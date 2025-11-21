@@ -1,0 +1,25 @@
+# Core requirements
+numpy>=1.20.0
+scipy>=1.7.0
+matplotlib>=3.3.0
+cython>=0.29.0
+
+# GUI requirements  
+PyQt5>=5.15.0
+pyqtgraph>=0.12.0
+PyOpenGL>=3.1.0
+imageio>=2.34.0
+imageio-ffmpeg>=0.4.9
+
+# Optional but recommended
+h5py>=3.0.0        # For saving/loading results
+numba>=0.53.0       # For JIT compilation (optional optimization)
+jupyterlab>=3.0.0   # For interactive notebooks
+
+# For GPU acceleration (optional)
+# cupy>=9.0.0       # Uncomment if you have CUDA available
+
+# Development tools (optional)
+pytest>=6.0.0       # For testing
+black>=21.0         # Code formatting
+flake8>=3.9.0       # Linting

@@ -1,0 +1,18 @@
+*.so
+*.o
+.DS_Store
+build/
+exports/
+
+
+*.png
+*.mp4
+*.svg
+*.gif
+exports/
+
+__pycache__/
+
+# Ignore all markdown files except README.md
+*.md
+!README.md
