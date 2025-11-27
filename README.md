@@ -304,29 +304,16 @@ If you use this simulator in your research, please cite:
 
 ```bibtex
 @software{bloch_simulator_python,
-  title={Python Bloch Equation Simulator},
-  author={Your Name},
-  year={2024},
-  url={https://github.com/yourusername/bloch_simulator}
-}
-
-@article{hargreaves2001,
-  title={Characterization and reduction of the transient response in steady‐state MR imaging},
-  author={Hargreaves, Brian A and Vasanawala, Shryas S and Pauly, John M and Nishimura, Dwight G},
-  journal={Magnetic Resonance in Medicine},
-  volume={46},
-  number={1},
-  pages={149--158},
-  year={2001}
+  title={Python Bloch Equation Simulator GUI and API},
+  author={Luca Nagel},
+  year={2025},
+  url={https://github.com/LucaNagel/bloch_sim_gui}
 }
 ```
 
-## License
-
-This project is based on code originally developed by Brian Hargreaves at Stanford University.
-[Specify your license here]
-
 ## Acknowledgments
+
+This project is based on [code originally developed by Brian Hargreaves at Stanford University](http://mrsrl.stanford.edu/~brian/blochsim/). A python adaption of this code can be found [here](https://github.com/ZhengguoTan/BlochSim).
 
 - Original Bloch simulator by Brian Hargreaves, Stanford University
 - NumPy and SciPy communities
@@ -335,7 +322,7 @@ This project is based on code originally developed by Brian Hargreaves at Stanfo
 
 ## Contact
 
-[Your contact information]
+Luca Nagel
 
 ## Appendix: File Structure
 
