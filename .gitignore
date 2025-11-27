@@ -2,14 +2,15 @@
 *.o
 .DS_Store
 build/
-exports/
 
+# Ignore all files in exports/ except .gitkeep
+exports/*
+!exports/.gitkeep
 
 *.png
 *.mp4
 *.svg
 *.gif
-exports/
 
 __pycache__/
 

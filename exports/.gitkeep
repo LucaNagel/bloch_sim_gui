@@ -1,0 +1,2 @@
+# This file ensures the exports/ directory is tracked by git
+# Actual export files are ignored via .gitignore
