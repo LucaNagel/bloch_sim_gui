@@ -313,7 +313,7 @@ If you use this simulator in your research, please cite:
 
 ## Acknowledgments
 
-This project is based on [code originally developed by Brian Hargreaves at Stanford University](http://mrsrl.stanford.edu/~brian/blochsim/). A python adaption of this code can be found [here](https://github.com/ZhengguoTan/BlochSim).
+This project is based on [code](http://mrsrl.stanford.edu/~brian/blochsim/) originally developed by Brian Hargreaves at Stanford University. Currently (11/2025) it is unfortunately not available. A python adaption of this code can be found [here](https://github.com/ZhengguoTan/BlochSim).
 
 - Original Bloch simulator by Brian Hargreaves, Stanford University
 - NumPy and SciPy communities

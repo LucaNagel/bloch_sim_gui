@@ -412,6 +412,12 @@ class ExportAnimationDialog(QDialog):
         self.mean_only_checkbox.setChecked(True)
         layout.addWidget(self.mean_only_checkbox)
 
+        # Include sequence diagram option
+        self.include_sequence_checkbox = QCheckBox("Include animated sequence diagram")
+        self.include_sequence_checkbox.setChecked(True)
+        self.include_sequence_checkbox.setToolTip("Add sequence diagram with playhead animation below the main view")
+        layout.addWidget(self.include_sequence_checkbox)
+
         # Buttons
         button_layout = QHBoxLayout()
         cancel_btn = QPushButton("Cancel")
@@ -463,7 +469,8 @@ class ExportAnimationDialog(QDialog):
             'end_idx': self.end_spin.value(),
             'width': self.width_spin.value(),
             'height': self.height_spin.value(),
-            'mean_only': self.mean_only_checkbox.isChecked()
+            'mean_only': self.mean_only_checkbox.isChecked(),
+            'include_sequence': self.include_sequence_checkbox.isChecked()
         }
 
 

@@ -95,14 +95,15 @@ class SimulationThread(QThread):
 
 class TissueParameterWidget(QGroupBox):
     """Widget for setting tissue parameters."""
-    
+
     def __init__(self):
         super().__init__("Tissue Parameters")
+        self.sequence_presets_enabled = True  # Default: auto-load presets
         self.init_ui()
-        
+
     def init_ui(self):
         layout = QVBoxLayout()
-        
+
         # Preset selector
         preset_layout = QHBoxLayout()
         preset_layout.addWidget(QLabel("Preset:"))
@@ -114,7 +115,7 @@ class TissueParameterWidget(QGroupBox):
         ])
         self.preset_combo.currentTextChanged.connect(self.load_preset)
         preset_layout.addWidget(self.preset_combo)
-        
+
         # Field strength
         preset_layout.addWidget(QLabel("Field:"))
         self.field_combo = QComboBox()
@@ -123,6 +124,15 @@ class TissueParameterWidget(QGroupBox):
         self.field_combo.currentTextChanged.connect(self.load_preset)
         preset_layout.addWidget(self.field_combo)
         layout.addLayout(preset_layout)
+
+        # Sequence-specific presets toggle
+        seq_preset_layout = QHBoxLayout()
+        self.seq_preset_checkbox = QCheckBox("Auto-load sequence presets")
+        self.seq_preset_checkbox.setChecked(True)
+        self.seq_preset_checkbox.setToolTip("Automatically load TE/TR/TI presets when sequence changes")
+        self.seq_preset_checkbox.toggled.connect(self._toggle_sequence_presets)
+        seq_preset_layout.addWidget(self.seq_preset_checkbox)
+        layout.addLayout(seq_preset_layout)
         
         # T1 parameter
         t1_layout = QHBoxLayout()
@@ -230,6 +240,10 @@ class TissueParameterWidget(QGroupBox):
     def get_initial_mz(self) -> float:
         """Return the initial longitudinal magnetization."""
         return float(self.m0_spin.value())
+
+    def _toggle_sequence_presets(self, enabled: bool):
+        """Toggle automatic loading of sequence presets."""
+        self.sequence_presets_enabled = enabled
 
 
 class RFPulseDesigner(QGroupBox):
@@ -397,7 +411,7 @@ class RFPulseDesigner(QGroupBox):
 
         # Find a global phase that maximizes the real-valued area of the waveform.
         # This keeps the flip-angle calibration stable even for complex pulses.
-        area = np.trapz(shape, dx=dt)
+        area = np.trapezoid(shape, dx=dt)
         opt_phase = -np.angle(area) if np.isfinite(area) else 0.0
         aligned_area = np.real(area * np.exp(1j * opt_phase))
         if not np.isfinite(aligned_area) or abs(aligned_area) < 1e-12:
@@ -585,7 +599,7 @@ class RFPulseDesigner(QGroupBox):
             dt = new_duration_s / len(shape) if len(shape) > 0 else 1e-6
 
             # Find optimal phase that maximizes real-valued area
-            area = np.trapz(shape, dx=dt)
+            area = np.trapezoid (shape, dx=dt)
             opt_phase = -np.angle(area) if np.isfinite(area) and area != 0 else 0.0
             aligned_area = np.real(area * np.exp(1j * opt_phase))
             if not np.isfinite(aligned_area) or abs(aligned_area) < 1e-12:
@@ -727,14 +741,14 @@ class SequenceDesigner(QGroupBox):
         self.ssfp_start_phase = QDoubleSpinBox()
         self.ssfp_start_phase.setRange(-3600, 3600)
         self.ssfp_start_phase.setDecimals(2)
-        self.ssfp_start_phase.setValue(0.0)
+        self.ssfp_start_phase.setValue(180.0)
         self.ssfp_start_phase.valueChanged.connect(lambda _: self.update_diagram())
         row4.addWidget(self.ssfp_start_phase)
         ssfp_layout.addLayout(row4)
 
         # Alternating phase option (common bSSFP scheme: 0/180/0/180 ...)
         self.ssfp_alternate_phase = QCheckBox("Alternate phase each TR (0/180°)")
-        self.ssfp_alternate_phase.setChecked(False)
+        self.ssfp_alternate_phase.setChecked(True)
         self.ssfp_alternate_phase.toggled.connect(lambda _: self.update_diagram())
         ssfp_layout.addWidget(self.ssfp_alternate_phase)
 
@@ -828,6 +842,96 @@ class SequenceDesigner(QGroupBox):
         seq_type = self.sequence_type.currentText()
         self.spin_echo_opts.setVisible(seq_type in ("Spin Echo", "Spin Echo (Tip-axis 180)"))
         self.ssfp_opts.setVisible(seq_type == "SSFP (Loop)")
+
+    def get_sequence_preset_params(self, seq_type: str) -> dict:
+        """
+        Get preset parameters for a specific sequence type.
+
+        When the "Auto-load sequence presets" checkbox is enabled (default), changing
+        the sequence type will automatically update relevant parameters to typical
+        values for that sequence. This helps users quickly configure standard sequences
+        without manual parameter adjustment.
+
+        For example, switching to "Spin Echo" sets TE=20ms and TR=500ms, while
+        "Gradient Echo" sets TE=5ms, TR=30ms, and flip_angle=30°. SSFP sequences
+        additionally configure pulse durations, phases, and repetition counts.
+
+        When disabled, parameter values are preserved across sequence changes, allowing
+        users to maintain custom settings while exploring different sequence types.
+
+        Returns
+        -------
+        dict
+            Dictionary with sequence-specific parameters. Possible keys include:
+            - te_ms: Echo time in milliseconds
+            - tr_ms: Repetition time in milliseconds
+            - ti_ms: Inversion time in milliseconds (for IR sequences)
+            - flip_angle: Flip angle in degrees
+            - ssfp_repeats: Number of SSFP repetitions
+            - ssfp_amp: SSFP pulse amplitude in Gauss
+            - ssfp_phase: SSFP pulse phase in degrees
+            - ssfp_dur: SSFP pulse duration in milliseconds
+            - ssfp_start_delay: Initial delay in milliseconds
+            - ssfp_start_amp: Starting pulse amplitude in Gauss
+            - ssfp_start_phase: Starting pulse phase in degrees
+            - ssfp_alternate_phase: Boolean, alternate phase 0/180° each TR
+        """
+        presets = {
+            "Free Induction Decay": {
+                "te_ms": 10,
+                "tr_ms": 100
+            },
+            "Spin Echo": {
+                "te_ms": 20,
+                "tr_ms": 500
+            },
+            "Spin Echo (Tip-axis 180)": {
+                "te_ms": 20,
+                "tr_ms": 500
+            },
+            "Gradient Echo": {
+                "te_ms": 5,
+                "tr_ms": 30,
+                "flip_angle": 30
+            },
+            "Slice Select + Rephase": {
+                "te_ms": 10,
+                "tr_ms": 100
+            },
+            "SSFP (Loop)": {
+                "te_ms": 2,
+                "tr_ms": 5,
+                "flip_angle": 30,
+                "ssfp_repeats": 16,
+                "ssfp_amp": 0.05,
+                "ssfp_phase": 0.0,
+                "ssfp_dur": 1.0,
+                "ssfp_start_delay": 0.0,
+                "ssfp_start_amp": 0.05,
+                "ssfp_start_phase": 180.0,
+                "ssfp_alternate_phase": True,
+                "pulse_type": "gaussian"
+            },
+            "Inversion Recovery": {
+                "te_ms": 20,
+                "tr_ms": 2000,
+                "ti_ms": 400
+            },
+            "FLASH": {
+                "te_ms": 3,
+                "tr_ms": 10,
+                "flip_angle": 15
+            },
+            "EPI": {
+                "te_ms": 30,
+                "tr_ms": 3000
+            },
+            "Custom": {
+                "te_ms": 10,
+                "tr_ms": 100
+            },
+        }
+        return presets.get(seq_type, {})
 
     def get_sequence(self, custom_pulse=None):
         """
@@ -1141,7 +1245,7 @@ class SequenceDesigner(QGroupBox):
             if b1_wave.size:
                 max_amp = float(np.max(np.abs(b1_wave)))
                 self.ssfp_amp.setValue(max_amp)
-                self.ssfp_start_amp.setValue(max_amp)
+                self.ssfp_start_amp.setValue(max_amp/2.0)
                 phase = float(np.angle(b1_wave[0]))
                 self.ssfp_phase.setValue(np.rad2deg(phase))
                 self.ssfp_start_phase.setValue(np.rad2deg(phase))
@@ -1189,10 +1293,12 @@ class SequenceDesigner(QGroupBox):
             gradients = gradients[idx]
         time_ms = (time - time[0]) * 1000.0
         b1_mag = np.abs(b1)
+        b1_phase = np.angle(b1)  # Phase in radians
 
         # Lane positions and labels
         lanes = [
-            ("RF", 3.0, 'b'),
+            ("RF Mag", 4.0, 'b'),
+            ("RF Phase", 3.0, 'c'),
             ("Gz (slice/readout)", 2.0, 'm'),
             ("Gy (phase1)", 1.0, 'g'),
             ("Gx (phase2)", 0.0, 'r'),
@@ -1209,15 +1315,40 @@ class SequenceDesigner(QGroupBox):
             self.diagram_widget.addItem(txt)
             self.diagram_labels.append(txt)
 
-        # RF lane
-        rf_y = lanes[0][1]
+        # RF Magnitude lane
+        rf_mag_y = lanes[0][1]
         rf_scale = 0.8 if b1_mag.max() == 0 else 0.8 / b1_mag.max()
-        self.diagram_widget.plot(time_ms, rf_y + b1_mag * rf_scale,
-                                 pen=pg.mkPen('b', width=2), name="RF")
+        self.diagram_widget.plot(time_ms, rf_mag_y + b1_mag * rf_scale,
+                                 pen=pg.mkPen('b', width=2), name="RF Mag")
+
+        # RF Phase lane (convert radians to normalized display: -π to π → -0.8 to 0.8)
+        rf_phase_y = lanes[1][1]
+        # Only plot phase where there's significant RF (avoid noise)
+        phase_mask = b1_mag > (b1_mag.max() * 0.01) if b1_mag.max() > 0 else np.zeros_like(b1_mag, dtype=bool)
+        if np.any(phase_mask):
+            phase_display = b1_phase / np.pi * 0.8  # Normalize to ±0.8 for display
+            # Create connected segments only where RF is active
+            self.diagram_widget.plot(time_ms, rf_phase_y + phase_display,
+                                     pen=pg.mkPen('c', width=2), name="RF Phase",
+                                     connect='finite')
+
+            # Add phase reference markers at -π, 0, +π
+            phase_ref_pen = pg.mkPen((150, 150, 150, 100), width=1, style=Qt.DashLine)
+            for phase_val, label_text in [(-np.pi, '-π'), (0, '0'), (np.pi, '+π')]:
+                y_pos = rf_phase_y + (phase_val / np.pi * 0.8)
+                ref_line = pg.InfiniteLine(pos=y_pos, angle=0, pen=phase_ref_pen)
+                self.diagram_widget.addItem(ref_line)
+                # Add small label at the right edge
+                if len(time_ms) > 0:
+                    phase_label = pg.TextItem(text=label_text, color=(150, 150, 150),
+                                             anchor=(1, 0.5), angle=0)
+                    phase_label.setPos(time_ms[-1] * 1.02, y_pos)
+                    self.diagram_widget.addItem(phase_label)
+                    self.diagram_labels.append(phase_label)
 
         # Gradient lanes
         grad_scales = []
-        for i, (label, y, color) in enumerate(lanes[1:]):
+        for i, (label, y, color) in enumerate(lanes[2:]):
             if i >= gradients.shape[1]:
                 continue
             g = gradients[:, i]
@@ -1491,6 +1622,18 @@ class MagnetizationViewer(QWidget):
         self.selector_slider.valueChanged.connect(self._on_selector_changed)
         view_layout.addWidget(self.selector_slider)
         controls_v.addLayout(view_layout)
+
+        # Initialize tracking state and path storage BEFORE checkbox initialization
+        self.length_scale = 1.0  # Reference magnitude used to normalize vectors in view
+        self.preview_time = None
+        self.track_path = False
+        self.path_points = []
+        self.path_item = gl.GLLinePlotItem(pos=np.zeros((0, 3)), color=(1, 1, 0, 0.8), width=2, mode='line_strip')
+        self.gl_widget.addItem(self.path_item)
+        self.mean_vector = gl.GLLinePlotItem(pos=np.zeros((2, 3)), color=(1, 1, 0, 1), width=5, mode='lines')
+        self.gl_widget.addItem(self.mean_vector)
+
+        # Now create checkboxes that depend on these variables
         self.track_checkbox = QCheckBox("Track tip path")
         self.track_checkbox.setChecked(True)
         self.track_checkbox.toggled.connect(self._toggle_track_path)
@@ -1504,16 +1647,6 @@ class MagnetizationViewer(QWidget):
         control_container.setLayout(controls_v)
         self.control_container = control_container
         layout.addWidget(control_container)
-
-        self.length_scale = 1.0  # Reference magnitude used to normalize vectors in view
-
-        self.preview_time = None
-        self.track_path = False
-        self.path_points = []
-        self.path_item = gl.GLLinePlotItem(pos=np.zeros((0, 3)), color=(1, 1, 0, 0.8), width=2, mode='line_strip')
-        self.gl_widget.addItem(self.path_item)
-        self.mean_vector = gl.GLLinePlotItem(pos=np.zeros((2, 3)), color=(1, 1, 0, 1), width=5, mode='lines')
-        self.gl_widget.addItem(self.mean_vector)
 
         # Track available position/frequency counts for selector range updates
         self._npos = 1
@@ -1877,6 +2010,8 @@ class BlochSimulatorGUI(QMainWindow):
         left_layout.addWidget(self.sequence_designer)
         self.rf_designer.pulse_changed.connect(self.sequence_designer.set_custom_pulse)
         self.sequence_designer.set_custom_pulse(self.rf_designer.get_pulse())
+        # Connect sequence type changes to preset loader
+        self.sequence_designer.sequence_type.currentTextChanged.connect(self._load_sequence_presets)
         # Link 3D viewer playhead to sequence diagram
         self.sequence_designer.update_diagram()
         
@@ -1899,7 +2034,7 @@ class BlochSimulatorGUI(QMainWindow):
         pos_layout.addWidget(QLabel("Positions:"))
         self.pos_spin = QSpinBox()
         self.pos_spin.setRange(1, 1100)
-        self.pos_spin.setValue(31)
+        self.pos_spin.setValue(1)
         pos_layout.addWidget(self.pos_spin)
         pos_layout.addWidget(QLabel("Range (cm):"))
         self.pos_range = QDoubleSpinBox()
@@ -1914,13 +2049,13 @@ class BlochSimulatorGUI(QMainWindow):
         freq_layout.addWidget(QLabel("Frequencies:"))
         self.freq_spin = QSpinBox()
         self.freq_spin.setRange(1, 1100)
-        self.freq_spin.setValue(5)
+        self.freq_spin.setValue(31)
         freq_layout.addWidget(self.freq_spin)
         freq_layout.addWidget(QLabel("Range (Hz):"))
         self.freq_range = QDoubleSpinBox()
         # Avoid zero-span (forces unique frequencies)
-        self.freq_range.setRange(0.01, 1000)
-        self.freq_range.setValue(500.0)
+        self.freq_range.setRange(0.01, 1e4)
+        self.freq_range.setValue(100.0)
         freq_layout.addWidget(self.freq_range)
         control_layout.addLayout(freq_layout)
         # Frequency helper text
@@ -1945,7 +2080,7 @@ class BlochSimulatorGUI(QMainWindow):
         tail_layout.addWidget(QLabel("Extra tail (ms):"))
         self.extra_tail_spin = QDoubleSpinBox()
         self.extra_tail_spin.setRange(0.0, 1e6)
-        self.extra_tail_spin.setValue(0.0)
+        self.extra_tail_spin.setValue(1.0)
         self.extra_tail_spin.setDecimals(3)
         self.extra_tail_spin.setSingleStep(1.0)
         tail_layout.addWidget(self.extra_tail_spin)
@@ -2168,6 +2303,14 @@ class BlochSimulatorGUI(QMainWindow):
         spectrum_controls.addWidget(self.spectrum_pos_label)
         spectrum_controls.addWidget(self.spectrum_pos_slider)
         spectrum_layout.addLayout(spectrum_controls)
+
+        # Toggle for colored frequency/position markers
+        self.spectrum_markers_checkbox = QCheckBox("Show colored frequency markers")
+        self.spectrum_markers_checkbox.setChecked(False)
+        self.spectrum_markers_checkbox.setToolTip("Display vertical lines at each frequency with 3D-view colors")
+        self.spectrum_markers_checkbox.toggled.connect(lambda _: self.update_plots(self.last_result) if self.last_result else None)
+        spectrum_layout.addWidget(self.spectrum_markers_checkbox)
+
         spectrum_layout.addWidget(self.spectrum_plot)
         spectrum_container.setLayout(spectrum_layout)
         self.tab_widget.addTab(spectrum_container, "Spectrum")
@@ -2213,6 +2356,13 @@ class BlochSimulatorGUI(QMainWindow):
         spatial_controls.addWidget(self.spatial_freq_label)
         spatial_controls.addWidget(self.spatial_freq_slider)
         spatial_layout.addLayout(spatial_controls)
+
+        # Toggle for colored position/frequency markers
+        self.spatial_markers_checkbox = QCheckBox("Show colored position/frequency markers")
+        self.spatial_markers_checkbox.setChecked(False)
+        self.spatial_markers_checkbox.setToolTip("Display vertical lines at each position/frequency with 3D-view colors")
+        self.spatial_markers_checkbox.toggled.connect(lambda _: self.update_spatial_plot_from_last_result())
+        spatial_layout.addWidget(self.spatial_markers_checkbox)
 
         # Mxy and Mz plots side by side
         spatial_plots_layout = QHBoxLayout()
@@ -2305,6 +2455,32 @@ class BlochSimulatorGUI(QMainWindow):
     def _color_for_index(self, idx: int, total: int):
         """Consistent color cycling for multiple frequencies."""
         return pg.intColor(idx, hues=max(total, 1), values=1.0, maxValue=255)
+
+    def _safe_clear_plot(self, plot_widget, persistent_items=None):
+        """
+        Safely clear a plot widget and re-add persistent items.
+
+        This prevents Qt warnings about items being removed from the wrong scene.
+
+        Parameters
+        ----------
+        plot_widget : pg.PlotWidget
+            The plot widget to clear
+        persistent_items : list, optional
+            List of items to re-add after clearing (e.g., cursor lines, guide lines)
+        """
+        plot_widget.clear()
+        if persistent_items:
+            for item in persistent_items:
+                if item is not None:
+                    # Check if item is actually in the scene before adding
+                    # After clear(), items should not be in the plot
+                    try:
+                        if item.scene() is None:
+                            plot_widget.addItem(item)
+                    except (AttributeError, RuntimeError):
+                        # Item doesn't have scene() method or was deleted, skip it
+                        pass
 
     def _reshape_to_tpf(self, arr: np.ndarray, pos_len: int, freq_len: int):
         """
@@ -2784,14 +2960,11 @@ class BlochSimulatorGUI(QMainWindow):
     def _update_spatial_line_plots(self, position, mxy, mz, mx_display=None, my_display=None, mz_display=None, freq_sel=0, spatial_mode="Mean only"):
         """Update the Mxy and Mz line plots."""
         try:
-            # Clear previous plots
-            self.spatial_mxy_plot.clear()
-            self.spatial_mz_plot.clear()
-            # Re-add slice guides after clear
-            for ln in self.spatial_slice_lines["mxy"]:
-                self.spatial_mxy_plot.addItem(ln)
-            for ln in self.spatial_slice_lines["mz"]:
-                self.spatial_mz_plot.addItem(ln)
+            # Safely clear plots while preserving persistent items
+            persistent_mxy = [self.spatial_mxy_time_line] + self.spatial_slice_lines["mxy"]
+            persistent_mz = [self.spatial_mz_time_line] + self.spatial_slice_lines["mz"]
+            self._safe_clear_plot(self.spatial_mxy_plot, persistent_mxy)
+            self._safe_clear_plot(self.spatial_mz_plot, persistent_mz)
 
             # Plot Mxy vs position
             if spatial_mode == "Mean + individuals" and mx_display is not None and my_display is not None and mz_display is not None:
@@ -2902,11 +3075,104 @@ class BlochSimulatorGUI(QMainWindow):
                 for line in self.spatial_slice_lines["mxy"] + self.spatial_slice_lines["mz"]:
                     line.setVisible(False)
 
+            # Add colored vertical markers if enabled
+            if self.spatial_markers_checkbox.isChecked() and mx_display is not None and my_display is not None:
+                # Determine what we're marking: frequencies or positions
+                nfreq = mx_display.shape[1] if mx_display.ndim == 2 else 1
+                npos = len(position)
+
+                # Show markers based on current mode
+                if spatial_mode in ("Mean + individuals", "Individual (select freq)") and nfreq > 1:
+                    # Mark each frequency with colored stem plots
+                    for fi in range(nfreq):
+                        color = self._color_for_index(fi, nfreq)
+                        mxy_val = np.sqrt(mx_display[:, fi]**2 + my_display[:, fi]**2) if mx_display.ndim == 2 else mxy
+                        mz_val = mz_display[:, fi] if mz_display.ndim == 2 else mz_pos
+                        # Draw stem lines from 0 to current value at each position
+                        for pi, pos_val in enumerate(position):
+                            # Mxy markers
+                            line_mxy = pg.PlotCurveItem([pos_val, pos_val], [0, mxy_val[pi]],
+                                                         pen=pg.mkPen(color, width=1.5))
+                            self.spatial_mxy_plot.addItem(line_mxy)
+                            # Mz markers
+                            line_mz = pg.PlotCurveItem([pos_val, pos_val], [0, mz_val[pi]],
+                                                        pen=pg.mkPen(color, width=1.5))
+                            self.spatial_mz_plot.addItem(line_mz)
+
             self.log_message("Spatial plot: updated successfully")
         except Exception as e:
             self.log_message(f"Spatial plot: error updating plots: {e}")
             import traceback
             self.log_message(f"Spatial plot: traceback: {traceback.format_exc()}")
+
+    def _load_sequence_presets(self, seq_type: str):
+        """Load sequence-specific parameter presets if enabled."""
+        if not self.tissue_widget.sequence_presets_enabled:
+            return
+
+        presets = self.sequence_designer.get_sequence_preset_params(seq_type)
+        if not presets:
+            return
+
+        # List of all widgets that might be updated
+        widgets_to_block = [
+            self.sequence_designer.te_spin,
+            self.sequence_designer.tr_spin,
+            self.sequence_designer.ti_spin,
+            self.rf_designer.flip_angle,  # flip_angle is in RFPulseDesigner, not SequenceDesigner
+            self.sequence_designer.ssfp_repeats,
+            self.sequence_designer.ssfp_amp,
+            self.sequence_designer.ssfp_phase,
+            self.sequence_designer.ssfp_dur,
+            self.sequence_designer.ssfp_start_delay,
+            self.sequence_designer.ssfp_start_amp,
+            self.sequence_designer.ssfp_start_phase,
+            self.sequence_designer.ssfp_alternate_phase,
+            self.rf_designer.pulse_type,
+        ]
+
+        # Block signals temporarily to avoid triggering diagram updates multiple times
+        for widget in widgets_to_block:
+            widget.blockSignals(True)
+
+        # Apply presets
+        if "pulse_type" in presets:
+            self.rf_designer.pulse_type.setCurrentText(presets["pulse_type"])
+        if "te_ms" in presets:
+            self.sequence_designer.te_spin.setValue(presets["te_ms"])
+        if "tr_ms" in presets:
+            self.sequence_designer.tr_spin.setValue(presets["tr_ms"])
+        if "ti_ms" in presets:
+            self.sequence_designer.ti_spin.setValue(presets["ti_ms"])
+        if "flip_angle" in presets:
+            self.rf_designer.flip_angle.setValue(presets["flip_angle"])
+
+        # SSFP-specific parameters
+        if "ssfp_repeats" in presets:
+            self.sequence_designer.ssfp_repeats.setValue(presets["ssfp_repeats"])
+        if "ssfp_amp" in presets:
+            self.sequence_designer.ssfp_amp.setValue(presets["ssfp_amp"])
+        if "ssfp_phase" in presets:
+            self.sequence_designer.ssfp_phase.setValue(presets["ssfp_phase"])
+        if "ssfp_dur" in presets:
+            self.sequence_designer.ssfp_dur.setValue(presets["ssfp_dur"])
+        if "ssfp_start_delay" in presets:
+            self.sequence_designer.ssfp_start_delay.setValue(presets["ssfp_start_delay"])
+        if "ssfp_start_amp" in presets:
+            self.sequence_designer.ssfp_start_amp.setValue(presets["ssfp_start_amp"])
+        if "ssfp_start_phase" in presets:
+            self.sequence_designer.ssfp_start_phase.setValue(presets["ssfp_start_phase"])
+        if "ssfp_alternate_phase" in presets:
+            self.sequence_designer.ssfp_alternate_phase.setChecked(presets["ssfp_alternate_phase"])
+
+        # Re-enable signals
+        for widget in widgets_to_block:
+            widget.blockSignals(False)
+
+        # Update diagram once with all new values
+        self.sequence_designer.update_diagram()
+
+        self.log_message(f"Loaded presets for {seq_type}: {presets}")
 
     def create_menu(self):
         """Create menu bar."""
@@ -3166,8 +3432,8 @@ class BlochSimulatorGUI(QMainWindow):
             my_all = my_arr
             mz_all = mz_arr
             t_plot = np.array([time[0], time[-1]]) if len(time) > 1 else np.array([0, 1])
-            
-            self.mxy_plot.clear()
+
+            self._safe_clear_plot(self.mxy_plot, [self.mxy_time_line])
             total_series = mx_all.shape[0] * mx_all.shape[1]
             self._reset_legend(self.mxy_plot, "mxy_legend", total_series > 1)
             idx = 0
@@ -3185,7 +3451,7 @@ class BlochSimulatorGUI(QMainWindow):
             mxy_ymin, mxy_ymax = self._calc_symmetric_limits(mx_all, my_all, base=self.initial_mz)
             self._set_plot_ranges(self.mxy_plot, x_min, x_max, mxy_ymin, mxy_ymax)
 
-            self.mz_plot.clear()
+            self._safe_clear_plot(self.mz_plot, [self.mz_time_line])
             self._reset_legend(self.mz_plot, "mz_legend", total_series > 1)
             idx = 0
             for pi in range(mz_all.shape[0]):
@@ -3216,7 +3482,7 @@ class BlochSimulatorGUI(QMainWindow):
                 sig = signal_vals[:, None]
             else:
                 sig = signal_vals.reshape(pos_len, freq_len)
-            self.signal_plot.clear()
+            self._safe_clear_plot(self.signal_plot, [self.signal_time_line])
             total_series = sig.shape[0] * sig.shape[1]
             self._reset_legend(self.signal_plot, "signal_legend", total_series > 1)
             idx = 0
@@ -3268,7 +3534,7 @@ class BlochSimulatorGUI(QMainWindow):
             self._update_mag_selector_limits(npos, nfreq, disable=mean_only)
             view_mode, selector = self._current_mag_filter(npos, nfreq)
 
-            self.mxy_plot.clear()
+            self._safe_clear_plot(self.mxy_plot, [self.mxy_time_line])
             if mean_only:
                 self._reset_legend(self.mxy_plot, "mxy_legend", False)
                 mean_mx = np.mean(mx_all, axis=(1, 2))
@@ -3326,7 +3592,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self.mxy_time_line.show()
                 self.mxy_time_line.setValue(time[0])
 
-            self.mz_plot.clear()
+            self._safe_clear_plot(self.mz_plot, [self.mz_time_line])
             if mean_only:
                 self._reset_legend(self.mz_plot, "mz_legend", False)
                 mean_mz = np.mean(mz_all, axis=(1, 2))
@@ -3383,7 +3649,7 @@ class BlochSimulatorGUI(QMainWindow):
                 signal = signal_arr
             if signal.ndim == 1:
                 signal = signal[:, None, None]
-            self.signal_plot.clear()
+            self._safe_clear_plot(self.signal_plot, [self.signal_time_line])
             if mean_only:
                 self._reset_legend(self.signal_plot, "signal_legend", False)
                 mean_sig = np.mean(signal, axis=(1, 2))
@@ -3597,6 +3863,12 @@ class BlochSimulatorGUI(QMainWindow):
         if self.anim_data is None or len(self.anim_data) == 0:
             return
         idx = int(max(0, min(idx, len(self.anim_data) - 1)))
+
+        # Clear path if jumping back to the beginning (e.g., scrubbing backward)
+        # This prevents a line being drawn from the current position to index 0
+        if idx == 0 and self.mag_3d.track_path and len(self.mag_3d.path_points) > 0:
+            self.mag_3d._clear_path()
+
         self.anim_index = idx
         vectors = self.anim_data[idx]
         self.mag_3d.update_magnetization(vectors, colors=self.anim_colors)
@@ -3609,6 +3881,9 @@ class BlochSimulatorGUI(QMainWindow):
             return
         if self.anim_index >= len(self.anim_data):
             self.anim_index = 0
+            # Clear the tip path when looping to avoid drawing a line from end to start
+            if self.mag_3d.track_path:
+                self.mag_3d._clear_path()
         step = max(1, getattr(self, "_frame_step", 1))
         # Move universal time control (label/slider) then propagate to all views
         self.time_control.set_time_index(self.anim_index)
@@ -4059,6 +4334,17 @@ class BlochSimulatorGUI(QMainWindow):
             if spec_mean is not None:
                 self.spectrum_plot.plot(freq, np.abs(spec_mean), pen=pg.mkPen('c', width=3), name="Mean")
         self.spectrum_plot.plot(freq, np.abs(spectrum), pen='w', name="Selected")
+
+        # Add colored vertical markers if enabled
+        if self.spectrum_markers_checkbox.isChecked() and len(freq) > 1:
+            # Draw vertical lines at each frequency with colors matching 3D view
+            mag = np.abs(spectrum)
+            for i, (f, m) in enumerate(zip(freq, mag)):
+                color = self._color_for_index(i, len(freq))
+                # Vertical line from 0 to magnitude
+                line = pg.PlotCurveItem([f, f], [0, m], pen=pg.mkPen(color, width=2))
+                self.spectrum_plot.addItem(line)
+
         span = self.spectrum_range.value()
         if span > 0:
             half = span / 2.0
@@ -4518,14 +4804,42 @@ class BlochSimulatorGUI(QMainWindow):
             return val if val % 2 == 0 else val + 1
 
         def grab_frame():
-            pixmap = self.mag_3d.gl_widget.grab()
-            image = pixmap.toImage()
-            # Determine target size; force even dimensions for libx264
-            target_w = params['width'] if params['width'] else image.width()
-            target_h = params['height'] if params['height'] else image.height()
-            # Honor exact resolution when both width/height provided; otherwise preserve aspect
-            aspect_mode = Qt.IgnoreAspectRatio if (params['width'] and params['height']) else Qt.KeepAspectRatio
-            image = image.scaled(target_w, target_h, aspect_mode, Qt.SmoothTransformation)
+            # Grab main view
+            main_pixmap = self.mag_3d.gl_widget.grab()
+            main_image = main_pixmap.toImage()
+
+            # Optionally grab sequence diagram
+            if params.get('include_sequence', False):
+                seq_pixmap = self.sequence_designer.diagram_widget.grab()
+                seq_image = seq_pixmap.toImage()
+
+                # Stack vertically: main view on top, sequence diagram below (20% height)
+                main_h = params['height'] if params['height'] else main_image.height()
+                seq_h = int(main_h * 0.25)  # 25% of main height for diagram
+                total_h = main_h + seq_h
+                total_w = params['width'] if params['width'] else main_image.width()
+
+                # Scale main image
+                main_image = main_image.scaled(total_w, main_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                # Scale sequence diagram
+                seq_image = seq_image.scaled(total_w, seq_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+
+                # Create composite image
+                from PyQt5.QtGui import QPainter, QImage as QImg
+                composite = QImg(total_w, total_h, QImg.Format_RGBA8888)
+                composite.fill(Qt.white)
+                painter = QPainter(composite)
+                painter.drawImage(0, 0, main_image)
+                painter.drawImage(0, main_h, seq_image)
+                painter.end()
+                image = composite
+            else:
+                # Just the main view
+                target_w = params['width'] if params['width'] else main_image.width()
+                target_h = params['height'] if params['height'] else main_image.height()
+                aspect_mode = Qt.IgnoreAspectRatio if (params['width'] and params['height']) else Qt.KeepAspectRatio
+                image = main_image.scaled(target_w, target_h, aspect_mode, Qt.SmoothTransformation)
+
             # Enforce even dimensions for codecs
             if image.width() % 2 or image.height() % 2:
                 image = image.scaled(_even(image.width()), _even(image.height()), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
