@@ -10,7 +10,6 @@ Date: 2024
 
 import sys
 import math
-import time
 import numpy as np
 from typing import Optional
 from pathlib import Path
@@ -45,15 +44,6 @@ from visualization_export import (
     DatasetExporter,
     imageio as vz_imageio,
 )
-
-# Import phantom module for 2D/3D phantom simulation
-try:
-    from phantom import Phantom, PhantomFactory
-    from phantom_widget import PhantomWidget
-    PHANTOM_AVAILABLE = True
-except ImportError:
-    PHANTOM_AVAILABLE = False
-    print("Phantom module not available - phantom tab will be disabled")
 
 
 class SimulationThread(QThread):
@@ -1534,7 +1524,6 @@ class MagnetizationViewer(QWidget):
         export_3d_menu.addAction("Image (SVG)...", lambda: self._export_3d_screenshot('svg'))
         export_3d_menu.addSeparator()
         export_3d_menu.addAction("Animation (GIF/MP4)...", self._export_3d_animation)
-        export_3d_menu.addAction("Sequence diagram (GIF/MP4)...", self._export_sequence_animation)
         self.export_3d_btn.setMenu(export_3d_menu)
         header_3d.addWidget(self.export_3d_btn)
         layout.addLayout(header_3d)
@@ -1950,18 +1939,6 @@ class MagnetizationViewer(QWidget):
         # Fallback message if parent handler not found
         self._show_not_implemented_3d("Animation")
 
-    def _export_sequence_animation(self):
-        """Delegate sequence diagram animation export to parent window."""
-        win = self.window()
-        if win and hasattr(win, "_export_sequence_diagram_animation"):
-            try:
-                win._export_sequence_diagram_animation()
-                return
-            except Exception as exc:
-                QMessageBox.critical(self, "Export Error", str(exc))
-                return
-        self._show_not_implemented_3d("Sequence animation")
-
 
 class BlochSimulatorGUI(QMainWindow):
     """Main GUI window for the Bloch simulator."""
@@ -1993,8 +1970,6 @@ class BlochSimulatorGUI(QMainWindow):
         self.playback_time = None     # Time array aligned to playback indices (seconds)
         self.playback_time_ms = None  # Same as playback_time but in ms for plot previews
         self.anim_index = 0
-        self._playback_anchor_wall = None  # monotonic timestamp for playback pacing
-        self._playback_anchor_time_ms = None  # simulation time (ms) at anchor
         self._frame_step = 1
         self._min_anim_interval_ms = 1000.0 / 120.0  # cap display rate to avoid event loop overload
         self.anim_b1 = None
@@ -2421,13 +2396,6 @@ class BlochSimulatorGUI(QMainWindow):
         spatial_container.setLayout(spatial_layout)
         self.tab_widget.addTab(spatial_container, "Spatial")
 
-        # === PHANTOM TAB (2D/3D Imaging) ===
-        if PHANTOM_AVAILABLE:
-            self.phantom_widget = PhantomWidget(self)
-            self.tab_widget.addTab(self.phantom_widget, "🔬 Phantom")
-        else:
-            self.phantom_widget = None
-
         # Add time cursor lines to spatial plots for synchronization
         self.spatial_mxy_time_line = pg.InfiniteLine(angle=90, pen=pg.mkPen('y', width=2))
         self.spatial_mxy_time_line.hide()
@@ -2595,19 +2563,6 @@ class BlochSimulatorGUI(QMainWindow):
             if indices[-1] != total_frames - 1:
                 indices = np.append(indices, total_frames - 1)
         return indices
-
-    def _reset_playback_anchor(self, idx: Optional[int] = None):
-        """Record the wall-clock anchor for the current playback position."""
-        if self.playback_time_ms is None or len(self.playback_time_ms) == 0:
-            self._playback_anchor_wall = None
-            self._playback_anchor_time_ms = None
-            return
-        if idx is None:
-            idx = getattr(self, "anim_index", 0)
-        idx = int(max(0, min(idx, len(self.playback_time_ms) - 1)))
-        self._playback_anchor_wall = time.monotonic()
-        self._playback_anchor_time_ms = float(self.playback_time_ms[idx])
-        self.anim_index = idx
 
     def _refresh_vector_view(self, mean_only: bool = None, restart: bool = True):
         """Apply the current vector filter (all/pos/freq) to the 3D view."""
@@ -3801,7 +3756,6 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Initialize universal time control with the time array
         self.time_control.set_time_range(self.playback_time)  # Use playback_time in seconds
-        self._reset_playback_anchor(0)
         self.time_control.setVisible(True)
 
         # Ensure signal tab x-range set even if spectrum-only
@@ -3828,7 +3782,6 @@ class BlochSimulatorGUI(QMainWindow):
             self.mag_3d._clear_path()
         if self.anim_index >= len(self.anim_data):
             self.anim_index = 0
-        self._reset_playback_anchor(self.anim_index)
         # Always recompute interval using current speed control
         self._recompute_anim_interval(self.time_control.speed_spin.value() if hasattr(self, 'time_control') else None)
         self.anim_timer.start(self.anim_interval_ms)
@@ -3846,7 +3799,6 @@ class BlochSimulatorGUI(QMainWindow):
         self.anim_timer.stop()
         self.anim_index = 0
         self.mag_3d._clear_path()
-        self._reset_playback_anchor(0)
         if self.anim_data is not None and len(self.anim_data) > 0:
             vectors = self.anim_data[0]
             colors = [self._color_tuple(self._color_for_index(i, vectors.shape[0])) for i in range(vectors.shape[0])]
@@ -3884,14 +3836,25 @@ class BlochSimulatorGUI(QMainWindow):
         desired_interval_ms = time_per_frame_ms / sim_ms_per_s * 1000.0
 
         min_interval = getattr(self, "_min_anim_interval_ms", 2.0)
-        interval_ms = max(min_interval, desired_interval_ms)
+        max_step = 10  # avoid skipping too many frames even at high speed
+
+        if desired_interval_ms < min_interval:
+            # Need to skip frames to achieve desired speed
+            # If we fire timer at min_interval and want to maintain speed:
+            # frame_step = (min_interval / desired_interval_ms)
+            frame_step = max(1, int(round(min_interval / max(desired_interval_ms, 1e-6))))
+            frame_step = min(frame_step, max_step, total_frames)
+            interval_ms = min_interval
+        else:
+            interval_ms = desired_interval_ms
+            frame_step = 1
+
         self.anim_interval_ms = max(1, int(round(interval_ms)))
-        self._frame_step = 1
+        self._frame_step = frame_step
 
     def _update_playback_speed(self, sim_ms_per_s: float):
         """Adjust playback speed (simulation ms per real second)."""
         self._recompute_anim_interval(sim_ms_per_s)
-        self._reset_playback_anchor(self.anim_index)
         if self.anim_timer.isActive():
             self.anim_timer.start(self.anim_interval_ms)
 
@@ -3911,51 +3874,21 @@ class BlochSimulatorGUI(QMainWindow):
         self.mag_3d.update_magnetization(vectors, colors=self.anim_colors)
         self.mag_3d.set_cursor_index(idx)
         self._update_b1_arrow(idx)
-        self._reset_playback_anchor(idx)
 
     def _animate_vector(self):
         """Advance the 3D vector animation if data is available."""
-        if self.anim_data is None or self.playback_time_ms is None or len(self.playback_time_ms) == 0:
+        if self.anim_data is None:
             return
-        if self._playback_anchor_wall is None or self._playback_anchor_time_ms is None:
-            self._reset_playback_anchor(self.anim_index)
-        if len(self.playback_time_ms) == 1:
-            self.time_control.set_time_index(0)
-            self._on_universal_time_changed(0)
-            return
-
-        now = time.monotonic()
-        elapsed_s = max(0.0, now - (self._playback_anchor_wall or now))
-        sim_ms_per_s = max(self.time_control.speed_spin.value(), 0.001)
-
-        start_ms = float(self.playback_time_ms[0])
-        end_ms = float(self.playback_time_ms[-1])
-        duration_ms = max(end_ms - start_ms, 1e-9)
-
-        target_ms = float(self._playback_anchor_time_ms or start_ms) + elapsed_s * sim_ms_per_s
-        wrapped = False
-        if target_ms > end_ms:
-            # Loop seamlessly: wrap to start while preserving speed
-            target_rel = (target_ms - start_ms) % duration_ms
-            target_ms = start_ms + target_rel
-            wrapped = True
-            self._playback_anchor_wall = now
-            self._playback_anchor_time_ms = target_ms
-
-        idx = int(np.searchsorted(self.playback_time_ms, target_ms, side="left"))
-        idx = min(max(idx, 0), len(self.playback_time_ms) - 1)
-        if idx > 0:
-            prev_ms = float(self.playback_time_ms[idx - 1])
-            curr_ms = float(self.playback_time_ms[idx])
-            if abs(target_ms - prev_ms) < abs(curr_ms - target_ms):
-                idx -= 1
-
-        if wrapped and self.mag_3d.track_path:
-            self.mag_3d._clear_path()
-
+        if self.anim_index >= len(self.anim_data):
+            self.anim_index = 0
+            # Clear the tip path when looping to avoid drawing a line from end to start
+            if self.mag_3d.track_path:
+                self.mag_3d._clear_path()
+        step = max(1, getattr(self, "_frame_step", 1))
         # Move universal time control (label/slider) then propagate to all views
-        self.time_control.set_time_index(idx)
-        self._on_universal_time_changed(idx)
+        self.time_control.set_time_index(self.anim_index)
+        self._on_universal_time_changed(self.anim_index)
+        self.anim_index += step
 
     def _update_b1_arrow(self, playback_idx: int):
         """Update the B1 direction/length indicator in the 3D view."""
@@ -4474,7 +4407,6 @@ class BlochSimulatorGUI(QMainWindow):
             default_directory=self._get_export_directory()
         )
         dialog.mean_only_checkbox.setVisible(False)
-        dialog.include_sequence_checkbox.setVisible(False)
 
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -4644,7 +4576,6 @@ class BlochSimulatorGUI(QMainWindow):
             default_directory=self._get_export_directory()
         )
         dialog.mean_only_checkbox.setChecked(self.mean_only_checkbox.isChecked())
-        dialog.include_sequence_checkbox.setVisible(False)
 
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -4667,6 +4598,42 @@ class BlochSimulatorGUI(QMainWindow):
         my_trace = _select_component(my)
         mz_trace = _select_component(mz)
 
+        # Preserve current sequence playhead to restore later
+        playhead = getattr(self.sequence_designer, 'playhead_line', None)
+        playhead_visible = playhead.isVisible() if playhead is not None else False
+        playhead_value = playhead.value() if playhead is not None else 0
+
+        def frame_hook(frame: np.ndarray, actual_idx: int) -> np.ndarray:
+            """Append sequence diagram snapshot beside the plot frame."""
+            try:
+                time_ms = None
+                if self.last_time is not None and 0 <= actual_idx < len(self.last_time):
+                    time_ms = float(self.last_time[actual_idx] * 1000.0)
+                if playhead is not None and time_ms is not None:
+                    playhead.show()
+                    playhead.setValue(time_ms)
+                QApplication.processEvents()
+                pixmap = self.sequence_designer.diagram_widget.grab()
+                image = pixmap.toImage().convertToFormat(QImage.Format_RGBA8888)
+                target_h = frame.shape[0]
+                image = image.scaledToHeight(target_h, Qt.SmoothTransformation)
+                ptr = image.bits()
+                ptr.setsize(image.byteCount())
+                arr = np.frombuffer(ptr, dtype=np.uint8).reshape((image.height(), image.width(), 4))[:, :, :3]
+                # Combine horizontally
+                h = min(frame.shape[0], arr.shape[0])
+                frame_resized = frame if frame.shape[0] == h else frame[:h, :, :]
+                arr_resized = arr if arr.shape[0] == h else arr[:h, :, :]
+                combined = np.hstack([frame_resized, arr_resized])
+                # Ensure even dimensions for encoders
+                if combined.shape[0] % 2 != 0:
+                    combined = combined[:-1, :, :]
+                if combined.shape[1] % 2 != 0:
+                    combined = combined[:, :-1, :]
+                return combined
+            except Exception:
+                return frame
+
         groups = [
             {
                 'title': 'Transverse Magnetization (Mx/My)',
@@ -4686,12 +4653,6 @@ class BlochSimulatorGUI(QMainWindow):
         ]
 
         exporter = AnimationExporter()
-        indices = exporter._compute_indices(
-            total_frames,
-            max_frames=params['max_frames'],
-            start_idx=start_idx,
-            end_idx=end_idx
-        )
         progress = QProgressDialog("Exporting animation...", "Cancel", 0, 100, self)
         progress.setWindowModality(Qt.WindowModal)
         progress.setAutoClose(True)
@@ -4719,7 +4680,8 @@ class BlochSimulatorGUI(QMainWindow):
                 format=params['format'],
                 progress_cb=progress_cb,
                 cancel_cb=cancel_cb,
-                indices=indices
+                indices=indices,
+                frame_hook=frame_hook
             )
             progress.setValue(100)
             if result:
@@ -4736,6 +4698,10 @@ class BlochSimulatorGUI(QMainWindow):
             else:
                 self.log_message(f"Animation export error: {e}")
                 QMessageBox.critical(self, "Export Error", f"An error occurred:\n{e}")
+        finally:
+            if playhead is not None:
+                playhead.setValue(playhead_value)
+                playhead.setVisible(playhead_visible)
 
     def _export_magnetization_data(self):
         """Export magnetization time series as CSV/NPY/DAT."""
@@ -4804,18 +4770,18 @@ class BlochSimulatorGUI(QMainWindow):
             end_idx=params['end_idx']
         )
 
-        # Prepare writers (main + optional sequence-only)
+        # Prepare writer
         fmt = params['format']
         filepath = Path(params['filename'])
         if filepath.suffix.lower() != f".{fmt}":
             filepath = filepath.with_suffix(f".{fmt}")
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        def _make_writer(target_path: Path):
-            if fmt == 'gif':
-                return vz_imageio.get_writer(str(target_path), mode='I', fps=params['fps'], format='GIF')
-            return vz_imageio.get_writer(
-                str(target_path),
+        if fmt == 'gif':
+            writer = vz_imageio.get_writer(str(filepath), mode='I', fps=params['fps'], format='GIF')
+        else:
+            writer = vz_imageio.get_writer(
+                str(filepath),
                 fps=params['fps'],
                 format='FFMPEG',
                 codec='libx264',
@@ -4823,14 +4789,6 @@ class BlochSimulatorGUI(QMainWindow):
                 quality=8,
                 macro_block_size=None
             )
-
-        writer = _make_writer(filepath)
-        seq_writer = None
-        seq_filepath = None
-        if params.get('include_sequence', False):
-            seq_filepath = filepath.with_name(f"{filepath.stem}_sequence{filepath.suffix}")
-            seq_filepath.parent.mkdir(parents=True, exist_ok=True)
-            seq_writer = _make_writer(seq_filepath)
 
         progress = QProgressDialog("Exporting 3D animation...", "Cancel", 0, len(indices), self)
         progress.setWindowModality(Qt.WindowModal)
@@ -4845,37 +4803,51 @@ class BlochSimulatorGUI(QMainWindow):
         def _even(val: int) -> int:
             return val if val % 2 == 0 else val + 1
 
-        def _qimage_to_rgb(image: QImage, target_w: int = None, target_h: int = None) -> np.ndarray:
-            """Convert a QImage to an even-sized RGB numpy array."""
-            if target_w or target_h:
-                aspect_mode = Qt.IgnoreAspectRatio if (target_w and target_h) else Qt.KeepAspectRatio
-                target_w = target_w or image.width()
-                target_h = target_h or image.height()
-                image = image.scaled(target_w, target_h, aspect_mode, Qt.SmoothTransformation)
-            if image.width() % 2 or image.height() % 2:
-                image = image.scaled(_even(image.width()), _even(image.height()), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-            image = image.convertToFormat(QImage.Format_RGBA8888)
-            ptr = image.bits()
-            ptr.setsize(image.byteCount())
-            return np.frombuffer(ptr, dtype=np.uint8).reshape((image.height(), image.width(), 4))[:, :, :3]
-
         def grab_frame():
             # Grab main view
             main_pixmap = self.mag_3d.gl_widget.grab()
             main_image = main_pixmap.toImage()
 
-            # Just the main view
-            target_w = params['width'] if params['width'] else main_image.width()
-            target_h = params['height'] if params['height'] else main_image.height()
-            frame = _qimage_to_rgb(main_image, target_w=target_w, target_h=target_h)
-            return frame
+            # Optionally grab sequence diagram
+            if params.get('include_sequence', False):
+                seq_pixmap = self.sequence_designer.diagram_widget.grab()
+                seq_image = seq_pixmap.toImage()
 
-        def grab_sequence_frame():
-            seq_pixmap = self.sequence_designer.diagram_widget.grab()
-            seq_image = seq_pixmap.toImage()
-            target_w = params['width'] if params['width'] else seq_image.width()
-            target_h = params['height'] if params['height'] else seq_image.height()
-            return _qimage_to_rgb(seq_image, target_w=target_w, target_h=target_h)
+                # Stack vertically: main view on top, sequence diagram below (20% height)
+                main_h = params['height'] if params['height'] else main_image.height()
+                seq_h = int(main_h * 0.25)  # 25% of main height for diagram
+                total_h = main_h + seq_h
+                total_w = params['width'] if params['width'] else main_image.width()
+
+                # Scale main image
+                main_image = main_image.scaled(total_w, main_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                # Scale sequence diagram
+                seq_image = seq_image.scaled(total_w, seq_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+
+                # Create composite image
+                from PyQt5.QtGui import QPainter, QImage as QImg
+                composite = QImg(total_w, total_h, QImg.Format_RGBA8888)
+                composite.fill(Qt.white)
+                painter = QPainter(composite)
+                painter.drawImage(0, 0, main_image)
+                painter.drawImage(0, main_h, seq_image)
+                painter.end()
+                image = composite
+            else:
+                # Just the main view
+                target_w = params['width'] if params['width'] else main_image.width()
+                target_h = params['height'] if params['height'] else main_image.height()
+                aspect_mode = Qt.IgnoreAspectRatio if (params['width'] and params['height']) else Qt.KeepAspectRatio
+                image = main_image.scaled(target_w, target_h, aspect_mode, Qt.SmoothTransformation)
+
+            # Enforce even dimensions for codecs
+            if image.width() % 2 or image.height() % 2:
+                image = image.scaled(_even(image.width()), _even(image.height()), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            image = image.convertToFormat(QImage.Format_RGBA8888)
+            ptr = image.bits()
+            ptr.setsize(image.byteCount())
+            frame = np.frombuffer(ptr, dtype=np.uint8).reshape((image.height(), image.width(), 4))[:, :, :3]
+            return frame
 
         try:
             for i, idx in enumerate(indices):
@@ -4885,32 +4857,22 @@ class BlochSimulatorGUI(QMainWindow):
                 QApplication.processEvents()
                 frame = grab_frame()
                 writer.append_data(frame)
-                if seq_writer is not None:
-                    seq_frame = grab_sequence_frame()
-                    seq_writer.append_data(seq_frame)
                 progress.setValue(i + 1)
                 QApplication.processEvents()
         finally:
             writer.close()
-            if seq_writer is not None:
-                seq_writer.close()
             # Restore playback state
             self._set_animation_index_from_slider(current_idx)
             if was_running:
                 self._resume_vector_animation()
             progress.setValue(progress.maximum())
 
-        msg = f"3D animation exported successfully:\n{filepath.name}"
-        if seq_filepath is not None:
-            msg += f"\nSequence diagram exported:\n{seq_filepath.name}"
-        QMessageBox.information(self, "Export Successful", msg)
+        QMessageBox.information(
+            self,
+            "Export Successful",
+            f"3D animation exported successfully:\n{filepath.name}"
+        )
         self.log_message(f"3D animation exported to {filepath}")
-        if seq_filepath is not None:
-            self.log_message(f"Sequence diagram exported to {seq_filepath}")
-
-    def _export_sequence_diagram_animation(self):
-        """Export the sequence diagram only (no combined views)."""
-        self._export_widget_animation([self.sequence_designer.diagram_widget], default_filename="sequence")
 
     def _export_signal_image(self, default_format='png'):
         """Export signal plot as an image."""
@@ -4979,7 +4941,6 @@ class BlochSimulatorGUI(QMainWindow):
             default_directory=self._get_export_directory()
         )
         dialog.mean_only_checkbox.setChecked(self.mean_only_checkbox.isChecked())
-        dialog.include_sequence_checkbox.setVisible(False)
         if dialog.exec_() != QDialog.Accepted:
             return
 

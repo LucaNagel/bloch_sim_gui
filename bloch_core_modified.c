@@ -613,4 +613,182 @@ void blochsim_batch_optimized(double *b1real, double *b1imag,
     free(e1);
     free(e2);
 }
+/* Heterogeneous phantom simulation - per-voxel T1/T2/df */
+void blochsim_heterogeneous(
+    double *b1real, double *b1imag,
+    double *gx, double *gy, double *gz, double *tsteps,
+    int ntime,
+    double *t1_arr, double *t2_arr, double *df_arr,
+    double *dx, double *dy, double *dz,
+    double *mx_init, double *my_init, double *mz_init,
+    int nvoxels,
+    double *mx, double *my, double *mz,
+    int mode, int num_threads)
+{
+    int ntout = (mode & 2) ? ntime : 1;
+    
+    #ifdef _OPENMP
+    omp_set_num_threads(num_threads);
+    #pragma omp parallel for schedule(dynamic, 64)
+    #endif
+    for (int v = 0; v < nvoxels; v++) {
+        /* Get per-voxel parameters */
+        double t1 = t1_arr[v];
+        double t2 = t2_arr[v];
+        double df = df_arr[v];
+        double pos_x = dx[v];
+        double pos_y = dy[v];
+        double pos_z = dz[v];
+        
+        /* Output pointer base for this voxel */
+        int base = v * ntout;
+        
+        /* Skip if T1 or T2 are zero (background/masked voxels) */
+        if (t1 <= 0.0 || t2 <= 0.0) {
+            for (int t = 0; t < ntout; t++) {
+                mx[base + t] = 0.0;
+                my[base + t] = 0.0;
+                mz[base + t] = 0.0;
+            }
+            continue;
+        }
+        
+        /* Compute E1, E2 arrays for this voxel's T1/T2 */
+        double *e1 = (double *)malloc(ntime * sizeof(double));
+        double *e2 = (double *)malloc(ntime * sizeof(double));
+        if (e1 == NULL || e2 == NULL) {
+            if (e1) free(e1);
+            if (e2) free(e2);
+            continue;
+        }
+        
+        for (int t = 0; t < ntime; t++) {
+            e1[t] = exp(-tsteps[t] / t1);
+            e2[t] = exp(-tsteps[t] / t2);
+        }
+        
+        /* Get initial magnetization */
+        double mx_start = mx_init ? mx_init[v] : 0.0;
+        double my_start = my_init ? my_init[v] : 0.0;
+        double mz_start = mz_init ? mz_init[v] : 1.0;
+        
+        /* Set initial values */
+        mx[base] = mx_start;
+        my[base] = my_start;
+        mz[base] = mz_start;
+        
+        /* Run Bloch simulation for this voxel */
+        blochsim(b1real, b1imag, gx, gy, gz, tsteps, ntime,
+                 e1, e2, df, pos_x, pos_y, pos_z,
+                 &mx[base], &my[base], &mz[base], mode);
+        
+        free(e1);
+        free(e2);
+    }
+}
+
+/* Optimized version for grouped tissue types */
+void blochsim_heterogeneous_grouped(
+    double *b1real, double *b1imag,
+    double *gx, double *gy, double *gz, double *tsteps,
+    int ntime,
+    int *tissue_labels,
+    double *t1_per_label, double *t2_per_label,
+    int nlabels,
+    double *df_arr,
+    double *dx, double *dy, double *dz,
+    double *mx_init, double *my_init, double *mz_init,
+    int nvoxels,
+    double *mx, double *my, double *mz,
+    int mode, int num_threads)
+{
+    int ntout = (mode & 2) ? ntime : 1;
+    
+    /* Pre-compute E1/E2 for each tissue label - shared across all voxels with that label */
+    double **e1_table = (double **)malloc(nlabels * sizeof(double *));
+    double **e2_table = (double **)malloc(nlabels * sizeof(double *));
+    
+    if (e1_table == NULL || e2_table == NULL) {
+        if (e1_table) free(e1_table);
+        if (e2_table) free(e2_table);
+        return;
+    }
+    
+    for (int l = 0; l < nlabels; l++) {
+        e1_table[l] = (double *)malloc(ntime * sizeof(double));
+        e2_table[l] = (double *)malloc(ntime * sizeof(double));
+        
+        if (e1_table[l] == NULL || e2_table[l] == NULL) {
+            /* Cleanup on allocation failure */
+            for (int j = 0; j <= l; j++) {
+                if (e1_table[j]) free(e1_table[j]);
+                if (e2_table[j]) free(e2_table[j]);
+            }
+            free(e1_table);
+            free(e2_table);
+            return;
+        }
+        
+        double t1 = t1_per_label[l];
+        double t2 = t2_per_label[l];
+        
+        for (int t = 0; t < ntime; t++) {
+            e1_table[l][t] = (t1 > 0) ? exp(-tsteps[t] / t1) : 0.0;
+            e2_table[l][t] = (t2 > 0) ? exp(-tsteps[t] / t2) : 0.0;
+        }
+    }
+    
+    #ifdef _OPENMP
+    omp_set_num_threads(num_threads);
+    #pragma omp parallel for schedule(dynamic, 64)
+    #endif
+    for (int v = 0; v < nvoxels; v++) {
+        int label = tissue_labels[v];
+        int base = v * ntout;
+        
+        /* Skip background (label < 0) or invalid labels */
+        if (label < 0 || label >= nlabels) {
+            for (int t = 0; t < ntout; t++) {
+                mx[base + t] = 0.0;
+                my[base + t] = 0.0;
+                mz[base + t] = 0.0;
+            }
+            continue;
+        }
+        
+        /* Check if this tissue has valid T1/T2 */
+        double t1 = t1_per_label[label];
+        double t2 = t2_per_label[label];
+        if (t1 <= 0.0 || t2 <= 0.0) {
+            for (int t = 0; t < ntout; t++) {
+                mx[base + t] = 0.0;
+                my[base + t] = 0.0;
+                mz[base + t] = 0.0;
+            }
+            continue;
+        }
+        
+        double *e1 = e1_table[label];
+        double *e2 = e2_table[label];
+        double df = df_arr[v];
+        
+        /* Set initial magnetization */
+        mx[base] = mx_init ? mx_init[v] : 0.0;
+        my[base] = my_init ? my_init[v] : 0.0;
+        mz[base] = mz_init ? mz_init[v] : 1.0;
+        
+        blochsim(b1real, b1imag, gx, gy, gz, tsteps, ntime,
+                 e1, e2, df, dx[v], dy[v], dz[v],
+                 &mx[base], &my[base], &mz[base], mode);
+    }
+    
+    /* Cleanup */
+    for (int l = 0; l < nlabels; l++) {
+        free(e1_table[l]);
+        free(e2_table[l]);
+    }
+    free(e1_table);
+    free(e2_table);
+}
+
 /* End of file */

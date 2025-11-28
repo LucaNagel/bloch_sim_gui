@@ -643,7 +643,7 @@ class BlochSimulator:
     High-level interface for Bloch equation simulations.
     """
     
-    def __init__(self, use_parallel: bool = True, num_threads: int = 4):
+    def __init__(self, use_parallel: bool = True, num_threads: int = 4, verbose: bool = False):
         """
         Initialize the Bloch simulator.
         
@@ -653,10 +653,18 @@ class BlochSimulator:
             Use parallel processing
         num_threads : int
             Number of threads for parallel processing
+        verbose : bool
+            Print progress messages
         """
         self.use_parallel = use_parallel
         self.num_threads = num_threads
+        self.verbose = verbose
         self.last_result = None
+    
+    def log_message(self, message: str):
+        """Print a message if verbose mode is enabled."""
+        if self.verbose:
+            print(message)
         
     def simulate(self, 
                  sequence: Union[PulseSequence, Tuple],
@@ -825,6 +833,224 @@ class BlochSimulator:
             'frequencies': frequencies,
             'tissue': tissue
         }
+        
+        return self.last_result
+    
+    def simulate_phantom(self, phantom, sequence: Union[PulseSequence, Tuple],
+                        dt: float = 1e-5,
+                        mode: int = 0,
+                        additional_frequencies: Optional[np.ndarray] = None,
+                        use_grouped: bool = True) -> Dict:
+        """
+        Simulate Bloch equations for a heterogeneous phantom.
+        
+        This method simulates MRI physics for phantoms with spatially-varying
+        tissue properties (T1, T2, proton density, frequency offset). Each voxel
+        can have different parameters, enabling realistic imaging simulation.
+        
+        Parameters
+        ----------
+        phantom : Phantom
+            Phantom object with tissue property maps (T1, T2, PD, df).
+            See phantom.py for Phantom class and PhantomFactory.
+        sequence : PulseSequence or tuple
+            Either a PulseSequence object or tuple of (b1, gradients, time)
+        dt : float
+            Time step for sequence compilation (if using PulseSequence)
+        mode : int
+            Simulation mode:
+            - 0: Endpoint only (faster, returns final magnetization)
+            - 2: Time-resolved (returns magnetization at all time points)
+        additional_frequencies : ndarray, optional
+            Extra frequency offsets to simulate (Hz). These are added to
+            each voxel's df_map value. Useful for multi-frequency/spectroscopic
+            imaging.
+        use_grouped : bool
+            If True and phantom has discrete tissue labels, use optimized
+            grouped simulation (faster for segmented phantoms).
+        
+        Returns
+        -------
+        dict
+            Simulation results containing:
+            - 'mx', 'my', 'mz': Magnetization components
+              Shape: (*phantom.shape,) for mode=0, or (ntime, *phantom.shape) for mode=2
+            - 'signal': Complex transverse magnetization (mx + 1j*my)
+            - 'time': Time array from sequence
+            - 'phantom': The input phantom object
+            - 'pd_weighted_signal': Signal weighted by proton density
+        
+        Examples
+        --------
+        >>> from phantom import PhantomFactory
+        >>> # Create Shepp-Logan phantom
+        >>> phantom = PhantomFactory.shepp_logan_2d(64, 0.24, 3.0)
+        >>> # Create excitation pulse
+        >>> seq = PulseSequence()
+        >>> seq.add_rf_pulse(flip_angle=90, duration=1e-3)
+        >>> # Simulate
+        >>> result = simulator.simulate_phantom(phantom, seq, mode=0)
+        >>> # Result shape matches phantom
+        >>> print(result['mx'].shape)  # (64, 64)
+        """
+        # Import Phantom class (avoid circular import)
+        try:
+            from phantom import Phantom
+        except ImportError:
+            raise ImportError("Phantom module not found. Ensure phantom.py is available.")
+        
+        if not isinstance(phantom, Phantom):
+            raise TypeError(f"Expected Phantom object, got {type(phantom)}")
+        
+        self.log_message(f"Simulating phantom: {phantom}")
+        self.log_message(f"Active voxels: {phantom.n_active} / {phantom.nvoxels}")
+        
+        # Compile sequence
+        if isinstance(sequence, PulseSequence):
+            b1, gradients, time = sequence.compile(dt)
+        else:
+            b1, gradients, time = sequence
+        
+        # Prepare arrays (same sanitization as simulate())
+        b1 = np.asarray(b1, dtype=np.complex128)
+        b1 = np.squeeze(b1)
+        if b1.ndim != 1:
+            raise ValueError(f"B1 array must be 1D, got shape {b1.shape}")
+        b1_gauss = np.ascontiguousarray(b1)
+        
+        gradients = np.asarray(gradients, dtype=np.float64)
+        if gradients.ndim == 1:
+            gradients = gradients.reshape(-1, 1)
+        if gradients.shape[1] < 3:
+            gradients = np.pad(gradients, ((0, 0), (0, 3 - gradients.shape[1])), mode='constant')
+        elif gradients.shape[1] > 3:
+            gradients = gradients[:, :3]
+        gradients_gauss = np.ascontiguousarray(gradients)
+        
+        time = np.asarray(time, dtype=np.float64).ravel()
+        time = np.ascontiguousarray(time)
+        
+        # Time intervals
+        if len(time) > 1:
+            dt_array = np.diff(time)
+            dt_array = np.append(dt_array, dt_array[-1])
+        else:
+            dt_array = np.array([dt])
+        dt_array = np.ascontiguousarray(dt_array, dtype=np.float64)
+        
+        # Get phantom properties (active voxels only for efficiency)
+        props = phantom.get_active_properties()
+        n_active = len(props['t1'])
+        
+        if n_active == 0:
+            self.log_message("Warning: No active voxels in phantom (all masked)")
+            # Return zeros
+            if mode & 2:
+                shape = (len(time),) + phantom.shape
+            else:
+                shape = phantom.shape
+            zeros = np.zeros(shape, dtype=np.float64)
+            return {
+                'mx': zeros,
+                'my': zeros,
+                'mz': zeros,
+                'signal': np.zeros(shape, dtype=np.complex128),
+                'time': time,
+                'phantom': phantom,
+                'pd_weighted_signal': np.zeros(shape, dtype=np.complex128),
+            }
+        
+        # Convert positions from meters to cm (Bloch core uses Gauss/cm)
+        positions_cm = props['positions'] * 100  # m -> cm
+        positions_cm = np.ascontiguousarray(positions_cm, dtype=np.float64)
+        
+        # Frequency offsets
+        df_array = np.ascontiguousarray(props['df'], dtype=np.float64)
+        
+        # Initial magnetization
+        m_init = np.ascontiguousarray(props['m0'], dtype=np.float64)
+        
+        # Check memory requirements
+        ntout = len(time) if (mode & 2) else 1
+        total_samples = ntout * n_active
+        if total_samples > 1e8:
+            raise ValueError(
+                f"Phantom simulation too large ({total_samples:.1e} samples for {n_active} active voxels). "
+                f"Use smaller phantom, reduce time points, or use endpoint mode (mode=0)."
+            )
+        
+        self.log_message(f"Simulation size: {n_active} voxels × {ntout} time points = {total_samples:.1e} samples")
+        
+        # Import wrapper function
+        try:
+            from bloch_simulator_cy import simulate_phantom as simulate_phantom_core
+        except ImportError:
+            raise ImportError("bloch_simulator_cy not compiled. Run: python setup.py build_ext --inplace")
+        
+        # Run simulation
+        t1_array = np.ascontiguousarray(props['t1'], dtype=np.float64)
+        t2_array = np.ascontiguousarray(props['t2'], dtype=np.float64)
+        
+        self.log_message("Running heterogeneous Bloch simulation...")
+        mx, my, mz = simulate_phantom_core(
+            b1_gauss, gradients_gauss, dt_array,
+            t1_array, t2_array, df_array,
+            positions_cm, m_init,
+            mode, self.num_threads
+        )
+        
+        # Reconstruct full phantom shape from active voxels
+        indices = props['indices']
+        
+        if mode & 2:
+            # Time-resolved: (ntime, n_active) -> (ntime, *phantom.shape)
+            mx_full = phantom.reconstruct_from_active(mx, indices, has_time=True, fill_value=0.0)
+            my_full = phantom.reconstruct_from_active(my, indices, has_time=True, fill_value=0.0)
+            mz_full = phantom.reconstruct_from_active(mz, indices, has_time=True, fill_value=0.0)
+        else:
+            # Endpoint: (n_active,) -> (*phantom.shape,)
+            mx_full = phantom.reconstruct_from_active(mx, indices, has_time=False, fill_value=0.0)
+            my_full = phantom.reconstruct_from_active(my, indices, has_time=False, fill_value=0.0)
+            mz_full = phantom.reconstruct_from_active(mz, indices, has_time=False, fill_value=0.0)
+        
+        # Complex signal per voxel (image-space magnetization)
+        signal_per_voxel = mx_full + 1j * my_full
+        
+        # Apply proton density weighting
+        pd_map = phantom.pd_map
+        if mode & 2:
+            # Broadcast pd_map to (ntime, *shape)
+            pd_weighted = signal_per_voxel * pd_map[np.newaxis, ...]
+        else:
+            pd_weighted = signal_per_voxel * pd_map
+        
+        # Calculate RECEIVED SIGNAL (sum over all voxels)
+        # This is what an RF coil would measure - the coherent sum of all spins
+        # S(t) = Σ [Mxy(r,t) * PD(r)] for all positions r
+        if mode & 2:
+            # Time-resolved: sum over spatial dimensions, keep time
+            # pd_weighted shape: (ntime, *spatial_shape)
+            spatial_axes = tuple(range(1, pd_weighted.ndim))
+            received_signal = np.sum(pd_weighted, axis=spatial_axes)
+            self.log_message(f"Received signal shape: {received_signal.shape} (sum over {pd_weighted.shape[1:]})")
+        else:
+            # Endpoint: sum over all spatial dimensions
+            received_signal = np.sum(pd_weighted)
+            self.log_message(f"Received signal (endpoint): {received_signal}")
+        
+        # Store result
+        self.last_result = {
+            'mx': mx_full,
+            'my': my_full,
+            'mz': mz_full,
+            'signal': signal_per_voxel,           # Per-voxel signal (for imaging)
+            'time': time,
+            'phantom': phantom,
+            'pd_weighted_signal': pd_weighted,    # Per-voxel signal * PD
+            'received_signal': received_signal,   # Total signal (what coil measures)
+        }
+        
+        self.log_message(f"Simulation complete. Output shape: {mx_full.shape}")
         
         return self.last_result
     

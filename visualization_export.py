@@ -413,9 +413,9 @@ class ExportAnimationDialog(QDialog):
         layout.addWidget(self.mean_only_checkbox)
 
         # Include sequence diagram option
-        self.include_sequence_checkbox = QCheckBox("Include animated sequence diagram")
-        self.include_sequence_checkbox.setChecked(True)
-        self.include_sequence_checkbox.setToolTip("Add sequence diagram with playhead animation below the main view")
+        self.include_sequence_checkbox = QCheckBox("Export sequence diagram as separate file")
+        self.include_sequence_checkbox.setChecked(False)
+        self.include_sequence_checkbox.setToolTip("If checked, also export the sequence diagram as its own animation.")
         layout.addWidget(self.include_sequence_checkbox)
 
         # Buttons

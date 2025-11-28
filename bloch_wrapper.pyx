@@ -29,6 +29,32 @@ cdef extern from "bloch_core.h":
     
     void calculate_relaxation(double t1, double t2, double dt, double *e1, double *e2) nogil
     void set_equilibrium_magnetization(double *mx, double *my, double *mz, int n) nogil
+    
+    # Heterogeneous phantom simulation functions
+    void blochsim_heterogeneous(
+        double *b1real, double *b1imag,
+        double *gx, double *gy, double *gz, double *tsteps,
+        int ntime,
+        double *t1_arr, double *t2_arr, double *df_arr,
+        double *dx, double *dy, double *dz,
+        double *mx_init, double *my_init, double *mz_init,
+        int nvoxels,
+        double *mx, double *my, double *mz,
+        int mode, int num_threads) nogil
+    
+    void blochsim_heterogeneous_grouped(
+        double *b1real, double *b1imag,
+        double *gx, double *gy, double *gz, double *tsteps,
+        int ntime,
+        int *tissue_labels,
+        double *t1_per_label, double *t2_per_label,
+        int nlabels,
+        double *df_arr,
+        double *dx, double *dy, double *dz,
+        double *mx_init, double *my_init, double *mz_init,
+        int nvoxels,
+        double *mx, double *my, double *mz,
+        int mode, int num_threads) nogil
 
 # Type definitions
 ctypedef np.float64_t DTYPE_t
@@ -395,3 +421,288 @@ def design_rf_pulse(pulse_type='rect', duration=1e-3, flip_angle=90,
         raise ValueError(f"Unknown pulse type: {pulse_type}")
     
     return b1.astype(complex), time
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def simulate_phantom(np.ndarray[CTYPE_t, ndim=1] b1_complex,
+                    np.ndarray[DTYPE_t, ndim=2] gradients,
+                    np.ndarray[DTYPE_t, ndim=1] time_points,
+                    np.ndarray[DTYPE_t, ndim=1] t1_array,
+                    np.ndarray[DTYPE_t, ndim=1] t2_array,
+                    np.ndarray[DTYPE_t, ndim=1] df_array,
+                    np.ndarray[DTYPE_t, ndim=2] positions,
+                    np.ndarray[DTYPE_t, ndim=2] m_init=None,
+                    int mode=0,
+                    int num_threads=4):
+    """
+    Simulate Bloch equations for a phantom with heterogeneous tissue properties.
+    
+    This is the core function for simulating imaging phantoms where each voxel
+    can have different T1, T2, and frequency offset values.
+    
+    Parameters
+    ----------
+    b1_complex : ndarray, shape (ntime,)
+        Complex RF pulse (B1 field) in Gauss
+    gradients : ndarray, shape (ntime, 3)
+        Gradient waveforms [Gx, Gy, Gz] in Gauss/cm
+    time_points : ndarray, shape (ntime,)
+        Time intervals in seconds
+    t1_array : ndarray, shape (nvoxels,)
+        T1 relaxation time per voxel in seconds
+    t2_array : ndarray, shape (nvoxels,)
+        T2 relaxation time per voxel in seconds
+    df_array : ndarray, shape (nvoxels,)
+        Frequency offset per voxel in Hz
+    positions : ndarray, shape (nvoxels, 3)
+        Spatial positions [x, y, z] in cm
+    m_init : ndarray, shape (nvoxels, 3), optional
+        Initial magnetization [Mx, My, Mz] per voxel. Default: [0, 0, 1]
+    mode : int, optional
+        Simulation mode:
+        - 0: Endpoint only (default)
+        - 2: Time-resolved (returns all time points)
+    num_threads : int, optional
+        Number of OpenMP threads (default: 4)
+    
+    Returns
+    -------
+    mx, my, mz : ndarray
+        Magnetization components.
+        Shape: (nvoxels,) for mode=0, or (ntime, nvoxels) for mode=2
+    
+    Notes
+    -----
+    - Voxels with T1 <= 0 or T2 <= 0 are treated as background and return zero
+    - Positions should be in cm (consistent with gradient units Gauss/cm)
+    - This function uses OpenMP parallelization across voxels
+    
+    Examples
+    --------
+    >>> # Simulate a 64x64 phantom
+    >>> nvoxels = 64 * 64
+    >>> t1 = np.ones(nvoxels) * 1.0  # 1 second T1
+    >>> t2 = np.ones(nvoxels) * 0.1  # 100 ms T2
+    >>> df = np.zeros(nvoxels)  # On-resonance
+    >>> positions = ...  # (nvoxels, 3) array of positions in cm
+    >>> mx, my, mz = simulate_phantom(b1, grads, time, t1, t2, df, positions)
+    """
+    cdef int ntime = len(b1_complex)
+    cdef int nvoxels = len(t1_array)
+    cdef int ntout = ntime if (mode & 2) else 1
+    
+    # Validate array lengths
+    if len(t2_array) != nvoxels:
+        raise ValueError(f"t2_array length ({len(t2_array)}) must match t1_array ({nvoxels})")
+    if len(df_array) != nvoxels:
+        raise ValueError(f"df_array length ({len(df_array)}) must match t1_array ({nvoxels})")
+    if positions.shape[0] != nvoxels:
+        raise ValueError(f"positions rows ({positions.shape[0]}) must match nvoxels ({nvoxels})")
+    
+    # Prepare B1 arrays (split complex into real/imag)
+    cdef np.ndarray[CTYPE_t, ndim=1] b1_c = np.ascontiguousarray(b1_complex, dtype=np.complex128)
+    cdef np.ndarray[DTYPE_t, ndim=1] b1_real = np.empty(ntime, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] b1_imag = np.empty(ntime, dtype=np.float64)
+    np.copyto(b1_real, b1_c.real)
+    np.copyto(b1_imag, b1_c.imag)
+    
+    # Prepare gradient arrays
+    cdef np.ndarray[DTYPE_t, ndim=2] grad_c = _coerce_three_columns(gradients, ntime, "gradients")
+    cdef np.ndarray[DTYPE_t, ndim=1] gx = np.ascontiguousarray(grad_c[:, 0])
+    cdef np.ndarray[DTYPE_t, ndim=1] gy = np.ascontiguousarray(grad_c[:, 1])
+    cdef np.ndarray[DTYPE_t, ndim=1] gz = np.ascontiguousarray(grad_c[:, 2])
+    
+    # Time array
+    cdef np.ndarray[DTYPE_t, ndim=1] time_c = np.ascontiguousarray(time_points, dtype=np.float64)
+    
+    # Tissue parameter arrays
+    cdef np.ndarray[DTYPE_t, ndim=1] t1_c = np.ascontiguousarray(t1_array, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] t2_c = np.ascontiguousarray(t2_array, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] df_c = np.ascontiguousarray(df_array, dtype=np.float64)
+    
+    # Position arrays
+    cdef np.ndarray[DTYPE_t, ndim=2] pos_c = _coerce_three_columns(positions, nvoxels, "positions")
+    cdef np.ndarray[DTYPE_t, ndim=1] dx = np.ascontiguousarray(pos_c[:, 0])
+    cdef np.ndarray[DTYPE_t, ndim=1] dy = np.ascontiguousarray(pos_c[:, 1])
+    cdef np.ndarray[DTYPE_t, ndim=1] dz = np.ascontiguousarray(pos_c[:, 2])
+    
+    # Initial magnetization
+    cdef np.ndarray[DTYPE_t, ndim=1] mx_init_c = None
+    cdef np.ndarray[DTYPE_t, ndim=1] my_init_c = None
+    cdef np.ndarray[DTYPE_t, ndim=1] mz_init_c = None
+    cdef double *mx_init_ptr = NULL
+    cdef double *my_init_ptr = NULL
+    cdef double *mz_init_ptr = NULL
+    cdef np.ndarray[DTYPE_t, ndim=2] m_init_c
+    
+    if m_init is not None:
+        if m_init.shape[0] != nvoxels or m_init.shape[1] != 3:
+            raise ValueError(f"m_init must have shape ({nvoxels}, 3); got ({m_init.shape[0]}, {m_init.shape[1]})")
+        m_init_c = np.ascontiguousarray(m_init, dtype=np.float64)
+        mx_init_c = np.ascontiguousarray(m_init_c[:, 0])
+        my_init_c = np.ascontiguousarray(m_init_c[:, 1])
+        mz_init_c = np.ascontiguousarray(m_init_c[:, 2])
+        mx_init_ptr = <double*>mx_init_c.data
+        my_init_ptr = <double*>my_init_c.data
+        mz_init_ptr = <double*>mz_init_c.data
+    
+    # Output arrays - flat layout: voxel-major, then time
+    cdef np.ndarray[DTYPE_t, ndim=1] mx_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] my_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] mz_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
+    
+    # Run heterogeneous simulation
+    with nogil:
+        blochsim_heterogeneous(
+            <double*>b1_real.data, <double*>b1_imag.data,
+            <double*>gx.data, <double*>gy.data, <double*>gz.data,
+            <double*>time_c.data, ntime,
+            <double*>t1_c.data, <double*>t2_c.data, <double*>df_c.data,
+            <double*>dx.data, <double*>dy.data, <double*>dz.data,
+            mx_init_ptr, my_init_ptr, mz_init_ptr,
+            nvoxels,
+            <double*>mx_buf.data, <double*>my_buf.data, <double*>mz_buf.data,
+            mode, num_threads)
+    
+    # Reshape output
+    # C layout is (nvoxels, ntout) -> we want (ntout, nvoxels) for time-resolved
+    if ntout > 1:
+        mx_out = mx_buf.reshape((nvoxels, ntout)).T.copy()  # (ntime, nvoxels)
+        my_out = my_buf.reshape((nvoxels, ntout)).T.copy()
+        mz_out = mz_buf.reshape((nvoxels, ntout)).T.copy()
+    else:
+        mx_out = mx_buf  # (nvoxels,)
+        my_out = my_buf
+        mz_out = mz_buf
+    
+    return mx_out, my_out, mz_out
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def simulate_phantom_grouped(np.ndarray[CTYPE_t, ndim=1] b1_complex,
+                            np.ndarray[DTYPE_t, ndim=2] gradients,
+                            np.ndarray[DTYPE_t, ndim=1] time_points,
+                            np.ndarray[np.int32_t, ndim=1] tissue_labels,
+                            np.ndarray[DTYPE_t, ndim=1] t1_per_label,
+                            np.ndarray[DTYPE_t, ndim=1] t2_per_label,
+                            np.ndarray[DTYPE_t, ndim=1] df_array,
+                            np.ndarray[DTYPE_t, ndim=2] positions,
+                            np.ndarray[DTYPE_t, ndim=2] m_init=None,
+                            int mode=0,
+                            int num_threads=4):
+    """
+    Optimized phantom simulation for phantoms with grouped tissue types.
+    
+    This version is more efficient when many voxels share the same T1/T2 values
+    (e.g., segmented phantoms with a small number of tissue types).
+    
+    Parameters
+    ----------
+    b1_complex : ndarray, shape (ntime,)
+        Complex RF pulse in Gauss
+    gradients : ndarray, shape (ntime, 3)
+        Gradient waveforms in Gauss/cm
+    time_points : ndarray, shape (ntime,)
+        Time intervals in seconds
+    tissue_labels : ndarray, shape (nvoxels,), dtype=int32
+        Tissue label per voxel (0 to nlabels-1). Use -1 for background.
+    t1_per_label : ndarray, shape (nlabels,)
+        T1 value for each tissue label
+    t2_per_label : ndarray, shape (nlabels,)
+        T2 value for each tissue label
+    df_array : ndarray, shape (nvoxels,)
+        Frequency offset per voxel in Hz
+    positions : ndarray, shape (nvoxels, 3)
+        Spatial positions in cm
+    m_init : ndarray, shape (nvoxels, 3), optional
+        Initial magnetization per voxel
+    mode : int
+        0=endpoint, 2=time-resolved
+    num_threads : int
+        Number of OpenMP threads
+    
+    Returns
+    -------
+    mx, my, mz : ndarray
+        Magnetization components
+    """
+    cdef int ntime = len(b1_complex)
+    cdef int nvoxels = len(tissue_labels)
+    cdef int nlabels = len(t1_per_label)
+    cdef int ntout = ntime if (mode & 2) else 1
+    
+    # Validate
+    if len(t2_per_label) != nlabels:
+        raise ValueError(f"t2_per_label length must match t1_per_label ({nlabels})")
+    
+    # Prepare arrays (similar to simulate_phantom)
+    cdef np.ndarray[CTYPE_t, ndim=1] b1_c = np.ascontiguousarray(b1_complex, dtype=np.complex128)
+    cdef np.ndarray[DTYPE_t, ndim=1] b1_real = np.empty(ntime, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] b1_imag = np.empty(ntime, dtype=np.float64)
+    np.copyto(b1_real, b1_c.real)
+    np.copyto(b1_imag, b1_c.imag)
+    
+    cdef np.ndarray[DTYPE_t, ndim=2] grad_c = _coerce_three_columns(gradients, ntime, "gradients")
+    cdef np.ndarray[DTYPE_t, ndim=1] gx = np.ascontiguousarray(grad_c[:, 0])
+    cdef np.ndarray[DTYPE_t, ndim=1] gy = np.ascontiguousarray(grad_c[:, 1])
+    cdef np.ndarray[DTYPE_t, ndim=1] gz = np.ascontiguousarray(grad_c[:, 2])
+    
+    cdef np.ndarray[DTYPE_t, ndim=1] time_c = np.ascontiguousarray(time_points, dtype=np.float64)
+    cdef np.ndarray[np.int32_t, ndim=1] labels_c = np.ascontiguousarray(tissue_labels, dtype=np.int32)
+    cdef np.ndarray[DTYPE_t, ndim=1] t1_c = np.ascontiguousarray(t1_per_label, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] t2_c = np.ascontiguousarray(t2_per_label, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] df_c = np.ascontiguousarray(df_array, dtype=np.float64)
+    
+    cdef np.ndarray[DTYPE_t, ndim=2] pos_c = _coerce_three_columns(positions, nvoxels, "positions")
+    cdef np.ndarray[DTYPE_t, ndim=1] dx = np.ascontiguousarray(pos_c[:, 0])
+    cdef np.ndarray[DTYPE_t, ndim=1] dy = np.ascontiguousarray(pos_c[:, 1])
+    cdef np.ndarray[DTYPE_t, ndim=1] dz = np.ascontiguousarray(pos_c[:, 2])
+    
+    cdef np.ndarray[DTYPE_t, ndim=1] mx_init_c = None
+    cdef np.ndarray[DTYPE_t, ndim=1] my_init_c = None
+    cdef np.ndarray[DTYPE_t, ndim=1] mz_init_c = None
+    cdef double *mx_init_ptr = NULL
+    cdef double *my_init_ptr = NULL
+    cdef double *mz_init_ptr = NULL
+    cdef np.ndarray[DTYPE_t, ndim=2] m_init_cont
+    
+    if m_init is not None:
+        m_init_cont = np.ascontiguousarray(m_init, dtype=np.float64)
+        mx_init_c = np.ascontiguousarray(m_init_cont[:, 0])
+        my_init_c = np.ascontiguousarray(m_init_cont[:, 1])
+        mz_init_c = np.ascontiguousarray(m_init_cont[:, 2])
+        mx_init_ptr = <double*>mx_init_c.data
+        my_init_ptr = <double*>my_init_c.data
+        mz_init_ptr = <double*>mz_init_c.data
+    
+    cdef np.ndarray[DTYPE_t, ndim=1] mx_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] my_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] mz_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
+    
+    with nogil:
+        blochsim_heterogeneous_grouped(
+            <double*>b1_real.data, <double*>b1_imag.data,
+            <double*>gx.data, <double*>gy.data, <double*>gz.data,
+            <double*>time_c.data, ntime,
+            <int*>labels_c.data,
+            <double*>t1_c.data, <double*>t2_c.data,
+            nlabels,
+            <double*>df_c.data,
+            <double*>dx.data, <double*>dy.data, <double*>dz.data,
+            mx_init_ptr, my_init_ptr, mz_init_ptr,
+            nvoxels,
+            <double*>mx_buf.data, <double*>my_buf.data, <double*>mz_buf.data,
+            mode, num_threads)
+    
+    if ntout > 1:
+        mx_out = mx_buf.reshape((nvoxels, ntout)).T.copy()
+        my_out = my_buf.reshape((nvoxels, ntout)).T.copy()
+        mz_out = mz_buf.reshape((nvoxels, ntout)).T.copy()
+    else:
+        mx_out = mx_buf
+        my_out = my_buf
+        mz_out = mz_buf
+    
+    return mx_out, my_out, mz_out

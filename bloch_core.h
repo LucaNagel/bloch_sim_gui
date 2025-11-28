@@ -68,4 +68,31 @@ void blochsim_batch_optimized(double *b1real, double *b1imag,
 void calculate_relaxation(double t1, double t2, double dt, double *e1, double *e2);
 void set_equilibrium_magnetization(double *mx, double *my, double *mz, int n);
 
+/* Heterogeneous phantom simulation - per-voxel T1/T2/df */
+void blochsim_heterogeneous(
+    double *b1real, double *b1imag,
+    double *gx, double *gy, double *gz, double *tsteps,
+    int ntime,
+    double *t1_arr, double *t2_arr, double *df_arr,
+    double *dx, double *dy, double *dz,
+    double *mx_init, double *my_init, double *mz_init,
+    int nvoxels,
+    double *mx, double *my, double *mz,
+    int mode, int num_threads);
+
+/* Optimized version for grouped tissue types (fewer unique T1/T2 combinations) */
+void blochsim_heterogeneous_grouped(
+    double *b1real, double *b1imag,
+    double *gx, double *gy, double *gz, double *tsteps,
+    int ntime,
+    int *tissue_labels,
+    double *t1_per_label, double *t2_per_label,
+    int nlabels,
+    double *df_arr,
+    double *dx, double *dy, double *dz,
+    double *mx_init, double *my_init, double *mz_init,
+    int nvoxels,
+    double *mx, double *my, double *mz,
+    int mode, int num_threads);
+
 #endif /* BLOCH_CORE_H */

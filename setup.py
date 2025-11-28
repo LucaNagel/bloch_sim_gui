@@ -37,8 +37,8 @@ elif is_mac:
         extra_link_args = []
 else:
     # Linux with gcc
-    extra_compile_args = ['-fopenmp', '-O3', '-ffast-math', '-march=native']
-    extra_link_args = ['-fopenmp']
+    extra_compile_args = ['-fopenmp', '-O3', '-ffast-math']
+    extra_link_args = ['-fopenmp', '-lm']
 
 # Define the extension
 extensions = [
