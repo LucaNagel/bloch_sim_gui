@@ -50,19 +50,10 @@ from visualization_export import (
 try:
     from phantom import Phantom, PhantomFactory
     from phantom_widget import PhantomWidget
-    PHANTOM_AVAILABLE = False  # Disabled per user request
+    PHANTOM_AVAILABLE = True
 except ImportError:
     PHANTOM_AVAILABLE = False
     print("Phantom module not available - phantom tab will be disabled")
-
-# Import k-space simulation widget
-try:
-    from kspace_widget import KSpaceWidget
-    from kspace_simulator import KSpaceSimulator, EddyCurrentModel, EPIParameters, CSIParameters
-    KSPACE_AVAILABLE = False  # Disabled per user request
-except ImportError:
-    KSPACE_AVAILABLE = False
-    print("K-Space module not available - k-space tab will be disabled")
 
 
 class SimulationThread(QThread):
@@ -1972,403 +1963,9 @@ class MagnetizationViewer(QWidget):
         self._show_not_implemented_3d("Sequence animation")
 
 
-class ParameterSweepWidget(QWidget):
-    """Widget for running parameter sweeps (multiple simulations with varying parameters)."""
-
-    sweep_finished = pyqtSignal(dict)  # Emits results when sweep completes
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.parent_gui = parent
-        self.sweep_running = False
-        self.sweep_thread = None
-        self.init_ui()
-
-    def init_ui(self):
-        layout = QVBoxLayout()
-
-        # Title
-        title_label = QLabel("Parameter Sweep")
-        title_label.setFont(QFont("Arial", 14, QFont.Bold))
-        layout.addWidget(title_label)
-
-        # Info label
-        info_label = QLabel("Run multiple simulations by sweeping a parameter over a range.")
-        info_label.setWordWrap(True)
-        layout.addWidget(info_label)
-
-        # Parameter selection
-        param_group = QGroupBox("Sweep Parameter")
-        param_layout = QVBoxLayout()
-
-        param_sel_layout = QHBoxLayout()
-        param_sel_layout.addWidget(QLabel("Parameter:"))
-        self.param_combo = QComboBox()
-        self.param_combo.addItems([
-            "Flip Angle (deg)",
-            "TE (ms)",
-            "TR (ms)",
-            "TI (ms)",
-            "B1 Scale Factor",
-            "T1 (ms)",
-            "T2 (ms)",
-            "Frequency Offset (Hz)"
-        ])
-        self.param_combo.currentTextChanged.connect(self._update_range_limits)
-        param_sel_layout.addWidget(self.param_combo)
-        param_layout.addLayout(param_sel_layout)
-
-        # Range controls
-        range_layout = QHBoxLayout()
-        range_layout.addWidget(QLabel("Start:"))
-        self.start_spin = QDoubleSpinBox()
-        self.start_spin.setRange(-1e6, 1e6)
-        self.start_spin.setValue(30)
-        self.start_spin.setDecimals(2)
-        range_layout.addWidget(self.start_spin)
-
-        range_layout.addWidget(QLabel("End:"))
-        self.end_spin = QDoubleSpinBox()
-        self.end_spin.setRange(-1e6, 1e6)
-        self.end_spin.setValue(90)
-        self.end_spin.setDecimals(2)
-        range_layout.addWidget(self.end_spin)
-
-        range_layout.addWidget(QLabel("Steps:"))
-        self.steps_spin = QSpinBox()
-        self.steps_spin.setRange(2, 500)
-        self.steps_spin.setValue(13)
-        range_layout.addWidget(self.steps_spin)
-        param_layout.addLayout(range_layout)
-
-        param_group.setLayout(param_layout)
-        layout.addWidget(param_group)
-
-        # Output metric selection
-        metric_group = QGroupBox("Output Metrics to Track")
-        metric_layout = QVBoxLayout()
-        self.metric_checkboxes = {}
-        for metric in ["Final Mz (mean)", "Final Mxy (mean)", "Peak |Mxy|", "Signal Magnitude", "Signal Phase"]:
-            cb = QCheckBox(metric)
-            cb.setChecked(metric in ["Final Mz (mean)", "Signal Magnitude"])
-            self.metric_checkboxes[metric] = cb
-            metric_layout.addWidget(cb)
-        metric_group.setLayout(metric_layout)
-        layout.addWidget(metric_group)
-
-        # Control buttons
-        button_layout = QHBoxLayout()
-        self.run_button = QPushButton("Run Sweep")
-        self.run_button.clicked.connect(self.run_sweep)
-        button_layout.addWidget(self.run_button)
-
-        self.stop_button = QPushButton("Stop")
-        self.stop_button.setEnabled(False)
-        self.stop_button.clicked.connect(self.stop_sweep)
-        button_layout.addWidget(self.stop_button)
-
-        self.export_button = QPushButton("Export Results")
-        self.export_button.setEnabled(False)
-        self.export_button.clicked.connect(self.export_results)
-        button_layout.addWidget(self.export_button)
-
-        layout.addLayout(button_layout)
-
-        # Progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
-
-        # Results plot
-        self.results_plot = pg.PlotWidget()
-        self.results_plot.setLabel('left', 'Metric Value')
-        self.results_plot.setLabel('bottom', 'Parameter Value')
-        self.results_plot.setMinimumHeight(300)
-        self.results_plot.addLegend()
-        layout.addWidget(self.results_plot)
-
-        # Results table
-        self.results_table = QTableWidget()
-        self.results_table.setMaximumHeight(200)
-        layout.addWidget(self.results_table)
-
-        layout.addStretch()
-        self.setLayout(layout)
-
-        # Initialize range limits
-        self._update_range_limits()
-
-        # Storage for results
-        self.last_sweep_results = None
-
-    def _update_range_limits(self):
-        """Update spin box ranges based on selected parameter."""
-        param = self.param_combo.currentText()
-
-        if "Flip Angle" in param:
-            self.start_spin.setRange(0, 180)
-            self.start_spin.setValue(30)
-            self.end_spin.setRange(0, 180)
-            self.end_spin.setValue(90)
-        elif "TE" in param or "TR" in param or "TI" in param:
-            self.start_spin.setRange(0.1, 10000)
-            self.start_spin.setValue(10)
-            self.end_spin.setRange(0.1, 10000)
-            self.end_spin.setValue(100)
-        elif "B1 Scale" in param:
-            self.start_spin.setRange(0, 5)
-            self.start_spin.setValue(0.5)
-            self.start_spin.setDecimals(3)
-            self.end_spin.setRange(0, 5)
-            self.end_spin.setValue(1.5)
-            self.end_spin.setDecimals(3)
-        elif "T1" in param:
-            self.start_spin.setRange(1, 5000)
-            self.start_spin.setValue(500)
-            self.end_spin.setRange(1, 5000)
-            self.end_spin.setValue(2000)
-        elif "T2" in param:
-            self.start_spin.setRange(1, 2000)
-            self.start_spin.setValue(20)
-            self.end_spin.setRange(1, 2000)
-            self.end_spin.setValue(100)
-        elif "Frequency" in param:
-            self.start_spin.setRange(-10000, 10000)
-            self.start_spin.setValue(-500)
-            self.end_spin.setRange(-10000, 10000)
-            self.end_spin.setValue(500)
-
-    def run_sweep(self):
-        """Run parameter sweep."""
-        if not self.parent_gui:
-            QMessageBox.warning(self, "Error", "No parent GUI available.")
-            return
-
-        self.sweep_running = True
-        self.run_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
-        self.progress_bar.setValue(0)
-
-        # Get sweep parameters
-        param_name = self.param_combo.currentText()
-        start_val = self.start_spin.value()
-        end_val = self.end_spin.value()
-        n_steps = self.steps_spin.value()
-
-        # Create parameter array
-        param_values = np.linspace(start_val, end_val, n_steps)
-
-        # Get selected metrics
-        selected_metrics = [name for name, cb in self.metric_checkboxes.items() if cb.isChecked()]
-        if not selected_metrics:
-            QMessageBox.warning(self, "No Metrics", "Please select at least one output metric.")
-            self.sweep_running = False
-            self.run_button.setEnabled(True)
-            self.stop_button.setEnabled(False)
-            return
-
-        # Run sweep
-        results = {
-            'parameter_name': param_name,
-            'parameter_values': param_values,
-            'metrics': {metric: [] for metric in selected_metrics}
-        }
-
-        # Store initial values for parameters that need them (like B1 scale)
-        initial_flip_angle = self.parent_gui.rf_designer.flip_angle.value()
-
-        for i, param_val in enumerate(param_values):
-            if not self.sweep_running:
-                break
-
-            # Update parameter
-            self._apply_parameter_value(param_name, param_val, initial_flip_angle)
-
-            # Run simulation
-            try:
-                self.parent_gui.run_simulation()
-
-                # Wait for simulation to complete (simple polling)
-                while self.parent_gui.simulation_thread and self.parent_gui.simulation_thread.isRunning():
-                    QApplication.processEvents()
-                    time.sleep(0.1)
-
-                # Extract metrics from results
-                if self.parent_gui.last_result:
-                    for metric in selected_metrics:
-                        value = self._extract_metric(metric, self.parent_gui.last_result)
-                        results['metrics'][metric].append(value)
-                else:
-                    # No result - append NaN to maintain array length
-                    for metric in selected_metrics:
-                        results['metrics'][metric].append(float('nan'))
-                    self.parent_gui.log_message(f"Warning: No result for {param_name}={param_val:.2f}")
-            except Exception as e:
-                import traceback
-                error_msg = f"Error at {param_name}={param_val:.2f}: {str(e)}\n{traceback.format_exc()}"
-                self.parent_gui.log_message(error_msg)
-                QMessageBox.warning(self, "Simulation Error", f"Error at {param_name}={param_val:.2f}: {str(e)}")
-                break
-
-            # Update progress
-            self.progress_bar.setValue(int((i + 1) / n_steps * 100))
-
-        # Store and display results
-        self.last_sweep_results = results
-        self._display_results(results)
-
-        self.sweep_running = False
-        self.run_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
-        self.export_button.setEnabled(True)
-
-    def stop_sweep(self):
-        """Stop the parameter sweep."""
-        self.sweep_running = False
-        self.run_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
-
-    def _apply_parameter_value(self, param_name, value, initial_flip_angle=None):
-        """Apply parameter value to the GUI controls."""
-        if "Flip Angle" in param_name:
-            self.parent_gui.rf_designer.flip_angle.setValue(value)
-        elif "TE" in param_name:
-            self.parent_gui.sequence_designer.te_spin.setValue(value)
-        elif "TR" in param_name:
-            self.parent_gui.sequence_designer.tr_spin.setValue(value)
-        elif "TI" in param_name:
-            self.parent_gui.sequence_designer.ti_spin.setValue(value)
-        elif "B1 Scale" in param_name:
-            # Scale the initial flip angle (not current, to avoid cumulative scaling)
-            if initial_flip_angle is not None:
-                self.parent_gui.rf_designer.flip_angle.setValue(initial_flip_angle * value)
-            else:
-                # Fallback if not provided
-                self.parent_gui.rf_designer.flip_angle.setValue(90 * value)
-        elif "T1" in param_name:
-            self.parent_gui.tissue_widget.t1_spin.setValue(value)
-        elif "T2" in param_name:
-            self.parent_gui.tissue_widget.t2_spin.setValue(value)
-        elif "Frequency" in param_name:
-            # Set single frequency offset
-            self.parent_gui.freq_range.setValue(0)
-            self.parent_gui.freq_center.setValue(value)
-
-    def _extract_metric(self, metric_name, result):
-        """Extract metric value from simulation result."""
-        try:
-            if "Final Mz" in metric_name:
-                mz = result.get('mz')
-                if mz is not None:
-                    # Handle different array shapes
-                    if mz.ndim == 3:  # (ntime, npos, nfreq)
-                        return float(np.mean(mz[-1, :, :]))
-                    elif mz.ndim == 2:  # (npos, nfreq) - endpoint mode
-                        return float(np.mean(mz))
-                    else:  # 1D or scalar
-                        return float(np.mean(mz))
-            elif "Final Mxy" in metric_name:
-                mx = result.get('mx')
-                my = result.get('my')
-                if mx is not None and my is not None:
-                    if mx.ndim == 3:  # Time-resolved
-                        mx_final = mx[-1, :, :]
-                        my_final = my[-1, :, :]
-                    else:  # Endpoint mode
-                        mx_final = mx
-                        my_final = my
-                    mxy = np.sqrt(mx_final**2 + my_final**2)
-                    return float(np.mean(mxy))
-            elif "Peak |Mxy|" in metric_name:
-                mx = result.get('mx')
-                my = result.get('my')
-                if mx is not None and my is not None:
-                    mxy = np.sqrt(mx**2 + my**2)
-                    return float(np.max(mxy))
-            elif "Signal Magnitude" in metric_name:
-                signal = result.get('signal')
-                if signal is not None:
-                    return float(np.mean(np.abs(signal)))
-            elif "Signal Phase" in metric_name:
-                signal = result.get('signal')
-                if signal is not None:
-                    # Use angle in degrees for better readability
-                    return float(np.mean(np.angle(signal, deg=True)))
-        except Exception as e:
-            if self.parent_gui:
-                self.parent_gui.log_message(f"Error extracting metric '{metric_name}': {str(e)}")
-            return float('nan')
-        return 0.0
-
-    def _display_results(self, results):
-        """Display sweep results in plot and table."""
-        self.results_plot.clear()
-
-        param_values = results['parameter_values']
-        param_name = results['parameter_name']
-
-        # Plot each metric
-        colors = ['r', 'g', 'b', 'y', 'm']
-        for i, (metric, values) in enumerate(results['metrics'].items()):
-            if len(values) == len(param_values):
-                color = colors[i % len(colors)]
-                self.results_plot.plot(param_values, values, pen=pg.mkPen(color, width=2),
-                                        symbol='o', symbolBrush=color, name=metric)
-
-        self.results_plot.setLabel('bottom', param_name)
-
-        # Update table
-        metrics = list(results['metrics'].keys())
-        self.results_table.setRowCount(len(param_values))
-        self.results_table.setColumnCount(1 + len(metrics))
-        self.results_table.setHorizontalHeaderLabels([param_name] + metrics)
-
-        for row, param_val in enumerate(param_values):
-            self.results_table.setItem(row, 0, QTableWidgetItem(f"{param_val:.3f}"))
-            for col, metric in enumerate(metrics):
-                if row < len(results['metrics'][metric]):
-                    value = results['metrics'][metric][row]
-                    self.results_table.setItem(row, col + 1, QTableWidgetItem(f"{value:.6f}"))
-
-        self.results_table.resizeColumnsToContents()
-
-    def export_results(self):
-        """Export sweep results to CSV."""
-        if not self.last_sweep_results:
-            QMessageBox.warning(self, "No Results", "No sweep results to export.")
-            return
-
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Export Sweep Results", "", "CSV Files (*.csv);;All Files (*)"
-        )
-        if not filename:
-            return
-
-        # Write CSV
-        with open(filename, 'w') as f:
-            results = self.last_sweep_results
-            param_name = results['parameter_name']
-            metrics = list(results['metrics'].keys())
-
-            # Header
-            f.write(f"{param_name}," + ",".join(metrics) + "\n")
-
-            # Data rows
-            for i, param_val in enumerate(results['parameter_values']):
-                row = [f"{param_val:.6f}"]
-                for metric in metrics:
-                    if i < len(results['metrics'][metric]):
-                        row.append(f"{results['metrics'][metric][i]:.6f}")
-                    else:
-                        row.append("")
-                f.write(",".join(row) + "\n")
-
-        QMessageBox.information(self, "Export Complete", f"Results exported to:\n{filename}")
-
-
 class BlochSimulatorGUI(QMainWindow):
     """Main GUI window for the Bloch simulator."""
-
+    
     def __init__(self):
         super().__init__()
         self.simulator = BlochSimulator(use_parallel=True, num_threads=4)
@@ -2529,18 +2126,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.spectrum_range.setSingleStep(500)
         spec_layout.addWidget(self.spectrum_range)
         control_layout.addLayout(spec_layout)
-
-        # Max traces control for performance
-        max_traces_layout = QHBoxLayout()
-        max_traces_layout.addWidget(QLabel("Max plot traces:"))
-        self.max_traces_spin = QSpinBox()
-        self.max_traces_spin.setRange(1, 500)
-        self.max_traces_spin.setValue(50)
-        self.max_traces_spin.setSingleStep(5)
-        self.max_traces_spin.setToolTip("Maximum number of individual traces to plot (for performance)")
-        max_traces_layout.addWidget(self.max_traces_spin)
-        control_layout.addLayout(max_traces_layout)
-
+        
         control_group.setLayout(control_layout)
         left_layout.addWidget(control_group)
         
@@ -2848,38 +2434,6 @@ class BlochSimulatorGUI(QMainWindow):
         else:
             self.phantom_widget = None
 
-        # === K-SPACE TAB (Signal-based simulation) ===
-        if KSPACE_AVAILABLE:
-            def get_phantom_for_kspace():
-                """Get current phantom from PhantomWidget."""
-                if self.phantom_widget is not None:
-                    if hasattr(self.phantom_widget, 'creator'):
-                        return self.phantom_widget.creator.current_phantom
-                return None
-            
-            def get_magnetization_for_kspace():
-                """Get magnetization from last Bloch simulation."""
-                if self.last_result is not None:
-                    return {
-                        'mx': self.last_result.get('mx'),
-                        'my': self.last_result.get('my'),
-                        'mz': self.last_result.get('mz'),
-                    }
-                return None
-            
-            self.kspace_widget = KSpaceWidget(
-                self,
-                get_phantom_callback=get_phantom_for_kspace,
-                get_magnetization_callback=get_magnetization_for_kspace
-            )
-            self.tab_widget.addTab(self.kspace_widget, "📡 K-Space")
-        else:
-            self.kspace_widget = None
-
-        # === PARAMETER SWEEP TAB ===
-        self.param_sweep_widget = ParameterSweepWidget(self)
-        self.tab_widget.addTab(self.param_sweep_widget, "📊 Parameter Sweep")
-
         # Add time cursor lines to spatial plots for synchronization
         self.spatial_mxy_time_line = pg.InfiniteLine(angle=90, pen=pg.mkPen('y', width=2))
         self.spatial_mxy_time_line.hide()
@@ -2939,43 +2493,6 @@ class BlochSimulatorGUI(QMainWindow):
     def _color_for_index(self, idx: int, total: int):
         """Consistent color cycling for multiple frequencies."""
         return pg.intColor(idx, hues=max(total, 1), values=1.0, maxValue=255)
-
-    def _get_trace_indices_to_plot(self, total_traces: int) -> list:
-        """
-        Get indices of traces to plot, respecting max_traces limit.
-
-        Returns evenly-spaced subset if total exceeds limit, otherwise all indices.
-        Always includes first and last trace for boundary visualization.
-
-        Parameters
-        ----------
-        total_traces : int
-            Total number of available traces
-
-        Returns
-        -------
-        list of int
-            Indices to plot
-        """
-        max_traces = self.max_traces_spin.value()
-
-        if total_traces <= max_traces:
-            return list(range(total_traces))
-
-        # Always include first and last
-        if max_traces == 1:
-            return [0]
-        if max_traces == 2:
-            return [0, total_traces - 1]
-
-        # Evenly space the rest
-        step = (total_traces - 1) / (max_traces - 1)
-        indices = [0]
-        for i in range(1, max_traces - 1):
-            indices.append(int(round(i * step)))
-        indices.append(total_traces - 1)
-
-        return sorted(list(set(indices)))  # Remove duplicates and sort
 
     def _safe_clear_plot(self, plot_widget, persistent_items=None):
         """
@@ -3616,33 +3133,16 @@ class BlochSimulatorGUI(QMainWindow):
                 # Determine what we're marking: frequencies or positions
                 nfreq = mx_display.shape[1] if mx_display.ndim == 2 else 1
                 npos = len(position)
-                max_markers = min(self.max_traces_spin.value(), 50)  # Limit for spatial markers
 
                 # Show markers based on current mode
                 if spatial_mode in ("Mean + individuals", "Individual (select freq)") and nfreq > 1:
-                    # Downsample which frequencies to mark
-                    if nfreq <= max_markers:
-                        freq_indices_to_mark = list(range(nfreq))
-                    else:
-                        step = nfreq / max_markers
-                        freq_indices_to_mark = [int(i * step) for i in range(max_markers)]
-
-                    # Mark selected frequencies with colored stem plots
-                    for fi in freq_indices_to_mark:
+                    # Mark each frequency with colored stem plots
+                    for fi in range(nfreq):
                         color = self._color_for_index(fi, nfreq)
                         mxy_val = np.sqrt(mx_display[:, fi]**2 + my_display[:, fi]**2) if mx_display.ndim == 2 else mxy
                         mz_val = mz_display[:, fi] if mz_display.ndim == 2 else mz_pos
-
-                        # Downsample position points to draw stems at
-                        if npos <= max_markers:
-                            pos_indices_to_mark = list(range(npos))
-                        else:
-                            step_pos = npos / max_markers
-                            pos_indices_to_mark = [int(i * step_pos) for i in range(max_markers)]
-
-                        # Draw stem lines from 0 to current value at selected positions
-                        for pi in pos_indices_to_mark:
-                            pos_val = position[pi]
+                        # Draw stem lines from 0 to current value at each position
+                        for pi, pos_val in enumerate(position):
                             # Mxy markers
                             line_mxy = pg.PlotCurveItem([pos_val, pos_val], [0, mxy_val[pi]],
                                                          pen=pg.mkPen(color, width=1.5))
@@ -4117,21 +3617,14 @@ class BlochSimulatorGUI(QMainWindow):
                     mean_my = np.mean(my_all[:, pi, :], axis=1)
                 else:
                     total_series = npos * nfreq
-                    indices_to_plot = self._get_trace_indices_to_plot(total_series)
-                    self._reset_legend(self.mxy_plot, "mxy_legend", len(indices_to_plot) > 1)
-
-                    # Log performance optimization if downsampling
-                    if len(indices_to_plot) < total_series:
-                        self.log_message(f"Performance: Plotting {len(indices_to_plot)}/{total_series} traces (limit: {self.max_traces_spin.value()})")
-
-                    # Plot only selected subset
-                    for plot_idx, linear_idx in enumerate(indices_to_plot):
-                        pi = linear_idx // nfreq
-                        fi = linear_idx % nfreq
-                        color = self._color_for_index(linear_idx, total_series)
-                        self.mxy_plot.plot(time, mx_all[:, pi, fi], pen=pg.mkPen(color, width=2), name=f"p{pi} f{fi} Mx")
-                        self.mxy_plot.plot(time, my_all[:, pi, fi], pen=pg.mkPen(color, style=Qt.DashLine, width=2), name=f"p{pi} f{fi} My")
-
+                    self._reset_legend(self.mxy_plot, "mxy_legend", total_series > 1)
+                    idx = 0
+                    for pi in range(npos):
+                        for fi in range(nfreq):
+                            color = self._color_for_index(idx, total_series)
+                            self.mxy_plot.plot(time, mx_all[:, pi, fi], pen=pg.mkPen(color, width=2), name=f"p{pi} f{fi} Mx")
+                            self.mxy_plot.plot(time, my_all[:, pi, fi], pen=pg.mkPen(color, style=Qt.DashLine, width=2), name=f"p{pi} f{fi} My")
+                            idx += 1
                     mean_mx = np.mean(mx_all, axis=(1, 2))
                     mean_my = np.mean(my_all, axis=(1, 2))
                 self.mxy_plot.plot(time, mean_mx, pen=pg.mkPen('c', width=4), name="Mean Mx")
@@ -4171,15 +3664,13 @@ class BlochSimulatorGUI(QMainWindow):
                         self.mz_plot.plot(time, mz_all[:, pi, fi], pen=pg.mkPen(color, width=2), name=f"f{fi} Mz @ p{pi}")
                     mean_mz = np.mean(mz_all[:, pi, :], axis=1)
                 else:
-                    # Use same downsampled indices from Mxy plot
-                    self._reset_legend(self.mz_plot, "mz_legend", len(indices_to_plot) > 1)
-
-                    for plot_idx, linear_idx in enumerate(indices_to_plot):
-                        pi = linear_idx // nfreq
-                        fi = linear_idx % nfreq
-                        color = self._color_for_index(linear_idx, total_series)
-                        self.mz_plot.plot(time, mz_all[:, pi, fi], pen=pg.mkPen(color, width=2), name=f"p{pi} f{fi} Mz")
-
+                    self._reset_legend(self.mz_plot, "mz_legend", total_series > 1)
+                    idx = 0
+                    for pi in range(npos):
+                        for fi in range(nfreq):
+                            color = self._color_for_index(idx, total_series)
+                            self.mz_plot.plot(time, mz_all[:, pi, fi], pen=pg.mkPen(color, width=2), name=f"p{pi} f{fi} Mz")
+                            idx += 1
                     mean_mz = np.mean(mz_all, axis=(1, 2))
                 self.mz_plot.plot(time, mean_mz, pen=pg.mkPen('c', width=4), name="Mean Mz")
             self._apply_pulse_region(self.mz_plot, "mz_region")
@@ -4218,18 +3709,15 @@ class BlochSimulatorGUI(QMainWindow):
                 self.signal_plot.plot(time, np.abs(mean_sig), pen=pg.mkPen('c', width=4), name='|S| mean')
             else:
                 total_series_sig = signal.shape[1] * signal.shape[2]
-                indices_to_plot_sig = self._get_trace_indices_to_plot(total_series_sig)
-                self._reset_legend(self.signal_plot, "signal_legend", len(indices_to_plot_sig) > 1)
-
-                # Plot only selected subset (3 lines each: magnitude, real, imaginary)
-                for plot_idx, linear_idx in enumerate(indices_to_plot_sig):
-                    pi = linear_idx // signal.shape[2]
-                    fi = linear_idx % signal.shape[2]
-                    color = self._color_for_index(linear_idx, total_series_sig)
-                    self.signal_plot.plot(time, np.abs(signal[:, pi, fi]), pen=color, name=f'|S| p{pi} f{fi}')
-                    self.signal_plot.plot(time, np.real(signal[:, pi, fi]), pen=pg.mkPen(color, style=Qt.DashLine), name=f'Re p{pi} f{fi}')
-                    self.signal_plot.plot(time, np.imag(signal[:, pi, fi]), pen=pg.mkPen(color, style=Qt.DotLine), name=f'Im p{pi} f{fi}')
-
+                self._reset_legend(self.signal_plot, "signal_legend", total_series_sig > 1)
+                idx = 0
+                for pi in range(signal.shape[1]):
+                    for fi in range(signal.shape[2]):
+                        color = self._color_for_index(idx, total_series_sig)
+                        self.signal_plot.plot(time, np.abs(signal[:, pi, fi]), pen=color, name=f'|S| p{pi} f{fi}')
+                        self.signal_plot.plot(time, np.real(signal[:, pi, fi]), pen=pg.mkPen(color, style=Qt.DashLine), name=f'Re p{pi} f{fi}')
+                        self.signal_plot.plot(time, np.imag(signal[:, pi, fi]), pen=pg.mkPen(color, style=Qt.DotLine), name=f'Im p{pi} f{fi}')
+                        idx += 1
                 mean_sig = np.mean(signal, axis=(1, 2))
                 self.signal_plot.plot(time, np.abs(mean_sig), pen=pg.mkPen('c', width=4), name='|S| mean')
             self._apply_pulse_region(self.signal_plot, "signal_region")
@@ -4929,23 +4417,10 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Add colored vertical markers if enabled
         if self.spectrum_markers_checkbox.isChecked() and len(freq) > 1:
-            # Draw vertical lines at selected frequency points (downsampled for performance)
+            # Draw vertical lines at each frequency with colors matching 3D view
             mag = np.abs(spectrum)
-            total_freq_points = len(freq)
-            max_markers = min(self.max_traces_spin.value(), 100)  # Limit markers for spectrum
-
-            # Downsample which frequency points to mark
-            if total_freq_points <= max_markers:
-                marker_indices = list(range(total_freq_points))
-            else:
-                # Evenly spaced markers
-                step = total_freq_points / max_markers
-                marker_indices = [int(i * step) for i in range(max_markers)]
-
-            for idx in marker_indices:
-                f = freq[idx]
-                m = mag[idx]
-                color = self._color_for_index(idx, total_freq_points)
+            for i, (f, m) in enumerate(zip(freq, mag)):
+                color = self._color_for_index(i, len(freq))
                 # Vertical line from 0 to magnitude
                 line = pg.PlotCurveItem([f, f], [0, m], pen=pg.mkPen(color, width=2))
                 self.spectrum_plot.addItem(line)
