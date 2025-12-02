@@ -283,7 +283,7 @@ class RFPulseDesigner(QGroupBox):
         type_layout = QHBoxLayout()
         type_layout.addWidget(QLabel("Pulse Type:"))
         self.pulse_type = QComboBox()
-        self.pulse_type.addItems(["Rectangle", "Sinc", "Gaussian", "Hermite", "Custom"])
+        self.pulse_type.addItems(["Rectangle", "Sinc", "Gaussian", "Hermite", "Adiabatic Half Passage", "Adiabatic Full Passage", "BIR-4", "Custom"])
         self.pulse_type.currentTextChanged.connect(self.update_pulse)
         type_layout.addWidget(self.pulse_type)
         layout.addLayout(type_layout)
@@ -292,7 +292,7 @@ class RFPulseDesigner(QGroupBox):
         flip_layout = QHBoxLayout()
         flip_layout.addWidget(QLabel("Flip Angle (°):"))
         self.flip_angle = QDoubleSpinBox()
-        self.flip_angle.setRange(0, 180)
+        self.flip_angle.setRange(0, 1e4)
         self.flip_angle.setValue(90)
         self.flip_angle.valueChanged.connect(self.update_pulse)
         flip_layout.addWidget(self.flip_angle)
@@ -329,7 +329,19 @@ class RFPulseDesigner(QGroupBox):
         self.phase.valueChanged.connect(self.update_pulse)
         phase_layout.addWidget(self.phase)
         layout.addLayout(phase_layout)
-        
+
+        # RF Frequency Offset
+        freq_offset_layout = QHBoxLayout()
+        freq_offset_layout.addWidget(QLabel("RF Frequency Offset (Hz):"))
+        self.freq_offset = QDoubleSpinBox()
+        self.freq_offset.setRange(-10000, 10000)
+        self.freq_offset.setValue(0.0)
+        self.freq_offset.setSingleStep(10)
+        self.freq_offset.setDecimals(1)
+        self.freq_offset.valueChanged.connect(self.update_pulse)
+        freq_offset_layout.addWidget(self.freq_offset)
+        layout.addLayout(freq_offset_layout)
+
         # Plot widget
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setLabel('left', 'B1 Amplitude', 'G')
@@ -399,6 +411,12 @@ class RFPulseDesigner(QGroupBox):
         pulse_type = self.pulse_type.currentText().lower()
         if pulse_type == 'rectangle':
             pulse_type = 'rect'
+        elif pulse_type == 'adiabatic half passage':
+            pulse_type = 'adiabatic_half'
+        elif pulse_type == 'adiabatic full passage':
+            pulse_type = 'adiabatic_full'
+        elif pulse_type == 'bir-4':
+            pulse_type = 'bir4'
         elif pulse_type == 'custom':
             # For custom pulses, trigger reprocessing if data is loaded
             if self.loaded_pulse_b1 is not None:
@@ -420,7 +438,8 @@ class RFPulseDesigner(QGroupBox):
             npoints = 100
         
         # Design pulse
-        b1, time = design_rf_pulse(pulse_type, duration, flip, tbw, npoints)
+        freq_offset_hz = self.freq_offset.value()
+        b1, time = design_rf_pulse(pulse_type, duration, flip, tbw, npoints, freq_offset=freq_offset_hz)
         # Sampling time [s]
         dt = duration / len(b1)
 
@@ -901,12 +920,12 @@ class SequenceDesigner(QGroupBox):
                 "tr_ms": 100
             },
             "Spin Echo": {
-                "te_ms": 20,
-                "tr_ms": 500
+                "te_ms": 10,
+                "tr_ms": 100
             },
             "Spin Echo (Tip-axis 180)": {
-                "te_ms": 20,
-                "tr_ms": 500
+                "te_ms": 10,
+                "tr_ms": 100
             },
             "Gradient Echo": {
                 "te_ms": 5,
@@ -933,8 +952,8 @@ class SequenceDesigner(QGroupBox):
             },
             "Inversion Recovery": {
                 "te_ms": 20,
-                "tr_ms": 2000,
-                "ti_ms": 400
+                "tr_ms": 100,
+                "ti_ms": 40
             },
             "FLASH": {
                 "te_ms": 3,
@@ -943,7 +962,7 @@ class SequenceDesigner(QGroupBox):
             },
             "EPI": {
                 "te_ms": 30,
-                "tr_ms": 3000
+                "tr_ms": 100
             },
             "Custom": {
                 "te_ms": 10,
@@ -975,6 +994,8 @@ class SequenceDesigner(QGroupBox):
             return (b1, gradients, time)
         
         if seq_type == "Spin Echo":
+            # Get RF frequency offset from RF designer
+            rf_freq_offset = self.parent_gui.rf_designer.freq_offset.value() if hasattr(self, 'parent_gui') and hasattr(self.parent_gui, 'rf_designer') else 0.0
             return SpinEcho(
                 te=te,
                 tr=tr,
@@ -982,6 +1003,7 @@ class SequenceDesigner(QGroupBox):
                 slice_thickness=self._slice_thickness_m(),
                 slice_gradient_override=self._slice_gradient_override(),
                 echo_count=self.spin_echo_echoes.value(),
+                rf_freq_offset=rf_freq_offset,
             )
         elif seq_type == "Spin Echo (Tip-axis 180)":
             return SpinEchoTipAxis(
@@ -993,6 +1015,8 @@ class SequenceDesigner(QGroupBox):
                 echo_count=self.spin_echo_echoes.value(),
             )
         elif seq_type == "Gradient Echo":
+            # Get RF frequency offset from RF designer
+            rf_freq_offset = self.parent_gui.rf_designer.freq_offset.value() if hasattr(self, 'parent_gui') and hasattr(self.parent_gui, 'rf_designer') else 0.0
             return GradientEcho(
                 te=te,
                 tr=tr,
@@ -1000,6 +1024,7 @@ class SequenceDesigner(QGroupBox):
                 custom_excitation=custom_pulse,
                 slice_thickness=self._slice_thickness_m(),
                 slice_gradient_override=self._slice_gradient_override(),
+                rf_freq_offset=rf_freq_offset,
             )
         elif seq_type == "Slice Select + Rephase":
             # Use a shorter rephase duration but preserve half-area rewind
@@ -1812,20 +1837,8 @@ class MagnetizationViewer(QWidget):
                 self.playhead_line.setValue(self.preview_time[idx])
             except Exception:
                 pass
-        # Move time cursors on plots
-        try:
-            tval = float(self.preview_time[idx])
-            for line in (self.mxy_time_line, self.mz_time_line, self.signal_time_line):
-                if line is not None:
-                    line.show()
-                    line.setValue(tval)
-            # Also update spatial time lines if they exist
-            for line in (getattr(self, 'spatial_mxy_time_line', None), getattr(self, 'spatial_mz_time_line', None)):
-                if line is not None:
-                    line.show()
-                    line.setValue(tval)
-        except Exception:
-            pass
+        # Time cursor lines removed for performance
+        pass
 
     def _on_view_mode_changed(self, *args):
         self._update_selector_range()
@@ -2416,7 +2429,17 @@ class BlochSimulatorGUI(QMainWindow):
         self._last_spatial_export = None
         self._last_spectrum_export = None
         self.dataset_exporter = DatasetExporter()
-        
+
+        # Dirty flags for expensive computations during animation
+        self._spectrum_needs_update = False
+        self._spatial_needs_update = False
+
+        # Cache for persistent plot items (avoids clear+replot cycle)
+        self._mxy_plot_items = {}  # key: (pi, fi, component) -> PlotDataItem
+        self._mz_plot_items = {}   # key: (pi, fi) -> PlotDataItem
+        self._signal_plot_items = {} # key: (pi, fi, component) -> PlotDataItem
+        self._plot_items_initialized = False
+
         # Create central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -2607,6 +2630,21 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Magnetization view filter controls (align with 3D view options)
         mag_view_layout = QHBoxLayout()
+
+        # Add plot type selector (Line vs Heatmap) - default to Heatmap
+        mag_view_layout.addWidget(QLabel("Plot type:"))
+        self.mag_plot_type = QComboBox()
+        self.mag_plot_type.addItems(["Heatmap", "Line"])
+        self.mag_plot_type.currentTextChanged.connect(lambda _: self._refresh_mag_plots())
+        mag_view_layout.addWidget(self.mag_plot_type)
+
+        # Add component selector for heatmap
+        mag_view_layout.addWidget(QLabel("Component:"))
+        self.mag_component = QComboBox()
+        self.mag_component.addItems(["Magnitude", "Real (Mx/Re)", "Imaginary (My/Im)", "Phase", "Mz"])
+        self.mag_component.currentTextChanged.connect(lambda _: self._refresh_mag_plots())
+        mag_view_layout.addWidget(self.mag_component)
+
         mag_view_layout.addWidget(QLabel("View mode:"))
         self.mag_view_mode = QComboBox()
         self.mag_view_mode.addItems([
@@ -2625,31 +2663,51 @@ class BlochSimulatorGUI(QMainWindow):
         mag_view_layout.addWidget(self.mag_view_selector)
         mag_layout.addLayout(mag_view_layout)
 
+        # Create both line plot and heatmap widgets, but only show one at a time
         self.mxy_plot = pg.PlotWidget()
         self.mxy_plot.setLabel('left', 'Mx / My')
         self.mxy_plot.setLabel('bottom', 'Time', 'ms')
-        self.mxy_time_line = pg.InfiniteLine(angle=90, pen=pg.mkPen('y', width=3))
-        self.mxy_time_line.hide()
-        self.mxy_plot.addItem(self.mxy_time_line)
-        
+        self.mxy_plot.hide()  # Hide by default (heatmap is default)
+
         self.mz_plot = pg.PlotWidget()
         self.mz_plot.setLabel('left', 'Mz')
         self.mz_plot.setLabel('bottom', 'Time', 'ms')
-        self.mz_time_line = pg.InfiniteLine(angle=90, pen=pg.mkPen('y', width=3))
-        self.mz_time_line.hide()
-        self.mz_plot.addItem(self.mz_time_line)
+        self.mz_plot.hide()  # Hide by default (heatmap is default)
+
+        # Create heatmap widgets
+        self.mxy_heatmap = pg.PlotWidget()
+        self.mxy_heatmap.setLabel('left', 'Position / Frequency Index')
+        self.mxy_heatmap.setLabel('bottom', 'Time', 'ms')
+        self.mxy_heatmap_item = pg.ImageItem()
+        self.mxy_heatmap.addItem(self.mxy_heatmap_item)
+        self.mxy_heatmap_colorbar = pg.ColorBarItem(values=(0, 1), colorMap='viridis')
+        self.mxy_heatmap_colorbar.setImageItem(self.mxy_heatmap_item)
+        # Show by default (heatmap is default view)
+
+        self.mz_heatmap = pg.PlotWidget()
+        self.mz_heatmap.setLabel('left', 'Position / Frequency Index')
+        self.mz_heatmap.setLabel('bottom', 'Time', 'ms')
+        self.mz_heatmap_item = pg.ImageItem()
+        self.mz_heatmap.addItem(self.mz_heatmap_item)
+        self.mz_heatmap_colorbar = pg.ColorBarItem(values=(0, 1), colorMap='viridis')
+        self.mz_heatmap_colorbar.setImageItem(self.mz_heatmap_item)
+        # Show by default (heatmap is default view)
 
         # Allow resizing between stacked plots so lower plots stay visible
         mag_splitter = QSplitter(Qt.Vertical)
         mag_splitter.addWidget(self.mxy_plot)
         mag_splitter.addWidget(self.mz_plot)
+        mag_splitter.addWidget(self.mxy_heatmap)
+        mag_splitter.addWidget(self.mz_heatmap)
         mag_splitter.setStretchFactor(0, 1)
         mag_splitter.setStretchFactor(1, 1)
+        mag_splitter.setStretchFactor(2, 1)
+        mag_splitter.setStretchFactor(3, 1)
         mag_layout.addWidget(mag_splitter)
 
         # Keep consistent ranges; disable autorange so manual ranges stick
         # (signal_plot is created below; set its autorange off immediately after creation)
-        for plt in (self.mxy_plot, self.mz_plot):
+        for plt in (self.mxy_plot, self.mz_plot, self.mxy_heatmap, self.mz_heatmap):
             plt.enableAutoRange(x=False, y=False)
         
         self.tab_widget.addTab(mag_widget, "Magnetization")
@@ -2694,21 +2752,63 @@ class BlochSimulatorGUI(QMainWindow):
         signal_header.addWidget(signal_export_btn)
         signal_layout.addLayout(signal_header)
 
+        # Add signal view controls - default to Heatmap
+        signal_view_layout = QHBoxLayout()
+        signal_view_layout.addWidget(QLabel("Plot type:"))
+        self.signal_plot_type = QComboBox()
+        self.signal_plot_type.addItems(["Heatmap", "Line"])
+        self.signal_plot_type.currentTextChanged.connect(lambda _: self._refresh_signal_plots())
+        signal_view_layout.addWidget(self.signal_plot_type)
+
+        # Add component selector for signal heatmap
+        signal_view_layout.addWidget(QLabel("Component:"))
+        self.signal_component = QComboBox()
+        self.signal_component.addItems(["Magnitude", "Real", "Imaginary", "Phase"])
+        self.signal_component.currentTextChanged.connect(lambda _: self._refresh_signal_plots())
+        signal_view_layout.addWidget(self.signal_component)
+
+        signal_view_layout.addWidget(QLabel("View mode:"))
+        self.signal_view_mode = QComboBox()
+        self.signal_view_mode.addItems([
+            "All positions x freqs",
+            "Positions @ freq",
+            "Freqs @ position"
+        ])
+        self.signal_view_mode.currentTextChanged.connect(lambda _: self._refresh_signal_plots())
+        signal_view_layout.addWidget(self.signal_view_mode)
+        self.signal_view_selector_label = QLabel("All spins")
+        signal_view_layout.addWidget(self.signal_view_selector_label)
+        self.signal_view_selector = QSlider(Qt.Horizontal)
+        self.signal_view_selector.setRange(0, 0)
+        self.signal_view_selector.setValue(0)
+        self.signal_view_selector.valueChanged.connect(lambda _: self._refresh_signal_plots())
+        signal_view_layout.addWidget(self.signal_view_selector)
+        signal_layout.addLayout(signal_view_layout)
+
+        # Create line plot
         self.signal_plot = pg.PlotWidget()
         self.signal_plot.setLabel('left', 'Signal')
         self.signal_plot.setLabel('bottom', 'Time', 'ms')
         self.signal_plot.enableAutoRange(x=False, y=False)
-        self.signal_time_line = pg.InfiniteLine(angle=90, pen=pg.mkPen('y', width=3))
-        self.signal_time_line.hide()
-        self.signal_plot.addItem(self.signal_time_line)
+        self.signal_plot.hide()  # Hide by default (heatmap is default)
+
+        # Create heatmap
+        self.signal_heatmap = pg.PlotWidget()
+        self.signal_heatmap.setLabel('left', 'Position / Frequency Index')
+        self.signal_heatmap.setLabel('bottom', 'Time', 'ms')
+        self.signal_heatmap_item = pg.ImageItem()
+        self.signal_heatmap.addItem(self.signal_heatmap_item)
+        self.signal_heatmap_colorbar = pg.ColorBarItem(values=(0, 1), colorMap='viridis')
+        self.signal_heatmap_colorbar.setImageItem(self.signal_heatmap_item)
+        # Show by default (heatmap is default view)
+        self.signal_heatmap.enableAutoRange(x=False, y=False)
+
         signal_layout.addWidget(self.signal_plot)
+        signal_layout.addWidget(self.signal_heatmap)
 
         self.tab_widget.addTab(signal_widget, "Signal")
 
-        # Share time cursor lines with the 3D viewer for synchronized scrubbing
-        self.mag_3d.mxy_time_line = self.mxy_time_line
-        self.mag_3d.mz_time_line = self.mz_time_line
-        self.mag_3d.signal_time_line = self.signal_time_line
+        # Time cursor lines removed for performance
         
         # Frequency spectrum
         self.spectrum_plot = pg.PlotWidget()
@@ -2901,6 +3001,9 @@ class BlochSimulatorGUI(QMainWindow):
 
         right_layout.addWidget(self.tab_widget)
 
+        # Connect tab change to optimize rendering
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
+
         # Universal time control - controls all time-resolved views
         self.time_control = UniversalTimeControl()
         right_layout.addWidget(self.time_control)
@@ -3003,6 +3106,61 @@ class BlochSimulatorGUI(QMainWindow):
                         # Item doesn't have scene() method or was deleted, skip it
                         pass
 
+    def _update_or_create_plot_item(self, plot_widget, cache_dict, key, x_data, y_data, pen, name=None):
+        """Update existing plot item or create new one if needed.
+
+        This avoids the expensive clear+replot cycle by reusing plot items.
+
+        Parameters
+        ----------
+        plot_widget : pg.PlotWidget
+            The plot widget containing the items
+        cache_dict : dict
+            Dictionary mapping keys to PlotDataItem objects
+        key : tuple
+            Unique identifier for this plot item
+        x_data, y_data : np.ndarray
+            Data to plot
+        pen : QPen or color spec
+            Pen style for the line
+        name : str, optional
+            Legend name for the item
+
+        Returns
+        -------
+        PlotDataItem
+            The updated or newly created plot item
+        """
+        if key in cache_dict and cache_dict[key] is not None:
+            # Update existing item
+            try:
+                cache_dict[key].setData(x_data, y_data)
+                cache_dict[key].setPen(pen)
+                return cache_dict[key]
+            except (AttributeError, RuntimeError):
+                # Item was deleted or invalid, recreate
+                pass
+
+        # Create new item
+        item = plot_widget.plot(x_data, y_data, pen=pen, name=name)
+        cache_dict[key] = item
+        return item
+
+    def _invalidate_plot_caches(self):
+        """Clear all cached plot items (e.g., when loading new simulation)."""
+        # Remove items from plots
+        for cache, plot in [(self._mxy_plot_items, self.mxy_plot),
+                            (self._mz_plot_items, self.mz_plot),
+                            (self._signal_plot_items, self.signal_plot)]:
+            for item in cache.values():
+                if item is not None:
+                    try:
+                        plot.removeItem(item)
+                    except (AttributeError, RuntimeError):
+                        pass
+            cache.clear()
+        self._plot_items_initialized = False
+
     def _reshape_to_tpf(self, arr: np.ndarray, pos_len: int, freq_len: int):
         """
         Ensure array shape is (ntime, npos, nfreq).
@@ -3077,7 +3235,7 @@ class BlochSimulatorGUI(QMainWindow):
     def _build_playback_indices(self, total_frames: int) -> np.ndarray:
         """Construct (optionally downsampled) playback indices for animation."""
         indices = np.arange(total_frames, dtype=int)
-        max_frames = 0  # set >0 to limit playback frames if needed
+        max_frames = 2000  # limit playback frames for smooth animation
         if max_frames and total_frames > max_frames:
             step = max(1, math.ceil(total_frames / max_frames))
             indices = np.arange(0, total_frames, step, dtype=int)
@@ -3221,8 +3379,17 @@ class BlochSimulatorGUI(QMainWindow):
         # Connect 3D vector position changes to universal control
         self.mag_3d.position_changed.connect(self._on_3d_vector_position_changed)
 
-    def _on_universal_time_changed(self, time_idx: int):
-        """Central handler for universal time control changes - updates all views."""
+    def _on_universal_time_changed(self, time_idx: int, skip_expensive_updates=False):
+        """Central handler for universal time control changes - updates all views.
+
+        Parameters
+        ----------
+        time_idx : int
+            The time index to display
+        skip_expensive_updates : bool
+            If True, only update time cursors and skip expensive plot redraws.
+            Use this during animation playback for better performance.
+        """
         if not hasattr(self, 'last_time') or self.last_time is None:
             return
         actual_idx = self._playback_to_full_index(time_idx)
@@ -3235,24 +3402,97 @@ class BlochSimulatorGUI(QMainWindow):
         self.mag_3d.set_cursor_index(time_idx)
         self._set_animation_index_from_slider(time_idx)
 
-        # Update spatial view with current time index
-        self.update_spatial_plot_from_last_result(time_idx=actual_idx)
+        # Get current visible tab to optimize updates (define early for all code paths)
+        current_tab_index = self.tab_widget.currentIndex()
+
+        # Check which plots are actually visible and need updates
+        # Tab indices: 0=Magnetization, 1=3D Vector, 2=Signal, 3=Spectrum, 4=Spatial, ...
+        mag_tab_visible = (current_tab_index == 0)
+        signal_tab_visible = (current_tab_index == 2)
+        spectrum_tab_visible = (current_tab_index == 3)
+        spatial_tab_visible = (current_tab_index == 4)
 
         # Update time cursors on plots
+        # PyQt/pyqtgraph still processes updates even for hidden tabs, causing lag.
+        # Disable updates for plots that aren't visible to improve animation performance.
         if self.last_time is not None and 0 <= actual_idx < len(self.last_time):
             time_ms = self.last_time[actual_idx] * 1000
-            self.mxy_time_line.setValue(time_ms)
-            self.mz_time_line.setValue(time_ms)
-            self.signal_time_line.setValue(time_ms)
-        # Refresh spectrum for this time
-        self._refresh_spectrum(time_idx=actual_idx)
+
+            # Only update time cursors when NOT animating (during scrubbing/pause)
+            # During animation, skip time cursor updates for Magnetization and Signal plots
+            # to improve performance - only 3D vector animates
+            # Time lines removed for performance
+
+        # Handle expensive redraws - only for visible tabs during animation
+        if not skip_expensive_updates:
+            # Full update when paused/scrubbing - always update visible tabs
+            if spatial_tab_visible:
+                self.update_spatial_plot_from_last_result(time_idx=actual_idx)
+                self._spatial_needs_update = False
+            else:
+                # Mark as dirty if not updated
+                self._spatial_needs_update = True
+
+            if spectrum_tab_visible:
+                self._refresh_spectrum(time_idx=actual_idx)
+                self._spectrum_needs_update = False
+            else:
+                # Mark as dirty if not updated
+                self._spectrum_needs_update = True
+        else:
+            # During animation playback, skip expensive updates
+            # Mark all tabs as needing update (will update when animation pauses or tab switches)
+            if not spatial_tab_visible:
+                self._spatial_needs_update = True
+            if not spectrum_tab_visible:
+                self._spectrum_needs_update = True
+
+    def _on_tab_changed(self, index: int):
+        """Handle tab changes to optimize rendering.
+
+        Disable updates on plots that aren't visible to speed up tab switching.
+        """
+        # Enable updates on all plot widgets first
+        for plot in [self.mxy_plot, self.mz_plot, self.signal_plot,
+                     self.spectrum_plot, self.spatial_mxy_plot, self.spatial_mz_plot]:
+            if plot is not None:
+                plot.setUpdatesEnabled(True)
+
+        # Now disable updates on plots not in the current tab
+        # Tab indices: 0=Magnetization, 1=3D Vector, 2=Signal, 3=Spectrum, 4=Spatial
+        if index != 0:  # Not Magnetization tab
+            self.mxy_plot.setUpdatesEnabled(False)
+            self.mz_plot.setUpdatesEnabled(False)
+        if index != 2:  # Not Signal tab
+            self.signal_plot.setUpdatesEnabled(False)
+        if index != 3:  # Not Spectrum tab
+            self.spectrum_plot.setUpdatesEnabled(False)
+        else:  # Switching TO Spectrum tab
+            # Update spectrum if it's dirty
+            if self._spectrum_needs_update and hasattr(self, 'last_result') and self.last_result is not None:
+                current_idx = self.time_control.time_slider.value() if hasattr(self, 'time_control') else 0
+                actual_idx = self._playback_to_full_index(current_idx)
+                self._refresh_spectrum(time_idx=actual_idx)
+                self._spectrum_needs_update = False
+        if index != 4:  # Not Spatial tab
+            self.spatial_mxy_plot.setUpdatesEnabled(False)
+            self.spatial_mz_plot.setUpdatesEnabled(False)
+        else:  # Switching TO Spatial tab
+            # Update spatial if it's dirty
+            if self._spatial_needs_update and hasattr(self, 'last_result') and self.last_result is not None:
+                current_idx = self.time_control.time_slider.value() if hasattr(self, 'time_control') else 0
+                actual_idx = self._playback_to_full_index(current_idx)
+                self.update_spatial_plot_from_last_result(time_idx=actual_idx)
+                self._spatial_needs_update = False
 
     def _on_3d_vector_position_changed(self, time_idx: int):
         """Handle 3D vector view position changes."""
         if not self.time_control._updating:
             self.time_control.set_time_index(time_idx)
         # Propagate the change to all synchronized views
-        self._on_universal_time_changed(time_idx)
+        # When user is manually scrubbing, do full update (skip_expensive_updates=False)
+        is_playing = self.anim_timer.isActive() if hasattr(self, 'anim_timer') else False
+        self._on_universal_time_changed(time_idx, skip_expensive_updates=is_playing)
 
     def _on_universal_play(self):
         """Handle universal play button."""
@@ -3290,7 +3530,36 @@ class BlochSimulatorGUI(QMainWindow):
     def _refresh_mag_plots(self):
         """Re-render magnetization plots using the current filter selection."""
         if self.last_result is not None:
-            self.update_plots(self.last_result)
+            # Check plot type and switch visibility
+            plot_type = self.mag_plot_type.currentText() if hasattr(self, 'mag_plot_type') else "Line"
+            if plot_type == "Heatmap":
+                self.mxy_plot.hide()
+                self.mz_plot.hide()
+                self.mxy_heatmap.show()
+                self.mz_heatmap.show()
+                self._update_mag_heatmaps()
+            else:
+                self.mxy_plot.show()
+                self.mz_plot.show()
+                self.mxy_heatmap.hide()
+                self.mz_heatmap.hide()
+                self.update_plots(self.last_result)
+
+    def _refresh_signal_plots(self):
+        """Re-render signal plots using the current filter selection."""
+        if self.last_result is None:
+            return
+        # Check plot type and switch visibility
+        plot_type = self.signal_plot_type.currentText() if hasattr(self, 'signal_plot_type') else "Heatmap"
+        if plot_type == "Heatmap":
+            self.signal_plot.hide()
+            self.signal_heatmap.show()
+            self._update_signal_heatmaps()
+        else:
+            self.signal_plot.show()
+            self.signal_heatmap.hide()
+            # Don't call update_plots to avoid infinite loop
+            # Just refresh the specific plot content
 
     def _calc_symmetric_limits(self, *arrays, base=1.0, pad=1.1):
         """Compute symmetric y-limits with padding based on provided arrays."""
@@ -3313,8 +3582,11 @@ class BlochSimulatorGUI(QMainWindow):
         existing = getattr(self, attr_name, None)
         if existing is not None:
             try:
-                plot_widget.scene().removeItem(existing)
-            except Exception:
+                # Check if the item is actually in this scene before removing
+                if existing.scene() == plot_widget.scene():
+                    plot_widget.scene().removeItem(existing)
+            except (RuntimeError, AttributeError):
+                # Item already deleted or scene mismatch
                 pass
             setattr(self, attr_name, None)
         if enable:
@@ -3363,6 +3635,35 @@ class BlochSimulatorGUI(QMainWindow):
         else:
             idx = 0
         return mode, idx
+
+    def _update_signal_selector_limits(self, npos: int, nfreq: int, disable: bool = False):
+        """Sync signal view selector with available pos/freq counts."""
+        if not hasattr(self, "signal_view_mode"):
+            return
+        mode = self.signal_view_mode.currentText()
+        if disable:
+            max_idx = 0
+            prefix = "All"
+        elif mode == "Positions @ freq":
+            max_idx = max(0, nfreq - 1)
+            prefix = "Freq"
+        elif mode == "Freqs @ position":
+            max_idx = max(0, npos - 1)
+            prefix = "Pos"
+        else:
+            max_idx = 0
+            prefix = "All"
+        slider = self.signal_view_selector
+        slider.blockSignals(True)
+        slider.setMaximum(max_idx)
+        slider.setValue(min(slider.value(), max_idx) if max_idx > 0 else 0)
+        slider.setEnabled(not disable and max_idx > 0)
+        slider.setVisible(max_idx > 0)
+        slider.blockSignals(False)
+        if max_idx > 0:
+            self.signal_view_selector_label.setText(f"{prefix} idx: {slider.value()}")
+        else:
+            self.signal_view_selector_label.setText("All spins")
 
     def _apply_pulse_region(self, plot_widget, attr_name):
         """Highlight pulse duration on a plot."""
@@ -3945,6 +4246,9 @@ class BlochSimulatorGUI(QMainWindow):
         
     def update_plots(self, result):
         """Update all visualization plots."""
+        # Invalidate plot caches when new simulation results arrive
+        self._invalidate_plot_caches()
+
         raw_time = result['time']
         # Align arrays to (ntime, npos, nfreq)
         pos_len = self.last_positions.shape[0] if self.last_positions is not None else result['mx'].shape[-2] if result['mx'].ndim == 3 else 1
@@ -3986,7 +4290,7 @@ class BlochSimulatorGUI(QMainWindow):
             mz_all = mz_arr
             t_plot = np.array([time[0], time[-1]]) if len(time) > 1 else np.array([0, 1])
 
-            self._safe_clear_plot(self.mxy_plot, [self.mxy_time_line])
+            self._safe_clear_plot(self.mxy_plot)
             total_series = mx_all.shape[0] * mx_all.shape[1]
             self._reset_legend(self.mxy_plot, "mxy_legend", total_series > 1)
             idx = 0
@@ -4004,7 +4308,7 @@ class BlochSimulatorGUI(QMainWindow):
             mxy_ymin, mxy_ymax = self._calc_symmetric_limits(mx_all, my_all, base=self.initial_mz)
             self._set_plot_ranges(self.mxy_plot, x_min, x_max, mxy_ymin, mxy_ymax)
 
-            self._safe_clear_plot(self.mz_plot, [self.mz_time_line])
+            self._safe_clear_plot(self.mz_plot)
             self._reset_legend(self.mz_plot, "mz_legend", total_series > 1)
             idx = 0
             for pi in range(mz_all.shape[0]):
@@ -4035,7 +4339,7 @@ class BlochSimulatorGUI(QMainWindow):
                 sig = signal_vals[:, None]
             else:
                 sig = signal_vals.reshape(pos_len, freq_len)
-            self._safe_clear_plot(self.signal_plot, [self.signal_time_line])
+            self._safe_clear_plot(self.signal_plot)
             total_series = sig.shape[0] * sig.shape[1]
             self._reset_legend(self.signal_plot, "signal_legend", total_series > 1)
             idx = 0
@@ -4051,10 +4355,6 @@ class BlochSimulatorGUI(QMainWindow):
             self.signal_plot.plot(t_plot, [np.abs(mean_sig), np.abs(mean_sig)], pen=pg.mkPen('c', width=4), name='|S| mean')
             self._apply_pulse_region(self.signal_plot, "signal_region")
             self._set_plot_ranges(self.signal_plot, x_min, x_max, -1.1, 1.1)
-            for line in (self.mxy_time_line, self.mz_time_line, self.signal_time_line):
-                if line is not None:
-                    line.show()
-                    line.setValue(time[0])
 
             # Spatial plot for endpoint
             self.update_spatial_plot_from_last_result()
@@ -4085,9 +4385,10 @@ class BlochSimulatorGUI(QMainWindow):
 
             # Update magnetization plots
             self._update_mag_selector_limits(npos, nfreq, disable=mean_only)
+            self._update_signal_selector_limits(npos, nfreq, disable=mean_only)
             view_mode, selector = self._current_mag_filter(npos, nfreq)
 
-            self._safe_clear_plot(self.mxy_plot, [self.mxy_time_line])
+            self._safe_clear_plot(self.mxy_plot)
             if mean_only:
                 self._reset_legend(self.mxy_plot, "mxy_legend", False)
                 mean_mx = np.mean(mx_all, axis=(1, 2))
@@ -4148,11 +4449,8 @@ class BlochSimulatorGUI(QMainWindow):
                 else:
                     mxy_ymin, mxy_ymax = self._calc_symmetric_limits(mx_all, my_all, mean_mx, mean_my, base=self.initial_mz)
             self._set_plot_ranges(self.mxy_plot, x_min, x_max, mxy_ymin, mxy_ymax)
-            if self.mxy_time_line is not None:
-                self.mxy_time_line.show()
-                self.mxy_time_line.setValue(time[0])
 
-            self._safe_clear_plot(self.mz_plot, [self.mz_time_line])
+            self._safe_clear_plot(self.mz_plot)
             if mean_only:
                 self._reset_legend(self.mz_plot, "mz_legend", False)
                 mean_mz = np.mean(mz_all, axis=(1, 2))
@@ -4193,10 +4491,7 @@ class BlochSimulatorGUI(QMainWindow):
                 else:
                     mz_ymin, mz_ymax = self._calc_symmetric_limits(mz_all, mean_mz, base=self.initial_mz)
             self._set_plot_ranges(self.mz_plot, x_min, x_max, mz_ymin, mz_ymax)
-            if self.mz_time_line is not None:
-                self.mz_time_line.show()
-                self.mz_time_line.setValue(time[0])
-            
+
             # Update signal plot
             signal_all = result['signal']  # (ntime, npos, nfreq)
             if signal_all.ndim == 3:
@@ -4211,7 +4506,7 @@ class BlochSimulatorGUI(QMainWindow):
                 signal = signal_arr
             if signal.ndim == 1:
                 signal = signal[:, None, None]
-            self._safe_clear_plot(self.signal_plot, [self.signal_time_line])
+            self._safe_clear_plot(self.signal_plot)
             if mean_only:
                 self._reset_legend(self.signal_plot, "signal_legend", False)
                 mean_sig = np.mean(signal, axis=(1, 2))
@@ -4238,10 +4533,7 @@ class BlochSimulatorGUI(QMainWindow):
                 base=self.initial_mz
             )
             self._set_plot_ranges(self.signal_plot, x_min, x_max, sig_ymin, sig_ymax)
-            if self.signal_time_line is not None:
-                self.signal_time_line.show()
-                self.signal_time_line.setValue(time[0])
-            
+
         # Update spectrum
         from scipy.fft import fft, fftfreq
         self.spectrum_plot.clear()
@@ -4326,7 +4618,13 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Ensure signal tab x-range set even if spectrum-only
         self.signal_plot.setXRange(x_min, x_max, padding=0)
-        
+
+        # Update heatmaps if they are the active view (default)
+        if hasattr(self, 'mag_plot_type') and self.mag_plot_type.currentText() == "Heatmap":
+            self._update_mag_heatmaps()
+        if hasattr(self, 'signal_plot_type') and self.signal_plot_type.currentText() == "Heatmap":
+            self._update_signal_heatmaps()
+
     def load_parameters(self):
         """Load simulation parameters from file."""
         filename, _ = QFileDialog.getOpenFileName(
@@ -4349,6 +4647,13 @@ class BlochSimulatorGUI(QMainWindow):
         if self.anim_index >= len(self.anim_data):
             self.anim_index = 0
         self._reset_playback_anchor(self.anim_index)
+
+        # CRITICAL: Disable updates on Magnetization and Signal plots during animation
+        # This prevents pyqtgraph from rendering them every frame, which causes slowness
+        self.mxy_plot.setUpdatesEnabled(False)
+        self.mz_plot.setUpdatesEnabled(False)
+        self.signal_plot.setUpdatesEnabled(False)
+
         # Always recompute interval using current speed control
         self._recompute_anim_interval(self.time_control.speed_spin.value() if hasattr(self, 'time_control') else None)
         self.anim_timer.start(self.anim_interval_ms)
@@ -4361,9 +4666,24 @@ class BlochSimulatorGUI(QMainWindow):
         """Pause the 3D vector animation."""
         self.anim_timer.stop()
 
+        # Re-enable updates on Magnetization and Signal plots after animation stops
+        self.mxy_plot.setUpdatesEnabled(True)
+        self.mz_plot.setUpdatesEnabled(True)
+        self.signal_plot.setUpdatesEnabled(True)
+
+        # When paused, refresh plots with current frame (full update)
+        if hasattr(self, 'anim_index'):
+            self._on_universal_time_changed(self.anim_index, skip_expensive_updates=False)
+
     def _reset_vector_animation(self):
         """Reset the 3D vector to the first available frame."""
         self.anim_timer.stop()
+
+        # Re-enable updates on Magnetization and Signal plots after animation stops
+        self.mxy_plot.setUpdatesEnabled(True)
+        self.mz_plot.setUpdatesEnabled(True)
+        self.signal_plot.setUpdatesEnabled(True)
+
         self.anim_index = 0
         self.mag_3d._clear_path()
         self._reset_playback_anchor(0)
@@ -4479,7 +4799,9 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Move universal time control (label/slider) then propagate to all views
         self.time_control.set_time_index(idx)
-        self._on_universal_time_changed(idx)
+        # During animation, skip expensive plot redraws (spatial FFT, spectrum FFT)
+        # Only update time cursors and 3D view for smooth playback
+        self._on_universal_time_changed(idx, skip_expensive_updates=True)
         self._last_render_wall = now
 
     def _update_b1_arrow(self, playback_idx: int):
@@ -5808,6 +6130,225 @@ class BlochSimulatorGUI(QMainWindow):
         except Exception as e:
             self.log_message(f"Spatial data export failed: {e}")
             QMessageBox.critical(self, "Export Error", f"Could not export spatial data:\n{e}")
+
+    def _update_mag_heatmaps(self):
+        """Update magnetization heatmaps (Time vs Position/Frequency)."""
+        if self.last_result is None:
+            return
+
+        mx_all = self.last_result['mx']
+        my_all = self.last_result['my']
+        mz_all = self.last_result['mz']
+        time = self.last_time if self.last_time is not None else self.last_result.get('time', None)
+
+        if time is None or mx_all.ndim != 3:
+            self.log_message("Heatmap requires time-resolved 3D data")
+            return
+
+        ntime, npos, nfreq = mx_all.shape
+        time_ms = time * 1000  # Convert to ms
+
+        # Get view mode
+        view_mode = self.mag_view_mode.currentText() if hasattr(self, 'mag_view_mode') else "All positions x freqs"
+        selector = self.mag_view_selector.value() if hasattr(self, 'mag_view_selector') else 0
+
+        # Determine if view mode selector should be visible
+        # Hide selector for single position/frequency cases
+        if view_mode == "Positions @ freq" and npos == 1:
+            # Only 1 position - no point showing position selector
+            if hasattr(self, 'mag_view_selector'):
+                self.mag_view_selector.setVisible(False)
+                self.mag_view_selector_label.setVisible(False)
+        elif view_mode == "Freqs @ position" and nfreq == 1:
+            # Only 1 frequency - no point showing frequency selector
+            if hasattr(self, 'mag_view_selector'):
+                self.mag_view_selector.setVisible(False)
+                self.mag_view_selector_label.setVisible(False)
+        elif view_mode == "All positions x freqs" and npos * nfreq == 1:
+            # Only 1 spin total
+            if hasattr(self, 'mag_view_selector'):
+                self.mag_view_selector.setVisible(False)
+                self.mag_view_selector_label.setVisible(False)
+
+        # Get component selection
+        component = self.mag_component.currentText() if hasattr(self, 'mag_component') else "Magnitude"
+
+        # Prepare data slices based on view mode
+        if view_mode == "Positions @ freq" and nfreq > 1:
+            # Show all positions at selected frequency
+            fi = min(selector, nfreq - 1)
+            mx_slice = mx_all[:, :, fi]  # (ntime, npos)
+            my_slice = my_all[:, :, fi]
+            mz_slice = mz_all[:, :, fi]
+            y_label = "Position Index"
+            n_y = npos
+        elif view_mode == "Freqs @ position" and npos > 1:
+            # Show all frequencies at selected position
+            pi = min(selector, npos - 1)
+            mx_slice = mx_all[:, pi, :]  # (ntime, nfreq)
+            my_slice = my_all[:, pi, :]
+            mz_slice = mz_all[:, pi, :]
+            y_label = "Frequency Index"
+            n_y = nfreq
+        else:
+            # Show all spins (flatten position x frequency)
+            mx_slice = mx_all.reshape(ntime, -1)  # (ntime, npos*nfreq)
+            my_slice = my_all.reshape(ntime, -1)
+            mz_slice = mz_all.reshape(ntime, -1)
+            y_label = "Spin Index (pos×freq)"
+            n_y = npos * nfreq
+
+        # Compute the selected component
+        if component == "Magnitude":
+            mxy_data = np.sqrt(mx_slice**2 + my_slice**2)  # (ntime, n_y)
+            mz_data = np.abs(mz_slice)  # (ntime, n_y)
+            mxy_title = '|Mxy| Heatmap'
+            mz_title = '|Mz| Heatmap'
+        elif component == "Real (Mx/Re)":
+            mxy_data = mx_slice  # (ntime, n_y)
+            mz_data = mz_slice  # (ntime, n_y)
+            mxy_title = 'Mx Heatmap'
+            mz_title = 'Mz Heatmap'
+        elif component == "Imaginary (My/Im)":
+            mxy_data = my_slice  # (ntime, n_y)
+            mz_data = mz_slice  # (ntime, n_y)
+            mxy_title = 'My Heatmap'
+            mz_title = 'Mz Heatmap'
+        elif component == "Phase":
+            mxy_data = np.angle(mx_slice + 1j * my_slice)  # (ntime, n_y)
+            mz_data = mz_slice  # (ntime, n_y)
+            mxy_title = 'Mxy Phase Heatmap'
+            mz_title = 'Mz Heatmap'
+        elif component == "Mz":
+            mxy_data = mz_slice  # (ntime, n_y)
+            mz_data = mz_slice  # (ntime, n_y)
+            mxy_title = 'Mz Heatmap'
+            mz_title = 'Mz Heatmap'
+        else:
+            # Default to magnitude
+            mxy_data = np.sqrt(mx_slice**2 + my_slice**2)
+            mz_data = np.abs(mz_slice)
+            mxy_title = '|Mxy| Heatmap'
+            mz_title = '|Mz| Heatmap'
+
+        # Update Mxy heatmap
+        # pyqtgraph ImageItem convention: data[row, col] where row=Y, col=X
+        # We have mxy_data as (ntime, n_y) meaning data[time, spin]
+        # We want: X-axis = Time, Y-axis = Spin
+        # So we need to transpose to get data[spin, time] = data[Y, X]
+        self.mxy_heatmap_item.setImage(mxy_data.T, autoLevels=True, axisOrder='row-major')
+        # Now set the coordinate mapping using setRect(x, y, width, height)
+        # The image spans from time_ms[0] to time_ms[-1] on X-axis
+        # and from 0 to n_y on Y-axis
+        self.mxy_heatmap_item.setRect(time_ms[0], 0, time_ms[-1] - time_ms[0], n_y)
+        self.mxy_heatmap.setLabel('left', y_label)
+        self.mxy_heatmap.setLabel('bottom', 'Time', 'ms')
+        self.mxy_heatmap.setTitle(mxy_title)
+        # Set view limits to show only actual data
+        self.mxy_heatmap.setXRange(time_ms[0], time_ms[-1], padding=0)
+        self.mxy_heatmap.setYRange(0, n_y, padding=0)
+
+        # Update Mz heatmap
+        self.mz_heatmap_item.setImage(mz_data.T, autoLevels=True, axisOrder='row-major')
+        self.mz_heatmap_item.setRect(time_ms[0], 0, time_ms[-1] - time_ms[0], n_y)
+        self.mz_heatmap.setLabel('left', y_label)
+        self.mz_heatmap.setLabel('bottom', 'Time', 'ms')
+        self.mz_heatmap.setTitle(mz_title)
+        # Set view limits to show only actual data
+        self.mz_heatmap.setXRange(time_ms[0], time_ms[-1], padding=0)
+        self.mz_heatmap.setYRange(0, n_y, padding=0)
+
+    def _update_signal_heatmaps(self):
+        """Update signal heatmaps (Time vs Position/Frequency)."""
+        if self.last_result is None:
+            return
+
+        signal_all = self.last_result['signal']
+        time = self.last_time if self.last_time is not None else self.last_result.get('time', None)
+
+        if time is None or signal_all.ndim != 3:
+            self.log_message("Heatmap requires time-resolved 3D data")
+            return
+
+        ntime, npos, nfreq = signal_all.shape
+        time_ms = time * 1000  # Convert to ms
+
+        # Get view mode
+        view_mode = self.signal_view_mode.currentText() if hasattr(self, 'signal_view_mode') else "All positions x freqs"
+        selector = self.signal_view_selector.value() if hasattr(self, 'signal_view_selector') else 0
+
+        # Determine if view mode selector should be visible
+        # Hide selector for single position/frequency cases
+        if view_mode == "Positions @ freq" and npos == 1:
+            # Only 1 position - no point showing position selector
+            if hasattr(self, 'signal_view_selector'):
+                self.signal_view_selector.setVisible(False)
+                self.signal_view_selector_label.setVisible(False)
+        elif view_mode == "Freqs @ position" and nfreq == 1:
+            # Only 1 frequency - no point showing frequency selector
+            if hasattr(self, 'signal_view_selector'):
+                self.signal_view_selector.setVisible(False)
+                self.signal_view_selector_label.setVisible(False)
+        elif view_mode == "All positions x freqs" and npos * nfreq == 1:
+            # Only 1 spin total
+            if hasattr(self, 'signal_view_selector'):
+                self.signal_view_selector.setVisible(False)
+                self.signal_view_selector_label.setVisible(False)
+
+        # Get component selection
+        component = self.signal_component.currentText() if hasattr(self, 'signal_component') else "Magnitude"
+
+        # Prepare data slices based on view mode
+        if view_mode == "Positions @ freq" and nfreq > 1:
+            # Show all positions at selected frequency
+            fi = min(selector, nfreq - 1)
+            signal_slice = signal_all[:, :, fi]  # (ntime, npos)
+            y_label = "Position Index"
+            n_y = npos
+        elif view_mode == "Freqs @ position" and npos > 1:
+            # Show all frequencies at selected position
+            pi = min(selector, npos - 1)
+            signal_slice = signal_all[:, pi, :]  # (ntime, nfreq)
+            y_label = "Frequency Index"
+            n_y = nfreq
+        else:
+            # Show all spins (flatten position x frequency)
+            signal_slice = signal_all.reshape(ntime, -1)  # (ntime, npos*nfreq)
+            y_label = "Spin Index (pos×freq)"
+            n_y = npos * nfreq
+
+        # Compute the selected component
+        if component == "Magnitude":
+            signal_data = np.abs(signal_slice)  # (ntime, n_y)
+            title = '|Signal| Heatmap'
+        elif component == "Real":
+            signal_data = np.real(signal_slice)  # (ntime, n_y)
+            title = 'Re(Signal) Heatmap'
+        elif component == "Imaginary":
+            signal_data = np.imag(signal_slice)  # (ntime, n_y)
+            title = 'Im(Signal) Heatmap'
+        elif component == "Phase":
+            signal_data = np.angle(signal_slice)  # (ntime, n_y)
+            title = 'Phase(Signal) Heatmap'
+        else:
+            # Default to magnitude
+            signal_data = np.abs(signal_slice)
+            title = '|Signal| Heatmap'
+
+        # Update signal heatmap
+        # pyqtgraph ImageItem convention: data[row, col] where row=Y, col=X
+        # We have signal_data as (ntime, n_y) meaning data[time, spin]
+        # We want: X-axis = Time, Y-axis = Spin
+        # So we need to transpose to get data[spin, time] = data[Y, X]
+        self.signal_heatmap_item.setImage(signal_data.T, autoLevels=True, axisOrder='row-major')
+        # Set proper scale and position
+        self.signal_heatmap_item.setRect(time_ms[0], 0, time_ms[-1] - time_ms[0], n_y)
+        self.signal_heatmap.setLabel('left', y_label)
+        self.signal_heatmap.setLabel('bottom', 'Time', 'ms')
+        self.signal_heatmap.setTitle(title)
+        # Set view limits to show only actual data
+        self.signal_heatmap.setXRange(time_ms[0], time_ms[-1], padding=0)
+        self.signal_heatmap.setYRange(0, n_y, padding=0)
 
     def show_about(self):
         """Show about dialog."""

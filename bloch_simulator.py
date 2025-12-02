@@ -34,10 +34,33 @@ except ImportError:
     def calculate_signal(mx, my, mz, receiver_phase=0.0):
         phase_factor = np.exp(-1j * receiver_phase)
         return (mx + 1j * my) * phase_factor
-def design_rf_pulse(pulse_type='rect', duration=1e-3, flip_angle=90, 
-                    time_bw_product=4, npoints=100):
+def design_rf_pulse(pulse_type='rect', duration=1e-3, flip_angle=90,
+                    time_bw_product=4, npoints=100, freq_offset=0.0):
         """
         Pure-Python fallback for RF design so imports work even without the extension.
+
+        Parameters
+        ----------
+        pulse_type : str
+            Type of pulse ('rect', 'sinc', 'gaussian', 'adiabatic_half', 'adiabatic_full', 'bir4')
+        duration : float
+            Pulse duration in seconds
+        flip_angle : float
+            Flip angle in degrees
+        time_bw_product : float
+            Time-bandwidth product for sinc/gaussian pulses
+        npoints : int
+            Number of time points
+        freq_offset : float
+            Frequency offset in Hz (default 0). Applies phase modulation: B1 * exp(2πi*f*t)
+            Positive offset shifts the pulse frequency higher.
+
+        Returns
+        -------
+        b1 : complex ndarray
+            Complex B1 field in Gauss
+        time : ndarray
+            Time points in seconds
         """
         time = np.linspace(0, duration, npoints, endpoint=False)
         dt = duration / npoints
@@ -58,8 +81,154 @@ def design_rf_pulse(pulse_type='rect', duration=1e-3, flip_angle=90,
             envelope = np.exp(-t_centered**2 / (2 * sigma**2))
             area = np.trapezoid(envelope, time)
             b1 = envelope * (target_area / area)
+        elif pulse_type == 'adiabatic_half':
+            # Adiabatic Half Passage (AHP): 90° excitation pulse
+            # Uses hyperbolic secant amplitude + tanh frequency modulation
+            # Magnetization tracks effective field through 90° rotation
+            #
+            # For adiabatic pulses, the flip angle is determined by the adiabaticity
+            # parameter κ = γ·B1_max·T / β, NOT by the pulse area.
+            # The flip_angle parameter controls B1_max to achieve the desired rotation.
+            t_centered = time - duration/2
+            beta = time_bw_product  # Modulation parameter (typically 4-8)
+
+            # HS amplitude modulation: A(t) = A0 * sech(beta * t / T)
+            # Normalized amplitude envelope (max = 1.0)
+            amplitude = 1.0 / np.cosh(beta * t_centered / (duration/2))
+
+            # Frequency modulation using tanh (standard for HS pulses)
+            # Frequency sweeps from +BW/2 to -BW/2 (or vice versa)
+            # Delta_omega(t) = -omega_max * tanh(beta * t / T)
+            bandwidth_hz = time_bw_product / duration
+            omega_max = np.pi * bandwidth_hz  # Max frequency offset (rad/s)
+
+            # Frequency sweep using tanh
+            freq_modulation = -omega_max * np.tanh(beta * t_centered / (duration/2))
+
+            # Integrate to get phase: phi(t) = integral(omega(t) dt)
+            dt = duration / npoints
+            instantaneous_phase = np.cumsum(freq_modulation * dt)
+
+            # Complex B1: A(t) * exp(i*phi(t))
+            b1_complex = amplitude * np.exp(1j * instantaneous_phase)
+
+            # For adiabatic pulses, scale by flip_angle to control B1_max directly
+            # AHP typically achieves 90° when adiabaticity κ ≈ 5-10
+            # User adjusts flip_angle to control the RF amplitude (B1_max in Gauss)
+            # flip_angle here acts as a B1 scaling factor, not a target rotation
+            target_flip_rad = np.deg2rad(flip_angle)
+            b1_max_gauss = target_flip_rad / (gamma * 2 * np.pi * duration)
+            b1 = b1_complex * b1_max_gauss
+
+        elif pulse_type == 'adiabatic_full':
+            # Adiabatic Full Passage (AFP): 180° inversion pulse
+            # Uses hyperbolic secant amplitude + tanh frequency modulation
+            # Magnetization follows effective field through full 180° inversion
+            #
+            # For adiabatic pulses, the flip angle is determined by the adiabaticity
+            # parameter κ = γ·B1_max·T / β, NOT by the pulse area.
+            # The flip_angle parameter controls B1_max to achieve the desired rotation.
+            t_centered = time - duration/2
+            beta = time_bw_product  # Typically 4-8 for good adiabatic condition
+
+            # HS amplitude modulation: A(t) = A0 * sech(beta * t / T)
+            # Normalized amplitude envelope (max = 1.0)
+            amplitude = 1.0 / np.cosh(beta * t_centered / (duration/2))
+
+            # Frequency modulation using tanh (sweeps through full resonance)
+            bandwidth_hz = time_bw_product / duration
+            omega_max = np.pi * bandwidth_hz
+
+            # Full sweep: omega goes from +omega_max to -omega_max
+            freq_modulation = -omega_max * np.tanh(beta * t_centered / (duration/2))
+
+            # Integrate to get phase
+            dt = duration / npoints
+            instantaneous_phase = np.cumsum(freq_modulation * dt)
+
+            # Complex B1
+            b1_complex = amplitude * np.exp(1j * instantaneous_phase)
+
+            # For adiabatic pulses, scale by flip_angle to control B1_max directly
+            # AFP typically achieves 180° when adiabaticity κ ≈ 5-10
+            # User adjusts flip_angle to control the RF amplitude (B1_max in Gauss)
+            # flip_angle here acts as a B1 scaling factor, not a target rotation
+            target_flip_rad = np.deg2rad(flip_angle)
+            b1_max_gauss = target_flip_rad / (gamma * 2 * np.pi * duration)
+            b1 = b1_complex * b1_max_gauss
+
+        elif pulse_type == 'bir4':
+            # BIR-4 (B1-Insensitive Rotation): Composite adiabatic pulse for arbitrary flip angles
+            # Structure: 4 segments that produce plane rotation insensitive to B1 inhomogeneity
+            # Composed of: AHP - 180° - AHP_inverse - 180°
+            # This implementation uses a simplified HS-based BIR-4
+            #
+            # For adiabatic pulses, the flip angle is determined by the adiabaticity
+            # parameter κ = γ·B1_max·T / β, NOT by the pulse area.
+            # The flip_angle parameter controls B1_max to achieve the desired rotation.
+
+            beta = time_bw_product
+
+            # Divide pulse into 4 segments
+            n_seg = npoints // 4
+            t_seg = duration / 4
+
+            # Segment times
+            t1 = time[:n_seg] - time[n_seg//2]
+            t2 = time[n_seg:2*n_seg] - time[3*n_seg//2]
+            t3 = time[2*n_seg:3*n_seg] - time[5*n_seg//2]
+            t4 = time[3*n_seg:] - time[7*n_seg//2]
+
+            bandwidth_hz = time_bw_product / t_seg
+            omega_max = np.pi * bandwidth_hz
+
+            # Segment 1: AHP (90°)
+            amp1 = 1.0 / np.cosh(beta * t1 / (t_seg/2))
+            freq1 = -omega_max * np.tanh(beta * t1 / (t_seg/2))
+            phase1 = np.cumsum(freq1 * (t_seg / n_seg))
+            b1_seg1 = amp1 * np.exp(1j * phase1)
+
+            # Segment 2: 180° phase shift + reverse AHP
+            amp2 = 1.0 / np.cosh(beta * t2 / (t_seg/2))
+            freq2 = omega_max * np.tanh(beta * t2 / (t_seg/2))  # Reversed
+            phase2 = np.cumsum(freq2 * (t_seg / n_seg)) + phase1[-1]
+            b1_seg2 = amp2 * np.exp(1j * (phase2 + np.pi))  # 180° phase shift
+
+            # Segment 3: Inverse AHP
+            amp3 = 1.0 / np.cosh(beta * t3 / (t_seg/2))
+            freq3 = omega_max * np.tanh(beta * t3 / (t_seg/2))
+            phase3 = np.cumsum(freq3 * (t_seg / n_seg)) + phase2[-1]
+            b1_seg3 = amp3 * np.exp(1j * phase3)
+
+            # Segment 4: 180° phase shift + AHP
+            amp4 = 1.0 / np.cosh(beta * t4 / (t_seg/2))
+            freq4 = -omega_max * np.tanh(beta * t4 / (t_seg/2))
+            phase4 = np.cumsum(freq4 * (t_seg / n_seg)) + phase3[-1]
+            b1_seg4 = amp4 * np.exp(1j * (phase4 + np.pi))  # 180° phase shift
+
+            # Concatenate segments
+            b1_complex = np.concatenate([b1_seg1, b1_seg2, b1_seg3, b1_seg4])
+
+            # Pad if needed due to rounding
+            if len(b1_complex) < npoints:
+                b1_complex = np.pad(b1_complex, (0, npoints - len(b1_complex)), mode='edge')
+            elif len(b1_complex) > npoints:
+                b1_complex = b1_complex[:npoints]
+
+            # For adiabatic pulses, scale by flip_angle to control B1_max directly
+            # User adjusts flip_angle to control the RF amplitude (B1_max in Gauss)
+            # flip_angle here acts as a B1 scaling factor, not a target rotation
+            target_flip_rad = np.deg2rad(flip_angle)
+            b1_max_gauss = target_flip_rad / (gamma * 2 * np.pi * duration)
+            b1 = b1_complex * b1_max_gauss
         else:
             raise ValueError(f"Unknown pulse type: {pulse_type}")
+
+        # Apply frequency offset as phase modulation
+        if freq_offset != 0.0:
+            phase_modulation = np.exp(2j * np.pi * freq_offset * time)
+            b1 = b1 * phase_modulation
+
         return b1.astype(complex), time
 
 
@@ -211,16 +380,18 @@ class SpinEcho(PulseSequence):
     """
     
     def __init__(self, te: float, tr: float, custom_excitation=None, slice_thickness: float = 0.005,
-                 slice_gradient_override: Optional[float] = None, echo_count: int = 1, **kwargs):
+                 slice_gradient_override: Optional[float] = None, echo_count: int = 1, rf_freq_offset: float = 0.0, **kwargs):
         """
         Initialize spin echo sequence.
-        
+
         Parameters
         ----------
         te : float
             Echo time in seconds
         tr : float
             Repetition time in seconds
+        rf_freq_offset : float
+            RF frequency offset in Hz (default 0)
         """
         super().__init__(slice_thickness=slice_thickness, **kwargs)
         self.te = te
@@ -228,6 +399,7 @@ class SpinEcho(PulseSequence):
         self.custom_excitation = custom_excitation
         self.slice_gradient_override = slice_gradient_override
         self.echo_count = max(1, int(echo_count))
+        self.rf_freq_offset = rf_freq_offset
         
     def compile(self, dt: float = 1e-6) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Compile spin echo sequence."""
@@ -249,14 +421,16 @@ class SpinEcho(PulseSequence):
             b1[:n_exc] = exc_b1[:n_exc]
             exc_duration = n_exc * dt
         else:
-            exc_pulse, _ = design_rf_pulse('sinc', duration=1e-3, 
-                                          flip_angle=90, npoints=int(1e-3/dt))
+            exc_pulse, _ = design_rf_pulse('sinc', duration=1e-3,
+                                          flip_angle=90, npoints=int(1e-3/dt),
+                                          freq_offset=self.rf_freq_offset)
             n_exc = len(exc_pulse)
             b1[:n_exc] = exc_pulse
             exc_duration = 1e-3
         # Default refocusing: classic 180° sinc
-        ref_pulse, _ = design_rf_pulse('sinc', duration=2e-3, 
-                                      flip_angle=180, npoints=int(2e-3/dt))
+        ref_pulse, _ = design_rf_pulse('sinc', duration=2e-3,
+                                      flip_angle=180, npoints=int(2e-3/dt),
+                                      freq_offset=self.rf_freq_offset)
 
         for echo_idx in range(self.echo_count):
             ref_time = (0.5 + echo_idx) * self.te
@@ -366,18 +540,20 @@ class GradientEcho(PulseSequence):
     """
     
     def __init__(self, te: float, tr: float, flip_angle: float = 30, custom_excitation=None,
-                 slice_thickness: float = 0.005, slice_gradient_override: Optional[float] = None, **kwargs):
+                 slice_thickness: float = 0.005, slice_gradient_override: Optional[float] = None, rf_freq_offset: float = 0.0, **kwargs):
         """
         Initialize gradient echo sequence.
-        
+
         Parameters
         ----------
         te : float
             Echo time in seconds
         tr : float
-            Repetition time in seconds  
+            Repetition time in seconds
         flip_angle : float
             Flip angle in degrees
+        rf_freq_offset : float
+            RF frequency offset in Hz (default 0)
         """
         super().__init__(slice_thickness=slice_thickness, **kwargs)
         self.te = te
@@ -385,6 +561,7 @@ class GradientEcho(PulseSequence):
         self.flip_angle = flip_angle
         self.custom_excitation = custom_excitation
         self.slice_gradient_override = slice_gradient_override
+        self.rf_freq_offset = rf_freq_offset
         
     def compile(self, dt: float = 1e-6) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Compile gradient echo sequence."""
@@ -403,9 +580,10 @@ class GradientEcho(PulseSequence):
             b1[:n_exc] = exc_b1[:n_exc]
             exc_duration = n_exc * dt
         else:
-            exc_pulse, _ = design_rf_pulse('sinc', duration=1e-3, 
-                                          flip_angle=self.flip_angle, 
-                                          npoints=int(1e-3/dt))
+            exc_pulse, _ = design_rf_pulse('sinc', duration=1e-3,
+                                          flip_angle=self.flip_angle,
+                                          npoints=int(1e-3/dt),
+                                          freq_offset=self.rf_freq_offset)
             b1[:len(exc_pulse)] = exc_pulse
             exc_duration = 1e-3
         
