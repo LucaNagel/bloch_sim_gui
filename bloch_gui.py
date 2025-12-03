@@ -273,6 +273,7 @@ class RFPulseDesigner(QGroupBox):
     def __init__(self):
         super().__init__("RF Pulse Design")
         self.target_dt = 5e-6  # default 5 us
+        self.last_integration_factor = 1.0
         self.init_ui()
         self.current_pulse = None
         
@@ -309,16 +310,20 @@ class RFPulseDesigner(QGroupBox):
         duration_layout.addWidget(self.duration)
         layout.addLayout(duration_layout)
         
-        # Time-bandwidth product
+        # Time-bandwidth product (computed from pulse shape; not user-set)
         tbw_layout = QHBoxLayout()
-        tbw_layout.addWidget(QLabel("Time-BW Product:"))
+        tbw_layout.addWidget(QLabel("Time-BW Product (auto):"))
         self.tbw = QDoubleSpinBox()
-        self.tbw.setRange(1, 10)
-        self.tbw.setValue(4)
+        self.tbw.setRange(0.001, 1000)
+        self.tbw.setValue(1)
         self.tbw.setSingleStep(0.5)
-        self.tbw.valueChanged.connect(self.update_pulse)
+        self.tbw.setReadOnly(True)
+        self.tbw.setButtonSymbols(QDoubleSpinBox.NoButtons)
         tbw_layout.addWidget(self.tbw)
         layout.addLayout(tbw_layout)
+        self.tbw_auto_label = QLabel("Auto TBW (≈1/integfac): —")
+        self.tbw_auto_label.setStyleSheet("color: gray;")
+        layout.addWidget(self.tbw_auto_label)
         
         # Phase
         phase_layout = QHBoxLayout()
@@ -405,6 +410,59 @@ class RFPulseDesigner(QGroupBox):
 
         # Initial pulse
         self.update_pulse()
+
+    def _update_tbw_auto(self, integration_factor: float):
+        """Set TBW readout from an integration factor (heuristic: TBW ≈ 1/integfac)."""
+        if not hasattr(self, "tbw") or not hasattr(self, "tbw_auto_label"):
+            return
+        if integration_factor is None or not np.isfinite(integration_factor) or integration_factor <= 0:
+            self.tbw_auto_label.setText("Auto TBW (≈1/integfac): —")
+            self.last_integration_factor = 1.0
+            return
+        tbw_auto = 1.0 / integration_factor
+        self.tbw_auto_label.setText(f"Auto TBW (≈1/integfac): {tbw_auto:.3f}")
+        self.last_integration_factor = float(integration_factor)
+        # Keep the control in sync without retriggering pulse design
+        self.tbw.blockSignals(True)
+        self.tbw.setValue(tbw_auto)
+        self.tbw.blockSignals(False)
+
+    def _design_tbw_for_type(self, pulse_type: str) -> float:
+        """Return a canonical TBW parameter for the designer (not user-controlled)."""
+        pt = pulse_type.lower()
+        if pt in ("sinc", "gaussian", "hermite"):
+            return 4.0  # typical shaping parameter
+        if pt.startswith("adiabatic") or pt in ("bir-4", "bir4"):
+            return 4.0  # modulation parameter for adiabatic-style pulses
+        return 1.0  # rectangular and default
+
+    def _compute_integration_factor_from_wave(self, b1_wave, t_wave):
+        """Compute integration factor |∫shape dt| / duration for a given complex waveform."""
+        try:
+            b1_wave = np.asarray(b1_wave, dtype=complex)
+            t_wave = np.asarray(t_wave, dtype=float)
+            if b1_wave.size < 2 or t_wave.size < 2:
+                return 1.0
+            duration = float(t_wave[-1] - t_wave[0])
+            dt = float(np.median(np.diff(t_wave)))
+            peak = np.max(np.abs(b1_wave)) if np.any(np.abs(b1_wave)) else 1.0
+            shape = b1_wave / peak if peak != 0 else b1_wave
+            area = np.trapezoid(shape, dx=dt)
+            aligned = np.real(area * np.exp(-1j * np.angle(area)))
+            if not np.isfinite(aligned) or abs(aligned) < 1e-12:
+                return 1.0
+            return abs(aligned) / max(duration, 1e-12)
+        except Exception:
+            return 1.0
+
+    def get_integration_factor(self) -> float:
+        """Return best-known integration factor (cached or recomputed from current pulse)."""
+        if self.current_pulse is not None and len(self.current_pulse) == 2:
+            b1_wave, t_wave = self.current_pulse
+            computed = self._compute_integration_factor_from_wave(b1_wave, t_wave)
+            self.last_integration_factor = computed
+            return computed
+        return self.last_integration_factor or 1.0
         
     def update_pulse(self):
         """Update the RF pulse based on current parameters."""
@@ -428,7 +486,7 @@ class RFPulseDesigner(QGroupBox):
             
         duration = self.duration.value() / 1000  # Convert to seconds
         flip = self.flip_angle.value()
-        tbw = self.tbw.value()
+        design_tbw = self._design_tbw_for_type(pulse_type)
         phase_rad = np.deg2rad(self.phase.value())
         # Increase time resolution using desired dt
         if self.target_dt and self.target_dt > 0:
@@ -439,7 +497,7 @@ class RFPulseDesigner(QGroupBox):
         
         # Design pulse
         freq_offset_hz = self.freq_offset.value()
-        b1, time = design_rf_pulse(pulse_type, duration, flip, tbw, npoints, freq_offset=freq_offset_hz)
+        b1, time = design_rf_pulse(pulse_type, duration, flip, design_tbw, npoints, freq_offset=freq_offset_hz)
         # Sampling time [s]
         dt = duration / len(b1)
 
@@ -454,6 +512,15 @@ class RFPulseDesigner(QGroupBox):
         aligned_area = np.real(area * np.exp(1j * opt_phase))
         if not np.isfinite(aligned_area) or abs(aligned_area) < 1e-12:
             aligned_area = 1e-12
+
+        # Estimate integration factor relative to a unit-amplitude block
+        try:
+            integration_factor = abs(aligned_area) / max(duration, 1e-12)
+        except Exception:
+            integration_factor = None
+        self._update_tbw_auto(integration_factor)
+        if integration_factor is not None and np.isfinite(integration_factor):
+            self.last_integration_factor = float(integration_factor)
 
         # flip angle in radians:
         flip_rad = np.deg2rad(flip)
@@ -542,9 +609,31 @@ class RFPulseDesigner(QGroupBox):
                 self.custom_b1_amplitude.blockSignals(False)
 
                 # Update info label
+                tbw_hint = None
+                integfac = None
+                try:
+                    if hasattr(metadata, "integfac") and metadata.integfac not in (None, 0):
+                        if np.isfinite(metadata.integfac) and metadata.integfac > 0:
+                            integfac = float(metadata.integfac)
+                            tbw_hint = 1.0 / integfac
+                except Exception:
+                    tbw_hint = None
+                    integfac = None
+                tbw_text = f", TBW≈{tbw_hint:.3f} (1/integfac={integfac:.3f})" if tbw_hint else ""
                 self.custom_info_label.setText(
-                    f"Original: {metadata.duration*1000:.3f} ms, {max_b1:.6f} G"
+                    f"Original: {metadata.duration*1000:.3f} ms, {max_b1:.6f} G{tbw_text}"
                 )
+
+                # If we have an estimated TBW from integfac, surface it in the designer control
+                if tbw_hint:
+                    self.tbw.blockSignals(True)
+                    self.tbw.setValue(tbw_hint)
+                    self.tbw.blockSignals(False)
+                self._update_tbw_auto(integfac)
+                if integfac is not None and np.isfinite(integfac):
+                    self.last_integration_factor = float(integfac)
+                else:
+                    self.last_integration_factor = self._compute_integration_factor_from_wave(b1, time)
 
                 # Show custom settings panel
                 self.custom_settings_group.setVisible(True)
@@ -605,6 +694,14 @@ class RFPulseDesigner(QGroupBox):
         original_b1 = self.loaded_pulse_b1
         original_time = self.loaded_pulse_time
         original_duration = original_time[-1] - original_time[0]
+        metadata = getattr(self, "loaded_pulse_metadata", None)
+        integfac = 1.0
+        try:
+            if metadata is not None and hasattr(metadata, "integfac"):
+                if metadata.integfac not in (None, 0) and np.isfinite(metadata.integfac):
+                    integfac = float(metadata.integfac)
+        except Exception:
+            integfac = 1.0
 
         # Calculate time scaling factor
         new_duration_s = new_duration_ms / 1000.0
@@ -642,6 +739,7 @@ class RFPulseDesigner(QGroupBox):
             aligned_area = np.real(area * np.exp(1j * opt_phase))
             if not np.isfinite(aligned_area) or abs(aligned_area) < 1e-12:
                 aligned_area = 1e-12
+            aligned_area *= integfac  # vendor integration factor scales effective area
 
             # Gyromagnetic ratio for 1H (rad / (T s))
             gmr_1h_rad_Ts = 267522187.43999997
@@ -669,6 +767,11 @@ class RFPulseDesigner(QGroupBox):
             t_min, t_max = 0, new_time[-1] * 1000
             self.plot_widget.setLimits(xMin=0, xMax=max(t_max, 0.1))
             self.plot_widget.setXRange(0, max(t_max, 0.1), padding=0)
+
+        # Update heuristic TBW from integration factor (if provided)
+        self._update_tbw_auto(integfac)
+        if integfac is not None and np.isfinite(integfac):
+            self.last_integration_factor = float(integfac)
 
         # Emit signal that pulse changed
         self.pulse_changed.emit(self.current_pulse)
@@ -772,7 +875,7 @@ class SequenceDesigner(QGroupBox):
         self.ssfp_start_amp = QDoubleSpinBox()
         self.ssfp_start_amp.setRange(0.0, 1e3)
         self.ssfp_start_amp.setDecimals(6)
-        self.ssfp_start_amp.setValue(0.05)
+        self.ssfp_start_amp.setValue(0.025)
         self.ssfp_start_amp.valueChanged.connect(lambda _: self.update_diagram())
         row4.addWidget(self.ssfp_start_amp)
         row4.addWidget(QLabel("Start phase (deg):"))
@@ -916,16 +1019,25 @@ class SequenceDesigner(QGroupBox):
         """
         presets = {
             "Free Induction Decay": {
-                "te_ms": 10,
-                "tr_ms": 100
+                "te_ms": 3,
+                "tr_ms": 10,
+                "num_positions": 1,
+                "num_frequencies": 201,
+                "frequency_range_hz": 100,
             },
             "Spin Echo": {
-                "te_ms": 10,
-                "tr_ms": 100
+                "te_ms": 5,
+                "tr_ms": 20,
+                "num_positions": 1,
+                "num_frequencies": 201,
+                "frequency_range_hz": 100,
             },
             "Spin Echo (Tip-axis 180)": {
-                "te_ms": 10,
-                "tr_ms": 100
+                "te_ms": 5,
+                "tr_ms": 20,
+                "num_positions": 1,
+                "num_frequencies": 201,
+                "frequency_range_hz": 100,
             },
             "Gradient Echo": {
                 "te_ms": 5,
@@ -934,7 +1046,9 @@ class SequenceDesigner(QGroupBox):
             },
             "Slice Select + Rephase": {
                 "te_ms": 10,
-                "tr_ms": 100
+                "tr_ms": 100,
+                "num_positions": 99,
+                "num_frequencies": 3,
             },
             "SSFP (Loop)": {
                 "te_ms": 2,
@@ -945,7 +1059,7 @@ class SequenceDesigner(QGroupBox):
                 "ssfp_phase": 0.0,
                 "ssfp_dur": 1.0,
                 "ssfp_start_delay": 0.0,
-                "ssfp_start_amp": 0.05,
+                "ssfp_start_amp": 0.025,
                 "ssfp_start_phase": 180.0,
                 "ssfp_alternate_phase": True,
                 "pulse_type": "gaussian"
@@ -953,7 +1067,9 @@ class SequenceDesigner(QGroupBox):
             "Inversion Recovery": {
                 "te_ms": 20,
                 "tr_ms": 100,
-                "ti_ms": 40
+                "ti_ms": 40,
+                "num_positions": 1,
+                "num_frequencies": 51,
             },
             "FLASH": {
                 "te_ms": 3,
@@ -962,7 +1078,9 @@ class SequenceDesigner(QGroupBox):
             },
             "EPI": {
                 "te_ms": 30,
-                "tr_ms": 100
+                "tr_ms": 100,
+                "num_positions": 51,
+                "num_frequencies": 3,
             },
             "Custom": {
                 "te_ms": 10,
@@ -1039,15 +1157,38 @@ class SequenceDesigner(QGroupBox):
                 custom_pulse=custom_pulse,
             )
         else:
-            # Return simple FID for now using configured time step and TE for duration
+            # Return a simple FID using the current RF designer pulse (resampled to dt)
             dt = max(self.default_dt, 1e-6)
             total_duration = max(te, 0.01)  # cover at least 10 ms or TE
-            ntime = int(np.ceil(total_duration / dt))
+            # Use designer pulse if available; otherwise synthesize a calibrated rect
+            pulse = None
+            if hasattr(self, "parent_gui") and self.parent_gui is not None:
+                pulse = self.parent_gui.rf_designer.get_pulse()
+            if pulse is not None and len(pulse) == 2 and pulse[0] is not None:
+                b1_wave, t_wave = pulse
+                b1_wave = np.asarray(b1_wave, dtype=complex)
+                t_wave = np.asarray(t_wave, dtype=float)
+                if b1_wave.size < 2 or t_wave.size < 2:
+                    b1_wave = np.array([0.0], dtype=complex)
+                    t_wave = np.array([0.0], dtype=float)
+                wave_duration = float(t_wave[-1] - t_wave[0] + (t_wave[1] - t_wave[0]) if len(t_wave) > 1 else dt)
+                n_wave = max(1, int(np.ceil(wave_duration / dt)))
+                t_resample = np.arange(0, n_wave) * dt
+                real_part = np.interp(t_resample, t_wave - t_wave[0], np.real(b1_wave))
+                imag_part = np.interp(t_resample, t_wave - t_wave[0], np.imag(b1_wave))
+                b1_exc = real_part + 1j * imag_part
+            else:
+                exc_duration = 1e-3
+                n_exc = max(int(np.ceil(exc_duration / dt)), 16)
+                flip = self.parent_gui.rf_designer.flip_angle.value() if hasattr(self, "parent_gui") and self.parent_gui is not None else 90.0
+                b1_exc, _ = design_rf_pulse("rect", duration=n_exc * dt, flip_angle=flip, npoints=n_exc)
+
+            ntime = max(len(b1_exc), int(np.ceil(total_duration / dt)))
             ntime = min(max(ntime, 1000), 20000)  # keep reasonable bounds
-            time = np.linspace(0, total_duration, ntime, endpoint=False)
             b1 = np.zeros(ntime, dtype=complex)
-            b1[0] = 0.01  # Hard pulse
             gradients = np.zeros((ntime, 3))
+            b1[:min(len(b1_exc), ntime)] = b1_exc[:min(len(b1_exc), ntime)]
+            time = np.arange(ntime) * dt
             return (b1, gradients, time)
 
     def compile_sequence(self, custom_pulse=None, dt: float = None):
@@ -2157,6 +2298,9 @@ class ParameterSweepWidget(QWidget):
             QMessageBox.warning(self, "Error", "No parent GUI available.")
             return
 
+        if hasattr(self.parent_gui, "set_sweep_mode"):
+            self.parent_gui.set_sweep_mode(True)
+
         self.sweep_running = True
         self.run_button.setEnabled(False)
         self.stop_button.setEnabled(True)
@@ -2175,6 +2319,8 @@ class ParameterSweepWidget(QWidget):
         selected_metrics = [name for name, cb in self.metric_checkboxes.items() if cb.isChecked()]
         if not selected_metrics:
             QMessageBox.warning(self, "No Metrics", "Please select at least one output metric.")
+            if hasattr(self.parent_gui, "set_sweep_mode"):
+                self.parent_gui.set_sweep_mode(False)
             self.sweep_running = False
             self.run_button.setEnabled(True)
             self.stop_button.setEnabled(False)
@@ -2190,56 +2336,61 @@ class ParameterSweepWidget(QWidget):
         # Store initial values for parameters that need them (like B1 scale)
         initial_flip_angle = self.parent_gui.rf_designer.flip_angle.value()
 
-        for i, param_val in enumerate(param_values):
-            if not self.sweep_running:
-                break
+        try:
+            for i, param_val in enumerate(param_values):
+                if not self.sweep_running:
+                    break
 
-            # Update parameter
-            self._apply_parameter_value(param_name, param_val, initial_flip_angle)
+                # Update parameter
+                self._apply_parameter_value(param_name, param_val, initial_flip_angle)
 
-            # Run simulation
-            try:
-                self.parent_gui.run_simulation()
+                # Run simulation
+                try:
+                    self.parent_gui.run_simulation()
 
-                # Wait for simulation to complete (simple polling)
-                while self.parent_gui.simulation_thread and self.parent_gui.simulation_thread.isRunning():
-                    QApplication.processEvents()
-                    time.sleep(0.1)
+                    # Wait for simulation to complete (simple polling)
+                    while self.parent_gui.simulation_thread and self.parent_gui.simulation_thread.isRunning():
+                        QApplication.processEvents()
+                        time.sleep(0.1)
 
-                # Extract metrics from results
-                if self.parent_gui.last_result:
-                    for metric in selected_metrics:
-                        value = self._extract_metric(metric, self.parent_gui.last_result)
-                        results['metrics'][metric].append(value)
-                else:
-                    # No result - append NaN to maintain array length
-                    for metric in selected_metrics:
-                        results['metrics'][metric].append(float('nan'))
-                    self.parent_gui.log_message(f"Warning: No result for {param_name}={param_val:.2f}")
-            except Exception as e:
-                import traceback
-                error_msg = f"Error at {param_name}={param_val:.2f}: {str(e)}\n{traceback.format_exc()}"
-                self.parent_gui.log_message(error_msg)
-                QMessageBox.warning(self, "Simulation Error", f"Error at {param_name}={param_val:.2f}: {str(e)}")
-                break
+                    # Extract metrics from results
+                    if self.parent_gui.last_result:
+                        for metric in selected_metrics:
+                            value = self._extract_metric(metric, self.parent_gui.last_result)
+                            results['metrics'][metric].append(value)
+                    else:
+                        # No result - append NaN to maintain array length
+                        for metric in selected_metrics:
+                            results['metrics'][metric].append(float('nan'))
+                        self.parent_gui.log_message(f"Warning: No result for {param_name}={param_val:.2f}")
+                except Exception as e:
+                    import traceback
+                    error_msg = f"Error at {param_name}={param_val:.2f}: {str(e)}\n{traceback.format_exc()}"
+                    self.parent_gui.log_message(error_msg)
+                    QMessageBox.warning(self, "Simulation Error", f"Error at {param_name}={param_val:.2f}: {str(e)}")
+                    break
 
-            # Update progress
-            self.progress_bar.setValue(int((i + 1) / n_steps * 100))
+                # Update progress
+                self.progress_bar.setValue(int((i + 1) / n_steps * 100))
 
-        # Store and display results
-        self.last_sweep_results = results
-        self._display_results(results)
-
-        self.sweep_running = False
-        self.run_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
-        self.export_button.setEnabled(True)
+            # Store and display results
+            self.last_sweep_results = results
+            self._display_results(results)
+        finally:
+            self.sweep_running = False
+            self.run_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
+            self.export_button.setEnabled(True)
+            if hasattr(self.parent_gui, "set_sweep_mode"):
+                self.parent_gui.set_sweep_mode(False)
 
     def stop_sweep(self):
         """Stop the parameter sweep."""
         self.sweep_running = False
         self.run_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        if hasattr(self.parent_gui, "set_sweep_mode"):
+            self.parent_gui.set_sweep_mode(False)
 
     def _apply_parameter_value(self, param_name, value, initial_flip_angle=None):
         """Apply parameter value to the GUI controls."""
@@ -2428,7 +2579,9 @@ class BlochSimulatorGUI(QMainWindow):
         self.initial_mz = 1.0  # Track initial Mz to scale plot limits
         self._last_spatial_export = None
         self._last_spectrum_export = None
+        self._spectrum_final_range = None
         self.dataset_exporter = DatasetExporter()
+        self._sweep_mode = False
 
         # Dirty flags for expensive computations during animation
         self._spectrum_needs_update = False
@@ -2465,10 +2618,15 @@ class BlochSimulatorGUI(QMainWindow):
         # Sequence designer
         self.sequence_designer = SequenceDesigner()
         left_layout.addWidget(self.sequence_designer)
+        self.sequence_designer.parent_gui = self
         self.rf_designer.pulse_changed.connect(self.sequence_designer.set_custom_pulse)
+        self.rf_designer.pulse_changed.connect(lambda _: self._auto_update_ssfp_amplitude())
         self.sequence_designer.set_custom_pulse(self.rf_designer.get_pulse())
         # Connect sequence type changes to preset loader
         self.sequence_designer.sequence_type.currentTextChanged.connect(self._load_sequence_presets)
+        self.sequence_designer.sequence_type.currentTextChanged.connect(lambda _: self._auto_update_ssfp_amplitude())
+        self.sequence_designer.ssfp_dur.valueChanged.connect(lambda _: self._auto_update_ssfp_amplitude())
+        self.rf_designer.flip_angle.valueChanged.connect(lambda _: self._auto_update_ssfp_amplitude())
         # Link 3D viewer playhead to sequence diagram
         self.sequence_designer.update_diagram()
         
@@ -2512,7 +2670,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.freq_range = QDoubleSpinBox()
         # Avoid zero-span (forces unique frequencies)
         self.freq_range.setRange(0.01, 1e4)
-        self.freq_range.setValue(100.0)
+        self.freq_range.setValue(1000.0)
         freq_layout.addWidget(self.freq_range)
         control_layout.addLayout(freq_layout)
         # Frequency helper text
@@ -2542,16 +2700,6 @@ class BlochSimulatorGUI(QMainWindow):
         self.extra_tail_spin.setSingleStep(1.0)
         tail_layout.addWidget(self.extra_tail_spin)
         control_layout.addLayout(tail_layout)
-
-        # Spectrum range control
-        spec_layout = QHBoxLayout()
-        spec_layout.addWidget(QLabel("Spectrum range (Hz):"))
-        self.spectrum_range = QDoubleSpinBox()
-        self.spectrum_range.setRange(10, 1e6)
-        self.spectrum_range.setValue(2000)
-        self.spectrum_range.setSingleStep(500)
-        spec_layout.addWidget(self.spectrum_range)
-        control_layout.addLayout(spec_layout)
 
         # Max traces control for performance
         max_traces_layout = QHBoxLayout()
@@ -2834,6 +2982,14 @@ class BlochSimulatorGUI(QMainWindow):
         spectrum_layout.addLayout(spectrum_header)
 
         spectrum_controls = QHBoxLayout()
+        spectrum_controls.addWidget(QLabel("Plot type:"))
+        self.spectrum_plot_type = QComboBox()
+        self.spectrum_plot_type.addItems(["Line", "Heatmap"])
+        self.spectrum_plot_type.currentTextChanged.connect(
+            lambda _: self._refresh_spectrum(time_idx=self._current_playback_index() if hasattr(self, '_current_playback_index') else None)
+        )
+        spectrum_controls.addWidget(self.spectrum_plot_type)
+
         spectrum_controls.addWidget(QLabel("Spectrum view:"))
         self.spectrum_mode = QComboBox()
         self.spectrum_mode.addItems(["Mean only", "Mean + individuals", "Individual (select pos)"])
@@ -2856,7 +3012,24 @@ class BlochSimulatorGUI(QMainWindow):
         self.spectrum_markers_checkbox.toggled.connect(lambda _: self.update_plots(self.last_result) if self.last_result else None)
         spectrum_layout.addWidget(self.spectrum_markers_checkbox)
 
+        # Toggle to show the simulated off-resonant spins directly (no FFT)
+        self.spectrum_show_spins_checkbox = QCheckBox("Show off-resonant spins (no FFT)")
+        self.spectrum_show_spins_checkbox.setChecked(True)
+        self.spectrum_show_spins_checkbox.setToolTip("Plot the discrete simulated frequency offsets instead of FFT bins")
+        self.spectrum_show_spins_checkbox.toggled.connect(lambda _: self._refresh_spectrum(time_idx=self._current_playback_index()) if hasattr(self, '_current_playback_index') else None)
+        spectrum_layout.addWidget(self.spectrum_show_spins_checkbox)
+
         spectrum_layout.addWidget(self.spectrum_plot)
+        # Spectrum heatmap (hidden unless selected)
+        self.spectrum_heatmap = pg.PlotWidget()
+        self.spectrum_heatmap.setLabel('left', 'Spin Index')
+        self.spectrum_heatmap.setLabel('bottom', 'Frequency', 'Hz')
+        self.spectrum_heatmap_item = pg.ImageItem()
+        self.spectrum_heatmap.addItem(self.spectrum_heatmap_item)
+        self.spectrum_heatmap_colorbar = pg.ColorBarItem(values=(0, 1), colorMap='viridis')
+        self.spectrum_heatmap_colorbar.setImageItem(self.spectrum_heatmap_item)
+        self.spectrum_heatmap.hide()
+        spectrum_layout.addWidget(self.spectrum_heatmap)
         spectrum_container.setLayout(spectrum_layout)
         self.tab_widget.addTab(spectrum_container, "Spectrum")
 
@@ -2900,6 +3073,11 @@ class BlochSimulatorGUI(QMainWindow):
         self.spatial_freq_label = QLabel("Freq idx: 0")
         spatial_controls.addWidget(self.spatial_freq_label)
         spatial_controls.addWidget(self.spatial_freq_slider)
+        spatial_controls.addWidget(QLabel("Plot type:"))
+        self.spatial_plot_type = QComboBox()
+        self.spatial_plot_type.addItems(["Line", "Heatmap"])
+        self.spatial_plot_type.currentTextChanged.connect(lambda _: self.update_spatial_plot_from_last_result())
+        spatial_controls.addWidget(self.spatial_plot_type)
         spatial_layout.addLayout(spatial_controls)
 
         # Toggle for colored position/frequency markers
@@ -2937,6 +3115,34 @@ class BlochSimulatorGUI(QMainWindow):
         spatial_plots_layout.addWidget(self.spatial_mz_plot)
 
         spatial_layout.addLayout(spatial_plots_layout)
+
+        # Heatmap container (hidden by default)
+        self.spatial_heatmap_container = QWidget()
+        spatial_heatmap_layout = QVBoxLayout()
+        spatial_heatmap_layout.setContentsMargins(0, 0, 0, 0)
+        self.spatial_heatmap_mxy = pg.PlotWidget()
+        self.spatial_heatmap_mxy.setLabel('bottom', 'Position', 'm')
+        self.spatial_heatmap_mxy.setLabel('left', 'Frequency', 'Hz')
+        self.spatial_heatmap_mxy.setTitle("Mxy magnitude (|Mxy|)")
+        self.spatial_heatmap_mxy_item = pg.ImageItem()
+        self.spatial_heatmap_mxy.addItem(self.spatial_heatmap_mxy_item)
+        self.spatial_heatmap_mxy_colorbar = pg.ColorBarItem(values=(0, 1), colorMap='viridis')
+        self.spatial_heatmap_mxy_colorbar.setImageItem(self.spatial_heatmap_mxy_item)
+        spatial_heatmap_layout.addWidget(self.spatial_heatmap_mxy)
+
+        self.spatial_heatmap_mz = pg.PlotWidget()
+        self.spatial_heatmap_mz.setLabel('bottom', 'Position', 'm')
+        self.spatial_heatmap_mz.setLabel('left', 'Frequency', 'Hz')
+        self.spatial_heatmap_mz.setTitle("Mz")
+        self.spatial_heatmap_mz_item = pg.ImageItem()
+        self.spatial_heatmap_mz.addItem(self.spatial_heatmap_mz_item)
+        self.spatial_heatmap_mz_colorbar = pg.ColorBarItem(values=(0, 1), colorMap='viridis')
+        self.spatial_heatmap_mz_colorbar.setImageItem(self.spatial_heatmap_mz_item)
+        spatial_heatmap_layout.addWidget(self.spatial_heatmap_mz)
+
+        self.spatial_heatmap_container.setLayout(spatial_heatmap_layout)
+        self.spatial_heatmap_container.hide()
+        spatial_layout.addWidget(self.spatial_heatmap_container)
 
         spatial_container.setLayout(spatial_layout)
         self.tab_widget.addTab(spatial_container, "Spatial")
@@ -3215,6 +3421,15 @@ class BlochSimulatorGUI(QMainWindow):
             dt = 1.0
         return np.arange(ntime) * dt
 
+    def _spectrum_fft_len(self, n: int) -> int:
+        """Choose an FFT length for smoother spectra."""
+        # Next power of two with a minimum to avoid too few bins
+        n = max(n, 8)
+        n_fft = 1 << (n - 1).bit_length()
+        # Apply a mild zero-padding to improve resolution without overkill
+        n_fft = min(max(n_fft * 2, 512), 262144)
+        return int(n_fft)
+
     def _playback_to_full_index(self, playback_idx: int) -> int:
         """Map a playback index to the corresponding full-resolution time index."""
         if self.playback_indices is None or len(self.playback_indices) == 0:
@@ -3362,6 +3577,38 @@ class BlochSimulatorGUI(QMainWindow):
         self.sequence_designer.set_time_step(dt_s)
         self.sequence_designer.update_diagram(self.rf_designer.get_pulse())
 
+    def _auto_update_ssfp_amplitude(self):
+        """Auto-calculate SSFP pulse amplitude from flip angle, duration, and integration factor."""
+        try:
+            if self.sequence_designer.sequence_type.currentText() != "SSFP (Loop)":
+                return
+            duration_s = max(self.sequence_designer.ssfp_dur.value() / 1000.0, 1e-9)
+            flip_rad = np.deg2rad(self.rf_designer.flip_angle.value())
+            integfac = max(self.rf_designer.get_integration_factor(), 1e-6)
+            gmr_1h_rad_Ts = 267522187.43999997
+            # Required amplitude (Tesla); convert to Gauss
+            amp_gauss = float(flip_rad / (gmr_1h_rad_Ts * integfac * duration_s)) * 1e4
+            if not np.isfinite(amp_gauss) or amp_gauss <= 0:
+                return
+            # Update SSFP amplitude controls without triggering extra diagram redraws
+            self.sequence_designer.ssfp_amp.blockSignals(True)
+            self.sequence_designer.ssfp_amp.setValue(amp_gauss)
+            self.sequence_designer.ssfp_amp.blockSignals(False)
+
+            start_amp_val = amp_gauss * 0.5
+            self.sequence_designer.ssfp_start_amp.blockSignals(True)
+            self.sequence_designer.ssfp_start_amp.setValue(start_amp_val)
+            self.sequence_designer.ssfp_start_amp.blockSignals(False)
+            # Keep duration/phase-driven diagram in sync
+            self.sequence_designer.update_diagram(self.rf_designer.get_pulse())
+        except Exception:
+            # Fail silently to avoid interrupting UI flow
+            return
+
+    def set_sweep_mode(self, enabled: bool):
+        """Enable/disable sweep mode (skip heavy plotting during sweeps)."""
+        self._sweep_mode = bool(enabled)
+
     def _setup_time_synchronization(self):
         """Setup connections for universal time control synchronization."""
         # Connect universal time control to update all views
@@ -3423,29 +3670,18 @@ class BlochSimulatorGUI(QMainWindow):
             # to improve performance - only 3D vector animates
             # Time lines removed for performance
 
-        # Handle expensive redraws - only for visible tabs during animation
-        if not skip_expensive_updates:
-            # Full update when paused/scrubbing - always update visible tabs
-            if spatial_tab_visible:
-                self.update_spatial_plot_from_last_result(time_idx=actual_idx)
-                self._spatial_needs_update = False
-            else:
-                # Mark as dirty if not updated
-                self._spatial_needs_update = True
-
-            if spectrum_tab_visible:
-                self._refresh_spectrum(time_idx=actual_idx)
-                self._spectrum_needs_update = False
-            else:
-                # Mark as dirty if not updated
-                self._spectrum_needs_update = True
+        # Always update visible spectrum/spatial views, even during playback
+        if spatial_tab_visible:
+            self.update_spatial_plot_from_last_result(time_idx=actual_idx)
+            self._spatial_needs_update = False
         else:
-            # During animation playback, skip expensive updates
-            # Mark all tabs as needing update (will update when animation pauses or tab switches)
-            if not spatial_tab_visible:
-                self._spatial_needs_update = True
-            if not spectrum_tab_visible:
-                self._spectrum_needs_update = True
+            self._spatial_needs_update = True
+
+        if spectrum_tab_visible:
+            self._refresh_spectrum(time_idx=actual_idx)
+            self._spectrum_needs_update = False
+        else:
+            self._spectrum_needs_update = True
 
     def _on_tab_changed(self, index: int):
         """Handle tab changes to optimize rendering.
@@ -3454,7 +3690,9 @@ class BlochSimulatorGUI(QMainWindow):
         """
         # Enable updates on all plot widgets first
         for plot in [self.mxy_plot, self.mz_plot, self.signal_plot,
-                     self.spectrum_plot, self.spatial_mxy_plot, self.spatial_mz_plot]:
+                     self.spectrum_plot, getattr(self, "spectrum_heatmap", None),
+                     self.spatial_mxy_plot, self.spatial_mz_plot,
+                     getattr(self, "spatial_heatmap_mxy", None), getattr(self, "spatial_heatmap_mz", None)]:
             if plot is not None:
                 plot.setUpdatesEnabled(True)
 
@@ -3467,6 +3705,8 @@ class BlochSimulatorGUI(QMainWindow):
             self.signal_plot.setUpdatesEnabled(False)
         if index != 3:  # Not Spectrum tab
             self.spectrum_plot.setUpdatesEnabled(False)
+            if hasattr(self, "spectrum_heatmap") and self.spectrum_heatmap is not None:
+                self.spectrum_heatmap.setUpdatesEnabled(False)
         else:  # Switching TO Spectrum tab
             # Update spectrum if it's dirty
             if self._spectrum_needs_update and hasattr(self, 'last_result') and self.last_result is not None:
@@ -3477,6 +3717,10 @@ class BlochSimulatorGUI(QMainWindow):
         if index != 4:  # Not Spatial tab
             self.spatial_mxy_plot.setUpdatesEnabled(False)
             self.spatial_mz_plot.setUpdatesEnabled(False)
+            if hasattr(self, "spatial_heatmap_mxy"):
+                self.spatial_heatmap_mxy.setUpdatesEnabled(False)
+            if hasattr(self, "spatial_heatmap_mz"):
+                self.spatial_heatmap_mz.setUpdatesEnabled(False)
         else:  # Switching TO Spatial tab
             # Update spatial if it's dirty
             if self._spatial_needs_update and hasattr(self, 'last_result') and self.last_result is not None:
@@ -3741,6 +3985,7 @@ class BlochSimulatorGUI(QMainWindow):
         # Frequency selection/averaging for spatial view
         freq_count = mx_display.shape[1]
         self.spatial_freq_slider.setMaximum(max(0, freq_count - 1))
+        self.spatial_freq_slider.setValue(np.floor(max(0, freq_count - 1)/2).astype(int))
         freq_sel = min(self.spatial_freq_slider.value(), freq_count - 1)
         self.spatial_freq_label.setText(f"Freq idx: {freq_sel}")
 
@@ -3763,6 +4008,12 @@ class BlochSimulatorGUI(QMainWindow):
 
         self.log_message(f"Spatial plot: mxy_pos shape = {mxy_pos.shape}, mz_pos shape = {mz_pos.shape}, pos_distance shape = {pos_distance.shape}")
 
+        freq_axis = np.asarray(self.last_frequencies) if self.last_frequencies is not None else np.arange(freq_count)
+        if freq_axis.shape[0] != freq_count:
+            freq_axis = np.linspace(freq_axis.min() if freq_axis.size else 0.0,
+                                    freq_axis.max() if freq_axis.size else float(freq_count - 1),
+                                    freq_count)
+
         # Cache data for export
         self._last_spatial_export = {
             "position_m": pos_distance,
@@ -3773,26 +4024,40 @@ class BlochSimulatorGUI(QMainWindow):
             "time_s": self.last_time[time_idx] if self.last_time is not None and len(self.last_time) > time_idx else None,
             "mxy_per_freq": np.sqrt(mx_display**2 + my_display**2),
             "mz_per_freq": mz_display,
+            "frequency_axis": freq_axis,
         }
 
         # Update plots
-        self._update_spatial_line_plots(pos_distance, mxy_pos, mz_pos, mx_display, my_display, mz_display, freq_sel, spatial_mode)
+        plot_type = self.spatial_plot_type.currentText() if hasattr(self, "spatial_plot_type") else "Line"
+        show_heatmap = (plot_type == "Heatmap")
+        self._set_spatial_plot_visibility(show_heatmap)
+        if show_heatmap:
+            self._update_spatial_heatmaps(pos_distance, self._last_spatial_export["mxy_per_freq"], mz_display, freq_axis)
+        else:
+            self._update_spatial_line_plots(pos_distance, mxy_pos, mz_pos, mx_display, my_display, mz_display, freq_sel, spatial_mode)
 
-        # Show time lines if in time-resolved mode
+        # Keep sequence diagram in sync but avoid time cursors on spatial (position) axes
+        if hasattr(self, 'spatial_mxy_time_line'):
+            self.spatial_mxy_time_line.hide()
+        if hasattr(self, 'spatial_mz_time_line'):
+            self.spatial_mz_time_line.hide()
         if is_time_resolved and time_idx < len(self.last_time):
             current_time = self.last_time[time_idx]
-            if hasattr(self, 'spatial_mxy_time_line'):
-                self.spatial_mxy_time_line.setValue(current_time)
-                self.spatial_mxy_time_line.show()
-            if hasattr(self, 'spatial_mz_time_line'):
-                self.spatial_mz_time_line.setValue(current_time)
-                self.spatial_mz_time_line.show()
             # Synchronize sequence diagram playhead
             if hasattr(self, 'sequence_designer') and hasattr(self.sequence_designer, 'playhead_line'):
                 if self.sequence_designer.playhead_line is not None:
                     self.sequence_designer.playhead_line.setValue(current_time * 1000.0)
                     if not self.sequence_designer.playhead_line.isVisible():
                         self.sequence_designer.playhead_line.show()
+
+    def _set_spatial_plot_visibility(self, show_heatmap: bool):
+        """Toggle between line plots and heatmaps in the Spatial view."""
+        if hasattr(self, "spatial_heatmap_container"):
+            self.spatial_heatmap_container.setVisible(show_heatmap)
+        if hasattr(self, "spatial_mxy_plot"):
+            self.spatial_mxy_plot.setVisible(not show_heatmap)
+        if hasattr(self, "spatial_mz_plot"):
+            self.spatial_mz_plot.setVisible(not show_heatmap)
 
     def _update_spatial_line_plots(self, position, mxy, mz, mx_display=None, my_display=None, mz_display=None, freq_sel=0, spatial_mode="Mean only"):
         """Update the Mxy and Mz line plots."""
@@ -3959,6 +4224,58 @@ class BlochSimulatorGUI(QMainWindow):
             import traceback
             self.log_message(f"Spatial plot: traceback: {traceback.format_exc()}")
 
+    def _update_spatial_heatmaps(self, position, mxy_per_freq, mz_per_freq, freq_axis):
+        """Render spatial heatmaps (position vs frequency) for |Mxy| and Mz."""
+        try:
+            if mxy_per_freq is None or mz_per_freq is None:
+                return
+            pos = np.asarray(position)
+            freq_axis = np.asarray(freq_axis)
+            if pos.size == 0 or freq_axis.size == 0:
+                return
+            mxy_arr = np.abs(np.asarray(mxy_per_freq))
+            mz_arr = np.asarray(mz_per_freq)
+            if mxy_arr.ndim != 2 or mz_arr.ndim != 2:
+                return
+            # Ensure axis lengths match the data
+            npos, nfreq = mxy_arr.shape
+            if freq_axis.size != nfreq:
+                freq_axis = np.linspace(freq_axis.min() if freq_axis.size else 0.0,
+                                        freq_axis.max() if freq_axis.size else float(nfreq - 1),
+                                        nfreq)
+
+            pos_min, pos_max = float(np.nanmin(pos)), float(np.nanmax(pos))
+            if not np.isfinite(pos_min) or not np.isfinite(pos_max) or np.isclose(pos_min, pos_max):
+                pos_min, pos_max = 0.0, float(max(npos - 1, 1))
+            x_span = pos_max - pos_min if pos_max != pos_min else 1.0
+            y_min, y_max = float(np.nanmin(freq_axis)), float(np.nanmax(freq_axis))
+            if not np.isfinite(y_min) or not np.isfinite(y_max) or np.isclose(y_min, y_max):
+                y_min, y_max = 0.0, float(max(nfreq - 1, 1))
+            y_span = y_max - y_min if y_max != y_min else 1.0
+
+            def _set_heatmap(plot_widget, img_item, colorbar, data):
+                img_item.setImage(data, autoLevels=True, axisOrder='row-major')
+                img_item.setRect(pos_min, y_min, x_span, y_span)
+                plot_widget.setXRange(pos_min, pos_max, padding=0)
+                plot_widget.setYRange(y_min, y_max, padding=0)
+                if colorbar is not None:
+                    finite_vals = data[np.isfinite(data)]
+                    if finite_vals.size:
+                        vmin = float(finite_vals.min())
+                        vmax = float(finite_vals.max())
+                        if np.isfinite(vmin) and np.isfinite(vmax) and vmax != vmin:
+                            colorbar.setLevels((vmin, vmax))
+
+            # ImageItem expects (rows, cols) = (y, x)
+            _set_heatmap(self.spatial_heatmap_mxy, self.spatial_heatmap_mxy_item,
+                         getattr(self, "spatial_heatmap_mxy_colorbar", None),
+                         mxy_arr.T)
+            _set_heatmap(self.spatial_heatmap_mz, self.spatial_heatmap_mz_item,
+                         getattr(self, "spatial_heatmap_mz_colorbar", None),
+                         mz_arr.T)
+        except Exception as exc:
+            self.log_message(f"Spatial heatmap update failed: {exc}")
+
     def _load_sequence_presets(self, seq_type: str):
         """Load sequence-specific parameter presets if enabled."""
         if not self.tissue_widget.sequence_presets_enabled:
@@ -3983,6 +4300,10 @@ class BlochSimulatorGUI(QMainWindow):
             self.sequence_designer.ssfp_start_phase,
             self.sequence_designer.ssfp_alternate_phase,
             self.rf_designer.pulse_type,
+            self.pos_spin,
+            self.pos_range,
+            self.freq_spin,
+            self.freq_range,
         ]
 
         # Block signals temporarily to avoid triggering diagram updates multiple times
@@ -4018,6 +4339,15 @@ class BlochSimulatorGUI(QMainWindow):
             self.sequence_designer.ssfp_start_phase.setValue(presets["ssfp_start_phase"])
         if "ssfp_alternate_phase" in presets:
             self.sequence_designer.ssfp_alternate_phase.setChecked(presets["ssfp_alternate_phase"])
+        # Optional simulation grid presets
+        if "num_positions" in presets:
+            self.pos_spin.setValue(int(presets["num_positions"]))
+        if "position_range_cm" in presets:
+            self.pos_range.setValue(float(presets["position_range_cm"]))
+        if "num_frequencies" in presets:
+            self.freq_spin.setValue(int(presets["num_frequencies"]))
+        if "frequency_range_hz" in presets:
+            self.freq_range.setValue(float(presets["frequency_range_hz"]))
 
         # Re-enable signals
         for widget in widgets_to_block:
@@ -4081,7 +4411,8 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Always work with explicit arrays so pulse visualization matches the run
         b1_arr, gradients_arr, time_arr = sequence_tuple
-        self.sequence_designer._render_sequence_diagram(b1_arr, gradients_arr, time_arr)
+        if not self._sweep_mode:
+            self.sequence_designer._render_sequence_diagram(b1_arr, gradients_arr, time_arr)
         self.last_b1 = np.asarray(b1_arr)
         self.last_time = np.asarray(time_arr)
         # Compute pulse window (where B1 is non-zero above a small threshold)
@@ -4267,6 +4598,11 @@ class BlochSimulatorGUI(QMainWindow):
         self.last_result['my'] = my_arr
         self.last_result['mz'] = mz_arr
         self.last_result['signal'] = signal_arr
+        # Precompute final-spectrum range for consistent y-limits
+        try:
+            self._compute_final_spectrum_range(signal_arr, self.last_time)
+        except Exception:
+            self._spectrum_final_range = None
 
         self.log_message(
             f"Shapes -> mx:{np.shape(mx_arr)}, my:{np.shape(my_arr)}, mz:{np.shape(mz_arr)}, signal:{np.shape(signal_arr)}"
@@ -4280,6 +4616,12 @@ class BlochSimulatorGUI(QMainWindow):
         if len(time) == 0:
             return
         x_min, x_max = time[0], time[-1]
+
+        # Skip heavy plotting during parameter sweeps; keep data cached only
+        if getattr(self, "_sweep_mode", False):
+            self._spectrum_needs_update = True
+            self._spatial_needs_update = True
+            return
         
         # Handle different result shapes
         if mx_arr.ndim == 2:
@@ -4534,56 +4876,12 @@ class BlochSimulatorGUI(QMainWindow):
             )
             self._set_plot_ranges(self.signal_plot, x_min, x_max, sig_ymin, sig_ymax)
 
-        # Update spectrum
-        from scipy.fft import fft, fftfreq
-        self.spectrum_plot.clear()
-        # Spectrum selection (mean vs selected position)
-        pos_count = signal.shape[1] if signal.ndim >= 2 else 1
-        self.spectrum_pos_slider.setMaximum(max(0, pos_count - 1))
-        pos_sel = min(self.spectrum_pos_slider.value(), pos_count - 1)
-        self.spectrum_pos_label.setText(f"Pos idx: {pos_sel}")
-
-        spectrum_mode = self.spectrum_mode.currentText()
-        if spectrum_mode == "Mean only":
-            sig_for_fft = np.mean(signal, axis=tuple(range(1, signal.ndim))) if signal.ndim > 1 else signal
-        else:
-            # Mean + individuals or Individual: use selected position averaged over freq
-            if signal.ndim == 1:
-                sig_for_fft = signal
-            elif signal.ndim == 2:
-                sig_for_fft = signal[:, pos_sel]
-            else:  # (ntime, npos, nfreq)
-                sig_for_fft = np.mean(signal[:, pos_sel, :], axis=1)
-        n = len(sig_for_fft)
-        dt = time[1] - time[0] if len(time) > 1 else 1
-        spectrum_mode = self.spectrum_mode.currentText()
-        self.spectrum_plot.clear()
-        spectrum = fft(sig_for_fft)
-        freq = fftfreq(n, dt/1000)  # Hz
-        spectrum_shift = np.fft.fftshift(spectrum)
-        freq_shift = np.fft.fftshift(freq)
-
-        # Compute global spectrum magnitude range for fixed y-limits
-        spec_mag_max = float(np.nanmax(np.abs(spectrum_shift)))
-        if spectrum_mode == "Mean + individuals":
-            sig_mean = np.mean(signal, axis=tuple(range(1, signal.ndim))) if signal.ndim > 1 else sig_for_fft
-            spec_mean = np.fft.fftshift(fft(sig_mean))
-            spec_mag_max = max(spec_mag_max, float(np.nanmax(np.abs(spec_mean))))
-            self.spectrum_plot.plot(freq_shift, np.abs(spec_mean), pen=pg.mkPen('c', width=3), name="Mean")
-
-        # Store global spectrum range (min is always 0 for magnitude)
-        self.spectrum_mag_range = (0.0, spec_mag_max * 1.1)
-
-        self.spectrum_plot.plot(freq_shift, np.abs(spectrum_shift), pen='w', name="Selected")
-        span = self.spectrum_range.value()
-        if span > 0:
-            half = span / 2.0
-            self.spectrum_plot.setXRange(-half, half, padding=0)
-        else:
-            self.spectrum_plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
-
-        # Set fixed Y range with 1.1 padding
-        self.spectrum_plot.setYRange(self.spectrum_mag_range[0], self.spectrum_mag_range[1], padding=0)
+        # Update spectrum using the shared helper (avoids SciPy dependency)
+        try:
+            self._refresh_spectrum(time_idx=len(time) - 1)
+            self._spectrum_needs_update = False
+        except Exception as exc:
+            self.log_message(f"Spectrum update failed: {exc}")
 
         # Spatial excitation plot (final Mz across positions, per frequency)
         self.update_spatial_plot_from_last_result()
@@ -5200,7 +5498,7 @@ class BlochSimulatorGUI(QMainWindow):
         sig_slice = sig_arr[:time_idx + 1]
         time_slice = time[:time_idx + 1]
         n = len(time_slice)
-        dt = (time_slice[1] - time_slice[0]) * 1000.0  # seconds -> milliseconds
+        dt = (time_slice[1] - time_slice[0])  # seconds per sample
         spectrum_mode = self.spectrum_mode.currentText() if hasattr(self, 'spectrum_mode') else "Mean only"
         pos_count = sig_slice.shape[1]
         pos_sel = min(self.spectrum_pos_slider.value(), pos_count - 1) if pos_count > 0 else 0
@@ -5210,13 +5508,15 @@ class BlochSimulatorGUI(QMainWindow):
             spec_mean = None
         elif spectrum_mode == "Mean + individuals":
             sig_for_fft = np.mean(sig_slice, axis=tuple(range(1, sig_slice.ndim)))
-            spec_mean = np.fft.fftshift(np.fft.fft(sig_for_fft))
+            n_fft = self._spectrum_fft_len(len(sig_for_fft))
+            spec_mean = np.fft.fftshift(np.fft.fft(sig_for_fft, n=n_fft))
         else:
             sig_for_fft = np.mean(sig_slice[:, pos_sel, :], axis=1)
             spec_mean = None
 
-        spectrum = np.fft.fftshift(np.fft.fft(sig_for_fft))
-        freq = np.fft.fftshift(np.fft.fftfreq(n, dt / 1000.0))
+        n_fft = self._spectrum_fft_len(len(sig_for_fft))
+        spectrum = np.fft.fftshift(np.fft.fft(sig_for_fft, n=n_fft))
+        freq = np.fft.fftshift(np.fft.fftfreq(n_fft, dt))
         return {
             "freq": freq,
             "spectrum": spectrum,
@@ -5225,7 +5525,108 @@ class BlochSimulatorGUI(QMainWindow):
             "pos_count": pos_count,
             "pos_sel": pos_sel,
             "time_idx": time_idx,
+            "time_slice": time_slice,
+            "signal_slice": sig_slice,
         }
+
+    def _update_spectrum_heatmap(self, time_idx=None):
+        """Render a heatmap of spectra across all position/frequency spins."""
+        if self.last_result is None:
+            return
+        signal = self.last_result.get('signal')
+        time = self.last_time if self.last_time is not None else self.last_result.get('time', None)
+        if signal is None or time is None:
+            self.log_message("Spectrum heatmap: missing signal or time axis")
+            return
+        show_spins = self.spectrum_show_spins_checkbox.isChecked() if hasattr(self, "spectrum_show_spins_checkbox") else False
+
+        sig_arr = np.asarray(signal)
+        if sig_arr.ndim == 1:
+            sig_arr = sig_arr[:, None, None]
+        elif sig_arr.ndim == 2:
+            sig_arr = sig_arr[:, :, None]
+
+        ntime = sig_arr.shape[0]
+        if ntime < 2:
+            self.log_message("Spectrum heatmap: need at least two time points")
+            return
+
+        time = np.asarray(time)
+        if time.size < 2:
+            self.log_message("Spectrum heatmap: invalid time array")
+            return
+
+        if time_idx is None:
+            time_idx = ntime - 1
+        time_idx = int(max(1, min(time_idx, ntime - 1)))
+
+        sig_slice = sig_arr[:time_idx + 1]  # (ntime, npos, nfreq)
+        npos, nfreq = sig_arr.shape[1], sig_arr.shape[2]
+
+        if show_spins:
+            # Direct spin magnitudes over time (no FFT)
+            time_ms = time[:time_idx + 1] * 1000.0
+            mags = np.abs(sig_slice).mean(axis=1)  # (ntime, nfreq)
+            freq_axis = np.asarray(self.last_frequencies) if self.last_frequencies is not None else np.arange(nfreq)
+            if freq_axis.shape[0] != nfreq:
+                freq_axis = np.arange(nfreq)
+            try:
+                data = mags.T  # (nfreq, ntime)
+                self.spectrum_heatmap_item.setImage(data, autoLevels=True, axisOrder='row-major')
+                time_span = float(time_ms[-1] - time_ms[0]) if len(time_ms) else 1.0
+                freq_span = float(freq_axis[-1] - freq_axis[0]) if len(freq_axis) > 1 else 1.0
+                self.spectrum_heatmap_item.setRect(float(time_ms[0]), float(freq_axis[0]),
+                                                   time_span if time_span != 0 else 1.0,
+                                                   freq_span if freq_span != 0 else 1.0)
+                self.spectrum_heatmap.setLabel('left', 'Frequency', 'Hz')
+                self.spectrum_heatmap.setLabel('bottom', 'Time', 'ms')
+                self.spectrum_heatmap.setTitle("Off-resonant spins (|S| over time)")
+                self.spectrum_heatmap.setXRange(float(time_ms[0]), float(time_ms[-1]), padding=0)
+                self.spectrum_heatmap.setYRange(float(freq_axis.min()), float(freq_axis.max()), padding=0)
+                if hasattr(self, "spectrum_heatmap_colorbar") and self.spectrum_heatmap_colorbar is not None:
+                    finite_mag = data[np.isfinite(data)]
+                    if finite_mag.size:
+                        vmin = float(finite_mag.min())
+                        vmax = float(finite_mag.max())
+                        if np.isfinite(vmin) and np.isfinite(vmax) and vmax != vmin:
+                            self.spectrum_heatmap_colorbar.setLevels((vmin, vmax))
+            except Exception as exc:
+                self.log_message(f"Spectrum heatmap update failed: {exc}")
+        else:
+            dt = float(time[1] - time[0]) if len(time) > 1 else 1e-3
+            n_fft = self._spectrum_fft_len(sig_slice.shape[0])
+            freq_axis = np.fft.fftshift(np.fft.fftfreq(n_fft, dt))
+
+            sig_flat = sig_slice.reshape(sig_slice.shape[0], -1)  # (ntime, spin)
+            spec = np.fft.fftshift(np.fft.fft(sig_flat, n=n_fft, axis=0), axes=0)  # (nfreqbins, spin)
+            magnitude = np.abs(spec).T  # (spin, nfreqbins)
+
+            spin_count = magnitude.shape[0]
+            if npos > 1 and nfreq == 1:
+                y_label = "Position index"
+            elif npos == 1 and nfreq > 1:
+                y_label = "Frequency index"
+            else:
+                y_label = "Spin index (pos×freq)"
+
+            try:
+                self.spectrum_heatmap_item.setImage(magnitude, autoLevels=True, axisOrder='row-major')
+                span = float(freq_axis[-1] - freq_axis[0])
+                self.spectrum_heatmap_item.setRect(float(freq_axis[0]), 0, span if span != 0 else 1.0, spin_count)
+                self.spectrum_heatmap.setLabel('left', y_label)
+                self.spectrum_heatmap.setLabel('bottom', 'Frequency', 'Hz')
+                self.spectrum_heatmap.setTitle("Spectrum Heatmap")
+                self.spectrum_heatmap.setXRange(float(freq_axis[0]), float(freq_axis[-1]), padding=0)
+                self.spectrum_heatmap.setYRange(0, spin_count, padding=0)
+                if hasattr(self, "spectrum_heatmap_colorbar") and self.spectrum_heatmap_colorbar is not None:
+                    finite_mag = magnitude[np.isfinite(magnitude)]
+                    if finite_mag.size:
+                        vmin = float(finite_mag.min())
+                        vmax = float(finite_mag.max())
+                        if np.isfinite(vmin) and np.isfinite(vmax) and vmax != vmin:
+                            self.spectrum_heatmap_colorbar.setLevels((vmin, vmax))
+            except Exception as exc:
+                self.log_message(f"Spectrum heatmap update failed: {exc}")
 
     def _refresh_spectrum(self, time_idx=None):
         """Update spectrum plot using data up to the specified time index."""
@@ -5239,63 +5640,224 @@ class BlochSimulatorGUI(QMainWindow):
         spectrum_mode = spec_data["mode"]
         pos_count = spec_data["pos_count"]
         pos_sel = spec_data["pos_sel"]
+        time_idx = spec_data.get("time_idx", time_idx)
+
+        show_spins = self.spectrum_show_spins_checkbox.isChecked() if hasattr(self, "spectrum_show_spins_checkbox") else False
 
         self.spectrum_pos_slider.setMaximum(max(0, pos_count - 1))
+        self.spectrum_pos_slider.setValue(np.floor(max(0, pos_count - 1)//2))
         self.spectrum_pos_label.setText(f"Pos idx: {pos_sel}")
 
-        self.spectrum_plot.clear()
-        if spectrum_mode == "Mean + individuals":
-            if spec_mean is not None:
-                self.spectrum_plot.plot(freq, np.abs(spec_mean), pen=pg.mkPen('c', width=3), name="Mean")
-        self.spectrum_plot.plot(freq, np.abs(spectrum), pen='w', name="Selected")
+        plot_type = self.spectrum_plot_type.currentText() if hasattr(self, 'spectrum_plot_type') else "Line"
+        is_heatmap = (plot_type == "Heatmap")
+        self.spectrum_plot.setVisible(not is_heatmap)
+        if hasattr(self, "spectrum_heatmap"):
+            self.spectrum_heatmap.setVisible(is_heatmap)
+        if hasattr(self, "spectrum_markers_checkbox"):
+            self.spectrum_markers_checkbox.setEnabled(not is_heatmap and not show_spins)
 
-        # Add colored vertical markers if enabled
-        if self.spectrum_markers_checkbox.isChecked() and len(freq) > 1:
-            # Draw vertical lines at selected frequency points (downsampled for performance)
-            mag = np.abs(spectrum)
-            total_freq_points = len(freq)
-            max_markers = min(self.max_traces_spin.value(), 100)  # Limit markers for spectrum
+        if is_heatmap:
+            self._update_spectrum_heatmap(spec_data["time_idx"])
+        elif show_spins:
+            if not self._plot_off_resonant_spins(time_idx=time_idx):
+                return
+        else:
+            # Compute magnitude range locally to avoid reliance on previous calls
+            mag_min = 0.0
+            mag_max = 0.0
+            try:
+                if spectrum is not None and spectrum.size:
+                    with np.errstate(invalid='ignore'):
+                        mag_abs = np.abs(spectrum)
+                        mag_max = float(np.nanmax(mag_abs))
+                        mag_min = float(np.nanmin(mag_abs))
+                if spec_mean is not None and spec_mean.size:
+                    with np.errstate(invalid='ignore'):
+                        mag_abs = np.abs(spec_mean)
+                        mag_max = max(mag_max, float(np.nanmax(mag_abs)))
+                        mag_min = min(mag_min, float(np.nanmin(mag_abs)))
+            except Exception:
+                mag_min = 0.0
+                mag_max = 0.0
+            if not np.isfinite(mag_max) or mag_max <= 0:
+                mag_max = 1.0
+            if not np.isfinite(mag_min) or mag_min < 0:
+                mag_min = 0.0
+            self.spectrum_mag_range = (mag_min, mag_max * 1.1)
 
-            # Downsample which frequency points to mark
-            if total_freq_points <= max_markers:
-                marker_indices = list(range(total_freq_points))
+            self.spectrum_plot.clear()
+            if spectrum_mode == "Mean + individuals":
+                if spec_mean is not None:
+                    self.spectrum_plot.plot(freq, np.abs(spec_mean), pen=pg.mkPen('c', width=3), name="Mean")
+            self.spectrum_plot.plot(freq, np.abs(spectrum), pen='w', name="Selected")
+
+            # Add colored vertical markers if enabled
+            if self.spectrum_markers_checkbox.isChecked() and len(freq) > 1:
+                # Draw vertical lines at selected frequency points (downsampled for performance)
+                mag = np.abs(spectrum)
+                total_freq_points = len(freq)
+                max_markers = min(self.max_traces_spin.value(), 100)  # Limit markers for spectrum
+
+                # Downsample which frequency points to mark
+                if total_freq_points <= max_markers:
+                    marker_indices = list(range(total_freq_points))
+                else:
+                    # Evenly spaced markers
+                    step = total_freq_points / max_markers
+                    marker_indices = [int(i * step) for i in range(max_markers)]
+
+                for idx in marker_indices:
+                    f = freq[idx]
+                    m = mag[idx]
+                    color = self._color_for_index(idx, total_freq_points)
+                    # Vertical line from 0 to magnitude
+                    line = pg.PlotCurveItem([f, f], [0, m], pen=pg.mkPen(color, width=2))
+                    self.spectrum_plot.addItem(line)
+
+            if freq is not None and len(freq) > 0:
+                self.spectrum_plot.setXRange(float(np.nanmin(freq)), float(np.nanmax(freq)), padding=0)
             else:
-                # Evenly spaced markers
-                step = total_freq_points / max_markers
-                marker_indices = [int(i * step) for i in range(max_markers)]
+                self.spectrum_plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
 
-            for idx in marker_indices:
-                f = freq[idx]
-                m = mag[idx]
-                color = self._color_for_index(idx, total_freq_points)
-                # Vertical line from 0 to magnitude
-                line = pg.PlotCurveItem([f, f], [0, m], pen=pg.mkPen(color, width=2))
-                self.spectrum_plot.addItem(line)
-
-        span = self.spectrum_range.value()
-        if span > 0:
-            half = span / 2.0
-            self.spectrum_plot.setXRange(-half, half, padding=0)
-        else:
-            self.spectrum_plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
-
-        # Use fixed Y range if available (computed in update_plots)
-        if hasattr(self, 'spectrum_mag_range') and self.spectrum_mag_range is not None:
-            self.spectrum_plot.setYRange(self.spectrum_mag_range[0], self.spectrum_mag_range[1], padding=0)
-        else:
-            self.spectrum_plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+            # Use fixed Y range with computed padding, prefer final-spectrum range if available
+            y_min, y_max = self.spectrum_mag_range
+            if getattr(self, "_spectrum_final_range", None):
+                final_min, final_max = self._spectrum_final_range
+                if np.isfinite(final_max):
+                    y_max = max(y_max, final_max)
+                if np.isfinite(final_min):
+                    y_min = min(y_min, final_min)
+            self.spectrum_plot.setYRange(y_min, y_max, padding=0)
 
         # Cache for export
-        self._last_spectrum_export = {
-            "frequency": freq,
-            "selected_magnitude": np.abs(spectrum),
-            "selected_phase_rad": np.angle(spectrum),
-            "mode": spectrum_mode,
-            "time_idx": spec_data["time_idx"],
+        if show_spins:
+            self._last_spectrum_export = {
+                "frequency": getattr(self, "last_frequencies", None),
+                "time_s": self.last_time,
+                "magnitude": np.abs(spec_data["signal_slice"]).mean(axis=1) if "signal_slice" in spec_data else None,
+                "mode": "off_res_spins",
+                "time_idx": spec_data["time_idx"],
+            }
+        else:
+            self._last_spectrum_export = {
+                "frequency": freq,
+                "selected_magnitude": np.abs(spectrum),
+                "selected_phase_rad": np.angle(spectrum),
+                "mode": spectrum_mode,
+                "time_idx": spec_data["time_idx"],
+            }
+            if spec_mean is not None:
+                self._last_spectrum_export["mean_magnitude"] = np.abs(spec_mean)
+                self._last_spectrum_export["mean_phase_rad"] = np.angle(spec_mean)
+
+    def _compute_final_spectrum_range(self, signal, time):
+        """Compute final-spectrum magnitude range for consistent y-limits."""
+        self._spectrum_final_range = None
+        if signal is None or time is None:
+            return
+        time = np.asarray(time)
+        sig_arr = np.asarray(signal)
+        if sig_arr.ndim == 1:
+            sig_arr = sig_arr[:, None, None]
+        elif sig_arr.ndim == 2:
+            sig_arr = sig_arr[:, :, None]
+        if len(time) < 2 or sig_arr.shape[0] != len(time):
+            return
+        try:
+            # Use mean across positions/frequencies
+            sig_for_fft = np.mean(sig_arr, axis=tuple(range(1, sig_arr.ndim)))
+            dt = float(time[1] - time[0])
+            n_fft = self._spectrum_fft_len(len(sig_for_fft))
+            spectrum = np.fft.fftshift(np.fft.fft(sig_for_fft, n=n_fft))
+            mag = np.abs(spectrum)
+            if mag.size:
+                mag_min = float(np.nanmin(mag))
+                mag_max = float(np.nanmax(mag))
+                if not np.isfinite(mag_min):
+                    mag_min = 0.0
+                if not np.isfinite(mag_max) or mag_max <= 0:
+                    mag_max = 1.0
+                self._spectrum_final_range = (mag_min, mag_max * 1.05)
+        except Exception:
+            self._spectrum_final_range = None
+
+    def _plot_off_resonant_spins(self, time_idx=None) -> bool:
+        """Plot a spectrum built directly from the simulated off-resonant spins (no FFT)."""
+        if self.last_result is None or self.last_frequencies is None:
+            return False
+        sig = self.last_result.get('signal')
+        if sig is None:
+            return False
+        sig_arr = np.asarray(sig)
+        if sig_arr.ndim == 1:
+            sig_arr = sig_arr[:, None, None]
+        elif sig_arr.ndim == 2:
+            sig_arr = sig_arr[:, :, None]
+        ntime = sig_arr.shape[0]
+        if ntime == 0:
+            return False
+        time_axis = self.last_time if self.last_time is not None else np.arange(ntime, dtype=float)
+        if time_idx is None:
+            time_idx = ntime - 1
+        t_idx = int(max(0, min(time_idx, ntime - 1)))
+
+        freq_axis = np.asarray(self.last_frequencies)
+        if freq_axis.shape[0] != sig_arr.shape[2]:
+            freq_axis = np.linspace(-0.5, 0.5, sig_arr.shape[2])
+
+        pos_count = sig_arr.shape[1]
+        spectrum_mode = self.spectrum_mode.currentText() if hasattr(self, 'spectrum_mode') else "Mean only"
+        pos_sel = min(self.spectrum_pos_slider.value(), pos_count - 1) if pos_count > 0 else 0
+
+        # Snapshot spectrum at the selected time index
+        snapshot = sig_arr[t_idx]  # (npos, nfreq)
+        mean_series = np.mean(snapshot, axis=0) if pos_count > 0 else snapshot
+        selected_series = mean_series
+        selected_label = "Mean"
+        if spectrum_mode == "Mean + individuals":
+            selected_series = snapshot[pos_sel] if pos_count else mean_series
+            selected_label = f"Pos {pos_sel}"
+        elif spectrum_mode == "Individual (select pos)":
+            selected_series = snapshot[pos_sel] if pos_count else mean_series
+            selected_label = f"Pos {pos_sel}"
+            mean_series = None
+
+        self.spectrum_plot.clear()
+        if mean_series is not None:
+            self.spectrum_plot.plot(freq_axis, np.abs(mean_series), pen=pg.mkPen('c', width=3), name="Mean")
+
+        sel_color = self._color_for_index(pos_sel, max(pos_count, 1)) if pos_count > 1 else 'w'
+        self.spectrum_plot.plot(freq_axis, np.abs(selected_series), pen=pg.mkPen(sel_color, width=2), name=selected_label)
+
+        self.spectrum_plot.setLabel('bottom', 'Frequency', 'Hz')
+        self.spectrum_plot.setLabel('left', '|S|')
+        if freq_axis.size:
+            self.spectrum_plot.setXRange(float(np.nanmin(freq_axis)), float(np.nanmax(freq_axis)), padding=0)
+        magnitudes = [np.abs(selected_series)]
+        if mean_series is not None:
+            magnitudes.append(np.abs(mean_series))
+        combined = np.concatenate([m.ravel() for m in magnitudes if m is not None and m.size]) if magnitudes else np.array([])
+        y_min = float(np.nanmin(combined)) if combined.size else 0.0
+        y_max = float(np.nanmax(combined)) if combined.size else 1.0
+        if not np.isfinite(y_min):
+            y_min = 0.0
+        if not np.isfinite(y_max) or y_max <= 0:
+            y_max = 1.0
+        self.spectrum_plot.setYRange(min(0.0, y_min), y_max * 1.1, padding=0)
+
+        export_entry = {
+            "frequency": freq_axis,
+            "selected_magnitude": np.abs(selected_series),
+            "selected_phase_rad": np.angle(selected_series),
+            "mode": "off_res_spins_freq",
+            "time_idx": t_idx,
+            "time_s": float(time_axis[t_idx]) if t_idx < len(time_axis) else None,
         }
-        if spec_mean is not None:
-            self._last_spectrum_export["mean_magnitude"] = np.abs(spec_mean)
-            self._last_spectrum_export["mean_phase_rad"] = np.angle(spec_mean)
+        if mean_series is not None:
+            export_entry["mean_magnitude"] = np.abs(mean_series)
+            export_entry["mean_phase_rad"] = np.angle(mean_series)
+        self._last_spectrum_export = export_entry
+        return True
 
     def _grab_widget_array(self, widget: QWidget, target_height: int = None) -> np.ndarray:
         """Grab a Qt widget as an RGB numpy array, optionally scaling height."""
