@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem,
     QFileDialog, QMessageBox, QTabWidget, QTextEdit, QSplitter,
     QProgressBar, QCheckBox, QRadioButton, QButtonGroup, QScrollArea,
-    QSizePolicy, QMenu, QDialog, QProgressDialog
+    QSizePolicy, QMenu, QDialog, QProgressDialog, QToolBar
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QIcon, QImage
@@ -1630,41 +1630,41 @@ class UniversalTimeControl(QWidget):
         self.init_ui()
 
     def init_ui(self):
-        layout = QVBoxLayout()
+        layout = QHBoxLayout()
         layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(8)
 
-        # Time slider
-        slider_layout = QHBoxLayout()
-        slider_layout.addWidget(QLabel("Time:"))
+        layout.addWidget(QLabel("Time:"))
         self.time_slider = QSlider(Qt.Horizontal)
         self.time_slider.setMinimum(0)
         self.time_slider.setMaximum(0)
         self.time_slider.valueChanged.connect(self._on_slider_changed)
-        slider_layout.addWidget(self.time_slider, 1)
+        layout.addWidget(self.time_slider, 1)
+
         self.time_label = QLabel("0.0 ms")
-        self.time_label.setFixedWidth(80)
-        slider_layout.addWidget(self.time_label)
-        layout.addLayout(slider_layout)
+        self.time_label.setFixedWidth(90)
+        layout.addWidget(self.time_label)
 
-        # Playback controls
-        control_layout = QHBoxLayout()
-        self.play_button = QPushButton("Play")
-        self.pause_button = QPushButton("Pause")
+        self.play_pause_button = QPushButton("Play")
+        self.play_pause_button.setCheckable(True)
+        self.play_pause_button.toggled.connect(self._update_play_pause_label)
+        layout.addWidget(self.play_pause_button)
+
         self.reset_button = QPushButton("Reset")
-        control_layout.addWidget(self.play_button)
-        control_layout.addWidget(self.pause_button)
-        control_layout.addWidget(self.reset_button)
+        layout.addWidget(self.reset_button)
 
-        # Speed control
-        control_layout.addWidget(QLabel("Speed (ms/s):"))
+        layout.addWidget(QLabel("Speed (ms/s):"))
         self.speed_spin = QDoubleSpinBox()
         self.speed_spin.setRange(0.001, 1000.0)
         self.speed_spin.setValue(1.0)  # Default to 50 ms of sim per real second
         self.speed_spin.setSuffix(" ms/s")
         self.speed_spin.setSingleStep(0.01)
-        control_layout.addWidget(self.speed_spin)
+        layout.addWidget(self.speed_spin)
 
-        layout.addLayout(control_layout)
+        # Backwards compatibility for existing signal connections
+        self.play_button = self.play_pause_button
+        self.pause_button = self.play_pause_button
+
         self.setLayout(layout)
 
         self.time_array = None  # Will store time array in seconds
@@ -1711,6 +1711,17 @@ class UniversalTimeControl(QWidget):
             self.time_label.setText(f"{time_ms:.3f} ms")
         else:
             self.time_label.setText("0.0 ms")
+
+    def _update_play_pause_label(self, is_playing: bool):
+        """Keep play/pause button text in sync with state."""
+        self.play_pause_button.setText("Pause" if is_playing else "Play")
+
+    def sync_play_state(self, is_playing: bool):
+        """Update play toggle without emitting signals."""
+        blocked = self.play_pause_button.blockSignals(True)
+        self.play_pause_button.setChecked(is_playing)
+        self._update_play_pause_label(is_playing)
+        self.play_pause_button.blockSignals(blocked)
 
 
 class MagnetizationViewer(QWidget):
@@ -2229,7 +2240,15 @@ class ParameterSweepWidget(QWidget):
         metric_group = QGroupBox("Output Metrics to Track")
         metric_layout = QVBoxLayout()
         self.metric_checkboxes = {}
-        for metric in ["Final Mz (mean)", "Final Mxy (mean)", "Peak |Mxy|", "Signal Magnitude", "Signal Phase"]:
+        for metric in [
+            "Final Mz (mean)",
+            "Final Mxy (mean)",
+            "Peak |Mxy|",
+            "Signal Magnitude",
+            "Signal Phase",
+            "Final |Mxy| map (per pos/freq)",
+            "Final Mz map (per pos/freq)",
+        ]:
             cb = QCheckBox(metric)
             cb.setChecked(metric in ["Final Mz (mean)", "Signal Magnitude"])
             self.metric_checkboxes[metric] = cb
@@ -2485,6 +2504,23 @@ class ParameterSweepWidget(QWidget):
                 if signal is not None:
                     # Use angle in degrees for better readability
                     return float(np.mean(np.angle(signal, deg=True)))
+            elif "Final |Mxy| map" in metric_name:
+                mx = result.get('mx')
+                my = result.get('my')
+                if mx is not None and my is not None:
+                    if mx.ndim == 3:
+                        mx_final = mx[-1, :, :]
+                        my_final = my[-1, :, :]
+                    else:
+                        mx_final = mx
+                        my_final = my
+                    return np.sqrt(mx_final**2 + my_final**2)
+            elif "Final Mz map" in metric_name:
+                mz = result.get('mz')
+                if mz is not None:
+                    if mz.ndim == 3:
+                        return mz[-1, :, :]
+                    return mz
         except Exception as e:
             if self.parent_gui:
                 self.parent_gui.log_message(f"Error extracting metric '{metric_name}': {str(e)}")
@@ -2501,10 +2537,22 @@ class ParameterSweepWidget(QWidget):
         # Plot each metric
         colors = ['r', 'g', 'b', 'y', 'm']
         for i, (metric, values) in enumerate(results['metrics'].items()):
-            if len(values) == len(param_values):
-                color = colors[i % len(colors)]
-                self.results_plot.plot(param_values, values, pen=pg.mkPen(color, width=2),
-                                        symbol='o', symbolBrush=color, name=metric)
+            if len(values) != len(param_values):
+                continue
+            # Only plot scalar metrics
+            scalar_vals = []
+            all_scalar = True
+            for v in values:
+                try:
+                    scalar_vals.append(float(v))
+                except Exception:
+                    all_scalar = False
+                    break
+            if not all_scalar:
+                continue
+            color = colors[i % len(colors)]
+            self.results_plot.plot(param_values, scalar_vals, pen=pg.mkPen(color, width=2),
+                                    symbol='o', symbolBrush=color, name=metric)
 
         self.results_plot.setLabel('bottom', param_name)
 
@@ -2519,7 +2567,14 @@ class ParameterSweepWidget(QWidget):
             for col, metric in enumerate(metrics):
                 if row < len(results['metrics'][metric]):
                     value = results['metrics'][metric][row]
-                    self.results_table.setItem(row, col + 1, QTableWidgetItem(f"{value:.6f}"))
+                    if isinstance(value, np.ndarray):
+                        display_text = f"array{value.shape}"
+                    else:
+                        try:
+                            display_text = f"{float(value):.6f}"
+                        except Exception:
+                            display_text = str(value)
+                    self.results_table.setItem(row, col + 1, QTableWidgetItem(display_text))
 
         self.results_table.resizeColumnsToContents()
 
@@ -2540,6 +2595,7 @@ class ParameterSweepWidget(QWidget):
             results = self.last_sweep_results
             param_name = results['parameter_name']
             metrics = list(results['metrics'].keys())
+            array_metrics = {m: [] for m in metrics}
 
             # Header
             f.write(f"{param_name}," + ",".join(metrics) + "\n")
@@ -2549,12 +2605,40 @@ class ParameterSweepWidget(QWidget):
                 row = [f"{param_val:.6f}"]
                 for metric in metrics:
                     if i < len(results['metrics'][metric]):
-                        row.append(f"{results['metrics'][metric][i]:.6f}")
+                        value = results['metrics'][metric][i]
+                        if isinstance(value, np.ndarray):
+                            row.append(f"array{value.shape}")
+                            array_metrics[metric].append(value)
+                        else:
+                            try:
+                                row.append(f"{float(value):.6f}")
+                            except Exception:
+                                row.append(str(value))
                     else:
                         row.append("")
                 f.write(",".join(row) + "\n")
 
-        QMessageBox.information(self, "Export Complete", f"Results exported to:\n{filename}")
+        array_path = None
+        stacked_arrays = {}
+        for metric, vals in array_metrics.items():
+            if not vals:
+                continue
+            try:
+                stacked_arrays[metric] = np.stack(vals)
+            except Exception:
+                stacked_arrays[metric] = np.array(vals, dtype=object)
+        if stacked_arrays:
+            base = Path(filename)
+            array_path = base.with_name(base.stem + "_arrays.npz")
+            np.savez(
+                array_path,
+                parameter_name=results['parameter_name'],
+                parameter_values=np.asarray(results['parameter_values']),
+                **stacked_arrays,
+            )
+
+        extra = f"\nArray metrics exported to:\n{array_path}" if array_path else ""
+        QMessageBox.information(self, "Export Complete", f"Results exported to:\n{filename}{extra}")
 
 
 class BlochSimulatorGUI(QMainWindow):
@@ -2631,8 +2715,12 @@ class BlochSimulatorGUI(QMainWindow):
         # Left panel - Parameters
         left_panel = QWidget()
         left_layout = QVBoxLayout()
+        left_layout.setContentsMargins(6, 6, 6, 18)
+        left_layout.setSpacing(8)
         left_panel.setLayout(left_layout)
-        left_panel.setMaximumWidth(400)
+        left_panel.setMaximumWidth(480)
+        left_panel.setMinimumWidth(340)
+        left_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         
         # Tissue parameters
         self.tissue_widget = TissueParameterWidget()
@@ -2747,7 +2835,12 @@ class BlochSimulatorGUI(QMainWindow):
         # Make the left panel scrollable so controls remain reachable on smaller screens
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
+        left_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        left_scroll.setMinimumHeight(0)
         left_scroll.setWidget(left_panel)
+        # Ensure the scroll area knows the full height so bottom controls are reachable
+        left_panel.adjustSize()
+        left_panel.setMinimumHeight(left_panel.sizeHint().height() + 32)
 
         # Footer with sticky run controls so the button stays visible
         self.simulate_button = QPushButton("Run Simulation")
@@ -2756,28 +2849,55 @@ class BlochSimulatorGUI(QMainWindow):
         footer = QWidget()
         footer_layout = QVBoxLayout()
         footer_layout.setContentsMargins(0, 4, 0, 0)
+        footer_layout.setSpacing(6)
         footer_layout.addWidget(self.simulate_button)
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_simulation)
         self.preview_checkbox = QCheckBox("Preview (fast subsample)")
+        self.preview_checkbox.toggled.connect(lambda val: self._sync_preview_checkboxes(val))
         footer_layout.addWidget(self.cancel_button)
         footer_layout.addWidget(self.preview_checkbox)
         footer_layout.addWidget(self.progress_bar)
         footer.setLayout(footer_layout)
+        footer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        footer.setMinimumHeight(footer.sizeHint().height())
+        self.simulate_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.cancel_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        footer.setMinimumHeight(
+            self.simulate_button.sizeHint().height()
+            + self.cancel_button.sizeHint().height()
+            + self.preview_checkbox.sizeHint().height()
+            + self.progress_bar.sizeHint().height()
+            + 12
+        )
 
         left_container = QWidget()
         left_container_layout = QVBoxLayout()
         left_container_layout.setContentsMargins(0, 0, 0, 0)
+        left_container_layout.setSpacing(6)
         left_container_layout.addWidget(left_scroll)
         left_container_layout.addWidget(footer)
         left_container_layout.setStretch(0, 1)
         left_container.setLayout(left_container_layout)
+        left_container.setMinimumWidth(left_panel.minimumWidth())
+        left_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         
         # Right panel - Visualization + log
         right_panel = QWidget()
         right_layout = QVBoxLayout()
         right_panel.setLayout(right_layout)
+
+        # Shared heatmap colormap selector for all tabs
+        colormap_layout = QHBoxLayout()
+        colormap_layout.addWidget(QLabel("Heatmap colormap:"))
+        self.heatmap_colormap = QComboBox()
+        self.heatmap_colormap.addItems(["viridis", "plasma", "magma", "cividis", "inferno", "gray"])
+        self.heatmap_colormap.setCurrentText("viridis")
+        self.heatmap_colormap.currentTextChanged.connect(self._apply_heatmap_colormap)
+        colormap_layout.addWidget(self.heatmap_colormap)
+        colormap_layout.addStretch()
+        right_layout.addLayout(colormap_layout)
         
         # Tab widget for different views
         self.tab_widget = QTabWidget()
@@ -3012,6 +3132,7 @@ class BlochSimulatorGUI(QMainWindow):
         spectrum_controls.addWidget(QLabel("Plot type:"))
         self.spectrum_plot_type = QComboBox()
         self.spectrum_plot_type.addItems(["Line", "Heatmap"])
+        self.spectrum_plot_type.setCurrentText("Line")
         self.spectrum_plot_type.currentTextChanged.connect(
             lambda _: self._refresh_spectrum(time_idx=self._current_playback_index() if hasattr(self, '_current_playback_index') else None)
         )
@@ -3087,6 +3208,16 @@ class BlochSimulatorGUI(QMainWindow):
         spatial_layout.addWidget(self.mean_only_checkbox)
 
         spatial_controls = QHBoxLayout()
+        spatial_controls.addWidget(QLabel("Plot type:"))
+        self.spatial_plot_type = QComboBox()
+        self.spatial_plot_type.addItems(["Line", "Heatmap"])
+        self.spatial_plot_type.currentTextChanged.connect(lambda _: self.update_spatial_plot_from_last_result())
+        spatial_controls.addWidget(self.spatial_plot_type)
+        spatial_controls.addWidget(QLabel("Heatmap mode:"))
+        self.spatial_heatmap_mode = QComboBox()
+        self.spatial_heatmap_mode.addItems(["Position vs Frequency", "Position vs Time"])
+        self.spatial_heatmap_mode.currentTextChanged.connect(lambda _: self.update_spatial_plot_from_last_result())
+        spatial_controls.addWidget(self.spatial_heatmap_mode)
         spatial_controls.addWidget(QLabel("Spatial view:"))
         self.spatial_mode = QComboBox()
         self.spatial_mode.addItems(["Mean only", "Mean + individuals", "Individual (select freq)"])
@@ -3100,11 +3231,6 @@ class BlochSimulatorGUI(QMainWindow):
         self.spatial_freq_label = QLabel("Freq idx: 0")
         spatial_controls.addWidget(self.spatial_freq_label)
         spatial_controls.addWidget(self.spatial_freq_slider)
-        spatial_controls.addWidget(QLabel("Plot type:"))
-        self.spatial_plot_type = QComboBox()
-        self.spatial_plot_type.addItems(["Line", "Heatmap"])
-        self.spatial_plot_type.currentTextChanged.connect(lambda _: self.update_spatial_plot_from_last_result())
-        spatial_controls.addWidget(self.spatial_plot_type)
         spatial_layout.addLayout(spatial_controls)
 
         # Toggle for colored position/frequency markers
@@ -3213,6 +3339,16 @@ class BlochSimulatorGUI(QMainWindow):
         self.param_sweep_widget = ParameterSweepWidget(self)
         self.tab_widget.addTab(self.param_sweep_widget, "📊 Parameter Sweep")
 
+        # Log console lives in its own tab to save vertical space
+        log_tab = QWidget()
+        log_layout = QVBoxLayout()
+        log_layout.setContentsMargins(6, 6, 6, 6)
+        self.log_widget = QTextEdit()
+        self.log_widget.setReadOnly(True)
+        log_layout.addWidget(self.log_widget)
+        log_tab.setLayout(log_layout)
+        self.tab_widget.addTab(log_tab, "Log")
+
         # Add time cursor lines to spatial plots for synchronization
         self.spatial_mxy_time_line = pg.InfiniteLine(angle=90, pen=pg.mkPen('y', width=2))
         self.spatial_mxy_time_line.hide()
@@ -3234,6 +3370,16 @@ class BlochSimulatorGUI(QMainWindow):
 
         right_layout.addWidget(self.tab_widget)
 
+        # Apply initial colormap selection now that heatmaps are constructed
+        default_cmap = "viridis"
+        if hasattr(self, "heatmap_colormap") and self.heatmap_colormap is not None:
+            default_cmap = self.heatmap_colormap.currentText()
+        self._apply_heatmap_colormap(default_cmap)
+
+        # Default to the 3D Vector tab so users immediately see the vector view
+        if hasattr(self, "mag_3d"):
+            self.tab_widget.setCurrentWidget(self.mag_3d)
+
         # Connect tab change to optimize rendering
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
 
@@ -3246,18 +3392,13 @@ class BlochSimulatorGUI(QMainWindow):
             self.mag_3d.speed_spin.setValue(self.time_control.speed_spin.value())
             self.mag_3d.speed_spin.setEnabled(False)
 
-        # Log console
-        self.log_widget = QTextEdit()
-        self.log_widget.setReadOnly(True)
-        self.log_widget.setFixedHeight(140)
-        right_layout.addWidget(self.log_widget)
-        
         # Add panels to main layout
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left_container)
         splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
+        splitter.setSizes([420, 1000])
         main_layout.addWidget(splitter)
         
         # Push initial time-step into designers
@@ -3642,9 +3783,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.time_control.time_changed.connect(self._on_universal_time_changed)
 
         # Connect play/pause/reset buttons
-        self.time_control.play_button.clicked.connect(self._on_universal_play)
-        self.time_control.pause_button.clicked.connect(self._on_universal_pause)
-        self.time_control.reset_button.clicked.connect(self._on_universal_reset)
+        self.time_control.play_pause_button.toggled.connect(self._handle_play_pause_toggle)
+        self.time_control.reset_button.clicked.connect(self._handle_reset_clicked)
         self.time_control.speed_spin.valueChanged.connect(self._update_playback_speed)
         # Mirror speed setting into the 3D viewer knob (kept disabled for clarity)
         if hasattr(self.mag_3d, "speed_spin"):
@@ -3765,6 +3905,23 @@ class BlochSimulatorGUI(QMainWindow):
         is_playing = self.anim_timer.isActive() if hasattr(self, 'anim_timer') else False
         self._on_universal_time_changed(time_idx, skip_expensive_updates=is_playing)
 
+    def _handle_play_pause_toggle(self, playing: bool):
+        """Unified handler for play/pause toggle."""
+        if playing:
+            self._on_universal_play()
+        else:
+            self._on_universal_pause()
+
+    def _handle_reset_clicked(self):
+        """Reset playback and return to paused state."""
+        self._on_universal_reset()
+        self._sync_play_toggle(False)
+
+    def _sync_play_toggle(self, playing: bool):
+        """Keep the play/pause toggle in sync with actual playback."""
+        if hasattr(self, "time_control"):
+            self.time_control.sync_play_state(playing)
+
     def _on_universal_play(self):
         """Handle universal play button."""
         # Use latest speed setting
@@ -3774,10 +3931,12 @@ class BlochSimulatorGUI(QMainWindow):
     def _on_universal_pause(self):
         """Handle universal pause button."""
         self._pause_vector_animation()
+        self._sync_play_toggle(False)
 
     def _on_universal_reset(self):
         """Handle universal reset button."""
         self._reset_vector_animation()
+        self._sync_play_toggle(False)
 
     def _set_plot_ranges(self, plot_widget, x_min, x_max, y_min=None, y_max=None):
         """Apply consistent axis ranges."""
@@ -3866,6 +4025,61 @@ class BlochSimulatorGUI(QMainWindow):
             setattr(self, attr_name, legend)
             return legend
         return None
+
+    def _apply_heatmap_colormap(self, cmap_name: Optional[str] = None):
+        """Apply a shared colormap to all heatmaps/colorbars."""
+        if cmap_name is None and hasattr(self, "heatmap_colormap"):
+            cmap_name = self.heatmap_colormap.currentText()
+        cmap_name = cmap_name or "viridis"
+        try:
+            cmap = pg.colormap.get(cmap_name)
+        except Exception:
+            cmap = cmap_name  # fall back to string name if lookup fails
+
+        def _set_cb(cb_item):
+            if cb_item is None:
+                return
+            setter = getattr(cb_item, "setColorMap", None)
+            if callable(setter):
+                try:
+                    setter(cmap)
+                except Exception:
+                    pass
+
+        for cb in [
+            getattr(self, "mxy_heatmap_colorbar", None),
+            getattr(self, "mz_heatmap_colorbar", None),
+            getattr(self, "signal_heatmap_colorbar", None),
+            getattr(self, "spectrum_heatmap_colorbar", None),
+            getattr(self, "spatial_heatmap_mxy_colorbar", None),
+            getattr(self, "spatial_heatmap_mz_colorbar", None),
+        ]:
+            _set_cb(cb)
+
+        lut = None
+        if hasattr(cmap, "getLookupTable"):
+            try:
+                lut = cmap.getLookupTable()
+            except Exception:
+                lut = None
+        if lut is not None:
+            for img in [
+                getattr(self, "mxy_heatmap_item", None),
+                getattr(self, "mz_heatmap_item", None),
+                getattr(self, "signal_heatmap_item", None),
+                getattr(self, "spectrum_heatmap_item", None),
+                getattr(self, "spatial_heatmap_mxy_item", None),
+                getattr(self, "spatial_heatmap_mz_item", None),
+            ]:
+                if img is not None and hasattr(img, "setLookupTable"):
+                    try:
+                        img.setLookupTable(lut)
+                    except Exception:
+                        pass
+
+        # Keep a consistent palette for the status bar progress as well
+        if hasattr(self, "status_progress"):
+            self.status_progress.setStyleSheet("")
 
     def _update_mag_selector_limits(self, npos: int, nfreq: int, disable: bool = False):
         """Sync magnetization view selector with available pos/freq counts."""
@@ -4011,9 +4225,13 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Frequency selection/averaging for spatial view
         freq_count = mx_display.shape[1]
-        self.spatial_freq_slider.setMaximum(max(0, freq_count - 1))
-        self.spatial_freq_slider.setValue(np.floor(max(0, freq_count - 1)/2).astype(int))
-        freq_sel = min(self.spatial_freq_slider.value(), freq_count - 1)
+        max_freq_idx = max(0, freq_count - 1)
+        self.spatial_freq_slider.blockSignals(True)
+        self.spatial_freq_slider.setMaximum(max_freq_idx)
+        if self.spatial_freq_slider.value() > max_freq_idx:
+            self.spatial_freq_slider.setValue(max_freq_idx)
+        self.spatial_freq_slider.blockSignals(False)
+        freq_sel = min(self.spatial_freq_slider.value(), max_freq_idx)
         self.spatial_freq_label.setText(f"Freq idx: {freq_sel}")
 
         spatial_mode = self.spatial_mode.currentText()
@@ -4052,14 +4270,31 @@ class BlochSimulatorGUI(QMainWindow):
             "mxy_per_freq": np.sqrt(mx_display**2 + my_display**2),
             "mz_per_freq": mz_display,
             "frequency_axis": freq_axis,
+            "heatmap_mode": None,
         }
 
         # Update plots
         plot_type = self.spatial_plot_type.currentText() if hasattr(self, "spatial_plot_type") else "Line"
+        heatmap_mode = self.spatial_heatmap_mode.currentText() if hasattr(self, "spatial_heatmap_mode") else "Position vs Frequency"
         show_heatmap = (plot_type == "Heatmap")
         self._set_spatial_plot_visibility(show_heatmap)
         if show_heatmap:
-            self._update_spatial_heatmaps(pos_distance, self._last_spatial_export["mxy_per_freq"], mz_display, freq_axis)
+            if heatmap_mode == "Position vs Time" and is_time_resolved:
+                mxy_time = np.sqrt(self.spatial_mx_time_series[:, :, freq_sel]**2 + self.spatial_my_time_series[:, :, freq_sel]**2)
+                mz_time = self.spatial_mz_time_series[:, :, freq_sel]
+                self._last_spatial_export.update({
+                    "heatmap_mode": "time",
+                    "mxy_time": mxy_time,
+                    "mz_time": mz_time,
+                })
+                self._update_spatial_time_heatmaps(pos_distance, self.last_time, mxy_time, mz_time, freq_sel)
+            elif heatmap_mode == "Position vs Time" and not is_time_resolved:
+                self.log_message("Spatial heatmap time view requires time-resolved simulation; showing frequency view instead.")
+                self._last_spatial_export["heatmap_mode"] = "frequency"
+                self._update_spatial_heatmaps(pos_distance, self._last_spatial_export["mxy_per_freq"], mz_display, freq_axis)
+            else:
+                self._last_spatial_export["heatmap_mode"] = "frequency"
+                self._update_spatial_heatmaps(pos_distance, self._last_spatial_export["mxy_per_freq"], mz_display, freq_axis)
         else:
             self._update_spatial_line_plots(pos_distance, mxy_pos, mz_pos, mx_display, my_display, mz_display, freq_sel, spatial_mode)
 
@@ -4303,6 +4538,64 @@ class BlochSimulatorGUI(QMainWindow):
         except Exception as exc:
             self.log_message(f"Spatial heatmap update failed: {exc}")
 
+    def _update_spatial_time_heatmaps(self, position, time_axis, mxy_time, mz_time, freq_sel):
+        """Render spatial heatmaps (position vs time) for a selected frequency."""
+        try:
+            pos = np.asarray(position)
+            time_axis = np.asarray(time_axis) if time_axis is not None else np.arange(mxy_time.shape[0])
+            if pos.size == 0 or time_axis.size == 0:
+                return
+            if mxy_time.ndim != 2 or mz_time.ndim != 2:
+                return
+            ntime, npos = mxy_time.shape
+            if time_axis.size != ntime:
+                time_axis = np.linspace(time_axis.min() if time_axis.size else 0.0,
+                                        time_axis.max() if time_axis.size else float(ntime - 1),
+                                        ntime)
+            time_ms = time_axis * 1000.0
+
+            pos_min, pos_max = float(np.nanmin(pos)), float(np.nanmax(pos))
+            if not np.isfinite(pos_min) or not np.isfinite(pos_max) or np.isclose(pos_min, pos_max):
+                pos_min, pos_max = 0.0, float(max(npos - 1, 1))
+            x_span = pos_max - pos_min if pos_max != pos_min else 1.0
+            t_min, t_max = float(np.nanmin(time_ms)), float(np.nanmax(time_ms))
+            if not np.isfinite(t_min) or not np.isfinite(t_max) or np.isclose(t_min, t_max):
+                t_min, t_max = 0.0, float(max(ntime - 1, 1))
+            t_span = t_max - t_min if t_max != t_min else 1.0
+
+            def _set_heatmap(plot_widget, img_item, colorbar, data, title):
+                img_item.setImage(data, autoLevels=True, axisOrder='row-major')
+                img_item.setRect(pos_min, t_min, x_span, t_span)
+                plot_widget.setXRange(pos_min, pos_max, padding=0)
+                plot_widget.setYRange(t_min, t_max, padding=0)
+                plot_widget.setLabel('bottom', 'Position', 'm')
+                plot_widget.setLabel('left', 'Time', 'ms')
+                plot_widget.setTitle(title)
+                if colorbar is not None:
+                    finite_vals = data[np.isfinite(data)]
+                    if finite_vals.size:
+                        vmin = float(finite_vals.min())
+                        vmax = float(finite_vals.max())
+                        if np.isfinite(vmin) and np.isfinite(vmax) and vmax != vmin:
+                            colorbar.setLevels((vmin, vmax))
+
+            _set_heatmap(
+                self.spatial_heatmap_mxy,
+                self.spatial_heatmap_mxy_item,
+                getattr(self, "spatial_heatmap_mxy_colorbar", None),
+                np.abs(mxy_time),
+                f"|Mxy| vs time @ freq {freq_sel}",
+            )
+            _set_heatmap(
+                self.spatial_heatmap_mz,
+                self.spatial_heatmap_mz_item,
+                getattr(self, "spatial_heatmap_mz_colorbar", None),
+                mz_time,
+                f"Mz vs time @ freq {freq_sel}",
+            )
+        except Exception as exc:
+            self.log_message(f"Spatial time heatmap update failed: {exc}")
+
     def _load_sequence_presets(self, seq_type: str):
         """Load sequence-specific parameter presets if enabled."""
         if not self.tissue_widget.sequence_presets_enabled:
@@ -4416,13 +4709,109 @@ class BlochSimulatorGUI(QMainWindow):
         
         about_action = help_menu.addAction("About")
         about_action.triggered.connect(self.show_about)
+
+    def _sync_preview_checkboxes(self, checked: bool):
+        """Keep preview checkboxes in sync between footer and status bar."""
+        if getattr(self, "_syncing_preview", False):
+            return
+        self._syncing_preview = True
+        try:
+            if hasattr(self, "preview_checkbox") and self.preview_checkbox.isChecked() != checked:
+                self.preview_checkbox.setChecked(checked)
+            if hasattr(self, "status_preview_checkbox") and self.status_preview_checkbox.isChecked() != checked:
+                self.status_preview_checkbox.setChecked(checked)
+            if hasattr(self, "toolbar_preview_action") and self.toolbar_preview_action.isChecked() != checked:
+                # block to avoid recursive signals
+                was_blocked = self.toolbar_preview_action.blockSignals(True)
+                self.toolbar_preview_action.setChecked(checked)
+                self.toolbar_preview_action.blockSignals(was_blocked)
+        finally:
+            self._syncing_preview = False
+
+    def _build_status_run_bar(self):
+        """Add always-visible run controls to the status bar."""
+        bar = QWidget()
+        layout = QHBoxLayout()
+        layout.setContentsMargins(4, 0, 4, 0)
+        layout.setSpacing(8)
+
+        self.status_run_button = QPushButton("Run Simulation")
+        self.status_run_button.clicked.connect(self.run_simulation)
+        self.status_run_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        layout.addWidget(self.status_run_button)
+
+        self.status_cancel_button = QPushButton("Cancel")
+        self.status_cancel_button.clicked.connect(self.cancel_simulation)
+        self.status_cancel_button.setEnabled(False)
+        self.status_cancel_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        layout.addWidget(self.status_cancel_button)
+
+        self.status_preview_checkbox = QCheckBox("Preview")
+        self.status_preview_checkbox.setChecked(self.preview_checkbox.isChecked())
+        self.status_preview_checkbox.toggled.connect(lambda val: self._sync_preview_checkboxes(val))
+        layout.addWidget(self.status_preview_checkbox)
+
+        self.status_progress = QProgressBar()
+        self.status_progress.setFixedWidth(180)
+        self.status_progress.setValue(self.progress_bar.value())
+        layout.addWidget(self.status_progress)
+
+        layout.addStretch()
+        bar.setLayout(layout)
+        self.statusBar().addPermanentWidget(bar, 1)
+        self.status_run_bar = bar
+
+    def _build_toolbar_run_bar(self):
+        """Add a top toolbar with run controls to keep them visible."""
+        tb = QToolBar("Run Controls")
+        tb.setMovable(False)
+        tb.setFloatable(False)
+
+        self.toolbar_run_action = tb.addAction("Run Simulation")
+        self.toolbar_run_action.triggered.connect(self.run_simulation)
+
+        self.toolbar_cancel_action = tb.addAction("Cancel")
+        self.toolbar_cancel_action.triggered.connect(self.cancel_simulation)
+        self.toolbar_cancel_action.setEnabled(False)
+
+        self.toolbar_preview_action = tb.addAction("Preview")
+        self.toolbar_preview_action.setCheckable(True)
+        self.toolbar_preview_action.setChecked(self.preview_checkbox.isChecked())
+        self.toolbar_preview_action.toggled.connect(lambda val: self._sync_preview_checkboxes(val))
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        tb.addWidget(spacer)
+
+        self.toolbar_progress = QProgressBar()
+        self.toolbar_progress.setFixedWidth(160)
+        self.toolbar_progress.setValue(self.progress_bar.value())
+        tb.addWidget(self.toolbar_progress)
+
+        self.addToolBar(tb)
+        self.toolbar_run_bar = tb
         
     def run_simulation(self):
         """Run the Bloch simulation."""
         self.statusBar().showMessage("Running simulation...")
         self.simulate_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
+        if hasattr(self, "status_run_button"):
+            self.status_run_button.setEnabled(False)
+        if hasattr(self, "status_cancel_button"):
+            self.status_cancel_button.setEnabled(True)
+        if hasattr(self, "toolbar_run_action"):
+            self.toolbar_run_action.setEnabled(False)
+        if hasattr(self, "toolbar_cancel_action"):
+            self.toolbar_cancel_action.setEnabled(True)
         self.progress_bar.setValue(0)
+        if hasattr(self, "status_progress"):
+            self.status_progress.setValue(0)
+        if hasattr(self, "toolbar_progress"):
+            self.toolbar_progress.setValue(0)
+        # Keep preview toggles in sync once more in case caller only touched the status bar
+        if hasattr(self, "status_preview_checkbox"):
+            self._sync_preview_checkboxes(self.status_preview_checkbox.isChecked())
 
         self.log_message("Starting simulation...")
         
@@ -4518,7 +4907,8 @@ class BlochSimulatorGUI(QMainWindow):
         mode = 2 if self.mode_combo.currentText() == "Time-resolved" else 0
 
         # Optional preview mode for faster turnaround
-        if self.preview_checkbox.isChecked():
+        preview_on = self.preview_checkbox.isChecked() or (hasattr(self, "status_preview_checkbox") and self.status_preview_checkbox.isChecked())
+        if preview_on:
             prev_stride = max(1, int(np.ceil(npos / 64)))  # cap preview positions
             freq_stride = max(1, int(np.ceil(nfreq / 16)))
             if prev_stride > 1:
@@ -4566,6 +4956,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.simulation_thread.cancelled.connect(self.on_simulation_cancelled)
         self.simulation_thread.error.connect(self.on_simulation_error)
         self.simulation_thread.progress.connect(self.progress_bar.setValue)
+        if hasattr(self, "status_progress"):
+            self.simulation_thread.progress.connect(self.status_progress.setValue)
         self.simulation_thread.start()
 
     def cancel_simulation(self):
@@ -4574,13 +4966,27 @@ class BlochSimulatorGUI(QMainWindow):
             self.simulation_thread.request_cancel()
             self.statusBar().showMessage("Cancellation requested...")
             self.log_message("User requested simulation cancel.")
-            
+        if hasattr(self, "status_cancel_button"):
+            self.status_cancel_button.setEnabled(False)
+
     def on_simulation_finished(self, result):
         """Handle simulation completion."""
         self.statusBar().showMessage("Simulation complete")
         self.simulate_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.progress_bar.setValue(100)
+        if hasattr(self, "status_run_button"):
+            self.status_run_button.setEnabled(True)
+        if hasattr(self, "status_cancel_button"):
+            self.status_cancel_button.setEnabled(False)
+        if hasattr(self, "status_progress"):
+            self.status_progress.setValue(100)
+        if hasattr(self, "toolbar_run_action"):
+            self.toolbar_run_action.setEnabled(True)
+        if hasattr(self, "toolbar_cancel_action"):
+            self.toolbar_cancel_action.setEnabled(False)
+        if hasattr(self, "toolbar_progress"):
+            self.toolbar_progress.setValue(100)
         self.log_message("Simulation completed successfully.")
         
         # Update plots
@@ -4593,6 +4999,18 @@ class BlochSimulatorGUI(QMainWindow):
         self.simulate_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.progress_bar.setValue(0)
+        if hasattr(self, "status_run_button"):
+            self.status_run_button.setEnabled(True)
+        if hasattr(self, "status_cancel_button"):
+            self.status_cancel_button.setEnabled(False)
+        if hasattr(self, "status_progress"):
+            self.status_progress.setValue(0)
+        if hasattr(self, "toolbar_run_action"):
+            self.toolbar_run_action.setEnabled(True)
+        if hasattr(self, "toolbar_cancel_action"):
+            self.toolbar_cancel_action.setEnabled(False)
+        if hasattr(self, "toolbar_progress"):
+            self.toolbar_progress.setValue(0)
         self.log_message(f"Simulation error: {error_msg}")
         
         QMessageBox.critical(self, "Simulation Error", error_msg)
@@ -4603,6 +5021,18 @@ class BlochSimulatorGUI(QMainWindow):
         self.simulate_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.progress_bar.setValue(0)
+        if hasattr(self, "status_run_button"):
+            self.status_run_button.setEnabled(True)
+        if hasattr(self, "status_cancel_button"):
+            self.status_cancel_button.setEnabled(False)
+        if hasattr(self, "status_progress"):
+            self.status_progress.setValue(0)
+        if hasattr(self, "toolbar_run_action"):
+            self.toolbar_run_action.setEnabled(True)
+        if hasattr(self, "toolbar_cancel_action"):
+            self.toolbar_cancel_action.setEnabled(False)
+        if hasattr(self, "toolbar_progress"):
+            self.toolbar_progress.setValue(0)
         self.log_message("Simulation cancelled.")
         
     def update_plots(self, result):
@@ -4969,6 +5399,7 @@ class BlochSimulatorGUI(QMainWindow):
         """Start or restart the 3D vector animation if data exists."""
         if self.anim_data is None or len(self.anim_data) == 0:
             self.anim_timer.stop()
+            self._sync_play_toggle(False)
             return
         if self.mag_3d.track_path:
             self.mag_3d._clear_path()
@@ -4985,6 +5416,7 @@ class BlochSimulatorGUI(QMainWindow):
         # Always recompute interval using current speed control
         self._recompute_anim_interval(self.time_control.speed_spin.value() if hasattr(self, 'time_control') else None)
         self.anim_timer.start(self.anim_interval_ms)
+        self._sync_play_toggle(True)
 
     def _resume_vector_animation(self):
         """Resume playback of the 3D vector."""
@@ -4993,6 +5425,7 @@ class BlochSimulatorGUI(QMainWindow):
     def _pause_vector_animation(self):
         """Pause the 3D vector animation."""
         self.anim_timer.stop()
+        self._sync_play_toggle(False)
 
         # Re-enable updates on Magnetization and Signal plots after animation stops
         self.mxy_plot.setUpdatesEnabled(True)
@@ -5006,6 +5439,7 @@ class BlochSimulatorGUI(QMainWindow):
     def _reset_vector_animation(self):
         """Reset the 3D vector to the first available frame."""
         self.anim_timer.stop()
+        self._sync_play_toggle(False)
 
         # Re-enable updates on Magnetization and Signal plots after animation stops
         self.mxy_plot.setUpdatesEnabled(True)
