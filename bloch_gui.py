@@ -916,7 +916,6 @@ class SequenceDesigner(QGroupBox):
         layout.addLayout(self.options_container)
         self.spin_echo_opts.setVisible(False)
         self.ssfp_opts.setVisible(False)
-        self._update_sequence_options()
         
         # TE parameter
         te_layout = QHBoxLayout()
@@ -969,8 +968,12 @@ class SequenceDesigner(QGroupBox):
         self.ti_spin.setRange(1, 5000)
         self.ti_spin.setValue(400)
         ti_layout.addWidget(self.ti_spin)
-        layout.addLayout(ti_layout)
+        self.ti_widget = QWidget()
+        self.ti_widget.setLayout(ti_layout)
+        layout.addWidget(self.ti_widget)
         self.ti_spin.valueChanged.connect(lambda _: self.update_diagram())
+        # Initialize option visibility after all widgets are created
+        self._update_sequence_options()
         
         # Sequence diagram
         self.diagram_widget = pg.PlotWidget()
@@ -1001,6 +1004,8 @@ class SequenceDesigner(QGroupBox):
         seq_type = self.sequence_type.currentText()
         self.spin_echo_opts.setVisible(seq_type in ("Spin Echo", "Spin Echo (Tip-axis 180)"))
         self.ssfp_opts.setVisible(seq_type == "SSFP (Loop)")
+        self.ti_widget.setVisible(seq_type == "Inversion Recovery")
+        # self.ti_spin.setVisible(seq_type == "Inversion Recovery")
 
     def get_sequence_preset_params(self, seq_type: str) -> dict:
         """
@@ -1731,6 +1736,7 @@ class MagnetizationViewer(QWidget):
     
     def __init__(self):
         super().__init__()
+        self._export_dir_provider = None
         self.init_ui()
         
     def init_ui(self):
@@ -2097,8 +2103,7 @@ class MagnetizationViewer(QWidget):
         """Export 3D view as screenshot."""
         exporter = ImageExporter()
 
-        # Get export directory (or use current directory as fallback)
-        export_dir = self._get_export_directory()
+        export_dir = self._resolve_export_directory()
         default_path = export_dir / f"3d_view.{format}"
 
         filename, _ = QFileDialog.getSaveFileName(
@@ -2127,6 +2132,32 @@ class MagnetizationViewer(QWidget):
 
             except Exception as e:
                 QMessageBox.critical(self, "Export Error", f"An error occurred:\n{e}")
+    def _resolve_export_directory(self) -> Path:
+        """Resolve an export directory via provider, window hook, or cwd."""
+        # External provider takes precedence
+        if callable(self._export_dir_provider):
+            try:
+                path = Path(self._export_dir_provider())
+                path.mkdir(parents=True, exist_ok=True)
+                return path
+            except Exception:
+                pass
+        # Ask the top-level window if it exposes an export directory helper
+        win = self.window()
+        if win and hasattr(win, "_get_export_directory"):
+            try:
+                path = Path(win._get_export_directory())
+                path.mkdir(parents=True, exist_ok=True)
+                return path
+            except Exception:
+                pass
+        path = Path.cwd()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def set_export_directory_provider(self, provider):
+        """Provide a callable returning a directory for exports."""
+        self._export_dir_provider = provider
 
     def _show_not_implemented_3d(self, feature_name):
         """Show a message for features not yet implemented in 3D viewer."""
@@ -2785,7 +2816,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.freq_range = QDoubleSpinBox()
         # Avoid zero-span (forces unique frequencies)
         self.freq_range.setRange(0.01, 1e4)
-        self.freq_range.setValue(1000.0)
+        self.freq_range.setValue(100.0)
         freq_layout.addWidget(self.freq_range)
         control_layout.addLayout(freq_layout)
         # Frequency helper text
@@ -2810,7 +2841,7 @@ class BlochSimulatorGUI(QMainWindow):
         tail_layout.addWidget(QLabel("Extra tail (ms):"))
         self.extra_tail_spin = QDoubleSpinBox()
         self.extra_tail_spin.setRange(0.0, 1e6)
-        self.extra_tail_spin.setValue(1.0)
+        self.extra_tail_spin.setValue(5.0)
         self.extra_tail_spin.setDecimals(3)
         self.extra_tail_spin.setSingleStep(1.0)
         tail_layout.addWidget(self.extra_tail_spin)
@@ -3010,6 +3041,7 @@ class BlochSimulatorGUI(QMainWindow):
         # 3D visualization
         self.mag_3d = MagnetizationViewer()
         self.mag_3d.playhead_line = self.sequence_designer.playhead_line
+        self.mag_3d.set_export_directory_provider(self._get_export_directory)
         self.mag_3d.play_button.clicked.connect(self._resume_vector_animation)
         self.mag_3d.pause_button.clicked.connect(self._pause_vector_animation)
         self.mag_3d.reset_button.clicked.connect(self._reset_vector_animation)
@@ -5894,7 +5926,12 @@ class BlochSimulatorGUI(QMainWindow):
             export_dir = Path(override).expanduser()
         else:
             export_dir = get_app_data_dir() / "exports"
-        export_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            export_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            # Fallback to working directory if preferred location is unavailable
+            export_dir = Path.cwd()
+            export_dir.mkdir(parents=True, exist_ok=True)
         return export_dir
 
     def _show_not_implemented(self, feature_name):
