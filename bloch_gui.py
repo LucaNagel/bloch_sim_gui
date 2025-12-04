@@ -8,6 +8,7 @@ Author: Your Name
 Date: 2024
 """
 
+import os
 import sys
 import math
 import time
@@ -63,6 +64,23 @@ try:
 except ImportError:
     KSPACE_AVAILABLE = False
     print("K-Space module not available - k-space tab will be disabled")
+
+
+def get_app_data_dir() -> Path:
+    """Return a writable per-user application directory."""
+    override = os.environ.get("BLOCH_APP_DIR")
+    if override:
+        return Path(override).expanduser()
+
+    system = sys.platform
+    if system.startswith("win"):
+        root = Path(os.environ.get("APPDATA", Path.home()))
+    elif system == "darwin":
+        root = Path.home() / "Library" / "Application Support"
+    else:
+        root = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+
+    return root / "BlochSimulator"
 
 
 class SimulationThread(QThread):
@@ -1024,6 +1042,8 @@ class SequenceDesigner(QGroupBox):
                 "num_positions": 1,
                 "num_frequencies": 201,
                 "frequency_range_hz": 100,
+                "pulse_type": "gaussian",
+                "duration": 2.0,
             },
             "Spin Echo": {
                 "te_ms": 5,
@@ -1031,6 +1051,7 @@ class SequenceDesigner(QGroupBox):
                 "num_positions": 1,
                 "num_frequencies": 201,
                 "frequency_range_hz": 100,
+                "duration": 1.0, # ms
             },
             "Spin Echo (Tip-axis 180)": {
                 "te_ms": 5,
@@ -1038,17 +1059,20 @@ class SequenceDesigner(QGroupBox):
                 "num_positions": 1,
                 "num_frequencies": 201,
                 "frequency_range_hz": 100,
+                "duration": 1.0, # ms
             },
             "Gradient Echo": {
                 "te_ms": 5,
                 "tr_ms": 30,
-                "flip_angle": 30
+                "flip_angle": 30,
+                "duration": 1.0, # ms
             },
             "Slice Select + Rephase": {
                 "te_ms": 10,
                 "tr_ms": 100,
                 "num_positions": 99,
                 "num_frequencies": 3,
+                "duration": 1.0, # ms
             },
             "SSFP (Loop)": {
                 "te_ms": 2,
@@ -1060,9 +1084,10 @@ class SequenceDesigner(QGroupBox):
                 "ssfp_dur": 1.0,
                 "ssfp_start_delay": 0.0,
                 "ssfp_start_amp": 0.025,
-                "ssfp_start_phase": 180.0,
+                "ssfp_start_phase": 0.0,
                 "ssfp_alternate_phase": True,
-                "pulse_type": "gaussian"
+                "pulse_type": "gaussian",
+                "duration": 1.0, # ms
             },
             "Inversion Recovery": {
                 "te_ms": 20,
@@ -1070,21 +1095,24 @@ class SequenceDesigner(QGroupBox):
                 "ti_ms": 40,
                 "num_positions": 1,
                 "num_frequencies": 51,
+                "duration": 1.0, # ms
             },
             "FLASH": {
                 "te_ms": 3,
                 "tr_ms": 10,
-                "flip_angle": 15
+                "flip_angle": 15,
+                "duration": 1.0, # ms
             },
             "EPI": {
                 "te_ms": 30,
                 "tr_ms": 100,
                 "num_positions": 51,
                 "num_frequencies": 3,
+                "duration": 1.0, # ms
             },
             "Custom": {
                 "te_ms": 10,
-                "tr_ms": 100
+                "tr_ms": 100,
             },
         }
         return presets.get(seq_type, {})
@@ -2059,8 +2087,7 @@ class MagnetizationViewer(QWidget):
         exporter = ImageExporter()
 
         # Get export directory (or use current directory as fallback)
-        export_dir = Path.cwd() / "exports"
-        export_dir.mkdir(exist_ok=True)
+        export_dir = self._get_export_directory()
         default_path = export_dir / f"3d_view.{format}"
 
         filename, _ = QFileDialog.getSaveFileName(
@@ -4304,6 +4331,7 @@ class BlochSimulatorGUI(QMainWindow):
             self.pos_range,
             self.freq_spin,
             self.freq_range,
+            self.rf_designer.duration,
         ]
 
         # Block signals temporarily to avoid triggering diagram updates multiple times
@@ -4321,6 +4349,8 @@ class BlochSimulatorGUI(QMainWindow):
             self.sequence_designer.ti_spin.setValue(presets["ti_ms"])
         if "flip_angle" in presets:
             self.rf_designer.flip_angle.setValue(presets["flip_angle"])
+        if "duration" in presets:
+            self.rf_designer.duration.setValue(presets["duration"])
 
         # SSFP-specific parameters
         if "ssfp_repeats" in presets:
@@ -5425,8 +5455,12 @@ class BlochSimulatorGUI(QMainWindow):
 
     def _get_export_directory(self):
         """Get or create the default export directory."""
-        export_dir = Path.cwd() / "exports"
-        export_dir.mkdir(exist_ok=True)
+        override = os.environ.get("BLOCH_EXPORT_DIR")
+        if override:
+            export_dir = Path(override).expanduser()
+        else:
+            export_dir = get_app_data_dir() / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
         return export_dir
 
     def _show_not_implemented(self, feature_name):

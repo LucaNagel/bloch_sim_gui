@@ -211,6 +211,41 @@ liver = TissueParameters(
 )
 ```
 
+## Desktop app build (PyInstaller)
+
+One build per OS is required (macOS build won’t run on Windows/Linux).
+
+### Prereqs
+- macOS: Xcode CLT; `brew install libomp`.
+- Windows: Python 3.8+ and MSVC Build Tools (for C extension).
+- Linux: gcc/g++; ensure `libgomp` available.
+
+### Quick build (any OS)
+```bash
+python -m pip install -r requirements.txt
+python -m pip install pyinstaller
+python setup.py build_ext --inplace
+PYINSTALLER_CONFIG_DIR=.pyinstaller pyinstaller bloch_gui.spec --noconfirm
+```
+Artifact: `dist/BlochSimulator` (single binary; `.exe` on Windows).
+
+### One-liner helper
+```bash
+./scripts/build_pyinstaller.sh   # creates a venv, installs deps, builds, packages
+```
+
+### Run the packaged app
+- macOS/Linux: `./dist/BlochSimulator`
+- Windows: `dist\\BlochSimulator.exe`
+
+### Runtime data/exports
+- `rfpulses/` is bundled automatically.
+- Exports default to per-user data dirs:
+  - macOS: `~/Library/Application Support/BlochSimulator/exports`
+  - Windows: `%APPDATA%\\BlochSimulator\\exports`
+  - Linux: `~/.local/share/BlochSimulator/exports`
+- Override with `BLOCH_APP_DIR` or `BLOCH_EXPORT_DIR` if you need a custom location.
+
 ## Performance
 
 Benchmarks on Intel i7-10700K (8 cores):

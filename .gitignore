@@ -2,6 +2,7 @@
 *.o
 .DS_Store
 build/
+dist/
 
 # Ignore all files in exports/ except .gitkeep
 exports/*
