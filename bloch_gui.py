@@ -23,7 +23,8 @@ from PyQt5.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem,
     QFileDialog, QMessageBox, QTabWidget, QTextEdit, QSplitter,
     QProgressBar, QCheckBox, QRadioButton, QButtonGroup, QScrollArea,
-    QSizePolicy, QMenu, QDialog, QProgressDialog, QToolBar
+    QSizePolicy, QMenu, QDialog, QProgressDialog, QToolBar, QFormLayout,
+    QDialogButtonBox, QListWidget
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QIcon, QImage
@@ -128,6 +129,90 @@ class SimulationThread(QThread):
             self.finished.emit(result)
         except Exception as e:
             self.error.emit(str(e))
+
+
+class PulseImportDialog(QDialog):
+    """Dialog to configure loading of custom amp/phase pulse files."""
+
+    def __init__(self, parent=None, filename: Optional[str] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Import RF Pulse Options")
+        layout = QVBoxLayout()
+        form = QFormLayout()
+
+        if filename:
+            form.addRow(QLabel(f"File: {Path(filename).name}"))
+
+        self.layout_mode = QComboBox()
+        self.layout_mode.addItems([
+            "Interleaved: amp, phase, amp, phase",
+            "Interleaved: phase, amp, phase, amp",
+            "Columns: amp | phase per row",
+        ])
+        self.layout_mode.setCurrentIndex(0)
+        form.addRow("Data layout:", self.layout_mode)
+
+        self.amp_unit = QComboBox()
+        self.amp_unit.addItems([
+            "Percent (0-100)",
+            "Fraction (0-1)",
+            "Gauss",
+            "mT",
+            "uT",
+        ])
+        self.amp_unit.setCurrentIndex(0)
+        form.addRow("Amplitude unit:", self.amp_unit)
+
+        self.phase_unit = QComboBox()
+        self.phase_unit.addItems(["Degrees", "Radians"])
+        self.phase_unit.setCurrentIndex(0)
+        form.addRow("Phase unit:", self.phase_unit)
+
+        self.duration_ms = QDoubleSpinBox()
+        self.duration_ms.setRange(0.001, 100000.0)
+        self.duration_ms.setDecimals(3)
+        self.duration_ms.setSingleStep(0.1)
+        self.duration_ms.setValue(1.0)
+        form.addRow("Duration (ms):", self.duration_ms)
+
+        layout.addLayout(form)
+        layout.addWidget(QLabel("Tip: Percent/fraction amplitudes are treated as relative and rescaled from flip angle."))
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+
+    def get_options(self) -> dict:
+        layout_choice = self.layout_mode.currentText()
+        if layout_choice.startswith("Interleaved: amp"):
+            layout = "amp_phase_interleaved"
+        elif layout_choice.startswith("Interleaved: phase"):
+            layout = "phase_amp_interleaved"
+        else:
+            layout = "columns"
+
+        amp_unit_text = self.amp_unit.currentText().lower()
+        if "percent" in amp_unit_text:
+            amp_unit = "percent"
+        elif "fraction" in amp_unit_text:
+            amp_unit = "fraction"
+        elif amp_unit_text.startswith("mt"):
+            amp_unit = "mt"
+        elif amp_unit_text.startswith("ut"):
+            amp_unit = "ut"
+        else:
+            amp_unit = "gauss"
+
+        phase_unit = "deg" if self.phase_unit.currentText().lower().startswith("deg") else "rad"
+
+        return {
+            "layout": layout,
+            "amp_unit": amp_unit,
+            "phase_unit": phase_unit,
+            "duration_s": float(self.duration_ms.value()) / 1000.0,
+        }
 
 
 class TissueParameterWidget(QGroupBox):
@@ -343,8 +428,21 @@ class RFPulseDesigner(QGroupBox):
         self.tbw_auto_label.setStyleSheet("color: gray;")
         layout.addWidget(self.tbw_auto_label)
         
+        # Lobes control for Sinc pulses
+        lobes_layout = QHBoxLayout()
+        lobes_layout.addWidget(QLabel("Lobes (Sinc):"))
+        self.sinc_lobes = QSpinBox()
+        self.sinc_lobes.setRange(1, 100)
+        self.sinc_lobes.setValue(3)
+        self.sinc_lobes.valueChanged.connect(self.update_pulse)
+        lobes_layout.addWidget(self.sinc_lobes)
+        self.lobes_container = QWidget()
+        self.lobes_container.setLayout(lobes_layout)
+        layout.addWidget(self.lobes_container)
+        
         # Phase
         phase_layout = QHBoxLayout()
+
         phase_layout.addWidget(QLabel("Phase (°):"))
         self.phase = QDoubleSpinBox()
         self.phase.setRange(0, 360)
@@ -473,6 +571,43 @@ class RFPulseDesigner(QGroupBox):
         except Exception:
             return 1.0
 
+    def _scale_pulse_to_flip(self, b1_wave, t_wave, flip_deg: float, integfac: float = 1.0):
+        """Scale a complex waveform to achieve a target flip angle (degrees)."""
+        b1_wave = np.asarray(b1_wave, dtype=complex)
+        t_wave = np.asarray(t_wave, dtype=float)
+        if b1_wave.size == 0 or t_wave.size == 0:
+            return b1_wave
+        flip_rad = np.deg2rad(flip_deg)
+        peak = np.max(np.abs(b1_wave)) if np.any(np.abs(b1_wave)) else 1.0
+        shape = b1_wave / peak if peak != 0 else b1_wave
+        dt = float(np.median(np.diff(t_wave))) if len(t_wave) > 1 else 1e-6
+        area = np.trapezoid(shape, dx=dt)
+        opt_phase = -np.angle(area) if np.isfinite(area) and area != 0 else 0.0
+        aligned_area = np.real(area * np.exp(1j * opt_phase))
+        if not np.isfinite(aligned_area) or abs(aligned_area) < 1e-12:
+            aligned_area = 1e-12
+        aligned_area *= max(integfac, 1e-9)
+        gmr_1h_rad_Ts = 267522187.43999997
+        pulse_amp_T = flip_rad / (gmr_1h_rad_Ts * aligned_area)
+        pulse_amp_G = pulse_amp_T * 1e4
+        return shape * pulse_amp_G * np.exp(1j * opt_phase)
+
+    def _apply_phase_and_offset(self, b1_wave, t_wave):
+        """Apply user-selected phase and frequency offset to a waveform."""
+        b1_wave = np.asarray(b1_wave, dtype=complex)
+        t_wave = np.asarray(t_wave, dtype=float)
+        if b1_wave.shape != t_wave.shape:
+            # Allow time to be length N while b1 is length N
+            pass
+        phase_rad = np.deg2rad(self.phase.value())
+        freq_hz = self.freq_offset.value()
+        if t_wave.size > 0:
+            t_rel = t_wave - t_wave[0]
+        else:
+            t_rel = t_wave
+        # Apply global phase and complex modulation for frequency offset
+        return b1_wave * np.exp(1j * (phase_rad + 2 * np.pi * freq_hz * t_rel))
+
     def get_integration_factor(self) -> float:
         """Return best-known integration factor (cached or recomputed from current pulse)."""
         if self.current_pulse is not None and len(self.current_pulse) == 2:
@@ -501,10 +636,17 @@ class RFPulseDesigner(QGroupBox):
 
         # Hide custom settings when not using custom pulse
         self.custom_settings_group.setVisible(False)
+        self.lobes_container.setVisible(pulse_type == 'sinc')
             
         duration = self.duration.value() / 1000  # Convert to seconds
         flip = self.flip_angle.value()
-        design_tbw = self._design_tbw_for_type(pulse_type)
+        
+        # Calculate TBW based on pulse type
+        if pulse_type == 'sinc':
+            design_tbw = float(self.sinc_lobes.value()) + 1.0 # Approximation: lobes ~ TBW - 1
+        else:
+            design_tbw = self._design_tbw_for_type(pulse_type)
+            
         phase_rad = np.deg2rad(self.phase.value())
         # Increase time resolution using desired dt
         if self.target_dt and self.target_dt > 0:
@@ -602,14 +744,41 @@ class RFPulseDesigner(QGroupBox):
             self,
             "Load RF Pulse",
             "",
-            "Bruker Pulse Files (*.exc);;All Files (*)"
+            "Pulse Files (*.exc *.dat *.txt *.csv);;All Files (*)"
         )
         if filename:
             try:
-                from pulse_loader import load_pulse_from_file as load_exc_file
-                b1, time, metadata = load_exc_file(filename)
+                suffix = Path(filename).suffix.lower()
+                if suffix == ".exc":
+                    from pulse_loader import load_pulse_from_file as load_exc_file
+                    b1, time, metadata = load_exc_file(filename)
+                else:
+                    # Let user describe how to interpret amp/phase text files
+                    dlg = PulseImportDialog(self, filename)
+                    if dlg.exec_() != QDialog.Accepted:
+                        return
+                    opts = dlg.get_options()
+                    from pulse_loader import load_amp_phase_dat
+                    b1, time, metadata = load_amp_phase_dat(
+                        filename,
+                        duration_s=opts["duration_s"],
+                        amplitude_unit=opts["amp_unit"],
+                        phase_unit=opts["phase_unit"],
+                        layout=opts["layout"],
+                    )
 
-                # Store the original loaded pulse data
+                # Apply user phase/frequency and calibrate amplitude to current flip angle
+                b1 = self._apply_phase_and_offset(b1, time)
+                integfac = None
+                try:
+                    if hasattr(metadata, "integfac") and metadata.integfac not in (None, 0):
+                        if np.isfinite(metadata.integfac) and metadata.integfac > 0:
+                            integfac = float(metadata.integfac)
+                except Exception:
+                    integfac = None
+                if integfac is None:
+                    integfac = self._compute_integration_factor_from_wave(b1, time)
+                b1 = self._scale_pulse_to_flip(b1, time, self.flip_angle.value(), integfac=integfac)
                 self.loaded_pulse_b1 = b1.copy()
                 self.loaded_pulse_time = time.copy()
                 self.loaded_pulse_metadata = metadata
@@ -658,6 +827,10 @@ class RFPulseDesigner(QGroupBox):
 
                 # Store the loaded pulse as current
                 self.current_pulse = (b1, time)
+                # Recompute integration factor/TBW from the loaded waveform
+                computed_integ = self._compute_integration_factor_from_wave(b1, time)
+                self._update_tbw_auto(computed_integ)
+                self.last_integration_factor = float(computed_integ)
 
                 # Update plot
                 self.plot_widget.clear()
@@ -698,6 +871,79 @@ class RFPulseDesigner(QGroupBox):
                     "Error Loading Pulse",
                     f"Failed to load pulse file:\n{str(e)}"
                 )
+
+    def get_state(self) -> dict:
+        """Get the current UI state of the pulse designer."""
+        state = {
+            "pulse_type": self.pulse_type.currentText(),
+            "flip_angle": self.flip_angle.value(),
+            "duration": self.duration.value(),
+            "phase": self.phase.value(),
+            "freq_offset": self.freq_offset.value(),
+            "sinc_lobes": self.sinc_lobes.value(),
+            # Custom settings
+            "custom_duration": self.custom_duration.value(),
+            "custom_b1_amplitude": self.custom_b1_amplitude.value(),
+        }
+        # Include loaded pulse data
+        state["loaded_pulse_b1"] = self.loaded_pulse_b1
+        state["loaded_pulse_time"] = self.loaded_pulse_time
+        state["loaded_pulse_metadata"] = getattr(self, "loaded_pulse_metadata", None)
+        return state
+
+    def set_state(self, state: dict):
+        """Restore the UI state."""
+        if not state:
+            return
+        
+        # Block signals to prevent intermediate updates
+        self.pulse_type.blockSignals(True)
+        self.flip_angle.blockSignals(True)
+        self.duration.blockSignals(True)
+        self.phase.blockSignals(True)
+        self.freq_offset.blockSignals(True)
+        self.sinc_lobes.blockSignals(True)
+        self.custom_duration.blockSignals(True)
+        self.custom_b1_amplitude.blockSignals(True)
+        
+        try:
+            if "pulse_type" in state:
+                self.pulse_type.setCurrentText(state["pulse_type"])
+            if "flip_angle" in state:
+                self.flip_angle.setValue(state["flip_angle"])
+            if "duration" in state:
+                self.duration.setValue(state["duration"])
+            if "phase" in state:
+                self.phase.setValue(state["phase"])
+            if "freq_offset" in state:
+                self.freq_offset.setValue(state["freq_offset"])
+            if "sinc_lobes" in state:
+                self.sinc_lobes.setValue(state["sinc_lobes"])
+            
+            # Restore loaded data
+            if "loaded_pulse_b1" in state:
+                self.loaded_pulse_b1 = state["loaded_pulse_b1"]
+            if "loaded_pulse_time" in state:
+                self.loaded_pulse_time = state["loaded_pulse_time"]
+            if "loaded_pulse_metadata" in state:
+                self.loaded_pulse_metadata = state["loaded_pulse_metadata"]
+                
+            if "custom_duration" in state:
+                self.custom_duration.setValue(state["custom_duration"])
+            if "custom_b1_amplitude" in state:
+                self.custom_b1_amplitude.setValue(state["custom_b1_amplitude"])
+        finally:
+            self.pulse_type.blockSignals(False)
+            self.flip_angle.blockSignals(False)
+            self.duration.blockSignals(False)
+            self.phase.blockSignals(False)
+            self.freq_offset.blockSignals(False)
+            self.sinc_lobes.blockSignals(False)
+            self.custom_duration.blockSignals(False)
+            self.custom_b1_amplitude.blockSignals(False)
+        
+        # Trigger update once
+        self.update_pulse()
 
     def reprocess_custom_pulse(self):
         """Reprocess the loaded custom pulse with new duration/amplitude settings."""
@@ -769,6 +1015,8 @@ class RFPulseDesigner(QGroupBox):
 
             # Apply amplitude and phase to achieve target flip angle
             new_b1 = shape * pulse_amp_G * np.exp(1j * opt_phase)
+        # Apply user-selected phase and frequency offset
+        new_b1 = self._apply_phase_and_offset(new_b1, new_time)
 
         # Update current pulse
         self.current_pulse = (new_b1, new_time)
@@ -786,10 +1034,11 @@ class RFPulseDesigner(QGroupBox):
             self.plot_widget.setLimits(xMin=0, xMax=max(t_max, 0.1))
             self.plot_widget.setXRange(0, max(t_max, 0.1), padding=0)
 
-        # Update heuristic TBW from integration factor (if provided)
-        self._update_tbw_auto(integfac)
-        if integfac is not None and np.isfinite(integfac):
-            self.last_integration_factor = float(integfac)
+        # Update heuristic TBW from integration factor (recomputed)
+        computed_integ = self._compute_integration_factor_from_wave(new_b1, new_time)
+        self._update_tbw_auto(computed_integ)
+        if np.isfinite(computed_integ):
+            self.last_integration_factor = float(computed_integ)
 
         # Emit signal that pulse changed
         self.pulse_changed.emit(self.current_pulse)
@@ -804,10 +1053,22 @@ class SequenceDesigner(QGroupBox):
         self.custom_pulse = None
         self.playhead_line = None
         self.diagram_labels = []
+        self.pulse_states = {}  # Store UI state for each pulse role
+        self.pulse_waveforms = {}  # Store (b1, time) for each pulse role
+        self.current_role = None
         self.init_ui()
         
     def init_ui(self):
         layout = QVBoxLayout()
+        
+        # Pulse selector
+        pulse_layout = QHBoxLayout()
+        pulse_layout.addWidget(QLabel("Pulses:"))
+        self.pulse_list = QListWidget()
+        self.pulse_list.setFixedHeight(60)
+        self.pulse_list.currentItemChanged.connect(self._on_pulse_selection_changed)
+        pulse_layout.addWidget(self.pulse_list)
+        layout.addLayout(pulse_layout)
         
         # Sequence type
         type_layout = QHBoxLayout()
@@ -999,13 +1260,75 @@ class SequenceDesigner(QGroupBox):
         val = self.slice_gradient_spin.value()
         return val if val > 0 else None
 
+    def _effective_tbw(self) -> float:
+        """Return best-effort time-bandwidth product from RF designer integration factor."""
+        try:
+            if hasattr(self, "parent_gui") and hasattr(self.parent_gui, "rf_designer"):
+                integ = float(self.parent_gui.rf_designer.get_integration_factor())
+                if np.isfinite(integ) and integ > 0:
+                    return 1.0 / integ
+        except Exception:
+            pass
+        return 4.0
+
     def _update_sequence_options(self):
-        """Show/hide sequence-specific option widgets."""
+        """Show/hide sequence-specific option widgets and update pulse list."""
         seq_type = self.sequence_type.currentText()
         self.spin_echo_opts.setVisible(seq_type in ("Spin Echo", "Spin Echo (Tip-axis 180)"))
         self.ssfp_opts.setVisible(seq_type == "SSFP (Loop)")
         self.ti_widget.setVisible(seq_type == "Inversion Recovery")
-        # self.ti_spin.setVisible(seq_type == "Inversion Recovery")
+        
+        # Update pulse list based on sequence type
+        self.pulse_list.blockSignals(True)
+        self.pulse_list.clear()
+        
+        roles = []
+        if seq_type in ("Spin Echo", "Spin Echo (Tip-axis 180)"):
+            roles = ["Excitation", "Refocusing"]
+            
+            # Pre-populate states so they share the same pulse type/duration
+            if hasattr(self, "parent_gui") and hasattr(self.parent_gui, "rf_designer"):
+                current_state = self.parent_gui.rf_designer.get_state()
+                
+                # Excitation: 90 degrees, same type/duration
+                exc_state = current_state.copy()
+                exc_state["flip_angle"] = 90.0
+                self.pulse_states["Excitation"] = exc_state
+                
+                # Refocusing: 180 degrees, same type/duration
+                ref_state = current_state.copy()
+                ref_state["flip_angle"] = 180.0
+                self.pulse_states["Refocusing"] = ref_state
+
+                # Pre-generate waveforms for both roles so they are available immediately
+                # Temporarily switch roles to force the designer to generate and save each pulse
+                for role in roles:
+                    self.current_role = role
+                    self.parent_gui.rf_designer.set_state(self.pulse_states[role])
+
+        elif seq_type == "Inversion Recovery":
+            roles = ["Inversion", "Excitation"]
+        elif seq_type in ("Gradient Echo", "Free Induction Decay", "FLASH", "EPI"):
+            roles = ["Excitation"]
+        elif seq_type == "Custom":
+            roles = ["Custom Pulse"]
+        else:
+            roles = ["Pulse"]
+
+        for role in roles:
+            self.pulse_list.addItem(role)
+            
+        # Select first item by default
+        if self.pulse_list.count() > 0:
+            self.pulse_list.setCurrentRow(0)
+            self.current_role = roles[0]
+            
+        self.pulse_list.blockSignals(False)
+        
+        # Trigger state load for the new selection
+        # We manually call the handler because we blocked signals to avoid partial updates
+        self._on_pulse_selection_changed(self.pulse_list.currentItem(), None)
+
 
     def get_sequence_preset_params(self, seq_type: str) -> dict:
         """
@@ -1147,20 +1470,29 @@ class SequenceDesigner(QGroupBox):
         if seq_type == "Spin Echo":
             # Get RF frequency offset from RF designer
             rf_freq_offset = self.parent_gui.rf_designer.freq_offset.value() if hasattr(self, 'parent_gui') and hasattr(self.parent_gui, 'rf_designer') else 0.0
+            
+            # Retrieve pulses from waveforms
+            exc = self.pulse_waveforms.get("Excitation", custom_pulse)
+            ref = self.pulse_waveforms.get("Refocusing")
+            
             return SpinEcho(
                 te=te,
                 tr=tr,
-                custom_excitation=custom_pulse,
+                custom_excitation=exc,
+                custom_refocusing=ref,
                 slice_thickness=self._slice_thickness_m(),
                 slice_gradient_override=self._slice_gradient_override(),
                 echo_count=self.spin_echo_echoes.value(),
                 rf_freq_offset=rf_freq_offset,
             )
         elif seq_type == "Spin Echo (Tip-axis 180)":
+            exc = self.pulse_waveforms.get("Excitation", custom_pulse)
+            ref = self.pulse_waveforms.get("Refocusing")
             return SpinEchoTipAxis(
                 te=te,
                 tr=tr,
-                custom_excitation=custom_pulse,
+                custom_excitation=exc,
+                custom_refocusing=ref,
                 slice_thickness=self._slice_thickness_m(),
                 slice_gradient_override=self._slice_gradient_override(),
                 echo_count=self.spin_echo_echoes.value(),
@@ -1183,7 +1515,7 @@ class SequenceDesigner(QGroupBox):
             return SliceSelectRephase(
                 flip_angle=90,
                 pulse_duration=3e-3,
-                time_bw_product=4.0,
+                time_bw_product=self._effective_tbw(),
                 rephase_duration=rephase_dur,
                 slice_thickness=self._slice_thickness_m(),
                 slice_gradient_override=self._slice_gradient_override(),
@@ -1236,7 +1568,13 @@ class SequenceDesigner(QGroupBox):
             return self._build_ssfp(custom_pulse, dt)
         seq = self.get_sequence(custom_pulse=custom_pulse)
         if isinstance(seq, PulseSequence):
-            return seq.compile(dt=dt)
+            b1, gradients, time = seq.compile(dt=dt)
+            # Scale slice gradients using effective TBW if user has not overridden Gz
+            if self._slice_gradient_override() is None and seq_type in ("Spin Echo", "Spin Echo (Tip-axis 180)", "Gradient Echo"):
+                scale = self._effective_tbw() / 4.0
+                gradients = np.array(gradients, copy=True)
+                gradients[:, 2] *= scale
+            return b1, gradients, time
         b1, gradients, time = seq
         return np.asarray(b1, dtype=complex), np.asarray(gradients, dtype=float), np.asarray(time, dtype=float)
 
@@ -1293,7 +1631,8 @@ class SequenceDesigner(QGroupBox):
         b1[:n_exc] = exc_b1[:n_exc]
         thickness_cm = self._slice_thickness_m() * 100.0
         gamma_hz_per_g = 4258.0
-        bw_hz = 4.0 / max(exc_duration, dt)
+        tbw = self._effective_tbw()
+        bw_hz = tbw / max(exc_duration, dt)
         slice_g = self._slice_gradient_override() or (bw_hz / (gamma_hz_per_g * thickness_cm))  # G/cm
         gradients[:n_exc, 2] = slice_g
 
@@ -1351,7 +1690,8 @@ class SequenceDesigner(QGroupBox):
         b1[:n_inv] = inv_b1[:n_inv]
         thickness_cm = self._slice_thickness_m() * 100.0
         gamma_hz_per_g = 4258.0
-        bw_hz = 4.0 / max(len(inv_b1) * dt, dt)
+        tbw = self._effective_tbw()
+        bw_hz = tbw / max(len(inv_b1) * dt, dt)
         slice_g = self._slice_gradient_override() or (bw_hz / (gamma_hz_per_g * thickness_cm))  # G/cm
         gradients[:n_inv, 2] = slice_g
         start_exc = int(max(ti, (n_inv * dt)) / dt)
@@ -1362,7 +1702,7 @@ class SequenceDesigner(QGroupBox):
             exc_b1, _ = design_rf_pulse('sinc', duration=1e-3, flip_angle=90, npoints=max(16, int(1e-3/dt)))
         n_exc = min(len(exc_b1), max(0, npoints - start_exc))
         b1[start_exc:start_exc + n_exc] = exc_b1[:n_exc]
-        bw_hz_exc = 4.0 / max(n_exc * dt, dt)
+        bw_hz_exc = tbw / max(n_exc * dt, dt)
         slice_g_exc = self._slice_gradient_override() or (bw_hz_exc / (gamma_hz_per_g * thickness_cm))
         gradients[start_exc:start_exc + n_exc, 2] = slice_g_exc
         ro_start = start_exc + int(max(0.2e-3, te/2) / dt)
@@ -1453,8 +1793,39 @@ class SequenceDesigner(QGroupBox):
             self.default_dt = dt_s
             self.update_diagram()
 
+    def _on_pulse_selection_changed(self, current, previous):
+        """Handle switching between pulses in the list."""
+        if not hasattr(self, "parent_gui") or not hasattr(self.parent_gui, "rf_designer"):
+            return
+
+        # Save previous state
+        if previous:
+            prev_role = previous.text()
+            self.pulse_states[prev_role] = self.parent_gui.rf_designer.get_state()
+        
+        # Load new state
+        if current:
+            curr_role = current.text()
+            self.current_role = curr_role
+            
+            if curr_role in self.pulse_states:
+                self.parent_gui.rf_designer.set_state(self.pulse_states[curr_role])
+            else:
+                # Apply defaults for new roles
+                defaults = {}
+                if curr_role in ("Refocusing", "Inversion"):
+                    defaults = {"flip_angle": 180.0, "duration": 2.0}
+                elif curr_role == "Excitation":
+                    defaults = {"flip_angle": 90.0, "duration": 1.0}
+                
+                if defaults:
+                    self.parent_gui.rf_designer.set_state(defaults)
+
     def set_custom_pulse(self, pulse):
         """Store custom pulse for preview (used when sequence type is Custom)."""
+        if self.current_role:
+            self.pulse_waveforms[self.current_role] = pulse
+            
         self.custom_pulse = pulse
         # If a custom pulse exists, sync SSFP parameter widgets to its basic stats
         if pulse is not None:
@@ -1471,7 +1842,6 @@ class SequenceDesigner(QGroupBox):
                 duration_s = float(t_wave[-1] - t_wave[0])
                 self.ssfp_dur.setValue(max(duration_s * 1000.0, self.ssfp_dur.singleStep()))
         self.update_diagram()
-        self._update_sequence_options()
 
     def update_diagram(self, custom_pulse=None):
         """Render the sequence diagram so users can see the selected waveform."""
@@ -2610,28 +2980,69 @@ class ParameterSweepWidget(QWidget):
         self.results_table.resizeColumnsToContents()
 
     def export_results(self):
-        """Export sweep results to CSV."""
+        """Export sweep results to CSV/NPZ/NPY."""
         if not self.last_sweep_results:
             QMessageBox.warning(self, "No Results", "No sweep results to export.")
             return
 
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Export Sweep Results", "", "CSV Files (*.csv);;All Files (*)"
+        export_dir = self._default_export_dir()
+        default_path = export_dir / "sweep_results.csv"
+
+        filename, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Sweep Results",
+            str(default_path),
+            "CSV (*.csv);;NumPy Archive (*.npz);;NumPy Binary (*.npy);;All Files (*)"
         )
         if not filename:
             return
 
-        # Write CSV
-        with open(filename, 'w') as f:
-            results = self.last_sweep_results
-            param_name = results['parameter_name']
-            metrics = list(results['metrics'].keys())
-            array_metrics = {m: [] for m in metrics}
+        path = Path(filename)
+        ext = path.suffix.lower()
+        # Infer from selected filter if no extension was provided
+        if ext == "":
+            if selected_filter and "npz" in selected_filter.lower():
+                path = path.with_suffix(".npz")
+                ext = ".npz"
+            elif selected_filter and "npy" in selected_filter.lower():
+                path = path.with_suffix(".npy")
+                ext = ".npy"
+            else:
+                path = path.with_suffix(".csv")
+                ext = ".csv"
 
-            # Header
+        if ext == ".csv":
+            array_path = self._save_sweep_results_csv(path)
+            extra = f"\nArray metrics exported to:\n{array_path}" if array_path else ""
+            QMessageBox.information(self, "Export Complete", f"Results exported to:\n{path}{extra}")
+        elif ext == ".npz":
+            self._save_sweep_results_npz(path)
+            QMessageBox.information(self, "Export Complete", f"Results exported to:\n{path}")
+        elif ext == ".npy":
+            self._save_sweep_results_npy(path)
+            QMessageBox.information(self, "Export Complete", f"Results exported to:\n{path}")
+        else:
+            QMessageBox.warning(self, "Unsupported format", f"Extension '{ext}' is not supported.")
+
+    def _default_export_dir(self) -> Path:
+        """Resolve a writable export directory for sweep results."""
+        if getattr(self, "parent_gui", None) and hasattr(self.parent_gui, "_get_export_directory"):
+            try:
+                return Path(self.parent_gui._get_export_directory())
+            except Exception:
+                pass
+        return Path.cwd()
+
+    def _save_sweep_results_csv(self, path: Path) -> Optional[Path]:
+        """Save sweep results to CSV and return any auxiliary array path."""
+        results = self.last_sweep_results
+        param_name = results['parameter_name']
+        metrics = list(results['metrics'].keys())
+        array_metrics = {m: [] for m in metrics}
+
+        with open(path, 'w') as f:
             f.write(f"{param_name}," + ",".join(metrics) + "\n")
 
-            # Data rows
             for i, param_val in enumerate(results['parameter_values']):
                 row = [f"{param_val:.6f}"]
                 for metric in metrics:
@@ -2649,7 +3060,6 @@ class ParameterSweepWidget(QWidget):
                         row.append("")
                 f.write(",".join(row) + "\n")
 
-        array_path = None
         stacked_arrays = {}
         for metric, vals in array_metrics.items():
             if not vals:
@@ -2658,18 +3068,48 @@ class ParameterSweepWidget(QWidget):
                 stacked_arrays[metric] = np.stack(vals)
             except Exception:
                 stacked_arrays[metric] = np.array(vals, dtype=object)
+
         if stacked_arrays:
-            base = Path(filename)
-            array_path = base.with_name(base.stem + "_arrays.npz")
+            array_path = path.with_name(path.stem + "_arrays.npz")
             np.savez(
                 array_path,
                 parameter_name=results['parameter_name'],
                 parameter_values=np.asarray(results['parameter_values']),
                 **stacked_arrays,
             )
+            return array_path
+        return None
 
-        extra = f"\nArray metrics exported to:\n{array_path}" if array_path else ""
-        QMessageBox.information(self, "Export Complete", f"Results exported to:\n{filename}{extra}")
+    def _save_sweep_results_npz(self, path: Path):
+        """Save sweep results into a single NPZ archive."""
+        results = self.last_sweep_results
+        payload = {
+            "parameter_name": results['parameter_name'],
+            "parameter_values": np.asarray(results['parameter_values']),
+        }
+        for metric, values in results['metrics'].items():
+            payload[metric] = self._stack_metric_values(values)
+        np.savez(path, **payload)
+
+    def _save_sweep_results_npy(self, path: Path):
+        """Save sweep results as a NumPy binary with a dictionary payload."""
+        results = self.last_sweep_results
+        payload = {
+            "parameter_name": results['parameter_name'],
+            "parameter_values": np.asarray(results['parameter_values']),
+            "metrics": {metric: self._stack_metric_values(vals) for metric, vals in results['metrics'].items()},
+        }
+        np.save(path, payload, allow_pickle=True)
+
+    def _stack_metric_values(self, values):
+        """Best-effort stacking for metric values with mixed scalar/array content."""
+        try:
+            return np.stack([np.asarray(v) for v in values])
+        except Exception:
+            try:
+                return np.asarray(values, dtype=float)
+            except Exception:
+                return np.asarray(values, dtype=object)
 
 
 class BlochSimulatorGUI(QMainWindow):
@@ -2724,6 +3164,8 @@ class BlochSimulatorGUI(QMainWindow):
         self._spectrum_final_range = None
         self.dataset_exporter = DatasetExporter()
         self._sweep_mode = False
+        self.spectrum_y_max = 1.1 # Constant maximum for spectrum Y-axis
+
 
         # Dirty flags for expensive computations during animation
         self._spectrum_needs_update = False
@@ -3471,19 +3913,8 @@ class BlochSimulatorGUI(QMainWindow):
         if total_traces <= max_traces:
             return list(range(total_traces))
 
-        # Always include first and last
-        if max_traces == 1:
-            return [0]
-        if max_traces == 2:
-            return [0, total_traces - 1]
-
-        # Evenly space the rest
-        step = (total_traces - 1) / (max_traces - 1)
-        indices = [0]
-        for i in range(1, max_traces - 1):
-            indices.append(int(round(i * step)))
-        indices.append(total_traces - 1)
-
+        # Evenly space the indices
+        indices = np.linspace(0, total_traces - 1, max_traces, dtype=int)
         return sorted(list(set(indices)))  # Remove duplicates and sort
 
     def _safe_clear_plot(self, plot_widget, persistent_items=None):
@@ -6224,15 +6655,8 @@ class BlochSimulatorGUI(QMainWindow):
             else:
                 self.spectrum_plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
 
-            # Use fixed Y range with computed padding, prefer final-spectrum range if available
-            y_min, y_max = self.spectrum_mag_range
-            if getattr(self, "_spectrum_final_range", None):
-                final_min, final_max = self._spectrum_final_range
-                if np.isfinite(final_max):
-                    y_max = max(y_max, final_max)
-                if np.isfinite(final_min):
-                    y_min = min(y_min, final_min)
-            self.spectrum_plot.setYRange(y_min, y_max, padding=0)
+            # Use fixed Y range for consistency
+            self.spectrum_plot.setYRange(0.0, self.spectrum_y_max, padding=0)
 
         # Cache for export
         if show_spins:
@@ -6348,7 +6772,7 @@ class BlochSimulatorGUI(QMainWindow):
             y_min = 0.0
         if not np.isfinite(y_max) or y_max <= 0:
             y_max = 1.0
-        self.spectrum_plot.setYRange(min(0.0, y_min), y_max * 1.1, padding=0)
+        self.spectrum_plot.setYRange(0.0, self.spectrum_y_max, padding=0)
 
         export_entry = {
             "frequency": freq_axis,

@@ -379,7 +379,7 @@ class SpinEcho(PulseSequence):
     Spin echo pulse sequence.
     """
     
-    def __init__(self, te: float, tr: float, custom_excitation=None, slice_thickness: float = 0.005,
+    def __init__(self, te: float, tr: float, custom_excitation=None, custom_refocusing=None, slice_thickness: float = 0.005,
                  slice_gradient_override: Optional[float] = None, echo_count: int = 1, rf_freq_offset: float = 0.0, **kwargs):
         """
         Initialize spin echo sequence.
@@ -397,6 +397,7 @@ class SpinEcho(PulseSequence):
         self.te = te
         self.tr = tr
         self.custom_excitation = custom_excitation
+        self.custom_refocusing = custom_refocusing
         self.slice_gradient_override = slice_gradient_override
         self.echo_count = max(1, int(echo_count))
         self.rf_freq_offset = rf_freq_offset
@@ -427,10 +428,16 @@ class SpinEcho(PulseSequence):
             n_exc = len(exc_pulse)
             b1[:n_exc] = exc_pulse
             exc_duration = 1e-3
-        # Default refocusing: classic 180° sinc
-        ref_pulse, _ = design_rf_pulse('sinc', duration=2e-3,
-                                      flip_angle=180, npoints=int(2e-3/dt),
-                                      freq_offset=self.rf_freq_offset)
+            
+        # Refocusing pulse
+        if self.custom_refocusing is not None:
+            ref_b1, _ = self.custom_refocusing
+            ref_pulse = np.asarray(ref_b1, dtype=complex)
+        else:
+            # Default refocusing: classic 180° sinc
+            ref_pulse, _ = design_rf_pulse('sinc', duration=2e-3,
+                                          flip_angle=180, npoints=int(2e-3/dt),
+                                          freq_offset=self.rf_freq_offset)
 
         for echo_idx in range(self.echo_count):
             ref_time = (0.5 + echo_idx) * self.te
@@ -466,12 +473,13 @@ class SpinEchoTipAxis(PulseSequence):
     (CPMG-style: 90° about X, 180° about Y).
     """
 
-    def __init__(self, te: float, tr: float, custom_excitation=None, slice_thickness: float = 0.005,
+    def __init__(self, te: float, tr: float, custom_excitation=None, custom_refocusing=None, slice_thickness: float = 0.005,
                  slice_gradient_override: Optional[float] = None, echo_count: int = 1, **kwargs):
         super().__init__(slice_thickness=slice_thickness, **kwargs)
         self.te = te
         self.tr = tr
         self.custom_excitation = custom_excitation
+        self.custom_refocusing = custom_refocusing
         self.slice_gradient_override = slice_gradient_override
         self.echo_count = max(1, int(echo_count))
 
@@ -498,8 +506,12 @@ class SpinEchoTipAxis(PulseSequence):
             b1[:n_exc] = exc_b1
             exc_duration = 1e-3
         # Build a proper 180° refocusing pulse (independent of excitation shape)
-        ref_pulse, _ = design_rf_pulse('sinc', duration=2e-3,
-                                      flip_angle=180, npoints=int(2e-3 / dt))
+        if self.custom_refocusing is not None:
+            ref_b1, _ = self.custom_refocusing
+            ref_pulse = np.asarray(ref_b1, dtype=complex)
+        else:
+            ref_pulse, _ = design_rf_pulse('sinc', duration=2e-3,
+                                          flip_angle=180, npoints=int(2e-3 / dt))
 
         # Estimate excitation phase from non-zero samples; default to 0
         if np.any(np.abs(b1[:n_exc]) > 0):

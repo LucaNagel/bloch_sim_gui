@@ -416,7 +416,10 @@ def load_pulse_from_file(filepath: Union[str, Path]) -> Tuple[np.ndarray, np.nda
 
 def load_amp_phase_dat(filepath: Union[str, Path],
                        duration_s: Optional[float] = None,
-                       max_b1_gauss: float = 1.0) -> Tuple[np.ndarray, np.ndarray, PulseMetadata]:
+                       max_b1_gauss: Optional[float] = None,
+                       amplitude_unit: str = "relative",
+                       phase_unit: str = "deg",
+                       layout: str = "columns") -> Tuple[np.ndarray, np.ndarray, PulseMetadata]:
     """
     Load a simple two-column .dat pulse where column 0 is relative amplitude (1.0 = 100%)
     and column 1 is phase in degrees.
@@ -430,6 +433,17 @@ def load_amp_phase_dat(filepath: Union[str, Path],
         from the filename (e.g., `AHP_5ms_Hsn.dat`). Fallback is index-based timing.
     max_b1_gauss : float, optional
         Peak B1 amplitude in Gauss corresponding to amplitude=1.0. Defaults to 1.0 G.
+    amplitude_unit : str, optional
+        One of {"relative", "percent", "fraction", "gauss", "mt", "ut"}.
+        - "relative"/"fraction": column values are 0..1 scaling of max_b1_gauss
+        - "percent": column values are 0..100 percent of max_b1_gauss
+        - "gauss"/"mt"/"ut": column values are absolute amplitudes in those units
+    phase_unit : str, optional
+        "deg" or "rad".
+    layout : str, optional
+        "columns" for amp|phase per row,
+        "amp_phase_interleaved" for amp, phase, amp, phase...,
+        "phase_amp_interleaved" for phase, amp, phase, amp...
 
     Returns
     -------
@@ -450,20 +464,64 @@ def load_amp_phase_dat(filepath: Union[str, Path],
     except Exception:
         data = np.loadtxt(path)
 
-    if data.ndim == 1:
-        if data.size < 2:
-            raise ValueError("Pulse file must have at least two columns (amp, phase).")
-        data = data.reshape((-1, 2))
+    if data.ndim == 0:
+        raise ValueError("Pulse file must have at least two values (amp, phase).")
+    if data.ndim > 1:
+        flat = data.ravel()
+    else:
+        flat = data
 
-    if data.shape[1] < 2:
-        raise ValueError(f"Expected at least 2 columns (amp, phase) in {filepath}, got {data.shape[1]}")
+    amp_arr = None
+    phase_arr = None
+    layout_key = (layout or "columns").lower()
 
-    amp_rel = data[:, 0]
-    phase_deg = data[:, 1]
+    if layout_key == "columns":
+        if data.ndim == 1:
+            if data.size < 2:
+                raise ValueError("Pulse file must have at least two columns (amp, phase).")
+            data = data.reshape((-1, 2))
+        if data.shape[1] < 2:
+            raise ValueError(f"Expected at least 2 columns (amp, phase) in {filepath}, got {data.shape[1]}")
+        amp_arr = data[:, 0]
+        phase_arr = data[:, 1]
+    elif layout_key == "amp_phase_interleaved":
+        if flat.size % 2 != 0:
+            raise ValueError("Interleaved data must have an even number of entries (amp, phase, ...).")
+        amp_arr = flat[0::2]
+        phase_arr = flat[1::2]
+    elif layout_key == "phase_amp_interleaved":
+        if flat.size % 2 != 0:
+            raise ValueError("Interleaved data must have an even number of entries (phase, amp, ...).")
+        phase_arr = flat[0::2]
+        amp_arr = flat[1::2]
+    else:
+        raise ValueError(f"Unsupported layout '{layout}'.")
 
-    # Scale amplitude to Gauss and phase to radians.
-    amp_gauss = amp_rel * max_b1_gauss
-    phase_rad = np.deg2rad(phase_deg)
+    # Scale amplitude to Gauss.
+    unit = (amplitude_unit or "relative").lower()
+    if unit in ("percent", "percentage"):
+        peak = max_b1_gauss if max_b1_gauss is not None else 1.0
+        amp_gauss = (amp_arr / 100.0) * peak
+        max_b1_used = float(peak)
+    elif unit in ("fraction", "relative"):
+        peak = max_b1_gauss if max_b1_gauss is not None else 1.0
+        amp_gauss = amp_arr * peak
+        max_b1_used = float(peak)
+    elif unit == "mt":
+        amp_gauss = amp_arr * 10.0
+        max_b1_used = float(np.max(np.abs(amp_gauss))) if amp_gauss.size else max_b1_gauss
+    elif unit == "ut":
+        amp_gauss = amp_arr * 0.01
+        max_b1_used = float(np.max(np.abs(amp_gauss))) if amp_gauss.size else max_b1_gauss
+    else:  # gauss or fallback
+        amp_gauss = amp_arr
+        max_b1_used = float(np.max(np.abs(amp_gauss))) if amp_gauss.size else (max_b1_gauss if max_b1_gauss is not None else 0.0)
+
+    # Phase to radians.
+    if (phase_unit or "deg").lower().startswith("rad"):
+        phase_rad = phase_arr.astype(float)
+    else:
+        phase_rad = np.deg2rad(phase_arr)
     b1 = amp_gauss * np.exp(1j * phase_rad)
 
     # Derive duration if not provided (look for '<number>ms' in filename).
@@ -483,7 +541,7 @@ def load_amp_phase_dat(filepath: Union[str, Path],
         origin=str(path),
         duration=pulse_duration if pulse_duration is not None else 0.0,
         npoints=len(b1),
-        max_b1=max_b1_gauss,
+        max_b1=max_b1_used,
         shape_type="custom",
         shape_mode="Excitation",
     )
