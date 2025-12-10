@@ -3420,10 +3420,6 @@ class BlochSimulatorGUI(QMainWindow):
         self.mag_view_selector.valueChanged.connect(lambda _: self._refresh_mag_plots())
         mag_view_layout.addWidget(self.mag_view_selector)
         mag_layout.addLayout(mag_view_layout)
-        # Add range selectors
-        self.mag_range_min = QSpinBox()
-        self.mag_range_max = QSpinBox()
-        mag_view_layout.addWidget(self.mag_range_min); mag_view_layout.addWidget(self.mag_range_max)
 
         # Create both line plot and heatmap widgets, but only show one at a time
         self.mxy_plot = pg.PlotWidget()
@@ -3542,10 +3538,6 @@ class BlochSimulatorGUI(QMainWindow):
         self.signal_view_selector.setValue(0)
         self.signal_view_selector.valueChanged.connect(lambda _: self._refresh_signal_plots())
         signal_view_layout.addWidget(self.signal_view_selector)
-        # Add range selectors
-        self.signal_range_min = QSpinBox()
-        self.signal_range_max = QSpinBox()
-        signal_view_layout.addWidget(self.signal_range_min); signal_view_layout.addWidget(self.signal_range_max)
         signal_layout.addLayout(signal_view_layout)
 
         # Create line plot
@@ -3621,6 +3613,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.spectrum_pos_label = QLabel("Pos: 0.00 cm")
         spectrum_controls.addWidget(self.spectrum_pos_label)
         spectrum_controls.addWidget(self.spectrum_pos_slider)
+        spectrum_layout.addLayout(spectrum_controls)
 
         # Component selector for spectrum
         spectrum_comp_layout = QHBoxLayout()
@@ -3675,13 +3668,17 @@ class BlochSimulatorGUI(QMainWindow):
         spatial_controls.addWidget(QLabel("Plot type:"))
         self.spatial_plot_type = QComboBox()
         self.spatial_plot_type.addItems(["Line", "Heatmap"])
-        self.spatial_plot_type.currentTextChanged.connect(lambda _: self.update_spatial_plot_from_last_result())
+        
         spatial_controls.addWidget(self.spatial_plot_type)
         spatial_controls.addWidget(QLabel("Heatmap mode:"))
         self.spatial_heatmap_mode = QComboBox()
         self.spatial_heatmap_mode.addItems(["Position vs Frequency", "Position vs Time"])
         self.spatial_heatmap_mode.currentTextChanged.connect(lambda _: self.update_spatial_plot_from_last_result())
         spatial_controls.addWidget(self.spatial_heatmap_mode)
+        
+        self.spatial_plot_type.currentTextChanged.connect(lambda text: self._update_spatial_controls_visibility(text))
+        self.spatial_plot_type.currentTextChanged.connect(lambda _: self.update_spatial_plot_from_last_result())
+
         spatial_controls.addWidget(QLabel("View:"))
         self.spatial_mode = QComboBox() # Renamed from spatial_mode to avoid confusion
         self.spatial_mode.addItems(["Mean over freqs", "Individual freq"])
@@ -3708,7 +3705,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.spatial_component_combo = QComboBox()
         self.spatial_component_combo.addItems(["Magnitude & Components", "Phase"])
         self.spatial_component_combo.currentTextChanged.connect(lambda _: self.update_spatial_plot_from_last_result())
-        spatial_comp_layout.addLayout(spatial_comp_layout)
+        spatial_layout.addLayout(spatial_comp_layout)
 
         # Mxy and Mz plots side by side
         spatial_plots_layout = QHBoxLayout()
@@ -3889,6 +3886,20 @@ class BlochSimulatorGUI(QMainWindow):
         self.mag_view_mode.currentTextChanged.connect(self._sync_view_modes)
         self.mag_3d.selector_slider.valueChanged.connect(self._sync_selectors)
         self.mag_view_selector.valueChanged.connect(self._sync_selectors)
+
+        # Initialize spatial controls visibility
+        self._update_spatial_controls_visibility(self.spatial_plot_type.currentText())
+
+    def _update_spatial_controls_visibility(self, plot_type: str):
+        """Enable/disable spatial controls based on plot type."""
+        is_heatmap = (plot_type == "Heatmap")
+        # Hide/Disable heatmap mode selector if not in heatmap mode
+        if hasattr(self, 'spatial_heatmap_mode'):
+            self.spatial_heatmap_mode.setEnabled(is_heatmap)
+        
+        # Hide markers checkbox in heatmap mode (as it applies to line plots)
+        if hasattr(self, 'spatial_markers_checkbox'):
+            self.spatial_markers_checkbox.setVisible(not is_heatmap)
 
     def _color_for_index(self, idx: int, total: int):
         """Consistent color cycling for multiple frequencies."""
@@ -4599,35 +4610,45 @@ class BlochSimulatorGUI(QMainWindow):
         mode = self.mag_view_mode.currentText()
         slider = self.mag_view_selector
 
+        # Helper to find index closest to 0
+        def _get_zero_idx(arr):
+            if arr is None or len(arr) == 0: return 0
+            return int(np.argmin(np.abs(arr)))
+
         if disable:
-            max_idx = 0
-            prefix = "All"
-            label_text = "All spins"
+            slider.setRange(0, 0)
+            slider.setEnabled(False)
+            self.mag_view_selector_label.setText("All spins")
         elif mode == "Positions @ freq":
             max_idx = max(0, nfreq - 1)
-            prefix = "Freq"
-            idx = min(slider.value(), max_idx)
+            slider.setRange(0, max_idx)
+            slider.setEnabled(nfreq > 1)
+            
+            # If current value is out of range or we just switched, try to set to 0 Hz
+            if slider.value() > max_idx:
+                target = _get_zero_idx(self.last_frequencies) if self.last_frequencies is not None else 0
+                slider.setValue(target)
+            
+            idx = slider.value()
             freq_val = self.last_frequencies[idx] if self.last_frequencies is not None and idx < len(self.last_frequencies) else idx
-            label_text = f"{prefix}: {freq_val:.1f} Hz"
+            self.mag_view_selector_label.setText(f"Freq: {freq_val:.1f} Hz")
         elif mode == "Freqs @ position":
             max_idx = max(0, npos - 1)
-            prefix = "Pos"
-            idx = min(slider.value(), max_idx)
+            slider.setRange(0, max_idx)
+            slider.setEnabled(npos > 1)
+
+            # If current value is out of range or we just switched, try to set to 0 cm
+            if slider.value() > max_idx:
+                target = _get_zero_idx(self.last_positions[:, 2] * 100) if self.last_positions is not None else 0
+                slider.setValue(target)
+                
+            idx = slider.value()
             pos_val = self.last_positions[idx, 2] * 100 if self.last_positions is not None and idx < len(self.last_positions) else idx
-            label_text = f"{prefix}: {pos_val:.2f} cm"
+            self.mag_view_selector_label.setText(f"Pos: {pos_val:.2f} cm")
         else:
-            max_idx = 0
-            prefix = "All"
-            label_text = "All spins"
-
-        slider.blockSignals(True)
-        slider.setMaximum(max_idx)
-        slider.setValue(min(slider.value(), max_idx) if max_idx > 0 else 0)
-        slider.setEnabled(not disable and max_idx > 0)
-        slider.setVisible(max_idx > 0)
-        slider.blockSignals(False)
-
-        self.mag_view_selector_label.setText(label_text)
+            slider.setRange(0, 0)
+            slider.setEnabled(False)
+            self.mag_view_selector_label.setText("All spins")
 
 
     def _current_mag_filter(self, npos: int, nfreq: int):
@@ -5040,20 +5061,28 @@ class BlochSimulatorGUI(QMainWindow):
 
                     # Mark selected frequencies with colored stem plots
                     for fi in freq_indices_to_mark:
-                        color = self._color_for_index(fi, nfreq)
+                        # Ensure color is an RGBA tuple for consistent rendering
+                        color = self._color_tuple(self._color_for_index(fi, nfreq))
                         mxy_val = np.sqrt(mx_display[:, fi]**2 + my_display[:, fi]**2) if mx_display.ndim == 2 else mxy
                         mz_val = mz_display[:, fi] if mz_display.ndim == 2 else mz_pos
+
+                        # Downsample position points to draw stems at
+                        if npos <= max_markers:
+                            pos_indices_to_mark = list(range(npos))
+                        else:
+                            step_pos = npos / max_markers
+                            pos_indices_to_mark = [int(i * step_pos) for i in range(max_markers)]
 
                         # Draw stem lines from 0 to current value at selected positions
                         for pi in pos_indices_to_mark:
                             pos_val = position[pi]
                             # Mxy markers
                             line_mxy = pg.PlotCurveItem([pos_val, pos_val], [0, mxy_val[pi]],
-                                                         pen=pg.mkPen(color, width=1.5))
+                                                         pen=pg.mkPen(color=color, width=1.5))
                             self.spatial_mxy_plot.addItem(line_mxy)
                             # Mz markers
                             line_mz = pg.PlotCurveItem([pos_val, pos_val], [0, mz_val[pi]],
-                                                        pen=pg.mkPen(color, width=1.5))
+                                                        pen=pg.mkPen(color=color, width=1.5))
                             self.spatial_mz_plot.addItem(line_mz)
 
             self.log_message("Spatial plot: updated successfully")
@@ -5643,6 +5672,37 @@ class BlochSimulatorGUI(QMainWindow):
             self._compute_final_spectrum_range(signal_arr, self.last_time)
         except Exception:
             self._spectrum_final_range = None
+
+        # Reset sliders to default values (0 Hz, 0 cm) if this is a new simulation
+        # Use helper to find index closest to 0
+        def _get_zero_idx(arr, length):
+            if arr is None or len(arr) == 0:
+                return 0
+            if len(arr) != length:
+                return 0
+            return int(np.argmin(np.abs(arr)))
+
+        # Default frequencies
+        f_idx = _get_zero_idx(self.last_frequencies, freq_len)
+        if hasattr(self, 'spatial_freq_slider'):
+             self.spatial_freq_slider.setValue(f_idx)
+        
+        # Default positions
+        p_idx = _get_zero_idx(self.last_positions[:, 2] * 100 if self.last_positions is not None else None, pos_len)
+        if hasattr(self, 'spectrum_pos_slider'):
+             self.spectrum_pos_slider.setValue(p_idx)
+        
+        # Default view selectors
+        if hasattr(self, 'mag_view_selector'):
+             # If showing frequencies, default to 0 Hz index. If showing positions, default to 0 cm index.
+             # Logic is handled dynamically in update_mag_selector, but we can preset value
+             # We just set it to 0 as a safe default, or the relevant zero index if we knew the mode.
+             # Since mode can change, resetting to 0 is often safe, but specific zero-index is better.
+             # Let's just reset to 0 for now as 'All spins' usually starts at 0.
+             self.mag_view_selector.setValue(0)
+             
+        if hasattr(self, 'signal_view_selector'):
+             self.signal_view_selector.setValue(0)
 
         self.log_message(
             f"Shapes -> mx:{np.shape(mx_arr)}, my:{np.shape(my_arr)}, mz:{np.shape(mz_arr)}, signal:{np.shape(signal_arr)}"
@@ -6796,11 +6856,17 @@ class BlochSimulatorGUI(QMainWindow):
         time_idx = spec_data.get("time_idx", time_idx)
 
         self.spectrum_pos_slider.setMaximum(max(0, pos_count - 1))
-        # Show/hide slider based on mode and position count
+        # Disable slider based on mode and position count instead of hiding
         if hasattr(self, 'spectrum_pos_slider'):
             is_individual = (spectrum_mode == "Individual position")
-            self.spectrum_pos_slider.setVisible(is_individual and pos_count > 1)
-            self.spectrum_pos_label.setVisible(is_individual and pos_count > 1)
+            self.spectrum_pos_slider.setEnabled(is_individual and pos_count > 1)
+            # Update tooltip to explain why disabled
+            if not is_individual:
+                self.spectrum_pos_slider.setToolTip("Switch to 'Individual position' view to select position")
+            elif pos_count <= 1:
+                self.spectrum_pos_slider.setToolTip("Only one position available")
+            else:
+                self.spectrum_pos_slider.setToolTip("Select position to view")
 
         self.spectrum_pos_slider.blockSignals(True)
         self.spectrum_pos_slider.setValue(pos_sel)
@@ -7812,22 +7878,39 @@ class BlochSimulatorGUI(QMainWindow):
         component = self.mag_component.currentText() if hasattr(self, 'mag_component') else "Magnitude"
 
         # Prepare data slices based on view mode
+        y_min, y_max = 0, 0
+        
         if view_mode == "Positions @ freq" and nfreq > 1:
             # Show all positions at selected frequency
             fi = min(selector, nfreq - 1)
             mx_slice = mx_all[:, :, fi]  # (ntime, npos)
             my_slice = my_all[:, :, fi]
             mz_slice = mz_all[:, :, fi]
-            y_label = "Position Index"
+            
+            y_label = "Position (cm)"
             n_y = npos
+            if self.last_positions is not None:
+                # Assume Z-axis varying
+                pos_vals = self.last_positions[:, 2] * 100
+                y_min, y_max = pos_vals[0], pos_vals[-1]
+            else:
+                y_label = "Position Index"
+                y_min, y_max = 0, npos
+
         elif view_mode == "Freqs @ position" and npos > 1:
             # Show all frequencies at selected position
             pi = min(selector, npos - 1)
             mx_slice = mx_all[:, pi, :]  # (ntime, nfreq)
             my_slice = my_all[:, pi, :]
             mz_slice = mz_all[:, pi, :]
-            y_label = "Frequency Index"
+            
+            y_label = "Frequency (Hz)"
             n_y = nfreq
+            if self.last_frequencies is not None:
+                y_min, y_max = self.last_frequencies[0], self.last_frequencies[-1]
+            else:
+                y_label = "Frequency Index"
+                y_min, y_max = 0, nfreq
         else:
             # Show all spins (flatten position x frequency)
             mx_slice = mx_all.reshape(ntime, -1)  # (ntime, npos*nfreq)
@@ -7835,6 +7918,11 @@ class BlochSimulatorGUI(QMainWindow):
             mz_slice = mz_all.reshape(ntime, -1)
             y_label = "Spin Index (pos×freq)"
             n_y = npos * nfreq
+            y_min, y_max = 0, n_y
+
+        # Handle degenerate range
+        if np.isclose(y_min, y_max):
+             y_max = y_min + (1.0 if n_y <= 1 else n_y)
 
         # Compute the selected component
         if component == "Magnitude":
@@ -7872,29 +7960,27 @@ class BlochSimulatorGUI(QMainWindow):
         # Update Mxy heatmap
         # pyqtgraph ImageItem convention: data[row, col] where row=Y, col=X
         # We have mxy_data as (ntime, n_y) meaning data[time, spin]
-        # We want: X-axis = Time, Y-axis = Spin
+        # We want: X-axis = Time, Y-axis = Spin/Pos/Freq
         # So we need to transpose to get data[spin, time] = data[Y, X]
         self.mxy_heatmap_item.setImage(mxy_data.T, autoLevels=True, axisOrder='row-major')
         # Now set the coordinate mapping using setRect(x, y, width, height)
-        # The image spans from time_ms[0] to time_ms[-1] on X-axis
-        # and from 0 to n_y on Y-axis
-        self.mxy_heatmap_item.setRect(time_ms[0], 0, time_ms[-1] - time_ms[0], n_y)
+        self.mxy_heatmap_item.setRect(time_ms[0], y_min, time_ms[-1] - time_ms[0], y_max - y_min)
         self.mxy_heatmap.setLabel('left', y_label)
         self.mxy_heatmap.setLabel('bottom', 'Time', 'ms')
         self.mxy_heatmap.setTitle(mxy_title)
         # Set view limits to show only actual data
         self.mxy_heatmap.setXRange(time_ms[0], time_ms[-1], padding=0)
-        self.mxy_heatmap.setYRange(0, n_y, padding=0)
+        self.mxy_heatmap.setYRange(y_min, y_max, padding=0)
 
         # Update Mz heatmap
         self.mz_heatmap_item.setImage(mz_data.T, autoLevels=True, axisOrder='row-major')
-        self.mz_heatmap_item.setRect(time_ms[0], 0, time_ms[-1] - time_ms[0], n_y)
+        self.mz_heatmap_item.setRect(time_ms[0], y_min, time_ms[-1] - time_ms[0], y_max - y_min)
         self.mz_heatmap.setLabel('left', y_label)
         self.mz_heatmap.setLabel('bottom', 'Time', 'ms')
         self.mz_heatmap.setTitle(mz_title)
         # Set view limits to show only actual data
         self.mz_heatmap.setXRange(time_ms[0], time_ms[-1], padding=0)
-        self.mz_heatmap.setYRange(0, n_y, padding=0)
+        self.mz_heatmap.setYRange(y_min, y_max, padding=0)
 
     def _update_signal_heatmaps(self):
         """Update signal heatmaps (Time vs Position/Frequency)."""
@@ -7937,23 +8023,44 @@ class BlochSimulatorGUI(QMainWindow):
         component = self.signal_component.currentText() if hasattr(self, 'signal_component') else "Magnitude"
 
         # Prepare data slices based on view mode
+        y_min, y_max = 0, 0
+        
         if view_mode == "Positions @ freq" and nfreq > 1:
             # Show all positions at selected frequency
             fi = min(selector, nfreq - 1)
             signal_slice = signal_all[:, :, fi]  # (ntime, npos)
-            y_label = "Position Index"
+            
+            y_label = "Position (cm)"
             n_y = npos
+            if self.last_positions is not None:
+                pos_vals = self.last_positions[:, 2] * 100
+                y_min, y_max = pos_vals[0], pos_vals[-1]
+            else:
+                y_label = "Position Index"
+                y_min, y_max = 0, npos
+
         elif view_mode == "Freqs @ position" and npos > 1:
             # Show all frequencies at selected position
             pi = min(selector, npos - 1)
             signal_slice = signal_all[:, pi, :]  # (ntime, nfreq)
-            y_label = "Frequency Index"
+            
+            y_label = "Frequency (Hz)"
             n_y = nfreq
+            if self.last_frequencies is not None:
+                y_min, y_max = self.last_frequencies[0], self.last_frequencies[-1]
+            else:
+                y_label = "Frequency Index"
+                y_min, y_max = 0, nfreq
         else:
             # Show all spins (flatten position x frequency)
             signal_slice = signal_all.reshape(ntime, -1)  # (ntime, npos*nfreq)
             y_label = "Spin Index (pos×freq)"
             n_y = npos * nfreq
+            y_min, y_max = 0, n_y
+
+        # Handle degenerate range
+        if np.isclose(y_min, y_max):
+             y_max = y_min + (1.0 if n_y <= 1 else n_y)
 
         # Compute the selected component
         if component == "Magnitude":
@@ -7980,13 +8087,13 @@ class BlochSimulatorGUI(QMainWindow):
         # So we need to transpose to get data[spin, time] = data[Y, X]
         self.signal_heatmap_item.setImage(signal_data.T, autoLevels=True, axisOrder='row-major')
         # Set proper scale and position
-        self.signal_heatmap_item.setRect(time_ms[0], 0, time_ms[-1] - time_ms[0], n_y)
+        self.signal_heatmap_item.setRect(time_ms[0], y_min, time_ms[-1] - time_ms[0], y_max - y_min)
         self.signal_heatmap.setLabel('left', y_label)
         self.signal_heatmap.setLabel('bottom', 'Time', 'ms')
         self.signal_heatmap.setTitle(title)
         # Set view limits to show only actual data
         self.signal_heatmap.setXRange(time_ms[0], time_ms[-1], padding=0)
-        self.signal_heatmap.setYRange(0, n_y, padding=0)
+        self.signal_heatmap.setYRange(y_min, y_max, padding=0)
 
     def show_about(self):
         """Show about dialog."""
