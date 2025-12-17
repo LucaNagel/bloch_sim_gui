@@ -6441,6 +6441,8 @@ class BlochSimulatorGUI(QMainWindow):
         notebook_load_radio = QRadioButton("Jupyter Notebook (.ipynb) - Load data from HDF5")
         notebook_resim_radio = QRadioButton("Jupyter Notebook (.ipynb) - Re-run simulation")
         notebook_both_radio = QRadioButton("HDF5 + Notebook (load data)")
+        final_state_radio = QRadioButton("Final State Data (.csv/.npz)")
+        full_sim_radio = QRadioButton("Full Simulation Data (.npz)")
 
         hdf5_radio.setChecked(True)
         format_buttons.addButton(hdf5_radio, 0)
@@ -6449,6 +6451,8 @@ class BlochSimulatorGUI(QMainWindow):
         format_buttons.addButton(notebook_load_radio, 3)
         format_buttons.addButton(notebook_resim_radio, 4)
         format_buttons.addButton(notebook_both_radio, 5)
+        format_buttons.addButton(final_state_radio, 6)
+        format_buttons.addButton(full_sim_radio, 7)
 
         format_layout.addWidget(hdf5_radio)
         format_layout.addWidget(json_radio)
@@ -6457,6 +6461,9 @@ class BlochSimulatorGUI(QMainWindow):
         format_layout.addWidget(notebook_load_radio)
         format_layout.addWidget(notebook_resim_radio)
         format_layout.addWidget(notebook_both_radio)
+        format_layout.addWidget(QLabel(""))  # Spacer
+        format_layout.addWidget(final_state_radio)
+        format_layout.addWidget(full_sim_radio)
         format_group.setLayout(format_layout)
         layout.addWidget(format_group)
 
@@ -6504,6 +6511,11 @@ class BlochSimulatorGUI(QMainWindow):
         # Handle notebook exports (options 3, 4, 5)
         if export_choice in [3, 4, 5]:
             self._export_notebook(export_choice, sequence_params, simulation_params)
+
+        if export_choice == 6:
+            self._export_final_state_data()
+        elif export_choice == 7:
+            self._export_full_simulation_data()
 
     def _export_notebook(self, export_choice, sequence_params, simulation_params):
         """
@@ -6647,6 +6659,113 @@ class BlochSimulatorGUI(QMainWindow):
                 )
             except Exception as e:
                 QMessageBox.critical(self, "Export Error", f"Failed to export notebook:\n{str(e)}")
+
+    def _export_final_state_data(self):
+        """Export the final magnetization state (Mx, My, Mz) for all positions/frequencies."""
+        if self.last_result is None:
+            return
+            
+        # Get data
+        mx = self.last_result.get('mx')
+        my = self.last_result.get('my')
+        mz = self.last_result.get('mz')
+        
+        if mx is None:
+            return
+
+        # Extract final state
+        if mx.ndim == 3: # (ntime, npos, nfreq)
+            mx_final = mx[-1]
+            my_final = my[-1]
+            mz_final = mz[-1]
+        else:
+            mx_final = mx
+            my_final = my
+            mz_final = mz
+            
+        # Prompt for file
+        filename, selected_filter = QFileDialog.getSaveFileName(
+            self, "Export Final State", "", "CSV Files (*.csv);;NumPy Archive (*.npz)"
+        )
+        if not filename:
+            return
+            
+        path = Path(filename)
+        if "csv" in selected_filter.lower():
+            if path.suffix.lower() != ".csv":
+                path = path.with_suffix(".csv")
+            
+            import csv
+            try:
+                with open(path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Pos_Index", "Freq_Index", "Position_m", "Frequency_Hz", "Mx", "My", "Mz", "Mxy_Mag", "Phase_rad"])
+                    
+                    npos, nfreq = mx_final.shape
+                    positions = self.last_positions[:, 2] if self.last_positions is not None else np.zeros(npos)
+                    frequencies = self.last_frequencies if self.last_frequencies is not None else np.zeros(nfreq)
+                    
+                    for p in range(npos):
+                        pos_val = positions[p] if p < len(positions) else 0
+                        for f_idx in range(nfreq):
+                            freq_val = frequencies[f_idx] if f_idx < len(frequencies) else 0
+                            val_mx = float(mx_final[p, f_idx])
+                            val_my = float(my_final[p, f_idx])
+                            val_mz = float(mz_final[p, f_idx])
+                            val_mxy = np.sqrt(val_mx**2 + val_my**2)
+                            val_phase = np.arctan2(val_my, val_mx)
+                            
+                            writer.writerow([p, f_idx, pos_val, freq_val, val_mx, val_my, val_mz, val_mxy, val_phase])
+                            
+                self.statusBar().showMessage(f"Final state exported to {path}")
+                QMessageBox.information(self, "Export Successful", f"Final state data saved to:\n{path.name}")
+            except Exception as e:
+                QMessageBox.critical(self, "Export Error", f"Failed to export CSV:\n{str(e)}")
+            
+        else: # NPZ
+            if path.suffix.lower() != ".npz":
+                path = path.with_suffix(".npz")
+            
+            try:
+                np.savez(path, 
+                        mx=mx_final, my=my_final, mz=mz_final,
+                        positions=self.last_positions,
+                        frequencies=self.last_frequencies)
+                self.statusBar().showMessage(f"Final state exported to {path}")
+                QMessageBox.information(self, "Export Successful", f"Final state data saved to:\n{path.name}")
+            except Exception as e:
+                QMessageBox.critical(self, "Export Error", f"Failed to export NPZ:\n{str(e)}")
+
+    def _export_full_simulation_data(self):
+        """Export full simulation data arrays."""
+        if self.last_result is None:
+            return
+            
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export Full Simulation Data", "", "NumPy Archive (*.npz)"
+        )
+        if not filename:
+            return
+            
+        path = Path(filename)
+        if path.suffix.lower() != ".npz":
+            path = path.with_suffix(".npz")
+            
+        try:
+            # Save all arrays
+            np.savez(path,
+                    time=self.last_time,
+                    mx=self.last_result.get('mx'),
+                    my=self.last_result.get('my'),
+                    mz=self.last_result.get('mz'),
+                    signal=self.last_result.get('signal'),
+                    positions=self.last_positions,
+                    frequencies=self.last_frequencies)
+                    
+            self.statusBar().showMessage(f"Full simulation data exported to {path}")
+            QMessageBox.information(self, "Export Successful", f"Full simulation data saved to:\n{path.name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export NPZ:\n{str(e)}")
 
     def _collect_sequence_parameters(self):
         """Collect all pulse sequence parameters from GUI."""
