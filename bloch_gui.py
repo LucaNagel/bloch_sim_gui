@@ -2077,12 +2077,12 @@ class SequenceDesigner(QGroupBox):
             pass
 
 
-class UniversalTimeControl(QWidget):
+class UniversalTimeControl(QGroupBox):
     """Universal time control widget that synchronizes all time-resolved views."""
     time_changed = pyqtSignal(int)  # Emits time index
 
     def __init__(self):
-        super().__init__()
+        super().__init__("Playback Control")
         self._updating = False  # Prevent circular updates
         self.init_ui()
 
@@ -2115,7 +2115,7 @@ class UniversalTimeControl(QWidget):
         self.speed_spin.setRange(0.001, 1000.0)
         self.speed_spin.setValue(1.0)  # Default to 50 ms of sim per real second
         self.speed_spin.setSuffix(" ms/s")
-        self.speed_spin.setSingleStep(0.01)
+        self.speed_spin.setSingleStep(0.1)
         layout.addWidget(self.speed_spin)
 
         # Backwards compatibility for existing signal connections
@@ -2123,7 +2123,7 @@ class UniversalTimeControl(QWidget):
         self.pause_button = self.play_pause_button
 
         self.setLayout(layout)
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.time_array = None  # Will store time array in seconds
 
@@ -2776,9 +2776,9 @@ class ParameterSweepWidget(QWidget):
         param = self.param_combo.currentText()
 
         if "Flip Angle" in param:
-            self.start_spin.setRange(0, 180)
+            self.start_spin.setRange(0, 9998)
             self.start_spin.setValue(30)
-            self.end_spin.setRange(0, 180)
+            self.end_spin.setRange(0, 9999)
             self.end_spin.setValue(90)
         elif "TE" in param or "TR" in param or "TI" in param:
             self.start_spin.setRange(0.1, 10000)
@@ -3442,7 +3442,11 @@ class BlochSimulatorGUI(QMainWindow):
         self.heatmap_colormap.setCurrentText("viridis")
         self.heatmap_colormap.currentTextChanged.connect(self._apply_heatmap_colormap)
         colormap_layout.addWidget(self.heatmap_colormap)
-        colormap_layout.addStretch()
+
+        # Universal time control - controls all time-resolved views
+        self.time_control = UniversalTimeControl()
+        self.time_control.setEnabled(False)
+        colormap_layout.addWidget(self.time_control, 1)
         right_layout.addLayout(colormap_layout)
         
         # Tab widget for different views
@@ -3924,7 +3928,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.mag_3d.spatial_mxy_time_line = self.spatial_mxy_time_line
         self.mag_3d.spatial_mz_time_line = self.spatial_mz_time_line
 
-        right_layout.addWidget(self.tab_widget)
+        right_layout.addWidget(self.tab_widget, 1)
 
         # Apply initial colormap selection now that heatmaps are constructed
         default_cmap = "viridis"
@@ -3939,10 +3943,6 @@ class BlochSimulatorGUI(QMainWindow):
         # Connect tab change to optimize rendering
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
 
-        # Universal time control - controls all time-resolved views
-        self.time_control = UniversalTimeControl()
-        right_layout.addWidget(self.time_control)
-        self.time_control.setVisible(False)  # Hidden until time-resolved simulation runs
         # Add panels to main layout
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left_container)
@@ -4393,6 +4393,9 @@ class BlochSimulatorGUI(QMainWindow):
         self.time_control.time_changed.connect(self._on_universal_time_changed)
 
         # Connect play/pause/reset buttons
+        self.time_control.play_pause_button.toggled.connect(self._handle_play_pause_toggle)
+        self.time_control.reset_button.clicked.connect(self._handle_reset_clicked)
+        self.time_control.speed_spin.valueChanged.connect(self._update_playback_speed)
 
         # Connect 3D vector position changes to universal control
         self.mag_3d.position_changed.connect(self._on_3d_vector_position_changed)
@@ -5889,7 +5892,8 @@ class BlochSimulatorGUI(QMainWindow):
             self.playback_time = None
             self.playback_time_ms = None
             self.anim_vectors_full = None
-            self.time_control.setVisible(False)
+            self.time_control.set_time_range(None)
+            self.time_control.setEnabled(False)
             # Disable mag filter since only endpoints are shown
             try:
                 self._update_mag_selector_limits(pos_len, freq_len, disable=True)
@@ -6136,7 +6140,7 @@ class BlochSimulatorGUI(QMainWindow):
         # Initialize universal time control with the time array
         self.time_control.set_time_range(self.playback_time)  # Use playback_time in seconds
         self._reset_playback_anchor(0)
-        self.time_control.setVisible(True)
+        self.time_control.setEnabled(True)
 
         # Ensure signal tab x-range set even if spectrum-only
         self.signal_plot.setXRange(x_min, x_max, padding=0)
