@@ -1458,6 +1458,7 @@ class SequenceDesigner(QGroupBox):
                 "num_positions": 99,
                 "num_frequencies": 3,
                 "duration": 1.0, # ms
+                "flip_angle": 90,
             },
             "SSFP (Loop)": {
                 "te_ms": 2,
@@ -1485,6 +1486,7 @@ class SequenceDesigner(QGroupBox):
                 "num_positions": 1,
                 "num_frequencies": 51,
                 "duration": 1.0, # ms
+                "flip_angle": 90,
             },
             "FLASH": {
                 "te_ms": 3,
@@ -2274,9 +2276,9 @@ class MagnetizationViewer(QWidget):
         self.gl_widget.addItem(grid)
         
         # Initialize magnetization vectors (one per frequency)
-        self.vectors = []
-        self.vector_colors = []
-        self._ensure_vectors(1)
+        self.vector_plot = gl.GLLinePlotItem(pos=np.zeros((0, 3)), color=(1, 0, 0, 1), width=3, mode='lines')
+        self.gl_widget.addItem(self.vector_plot)
+        self.vector_colors = None
         
         layout.addWidget(self.gl_widget, stretch=5)
 
@@ -2368,31 +2370,9 @@ class MagnetizationViewer(QWidget):
         self.setLayout(layout)
         
     def _ensure_vectors(self, count: int, colors=None):
-        """Create/update GL line items to match the requested count."""
-        # Remove excess
-        while len(self.vectors) > count:
-            vec = self.vectors.pop()
-            try:
-                self.gl_widget.removeItem(vec)
-            except Exception:
-                pass
-        # Add missing
-        while len(self.vectors) < count:
-            color = (1, 0, 0, 1)
-            if colors and len(colors) > len(self.vectors):
-                color = colors[len(self.vectors)]
-            vec = gl.GLLinePlotItem(
-                pos=np.array([[0, 0, 0], [0, 0, 1]]),
-                color=color,
-                width=3
-            )
-            self.gl_widget.addItem(vec)
-            self.vectors.append(vec)
-        # Update colors if provided
-        if colors:
-            for vec, col in zip(self.vectors, colors):
-                vec.setData(color=col)
-        self.vector_colors = colors or self.vector_colors
+        """Cache colors for vector updates."""
+        if colors is not None:
+            self.vector_colors = colors
 
     def set_length_scale(self, scale: float):
         """Set reference magnitude to normalize displayed vectors."""
@@ -2424,13 +2404,30 @@ class MagnetizationViewer(QWidget):
                 vecs = np.array([[float(mx_arr), float(my_arr), float(mz_arr)]])
             else:
                 vecs = np.stack([mx_arr, my_arr, mz_arr], axis=-1)
+        
         count = vecs.shape[0]
         self._ensure_vectors(count, colors=colors)
+        
         norm = 1.0 / max(self.length_scale, 1e-9)
         vecs_scaled = vecs * norm
-        for vec_item, comp in zip(self.vectors, vecs):
-            pos = np.array([[0, 0, 0], comp * norm])
-            vec_item.setData(pos=pos)
+        
+        # Construct interleaved array for single draw call: (Origin, Tip, Origin, Tip...)
+        pos = np.zeros((count * 2, 3), dtype=np.float32)
+        pos[1::2] = vecs_scaled
+        
+        # Handle colors
+        use_colors = self.vector_colors if self.vector_colors is not None and len(self.vector_colors) >= count else None
+        if use_colors is not None:
+            # Repeat colors for each vertex (2 per line)
+            c_arr = np.asarray(use_colors)
+            if c_arr.ndim == 1 and c_arr.shape[0] == 4:
+                self.vector_plot.setData(pos=pos, color=c_arr, mode='lines')
+            else:
+                c_expanded = np.repeat(c_arr[:count], 2, axis=0)
+                self.vector_plot.setData(pos=pos, color=c_expanded, mode='lines')
+        else:
+            self.vector_plot.setData(pos=pos, color=(1, 0, 0, 1), mode='lines')
+            
         mean_vec = np.mean(vecs_scaled, axis=0) if vecs.size else None
         if self.track_path and mean_vec is not None:
             self._append_path_point(mean_vec)
@@ -3556,11 +3553,15 @@ class BlochSimulatorGUI(QMainWindow):
         self.mxy_plot = pg.PlotWidget()
         self.mxy_plot.setLabel('left', 'Mx / My')
         self.mxy_plot.setLabel('bottom', 'Time', 'ms')
+        self.mxy_plot.setDownsampling(mode='peak')
+        self.mxy_plot.setClipToView(True)
         self.mxy_plot.hide()  # Hide by default (heatmap is default)
 
         self.mz_plot = pg.PlotWidget()
         self.mz_plot.setLabel('left', 'Mz')
         self.mz_plot.setLabel('bottom', 'Time', 'ms')
+        self.mz_plot.setDownsampling(mode='peak')
+        self.mz_plot.setClipToView(True)
         self.mz_plot.hide()  # Hide by default (heatmap is default)
 
         # Create heatmap widgets using GraphicsLayoutWidget for proper colorbar alignment
@@ -3608,7 +3609,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.mag_3d = MagnetizationViewer()
         self.mag_3d.playhead_line = self.sequence_designer.playhead_line
         self.mag_3d.set_export_directory_provider(self._get_export_directory)
-        self.mag_3d.position_changed.connect(self._set_animation_index_from_slider)
+        self.mag_3d.position_changed.connect(lambda idx: self._set_animation_index_from_slider(idx, reset_anchor=True))
         self.mag_3d.view_filter_changed.connect(lambda: self._refresh_vector_view())
         # Disable selector until data is available
         self.mag_3d.set_selector_limits(1, 1, disable=True)
@@ -3675,6 +3676,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.signal_plot = pg.PlotWidget()
         self.signal_plot.setLabel('left', 'Signal')
         self.signal_plot.setLabel('bottom', 'Time', 'ms')
+        self.signal_plot.setDownsampling(mode='peak')
+        self.signal_plot.setClipToView(True)
         self.signal_plot.enableAutoRange(x=False, y=False)
         self.signal_plot.hide()  # Hide by default (heatmap is default)
 
@@ -3704,6 +3707,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.spectrum_plot = pg.PlotWidget()
         self.spectrum_plot.setLabel('left', 'Magnitude')
         self.spectrum_plot.setLabel('bottom', 'Frequency', 'Hz')
+        self.spectrum_plot.setDownsampling(mode='peak')
+        self.spectrum_plot.setClipToView(True)
         spectrum_container = QWidget()
         spectrum_layout = QVBoxLayout()
 
@@ -3846,6 +3851,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.spatial_mxy_plot.setLabel('left', 'Mxy (transverse)')
         self.spatial_mxy_plot.setLabel('bottom', 'Position', 'm')
         self.spatial_mxy_plot.enableAutoRange(x=False, y=False)
+        self.spatial_mxy_plot.setDownsampling(mode='peak')
+        self.spatial_mxy_plot.setClipToView(True)
         # Slice thickness guides (added once and reused)
         slice_pen = pg.mkPen((180, 180, 180), style=Qt.DashLine)
         self.spatial_slice_lines = {
@@ -3861,6 +3868,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.spatial_mz_plot.setLabel('left', 'Mz (longitudinal)')
         self.spatial_mz_plot.setLabel('bottom', 'Position', 'm')
         self.spatial_mz_plot.enableAutoRange(x=False, y=False)
+        self.spatial_mz_plot.setDownsampling(mode='peak')
+        self.spatial_mz_plot.setClipToView(True)
         for ln in self.spatial_slice_lines["mz"]:
             self.spatial_mz_plot.addItem(ln)
         spatial_plots_layout.addWidget(self.spatial_mz_plot)
@@ -4271,14 +4280,9 @@ class BlochSimulatorGUI(QMainWindow):
 
     def _build_playback_indices(self, total_frames: int) -> np.ndarray:
         """Construct (optionally downsampled) playback indices for animation."""
-        indices = np.arange(total_frames, dtype=int)
-        max_frames = 2000  # limit playback frames for smooth animation
-        if max_frames and total_frames > max_frames:
-            step = max(1, math.ceil(total_frames / max_frames))
-            indices = np.arange(0, total_frames, step, dtype=int)
-            if indices[-1] != total_frames - 1:
-                indices = np.append(indices, total_frames - 1)
-        return indices
+        # Return all indices to ensure every simulated point is accessible.
+        # The animation loop handles frame skipping automatically to maintain speed.
+        return np.arange(total_frames, dtype=int)
 
     def _reset_playback_anchor(self, idx: Optional[int] = None):
         """Record the wall-clock anchor for the current playback position."""
@@ -4449,7 +4453,7 @@ class BlochSimulatorGUI(QMainWindow):
         # Connect 3D vector position changes to universal control
         self.mag_3d.position_changed.connect(self._on_3d_vector_position_changed)
 
-    def _on_universal_time_changed(self, time_idx: int, skip_expensive_updates=False):
+    def _on_universal_time_changed(self, time_idx: int, skip_expensive_updates=False, reset_anchor=True):
         """Central handler for universal time control changes - updates all views.
 
         Parameters
@@ -4459,6 +4463,8 @@ class BlochSimulatorGUI(QMainWindow):
         skip_expensive_updates : bool
             If True, only update time cursors and skip expensive plot redraws.
             Use this during animation playback for better performance.
+        reset_anchor : bool
+            If True, reset the playback timing anchor (for manual scrubbing).
         """
         if not hasattr(self, 'last_time') or self.last_time is None:
             return
@@ -4501,7 +4507,7 @@ class BlochSimulatorGUI(QMainWindow):
             self._spatial_needs_update = True
 
         if spectrum_tab_visible:
-            self._refresh_spectrum(time_idx=actual_idx)
+            self._refresh_spectrum(time_idx=actual_idx, skip_fft=skip_expensive_updates)
             self._spectrum_needs_update = False
         else:
             self._spectrum_needs_update = True
@@ -4538,7 +4544,7 @@ class BlochSimulatorGUI(QMainWindow):
             if self._spectrum_needs_update and hasattr(self, 'last_result') and self.last_result is not None:
                 current_idx = self.time_control.time_slider.value() if hasattr(self, 'time_control') else 0
                 actual_idx = self._playback_to_full_index(current_idx)
-                self._refresh_spectrum(time_idx=actual_idx)
+                self._refresh_spectrum(time_idx=actual_idx, skip_fft=False)
                 self._spectrum_needs_update = False
         if index != 4:  # Not Spatial tab
             self.spatial_mxy_plot.setUpdatesEnabled(False)
@@ -6158,7 +6164,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Update spectrum using the shared helper (avoids SciPy dependency)
         try:
-            self._refresh_spectrum(time_idx=len(time) - 1)
+            self._refresh_spectrum(time_idx=len(time) - 1, skip_fft=False)
             self._spectrum_needs_update = False
         except Exception as exc:
             self.log_message(f"Spectrum update failed: {exc}")
@@ -6440,7 +6446,7 @@ class BlochSimulatorGUI(QMainWindow):
         if self.anim_timer.isActive():
             self.anim_timer.start(self.anim_interval_ms)
 
-    def _set_animation_index_from_slider(self, idx: int):
+    def _set_animation_index_from_slider(self, idx: int, reset_anchor=True):
         """Scrub animation position from the preview slider."""
         if self.anim_data is None or len(self.anim_data) == 0:
             return
@@ -6456,7 +6462,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.mag_3d.update_magnetization(vectors, colors=self.anim_colors)
         self.mag_3d.set_cursor_index(idx)
         self._update_b1_arrow(idx)
-        self._reset_playback_anchor(idx)
+        if reset_anchor:
+            self._reset_playback_anchor(idx)
 
     def _animate_vector(self):
         """Advance the 3D vector animation if data is available."""
@@ -6506,7 +6513,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.time_control.set_time_index(idx)
         # During animation, skip expensive plot redraws (spatial FFT, spectrum FFT)
         # Only update time cursors and 3D view for smooth playback
-        self._on_universal_time_changed(idx, skip_expensive_updates=True)
+        self._on_universal_time_changed(idx, skip_expensive_updates=True, reset_anchor=False)
         self._last_render_wall = now
 
     def _update_b1_arrow(self, playback_idx: int):
@@ -7072,7 +7079,7 @@ class BlochSimulatorGUI(QMainWindow):
             return len(self.last_time) - 1
         return 0
 
-    def _calculate_spectrum_data(self, time_idx=None):
+    def _calculate_spectrum_data(self, time_idx=None, compute_fft=True):
         """Compute spectrum arrays used for plotting or export."""
         if self.last_result is None:
             return None
@@ -7114,20 +7121,26 @@ class BlochSimulatorGUI(QMainWindow):
         else:
             self.spectrum_pos_label.setText(f"Pos idx: {pos_sel}")
 
-        if spectrum_mode == "Mean over positions":
-            sig_for_fft = np.mean(sig_slice, axis=tuple(range(1, sig_slice.ndim)))
-            spec_mean = np.fft.fftshift(np.fft.fft(sig_for_fft, n=self._spectrum_fft_len(len(sig_for_fft))))
-        elif spectrum_mode == "Mean + individuals":
-            sig_for_fft = np.mean(sig_slice, axis=tuple(range(1, sig_slice.ndim)))
-            n_fft = self._spectrum_fft_len(len(sig_for_fft))
-            spec_mean = np.fft.fftshift(np.fft.fft(sig_for_fft, n=n_fft))
-        else:
-            sig_for_fft = np.mean(sig_slice[:, pos_sel, :], axis=1)
-            spec_mean = None
+        spectrum = None
+        spec_mean = None
+        freq = None
 
-        n_fft = self._spectrum_fft_len(len(sig_for_fft))
-        spectrum = np.fft.fftshift(np.fft.fft(sig_for_fft, n=n_fft))
-        freq = np.fft.fftshift(np.fft.fftfreq(n_fft, dt))
+        if compute_fft:
+            if spectrum_mode == "Mean over positions":
+                sig_for_fft = np.mean(sig_slice, axis=tuple(range(1, sig_slice.ndim)))
+                spec_mean = np.fft.fftshift(np.fft.fft(sig_for_fft, n=self._spectrum_fft_len(len(sig_for_fft))))
+            elif spectrum_mode == "Mean + individuals":
+                sig_for_fft = np.mean(sig_slice, axis=tuple(range(1, sig_slice.ndim)))
+                n_fft = self._spectrum_fft_len(len(sig_for_fft))
+                spec_mean = np.fft.fftshift(np.fft.fft(sig_for_fft, n=n_fft))
+            else:
+                sig_for_fft = np.mean(sig_slice[:, pos_sel, :], axis=1)
+                spec_mean = None
+
+            n_fft = self._spectrum_fft_len(len(sig_for_fft))
+            spectrum = np.fft.fftshift(np.fft.fft(sig_for_fft, n=n_fft))
+            freq = np.fft.fftshift(np.fft.fftfreq(n_fft, dt))
+
         return {
             "freq": freq,
             "spectrum": spectrum,
@@ -7239,9 +7252,9 @@ class BlochSimulatorGUI(QMainWindow):
             except Exception as exc:
                 self.log_message(f"Spectrum heatmap update failed: {exc}")
 
-    def _refresh_spectrum(self, time_idx=None):
+    def _refresh_spectrum(self, time_idx=None, skip_fft=False):
         """Update spectrum plot using data up to the specified time index."""
-        spec_data = self._calculate_spectrum_data(time_idx)
+        spec_data = self._calculate_spectrum_data(time_idx, compute_fft=not skip_fft)
         if spec_data is None:
             return
 
@@ -7275,6 +7288,7 @@ class BlochSimulatorGUI(QMainWindow):
         # Add colorbar to heatmap
         if is_heatmap and hasattr(self, "spectrum_heatmap_colorbar"):
             self.spectrum_heatmap_layout.addItem(self.spectrum_heatmap_colorbar, row=0, col=1)
+        
         self._plot_off_resonant_spins(time_idx=time_idx)
 
     def _compute_final_spectrum_range(self, signal, time):
@@ -8059,7 +8073,7 @@ class BlochSimulatorGUI(QMainWindow):
         """Export spectrum plot animation via widget grab."""
         def updater(idx):
             actual_idx = self._playback_to_full_index(idx)
-            self._refresh_spectrum(time_idx=actual_idx)
+            self._refresh_spectrum(time_idx=actual_idx, skip_fft=False)
         self._export_widget_animation([self.spectrum_plot], default_filename="spectrum", before_grab=updater)
 
     def _export_spatial_animation(self):
@@ -8109,7 +8123,7 @@ class BlochSimulatorGUI(QMainWindow):
             QMessageBox.warning(self, "No Data", "Please run a simulation first.")
             return
         actual_idx = self._current_playback_index()
-        self._refresh_spectrum(time_idx=actual_idx)
+        self._refresh_spectrum(time_idx=actual_idx, skip_fft=False)
         export_cache = getattr(self, "_last_spectrum_export", None)
         if not export_cache:
             QMessageBox.warning(self, "No Spectrum", "Spectrum data is not available for export.")
