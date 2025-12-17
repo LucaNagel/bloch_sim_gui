@@ -536,41 +536,6 @@ class AnimationExporter:
             limits.append((float(ymin), float(ymax)))
         return limits
 
-    def _render_frame(self, time_s: np.ndarray, groups: List[Dict], idx: int,
-                      width_px: int, height_px: int, limits: List[Tuple[float, float]]):
-        nrows = max(len(groups), 1)
-        fig = Figure(figsize=(width_px / 100.0, height_px / 100.0), dpi=100)
-        canvas = FigureCanvasAgg(fig)
-
-        for i, group in enumerate(groups):
-            ax = fig.add_subplot(nrows, 1, i + 1)
-            for series in group.get('series', []):
-                data = np.asarray(series['data'])
-                label = series.get('label', '')
-                color = series.get('color', None)
-                style = series.get('style', '-')
-                ax.plot(time_s, data, style, label=label, color=color, linewidth=1.8)
-                if 0 <= idx < len(time_s):
-                    ax.plot(time_s[idx], data[idx], 'o', color=color or 'k', markersize=5, alpha=0.9)
-            if 0 <= idx < len(time_s):
-                ax.axvline(time_s[idx], color='k', linestyle='--', alpha=0.25)
-            ax.set_title(group.get('title', ''), fontsize=10)
-            ax.set_ylabel(group.get('ylabel', ''))
-            ax.set_xlim(time_s[0], time_s[-1])
-            ymin, ymax = limits[i]
-            ax.set_ylim(ymin, ymax)
-            if group.get('series'):
-                ax.legend(loc='upper right', fontsize=8)
-            if i == nrows - 1:
-                ax.set_xlabel("Time (s)")
-
-        fig.tight_layout()
-        canvas.draw()
-        buf = np.frombuffer(canvas.buffer_rgba(), dtype=np.uint8)
-        w, h = canvas.get_width_height()
-        image = buf.reshape((h, w, 4))[:, :, :3]  # Drop alpha channel for most writers
-        return image
-
     def export_time_series_animation(
         self,
         time_s: Union[List[float], np.ndarray],
@@ -635,7 +600,11 @@ class AnimationExporter:
             indices = np.asarray(indices, dtype=int)
             if indices.ndim != 1 or np.any(indices < 0) or np.any(indices >= len(time_s)):
                 raise ValueError("indices must be a 1D array within time bounds.")
+        
+        # Subsample data to match indices for efficiency
         time_ds = time_s[indices]
+        
+        # Prepare data structures
         groups_ds = []
         for group in groups:
             new_group = dict(group)
@@ -643,11 +612,14 @@ class AnimationExporter:
             for series in group.get('series', []):
                 data = np.asarray(series['data'])
                 if data.ndim == 0:
-                    data = np.asarray([float(data)] * len(time_ds))
+                    data = np.asarray([float(data)] * len(time_s))
                 if len(data) != len(time_s):
                     raise ValueError("Series length must match time array length.")
+                # We keep the full data for plotting the background trace, 
+                # but we'll need efficient access for the "current point" marker
                 new_series.append({
-                    'data': data[indices],
+                    'full_data': data,      # Full trace
+                    'data': data[indices],  # Subsampled for dot marker
                     'label': series.get('label', ''),
                     'color': series.get('color', None),
                     'style': series.get('style', '-')
@@ -655,12 +627,58 @@ class AnimationExporter:
             new_group['series'] = new_series
             groups_ds.append(new_group)
 
+        # Initialize Plot (One-time setup)
+        nrows = max(len(groups_ds), 1)
+        fig = Figure(figsize=(width_px / 100.0, height_px / 100.0), dpi=100)
+        canvas = FigureCanvasAgg(fig)
+        axes = []
+        
+        # Store artist references for updating
+        time_lines = []     # Vertical cursor lines
+        dot_artists = []    # Current value dots (list of lists)
+
+        # Compute limits first
         limits = self._compute_group_limits(groups_ds)
 
+        for i, group in enumerate(groups_ds):
+            ax = fig.add_subplot(nrows, 1, i + 1)
+            group_dots = []
+            
+            # Plot full static traces
+            for series in group.get('series', []):
+                color = series.get('color', None)
+                style = series.get('style', '-')
+                # Background trace (static)
+                ax.plot(time_s, series['full_data'], style, label=series['label'], color=color, linewidth=1.8)
+                
+                # Current point marker (dynamic) - initialize at start
+                dot, = ax.plot([], [], 'o', color=color or 'k', markersize=5, alpha=0.9)
+                group_dots.append(dot)
+            
+            dot_artists.append(group_dots)
+
+            # Vertical time cursor (dynamic)
+            vline = ax.axvline(time_ds[0], color='k', linestyle='--', alpha=0.25)
+            time_lines.append(vline)
+
+            ax.set_title(group.get('title', ''), fontsize=10)
+            ax.set_ylabel(group.get('ylabel', ''))
+            ax.set_xlim(time_s[0], time_s[-1])
+            ymin, ymax = limits[i]
+            ax.set_ylim(ymin, ymax)
+            
+            if group.get('series'):
+                ax.legend(loc='upper right', fontsize=8)
+            if i == nrows - 1:
+                ax.set_xlabel("Time (s)")
+            axes.append(ax)
+
+        fig.tight_layout()
+
+        # Initialize Video Writer
         if fmt == 'gif':
             writer = imageio.get_writer(str(filepath), mode='I', fps=fps, format='GIF')
         else:
-            # Force ffmpeg backend to avoid pillow/tiff fallback errors
             writer = imageio.get_writer(
                 str(filepath),
                 fps=fps,
@@ -668,22 +686,47 @@ class AnimationExporter:
                 codec='libx264',
                 bitrate=self.default_bitrate,
                 quality=8,
-                macro_block_size=None  # Avoid resizing frames
+                macro_block_size=None
             )
 
         total_frames = len(time_ds)
+        
         try:
             for i in range(total_frames):
                 if cancel_cb and cancel_cb():
                     raise RuntimeError("Animation export cancelled")
-                frame = self._render_frame(time_ds, groups_ds, i, width_px, height_px, limits)
+
+                current_time = time_ds[i]
+
+                # Update dynamic artists
+                for ax_idx, group in enumerate(groups_ds):
+                    # Update vertical line
+                    time_lines[ax_idx].set_xdata([current_time, current_time])
+                    
+                    # Update dots
+                    for ser_idx, series in enumerate(group['series']):
+                        # Get pre-subsampled value for efficiency
+                        val = series['data'][i]
+                        dot_artists[ax_idx][ser_idx].set_data([current_time], [val])
+
+                # Render frame
+                canvas.draw()
+                buf = np.frombuffer(canvas.buffer_rgba(), dtype=np.uint8)
+                w, h = canvas.get_width_height()
+                image = buf.reshape((h, w, 4))[:, :, :3]  # Drop alpha
+
                 if frame_hook:
-                    frame = frame_hook(frame, int(indices[i]))
-                writer.append_data(frame)
+                    image = frame_hook(image, int(indices[i]))
+                
+                writer.append_data(image)
+                
                 if progress_cb and (i % 5 == 0 or i == total_frames - 1):
                     progress_cb(i + 1, total_frames)
         finally:
             writer.close()
+            # Clean up matplotlib figures
+            import matplotlib.pyplot as plt
+            plt.close(fig)
 
         if progress_cb:
             progress_cb(total_frames, total_frames)

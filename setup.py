@@ -15,6 +15,16 @@ extra_compile_args = []
 extra_link_args = []
 define_macros = []
 
+# Architecture optimization flags
+arch_flags = []
+machine = platform.machine().lower()
+if is_mac and 'arm' in machine:
+    # Apple Silicon
+    arch_flags = ['-mcpu=native']
+elif not is_windows:
+    # Intel/AMD on Linux/Mac
+    arch_flags = ['-march=native']
+
 if is_windows:
     # Windows with MSVC
     extra_compile_args = ['/openmp', '/O2']
@@ -29,15 +39,15 @@ elif is_mac:
     libomp_root = next((p for p in libomp_paths if os.path.exists(p)), None)
     if libomp_root:
         extra_compile_args = ['-Xpreprocessor', '-fopenmp', '-O3', '-ffast-math',
-                              f'-I{os.path.join(libomp_root, "include")}']
+                              f'-I{os.path.join(libomp_root, "include")}'] + arch_flags
         extra_link_args = ['-lomp', f'-L{os.path.join(libomp_root, "lib")}']
     else:
         # Build without OpenMP; prange falls back to serial execution
-        extra_compile_args = ['-O3', '-ffast-math']
+        extra_compile_args = ['-O3', '-ffast-math'] + arch_flags
         extra_link_args = []
 else:
     # Linux with gcc
-    extra_compile_args = ['-fopenmp', '-O3', '-ffast-math']
+    extra_compile_args = ['-fopenmp', '-O3', '-ffast-math'] + arch_flags
     extra_link_args = ['-fopenmp', '-lm']
 
 # Define the extension

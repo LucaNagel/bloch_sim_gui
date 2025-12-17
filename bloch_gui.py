@@ -1174,9 +1174,25 @@ class SequenceDesigner(QGroupBox):
 
         self.ssfp_opts.setLayout(ssfp_layout)
         self.options_container.addWidget(self.ssfp_opts)
+        
+        # Slice Rephase options
+        self.slice_rephase_opts = QWidget()
+        sr_layout = QHBoxLayout()
+        sr_layout.addWidget(QLabel("Rephase Area (%):"))
+        self.rephase_percentage = QDoubleSpinBox()
+        self.rephase_percentage.setRange(-200.0, 200.0)
+        self.rephase_percentage.setValue(50.0)
+        self.rephase_percentage.setSingleStep(1.0)
+        self.rephase_percentage.setToolTip("Percentage of slice select gradient area to rewind (50% = half area)")
+        self.rephase_percentage.valueChanged.connect(lambda _: self.update_diagram())
+        sr_layout.addWidget(self.rephase_percentage)
+        self.slice_rephase_opts.setLayout(sr_layout)
+        self.options_container.addWidget(self.slice_rephase_opts)
+
         layout.addLayout(self.options_container)
         self.spin_echo_opts.setVisible(False)
         self.ssfp_opts.setVisible(False)
+        self.slice_rephase_opts.setVisible(False)
         
         # TE parameter
         te_layout = QHBoxLayout()
@@ -1276,6 +1292,7 @@ class SequenceDesigner(QGroupBox):
         seq_type = self.sequence_type.currentText()
         self.spin_echo_opts.setVisible(seq_type in ("Spin Echo", "Spin Echo (Tip-axis 180)"))
         self.ssfp_opts.setVisible(seq_type == "SSFP (Loop)")
+        self.slice_rephase_opts.setVisible(seq_type == "Slice Select + Rephase")
         self.ti_widget.setVisible(seq_type == "Inversion Recovery")
         
         # Update pulse list based on sequence type
@@ -1556,7 +1573,7 @@ class SequenceDesigner(QGroupBox):
             time = np.arange(ntime) * dt
             return (b1, gradients, time)
 
-    def compile_sequence(self, custom_pulse=None, dt: float = None):
+    def compile_sequence(self, custom_pulse=None, dt: float = None, log_info: bool = False):
         """Return explicit (b1, gradients, time) arrays for the current sequence."""
         dt = dt or self.default_dt
         seq_type = self.sequence_type.currentText()
@@ -1566,6 +1583,8 @@ class SequenceDesigner(QGroupBox):
             return self._build_ir(custom_pulse, dt)
         if seq_type == "SSFP (Loop)":
             return self._build_ssfp(custom_pulse, dt)
+        if seq_type == "Slice Select + Rephase":
+            return self._build_slice_select_rephase(custom_pulse, dt, log_info=log_info)
         seq = self.get_sequence(custom_pulse=custom_pulse)
         if isinstance(seq, PulseSequence):
             b1, gradients, time = seq.compile(dt=dt)
@@ -1785,6 +1804,69 @@ class SequenceDesigner(QGroupBox):
                 phase = pulse_phase + (math.pi if (k % 2 == 1) else 0.0)
             _place_pulse(t0, pulse_amp, phase)
 
+        return b1, gradients, time
+
+    def _build_slice_select_rephase(self, custom_pulse, dt, log_info=False):
+        dt = max(dt, 1e-6)
+        te = self.te_spin.value() / 1000.0
+        
+        # Excitation (use provided custom pulse if available)
+        if custom_pulse is not None:
+            exc_b1, _ = custom_pulse
+            exc_b1 = np.asarray(exc_b1, dtype=complex)
+        else:
+            exc_duration = 3e-3
+            n_exc = max(int(np.ceil(exc_duration / dt)), 16)
+            exc_b1, _ = design_rf_pulse("sinc", duration=n_exc * dt, flip_angle=90, npoints=n_exc)
+        
+        exc_pts = len(exc_b1)
+        exc_duration = exc_pts * dt
+        
+        # Slice gradient
+        thickness_cm = self._slice_thickness_m() * 100.0
+        gamma_hz_per_g = 4258.0
+        tbw = self._effective_tbw()
+        bw_hz = tbw / max(exc_duration, dt)
+        slice_g = self._slice_gradient_override() or (bw_hz / (gamma_hz_per_g * thickness_cm))
+        
+        # Rephase parameters
+        rephase_pct = self.rephase_percentage.value() / 100.0
+        slice_area = slice_g * exc_duration
+        rephase_area = -slice_area * rephase_pct
+        
+        if log_info and hasattr(self, "parent_gui") and self.parent_gui:
+            self.parent_gui.log_message(f"Slice Select + Rephase Info:")
+            self.parent_gui.log_message(f"  Slice Gradient: {slice_g:.4f} G/cm")
+            self.parent_gui.log_message(f"  Pulse Duration: {exc_duration*1000:.3f} ms")
+            self.parent_gui.log_message(f"  Slice Area: {slice_area:.6e} G*s")
+            self.parent_gui.log_message(f"  Rephase Target: {rephase_pct*100:.1f}%")
+            self.parent_gui.log_message(f"  Rephase Area: {rephase_area:.6e} G*s")
+
+        # Timing
+        slice_gap_pts = max(int(np.ceil(0.05e-3 / dt)), 1)
+        rephase_dur = max(0.2e-3, min(1.0e-3, te / 2))
+        rephase_pts = max(int(np.ceil(rephase_dur / dt)), 2)
+        rephase_amp = rephase_area / (rephase_pts * dt)
+        
+        # Total duration
+        total_dur = max(te, (exc_pts + slice_gap_pts + rephase_pts) * dt + 0.001)
+        npoints = int(np.ceil(total_dur / dt))
+        
+        b1 = np.zeros(npoints, dtype=complex)
+        gradients = np.zeros((npoints, 3))
+        time = np.arange(npoints) * dt
+        
+        # Pulse + Slice Gradient
+        n_exc_safe = min(exc_pts, npoints)
+        b1[:n_exc_safe] = exc_b1[:n_exc_safe]
+        gradients[:n_exc_safe, 2] = slice_g
+        
+        # Rephase Gradient
+        start_rephase = exc_pts + slice_gap_pts
+        end_rephase = start_rephase + rephase_pts
+        if end_rephase <= npoints:
+            gradients[start_rephase:end_rephase, 2] = rephase_amp
+            
         return b1, gradients, time
 
     def set_time_step(self, dt_s: float):
@@ -2041,6 +2123,7 @@ class UniversalTimeControl(QWidget):
         self.pause_button = self.play_pause_button
 
         self.setLayout(layout)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
         self.time_array = None  # Will store time array in seconds
 
@@ -5424,7 +5507,7 @@ class BlochSimulatorGUI(QMainWindow):
         tissue = self.tissue_widget.get_parameters()
         pulse = self.rf_designer.get_pulse()
         dt_s = max(self.time_step_spin.value(), 0.1) * 1e-6
-        sequence_tuple = self.sequence_designer.compile_sequence(custom_pulse=pulse, dt=dt_s)
+        sequence_tuple = self.sequence_designer.compile_sequence(custom_pulse=pulse, dt=dt_s, log_info=True)
         # Optionally extend sequence with a zero tail to keep sampling after gradients/RF
         tail_ms = self.extra_tail_spin.value()
         b1_orig_len = len(sequence_tuple[0])
