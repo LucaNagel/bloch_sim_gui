@@ -440,6 +440,15 @@ class RFPulseDesigner(QGroupBox):
         self.lobes_container.setLayout(lobes_layout)
         layout.addWidget(self.lobes_container)
         
+        # Apodization
+        apod_layout = QHBoxLayout()
+        apod_layout.addWidget(QLabel("Apodization:"))
+        self.apodization_combo = QComboBox()
+        self.apodization_combo.addItems(["None", "Hamming", "Hanning", "Blackman"])
+        self.apodization_combo.currentTextChanged.connect(self.update_pulse)
+        apod_layout.addWidget(self.apodization_combo)
+        layout.addLayout(apod_layout)
+
         # Phase
         phase_layout = QHBoxLayout()
 
@@ -665,6 +674,19 @@ class RFPulseDesigner(QGroupBox):
         peak = np.max(np.abs(b1)) if np.any(np.abs(b1)) else 1.0
         shape = b1 / peak
 
+        # Apply Apodization
+        window_type = self.apodization_combo.currentText()
+        if window_type != "None" and len(shape) > 1:
+            if window_type == "Hamming":
+                win = np.hamming(len(shape))
+            elif window_type == "Hanning":
+                win = np.hanning(len(shape))
+            elif window_type == "Blackman":
+                win = np.blackman(len(shape))
+            else:
+                win = np.ones(len(shape))
+            shape = shape * win
+
         # Find a global phase that maximizes the real-valued area of the waveform.
         # This keeps the flip-angle calibration stable even for complex pulses.
         area = np.trapezoid(shape, dx=dt)
@@ -881,6 +903,7 @@ class RFPulseDesigner(QGroupBox):
             "phase": self.phase.value(),
             "freq_offset": self.freq_offset.value(),
             "sinc_lobes": self.sinc_lobes.value(),
+            "apodization": self.apodization_combo.currentText(),
             # Custom settings
             "custom_duration": self.custom_duration.value(),
             "custom_b1_amplitude": self.custom_b1_amplitude.value(),
@@ -903,6 +926,7 @@ class RFPulseDesigner(QGroupBox):
         self.phase.blockSignals(True)
         self.freq_offset.blockSignals(True)
         self.sinc_lobes.blockSignals(True)
+        self.apodization_combo.blockSignals(True)
         self.custom_duration.blockSignals(True)
         self.custom_b1_amplitude.blockSignals(True)
         
@@ -919,6 +943,8 @@ class RFPulseDesigner(QGroupBox):
                 self.freq_offset.setValue(state["freq_offset"])
             if "sinc_lobes" in state:
                 self.sinc_lobes.setValue(state["sinc_lobes"])
+            if "apodization" in state:
+                self.apodization_combo.setCurrentText(state["apodization"])
             
             # Restore loaded data
             if "loaded_pulse_b1" in state:
@@ -939,6 +965,7 @@ class RFPulseDesigner(QGroupBox):
             self.phase.blockSignals(False)
             self.freq_offset.blockSignals(False)
             self.sinc_lobes.blockSignals(False)
+            self.apodization_combo.blockSignals(False)
             self.custom_duration.blockSignals(False)
             self.custom_b1_amplitude.blockSignals(False)
         
@@ -977,22 +1004,35 @@ class RFPulseDesigner(QGroupBox):
         # Resample B1 if needed (for now, just use the original samples with scaled time)
         new_b1 = original_b1.copy()
 
+        # Apply Apodization
+        window_type = self.apodization_combo.currentText()
+        if window_type != "None" and len(new_b1) > 1:
+            if window_type == "Hamming":
+                win = np.hamming(len(new_b1))
+            elif window_type == "Hanning":
+                win = np.hanning(len(new_b1))
+            elif window_type == "Blackman":
+                win = np.blackman(len(new_b1))
+            else:
+                win = np.ones(len(new_b1))
+            new_b1 = new_b1 * win
+
         # Apply B1 amplitude override
         if new_b1_amplitude > 0:
             # Use specified amplitude - scale to match target
-            current_max_b1 = np.max(np.abs(original_b1))
+            current_max_b1 = np.max(np.abs(new_b1))
             if current_max_b1 > 0:
                 b1_scale = new_b1_amplitude / current_max_b1
-                new_b1 = original_b1 * b1_scale
+                new_b1 = new_b1 * b1_scale
         else:
             # Use flip angle calibration (auto mode)
             # Recalculate B1 amplitude to achieve target flip angle
             flip = self.flip_angle.value()  # degrees
             flip_rad = np.deg2rad(flip)
 
-            # Normalize pulse shape to unit peak
-            peak = np.max(np.abs(original_b1)) if np.any(np.abs(original_b1)) else 1.0
-            shape = original_b1 / peak
+            # Normalize pulse shape to unit peak (using windowed version)
+            peak = np.max(np.abs(new_b1)) if np.any(np.abs(new_b1)) else 1.0
+            shape = new_b1 / peak
 
             # Calculate sampling time for new duration
             dt = new_duration_s / len(shape) if len(shape) > 0 else 1e-6
