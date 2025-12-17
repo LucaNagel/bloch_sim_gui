@@ -1463,7 +1463,7 @@ class SequenceDesigner(QGroupBox):
                 "te_ms": 2,
                 "tr_ms": 5,
                 "flip_angle": 30,
-                "ssfp_repeats": 16,
+                "ssfp_repeats": 100,
                 "ssfp_amp": 0.05,
                 "ssfp_phase": 0.0,
                 "ssfp_dur": 1.0,
@@ -1472,7 +1472,11 @@ class SequenceDesigner(QGroupBox):
                 "ssfp_start_phase": 0.0,
                 "ssfp_alternate_phase": True,
                 "pulse_type": "gaussian",
+                "num_positions": 1,
+                "num_frequencies": 101,
+                "frequency_range_hz": 1000,
                 "duration": 1.0, # ms
+                "time_step": 10.0,
             },
             "Inversion Recovery": {
                 "te_ms": 20,
@@ -2756,7 +2760,7 @@ class ParameterSweepWidget(QWidget):
             "Peak |Mxy|",
             "Signal Magnitude",
             "Signal Phase",
-            "Final |Mxy| map (per pos/freq)",
+            "Final Mxy map (complex) (per pos/freq)",
             "Final Mz map (per pos/freq)",
         ]:
             cb = QCheckBox(metric)
@@ -2977,7 +2981,7 @@ class ParameterSweepWidget(QWidget):
     def _extract_metric(self, metric_name, result):
         """Extract metric value from simulation result."""
         try:
-            if "Final Mz" in metric_name:
+            if "Final Mz (mean)" in metric_name:
                 mz = result.get('mz')
                 if mz is not None:
                     # Handle different array shapes
@@ -2987,7 +2991,7 @@ class ParameterSweepWidget(QWidget):
                         return float(np.mean(mz))
                     else:  # 1D or scalar
                         return float(np.mean(mz))
-            elif "Final Mxy" in metric_name:
+            elif "Final Mxy (mean)" in metric_name:
                 mx = result.get('mx')
                 my = result.get('my')
                 if mx is not None and my is not None:
@@ -3014,7 +3018,7 @@ class ParameterSweepWidget(QWidget):
                 if signal is not None:
                     # Use angle in degrees for better readability
                     return float(np.mean(np.angle(signal, deg=True)))
-            elif "Final |Mxy| map" in metric_name:
+            elif "Final Mxy map" in metric_name:
                 mx = result.get('mx')
                 my = result.get('my')
                 if mx is not None and my is not None:
@@ -3024,7 +3028,7 @@ class ParameterSweepWidget(QWidget):
                     else:
                         mx_final = mx
                         my_final = my
-                    return np.sqrt(mx_final**2 + my_final**2)
+                    return mx_final + 1j * my_final
             elif "Final Mz map" in metric_name:
                 mz = result.get('mz')
                 if mz is not None:
@@ -4426,6 +4430,11 @@ class BlochSimulatorGUI(QMainWindow):
     def set_sweep_mode(self, enabled: bool):
         """Enable/disable sweep mode (skip heavy plotting during sweeps)."""
         self._sweep_mode = bool(enabled)
+        if enabled:
+            # Stop any running animation to save resources
+            if hasattr(self, 'anim_timer') and self.anim_timer.isActive():
+                self.anim_timer.stop()
+                self._sync_play_toggle(False)
 
     def _setup_time_synchronization(self):
         """Setup connections for universal time control synchronization."""
@@ -5356,6 +5365,7 @@ class BlochSimulatorGUI(QMainWindow):
             self.freq_spin,
             self.freq_range,
             self.rf_designer.duration,
+            self.time_step_spin,
         ]
 
         # Block signals temporarily to avoid triggering diagram updates multiple times
@@ -5402,6 +5412,8 @@ class BlochSimulatorGUI(QMainWindow):
             self.freq_spin.setValue(int(presets["num_frequencies"]))
         if "frequency_range_hz" in presets:
             self.freq_range.setValue(float(presets["frequency_range_hz"]))
+        if "time_step" in presets:
+            self.time_step_spin.setValue(float(presets["time_step"]))
 
         # Re-enable signals
         for widget in widgets_to_block:
@@ -6240,18 +6252,94 @@ class BlochSimulatorGUI(QMainWindow):
 
     def load_parameters(self):
         """Load simulation parameters from file."""
+        export_dir = self._get_export_directory()
         filename, _ = QFileDialog.getOpenFileName(
-            self, "Load Parameters", "", "JSON Files (*.json)"
+            self, "Load Parameters", str(export_dir), "JSON Files (*.json);;All Files (*)"
         )
-        if filename:
+        if not filename:
+            return
+
+        try:
             with open(filename, 'r') as f:
-                params = json.load(f)
-                # Apply parameters to widgets
-                self.tissue_widget.t1_spin.setValue(params.get('t1', 1000))
-                self.tissue_widget.t2_spin.setValue(params.get('t2', 20))
+                state = json.load(f)
+
+            # 1. Restore Tissue Parameters
+            t_state = state.get("tissue", {})
+            self.tissue_widget.preset_combo.blockSignals(True)
+            self.tissue_widget.field_combo.blockSignals(True)
+            self.tissue_widget.preset_combo.setCurrentText(t_state.get("preset", "Custom"))
+            self.tissue_widget.field_combo.setCurrentText(t_state.get("field", "3.0T"))
+            self.tissue_widget.preset_combo.blockSignals(False)
+            self.tissue_widget.field_combo.blockSignals(False)
+            
+            self.tissue_widget.t1_spin.setValue(t_state.get("t1_ms", 1000))
+            self.tissue_widget.t2_spin.setValue(t_state.get("t2_ms", 100))
+            self.tissue_widget.t2s_spin.setValue(t_state.get("t2s_ms", 50))
+            self.tissue_widget.pd_spin.setValue(t_state.get("pd", 1.0))
+            self.tissue_widget.m0_spin.setValue(t_state.get("m0", 1.0))
+
+            # 2. Restore RF Pulse Parameters
+            if "rf" in state:
+                self.rf_designer.set_state(state["rf"])
+
+            # 3. Restore Sequence Parameters
+            s_state = state.get("sequence", {})
+            # Disable preset auto-loading to prevent overwriting loaded values
+            old_presets_enabled = self.tissue_widget.sequence_presets_enabled
+            self.tissue_widget.sequence_presets_enabled = False
+            
+            try:
+                self.sequence_designer.sequence_type.setCurrentText(s_state.get("type", "Free Induction Decay"))
+                self.sequence_designer.te_spin.setValue(s_state.get("te", 10))
+                self.sequence_designer.tr_spin.setValue(s_state.get("tr", 100))
+                self.sequence_designer.ti_spin.setValue(s_state.get("ti", 400))
+                self.sequence_designer.spin_echo_echoes.setValue(s_state.get("echo_count", 1))
+                self.sequence_designer.slice_thickness_spin.setValue(s_state.get("slice_thickness", 5.0))
+                self.sequence_designer.slice_gradient_spin.setValue(s_state.get("slice_gradient", 0.0))
+                
+                # SSFP
+                self.sequence_designer.ssfp_repeats.setValue(s_state.get("ssfp_repeats", 16))
+                self.sequence_designer.ssfp_amp.setValue(s_state.get("ssfp_amp", 0.05))
+                self.sequence_designer.ssfp_phase.setValue(s_state.get("ssfp_phase", 0.0))
+                self.sequence_designer.ssfp_dur.setValue(s_state.get("ssfp_dur", 1.0))
+                self.sequence_designer.ssfp_start_delay.setValue(s_state.get("ssfp_start_delay", 0.0))
+                self.sequence_designer.ssfp_start_amp.setValue(s_state.get("ssfp_start_amp", 0.025))
+                self.sequence_designer.ssfp_start_phase.setValue(s_state.get("ssfp_start_phase", 180.0))
+                self.sequence_designer.ssfp_alternate_phase.setChecked(s_state.get("ssfp_alternate", True))
+                
+                # Rephase
+                self.sequence_designer.rephase_percentage.setValue(s_state.get("rephase_pct", 50.0))
+            finally:
+                self.tissue_widget.sequence_presets_enabled = old_presets_enabled
+
+            # 4. Restore Simulation Grid
+            sim_state = state.get("simulation", {})
+            self.mode_combo.setCurrentText(sim_state.get("mode", "Time-resolved"))
+            self.pos_spin.setValue(sim_state.get("num_pos", 1))
+            self.pos_range.setValue(sim_state.get("pos_range", 2.0))
+            self.freq_spin.setValue(sim_state.get("num_freq", 31))
+            self.freq_range.setValue(sim_state.get("freq_range", 100.0))
+            self.time_step_spin.setValue(sim_state.get("time_step", 1.0))
+            self.extra_tail_spin.setValue(sim_state.get("extra_tail", 5.0))
+            self.max_traces_spin.setValue(sim_state.get("max_traces", 50))
+
+            self.log_message(f"Parameters loaded successfully from {Path(filename).name}")
+            self.statusBar().showMessage(f"Parameters loaded from {Path(filename).name}")
+            
+            # Trigger diagram update
+            self.sequence_designer.update_diagram()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Load Error", f"Failed to load parameters:\n{str(e)}")
+            self.log_message(f"Error loading parameters: {e}")
 
     def _start_vector_animation(self):
         """Start or restart the 3D vector animation if data exists."""
+        # Prevent animation during parameter sweeps
+        if getattr(self, "_sweep_mode", False):
+            self._sync_play_toggle(False)
+            return
+
         if self.anim_data is None or len(self.anim_data) == 0:
             self.anim_timer.stop()
             self._sync_play_toggle(False)
@@ -6443,18 +6531,71 @@ class BlochSimulatorGUI(QMainWindow):
                 
     def save_parameters(self):
         """Save simulation parameters to file."""
+        export_dir = self._get_export_directory()
+        seq_type = self.sequence_designer.sequence_type.currentText().replace(" ", "_").replace("(", "").replace(")", "").replace("+", "").lower()
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        default_filename = f"bloch_params_{seq_type}_{timestamp}.json"
+        default_path = export_dir / default_filename
+
         filename, _ = QFileDialog.getSaveFileName(
-            self, "Save Parameters", "", "JSON Files (*.json)"
+            self, "Save Parameters", str(default_path), "JSON Files (*.json)"
         )
-        if filename:
-            params = {
-                't1': self.tissue_widget.t1_spin.value(),
-                't2': self.tissue_widget.t2_spin.value(),
-                'te': self.sequence_designer.te_spin.value(),
-                'tr': self.sequence_designer.tr_spin.value(),
+        if not filename:
+            return
+
+        try:
+            state = {
+                "version": "1.1",
+                "timestamp": timestamp,
+                "tissue": {
+                    "preset": self.tissue_widget.preset_combo.currentText(),
+                    "field": self.tissue_widget.field_combo.currentText(),
+                    "t1_ms": self.tissue_widget.t1_spin.value(),
+                    "t2_ms": self.tissue_widget.t2_spin.value(),
+                    "t2s_ms": self.tissue_widget.t2s_spin.value(),
+                    "pd": self.tissue_widget.pd_spin.value(),
+                    "m0": self.tissue_widget.m0_spin.value(),
+                },
+                "rf": self.rf_designer.get_state(),
+                "sequence": {
+                    "type": self.sequence_designer.sequence_type.currentText(),
+                    "te": self.sequence_designer.te_spin.value(),
+                    "tr": self.sequence_designer.tr_spin.value(),
+                    "ti": self.sequence_designer.ti_spin.value(),
+                    "echo_count": self.sequence_designer.spin_echo_echoes.value(),
+                    "slice_thickness": self.sequence_designer.slice_thickness_spin.value(),
+                    "slice_gradient": self.sequence_designer.slice_gradient_spin.value(),
+                    "ssfp_repeats": self.sequence_designer.ssfp_repeats.value(),
+                    "ssfp_amp": self.sequence_designer.ssfp_amp.value(),
+                    "ssfp_phase": self.sequence_designer.ssfp_phase.value(),
+                    "ssfp_dur": self.sequence_designer.ssfp_dur.value(),
+                    "ssfp_start_delay": self.sequence_designer.ssfp_start_delay.value(),
+                    "ssfp_start_amp": self.sequence_designer.ssfp_start_amp.value(),
+                    "ssfp_start_phase": self.sequence_designer.ssfp_start_phase.value(),
+                    "ssfp_alternate": self.sequence_designer.ssfp_alternate_phase.isChecked(),
+                    "rephase_pct": self.sequence_designer.rephase_percentage.value(),
+                },
+                "simulation": {
+                    "mode": self.mode_combo.currentText(),
+                    "num_pos": self.pos_spin.value(),
+                    "pos_range": self.pos_range.value(),
+                    "num_freq": self.freq_spin.value(),
+                    "freq_range": self.freq_range.value(),
+                    "time_step": self.time_step_spin.value(),
+                    "extra_tail": self.extra_tail_spin.value(),
+                    "max_traces": self.max_traces_spin.value(),
+                }
             }
+
             with open(filename, 'w') as f:
-                json.dump(params, f, indent=2)
+                json.dump(state, f, indent=2)
+            
+            self.log_message(f"Parameters saved to {Path(filename).name}")
+            self.statusBar().showMessage(f"Parameters saved to {Path(filename).name}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", f"Failed to save parameters:\n{str(e)}")
+            self.log_message(f"Error saving parameters: {e}")
                 
     def export_results(self):
         """Export simulation results with complete parameters."""
@@ -6739,7 +6880,7 @@ class BlochSimulatorGUI(QMainWindow):
             try:
                 with open(path, 'w', newline='') as f:
                     writer = csv.writer(f)
-                    writer.writerow(["Pos_Index", "Freq_Index", "Position_m", "Frequency_Hz", "Mx", "My", "Mz", "Mxy_Mag", "Phase_rad"])
+                    writer.writerow(["Pos_Index", "Freq_Index", "Position_m", "Frequency_Hz", "Mx", "My", "Mz", "Mxy_Complex"])
                     
                     npos, nfreq = mx_final.shape
                     positions = self.last_positions[:, 2] if self.last_positions is not None else np.zeros(npos)
@@ -6752,10 +6893,9 @@ class BlochSimulatorGUI(QMainWindow):
                             val_mx = float(mx_final[p, f_idx])
                             val_my = float(my_final[p, f_idx])
                             val_mz = float(mz_final[p, f_idx])
-                            val_mxy = np.sqrt(val_mx**2 + val_my**2)
-                            val_phase = np.arctan2(val_my, val_mx)
+                            val_mxy_complex = complex(val_mx, val_my)
                             
-                            writer.writerow([p, f_idx, pos_val, freq_val, val_mx, val_my, val_mz, val_mxy, val_phase])
+                            writer.writerow([p, f_idx, pos_val, freq_val, val_mx, val_my, val_mz, str(val_mxy_complex)])
                             
                 self.statusBar().showMessage(f"Final state exported to {path}")
                 QMessageBox.information(self, "Export Successful", f"Final state data saved to:\n{path.name}")
@@ -6766,9 +6906,11 @@ class BlochSimulatorGUI(QMainWindow):
             if path.suffix.lower() != ".npz":
                 path = path.with_suffix(".npz")
             
+            mxy_complex = mx_final + 1j * my_final
             try:
                 np.savez(path, 
                         mx=mx_final, my=my_final, mz=mz_final,
+                        mxy=mxy_complex,
                         positions=self.last_positions,
                         frequencies=self.last_frequencies)
                 self.statusBar().showMessage(f"Final state exported to {path}")
@@ -6791,13 +6933,20 @@ class BlochSimulatorGUI(QMainWindow):
         if path.suffix.lower() != ".npz":
             path = path.with_suffix(".npz")
             
+        mx = self.last_result.get('mx')
+        my = self.last_result.get('my')
+        mxy = None
+        if mx is not None and my is not None:
+            mxy = mx + 1j * my
+
         try:
             # Save all arrays
             np.savez(path,
                     time=self.last_time,
-                    mx=self.last_result.get('mx'),
-                    my=self.last_result.get('my'),
+                    mx=mx,
+                    my=my,
                     mz=self.last_result.get('mz'),
+                    mxy=mxy,
                     signal=self.last_result.get('signal'),
                     positions=self.last_positions,
                     frequencies=self.last_frequencies)
