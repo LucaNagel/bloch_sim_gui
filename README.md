@@ -9,7 +9,7 @@ A high-performance Python implementation of the Bloch equation solver originally
 - **Interactive GUI**: Real-time visualization and parameter adjustment
 - **Flexible API**: Easy-to-use Python interface for scripting
 - **Comprehensive**: Supports arbitrary RF pulses, gradient waveforms, and tissue parameters
-- **Visualization**: 3D magnetization vectors, time evolution plots, and frequency spectra
+- **Visualization**: 3D magnetization vectors, time evolution plots, frequency spectra, and **animation export**
 
 ## Installation
 
@@ -246,57 +246,6 @@ Artifact: `dist/BlochSimulator` (single binary; `.exe` on Windows).
   - Linux: `~/.local/share/BlochSimulator/exports`
 - Override with `BLOCH_APP_DIR` or `BLOCH_EXPORT_DIR` if you need a custom location.
 
-## Performance
-
-Benchmarks on Intel i7-10700K (8 cores):
-
-| Simulation Size | Single Thread | 8 Threads | Speedup |
-|-----------------|---------------|-----------|---------|
-| 1 spin, 1000 points | 0.8 ms | - | - |
-| 256x256 image | 450 ms | 65 ms | 6.9x |
-| 64x64x64 volume | 8.2 s | 1.3 s | 6.3x |
-
-## Advanced Features
-
-### GPU Acceleration (Optional)
-
-If CUDA is available:
-
-```python
-# Install CuPy
-pip install cupy-cuda11x
-
-# Enable GPU acceleration (future feature)
-sim = BlochSimulator(use_gpu=True)
-```
-
-### Steady-State Simulations
-
-```python
-# Mode 1: Steady-state endpoint
-result = sim.simulate(sequence, tissue, mode=1)
-
-# Mode 3: Steady-state with time evolution  
-result = sim.simulate(sequence, tissue, mode=3)
-```
-
-### Save/Load Results
-
-```python
-# Save to HDF5
-sim.save_results("simulation_results.h5")
-
-# Load later
-sim.load_results("simulation_results.h5")
-```
-
-## Validation
-
-The simulator has been validated against:
-- Analytical solutions for simple cases
-- Original MATLAB implementation
-- Published literature values
-
 ## Theory
 
 The simulator solves the Bloch equations:
@@ -317,13 +266,6 @@ Using:
 1. **Missing compiler**: Install gcc (Linux), Xcode (macOS), or Visual Studio (Windows)
 2. **OpenMP not found**: The code will still work but without parallelization
 3. **Import error**: Ensure the .so/.pyd file is in the same directory
-
-### Performance Issues
-
-1. Enable parallel processing: `use_parallel=True`
-2. Increase threads: `num_threads=8`
-3. Reduce simulation points where possible
-4. Use endpoint mode (0) instead of time-resolved (2) when appropriate
 
 ## Contributing
 
@@ -354,6 +296,7 @@ This project is based on [code](http://mrsrl.stanford.edu/~brian/blochsim/) orig
 - NumPy and SciPy communities
 - PyQt/PySide developers
 - OpenMP project
+- Built partially with [codex](https://openai.com/codex/), [claude code](https://claude.ai/) and [gemini cli](https://github.com/google-gemini/gemini-cli)
 
 ## Contact
 
