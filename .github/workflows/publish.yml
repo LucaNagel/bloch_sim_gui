@@ -2,8 +2,11 @@ name: Publish to PyPI
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
+  workflow_dispatch: # Allows manual triggering from the GitHub UI
 
 jobs:
   test:
@@ -27,13 +30,27 @@ jobs:
         run: |
           # Install system libraries required for PyQt5/GUI tests
           sudo apt-get update
-          sudo apt-get install -y xvfb libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-xfixes0 libxcb-cursor0 libxcb-shape0 libegl1-mesa libgl1-mesa-dri libgl1-mesa-glx libpci3
+          sudo apt-get install -y --no-install-recommends \
+            xvfb \
+            libxkbcommon-x11-0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-randr0 \
+            libxcb-render-util0 \
+            libxcb-xinerama0 \
+            libxcb-xfixes0 \
+            libxcb-shape0 \
+            libxcb-cursor0 \
+            libgl1 \
+            libegl1
           # Force software rendering for headless CI
           export QT_QPA_PLATFORM=offscreen
           xvfb-run pytest tests/
 
   build-n-publish:
     name: Build and publish Python 🐍 distributions to PyPI
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: test
     runs-on: ubuntu-latest
     steps:
