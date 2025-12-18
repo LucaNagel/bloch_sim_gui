@@ -8528,7 +8528,7 @@ class BlochSimulatorGUI(QMainWindow):
             "originally developed by Brian Hargreaves.\n\n"
             "This GUI provides interactive visualization and\n"
             "parameter control for MRI pulse sequence simulation.\n\n"
-            "Version 1.0.2")
+            "Version 1.0.3")
 
 
 def main():
