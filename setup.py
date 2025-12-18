@@ -17,13 +17,8 @@ define_macros = []
 
 # Architecture optimization flags
 arch_flags = []
-machine = platform.machine().lower()
-if is_mac and 'arm' in machine:
-    # Apple Silicon
-    arch_flags = ['-mcpu=native']
-elif not is_windows:
-    # Intel/AMD on Linux/Mac
-    arch_flags = ['-march=native']
+# Avoid -mcpu=native or -march=native for wheel builds to ensure portability
+# and prevent errors during cross-compilation (e.g. via cibuildwheel).
 
 if is_windows:
     # Windows with MSVC
