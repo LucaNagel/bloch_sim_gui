@@ -9,56 +9,49 @@ from PyQt5.QtWidgets import QApplication
 import pyqtgraph as pg
 from pyqtgraph.exporters import ImageExporter, SVGExporter
 from pathlib import Path
+import pytest
 
-# Create QApplication
-app = QApplication(sys.argv)
+def test_export_simple():
+    # Create QApplication
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
 
-# Create a simple plot
-plot_widget = pg.PlotWidget()
-x = np.linspace(0, 10, 100)
-y = np.sin(x)
-plot_widget.plot(x, y, pen='r')
-plot_widget.setLabel('left', 'Amplitude')
-plot_widget.setLabel('bottom', 'Time', 's')
+    # Create a simple plot
+    plot_widget = pg.PlotWidget()
+    x = np.linspace(0, 10, 100)
+    y = np.sin(x)
+    plot_widget.plot(x, y, pen='r')
+    plot_widget.setLabel('left', 'Amplitude')
+    plot_widget.setLabel('bottom', 'Time', 's')
 
-# Show the widget (important - some exporters need rendered content)
-plot_widget.show()
-app.processEvents()  # Process events to ensure rendering
+    # Show the widget (important - some exporters need rendered content)
+    plot_widget.show()
+    app.processEvents()  # Process events to ensure rendering
 
-# Test PNG export
-print("Testing PNG export...")
-try:
+    # Test PNG export
+    print("Testing PNG export...")
     exporter = ImageExporter(plot_widget.plotItem)
     exporter.parameters()['width'] = 800
-    output_file = 'test_export.png'
-    exporter.export(output_file)
+    output_file_png = 'test_export.png'
+    exporter.export(output_file_png)
 
-    if Path(output_file).exists():
-        print(f"✓ PNG export SUCCESS: {output_file}")
-        print(f"  File size: {Path(output_file).stat().st_size} bytes")
-    else:
-        print(f"✗ PNG export FAILED: File not created")
-except Exception as e:
-    print(f"✗ PNG export ERROR: {e}")
-    import traceback
-    traceback.print_exc()
+    assert Path(output_file_png).exists(), "PNG export FAILED: File not created"
+    print(f"✓ PNG export SUCCESS: {output_file_png}")
+    print(f"  File size: {Path(output_file_png).stat().st_size} bytes")
 
-# Test SVG export
-print("\nTesting SVG export...")
-try:
+    # Test SVG export
+    print("\nTesting SVG export...")
     exporter = SVGExporter(plot_widget.plotItem)
-    output_file = 'test_export.svg'
-    exporter.export(output_file)
+    output_file_svg = 'test_export.svg'
+    exporter.export(output_file_svg)
 
-    if Path(output_file).exists():
-        print(f"✓ SVG export SUCCESS: {output_file}")
-        print(f"  File size: {Path(output_file).stat().st_size} bytes")
-    else:
-        print(f"✗ SVG export FAILED: File not created")
-except Exception as e:
-    print(f"✗ SVG export ERROR: {e}")
-    import traceback
-    traceback.print_exc()
+    assert Path(output_file_svg).exists(), "SVG export FAILED: File not created"
+    print(f"✓ SVG export SUCCESS: {output_file_svg}")
+    print(f"  File size: {Path(output_file_svg).stat().st_size} bytes")
+    
+    # Cleanup
+    plot_widget.close()
 
-print("\nTest complete. Check for test_export.png and test_export.svg in current directory.")
-sys.exit(0)
+if __name__ == "__main__":
+    test_export_simple()

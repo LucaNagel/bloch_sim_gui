@@ -64,7 +64,7 @@ extensions = [
 ]
 
 setup(
-    name="bloch_simulator",
+    name="blochsimulator",
     version="1.0.0",
     description="High-performance Bloch equation simulator for MRI",
     author="Your Name",
@@ -75,6 +75,18 @@ setup(
                               'wraparound': False,
                               'cdivision': True,
                           }),
+    py_modules=[
+        "bloch_simulator",
+        "bloch_gui",
+        "visualization_export",
+        "kspace_simulator",
+        "phantom",
+        "pulse_loader",
+        "kspace_widget",
+        "phantom_widget",
+        "notebook_exporter",
+    ],
+    include_package_data=True,
     zip_safe=False,
     install_requires=[
         "numpy>=1.20.0",

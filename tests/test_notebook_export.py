@@ -161,7 +161,7 @@ def test_mode_b_notebook():
     return nb_file
 
 
-def test_notebook_execution(nb_file):
+def helper_notebook_execution(nb_file):
     """
     Test that notebook can be executed (requires jupyter/nbconvert).
 
@@ -249,8 +249,8 @@ def main():
         print("\nThese tests require 'jupyter' and 'nbconvert' installed.")
         print("They will be skipped if not available.\n")
 
-        test_notebook_execution(mode_a_nb)
-        test_notebook_execution(mode_b_nb)
+        helper_notebook_execution(mode_a_nb)
+        helper_notebook_execution(mode_b_nb)
 
         # Summary
         print("\n" + "="*70)

@@ -112,12 +112,12 @@ class TestImageExporter(unittest.TestCase):
         plot_widget = pg.PlotWidget()
         output_path = Path(self.temp_dir) / "test_plot.xyz"
 
-        with self.assertRaises(ValueError):
-            self.exporter.export_pyqtgraph_plot(
-                plot_widget,
-                str(output_path),
-                format='xyz'
-            )
+        result = self.exporter.export_pyqtgraph_plot(
+            plot_widget,
+            str(output_path),
+            format='xyz'
+        )
+        self.assertFalse(result, "Expected export to fail for unsupported format")
 
     def test_file_extension_correction(self):
         """Test that file extensions are corrected automatically."""

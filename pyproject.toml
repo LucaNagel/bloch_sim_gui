@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=42", "wheel", "Cython>=0.29", "numpy>=1.20"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blochsimulator"
+version = "1.0.0"
+description = "High-performance Bloch equation simulator for MRI"
+readme = "README.md"
+requires-python = ">=3.7"
+license = {text = "MIT"}
+authors = [
+    {name = "Luca Nagel"}
+]
+dependencies = [
+    "numpy>=1.20.0",
+    "scipy>=1.7.0",
+    "matplotlib>=3.3.0",
+    "cython>=0.29.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/bloch_simulator"

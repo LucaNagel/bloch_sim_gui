@@ -1,0 +1,6 @@
+include bloch_core_modified.c
+include bloch_core.h
+include bloch_wrapper.pyx
+include requirements.txt
+include README.md
+recursive-include rfpulses *
