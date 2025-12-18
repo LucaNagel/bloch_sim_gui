@@ -34,3 +34,6 @@ Homepage = "https://github.com/yourusername/blochsimulator"
 
 [project.scripts]
 blochsimulator-gui = "blochsimulator.gui:main"
+
+[tool.cibuildwheel]
+skip = "pp*"
