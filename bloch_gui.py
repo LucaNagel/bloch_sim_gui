@@ -7449,6 +7449,35 @@ class BlochSimulatorGUI(QMainWindow):
             frame = frame[:, :-1, :]
         return frame
 
+    def _compute_playback_indices(self, time_array, start_idx, end_idx, fps):
+        """Compute indices to match the current playback speed setting."""
+        speed_ms_per_s = self.time_control.speed_spin.value()
+        if speed_ms_per_s <= 1e-6:
+            speed_ms_per_s = 50.0
+
+        t_start = time_array[start_idx]
+        t_end = time_array[end_idx]
+
+        # Simulation duration in seconds
+        sim_dur_s = t_end - t_start
+
+        # Real duration in seconds = (Sim ms) / (ms/s)
+        real_dur_s = (sim_dur_s * 1000.0) / speed_ms_per_s
+
+        # Total frames
+        n_frames = int(max(2, np.ceil(real_dur_s * fps)))
+
+        # Target times
+        target_times = np.linspace(t_start, t_end, n_frames)
+
+        # Find indices
+        indices = np.searchsorted(time_array, target_times)
+        indices = np.clip(indices, start_idx, end_idx)
+
+        self.log_message(f"Exporting animation: {n_frames} frames to match {speed_ms_per_s} ms/s at {fps} FPS.")
+
+        return indices
+
     def _export_widget_animation(self, widgets: list, default_filename: str, before_grab=None):
         """Generic widget-grab animation exporter (GIF/MP4) for plot tabs."""
         if self.last_time is None:
@@ -7471,13 +7500,9 @@ class BlochSimulatorGUI(QMainWindow):
         if dialog.exec_() != QDialog.Accepted:
             return
         params = dialog.get_export_params()
-        exporter = AnimationExporter()
-        indices = exporter._compute_indices(
-            total_frames,
-            max_frames=params['max_frames'],
-            start_idx=params['start_idx'],
-            end_idx=params['end_idx']
-        )
+        
+        time_array = self.playback_time if self.playback_time is not None else self.last_time
+        indices = self._compute_playback_indices(time_array, params['start_idx'], params['end_idx'], params['fps'])
 
         fmt = params['format']
         filepath = Path(params['filename'])
@@ -7489,6 +7514,7 @@ class BlochSimulatorGUI(QMainWindow):
             QMessageBox.warning(self, "Missing Dependency", "Animation export requires the 'imageio' package.")
             return
 
+        exporter = AnimationExporter()
         if fmt == 'gif':
             writer = vz_imageio.get_writer(str(filepath), mode='I', fps=params['fps'], format='GIF')
         else:
@@ -7683,13 +7709,7 @@ class BlochSimulatorGUI(QMainWindow):
             }
         ]
 
-        exporter = AnimationExporter()
-        indices = exporter._compute_indices(
-            total_frames,
-            max_frames=params['max_frames'],
-            start_idx=start_idx,
-            end_idx=end_idx
-        )
+        indices = self._compute_playback_indices(time_s, start_idx, end_idx, params['fps'])
         progress = QProgressDialog("Exporting animation...", "Cancel", 0, 100, self)
         progress.setWindowModality(Qt.WindowModal)
         progress.setAutoClose(True)
@@ -7703,6 +7723,7 @@ class BlochSimulatorGUI(QMainWindow):
         def cancel_cb():
             return progress.wasCanceled()
 
+        exporter = AnimationExporter()
         try:
             result = exporter.export_time_series_animation(
                 time_s,
@@ -7794,13 +7815,7 @@ class BlochSimulatorGUI(QMainWindow):
             return
 
         params = dialog.get_export_params()
-        exporter = AnimationExporter()
-        indices = exporter._compute_indices(
-            total_frames,
-            max_frames=params['max_frames'],
-            start_idx=params['start_idx'],
-            end_idx=params['end_idx']
-        )
+        indices = self._compute_playback_indices(self.playback_time, params['start_idx'], params['end_idx'], params['fps'])
 
         # Prepare writers (main + optional sequence-only)
         fmt = params['format']
@@ -7809,6 +7824,7 @@ class BlochSimulatorGUI(QMainWindow):
             filepath = filepath.with_suffix(f".{fmt}")
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
+        exporter = AnimationExporter()
         def _make_writer(target_path: Path):
             if fmt == 'gif':
                 return vz_imageio.get_writer(str(target_path), mode='I', fps=params['fps'], format='GIF')
@@ -7964,8 +7980,7 @@ class BlochSimulatorGUI(QMainWindow):
         start_idx = min(params['start_idx'], nframes - 1)
         end_idx = max(start_idx, min(params['end_idx'], nframes - 1))
         mean_only = params['mean_only']
-        exporter = AnimationExporter()
-        indices = exporter._compute_indices(nframes, max_frames=params['max_frames'], start_idx=start_idx, end_idx=end_idx)
+        indices = self._compute_playback_indices(time_s, start_idx, end_idx, params['fps'])
 
         def _select_signal(arr):
             if arr.ndim == 3:
@@ -8008,6 +8023,7 @@ class BlochSimulatorGUI(QMainWindow):
         def cancel_cb():
             return progress.wasCanceled()
 
+        exporter = AnimationExporter()
         try:
             result = exporter.export_time_series_animation(
                 time_s,
