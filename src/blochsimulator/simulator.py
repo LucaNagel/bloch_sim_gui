@@ -10,7 +10,6 @@ Date: 2024
 
 import numpy as np
 from typing import Optional, Tuple, Union, Dict
-import matplotlib.pyplot as plt
 from scipy import signal
 from dataclasses import dataclass
 import h5py
@@ -1277,6 +1276,8 @@ class BlochSimulator:
         mz = result['mz'][:, position_idx, freq_idx]
         self.log_message(f"result = {result}")  # Debugging line
         
+        import matplotlib.pyplot as plt
+
         # Create plot
         fig, axes = plt.subplots(2, 2, figsize=(12, 8))
         

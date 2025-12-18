@@ -8,7 +8,7 @@ package-dir = {"" = "src"}
 
 [project]
 name = "blochsimulator"
-version = "1.0.3"
+version = "1.0.4"
 description = "High-performance Bloch equation simulator for MRI"
 readme = "README.md"
 requires-python = ">=3.7"

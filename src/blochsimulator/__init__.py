@@ -11,7 +11,8 @@ from .simulator import (
 )
 
 from . import notebook_exporter
-from . import visualization
+# visualization is available but not imported by default to avoid PyQt5 dependencies
+# from . import visualization
 from . import kspace
 from . import phantom
 from . import pulse_loader
