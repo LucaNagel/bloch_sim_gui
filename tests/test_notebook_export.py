@@ -9,7 +9,7 @@ This script tests:
 
 import numpy as np
 from bloch_simulator import BlochSimulator, TissueParameters, SpinEcho
-from notebook_exporter import export_notebook
+from bloch_simulator.notebook_exporter import export_notebook
 from pathlib import Path
 import subprocess
 

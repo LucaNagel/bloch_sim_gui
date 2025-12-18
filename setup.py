@@ -1,5 +1,5 @@
 # setup.py - Build configuration for Bloch simulator
-from setuptools import setup, Extension
+from setuptools import setup, Extension, find_packages
 from Cython.Build import cythonize
 import numpy as np
 import platform
@@ -53,9 +53,12 @@ else:
 # Define the extension
 extensions = [
     Extension(
-        "bloch_simulator_cy",
-        sources=["bloch_wrapper.pyx", "bloch_core_modified.c"],
-        include_dirs=[np.get_include(), "."],
+        "bloch_simulator.bloch_simulator_cy",
+        sources=[
+            "src/bloch_simulator/bloch_wrapper.pyx", 
+            "src/bloch_simulator/bloch_core_modified.c"
+        ],
+        include_dirs=[np.get_include(), "src/bloch_simulator"],
         define_macros=define_macros,
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,
@@ -64,10 +67,8 @@ extensions = [
 ]
 
 setup(
-    name="blochsimulator",
-    version="1.0.0",
-    description="High-performance Bloch equation simulator for MRI",
-    author="Your Name",
+    packages=find_packages(where="src"),
+    package_dir={"": "src"},
     ext_modules=cythonize(extensions, 
                           compiler_directives={
                               'language_level': "3",
@@ -75,27 +76,6 @@ setup(
                               'wraparound': False,
                               'cdivision': True,
                           }),
-    py_modules=[
-        "bloch_simulator",
-        "bloch_gui",
-        "visualization_export",
-        "kspace_simulator",
-        "phantom",
-        "pulse_loader",
-        "kspace_widget",
-        "phantom_widget",
-        "notebook_exporter",
-    ],
     include_package_data=True,
     zip_safe=False,
-    install_requires=[
-        "numpy>=1.20.0",
-        "scipy>=1.7.0",
-        "matplotlib>=3.3.0",
-        "cython>=0.29.0",
-    ],
-    python_requires=">=3.7",
 )
-
-# Build instructions:
-# python setup.py build_ext --inplace
