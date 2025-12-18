@@ -25,9 +25,11 @@ jobs:
           
       - name: Run tests
         run: |
-          # Note: GUI tests might fail on headless CI, we use xvfb
+          # Install system libraries required for PyQt5/GUI tests
           sudo apt-get update
-          sudo apt-get install -y xvfb
+          sudo apt-get install -y xvfb libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-xfixes0 libxcb-cursor0 libxcb-shape0 libegl1-mesa libgl1-mesa-dri libgl1-mesa-glx libpci3
+          # Force software rendering for headless CI
+          export QT_QPA_PLATFORM=offscreen
           xvfb-run pytest tests/
 
   build-n-publish:

@@ -1401,7 +1401,7 @@ class BlochSimulator:
         params_dict = {
             'metadata': {
                 'export_timestamp': str(np.datetime64('now')),
-                'simulator_version': '1.0.1'
+                'simulator_version': '1.0.2'
             },
             'tissue_parameters': {
                 'name': self.last_result['tissue'].name,
