@@ -133,8 +133,10 @@ int count;
 det = detmat(mat);	/* Determinant */
 adjmat(mat, imat);	/* Adjoint */
 
-for (count=0; count<9; count++)
-	*imat = *imat++ / det;		
+for (count=0; count<9; count++) {
+	*imat /= det;
+	imat++;
+}		
 }
 
 
@@ -155,7 +157,7 @@ void addmats(double *mat1, double *mat2, double *matsum)
 }
 
 
-double multmats(double *mat1, double *mat2, double *matproduct)
+void multmats(double *mat1, double *mat2, double *matproduct)
 
 /* ======= Multiply two 3x3 matrices. ====== */
 /*	DO NOT MAKE THE OUTPUT THE SAME AS ONE OF THE INPUTS!! */
@@ -173,7 +175,7 @@ double multmats(double *mat1, double *mat2, double *matproduct)
 }
 
 
-double calcrotmat(double nx, double ny, double nz, double *rmat)
+void calcrotmat(double nx, double ny, double nz, double *rmat)
 
 	/* Find the rotation matrix that rotates |n| radians about
 		the vector given by nx,ny,nz				*/
@@ -294,7 +296,6 @@ int blochsim(double *b1real, double *b1imag,
 	/* Go through time for one df and one dx,dy,dz.		*/
 
 {
-int count;
 int tcount;
 double gammadx;
 double gammady;
@@ -305,8 +306,6 @@ double arot[9], brot[3];	/* A and B after rotation step. */
 double decmat[9];		/* Decay matrix for each time step. */
 double decvec[3];		/* Recovery vector for each time step. */
 double rotx,roty,rotz;		/* Rotation axis coordinates. */
-double mstart[3];
-double mfinish[3];
 double imat[9], mvec[3];
 double mcurr0[3];		/* Current magnetization before rotation. */
 double mcurr1[3];		/* Current magnetization before decay. */
@@ -419,7 +418,7 @@ else if (mode==1)	/* Indicates to find steady-state magnetization */
 	*mz = mvec[2];
 	}
 
-
+return 0;
 }
 
 
@@ -513,6 +512,7 @@ for (fcount=0; fcount < nfreq; fcount++)
 free(e1);
 free(e2);
 
+return 0;
 }
 
 
@@ -584,29 +584,33 @@ void blochsim_batch_optimized(double *b1real, double *b1imag,
         e2[t] = exp(-tsteps[t] / t2);
     }
 
+    int total_points = nf * npos;
+    int i;
+
     #ifdef _OPENMP
     omp_set_num_threads(num_threads);
-    #pragma omp parallel for collapse(2) schedule(static)
+    #pragma omp parallel for schedule(static)
     #endif
-    for (int f = 0; f < nf; f++) {
-        for (int p = 0; p < npos; p++) {
-            int base = (f * npos + p) * ntout;
-            double *mx_ptr = mx + base;
-            double *my_ptr = my + base;
-            double *mz_ptr = mz + base;
+    for (i = 0; i < total_points; i++) {
+        int f = i / npos;
+        int p = i % npos;
 
-            if (mode == 3) {
-                blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime,
-                         e1, e2, df[f], dx[p], dy[p], dz[p],
-                         mx_ptr, my_ptr, mz_ptr, 1);
-                blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime,
-                         e1, e2, df[f], dx[p], dy[p], dz[p],
-                         mx_ptr, my_ptr, mz_ptr, 2);
-            } else {
-                blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime,
-                         e1, e2, df[f], dx[p], dy[p], dz[p],
-                         mx_ptr, my_ptr, mz_ptr, mode);
-            }
+        int base = (f * npos + p) * ntout;
+        double *mx_ptr = mx + base;
+        double *my_ptr = my + base;
+        double *mz_ptr = mz + base;
+
+        if (mode == 3) {
+            blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime,
+                     e1, e2, df[f], dx[p], dy[p], dz[p],
+                     mx_ptr, my_ptr, mz_ptr, 1);
+            blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime,
+                     e1, e2, df[f], dx[p], dy[p], dz[p],
+                     mx_ptr, my_ptr, mz_ptr, 2);
+        } else {
+            blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime,
+                     e1, e2, df[f], dx[p], dy[p], dz[p],
+                     mx_ptr, my_ptr, mz_ptr, mode);
         }
     }
 
@@ -626,12 +630,13 @@ void blochsim_heterogeneous(
     int mode, int num_threads)
 {
     int ntout = (mode & 2) ? ntime : 1;
+    int v;
     
     #ifdef _OPENMP
     omp_set_num_threads(num_threads);
     #pragma omp parallel for schedule(dynamic, 64)
     #endif
-    for (int v = 0; v < nvoxels; v++) {
+    for (v = 0; v < nvoxels; v++) {
         /* Get per-voxel parameters */
         double t1 = t1_arr[v];
         double t2 = t2_arr[v];
@@ -738,11 +743,13 @@ void blochsim_heterogeneous_grouped(
         }
     }
     
+    int v;
+
     #ifdef _OPENMP
     omp_set_num_threads(num_threads);
     #pragma omp parallel for schedule(dynamic, 64)
     #endif
-    for (int v = 0; v < nvoxels; v++) {
+    for (v = 0; v < nvoxels; v++) {
         int label = tissue_labels[v];
         int base = v * ntout;
         

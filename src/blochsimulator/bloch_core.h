@@ -28,8 +28,8 @@ double detmat(double *mat);
 void scalemat(double *mat, double scalar);
 void invmat(double *mat, double *imat);
 void addmats(double *mat1, double *mat2, double *matsum);
-double multmats(double *mat1, double *mat2, double *matproduct);
-double calcrotmat(double nx, double ny, double nz, double *rmat);
+void multmats(double *mat1, double *mat2, double *matproduct);
+void calcrotmat(double nx, double ny, double nz, double *rmat);
 void zerovec(double *vec);
 
 /* Time interval conversion */
