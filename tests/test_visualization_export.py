@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import QApplication
 import pyqtgraph as pg
 
 # Import the export classes
-from bloch_simulator.visualization import ImageExporter, ExportImageDialog, AnimationExporter, DatasetExporter
+from blochsimulator.visualization import ImageExporter, ExportImageDialog, AnimationExporter, DatasetExporter
 
 try:
     import imageio  # noqa: F401

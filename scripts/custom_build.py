@@ -108,7 +108,7 @@ def build_extension():
             
             # Check if the .so/.pyd file was created
             import glob
-            extensions = glob.glob("bloch_simulator_cy*.so") + glob.glob("bloch_simulator_cy*.pyd")
+            extensions = glob.glob("blochsimulator_cy*.so") + glob.glob("blochsimulator_cy*.pyd")
             if extensions:
                 print(f"✓ Extension file created: {extensions[0]}")
             return True
@@ -128,11 +128,11 @@ def test_import():
     print("\nTesting import...")
     
     try:
-        import bloch_simulator_cy
+        import blochsimulator_cy
         print("✓ Extension imported successfully")
         
         # Check available functions
-        functions = [name for name in dir(bloch_simulator_cy) if not name.startswith('_')]
+        functions = [name for name in dir(blochsimulator_cy) if not name.startswith('_')]
         print(f"Available functions: {', '.join(functions[:5])}...")
         
         return True
@@ -200,8 +200,8 @@ def main():
     
     print("\nYou can now:")
     print("1. Run the GUI: python bloch_gui.py")
-    print("2. Use the API: from bloch_simulator import BlochSimulator")
-    print("3. Run examples: python -c 'from bloch_simulator import example_fid; example_fid()'")
+    print("2. Use the API: from blochsimulator import BlochSimulator")
+    print("3. Run examples: python -c 'from blochsimulator import example_fid; example_fid()'")
     
     if not has_openmp:
         print("\nNote: OpenMP support is not available. The simulator will run")

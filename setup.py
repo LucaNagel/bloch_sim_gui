@@ -53,12 +53,12 @@ else:
 # Define the extension
 extensions = [
     Extension(
-        "bloch_simulator.bloch_simulator_cy",
+        "blochsimulator.blochsimulator_cy",
         sources=[
-            "src/bloch_simulator/bloch_wrapper.pyx", 
-            "src/bloch_simulator/bloch_core_modified.c"
+            "src/blochsimulator/bloch_wrapper.pyx", 
+            "src/blochsimulator/bloch_core_modified.c"
         ],
-        include_dirs=[np.get_include(), "src/bloch_simulator"],
+        include_dirs=[np.get_include(), "src/blochsimulator"],
         define_macros=define_macros,
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,

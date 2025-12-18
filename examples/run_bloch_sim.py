@@ -10,7 +10,7 @@ python run_bloch_sim.py --flip 30 --duration_ms 0.5 --freqs -50,0,50 --npos 5 --
 import argparse
 import numpy as np
 
-from bloch_simulator import BlochSimulator, TissueParameters, design_rf_pulse
+from blochsimulator import BlochSimulator, TissueParameters, design_rf_pulse
 
 
 def parse_args():

@@ -3,15 +3,15 @@ requires = ["setuptools>=42", "wheel", "Cython>=0.29", "numpy>=1.20"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["bloch_simulator"]
+packages = ["blochsimulator"]
 package-dir = {"" = "src"}
 
 [project]
 name = "blochsimulator"
-version = "1.0.0"
+version = "1.0.1"
 description = "High-performance Bloch equation simulator for MRI"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.7"
 license = {text = "MIT"}
 authors = [
     {name = "Luca Nagel"}
@@ -29,12 +29,8 @@ dependencies = [
     "h5py>=3.0.0",
 ]
 
-[project.optional-dependencies]
-dev = ["pytest", "black", "flake8"]
-notebook = ["jupyterlab"]
+[project.urls]
+Homepage = "https://github.com/yourusername/blochsimulator"
 
 [project.scripts]
-bloch-gui = "bloch_simulator.gui:main"
-
-[project.urls]
-Homepage = "https://github.com/yourusername/bloch_simulator"
+blochsimulator-gui = "blochsimulator.gui:main"

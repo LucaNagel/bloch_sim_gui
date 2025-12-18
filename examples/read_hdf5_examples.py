@@ -385,7 +385,7 @@ def example_basic():
     print("="*60)
 
     # Create a test file first
-    from bloch_simulator import BlochSimulator, TissueParameters, SpinEcho
+    from blochsimulator import BlochSimulator, TissueParameters, SpinEcho
 
     print("\nCreating test simulation...")
     sim = BlochSimulator(use_parallel=False)
@@ -431,7 +431,7 @@ def example_multi_position():
     print("EXAMPLE 2: Multi-Position, Multi-Frequency")
     print("="*60)
 
-    from bloch_simulator import BlochSimulator, TissueParameters, SpinEcho
+    from blochsimulator import BlochSimulator, TissueParameters, SpinEcho
 
     print("\nCreating simulation with spatial and frequency variation...")
     sim = BlochSimulator(use_parallel=False)

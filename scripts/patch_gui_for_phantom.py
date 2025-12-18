@@ -140,8 +140,8 @@ except ImportError:
     print("\nMake sure you have these files in the same directory:")
     print("  - phantom.py")
     print("  - phantom_widget.py")
-    print("  - bloch_simulator.py (with simulate_phantom method)")
-    print("  - bloch_simulator_cy.so (compiled Cython extension)")
+    print("  - blochsimulator.py (with simulate_phantom method)")
+    print("  - blochsimulator_cy.so (compiled Cython extension)")
     
     return True
 

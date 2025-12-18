@@ -8,7 +8,7 @@ This script tests:
 """
 
 import numpy as np
-from bloch_simulator import BlochSimulator, TissueParameters, SpinEcho
+from blochsimulator import BlochSimulator, TissueParameters, SpinEcho
 import h5py
 import json
 from pathlib import Path

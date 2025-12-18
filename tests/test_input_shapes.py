@@ -1,7 +1,7 @@
 import unittest
 import numpy as np
 
-from bloch_simulator import BlochSimulator, TissueParameters
+from blochsimulator import BlochSimulator, TissueParameters
 
 
 class InputShapeTests(unittest.TestCase):

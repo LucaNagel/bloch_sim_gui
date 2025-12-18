@@ -27,18 +27,15 @@ A high-performance Python implementation of the Bloch equation solver originally
 
 ### Quick Setup
 
+To install the simulator for local use or development:
+
 ```bash
 # Clone or download the repository
-cd bloch_simulator
+cd blochsimulator
 
-# Install dependencies
-pip install -r requirements.txt
-
-# Build the extension
-python build.py
-
-# Or manually:
-python setup.py build_ext --inplace
+# Install the package in editable mode
+# This builds the C-extension automatically
+pip install -e .
 ```
 
 ### Verification
@@ -46,7 +43,7 @@ python setup.py build_ext --inplace
 Test the installation:
 
 ```python
-from bloch_simulator import BlochSimulator, TissueParameters
+from blochsimulator import BlochSimulator, TissueParameters
 
 sim = BlochSimulator()
 tissue = TissueParameters.gray_matter(3.0)
@@ -55,12 +52,26 @@ print(f"T1: {tissue.t1:.3f}s, T2: {tissue.t2:.3f}s")
 
 ## Usage
 
+### 🚀 Jupyter Notebook (Recommended)
+
+You can launch the interactive GUI directly from a cell in your Jupyter Notebook.
+
+```python
+# 1. Install (run once)
+!pip install -e .
+
+# 2. Launch GUI
+!blochsimulator-gui
+```
+
+*Note: This works if Jupyter is running on your local machine. It will not work on headless remote servers or Google Colab.*
+
 ### 1. GUI Application
 
-Launch the interactive GUI:
+Once installed, you can launch the GUI from any terminal or shell:
 
 ```bash
-python bloch_gui.py
+blochsimulator-gui
 ```
 
 Features:
@@ -76,7 +87,7 @@ Features:
 
 ```python
 import numpy as np
-from bloch_simulator import BlochSimulator, TissueParameters
+from blochsimulator import BlochSimulator, TissueParameters
 
 # Create simulator
 sim = BlochSimulator(use_parallel=True, num_threads=4)
@@ -112,7 +123,7 @@ sim.plot_magnetization()
 #### Spin Echo Sequence
 
 ```python
-from bloch_simulator import BlochSimulator, SpinEcho, TissueParameters
+from blochsimulator import BlochSimulator, SpinEcho, TissueParameters
 
 sim = BlochSimulator()
 
@@ -134,7 +145,7 @@ signal = result['signal']
 #### Custom Pulse Design
 
 ```python
-from bloch_simulator import design_rf_pulse
+from blochsimulator import design_rf_pulse
 
 # Design a sinc pulse
 b1, time = design_rf_pulse(
@@ -174,7 +185,7 @@ print(f"Signal shape: {result['signal'].shape}")
 Pre-defined sequences are available:
 
 ```python
-from bloch_simulator import SpinEcho, GradientEcho
+from blochsimulator import SpinEcho, GradientEcho
 
 # Spin Echo
 se = SpinEcho(te=30e-3, tr=1.0)
@@ -191,7 +202,7 @@ b1, gradients, time = se.compile(dt=1e-6)
 Common tissues at different field strengths:
 
 ```python
-from bloch_simulator import TissueParameters
+from blochsimulator import TissueParameters
 
 # 3T parameters
 gm = TissueParameters.gray_matter(3.0)
@@ -280,7 +291,7 @@ Contributions are welcome! Please:
 If you use this simulator in your research, please cite:
 
 ```bibtex
-@software{bloch_simulator_python,
+@software{blochsimulator_python,
   title={Python Bloch Equation Simulator GUI and API},
   author={Luca Nagel},
   year={2025},
@@ -305,14 +316,20 @@ Luca Nagel
 ## Appendix: File Structure
 
 ```
-bloch_simulator/
-├── bloch_core_modified.c   # C implementation (from original)
-├── bloch_core.h            # C header file
-├── bloch_wrapper.pyx       # Cython wrapper
-├── setup.py                # Build configuration
-├── build.py                # Build script
-├── bloch_simulator.py      # Python API
-├── bloch_gui.py           # GUI application
-├── requirements.txt        # Dependencies
-└── README.md              # This file
+blochsimulator/
+├── src/
+│   └── blochsimulator/
+│       ├── __init__.py
+│       ├── simulator.py            # Core Python API
+│       ├── gui.py                  # PyQt5 GUI
+│       ├── bloch_core_modified.c   # C implementation
+│       ├── bloch_core.h            # C header
+│       ├── bloch_wrapper.pyx       # Cython wrapper
+│       └── ...
+├── tests/                          # Unit tests
+├── docs/                           # Sphinx documentation
+├── pyproject.toml                  # Modern build config
+├── setup.py                        # C-extension build config
+├── MANIFEST.in                     # Source dist manifest
+└── README.md
 ```

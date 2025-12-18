@@ -3,6 +3,7 @@
 .DS_Store
 build/
 dist/
+venv_test/
 *.egg-info/
 
 # Ignore all files in exports/ except .gitkeep
@@ -19,6 +20,7 @@ __pycache__/
 # Ignore all markdown files except README.md
 *.md
 !README.md
+!self_testing.md
 
 # Generated C files
-src/bloch_simulator/bloch_wrapper.c
+src/blochsimulator/bloch_wrapper.c

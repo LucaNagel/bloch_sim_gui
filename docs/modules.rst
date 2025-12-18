@@ -3,28 +3,28 @@ API Reference
 
 Bloch Simulator
 ---------------
-.. automodule:: bloch_simulator
+.. automodule:: blochsimulator
    :members:
    :undoc-members:
    :show-inheritance:
 
 K-Space Simulator
 -----------------
-.. automodule:: kspace_simulator
+.. automodule:: blochsimulator.kspace
    :members:
    :undoc-members:
    :show-inheritance:
 
 Phantoms
 --------
-.. automodule:: phantom
+.. automodule:: blochsimulator.phantom
    :members:
    :undoc-members:
    :show-inheritance:
 
 Pulse Loader
 ------------
-.. automodule:: pulse_loader
+.. automodule:: blochsimulator.pulse_loader
    :members:
    :undoc-members:
    :show-inheritance:
