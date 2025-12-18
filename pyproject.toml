@@ -36,4 +36,4 @@ Homepage = "https://github.com/yourusername/blochsimulator"
 blochsimulator-gui = "blochsimulator.gui:main"
 
 [tool.cibuildwheel]
-skip = "pp*"
+skip = "pp* *musllinux*"
