@@ -342,7 +342,7 @@ class ExportAnimationDialog(QDialog):
         self.default_directory = default_directory if default_directory else Path.cwd()
         self.default_filename = default_filename
         self.total_frames = max(total_frames, 0)
-        self.selected_format = 'gif'
+        self.selected_format = 'mp4'
         self.output_path = None
 
         self.init_ui()
@@ -354,7 +354,7 @@ class ExportAnimationDialog(QDialog):
         format_layout = QHBoxLayout()
         format_layout.addWidget(QLabel("Format:"))
         self.format_combo = QComboBox()
-        self.format_combo.addItems(['GIF', 'MP4'])
+        self.format_combo.addItems(['MP4', 'GIF'])
         format_layout.addWidget(self.format_combo)
         layout.addLayout(format_layout)
 
@@ -441,10 +441,10 @@ class ExportAnimationDialog(QDialog):
 
     def _on_export_clicked(self):
         format_filters = {
-            'gif': "GIF Animation (*.gif)",
-            'mp4': "MP4 Video (*.mp4)"
+            'mp4': "MP4 Video (*.mp4)",
+            'gif': "GIF Animation (*.gif)"
         }
-        formats = ['gif', 'mp4']
+        formats = ['mp4', 'gif']
         self.selected_format = formats[self.format_combo.currentIndex()]
         default_path = self.default_directory / f"{self.default_filename}.{self.selected_format}"
 
