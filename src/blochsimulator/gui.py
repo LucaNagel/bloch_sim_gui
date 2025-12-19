@@ -737,15 +737,19 @@ class RFPulseDesigner(QGroupBox):
         else:
             npoints = 100
         
-        # Design pulse
+        # Design pulse (without frequency offset first, to get base shape statistics)
+        # We apply freq offset manually later to ensure TBW calculation is invariant to offset.
         freq_offset_hz = self.freq_offset.value()
-        b1, time = design_rf_pulse(pulse_type, duration, flip, design_tbw, npoints, freq_offset=freq_offset_hz)
+        
+        # 1. Generate base pulse (centered at 0 Hz)
+        b1_base, time = design_rf_pulse(pulse_type, duration, flip, design_tbw, npoints, freq_offset=0.0)
+        
         # Sampling time [s]
-        dt = duration / len(b1)
+        dt = duration / len(b1_base)
 
         # Normalize pulse shape to unit peak for amplitude scaling
-        peak = np.max(np.abs(b1)) if np.any(np.abs(b1)) else 1.0
-        shape = b1 / peak
+        peak = np.max(np.abs(b1_base)) if np.any(np.abs(b1_base)) else 1.0
+        shape = b1_base / peak
 
         # Apply Apodization
         window_type = self.apodization_combo.currentText()
@@ -769,6 +773,7 @@ class RFPulseDesigner(QGroupBox):
             aligned_area = 1e-12
 
         # Estimate integration factor relative to a unit-amplitude block
+        # This is now independent of frequency offset because we use b1_base
         try:
             integration_factor = abs(aligned_area) / max(duration, 1e-12)
         except Exception:
@@ -791,6 +796,14 @@ class RFPulseDesigner(QGroupBox):
         # Apply the optimal calibration phase plus any user-selected phase
         total_phase = opt_phase + phase_rad
         b1 = shape * pulse_amp_G * np.exp(1j * total_phase)
+        
+        # 2. Apply frequency offset modulation
+        if freq_offset_hz != 0.0:
+            # design_rf_pulse uses: b1 * np.exp(2j * np.pi * freq_offset * time)
+            # We replicate that here.
+            # Note: time array starts at 0
+            mod = np.exp(2j * np.pi * freq_offset_hz * time)
+            b1 = b1 * mod
         
         # print(f"b1 = {b1}")
         
@@ -7644,7 +7657,15 @@ class BlochSimulatorGUI(QMainWindow):
                     qimg = qimg.copy().scaled(target_w, target_h_final, aspect_mode, Qt.SmoothTransformation)
                     ptr = qimg.bits()
                     ptr.setsize(qimg.byteCount())
-                    combined = np.frombuffer(ptr, dtype=np.uint8).reshape((qimg.height(), qimg.width(), 3))
+                    # QImage bits are often 32-bit aligned/padded or RGBA even if Format_RGB888 was requested
+                    # Check size to determine channels
+                    n_bytes = qimg.byteCount()
+                    n_pixels = qimg.width() * qimg.height()
+                    n_channels = n_bytes // n_pixels
+                    
+                    arr = np.frombuffer(ptr, dtype=np.uint8).reshape((qimg.height(), qimg.width(), n_channels))
+                    # Keep only RGB channels (drop alpha if present)
+                    combined = arr[:, :, :3]
                 combined = self._ensure_even_frame(combined)
                 writer.append_data(combined)
                 progress.setValue(i + 1)
