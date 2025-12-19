@@ -21,6 +21,7 @@ __pycache__/
 *.md
 !README.md
 !self_testing.md
+!USER_GUIDE.md
 
 # Generated C files
 src/blochsimulator/bloch_wrapper.c

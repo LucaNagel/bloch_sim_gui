@@ -11,32 +11,58 @@ A high-performance Python implementation of the Bloch equation solver originally
 - **Comprehensive**: Supports arbitrary RF pulses, gradient waveforms, and tissue parameters
 - **Visualization**: 3D magnetization vectors, time evolution plots, frequency spectra, and **animation export**
 
+## Documentation
+
+For a comprehensive guide on installation, usage, and advanced features, please refer to the **[User Guide](USER_GUIDE.md)**.
+
 ## Installation
 
-### Prerequisites
+### Method A: Standalone Application (No Python Required)
+*Recommended for general users.*
 
-1. **Python 3.7+**
-2. **C Compiler**:
-   - Linux: `gcc` (usually pre-installed)
-   - macOS: Xcode Command Line Tools (`xcode-select --install`)
-   - Windows: Visual Studio Build Tools
-3. **OpenMP** (optional but recommended):
-   - Linux: Included with gcc
-   - macOS: `brew install libomp`
-   - Windows: Included with Visual Studio
+1.  **Download:** Go to the [Releases page](#) (if available) or obtain the `BlochSimulator` executable for your operating system.
+2.  **Run:** Double-click the application to start.
 
-### Quick Setup
+### Method B: Python Package (From Source)
+*Recommended for researchers and developers.*
 
-To install the simulator for local use or development:
+To run from source, you need **Python** and a **C Compiler** installed.
 
-```bash
-# Clone or download the repository
-cd blochsimulator
+<details>
+<summary><strong>👇 Click here for detailed setup instructions (Windows, macOS, Linux)</strong></summary>
 
-# Install the package in editable mode
-# This builds the C-extension automatically
-pip install -e .
-```
+#### 1. Install Python 3.9+
+
+*   **Windows:**
+    *   Download the installer from [python.org](https://www.python.org/downloads/windows/).
+    *   **Important:** During installation, check the box **"Add Python to PATH"**.
+*   **macOS:**
+    *   Download from [python.org](https://www.python.org/downloads/macos/) OR use Homebrew: `brew install python`.
+*   **Linux:**
+    *   Usually pre-installed. If not: `sudo apt install python3 python3-pip` (Ubuntu/Debian) or `sudo dnf install python3` (Fedora).
+
+#### 2. Install a C Compiler
+Required to build the fast simulation core.
+
+*   **Windows:**
+    *   Install **Visual Studio Build Tools** (free).
+    *   Download from [visualstudio.microsoft.com](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
+    *   In the installer, select **"Desktop development with C++"**.
+*   **macOS:**
+    *   Open Terminal and run: `xcode-select --install`.
+    *   (Optional but recommended for speed) Install OpenMP: `brew install libomp`.
+*   **Linux:**
+    *   Install GCC: `sudo apt install build-essential` (Ubuntu/Debian) or `sudo dnf groupinstall "Development Tools"` (Fedora).
+
+</details>
+
+**Steps:**
+1.  **Clone or download** the repository.
+2.  **Navigate** to the folder in your terminal.
+3.  **Install** in editable mode:
+    ```bash
+    pip install -e .
+    ```
 
 ### Verification
 
@@ -261,9 +287,9 @@ Artifact: `dist/BlochSimulator` (single binary; `.exe` on Windows).
 
 The simulator solves the Bloch equations:
 
-```
-dM/dt = γ(M × B) - [Mx/T2, My/T2, (Mz-M0)/T1]
-```
+$$
+\frac{d\vec{M}}{dt} = \gamma (\vec{M} \times \vec{B}) - \begin{pmatrix} M_x / T_2 \\ M_y / T_2 \\ (M_z - M_0) / T_1 \end{pmatrix}
+$$
 
 Using:
 - Rotation matrices for RF and gradient effects
