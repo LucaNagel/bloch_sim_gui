@@ -14,6 +14,7 @@ from scipy import signal
 from dataclasses import dataclass
 import h5py
 from pathlib import Path
+from . import __version__
 
 # Import the Cython extension (will be available after building)
 try:
@@ -1375,7 +1376,7 @@ class BlochSimulator:
 
             # Add metadata
             f.attrs['export_timestamp'] = str(np.datetime64('now'))
-            f.attrs['simulator_version'] = '1.0.1'
+            f.attrs['simulator_version'] = __version__
 
     def save_parameters_json(self, filename: str, sequence_params: Optional[Dict] = None,
                              simulation_params: Optional[Dict] = None,
@@ -1402,7 +1403,7 @@ class BlochSimulator:
         params_dict = {
             'metadata': {
                 'export_timestamp': str(np.datetime64('now')),
-                'simulator_version': '1.0.3'
+                'simulator_version': __version__
             },
             'tissue_parameters': {
                 'name': self.last_result['tissue'].name,

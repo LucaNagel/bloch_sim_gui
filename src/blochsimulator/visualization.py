@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QBuffer
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
+from . import __version__
 
 try:
     import imageio
@@ -793,7 +794,7 @@ class AnimationExporter:
 
         # Initialize Video Writer
         if fmt == 'gif':
-            writer = imageio.get_writer(str(filepath), mode='I', fps=fps, format='GIF')
+            writer = imageio.get_writer(str(filepath), mode='I', fps=fps, format='GIF', loop=0)
         else:
             writer = imageio.get_writer(
                 str(filepath),
@@ -802,7 +803,8 @@ class AnimationExporter:
                 codec='libx264',
                 bitrate=self.default_bitrate,
                 quality=8,
-                macro_block_size=None
+                macro_block_size=None,
+                ffmpeg_params=['-metadata', f'comment=BlochSimulator {__version__}']
             )
 
         total_frames = len(time_ds)
@@ -872,14 +874,18 @@ class DatasetExporter:
 
         fmt = format.lower()
         filepath = Path(filename)
+        version_header = f"# BlochSimulator {__version__}\n"
+        
         if fmt == 'csv':
             if filepath.suffix.lower() != '.csv':
                 filepath = filepath.with_suffix('.csv')
-            np.savetxt(filepath, data, delimiter=',', header=",".join(keys), comments='')
+            header = version_header + ",".join(keys)
+            np.savetxt(filepath, data, delimiter=',', header=header, comments='')
         elif fmt in ('dat', 'tsv'):
             if filepath.suffix.lower() not in ('.dat', '.tsv'):
                 filepath = filepath.with_suffix('.dat')
-            np.savetxt(filepath, data, delimiter='\t', header="\t".join(keys), comments='')
+            header = version_header + "\t".join(keys)
+            np.savetxt(filepath, data, delimiter='\t', header=header, comments='')
         elif fmt == 'npy':
             if filepath.suffix.lower() != '.npy':
                 filepath = filepath.with_suffix('.npy')

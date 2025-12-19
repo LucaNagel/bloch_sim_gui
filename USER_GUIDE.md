@@ -4,8 +4,14 @@ This guide covers the installation, usage, and features of the Bloch Equation Si
 
 ## 1. Installation
 
-### Method A: Standalone Application (No Python Required)
-*Recommended for general users.*
+### Method A: Direct Install (PyPI)
+*Recommended for most users.*
+```bash
+pip install blochsimulator
+```
+
+### Method B: Standalone Application (No Python Required)
+*Recommended for users without Python.*
 
 1.  **Download:** Go to the [Releases page](#) (if available) or obtain the `BlochSimulator` executable for your operating system (Windows `.exe`, macOS `.app`/binary, Linux binary).
 2.  **Run:** Double-click the application to start.
@@ -175,3 +181,38 @@ result = sim.simulate(seq, tissue, mode=2) # mode 2 = time-resolved
 time = result['time']
 signal = result['signal']
 ```
+
+## 8. Developer Guide
+
+### Version Management
+To update the project version across all files (`pyproject.toml`, `setup.py`, source code, docs), use the helper script:
+
+```bash
+python bump_version.py 1.0.5
+```
+
+This will automatically:
+1.  Update version strings in all configuration and source files.
+2.  Suggest the git commands to commit and tag the new version.
+
+### Releasing to PyPI
+The project is configured to automatically publish to PyPI when a new version tag is pushed to GitHub.
+
+**Steps to release:**
+
+1.  **Bump Version:** Run `python bump_version.py <new_version>` (e.g., `1.0.5`).
+2.  **Commit:** Commit the changes:
+    ```bash
+    git add .
+    git commit -m "Bump version to 1.0.5"
+    ```
+3.  **Tag:** Create a git tag for the version:
+    ```bash
+    git tag v1.0.5
+    ```
+4.  **Push:** Push the commit and the tag to GitHub:
+    ```bash
+    git push origin main v1.0.5
+    ```
+
+Once the tag is pushed, the GitHub Action workflow (`.github/workflows/publish.yml`) will trigger, build the package, and upload it to PyPI. You can verify the new release at [pypi.org/project/blochsimulator](https://pypi.org/project/blochsimulator/).

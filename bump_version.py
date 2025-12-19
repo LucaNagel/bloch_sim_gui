@@ -79,6 +79,14 @@ def main():
         f"release = '{new_version}'"
     )
 
+    # 6. src/blochsimulator/__init__.py
+    # pattern: __version__ = "1.0.1"
+    update_file(
+        Path("src/blochsimulator/__init__.py"),
+        r'__version__ = "[0-9.]+"',
+        f'__version__ = "{new_version}"'
+    )
+
     print(f"\nDone! Project version bumped to {new_version}")
     print("Next steps:")
     print(f"  git add .")

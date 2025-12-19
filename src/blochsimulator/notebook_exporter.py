@@ -16,6 +16,7 @@ from nbformat.v4 import new_notebook, new_code_cell, new_markdown_cell
 import numpy as np
 from typing import Dict, Optional, Tuple
 from pathlib import Path
+from . import __version__
 
 
 class NotebookExporter:
@@ -58,6 +59,7 @@ class NotebookExporter:
 
         # Title
         cells.append(new_markdown_cell(f"# {title}\n\n"
+                                       f"**BlochSimulator Version**: {__version__}\n\n"
                                        f"**Mode**: Load data from HDF5 file\n\n"
                                        f"**Data file**: `{h5_filename}`\n\n"
                                        f"This notebook loads pre-computed simulation data and provides "
@@ -155,6 +157,7 @@ class NotebookExporter:
         # Title
         cells.append(new_markdown_cell(
             f"# {title}\n\n"
+            f"**BlochSimulator Version**: {__version__}\n\n"
             f"**Mode**: Re-run simulation from parameters\n\n"
             f"This notebook reproduces the simulation from scratch using the "
             f"exported parameters."

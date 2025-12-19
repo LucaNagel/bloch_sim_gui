@@ -17,8 +17,14 @@ For a comprehensive guide on installation, usage, and advanced features, please 
 
 ## Installation
 
-### Method A: Standalone Application (No Python Required)
-*Recommended for general users.*
+### Method A: Direct Install (PyPI)
+*Recommended for most users.*
+```bash
+pip install blochsimulator
+```
+
+### Method B: Standalone Application (No Python Required)
+*Recommended for users without Python.*
 
 1.  **Download:** Go to the [Releases page](#) (if available) or obtain the `BlochSimulator` executable for your operating system.
 2.  **Run:** Double-click the application to start.

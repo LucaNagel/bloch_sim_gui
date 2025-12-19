@@ -32,6 +32,8 @@ from PyQt5.QtGui import QFont, QIcon, QImage
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 
+from . import __version__
+
 # Import the simulator
 from .simulator import (
     BlochSimulator, TissueParameters,
@@ -8599,7 +8601,7 @@ class BlochSimulatorGUI(QMainWindow):
             "originally developed by Brian Hargreaves.\n\n"
             "This GUI provides interactive visualization and\n"
             "parameter control for MRI pulse sequence simulation.\n\n"
-            "Version 1.0.3")
+            f"Version {__version__}")
 
 
 def main():
