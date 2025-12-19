@@ -1,9 +1,11 @@
 *.so
 *.o
+*.log
 .DS_Store
 build/
 dist/
 *.egg-info/
+venv_test/
 
 # Ignore all files in exports/ except .gitkeep
 exports/*
