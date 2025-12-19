@@ -15,6 +15,7 @@ imageio-ffmpeg>=0.4.9
 h5py>=3.0.0        # For saving/loading results
 numba>=0.53.0       # For JIT compilation (optional optimization)
 jupyterlab>=3.0.0   # For interactive notebooks
+nbformat>=5.0.0     # For notebook export
 
 # For GPU acceleration (optional)
 # cupy>=9.0.0       # Uncomment if you have CUDA available

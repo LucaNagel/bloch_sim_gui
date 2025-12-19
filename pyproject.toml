@@ -27,6 +27,7 @@ dependencies = [
     "imageio>=2.34.0",
     "imageio-ffmpeg>=0.4.9",
     "h5py>=3.0.0",
+    "nbformat>=5.0.0",
 ]
 
 [project.urls]

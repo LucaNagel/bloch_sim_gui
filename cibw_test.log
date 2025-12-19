@@ -1,0 +1,66 @@
+
+     _ _       _ _   _       _           _
+ ___|_| |_ _ _|_| |_| |_ _ _| |_ ___ ___| |
+|  _| | . | | | | | . | | | |   | -_| -_| |
+|___|_|___|___|_|_|___|_____|_|_|___|___|_|
+
+cibuildwheel version 3.3.0
+
+Build options:
+  platform: macos
+  allow_empty: False
+  architectures: arm64
+  build_selector: 
+    build_config: cp312-macosx_arm64
+    skip_config: pp*
+    requires_python: >=3.7
+    enable: []
+  output_dir: /Users/lucanagel/phd/bloch_simulator/wheelhouse
+  package_dir: /Users/lucanagel/phd/bloch_simulator
+  test_selector: 
+    skip_config:
+  before_all: 
+  before_build: 
+  before_test: 
+  build_frontend: build
+  build_verbosity: 0
+  config_settings: 
+  container_engine: docker
+  dependency_constraints: pinned
+  environment: 
+  manylinux_images: None
+  musllinux_images: None
+  pyodide_version: None
+  repair_command: delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}
+  test_command: 
+  test_environment: 
+  test_extras: 
+  test_groups: 
+  test_requires: 
+  test_runtime: 
+    args: ()
+  test_sources: 
+  xbuild_tools: None
+
+Cache folder: /Users/lucanagel/Library/Caches/cibuildwheel
+
+cibuildwheel: warning: Invalid skip selector: 'pp*'. This selector matches a group that wasn't enabled. Enable it using the `enable` option or remove this selector. This selector will have no effect. 
+
+Here we go!
+
+
+Building cp312-macosx_arm64 wheel
+CPython 3.12 macOS arm64 - Apple Silicon
+
+Installing Python cp312...
+
++ pkgutil --pkgs
+
+                                                                       ✕ 0.05s
+cibuildwheel: error: Error: CPython 3.12 is not installed.
+cibuildwheel will not perform system-wide installs when running outside of CI.
+To build locally, install CPython 3.12 on this machine, or, disable this
+version of Python using CIBW_SKIP=cp312-macosx_*
+For portable builds, cibuildwheel needs the official builds from python.org.
+Download link: https://www.python.org/ftp/python/3.12.10/python-3.12.10-macos11.pkg
+

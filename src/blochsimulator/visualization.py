@@ -474,6 +474,122 @@ class ExportAnimationDialog(QDialog):
         }
 
 
+class ExportDataDialog(QDialog):
+    """
+    Dialog for configuring data export options (HDF5, Notebooks, etc.).
+    Allows selecting multiple formats simultaneously.
+    """
+
+    def __init__(self, parent=None, default_filename: str = "simulation_data", default_directory: Path = None):
+        super().__init__(parent)
+        self.setWindowTitle("Export Data")
+        self.default_filename = default_filename
+        self.default_directory = default_directory if default_directory else Path.cwd()
+        self.selected_options = {}
+        self.base_path = None
+
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+        
+        layout.addWidget(QLabel("Select export formats:"))
+
+        # Checkboxes
+        self.chk_hdf5 = QCheckBox("HDF5 Data File (.h5)")
+        self.chk_hdf5.setChecked(True)
+        self.chk_hdf5.setToolTip("Full simulation data including magnetization, signal, and parameters.")
+        layout.addWidget(self.chk_hdf5)
+
+        self.chk_nb_analysis = QCheckBox("Jupyter Notebook: Analysis (Mode A)")
+        self.chk_nb_analysis.setChecked(False)
+        self.chk_nb_analysis.setToolTip("Notebook that loads the HDF5 file for visualization and analysis.")
+        layout.addWidget(self.chk_nb_analysis)
+
+        self.chk_nb_repro = QCheckBox("Jupyter Notebook: Reproduce (Mode B)")
+        self.chk_nb_repro.setChecked(False)
+        self.chk_nb_repro.setToolTip("Notebook that contains all parameters to re-run this simulation.")
+        layout.addWidget(self.chk_nb_repro)
+
+        self.chk_csv = QCheckBox("CSV/Text Data")
+        self.chk_csv.setChecked(False)
+        self.chk_csv.setToolTip("Magnetization and signal traces in text format.")
+        layout.addWidget(self.chk_csv)
+
+        # Options for CSV
+        self.csv_opts = QWidget()
+        csv_layout = QHBoxLayout()
+        csv_layout.setContentsMargins(20, 0, 0, 0)
+        csv_layout.addWidget(QLabel("Format:"))
+        self.csv_fmt = QComboBox()
+        self.csv_fmt.addItems(["csv", "tsv", "dat", "npy"])
+        csv_layout.addWidget(self.csv_fmt)
+        self.csv_opts.setLayout(csv_layout)
+        self.csv_opts.setVisible(False)
+        self.chk_csv.toggled.connect(self.csv_opts.setVisible)
+        layout.addWidget(self.csv_opts)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        export_btn = QPushButton("Export...")
+        export_btn.clicked.connect(self._on_export_clicked)
+        button_layout.addWidget(cancel_btn)
+        button_layout.addWidget(export_btn)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+        self.setMinimumWidth(350)
+
+    def _on_export_clicked(self):
+        # Validate selection
+        if not any([self.chk_hdf5.isChecked(), self.chk_nb_analysis.isChecked(), 
+                   self.chk_nb_repro.isChecked(), self.chk_csv.isChecked()]):
+            QMessageBox.warning(self, "No Selection", "Please select at least one export format.")
+            return
+
+        # Mode A notebook requires HDF5
+        if self.chk_nb_analysis.isChecked() and not self.chk_hdf5.isChecked():
+            ret = QMessageBox.question(self, "Dependency", 
+                                     "Analysis Notebook requires HDF5 data.\nEnable HDF5 export also?",
+                                     QMessageBox.Yes | QMessageBox.No)
+            if ret == QMessageBox.Yes:
+                self.chk_hdf5.setChecked(True)
+            else:
+                return
+
+        # Get base filename
+        default_path = self.default_directory / self.default_filename
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Data (Base Filename)",
+            str(default_path),
+            "All Files (*)"
+        )
+
+        if filename:
+            # Strip extension if user typed one, we'll append based on formats
+            p = Path(filename)
+            if p.suffix.lower() in ['.h5', '.ipynb', '.csv', '.dat', '.npy', '.txt']:
+                self.base_path = str(p.with_suffix(''))
+            else:
+                self.base_path = str(p)
+            
+            self.accept()
+
+    def get_export_options(self) -> Dict:
+        """Return selected options and base filename."""
+        return {
+            'base_path': self.base_path,
+            'hdf5': self.chk_hdf5.isChecked(),
+            'notebook_analysis': self.chk_nb_analysis.isChecked(),
+            'notebook_repro': self.chk_nb_repro.isChecked(),
+            'csv': self.chk_csv.isChecked(),
+            'csv_format': self.csv_fmt.currentText()
+        }
+
+
 class AnimationExporter:
     """
     Export time-resolved simulations as animated GIF or MP4 videos.

@@ -123,7 +123,8 @@ class NotebookExporter:
         simulation_params: Dict,
         tissue_params: Dict,
         rf_waveform: Optional[Tuple[np.ndarray, np.ndarray]] = None,
-        title: str = "Bloch Simulation - Reproducible"
+        title: str = "Bloch Simulation - Reproducible",
+        waveform_filename: Optional[str] = None
     ) -> nbformat.NotebookNode:
         """
         Create notebook that re-runs simulation (Mode B).
@@ -140,6 +141,8 @@ class NotebookExporter:
             (b1, time) RF pulse waveform
         title : str
             Notebook title
+        waveform_filename : str, optional
+            Path to save/load large waveforms (e.g. .npz)
 
         Returns
         -------
@@ -162,6 +165,7 @@ class NotebookExporter:
         cells.append(new_code_cell(
             "import numpy as np\n"
             "import matplotlib.pyplot as plt\n"
+            "from pathlib import Path\n"
             "from blochsimulator import (\n"
             "    BlochSimulator, TissueParameters,\n"
             "    SpinEcho, SpinEchoTipAxis, GradientEcho,\n"
@@ -175,7 +179,7 @@ class NotebookExporter:
         # Cell 2: Define parameters
         cells.append(new_markdown_cell("## Simulation Parameters"))
         cells.append(new_code_cell(self._generate_parameter_definition_code(
-            tissue_params, sequence_params, simulation_params
+            tissue_params, sequence_params, simulation_params, waveform_filename
         )))
 
         # Cell 3: Create simulator and tissue
@@ -440,7 +444,8 @@ plt.show()
         self,
         tissue_params: Dict,
         sequence_params: Dict,
-        simulation_params: Dict
+        simulation_params: Dict,
+        waveform_filename: Optional[str] = None
     ) -> str:
         """Generate parameter definition code."""
         code = "# Define simulation parameters\n\n"
@@ -470,6 +475,55 @@ plt.show()
         code += f"time_step_us = {simulation_params.get('time_step_us', 1.0):.3f}\n"
         mode_str = simulation_params.get('mode', 'endpoint')
         code += f"mode = 2 if '{mode_str}' == 'time-resolved' else 0\n"
+
+        # Create dictionary for compatibility
+        code += "\n# Parameter dictionary (used for some sequence types)\n"
+        
+        # Check if we have waveforms to save
+        waveforms_to_save = {}
+        for k, v in sequence_params.items():
+            if isinstance(v, np.ndarray):
+                waveforms_to_save[k] = v
+        
+        if waveforms_to_save and waveform_filename:
+            # Save to file
+            np.savez(waveform_filename, **waveforms_to_save)
+            rel_path = Path(waveform_filename).name
+            code += f"# Load large waveforms from external file\n"
+            code += f"loaded_waveforms = {{}}\n"
+            code += f"wf_file = Path('{rel_path}')\n"
+            code += f"if wf_file.exists():\n"
+            code += f"    with np.load(wf_file) as wf_data:\n"
+            code += f"        loaded_waveforms = {{k: wf_data[k] for k in wf_data.files}}\n"
+            code += f"else:\n"
+            code += f"    print(f'Warning: Waveform file {{wf_file}} not found!')\n\n"
+            
+            code += "sequence_params = {\n"
+            code += f"    'sequence_type': '{sequence_params.get('sequence_type', 'Custom')}',\n"
+            for k, v in sequence_params.items():
+                if k == 'sequence_type': continue
+                if k in waveforms_to_save:
+                    code += f"    '{k}': loaded_waveforms.get('{k}'),\n"
+                elif isinstance(v, str):
+                    code += f"    '{k}': '{v}',\n"
+                elif v is None:
+                    code += f"    '{k}': None,\n"
+                else:
+                    code += f"    '{k}': {v},\n"
+            code += "}\n"
+        else:
+            code += "sequence_params = {\n"
+            code += f"    'sequence_type': '{sequence_params.get('sequence_type', 'Custom')}',\n"
+            for k, v in sequence_params.items():
+                if k == 'sequence_type': continue
+                if isinstance(v, str):
+                    code += f"    '{k}': '{v}',\n"
+                elif v is None:
+                    code += f"    '{k}': None,\n"
+                else:
+                    # Note: numpy arrays will be truncated here if not saved to file
+                    code += f"    '{k}': {v},\n"
+            code += "}\n"
 
         return code
 
@@ -506,6 +560,25 @@ print(f"  T1: {{tissue.t1*1000:.1f}} ms, T2: {{tissue.t2*1000:.1f}} ms")
         """Generate pulse sequence definition code."""
         seq_type = sequence_params.get('sequence_type', 'Spin Echo')
 
+        # Use full waveforms if available (preferred for accuracy and complex sequences)
+        if 'b1_waveform' in sequence_params and 'time_waveform' in sequence_params:
+            return """# Use the full simulated waveforms exported from the GUI
+b1 = sequence_params.get('b1_waveform')
+time = sequence_params.get('time_waveform')
+gradients = sequence_params.get('gradients_waveform')
+
+if b1 is None or time is None:
+    print("Warning: Waveforms missing from sequence_params dictionary!")
+    # Fallback or error
+    raise ValueError("B1 or time waveform missing. Ensure the .npz file was exported and loaded correctly.")
+
+if gradients is None:
+    gradients = np.zeros((len(b1), 3))
+
+sequence = (b1, gradients, time)
+print(f"Sequence created from full exported waveforms ({len(b1)} points)")
+"""
+
         if 'Spin Echo' in seq_type and 'Tip' not in seq_type:
             return f"""# Create Spin Echo sequence
 sequence = SpinEcho(
@@ -531,11 +604,69 @@ sequence = SliceSelectRephase(
 )
 print(f"Slice Select + Rephase: FA={{flip_angle:.1f}}°")
 """
+        elif 'Free Induction Decay' in seq_type:
+            return f"""# Create Free Induction Decay (FID) sequence
+# Using a simple pulse followed by readout
+dt = time_step_us * 1e-6
+duration = {sequence_params.get('duration', 0.01)}
+npoints = int(duration / dt)
+time = np.arange(npoints) * dt
+b1 = np.zeros(npoints, dtype=complex)
+gradients = np.zeros((npoints, 3))
+
+# RF Pulse
+flip = {sequence_params.get('flip_angle', 90.0)}
+pulse, _ = design_rf_pulse('gaussian', duration=1e-3, flip_angle=flip, npoints=int(1e-3/dt))
+n_pulse = min(len(pulse), npoints)
+b1[:n_pulse] = pulse[:n_pulse]
+
+sequence = (b1, gradients, time)
+print(f"FID sequence created: duration={{duration:.3f}}s, flip={{flip}}°")
+"""
+        elif 'SSFP' in seq_type:
+            return f"""# Create SSFP sequence
+# Simplified implementation for notebook
+# Note: For full SSFP features, consider exporting HDF5 data instead
+dt = time_step_us * 1e-6
+tr = {sequence_params.get('tr', 0.01)}
+n_reps = {int(sequence_params.get('ssfp_repeats', 10))}
+flip = {sequence_params.get('flip_angle', 30.0)}
+alpha_rad = np.deg2rad(flip)
+
+# Create a single TR block
+n_tr = int(tr / dt)
+b1_block = np.zeros(n_tr, dtype=complex)
+pulse, _ = design_rf_pulse('sinc', duration=0.001, flip_angle=flip, npoints=int(0.001/dt))
+n_pulse = min(len(pulse), n_tr)
+b1_block[:n_pulse] = pulse[:n_pulse]
+
+# Repeat blocks
+b1 = np.tile(b1_block, n_reps)
+# Alternate phase (0-180)
+for i in range(1, n_reps, 2):
+    start = i * n_tr
+    end = start + n_pulse
+    b1[start:end] *= -1
+
+gradients = np.zeros((len(b1), 3))
+time = np.arange(len(b1)) * dt
+sequence = (b1, gradients, time)
+print(f"SSFP sequence: TR={{tr*1000:.1f}}ms, FA={{flip}}°, {{n_reps}} reps")
+"""
         else:
             # Custom sequence with RF pulse
             return """# Create custom sequence from parameters
-# You may need to adjust this based on your specific sequence
-b1, gradients, time = sequence_params  # Define your sequence here
+# NOTE: This sequence type requires custom waveform definitions not fully exported to this notebook.
+# You can define your own 'b1', 'gradients', and 'time' arrays here.
+
+print("Custom/Complex sequence selected. Arrays must be defined manually.")
+# Example placeholder:
+# time = np.arange(1000) * 1e-5
+# b1 = np.zeros_like(time, dtype=complex)
+# gradients = np.zeros((1000, 3))
+# sequence = (b1, gradients, time)
+
+raise NotImplementedError("This sequence type requires manual definition of waveforms in this notebook.")
 """
 
     def _generate_sampling_code(self, simulation_params: Dict) -> str:
@@ -616,7 +747,8 @@ def export_notebook(
     tissue_params: Dict,
     h5_filename: Optional[str] = None,
     rf_waveform: Optional[Tuple] = None,
-    title: Optional[str] = None
+    title: Optional[str] = None,
+    waveform_filename: Optional[str] = None
 ):
     """
     Export Jupyter notebook (convenience function).
@@ -639,6 +771,8 @@ def export_notebook(
         (b1, time) RF waveform (Mode B only)
     title : str, optional
         Notebook title
+    waveform_filename : str, optional
+        Path to save/load large waveforms (e.g. .npz)
     """
     exporter = NotebookExporter()
 
@@ -659,7 +793,8 @@ def export_notebook(
             simulation_params,
             tissue_params,
             rf_waveform,
-            title or "Bloch Simulation - Reproducible"
+            title or "Bloch Simulation - Reproducible",
+            waveform_filename=waveform_filename
         )
     else:
         raise ValueError(f"Unknown mode: {mode}. Use 'load_data' or 'resimulate'")

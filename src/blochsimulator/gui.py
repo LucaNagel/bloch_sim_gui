@@ -44,6 +44,7 @@ from .visualization import (
     ExportImageDialog,
     AnimationExporter,
     ExportAnimationDialog,
+    ExportDataDialog,
     DatasetExporter,
     imageio as vz_imageio,
 )
@@ -82,6 +83,76 @@ def get_app_data_dir() -> Path:
         root = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
 
     return root / "BlochSimulator"
+
+
+class CheckableComboBox(QComboBox):
+    """A combo box with checkable items for multi-selection."""
+    
+    selection_changed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self.lineEdit().setReadOnly(True)
+        self.closeOnLineEditClick = False
+        self.lineEdit().installEventFilter(self)
+        self.model().dataChanged.connect(self._on_model_data_changed)
+        
+    def _on_model_data_changed(self, top_left, bottom_right, roles):
+        if Qt.CheckStateRole in roles:
+            self.update_display_text()
+            self.selection_changed.emit()
+
+    def eventFilter(self, obj, event):
+        if obj == self.lineEdit() and event.type() == event.MouseButtonRelease:
+            if self.closeOnLineEditClick:
+                self.hidePopup()
+            else:
+                self.showPopup()
+            return True
+        return super().eventFilter(obj, event)
+
+    def showPopup(self):
+        super().showPopup()
+        self.closeOnLineEditClick = True
+
+    def hidePopup(self):
+        super().hidePopup()
+        self.closeOnLineEditClick = False
+
+    def add_items(self, items):
+        for text in items:
+            self.addItem(text)
+            item = self.model().item(self.count() - 1)
+            item.setCheckState(Qt.Unchecked)
+            item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+
+    def get_selected_items(self):
+        selected = []
+        for i in range(self.count()):
+            item = self.model().item(i)
+            if item.checkState() == Qt.Checked:
+                selected.append(item.text())
+        return selected
+
+    def set_selected_items(self, items):
+        self.model().blockSignals(True)
+        for i in range(self.count()):
+            item = self.model().item(i)
+            if item.text() in items:
+                item.setCheckState(Qt.Checked)
+            else:
+                item.setCheckState(Qt.Unchecked)
+        self.model().blockSignals(False)
+        self.update_display_text()
+
+    def update_display_text(self):
+        selected = self.get_selected_items()
+        text = ", ".join(selected) if selected else "None"
+        self.lineEdit().setText(text)
+        
+    def currentText(self):
+        return self.lineEdit().text()
 
 
 class SimulationThread(QThread):
@@ -3509,7 +3580,8 @@ class BlochSimulatorGUI(QMainWindow):
         mag_export_menu.addAction("Image (SVG)...", lambda: self._export_magnetization_image('svg'))
         mag_export_menu.addSeparator()
         mag_export_menu.addAction("Animation (GIF/MP4)...", self._export_magnetization_animation)
-        mag_export_menu.addAction("Data (CSV/NPY)...", self._export_magnetization_data)
+        mag_export_menu.addAction("Export Traces (CSV/NPY)...", self._export_magnetization_data)
+        mag_export_menu.addAction("Export Full Results...", self.export_results)
         mag_export_btn.setMenu(mag_export_menu)
         mag_header.addWidget(mag_export_btn)
         mag_layout.addLayout(mag_header)
@@ -3753,10 +3825,26 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Component selector for spectrum
         spectrum_comp_layout = QHBoxLayout()
-        spectrum_comp_layout.addWidget(QLabel("Component:"))
-        self.spectrum_component_combo = QComboBox()
-        self.spectrum_component_combo.addItems(["Magnitude", "Phase", "Real", "Imaginary"])
-        self.spectrum_component_combo.currentTextChanged.connect(lambda _: self._refresh_spectrum(time_idx=self._current_playback_index()) if hasattr(self, '_current_playback_index') else None)
+        self.spectrum_component_label = QLabel("Component:")
+        spectrum_comp_layout.addWidget(self.spectrum_component_label)
+        self.spectrum_component_combo = CheckableComboBox()
+        self.spectrum_component_combo.add_items(["Magnitude", "Phase", "Phase (unwrapped)", "Real", "Imaginary"])
+        self.spectrum_component_combo.set_selected_items(["Magnitude"])
+        self.spectrum_component_combo.selection_changed.connect(lambda: self._refresh_spectrum(time_idx=self._current_playback_index()) if hasattr(self, '_current_playback_index') else None)
+        spectrum_comp_layout.addWidget(self.spectrum_component_combo)
+
+        # Heatmap specific mode selector
+        self.spectrum_heatmap_mode_label = QLabel("Heatmap mode:")
+        self.spectrum_heatmap_mode = QComboBox()
+        self.spectrum_heatmap_mode.addItems(["Spin vs Frequency (FFT)", "Spin vs Time (Evolution)"])
+        self.spectrum_heatmap_mode.currentTextChanged.connect(
+            lambda _: self._refresh_spectrum(time_idx=self._current_playback_index()) if hasattr(self, '_current_playback_index') else None
+        )
+        self.spectrum_heatmap_mode_label.setVisible(False)
+        self.spectrum_heatmap_mode.setVisible(False)
+        spectrum_comp_layout.addWidget(self.spectrum_heatmap_mode_label)
+        spectrum_comp_layout.addWidget(self.spectrum_heatmap_mode)
+        
         spectrum_layout.addLayout(spectrum_comp_layout)
 
         spectrum_layout.addWidget(self.spectrum_plot)
@@ -3837,10 +3925,13 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Component selector for spatial plot
         spatial_comp_layout = QHBoxLayout()
-        spatial_comp_layout.addWidget(QLabel("Component:"))
-        self.spatial_component_combo = QComboBox()
-        self.spatial_component_combo.addItems(["Magnitude & Components", "Phase"])
-        self.spatial_component_combo.currentTextChanged.connect(lambda _: self.update_spatial_plot_from_last_result())
+        self.spatial_component_label = QLabel("Component:")
+        spatial_comp_layout.addWidget(self.spatial_component_label)
+        self.spatial_component_combo = CheckableComboBox()
+        self.spatial_component_combo.add_items(["Magnitude", "Phase", "Phase (unwrapped)", "Real", "Imaginary"])
+        self.spatial_component_combo.set_selected_items(["Magnitude", "Real", "Imaginary"])
+        self.spatial_component_combo.selection_changed.connect(lambda: self.update_spatial_plot_from_last_result())
+        spatial_comp_layout.addWidget(self.spatial_component_combo)
         spatial_layout.addLayout(spatial_comp_layout)
 
         # Mxy and Mz plots side by side
@@ -4036,6 +4127,12 @@ class BlochSimulatorGUI(QMainWindow):
         # Hide markers checkbox in heatmap mode (as it applies to line plots)
         if hasattr(self, 'spatial_markers_checkbox'):
             self.spatial_markers_checkbox.setVisible(not is_heatmap)
+
+        # Show/hide component selector (only for line plots)
+        if hasattr(self, "spatial_component_combo"):
+            self.spatial_component_combo.setVisible(not is_heatmap)
+            if hasattr(self, "spatial_component_label"):
+                self.spatial_component_label.setVisible(not is_heatmap)
 
     def _color_for_index(self, idx: int, total: int):
         """Consistent color cycling for multiple frequencies."""
@@ -5022,9 +5119,9 @@ class BlochSimulatorGUI(QMainWindow):
             self.spatial_mxy_plot.setVisible(not show_heatmap)
         if hasattr(self, "spatial_mz_plot"):
             self.spatial_mz_plot.setVisible(not show_heatmap)
-        # Hide Mz plot when showing phase
-        component = self.spatial_component_combo.currentText()
-        if component == "Phase":
+        # Hide Mz plot when showing ONLY phase (wrapped or unwrapped)
+        selected = self.spatial_component_combo.get_selected_items()
+        if len(selected) > 0 and all(c in ["Phase", "Phase (unwrapped)"] for c in selected):
             self.spatial_mz_plot.setVisible(False)
 
     def _update_spatial_line_plots(self, position, mxy, mz, mx_display=None, my_display=None, mz_display=None, freq_sel=0, spatial_mode="Mean only"):
@@ -5036,7 +5133,7 @@ class BlochSimulatorGUI(QMainWindow):
             self._safe_clear_plot(self.spatial_mxy_plot, persistent_mxy)
             self._safe_clear_plot(self.spatial_mz_plot, persistent_mz)
 
-            component = self.spatial_component_combo.currentText() if hasattr(self, "spatial_component_combo") else "Magnitude & Components"
+            selected_components = self.spatial_component_combo.get_selected_items()
 
             # Plot Mxy vs position
             if spatial_mode == "Mean + individuals" and mx_display is not None and my_display is not None and mz_display is not None:
@@ -5048,45 +5145,75 @@ class BlochSimulatorGUI(QMainWindow):
                     mxy_ind = np.sqrt(mx_display[:, fi]**2 + my_display[:, fi]**2)
                     self.spatial_mxy_plot.plot(position, mxy_ind, pen=pg.mkPen(color, width=1), name=f"f{fi}")
                     self.spatial_mz_plot.plot(position, mz_display[:, fi], pen=pg.mkPen(color, width=1), name=f"f{fi}")
-                self.spatial_mxy_plot.plot(position, mxy, pen=pg.mkPen('b', width=3), name='|Mxy| mean')
-                if component == "Magnitude & Components":
+                
+                if "Magnitude" in selected_components:
+                    self.spatial_mxy_plot.plot(position, mxy, pen=pg.mkPen('b', width=3), name='|Mxy| mean')
+                if "Real" in selected_components:
+                    mx_mean = np.mean(mx_display, axis=1)
+                    self.spatial_mxy_plot.plot(position, mx_mean, pen=pg.mkPen('r', style=Qt.DashLine, width=2), name='Mx mean')
+                if "Imaginary" in selected_components:
+                    my_mean = np.mean(my_display, axis=1)
+                    self.spatial_mxy_plot.plot(position, my_mean, pen=pg.mkPen('g', style=Qt.DotLine, width=2), name='My mean')
+                if "Phase" in selected_components:
                     mx_mean = np.mean(mx_display, axis=1)
                     my_mean = np.mean(my_display, axis=1)
-                    self.spatial_mxy_plot.plot(position, mx_mean, pen=pg.mkPen('r', style=Qt.DashLine, width=2), name='Mx mean')
-                    self.spatial_mxy_plot.plot(position, my_mean, pen=pg.mkPen('g', style=Qt.DotLine, width=2), name='My mean')
+                    phase = np.angle(mx_mean + 1j * my_mean) / np.pi
+                    self.spatial_mxy_plot.plot(position, phase, pen=pg.mkPen('c', width=2), name='Phase mean')
+                
+                if "Phase (unwrapped)" in selected_components:
+                    mx_mean = np.mean(mx_display, axis=1)
+                    my_mean = np.mean(my_display, axis=1)
+                    phase_unwrapped = np.unwrap(np.angle(mx_mean + 1j * my_mean)) / np.pi
+                    self.spatial_mxy_plot.plot(position, phase_unwrapped, pen=pg.mkPen('y', width=2), name='Phase (unwrapped) mean')
+
                 self.spatial_mz_plot.plot(position, mz, pen=pg.mkPen('m', width=3), name='Mz mean')
             else:
                 self._reset_legend(self.spatial_mxy_plot, "spatial_mxy_legend", True)
                 self._reset_legend(self.spatial_mz_plot, "spatial_mz_legend", False)
 
-                if component == "Phase":
-                    self.spatial_mxy_plot.setLabel('left', 'Mxy Phase (rad)')
+                self.spatial_mxy_plot.setLabel('left', 'Mxy (transverse)')
+                
+                if "Phase" in selected_components:
                     if mx_display is not None and my_display is not None:
-                        if spatial_mode == "Individual (select freq)" and mx_display.ndim == 2:
-                            phase = np.angle(mx_display[:, freq_sel] + 1j * my_display[:, freq_sel]) if freq_sel < mx_display.shape[1] else np.zeros(mx_display.shape[0])
+                        if spatial_mode == "Individual freq" and mx_display.ndim == 2:
+                            phase = np.angle(mx_display[:, freq_sel] + 1j * my_display[:, freq_sel]) / np.pi if freq_sel < mx_display.shape[1] else np.zeros(mx_display.shape[0])
                         else:
                             mx_mean = np.mean(mx_display, axis=1)
                             my_mean = np.mean(my_display, axis=1)
-                            phase = np.angle(mx_mean + 1j * my_mean)
+                            phase = np.angle(mx_mean + 1j * my_mean) / np.pi
                         self.spatial_mxy_plot.plot(position, phase, pen=pg.mkPen('c', width=2), name='Phase')
-                else: # Magnitude & Components
-                    self.spatial_mxy_plot.setLabel('left', 'Mxy (transverse)')
-                    self.spatial_mxy_plot.plot(position, mxy, pen=pg.mkPen('b', width=2), name='|Mxy|')
-                    mx_line = None
-                    my_line = None
+
+                if "Phase (unwrapped)" in selected_components:
                     if mx_display is not None and my_display is not None:
+                        if spatial_mode == "Individual freq" and mx_display.ndim == 2:
+                            phase_unwrapped = np.unwrap(np.angle(mx_display[:, freq_sel] + 1j * my_display[:, freq_sel])) / np.pi if freq_sel < mx_display.shape[1] else np.zeros(mx_display.shape[0])
+                        else:
+                            mx_mean = np.mean(mx_display, axis=1)
+                            my_mean = np.mean(my_display, axis=1)
+                            phase_unwrapped = np.unwrap(np.angle(mx_mean + 1j * my_mean)) / np.pi
+                        self.spatial_mxy_plot.plot(position, phase_unwrapped, pen=pg.mkPen('y', width=2), name='Phase (unwrapped)')
+
+                if "Magnitude" in selected_components:
+                    self.spatial_mxy_plot.plot(position, mxy, pen=pg.mkPen('b', width=2), name='|Mxy|')
+                
+                if "Real" in selected_components:
+                    if mx_display is not None:
                         if spatial_mode == "Individual freq" and mx_display.ndim == 2 and freq_sel < mx_display.shape[1]:
                             mx_line = mx_display[:, freq_sel]
-                            my_line = my_display[:, freq_sel]
                         elif mx_display.ndim == 2:
                             mx_line = np.mean(mx_display, axis=1)
-                            my_line = np.mean(my_display, axis=1)
                         else:
                             mx_line = mx_display
-                            my_line = my_display
-                    if mx_line is not None:
                         self.spatial_mxy_plot.plot(position, mx_line, pen=pg.mkPen('r', style=Qt.DashLine, width=2), name='Mx')
-                    if my_line is not None:
+
+                if "Imaginary" in selected_components:
+                    if my_display is not None:
+                        if spatial_mode == "Individual freq" and my_display.ndim == 2 and freq_sel < my_display.shape[1]:
+                            my_line = my_display[:, freq_sel]
+                        elif my_display.ndim == 2:
+                            my_line = np.mean(my_display, axis=1)
+                        else:
+                            my_line = my_display
                         self.spatial_mxy_plot.plot(position, my_line, pen=pg.mkPen('g', style=Qt.DotLine, width=2), name='My')
 
                 self.spatial_mz_plot.plot(position, mz, pen=pg.mkPen('m', width=2))
@@ -5132,24 +5259,36 @@ class BlochSimulatorGUI(QMainWindow):
                 half = (span * scale) / 2.0
                 return mid - half, mid + half
 
-            if component == "Phase":
-                mxy_ymin, mxy_ymax = -np.pi * 1.1, np.pi * 1.1
+            is_only_phase = all(c in ["Phase", "Phase (unwrapped)"] for c in selected_components) and len(selected_components) > 0
+            has_magnitude = any(c in selected_components for c in ["Magnitude", "Real", "Imaginary"])
+            has_unwrapped = "Phase (unwrapped)" in selected_components
+
+            if has_unwrapped:
+                self.spatial_mxy_plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+            elif is_only_phase:
+                self.spatial_mxy_plot.setYRange(-1.1, 1.1, padding=0)
             else:
                 mxy_ymin, mxy_ymax = padded_range(mxy_min_all, mxy_max_all, scale=1.1)
+                self.spatial_mxy_plot.setYRange(mxy_ymin, mxy_ymax)
 
-            mz_ymin, mz_ymax = padded_range(mz_min_all, mz_max_all, scale=1.1) if component != "Phase" else (-1.1, 1.1)
+            mz_ymin, mz_ymax = padded_range(mz_min_all, mz_max_all, scale=1.1) if not is_only_phase else (-1.1, 1.1)
 
-            # Use pre-calculated stable ranges, adapted for the current component
-            if component == "Phase":
-                mxy_ymin, mxy_ymax = -np.pi * 1.1, np.pi * 1.1
+            # Use pre-calculated stable ranges, adapted for the current selection
+            if has_unwrapped:
+                pass # Already set to auto
+            elif is_only_phase:
+                pass # Already set fixed
             elif hasattr(self, 'spatial_mxy_yrange'):
-                # For strictly magnitude, use [0, max]. For components (or mixed), use [-max, max]
-                if component == "Magnitude":
+                # If only "Magnitude" is selected (no Real/Imag), use [0, max]
+                if len(selected_components) == 1 and selected_components[0] == "Magnitude":
                     mxy_ymin, mxy_ymax = -0.05 * self.spatial_mxy_yrange[1], self.spatial_mxy_yrange[1]
                 else:
                     mxy_ymin, mxy_ymax = self.spatial_mxy_yrange
-            if hasattr(self, 'spatial_mz_yrange') and component != "Phase":
+                self.spatial_mxy_plot.setYRange(mxy_ymin, mxy_ymax)
+            
+            if hasattr(self, 'spatial_mz_yrange') and not is_only_phase:
                 mz_ymin, mz_ymax = self.spatial_mz_yrange
+                self.spatial_mz_plot.setYRange(mz_ymin, mz_ymax)
 
             self.spatial_mxy_plot.setXRange(pos_min - pos_pad, pos_max + pos_pad)
             self.spatial_mxy_plot.setYRange(mxy_ymin, mxy_ymax)
@@ -5582,6 +5721,7 @@ class BlochSimulatorGUI(QMainWindow):
         if not self._sweep_mode:
             self.sequence_designer._render_sequence_diagram(b1_arr, gradients_arr, time_arr)
         self.last_b1 = np.asarray(b1_arr)
+        self.last_gradients = np.asarray(gradients_arr)
         self.last_time = np.asarray(time_arr)
         # Compute pulse window (where B1 is non-zero above a small threshold)
         b1_abs = np.abs(self.last_b1)
@@ -6605,248 +6745,122 @@ class BlochSimulatorGUI(QMainWindow):
             self.log_message(f"Error saving parameters: {e}")
                 
     def export_results(self):
-        """Export simulation results with complete parameters."""
-        if self.simulator.last_result is None:
-            QMessageBox.warning(self, "No Results",
-                              "No simulation results to export")
+        """Export simulation results and parameters using the new multi-format dialog."""
+        if self.last_result is None and not hasattr(self, 'last_b1'):
+            QMessageBox.warning(self, "No Data", "Please run a simulation first.")
             return
 
-        # Ask user which format to export
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QDialogButtonBox
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Export Options")
-        layout = QVBoxLayout()
-
-        # Export format selection
-        format_group = QGroupBox("Export Format")
-        format_layout = QVBoxLayout()
-        format_buttons = QButtonGroup(dialog)
-
-        hdf5_radio = QRadioButton("HDF5 (.h5) - Full data + parameters")
-        json_radio = QRadioButton("JSON (.json) - Parameters only")
-        both_radio = QRadioButton("Both HDF5 + JSON")
-        notebook_load_radio = QRadioButton("Jupyter Notebook (.ipynb) - Load data from HDF5")
-        notebook_resim_radio = QRadioButton("Jupyter Notebook (.ipynb) - Re-run simulation")
-        notebook_both_radio = QRadioButton("HDF5 + Notebook (load data)")
-        final_state_radio = QRadioButton("Final State Data (.csv/.npz)")
-        full_sim_radio = QRadioButton("Full Simulation Data (.npz)")
-
-        hdf5_radio.setChecked(True)
-        format_buttons.addButton(hdf5_radio, 0)
-        format_buttons.addButton(json_radio, 1)
-        format_buttons.addButton(both_radio, 2)
-        format_buttons.addButton(notebook_load_radio, 3)
-        format_buttons.addButton(notebook_resim_radio, 4)
-        format_buttons.addButton(notebook_both_radio, 5)
-        format_buttons.addButton(final_state_radio, 6)
-        format_buttons.addButton(full_sim_radio, 7)
-
-        format_layout.addWidget(hdf5_radio)
-        format_layout.addWidget(json_radio)
-        format_layout.addWidget(both_radio)
-        format_layout.addWidget(QLabel(""))  # Spacer
-        format_layout.addWidget(notebook_load_radio)
-        format_layout.addWidget(notebook_resim_radio)
-        format_layout.addWidget(notebook_both_radio)
-        format_layout.addWidget(QLabel(""))  # Spacer
-        format_layout.addWidget(final_state_radio)
-        format_layout.addWidget(full_sim_radio)
-        format_group.setLayout(format_layout)
-        layout.addWidget(format_group)
-
-        # Buttons
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(dialog.accept)
-        button_box.rejected.connect(dialog.reject)
-        layout.addWidget(button_box)
-
-        dialog.setLayout(layout)
+        # Create the dialog
+        dialog = ExportDataDialog(
+            self, 
+            default_filename="simulation_results", 
+            default_directory=self._get_export_directory()
+        )
 
         if dialog.exec_() != QDialog.Accepted:
             return
 
-        export_choice = format_buttons.checkedId()
-
-        # Collect all parameters
+        options = dialog.get_export_options()
+        base_path = options['base_path']
+        
+        # Collect parameters
         sequence_params = self._collect_sequence_parameters()
         simulation_params = self._collect_simulation_parameters()
-
-        # Export based on choice
-        if export_choice == 0 or export_choice == 2:  # HDF5 or Both
-            filename, _ = QFileDialog.getSaveFileName(
-                self, "Export Results (HDF5)", "", "HDF5 Files (*.h5)"
-            )
-            if filename:
-                try:
-                    self.simulator.save_results(filename, sequence_params, simulation_params)
-                    self.statusBar().showMessage(f"Results exported to {filename}")
-                except Exception as e:
-                    QMessageBox.critical(self, "Export Error", f"Failed to export HDF5:\n{str(e)}")
-                    return
-
-        if export_choice == 1 or export_choice == 2:  # JSON or Both
-            filename, _ = QFileDialog.getSaveFileName(
-                self, "Export Parameters (JSON)", "", "JSON Files (*.json)"
-            )
-            if filename:
-                try:
-                    self.simulator.save_parameters_json(filename, sequence_params, simulation_params)
-                    self.statusBar().showMessage(f"Parameters exported to {filename}")
-                except Exception as e:
-                    QMessageBox.critical(self, "Export Error", f"Failed to export JSON:\n{str(e)}")
-
-        # Handle notebook exports (options 3, 4, 5)
-        if export_choice in [3, 4, 5]:
-            self._export_notebook(export_choice, sequence_params, simulation_params)
-
-        if export_choice == 6:
-            self._export_final_state_data()
-        elif export_choice == 7:
-            self._export_full_simulation_data()
-
-    def _export_notebook(self, export_choice, sequence_params, simulation_params):
-        """
-        Export Jupyter notebook.
-
-        Parameters
-        ----------
-        export_choice : int
-            3 = Notebook (load data), 4 = Notebook (resimulate), 5 = HDF5 + Notebook
-        sequence_params : dict
-            Sequence parameters
-        simulation_params : dict
-            Simulation parameters
-        """
-        try:
-            from notebook_exporter import export_notebook
-        except ImportError:
-            QMessageBox.critical(
-                self,
-                "Import Error",
-                "Notebook export requires 'nbformat' package.\n\n"
-                "Install with: pip install nbformat"
-            )
-            return
-
-        # Get tissue parameters
-        tissue_params = {
-            'name': self.tissue_widget.preset_combo.currentText(),
-            't1': self.tissue_widget.t1_spin.value() / 1000,  # ms to s
-            't2': self.tissue_widget.t2_spin.value() / 1000,
-            't2_star': self.tissue_widget.t2s_spin.value() / 1000,
-            'density': self.tissue_widget.pd_spin.value()
-        }
-
-        # RF waveform (if available)
-        rf_waveform = None
-        if hasattr(self, 'last_b1') and self.last_b1 is not None:
-            rf_waveform = (self.last_b1, self.last_time)
-
-        # Handle Mode A (load data) or Mode B (resimulate)
-        if export_choice == 3:  # Notebook (load data)
-            # Need HDF5 file first
-            h5_filename, _ = QFileDialog.getSaveFileName(
-                self, "Save HDF5 Data File", "", "HDF5 Files (*.h5)"
-            )
-            if not h5_filename:
-                return
-
-            # Save HDF5 file
+        
+        # 1. HDF5 Export
+        h5_path = f"{base_path}.h5"
+        if options['hdf5']:
             try:
-                self.simulator.save_results(h5_filename, sequence_params, simulation_params)
+                self.simulator.save_results(h5_path, sequence_params, simulation_params)
+                self.log_message(f"Exported HDF5: {h5_path}")
             except Exception as e:
-                QMessageBox.critical(self, "Export Error", f"Failed to save HDF5:\n{str(e)}")
-                return
+                QMessageBox.critical(self, "HDF5 Export Error", f"Failed to export HDF5:\n{str(e)}")
+                return # Stop if primary data export fails
 
-            # Now save notebook
-            nb_filename, _ = QFileDialog.getSaveFileName(
-                self, "Save Jupyter Notebook", "", "Jupyter Notebooks (*.ipynb)"
-            )
-            if not nb_filename:
-                return
-
+        # 2. Notebook Exports
+        if options['notebook_analysis'] or options['notebook_repro']:
             try:
-                export_notebook(
-                    mode='load_data',
-                    filename=nb_filename,
-                    sequence_params=sequence_params,
-                    simulation_params=simulation_params,
-                    tissue_params=tissue_params,
-                    h5_filename=h5_filename
-                )
-                self.statusBar().showMessage(f"Notebook exported: {nb_filename}")
-                QMessageBox.information(
-                    self,
-                    "Export Complete",
-                    f"Exported:\n  Data: {h5_filename}\n  Notebook: {nb_filename}\n\n"
-                    f"Open the notebook in Jupyter to analyze the data."
-                )
-            except Exception as e:
-                QMessageBox.critical(self, "Export Error", f"Failed to export notebook:\n{str(e)}")
+                from .notebook_exporter import export_notebook
+            except ImportError:
+                QMessageBox.warning(self, "Missing Dependency", "Notebook export requires 'nbformat'.\nPlease install it: pip install nbformat")
+            else:
+                tissue_params = {
+                    'name': self.tissue_widget.preset_combo.currentText(),
+                    't1': self.tissue_widget.t1_spin.value() / 1000,
+                    't2': self.tissue_widget.t2_spin.value() / 1000,
+                    't2_star': self.tissue_widget.t2s_spin.value() / 1000,
+                    'density': self.tissue_widget.pd_spin.value()
+                }
+                
+                if options['notebook_analysis']:
+                    nb_path = f"{base_path}_analysis.ipynb"
+                    try:
+                        export_notebook(
+                            mode='load_data',
+                            filename=nb_path,
+                            sequence_params=sequence_params,
+                            simulation_params=simulation_params,
+                            tissue_params=tissue_params,
+                            h5_filename=Path(h5_path).name, # Use relative path assuming same dir
+                            title="Bloch Simulation Analysis"
+                        )
+                        self.log_message(f"Exported Analysis Notebook: {nb_path}")
+                    except Exception as e:
+                        self.log_message(f"Failed to export analysis notebook: {e}")
 
-        elif export_choice == 4:  # Notebook (resimulate)
-            nb_filename, _ = QFileDialog.getSaveFileName(
-                self, "Save Jupyter Notebook", "", "Jupyter Notebooks (*.ipynb)"
-            )
-            if not nb_filename:
-                return
+                if options['notebook_repro']:
+                    nb_path = f"{base_path}_repro.ipynb"
+                    wf_path = f"{base_path}_waveforms.npz"
+                    rf_waveform = None
+                    if hasattr(self, 'last_b1') and self.last_b1 is not None:
+                        rf_waveform = (self.last_b1, self.last_time)
+                    
+                    try:
+                        export_notebook(
+                            mode='resimulate',
+                            filename=nb_path,
+                            sequence_params=sequence_params,
+                            simulation_params=simulation_params,
+                            tissue_params=tissue_params,
+                            rf_waveform=rf_waveform,
+                            title="Bloch Simulation - Reproducible",
+                            waveform_filename=wf_path
+                        )
+                        self.log_message(f"Exported Repro Notebook: {nb_path}")
+                        self.log_message(f"Exported Waveforms: {wf_path}")
+                    except Exception as e:
+                        self.log_message(f"Failed to export repro notebook: {e}")
 
+        # 3. CSV/Text Export
+        if options['csv']:
+            fmt = options['csv_format']
+            csv_path = f"{base_path}_data.{fmt}" if fmt != 'npy' else f"{base_path}_data.npy"
             try:
-                export_notebook(
-                    mode='resimulate',
-                    filename=nb_filename,
-                    sequence_params=sequence_params,
-                    simulation_params=simulation_params,
-                    tissue_params=tissue_params,
-                    rf_waveform=rf_waveform
-                )
-                self.statusBar().showMessage(f"Notebook exported: {nb_filename}")
-                QMessageBox.information(
-                    self,
-                    "Export Complete",
-                    f"Notebook exported: {nb_filename}\n\n"
-                    f"Open in Jupyter to re-run the simulation."
-                )
+                # Use DatasetExporter
+                exporter = DatasetExporter()
+                
+                # We need time, mx, my, mz from last_result
+                if self.last_result:
+                    time = self.last_result.get('time')
+                    mx = self.last_result.get('mx')
+                    my = self.last_result.get('my')
+                    mz = self.last_result.get('mz')
+                    pos = self.last_result.get('positions')
+                    freq = self.last_result.get('frequencies')
+                    
+                    if time is not None and mx is not None:
+                        exporter.export_magnetization(
+                            time, mx, my, mz, pos, freq, csv_path, format=fmt
+                        )
+                        self.log_message(f"Exported Data ({fmt}): {csv_path}")
+                    else:
+                        self.log_message("Skipping CSV export: missing magnetization data.")
             except Exception as e:
-                QMessageBox.critical(self, "Export Error", f"Failed to export notebook:\n{str(e)}")
+                self.log_message(f"Failed to export CSV/Text data: {e}")
 
-        elif export_choice == 5:  # HDF5 + Notebook (load)
-            # Save HDF5 first
-            h5_filename, _ = QFileDialog.getSaveFileName(
-                self, "Save HDF5 Data File", "", "HDF5 Files (*.h5)"
-            )
-            if not h5_filename:
-                return
+        QMessageBox.information(self, "Export Complete", f"Export process finished.\nFiles saved to: {Path(base_path).parent}")
 
-            try:
-                self.simulator.save_results(h5_filename, sequence_params, simulation_params)
-            except Exception as e:
-                QMessageBox.critical(self, "Export Error", f"Failed to save HDF5:\n{str(e)}")
-                return
 
-            # Auto-generate notebook filename
-            from pathlib import Path
-            nb_filename = str(Path(h5_filename).with_suffix('.ipynb'))
-
-            try:
-                export_notebook(
-                    mode='load_data',
-                    filename=nb_filename,
-                    sequence_params=sequence_params,
-                    simulation_params=simulation_params,
-                    tissue_params=tissue_params,
-                    h5_filename=h5_filename
-                )
-                self.statusBar().showMessage(f"Exported HDF5 and notebook")
-                QMessageBox.information(
-                    self,
-                    "Export Complete",
-                    f"Exported:\n  Data: {h5_filename}\n  Notebook: {nb_filename}\n\n"
-                    f"Both files saved successfully!"
-                )
-            except Exception as e:
-                QMessageBox.critical(self, "Export Error", f"Failed to export notebook:\n{str(e)}")
 
     def _export_final_state_data(self):
         """Export the final magnetization state (Mx, My, Mz) for all positions/frequencies."""
@@ -6992,6 +7006,8 @@ class BlochSimulatorGUI(QMainWindow):
         if hasattr(self, 'last_b1') and self.last_b1 is not None:
             params['b1_waveform'] = self.last_b1
             params['time_waveform'] = self.last_time
+            if hasattr(self, 'last_gradients'):
+                params['gradients_waveform'] = self.last_gradients
 
         return params
 
@@ -7162,7 +7178,10 @@ class BlochSimulatorGUI(QMainWindow):
         if signal is None or time is None:
             self.log_message("Spectrum heatmap: missing signal or time axis")
             return
-        show_spins = self.spectrum_show_spins_checkbox.isChecked() if hasattr(self, "spectrum_show_spins_checkbox") else False
+        
+        # Determine heatmap mode
+        mode_text = self.spectrum_heatmap_mode.currentText() if hasattr(self, "spectrum_heatmap_mode") else "Spin vs Frequency (FFT)"
+        show_evolution = (mode_text == "Spin vs Time (Evolution)")
 
         sig_arr = np.asarray(signal)
         if sig_arr.ndim == 1:
@@ -7186,27 +7205,34 @@ class BlochSimulatorGUI(QMainWindow):
 
         sig_slice = sig_arr[:time_idx + 1]  # (ntime, npos, nfreq)
         npos, nfreq = sig_arr.shape[1], sig_arr.shape[2]
+        
+        if npos > 1 and nfreq == 1:
+            y_label = "Position index"
+        elif npos == 1 and nfreq > 1:
+            y_label = "Frequency index (spin off-res)"
+        else:
+            y_label = "Spin index (pos×freq)"
 
-        if show_spins:
+        if show_evolution:
             # Direct spin magnitudes over time (no FFT)
             time_ms = time[:time_idx + 1] * 1000.0
-            mags = np.abs(sig_slice).mean(axis=1)  # (ntime, nfreq)
-            freq_axis = np.asarray(self.last_frequencies) if self.last_frequencies is not None else np.arange(nfreq)
-            if freq_axis.shape[0] != nfreq:
-                freq_axis = np.arange(nfreq)
+            
+            # Reshape to (ntime, spin_count)
+            mags = np.abs(sig_slice).reshape(sig_slice.shape[0], -1) 
+            data = mags.T  # (spin_count, ntime)
+            
+            spin_count = data.shape[0]
             try:
-                data = mags.T  # (nfreq, ntime)
                 self.spectrum_heatmap_item.setImage(data, autoLevels=True, axisOrder='row-major')
-                time_span = float(time_ms[-1] - time_ms[0]) if len(time_ms) else 1.0
-                freq_span = float(freq_axis[-1] - freq_axis[0]) if len(freq_axis) > 1 else 1.0
-                self.spectrum_heatmap_item.setRect(float(time_ms[0]), float(freq_axis[0]),
+                time_span = float(time_ms[-1] - time_ms[0]) if len(time_ms) > 1 else 1.0
+                self.spectrum_heatmap_item.setRect(float(time_ms[0]), 0,
                                                    time_span if time_span != 0 else 1.0,
-                                                   freq_span if freq_span != 0 else 1.0)
-                self.spectrum_heatmap.setLabel('left', 'Frequency', 'Hz')
+                                                   spin_count)
+                self.spectrum_heatmap.setLabel('left', y_label)
                 self.spectrum_heatmap.setLabel('bottom', 'Time', 'ms')
-                self.spectrum_heatmap.setTitle("Off-resonant spins (|S| over time)")
+                self.spectrum_heatmap.setTitle("Temporal Evolution (|Mxy| over time)")
                 self.spectrum_heatmap.setXRange(float(time_ms[0]), float(time_ms[-1]), padding=0)
-                self.spectrum_heatmap.setYRange(float(freq_axis.min()), float(freq_axis.max()), padding=0)
+                self.spectrum_heatmap.setYRange(0, spin_count, padding=0)
                 if hasattr(self, "spectrum_heatmap_colorbar") and self.spectrum_heatmap_colorbar is not None:
                     finite_mag = data[np.isfinite(data)]
                     if finite_mag.size:
@@ -7217,6 +7243,7 @@ class BlochSimulatorGUI(QMainWindow):
             except Exception as exc:
                 self.log_message(f"Spectrum heatmap update failed: {exc}")
         else:
+            # FFT Mode: Stack of spectra
             dt = float(time[1] - time[0]) if len(time) > 1 else 1e-3
             n_fft = self._spectrum_fft_len(sig_slice.shape[0])
             freq_axis = np.fft.fftshift(np.fft.fftfreq(n_fft, dt))
@@ -7226,20 +7253,13 @@ class BlochSimulatorGUI(QMainWindow):
             magnitude = np.abs(spec).T  # (spin, nfreqbins)
 
             spin_count = magnitude.shape[0]
-            if npos > 1 and nfreq == 1:
-                y_label = "Position index"
-            elif npos == 1 and nfreq > 1:
-                y_label = "Frequency index"
-            else:
-                y_label = "Spin index (pos×freq)"
-
             try:
                 self.spectrum_heatmap_item.setImage(magnitude, autoLevels=True, axisOrder='row-major')
                 span = float(freq_axis[-1] - freq_axis[0])
                 self.spectrum_heatmap_item.setRect(float(freq_axis[0]), 0, span if span != 0 else 1.0, spin_count)
                 self.spectrum_heatmap.setLabel('left', y_label)
-                self.spectrum_heatmap.setLabel('bottom', 'Frequency', 'Hz')
-                self.spectrum_heatmap.setTitle("Spectrum Heatmap")
+                self.spectrum_heatmap.setLabel('bottom', 'Frequency (from signal FFT)', 'Hz')
+                self.spectrum_heatmap.setTitle("Spectra Stack (FFT of signal per spin)")
                 self.spectrum_heatmap.setXRange(float(freq_axis[0]), float(freq_axis[-1]), padding=0)
                 self.spectrum_heatmap.setYRange(0, spin_count, padding=0)
                 if hasattr(self, "spectrum_heatmap_colorbar") and self.spectrum_heatmap_colorbar is not None:
@@ -7281,6 +7301,18 @@ class BlochSimulatorGUI(QMainWindow):
         self.spectrum_pos_slider.blockSignals(False)
         plot_type = self.spectrum_plot_type.currentText() if hasattr(self, 'spectrum_plot_type') else "Line"
         is_heatmap = (plot_type == "Heatmap")
+        
+        # Show/hide heatmap mode selector
+        if hasattr(self, "spectrum_heatmap_mode"):
+            self.spectrum_heatmap_mode.setVisible(is_heatmap)
+            self.spectrum_heatmap_mode_label.setVisible(is_heatmap)
+        
+        # Show/hide component selector (only for line plots)
+        if hasattr(self, "spectrum_component_combo"):
+            self.spectrum_component_combo.setVisible(not is_heatmap)
+            if hasattr(self, "spectrum_component_label"):
+                self.spectrum_component_label.setVisible(not is_heatmap)
+
         self.spectrum_plot.setVisible(not is_heatmap)
         if hasattr(self, "spectrum_heatmap"):
             self.spectrum_heatmap_layout.setVisible(is_heatmap)
@@ -7289,7 +7321,10 @@ class BlochSimulatorGUI(QMainWindow):
         if is_heatmap and hasattr(self, "spectrum_heatmap_colorbar"):
             self.spectrum_heatmap_layout.addItem(self.spectrum_heatmap_colorbar, row=0, col=1)
         
-        self._plot_off_resonant_spins(time_idx=time_idx)
+        if is_heatmap:
+            self._update_spectrum_heatmap(time_idx=time_idx)
+        else:
+            self._plot_off_resonant_spins(time_idx=time_idx)
 
     def _compute_final_spectrum_range(self, signal, time):
         """Compute final-spectrum magnitude range for consistent y-limits."""
@@ -7369,23 +7404,56 @@ class BlochSimulatorGUI(QMainWindow):
             mean_series = None
 
         self.spectrum_plot.clear()
-        component = self.spectrum_component_combo.currentText()
+        selected_components = self.spectrum_component_combo.get_selected_items()
 
         def get_component(data, comp):
             if comp == "Magnitude": return np.abs(data)
-            if comp == "Phase": return np.angle(data)
+            if comp == "Phase": return np.angle(data) / np.pi
+            if comp == "Phase (unwrapped)": return np.unwrap(np.angle(data)) / np.pi
             if comp == "Real": return np.real(data)
             if comp == "Imaginary": return np.imag(data)
             return np.abs(data)
 
-        if mean_series is not None:
-            self.spectrum_plot.plot(freq_axis, get_component(mean_series, component), pen=pg.mkPen('c', width=3), name="Mean")
+        # Plot each selected component
+        for component in selected_components:
+            if mean_series is not None:
+                # Use fixed colors for components in the Mean plot
+                color = 'c' # Default Mean Magnitude
+                if component == "Real": color = 'r'
+                elif component == "Imaginary": color = 'g'
+                elif component == "Phase" or component == "Phase (unwrapped)": color = 'y'
+                
+                self.spectrum_plot.plot(freq_axis, get_component(mean_series, component), 
+                                        pen=pg.mkPen(color, width=3), 
+                                        name=f"Mean {component}")
 
-        sel_color = self._color_for_index(pos_sel, max(pos_count, 1)) if pos_count > 1 else 'w'
-        self.spectrum_plot.plot(freq_axis, get_component(selected_series, component), pen=pg.mkPen(sel_color, width=2), name=selected_label)
+            # Selected position plot
+            if pos_count > 0:
+                sel_color = self._color_for_index(pos_sel, max(pos_count, 1)) if pos_count > 1 else 'w'
+                
+                # If only one component is selected, use the position-cycling color.
+                # If multiple components are selected, use fixed colors but different styles.
+                if len(selected_components) == 1:
+                    pen = pg.mkPen(sel_color, width=2)
+                else:
+                    color = 'b' # Selected Magnitude
+                    if component == "Real": color = 'r'
+                    elif component == "Imaginary": color = 'g'
+                    elif component == "Phase" or component == "Phase (unwrapped)": color = 'y'
+                    pen = pg.mkPen(color, width=2)
+                    
+                if component == "Real": pen.setStyle(Qt.DashLine)
+                elif component == "Imaginary": pen.setStyle(Qt.DotLine)
+                elif component == "Phase (unwrapped)": pen.setStyle(Qt.SolidLine)
+                
+                self.spectrum_plot.plot(freq_axis, get_component(selected_series, component), 
+                                        pen=pen, name=f"{selected_label} {component}")
 
         self.spectrum_plot.setLabel('bottom', 'Frequency', 'Hz')
-        self.spectrum_plot.setLabel('left', f'{component}')
+        y_label = "Signal" if len(selected_components) > 1 else selected_components[0] if selected_components else ""
+        if ("Phase" in selected_components or "Phase (unwrapped)" in selected_components) and len(selected_components) == 1:
+            y_label = f"{selected_components[0]} (units of π)"
+        self.spectrum_plot.setLabel('left', y_label)
 
         if freq_axis is not None and freq_axis.size > 0:
             self.spectrum_plot.setXRange(float(np.nanmin(freq_axis)), float(np.nanmax(freq_axis)), padding=0.05)
@@ -7394,11 +7462,14 @@ class BlochSimulatorGUI(QMainWindow):
         if hasattr(self, 'off_res_spectrum_yrange') and self.off_res_spectrum_yrange is not None:
             y_min, y_max = self.off_res_spectrum_yrange
 
-        if component == "Phase":
-            self.spectrum_plot.setYRange(-np.pi * 1.1, np.pi * 1.1, padding=0)
-        elif component == "Magnitude":
+        if "Phase (unwrapped)" in selected_components:
+            # Unwrapped phase can be large, use auto-range
+            self.spectrum_plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+        elif "Phase" in selected_components and len(selected_components) == 1:
+            self.spectrum_plot.setYRange(-1.1, 1.1, padding=0)
+        elif "Magnitude" in selected_components and len(selected_components) == 1:
             self.spectrum_plot.setYRange(0, y_max * 1.1, padding=0)
-        else: # Real/Imag
+        else: # Mixed or Real/Imag
             self.spectrum_plot.setYRange(-y_max * 1.1, y_max * 1.1, padding=0)
 
         export_entry = {
