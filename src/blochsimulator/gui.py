@@ -3796,6 +3796,12 @@ class BlochSimulatorGUI(QMainWindow):
         self.spectrum_plot.setLabel('bottom', 'Frequency', 'Hz')
         self.spectrum_plot.setDownsampling(mode='peak')
         self.spectrum_plot.setClipToView(True)
+        
+        # 3D Spectrum Plot (Hidden by default)
+        self.spectrum_plot_3d = gl.GLViewWidget()
+        self.spectrum_plot_3d.opts['distance'] = 40
+        self.spectrum_plot_3d.hide()
+        
         spectrum_container = QWidget()
         spectrum_layout = QVBoxLayout()
 
@@ -3816,6 +3822,12 @@ class BlochSimulatorGUI(QMainWindow):
         spectrum_layout.addLayout(spectrum_header)
 
         spectrum_controls = QHBoxLayout()
+        
+        # 3D View Toggle
+        self.spectrum_3d_toggle = QCheckBox("3D View")
+        self.spectrum_3d_toggle.toggled.connect(self._toggle_spectrum_3d_mode)
+        spectrum_controls.addWidget(self.spectrum_3d_toggle)
+        
         spectrum_controls.addWidget(QLabel("Plot type:"))
         self.spectrum_plot_type = QComboBox()
         self.spectrum_plot_type.addItems(["Line", "Heatmap"])
@@ -3863,6 +3875,7 @@ class BlochSimulatorGUI(QMainWindow):
         spectrum_layout.addLayout(spectrum_comp_layout)
 
         spectrum_layout.addWidget(self.spectrum_plot)
+        spectrum_layout.addWidget(self.spectrum_plot_3d)
         # Spectrum heatmap using GraphicsLayoutWidget
         self.spectrum_heatmap_layout = pg.GraphicsLayoutWidget()
         self.spectrum_heatmap = self.spectrum_heatmap_layout.addPlot(row=0, col=0)
@@ -7287,8 +7300,123 @@ class BlochSimulatorGUI(QMainWindow):
             except Exception as exc:
                 self.log_message(f"Spectrum heatmap update failed: {exc}")
 
+    def _toggle_spectrum_3d_mode(self, checked):
+        """Toggle between 2D and 3D spectrum visualization."""
+        if checked:
+            self.spectrum_plot.hide()
+            self.spectrum_heatmap_layout.hide()
+            self.spectrum_plot_3d.show()
+            # Disable other controls that might not apply
+            if hasattr(self, 'spectrum_plot_type'):
+                self.spectrum_plot_type.setEnabled(False)
+        else:
+            self.spectrum_plot_3d.hide()
+            if hasattr(self, 'spectrum_plot_type'):
+                self.spectrum_plot_type.setEnabled(True)
+            
+            # Restore based on plot type
+            is_heatmap = self.spectrum_plot_type.currentText() == "Heatmap"
+            self.spectrum_plot.setVisible(not is_heatmap)
+            self.spectrum_heatmap_layout.setVisible(is_heatmap)
+            
+        self._refresh_spectrum()
+
+    def _update_spectrum_3d(self, time_idx=None):
+        """Update the 3D spectrum plot."""
+        self.spectrum_plot_3d.clear()
+        
+        # Add simple grid
+        gx = gl.GLGridItem()
+        gx.setSize(x=20, y=20, z=20)
+        gx.rotate(90, 0, 1, 0)
+        self.spectrum_plot_3d.addItem(gx)
+        
+        gy = gl.GLGridItem()
+        gy.setSize(x=20, y=20, z=20)
+        gy.rotate(90, 1, 0, 0)
+        self.spectrum_plot_3d.addItem(gy)
+        
+        gz = gl.GLGridItem()
+        gz.setSize(x=20, y=20, z=20)
+        self.spectrum_plot_3d.addItem(gz)
+
+        freqs = None
+        data = None
+        
+        # 1. Try Off-Resonant (Direct Frequency Axis)
+        if self.last_result is not None and self.last_frequencies is not None:
+            sig = self.last_result.get('signal')
+            if sig is not None:
+                sig_arr = np.asarray(sig)
+                ntime = sig_arr.shape[0]
+                if ntime > 0:
+                    if sig_arr.ndim == 1: sig_arr = sig_arr[:, None, None]
+                    elif sig_arr.ndim == 2:
+                        # Assume (time, freq) or (time, pos)
+                        if self.last_positions is not None and sig_arr.shape[1] == self.last_positions.shape[0]:
+                             sig_arr = sig_arr[:, :, None] # (time, pos, freq=1)
+                        else:
+                             sig_arr = sig_arr[:, None, :] # (time, pos=1, freq)
+                    
+                    if time_idx is None: time_idx = ntime - 1
+                    t_idx = int(max(0, min(time_idx, ntime - 1)))
+                    
+                    pos_count = sig_arr.shape[1]
+                    pos_sel = min(self.spectrum_pos_slider.value(), pos_count - 1) if pos_count > 0 else 0
+                    
+                    snapshot = sig_arr[t_idx] # (npos, nfreq)
+                    
+                    if pos_count > 0:
+                        data = snapshot[pos_sel]
+                    else:
+                        data = snapshot[0]
+                        
+                    freqs = np.asarray(self.last_frequencies)
+
+        # 2. If not found, Try FFT
+        if data is None:
+            # We must force compute_fft=True here to get data for 3D plot
+            spec_data = self._calculate_spectrum_data(time_idx, compute_fft=True)
+            if spec_data and spec_data.get('spectrum') is not None:
+                data = spec_data['spectrum']
+                freqs = spec_data['freq']
+        
+        if data is None or freqs is None or data.size != freqs.size:
+            return
+
+        # Prepare Points
+        # Normalize Frequency for display [-10, 10]
+        f_min, f_max = freqs.min(), freqs.max()
+        f_range = f_max - f_min
+        if f_range == 0: f_range = 1.0
+        
+        freq_norm = (freqs - f_min) / f_range * 20.0 - 10.0
+        
+        # Scale Magnitude for display
+        mag_scale = 5.0
+        
+        # x=freq, y=real, z=imag
+        pts = np.vstack([freq_norm, np.real(data) * mag_scale, np.imag(data) * mag_scale]).transpose()
+        
+        # Main signal line
+        line = gl.GLLinePlotItem(pos=pts, color=(0, 1, 1, 1), width=2, antialias=True)
+        self.spectrum_plot_3d.addItem(line)
+        
+        # Frequency baseline (Real/Imag = 0)
+        baseline_pts = np.vstack([freq_norm, np.zeros_like(freqs), np.zeros_like(freqs)]).transpose()
+        baseline = gl.GLLinePlotItem(pos=baseline_pts, color=(0.5, 0.5, 0.5, 0.5), width=1)
+        self.spectrum_plot_3d.addItem(baseline)
+
+        # Labels (using TextItem if available or printing info)
+        # GLTextItem is tricky in older pyqtgraph. simpler to just rely on grid.
+
     def _refresh_spectrum(self, time_idx=None, skip_fft=False):
         """Update spectrum plot using data up to the specified time index."""
+        # 3D Mode Check
+        if hasattr(self, 'spectrum_3d_toggle') and self.spectrum_3d_toggle.isChecked():
+            self._update_spectrum_3d(time_idx)
+            return
+
         spec_data = self._calculate_spectrum_data(time_idx, compute_fft=not skip_fft)
         if spec_data is None:
             return
