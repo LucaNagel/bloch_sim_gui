@@ -274,7 +274,7 @@ class RFPulseDesigner(QGroupBox):
         type_layout = QHBoxLayout()
         type_layout.addWidget(QLabel("Pulse Type:"))
         self.pulse_type = QComboBox()
-        self.pulse_type.addItems(["Rectangle", "Sinc", "Gaussian", "Hermite", "Custom"])
+        self.pulse_type.addItems(["Rectangle", "Sinc", "Gaussian", "Custom"])
         self.pulse_type.currentTextChanged.connect(self.update_pulse)
         type_layout.addWidget(self.pulse_type)
         layout.addLayout(type_layout)

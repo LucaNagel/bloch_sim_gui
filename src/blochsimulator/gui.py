@@ -436,7 +436,7 @@ class RFPulseDesigner(QGroupBox):
         type_layout = QHBoxLayout()
         type_layout.addWidget(QLabel("Pulse Type:"))
         self.pulse_type = QComboBox()
-        self.pulse_type.addItems(["Rectangle", "Sinc", "Gaussian", "Hermite", "Adiabatic Half Passage", "Adiabatic Full Passage", "BIR-4", "Custom"])
+        self.pulse_type.addItems(["Rectangle", "Sinc", "Gaussian", "Adiabatic Half Passage", "Adiabatic Full Passage", "BIR-4", "Custom"])
         self.pulse_type.currentTextChanged.connect(self.update_pulse)
         type_layout.addWidget(self.pulse_type)
         layout.addLayout(type_layout)
@@ -604,7 +604,7 @@ class RFPulseDesigner(QGroupBox):
     def _design_tbw_for_type(self, pulse_type: str) -> float:
         """Return a canonical TBW parameter for the designer (not user-controlled)."""
         pt = pulse_type.lower()
-        if pt in ("sinc", "gaussian", "hermite"):
+        if pt in ("sinc", "gaussian"):
             return 4.0  # typical shaping parameter
         if pt.startswith("adiabatic") or pt in ("bir-4", "bir4"):
             return 4.0  # modulation parameter for adiabatic-style pulses
