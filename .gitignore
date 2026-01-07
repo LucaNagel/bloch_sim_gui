@@ -4,6 +4,7 @@
 build/
 dist/
 venv_test/
+.venv-packaging/
 *.egg-info/
 
 # Ignore all files in exports/ except .gitkeep
@@ -22,6 +23,7 @@ __pycache__/
 !README.md
 !self_testing.md
 !USER_GUIDE.md
+!DEVELOPER_GUIDE.md
 
 # Generated C files
 src/blochsimulator/bloch_wrapper.c

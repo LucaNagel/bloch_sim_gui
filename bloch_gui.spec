@@ -1,23 +1,32 @@
 # -*- mode: python -*-
 import os
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_submodules
-
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 block_cipher = None
 
-project_root = Path(__file__).parent if "__file__" in globals() else Path.cwd()
+# project_root is the directory containing this spec file
+project_root = Path(os.getcwd())
+
+# Add src to pathex so PyInstaller can find the package
+pathex = [str(project_root), str(project_root / "src")]
 
 # Data files bundled into the app
 datas = []
+# Collect data files for rfc3987_syntax (needed by jsonschema/nbformat)
+datas += collect_data_files('rfc3987_syntax')
+
 rf_dir = project_root / "rfpulses"
 if rf_dir.exists():
-    datas.append((str(rf_dir), "rfpulses"))
+    # Place rfpulses inside blochsimulator package so pulse_loader.py finds it relative to __file__
+    datas.append((str(rf_dir), "blochsimulator/rfpulses"))
 
-# Native binaries to keep alongside the app
+# Native binaries
 binaries = []
-for ext in project_root.glob("bloch_simulator_cy.*"):
-    binaries.append((str(ext), "."))
+# Look for compiled extension in src/blochsimulator
+# We place it in 'blochsimulator' folder in the bundle to match package structure
+for ext in (project_root / "src" / "blochsimulator").glob("blochsimulator_cy.*"):
+    binaries.append((str(ext), "blochsimulator"))
 
 # Common OpenMP runtime locations (macOS and Linux)
 omp_candidates = [
@@ -35,12 +44,13 @@ hiddenimports = [
     "PyQt5.sip",
     "pyqtgraph.opengl",
     "imageio_ffmpeg",
+    "blochsimulator.blochsimulator_cy", # Ensure Cython module is found
 ]
 hiddenimports += collect_submodules("OpenGL.platform")
 
 a = Analysis(
     ["bloch_gui.py"],
-    pathex=[str(project_root)],
+    pathex=pathex,
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -72,3 +82,11 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+
+app = BUNDLE(
+    exe,
+    name='BlochSimulator.app',
+    icon=None,
+    bundle_identifier='com.lucanagel.blochsimulator',
+)
+        
