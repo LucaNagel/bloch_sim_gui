@@ -79,29 +79,41 @@ a = Analysis(
     noarchive=False,
 )
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+# EXE now only contains the launcher/entry point, not the dependencies
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    [],
+    [],  # No binaries/datas here for onedir
+    exclude_binaries=True,
     name="BlochSimulator",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=False, # Set to True if you want to see the terminal window on launch (good for debug)
+    console=False, 
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
 )
 
-# Bundle into .app only on macOS
+# COLLECT gathers all dependencies into a directory (onedir mode)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='BlochSimulator',
+)
+
+# Bundle into .app on macOS
 if system_platform == 'Darwin':
     app = BUNDLE(
-        exe,
+        coll,
         name='BlochSimulator.app',
         icon=None,
         bundle_identifier='com.lucanagel.blochsimulator',
