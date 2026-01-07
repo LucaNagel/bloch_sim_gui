@@ -405,8 +405,33 @@ class SpinEcho(PulseSequence):
         
     def compile(self, dt: float = 1e-6) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Compile spin echo sequence."""
+        
+        # Determine pulse durations first to validate TE
+        if self.custom_excitation is not None:
+            exc_b1_in, exc_time_in = self.custom_excitation
+            # Use actual length
+            exc_duration = len(exc_b1_in) * dt if len(exc_time_in) <= 1 else exc_time_in[-1] - exc_time_in[0]
+        else:
+            exc_duration = 1e-3
+
+        if self.custom_refocusing is not None:
+            ref_b1_in, ref_time_in = self.custom_refocusing
+            ref_duration = len(ref_b1_in) * dt if len(ref_time_in) <= 1 else ref_time_in[-1] - ref_time_in[0]
+        else:
+            ref_duration = 2e-3
+
+        # Validate TE
+        # Center-to-center spacing is TE/2.
+        # This requires TE/2 >= (exc_duration/2 + ref_duration/2)
+        # So TE >= exc_duration + ref_duration
+        # We add a small buffer for safety
+        min_te = (exc_duration + ref_duration) * 1.01
+        if self.te < min_te:
+            raise ValueError(f"TE ({self.te*1000:.2f} ms) is too short for selected pulses. "
+                             f"Minimum TE ≈ {min_te*1000:.2f} ms (Exc: {exc_duration*1000:.1f}ms, Ref: {ref_duration*1000:.1f}ms)")
+
         # Ensure timeline covers all requested echoes (echo spacing = TE)
-        min_duration = (self.echo_count + 0.5) * self.te + 1e-3  # include some buffer
+        min_duration = (self.echo_count + 0.5) * self.te + ref_duration  # include buffer for last echo
         total_duration = max(self.tr, min_duration)
         npoints = int(np.ceil(total_duration / dt))
         
@@ -419,16 +444,19 @@ class SpinEcho(PulseSequence):
         if self.custom_excitation is not None:
             exc_b1, exc_time = self.custom_excitation
             exc_b1 = np.asarray(exc_b1, dtype=complex)
+            # Resample if needed (simplified check)
+            if len(exc_b1) != int(exc_duration / dt):
+                 # This is a simplification; in a full implementation we'd resample properly.
+                 # For now, trust the duration/dt calculation or just take the array if it fits.
+                 pass
             n_exc = min(len(exc_b1), npoints)
             b1[:n_exc] = exc_b1[:n_exc]
-            exc_duration = n_exc * dt
         else:
-            exc_pulse, _ = design_rf_pulse('sinc', duration=1e-3,
-                                          flip_angle=90, npoints=int(1e-3/dt),
+            exc_pulse, _ = design_rf_pulse('sinc', duration=exc_duration,
+                                          flip_angle=90, npoints=int(exc_duration/dt),
                                           freq_offset=self.rf_freq_offset)
             n_exc = len(exc_pulse)
             b1[:n_exc] = exc_pulse
-            exc_duration = 1e-3
             
         # Refocusing pulse
         if self.custom_refocusing is not None:
@@ -436,14 +464,17 @@ class SpinEcho(PulseSequence):
             ref_pulse = np.asarray(ref_b1, dtype=complex)
         else:
             # Default refocusing: classic 180° sinc
-            ref_pulse, _ = design_rf_pulse('sinc', duration=2e-3,
-                                          flip_angle=180, npoints=int(2e-3/dt),
+            ref_pulse, _ = design_rf_pulse('sinc', duration=ref_duration,
+                                          flip_angle=180, npoints=int(ref_duration/dt),
                                           freq_offset=self.rf_freq_offset)
 
         for echo_idx in range(self.echo_count):
-            ref_time = (0.5 + echo_idx) * self.te
-            ref_start = int(ref_time / dt)
-            if ref_start + len(ref_pulse) < npoints:
+            # Center of refocusing pulse at (0.5 + idx) * TE
+            ref_center_time = (0.5 + echo_idx) * self.te
+            ref_start_time = ref_center_time - ref_duration / 2
+            ref_start = int(ref_start_time / dt)
+            
+            if ref_start >= 0 and ref_start + len(ref_pulse) <= npoints:
                 b1[ref_start:ref_start+len(ref_pulse)] = ref_pulse
         
         # Add slice selection gradients
@@ -458,9 +489,11 @@ class SpinEcho(PulseSequence):
             gz_amp = bw_hz / (gamma_hz_per_g * thickness_cm)
         gradients[:max(n_exc, 1), 2] = gz_amp
         for echo_idx in range(self.echo_count):
-            ref_time = (0.5 + echo_idx) * self.te
-            ref_start = int(ref_time / dt)
-            if ref_start + len(ref_pulse) < npoints:
+            ref_center_time = (0.5 + echo_idx) * self.te
+            ref_start_time = ref_center_time - ref_duration / 2
+            ref_start = int(ref_start_time / dt)
+            
+            if ref_start >= 0 and ref_start + len(ref_pulse) <= npoints:
                 gradients[ref_start:ref_start+len(ref_pulse), 2] = gz_amp
         
         return b1, gradients, time
@@ -578,7 +611,29 @@ class GradientEcho(PulseSequence):
         
     def compile(self, dt: float = 1e-6) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Compile gradient echo sequence."""
-        npoints = int(self.tr / dt)
+        
+        # Determine pulse and readout durations first to validate TE
+        if self.custom_excitation is not None:
+            exc_b1_in, exc_time_in = self.custom_excitation
+            exc_duration = len(exc_b1_in) * dt if len(exc_time_in) <= 1 else exc_time_in[-1] - exc_time_in[0]
+        else:
+            exc_duration = 1e-3
+            
+        readout_duration = 1e-3 # Default readout duration
+        
+        # Validate TE
+        # Center of excitation to center of readout is TE.
+        # TE >= exc_duration/2 + readout_duration/2
+        min_te = (exc_duration + readout_duration) / 2.0 * 1.01 # Add buffer
+        if self.te < min_te:
+            raise ValueError(f"TE ({self.te*1000:.2f} ms) is too short. "
+                             f"Minimum TE ≈ {min_te*1000:.2f} ms (Exc: {exc_duration*1000:.1f}ms, Read: {readout_duration*1000:.1f}ms)")
+
+        # Determine total duration
+        # Must cover readout end: TE + readout_duration/2
+        min_duration = self.te + readout_duration/2.0 + 1e-3 # small buffer
+        total_duration = max(self.tr, min_duration)
+        npoints = int(np.ceil(total_duration / dt))
         
         # Initialize arrays
         b1 = np.zeros(npoints, dtype=complex)
@@ -591,14 +646,13 @@ class GradientEcho(PulseSequence):
             exc_b1 = np.asarray(exc_b1, dtype=complex)
             n_exc = min(len(exc_b1), npoints)
             b1[:n_exc] = exc_b1[:n_exc]
-            exc_duration = n_exc * dt
         else:
-            exc_pulse, _ = design_rf_pulse('sinc', duration=1e-3,
+            exc_pulse, _ = design_rf_pulse('sinc', duration=exc_duration,
                                           flip_angle=self.flip_angle,
-                                          npoints=int(1e-3/dt),
+                                          npoints=int(exc_duration/dt),
                                           freq_offset=self.rf_freq_offset)
-            b1[:len(exc_pulse)] = exc_pulse
-            exc_duration = 1e-3
+            n_exc = len(exc_pulse)
+            b1[:n_exc] = exc_pulse
         
         # Slice selection gradient
         thickness_cm = max(self.slice_thickness, 1e-3) * 100.0
@@ -608,14 +662,17 @@ class GradientEcho(PulseSequence):
             gz_amp = self.slice_gradient_override
         else:
             gz_amp = bw_hz / (gamma_hz_per_g * thickness_cm)
-        n_exc = np.count_nonzero(np.abs(b1) > 0)
-        gradients[:max(n_exc, 1), 2] = gz_amp
+        n_exc_active = np.count_nonzero(np.abs(b1) > 0)
+        gradients[:max(n_exc_active, 1), 2] = gz_amp
         
-        # Readout gradient (simplified)
-        readout_start = int(self.te / dt) - int(0.5e-3 / dt)
-        readout_duration = int(1e-3 / dt)
-        if readout_start + readout_duration < npoints:
-            gradients[readout_start:readout_start+readout_duration, 0] = 5e-3
+        # Readout gradient
+        # Center at TE
+        readout_start_time = self.te - readout_duration / 2.0
+        readout_start = int(readout_start_time / dt)
+        readout_pts = int(readout_duration / dt)
+        
+        if readout_start >= 0 and readout_start + readout_pts <= npoints:
+            gradients[readout_start:readout_start+readout_pts, 0] = 5e-3
         
         return b1, gradients, time
 

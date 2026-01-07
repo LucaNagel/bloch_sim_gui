@@ -363,26 +363,6 @@ class TissueParameterWidget(QGroupBox):
         t2_layout.addWidget(self.t2_slider)
         layout.addLayout(t2_layout)
         
-        # T2* parameter
-        t2s_layout = QHBoxLayout()
-        t2s_layout.addWidget(QLabel("T2* (ms):"))
-        self.t2s_spin = QDoubleSpinBox()
-        self.t2s_spin.setRange(1, 200)
-        self.t2s_spin.setValue(50)
-        self.t2s_spin.setSuffix(" ms")
-        t2s_layout.addWidget(self.t2s_spin)
-        layout.addLayout(t2s_layout)
-        
-        # Proton density
-        pd_layout = QHBoxLayout()
-        pd_layout.addWidget(QLabel("Proton Density:"))
-        self.pd_spin = QDoubleSpinBox()
-        self.pd_spin.setRange(0, 1)
-        self.pd_spin.setSingleStep(0.1)
-        self.pd_spin.setValue(1.0)
-        pd_layout.addWidget(self.pd_spin)
-        layout.addLayout(pd_layout)
-
         # Initial magnetization (Mz)
         m0_layout = QHBoxLayout()
         m0_layout.addWidget(QLabel("Initial Mz:"))
@@ -411,8 +391,6 @@ class TissueParameterWidget(QGroupBox):
             # Typical HP 13C pyruvate values (approx.): long T1, slower decay
             self.t1_spin.setValue(60000)  # 60 s
             self.t2_spin.setValue(1000)   # 1 s
-            self.t2s_spin.setValue(1000)
-            self.pd_spin.setValue(1.0)
             self.m0_spin.setValue(100000)
             return
         else:
@@ -428,8 +406,6 @@ class TissueParameterWidget(QGroupBox):
             name=self.preset_combo.currentText(),
             t1=self.t1_spin.value() / 1000,  # Convert to seconds
             t2=self.t2_spin.value() / 1000,  # Convert to seconds
-            t2_star=self.t2s_spin.value() / 1000,
-            density=self.pd_spin.value()
         )
 
     def get_initial_mz(self) -> float:
@@ -1361,6 +1337,9 @@ class SequenceDesigner(QGroupBox):
         self.tr_spin.setRange(1, 10000)
         self.tr_spin.setValue(100)
         tr_layout.addWidget(self.tr_spin)
+        self.tr_actual_label = QLabel("")
+        self.tr_actual_label.setStyleSheet("color: #666; font-style: italic;")
+        tr_layout.addWidget(self.tr_actual_label)
         layout.addLayout(tr_layout)
         self.tr_spin.valueChanged.connect(lambda _: self.update_diagram())
         
@@ -1517,7 +1496,7 @@ class SequenceDesigner(QGroupBox):
                 "duration": 2.0,
             },
             "Spin Echo": {
-                "te_ms": 5,
+                "te_ms": 10,
                 "tr_ms": 20,
                 "num_positions": 1,
                 "num_frequencies": 201,
@@ -1525,7 +1504,7 @@ class SequenceDesigner(QGroupBox):
                 "duration": 1.0, # ms
             },
             "Spin Echo (Tip-axis 180)": {
-                "te_ms": 5,
+                "te_ms": 10,
                 "tr_ms": 20,
                 "num_positions": 1,
                 "num_frequencies": 201,
@@ -1534,13 +1513,13 @@ class SequenceDesigner(QGroupBox):
             },
             "Gradient Echo": {
                 "te_ms": 5,
-                "tr_ms": 30,
+                "tr_ms": 20,
                 "flip_angle": 30,
                 "duration": 1.0, # ms
             },
             "Slice Select + Rephase": {
-                "te_ms": 10,
-                "tr_ms": 100,
+                "te_ms": 5,
+                "tr_ms": 20,
                 "num_positions": 99,
                 "num_frequencies": 3,
                 "duration": 1.0, # ms
@@ -1566,9 +1545,9 @@ class SequenceDesigner(QGroupBox):
                 "time_step": 10.0,
             },
             "Inversion Recovery": {
-                "te_ms": 20,
+                "te_ms": 10,
                 "tr_ms": 100,
-                "ti_ms": 40,
+                "ti_ms": 50,
                 "num_positions": 1,
                 "num_frequencies": 51,
                 "duration": 1.0, # ms
@@ -1581,7 +1560,7 @@ class SequenceDesigner(QGroupBox):
                 "duration": 1.0, # ms
             },
             "EPI": {
-                "te_ms": 30,
+                "te_ms": 25,
                 "tr_ms": 100,
                 "num_positions": 51,
                 "num_frequencies": 3,
@@ -2062,9 +2041,25 @@ class SequenceDesigner(QGroupBox):
         custom = custom_pulse if custom_pulse is not None else self.custom_pulse
         try:
             b1, gradients, time = self.compile_sequence(custom_pulse=custom, dt=self.default_dt)
-        except Exception:
+        except ValueError as e:
+            # Handle validation errors (e.g. TE too short)
             self.diagram_widget.clear()
+            self.diagram_widget.setLabel('bottom', '')
+            self.diagram_widget.setTitle(f"Invalid Sequence: {str(e)}")
+            text = pg.TextItem(text=f"Error:\n{str(e)}", color='r', anchor=(0.5, 0.5))
+            # Put text roughly in center
+            self.diagram_widget.addItem(text)
+            text.setPos(0.5, 0.5)
+            # Need to set arbitrary range to show text
+            self.diagram_widget.setXRange(0, 1)
+            self.diagram_widget.setYRange(0, 1)
             return
+        except Exception as e:
+            self.diagram_widget.clear()
+            self.diagram_widget.setTitle(f"Error: {str(e)}")
+            return
+        
+        self.diagram_widget.setTitle(None)
         self._render_sequence_diagram(b1, gradients, time)
 
     def _render_sequence_diagram(self, b1, gradients, time):
@@ -2174,12 +2169,29 @@ class SequenceDesigner(QGroupBox):
         # TE / TR markers
         te_ms = self.te_spin.value()
         tr_ms = self.tr_spin.value()
-        if tr_ms > 0:
-            tr_line = pg.InfiniteLine(pos=tr_ms, angle=90, pen=pg.mkPen((120, 120, 120), style=Qt.DashLine))
+        actual_tr_ms = time_ms[-1] if len(time_ms) > 0 else 0
+        
+        # Update actual TR label in UI
+        if abs(actual_tr_ms - tr_ms) > 0.1:
+            self.tr_actual_label.setText(f"(Actual: {actual_tr_ms:.1f} ms)")
+        else:
+            self.tr_actual_label.setText("")
+
+        if actual_tr_ms > 0:
+            tr_line = pg.InfiniteLine(pos=actual_tr_ms, angle=90, pen=pg.mkPen((120, 120, 120), style=Qt.DashLine))
             self.diagram_widget.addItem(tr_line)
-        if te_ms > 0:
-            te_line = pg.InfiniteLine(pos=te_ms, angle=90, pen=pg.mkPen((120, 120, 120), style=Qt.DotLine))
+            tr_lbl = pg.TextItem(text="Actual TR", color=(120, 120, 120), anchor=(1, 1))
+            tr_lbl.setPos(actual_tr_ms, 4.8)
+            self.diagram_widget.addItem(tr_lbl)
+            self.diagram_labels.append(tr_lbl)
+
+        if te_ms > 0 and te_ms <= actual_tr_ms:
+            te_line = pg.InfiniteLine(pos=te_ms, angle=90, pen=pg.mkPen((200, 150, 0), style=Qt.DotLine, width=2))
             self.diagram_widget.addItem(te_line)
+            te_lbl = pg.TextItem(text=f"TE={te_ms:.1f}ms", color=(200, 150, 0), anchor=(0, 1))
+            te_lbl.setPos(te_ms, 4.8)
+            self.diagram_widget.addItem(te_lbl)
+            self.diagram_labels.append(te_lbl)
 
         self.diagram_widget.setLimits(xMin=0)
         if len(time_ms):
@@ -3839,7 +3851,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         spectrum_controls.addWidget(QLabel("Spectrum view:"))
         self.spectrum_view_mode = QComboBox()
-        self.spectrum_view_mode.addItems(["Mean over positions", "Individual position"])
+        self.spectrum_view_mode.addItems(["Individual position", "Mean over positions"])
         self.spectrum_view_mode.currentIndexChanged.connect(lambda _: self._refresh_spectrum(time_idx=self._current_playback_index()) if hasattr(self, '_current_playback_index') else None)
         spectrum_controls.addWidget(self.spectrum_view_mode)
         self.spectrum_pos_slider = QSlider(Qt.Horizontal)
@@ -3863,7 +3875,7 @@ class BlochSimulatorGUI(QMainWindow):
         # Heatmap specific mode selector
         self.spectrum_heatmap_mode_label = QLabel("Heatmap mode:")
         self.spectrum_heatmap_mode = QComboBox()
-        self.spectrum_heatmap_mode.addItems(["Spin vs Frequency (FFT)", "Spin vs Time (Evolution)"])
+        self.spectrum_heatmap_mode.addItems([ "Spin vs Time (Evolution)", "Spin vs Frequency (FFT)"])
         self.spectrum_heatmap_mode.currentTextChanged.connect(
             lambda _: self._refresh_spectrum(time_idx=self._current_playback_index()) if hasattr(self, '_current_playback_index') else None
         )
@@ -3933,7 +3945,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         spatial_controls.addWidget(QLabel("View:"))
         self.spatial_mode = QComboBox() # Renamed from spatial_mode to avoid confusion
-        self.spatial_mode.addItems(["Mean over freqs", "Individual freq"])
+        self.spatial_mode.addItems(["Individual freq", "Mean over freqs"])
         self.spatial_mode.currentIndexChanged.connect(self.update_spatial_plot_from_last_result)
         spatial_controls.addWidget(self.spatial_mode)
         self.spatial_freq_slider = QSlider(Qt.Horizontal)
@@ -6448,8 +6460,6 @@ class BlochSimulatorGUI(QMainWindow):
             
             self.tissue_widget.t1_spin.setValue(t_state.get("t1_ms", 1000))
             self.tissue_widget.t2_spin.setValue(t_state.get("t2_ms", 100))
-            self.tissue_widget.t2s_spin.setValue(t_state.get("t2s_ms", 50))
-            self.tissue_widget.pd_spin.setValue(t_state.get("pd", 1.0))
             self.tissue_widget.m0_spin.setValue(t_state.get("m0", 1.0))
 
             # 2. Restore RF Pulse Parameters
@@ -6727,8 +6737,6 @@ class BlochSimulatorGUI(QMainWindow):
                     "field": self.tissue_widget.field_combo.currentText(),
                     "t1_ms": self.tissue_widget.t1_spin.value(),
                     "t2_ms": self.tissue_widget.t2_spin.value(),
-                    "t2s_ms": self.tissue_widget.t2s_spin.value(),
-                    "pd": self.tissue_widget.pd_spin.value(),
                     "m0": self.tissue_widget.m0_spin.value(),
                 },
                 "rf": self.rf_designer.get_state(),
@@ -6816,8 +6824,6 @@ class BlochSimulatorGUI(QMainWindow):
                     'name': self.tissue_widget.preset_combo.currentText(),
                     't1': self.tissue_widget.t1_spin.value() / 1000,
                     't2': self.tissue_widget.t2_spin.value() / 1000,
-                    't2_star': self.tissue_widget.t2s_spin.value() / 1000,
-                    'density': self.tissue_widget.pd_spin.value()
                 }
                 
                 if options['notebook_analysis']:
