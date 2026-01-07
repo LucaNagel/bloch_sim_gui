@@ -16,7 +16,7 @@ A high-performance Python implementation of the Bloch equation solver originally
 
 ## Documentation
 
-For a comprehensive guide on installation, usage, and advanced features, please refer to the **[User Guide](USER_GUIDE.md)**.
+For detailed instructions on installation, GUI features, and Python API usage, please refer to the **[User Guide](https://github.com/LucaNagel/bloch_sim_gui/blob/main/USER_GUIDE.md)**.
 
 ## Installation
 
