@@ -31,7 +31,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/blochsimulator"
+Homepage = "https://github.com/LucaNagel/bloch_sim_gui"
 
 [project.scripts]
 blochsimulator-gui = "blochsimulator.gui:main"
