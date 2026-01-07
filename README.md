@@ -106,6 +106,13 @@ This requires you to manually remove the *quarantine* flag that macOS puts on th
     ```
 4.  Launch **BlochSimulator** from your Applications folder.
 
+**Alternative**:
+
+2. Launch **BlochSimulator** from your Applications folder and dimiss the warning.
+3. Go to System Settings > Privacy & Security, scroll down to the Security section, here you should see a message "BlochSimulator.app was blocked...". Click "Open Anyway".
+4.  Launch **BlochSimulator** from your Applications folder.
+
+
 
 ## Usage
 
