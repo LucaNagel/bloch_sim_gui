@@ -93,6 +93,19 @@ tissue = TissueParameters.gray_matter(3.0)
 print(f"T1: {tissue.t1:.3f}s, T2: {tissue.t2:.3f}s")
 ```
 
+### Method No Installation: Use Release version
+*Only works for MacOS so far*. 
+Requires you to manually remove the *quarantine* flag that MacOS puts on the downloaded app. Only perform this step if you trust the distributor (me).
+- Go to the **[Releases](https://github.com/LucaNagel/bloch_sim_gui/releases)** page and download the most up to date *.zip* file.
+- Unpack the downloaded *.zip* file.
+- Move the downloaded *.app* file into the **Applications** folder.
+- Run this in a terminal:
+```bash
+xattr -cr /Applications/BlochSimulator.app
+```
+- Open GUI by double clicking the **BlochSimulator** app in the **Applications** folder.
+
+
 ## Usage
 
 ### 🚀 Jupyter Notebook (Recommended)

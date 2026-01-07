@@ -60,7 +60,7 @@ This script will:
 *   Print the exact git commands you need to run to commit and tag the release.
 
 ### Step 2: Commit and Tag
-Run the commands suggested by the `bump_version.py` script. For example:
+Run the commands suggested by the `bump_version.py` script. The version number v`XX.YY.ZZ` matches the `python bump_version.py XX.YY.ZZ`. For example (if new version is XX.YY.ZZ = 1.0.6):
 
 ```bash
 git add .
@@ -96,15 +96,16 @@ You should now see a file like `dist/BlochSimulator_macOS_arm64_v1.0.6.zip`.
 
 Since the app is not signed with an Apple Developer ID, users will see a "damaged" or "unidentified developer" warning. You must provide these instructions to them (e.g., in the Release description or README):
 
-> **Installation Instructions for macOS:**
->
-> 1. Download and unzip the application.
-> 2. Move `BlochSimulator.app` to your Applications folder.
-> 3. **Important:** Run the following command in Terminal to allow the app to run (fixes the "damaged" error):
->    ```bash
->    xattr -cr /Applications/BlochSimulator.app
->    ```
-> 4. Double-click to open.
+**Installation Instructions for macOS:**
+
+1. Download and unzip the application.
+2. Move `BlochSimulator.app` to your Applications folder.
+3. **Important:** Run the following command in Terminal to allow the app to run (fixes the "damaged" error):
+   ```bash
+   xattr -cr /Applications/BlochSimulator.app
+   ```
+
+4. Double-click to open.
 
 ## 6. Automated CI/CD & PyPI Release
 
