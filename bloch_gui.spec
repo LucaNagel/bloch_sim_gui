@@ -1,5 +1,6 @@
 # -*- mode: python -*-
 import os
+import platform
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
@@ -7,6 +8,7 @@ block_cipher = None
 
 # project_root is the directory containing this spec file
 project_root = Path(os.getcwd())
+system_platform = platform.system()
 
 # Add src to pathex so PyInstaller can find the package
 pathex = [str(project_root), str(project_root / "src")]
@@ -28,16 +30,29 @@ binaries = []
 for ext in (project_root / "src" / "blochsimulator").glob("blochsimulator_cy.*"):
     binaries.append((str(ext), "blochsimulator"))
 
-# Common OpenMP runtime locations (macOS and Linux)
-omp_candidates = [
-    Path("/opt/homebrew/opt/libomp/lib/libomp.dylib"),
-    Path("/usr/local/opt/libomp/lib/libomp.dylib"),
-    Path("/usr/lib/libgomp.so.1"),
-    Path("/usr/local/lib/libgomp.so.1"),
-]
-for omp in omp_candidates:
-    if omp.exists():
-        binaries.append((str(omp), "."))
+# Handle OpenMP libraries based on OS
+if system_platform == 'Darwin':
+    # Common OpenMP runtime locations (macOS)
+    omp_candidates = [
+        Path("/opt/homebrew/opt/libomp/lib/libomp.dylib"),
+        Path("/usr/local/opt/libomp/lib/libomp.dylib"),
+    ]
+    for omp in omp_candidates:
+        if omp.exists():
+            binaries.append((str(omp), "."))
+elif system_platform == 'Linux':
+    # Linux OpenMP (usually libgomp)
+    omp_candidates = [
+        Path("/usr/lib/x86_64-linux-gnu/libgomp.so.1"),
+        Path("/usr/lib/libgomp.so.1"),
+    ]
+    for omp in omp_candidates:
+        if omp.exists():
+            binaries.append((str(omp), "."))
+elif system_platform == 'Windows':
+    # Windows OpenMP (vcomp140.dll or similar, usually found in system32 or by compiler)
+    # PyInstaller often finds DLLs automatically, but we can add explicit checks if needed.
+    pass
 
 # Hidden imports needed by PyQt5, pyqtgraph OpenGL, and image exporters
 hiddenimports = [
@@ -76,17 +91,19 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=False,
+    console=False, # Set to True if you want to see the terminal window on launch (good for debug)
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
 )
 
-app = BUNDLE(
-    exe,
-    name='BlochSimulator.app',
-    icon=None,
-    bundle_identifier='com.lucanagel.blochsimulator',
-)
+# Bundle into .app only on macOS
+if system_platform == 'Darwin':
+    app = BUNDLE(
+        exe,
+        name='BlochSimulator.app',
+        icon=None,
+        bundle_identifier='com.lucanagel.blochsimulator',
+    )
         

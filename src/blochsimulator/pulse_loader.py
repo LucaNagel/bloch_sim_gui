@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Tuple, Dict, Optional, Union
 from dataclasses import dataclass
 import re
+import sys
 
 
 @dataclass
@@ -297,7 +298,12 @@ class PulseLibrary:
             Base directory for pulse files. If None, uses './rfpulses'
         """
         if base_path is None:
-            base_path = Path(__file__).parent / 'rfpulses'
+            if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+                # Running in a PyInstaller bundle
+                base_path = Path(sys._MEIPASS) / 'blochsimulator' / 'rfpulses'
+            else:
+                # Running from source
+                base_path = Path(__file__).parent / 'rfpulses'
         else:
             base_path = Path(base_path)
 
