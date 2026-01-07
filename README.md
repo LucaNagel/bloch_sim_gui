@@ -4,12 +4,15 @@ A high-performance Python implementation of the Bloch equation solver originally
 
 ## Features
 
-- **High Performance**: C implementation with Cython bindings maintains original speed
-- **Parallel Processing**: OpenMP support for multi-core acceleration
-- **Interactive GUI**: Real-time visualization and parameter adjustment
-- **Flexible API**: Easy-to-use Python interface for scripting
-- **Comprehensive**: Supports arbitrary RF pulses, gradient waveforms, and tissue parameters
+- **High Performance**: C implementation with Cython bindings maintains original speed.
+- **Parallel Processing**: OpenMP support for multi-core acceleration.
+- **Interactive GUI**: Real-time visualization and parameter adjustment.
+- **Flexible API**: Easy-to-use Python interface for scripting.
+- **Comprehensive**: Supports arbitrary RF pulses, gradient waveforms, and tissue parameters.
+- **Parameter sweep**: Allows simulation of parameter space (e.g. varying **TRs** in a SSFP loop).
 - **Visualization**: 3D magnetization vectors, time evolution plots, frequency spectra, and **animation export**
+- **Reproducibilty**: Sequence parameters and simulation results can be exported and imported.
+- **Auto-generation of jupyter notebook**: GUI simulations can be exported as jupyter notebooks.
 
 ## Documentation
 
@@ -18,7 +21,7 @@ For a comprehensive guide on installation, usage, and advanced features, please 
 ## Installation
 
 ### Method A: Direct Install (PyPI)
-*Recommended for most users.*
+*Recommended for most users.*  Package is availabe on [pypi.org](https://pypi.org/project/blochsimulator/).
 ```bash
 pip install blochsimulator
 ```
@@ -57,14 +60,28 @@ Required to build the fast simulation core.
 </details>
 
 **Steps:**
-1.  **Clone or download** the repository.
-2.  **Navigate** to the folder in your terminal.
-3.  **Install** in editable mode:
+1.  **Navigate** to the directory where you want to install the GUI in your terminal.
+    ```bash
+    cd /path/to/the/directory/
+    ```
+2.  **Clone or download** the repository.
+    ```bash
+    git clone git@github.com:LucaNagel/bloch_sim_gui.git
+    ```
+2. **Or** if that fails:
+    ```bash
+    git clone https://github.com/LucaNagel/bloch_sim_gui.git
+    ```
+3. **Navigate** to the cloned repository.
+    ```bash
+    cd bloch_sim_gui/
+    ```
+4.  **Install** in editable mode:
     ```bash
     pip install -e .
     ```
 
-### Verification
+### Verification (not necessary for the installation)
 
 Test the installation:
 
@@ -80,13 +97,13 @@ print(f"T1: {tissue.t1:.3f}s, T2: {tissue.t2:.3f}s")
 
 ### 🚀 Jupyter Notebook (Recommended)
 
-You can launch the interactive GUI directly from a cell in your Jupyter Notebook.
+You can launch the interactive GUI directly from a cell in your Jupyter Notebook. 
 
 ```python
-# 1. Install (run once)
-!pip install -e .
+# 0. Install from PyPI (run once) if not done before
+!pip install blochsimulator
 
-# 2. Launch GUI
+# 1. Launch GUI
 !blochsimulator-gui
 ```
 
@@ -102,7 +119,7 @@ blochsimulator-gui
 
 Features:
 - Design RF pulses (rectangular, sinc, Gaussian)
-- Configure tissue parameters (T1, T2, proton density)
+- Configure tissue parameters (T1, T2)
 - Select pulse sequences (spin echo, gradient echo, etc.)
 - Real-time 3D magnetization visualization
 - Signal analysis and frequency spectra
@@ -320,14 +337,14 @@ If you use this simulator in your research, please cite:
 @software{blochsimulator_python,
   title={Python Bloch Equation Simulator GUI and API},
   author={Luca Nagel},
-  year={2025},
+  year={2026},
   url={https://github.com/LucaNagel/bloch_sim_gui}
 }
 ```
 
 ## Acknowledgments
 
-This project is based on [code](http://mrsrl.stanford.edu/~brian/blochsim/) originally developed by Brian Hargreaves at Stanford University. Currently (11/2025) it is unfortunately not available. A python adaption of this code can be found [here](https://github.com/ZhengguoTan/BlochSim).
+This project is based on [code](http://mrsrl.stanford.edu/~brian/blochsim/) originally developed by Brian Hargreaves at Stanford University. Currently (01/2026) it is unfortunately not available. A python adaption of this code can be found [here](https://github.com/ZhengguoTan/BlochSim).
 
 - Original Bloch simulator by Brian Hargreaves, Stanford University
 - NumPy and SciPy communities
