@@ -10,58 +10,12 @@ This guide covers the installation, usage, and features of the Bloch Equation Si
 pip install blochsimulator
 ```
 
-### Method B: Standalone Application (No Python Required)
-*Recommended for users without Python.*
-
-1.  **Download:** Go to the [Releases page](#) (if available) or obtain the `BlochSimulator` executable for your operating system (Windows `.exe`, macOS `.app`/binary, Linux binary).
-2.  **Run:** Double-click the application to start.
-    *   *Note on macOS/Linux:* You may need to grant execution permissions: `chmod +x BlochSimulator`.
-
-### Method B: Python Package (From Source)
-*Recommended for researchers and developers.*
-
-To run from source, you need **Python** and a **C Compiler** installed.
-
-<details>
-<summary><strong>👇 Click here for detailed setup instructions (Windows, macOS, Linux)</strong></summary>
-
-#### 1. Install Python 3.9+
-
-*   **Windows:**
-    *   Download the installer from [python.org](https://www.python.org/downloads/windows/).
-    *   **Important:** During installation, check the box **"Add Python to PATH"**.
-*   **macOS:**
-    *   Download from [python.org](https://www.python.org/downloads/macos/) OR use Homebrew: `brew install python`.
-*   **Linux:**
-    *   Usually pre-installed. If not: `sudo apt install python3 python3-pip` (Ubuntu/Debian) or `sudo dnf install python3` (Fedora).
-
-#### 2. Install a C Compiler
-Required to build the fast simulation core.
-
-*   **Windows:**
-    *   Install **Visual Studio Build Tools** (free).
-    *   Download from [visualstudio.microsoft.com](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
-    *   In the installer, select **"Desktop development with C++"**.
-*   **macOS:**
-    *   Open Terminal and run: `xcode-select --install`.
-    *   (Optional but recommended for speed) Install OpenMP: `brew install libomp`.
-*   **Linux:**
-    *   Install GCC: `sudo apt install build-essential` (Ubuntu/Debian) or `sudo dnf groupinstall "Development Tools"` (Fedora).
-
-</details>
-
-**Steps:**
-1.  Clone the repository or download the source code.
-2.  Open a terminal in the project folder.
-3.  Install in editable mode:
-    ```bash
-    pip install -e .
-    ```
+For other installation methods see [README](https://github.com/LucaNagel/bloch_sim_gui/blob/main/README.md).
 
 ## 2. Launching the Simulator
 
 ### From Terminal
-Once installed via Method B, you can launch the GUI directly:
+Once installed, you can launch the GUI directly:
 ```bash
 blochsimulator-gui
 ```
@@ -182,37 +136,7 @@ time = result['time']
 signal = result['signal']
 ```
 
-## 8. Developer Guide
+## 8. For Developers
 
-### Version Management
-To update the project version across all files (`pyproject.toml`, `setup.py`, source code, docs), use the helper script:
+For instructions on building the standalone application, managing versions, and the release workflow, please refer to the **[Developer Guide](https://github.com/LucaNagel/bloch_sim_gui/blob/main/DEVELOPER_GUIDE.md)**.
 
-```bash
-python bump_version.py 1.0.5
-```
-
-This will automatically:
-1.  Update version strings in all configuration and source files.
-2.  Suggest the git commands to commit and tag the new version.
-
-### Releasing to PyPI
-The project is configured to automatically publish to PyPI when a new version tag is pushed to GitHub.
-
-**Steps to release:**
-
-1.  **Bump Version:** Run `python bump_version.py <new_version>` (e.g., `1.0.5`).
-2.  **Commit:** Commit the changes:
-    ```bash
-    git add .
-    git commit -m "Bump version to 1.0.5"
-    ```
-3.  **Tag:** Create a git tag for the version:
-    ```bash
-    git tag v1.0.5
-    ```
-4.  **Push:** Push the commit and the tag to GitHub:
-    ```bash
-    git push origin main v1.0.5
-    ```
-
-Once the tag is pushed, the GitHub Action workflow (`.github/workflows/publish.yml`) will trigger, build the package, and upload it to PyPI. You can verify the new release at [pypi.org/project/blochsimulator](https://pypi.org/project/blochsimulator/).

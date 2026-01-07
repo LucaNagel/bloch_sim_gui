@@ -93,17 +93,18 @@ tissue = TissueParameters.gray_matter(3.0)
 print(f"T1: {tissue.t1:.3f}s, T2: {tissue.t2:.3f}s")
 ```
 
-### Method No Installation: Use Release version
-*Only works for MacOS so far*. 
-Requires you to manually remove the *quarantine* flag that MacOS puts on the downloaded app. Only perform this step if you trust the distributor (me).
-- Go to the **[Releases](https://github.com/LucaNagel/bloch_sim_gui/releases)** page and download the most up to date *.zip* file.
-- Unpack the downloaded *.zip* file.
-- Move the downloaded *.app* file into the **Applications** folder.
-- Run this in a terminal:
-```bash
-xattr -cr /Applications/BlochSimulator.app
-```
-- Open GUI by double clicking the **BlochSimulator** app in the **Applications** folder.
+### Method C: Standalone App (macOS)
+*No installation required. Recommended for non-technical users.*
+
+This requires you to manually remove the *quarantine* flag that macOS puts on the downloaded app. Only perform this step if you trust the distributor.
+
+1.  Go to the **[Releases](https://github.com/LucaNagel/bloch_sim_gui/releases)** page and download the latest `.zip` file.
+2.  Unzip the file and move `BlochSimulator.app` to your **Applications** folder.
+3.  **Crucial Step:** Open Terminal and run this command to fix the "App is damaged" error:
+    ```bash
+    xattr -cr /Applications/BlochSimulator.app
+    ```
+4.  Launch **BlochSimulator** from your Applications folder.
 
 
 ## Usage
@@ -279,6 +280,8 @@ liver = TissueParameters(
 ```
 
 ## Desktop app build (PyInstaller)
+
+*For detailed packaging, release workflows, and CI/CD info, see the [Developer Guide](DEVELOPER_GUIDE.md).*
 
 One build per OS is required (macOS build won’t run on Windows/Linux).
 
