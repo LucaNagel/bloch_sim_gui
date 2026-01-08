@@ -58,6 +58,7 @@ elif system_platform == 'Windows':
 hiddenimports = [
     "PyQt5.sip",
     "pyqtgraph.opengl",
+    "imageio",
     "imageio_ffmpeg",
     "blochsimulator.blochsimulator_cy", # Ensure Cython module is found
 ]
