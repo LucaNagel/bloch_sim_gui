@@ -27,3 +27,10 @@ __pycache__/
 
 # Generated C files
 src/blochsimulator/bloch_wrapper.c
+
+# Generated test notebooks (can be generated from tests/test_notebook_export.py)
+test_mode_a.ipynb
+test_mode_b.ipynb
+
+# Ignore log files
+*.log

@@ -142,4 +142,16 @@ To ensure your code passes all tests and builds successfully **before** you assi
 4.  **Proceed to Release**:
     Only *after* the build on `main` is green, proceed with the [Release Workflow](#4-release-workflow) (Bump Version -> Tag -> Push Tag).
     *   When you push the tag, a *new* workflow run will start.
-    *   Since the code is identical to what just passed (plus the version bump), it is highly likely to pass again and successfully run the `publish` step.
+        *   Since the code is identical to what just passed (plus the version bump), it is highly likely to pass again and successfully run the `publish` step.
+    
+    ## 7. Package Configuration (MANIFEST.in)
+    
+    The `MANIFEST.in` file is critical for the Python package distribution (PyPI). It explicitly tells `setuptools` which non-Python files to include in the **Source Distribution (`sdist`)**.
+    
+    Without this file, users installing from source (e.g., via `pip install` on an unsupported architecture) would fail because the following would be missing:
+    *   **C/Cython Source Files**: `.c`, `.h`, and `.pyx` files required to compile the simulation core.
+    *   **Data Assets**: The `rfpulses/` directory containing essential pulse waveforms.
+    *   **Metadata**: The `README.md` and `requirements.txt` files.
+    
+    If you add new non-python directories (like more asset folders) that need to be bundled with the library, ensure they are added to `MANIFEST.in`.
+    

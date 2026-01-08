@@ -16,7 +16,7 @@ A high-performance Python implementation of the Bloch equation solver originally
 
 ## Documentation
 
-For detailed instructions on installation, GUI features, and Python API usage, please refer to the **[User Guide](https://github.com/LucaNagel/bloch_sim_gui/blob/main/USER_GUIDE.md)**.
+For detailed instructions on installation, GUI features, and Python API usage, please refer to the **[User Guide](https://github.com/LucaNagel/bloch_sim_gui/blob/main/docs/USER_GUIDE.md)**.
 
 ## Installation
 
@@ -288,7 +288,7 @@ liver = TissueParameters(
 
 ## Desktop app build (PyInstaller)
 
-*For detailed packaging, release workflows, and CI/CD info, see the [Developer Guide](DEVELOPER_GUIDE.md).*
+*For detailed packaging, release workflows, and CI/CD info, see the [Developer Guide](docs/DEVELOPER_GUIDE.md).*
 
 One build per OS is required (macOS build won’t run on Windows/Linux).
 
