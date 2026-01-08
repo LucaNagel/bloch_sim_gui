@@ -290,6 +290,8 @@ liver = TissueParameters(
 
 *For detailed packaging, release workflows, and CI/CD info, see the [Developer Guide](docs/DEVELOPER_GUIDE.md).*
 
+**Note:** Standalone applications for macOS, Windows, and Linux are automatically built and attached to GitHub Releases whenever a new version tag is pushed. The instructions below are for manual/local builds.
+
 One build per OS is required (macOS build won’t run on Windows/Linux).
 
 ### Prereqs
