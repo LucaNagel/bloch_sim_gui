@@ -2171,27 +2171,37 @@ class SequenceDesigner(QGroupBox):
         tr_ms = self.tr_spin.value()
         actual_tr_ms = time_ms[-1] if len(time_ms) > 0 else 0
         
-        # Update actual TR label in UI
-        if abs(actual_tr_ms - tr_ms) > 0.1:
-            self.tr_actual_label.setText(f"(Actual: {actual_tr_ms:.1f} ms)")
-        else:
-            self.tr_actual_label.setText("")
+        # Remove actual TR label (user request)
+        self.tr_actual_label.setText("")
 
         if actual_tr_ms > 0:
             tr_line = pg.InfiniteLine(pos=actual_tr_ms, angle=90, pen=pg.mkPen((120, 120, 120), style=Qt.DashLine))
             self.diagram_widget.addItem(tr_line)
-            tr_lbl = pg.TextItem(text="Actual TR", color=(120, 120, 120), anchor=(1, 1))
-            tr_lbl.setPos(actual_tr_ms, 4.8)
-            self.diagram_widget.addItem(tr_lbl)
-            self.diagram_labels.append(tr_lbl)
+            # Removed "Actual TR" text item
 
         if te_ms > 0 and te_ms <= actual_tr_ms:
-            te_line = pg.InfiniteLine(pos=te_ms, angle=90, pen=pg.mkPen((200, 150, 0), style=Qt.DotLine, width=2))
-            self.diagram_widget.addItem(te_line)
-            te_lbl = pg.TextItem(text=f"TE={te_ms:.1f}ms", color=(200, 150, 0), anchor=(0, 1))
-            te_lbl.setPos(te_ms, 4.8)
-            self.diagram_widget.addItem(te_lbl)
-            self.diagram_labels.append(te_lbl)
+            # Calculate actual echo position based on sequence type
+            seq_type = self.sequence_type.currentText()
+            echo_pos_ms = te_ms
+            
+            if seq_type in ("Spin Echo", "Spin Echo (Tip-axis 180)", "Gradient Echo"):
+                # Estimate excitation duration
+                exc = self.pulse_waveforms.get("Excitation", self.custom_pulse)
+                if exc is not None and len(exc[1]) > 1:
+                    exc_dur_ms = (exc[1][-1] - exc[1][0]) * 1000.0
+                else:
+                    exc_dur_ms = 1.0 # default 1ms
+                
+                # Echo happens at exc_duration/2 + TE
+                echo_pos_ms = exc_dur_ms / 2.0 + te_ms
+            
+            if echo_pos_ms <= actual_tr_ms:
+                te_line = pg.InfiniteLine(pos=echo_pos_ms, angle=90, pen=pg.mkPen((200, 150, 0), style=Qt.DotLine, width=2))
+                self.diagram_widget.addItem(te_line)
+                te_lbl = pg.TextItem(text=f"TE={te_ms:.1f}ms", color=(200, 150, 0), anchor=(0, 1))
+                te_lbl.setPos(echo_pos_ms, 4.8)
+                self.diagram_widget.addItem(te_lbl)
+                self.diagram_labels.append(te_lbl)
 
         self.diagram_widget.setLimits(xMin=0)
         if len(time_ms):
@@ -2990,6 +3000,25 @@ class ParameterSweepWidget(QWidget):
 
         # Store initial values for parameters that need them (like B1 scale)
         initial_flip_angle = self.parent_gui.rf_designer.flip_angle.value()
+        
+        # Capture initial state of the parameter to restore it later
+        initial_param_val = None
+        if "Flip Angle" in param_name:
+            initial_param_val = self.parent_gui.rf_designer.flip_angle.value()
+        elif "TE" in param_name:
+            initial_param_val = self.parent_gui.sequence_designer.te_spin.value()
+        elif "TR" in param_name:
+            initial_param_val = self.parent_gui.sequence_designer.tr_spin.value()
+        elif "TI" in param_name:
+            initial_param_val = self.parent_gui.sequence_designer.ti_spin.value()
+        elif "T1" in param_name:
+            initial_param_val = self.parent_gui.tissue_widget.t1_spin.value()
+        elif "T2" in param_name:
+            initial_param_val = self.parent_gui.tissue_widget.t2_spin.value()
+        elif "Frequency" in param_name:
+            initial_param_val = self.parent_gui.freq_center.value() if hasattr(self.parent_gui, "freq_center") else 0
+        elif "B1 Scale" in param_name:
+            initial_param_val = 1.0  # Scale factor is 1.0 relative to initial
 
         try:
             for i, param_val in enumerate(param_values):
@@ -3006,7 +3035,7 @@ class ParameterSweepWidget(QWidget):
                     # Wait for simulation to complete (simple polling)
                     while self.parent_gui.simulation_thread and self.parent_gui.simulation_thread.isRunning():
                         QApplication.processEvents()
-                        time.sleep(0.1)
+                        time.sleep(0.01)
 
                     # Extract metrics from results
                     if self.parent_gui.last_result:
@@ -3022,7 +3051,6 @@ class ParameterSweepWidget(QWidget):
                     import traceback
                     error_msg = f"Error at {param_name}={param_val:.2f}: {str(e)}\n{traceback.format_exc()}"
                     self.parent_gui.log_message(error_msg)
-                    QMessageBox.warning(self, "Simulation Error", f"Error at {param_name}={param_val:.2f}: {str(e)}")
                     break
 
                 # Update progress
@@ -3032,6 +3060,10 @@ class ParameterSweepWidget(QWidget):
             self.last_sweep_results = results
             self._display_results(results)
         finally:
+            # Restore initial parameter value
+            if initial_param_val is not None:
+                self._apply_parameter_value(param_name, initial_param_val, initial_flip_angle)
+
             self.sweep_running = False
             self.run_button.setEnabled(True)
             self.stop_button.setEnabled(False)

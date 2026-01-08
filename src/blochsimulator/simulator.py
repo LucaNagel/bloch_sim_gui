@@ -431,7 +431,7 @@ class SpinEcho(PulseSequence):
                              f"Minimum TE ≈ {min_te*1000:.2f} ms (Exc: {exc_duration*1000:.1f}ms, Ref: {ref_duration*1000:.1f}ms)")
 
         # Ensure timeline covers all requested echoes (echo spacing = TE)
-        min_duration = (self.echo_count + 0.5) * self.te + ref_duration  # include buffer for last echo
+        min_duration = exc_duration / 2.0 + (self.echo_count + 0.5) * self.te + ref_duration  # include buffer for last echo
         total_duration = max(self.tr, min_duration)
         npoints = int(np.ceil(total_duration / dt))
         
@@ -469,8 +469,8 @@ class SpinEcho(PulseSequence):
                                           freq_offset=self.rf_freq_offset)
 
         for echo_idx in range(self.echo_count):
-            # Center of refocusing pulse at (0.5 + idx) * TE
-            ref_center_time = (0.5 + echo_idx) * self.te
+            # Center of refocusing pulse at exc_duration/2 + (0.5 + idx) * TE
+            ref_center_time = exc_duration / 2.0 + (0.5 + echo_idx) * self.te
             ref_start_time = ref_center_time - ref_duration / 2
             ref_start = int(ref_start_time / dt)
             
@@ -489,7 +489,7 @@ class SpinEcho(PulseSequence):
             gz_amp = bw_hz / (gamma_hz_per_g * thickness_cm)
         gradients[:max(n_exc, 1), 2] = gz_amp
         for echo_idx in range(self.echo_count):
-            ref_center_time = (0.5 + echo_idx) * self.te
+            ref_center_time = exc_duration / 2.0 + (0.5 + echo_idx) * self.te
             ref_start_time = ref_center_time - ref_duration / 2
             ref_start = int(ref_start_time / dt)
             
@@ -518,7 +518,15 @@ class SpinEchoTipAxis(PulseSequence):
         self.echo_count = max(1, int(echo_count))
 
     def compile(self, dt: float = 1e-6) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        min_duration = (self.echo_count + 0.5) * self.te + 1e-3
+        # Determine pulse durations first
+        if self.custom_excitation is not None:
+            exc_b1_in, exc_time_in = self.custom_excitation
+            # Use actual length
+            exc_duration = len(exc_b1_in) * dt if len(exc_time_in) <= 1 else exc_time_in[-1] - exc_time_in[0]
+        else:
+            exc_duration = 1e-3
+
+        min_duration = exc_duration / 2.0 + (self.echo_count + 0.5) * self.te + 1e-3
         total_duration = max(self.tr, min_duration)
         npoints = int(np.ceil(total_duration / dt))
 
@@ -532,13 +540,12 @@ class SpinEchoTipAxis(PulseSequence):
             exc_b1 = np.asarray(exc_b1, dtype=complex)
             n_exc = min(len(exc_b1), npoints)
             b1[:n_exc] = exc_b1[:n_exc]
-            exc_duration = n_exc * dt
         else:
             exc_b1, _ = design_rf_pulse('sinc', duration=1e-3,
                                        flip_angle=90, npoints=int(1e-3 / dt))
             n_exc = len(exc_b1)
             b1[:n_exc] = exc_b1
-            exc_duration = 1e-3
+
         # Build a proper 180° refocusing pulse (independent of excitation shape)
         if self.custom_refocusing is not None:
             ref_b1, _ = self.custom_refocusing
@@ -557,9 +564,12 @@ class SpinEchoTipAxis(PulseSequence):
         phase_shift = np.exp(1j * (exc_phase + np.pi / 2.0))
         ref_pulse = ref_pulse * phase_shift
         for echo_idx in range(self.echo_count):
-            ref_time = (0.5 + echo_idx) * self.te
-            ref_start = int(ref_time / dt)
-            if ref_start + len(ref_pulse) < npoints:
+            # Center of refocusing pulse at exc_duration/2 + (0.5 + idx) * TE
+            ref_center_time = exc_duration / 2.0 + (0.5 + echo_idx) * self.te
+            ref_start_time = ref_center_time - len(ref_pulse) * dt / 2.0
+            ref_start = int(ref_start_time / dt)
+            
+            if ref_start >= 0 and ref_start + len(ref_pulse) <= npoints:
                 b1[ref_start:ref_start + len(ref_pulse)] = ref_pulse
 
         # Slice-select gradients (reuse SpinEcho logic)
@@ -572,9 +582,11 @@ class SpinEchoTipAxis(PulseSequence):
             gz_amp = bw_hz / (gamma_hz_per_g * thickness_cm)
         gradients[:max(n_exc, 1), 2] = gz_amp
         for echo_idx in range(self.echo_count):
-            ref_time = (0.5 + echo_idx) * self.te
-            ref_start = int(ref_time / dt)
-            if ref_start + len(ref_pulse) < npoints:
+            ref_center_time = exc_duration / 2.0 + (0.5 + echo_idx) * self.te
+            ref_start_time = ref_center_time - len(ref_pulse) * dt / 2.0
+            ref_start = int(ref_start_time / dt)
+            
+            if ref_start >= 0 and ref_start + len(ref_pulse) <= npoints:
                 gradients[ref_start:ref_start + len(ref_pulse), 2] = gz_amp
 
         return b1, gradients, time
