@@ -1306,7 +1306,11 @@ class SequenceDesigner(QGroupBox):
         layout.addLayout(te_layout)
         self.te_spin.valueChanged.connect(lambda _: self.update_diagram())
 
-        # Slice thickness
+        # Slice thickness and Gradient overrides (grouped for easy hiding)
+        self.gradient_opts_container = QWidget()
+        grad_layout = QVBoxLayout()
+        grad_layout.setContentsMargins(0, 0, 0, 0)
+        
         thick_layout = QHBoxLayout()
         thick_layout.addWidget(QLabel("Slice thickness (mm):"))
         self.slice_thickness_spin = QDoubleSpinBox()
@@ -1316,7 +1320,7 @@ class SequenceDesigner(QGroupBox):
         self.slice_thickness_spin.setSingleStep(0.1)
         self.slice_thickness_spin.valueChanged.connect(lambda _: self.update_diagram())
         thick_layout.addWidget(self.slice_thickness_spin)
-        layout.addLayout(thick_layout)
+        grad_layout.addLayout(thick_layout)
 
         # Manual slice gradient override
         g_layout = QHBoxLayout()
@@ -1328,7 +1332,10 @@ class SequenceDesigner(QGroupBox):
         self.slice_gradient_spin.setValue(0.0)
         self.slice_gradient_spin.valueChanged.connect(lambda _: self.update_diagram())
         g_layout.addWidget(self.slice_gradient_spin)
-        layout.addLayout(g_layout)
+        grad_layout.addLayout(g_layout)
+        
+        self.gradient_opts_container.setLayout(grad_layout)
+        layout.addWidget(self.gradient_opts_container)
         
         # TR parameter
         tr_layout = QHBoxLayout()
@@ -1399,6 +1406,10 @@ class SequenceDesigner(QGroupBox):
         self.ssfp_opts.setVisible(seq_type == "SSFP (Loop)")
         self.slice_rephase_opts.setVisible(seq_type == "Slice Select + Rephase")
         self.ti_widget.setVisible(seq_type == "Inversion Recovery")
+
+        # Hide gradient options for SSFP as it's typically a 0D/1D simulation without slice gradients in this context
+        if hasattr(self, "gradient_opts_container"):
+            self.gradient_opts_container.setVisible(seq_type != "SSFP (Loop)")
         
         # Update pulse list based on sequence type
         self.pulse_list.blockSignals(True)

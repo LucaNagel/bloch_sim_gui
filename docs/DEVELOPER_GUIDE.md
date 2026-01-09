@@ -1,6 +1,6 @@
 # Developer Guide
 
-This guide explains how to build, package, and release the BlochSimulator application.
+This guide explains how to build, package, and release the BlochSimulator application, as well as how to extend it with new pulse sequences and GUI options.
 
 ## 1. Environment Setup
 
@@ -118,3 +118,94 @@ To test your code before tagging:
 The `MANIFEST.in` file tells `setuptools` which non-Python files to include in the **Source Distribution (`sdist`)**. This is critical for users installing from source who need the C/Cython files and RF pulse data.
 
 Ensure any new asset directories are added here to be bundled with the library.
+
+---
+
+## 7. Extending the Simulator
+
+### How to Add a New Pulse Sequence
+
+Adding a new sequence involves updates to both the core simulator logic and the GUI.
+
+**1. Define the Sequence Class (Optional but Recommended)**
+In `src/blochsimulator/simulator.py`:
+Create a new class inheriting from `PulseSequence`. Implement the `compile()` method to return `(b1, gradients, time)`.
+
+```python
+class MyNewSequence(PulseSequence):
+    def __init__(self, param1, param2, ...):
+        # Initialize parameters
+        pass
+
+    def compile(self, dt=1e-6):
+        # Generate b1 (complex), gradients (N,3), and time arrays
+        return b1, gradients, time
+```
+
+**2. Register in GUI (`src/blochsimulator/gui.py`)**
+
+*   **Add to List:** In `SequenceDesigner.init_ui()`, add your sequence name to the `self.sequence_type` ComboBox.
+    ```python
+    self.sequence_type.addItems([..., "My New Sequence"])
+    ```
+
+*   **Define Default Parameters:** In `SequenceDesigner.get_sequence_preset_params()`, add a dictionary for your sequence. This sets default TE, TR, and other values when the user selects your sequence.
+    ```python
+    "My New Sequence": {
+        "te_ms": 15,
+        "tr_ms": 100,
+        "flip_angle": 45,
+    },
+    ```
+
+*   **Implement Generation Logic:** In `SequenceDesigner.get_sequence()`, handle the new sequence type instantiation.
+    ```python
+    elif seq_type == "My New Sequence":
+        return MyNewSequence(
+            te=te,
+            tr=tr,
+            param1=...,
+        )
+    ```
+
+### How to Hide/Show Options per Sequence
+
+You can customize which widgets (e.g., TI spinbox, Echo Count, custom checkboxes) are visible for each sequence type.
+
+**1. Create a Container for New Options (if needed)**
+In `SequenceDesigner.init_ui()`, create a `QWidget` or `QGroupBox` to hold your specific controls. Add it to `self.options_container`.
+
+```python
+# Create widget
+self.my_seq_opts = QWidget()
+layout = QHBoxLayout()
+self.my_param_spin = QSpinBox()
+layout.addWidget(QLabel("My Param:"))
+layout.addWidget(self.my_param_spin)
+self.my_seq_opts.setLayout(layout)
+
+# Add to main container
+self.options_container.addWidget(self.my_seq_opts)
+
+# Hide by default
+self.my_seq_opts.setVisible(False)
+```
+
+**2. Update Visibility Logic**
+In `SequenceDesigner._update_sequence_options()`, add your logic to show or hide the widget based on `seq_type`.
+
+```python
+def _update_sequence_options(self):
+    seq_type = self.sequence_type.currentText()
+    
+    # Toggle visibility
+    self.spin_echo_opts.setVisible(seq_type in ("Spin Echo", ...))
+    self.my_seq_opts.setVisible(seq_type == "My New Sequence")
+    
+    # Update pulse list roles if needed (e.g., Excitation only, or Excitation + Refocusing)
+    if seq_type == "My New Sequence":
+        roles = ["Excitation", "MyPulse"]
+    ...
+```
+
+This ensures users only see relevant controls for the active sequence.
