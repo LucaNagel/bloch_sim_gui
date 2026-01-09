@@ -60,9 +60,16 @@ hiddenimports = [
     "pyqtgraph.opengl",
     "imageio",
     "imageio_ffmpeg",
+    "h5py",
+    "nbformat",
+    "nbformat.v4",
     "blochsimulator.blochsimulator_cy", # Ensure Cython module is found
 ]
 hiddenimports += collect_submodules("OpenGL.platform")
+hiddenimports += collect_submodules("imageio")
+hiddenimports += collect_submodules("imageio_ffmpeg")
+hiddenimports += collect_submodules("h5py")
+hiddenimports += collect_submodules("nbformat")
 
 a = Analysis(
     ["bloch_gui.py"],

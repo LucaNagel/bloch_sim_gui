@@ -1,7 +1,7 @@
 # setup.py - Build configuration for Bloch simulator
 from setuptools import setup, Extension, find_packages
+from setuptools.command.build_ext import build_ext
 from Cython.Build import cythonize
-import numpy as np
 import platform
 import os
 
@@ -18,7 +18,6 @@ define_macros = []
 # Architecture optimization flags
 arch_flags = []
 # Avoid -mcpu=native or -march=native for wheel builds to ensure portability
-# and prevent errors during cross-compilation (e.g. via cibuildwheel).
 
 if is_windows:
     # Windows with MSVC
@@ -45,7 +44,7 @@ else:
     extra_compile_args = ['-fopenmp', '-O3', '-ffast-math'] + arch_flags
     extra_link_args = ['-fopenmp', '-lm']
 
-# Define the extension
+# Define extension without numpy include first (added in CustomBuildExt)
 extensions = [
     Extension(
         "blochsimulator.blochsimulator_cy",
@@ -53,13 +52,26 @@ extensions = [
             "src/blochsimulator/bloch_wrapper.pyx", 
             "src/blochsimulator/bloch_core_modified.c"
         ],
-        include_dirs=[np.get_include(), "src/blochsimulator"],
+        include_dirs=["src/blochsimulator"],
         define_macros=define_macros,
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,
         language="c"
     )
 ]
+
+# Custom build command to lazy-import numpy
+class CustomBuildExt(build_ext):
+    def build_extensions(self):
+        # Prevent numpy import at top level to allow pip to install it first
+        import numpy
+        numpy_include = numpy.get_include()
+        
+        for ext in self.extensions:
+            if numpy_include not in ext.include_dirs:
+                ext.include_dirs.append(numpy_include)
+                
+        super().build_extensions()
 
 setup(
     packages=find_packages(where="src"),
@@ -71,20 +83,8 @@ setup(
                               'wraparound': False,
                               'cdivision': True,
                           }),
-        include_package_data=True,
-        zip_safe=False,
-        install_requires=[
-            "numpy>=1.20.0",
-            "scipy>=1.7.0",
-            "matplotlib>=3.3.0",
-            "cython>=0.29.0",
-            "PyQt5>=5.15.0",
-            "pyqtgraph>=0.12.0",
-            "PyOpenGL>=3.1.0",
-            "imageio>=2.34.0",
-            "imageio-ffmpeg>=0.4.9",
-            "h5py>=3.0.0",
-            "nbformat>=5.0.0",
-        ],
-    )
-    
+    include_package_data=True,
+    zip_safe=False,
+    cmdclass={'build_ext': CustomBuildExt},
+    # Dependencies are handled by pyproject.toml [project] table
+)

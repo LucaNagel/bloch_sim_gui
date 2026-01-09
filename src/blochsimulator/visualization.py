@@ -35,7 +35,8 @@ from . import __version__
 
 try:
     import imageio
-except ImportError:  # pragma: no cover - dependency is optional at import time
+except ImportError as e:  # pragma: no cover - dependency is optional at import time
+    print(f"Warning: could not import imageio: {e}")
     imageio = None
 
 
