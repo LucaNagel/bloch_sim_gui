@@ -11,7 +11,7 @@ name = "blochsimulator"
 version = "1.0.6"
 description = "High-performance Bloch equation simulator for MRI"
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.9"
 license = "MIT"
 authors = [
     {name = "Luca Nagel"}
