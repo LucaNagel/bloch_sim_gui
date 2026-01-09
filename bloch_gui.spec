@@ -97,6 +97,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    # icon='path/to/icon.icns',
 )
 
 # COLLECT gathers all dependencies into a directory (onedir mode)
@@ -113,10 +114,15 @@ coll = COLLECT(
 
 # Bundle into .app on macOS
 if system_platform == 'Darwin':
+    icon_path = project_root / "docs" / "icon" / "MyIcon.icns"
+    if not icon_path.exists():
+        print(f"Warning: Icon not found at {icon_path}")
+        icon_path = None
+        
     app = BUNDLE(
         coll,
         name='BlochSimulator.app',
-        icon=None,
+        icon=str(icon_path) if icon_path else None,
         bundle_identifier='com.lucanagel.blochsimulator',
     )
         
