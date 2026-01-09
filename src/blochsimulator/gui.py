@@ -1335,7 +1335,7 @@ class SequenceDesigner(QGroupBox):
         tr_layout.addWidget(QLabel("TR (ms):"))
         self.tr_spin = QDoubleSpinBox()
         self.tr_spin.setRange(1, 10000)
-        self.tr_spin.setValue(100)
+        self.tr_spin.setValue(10)
         tr_layout.addWidget(self.tr_spin)
         self.tr_actual_label = QLabel("")
         self.tr_actual_label.setStyleSheet("color: #666; font-style: italic;")
@@ -1592,6 +1592,21 @@ class SequenceDesigner(QGroupBox):
             time = np.asarray(time, dtype=float)
             if b1.shape[0] != time.shape[0]:
                 raise ValueError("Custom pulse B1 and time arrays must have the same length.")
+            
+            # Extend to full TR
+            dt = time[1] - time[0] if len(time) > 1 else self.default_dt
+            current_dur = time[-1] if len(time) > 0 else 0
+            target_dur = max(tr, current_dur)
+            
+            if target_dur > current_dur + dt/2:
+                n_extra = int(np.ceil((target_dur - current_dur) / dt))
+                # Clamp to avoid huge allocations if TR is very large relative to dt
+                n_extra = min(n_extra, 1000000)
+                if n_extra > 0:
+                    b1 = np.pad(b1, (0, n_extra), 'constant')
+                    extra_time = current_dur + np.arange(1, n_extra + 1) * dt
+                    time = np.concatenate([time, extra_time])
+            
             gradients = np.zeros((len(time), 3))
             return (b1, gradients, time)
         
@@ -1652,7 +1667,7 @@ class SequenceDesigner(QGroupBox):
         else:
             # Return a simple FID using the current RF designer pulse (resampled to dt)
             dt = max(self.default_dt, 1e-6)
-            total_duration = max(te, 0.01)  # cover at least 10 ms or TE
+            total_duration = max(te, tr, 0.01)  # cover at least 10 ms, TE or TR
             # Use designer pulse if available; otherwise synthesize a calibrated rect
             pulse = None
             if hasattr(self, "parent_gui") and self.parent_gui is not None:
