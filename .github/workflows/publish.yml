@@ -55,7 +55,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            cibw_archs: "auto"
+          - os: windows-latest
+            cibw_archs: "auto"
+          - os: macos-13
+            cibw_archs: "x86_64"
+          - os: macos-14
+            cibw_archs: "arm64"
 
     steps:
       - uses: actions/checkout@v4
@@ -67,6 +75,8 @@ jobs:
       # Used to build wheels (binary packages)
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.21.0
+        env:
+          CIBW_ARCHS: ${{ matrix.cibw_archs }}
         # You can configure cibuildwheel in pyproject.toml if needed,
         # but defaults work well for most projects.
 
