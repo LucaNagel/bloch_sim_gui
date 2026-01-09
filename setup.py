@@ -32,9 +32,10 @@ elif is_mac:
 
     libomp_root = next((p for p in libomp_paths if os.path.exists(p)), None)
     if libomp_root:
+        libomp_lib = os.path.join(libomp_root, "lib")
         extra_compile_args = ['-Xpreprocessor', '-fopenmp', '-O3', '-ffast-math',
                               f'-I{os.path.join(libomp_root, "include")}'] + arch_flags
-        extra_link_args = ['-lomp', f'-L{os.path.join(libomp_root, "lib")}']
+        extra_link_args = ['-lomp', f'-L{libomp_lib}', f'-Wl,-rpath,{libomp_lib}']
     else:
         # Build without OpenMP; prange falls back to serial execution
         extra_compile_args = ['-O3', '-ffast-math'] + arch_flags

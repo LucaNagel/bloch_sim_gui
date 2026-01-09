@@ -38,7 +38,7 @@ The interface is divided into two main areas:
     *   *Time-resolved:* Simulates and stores every time point (required for animations).
     *   *Endpoint:* Only calculates the final state (faster, good for large sweeps).
 *   **Positions/Frequencies:** Set the number of spatial spins and off-resonance frequencies to simulate.
-*   **Time step:** Simulation temporal resolution (default 1.0 µs).
+*   **Time step:** Simulation temporal resolution (default 10.0 µs).
 
 ## 4. Key Use Cases & Tutorials
 
