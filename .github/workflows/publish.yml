@@ -65,7 +65,7 @@ jobs:
 
       # Used to build wheels (binary packages)
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.16.5
+        uses: pypa/cibuildwheel@v2.21.0
         # You can configure cibuildwheel in pyproject.toml if needed, 
         # but defaults work well for most projects.
 
