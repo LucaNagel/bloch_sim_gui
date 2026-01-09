@@ -197,11 +197,11 @@ In `SequenceDesigner._update_sequence_options()`, add your logic to show or hide
 ```python
 def _update_sequence_options(self):
     seq_type = self.sequence_type.currentText()
-    
+
     # Toggle visibility
     self.spin_echo_opts.setVisible(seq_type in ("Spin Echo", ...))
     self.my_seq_opts.setVisible(seq_type == "My New Sequence")
-    
+
     # Update pulse list roles if needed (e.g., Excitation only, or Excitation + Refocusing)
     if seq_type == "My New Sequence":
         roles = ["Excitation", "MyPulse"]

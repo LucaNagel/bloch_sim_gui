@@ -9,7 +9,7 @@
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
 
-  
+
       <script src="../_static/jquery.js?v=5d32c60e"></script>
       <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
       <script src="../_static/documentation_options.js?v=8d563738"></script>
@@ -17,17 +17,17 @@
       <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../genindex.html" />
-    <link rel="search" title="Search" href="../search.html" /> 
+    <link rel="search" title="Search" href="../search.html" />
 </head>
 
-<body class="wy-body-for-nav"> 
+<body class="wy-body-for-nav">
   <div class="wy-grid-for-nav">
     <nav data-toggle="wy-nav-shift" class="wy-nav-side">
       <div class="wy-side-scroll">
         <div class="wy-side-nav-search" >
 
-          
-          
+
+
           <a href="../index.html" class="icon icon-home">
             Bloch Simulator
           </a>
@@ -67,7 +67,7 @@
 </div>
           <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
            <div itemprop="articleBody">
-             
+
   <h1>Source code for kspace_simulator</h1><div class="highlight"><pre>
 <span></span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">kspace_simulator.py - K-space and spectroscopic MRI simulation</span>
@@ -148,7 +148,7 @@
     <span class="n">time_constants</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="k">lambda</span><span class="p">:</span> <span class="p">[</span><span class="mf">0.1e-3</span><span class="p">,</span> <span class="mf">1e-3</span><span class="p">])</span>
     <span class="n">axes</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="k">lambda</span><span class="p">:</span> <span class="p">[</span><span class="kc">None</span><span class="p">,</span> <span class="kc">None</span><span class="p">])</span>
     <span class="n">cross_terms</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">dict</span><span class="p">)</span>
-    
+
 <div class="viewcode-block" id="EddyCurrentModel.apply_to_gradient">
 <a class="viewcode-back" href="../modules.html#kspace_simulator.EddyCurrentModel.apply_to_gradient">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">apply_to_gradient</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">gradient</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">dt</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
@@ -169,28 +169,28 @@
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="n">ntime</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">gradient</span><span class="p">)</span>
         <span class="n">grad_actual</span> <span class="o">=</span> <span class="n">gradient</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
-        
+
         <span class="c1"># Calculate gradient derivative (rate of change)</span>
         <span class="n">grad_diff</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">diff</span><span class="p">(</span><span class="n">gradient</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">prepend</span><span class="o">=</span><span class="n">gradient</span><span class="p">[</span><span class="mi">0</span><span class="p">:</span><span class="mi">1</span><span class="p">])</span>
-        
+
         <span class="k">for</span> <span class="n">amp</span><span class="p">,</span> <span class="n">tau</span><span class="p">,</span> <span class="n">axis</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">amplitudes</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">time_constants</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">axes</span><span class="p">):</span>
             <span class="k">if</span> <span class="n">tau</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
                 <span class="k">continue</span>
-                
+
             <span class="c1"># Build impulse response: h(t) = amp * exp(-t/tau)</span>
             <span class="c1"># Length needed to capture 5 time constants</span>
             <span class="n">ir_length</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">ntime</span><span class="p">,</span> <span class="nb">int</span><span class="p">(</span><span class="mi">5</span> <span class="o">*</span> <span class="n">tau</span> <span class="o">/</span> <span class="n">dt</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span>
             <span class="n">t_ir</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">ir_length</span><span class="p">)</span> <span class="o">*</span> <span class="n">dt</span>
             <span class="n">impulse_response</span> <span class="o">=</span> <span class="n">amp</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="o">-</span><span class="n">t_ir</span> <span class="o">/</span> <span class="n">tau</span><span class="p">)</span>
-            
+
             <span class="c1"># Convolve gradient derivative with impulse response</span>
             <span class="k">for</span> <span class="n">ax_idx</span><span class="p">,</span> <span class="n">ax_name</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">([</span><span class="s1">&#39;x&#39;</span><span class="p">,</span> <span class="s1">&#39;y&#39;</span><span class="p">,</span> <span class="s1">&#39;z&#39;</span><span class="p">]):</span>
                 <span class="k">if</span> <span class="n">axis</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">axis</span> <span class="o">!=</span> <span class="n">ax_name</span><span class="p">:</span>
                     <span class="k">continue</span>
-                    
+
                 <span class="n">eddy</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">convolve</span><span class="p">(</span><span class="n">grad_diff</span><span class="p">[:,</span> <span class="n">ax_idx</span><span class="p">],</span> <span class="n">impulse_response</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="s1">&#39;full&#39;</span><span class="p">)[:</span><span class="n">ntime</span><span class="p">]</span>
                 <span class="n">grad_actual</span><span class="p">[:,</span> <span class="n">ax_idx</span><span class="p">]</span> <span class="o">-=</span> <span class="n">eddy</span>
-        
+
         <span class="c1"># Apply cross-terms</span>
         <span class="k">for</span> <span class="n">cross_key</span><span class="p">,</span> <span class="p">(</span><span class="n">amp</span><span class="p">,</span> <span class="n">tau</span><span class="p">)</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">cross_terms</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
             <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">cross_key</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">2</span><span class="p">:</span>
@@ -199,14 +199,14 @@
             <span class="n">dst_axis</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;x&#39;</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span> <span class="s1">&#39;y&#39;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s1">&#39;z&#39;</span><span class="p">:</span> <span class="mi">2</span><span class="p">}</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">cross_key</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span>
             <span class="k">if</span> <span class="n">src_axis</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">dst_axis</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
                 <span class="k">continue</span>
-                
+
             <span class="n">ir_length</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">ntime</span><span class="p">,</span> <span class="nb">int</span><span class="p">(</span><span class="mi">5</span> <span class="o">*</span> <span class="n">tau</span> <span class="o">/</span> <span class="n">dt</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span>
             <span class="n">t_ir</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">ir_length</span><span class="p">)</span> <span class="o">*</span> <span class="n">dt</span>
             <span class="n">impulse_response</span> <span class="o">=</span> <span class="n">amp</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="o">-</span><span class="n">t_ir</span> <span class="o">/</span> <span class="n">tau</span><span class="p">)</span>
-            
+
             <span class="n">eddy</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">convolve</span><span class="p">(</span><span class="n">grad_diff</span><span class="p">[:,</span> <span class="n">src_axis</span><span class="p">],</span> <span class="n">impulse_response</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="s1">&#39;full&#39;</span><span class="p">)[:</span><span class="n">ntime</span><span class="p">]</span>
             <span class="n">grad_actual</span><span class="p">[:,</span> <span class="n">dst_axis</span><span class="p">]</span> <span class="o">-=</span> <span class="n">eddy</span>
-        
+
         <span class="k">return</span> <span class="n">grad_actual</span></div>
 </div>
 
@@ -249,7 +249,7 @@
     <span class="n">n_shots</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1</span>
     <span class="n">partial_fourier</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1.0</span>
     <span class="n">flyback</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
-    
+
     <span class="nd">@property</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">lines_per_shot</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Number of phase-encode lines per shot.&quot;&quot;&quot;</span>
@@ -260,7 +260,7 @@
 
 <div class="viewcode-block" id="CSIParameters">
 <a class="viewcode-back" href="../modules.html#kspace_simulator.CSIParameters">[docs]</a>
-<span class="nd">@dataclass</span> 
+<span class="nd">@dataclass</span>
 <span class="k">class</span><span class="w"> </span><span class="nc">CSIParameters</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Parameters for Chemical Shift Imaging (CSI).</span>
@@ -283,12 +283,12 @@
     <span class="n">spectral_points</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1024</span>
     <span class="n">spectral_bandwidth</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">2000.0</span>
     <span class="n">tr</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1.5</span>
-    
+
     <span class="nd">@property</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">dwell_time</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Time between spectral samples.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="mf">1.0</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">spectral_bandwidth</span>
-    
+
     <span class="nd">@property</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">acquisition_time</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Total acquisition time per voxel.&quot;&quot;&quot;</span>
@@ -327,19 +327,19 @@
 <span class="sd">    verbose : bool</span>
 <span class="sd">        Print progress messages</span>
 <span class="sd">    &quot;&quot;&quot;</span>
-    
+
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">gamma</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">42.576e6</span><span class="p">,</span> <span class="n">verbose</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">):</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">gamma</span> <span class="o">=</span> <span class="n">gamma</span>  <span class="c1"># Hz/T</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">verbose</span> <span class="o">=</span> <span class="n">verbose</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_log_callback</span> <span class="o">=</span> <span class="kc">None</span>
-        
+
 <div class="viewcode-block" id="KSpaceSimulator.set_log_callback">
 <a class="viewcode-back" href="../modules.html#kspace_simulator.KSpaceSimulator.set_log_callback">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">set_log_callback</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">callback</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="nb">str</span><span class="p">],</span> <span class="kc">None</span><span class="p">]):</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Set callback for log messages.&quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_log_callback</span> <span class="o">=</span> <span class="n">callback</span></div>
 
-        
+
 <div class="viewcode-block" id="KSpaceSimulator.log">
 <a class="viewcode-back" href="../modules.html#kspace_simulator.KSpaceSimulator.log">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">log</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">message</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
@@ -349,14 +349,14 @@
         <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">verbose</span><span class="p">:</span>
             <span class="nb">print</span><span class="p">(</span><span class="n">message</span><span class="p">)</span></div>
 
-    
+
     <span class="c1"># =========================================================================</span>
     <span class="c1"># K-SPACE TRAJECTORY GENERATION</span>
     <span class="c1"># =========================================================================</span>
-    
+
 <div class="viewcode-block" id="KSpaceSimulator.generate_cartesian_trajectory">
 <a class="viewcode-back" href="../modules.html#kspace_simulator.KSpaceSimulator.generate_cartesian_trajectory">[docs]</a>
-    <span class="k">def</span><span class="w"> </span><span class="nf">generate_cartesian_trajectory</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> 
+    <span class="k">def</span><span class="w"> </span><span class="nf">generate_cartesian_trajectory</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span>
                                       <span class="n">matrix_size</span><span class="p">:</span> <span class="n">Tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="o">...</span><span class="p">],</span>
                                       <span class="n">fov</span><span class="p">:</span> <span class="n">Tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="o">...</span><span class="p">],</span>
                                       <span class="n">dwell_time</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">10e-6</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">:</span>
@@ -380,18 +380,18 @@
 <span class="sd">            &#39;sample_indices&#39;: indices into full k-space grid</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="n">ndim</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">matrix_size</span><span class="p">)</span>
-        
+
         <span class="c1"># k-space extent: Δk = 1/FOV, k_max = N/(2*FOV)</span>
         <span class="n">dk</span> <span class="o">=</span> <span class="p">[</span><span class="mf">1.0</span> <span class="o">/</span> <span class="n">f</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">fov</span><span class="p">]</span>
         <span class="n">k_max</span> <span class="o">=</span> <span class="p">[</span><span class="n">n</span> <span class="o">/</span> <span class="p">(</span><span class="mi">2</span> <span class="o">*</span> <span class="n">f</span><span class="p">)</span> <span class="k">for</span> <span class="n">n</span><span class="p">,</span> <span class="n">f</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">matrix_size</span><span class="p">,</span> <span class="n">fov</span><span class="p">)]</span>
-        
+
         <span class="c1"># Generate k-space coordinates</span>
         <span class="n">k_coords</span> <span class="o">=</span> <span class="p">[]</span>
         <span class="k">for</span> <span class="n">dim</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">ndim</span><span class="p">):</span>
             <span class="n">n</span> <span class="o">=</span> <span class="n">matrix_size</span><span class="p">[</span><span class="n">dim</span><span class="p">]</span>
             <span class="n">k</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">linspace</span><span class="p">(</span><span class="o">-</span><span class="n">k_max</span><span class="p">[</span><span class="n">dim</span><span class="p">],</span> <span class="n">k_max</span><span class="p">[</span><span class="n">dim</span><span class="p">],</span> <span class="n">n</span><span class="p">,</span> <span class="n">endpoint</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
             <span class="n">k_coords</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">k</span><span class="p">)</span>
-        
+
         <span class="c1"># Create meshgrid for all dimensions</span>
         <span class="k">if</span> <span class="n">ndim</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
             <span class="n">kx</span> <span class="o">=</span> <span class="n">k_coords</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
@@ -407,10 +407,10 @@
             <span class="n">kx</span> <span class="o">=</span> <span class="n">KX</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
             <span class="n">ky</span> <span class="o">=</span> <span class="n">KY</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
             <span class="n">kz</span> <span class="o">=</span> <span class="n">KZ</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
-        
+
         <span class="n">n_samples</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">kx</span><span class="p">)</span>
         <span class="n">time</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">n_samples</span><span class="p">)</span> <span class="o">*</span> <span class="n">dwell_time</span>
-        
+
         <span class="k">return</span> <span class="p">{</span>
             <span class="s1">&#39;kx&#39;</span><span class="p">:</span> <span class="n">kx</span><span class="p">,</span>
             <span class="s1">&#39;ky&#39;</span><span class="p">:</span> <span class="n">ky</span><span class="p">,</span>
@@ -422,10 +422,10 @@
             <span class="s1">&#39;trajectory_type&#39;</span><span class="p">:</span> <span class="n">TrajectoryType</span><span class="o">.</span><span class="n">CARTESIAN</span><span class="p">,</span>
         <span class="p">}</span></div>
 
-    
+
 <div class="viewcode-block" id="KSpaceSimulator.generate_epi_trajectory">
 <a class="viewcode-back" href="../modules.html#kspace_simulator.KSpaceSimulator.generate_epi_trajectory">[docs]</a>
-    <span class="k">def</span><span class="w"> </span><span class="nf">generate_epi_trajectory</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">params</span><span class="p">:</span> <span class="n">EPIParameters</span><span class="p">,</span> 
+    <span class="k">def</span><span class="w"> </span><span class="nf">generate_epi_trajectory</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">params</span><span class="p">:</span> <span class="n">EPIParameters</span><span class="p">,</span>
                                <span class="n">dt</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">4e-6</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">        Generate EPI k-space trajectory with realistic timing.</span>
@@ -449,55 +449,55 @@
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="n">nx</span><span class="p">,</span> <span class="n">ny</span> <span class="o">=</span> <span class="n">params</span><span class="o">.</span><span class="n">matrix_size</span>
         <span class="n">fov_x</span><span class="p">,</span> <span class="n">fov_y</span> <span class="o">=</span> <span class="n">params</span><span class="o">.</span><span class="n">fov</span>
-        
+
         <span class="c1"># Calculate gradient amplitudes</span>
         <span class="c1"># For Cartesian: G = dk / (γ × dt_sample) where dk = 1/FOV</span>
         <span class="c1"># Readout gradient: traverse kx in flat_time</span>
         <span class="n">dk_x</span> <span class="o">=</span> <span class="mf">1.0</span> <span class="o">/</span> <span class="n">fov_x</span>  <span class="c1"># cycles/m per sample</span>
         <span class="n">k_max_x</span> <span class="o">=</span> <span class="n">nx</span> <span class="o">/</span> <span class="p">(</span><span class="mi">2</span> <span class="o">*</span> <span class="n">fov_x</span><span class="p">)</span>  <span class="c1"># max k in x</span>
-        
+
         <span class="c1"># Gradient amplitude to traverse full kx in readout time</span>
         <span class="c1"># Δk = γ × G × Δt, so G = Δk / (γ × Δt)</span>
         <span class="c1"># Full kx range = 2 × k_max_x, traversed in flat_time</span>
         <span class="n">g_read_amplitude</span> <span class="o">=</span> <span class="p">(</span><span class="mi">2</span> <span class="o">*</span> <span class="n">k_max_x</span><span class="p">)</span> <span class="o">/</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">gamma</span> <span class="o">*</span> <span class="n">params</span><span class="o">.</span><span class="n">flat_time</span><span class="p">)</span>
         <span class="n">g_read_amplitude_gcm</span> <span class="o">=</span> <span class="n">g_read_amplitude</span> <span class="o">*</span> <span class="mf">1e-2</span>  <span class="c1"># T/m to G/cm</span>
-        
+
         <span class="c1"># Phase-encode blip: one dk_y step</span>
         <span class="n">dk_y</span> <span class="o">=</span> <span class="mf">1.0</span> <span class="o">/</span> <span class="n">fov_y</span>
         <span class="n">g_blip_amplitude</span> <span class="o">=</span> <span class="n">dk_y</span> <span class="o">/</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">gamma</span> <span class="o">*</span> <span class="n">params</span><span class="o">.</span><span class="n">blip_duration</span><span class="p">)</span>
         <span class="n">g_blip_amplitude_gcm</span> <span class="o">=</span> <span class="n">g_blip_amplitude</span> <span class="o">*</span> <span class="mf">1e-2</span>
-        
+
         <span class="c1"># Build waveforms</span>
         <span class="n">n_lines</span> <span class="o">=</span> <span class="n">params</span><span class="o">.</span><span class="n">lines_per_shot</span>
-        
+
         <span class="c1"># Time for one readout (ramp + flat + ramp)</span>
         <span class="n">readout_time</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">params</span><span class="o">.</span><span class="n">ramp_time</span> <span class="o">+</span> <span class="n">params</span><span class="o">.</span><span class="n">flat_time</span>
-        
+
         <span class="c1"># Total time estimate</span>
         <span class="n">total_time</span> <span class="o">=</span> <span class="n">n_lines</span> <span class="o">*</span> <span class="p">(</span><span class="n">readout_time</span> <span class="o">+</span> <span class="n">params</span><span class="o">.</span><span class="n">blip_duration</span><span class="p">)</span>
         <span class="n">n_points</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">total_time</span> <span class="o">/</span> <span class="n">dt</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span>
-        
+
         <span class="c1"># Initialize gradient arrays</span>
         <span class="n">gx</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">n_points</span><span class="p">)</span>
         <span class="n">gy</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">n_points</span><span class="p">)</span>
         <span class="n">gz</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">n_points</span><span class="p">)</span>
-        
+
         <span class="c1"># Build each echo</span>
         <span class="n">t_idx</span> <span class="o">=</span> <span class="mi">0</span>
         <span class="n">echo_centers</span> <span class="o">=</span> <span class="p">[]</span>
         <span class="n">line_indices</span> <span class="o">=</span> <span class="p">[]</span>
-        
+
         <span class="c1"># Pre-phase gradient (move to -kx_max, -ky_max)</span>
         <span class="c1"># For simplicity, assume instantaneous pre-phasing</span>
         <span class="c1"># In practice, this would be a separate gradient lobe</span>
-        
+
         <span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_lines</span><span class="p">):</span>
             <span class="c1"># Determine readout polarity</span>
             <span class="k">if</span> <span class="n">params</span><span class="o">.</span><span class="n">flyback</span><span class="p">:</span>
                 <span class="n">polarity</span> <span class="o">=</span> <span class="mi">1</span>
             <span class="k">else</span><span class="p">:</span>
                 <span class="n">polarity</span> <span class="o">=</span> <span class="mi">1</span> <span class="k">if</span> <span class="n">line</span> <span class="o">%</span> <span class="mi">2</span> <span class="o">==</span> <span class="mi">0</span> <span class="k">else</span> <span class="o">-</span><span class="mi">1</span>
-            
+
             <span class="c1"># Ramp up</span>
             <span class="n">n_ramp</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">params</span><span class="o">.</span><span class="n">ramp_time</span> <span class="o">/</span> <span class="n">dt</span><span class="p">)</span>
             <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_ramp</span><span class="p">):</span>
@@ -505,25 +505,25 @@
                     <span class="n">ramp_frac</span> <span class="o">=</span> <span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">/</span> <span class="n">n_ramp</span>
                     <span class="n">gx</span><span class="p">[</span><span class="n">t_idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">polarity</span> <span class="o">*</span> <span class="n">g_read_amplitude_gcm</span> <span class="o">*</span> <span class="n">ramp_frac</span>
                     <span class="n">t_idx</span> <span class="o">+=</span> <span class="mi">1</span>
-            
+
             <span class="c1"># Flat top (readout)</span>
             <span class="n">n_flat</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">params</span><span class="o">.</span><span class="n">flat_time</span> <span class="o">/</span> <span class="n">dt</span><span class="p">)</span>
             <span class="n">echo_center_idx</span> <span class="o">=</span> <span class="n">t_idx</span> <span class="o">+</span> <span class="n">n_flat</span> <span class="o">//</span> <span class="mi">2</span>
             <span class="n">echo_centers</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">echo_center_idx</span><span class="p">)</span>
             <span class="n">line_indices</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">line</span> <span class="k">if</span> <span class="n">polarity</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="k">else</span> <span class="p">(</span><span class="n">ny</span> <span class="o">-</span> <span class="mi">1</span> <span class="o">-</span> <span class="n">line</span><span class="p">)</span> <span class="k">if</span> <span class="ow">not</span> <span class="n">params</span><span class="o">.</span><span class="n">flyback</span> <span class="k">else</span> <span class="n">line</span><span class="p">)</span>
-            
+
             <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_flat</span><span class="p">):</span>
                 <span class="k">if</span> <span class="n">t_idx</span> <span class="o">&lt;</span> <span class="n">n_points</span><span class="p">:</span>
                     <span class="n">gx</span><span class="p">[</span><span class="n">t_idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">polarity</span> <span class="o">*</span> <span class="n">g_read_amplitude_gcm</span>
                     <span class="n">t_idx</span> <span class="o">+=</span> <span class="mi">1</span>
-            
+
             <span class="c1"># Ramp down</span>
             <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_ramp</span><span class="p">):</span>
                 <span class="k">if</span> <span class="n">t_idx</span> <span class="o">&lt;</span> <span class="n">n_points</span><span class="p">:</span>
                     <span class="n">ramp_frac</span> <span class="o">=</span> <span class="mf">1.0</span> <span class="o">-</span> <span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">/</span> <span class="n">n_ramp</span>
                     <span class="n">gx</span><span class="p">[</span><span class="n">t_idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">polarity</span> <span class="o">*</span> <span class="n">g_read_amplitude_gcm</span> <span class="o">*</span> <span class="n">ramp_frac</span>
                     <span class="n">t_idx</span> <span class="o">+=</span> <span class="mi">1</span>
-            
+
             <span class="c1"># Phase-encode blip (if not last line)</span>
             <span class="k">if</span> <span class="n">line</span> <span class="o">&lt;</span> <span class="n">n_lines</span> <span class="o">-</span> <span class="mi">1</span><span class="p">:</span>
                 <span class="n">n_blip</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">params</span><span class="o">.</span><span class="n">blip_duration</span> <span class="o">/</span> <span class="n">dt</span><span class="p">)</span>
@@ -531,7 +531,7 @@
                     <span class="k">if</span> <span class="n">t_idx</span> <span class="o">&lt;</span> <span class="n">n_points</span><span class="p">:</span>
                         <span class="n">gy</span><span class="p">[</span><span class="n">t_idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">g_blip_amplitude_gcm</span>
                         <span class="n">t_idx</span> <span class="o">+=</span> <span class="mi">1</span>
-            
+
             <span class="c1"># Flyback (if using flyback readout)</span>
             <span class="k">if</span> <span class="n">params</span><span class="o">.</span><span class="n">flyback</span> <span class="ow">and</span> <span class="n">line</span> <span class="o">&lt;</span> <span class="n">n_lines</span> <span class="o">-</span> <span class="mi">1</span><span class="p">:</span>
                 <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_ramp</span><span class="p">):</span>
@@ -548,22 +548,22 @@
                         <span class="n">ramp_frac</span> <span class="o">=</span> <span class="mf">1.0</span> <span class="o">-</span> <span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">/</span> <span class="n">n_ramp</span>
                         <span class="n">gx</span><span class="p">[</span><span class="n">t_idx</span><span class="p">]</span> <span class="o">=</span> <span class="o">-</span><span class="n">g_read_amplitude_gcm</span> <span class="o">*</span> <span class="n">ramp_frac</span>
                         <span class="n">t_idx</span> <span class="o">+=</span> <span class="mi">1</span>
-        
+
         <span class="c1"># Trim to actual length</span>
         <span class="n">gx</span> <span class="o">=</span> <span class="n">gx</span><span class="p">[:</span><span class="n">t_idx</span><span class="p">]</span>
         <span class="n">gy</span> <span class="o">=</span> <span class="n">gy</span><span class="p">[:</span><span class="n">t_idx</span><span class="p">]</span>
         <span class="n">gz</span> <span class="o">=</span> <span class="n">gz</span><span class="p">[:</span><span class="n">t_idx</span><span class="p">]</span>
-        
+
         <span class="c1"># Calculate k-space trajectory by integrating gradients</span>
         <span class="n">time</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">gx</span><span class="p">))</span> <span class="o">*</span> <span class="n">dt</span>
         <span class="n">kx</span><span class="p">,</span> <span class="n">ky</span><span class="p">,</span> <span class="n">kz</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_integrate_gradients</span><span class="p">(</span>
             <span class="n">np</span><span class="o">.</span><span class="n">column_stack</span><span class="p">([</span><span class="n">gx</span><span class="p">,</span> <span class="n">gy</span><span class="p">,</span> <span class="n">gz</span><span class="p">]),</span> <span class="n">dt</span>
         <span class="p">)</span>
-        
+
         <span class="c1"># Add pre-phasing offset</span>
         <span class="n">kx</span> <span class="o">=</span> <span class="n">kx</span> <span class="o">-</span> <span class="n">k_max_x</span>
         <span class="n">ky</span> <span class="o">=</span> <span class="n">ky</span> <span class="o">-</span> <span class="p">(</span><span class="n">ny</span> <span class="o">/</span> <span class="mi">2</span><span class="p">)</span> <span class="o">*</span> <span class="n">dk_y</span>
-        
+
         <span class="k">return</span> <span class="p">{</span>
             <span class="s1">&#39;kx&#39;</span><span class="p">:</span> <span class="n">kx</span><span class="p">,</span>
             <span class="s1">&#39;ky&#39;</span><span class="p">:</span> <span class="n">ky</span><span class="p">,</span>
@@ -577,7 +577,7 @@
             <span class="s1">&#39;dt&#39;</span><span class="p">:</span> <span class="n">dt</span><span class="p">,</span>
         <span class="p">}</span></div>
 
-    
+
 <div class="viewcode-block" id="KSpaceSimulator.generate_csi_trajectory">
 <a class="viewcode-back" href="../modules.html#kspace_simulator.KSpaceSimulator.generate_csi_trajectory">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">generate_csi_trajectory</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">params</span><span class="p">:</span> <span class="n">CSIParameters</span><span class="p">,</span>
@@ -602,11 +602,11 @@
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="k">if</span> <span class="n">dt</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">dt</span> <span class="o">=</span> <span class="n">params</span><span class="o">.</span><span class="n">dwell_time</span>
-            
+
         <span class="n">matrix</span> <span class="o">=</span> <span class="n">params</span><span class="o">.</span><span class="n">matrix_size</span>
         <span class="n">fov</span> <span class="o">=</span> <span class="n">params</span><span class="o">.</span><span class="n">fov</span>
         <span class="n">ndim</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">matrix</span><span class="p">)</span>
-        
+
         <span class="c1"># k-space coordinates for phase encoding</span>
         <span class="n">k_coords</span> <span class="o">=</span> <span class="p">[]</span>
         <span class="k">for</span> <span class="n">dim</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">ndim</span><span class="p">):</span>
@@ -614,7 +614,7 @@
             <span class="n">dk</span> <span class="o">=</span> <span class="mf">1.0</span> <span class="o">/</span> <span class="n">fov</span><span class="p">[</span><span class="n">dim</span><span class="p">]</span>
             <span class="n">k</span> <span class="o">=</span> <span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">n</span><span class="p">)</span> <span class="o">-</span> <span class="n">n</span> <span class="o">//</span> <span class="mi">2</span><span class="p">)</span> <span class="o">*</span> <span class="n">dk</span>
             <span class="n">k_coords</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">k</span><span class="p">)</span>
-        
+
         <span class="c1"># Create full k-space grid</span>
         <span class="k">if</span> <span class="n">ndim</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
             <span class="n">kx_grid</span> <span class="o">=</span> <span class="n">k_coords</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
@@ -630,13 +630,13 @@
             <span class="n">kx_grid</span> <span class="o">=</span> <span class="n">KX</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
             <span class="n">ky_grid</span> <span class="o">=</span> <span class="n">KY</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
             <span class="n">kz_grid</span> <span class="o">=</span> <span class="n">KZ</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
-        
+
         <span class="n">n_spatial</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">kx_grid</span><span class="p">)</span>
         <span class="n">n_spectral</span> <span class="o">=</span> <span class="n">params</span><span class="o">.</span><span class="n">spectral_points</span>
-        
+
         <span class="c1"># Time points for spectral acquisition</span>
         <span class="n">t_spectral</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">n_spectral</span><span class="p">)</span> <span class="o">*</span> <span class="n">params</span><span class="o">.</span><span class="n">dwell_time</span>
-        
+
         <span class="k">return</span> <span class="p">{</span>
             <span class="s1">&#39;kx_spatial&#39;</span><span class="p">:</span> <span class="n">kx_grid</span><span class="p">,</span>
             <span class="s1">&#39;ky_spatial&#39;</span><span class="p">:</span> <span class="n">ky_grid</span><span class="p">,</span>
@@ -649,7 +649,7 @@
             <span class="s1">&#39;dwell_time&#39;</span><span class="p">:</span> <span class="n">params</span><span class="o">.</span><span class="n">dwell_time</span><span class="p">,</span>
         <span class="p">}</span></div>
 
-    
+
     <span class="k">def</span><span class="w"> </span><span class="nf">_integrate_gradients</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">gradients</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">dt</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">        Calculate k-space trajectory from gradient waveform.</span>
@@ -670,21 +670,21 @@
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="c1"># Convert G/cm to T/m: 1 G/cm = 0.01 T/m</span>
         <span class="n">grad_T_m</span> <span class="o">=</span> <span class="n">gradients</span> <span class="o">*</span> <span class="mf">0.01</span>
-        
+
         <span class="c1"># Integrate: k = γ × cumsum(G × dt)</span>
         <span class="n">kx</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">cumsum</span><span class="p">(</span><span class="n">grad_T_m</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">])</span> <span class="o">*</span> <span class="n">dt</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">gamma</span>
         <span class="n">ky</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">cumsum</span><span class="p">(</span><span class="n">grad_T_m</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">])</span> <span class="o">*</span> <span class="n">dt</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">gamma</span>
         <span class="n">kz</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">cumsum</span><span class="p">(</span><span class="n">grad_T_m</span><span class="p">[:,</span> <span class="mi">2</span><span class="p">])</span> <span class="o">*</span> <span class="n">dt</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">gamma</span>
-        
+
         <span class="k">return</span> <span class="n">kx</span><span class="p">,</span> <span class="n">ky</span><span class="p">,</span> <span class="n">kz</span>
-    
+
     <span class="c1"># =========================================================================</span>
     <span class="c1"># SIGNAL SIMULATION</span>
     <span class="c1"># =========================================================================</span>
-    
+
 <div class="viewcode-block" id="KSpaceSimulator.simulate_signal">
 <a class="viewcode-back" href="../modules.html#kspace_simulator.KSpaceSimulator.simulate_signal">[docs]</a>
-    <span class="k">def</span><span class="w"> </span><span class="nf">simulate_signal</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> 
+    <span class="k">def</span><span class="w"> </span><span class="nf">simulate_signal</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span>
                        <span class="n">phantom</span><span class="p">,</span>
                        <span class="n">trajectory</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span>
                        <span class="n">magnetization</span><span class="p">:</span> <span class="n">Dict</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
@@ -725,10 +725,10 @@
 <span class="sd">            &#39;time&#39;: Time points</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="n">traj_type</span> <span class="o">=</span> <span class="n">trajectory</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;trajectory_type&#39;</span><span class="p">,</span> <span class="n">TrajectoryType</span><span class="o">.</span><span class="n">CUSTOM</span><span class="p">)</span>
-        
+
         <span class="k">if</span> <span class="n">traj_type</span> <span class="o">==</span> <span class="n">TrajectoryType</span><span class="o">.</span><span class="n">CSI</span><span class="p">:</span>
             <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_simulate_csi_signal</span><span class="p">(</span>
-                <span class="n">phantom</span><span class="p">,</span> <span class="n">trajectory</span><span class="p">,</span> <span class="n">magnetization</span><span class="p">,</span> 
+                <span class="n">phantom</span><span class="p">,</span> <span class="n">trajectory</span><span class="p">,</span> <span class="n">magnetization</span><span class="p">,</span>
                 <span class="n">b0_map</span><span class="p">,</span> <span class="n">coil_sensitivity</span><span class="p">,</span> <span class="n">noise_std</span>
             <span class="p">)</span>
         <span class="k">else</span><span class="p">:</span>
@@ -737,7 +737,7 @@
                 <span class="n">eddy_model</span><span class="p">,</span> <span class="n">b0_map</span><span class="p">,</span> <span class="n">coil_sensitivity</span><span class="p">,</span> <span class="n">noise_std</span>
             <span class="p">)</span></div>
 
-    
+
     <span class="k">def</span><span class="w"> </span><span class="nf">_simulate_imaging_signal</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span>
                                  <span class="n">phantom</span><span class="p">,</span>
                                  <span class="n">trajectory</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span>
@@ -747,33 +747,33 @@
                                  <span class="n">coil_sensitivity</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
                                  <span class="n">noise_std</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Simulate signal for imaging sequences (Cartesian, EPI, etc.).&quot;&quot;&quot;</span>
-        
+
         <span class="n">kx</span> <span class="o">=</span> <span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;kx&#39;</span><span class="p">]</span>
         <span class="n">ky</span> <span class="o">=</span> <span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;ky&#39;</span><span class="p">]</span>
         <span class="n">kz</span> <span class="o">=</span> <span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;kz&#39;</span><span class="p">]</span>
         <span class="n">time</span> <span class="o">=</span> <span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;time&#39;</span><span class="p">]</span>
         <span class="n">n_samples</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">kx</span><span class="p">)</span>
-        
+
         <span class="c1"># Apply eddy currents to trajectory if model provided</span>
         <span class="k">if</span> <span class="n">eddy_model</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="s1">&#39;gradients&#39;</span> <span class="ow">in</span> <span class="n">trajectory</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="s2">&quot;Applying eddy current model...&quot;</span><span class="p">)</span>
             <span class="n">dt</span> <span class="o">=</span> <span class="n">trajectory</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;dt&#39;</span><span class="p">,</span> <span class="n">time</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">-</span> <span class="n">time</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">time</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">1</span> <span class="k">else</span> <span class="mf">1e-5</span><span class="p">)</span>
             <span class="n">grad_actual</span> <span class="o">=</span> <span class="n">eddy_model</span><span class="o">.</span><span class="n">apply_to_gradient</span><span class="p">(</span><span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;gradients&#39;</span><span class="p">],</span> <span class="n">dt</span><span class="p">)</span>
             <span class="n">kx</span><span class="p">,</span> <span class="n">ky</span><span class="p">,</span> <span class="n">kz</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_integrate_gradients</span><span class="p">(</span><span class="n">grad_actual</span><span class="p">,</span> <span class="n">dt</span><span class="p">)</span>
-            
+
             <span class="c1"># Apply same pre-phase offset as original</span>
             <span class="k">if</span> <span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;trajectory_type&#39;</span><span class="p">]</span> <span class="o">==</span> <span class="n">TrajectoryType</span><span class="o">.</span><span class="n">EPI</span><span class="p">:</span>
                 <span class="n">params</span> <span class="o">=</span> <span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;params&#39;</span><span class="p">]</span>
                 <span class="n">kx</span> <span class="o">=</span> <span class="n">kx</span> <span class="o">-</span> <span class="n">params</span><span class="o">.</span><span class="n">matrix_size</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">/</span> <span class="p">(</span><span class="mi">2</span> <span class="o">*</span> <span class="n">params</span><span class="o">.</span><span class="n">fov</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
                 <span class="n">ky</span> <span class="o">=</span> <span class="n">ky</span> <span class="o">-</span> <span class="n">params</span><span class="o">.</span><span class="n">matrix_size</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">/</span> <span class="p">(</span><span class="mi">2</span> <span class="o">*</span> <span class="n">params</span><span class="o">.</span><span class="n">fov</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span>
-        
+
         <span class="c1"># Get phantom spatial positions</span>
         <span class="n">positions</span> <span class="o">=</span> <span class="n">phantom</span><span class="o">.</span><span class="n">positions</span>  <span class="c1"># (nvoxels, 3) in meters</span>
         <span class="n">nvoxels</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">positions</span><span class="p">)</span>
-        
+
         <span class="c1"># Get proton density</span>
         <span class="n">pd</span> <span class="o">=</span> <span class="n">phantom</span><span class="o">.</span><span class="n">pd_map</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
-        
+
         <span class="c1"># Get magnetization</span>
         <span class="k">if</span> <span class="n">magnetization</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="c1"># Use provided transverse magnetization</span>
@@ -790,7 +790,7 @@
         <span class="k">else</span><span class="p">:</span>
             <span class="c1"># Assume fully excited (Mxy = 1)</span>
             <span class="n">mxy</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">nvoxels</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">complex128</span><span class="p">)</span>
-        
+
         <span class="c1"># Apply coil sensitivity</span>
         <span class="k">if</span> <span class="n">coil_sensitivity</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">coil_flat</span> <span class="o">=</span> <span class="n">coil_sensitivity</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
@@ -799,56 +799,56 @@
                 <span class="n">coil_flat</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">nvoxels</span><span class="p">)</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="n">coil_flat</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">nvoxels</span><span class="p">)</span>
-        
+
         <span class="c1"># B0 inhomogeneity (frequency offset in Hz)</span>
         <span class="k">if</span> <span class="n">b0_map</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">b0_flat</span> <span class="o">=</span> <span class="n">b0_map</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="n">b0_flat</span> <span class="o">=</span> <span class="n">phantom</span><span class="o">.</span><span class="n">df_map</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span> <span class="k">if</span> <span class="n">phantom</span><span class="o">.</span><span class="n">df_map</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">nvoxels</span><span class="p">)</span>
-        
+
         <span class="bp">self</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Simulating signal: </span><span class="si">{</span><span class="n">n_samples</span><span class="si">}</span><span class="s2"> k-space points, </span><span class="si">{</span><span class="n">nvoxels</span><span class="si">}</span><span class="s2"> voxels&quot;</span><span class="p">)</span>
-        
+
         <span class="c1"># Compute signal: S(k) = Σ M_xy(r) × ρ(r) × C(r) × exp(-i·2π·k·r)</span>
         <span class="n">signal</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">n_samples</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">complex128</span><span class="p">)</span>
-        
+
         <span class="c1"># Weighted source: M_xy × ρ × C</span>
         <span class="n">source</span> <span class="o">=</span> <span class="n">mxy</span> <span class="o">*</span> <span class="n">pd</span> <span class="o">*</span> <span class="n">coil_flat</span>
-        
+
         <span class="c1"># For efficiency, vectorize over k-space points in chunks</span>
         <span class="n">chunk_size</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="mi">1000</span><span class="p">,</span> <span class="n">n_samples</span><span class="p">)</span>
-        
+
         <span class="k">for</span> <span class="n">start</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">n_samples</span><span class="p">,</span> <span class="n">chunk_size</span><span class="p">):</span>
             <span class="n">end</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">start</span> <span class="o">+</span> <span class="n">chunk_size</span><span class="p">,</span> <span class="n">n_samples</span><span class="p">)</span>
-            
+
             <span class="c1"># k-space coordinates for this chunk</span>
             <span class="n">kx_chunk</span> <span class="o">=</span> <span class="n">kx</span><span class="p">[</span><span class="n">start</span><span class="p">:</span><span class="n">end</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">newaxis</span><span class="p">]</span>  <span class="c1"># (chunk, 1)</span>
             <span class="n">ky_chunk</span> <span class="o">=</span> <span class="n">ky</span><span class="p">[</span><span class="n">start</span><span class="p">:</span><span class="n">end</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">newaxis</span><span class="p">]</span>
             <span class="n">kz_chunk</span> <span class="o">=</span> <span class="n">kz</span><span class="p">[</span><span class="n">start</span><span class="p">:</span><span class="n">end</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">newaxis</span><span class="p">]</span>
             <span class="n">t_chunk</span> <span class="o">=</span> <span class="n">time</span><span class="p">[</span><span class="n">start</span><span class="p">:</span><span class="n">end</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">newaxis</span><span class="p">]</span>
-            
+
             <span class="c1"># Position coordinates (broadcast)</span>
             <span class="n">rx</span> <span class="o">=</span> <span class="n">positions</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">]</span>  <span class="c1"># (nvoxels,)</span>
             <span class="n">ry</span> <span class="o">=</span> <span class="n">positions</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">]</span>
             <span class="n">rz</span> <span class="o">=</span> <span class="n">positions</span><span class="p">[:,</span> <span class="mi">2</span><span class="p">]</span>
-            
+
             <span class="c1"># Phase from spatial encoding: φ = 2π × (kx×x + ky×y + kz×z)</span>
             <span class="n">phase_spatial</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="p">(</span>
                 <span class="n">kx_chunk</span> <span class="o">*</span> <span class="n">rx</span> <span class="o">+</span> <span class="n">ky_chunk</span> <span class="o">*</span> <span class="n">ry</span> <span class="o">+</span> <span class="n">kz_chunk</span> <span class="o">*</span> <span class="n">rz</span>
             <span class="p">)</span>  <span class="c1"># (chunk, nvoxels)</span>
-            
+
             <span class="c1"># Phase from B0 inhomogeneity: φ = 2π × Δf × t</span>
             <span class="n">phase_b0</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="n">b0_flat</span> <span class="o">*</span> <span class="n">t_chunk</span>  <span class="c1"># (chunk, nvoxels)</span>
-            
+
             <span class="n">total_phase</span> <span class="o">=</span> <span class="n">phase_spatial</span> <span class="o">+</span> <span class="n">phase_b0</span>
-            
+
             <span class="c1"># Signal = sum over voxels</span>
             <span class="n">signal</span><span class="p">[</span><span class="n">start</span><span class="p">:</span><span class="n">end</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">source</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="n">j</span> <span class="o">*</span> <span class="n">total_phase</span><span class="p">),</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
-        
+
         <span class="c1"># Add noise</span>
         <span class="k">if</span> <span class="n">noise_std</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
             <span class="n">noise</span> <span class="o">=</span> <span class="n">noise_std</span> <span class="o">*</span> <span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">n_samples</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="n">j</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">n_samples</span><span class="p">))</span>
             <span class="n">signal</span> <span class="o">=</span> <span class="n">signal</span> <span class="o">+</span> <span class="n">noise</span>
-        
+
         <span class="k">return</span> <span class="p">{</span>
             <span class="s1">&#39;signal&#39;</span><span class="p">:</span> <span class="n">signal</span><span class="p">,</span>
             <span class="s1">&#39;kx&#39;</span><span class="p">:</span> <span class="n">kx</span><span class="p">,</span>
@@ -858,7 +858,7 @@
             <span class="s1">&#39;trajectory&#39;</span><span class="p">:</span> <span class="n">trajectory</span><span class="p">,</span>
             <span class="s1">&#39;eddy_applied&#39;</span><span class="p">:</span> <span class="n">eddy_model</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">,</span>
         <span class="p">}</span>
-    
+
     <span class="k">def</span><span class="w"> </span><span class="nf">_simulate_csi_signal</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span>
                             <span class="n">phantom</span><span class="p">,</span>
                             <span class="n">trajectory</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span>
@@ -877,27 +877,27 @@
         <span class="n">ky_spatial</span> <span class="o">=</span> <span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;ky_spatial&#39;</span><span class="p">]</span>
         <span class="n">kz_spatial</span> <span class="o">=</span> <span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;kz_spatial&#39;</span><span class="p">]</span>
         <span class="n">t_spectral</span> <span class="o">=</span> <span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;t_spectral&#39;</span><span class="p">]</span>
-        
+
         <span class="n">n_spatial</span> <span class="o">=</span> <span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;n_spatial&#39;</span><span class="p">]</span>
         <span class="n">n_spectral</span> <span class="o">=</span> <span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;n_spectral&#39;</span><span class="p">]</span>
-        
+
         <span class="c1"># Get phantom properties</span>
         <span class="n">positions</span> <span class="o">=</span> <span class="n">phantom</span><span class="o">.</span><span class="n">positions</span>
         <span class="n">nvoxels</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">positions</span><span class="p">)</span>
         <span class="n">pd</span> <span class="o">=</span> <span class="n">phantom</span><span class="o">.</span><span class="n">pd_map</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
         <span class="n">t2</span> <span class="o">=</span> <span class="n">phantom</span><span class="o">.</span><span class="n">t2_map</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
-        
+
         <span class="c1"># Frequency offsets (chemical shift + B0)</span>
         <span class="n">df</span> <span class="o">=</span> <span class="n">phantom</span><span class="o">.</span><span class="n">df_map</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span> <span class="k">if</span> <span class="n">phantom</span><span class="o">.</span><span class="n">df_map</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">nvoxels</span><span class="p">)</span>
         <span class="k">if</span> <span class="n">b0_map</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">df</span> <span class="o">=</span> <span class="n">df</span> <span class="o">+</span> <span class="n">b0_map</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
-        
+
         <span class="c1"># Coil sensitivity</span>
         <span class="k">if</span> <span class="n">coil_sensitivity</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">coil_flat</span> <span class="o">=</span> <span class="n">coil_sensitivity</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="n">coil_flat</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">nvoxels</span><span class="p">)</span>
-        
+
         <span class="c1"># Get initial magnetization</span>
         <span class="k">if</span> <span class="n">magnetization</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">mx</span> <span class="o">=</span> <span class="n">magnetization</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">&#39;mx&#39;</span><span class="p">)</span>
@@ -911,15 +911,15 @@
                 <span class="n">mxy</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">nvoxels</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">complex128</span><span class="p">)</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="n">mxy</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ones</span><span class="p">(</span><span class="n">nvoxels</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">complex128</span><span class="p">)</span>
-        
+
         <span class="bp">self</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Simulating CSI: </span><span class="si">{</span><span class="n">n_spatial</span><span class="si">}</span><span class="s2"> spatial × </span><span class="si">{</span><span class="n">n_spectral</span><span class="si">}</span><span class="s2"> spectral points&quot;</span><span class="p">)</span>
-        
+
         <span class="c1"># Output: (n_spatial, n_spectral) complex array</span>
         <span class="n">signal</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">n_spatial</span><span class="p">,</span> <span class="n">n_spectral</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">complex128</span><span class="p">)</span>
-        
+
         <span class="c1"># Source term (constant for all time)</span>
         <span class="n">source</span> <span class="o">=</span> <span class="n">mxy</span> <span class="o">*</span> <span class="n">pd</span> <span class="o">*</span> <span class="n">coil_flat</span>
-        
+
         <span class="k">for</span> <span class="n">k_idx</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_spatial</span><span class="p">):</span>
             <span class="c1"># Spatial encoding phase</span>
             <span class="n">phase_spatial</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="p">(</span>
@@ -927,25 +927,25 @@
                 <span class="n">ky_spatial</span><span class="p">[</span><span class="n">k_idx</span><span class="p">]</span> <span class="o">*</span> <span class="n">positions</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">]</span> <span class="o">+</span>
                 <span class="n">kz_spatial</span><span class="p">[</span><span class="n">k_idx</span><span class="p">]</span> <span class="o">*</span> <span class="n">positions</span><span class="p">[:,</span> <span class="mi">2</span><span class="p">]</span>
             <span class="p">)</span>
-            
+
             <span class="c1"># For each spectral point</span>
             <span class="k">for</span> <span class="n">t_idx</span><span class="p">,</span> <span class="n">t</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">t_spectral</span><span class="p">):</span>
                 <span class="c1"># T2 decay</span>
                 <span class="n">t2_decay</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="o">-</span><span class="n">t</span> <span class="o">/</span> <span class="n">np</span><span class="o">.</span><span class="n">maximum</span><span class="p">(</span><span class="n">t2</span><span class="p">,</span> <span class="mf">1e-10</span><span class="p">))</span>
-                
+
                 <span class="c1"># Chemical shift evolution</span>
                 <span class="n">phase_spectral</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="n">df</span> <span class="o">*</span> <span class="n">t</span>
-                
+
                 <span class="c1"># Total signal</span>
                 <span class="n">signal</span><span class="p">[</span><span class="n">k_idx</span><span class="p">,</span> <span class="n">t_idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span>
                     <span class="n">source</span> <span class="o">*</span> <span class="n">t2_decay</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">exp</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="n">j</span> <span class="o">*</span> <span class="p">(</span><span class="n">phase_spatial</span> <span class="o">+</span> <span class="n">phase_spectral</span><span class="p">))</span>
                 <span class="p">)</span>
-        
+
         <span class="c1"># Add noise</span>
         <span class="k">if</span> <span class="n">noise_std</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
             <span class="n">noise</span> <span class="o">=</span> <span class="n">noise_std</span> <span class="o">*</span> <span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="o">*</span><span class="n">signal</span><span class="o">.</span><span class="n">shape</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="n">j</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="o">*</span><span class="n">signal</span><span class="o">.</span><span class="n">shape</span><span class="p">))</span>
             <span class="n">signal</span> <span class="o">=</span> <span class="n">signal</span> <span class="o">+</span> <span class="n">noise</span>
-        
+
         <span class="k">return</span> <span class="p">{</span>
             <span class="s1">&#39;signal&#39;</span><span class="p">:</span> <span class="n">signal</span><span class="p">,</span>  <span class="c1"># (n_spatial, n_spectral)</span>
             <span class="s1">&#39;kx_spatial&#39;</span><span class="p">:</span> <span class="n">kx_spatial</span><span class="p">,</span>
@@ -954,11 +954,11 @@
             <span class="s1">&#39;t_spectral&#39;</span><span class="p">:</span> <span class="n">t_spectral</span><span class="p">,</span>
             <span class="s1">&#39;trajectory&#39;</span><span class="p">:</span> <span class="n">trajectory</span><span class="p">,</span>
         <span class="p">}</span>
-    
+
     <span class="c1"># =========================================================================</span>
     <span class="c1"># IMAGE RECONSTRUCTION</span>
     <span class="c1"># =========================================================================</span>
-    
+
 <div class="viewcode-block" id="KSpaceSimulator.reconstruct_cartesian">
 <a class="viewcode-back" href="../modules.html#kspace_simulator.KSpaceSimulator.reconstruct_cartesian">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">reconstruct_cartesian</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">signal_data</span><span class="p">:</span> <span class="n">Dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
@@ -978,20 +978,20 @@
         <span class="n">signal</span> <span class="o">=</span> <span class="n">signal_data</span><span class="p">[</span><span class="s1">&#39;signal&#39;</span><span class="p">]</span>
         <span class="n">trajectory</span> <span class="o">=</span> <span class="n">signal_data</span><span class="p">[</span><span class="s1">&#39;trajectory&#39;</span><span class="p">]</span>
         <span class="n">matrix_size</span> <span class="o">=</span> <span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;matrix_size&#39;</span><span class="p">]</span>
-        
+
         <span class="c1"># Reshape signal to k-space matrix</span>
         <span class="n">kspace</span> <span class="o">=</span> <span class="n">signal</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">matrix_size</span><span class="p">)</span>
-        
+
         <span class="c1"># Apply inverse FFT with proper shifting</span>
         <span class="c1"># fftshift moves DC to center, ifft2 reconstructs, ifftshift moves back</span>
         <span class="n">image</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">ifftshift</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">ifftn</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">ifftshift</span><span class="p">(</span><span class="n">kspace</span><span class="p">)))</span>
-        
+
         <span class="k">return</span> <span class="n">image</span></div>
 
-    
+
 <div class="viewcode-block" id="KSpaceSimulator.reconstruct_epi">
 <a class="viewcode-back" href="../modules.html#kspace_simulator.KSpaceSimulator.reconstruct_epi">[docs]</a>
-    <span class="k">def</span><span class="w"> </span><span class="nf">reconstruct_epi</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">signal_data</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span> 
+    <span class="k">def</span><span class="w"> </span><span class="nf">reconstruct_epi</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">signal_data</span><span class="p">:</span> <span class="n">Dict</span><span class="p">,</span>
                        <span class="n">phase_correction</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;none&#39;</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">        Reconstruct EPI with optional phase correction.</span>
@@ -1013,43 +1013,43 @@
         <span class="n">signal</span> <span class="o">=</span> <span class="n">signal_data</span><span class="p">[</span><span class="s1">&#39;signal&#39;</span><span class="p">]</span>
         <span class="n">trajectory</span> <span class="o">=</span> <span class="n">signal_data</span><span class="p">[</span><span class="s1">&#39;trajectory&#39;</span><span class="p">]</span>
         <span class="n">params</span> <span class="o">=</span> <span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;params&#39;</span><span class="p">]</span>
-        
+
         <span class="n">nx</span><span class="p">,</span> <span class="n">ny</span> <span class="o">=</span> <span class="n">params</span><span class="o">.</span><span class="n">matrix_size</span>
         <span class="n">echo_centers</span> <span class="o">=</span> <span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;echo_centers&#39;</span><span class="p">]</span>
         <span class="n">line_indices</span> <span class="o">=</span> <span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;line_indices&#39;</span><span class="p">]</span>
-        
+
         <span class="c1"># Extract data for each echo</span>
         <span class="n">n_points_per_echo</span> <span class="o">=</span> <span class="n">nx</span>  <span class="c1"># Assumes symmetric readout</span>
-        
+
         <span class="c1"># Initialize k-space</span>
         <span class="n">kspace</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">nx</span><span class="p">,</span> <span class="n">ny</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">complex128</span><span class="p">)</span>
-        
+
         <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="p">(</span><span class="n">center</span><span class="p">,</span> <span class="n">line</span><span class="p">)</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="nb">zip</span><span class="p">(</span><span class="n">echo_centers</span><span class="p">,</span> <span class="n">line_indices</span><span class="p">)):</span>
             <span class="c1"># Extract echo data</span>
             <span class="n">start</span> <span class="o">=</span> <span class="n">center</span> <span class="o">-</span> <span class="n">nx</span> <span class="o">//</span> <span class="mi">2</span>
             <span class="n">end</span> <span class="o">=</span> <span class="n">center</span> <span class="o">+</span> <span class="n">nx</span> <span class="o">//</span> <span class="mi">2</span>
-            
+
             <span class="k">if</span> <span class="n">start</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="ow">and</span> <span class="n">end</span> <span class="o">&lt;=</span> <span class="nb">len</span><span class="p">(</span><span class="n">signal</span><span class="p">):</span>
                 <span class="n">echo_data</span> <span class="o">=</span> <span class="n">signal</span><span class="p">[</span><span class="n">start</span><span class="p">:</span><span class="n">end</span><span class="p">]</span>
-                
+
                 <span class="c1"># Reverse odd echoes if bipolar readout</span>
                 <span class="k">if</span> <span class="ow">not</span> <span class="n">params</span><span class="o">.</span><span class="n">flyback</span> <span class="ow">and</span> <span class="n">i</span> <span class="o">%</span> <span class="mi">2</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
                     <span class="n">echo_data</span> <span class="o">=</span> <span class="n">echo_data</span><span class="p">[::</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
-                
+
                 <span class="c1"># Phase correction</span>
                 <span class="k">if</span> <span class="n">phase_correction</span> <span class="o">==</span> <span class="s1">&#39;linear&#39;</span><span class="p">:</span>
                     <span class="c1"># Simple linear phase correction</span>
                     <span class="c1"># In practice, this would be estimated from navigators</span>
                     <span class="k">pass</span>
-                
+
                 <span class="n">kspace</span><span class="p">[:,</span> <span class="n">line</span><span class="p">]</span> <span class="o">=</span> <span class="n">echo_data</span>
-        
+
         <span class="c1"># Reconstruct</span>
         <span class="n">image</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">ifftshift</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">ifft2</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">ifftshift</span><span class="p">(</span><span class="n">kspace</span><span class="p">)))</span>
-        
+
         <span class="k">return</span> <span class="n">image</span></div>
 
-    
+
 <div class="viewcode-block" id="KSpaceSimulator.reconstruct_csi">
 <a class="viewcode-back" href="../modules.html#kspace_simulator.KSpaceSimulator.reconstruct_csi">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">reconstruct_csi</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">signal_data</span><span class="p">:</span> <span class="n">Dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
@@ -1069,17 +1069,17 @@
         <span class="n">signal</span> <span class="o">=</span> <span class="n">signal_data</span><span class="p">[</span><span class="s1">&#39;signal&#39;</span><span class="p">]</span>  <span class="c1"># (n_spatial, n_spectral)</span>
         <span class="n">trajectory</span> <span class="o">=</span> <span class="n">signal_data</span><span class="p">[</span><span class="s1">&#39;trajectory&#39;</span><span class="p">]</span>
         <span class="n">params</span> <span class="o">=</span> <span class="n">trajectory</span><span class="p">[</span><span class="s1">&#39;params&#39;</span><span class="p">]</span>
-        
+
         <span class="n">n_spectral</span> <span class="o">=</span> <span class="n">params</span><span class="o">.</span><span class="n">spectral_points</span>
         <span class="n">spatial_shape</span> <span class="o">=</span> <span class="n">params</span><span class="o">.</span><span class="n">matrix_size</span>
-        
+
         <span class="c1"># Reshape to spatial grid</span>
         <span class="n">signal_grid</span> <span class="o">=</span> <span class="n">signal</span><span class="o">.</span><span class="n">reshape</span><span class="p">((</span><span class="o">*</span><span class="n">spatial_shape</span><span class="p">,</span> <span class="n">n_spectral</span><span class="p">))</span>
-        
+
         <span class="c1"># Spatial FFT (inverse FFT for each spectral point)</span>
         <span class="n">ndim_spatial</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">spatial_shape</span><span class="p">)</span>
         <span class="n">axes_spatial</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="n">ndim_spatial</span><span class="p">))</span>
-        
+
         <span class="c1"># Apply inverse FFT along spatial dimensions</span>
         <span class="n">image_spectral</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">ifftshift</span><span class="p">(</span>
             <span class="n">np</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">ifftn</span><span class="p">(</span>
@@ -1088,14 +1088,14 @@
             <span class="p">),</span>
             <span class="n">axes</span><span class="o">=</span><span class="n">axes_spatial</span>
         <span class="p">)</span>
-        
+
         <span class="c1"># Spectral FFT for each voxel</span>
         <span class="n">spectra</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">fftshift</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">fft</span><span class="p">(</span><span class="n">image_spectral</span><span class="p">,</span> <span class="n">axis</span><span class="o">=-</span><span class="mi">1</span><span class="p">),</span> <span class="n">axes</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span>
-        
+
         <span class="c1"># Frequency axis</span>
         <span class="n">df</span> <span class="o">=</span> <span class="mf">1.0</span> <span class="o">/</span> <span class="p">(</span><span class="n">n_spectral</span> <span class="o">*</span> <span class="n">params</span><span class="o">.</span><span class="n">dwell_time</span><span class="p">)</span>
         <span class="n">freq</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">fftshift</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">fft</span><span class="o">.</span><span class="n">fftfreq</span><span class="p">(</span><span class="n">n_spectral</span><span class="p">,</span> <span class="n">params</span><span class="o">.</span><span class="n">dwell_time</span><span class="p">))</span>
-        
+
         <span class="k">return</span> <span class="p">{</span>
             <span class="s1">&#39;spectra&#39;</span><span class="p">:</span> <span class="n">spectra</span><span class="p">,</span>  <span class="c1"># (*spatial_shape, n_spectral)</span>
             <span class="s1">&#39;frequency&#39;</span><span class="p">:</span> <span class="n">freq</span><span class="p">,</span>   <span class="c1"># Hz</span>
@@ -1111,7 +1111,7 @@
 
 <div class="viewcode-block" id="simulate_epi_with_artifacts">
 <a class="viewcode-back" href="../modules.html#kspace_simulator.simulate_epi_with_artifacts">[docs]</a>
-<span class="k">def</span><span class="w"> </span><span class="nf">simulate_epi_with_artifacts</span><span class="p">(</span><span class="n">phantom</span><span class="p">,</span> 
+<span class="k">def</span><span class="w"> </span><span class="nf">simulate_epi_with_artifacts</span><span class="p">(</span><span class="n">phantom</span><span class="p">,</span>
                                 <span class="n">epi_params</span><span class="p">:</span> <span class="n">EPIParameters</span><span class="p">,</span>
                                 <span class="n">eddy_amplitudes</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
                                 <span class="n">eddy_taus</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">float</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
@@ -1143,10 +1143,10 @@
 <span class="sd">    dict with images and intermediate data</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">sim</span> <span class="o">=</span> <span class="n">KSpaceSimulator</span><span class="p">(</span><span class="n">verbose</span><span class="o">=</span><span class="n">verbose</span><span class="p">)</span>
-    
+
     <span class="c1"># Generate trajectory</span>
     <span class="n">trajectory</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">generate_epi_trajectory</span><span class="p">(</span><span class="n">epi_params</span><span class="p">)</span>
-    
+
     <span class="c1"># Create eddy current model if specified</span>
     <span class="k">if</span> <span class="n">eddy_amplitudes</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">eddy_taus</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
         <span class="n">eddy</span> <span class="o">=</span> <span class="n">EddyCurrentModel</span><span class="p">(</span>
@@ -1155,7 +1155,7 @@
         <span class="p">)</span>
     <span class="k">else</span><span class="p">:</span>
         <span class="n">eddy</span> <span class="o">=</span> <span class="kc">None</span>
-    
+
     <span class="c1"># Simulate without eddy currents (reference)</span>
     <span class="n">result_clean</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">simulate_signal</span><span class="p">(</span>
         <span class="n">phantom</span><span class="p">,</span> <span class="n">trajectory</span><span class="p">,</span>
@@ -1163,7 +1163,7 @@
         <span class="n">noise_std</span><span class="o">=</span><span class="n">noise_level</span>
     <span class="p">)</span>
     <span class="n">image_clean</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">reconstruct_epi</span><span class="p">(</span><span class="n">result_clean</span><span class="p">)</span>
-    
+
     <span class="c1"># Simulate with eddy currents</span>
     <span class="k">if</span> <span class="n">eddy</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
         <span class="n">result_eddy</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">simulate_signal</span><span class="p">(</span>
@@ -1176,7 +1176,7 @@
     <span class="k">else</span><span class="p">:</span>
         <span class="n">result_eddy</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="n">image_eddy</span> <span class="o">=</span> <span class="kc">None</span>
-    
+
     <span class="k">return</span> <span class="p">{</span>
         <span class="s1">&#39;image_clean&#39;</span><span class="p">:</span> <span class="n">image_clean</span><span class="p">,</span>
         <span class="s1">&#39;image_eddy&#39;</span><span class="p">:</span> <span class="n">image_eddy</span><span class="p">,</span>
@@ -1213,16 +1213,16 @@
 <span class="sd">    dict with spectra and images</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">sim</span> <span class="o">=</span> <span class="n">KSpaceSimulator</span><span class="p">(</span><span class="n">verbose</span><span class="o">=</span><span class="n">verbose</span><span class="p">)</span>
-    
+
     <span class="c1"># Generate CSI trajectory</span>
     <span class="n">trajectory</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">generate_csi_trajectory</span><span class="p">(</span><span class="n">csi_params</span><span class="p">)</span>
-    
+
     <span class="c1"># Simulate signal</span>
     <span class="n">result</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">simulate_signal</span><span class="p">(</span><span class="n">phantom</span><span class="p">,</span> <span class="n">trajectory</span><span class="p">)</span>
-    
+
     <span class="c1"># Reconstruct</span>
     <span class="n">recon</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">reconstruct_csi</span><span class="p">(</span><span class="n">result</span><span class="p">)</span>
-    
+
     <span class="k">return</span> <span class="p">{</span>
         <span class="o">**</span><span class="n">recon</span><span class="p">,</span>
         <span class="s1">&#39;signal&#39;</span><span class="p">:</span> <span class="n">result</span><span class="p">[</span><span class="s1">&#39;signal&#39;</span><span class="p">],</span>
@@ -1239,7 +1239,7 @@
 <span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
     <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;K-Space Simulator Module&quot;</span><span class="p">)</span>
     <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;=&quot;</span> <span class="o">*</span> <span class="mi">50</span><span class="p">)</span>
-    
+
     <span class="c1"># Create a simple test phantom</span>
     <span class="k">try</span><span class="p">:</span>
         <span class="kn">from</span><span class="w"> </span><span class="nn">phantom</span><span class="w"> </span><span class="kn">import</span> <span class="n">PhantomFactory</span>
@@ -1248,32 +1248,32 @@
     <span class="k">except</span> <span class="ne">ImportError</span><span class="p">:</span>
         <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Phantom module not available for testing&quot;</span><span class="p">)</span>
         <span class="n">phantom</span> <span class="o">=</span> <span class="kc">None</span>
-    
+
     <span class="k">if</span> <span class="n">phantom</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
         <span class="n">sim</span> <span class="o">=</span> <span class="n">KSpaceSimulator</span><span class="p">()</span>
-        
+
         <span class="c1"># Test Cartesian trajectory</span>
         <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">Testing Cartesian trajectory...&quot;</span><span class="p">)</span>
         <span class="n">traj</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">generate_cartesian_trajectory</span><span class="p">((</span><span class="mi">32</span><span class="p">,</span> <span class="mi">32</span><span class="p">),</span> <span class="p">(</span><span class="mf">0.24</span><span class="p">,</span> <span class="mf">0.24</span><span class="p">))</span>
         <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  K-space points: </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">traj</span><span class="p">[</span><span class="s1">&#39;kx&#39;</span><span class="p">])</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
-        
+
         <span class="c1"># Test EPI trajectory</span>
         <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">Testing EPI trajectory...&quot;</span><span class="p">)</span>
         <span class="n">epi_params</span> <span class="o">=</span> <span class="n">EPIParameters</span><span class="p">(</span><span class="n">matrix_size</span><span class="o">=</span><span class="p">(</span><span class="mi">32</span><span class="p">,</span> <span class="mi">32</span><span class="p">),</span> <span class="n">fov</span><span class="o">=</span><span class="p">(</span><span class="mf">0.24</span><span class="p">,</span> <span class="mf">0.24</span><span class="p">))</span>
         <span class="n">traj_epi</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">generate_epi_trajectory</span><span class="p">(</span><span class="n">epi_params</span><span class="p">)</span>
         <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  Gradient points: </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">traj_epi</span><span class="p">[</span><span class="s1">&#39;gradients&#39;</span><span class="p">])</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
         <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  Echo centers: </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">traj_epi</span><span class="p">[</span><span class="s1">&#39;echo_centers&#39;</span><span class="p">])</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
-        
+
         <span class="c1"># Test signal simulation</span>
         <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">Testing signal simulation...&quot;</span><span class="p">)</span>
         <span class="n">result</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">simulate_signal</span><span class="p">(</span><span class="n">phantom</span><span class="p">,</span> <span class="n">traj</span><span class="p">)</span>
         <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  Signal shape: </span><span class="si">{</span><span class="n">result</span><span class="p">[</span><span class="s1">&#39;signal&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
-        
+
         <span class="c1"># Test reconstruction</span>
         <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">Testing reconstruction...&quot;</span><span class="p">)</span>
         <span class="n">image</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">reconstruct_cartesian</span><span class="p">(</span><span class="n">result</span><span class="p">)</span>
         <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  Image shape: </span><span class="si">{</span><span class="n">image</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
-        
+
         <span class="c1"># Test EPI with eddy currents</span>
         <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">Testing EPI with eddy currents...&quot;</span><span class="p">)</span>
         <span class="n">eddy</span> <span class="o">=</span> <span class="n">EddyCurrentModel</span><span class="p">(</span>
@@ -1283,7 +1283,7 @@
         <span class="n">result_epi</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">simulate_signal</span><span class="p">(</span><span class="n">phantom</span><span class="p">,</span> <span class="n">traj_epi</span><span class="p">,</span> <span class="n">eddy_model</span><span class="o">=</span><span class="n">eddy</span><span class="p">)</span>
         <span class="n">image_epi</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">reconstruct_epi</span><span class="p">(</span><span class="n">result_epi</span><span class="p">)</span>
         <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  EPI image shape: </span><span class="si">{</span><span class="n">image_epi</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
-        
+
         <span class="c1"># Test CSI</span>
         <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">Testing CSI...&quot;</span><span class="p">)</span>
         <span class="n">csi_params</span> <span class="o">=</span> <span class="n">CSIParameters</span><span class="p">(</span><span class="n">matrix_size</span><span class="o">=</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="mi">8</span><span class="p">),</span> <span class="n">spectral_points</span><span class="o">=</span><span class="mi">256</span><span class="p">)</span>
@@ -1291,7 +1291,7 @@
         <span class="n">result_csi</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">simulate_signal</span><span class="p">(</span><span class="n">phantom</span><span class="p">,</span> <span class="n">traj_csi</span><span class="p">)</span>
         <span class="n">recon_csi</span> <span class="o">=</span> <span class="n">sim</span><span class="o">.</span><span class="n">reconstruct_csi</span><span class="p">(</span><span class="n">result_csi</span><span class="p">)</span>
         <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  CSI spectra shape: </span><span class="si">{</span><span class="n">recon_csi</span><span class="p">[</span><span class="s1">&#39;spectra&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
-        
+
         <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">✓ All tests passed!&quot;</span><span class="p">)</span>
 </pre></div>
 
@@ -1308,7 +1308,7 @@
   Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
     <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
     provided by <a href="https://readthedocs.org">Read the Docs</a>.
-   
+
 
 </footer>
         </div>
@@ -1319,7 +1319,7 @@
       jQuery(function () {
           SphinxRtdTheme.Navigation.enable(true);
       });
-  </script> 
+  </script>
 
 </body>
 </html>

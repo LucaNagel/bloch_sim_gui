@@ -45,7 +45,7 @@ void adjmat(double *mat, double *adj)
 /* ======== Adjoint of a 3x3 matrix ========= */
 
 {
-*adj++ = (mat[4]*mat[8]-mat[7]*mat[5]);	
+*adj++ = (mat[4]*mat[8]-mat[7]*mat[5]);
 *adj++ =-(mat[1]*mat[8]-mat[7]*mat[2]);
 *adj++ = (mat[1]*mat[5]-mat[4]*mat[2]);
 *adj++ =-(mat[3]*mat[8]-mat[6]*mat[5]);
@@ -136,7 +136,7 @@ adjmat(mat, imat);	/* Adjoint */
 for (count=0; count<9; count++) {
 	*imat /= det;
 	imat++;
-}		
+}
 }
 
 
@@ -204,7 +204,7 @@ if (phi == 0.0)
 else
 	{
 	/* First define Cayley-Klein parameters 	*/
-	hp = phi/2;		
+	hp = phi/2;
 	cp = cos(hp);
 	sp = sin(hp)/phi;	/* /phi because n is unit length in defs. */
 	ar = cp;
@@ -231,7 +231,7 @@ else
 	*rmat++ = arar-aiai-brbr+bibi;
 	*rmat++ = -arai2-brbi2;
 	*rmat++ = -arbr2+aibi2;
-	*rmat++ =  arai2-brbi2; 
+	*rmat++ =  arai2-brbi2;
 	*rmat++ = arar-aiai+brbr-bibi;
 	*rmat++ = -aibr2-arbi2;
 	*rmat++ =  arbr2+aibi2;
@@ -287,10 +287,10 @@ return (allpos);
 
 
 
-int blochsim(double *b1real, double *b1imag, 
-		double *xgrad, double *ygrad, double *zgrad, double *tsteps, 
-		int ntime, double *e1, double *e2, double df, 
-		double dx, double dy, double dz, 
+int blochsim(double *b1real, double *b1imag,
+		double *xgrad, double *ygrad, double *zgrad, double *tsteps,
+		int ntime, double *e1, double *e2, double df,
+		double dx, double dy, double dz,
 		double *mx, double *my, double *mz, int mode)
 
 	/* Go through time for one df and one dx,dy,dz.		*/
@@ -352,7 +352,7 @@ for (tcount = 0; tcount < ntime; tcount++)
 	decmat[0]= *e2;
 	decmat[4]= *e2++;
 	decmat[8]= *e1++;
-	
+
 	if (mode == 1)
 		{
 		multmats(decmat,arot,amat);
@@ -389,10 +389,10 @@ for (tcount = 0; tcount < ntime; tcount++)
 		*my = mcurr0[1];
 		*mz = mcurr0[2];
 
-		mx++;	
-		my++;	
-		mz++;	
-		}	
+		mx++;
+		my++;
+		mz++;
+		}
 	}
 
 
@@ -423,10 +423,10 @@ return 0;
 
 
 
-int blochsimfz(double *b1real, double *b1imag, double *xgrad, double *ygrad, double *zgrad, 
-		double *tsteps, 
+int blochsimfz(double *b1real, double *b1imag, double *xgrad, double *ygrad, double *zgrad,
+		double *tsteps,
 		int ntime, double t1, double t2, double *dfreq, int nfreq,
-		double *dxpos, double *dypos, double *dzpos, int npos, 
+		double *dxpos, double *dypos, double *dzpos, int npos,
 		double *mx, double *my, double *mz, int mode)
 
 
@@ -477,31 +477,31 @@ for (fcount=0; fcount < nfreq; fcount++)
     for (poscount=0; poscount < npos; poscount++)
 
 	{
-	
+
 	if (mode == 3)	/* Steady state AND record all time points. */
 
 		{	/* First go through and find steady state, then
 				repeat as if transient starting at steady st.*/
-	
-		blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime, 
-			e1, e2, *dfreq, *dxptr, *dyptr, 
+
+		blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime,
+			e1, e2, *dfreq, *dxptr, *dyptr,
 			*dzptr, mx, my, mz, 1);
 
-		blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime, 
-			e1, e2, *dfreq, *dxptr++, *dyptr++, 
+		blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime,
+			e1, e2, *dfreq, *dxptr++, *dyptr++,
 			*dzptr++, mx, my, mz, 2);
 		}
 	else
 		{
-		blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime, 
-			e1, e2, *dfreq, *dxptr++, *dyptr++, 
+		blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime,
+			e1, e2, *dfreq, *dxptr++, *dyptr++,
 			*dzptr++, mx, my, mz, mode);
 		}
 
 	mx += ntout;
 	my += ntout;
 	mz += ntout;
-	
+
 	totcount++;
 	if ((totpoints > 40000) && ( ((10*totcount)/totpoints)> (10*(totcount-1)/totpoints) ))
 		printf("%d%% Complete.\n",(100*totcount/totpoints));
@@ -525,7 +525,7 @@ void calculate_relaxation(double t1, double t2, double dt, double *e1, double *e
         *e1 = exp(-dt / t1);
     else
         *e1 = 0.0;
-    
+
     if (t2 > 0)
         *e2 = exp(-dt / t2);
     else
@@ -555,7 +555,7 @@ void blochsim_batch(double *b1real, double *b1imag,
     #ifdef _OPENMP
     omp_set_num_threads(num_threads);
     #endif
-    
+
     /* Call the existing blochsimfz function */
     blochsimfz(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime,
                t1, t2, df, nf, dx, dy, dz, npos, mx, my, mz, mode);
@@ -631,7 +631,7 @@ void blochsim_heterogeneous(
 {
     int ntout = (mode & 2) ? ntime : 1;
     int v;
-    
+
     #ifdef _OPENMP
     omp_set_num_threads(num_threads);
     #pragma omp parallel for schedule(dynamic, 64)
@@ -644,10 +644,10 @@ void blochsim_heterogeneous(
         double pos_x = dx[v];
         double pos_y = dy[v];
         double pos_z = dz[v];
-        
+
         /* Output pointer base for this voxel */
         int base = v * ntout;
-        
+
         /* Skip if T1 or T2 are zero (background/masked voxels) */
         if (t1 <= 0.0 || t2 <= 0.0) {
             for (int t = 0; t < ntout; t++) {
@@ -657,7 +657,7 @@ void blochsim_heterogeneous(
             }
             continue;
         }
-        
+
         /* Compute E1, E2 arrays for this voxel's T1/T2 */
         double *e1 = (double *)malloc(ntime * sizeof(double));
         double *e2 = (double *)malloc(ntime * sizeof(double));
@@ -666,27 +666,27 @@ void blochsim_heterogeneous(
             if (e2) free(e2);
             continue;
         }
-        
+
         for (int t = 0; t < ntime; t++) {
             e1[t] = exp(-tsteps[t] / t1);
             e2[t] = exp(-tsteps[t] / t2);
         }
-        
+
         /* Get initial magnetization */
         double mx_start = mx_init ? mx_init[v] : 0.0;
         double my_start = my_init ? my_init[v] : 0.0;
         double mz_start = mz_init ? mz_init[v] : 1.0;
-        
+
         /* Set initial values */
         mx[base] = mx_start;
         my[base] = my_start;
         mz[base] = mz_start;
-        
+
         /* Run Bloch simulation for this voxel */
         blochsim(b1real, b1imag, gx, gy, gz, tsteps, ntime,
                  e1, e2, df, pos_x, pos_y, pos_z,
                  &mx[base], &my[base], &mz[base], mode);
-        
+
         free(e1);
         free(e2);
     }
@@ -708,21 +708,21 @@ void blochsim_heterogeneous_grouped(
     int mode, int num_threads)
 {
     int ntout = (mode & 2) ? ntime : 1;
-    
+
     /* Pre-compute E1/E2 for each tissue label - shared across all voxels with that label */
     double **e1_table = (double **)malloc(nlabels * sizeof(double *));
     double **e2_table = (double **)malloc(nlabels * sizeof(double *));
-    
+
     if (e1_table == NULL || e2_table == NULL) {
         if (e1_table) free(e1_table);
         if (e2_table) free(e2_table);
         return;
     }
-    
+
     for (int l = 0; l < nlabels; l++) {
         e1_table[l] = (double *)malloc(ntime * sizeof(double));
         e2_table[l] = (double *)malloc(ntime * sizeof(double));
-        
+
         if (e1_table[l] == NULL || e2_table[l] == NULL) {
             /* Cleanup on allocation failure */
             for (int j = 0; j <= l; j++) {
@@ -733,16 +733,16 @@ void blochsim_heterogeneous_grouped(
             free(e2_table);
             return;
         }
-        
+
         double t1 = t1_per_label[l];
         double t2 = t2_per_label[l];
-        
+
         for (int t = 0; t < ntime; t++) {
             e1_table[l][t] = (t1 > 0) ? exp(-tsteps[t] / t1) : 0.0;
             e2_table[l][t] = (t2 > 0) ? exp(-tsteps[t] / t2) : 0.0;
         }
     }
-    
+
     int v;
 
     #ifdef _OPENMP
@@ -752,7 +752,7 @@ void blochsim_heterogeneous_grouped(
     for (v = 0; v < nvoxels; v++) {
         int label = tissue_labels[v];
         int base = v * ntout;
-        
+
         /* Skip background (label < 0) or invalid labels */
         if (label < 0 || label >= nlabels) {
             for (int t = 0; t < ntout; t++) {
@@ -762,7 +762,7 @@ void blochsim_heterogeneous_grouped(
             }
             continue;
         }
-        
+
         /* Check if this tissue has valid T1/T2 */
         double t1 = t1_per_label[label];
         double t2 = t2_per_label[label];
@@ -774,21 +774,21 @@ void blochsim_heterogeneous_grouped(
             }
             continue;
         }
-        
+
         double *e1 = e1_table[label];
         double *e2 = e2_table[label];
         double df = df_arr[v];
-        
+
         /* Set initial magnetization */
         mx[base] = mx_init ? mx_init[v] : 0.0;
         my[base] = my_init ? my_init[v] : 0.0;
         mz[base] = mz_init ? mz_init[v] : 1.0;
-        
+
         blochsim(b1real, b1imag, gx, gy, gz, tsteps, ntime,
                  e1, e2, df, dx[v], dy[v], dz[v],
                  &mx[base], &my[base], &mz[base], mode);
     }
-    
+
     /* Cleanup */
     for (int l = 0; l < nlabels; l++) {
         free(e1_table[l]);

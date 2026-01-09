@@ -1,4 +1,4 @@
-#include "mex.h" 
+#include "mex.h"
 #include <stdio.h>
 #include <math.h>
 
@@ -39,7 +39,7 @@ void adjmat(double *mat, double *adj)
 /* ======== Adjoint of a 3x3 matrix ========= */
 
 {
-*adj++ = (mat[4]*mat[8]-mat[7]*mat[5]);	
+*adj++ = (mat[4]*mat[8]-mat[7]*mat[5]);
 *adj++ =-(mat[1]*mat[8]-mat[7]*mat[2]);
 *adj++ = (mat[1]*mat[5]-mat[4]*mat[2]);
 *adj++ =-(mat[3]*mat[8]-mat[6]*mat[5]);
@@ -128,7 +128,7 @@ det = detmat(mat);	/* Determinant */
 adjmat(mat, imat);	/* Adjoint */
 
 for (count=0; count<9; count++)
-	*imat = *imat++ / det;		
+	*imat = *imat++ / det;
 }
 
 
@@ -196,7 +196,7 @@ if (phi == 0.0)
 else
 	{
 	/* First define Cayley-Klein parameters 	*/
-	hp = phi/2;		
+	hp = phi/2;
 	cp = cos(hp);
 	sp = sin(hp)/phi;	/* /phi because n is unit length in defs. */
 	ar = cp;
@@ -223,7 +223,7 @@ else
 	*rmat++ = arar-aiai-brbr+bibi;
 	*rmat++ = -arai2-brbi2;
 	*rmat++ = -arbr2+aibi2;
-	*rmat++ =  arai2-brbi2; 
+	*rmat++ =  arai2-brbi2;
 	*rmat++ = arar-aiai+brbr-bibi;
 	*rmat++ = -aibr2-arbi2;
 	*rmat++ =  arbr2+aibi2;
@@ -279,10 +279,10 @@ return (allpos);
 
 
 
-int blochsim(double *b1real, double *b1imag, 
-		double *xgrad, double *ygrad, double *zgrad, double *tsteps, 
-		int ntime, double *e1, double *e2, double df, 
-		double dx, double dy, double dz, 
+int blochsim(double *b1real, double *b1imag,
+		double *xgrad, double *ygrad, double *zgrad, double *tsteps,
+		int ntime, double *e1, double *e2, double df,
+		double dx, double dy, double dz,
 		double *mx, double *my, double *mz, int mode)
 
 	/* Go through time for one df and one dx,dy,dz.		*/
@@ -347,7 +347,7 @@ for (tcount = 0; tcount < ntime; tcount++)
 	decmat[0]= *e2;
 	decmat[4]= *e2++;
 	decmat[8]= *e1++;
-	
+
 	if (mode == 1)
 		{
 		multmats(decmat,arot,amat);
@@ -384,10 +384,10 @@ for (tcount = 0; tcount < ntime; tcount++)
 		*my = mcurr0[1];
 		*mz = mcurr0[2];
 
-		mx++;	
-		my++;	
-		mz++;	
-		}	
+		mx++;
+		my++;
+		mz++;
+		}
 	}
 
 
@@ -418,10 +418,10 @@ else if (mode==1)	/* Indicates to find steady-state magnetization */
 
 
 
-int blochsimfz(double *b1real, double *b1imag, double *xgrad, double *ygrad, double *zgrad, 
-		double *tsteps, 
+int blochsimfz(double *b1real, double *b1imag, double *xgrad, double *ygrad, double *zgrad,
+		double *tsteps,
 		int ntime, double t1, double t2, double *dfreq, int nfreq,
-		double *dxpos, double *dypos, double *dzpos, int npos, 
+		double *dxpos, double *dypos, double *dzpos, int npos,
 		double *mx, double *my, double *mz, int mode)
 
 
@@ -472,31 +472,31 @@ for (fcount=0; fcount < nfreq; fcount++)
     for (poscount=0; poscount < npos; poscount++)
 
 	{
-	
+
 	if (mode == 3)	/* Steady state AND record all time points. */
 
 		{	/* First go through and find steady state, then
 				repeat as if transient starting at steady st.*/
-	
-		blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime, 
-			e1, e2, *dfreq, *dxptr, *dyptr, 
+
+		blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime,
+			e1, e2, *dfreq, *dxptr, *dyptr,
 			*dzptr, mx, my, mz, 1);
 
-		blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime, 
-			e1, e2, *dfreq, *dxptr++, *dyptr++, 
+		blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime,
+			e1, e2, *dfreq, *dxptr++, *dyptr++,
 			*dzptr++, mx, my, mz, 2);
 		}
 	else
 		{
-		blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime, 
-			e1, e2, *dfreq, *dxptr++, *dyptr++, 
+		blochsim(b1real, b1imag, xgrad, ygrad, zgrad, tsteps, ntime,
+			e1, e2, *dfreq, *dxptr++, *dyptr++,
 			*dzptr++, mx, my, mz, mode);
 		}
 
 	mx += ntout;
 	my += ntout;
 	mz += ntout;
-	
+
 	totcount++;
 	if ((totpoints > 40000) && ( ((10*totcount)/totpoints)> (10*(totcount-1)/totpoints) ))
 		printf("%d%% Complete.\n",(100*totcount/totpoints));
@@ -541,10 +541,10 @@ double *mx;	/* Output Arrays */
 double *my;
 double *mz;
 
-int gyaflag=0;	/* 1 if gy was allocated. */ 
-int gzaflag=0;	/* 1 if gy was allocated. */ 
-int dyaflag=0;	/* 1 if dy was allocated. */ 
-int dzaflag=0;	/* 1 if dy was allocated. */ 
+int gyaflag=0;	/* 1 if gy was allocated. */
+int gzaflag=0;	/* 1 if gy was allocated. */
+int dyaflag=0;	/* 1 if dy was allocated. */
+int dzaflag=0;	/* 1 if dy was allocated. */
 
 int ntime;	/* Number of time points. 	 */
 int ntout;	/* Number of time poitns at output. */
@@ -629,7 +629,7 @@ else
 
 	/* Warning if Gradient length is not 1x, 2x, or 3x RF length. */
 
-	
+
 #ifdef DEBUG
   printf("%d Gradient Points (total) \n",ngrad);
 #endif
@@ -637,11 +637,11 @@ if ( (ngrad != ntime) && (ngrad != 2*ntime) && (ngrad != 3*ntime) )
 		printf("Gradient length differs from B1 length\n");
 
 
-if (gx == NULL) 
+if (gx == NULL)
 	printf("ERROR:  gx is not allocated. \n");
-if (gy == NULL) 
+if (gy == NULL)
 	printf("ERROR:  gy is not allocated. \n");
-if (gz == NULL) 
+if (gz == NULL)
 	printf("ERROR:  gz is not allocated. \n");
 
 
@@ -668,7 +668,7 @@ if (mxGetM(prhs[2]) * mxGetN(prhs[2]) == 1)	/* === Case 1 === */
 else if (mxGetM(prhs[2]) * mxGetN(prhs[2]) != ntime)
 	printf("Time-point length differs from B1 length\n");
 
-else	
+else
 	{
 	tp = mxGetPr(prhs[2]);
 	ti = (double *)malloc(ntime * sizeof(double));
@@ -689,7 +689,7 @@ t2 = *mxGetPr(prhs[4]);
 
 df = mxGetPr(prhs[5]);
 nf = mxGetM(prhs[5]) * mxGetN(prhs[5]);
-	
+
 #ifdef DEBUG
   printf("%d Frequency points.\n",nf);
 #endif
@@ -748,28 +748,28 @@ else				/* Either 1xN, Nx1 or something random.  In all these
 		dz[count]=0.0;
 		}
 	#ifdef DEBUG
-	  if ((nposM !=1) && (nposN!=1))		
+	  if ((nposM !=1) && (nposN!=1))
 		{
 		printf("Position vector should be 1xN, Nx1, Nx2 or Nx3. \n");
 		printf(" -> Assuming 1 position dimension is given. \n");
-		}	
+		}
 	#endif
 	}
 
-if (dx == NULL) 
+if (dx == NULL)
 	printf("ERROR:  dx is not allocated. \n");
-if (dy == NULL) 
+if (dy == NULL)
 	printf("ERROR:  dy is not allocated. \n");
-if (dz == NULL) 
+if (dz == NULL)
 	printf("ERROR:  dz is not allocated. \n");
 
-nfnpos = nf*npos;	/* Just used to speed things up below. 	*/ 
+nfnpos = nf*npos;	/* Just used to speed things up below. 	*/
 
 
 /* ===== Mode, defaults to 0 (simulate single endpoint, transient). ==== */
 
 if (nrhs > 7)
-	md = (int)(*mxGetPr(prhs[7]));		
+	md = (int)(*mxGetPr(prhs[7]));
 else
 	md = 0;
 
@@ -816,16 +816,16 @@ mzout = mz;
 
 /* ===== If Initial Magnetization is given... */
 
-if ( (nrhs > 10) &&	 
+if ( (nrhs > 10) &&
 	(mxGetM(prhs[8]) * mxGetN(prhs[8]) == nfnpos) &&
         (mxGetM(prhs[9]) * mxGetN(prhs[9]) == nfnpos) &&
         (mxGetM(prhs[10]) * mxGetN(prhs[10]) == nfnpos)  )
 
-		/* Set output magnetization to that passed. 
-			If multiple time points, then just the 
+		/* Set output magnetization to that passed.
+			If multiple time points, then just the
 			first is set.				*/
 
-		
+
 	{
 	#ifdef DEBUG
   	  printf("Using Specified Initial Magnetization.\n");
@@ -844,7 +844,7 @@ if ( (nrhs > 10) &&
 		mzout += ntout;
 		}
 	}
-else 
+else
 	{
 	#ifdef DEBUG
 	if (nrhs > 10) 	 /* Magnetization given, but wrong size! */
@@ -862,7 +862,7 @@ else
 		myout += ntout;
 		mzout += ntout;
 		}
-	}	
+	}
 
 
 /* ======= Do The Simulation! ====== */
@@ -887,7 +887,7 @@ if ((ntout > 1) && (nf > 1) && (npos > 1))
 	}
 else			/* Basically "squeeze" the matrix. */
 	{
-	if (ntout > 1)	
+	if (ntout > 1)
 		{
 		outsize[0]=ntout;
 		outsize[1]=npos*nf;

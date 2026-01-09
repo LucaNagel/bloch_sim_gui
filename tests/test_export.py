@@ -13,6 +13,7 @@ import h5py
 import json
 from pathlib import Path
 
+
 def test_enhanced_export():
     """Test the enhanced export functionality."""
 
@@ -34,7 +35,7 @@ def test_enhanced_export():
         tissue,
         positions=positions,
         frequencies=frequencies,
-        mode=2  # Time-resolved
+        mode=2,  # Time-resolved
     )
 
     print(f"   ✓ Simulation complete: {result['mx'].shape} samples")
@@ -42,18 +43,18 @@ def test_enhanced_export():
     # 2. Prepare parameters for export
     print("\n2. Preparing parameters...")
     sequence_params = {
-        'sequence_type': 'Spin Echo',
-        'te': 20e-3,
-        'tr': 500e-3,
-        'flip_angle': 90.0,
+        "sequence_type": "Spin Echo",
+        "te": 20e-3,
+        "tr": 500e-3,
+        "flip_angle": 90.0,
     }
 
     simulation_params = {
-        'mode': 'time-resolved',
-        'time_step_us': 1.0,
-        'num_positions': 3,
-        'num_frequencies': 3,
-        'use_parallel': False,
+        "mode": "time-resolved",
+        "time_step_us": 1.0,
+        "num_positions": 3,
+        "num_frequencies": 3,
+        "use_parallel": False,
     }
 
     # 3. Test HDF5 export
@@ -64,7 +65,7 @@ def test_enhanced_export():
 
     # 4. Verify HDF5 contents
     print("\n4. Verifying HDF5 contents...")
-    with h5py.File(h5_file, 'r') as f:
+    with h5py.File(h5_file, "r") as f:
         print(f"   Data arrays:")
         print(f"     - mx: {f['mx'].shape}")
         print(f"     - my: {f['my'].shape}")
@@ -72,17 +73,17 @@ def test_enhanced_export():
         print(f"     - signal: {f['signal'].shape}")
 
         print(f"\n   Tissue parameters:")
-        for key, value in f['tissue'].attrs.items():
+        for key, value in f["tissue"].attrs.items():
             print(f"     - {key}: {value}")
 
-        if 'sequence_parameters' in f:
+        if "sequence_parameters" in f:
             print(f"\n   Sequence parameters:")
-            for key, value in f['sequence_parameters'].attrs.items():
+            for key, value in f["sequence_parameters"].attrs.items():
                 print(f"     - {key}: {value}")
 
-        if 'simulation_parameters' in f:
+        if "simulation_parameters" in f:
             print(f"\n   Simulation parameters:")
-            for key, value in f['simulation_parameters'].attrs.items():
+            for key, value in f["simulation_parameters"].attrs.items():
                 print(f"     - {key}: {value}")
 
         print(f"\n   Metadata:")
@@ -97,7 +98,7 @@ def test_enhanced_export():
 
     # 6. Verify JSON contents
     print("\n6. Verifying JSON contents...")
-    with open(json_file, 'r') as f:
+    with open(json_file, "r") as f:
         params = json.load(f)
 
     print(f"   JSON structure:")
@@ -105,7 +106,7 @@ def test_enhanced_export():
         print(f"     - {key}")
 
     print(f"\n   Tissue parameters from JSON:")
-    for key, value in params['tissue_parameters'].items():
+    for key, value in params["tissue_parameters"].items():
         print(f"     - {key}: {value}")
 
     # 7. Clean up
@@ -126,6 +127,7 @@ def test_enhanced_export():
     print("- Test in GUI with real simulations")
     print("- Gather user feedback on export format")
     print("- Move to Phase 2: Jupyter notebook export")
+
 
 if __name__ == "__main__":
     test_enhanced_export()

@@ -26,32 +26,34 @@ REQUIRED_MODULES = [
     ("cython", "C-extension compilation support"),
 ]
 
+
 class TestDependencies(unittest.TestCase):
     """Test that the environment is correctly set up with all dependencies."""
 
     def test_required_modules(self):
         """
         Iterate through all critical modules and verify they can be imported.
-        
+
         This prevents runtime crashes or silent failures (like missing export options)
         due to incomplete environments.
         """
         missing_modules = []
-        
+
         for module_name, description in REQUIRED_MODULES:
             with self.subTest(module=module_name):
                 try:
                     importlib.import_module(module_name)
                 except ImportError:
                     missing_modules.append(f"{module_name} ({description})")
-        
+
         if missing_modules:
             failure_msg = (
-                f"\n\nMissing {len(missing_modules)} required dependencies:\n" + 
-                "\n".join(f"  - {m}" for m in missing_modules) + 
-                "\nPlease run: pip install -e ."
+                f"\n\nMissing {len(missing_modules)} required dependencies:\n"
+                + "\n".join(f"  - {m}" for m in missing_modules)
+                + "\nPlease run: pip install -e ."
             )
             self.fail(failure_msg)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

@@ -8,7 +8,7 @@ import os
 
 # Ensure the src directory is in the python path
 # This allows running from source without installation
-src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src')
+src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
 if src_path not in sys.path:
     sys.path.insert(0, src_path)
 

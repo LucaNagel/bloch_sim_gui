@@ -36,14 +36,14 @@ void zerovec(double *vec);
 int times2intervals(double *endtimes, double *intervals, long n);
 
 /* Core Bloch simulation functions */
-int blochsim(double *b1real, double *b1imag, 
-            double *xgrad, double *ygrad, double *zgrad, double *tsteps, 
-            int ntime, double *e1, double *e2, double df, 
-            double dx, double dy, double dz, 
+int blochsim(double *b1real, double *b1imag,
+            double *xgrad, double *ygrad, double *zgrad, double *tsteps,
+            int ntime, double *e1, double *e2, double df,
+            double dx, double dy, double dz,
             double *mx, double *my, double *mz, int mode);
 
 int blochsimfz(double *b1r, double *b1i, double *gx, double *gy, double *gz,
-               double *tp, int ntime, double t1, double t2, double *df, int nf, 
+               double *tp, int ntime, double t1, double t2, double *df, int nf,
                double *dx, double *dy, double *dz, int npos,
                double *mx, double *my, double *mz, int mode);
 

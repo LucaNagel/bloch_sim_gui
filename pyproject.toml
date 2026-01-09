@@ -38,3 +38,8 @@ blochsimulator-gui = "blochsimulator.gui:main"
 
 [tool.cibuildwheel]
 skip = "pp* *musllinux*"
+
+[tool.black]
+line-length = 88
+target-version = ['py39']
+include = '\.pyi?$'

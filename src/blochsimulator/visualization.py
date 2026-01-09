@@ -14,7 +14,10 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, Union, Dict, Tuple, List, Callable
 import pyqtgraph as pg
-from pyqtgraph.exporters import ImageExporter as PgImageExporter, SVGExporter as PgSVGExporter
+from pyqtgraph.exporters import (
+    ImageExporter as PgImageExporter,
+    SVGExporter as PgSVGExporter,
+)
 from PyQt5.QtWidgets import (
     QWidget,
     QDialog,
@@ -50,9 +53,14 @@ class ImageExporter:
     def __init__(self):
         self.default_dpi = 300  # For print quality
 
-    def export_pyqtgraph_plot(self, plot_widget: pg.PlotWidget, filename: str,
-                              format: str = 'png', width: Optional[int] = None,
-                              height: Optional[int] = None) -> bool:
+    def export_pyqtgraph_plot(
+        self,
+        plot_widget: pg.PlotWidget,
+        filename: str,
+        format: str = "png",
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+    ) -> bool:
         """
         Export a PyQtGraph PlotWidget to an image file.
 
@@ -79,13 +87,13 @@ class ImageExporter:
 
             # Ensure filename has correct extension
             filepath = Path(filename)
-            if filepath.suffix.lower() != f'.{format}':
-                filepath = filepath.with_suffix(f'.{format}')
+            if filepath.suffix.lower() != f".{format}":
+                filepath = filepath.with_suffix(f".{format}")
 
             # Ensure parent directory exists
             filepath.parent.mkdir(parents=True, exist_ok=True)
 
-            if format == 'png':
+            if format == "png":
                 # Use ImageExporter for PNG
                 exporter = PgImageExporter(plot_widget.plotItem)
 
@@ -95,27 +103,29 @@ class ImageExporter:
                     scale_factor = self.default_dpi / 96.0
                     width = int(plot_widget.width() * scale_factor)
 
-                exporter.parameters()['width'] = width
+                exporter.parameters()["width"] = width
                 exporter.export(str(filepath))
 
-            elif format == 'svg':
+            elif format == "svg":
                 # Use SVGExporter for vector format
                 exporter = PgSVGExporter(plot_widget.plotItem)
                 exporter.export(str(filepath))
 
-            elif format == 'pdf':
+            elif format == "pdf":
                 # PyQtGraph doesn't have native PDF export, convert SVG to PDF
                 # For now, we'll use the SVG exporter and let the user convert
                 # A future enhancement could use reportlab or similar
                 exporter = PgSVGExporter(plot_widget.plotItem)
-                svg_path = filepath.with_suffix('.svg')
+                svg_path = filepath.with_suffix(".svg")
                 exporter.export(str(svg_path))
 
                 # Inform user that PDF export created SVG instead
                 return str(svg_path)
 
             else:
-                raise ValueError(f"Unsupported format: {format}. Use 'png', 'svg', or 'pdf'.")
+                raise ValueError(
+                    f"Unsupported format: {format}. Use 'png', 'svg', or 'pdf'."
+                )
 
             # Verify the file was actually created
             if not filepath.exists():
@@ -126,12 +136,14 @@ class ImageExporter:
 
         except Exception as e:
             import traceback
+
             print(f"Error exporting plot: {e}")
             traceback.print_exc()
             return False
 
-    def export_widget_screenshot(self, widget: QWidget, filename: str,
-                                 format: str = 'png') -> bool:
+    def export_widget_screenshot(
+        self, widget: QWidget, filename: str, format: str = "png"
+    ) -> bool:
         """
         Export a Qt widget as a screenshot image.
 
@@ -156,18 +168,20 @@ class ImageExporter:
 
             # Ensure filename has correct extension
             filepath = Path(filename)
-            if filepath.suffix.lower() != f'.{format}':
-                filepath = filepath.with_suffix(f'.{format}')
+            if filepath.suffix.lower() != f".{format}":
+                filepath = filepath.with_suffix(f".{format}")
 
             # Capture widget as pixmap
             pixmap = widget.grab()
-            if format == 'svg':
+            if format == "svg":
                 # Embed PNG in simple SVG wrapper for compatibility
-                image = pixmap.toImage().convertToFormat(pixmap.toImage().Format_RGBA8888)
+                image = pixmap.toImage().convertToFormat(
+                    pixmap.toImage().Format_RGBA8888
+                )
                 buffer = QBuffer()
                 buffer.open(QBuffer.ReadWrite)
                 image.save(buffer, "PNG")
-                b64 = buffer.data().toBase64().data().decode('ascii')
+                b64 = buffer.data().toBase64().data().decode("ascii")
                 width = image.width()
                 height = image.height()
                 svg_content = (
@@ -193,8 +207,13 @@ class ImageExporter:
             print(f"Error exporting widget screenshot: {e}")
             return False
 
-    def export_multiple_plots(self, plot_widgets: list, filename: str,
-                             format: str = 'png', layout: str = 'vertical') -> bool:
+    def export_multiple_plots(
+        self,
+        plot_widgets: list,
+        filename: str,
+        format: str = "png",
+        layout: str = "vertical",
+    ) -> bool:
         """
         Export multiple plots to a single image file.
 
@@ -216,8 +235,10 @@ class ImageExporter:
         """
         # This is a placeholder for future multi-plot export
         # For now, we'll export plots individually
-        raise NotImplementedError("Multi-plot export not yet implemented. "
-                                 "Export plots individually for now.")
+        raise NotImplementedError(
+            "Multi-plot export not yet implemented. "
+            "Export plots individually for now."
+        )
 
 
 class ExportImageDialog(QDialog):
@@ -227,12 +248,17 @@ class ExportImageDialog(QDialog):
     Allows user to select format, resolution, and output file.
     """
 
-    def __init__(self, parent=None, default_filename: str = "export", default_directory: Path = None):
+    def __init__(
+        self,
+        parent=None,
+        default_filename: str = "export",
+        default_directory: Path = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Export Image")
         self.default_filename = default_filename
         self.default_directory = default_directory if default_directory else Path.cwd()
-        self.selected_format = 'png'
+        self.selected_format = "png"
         self.selected_width = None
         self.output_path = None
 
@@ -245,7 +271,7 @@ class ExportImageDialog(QDialog):
         format_layout = QHBoxLayout()
         format_layout.addWidget(QLabel("Format:"))
         self.format_combo = QComboBox()
-        self.format_combo.addItems(['PNG (Raster)', 'SVG (Vector)', 'PDF (Vector)'])
+        self.format_combo.addItems(["PNG (Raster)", "SVG (Vector)", "PDF (Vector)"])
         self.format_combo.currentIndexChanged.connect(self._on_format_changed)
         format_layout.addWidget(self.format_combo)
         layout.addLayout(format_layout)
@@ -280,39 +306,47 @@ class ExportImageDialog(QDialog):
 
     def _on_format_changed(self, index):
         """Handle format selection change."""
-        formats = ['png', 'svg', 'pdf']
+        formats = ["png", "svg", "pdf"]
         self.selected_format = formats[index]
 
         # Show/hide resolution controls based on format
-        is_raster = (self.selected_format == 'png')
+        is_raster = self.selected_format == "png"
         self.width_spin.setEnabled(is_raster)
 
         if is_raster:
-            self.info_label.setText("High quality (300 DPI) - suitable for publications")
+            self.info_label.setText(
+                "High quality (300 DPI) - suitable for publications"
+            )
         else:
-            self.info_label.setText("Vector format - infinitely scalable, ideal for publications")
+            self.info_label.setText(
+                "Vector format - infinitely scalable, ideal for publications"
+            )
 
     def _on_export_clicked(self):
         """Open file dialog and export."""
         format_filters = {
-            'png': "PNG Images (*.png)",
-            'svg': "SVG Images (*.svg)",
-            'pdf': "PDF Documents (*.pdf)"
+            "png": "PNG Images (*.png)",
+            "svg": "SVG Images (*.svg)",
+            "pdf": "PDF Documents (*.pdf)",
         }
 
         # Use default directory for initial location
-        default_path = self.default_directory / f"{self.default_filename}.{self.selected_format}"
+        default_path = (
+            self.default_directory / f"{self.default_filename}.{self.selected_format}"
+        )
 
         filename, _ = QFileDialog.getSaveFileName(
             self,
             "Export Image",
             str(default_path),
-            format_filters[self.selected_format]
+            format_filters[self.selected_format],
         )
 
         if filename:
             self.output_path = filename
-            self.selected_width = self.width_spin.value() if self.selected_format == 'png' else None
+            self.selected_width = (
+                self.width_spin.value() if self.selected_format == "png" else None
+            )
             self.accept()
 
     def get_export_params(self) -> Dict:
@@ -325,9 +359,9 @@ class ExportImageDialog(QDialog):
             Dictionary with 'filename', 'format', and 'width' keys
         """
         return {
-            'filename': self.output_path,
-            'format': self.selected_format,
-            'width': self.selected_width
+            "filename": self.output_path,
+            "format": self.selected_format,
+            "width": self.selected_width,
         }
 
 
@@ -336,14 +370,19 @@ class ExportAnimationDialog(QDialog):
     Dialog for configuring animation export options.
     """
 
-    def __init__(self, parent=None, total_frames: int = 0, default_filename: str = "animation",
-                 default_directory: Path = None):
+    def __init__(
+        self,
+        parent=None,
+        total_frames: int = 0,
+        default_filename: str = "animation",
+        default_directory: Path = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Export Animation")
         self.default_directory = default_directory if default_directory else Path.cwd()
         self.default_filename = default_filename
         self.total_frames = max(total_frames, 0)
-        self.selected_format = 'mp4'
+        self.selected_format = "mp4"
         self.output_path = None
 
         self.init_ui()
@@ -355,7 +394,7 @@ class ExportAnimationDialog(QDialog):
         format_layout = QHBoxLayout()
         format_layout.addWidget(QLabel("Format:"))
         self.format_combo = QComboBox()
-        self.format_combo.addItems(['MP4', 'GIF'])
+        self.format_combo.addItems(["MP4", "GIF"])
         format_layout.addWidget(self.format_combo)
         layout.addLayout(format_layout)
 
@@ -415,9 +454,13 @@ class ExportAnimationDialog(QDialog):
         layout.addWidget(self.mean_only_checkbox)
 
         # Include sequence diagram option
-        self.include_sequence_checkbox = QCheckBox("Export sequence diagram as separate file")
+        self.include_sequence_checkbox = QCheckBox(
+            "Export sequence diagram as separate file"
+        )
         self.include_sequence_checkbox.setChecked(False)
-        self.include_sequence_checkbox.setToolTip("If checked, also export the sequence diagram as its own animation.")
+        self.include_sequence_checkbox.setToolTip(
+            "If checked, also export the sequence diagram as its own animation."
+        )
         layout.addWidget(self.include_sequence_checkbox)
 
         # Buttons
@@ -441,19 +484,18 @@ class ExportAnimationDialog(QDialog):
             self.end_spin.setValue(start)
 
     def _on_export_clicked(self):
-        format_filters = {
-            'mp4': "MP4 Video (*.mp4)",
-            'gif': "GIF Animation (*.gif)"
-        }
-        formats = ['mp4', 'gif']
+        format_filters = {"mp4": "MP4 Video (*.mp4)", "gif": "GIF Animation (*.gif)"}
+        formats = ["mp4", "gif"]
         self.selected_format = formats[self.format_combo.currentIndex()]
-        default_path = self.default_directory / f"{self.default_filename}.{self.selected_format}"
+        default_path = (
+            self.default_directory / f"{self.default_filename}.{self.selected_format}"
+        )
 
         filename, _ = QFileDialog.getSaveFileName(
             self,
             "Export Animation",
             str(default_path),
-            format_filters[self.selected_format]
+            format_filters[self.selected_format],
         )
 
         if filename:
@@ -463,16 +505,16 @@ class ExportAnimationDialog(QDialog):
     def get_export_params(self) -> Dict:
         """Return the export configuration."""
         return {
-            'filename': self.output_path,
-            'format': self.selected_format,
-            'fps': self.fps_spin.value(),
-            'max_frames': self.max_frames_spin.value(),
-            'start_idx': self.start_spin.value(),
-            'end_idx': self.end_spin.value(),
-            'width': self.width_spin.value(),
-            'height': self.height_spin.value(),
-            'mean_only': self.mean_only_checkbox.isChecked(),
-            'include_sequence': self.include_sequence_checkbox.isChecked()
+            "filename": self.output_path,
+            "format": self.selected_format,
+            "fps": self.fps_spin.value(),
+            "max_frames": self.max_frames_spin.value(),
+            "start_idx": self.start_spin.value(),
+            "end_idx": self.end_spin.value(),
+            "width": self.width_spin.value(),
+            "height": self.height_spin.value(),
+            "mean_only": self.mean_only_checkbox.isChecked(),
+            "include_sequence": self.include_sequence_checkbox.isChecked(),
         }
 
 
@@ -482,7 +524,12 @@ class ExportDataDialog(QDialog):
     Allows selecting multiple formats simultaneously.
     """
 
-    def __init__(self, parent=None, default_filename: str = "simulation_data", default_directory: Path = None):
+    def __init__(
+        self,
+        parent=None,
+        default_filename: str = "simulation_data",
+        default_directory: Path = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Export Data")
         self.default_filename = default_filename
@@ -494,23 +541,29 @@ class ExportDataDialog(QDialog):
 
     def init_ui(self):
         layout = QVBoxLayout()
-        
+
         layout.addWidget(QLabel("Select export formats:"))
 
         # Checkboxes
         self.chk_hdf5 = QCheckBox("HDF5 Data File (.h5)")
         self.chk_hdf5.setChecked(True)
-        self.chk_hdf5.setToolTip("Full simulation data including magnetization, signal, and parameters.")
+        self.chk_hdf5.setToolTip(
+            "Full simulation data including magnetization, signal, and parameters."
+        )
         layout.addWidget(self.chk_hdf5)
 
         self.chk_nb_analysis = QCheckBox("Jupyter Notebook: Analysis (Mode A)")
         self.chk_nb_analysis.setChecked(False)
-        self.chk_nb_analysis.setToolTip("Notebook that loads the HDF5 file for visualization and analysis.")
+        self.chk_nb_analysis.setToolTip(
+            "Notebook that loads the HDF5 file for visualization and analysis."
+        )
         layout.addWidget(self.chk_nb_analysis)
 
         self.chk_nb_repro = QCheckBox("Jupyter Notebook: Reproduce (Mode B)")
         self.chk_nb_repro.setChecked(False)
-        self.chk_nb_repro.setToolTip("Notebook that contains all parameters to re-run this simulation.")
+        self.chk_nb_repro.setToolTip(
+            "Notebook that contains all parameters to re-run this simulation."
+        )
         layout.addWidget(self.chk_nb_repro)
 
         self.chk_csv = QCheckBox("CSV/Text Data")
@@ -546,16 +599,27 @@ class ExportDataDialog(QDialog):
 
     def _on_export_clicked(self):
         # Validate selection
-        if not any([self.chk_hdf5.isChecked(), self.chk_nb_analysis.isChecked(), 
-                   self.chk_nb_repro.isChecked(), self.chk_csv.isChecked()]):
-            QMessageBox.warning(self, "No Selection", "Please select at least one export format.")
+        if not any(
+            [
+                self.chk_hdf5.isChecked(),
+                self.chk_nb_analysis.isChecked(),
+                self.chk_nb_repro.isChecked(),
+                self.chk_csv.isChecked(),
+            ]
+        ):
+            QMessageBox.warning(
+                self, "No Selection", "Please select at least one export format."
+            )
             return
 
         # Mode A notebook requires HDF5
         if self.chk_nb_analysis.isChecked() and not self.chk_hdf5.isChecked():
-            ret = QMessageBox.question(self, "Dependency", 
-                                     "Analysis Notebook requires HDF5 data.\nEnable HDF5 export also?",
-                                     QMessageBox.Yes | QMessageBox.No)
+            ret = QMessageBox.question(
+                self,
+                "Dependency",
+                "Analysis Notebook requires HDF5 data.\nEnable HDF5 export also?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
             if ret == QMessageBox.Yes:
                 self.chk_hdf5.setChecked(True)
             else:
@@ -564,31 +628,28 @@ class ExportDataDialog(QDialog):
         # Get base filename
         default_path = self.default_directory / self.default_filename
         filename, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export Data (Base Filename)",
-            str(default_path),
-            "All Files (*)"
+            self, "Export Data (Base Filename)", str(default_path), "All Files (*)"
         )
 
         if filename:
             # Strip extension if user typed one, we'll append based on formats
             p = Path(filename)
-            if p.suffix.lower() in ['.h5', '.ipynb', '.csv', '.dat', '.npy', '.txt']:
-                self.base_path = str(p.with_suffix(''))
+            if p.suffix.lower() in [".h5", ".ipynb", ".csv", ".dat", ".npy", ".txt"]:
+                self.base_path = str(p.with_suffix(""))
             else:
                 self.base_path = str(p)
-            
+
             self.accept()
 
     def get_export_options(self) -> Dict:
         """Return selected options and base filename."""
         return {
-            'base_path': self.base_path,
-            'hdf5': self.chk_hdf5.isChecked(),
-            'notebook_analysis': self.chk_nb_analysis.isChecked(),
-            'notebook_repro': self.chk_nb_repro.isChecked(),
-            'csv': self.chk_csv.isChecked(),
-            'csv_format': self.csv_fmt.currentText()
+            "base_path": self.base_path,
+            "hdf5": self.chk_hdf5.isChecked(),
+            "notebook_analysis": self.chk_nb_analysis.isChecked(),
+            "notebook_repro": self.chk_nb_repro.isChecked(),
+            "csv": self.chk_csv.isChecked(),
+            "csv_format": self.csv_fmt.currentText(),
         }
 
 
@@ -604,12 +665,14 @@ class AnimationExporter:
 
     def _ensure_imageio(self):
         if imageio is None:
-            raise ImportError("Animation export requires 'imageio'. Install with: pip install imageio imageio-ffmpeg")
+            raise ImportError(
+                "Animation export requires 'imageio'. Install with: pip install imageio imageio-ffmpeg"
+            )
 
     def _infer_format(self, filename: str, format_hint: Optional[str] = None) -> str:
-        fmt = format_hint or Path(filename).suffix.lower().lstrip('.')
+        fmt = format_hint or Path(filename).suffix.lower().lstrip(".")
         fmt = fmt.lower()
-        if fmt in ('gif', 'mp4'):
+        if fmt in ("gif", "mp4"):
             return fmt
         raise ValueError(f"Unsupported animation format '{fmt}'. Use GIF or MP4.")
 
@@ -620,9 +683,16 @@ class AnimationExporter:
             return max(2, value + 1)
         return value
 
-    def _compute_indices(self, total_frames: int, max_frames: Optional[int] = None,
-                         start_idx: int = 0, end_idx: Optional[int] = None) -> np.ndarray:
-        end_idx = total_frames - 1 if end_idx is None else min(end_idx, total_frames - 1)
+    def _compute_indices(
+        self,
+        total_frames: int,
+        max_frames: Optional[int] = None,
+        start_idx: int = 0,
+        end_idx: Optional[int] = None,
+    ) -> np.ndarray:
+        end_idx = (
+            total_frames - 1 if end_idx is None else min(end_idx, total_frames - 1)
+        )
         start_idx = max(0, min(start_idx, end_idx))
         count = end_idx - start_idx + 1
         if max_frames is None or max_frames <= 0 or count <= max_frames:
@@ -637,8 +707,8 @@ class AnimationExporter:
         limits = []
         for group in groups:
             ymin, ymax = None, None
-            for series in group.get('series', []):
-                data = np.asarray(series['data'])
+            for series in group.get("series", []):
+                data = np.asarray(series["data"])
                 if data.size == 0:
                     continue
                 smin = np.nanmin(data)
@@ -709,40 +779,56 @@ class AnimationExporter:
             filepath = filepath.with_suffix(f".{fmt}")
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        width_px = self._even_size(int(width)) if width else self._even_size(self.default_width)
-        height_px = self._even_size(int(height)) if height else self._even_size(self.default_height)
+        width_px = (
+            self._even_size(int(width))
+            if width
+            else self._even_size(self.default_width)
+        )
+        height_px = (
+            self._even_size(int(height))
+            if height
+            else self._even_size(self.default_height)
+        )
 
         if indices is None:
-            indices = self._compute_indices(len(time_s), max_frames=max_frames, start_idx=start_idx, end_idx=end_idx)
+            indices = self._compute_indices(
+                len(time_s), max_frames=max_frames, start_idx=start_idx, end_idx=end_idx
+            )
         else:
             indices = np.asarray(indices, dtype=int)
-            if indices.ndim != 1 or np.any(indices < 0) or np.any(indices >= len(time_s)):
+            if (
+                indices.ndim != 1
+                or np.any(indices < 0)
+                or np.any(indices >= len(time_s))
+            ):
                 raise ValueError("indices must be a 1D array within time bounds.")
-        
+
         # Subsample data to match indices for efficiency
         time_ds = time_s[indices]
-        
+
         # Prepare data structures
         groups_ds = []
         for group in groups:
             new_group = dict(group)
             new_series = []
-            for series in group.get('series', []):
-                data = np.asarray(series['data'])
+            for series in group.get("series", []):
+                data = np.asarray(series["data"])
                 if data.ndim == 0:
                     data = np.asarray([float(data)] * len(time_s))
                 if len(data) != len(time_s):
                     raise ValueError("Series length must match time array length.")
-                # We keep the full data for plotting the background trace, 
+                # We keep the full data for plotting the background trace,
                 # but we'll need efficient access for the "current point" marker
-                new_series.append({
-                    'full_data': data,      # Full trace
-                    'data': data[indices],  # Subsampled for dot marker
-                    'label': series.get('label', ''),
-                    'color': series.get('color', None),
-                    'style': series.get('style', '-')
-                })
-            new_group['series'] = new_series
+                new_series.append(
+                    {
+                        "full_data": data,  # Full trace
+                        "data": data[indices],  # Subsampled for dot marker
+                        "label": series.get("label", ""),
+                        "color": series.get("color", None),
+                        "style": series.get("style", "-"),
+                    }
+                )
+            new_group["series"] = new_series
             groups_ds.append(new_group)
 
         # Initialize Plot (One-time setup)
@@ -750,10 +836,10 @@ class AnimationExporter:
         fig = Figure(figsize=(width_px / 100.0, height_px / 100.0), dpi=100)
         canvas = FigureCanvasAgg(fig)
         axes = []
-        
+
         # Store artist references for updating
-        time_lines = []     # Vertical cursor lines
-        dot_artists = []    # Current value dots (list of lists)
+        time_lines = []  # Vertical cursor lines
+        dot_artists = []  # Current value dots (list of lists)
 
         # Compute limits first
         limits = self._compute_group_limits(groups_ds)
@@ -761,32 +847,41 @@ class AnimationExporter:
         for i, group in enumerate(groups_ds):
             ax = fig.add_subplot(nrows, 1, i + 1)
             group_dots = []
-            
+
             # Plot full static traces
-            for series in group.get('series', []):
-                color = series.get('color', None)
-                style = series.get('style', '-')
+            for series in group.get("series", []):
+                color = series.get("color", None)
+                style = series.get("style", "-")
                 # Background trace (static)
-                ax.plot(time_s, series['full_data'], style, label=series['label'], color=color, linewidth=1.8)
-                
+                ax.plot(
+                    time_s,
+                    series["full_data"],
+                    style,
+                    label=series["label"],
+                    color=color,
+                    linewidth=1.8,
+                )
+
                 # Current point marker (dynamic) - initialize at start
-                dot, = ax.plot([], [], 'o', color=color or 'k', markersize=5, alpha=0.9)
+                (dot,) = ax.plot(
+                    [], [], "o", color=color or "k", markersize=5, alpha=0.9
+                )
                 group_dots.append(dot)
-            
+
             dot_artists.append(group_dots)
 
             # Vertical time cursor (dynamic)
-            vline = ax.axvline(time_ds[0], color='k', linestyle='--', alpha=0.25)
+            vline = ax.axvline(time_ds[0], color="k", linestyle="--", alpha=0.25)
             time_lines.append(vline)
 
-            ax.set_title(group.get('title', ''), fontsize=10)
-            ax.set_ylabel(group.get('ylabel', ''))
+            ax.set_title(group.get("title", ""), fontsize=10)
+            ax.set_ylabel(group.get("ylabel", ""))
             ax.set_xlim(time_s[0], time_s[-1])
             ymin, ymax = limits[i]
             ax.set_ylim(ymin, ymax)
-            
-            if group.get('series'):
-                ax.legend(loc='upper right', fontsize=8)
+
+            if group.get("series"):
+                ax.legend(loc="upper right", fontsize=8)
             if i == nrows - 1:
                 ax.set_xlabel("Time (s)")
             axes.append(ax)
@@ -794,22 +889,24 @@ class AnimationExporter:
         fig.tight_layout()
 
         # Initialize Video Writer
-        if fmt == 'gif':
-            writer = imageio.get_writer(str(filepath), mode='I', fps=fps, format='GIF', loop=0)
+        if fmt == "gif":
+            writer = imageio.get_writer(
+                str(filepath), mode="I", fps=fps, format="GIF", loop=0
+            )
         else:
             writer = imageio.get_writer(
                 str(filepath),
                 fps=fps,
-                format='FFMPEG',
-                codec='libx264',
+                format="FFMPEG",
+                codec="libx264",
                 bitrate=self.default_bitrate,
                 quality=8,
                 macro_block_size=None,
-                ffmpeg_params=['-metadata', f'comment=BlochSimulator {__version__}']
+                ffmpeg_params=["-metadata", f"comment=BlochSimulator {__version__}"],
             )
 
         total_frames = len(time_ds)
-        
+
         try:
             for i in range(total_frames):
                 if cancel_cb and cancel_cb():
@@ -821,11 +918,11 @@ class AnimationExporter:
                 for ax_idx, group in enumerate(groups_ds):
                     # Update vertical line
                     time_lines[ax_idx].set_xdata([current_time, current_time])
-                    
+
                     # Update dots
-                    for ser_idx, series in enumerate(group['series']):
+                    for ser_idx, series in enumerate(group["series"]):
                         # Get pre-subsampled value for efficiency
-                        val = series['data'][i]
+                        val = series["data"][i]
                         dot_artists[ax_idx][ser_idx].set_data([current_time], [val])
 
                 # Render frame
@@ -836,15 +933,16 @@ class AnimationExporter:
 
                 if frame_hook:
                     image = frame_hook(image, int(indices[i]))
-                
+
                 writer.append_data(image)
-                
+
                 if progress_cb and (i % 5 == 0 or i == total_frames - 1):
                     progress_cb(i + 1, total_frames)
         finally:
             writer.close()
             # Clean up matplotlib figures
             import matplotlib.pyplot as plt
+
             plt.close(fig)
 
         if progress_cb:
@@ -860,9 +958,11 @@ class DatasetExporter:
 
     def __init__(self):
         # No stateful resources required
-        self.supported_formats = ('csv', 'dat', 'tsv', 'npy')
+        self.supported_formats = ("csv", "dat", "tsv", "npy")
 
-    def _write_columns(self, columns: Dict[str, np.ndarray], filename: str, format: str = 'csv') -> str:
+    def _write_columns(
+        self, columns: Dict[str, np.ndarray], filename: str, format: str = "csv"
+    ) -> str:
         """Write a dictionary of named 1D arrays to disk."""
         if not columns:
             raise ValueError("No columns provided for export.")
@@ -876,33 +976,43 @@ class DatasetExporter:
         fmt = format.lower()
         filepath = Path(filename)
         version_header = f"# BlochSimulator {__version__}\n"
-        
-        if fmt == 'csv':
-            if filepath.suffix.lower() != '.csv':
-                filepath = filepath.with_suffix('.csv')
+
+        if fmt == "csv":
+            if filepath.suffix.lower() != ".csv":
+                filepath = filepath.with_suffix(".csv")
             header = version_header + ",".join(keys)
-            np.savetxt(filepath, data, delimiter=',', header=header, comments='')
-        elif fmt in ('dat', 'tsv'):
-            if filepath.suffix.lower() not in ('.dat', '.tsv'):
-                filepath = filepath.with_suffix('.dat')
+            np.savetxt(filepath, data, delimiter=",", header=header, comments="")
+        elif fmt in ("dat", "tsv"):
+            if filepath.suffix.lower() not in (".dat", ".tsv"):
+                filepath = filepath.with_suffix(".dat")
             header = version_header + "\t".join(keys)
-            np.savetxt(filepath, data, delimiter='\t', header=header, comments='')
-        elif fmt == 'npy':
-            if filepath.suffix.lower() != '.npy':
-                filepath = filepath.with_suffix('.npy')
+            np.savetxt(filepath, data, delimiter="\t", header=header, comments="")
+        elif fmt == "npy":
+            if filepath.suffix.lower() != ".npy":
+                filepath = filepath.with_suffix(".npy")
             dtype = [(key, float) for key in keys]
             structured = np.zeros(length, dtype=dtype)
             for key in keys:
                 structured[key] = np.asarray(columns[key]).ravel()
             np.save(filepath, structured)
         else:
-            raise ValueError(f"Unsupported export format '{format}'. Use one of: {self.supported_formats}")
+            raise ValueError(
+                f"Unsupported export format '{format}'. Use one of: {self.supported_formats}"
+            )
 
         return str(filepath)
 
-    def export_magnetization(self, time_s: np.ndarray, mx: np.ndarray, my: np.ndarray, mz: np.ndarray,
-                             positions: Optional[np.ndarray], frequencies: Optional[np.ndarray],
-                             filename: str, format: str = 'csv') -> str:
+    def export_magnetization(
+        self,
+        time_s: np.ndarray,
+        mx: np.ndarray,
+        my: np.ndarray,
+        mz: np.ndarray,
+        positions: Optional[np.ndarray],
+        frequencies: Optional[np.ndarray],
+        filename: str,
+        format: str = "csv",
+    ) -> str:
         """Export magnetization time series for all positions/frequencies."""
         time_ms = np.asarray(time_s).ravel() * 1000.0
         mx = np.asarray(mx)
@@ -915,7 +1025,7 @@ class DatasetExporter:
             mz = mz[None, ...]
         ntime, npos, nfreq = mx.shape
 
-        columns: Dict[str, np.ndarray] = {'time_ms': time_ms}
+        columns: Dict[str, np.ndarray] = {"time_ms": time_ms}
         for pi in range(npos):
             for fi in range(nfreq):
                 label = f"p{pi}_f{fi}"
@@ -927,7 +1037,9 @@ class DatasetExporter:
 
         return self._write_columns(columns, filename, format=format)
 
-    def export_signal(self, time_s: np.ndarray, signal: np.ndarray, filename: str, format: str = 'csv') -> str:
+    def export_signal(
+        self, time_s: np.ndarray, signal: np.ndarray, filename: str, format: str = "csv"
+    ) -> str:
         """Export complex signal traces for all positions/frequencies."""
         time_ms = np.asarray(time_s).ravel() * 1000.0
         sig = np.asarray(signal)
@@ -937,7 +1049,7 @@ class DatasetExporter:
             sig = sig[:, :, None]
         ntime, npos, nfreq = sig.shape
 
-        columns: Dict[str, np.ndarray] = {'time_ms': time_ms}
+        columns: Dict[str, np.ndarray] = {"time_ms": time_ms}
         for pi in range(npos):
             for fi in range(nfreq):
                 label = f"p{pi}_f{fi}"
@@ -949,11 +1061,16 @@ class DatasetExporter:
 
         return self._write_columns(columns, filename, format=format)
 
-    def export_spectrum(self, frequency_hz: np.ndarray, series: Dict[str, np.ndarray],
-                        filename: str, format: str = 'csv') -> str:
+    def export_spectrum(
+        self,
+        frequency_hz: np.ndarray,
+        series: Dict[str, np.ndarray],
+        filename: str,
+        format: str = "csv",
+    ) -> str:
         """Export spectrum data with one or more series."""
         freq = np.asarray(frequency_hz).ravel()
-        columns: Dict[str, np.ndarray] = {'frequency_hz': freq}
+        columns: Dict[str, np.ndarray] = {"frequency_hz": freq}
         for name, arr in series.items():
             if arr is None:
                 continue
@@ -963,16 +1080,22 @@ class DatasetExporter:
             columns[name] = data
         return self._write_columns(columns, filename, format=format)
 
-    def export_spatial(self, position_axis: np.ndarray, mxy: np.ndarray, mz: np.ndarray,
-                       filename: str, format: str = 'csv',
-                       mxy_per_freq: Optional[np.ndarray] = None,
-                       mz_per_freq: Optional[np.ndarray] = None) -> str:
+    def export_spatial(
+        self,
+        position_axis: np.ndarray,
+        mxy: np.ndarray,
+        mz: np.ndarray,
+        filename: str,
+        format: str = "csv",
+        mxy_per_freq: Optional[np.ndarray] = None,
+        mz_per_freq: Optional[np.ndarray] = None,
+    ) -> str:
         """Export spatial profiles along the chosen axis."""
         pos = np.asarray(position_axis).ravel()
         columns: Dict[str, np.ndarray] = {
-            'position_m': pos,
-            'mxy': np.asarray(mxy).ravel(),
-            'mz': np.asarray(mz).ravel()
+            "position_m": pos,
+            "mxy": np.asarray(mxy).ravel(),
+            "mz": np.asarray(mz).ravel(),
         }
         if mxy_per_freq is not None:
             mxy_arr = np.asarray(mxy_per_freq)

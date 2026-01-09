@@ -9,12 +9,13 @@ from .simulator import (
     GradientEcho,
     SliceSelectRephase,
     CustomPulse,
-    design_rf_pulse
-)
+    design_rf_pulse,
+)  # noqa: F401
 
-from . import notebook_exporter
+from . import notebook_exporter  # noqa: F401
+
 # visualization is available but not imported by default to avoid PyQt5 dependencies
 # from . import visualization
-from . import kspace
-from . import phantom
-from . import pulse_loader
+from . import kspace  # noqa: F401
+from . import phantom  # noqa: F401
+from . import pulse_loader  # noqa: F401

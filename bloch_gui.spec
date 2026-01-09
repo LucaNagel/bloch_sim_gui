@@ -102,7 +102,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=False, 
+    console=False,
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity=None,
@@ -128,11 +128,10 @@ if system_platform == 'Darwin':
     if not icon_path.exists():
         print(f"Warning: Icon not found at {icon_path}")
         icon_path = None
-        
+
     app = BUNDLE(
         coll,
         name='BlochSimulator.app',
         icon=str(icon_path) if icon_path else None,
         bundle_identifier='com.lucanagel.blochsimulator',
     )
-        

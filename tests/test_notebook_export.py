@@ -16,9 +16,9 @@ import subprocess
 
 def test_mode_a_notebook():
     """Test Mode A: Load data from HDF5."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("TEST 1: Mode A - Load Data from HDF5")
-    print("="*60)
+    print("=" * 60)
 
     # 1. Create and run simulation
     print("\n1. Running simulation...")
@@ -29,66 +29,68 @@ def test_mode_a_notebook():
     positions = np.array([[0.0, 0.0, 0.0]])
     frequencies = np.array([0.0])
 
-    result = sim.simulate(sequence, tissue, positions=positions,
-                         frequencies=frequencies, mode=2)
+    result = sim.simulate(
+        sequence, tissue, positions=positions, frequencies=frequencies, mode=2
+    )
     print(f"   ✓ Simulation complete")
 
     # 2. Save HDF5
-    h5_file = 'test_notebook_data.h5'
+    h5_file = "test_notebook_data.h5"
     sequence_params = {
-        'sequence_type': 'Spin Echo',
-        'te': 20e-3,
-        'tr': 100e-3,
-        'flip_angle': 90.0
+        "sequence_type": "Spin Echo",
+        "te": 20e-3,
+        "tr": 100e-3,
+        "flip_angle": 90.0,
     }
     simulation_params = {
-        'mode': 'time-resolved',
-        'num_positions': 1,
-        'num_frequencies': 1,
-        'time_step_us': 1.0
+        "mode": "time-resolved",
+        "num_positions": 1,
+        "num_frequencies": 1,
+        "time_step_us": 1.0,
     }
     tissue_params = {
-        'name': tissue.name,
-        't1': tissue.t1,
-        't2': tissue.t2,
-        'density': tissue.density
+        "name": tissue.name,
+        "t1": tissue.t1,
+        "t2": tissue.t2,
+        "density": tissue.density,
     }
 
     sim.save_results(h5_file, sequence_params, simulation_params)
     print(f"   ✓ HDF5 saved: {h5_file}")
 
     # 3. Export notebook (Mode A)
-    nb_file = 'test_mode_a.ipynb'
+    nb_file = "test_mode_a.ipynb"
     print(f"\n2. Exporting Mode A notebook...")
     export_notebook(
-        mode='load_data',
+        mode="load_data",
         filename=nb_file,
         sequence_params=sequence_params,
         simulation_params=simulation_params,
         tissue_params=tissue_params,
-        h5_filename=h5_file
+        h5_filename=h5_file,
     )
     print(f"   ✓ Notebook exported: {nb_file}")
 
     # 4. Verify notebook structure
     print(f"\n3. Verifying notebook structure...")
     import nbformat
-    with open(nb_file, 'r') as f:
+
+    with open(nb_file, "r") as f:
         nb = nbformat.read(f, as_version=4)
 
     print(f"   ✓ Notebook has {len(nb.cells)} cells")
 
     # Check for key cells
     cell_types = [cell.cell_type for cell in nb.cells]
-    code_cells = sum(1 for ct in cell_types if ct == 'code')
-    markdown_cells = sum(1 for ct in cell_types if ct == 'markdown')
+    code_cells = sum(1 for ct in cell_types if ct == "code")
+    markdown_cells = sum(1 for ct in cell_types if ct == "markdown")
 
     print(f"   ✓ Code cells: {code_cells}, Markdown cells: {markdown_cells}")
 
     # 5. Check that HDF5 loading code is present
     nb_text = nbformat.writes(nb)
-    assert 'h5py' in nb_text, "Missing h5py import"
-    assert 'data_file' in nb_text, "Missing data loading code"
+    assert "h5py" in nb_text, "Missing h5py import"
+    assert "data_file" in nb_text, "Missing data loading code"
     assert h5_file in nb_text, f"Missing reference to {h5_file}"
     print(f"   ✓ Notebook contains HDF5 loading code")
 
@@ -97,60 +99,56 @@ def test_mode_a_notebook():
 
 def test_mode_b_notebook():
     """Test Mode B: Re-run simulation."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("TEST 2: Mode B - Re-run Simulation")
-    print("="*60)
+    print("=" * 60)
 
     # 1. Define parameters
     print("\n1. Preparing parameters...")
     sequence_params = {
-        'sequence_type': 'Spin Echo',
-        'te': 30e-3,
-        'tr': 200e-3,
-        'flip_angle': 90.0
+        "sequence_type": "Spin Echo",
+        "te": 30e-3,
+        "tr": 200e-3,
+        "flip_angle": 90.0,
     }
     simulation_params = {
-        'mode': 'time-resolved',
-        'num_positions': 3,
-        'num_frequencies': 5,
-        'time_step_us': 1.0,
-        'position_range_cm': 2.0,
-        'frequency_range_hz': 200.0
+        "mode": "time-resolved",
+        "num_positions": 3,
+        "num_frequencies": 5,
+        "time_step_us": 1.0,
+        "position_range_cm": 2.0,
+        "frequency_range_hz": 200.0,
     }
-    tissue_params = {
-        'name': 'White Matter',
-        't1': 0.83,
-        't2': 0.070,
-        'density': 1.0
-    }
+    tissue_params = {"name": "White Matter", "t1": 0.83, "t2": 0.070, "density": 1.0}
     print(f"   ✓ Parameters prepared")
 
     # 2. Export notebook (Mode B)
-    nb_file = 'test_mode_b.ipynb'
+    nb_file = "test_mode_b.ipynb"
     print(f"\n2. Exporting Mode B notebook...")
     export_notebook(
-        mode='resimulate',
+        mode="resimulate",
         filename=nb_file,
         sequence_params=sequence_params,
         simulation_params=simulation_params,
-        tissue_params=tissue_params
+        tissue_params=tissue_params,
     )
     print(f"   ✓ Notebook exported: {nb_file}")
 
     # 3. Verify notebook structure
     print(f"\n3. Verifying notebook structure...")
     import nbformat
-    with open(nb_file, 'r') as f:
+
+    with open(nb_file, "r") as f:
         nb = nbformat.read(f, as_version=4)
 
     print(f"   ✓ Notebook has {len(nb.cells)} cells")
 
     # 4. Check for simulation code
     nb_text = nbformat.writes(nb)
-    assert 'BlochSimulator' in nb_text, "Missing BlochSimulator import"
-    assert 'SpinEcho' in nb_text, "Missing sequence import"
-    assert 't1 =' in nb_text, "Missing parameter definitions"
-    assert 'sim.simulate' in nb_text, "Missing simulation call"
+    assert "BlochSimulator" in nb_text, "Missing BlochSimulator import"
+    assert "SpinEcho" in nb_text, "Missing sequence import"
+    assert "t1 =" in nb_text, "Missing parameter definitions"
+    assert "sim.simulate" in nb_text, "Missing simulation call"
     print(f"   ✓ Notebook contains simulation code")
 
     # 5. Check parameter values are correct
@@ -170,21 +168,30 @@ def helper_notebook_execution(nb_file):
     nb_file : str
         Notebook filename to execute
     """
-    print(f"\n" + "="*60)
+    print(f"\n" + "=" * 60)
     print(f"TEST 3: Execute Notebook - {nb_file}")
-    print("="*60)
+    print("=" * 60)
 
     try:
         import nbconvert
+
         print(f"\n1. nbconvert available, testing execution...")
 
         # Try to execute notebook
         result = subprocess.run(
-            ['jupyter', 'nbconvert', '--to', 'notebook', '--execute',
-             '--output', f'executed_{nb_file}', nb_file],
+            [
+                "jupyter",
+                "nbconvert",
+                "--to",
+                "notebook",
+                "--execute",
+                "--output",
+                f"executed_{nb_file}",
+                nb_file,
+            ],
             capture_output=True,
             text=True,
-            timeout=60
+            timeout=60,
         )
 
         if result.returncode == 0:
@@ -210,16 +217,16 @@ def helper_notebook_execution(nb_file):
 
 def cleanup_test_files():
     """Remove test files."""
-    print(f"\n" + "="*60)
+    print(f"\n" + "=" * 60)
     print("CLEANUP")
-    print("="*60)
+    print("=" * 60)
 
     files_to_remove = [
-        'test_notebook_data.h5',
-        'test_mode_a.ipynb',
-        'test_mode_b.ipynb',
-        'executed_test_mode_a.ipynb',
-        'executed_test_mode_b.ipynb'
+        "test_notebook_data.h5",
+        "test_mode_a.ipynb",
+        "test_mode_b.ipynb",
+        "executed_test_mode_a.ipynb",
+        "executed_test_mode_b.ipynb",
     ]
 
     for fname in files_to_remove:
@@ -231,9 +238,9 @@ def cleanup_test_files():
 
 def main():
     """Run all tests."""
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print(" JUPYTER NOTEBOOK EXPORT TESTS (PHASE 2) ".center(70))
-    print("="*70)
+    print("=" * 70)
 
     try:
         # Test Mode A
@@ -243,9 +250,9 @@ def main():
         mode_b_nb = test_mode_b_notebook()
 
         # Try to execute notebooks (optional - requires jupyter)
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("OPTIONAL: Notebook Execution Tests")
-        print("="*60)
+        print("=" * 60)
         print("\nThese tests require 'jupyter' and 'nbconvert' installed.")
         print("They will be skipped if not available.\n")
 
@@ -253,9 +260,9 @@ def main():
         helper_notebook_execution(mode_b_nb)
 
         # Summary
-        print("\n" + "="*70)
+        print("\n" + "=" * 70)
         print(" ALL TESTS PASSED ".center(70, "="))
-        print("="*70)
+        print("=" * 70)
         print("\nPhase 2 Implementation Summary:")
         print("✓ Mode A: Notebook with HDF5 data loading")
         print("✓ Mode B: Notebook with simulation re-execution")
@@ -272,13 +279,14 @@ def main():
     except Exception as e:
         print(f"\n❌ TEST FAILED: {e}")
         import traceback
+
         traceback.print_exc()
         return 1
 
     finally:
         # Ask before cleanup
         response = input("\nRemove test files? (y/n): ")
-        if response.lower() == 'y':
+        if response.lower() == "y":
             cleanup_test_files()
         else:
             print("\nTest files preserved for inspection.")

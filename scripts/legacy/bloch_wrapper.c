@@ -1152,7 +1152,7 @@ static int __Pyx_init_co_variables(void) {
 #include <stdio.h>
 
     /* Using NumPy API declarations from "numpy/__init__.cython-30.pxd" */
-    
+
 #include "numpy/arrayobject.h"
 #include "numpy/ndarrayobject.h"
 #include "numpy/ndarraytypes.h"
@@ -1623,7 +1623,7 @@ typedef struct {
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":743
  * # in Cython to enable them only on the right systems.
- * 
+ *
  * ctypedef npy_int8       int8_t             # <<<<<<<<<<<<<<
  * ctypedef npy_int16      int16_t
  * ctypedef npy_int32      int32_t
@@ -1631,7 +1631,7 @@ typedef struct {
 typedef npy_int8 __pyx_t_5numpy_int8_t;
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":744
- * 
+ *
  * ctypedef npy_int8       int8_t
  * ctypedef npy_int16      int16_t             # <<<<<<<<<<<<<<
  * ctypedef npy_int32      int32_t
@@ -1644,7 +1644,7 @@ typedef npy_int16 __pyx_t_5numpy_int16_t;
  * ctypedef npy_int16      int16_t
  * ctypedef npy_int32      int32_t             # <<<<<<<<<<<<<<
  * ctypedef npy_int64      int64_t
- * 
+ *
 */
 typedef npy_int32 __pyx_t_5numpy_int32_t;
 
@@ -1652,14 +1652,14 @@ typedef npy_int32 __pyx_t_5numpy_int32_t;
  * ctypedef npy_int16      int16_t
  * ctypedef npy_int32      int32_t
  * ctypedef npy_int64      int64_t             # <<<<<<<<<<<<<<
- * 
+ *
  * ctypedef npy_uint8      uint8_t
 */
 typedef npy_int64 __pyx_t_5numpy_int64_t;
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":748
  * ctypedef npy_int64      int64_t
- * 
+ *
  * ctypedef npy_uint8      uint8_t             # <<<<<<<<<<<<<<
  * ctypedef npy_uint16     uint16_t
  * ctypedef npy_uint32     uint32_t
@@ -1667,7 +1667,7 @@ typedef npy_int64 __pyx_t_5numpy_int64_t;
 typedef npy_uint8 __pyx_t_5numpy_uint8_t;
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":749
- * 
+ *
  * ctypedef npy_uint8      uint8_t
  * ctypedef npy_uint16     uint16_t             # <<<<<<<<<<<<<<
  * ctypedef npy_uint32     uint32_t
@@ -1680,7 +1680,7 @@ typedef npy_uint16 __pyx_t_5numpy_uint16_t;
  * ctypedef npy_uint16     uint16_t
  * ctypedef npy_uint32     uint32_t             # <<<<<<<<<<<<<<
  * ctypedef npy_uint64     uint64_t
- * 
+ *
 */
 typedef npy_uint32 __pyx_t_5numpy_uint32_t;
 
@@ -1688,14 +1688,14 @@ typedef npy_uint32 __pyx_t_5numpy_uint32_t;
  * ctypedef npy_uint16     uint16_t
  * ctypedef npy_uint32     uint32_t
  * ctypedef npy_uint64     uint64_t             # <<<<<<<<<<<<<<
- * 
+ *
  * ctypedef npy_float32    float32_t
 */
 typedef npy_uint64 __pyx_t_5numpy_uint64_t;
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":753
  * ctypedef npy_uint64     uint64_t
- * 
+ *
  * ctypedef npy_float32    float32_t             # <<<<<<<<<<<<<<
  * ctypedef npy_float64    float64_t
  * #ctypedef npy_float80    float80_t
@@ -1703,7 +1703,7 @@ typedef npy_uint64 __pyx_t_5numpy_uint64_t;
 typedef npy_float32 __pyx_t_5numpy_float32_t;
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":754
- * 
+ *
  * ctypedef npy_float32    float32_t
  * ctypedef npy_float64    float64_t             # <<<<<<<<<<<<<<
  * #ctypedef npy_float80    float80_t
@@ -1713,43 +1713,43 @@ typedef npy_float64 __pyx_t_5numpy_float64_t;
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":761
  * ctypedef double complex complex128_t
- * 
+ *
  * ctypedef npy_longlong   longlong_t             # <<<<<<<<<<<<<<
  * ctypedef npy_ulonglong  ulonglong_t
- * 
+ *
 */
 typedef npy_longlong __pyx_t_5numpy_longlong_t;
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":762
- * 
+ *
  * ctypedef npy_longlong   longlong_t
  * ctypedef npy_ulonglong  ulonglong_t             # <<<<<<<<<<<<<<
- * 
+ *
  * ctypedef npy_intp       intp_t
 */
 typedef npy_ulonglong __pyx_t_5numpy_ulonglong_t;
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":764
  * ctypedef npy_ulonglong  ulonglong_t
- * 
+ *
  * ctypedef npy_intp       intp_t             # <<<<<<<<<<<<<<
  * ctypedef npy_uintp      uintp_t
- * 
+ *
 */
 typedef npy_intp __pyx_t_5numpy_intp_t;
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":765
- * 
+ *
  * ctypedef npy_intp       intp_t
  * ctypedef npy_uintp      uintp_t             # <<<<<<<<<<<<<<
- * 
+ *
  * ctypedef npy_double     float_t
 */
 typedef npy_uintp __pyx_t_5numpy_uintp_t;
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":767
  * ctypedef npy_uintp      uintp_t
- * 
+ *
  * ctypedef npy_double     float_t             # <<<<<<<<<<<<<<
  * ctypedef npy_double     double_t
  * ctypedef npy_longdouble longdouble_t
@@ -1757,11 +1757,11 @@ typedef npy_uintp __pyx_t_5numpy_uintp_t;
 typedef npy_double __pyx_t_5numpy_float_t;
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":768
- * 
+ *
  * ctypedef npy_double     float_t
  * ctypedef npy_double     double_t             # <<<<<<<<<<<<<<
  * ctypedef npy_longdouble longdouble_t
- * 
+ *
 */
 typedef npy_double __pyx_t_5numpy_double_t;
 
@@ -1769,17 +1769,17 @@ typedef npy_double __pyx_t_5numpy_double_t;
  * ctypedef npy_double     float_t
  * ctypedef npy_double     double_t
  * ctypedef npy_longdouble longdouble_t             # <<<<<<<<<<<<<<
- * 
+ *
  * ctypedef float complex       cfloat_t
 */
 typedef npy_longdouble __pyx_t_5numpy_longdouble_t;
 
 /* "bloch_wrapper.pyx":60
- * 
+ *
  * # Type definitions
  * ctypedef np.float64_t DTYPE_t             # <<<<<<<<<<<<<<
  * ctypedef np.complex128_t CTYPE_t
- * 
+ *
 */
 typedef __pyx_t_5numpy_float64_t __pyx_t_18bloch_simulator_cy_DTYPE_t;
 /* #### Code section: complex_type_declarations ### */
@@ -3305,7 +3305,7 @@ return 0;
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":242
  *         cdef int type_num
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_intp itemsize(self) noexcept nogil:
  *             return PyDataType_ELSIZE(self)
@@ -3318,7 +3318,7 @@ static CYTHON_INLINE npy_intp __pyx_f_5numpy_5dtype_8itemsize_itemsize(PyArray_D
  *         @property
  *         cdef inline npy_intp itemsize(self) noexcept nogil:
  *             return PyDataType_ELSIZE(self)             # <<<<<<<<<<<<<<
- * 
+ *
  *         @property
 */
   __pyx_r = PyDataType_ELSIZE(__pyx_v_self);
@@ -3326,7 +3326,7 @@ static CYTHON_INLINE npy_intp __pyx_f_5numpy_5dtype_8itemsize_itemsize(PyArray_D
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":242
  *         cdef int type_num
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_intp itemsize(self) noexcept nogil:
  *             return PyDataType_ELSIZE(self)
@@ -3339,7 +3339,7 @@ static CYTHON_INLINE npy_intp __pyx_f_5numpy_5dtype_8itemsize_itemsize(PyArray_D
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":246
  *             return PyDataType_ELSIZE(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_intp alignment(self) noexcept nogil:
  *             return PyDataType_ALIGNMENT(self)
@@ -3352,7 +3352,7 @@ static CYTHON_INLINE npy_intp __pyx_f_5numpy_5dtype_9alignment_alignment(PyArray
  *         @property
  *         cdef inline npy_intp alignment(self) noexcept nogil:
  *             return PyDataType_ALIGNMENT(self)             # <<<<<<<<<<<<<<
- * 
+ *
  *         # Use fields/names with care as they may be NULL.  You must check
 */
   __pyx_r = PyDataType_ALIGNMENT(__pyx_v_self);
@@ -3360,7 +3360,7 @@ static CYTHON_INLINE npy_intp __pyx_f_5numpy_5dtype_9alignment_alignment(PyArray
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":246
  *             return PyDataType_ELSIZE(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_intp alignment(self) noexcept nogil:
  *             return PyDataType_ALIGNMENT(self)
@@ -3389,7 +3389,7 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_5dtype_6fields_fields(PyArray_Desc
  *         @property
  *         cdef inline object fields(self):
  *             return <object>PyDataType_FIELDS(self)             # <<<<<<<<<<<<<<
- * 
+ *
  *         @property
 */
   __Pyx_XDECREF(__pyx_r);
@@ -3415,7 +3415,7 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_5dtype_6fields_fields(PyArray_Desc
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":256
  *             return <object>PyDataType_FIELDS(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline tuple names(self):
  *             return <tuple>PyDataType_NAMES(self)
@@ -3431,7 +3431,7 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_5dtype_5names_names(PyArray_Descr 
  *         @property
  *         cdef inline tuple names(self):
  *             return <tuple>PyDataType_NAMES(self)             # <<<<<<<<<<<<<<
- * 
+ *
  *         # Use PyDataType_HASSUBARRAY to test whether this field is
 */
   __Pyx_XDECREF(__pyx_r);
@@ -3442,7 +3442,7 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_5dtype_5names_names(PyArray_Descr 
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":256
  *             return <object>PyDataType_FIELDS(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline tuple names(self):
  *             return <tuple>PyDataType_NAMES(self)
@@ -3470,7 +3470,7 @@ static CYTHON_INLINE PyArray_ArrayDescr *__pyx_f_5numpy_5dtype_8subarray_subarra
  *         @property
  *         cdef inline PyArray_ArrayDescr* subarray(self) noexcept nogil:
  *             return PyDataType_SUBARRAY(self)             # <<<<<<<<<<<<<<
- * 
+ *
  *         @property
 */
   __pyx_r = PyDataType_SUBARRAY(__pyx_v_self);
@@ -3491,7 +3491,7 @@ static CYTHON_INLINE PyArray_ArrayDescr *__pyx_f_5numpy_5dtype_8subarray_subarra
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":267
  *             return PyDataType_SUBARRAY(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_uint64 flags(self) noexcept nogil:
  *             """The data types flags."""
@@ -3504,15 +3504,15 @@ static CYTHON_INLINE npy_uint64 __pyx_f_5numpy_5dtype_5flags_flags(PyArray_Descr
  *         cdef inline npy_uint64 flags(self) noexcept nogil:
  *             """The data types flags."""
  *             return PyDataType_FLAGS(self)             # <<<<<<<<<<<<<<
- * 
- * 
+ *
+ *
 */
   __pyx_r = PyDataType_FLAGS(__pyx_v_self);
   goto __pyx_L0;
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":267
  *             return PyDataType_SUBARRAY(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_uint64 flags(self) noexcept nogil:
  *             """The data types flags."""
@@ -3525,7 +3525,7 @@ static CYTHON_INLINE npy_uint64 __pyx_f_5numpy_5dtype_5flags_flags(PyArray_Descr
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":279
  *     ctypedef class numpy.broadcast [object PyArrayMultiIterObject, check_size ignore]:
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline int numiter(self) noexcept nogil:
  *             """The number of arrays that need to be broadcast to the same shape."""
@@ -3538,7 +3538,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_9broadcast_7numiter_numiter(PyArrayMulti
  *         cdef inline int numiter(self) noexcept nogil:
  *             """The number of arrays that need to be broadcast to the same shape."""
  *             return PyArray_MultiIter_NUMITER(self)             # <<<<<<<<<<<<<<
- * 
+ *
  *         @property
 */
   __pyx_r = PyArray_MultiIter_NUMITER(__pyx_v_self);
@@ -3546,7 +3546,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_9broadcast_7numiter_numiter(PyArrayMulti
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":279
  *     ctypedef class numpy.broadcast [object PyArrayMultiIterObject, check_size ignore]:
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline int numiter(self) noexcept nogil:
  *             """The number of arrays that need to be broadcast to the same shape."""
@@ -3559,7 +3559,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_9broadcast_7numiter_numiter(PyArrayMulti
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":284
  *             return PyArray_MultiIter_NUMITER(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_intp size(self) noexcept nogil:
  *             """The total broadcasted size."""
@@ -3572,7 +3572,7 @@ static CYTHON_INLINE npy_intp __pyx_f_5numpy_9broadcast_4size_size(PyArrayMultiI
  *         cdef inline npy_intp size(self) noexcept nogil:
  *             """The total broadcasted size."""
  *             return PyArray_MultiIter_SIZE(self)             # <<<<<<<<<<<<<<
- * 
+ *
  *         @property
 */
   __pyx_r = PyArray_MultiIter_SIZE(__pyx_v_self);
@@ -3580,7 +3580,7 @@ static CYTHON_INLINE npy_intp __pyx_f_5numpy_9broadcast_4size_size(PyArrayMultiI
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":284
  *             return PyArray_MultiIter_NUMITER(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_intp size(self) noexcept nogil:
  *             """The total broadcasted size."""
@@ -3593,7 +3593,7 @@ static CYTHON_INLINE npy_intp __pyx_f_5numpy_9broadcast_4size_size(PyArrayMultiI
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":289
  *             return PyArray_MultiIter_SIZE(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_intp index(self) noexcept nogil:
  *             """The current (1-d) index into the broadcasted result."""
@@ -3606,7 +3606,7 @@ static CYTHON_INLINE npy_intp __pyx_f_5numpy_9broadcast_5index_index(PyArrayMult
  *         cdef inline npy_intp index(self) noexcept nogil:
  *             """The current (1-d) index into the broadcasted result."""
  *             return PyArray_MultiIter_INDEX(self)             # <<<<<<<<<<<<<<
- * 
+ *
  *         @property
 */
   __pyx_r = PyArray_MultiIter_INDEX(__pyx_v_self);
@@ -3614,7 +3614,7 @@ static CYTHON_INLINE npy_intp __pyx_f_5numpy_9broadcast_5index_index(PyArrayMult
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":289
  *             return PyArray_MultiIter_SIZE(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_intp index(self) noexcept nogil:
  *             """The current (1-d) index into the broadcasted result."""
@@ -3627,7 +3627,7 @@ static CYTHON_INLINE npy_intp __pyx_f_5numpy_9broadcast_5index_index(PyArrayMult
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":294
  *             return PyArray_MultiIter_INDEX(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline int nd(self) noexcept nogil:
  *             """The number of dimensions in the broadcasted result."""
@@ -3640,7 +3640,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_9broadcast_2nd_nd(PyArrayMultiIterObject
  *         cdef inline int nd(self) noexcept nogil:
  *             """The number of dimensions in the broadcasted result."""
  *             return PyArray_MultiIter_NDIM(self)             # <<<<<<<<<<<<<<
- * 
+ *
  *         @property
 */
   __pyx_r = PyArray_MultiIter_NDIM(__pyx_v_self);
@@ -3648,7 +3648,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_9broadcast_2nd_nd(PyArrayMultiIterObject
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":294
  *             return PyArray_MultiIter_INDEX(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline int nd(self) noexcept nogil:
  *             """The number of dimensions in the broadcasted result."""
@@ -3661,7 +3661,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_9broadcast_2nd_nd(PyArrayMultiIterObject
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":299
  *             return PyArray_MultiIter_NDIM(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_intp* dimensions(self) noexcept nogil:
  *             """The shape of the broadcasted result."""
@@ -3674,7 +3674,7 @@ static CYTHON_INLINE npy_intp *__pyx_f_5numpy_9broadcast_10dimensions_dimensions
  *         cdef inline npy_intp* dimensions(self) noexcept nogil:
  *             """The shape of the broadcasted result."""
  *             return PyArray_MultiIter_DIMS(self)             # <<<<<<<<<<<<<<
- * 
+ *
  *         @property
 */
   __pyx_r = PyArray_MultiIter_DIMS(__pyx_v_self);
@@ -3682,7 +3682,7 @@ static CYTHON_INLINE npy_intp *__pyx_f_5numpy_9broadcast_10dimensions_dimensions
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":299
  *             return PyArray_MultiIter_NDIM(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_intp* dimensions(self) noexcept nogil:
  *             """The shape of the broadcasted result."""
@@ -3695,7 +3695,7 @@ static CYTHON_INLINE npy_intp *__pyx_f_5numpy_9broadcast_10dimensions_dimensions
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":304
  *             return PyArray_MultiIter_DIMS(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline void** iters(self) noexcept nogil:
  *             """An array of iterator objects that holds the iterators for the arrays to be broadcast together.
@@ -3708,15 +3708,15 @@ static CYTHON_INLINE void **__pyx_f_5numpy_9broadcast_5iters_iters(PyArrayMultiI
  *             """An array of iterator objects that holds the iterators for the arrays to be broadcast together.
  *             On return, the iterators are adjusted for broadcasting."""
  *             return PyArray_MultiIter_ITERS(self)             # <<<<<<<<<<<<<<
- * 
- * 
+ *
+ *
 */
   __pyx_r = PyArray_MultiIter_ITERS(__pyx_v_self);
   goto __pyx_L0;
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":304
  *             return PyArray_MultiIter_DIMS(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline void** iters(self) noexcept nogil:
  *             """An array of iterator objects that holds the iterators for the arrays to be broadcast together.
@@ -3729,7 +3729,7 @@ static CYTHON_INLINE void **__pyx_f_5numpy_9broadcast_5iters_iters(PyArrayMultiI
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":322
  *         # Instead, we use properties that map to the corresponding C-API functions.
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline PyObject* base(self) noexcept nogil:
  *             """Returns a borrowed reference to the object owning the data/memory.
@@ -3742,7 +3742,7 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_7ndarray_4base_base(PyArrayObject 
  *             """Returns a borrowed reference to the object owning the data/memory.
  *             """
  *             return PyArray_BASE(self)             # <<<<<<<<<<<<<<
- * 
+ *
  *         @property
 */
   __pyx_r = PyArray_BASE(__pyx_v_self);
@@ -3750,7 +3750,7 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_7ndarray_4base_base(PyArrayObject 
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":322
  *         # Instead, we use properties that map to the corresponding C-API functions.
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline PyObject* base(self) noexcept nogil:
  *             """Returns a borrowed reference to the object owning the data/memory.
@@ -3763,7 +3763,7 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_7ndarray_4base_base(PyArrayObject 
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":328
  *             return PyArray_BASE(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline dtype descr(self):
  *             """Returns an owned reference to the dtype of the array.
@@ -3779,7 +3779,7 @@ static CYTHON_INLINE PyArray_Descr *__pyx_f_5numpy_7ndarray_5descr_descr(PyArray
  *             """Returns an owned reference to the dtype of the array.
  *             """
  *             return <dtype>PyArray_DESCR(self)             # <<<<<<<<<<<<<<
- * 
+ *
  *         @property
 */
   __Pyx_XDECREF((PyObject *)__pyx_r);
@@ -3790,7 +3790,7 @@ static CYTHON_INLINE PyArray_Descr *__pyx_f_5numpy_7ndarray_5descr_descr(PyArray
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":328
  *             return PyArray_BASE(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline dtype descr(self):
  *             """Returns an owned reference to the dtype of the array.
@@ -3805,7 +3805,7 @@ static CYTHON_INLINE PyArray_Descr *__pyx_f_5numpy_7ndarray_5descr_descr(PyArray
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":334
  *             return <dtype>PyArray_DESCR(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline int ndim(self) noexcept nogil:
  *             """Returns the number of dimensions in the array.
@@ -3818,7 +3818,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_7ndarray_4ndim_ndim(PyArrayObject *__pyx
  *             """Returns the number of dimensions in the array.
  *             """
  *             return PyArray_NDIM(self)             # <<<<<<<<<<<<<<
- * 
+ *
  *         @property
 */
   __pyx_r = PyArray_NDIM(__pyx_v_self);
@@ -3826,7 +3826,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_7ndarray_4ndim_ndim(PyArrayObject *__pyx
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":334
  *             return <dtype>PyArray_DESCR(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline int ndim(self) noexcept nogil:
  *             """Returns the number of dimensions in the array.
@@ -3839,7 +3839,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_7ndarray_4ndim_ndim(PyArrayObject *__pyx
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":340
  *             return PyArray_NDIM(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_intp *shape(self) noexcept nogil:
  *             """Returns a pointer to the dimensions/shape of the array.
@@ -3852,7 +3852,7 @@ static CYTHON_INLINE npy_intp *__pyx_f_5numpy_7ndarray_5shape_shape(PyArrayObjec
  *             Can return NULL for 0-dimensional arrays.
  *             """
  *             return PyArray_DIMS(self)             # <<<<<<<<<<<<<<
- * 
+ *
  *         @property
 */
   __pyx_r = PyArray_DIMS(__pyx_v_self);
@@ -3860,7 +3860,7 @@ static CYTHON_INLINE npy_intp *__pyx_f_5numpy_7ndarray_5shape_shape(PyArrayObjec
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":340
  *             return PyArray_NDIM(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_intp *shape(self) noexcept nogil:
  *             """Returns a pointer to the dimensions/shape of the array.
@@ -3873,7 +3873,7 @@ static CYTHON_INLINE npy_intp *__pyx_f_5numpy_7ndarray_5shape_shape(PyArrayObjec
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":348
  *             return PyArray_DIMS(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_intp *strides(self) noexcept nogil:
  *             """Returns a pointer to the strides of the array.
@@ -3886,7 +3886,7 @@ static CYTHON_INLINE npy_intp *__pyx_f_5numpy_7ndarray_7strides_strides(PyArrayO
  *             The number of elements matches the number of dimensions of the array (ndim).
  *             """
  *             return PyArray_STRIDES(self)             # <<<<<<<<<<<<<<
- * 
+ *
  *         @property
 */
   __pyx_r = PyArray_STRIDES(__pyx_v_self);
@@ -3894,7 +3894,7 @@ static CYTHON_INLINE npy_intp *__pyx_f_5numpy_7ndarray_7strides_strides(PyArrayO
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":348
  *             return PyArray_DIMS(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_intp *strides(self) noexcept nogil:
  *             """Returns a pointer to the strides of the array.
@@ -3907,7 +3907,7 @@ static CYTHON_INLINE npy_intp *__pyx_f_5numpy_7ndarray_7strides_strides(PyArrayO
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":355
  *             return PyArray_STRIDES(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_intp size(self) noexcept nogil:
  *             """Returns the total size (in number of elements) of the array.
@@ -3920,7 +3920,7 @@ static CYTHON_INLINE npy_intp __pyx_f_5numpy_7ndarray_4size_size(PyArrayObject *
  *             """Returns the total size (in number of elements) of the array.
  *             """
  *             return PyArray_SIZE(self)             # <<<<<<<<<<<<<<
- * 
+ *
  *         @property
 */
   __pyx_r = PyArray_SIZE(__pyx_v_self);
@@ -3928,7 +3928,7 @@ static CYTHON_INLINE npy_intp __pyx_f_5numpy_7ndarray_4size_size(PyArrayObject *
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":355
  *             return PyArray_STRIDES(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline npy_intp size(self) noexcept nogil:
  *             """Returns the total size (in number of elements) of the array.
@@ -3941,7 +3941,7 @@ static CYTHON_INLINE npy_intp __pyx_f_5numpy_7ndarray_4size_size(PyArrayObject *
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":361
  *             return PyArray_SIZE(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline char* data(self) noexcept nogil:
  *             """The pointer to the data buffer as a char*.
@@ -3954,15 +3954,15 @@ static CYTHON_INLINE char *__pyx_f_5numpy_7ndarray_4data_data(PyArrayObject *__p
  *             of `PyArray_DATA()` instead, which returns a 'void*'.
  *             """
  *             return PyArray_BYTES(self)             # <<<<<<<<<<<<<<
- * 
- * 
+ *
+ *
 */
   __pyx_r = PyArray_BYTES(__pyx_v_self);
   goto __pyx_L0;
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":361
  *             return PyArray_SIZE(self)
- * 
+ *
  *         @property             # <<<<<<<<<<<<<<
  *         cdef inline char* data(self) noexcept nogil:
  *             """The pointer to the data buffer as a char*.
@@ -3975,10 +3975,10 @@ static CYTHON_INLINE char *__pyx_f_5numpy_7ndarray_4data_data(PyArrayObject *__p
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":776
  * ctypedef long double complex clongdouble_t
- * 
+ *
  * cdef inline object PyArray_MultiIterNew1(a):             # <<<<<<<<<<<<<<
  *     return PyArray_MultiIterNew(1, <void*>a)
- * 
+ *
 */
 
 static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew1(PyObject *__pyx_v_a) {
@@ -3991,10 +3991,10 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew1(PyObject *__
   __Pyx_RefNannySetupContext("PyArray_MultiIterNew1", 0);
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":777
- * 
+ *
  * cdef inline object PyArray_MultiIterNew1(a):
  *     return PyArray_MultiIterNew(1, <void*>a)             # <<<<<<<<<<<<<<
- * 
+ *
  * cdef inline object PyArray_MultiIterNew2(a, b):
 */
   __Pyx_XDECREF(__pyx_r);
@@ -4006,10 +4006,10 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew1(PyObject *__
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":776
  * ctypedef long double complex clongdouble_t
- * 
+ *
  * cdef inline object PyArray_MultiIterNew1(a):             # <<<<<<<<<<<<<<
  *     return PyArray_MultiIterNew(1, <void*>a)
- * 
+ *
 */
 
   /* function exit code */
@@ -4025,10 +4025,10 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew1(PyObject *__
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":779
  *     return PyArray_MultiIterNew(1, <void*>a)
- * 
+ *
  * cdef inline object PyArray_MultiIterNew2(a, b):             # <<<<<<<<<<<<<<
  *     return PyArray_MultiIterNew(2, <void*>a, <void*>b)
- * 
+ *
 */
 
 static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew2(PyObject *__pyx_v_a, PyObject *__pyx_v_b) {
@@ -4041,10 +4041,10 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew2(PyObject *__
   __Pyx_RefNannySetupContext("PyArray_MultiIterNew2", 0);
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":780
- * 
+ *
  * cdef inline object PyArray_MultiIterNew2(a, b):
  *     return PyArray_MultiIterNew(2, <void*>a, <void*>b)             # <<<<<<<<<<<<<<
- * 
+ *
  * cdef inline object PyArray_MultiIterNew3(a, b, c):
 */
   __Pyx_XDECREF(__pyx_r);
@@ -4056,10 +4056,10 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew2(PyObject *__
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":779
  *     return PyArray_MultiIterNew(1, <void*>a)
- * 
+ *
  * cdef inline object PyArray_MultiIterNew2(a, b):             # <<<<<<<<<<<<<<
  *     return PyArray_MultiIterNew(2, <void*>a, <void*>b)
- * 
+ *
 */
 
   /* function exit code */
@@ -4075,10 +4075,10 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew2(PyObject *__
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":782
  *     return PyArray_MultiIterNew(2, <void*>a, <void*>b)
- * 
+ *
  * cdef inline object PyArray_MultiIterNew3(a, b, c):             # <<<<<<<<<<<<<<
  *     return PyArray_MultiIterNew(3, <void*>a, <void*>b, <void*> c)
- * 
+ *
 */
 
 static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew3(PyObject *__pyx_v_a, PyObject *__pyx_v_b, PyObject *__pyx_v_c) {
@@ -4091,10 +4091,10 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew3(PyObject *__
   __Pyx_RefNannySetupContext("PyArray_MultiIterNew3", 0);
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":783
- * 
+ *
  * cdef inline object PyArray_MultiIterNew3(a, b, c):
  *     return PyArray_MultiIterNew(3, <void*>a, <void*>b, <void*> c)             # <<<<<<<<<<<<<<
- * 
+ *
  * cdef inline object PyArray_MultiIterNew4(a, b, c, d):
 */
   __Pyx_XDECREF(__pyx_r);
@@ -4106,10 +4106,10 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew3(PyObject *__
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":782
  *     return PyArray_MultiIterNew(2, <void*>a, <void*>b)
- * 
+ *
  * cdef inline object PyArray_MultiIterNew3(a, b, c):             # <<<<<<<<<<<<<<
  *     return PyArray_MultiIterNew(3, <void*>a, <void*>b, <void*> c)
- * 
+ *
 */
 
   /* function exit code */
@@ -4125,10 +4125,10 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew3(PyObject *__
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":785
  *     return PyArray_MultiIterNew(3, <void*>a, <void*>b, <void*> c)
- * 
+ *
  * cdef inline object PyArray_MultiIterNew4(a, b, c, d):             # <<<<<<<<<<<<<<
  *     return PyArray_MultiIterNew(4, <void*>a, <void*>b, <void*>c, <void*> d)
- * 
+ *
 */
 
 static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew4(PyObject *__pyx_v_a, PyObject *__pyx_v_b, PyObject *__pyx_v_c, PyObject *__pyx_v_d) {
@@ -4141,10 +4141,10 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew4(PyObject *__
   __Pyx_RefNannySetupContext("PyArray_MultiIterNew4", 0);
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":786
- * 
+ *
  * cdef inline object PyArray_MultiIterNew4(a, b, c, d):
  *     return PyArray_MultiIterNew(4, <void*>a, <void*>b, <void*>c, <void*> d)             # <<<<<<<<<<<<<<
- * 
+ *
  * cdef inline object PyArray_MultiIterNew5(a, b, c, d, e):
 */
   __Pyx_XDECREF(__pyx_r);
@@ -4156,10 +4156,10 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew4(PyObject *__
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":785
  *     return PyArray_MultiIterNew(3, <void*>a, <void*>b, <void*> c)
- * 
+ *
  * cdef inline object PyArray_MultiIterNew4(a, b, c, d):             # <<<<<<<<<<<<<<
  *     return PyArray_MultiIterNew(4, <void*>a, <void*>b, <void*>c, <void*> d)
- * 
+ *
 */
 
   /* function exit code */
@@ -4175,10 +4175,10 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew4(PyObject *__
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":788
  *     return PyArray_MultiIterNew(4, <void*>a, <void*>b, <void*>c, <void*> d)
- * 
+ *
  * cdef inline object PyArray_MultiIterNew5(a, b, c, d, e):             # <<<<<<<<<<<<<<
  *     return PyArray_MultiIterNew(5, <void*>a, <void*>b, <void*>c, <void*> d, <void*> e)
- * 
+ *
 */
 
 static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew5(PyObject *__pyx_v_a, PyObject *__pyx_v_b, PyObject *__pyx_v_c, PyObject *__pyx_v_d, PyObject *__pyx_v_e) {
@@ -4191,10 +4191,10 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew5(PyObject *__
   __Pyx_RefNannySetupContext("PyArray_MultiIterNew5", 0);
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":789
- * 
+ *
  * cdef inline object PyArray_MultiIterNew5(a, b, c, d, e):
  *     return PyArray_MultiIterNew(5, <void*>a, <void*>b, <void*>c, <void*> d, <void*> e)             # <<<<<<<<<<<<<<
- * 
+ *
  * cdef inline tuple PyDataType_SHAPE(dtype d):
 */
   __Pyx_XDECREF(__pyx_r);
@@ -4206,10 +4206,10 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew5(PyObject *__
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":788
  *     return PyArray_MultiIterNew(4, <void*>a, <void*>b, <void*>c, <void*> d)
- * 
+ *
  * cdef inline object PyArray_MultiIterNew5(a, b, c, d, e):             # <<<<<<<<<<<<<<
  *     return PyArray_MultiIterNew(5, <void*>a, <void*>b, <void*>c, <void*> d, <void*> e)
- * 
+ *
 */
 
   /* function exit code */
@@ -4225,7 +4225,7 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyArray_MultiIterNew5(PyObject *__
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":791
  *     return PyArray_MultiIterNew(5, <void*>a, <void*>b, <void*>c, <void*> d, <void*> e)
- * 
+ *
  * cdef inline tuple PyDataType_SHAPE(dtype d):             # <<<<<<<<<<<<<<
  *     if PyDataType_HASSUBARRAY(d):
  *         return <tuple>d.subarray.shape
@@ -4239,7 +4239,7 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyDataType_SHAPE(PyArray_Descr *__
   __Pyx_RefNannySetupContext("PyDataType_SHAPE", 0);
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":792
- * 
+ *
  * cdef inline tuple PyDataType_SHAPE(dtype d):
  *     if PyDataType_HASSUBARRAY(d):             # <<<<<<<<<<<<<<
  *         return <tuple>d.subarray.shape
@@ -4262,7 +4262,7 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyDataType_SHAPE(PyArray_Descr *__
     goto __pyx_L0;
 
     /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":792
- * 
+ *
  * cdef inline tuple PyDataType_SHAPE(dtype d):
  *     if PyDataType_HASSUBARRAY(d):             # <<<<<<<<<<<<<<
  *         return <tuple>d.subarray.shape
@@ -4274,8 +4274,8 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyDataType_SHAPE(PyArray_Descr *__
  *         return <tuple>d.subarray.shape
  *     else:
  *         return ()             # <<<<<<<<<<<<<<
- * 
- * 
+ *
+ *
 */
   /*else*/ {
     __Pyx_XDECREF(__pyx_r);
@@ -4286,7 +4286,7 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyDataType_SHAPE(PyArray_Descr *__
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":791
  *     return PyArray_MultiIterNew(5, <void*>a, <void*>b, <void*>c, <void*> d, <void*> e)
- * 
+ *
  * cdef inline tuple PyDataType_SHAPE(dtype d):             # <<<<<<<<<<<<<<
  *     if PyDataType_HASSUBARRAY(d):
  *         return <tuple>d.subarray.shape
@@ -4301,7 +4301,7 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_PyDataType_SHAPE(PyArray_Descr *__
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":994
  *     int _import_umath() except -1
- * 
+ *
  * cdef inline void set_array_base(ndarray arr, object base) except *:             # <<<<<<<<<<<<<<
  *     Py_INCREF(base) # important to do this before stealing the reference below!
  *     PyArray_SetBaseObject(arr, base)
@@ -4314,11 +4314,11 @@ static CYTHON_INLINE void __pyx_f_5numpy_set_array_base(PyArrayObject *__pyx_v_a
   int __pyx_clineno = 0;
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":995
- * 
+ *
  * cdef inline void set_array_base(ndarray arr, object base) except *:
  *     Py_INCREF(base) # important to do this before stealing the reference below!             # <<<<<<<<<<<<<<
  *     PyArray_SetBaseObject(arr, base)
- * 
+ *
 */
   Py_INCREF(__pyx_v_base);
 
@@ -4326,14 +4326,14 @@ static CYTHON_INLINE void __pyx_f_5numpy_set_array_base(PyArrayObject *__pyx_v_a
  * cdef inline void set_array_base(ndarray arr, object base) except *:
  *     Py_INCREF(base) # important to do this before stealing the reference below!
  *     PyArray_SetBaseObject(arr, base)             # <<<<<<<<<<<<<<
- * 
+ *
  * cdef inline object get_array_base(ndarray arr):
 */
   __pyx_t_1 = PyArray_SetBaseObject(__pyx_v_arr, __pyx_v_base); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(1, 996, __pyx_L1_error)
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":994
  *     int _import_umath() except -1
- * 
+ *
  * cdef inline void set_array_base(ndarray arr, object base) except *:             # <<<<<<<<<<<<<<
  *     Py_INCREF(base) # important to do this before stealing the reference below!
  *     PyArray_SetBaseObject(arr, base)
@@ -4348,7 +4348,7 @@ static CYTHON_INLINE void __pyx_f_5numpy_set_array_base(PyArrayObject *__pyx_v_a
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":998
  *     PyArray_SetBaseObject(arr, base)
- * 
+ *
  * cdef inline object get_array_base(ndarray arr):             # <<<<<<<<<<<<<<
  *     base = PyArray_BASE(arr)
  *     if base is NULL:
@@ -4362,7 +4362,7 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_get_array_base(PyArrayObject *__py
   __Pyx_RefNannySetupContext("get_array_base", 0);
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":999
- * 
+ *
  * cdef inline object get_array_base(ndarray arr):
  *     base = PyArray_BASE(arr)             # <<<<<<<<<<<<<<
  *     if base is NULL:
@@ -4385,7 +4385,7 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_get_array_base(PyArrayObject *__py
  *     if base is NULL:
  *         return None             # <<<<<<<<<<<<<<
  *     return <object>base
- * 
+ *
 */
     __Pyx_XDECREF(__pyx_r);
     __pyx_r = Py_None; __Pyx_INCREF(Py_None);
@@ -4404,7 +4404,7 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_get_array_base(PyArrayObject *__py
  *     if base is NULL:
  *         return None
  *     return <object>base             # <<<<<<<<<<<<<<
- * 
+ *
  * # Versions of the import_* functions which are more suitable for
 */
   __Pyx_XDECREF(__pyx_r);
@@ -4414,7 +4414,7 @@ static CYTHON_INLINE PyObject *__pyx_f_5numpy_get_array_base(PyArrayObject *__py
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":998
  *     PyArray_SetBaseObject(arr, base)
- * 
+ *
  * cdef inline object get_array_base(ndarray arr):             # <<<<<<<<<<<<<<
  *     base = PyArray_BASE(arr)
  *     if base is NULL:
@@ -4497,7 +4497,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_array(void) {
  *         __pyx_import_array()
  *     except Exception:             # <<<<<<<<<<<<<<
  *         raise ImportError("numpy._core.multiarray failed to import")
- * 
+ *
 */
     __pyx_t_4 = __Pyx_PyErr_ExceptionMatches(((PyObject *)(((PyTypeObject*)PyExc_Exception))));
     if (__pyx_t_4) {
@@ -4511,7 +4511,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_array(void) {
  *         __pyx_import_array()
  *     except Exception:
  *         raise ImportError("numpy._core.multiarray failed to import")             # <<<<<<<<<<<<<<
- * 
+ *
  * cdef inline int import_umath() except -1:
 */
       __pyx_t_9 = NULL;
@@ -4571,7 +4571,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_array(void) {
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1012
  *         raise ImportError("numpy._core.multiarray failed to import")
- * 
+ *
  * cdef inline int import_umath() except -1:             # <<<<<<<<<<<<<<
  *     try:
  *         _import_umath()
@@ -4596,7 +4596,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_umath(void) {
   __Pyx_RefNannySetupContext("import_umath", 0);
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1013
- * 
+ *
  * cdef inline int import_umath() except -1:
  *     try:             # <<<<<<<<<<<<<<
  *         _import_umath()
@@ -4621,7 +4621,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_umath(void) {
       __pyx_t_4 = _import_umath(); if (unlikely(__pyx_t_4 == ((int)-1))) __PYX_ERR(1, 1014, __pyx_L3_error)
 
       /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1013
- * 
+ *
  * cdef inline int import_umath() except -1:
  *     try:             # <<<<<<<<<<<<<<
  *         _import_umath()
@@ -4639,7 +4639,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_umath(void) {
  *         _import_umath()
  *     except Exception:             # <<<<<<<<<<<<<<
  *         raise ImportError("numpy._core.umath failed to import")
- * 
+ *
 */
     __pyx_t_4 = __Pyx_PyErr_ExceptionMatches(((PyObject *)(((PyTypeObject*)PyExc_Exception))));
     if (__pyx_t_4) {
@@ -4653,7 +4653,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_umath(void) {
  *         _import_umath()
  *     except Exception:
  *         raise ImportError("numpy._core.umath failed to import")             # <<<<<<<<<<<<<<
- * 
+ *
  * cdef inline int import_ufunc() except -1:
 */
       __pyx_t_9 = NULL;
@@ -4672,7 +4672,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_umath(void) {
     goto __pyx_L5_except_error;
 
     /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1013
- * 
+ *
  * cdef inline int import_umath() except -1:
  *     try:             # <<<<<<<<<<<<<<
  *         _import_umath()
@@ -4689,7 +4689,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_umath(void) {
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1012
  *         raise ImportError("numpy._core.multiarray failed to import")
- * 
+ *
  * cdef inline int import_umath() except -1:             # <<<<<<<<<<<<<<
  *     try:
  *         _import_umath()
@@ -4713,7 +4713,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_umath(void) {
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1018
  *         raise ImportError("numpy._core.umath failed to import")
- * 
+ *
  * cdef inline int import_ufunc() except -1:             # <<<<<<<<<<<<<<
  *     try:
  *         _import_umath()
@@ -4738,7 +4738,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_ufunc(void) {
   __Pyx_RefNannySetupContext("import_ufunc", 0);
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1019
- * 
+ *
  * cdef inline int import_ufunc() except -1:
  *     try:             # <<<<<<<<<<<<<<
  *         _import_umath()
@@ -4763,7 +4763,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_ufunc(void) {
       __pyx_t_4 = _import_umath(); if (unlikely(__pyx_t_4 == ((int)-1))) __PYX_ERR(1, 1020, __pyx_L3_error)
 
       /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1019
- * 
+ *
  * cdef inline int import_ufunc() except -1:
  *     try:             # <<<<<<<<<<<<<<
  *         _import_umath()
@@ -4781,7 +4781,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_ufunc(void) {
  *         _import_umath()
  *     except Exception:             # <<<<<<<<<<<<<<
  *         raise ImportError("numpy._core.umath failed to import")
- * 
+ *
 */
     __pyx_t_4 = __Pyx_PyErr_ExceptionMatches(((PyObject *)(((PyTypeObject*)PyExc_Exception))));
     if (__pyx_t_4) {
@@ -4795,8 +4795,8 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_ufunc(void) {
  *         _import_umath()
  *     except Exception:
  *         raise ImportError("numpy._core.umath failed to import")             # <<<<<<<<<<<<<<
- * 
- * 
+ *
+ *
 */
       __pyx_t_9 = NULL;
       __pyx_t_10 = 1;
@@ -4814,7 +4814,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_ufunc(void) {
     goto __pyx_L5_except_error;
 
     /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1019
- * 
+ *
  * cdef inline int import_ufunc() except -1:
  *     try:             # <<<<<<<<<<<<<<
  *         _import_umath()
@@ -4831,7 +4831,7 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_ufunc(void) {
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1018
  *         raise ImportError("numpy._core.umath failed to import")
- * 
+ *
  * cdef inline int import_ufunc() except -1:             # <<<<<<<<<<<<<<
  *     try:
  *         _import_umath()
@@ -4854,8 +4854,8 @@ static CYTHON_INLINE int __pyx_f_5numpy_import_ufunc(void) {
 }
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1025
- * 
- * 
+ *
+ *
  * cdef inline bint is_timedelta64_object(object obj) noexcept:             # <<<<<<<<<<<<<<
  *     """
  *     Cython equivalent of `isinstance(obj, np.timedelta64)`
@@ -4868,15 +4868,15 @@ static CYTHON_INLINE int __pyx_f_5numpy_is_timedelta64_object(PyObject *__pyx_v_
  *     bool
  *     """
  *     return PyObject_TypeCheck(obj, &PyTimedeltaArrType_Type)             # <<<<<<<<<<<<<<
- * 
- * 
+ *
+ *
 */
   __pyx_r = PyObject_TypeCheck(__pyx_v_obj, (&PyTimedeltaArrType_Type));
   goto __pyx_L0;
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1025
- * 
- * 
+ *
+ *
  * cdef inline bint is_timedelta64_object(object obj) noexcept:             # <<<<<<<<<<<<<<
  *     """
  *     Cython equivalent of `isinstance(obj, np.timedelta64)`
@@ -4888,8 +4888,8 @@ static CYTHON_INLINE int __pyx_f_5numpy_is_timedelta64_object(PyObject *__pyx_v_
 }
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1040
- * 
- * 
+ *
+ *
  * cdef inline bint is_datetime64_object(object obj) noexcept:             # <<<<<<<<<<<<<<
  *     """
  *     Cython equivalent of `isinstance(obj, np.datetime64)`
@@ -4902,15 +4902,15 @@ static CYTHON_INLINE int __pyx_f_5numpy_is_datetime64_object(PyObject *__pyx_v_o
  *     bool
  *     """
  *     return PyObject_TypeCheck(obj, &PyDatetimeArrType_Type)             # <<<<<<<<<<<<<<
- * 
- * 
+ *
+ *
 */
   __pyx_r = PyObject_TypeCheck(__pyx_v_obj, (&PyDatetimeArrType_Type));
   goto __pyx_L0;
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1040
- * 
- * 
+ *
+ *
  * cdef inline bint is_datetime64_object(object obj) noexcept:             # <<<<<<<<<<<<<<
  *     """
  *     Cython equivalent of `isinstance(obj, np.datetime64)`
@@ -4922,8 +4922,8 @@ static CYTHON_INLINE int __pyx_f_5numpy_is_datetime64_object(PyObject *__pyx_v_o
 }
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1055
- * 
- * 
+ *
+ *
  * cdef inline npy_datetime get_datetime64_value(object obj) noexcept nogil:             # <<<<<<<<<<<<<<
  *     """
  *     returns the int64 value underlying scalar numpy datetime64 object
@@ -4936,15 +4936,15 @@ static CYTHON_INLINE npy_datetime __pyx_f_5numpy_get_datetime64_value(PyObject *
  *     also needed.  That can be found using `get_datetime64_unit`.
  *     """
  *     return (<PyDatetimeScalarObject*>obj).obval             # <<<<<<<<<<<<<<
- * 
- * 
+ *
+ *
 */
   __pyx_r = ((PyDatetimeScalarObject *)__pyx_v_obj)->obval;
   goto __pyx_L0;
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1055
- * 
- * 
+ *
+ *
  * cdef inline npy_datetime get_datetime64_value(object obj) noexcept nogil:             # <<<<<<<<<<<<<<
  *     """
  *     returns the int64 value underlying scalar numpy datetime64 object
@@ -4956,8 +4956,8 @@ static CYTHON_INLINE npy_datetime __pyx_f_5numpy_get_datetime64_value(PyObject *
 }
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1065
- * 
- * 
+ *
+ *
  * cdef inline npy_timedelta get_timedelta64_value(object obj) noexcept nogil:             # <<<<<<<<<<<<<<
  *     """
  *     returns the int64 value underlying scalar numpy timedelta64 object
@@ -4970,15 +4970,15 @@ static CYTHON_INLINE npy_timedelta __pyx_f_5numpy_get_timedelta64_value(PyObject
  *     returns the int64 value underlying scalar numpy timedelta64 object
  *     """
  *     return (<PyTimedeltaScalarObject*>obj).obval             # <<<<<<<<<<<<<<
- * 
- * 
+ *
+ *
 */
   __pyx_r = ((PyTimedeltaScalarObject *)__pyx_v_obj)->obval;
   goto __pyx_L0;
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1065
- * 
- * 
+ *
+ *
  * cdef inline npy_timedelta get_timedelta64_value(object obj) noexcept nogil:             # <<<<<<<<<<<<<<
  *     """
  *     returns the int64 value underlying scalar numpy timedelta64 object
@@ -4990,8 +4990,8 @@ static CYTHON_INLINE npy_timedelta __pyx_f_5numpy_get_timedelta64_value(PyObject
 }
 
 /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1072
- * 
- * 
+ *
+ *
  * cdef inline NPY_DATETIMEUNIT get_datetime64_unit(object obj) noexcept nogil:             # <<<<<<<<<<<<<<
  *     """
  *     returns the unit part of the dtype for a numpy datetime64 object.
@@ -5004,15 +5004,15 @@ static CYTHON_INLINE NPY_DATETIMEUNIT __pyx_f_5numpy_get_datetime64_unit(PyObjec
  *     returns the unit part of the dtype for a numpy datetime64 object.
  *     """
  *     return <NPY_DATETIMEUNIT>(<PyDatetimeScalarObject*>obj).obmeta.base             # <<<<<<<<<<<<<<
- * 
- * 
+ *
+ *
 */
   __pyx_r = ((NPY_DATETIMEUNIT)((PyDatetimeScalarObject *)__pyx_v_obj)->obmeta.base);
   goto __pyx_L0;
 
   /* "../../../../private/var/folders/1w/3lnw_t0n3d5_xlt4h40g6r0c0000gn/T/build-env-06x2_ewe/lib/python3.12/site-packages/numpy/__init__.cython-30.pxd":1072
- * 
- * 
+ *
+ *
  * cdef inline NPY_DATETIMEUNIT get_datetime64_unit(object obj) noexcept nogil:             # <<<<<<<<<<<<<<
  *     """
  *     returns the unit part of the dtype for a numpy datetime64 object.
@@ -5025,7 +5025,7 @@ static CYTHON_INLINE NPY_DATETIMEUNIT __pyx_f_5numpy_get_datetime64_unit(PyObjec
 
 /* "bloch_wrapper.pyx":63
  * ctypedef np.complex128_t CTYPE_t
- * 
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * cdef inline np.ndarray[DTYPE_t, ndim=2] _coerce_three_columns(np.ndarray arr, int rows, str name):
@@ -5128,7 +5128,7 @@ static CYTHON_INLINE PyArrayObject *__pyx_f_18bloch_simulator_cy__coerce_three_c
  *         raise ValueError("%s must be 2D with shape (%d, 3); got ndim=%d" % (name, rows, arr.ndim))
  *     if arr.shape[0] != rows:             # <<<<<<<<<<<<<<
  *         raise ValueError("%s must have shape (%d, 3); got (%d, %d)" % (name, rows, arr.shape[0], arr.shape[1]))
- * 
+ *
 */
   __pyx_t_1 = ((__pyx_f_5numpy_7ndarray_5shape_shape(__pyx_v_arr)[0]) != __pyx_v_rows);
   if (unlikely(__pyx_t_1)) {
@@ -5137,7 +5137,7 @@ static CYTHON_INLINE PyArrayObject *__pyx_f_18bloch_simulator_cy__coerce_three_c
  *         raise ValueError("%s must be 2D with shape (%d, 3); got ndim=%d" % (name, rows, arr.ndim))
  *     if arr.shape[0] != rows:
  *         raise ValueError("%s must have shape (%d, 3); got (%d, %d)" % (name, rows, arr.shape[0], arr.shape[1]))             # <<<<<<<<<<<<<<
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=2] arr_c = np.ascontiguousarray(arr, dtype=np.float64)
 */
     __pyx_t_8 = NULL;
@@ -5182,13 +5182,13 @@ static CYTHON_INLINE PyArrayObject *__pyx_f_18bloch_simulator_cy__coerce_three_c
  *         raise ValueError("%s must be 2D with shape (%d, 3); got ndim=%d" % (name, rows, arr.ndim))
  *     if arr.shape[0] != rows:             # <<<<<<<<<<<<<<
  *         raise ValueError("%s must have shape (%d, 3); got (%d, %d)" % (name, rows, arr.shape[0], arr.shape[1]))
- * 
+ *
 */
   }
 
   /* "bloch_wrapper.pyx":72
  *         raise ValueError("%s must have shape (%d, 3); got (%d, %d)" % (name, rows, arr.shape[0], arr.shape[1]))
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=2] arr_c = np.ascontiguousarray(arr, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     if arr_c.shape[1] == 3:
  *         return arr_c
@@ -5242,11 +5242,11 @@ static CYTHON_INLINE PyArrayObject *__pyx_f_18bloch_simulator_cy__coerce_three_c
   __pyx_t_2 = 0;
 
   /* "bloch_wrapper.pyx":73
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=2] arr_c = np.ascontiguousarray(arr, dtype=np.float64)
  *     if arr_c.shape[1] == 3:             # <<<<<<<<<<<<<<
  *         return arr_c
- * 
+ *
 */
   __pyx_t_1 = ((__pyx_f_5numpy_7ndarray_5shape_shape(((PyArrayObject *)__pyx_v_arr_c))[1]) == 3);
   if (__pyx_t_1) {
@@ -5255,7 +5255,7 @@ static CYTHON_INLINE PyArrayObject *__pyx_f_18bloch_simulator_cy__coerce_three_c
  *     cdef np.ndarray[DTYPE_t, ndim=2] arr_c = np.ascontiguousarray(arr, dtype=np.float64)
  *     if arr_c.shape[1] == 3:
  *         return arr_c             # <<<<<<<<<<<<<<
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=2] padded = np.zeros((rows, 3), dtype=np.float64)
 */
     __Pyx_XDECREF((PyObject *)__pyx_r);
@@ -5264,17 +5264,17 @@ static CYTHON_INLINE PyArrayObject *__pyx_f_18bloch_simulator_cy__coerce_three_c
     goto __pyx_L0;
 
     /* "bloch_wrapper.pyx":73
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=2] arr_c = np.ascontiguousarray(arr, dtype=np.float64)
  *     if arr_c.shape[1] == 3:             # <<<<<<<<<<<<<<
  *         return arr_c
- * 
+ *
 */
   }
 
   /* "bloch_wrapper.pyx":76
  *         return arr_c
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=2] padded = np.zeros((rows, 3), dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef int copy_cols = 3 if arr_c.shape[1] > 3 else arr_c.shape[1]
  *     if copy_cols > 0:
@@ -5339,7 +5339,7 @@ static CYTHON_INLINE PyArrayObject *__pyx_f_18bloch_simulator_cy__coerce_three_c
   __pyx_t_2 = 0;
 
   /* "bloch_wrapper.pyx":77
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=2] padded = np.zeros((rows, 3), dtype=np.float64)
  *     cdef int copy_cols = 3 if arr_c.shape[1] > 3 else arr_c.shape[1]             # <<<<<<<<<<<<<<
  *     if copy_cols > 0:
@@ -5368,7 +5368,7 @@ static CYTHON_INLINE PyArrayObject *__pyx_f_18bloch_simulator_cy__coerce_three_c
  *     if copy_cols > 0:
  *         padded[:, :copy_cols] = arr_c[:, :copy_cols]             # <<<<<<<<<<<<<<
  *     return padded
- * 
+ *
 */
     __pyx_t_2 = __Pyx_PyLong_From_int(__pyx_v_copy_cols); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 79, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
@@ -5416,7 +5416,7 @@ static CYTHON_INLINE PyArrayObject *__pyx_f_18bloch_simulator_cy__coerce_three_c
  *     if copy_cols > 0:
  *         padded[:, :copy_cols] = arr_c[:, :copy_cols]
  *     return padded             # <<<<<<<<<<<<<<
- * 
+ *
  * @cython.boundscheck(False)
 */
   __Pyx_XDECREF((PyObject *)__pyx_r);
@@ -5426,7 +5426,7 @@ static CYTHON_INLINE PyArrayObject *__pyx_f_18bloch_simulator_cy__coerce_three_c
 
   /* "bloch_wrapper.pyx":63
  * ctypedef np.complex128_t CTYPE_t
- * 
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * cdef inline np.ndarray[DTYPE_t, ndim=2] _coerce_three_columns(np.ndarray arr, int rows, str name):
@@ -5464,14 +5464,14 @@ static CYTHON_INLINE PyArrayObject *__pyx_f_18bloch_simulator_cy__coerce_three_c
 
 /* "bloch_wrapper.pyx":82
  *     return padded
- * 
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * def simulate_bloch(np.ndarray[CTYPE_t, ndim=1] b1_complex,
 */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_18bloch_simulator_cy_1simulate_bloch(PyObject *__pyx_self, 
+static PyObject *__pyx_pw_18bloch_simulator_cy_1simulate_bloch(PyObject *__pyx_self,
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
@@ -5480,7 +5480,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 ); /*proto*/
 PyDoc_STRVAR(__pyx_doc_18bloch_simulator_cy_simulate_bloch, "\n    Simulate Bloch equations for MRI physics.\n    \n    Parameters\n    ----------\n    b1_complex : ndarray, shape (ntime,)\n        Complex RF pulse (B1 field) in Gauss\n    gradients : ndarray, shape (ntime, 3)\n        Gradient waveforms [Gx, Gy, Gz] in Gauss/cm\n    time_points : ndarray, shape (ntime,)\n        Time intervals in seconds\n    t1 : float\n        Longitudinal relaxation time in seconds\n    t2 : float\n        Transverse relaxation time in seconds\n    frequencies : ndarray, shape (nfreq,)\n        Off-resonance frequencies in Hz\n    positions : ndarray, shape (npos, 3)\n        Spatial positions [x, y, z] in cm\n    m_init : ndarray, shape (3, nfreq*npos), optional\n        Initial magnetization [Mx, My, Mz]. Default is equilibrium [0, 0, 1]\n    mode : int, optional\n        Simulation mode:\n        - 0: Transient from initial condition to endpoint (default)\n        - 1: Steady-state simulation\n        - 2: Transient with all time points output\n        - 3: Steady-state with all time points output\n    num_threads : int, optional\n        Number of threads for parallel computation (default: 1)\n    \n    Returns\n    -------\n    mx, my, mz : ndarray\n        Magnetization components\n        Shape depends on mode:\n        - mode 0,1: (npos, nfreq)\n        - mode 2,3: (ntime, npos, nfreq)\n    \n    Notes\n    -----\n    This function wraps the C implementation of the Bloch simulator,\n    originally developed by Brian Hargreaves at Stanford University.\n    \n    The simulator uses rotation matrices for RF and gradient effects,\n    followed by relaxation/recovery steps at each time point.\n    \n    Examples\n    --------\n    >>> import numpy as np\n    >>> # Simple FID simulation\n    >>> ntime = 1000\n    >>> dt = 1e-5  # 10 us\n    >>> time_points = np.ones(ntime) * dt\n    >>> \n    >>> # 90-degree pulse\n    >>> b1 = np.zeros(ntime, dtype=complex)\n    >>> b1[0] = 0.1 + 0j  # 0.1 G for 10 us\n    >>> \n    >>> # No gradients""\n    >>> gradients = np.zeros((ntime, 3))\n    >>> \n    >>> # Single position, single frequency\n    >>> positions = np.array([[0, 0, 0]])\n    >>> frequencies = np.array([0])\n    >>> \n    >>> # Simulate\n    >>> mx, my, mz = simulate_bloch(b1, gradients, time_points,\n    ...                            t1=1.0, t2=0.1,\n    ...                            frequencies=frequencies,\n    ...                            positions=positions)\n    ");
 static PyMethodDef __pyx_mdef_18bloch_simulator_cy_1simulate_bloch = {"simulate_bloch", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_18bloch_simulator_cy_1simulate_bloch, __Pyx_METH_FASTCALL|METH_KEYWORDS, __pyx_doc_18bloch_simulator_cy_simulate_bloch};
-static PyObject *__pyx_pw_18bloch_simulator_cy_1simulate_bloch(PyObject *__pyx_self, 
+static PyObject *__pyx_pw_18bloch_simulator_cy_1simulate_bloch(PyObject *__pyx_self,
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
@@ -5655,7 +5655,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 
   /* "bloch_wrapper.pyx":82
  *     return padded
- * 
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * def simulate_bloch(np.ndarray[CTYPE_t, ndim=1] b1_complex,
@@ -5900,7 +5900,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
 
   /* "bloch_wrapper.pyx":165
  *     """
- * 
+ *
  *     cdef int ntime = len(b1_complex)             # <<<<<<<<<<<<<<
  *     cdef int nfreq = len(frequencies)
  *     cdef int npos = len(positions)
@@ -5909,7 +5909,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
   __pyx_v_ntime = __pyx_t_1;
 
   /* "bloch_wrapper.pyx":166
- * 
+ *
  *     cdef int ntime = len(b1_complex)
  *     cdef int nfreq = len(frequencies)             # <<<<<<<<<<<<<<
  *     cdef int npos = len(positions)
@@ -5957,13 +5957,13 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
  *     cdef int nfnpos = nfreq * npos
  *     cdef int ntnfnpos = ntout * nfnpos             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=2] m_init_arr
- * 
+ *
 */
   __pyx_v_ntnfnpos = (__pyx_v_ntout * __pyx_v_nfnpos);
 
   /* "bloch_wrapper.pyx":173
  *     cdef np.ndarray[DTYPE_t, ndim=2] m_init_arr
- * 
+ *
  *     cdef np.ndarray[CTYPE_t, ndim=1] b1_c = np.ascontiguousarray(b1_complex, dtype=np.complex128)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] time_c = np.ascontiguousarray(time_points, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] freq_c = np.ascontiguousarray(frequencies, dtype=np.float64)
@@ -6017,7 +6017,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
   __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":174
- * 
+ *
  *     cdef np.ndarray[CTYPE_t, ndim=1] b1_c = np.ascontiguousarray(b1_complex, dtype=np.complex128)
  *     cdef np.ndarray[DTYPE_t, ndim=1] time_c = np.ascontiguousarray(time_points, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] freq_c = np.ascontiguousarray(frequencies, dtype=np.float64)
@@ -6248,7 +6248,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
  *         raise ValueError("time_points must have length %d; got %d" % (ntime, time_len))
  *     if freq_len != nfreq:             # <<<<<<<<<<<<<<
  *         raise ValueError("frequencies must have length %d; got %d" % (nfreq, freq_len))
- * 
+ *
 */
   __pyx_t_3 = (__pyx_v_freq_len != __pyx_v_nfreq);
   if (unlikely(__pyx_t_3)) {
@@ -6257,7 +6257,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
  *         raise ValueError("time_points must have length %d; got %d" % (ntime, time_len))
  *     if freq_len != nfreq:
  *         raise ValueError("frequencies must have length %d; got %d" % (nfreq, freq_len))             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Real/imag views from a complex array are strided; copy directly into contiguous buffers
 */
     __pyx_t_8 = NULL;
@@ -6292,12 +6292,12 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
  *         raise ValueError("time_points must have length %d; got %d" % (ntime, time_len))
  *     if freq_len != nfreq:             # <<<<<<<<<<<<<<
  *         raise ValueError("frequencies must have length %d; got %d" % (nfreq, freq_len))
- * 
+ *
 */
   }
 
   /* "bloch_wrapper.pyx":186
- * 
+ *
  *     # Real/imag views from a complex array are strided; copy directly into contiguous buffers
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_real = np.empty(ntime, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_imag = np.empty(ntime, dtype=np.float64)
@@ -6417,7 +6417,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_imag = np.empty(ntime, dtype=np.float64)
  *     np.copyto(b1_real, b1_c.real)             # <<<<<<<<<<<<<<
  *     np.copyto(b1_imag, b1_c.imag)
- * 
+ *
 */
   __pyx_t_11 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 188, __pyx_L1_error)
@@ -6454,7 +6454,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_imag = np.empty(ntime, dtype=np.float64)
  *     np.copyto(b1_real, b1_c.real)
  *     np.copyto(b1_imag, b1_c.imag)             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Extract gradient components without extra temporary arrays
 */
   __pyx_t_6 = NULL;
@@ -6489,7 +6489,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":192
- * 
+ *
  *     # Extract gradient components without extra temporary arrays
  *     cdef np.ndarray[DTYPE_t, ndim=1] gx = np.empty(ntime, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] gy = np.empty(ntime, dtype=np.float64)
@@ -6705,7 +6705,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
  *     np.copyto(gx, grad_c[:, 0])
  *     np.copyto(gy, grad_c[:, 1])             # <<<<<<<<<<<<<<
  *     np.copyto(gz, grad_c[:, 2])
- * 
+ *
 */
   __pyx_t_6 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 196, __pyx_L1_error)
@@ -6742,7 +6742,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
  *     np.copyto(gx, grad_c[:, 0])
  *     np.copyto(gy, grad_c[:, 1])
  *     np.copyto(gz, grad_c[:, 2])             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Extract position components
 */
   __pyx_t_11 = NULL;
@@ -6777,7 +6777,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":200
- * 
+ *
  *     # Extract position components
  *     cdef np.ndarray[DTYPE_t, ndim=1] dx = np.empty(npos, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] dy = np.empty(npos, dtype=np.float64)
@@ -6993,7 +6993,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
  *     np.copyto(dx, pos_c[:, 0])
  *     np.copyto(dy, pos_c[:, 1])             # <<<<<<<<<<<<<<
  *     np.copyto(dz, pos_c[:, 2])
- * 
+ *
 */
   __pyx_t_11 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 204, __pyx_L1_error)
@@ -7030,7 +7030,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
  *     np.copyto(dx, pos_c[:, 0])
  *     np.copyto(dy, pos_c[:, 1])
  *     np.copyto(dz, pos_c[:, 2])             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Allocate output arrays
 */
   __pyx_t_6 = NULL;
@@ -7065,7 +7065,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":208
- * 
+ *
  *     # Allocate output arrays
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_buf = np.empty(ntnfnpos, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] my_buf = np.empty(ntnfnpos, dtype=np.float64)
@@ -7127,7 +7127,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_buf = np.empty(ntnfnpos, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] my_buf = np.empty(ntnfnpos, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] mz_buf = np.empty(ntnfnpos, dtype=np.float64)
- * 
+ *
 */
   __pyx_t_6 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 209, __pyx_L1_error)
@@ -7184,7 +7184,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_buf = np.empty(ntnfnpos, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] my_buf = np.empty(ntnfnpos, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] mz_buf = np.empty(ntnfnpos, dtype=np.float64)             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Set initial magnetization
 */
   __pyx_t_7 = NULL;
@@ -7239,7 +7239,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
   __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":213
- * 
+ *
  *     # Set initial magnetization
  *     cdef slice start_slice = slice(0, ntnfnpos, ntout)             # <<<<<<<<<<<<<<
  *     if m_init is not None:
@@ -7438,7 +7438,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
  *         mx_buf[start_slice] = 0.0
  *         my_buf[start_slice] = 0.0             # <<<<<<<<<<<<<<
  *         mz_buf[start_slice] = 1.0
- * 
+ *
 */
     if (unlikely((PyObject_SetItem(((PyObject *)__pyx_v_my_buf), __pyx_v_start_slice, __pyx_mstate_global->__pyx_float_0_0) < 0))) __PYX_ERR(0, 223, __pyx_L1_error)
 
@@ -7446,7 +7446,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
  *         mx_buf[start_slice] = 0.0
  *         my_buf[start_slice] = 0.0
  *         mz_buf[start_slice] = 1.0             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Call the C function
 */
     if (unlikely((PyObject_SetItem(((PyObject *)__pyx_v_mz_buf), __pyx_v_start_slice, __pyx_mstate_global->__pyx_float_1_0) < 0))) __PYX_ERR(0, 224, __pyx_L1_error)
@@ -7454,7 +7454,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
   __pyx_L5:;
 
   /* "bloch_wrapper.pyx":227
- * 
+ *
  *     # Call the C function
  *     blochsimfz(<double*>b1_real.data, <double*>b1_imag.data,             # <<<<<<<<<<<<<<
  *                <double*>gx.data, <double*>gy.data, <double*>gz.data,
@@ -7656,7 +7656,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
  *         mx_out = mx_buf.reshape((nfreq, npos)).T
  *         my_out = my_buf.reshape((nfreq, npos)).T             # <<<<<<<<<<<<<<
  *         mz_out = mz_buf.reshape((nfreq, npos)).T
- * 
+ *
 */
     __pyx_t_5 = ((PyObject *)__pyx_v_my_buf);
     __Pyx_INCREF(__pyx_t_5);
@@ -7691,7 +7691,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
  *         mx_out = mx_buf.reshape((nfreq, npos)).T
  *         my_out = my_buf.reshape((nfreq, npos)).T
  *         mz_out = mz_buf.reshape((nfreq, npos)).T             # <<<<<<<<<<<<<<
- * 
+ *
  *     return mx_out, my_out, mz_out
 */
     __pyx_t_8 = ((PyObject *)__pyx_v_mz_buf);
@@ -7727,10 +7727,10 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
 
   /* "bloch_wrapper.pyx":249
  *         mz_out = mz_buf.reshape((nfreq, npos)).T
- * 
+ *
  *     return mx_out, my_out, mz_out             # <<<<<<<<<<<<<<
- * 
- * 
+ *
+ *
 */
   __Pyx_XDECREF(__pyx_r);
   __pyx_t_6 = PyTuple_New(3); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 249, __pyx_L1_error)
@@ -7750,7 +7750,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
 
   /* "bloch_wrapper.pyx":82
  *     return padded
- * 
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * def simulate_bloch(np.ndarray[CTYPE_t, ndim=1] b1_complex,
@@ -7847,15 +7847,15 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_simulate_bloch(CYTHON_UNUSED PyOb
 }
 
 /* "bloch_wrapper.pyx":252
- * 
- * 
+ *
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * def simulate_bloch_parallel(np.ndarray[CTYPE_t, ndim=1] b1_complex,
 */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_18bloch_simulator_cy_3simulate_bloch_parallel(PyObject *__pyx_self, 
+static PyObject *__pyx_pw_18bloch_simulator_cy_3simulate_bloch_parallel(PyObject *__pyx_self,
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
@@ -7864,7 +7864,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 ); /*proto*/
 PyDoc_STRVAR(__pyx_doc_18bloch_simulator_cy_2simulate_bloch_parallel, "\n    Parallel version of Bloch simulation using OpenMP.\n    \n    This function provides the same interface as simulate_bloch but\n    uses parallel processing to speed up computation for multiple\n    frequencies and positions.\n    \n    See simulate_bloch for full documentation.\n    ");
 static PyMethodDef __pyx_mdef_18bloch_simulator_cy_3simulate_bloch_parallel = {"simulate_bloch_parallel", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_18bloch_simulator_cy_3simulate_bloch_parallel, __Pyx_METH_FASTCALL|METH_KEYWORDS, __pyx_doc_18bloch_simulator_cy_2simulate_bloch_parallel};
-static PyObject *__pyx_pw_18bloch_simulator_cy_3simulate_bloch_parallel(PyObject *__pyx_self, 
+static PyObject *__pyx_pw_18bloch_simulator_cy_3simulate_bloch_parallel(PyObject *__pyx_self,
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
@@ -8038,8 +8038,8 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   __pyx_r = __pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(__pyx_self, __pyx_v_b1_complex, __pyx_v_gradients, __pyx_v_time_points, __pyx_v_t1, __pyx_v_t2, __pyx_v_frequencies, __pyx_v_positions, __pyx_v_m_init, __pyx_v_mode, __pyx_v_num_threads);
 
   /* "bloch_wrapper.pyx":252
- * 
- * 
+ *
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * def simulate_bloch_parallel(np.ndarray[CTYPE_t, ndim=1] b1_complex,
@@ -8284,7 +8284,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
 
   /* "bloch_wrapper.pyx":273
  *     """
- * 
+ *
  *     cdef int ntime = len(b1_complex)             # <<<<<<<<<<<<<<
  *     cdef int nfreq = len(frequencies)
  *     cdef int npos = len(positions)
@@ -8293,7 +8293,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
   __pyx_v_ntime = __pyx_t_1;
 
   /* "bloch_wrapper.pyx":274
- * 
+ *
  *     cdef int ntime = len(b1_complex)
  *     cdef int nfreq = len(frequencies)             # <<<<<<<<<<<<<<
  *     cdef int npos = len(positions)
@@ -8341,12 +8341,12 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
  *     cdef int nfnpos = nfreq * npos
  *     cdef int ntnfnpos = ntout * nfnpos             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=2] m_init_arr
- * 
+ *
 */
   __pyx_v_ntnfnpos = (__pyx_v_ntout * __pyx_v_nfnpos);
 
   /* "bloch_wrapper.pyx":282
- * 
+ *
  *     # Prepare input arrays
  *     cdef np.ndarray[CTYPE_t, ndim=1] b1_c = np.ascontiguousarray(b1_complex, dtype=np.complex128)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] time_c = np.ascontiguousarray(time_points, dtype=np.float64)
@@ -8632,7 +8632,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
  *         raise ValueError("time_points must have length %d; got %d" % (ntime, time_len))
  *     if freq_len != nfreq:             # <<<<<<<<<<<<<<
  *         raise ValueError("frequencies must have length %d; got %d" % (nfreq, freq_len))
- * 
+ *
 */
   __pyx_t_3 = (__pyx_v_freq_len != __pyx_v_nfreq);
   if (unlikely(__pyx_t_3)) {
@@ -8641,7 +8641,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
  *         raise ValueError("time_points must have length %d; got %d" % (ntime, time_len))
  *     if freq_len != nfreq:
  *         raise ValueError("frequencies must have length %d; got %d" % (nfreq, freq_len))             # <<<<<<<<<<<<<<
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_real = np.empty(ntime, dtype=np.float64)
 */
     __pyx_t_8 = NULL;
@@ -8676,13 +8676,13 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
  *         raise ValueError("time_points must have length %d; got %d" % (ntime, time_len))
  *     if freq_len != nfreq:             # <<<<<<<<<<<<<<
  *         raise ValueError("frequencies must have length %d; got %d" % (nfreq, freq_len))
- * 
+ *
 */
   }
 
   /* "bloch_wrapper.pyx":294
  *         raise ValueError("frequencies must have length %d; got %d" % (nfreq, freq_len))
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_real = np.empty(ntime, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_imag = np.empty(ntime, dtype=np.float64)
  *     np.copyto(b1_real, b1_c.real)
@@ -8739,7 +8739,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
   __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":295
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_real = np.empty(ntime, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_imag = np.empty(ntime, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     np.copyto(b1_real, b1_c.real)
@@ -8801,7 +8801,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_imag = np.empty(ntime, dtype=np.float64)
  *     np.copyto(b1_real, b1_c.real)             # <<<<<<<<<<<<<<
  *     np.copyto(b1_imag, b1_c.imag)
- * 
+ *
 */
   __pyx_t_11 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 296, __pyx_L1_error)
@@ -8838,7 +8838,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_imag = np.empty(ntime, dtype=np.float64)
  *     np.copyto(b1_real, b1_c.real)
  *     np.copyto(b1_imag, b1_c.imag)             # <<<<<<<<<<<<<<
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] gx = np.empty(ntime, dtype=np.float64)
 */
   __pyx_t_6 = NULL;
@@ -8874,7 +8874,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
 
   /* "bloch_wrapper.pyx":299
  *     np.copyto(b1_imag, b1_c.imag)
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] gx = np.empty(ntime, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] gy = np.empty(ntime, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] gz = np.empty(ntime, dtype=np.float64)
@@ -8931,7 +8931,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
   __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":300
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] gx = np.empty(ntime, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] gy = np.empty(ntime, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] gz = np.empty(ntime, dtype=np.float64)
@@ -9089,7 +9089,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
  *     np.copyto(gx, grad_c[:, 0])
  *     np.copyto(gy, grad_c[:, 1])             # <<<<<<<<<<<<<<
  *     np.copyto(gz, grad_c[:, 2])
- * 
+ *
 */
   __pyx_t_6 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 303, __pyx_L1_error)
@@ -9126,7 +9126,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
  *     np.copyto(gx, grad_c[:, 0])
  *     np.copyto(gy, grad_c[:, 1])
  *     np.copyto(gz, grad_c[:, 2])             # <<<<<<<<<<<<<<
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] dx = np.empty(npos, dtype=np.float64)
 */
   __pyx_t_11 = NULL;
@@ -9162,7 +9162,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
 
   /* "bloch_wrapper.pyx":306
  *     np.copyto(gz, grad_c[:, 2])
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] dx = np.empty(npos, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] dy = np.empty(npos, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] dz = np.empty(npos, dtype=np.float64)
@@ -9219,7 +9219,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
   __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":307
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] dx = np.empty(npos, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] dy = np.empty(npos, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] dz = np.empty(npos, dtype=np.float64)
@@ -9377,7 +9377,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
  *     np.copyto(dx, pos_c[:, 0])
  *     np.copyto(dy, pos_c[:, 1])             # <<<<<<<<<<<<<<
  *     np.copyto(dz, pos_c[:, 2])
- * 
+ *
 */
   __pyx_t_11 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_8, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 310, __pyx_L1_error)
@@ -9414,7 +9414,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
  *     np.copyto(dx, pos_c[:, 0])
  *     np.copyto(dy, pos_c[:, 1])
  *     np.copyto(dz, pos_c[:, 2])             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Flat output buffers to match blochsim layout (freq-major, then position, then time)
 */
   __pyx_t_6 = NULL;
@@ -9449,7 +9449,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":314
- * 
+ *
  *     # Flat output buffers to match blochsim layout (freq-major, then position, then time)
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_buf = np.empty(ntnfnpos, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] my_buf = np.empty(ntnfnpos, dtype=np.float64)
@@ -9511,7 +9511,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_buf = np.empty(ntnfnpos, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] my_buf = np.empty(ntnfnpos, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] mz_buf = np.empty(ntnfnpos, dtype=np.float64)
- * 
+ *
 */
   __pyx_t_6 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 315, __pyx_L1_error)
@@ -9568,7 +9568,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_buf = np.empty(ntnfnpos, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] my_buf = np.empty(ntnfnpos, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] mz_buf = np.empty(ntnfnpos, dtype=np.float64)             # <<<<<<<<<<<<<<
- * 
+ *
  *     cdef slice start_slice = slice(0, ntnfnpos, ntout)
 */
   __pyx_t_7 = NULL;
@@ -9624,7 +9624,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
 
   /* "bloch_wrapper.pyx":318
  *     cdef np.ndarray[DTYPE_t, ndim=1] mz_buf = np.empty(ntnfnpos, dtype=np.float64)
- * 
+ *
  *     cdef slice start_slice = slice(0, ntnfnpos, ntout)             # <<<<<<<<<<<<<<
  *     if m_init is not None:
  *         m_init_arr = np.ascontiguousarray(m_init, dtype=np.float64)
@@ -9641,7 +9641,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
   __pyx_t_5 = 0;
 
   /* "bloch_wrapper.pyx":319
- * 
+ *
  *     cdef slice start_slice = slice(0, ntnfnpos, ntout)
  *     if m_init is not None:             # <<<<<<<<<<<<<<
  *         m_init_arr = np.ascontiguousarray(m_init, dtype=np.float64)
@@ -9798,7 +9798,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
     __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
     /* "bloch_wrapper.pyx":319
- * 
+ *
  *     cdef slice start_slice = slice(0, ntnfnpos, ntout)
  *     if m_init is not None:             # <<<<<<<<<<<<<<
  *         m_init_arr = np.ascontiguousarray(m_init, dtype=np.float64)
@@ -9822,7 +9822,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
  *         mx_buf[start_slice] = 0.0
  *         my_buf[start_slice] = 0.0             # <<<<<<<<<<<<<<
  *         mz_buf[start_slice] = 1.0
- * 
+ *
 */
     if (unlikely((PyObject_SetItem(((PyObject *)__pyx_v_my_buf), __pyx_v_start_slice, __pyx_mstate_global->__pyx_float_0_0) < 0))) __PYX_ERR(0, 328, __pyx_L1_error)
 
@@ -9830,7 +9830,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
  *         mx_buf[start_slice] = 0.0
  *         my_buf[start_slice] = 0.0
  *         mz_buf[start_slice] = 1.0             # <<<<<<<<<<<<<<
- * 
+ *
  *     with nogil:
 */
     if (unlikely((PyObject_SetItem(((PyObject *)__pyx_v_mz_buf), __pyx_v_start_slice, __pyx_mstate_global->__pyx_float_1_0) < 0))) __PYX_ERR(0, 329, __pyx_L1_error)
@@ -9839,7 +9839,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
 
   /* "bloch_wrapper.pyx":331
  *         mz_buf[start_slice] = 1.0
- * 
+ *
  *     with nogil:             # <<<<<<<<<<<<<<
  *         blochsim_batch_optimized(
  *             <double*>b1_real.data, <double*>b1_imag.data,
@@ -9851,7 +9851,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
       /*try:*/ {
 
         /* "bloch_wrapper.pyx":332
- * 
+ *
  *     with nogil:
  *         blochsim_batch_optimized(             # <<<<<<<<<<<<<<
  *             <double*>b1_real.data, <double*>b1_imag.data,
@@ -9862,7 +9862,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
 
       /* "bloch_wrapper.pyx":331
  *         mz_buf[start_slice] = 1.0
- * 
+ *
  *     with nogil:             # <<<<<<<<<<<<<<
  *         blochsim_batch_optimized(
  *             <double*>b1_real.data, <double*>b1_imag.data,
@@ -9879,7 +9879,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
 
   /* "bloch_wrapper.pyx":341
  *             mode, num_threads)
- * 
+ *
  *     if ntout > 1:             # <<<<<<<<<<<<<<
  *         mx_out = mx_buf.reshape((nfreq, npos, ntout)).transpose(2, 1, 0)
  *         my_out = my_buf.reshape((nfreq, npos, ntout)).transpose(2, 1, 0)
@@ -9888,7 +9888,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
   if (__pyx_t_3) {
 
     /* "bloch_wrapper.pyx":342
- * 
+ *
  *     if ntout > 1:
  *         mx_out = mx_buf.reshape((nfreq, npos, ntout)).transpose(2, 1, 0)             # <<<<<<<<<<<<<<
  *         my_out = my_buf.reshape((nfreq, npos, ntout)).transpose(2, 1, 0)
@@ -10021,7 +10021,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
 
     /* "bloch_wrapper.pyx":341
  *             mode, num_threads)
- * 
+ *
  *     if ntout > 1:             # <<<<<<<<<<<<<<
  *         mx_out = mx_buf.reshape((nfreq, npos, ntout)).transpose(2, 1, 0)
  *         my_out = my_buf.reshape((nfreq, npos, ntout)).transpose(2, 1, 0)
@@ -10071,7 +10071,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
  *         mx_out = mx_buf.reshape((nfreq, npos)).T
  *         my_out = my_buf.reshape((nfreq, npos)).T             # <<<<<<<<<<<<<<
  *         mz_out = mz_buf.reshape((nfreq, npos)).T
- * 
+ *
 */
     __pyx_t_5 = ((PyObject *)__pyx_v_my_buf);
     __Pyx_INCREF(__pyx_t_5);
@@ -10106,7 +10106,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
  *         mx_out = mx_buf.reshape((nfreq, npos)).T
  *         my_out = my_buf.reshape((nfreq, npos)).T
  *         mz_out = mz_buf.reshape((nfreq, npos)).T             # <<<<<<<<<<<<<<
- * 
+ *
  *     return mx_out, my_out, mz_out
 */
     __pyx_t_8 = ((PyObject *)__pyx_v_mz_buf);
@@ -10142,10 +10142,10 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
 
   /* "bloch_wrapper.pyx":350
  *         mz_out = mz_buf.reshape((nfreq, npos)).T
- * 
+ *
  *     return mx_out, my_out, mz_out             # <<<<<<<<<<<<<<
- * 
- * 
+ *
+ *
 */
   __Pyx_XDECREF(__pyx_r);
   __pyx_t_6 = PyTuple_New(3); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 350, __pyx_L1_error)
@@ -10164,8 +10164,8 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
   goto __pyx_L0;
 
   /* "bloch_wrapper.pyx":252
- * 
- * 
+ *
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * def simulate_bloch_parallel(np.ndarray[CTYPE_t, ndim=1] b1_complex,
@@ -10262,15 +10262,15 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_2simulate_bloch_parallel(CYTHON_U
 }
 
 /* "bloch_wrapper.pyx":353
- * 
- * 
+ *
+ *
  * def calculate_signal(mx, my, mz, receiver_phase=0.0):             # <<<<<<<<<<<<<<
  *     """
  *     Calculate complex signal from magnetization components.
 */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_18bloch_simulator_cy_5calculate_signal(PyObject *__pyx_self, 
+static PyObject *__pyx_pw_18bloch_simulator_cy_5calculate_signal(PyObject *__pyx_self,
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
@@ -10279,7 +10279,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 ); /*proto*/
 PyDoc_STRVAR(__pyx_doc_18bloch_simulator_cy_4calculate_signal, "\n    Calculate complex signal from magnetization components.\n    \n    Parameters\n    ----------\n    mx, my, mz : ndarray\n        Magnetization components\n    receiver_phase : float, optional\n        Receiver phase in radians (default: 0)\n    \n    Returns\n    -------\n    signal : ndarray, complex\n        Complex MRI signal\n    ");
 static PyMethodDef __pyx_mdef_18bloch_simulator_cy_5calculate_signal = {"calculate_signal", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_18bloch_simulator_cy_5calculate_signal, __Pyx_METH_FASTCALL|METH_KEYWORDS, __pyx_doc_18bloch_simulator_cy_4calculate_signal};
-static PyObject *__pyx_pw_18bloch_simulator_cy_5calculate_signal(PyObject *__pyx_self, 
+static PyObject *__pyx_pw_18bloch_simulator_cy_5calculate_signal(PyObject *__pyx_self,
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
@@ -10407,7 +10407,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_4calculate_signal(CYTHON_UNUSED P
  *     """
  *     phase_factor = np.exp(-1j * receiver_phase)             # <<<<<<<<<<<<<<
  *     return (mx + 1j * my) * phase_factor
- * 
+ *
 */
   __pyx_t_2 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 369, __pyx_L1_error)
@@ -10449,8 +10449,8 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_4calculate_signal(CYTHON_UNUSED P
  *     """
  *     phase_factor = np.exp(-1j * receiver_phase)
  *     return (mx + 1j * my) * phase_factor             # <<<<<<<<<<<<<<
- * 
- * 
+ *
+ *
 */
   __Pyx_XDECREF(__pyx_r);
   __pyx_t_1 = PyComplex_FromDoubles(0.0, 1.0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 370, __pyx_L1_error)
@@ -10469,8 +10469,8 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_4calculate_signal(CYTHON_UNUSED P
   goto __pyx_L0;
 
   /* "bloch_wrapper.pyx":353
- * 
- * 
+ *
+ *
  * def calculate_signal(mx, my, mz, receiver_phase=0.0):             # <<<<<<<<<<<<<<
  *     """
  *     Calculate complex signal from magnetization components.
@@ -10493,15 +10493,15 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_4calculate_signal(CYTHON_UNUSED P
 }
 
 /* "bloch_wrapper.pyx":373
- * 
- * 
+ *
+ *
  * def design_rf_pulse(pulse_type='rect', duration=1e-3, flip_angle=90,             # <<<<<<<<<<<<<<
  *                     time_bw_product=4, npoints=100):
  *     """
 */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_18bloch_simulator_cy_7design_rf_pulse(PyObject *__pyx_self, 
+static PyObject *__pyx_pw_18bloch_simulator_cy_7design_rf_pulse(PyObject *__pyx_self,
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
@@ -10510,7 +10510,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 ); /*proto*/
 PyDoc_STRVAR(__pyx_doc_18bloch_simulator_cy_6design_rf_pulse, "\n    Design common RF pulse shapes.\n    \n    Parameters\n    ----------\n    pulse_type : str\n        Type of pulse: 'rect', 'sinc', 'gaussian', 'hermite'\n    duration : float\n        Pulse duration in seconds\n    flip_angle : float\n        Flip angle in degrees\n    time_bw_product : float\n        Time-bandwidth product for sinc/gaussian pulses\n    npoints : int\n        Number of time points\n    \n    Returns\n    -------\n    b1 : ndarray, complex\n        Complex B1 field in Gauss\n    time : ndarray\n        Time points in seconds\n    ");
 static PyMethodDef __pyx_mdef_18bloch_simulator_cy_7design_rf_pulse = {"design_rf_pulse", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_18bloch_simulator_cy_7design_rf_pulse, __Pyx_METH_FASTCALL|METH_KEYWORDS, __pyx_doc_18bloch_simulator_cy_6design_rf_pulse};
-static PyObject *__pyx_pw_18bloch_simulator_cy_7design_rf_pulse(PyObject *__pyx_self, 
+static PyObject *__pyx_pw_18bloch_simulator_cy_7design_rf_pulse(PyObject *__pyx_self,
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
@@ -10791,7 +10791,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_6design_rf_pulse(CYTHON_UNUSED Py
  *     target_area = flip_rad / (gamma * 2 * np.pi)  # integral of B1 over time
  *     if pulse_type == 'rect':             # <<<<<<<<<<<<<<
  *         b1 = np.ones(npoints) * (target_area / duration)
- * 
+ *
 */
   __pyx_t_6 = (__Pyx_PyUnicode_Equals(__pyx_v_pulse_type, __pyx_mstate_global->__pyx_n_u_rect, Py_EQ)); if (unlikely((__pyx_t_6 < 0))) __PYX_ERR(0, 403, __pyx_L1_error)
   if (__pyx_t_6) {
@@ -10800,7 +10800,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_6design_rf_pulse(CYTHON_UNUSED Py
  *     target_area = flip_rad / (gamma * 2 * np.pi)  # integral of B1 over time
  *     if pulse_type == 'rect':
  *         b1 = np.ones(npoints) * (target_area / duration)             # <<<<<<<<<<<<<<
- * 
+ *
  *     elif pulse_type == 'sinc':
 */
     __pyx_t_2 = NULL;
@@ -10843,14 +10843,14 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_6design_rf_pulse(CYTHON_UNUSED Py
  *     target_area = flip_rad / (gamma * 2 * np.pi)  # integral of B1 over time
  *     if pulse_type == 'rect':             # <<<<<<<<<<<<<<
  *         b1 = np.ones(npoints) * (target_area / duration)
- * 
+ *
 */
     goto __pyx_L3;
   }
 
   /* "bloch_wrapper.pyx":406
  *         b1 = np.ones(npoints) * (target_area / duration)
- * 
+ *
  *     elif pulse_type == 'sinc':             # <<<<<<<<<<<<<<
  *         t_centered = time - duration/2
  *         bw = time_bw_product / duration
@@ -10859,7 +10859,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_6design_rf_pulse(CYTHON_UNUSED Py
   if (__pyx_t_6) {
 
     /* "bloch_wrapper.pyx":407
- * 
+ *
  *     elif pulse_type == 'sinc':
  *         t_centered = time - duration/2             # <<<<<<<<<<<<<<
  *         bw = time_bw_product / duration
@@ -10929,7 +10929,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_6design_rf_pulse(CYTHON_UNUSED Py
  *         envelope = np.sinc(bw * t_centered)
  *         area = np.trapezoid(envelope, time)             # <<<<<<<<<<<<<<
  *         b1 = envelope * (target_area / area)
- * 
+ *
 */
     __pyx_t_1 = NULL;
     __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 410, __pyx_L1_error)
@@ -10964,7 +10964,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_6design_rf_pulse(CYTHON_UNUSED Py
  *         envelope = np.sinc(bw * t_centered)
  *         area = np.trapezoid(envelope, time)
  *         b1 = envelope * (target_area / area)             # <<<<<<<<<<<<<<
- * 
+ *
  *     elif pulse_type == 'gaussian':
 */
     __pyx_t_3 = __Pyx_PyNumber_Divide(__pyx_v_target_area, __pyx_v_area); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 411, __pyx_L1_error)
@@ -10977,7 +10977,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_6design_rf_pulse(CYTHON_UNUSED Py
 
     /* "bloch_wrapper.pyx":406
  *         b1 = np.ones(npoints) * (target_area / duration)
- * 
+ *
  *     elif pulse_type == 'sinc':             # <<<<<<<<<<<<<<
  *         t_centered = time - duration/2
  *         bw = time_bw_product / duration
@@ -10987,7 +10987,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_6design_rf_pulse(CYTHON_UNUSED Py
 
   /* "bloch_wrapper.pyx":413
  *         b1 = envelope * (target_area / area)
- * 
+ *
  *     elif pulse_type == 'gaussian':             # <<<<<<<<<<<<<<
  *         t_centered = time - duration/2
  *         sigma = duration / (2 * np.sqrt(2 * np.log(2)) * time_bw_product)
@@ -10996,7 +10996,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_6design_rf_pulse(CYTHON_UNUSED Py
   if (likely(__pyx_t_6)) {
 
     /* "bloch_wrapper.pyx":414
- * 
+ *
  *     elif pulse_type == 'gaussian':
  *         t_centered = time - duration/2             # <<<<<<<<<<<<<<
  *         sigma = duration / (2 * np.sqrt(2 * np.log(2)) * time_bw_product)
@@ -11141,7 +11141,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_6design_rf_pulse(CYTHON_UNUSED Py
  *         envelope = np.exp(-t_centered**2 / (2 * sigma**2))
  *         area = np.trapezoid(envelope, time)             # <<<<<<<<<<<<<<
  *         b1 = envelope * (target_area / area)
- * 
+ *
 */
     __pyx_t_2 = NULL;
     __Pyx_GetModuleGlobalName(__pyx_t_9, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 417, __pyx_L1_error)
@@ -11176,7 +11176,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_6design_rf_pulse(CYTHON_UNUSED Py
  *         envelope = np.exp(-t_centered**2 / (2 * sigma**2))
  *         area = np.trapezoid(envelope, time)
  *         b1 = envelope * (target_area / area)             # <<<<<<<<<<<<<<
- * 
+ *
  *     else:
 */
     __pyx_t_4 = __Pyx_PyNumber_Divide(__pyx_v_target_area, __pyx_v_area); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 418, __pyx_L1_error)
@@ -11189,7 +11189,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_6design_rf_pulse(CYTHON_UNUSED Py
 
     /* "bloch_wrapper.pyx":413
  *         b1 = envelope * (target_area / area)
- * 
+ *
  *     elif pulse_type == 'gaussian':             # <<<<<<<<<<<<<<
  *         t_centered = time - duration/2
  *         sigma = duration / (2 * np.sqrt(2 * np.log(2)) * time_bw_product)
@@ -11198,10 +11198,10 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_6design_rf_pulse(CYTHON_UNUSED Py
   }
 
   /* "bloch_wrapper.pyx":421
- * 
+ *
  *     else:
  *         raise ValueError(f"Unknown pulse type: {pulse_type}")             # <<<<<<<<<<<<<<
- * 
+ *
  *     return b1.astype(complex), time
 */
   /*else*/ {
@@ -11228,10 +11228,10 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_6design_rf_pulse(CYTHON_UNUSED Py
 
   /* "bloch_wrapper.pyx":423
  *         raise ValueError(f"Unknown pulse type: {pulse_type}")
- * 
+ *
  *     return b1.astype(complex), time             # <<<<<<<<<<<<<<
- * 
- * 
+ *
+ *
 */
   __Pyx_XDECREF(__pyx_r);
   __pyx_t_9 = __pyx_v_b1;
@@ -11257,8 +11257,8 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_6design_rf_pulse(CYTHON_UNUSED Py
   goto __pyx_L0;
 
   /* "bloch_wrapper.pyx":373
- * 
- * 
+ *
+ *
  * def design_rf_pulse(pulse_type='rect', duration=1e-3, flip_angle=90,             # <<<<<<<<<<<<<<
  *                     time_bw_product=4, npoints=100):
  *     """
@@ -11292,15 +11292,15 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_6design_rf_pulse(CYTHON_UNUSED Py
 }
 
 /* "bloch_wrapper.pyx":426
- * 
- * 
+ *
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * def simulate_phantom(np.ndarray[CTYPE_t, ndim=1] b1_complex,
 */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_18bloch_simulator_cy_9simulate_phantom(PyObject *__pyx_self, 
+static PyObject *__pyx_pw_18bloch_simulator_cy_9simulate_phantom(PyObject *__pyx_self,
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
@@ -11309,7 +11309,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 ); /*proto*/
 PyDoc_STRVAR(__pyx_doc_18bloch_simulator_cy_8simulate_phantom, "\n    Simulate Bloch equations for a phantom with heterogeneous tissue properties.\n    \n    This is the core function for simulating imaging phantoms where each voxel\n    can have different T1, T2, and frequency offset values.\n    \n    Parameters\n    ----------\n    b1_complex : ndarray, shape (ntime,)\n        Complex RF pulse (B1 field) in Gauss\n    gradients : ndarray, shape (ntime, 3)\n        Gradient waveforms [Gx, Gy, Gz] in Gauss/cm\n    time_points : ndarray, shape (ntime,)\n        Time intervals in seconds\n    t1_array : ndarray, shape (nvoxels,)\n        T1 relaxation time per voxel in seconds\n    t2_array : ndarray, shape (nvoxels,)\n        T2 relaxation time per voxel in seconds\n    df_array : ndarray, shape (nvoxels,)\n        Frequency offset per voxel in Hz\n    positions : ndarray, shape (nvoxels, 3)\n        Spatial positions [x, y, z] in cm\n    m_init : ndarray, shape (nvoxels, 3), optional\n        Initial magnetization [Mx, My, Mz] per voxel. Default: [0, 0, 1]\n    mode : int, optional\n        Simulation mode:\n        - 0: Endpoint only (default)\n        - 2: Time-resolved (returns all time points)\n    num_threads : int, optional\n        Number of OpenMP threads (default: 4)\n    \n    Returns\n    -------\n    mx, my, mz : ndarray\n        Magnetization components.\n        Shape: (nvoxels,) for mode=0, or (ntime, nvoxels) for mode=2\n    \n    Notes\n    -----\n    - Voxels with T1 <= 0 or T2 <= 0 are treated as background and return zero\n    - Positions should be in cm (consistent with gradient units Gauss/cm)\n    - This function uses OpenMP parallelization across voxels\n    \n    Examples\n    --------\n    >>> # Simulate a 64x64 phantom\n    >>> nvoxels = 64 * 64\n    >>> t1 = np.ones(nvoxels) * 1.0  # 1 second T1\n    >>> t2 = np.ones(nvoxels) * 0.1  # 100 ms T2\n    >>> df = np.zeros(nvoxels)  # On-resonance\n    >>> positions = ...  # (nvoxels, 3) array of positions in cm\n    >>> mx, my, mz = simulate_phantom(b1, g""rads, time, t1, t2, df, positions)\n    ");
 static PyMethodDef __pyx_mdef_18bloch_simulator_cy_9simulate_phantom = {"simulate_phantom", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_18bloch_simulator_cy_9simulate_phantom, __Pyx_METH_FASTCALL|METH_KEYWORDS, __pyx_doc_18bloch_simulator_cy_8simulate_phantom};
-static PyObject *__pyx_pw_18bloch_simulator_cy_9simulate_phantom(PyObject *__pyx_self, 
+static PyObject *__pyx_pw_18bloch_simulator_cy_9simulate_phantom(PyObject *__pyx_self,
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
@@ -11485,8 +11485,8 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   __pyx_r = __pyx_pf_18bloch_simulator_cy_8simulate_phantom(__pyx_self, __pyx_v_b1_complex, __pyx_v_gradients, __pyx_v_time_points, __pyx_v_t1_array, __pyx_v_t2_array, __pyx_v_df_array, __pyx_v_positions, __pyx_v_m_init, __pyx_v_mode, __pyx_v_num_threads);
 
   /* "bloch_wrapper.pyx":426
- * 
- * 
+ *
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * def simulate_phantom(np.ndarray[CTYPE_t, ndim=1] b1_complex,
@@ -11803,7 +11803,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *     cdef int ntime = len(b1_complex)
  *     cdef int nvoxels = len(t1_array)             # <<<<<<<<<<<<<<
  *     cdef int ntout = ntime if (mode & 2) else 1
- * 
+ *
 */
   __pyx_t_1 = PyObject_Length(((PyObject *)__pyx_v_t1_array)); if (unlikely(__pyx_t_1 == ((Py_ssize_t)-1))) __PYX_ERR(0, 492, __pyx_L1_error)
   __pyx_v_nvoxels = __pyx_t_1;
@@ -11812,7 +11812,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *     cdef int ntime = len(b1_complex)
  *     cdef int nvoxels = len(t1_array)
  *     cdef int ntout = ntime if (mode & 2) else 1             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Validate array lengths
 */
   __pyx_t_3 = ((__pyx_v_mode & 2) != 0);
@@ -11824,7 +11824,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
   __pyx_v_ntout = __pyx_t_2;
 
   /* "bloch_wrapper.pyx":496
- * 
+ *
  *     # Validate array lengths
  *     if len(t2_array) != nvoxels:             # <<<<<<<<<<<<<<
  *         raise ValueError(f"t2_array length ({len(t2_array)}) must match t1_array ({nvoxels})")
@@ -11871,7 +11871,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
     __PYX_ERR(0, 497, __pyx_L1_error)
 
     /* "bloch_wrapper.pyx":496
- * 
+ *
  *     # Validate array lengths
  *     if len(t2_array) != nvoxels:             # <<<<<<<<<<<<<<
  *         raise ValueError(f"t2_array length ({len(t2_array)}) must match t1_array ({nvoxels})")
@@ -11940,7 +11940,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *         raise ValueError(f"df_array length ({len(df_array)}) must match t1_array ({nvoxels})")
  *     if positions.shape[0] != nvoxels:             # <<<<<<<<<<<<<<
  *         raise ValueError(f"positions rows ({positions.shape[0]}) must match nvoxels ({nvoxels})")
- * 
+ *
 */
   __pyx_t_3 = ((__pyx_f_5numpy_7ndarray_5shape_shape(((PyArrayObject *)__pyx_v_positions))[0]) != __pyx_v_nvoxels);
   if (unlikely(__pyx_t_3)) {
@@ -11949,7 +11949,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *         raise ValueError(f"df_array length ({len(df_array)}) must match t1_array ({nvoxels})")
  *     if positions.shape[0] != nvoxels:
  *         raise ValueError(f"positions rows ({positions.shape[0]}) must match nvoxels ({nvoxels})")             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Prepare B1 arrays (split complex into real/imag)
 */
     __pyx_t_6 = NULL;
@@ -11985,12 +11985,12 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *         raise ValueError(f"df_array length ({len(df_array)}) must match t1_array ({nvoxels})")
  *     if positions.shape[0] != nvoxels:             # <<<<<<<<<<<<<<
  *         raise ValueError(f"positions rows ({positions.shape[0]}) must match nvoxels ({nvoxels})")
- * 
+ *
 */
   }
 
   /* "bloch_wrapper.pyx":504
- * 
+ *
  *     # Prepare B1 arrays (split complex into real/imag)
  *     cdef np.ndarray[CTYPE_t, ndim=1] b1_c = np.ascontiguousarray(b1_complex, dtype=np.complex128)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_real = np.empty(ntime, dtype=np.float64)
@@ -12165,7 +12165,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_imag = np.empty(ntime, dtype=np.float64)
  *     np.copyto(b1_real, b1_c.real)             # <<<<<<<<<<<<<<
  *     np.copyto(b1_imag, b1_c.imag)
- * 
+ *
 */
   __pyx_t_11 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 507, __pyx_L1_error)
@@ -12202,7 +12202,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_imag = np.empty(ntime, dtype=np.float64)
  *     np.copyto(b1_real, b1_c.real)
  *     np.copyto(b1_imag, b1_c.imag)             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Prepare gradient arrays
 */
   __pyx_t_7 = NULL;
@@ -12237,7 +12237,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":511
- * 
+ *
  *     # Prepare gradient arrays
  *     cdef np.ndarray[DTYPE_t, ndim=2] grad_c = _coerce_three_columns(gradients, ntime, "gradients")             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] gx = np.ascontiguousarray(grad_c[:, 0])
@@ -12309,7 +12309,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *     cdef np.ndarray[DTYPE_t, ndim=1] gx = np.ascontiguousarray(grad_c[:, 0])
  *     cdef np.ndarray[DTYPE_t, ndim=1] gy = np.ascontiguousarray(grad_c[:, 1])             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] gz = np.ascontiguousarray(grad_c[:, 2])
- * 
+ *
 */
   __pyx_t_7 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 513, __pyx_L1_error)
@@ -12356,7 +12356,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *     cdef np.ndarray[DTYPE_t, ndim=1] gx = np.ascontiguousarray(grad_c[:, 0])
  *     cdef np.ndarray[DTYPE_t, ndim=1] gy = np.ascontiguousarray(grad_c[:, 1])
  *     cdef np.ndarray[DTYPE_t, ndim=1] gz = np.ascontiguousarray(grad_c[:, 2])             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Time array
 */
   __pyx_t_11 = NULL;
@@ -12401,10 +12401,10 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
   __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":517
- * 
+ *
  *     # Time array
  *     cdef np.ndarray[DTYPE_t, ndim=1] time_c = np.ascontiguousarray(time_points, dtype=np.float64)             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Tissue parameter arrays
 */
   __pyx_t_7 = NULL;
@@ -12456,7 +12456,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
   __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":520
- * 
+ *
  *     # Tissue parameter arrays
  *     cdef np.ndarray[DTYPE_t, ndim=1] t1_c = np.ascontiguousarray(t1_array, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] t2_c = np.ascontiguousarray(t2_array, dtype=np.float64)
@@ -12515,7 +12515,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *     cdef np.ndarray[DTYPE_t, ndim=1] t1_c = np.ascontiguousarray(t1_array, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] t2_c = np.ascontiguousarray(t2_array, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] df_c = np.ascontiguousarray(df_array, dtype=np.float64)
- * 
+ *
 */
   __pyx_t_5 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 521, __pyx_L1_error)
@@ -12569,7 +12569,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *     cdef np.ndarray[DTYPE_t, ndim=1] t1_c = np.ascontiguousarray(t1_array, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] t2_c = np.ascontiguousarray(t2_array, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] df_c = np.ascontiguousarray(df_array, dtype=np.float64)             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Position arrays
 */
   __pyx_t_7 = NULL;
@@ -12621,7 +12621,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
   __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":525
- * 
+ *
  *     # Position arrays
  *     cdef np.ndarray[DTYPE_t, ndim=2] pos_c = _coerce_three_columns(positions, nvoxels, "positions")             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] dx = np.ascontiguousarray(pos_c[:, 0])
@@ -12693,7 +12693,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *     cdef np.ndarray[DTYPE_t, ndim=1] dx = np.ascontiguousarray(pos_c[:, 0])
  *     cdef np.ndarray[DTYPE_t, ndim=1] dy = np.ascontiguousarray(pos_c[:, 1])             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] dz = np.ascontiguousarray(pos_c[:, 2])
- * 
+ *
 */
   __pyx_t_5 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 527, __pyx_L1_error)
@@ -12740,7 +12740,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *     cdef np.ndarray[DTYPE_t, ndim=1] dx = np.ascontiguousarray(pos_c[:, 0])
  *     cdef np.ndarray[DTYPE_t, ndim=1] dy = np.ascontiguousarray(pos_c[:, 1])
  *     cdef np.ndarray[DTYPE_t, ndim=1] dz = np.ascontiguousarray(pos_c[:, 2])             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Initial magnetization
 */
   __pyx_t_11 = NULL;
@@ -12785,7 +12785,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
   __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":531
- * 
+ *
  *     # Initial magnetization
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_init_c = None             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] my_init_c = None
@@ -12867,13 +12867,13 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *     cdef double *my_init_ptr = NULL
  *     cdef double *mz_init_ptr = NULL             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=2] m_init_c
- * 
+ *
 */
   __pyx_v_mz_init_ptr = NULL;
 
   /* "bloch_wrapper.pyx":539
  *     cdef np.ndarray[DTYPE_t, ndim=2] m_init_c
- * 
+ *
  *     if m_init is not None:             # <<<<<<<<<<<<<<
  *         if m_init.shape[0] != nvoxels or m_init.shape[1] != 3:
  *             raise ValueError(f"m_init must have shape ({nvoxels}, 3); got ({m_init.shape[0]}, {m_init.shape[1]})")
@@ -12882,7 +12882,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
   if (__pyx_t_3) {
 
     /* "bloch_wrapper.pyx":540
- * 
+ *
  *     if m_init is not None:
  *         if m_init.shape[0] != nvoxels or m_init.shape[1] != 3:             # <<<<<<<<<<<<<<
  *             raise ValueError(f"m_init must have shape ({nvoxels}, 3); got ({m_init.shape[0]}, {m_init.shape[1]})")
@@ -12940,7 +12940,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
       __PYX_ERR(0, 541, __pyx_L1_error)
 
       /* "bloch_wrapper.pyx":540
- * 
+ *
  *     if m_init is not None:
  *         if m_init.shape[0] != nvoxels or m_init.shape[1] != 3:             # <<<<<<<<<<<<<<
  *             raise ValueError(f"m_init must have shape ({nvoxels}, 3); got ({m_init.shape[0]}, {m_init.shape[1]})")
@@ -13197,7 +13197,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *         mx_init_ptr = <double*>mx_init_c.data
  *         my_init_ptr = <double*>my_init_c.data             # <<<<<<<<<<<<<<
  *         mz_init_ptr = <double*>mz_init_c.data
- * 
+ *
 */
     __pyx_v_my_init_ptr = ((double *)__pyx_f_5numpy_7ndarray_4data_data(((PyArrayObject *)__pyx_v_my_init_c)));
 
@@ -13205,14 +13205,14 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *         mx_init_ptr = <double*>mx_init_c.data
  *         my_init_ptr = <double*>my_init_c.data
  *         mz_init_ptr = <double*>mz_init_c.data             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Output arrays - flat layout: voxel-major, then time
 */
     __pyx_v_mz_init_ptr = ((double *)__pyx_f_5numpy_7ndarray_4data_data(((PyArrayObject *)__pyx_v_mz_init_c)));
 
     /* "bloch_wrapper.pyx":539
  *     cdef np.ndarray[DTYPE_t, ndim=2] m_init_c
- * 
+ *
  *     if m_init is not None:             # <<<<<<<<<<<<<<
  *         if m_init.shape[0] != nvoxels or m_init.shape[1] != 3:
  *             raise ValueError(f"m_init must have shape ({nvoxels}, 3); got ({m_init.shape[0]}, {m_init.shape[1]})")
@@ -13220,7 +13220,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
   }
 
   /* "bloch_wrapper.pyx":551
- * 
+ *
  *     # Output arrays - flat layout: voxel-major, then time
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_buf = np.zeros(nvoxels * ntout, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] my_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
@@ -13282,7 +13282,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] my_buf = np.zeros(nvoxels * ntout, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] mz_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
- * 
+ *
 */
   __pyx_t_7 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_9, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 552, __pyx_L1_error)
@@ -13339,7 +13339,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] my_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] mz_buf = np.zeros(nvoxels * ntout, dtype=np.float64)             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Run heterogeneous simulation
 */
   __pyx_t_6 = NULL;
@@ -13394,7 +13394,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
   __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":556
- * 
+ *
  *     # Run heterogeneous simulation
  *     with nogil:             # <<<<<<<<<<<<<<
  *         blochsim_heterogeneous(
@@ -13417,7 +13417,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
       }
 
       /* "bloch_wrapper.pyx":556
- * 
+ *
  *     # Run heterogeneous simulation
  *     with nogil:             # <<<<<<<<<<<<<<
  *         blochsim_heterogeneous(
@@ -13610,7 +13610,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *         mx_out = mx_buf  # (nvoxels,)
  *         my_out = my_buf             # <<<<<<<<<<<<<<
  *         mz_out = mz_buf
- * 
+ *
 */
     __Pyx_INCREF((PyObject *)__pyx_v_my_buf);
     __pyx_v_my_out = ((PyObject *)__pyx_v_my_buf);
@@ -13619,7 +13619,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
  *         mx_out = mx_buf  # (nvoxels,)
  *         my_out = my_buf
  *         mz_out = mz_buf             # <<<<<<<<<<<<<<
- * 
+ *
  *     return mx_out, my_out, mz_out
 */
     __Pyx_INCREF((PyObject *)__pyx_v_mz_buf);
@@ -13629,10 +13629,10 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
 
   /* "bloch_wrapper.pyx":579
  *         mz_out = mz_buf
- * 
+ *
  *     return mx_out, my_out, mz_out             # <<<<<<<<<<<<<<
- * 
- * 
+ *
+ *
 */
   __Pyx_XDECREF(__pyx_r);
   __pyx_t_4 = PyTuple_New(3); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 579, __pyx_L1_error)
@@ -13651,8 +13651,8 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
   goto __pyx_L0;
 
   /* "bloch_wrapper.pyx":426
- * 
- * 
+ *
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * def simulate_phantom(np.ndarray[CTYPE_t, ndim=1] b1_complex,
@@ -13768,15 +13768,15 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_8simulate_phantom(CYTHON_UNUSED P
 }
 
 /* "bloch_wrapper.pyx":582
- * 
- * 
+ *
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * def simulate_phantom_grouped(np.ndarray[CTYPE_t, ndim=1] b1_complex,
 */
 
 /* Python wrapper */
-static PyObject *__pyx_pw_18bloch_simulator_cy_11simulate_phantom_grouped(PyObject *__pyx_self, 
+static PyObject *__pyx_pw_18bloch_simulator_cy_11simulate_phantom_grouped(PyObject *__pyx_self,
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
@@ -13785,7 +13785,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 ); /*proto*/
 PyDoc_STRVAR(__pyx_doc_18bloch_simulator_cy_10simulate_phantom_grouped, "\n    Optimized phantom simulation for phantoms with grouped tissue types.\n    \n    This version is more efficient when many voxels share the same T1/T2 values\n    (e.g., segmented phantoms with a small number of tissue types).\n    \n    Parameters\n    ----------\n    b1_complex : ndarray, shape (ntime,)\n        Complex RF pulse in Gauss\n    gradients : ndarray, shape (ntime, 3)\n        Gradient waveforms in Gauss/cm\n    time_points : ndarray, shape (ntime,)\n        Time intervals in seconds\n    tissue_labels : ndarray, shape (nvoxels,), dtype=int32\n        Tissue label per voxel (0 to nlabels-1). Use -1 for background.\n    t1_per_label : ndarray, shape (nlabels,)\n        T1 value for each tissue label\n    t2_per_label : ndarray, shape (nlabels,)\n        T2 value for each tissue label\n    df_array : ndarray, shape (nvoxels,)\n        Frequency offset per voxel in Hz\n    positions : ndarray, shape (nvoxels, 3)\n        Spatial positions in cm\n    m_init : ndarray, shape (nvoxels, 3), optional\n        Initial magnetization per voxel\n    mode : int\n        0=endpoint, 2=time-resolved\n    num_threads : int\n        Number of OpenMP threads\n    \n    Returns\n    -------\n    mx, my, mz : ndarray\n        Magnetization components\n    ");
 static PyMethodDef __pyx_mdef_18bloch_simulator_cy_11simulate_phantom_grouped = {"simulate_phantom_grouped", (PyCFunction)(void(*)(void))(__Pyx_PyCFunction_FastCallWithKeywords)__pyx_pw_18bloch_simulator_cy_11simulate_phantom_grouped, __Pyx_METH_FASTCALL|METH_KEYWORDS, __pyx_doc_18bloch_simulator_cy_10simulate_phantom_grouped};
-static PyObject *__pyx_pw_18bloch_simulator_cy_11simulate_phantom_grouped(PyObject *__pyx_self, 
+static PyObject *__pyx_pw_18bloch_simulator_cy_11simulate_phantom_grouped(PyObject *__pyx_self,
 #if CYTHON_METH_FASTCALL
 PyObject *const *__pyx_args, Py_ssize_t __pyx_nargs, PyObject *__pyx_kwds
 #else
@@ -13970,8 +13970,8 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   __pyx_r = __pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(__pyx_self, __pyx_v_b1_complex, __pyx_v_gradients, __pyx_v_time_points, __pyx_v_tissue_labels, __pyx_v_t1_per_label, __pyx_v_t2_per_label, __pyx_v_df_array, __pyx_v_positions, __pyx_v_m_init, __pyx_v_mode, __pyx_v_num_threads);
 
   /* "bloch_wrapper.pyx":582
- * 
- * 
+ *
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * def simulate_phantom_grouped(np.ndarray[CTYPE_t, ndim=1] b1_complex,
@@ -14315,7 +14315,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *     cdef int nvoxels = len(tissue_labels)
  *     cdef int nlabels = len(t1_per_label)             # <<<<<<<<<<<<<<
  *     cdef int ntout = ntime if (mode & 2) else 1
- * 
+ *
 */
   __pyx_t_1 = PyObject_Length(((PyObject *)__pyx_v_t1_per_label)); if (unlikely(__pyx_t_1 == ((Py_ssize_t)-1))) __PYX_ERR(0, 633, __pyx_L1_error)
   __pyx_v_nlabels = __pyx_t_1;
@@ -14324,7 +14324,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *     cdef int nvoxels = len(tissue_labels)
  *     cdef int nlabels = len(t1_per_label)
  *     cdef int ntout = ntime if (mode & 2) else 1             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Validate
 */
   __pyx_t_3 = ((__pyx_v_mode & 2) != 0);
@@ -14336,11 +14336,11 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
   __pyx_v_ntout = __pyx_t_2;
 
   /* "bloch_wrapper.pyx":637
- * 
+ *
  *     # Validate
  *     if len(t2_per_label) != nlabels:             # <<<<<<<<<<<<<<
  *         raise ValueError(f"t2_per_label length must match t1_per_label ({nlabels})")
- * 
+ *
 */
   __pyx_t_1 = PyObject_Length(((PyObject *)__pyx_v_t2_per_label)); if (unlikely(__pyx_t_1 == ((Py_ssize_t)-1))) __PYX_ERR(0, 637, __pyx_L1_error)
   __pyx_t_3 = (__pyx_t_1 != __pyx_v_nlabels);
@@ -14350,7 +14350,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *     # Validate
  *     if len(t2_per_label) != nlabels:
  *         raise ValueError(f"t2_per_label length must match t1_per_label ({nlabels})")             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Prepare arrays (similar to simulate_phantom)
 */
     __pyx_t_5 = NULL;
@@ -14377,16 +14377,16 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
     __PYX_ERR(0, 638, __pyx_L1_error)
 
     /* "bloch_wrapper.pyx":637
- * 
+ *
  *     # Validate
  *     if len(t2_per_label) != nlabels:             # <<<<<<<<<<<<<<
  *         raise ValueError(f"t2_per_label length must match t1_per_label ({nlabels})")
- * 
+ *
 */
   }
 
   /* "bloch_wrapper.pyx":641
- * 
+ *
  *     # Prepare arrays (similar to simulate_phantom)
  *     cdef np.ndarray[CTYPE_t, ndim=1] b1_c = np.ascontiguousarray(b1_complex, dtype=np.complex128)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_real = np.empty(ntime, dtype=np.float64)
@@ -14561,7 +14561,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_imag = np.empty(ntime, dtype=np.float64)
  *     np.copyto(b1_real, b1_c.real)             # <<<<<<<<<<<<<<
  *     np.copyto(b1_imag, b1_c.imag)
- * 
+ *
 */
   __pyx_t_11 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 644, __pyx_L1_error)
@@ -14598,7 +14598,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *     cdef np.ndarray[DTYPE_t, ndim=1] b1_imag = np.empty(ntime, dtype=np.float64)
  *     np.copyto(b1_real, b1_c.real)
  *     np.copyto(b1_imag, b1_c.imag)             # <<<<<<<<<<<<<<
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=2] grad_c = _coerce_three_columns(gradients, ntime, "gradients")
 */
   __pyx_t_6 = NULL;
@@ -14634,7 +14634,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
 
   /* "bloch_wrapper.pyx":647
  *     np.copyto(b1_imag, b1_c.imag)
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=2] grad_c = _coerce_three_columns(gradients, ntime, "gradients")             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] gx = np.ascontiguousarray(grad_c[:, 0])
  *     cdef np.ndarray[DTYPE_t, ndim=1] gy = np.ascontiguousarray(grad_c[:, 1])
@@ -14653,7 +14653,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
   __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":648
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=2] grad_c = _coerce_three_columns(gradients, ntime, "gradients")
  *     cdef np.ndarray[DTYPE_t, ndim=1] gx = np.ascontiguousarray(grad_c[:, 0])             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] gy = np.ascontiguousarray(grad_c[:, 1])
@@ -14705,7 +14705,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *     cdef np.ndarray[DTYPE_t, ndim=1] gx = np.ascontiguousarray(grad_c[:, 0])
  *     cdef np.ndarray[DTYPE_t, ndim=1] gy = np.ascontiguousarray(grad_c[:, 1])             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] gz = np.ascontiguousarray(grad_c[:, 2])
- * 
+ *
 */
   __pyx_t_6 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 649, __pyx_L1_error)
@@ -14752,7 +14752,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *     cdef np.ndarray[DTYPE_t, ndim=1] gx = np.ascontiguousarray(grad_c[:, 0])
  *     cdef np.ndarray[DTYPE_t, ndim=1] gy = np.ascontiguousarray(grad_c[:, 1])
  *     cdef np.ndarray[DTYPE_t, ndim=1] gz = np.ascontiguousarray(grad_c[:, 2])             # <<<<<<<<<<<<<<
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] time_c = np.ascontiguousarray(time_points, dtype=np.float64)
 */
   __pyx_t_11 = NULL;
@@ -14798,7 +14798,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
 
   /* "bloch_wrapper.pyx":652
  *     cdef np.ndarray[DTYPE_t, ndim=1] gz = np.ascontiguousarray(grad_c[:, 2])
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] time_c = np.ascontiguousarray(time_points, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[np.int32_t, ndim=1] labels_c = np.ascontiguousarray(tissue_labels, dtype=np.int32)
  *     cdef np.ndarray[DTYPE_t, ndim=1] t1_c = np.ascontiguousarray(t1_per_label, dtype=np.float64)
@@ -14852,7 +14852,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
   __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":653
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] time_c = np.ascontiguousarray(time_points, dtype=np.float64)
  *     cdef np.ndarray[np.int32_t, ndim=1] labels_c = np.ascontiguousarray(tissue_labels, dtype=np.int32)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] t1_c = np.ascontiguousarray(t1_per_label, dtype=np.float64)
@@ -14966,7 +14966,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *     cdef np.ndarray[DTYPE_t, ndim=1] t1_c = np.ascontiguousarray(t1_per_label, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] t2_c = np.ascontiguousarray(t2_per_label, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] df_c = np.ascontiguousarray(df_array, dtype=np.float64)
- * 
+ *
 */
   __pyx_t_6 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 655, __pyx_L1_error)
@@ -15020,7 +15020,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *     cdef np.ndarray[DTYPE_t, ndim=1] t1_c = np.ascontiguousarray(t1_per_label, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] t2_c = np.ascontiguousarray(t2_per_label, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] df_c = np.ascontiguousarray(df_array, dtype=np.float64)             # <<<<<<<<<<<<<<
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=2] pos_c = _coerce_three_columns(positions, nvoxels, "positions")
 */
   __pyx_t_11 = NULL;
@@ -15073,7 +15073,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
 
   /* "bloch_wrapper.pyx":658
  *     cdef np.ndarray[DTYPE_t, ndim=1] df_c = np.ascontiguousarray(df_array, dtype=np.float64)
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=2] pos_c = _coerce_three_columns(positions, nvoxels, "positions")             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] dx = np.ascontiguousarray(pos_c[:, 0])
  *     cdef np.ndarray[DTYPE_t, ndim=1] dy = np.ascontiguousarray(pos_c[:, 1])
@@ -15092,7 +15092,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
   __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":659
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=2] pos_c = _coerce_three_columns(positions, nvoxels, "positions")
  *     cdef np.ndarray[DTYPE_t, ndim=1] dx = np.ascontiguousarray(pos_c[:, 0])             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] dy = np.ascontiguousarray(pos_c[:, 1])
@@ -15144,7 +15144,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *     cdef np.ndarray[DTYPE_t, ndim=1] dx = np.ascontiguousarray(pos_c[:, 0])
  *     cdef np.ndarray[DTYPE_t, ndim=1] dy = np.ascontiguousarray(pos_c[:, 1])             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] dz = np.ascontiguousarray(pos_c[:, 2])
- * 
+ *
 */
   __pyx_t_6 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 660, __pyx_L1_error)
@@ -15191,7 +15191,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *     cdef np.ndarray[DTYPE_t, ndim=1] dx = np.ascontiguousarray(pos_c[:, 0])
  *     cdef np.ndarray[DTYPE_t, ndim=1] dy = np.ascontiguousarray(pos_c[:, 1])
  *     cdef np.ndarray[DTYPE_t, ndim=1] dz = np.ascontiguousarray(pos_c[:, 2])             # <<<<<<<<<<<<<<
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_init_c = None
 */
   __pyx_t_8 = NULL;
@@ -15237,7 +15237,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
 
   /* "bloch_wrapper.pyx":663
  *     cdef np.ndarray[DTYPE_t, ndim=1] dz = np.ascontiguousarray(pos_c[:, 2])
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_init_c = None             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] my_init_c = None
  *     cdef np.ndarray[DTYPE_t, ndim=1] mz_init_c = None
@@ -15256,7 +15256,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
   __pyx_v_mx_init_c = ((PyArrayObject *)Py_None);
 
   /* "bloch_wrapper.pyx":664
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_init_c = None
  *     cdef np.ndarray[DTYPE_t, ndim=1] my_init_c = None             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] mz_init_c = None
@@ -15318,13 +15318,13 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *     cdef double *my_init_ptr = NULL
  *     cdef double *mz_init_ptr = NULL             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=2] m_init_cont
- * 
+ *
 */
   __pyx_v_mz_init_ptr = NULL;
 
   /* "bloch_wrapper.pyx":671
  *     cdef np.ndarray[DTYPE_t, ndim=2] m_init_cont
- * 
+ *
  *     if m_init is not None:             # <<<<<<<<<<<<<<
  *         m_init_cont = np.ascontiguousarray(m_init, dtype=np.float64)
  *         mx_init_c = np.ascontiguousarray(m_init_cont[:, 0])
@@ -15333,7 +15333,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
   if (__pyx_t_3) {
 
     /* "bloch_wrapper.pyx":672
- * 
+ *
  *     if m_init is not None:
  *         m_init_cont = np.ascontiguousarray(m_init, dtype=np.float64)             # <<<<<<<<<<<<<<
  *         mx_init_c = np.ascontiguousarray(m_init_cont[:, 0])
@@ -15581,7 +15581,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *         mx_init_ptr = <double*>mx_init_c.data
  *         my_init_ptr = <double*>my_init_c.data             # <<<<<<<<<<<<<<
  *         mz_init_ptr = <double*>mz_init_c.data
- * 
+ *
 */
     __pyx_v_my_init_ptr = ((double *)__pyx_f_5numpy_7ndarray_4data_data(((PyArrayObject *)__pyx_v_my_init_c)));
 
@@ -15589,14 +15589,14 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *         mx_init_ptr = <double*>mx_init_c.data
  *         my_init_ptr = <double*>my_init_c.data
  *         mz_init_ptr = <double*>mz_init_c.data             # <<<<<<<<<<<<<<
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
 */
     __pyx_v_mz_init_ptr = ((double *)__pyx_f_5numpy_7ndarray_4data_data(((PyArrayObject *)__pyx_v_mz_init_c)));
 
     /* "bloch_wrapper.pyx":671
  *     cdef np.ndarray[DTYPE_t, ndim=2] m_init_cont
- * 
+ *
  *     if m_init is not None:             # <<<<<<<<<<<<<<
  *         m_init_cont = np.ascontiguousarray(m_init, dtype=np.float64)
  *         mx_init_c = np.ascontiguousarray(m_init_cont[:, 0])
@@ -15605,7 +15605,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
 
   /* "bloch_wrapper.pyx":680
  *         mz_init_ptr = <double*>mz_init_c.data
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_buf = np.zeros(nvoxels * ntout, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] my_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] mz_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
@@ -15662,11 +15662,11 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
   __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":681
- * 
+ *
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] my_buf = np.zeros(nvoxels * ntout, dtype=np.float64)             # <<<<<<<<<<<<<<
  *     cdef np.ndarray[DTYPE_t, ndim=1] mz_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
- * 
+ *
 */
   __pyx_t_8 = NULL;
   __Pyx_GetModuleGlobalName(__pyx_t_6, __pyx_mstate_global->__pyx_n_u_np); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 681, __pyx_L1_error)
@@ -15723,7 +15723,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *     cdef np.ndarray[DTYPE_t, ndim=1] mx_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] my_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
  *     cdef np.ndarray[DTYPE_t, ndim=1] mz_buf = np.zeros(nvoxels * ntout, dtype=np.float64)             # <<<<<<<<<<<<<<
- * 
+ *
  *     with nogil:
 */
   __pyx_t_10 = NULL;
@@ -15779,7 +15779,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
 
   /* "bloch_wrapper.pyx":684
  *     cdef np.ndarray[DTYPE_t, ndim=1] mz_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
- * 
+ *
  *     with nogil:             # <<<<<<<<<<<<<<
  *         blochsim_heterogeneous_grouped(
  *             <double*>b1_real.data, <double*>b1_imag.data,
@@ -15791,7 +15791,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
       /*try:*/ {
 
         /* "bloch_wrapper.pyx":685
- * 
+ *
  *     with nogil:
  *         blochsim_heterogeneous_grouped(             # <<<<<<<<<<<<<<
  *             <double*>b1_real.data, <double*>b1_imag.data,
@@ -15802,7 +15802,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
 
       /* "bloch_wrapper.pyx":684
  *     cdef np.ndarray[DTYPE_t, ndim=1] mz_buf = np.zeros(nvoxels * ntout, dtype=np.float64)
- * 
+ *
  *     with nogil:             # <<<<<<<<<<<<<<
  *         blochsim_heterogeneous_grouped(
  *             <double*>b1_real.data, <double*>b1_imag.data,
@@ -15819,7 +15819,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
 
   /* "bloch_wrapper.pyx":699
  *             mode, num_threads)
- * 
+ *
  *     if ntout > 1:             # <<<<<<<<<<<<<<
  *         mx_out = mx_buf.reshape((nvoxels, ntout)).T.copy()
  *         my_out = my_buf.reshape((nvoxels, ntout)).T.copy()
@@ -15828,7 +15828,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
   if (__pyx_t_3) {
 
     /* "bloch_wrapper.pyx":700
- * 
+ *
  *     if ntout > 1:
  *         mx_out = mx_buf.reshape((nvoxels, ntout)).T.copy()             # <<<<<<<<<<<<<<
  *         my_out = my_buf.reshape((nvoxels, ntout)).T.copy()
@@ -15970,7 +15970,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
 
     /* "bloch_wrapper.pyx":699
  *             mode, num_threads)
- * 
+ *
  *     if ntout > 1:             # <<<<<<<<<<<<<<
  *         mx_out = mx_buf.reshape((nvoxels, ntout)).T.copy()
  *         my_out = my_buf.reshape((nvoxels, ntout)).T.copy()
@@ -15994,7 +15994,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *         mx_out = mx_buf
  *         my_out = my_buf             # <<<<<<<<<<<<<<
  *         mz_out = mz_buf
- * 
+ *
 */
     __Pyx_INCREF((PyObject *)__pyx_v_my_buf);
     __pyx_v_my_out = ((PyObject *)__pyx_v_my_buf);
@@ -16003,7 +16003,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
  *         mx_out = mx_buf
  *         my_out = my_buf
  *         mz_out = mz_buf             # <<<<<<<<<<<<<<
- * 
+ *
  *     return mx_out, my_out, mz_out
 */
     __Pyx_INCREF((PyObject *)__pyx_v_mz_buf);
@@ -16013,7 +16013,7 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
 
   /* "bloch_wrapper.pyx":708
  *         mz_out = mz_buf
- * 
+ *
  *     return mx_out, my_out, mz_out             # <<<<<<<<<<<<<<
 */
   __Pyx_XDECREF(__pyx_r);
@@ -16033,8 +16033,8 @@ static PyObject *__pyx_pf_18bloch_simulator_cy_10simulate_phantom_grouped(CYTHON
   goto __pyx_L0;
 
   /* "bloch_wrapper.pyx":582
- * 
- * 
+ *
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * def simulate_phantom_grouped(np.ndarray[CTYPE_t, ndim=1] b1_complex,
@@ -16626,7 +16626,7 @@ static CYTHON_SMALL_CODE int __pyx_pymod_exec_bloch_simulator_cy(PyObject *__pyx
         Py_FatalError("failed to import 'refnanny' module");
   }
   #endif
-  
+
 __Pyx_RefNannySetupContext("PyInit_bloch_simulator_cy", 0);
   __Pyx_init_runtime_version();
   if (__Pyx_check_binary_version(__PYX_LIMITED_VERSION_HEX, __Pyx_get_runtime_version(), CYTHON_COMPILING_IN_LIMITED_API) < (0)) __PYX_ERR(0, 1, __pyx_L1_error)
@@ -16664,7 +16664,7 @@ __Pyx_RefNannySetupContext("PyInit_bloch_simulator_cy", 0);
 
   /* "bloch_wrapper.pyx":4
  * # This file provides Python bindings for the C implementation
- * 
+ *
  * import numpy as np             # <<<<<<<<<<<<<<
  * cimport numpy as np
  * cimport cython
@@ -16697,7 +16697,7 @@ __Pyx_RefNannySetupContext("PyInit_bloch_simulator_cy", 0);
 
   /* "bloch_wrapper.pyx":82
  *     return padded
- * 
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * def simulate_bloch(np.ndarray[CTYPE_t, ndim=1] b1_complex,
@@ -16737,8 +16737,8 @@ __Pyx_RefNannySetupContext("PyInit_bloch_simulator_cy", 0);
   __Pyx_GOTREF(__pyx_t_4);
 
   /* "bloch_wrapper.pyx":252
- * 
- * 
+ *
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * def simulate_bloch_parallel(np.ndarray[CTYPE_t, ndim=1] b1_complex,
@@ -16758,8 +16758,8 @@ __Pyx_RefNannySetupContext("PyInit_bloch_simulator_cy", 0);
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":353
- * 
- * 
+ *
+ *
  * def calculate_signal(mx, my, mz, receiver_phase=0.0):             # <<<<<<<<<<<<<<
  *     """
  *     Calculate complex signal from magnetization components.
@@ -16774,8 +16774,8 @@ __Pyx_RefNannySetupContext("PyInit_bloch_simulator_cy", 0);
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
   /* "bloch_wrapper.pyx":373
- * 
- * 
+ *
+ *
  * def design_rf_pulse(pulse_type='rect', duration=1e-3, flip_angle=90,             # <<<<<<<<<<<<<<
  *                     time_bw_product=4, npoints=100):
  *     """
@@ -16810,8 +16810,8 @@ __Pyx_RefNannySetupContext("PyInit_bloch_simulator_cy", 0);
   __Pyx_GOTREF(__pyx_t_2);
 
   /* "bloch_wrapper.pyx":426
- * 
- * 
+ *
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * def simulate_phantom(np.ndarray[CTYPE_t, ndim=1] b1_complex,
@@ -16851,8 +16851,8 @@ __Pyx_RefNannySetupContext("PyInit_bloch_simulator_cy", 0);
   __Pyx_GOTREF(__pyx_t_3);
 
   /* "bloch_wrapper.pyx":582
- * 
- * 
+ *
+ *
  * @cython.boundscheck(False)             # <<<<<<<<<<<<<<
  * @cython.wraparound(False)
  * def simulate_phantom_grouped(np.ndarray[CTYPE_t, ndim=1] b1_complex,
@@ -16874,7 +16874,7 @@ __Pyx_RefNannySetupContext("PyInit_bloch_simulator_cy", 0);
   /* "bloch_wrapper.pyx":1
  * # bloch_wrapper.pyx - Cython wrapper for Bloch simulator             # <<<<<<<<<<<<<<
  * # This file provides Python bindings for the C implementation
- * 
+ *
 */
   __pyx_t_3 = __Pyx_PyDict_NewPresized(2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 1, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
@@ -16943,7 +16943,7 @@ static int __Pyx_InitCachedConstants(__pyx_mstatetype *__pyx_mstate) {
  *     if copy_cols > 0:
  *         padded[:, :copy_cols] = arr_c[:, :copy_cols]             # <<<<<<<<<<<<<<
  *     return padded
- * 
+ *
 */
   __pyx_mstate_global->__pyx_slice[0] = PySlice_New(Py_None, Py_None, Py_None); if (unlikely(!__pyx_mstate_global->__pyx_slice[0])) __PYX_ERR(0, 79, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_mstate_global->__pyx_slice[0]);
@@ -16965,7 +16965,7 @@ static int __Pyx_InitCachedConstants(__pyx_mstatetype *__pyx_mstate) {
  *     np.copyto(gx, grad_c[:, 0])
  *     np.copyto(gy, grad_c[:, 1])             # <<<<<<<<<<<<<<
  *     np.copyto(gz, grad_c[:, 2])
- * 
+ *
 */
   __pyx_mstate_global->__pyx_tuple[1] = PyTuple_Pack(2, __pyx_mstate_global->__pyx_slice[0], __pyx_mstate_global->__pyx_int_1); if (unlikely(!__pyx_mstate_global->__pyx_tuple[1])) __PYX_ERR(0, 196, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_mstate_global->__pyx_tuple[1]);
@@ -16975,7 +16975,7 @@ static int __Pyx_InitCachedConstants(__pyx_mstatetype *__pyx_mstate) {
  *     np.copyto(gx, grad_c[:, 0])
  *     np.copyto(gy, grad_c[:, 1])
  *     np.copyto(gz, grad_c[:, 2])             # <<<<<<<<<<<<<<
- * 
+ *
  *     # Extract position components
 */
   __pyx_mstate_global->__pyx_tuple[2] = PyTuple_Pack(2, __pyx_mstate_global->__pyx_slice[0], __pyx_mstate_global->__pyx_int_2); if (unlikely(!__pyx_mstate_global->__pyx_tuple[2])) __PYX_ERR(0, 197, __pyx_L1_error)
@@ -16994,8 +16994,8 @@ static int __Pyx_InitCachedConstants(__pyx_mstatetype *__pyx_mstate) {
   __Pyx_GIVEREF(__pyx_mstate_global->__pyx_tuple[3]);
 
   /* "bloch_wrapper.pyx":353
- * 
- * 
+ *
+ *
  * def calculate_signal(mx, my, mz, receiver_phase=0.0):             # <<<<<<<<<<<<<<
  *     """
  *     Calculate complex signal from magnetization components.
@@ -17005,8 +17005,8 @@ static int __Pyx_InitCachedConstants(__pyx_mstatetype *__pyx_mstate) {
   __Pyx_GIVEREF(__pyx_mstate_global->__pyx_tuple[4]);
 
   /* "bloch_wrapper.pyx":373
- * 
- * 
+ *
+ *
  * def design_rf_pulse(pulse_type='rect', duration=1e-3, flip_angle=90,             # <<<<<<<<<<<<<<
  *                     time_bw_product=4, npoints=100):
  *     """
@@ -17209,7 +17209,7 @@ static int __Pyx_CreateCodeObjects(__pyx_mstatetype *__pyx_mstate) {
 static int __Pyx_InitGlobals(void) {
   /* PythonCompatibility.init */
   if (likely(__Pyx_init_co_variables() == 0)); else
-  
+
   if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 1, __pyx_L1_error)
 
   /* NumpyImportArray.init */
@@ -17228,12 +17228,12 @@ static int __Pyx_InitGlobals(void) {
   }
   #endif
   #endif
-  
+
   if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 1, __pyx_L1_error)
 
   /* CommonTypesMetaclass.init */
   if (likely(__pyx_CommonTypesMetaclass_init(__pyx_m) == 0)); else
-  
+
   if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 1, __pyx_L1_error)
 
   /* CachedMethodType.init */
@@ -17247,12 +17247,12 @@ static int __Pyx_InitGlobals(void) {
       }
   } // error handling follows
   #endif
-  
+
   if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 1, __pyx_L1_error)
 
   /* CythonFunctionShared.init */
   if (likely(__pyx_CyFunction_init(__pyx_m) == 0)); else
-  
+
   if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 1, __pyx_L1_error)
 
   return 0;
@@ -18946,7 +18946,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
     __Pyx_SafeReleaseBuffer(buf);
     return -1;
   }
-  
+
 /* GetItemInt */
   static PyObject *__Pyx_GetItemInt_Generic(PyObject *o, PyObject* j) {
       PyObject *r;
@@ -19049,13 +19049,13 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       (void)boundscheck;
       return __Pyx_GetItemInt_Generic(o, PyLong_FromSsize_t(i));
   }
-  
+
 /* PyObjectCallOneArg (used by ObjectGetItem) */
   static CYTHON_INLINE PyObject* __Pyx_PyObject_CallOneArg(PyObject *func, PyObject *arg) {
       PyObject *args[2] = {NULL, arg};
       return __Pyx_PyObject_FastCall(func, args+1, 1 | __Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET);
   }
-  
+
 /* ObjectGetItem */
   #if CYTHON_USE_TYPE_SLOTS
   static PyObject *__Pyx_PyObject_GetIndex(PyObject *obj, PyObject *index) {
@@ -19105,7 +19105,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       return __Pyx_PyObject_GetItem_Slow(obj, key);
   }
   #endif
-  
+
 /* TupleAndListFromArray (used by fastcall) */
   #if !CYTHON_COMPILING_IN_CPYTHON && CYTHON_METH_FASTCALL
   static CYTHON_INLINE PyObject *
@@ -19161,7 +19161,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       return res;
   }
   #endif
-  
+
 /* BytesEquals (used by UnicodeEquals) */
   static CYTHON_INLINE int __Pyx_PyBytes_Equals(PyObject* s1, PyObject* s2, int equals) {
   #if CYTHON_COMPILING_IN_PYPY || CYTHON_COMPILING_IN_LIMITED_API || CYTHON_COMPILING_IN_GRAAL ||\
@@ -19209,7 +19209,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       }
   #endif
   }
-  
+
 /* UnicodeEquals (used by fastcall) */
   static CYTHON_INLINE int __Pyx_PyUnicode_Equals(PyObject* s1, PyObject* s2, int equals) {
   #if CYTHON_COMPILING_IN_PYPY || CYTHON_COMPILING_IN_LIMITED_API || CYTHON_COMPILING_IN_GRAAL
@@ -19283,7 +19283,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       return (equals == Py_NE);
   #endif
   }
-  
+
 /* fastcall */
   #if CYTHON_METH_FASTCALL
   static CYTHON_INLINE PyObject * __Pyx_GetKwValue_FASTCALL(PyObject *kwnames, PyObject *const *kwvalues, PyObject *s)
@@ -19344,7 +19344,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
   }
   #endif
   #endif
-  
+
 /* UnpackUnboundCMethod (used by CallUnboundCMethod0) */
   #if CYTHON_COMPILING_IN_LIMITED_API && __PYX_LIMITED_VERSION_HEX < 0x030C0000
   static PyObject *__Pyx_SelflessCall(PyObject *method, PyObject *args, PyObject *kwargs) {
@@ -19429,7 +19429,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       target->method = result;
       return 0;
   }
-  
+
 /* CallUnboundCMethod0 */
   #if CYTHON_COMPILING_IN_CPYTHON
   static CYTHON_INLINE PyObject* __Pyx_CallUnboundCMethod0(__Pyx_CachedCFunction* cfunc, PyObject* self) {
@@ -19470,17 +19470,17 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       result = __Pyx_PyObject_CallOneArg(cfunc->method, self);
       return result;
   }
-  
+
 /* py_dict_items (used by OwnedDictNext) */
   static CYTHON_INLINE PyObject* __Pyx_PyDict_Items(PyObject* d) {
       return __Pyx_CallUnboundCMethod0(&__pyx_mstate_global->__pyx_umethod_PyDict_Type_items, d);
   }
-  
+
 /* py_dict_values (used by OwnedDictNext) */
   static CYTHON_INLINE PyObject* __Pyx_PyDict_Values(PyObject* d) {
       return __Pyx_CallUnboundCMethod0(&__pyx_mstate_global->__pyx_umethod_PyDict_Type_values, d);
   }
-  
+
 /* OwnedDictNext (used by ParseKeywordsImpl) */
   #if CYTHON_AVOID_BORROWED_REFS
   static int __Pyx_PyDict_NextRef(PyObject *p, PyObject **ppos, PyObject **pkey, PyObject **pvalue) {
@@ -19535,7 +19535,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       return result;
   }
   #endif
-  
+
 /* RaiseDoubleKeywords (used by ParseKeywordsImpl) */
   static void __Pyx_RaiseDoubleKeywordsError(
       const char* func_name,
@@ -19544,7 +19544,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       PyErr_Format(PyExc_TypeError,
           "%s() got multiple values for keyword argument '%U'", func_name, kw_name);
   }
-  
+
 /* CallUnboundCMethod2 */
   #if CYTHON_COMPILING_IN_CPYTHON
   static CYTHON_INLINE PyObject *__Pyx_CallUnboundCMethod2(__Pyx_CachedCFunction *cfunc, PyObject *self, PyObject *arg1, PyObject *arg2) {
@@ -19598,7 +19598,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
           return __Pyx_PyObject_FastCall(cfunc->method, args+1, 3 | __Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET);
       }
   }
-  
+
 /* ParseKeywordsImpl (used by ParseKeywords) */
   static int __Pyx_ValidateDuplicatePosArgs(
       PyObject *kwds,
@@ -19965,7 +19965,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       #endif
       return -1;
   }
-  
+
 /* ParseKeywords */
   static int __Pyx_ParseKeywords(
       PyObject *kwds,
@@ -19985,7 +19985,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       else
           return __Pyx_ParseKeywordDict(kwds, argnames, values, num_pos_args, num_kwargs, function_name, ignore_unknown_kwargs);
   }
-  
+
 /* RaiseArgTupleInvalid */
   static void __Pyx_RaiseArgtupleInvalid(
       const char* func_name,
@@ -20011,7 +20011,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
                    func_name, more_or_less, num_expected,
                    (num_expected == 1) ? "" : "s", num_found);
   }
-  
+
 /* ArgTypeTestFunc (used by ArgTypeTest) */
   static int __Pyx__ArgTypeTest(PyObject *obj, PyTypeObject *type, const char *name, int exact)
   {
@@ -20059,7 +20059,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       __Pyx_DECREF_TypeName(obj_type_name);
       return 0;
   }
-  
+
 /* CIntToPyUnicode */
   static CYTHON_INLINE PyObject* __Pyx_uchar___Pyx_PyUnicode_From_Py_ssize_t(Py_ssize_t value, Py_ssize_t width, char padding_char) {
   #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
@@ -20152,13 +20152,13 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       }
       return __Pyx_PyUnicode_BuildFromAscii(ulength, dpos, (int) length, prepend_sign, padding_char);
   }
-  
+
 /* BufferFallbackError */
   static void __Pyx_RaiseBufferFallbackError(void) {
     PyErr_SetString(PyExc_ValueError,
        "Buffer acquisition failed on assignment; and then reacquiring the old buffer failed too!");
   }
-  
+
 /* PyObjectFastCallMethod */
   #if !CYTHON_VECTORCALL || PY_VERSION_HEX < 0x03090000
   static PyObject *__Pyx_PyObject_FastCallMethod(PyObject *name, PyObject *const *args, size_t nargsf) {
@@ -20171,7 +20171,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       return result;
   }
   #endif
-  
+
 /* PyLongBinop */
   #if !CYTHON_COMPILING_IN_PYPY
   static PyObject* __Pyx_Fallback___Pyx_PyLong_TrueDivideObjC(PyObject *op1, PyObject *op2, int inplace) {
@@ -20230,7 +20230,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       const long b = intval;
       double a = __Pyx_PyFloat_AS_DOUBLE(float_val);
           double result;
-          
+
           result = ((double)a) / (double)b;
           return PyFloat_FromDouble(result);
   }
@@ -20248,7 +20248,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       return __Pyx_Fallback___Pyx_PyLong_TrueDivideObjC(op1, op2, inplace);
   }
   #endif
-  
+
 /* PyLongBinop */
   #if !CYTHON_COMPILING_IN_PYPY
   static PyObject* __Pyx_Fallback___Pyx_PyLong_MultiplyCObj(PyObject *op1, PyObject *op2, int inplace) {
@@ -20320,7 +20320,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
               llx = lla * llb;
               return PyLong_FromLongLong(llx);
           }
-      
+
   }
   #endif
   static PyObject* __Pyx_Float___Pyx_PyLong_MultiplyCObj(PyObject *float_val, long intval, int zerodivision_check) {
@@ -20328,7 +20328,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       const long a = intval;
       double b = __Pyx_PyFloat_AS_DOUBLE(float_val);
           double result;
-          
+
           result = ((double)a) * (double)b;
           return PyFloat_FromDouble(result);
   }
@@ -20346,7 +20346,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       return __Pyx_Fallback___Pyx_PyLong_MultiplyCObj(op1, op2, inplace);
   }
   #endif
-  
+
 /* TypeImport */
   #ifndef __PYX_HAVE_RT_ImportType_3_2_3
   #define __PYX_HAVE_RT_ImportType_3_2_3
@@ -20429,7 +20429,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       return NULL;
   }
   #endif
-  
+
 /* HasAttr (used by ImportImpl) */
   #if __PYX_LIMITED_VERSION_HEX < 0x030d0000
   static CYTHON_INLINE int __Pyx_HasAttr(PyObject *o, PyObject *n) {
@@ -20448,7 +20448,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       }
   }
   #endif
-  
+
 /* ImportImpl (used by Import) */
   static int __Pyx__Import_GetModule(PyObject *qualname, PyObject **module) {
       PyObject *imported_module = PyImport_GetModule(qualname);
@@ -20562,12 +20562,12 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       Py_XDECREF(empty_dict);
       return module;
   }
-  
+
 /* Import */
   static PyObject *__Pyx_Import(PyObject *name, PyObject *const *imported_names, Py_ssize_t len_imported_names, PyObject *qualname, int level) {
       return __Pyx__Import(name, imported_names, len_imported_names, qualname, __pyx_mstate_global->__pyx_d, level);
   }
-  
+
 /* dict_setdefault (used by FetchCommonType) */
   static CYTHON_INLINE PyObject *__Pyx_PyDict_SetDefault(PyObject *d, PyObject *key, PyObject *default_value) {
       PyObject* value;
@@ -20585,7 +20585,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
   #endif
       return value;
   }
-  
+
 /* LimitedApiGetTypeDict (used by SetItemOnTypeDict) */
   #if CYTHON_COMPILING_IN_LIMITED_API
   static Py_ssize_t __Pyx_GetTypeDictOffset(void) {
@@ -20621,7 +20621,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       return *(PyObject**)((char*)tp + tp_dictoffset);
   }
   #endif
-  
+
 /* SetItemOnTypeDict (used by FixUpExtensionType) */
   static int __Pyx__SetItemOnTypeDict(PyTypeObject *tp, PyObject *k, PyObject *v) {
       int result;
@@ -20643,7 +20643,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       }
       return result;
   }
-  
+
 /* FixUpExtensionType (used by FetchCommonType) */
   static int __Pyx_fix_up_extension_type_from_spec(PyType_Spec *spec, PyTypeObject *type) {
   #if __PYX_LIMITED_VERSION_HEX > 0x030900B1
@@ -20744,7 +20744,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
   #endif  // PY_VERSION_HEX > 0x030900B1
       return 0;
   }
-  
+
 /* AddModuleRef (used by FetchSharedCythonModule) */
   #if CYTHON_COMPILING_IN_CPYTHON_FREETHREADING
     static PyObject *__Pyx_PyImport_AddModuleObjectRef(PyObject *name) {
@@ -20789,12 +20789,12 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
         return module;
     }
   #endif
-  
+
 /* FetchSharedCythonModule (used by FetchCommonType) */
   static PyObject *__Pyx_FetchSharedCythonABIModule(void) {
       return __Pyx_PyImport_AddModuleRef(__PYX_ABI_MODULE_NAME);
   }
-  
+
 /* FetchCommonType (used by CommonTypesMetaclass) */
   #if __PYX_LIMITED_VERSION_HEX < 0x030C0000
   static PyObject* __Pyx_PyType_FromMetaclass(PyTypeObject *metaclass, PyObject *module, PyType_Spec *spec, PyObject *bases) {
@@ -20899,7 +20899,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       cached_type = NULL;
       goto done;
   }
-  
+
 /* CommonTypesMetaclass (used by CythonFunctionShared) */
   static PyObject* __pyx_CommonTypesMetaclass_get_module(CYTHON_UNUSED PyObject *self, CYTHON_UNUSED void* context) {
       return PyUnicode_FromString(__PYX_ABI_MODULE_NAME);
@@ -20949,7 +20949,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       }
       return 0;
   }
-  
+
 /* CallTypeTraverse (used by CythonFunctionShared) */
   #if !CYTHON_USE_TYPE_SPECS || (!CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX < 0x03090000)
   #else
@@ -20968,7 +20968,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       return 0;
   }
   #endif
-  
+
 /* PyMethodNew (used by CythonFunctionShared) */
   #if CYTHON_COMPILING_IN_LIMITED_API
   static PyObject *__Pyx_PyMethod_New(PyObject *func, PyObject *self, PyObject *typ) {
@@ -20994,7 +20994,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       return PyMethod_New(func, self);
   }
   #endif
-  
+
 /* PyVectorcallFastCallDict (used by CythonFunctionShared) */
   #if CYTHON_METH_FASTCALL && CYTHON_VECTORCALL
   static PyObject *__Pyx_PyVectorcall_FastCallDict_kw(PyObject *func, __pyx_vectorcallfunc vc, PyObject *const *args, size_t nargs, PyObject *kw)
@@ -21084,7 +21084,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       return __Pyx_PyVectorcall_FastCallDict_kw(func, vc, args, nargs, kw);
   }
   #endif
-  
+
 /* CythonFunctionShared (used by CythonFunction) */
   #if CYTHON_COMPILING_IN_LIMITED_API
   static CYTHON_INLINE int __Pyx__IsSameCyOrCFunctionNoMethod(PyObject *func, void (*cfunc)(void)) {
@@ -22093,7 +22093,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       m->func_annotations = dict;
       Py_INCREF(dict);
   }
-  
+
 /* CythonFunction */
   static PyObject *__Pyx_CyFunction_New(PyMethodDef *ml, int flags, PyObject* qualname,
                                         PyObject *closure, PyObject *module, PyObject* globals, PyObject* code) {
@@ -22106,7 +22106,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       }
       return op;
   }
-  
+
 /* CLineInTraceback (used by AddTraceback) */
   #if CYTHON_CLINE_IN_TRACEBACK && CYTHON_CLINE_IN_TRACEBACK_RUNTIME
   #if CYTHON_COMPILING_IN_LIMITED_API && __PYX_LIMITED_VERSION_HEX < 0x030A0000
@@ -22143,7 +22143,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       return c_line;
   }
   #endif
-  
+
 /* CodeObjectCache (used by AddTraceback) */
   static int __pyx_bisect_code_objects(__Pyx_CodeObjectCacheEntry* entries, int count, int code_line) {
       int start = 0, mid = 0, end = count - 1;
@@ -22263,7 +22263,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
   #endif
   #endif
   }
-  
+
 /* AddTraceback */
   #include "compile.h"
   #include "frameobject.h"
@@ -22400,7 +22400,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       Py_XDECREF(py_frame);
   }
   #endif
-  
+
 /* CIntFromPyVerify */
   #define __PYX_VERIFY_RETURN_INT(target_type, func_type, func_value)\
       __PYX__VERIFY_RETURN_INT(target_type, func_type, func_value, 0)
@@ -22422,7 +22422,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
           }\
           return (target_type) value;\
       }
-  
+
 /* Declarations */
   #if CYTHON_CCOMPLEX && (1) && (!0 || __cplusplus)
     #ifdef __cplusplus
@@ -22442,7 +22442,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
         return z;
       }
   #endif
-  
+
 /* Arithmetic */
   #if CYTHON_CCOMPLEX && (1) && (!0 || __cplusplus)
   #else
@@ -22576,7 +22576,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
           }
       #endif
   #endif
-  
+
 /* Declarations */
   #if CYTHON_CCOMPLEX && (1) && (!0 || __cplusplus)
     #ifdef __cplusplus
@@ -22596,7 +22596,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
         return z;
       }
   #endif
-  
+
 /* Arithmetic */
   #if CYTHON_CCOMPLEX && (1) && (!0 || __cplusplus)
   #else
@@ -22730,7 +22730,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
           }
       #endif
   #endif
-  
+
 /* Declarations */
   #if CYTHON_CCOMPLEX && (1) && (!0 || __cplusplus)
     #ifdef __cplusplus
@@ -22750,7 +22750,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
         return z;
       }
   #endif
-  
+
 /* Arithmetic */
   #if CYTHON_CCOMPLEX && (1) && (!0 || __cplusplus)
   #else
@@ -22884,7 +22884,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
           }
       #endif
   #endif
-  
+
 /* CIntFromPy */
   static CYTHON_INLINE int __Pyx_PyLong_As_int(PyObject *x) {
   #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
@@ -23134,7 +23134,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
           "can't convert negative value to int");
       return (int) -1;
   }
-  
+
 /* CIntToPy */
   static CYTHON_INLINE PyObject* __Pyx_PyLong_From_int(int value) {
   #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
@@ -23203,7 +23203,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
   #endif
       }
   }
-  
+
 /* CIntToPy */
   static CYTHON_INLINE PyObject* __Pyx_PyLong_From_long(long value) {
   #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
@@ -23272,7 +23272,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
   #endif
       }
   }
-  
+
 /* FormatTypeName */
   #if CYTHON_COMPILING_IN_LIMITED_API && __PYX_LIMITED_VERSION_HEX < 0x030d0000
   static __Pyx_TypeName
@@ -23311,7 +23311,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       goto done;
   }
   #endif
-  
+
 /* CIntFromPy */
   static CYTHON_INLINE long __Pyx_PyLong_As_long(PyObject *x) {
   #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
@@ -23561,7 +23561,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
           "can't convert negative value to long");
       return (long) -1;
   }
-  
+
 /* FastTypeChecks */
   #if CYTHON_COMPILING_IN_CPYTHON
   static int __Pyx_InBases(PyTypeObject *a, PyTypeObject *b) {
@@ -23648,7 +23648,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       return (PyErr_GivenExceptionMatches(err, exc_type1) || PyErr_GivenExceptionMatches(err, exc_type2));
   }
   #endif
-  
+
 /* GetRuntimeVersion */
   #if __PYX_LIMITED_VERSION_HEX < 0x030b0000
   void __Pyx_init_runtime_version(void) {
@@ -23681,7 +23681,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       return __Pyx_cached_runtime_version;
   #endif
   }
-  
+
 /* CheckBinaryVersion */
   static int __Pyx_check_binary_version(unsigned long ct_version, unsigned long rt_version, int allow_newer) {
       const unsigned long MAJOR_MINOR = 0xFFFF0000UL;
@@ -23704,7 +23704,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
           return PyErr_WarnEx(NULL, message, 1);
       }
   }
-  
+
 /* NewCodeObj */
   #if CYTHON_COMPILING_IN_LIMITED_API
       static PyObject* __Pyx__PyCode_New(int a, int p, int k, int l, int s, int f,
@@ -23845,7 +23845,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       Py_DECREF(varnames_tuple);
       return code_obj;
   }
-  
+
 /* DecompressString */
   static PyObject *__Pyx_DecompressString(const char *s, Py_ssize_t length, int algo) {
       PyObject *module, *decompress, *compressed_bytes, *decompressed;
@@ -23909,7 +23909,7 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
       Py_DECREF(methodname);
       return NULL;
   }
-  
+
 #include <string.h>
 static CYTHON_INLINE Py_ssize_t __Pyx_ssize_strlen(const char *s) {
     size_t len = strlen(s);
@@ -24450,7 +24450,7 @@ static CYTHON_INLINE PyObject * __Pyx_PyLong_FromSize_t(size_t ival) {
       return 0;
   }
   #endif
-  
+
 /* #### Code section: utility_code_pragmas_end ### */
 #ifdef _MSC_VER
 #pragma warning( pop )

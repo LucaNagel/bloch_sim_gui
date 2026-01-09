@@ -118,7 +118,7 @@ This requires you to manually remove the *quarantine* flag that macOS puts on th
 
 ### 🚀 Jupyter Notebook (Recommended)
 
-You can launch the interactive GUI directly from a cell in your Jupyter Notebook. 
+You can launch the interactive GUI directly from a cell in your Jupyter Notebook.
 
 ```python
 # 0. Install from PyPI (run once) if not done before
@@ -254,7 +254,7 @@ from blochsimulator import SpinEcho, GradientEcho
 # Spin Echo
 se = SpinEcho(te=30e-3, tr=1.0)
 
-# Gradient Echo  
+# Gradient Echo
 gre = GradientEcho(te=5e-3, tr=10e-3, flip_angle=30)
 
 # Compile to waveforms
