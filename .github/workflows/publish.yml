@@ -78,13 +78,10 @@ jobs:
 
       # Used to build wheels (binary packages)
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.21.0
+        uses: pypa/cibuildwheel@v2.16.5
         env:
           CIBW_ARCHS: ${{ matrix.cibw_archs }}
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
-          CIBW_REPAIR_WHEEL_COMMAND_MACOS: >
-            export DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH:/opt/homebrew/opt/libomp/lib:/usr/local/opt/libomp/lib &&
-            delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}
         # You can configure cibuildwheel in pyproject.toml if needed,
         # but defaults work well for most projects.
 

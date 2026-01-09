@@ -40,7 +40,7 @@ elif is_mac:
             "-ffast-math",
             f'-I{os.path.join(libomp_root, "include")}',
         ] + arch_flags
-        extra_link_args = ["-lomp", f"-L{libomp_lib}", f"-Wl,-rpath,{libomp_lib}"]
+        extra_link_args = ["-lomp", f"-L{libomp_lib}"]
     else:
         # Build without OpenMP; prange falls back to serial execution
         extra_compile_args = ["-O3", "-ffast-math"] + arch_flags
