@@ -17,6 +17,8 @@ pathex = [str(project_root), str(project_root / "src")]
 datas = []
 # Collect data files for rfc3987_syntax (needed by jsonschema/nbformat)
 datas += collect_data_files('rfc3987_syntax')
+datas += collect_data_files('imageio')
+datas += collect_data_files('imageio_ffmpeg')
 
 rf_dir = project_root / "rfpulses"
 if rf_dir.exists():
@@ -60,6 +62,7 @@ hiddenimports = [
     "pyqtgraph.opengl",
     "imageio",
     "imageio_ffmpeg",
+    "PIL",
     "h5py",
     "nbformat",
     "nbformat.v4",
