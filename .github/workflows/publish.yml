@@ -58,12 +58,16 @@ jobs:
         include:
           - os: ubuntu-latest
             cibw_archs: "auto"
+            deployment_target: ""
           - os: windows-latest
             cibw_archs: "auto"
+            deployment_target: ""
           - os: macos-13
             cibw_archs: "x86_64"
+            deployment_target: "10.15"
           - os: macos-14
             cibw_archs: "arm64"
+            deployment_target: "14.0"
 
     steps:
       - uses: actions/checkout@v4
@@ -77,6 +81,7 @@ jobs:
         uses: pypa/cibuildwheel@v2.21.0
         env:
           CIBW_ARCHS: ${{ matrix.cibw_archs }}
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
         # You can configure cibuildwheel in pyproject.toml if needed,
         # but defaults work well for most projects.
 
