@@ -165,7 +165,7 @@ class SimulationThread(QThread):
     cancelled = pyqtSignal()
     error = pyqtSignal(str)
     
-    def __init__(self, simulator, sequence, tissue, positions, frequencies, mode, dt=1e-6, m_init=None):
+    def __init__(self, simulator, sequence, tissue, positions, frequencies, mode, dt=1e-5, m_init=None):
         super().__init__()
         self.simulator = simulator
         self.sequence = sequence
@@ -1151,7 +1151,7 @@ class SequenceDesigner(QGroupBox):
 
     def __init__(self):
         super().__init__("Sequence Design")
-        self.default_dt = 1e-6  # 1 us
+        self.default_dt = 1e-5  # 10 us
         self.custom_pulse = None
         self.playhead_line = None
         self.diagram_labels = []
@@ -3541,7 +3541,7 @@ class BlochSimulatorGUI(QMainWindow):
         time_res_layout.addWidget(QLabel("Time step (us):"))
         self.time_step_spin = QDoubleSpinBox()
         self.time_step_spin.setRange(0.1, 5000)
-        self.time_step_spin.setValue(1.0)
+        self.time_step_spin.setValue(10.0)
         self.time_step_spin.setDecimals(2)
         self.time_step_spin.setSingleStep(0.1)
         self.time_step_spin.valueChanged.connect(self._update_time_step)

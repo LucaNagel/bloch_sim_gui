@@ -358,7 +358,7 @@ class PulseSequence:
             'time': time
         })
         
-    def compile(self, dt: float = 1e-6) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def compile(self, dt: float = 1e-5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Compile the sequence into arrays for simulation.
         
@@ -403,10 +403,10 @@ class SpinEcho(PulseSequence):
         self.echo_count = max(1, int(echo_count))
         self.rf_freq_offset = rf_freq_offset
         
-    def compile(self, dt: float = 1e-6) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def compile(self, dt: float = 1e-5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Compile spin echo sequence."""
         
-        # Determine pulse durations first to validate TE
+        # Determine pulse and readout durations first to validate TE
         if self.custom_excitation is not None:
             exc_b1_in, exc_time_in = self.custom_excitation
             # Use actual length
@@ -517,7 +517,7 @@ class SpinEchoTipAxis(PulseSequence):
         self.slice_gradient_override = slice_gradient_override
         self.echo_count = max(1, int(echo_count))
 
-    def compile(self, dt: float = 1e-6) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def compile(self, dt: float = 1e-5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         # Determine pulse durations first
         if self.custom_excitation is not None:
             exc_b1_in, exc_time_in = self.custom_excitation
@@ -616,12 +616,14 @@ class GradientEcho(PulseSequence):
         super().__init__(slice_thickness=slice_thickness, **kwargs)
         self.te = te
         self.tr = tr
+
         self.flip_angle = flip_angle
         self.custom_excitation = custom_excitation
         self.slice_gradient_override = slice_gradient_override
         self.rf_freq_offset = rf_freq_offset
+
         
-    def compile(self, dt: float = 1e-6) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def compile(self, dt: float = 1e-5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Compile gradient echo sequence."""
         
         # Determine pulse and readout durations first to validate TE
@@ -712,7 +714,7 @@ class SliceSelectRephase(PulseSequence):
         self.slice_gradient_override = slice_gradient_override
         self.custom_pulse = custom_pulse
 
-    def compile(self, dt: float = 5e-6) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def compile(self, dt: float = 1e-5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Compile a slice-select + rephase waveform.
 
@@ -833,9 +835,7 @@ class CustomPulse(PulseSequence):
                 f"Ensure the file exists or the pulse name is in the library."
             ) from e
 
-    def compile(self, dt: float = 1e-6) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Compile the custom pulse sequence.
+    def compile(self, dt: float = 1e-5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
 
         Parameters
         ----------
@@ -932,7 +932,7 @@ class BlochSimulator:
                  positions: Optional[np.ndarray] = None,
                  frequencies: Optional[np.ndarray] = None,
                  initial_magnetization: Optional[np.ndarray] = None,
-                 dt: float = 1e-6,
+                 dt: float = 1e-5,
                  mode: int = 0) -> Dict:
         """
         Simulate MRI signal using Bloch equations.
