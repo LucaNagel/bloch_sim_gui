@@ -34,3 +34,4 @@ test_mode_b.ipynb
 
 # Ignore log files
 *.log
+*.h5
