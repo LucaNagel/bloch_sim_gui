@@ -62,9 +62,6 @@ jobs:
           - os: windows-latest
             cibw_archs: "auto"
             deployment_target: ""
-          - os: macos-13-intel
-            cibw_archs: "x86_64"
-            deployment_target: "10.15"
           - os: macos-latest
             cibw_archs: "arm64"
             deployment_target: "14.0"

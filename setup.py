@@ -26,7 +26,6 @@ if is_windows:
 elif is_mac:
     # macOS with clang; try OpenMP if libomp is available
     libomp_paths = [
-        "/usr/local/opt/libomp",  # Intel Homebrew
         "/opt/homebrew/opt/libomp",  # Apple Silicon Homebrew
     ]
 
