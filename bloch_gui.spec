@@ -1,12 +1,24 @@
 # -*- mode: python -*-
 import os
+import re
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
-
 
 block_cipher = None
 
 project_root = Path(__file__).parent if "__file__" in globals() else Path.cwd()
+
+# Extract version from __init__.py
+init_file = project_root / "src" / "blochsimulator" / "__init__.py"
+version = "1.0.0"  # Default
+if init_file.exists():
+    with open(init_file, "r") as f:
+        content = f.read()
+        match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
+        if match:
+            version = match.group(1)
+
+print(f"Building BlochSimulator.app version: {version}")
 
 # Data files bundled into the app
 datas = []
@@ -71,4 +83,16 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+app = BUNDLE(
+    exe,
+    name="BlochSimulator.app",
+    icon=None,  # Add 'docs/icon/MyIcon.icns' if available
+    bundle_identifier="com.lucanagel.blochsimulator",
+    info_plist={
+        "CFBundleShortVersionString": version,
+        "CFBundleVersion": version,
+        "NSHighResolutionCapable": "True",
+    },
 )
