@@ -96,27 +96,26 @@ def design_rf_pulse(
         b1 = envelope * (target_area / area)
     elif pulse_type == "adiabatic_half":
         # Adiabatic Half Passage (AHP): 90° excitation pulse
-        # Uses hyperbolic secant amplitude + tanh frequency modulation
-        # Magnetization tracks effective field through 90° rotation
-        #
-        # For adiabatic pulses, the flip angle is determined by the adiabaticity
-        # parameter κ = γ·B1_max·T / β, NOT by the pulse area.
-        # The flip_angle parameter controls B1_max to achieve the desired rotation.
-        t_centered = time - duration / 2
+        # Sweeps from off-resonance to on-resonance.
+        # Magnetization tracks effective field from Z to Transverse plane.
+
+        # Time variable for AHP (Half of a full passage)
+        # Map time [0, duration] to [-duration, 0] relative to crossing
+        t_arg = (time - duration) / duration
+
         beta = time_bw_product  # Modulation parameter (typically 4-8)
 
-        # HS amplitude modulation: A(t) = A0 * sech(beta * t / T)
-        # Normalized amplitude envelope (max = 1.0)
-        amplitude = 1.0 / np.cosh(beta * t_centered / (duration / 2))
+        # HS amplitude modulation: A(t) = A0 * sech(beta * t)
+        # Grows from ~0 to 1.0
+        amplitude = 1.0 / np.cosh(beta * t_arg)
 
-        # Frequency modulation using tanh (standard for HS pulses)
-        # Frequency sweeps from +BW/2 to -BW/2 (or vice versa)
-        # Delta_omega(t) = -omega_max * tanh(beta * t / T)
+        # Frequency modulation using tanh
+        # Delta_omega(t) = -omega_max * tanh(beta * t)
+        # Sweeps from +Omega_max (at t=0) to 0 (at t=duration)
         bandwidth_hz = time_bw_product / duration
-        omega_max = np.pi * bandwidth_hz  # Max frequency offset (rad/s)
+        omega_max = np.pi * bandwidth_hz
 
-        # Frequency sweep using tanh
-        freq_modulation = -omega_max * np.tanh(beta * t_centered / (duration / 2))
+        freq_modulation = -omega_max * np.tanh(beta * t_arg)
 
         # Integrate to get phase: phi(t) = integral(omega(t) dt)
         dt = duration / npoints
@@ -128,7 +127,6 @@ def design_rf_pulse(
         # For adiabatic pulses, scale by flip_angle to control B1_max directly
         # AHP typically achieves 90° when adiabaticity κ ≈ 5-10
         # User adjusts flip_angle to control the RF amplitude (B1_max in Gauss)
-        # flip_angle here acts as a B1 scaling factor, not a target rotation
         target_flip_rad = np.deg2rad(flip_angle)
         b1_max_gauss = target_flip_rad / (gamma * 2 * np.pi * duration)
         b1 = b1_complex * b1_max_gauss

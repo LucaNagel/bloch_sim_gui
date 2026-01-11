@@ -496,7 +496,14 @@ class RFPulseDesigner(QGroupBox):
         self.current_pulse = None
 
     def init_ui(self):
-        layout = QVBoxLayout()
+        # Main layout: Horizontal split
+        main_layout = QHBoxLayout()
+
+        # --- LEFT COLUMN: Controls ---
+        control_panel = QWidget()
+        control_layout = QVBoxLayout()
+        control_panel.setLayout(control_layout)
+        control_panel.setMaximumWidth(400)  # Keep controls from taking too much space
 
         # Pulse type selector
         type_layout = QHBoxLayout()
@@ -507,6 +514,7 @@ class RFPulseDesigner(QGroupBox):
                 "Rectangle",
                 "Sinc",
                 "Gaussian",
+                "Hermite",
                 "Adiabatic Half Passage",
                 "Adiabatic Full Passage",
                 "BIR-4",
@@ -515,7 +523,7 @@ class RFPulseDesigner(QGroupBox):
         )
         self.pulse_type.currentTextChanged.connect(self.update_pulse)
         type_layout.addWidget(self.pulse_type)
-        layout.addLayout(type_layout)
+        control_layout.addLayout(type_layout)
 
         # Flip angle
         flip_layout = QHBoxLayout()
@@ -525,7 +533,7 @@ class RFPulseDesigner(QGroupBox):
         self.flip_angle.setValue(90)
         self.flip_angle.valueChanged.connect(self.update_pulse)
         flip_layout.addWidget(self.flip_angle)
-        layout.addLayout(flip_layout)
+        control_layout.addLayout(flip_layout)
 
         # Duration
         duration_layout = QHBoxLayout()
@@ -536,7 +544,7 @@ class RFPulseDesigner(QGroupBox):
         self.duration.setSingleStep(0.1)
         self.duration.valueChanged.connect(self.update_pulse)
         duration_layout.addWidget(self.duration)
-        layout.addLayout(duration_layout)
+        control_layout.addLayout(duration_layout)
 
         # Time-bandwidth product (computed from pulse shape; not user-set)
         tbw_layout = QHBoxLayout()
@@ -548,10 +556,10 @@ class RFPulseDesigner(QGroupBox):
         self.tbw.setReadOnly(True)
         self.tbw.setButtonSymbols(QDoubleSpinBox.NoButtons)
         tbw_layout.addWidget(self.tbw)
-        layout.addLayout(tbw_layout)
+        control_layout.addLayout(tbw_layout)
         self.tbw_auto_label = QLabel("Auto TBW (≈1/integfac): —")
         self.tbw_auto_label.setStyleSheet("color: gray;")
-        layout.addWidget(self.tbw_auto_label)
+        control_layout.addWidget(self.tbw_auto_label)
 
         # Lobes control for Sinc pulses
         lobes_layout = QHBoxLayout()
@@ -563,7 +571,7 @@ class RFPulseDesigner(QGroupBox):
         lobes_layout.addWidget(self.sinc_lobes)
         self.lobes_container = QWidget()
         self.lobes_container.setLayout(lobes_layout)
-        layout.addWidget(self.lobes_container)
+        control_layout.addWidget(self.lobes_container)
 
         # Apodization
         apod_layout = QHBoxLayout()
@@ -572,7 +580,7 @@ class RFPulseDesigner(QGroupBox):
         self.apodization_combo.addItems(["None", "Hamming", "Hanning", "Blackman"])
         self.apodization_combo.currentTextChanged.connect(self.update_pulse)
         apod_layout.addWidget(self.apodization_combo)
-        layout.addLayout(apod_layout)
+        control_layout.addLayout(apod_layout)
 
         # Phase
         phase_layout = QHBoxLayout()
@@ -583,7 +591,7 @@ class RFPulseDesigner(QGroupBox):
         self.phase.setValue(0)
         self.phase.valueChanged.connect(self.update_pulse)
         phase_layout.addWidget(self.phase)
-        layout.addLayout(phase_layout)
+        control_layout.addLayout(phase_layout)
 
         # RF Frequency Offset
         freq_offset_layout = QHBoxLayout()
@@ -595,14 +603,7 @@ class RFPulseDesigner(QGroupBox):
         self.freq_offset.setDecimals(1)
         self.freq_offset.valueChanged.connect(self.update_pulse)
         freq_offset_layout.addWidget(self.freq_offset)
-        layout.addLayout(freq_offset_layout)
-
-        # Plot widget
-        self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setLabel("left", "B1 Amplitude", "G")
-        self.plot_widget.setLabel("bottom", "Time", "ms")
-        self.plot_widget.setMinimumHeight(200)
-        layout.addWidget(self.plot_widget)
+        control_layout.addLayout(freq_offset_layout)
 
         # Custom pulse settings (initially hidden)
         self.custom_settings_group = QGroupBox("Custom Pulse Settings")
@@ -640,7 +641,14 @@ class RFPulseDesigner(QGroupBox):
 
         self.custom_settings_group.setLayout(custom_settings_layout)
         self.custom_settings_group.setVisible(False)
-        layout.addWidget(self.custom_settings_group)
+        control_layout.addWidget(self.custom_settings_group)
+
+        # Pulse Explanation
+        control_layout.addWidget(QLabel("Pulse Description:"))
+        self.explanation_box = QTextEdit()
+        self.explanation_box.setReadOnly(True)
+        self.explanation_box.setMaximumHeight(150)
+        control_layout.addWidget(self.explanation_box)
 
         # Buttons
         button_layout = QHBoxLayout()
@@ -649,9 +657,23 @@ class RFPulseDesigner(QGroupBox):
         self.save_button = QPushButton("Save to File")
         button_layout.addWidget(self.load_button)
         button_layout.addWidget(self.save_button)
-        layout.addLayout(button_layout)
+        control_layout.addLayout(button_layout)
 
-        self.setLayout(layout)
+        control_layout.addStretch()
+
+        # --- RIGHT COLUMN: Plot ---
+        plot_layout = QVBoxLayout()
+        self.plot_widget = pg.PlotWidget()
+        self.plot_widget.setLabel("left", "B1 Amplitude", "G")
+        self.plot_widget.setLabel("bottom", "Time", "ms")
+        # Expand policy to take available space
+        self.plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        plot_layout.addWidget(self.plot_widget)
+
+        main_layout.addWidget(control_panel)
+        main_layout.addLayout(plot_layout, stretch=1)  # Give plot more space
+
+        self.setLayout(main_layout)
 
         # Storage for loaded pulse data
         self.loaded_pulse_b1 = None
@@ -759,7 +781,22 @@ class RFPulseDesigner(QGroupBox):
 
     def update_pulse(self):
         """Update the RF pulse based on current parameters."""
-        pulse_type = self.pulse_type.currentText().lower()
+        pulse_type_text = self.pulse_type.currentText().lower()
+
+        # Update explanation
+        desc_map = {
+            "rectangle": "<b>Rectangular Pulse</b><br>Constant amplitude hard pulse. Broad excitation bandwidth.",
+            "sinc": "<b>Sinc Pulse</b><br>Selective excitation. Fourier transform of a rectangular slice profile. Use 'Lobes' to control bandwidth/sharpness.",
+            "gaussian": "<b>Gaussian Pulse</b><br>Selective pulse with no side lobes in time domain. Smooth excitation profile.",
+            "hermite": "<b>Hermite Pulse</b><br>Short selective pulse derived from Hermite polynomials. Good for short TR sequences.",
+            "adiabatic half passage": "<b>Adiabatic Half Passage (AHP)</b><br>Frequency sweep from off-resonance to resonance (or vice versa). Generates robust 90° excitation insensitive to B1 inhomogeneity (above a threshold).",
+            "adiabatic full passage": "<b>Adiabatic Full Passage (AFP)</b><br>Frequency sweep from far off-resonance to far off-resonance. Generates robust 180° inversion insensitive to B1 inhomogeneity.",
+            "bir-4": "<b>BIR-4</b><br>B1-Insensitive Rotation. Composite adiabatic pulse capable of arbitrary flip angles (defined by phase jumps).",
+            "custom": "<b>Custom Pulse</b><br>User-loaded waveform.",
+        }
+        self.explanation_box.setHtml(desc_map.get(pulse_type_text, ""))
+
+        pulse_type = pulse_type_text
         if pulse_type == "rectangle":
             pulse_type = "rect"
         elif pulse_type == "adiabatic half passage":
@@ -3784,7 +3821,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         # RF Pulse designer
         self.rf_designer = RFPulseDesigner()
-        left_layout.addWidget(self.rf_designer)
+        # left_layout.addWidget(self.rf_designer)
 
         # Sequence designer
         self.sequence_designer = SequenceDesigner()
@@ -4586,6 +4623,9 @@ class BlochSimulatorGUI(QMainWindow):
         # === PARAMETER SWEEP TAB ===
         self.param_sweep_widget = ParameterSweepWidget(self)
         self.tab_widget.addTab(self.param_sweep_widget, "📊 Parameter Sweep")
+
+        # === RF PULSE DESIGN TAB ===
+        self.tab_widget.addTab(self.rf_designer, "RF Design")
 
         # Log console lives in its own tab to save vertical space
         log_tab = QWidget()
