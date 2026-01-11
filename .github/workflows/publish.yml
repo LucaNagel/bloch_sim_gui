@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - fixes
+      - feature
     tags:
       - 'v*'
   workflow_dispatch: # Allows manual triggering
@@ -73,6 +74,17 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install libomp
 
+      - name: Bump version for dev build (Feature Branch)
+        if: github.ref == 'refs/heads/feature'
+        shell: bash
+        run: |
+          # Extract current version from pyproject.toml
+          CURRENT_VER=$(grep -m1 'version = ' pyproject.toml | cut -d '"' -f 2)
+          # Create dev version compliant with PEP 440
+          DEV_VER="${CURRENT_VER}.dev${{ github.run_number }}"
+          echo "Bumping version to $DEV_VER for development build..."
+          python bump_version.py "$DEV_VER"
+
       # Used to build wheels (binary packages)
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.16.5
@@ -94,6 +106,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Bump version for dev build (Feature Branch)
+        if: github.ref == 'refs/heads/feature'
+        shell: bash
+        run: |
+          CURRENT_VER=$(grep -m1 'version = ' pyproject.toml | cut -d '"' -f 2)
+          DEV_VER="${CURRENT_VER}.dev${{ github.run_number }}"
+          echo "Bumping version to $DEV_VER for development build..."
+          python bump_version.py "$DEV_VER"
+
       - name: Build sdist
         run: pipx run build --sdist
 
@@ -101,6 +122,39 @@ jobs:
         with:
           name: cibw-sdist
           path: dist/*.tar.gz
+
+  create_pre_release:
+    name: Create Pre-Release (GitHub)
+    needs: [build_wheels, build_sdist]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/feature'
+    permissions:
+      contents: write  # Required to create releases
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cibw-*
+          path: dist
+          merge-multiple: true
+
+      - name: Determine Version Tag
+        id: get_version
+        run: |
+          CURRENT_VER=$(grep -m1 'version = ' pyproject.toml | cut -d '"' -f 2)
+          DEV_VER="${CURRENT_VER}.dev${{ github.run_number }}"
+          echo "VERSION=$DEV_VER" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.get_version.outputs.VERSION }}
+          name: Development Build ${{ steps.get_version.outputs.VERSION }}
+          draft: false
+          prerelease: true
+          files: dist/*
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   publish:
     name: Publish to PyPI
