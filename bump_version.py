@@ -21,10 +21,10 @@ def update_file(path, pattern, replacement):
 
     if content != new_content:
         path.write_text(new_content)
-        print(f"✓ Updated {path}")
+        print(f"[OK] Updated {path}")
         return True
     else:
-        print(f"ℹ No changes needed in {path}")
+        print(f"[-] No changes needed in {path}")
         return False
 
 
