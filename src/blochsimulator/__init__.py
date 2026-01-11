@@ -6,6 +6,7 @@ from .simulator import (
     PulseSequence,
     SpinEcho,
     SpinEchoTipAxis,
+    InversionRecovery,
     GradientEcho,
     SliceSelectRephase,
     CustomPulse,

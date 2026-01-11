@@ -774,6 +774,159 @@ class GradientEcho(PulseSequence):
         return b1, gradients, time
 
 
+class InversionRecovery(PulseSequence):
+    """
+    Inversion recovery pulse sequence (180 -> TI -> 90).
+    """
+
+    def __init__(
+        self,
+        ti: float,
+        tr: float,
+        te: float = 0.0,
+        pulse_type: str = "sinc",
+        slice_thickness: float = 0.005,
+        slice_gradient_override: Optional[float] = None,
+        custom_inversion=None,
+        custom_excitation=None,
+        rf_freq_offset: float = 0.0,
+        **kwargs,
+    ):
+        """
+        Initialize inversion recovery sequence.
+
+        Parameters
+        ----------
+        ti : float
+            Inversion time (center of 180 to center of 90) in seconds
+        tr : float
+            Repetition time in seconds
+        te : float
+            Echo time (time from 90 to readout center) in seconds.
+        pulse_type : str
+            Type of pulses to use ('sinc', 'rect', 'gaussian', etc.) if custom pulses are not provided.
+            Ensures both pulses are of the same kind.
+        """
+        super().__init__(slice_thickness=slice_thickness, **kwargs)
+        self.ti = ti
+        self.tr = tr
+        self.te = te
+        self.pulse_type = pulse_type
+        self.slice_gradient_override = slice_gradient_override
+        self.custom_inversion = custom_inversion
+        self.custom_excitation = custom_excitation
+        self.rf_freq_offset = rf_freq_offset
+
+    def compile(self, dt: float = 1e-6) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Compile inversion recovery sequence."""
+        # Ensure minimal duration
+        min_duration = self.ti + self.te + 5e-3
+        total_duration = max(self.tr, min_duration)
+        npoints = int(np.ceil(total_duration / dt))
+
+        b1 = np.zeros(npoints, dtype=complex)
+        gradients = np.zeros((npoints, 3))
+        time = np.arange(npoints) * dt
+
+        # --- 1. Inversion Pulse (180) ---
+        if self.custom_inversion is not None:
+            inv_b1, _ = self.custom_inversion
+            inv_b1 = np.asarray(inv_b1, dtype=complex)
+        else:
+            # Generate 180 of the specified type
+            inv_b1, _ = design_rf_pulse(
+                self.pulse_type,
+                duration=2e-3,
+                flip_angle=180,
+                npoints=int(2e-3 / dt),
+                freq_offset=self.rf_freq_offset,
+            )
+
+        n_inv = min(len(inv_b1), npoints)
+        b1[:n_inv] = inv_b1[:n_inv]
+        inv_center_time = (n_inv * dt) / 2.0  # Approximate center
+
+        # Slice gradient for inversion
+        inv_duration = n_inv * dt
+        thickness_cm = max(self.slice_thickness, 1e-3) * 100.0
+        bw_hz = 4.0 / max(inv_duration, dt)  # approx
+        gamma_hz_per_g = 4258.0
+
+        if (
+            self.slice_gradient_override is not None
+            and self.slice_gradient_override > 0
+        ):
+            gz_amp = self.slice_gradient_override
+        else:
+            gz_amp = bw_hz / (gamma_hz_per_g * thickness_cm)
+
+        gradients[:n_inv, 2] = gz_amp
+
+        # --- 2. Excitation Pulse (90) ---
+        if self.custom_excitation is not None:
+            exc_b1, _ = self.custom_excitation
+            exc_b1 = np.asarray(exc_b1, dtype=complex)
+        else:
+            # Generate 90 of the SAME type
+            exc_b1, _ = design_rf_pulse(
+                self.pulse_type,
+                duration=1e-3,
+                flip_angle=90,
+                npoints=int(1e-3 / dt),
+                freq_offset=self.rf_freq_offset,
+            )
+
+        n_exc = len(exc_b1)
+        exc_center_time = (n_exc * dt) / 2.0
+
+        # Calculate start time for excitation to match TI (center-to-center)
+        # TI = (exc_start + exc_center) - inv_center
+        # exc_start = TI + inv_center - exc_center
+        exc_start_time = self.ti + inv_center_time - exc_center_time
+        exc_start_idx = int(exc_start_time / dt)
+
+        # Safety check: don't overlap
+        if exc_start_idx < n_inv:
+            exc_start_idx = n_inv + 10  # minimal gap
+
+        if exc_start_idx + n_exc < npoints:
+            b1[exc_start_idx : exc_start_idx + n_exc] = exc_b1
+
+            # Slice gradient for excitation
+            exc_duration = n_exc * dt
+            bw_hz_exc = 4.0 / max(exc_duration, dt)
+            if (
+                self.slice_gradient_override is not None
+                and self.slice_gradient_override > 0
+            ):
+                gz_amp_exc = self.slice_gradient_override
+            else:
+                gz_amp_exc = bw_hz_exc / (gamma_hz_per_g * thickness_cm)
+            gradients[exc_start_idx : exc_start_idx + n_exc, 2] = gz_amp_exc
+
+        # --- 3. Readout ---
+        # Assuming simple FID readout starting after excitation or at TE
+        # Center of excitation is at exc_start_time + exc_center_time
+        # We want readout center at TE after that? Or TE relative to excitation center?
+        # Usually TE in IR is defined if there is a refocusing pulse (IR-SE).
+        # If it's IR-FID, TE might just mean "start acquisition".
+        # Let's assume readout starts shortly after excitation for FID.
+
+        if self.te > 0:
+            # If TE provided, maybe we want a gradient echo or just wait?
+            # For simplicity, let's put a readout gradient lobe at TE
+            ro_center = (exc_start_idx * dt) + exc_center_time + self.te
+            ro_start = int((ro_center - 0.5e-3) / dt)
+        else:
+            ro_start = exc_start_idx + n_exc + 10
+
+        ro_dur = int(1e-3 / dt)
+        if ro_start + ro_dur < npoints:
+            gradients[ro_start : ro_start + ro_dur, 0] = 5e-3  # Readout gradient
+
+        return b1, gradients, time
+
+
 class SliceSelectRephase(PulseSequence):
     """
     Simple slice-select pulse followed by a rephasing gradient lobe.

@@ -71,6 +71,7 @@ from .simulator import (
     CustomPulse,
     PulseSequence,
     design_rf_pulse,
+    InversionRecovery,
 )
 
 # Import visualization export tools
@@ -1551,6 +1552,23 @@ class SequenceDesigner(QGroupBox):
 
         elif seq_type == "Inversion Recovery":
             roles = ["Inversion", "Excitation"]
+
+            # Pre-populate states to ensure they are both Sinc (or match current designer type)
+            if hasattr(self, "parent_gui") and hasattr(self.parent_gui, "rf_designer"):
+                current_state = self.parent_gui.rf_designer.get_state()
+
+                # Inversion: 180 degrees
+                inv_state = current_state.copy()
+                inv_state["flip_angle"] = 180.0
+                # Ensure it's a Sinc if the user hasn't explicitly set a type for this role yet
+                # Or just force it to match the current designer type (which is usually what users expect)
+                self.pulse_states["Inversion"] = inv_state
+
+                # Excitation: 90 degrees
+                exc_state = current_state.copy()
+                exc_state["flip_angle"] = 90.0
+                self.pulse_states["Excitation"] = exc_state
+
         elif seq_type in ("Gradient Echo", "Free Induction Decay", "FLASH", "EPI"):
             roles = ["Excitation"]
         elif seq_type == "Custom":
@@ -1992,43 +2010,39 @@ class SequenceDesigner(QGroupBox):
         te = self.te_spin.value() / 1000
         tr = self.tr_spin.value() / 1000
         dt = max(dt, 1e-6)
-        npoints = int(np.ceil(tr / dt))
-        b1 = np.zeros(npoints, dtype=complex)
-        gradients = np.zeros((npoints, 3))
-        inv_b1, _ = design_rf_pulse(
-            "sinc", duration=2e-3, flip_angle=180, npoints=max(32, int(2e-3 / dt))
-        )
-        n_inv = min(len(inv_b1), npoints)
-        b1[:n_inv] = inv_b1[:n_inv]
-        thickness_cm = self._slice_thickness_m() * 100.0
-        gamma_hz_per_g = 4258.0
-        tbw = self._effective_tbw()
-        bw_hz = tbw / max(len(inv_b1) * dt, dt)
-        slice_g = self._slice_gradient_override() or (
-            bw_hz / (gamma_hz_per_g * thickness_cm)
-        )  # G/cm
-        gradients[:n_inv, 2] = slice_g
-        start_exc = int(max(ti, (n_inv * dt)) / dt)
-        if custom_pulse is not None:
-            exc_b1, _ = custom_pulse
-            exc_b1 = np.asarray(exc_b1, dtype=complex)
+
+        # Determine which pulse is which
+        # If the user is designing a pulse, 'custom_pulse' is that live pulse.
+        # We need to assign it to the correct role (Inversion or Excitation)
+        # and retrieve the OTHER pulse from the stored waveforms.
+
+        current_role = getattr(self, "current_role", None)
+        inv_pulse = None
+        exc_pulse = None
+
+        if current_role == "Inversion":
+            inv_pulse = custom_pulse
+            exc_pulse = self.pulse_waveforms.get("Excitation")
+        elif current_role == "Excitation":
+            exc_pulse = custom_pulse
+            inv_pulse = self.pulse_waveforms.get("Inversion")
         else:
-            exc_b1, _ = design_rf_pulse(
-                "sinc", duration=1e-3, flip_angle=90, npoints=max(16, int(1e-3 / dt))
-            )
-        n_exc = min(len(exc_b1), max(0, npoints - start_exc))
-        b1[start_exc : start_exc + n_exc] = exc_b1[:n_exc]
-        bw_hz_exc = tbw / max(n_exc * dt, dt)
-        slice_g_exc = self._slice_gradient_override() or (
-            bw_hz_exc / (gamma_hz_per_g * thickness_cm)
+            # Fallback if roles are somehow ambiguous
+            inv_pulse = self.pulse_waveforms.get("Inversion")
+            exc_pulse = self.pulse_waveforms.get("Excitation")
+
+        seq = InversionRecovery(
+            ti=ti,
+            tr=tr,
+            te=te,
+            pulse_type="sinc",
+            slice_thickness=self._slice_thickness_m(),
+            slice_gradient_override=self._slice_gradient_override(),
+            custom_inversion=inv_pulse,
+            custom_excitation=exc_pulse,
         )
-        gradients[start_exc : start_exc + n_exc, 2] = slice_g_exc
-        ro_start = start_exc + int(max(0.2e-3, te / 2) / dt)
-        ro_dur = max(1, int(0.8e-3 / dt))
-        if ro_start + ro_dur < npoints:
-            gradients[ro_start : ro_start + ro_dur, 0] = 5e-3
-        time = np.arange(npoints) * dt
-        return b1, gradients, time
+
+        return seq.compile(dt)
 
     def _build_ssfp(self, custom_pulse, dt):
         """
