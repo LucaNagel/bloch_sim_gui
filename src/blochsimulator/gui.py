@@ -2131,7 +2131,7 @@ class SequenceDesigner(QGroupBox):
                 )
             if len(t_wave) > 1:
                 wave_dt = np.median(np.diff(t_wave))
-                wave_duration = (len(t_wave) - 1) * wave_dt
+                wave_duration = len(t_wave) * wave_dt
             else:
                 wave_dt = dt
                 wave_duration = dt

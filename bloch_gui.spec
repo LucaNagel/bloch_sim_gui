@@ -3,7 +3,7 @@ import os
 import platform
 import re
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files, collect_all
 
 block_cipher = None
 
@@ -29,9 +29,9 @@ pathex = [str(project_root), str(project_root / "src")]
 # Data files bundled into the app
 datas = []
 # Collect data files for rfc3987_syntax (needed by jsonschema/nbformat)
-datas += collect_data_files('rfc3987_syntax')
-datas += collect_data_files('imageio')
-datas += collect_data_files('imageio_ffmpeg')
+datas += collect_data_files("rfc3987_syntax")
+datas += collect_data_files("imageio")
+datas += collect_data_files("imageio_ffmpeg")
 
 rf_dir = project_root / "rfpulses"
 if rf_dir.exists():
@@ -46,7 +46,7 @@ for ext in (project_root / "src" / "blochsimulator").glob("blochsimulator_cy.*")
     binaries.append((str(ext), "blochsimulator"))
 
 # Handle OpenMP libraries based on OS
-if system_platform == 'Darwin':
+if system_platform == "Darwin":
     # Common OpenMP runtime locations (macOS)
     omp_candidates = [
         Path("/opt/homebrew/opt/libomp/lib/libomp.dylib"),
@@ -55,7 +55,7 @@ if system_platform == 'Darwin':
     for omp in omp_candidates:
         if omp.exists():
             binaries.append((str(omp), "."))
-elif system_platform == 'Linux':
+elif system_platform == "Linux":
     # Linux OpenMP (usually libgomp)
     omp_candidates = [
         Path("/usr/lib/x86_64-linux-gnu/libgomp.so.1"),
@@ -64,7 +64,7 @@ elif system_platform == 'Linux':
     for omp in omp_candidates:
         if omp.exists():
             binaries.append((str(omp), "."))
-elif system_platform == 'Windows':
+elif system_platform == "Windows":
     # Windows OpenMP (vcomp140.dll or similar, usually found in system32 or by compiler)
     # PyInstaller often finds DLLs automatically, but we can add explicit checks if needed.
     pass
@@ -79,13 +79,24 @@ hiddenimports = [
     "h5py",
     "nbformat",
     "nbformat.v4",
-    "blochsimulator.blochsimulator_cy", # Ensure Cython module is found
+    "blochsimulator.blochsimulator_cy",  # Ensure Cython module is found
 ]
 hiddenimports += collect_submodules("OpenGL.platform")
 hiddenimports += collect_submodules("imageio")
 hiddenimports += collect_submodules("imageio_ffmpeg")
 hiddenimports += collect_submodules("h5py")
 hiddenimports += collect_submodules("nbformat")
+
+# Collect all imageio components (plugins, binaries, etc.)
+# tmp_ret = collect_all('imageio')
+# datas += tmp_ret[0]
+# binaries += tmp_ret[1]
+# hiddenimports += tmp_ret[2]
+
+tmp_ret = collect_all("imageio")
+datas += tmp_ret[0]
+binaries += tmp_ret[1]
+hiddenimports += tmp_ret[2]
 
 a = Analysis(
     ["bloch_gui.py"],
