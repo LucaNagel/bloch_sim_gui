@@ -1,6 +1,7 @@
 # -*- mode: python -*-
 import os
 import platform
+import re
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
@@ -9,6 +10,18 @@ block_cipher = None
 # project_root is the directory containing this spec file
 project_root = Path(os.getcwd())
 system_platform = platform.system()
+
+# Extract version from __init__.py
+init_file = project_root / "src" / "blochsimulator" / "__init__.py"
+version = "1.0.0"  # Default
+if init_file.exists():
+    with open(init_file, "r") as f:
+        content = f.read()
+        match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
+        if match:
+            version = match.group(1)
+
+print(f"Building BlochSimulator.app version: {version}")
 
 # Add src to pathex so PyInstaller can find the package
 pathex = [str(project_root), str(project_root / "src")]
@@ -134,4 +147,9 @@ if system_platform == 'Darwin':
         name='BlochSimulator.app',
         icon=str(icon_path) if icon_path else None,
         bundle_identifier='com.lucanagel.blochsimulator',
+        info_plist={
+            "CFBundleShortVersionString": version,
+            "CFBundleVersion": version,
+            "NSHighResolutionCapable": "True",
+        },
     )
