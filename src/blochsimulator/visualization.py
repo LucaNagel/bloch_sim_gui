@@ -36,10 +36,12 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from . import __version__
 
+imageio_import_error = None
 try:
     import imageio
 except ImportError as e:  # pragma: no cover - dependency is optional at import time
     print(f"Warning: could not import imageio: {e}")
+    imageio_import_error = e
     imageio = None
 
 
@@ -664,10 +666,20 @@ class AnimationExporter:
         self.default_bitrate = "5000k"
 
     def _ensure_imageio(self):
+        global imageio
         if imageio is None:
-            raise ImportError(
-                "Animation export requires 'imageio'. Install with: pip install imageio imageio-ffmpeg"
-            )
+            # Try importing one more time in case it was installed after load
+            try:
+                import imageio as iio
+
+                imageio = iio
+            except ImportError as e:
+                msg = "Animation export requires 'imageio'. Install with: pip install imageio imageio-ffmpeg"
+                if imageio_import_error:
+                    msg += f"\n\nImport Error: {imageio_import_error}"
+                else:
+                    msg += f"\n\nImport Error: {e}"
+                raise ImportError(msg)
 
     def _infer_format(self, filename: str, format_hint: Optional[str] = None) -> str:
         fmt = format_hint or Path(filename).suffix.lower().lstrip(".")

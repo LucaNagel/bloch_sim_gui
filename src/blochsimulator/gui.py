@@ -9654,13 +9654,20 @@ class BlochSimulatorGUI(QMainWindow):
                 "3D animation export requires a time-resolved simulation.",
             )
             return
-        if vz_imageio is None:
-            QMessageBox.critical(
-                self,
-                "Missing Dependency",
-                "Animation export requires 'imageio'. Install with: pip install imageio imageio-ffmpeg",
-            )
-            return
+        # Check dependency - use local variable to avoid UnboundLocalError
+        imageio_lib = vz_imageio
+        if imageio_lib is None:
+            try:
+                import imageio
+
+                imageio_lib = imageio
+            except ImportError as e:
+                QMessageBox.critical(
+                    self,
+                    "Missing Dependency",
+                    f"Animation export requires 'imageio'. Install with: pip install imageio imageio-ffmpeg\n\nError: {e}",
+                )
+                return
 
         total_frames = len(self.anim_data)
         dialog = ExportAnimationDialog(
@@ -9691,10 +9698,10 @@ class BlochSimulatorGUI(QMainWindow):
 
         def _make_writer(target_path: Path):
             if fmt == "gif":
-                return vz_imageio.get_writer(
+                return imageio_lib.get_writer(
                     str(target_path), mode="I", fps=params["fps"], format="GIF"
                 )
-            return vz_imageio.get_writer(
+            return imageio_lib.get_writer(
                 str(target_path),
                 fps=params["fps"],
                 format="FFMPEG",

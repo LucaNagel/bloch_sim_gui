@@ -40,5 +40,5 @@ test_mode_b.ipynb
 .claude/
 .github/commands/
 .github/workflows/*
-!.github/workflows/publish.yml
+!.github/workflows/*.yml
 gha-creds-*.json
