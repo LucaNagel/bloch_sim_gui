@@ -93,24 +93,26 @@ tissue = TissueParameters.gray_matter(3.0)
 print(f"T1: {tissue.t1:.3f}s, T2: {tissue.t2:.3f}s")
 ```
 
-### Method C: Standalone App (macOS)
+### Method C: Standalone App
 *No installation required. Recommended for non-technical users.*
 
-This requires you to manually remove the *quarantine* flag that macOS puts on the downloaded app. Only perform this step if you trust the distributor.
+Download the most reason version for your OS in **[Releases](https://github.com/LucaNagel/bloch_sim_gui/releases)**
 
-1.  Go to the **[Releases](https://github.com/LucaNagel/bloch_sim_gui/releases)** page and download the latest `.zip` file.
-2.  Unzip the file and move `BlochSimulator.app` to your **Applications** folder.
-3.  **Crucial Step:** Open Terminal and run this command to fix the "App is damaged" error:
-    ```bash
-    xattr -cr /Applications/BlochSimulator.app
-    ```
-4.  Launch **BlochSimulator** from your Applications folder.
+#### Activation (MacOS):
+In case of the MacOS app, this requires you to manually remove the *quarantine* flag that macOS puts on the downloaded app. Only perform this step if you trust the distributor.
 
-**Alternative**:
-
+1.  Unzip the file and move `BlochSimulator.app` to your **Applications** folder.
 2. Launch **BlochSimulator** from your Applications folder and dimiss the warning.
 3. Go to System Settings > Privacy & Security, scroll down to the Security section, here you should see a message "BlochSimulator.app was blocked...". Click "Open Anyway".
 4.  Launch **BlochSimulator** from your Applications folder.
+
+**Alternative Activation**:
+1.  Unzip the file and move `BlochSimulator.app` to your **Applications** folder.
+2.  **Crucial Step:** Open Terminal and run this command to fix the "App is damaged" error:
+    ```bash
+    xattr -cr /Applications/BlochSimulator.app
+    ```
+3.  Launch **BlochSimulator** from your Applications folder.
 
 
 
