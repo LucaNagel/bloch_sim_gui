@@ -35,3 +35,10 @@ test_mode_b.ipynb
 # Ignore log files
 *.log
 *.h5
+
+.gemini/
+.claude/
+.github/commands/
+.github/workflows/*
+!.github/workflows/publish.yml
+gha-creds-*.json
