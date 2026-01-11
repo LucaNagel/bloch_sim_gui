@@ -5422,8 +5422,8 @@ class BlochSimulatorGUI(QMainWindow):
             else:
                 self.mxy_plot.show()
                 self.mz_plot.show()
-                self.mxy_heatmap.hide()
-                self.mz_heatmap.hide()
+                self.mxy_heatmap_layout.hide()
+                self.mz_heatmap_layout.hide()
                 self.update_plots(self.last_result)
 
     def _refresh_signal_plots(self):
