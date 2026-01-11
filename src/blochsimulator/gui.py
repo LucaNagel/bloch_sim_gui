@@ -487,23 +487,32 @@ class RFPulseDesigner(QGroupBox):
     """Widget for designing RF pulses."""
 
     pulse_changed = pyqtSignal(object)
+    parameters_changed = pyqtSignal(dict)
 
-    def __init__(self):
+    def __init__(self, compact=False):
         super().__init__("RF Pulse Design")
+        self.compact = compact
         self.target_dt = 5e-6  # default 5 us
         self.last_integration_factor = 1.0
-        self.init_ui()
         self.current_pulse = None
+        self._syncing = False
+        self.init_ui()
 
     def init_ui(self):
-        # Main layout: Horizontal split
-        main_layout = QHBoxLayout()
-
-        # --- LEFT COLUMN: Controls ---
-        control_panel = QWidget()
-        control_layout = QVBoxLayout()
-        control_panel.setLayout(control_layout)
-        control_panel.setMaximumWidth(400)  # Keep controls from taking too much space
+        # Main layout
+        if self.compact:
+            # Vertical layout for side panel
+            main_layout = QVBoxLayout()
+            control_layout = main_layout
+            control_panel = None  # No separate panel container
+        else:
+            # Horizontal split for main tab
+            main_layout = QHBoxLayout()
+            control_panel = QWidget()
+            control_layout = QVBoxLayout()
+            control_panel.setLayout(control_layout)
+            control_panel.setMaximumWidth(400)
+            main_layout.addWidget(control_panel)
 
         # Pulse type selector
         type_layout = QHBoxLayout()
@@ -643,12 +652,14 @@ class RFPulseDesigner(QGroupBox):
         self.custom_settings_group.setVisible(False)
         control_layout.addWidget(self.custom_settings_group)
 
-        # Pulse Explanation
-        control_layout.addWidget(QLabel("Pulse Description:"))
+        # Pulse Explanation (Only in full mode)
         self.explanation_box = QTextEdit()
         self.explanation_box.setReadOnly(True)
         self.explanation_box.setMaximumHeight(150)
-        control_layout.addWidget(self.explanation_box)
+
+        if not self.compact:
+            control_layout.addWidget(QLabel("Pulse Description:"))
+            control_layout.addWidget(self.explanation_box)
 
         # Buttons
         button_layout = QHBoxLayout()
@@ -661,17 +672,20 @@ class RFPulseDesigner(QGroupBox):
 
         control_layout.addStretch()
 
-        # --- RIGHT COLUMN: Plot ---
-        plot_layout = QVBoxLayout()
+        # Plot Widget
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setLabel("left", "B1 Amplitude", "G")
         self.plot_widget.setLabel("bottom", "Time", "ms")
-        # Expand policy to take available space
-        self.plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        plot_layout.addWidget(self.plot_widget)
 
-        main_layout.addWidget(control_panel)
-        main_layout.addLayout(plot_layout, stretch=1)  # Give plot more space
+        if self.compact:
+            self.plot_widget.setMinimumHeight(150)
+            main_layout.addWidget(self.plot_widget)
+        else:
+            # Right column in full mode
+            plot_layout = QVBoxLayout()
+            self.plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            plot_layout.addWidget(self.plot_widget)
+            main_layout.addLayout(plot_layout, stretch=1)
 
         self.setLayout(main_layout)
 
@@ -918,6 +932,10 @@ class RFPulseDesigner(QGroupBox):
         self.current_pulse = (b1, time)
         self.pulse_changed.emit(self.current_pulse)
 
+        # Emit parameters changed signal if this was a user interaction (not a sync)
+        if not self._syncing:
+            self.parameters_changed.emit(self.get_state())
+
         # Update plot
         self.plot_widget.clear()
         # design_rf_pulse returns B1 in Gauss already; plot directly
@@ -1115,61 +1133,65 @@ class RFPulseDesigner(QGroupBox):
 
     def set_state(self, state: dict):
         """Restore the UI state."""
-        if not state:
+        if not state or self._syncing:
             return
 
-        # Block signals to prevent intermediate updates
-        self.pulse_type.blockSignals(True)
-        self.flip_angle.blockSignals(True)
-        self.duration.blockSignals(True)
-        self.phase.blockSignals(True)
-        self.freq_offset.blockSignals(True)
-        self.sinc_lobes.blockSignals(True)
-        self.apodization_combo.blockSignals(True)
-        self.custom_duration.blockSignals(True)
-        self.custom_b1_amplitude.blockSignals(True)
-
+        self._syncing = True
         try:
-            if "pulse_type" in state:
-                self.pulse_type.setCurrentText(state["pulse_type"])
-            if "flip_angle" in state:
-                self.flip_angle.setValue(state["flip_angle"])
-            if "duration" in state:
-                self.duration.setValue(state["duration"])
-            if "phase" in state:
-                self.phase.setValue(state["phase"])
-            if "freq_offset" in state:
-                self.freq_offset.setValue(state["freq_offset"])
-            if "sinc_lobes" in state:
-                self.sinc_lobes.setValue(state["sinc_lobes"])
-            if "apodization" in state:
-                self.apodization_combo.setCurrentText(state["apodization"])
+            # Block signals to prevent intermediate updates
+            self.pulse_type.blockSignals(True)
+            self.flip_angle.blockSignals(True)
+            self.duration.blockSignals(True)
+            self.phase.blockSignals(True)
+            self.freq_offset.blockSignals(True)
+            self.sinc_lobes.blockSignals(True)
+            self.apodization_combo.blockSignals(True)
+            self.custom_duration.blockSignals(True)
+            self.custom_b1_amplitude.blockSignals(True)
 
-            # Restore loaded data
-            if "loaded_pulse_b1" in state:
-                self.loaded_pulse_b1 = state["loaded_pulse_b1"]
-            if "loaded_pulse_time" in state:
-                self.loaded_pulse_time = state["loaded_pulse_time"]
-            if "loaded_pulse_metadata" in state:
-                self.loaded_pulse_metadata = state["loaded_pulse_metadata"]
+            try:
+                if "pulse_type" in state:
+                    self.pulse_type.setCurrentText(state["pulse_type"])
+                if "flip_angle" in state:
+                    self.flip_angle.setValue(state["flip_angle"])
+                if "duration" in state:
+                    self.duration.setValue(state["duration"])
+                if "phase" in state:
+                    self.phase.setValue(state["phase"])
+                if "freq_offset" in state:
+                    self.freq_offset.setValue(state["freq_offset"])
+                if "sinc_lobes" in state:
+                    self.sinc_lobes.setValue(state["sinc_lobes"])
+                if "apodization" in state:
+                    self.apodization_combo.setCurrentText(state["apodization"])
 
-            if "custom_duration" in state:
-                self.custom_duration.setValue(state["custom_duration"])
-            if "custom_b1_amplitude" in state:
-                self.custom_b1_amplitude.setValue(state["custom_b1_amplitude"])
+                # Restore loaded data
+                if "loaded_pulse_b1" in state:
+                    self.loaded_pulse_b1 = state["loaded_pulse_b1"]
+                if "loaded_pulse_time" in state:
+                    self.loaded_pulse_time = state["loaded_pulse_time"]
+                if "loaded_pulse_metadata" in state:
+                    self.loaded_pulse_metadata = state["loaded_pulse_metadata"]
+
+                if "custom_duration" in state:
+                    self.custom_duration.setValue(state["custom_duration"])
+                if "custom_b1_amplitude" in state:
+                    self.custom_b1_amplitude.setValue(state["custom_b1_amplitude"])
+            finally:
+                self.pulse_type.blockSignals(False)
+                self.flip_angle.blockSignals(False)
+                self.duration.blockSignals(False)
+                self.phase.blockSignals(False)
+                self.freq_offset.blockSignals(False)
+                self.sinc_lobes.blockSignals(False)
+                self.apodization_combo.blockSignals(False)
+                self.custom_duration.blockSignals(False)
+                self.custom_b1_amplitude.blockSignals(False)
+
+            # Trigger update once
+            self.update_pulse()
         finally:
-            self.pulse_type.blockSignals(False)
-            self.flip_angle.blockSignals(False)
-            self.duration.blockSignals(False)
-            self.phase.blockSignals(False)
-            self.freq_offset.blockSignals(False)
-            self.sinc_lobes.blockSignals(False)
-            self.apodization_combo.blockSignals(False)
-            self.custom_duration.blockSignals(False)
-            self.custom_b1_amplitude.blockSignals(False)
-
-        # Trigger update once
-        self.update_pulse()
+            self._syncing = False
 
     def reprocess_custom_pulse(self):
         """Reprocess the loaded custom pulse with new duration/amplitude settings."""
@@ -3819,9 +3841,25 @@ class BlochSimulatorGUI(QMainWindow):
         self.tissue_widget = TissueParameterWidget()
         left_layout.addWidget(self.tissue_widget)
 
-        # RF Pulse designer
-        self.rf_designer = RFPulseDesigner()
-        # left_layout.addWidget(self.rf_designer)
+        # RF Pulse designers
+        # 1. Compact panel view
+        self.rf_designer_panel = RFPulseDesigner(compact=True)
+        left_layout.addWidget(self.rf_designer_panel)
+
+        # 2. Full view for main tab (created here, added to tab widget later)
+        self.rf_designer_tab = RFPulseDesigner(compact=False)
+        self.rf_designer = self.rf_designer_tab  # Alias for compatibility
+
+        # Connect Panel and Tab designers for synchronization
+        self.rf_designer_panel.parameters_changed.connect(
+            self.rf_designer_tab.set_state
+        )
+        self.rf_designer_tab.parameters_changed.connect(
+            self.rf_designer_panel.set_state
+        )
+
+        # Sync initial state
+        self.rf_designer_panel.set_state(self.rf_designer_tab.get_state())
 
         # Sequence designer
         self.sequence_designer = SequenceDesigner()
@@ -4625,7 +4663,15 @@ class BlochSimulatorGUI(QMainWindow):
         self.tab_widget.addTab(self.param_sweep_widget, "📊 Parameter Sweep")
 
         # === RF PULSE DESIGN TAB ===
-        self.tab_widget.addTab(self.rf_designer, "RF Design")
+        self.tab_widget.addTab(self.rf_designer_tab, "RF Design")
+
+        # Wire up signals for the panel instance (tab instance is wired via self.rf_designer alias earlier)
+        self.rf_designer_panel.pulse_changed.connect(
+            self.sequence_designer.set_custom_pulse
+        )
+        self.rf_designer_panel.pulse_changed.connect(
+            lambda _: self._auto_update_ssfp_amplitude()
+        )
 
         # Log console lives in its own tab to save vertical space
         log_tab = QWidget()
