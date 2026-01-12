@@ -970,7 +970,7 @@ class RFPulseDesigner(QGroupBox):
             try:
                 suffix = Path(filename).suffix.lower()
                 if suffix == ".exc":
-                    from pulse_loader import load_pulse_from_file as load_exc_file
+                    from .pulse_loader import load_pulse_from_file as load_exc_file
 
                     b1, time, metadata = load_exc_file(filename)
                 else:
@@ -979,7 +979,7 @@ class RFPulseDesigner(QGroupBox):
                     if dlg.exec_() != QDialog.Accepted:
                         return
                     opts = dlg.get_options()
-                    from pulse_loader import load_amp_phase_dat
+                    from .pulse_loader import load_amp_phase_dat
 
                     b1, time, metadata = load_amp_phase_dat(
                         filename,

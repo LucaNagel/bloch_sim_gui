@@ -245,7 +245,7 @@ def design_rf_pulse(
 
 # Import pulse loader (optional - gracefully handle if module not available)
 try:
-    from pulse_loader import load_pulse, load_pulse_from_file, get_pulse_library
+    from .pulse_loader import load_pulse, load_pulse_from_file, get_pulse_library
 except ImportError:
     # Define dummy functions if pulse_loader not available
     def load_pulse(*args, **kwargs):
