@@ -548,12 +548,29 @@ class RFPulseDesigner(QGroupBox):
         duration_layout = QHBoxLayout()
         duration_layout.addWidget(QLabel("Duration (ms):"))
         self.duration = QDoubleSpinBox()
-        self.duration.setRange(0.1, 10)
+        self.duration.setRange(0.001, 1000.0)  # Extended range for custom pulses
         self.duration.setValue(1.0)
         self.duration.setSingleStep(0.1)
+        self.duration.setDecimals(3)
         self.duration.valueChanged.connect(self.update_pulse)
         duration_layout.addWidget(self.duration)
         control_layout.addLayout(duration_layout)
+
+        # B1 Amplitude (G)
+        b1_layout = QHBoxLayout()
+        b1_layout.addWidget(QLabel("B1 Amplitude (G):"))
+        self.b1_amplitude = QDoubleSpinBox()
+        self.b1_amplitude.setRange(0.0, 1e4)
+        self.b1_amplitude.setValue(0.0)
+        self.b1_amplitude.setSingleStep(0.01)
+        self.b1_amplitude.setDecimals(4)
+        self.b1_amplitude.setSpecialValueText("Auto")
+        self.b1_amplitude.setToolTip(
+            "Set > 0 to override B1 amplitude. 0 = Auto (derive from Flip Angle)."
+        )
+        self.b1_amplitude.valueChanged.connect(self.update_pulse)
+        b1_layout.addWidget(self.b1_amplitude)
+        control_layout.addLayout(b1_layout)
 
         # Time-bandwidth product (computed from pulse shape; not user-set)
         tbw_layout = QHBoxLayout()
@@ -593,7 +610,6 @@ class RFPulseDesigner(QGroupBox):
 
         # Phase
         phase_layout = QHBoxLayout()
-
         phase_layout.addWidget(QLabel("Phase (°):"))
         self.phase = QDoubleSpinBox()
         self.phase.setRange(0, 360)
@@ -614,43 +630,11 @@ class RFPulseDesigner(QGroupBox):
         freq_offset_layout.addWidget(self.freq_offset)
         control_layout.addLayout(freq_offset_layout)
 
-        # Custom pulse settings (initially hidden)
-        self.custom_settings_group = QGroupBox("Custom Pulse Settings")
-        custom_settings_layout = QVBoxLayout()
-
-        # Duration override
-        duration_custom_layout = QHBoxLayout()
-        duration_custom_layout.addWidget(QLabel("Duration (ms):"))
-        self.custom_duration = QDoubleSpinBox()
-        self.custom_duration.setRange(0.01, 100.0)
-        self.custom_duration.setValue(1.0)
-        self.custom_duration.setSingleStep(0.1)
-        self.custom_duration.setDecimals(3)
-        self.custom_duration.valueChanged.connect(self.reprocess_custom_pulse)
-        duration_custom_layout.addWidget(self.custom_duration)
-        custom_settings_layout.addLayout(duration_custom_layout)
-
-        # B1 amplitude override (0 = use flip angle calibration)
-        b1_custom_layout = QHBoxLayout()
-        b1_custom_layout.addWidget(QLabel("B1 Amplitude (G):"))
-        self.custom_b1_amplitude = QDoubleSpinBox()
-        self.custom_b1_amplitude.setRange(0.0, 1e3)
-        self.custom_b1_amplitude.setValue(0.0)
-        self.custom_b1_amplitude.setSingleStep(0.001)
-        self.custom_b1_amplitude.setDecimals(6)
-        self.custom_b1_amplitude.setSpecialValueText("Auto (from flip angle)")
-        self.custom_b1_amplitude.valueChanged.connect(self.reprocess_custom_pulse)
-        b1_custom_layout.addWidget(self.custom_b1_amplitude)
-        custom_settings_layout.addLayout(b1_custom_layout)
-
-        # Info label
-        self.custom_info_label = QLabel("Original: 1.000 ms, 0.000100 G")
+        # Info label for Custom Pulse
+        self.custom_info_label = QLabel("")
         self.custom_info_label.setStyleSheet("color: gray; font-size: 9pt;")
-        custom_settings_layout.addWidget(self.custom_info_label)
-
-        self.custom_settings_group.setLayout(custom_settings_layout)
-        self.custom_settings_group.setVisible(False)
-        control_layout.addWidget(self.custom_settings_group)
+        self.custom_info_label.setVisible(False)
+        control_layout.addWidget(self.custom_info_label)
 
         # Pulse Explanation (Only in full mode)
         self.explanation_box = QTextEdit()
@@ -664,6 +648,7 @@ class RFPulseDesigner(QGroupBox):
         # Buttons
         button_layout = QHBoxLayout()
         self.load_button = QPushButton("Load from File")
+        self.load_button.setToolTip("Load a custom RF pulse waveform")
         self.load_button.clicked.connect(self.load_pulse_from_file)
         self.save_button = QPushButton("Save to File")
         button_layout.addWidget(self.load_button)
@@ -806,7 +791,7 @@ class RFPulseDesigner(QGroupBox):
             "adiabatic half passage": "<b>Adiabatic Half Passage (AHP)</b><br>Frequency sweep from off-resonance to resonance (or vice versa). Generates robust 90° excitation insensitive to B1 inhomogeneity (above a threshold).",
             "adiabatic full passage": "<b>Adiabatic Full Passage (AFP)</b><br>Frequency sweep from far off-resonance to far off-resonance. Generates robust 180° inversion insensitive to B1 inhomogeneity.",
             "bir-4": "<b>BIR-4</b><br>B1-Insensitive Rotation. Composite adiabatic pulse capable of arbitrary flip angles (defined by phase jumps).",
-            "custom": "<b>Custom Pulse</b><br>User-loaded waveform.",
+            "custom": "<b>Custom Pulse</b><br>User-loaded waveform. Use 'Load from File' to import.",
         }
         self.explanation_box.setHtml(desc_map.get(pulse_type_text, ""))
 
@@ -819,52 +804,123 @@ class RFPulseDesigner(QGroupBox):
             pulse_type = "adiabatic_full"
         elif pulse_type == "bir-4":
             pulse_type = "bir4"
-        elif pulse_type == "custom":
-            # For custom pulses, trigger reprocessing if data is loaded
-            if self.loaded_pulse_b1 is not None:
-                self.reprocess_custom_pulse()
-            return
 
-        # Hide custom settings when not using custom pulse
-        self.custom_settings_group.setVisible(False)
+        # Show/hide controls based on type
         self.lobes_container.setVisible(pulse_type == "sinc")
+        self.custom_info_label.setVisible(pulse_type == "custom")
 
         duration = self.duration.value() / 1000  # Convert to seconds
         flip = self.flip_angle.value()
+        b1_override = self.b1_amplitude.value()
+        freq_offset_hz = self.freq_offset.value()
+        phase_rad = np.deg2rad(self.phase.value())
 
+        # Handle Custom Pulse
+        if pulse_type == "custom":
+            if self.loaded_pulse_b1 is None or self.loaded_pulse_time is None:
+                # Fallback if no pulse loaded
+                self.plot_widget.clear()
+                self.current_pulse = None
+                return
+
+            original_b1 = self.loaded_pulse_b1
+            original_time = self.loaded_pulse_time
+            original_duration = (
+                original_time[-1] - original_time[0] if len(original_time) > 1 else 1e-6
+            )
+
+            # Resample to new duration
+            if duration > 0 and original_duration > 0:
+                time_scale = duration / original_duration
+                new_time = original_time * time_scale
+                # Simple resampling (linear interp) if points are sparse, or just use scaled time
+                # Ideally we want to preserve shape. Just scaling time vector is enough if we don't change point count.
+                b1 = original_b1.copy()
+                time = new_time
+            else:
+                b1 = original_b1.copy()
+                time = original_time.copy()
+
+            # Apply Apodization
+            window_type = self.apodization_combo.currentText()
+            if window_type != "None" and len(b1) > 1:
+                if window_type == "Hamming":
+                    win = np.hamming(len(b1))
+                elif window_type == "Hanning":
+                    win = np.hanning(len(b1))
+                elif window_type == "Blackman":
+                    win = np.blackman(len(b1))
+                else:
+                    win = np.ones(len(b1))
+                b1 = b1 * win
+
+            # Calculate amplitude scaling
+            peak = np.max(np.abs(b1)) if np.any(np.abs(b1)) else 1.0
+            shape = b1 / peak if peak != 0 else b1
+
+            # Get integration factor for TBW display
+            integfac = 1.0
+            if (
+                self.loaded_pulse_metadata
+                and hasattr(self.loaded_pulse_metadata, "integfac")
+                and self.loaded_pulse_metadata.integfac > 0
+            ):
+                integfac = float(self.loaded_pulse_metadata.integfac)
+            else:
+                # Recompute
+                integfac = self._compute_integration_factor_from_wave(b1, time)
+
+            self._update_tbw_auto(integfac)
+            self.last_integration_factor = float(integfac)
+
+            # Amplitude scaling: B1 override vs Flip Angle
+            if b1_override > 0:
+                # Manual B1 override
+                # Scale shape so peak matches b1_override
+                b1 = shape * b1_override
+            else:
+                # Auto (Flip Angle)
+                b1 = self._scale_pulse_to_flip(b1, time, flip, integfac=integfac)
+
+            # Apply Phase and Frequency Offset
+            # Note: _apply_phase_and_offset handles self.phase and self.freq_offset internally
+            # but we extracted them above. Let's use the helper or manual.
+            # Helper uses self.phase/freq_offset.value() directly.
+            b1 = self._apply_phase_and_offset(b1, time)
+
+            self.current_pulse = (b1, time)
+            self.pulse_changed.emit(self.current_pulse)
+
+            if not self._syncing:
+                self.parameters_changed.emit(self.get_state())
+
+            self._update_plot(b1, time)
+            return
+
+        # Handle Standard Pulses
         # Calculate TBW based on pulse type
         if pulse_type == "sinc":
-            design_tbw = (
-                float(self.sinc_lobes.value()) + 1.0
-            )  # Approximation: lobes ~ TBW - 1
+            design_tbw = float(self.sinc_lobes.value()) + 1.0
         else:
             design_tbw = self._design_tbw_for_type(pulse_type)
 
-        phase_rad = np.deg2rad(self.phase.value())
-        # Increase time resolution using desired dt
+        # Target point count
         if self.target_dt and self.target_dt > 0:
             npoints = max(32, int(np.ceil(duration / self.target_dt)))
-            npoints = min(npoints, 50000)  # avoid runaway
+            npoints = min(npoints, 50000)
         else:
             npoints = 100
 
-        # Design pulse (without frequency offset first, to get base shape statistics)
-        # We apply freq offset manually later to ensure TBW calculation is invariant to offset.
-        freq_offset_hz = self.freq_offset.value()
-
-        # 1. Generate base pulse (centered at 0 Hz)
+        # 1. Generate base pulse
         b1_base, time = design_rf_pulse(
             pulse_type, duration, flip, design_tbw, npoints, freq_offset=0.0
         )
 
-        # Sampling time [s]
-        dt = duration / len(b1_base)
-
-        # Normalize pulse shape to unit peak for amplitude scaling
+        dt = duration / len(b1_base) if len(b1_base) > 0 else 1e-6
         peak = np.max(np.abs(b1_base)) if np.any(np.abs(b1_base)) else 1.0
-        shape = b1_base / peak
+        shape = b1_base / peak if peak != 0 else b1_base
 
-        # Apply Apodization
+        # Apodization
         window_type = self.apodization_combo.currentText()
         if window_type != "None" and len(shape) > 1:
             if window_type == "Hamming":
@@ -877,73 +933,53 @@ class RFPulseDesigner(QGroupBox):
                 win = np.ones(len(shape))
             shape = shape * win
 
-        # Find a global phase that maximizes the real-valued area of the waveform.
-        # This keeps the flip-angle calibration stable even for complex pulses.
+        # Compute integration factor
         area = np.trapezoid(shape, dx=dt)
         opt_phase = -np.angle(area) if np.isfinite(area) else 0.0
         aligned_area = np.real(area * np.exp(1j * opt_phase))
         if not np.isfinite(aligned_area) or abs(aligned_area) < 1e-12:
             aligned_area = 1e-12
+        integration_factor = abs(aligned_area) / max(duration, 1e-12)
 
-        # Estimate integration factor relative to a unit-amplitude block
-        # This is now independent of frequency offset because we use b1_base
-        try:
-            integration_factor = abs(aligned_area) / max(duration, 1e-12)
-        except Exception:
-            integration_factor = None
         self._update_tbw_auto(integration_factor)
-        if integration_factor is not None and np.isfinite(integration_factor):
-            self.last_integration_factor = float(integration_factor)
+        self.last_integration_factor = float(integration_factor)
 
-        # flip angle in radians:
-        flip_rad = np.deg2rad(flip)
+        # Amplitude scaling
+        if b1_override > 0:
+            # Manual B1 override
+            pulse_amp_G = b1_override
+        else:
+            # Auto (Flip Angle)
+            flip_rad = np.deg2rad(flip)
+            gmr_1h_rad_Ts = 267522187.43999997
+            pulse_amp_T = flip_rad / (gmr_1h_rad_Ts * aligned_area)
+            pulse_amp_G = pulse_amp_T * 1e4
 
-        # Gyromagnetic ratio for 1H (rad / (T s)):
-        gmr_1h_rad_Ts = 267522187.43999997
-
-        # Calculate required pulse amplitude in Tesla:
-        pulse_amp_T = flip_rad / (gmr_1h_rad_Ts * aligned_area)
-        # Convert to Gauss:
-        pulse_amp_G = pulse_amp_T * 1e4  # Gauss
-
-        # Apply the optimal calibration phase plus any user-selected phase
+        # Combine
         total_phase = opt_phase + phase_rad
         b1 = shape * pulse_amp_G * np.exp(1j * total_phase)
 
-        # 2. Apply frequency offset modulation
+        # Frequency Offset
         if freq_offset_hz != 0.0:
-            # design_rf_pulse uses: b1 * np.exp(2j * np.pi * freq_offset * time)
-            # We replicate that here.
-            # Note: time array starts at 0
             mod = np.exp(2j * np.pi * freq_offset_hz * time)
             b1 = b1 * mod
-
-        # print(f"b1 = {b1}")
-
-        # # Re-normalize area to requested flip angle (protects against backend differences)
-        # if len(time) > 1 and np.any(np.abs(b1) > 0):
-        #     target_area = np.deg2rad(flip) / (4257.0 * 2 * np.pi)
-        #     area = np.trapezoid(np.abs(b1), time)
-        #     if area > 0:
-        #         b1 = b1 * (target_area / area)
-
-        # print(f"b1 = {b1}")
 
         self.current_pulse = (b1, time)
         self.pulse_changed.emit(self.current_pulse)
 
-        # Emit parameters changed signal if this was a user interaction (not a sync)
         if not self._syncing:
             self.parameters_changed.emit(self.get_state())
 
-        # Update plot
+        self._update_plot(b1, time)
+
+    def _update_plot(self, b1, time):
+        """Helper to update the plot widget."""
         self.plot_widget.clear()
-        # design_rf_pulse returns B1 in Gauss already; plot directly
         self.plot_widget.plot(time * 1000, np.abs(b1), pen="b", name="Magnitude")
         self.plot_widget.plot(time * 1000, np.real(b1), pen="r", name="Real")
         self.plot_widget.plot(time * 1000, np.imag(b1), pen="g", name="Imaginary")
         if len(time):
-            t_min, t_max = 0, time[-1] * 1000
+            t_max = time[-1] * 1000
             self.plot_widget.setLimits(xMin=0, xMax=max(t_max, 0.1))
             self.plot_widget.setXRange(0, max(t_max, 0.1), padding=0)
 
@@ -989,28 +1025,12 @@ class RFPulseDesigner(QGroupBox):
                         layout=opts["layout"],
                     )
 
-                # Apply user phase/frequency and calibrate amplitude to current flip angle
-                b1 = self._apply_phase_and_offset(b1, time)
-                integfac = None
-                try:
-                    if hasattr(metadata, "integfac") and metadata.integfac not in (
-                        None,
-                        0,
-                    ):
-                        if np.isfinite(metadata.integfac) and metadata.integfac > 0:
-                            integfac = float(metadata.integfac)
-                except Exception:
-                    integfac = None
-                if integfac is None:
-                    integfac = self._compute_integration_factor_from_wave(b1, time)
-                b1 = self._scale_pulse_to_flip(
-                    b1, time, self.flip_angle.value(), integfac=integfac
-                )
+                # Store loaded data
                 self.loaded_pulse_b1 = b1.copy()
                 self.loaded_pulse_time = time.copy()
                 self.loaded_pulse_metadata = metadata
 
-                # Initialize custom settings from loaded pulse
+                # Get basic info
                 duration_ms = (
                     metadata.duration * 1000.0
                     if metadata.duration > 0
@@ -1018,17 +1038,20 @@ class RFPulseDesigner(QGroupBox):
                 )
                 max_b1 = metadata.max_b1 if metadata.max_b1 > 0 else np.max(np.abs(b1))
 
-                # Set custom settings to match loaded pulse
-                self.custom_duration.blockSignals(True)
-                self.custom_b1_amplitude.blockSignals(True)
-                self.custom_duration.setValue(duration_ms)
-                self.custom_b1_amplitude.setValue(0.0)  # Start with auto
-                self.custom_duration.blockSignals(False)
-                self.custom_b1_amplitude.blockSignals(False)
+                # Update UI
+                self._syncing = True  # Prevent intermediate updates
+                try:
+                    self.pulse_type.setCurrentText("Custom")
+                    self.duration.setValue(duration_ms)
+                    self.b1_amplitude.setValue(0.0)  # Reset to Auto
+                    self.flip_angle.setValue(
+                        metadata.flip_angle if metadata.flip_angle > 0 else 90.0
+                    )
+                finally:
+                    self._syncing = False
 
                 # Update info label
                 tbw_hint = None
-                integfac = None
                 try:
                     if hasattr(metadata, "integfac") and metadata.integfac not in (
                         None,
@@ -1038,58 +1061,16 @@ class RFPulseDesigner(QGroupBox):
                             integfac = float(metadata.integfac)
                             tbw_hint = 1.0 / integfac
                 except Exception:
-                    tbw_hint = None
-                    integfac = None
-                tbw_text = (
-                    f", TBW≈{tbw_hint:.3f} (1/integfac={integfac:.3f})"
-                    if tbw_hint
-                    else ""
-                )
+                    pass
+
+                tbw_text = f", TBW≈{tbw_hint:.3f}" if tbw_hint else ""
                 self.custom_info_label.setText(
-                    f"Original: {metadata.duration*1000:.3f} ms, {max_b1:.6f} G{tbw_text}"
+                    f"Original: {duration_ms:.3f} ms, {max_b1:.6f} G{tbw_text}"
                 )
+                self.custom_info_label.setVisible(True)
 
-                # If we have an estimated TBW from integfac, surface it in the designer control
-                if tbw_hint:
-                    self.tbw.blockSignals(True)
-                    self.tbw.setValue(tbw_hint)
-                    self.tbw.blockSignals(False)
-                self._update_tbw_auto(integfac)
-                if integfac is not None and np.isfinite(integfac):
-                    self.last_integration_factor = float(integfac)
-                else:
-                    self.last_integration_factor = (
-                        self._compute_integration_factor_from_wave(b1, time)
-                    )
-
-                # Show custom settings panel
-                self.custom_settings_group.setVisible(True)
-
-                # Store the loaded pulse as current
-                self.current_pulse = (b1, time)
-                # Recompute integration factor/TBW from the loaded waveform
-                computed_integ = self._compute_integration_factor_from_wave(b1, time)
-                self._update_tbw_auto(computed_integ)
-                self.last_integration_factor = float(computed_integ)
-
-                # Update plot
-                self.plot_widget.clear()
-                self.plot_widget.plot(
-                    time * 1000, np.abs(b1), pen="b", name="Magnitude"
-                )
-                self.plot_widget.plot(time * 1000, np.real(b1), pen="r", name="Real")
-                self.plot_widget.plot(
-                    time * 1000, np.imag(b1), pen="g", name="Imaginary"
-                )
-                if len(time):
-                    t_min, t_max = 0, time[-1] * 1000
-                    self.plot_widget.setLimits(xMin=0, xMax=max(t_max, 0.1))
-                    self.plot_widget.setXRange(0, max(t_max, 0.1), padding=0)
-
-                # Update UI to show loaded pulse info
-                self.pulse_type.blockSignals(True)
-                self.pulse_type.setCurrentText("Custom")
-                self.pulse_type.blockSignals(False)
+                # Force update to process the pulse (resample/scale)
+                self.update_pulse()
 
                 # Show info message
                 QMessageBox.information(
@@ -1097,14 +1078,10 @@ class RFPulseDesigner(QGroupBox):
                     "Pulse Loaded",
                     f"Successfully loaded pulse from:\n{filename}\n\n"
                     f"Flip angle: {metadata.flip_angle}°\n"
-                    f"Duration: {metadata.duration*1000:.3f} ms\n"
+                    f"Duration: {duration_ms:.3f} ms\n"
                     f"Points: {len(b1)}\n"
-                    f"Max B1: {metadata.max_b1:.6f} Gauss\n\n"
-                    f"You can now adjust duration and B1 amplitude in the Custom Pulse Settings panel.",
+                    f"Max B1: {max_b1:.6f} Gauss",
                 )
-
-                # Emit signal that pulse changed
-                self.pulse_changed.emit(self.current_pulse)
 
             except Exception as e:
                 QMessageBox.critical(
@@ -1117,13 +1094,11 @@ class RFPulseDesigner(QGroupBox):
             "pulse_type": self.pulse_type.currentText(),
             "flip_angle": self.flip_angle.value(),
             "duration": self.duration.value(),
+            "b1_amplitude": self.b1_amplitude.value(),
             "phase": self.phase.value(),
             "freq_offset": self.freq_offset.value(),
             "sinc_lobes": self.sinc_lobes.value(),
             "apodization": self.apodization_combo.currentText(),
-            # Custom settings
-            "custom_duration": self.custom_duration.value(),
-            "custom_b1_amplitude": self.custom_b1_amplitude.value(),
         }
         # Include loaded pulse data
         state["loaded_pulse_b1"] = self.loaded_pulse_b1
@@ -1142,12 +1117,11 @@ class RFPulseDesigner(QGroupBox):
             self.pulse_type.blockSignals(True)
             self.flip_angle.blockSignals(True)
             self.duration.blockSignals(True)
+            self.b1_amplitude.blockSignals(True)
             self.phase.blockSignals(True)
             self.freq_offset.blockSignals(True)
             self.sinc_lobes.blockSignals(True)
             self.apodization_combo.blockSignals(True)
-            self.custom_duration.blockSignals(True)
-            self.custom_b1_amplitude.blockSignals(True)
 
             try:
                 if "pulse_type" in state:
@@ -1156,6 +1130,8 @@ class RFPulseDesigner(QGroupBox):
                     self.flip_angle.setValue(state["flip_angle"])
                 if "duration" in state:
                     self.duration.setValue(state["duration"])
+                if "b1_amplitude" in state:
+                    self.b1_amplitude.setValue(state["b1_amplitude"])
                 if "phase" in state:
                     self.phase.setValue(state["phase"])
                 if "freq_offset" in state:
@@ -1172,142 +1148,20 @@ class RFPulseDesigner(QGroupBox):
                     self.loaded_pulse_time = state["loaded_pulse_time"]
                 if "loaded_pulse_metadata" in state:
                     self.loaded_pulse_metadata = state["loaded_pulse_metadata"]
-
-                if "custom_duration" in state:
-                    self.custom_duration.setValue(state["custom_duration"])
-                if "custom_b1_amplitude" in state:
-                    self.custom_b1_amplitude.setValue(state["custom_b1_amplitude"])
             finally:
                 self.pulse_type.blockSignals(False)
                 self.flip_angle.blockSignals(False)
                 self.duration.blockSignals(False)
+                self.b1_amplitude.blockSignals(False)
                 self.phase.blockSignals(False)
                 self.freq_offset.blockSignals(False)
                 self.sinc_lobes.blockSignals(False)
                 self.apodization_combo.blockSignals(False)
-                self.custom_duration.blockSignals(False)
-                self.custom_b1_amplitude.blockSignals(False)
 
             # Trigger update once
             self.update_pulse()
         finally:
             self._syncing = False
-
-    def reprocess_custom_pulse(self):
-        """Reprocess the loaded custom pulse with new duration/amplitude settings."""
-        if self.loaded_pulse_b1 is None or self.loaded_pulse_time is None:
-            return
-
-        # Get new settings
-        new_duration_ms = self.custom_duration.value()
-        new_b1_amplitude = self.custom_b1_amplitude.value()
-
-        # Original pulse data
-        original_b1 = self.loaded_pulse_b1
-        original_time = self.loaded_pulse_time
-        original_duration = original_time[-1] - original_time[0]
-        metadata = getattr(self, "loaded_pulse_metadata", None)
-        integfac = 1.0
-        try:
-            if metadata is not None and hasattr(metadata, "integfac"):
-                if metadata.integfac not in (None, 0) and np.isfinite(
-                    metadata.integfac
-                ):
-                    integfac = float(metadata.integfac)
-        except Exception:
-            integfac = 1.0
-
-        # Calculate time scaling factor
-        new_duration_s = new_duration_ms / 1000.0
-        time_scale = (
-            new_duration_s / original_duration if original_duration > 0 else 1.0
-        )
-
-        # Rescale time array
-        new_time = original_time * time_scale
-
-        # Resample B1 if needed (for now, just use the original samples with scaled time)
-        new_b1 = original_b1.copy()
-
-        # Apply Apodization
-        window_type = self.apodization_combo.currentText()
-        if window_type != "None" and len(new_b1) > 1:
-            if window_type == "Hamming":
-                win = np.hamming(len(new_b1))
-            elif window_type == "Hanning":
-                win = np.hanning(len(new_b1))
-            elif window_type == "Blackman":
-                win = np.blackman(len(new_b1))
-            else:
-                win = np.ones(len(new_b1))
-            new_b1 = new_b1 * win
-
-        # Apply B1 amplitude override
-        if new_b1_amplitude > 0:
-            # Use specified amplitude - scale to match target
-            current_max_b1 = np.max(np.abs(new_b1))
-            if current_max_b1 > 0:
-                b1_scale = new_b1_amplitude / current_max_b1
-                new_b1 = new_b1 * b1_scale
-        else:
-            # Use flip angle calibration (auto mode)
-            # Recalculate B1 amplitude to achieve target flip angle
-            flip = self.flip_angle.value()  # degrees
-            flip_rad = np.deg2rad(flip)
-
-            # Normalize pulse shape to unit peak (using windowed version)
-            peak = np.max(np.abs(new_b1)) if np.any(np.abs(new_b1)) else 1.0
-            shape = new_b1 / peak
-
-            # Calculate sampling time for new duration
-            dt = new_duration_s / len(shape) if len(shape) > 0 else 1e-6
-
-            # Find optimal phase that maximizes real-valued area
-            area = np.trapezoid(shape, dx=dt)
-            opt_phase = -np.angle(area) if np.isfinite(area) and area != 0 else 0.0
-            aligned_area = np.real(area * np.exp(1j * opt_phase))
-            if not np.isfinite(aligned_area) or abs(aligned_area) < 1e-12:
-                aligned_area = 1e-12
-            aligned_area *= integfac  # vendor integration factor scales effective area
-
-            # Gyromagnetic ratio for 1H (rad / (T s))
-            gmr_1h_rad_Ts = 267522187.43999997
-
-            # Calculate required pulse amplitude in Tesla
-            pulse_amp_T = flip_rad / (gmr_1h_rad_Ts * aligned_area)
-            # Convert to Gauss
-            pulse_amp_G = pulse_amp_T * 1e4
-
-            # Apply amplitude and phase to achieve target flip angle
-            new_b1 = shape * pulse_amp_G * np.exp(1j * opt_phase)
-        # Apply user-selected phase and frequency offset
-        new_b1 = self._apply_phase_and_offset(new_b1, new_time)
-
-        # Update current pulse
-        self.current_pulse = (new_b1, new_time)
-
-        # Update plot
-        self.plot_widget.clear()
-        self.plot_widget.plot(
-            new_time * 1000, np.abs(new_b1), pen="b", name="Magnitude"
-        )
-        self.plot_widget.plot(new_time * 1000, np.real(new_b1), pen="r", name="Real")
-        self.plot_widget.plot(
-            new_time * 1000, np.imag(new_b1), pen="g", name="Imaginary"
-        )
-        if len(new_time):
-            t_min, t_max = 0, new_time[-1] * 1000
-            self.plot_widget.setLimits(xMin=0, xMax=max(t_max, 0.1))
-            self.plot_widget.setXRange(0, max(t_max, 0.1), padding=0)
-
-        # Update heuristic TBW from integration factor (recomputed)
-        computed_integ = self._compute_integration_factor_from_wave(new_b1, new_time)
-        self._update_tbw_auto(computed_integ)
-        if np.isfinite(computed_integ):
-            self.last_integration_factor = float(computed_integ)
-
-        # Emit signal that pulse changed
-        self.pulse_changed.emit(self.current_pulse)
 
 
 class SequenceDesigner(QGroupBox):
@@ -3168,6 +3022,7 @@ class ParameterSweepWidget(QWidget):
                 "TR (ms)",
                 "TI (ms)",
                 "B1 Scale Factor",
+                "B1 Amplitude (G)",
                 "T1 (ms)",
                 "T2 (ms)",
                 "Frequency Offset (Hz)",
@@ -3289,6 +3144,13 @@ class ParameterSweepWidget(QWidget):
             self.end_spin.setRange(0, 5)
             self.end_spin.setValue(1.5)
             self.end_spin.setDecimals(3)
+        elif "B1 Amplitude" in param:
+            self.start_spin.setRange(0, 100)
+            self.start_spin.setValue(0.0)
+            self.start_spin.setDecimals(4)
+            self.end_spin.setRange(0, 100)
+            self.end_spin.setValue(1.0)
+            self.end_spin.setDecimals(4)
         elif "T1" in param:
             self.start_spin.setRange(1, 5000)
             self.start_spin.setValue(500)
@@ -3375,6 +3237,8 @@ class ParameterSweepWidget(QWidget):
             )
         elif "B1 Scale" in param_name:
             initial_param_val = 1.0  # Scale factor is 1.0 relative to initial
+        elif "B1 Amplitude" in param_name:
+            initial_param_val = self.parent_gui.rf_designer.b1_amplitude.value()
 
         try:
             for i, param_val in enumerate(param_values):
@@ -3464,6 +3328,8 @@ class ParameterSweepWidget(QWidget):
             else:
                 # Fallback if not provided
                 self.parent_gui.rf_designer.flip_angle.setValue(90 * value)
+        elif "B1 Amplitude" in param_name:
+            self.parent_gui.rf_designer.b1_amplitude.setValue(value)
         elif "T1" in param_name:
             self.parent_gui.tissue_widget.t1_spin.setValue(value)
         elif "T2" in param_name:
