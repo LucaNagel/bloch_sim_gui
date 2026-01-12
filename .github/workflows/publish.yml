@@ -5,7 +5,7 @@ on:
     branches:
       - main
       - fixes
-      - feature
+      # - feature
     tags:
       - 'v*'
   workflow_dispatch: # Allows manual triggering
