@@ -72,7 +72,7 @@
                 status.innerText = "Pyodide loaded. Installing dependencies...";
 
                 // 2. Install dependencies
-                await pyodide.loadPackage(["numpy", "matplotlib", "micropip"]);
+                await pyodide.loadPackage(["numpy", "matplotlib", "micropip", "h5py", "scipy"]);
 
                 // 3. Install Bloch Simulator Wheel
                 status.innerText = `Installing ${WHEEL_FILENAME}... (Make sure this file exists in the same folder!)`;
