@@ -4,8 +4,10 @@ from setuptools.command.build_ext import build_ext
 from Cython.Build import cythonize
 import platform
 import os
+import sys
 
 # Detect platform for compiler flags
+is_emscripten = sys.platform == "emscripten"
 is_windows = platform.system() == "Windows"
 is_mac = platform.system() == "Darwin"
 is_linux = platform.system() == "Linux"
@@ -19,7 +21,12 @@ define_macros = []
 arch_flags = []
 # Avoid -mcpu=native or -march=native for wheel builds to ensure portability
 
-if is_windows:
+if is_emscripten:
+    # WebAssembly build (Emscripten)
+    # Disable OpenMP for initial compatibility (single-threaded)
+    extra_compile_args = ["-O3", "-ffast-math"]
+    extra_link_args = ["-lm"]
+elif is_windows:
     # Windows with MSVC
     extra_compile_args = ["/openmp", "/O2"]
     extra_link_args = []

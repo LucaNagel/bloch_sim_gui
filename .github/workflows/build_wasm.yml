@@ -1,0 +1,36 @@
+name: Build WASM Wheel
+
+on:
+  push:
+    branches: [ "webassembly", "main" ]
+  pull_request:
+    branches: [ "webassembly", "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-wasm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install pyodide-build
+        run: pip install pyodide-build
+
+      - name: Build WASM Wheel
+        run: pyodide build
+
+      - name: List built wheels
+        run: ls -l dist/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-wheels
+          path: dist/*.whl
