@@ -1,14 +1,26 @@
-name: Build WASM Wheel
+name: Build and Deploy WASM
 
 on:
   push:
     branches: [ "webassembly", "main" ]
-  pull_request:
-    branches: [ "webassembly", "main" ]
   workflow_dispatch:
 
+# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
 jobs:
-  build-wasm:
+  build-and-deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
 
     steps:
@@ -31,14 +43,26 @@ jobs:
       - name: Build WASM Wheel
         env:
           EMSCRIPTEN: "1"
-          CFLAGS: "-g0 -O3" # Override pyodide flags to be sure, and ensure setup.py sees them if needed
+          CFLAGS: "-g0 -O3"
         run: pyodide build
 
-      - name: List built wheels
-        run: ls -l dist/
+      - name: Prepare Pages Artifact
+        run: |
+          mkdir _site
+          cp index.html _site/
+          # Copy and rename the wheel to a fixed name for simpler loading in JS
+          # Finding the first whl file in dist/
+          cp dist/*.whl _site/bloch_simulator.whl
+          ls -R _site
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: wasm-wheels
-          path: dist/*.whl
+          path: '_site'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

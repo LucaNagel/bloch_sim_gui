@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bloch Simulator WASM Smoke Test</title>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.25.0/full/pyodide.js"></script>
+    <style>
+        body { font-family: sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; }
+        #plot { width: 100%; height: 600px; border: 1px solid #ddd; margin-top: 20px; }
+        .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-bottom: 20px; background: #f5f5f5; padding: 15px; border-radius: 8px; }
+        .control-group { display: flex; flex-direction: column; }
+        label { margin-bottom: 5px; font-weight: bold; }
+        input, select { padding: 5px; }
+        button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #ccc; }
+        #status { margin-bottom: 10px; color: #666; }
+    </style>
+</head>
+<body>
+    <h1>Bloch Simulator WASM Smoke Test</h1>
+    <div id="status">Initializing Pyodide...</div>
+
+    <div class="controls">
+        <div class="control-group">
+            <label for="t1">T1 (ms)</label>
+            <input type="number" id="t1" value="800" step="10">
+        </div>
+        <div class="control-group">
+            <label for="t2">T2 (ms)</label>
+            <input type="number" id="t2" value="20" step="0.1">
+        </div>
+        <div class="control-group">
+            <label for="duration">Pulse Duration (ms)</label>
+            <input type="number" id="duration" value="5" step="0.1">
+        </div>
+        <div class="control-group">
+            <label for="freq_offset">Freq Offset (Hz)</label>
+            <input type="number" id="freq_offset" value="0" step="10">
+        </div>
+        <div class="control-group">
+            <label for="pulse_type">Pulse Type</label>
+            <select id="pulse_type">
+                <option value="sinc" selected>Sinc</option>
+                <option value="rect">Rectangular</option>
+                <option value="gaussian">Gaussian</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label>&nbsp;</label>
+            <button id="runBtn" disabled>Run Simulation</button>
+        </div>
+    </div>
+
+    <div id="plot"></div>
+
+    <script type="text/javascript">
+        let pyodide = null;
+        let blochModule = null;
+
+        // Configuration
+        // The CI/CD pipeline renames the built wheel to this constant name for simplicity.
+        const WHEEL_FILENAME = "bloch_simulator.whl";
+
+        async function main() {
+            const status = document.getElementById("status");
+
+            try {
+                // 1. Load Pyodide
+                pyodide = await loadPyodide();
+                status.innerText = "Pyodide loaded. Installing dependencies...";
+
+                // 2. Install dependencies
+                await pyodide.loadPackage(["numpy", "matplotlib", "micropip"]);
+
+                // 3. Install Bloch Simulator Wheel
+                status.innerText = `Installing ${WHEEL_FILENAME}... (Make sure this file exists in the same folder!)`;
+                const micropip = pyodide.pyimport("micropip");
+
+                // Attempt to load the wheel from relative path
+                try {
+                    await micropip.install(WHEEL_FILENAME);
+                } catch (e) {
+                    throw new Error(`Failed to install wheel. ensure '${WHEEL_FILENAME}' is in the directory. Error: ${e.message}`);
+                }
+
+                status.innerText = "Ready. Loading Python script...";
+
+                // 4. Define Python simulation code
+                await pyodide.runPythonAsync(`
+import numpy as np
+import matplotlib
+matplotlib.use("module://matplotlib_pyodide.wasm_backend")
+import matplotlib.pyplot as plt
+from blochsimulator import BlochSimulator, TissueParameters, design_rf_pulse
+
+# Initialize simulator (disable parallel for WASM)
+sim = BlochSimulator(use_parallel=False)
+
+def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type):
+    # Setup parameters
+    t1_s = t1_ms * 1e-3
+    t2_s = t2_ms * 1e-3
+    duration_s = duration_ms * 1e-3
+
+    tissue = TissueParameters(name="Gray Matter", t1=t1_s, t2=t2_s)
+
+    # Design RF Pulse
+    npoints = 500
+    b1, time_s = design_rf_pulse(
+        pulse_type=pulse_type,
+        duration=duration_s,
+        flip_angle=90,
+        time_bw_product=4,
+        npoints=npoints,
+        freq_offset=freq_offset_hz
+    )
+
+    time_ms = time_s * 1e3
+    gradients = np.zeros((len(time_s), 3))
+
+    # Simulation range
+    freq_range = np.linspace(-1000, 1000, 100)
+    positions = np.array([[0.0, 0.0, 0.0]]) # Single position
+
+    # Run Simulation
+    result = sim.simulate(
+        sequence=(b1, gradients, time_s),
+        tissue=tissue,
+        frequencies=freq_range,
+        positions=positions,
+        mode=2 # Time-resolved
+    )
+
+    # Plotting
+    plt.clf() # Clear previous figure
+    fig, axs = plt.subplots(1, 3, figsize=(10, 4))
+
+    # 1. RF Pulse
+    axs[0].plot(time_ms, np.real(b1), label='Real')
+    axs[0].plot(time_ms, np.imag(b1), label='Imag')
+    axs[0].set_title(f"RF Pulse ({pulse_type})")
+    axs[0].set_xlabel("Time (ms)")
+    axs[0].legend()
+
+    # 2. Magnetization Evolution (center freq)
+    center_idx = len(freq_range) // 2
+    mx = result['mx'][:, 0, center_idx]
+    my = result['my'][:, 0, center_idx]
+    mz = result['mz'][:, 0, center_idx]
+
+    axs[1].plot(time_ms, mx, label='Mx')
+    axs[1].plot(time_ms, my, label='My')
+    axs[1].plot(time_ms, mz, label='Mz')
+    axs[1].set_title("Magnetization (Center Freq)")
+    axs[1].set_xlabel("Time (ms)")
+    axs[1].set_ylim(-1.1, 1.1)
+    axs[1].legend()
+
+    # 3. Frequency Profile (at end)
+    mx_end = result['mx'][-1, 0, :]
+    my_end = result['my'][-1, 0, :]
+    mz_end = result['mz'][-1, 0, :]
+    mxy_end = np.sqrt(mx_end**2 + my_end**2)
+
+    axs[2].plot(freq_range, mz_end, label='Mz')
+    axs[2].plot(freq_range, mxy_end, label='Mxy')
+    axs[2].set_title("Frequency Profile (End)")
+    axs[2].set_xlabel("Frequency (Hz)")
+    axs[2].set_ylim(-1.1, 1.1)
+    axs[2].legend()
+
+    plt.tight_layout()
+
+    # Render to the DOM element with id 'plot'
+    document_element = document.getElementById("plot")
+    # In pure Pyodide matplotlib, plt.show() targets the currently active figure manager
+    # We rely on the WASM backend to insert the canvas
+    plt.show()
+                `);
+
+                status.innerText = "Ready. Click 'Run Simulation'.";
+                document.getElementById("runBtn").disabled = false;
+
+            } catch (err) {
+                status.innerText = "Error: " + err.message;
+                console.error(err);
+            }
+        }
+
+        async function runSimulation() {
+            const btn = document.getElementById("runBtn");
+            const status = document.getElementById("status");
+            btn.disabled = true;
+            status.innerText = "Simulating...";
+
+            // Get values from UI
+            const t1 = parseFloat(document.getElementById("t1").value);
+            const t2 = parseFloat(document.getElementById("t2").value);
+            const duration = parseFloat(document.getElementById("duration").value);
+            const freqOffset = parseFloat(document.getElementById("freq_offset").value);
+            const pulseType = document.getElementById("pulse_type").value;
+
+            try {
+                // Call the Python function
+                pyodide.globals.get("run_simulation")(t1, t2, duration, freqOffset, pulseType);
+                status.innerText = "Simulation complete.";
+            } catch (err) {
+                status.innerText = "Runtime Error: " + err.message;
+                console.error(err);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        document.getElementById("runBtn").addEventListener("click", runSimulation);
+        main();
+
+        // Helper to expose 'document' to Python
+        // (Pyodide usually does this automatically in browser, but good to ensure)
+    </script>
+</body>
+</html>
