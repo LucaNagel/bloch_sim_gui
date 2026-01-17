@@ -61,13 +61,16 @@ jobs:
           # Replace the placeholder in index.html with the actual filename
           sed -i "s/WHEEL_FILE_PLACEHOLDER/$WHEEL_FILE/g" _site/index.html
 
+          # DEBUG: Print the line containing WHEEL_FILENAME to verify replacement
+          echo "Verifying index.html content:"
+          grep "WHEEL_FILENAME =" _site/index.html
+
           ls -R _site
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
         with:
           enablement: true
-
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
