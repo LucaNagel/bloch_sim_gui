@@ -50,9 +50,17 @@ jobs:
         run: |
           mkdir _site
           cp index.html _site/
-          # Copy and rename the wheel to a fixed name for simpler loading in JS
-          # Finding the first whl file in dist/
-          cp dist/*.whl _site/bloch_simulator.whl
+
+          # Find the actual wheel filename
+          WHEEL_FILE=$(basename $(ls dist/*.whl | head -n 1))
+          echo "Found wheel: $WHEEL_FILE"
+
+          # Copy the wheel to the site directory
+          cp "dist/$WHEEL_FILE" "_site/$WHEEL_FILE"
+
+          # Replace the placeholder in index.html with the actual filename
+          sed -i "s/WHEEL_FILE_PLACEHOLDER/$WHEEL_FILE/g" _site/index.html
+
           ls -R _site
 
       - name: Setup Pages
