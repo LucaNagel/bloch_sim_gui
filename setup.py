@@ -7,7 +7,8 @@ import os
 import sys
 
 # Detect platform for compiler flags
-is_emscripten = sys.platform == "emscripten"
+# Check if sys.platform is emscripten OR if CC env var points to emcc (cross-compilation)
+is_emscripten = (sys.platform == "emscripten") or ("emcc" in os.environ.get("CC", ""))
 is_windows = platform.system() == "Windows"
 is_mac = platform.system() == "Darwin"
 is_linux = platform.system() == "Linux"
