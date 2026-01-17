@@ -10,12 +10,14 @@ import sys
 # Check if sys.platform is emscripten OR if CC env var points to emcc (cross-compilation)
 # Also check CFLAGS for wasm/emscripten targets (common in pyodide build)
 cflags = os.environ.get("CFLAGS", "").lower()
+sysconfig_name = os.environ.get("_PYTHON_SYSCONFIGDATA_NAME", "").lower()
 is_emscripten = (
     (sys.platform == "emscripten")
     or ("emcc" in os.environ.get("CC", ""))
     or ("wasm" in cflags)
     or ("emscripten" in cflags)
     or ("EMSCRIPTEN" in os.environ)
+    or ("emscripten" in sysconfig_name)
 )
 is_windows = platform.system() == "Windows"
 is_mac = platform.system() == "Darwin"

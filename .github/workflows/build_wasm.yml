@@ -29,6 +29,9 @@ jobs:
         run: pip install pyodide-build
 
       - name: Build WASM Wheel
+        env:
+          EMSCRIPTEN: "1"
+          CFLAGS: "-g0 -O3" # Override pyodide flags to be sure, and ensure setup.py sees them if needed
         run: pyodide build
 
       - name: List built wheels
