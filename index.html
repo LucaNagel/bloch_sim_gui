@@ -94,6 +94,8 @@
                 await pyodide.runPythonAsync(`
 import numpy as np
 import matplotlib
+from js import document
+
 matplotlib.use("module://matplotlib_pyodide.wasm_backend")
 import matplotlib.pyplot as plt
 from blochsimulator import BlochSimulator, TissueParameters, design_rf_pulse
