@@ -75,14 +75,17 @@
                 await pyodide.loadPackage(["numpy", "matplotlib", "micropip", "h5py", "scipy"]);
 
                 // 3. Install Bloch Simulator Wheel
-                status.innerText = `Installing ${WHEEL_FILENAME}... (Make sure this file exists in the same folder!)`;
+                status.innerText = `Installing ${WHEEL_FILENAME}...`;
                 const micropip = pyodide.pyimport("micropip");
 
-                // Attempt to load the wheel from relative path
+                // Construct absolute URL with cache busting
+                const wheelUrl = new URL(WHEEL_FILENAME, window.location.href).href + "?v=" + Date.now();
+
+                // Attempt to load the wheel
                 try {
-                    await micropip.install(WHEEL_FILENAME);
+                    await micropip.install(wheelUrl);
                 } catch (e) {
-                    throw new Error(`Failed to install wheel. ensure '${WHEEL_FILENAME}' is in the directory. Error: ${e.message}`);
+                    throw new Error(`Failed to install wheel from ${wheelUrl}. Error: ${e.message}`);
                 }
 
                 status.innerText = "Ready. Loading Python script...";
