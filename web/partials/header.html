@@ -13,8 +13,14 @@
         <h1>Bloch Simulator</h1>
         <div class="nav-links">
             <button onclick="router('home')">Home</button>
+            <button onclick="toggleLog()">View Log</button>
             <button onclick="window.open('https://github.com/LucaNagel/bloch_sim_gui', '_blank')">GitHub</button>
         </div>
     </nav>
 
     <div class="container">
+        <div id="error-log" style="display: none; background: #fff0f0; color: #d32f2f; padding: 15px; margin: 10px 0; border: 1px solid #ffcdd2; border-radius: 4px; font-family: monospace; white-space: pre-wrap; position: relative; font-size: 0.9rem; max-height: 200px; overflow-y: auto;">
+            <div style="font-weight: bold; margin-bottom: 5px; border-bottom: 1px solid #ffcdd2; padding-bottom: 5px;">Error Log</div>
+            <button onclick="this.parentElement.style.display='none'" style="position: absolute; top: 5px; right: 5px; border: none; background: none; cursor: pointer; font-size: 16px; color: #d32f2f;">&times;</button>
+            <div id="error-log-content">No errors reported.</div>
+        </div>
