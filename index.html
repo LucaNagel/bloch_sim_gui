@@ -59,16 +59,17 @@
                             <option value="sinc" selected>Sinc</option>
                             <option value="rect">Rectangular</option>
                             <option value="gaussian">Gaussian</option>
-                            <option value="gaussian">Gaussian</option>
+                            <option value="adiabatic_half">Adiabatic Half Passage</option>
+                            <option value="adiabatic_full">Adiabatic Full Passage</option>
                         </select>
+                    </div>
+                    <div class="control-group">
+                        <label for="flip_angle">Flip Angle (&deg;)</label>
+                        <input type="number" id="flip_angle" value="90" step="5" class="sim-input">
                     </div>
                     <div class="control-group">
                         <label for="duration">Duration (ms)</label>
                         <input type="number" id="duration" value="2.0" step="0.1" min="0.1" max="20" class="sim-input">
-                    </div>
-                    <div class="control-group">
-                        <label for="freq_offset">Freq. Offset (Hz)</label>
-                        <input type="number" id="freq_offset" value="0" step="50" class="sim-input">
                     </div>
                     <div class="control-group">
                         <label for="t1">T1 (ms)</label>
@@ -78,16 +79,37 @@
                         <label for="t2">T2 (ms)</label>
                         <input type="number" id="t2" value="100" step="10" min="1" class="sim-input">
                     </div>
-                    <!-- View Parameters (Hidden or Advanced) -->
-                    <div class="control-group">
-                        <label for="view_time">View Time (ms)</label>
-                        <input type="number" id="view_time" value="2.0" step="0.1" class="sim-input">
-                    </div>
-                    <div class="control-group">
-                        <label for="view_freq">View Freq (Hz)</label>
-                        <input type="number" id="view_freq" value="0" step="10" class="sim-input">
-                    </div>
                 </div>
+
+                <details style="margin-top: 1rem; border: 1px solid #ddd; padding: 0.5rem; border-radius: 4px;">
+                    <summary style="cursor: pointer; font-weight: bold; color: var(--primary-color);">Advanced Settings</summary>
+                    <div class="controls-grid" style="margin-top: 0.5rem;">
+                        <div class="control-group">
+                            <label for="freq_offset">Freq. Offset (Hz)</label>
+                            <input type="number" id="freq_offset" value="0" step="50" class="sim-input">
+                        </div>
+                        <div class="control-group">
+                            <label for="freq_range">Freq Range (&plusmn;Hz)</label>
+                            <input type="number" id="freq_range" value="1000" step="100" class="sim-input">
+                        </div>
+                        <div class="control-group">
+                            <label for="freq_points">Freq Points</label>
+                            <input type="number" id="freq_points" value="100" step="10" class="sim-input">
+                        </div>
+                        <div class="control-group">
+                            <label for="tbw">Time-BW Product</label>
+                            <input type="number" id="tbw" value="4.0" step="0.5" min="0.5" class="sim-input">
+                        </div>
+                        <div class="control-group">
+                            <label for="view_time">View Time (ms)</label>
+                            <input type="number" id="view_time" value="2.0" step="0.1" class="sim-input">
+                        </div>
+                        <div class="control-group">
+                            <label for="view_freq">View Freq (Hz)</label>
+                            <input type="number" id="view_freq" value="0" step="10" class="sim-input">
+                        </div>
+                    </div>
+                </details>
             </div>
 
             <div id="error-log" style="display: none; background: #fee; color: #c00; padding: 10px; margin: 10px 0; border: 1px solid #c00; font-family: monospace; white-space: pre-wrap;"></div>

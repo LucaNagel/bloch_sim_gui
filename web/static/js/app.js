@@ -49,7 +49,6 @@ async function init() {
         } catch (e) {
             console.warn("Wheel install failed (expected in dev without build):", e);
             status.innerText = "Dev mode: Wheel missing (Simulation mock)";
-            // In real deployment, this throws. In dev, we might want to fail gracefully or show a message.
         }
 
         // 4. Setup Python Environment
@@ -70,19 +69,18 @@ except ImportError:
     HAS_BACKEND = False
     print("Warning: Backend not found. Using mocks.")
 
-# Global Plot Objects
+# Global State
 fig, axs = None, None
-lines = {} # Store line objects for updates
+lines = {}
+last_result = None
+last_params = {}
 
 def init_plot():
     global fig, axs, lines
     plt.clf()
-    # Create 3 subplots with shared x/y where appropriate
-    # increased height slightly, used constrained_layout for tighter packing
     fig, axs = plt.subplots(1, 3, figsize=(12, 4.5), constrained_layout=True)
-
-    # Customize layout
     fig.patch.set_facecolor('#ffffff')
+
     # 1. RF Pulse
     axs[0].set_title("RF Pulse Shape")
     axs[0].set_xlabel("Time (ms)")
@@ -113,243 +111,163 @@ def init_plot():
     axs[2].legend(loc='upper right', fontsize='small')
     axs[2].grid(True, linestyle='--', alpha=0.5)
 
-    plt.tight_layout()
-
-    # Initial draw to attach to DOM
     plt.show()
 
-def update_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, view_freq_hz, view_time_ms):
+def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_angle, freq_range_val, freq_points, tbw):
+    global last_result, last_params
 
-    global fig, axs, lines
-
-
-
-    # Initialize plot if needed
+    # Store params to check against later if needed, though JS handles triggering
+    last_params = locals()
 
     if fig is None:
-
         init_plot()
 
-
-
-    # --- PHYSICS or MOCK ---
-
     t1_s = t1_ms * 1e-3
-
     t2_s = t2_ms * 1e-3
-
     duration_s = duration_ms * 1e-3
 
-    time_ms = np.linspace(0, duration_ms, 400)
+    # Calculate frequency range
+    f_limit = max(100, float(freq_range_val))
+    n_freq = max(10, int(freq_points))
+    freq_range = np.linspace(-f_limit, f_limit, n_freq)
 
-    freq_range = np.linspace(-1000, 1000, 80)
-
-    positions = np.array([[0, 0, 0]])  # Single position
-
-
+    positions = np.array([[0, 0, 0]])
 
     if HAS_BACKEND:
-
-        tissue = TissueParameters(name="Gray Matter", t1=t1_s, t2=t2_s)
-
+        tissue = TissueParameters(name="Generic", t1=t1_s, t2=t2_s)
         npoints = 400
 
+        # Ensure TBW is sane
+        tbw_val = float(tbw) if tbw > 0 else 4.0
+
         b1, time_s = design_rf_pulse(
-
             pulse_type=pulse_type,
-
             duration=duration_s,
-
-            flip_angle=90,
-
-            time_bw_product=4,
-
+            flip_angle=flip_angle,
+            time_bw_product=tbw_val,
             npoints=npoints,
-
             freq_offset=freq_offset_hz
-
         )
 
         time_ms = time_s * 1e3
-
         gradients = np.zeros((len(time_s), 3))
 
-        result = sim.simulate(
-
+        sim_res = sim.simulate(
             sequence=(b1, gradients, time_s),
-
             tissue=tissue,
-
             frequencies=freq_range,
-
             positions=positions,
-
             mode=2
-
         )
 
-
-
-        # Extract data
-        freq_idx = int(np.argmin(np.abs(freq_range - view_freq_hz)))
-        time_idx = int(np.argmin(np.abs(time_ms - view_time_ms)))
-
-        # Time evolution of the magnetization:
-        # Handle dimensions robustly
-        mx_all = result['mx']
-        my_all = result['my']
-        mz_all = result['mz']
-
-        # Check shape: (time, pos, freq) or (time, freq)
-        if mx_all.ndim == 3:
-            # (time, pos, freq) - take pos=0
-            if mx_all.shape[2] > freq_idx:
-                mx = mx_all[:, 0, freq_idx]
-                my = my_all[:, 0, freq_idx]
-                mz = mz_all[:, 0, freq_idx]
-            else:
-                mx, my, mz = mx_all[:, 0, 0], my_all[:, 0, 0], mz_all[:, 0, 0]
-        elif mx_all.ndim == 2:
-            # (time, freq) or (time, flattened_pos_freq)
-            # Assuming freq dim is the last one
-            if mx_all.shape[1] > freq_idx:
-                mx = mx_all[:, freq_idx]
-                my = my_all[:, freq_idx]
-                mz = mz_all[:, freq_idx]
-            else:
-                mx, my, mz = mx_all[:, 0], my_all[:, 0], mz_all[:, 0]
-        else:
-             # Fallback
-             mx = mx_all.ravel()
-             my = my_all.ravel()
-             mz = mz_all.ravel()
-
-        if mx_all.ndim == 3:
-            mx_t = mx_all[time_idx, 0, :]
-            my_t = my_all[time_idx, 0, :]
-            mz_t = mz_all[time_idx, 0, :]
-        elif mx_all.ndim == 2:
-            mx_t = mx_all[time_idx, :]
-            my_t = my_all[time_idx, :]
-            mz_t = mz_all[time_idx, :]
-        else:
-            mx_t, my_t, mz_t = np.zeros(80), np.zeros(80), np.zeros(80) # Fallback
-
-        mxy_prof = np.sqrt(mx_t**2 + my_t**2)
-        mz_prof = mz_t
-
-        rf_real, rf_imag = np.real(b1), np.imag(b1)
+        last_result = {
+            "mx": sim_res['mx'],
+            "my": sim_res['my'],
+            "mz": sim_res['mz'],
+            "time_ms": time_ms,
+            "freq_range": freq_range,
+            "rf_real": np.real(b1),
+            "rf_imag": np.imag(b1)
+        }
 
     else:
+        # Mock logic
+        time_ms = np.linspace(0, duration_ms, 400)
+        rf_real = np.zeros_like(time_ms)
+        last_result = {
+            "mx": np.zeros((400, 1, len(freq_range))),
+            "my": np.zeros((400, 1, len(freq_range))),
+            "mz": np.ones((400, 1, len(freq_range))),
+            "time_ms": time_ms,
+            "freq_range": freq_range,
+            "rf_real": rf_real,
+            "rf_imag": rf_real
+        }
 
-        # --- MOCK DATA FOR UI TESTING ---
+def extract_view(view_freq_hz, view_time_ms):
+    global last_result, fig, axs, lines
 
-        # Generate a shape based on pulse_type
+    if last_result is None or fig is None:
+        return
 
-        if pulse_type == 'sinc':
+    time_ms = last_result["time_ms"]
+    freq_range = last_result["freq_range"]
 
-            rf_real = np.sinc((time_ms - duration_ms/2) / (duration_ms/4))
+    # Indices
+    freq_idx = int(np.argmin(np.abs(freq_range - view_freq_hz)))
+    time_idx = int(np.argmin(np.abs(time_ms - view_time_ms)))
 
-        elif pulse_type == 'gaussian':
+    # Extract Magnetization (Time Evolution)
+    mx_all = last_result['mx']
+    my_all = last_result['my']
+    mz_all = last_result['mz']
 
-            rf_real = np.exp(-(time_ms - duration_ms/2)**2 / (2 * (duration_ms/6)**2))
+    # Robust shape handling
+    if mx_all.ndim == 3:
+        # (time, pos, freq)
+        mx = mx_all[:, 0, freq_idx]
+        my = my_all[:, 0, freq_idx]
+        mz = mz_all[:, 0, freq_idx]
 
-        else: # rect
+        # Profile at specific time
+        mx_t = mx_all[time_idx, 0, :]
+        my_t = my_all[time_idx, 0, :]
+        mz_t = mz_all[time_idx, 0, :]
 
-            rf_real = np.ones_like(time_ms)
+    elif mx_all.ndim == 2:
+        # (time, freq)
+        mx = mx_all[:, freq_idx]
+        my = my_all[:, freq_idx]
+        mz = mz_all[:, freq_idx]
 
+        mx_t = mx_all[time_idx, :]
+        my_t = my_all[time_idx, :]
+        mz_t = mz_all[time_idx, :]
+    else:
+        mx = mx_all.ravel()
+        my = my_all.ravel()
+        mz = mz_all.ravel()
+        mx_t, my_t, mz_t = np.zeros_like(freq_range), np.zeros_like(freq_range), np.zeros_like(freq_range)
 
+    # Profile
+    mxy_prof = np.sqrt(mx_t**2 + my_t**2)
+    mz_prof = mz_t
 
-        # Add a "phase" based on freq_offset
-
-        phase = 2 * np.pi * freq_offset_hz * (time_ms/1000)
-
-        rf_complex = rf_real * np.exp(1j * phase)
-
-        rf_real, rf_imag = np.real(rf_complex), np.imag(rf_complex)
-
-
-
-        # Mock magnetization (simple decay/rotation)
-
-        mx = np.sin(time_ms / duration_ms * np.pi/2) * np.exp(-time_ms/t2_ms)
-
-        my = np.zeros_like(time_ms)
-
-        mz = np.cos(time_ms / duration_ms * np.pi/2)
-
-
-
-        # Mock Profile (Gaussian peak)
-
-        mxy_prof = np.exp(-(freq_range - freq_offset_hz)**2 / (2 * 200**2))
-
-        mz_prof = 1 - mxy_prof
-
-
-
-    # --- UPDATE PLOTS ---
-
-    # 1. RF Pulse
-
-    lines['rf_real'].set_data(time_ms, rf_real)
-
-    lines['rf_imag'].set_data(time_ms, rf_imag)
-
-    lines['time_line'].set_data([view_time_ms, view_time_ms], [min(rf_real)-0.1, max(rf_real)+0.1])
-
+    # 1. Update RF Plot
+    lines['rf_real'].set_data(time_ms, last_result['rf_real'])
+    lines['rf_imag'].set_data(time_ms, last_result['rf_imag'])
+    lines['time_line'].set_data([view_time_ms, view_time_ms], [np.min(last_result['rf_real'])-0.1, np.max(last_result['rf_real'])+0.1])
     axs[0].relim()
-
     axs[0].autoscale_view()
 
-
-
-    # 2. Magnetization
-
+    # 2. Update Magnetization Plot
     lines['mx'].set_data(time_ms, mx)
-
     lines['my'].set_data(time_ms, my)
-
     lines['mz'].set_data(time_ms, mz)
-
-    axs[1].set_xlim(0, max(time_ms))
-
+    axs[1].set_xlim(0, np.max(time_ms))
     axs[1].set_ylim(-1.1, 1.1)
 
-
-
-    # 3. Profile
-
+    # 3. Update Profile Plot
     lines['mxy'].set_data(freq_range, mxy_prof)
-
     lines['mz_prof'].set_data(freq_range, mz_prof)
-
-    lines['freq_line'].set_data([view_freq_hz, view_freq_hz], [-1, 1])
-
-    axs[2].set_xlim(min(freq_range), max(freq_range))
-
-
+    lines['freq_line'].set_data([view_freq_hz, view_freq_hz], [-1.1, 1.1])
+    axs[2].set_xlim(np.min(freq_range), np.max(freq_range))
 
     fig.canvas.draw()
-
     fig.canvas.flush_events()
-
-
-        `);
+`);
 
         isPyodideReady = true;
         status.innerText = "Ready";
 
-        // Initialize view time to duration
+        // Initialize inputs
         const dInput = document.getElementById("duration");
         const vInput = document.getElementById("view_time");
-        if (dInput && vInput) {
-            vInput.value = dInput.value;
-        }
+        if (dInput && vInput) vInput.value = dInput.value;
 
-        // If we are already on the sim page, run it
+        // Run initial simulation
         if (document.getElementById('rf-pulse-view').classList.contains('active')) {
-            triggerSimulation();
+            triggerSimulation(null, true); // force run
         }
 
     } catch (err) {
@@ -359,10 +277,12 @@ def update_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, vie
 }
 
 // --- INTERACTION ---
-function triggerSimulation() {
+function triggerSimulation(event, forceRun = false) {
     if (!isPyodideReady) return;
 
-    // Sync view_time max with duration
+    const sourceId = event ? event.target.id : null;
+
+    // Sync view_time max
     const durationInput = document.getElementById("duration");
     const viewTimeInput = document.getElementById("view_time");
     if (durationInput && viewTimeInput) {
@@ -371,55 +291,77 @@ function triggerSimulation() {
             viewTimeInput.max = dur;
             if (parseFloat(viewTimeInput.value) > dur) {
                 viewTimeInput.value = dur;
-                // Update label immediately for responsiveness
-                const timeLabel = document.getElementById("time_ms_val");
-                if (timeLabel) timeLabel.innerText = dur;
             }
         }
     }
 
-    // Debounce logic
+    // Determine if we need a full simulation or just a view update
+    // Full sim needed if physics params change
+    const physicsParams = [
+        "t1", "t2", "duration", "freq_offset", "pulse_type",
+        "flip_angle", "freq_range", "freq_points", "tbw"
+    ];
+
+    let needFullSim = forceRun;
+    if (sourceId && physicsParams.includes(sourceId)) {
+        needFullSim = true;
+    }
+
+    // If no sourceId (e.g. init), assume full sim
+    if (!sourceId && !forceRun) needFullSim = true;
+
+    // Debounce
     if (updateTimer) clearTimeout(updateTimer);
 
-    document.getElementById('status-text').innerHTML = '<span class="spinner"></span>Calculating...';
+    const statusEl = document.getElementById('status-text');
+    statusEl.innerHTML = needFullSim ? '<span class="spinner"></span>Calculating...' : 'Updating view...';
 
     updateTimer = setTimeout(async () => {
-        const vals = {
-            t1: parseFloat(document.getElementById("t1").value),
-            t2: parseFloat(document.getElementById("t2").value),
-            duration: parseFloat(document.getElementById("duration").value),
-            freq: parseFloat(document.getElementById("freq_offset").value),
-            type: document.getElementById("pulse_type").value,
-            viewFreq: parseFloat(document.getElementById("view_freq").value),
-            viewTime: parseFloat(document.getElementById("view_time").value)
-        };
-
-        // Update freq label
-        document.getElementById("freq_hz_val").innerText = vals.viewFreq;
-        document.getElementById("time_ms_val").innerText = vals.viewTime;
-
         try {
-            const pyFunc = pyodide.globals.get("update_simulation");
-            if (pyFunc) {
-                pyFunc(vals.t1, vals.t2, vals.duration, vals.freq, vals.type, vals.viewFreq, vals.viewTime);
+            const vals = {
+                t1: parseFloat(document.getElementById("t1").value),
+                t2: parseFloat(document.getElementById("t2").value),
+                duration: parseFloat(document.getElementById("duration").value),
+                freq: parseFloat(document.getElementById("freq_offset").value),
+                type: document.getElementById("pulse_type").value,
+                flip: parseFloat(document.getElementById("flip_angle").value),
+                fRange: parseFloat(document.getElementById("freq_range").value),
+                fPoints: parseFloat(document.getElementById("freq_points").value),
+                tbw: parseFloat(document.getElementById("tbw").value),
+                viewFreq: parseFloat(document.getElementById("view_freq").value),
+                viewTime: parseFloat(document.getElementById("view_time").value)
+            };
+
+            const runSim = pyodide.globals.get("run_simulation");
+            const extractView = pyodide.globals.get("extract_view");
+
+            if (needFullSim && runSim) {
+                runSim(vals.t1, vals.t2, vals.duration, vals.freq, vals.type,
+                       vals.flip, vals.fRange, vals.fPoints, vals.tbw);
             }
-            document.getElementById('status-text').innerText = "Ready";
+
+            if (extractView) {
+                extractView(vals.viewFreq, vals.viewTime);
+            }
+
+            statusEl.innerText = "Ready";
             const errorLog = document.getElementById('error-log');
             if (errorLog) errorLog.style.display = 'none';
+
         } catch (e) {
             console.error("Sim Error", e);
-            // Show the actual error message
             let msg = e.message || e.toString();
-
-            document.getElementById('status-text').innerText = "Error (see details)";
-
+            if (msg.includes("PythonError:")) {
+                msg = msg.split("PythonError:")[1];
+            }
+            statusEl.innerText = "Error (see log)";
             const errorLog = document.getElementById('error-log');
             if (errorLog) {
                 errorLog.style.display = 'block';
                 errorLog.innerText = msg;
             }
         }
-    }, 50); // 50ms delay
+    }, 50);
 }
 
 // Attach listeners
