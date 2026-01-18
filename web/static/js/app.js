@@ -78,11 +78,11 @@ def init_plot():
     global fig, axs, lines
     plt.clf()
     # Create 3 subplots with shared x/y where appropriate
-    fig, axs = plt.subplots(1, 3, figsize=(10, 4))
+    # increased height slightly, used constrained_layout for tighter packing
+    fig, axs = plt.subplots(1, 3, figsize=(10, 4.5), constrained_layout=True)
 
     # Customize layout
     fig.patch.set_facecolor('#ffffff')
-
     # 1. RF Pulse
     axs[0].set_title("RF Pulse Shape")
     axs[0].set_xlabel("Time (ms)")

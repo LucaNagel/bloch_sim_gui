@@ -165,10 +165,11 @@ nav h1 {
 #plot-container {
     background: var(--card-bg);
     border-radius: 8px;
-    padding: 0.5rem; /* Reduced padding */
+    padding: 0; /* Removed padding */
     box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-    min-height: 500px;
+    /* min-height removed to allow hugging the content */
     position: relative;
+    overflow: hidden;
 }
 
 /* Make sure the pyodide plot fills the container */
