@@ -88,13 +88,18 @@ def init_plot():
     fig, axs = plt.subplots(1, 3, figsize=(12, 4.5), constrained_layout=True)
     fig.patch.set_facecolor('#ffffff')
 
+    # Add zero lines to all
+    for ax in axs:
+        ax.axhline(0, color='black', linewidth=0.8, alpha=0.3)
+        ax.axvline(0, color='black', linewidth=0.8, alpha=0.3)
+
     # 1. RF Pulse
     axs[0].set_title("RF Pulse Shape")
     axs[0].set_xlabel("Time (ms)")
     axs[0].set_ylabel("Amplitude (uT)")
     lines['rf_real'], = axs[0].plot([], [], label='Real', color='#0056b3')
     lines['rf_imag'], = axs[0].plot([], [], label='Imag', color='#ff9900', alpha=0.7)
-    lines['time_line'], = axs[0].plot([], [], color='black', linestyle='--', alpha=0.5)
+    lines['time_line'], = axs[0].plot([], [], color='red', linestyle='--', alpha=0.8, zorder=10)
     axs[0].legend(loc='upper right', fontsize='small')
     axs[0].grid(True, linestyle='--', alpha=0.5)
 
@@ -105,7 +110,7 @@ def init_plot():
     lines['mx'], = axs[1].plot([], [], label='Mx', color='r', alpha=0.6)
     lines['my'], = axs[1].plot([], [], label='My', color='g', alpha=0.6)
     lines['mz'], = axs[1].plot([], [], label='Mz', color='b')
-    lines['time_line_2'] = axs[1].axvline(0, color='gray', linestyle='-', alpha=0.5, linewidth=0.5)
+    lines['time_line_2'], = axs[1].plot([], [], color='red', linestyle='--', alpha=0.8, zorder=10)
     axs[1].legend(loc='upper right', fontsize='small')
     axs[1].grid(True, linestyle='--', alpha=0.5)
 
@@ -115,7 +120,7 @@ def init_plot():
     axs[2].set_ylim(-1.1, 1.1)
     lines['mxy'], = axs[2].plot([], [], label='Mxy', color='purple')
     lines['mz_prof'], = axs[2].plot([], [], label='Mz', color='gray', linestyle='--')
-    lines['freq_line'], = axs[2].plot([], [], label='Freq Offset', color='gray', linestyle='-', alpha=0.5, linewidth=0.5)
+    lines['freq_line'], = axs[2].plot([], [], color='red', linestyle='--', alpha=0.8, zorder=10)
     axs[2].legend(loc='upper right', fontsize='small')
     axs[2].grid(True, linestyle='--', alpha=0.5)
 
@@ -241,11 +246,16 @@ def extract_view(view_freq_hz, view_time_ms):
     mxy_prof = np.sqrt(mx_t**2 + my_t**2)
     mz_prof = mz_t
 
+    # Update Labels in JS
+    document.getElementById("view_time_val").innerText = str(round(view_time_ms, 2))
+    document.getElementById("view_freq_val").innerText = str(int(view_freq_hz))
+
     # 1. Update RF Plot
     lines['rf_real'].set_data(time_ms, last_result['rf_real'])
     lines['rf_imag'].set_data(time_ms, last_result['rf_imag'])
     axs[0].relim()
     axs[0].autoscale_view()
+    # Set indicator after autoscale to match current limits
     lines['time_line'].set_data([view_time_ms, view_time_ms], axs[0].get_ylim())
 
     # 2. Update Magnetization Plot
@@ -254,6 +264,7 @@ def extract_view(view_freq_hz, view_time_ms):
     lines['mz'].set_data(time_ms, mz)
     axs[1].set_xlim(0, np.max(time_ms))
     axs[1].set_ylim(-1.1, 1.1)
+    lines['time_line_2'].set_data([view_time_ms, view_time_ms], axs[1].get_ylim())
 
     # 3. Update Profile Plot
     lines['mxy'].set_data(freq_range, mxy_prof)

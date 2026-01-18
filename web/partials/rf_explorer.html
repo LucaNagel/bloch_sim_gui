@@ -55,12 +55,12 @@
                             <input type="number" id="tbw" value="4.0" step="0.5" min="0.5" class="sim-input">
                         </div>
                         <div class="control-group">
-                            <label for="view_time">View Time (ms)</label>
-                            <input type="number" id="view_time" value="2.0" step="0.1" class="sim-input">
+                            <label for="view_time">View Time: <span id="view_time_val">2.0</span> ms</label>
+                            <input type="range" id="view_time" class="sim-input" min="0" max="2.0" step="0.01" value="2.0">
                         </div>
                         <div class="control-group">
-                            <label for="view_freq">View Freq (Hz)</label>
-                            <input type="number" id="view_freq" value="0" step="10" class="sim-input">
+                            <label for="view_freq">View Freq: <span id="view_freq_val">0</span> Hz</label>
+                            <input type="range" id="view_freq" class="sim-input" min="-1000" max="1000" step="1" value="0">
                         </div>
                     </div>
                 </details>
