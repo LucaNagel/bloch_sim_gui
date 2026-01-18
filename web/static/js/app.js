@@ -191,17 +191,52 @@ def update_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, vie
 
 
         # Extract data
-
         freq_idx = int(np.argmin(np.abs(freq_range - view_freq_hz)))
-
         time_idx = int(np.argmin(np.abs(time_ms - view_time_ms)))
 
         # Time evolution of the magnetization:
-        mx, my, mz = result['mx'][:, 0, freq_idx], result['my'][:, 0, freq_idx], result['mz'][:, 0, freq_idx]
+        # Handle dimensions robustly
+        mx_all = result['mx']
+        my_all = result['my']
+        mz_all = result['mz']
 
-        mxy_prof = np.sqrt(result['mx'][time_idx, 0, :]**2 + result['my'][time_idx, 0, :]**2)
+        # Check shape: (time, pos, freq) or (time, freq)
+        if mx_all.ndim == 3:
+            # (time, pos, freq) - take pos=0
+            if mx_all.shape[2] > freq_idx:
+                mx = mx_all[:, 0, freq_idx]
+                my = my_all[:, 0, freq_idx]
+                mz = mz_all[:, 0, freq_idx]
+            else:
+                mx, my, mz = mx_all[:, 0, 0], my_all[:, 0, 0], mz_all[:, 0, 0]
+        elif mx_all.ndim == 2:
+            # (time, freq) or (time, flattened_pos_freq)
+            # Assuming freq dim is the last one
+            if mx_all.shape[1] > freq_idx:
+                mx = mx_all[:, freq_idx]
+                my = my_all[:, freq_idx]
+                mz = mz_all[:, freq_idx]
+            else:
+                mx, my, mz = mx_all[:, 0], my_all[:, 0], mz_all[:, 0]
+        else:
+             # Fallback
+             mx = mx_all.ravel()
+             my = my_all.ravel()
+             mz = mz_all.ravel()
 
-        mz_prof = result['mz'][time_idx, 0, :]
+        if mx_all.ndim == 3:
+            mx_t = mx_all[time_idx, 0, :]
+            my_t = my_all[time_idx, 0, :]
+            mz_t = mz_all[time_idx, 0, :]
+        elif mx_all.ndim == 2:
+            mx_t = mx_all[time_idx, :]
+            my_t = my_all[time_idx, :]
+            mz_t = mz_all[time_idx, :]
+        else:
+            mx_t, my_t, mz_t = np.zeros(80), np.zeros(80), np.zeros(80) # Fallback
+
+        mxy_prof = np.sqrt(mx_t**2 + my_t**2)
+        mz_prof = mz_t
 
         rf_real, rf_imag = np.real(b1), np.imag(b1)
 
@@ -305,6 +340,13 @@ def update_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, vie
         isPyodideReady = true;
         status.innerText = "Ready";
 
+        // Initialize view time to duration
+        const dInput = document.getElementById("duration");
+        const vInput = document.getElementById("view_time");
+        if (dInput && vInput) {
+            vInput.value = dInput.value;
+        }
+
         // If we are already on the sim page, run it
         if (document.getElementById('rf-pulse-view').classList.contains('active')) {
             triggerSimulation();
@@ -362,15 +404,20 @@ function triggerSimulation() {
                 pyFunc(vals.t1, vals.t2, vals.duration, vals.freq, vals.type, vals.viewFreq, vals.viewTime);
             }
             document.getElementById('status-text').innerText = "Ready";
+            const errorLog = document.getElementById('error-log');
+            if (errorLog) errorLog.style.display = 'none';
         } catch (e) {
             console.error("Sim Error", e);
-            // Show the actual error message (truncated if too long)
+            // Show the actual error message
             let msg = e.message || e.toString();
-            if (msg.includes("PythonError:")) {
-                msg = msg.split("PythonError:")[1].split("\n")[0];
+
+            document.getElementById('status-text').innerText = "Error (see details)";
+
+            const errorLog = document.getElementById('error-log');
+            if (errorLog) {
+                errorLog.style.display = 'block';
+                errorLog.innerText = msg;
             }
-            document.getElementById('status-text').innerText = "Error: " + msg.substring(0, 60);
-            document.getElementById('status-text').title = msg; // Hover to see full error
         }
     }, 50); // 50ms delay
 }

@@ -78,8 +78,19 @@
                         <label for="t2">T2 (ms)</label>
                         <input type="number" id="t2" value="100" step="10" min="1" class="sim-input">
                     </div>
+                    <!-- View Parameters (Hidden or Advanced) -->
+                    <div class="control-group">
+                        <label for="view_time">View Time (ms)</label>
+                        <input type="number" id="view_time" value="2.0" step="0.1" class="sim-input">
+                    </div>
+                    <div class="control-group">
+                        <label for="view_freq">View Freq (Hz)</label>
+                        <input type="number" id="view_freq" value="0" step="10" class="sim-input">
+                    </div>
                 </div>
             </div>
+
+            <div id="error-log" style="display: none; background: #fee; color: #c00; padding: 10px; margin: 10px 0; border: 1px solid #c00; font-family: monospace; white-space: pre-wrap;"></div>
 
             <div id="plot-container">
                 <div id="plot"></div>
@@ -90,7 +101,7 @@
 
     <div id="status-bar">
         <span id="status-text">Initializing environment...</span>
-        <span id="version-info">v1.0</span>
+        <span id="version-info">v1.0.8</span>
     </div>
 
     <script src="static/js/app.js"></script>
