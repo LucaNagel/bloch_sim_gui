@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bloch Simulator</title>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.25.0/full/pyodide.js"></script>
+    <link rel="stylesheet" href="static/css/style.css">
+</head>
+<body>
+
+    <nav>
+        <h1>Bloch Simulator</h1>
+        <div class="nav-links">
+            <button onclick="router('home')">Home</button>
+            <button onclick="window.open('https://github.com/lucanagel/bloch_simulator', '_blank')">GitHub</button>
+        </div>
+    </nav>
+
+    <div class="container">
+
+        <!-- WELCOME VIEW -->
+        <div id="home-view" class="view active">
+            <div class="welcome-hero">
+                <h2>Welcome to the Bloch Simulator</h2>
+                <p>Interactive MRI physics simulation in your browser. Explore magnetic resonance concepts with real-time feedback.</p>
+            </div>
+
+            <div class="card-grid">
+                <div class="card" onclick="router('rf-pulse')">
+                    <h3>RF Pulse Explorer</h3>
+                    <p>Design and analyze Radio Frequency pulses. Adjust duration, shape, and frequency offsets in real-time.</p>
+                </div>
+
+                <div class="card" style="opacity: 0.6; cursor: default;">
+                    <h3>Gradient Echo (Coming Soon)</h3>
+                    <p>Simulate GRE sequences with variable TR, TE, and flip angles.</p>
+                </div>
+
+                <div class="card" style="opacity: 0.6; cursor: default;">
+                    <h3>Spin Echo (Coming Soon)</h3>
+                    <p>Explore T2 weighting and refueling pulses.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- RF PULSE SIMULATOR VIEW -->
+        <div id="rf-pulse-view" class="view">
+            <div style="margin-bottom: 1rem; display: flex; justify-content: space-between; align-items: center;">
+                <h2 style="margin: 0; color: var(--primary-color);">RF Pulse Explorer</h2>
+                <button onclick="router('home')" style="padding: 0.5rem 1rem; cursor: pointer;">&larr; Back</button>
+            </div>
+
+            <div class="controls-panel">
+                <div class="controls-grid">
+                    <div class="control-group">
+                        <label for="pulse_type">Pulse Type</label>
+                        <select id="pulse_type" class="sim-input">
+                            <option value="sinc" selected>Sinc</option>
+                            <option value="rect">Rectangular</option>
+                            <option value="gaussian">Gaussian</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <label for="duration">Duration (ms)</label>
+                        <input type="number" id="duration" value="2.0" step="0.1" min="0.1" max="20" class="sim-input">
+                    </div>
+                    <div class="control-group">
+                        <label for="freq_offset">Freq. Offset (Hz)</label>
+                        <input type="number" id="freq_offset" value="0" step="50" class="sim-input">
+                    </div>
+                    <div class="control-group">
+                        <label for="t1">T1 (ms)</label>
+                        <input type="number" id="t1" value="800" step="50" min="10" class="sim-input">
+                    </div>
+                    <div class="control-group">
+                        <label for="t2">T2 (ms)</label>
+                        <input type="number" id="t2" value="100" step="10" min="1" class="sim-input">
+                    </div>
+                </div>
+            </div>
+
+            <div id="plot-container">
+                <div id="plot"></div>
+            </div>
+        </div>
+
+    </div>
+
+    <div id="status-bar">
+        <span id="status-text">Initializing environment...</span>
+        <span id="version-info">v1.0</span>
+    </div>
+
+    <script src="static/js/app.js"></script>
+</body>
+</html>

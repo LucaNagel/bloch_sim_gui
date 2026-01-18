@@ -209,3 +209,56 @@ def _update_sequence_options(self):
 ```
 
 This ensures users only see relevant controls for the active sequence.
+
+---
+
+## 8. Web Simulation Extensions
+
+The web version of the Bloch Simulator runs via Pyodide (WASM) and interacts with the DOM. To extend the web simulation options, you need to modify three main components: the HTML view, the JavaScript controller, and the Python simulation logic.
+
+### 1. Update the HTML View
+File: `web/partials/rf_explorer.html` (or create a new partial for a new view)
+
+Add the new input control (e.g., a slider or input box). Ensure it has:
+*   An `id` (e.g., `id="my_new_param"`).
+*   The class `sim-input` (this automatically triggers the `triggerSimulation` event listener).
+
+```html
+<div class="control-group">
+    <label for="my_new_param">My Parameter</label>
+    <input type="number" id="my_new_param" value="1.0" step="0.1" class="sim-input">
+</div>
+```
+
+### 2. Update the JavaScript Controller
+File: `web/static/js/app.js`
+
+You need to update two functions:
+*   **`triggerSimulation()`**: Read the value from your new HTML input and pass it to the Python function.
+    ```javascript
+    const vals = {
+        // ... existing params ...
+        myParam: parseFloat(document.getElementById("my_new_param").value)
+    };
+
+    // Pass to Python
+    pyFunc(vals.t1, vals.t2, vals.duration, vals.freq, vals.type, vals.myParam);
+    ```
+
+### 3. Update the Python Logic
+File: `web/static/js/app.js` (inside the `runPythonAsync` block)
+
+Update the `update_simulation` Python function signature to accept the new argument and use it in the simulation.
+
+```python
+def update_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, my_param):
+    # Use my_param in your simulation logic
+    # ...
+```
+
+### Testing Changes
+Run the local dev server to test your changes without deploying:
+```bash
+python scripts/dev_server.py
+```
+This builds the site to `_dev/` and serves it at `http://localhost:8000`.
