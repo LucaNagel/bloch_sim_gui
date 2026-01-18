@@ -196,7 +196,8 @@ def update_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, vie
 
         time_idx = int(np.argmin(np.abs(time_ms - view_time_ms)))
 
-        mx, my, mz = result['mx'][:, time_idx, freq_idx], result['my'][:, time_idx, freq_idx], result['mz'][:, time_idx, freq_idx]
+        # Time evolution of the magnetization:
+        mx, my, mz = result['mx'][:, 0, freq_idx], result['my'][:, 0, freq_idx], result['mz'][:, 0, freq_idx]
 
         mxy_prof = np.sqrt(result['mx'][time_idx, 0, :]**2 + result['my'][time_idx, 0, :]**2)
 
