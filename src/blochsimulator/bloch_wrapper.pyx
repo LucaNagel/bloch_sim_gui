@@ -407,14 +407,14 @@ def design_rf_pulse(pulse_type='rect', duration=1e-3, flip_angle=90,
         t_centered = time - duration/2
         bw = time_bw_product / duration
         envelope = np.sinc(bw * t_centered)
-        area = np.trapezoid(envelope, time)
+        area = np.trapz(envelope, time)
         b1 = envelope * (target_area / area)
 
     elif pulse_type == 'gaussian':
         t_centered = time - duration/2
         sigma = duration / (2 * np.sqrt(2 * np.log(2)) * time_bw_product)
         envelope = np.exp(-t_centered**2 / (2 * sigma**2))
-        area = np.trapezoid(envelope, time)
+        area = np.trapz(envelope, time)
         b1 = envelope * (target_area / area)
 
     else:
