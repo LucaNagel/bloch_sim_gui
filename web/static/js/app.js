@@ -20,7 +20,14 @@ function router(viewName) {
 
     // Trigger sim if entering sim view and ready
     if (viewName === 'rf-pulse' && isPyodideReady) {
-        triggerSimulation();
+        triggerSimulation(null, true);
+    }
+}
+
+function toggleLog() {
+    const log = document.getElementById('error-log');
+    if (log) {
+        log.style.display = log.style.display === 'none' ? 'block' : 'none';
     }
 }
 
@@ -354,11 +361,12 @@ function triggerSimulation(event, forceRun = false) {
             if (msg.includes("PythonError:")) {
                 msg = msg.split("PythonError:")[1];
             }
-            statusEl.innerText = "Error (see log)";
+            statusEl.innerText = "Error (Details in Log)";
             const errorLog = document.getElementById('error-log');
-            if (errorLog) {
+            const errorContent = document.getElementById('error-log-content');
+            if (errorLog && errorContent) {
                 errorLog.style.display = 'block';
-                errorLog.innerText = msg;
+                errorContent.innerText = msg;
             }
         }
     }, 50);
