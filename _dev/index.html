@@ -70,12 +70,28 @@
                         <input type="number" id="freq_offset" value="0" step="50" class="sim-input">
                     </div>
                     <div class="control-group">
+                        <label for="phase_offset">Phase Offset (deg)</label>
+                        <input type="number" id="phase_offset" value="0" step="50" class="sim-input">
+                    </div>
+                    <div class="control-group">
                         <label for="t1">T1 (ms)</label>
                         <input type="number" id="t1" value="800" step="50" min="10" class="sim-input">
                     </div>
                     <div class="control-group">
                         <label for="t2">T2 (ms)</label>
                         <input type="number" id="t2" value="100" step="10" min="1" class="sim-input">
+                    </div>
+                    <div class="control-group">
+                        <!-- Label updates dynamically to show current value -->
+                        <label for="view_freq">View Frequency: <span id="freq_hz_val">0</span> Hz</label>
+                        <!-- The Slider -->
+                        <input type="range" id="view_freq" class="sim-input" min="-1000" max="1000" step="5" value="0">
+                    </div>
+                    <div class="control-group">
+                        <!-- Label updates dynamically to show current value -->
+                        <label for="view_time">View Time: <span id="time_ms_val">0</span> ms</label>
+                        <!-- The Slider -->
+                        <input type="range" id="view_time" class="sim-input" min="0" max="100" step="0.1" value="0">
                     </div>
                 </div>
             </div>

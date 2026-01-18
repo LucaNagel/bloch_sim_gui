@@ -262,3 +262,24 @@ Run the local dev server to test your changes without deploying:
 python scripts/dev_server.py
 ```
 This builds the site to `_dev/` and serves it at `http://localhost:8000`.
+
+### Running Real Physics Locally (Docker)
+By default, the dev server runs in "Mock Mode" because the C-extension (`bloch_core_modified.c`) isn't compiled for the browser. To run the **real physics engine** locally, you can use Docker to compile the WebAssembly wheel.
+
+1.  **Prerequisites**: Install Docker Desktop.
+2.  **Build the WASM Wheel**: Run this command from the project root:
+    ```bash
+    docker run --rm -v $(pwd):/src -w /src python:3.11 /bin/bash -c "
+      pip install pyodide-build &&
+      export EMSCRIPTEN=1 &&
+      export CFLAGS='-g0 -O3' &&
+      pyodide build
+    "
+    ```
+    *Note: This pulls a standard Python image and installs the build tools. The first run takes a few minutes.*
+
+3.  **Start the Dev Server**:
+    ```bash
+    python scripts/dev_server.py
+    ```
+    The script will automatically detect the new `.whl` file in `dist/` and switch to "Real Physics Mode". You will see "Installing bloch_simulator... Ready" in the status bar instead of "Dev mode".

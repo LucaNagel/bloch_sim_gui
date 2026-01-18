@@ -79,7 +79,7 @@ def init_plot():
     plt.clf()
     # Create 3 subplots with shared x/y where appropriate
     # increased height slightly, used constrained_layout for tighter packing
-    fig, axs = plt.subplots(1, 3, figsize=(10, 4.5), constrained_layout=True)
+    fig, axs = plt.subplots(1, 3, figsize=(12, 4.5), constrained_layout=True)
 
     # Customize layout
     fig.patch.set_facecolor('#ffffff')
@@ -89,6 +89,7 @@ def init_plot():
     axs[0].set_ylabel("Amplitude (uT)")
     lines['rf_real'], = axs[0].plot([], [], label='Real', color='#0056b3')
     lines['rf_imag'], = axs[0].plot([], [], label='Imag', color='#ff9900', alpha=0.7)
+    lines['time_line'] = axs[0].axvline(0, color='black', linestyle='--', alpha=0.5)
     axs[0].legend(loc='upper right', fontsize='small')
     axs[0].grid(True, linestyle='--', alpha=0.5)
 
@@ -105,9 +106,10 @@ def init_plot():
     # 3. Frequency Profile
     axs[2].set_title("Excitation Profile")
     axs[2].set_xlabel("Frequency (Hz)")
-    axs[2].set_ylim(-0.1, 1.1)
+    axs[2].set_ylim(-2.1, 1.1)
     lines['mxy'], = axs[2].plot([], [], label='Mxy', color='purple')
     lines['mz_prof'], = axs[2].plot([], [], label='Mz', color='gray', linestyle='--')
+    lines['freq_line'], = axs[2].plot([], [], label='Freq Offset', color='black', linestyle='--', alpha=0.5)
     axs[2].legend(loc='upper right', fontsize='small')
     axs[2].grid(True, linestyle='--', alpha=0.5)
 
@@ -116,79 +118,183 @@ def init_plot():
     # Initial draw to attach to DOM
     plt.show()
 
-def update_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type):
+def update_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, view_freq_hz, view_time_ms):
+
     global fig, axs, lines
 
-    if not HAS_BACKEND:
-        return
+
 
     # Initialize plot if needed
+
     if fig is None:
+
         init_plot()
 
-    # --- PHYSICS ---
+
+
+    # --- PHYSICS or MOCK ---
+
     t1_s = t1_ms * 1e-3
+
     t2_s = t2_ms * 1e-3
+
     duration_s = duration_ms * 1e-3
 
-    tissue = TissueParameters(name="Gray Matter", t1=t1_s, t2=t2_s)
+    time_ms = np.linspace(0, duration_ms, 400)
 
-    # Pulse Design
-    npoints = 400
-    b1, time_s = design_rf_pulse(
-        pulse_type=pulse_type,
-        duration=duration_s,
-        flip_angle=90,
-        time_bw_product=4,
-        npoints=npoints,
-        freq_offset=freq_offset_hz
-    )
-    time_ms = time_s * 1e3
+    freq_range = np.linspace(-1000, 1000, 80)
 
-    # Simulation
-    freq_range = np.linspace(-1000, 1000, 80) # Reduced points for speed
-    positions = np.array([[0.0, 0.0, 0.0]])
 
-    gradients = np.zeros((len(time_s), 3))
 
-    result = sim.simulate(
-        sequence=(b1, gradients, time_s),
-        tissue=tissue,
-        frequencies=freq_range,
-        positions=positions,
-        mode=2
-    )
+    if HAS_BACKEND:
+
+        tissue = TissueParameters(name="Gray Matter", t1=t1_s, t2=t2_s)
+
+        npoints = 400
+
+        b1, time_s = design_rf_pulse(
+
+            pulse_type=pulse_type,
+
+            duration=duration_s,
+
+            flip_angle=90,
+
+            time_bw_product=4,
+
+            npoints=npoints,
+
+            freq_offset=freq_offset_hz
+
+        )
+
+        time_ms = time_s * 1e3
+
+        gradients = np.zeros((len(time_s), 3))
+
+        result = sim.simulate(
+
+            sequence=(b1, gradients, time_s),
+
+            tissue=tissue,
+
+            frequencies=freq_range,
+
+            positions=positions,
+
+            mode=2
+
+        )
+
+
+
+        # Extract data
+
+        freq_idx = int(np.argmin(np.abs(freq_range - view_freq_hz)))
+
+        time_idx = int(np.argmin(np.abs(time_ms - view_time_ms)))
+
+        mx, my, mz = result['mx'][:, 0, freq_idx], result['my'][:, 0, freq_idx], result['mz'][:, 0, freq_idx]
+
+        mxy_prof = np.sqrt(result['mx'][time_idx, 0, :]**2 + result['my'][time_idx, 0, :]**2)
+
+        mz_prof = result['mz'][time_idx, 0, :]
+
+        rf_real, rf_imag = np.real(b1), np.imag(b1)
+
+    else:
+
+        # --- MOCK DATA FOR UI TESTING ---
+
+        # Generate a shape based on pulse_type
+
+        if pulse_type == 'sinc':
+
+            rf_real = np.sinc((time_ms - duration_ms/2) / (duration_ms/4))
+
+        elif pulse_type == 'gaussian':
+
+            rf_real = np.exp(-(time_ms - duration_ms/2)**2 / (2 * (duration_ms/6)**2))
+
+        else: # rect
+
+            rf_real = np.ones_like(time_ms)
+
+
+
+        # Add a "phase" based on freq_offset
+
+        phase = 2 * np.pi * freq_offset_hz * (time_ms/1000)
+
+        rf_complex = rf_real * np.exp(1j * phase)
+
+        rf_real, rf_imag = np.real(rf_complex), np.imag(rf_complex)
+
+
+
+        # Mock magnetization (simple decay/rotation)
+
+        mx = np.sin(time_ms / duration_ms * np.pi/2) * np.exp(-time_ms/t2_ms)
+
+        my = np.zeros_like(time_ms)
+
+        mz = np.cos(time_ms / duration_ms * np.pi/2)
+
+
+
+        # Mock Profile (Gaussian peak)
+
+        mxy_prof = np.exp(-(freq_range - freq_offset_hz)**2 / (2 * 200**2))
+
+        mz_prof = 1 - mxy_prof
+
+
 
     # --- UPDATE PLOTS ---
+
     # 1. RF Pulse
-    lines['rf_real'].set_data(time_ms, np.real(b1))
-    lines['rf_imag'].set_data(time_ms, np.imag(b1))
+
+    lines['rf_real'].set_data(time_ms, rf_real)
+
+    lines['rf_imag'].set_data(time_ms, rf_imag)
+
+    lines['time_line'].set_data([view_time_ms, view_time_ms], [min(rf_real)-0.1, max(rf_real)+0.1])
+
     axs[0].relim()
+
     axs[0].autoscale_view()
 
-    # 2. Magnetization (Center Freq)
-    center_idx = len(freq_range) // 2
-    mx = result['mx'][:, 0, center_idx]
-    my = result['my'][:, 0, center_idx]
-    mz = result['mz'][:, 0, center_idx]
+
+
+    # 2. Magnetization
 
     lines['mx'].set_data(time_ms, mx)
+
     lines['my'].set_data(time_ms, my)
+
     lines['mz'].set_data(time_ms, mz)
+
     axs[1].set_xlim(0, max(time_ms))
 
+    axs[1].set_ylim(-1.1, 1.1)
+
+
+
     # 3. Profile
-    mx_end = result['mx'][-1, 0, :]
-    my_end = result['my'][-1, 0, :]
-    mz_end = result['mz'][-1, 0, :]
-    mxy_end = np.sqrt(mx_end**2 + my_end**2)
 
-    lines['mxy'].set_data(freq_range, mxy_end)
-    lines['mz_prof'].set_data(freq_range, mz_end)
+    lines['mxy'].set_data(freq_range, mxy_prof)
 
-    # Redraw
+    lines['mz_prof'].set_data(freq_range, mz_prof)
+
+    lines['freq_line'].set_data([view_freq_hz, view_freq_hz], [-1, 1])
+
+
+
     fig.canvas.draw()
+
     fig.canvas.flush_events()
+
+
         `);
 
         isPyodideReady = true;
@@ -220,18 +326,30 @@ function triggerSimulation() {
             t2: parseFloat(document.getElementById("t2").value),
             duration: parseFloat(document.getElementById("duration").value),
             freq: parseFloat(document.getElementById("freq_offset").value),
-            type: document.getElementById("pulse_type").value
+            type: document.getElementById("pulse_type").value,
+            viewFreq: parseFloat(document.getElementById("view_freq").value),
+            viewTime: parseFloat(document.getElementById("view_time").value)
         };
+
+        // Update freq label
+        document.getElementById("freq_hz_val").innerText = vals.viewFreq;
+        document.getElementById("time_ms_val").innerText = vals.viewTime;
 
         try {
             const pyFunc = pyodide.globals.get("update_simulation");
             if (pyFunc) {
-                pyFunc(vals.t1, vals.t2, vals.duration, vals.freq, vals.type);
+                pyFunc(vals.t1, vals.t2, vals.duration, vals.freq, vals.type, vals.viewFreq, vals.viewTime);
             }
             document.getElementById('status-text').innerText = "Ready";
         } catch (e) {
             console.error("Sim Error", e);
-            document.getElementById('status-text').innerText = "Simulation Error";
+            // Show the actual error message (truncated if too long)
+            let msg = e.message || e.toString();
+            if (msg.includes("PythonError:")) {
+                msg = msg.split("PythonError:")[1].split("\n")[0];
+            }
+            document.getElementById('status-text').innerText = "Error: " + msg.substring(0, 60);
+            document.getElementById('status-text').title = msg; // Hover to see full error
         }
     }, 50); // 50ms delay
 }

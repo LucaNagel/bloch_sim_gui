@@ -2807,13 +2807,13 @@ class MagnetizationViewer(QWidget):
         if mode == "Positions @ freq":
             max_idx = max(0, self._nfreq - 1)
             idx = min(self.selector_slider.value(), max_idx)
-            freq_val = (
+            freq_hz_val = (
                 self.last_frequencies[idx]
                 if self.last_frequencies is not None
                 and idx < len(self.last_frequencies)
                 else idx
             )
-            label_text = f"Freq: {freq_val:.1f} Hz"
+            label_text = f"Freq: {freq_hz_val:.1f} Hz"
         elif mode == "Freqs @ position":
             max_idx = max(0, self._npos - 1)
             idx = min(self.selector_slider.value(), max_idx)
@@ -5434,13 +5434,13 @@ class BlochSimulatorGUI(QMainWindow):
                 slider.setValue(target)
 
             idx = slider.value()
-            freq_val = (
+            freq_hz_val = (
                 self.last_frequencies[idx]
                 if self.last_frequencies is not None
                 and idx < len(self.last_frequencies)
                 else idx
             )
-            self.mag_view_selector_label.setText(f"Freq: {freq_val:.1f} Hz")
+            self.mag_view_selector_label.setText(f"Freq: {freq_hz_val:.1f} Hz")
         elif mode == "Freqs @ position":
             max_idx = max(0, npos - 1)
             slider.setRange(0, max_idx)
@@ -5499,13 +5499,13 @@ class BlochSimulatorGUI(QMainWindow):
             max_idx = max(0, nfreq - 1)
             prefix = "Freq"
             idx = min(slider.value(), max_idx)
-            freq_val = (
+            freq_hz_val = (
                 self.last_frequencies[idx]
                 if self.last_frequencies is not None
                 and idx < len(self.last_frequencies)
                 else idx
             )
-            label_text = f"{prefix}: {freq_val:.1f} Hz"
+            label_text = f"{prefix}: {freq_hz_val:.1f} Hz"
         elif mode == "Freqs @ position":
             max_idx = max(0, npos - 1)
             prefix = "Pos"
@@ -7123,14 +7123,14 @@ class BlochSimulatorGUI(QMainWindow):
             else:
                 if view_mode == "Positions @ freq":
                     fi = min(selector, nfreq - 1)
-                    freq_val = (
+                    freq_hz_val = (
                         self.last_frequencies[fi]
                         if self.last_frequencies is not None
                         and fi < len(self.last_frequencies)
                         else fi
                     )
                     self.mxy_plot.setTitle(
-                        f"Mx/My vs Time for all Positions @ Freq: {freq_val:.1f} Hz"
+                        f"Mx/My vs Time for all Positions @ Freq: {freq_hz_val:.1f} Hz"
                     )
                     total_series = npos
                     indices_to_plot = self._get_trace_indices_to_plot(total_series)
@@ -7263,14 +7263,14 @@ class BlochSimulatorGUI(QMainWindow):
                 )
             else:
                 if view_mode == "Positions @ freq":
-                    freq_val = (
+                    freq_hz_val = (
                         self.last_frequencies[fi]
                         if self.last_frequencies is not None
                         and fi < len(self.last_frequencies)
                         else fi
                     )
                     self.mz_plot.setTitle(
-                        f"Mz vs Time for all Positions @ Freq: {freq_val:.1f} Hz"
+                        f"Mz vs Time for all Positions @ Freq: {freq_hz_val:.1f} Hz"
                     )
                     self._reset_legend(self.mz_plot, "mz_legend", total_series > 1)
                     indices_to_plot = self._get_trace_indices_to_plot(total_series)
@@ -7371,14 +7371,14 @@ class BlochSimulatorGUI(QMainWindow):
             else:
                 if view_mode == "Positions @ freq":
                     fi = min(selector, nfreq - 1)
-                    freq_val = (
+                    freq_hz_val = (
                         self.last_frequencies[fi]
                         if self.last_frequencies is not None
                         and fi < len(self.last_frequencies)
                         else fi
                     )
                     self.signal_plot.setTitle(
-                        f"Signal vs Time for all Positions @ Freq: {freq_val:.1f} Hz"
+                        f"Signal vs Time for all Positions @ Freq: {freq_hz_val:.1f} Hz"
                     )
                     sig_to_plot = signal[:, :, fi]  # (ntime, npos)
                     total_series_sig = npos
@@ -8166,7 +8166,7 @@ class BlochSimulatorGUI(QMainWindow):
                     for p in range(npos):
                         pos_val = positions[p] if p < len(positions) else 0
                         for f_idx in range(nfreq):
-                            freq_val = (
+                            freq_hz_val = (
                                 frequencies[f_idx] if f_idx < len(frequencies) else 0
                             )
                             val_mx = float(mx_final[p, f_idx])
@@ -8179,7 +8179,7 @@ class BlochSimulatorGUI(QMainWindow):
                                     p,
                                     f_idx,
                                     pos_val,
-                                    freq_val,
+                                    freq_hz_val,
                                     val_mx,
                                     val_my,
                                     val_mz,
