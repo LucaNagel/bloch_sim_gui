@@ -1,49 +1,3 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bloch Simulator</title>
-    <script src="https://cdn.jsdelivr.net/pyodide/v0.25.0/full/pyodide.js"></script>
-    <link rel="stylesheet" href="static/css/style.css">
-</head>
-<body>
-
-    <nav>
-        <h1>Bloch Simulator</h1>
-        <div class="nav-links">
-            <button onclick="router('home')">Home</button>
-            <button onclick="window.open('https://github.com/lucanagel/bloch_simulator', '_blank')">GitHub</button>
-        </div>
-    </nav>
-
-    <div class="container">
-
-        <!-- WELCOME VIEW -->
-        <div id="home-view" class="view active">
-            <div class="welcome-hero">
-                <h2>Welcome to the Bloch Simulator</h2>
-                <p>Interactive MRI physics simulation in your browser. Explore magnetic resonance concepts with real-time feedback.</p>
-            </div>
-
-            <div class="card-grid">
-                <div class="card" onclick="router('rf-pulse')">
-                    <h3>RF Pulse Explorer</h3>
-                    <p>Design and analyze Radio Frequency pulses. Adjust duration, shape, and frequency offsets in real-time.</p>
-                </div>
-
-                <div class="card" style="opacity: 0.6; cursor: default;">
-                    <h3>Gradient Echo (Coming Soon)</h3>
-                    <p>Simulate GRE sequences with variable TR, TE, and flip angles.</p>
-                </div>
-
-                <div class="card" style="opacity: 0.6; cursor: default;">
-                    <h3>Spin Echo (Coming Soon)</h3>
-                    <p>Explore T2 weighting and refueling pulses.</p>
-                </div>
-            </div>
-        </div>
-
         <!-- RF PULSE SIMULATOR VIEW -->
         <div id="rf-pulse-view" class="view">
             <div style="margin-bottom: 1rem; display: flex; justify-content: space-between; align-items: center;">
@@ -84,14 +38,3 @@
                 <div id="plot"></div>
             </div>
         </div>
-
-    </div>
-
-    <div id="status-bar">
-        <span id="status-text">Initializing environment...</span>
-        <span id="version-info">v1.0</span>
-    </div>
-
-    <script src="static/js/app.js"></script>
-</body>
-</html>

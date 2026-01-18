@@ -46,10 +46,13 @@ jobs:
           CFLAGS: "-g0 -O3"
         run: pyodide build
 
-      - name: Prepare Pages Artifact
+      - name: Build Web Application
         run: |
+          python scripts/build_web.py
           mkdir _site
           cp index.html _site/
+          mkdir -p _site/static
+          cp -r web/static/* _site/static/
 
           # Find the actual wheel filename
           WHEEL_FILE=$(basename $(ls dist/*.whl | head -n 1))
@@ -58,12 +61,13 @@ jobs:
           # Copy the wheel to the site directory
           cp "dist/$WHEEL_FILE" "_site/$WHEEL_FILE"
 
-          # Replace the placeholder in index.html with the actual filename
-          sed -i "s/WHEEL_FILE_PLACEHOLDER/$WHEEL_FILE/g" _site/index.html
+          # Replace the placeholder in app.js (which is now in static/js) with the actual filename
+          # We need to target _site/static/js/app.js since that's what is deployed
+          sed -i "s/WHEEL_FILE_PLACEHOLDER/$WHEEL_FILE/g" _site/static/js/app.js
 
           # DEBUG: Print the line containing WHEEL_FILENAME to verify replacement
-          echo "Verifying index.html content:"
-          grep "WHEEL_FILENAME =" _site/index.html
+          echo "Verifying app.js content:"
+          grep "WHEEL_FILENAME =" _site/static/js/app.js
 
           ls -R _site
 
