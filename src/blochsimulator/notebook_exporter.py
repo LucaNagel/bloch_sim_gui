@@ -41,7 +41,7 @@ class NotebookExporter:
         simulation_params: Dict,
         tissue_params: Dict,
         title: str = "Bloch Simulation Analysis",
-    ) -> nbformat.NotebookNode:
+    ) -> Any:
         """
         Create notebook that loads data from HDF5 file (Mode A).
 
@@ -148,7 +148,7 @@ class NotebookExporter:
         rf_waveform: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         title: str = "Bloch Simulation - Reproducible",
         waveform_filename: Optional[str] = None,
-    ) -> nbformat.NotebookNode:
+    ) -> Any:
         """
         Create notebook that re-runs simulation (Mode B).
 
@@ -761,7 +761,7 @@ print(f"  Result shape: {result['mx'].shape}")
 print(f"  Duration: {result['time'][-1]*1000:.3f} ms")
 """
 
-    def save_notebook(self, nb: nbformat.NotebookNode, filename: str):
+    def save_notebook(self, nb: Any, filename: str):
         """
         Save notebook to file.
 
