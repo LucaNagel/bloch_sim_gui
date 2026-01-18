@@ -17,6 +17,7 @@ from pathlib import Path
 from . import __version__
 
 # Import the Cython extension (will be available after building)
+HAS_CYTHON = False
 try:
     from .blochsimulator_cy import (
         simulate_bloch,
@@ -24,6 +25,8 @@ try:
         calculate_signal,
         design_rf_pulse,
     )
+
+    HAS_CYTHON = True
 except ImportError:
     print(
         "Warning: Cython extension not built. Run 'python setup.py build_ext --inplace' first."

@@ -1,5 +1,5 @@
 // --- CONFIGURATION ---
-const WHEEL_FILENAME = "WHEEL_FILE_PLACEHOLDER";
+const WHEEL_FILENAME = "blochsimulator-1.0.9-cp311-cp311-emscripten_3_1_46_wasm32.whl";
 
 // --- GLOBAL STATE ---
 let pyodide = null;
@@ -94,7 +94,7 @@ def init_plot():
     axs[0].grid(True, linestyle='--', alpha=0.5)
 
     # 2. Magnetization Evolution
-    axs[1].set_title("Magnetization (Center)")
+    axs[1].set_title("Magnetization")
     axs[1].set_xlabel("Time (ms)")
     axs[1].set_ylim(-1.1, 1.1)
     lines['mx'], = axs[1].plot([], [], label='Mx', color='r', alpha=0.6)
@@ -143,6 +143,8 @@ def update_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, vie
     time_ms = np.linspace(0, duration_ms, 400)
 
     freq_range = np.linspace(-1000, 1000, 80)
+
+    positions = np.array([[0, 0, 0]])  # Single position
 
 
 
@@ -194,7 +196,7 @@ def update_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, vie
 
         time_idx = int(np.argmin(np.abs(time_ms - view_time_ms)))
 
-        mx, my, mz = result['mx'][:, 0, freq_idx], result['my'][:, 0, freq_idx], result['mz'][:, 0, freq_idx]
+        mx, my, mz = result['mx'][:, time_idx, freq_idx], result['my'][:, time_idx, freq_idx], result['mz'][:, time_idx, freq_idx]
 
         mxy_prof = np.sqrt(result['mx'][time_idx, 0, :]**2 + result['my'][time_idx, 0, :]**2)
 
