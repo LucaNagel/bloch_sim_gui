@@ -13,7 +13,10 @@ from .simulator import (
     design_rf_pulse,
 )  # noqa: F401
 
-from . import notebook_exporter  # noqa: F401
+try:
+    from . import notebook_exporter
+except ImportError:
+    pass
 
 # visualization is available but not imported by default to avoid PyQt5 dependencies
 # from . import visualization

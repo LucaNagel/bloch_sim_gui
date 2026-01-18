@@ -11,8 +11,17 @@ Author: Bloch Simulator Team
 Date: 2024
 """
 
-import nbformat
-from nbformat.v4 import new_notebook, new_code_cell, new_markdown_cell
+from typing import List, Dict, Any, Optional
+import json
+
+try:
+    import nbformat
+    from nbformat.v4 import new_notebook, new_code_cell, new_markdown_cell
+
+    HAS_NBFORMAT = True
+except ImportError:
+    HAS_NBFORMAT = False
+    nbformat = None
 import numpy as np
 from typing import Dict, Optional, Tuple
 from pathlib import Path
