@@ -70,6 +70,7 @@ from js import document
 # Try importing, otherwise mock for UI testing if wheel is missing
 try:
     from blochsimulator import BlochSimulator, TissueParameters, design_rf_pulse
+    from gui import _compute_integration_factor_from_wave
     HAS_BACKEND = True
     sim = BlochSimulator(use_parallel=False)
 except ImportError:
@@ -99,7 +100,8 @@ def init_plot():
     axs[0].set_ylabel("Amplitude (uT)")
     lines['rf_real'], = axs[0].plot([], [], label='Real', color='#0056b3')
     lines['rf_imag'], = axs[0].plot([], [], label='Imag', color='#ff9900', alpha=0.7)
-    lines['time_line'], = axs[0].plot([], [], color='red', linestyle='--', alpha=0.8, zorder=10)
+    lines['rf_abs'], = axs[0].plot([], [], label='Abs', color='gray', alpha=0.7)
+    lines['time_line'], = axs[0].plot([], [], color='gray', linestyle=':', alpha=0.8, zorder=10,linewidth=0.5,zorder=10)
     axs[0].legend(loc='upper right', fontsize='small')
     axs[0].grid(True, linestyle='--', alpha=0.5)
 
@@ -110,7 +112,7 @@ def init_plot():
     lines['mx'], = axs[1].plot([], [], label='Mx', color='r', alpha=0.6)
     lines['my'], = axs[1].plot([], [], label='My', color='g', alpha=0.6)
     lines['mz'], = axs[1].plot([], [], label='Mz', color='b')
-    lines['time_line_2'], = axs[1].plot([], [], color='red', linestyle='--', alpha=0.8, zorder=10)
+    lines['time_line_2'], = axs[1].plot([], [], color='gray', linestyle=':', alpha=0.8, zorder=10,linewidth=0.5,zorder=10)
     axs[1].legend(loc='upper right', fontsize='small')
     axs[1].grid(True, linestyle='--', alpha=0.5)
 
@@ -120,7 +122,7 @@ def init_plot():
     axs[2].set_ylim(-1.1, 1.1)
     lines['mxy'], = axs[2].plot([], [], label='Mxy', color='purple')
     lines['mz_prof'], = axs[2].plot([], [], label='Mz', color='gray', linestyle='--')
-    lines['freq_line'], = axs[2].plot([], [], color='red', linestyle='--', alpha=0.8, zorder=10)
+    lines['freq_line'], = axs[2].plot([], [], color='gray', linestyle=':', alpha=0.8, zorder=10,linewidth=0.5,zorder=10)
     axs[2].legend(loc='upper right', fontsize='small')
     axs[2].grid(True, linestyle='--', alpha=0.5)
 
@@ -162,6 +164,21 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
             freq_offset=freq_offset_hz
         )
 
+        integration_factor = _compute_integration_factor_from_wave(b1_wave=b1, t_wave=time_s)
+        try:
+            tbw_val = 1 / integration_factor
+        except:
+            pass
+
+        b1, time_s = design_rf_pulse(
+            pulse_type=pulse_type,
+            duration=duration_s,
+            flip_angle=flip_angle,
+            time_bw_product=tbw_val,
+            npoints=npoints,
+            freq_offset=freq_offset_hz
+        )
+
         time_ms = time_s * 1e3
         gradients = np.zeros((len(time_s), 3))
 
@@ -180,7 +197,8 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
             "time_ms": time_ms,
             "freq_range": freq_range,
             "rf_real": np.real(b1),
-            "rf_imag": np.imag(b1)
+            "rf_imag": np.imag(b1),
+            "rf_abs": np.abs(b1)
         }
 
     else:
@@ -194,7 +212,8 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
             "time_ms": time_ms,
             "freq_range": freq_range,
             "rf_real": rf_real,
-            "rf_imag": rf_real
+            "rf_imag": rf_real,
+            "rf_abs": np.abs(rf_real)
         }
 
 def extract_view(view_freq_hz, view_time_ms):
@@ -253,10 +272,12 @@ def extract_view(view_freq_hz, view_time_ms):
     # 1. Update RF Plot
     lines['rf_real'].set_data(time_ms, last_result['rf_real'])
     lines['rf_imag'].set_data(time_ms, last_result['rf_imag'])
-    axs[0].relim()
-    axs[0].autoscale_view()
+    lines['rf_abs'].set_data(time_ms, last_result['rf_abs'])
     # Set indicator after autoscale to match current limits
     lines['time_line'].set_data([view_time_ms, view_time_ms], axs[0].get_ylim())
+    axs[0].relim()
+    # axs[0].autoscale_view()
+
 
     # 2. Update Magnetization Plot
     lines['mx'].set_data(time_ms, mx)
