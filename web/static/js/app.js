@@ -94,7 +94,7 @@ def init_plot():
     axs[0].set_ylabel("Amplitude (uT)")
     lines['rf_real'], = axs[0].plot([], [], label='Real', color='#0056b3')
     lines['rf_imag'], = axs[0].plot([], [], label='Imag', color='#ff9900', alpha=0.7)
-    lines['time_line'] = axs[0].axvline(0, color='black', linestyle='--', alpha=0.5)
+    lines['time_line'], = axs[0].plot([], [], color='black', linestyle='--', alpha=0.5)
     axs[0].legend(loc='upper right', fontsize='small')
     axs[0].grid(True, linestyle='--', alpha=0.5)
 
@@ -105,16 +105,17 @@ def init_plot():
     lines['mx'], = axs[1].plot([], [], label='Mx', color='r', alpha=0.6)
     lines['my'], = axs[1].plot([], [], label='My', color='g', alpha=0.6)
     lines['mz'], = axs[1].plot([], [], label='Mz', color='b')
+    lines['time_line_2'] = axs[1].axvline(0, color='gray', linestyle='-', alpha=0.5, linewidth=0.5)
     axs[1].legend(loc='upper right', fontsize='small')
     axs[1].grid(True, linestyle='--', alpha=0.5)
 
     # 3. Frequency Profile
     axs[2].set_title("Excitation Profile")
     axs[2].set_xlabel("Frequency (Hz)")
-    axs[2].set_ylim(-2.1, 1.1)
+    axs[2].set_ylim(-1.1, 1.1)
     lines['mxy'], = axs[2].plot([], [], label='Mxy', color='purple')
     lines['mz_prof'], = axs[2].plot([], [], label='Mz', color='gray', linestyle='--')
-    lines['freq_line'], = axs[2].plot([], [], label='Freq Offset', color='black', linestyle='--', alpha=0.5)
+    lines['freq_line'], = axs[2].plot([], [], label='Freq Offset', color='gray', linestyle='-', alpha=0.5, linewidth=0.5)
     axs[2].legend(loc='upper right', fontsize='small')
     axs[2].grid(True, linestyle='--', alpha=0.5)
 
@@ -243,9 +244,9 @@ def extract_view(view_freq_hz, view_time_ms):
     # 1. Update RF Plot
     lines['rf_real'].set_data(time_ms, last_result['rf_real'])
     lines['rf_imag'].set_data(time_ms, last_result['rf_imag'])
-    lines['time_line'].set_data([view_time_ms, view_time_ms], [np.min(last_result['rf_real'])-0.1, np.max(last_result['rf_real'])+0.1])
     axs[0].relim()
     axs[0].autoscale_view()
+    lines['time_line'].set_data([view_time_ms, view_time_ms], axs[0].get_ylim())
 
     # 2. Update Magnetization Plot
     lines['mx'].set_data(time_ms, mx)
@@ -257,7 +258,7 @@ def extract_view(view_freq_hz, view_time_ms):
     # 3. Update Profile Plot
     lines['mxy'].set_data(freq_range, mxy_prof)
     lines['mz_prof'].set_data(freq_range, mz_prof)
-    lines['freq_line'].set_data([view_freq_hz, view_freq_hz], [-1.1, 1.1])
+    lines['freq_line'].set_data([view_freq_hz, view_freq_hz], axs[2].get_ylim())
     axs[2].set_xlim(np.min(freq_range), np.max(freq_range))
 
     fig.canvas.draw()
