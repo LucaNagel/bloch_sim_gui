@@ -31,6 +31,30 @@ function toggleLog() {
     }
 }
 
+function logMessage(msg, level = 'info') {
+    const errorLog = document.getElementById('error-log');
+    const errorContent = document.getElementById('error-log-content');
+    if (errorLog && errorContent) {
+        // Remove 'No errors reported' if it's there
+        if (errorContent.innerText === 'No errors reported.') {
+            errorContent.innerText = '';
+        }
+
+        const timestamp = new Date().toLocaleTimeString();
+        const prefix = level.toUpperCase();
+        const line = document.createElement('div');
+        line.style.marginBottom = '2px';
+        line.style.borderBottom = '1px solid #eee';
+        line.innerText = `[${timestamp}] ${prefix}: ${msg}`;
+        if (level === 'error') line.style.color = '#d32f2f';
+        if (level === 'debug') line.style.color = '#666';
+
+        errorContent.appendChild(line);
+        // Auto-scroll to bottom
+        errorLog.scrollTop = errorLog.scrollHeight;
+    }
+}
+
 // --- INITIALIZATION ---
 async function init() {
     const status = document.getElementById("status-text");
@@ -53,19 +77,37 @@ async function init() {
 
         try {
             await micropip.install(wheelUrl);
+            logMessage("Bloch Simulator package installed successfully.");
         } catch (e) {
             console.warn("Wheel install failed (expected in dev without build):", e);
             status.innerText = "Dev mode: Wheel missing (Simulation mock)";
+            logMessage("Running in dev mode (Mocking simulation backend)", "debug");
         }
 
         // 4. Setup Python Environment
         status.innerText = "Starting engine...";
         await pyodide.runPythonAsync(`
+import sys
 import numpy as np
 import matplotlib
 matplotlib.use("module://matplotlib_pyodide.wasm_backend")
 import matplotlib.pyplot as plt
-from js import document
+from js import document, logMessage
+
+# Redirect stdout/stderr to our JS log window
+class WebLogger:
+    def __init__(self, level="info"):
+        self.level = level
+    def write(self, text):
+        if text.strip():
+            logMessage(text.strip(), self.level)
+    def flush(self):
+        pass
+
+sys.stdout = WebLogger("info")
+sys.stderr = WebLogger("error")
+
+print("Python engine initialized. Redirection active.")
 
 # Try importing, otherwise mock for UI testing if wheel is missing
 try:
@@ -73,6 +115,7 @@ try:
     from gui import _compute_integration_factor_from_wave
     HAS_BACKEND = True
     sim = BlochSimulator(use_parallel=False)
+    print("Backend loaded successfully.")
 except ImportError:
     HAS_BACKEND = False
     print("Warning: Backend not found. Using mocks.")
@@ -101,7 +144,7 @@ def init_plot():
     lines['rf_real'], = axs[0].plot([], [], label='Real', color='#0056b3')
     lines['rf_imag'], = axs[0].plot([], [], label='Imag', color='#ff9900', alpha=0.7)
     lines['rf_abs'], = axs[0].plot([], [], label='Abs', color='gray', alpha=0.7)
-    lines['time_line'], = axs[0].plot([], [], color='gray', linestyle=':', alpha=0.8, linewidth=0.5,zorder=10)
+    lines['time_line'], = axs[0].plot([], [], color='gray', linestyle=':', alpha=0.8, linewidth=0.5,zorder=3)
     axs[0].legend(loc='upper right', fontsize='small')
     axs[0].grid(True, linestyle='--', alpha=0.5)
 
@@ -112,7 +155,7 @@ def init_plot():
     lines['mx'], = axs[1].plot([], [], label='Mx', color='r', alpha=0.6)
     lines['my'], = axs[1].plot([], [], label='My', color='g', alpha=0.6)
     lines['mz'], = axs[1].plot([], [], label='Mz', color='b')
-    lines['time_line_2'], = axs[1].plot([], [], color='gray', linestyle=':', alpha=0.8, linewidth=0.5,zorder=10)
+    lines['time_line_2'], = axs[1].plot([], [], color='gray', linestyle=':', alpha=0.8, linewidth=0.5,zorder=4)
     axs[1].legend(loc='upper right', fontsize='small')
     axs[1].grid(True, linestyle='--', alpha=0.5)
 
@@ -122,7 +165,7 @@ def init_plot():
     axs[2].set_ylim(-1.1, 1.1)
     lines['mxy'], = axs[2].plot([], [], label='Mxy', color='purple')
     lines['mz_prof'], = axs[2].plot([], [], label='Mz', color='gray', linestyle='--')
-    lines['freq_line'], = axs[2].plot([], [], color='gray', linestyle=':', alpha=0.8, linewidth=0.5,zorder=10)
+    lines['freq_line'], = axs[2].plot([], [], color='gray', linestyle=':', alpha=0.8, linewidth=0.5,zorder=2)
     axs[2].legend(loc='upper right', fontsize='small')
     axs[2].grid(True, linestyle='--', alpha=0.5)
 
@@ -386,8 +429,7 @@ function triggerSimulation(event, forceRun = false) {
 
             statusEl.innerText = "Ready";
             const errorLog = document.getElementById('error-log');
-            if (errorLog) errorLog.style.display = 'none';
-
+            // Don't auto-hide on success if the user has it open, just clear potential error status
         } catch (e) {
             console.error("Sim Error", e);
             let msg = e.message || e.toString();
@@ -395,12 +437,7 @@ function triggerSimulation(event, forceRun = false) {
                 msg = msg.split("PythonError:")[1];
             }
             statusEl.innerText = "Error (Details in Log)";
-            const errorLog = document.getElementById('error-log');
-            const errorContent = document.getElementById('error-log-content');
-            if (errorLog && errorContent) {
-                errorLog.style.display = 'block';
-                errorContent.innerText = msg;
-            }
+            logMessage(msg, "error");
         }
     }, 50);
 }
