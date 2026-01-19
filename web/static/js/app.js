@@ -150,51 +150,84 @@ fig, axs = None, None
 lines = {}
 last_result = None
 last_params = {}
+is_3d_mode = False
 
 def init_plot():
-    global fig, axs, lines
+    global fig, axs, lines, is_3d_mode
     plt.clf()
-    fig, axs = plt.subplots(1, 3, figsize=(12, 4.5), constrained_layout=True)
+    fig = plt.figure(figsize=(12, 4.5), constrained_layout=True)
     fig.patch.set_facecolor('#ffffff')
+    fig.suptitle("RF Pulse Simulations", fontsize=16, fontweight='bold')
 
-    # Add zero lines to all
-    for ax in axs:
-        ax.axhline(0, color='black', linewidth=0.8, alpha=0.3)
-        ax.axvline(0, color='black', linewidth=0.8, alpha=0.3)
+    # Create axes manually to support dynamic switching
+    ax0 = fig.add_subplot(1, 3, 1)
+    ax1 = fig.add_subplot(1, 3, 2)
+    ax2 = fig.add_subplot(1, 3, 3)
+    axs = [ax0, ax1, ax2]
+    is_3d_mode = False
 
-    # 1. RF Pulse
+    # 1. RF Pulse (Static)
     axs[0].set_title("RF Pulse Shape")
     axs[0].set_xlabel("Time (ms)")
     axs[0].set_ylabel("Amplitude (uT)")
+    axs[0].axhline(0, color='black', linewidth=0.8, alpha=0.3)
     lines['rf_real'], = axs[0].plot([], [], label='Real', color='#0056b3')
     lines['rf_imag'], = axs[0].plot([], [], label='Imag', color='#ff9900', alpha=0.7)
     lines['rf_abs'], = axs[0].plot([], [], label='Abs', color='gray', alpha=0.7)
-    lines['time_line'], = axs[0].plot([], [], color='gray', linestyle=':', alpha=0.8, linewidth=0.5,zorder=3)
+    lines['time_line'], = axs[0].plot([], [], color='#e74c3c', linestyle='-', alpha=1.0, linewidth=2.0, zorder=10)
     axs[0].legend(loc='upper right', fontsize='small')
     axs[0].grid(True, linestyle='--', alpha=0.5)
 
-    # 2. Magnetization Evolution
-    axs[1].set_title("Magnetization")
-    axs[1].set_xlabel("Time (ms)")
-    axs[1].set_ylim(-1.1, 1.1)
-    lines['mx'], = axs[1].plot([], [], label='Mx', color='r', alpha=0.6)
-    lines['my'], = axs[1].plot([], [], label='My', color='g', alpha=0.6)
-    lines['mz'], = axs[1].plot([], [], label='Mz', color='b')
-    lines['time_line_2'], = axs[1].plot([], [], color='gray', linestyle=':', alpha=0.8, linewidth=0.5,zorder=4)
-    axs[1].legend(loc='upper right', fontsize='small')
-    axs[1].grid(True, linestyle='--', alpha=0.5)
+    # 2. Magnetization (Dynamic 2D/3D)
+    # Default is 2D
+    _setup_2d_mag_axes()
 
-    # 3. Frequency Profile
+    # 3. Frequency Profile (Static)
     axs[2].set_title("Excitation Profile")
     axs[2].set_xlabel("Frequency (Hz)")
     axs[2].set_ylim(-1.1, 1.1)
+    axs[2].axhline(0, color='black', linewidth=0.8, alpha=0.3)
+    axs[2].axvline(0, color='black', linewidth=0.8, alpha=0.3)
     lines['mxy'], = axs[2].plot([], [], label='Mxy', color='purple')
     lines['mz_prof'], = axs[2].plot([], [], label='Mz', color='gray', linestyle='--')
-    lines['freq_line'], = axs[2].plot([], [], color='gray', linestyle=':', alpha=0.8, linewidth=0.5,zorder=2)
+    lines['freq_line'], = axs[2].plot([], [], color='#e74c3c', linestyle='-', alpha=1.0, linewidth=2.0, zorder=10)
     axs[2].legend(loc='upper right', fontsize='small')
     axs[2].grid(True, linestyle='--', alpha=0.5)
 
     plt.show()
+
+def _setup_2d_mag_axes():
+    global axs, lines
+    axs[1].set_title("Magnetization")
+    axs[1].set_xlabel("Time (ms)")
+    axs[1].set_ylim(-1.1, 1.1)
+    axs[1].axhline(0, color='black', linewidth=0.8, alpha=0.3)
+    lines['mx'], = axs[1].plot([], [], label='Mx', color='r', alpha=0.6)
+    lines['my'], = axs[1].plot([], [], label='My', color='g', alpha=0.6)
+    lines['mz'], = axs[1].plot([], [], label='Mz', color='b')
+    lines['time_line_2'], = axs[1].plot([], [], color='#e74c3c', linestyle='-', alpha=1.0, linewidth=2.0, zorder=10)
+    axs[1].legend(loc='upper right', fontsize='small')
+    axs[1].grid(True, linestyle='--', alpha=0.5)
+
+def update_plot_mode(want_3d):
+    global is_3d_mode, axs, fig, lines
+    if want_3d == is_3d_mode:
+        return
+
+    # Remove old axes
+    fig.delaxes(axs[1])
+
+    if want_3d:
+        # Create 3D axes
+        axs[1] = fig.add_subplot(1, 3, 2, projection='3d')
+        axs[1].set_title("Magnetization Path")
+        # No permanent lines in 3D, we redraw
+    else:
+        # Create 2D axes
+        axs[1] = fig.add_subplot(1, 3, 2)
+        _setup_2d_mag_axes()
+
+    is_3d_mode = want_3d
 
 def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_angle, freq_range_val, freq_points, tbw):
     global last_result, last_params
@@ -282,11 +315,14 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
             "rf_abs": np.abs(rf_real)
         }
 
-def extract_view(view_freq_hz, view_time_ms):
+def extract_view(view_freq_hz, view_time_ms, want_3d):
     global last_result, fig, axs, lines
 
     if last_result is None or fig is None:
         return
+
+    # Update mode (swaps axes if needed)
+    update_plot_mode(want_3d)
 
     time_ms = last_result["time_ms"]
     freq_range = last_result["freq_range"]
@@ -350,12 +386,37 @@ def extract_view(view_freq_hz, view_time_ms):
     lines['time_line'].set_data([view_time_ms, view_time_ms], axs[0].get_ylim())
 
     # 2. Update Magnetization Plot
-    lines['mx'].set_data(time_ms, mx)
-    lines['my'].set_data(time_ms, my)
-    lines['mz'].set_data(time_ms, mz)
-    axs[1].set_xlim(0, np.max(time_ms))
-    axs[1].set_ylim(-1.1, 1.1)
-    lines['time_line_2'].set_data([view_time_ms, view_time_ms], axs[1].get_ylim())
+    if want_3d:
+        # 3D Plot logic
+        axs[1].cla()
+        axs[1].set_title(f"Trajectory @ {int(view_freq_hz)} Hz")
+
+        # Draw axes/sphere context (simplified)
+        # Draw a unit sphere wireframe or just axes
+        # For performance in web, simple axes and unit circle guides are better
+        axs[1].set_xlim(-1, 1)
+        axs[1].set_ylim(-1, 1)
+        axs[1].set_zlim(-1, 1)
+        axs[1].set_xlabel('Mx')
+        axs[1].set_ylabel('My')
+        axs[1].set_zlabel('Mz')
+
+        # Plot path up to current time
+        # Full path ghost
+        axs[1].plot(mx, my, mz, color='gray', alpha=0.3, linewidth=1)
+        # Active path up to time_idx
+        axs[1].plot(mx[:time_idx+1], my[:time_idx+1], mz[:time_idx+1], color='blue', linewidth=2)
+        # Current tip
+        axs[1].scatter([mx_t], [my_t], [mz_t], color='red', s=50)
+
+    else:
+        # 2D Plot logic (Standard)
+        lines['mx'].set_data(time_ms, mx)
+        lines['my'].set_data(time_ms, my)
+        lines['mz'].set_data(time_ms, mz)
+        axs[1].set_xlim(0, np.max(time_ms))
+        axs[1].set_ylim(-1.1, 1.1)
+        lines['time_line_2'].set_data([view_time_ms, view_time_ms], axs[1].get_ylim())
 
     # 3. Update Profile Plot
     lines['mxy'].set_data(freq_range, mxy_prof)
@@ -400,6 +461,10 @@ function triggerSimulation(event, forceRun = false) {
         const dur = parseFloat(durationInput.value);
         if (!isNaN(dur)) {
             viewTimeInput.max = dur;
+            // If duration changed, snap view to end
+            if (sourceId === 'duration') {
+                viewTimeInput.value = dur;
+            }
             if (parseFloat(viewTimeInput.value) > dur) {
                 viewTimeInput.value = dur;
             }
@@ -440,7 +505,8 @@ function triggerSimulation(event, forceRun = false) {
                 fPoints: parseFloat(document.getElementById("freq_points").value),
                 tbw: parseFloat(document.getElementById("tbw").value),
                 viewFreq: parseFloat(document.getElementById("view_freq").value),
-                viewTime: parseFloat(document.getElementById("view_time").value)
+                viewTime: parseFloat(document.getElementById("view_time").value),
+                is3d: document.getElementById("toggle_3d").checked
             };
 
             const runSim = pyodide.globals.get("run_simulation");
@@ -452,7 +518,7 @@ function triggerSimulation(event, forceRun = false) {
             }
 
             if (extractView) {
-                extractView(vals.viewFreq, vals.viewTime);
+                extractView(vals.viewFreq, vals.viewTime, vals.is3d);
             }
 
             statusEl.innerText = "Ready";
