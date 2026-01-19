@@ -385,36 +385,37 @@ def extract_view(view_freq_hz, view_time_ms, want_3d):
     # Set indicator after limits are finalized
     lines['time_line'].set_data([view_time_ms, view_time_ms], axs[0].get_ylim())
 
-        # 2. Update Magnetization Plot
-        if want_3d:
-            # 3D Plot logic
-            axs[1].cla()
-            axs[1].set_title(f"Trajectory @ {int(view_freq_hz)} Hz")
+    # 2. Update Magnetization Plot
+    if want_3d:
+        # 3D Plot logic
+        axs[1].cla()
+        axs[1].set_title(f"Trajectory @ {int(view_freq_hz)} Hz")
 
-            # Fixed limits for Bloch Sphere
-            axs[1].set_xlim(-1, 1)
-            axs[1].set_ylim(-1, 1)
-            axs[1].set_zlim(-1, 1)
-            axs[1].set_xlabel('Mx')
-            axs[1].set_ylabel('My')
-            axs[1].set_zlabel('Mz')
+        # Fixed limits for Bloch Sphere
+        axs[1].set_xlim(-1, 1)
+        axs[1].set_ylim(-1, 1)
+        axs[1].set_zlim(-1, 1)
+        axs[1].set_xlabel('Mx')
+        axs[1].set_ylabel('My')
+        axs[1].set_zlabel('Mz')
 
-            # Draw unit circles for context (Bloch sphere visual aid)
-            t_circ = np.linspace(0, 2*np.pi, 60)
-            axs[1].plot(np.cos(t_circ), np.sin(t_circ), 0, color='gray', linestyle=':', alpha=0.2, linewidth=0.5)
-            axs[1].plot(np.cos(t_circ), 0, np.sin(t_circ), color='gray', linestyle=':', alpha=0.2, linewidth=0.5)
+        # Draw unit circles for context (Bloch sphere visual aid)
+        t_circ = np.linspace(0, 2*np.pi, 60)
+        axs[1].plot(np.cos(t_circ), np.sin(t_circ), 0, color='gray', linestyle=':', alpha=0.2, linewidth=0.5)
+        axs[1].plot(np.cos(t_circ), 0, np.sin(t_circ), color='gray', linestyle=':', alpha=0.2, linewidth=0.5)
 
-            # Plot the full magnetization path
-            axs[1].plot(mx, my, mz, color='#0056b3', linewidth=1.5, alpha=0.8)
+        # Plot the full magnetization path
+        axs[1].plot(mx, my, mz, color='#0056b3', linewidth=1.5, alpha=0.8)
 
-            # Draw vector from origin to current point
-            m_curr = [mx[time_idx], my[time_idx], mz[time_idx]]
-            axs[1].plot([0, m_curr[0]], [0, m_curr[1]], [0, m_curr[2]], color='red', linewidth=2, alpha=0.6)
+        # Draw vector from origin to current point
+        m_curr = [mx[time_idx], my[time_idx], mz[time_idx]]
+        axs[1].plot([0, m_curr[0]], [0, m_curr[1]], [0, m_curr[2]], color='red', linewidth=2, alpha=0.6)
 
-            # Plot indicator dot (current point)
-            axs[1].scatter([m_curr[0]], [m_curr[1]], [m_curr[2]], color='red', s=25, zorder=20)
+        # Plot indicator dot (current point)
+        axs[1].scatter([m_curr[0]], [m_curr[1]], [m_curr[2]], color='red', s=25, zorder=20)
 
-        else:        # 2D Plot logic (Standard)
+    else:
+        # 2D Plot logic (Standard)
         lines['mx'].set_data(time_ms, mx)
         lines['my'].set_data(time_ms, my)
         lines['mz'].set_data(time_ms, mz)
