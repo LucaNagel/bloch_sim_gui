@@ -101,7 +101,7 @@ def init_plot():
     lines['rf_real'], = axs[0].plot([], [], label='Real', color='#0056b3')
     lines['rf_imag'], = axs[0].plot([], [], label='Imag', color='#ff9900', alpha=0.7)
     lines['rf_abs'], = axs[0].plot([], [], label='Abs', color='gray', alpha=0.7)
-    lines['time_line'], = axs[0].plot([], [], color='gray', linestyle=':', alpha=0.8, zorder=10,linewidth=0.5,zorder=10)
+    lines['time_line'], = axs[0].plot([], [], color='gray', linestyle=':', alpha=0.8, linewidth=0.5,zorder=10)
     axs[0].legend(loc='upper right', fontsize='small')
     axs[0].grid(True, linestyle='--', alpha=0.5)
 
@@ -112,7 +112,7 @@ def init_plot():
     lines['mx'], = axs[1].plot([], [], label='Mx', color='r', alpha=0.6)
     lines['my'], = axs[1].plot([], [], label='My', color='g', alpha=0.6)
     lines['mz'], = axs[1].plot([], [], label='Mz', color='b')
-    lines['time_line_2'], = axs[1].plot([], [], color='gray', linestyle=':', alpha=0.8, zorder=10,linewidth=0.5,zorder=10)
+    lines['time_line_2'], = axs[1].plot([], [], color='gray', linestyle=':', alpha=0.8, linewidth=0.5,zorder=10)
     axs[1].legend(loc='upper right', fontsize='small')
     axs[1].grid(True, linestyle='--', alpha=0.5)
 
@@ -122,7 +122,7 @@ def init_plot():
     axs[2].set_ylim(-1.1, 1.1)
     lines['mxy'], = axs[2].plot([], [], label='Mxy', color='purple')
     lines['mz_prof'], = axs[2].plot([], [], label='Mz', color='gray', linestyle='--')
-    lines['freq_line'], = axs[2].plot([], [], color='gray', linestyle=':', alpha=0.8, zorder=10,linewidth=0.5,zorder=10)
+    lines['freq_line'], = axs[2].plot([], [], color='gray', linestyle=':', alpha=0.8, linewidth=0.5,zorder=10)
     axs[2].legend(loc='upper right', fontsize='small')
     axs[2].grid(True, linestyle='--', alpha=0.5)
 
