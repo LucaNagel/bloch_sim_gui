@@ -399,22 +399,21 @@ def extract_view(view_freq_hz, view_time_ms, want_3d):
         axs[1].set_ylabel('My')
         axs[1].set_zlabel('Mz')
 
-        # Draw unit circles for context (Bloch sphere visual aid)
-        t_circ = np.linspace(0, 2*np.pi, 60)
-        z_circ = np.zeros_like(t_circ)
-        axs[1].plot(np.cos(t_circ), np.sin(t_circ), z_circ, color='gray', linestyle=':', alpha=0.2, linewidth=0.5)
-        axs[1].plot(np.cos(t_circ), z_circ, np.sin(t_circ), color='gray', linestyle=':', alpha=0.2, linewidth=0.5)
+                # Draw unit circles for context (Bloch sphere visual aid)
+                t_circ = np.linspace(0, 2*np.pi, 60)
+                z_circ = np.zeros_like(t_circ)
+                axs[1].plot(np.cos(t_circ), np.sin(t_circ), zs=z_circ, color='gray', linestyle=':', alpha=0.2, linewidth=0.5)
+                axs[1].plot(np.cos(t_circ), z_circ, zs=np.sin(t_circ), color='gray', linestyle=':', alpha=0.2, linewidth=0.5)
 
-        # Plot the full magnetization path
-        axs[1].plot(mx, my, mz, color='#0056b3', linewidth=1.5, alpha=0.8)
+                # Plot the full magnetization path
+                axs[1].plot(mx, my, zs=mz, color='#0056b3', linewidth=1.5, alpha=0.8)
 
-        # Draw vector from origin to current point
-        m_curr = [mx[time_idx], my[time_idx], mz[time_idx]]
-        axs[1].plot([0, m_curr[0]], [0, m_curr[1]], [0, m_curr[2]], color='red', linewidth=2, alpha=0.6)
+                # Draw vector from origin to current point
+                m_curr = [mx[time_idx], my[time_idx], mz[time_idx]]
+                axs[1].plot([0, m_curr[0]], [0, m_curr[1]], zs=[0, m_curr[2]], color='red', linewidth=2, alpha=0.6)
 
-        # Plot indicator dot (current point)
-        axs[1].scatter([m_curr[0]], [m_curr[1]], [m_curr[2]], color='red', s=25, zorder=20)
-
+                # Plot indicator dot (current point)
+                axs[1].scatter([m_curr[0]], [m_curr[1]], [m_curr[2]], color='red', s=25, zorder=20)
     else:
         # 2D Plot logic (Standard)
         lines['mx'].set_data(time_ms, mx)
