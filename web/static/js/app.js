@@ -32,12 +32,13 @@ function toggleLog() {
 }
 
 function logMessage(msg, level = 'info') {
+    console.log(`[Log] ${level}: ${msg}`);
     const errorLog = document.getElementById('error-log');
     const errorContent = document.getElementById('error-log-content');
     if (errorLog && errorContent) {
         // Remove 'No errors reported' if it's there
-        if (errorContent.innerText === 'No errors reported.') {
-            errorContent.innerText = '';
+        if (errorContent.textContent.includes('No errors reported')) {
+            errorContent.textContent = '';
         }
 
         const timestamp = new Date().toLocaleTimeString();
@@ -45,15 +46,19 @@ function logMessage(msg, level = 'info') {
         const line = document.createElement('div');
         line.style.marginBottom = '2px';
         line.style.borderBottom = '1px solid #eee';
+        line.style.padding = '2px 0';
         line.innerText = `[${timestamp}] ${prefix}: ${msg}`;
+
         if (level === 'error') line.style.color = '#d32f2f';
-        if (level === 'debug') line.style.color = '#666';
+        else if (level === 'debug') line.style.color = '#666';
+        else line.style.color = '#333';
 
         errorContent.appendChild(line);
         // Auto-scroll to bottom
         errorLog.scrollTop = errorLog.scrollHeight;
     }
 }
+window.logMessage = logMessage;
 
 // --- INITIALIZATION ---
 async function init() {
@@ -86,6 +91,7 @@ async function init() {
 
         // 4. Setup Python Environment
         status.innerText = "Starting engine...";
+        logMessage("Initializing Python environment...");
         await pyodide.runPythonAsync(`
 import sys
 import numpy as np
@@ -99,7 +105,7 @@ class WebLogger:
     def __init__(self, level="info"):
         self.level = level
     def write(self, text):
-        if text.strip():
+        if text and text.strip():
             logMessage(text.strip(), self.level)
     def flush(self):
         pass
@@ -107,18 +113,18 @@ class WebLogger:
 sys.stdout = WebLogger("info")
 sys.stderr = WebLogger("error")
 
-print("Python engine initialized. Redirection active.")
+print("Python redirection active.")
 
 # Try importing, otherwise mock for UI testing if wheel is missing
 try:
     from blochsimulator import BlochSimulator, TissueParameters, design_rf_pulse
-    from gui import _compute_integration_factor_from_wave
+    from blochsimulator.gui import _compute_integration_factor_from_wave
     HAS_BACKEND = True
     sim = BlochSimulator(use_parallel=False)
-    print("Backend loaded successfully.")
-except ImportError:
+    print("Bloch Simulator backend loaded.")
+except ImportError as e:
     HAS_BACKEND = False
-    print("Warning: Backend not found. Using mocks.")
+    print(f"Warning: Backend not found ({e}). Using mocks.")
 
 # Global State
 fig, axs = None, None
