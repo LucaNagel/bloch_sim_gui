@@ -155,9 +155,13 @@ is_3d_mode = False
 def init_plot():
     global fig, axs, lines, is_3d_mode
     plt.clf()
-    fig = plt.figure(figsize=(12, 4.5), constrained_layout=True)
+    # Disable constrained_layout to prevent jumping
+    fig = plt.figure(figsize=(12, 4.5), constrained_layout=False)
     fig.patch.set_facecolor('#ffffff')
     fig.suptitle("RF Pulse Simulations", fontsize=16, fontweight='bold')
+
+    # Fix margins manually
+    fig.subplots_adjust(left=0.06, right=0.96, bottom=0.12, top=0.88, wspace=0.25)
 
     # Create axes manually to support dynamic switching
     ax0 = fig.add_subplot(1, 3, 1)
@@ -395,12 +399,16 @@ def extract_view(view_freq_hz, view_time_ms, want_3d):
         axs[1].set_xlim(-1, 1)
         axs[1].set_ylim(-1, 1)
         axs[1].set_zlim(-1, 1)
-        axs[1].set_xlabel('Mx')
-        axs[1].set_ylabel('My')
-        axs[1].set_zlabel('Mz')
+                axs[1].set_xlabel('Mx')
+                axs[1].set_ylabel('My')
+                axs[1].set_zlabel('Mz')
 
-        # Draw unit circles for context (Bloch sphere visual aid)
-        t_circ = np.linspace(0, 2*np.pi, 60)
+                # Draw Cartesian Axes
+                axs[1].plot([-1, 1], [0, 0], zs=[0, 0], color='black', linewidth=0.8, alpha=0.3)
+                axs[1].plot([0, 0], [-1, 1], zs=[0, 0], color='black', linewidth=0.8, alpha=0.3)
+                axs[1].plot([0, 0], [0, 0], zs=[-1, 1], color='black', linewidth=0.8, alpha=0.3)
+
+                # Draw unit circles for context (Bloch sphere visual aid)        t_circ = np.linspace(0, 2*np.pi, 60)
         z_circ = np.zeros_like(t_circ)
         axs[1].plot(np.cos(t_circ), np.sin(t_circ), zs=z_circ, color='gray', linestyle=':', alpha=0.2, linewidth=0.5)
         axs[1].plot(np.cos(t_circ), z_circ, zs=np.sin(t_circ), color='gray', linestyle=':', alpha=0.2, linewidth=0.5)
