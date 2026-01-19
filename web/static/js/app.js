@@ -223,7 +223,7 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
         # Ensure TBW is sane
         tbw_val = float(tbw) if tbw > 0 else 4.0
 
-        print(f"1. Simulation: Pulse={pulse_type}, Flip={flip_angle}, Dur={duration_ms}ms, TBW={tbw_val:.2f}")
+        print(f"Simulation: Pulse={pulse_type}, Flip={flip_angle}, Dur={duration_ms}ms, TBW={tbw_val:.2f}")
 
         b1, time_s = design_rf_pulse(
             pulse_type=pulse_type,
@@ -234,26 +234,16 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
             freq_offset=freq_offset_hz
         )
 
+        # Calculate integration factor (matching GUI logic)
         integration_factor = _compute_integration_factor_from_wave(b1_wave=b1, t_wave=time_s)
-        print(f"Pulse analysis: Pulse={pulse_type}, area_factor={integration_factor:.4f}")
         try:
-            tbw_val = 1 / integration_factor
-            # Update GUI
-            document.getElementById("tbw").value = str(round(tbw_val, 2))
+            if integration_factor > 0:
+                eff_tbw = 1.0 / integration_factor
+                print(f"Pulse analysis: Pulse={pulse_type}, Integration Factor={integration_factor:.4f}, Effective TBW={eff_tbw:.4f}")
+            else:
+                print(f"Pulse analysis: Pulse={pulse_type}, Integration Factor={integration_factor:.4f}")
         except Exception as e:
-            print(f"TBW update error: {e}")
-            pass
-
-        print(f"2. Simulation: Pulse={pulse_type}, Flip={flip_angle}, Dur={duration_ms}ms, TBW={tbw_val:.2f}")
-
-        b1, time_s = design_rf_pulse(
-            pulse_type=pulse_type,
-            duration=duration_s,
-            flip_angle=flip_angle,
-            time_bw_product=tbw_val,
-            npoints=npoints,
-            freq_offset=freq_offset_hz
-        )
+            print(f"Analysis error: {e}")
 
         time_ms = time_s * 1e3
         gradients = np.zeros((len(time_s), 3))
