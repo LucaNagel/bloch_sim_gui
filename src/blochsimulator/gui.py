@@ -85,6 +85,8 @@ from .visualization import (
     imageio as vz_imageio,
 )
 
+from .slice_explorer import SliceSelectionExplorer
+
 # Import phantom module for 2D/3D phantom simulation
 try:
     from .phantom import Phantom, PhantomFactory
@@ -4530,6 +4532,10 @@ class BlochSimulatorGUI(QMainWindow):
 
         # === RF PULSE DESIGN TAB ===
         self.tab_widget.addTab(self.rf_designer_tab, "RF Design")
+
+        # === SLICE EXPLORER TAB ===
+        self.slice_explorer = SliceSelectionExplorer(self)
+        self.tab_widget.addTab(self.slice_explorer, "Slice Explorer")
 
         # Wire up signals for the panel instance (tab instance is wired via self.rf_designer alias earlier)
         self.rf_designer_panel.pulse_changed.connect(

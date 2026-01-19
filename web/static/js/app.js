@@ -14,13 +14,54 @@ function router(viewName) {
 
     // Show target view
     const target = document.getElementById(viewName + '-view');
-    if (target) {
-        target.classList.add('active');
+    // Handle mismatch naming for rf-pulse (rf-explorer.html uses rf-pulse-view but router arg might be 'rf-pulse' or 'rf_explorer'?)
+    // Partial says id="rf-pulse-view".
+    // Partial for slice says id="slice-explorer-view".
+
+    // Normalize view names
+    let targetId = viewName + '-view';
+    if (viewName === 'home') targetId = 'home-view';
+    if (viewName === 'rf-pulse') targetId = 'rf-pulse-view';
+    if (viewName === 'slice-explorer') targetId = 'slice-explorer-view';
+
+    const viewEl = document.getElementById(targetId);
+    if (viewEl) {
+        viewEl.classList.add('active');
     }
 
-    // Trigger sim if entering sim view and ready
-    if (viewName === 'rf-pulse' && isPyodideReady) {
-        triggerSimulation(null, true);
+    if (!isPyodideReady) return;
+
+    // View-specific initialization
+    if (viewName === 'rf-pulse') {
+        // Switch to RF plot layout
+        try {
+             pyodide.globals.get("init_plot")();
+             triggerSimulation(null, true);
+        } catch(e) { console.error(e); }
+
+        // Move canvas if possible (Matplotlib Pyodide usually targets document.body or specific div if configured)
+        // We will just let it be for now, assuming it finds the visible container or we might need a specialized move
+        moveCanvasTo('plot');
+    }
+
+    if (viewName === 'slice-explorer') {
+        try {
+            pyodide.globals.get("init_slice_plot")();
+            triggerSliceSimulation();
+        } catch(e) { console.error(e); }
+        moveCanvasTo('slice-plot-container');
+    }
+}
+
+function moveCanvasTo(containerId) {
+    const container = document.getElementById(containerId);
+    // Find canvas - usually it's a div with class 'mpld3-figure' or just the last canvas/div appended by pyodide
+    // Matplotlib-pyodide typically creates a div with id 'figure1' or similar, or appends to body.
+    // Let's search for a div that looks like a plot.
+    const figures = document.querySelectorAll('.matplotlib-figure, .mpld3-figure, div[id^="figure"]');
+    if (figures.length > 0 && container) {
+        // Move the most recent one
+        container.appendChild(figures[figures.length - 1]);
     }
 }
 
@@ -232,6 +273,127 @@ def update_plot_mode(want_3d):
         _setup_2d_mag_axes()
 
     is_3d_mode = want_3d
+
+def init_slice_plot():
+    global fig, axs, lines, is_3d_mode
+    plt.clf()
+    fig = plt.figure(figsize=(12, 4.5), constrained_layout=False)
+    fig.patch.set_facecolor('#ffffff')
+    fig.suptitle("Slice Selection Profile", fontsize=16, fontweight='bold')
+    fig.subplots_adjust(left=0.06, right=0.96, bottom=0.12, top=0.88, wspace=0.25)
+
+    # Ax0: RF Pulse
+    ax0 = fig.add_subplot(1, 2, 1)
+    ax0.set_title("RF Pulse & Gradient")
+    ax0.set_xlabel("Time (ms)")
+    ax0.set_ylabel("Amplitude")
+    lines['rf_amp'], = ax0.plot([], [], label='|B1| (G)', color='blue')
+    lines['grad'], = ax0.plot([], [], label='Gz (G/cm)', color='red', alpha=0.5)
+    ax0.legend(loc='upper right', fontsize='small')
+    ax0.grid(True, linestyle='--', alpha=0.5)
+
+    # Ax1: Profile
+    ax1 = fig.add_subplot(1, 2, 2)
+    ax1.set_title("Excitation Profile")
+    ax1.set_xlabel("Position (cm)")
+    ax1.set_ylabel("Magnetization")
+    ax1.set_ylim(-1.1, 1.1)
+    lines['mz_slice'], = ax1.plot([], [], label='Mz', color='green')
+    lines['mxy_slice'], = ax1.plot([], [], label='|Mxy|', color='orange')
+    ax1.legend(loc='upper right', fontsize='small')
+    ax1.grid(True, linestyle='--', alpha=0.5)
+
+    axs = [ax0, ax1]
+    plt.show()
+
+def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase, range_cm, n_points):
+    global fig, axs, lines
+
+    # Initialize plot if needed (check if we have the right number of axes)
+    if fig is None or len(axs) != 2:
+        init_slice_plot()
+
+    dur_s = duration_ms * 1e-3
+    dt = 1e-5
+
+    # Design RF
+    # Simplified design_rf_pulse call + manual apodization
+    b1, time = design_rf_pulse('sinc', duration=dur_s, flip_angle=flip, time_bw_product=tbw, npoints=int(dur_s/dt))
+
+    # Apodization
+    if apod != "None":
+        n = len(b1)
+        if apod == "Hamming":
+            win = np.hamming(n)
+        elif apod == "Hanning":
+            win = np.hanning(n)
+        elif apod == "Blackman":
+            win = np.blackman(n)
+        else:
+            win = np.ones(n)
+        b1 = b1 * win
+        # Rescale
+        target_area = np.deg2rad(flip) / (4258.0 * 2 * np.pi)
+        curr_area = np.trapz(np.abs(b1), dx=dt)
+        if curr_area > 0:
+            b1 *= (target_area / curr_area)
+
+    # Gradient
+    bw_hz = tbw / dur_s
+    gamma = 4258.0
+    gz = bw_hz / (gamma * (thick_mm/10.0)) # G/cm
+
+    grads = np.zeros((len(b1), 3))
+    grads[:, 2] = gz
+
+    # Rephase logic (simplified endpoint)
+    # If rephase is ON (rephase=1), we effectively want the profile AFTER rephasing.
+    # But simulation here is just the pulse.
+    # To see the rephased profile, we should simulate the rephase lobe too.
+
+    if rephase > 0:
+        # Append rephase lobe
+        rephase_dur = 1e-3
+        n_rephase = int(rephase_dur/dt)
+        rephase_amp = -(gz * dur_s * 0.5) / rephase_dur
+
+        b1 = np.concatenate([b1, np.zeros(n_rephase)])
+        grad_rephase = np.zeros((n_rephase, 3))
+        grad_rephase[:, 2] = rephase_amp
+        grads = np.concatenate([grads, grad_rephase])
+
+    time = np.arange(len(b1)) * dt
+
+    # Simulation positions
+    pos = np.zeros((int(n_points), 3))
+    half_range = range_cm / 2.0
+    pos[:, 2] = np.linspace(-half_range/100.0, half_range/100.0, int(n_points))
+
+    tissue = TissueParameters("Water", 2.0, 2.0)
+
+    # Run
+    if HAS_BACKEND:
+        res = sim.simulate((b1, grads, time), tissue, positions=pos, mode=0)
+        mz = res['mz']
+        mxy = np.sqrt(res['mx']**2 + res['my']**2)
+    else:
+        mz = np.cos(np.linspace(-np.pi, np.pi, int(n_points)))
+        mxy = np.abs(np.sin(np.linspace(-np.pi, np.pi, int(n_points))))
+
+    # Plot
+    t_ms = time * 1000
+    lines['rf_amp'].set_data(t_ms, np.abs(b1))
+    lines['grad'].set_data(t_ms, grads[:, 2])
+    axs[0].relim()
+    axs[0].autoscale_view()
+
+    pos_cm = pos[:, 2] * 100
+    lines['mz_slice'].set_data(pos_cm, mz)
+    lines['mxy_slice'].set_data(pos_cm, mxy)
+    axs[1].set_xlim(pos_cm.min(), pos_cm.max())
+
+    fig.canvas.draw()
+    fig.canvas.flush_events()
 
 def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_angle, freq_range_val, freq_points, tbw):
     global last_result, last_params
@@ -463,6 +625,41 @@ def extract_view(view_freq_hz, view_time_ms, want_3d):
 }
 
 // --- INTERACTION ---
+function triggerSliceSimulation() {
+    if (!isPyodideReady) return;
+
+    // Debounce
+    if (updateTimer) clearTimeout(updateTimer);
+
+    const statusEl = document.getElementById('status-text');
+    statusEl.innerHTML = '<span class="spinner"></span>Calculating...';
+
+    updateTimer = setTimeout(async () => {
+        try {
+            const vals = {
+                flip: parseFloat(document.getElementById("slice_flip_angle").value),
+                dur: parseFloat(document.getElementById("slice_duration").value),
+                tbw: parseFloat(document.getElementById("slice_tbw").value),
+                apod: document.getElementById("slice_apodization").value,
+                thick: parseFloat(document.getElementById("slice_thickness").value),
+                rephase: parseInt(document.getElementById("slice_rephase").value),
+                range: parseFloat(document.getElementById("slice_range").value),
+                points: parseInt(document.getElementById("slice_points").value)
+            };
+
+            const runSlice = pyodide.globals.get("run_slice_simulation");
+            if (runSlice) {
+                runSlice(vals.flip, vals.dur, vals.tbw, vals.apod, vals.thick, vals.rephase, vals.range, vals.points);
+            }
+
+            statusEl.innerText = "Ready";
+        } catch (e) {
+            console.error("Slice Sim Error", e);
+            statusEl.innerText = "Error";
+        }
+    }, 50);
+}
+
 function triggerSimulation(event, forceRun = false) {
     if (!isPyodideReady) return;
 
@@ -553,6 +750,9 @@ function triggerSimulation(event, forceRun = false) {
 // Attach listeners
 document.querySelectorAll('.sim-input').forEach(input => {
     input.addEventListener('input', triggerSimulation);
+});
+document.querySelectorAll('.slice-input').forEach(input => {
+    input.addEventListener('input', triggerSliceSimulation);
 });
 
 // Start

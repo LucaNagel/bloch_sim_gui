@@ -1,0 +1,83 @@
+<!-- SLICE SELECTION EXPLORER VIEW -->
+<div id="slice-explorer-view" class="view">
+    <div style="margin-bottom: 1rem; display: flex; justify-content: space-between; align-items: center;">
+        <h2 style="margin: 0; color: var(--primary-color);">Slice Selection Explorer</h2>
+        <button onclick="router('home')" style="padding: 0.5rem 1rem; cursor: pointer;">&larr; Back</button>
+    </div>
+
+    <div class="controls-panel">
+        <div class="controls-grid">
+            <!-- Pulse Parameters -->
+            <div class="control-group">
+                <label for="slice_flip_angle">Flip Angle (°)</label>
+                <input type="number" id="slice_flip_angle" class="slice-input" value="90" min="0" max="180" step="1">
+            </div>
+            <div class="control-group">
+                <label for="slice_duration">Duration (ms)</label>
+                <input type="number" id="slice_duration" class="slice-input" value="2.0" min="0.1" max="20.0" step="0.1">
+            </div>
+            <div class="control-group">
+                <label for="slice_tbw">Time-BW Product</label>
+                <input type="number" id="slice_tbw" class="slice-input" value="4.0" min="1.0" max="16.0" step="0.5">
+            </div>
+            <div class="control-group">
+                <label for="slice_apodization">Apodization</label>
+                <select id="slice_apodization" class="slice-input">
+                    <option value="None" selected>None</option>
+                    <option value="Hamming">Hamming</option>
+                    <option value="Hanning">Hanning</option>
+                    <option value="Blackman">Blackman</option>
+                </select>
+            </div>
+
+            <!-- Slice Parameters -->
+            <div class="control-group">
+                <label for="slice_thickness">Thickness (mm)</label>
+                <input type="number" id="slice_thickness" class="slice-input" value="5.0" min="0.1" max="20.0" step="0.5">
+            </div>
+            <div class="control-group">
+                <label for="slice_rephase">Rephasing</label>
+                <select id="slice_rephase" class="slice-input">
+                    <option value="1">Rephase (50%)</option>
+                    <option value="0">No Rephase</option>
+                </select>
+            </div>
+
+            <!-- Simulation Grid -->
+            <div class="control-group">
+                <label for="slice_range">Pos Range (cm)</label>
+                <input type="number" id="slice_range" class="slice-input" value="4.0" min="0.5" max="20.0" step="0.5">
+            </div>
+            <div class="control-group">
+                <label for="slice_points">Points</label>
+                <input type="number" id="slice_points" class="slice-input" value="200" min="50" max="1000" step="10">
+            </div>
+        </div>
+    </div>
+
+    <!-- Using the same plot container ID as RF Explorer might cause conflicts if we don't clear it.
+         app.js uses `document.body.appendChild` or relies on `matplotlib` to find its canvas or output.
+         Usually Pyodide/Matplotlib targets a specific div if configured, but here the Python code
+         seems to just `plt.show()` which usually appends to the document body or a target div if using
+         `matplotlib_pyodide.wasm_backend`.
+         Looking at `app.js` init, it doesn't specify a target div for `plt.show()`.
+         By default `matplotlib_pyodide` appends to `document.body` or looking for a div with id `figure`.
+         Wait, checking `index.html` (not visible here but common pattern).
+         Actually, let's look at `web/partials/home.html` or `rf_explorer.html` to see where the plot goes.
+         Ah, `rf_explorer.html` (which I read part of) likely has a div.
+         Let's assume there is a generic figure container in `index.html` or the partials rely on auto-appending.
+
+         However, for safety, I will add a specific container here and we might need to tell Python where to draw.
+         But `app.js` uses `matplotlib.use("module://matplotlib_pyodide.wasm_backend")`.
+         This backend typically targets a div with ID `plot` or appends.
+
+         Let's assume the existing `rf_explorer` works. I will just leave the plot area handling to the JS/Python
+         logic which seems to handle the canvas.
+         Wait, if I switch views, I need the plot to appear IN this view.
+
+         I'll verify `web/partials/rf_explorer.html` again to see if it has a plot container.
+    -->
+    <div id="slice-plot-container" style="margin-top: 1rem; text-align: center;">
+        <!-- Matplotlib canvas will likely be appended here or we move it here via JS -->
+    </div>
+</div>

@@ -7,7 +7,13 @@ def main():
     partials_dir = os.path.join(web_dir, "partials")
 
     # Order of concatenation
-    parts = ["header.html", "home.html", "rf_explorer.html", "footer.html"]
+    parts = [
+        "header.html",
+        "home.html",
+        "rf_explorer.html",
+        "slice_explorer.html",
+        "footer.html",
+    ]
 
     output_content = ""
 
