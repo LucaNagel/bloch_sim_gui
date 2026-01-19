@@ -346,11 +346,10 @@ def extract_view(view_freq_hz, view_time_ms):
     lines['rf_real'].set_data(time_ms, last_result['rf_real'])
     lines['rf_imag'].set_data(time_ms, last_result['rf_imag'])
     lines['rf_abs'].set_data(time_ms, last_result['rf_abs'])
-    # Set indicator after autoscale to match current limits
-    lines['time_line'].set_data([view_time_ms, view_time_ms], axs[0].get_ylim())
+    axs[0].set_xlim(0, np.max(time_ms))
     axs[0].relim()
-    # axs[0].autoscale_view()
-
+    axs[0].autoscale_view(scalex=False, scaley=True)
+    lines['time_line'].set_data([view_time_ms, view_time_ms], axs[0].get_ylim())
 
     # 2. Update Magnetization Plot
     lines['mx'].set_data(time_ms, mx)
@@ -363,8 +362,9 @@ def extract_view(view_freq_hz, view_time_ms):
     # 3. Update Profile Plot
     lines['mxy'].set_data(freq_range, mxy_prof)
     lines['mz_prof'].set_data(freq_range, mz_prof)
-    lines['freq_line'].set_data([view_freq_hz, view_freq_hz], axs[2].get_ylim())
     axs[2].set_xlim(np.min(freq_range), np.max(freq_range))
+    axs[2].set_ylim(-1.1, 1.1)
+    lines['freq_line'].set_data([view_freq_hz, view_freq_hz], axs[2].get_ylim())
 
     fig.canvas.draw()
     fig.canvas.flush_events()
