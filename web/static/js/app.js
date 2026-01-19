@@ -346,9 +346,14 @@ def extract_view(view_freq_hz, view_time_ms):
     lines['rf_real'].set_data(time_ms, last_result['rf_real'])
     lines['rf_imag'].set_data(time_ms, last_result['rf_imag'])
     lines['rf_abs'].set_data(time_ms, last_result['rf_abs'])
+
+    # Manually calculate Y limits to avoid the 'zooming out' bug caused by relim() seeing the indicator line
+    rf_max = np.max(last_result['rf_abs'])
+    if rf_max <= 0: rf_max = 1.0
+    axs[0].set_ylim(-rf_max * 1.1, rf_max * 1.1)
     axs[0].set_xlim(0, np.max(time_ms))
-    axs[0].relim()
-    axs[0].autoscale_view(scalex=False, scaley=True)
+
+    # Set indicator after limits are finalized
     lines['time_line'].set_data([view_time_ms, view_time_ms], axs[0].get_ylim())
 
     # 2. Update Magnetization Plot
