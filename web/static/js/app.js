@@ -274,8 +274,10 @@ def update_plot_mode(want_3d):
 
     is_3d_mode = want_3d
 
+is_slice_3d_mode = False
+
 def init_slice_plot():
-    global fig, axs, lines, is_3d_mode
+    global fig, axs, lines, is_slice_3d_mode
     plt.clf()
     fig = plt.figure(figsize=(12, 4.5), constrained_layout=False)
     fig.patch.set_facecolor('#ffffff')
@@ -292,95 +294,95 @@ def init_slice_plot():
     ax0.legend(loc='upper right', fontsize='small')
     ax0.grid(True, linestyle='--', alpha=0.5)
 
-    # Ax1: Profile
+    # Ax1: Profile (Default 2D)
     ax1 = fig.add_subplot(1, 2, 2)
-    ax1.set_title("Excitation Profile")
-    ax1.set_xlabel("Position (cm)")
-    ax1.set_ylabel("Magnetization")
-    ax1.set_ylim(-1.1, 1.1)
-    lines['mz_slice'], = ax1.plot([], [], label='Mz', color='green')
-    lines['mxy_slice'], = ax1.plot([], [], label='|Mxy|', color='orange')
-    ax1.legend(loc='upper right', fontsize='small')
-    ax1.grid(True, linestyle='--', alpha=0.5)
+    _setup_slice_profile_2d(ax1)
 
     axs = [ax0, ax1]
+    is_slice_3d_mode = False
     plt.show()
 
-def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase, range_cm, n_points):
-    global fig, axs, lines
+def _setup_slice_profile_2d(ax):
+    ax.set_title("Excitation Profile")
+    ax.set_xlabel("Position (cm)")
+    ax.set_ylabel("Magnetization")
+    ax.set_ylim(-1.1, 1.1)
+    lines['mz_slice'], = ax.plot([], [], label='Mz', color='green')
+    lines['mxy_slice'], = ax.plot([], [], label='|Mxy|', color='orange')
+    ax.legend(loc='upper right', fontsize='small')
+    ax.grid(True, linestyle='--', alpha=0.5)
 
-    # Initialize plot if needed (check if we have the right number of axes)
+def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase, range_cm, n_points, is3d):
+    global fig, axs, lines, is_slice_3d_mode
+
     if fig is None or len(axs) != 2:
         init_slice_plot()
+
+    # Handle 3D mode switch
+    if is3d != is_slice_3d_mode:
+        fig.delaxes(axs[1])
+        if is3d:
+            axs[1] = fig.add_subplot(1, 2, 2, projection='3d')
+            axs[1].set_title("Magnetization Helix")
+            # 3D setup done in plotting phase
+        else:
+            axs[1] = fig.add_subplot(1, 2, 2)
+            _setup_slice_profile_2d(axs[1])
+        is_slice_3d_mode = is3d
 
     dur_s = duration_ms * 1e-3
     dt = 1e-5
 
     # Design RF
-    # Simplified design_rf_pulse call + manual apodization
     b1, time = design_rf_pulse('sinc', duration=dur_s, flip_angle=flip, time_bw_product=tbw, npoints=int(dur_s/dt))
 
-    # Apodization
     if apod != "None":
         n = len(b1)
-        if apod == "Hamming":
-            win = np.hamming(n)
-        elif apod == "Hanning":
-            win = np.hanning(n)
-        elif apod == "Blackman":
-            win = np.blackman(n)
-        else:
-            win = np.ones(n)
+        if apod == "Hamming": win = np.hamming(n)
+        elif apod == "Hanning": win = np.hanning(n)
+        elif apod == "Blackman": win = np.blackman(n)
+        else: win = np.ones(n)
         b1 = b1 * win
-        # Rescale
         target_area = np.deg2rad(flip) / (4258.0 * 2 * np.pi)
         curr_area = np.trapz(np.abs(b1), dx=dt)
-        if curr_area > 0:
-            b1 *= (target_area / curr_area)
+        if curr_area > 0: b1 *= (target_area / curr_area)
 
-    # Gradient
     bw_hz = tbw / dur_s
     gamma = 4258.0
-    gz = bw_hz / (gamma * (thick_mm/10.0)) # G/cm
+    gz = bw_hz / (gamma * (thick_mm/10.0))
 
     grads = np.zeros((len(b1), 3))
     grads[:, 2] = gz
 
-    # Rephase logic (simplified endpoint)
-    # If rephase is ON (rephase=1), we effectively want the profile AFTER rephasing.
-    # But simulation here is just the pulse.
-    # To see the rephased profile, we should simulate the rephase lobe too.
-
     if rephase > 0:
-        # Append rephase lobe
         rephase_dur = 1e-3
         n_rephase = int(rephase_dur/dt)
         rephase_amp = -(gz * dur_s * 0.5) / rephase_dur
-
         b1 = np.concatenate([b1, np.zeros(n_rephase)])
         grad_rephase = np.zeros((n_rephase, 3))
         grad_rephase[:, 2] = rephase_amp
         grads = np.concatenate([grads, grad_rephase])
 
     time = np.arange(len(b1)) * dt
-
-    # Simulation positions
     pos = np.zeros((int(n_points), 3))
     half_range = range_cm / 2.0
     pos[:, 2] = np.linspace(-half_range/100.0, half_range/100.0, int(n_points))
 
     tissue = TissueParameters("Water", 2.0, 2.0)
 
-    # Run
+    mx, my, mz = np.zeros(int(n_points)), np.zeros(int(n_points)), np.ones(int(n_points))
+
     if HAS_BACKEND:
         res = sim.simulate((b1, grads, time), tissue, positions=pos, mode=0)
-        mz = res['mz']
-        mxy = np.sqrt(res['mx']**2 + res['my']**2)
+        mx, my, mz = res['mx'], res['my'], res['mz']
     else:
-        mz = np.cos(np.linspace(-np.pi, np.pi, int(n_points)))
-        mxy = np.abs(np.sin(np.linspace(-np.pi, np.pi, int(n_points))))
+        # Mock
+        z = pos[:, 2]
+        mz = np.cos(z * 10)
+        mx = np.sin(z * 10)
+        my = np.zeros_like(z)
 
-    # Plot
+    # Plot Update
     t_ms = time * 1000
     lines['rf_amp'].set_data(t_ms, np.abs(b1))
     lines['grad'].set_data(t_ms, grads[:, 2])
@@ -388,15 +390,33 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase, range_
     axs[0].autoscale_view()
 
     pos_cm = pos[:, 2] * 100
-    lines['mz_slice'].set_data(pos_cm, mz)
-    lines['mxy_slice'].set_data(pos_cm, mxy)
-    axs[1].set_xlim(pos_cm.min(), pos_cm.max())
+
+    if is3d:
+        axs[1].cla()
+        axs[1].set_title("Magnetization Helix (Slice Profile)")
+        axs[1].set_xlabel("Mx")
+        axs[1].set_ylabel("My")
+        axs[1].set_zlabel("Position (cm)")
+        axs[1].set_xlim(-1, 1)
+        axs[1].set_ylim(-1, 1)
+        axs[1].set_zlim(pos_cm.min(), pos_cm.max())
+
+        # Plot helix
+        axs[1].plot(mx, my, zs=pos_cm, color='purple', linewidth=1.5, alpha=0.8)
+
+        # Add reference line
+        axs[1].plot(np.zeros_like(pos_cm), np.zeros_like(pos_cm), zs=pos_cm, color='gray', linestyle=':', alpha=0.5)
+
+    else:
+        mxy = np.sqrt(mx**2 + my**2)
+        lines['mz_slice'].set_data(pos_cm, mz)
+        lines['mxy_slice'].set_data(pos_cm, mxy)
+        axs[1].set_xlim(pos_cm.min(), pos_cm.max())
 
     fig.canvas.draw()
     fig.canvas.flush_events()
 
-def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_angle, freq_range_val, freq_points, tbw):
-    global last_result, last_params
+def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_angle, freq_range_val, freq_points, tbw):    global last_result, last_params
 
     # Store params to check against later if needed, though JS handles triggering
     last_params = locals()
@@ -642,18 +662,18 @@ function triggerSliceSimulation() {
                 tbw: parseFloat(document.getElementById("slice_tbw").value),
                 apod: document.getElementById("slice_apodization").value,
                 thick: parseFloat(document.getElementById("slice_thickness").value),
-                rephase: parseInt(document.getElementById("slice_rephase").value),
-                range: parseFloat(document.getElementById("slice_range").value),
-                points: parseInt(document.getElementById("slice_points").value)
-            };
+                                rephase: parseInt(document.getElementById("slice_rephase").value),
+                                range: parseFloat(document.getElementById("slice_range").value),
+                                points: parseInt(document.getElementById("slice_points").value),
+                                is3d: document.getElementById("slice_3d").checked
+                            };
 
-            const runSlice = pyodide.globals.get("run_slice_simulation");
-            if (runSlice) {
-                runSlice(vals.flip, vals.dur, vals.tbw, vals.apod, vals.thick, vals.rephase, vals.range, vals.points);
-            }
+                            const runSlice = pyodide.globals.get("run_slice_simulation");
+                            if (runSlice) {
+                                runSlice(vals.flip, vals.dur, vals.tbw, vals.apod, vals.thick, vals.rephase, vals.range, vals.points, vals.is3d);
+                            }
 
-            statusEl.innerText = "Ready";
-        } catch (e) {
+                            statusEl.innerText = "Ready";        } catch (e) {
             console.error("Slice Sim Error", e);
             statusEl.innerText = "Error";
         }
