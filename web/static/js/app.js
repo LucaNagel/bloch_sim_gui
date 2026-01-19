@@ -235,10 +235,13 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
         )
 
         integration_factor = _compute_integration_factor_from_wave(b1_wave=b1, t_wave=time_s)
-        print(f"Pulse analysis: area_factor={integration_factor:.4f}")
+        print(f"Pulse analysis: Pulse={pulse_type}, area_factor={integration_factor:.4f}")
         try:
             tbw_val = 1 / integration_factor
-        except:
+            # Update GUI
+            document.getElementById("tbw").value = str(round(tbw_val, 2))
+        except Exception as e:
+            print(f"TBW update error: {e}")
             pass
 
         print(f"2. Simulation: Pulse={pulse_type}, Flip={flip_angle}, Dur={duration_ms}ms, TBW={tbw_val:.2f}")
