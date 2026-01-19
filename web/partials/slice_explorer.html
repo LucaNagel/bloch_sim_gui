@@ -5,61 +5,82 @@
         <button onclick="router('home')" style="padding: 0.5rem 1rem; cursor: pointer;">&larr; Back</button>
     </div>
 
-    <div class="controls-panel">
-        <div class="controls-grid">
-            <!-- Pulse Parameters -->
-            <div class="control-group">
-                <label for="slice_flip_angle">Flip Angle (°)</label>
-                <input type="number" id="slice_flip_angle" class="slice-input" value="90" min="0" max="180" step="1">
-            </div>
-            <div class="control-group">
-                <label for="slice_duration">Duration (ms)</label>
-                <input type="number" id="slice_duration" class="slice-input" value="2.0" min="0.1" max="20.0" step="0.1">
-            </div>
-            <div class="control-group">
-                <label for="slice_tbw">Time-BW Product</label>
-                <input type="number" id="slice_tbw" class="slice-input" value="4.0" min="1.0" max="16.0" step="0.5">
-            </div>
-            <div class="control-group">
-                <label for="slice_apodization">Apodization</label>
-                <select id="slice_apodization" class="slice-input">
-                    <option value="None" selected>None</option>
-                    <option value="Hamming">Hamming</option>
-                    <option value="Hanning">Hanning</option>
-                    <option value="Blackman">Blackman</option>
-                </select>
+        <div class="controls-panel">
+            <div class="controls-grid">
+                <!-- Pulse Parameters -->
+                <div class="control-group">
+                    <label for="slice_pulse_type">Pulse Type</label>
+                    <select id="slice_pulse_type" class="slice-input">
+                        <option value="sinc" selected>Sinc</option>
+                        <option value="rect">Rectangular</option>
+                        <option value="gaussian">Gaussian</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label for="slice_flip_angle">Flip Angle (°)</label>
+                    <input type="number" id="slice_flip_angle" class="slice-input" value="90" min="0" max="180" step="1">
+                </div>
+                <div class="control-group">
+                    <label for="slice_duration">Duration (ms)</label>
+                    <input type="number" id="slice_duration" class="slice-input" value="2.0" min="0.1" max="20.0" step="0.1">
+                </div>
+                <div class="control-group">
+                    <label for="slice_tbw">Time-BW Product</label>
+                    <input type="number" id="slice_tbw" class="slice-input" value="4.0" min="1.0" max="16.0" step="0.5">
+                </div>
+                <div class="control-group">
+                    <label for="slice_apodization">Apodization</label>
+                    <select id="slice_apodization" class="slice-input">
+                        <option value="None" selected>None</option>
+                        <option value="Hamming">Hamming</option>
+                        <option value="Hanning">Hanning</option>
+                        <option value="Blackman">Blackman</option>
+                    </select>
+                </div>
+
+                <!-- Slice Parameters -->
+                <div class="control-group">
+                    <label for="slice_thickness">Thickness (mm)</label>
+                    <input type="number" id="slice_thickness" class="slice-input" value="5.0" min="0.1" max="20.0" step="0.5">
+                </div>
+
+                <!-- Simulation Grid -->
+                <div class="control-group">
+                    <label for="slice_range">Pos Range (cm)</label>
+                    <input type="number" id="slice_range" class="slice-input" value="4.0" min="0.5" max="20.0" step="0.5">
+                </div>
+                <div class="control-group">
+                    <label for="slice_points">Points</label>
+                    <input type="number" id="slice_points" class="slice-input" value="200" min="50" max="1000" step="10">
+                </div>
+
+                <div class="control-group" style="display: flex; align-items: center; justify-content: space-between;">
+                    <label for="slice_3d" style="margin-bottom: 0;">3D Visualization</label>
+                    <input type="checkbox" id="slice_3d" class="slice-input" style="width: auto;">
+                </div>
             </div>
 
-            <!-- Slice Parameters -->
-            <div class="control-group">
-                <label for="slice_thickness">Thickness (mm)</label>
-                <input type="number" id="slice_thickness" class="slice-input" value="5.0" min="0.1" max="20.0" step="0.5">
-            </div>
-            <div class="control-group">
-                <label for="slice_rephase">Rephasing</label>
-                <select id="slice_rephase" class="slice-input">
-                    <option value="1">Rephase (50%)</option>
-                    <option value="0">No Rephase</option>
-                </select>
-            </div>
-
-            <!-- Simulation Grid -->
-            <div class="control-group">
-                <label for="slice_range">Pos Range (cm)</label>
-                <input type="number" id="slice_range" class="slice-input" value="4.0" min="0.5" max="20.0" step="0.5">
-            </div>
-            <div class="control-group">
-                <label for="slice_points">Points</label>
-                <input type="number" id="slice_points" class="slice-input" value="200" min="50" max="1000" step="10">
-            </div>
-
-            <div class="control-group" style="display: flex; align-items: center; justify-content: space-between;">
-                <label for="slice_3d" style="margin-bottom: 0;">3D Visualization</label>
-                <input type="checkbox" id="slice_3d" class="slice-input" style="width: auto;">
-            </div>
+            <details style="margin-top: 1rem; border: 1px solid #ddd; padding: 0.5rem; border-radius: 4px;">
+                <summary style="cursor: pointer; font-weight: bold; color: var(--primary-color);">Advanced Settings</summary>
+                <div class="controls-grid" style="margin-top: 0.5rem;">
+                    <div class="control-group">
+                        <label for="slice_b1">B1 Amplitude (G)</label>
+                        <input type="number" id="slice_b1" class="slice-input" step="0.01" placeholder="Auto">
+                    </div>
+                    <div class="control-group">
+                        <label for="slice_rephase_pct">Rephasing (%)</label>
+                        <input type="number" id="slice_rephase_pct" class="slice-input" value="50" min="-100" max="100" step="10">
+                    </div>
+                    <div class="control-group" style="grid-column: span 2;">
+                        <label>Plot Components</label>
+                        <div style="display: flex; gap: 1rem; margin-top: 0.25rem;">
+                            <label style="font-weight: normal;"><input type="checkbox" id="slice_show_mx" class="slice-input"> Show Mx</label>
+                            <label style="font-weight: normal;"><input type="checkbox" id="slice_show_my" class="slice-input"> Show My</label>
+                        </div>
+                    </div>
+                </div>
+            </details>
         </div>
-    </div>
-
     <!-- Using the same plot container ID as RF Explorer might cause conflicts if we don't clear it.
          app.js uses `document.body.appendChild` or relies on `matplotlib` to find its canvas or output.
          Usually Pyodide/Matplotlib targets a specific div if configured, but here the Python code

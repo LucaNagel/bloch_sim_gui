@@ -235,6 +235,8 @@ def init_plot():
     axs[2].axvline(0, color='black', linewidth=0.8, alpha=0.3)
     lines['mxy'], = axs[2].plot([], [], label='Mxy', color='purple')
     lines['mz_prof'], = axs[2].plot([], [], label='Mz', color='gray', linestyle='--')
+    lines['mx_prof'], = axs[2].plot([], [], label='Mx', color='red', alpha=0.5, linestyle=':')
+    lines['my_prof'], = axs[2].plot([], [], label='My', color='blue', alpha=0.5, linestyle=':')
     lines['freq_line'], = axs[2].plot([], [], color='#e74c3c', linestyle='-', alpha=1.0, linewidth=2.0, zorder=10)
     axs[2].legend(loc='upper right', fontsize='small')
     axs[2].grid(True, linestyle='--', alpha=0.5)
@@ -312,7 +314,7 @@ def _setup_slice_profile_2d(ax):
     ax.legend(loc='upper right', fontsize='small')
     ax.grid(True, linestyle='--', alpha=0.5)
 
-def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase, range_cm, n_points, is3d):
+def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase_pct, range_cm, n_points, is3d, b1_amp_gauss, pulse_type, show_mx, show_my):
     global fig, axs, lines, is_slice_3d_mode
 
     if fig is None or len(axs) != 2:
@@ -324,7 +326,6 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase, range_
         if is3d:
             axs[1] = fig.add_subplot(1, 2, 2, projection='3d')
             axs[1].set_title("Magnetization Helix")
-            # 3D setup done in plotting phase
         else:
             axs[1] = fig.add_subplot(1, 2, 2)
             _setup_slice_profile_2d(axs[1])
@@ -333,8 +334,28 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase, range_
     dur_s = duration_ms * 1e-3
     dt = 1e-5
 
-    # Design RF
-    b1, time = design_rf_pulse('sinc', duration=dur_s, flip_angle=flip, time_bw_product=tbw, npoints=int(dur_s/dt))
+    # 1. Determine Flip Angle from B1 Override if provided
+    calc_flip = flip
+    if b1_amp_gauss is not None and b1_amp_gauss > 0:
+        # Design a probe pulse (1 deg) to find the B1 per Flip ratio
+        probe_flip = 1.0
+        b1_probe, _ = design_rf_pulse(pulse_type, duration=dur_s, flip_angle=probe_flip, time_bw_product=tbw, npoints=int(dur_s/dt))
+
+        # Apply apodization to probe to measure *actual* peak
+        if apod != "None":
+            n_p = len(b1_probe)
+            if apod == "Hamming": win = np.hamming(n_p)
+            elif apod == "Hanning": win = np.hanning(n_p)
+            elif apod == "Blackman": win = np.blackman(n_p)
+            else: win = np.ones(n_p)
+            b1_probe = b1_probe * win
+
+        peak_probe = np.max(np.abs(b1_probe))
+        if peak_probe > 0:
+            calc_flip = probe_flip * (b1_amp_gauss / peak_probe)
+
+    # 2. Design Final Pulse
+    b1, time = design_rf_pulse(pulse_type, duration=dur_s, flip_angle=calc_flip, time_bw_product=tbw, npoints=int(dur_s/dt))
 
     if apod != "None":
         n = len(b1)
@@ -343,9 +364,12 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase, range_
         elif apod == "Blackman": win = np.blackman(n)
         else: win = np.ones(n)
         b1 = b1 * win
-        target_area = np.deg2rad(flip) / (4258.0 * 2 * np.pi)
-        curr_area = np.trapz(np.abs(b1), dx=dt)
-        if curr_area > 0: b1 *= (target_area / curr_area)
+
+        # Only rescale if we didn't calculate flip from B1
+        if b1_amp_gauss is None or b1_amp_gauss <= 0:
+            target_area = np.deg2rad(calc_flip) / (4258.0 * 2 * np.pi)
+            curr_area = np.trapz(np.abs(b1), dx=dt)
+            if curr_area > 0: b1 *= (target_area / curr_area)
 
     bw_hz = tbw / dur_s
     gamma = 4258.0
@@ -354,10 +378,14 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase, range_
     grads = np.zeros((len(b1), 3))
     grads[:, 2] = gz
 
-    if rephase > 0:
+    # Rephase Logic (Percentage)
+    if rephase_pct != 0:
         rephase_dur = 1e-3
         n_rephase = int(rephase_dur/dt)
-        rephase_amp = -(gz * dur_s * 0.5) / rephase_dur
+        slice_area = gz * dur_s
+        rewind_area = -slice_area * (rephase_pct / 100.0)
+        rephase_amp = rewind_area / rephase_dur
+
         b1 = np.concatenate([b1, np.zeros(n_rephase)])
         grad_rephase = np.zeros((n_rephase, 3))
         grad_rephase[:, 2] = rephase_amp
@@ -376,7 +404,6 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase, range_
         res = sim.simulate((b1, grads, time), tissue, positions=pos, mode=0)
         mx, my, mz = res['mx'], res['my'], res['mz']
     else:
-        # Mock
         z = pos[:, 2]
         mz = np.cos(z * 10)
         mx = np.sin(z * 10)
@@ -400,26 +427,43 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase, range_
         axs[1].set_xlim(-1, 1)
         axs[1].set_ylim(-1, 1)
         axs[1].set_zlim(pos_cm.min(), pos_cm.max())
-
-        # Plot helix
         axs[1].plot(mx, my, zs=pos_cm, color='purple', linewidth=1.5, alpha=0.8)
-
-        # Add reference line
         axs[1].plot(np.zeros_like(pos_cm), np.zeros_like(pos_cm), zs=pos_cm, color='gray', linestyle=':', alpha=0.5)
-
     else:
-        mxy = np.sqrt(mx**2 + my**2)
+        axs[1].legend_.remove()
+        plotted_lines = []
+
         lines['mz_slice'].set_data(pos_cm, mz)
+        plotted_lines.append(lines['mz_slice'])
+
+        mxy = np.sqrt(mx**2 + my**2)
         lines['mxy_slice'].set_data(pos_cm, mxy)
+        plotted_lines.append(lines['mxy_slice'])
+
+        if show_mx:
+            if 'mx_slice' not in lines:
+                lines['mx_slice'], = axs[1].plot([], [], label='Mx', color='red', alpha=0.6, linestyle='--')
+            lines['mx_slice'].set_data(pos_cm, mx)
+            plotted_lines.append(lines['mx_slice'])
+        elif 'mx_slice' in lines: lines['mx_slice'].set_data([], [])
+
+        if show_my:
+            if 'my_slice' not in lines:
+                lines['my_slice'], = axs[1].plot([], [], label='My', color='blue', alpha=0.6, linestyle='--')
+            lines['my_slice'].set_data(pos_cm, my)
+            plotted_lines.append(lines['my_slice'])
+        elif 'my_slice' in lines: lines['my_slice'].set_data([], [])
+
         axs[1].set_xlim(pos_cm.min(), pos_cm.max())
+        axs[1].legend(handles=plotted_lines, loc='upper right', fontsize='small')
 
     fig.canvas.draw()
     fig.canvas.flush_events()
 
+    return float(calc_flip), float(np.max(np.abs(b1)))
+
 def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_angle, freq_range_val, freq_points, tbw):
     global last_result, last_params
-
-    # Store params to check against later if needed, though JS handles triggering
     last_params = locals()
 
     if fig is None:
@@ -646,8 +690,10 @@ def extract_view(view_freq_hz, view_time_ms, want_3d):
 }
 
 // --- INTERACTION ---
-function triggerSliceSimulation() {
+function triggerSliceSimulation(event) {
     if (!isPyodideReady) return;
+
+    const sourceId = event ? event.target.id : null;
 
     // Debounce
     if (updateTimer) clearTimeout(updateTimer);
@@ -657,24 +703,59 @@ function triggerSliceSimulation() {
 
     updateTimer = setTimeout(async () => {
         try {
+            // Logic: If user changes Flip, we clear B1 override. If user changes B1, we use B1 override.
+            // If user changes other params, we respect B1 override if it's set, else Flip.
+
+            let b1Override = parseFloat(document.getElementById("slice_b1").value);
+            if (isNaN(b1Override)) b1Override = -1;
+
+            if (sourceId === 'slice_flip_angle') {
+                b1Override = -1;
+                document.getElementById("slice_b1").value = ""; // Clear B1 to indicate Flip is driver
+            }
+
             const vals = {
                 flip: parseFloat(document.getElementById("slice_flip_angle").value),
                 dur: parseFloat(document.getElementById("slice_duration").value),
                 tbw: parseFloat(document.getElementById("slice_tbw").value),
                 apod: document.getElementById("slice_apodization").value,
                 thick: parseFloat(document.getElementById("slice_thickness").value),
-                                rephase: parseInt(document.getElementById("slice_rephase").value),
-                                range: parseFloat(document.getElementById("slice_range").value),
-                                points: parseInt(document.getElementById("slice_points").value),
-                                is3d: document.getElementById("slice_3d").checked
-                            };
+                rephase: parseFloat(document.getElementById("slice_rephase_pct").value),
+                range: parseFloat(document.getElementById("slice_range").value),
+                points: parseInt(document.getElementById("slice_points").value),
+                is3d: document.getElementById("slice_3d").checked,
+                b1: b1Override,
+                type: document.getElementById("slice_pulse_type").value,
+                showMx: document.getElementById("slice_show_mx").checked,
+                showMy: document.getElementById("slice_show_my").checked
+            };
 
-                            const runSlice = pyodide.globals.get("run_slice_simulation");
-                            if (runSlice) {
-                                runSlice(vals.flip, vals.dur, vals.tbw, vals.apod, vals.thick, vals.rephase, vals.range, vals.points, vals.is3d);
-                            }
+            const runSlice = pyodide.globals.get("run_slice_simulation");
+            if (runSlice) {
+                const result = runSlice(vals.flip, vals.dur, vals.tbw, vals.apod, vals.thick, vals.rephase, vals.range, vals.points, vals.is3d, vals.b1, vals.type, vals.showMx, vals.showMy);
 
-                            statusEl.innerText = "Ready";        } catch (e) {
+                // Sync UI
+                if (result && result.length === 2) {
+                    const actFlip = result.get(0);
+                    const actB1 = result.get(1);
+
+                    if (vals.b1 > 0) {
+                        // B1 drove simulation -> update Flip
+                        if (document.activeElement.id !== "slice_flip_angle") {
+                            document.getElementById("slice_flip_angle").value = actFlip.toFixed(2);
+                        }
+                    } else {
+                        // Flip drove simulation -> update B1
+                        if (document.activeElement.id !== "slice_b1") {
+                            document.getElementById("slice_b1").value = actB1.toFixed(4);
+                        }
+                    }
+                    result.destroy();
+                }
+            }
+
+            statusEl.innerText = "Ready";
+        } catch (e) {
             console.error("Slice Sim Error", e);
             statusEl.innerText = "Error";
         }
@@ -704,10 +785,10 @@ function triggerSimulation(event, forceRun = false) {
     }
 
     // Determine if we need a full simulation or just a view update
-    // Full sim needed if physics params change
     const physicsParams = [
         "t1", "t2", "duration", "freq_offset", "pulse_type",
-        "flip_angle", "freq_range", "freq_points", "tbw"
+        "flip_angle", "freq_range", "freq_points", "tbw",
+        "b1_amp", "show_mx", "show_my"
     ];
 
     let needFullSim = forceRun;
@@ -718,6 +799,11 @@ function triggerSimulation(event, forceRun = false) {
     // If no sourceId (e.g. init), assume full sim
     if (!sourceId && !forceRun) needFullSim = true;
 
+    // Clear B1 if Flip changes
+    if (sourceId === 'flip_angle') {
+        document.getElementById("b1_amp").value = "";
+    }
+
     // Debounce
     if (updateTimer) clearTimeout(updateTimer);
 
@@ -726,6 +812,11 @@ function triggerSimulation(event, forceRun = false) {
 
     updateTimer = setTimeout(async () => {
         try {
+            let b1val = parseFloat(document.getElementById("b1_amp").value);
+            if (isNaN(b1val)) b1val = -1;
+
+            if (sourceId === 'flip_angle') b1val = -1;
+
             const vals = {
                 t1: parseFloat(document.getElementById("t1").value),
                 t2: parseFloat(document.getElementById("t2").value),
@@ -738,15 +829,35 @@ function triggerSimulation(event, forceRun = false) {
                 tbw: parseFloat(document.getElementById("tbw").value),
                 viewFreq: parseFloat(document.getElementById("view_freq").value),
                 viewTime: parseFloat(document.getElementById("view_time").value),
-                is3d: document.getElementById("toggle_3d").checked
+                is3d: document.getElementById("toggle_3d").checked,
+                b1: b1val,
+                showMx: document.getElementById("show_mx").checked,
+                showMy: document.getElementById("show_my").checked
             };
 
             const runSim = pyodide.globals.get("run_simulation");
             const extractView = pyodide.globals.get("extract_view");
 
             if (needFullSim && runSim) {
-                runSim(vals.t1, vals.t2, vals.duration, vals.freq, vals.type,
-                       vals.flip, vals.fRange, vals.fPoints, vals.tbw);
+                const result = runSim(vals.t1, vals.t2, vals.duration, vals.freq, vals.type,
+                       vals.flip, vals.fRange, vals.fPoints, vals.tbw, vals.b1, vals.showMx, vals.showMy);
+
+                // Sync UI
+                if (result && result.length === 2) {
+                    const actFlip = result.get(0);
+                    const actB1 = result.get(1);
+
+                    if (vals.b1 > 0) {
+                        if (document.activeElement.id !== "flip_angle") {
+                            document.getElementById("flip_angle").value = actFlip.toFixed(2);
+                        }
+                    } else {
+                        if (document.activeElement.id !== "b1_amp") {
+                            document.getElementById("b1_amp").value = actB1.toFixed(2);
+                        }
+                    }
+                    result.destroy();
+                }
             }
 
             if (extractView) {
