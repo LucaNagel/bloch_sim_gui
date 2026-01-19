@@ -399,16 +399,17 @@ def extract_view(view_freq_hz, view_time_ms, want_3d):
         axs[1].set_xlim(-1, 1)
         axs[1].set_ylim(-1, 1)
         axs[1].set_zlim(-1, 1)
-                axs[1].set_xlabel('Mx')
-                axs[1].set_ylabel('My')
-                axs[1].set_zlabel('Mz')
+        axs[1].set_xlabel('Mx')
+        axs[1].set_ylabel('My')
+        axs[1].set_zlabel('Mz')
 
-                # Draw Cartesian Axes
-                axs[1].plot([-1, 1], [0, 0], zs=[0, 0], color='black', linewidth=0.8, alpha=0.3)
-                axs[1].plot([0, 0], [-1, 1], zs=[0, 0], color='black', linewidth=0.8, alpha=0.3)
-                axs[1].plot([0, 0], [0, 0], zs=[-1, 1], color='black', linewidth=0.8, alpha=0.3)
+        # Draw Cartesian Axes
+        axs[1].plot([-1, 1], [0, 0], zs=[0, 0], color='black', linewidth=0.8, alpha=0.3)
+        axs[1].plot([0, 0], [-1, 1], zs=[0, 0], color='black', linewidth=0.8, alpha=0.3)
+        axs[1].plot([0, 0], [0, 0], zs=[-1, 1], color='black', linewidth=0.8, alpha=0.3)
 
-                # Draw unit circles for context (Bloch sphere visual aid)        t_circ = np.linspace(0, 2*np.pi, 60)
+        # Draw unit circles for context (Bloch sphere visual aid)
+        t_circ = np.linspace(0, 2*np.pi, 60)
         z_circ = np.zeros_like(t_circ)
         axs[1].plot(np.cos(t_circ), np.sin(t_circ), zs=z_circ, color='gray', linestyle=':', alpha=0.2, linewidth=0.5)
         axs[1].plot(np.cos(t_circ), z_circ, zs=np.sin(t_circ), color='gray', linestyle=':', alpha=0.2, linewidth=0.5)
