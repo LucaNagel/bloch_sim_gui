@@ -115,10 +115,29 @@ sys.stderr = WebLogger("error")
 
 print("Python redirection active.")
 
+def _compute_integration_factor_from_wave(b1_wave, t_wave):
+    """Compute integration factor |∫shape dt| / duration for a given complex waveform."""
+    try:
+        b1_wave = np.asarray(b1_wave, dtype=complex)
+        t_wave = np.asarray(t_wave, dtype=float)
+        if b1_wave.size < 2 or t_wave.size < 2:
+            return 1.0
+        duration = float(t_wave[-1] - t_wave[0])
+        dt = float(np.median(np.diff(t_wave)))
+        peak = np.max(np.abs(b1_wave)) if np.any(np.abs(b1_wave)) else 1.0
+        shape = b1_wave / peak if peak != 0 else b1_wave
+        area = np.trapz(shape, dx=dt)
+        aligned = np.real(area * np.exp(-1j * np.angle(area)))
+        if not np.isfinite(aligned) or abs(aligned) < 1e-12:
+            return 1.0
+        return abs(aligned) / max(duration, 1e-12)
+    except Exception as e:
+        print(f"Integration factor error: {e}")
+        return 1.0
+
 # Try importing, otherwise mock for UI testing if wheel is missing
 try:
     from blochsimulator import BlochSimulator, TissueParameters, design_rf_pulse
-    from blochsimulator.gui import _compute_integration_factor_from_wave
     HAS_BACKEND = True
     sim = BlochSimulator(use_parallel=False)
     print("Bloch Simulator backend loaded.")
@@ -216,6 +235,7 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
         )
 
         integration_factor = _compute_integration_factor_from_wave(b1_wave=b1, t_wave=time_s)
+        print(f"Pulse analysis: area_factor={integration_factor:.4f}")
         try:
             tbw_val = 1 / integration_factor
         except:
