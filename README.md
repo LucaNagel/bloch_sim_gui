@@ -1,5 +1,7 @@
 # Bloch Equation Simulator for Python
 
+[![Live Demo](https://img.shields.io/badge/Live-Demo-blue?style=for-the-badge&logo=github)](https://lucanagel.github.io/bloch_sim_gui/)
+
 A high-performance Python implementation of the Bloch equation solver originally developed by Brian Hargreaves at Stanford University. This package provides a fast C-based core with Python bindings, parallel processing support, and an interactive GUI for MRI pulse sequence simulation.
 
 ## Features
