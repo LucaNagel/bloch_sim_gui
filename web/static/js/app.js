@@ -427,8 +427,15 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase_pct, ra
         axs[1].set_xlim(-1, 1)
         axs[1].set_ylim(-1, 1)
         axs[1].set_zlim(pos_cm.min(), pos_cm.max())
-        axs[1].plot(mx, my, zs=pos_cm, color='purple', linewidth=1.5, alpha=0.8)
-        axs[1].plot(np.zeros_like(pos_cm), np.zeros_like(pos_cm), zs=pos_cm, color='gray', linestyle=':', alpha=0.5)
+
+        # Flatten arrays to ensure 1D for plotting
+        mx_flat = np.asarray(mx).ravel()
+        my_flat = np.asarray(my).ravel()
+        pos_cm_flat = np.asarray(pos_cm).ravel()
+        zeros_flat = np.zeros_like(pos_cm_flat)
+
+        axs[1].plot(mx_flat, my_flat, zs=pos_cm_flat, color='purple', linewidth=1.5, alpha=0.8)
+        axs[1].plot(zeros_flat, zeros_flat, zs=pos_cm_flat, color='gray', linestyle=':', alpha=0.5)
     else:
         axs[1].legend_.remove()
         plotted_lines = []
@@ -462,7 +469,7 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase_pct, ra
 
     return float(calc_flip), float(np.max(np.abs(b1)))
 
-def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_angle, freq_range_val, freq_points, tbw):
+def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_angle, freq_range_val, freq_points, tbw, b1_amp, show_mx, show_my):
     global last_result, last_params
     last_params = locals()
 
@@ -479,20 +486,37 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
     freq_range = np.linspace(-f_limit, f_limit, n_freq)
 
     positions = np.array([[0, 0, 0]])
+    npoints = 400
+
+    # Ensure TBW is sane
+    tbw_val = float(tbw) if tbw > 0 else 4.0
 
     if HAS_BACKEND:
         tissue = TissueParameters(name="Generic", t1=t1_s, t2=t2_s)
-        npoints = 400
 
-        # Ensure TBW is sane
-        tbw_val = float(tbw) if tbw > 0 else 4.0
+        # B1 Override Logic
+        calc_flip = flip_angle
+        if b1_amp > 0:
+             # Design a probe pulse (1 deg) to find the B1 per Flip ratio
+            probe_flip = 1.0
+            b1_probe, _ = design_rf_pulse(
+                pulse_type=pulse_type,
+                duration=duration_s,
+                flip_angle=probe_flip,
+                time_bw_product=tbw_val,
+                npoints=npoints,
+                freq_offset=freq_offset_hz
+            )
+            peak_probe = np.max(np.abs(b1_probe))
+            if peak_probe > 0:
+                calc_flip = probe_flip * (b1_amp / peak_probe)
 
-        print(f"Simulation: Pulse={pulse_type}, Flip={flip_angle}, Dur={duration_ms}ms, TBW={tbw_val:.2f}")
+        print(f"Simulation: Pulse={pulse_type}, Flip={calc_flip:.2f}, Dur={duration_ms}ms, TBW={tbw_val:.2f}")
 
         b1, time_s = design_rf_pulse(
             pulse_type=pulse_type,
             duration=duration_s,
-            flip_angle=flip_angle,
+            flip_angle=calc_flip,
             time_bw_product=tbw_val,
             npoints=npoints,
             freq_offset=freq_offset_hz
@@ -531,6 +555,8 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
             "rf_abs": np.abs(b1)
         }
 
+        return float(calc_flip), float(np.max(np.abs(b1)))
+
     else:
         # Mock logic
         time_ms = np.linspace(0, duration_ms, 400)
@@ -545,6 +571,7 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
             "rf_imag": rf_real,
             "rf_abs": np.abs(rf_real)
         }
+        return float(flip_angle), 0.0
 
 def extract_view(view_freq_hz, view_time_ms, want_3d):
     global last_result, fig, axs, lines
