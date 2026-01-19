@@ -5,9 +5,9 @@
         <button onclick="router('home')" style="padding: 0.5rem 1rem; cursor: pointer;">&larr; Back</button>
     </div>
 
-        <div class="controls-panel">
-            <div class="controls-grid">
-                <!-- Pulse Parameters -->
+    <div class="controls-panel">
+        <div class="controls-grid">
+            <!-- Pulse Parameters -->
                 <div class="control-group">
                     <label for="slice_pulse_type">Pulse Type</label>
                     <select id="slice_pulse_type" class="slice-input">
@@ -81,28 +81,7 @@
                 </div>
             </details>
         </div>
-    <!-- Using the same plot container ID as RF Explorer might cause conflicts if we don't clear it.
-         app.js uses `document.body.appendChild` or relies on `matplotlib` to find its canvas or output.
-         Usually Pyodide/Matplotlib targets a specific div if configured, but here the Python code
-         seems to just `plt.show()` which usually appends to the document body or a target div if using
-         `matplotlib_pyodide.wasm_backend`.
-         Looking at `app.js` init, it doesn't specify a target div for `plt.show()`.
-         By default `matplotlib_pyodide` appends to `document.body` or looking for a div with id `figure`.
-         Wait, checking `index.html` (not visible here but common pattern).
-         Actually, let's look at `web/partials/home.html` or `rf_explorer.html` to see where the plot goes.
-         Ah, `rf_explorer.html` (which I read part of) likely has a div.
-         Let's assume there is a generic figure container in `index.html` or the partials rely on auto-appending.
 
-         However, for safety, I will add a specific container here and we might need to tell Python where to draw.
-         But `app.js` uses `matplotlib.use("module://matplotlib_pyodide.wasm_backend")`.
-         This backend typically targets a div with ID `plot` or appends.
-
-         Let's assume the existing `rf_explorer` works. I will just leave the plot area handling to the JS/Python
-         logic which seems to handle the canvas.
-         Wait, if I switch views, I need the plot to appear IN this view.
-
-         I'll verify `web/partials/rf_explorer.html` again to see if it has a plot container.
-    -->
     <div id="slice-plot-container" style="margin-top: 1rem; text-align: center;">
         <!-- Matplotlib canvas will likely be appended here or we move it here via JS -->
     </div>

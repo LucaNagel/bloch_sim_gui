@@ -758,6 +758,7 @@ function triggerSliceSimulation(event) {
         } catch (e) {
             console.error("Slice Sim Error", e);
             statusEl.innerText = "Error";
+            logMessage(e.message || e.toString(), "error");
         }
     }, 50);
 }
