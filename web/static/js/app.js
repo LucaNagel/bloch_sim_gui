@@ -401,8 +401,9 @@ def extract_view(view_freq_hz, view_time_ms, want_3d):
 
         # Draw unit circles for context (Bloch sphere visual aid)
         t_circ = np.linspace(0, 2*np.pi, 60)
-        axs[1].plot(np.cos(t_circ), np.sin(t_circ), 0, color='gray', linestyle=':', alpha=0.2, linewidth=0.5)
-        axs[1].plot(np.cos(t_circ), 0, np.sin(t_circ), color='gray', linestyle=':', alpha=0.2, linewidth=0.5)
+        z_circ = np.zeros_like(t_circ)
+        axs[1].plot(np.cos(t_circ), np.sin(t_circ), z_circ, color='gray', linestyle=':', alpha=0.2, linewidth=0.5)
+        axs[1].plot(np.cos(t_circ), z_circ, np.sin(t_circ), color='gray', linestyle=':', alpha=0.2, linewidth=0.5)
 
         # Plot the full magnetization path
         axs[1].plot(mx, my, mz, color='#0056b3', linewidth=1.5, alpha=0.8)
