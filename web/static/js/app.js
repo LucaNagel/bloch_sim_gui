@@ -416,7 +416,8 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase, range_
     fig.canvas.draw()
     fig.canvas.flush_events()
 
-def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_angle, freq_range_val, freq_points, tbw):    global last_result, last_params
+def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_angle, freq_range_val, freq_points, tbw):
+    global last_result, last_params
 
     # Store params to check against later if needed, though JS handles triggering
     last_params = locals()
