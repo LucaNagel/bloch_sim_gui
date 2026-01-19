@@ -213,6 +213,8 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
         except:
             pass
 
+        print(f"Simulation: Pulse={pulse_type}, Flip={flip_angle}, Dur={duration_ms}ms, TBW={tbw_val:.2f}")
+
         b1, time_s = design_rf_pulse(
             pulse_type=pulse_type,
             duration=duration_s,
