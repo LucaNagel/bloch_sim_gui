@@ -367,12 +367,21 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase_pct, ra
     dur_s = duration_ms * 1e-3
     dt = 1e-5
 
+    # Auto TBW logic (Fixed by Type)
+    calc_tbw = tbw
+    if pulse_type == "sinc":
+        calc_tbw = 4.0
+    elif pulse_type == "rect":
+        calc_tbw = 1.0 # approx
+    elif pulse_type == "gaussian":
+        calc_tbw = 2.5 # approx
+
     # 1. Determine Flip Angle from B1 Override if provided
     calc_flip = flip
     if b1_amp_gauss is not None and b1_amp_gauss > 0:
         # Design a probe pulse (1 deg) to find the B1 per Flip ratio
         probe_flip = 1.0
-        b1_probe, _ = design_rf_pulse(pulse_type, duration=dur_s, flip_angle=probe_flip, time_bw_product=tbw, npoints=int(dur_s/dt))
+        b1_probe, _ = design_rf_pulse(pulse_type, duration=dur_s, flip_angle=probe_flip, time_bw_product=calc_tbw, npoints=int(dur_s/dt))
 
         # Apply apodization to probe to measure *actual* peak
         if apod != "None":
@@ -388,7 +397,7 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase_pct, ra
             calc_flip = probe_flip * (b1_amp_gauss / peak_probe)
 
     # 2. Design Final Pulse
-    b1, time = design_rf_pulse(pulse_type, duration=dur_s, flip_angle=calc_flip, time_bw_product=tbw, npoints=int(dur_s/dt))
+    b1, time = design_rf_pulse(pulse_type, duration=dur_s, flip_angle=calc_flip, time_bw_product=calc_tbw, npoints=int(dur_s/dt))
 
     if apod != "None":
         n = len(b1)
@@ -404,7 +413,7 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase_pct, ra
             curr_area = np.trapz(np.abs(b1), dx=dt)
             if curr_area > 0: b1 *= (target_area / curr_area)
 
-    bw_hz = tbw / dur_s
+    bw_hz = calc_tbw / dur_s
     gamma = 4258.0
     gz = bw_hz / (gamma * (thick_mm/10.0))
 
@@ -452,7 +461,8 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase_pct, ra
         "show_my": show_my
     }
 
-    return float(calc_flip), float(np.max(np.abs(b1)))
+    # Return 3 values now: ActFlip, ActB1, ActTBW
+    return float(calc_flip), float(np.max(np.abs(b1))), float(calc_tbw)
 
 def extract_slice_view(view_time_ms, view_pos_cm, is3d):
     global last_slice_result, fig, axs, lines
@@ -493,11 +503,19 @@ def extract_slice_view(view_time_ms, view_pos_cm, is3d):
     show_my = last_slice_result.get('show_my', False)
 
     if is3d:
-        # 3D: Trajectory of single spin at p_idx
-        # mx_all shape: (Time, Pos, Freq=1) -> squeeze
-        mx_traj = mx_all[:, p_idx].ravel()
-        my_traj = my_all[:, p_idx].ravel()
-        mz_traj = mz_all[:, p_idx].ravel()
+        # 3D: Trajectory of single spin at p_idx (EVOLUTION)
+        # mx_all shape: (Time, Pos, Freq=1) -> squeeze to (Time, Pos)
+        # We need the time evolution at the selected POSITION p_idx
+
+        # Check shape to be safe
+        if mx_all.ndim == 3:
+             mx_traj = mx_all[:, p_idx, 0] # (Time)
+             my_traj = my_all[:, p_idx, 0]
+             mz_traj = mz_all[:, p_idx, 0]
+        else:
+             mx_traj = mx_all[:, p_idx]
+             my_traj = my_all[:, p_idx]
+             mz_traj = mz_all[:, p_idx]
 
         ax3d = axs[2]
         ax3d.cla()
@@ -510,7 +528,7 @@ def extract_slice_view(view_time_ms, view_pos_cm, is3d):
         ax3d.plot([0, 0], [-1, 1], zs=[0, 0], color='black', alpha=0.3)
         ax3d.plot([0, 0], [0, 0], zs=[-1, 1], color='black', alpha=0.3)
 
-        # Plot
+        # Plot Trajectory
         ax3d.plot(mx_traj, my_traj, zs=mz_traj, color='#0056b3', linewidth=1.5, alpha=0.8)
 
         # Current Point
@@ -519,10 +537,16 @@ def extract_slice_view(view_time_ms, view_pos_cm, is3d):
         ax3d.scatter([cur_mx], [cur_my], [cur_mz], color='red', s=25)
 
     else:
-        # 2D: Profile at t_idx
-        mx_prof = mx_all[t_idx, :].ravel()
-        my_prof = my_all[t_idx, :].ravel()
-        mz_prof = mz_all[t_idx, :].ravel()
+        # 2D: Profile at time t_idx (PROFILE)
+        if mx_all.ndim == 3:
+             mx_prof = mx_all[t_idx, :, 0]
+             my_prof = my_all[t_idx, :, 0]
+             mz_prof = mz_all[t_idx, :, 0]
+        else:
+             mx_prof = mx_all[t_idx, :]
+             my_prof = my_all[t_idx, :]
+             mz_prof = mz_all[t_idx, :]
+
         mxy_prof = np.sqrt(mx_prof**2 + my_prof**2)
 
         lines['mz_slice'].set_data(pos_cm, mz_prof)
@@ -549,7 +573,6 @@ def extract_slice_view(view_time_ms, view_pos_cm, is3d):
     # Update Text
     document.getElementById("slice_view_time_val").innerText = str(round(view_time_ms, 2))
     document.getElementById("slice_view_pos_val").innerText = str(round(view_pos_cm, 2))
-
 
 def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_angle, freq_range_val, freq_points, tbw, b1_amp, show_mx, show_my):
     global last_result, last_params
@@ -902,9 +925,10 @@ function triggerSliceSimulation(event) {
                     const result = runSlice(vals.flip, vals.dur, vals.tbw, vals.apod, vals.thick, vals.rephase, vals.range, vals.points, vals.is3d, vals.b1, vals.type, vals.showMx, vals.showMy);
 
                     // Sync UI
-                    if (result && result.length === 2) {
+                    if (result && result.length === 3) {
                         const actFlip = result.get(0);
                         const actB1 = result.get(1);
+                        const actTBW = result.get(2);
 
                         if (vals.b1 > 0) {
                             // B1 drove simulation -> update Flip
@@ -917,6 +941,9 @@ function triggerSliceSimulation(event) {
                                 document.getElementById("slice_b1").value = actB1.toFixed(4);
                             }
                         }
+                        // Update TBW (always calculated now)
+                        document.getElementById("slice_tbw").value = actTBW.toFixed(1);
+
                         result.destroy();
                     }
                 }
