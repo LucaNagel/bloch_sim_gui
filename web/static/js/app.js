@@ -201,6 +201,7 @@ is_3d_mode = True  # Default to 3D
 
 def init_plot():
     global fig, axs, lines, is_3d_mode
+    plt.close('all')
     plt.clf()
     # Disable constrained_layout to prevent jumping
     fig = plt.figure(figsize=(12, 4.5), constrained_layout=False)
@@ -286,6 +287,7 @@ last_slice_result = None
 
 def init_slice_plot():
     global fig, axs, lines, is_slice_3d_mode
+    plt.close('all')
     plt.clf()
     fig = plt.figure(figsize=(12, 4.5), constrained_layout=False)
     fig.patch.set_facecolor('#ffffff')
