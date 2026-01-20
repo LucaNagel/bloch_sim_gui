@@ -915,22 +915,27 @@ function triggerSliceSimulation(event) {
     const viewParams = ["slice_view_time", "slice_view_pos"];
     const isViewOnly = sourceId && viewParams.includes(sourceId);
 
-    // Sync View Time Max
-    const durationInput = document.getElementById("slice_duration");
-    const extraInput = document.getElementById("slice_extra_time");
-    const viewTimeInput = document.getElementById("slice_view_time");
+        // Sync View Time Max
+        const durationInput = document.getElementById("slice_duration");
+        const extraInput = document.getElementById("slice_extra_time");
+        const rephaseInput = document.getElementById("slice_rephase_pct");
+        const viewTimeInput = document.getElementById("slice_view_time");
 
-    if (durationInput && viewTimeInput) {
-        const dur = parseFloat(durationInput.value) || 0;
-        const extra = parseFloat(extraInput ? extraInput.value : 0) || 0;
-        const totalDur = dur + extra;
+        if (durationInput && viewTimeInput) {
+            const dur = parseFloat(durationInput.value) || 0;
+            const extra = parseFloat(extraInput ? extraInput.value : 0) || 0;
+            const rephase = parseFloat(rephaseInput ? rephaseInput.value : 0);
 
-        viewTimeInput.max = totalDur;
+            // Rephase duration is fixed at 1.0ms in simulation if pct != 0
+            const rephaseDur = (rephase !== 0) ? 1.0 : 0.0;
 
-        let val = parseFloat(viewTimeInput.value);
-        if (val > totalDur) viewTimeInput.value = totalDur;
-    }
+            const totalDur = dur + rephaseDur + extra;
 
+            viewTimeInput.max = totalDur;
+
+            let val = parseFloat(viewTimeInput.value);
+            if (val > totalDur) viewTimeInput.value = totalDur;
+        }
     // Sync View Pos Max (Range)
     const rangeInput = document.getElementById("slice_range");
     const viewPosInput = document.getElementById("slice_view_pos");
