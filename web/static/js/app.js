@@ -191,7 +191,7 @@ fig, axs = None, None
 lines = {}
 last_result = None
 last_params = {}
-is_3d_mode = False
+is_3d_mode = True  # Default to 3D
 
 def init_plot():
     global fig, axs, lines, is_3d_mode
@@ -206,15 +206,15 @@ def init_plot():
 
     # Create axes manually to support dynamic switching
     ax0 = fig.add_subplot(1, 3, 1)
-    ax1 = fig.add_subplot(1, 3, 2)
+    ax1 = fig.add_subplot(1, 3, 2, projection='3d') # Default 3D
     ax2 = fig.add_subplot(1, 3, 3)
     axs = [ax0, ax1, ax2]
-    is_3d_mode = False
+    is_3d_mode = True
 
     # 1. RF Pulse (Static)
     axs[0].set_title("RF Pulse Shape")
     axs[0].set_xlabel("Time (ms)")
-    axs[0].set_ylabel("Amplitude (uT)")
+    axs[0].set_ylabel("Amplitude (G)")
     axs[0].axhline(0, color='black', linewidth=0.8, alpha=0.3)
     lines['rf_real'], = axs[0].plot([], [], label='Real', color='#0056b3')
     lines['rf_imag'], = axs[0].plot([], [], label='Imag', color='#ff9900', alpha=0.7)
@@ -223,9 +223,8 @@ def init_plot():
     axs[0].legend(loc='upper right', fontsize='small')
     axs[0].grid(True, linestyle='--', alpha=0.5)
 
-    # 2. Magnetization (Dynamic 2D/3D)
-    # Default is 2D
-    _setup_2d_mag_axes()
+    # 2. Magnetization (Dynamic 2D/3D) - Init in 3D
+    # (Plot setup happens in extract_view)
 
     # 3. Frequency Profile (Static)
     axs[2].set_title("Excitation Profile")
@@ -277,6 +276,7 @@ def update_plot_mode(want_3d):
     is_3d_mode = want_3d
 
 is_slice_3d_mode = False
+last_slice_result = None
 
 def init_slice_plot():
     global fig, axs, lines, is_slice_3d_mode
@@ -284,23 +284,36 @@ def init_slice_plot():
     fig = plt.figure(figsize=(12, 4.5), constrained_layout=False)
     fig.patch.set_facecolor('#ffffff')
     fig.suptitle("Slice Selection Profile", fontsize=16, fontweight='bold')
-    fig.subplots_adjust(left=0.06, right=0.96, bottom=0.12, top=0.88, wspace=0.25)
+    # Right margin increased to accommodate secondary Y axis
+    fig.subplots_adjust(left=0.06, right=0.90, bottom=0.12, top=0.88, wspace=0.30)
 
     # Ax0: RF Pulse
     ax0 = fig.add_subplot(1, 2, 1)
     ax0.set_title("RF Pulse & Gradient")
     ax0.set_xlabel("Time (ms)")
-    ax0.set_ylabel("Amplitude")
-    lines['rf_amp'], = ax0.plot([], [], label='|B1| (G)', color='blue')
-    lines['grad'], = ax0.plot([], [], label='Gz (G/cm)', color='red', alpha=0.5)
-    ax0.legend(loc='upper right', fontsize='small')
+    ax0.set_ylabel("Amplitude (G)")
+    lines['rf_amp'], = ax0.plot([], [], label='|B1|', color='blue')
+
+    # Dual Axis for Gradient
+    ax0b = ax0.twinx()
+    ax0b.set_ylabel("Gradient (G/cm)", color='red')
+    ax0b.tick_params(axis='y', labelcolor='red')
+    lines['grad'], = ax0b.plot([], [], label='Gz', color='red', alpha=0.5)
+
+    # Legend combined? Matplotlib legends are per-axis.
+    # Ax0 legend
+    h1, l1 = ax0.get_legend_handles_labels()
+    h2, l2 = ax0b.get_legend_handles_labels()
+    ax0.legend(h1+h2, l1+l2, loc='upper right', fontsize='small')
     ax0.grid(True, linestyle='--', alpha=0.5)
+
+    lines['slice_time_line'], = ax0.plot([], [], color='#e74c3c', linestyle='-', alpha=1.0, linewidth=2.0, zorder=10)
 
     # Ax1: Profile (Default 2D)
     ax1 = fig.add_subplot(1, 2, 2)
     _setup_slice_profile_2d(ax1)
 
-    axs = [ax0, ax1]
+    axs = [ax0, ax0b, ax1]
     is_slice_3d_mode = False
     plt.show()
 
@@ -311,25 +324,45 @@ def _setup_slice_profile_2d(ax):
     ax.set_ylim(-1.1, 1.1)
     lines['mz_slice'], = ax.plot([], [], label='Mz', color='green')
     lines['mxy_slice'], = ax.plot([], [], label='|Mxy|', color='orange')
+    lines['mx_slice'], = ax.plot([], [], label='Mx', color='red', alpha=0.6, linestyle='--')
+    lines['my_slice'], = ax.plot([], [], label='My', color='blue', alpha=0.6, linestyle='--')
+    lines['slice_pos_line'], = ax.plot([], [], color='#e74c3c', linestyle='-', alpha=1.0, linewidth=2.0, zorder=10)
+
     ax.legend(loc='upper right', fontsize='small')
     ax.grid(True, linestyle='--', alpha=0.5)
 
-def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase_pct, range_cm, n_points, is3d, b1_amp_gauss, pulse_type, show_mx, show_my):
-    global fig, axs, lines, is_slice_3d_mode
+def update_slice_plot_mode(want_3d):
+    global is_slice_3d_mode, axs, fig, lines
+    if want_3d == is_slice_3d_mode:
+        return
 
-    if fig is None or len(axs) != 2:
+    # Remove old axes (Ax1 is at index 2 in axs list: [ax0, ax0b, ax1])
+    fig.delaxes(axs[2])
+
+    if want_3d:
+        # Create 3D axes
+        axs[2] = fig.add_subplot(1, 2, 2, projection='3d')
+        axs[2].set_title("Magnetization Evolution")
+        axs[2].set_xlim(-1, 1)
+        axs[2].set_ylim(-1, 1)
+        axs[2].set_zlim(-1, 1)
+        axs[2].set_xlabel('Mx')
+        axs[2].set_ylabel('My')
+        axs[2].set_zlabel('Mz')
+    else:
+        # Create 2D axes
+        axs[2] = fig.add_subplot(1, 2, 2)
+        _setup_slice_profile_2d(axs[2])
+
+    is_slice_3d_mode = want_3d
+
+def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase_pct, range_cm, n_points, is3d, b1_amp_gauss, pulse_type, show_mx, show_my):
+    global fig, axs, lines, is_slice_3d_mode, last_slice_result
+
+    if fig is None or len(axs) != 3:
         init_slice_plot()
 
-    # Handle 3D mode switch
-    if is3d != is_slice_3d_mode:
-        fig.delaxes(axs[1])
-        if is3d:
-            axs[1] = fig.add_subplot(1, 2, 2, projection='3d')
-            axs[1].set_title("Magnetization Helix")
-        else:
-            axs[1] = fig.add_subplot(1, 2, 2)
-            _setup_slice_profile_2d(axs[1])
-        is_slice_3d_mode = is3d
+    # NOTE: View updates happen in extract_slice_view. Here we run simulation and store result.
 
     dur_s = duration_ms * 1e-3
     dt = 1e-5
@@ -398,76 +431,125 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase_pct, ra
 
     tissue = TissueParameters("Water", 2.0, 2.0)
 
-    mx, my, mz = np.zeros(int(n_points)), np.zeros(int(n_points)), np.ones(int(n_points))
-
     if HAS_BACKEND:
-        res = sim.simulate((b1, grads, time), tissue, positions=pos, mode=0)
+        # Mode 2 for time-resolved
+        res = sim.simulate((b1, grads, time), tissue, positions=pos, mode=2)
         mx, my, mz = res['mx'], res['my'], res['mz']
     else:
+        # Mock
         z = pos[:, 2]
-        mz = np.cos(z * 10)
-        mx = np.sin(z * 10)
-        my = np.zeros_like(z)
+        mz = np.tile(np.cos(z * 10), (len(time), 1))
+        mx = np.tile(np.sin(z * 10), (len(time), 1))
+        my = np.zeros_like(mx)
 
-    # Plot Update
-    t_ms = time * 1000
-    lines['rf_amp'].set_data(t_ms, np.abs(b1))
-    lines['grad'].set_data(t_ms, grads[:, 2])
-    axs[0].relim()
-    axs[0].autoscale_view()
+    last_slice_result = {
+        "mx": mx, "my": my, "mz": mz,
+        "time_ms": time * 1000,
+        "pos_cm": pos[:, 2] * 100,
+        "b1_abs": np.abs(b1),
+        "grads_z": grads[:, 2],
+        "show_mx": show_mx,
+        "show_my": show_my
+    }
 
-    pos_cm = pos[:, 2] * 100
+    return float(calc_flip), float(np.max(np.abs(b1)))
+
+def extract_slice_view(view_time_ms, view_pos_cm, is3d):
+    global last_slice_result, fig, axs, lines
+
+    if last_slice_result is None or fig is None:
+        return
+
+    update_slice_plot_mode(is3d)
+
+    time_ms = last_slice_result["time_ms"]
+    pos_cm = last_slice_result["pos_cm"]
+
+    # Indices
+    t_idx = int(np.argmin(np.abs(time_ms - view_time_ms)))
+    p_idx = int(np.argmin(np.abs(pos_cm - view_pos_cm)))
+
+    # Update Ax0 (RF/Grad)
+    lines['rf_amp'].set_data(time_ms, last_slice_result['b1_abs'])
+    lines['grad'].set_data(time_ms, last_slice_result['grads_z'])
+
+    # Scaling
+    max_b1 = np.max(last_slice_result['b1_abs'])
+    if max_b1 <= 0: max_b1 = 1.0
+    axs[0].set_ylim(-0.1, max_b1 * 1.1)
+
+    max_gz = np.max(np.abs(last_slice_result['grads_z']))
+    if max_gz <= 0: max_gz = 1.0
+    axs[1].set_ylim(-max_gz * 1.1, max_gz * 1.1) # axs[1] is ax0b (twinx)
+
+    axs[0].set_xlim(0, time_ms[-1])
+    lines['slice_time_line'].set_data([view_time_ms, view_time_ms], axs[0].get_ylim())
+
+    # Data
+    mx_all = last_slice_result['mx']
+    my_all = last_slice_result['my']
+    mz_all = last_slice_result['mz']
+    show_mx = last_slice_result.get('show_mx', False)
+    show_my = last_slice_result.get('show_my', False)
 
     if is3d:
-        axs[1].cla()
-        axs[1].set_title("Magnetization Helix (Slice Profile)")
-        axs[1].set_xlabel("Mx")
-        axs[1].set_ylabel("My")
-        axs[1].set_zlabel("Position (cm)")
-        axs[1].set_xlim(-1, 1)
-        axs[1].set_ylim(-1, 1)
-        axs[1].set_zlim(pos_cm.min(), pos_cm.max())
+        # 3D: Trajectory of single spin at p_idx
+        # mx_all shape: (Time, Pos, Freq=1) -> squeeze
+        mx_traj = mx_all[:, p_idx].ravel()
+        my_traj = my_all[:, p_idx].ravel()
+        mz_traj = mz_all[:, p_idx].ravel()
 
-        # Flatten arrays to ensure 1D for plotting
-        mx_flat = np.asarray(mx).ravel()
-        my_flat = np.asarray(my).ravel()
-        pos_cm_flat = np.asarray(pos_cm).ravel()
-        zeros_flat = np.zeros_like(pos_cm_flat)
+        ax3d = axs[2]
+        ax3d.cla()
+        ax3d.set_title(f"Trajectory @ {view_pos_cm:.2f} cm")
+        ax3d.set_xlim(-1, 1); ax3d.set_ylim(-1, 1); ax3d.set_zlim(-1, 1)
+        ax3d.set_xlabel('Mx'); ax3d.set_ylabel('My'); ax3d.set_zlabel('Mz')
 
-        axs[1].plot(mx_flat, my_flat, zs=pos_cm_flat, color='purple', linewidth=1.5, alpha=0.8)
-        axs[1].plot(zeros_flat, zeros_flat, zs=pos_cm_flat, color='gray', linestyle=':', alpha=0.5)
+        # Axes
+        ax3d.plot([-1, 1], [0, 0], zs=[0, 0], color='black', alpha=0.3)
+        ax3d.plot([0, 0], [-1, 1], zs=[0, 0], color='black', alpha=0.3)
+        ax3d.plot([0, 0], [0, 0], zs=[-1, 1], color='black', alpha=0.3)
+
+        # Plot
+        ax3d.plot(mx_traj, my_traj, zs=mz_traj, color='#0056b3', linewidth=1.5, alpha=0.8)
+
+        # Current Point
+        cur_mx, cur_my, cur_mz = mx_traj[t_idx], my_traj[t_idx], mz_traj[t_idx]
+        ax3d.plot([0, cur_mx], [0, cur_my], zs=[0, cur_mz], color='red', linewidth=2)
+        ax3d.scatter([cur_mx], [cur_my], [cur_mz], color='red', s=25)
+
     else:
-        axs[1].legend_.remove()
-        plotted_lines = []
+        # 2D: Profile at t_idx
+        mx_prof = mx_all[t_idx, :].ravel()
+        my_prof = my_all[t_idx, :].ravel()
+        mz_prof = mz_all[t_idx, :].ravel()
+        mxy_prof = np.sqrt(mx_prof**2 + my_prof**2)
 
-        lines['mz_slice'].set_data(pos_cm, mz)
-        plotted_lines.append(lines['mz_slice'])
-
-        mxy = np.sqrt(mx**2 + my**2)
-        lines['mxy_slice'].set_data(pos_cm, mxy)
-        plotted_lines.append(lines['mxy_slice'])
+        lines['mz_slice'].set_data(pos_cm, mz_prof)
+        lines['mxy_slice'].set_data(pos_cm, mxy_prof)
 
         if show_mx:
-            if 'mx_slice' not in lines:
-                lines['mx_slice'], = axs[1].plot([], [], label='Mx', color='red', alpha=0.6, linestyle='--')
-            lines['mx_slice'].set_data(pos_cm, mx)
-            plotted_lines.append(lines['mx_slice'])
-        elif 'mx_slice' in lines: lines['mx_slice'].set_data([], [])
+            lines['mx_slice'].set_data(pos_cm, mx_prof)
+            lines['mx_slice'].set_visible(True)
+        else:
+            lines['mx_slice'].set_visible(False)
 
         if show_my:
-            if 'my_slice' not in lines:
-                lines['my_slice'], = axs[1].plot([], [], label='My', color='blue', alpha=0.6, linestyle='--')
-            lines['my_slice'].set_data(pos_cm, my)
-            plotted_lines.append(lines['my_slice'])
-        elif 'my_slice' in lines: lines['my_slice'].set_data([], [])
+            lines['my_slice'].set_data(pos_cm, my_prof)
+            lines['my_slice'].set_visible(True)
+        else:
+            lines['my_slice'].set_visible(False)
 
-        axs[1].set_xlim(pos_cm.min(), pos_cm.max())
-        axs[1].legend(handles=plotted_lines, loc='upper right', fontsize='small')
+        lines['slice_pos_line'].set_data([view_pos_cm, view_pos_cm], [-1.1, 1.1])
+        axs[2].set_xlim(pos_cm.min(), pos_cm.max())
 
     fig.canvas.draw()
     fig.canvas.flush_events()
 
-    return float(calc_flip), float(np.max(np.abs(b1)))
+    # Update Text
+    document.getElementById("slice_view_time_val").innerText = str(round(view_time_ms, 2))
+    document.getElementById("slice_view_pos_val").innerText = str(round(view_pos_cm, 2))
+
 
 def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_angle, freq_range_val, freq_points, tbw, b1_amp, show_mx, show_my):
     global last_result, last_params
@@ -494,7 +576,7 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
     if HAS_BACKEND:
         tissue = TissueParameters(name="Generic", t1=t1_s, t2=t2_s)
 
-        # B1 Override Logic
+        # B1 Override Logic (b1_amp is in Gauss)
         calc_flip = flip_angle
         if b1_amp > 0:
              # Design a probe pulse (1 deg) to find the B1 per Flip ratio
@@ -552,7 +634,9 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
             "freq_range": freq_range,
             "rf_real": np.real(b1),
             "rf_imag": np.imag(b1),
-            "rf_abs": np.abs(b1)
+            "rf_abs": np.abs(b1),
+            "show_mx": show_mx, # Store flags
+            "show_my": show_my
         }
 
         return float(calc_flip), float(np.max(np.abs(b1)))
@@ -569,7 +653,9 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
             "freq_range": freq_range,
             "rf_real": rf_real,
             "rf_imag": rf_real,
-            "rf_abs": np.abs(rf_real)
+            "rf_abs": np.abs(rf_real),
+            "show_mx": show_mx,
+            "show_my": show_my
         }
         return float(flip_angle), 0.0
 
@@ -689,6 +775,23 @@ def extract_view(view_freq_hz, view_time_ms, want_3d):
     # 3. Update Profile Plot
     lines['mxy'].set_data(freq_range, mxy_prof)
     lines['mz_prof'].set_data(freq_range, mz_prof)
+
+    # Check Show Mx/My flags
+    show_mx = last_result.get('show_mx', False)
+    show_my = last_result.get('show_my', False)
+
+    if show_mx:
+        lines['mx_prof'].set_data(freq_range, mx_t)
+        lines['mx_prof'].set_visible(True)
+    else:
+        lines['mx_prof'].set_visible(False)
+
+    if show_my:
+        lines['my_prof'].set_data(freq_range, my_t)
+        lines['my_prof'].set_visible(True)
+    else:
+        lines['my_prof'].set_visible(False)
+
     axs[2].set_xlim(np.min(freq_range), np.max(freq_range))
     axs[2].set_ylim(-1.1, 1.1)
     lines['freq_line'].set_data([view_freq_hz, view_freq_hz], axs[2].get_ylim())
@@ -722,25 +825,46 @@ function triggerSliceSimulation(event) {
 
     const sourceId = event ? event.target.id : null;
 
-    // Debounce
+    // View Update Only?
+    const viewParams = ["slice_view_time", "slice_view_pos"];
+    const isViewOnly = sourceId && viewParams.includes(sourceId);
+
+    // Sync View Time Max
+    const durationInput = document.getElementById("slice_duration");
+    const viewTimeInput = document.getElementById("slice_view_time");
+    if (durationInput && viewTimeInput) {
+        const dur = parseFloat(durationInput.value);
+        if (!isNaN(dur)) {
+            viewTimeInput.max = dur;
+            if (sourceId === 'slice_duration') viewTimeInput.value = dur;
+            if (parseFloat(viewTimeInput.value) > dur) viewTimeInput.value = dur;
+        }
+    }
+
+    // Sync View Pos Max (Range)
+    const rangeInput = document.getElementById("slice_range");
+    const viewPosInput = document.getElementById("slice_view_pos");
+    if (rangeInput && viewPosInput) {
+        const rng = parseFloat(rangeInput.value);
+        if (!isNaN(rng)) {
+            const half = rng/2;
+            viewPosInput.min = -half;
+            viewPosInput.max = half;
+            // Clamp
+            let val = parseFloat(viewPosInput.value);
+            if (val < -half) viewPosInput.value = -half;
+            if (val > half) viewPosInput.value = half;
+        }
+    }
+
     if (updateTimer) clearTimeout(updateTimer);
 
     const statusEl = document.getElementById('status-text');
-    statusEl.innerHTML = '<span class="spinner"></span>Calculating...';
+    statusEl.innerHTML = isViewOnly ? 'Updating view...' : '<span class="spinner"></span>Calculating...';
 
     updateTimer = setTimeout(async () => {
         try {
-            // Logic: If user changes Flip, we clear B1 override. If user changes B1, we use B1 override.
-            // If user changes other params, we respect B1 override if it's set, else Flip.
-
-            let b1Override = parseFloat(document.getElementById("slice_b1").value);
-            if (isNaN(b1Override)) b1Override = -1;
-
-            if (sourceId === 'slice_flip_angle') {
-                b1Override = -1;
-                document.getElementById("slice_b1").value = ""; // Clear B1 to indicate Flip is driver
-            }
-
+            // Gather Values
             const vals = {
                 flip: parseFloat(document.getElementById("slice_flip_angle").value),
                 dur: parseFloat(document.getElementById("slice_duration").value),
@@ -751,34 +875,57 @@ function triggerSliceSimulation(event) {
                 range: parseFloat(document.getElementById("slice_range").value),
                 points: parseInt(document.getElementById("slice_points").value),
                 is3d: document.getElementById("slice_3d").checked,
-                b1: b1Override,
+                b1: parseFloat(document.getElementById("slice_b1").value),
                 type: document.getElementById("slice_pulse_type").value,
                 showMx: document.getElementById("slice_show_mx").checked,
-                showMy: document.getElementById("slice_show_my").checked
+                showMy: document.getElementById("slice_show_my").checked,
+                viewTime: parseFloat(document.getElementById("slice_view_time").value),
+                viewPos: parseFloat(document.getElementById("slice_view_pos").value)
             };
 
-            const runSlice = pyodide.globals.get("run_slice_simulation");
-            if (runSlice) {
-                const result = runSlice(vals.flip, vals.dur, vals.tbw, vals.apod, vals.thick, vals.rephase, vals.range, vals.points, vals.is3d, vals.b1, vals.type, vals.showMx, vals.showMy);
+            if (isNaN(vals.b1)) vals.b1 = -1;
 
-                // Sync UI
-                if (result && result.length === 2) {
-                    const actFlip = result.get(0);
-                    const actB1 = result.get(1);
-
-                    if (vals.b1 > 0) {
-                        // B1 drove simulation -> update Flip
-                        if (document.activeElement.id !== "slice_flip_angle") {
-                            document.getElementById("slice_flip_angle").value = actFlip.toFixed(2);
-                        }
-                    } else {
-                        // Flip drove simulation -> update B1
-                        if (document.activeElement.id !== "slice_b1") {
-                            document.getElementById("slice_b1").value = actB1.toFixed(4);
-                        }
-                    }
-                    result.destroy();
+            // Last Changed Logic (Only if not view update)
+            if (!isViewOnly) {
+                // If B1 Changed -> Keep B1 (vals.b1 is valid)
+                // If Flip/Dur/TBW Changed -> Reset B1
+                const physicsParamsThatResetB1 = ["slice_flip_angle", "slice_duration", "slice_tbw", "slice_thickness"];
+                if (physicsParamsThatResetB1.includes(sourceId)) {
+                    document.getElementById("slice_b1").value = "";
+                    vals.b1 = -1;
                 }
+            }
+
+            if (!isViewOnly) {
+                const runSlice = pyodide.globals.get("run_slice_simulation");
+                if (runSlice) {
+                    const result = runSlice(vals.flip, vals.dur, vals.tbw, vals.apod, vals.thick, vals.rephase, vals.range, vals.points, vals.is3d, vals.b1, vals.type, vals.showMx, vals.showMy);
+
+                    // Sync UI
+                    if (result && result.length === 2) {
+                        const actFlip = result.get(0);
+                        const actB1 = result.get(1);
+
+                        if (vals.b1 > 0) {
+                            // B1 drove simulation -> update Flip
+                            if (document.activeElement.id !== "slice_flip_angle") {
+                                document.getElementById("slice_flip_angle").value = actFlip.toFixed(2);
+                            }
+                        } else {
+                            // Flip drove simulation -> update B1
+                            if (document.activeElement.id !== "slice_b1") {
+                                document.getElementById("slice_b1").value = actB1.toFixed(4);
+                            }
+                        }
+                        result.destroy();
+                    }
+                }
+            }
+
+            // Always update view
+            const extractView = pyodide.globals.get("extract_slice_view");
+            if (extractView) {
+                extractView(vals.viewTime, vals.viewPos, vals.is3d);
             }
 
             statusEl.innerText = "Ready";
@@ -827,11 +974,6 @@ function triggerSimulation(event, forceRun = false) {
     // If no sourceId (e.g. init), assume full sim
     if (!sourceId && !forceRun) needFullSim = true;
 
-    // Clear B1 if Flip changes
-    if (sourceId === 'flip_angle') {
-        document.getElementById("b1_amp").value = "";
-    }
-
     // Debounce
     if (updateTimer) clearTimeout(updateTimer);
 
@@ -840,10 +982,15 @@ function triggerSimulation(event, forceRun = false) {
 
     updateTimer = setTimeout(async () => {
         try {
+            // Last Changed Logic
+            // If sourceId is Flip/Dur/TBW -> Clear B1
+            const resetB1Params = ["flip_angle", "duration", "tbw"];
+            if (resetB1Params.includes(sourceId)) {
+                document.getElementById("b1_amp").value = "";
+            }
+
             let b1val = parseFloat(document.getElementById("b1_amp").value);
             if (isNaN(b1val)) b1val = -1;
-
-            if (sourceId === 'flip_angle') b1val = -1;
 
             const vals = {
                 t1: parseFloat(document.getElementById("t1").value),
@@ -881,7 +1028,7 @@ function triggerSimulation(event, forceRun = false) {
                         }
                     } else {
                         if (document.activeElement.id !== "b1_amp") {
-                            document.getElementById("b1_amp").value = actB1.toFixed(2);
+                            document.getElementById("b1_amp").value = actB1.toFixed(4); // G
                         }
                     }
                     result.destroy();
@@ -893,8 +1040,6 @@ function triggerSimulation(event, forceRun = false) {
             }
 
             statusEl.innerText = "Ready";
-            const errorLog = document.getElementById('error-log');
-            // Don't auto-hide on success if the user has it open, just clear potential error status
         } catch (e) {
             console.error("Sim Error", e);
             let msg = e.message || e.toString();

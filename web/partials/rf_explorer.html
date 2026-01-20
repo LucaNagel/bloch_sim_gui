@@ -39,8 +39,8 @@
                     <summary style="cursor: pointer; font-weight: bold; color: var(--primary-color);">Advanced Settings</summary>
                     <div class="controls-grid" style="margin-top: 0.5rem;">
                         <div class="control-group">
-                            <label for="b1_amp">B1 Amplitude (uT)</label>
-                            <input type="number" id="b1_amp" class="sim-input" step="0.1" placeholder="Auto">
+                            <label for="b1_amp">B1 Amplitude (G)</label>
+                            <input type="number" id="b1_amp" class="sim-input" step="0.01" placeholder="Auto">
                         </div>
                         <div class="control-group">
                             <label for="freq_offset">Freq. Offset (Hz)</label>
@@ -55,8 +55,8 @@
                             <input type="number" id="freq_points" value="100" step="10" class="sim-input">
                         </div>
                         <div class="control-group">
-                            <label for="tbw">Time-BW Product (calc.)</label>
-                            <input type="number" id="tbw" value="4.0" step="0.5" min="0.5" class="sim-input" readonly style="background-color: #f0f0f0; color: #666;">
+                            <label for="tbw">Time-BW Product</label>
+                            <input type="number" id="tbw" value="4.0" step="0.5" min="0.5" class="sim-input">
                         </div>
                         <div class="control-group">
                             <label for="view_time">View Time: <span id="view_time_val">2.0</span> ms</label>
@@ -68,7 +68,7 @@
                         </div>
                         <div class="control-group" style="display: flex; align-items: center; justify-content: space-between;">
                             <label for="toggle_3d" style="margin-bottom: 0;">3D Trajectory</label>
-                            <input type="checkbox" id="toggle_3d" class="sim-input" style="width: auto;">
+                            <input type="checkbox" id="toggle_3d" class="sim-input" style="width: auto;" checked>
                         </div>
                         <div class="control-group" style="grid-column: span 2;">
                             <label>Plot Components</label>

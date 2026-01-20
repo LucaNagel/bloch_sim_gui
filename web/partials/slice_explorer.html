@@ -56,7 +56,7 @@
 
                 <div class="control-group" style="display: flex; align-items: center; justify-content: space-between;">
                     <label for="slice_3d" style="margin-bottom: 0;">3D Visualization</label>
-                    <input type="checkbox" id="slice_3d" class="slice-input" style="width: auto;">
+                    <input type="checkbox" id="slice_3d" class="slice-input" style="width: auto;" checked>
                 </div>
             </div>
 
@@ -71,6 +71,14 @@
                         <label for="slice_rephase_pct">Rephasing (%)</label>
                         <input type="number" id="slice_rephase_pct" class="slice-input" value="50" min="-100" max="100" step="10">
                     </div>
+                    <div class="control-group">
+                        <label for="slice_view_time">View Time: <span id="slice_view_time_val">2.0</span> ms</label>
+                        <input type="range" id="slice_view_time" class="slice-input" min="0" max="2.0" step="0.01" value="2.0">
+                    </div>
+                    <div class="control-group">
+                        <label for="slice_view_pos">View Pos: <span id="slice_view_pos_val">0</span> cm</label>
+                        <input type="range" id="slice_view_pos" class="slice-input" min="-2.0" max="2.0" step="0.01" value="0">
+                    </div>
                     <div class="control-group" style="grid-column: span 2;">
                         <label>Plot Components</label>
                         <div style="display: flex; gap: 1rem; margin-top: 0.25rem;">
@@ -82,7 +90,7 @@
             </details>
         </div>
 
-    <div id="slice-plot-container" style="margin-top: 1rem; text-align: center;">
+    <div id="slice-plot-container" style="margin-top: 0; text-align: center;">
         <!-- Matplotlib canvas will likely be appended here or we move it here via JS -->
     </div>
 </div>
