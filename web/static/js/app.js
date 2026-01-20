@@ -926,8 +926,8 @@ function triggerSliceSimulation(event) {
             const extra = parseFloat(extraInput ? extraInput.value : 0) || 0;
             const rephase = parseFloat(rephaseInput ? rephaseInput.value : 0);
 
-            // Rephase duration is fixed at 1.0ms in simulation if pct != 0
-            const rephaseDur = (rephase !== 0) ? 1.0 : 0.0;
+            // Rephase duration is fixed at 0.5ms in simulation if pct != 0 (matching python backend)
+            const rephaseDur = (rephase !== 0) ? 0.5 : 0.0;
 
             const totalDur = dur + rephaseDur + extra;
 
