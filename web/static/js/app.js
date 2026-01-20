@@ -33,18 +33,24 @@ function router(viewName) {
 
     // View-specific initialization
     if (viewName === 'rf-pulse') {
+        // Clear previous
+        const container = document.getElementById('plot');
+        if (container) container.innerHTML = '';
+
         // Switch to RF plot layout
         try {
              pyodide.globals.get("init_plot")();
              triggerSimulation(null, true);
         } catch(e) { console.error(e); }
 
-        // Move canvas if possible (Matplotlib Pyodide usually targets document.body or specific div if configured)
-        // We will just let it be for now, assuming it finds the visible container or we might need a specialized move
         moveCanvasTo('plot');
     }
 
     if (viewName === 'slice-explorer') {
+        // Clear previous
+        const container = document.getElementById('slice-plot-container');
+        if (container) container.innerHTML = '';
+
         try {
             pyodide.globals.get("init_slice_plot")();
             triggerSliceSimulation();
@@ -911,8 +917,8 @@ function triggerSliceSimulation(event) {
             // Last Changed Logic (Only if not view update)
             if (!isViewOnly) {
                 // If B1 Changed -> Keep B1 (vals.b1 is valid)
-                // If Flip/Dur/TBW Changed -> Reset B1
-                const physicsParamsThatResetB1 = ["slice_flip_angle", "slice_duration", "slice_tbw", "slice_thickness"];
+                // If Flip/Dur/TBW/Type Changed -> Reset B1
+                const physicsParamsThatResetB1 = ["slice_flip_angle", "slice_duration", "slice_tbw", "slice_thickness", "slice_pulse_type"];
                 if (physicsParamsThatResetB1.includes(sourceId)) {
                     document.getElementById("slice_b1").value = "";
                     vals.b1 = -1;
@@ -1010,8 +1016,8 @@ function triggerSimulation(event, forceRun = false) {
     updateTimer = setTimeout(async () => {
         try {
             // Last Changed Logic
-            // If sourceId is Flip/Dur/TBW -> Clear B1
-            const resetB1Params = ["flip_angle", "duration", "tbw"];
+            // If sourceId is Flip/Dur/TBW/Type -> Clear B1
+            const resetB1Params = ["flip_angle", "duration", "tbw", "pulse_type"];
             if (resetB1Params.includes(sourceId)) {
                 document.getElementById("b1_amp").value = "";
             }
