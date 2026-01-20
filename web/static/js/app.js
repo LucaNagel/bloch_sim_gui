@@ -8,6 +8,12 @@ let isSimulationPending = false;
 let updateTimer = null;
 
 // --- ROUTER ---
+function cleanupFigures() {
+    // Aggressively remove any matplotlib figures from the DOM
+    const figures = document.querySelectorAll('.matplotlib-figure, .mpld3-figure, div[id^="figure"]');
+    figures.forEach(fig => fig.remove());
+}
+
 function router(viewName) {
     // Hide all views
     document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
@@ -18,6 +24,9 @@ function router(viewName) {
         const el = document.getElementById(id);
         if (el) el.innerHTML = '';
     });
+
+    // Cleanup lingering global figures (e.g. attached to body)
+    cleanupFigures();
 
     // Show target view
     const target = document.getElementById(viewName + '-view');
@@ -63,6 +72,11 @@ function moveCanvasTo(containerId) {
     if (figures.length > 0 && container) {
         // Move the most recent one
         container.appendChild(figures[figures.length - 1]);
+
+        // Remove any others that might have been created but not used (safety cleanup)
+        for (let i = 0; i < figures.length - 1; i++) {
+            figures[i].remove();
+        }
     }
 }
 
