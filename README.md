@@ -6,15 +6,27 @@ A high-performance Python implementation of the Bloch equation solver originally
 
 ## Features
 
-- **High Performance**: C implementation with Cython bindings maintains original speed.
-- **Parallel Processing**: OpenMP support for multi-core acceleration.
-- **Interactive GUI**: Real-time visualization and parameter adjustment.
-- **Flexible API**: Easy-to-use Python interface for scripting.
-- **Comprehensive**: Supports arbitrary RF pulses, gradient waveforms, and tissue parameters.
-- **Parameter sweep**: Allows simulation of parameter space (e.g. varying **TRs** in a SSFP loop).
-- **Visualization**: 3D magnetization vectors, time evolution plots, frequency spectra, and **animation export**
-- **Reproducibilty**: Sequence parameters and simulation results can be exported and imported.
-- **Auto-generation of jupyter notebook**: GUI simulations can be exported as jupyter notebooks.
+The Bloch Simulator can be accessed from 3 different directions:
+
+1. Download and install **built package (*.exe*, *.app*)** [here](**[Releases](https://github.com/LucaNagel/bloch_sim_gui/releases)**):
+    * High performance GUI for nice visualization
+    * Can be used to export:
+        * Python compatible simulation results (*.npy*, *.npz*, *.hdf5*)
+        * Automically generated IPython (*.ipynb*) notebooks for repeatility and modifications
+        * Animations: *.mp4*, *.gif*, Figures: *.svg*, *.png*
+    * Easily modify and live update simulation:
+        * Tissue Parameters: *T1*, *T2*, *Polarization level (enables simulation of hyperpolarized magnetization*), etc
+        * RF Pulses: *Duration*, *Tip Angle*, *B1*, *Frequency*, *Phase*, *Pulse type* such as *sinc*, *Gaussian*, *Adiabatic Half Passage*, etc
+        * Pulse Sequence: *Blockpulse*, *Spin Echo*, *Slice Selection*, *SSFP*, *Inversion Recovery*, etc
+
+2. Install bloch simulator package from [pypi.org](https://pypi.org/project/blochsimulator/) via `pip instal blochsimulator`
+    * Access simulation capabilites from IPython notebooks and python scripts
+    * Highly customizable simulations
+
+3. Access [here online](https://lucanagel.github.io/bloch_sim_gui/)
+    * No installation required
+    * Simple UI, live simulation
+    * Simulate RF Pulse Parameters and Slice Selection Parameters
 
 ## Documentation
 
