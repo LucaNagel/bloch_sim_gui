@@ -701,6 +701,8 @@ def extract_view(view_freq_hz, view_time_ms, want_3d):
     freq_idx = int(np.argmin(np.abs(freq_range - view_freq_hz)))
     time_idx = int(np.argmin(np.abs(time_ms - view_time_ms)))
 
+    actual_freq = freq_range[freq_idx]
+
     # Extract Magnetization (Time Evolution)
     mx_all = last_result['mx']
     my_all = last_result['my']
@@ -739,7 +741,7 @@ def extract_view(view_freq_hz, view_time_ms, want_3d):
 
     # Update Labels in JS
     document.getElementById("view_time_val").innerText = str(round(view_time_ms, 2))
-    document.getElementById("view_freq_val").innerText = str(int(view_freq_hz))
+    document.getElementById("view_freq_val").innerText = f"{actual_freq:.1f}"
 
     # 1. Update RF Plot
     lines['rf_real'].set_data(time_ms, last_result['rf_real'])
@@ -1022,6 +1024,21 @@ function triggerSimulation(event, forceRun = false) {
             let b1val = parseFloat(document.getElementById("b1_amp").value);
             if (isNaN(b1val)) b1val = -1;
 
+            // Update View Freq Slider Range/Step to match simulation grid
+            const rawFRange = parseFloat(document.getElementById("freq_range").value);
+            const rawFPoints = parseFloat(document.getElementById("freq_points").value);
+            // Match Python logic for grid generation: max(100, range), max(10, points)
+            const fRangeEff = Math.max(100, isNaN(rawFRange) ? 1000 : rawFRange);
+            const fPointsEff = Math.max(10, isNaN(rawFPoints) ? 100 : Math.floor(rawFPoints));
+
+            const viewFreqInput = document.getElementById("view_freq");
+            if (viewFreqInput) {
+                const step = (2 * fRangeEff) / (fPointsEff - 1);
+                viewFreqInput.min = -fRangeEff;
+                viewFreqInput.max = fRangeEff;
+                viewFreqInput.step = step;
+            }
+
             const vals = {
                 t1: parseFloat(document.getElementById("t1").value),
                 t2: parseFloat(document.getElementById("t2").value),
@@ -1032,7 +1049,7 @@ function triggerSimulation(event, forceRun = false) {
                 fRange: parseFloat(document.getElementById("freq_range").value),
                 fPoints: parseFloat(document.getElementById("freq_points").value),
                 tbw: parseFloat(document.getElementById("tbw").value),
-                viewFreq: parseFloat(document.getElementById("view_freq").value),
+                viewFreq: parseFloat(viewFreqInput ? viewFreqInput.value : document.getElementById("view_freq").value),
                 viewTime: parseFloat(document.getElementById("view_time").value),
                 is3d: document.getElementById("toggle_3d").checked,
                 b1: b1val,
