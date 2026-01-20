@@ -414,12 +414,13 @@ def run_slice_simulation(flip, duration_ms, extra_time_ms, tbw, apod, thick_mm, 
 
     # Auto TBW logic (Fixed by Type)
     calc_tbw = tbw
-    if pulse_type == "sinc":
-        calc_tbw = 4.0
-    elif pulse_type == "rect":
-        calc_tbw = 1.0 # approx
-    elif pulse_type == "gaussian":
-        calc_tbw = 2.5 # approx
+    if calc_tbw <= 0:
+        if pulse_type == "sinc":
+            calc_tbw = 4.0
+        elif pulse_type == "rect":
+            calc_tbw = 1.0 # approx
+        elif pulse_type == "gaussian":
+            calc_tbw = 2.5 # approx
 
     # 1. Determine Flip Angle from B1 Override if provided
     calc_flip = flip
@@ -644,7 +645,9 @@ def run_simulation(t1_ms, t2_ms, duration_ms, extra_time_ms, freq_offset_hz, pul
     freq_range = np.linspace(-f_limit, f_limit, n_freq)
 
     positions = np.array([[0, 0, 0]])
-    npoints = 400
+    dt = 1e-5
+    npoints = int(duration_s / dt)
+    if npoints < 10: npoints = 10
 
     # Ensure TBW is sane
     tbw_val = float(tbw) if tbw > 0 else 4.0
