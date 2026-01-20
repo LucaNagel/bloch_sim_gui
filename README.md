@@ -8,25 +8,32 @@ A high-performance Python implementation of the Bloch equation solver originally
 
 The Bloch Simulator can be accessed from 3 different directions:
 
-1. Download and install **built package (*.exe*, *.app*)** **[here](https://github.com/LucaNagel/bloch_sim_gui/releases)**:
-    * High performance GUI for nice visualization
-    * Can be used to export:
-        * Python compatible simulation results (*.npy*, *.npz*, *.hdf5*)
-        * Automically generated IPython (*.ipynb*) notebooks for repeatility and modifications
-        * Animations (*.mp4*, *.gif*) and figures (*.svg*, *.png*)
-    * Easily modify and live update simulation:
-        * Tissue Parameters: *T1*, *T2*, *Polarization level (enables simulation of hyperpolarized magnetization*), etc.
-        * RF Pulses: *Duration*, *Tip Angle*, *B1*, *Frequency*, *Phase*, *Pulse type* such as *sinc*, *Gaussian*, *Adiabatic Half Passage*, etc.
-        * Pulse Sequence: *Blockpulse*, *Spin Echo*, *Slice Selection*, *SSFP*, *Inversion Recovery*, etc.
+### Standalone **[GUI](https://github.com/LucaNagel/bloch_sim_gui/releases)**:
 
-2. **Install bloch simulator** package from [pypi.org](https://pypi.org/project/blochsimulator/) via `pip instal blochsimulator`
-    * Access simulation capabilites from IPython notebooks and python scripts
-    * Highly customizable simulations
+Download and install **built package (*.exe*, *.app*)** **[here](https://github.com/LucaNagel/bloch_sim_gui/releases)**. Features:
+* High performance GUI for nice visualization
+* Easily modify and live update simulation:
+    * **Sample Parameters**: *T1*, *T2*, *Polarization level (enables simulation of hyperpolarized magnetization*), etc.
+    * **RF Pulses**: *Duration*, *Tip Angle*, *B1*, *Frequency*, *Phase*, *Pulse type* such as *sinc*, *Gaussian*, *Adiabatic Half Passage*, etc.
+    * **Pulse Sequence**: *Blockpulse*, *Spin Echo*, *Slice Selection*, *SSFP*, *Inversion Recovery*, etc.
+* Export:
+    * Python compatible simulation results (*.npy*, *.npz*, *.hdf5*)
+    * Automically generated IPython (*.ipynb*) notebooks for repeatility and modifications
+    * Animations (*.mp4*, *.gif*) and figures (*.svg*, *.png*)
 
-3. Access **[here online](https://lucanagel.github.io/bloch_sim_gui/)**
-    * No installation required
-    * Simple UI, live simulation
-    * Simulate RF Pulse Parameters and Slice Selection Parameters
+
+### Python package **[blochsimulator](https://pypi.org/project/blochsimulator/)**
+**Install bloch simulator** package from [pypi.org](https://pypi.org/project/blochsimulator/) via `pip instal blochsimulator`. Features:
+
+* Access simulation capabilites from IPython notebooks and python scripts
+* Highly customizable simulations
+
+### Online [GUI](https://lucanagel.github.io/bloch_sim_gui/)
+Access [here online](https://lucanagel.github.io/bloch_sim_gui/). Features:
+
+* No installation required
+* Simple UI, live simulation
+* Simulate RF Pulse Parameters and Slice Selection Parameters
 
 ## Documentation
 

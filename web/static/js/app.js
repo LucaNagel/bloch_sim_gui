@@ -9,9 +9,36 @@ let updateTimer = null;
 
 // --- ROUTER ---
 function cleanupFigures() {
-    // Aggressively remove any matplotlib figures from the DOM
+    // 1. Remove by known selectors
     const figures = document.querySelectorAll('.matplotlib-figure, .mpld3-figure, div[id^="figure"]');
     figures.forEach(fig => fig.remove());
+
+    // 2. Remove orphaned elements on document.body (common behavior of Matplotlib Pyodide backend)
+    // We expect ONLY: <nav>, <div class="container">, <div id="status-bar">, <script>, <style>, <link>
+    const whitelistTags = ['NAV', 'SCRIPT', 'STYLE', 'LINK'];
+    const whitelistIds = ['status-bar'];
+    const whitelistClasses = ['container'];
+
+    Array.from(document.body.children).forEach(child => {
+        // Skip whitelisted elements
+        if (whitelistTags.includes(child.tagName)) return;
+        if (child.id && whitelistIds.includes(child.id)) return;
+        if (whitelistClasses.some(cls => child.classList.contains(cls))) return;
+
+        // Inspect suspect element
+        // If it's a div and looks like a plot (has canvas or figure ID), remove it.
+        const isPlotCandidate =
+            child.tagName === 'DIV' && (
+                child.querySelector('canvas') ||
+                (child.id && child.id.startsWith('figure')) ||
+                child.className.includes('matplotlib')
+            );
+
+        if (isPlotCandidate) {
+            // console.log("Cleaning up orphaned plot element:", child);
+            child.remove();
+        }
+    });
 }
 
 function router(viewName) {
