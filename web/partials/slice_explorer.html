@@ -75,7 +75,10 @@
                         <input type="number" id="slice_rephase_pct" class="slice-input" value="50" min="-100" max="100" step="10">
                     </div>
                     <div class="control-group">
-                        <label for="slice_view_time">View Time: <span id="slice_view_time_val">2.0</span> ms</label>
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem;">
+                            <label for="slice_view_time" style="margin-bottom: 0;">View Time: <span id="slice_view_time_val">2.0</span> ms</label>
+                            <button id="play_btn_slice" class="play-btn" style="padding: 1px 6px; font-size: 0.8rem; cursor: pointer;">&#9658;</button>
+                        </div>
                         <input type="range" id="slice_view_time" class="slice-input" min="0" max="2.0" step="0.01" value="2.0">
                     </div>
                     <div class="control-group">

@@ -6,6 +6,8 @@ let pyodide = null;
 let isPyodideReady = false;
 let isSimulationPending = false;
 let updateTimer = null;
+let playbackInterval = null;
+let isPlaying = false;
 
 // --- ROUTER ---
 function cleanupFigures() {
@@ -1177,6 +1179,77 @@ document.querySelectorAll('.sim-input').forEach(input => {
 });
 document.querySelectorAll('.slice-input').forEach(input => {
     input.addEventListener('input', triggerSliceSimulation);
+});
+
+// --- PLAYBACK ---
+function togglePlayback(type) {
+    const btnId = type === 'rf' ? 'play_btn_rf' : 'play_btn_slice';
+    const sliderId = type === 'rf' ? 'view_time' : 'slice_view_time';
+    const triggerFunc = type === 'rf' ? triggerSimulation : triggerSliceSimulation;
+
+    const btn = document.getElementById(btnId);
+    const slider = document.getElementById(sliderId);
+
+    if (!btn || !slider) return;
+
+    if (isPlaying) {
+        // STOP
+        clearInterval(playbackInterval);
+        playbackInterval = null;
+        isPlaying = false;
+        btn.innerHTML = "&#9658;"; // Play symbol
+    } else {
+        // START
+        isPlaying = true;
+        btn.innerHTML = "&#10074;&#10074;"; // Pause symbol
+
+        // If at end, restart
+        if (parseFloat(slider.value) >= parseFloat(slider.max)) {
+            slider.value = 0;
+            triggerFunc({ target: { id: sliderId } });
+        }
+
+        playbackInterval = setInterval(() => {
+            let val = parseFloat(slider.value);
+            let max = parseFloat(slider.max);
+            let step = parseFloat(slider.step) || 0.01;
+
+            // Increment faster than single step for smoothness/speed balance
+            // A 2ms pulse with 0.01 step has 200 steps. 50ms interval -> 10s duration.
+            // Let's take 2x step.
+            let nextVal = val + (step * 2);
+
+            if (nextVal >= max) {
+                nextVal = max;
+                clearInterval(playbackInterval);
+                playbackInterval = null;
+                isPlaying = false;
+                btn.innerHTML = "&#9658;";
+            }
+
+            slider.value = nextVal;
+            // Mock an event object for the trigger function
+            triggerFunc({ target: { id: sliderId } });
+
+        }, 50); // 20fps
+    }
+}
+
+// Attach Playback Listeners
+document.getElementById('play_btn_rf').addEventListener('click', () => togglePlayback('rf'));
+document.getElementById('play_btn_slice').addEventListener('click', () => togglePlayback('slice'));
+
+// Stop playback on manual interaction
+['view_time', 'slice_view_time'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+        el.addEventListener('mousedown', () => {
+            if (isPlaying) togglePlayback(id === 'view_time' ? 'rf' : 'slice');
+        });
+        el.addEventListener('touchstart', () => { // Mobile support
+            if (isPlaying) togglePlayback(id === 'view_time' ? 'rf' : 'slice');
+        });
+    }
 });
 
 // Start
