@@ -911,36 +911,123 @@ def extract_view(view_freq_hz, view_time_ms, want_3d):
 }
 
 // --- INTERACTION ---
+async function performSliceSimulation(sourceId) {
+    const statusEl = document.getElementById('status-text');
+    try {
+        // View Update Only?
+        const viewParams = ["slice_view_time", "slice_view_pos"];
+        const isViewOnly = sourceId && viewParams.includes(sourceId);
+
+        // Gather Values
+        const vals = {
+            flip: parseFloat(document.getElementById("slice_flip_angle").value),
+            dur: parseFloat(document.getElementById("slice_duration").value),
+            extra: parseFloat(document.getElementById("slice_extra_time").value) || 0.0,
+            tbw: parseFloat(document.getElementById("slice_tbw").value),
+            apod: document.getElementById("slice_apodization").value,
+            thick: parseFloat(document.getElementById("slice_thickness").value),
+            rephase: parseFloat(document.getElementById("slice_rephase_pct").value),
+            range: parseFloat(document.getElementById("slice_range").value),
+            points: parseInt(document.getElementById("slice_points").value),
+            is3d: document.getElementById("slice_3d").checked,
+            b1: parseFloat(document.getElementById("slice_b1").value),
+            type: document.getElementById("slice_pulse_type").value,
+            showMx: document.getElementById("slice_show_mx").checked,
+            showMy: document.getElementById("slice_show_my").checked,
+            viewTime: parseFloat(document.getElementById("slice_view_time").value),
+            viewPos: parseFloat(document.getElementById("slice_view_pos").value)
+        };
+
+        if (isNaN(vals.b1)) vals.b1 = -1;
+
+        // Last Changed Logic (Only if not view update)
+        if (!isViewOnly) {
+            // If B1 Changed -> Keep B1 (vals.b1 is valid)
+            // If Flip/Dur/TBW/Type Changed -> Reset B1
+            const physicsParamsThatResetB1 = ["slice_flip_angle", "slice_duration", "slice_tbw", "slice_thickness", "slice_pulse_type", "slice_rephase_pct"];
+            if (physicsParamsThatResetB1.includes(sourceId)) {
+                document.getElementById("slice_b1").value = "";
+                vals.b1 = -1;
+            }
+        }
+
+        if (!isViewOnly) {
+            const runSlice = pyodide.globals.get("run_slice_simulation");
+            if (runSlice) {
+                const result = runSlice(vals.flip, vals.dur, vals.extra, vals.tbw, vals.apod, vals.thick, vals.rephase, vals.range, vals.points, vals.is3d, vals.b1, vals.type, vals.showMx, vals.showMy);
+
+                // Sync UI
+                if (result && result.length === 3) {
+                    const actFlip = result.get(0);
+                    const actB1 = result.get(1);
+                    const actTBW = result.get(2);
+
+                    if (vals.b1 > 0) {
+                        // B1 drove simulation -> update Flip
+                        if (document.activeElement.id !== "slice_flip_angle") {
+                            document.getElementById("slice_flip_angle").value = actFlip.toFixed(2);
+                        }
+                    } else {
+                        // Flip drove simulation -> update B1
+                        if (document.activeElement.id !== "slice_b1") {
+                            document.getElementById("slice_b1").value = actB1.toFixed(4);
+                        }
+                    }
+                    // Update TBW (always calculated now)
+                    document.getElementById("slice_tbw").value = actTBW.toFixed(1);
+
+                    result.destroy();
+                }
+            }
+        }
+
+        // Always update view
+        const extractView = pyodide.globals.get("extract_slice_view");
+        if (extractView) {
+            extractView(vals.viewTime, vals.viewPos, vals.is3d);
+        }
+
+        statusEl.innerText = "Ready";
+    } catch (e) {
+        console.error("Slice Sim Error", e);
+        statusEl.innerText = "Error";
+        logMessage(e.message || e.toString(), "error");
+    }
+}
+
 function triggerSliceSimulation(event) {
     if (!isPyodideReady) return;
 
     const sourceId = event ? event.target.id : null;
+    const isPlayback = event ? event.isPlayback : false;
 
     // View Update Only?
     const viewParams = ["slice_view_time", "slice_view_pos"];
     const isViewOnly = sourceId && viewParams.includes(sourceId);
 
-        // Sync View Time Max
-        const durationInput = document.getElementById("slice_duration");
-        const extraInput = document.getElementById("slice_extra_time");
-        const rephaseInput = document.getElementById("slice_rephase_pct");
-        const viewTimeInput = document.getElementById("slice_view_time");
+    // Sync View Time Max
+    const durationInput = document.getElementById("slice_duration");
+    const extraInput = document.getElementById("slice_extra_time");
+    const rephaseInput = document.getElementById("slice_rephase_pct");
+    const viewTimeInput = document.getElementById("slice_view_time");
 
-        if (durationInput && viewTimeInput) {
-            const dur = parseFloat(durationInput.value) || 0;
-            const extra = parseFloat(extraInput ? extraInput.value : 0) || 0;
-            const rephase = parseFloat(rephaseInput ? rephaseInput.value : 0);
+    if (durationInput && viewTimeInput) {
+        const dur = parseFloat(durationInput.value) || 0;
+        const extra = parseFloat(extraInput ? extraInput.value : 0) || 0;
+        const rephase = parseFloat(rephaseInput ? rephaseInput.value : 0);
+        // Rephase duration is fixed at 0.5ms in simulation if pct != 0
+        const rephaseDur = (rephase !== 0) ? 0.5 : 0.0;
+        const totalDur = dur + rephaseDur + extra;
 
-            // Rephase duration is fixed at 0.5ms in simulation if pct != 0 (matching python backend)
-            const rephaseDur = (rephase !== 0) ? 0.5 : 0.0;
+        viewTimeInput.max = totalDur;
 
-            const totalDur = dur + rephaseDur + extra;
-
-            viewTimeInput.max = totalDur;
-
+        // Only clamp if not playback (playback handles its own limits/wrapping)
+        if (!isPlayback) {
             let val = parseFloat(viewTimeInput.value);
             if (val > totalDur) viewTimeInput.value = totalDur;
         }
+    }
+
     // Sync View Pos Max (Range)
     const rangeInput = document.getElementById("slice_range");
     const viewPosInput = document.getElementById("slice_view_pos");
@@ -950,7 +1037,6 @@ function triggerSliceSimulation(event) {
             const half = rng/2;
             viewPosInput.min = -half;
             viewPosInput.max = half;
-            // Clamp
             let val = parseFloat(viewPosInput.value);
             if (val < -half) viewPosInput.value = -half;
             if (val > half) viewPosInput.value = half;
@@ -960,92 +1046,127 @@ function triggerSliceSimulation(event) {
     if (updateTimer) clearTimeout(updateTimer);
 
     const statusEl = document.getElementById('status-text');
-    statusEl.innerHTML = isViewOnly ? 'Updating view...' : '<span class="spinner"></span>Calculating...';
+    if (!isPlayback) {
+         statusEl.innerHTML = isViewOnly ? 'Updating view...' : '<span class="spinner"></span>Calculating...';
+    }
 
-    updateTimer = setTimeout(async () => {
-        try {
-            // Gather Values
-            const vals = {
-                flip: parseFloat(document.getElementById("slice_flip_angle").value),
-                dur: parseFloat(document.getElementById("slice_duration").value),
-                extra: parseFloat(document.getElementById("slice_extra_time").value) || 0.0,
-                tbw: parseFloat(document.getElementById("slice_tbw").value),
-                apod: document.getElementById("slice_apodization").value,
-                thick: parseFloat(document.getElementById("slice_thickness").value),
-                rephase: parseFloat(document.getElementById("slice_rephase_pct").value),
-                range: parseFloat(document.getElementById("slice_range").value),
-                points: parseInt(document.getElementById("slice_points").value),
-                is3d: document.getElementById("slice_3d").checked,
-                b1: parseFloat(document.getElementById("slice_b1").value),
-                type: document.getElementById("slice_pulse_type").value,
-                showMx: document.getElementById("slice_show_mx").checked,
-                showMy: document.getElementById("slice_show_my").checked,
-                viewTime: parseFloat(document.getElementById("slice_view_time").value),
-                viewPos: parseFloat(document.getElementById("slice_view_pos").value)
-            };
+    if (isPlayback) {
+        // Immediate execution for playback
+        performSliceSimulation(sourceId);
+    } else {
+        // Debounced execution for user input
+        updateTimer = setTimeout(() => performSliceSimulation(sourceId), 50);
+    }
+}
 
-            if (isNaN(vals.b1)) vals.b1 = -1;
+async function performRfSimulation(sourceId, forceRun) {
+    const statusEl = document.getElementById('status-text');
+    try {
+        // Determine if we need a full simulation or just a view update
+        const physicsParams = [
+            "t1", "t2", "duration", "freq_offset", "pulse_type",
+            "flip_angle", "freq_range", "freq_points", "tbw",
+            "b1_amp", "show_mx", "show_my"
+        ];
 
-            // Last Changed Logic (Only if not view update)
-            if (!isViewOnly) {
-                // If B1 Changed -> Keep B1 (vals.b1 is valid)
-                // If Flip/Dur/TBW/Type Changed -> Reset B1
-                const physicsParamsThatResetB1 = ["slice_flip_angle", "slice_duration", "slice_tbw", "slice_thickness", "slice_pulse_type", "slice_rephase_pct"];
-                if (physicsParamsThatResetB1.includes(sourceId)) {
-                    document.getElementById("slice_b1").value = "";
-                    vals.b1 = -1;
-                }
-            }
+        let needFullSim = forceRun;
+        if (sourceId && physicsParams.includes(sourceId)) {
+            needFullSim = true;
+        }
 
-            if (!isViewOnly) {
-                const runSlice = pyodide.globals.get("run_slice_simulation");
-                if (runSlice) {
-                    const result = runSlice(vals.flip, vals.dur, vals.extra, vals.tbw, vals.apod, vals.thick, vals.rephase, vals.range, vals.points, vals.is3d, vals.b1, vals.type, vals.showMx, vals.showMy);
+        // If no sourceId (e.g. init), assume full sim
+        if (!sourceId && !forceRun) needFullSim = true;
 
-                    // Sync UI
-                    if (result && result.length === 3) {
-                        const actFlip = result.get(0);
-                        const actB1 = result.get(1);
-                        const actTBW = result.get(2);
+        // Last Changed Logic
+        // If sourceId is Flip/Dur/TBW/Type -> Clear B1
+        const resetB1Params = ["flip_angle", "duration", "tbw", "pulse_type"];
+        if (resetB1Params.includes(sourceId)) {
+            document.getElementById("b1_amp").value = "";
+        }
 
-                        if (vals.b1 > 0) {
-                            // B1 drove simulation -> update Flip
-                            if (document.activeElement.id !== "slice_flip_angle") {
-                                document.getElementById("slice_flip_angle").value = actFlip.toFixed(2);
-                            }
-                        } else {
-                            // Flip drove simulation -> update B1
-                            if (document.activeElement.id !== "slice_b1") {
-                                document.getElementById("slice_b1").value = actB1.toFixed(4);
-                            }
-                        }
-                        // Update TBW (always calculated now)
-                        document.getElementById("slice_tbw").value = actTBW.toFixed(1);
+        let b1val = parseFloat(document.getElementById("b1_amp").value);
+        if (isNaN(b1val)) b1val = -1;
 
-                        result.destroy();
+        // Update View Freq Slider Range/Step to match simulation grid
+        const rawFRange = parseFloat(document.getElementById("freq_range").value);
+        const rawFPoints = parseFloat(document.getElementById("freq_points").value);
+        // Match Python logic for grid generation: max(100, range), max(10, points)
+        const fRangeEff = Math.max(100, isNaN(rawFRange) ? 1000 : rawFRange);
+        const fPointsEff = Math.max(10, isNaN(rawFPoints) ? 100 : Math.floor(rawFPoints));
+
+        const viewFreqInput = document.getElementById("view_freq");
+        if (viewFreqInput) {
+            const step = (2 * fRangeEff) / (fPointsEff - 1);
+            viewFreqInput.min = -fRangeEff;
+            viewFreqInput.max = fRangeEff;
+            viewFreqInput.step = step;
+        }
+
+        const vals = {
+            t1: parseFloat(document.getElementById("t1").value),
+            t2: parseFloat(document.getElementById("t2").value),
+            duration: parseFloat(document.getElementById("duration").value),
+            extra: parseFloat(document.getElementById("extra_time").value) || 0.0,
+            freq: parseFloat(document.getElementById("freq_offset").value),
+            type: document.getElementById("pulse_type").value,
+            flip: parseFloat(document.getElementById("flip_angle").value),
+            fRange: parseFloat(document.getElementById("freq_range").value),
+            fPoints: parseFloat(document.getElementById("freq_points").value),
+            tbw: parseFloat(document.getElementById("tbw").value),
+            viewFreq: parseFloat(viewFreqInput ? viewFreqInput.value : document.getElementById("view_freq").value),
+            viewTime: parseFloat(document.getElementById("view_time").value),
+            is3d: document.getElementById("toggle_3d").checked,
+            b1: b1val,
+            showMx: document.getElementById("show_mx").checked,
+            showMy: document.getElementById("show_my").checked
+        };
+
+        const runSim = pyodide.globals.get("run_simulation");
+        const extractView = pyodide.globals.get("extract_view");
+
+        if (needFullSim && runSim) {
+            const result = runSim(vals.t1, vals.t2, vals.duration, vals.extra, vals.freq, vals.type,
+                   vals.flip, vals.fRange, vals.fPoints, vals.tbw, vals.b1, vals.showMx, vals.showMy);
+
+            // Sync UI
+            if (result && result.length === 2) {
+                const actFlip = result.get(0);
+                const actB1 = result.get(1);
+
+                if (vals.b1 > 0) {
+                    if (document.activeElement.id !== "flip_angle") {
+                        document.getElementById("flip_angle").value = actFlip.toFixed(2);
+                    }
+                } else {
+                    if (document.activeElement.id !== "b1_amp") {
+                        document.getElementById("b1_amp").value = actB1.toFixed(4); // G
                     }
                 }
+                result.destroy();
             }
-
-            // Always update view
-            const extractView = pyodide.globals.get("extract_slice_view");
-            if (extractView) {
-                extractView(vals.viewTime, vals.viewPos, vals.is3d);
-            }
-
-            statusEl.innerText = "Ready";
-        } catch (e) {
-            console.error("Slice Sim Error", e);
-            statusEl.innerText = "Error";
-            logMessage(e.message || e.toString(), "error");
         }
-    }, 50);
+
+        if (extractView) {
+            extractView(vals.viewFreq, vals.viewTime, vals.is3d);
+        }
+
+        statusEl.innerText = "Ready";
+    } catch (e) {
+        console.error("Sim Error", e);
+        let msg = e.message || e.toString();
+        if (msg.includes("PythonError:")) {
+            msg = msg.split("PythonError:")[1];
+        }
+        statusEl.innerText = "Error (Details in Log)";
+        logMessage(msg, "error");
+    }
 }
 
 function triggerSimulation(event, forceRun = false) {
     if (!isPyodideReady) return;
 
     const sourceId = event ? event.target.id : null;
+    const isPlayback = event ? event.isPlayback : false;
 
     // Sync view_time max
     const durationInput = document.getElementById("duration");
@@ -1059,118 +1180,27 @@ function triggerSimulation(event, forceRun = false) {
 
         viewTimeInput.max = totalDur;
 
-        if (parseFloat(viewTimeInput.value) > totalDur) {
-            viewTimeInput.value = totalDur;
+        // Only clamp if not playback
+        if (!isPlayback) {
+            if (parseFloat(viewTimeInput.value) > totalDur) {
+                viewTimeInput.value = totalDur;
+            }
         }
     }
 
-    // Determine if we need a full simulation or just a view update
-    const physicsParams = [
-        "t1", "t2", "duration", "freq_offset", "pulse_type",
-        "flip_angle", "freq_range", "freq_points", "tbw",
-        "b1_amp", "show_mx", "show_my"
-    ];
-
-    let needFullSim = forceRun;
-    if (sourceId && physicsParams.includes(sourceId)) {
-        needFullSim = true;
-    }
-
-    // If no sourceId (e.g. init), assume full sim
-    if (!sourceId && !forceRun) needFullSim = true;
-
-    // Debounce
     if (updateTimer) clearTimeout(updateTimer);
 
     const statusEl = document.getElementById('status-text');
-    statusEl.innerHTML = needFullSim ? '<span class="spinner"></span>Calculating...' : 'Updating view...';
+    // For playback, don't show "Calculating..." constantly flickering
+    if (!isPlayback) {
+         statusEl.innerHTML = (sourceId || forceRun) ? '<span class="spinner"></span>Calculating...' : 'Updating view...';
+    }
 
-    updateTimer = setTimeout(async () => {
-        try {
-            // Last Changed Logic
-            // If sourceId is Flip/Dur/TBW/Type -> Clear B1
-            const resetB1Params = ["flip_angle", "duration", "tbw", "pulse_type"];
-            if (resetB1Params.includes(sourceId)) {
-                document.getElementById("b1_amp").value = "";
-            }
-
-            let b1val = parseFloat(document.getElementById("b1_amp").value);
-            if (isNaN(b1val)) b1val = -1;
-
-            // Update View Freq Slider Range/Step to match simulation grid
-            const rawFRange = parseFloat(document.getElementById("freq_range").value);
-            const rawFPoints = parseFloat(document.getElementById("freq_points").value);
-            // Match Python logic for grid generation: max(100, range), max(10, points)
-            const fRangeEff = Math.max(100, isNaN(rawFRange) ? 1000 : rawFRange);
-            const fPointsEff = Math.max(10, isNaN(rawFPoints) ? 100 : Math.floor(rawFPoints));
-
-            const viewFreqInput = document.getElementById("view_freq");
-            if (viewFreqInput) {
-                const step = (2 * fRangeEff) / (fPointsEff - 1);
-                viewFreqInput.min = -fRangeEff;
-                viewFreqInput.max = fRangeEff;
-                viewFreqInput.step = step;
-            }
-
-            const vals = {
-                t1: parseFloat(document.getElementById("t1").value),
-                t2: parseFloat(document.getElementById("t2").value),
-                duration: parseFloat(document.getElementById("duration").value),
-                extra: parseFloat(document.getElementById("extra_time").value) || 0.0,
-                freq: parseFloat(document.getElementById("freq_offset").value),
-                type: document.getElementById("pulse_type").value,
-                flip: parseFloat(document.getElementById("flip_angle").value),
-                fRange: parseFloat(document.getElementById("freq_range").value),
-                fPoints: parseFloat(document.getElementById("freq_points").value),
-                tbw: parseFloat(document.getElementById("tbw").value),
-                viewFreq: parseFloat(viewFreqInput ? viewFreqInput.value : document.getElementById("view_freq").value),
-                viewTime: parseFloat(document.getElementById("view_time").value),
-                is3d: document.getElementById("toggle_3d").checked,
-                b1: b1val,
-                showMx: document.getElementById("show_mx").checked,
-                showMy: document.getElementById("show_my").checked
-            };
-
-            const runSim = pyodide.globals.get("run_simulation");
-            const extractView = pyodide.globals.get("extract_view");
-
-            if (needFullSim && runSim) {
-                const result = runSim(vals.t1, vals.t2, vals.duration, vals.extra, vals.freq, vals.type,
-                       vals.flip, vals.fRange, vals.fPoints, vals.tbw, vals.b1, vals.showMx, vals.showMy);
-
-                // Sync UI
-                if (result && result.length === 2) {
-                    const actFlip = result.get(0);
-                    const actB1 = result.get(1);
-
-                    if (vals.b1 > 0) {
-                        if (document.activeElement.id !== "flip_angle") {
-                            document.getElementById("flip_angle").value = actFlip.toFixed(2);
-                        }
-                    } else {
-                        if (document.activeElement.id !== "b1_amp") {
-                            document.getElementById("b1_amp").value = actB1.toFixed(4); // G
-                        }
-                    }
-                    result.destroy();
-                }
-            }
-
-            if (extractView) {
-                extractView(vals.viewFreq, vals.viewTime, vals.is3d);
-            }
-
-            statusEl.innerText = "Ready";
-        } catch (e) {
-            console.error("Sim Error", e);
-            let msg = e.message || e.toString();
-            if (msg.includes("PythonError:")) {
-                msg = msg.split("PythonError:")[1];
-            }
-            statusEl.innerText = "Error (Details in Log)";
-            logMessage(msg, "error");
-        }
-    }, 50);
+    if (isPlayback) {
+        performRfSimulation(sourceId, forceRun);
+    } else {
+        updateTimer = setTimeout(() => performRfSimulation(sourceId, forceRun), 50);
+    }
 }
 
 // Attach listeners
@@ -1229,7 +1259,7 @@ function togglePlayback(type) {
 
             slider.value = nextVal;
             // Mock an event object for the trigger function
-            triggerFunc({ target: { id: sliderId } });
+            triggerFunc({ target: { id: sliderId }, isPlayback: true });
 
         }, 50); // 20fps
     }
