@@ -79,6 +79,22 @@ def main():
         f'__version__ = "{new_version}"',
     )
 
+    # 7. web/partials/footer.html
+    # pattern: v1.0.1
+    update_file(
+        Path("web/partials/footer.html"),
+        r'<span id="version-info">v[0-9.]+</span>',
+        f'<span id="version-info">v{new_version}</span>',
+    )
+
+    # 8. index.html
+    # pattern: v1.0.1
+    update_file(
+        Path("index.html"),
+        r'<span id="version-info">v[0-9.]+</span>',
+        f'<span id="version-info">v{new_version}</span>',
+    )
+
     print(f"\nDone! Project version bumped to {new_version}")
     print("Next steps:")
     print(f"  git add .")
