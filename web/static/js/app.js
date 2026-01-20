@@ -340,9 +340,9 @@ def init_slice_plot():
 
     # Dual Axis for Gradient
     ax0b = ax0.twinx()
-    ax0b.set_ylabel("Gradient (G/cm)", color='red')
-    ax0b.tick_params(axis='y', labelcolor='red')
-    lines['grad'], = ax0b.plot([], [], label='Gz', color='red', alpha=0.5)
+    ax0b.set_ylabel("Gradient (G/cm)", color='magenta')
+    ax0b.tick_params(axis='y', labelcolor='magenta')
+    lines['grad'], = ax0b.plot([], [], label='Gz', color='magenta', alpha=0.5)
 
     # Legend combined? Matplotlib legends are per-axis.
     # Ax0 legend
@@ -400,7 +400,7 @@ def update_slice_plot_mode(want_3d):
 
     is_slice_3d_mode = want_3d
 
-def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase_pct, range_cm, n_points, is3d, b1_amp_gauss, pulse_type, show_mx, show_my):
+def run_slice_simulation(flip, duration_ms, extra_time_ms, tbw, apod, thick_mm, rephase_pct, range_cm, n_points, is3d, b1_amp_gauss, pulse_type, show_mx, show_my):
     global fig, axs, lines, is_slice_3d_mode, last_slice_result
 
     if fig is None or len(axs) != 3:
@@ -409,6 +409,7 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase_pct, ra
     # NOTE: View updates happen in extract_slice_view. Here we run simulation and store result.
 
     dur_s = duration_ms * 1e-3
+    extra_s = extra_time_ms * 1e-3
     dt = 1e-5
 
     # Auto TBW logic (Fixed by Type)
@@ -476,6 +477,13 @@ def run_slice_simulation(flip, duration_ms, tbw, apod, thick_mm, rephase_pct, ra
         grad_rephase = np.zeros((n_rephase, 3))
         grad_rephase[:, 2] = rephase_amp
         grads = np.concatenate([grads, grad_rephase])
+
+    # Extra Time Padding
+    if extra_s > 0:
+        n_extra = int(extra_s / dt)
+        if n_extra > 0:
+            b1 = np.concatenate([b1, np.zeros(n_extra)])
+            grads = np.concatenate([grads, np.zeros((n_extra, 3))])
 
     time = np.arange(len(b1)) * dt
     pos = np.zeros((int(n_points), 3))
@@ -618,7 +626,7 @@ def extract_slice_view(view_time_ms, view_pos_cm, is3d):
     document.getElementById("slice_view_time_val").innerText = str(round(view_time_ms, 2))
     document.getElementById("slice_view_pos_val").innerText = str(round(view_pos_cm, 2))
 
-def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_angle, freq_range_val, freq_points, tbw, b1_amp, show_mx, show_my):
+def run_simulation(t1_ms, t2_ms, duration_ms, extra_time_ms, freq_offset_hz, pulse_type, flip_angle, freq_range_val, freq_points, tbw, b1_amp, show_mx, show_my):
     global last_result, last_params
     last_params = locals()
 
@@ -628,6 +636,7 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
     t1_s = t1_ms * 1e-3
     t2_s = t2_ms * 1e-3
     duration_s = duration_ms * 1e-3
+    extra_s = extra_time_ms * 1e-3
 
     # Calculate frequency range
     f_limit = max(100, float(freq_range_val))
@@ -682,6 +691,14 @@ def run_simulation(t1_ms, t2_ms, duration_ms, freq_offset_hz, pulse_type, flip_a
         except Exception as e:
             print(f"Analysis error: {e}")
 
+        # Extra Time Padding
+        dt = 1e-5
+        if extra_s > 0:
+            n_extra = int(extra_s / dt)
+            if n_extra > 0:
+                b1 = np.concatenate([b1, np.zeros(n_extra)])
+
+        time_s = np.arange(len(b1)) * dt
         time_ms = time_s * 1e3
         gradients = np.zeros((len(time_s), 3))
 
@@ -900,14 +917,18 @@ function triggerSliceSimulation(event) {
 
     // Sync View Time Max
     const durationInput = document.getElementById("slice_duration");
+    const extraInput = document.getElementById("slice_extra_time");
     const viewTimeInput = document.getElementById("slice_view_time");
+
     if (durationInput && viewTimeInput) {
-        const dur = parseFloat(durationInput.value);
-        if (!isNaN(dur)) {
-            viewTimeInput.max = dur;
-            if (sourceId === 'slice_duration') viewTimeInput.value = dur;
-            if (parseFloat(viewTimeInput.value) > dur) viewTimeInput.value = dur;
-        }
+        const dur = parseFloat(durationInput.value) || 0;
+        const extra = parseFloat(extraInput ? extraInput.value : 0) || 0;
+        const totalDur = dur + extra;
+
+        viewTimeInput.max = totalDur;
+
+        let val = parseFloat(viewTimeInput.value);
+        if (val > totalDur) viewTimeInput.value = totalDur;
     }
 
     // Sync View Pos Max (Range)
@@ -937,6 +958,7 @@ function triggerSliceSimulation(event) {
             const vals = {
                 flip: parseFloat(document.getElementById("slice_flip_angle").value),
                 dur: parseFloat(document.getElementById("slice_duration").value),
+                extra: parseFloat(document.getElementById("slice_extra_time").value) || 0.0,
                 tbw: parseFloat(document.getElementById("slice_tbw").value),
                 apod: document.getElementById("slice_apodization").value,
                 thick: parseFloat(document.getElementById("slice_thickness").value),
@@ -968,7 +990,7 @@ function triggerSliceSimulation(event) {
             if (!isViewOnly) {
                 const runSlice = pyodide.globals.get("run_slice_simulation");
                 if (runSlice) {
-                    const result = runSlice(vals.flip, vals.dur, vals.tbw, vals.apod, vals.thick, vals.rephase, vals.range, vals.points, vals.is3d, vals.b1, vals.type, vals.showMx, vals.showMy);
+                    const result = runSlice(vals.flip, vals.dur, vals.extra, vals.tbw, vals.apod, vals.thick, vals.rephase, vals.range, vals.points, vals.is3d, vals.b1, vals.type, vals.showMx, vals.showMy);
 
                     // Sync UI
                     if (result && result.length === 3) {
@@ -1017,18 +1039,18 @@ function triggerSimulation(event, forceRun = false) {
 
     // Sync view_time max
     const durationInput = document.getElementById("duration");
+    const extraInput = document.getElementById("extra_time");
     const viewTimeInput = document.getElementById("view_time");
+
     if (durationInput && viewTimeInput) {
-        const dur = parseFloat(durationInput.value);
-        if (!isNaN(dur)) {
-            viewTimeInput.max = dur;
-            // If duration changed, snap view to end
-            if (sourceId === 'duration') {
-                viewTimeInput.value = dur;
-            }
-            if (parseFloat(viewTimeInput.value) > dur) {
-                viewTimeInput.value = dur;
-            }
+        const dur = parseFloat(durationInput.value) || 0;
+        const extra = parseFloat(extraInput ? extraInput.value : 0) || 0;
+        const totalDur = dur + extra;
+
+        viewTimeInput.max = totalDur;
+
+        if (parseFloat(viewTimeInput.value) > totalDur) {
+            viewTimeInput.value = totalDur;
         }
     }
 
@@ -1084,6 +1106,7 @@ function triggerSimulation(event, forceRun = false) {
                 t1: parseFloat(document.getElementById("t1").value),
                 t2: parseFloat(document.getElementById("t2").value),
                 duration: parseFloat(document.getElementById("duration").value),
+                extra: parseFloat(document.getElementById("extra_time").value) || 0.0,
                 freq: parseFloat(document.getElementById("freq_offset").value),
                 type: document.getElementById("pulse_type").value,
                 flip: parseFloat(document.getElementById("flip_angle").value),
@@ -1102,7 +1125,7 @@ function triggerSimulation(event, forceRun = false) {
             const extractView = pyodide.globals.get("extract_view");
 
             if (needFullSim && runSim) {
-                const result = runSim(vals.t1, vals.t2, vals.duration, vals.freq, vals.type,
+                const result = runSim(vals.t1, vals.t2, vals.duration, vals.extra, vals.freq, vals.type,
                        vals.flip, vals.fRange, vals.fPoints, vals.tbw, vals.b1, vals.showMx, vals.showMy);
 
                 // Sync UI

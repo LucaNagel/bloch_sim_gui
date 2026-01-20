@@ -67,6 +67,10 @@
                         <input type="number" id="slice_b1" class="slice-input" step="0.01" placeholder="Auto">
                     </div>
                     <div class="control-group">
+                        <label for="slice_extra_time">Extra Time (ms)</label>
+                        <input type="number" id="slice_extra_time" value="0.0" step="0.1" min="0" class="slice-input">
+                    </div>
+                    <div class="control-group">
                         <label for="slice_rephase_pct">Rephasing (%)</label>
                         <input type="number" id="slice_rephase_pct" class="slice-input" value="50" min="-100" max="100" step="10">
                     </div>
@@ -81,8 +85,8 @@
                     <div class="control-group" style="grid-column: span 2;">
                         <label>Plot Components</label>
                         <div style="display: flex; gap: 1rem; margin-top: 0.25rem;">
-                            <label style="font-weight: normal;"><input type="checkbox" id="slice_show_mx" class="slice-input"> Show Mx</label>
-                            <label style="font-weight: normal;"><input type="checkbox" id="slice_show_my" class="slice-input"> Show My</label>
+                            <label style="font-weight: normal;"><input type="checkbox" id="slice_show_mx" class="slice-input" checked> Show Mx</label>
+                            <label style="font-weight: normal;"><input type="checkbox" id="slice_show_my" class="slice-input" checked> Show My</label>
                         </div>
                     </div>
                 </div>
