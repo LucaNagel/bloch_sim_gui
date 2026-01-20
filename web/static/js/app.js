@@ -12,13 +12,16 @@ function router(viewName) {
     // Hide all views
     document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
 
+    // Clear ALL plot containers to prevent ghost figures
+    const plotContainers = ['plot', 'slice-plot-container'];
+    plotContainers.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.innerHTML = '';
+    });
+
     // Show target view
     const target = document.getElementById(viewName + '-view');
-    // Handle mismatch naming for rf-pulse (rf-explorer.html uses rf-pulse-view but router arg might be 'rf-pulse' or 'rf_explorer'?)
-    // Partial says id="rf-pulse-view".
-    // Partial for slice says id="slice-explorer-view".
-
-    // Normalize view names
+    // Handle mismatch naming for rf-pulse
     let targetId = viewName + '-view';
     if (viewName === 'home') targetId = 'home-view';
     if (viewName === 'rf-pulse') targetId = 'rf-pulse-view';
@@ -33,10 +36,6 @@ function router(viewName) {
 
     // View-specific initialization
     if (viewName === 'rf-pulse') {
-        // Clear previous
-        const container = document.getElementById('plot');
-        if (container) container.innerHTML = '';
-
         // Switch to RF plot layout
         try {
              pyodide.globals.get("init_plot")();
@@ -47,10 +46,6 @@ function router(viewName) {
     }
 
     if (viewName === 'slice-explorer') {
-        // Clear previous
-        const container = document.getElementById('slice-plot-container');
-        if (container) container.innerHTML = '';
-
         try {
             pyodide.globals.get("init_slice_plot")();
             triggerSliceSimulation();
