@@ -241,49 +241,40 @@ class SliceSelectionExplorer(QWidget):
             # target area (G*s) = flip_rad / (gamma_Hz_per_G * 2 * pi)
 
             target_area = np.deg2rad(flip) / (4258.0 * 2 * np.pi)
-            current_area = np.trapz(np.abs(b1_base), dx=dt)
+            current_area = np.abs(np.trapz(b1_base, dx=dt))
             if current_area > 0:
                 scale = target_area / current_area
                 b1_base *= scale
 
         # 3. Create Sequence
-        # We can construct a SliceSelectRephase, passing our custom pulse
-        rephase_dur = 0.0
-        if do_rephase:
-            rephase_dur = dur_s / 2.0  # Simple default, usually sufficient
-            # But the class calculates rephase lobe based on slice gradient area.
-            # SliceSelectRephase handles the rephase lobe creation.
+        # Manual construction to avoid SliceSelectRephase overhead
+        n_base = len(b1_base)
+        n_rephase = 0
+        rephase_amp = 0.0
 
-        # We will manually construct the sequence tuple to have full control if needed,
-        # or rely on SliceSelectRephase logic.
-        # SliceSelectRephase logic for rephase_duration creates a lobe.
-        # If we want "No Rephase", we can pass rephase_duration very small or handle gradients manually.
+        # Calculate Slice Gradient
+        bw_hz = tbw / dur_s
+        gamma_hz_per_g = 4258.0
+        gz_amp = bw_hz / (gamma_hz_per_g * (thick_m * 100))  # G/cm
 
         if do_rephase:
-            seq_obj = SliceSelectRephase(
-                flip_angle=flip,
-                pulse_duration=dur_s,
-                time_bw_product=tbw,
-                rephase_duration=0.5e-3,  # Fixed rephase time (0.5ms)
-                slice_thickness=thick_m,
-                custom_pulse=(b1_base, time_rf),
-            )
-            b1, grads, time = seq_obj.compile(dt=dt)
-        else:
-            # Custom construction without rephase
-            # Calculate Slice Gradient
-            bw_hz = tbw / dur_s
-            gamma_hz_per_g = 4258.0
-            gz_amp = bw_hz / (gamma_hz_per_g * (thick_m * 100))  # G/cm
+            rephase_dur = 0.5e-3  # 0.5ms fixed
+            n_rephase = int(np.ceil(rephase_dur / dt))
+            # Area = -0.5 * slice_area
+            slice_area = gz_amp * dur_s
+            rephase_area = -0.5 * slice_area
+            rephase_amp = rephase_area / rephase_dur
 
-            n_total = len(b1_base) + 10
-            b1 = np.zeros(n_total, dtype=complex)
-            b1[: len(b1_base)] = b1_base
+        n_total = n_base + n_rephase
+        b1 = np.zeros(n_total, dtype=complex)
+        grads = np.zeros((n_total, 3))
+        time = np.arange(n_total) * dt
 
-            grads = np.zeros((n_total, 3))
-            grads[: len(b1_base), 2] = gz_amp
+        b1[:n_base] = b1_base
+        grads[:n_base, 2] = gz_amp
 
-            time = np.arange(n_total) * dt
+        if n_rephase > 0:
+            grads[n_base : n_base + n_rephase, 2] = rephase_amp
 
         # 4. Define Spatial Grid
         half_range = range_cm / 2.0

@@ -455,7 +455,7 @@ def run_slice_simulation(flip, duration_ms, extra_time_ms, tbw, apod, thick_mm, 
         # Only rescale if we didn't calculate flip from B1
         if b1_amp_gauss is None or b1_amp_gauss <= 0:
             target_area = np.deg2rad(calc_flip) / (4258.0 * 2 * np.pi)
-            curr_area = np.trapz(np.abs(b1), dx=dt)
+            curr_area = np.abs(np.trapz(b1, dx=dt))
             if curr_area > 0: b1 *= (target_area / curr_area)
 
     bw_hz = calc_tbw / dur_s
