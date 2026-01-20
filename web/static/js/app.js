@@ -467,7 +467,7 @@ def run_slice_simulation(flip, duration_ms, extra_time_ms, tbw, apod, thick_mm, 
 
     # Rephase Logic (Percentage)
     if rephase_pct != 0:
-        rephase_dur = 1e-3
+        rephase_dur = 0.0005
         n_rephase = int(rephase_dur/dt)
         slice_area = gz * dur_s
         rewind_area = -slice_area * (rephase_pct / 100.0)
@@ -985,7 +985,7 @@ function triggerSliceSimulation(event) {
             if (!isViewOnly) {
                 // If B1 Changed -> Keep B1 (vals.b1 is valid)
                 // If Flip/Dur/TBW/Type Changed -> Reset B1
-                const physicsParamsThatResetB1 = ["slice_flip_angle", "slice_duration", "slice_tbw", "slice_thickness", "slice_pulse_type"];
+                const physicsParamsThatResetB1 = ["slice_flip_angle", "slice_duration", "slice_tbw", "slice_thickness", "slice_pulse_type", "slice_rephase_pct"];
                 if (physicsParamsThatResetB1.includes(sourceId)) {
                     document.getElementById("slice_b1").value = "";
                     vals.b1 = -1;

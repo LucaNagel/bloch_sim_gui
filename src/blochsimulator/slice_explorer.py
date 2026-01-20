@@ -264,7 +264,7 @@ class SliceSelectionExplorer(QWidget):
                 flip_angle=flip,
                 pulse_duration=dur_s,
                 time_bw_product=tbw,
-                rephase_duration=1e-3,  # Fixed rephase time
+                rephase_duration=0.5e-3,  # Fixed rephase time (0.5ms)
                 slice_thickness=thick_m,
                 custom_pulse=(b1_base, time_rf),
             )
