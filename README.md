@@ -4,6 +4,11 @@
 
 A high-performance Python implementation of the Bloch equation solver originally developed by Brian Hargreaves at Stanford University. This package provides a fast C-based core with Python bindings, parallel processing support, and an interactive GUI for MRI pulse sequence simulation.
 
+## Demo
+
+<video src="docs/source/_static/media/spin_echo.mp4" controls="controls" autoplay="autoplay" loop="loop" muted="muted" style="max-width: 100%;">
+</video>
+
 ## Features
 
 The Bloch Simulator can be accessed from 3 different directions:
