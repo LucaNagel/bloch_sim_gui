@@ -6,7 +6,8 @@ A high-performance Python implementation of the Bloch equation solver originally
 
 ## Demo
 
-<video src="docs/source/_static/media/spin_echo.mp4" controls="controls" autoplay="autoplay" loop="loop" muted="muted" style="max-width: 100%;">
+<video src="docs/_static/media/spin_echo.mp4" controls="controls" style="max-width: 100%;">
+  <a href="docs/_static/media/spin_echo.mp4">Watch Demo Video</a>
 </video>
 
 ## Features
