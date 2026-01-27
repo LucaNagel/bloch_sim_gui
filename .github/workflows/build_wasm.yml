@@ -38,7 +38,7 @@ jobs:
           version: 3.1.46
 
       - name: Install pyodide-build
-        run: pip install pyodide-build
+        run: pip install "wheel<0.40.0" pyodide-build
 
       - name: Build WASM Wheel
         env:
