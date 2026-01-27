@@ -16,6 +16,11 @@ exports/*
 *.svg
 *.gif
 
+!docs/_static/media/*.gif
+!docs/_static/media/*.png
+!docs/_static/media/*.svg
+!docs/_static/media/*.mp4
+
 __pycache__/
 
 # Ignore all markdown files except README.md
