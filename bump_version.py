@@ -46,37 +46,40 @@ def main():
     # pattern: version="1.0.1",
     update_file(Path("setup.py"), r'version="[0-9.]+"', f'version="{new_version}"')
 
-    # 3. simulator.py
-    # pattern: 'simulator_version' = '1.0.1'
-    update_file(
-        Path("src/blochsimulator/simulator.py"),
-        r"'simulator_version': '[0-9.]+'",
-        f"'simulator_version': '{new_version}'",
-    )
-    update_file(
-        Path("src/blochsimulator/simulator.py"),
-        r"attrs['simulator_version'] = '[0-9.]+'",
-        f"attrs['simulator_version'] = '{new_version}'",
-    )
-
-    # 4. gui.py (About dialog)
+    # 3. gui.py (About dialog)
     # pattern: "Version 1.0.1"
     update_file(
         Path("src/blochsimulator/gui.py"), r"Version [0-9.]+", f"Version {new_version}"
     )
 
-    # 5. docs/conf.py
-    # pattern: release = '1.0.1'
+    # 4. docs/conf.py
+    # pattern: release = "1.0.1" or release = '1.0.1'
     update_file(
-        Path("docs/conf.py"), r"release = '[0-9.]+'", f"release = '{new_version}'"
+        Path("docs/conf.py"),
+        r"release = ['\"][0-9.]+['\"]",
+        f'release = "{new_version}"',
     )
 
-    # 6. src/blochsimulator/__init__.py
+    # 5. src/blochsimulator/__init__.py
     # pattern: __version__ = "1.0.1"
     update_file(
         Path("src/blochsimulator/__init__.py"),
         r'__version__ = "[0-9.]+"',
         f'__version__ = "{new_version}"',
+    )
+
+    # 6. web/partials/home.html
+    # pattern: >v1.0.1</a>
+    # pattern: tag/v1.0.1"
+    update_file(
+        Path("web/partials/home.html"),
+        r">v[0-9.]+</a>",
+        f">v{new_version}</a>",
+    )
+    update_file(
+        Path("web/partials/home.html"),
+        r"tag/v[0-9.]+\"",
+        f'tag/v{new_version}"',
     )
 
     # 7. web/partials/footer.html
