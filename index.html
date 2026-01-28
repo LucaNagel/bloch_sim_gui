@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Bloch Simulator</title>
     <script src="https://cdn.jsdelivr.net/pyodide/v0.25.0/full/pyodide.js"></script>
+    <link rel="icon" type="image/svg+xml" href="static/favicon.svg">
     <link rel="stylesheet" href="static/css/style.css">
 </head>
 <body>
@@ -30,6 +31,7 @@
             <div class="welcome-hero">
                 <h2>Welcome to the Bloch Simulator</h2>
                 <p>Interactive MRI physics simulation in your browser. Explore magnetic resonance concepts with real-time feedback.</p>
+                <p style="font-size: 0.9rem; opacity: 0.8;">Latest Desktop Release: <a href="https://github.com/LucaNagel/bloch_sim_gui/releases/tag/v1.0.10" target="_blank" style="color: #0056b3; text-decoration: underline;">v1.0.10</a></p>
             </div>
 
             <div class="card-grid">
@@ -38,9 +40,9 @@
                     <p>Design and analyze Radio Frequency pulses. Adjust duration, shape, and frequency offsets in real-time.</p>
                 </div>
 
-                <div class="card" style="opacity: 0.6; cursor: default;">
-                    <h3>Gradient Echo (Coming Soon)</h3>
-                    <p>Simulate GRE sequences with variable TR, TE, and flip angles.</p>
+                <div class="card" onclick="router('slice-explorer')">
+                    <h3>Slice Selection Explorer</h3>
+                    <p>Simulate slice profiles with configurable gradients, RF shapes, and rephasing lobes.</p>
                 </div>
 
                 <div class="card" style="opacity: 0.6; cursor: default;">
@@ -91,6 +93,14 @@
                     <summary style="cursor: pointer; font-weight: bold; color: var(--primary-color);">Advanced Settings</summary>
                     <div class="controls-grid" style="margin-top: 0.5rem;">
                         <div class="control-group">
+                            <label for="b1_amp">B1 Amplitude (G)</label>
+                            <input type="number" id="b1_amp" class="sim-input" step="0.01" placeholder="Auto">
+                        </div>
+                        <div class="control-group">
+                            <label for="extra_time">Extra Time (ms)</label>
+                            <input type="number" id="extra_time" value="0.0" step="0.1" min="0" class="sim-input">
+                        </div>
+                        <div class="control-group">
                             <label for="freq_offset">Freq. Offset (Hz)</label>
                             <input type="number" id="freq_offset" value="0" step="50" class="sim-input">
                         </div>
@@ -107,12 +117,26 @@
                             <input type="number" id="tbw" value="4.0" step="0.5" min="0.5" class="sim-input">
                         </div>
                         <div class="control-group">
-                            <label for="view_time">View Time: <span id="view_time_val">2.0</span> ms</label>
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem;">
+                                <label for="view_time" style="margin-bottom: 0;">View Time: <span id="view_time_val">2.0</span> ms</label>
+                                <button id="play_btn_rf" class="play-btn" style="padding: 1px 6px; font-size: 0.8rem; cursor: pointer;">&#9658;</button>
+                            </div>
                             <input type="range" id="view_time" class="sim-input" min="0" max="2.0" step="0.01" value="2.0">
                         </div>
                         <div class="control-group">
                             <label for="view_freq">View Freq: <span id="view_freq_val">0</span> Hz</label>
                             <input type="range" id="view_freq" class="sim-input" min="-1000" max="1000" step="1" value="0">
+                        </div>
+                        <div class="control-group" style="display: flex; align-items: center; justify-content: space-between;">
+                            <label for="toggle_3d" style="margin-bottom: 0;">3D Trajectory</label>
+                            <input type="checkbox" id="toggle_3d" class="sim-input" style="width: auto;" checked>
+                        </div>
+                        <div class="control-group" style="grid-column: span 2;">
+                            <label>Plot Components</label>
+                            <div style="display: flex; gap: 1rem; margin-top: 0.25rem;">
+                                <label style="font-weight: normal;"><input type="checkbox" id="show_mx" class="sim-input" checked> Show Mx</label>
+                                <label style="font-weight: normal;"><input type="checkbox" id="show_my" class="sim-input" checked> Show My</label>
+                            </div>
                         </div>
                     </div>
                 </details>
@@ -122,6 +146,109 @@
                 <div id="plot"></div>
             </div>
         </div>
+
+<!-- SLICE SELECTION EXPLORER VIEW -->
+<div id="slice-explorer-view" class="view">
+    <div style="margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center;">
+        <h2 style="margin: 0; color: var(--primary-color);">Slice Selection Explorer</h2>
+        <button onclick="router('home')" style="padding: 0.5rem 1rem; cursor: pointer;">&larr; Back</button>
+    </div>
+
+    <div class="controls-panel">
+        <div class="controls-grid" style="gap: 0.5rem;">
+            <!-- Pulse Parameters -->
+                <div class="control-group">
+                    <label for="slice_pulse_type">Pulse Type</label>
+                    <select id="slice_pulse_type" class="slice-input">
+                        <option value="sinc" selected>Sinc</option>
+                        <option value="rect">Rectangular</option>
+                        <option value="gaussian">Gaussian</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label for="slice_flip_angle">Flip Angle (°)</label>
+                    <input type="number" id="slice_flip_angle" class="slice-input" value="90" min="0" max="180" step="1">
+                </div>
+                <div class="control-group">
+                    <label for="slice_duration">Duration (ms)</label>
+                    <input type="number" id="slice_duration" class="slice-input" value="2.0" min="0.1" max="20.0" step="0.1">
+                </div>
+                <div class="control-group">
+                    <label for="slice_tbw">Time-BW Product</label>
+                    <input type="number" id="slice_tbw" class="slice-input" value="4.0" min="1.0" max="16.0" step="0.5" readonly style="background-color: #f0f0f0; color: #666;">
+                </div>
+                <div class="control-group">
+                    <label for="slice_apodization">Apodization</label>
+                    <select id="slice_apodization" class="slice-input">
+                        <option value="None" selected>None</option>
+                        <option value="Hamming">Hamming</option>
+                        <option value="Hanning">Hanning</option>
+                        <option value="Blackman">Blackman</option>
+                    </select>
+                </div>
+
+                <!-- Slice Parameters -->
+                <div class="control-group">
+                    <label for="slice_thickness">Thickness (mm)</label>
+                    <input type="number" id="slice_thickness" class="slice-input" value="5.0" min="0.1" max="20.0" step="0.5">
+                </div>
+
+                <!-- Simulation Grid -->
+                <div class="control-group">
+                    <label for="slice_range">Pos Range (cm)</label>
+                    <input type="number" id="slice_range" class="slice-input" value="4.0" min="0.5" max="20.0" step="0.5">
+                </div>
+                <div class="control-group">
+                    <label for="slice_points">Points</label>
+                    <input type="number" id="slice_points" class="slice-input" value="200" min="50" max="1000" step="10">
+                </div>
+
+                                    <div class="control-group" style="display: flex; align-items: center; justify-content: space-between;">
+                                        <label for="slice_3d" style="margin-bottom: 0;">3D Visualization</label>
+                                        <input type="checkbox" id="slice_3d" class="slice-input" style="width: auto;">
+                                    </div>            </div>
+
+            <details style="margin-top: 0.5rem; border: 1px solid #ddd; padding: 0.5rem; border-radius: 4px;">
+                <summary style="cursor: pointer; font-weight: bold; color: var(--primary-color);">Advanced Settings</summary>
+                <div class="controls-grid" style="margin-top: 0.5rem;">
+                    <div class="control-group">
+                        <label for="slice_b1">B1 Amplitude (G)</label>
+                        <input type="number" id="slice_b1" class="slice-input" step="0.01" placeholder="Auto">
+                    </div>
+                    <div class="control-group">
+                        <label for="slice_extra_time">Extra Time (ms)</label>
+                        <input type="number" id="slice_extra_time" value="0.0" step="0.1" min="0" class="slice-input">
+                    </div>
+                    <div class="control-group">
+                        <label for="slice_rephase_pct">Rephasing (%)</label>
+                        <input type="number" id="slice_rephase_pct" class="slice-input" value="50" min="-100" max="100" step="10">
+                    </div>
+                    <div class="control-group">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem;">
+                            <label for="slice_view_time" style="margin-bottom: 0;">View Time: <span id="slice_view_time_val">2.0</span> ms</label>
+                            <button id="play_btn_slice" class="play-btn" style="padding: 1px 6px; font-size: 0.8rem; cursor: pointer;">&#9658;</button>
+                        </div>
+                        <input type="range" id="slice_view_time" class="slice-input" min="0" max="2.0" step="0.01" value="2.0">
+                    </div>
+                    <div class="control-group">
+                        <label for="slice_view_pos">View Pos: <span id="slice_view_pos_val">0</span> cm</label>
+                        <input type="range" id="slice_view_pos" class="slice-input" min="-2.0" max="2.0" step="0.01" value="0">
+                    </div>
+                    <div class="control-group" style="grid-column: span 2;">
+                        <label>Plot Components</label>
+                        <div style="display: flex; gap: 1rem; margin-top: 0.25rem;">
+                            <label style="font-weight: normal;"><input type="checkbox" id="slice_show_mx" class="slice-input" checked> Show Mx</label>
+                            <label style="font-weight: normal;"><input type="checkbox" id="slice_show_my" class="slice-input" checked> Show My</label>
+                        </div>
+                    </div>
+                </div>
+            </details>
+        </div>
+
+    <div id="slice-plot-container" style="margin-top: 0; text-align: center;">
+        <!-- Matplotlib canvas will likely be appended here or we move it here via JS -->
+    </div>
+</div>
 
     </div>
 

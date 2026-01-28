@@ -20,6 +20,7 @@ exports/*
 !docs/_static/media/*.png
 !docs/_static/media/*.svg
 !docs/_static/media/*.mp4
+!web/static/favicon.svg
 
 __pycache__/
 
