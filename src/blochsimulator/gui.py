@@ -3072,6 +3072,8 @@ class ParameterSweepWidget(QWidget):
             "Signal Phase",
             "Final Mxy map (complex) (per pos/freq)",
             "Final Mz map (per pos/freq)",
+            "Full Signal Evolution (complex)",
+            "Time Vector",
         ]:
             cb = QCheckBox(metric)
             cb.setChecked(metric in ["Final Mz (mean)", "Signal Magnitude"])
@@ -3253,29 +3255,66 @@ class ParameterSweepWidget(QWidget):
                 # Run simulation
                 try:
                     self.parent_gui.run_simulation()
+                    sim_thread = getattr(self.parent_gui, "simulation_thread", None)
 
-                    # Wait for simulation to complete (simple polling)
-                    while (
-                        self.parent_gui.simulation_thread
-                        and self.parent_gui.simulation_thread.isRunning()
-                    ):
-                        QApplication.processEvents()
-                        time.sleep(0.01)
+                    step_result_container = []
+                    step_error_container = []
+
+                    def on_step_finished(res):
+                        step_result_container.append(res)
+
+                    def on_step_error(err):
+                        step_error_container.append(err)
+
+                    if sim_thread:
+                        sim_thread.finished.connect(on_step_finished)
+                        sim_thread.error.connect(on_step_error)
+
+                        # Wait for completion
+                        while not step_result_container and not step_error_container:
+                            QApplication.processEvents()
+                            if not self.sweep_running:
+                                if hasattr(sim_thread, "request_cancel"):
+                                    sim_thread.request_cancel()
+                                break
+
+                            if (
+                                not sim_thread.isRunning()
+                                and not step_result_container
+                                and not step_error_container
+                            ):
+                                # Thread stopped but no signals? Wait a brief moment for pending signals
+                                start_wait = time.time()
+                                while (
+                                    time.time() - start_wait < 0.2
+                                ):  # 200ms grace period
+                                    QApplication.processEvents()
+                                    if step_result_container or step_error_container:
+                                        break
+                                    time.sleep(0.01)
+                                break
+
+                            time.sleep(0.005)
+
+                    if step_error_container:
+                        raise RuntimeError(
+                            f"Simulation failed: {step_error_container[0]}"
+                        )
 
                     # Extract metrics from results
-                    if self.parent_gui.last_result:
+                    if step_result_container:
+                        result = step_result_container[0]
                         for metric in selected_metrics:
-                            value = self._extract_metric(
-                                metric, self.parent_gui.last_result
-                            )
+                            value = self._extract_metric(metric, result)
                             results["metrics"][metric].append(value)
                     else:
                         # No result - append NaN to maintain array length
                         for metric in selected_metrics:
                             results["metrics"][metric].append(float("nan"))
-                        self.parent_gui.log_message(
-                            f"Warning: No result for {param_name}={param_val:.2f}"
-                        )
+                        if self.sweep_running:
+                            self.parent_gui.log_message(
+                                f"Warning: No result for {param_name}={param_val:.2f}"
+                            )
                 except Exception as e:
                     import traceback
 
@@ -3398,6 +3437,10 @@ class ParameterSweepWidget(QWidget):
                     if mz.ndim == 3:
                         return mz[-1, :, :]
                     return mz
+            elif "Full Signal Evolution" in metric_name:
+                return result.get("signal")
+            elif "Time Vector" in metric_name:
+                return result.get("time")
         except Exception as e:
             if self.parent_gui:
                 self.parent_gui.log_message(

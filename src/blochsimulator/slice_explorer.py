@@ -324,8 +324,10 @@ class SliceSelectionExplorer(QWidget):
 
         # Profile Plot
         pos_cm = positions[:, 2] * 100.0
-        mz = result["mz"]
-        mxy = np.sqrt(result["mx"] ** 2 + result["my"] ** 2)
+        mz = np.squeeze(result["mz"])
+        mx = np.squeeze(result["mx"])
+        my = np.squeeze(result["my"])
+        mxy = np.sqrt(mx**2 + my**2)
 
         self.plot_profile.plot(pos_cm, mz, pen="g", name="Mz")
         self.plot_profile.plot(pos_cm, mxy, pen="y", name="|Mxy|")
