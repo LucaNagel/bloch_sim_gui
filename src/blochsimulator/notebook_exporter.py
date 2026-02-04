@@ -290,11 +290,31 @@ with h5py.File(data_file, 'r') as f:
 
     # Load tissue parameters
     data['tissue'] = {{}}
-    for key in ['name', 't1', 't2', 'density', 't2_star']:
-        try:
+    if 'tissue' in f:
+        for key in f['tissue'].attrs.keys():
             data['tissue'][key] = f['tissue'].attrs[key]
-        except KeyError:
-            pass
+
+    # Load sequence parameters
+    data['sequence_params'] = {{}}
+    if 'sequence_parameters' in f:
+        grp = f['sequence_parameters']
+        # Load attributes
+        for key in grp.attrs.keys():
+            data['sequence_params'][key] = grp.attrs[key]
+        # Load datasets (e.g., waveforms)
+        for key in grp.keys():
+            if isinstance(grp[key], h5py.Dataset):
+                data['sequence_params'][key] = grp[key][...]
+
+    # Load simulation parameters
+    data['simulation_params'] = {{}}
+    if 'simulation_parameters' in f:
+        grp = f['simulation_parameters']
+        for key in grp.attrs.keys():
+            data['simulation_params'][key] = grp.attrs[key]
+        for key in grp.keys():
+            if isinstance(grp[key], h5py.Dataset):
+                data['simulation_params'][key] = grp[key][...]
 
     print(f"Data loaded successfully!")
     print(f"  Shape: {{data['mx'].shape}}")
@@ -305,31 +325,27 @@ with h5py.File(data_file, 'r') as f:
         self, tissue_params: Dict, sequence_params: Dict, simulation_params: Dict
     ) -> str:
         """Generate code to display parameters."""
-        # Filter out numpy arrays from parameters for display
-        seq_params_filtered = {
-            k: v for k, v in sequence_params.items() if not isinstance(v, np.ndarray)
-        }
-        sim_params_filtered = {
-            k: v for k, v in simulation_params.items() if not isinstance(v, np.ndarray)
-        }
-
-        return f"""# Display simulation parameters
+        return """# Display simulation parameters
 print("="*60)
 print("SIMULATION PARAMETERS")
 print("="*60)
 
 print("\\nTissue:")
-print(f"  Name: {{data['tissue'].get('name', 'Unknown')}}")
-print(f"  T1: {{data['tissue'].get('t1', 0)*1000:.1f}} ms")
-print(f"  T2: {{data['tissue'].get('t2', 0)*1000:.1f}} ms")
+for key, value in data['tissue'].items():
+    if key in ['t1', 't2', 't2_star']:
+        print(f"  {key}: {value*1000:.1f} ms")
+    else:
+        print(f"  {key}: {value}")
 
 print("\\nSequence:")
-for key, value in {seq_params_filtered}.items():
-    print(f"  {{key}}: {{value}}")
+for key, value in data['sequence_params'].items():
+    if not isinstance(value, np.ndarray):
+        print(f"  {key}: {value}")
 
 print("\\nSimulation:")
-for key, value in {sim_params_filtered}.items():
-    print(f"  {{key}}: {{value}}")
+for key, value in data['simulation_params'].items():
+    if not isinstance(value, np.ndarray):
+        print(f"  {key}: {value}")
 
 print("="*60)
 """
@@ -364,8 +380,13 @@ if data['mx'].ndim == 3:  # Time-resolved
     def _generate_magnetization_plot_code(self) -> str:
         """Generate magnetization plotting code."""
         return """# Plot magnetization evolution
-position_idx = 0  # Change to plot different position
-freq_idx = 0      # Change to plot different frequency
+# Always choose central index for position and frequency
+position_idx = data['positions'].shape[0] // 2
+freq_idx = len(data['frequencies']) // 2
+
+# Get actual values for title
+pos_z_cm = data['positions'][position_idx, 2] * 100
+freq_hz = data['frequencies'][freq_idx]
 
 if data['mx'].ndim == 3:  # Time-resolved
     time_ms = data['time'] * 1000
@@ -400,7 +421,7 @@ if data['mx'].ndim == 3:  # Time-resolved
     axes[1, 1].set_title('Transverse Magnitude')
     axes[1, 1].grid(True, alpha=0.3)
 
-    plt.suptitle(f'Magnetization Evolution - Position {position_idx}, Frequency {freq_idx}',
+    plt.suptitle(f'Magnetization Evolution - Pos: {pos_z_cm:.2f} cm, Freq: {freq_hz:.1f} Hz',
                  fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.show()
@@ -411,6 +432,13 @@ else:
     def _generate_signal_plot_code(self) -> str:
         """Generate signal plotting code."""
         return """# Plot signal
+# Re-use central indices
+position_idx = data['positions'].shape[0] // 2
+freq_idx = len(data['frequencies']) // 2
+
+pos_z_cm = data['positions'][position_idx, 2] * 100
+freq_hz = data['frequencies'][freq_idx]
+
 if data['signal'].ndim == 3:  # Time-resolved
     signal = data['signal'][:, position_idx, freq_idx]
     time_ms = data['time'] * 1000
@@ -431,7 +459,7 @@ if data['signal'].ndim == 3:  # Time-resolved
     axes[1].set_title('Signal Magnitude')
     axes[1].grid(True, alpha=0.3)
 
-    plt.suptitle(f'MRI Signal - Position {position_idx}, Frequency {freq_idx}',
+    plt.suptitle(f'MRI Signal - Pos: {pos_z_cm:.2f} cm, Freq: {freq_hz:.1f} Hz',
                  fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.show()
@@ -638,10 +666,11 @@ sequence = GradientEcho(
 print(f"Gradient Echo: TE={{te*1000:.1f}} ms, TR={{tr*1000:.1f}} ms, FA={{flip_angle:.1f}}°")
 """
         elif "Slice Select" in seq_type:
+            dur = sequence_params.get("rf_duration", 3e-3)
             return f"""# Create Slice Select + Rephase sequence
 sequence = SliceSelectRephase(
     flip_angle=flip_angle,
-    pulse_duration={sequence_params.get('rf_duration', 3e-3):.6f}
+    pulse_duration={dur:.6f}
 )
 print(f"Slice Select + Rephase: FA={{flip_angle:.1f}}°")
 """
