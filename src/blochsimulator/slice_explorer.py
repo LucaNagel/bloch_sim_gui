@@ -327,8 +327,8 @@ class SliceSelectionExplorer(QWidget):
         mz = result["mz"]
         mxy = np.sqrt(result["mx"] ** 2 + result["my"] ** 2)
 
-        self.plot_profile.plot(pos_cm, mz, pen="g", name="Mz")
-        self.plot_profile.plot(pos_cm, mxy, pen="y", name="|Mxy|")
+        self.plot_profile.plot(pos_cm, mz.flatten(), pen="g", name="Mz")
+        self.plot_profile.plot(pos_cm, mxy.flatten(), pen="y", name="|Mxy|")
 
         # Add slice boundaries indicators
         half_thick_cm = (self.thickness.value() / 2.0) / 10.0  # mm -> cm
