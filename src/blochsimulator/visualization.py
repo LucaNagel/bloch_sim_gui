@@ -30,6 +30,8 @@ from PyQt5.QtWidgets import (
     QSpinBox,
     QMessageBox,
     QCheckBox,
+    QRadioButton,
+    QGroupBox,
 )
 from PyQt5.QtCore import Qt, QBuffer
 from matplotlib.figure import Figure
@@ -655,6 +657,62 @@ class ExportDataDialog(QDialog):
         }
 
 
+class ParameterSweepExportDialog(ExportDataDialog):
+    """
+    Dialog for configuring parameter sweep export options.
+    Excludes Repro Notebook and adds options for Final State vs Full Time Course.
+    """
+
+    def __init__(
+        self,
+        parent=None,
+        default_filename: str = "sweep_results",
+        default_directory: Path = None,
+    ):
+        super().__init__(parent, default_filename, default_directory)
+        self.setWindowTitle("Export Parameter Sweep")
+
+    def init_ui(self):
+        super().init_ui()
+        # Rename HDF5 to NPZ for sweep
+        self.chk_hdf5.setText("NumPy Archive (.npz)")
+        self.chk_hdf5.setToolTip("Full sweep data in NumPy format.")
+
+        # Hide Repro notebook
+        self.chk_nb_repro.setVisible(False)
+        self.chk_nb_repro.setChecked(False)
+
+        # Add Sweep Options
+        self.sweep_opts_group = QGroupBox("Sweep Data Options")
+        sweep_layout = QVBoxLayout()
+
+        self.radio_final = QRadioButton("Final State Only (Faster, smaller)")
+        self.radio_final.setChecked(True)
+        self.radio_full = QRadioButton("Full Time Course (Large files)")
+
+        # Tooltips
+        self.radio_final.setToolTip(
+            "Export only the final magnetization state for each step."
+        )
+        self.radio_full.setToolTip(
+            "Export the full time evolution for each step (can be very large)."
+        )
+
+        sweep_layout.addWidget(self.radio_final)
+        sweep_layout.addWidget(self.radio_full)
+        self.sweep_opts_group.setLayout(sweep_layout)
+
+        # Insert before buttons (layout count - 1)
+        # self.layout() is QVBoxLayout
+        layout = self.layout()
+        layout.insertWidget(layout.count() - 1, self.sweep_opts_group)
+
+    def get_export_options(self) -> Dict:
+        opts = super().get_export_options()
+        opts["save_full_time_course"] = self.radio_full.isChecked()
+        return opts
+
+
 class AnimationExporter:
     """
     Export time-resolved simulations as animated GIF or MP4 videos.
@@ -973,7 +1031,11 @@ class DatasetExporter:
         self.supported_formats = ("csv", "dat", "tsv", "npy")
 
     def _write_columns(
-        self, columns: Dict[str, np.ndarray], filename: str, format: str = "csv"
+        self,
+        columns: Dict[str, np.ndarray],
+        filename: str,
+        format: str = "csv",
+        metadata: Optional[Dict] = None,
     ) -> str:
         """Write a dictionary of named 1D arrays to disk."""
         if not columns:
@@ -987,17 +1049,34 @@ class DatasetExporter:
 
         fmt = format.lower()
         filepath = Path(filename)
-        version_header = f"# BlochSimulator {__version__}\n"
+
+        # Build metadata header
+        header_lines = [f"# BlochSimulator {__version__}"]
+        if metadata:
+            for category, params in metadata.items():
+                if isinstance(params, dict):
+                    header_lines.append(f"# [{category.upper()}]")
+                    for k, v in params.items():
+                        if isinstance(v, np.ndarray):
+                            header_lines.append(f"#   {k}: array {v.shape}")
+                        elif isinstance(v, (list, tuple)):
+                            header_lines.append(f"#   {k}: list/tuple len={len(v)}")
+                        else:
+                            header_lines.append(f"#   {k}: {v}")
+                else:
+                    header_lines.append(f"# {category}: {params}")
+
+        metadata_str = "\n".join(header_lines) + "\n"
 
         if fmt == "csv":
             if filepath.suffix.lower() != ".csv":
                 filepath = filepath.with_suffix(".csv")
-            header = version_header + ",".join(keys)
+            header = metadata_str + ",".join(keys)
             np.savetxt(filepath, data, delimiter=",", header=header, comments="")
         elif fmt in ("dat", "tsv"):
             if filepath.suffix.lower() not in (".dat", ".tsv"):
                 filepath = filepath.with_suffix(".dat")
-            header = version_header + "\t".join(keys)
+            header = metadata_str + "\t".join(keys)
             np.savetxt(filepath, data, delimiter="\t", header=header, comments="")
         elif fmt == "npy":
             if filepath.suffix.lower() != ".npy":
@@ -1007,6 +1086,32 @@ class DatasetExporter:
             for key in keys:
                 structured[key] = np.asarray(columns[key]).ravel()
             np.save(filepath, structured)
+            # If metadata exists, also save it as a JSON sidecar for NPY
+            if metadata:
+                import json
+
+                def json_serializable(obj):
+                    if isinstance(obj, np.ndarray):
+                        return f"array {obj.shape}"
+                    if isinstance(obj, (np.float32, np.float64)):
+                        return float(obj)
+                    if isinstance(obj, (np.int32, np.int64)):
+                        return int(obj)
+                    return str(obj)
+
+                # Create a serializable copy of metadata
+                clean_meta = {}
+                for cat, ps in metadata.items():
+                    if isinstance(ps, dict):
+                        clean_meta[cat] = {
+                            k: json_serializable(v) for k, v in ps.items()
+                        }
+                    else:
+                        clean_meta[cat] = json_serializable(ps)
+
+                meta_path = filepath.with_suffix(".json")
+                with open(meta_path, "w") as f:
+                    json.dump(clean_meta, f, indent=4)
         else:
             raise ValueError(
                 f"Unsupported export format '{format}'. Use one of: {self.supported_formats}"

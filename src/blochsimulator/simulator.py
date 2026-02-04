@@ -429,25 +429,47 @@ class SpinEcho(PulseSequence):
     def compile(self, dt: float = 1e-5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Compile spin echo sequence."""
 
+        def _resample_pulse(pulse_data, target_dt, duration):
+            """Resample pulse to match simulation dt."""
+            b1_in, time_in = pulse_data
+            b1_in = np.asarray(b1_in, dtype=complex)
+            time_in = np.asarray(time_in, dtype=float)
+
+            if len(time_in) < 2:
+                return b1_in
+
+            # Target time points
+            num_points = int(np.round(duration / target_dt))
+            if num_points <= 0:
+                return np.array([], dtype=complex)
+
+            # Original time (normalized to start at 0)
+            t_orig = time_in - time_in[0]
+            # Target time
+            t_new = np.linspace(0, t_orig[-1], num_points)
+
+            # Interpolate complex
+            b1_real = np.interp(t_new, t_orig, np.real(b1_in))
+            b1_imag = np.interp(t_new, t_orig, np.imag(b1_in))
+            return b1_real + 1j * b1_imag
+
         # Determine pulse and readout durations first to validate TE
         if self.custom_excitation is not None:
             exc_b1_in, exc_time_in = self.custom_excitation
-            # Use actual length
-            exc_duration = (
-                len(exc_b1_in) * dt
-                if len(exc_time_in) <= 1
-                else exc_time_in[-1] - exc_time_in[0]
-            )
+            # Use actual length from time array
+            if len(exc_time_in) > 1:
+                exc_duration = exc_time_in[-1] - exc_time_in[0]
+            else:
+                exc_duration = len(exc_b1_in) * dt
         else:
             exc_duration = 1e-3
 
         if self.custom_refocusing is not None:
             ref_b1_in, ref_time_in = self.custom_refocusing
-            ref_duration = (
-                len(ref_b1_in) * dt
-                if len(ref_time_in) <= 1
-                else ref_time_in[-1] - ref_time_in[0]
-            )
+            if len(ref_time_in) > 1:
+                ref_duration = ref_time_in[-1] - ref_time_in[0]
+            else:
+                ref_duration = len(ref_b1_in) * dt
         else:
             ref_duration = 2e-3
 
@@ -477,15 +499,9 @@ class SpinEcho(PulseSequence):
 
         # 90-degree excitation pulse
         if self.custom_excitation is not None:
-            exc_b1, exc_time = self.custom_excitation
-            exc_b1 = np.asarray(exc_b1, dtype=complex)
-            # Resample if needed (simplified check)
-            if len(exc_b1) != int(exc_duration / dt):
-                # This is a simplification; in a full implementation we'd resample properly.
-                # For now, trust the duration/dt calculation or just take the array if it fits.
-                pass
-            n_exc = min(len(exc_b1), npoints)
-            b1[:n_exc] = exc_b1[:n_exc]
+            exc_pulse = _resample_pulse(self.custom_excitation, dt, exc_duration)
+            n_exc = min(len(exc_pulse), npoints)
+            b1[:n_exc] = exc_pulse[:n_exc]
         else:
             exc_pulse, _ = design_rf_pulse(
                 "sinc",
@@ -499,8 +515,7 @@ class SpinEcho(PulseSequence):
 
         # Refocusing pulse
         if self.custom_refocusing is not None:
-            ref_b1, _ = self.custom_refocusing
-            ref_pulse = np.asarray(ref_b1, dtype=complex)
+            ref_pulse = _resample_pulse(self.custom_refocusing, dt, ref_duration)
         else:
             # Default refocusing: classic 180° sinc
             ref_pulse, _ = design_rf_pulse(
@@ -573,17 +588,48 @@ class SpinEchoTipAxis(PulseSequence):
         self.echo_count = max(1, int(echo_count))
 
     def compile(self, dt: float = 1e-5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        def _resample_pulse(pulse_data, target_dt, duration):
+            """Resample pulse to match simulation dt."""
+            b1_in, time_in = pulse_data
+            b1_in = np.asarray(b1_in, dtype=complex)
+            time_in = np.asarray(time_in, dtype=float)
+
+            if len(time_in) < 2:
+                return b1_in
+
+            # Target time points
+            num_points = int(np.round(duration / target_dt))
+            if num_points <= 0:
+                return np.array([], dtype=complex)
+
+            # Original time (normalized to start at 0)
+            t_orig = time_in - time_in[0]
+            # Target time
+            t_new = np.linspace(0, t_orig[-1], num_points)
+
+            # Interpolate complex
+            b1_real = np.interp(t_new, t_orig, np.real(b1_in))
+            b1_imag = np.interp(t_new, t_orig, np.imag(b1_in))
+            return b1_real + 1j * b1_imag
+
         # Determine pulse durations first
         if self.custom_excitation is not None:
             exc_b1_in, exc_time_in = self.custom_excitation
-            # Use actual length
-            exc_duration = (
-                len(exc_b1_in) * dt
-                if len(exc_time_in) <= 1
-                else exc_time_in[-1] - exc_time_in[0]
-            )
+            if len(exc_time_in) > 1:
+                exc_duration = exc_time_in[-1] - exc_time_in[0]
+            else:
+                exc_duration = len(exc_b1_in) * dt
         else:
             exc_duration = 1e-3
+
+        if self.custom_refocusing is not None:
+            ref_b1_in, ref_time_in = self.custom_refocusing
+            if len(ref_time_in) > 1:
+                ref_duration = ref_time_in[-1] - ref_time_in[0]
+            else:
+                ref_duration = len(ref_b1_in) * dt
+        else:
+            ref_duration = 2e-3
 
         min_duration = exc_duration / 2.0 + (self.echo_count + 0.5) * self.te + 1e-3
         total_duration = max(self.tr, min_duration)
@@ -595,21 +641,19 @@ class SpinEchoTipAxis(PulseSequence):
 
         # Excitation pulse
         if self.custom_excitation is not None:
-            exc_b1, exc_time = self.custom_excitation
-            exc_b1 = np.asarray(exc_b1, dtype=complex)
-            n_exc = min(len(exc_b1), npoints)
-            b1[:n_exc] = exc_b1[:n_exc]
+            exc_pulse = _resample_pulse(self.custom_excitation, dt, exc_duration)
+            n_exc = min(len(exc_pulse), npoints)
+            b1[:n_exc] = exc_pulse[:n_exc]
         else:
-            exc_b1, _ = design_rf_pulse(
+            exc_pulse, _ = design_rf_pulse(
                 "sinc", duration=1e-3, flip_angle=90, npoints=int(1e-3 / dt)
             )
-            n_exc = len(exc_b1)
-            b1[:n_exc] = exc_b1
+            n_exc = len(exc_pulse)
+            b1[:n_exc] = exc_pulse
 
         # Build a proper 180° refocusing pulse (independent of excitation shape)
         if self.custom_refocusing is not None:
-            ref_b1, _ = self.custom_refocusing
-            ref_pulse = np.asarray(ref_b1, dtype=complex)
+            ref_pulse = _resample_pulse(self.custom_refocusing, dt, ref_duration)
         else:
             ref_pulse, _ = design_rf_pulse(
                 "sinc", duration=2e-3, flip_angle=180, npoints=int(2e-3 / dt)
@@ -820,6 +864,50 @@ class InversionRecovery(PulseSequence):
 
     def compile(self, dt: float = 1e-6) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Compile inversion recovery sequence."""
+
+        def _resample_pulse(pulse_data, target_dt, duration):
+            """Resample pulse to match simulation dt."""
+            b1_in, time_in = pulse_data
+            b1_in = np.asarray(b1_in, dtype=complex)
+            time_in = np.asarray(time_in, dtype=float)
+
+            if len(time_in) < 2:
+                return b1_in
+
+            # Target time points
+            num_points = int(np.round(duration / target_dt))
+            if num_points <= 0:
+                return np.array([], dtype=complex)
+
+            # Original time (normalized to start at 0)
+            t_orig = time_in - time_in[0]
+            # Target time
+            t_new = np.linspace(0, t_orig[-1], num_points)
+
+            # Interpolate complex
+            b1_real = np.interp(t_new, t_orig, np.real(b1_in))
+            b1_imag = np.interp(t_new, t_orig, np.imag(b1_in))
+            return b1_real + 1j * b1_imag
+
+        # Calculate durations
+        if self.custom_inversion is not None:
+            inv_b1_in, inv_time_in = self.custom_inversion
+            if len(inv_time_in) > 1:
+                inv_duration = inv_time_in[-1] - inv_time_in[0]
+            else:
+                inv_duration = len(inv_b1_in) * dt
+        else:
+            inv_duration = 2e-3
+
+        if self.custom_excitation is not None:
+            exc_b1_in, exc_time_in = self.custom_excitation
+            if len(exc_time_in) > 1:
+                exc_duration = exc_time_in[-1] - exc_time_in[0]
+            else:
+                exc_duration = len(exc_b1_in) * dt
+        else:
+            exc_duration = 1e-3
+
         # Ensure minimal duration
         min_duration = self.ti + self.te + 5e-3
         total_duration = max(self.tr, min_duration)
@@ -831,24 +919,24 @@ class InversionRecovery(PulseSequence):
 
         # --- 1. Inversion Pulse (180) ---
         if self.custom_inversion is not None:
-            inv_b1, _ = self.custom_inversion
-            inv_b1 = np.asarray(inv_b1, dtype=complex)
+            inv_pulse = _resample_pulse(self.custom_inversion, dt, inv_duration)
+            n_inv = min(len(inv_pulse), npoints)
+            b1[:n_inv] = inv_pulse[:n_inv]
         else:
             # Generate 180 of the specified type
-            inv_b1, _ = design_rf_pulse(
+            inv_pulse, _ = design_rf_pulse(
                 self.pulse_type,
-                duration=2e-3,
+                duration=inv_duration,
                 flip_angle=180,
-                npoints=int(2e-3 / dt),
+                npoints=int(inv_duration / dt),
                 freq_offset=self.rf_freq_offset,
             )
+            n_inv = min(len(inv_pulse), npoints)
+            b1[:n_inv] = inv_pulse[:n_inv]
 
-        n_inv = min(len(inv_b1), npoints)
-        b1[:n_inv] = inv_b1[:n_inv]
         inv_center_time = (n_inv * dt) / 2.0  # Approximate center
 
         # Slice gradient for inversion
-        inv_duration = n_inv * dt
         thickness_cm = max(self.slice_thickness, 1e-3) * 100.0
         bw_hz = 4.0 / max(inv_duration, dt)  # approx
         gamma_hz_per_g = 4258.0
@@ -865,19 +953,18 @@ class InversionRecovery(PulseSequence):
 
         # --- 2. Excitation Pulse (90) ---
         if self.custom_excitation is not None:
-            exc_b1, _ = self.custom_excitation
-            exc_b1 = np.asarray(exc_b1, dtype=complex)
+            exc_pulse = _resample_pulse(self.custom_excitation, dt, exc_duration)
         else:
             # Generate 90 of the SAME type
-            exc_b1, _ = design_rf_pulse(
+            exc_pulse, _ = design_rf_pulse(
                 self.pulse_type,
-                duration=1e-3,
+                duration=exc_duration,
                 flip_angle=90,
-                npoints=int(1e-3 / dt),
+                npoints=int(exc_duration / dt),
                 freq_offset=self.rf_freq_offset,
             )
 
-        n_exc = len(exc_b1)
+        n_exc = len(exc_pulse)
         exc_center_time = (n_exc * dt) / 2.0
 
         # Calculate start time for excitation to match TI (center-to-center)
@@ -891,10 +978,9 @@ class InversionRecovery(PulseSequence):
             exc_start_idx = n_inv + 10  # minimal gap
 
         if exc_start_idx + n_exc < npoints:
-            b1[exc_start_idx : exc_start_idx + n_exc] = exc_b1
+            b1[exc_start_idx : exc_start_idx + n_exc] = exc_pulse
 
             # Slice gradient for excitation
-            exc_duration = n_exc * dt
             bw_hz_exc = 4.0 / max(exc_duration, dt)
             if (
                 self.slice_gradient_override is not None

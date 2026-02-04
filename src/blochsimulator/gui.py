@@ -13,7 +13,7 @@ import sys
 import math
 import time
 import numpy as np
-from typing import Optional
+from typing import Optional, Dict
 from pathlib import Path
 import json
 
@@ -51,6 +51,7 @@ from PyQt5.QtWidgets import (
     QFormLayout,
     QDialogButtonBox,
     QListWidget,
+    QToolButton,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QIcon, QImage
@@ -81,6 +82,7 @@ from .visualization import (
     AnimationExporter,
     ExportAnimationDialog,
     ExportDataDialog,
+    ParameterSweepExportDialog,
     DatasetExporter,
     imageio as vz_imageio,
 )
@@ -1201,12 +1203,9 @@ class SequenceDesigner(QGroupBox):
                 "Free Induction Decay",
                 "Spin Echo",
                 "Spin Echo (Tip-axis 180)",
-                "Gradient Echo",
                 "Slice Select + Rephase",
                 "SSFP (Loop)",
                 "Inversion Recovery",
-                "FLASH",
-                "EPI",
                 "Custom",
             ]
         )
@@ -1239,31 +1238,10 @@ class SequenceDesigner(QGroupBox):
         row1.addWidget(self.ssfp_repeats)
         ssfp_layout.addLayout(row1)
 
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Pulse amp (G):"))
-        self.ssfp_amp = QDoubleSpinBox()
-        self.ssfp_amp.setRange(0.0, 1e3)
-        self.ssfp_amp.setDecimals(6)
-        self.ssfp_amp.setValue(0.05)
-        self.ssfp_amp.valueChanged.connect(lambda _: self.update_diagram())
-        row2.addWidget(self.ssfp_amp)
-        row2.addWidget(QLabel("Phase (deg):"))
-        self.ssfp_phase = QDoubleSpinBox()
-        self.ssfp_phase.setRange(-3600, 3600)
-        self.ssfp_phase.setDecimals(2)
-        self.ssfp_phase.setValue(0.0)
-        self.ssfp_phase.valueChanged.connect(lambda _: self.update_diagram())
-        row2.addWidget(self.ssfp_phase)
-        ssfp_layout.addLayout(row2)
-
         row3 = QHBoxLayout()
-        row3.addWidget(QLabel("Pulse dur (ms):"))
-        self.ssfp_dur = QDoubleSpinBox()
-        self.ssfp_dur.setRange(0.01, 1000.0)
-        self.ssfp_dur.setDecimals(3)
-        self.ssfp_dur.setValue(1.0)
-        self.ssfp_dur.valueChanged.connect(lambda _: self.update_diagram())
-        row3.addWidget(self.ssfp_dur)
+        # Pulse duration is now taken from RF Pulse Designer
+        # self.ssfp_dur = QDoubleSpinBox()... (removed)
+
         row3.addWidget(QLabel("Start delay (ms):"))
         self.ssfp_start_delay = QDoubleSpinBox()
         self.ssfp_start_delay.setRange(0.0, 10000.0)
@@ -1274,13 +1252,13 @@ class SequenceDesigner(QGroupBox):
         ssfp_layout.addLayout(row3)
 
         row4 = QHBoxLayout()
-        row4.addWidget(QLabel("Start amp (G):"))
-        self.ssfp_start_amp = QDoubleSpinBox()
-        self.ssfp_start_amp.setRange(0.0, 1e3)
-        self.ssfp_start_amp.setDecimals(6)
-        self.ssfp_start_amp.setValue(0.025)
-        self.ssfp_start_amp.valueChanged.connect(lambda _: self.update_diagram())
-        row4.addWidget(self.ssfp_start_amp)
+        row4.addWidget(QLabel("Start Flip (°):"))
+        self.ssfp_start_flip = QDoubleSpinBox()
+        self.ssfp_start_flip.setRange(0.0, 360.0)
+        self.ssfp_start_flip.setDecimals(2)
+        self.ssfp_start_flip.setValue(45.0)
+        self.ssfp_start_flip.valueChanged.connect(lambda _: self.update_diagram())
+        row4.addWidget(self.ssfp_start_flip)
         row4.addWidget(QLabel("Start phase (deg):"))
         self.ssfp_start_phase = QDoubleSpinBox()
         self.ssfp_start_phase.setRange(-3600, 3600)
@@ -1321,13 +1299,15 @@ class SequenceDesigner(QGroupBox):
         self.slice_rephase_opts.setVisible(False)
 
         # TE parameter
-        te_layout = QHBoxLayout()
+        self.te_container = QWidget()
+        te_layout = QHBoxLayout(self.te_container)
+        te_layout.setContentsMargins(0, 0, 0, 0)
         te_layout.addWidget(QLabel("TE (ms):"))
         self.te_spin = QDoubleSpinBox()
         self.te_spin.setRange(0.1, 200)
         self.te_spin.setValue(20)
         te_layout.addWidget(self.te_spin)
-        layout.addLayout(te_layout)
+        layout.addWidget(self.te_container)
         self.te_spin.valueChanged.connect(lambda _: self.update_diagram())
 
         # Slice thickness and Gradient overrides (grouped for easy hiding)
@@ -1436,53 +1416,92 @@ class SequenceDesigner(QGroupBox):
         # Hide gradient options for SSFP as it's typically a 0D/1D simulation without slice gradients in this context
         if hasattr(self, "gradient_opts_container"):
             self.gradient_opts_container.setVisible(seq_type != "SSFP (Loop)")
+            self.gradient_opts_container.setVisible(seq_type != "Inversion Recovery")
+            self.gradient_opts_container.setVisible(seq_type != "Spin Echo")
+            self.gradient_opts_container.setVisible(
+                seq_type != "Spin Echo (Tip-axis 180)"
+            )
+            self.gradient_opts_container.setVisible(seq_type != "Free Induction Decay")
+
+        # TE is irrelevant for continuous SSFP loop (which uses TR/Dur)
+        if hasattr(self, "te_container"):
+            self.te_container.setVisible(False)
+            self.te_container.setVisible(
+                seq_type in ("Spin Echo", "Spin Echo (Tip-axis 180)")
+            )
 
         # Update pulse list based on sequence type
         self.pulse_list.blockSignals(True)
         self.pulse_list.clear()
+        self.pulse_waveforms.clear()
+        self.current_role = None
 
         roles = []
         if seq_type in ("Spin Echo", "Spin Echo (Tip-axis 180)"):
-            roles = ["Excitation", "Refocusing"]
+            # Generate Refocusing first, then Excitation.
+            # This ensures rf_designer is left in Excitation state (90 deg)
+            # which is safer if it's picked up as a default anywhere.
+            generation_roles = ["Refocusing", "Excitation"]
+            roles = ["Excitation", "Refocusing"]  # Display order
 
-            # Pre-populate states so they share the same pulse type/duration
             if hasattr(self, "parent_gui") and hasattr(self.parent_gui, "rf_designer"):
                 current_state = self.parent_gui.rf_designer.get_state()
+                presets = self.get_sequence_preset_params(seq_type)
+                default_duration = presets.get(
+                    "duration", current_state.get("duration", 1.0)
+                )
 
-                # Excitation: 90 degrees, same type/duration
+                # Excitation: 90 degrees, same type, correct duration, reset B1 override
                 exc_state = current_state.copy()
                 exc_state["flip_angle"] = 90.0
+                exc_state["duration"] = default_duration
+                exc_state["b1_amplitude"] = 0.0
                 self.pulse_states["Excitation"] = exc_state
 
-                # Refocusing: 180 degrees, same type/duration
+                # Refocusing: 180 degrees, same type, correct duration, reset B1 override
                 ref_state = current_state.copy()
                 ref_state["flip_angle"] = 180.0
+                ref_state["duration"] = default_duration
+                ref_state["b1_amplitude"] = 0.0
                 self.pulse_states["Refocusing"] = ref_state
 
-                # Pre-generate waveforms for both roles so they are available immediately
-                # Temporarily switch roles to force the designer to generate and save each pulse
-                for role in roles:
+                # Pre-generate waveforms
+                for role in generation_roles:
                     self.current_role = role
                     self.parent_gui.rf_designer.set_state(self.pulse_states[role])
 
         elif seq_type == "Inversion Recovery":
+            generation_roles = ["Inversion", "Excitation"]
             roles = ["Inversion", "Excitation"]
 
             # Pre-populate states to ensure they are both Sinc (or match current designer type)
             if hasattr(self, "parent_gui") and hasattr(self.parent_gui, "rf_designer"):
                 current_state = self.parent_gui.rf_designer.get_state()
+                presets = self.get_sequence_preset_params(seq_type)
+                default_duration = presets.get(
+                    "duration", current_state.get("duration", 1.0)
+                )
 
-                # Inversion: 180 degrees
+                # Inversion: 180 degrees, reset B1 override
                 inv_state = current_state.copy()
                 inv_state["flip_angle"] = 180.0
+                inv_state["duration"] = default_duration
+                inv_state["b1_amplitude"] = 0.0
                 # Ensure it's a Sinc if the user hasn't explicitly set a type for this role yet
                 # Or just force it to match the current designer type (which is usually what users expect)
                 self.pulse_states["Inversion"] = inv_state
 
-                # Excitation: 90 degrees
+                # Excitation: 90 degrees, reset B1 override
                 exc_state = current_state.copy()
                 exc_state["flip_angle"] = 90.0
+                exc_state["duration"] = default_duration
+                exc_state["b1_amplitude"] = 0.0
                 self.pulse_states["Excitation"] = exc_state
+
+                # Pre-generate waveforms
+                for role in generation_roles:
+                    self.current_role = role
+                    self.parent_gui.rf_designer.set_state(self.pulse_states[role])
 
         elif seq_type in ("Gradient Echo", "Free Induction Decay", "FLASH", "EPI"):
             roles = ["Excitation"]
@@ -1547,6 +1566,7 @@ class SequenceDesigner(QGroupBox):
                 "frequency_range_hz": 100,
                 "pulse_type": "gaussian",
                 "duration": 2.0,
+                "b1_amplitude": 0.0,
             },
             "Spin Echo": {
                 "te_ms": 10,
@@ -1555,6 +1575,7 @@ class SequenceDesigner(QGroupBox):
                 "num_frequencies": 201,
                 "frequency_range_hz": 100,
                 "duration": 1.0,  # ms
+                "b1_amplitude": 0.0,
             },
             "Spin Echo (Tip-axis 180)": {
                 "te_ms": 10,
@@ -1563,12 +1584,14 @@ class SequenceDesigner(QGroupBox):
                 "num_frequencies": 201,
                 "frequency_range_hz": 100,
                 "duration": 1.0,  # ms
+                "b1_amplitude": 0.0,
             },
             "Gradient Echo": {
                 "te_ms": 5,
                 "tr_ms": 20,
                 "flip_angle": 30,
                 "duration": 1.0,  # ms
+                "b1_amplitude": 0.0,
             },
             "Slice Select + Rephase": {
                 "te_ms": 5,
@@ -1577,17 +1600,16 @@ class SequenceDesigner(QGroupBox):
                 "num_frequencies": 3,
                 "duration": 1.0,  # ms
                 "flip_angle": 90,
+                "b1_amplitude": 0.0,
             },
             "SSFP (Loop)": {
                 "te_ms": 2,
                 "tr_ms": 5,
                 "flip_angle": 30,
                 "ssfp_repeats": 100,
-                "ssfp_amp": 0.05,
-                "ssfp_phase": 0.0,
                 "ssfp_dur": 1.0,
                 "ssfp_start_delay": 0.0,
-                "ssfp_start_amp": 0.025,
+                "ssfp_start_flip": 15.0,
                 "ssfp_start_phase": 0.0,
                 "ssfp_alternate_phase": True,
                 "pulse_type": "gaussian",
@@ -1596,6 +1618,7 @@ class SequenceDesigner(QGroupBox):
                 "frequency_range_hz": 1000,
                 "duration": 1.0,  # ms
                 "time_step": 10.0,
+                "b1_amplitude": 0.0,
             },
             "Inversion Recovery": {
                 "te_ms": 10,
@@ -1604,13 +1627,14 @@ class SequenceDesigner(QGroupBox):
                 "num_positions": 1,
                 "num_frequencies": 51,
                 "duration": 1.0,  # ms
-                "flip_angle": 90,
+                "b1_amplitude": 0.0,
             },
             "FLASH": {
                 "te_ms": 3,
                 "tr_ms": 10,
                 "flip_angle": 15,
                 "duration": 1.0,  # ms
+                "b1_amplitude": 0.0,
             },
             "EPI": {
                 "te_ms": 25,
@@ -1618,6 +1642,7 @@ class SequenceDesigner(QGroupBox):
                 "num_positions": 51,
                 "num_frequencies": 3,
                 "duration": 1.0,  # ms
+                "b1_amplitude": 0.0,
             },
             "Custom": {
                 "te_ms": 10,
@@ -1967,10 +1992,11 @@ class SequenceDesigner(QGroupBox):
         dt = max(dt, 1e-6)
         tr = self.tr_spin.value() / 1000.0
         n_reps = max(1, self.ssfp_repeats.value())
-        pulse_amp = self.ssfp_amp.value()
-        pulse_phase = np.deg2rad(self.ssfp_phase.value())
-        pulse_dur = self.ssfp_dur.value() / 1000.0
-        start_amp = self.ssfp_start_amp.value()
+        # Use duration and flip from RF designer (shared state)
+        main_flip = self.parent_gui.rf_designer.flip_angle.value()
+        pulse_dur = self.parent_gui.rf_designer.duration.value() / 1000.0
+
+        start_flip = self.ssfp_start_flip.value()
         start_phase = np.deg2rad(self.ssfp_start_phase.value())
         start_delay = self.ssfp_start_delay.value() / 1000.0
         alternate = self.ssfp_alternate_phase.isChecked()
@@ -2021,6 +2047,8 @@ class SequenceDesigner(QGroupBox):
                 seg_len = min(end_idx - start_idx, len(seg))
                 # Scale/rotate custom waveform by amp/phase controls
                 scale = amp / base_peak if base_peak else 1.0
+                # Note: custom_b1 already has the phase from the designer baked in.
+                # However, for SSFP we might want to rotate it further if alternating phase is used.
                 b1[start_idx : start_idx + seg_len] = (
                     seg[:seg_len] * scale * np.exp(1j * phase)
                 )
@@ -2028,15 +2056,18 @@ class SequenceDesigner(QGroupBox):
                 b1[start_idx:end_idx] = amp * np.exp(1j * phase)
 
         # Optional distinct first pulse
+        # Calculate start amplitude from start flip angle
+        start_scale = start_flip / main_flip if main_flip > 0 else 0.5
+        start_amp = base_peak * start_scale if base_peak is not None else 0.025
         _place_pulse(start_delay, start_amp, start_phase)
 
         # Remaining pulses evenly spaced by TR
         for k in range(1, n_reps):
             t0 = start_delay + k * tr
-            phase = pulse_phase
-            if alternate:
-                phase = pulse_phase + (math.pi if (k % 2 == 1) else 0.0)
-            _place_pulse(t0, pulse_amp, phase)
+            # Main pulses use base_peak (the flip angle from designer)
+            # and additional phase rotation for alternating bSSFP if needed.
+            extra_phase = math.pi if (k % 2 == 1 and alternate) else 0.0
+            _place_pulse(t0, base_peak if base_peak is not None else 0.05, extra_phase)
 
         return b1, gradients, time
 
@@ -2131,14 +2162,26 @@ class SequenceDesigner(QGroupBox):
             self.current_role = curr_role
 
             if curr_role in self.pulse_states:
-                self.parent_gui.rf_designer.set_state(self.pulse_states[curr_role])
+                state = self.pulse_states[curr_role]
+                self.parent_gui.rf_designer.set_state(state)
+                # Also update the panel view if it exists
+                if hasattr(self.parent_gui, "rf_designer_panel"):
+                    self.parent_gui.rf_designer_panel.set_state(state)
             else:
                 # Apply defaults for new roles
                 defaults = {}
                 if curr_role in ("Refocusing", "Inversion"):
-                    defaults = {"flip_angle": 180.0, "duration": 2.0}
+                    defaults = {
+                        "flip_angle": 180.0,
+                        "duration": 2.0,
+                        "b1_amplitude": 0.0,
+                    }
                 elif curr_role == "Excitation":
-                    defaults = {"flip_angle": 90.0, "duration": 1.0}
+                    defaults = {
+                        "flip_angle": 90.0,
+                        "duration": 1.0,
+                        "b1_amplitude": 0.0,
+                    }
 
                 if defaults:
                     self.parent_gui.rf_designer.set_state(defaults)
@@ -2154,17 +2197,15 @@ class SequenceDesigner(QGroupBox):
             b1_wave, t_wave = pulse
             b1_wave = np.asarray(b1_wave, dtype=complex)
             if b1_wave.size:
-                max_amp = float(np.max(np.abs(b1_wave)))
-                self.ssfp_amp.setValue(max_amp)
-                self.ssfp_start_amp.setValue(max_amp / 2.0)
-                phase = float(np.angle(b1_wave[0]))
-                self.ssfp_phase.setValue(np.rad2deg(phase))
-                self.ssfp_start_phase.setValue(np.rad2deg(phase))
+                # Sync Start Flip to half of the designer's flip angle
+                main_flip = self.parent_gui.rf_designer.flip_angle.value()
+                self.ssfp_start_flip.setValue(main_flip / 2.0)
             if t_wave is not None and len(t_wave) > 1:
-                duration_s = float(t_wave[-1] - t_wave[0])
-                self.ssfp_dur.setValue(
-                    max(duration_s * 1000.0, self.ssfp_dur.singleStep())
-                )
+                # Calculate dt from the first two points (assuming uniform spacing)
+                dt = float(t_wave[1] - t_wave[0])
+                # Duration is span + 1 dt (because samples are 0..N-1)
+                duration_s = float(t_wave[-1] - t_wave[0]) + dt
+                # self.ssfp_dur.setValue(...) # Removed as redundant
         self.update_diagram()
 
     def update_diagram(self, custom_pulse=None):
@@ -3082,6 +3123,26 @@ class ParameterSweepWidget(QWidget):
         metric_group.setLayout(metric_layout)
         layout.addWidget(metric_group)
 
+        # Data Collection Mode
+        mode_group = QGroupBox("Data Collection Mode")
+        mode_layout = QVBoxLayout()
+
+        self.mode_final = QRadioButton("Final State Only")
+        self.mode_final.setChecked(True)
+        self.mode_final.setToolTip(
+            "Collect only the final magnetization/signal state (smaller memory usage)."
+        )
+
+        self.mode_dynamic = QRadioButton("Dynamic (Time-Resolved)")
+        self.mode_dynamic.setToolTip(
+            "Collect full time evolution (larger memory usage)."
+        )
+
+        mode_layout.addWidget(self.mode_final)
+        mode_layout.addWidget(self.mode_dynamic)
+        mode_group.setLayout(mode_layout)
+        layout.addWidget(mode_group)
+
         # Control buttons
         button_layout = QHBoxLayout()
         self.run_button = QPushButton("Run Sweep")
@@ -3194,26 +3255,24 @@ class ParameterSweepWidget(QWidget):
         # Create parameter array
         param_values = np.linspace(start_val, end_val, n_steps)
 
-        # Get selected metrics
-        selected_metrics = [
-            name for name, cb in self.metric_checkboxes.items() if cb.isChecked()
-        ]
-        if not selected_metrics:
-            QMessageBox.warning(
-                self, "No Metrics", "Please select at least one output metric."
-            )
-            if hasattr(self.parent_gui, "set_sweep_mode"):
-                self.parent_gui.set_sweep_mode(False)
-            self.sweep_running = False
-            self.run_button.setEnabled(True)
-            self.stop_button.setEnabled(False)
-            return
+        # Determine mode
+        save_full = self.mode_dynamic.isChecked()
+
+        # Enforce simulation mode
+        original_sim_mode = self.parent_gui.mode_combo.currentText()
+        target_sim_mode = "Time-resolved" if save_full else "Endpoint"
+        self.parent_gui.mode_combo.setCurrentText(target_sim_mode)
+
+        # Define standard metrics to collect
+        # "Mean Signal" is for the plot. Others are data.
+        selected_metrics = ["Mx", "My", "Mz", "Signal", "Mean Signal"]
 
         # Run sweep
         results = {
             "parameter_name": param_name,
             "parameter_values": param_values,
             "metrics": {metric: [] for metric in selected_metrics},
+            "mode": "dynamic" if save_full else "final",
         }
 
         # Store initial values for parameters that need them (like B1 scale)
@@ -3335,6 +3394,10 @@ class ParameterSweepWidget(QWidget):
                     param_name, initial_param_val, initial_flip_angle
                 )
 
+            # Restore simulation mode
+            if hasattr(self, "parent_gui") and original_sim_mode:
+                self.parent_gui.mode_combo.setCurrentText(original_sim_mode)
+
             self.sweep_running = False
             self.run_button.setEnabled(True)
             self.stop_button.setEnabled(False)
@@ -3381,37 +3444,11 @@ class ParameterSweepWidget(QWidget):
             self.parent_gui.freq_center.setValue(value)
 
     def _extract_metric(self, metric_name, result):
-        """Extract metric value from simulation result."""
+        """Extract metric value from simulation result based on mode."""
+        save_full = self.mode_dynamic.isChecked()
         try:
-            if "Final Mz (mean)" in metric_name:
-                mz = result.get("mz")
-                if mz is not None:
-                    # Handle different array shapes
-                    if mz.ndim == 3:  # (ntime, npos, nfreq)
-                        return float(np.mean(mz[-1, :, :]))
-                    elif mz.ndim == 2:  # (npos, nfreq) - endpoint mode
-                        return float(np.mean(mz))
-                    else:  # 1D or scalar
-                        return float(np.mean(mz))
-            elif "Final Mxy (mean)" in metric_name:
-                mx = result.get("mx")
-                my = result.get("my")
-                if mx is not None and my is not None:
-                    if mx.ndim == 3:  # Time-resolved
-                        mx_final = mx[-1, :, :]
-                        my_final = my[-1, :, :]
-                    else:  # Endpoint mode
-                        mx_final = mx
-                        my_final = my
-                    mxy = np.sqrt(mx_final**2 + my_final**2)
-                    return float(np.mean(mxy))
-            elif "Peak |Mxy|" in metric_name:
-                mx = result.get("mx")
-                my = result.get("my")
-                if mx is not None and my is not None:
-                    mxy = np.sqrt(mx**2 + my**2)
-                    return float(np.max(mxy))
-            elif "Signal Magnitude" in metric_name:
+            if metric_name == "Mean Signal":
+                # Always scalar for plotting
                 signal = result.get("signal")
                 if signal is not None:
                     return float(np.mean(np.abs(signal)))
@@ -3441,6 +3478,19 @@ class ParameterSweepWidget(QWidget):
                 return result.get("signal")
             elif "Time Vector" in metric_name:
                 return result.get("time")
+
+            # Raw Data Extraction fallback
+            key = metric_name.lower()
+            val = result.get(key)
+            if val is not None:
+                if save_full:
+                    return val
+                if isinstance(val, np.ndarray) and val.ndim == 3:
+                    return val[-1, :, :]
+                elif isinstance(val, np.ndarray) and val.ndim > 0:
+                    return val[-1]
+                return val
+
         except Exception as e:
             if self.parent_gui:
                 self.parent_gui.log_message(
@@ -3508,58 +3558,89 @@ class ParameterSweepWidget(QWidget):
 
         self.results_table.resizeColumnsToContents()
 
+    def _process_results_for_export(self, results, save_full):
+        """Filter results based on export options and data availability."""
+        mode = results.get("mode", "final")
+
+        # If data is already reduced, or user wants full data (and it exists), return as is
+        if mode == "final" or save_full:
+            return results
+
+        # Mode is dynamic, but user requested final state -> Slice time dimension
+        processed = results.copy()
+        processed["metrics"] = {}
+        for metric, vals in results["metrics"].items():
+            new_vals = []
+            for v in vals:
+                # Assume 3D arrays are (ntime, npos, nfreq) -> take last time point
+                if isinstance(v, np.ndarray) and v.ndim == 3:
+                    new_vals.append(v[-1, :, :])
+                # Assume 1D arrays matching time length -> take last point
+                elif isinstance(v, np.ndarray) and v.ndim == 1 and len(v) > 1:
+                    new_vals.append(v[-1])
+                else:
+                    new_vals.append(v)
+            processed["metrics"][metric] = new_vals
+        return processed
+
     def export_results(self):
-        """Export sweep results to CSV/NPZ/NPY."""
+        """Export sweep results using the unified dialog."""
         if not self.last_sweep_results:
             QMessageBox.warning(self, "No Results", "No sweep results to export.")
             return
 
-        export_dir = self._default_export_dir()
-        default_path = export_dir / "sweep_results.csv"
-
-        filename, selected_filter = QFileDialog.getSaveFileName(
+        dialog = ParameterSweepExportDialog(
             self,
-            "Export Sweep Results",
-            str(default_path),
-            "CSV (*.csv);;NumPy Archive (*.npz);;NumPy Binary (*.npy);;All Files (*)",
+            default_filename="sweep_results",
+            default_directory=self._default_export_dir(),
         )
-        if not filename:
+
+        # Configure dialog based on available data
+        mode = self.last_sweep_results.get("mode", "final")
+        if mode == "final":
+            dialog.radio_full.setEnabled(False)
+            dialog.radio_full.setText(dialog.radio_full.text() + " (Not available)")
+            dialog.radio_full.setToolTip("Sweep was run in 'Final State Only' mode.")
+            dialog.radio_final.setChecked(True)
+
+        if dialog.exec_() != QDialog.Accepted:
             return
 
-        path = Path(filename)
-        ext = path.suffix.lower()
-        # Infer from selected filter if no extension was provided
-        if ext == "":
-            if selected_filter and "npz" in selected_filter.lower():
-                path = path.with_suffix(".npz")
-                ext = ".npz"
-            elif selected_filter and "npy" in selected_filter.lower():
-                path = path.with_suffix(".npy")
-                ext = ".npy"
-            else:
-                path = path.with_suffix(".csv")
-                ext = ".csv"
+        options = dialog.get_export_options()
+        base_path = Path(options["base_path"])
+        save_full = options.get("save_full_time_course", True)
 
-        if ext == ".csv":
-            array_path = self._save_sweep_results_csv(path)
-            extra = f"\nArray metrics exported to:\n{array_path}" if array_path else ""
-            QMessageBox.information(
-                self, "Export Complete", f"Results exported to:\n{path}{extra}"
-            )
-        elif ext == ".npz":
-            self._save_sweep_results_npz(path)
-            QMessageBox.information(
-                self, "Export Complete", f"Results exported to:\n{path}"
-            )
-        elif ext == ".npy":
-            self._save_sweep_results_npy(path)
-            QMessageBox.information(
-                self, "Export Complete", f"Results exported to:\n{path}"
-            )
-        else:
-            QMessageBox.warning(
-                self, "Unsupported format", f"Extension '{ext}' is not supported."
-            )
+        export_data = self._process_results_for_export(
+            self.last_sweep_results, save_full
+        )
+        exported_files = []
+
+        try:
+            # Export CSV
+            if options["csv"]:
+                csv_path = base_path.with_suffix(".csv")
+                self._save_sweep_results_csv(csv_path, export_data)
+                exported_files.append(str(csv_path.name))
+
+            # Export NPZ (mapped from HDF5 checkbox)
+            if options["hdf5"]:
+                npz_path = base_path.with_suffix(".npz")
+                self._save_sweep_results_npz(npz_path, export_data)
+                exported_files.append(str(npz_path.name))
+
+            # Export Analysis Notebook (Placeholder/Basic)
+            if options["notebook_analysis"]:
+                self.parent_gui.log_message(
+                    "Analysis notebook export for sweeps is not yet available."
+                )
+
+            if exported_files:
+                QMessageBox.information(
+                    self, "Export Complete", f"Exported:\n" + "\n".join(exported_files)
+                )
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", str(e))
 
     def _default_export_dir(self) -> Path:
         """Resolve a writable export directory for sweep results."""
@@ -3572,9 +3653,9 @@ class ParameterSweepWidget(QWidget):
                 pass
         return Path.cwd()
 
-    def _save_sweep_results_csv(self, path: Path) -> Optional[Path]:
+    def _save_sweep_results_csv(self, path: Path, results: dict) -> Optional[Path]:
         """Save sweep results to CSV and return any auxiliary array path."""
-        results = self.last_sweep_results
+        # results passed in
         param_name = results["parameter_name"]
         metrics = list(results["metrics"].keys())
         array_metrics = {m: [] for m in metrics}
@@ -3619,9 +3700,9 @@ class ParameterSweepWidget(QWidget):
             return array_path
         return None
 
-    def _save_sweep_results_npz(self, path: Path):
+    def _save_sweep_results_npz(self, path: Path, results: dict):
         """Save sweep results into a single NPZ archive."""
-        results = self.last_sweep_results
+        # results passed in
         payload = {
             "parameter_name": results["parameter_name"],
             "parameter_values": np.asarray(results["parameter_values"]),
@@ -3788,9 +3869,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.sequence_designer.sequence_type.currentTextChanged.connect(
             lambda _: self._auto_update_ssfp_amplitude()
         )
-        self.sequence_designer.ssfp_dur.valueChanged.connect(
-            lambda _: self._auto_update_ssfp_amplitude()
-        )
+        # self.sequence_designer.ssfp_dur.valueChanged.connect(...) # Removed
         self.rf_designer.flip_angle.valueChanged.connect(
             lambda _: self._auto_update_ssfp_amplitude()
         )
@@ -3830,7 +3909,7 @@ class BlochSimulatorGUI(QMainWindow):
         freq_layout = QHBoxLayout()
         freq_layout.addWidget(QLabel("Frequencies:"))
         self.freq_spin = QSpinBox()
-        self.freq_spin.setRange(1, 1100)
+        self.freq_spin.setRange(1, 10000)
         self.freq_spin.setValue(31)
         freq_layout.addWidget(self.freq_spin)
         freq_layout.addWidget(QLabel("Range (Hz):"))
@@ -5074,23 +5153,23 @@ class BlochSimulatorGUI(QMainWindow):
         try:
             if self.sequence_designer.sequence_type.currentText() != "SSFP (Loop)":
                 return
-            duration_s = max(self.sequence_designer.ssfp_dur.value() / 1000.0, 1e-9)
-            flip_rad = np.deg2rad(self.rf_designer.flip_angle.value())
-            integfac = max(self.rf_designer.get_integration_factor(), 1e-6)
+            # Get params
+            flip_deg = self.rf_designer.flip_angle.value()
+            flip_rad = np.deg2rad(flip_deg)
+            duration_s = max(self.rf_designer.duration.value() / 1000.0, 1e-9)
+
             gmr_1h_rad_Ts = 267522187.43999997
+            integfac = max(self.rf_designer.get_integration_factor(), 1e-6)
+
             # Required amplitude (Tesla); convert to Gauss
             amp_gauss = float(flip_rad / (gmr_1h_rad_Ts * integfac * duration_s)) * 1e4
             if not np.isfinite(amp_gauss) or amp_gauss <= 0:
                 return
-            # Update SSFP amplitude controls without triggering extra diagram redraws
-            self.sequence_designer.ssfp_amp.blockSignals(True)
-            self.sequence_designer.ssfp_amp.setValue(amp_gauss)
-            self.sequence_designer.ssfp_amp.blockSignals(False)
+            # Update SSFP start flip angle (default to alpha/2)
+            self.sequence_designer.ssfp_start_flip.blockSignals(True)
+            self.sequence_designer.ssfp_start_flip.setValue(flip_deg * 0.5)
+            self.sequence_designer.ssfp_start_flip.blockSignals(False)
 
-            start_amp_val = amp_gauss * 0.5
-            self.sequence_designer.ssfp_start_amp.blockSignals(True)
-            self.sequence_designer.ssfp_start_amp.setValue(start_amp_val)
-            self.sequence_designer.ssfp_start_amp.blockSignals(False)
             # Keep duration/phase-driven diagram in sync
             self.sequence_designer.update_diagram(self.rf_designer.get_pulse())
         except Exception:
@@ -6393,12 +6472,10 @@ class BlochSimulatorGUI(QMainWindow):
             self.sequence_designer.tr_spin,
             self.sequence_designer.ti_spin,
             self.rf_designer.flip_angle,  # flip_angle is in RFPulseDesigner, not SequenceDesigner
+            self.rf_designer.b1_amplitude,
             self.sequence_designer.ssfp_repeats,
-            self.sequence_designer.ssfp_amp,
-            self.sequence_designer.ssfp_phase,
-            self.sequence_designer.ssfp_dur,
             self.sequence_designer.ssfp_start_delay,
-            self.sequence_designer.ssfp_start_amp,
+            self.sequence_designer.ssfp_start_flip,
             self.sequence_designer.ssfp_start_phase,
             self.sequence_designer.ssfp_alternate_phase,
             self.rf_designer.pulse_type,
@@ -6425,24 +6502,20 @@ class BlochSimulatorGUI(QMainWindow):
             self.sequence_designer.ti_spin.setValue(presets["ti_ms"])
         if "flip_angle" in presets:
             self.rf_designer.flip_angle.setValue(presets["flip_angle"])
+        if "b1_amplitude" in presets:
+            self.rf_designer.b1_amplitude.setValue(presets["b1_amplitude"])
         if "duration" in presets:
             self.rf_designer.duration.setValue(presets["duration"])
 
         # SSFP-specific parameters
         if "ssfp_repeats" in presets:
             self.sequence_designer.ssfp_repeats.setValue(presets["ssfp_repeats"])
-        if "ssfp_amp" in presets:
-            self.sequence_designer.ssfp_amp.setValue(presets["ssfp_amp"])
-        if "ssfp_phase" in presets:
-            self.sequence_designer.ssfp_phase.setValue(presets["ssfp_phase"])
-        if "ssfp_dur" in presets:
-            self.sequence_designer.ssfp_dur.setValue(presets["ssfp_dur"])
         if "ssfp_start_delay" in presets:
             self.sequence_designer.ssfp_start_delay.setValue(
                 presets["ssfp_start_delay"]
             )
-        if "ssfp_start_amp" in presets:
-            self.sequence_designer.ssfp_start_amp.setValue(presets["ssfp_start_amp"])
+        if "ssfp_start_flip" in presets:
+            self.sequence_designer.ssfp_start_flip.setValue(presets["ssfp_start_flip"])
         if "ssfp_start_phase" in presets:
             self.sequence_designer.ssfp_start_phase.setValue(
                 presets["ssfp_start_phase"]
@@ -6466,6 +6539,10 @@ class BlochSimulatorGUI(QMainWindow):
         # Re-enable signals
         for widget in widgets_to_block:
             widget.blockSignals(False)
+
+        # Force regeneration of the current pulse (Excitation) to match the new presets
+        # (e.g. duration) which were set while signals were blocked.
+        self.rf_designer.update_pulse()
 
         # Update diagram once with all new values
         self.sequence_designer.update_diagram()
@@ -6494,6 +6571,23 @@ class BlochSimulatorGUI(QMainWindow):
 
         exit_action = file_menu.addAction("Exit")
         exit_action.triggered.connect(self.close)
+
+        # Tools/Export menu
+        tools_menu = menubar.addMenu("Tools")
+        tools_menu.addAction(
+            "Export Image (PNG)...", lambda: self._export_magnetization_image("png")
+        )
+        tools_menu.addAction(
+            "Export Image (SVG)...", lambda: self._export_magnetization_image("svg")
+        )
+        tools_menu.addSeparator()
+        tools_menu.addAction(
+            "Export Animation (GIF/MP4)...", self._export_magnetization_animation
+        )
+        tools_menu.addAction(
+            "Export Traces (CSV/NPY)...", self._export_magnetization_data
+        )
+        tools_menu.addAction("Export Full Results...", self.export_results)
 
         # Help menu
         help_menu = menubar.addMenu("Help")
@@ -6582,6 +6676,30 @@ class BlochSimulatorGUI(QMainWindow):
         self.toolbar_preview_action.toggled.connect(
             lambda val: self._sync_preview_checkboxes(val)
         )
+
+        tb.addSeparator()
+
+        # Global Export Menu
+        self.toolbar_export_button = QToolButton()
+        self.toolbar_export_button.setText("Export ")
+        self.toolbar_export_button.setPopupMode(QToolButton.InstantPopup)
+        export_menu = QMenu()
+        export_menu.addAction(
+            "Image (PNG)...", lambda: self._export_magnetization_image("png")
+        )
+        export_menu.addAction(
+            "Image (SVG)...", lambda: self._export_magnetization_image("svg")
+        )
+        export_menu.addSeparator()
+        export_menu.addAction(
+            "Animation (GIF/MP4)...", self._export_magnetization_animation
+        )
+        export_menu.addAction(
+            "Export Traces (CSV/NPY)...", self._export_magnetization_data
+        )
+        export_menu.addAction("Export Full Results...", self.export_results)
+        self.toolbar_export_button.setMenu(export_menu)
+        tb.addWidget(self.toolbar_export_button)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -7066,9 +7184,9 @@ class BlochSimulatorGUI(QMainWindow):
             self._set_plot_ranges(self.mz_plot, x_min, x_max, mz_ymin, mz_ymax)
 
             # Update 3D view
-            # Use first position/frequency vector for static endpoint preview
+            # Use all position/frequency vectors for static endpoint preview
             self.mag_3d.update_magnetization(
-                mx_all.flatten()[0], my_all.flatten()[0], mz_all.flatten()[0]
+                mx_all.flatten(), my_all.flatten(), mz_all.flatten()
             )
             self.anim_timer.stop()
             self.anim_data = None
@@ -7672,16 +7790,12 @@ class BlochSimulatorGUI(QMainWindow):
                 self.sequence_designer.ssfp_repeats.setValue(
                     s_state.get("ssfp_repeats", 16)
                 )
-                self.sequence_designer.ssfp_amp.setValue(s_state.get("ssfp_amp", 0.05))
-                self.sequence_designer.ssfp_phase.setValue(
-                    s_state.get("ssfp_phase", 0.0)
-                )
-                self.sequence_designer.ssfp_dur.setValue(s_state.get("ssfp_dur", 1.0))
+                # self.sequence_designer.ssfp_dur.setValue(s_state.get("ssfp_dur", 1.0))
                 self.sequence_designer.ssfp_start_delay.setValue(
                     s_state.get("ssfp_start_delay", 0.0)
                 )
-                self.sequence_designer.ssfp_start_amp.setValue(
-                    s_state.get("ssfp_start_amp", 0.025)
+                self.sequence_designer.ssfp_start_flip.setValue(
+                    s_state.get("ssfp_start_flip", 45.0)
                 )
                 self.sequence_designer.ssfp_start_phase.setValue(
                     s_state.get("ssfp_start_phase", 180.0)
@@ -7984,11 +8098,8 @@ class BlochSimulatorGUI(QMainWindow):
                     "slice_thickness": self.sequence_designer.slice_thickness_spin.value(),
                     "slice_gradient": self.sequence_designer.slice_gradient_spin.value(),
                     "ssfp_repeats": self.sequence_designer.ssfp_repeats.value(),
-                    "ssfp_amp": self.sequence_designer.ssfp_amp.value(),
-                    "ssfp_phase": self.sequence_designer.ssfp_phase.value(),
-                    "ssfp_dur": self.sequence_designer.ssfp_dur.value(),
                     "ssfp_start_delay": self.sequence_designer.ssfp_start_delay.value(),
-                    "ssfp_start_amp": self.sequence_designer.ssfp_start_amp.value(),
+                    "ssfp_start_flip": self.sequence_designer.ssfp_start_flip.value(),
                     "ssfp_start_phase": self.sequence_designer.ssfp_start_phase.value(),
                     "ssfp_alternate": self.sequence_designer.ssfp_alternate_phase.isChecked(),
                     "rephase_pct": self.sequence_designer.rephase_percentage.value(),
@@ -8036,9 +8147,10 @@ class BlochSimulatorGUI(QMainWindow):
         options = dialog.get_export_options()
         base_path = options["base_path"]
 
-        # Collect parameters
-        sequence_params = self._collect_sequence_parameters()
-        simulation_params = self._collect_simulation_parameters()
+        # Collect complete metadata
+        all_metadata = self._collect_all_parameters()
+        sequence_params = all_metadata["sequence"]
+        simulation_params = all_metadata["simulation"]
 
         # 1. HDF5 Export
         h5_path = f"{base_path}.h5"
@@ -8063,11 +8175,7 @@ class BlochSimulatorGUI(QMainWindow):
                     "Notebook export requires 'nbformat'.\nPlease install it: pip install nbformat",
                 )
             else:
-                tissue_params = {
-                    "name": self.tissue_widget.preset_combo.currentText(),
-                    "t1": self.tissue_widget.t1_spin.value() / 1000,
-                    "t2": self.tissue_widget.t2_spin.value() / 1000,
-                }
+                tissue_params = all_metadata["tissue"]
 
                 if options["notebook_analysis"]:
                     nb_path = f"{base_path}_analysis.ipynb"
@@ -8131,7 +8239,15 @@ class BlochSimulatorGUI(QMainWindow):
 
                     if time is not None and mx is not None:
                         exporter.export_magnetization(
-                            time, mx, my, mz, pos, freq, csv_path, format=fmt
+                            time,
+                            mx,
+                            my,
+                            mz,
+                            pos,
+                            freq,
+                            csv_path,
+                            format=fmt,
+                            metadata=all_metadata,
                         )
                         self.log_message(f"Exported Data ({fmt}): {csv_path}")
                     else:
@@ -8380,6 +8496,19 @@ class BlochSimulatorGUI(QMainWindow):
         params["initial_mz"] = self.tissue_widget.get_initial_mz()
 
         return params
+
+    def _collect_all_parameters(self) -> Dict:
+        """Collect all parameters (Tissue, Sequence, Simulation) for metadata export."""
+        return {
+            "tissue": {
+                "name": self.tissue_widget.preset_combo.currentText(),
+                "t1": self.tissue_widget.t1_spin.value() / 1000,
+                "t2": self.tissue_widget.t2_spin.value() / 1000,
+                "density": self.tissue_widget.m0_spin.value(),
+            },
+            "sequence": self._collect_sequence_parameters(),
+            "simulation": self._collect_simulation_parameters(),
+        }
 
     # ========== Export Methods ==========
 
@@ -9534,6 +9663,7 @@ class BlochSimulatorGUI(QMainWindow):
         if not path:
             return
         try:
+            all_metadata = self._collect_all_parameters()
             result_path = self.dataset_exporter.export_magnetization(
                 time_s,
                 mx,
@@ -9543,6 +9673,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self.last_frequencies,
                 str(path),
                 format=fmt,
+                metadata=all_metadata,
             )
             self.log_message(f"Magnetization data exported to {result_path}")
             QMessageBox.information(
@@ -9922,8 +10053,9 @@ class BlochSimulatorGUI(QMainWindow):
         if not path:
             return
         try:
+            all_metadata = self._collect_all_parameters()
             result_path = self.dataset_exporter.export_signal(
-                time_s, signal_arr, str(path), format=fmt
+                time_s, signal_arr, str(path), format=fmt, metadata=all_metadata
             )
             self.log_message(f"Signal data exported to {result_path}")
             QMessageBox.information(

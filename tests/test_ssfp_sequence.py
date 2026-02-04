@@ -20,17 +20,16 @@ class MockSequenceDesigner:
         self.ssfp_repeats = MagicMock()
         self.ssfp_repeats.value.return_value = 5
 
-        self.ssfp_amp = MagicMock()
-        self.ssfp_amp.value.return_value = 0.05
+        # Mock parent_gui structure for shared RF designer state
+        self.parent_gui = MagicMock()
+        self.parent_gui.rf_designer = MagicMock()
+        self.parent_gui.rf_designer.duration = MagicMock()
+        self.parent_gui.rf_designer.duration.value.return_value = 1.0  # 1.0 ms
+        self.parent_gui.rf_designer.flip_angle = MagicMock()
+        self.parent_gui.rf_designer.flip_angle.value.return_value = 90.0
 
-        self.ssfp_phase = MagicMock()
-        self.ssfp_phase.value.return_value = 0.0
-
-        self.ssfp_dur = MagicMock()
-        self.ssfp_dur.value.return_value = 1.0  # 1.0 ms
-
-        self.ssfp_start_amp = MagicMock()
-        self.ssfp_start_amp.value.return_value = 0.025
+        self.ssfp_start_flip = MagicMock()
+        self.ssfp_start_flip.value.return_value = 45.0
 
         self.ssfp_start_phase = MagicMock()
         self.ssfp_start_phase.value.return_value = 180.0
@@ -90,8 +89,8 @@ def test_ssfp_block_pulse_duration():
     Test that standard block pulse duration is respected.
     """
     mock_self = MockSequenceDesigner()
-    # Set standard block pulse duration to 1.0 ms
-    mock_self.ssfp_dur.value.return_value = 1.0
+    # Set standard block pulse duration to 1.0 ms via RF designer
+    mock_self.parent_gui.rf_designer.duration.value.return_value = 1.0
 
     dt = 1e-5  # 0.01 ms
 
