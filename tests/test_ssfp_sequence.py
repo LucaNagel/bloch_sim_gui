@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 # Ensure we import from src to test the local changes
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
-from blochsimulator.gui import SequenceDesigner
+from blochsimulator.ui.sequence_designer import SequenceDesigner
 
 
 class MockSequenceDesigner:

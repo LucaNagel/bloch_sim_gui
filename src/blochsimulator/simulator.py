@@ -577,6 +577,7 @@ class SpinEchoTipAxis(PulseSequence):
         slice_thickness: float = 0.005,
         slice_gradient_override: Optional[float] = None,
         echo_count: int = 1,
+        rf_freq_offset: float = 0.0,
         **kwargs,
     ):
         super().__init__(slice_thickness=slice_thickness, **kwargs)
@@ -586,6 +587,7 @@ class SpinEchoTipAxis(PulseSequence):
         self.custom_refocusing = custom_refocusing
         self.slice_gradient_override = slice_gradient_override
         self.echo_count = max(1, int(echo_count))
+        self.rf_freq_offset = rf_freq_offset
 
     def compile(self, dt: float = 1e-5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         def _resample_pulse(pulse_data, target_dt, duration):
@@ -646,7 +648,11 @@ class SpinEchoTipAxis(PulseSequence):
             b1[:n_exc] = exc_pulse[:n_exc]
         else:
             exc_pulse, _ = design_rf_pulse(
-                "sinc", duration=1e-3, flip_angle=90, npoints=int(1e-3 / dt)
+                "sinc",
+                duration=1e-3,
+                flip_angle=90,
+                npoints=int(1e-3 / dt),
+                freq_offset=self.rf_freq_offset,
             )
             n_exc = len(exc_pulse)
             b1[:n_exc] = exc_pulse
@@ -654,9 +660,19 @@ class SpinEchoTipAxis(PulseSequence):
         # Build a proper 180° refocusing pulse (independent of excitation shape)
         if self.custom_refocusing is not None:
             ref_pulse = _resample_pulse(self.custom_refocusing, dt, ref_duration)
+            if np.any(np.abs(ref_pulse) > 0):
+                peak_idx = np.argmax(np.abs(ref_pulse))
+                ref_phase = np.angle(ref_pulse[peak_idx])
+                print(
+                    f"DEBUG: Refocusing pulse phase at peak = {np.rad2deg(ref_phase):.2f} degrees"
+                )
         else:
             ref_pulse, _ = design_rf_pulse(
-                "sinc", duration=2e-3, flip_angle=180, npoints=int(2e-3 / dt)
+                "sinc",
+                duration=2e-3,
+                flip_angle=180,
+                npoints=int(2e-3 / dt),
+                freq_offset=self.rf_freq_offset,
             )
 
         # Estimate excitation phase from non-zero samples; default to 0
@@ -665,9 +681,10 @@ class SpinEchoTipAxis(PulseSequence):
         else:
             exc_phase = 0.0
 
-        # 180° refocusing pulses every TE, phase-shifted by +90° relative to excitation
-        phase_shift = np.exp(1j * (exc_phase + np.pi / 2.0))
-        ref_pulse = ref_pulse * phase_shift
+        # 180° refocusing pulses every TE
+        # Phase shift is typically +90° relative to excitation (CPMG),
+        # but we now expect the custom_refocusing pulse to already contain the desired phase
+        # (synced from the UI).
         for echo_idx in range(self.echo_count):
             # Center of refocusing pulse at exc_duration/2 + (0.5 + idx) * TE
             ref_center_time = exc_duration / 2.0 + (0.5 + echo_idx) * self.te

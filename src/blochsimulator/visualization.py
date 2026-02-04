@@ -524,21 +524,21 @@ class ExportAnimationDialog(QDialog):
 
 class ExportDataDialog(QDialog):
     """
-    Dialog for configuring data export options (HDF5, Notebooks, etc.).
-    Allows selecting multiple formats simultaneously.
+    Unified dialog for configuring all export options (Static, Animation, Data, Notebooks).
     """
 
     def __init__(
         self,
         parent=None,
-        default_filename: str = "simulation_data",
+        default_filename: str = "simulation_results",
         default_directory: Path = None,
+        has_time_resolved: bool = True,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Export Data")
+        self.setWindowTitle("Export Results")
         self.default_filename = default_filename
         self.default_directory = default_directory if default_directory else Path.cwd()
-        self.selected_options = {}
+        self.has_time_resolved = has_time_resolved
         self.base_path = None
 
         self.init_ui()
@@ -546,36 +546,87 @@ class ExportDataDialog(QDialog):
     def init_ui(self):
         layout = QVBoxLayout()
 
-        layout.addWidget(QLabel("Select export formats:"))
+        # 1. Visual Exports (Static)
+        visual_group = QGroupBox("Visual Exports (Current View)")
+        visual_layout = QVBoxLayout()
 
-        # Checkboxes
+        self.chk_image = QCheckBox("Static Image (PNG/SVG)")
+        self.chk_image.setChecked(False)
+        visual_layout.addWidget(self.chk_image)
+
+        self.img_opts = QWidget()
+        img_opts_layout = QHBoxLayout()
+        img_opts_layout.setContentsMargins(20, 0, 0, 0)
+        img_opts_layout.addWidget(QLabel("Format:"))
+        self.img_format = QComboBox()
+        self.img_format.addItems(["png", "svg", "pdf"])
+        img_opts_layout.addWidget(self.img_format)
+        self.img_opts.setLayout(img_opts_layout)
+        self.img_opts.setVisible(False)
+        self.chk_image.toggled.connect(self.img_opts.setVisible)
+        visual_layout.addWidget(self.img_opts)
+
+        # 2. Animation Exports
+        self.chk_animation = QCheckBox("Animation (MP4/GIF)")
+        self.chk_animation.setChecked(False)
+        self.chk_animation.setEnabled(self.has_time_resolved)
+        if not self.has_time_resolved:
+            self.chk_animation.setToolTip(
+                "Only available for time-resolved simulations."
+            )
+        visual_layout.addWidget(self.chk_animation)
+
+        self.anim_opts = QWidget()
+        anim_opts_layout = QVBoxLayout()
+        anim_opts_layout.setContentsMargins(20, 0, 0, 0)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Format:"))
+        self.anim_format = QComboBox()
+        self.anim_format.addItems(["mp4", "gif"])
+        row1.addWidget(self.anim_format)
+        row1.addWidget(QLabel("FPS:"))
+        self.anim_fps = QSpinBox()
+        self.anim_fps.setRange(1, 120)
+        self.anim_fps.setValue(30)
+        row1.addWidget(self.anim_fps)
+        anim_opts_layout.addLayout(row1)
+
+        self.chk_include_seq = QCheckBox("Include sequence diagram")
+        self.chk_include_seq.setChecked(False)
+        anim_opts_layout.addWidget(self.chk_include_seq)
+
+        self.anim_opts.setLayout(anim_opts_layout)
+        self.anim_opts.setVisible(False)
+        self.chk_animation.toggled.connect(self.anim_opts.setVisible)
+        visual_layout.addWidget(self.anim_opts)
+
+        visual_group.setLayout(visual_layout)
+        layout.addWidget(visual_group)
+
+        # 3. Data Exports
+        data_group = QGroupBox("Data & Analysis")
+        data_layout = QVBoxLayout()
+
         self.chk_hdf5 = QCheckBox("HDF5 Data File (.h5)")
         self.chk_hdf5.setChecked(True)
         self.chk_hdf5.setToolTip(
             "Full simulation data including magnetization, signal, and parameters."
         )
-        layout.addWidget(self.chk_hdf5)
+        data_layout.addWidget(self.chk_hdf5)
 
-        self.chk_nb_analysis = QCheckBox("Jupyter Notebook: Analysis (Mode A)")
+        self.chk_nb_analysis = QCheckBox("Jupyter Notebook: Analysis")
         self.chk_nb_analysis.setChecked(False)
-        self.chk_nb_analysis.setToolTip(
-            "Notebook that loads the HDF5 file for visualization and analysis."
-        )
-        layout.addWidget(self.chk_nb_analysis)
+        data_layout.addWidget(self.chk_nb_analysis)
 
-        self.chk_nb_repro = QCheckBox("Jupyter Notebook: Reproduce (Mode B)")
+        self.chk_nb_repro = QCheckBox("Jupyter Notebook: Reproduce")
         self.chk_nb_repro.setChecked(False)
-        self.chk_nb_repro.setToolTip(
-            "Notebook that contains all parameters to re-run this simulation."
-        )
-        layout.addWidget(self.chk_nb_repro)
+        data_layout.addWidget(self.chk_nb_repro)
 
         self.chk_csv = QCheckBox("CSV/Text Data")
         self.chk_csv.setChecked(False)
-        self.chk_csv.setToolTip("Magnetization and signal traces in text format.")
-        layout.addWidget(self.chk_csv)
+        data_layout.addWidget(self.chk_csv)
 
-        # Options for CSV
         self.csv_opts = QWidget()
         csv_layout = QHBoxLayout()
         csv_layout.setContentsMargins(20, 0, 0, 0)
@@ -586,7 +637,10 @@ class ExportDataDialog(QDialog):
         self.csv_opts.setLayout(csv_layout)
         self.csv_opts.setVisible(False)
         self.chk_csv.toggled.connect(self.csv_opts.setVisible)
-        layout.addWidget(self.csv_opts)
+        data_layout.addWidget(self.csv_opts)
+
+        data_group.setLayout(data_layout)
+        layout.addWidget(data_group)
 
         # Buttons
         button_layout = QHBoxLayout()
@@ -599,12 +653,13 @@ class ExportDataDialog(QDialog):
         layout.addLayout(button_layout)
 
         self.setLayout(layout)
-        self.setMinimumWidth(350)
+        self.setMinimumWidth(400)
 
     def _on_export_clicked(self):
-        # Validate selection
         if not any(
             [
+                self.chk_image.isChecked(),
+                self.chk_animation.isChecked(),
                 self.chk_hdf5.isChecked(),
                 self.chk_nb_analysis.isChecked(),
                 self.chk_nb_repro.isChecked(),
@@ -616,39 +671,43 @@ class ExportDataDialog(QDialog):
             )
             return
 
-        # Mode A notebook requires HDF5
-        if self.chk_nb_analysis.isChecked() and not self.chk_hdf5.isChecked():
-            ret = QMessageBox.question(
-                self,
-                "Dependency",
-                "Analysis Notebook requires HDF5 data.\nEnable HDF5 export also?",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            if ret == QMessageBox.Yes:
-                self.chk_hdf5.setChecked(True)
-            else:
-                return
-
         # Get base filename
         default_path = self.default_directory / self.default_filename
         filename, _ = QFileDialog.getSaveFileName(
-            self, "Export Data (Base Filename)", str(default_path), "All Files (*)"
+            self, "Export Results (Base Filename)", str(default_path), "All Files (*)"
         )
 
         if filename:
-            # Strip extension if user typed one, we'll append based on formats
             p = Path(filename)
-            if p.suffix.lower() in [".h5", ".ipynb", ".csv", ".dat", ".npy", ".txt"]:
+            # Remove common extensions if manually typed
+            known_exts = [
+                ".h5",
+                ".ipynb",
+                ".csv",
+                ".dat",
+                ".npy",
+                ".txt",
+                ".png",
+                ".svg",
+                ".pdf",
+                ".mp4",
+                ".gif",
+            ]
+            if p.suffix.lower() in known_exts:
                 self.base_path = str(p.with_suffix(""))
             else:
                 self.base_path = str(p)
-
             self.accept()
 
     def get_export_options(self) -> Dict:
-        """Return selected options and base filename."""
         return {
             "base_path": self.base_path,
+            "image": self.chk_image.isChecked(),
+            "image_format": self.img_format.currentText(),
+            "animation": self.chk_animation.isChecked(),
+            "animation_format": self.anim_format.currentText(),
+            "animation_fps": self.anim_fps.value(),
+            "include_sequence": self.chk_include_seq.isChecked(),
             "hdf5": self.chk_hdf5.isChecked(),
             "notebook_analysis": self.chk_nb_analysis.isChecked(),
             "notebook_repro": self.chk_nb_repro.isChecked(),
@@ -677,6 +736,10 @@ class ParameterSweepExportDialog(ExportDataDialog):
         # Rename HDF5 to NPZ for sweep
         self.chk_hdf5.setText("NumPy Archive (.npz)")
         self.chk_hdf5.setToolTip("Full sweep data in NumPy format.")
+
+        # Hide visual/animation options for sweep (not yet implemented for sweep results)
+        self.chk_image.setVisible(False)
+        self.chk_animation.setVisible(False)
 
         # Hide Repro notebook
         self.chk_nb_repro.setVisible(False)
@@ -1129,6 +1192,7 @@ class DatasetExporter:
         frequencies: Optional[np.ndarray],
         filename: str,
         format: str = "csv",
+        metadata: Optional[Dict] = None,
     ) -> str:
         """Export magnetization time series for all positions/frequencies."""
         time_ms = np.asarray(time_s).ravel() * 1000.0
@@ -1152,10 +1216,15 @@ class DatasetExporter:
                 mxy_mag = np.sqrt(mx[:, pi, fi] ** 2 + my[:, pi, fi] ** 2)
                 columns[f"mxy_mag_{label}"] = mxy_mag
 
-        return self._write_columns(columns, filename, format=format)
+        return self._write_columns(columns, filename, format=format, metadata=metadata)
 
     def export_signal(
-        self, time_s: np.ndarray, signal: np.ndarray, filename: str, format: str = "csv"
+        self,
+        time_s: np.ndarray,
+        signal: np.ndarray,
+        filename: str,
+        format: str = "csv",
+        metadata: Optional[Dict] = None,
     ) -> str:
         """Export complex signal traces for all positions/frequencies."""
         time_ms = np.asarray(time_s).ravel() * 1000.0
@@ -1176,7 +1245,7 @@ class DatasetExporter:
                 columns[f"signal_mag_{label}"] = np.abs(trace)
                 columns[f"signal_phase_rad_{label}"] = np.angle(trace)
 
-        return self._write_columns(columns, filename, format=format)
+        return self._write_columns(columns, filename, format=format, metadata=metadata)
 
     def export_spectrum(
         self,
@@ -1184,6 +1253,7 @@ class DatasetExporter:
         series: Dict[str, np.ndarray],
         filename: str,
         format: str = "csv",
+        metadata: Optional[Dict] = None,
     ) -> str:
         """Export spectrum data with one or more series."""
         freq = np.asarray(frequency_hz).ravel()
@@ -1195,7 +1265,7 @@ class DatasetExporter:
             if len(data) != len(freq):
                 continue
             columns[name] = data
-        return self._write_columns(columns, filename, format=format)
+        return self._write_columns(columns, filename, format=format, metadata=metadata)
 
     def export_spatial(
         self,
@@ -1206,6 +1276,7 @@ class DatasetExporter:
         format: str = "csv",
         mxy_per_freq: Optional[np.ndarray] = None,
         mz_per_freq: Optional[np.ndarray] = None,
+        metadata: Optional[Dict] = None,
     ) -> str:
         """Export spatial profiles along the chosen axis."""
         pos = np.asarray(position_axis).ravel()
@@ -1222,4 +1293,4 @@ class DatasetExporter:
             mz_arr = np.asarray(mz_per_freq)
             for fi in range(mz_arr.shape[1]):
                 columns[f"mz_f{fi}"] = mz_arr[:, fi]
-        return self._write_columns(columns, filename, format=format)
+        return self._write_columns(columns, filename, format=format, metadata=metadata)

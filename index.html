@@ -190,7 +190,7 @@
                 <!-- Slice Parameters -->
                 <div class="control-group">
                     <label for="slice_thickness">Thickness (mm)</label>
-                    <input type="number" id="slice_thickness" class="slice-input" value="5.0" min="0.1" max="20.0" step="0.5">
+                    <input type="number" id="slice_thickness" class="slice-input" value="10.0" min="0.1" max="20.0" step="0.5">
                 </div>
 
                 <!-- Simulation Grid -->
@@ -202,11 +202,18 @@
                     <label for="slice_points">Points</label>
                     <input type="number" id="slice_points" class="slice-input" value="200" min="50" max="1000" step="10">
                 </div>
-
-                                    <div class="control-group" style="display: flex; align-items: center; justify-content: space-between;">
-                                        <label for="slice_3d" style="margin-bottom: 0;">3D Visualization</label>
-                                        <input type="checkbox" id="slice_3d" class="slice-input" style="width: auto;">
-                                    </div>            </div>
+                    <div class="control-group" style="display: flex; align-items: center; justify-content: space-between;">
+                        <label for="slice_3d" style="margin-bottom: 0;">3D Visualization</label>
+                        <input type="checkbox" id="slice_3d" class="slice-input" style="width: auto;">
+                    </div>
+                </div>
+                <div class="control-group">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem;">
+                        <label for="slice_view_time" style="margin-bottom: 0;">View Time: <span id="slice_view_time_val">2.0</span> ms</label>
+                        <button id="play_btn_slice" class="play-btn" style="padding: 1px 6px; font-size: 0.8rem; cursor: pointer;">&#9658;</button>
+                    </div>
+                    <input type="range" id="slice_view_time" class="slice-input" min="0" max="2.0" step="0.01" value="2.0">
+                </div>
 
             <details style="margin-top: 0.5rem; border: 1px solid #ddd; padding: 0.5rem; border-radius: 4px;">
                 <summary style="cursor: pointer; font-weight: bold; color: var(--primary-color);">Advanced Settings</summary>
@@ -222,13 +229,6 @@
                     <div class="control-group">
                         <label for="slice_rephase_pct">Rephasing (%)</label>
                         <input type="number" id="slice_rephase_pct" class="slice-input" value="50" min="-100" max="100" step="10">
-                    </div>
-                    <div class="control-group">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem;">
-                            <label for="slice_view_time" style="margin-bottom: 0;">View Time: <span id="slice_view_time_val">2.0</span> ms</label>
-                            <button id="play_btn_slice" class="play-btn" style="padding: 1px 6px; font-size: 0.8rem; cursor: pointer;">&#9658;</button>
-                        </div>
-                        <input type="range" id="slice_view_time" class="slice-input" min="0" max="2.0" step="0.01" value="2.0">
                     </div>
                     <div class="control-group">
                         <label for="slice_view_pos">View Pos: <span id="slice_view_pos_val">0</span> cm</label>
