@@ -99,7 +99,9 @@ class NotebookExporter:
                 "import numpy as np\n"
                 "import matplotlib.pyplot as plt\n"
                 "import h5py\n"
-                "from pathlib import Path\n\n"
+                "import xarray as xr\n"
+                "from pathlib import Path\n"
+                "from blochsimulator import BlochSimulator\n\n"
                 "# Set matplotlib style\n"
                 "plt.style.use('seaborn-v0_8-darkgrid')\n"
                 "%matplotlib inline"
@@ -108,9 +110,59 @@ class NotebookExporter:
 
         # Cell 2: Load data
         cells.append(new_markdown_cell("## Load Simulation Data"))
-        cells.append(new_code_cell(self._generate_load_data_code(h5_filename)))
+        cells.append(new_code_cell(self._generate_load_data_code_mode_a(h5_filename)))
 
-        # Cell 3: Display parameters
+        # Cell 3: Xarray Integration
+        cells.append(new_markdown_cell("## Xarray Dataset"))
+        xr_code = """# Convert to xarray Dataset for advanced analysis
+# Extract info from metadata
+n_pos = data.get('simulation_params', {}).get('num_positions', 1)
+n_freq = data.get('simulation_params', {}).get('num_frequencies', 1)
+time = data.get('time')
+n_time = len(time) if time is not None else 0
+
+# Create DataArray for each component
+vars = {}
+coords = {}
+if time is not None: coords['time'] = time
+
+for k in ['mx', 'my', 'mz', 'signal']:
+    v = data[k]
+    dims = []
+
+    # Try to intelligently name dimensions
+    for i, dim_len in enumerate(v.shape):
+        if n_time > 0 and dim_len == n_time:
+            dims.append('time')
+        elif n_pos > 1 and dim_len == n_pos:
+            dims.append('position')
+        elif n_freq > 1 and dim_len == n_freq:
+            dims.append('frequency')
+        else:
+            dims.append(f'dim_{i}')
+
+    vars[k] = (dims, v)
+
+ds = xr.Dataset(vars, coords=coords)
+# Add metadata
+ds.attrs.update(data.get('simulation_params', {}))
+ds.attrs.update(data.get('sequence_params', {}))
+
+print('Xarray Dataset created:')
+print(ds)"""
+        cells.append(new_code_cell(xr_code))
+
+        # Cell 3b: Compatibility conversion
+        cells.append(
+            new_code_cell(
+                "# Prepare data for display (convert objects to dictionaries)\n"
+                "from dataclasses import asdict\n"
+                "if hasattr(data['tissue'], 't1'): # Check if object\n"
+                "    data['tissue'] = asdict(data['tissue'])"
+            )
+        )
+
+        # Cell 4: Display parameters
         cells.append(new_markdown_cell("## Simulation Parameters"))
         cells.append(
             new_code_cell(
@@ -213,6 +265,7 @@ class NotebookExporter:
                 "import numpy as np\n"
                 "import matplotlib.pyplot as plt\n"
                 "import json\n"
+                "import xarray as xr\n"
                 "from pathlib import Path\n\n"
                 "# Set matplotlib style\n"
                 "plt.style.use('seaborn-v0_8-darkgrid')\n"
@@ -306,50 +359,118 @@ class NotebookExporter:
         load_code += "print(f'Metrics: {list(results.keys())}')"
         cells.append(new_code_cell(load_code))
 
+        # Xarray Integration
+        cells.append(new_markdown_cell("## Xarray Dataset Construction"))
+        xr_code = f"""# Create xarray Dataset from sweep results
+data_vars = {{}}
+coords = {{param_name: param_values}}
+
+if time_vector is not None:
+    coords['time'] = time_vector
+
+# Extract spatial/frequency info from constant params
+n_pos = constant_params.get('num_positions', 1)
+n_freq = constant_params.get('num_frequencies', 1)
+n_time = len(time_vector) if time_vector is not None else 0
+
+for k, v in results.items():
+    if np.ndim(v) == 1 and len(v) == len(param_values):
+        # Scalar metric vs parameter
+        data_vars[k] = ([param_name], v)
+    elif np.ndim(v) > 1 and len(v) == len(param_values):
+        # Dynamic/Multi-dim metric: (param_steps, ...)
+        dims = [param_name]
+        remaining_shape = v.shape[1:]
+
+        # Try to intelligently name dimensions
+        for i, dim_len in enumerate(remaining_shape):
+            if n_time > 0 and dim_len == n_time:
+                dims.append('time')
+            elif n_pos > 1 and dim_len == n_pos:
+                dims.append('position')
+            elif n_freq > 1 and dim_len == n_freq:
+                dims.append('frequency')
+            else:
+                dims.append(f'dim_{{i+1}}')
+
+        # Handle duplicate dimension names (if any)
+        seen = {{}}
+        for i, d in enumerate(dims):
+            if d in seen:
+                seen[d] += 1
+                dims[i] = f"{{d}}_{{seen[d]}}"
+            else:
+                seen[d] = 0
+
+        data_vars[k] = (dims, v)
+
+ds = xr.Dataset(
+    data_vars,
+    coords=coords
+)
+# Add constant params as attrs
+if constant_params:
+    ds.attrs.update(constant_params)
+
+print('Xarray Dataset created:')
+print(ds)"""
+        cells.append(new_code_cell(xr_code))
+
         # Display Constant Parameters
         cells.append(new_markdown_cell("## Simulation Configuration"))
-        config_code = 'print(f\'Sweep Mode: {"Dynamic (Time-Resolved)" if is_dynamic else "Static (Final State)"}\')\n'
-        config_code += "print('\\nConstant Parameters (Fixed during sweep):')\n"
-        config_code += "if constant_params:\n"
-        config_code += "    for k, v in sorted(constant_params.items()):\n"
-        config_code += "        print(f'  {k}: {v}')\n"
-        config_code += "else:\n"
-        config_code += "    print('  No constant parameters found in metadata.')\n"
-        config_code += "\n"
-        config_code += "if time_vector is not None:\n"
-        config_code += "    print(f'\\nTime vector loaded: {len(time_vector)} points, duration={time_vector[-1]*1000:.1f} ms')\n"
-        config_code += "\n"
-        config_code += (
-            "# Example: Extracting specific parameters for further calculation\n"
-        )
-        config_code += "t1_ms = constant_params.get('t1', 0) * 1000\n"
-        config_code += "te_ms = constant_params.get('te', 0) * 1000\n"
-        config_code += "print(f'\\nSelected T1: {t1_ms:.1f} ms, TE: {te_ms:.1f} ms')"
+        config_code = """print(f'Sweep Mode: {"Dynamic (Time-Resolved)" if is_dynamic else "Static (Final State)"}')
+print('\\nConstant Parameters (Fixed during sweep):')
+
+# Organize parameters for display if possible
+categories = {'Tissue': [], 'Sequence': [], 'Simulation': [], 'Other': []}
+
+if constant_params:
+    for k, v in sorted(constant_params.items()):
+        if k in ['t1', 't2', 't2_star', 'density', 'name', 'tissue_name']:
+            categories['Tissue'].append((k, v))
+        elif k in ['te', 'tr', 'flip_angle', 'sequence_type']:
+            categories['Sequence'].append((k, v))
+        elif k in ['num_positions', 'num_frequencies', 'time_step_us']:
+            categories['Simulation'].append((k, v))
+        else:
+            categories['Other'].append((k, v))
+
+    for cat, items in categories.items():
+        if items:
+            print(f'\\n{cat}:')
+            for k, v in items:
+                print(f'  {k}: {v}')
+else:
+    print('  No constant parameters found in metadata.')
+
+if time_vector is not None:
+    print(f'\\nTime vector loaded: {len(time_vector)} points, duration={time_vector[-1]*1000:.1f} ms')
+
+# Example: Extracting specific parameters for further calculation
+t1_ms = constant_params.get('t1', 0) * 1000
+te_ms = constant_params.get('te', 0) * 1000
+print(f'\\nSelected T1: {t1_ms:.1f} ms, TE: {te_ms:.1f} ms')"""
         cells.append(new_code_cell(config_code))
 
         # Plot Scalar Metrics
         cells.append(new_markdown_cell("## Scalar Metrics vs Parameter"))
-        plot_code = "fig, ax = plt.subplots(figsize=(10, 6))\n\n"
-        plot_code += "has_scalar = False\n"
-        plot_code += "for name, values in results.items():\n"
-        plot_code += "    # Check if 1D (scalar metric)\n"
-        plot_code += (
-            "    if np.ndim(values) == 1 and len(values) == len(param_values):\n"
-        )
-        plot_code += "        has_scalar = True\n"
-        plot_code += (
-            "        ax.plot(param_values, values, 'o-', label=name, alpha=0.8)\n\n"
-        )
-        plot_code += "if has_scalar:\n"
-        plot_code += "    ax.set_xlabel(param_name)\n"
-        plot_code += "    ax.set_ylabel('Metric Value')\n"
-        plot_code += "    ax.set_title(f'Sweep Results: {param_name}')\n"
-        plot_code += "    ax.legend()\n"
-        plot_code += "    ax.grid(True, alpha=0.3)\n"
-        plot_code += "    plt.show()\n"
-        plot_code += "else:\n"
-        plot_code += "    print('No scalar metrics found to plot.')\n"
-        plot_code += "    plt.close()"
+        plot_code = """fig, ax = plt.subplots(figsize=(10, 6))
+
+# Plot all scalar metrics using xarray
+has_scalar = False
+for var_name in ds.data_vars:
+    if ds[var_name].ndim == 1:
+        has_scalar = True
+        ds[var_name].plot(ax=ax, marker='o', label=var_name)
+
+if has_scalar:
+    ax.set_title(f'Sweep Results: {param_name}')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.show()
+else:
+    print('No scalar metrics found to plot.')
+    plt.close()"""
         cells.append(new_code_cell(plot_code))
 
         # Advanced Analysis (Dynamic Data) - Only if dynamic mode
@@ -361,43 +482,55 @@ class NotebookExporter:
                 )
             )
 
-            dyn_code = "# Check for time-resolved data (usually 2D or 3D arrays)\n"
-            dyn_code += "dynamic_metrics = [k for k, v in results.items() if np.ndim(v) > 1]\n\n"
-            dyn_code += "if dynamic_metrics:\n"
-            dyn_code += "    print(f'Found dynamic metrics: {dynamic_metrics}')\n"
-            dyn_code += "    target = 'Signal' if 'Signal' in dynamic_metrics else dynamic_metrics[0]\n"
-            dyn_code += "    data_array = results[target]\n"
-            dyn_code += "    \n"
-            dyn_code += "    # Ensure it's 2D for heatmap (Sweep Step x Time)\n"
-            dyn_code += "    if data_array.ndim > 2:\n"
-            dyn_code += "        print(f'Reducing {data_array.ndim}D data to 2D for heatmap...')\n"
-            dyn_code += "        # Average over spatial dimensions (indices 1..N-1), keeping Step (0) and Time (last?)\n"
-            dyn_code += "        # Wait, shape is typically (N_steps, N_time, ...)\n"
-            dyn_code += "        # We want to keep (Step, Time)\n"
-            dyn_code += "        heatmap_data = np.mean(np.abs(data_array), axis=tuple(range(2, data_array.ndim)))\n"
-            dyn_code += "    else:\n"
-            dyn_code += "        heatmap_data = np.abs(data_array)\n\n"
-            dyn_code += "    plt.figure(figsize=(12, 6))\n"
-            dyn_code += "    \n"
-            dyn_code += "    # Set extent based on time vector if available\n"
-            dyn_code += "    if time_vector is not None:\n"
-            dyn_code += "        extent = [time_vector[0], time_vector[-1], param_values[0], param_values[-1]]\n"
-            dyn_code += "        xlabel = 'Time (s)'\n"
-            dyn_code += "    else:\n"
-            dyn_code += "        extent = [0, heatmap_data.shape[1], param_values[0], param_values[-1]]\n"
-            dyn_code += "        xlabel = 'Time (index)'\n"
-            dyn_code += "    \n"
-            dyn_code += "    plt.imshow(heatmap_data, aspect='auto', origin='lower',\n"
-            dyn_code += "               extent=extent, cmap='viridis')\n"
-            dyn_code += "    plt.colorbar(label=f'|{target}|')\n"
-            dyn_code += "    plt.xlabel(xlabel)\n"
-            dyn_code += "    plt.ylabel(param_name)\n"
-            dyn_code += "    plt.title(f'{target} Heatmap vs {param_name}')\n"
-            dyn_code += "    plt.grid(False)\n"
-            dyn_code += "    plt.show()\n"
-            dyn_code += "else:\n"
-            dyn_code += "    print('No dynamic data found for heatmap analysis.')"
-            cells.append(new_code_cell(dyn_code))
+            # 1. Heatmap
+            heatmap_code = """# 1. Heatmap of the signal magnitude
+dynamic_vars = [v for v in ds.data_vars if ds[v].ndim > 1]
+if dynamic_vars:
+    target = 'Signal' if 'Signal' in dynamic_vars else dynamic_vars[0]
+    print(f'Plotting heatmap for: {target}')
+
+    plt.figure(figsize=(12, 6))
+    plot_data = np.abs(ds[target])
+
+    # Reduce dimensions until 2D (sweep_dim, time_dim)
+    while plot_data.ndim > 2:
+        # Average over intermediate dims (e.g. spatial)
+        plot_data = plot_data.mean(dim=plot_data.dims[1])
+
+    plot_data.plot(cmap='viridis')
+    plt.title(f'{target} Heatmap')
+    plt.show()"""
+            cells.append(new_code_cell(heatmap_code))
+
+            # 2. Coordinate vs Data Plot (requested feature)
+            coord_plot_code = """# 2. Coordinate Selection Plot (Data vs Time)
+# Demonstrates xarray's powerful selection capabilities
+if dynamic_vars and 'time' in ds.coords:
+    target = 'Signal' if 'Signal' in dynamic_vars else dynamic_vars[0]
+
+    # Select 3 evenly spaced points from the sweep parameter
+    param_vals = ds[param_name].values
+    indices = np.linspace(0, len(param_vals)-1, 3, dtype=int)
+    selected_vals = param_vals[indices]
+
+    plt.figure(figsize=(10, 6))
+
+    for val in selected_vals:
+        # Use .sel() to select data by coordinate value
+        trace = np.abs(ds[target].sel({param_name: val}, method='nearest'))
+        # Handle extra dims if any
+        if trace.ndim > 1:
+            trace = trace.mean(axis=tuple(range(trace.ndim-1)))
+
+        trace.plot(label=f'{param_name}={val:.2f}')
+
+    plt.title(f'{target} Evolution for selected {param_name}')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()
+else:
+    print('Skipping coordinate plot (requires time dimension)')"""
+            cells.append(new_code_cell(coord_plot_code))
 
         nb["cells"] = cells
         return nb
@@ -468,6 +601,7 @@ class NotebookExporter:
             new_code_cell(
                 "import numpy as np\n"
                 "import matplotlib.pyplot as plt\n"
+                "import xarray as xr\n"
                 "from pathlib import Path\n"
                 "from blochsimulator import (\n"
                 "    BlochSimulator, TissueParameters,\n"
@@ -516,6 +650,46 @@ class NotebookExporter:
             new_code_cell(self._generate_simulation_run_code(simulation_params))
         )
 
+        # Cell 6b: Xarray Dataset
+        cells.append(new_markdown_cell("## Xarray Dataset"))
+        xr_code = """# Convert to xarray Dataset for advanced analysis
+# Extract info from metadata
+n_pos = data.get('simulation_params', {}).get('num_positions', 1)
+n_freq = data.get('simulation_params', {}).get('num_frequencies', 1)
+time = data.get('time')
+n_time = len(time) if time is not None else 0
+
+# Create DataArray for each component
+vars = {}
+coords = {}
+if time is not None: coords['time'] = time
+
+for k in ['mx', 'my', 'mz', 'signal']:
+    v = data[k]
+    dims = []
+
+    # Try to intelligently name dimensions
+    for i, dim_len in enumerate(v.shape):
+        if n_time > 0 and dim_len == n_time:
+            dims.append('time')
+        elif n_pos > 1 and dim_len == n_pos:
+            dims.append('position')
+        elif n_freq > 1 and dim_len == n_freq:
+            dims.append('frequency')
+        else:
+            dims.append(f'dim_{i}')
+
+    vars[k] = (dims, v)
+
+ds = xr.Dataset(vars, coords=coords)
+# Add metadata
+ds.attrs.update(data.get('simulation_params', {}))
+ds.attrs.update(data.get('sequence_params', {}))
+
+print('Xarray Dataset created:')
+print(ds)"""
+        cells.append(new_code_cell(xr_code))
+
         # Cell 7: Visualize results
         cells.append(new_markdown_cell("## Visualization"))
         cells.append(new_code_cell(self._generate_magnetization_plot_code()))
@@ -541,8 +715,52 @@ class NotebookExporter:
     # Code Generation Methods
     # ========================================================================
 
+    def _generate_load_data_code_mode_a(self, h5_filename: str) -> str:
+        """Generate code to load HDF5 data using BlochSimulator."""
+        return f"""# Load data from HDF5 file
+data_file = '{h5_filename}'
+
+if not Path(data_file).exists():
+    raise FileNotFoundError(f"Data file not found: {{data_file}}")
+
+print(f"Loading data from: {{data_file}}")
+
+# Initialize simulator to handle data loading
+sim = BlochSimulator()
+sim.load_results(data_file)
+data = sim.last_result
+
+# Load additional parameters (metadata) not loaded by the simulator core
+with h5py.File(data_file, 'r') as f:
+    # Load sequence parameters
+    data['sequence_params'] = {{}}
+    if 'sequence_parameters' in f:
+        grp = f['sequence_parameters']
+        for key in grp.attrs.keys():
+            data['sequence_params'][key] = grp.attrs[key]
+        for key in grp.keys():
+            if isinstance(grp[key], h5py.Dataset):
+                data['sequence_params'][key] = grp[key][...]
+
+    # Load simulation parameters
+    data['simulation_params'] = {{}}
+    if 'simulation_parameters' in f:
+        grp = f['simulation_parameters']
+        for key in grp.attrs.keys():
+            data['simulation_params'][key] = grp.attrs[key]
+        for key in grp.keys():
+            if isinstance(grp[key], h5py.Dataset):
+                data['simulation_params'][key] = grp[key][...]
+
+print(f"Data loaded successfully!")
+if 'mx' in data:
+    print(f"  Shape: {{data['mx'].shape}}")
+if 'time' in data:
+    print(f"  Duration: {{data['time'][-1]*1000:.3f}} ms")
+"""
+
     def _generate_load_data_code(self, h5_filename: str) -> str:
-        """Generate code to load HDF5 data."""
+        """Generate code to load HDF5 data (Legacy Manual Method)."""
         return f"""# Load data from HDF5 file
 data_file = '{h5_filename}'
 
@@ -608,9 +826,9 @@ print("="*60)
 
 print("\\nTissue:")
 for key, value in data['tissue'].items():
-    if key in ['t1', 't2', 't2_star']:
+    if key in ['t1', 't2', 't2_star'] and value is not None:
         print(f"  {key}: {value*1000:.1f} ms")
-    else:
+    elif value is not None:
         print(f"  {key}: {value}")
 
 print("\\nSequence:")
@@ -1058,7 +1276,11 @@ data = {
     'time': result['time'],
     'positions': result['positions'],
     'frequencies': result['frequencies'],
-    'tissue': {'name': tissue.name, 't1': tissue.t1, 't2': tissue.t2}
+    'tissue': {'name': tissue.name, 't1': tissue.t1, 't2': tissue.t2},
+    'simulation_params': {
+        'num_positions': len(positions),
+        'num_frequencies': len(frequencies)
+    }
 }
 
 print(f"Simulation complete!")

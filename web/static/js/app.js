@@ -211,7 +211,7 @@ def _compute_integration_factor_from_wave(b1_wave, t_wave):
         dt = float(np.median(np.diff(t_wave)))
         peak = np.max(np.abs(b1_wave)) if np.any(np.abs(b1_wave)) else 1.0
         shape = b1_wave / peak if peak != 0 else b1_wave
-        area = np.trapz(shape, dx=dt)
+        area = np.trapezoid(shape, dx=dt)
         aligned = np.real(area * np.exp(-1j * np.angle(area)))
         if not np.isfinite(aligned) or abs(aligned) < 1e-12:
             return 1.0
@@ -458,7 +458,7 @@ def run_slice_simulation(flip, duration_ms, extra_time_ms, tbw, apod, thick_mm, 
         # Only rescale if we didn't calculate flip from B1
         if b1_amp_gauss is None or b1_amp_gauss <= 0:
             target_area = np.deg2rad(calc_flip) / (4258.0 * 2 * np.pi)
-            curr_area = np.trapz(np.abs(b1), dx=dt)
+            curr_area = np.trapezoid(np.abs(b1), dx=dt)
             if curr_area > 0: b1 *= (target_area / curr_area)
 
     bw_hz = calc_tbw / dur_s

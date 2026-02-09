@@ -260,7 +260,7 @@ class RFPulseDesigner(QGroupBox):
             dt = float(np.median(np.diff(t_wave)))
             peak = np.max(np.abs(b1_wave)) if np.any(np.abs(b1_wave)) else 1.0
             shape = b1_wave / peak if peak != 0 else b1_wave
-            area = np.trapz(shape, dx=dt)
+            area = np.trapezoid(shape, dx=dt)
             aligned = np.real(area * np.exp(-1j * np.angle(area)))
             if not np.isfinite(aligned) or abs(aligned) < 1e-12:
                 return 1.0
@@ -280,7 +280,7 @@ class RFPulseDesigner(QGroupBox):
         peak = np.max(np.abs(b1_wave)) if np.any(np.abs(b1_wave)) else 1.0
         shape = b1_wave / peak if peak != 0 else b1_wave
         dt = float(np.median(np.diff(t_wave))) if len(t_wave) > 1 else 1e-6
-        area = np.trapz(shape, dx=dt)
+        area = np.trapezoid(shape, dx=dt)
         opt_phase = -np.angle(area) if np.isfinite(area) and area != 0 else 0.0
         aligned_area = np.real(area * np.exp(1j * opt_phase))
         if not np.isfinite(aligned_area) or abs(aligned_area) < 1e-12:
@@ -472,7 +472,7 @@ class RFPulseDesigner(QGroupBox):
             shape = shape * win
 
         # Compute integration factor
-        area = np.trapz(shape, dx=dt)
+        area = np.trapezoid(shape, dx=dt)
         opt_phase = -np.angle(area) if np.isfinite(area) else 0.0
         aligned_area = np.real(area * np.exp(1j * opt_phase))
         if not np.isfinite(aligned_area) or abs(aligned_area) < 1e-12:

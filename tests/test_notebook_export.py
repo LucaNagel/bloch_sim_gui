@@ -90,9 +90,11 @@ def test_mode_a_notebook():
     # 5. Check that HDF5 loading code is present
     nb_text = nbformat.writes(nb)
     assert "h5py" in nb_text, "Missing h5py import"
+    assert "xarray" in nb_text, "Missing xarray import"
     assert "data_file" in nb_text, "Missing data loading code"
     assert h5_file in nb_text, f"Missing reference to {h5_file}"
-    print(f"   ✓ Notebook contains HDF5 loading code")
+    assert "n_pos =" in nb_text, "Missing improved xarray construction code"
+    print(f"   ✓ Notebook contains HDF5 loading and improved xarray code")
 
     return h5_file, nb_file
 
@@ -154,7 +156,81 @@ def test_mode_b_notebook():
     # 5. Check parameter values are correct
     assert f"t1 = {tissue_params['t1']:.6f}" in nb_text, "T1 parameter mismatch"
     assert f"te = {sequence_params['te']:.6f}" in nb_text, "TE parameter mismatch"
+    assert "xarray" in nb_text, "Missing xarray import"
+    assert "n_pos =" in nb_text, "Missing improved xarray construction code"
     print(f"   ✓ Parameters correctly embedded in notebook")
+
+    return nb_file
+
+
+def test_sweep_notebook():
+    """Test Sweep Analysis: Parameter sweep notebook."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Sweep Analysis Notebook")
+    print("=" * 60)
+
+    # 1. Create dummy sweep data
+    print("\n1. Creating dummy sweep data...")
+    import json
+
+    filename = "test_sweep_data.npz"
+    param_name = "flip_angle"
+    param_values = np.linspace(10, 90, 5)
+
+    # Metrics
+    peak_signal = np.sin(np.deg2rad(param_values))
+    time = np.linspace(0, 0.1, 20)
+    # Shape: (n_sweep, n_time)
+    signal_evolution = np.outer(peak_signal, np.exp(-time / 0.05))
+
+    constant_params = {
+        "te": 0.02,
+        "tr": 0.5,
+        "t1": 1.0,
+        "t2": 0.1,
+        "sequence_type": "Gradient Echo",
+    }
+
+    np.savez(
+        filename,
+        parameter_name=param_name,
+        parameter_values=param_values,
+        peak_signal=peak_signal,
+        signal_evolution=signal_evolution,
+        time=time,
+        constant_params=json.dumps(constant_params),
+    )
+    print(f"   ✓ Dummy data created: {filename}")
+
+    # 2. Export notebook
+    nb_file = "test_sweep.ipynb"
+    print(f"\n2. Exporting Sweep notebook...")
+    export_notebook(
+        mode="sweep",
+        filename=nb_file,
+        data_filename=filename,
+        param_name=param_name,
+        metrics=["peak_signal", "signal_evolution"],
+        is_dynamic=True,
+    )
+    print(f"   ✓ Notebook exported: {nb_file}")
+
+    # 3. Verify notebook structure
+    print(f"\n3. Verifying notebook structure...")
+    import nbformat
+
+    with open(nb_file, "r") as f:
+        nb = nbformat.read(f, as_version=4)
+
+    nb_text = nbformat.writes(nb)
+
+    # Check for Xarray improvements
+    assert "time_vector is not None" in nb_text, "Missing time vector check"
+    assert "dims.append('time')" in nb_text, "Missing time dimension naming"
+    assert ".sel(" in nb_text, "Missing coordinate selection code"
+    assert "categories['Sequence']" in nb_text, "Missing parameter categorization"
+
+    print(f"   ✓ Notebook contains improved Xarray and plotting code")
 
     return nb_file
 
@@ -225,8 +301,11 @@ def cleanup_test_files():
         "test_notebook_data.h5",
         "test_mode_a.ipynb",
         "test_mode_b.ipynb",
+        "test_sweep_data.npz",
+        "test_sweep.ipynb",
         "executed_test_mode_a.ipynb",
         "executed_test_mode_b.ipynb",
+        "executed_test_sweep.ipynb",
     ]
 
     for fname in files_to_remove:
@@ -249,6 +328,9 @@ def main():
         # Test Mode B
         mode_b_nb = test_mode_b_notebook()
 
+        # Test Sweep
+        sweep_nb = test_sweep_notebook()
+
         # Try to execute notebooks (optional - requires jupyter)
         print("\n" + "=" * 60)
         print("OPTIONAL: Notebook Execution Tests")
@@ -258,6 +340,7 @@ def main():
 
         helper_notebook_execution(mode_a_nb)
         helper_notebook_execution(mode_b_nb)
+        helper_notebook_execution(sweep_nb)
 
         # Summary
         print("\n" + "=" * 70)
@@ -266,11 +349,13 @@ def main():
         print("\nPhase 2 Implementation Summary:")
         print("✓ Mode A: Notebook with HDF5 data loading")
         print("✓ Mode B: Notebook with simulation re-execution")
+        print("✓ Sweep: Notebook with xarray analysis")
         print("✓ Proper cell structure and content")
         print("✓ Parameter embedding")
         print("\nGenerated notebooks:")
         print(f"  - {mode_a_nb} (loads data from {h5_file})")
         print(f"  - {mode_b_nb} (re-runs simulation)")
+        print(f"  - {sweep_nb} (sweep analysis)")
         print("\nYou can now:")
         print(f"  1. Open notebooks in Jupyter: jupyter lab {mode_a_nb}")
         print(f"  2. Test in GUI: File → Export Results → Notebook options")
@@ -285,7 +370,8 @@ def main():
 
     finally:
         # Ask before cleanup
-        response = input("\nRemove test files? (y/n): ")
+        # response = input("\nRemove test files? (y/n): ")
+        response = "y"
         if response.lower() == "y":
             cleanup_test_files()
         else:

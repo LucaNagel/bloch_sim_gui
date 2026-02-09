@@ -241,7 +241,7 @@ class SliceSelectionExplorer(QWidget):
             # target area (G*s) = flip_rad / (gamma_Hz_per_G * 2 * pi)
 
             target_area = np.deg2rad(flip) / (4258.0 * 2 * np.pi)
-            current_area = np.trapz(np.abs(b1_base), dx=dt)
+            current_area = np.trapezoid(np.abs(b1_base), dx=dt)
             if current_area > 0:
                 scale = target_area / current_area
                 b1_base *= scale

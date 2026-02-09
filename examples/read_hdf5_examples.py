@@ -551,6 +551,35 @@ def example_custom_analysis(filename):
                 print("\nCould not fit T2 decay curve")
 
 
+def example_xarray():
+    """Example: Load HDF5 file directly into xarray."""
+    print("\n" + "=" * 60)
+    print("EXAMPLE 3: Xarray Integration")
+    print("=" * 60)
+
+    from blochsimulator import BlochSimulator, TissueParameters, SpinEcho
+
+    # 1. Create Data
+    sim = BlochSimulator()
+    tissue = TissueParameters.gray_matter(3.0)
+    seq = SpinEcho(te=20e-3, tr=100e-3)
+    sim.simulate(seq, tissue, mode=2)
+    filename = "example_xarray.h5"
+    sim.save_results(filename)
+
+    # 2. Load using BlochSimulator helper
+    print("Loading directly to xarray...")
+    sim_load = BlochSimulator()
+    sim_load.load_results(filename)
+    ds = sim_load.get_results_as_xarray()
+
+    print("\nXarray Dataset:")
+    print(ds)
+
+    # Clean up
+    Path(filename).unlink()
+
+
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
@@ -564,6 +593,8 @@ if __name__ == "__main__":
     example_basic()
     print("\n\n")
     example_multi_position()
+    print("\n\n")
+    example_xarray()
 
     print("\n" + "=" * 70)
     print(" ALL EXAMPLES COMPLETED ".center(70))

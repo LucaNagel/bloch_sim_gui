@@ -13,6 +13,7 @@ from typing import Optional, Tuple, Union, Dict
 from scipy import signal
 from dataclasses import dataclass
 import h5py
+import xarray as xr
 from pathlib import Path
 from . import __version__
 
@@ -89,13 +90,13 @@ def design_rf_pulse(
         t_centered = time - duration / 2
         bw = time_bw_product / duration
         envelope = np.sinc(bw * t_centered)
-        area = np.trapz(envelope, time)
+        area = np.trapezoid(envelope, time)
         b1 = envelope * (target_area / area)
     elif pulse_type == "gaussian":
         t_centered = time - duration / 2
         sigma = duration / (2 * np.sqrt(2 * np.log(2)) * time_bw_product)
         envelope = np.exp(-(t_centered**2) / (2 * sigma**2))
-        area = np.trapz(envelope, time)
+        area = np.trapezoid(envelope, time)
         b1 = envelope * (target_area / area)
     elif pulse_type == "adiabatic_half":
         # Adiabatic Half Passage (AHP): 90° excitation pulse
@@ -663,9 +664,6 @@ class SpinEchoTipAxis(PulseSequence):
             if np.any(np.abs(ref_pulse) > 0):
                 peak_idx = np.argmax(np.abs(ref_pulse))
                 ref_phase = np.angle(ref_pulse[peak_idx])
-                print(
-                    f"DEBUG: Refocusing pulse phase at peak = {np.rad2deg(ref_phase):.2f} degrees"
-                )
         else:
             ref_pulse, _ = design_rf_pulse(
                 "sinc",
@@ -1800,6 +1798,152 @@ class BlochSimulator:
         plt.suptitle(f'Magnetization Evolution\n{result["tissue"].name}')
         plt.tight_layout()
         plt.show()
+
+    def get_results_as_xarray(self) -> "xr.Dataset":
+        """
+        Convert the last simulation result to an xarray Dataset.
+
+        Returns
+        -------
+        xarray.Dataset
+            Dataset containing magnetization and signal data with metadata attributes.
+            Dimensions will be (time, position, frequency) or (position, frequency)
+            depending on the simulation mode.
+        """
+        if self.last_result is None:
+            raise ValueError("No simulation results available")
+
+        result = self.last_result
+        mx = result["mx"]
+        my = result["my"]
+        mz = result["mz"]
+        signal = result["signal"]
+        time = result["time"]
+
+        # Prepare attributes
+        attrs = {
+            "simulator_version": __version__,
+            "export_timestamp": str(np.datetime64("now")),
+        }
+        if "tissue" in result:
+            tissue = result["tissue"]
+            attrs.update(
+                {
+                    "tissue_name": tissue.name,
+                    "t1": tissue.t1,
+                    "t2": tissue.t2,
+                    "density": tissue.density,
+                }
+            )
+            if tissue.t2_star is not None:
+                attrs["t2_star"] = tissue.t2_star
+
+        # Handle Phantom Simulation
+        if "phantom" in result:
+            phantom = result["phantom"]
+
+            # Determine dimensions
+            # mx shape is either (*phantom.shape) or (ntime, *phantom.shape)
+            phantom_dim_names = ["z", "y", "x"][
+                -phantom.ndim :
+            ]  # e.g. ['y', 'x'] for 2D
+
+            dims = []
+            coords = {}
+
+            # Check if time dimension exists
+            # We assume if mx has one more dim than phantom, the first one is time
+            if mx.ndim == phantom.ndim + 1:
+                dims.append("time")
+                coords["time"] = time
+
+            dims.extend(phantom_dim_names)
+
+            # Create Dataset
+            data_vars = {
+                "mx": (dims, mx),
+                "my": (dims, my),
+                "mz": (dims, mz),
+                "signal": (dims, signal),
+            }
+
+            if "pd_weighted_signal" in result:
+                data_vars["pd_weighted_signal"] = (dims, result["pd_weighted_signal"])
+
+            # Add spatial coords if available in phantom?
+            # Phantom usually implies a grid, so indices are sufficient or we could add real-world coords if phantom has FOV.
+            # Assuming basic indices for now.
+
+            ds = xr.Dataset(data_vars, coords=coords, attrs=attrs)
+            return ds
+
+        # Handle Point Simulation
+        positions = result["positions"]  # (N_pos, 3)
+        frequencies = result["frequencies"]  # (N_freq,)
+
+        n_pos = positions.shape[0]
+        n_freq = frequencies.shape[0]
+        n_time = len(time)
+
+        # Logic to determine dimensions based on shape
+        # Expected max shape: (time, position, frequency)
+
+        dims = []
+        coords = {}
+
+        if mx.ndim == 3:
+            # Full (time, pos, freq)
+            dims = ["time", "position", "frequency"]
+        elif mx.ndim == 2:
+            # (pos, freq) or (time, pos) or (time, freq)?
+            # If endpoint mode (time not returned in shape), usually (pos, freq)
+            # Check against sizes
+            if mx.shape == (n_pos, n_freq):
+                dims = ["position", "frequency"]
+            elif mx.shape == (n_time, n_pos):  # Single freq
+                dims = ["time", "position"]
+            elif mx.shape == (n_time, n_freq):  # Single pos
+                dims = ["time", "frequency"]
+            else:
+                # Fallback / Ambiguous
+                # Assume (pos, freq) if n_time is arguably 1 (endpoint)
+                dims = ["dim_0", "dim_1"]
+        elif mx.ndim == 1:
+            if n_pos > 1 and mx.shape[0] == n_pos:
+                dims = ["position"]
+            elif n_freq > 1 and mx.shape[0] == n_freq:
+                dims = ["frequency"]
+            elif n_time > 1 and mx.shape[0] == n_time:
+                dims = ["time"]
+            else:
+                dims = ["dim_0"]
+        else:
+            # Scalar?
+            dims = []
+
+        # Populate coordinates
+        if "time" in dims:
+            coords["time"] = time
+        if "position" in dims:
+            coords["position"] = np.arange(n_pos)
+            # Add spatial coordinates
+            coords["x"] = ("position", positions[:, 0])
+            coords["y"] = ("position", positions[:, 1])
+            coords["z"] = ("position", positions[:, 2])
+        if "frequency" in dims:
+            coords["frequency"] = frequencies
+
+        ds = xr.Dataset(
+            {
+                "mx": (dims, mx),
+                "my": (dims, my),
+                "mz": (dims, mz),
+                "signal": (dims, signal),
+            },
+            coords=coords,
+            attrs=attrs,
+        )
+        return ds
 
     def save_results(
         self,
