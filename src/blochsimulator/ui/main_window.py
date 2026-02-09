@@ -1112,6 +1112,33 @@ class BlochSimulatorGUI(QMainWindow):
         # Initialize spatial controls visibility
         self._update_spatial_controls_visibility(self.spatial_plot_type.currentText())
 
+        # Initialize tab highlights
+        self._update_tab_highlights()
+
+    def _update_tab_highlights(self):
+        """Update tab colors based on current sequence selection."""
+        if not hasattr(self, "tab_widget"):
+            return
+
+        seq_type = self.sequence_designer.sequence_type.currentText()
+        bar = self.tab_widget.tabBar()
+
+        # Reset all tabs to default first
+        for i in range(self.tab_widget.count()):
+            bar.setTabTextColor(i, self.palette().color(QPalette.WindowText))
+
+        # Highlight specific tabs based on sequence
+        highlight_color = QColor("#0078D7")  # Professional blue
+
+        for i in range(self.tab_widget.count()):
+            text = self.tab_widget.tabText(i)
+            if seq_type == "Free Induction Decay" and "Spectrum" in text:
+                bar.setTabTextColor(i, highlight_color)
+            elif seq_type == "Slice Select + Rephase" and "Spatial" in text:
+                bar.setTabTextColor(i, highlight_color)
+            elif seq_type == "SSFP (Loop)" and "Signal" in text:
+                bar.setTabTextColor(i, highlight_color)
+
     def _wrap_in_scroll_area(self, widget):
         """Wrap a widget in a QScrollArea with no frame."""
         scroll = QScrollArea()
