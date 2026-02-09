@@ -38,7 +38,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
 )
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QFont, QIcon, QImage
+from PyQt5.QtGui import QFont, QIcon, QImage, QPalette, QColor
 
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
@@ -81,6 +81,7 @@ from .sequence_designer import SequenceDesigner
 from .controls import UniversalTimeControl
 from .magnetization_viewer import MagnetizationViewer
 from .parameter_sweep import ParameterSweepWidget
+from .tutorial_manager import TutorialManager
 
 
 def get_app_data_dir() -> Path:
@@ -159,6 +160,9 @@ class BlochSimulatorGUI(QMainWindow):
         self._last_spectrum_export = None
         self._spectrum_final_range = None
         self.dataset_exporter = DatasetExporter()
+        self.tutorial_manager = TutorialManager(self)
+        self.tutorial_manager.step_reached.connect(self._on_tutorial_step)
+        self.tutorial_manager.playback_finished.connect(self._on_tutorial_finished)
         self._sweep_mode = False
         self.spectrum_y_max = 1.1  # Constant maximum for spectrum Y-axis
 
@@ -232,6 +236,9 @@ class BlochSimulatorGUI(QMainWindow):
             self._load_sequence_presets
         )
         self.sequence_designer.sequence_type.currentTextChanged.connect(
+            self._update_tab_highlights
+        )
+        self.sequence_designer.sequence_type.currentTextChanged.connect(
             lambda _: self._auto_update_ssfp_amplitude()
         )
         # self.sequence_designer.ssfp_dur.valueChanged.connect(...) # Removed
@@ -249,6 +256,7 @@ class BlochSimulatorGUI(QMainWindow):
         mode_layout = QHBoxLayout()
         mode_layout.addWidget(QLabel("Mode:"))
         self.mode_combo = QComboBox()
+        self.mode_combo.setObjectName("mode_combo")
         self.mode_combo.addItems(["Endpoint", "Time-resolved"])
         # Default to time-resolved so users see waveforms/animation without changing anything
         self.mode_combo.setCurrentText("Time-resolved")
@@ -384,6 +392,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Tab widget for different views
         self.tab_widget = QTabWidget()
+        self.tab_widget.setObjectName("main_tabs")
 
         # Magnetization plots
         mag_widget = QWidget()
@@ -3062,6 +3071,21 @@ class BlochSimulatorGUI(QMainWindow):
         )
         tools_menu.addAction("Export Full Results...", self.export_results)
 
+        # Tutorials menu
+        tut_menu = menubar.addMenu("Tutorials")
+
+        record_action = tut_menu.addAction("Record New Tutorial...")
+        record_action.triggered.connect(self.record_tutorial)
+
+        load_tut_action = tut_menu.addAction("Load Tutorial...")
+        load_tut_action.triggered.connect(self.load_tutorial_dialog)
+
+        tut_menu.addSeparator()
+
+        self.stop_tut_action = tut_menu.addAction("Stop Recording/Playback")
+        self.stop_tut_action.setEnabled(False)
+        self.stop_tut_action.triggered.connect(self.stop_tutorial)
+
         # Help menu
         help_menu = menubar.addMenu("Help")
 
@@ -3102,11 +3126,13 @@ class BlochSimulatorGUI(QMainWindow):
         layout.setSpacing(8)
 
         self.status_run_button = QPushButton("Run Simulation")
+        self.status_run_button.setObjectName("run_btn")
         self.status_run_button.clicked.connect(self.run_simulation)
         self.status_run_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         layout.addWidget(self.status_run_button)
 
         self.status_cancel_button = QPushButton("Cancel")
+        self.status_cancel_button.setObjectName("cancel_btn")
         self.status_cancel_button.clicked.connect(self.cancel_simulation)
         self.status_cancel_button.setEnabled(False)
         self.status_cancel_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -6273,6 +6299,58 @@ class BlochSimulatorGUI(QMainWindow):
         # Set view limits to show only actual data
         self.signal_heatmap.setXRange(time_ms[0], time_ms[-1], padding=0)
         self.signal_heatmap.setYRange(y_min, y_max, padding=0)
+
+    # === TUTORIAL METHODS ===
+
+    def record_tutorial(self):
+        from PyQt5.QtWidgets import QInputDialog
+
+        name, ok = QInputDialog.getText(self, "New Tutorial", "Enter tutorial name:")
+        if ok and name:
+            self.current_tutorial_name = name
+            self.tutorial_manager.start_recording()
+            self.statusBar().showMessage(f"Recording tutorial: {name}...")
+            self.stop_tut_action.setEnabled(True)
+
+    def load_tutorial_dialog(self):
+        folder = os.path.join(os.getcwd(), "tutorials")
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Tutorial", folder, "JSON Files (*.json)"
+        )
+        if path:
+            name = Path(path).stem
+            if self.tutorial_manager.load_tutorial(name):
+                self.tutorial_manager.start_playback()
+                self.stop_tut_action.setEnabled(True)
+                self.statusBar().showMessage(f"Playing tutorial: {name}")
+            else:
+                QMessageBox.warning(self, "Error", f"Could not load tutorial: {name}")
+
+    def stop_tutorial(self):
+        if self.tutorial_manager.is_recording:
+            steps = self.tutorial_manager.stop_recording()
+            if hasattr(self, "current_tutorial_name"):
+                path = self.tutorial_manager.save_tutorial(self.current_tutorial_name)
+                QMessageBox.information(
+                    self, "Tutorial Saved", f"Saved {len(steps)} steps to:\n{path}"
+                )
+            self.statusBar().showMessage("Recording stopped.")
+        elif self.tutorial_manager.is_playing:
+            self.tutorial_manager.stop_playback()
+            self.statusBar().showMessage("Tutorial playback stopped.")
+
+        self.stop_tut_action.setEnabled(False)
+
+    def _on_tutorial_step(self, current, total):
+        self.statusBar().showMessage(f"Tutorial Step {current + 1}/{total}")
+
+    def _on_tutorial_finished(self):
+        self.statusBar().showMessage("Tutorial Completed!")
+        self.stop_tut_action.setEnabled(False)
+        QMessageBox.information(self, "Tutorial", "Tutorial Completed!")
 
     def show_about(self):
         """Show about dialog."""

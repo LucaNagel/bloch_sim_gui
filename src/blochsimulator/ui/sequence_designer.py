@@ -57,6 +57,7 @@ class SequenceDesigner(QGroupBox):
         type_layout = QHBoxLayout()
         type_layout.addWidget(QLabel("Sequence:"))
         self.sequence_type = QComboBox()
+        self.sequence_type.setObjectName("sequence_type_combo")
         self.sequence_type.addItems(
             [
                 "Free Induction Decay",
