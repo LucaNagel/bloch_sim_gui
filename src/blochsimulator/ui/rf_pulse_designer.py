@@ -56,6 +56,8 @@ class RFPulseDesigner(QGroupBox):
         type_layout = QHBoxLayout()
         type_layout.addWidget(QLabel("Pulse Type:"))
         self.pulse_type = QComboBox()
+        prefix = "rf_compact_" if self.compact else "rf_tab_"
+        self.pulse_type.setObjectName(f"{prefix}pulse_type")
         self.pulse_type.addItems(
             [
                 "Rectangle",
@@ -76,6 +78,7 @@ class RFPulseDesigner(QGroupBox):
         flip_layout = QHBoxLayout()
         flip_layout.addWidget(QLabel("Flip Angle (°):"))
         self.flip_angle = QDoubleSpinBox()
+        self.flip_angle.setObjectName(f"{prefix}flip_angle")
         self.flip_angle.setRange(0, 1e4)
         self.flip_angle.setValue(90)
         self.flip_angle.valueChanged.connect(self.update_pulse)
@@ -86,6 +89,7 @@ class RFPulseDesigner(QGroupBox):
         duration_layout = QHBoxLayout()
         duration_layout.addWidget(QLabel("Duration (ms):"))
         self.duration = QDoubleSpinBox()
+        self.duration.setObjectName(f"{prefix}duration")
         self.duration.setRange(0.001, 1000.0)  # Extended range for custom pulses
         self.duration.setValue(1.0)
         self.duration.setSingleStep(0.1)
@@ -98,6 +102,7 @@ class RFPulseDesigner(QGroupBox):
         b1_layout = QHBoxLayout()
         b1_layout.addWidget(QLabel("B1 Amplitude (G):"))
         self.b1_amplitude = QDoubleSpinBox()
+        self.b1_amplitude.setObjectName(f"{prefix}b1_amplitude")
         self.b1_amplitude.setRange(0.0, 1e4)
         self.b1_amplitude.setValue(0.0)
         self.b1_amplitude.setSingleStep(0.01)
@@ -114,6 +119,7 @@ class RFPulseDesigner(QGroupBox):
         tbw_layout = QHBoxLayout()
         tbw_layout.addWidget(QLabel("Time-BW Product (auto):"))
         self.tbw = QDoubleSpinBox()
+        self.tbw.setObjectName(f"{prefix}tbw")
         self.tbw.setRange(0.001, 1000)
         self.tbw.setValue(1)
         self.tbw.setSingleStep(0.5)
@@ -129,6 +135,7 @@ class RFPulseDesigner(QGroupBox):
         lobes_layout = QHBoxLayout()
         lobes_layout.addWidget(QLabel("Lobes (Sinc):"))
         self.sinc_lobes = QSpinBox()
+        self.sinc_lobes.setObjectName(f"{prefix}sinc_lobes")
         self.sinc_lobes.setRange(1, 100)
         self.sinc_lobes.setValue(3)
         self.sinc_lobes.valueChanged.connect(self.update_pulse)
@@ -141,6 +148,7 @@ class RFPulseDesigner(QGroupBox):
         apod_layout = QHBoxLayout()
         apod_layout.addWidget(QLabel("Apodization:"))
         self.apodization_combo = QComboBox()
+        self.apodization_combo.setObjectName(f"{prefix}apodization_combo")
         self.apodization_combo.addItems(["None", "Hamming", "Hanning", "Blackman"])
         self.apodization_combo.currentTextChanged.connect(self.update_pulse)
         apod_layout.addWidget(self.apodization_combo)
@@ -150,6 +158,7 @@ class RFPulseDesigner(QGroupBox):
         phase_layout = QHBoxLayout()
         phase_layout.addWidget(QLabel("Phase (°):"))
         self.phase = QDoubleSpinBox()
+        self.phase.setObjectName(f"{prefix}phase")
         self.phase.setRange(0, 360)
         self.phase.setValue(0)
         self.phase.valueChanged.connect(self.update_pulse)
@@ -160,6 +169,7 @@ class RFPulseDesigner(QGroupBox):
         freq_offset_layout = QHBoxLayout()
         freq_offset_layout.addWidget(QLabel("RF Frequency Offset (Hz):"))
         self.freq_offset = QDoubleSpinBox()
+        self.freq_offset.setObjectName(f"{prefix}freq_offset")
         self.freq_offset.setRange(-10000, 10000)
         self.freq_offset.setValue(0.0)
         self.freq_offset.setSingleStep(10)
@@ -170,12 +180,14 @@ class RFPulseDesigner(QGroupBox):
 
         # Info label for Custom Pulse
         self.custom_info_label = QLabel("")
+        self.custom_info_label.setObjectName(f"{prefix}custom_info_label")
         self.custom_info_label.setStyleSheet("color: gray; font-size: 9pt;")
         self.custom_info_label.setVisible(False)
         control_layout.addWidget(self.custom_info_label)
 
         # Pulse Explanation (Only in full mode)
         self.explanation_box = QTextEdit()
+        self.explanation_box.setObjectName(f"{prefix}explanation_box")
         self.explanation_box.setReadOnly(True)
         self.explanation_box.setMaximumHeight(150)
 
@@ -186,9 +198,11 @@ class RFPulseDesigner(QGroupBox):
         # Buttons
         button_layout = QHBoxLayout()
         self.load_button = QPushButton("Load from File")
+        self.load_button.setObjectName(f"{prefix}load_button")
         self.load_button.setToolTip("Load a custom RF pulse waveform")
         self.load_button.clicked.connect(self.load_pulse_from_file)
         self.save_button = QPushButton("Save to File")
+        self.save_button.setObjectName(f"{prefix}save_button")
         button_layout.addWidget(self.load_button)
         button_layout.addWidget(self.save_button)
         control_layout.addLayout(button_layout)

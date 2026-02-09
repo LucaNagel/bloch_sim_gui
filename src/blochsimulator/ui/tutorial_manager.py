@@ -94,16 +94,16 @@ class TutorialManager(QObject):
 
     def eventFilter(self, obj, event):
         if self.is_recording and event.type() == QEvent.MouseButtonRelease:
-            # Record buttons, tabs, and combo boxes
-            name = obj.objectName()
+            # If the widget itself has no name, crawl up to find first named parent
+            curr = obj
+            name = curr.objectName()
+            while curr and not name:
+                curr = curr.parent()
+                if curr:
+                    name = curr.objectName()
 
-            # If the widget itself has no name, check its immediate parent
-            # (sometimes clicks land on sub-elements of complex widgets like SpinBox)
-            if not name and obj.parent():
-                parent_name = obj.parent().objectName()
-                if parent_name:
-                    obj = obj.parent()
-                    name = parent_name
+            if curr:
+                obj = curr
 
             if not name:
                 return super().eventFilter(obj, event)
@@ -117,6 +117,7 @@ class TutorialManager(QObject):
                 QDoubleSpinBox,
                 QSlider,
                 QToolButton,
+                QAction,
             )
 
             if isinstance(obj, supported_classes):

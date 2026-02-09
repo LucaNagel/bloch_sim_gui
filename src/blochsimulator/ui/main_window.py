@@ -691,6 +691,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         spectrum_controls.addWidget(QLabel("Plot type:"))
         self.spectrum_plot_type = QComboBox()
+        self.spectrum_plot_type.setObjectName("spectrum_plot_type")
         self.spectrum_plot_type.addItems(["Line", "Heatmap"])
         self.spectrum_plot_type.setCurrentText("Line")
         self.spectrum_plot_type.currentTextChanged.connect(
@@ -706,6 +707,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         spectrum_controls.addWidget(QLabel("Spectrum view:"))
         self.spectrum_view_mode = QComboBox()
+        self.spectrum_view_mode.setObjectName("spectrum_view_mode")
         self.spectrum_view_mode.addItems(["Individual position", "Mean over positions"])
         self.spectrum_view_mode.currentIndexChanged.connect(
             lambda _: (
@@ -716,6 +718,7 @@ class BlochSimulatorGUI(QMainWindow):
         )
         spectrum_controls.addWidget(self.spectrum_view_mode)
         self.spectrum_pos_slider = QSlider(Qt.Horizontal)
+        self.spectrum_pos_slider.setObjectName("spectrum_pos_slider")
         self.spectrum_pos_slider.setRange(0, 0)
         self.spectrum_pos_slider.valueChanged.connect(
             lambda _: (
@@ -750,6 +753,7 @@ class BlochSimulatorGUI(QMainWindow):
         # Heatmap specific mode selector
         self.spectrum_heatmap_mode_label = QLabel("Heatmap mode:")
         self.spectrum_heatmap_mode = QComboBox()
+        self.spectrum_heatmap_mode.setObjectName("spectrum_heatmap_mode")
         self.spectrum_heatmap_mode.addItems(
             ["Spin vs Time (Evolution)", "Spin vs Frequency (FFT)"]
         )
@@ -818,6 +822,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Display controls
         self.mean_only_checkbox = QCheckBox("Mean only (Mag/Signal/3D)")
+        self.mean_only_checkbox.setObjectName("mean_only_checkbox")
         self.mean_only_checkbox.stateChanged.connect(
             lambda _: self.update_plots(self.last_result) if self.last_result else None
         )
@@ -826,11 +831,13 @@ class BlochSimulatorGUI(QMainWindow):
         spatial_controls = QHBoxLayout()
         spatial_controls.addWidget(QLabel("Plot type:"))
         self.spatial_plot_type = QComboBox()
+        self.spatial_plot_type.setObjectName("spatial_plot_type")
         self.spatial_plot_type.addItems(["Line", "Heatmap"])
 
         spatial_controls.addWidget(self.spatial_plot_type)
         spatial_controls.addWidget(QLabel("Heatmap mode:"))
         self.spatial_heatmap_mode = QComboBox()
+        self.spatial_heatmap_mode.setObjectName("spatial_heatmap_mode")
         self.spatial_heatmap_mode.addItems(
             ["Position vs Frequency", "Position vs Time"]
         )
@@ -848,12 +855,14 @@ class BlochSimulatorGUI(QMainWindow):
 
         spatial_controls.addWidget(QLabel("View:"))
         self.spatial_mode = QComboBox()  # Renamed from spatial_mode to avoid confusion
+        self.spatial_mode.setObjectName("spatial_mode")
         self.spatial_mode.addItems(["Individual freq", "Mean over freqs"])
         self.spatial_mode.currentIndexChanged.connect(
             self.update_spatial_plot_from_last_result
         )
         spatial_controls.addWidget(self.spatial_mode)
         self.spatial_freq_slider = QSlider(Qt.Horizontal)
+        self.spatial_freq_slider.setObjectName("spatial_freq_slider")
         self.spatial_freq_slider.setRange(0, 0)
         self.spatial_freq_slider.valueChanged.connect(
             lambda: self.update_spatial_plot_from_last_result()
@@ -867,6 +876,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.spatial_markers_checkbox = QCheckBox(
             "Show colored position/frequency markers"
         )
+        self.spatial_markers_checkbox.setObjectName("spatial_markers_checkbox")
         self.spatial_markers_checkbox.setChecked(False)
         self.spatial_markers_checkbox.setToolTip(
             "Display vertical lines at each position/frequency with 3D-view colors"

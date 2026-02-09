@@ -41,6 +41,7 @@ class MagnetizationViewer(QWidget):
         header_3d.addStretch()
 
         self.export_3d_btn = QPushButton("Export ▼")
+        self.export_3d_btn.setObjectName("export_3d_btn")
         export_3d_menu = QMenu()
         export_3d_menu.addAction(
             "Image (PNG)...", lambda: self._export_3d_screenshot("png")
@@ -123,6 +124,7 @@ class MagnetizationViewer(QWidget):
         view_layout = QHBoxLayout()
         view_layout.addWidget(QLabel("View mode:"))
         self.view_mode_combo = QComboBox()
+        self.view_mode_combo.setObjectName("mag_3d_view_mode")
         self.view_mode_combo.addItems(
             ["All positions x freqs", "Positions @ freq", "Freqs @ position"]
         )
@@ -131,6 +133,7 @@ class MagnetizationViewer(QWidget):
         self.selector_label = QLabel("All spins")
         view_layout.addWidget(self.selector_label)
         self.selector_slider = QSlider(Qt.Horizontal)
+        self.selector_slider.setObjectName("mag_3d_selector_slider")
         self.selector_slider.setRange(0, 0)
         self.selector_slider.valueChanged.connect(self._on_selector_changed)
         view_layout.addWidget(self.selector_slider)
@@ -152,12 +155,14 @@ class MagnetizationViewer(QWidget):
 
         # Now create checkboxes that depend on these variables
         self.track_checkbox = QCheckBox("Track tip path")
+        self.track_checkbox.setObjectName("mag_3d_track_checkbox")
         self.track_checkbox.setChecked(True)
         self.track_checkbox.toggled.connect(self._toggle_track_path)
         # Sync internal flag to the initial checkbox state so tracking is active on first playback
         self._toggle_track_path(self.track_checkbox.isChecked())
         controls_v.addWidget(self.track_checkbox)
         self.mean_checkbox = QCheckBox("Show mean magnetization")
+        self.mean_checkbox.setObjectName("mag_3d_mean_checkbox")
         self.mean_checkbox.setChecked(False)
         self.mean_checkbox.toggled.connect(self._toggle_mean_vector)
         controls_v.addWidget(self.mean_checkbox)

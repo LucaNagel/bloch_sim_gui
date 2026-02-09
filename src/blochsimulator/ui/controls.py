@@ -27,6 +27,7 @@ class UniversalTimeControl(QGroupBox):
 
         layout.addWidget(QLabel("Time:"))
         self.time_slider = QSlider(Qt.Horizontal)
+        self.time_slider.setObjectName("playback_time_slider")
         self.time_slider.setMinimum(0)
         self.time_slider.setMaximum(0)
         self.time_slider.valueChanged.connect(self._on_slider_changed)
@@ -37,15 +38,18 @@ class UniversalTimeControl(QGroupBox):
         layout.addWidget(self.time_label)
 
         self.play_pause_button = QPushButton("Play")
+        self.play_pause_button.setObjectName("playback_play_btn")
         self.play_pause_button.setCheckable(True)
         self.play_pause_button.toggled.connect(self._update_play_pause_label)
         layout.addWidget(self.play_pause_button)
 
         self.reset_button = QPushButton("Reset")
+        self.reset_button.setObjectName("playback_reset_btn")
         layout.addWidget(self.reset_button)
 
         layout.addWidget(QLabel("Speed (ms/s):"))
         self.speed_spin = QDoubleSpinBox()
+        self.speed_spin.setObjectName("playback_speed_spin")
         self.speed_spin.setRange(0.001, 1000.0)
         self.speed_spin.setValue(1.0)  # Default to 50 ms of sim per real second
         self.speed_spin.setSuffix(" ms/s")
