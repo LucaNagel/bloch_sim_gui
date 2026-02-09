@@ -78,6 +78,20 @@ class NotebookExporter:
             )
         )
 
+        # Installation Instructions
+        cells.append(
+            new_markdown_cell(
+                "## Installation\n\n"
+                "If you haven't installed the `blochsimulator` package yet, you can do so using pip:\n\n"
+                "```bash\n"
+                "# From GitHub (latest version)\n"
+                "!pip install git+https://github.com/LucaNagel/bloch_sim_gui.git\n\n"
+                "# From local directory (if you have the source code)\n"
+                "# !pip install .\n"
+                "```"
+            )
+        )
+
         # Cell 1: Imports
         cells.append(new_markdown_cell("## Setup and Imports"))
         cells.append(
@@ -140,6 +154,254 @@ class NotebookExporter:
         nb["cells"] = cells
         return nb
 
+    def create_notebook_sweep_analysis(
+        self,
+        data_filename: str,
+        param_name: str,
+        metrics: List[str],
+        title: str = "Parameter Sweep Analysis",
+        is_dynamic: bool = False,
+    ) -> Any:
+        """
+        Create notebook for parameter sweep analysis.
+
+        Parameters
+        ----------
+        data_filename : str
+            Path to the data file (NPZ or CSV)
+        param_name : str
+            Name of the swept parameter
+        metrics : list
+            List of collected metrics
+        title : str
+            Notebook title
+        is_dynamic : bool
+            Whether the sweep contains time-resolved data
+        """
+        nb = new_notebook()
+        cells = []
+
+        # Title
+        cells.append(
+            new_markdown_cell(
+                f"# {title}\n\n"
+                f"**BlochSimulator Version**: {__version__}\n\n"
+                f"**Sweep Parameter**: {param_name}\n\n"
+                f"**Data file**: `{data_filename}`\n\n"
+                f"**Mode**: {'Dynamic (Time-Resolved)' if is_dynamic else 'Static (Final State)'}"
+            )
+        )
+
+        # Installation Instructions
+        cells.append(
+            new_markdown_cell(
+                "## Installation\n\n"
+                "If you haven't installed the `blochsimulator` package yet, you can do so using pip:\n\n"
+                "```bash\n"
+                "# From GitHub (latest version)\n"
+                "!pip install git+https://github.com/LucaNagel/bloch_sim_gui.git\n\n"
+                "# From local directory (if you have the source code)\n"
+                "# !pip install .\n"
+                "```"
+            )
+        )
+
+        # Imports
+        cells.append(new_markdown_cell("## Setup and Imports"))
+        cells.append(
+            new_code_cell(
+                "import numpy as np\n"
+                "import matplotlib.pyplot as plt\n"
+                "import json\n"
+                "from pathlib import Path\n\n"
+                "# Set matplotlib style\n"
+                "plt.style.use('seaborn-v0_8-darkgrid')\n"
+                "%matplotlib inline"
+            )
+        )
+
+        # Load Data
+        cells.append(new_markdown_cell("## Load Sweep Data"))
+        load_code = f"filename = '{data_filename}'\n"
+        load_code += f"is_dynamic = {is_dynamic}\n"
+        load_code += "file_path = Path(filename)\n\n"
+        load_code += "constant_params = {}\n"
+        load_code += "time_vector = None\n\n"
+
+        load_code += "if file_path.suffix == '.npz':\n"
+        load_code += "    data = np.load(file_path, allow_pickle=True)\n"
+        load_code += "    param_values = data['parameter_values']\n"
+        load_code += f"    param_name = str(data['parameter_name'])\n"
+        load_code += "    # Load constant params\n"
+        load_code += "    if 'constant_params' in data:\n"
+        load_code += "        try:\n"
+        load_code += "            val = data['constant_params']\n"
+        load_code += "            if hasattr(val, 'item'): val = val.item()\n"
+        load_code += "            constant_params = json.loads(str(val))\n"
+        load_code += "        except:\n"
+        load_code += "            pass\n"
+        load_code += "    if 'time' in data:\n"
+        load_code += "        time_vector = data['time']\n"
+        load_code += "    # Load metrics into a dictionary\n"
+        load_code += "    results = {k: data[k] for k in data.files if k not in ['parameter_values', 'parameter_name', 'constant_params', 'time']}\n"
+        load_code += "elif file_path.suffix == '.csv':\n"
+        load_code += "    # Load CSV using numpy (ignoring header row)\n"
+        load_code += "    with open(file_path, 'r') as f:\n"
+        load_code += "        header_lines = []\n"
+        load_code += "        pos = f.tell()\n"
+        load_code += "        line = f.readline()\n"
+        load_code += "        while line.startswith('#'):\n"
+        load_code += "            header_lines.append(line)\n"
+        load_code += "            pos = f.tell()\n"
+        load_code += "            line = f.readline()\n"
+        load_code += "        f.seek(pos) # Go back to first data line\n"
+        load_code += "        col_header = line.strip().split(',')\n"
+        load_code += "    \n"
+        load_code += "    # Parse constant params from header\n"
+        load_code += "    for line in header_lines:\n"
+        load_code += "        if 'Constant Parameters:' in line:\n"
+        load_code += "            try:\n"
+        load_code += "                json_str = line.split('Constant Parameters:', 1)[1].strip()\n"
+        load_code += "                constant_params = json.loads(json_str)\n"
+        load_code += "            except:\n"
+        load_code += "                pass\n"
+        load_code += "    \n"
+        load_code += "    raw_data = np.genfromtxt(file_path, delimiter=',', comments='#', skip_header=1)\n"
+        load_code += "    # If only one line, genfromtxt returns 1D array\n"
+        load_code += "    if raw_data.ndim == 1:\n"
+        load_code += "        raw_data = raw_data.reshape(1, -1)\n"
+        load_code += "    \n"
+        load_code += "    param_name = col_header[0]\n"
+        load_code += "    param_values = raw_data[:, 0]\n"
+        load_code += "    \n"
+        load_code += "    results = {}\n"
+        load_code += "    for i, col_name in enumerate(col_header[1:]):\n"
+        load_code += "        results[col_name] = raw_data[:, i+1]\n"
+        load_code += "        \n"
+        load_code += "    # Check for array sidecar\n"
+        load_code += (
+            "    array_path = file_path.with_name(file_path.stem + '_arrays.npz')\n"
+        )
+        load_code += "    if array_path.exists():\n"
+        load_code += "        print(f'Loading array data from {array_path.name}')\n"
+        load_code += "        arrays = np.load(array_path, allow_pickle=True)\n"
+        load_code += "        if 'time' in arrays:\n"
+        load_code += "             time_vector = arrays['time']\n"
+        load_code += (
+            "        # Load constant params from sidecar if not in CSV header\n"
+        )
+        load_code += "        if not constant_params and 'constant_params' in arrays:\n"
+        load_code += "            try:\n"
+        load_code += "                val = arrays['constant_params']\n"
+        load_code += "                if hasattr(val, 'item'): val = val.item()\n"
+        load_code += "                constant_params = json.loads(str(val))\n"
+        load_code += "            except: pass\n"
+        load_code += "        for k in arrays.files:\n"
+        load_code += "            if k not in ['parameter_name', 'parameter_values', 'constant_params', 'time']:\n"
+        load_code += "                results[k] = arrays[k]\n"
+        load_code += "else:\n"
+        load_code += "    raise ValueError('Unsupported file format')\n\n"
+        load_code += "print(f'Loaded sweep data for parameter: {param_name}')\n"
+        load_code += "print(f'Steps: {len(param_values)}')\n"
+        load_code += "print(f'Metrics: {list(results.keys())}')"
+        cells.append(new_code_cell(load_code))
+
+        # Display Constant Parameters
+        cells.append(new_markdown_cell("## Simulation Configuration"))
+        config_code = 'print(f\'Sweep Mode: {"Dynamic (Time-Resolved)" if is_dynamic else "Static (Final State)"}\')\n'
+        config_code += "print('\\nConstant Parameters (Fixed during sweep):')\n"
+        config_code += "if constant_params:\n"
+        config_code += "    for k, v in sorted(constant_params.items()):\n"
+        config_code += "        print(f'  {k}: {v}')\n"
+        config_code += "else:\n"
+        config_code += "    print('  No constant parameters found in metadata.')\n"
+        config_code += "\n"
+        config_code += "if time_vector is not None:\n"
+        config_code += "    print(f'\\nTime vector loaded: {len(time_vector)} points, duration={time_vector[-1]*1000:.1f} ms')\n"
+        config_code += "\n"
+        config_code += (
+            "# Example: Extracting specific parameters for further calculation\n"
+        )
+        config_code += "t1_ms = constant_params.get('t1', 0) * 1000\n"
+        config_code += "te_ms = constant_params.get('te', 0) * 1000\n"
+        config_code += "print(f'\\nSelected T1: {t1_ms:.1f} ms, TE: {te_ms:.1f} ms')"
+        cells.append(new_code_cell(config_code))
+
+        # Plot Scalar Metrics
+        cells.append(new_markdown_cell("## Scalar Metrics vs Parameter"))
+        plot_code = "fig, ax = plt.subplots(figsize=(10, 6))\n\n"
+        plot_code += "has_scalar = False\n"
+        plot_code += "for name, values in results.items():\n"
+        plot_code += "    # Check if 1D (scalar metric)\n"
+        plot_code += (
+            "    if np.ndim(values) == 1 and len(values) == len(param_values):\n"
+        )
+        plot_code += "        has_scalar = True\n"
+        plot_code += (
+            "        ax.plot(param_values, values, 'o-', label=name, alpha=0.8)\n\n"
+        )
+        plot_code += "if has_scalar:\n"
+        plot_code += "    ax.set_xlabel(param_name)\n"
+        plot_code += "    ax.set_ylabel('Metric Value')\n"
+        plot_code += "    ax.set_title(f'Sweep Results: {param_name}')\n"
+        plot_code += "    ax.legend()\n"
+        plot_code += "    ax.grid(True, alpha=0.3)\n"
+        plot_code += "    plt.show()\n"
+        plot_code += "else:\n"
+        plot_code += "    print('No scalar metrics found to plot.')\n"
+        plot_code += "    plt.close()"
+        cells.append(new_code_cell(plot_code))
+
+        # Advanced Analysis (Dynamic Data) - Only if dynamic mode
+        if is_dynamic:
+            cells.append(new_markdown_cell("## Dynamic Data Analysis"))
+            cells.append(
+                new_markdown_cell(
+                    "Analysis of time-resolved signals across the parameter sweep."
+                )
+            )
+
+            dyn_code = "# Check for time-resolved data (usually 2D or 3D arrays)\n"
+            dyn_code += "dynamic_metrics = [k for k, v in results.items() if np.ndim(v) > 1]\n\n"
+            dyn_code += "if dynamic_metrics:\n"
+            dyn_code += "    print(f'Found dynamic metrics: {dynamic_metrics}')\n"
+            dyn_code += "    target = 'Signal' if 'Signal' in dynamic_metrics else dynamic_metrics[0]\n"
+            dyn_code += "    data_array = results[target]\n"
+            dyn_code += "    \n"
+            dyn_code += "    # Ensure it's 2D for heatmap (Sweep Step x Time)\n"
+            dyn_code += "    if data_array.ndim > 2:\n"
+            dyn_code += "        print(f'Reducing {data_array.ndim}D data to 2D for heatmap...')\n"
+            dyn_code += "        # Average over spatial dimensions (indices 1..N-1), keeping Step (0) and Time (last?)\n"
+            dyn_code += "        # Wait, shape is typically (N_steps, N_time, ...)\n"
+            dyn_code += "        # We want to keep (Step, Time)\n"
+            dyn_code += "        heatmap_data = np.mean(np.abs(data_array), axis=tuple(range(2, data_array.ndim)))\n"
+            dyn_code += "    else:\n"
+            dyn_code += "        heatmap_data = np.abs(data_array)\n\n"
+            dyn_code += "    plt.figure(figsize=(12, 6))\n"
+            dyn_code += "    \n"
+            dyn_code += "    # Set extent based on time vector if available\n"
+            dyn_code += "    if time_vector is not None:\n"
+            dyn_code += "        extent = [time_vector[0], time_vector[-1], param_values[0], param_values[-1]]\n"
+            dyn_code += "        xlabel = 'Time (s)'\n"
+            dyn_code += "    else:\n"
+            dyn_code += "        extent = [0, heatmap_data.shape[1], param_values[0], param_values[-1]]\n"
+            dyn_code += "        xlabel = 'Time (index)'\n"
+            dyn_code += "    \n"
+            dyn_code += "    plt.imshow(heatmap_data, aspect='auto', origin='lower',\n"
+            dyn_code += "               extent=extent, cmap='viridis')\n"
+            dyn_code += "    plt.colorbar(label=f'|{target}|')\n"
+            dyn_code += "    plt.xlabel(xlabel)\n"
+            dyn_code += "    plt.ylabel(param_name)\n"
+            dyn_code += "    plt.title(f'{target} Heatmap vs {param_name}')\n"
+            dyn_code += "    plt.grid(False)\n"
+            dyn_code += "    plt.show()\n"
+            dyn_code += "else:\n"
+            dyn_code += "    print('No dynamic data found for heatmap analysis.')"
+            cells.append(new_code_cell(dyn_code))
+
+        nb["cells"] = cells
+        return nb
+
     def create_notebook_mode_b(
         self,
         sequence_params: Dict,
@@ -183,6 +445,20 @@ class NotebookExporter:
                 f"**Mode**: Re-run simulation from parameters\n\n"
                 f"This notebook reproduces the simulation from scratch using the "
                 f"exported parameters."
+            )
+        )
+
+        # Installation Instructions
+        cells.append(
+            new_markdown_cell(
+                "## Installation\n\n"
+                "If you haven't installed the `blochsimulator` package yet, you can do so using pip:\n\n"
+                "```bash\n"
+                "# From GitHub (latest version)\n"
+                "!pip install git+https://github.com/LucaNagel/bloch_sim_gui.git\n\n"
+                "# From local directory (if you have the source code)\n"
+                "# !pip install .\n"
+                "```"
             )
         )
 
@@ -813,13 +1089,18 @@ print(f"  Duration: {result['time'][-1]*1000:.3f} ms")
 def export_notebook(
     mode: str,
     filename: str,
-    sequence_params: Dict,
-    simulation_params: Dict,
-    tissue_params: Dict,
+    sequence_params: Optional[Dict] = None,
+    simulation_params: Optional[Dict] = None,
+    tissue_params: Optional[Dict] = None,
     h5_filename: Optional[str] = None,
     rf_waveform: Optional[Tuple] = None,
     title: Optional[str] = None,
     waveform_filename: Optional[str] = None,
+    # Sweep specific
+    data_filename: Optional[str] = None,
+    param_name: Optional[str] = None,
+    metrics: Optional[List[str]] = None,
+    is_dynamic: bool = False,
 ):
     """
     Export Jupyter notebook (convenience function).
@@ -827,29 +1108,21 @@ def export_notebook(
     Parameters
     ----------
     mode : str
-        'load_data' (Mode A) or 'resimulate' (Mode B)
+        'load_data' (Mode A), 'resimulate' (Mode B), or 'sweep'
     filename : str
         Output .ipynb filename
-    sequence_params : dict
-        Sequence parameters
-    simulation_params : dict
-        Simulation parameters
-    tissue_params : dict
-        Tissue parameters
-    h5_filename : str, optional
-        HDF5 data file (Mode A only)
-    rf_waveform : tuple, optional
-        (b1, time) RF waveform (Mode B only)
-    title : str, optional
-        Notebook title
-    waveform_filename : str, optional
-        Path to save/load large waveforms (e.g. .npz)
+    ... (other params)
+    is_dynamic : bool
+        Whether sweep data is time-resolved (sweep mode only)
     """
     exporter = NotebookExporter()
 
     if mode.lower() in ["load_data", "a", "mode_a"]:
         if h5_filename is None:
             raise ValueError("Mode A requires h5_filename parameter")
+        # Ensure params are provided
+        if not all([sequence_params, simulation_params, tissue_params]):
+            raise ValueError("Mode A requires sequence, simulation, and tissue params")
 
         nb = exporter.create_notebook_mode_a(
             h5_filename,
@@ -859,6 +1132,8 @@ def export_notebook(
             title or "Bloch Simulation Analysis",
         )
     elif mode.lower() in ["resimulate", "b", "mode_b"]:
+        if not all([sequence_params, simulation_params, tissue_params]):
+            raise ValueError("Mode B requires sequence, simulation, and tissue params")
         nb = exporter.create_notebook_mode_b(
             sequence_params,
             simulation_params,
@@ -867,8 +1142,20 @@ def export_notebook(
             title or "Bloch Simulation - Reproducible",
             waveform_filename=waveform_filename,
         )
+    elif mode.lower() == "sweep":
+        if not all([data_filename, param_name]):
+            raise ValueError("Sweep mode requires data_filename and param_name")
+        nb = exporter.create_notebook_sweep_analysis(
+            data_filename,
+            param_name,
+            metrics or [],
+            title or f"Sweep Analysis: {param_name}",
+            is_dynamic=is_dynamic,
+        )
     else:
-        raise ValueError(f"Unknown mode: {mode}. Use 'load_data' or 'resimulate'")
+        raise ValueError(
+            f"Unknown mode: {mode}. Use 'load_data', 'resimulate', or 'sweep'"
+        )
 
     exporter.save_notebook(nb, filename)
     print(f"Notebook exported: {filename}")

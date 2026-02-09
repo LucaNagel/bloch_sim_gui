@@ -547,7 +547,7 @@ class ExportDataDialog(QDialog):
         layout = QVBoxLayout()
 
         # 1. Visual Exports (Static)
-        visual_group = QGroupBox("Visual Exports (Current View)")
+        self.visual_group = QGroupBox("Visual Exports (Current View)")
         visual_layout = QVBoxLayout()
 
         self.chk_image = QCheckBox("Static Image (PNG/SVG)")
@@ -601,8 +601,8 @@ class ExportDataDialog(QDialog):
         self.chk_animation.toggled.connect(self.anim_opts.setVisible)
         visual_layout.addWidget(self.anim_opts)
 
-        visual_group.setLayout(visual_layout)
-        layout.addWidget(visual_group)
+        self.visual_group.setLayout(visual_layout)
+        layout.addWidget(self.visual_group)
 
         # 3. Data Exports
         data_group = QGroupBox("Data & Analysis")
@@ -738,12 +738,13 @@ class ParameterSweepExportDialog(ExportDataDialog):
         self.chk_hdf5.setToolTip("Full sweep data in NumPy format.")
 
         # Hide visual/animation options for sweep (not yet implemented for sweep results)
-        self.chk_image.setVisible(False)
-        self.chk_animation.setVisible(False)
+        self.visual_group.setVisible(False)
 
-        # Hide Repro notebook
+        # Hide Notebooks
         self.chk_nb_repro.setVisible(False)
         self.chk_nb_repro.setChecked(False)
+        self.chk_nb_analysis.setVisible(True)
+        self.chk_nb_analysis.setChecked(False)
 
         # Add Sweep Options
         self.sweep_opts_group = QGroupBox("Sweep Data Options")

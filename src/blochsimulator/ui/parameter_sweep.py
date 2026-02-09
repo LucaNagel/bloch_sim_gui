@@ -22,9 +22,11 @@ from PyQt5.QtGui import QFont
 import pyqtgraph as pg
 import numpy as np
 import time
+import json
 from typing import Optional
 from pathlib import Path
 from ..visualization import ParameterSweepExportDialog
+from ..notebook_exporter import export_notebook
 
 
 class ParameterSweepWidget(QWidget):
@@ -247,12 +249,62 @@ class ParameterSweepWidget(QWidget):
         # Standard metrics to collect for every sweep
         selected_metrics = ["Mx", "My", "Mz", "Signal", "Mean Signal"]
 
+        # Capture constant parameters
+        constant_params = {}
+        try:
+            # Tissue
+            if hasattr(self.parent_gui, "tissue_widget"):
+                tw = self.parent_gui.tissue_widget
+                params = tw.get_parameters()
+                constant_params["t1"] = float(params.t1)
+                constant_params["t2"] = float(params.t2)
+                constant_params["tissue_name"] = str(params.name)
+                constant_params["m0"] = float(tw.get_initial_mz())
+
+            # Sequence (basic params)
+            if hasattr(self.parent_gui, "sequence_designer"):
+                sd = self.parent_gui.sequence_designer
+                constant_params["te"] = float(sd.te_spin.value() / 1000.0)
+                constant_params["tr"] = float(sd.tr_spin.value() / 1000.0)
+                constant_params["sequence_type"] = str(sd.sequence_type.currentText())
+
+            # RF
+            if hasattr(self.parent_gui, "rf_designer"):
+                rd = self.parent_gui.rf_designer
+                constant_params["flip_angle"] = float(rd.flip_angle.value())
+                constant_params["pulse_duration"] = float(rd.duration.value() / 1000.0)
+                constant_params["pulse_type"] = str(rd.pulse_type.currentText())
+
+            # Simulation
+            if hasattr(self.parent_gui, "pos_spin"):
+                constant_params["num_positions"] = int(self.parent_gui.pos_spin.value())
+            if hasattr(self.parent_gui, "freq_spin"):
+                constant_params["num_frequencies"] = int(
+                    self.parent_gui.freq_spin.value()
+                )
+            if hasattr(self.parent_gui, "time_step_spin"):
+                constant_params["time_step"] = float(
+                    self.parent_gui.time_step_spin.value() * 1e-6
+                )
+
+        except Exception as e:
+            msg = f"Warning: Could not capture constant parameters: {e}"
+            if self.parent_gui:
+                self.parent_gui.log_message(msg)
+            print(msg)
+
+        if constant_params and self.parent_gui:
+            self.parent_gui.log_message(
+                f"Captured {len(constant_params)} constant parameters for export."
+            )
+
         # Run sweep
         results = {
             "parameter_name": param_name,
             "parameter_values": param_values,
             "metrics": {metric: [] for metric in selected_metrics},
             "mode": "dynamic" if save_full else "final",
+            "constant_params": constant_params,
         }
 
         # Store initial values for parameters that need them (like B1 scale)
@@ -260,6 +312,7 @@ class ParameterSweepWidget(QWidget):
 
         # Capture initial state of the parameter to restore it later
         initial_param_val = None
+        initial_freq_range = None
         if "Flip Angle" in param_name:
             initial_param_val = self.parent_gui.rf_designer.flip_angle.value()
         elif "TE" in param_name:
@@ -276,6 +329,11 @@ class ParameterSweepWidget(QWidget):
             initial_param_val = (
                 self.parent_gui.freq_center.value()
                 if hasattr(self.parent_gui, "freq_center")
+                else 0
+            )
+            initial_freq_range = (
+                self.parent_gui.freq_range.value()
+                if hasattr(self.parent_gui, "freq_range")
                 else 0
             )
         elif "B1 Scale" in param_name:
@@ -343,8 +401,16 @@ class ParameterSweepWidget(QWidget):
                     # Extract metrics from results
                     if step_result_container:
                         result = step_result_container[0]
+                        # Capture time vector if available and relevant
+                        if (
+                            save_full
+                            and "time" not in results
+                            and result.get("time") is not None
+                        ):
+                            results["time"] = result["time"]
+
                         for metric in selected_metrics:
-                            value = self._extract_metric(metric, result)
+                            value = self._extract_metric(metric, result, save_full)
                             results["metrics"][metric].append(value)
                     else:
                         # No result - append NaN to maintain array length
@@ -373,6 +439,10 @@ class ParameterSweepWidget(QWidget):
                 self._apply_parameter_value(
                     param_name, initial_param_val, initial_flip_angle
                 )
+            if initial_freq_range is not None and hasattr(
+                self.parent_gui, "freq_range"
+            ):
+                self.parent_gui.freq_range.setValue(initial_freq_range)
 
             # Restore simulation mode
             if hasattr(self, "parent_gui") and original_sim_mode:
@@ -423,9 +493,8 @@ class ParameterSweepWidget(QWidget):
             self.parent_gui.freq_range.setValue(0)
             self.parent_gui.freq_center.setValue(value)
 
-    def _extract_metric(self, metric_name, result):
+    def _extract_metric(self, metric_name, result, save_full):
         """Extract metric value from simulation result based on mode."""
-        save_full = self.mode_dynamic.isChecked()
         try:
             if metric_name == "Mean Signal":
                 # Scalar for plotting (mean absolute transverse magnetization)
@@ -434,10 +503,13 @@ class ParameterSweepWidget(QWidget):
                 if mx is not None and my is not None:
                     mxy = np.sqrt(mx**2 + my**2)
                     if save_full:
-                        # For time-resolved, take mean of peak values or final values?
-                        # Let's take mean over all spins at the peak time or final time.
-                        return float(np.mean(mxy[-1]))
+                        # For time-resolved, take mean over spatial dimensions (axis 1 onwards)
+                        # Result should be 1D array of time points
+                        if mxy.ndim > 1:
+                            return np.mean(mxy, axis=tuple(range(1, mxy.ndim)))
+                        return mxy  # If 1D, it's already a single spin time course
                     else:
+                        # For final state, mean over all spins
                         return float(np.mean(mxy))
                 return 0.0
 
@@ -572,6 +644,7 @@ class ParameterSweepWidget(QWidget):
             self.last_sweep_results, save_full
         )
         exported_files = []
+        primary_data_file = None
 
         try:
             # Export CSV
@@ -579,18 +652,40 @@ class ParameterSweepWidget(QWidget):
                 csv_path = base_path.with_suffix(".csv")
                 self._save_sweep_results_csv(csv_path, export_data)
                 exported_files.append(str(csv_path.name))
+                if not primary_data_file:
+                    primary_data_file = csv_path
 
             # Export NPZ (mapped from HDF5 checkbox)
             if options["hdf5"]:
                 npz_path = base_path.with_suffix(".npz")
                 self._save_sweep_results_npz(npz_path, export_data)
                 exported_files.append(str(npz_path.name))
+                primary_data_file = npz_path  # Prefer NPZ as primary for notebook
 
-            # Export Analysis Notebook (Placeholder/Basic)
+            # Export Analysis Notebook
             if options["notebook_analysis"]:
-                self.parent_gui.log_message(
-                    "Analysis notebook export for sweeps is not yet available."
+                # Ensure we have a data file to load
+                if not primary_data_file:
+                    # User asked for notebook only? Save NPZ automatically
+                    npz_path = base_path.with_suffix(".npz")
+                    self._save_sweep_results_npz(npz_path, export_data)
+                    exported_files.append(str(npz_path.name) + " (auto-generated)")
+                    primary_data_file = npz_path
+
+                nb_path = base_path.with_suffix(".ipynb")
+
+                # Determine dynamic flag from data
+                is_dynamic = export_data.get("mode", "final") == "dynamic"
+
+                export_notebook(
+                    mode="sweep",
+                    filename=str(nb_path),
+                    data_filename=primary_data_file.name,  # Use relative path
+                    param_name=export_data["parameter_name"],
+                    metrics=list(export_data["metrics"].keys()),
+                    is_dynamic=is_dynamic,
                 )
+                exported_files.append(str(nb_path.name))
 
             if exported_files:
                 QMessageBox.information(
@@ -617,8 +712,14 @@ class ParameterSweepWidget(QWidget):
         param_name = results["parameter_name"]
         metrics = list(results["metrics"].keys())
         array_metrics = {m: [] for m in metrics}
+        constant_params = results.get("constant_params", {})
 
         with open(path, "w") as f:
+            # Header with metadata
+            f.write(f"# BlochSimulator Parameter Sweep\n")
+            f.write(f"# Parameter: {param_name}\n")
+            f.write(f"# Constant Parameters: {json.dumps(constant_params)}\n")
+
             f.write(f"{param_name}," + ",".join(metrics) + "\n")
 
             for i, param_val in enumerate(results["parameter_values"]):
@@ -647,12 +748,17 @@ class ParameterSweepWidget(QWidget):
             except Exception:
                 stacked_arrays[metric] = np.array(vals, dtype=object)
 
+        # Include time vector in sidecar if available
+        if "time" in results:
+            stacked_arrays["time"] = results["time"]
+
         if stacked_arrays:
             array_path = path.with_name(path.stem + "_arrays.npz")
             np.savez(
                 array_path,
                 parameter_name=results["parameter_name"],
                 parameter_values=np.asarray(results["parameter_values"]),
+                constant_params=str(json.dumps(constant_params)),
                 **stacked_arrays,
             )
             return array_path
@@ -664,7 +770,11 @@ class ParameterSweepWidget(QWidget):
         payload = {
             "parameter_name": results["parameter_name"],
             "parameter_values": np.asarray(results["parameter_values"]),
+            "constant_params": json.dumps(results.get("constant_params", {})),
         }
+        if "time" in results:
+            payload["time"] = results["time"]
+
         for metric, values in results["metrics"].items():
             payload[metric] = self._stack_metric_values(values)
         np.savez(path, **payload)
