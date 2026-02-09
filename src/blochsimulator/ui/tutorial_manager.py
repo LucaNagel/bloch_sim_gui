@@ -8,6 +8,12 @@ from PyQt5.QtWidgets import (
     QApplication,
     QWidget,
     QTabWidget,
+    QCheckBox,
+    QRadioButton,
+    QSpinBox,
+    QDoubleSpinBox,
+    QSlider,
+    QToolButton,
 )
 from PyQt5.QtCore import QObject, QEvent, pyqtSignal, Qt
 
@@ -90,11 +96,38 @@ class TutorialManager(QObject):
         if self.is_recording and event.type() == QEvent.MouseButtonRelease:
             # Record buttons, tabs, and combo boxes
             name = obj.objectName()
+
+            # If the widget itself has no name, check its immediate parent
+            # (sometimes clicks land on sub-elements of complex widgets like SpinBox)
+            if not name and obj.parent():
+                parent_name = obj.parent().objectName()
+                if parent_name:
+                    obj = obj.parent()
+                    name = parent_name
+
             if not name:
                 return super().eventFilter(obj, event)
 
-            if isinstance(obj, (QPushButton, QComboBox)):
-                self.steps.append({"name": name, "type": "click"})
+            supported_classes = (
+                QPushButton,
+                QComboBox,
+                QCheckBox,
+                QRadioButton,
+                QSpinBox,
+                QDoubleSpinBox,
+                QSlider,
+                QToolButton,
+            )
+
+            if isinstance(obj, supported_classes):
+                # Avoid duplicate steps if multiple events fire for one click
+                if not self.steps or self.steps[-1].get("name") != name:
+                    self.steps.append(
+                        {"name": name, "type": "click", "class": obj.__class__.__name__}
+                    )
+                    print(
+                        f"[Tutorial] Recorded click on: {name} ({obj.__class__.__name__})"
+                    )
 
             elif isinstance(obj, QTabBar):
                 # For tabs, we record the index
@@ -106,9 +139,19 @@ class TutorialManager(QObject):
                         tw = tw.parent()
 
                     if tw and tw.objectName():
-                        self.steps.append(
-                            {"name": tw.objectName(), "type": "tab", "index": idx}
-                        )
+                        tab_name = tw.objectName()
+                        # Avoid duplicates
+                        if (
+                            not self.steps
+                            or self.steps[-1].get("name") != tab_name
+                            or self.steps[-1].get("index") != idx
+                        ):
+                            self.steps.append(
+                                {"name": tab_name, "type": "tab", "index": idx}
+                            )
+                            print(
+                                f"[Tutorial] Recorded tab switch: {tab_name} -> index {idx}"
+                            )
 
         elif self.is_playing and event.type() == QEvent.MouseButtonRelease:
             # Check if the clicked object is the one we are highlighting

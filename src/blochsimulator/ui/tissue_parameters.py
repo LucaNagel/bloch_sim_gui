@@ -27,6 +27,7 @@ class TissueParameterWidget(QGroupBox):
         preset_layout = QHBoxLayout()
         preset_layout.addWidget(QLabel("Preset:"))
         self.preset_combo = QComboBox()
+        self.preset_combo.setObjectName("tissue_preset_combo")
         self.preset_combo.addItems(
             [
                 "Custom",
@@ -46,6 +47,7 @@ class TissueParameterWidget(QGroupBox):
         # Field strength
         preset_layout.addWidget(QLabel("Field:"))
         self.field_combo = QComboBox()
+        self.field_combo.setObjectName("field_strength_combo")
         self.field_combo.addItems(["1.5T", "3.0T", "7.0T"])
         self.field_combo.setCurrentText("3.0T")
         self.field_combo.currentTextChanged.connect(self.load_preset)
@@ -55,6 +57,7 @@ class TissueParameterWidget(QGroupBox):
         # Sequence-specific presets toggle
         seq_preset_layout = QHBoxLayout()
         self.seq_preset_checkbox = QCheckBox("Auto-load sequence presets")
+        self.seq_preset_checkbox.setObjectName("seq_preset_checkbox")
         self.seq_preset_checkbox.setChecked(True)
         self.seq_preset_checkbox.setToolTip(
             "Automatically load TE/TR/TI presets when sequence changes"
@@ -67,12 +70,14 @@ class TissueParameterWidget(QGroupBox):
         t1_layout = QHBoxLayout()
         t1_layout.addWidget(QLabel("T1 (ms):"))
         self.t1_spin = QDoubleSpinBox()
+        self.t1_spin.setObjectName("t1_spin")
         self.t1_spin.setRange(1, 5000)
         self.t1_spin.setValue(1000)
         self.t1_spin.setSuffix(" ms")
         t1_layout.addWidget(self.t1_spin)
 
         self.t1_slider = QSlider(Qt.Horizontal)
+        self.t1_slider.setObjectName("t1_slider")
         self.t1_slider.setRange(1, 5000)
         self.t1_slider.setValue(1000)
         self.t1_slider.valueChanged.connect(lambda v: self.t1_spin.setValue(v))
@@ -84,12 +89,14 @@ class TissueParameterWidget(QGroupBox):
         t2_layout = QHBoxLayout()
         t2_layout.addWidget(QLabel("T2 (ms):"))
         self.t2_spin = QDoubleSpinBox()
+        self.t2_spin.setObjectName("t2_spin")
         self.t2_spin.setRange(1, 2000)
         self.t2_spin.setValue(100)
         self.t2_spin.setSuffix(" ms")
         t2_layout.addWidget(self.t2_spin)
 
         self.t2_slider = QSlider(Qt.Horizontal)
+        self.t2_slider.setObjectName("t2_slider")
         self.t2_slider.setRange(1, 2000)
         self.t2_slider.setValue(100)
         self.t2_slider.valueChanged.connect(lambda v: self.t2_spin.setValue(v))
@@ -101,6 +108,7 @@ class TissueParameterWidget(QGroupBox):
         m0_layout = QHBoxLayout()
         m0_layout.addWidget(QLabel("Initial Mz:"))
         self.m0_spin = QDoubleSpinBox()
+        self.m0_spin.setObjectName("m0_spin")
         self.m0_spin.setRange(-1e9, 1e9)
         self.m0_spin.setDecimals(3)
         self.m0_spin.setValue(1.0)

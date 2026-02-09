@@ -267,11 +267,13 @@ class BlochSimulatorGUI(QMainWindow):
         pos_layout = QHBoxLayout()
         pos_layout.addWidget(QLabel("Positions:"))
         self.pos_spin = QSpinBox()
+        self.pos_spin.setObjectName("pos_spin")
         self.pos_spin.setRange(1, 1100)
         self.pos_spin.setValue(1)
         pos_layout.addWidget(self.pos_spin)
         pos_layout.addWidget(QLabel("Range (cm):"))
         self.pos_range = QDoubleSpinBox()
+        self.pos_range.setObjectName("pos_range")
         self.pos_range.setRange(0.01, 9999.0)
         self.pos_range.setValue(2.0)
         self.pos_range.setSingleStep(1.0)
@@ -282,11 +284,13 @@ class BlochSimulatorGUI(QMainWindow):
         freq_layout = QHBoxLayout()
         freq_layout.addWidget(QLabel("Frequencies:"))
         self.freq_spin = QSpinBox()
+        self.freq_spin.setObjectName("freq_spin")
         self.freq_spin.setRange(1, 10000)
         self.freq_spin.setValue(31)
         freq_layout.addWidget(self.freq_spin)
         freq_layout.addWidget(QLabel("Range (Hz):"))
         self.freq_range = QDoubleSpinBox()
+        self.freq_range.setObjectName("freq_range")
         # Avoid zero-span (forces unique frequencies)
         self.freq_range.setRange(0.01, 1e4)
         self.freq_range.setValue(100.0)
@@ -301,6 +305,7 @@ class BlochSimulatorGUI(QMainWindow):
         time_res_layout = QHBoxLayout()
         time_res_layout.addWidget(QLabel("Time step (us):"))
         self.time_step_spin = QDoubleSpinBox()
+        self.time_step_spin.setObjectName("time_step_spin")
         self.time_step_spin.setRange(0.1, 5000)
         self.time_step_spin.setValue(10.0)
         self.time_step_spin.setDecimals(2)
@@ -313,6 +318,7 @@ class BlochSimulatorGUI(QMainWindow):
         tail_layout = QHBoxLayout()
         tail_layout.addWidget(QLabel("Extra tail (ms):"))
         self.extra_tail_spin = QDoubleSpinBox()
+        self.extra_tail_spin.setObjectName("extra_tail_spin")
         self.extra_tail_spin.setRange(0.0, 1e6)
         self.extra_tail_spin.setValue(5.0)
         self.extra_tail_spin.setDecimals(3)
@@ -430,6 +436,7 @@ class BlochSimulatorGUI(QMainWindow):
         # Add plot type selector (Line vs Heatmap) - default to Heatmap
         mag_view_layout.addWidget(QLabel("Plot type:"))
         self.mag_plot_type = QComboBox()
+        self.mag_plot_type.setObjectName("mag_plot_type")
         self.mag_plot_type.addItems(["Heatmap", "Line"])
         self.mag_plot_type.currentTextChanged.connect(
             lambda _: self._refresh_mag_plots()
@@ -439,6 +446,7 @@ class BlochSimulatorGUI(QMainWindow):
         # Add component selector for heatmap
         mag_view_layout.addWidget(QLabel("Component:"))
         self.mag_component = QComboBox()
+        self.mag_component.setObjectName("mag_component")
         self.mag_component.addItems(
             ["Magnitude", "Real (Mx/Re)", "Imaginary (My/Im)", "Phase", "Mz"]
         )
@@ -449,6 +457,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         mag_view_layout.addWidget(QLabel("View mode:"))
         self.mag_view_mode = QComboBox()
+        self.mag_view_mode.setObjectName("mag_view_mode")
         self.mag_view_mode.addItems(
             ["All positions x freqs", "Positions @ freq", "Freqs @ position"]
         )
@@ -567,6 +576,7 @@ class BlochSimulatorGUI(QMainWindow):
         signal_view_layout = QHBoxLayout()
         signal_view_layout.addWidget(QLabel("Plot type:"))
         self.signal_plot_type = QComboBox()
+        self.signal_plot_type.setObjectName("signal_plot_type")
         self.signal_plot_type.addItems(["Heatmap", "Line"])
         self.signal_plot_type.currentTextChanged.connect(
             lambda _: self._refresh_signal_plots()
@@ -576,6 +586,7 @@ class BlochSimulatorGUI(QMainWindow):
         # Add component selector for signal heatmap
         signal_view_layout.addWidget(QLabel("Component:"))
         self.signal_component = QComboBox()
+        self.signal_component.setObjectName("signal_component")
         self.signal_component.addItems(["Magnitude", "Real", "Imaginary", "Phase"])
         self.signal_component.currentTextChanged.connect(
             lambda _: self._refresh_signal_plots()
@@ -584,6 +595,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         signal_view_layout.addWidget(QLabel("View mode:"))
         self.signal_view_mode = QComboBox()
+        self.signal_view_mode.setObjectName("signal_view_mode")
         self.signal_view_mode.addItems(
             ["All positions x freqs", "Positions @ freq", "Freqs @ position"]
         )
@@ -3647,6 +3659,9 @@ class BlochSimulatorGUI(QMainWindow):
             self.time_control.setEnabled(True)
 
         self.update_spatial_plot_from_last_result()
+        # Ensure heatmaps or lines are correctly refreshed based on current UI selection
+        self._refresh_mag_plots()
+        self._refresh_signal_plots()
 
     def _precompute_plot_ranges(self, result):
         """Pre-calculate stable Y-ranges for plots based on the full dataset."""
