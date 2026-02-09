@@ -271,6 +271,25 @@ result = sim.simulate(
 print(f"Signal shape: {result['signal'].shape}")
 ```
 
+#### Xarray Integration
+
+For advanced analysis, you can convert simulation results directly to an `xarray.Dataset`. This provides named dimensions, coordinates, and automatic metadata tracking.
+
+```python
+# Convert last result to xarray
+ds = sim.get_results_as_xarray()
+
+# Access data with named dimensions
+# Dimensions: (time, position, frequency)
+print(ds.mx.dims)
+
+# Powerful selection and plotting
+ds.signal.sel(frequency=0, method='nearest').plot()
+
+# Metadata is preserved in attributes
+print(ds.attrs['t1'], ds.attrs['te'])
+```
+
 ### 3. Sequence Library
 
 Pre-defined sequences are available:
