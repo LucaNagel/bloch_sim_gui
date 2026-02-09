@@ -82,6 +82,7 @@ from .controls import UniversalTimeControl
 from .magnetization_viewer import MagnetizationViewer
 from .parameter_sweep import ParameterSweepWidget
 from .tutorial_manager import TutorialManager
+from .tutorial_overlay import TutorialOverlay
 
 
 def get_app_data_dir() -> Path:
@@ -161,6 +162,7 @@ class BlochSimulatorGUI(QMainWindow):
         self._spectrum_final_range = None
         self.dataset_exporter = DatasetExporter()
         self.tutorial_manager = TutorialManager(self)
+        self.tutorial_overlay = None
         self.tutorial_manager.step_reached.connect(self._on_tutorial_step)
         self.tutorial_manager.playback_finished.connect(self._on_tutorial_finished)
         self._sweep_mode = False
@@ -6375,11 +6377,26 @@ class BlochSimulatorGUI(QMainWindow):
         if path:
             name = Path(path).stem
             if self.tutorial_manager.load_tutorial(name):
+                self._show_tutorial_overlay()
                 self.tutorial_manager.start_playback()
                 self.stop_tut_action.setEnabled(True)
                 self.statusBar().showMessage(f"Playing tutorial: {name}")
             else:
                 QMessageBox.warning(self, "Error", f"Could not load tutorial: {name}")
+
+    def _show_tutorial_overlay(self):
+        if self.tutorial_overlay is None:
+            self.tutorial_overlay = TutorialOverlay(self)
+            self.tutorial_overlay.next_clicked.connect(self.tutorial_manager.next_step)
+            self.tutorial_overlay.prev_clicked.connect(self.tutorial_manager.prev_step)
+            self.tutorial_overlay.stop_clicked.connect(self.stop_tutorial)
+
+        # Position in top-right corner
+        geo = self.geometry()
+        x = geo.x() + geo.width() - 300
+        y = geo.y() + 100
+        self.tutorial_overlay.move(x, y)
+        self.tutorial_overlay.show()
 
     def stop_tutorial(self):
         if self.tutorial_manager.is_recording:
@@ -6394,14 +6411,25 @@ class BlochSimulatorGUI(QMainWindow):
             self.tutorial_manager.stop_playback()
             self.statusBar().showMessage("Tutorial playback stopped.")
 
+        if self.tutorial_overlay:
+            self.tutorial_overlay.hide()
+            self.tutorial_overlay = None
+
         self.stop_tut_action.setEnabled(False)
 
     def _on_tutorial_step(self, current, total):
-        self.statusBar().showMessage(f"Tutorial Step {current + 1}/{total}")
+        msg = f"Tutorial Step {current + 1}/{total}"
+        self.statusBar().showMessage(msg)
+        if self.tutorial_overlay:
+            instruction = self.tutorial_manager.get_current_instruction()
+            self.tutorial_overlay.update_step(current, total, instruction)
 
     def _on_tutorial_finished(self):
         self.statusBar().showMessage("Tutorial Completed!")
         self.stop_tut_action.setEnabled(False)
+        if self.tutorial_overlay:
+            self.tutorial_overlay.hide()
+            self.tutorial_overlay = None
         QMessageBox.information(self, "Tutorial", "Tutorial Completed!")
 
     def show_about(self):

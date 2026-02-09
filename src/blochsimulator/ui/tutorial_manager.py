@@ -184,11 +184,12 @@ class TutorialManager(QObject):
             if is_correct:
                 # Move to next step shortly after to allow the event to process
                 # We can't delay in eventFilter, so we just call next_step
-                self._next_step()
+                self.next_step()
 
         return super().eventFilter(obj, event)
 
-    def _next_step(self):
+    def next_step(self):
+        """Advance to the next tutorial step."""
         self._clear_highlights()
         self.current_step_idx += 1
         if self.current_step_idx < len(self.steps):
@@ -197,15 +198,40 @@ class TutorialManager(QObject):
         else:
             self.stop_playback()
 
+    def prev_step(self):
+        """Go back to the previous tutorial step."""
+        if self.current_step_idx > 0:
+            self._clear_highlights()
+            self.current_step_idx -= 1
+            self._highlight_current_step()
+            self.step_reached.emit(self.current_step_idx, len(self.steps))
+
+    def get_current_instruction(self):
+        """Get text instruction for the current step."""
+        if 0 <= self.current_step_idx < len(self.steps):
+            step = self.steps[self.current_step_idx]
+            name = step.get("name", "Unknown Widget")
+            action = "Click" if step.get("type") == "click" else "Select"
+            if step.get("type") == "tab":
+                return f"{action} tab on '{name}' (index {step.get('index')})"
+            return f"{action} '{name}'"
+        return "Tutorial finished"
+
     def _highlight_current_step(self):
         target = self.steps[self.current_step_idx]
         widget = self.main_window.findChild(QWidget, target["name"])
 
         if widget:
-            self.original_styles[widget] = widget.styleSheet()
-            # Append highlight style to existing style (or replace if empty)
-            new_style = self.highlight_style
-            widget.setStyleSheet(new_style)
+            if target.get("type") == "tab" and isinstance(widget, QTabWidget):
+                # For tabs, we highlight the tab bar
+                bar = widget.tabBar()
+                self.original_styles[bar] = bar.styleSheet()
+                bar.setStyleSheet(self.highlight_style)
+            else:
+                self.original_styles[widget] = widget.styleSheet()
+                # Append highlight style to existing style (or replace if empty)
+                new_style = self.highlight_style
+                widget.setStyleSheet(new_style)
 
     def _clear_highlights(self):
         for widget, style in self.original_styles.items():

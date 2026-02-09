@@ -30,6 +30,7 @@ __pycache__/
 !self_testing.md
 !USER_GUIDE.md
 !DEVELOPER_GUIDE.md
+!docs/TUTORIAL_MODE.md
 
 # Generated C files
 src/blochsimulator/bloch_wrapper.c

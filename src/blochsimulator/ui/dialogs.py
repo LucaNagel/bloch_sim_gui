@@ -24,6 +24,7 @@ class PulseImportDialog(QDialog):
             form.addRow(QLabel(f"File: {Path(filename).name}"))
 
         self.layout_mode = QComboBox()
+        self.layout_mode.setObjectName("import_layout_mode")
         self.layout_mode.addItems(
             [
                 "Interleaved: amp, phase, amp, phase",
@@ -35,6 +36,7 @@ class PulseImportDialog(QDialog):
         form.addRow("Data layout:", self.layout_mode)
 
         self.amp_unit = QComboBox()
+        self.amp_unit.setObjectName("import_amp_unit")
         self.amp_unit.addItems(
             [
                 "Percent (0-100)",
@@ -48,11 +50,13 @@ class PulseImportDialog(QDialog):
         form.addRow("Amplitude unit:", self.amp_unit)
 
         self.phase_unit = QComboBox()
+        self.phase_unit.setObjectName("import_phase_unit")
         self.phase_unit.addItems(["Degrees", "Radians"])
         self.phase_unit.setCurrentIndex(0)
         form.addRow("Phase unit:", self.phase_unit)
 
         self.duration_ms = QDoubleSpinBox()
+        self.duration_ms.setObjectName("import_duration_ms")
         self.duration_ms.setRange(0.001, 100000.0)
         self.duration_ms.setDecimals(3)
         self.duration_ms.setSingleStep(0.1)
