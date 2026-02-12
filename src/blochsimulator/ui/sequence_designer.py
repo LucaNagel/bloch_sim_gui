@@ -48,6 +48,7 @@ class SequenceDesigner(QGroupBox):
         pulse_layout = QHBoxLayout()
         pulse_layout.addWidget(QLabel("Pulses:"))
         self.pulse_list = QListWidget()
+        self.pulse_list.setObjectName("sequence_pulse_list")
         self.pulse_list.setFixedHeight(60)
         self.pulse_list.currentItemChanged.connect(self._on_pulse_selection_changed)
         pulse_layout.addWidget(self.pulse_list)
@@ -100,38 +101,81 @@ class SequenceDesigner(QGroupBox):
         row1.addWidget(self.ssfp_repeats)
         ssfp_layout.addLayout(row1)
 
-        row3 = QHBoxLayout()
-        # Pulse duration is now taken from RF Pulse Designer
-        # self.ssfp_dur = QDoubleSpinBox()... (removed)
+        # Ratio mode toggle
+        self.ssfp_use_ratios = QCheckBox("Use ratios for start pulse")
+        self.ssfp_use_ratios.setObjectName("ssfp_use_ratios")
+        self.ssfp_use_ratios.setChecked(True)
+        self.ssfp_use_ratios.toggled.connect(self._update_ssfp_visibility)
+        self.ssfp_use_ratios.toggled.connect(lambda _: self.update_diagram())
+        ssfp_layout.addWidget(self.ssfp_use_ratios)
 
-        row3.addWidget(QLabel("Start delay (ms):"))
-        self.ssfp_start_delay = QDoubleSpinBox()
-        self.ssfp_start_delay.setObjectName("ssfp_start_delay")
-        self.ssfp_start_delay.setRange(0.0, 10000.0)
-        self.ssfp_start_delay.setDecimals(3)
-        self.ssfp_start_delay.setValue(0.0)
-        self.ssfp_start_delay.valueChanged.connect(lambda _: self.update_diagram())
-        row3.addWidget(self.ssfp_start_delay)
-        ssfp_layout.addLayout(row3)
+        # Absolute value container
+        self.ssfp_abs_container = QWidget()
+        abs_layout = QVBoxLayout()
+        abs_layout.setContentsMargins(0, 0, 0, 0)
 
-        row4 = QHBoxLayout()
-        row4.addWidget(QLabel("Start Flip (°):"))
+        row_abs_tr = QHBoxLayout()
+        row_abs_tr.addWidget(QLabel("Start TR (ms):"))
+        self.ssfp_start_tr = QDoubleSpinBox()
+        self.ssfp_start_tr.setObjectName("ssfp_start_tr")
+        self.ssfp_start_tr.setRange(0.0, 10000.0)
+        self.ssfp_start_tr.setDecimals(3)
+        self.ssfp_start_tr.setValue(0.0)
+        self.ssfp_start_tr.valueChanged.connect(lambda _: self.update_diagram())
+        row_abs_tr.addWidget(self.ssfp_start_tr)
+        abs_layout.addLayout(row_abs_tr)
+
+        row_abs_flip = QHBoxLayout()
+        row_abs_flip.addWidget(QLabel("Start Flip (°):"))
         self.ssfp_start_flip = QDoubleSpinBox()
         self.ssfp_start_flip.setObjectName("ssfp_start_flip")
         self.ssfp_start_flip.setRange(0.0, 360.0)
         self.ssfp_start_flip.setDecimals(2)
         self.ssfp_start_flip.setValue(45.0)
         self.ssfp_start_flip.valueChanged.connect(lambda _: self.update_diagram())
-        row4.addWidget(self.ssfp_start_flip)
-        row4.addWidget(QLabel("Start phase (deg):"))
+        row_abs_flip.addWidget(self.ssfp_start_flip)
+        abs_layout.addLayout(row_abs_flip)
+        self.ssfp_abs_container.setLayout(abs_layout)
+        ssfp_layout.addWidget(self.ssfp_abs_container)
+
+        # Ratio value container
+        self.ssfp_ratio_container = QWidget()
+        ratio_layout = QVBoxLayout()
+        ratio_layout.setContentsMargins(0, 0, 0, 0)
+
+        row_ratio_tr = QHBoxLayout()
+        row_ratio_tr.addWidget(QLabel("Start TR Ratio:"))
+        self.ssfp_tr_ratio = QDoubleSpinBox()
+        self.ssfp_tr_ratio.setRange(0.0, 2.0)
+        self.ssfp_tr_ratio.setSingleStep(0.1)
+        self.ssfp_tr_ratio.setValue(0.5)
+        self.ssfp_tr_ratio.valueChanged.connect(lambda _: self.update_diagram())
+        row_ratio_tr.addWidget(self.ssfp_tr_ratio)
+        ratio_layout.addLayout(row_ratio_tr)
+
+        row_ratio_flip = QHBoxLayout()
+        row_ratio_flip.addWidget(QLabel("Start Flip Ratio:"))
+        self.ssfp_flip_ratio = QDoubleSpinBox()
+        self.ssfp_flip_ratio.setRange(0.0, 2.0)
+        self.ssfp_flip_ratio.setSingleStep(0.1)
+        self.ssfp_flip_ratio.setValue(0.5)
+        self.ssfp_flip_ratio.valueChanged.connect(lambda _: self.update_diagram())
+        row_ratio_flip.addWidget(self.ssfp_flip_ratio)
+        ratio_layout.addLayout(row_ratio_flip)
+        self.ssfp_ratio_container.setLayout(ratio_layout)
+        ssfp_layout.addWidget(self.ssfp_ratio_container)
+
+        # Phase setting (always visible in SSFP)
+        row_phase = QHBoxLayout()
+        row_phase.addWidget(QLabel("Start phase (deg):"))
         self.ssfp_start_phase = QDoubleSpinBox()
         self.ssfp_start_phase.setObjectName("ssfp_start_phase")
         self.ssfp_start_phase.setRange(-3600, 3600)
         self.ssfp_start_phase.setDecimals(2)
         self.ssfp_start_phase.setValue(180.0)
         self.ssfp_start_phase.valueChanged.connect(lambda _: self.update_diagram())
-        row4.addWidget(self.ssfp_start_phase)
-        ssfp_layout.addLayout(row4)
+        row_phase.addWidget(self.ssfp_start_phase)
+        ssfp_layout.addLayout(row_phase)
 
         # Alternating phase option (common bSSFP scheme: 0/180/0/180 ...)
         self.ssfp_alternate_phase = QCheckBox("Alternate phase each TR (0/180°)")
@@ -172,7 +216,7 @@ class SequenceDesigner(QGroupBox):
         te_layout.addWidget(QLabel("TE (ms):"))
         self.te_spin = QDoubleSpinBox()
         self.te_spin.setObjectName("te_spin")
-        self.te_spin.setRange(0.1, 200)
+        self.te_spin.setRange(0.1, 10000)
         self.te_spin.setValue(20)
         te_layout.addWidget(self.te_spin)
         layout.addWidget(self.te_container)
@@ -216,7 +260,7 @@ class SequenceDesigner(QGroupBox):
         tr_layout.addWidget(QLabel("TR (ms):"))
         self.tr_spin = QDoubleSpinBox()
         self.tr_spin.setObjectName("tr_spin")
-        self.tr_spin.setRange(1, 10000)
+        self.tr_spin.setRange(1, 1000000)
         self.tr_spin.setValue(10)
         tr_layout.addWidget(self.tr_spin)
         self.tr_actual_label = QLabel("")
@@ -230,7 +274,7 @@ class SequenceDesigner(QGroupBox):
         ti_layout.addWidget(QLabel("TI (ms):"))
         self.ti_spin = QDoubleSpinBox()
         self.ti_spin.setObjectName("ti_spin")
-        self.ti_spin.setRange(1, 5000)
+        self.ti_spin.setRange(1, 180000)
         self.ti_spin.setValue(400)
         ti_layout.addWidget(self.ti_spin)
         self.ti_widget = QWidget()
@@ -275,6 +319,12 @@ class SequenceDesigner(QGroupBox):
             pass
         return 4.0
 
+    def _update_ssfp_visibility(self):
+        """Toggle between absolute and ratio inputs for SSFP."""
+        is_ratio = self.ssfp_use_ratios.isChecked()
+        self.ssfp_abs_container.setVisible(not is_ratio)
+        self.ssfp_ratio_container.setVisible(is_ratio)
+
     def _update_sequence_options(self):
         """Show/hide sequence-specific option widgets and update pulse list."""
         seq_type = self.sequence_type.currentText()
@@ -282,6 +332,8 @@ class SequenceDesigner(QGroupBox):
             seq_type in ("Spin Echo", "Spin Echo (Tip-axis 180)")
         )
         self.ssfp_opts.setVisible(seq_type == "SSFP (Loop)")
+        if seq_type == "SSFP (Loop)":
+            self._update_ssfp_visibility()
         self.slice_rephase_opts.setVisible(seq_type == "Slice Select + Rephase")
         self.ti_widget.setVisible(seq_type == "Inversion Recovery")
 
@@ -465,17 +517,14 @@ class SequenceDesigner(QGroupBox):
                 "flip_angle": 30,
                 "ssfp_repeats": 100,
                 "ssfp_dur": 1.0,
-                "ssfp_start_delay": 0.0,
+                "ssfp_start_tr": 0.0,
                 "ssfp_start_flip": 15.0,
                 "ssfp_start_phase": 0.0,
                 "ssfp_alternate_phase": True,
+                "ssfp_use_ratios": True,
+                "ssfp_tr_ratio": 0.5,
+                "ssfp_flip_ratio": 0.5,
                 "pulse_type": "gaussian",
-                "num_positions": 1,
-                "num_frequencies": 101,
-                "frequency_range_hz": 1000,
-                "duration": 1.0,  # ms
-                "time_step": 10.0,
-                "b1_amplitude": 0.0,
             },
             "Inversion Recovery": {
                 "te_ms": 10,
@@ -862,9 +911,14 @@ class SequenceDesigner(QGroupBox):
             main_flip = 30.0
             pulse_dur = 1e-3
 
-        start_flip = self.ssfp_start_flip.value()
+        if self.ssfp_use_ratios.isChecked():
+            start_flip = main_flip * self.ssfp_flip_ratio.value()
+            start_delay = tr * self.ssfp_tr_ratio.value()
+        else:
+            start_flip = self.ssfp_start_flip.value()
+            start_delay = self.ssfp_start_tr.value() / 1000.0
+
         start_phase = np.deg2rad(self.ssfp_start_phase.value())
-        start_delay = self.ssfp_start_delay.value() / 1000.0
         alternate = self.ssfp_alternate_phase.isChecked()
 
         # If a custom pulse is provided, resample it onto dt and override the pulse shape.
@@ -1072,12 +1126,15 @@ class SequenceDesigner(QGroupBox):
                 # Sync Start Flip to half of the designer's flip angle
                 main_flip = self.parent_gui.rf_designer.flip_angle.value()
                 self.ssfp_start_flip.setValue(main_flip / 2.0)
+                self.ssfp_flip_ratio.setValue(0.5)
             if t_wave is not None and len(t_wave) > 1:
                 # Calculate dt from the first two points (assuming uniform spacing)
                 dt = float(t_wave[1] - t_wave[0])
                 # Duration is span + 1 dt (because samples are 0..N-1)
                 duration_s = float(t_wave[-1] - t_wave[0]) + dt
-                # self.ssfp_dur.setValue(...) # Removed as redundant
+                # Sync Start TR to 0
+                self.ssfp_start_tr.setValue(0.0)
+                self.ssfp_tr_ratio.setValue(0.0)
         self.update_diagram()
 
     def update_diagram(self, custom_pulse=None):

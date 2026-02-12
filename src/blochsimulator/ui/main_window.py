@@ -161,6 +161,7 @@ class BlochSimulatorGUI(QMainWindow):
         self._last_spectrum_export = None
         self._spectrum_final_range = None
         self.dataset_exporter = DatasetExporter()
+        self._plotting_in_progress = False
         self.tutorial_manager = TutorialManager(self)
         self.tutorial_overlay = None
         self.tutorial_manager.step_reached.connect(self._on_tutorial_step)
@@ -740,7 +741,7 @@ class BlochSimulatorGUI(QMainWindow):
         spectrum_comp_layout.addWidget(self.spectrum_component_label)
         self.spectrum_component_combo = CheckableComboBox()
         self.spectrum_component_combo.add_items(
-            ["Magnitude", "Phase", "Phase (unwrapped)", "Real", "Imaginary"]
+            ["Magnitude", "Phase", "Phase (unwrapped)", "Real", "Imaginary", "Mz"]
         )
         self.spectrum_component_combo.set_selected_items(["Magnitude"])
         self.spectrum_component_combo.selection_changed.connect(
@@ -1949,7 +1950,106 @@ class BlochSimulatorGUI(QMainWindow):
                 self.mz_plot.show()
                 self.mxy_heatmap_layout.hide()
                 self.mz_heatmap_layout.hide()
-                self.update_plots(self.last_result)
+                self._render_mag_lines()
+
+    def _render_mag_lines(self):
+        """Render magnetization as lines."""
+        if self.last_result is None:
+            return
+
+        mx_all = self.last_result["mx"]
+        my_all = self.last_result["my"]
+        mz_all = self.last_result["mz"]
+
+        time_arr = (
+            self.last_time
+            if self.last_time is not None
+            else self.last_result.get("time", None)
+        )
+        if time_arr is None:
+            return
+        time_ms = time_arr * 1000
+
+        if mx_all.ndim == 2:
+            # Steady-state / endpoint
+            t_plot = (
+                np.array([time_ms[0], time_ms[-1]])
+                if len(time_ms) > 1
+                else np.array([0, 1])
+            )
+            self._safe_clear_plot(self.mxy_plot)
+            total_series = mx_all.shape[0] * mx_all.shape[1]
+            self._reset_legend(self.mxy_plot, "mxy_legend", total_series > 1)
+            idx = 0
+            for pi in range(mx_all.shape[0]):
+                for fi in range(mx_all.shape[1]):
+                    color = self._color_for_index(idx, total_series)
+                    self.mxy_plot.plot(
+                        t_plot,
+                        [mx_all[pi, fi], mx_all[pi, fi]],
+                        pen=pg.mkPen(color, width=4),
+                    )
+                    self.mxy_plot.plot(
+                        t_plot,
+                        [my_all[pi, fi], my_all[pi, fi]],
+                        pen=pg.mkPen(color, style=Qt.DashLine, width=2),
+                    )
+                    idx += 1
+
+            self._safe_clear_plot(self.mz_plot)
+            self._reset_legend(self.mz_plot, "mz_legend", total_series > 1)
+            idx = 0
+            for pi in range(mz_all.shape[0]):
+                for fi in range(mz_all.shape[1]):
+                    color = self._color_for_index(idx, total_series)
+                    self.mz_plot.plot(
+                        t_plot,
+                        [mz_all[pi, fi], mz_all[pi, fi]],
+                        pen=pg.mkPen(color, width=2),
+                    )
+                    idx += 1
+        else:
+            # Time-resolved
+            ntime, npos, nfreq = mx_all.shape
+            mean_only = self.mean_only_checkbox.isChecked()
+
+            self._safe_clear_plot(self.mxy_plot)
+            if mean_only:
+                mean_mx = np.mean(mx_all, axis=(1, 2))
+                mean_my = np.mean(my_all, axis=(1, 2))
+                self.mxy_plot.plot(time_ms, mean_mx, pen=pg.mkPen("c", width=4))
+                self.mxy_plot.plot(
+                    time_ms, mean_my, pen=pg.mkPen("c", width=4, style=Qt.DashLine)
+                )
+            else:
+                total_series = npos * nfreq
+                indices_to_plot = self._get_trace_indices_to_plot(total_series)
+                for linear_idx in indices_to_plot:
+                    pi = linear_idx // nfreq
+                    fi = linear_idx % nfreq
+                    color = self._color_for_index(linear_idx, total_series)
+                    self.mxy_plot.plot(
+                        time_ms, mx_all[:, pi, fi], pen=pg.mkPen(color, width=2)
+                    )
+                    self.mxy_plot.plot(
+                        time_ms,
+                        my_all[:, pi, fi],
+                        pen=pg.mkPen(color, style=Qt.DashLine, width=2),
+                    )
+
+            self._safe_clear_plot(self.mz_plot)
+            if mean_only:
+                mean_mz = np.mean(mz_all, axis=(1, 2))
+                self.mz_plot.plot(time_ms, mean_mz, pen=pg.mkPen("c", width=4))
+            else:
+                indices_to_plot = self._get_trace_indices_to_plot(npos * nfreq)
+                for linear_idx in indices_to_plot:
+                    pi = linear_idx // nfreq
+                    fi = linear_idx % nfreq
+                    color = self._color_for_index(linear_idx, npos * nfreq)
+                    self.mz_plot.plot(
+                        time_ms, mz_all[:, pi, fi], pen=pg.mkPen(color, width=2)
+                    )
 
     def _refresh_signal_plots(self):
         """Re-render signal plots using the current filter selection."""
@@ -1968,8 +2068,66 @@ class BlochSimulatorGUI(QMainWindow):
         else:
             self.signal_plot.show()
             self.signal_heatmap_layout.hide()
-            # Don't call update_plots to avoid infinite loop
-            # Just refresh the specific plot content
+            self._render_signal_lines()
+
+    def _render_signal_lines(self):
+        """Render received signal as lines."""
+        if self.last_result is None:
+            return
+
+        signal_all = self.last_result["signal"]
+        time_arr = (
+            self.last_time
+            if self.last_time is not None
+            else self.last_result.get("time", None)
+        )
+        if time_arr is None:
+            return
+        time_ms = time_arr * 1000
+
+        self._safe_clear_plot(self.signal_plot)
+
+        if signal_all.ndim == 1:
+            # Simple 1D signal
+            self.signal_plot.plot(
+                time_ms,
+                np.abs(signal_all),
+                pen=pg.mkPen("w", width=2),
+                name="Magnitude",
+            )
+            self.signal_plot.plot(
+                time_ms, np.real(signal_all), pen=pg.mkPen("r", width=1), name="Real"
+            )
+            self.signal_plot.plot(
+                time_ms,
+                np.imag(signal_all),
+                pen=pg.mkPen("g", width=1),
+                name="Imaginary",
+            )
+        elif signal_all.ndim == 3:
+            # Time-resolved 3D data (ntime, npos, nfreq)
+            ntime, npos, nfreq = signal_all.shape
+            mean_only = self.mean_only_checkbox.isChecked()
+
+            if mean_only:
+                mean_sig = np.mean(signal_all, axis=(1, 2))
+                self.signal_plot.plot(
+                    time_ms,
+                    np.abs(mean_sig),
+                    pen=pg.mkPen("w", width=3),
+                    name="Mean Mag",
+                )
+            else:
+                total_series = npos * nfreq
+                indices_to_plot = self._get_trace_indices_to_plot(total_series)
+                for linear_idx in indices_to_plot:
+                    pi = linear_idx // nfreq
+                    fi = linear_idx % nfreq
+                    color = self._color_for_index(linear_idx, total_series)
+                    sig_trace = signal_all[:, pi, fi]
+                    self.signal_plot.plot(
+                        time_ms, np.abs(sig_trace), pen=pg.mkPen(color, width=1.5)
+                    )
 
     def _calc_symmetric_limits(self, *arrays, base=1.0, pad=1.1):
         """Compute symmetric y-limits with padding based on provided arrays."""
@@ -2683,27 +2841,14 @@ class BlochSimulatorGUI(QMainWindow):
             )
             has_unwrapped = "Phase (unwrapped)" in selected_components
 
+            # Use pre-calculated stable ranges, adapted for the current selection
             if has_unwrapped:
                 self.spatial_mxy_plot.enableAutoRange(
                     axis=pg.ViewBox.YAxis, enable=True
                 )
             elif is_only_phase:
-                self.spatial_mxy_plot.setYRange(-1.1, 1.1, padding=0)
-            else:
-                mxy_ymin, mxy_ymax = padded_range(mxy_min_all, mxy_max_all, scale=1.1)
-                self.spatial_mxy_plot.setYRange(mxy_ymin, mxy_ymax)
-
-            mz_ymin, mz_ymax = (
-                padded_range(mz_min_all, mz_max_all, scale=1.1)
-                if not is_only_phase
-                else (-1.1, 1.1)
-            )
-
-            # Use pre-calculated stable ranges, adapted for the current selection
-            if has_unwrapped:
-                pass  # Already set to auto
-            elif is_only_phase:
-                pass  # Already set fixed
+                mxy_ymin, mxy_ymax = -1.1, 1.1
+                self.spatial_mxy_plot.setYRange(mxy_ymin, mxy_ymax, padding=0)
             elif hasattr(self, "spatial_mxy_yrange"):
                 # If only "Magnitude" is selected (no Real/Imag), use [0, max]
                 if (
@@ -2716,17 +2861,20 @@ class BlochSimulatorGUI(QMainWindow):
                     )
                 else:
                     mxy_ymin, mxy_ymax = self.spatial_mxy_yrange
+                self.spatial_mxy_plot.setYRange(mxy_ymin, mxy_ymax, padding=0)
+            else:
+                mxy_ymin, mxy_ymax = padded_range(mxy_min_all, mxy_max_all, scale=1.1)
                 self.spatial_mxy_plot.setYRange(mxy_ymin, mxy_ymax)
 
             if hasattr(self, "spatial_mz_yrange") and not is_only_phase:
                 mz_ymin, mz_ymax = self.spatial_mz_yrange
+                self.spatial_mz_plot.setYRange(mz_ymin, mz_ymax, padding=0)
+            elif not is_only_phase:
+                mz_ymin, mz_ymax = padded_range(mz_min_all, mz_max_all, scale=1.1)
                 self.spatial_mz_plot.setYRange(mz_ymin, mz_ymax)
 
             self.spatial_mxy_plot.setXRange(pos_min - pos_pad, pos_max + pos_pad)
-            self.spatial_mxy_plot.setYRange(mxy_ymin, mxy_ymax)
-
             self.spatial_mz_plot.setXRange(pos_min - pos_pad, pos_max + pos_pad)
-            self.spatial_mz_plot.setYRange(mz_ymin, mz_ymax)
 
             # Update slice thickness guides
             slice_thk = None
@@ -3005,7 +3153,10 @@ class BlochSimulatorGUI(QMainWindow):
             self.rf_designer.flip_angle,
             self.rf_designer.b1_amplitude,
             self.sequence_designer.ssfp_repeats,
-            self.sequence_designer.ssfp_start_delay,
+            self.sequence_designer.ssfp_start_tr,
+            self.sequence_designer.ssfp_use_ratios,
+            self.sequence_designer.ssfp_tr_ratio,
+            self.sequence_designer.ssfp_flip_ratio,
             self.sequence_designer.ssfp_start_flip,
             self.sequence_designer.ssfp_start_phase,
             self.sequence_designer.ssfp_alternate_phase,
@@ -3044,10 +3195,18 @@ class BlochSimulatorGUI(QMainWindow):
         # SSFP-specific parameters
         if "ssfp_repeats" in presets:
             self.sequence_designer.ssfp_repeats.setValue(presets["ssfp_repeats"])
-        if "ssfp_start_delay" in presets:
-            self.sequence_designer.ssfp_start_delay.setValue(
-                presets["ssfp_start_delay"]
+        if "ssfp_use_ratios" in presets:
+            self.sequence_designer.ssfp_use_ratios.setChecked(
+                presets["ssfp_use_ratios"]
             )
+        if "ssfp_tr_ratio" in presets:
+            self.sequence_designer.ssfp_tr_ratio.setValue(presets["ssfp_tr_ratio"])
+        if "ssfp_flip_ratio" in presets:
+            self.sequence_designer.ssfp_flip_ratio.setValue(presets["ssfp_flip_ratio"])
+        if "ssfp_start_tr" in presets:
+            self.sequence_designer.ssfp_start_tr.setValue(presets["ssfp_start_tr"])
+        elif "ssfp_start_delay" in presets:  # Backward compatibility
+            self.sequence_designer.ssfp_start_tr.setValue(presets["ssfp_start_delay"])
         if "ssfp_start_flip" in presets:
             self.sequence_designer.ssfp_start_flip.setValue(presets["ssfp_start_flip"])
         if "ssfp_start_phase" in presets:
@@ -3088,59 +3247,82 @@ class BlochSimulatorGUI(QMainWindow):
 
         # File menu
         file_menu = menubar.addMenu("File")
+        file_menu.setObjectName("menu_file")
 
         load_action = file_menu.addAction("Load Parameters")
+        load_action.setObjectName("action_load_params")
         load_action.triggered.connect(self.load_parameters)
 
         save_action = file_menu.addAction("Save Parameters")
+        save_action.setObjectName("action_save_params")
         save_action.triggered.connect(self.save_parameters)
 
         file_menu.addSeparator()
 
         export_action = file_menu.addAction("Export Results")
+        export_action.setObjectName("action_export_results")
         export_action.triggered.connect(self.export_results)
 
         file_menu.addSeparator()
 
         exit_action = file_menu.addAction("Exit")
+        exit_action.setObjectName("action_exit")
         exit_action.triggered.connect(self.close)
 
         # Tools/Export menu
         tools_menu = menubar.addMenu("Tools")
-        tools_menu.addAction(
+        tools_menu.setObjectName("menu_tools")
+
+        act = tools_menu.addAction(
             "Export Image (PNG)...", lambda: self._export_magnetization_image("png")
         )
-        tools_menu.addAction(
+        act.setObjectName("action_export_image_png")
+
+        act = tools_menu.addAction(
             "Export Image (SVG)...", lambda: self._export_magnetization_image("svg")
         )
+        act.setObjectName("action_export_image_svg")
+
         tools_menu.addSeparator()
-        tools_menu.addAction(
+
+        act = tools_menu.addAction(
             "Export Animation (GIF/MP4)...", self._export_magnetization_animation
         )
-        tools_menu.addAction(
+        act.setObjectName("action_export_animation")
+
+        act = tools_menu.addAction(
             "Export Traces (CSV/NPY)...", self._export_magnetization_data
         )
-        tools_menu.addAction("Export Full Results...", self.export_results)
+        act.setObjectName("action_export_traces")
+
+        act = tools_menu.addAction("Export Full Results...", self.export_results)
+        act.setObjectName("action_export_full_results")
 
         # Tutorials menu
         tut_menu = menubar.addMenu("Tutorials")
+        tut_menu.setObjectName("menu_tutorials")
 
         record_action = tut_menu.addAction("Record New Tutorial...")
+        record_action.setObjectName("action_record_tutorial")
         record_action.triggered.connect(self.record_tutorial)
 
         load_tut_action = tut_menu.addAction("Load Tutorial...")
+        load_tut_action.setObjectName("action_load_tutorial")
         load_tut_action.triggered.connect(self.load_tutorial_dialog)
 
         tut_menu.addSeparator()
 
         self.stop_tut_action = tut_menu.addAction("Stop Recording/Playback")
+        self.stop_tut_action.setObjectName("action_stop_tutorial")
         self.stop_tut_action.setEnabled(False)
         self.stop_tut_action.triggered.connect(self.stop_tutorial)
 
         # Help menu
         help_menu = menubar.addMenu("Help")
+        help_menu.setObjectName("menu_help")
 
         about_action = help_menu.addAction("About")
+        about_action.setObjectName("action_about")
         about_action.triggered.connect(self.show_about)
 
     def _sync_preview_checkboxes(self, checked: bool):
@@ -3215,17 +3397,21 @@ class BlochSimulatorGUI(QMainWindow):
     def _build_toolbar_run_bar(self):
         """Add a top toolbar with run controls to keep them visible."""
         tb = QToolBar("Run Controls")
+        tb.setObjectName("main_toolbar")
         tb.setMovable(False)
         tb.setFloatable(False)
 
         self.toolbar_run_action = tb.addAction("Run Simulation")
+        self.toolbar_run_action.setObjectName("action_toolbar_run")
         self.toolbar_run_action.triggered.connect(self.run_simulation)
 
         self.toolbar_cancel_action = tb.addAction("Cancel")
+        self.toolbar_cancel_action.setObjectName("action_toolbar_cancel")
         self.toolbar_cancel_action.triggered.connect(self.cancel_simulation)
         self.toolbar_cancel_action.setEnabled(False)
 
         self.toolbar_preview_action = tb.addAction("Preview")
+        self.toolbar_preview_action.setObjectName("action_toolbar_preview")
         self.toolbar_preview_action.setCheckable(True)
         initial_preview = False
         if hasattr(self, "preview_checkbox"):
@@ -3238,6 +3424,7 @@ class BlochSimulatorGUI(QMainWindow):
         tb.addSeparator()
 
         self.toolbar_export_button = QToolButton()
+        self.toolbar_export_button.setObjectName("toolbar_export_btn")
         self.toolbar_export_button.setText("Export ")
         self.toolbar_export_button.setPopupMode(QToolButton.InstantPopup)
         export_menu = QMenu()
@@ -3479,217 +3666,186 @@ class BlochSimulatorGUI(QMainWindow):
 
     def update_plots(self, result):
         """Update all visualization plots."""
-        self._invalidate_plot_caches()
+        if self._plotting_in_progress:
+            return
+        self._plotting_in_progress = True
 
-        raw_time = result["time"]
-        pos_len = (
-            self.last_positions.shape[0]
-            if self.last_positions is not None
-            else result["mx"].shape[-2] if result["mx"].ndim == 3 else 1
-        )
-        freq_len = (
-            self.last_frequencies.shape[0]
-            if self.last_frequencies is not None
-            else result["mx"].shape[-1] if result["mx"].ndim == 3 else 1
-        )
-
-        mx_arr = self._reshape_to_tpf(result["mx"], pos_len, freq_len)
-        my_arr = self._reshape_to_tpf(result["my"], pos_len, freq_len)
-        mz_arr = self._reshape_to_tpf(result["mz"], pos_len, freq_len)
-        signal_arr = result["signal"]
-        if signal_arr.ndim == 3:
-            signal_arr = self._reshape_to_tpf(signal_arr, pos_len, freq_len)
-
-        self.last_result = result.copy()
-        self.last_result["mx"] = mx_arr
-        self.last_result["my"] = my_arr
-        self.last_result["mz"] = mz_arr
-        self.last_result["signal"] = signal_arr
         try:
-            self._compute_final_spectrum_range(signal_arr, self.last_time)
-        except Exception:
-            self._spectrum_final_range = None
+            self._invalidate_plot_caches()
 
-        def _get_zero_idx(arr, length):
-            if arr is None or len(arr) == 0:
-                return 0
-            if len(arr) != length:
-                return 0
-            return int(np.argmin(np.abs(arr)))
-
-        f_idx = _get_zero_idx(self.last_frequencies, freq_len)
-        if hasattr(self, "spatial_freq_slider"):
-            self.spatial_freq_slider.setValue(f_idx)
-
-        p_idx = _get_zero_idx(
-            (
-                self.last_positions[:, 2] * 100
+            raw_time = result["time"]
+            pos_len = (
+                self.last_positions.shape[0]
                 if self.last_positions is not None
-                else None
-            ),
-            pos_len,
-        )
-        if hasattr(self, "spectrum_pos_slider"):
-            self.spectrum_pos_slider.setValue(p_idx)
-
-        if hasattr(self, "mag_view_selector"):
-            self.mag_view_selector.setValue(0)
-
-        if hasattr(self, "signal_view_selector"):
-            self.signal_view_selector.setValue(0)
-
-        ntime = mx_arr.shape[0]
-        time_ms = self._normalize_time_length(raw_time, ntime) * 1000
-        self.last_time = self._normalize_time_length(raw_time, ntime)
-        if len(time_ms) == 0:
-            return
-        x_min, x_max = time_ms[0], time_ms[-1]
-
-        if getattr(self, "_sweep_mode", False):
-            self._spectrum_needs_update = True
-            self._spatial_needs_update = True
-            return
-
-        if mx_arr.ndim == 2:
-            mx_all = mx_arr
-            my_all = my_arr
-            mz_all = mz_arr
-            t_plot = (
-                np.array([time_ms[0], time_ms[-1]])
-                if len(time_ms) > 1
-                else np.array([0, 1])
+                else result["mx"].shape[-2] if result["mx"].ndim == 3 else 1
+            )
+            freq_len = (
+                self.last_frequencies.shape[0]
+                if self.last_frequencies is not None
+                else result["mx"].shape[-1] if result["mx"].ndim == 3 else 1
             )
 
-            self._safe_clear_plot(self.mxy_plot)
-            total_series = mx_all.shape[0] * mx_all.shape[1]
-            self._reset_legend(self.mxy_plot, "mxy_legend", total_series > 1)
-            idx = 0
-            for pi in range(mx_all.shape[0]):
-                for fi in range(mx_all.shape[1]):
-                    color = self._color_for_index(idx, total_series)
-                    self.mxy_plot.plot(
-                        t_plot,
-                        [mx_all[pi, fi], mx_all[pi, fi]],
-                        pen=pg.mkPen(color, width=4),
-                    )
-                    self.mxy_plot.plot(
-                        t_plot,
-                        [my_all[pi, fi], my_all[pi, fi]],
-                        pen=pg.mkPen(color, style=Qt.DashLine, width=2),
-                    )
-                    idx += 1
+            mx_arr = self._reshape_to_tpf(result["mx"], pos_len, freq_len)
+            my_arr = self._reshape_to_tpf(result["my"], pos_len, freq_len)
+            mz_arr = self._reshape_to_tpf(result["mz"], pos_len, freq_len)
+            signal_arr = result["signal"]
+            if signal_arr.ndim == 3:
+                signal_arr = self._reshape_to_tpf(signal_arr, pos_len, freq_len)
 
-            self._safe_clear_plot(self.mz_plot)
-            self._reset_legend(self.mz_plot, "mz_legend", total_series > 1)
-            idx = 0
-            for pi in range(mz_all.shape[0]):
-                for fi in range(mz_all.shape[1]):
-                    color = self._color_for_index(idx, total_series)
-                    self.mz_plot.plot(
-                        t_plot,
-                        [mz_all[pi, fi], mz_all[pi, fi]],
-                        pen=pg.mkPen(color, width=2),
-                    )
-                    idx += 1
+            self.last_result = result.copy()
+            self.last_result["mx"] = mx_arr
+            self.last_result["my"] = my_arr
+            self.last_result["mz"] = mz_arr
+            self.last_result["signal"] = signal_arr
+            try:
+                self._compute_final_spectrum_range(signal_arr, self.last_time)
+            except Exception:
+                self._spectrum_final_range = None
 
-            self.mag_3d.update_magnetization(
-                mx_all.flatten(), my_all.flatten(), mz_all.flatten()
+            def _get_zero_idx(arr, length):
+                if arr is None or len(arr) == 0:
+                    return 0
+                if len(arr) != length:
+                    return 0
+                return int(np.argmin(np.abs(arr)))
+
+            f_idx = _get_zero_idx(self.last_frequencies, freq_len)
+            if hasattr(self, "spatial_freq_slider"):
+                self.spatial_freq_slider.setValue(f_idx)
+
+            p_idx = _get_zero_idx(
+                (
+                    self.last_positions[:, 2] * 100
+                    if self.last_positions is not None
+                    else None
+                ),
+                pos_len,
             )
-            self.anim_timer.stop()
+            if hasattr(self, "spectrum_pos_slider"):
+                self.spectrum_pos_slider.setValue(p_idx)
+
+            if hasattr(self, "mag_view_selector"):
+                self.mag_view_selector.setValue(0)
+
+            if hasattr(self, "signal_view_selector"):
+                self.signal_view_selector.setValue(0)
+
+            ntime = mx_arr.shape[0]
+            time_ms = self._normalize_time_length(raw_time, ntime) * 1000
+            self.last_time = self._normalize_time_length(raw_time, ntime)
+            if len(time_ms) == 0:
+                return
+            x_min, x_max = time_ms[0], time_ms[-1]
+
+            if getattr(self, "_sweep_mode", False):
+                self._spectrum_needs_update = True
+                self._spatial_needs_update = True
+                return
+
+            if mx_arr.ndim == 2:
+                # Use common line rendering logic but extracted to method
+                self._render_mag_lines()
+                self._render_signal_lines()
+
+                self.mag_3d.update_magnetization(
+                    mx_arr.flatten(), my_arr.flatten(), mz_arr.flatten()
+                )
+                self.anim_timer.stop()
+
+                self.update_spatial_plot_from_last_result()
+                self.time_control.setEnabled(False)
+            else:
+                mx_all = mx_arr
+                my_all = my_arr
+                mz_all = mz_arr
+                ntime, npos, nfreq = mx_all.shape
+                mean_only = self.mean_only_checkbox.isChecked()
+
+                self._update_mag_selector_limits(npos, nfreq, disable=mean_only)
+                self._update_signal_selector_limits(npos, nfreq, disable=mean_only)
+
+                # These methods now handle their own Line vs Heatmap logic
+                self._refresh_mag_plots()
+                self._refresh_signal_plots()
+
+                self.anim_vectors_full = np.stack([mx_all, my_all, mz_all], axis=3)
+                self.playback_indices = self._build_playback_indices(ntime)
+                self.playback_time = self.last_time[self.playback_indices]
+                self.playback_time_ms = self.playback_time * 1000.0
+
+                # Prepare B1 for playback
+                if hasattr(self, "last_b1") and self.last_b1 is not None:
+                    self.anim_b1 = np.asarray(self.last_b1)[self.playback_indices]
+                    max_b1 = (
+                        float(np.nanmax(np.abs(self.anim_b1)))
+                        if self.anim_b1.size
+                        else 0.0
+                    )
+                    self.anim_b1_scale = 1.5 / max(max_b1, 1e-6)
+                else:
+                    self.anim_b1 = None
+                    self.anim_b1_scale = 1.0
+
+                self.mag_3d.set_selector_limits(npos, nfreq, disable=mean_only)
+                self.anim_index = 0
+                self._refresh_vector_view(mean_only=mean_only)
+                self.time_control.set_time_range(self.playback_time)
+                self.time_control.setEnabled(True)
 
             self.update_spatial_plot_from_last_result()
-            self.time_control.setEnabled(False)
-            return
-        else:
-            mx_all = mx_arr
-            my_all = my_arr
-            mz_all = mz_arr
-            ntime, npos, nfreq = mx_all.shape
-            mean_only = self.mean_only_checkbox.isChecked()
-
-            self._update_mag_selector_limits(npos, nfreq, disable=mean_only)
-            self._update_signal_selector_limits(npos, nfreq, disable=mean_only)
-            view_mode, selector = self._current_mag_filter(npos, nfreq)
-
-            self._safe_clear_plot(self.mxy_plot)
-            if mean_only:
-                mean_mx = np.mean(mx_all, axis=(1, 2))
-                mean_my = np.mean(my_all, axis=(1, 2))
-                self.mxy_plot.plot(time_ms, mean_mx, pen=pg.mkPen("c", width=4))
-                self.mxy_plot.plot(
-                    time_ms, mean_my, pen=pg.mkPen("c", width=4, style=Qt.DashLine)
-                )
-            else:
-                total_series = npos * nfreq
-                indices_to_plot = self._get_trace_indices_to_plot(total_series)
-                for linear_idx in indices_to_plot:
-                    pi = linear_idx // nfreq
-                    fi = linear_idx % nfreq
-                    color = self._color_for_index(linear_idx, total_series)
-                    self.mxy_plot.plot(
-                        time_ms, mx_all[:, pi, fi], pen=pg.mkPen(color, width=2)
-                    )
-                    self.mxy_plot.plot(
-                        time_ms,
-                        my_all[:, pi, fi],
-                        pen=pg.mkPen(color, style=Qt.DashLine, width=2),
-                    )
-
-            self._safe_clear_plot(self.mz_plot)
-            if mean_only:
-                mean_mz = np.mean(mz_all, axis=(1, 2))
-                self.mz_plot.plot(time_ms, mean_mz, pen=pg.mkPen("c", width=4))
-            else:
-                indices_to_plot = self._get_trace_indices_to_plot(npos * nfreq)
-                for linear_idx in indices_to_plot:
-                    pi = linear_idx // nfreq
-                    fi = linear_idx % nfreq
-                    color = self._color_for_index(linear_idx, npos * nfreq)
-                    self.mz_plot.plot(
-                        time_ms, mz_all[:, pi, fi], pen=pg.mkPen(color, width=2)
-                    )
-
-            self.anim_vectors_full = np.stack([mx_all, my_all, mz_all], axis=3)
-            self.playback_indices = self._build_playback_indices(ntime)
-            self.playback_time = self.last_time[self.playback_indices]
-            self.playback_time_ms = self.playback_time * 1000.0
-
-            # Prepare B1 for playback
-            if hasattr(self, "last_b1") and self.last_b1 is not None:
-                self.anim_b1 = np.asarray(self.last_b1)[self.playback_indices]
-                max_b1 = (
-                    float(np.nanmax(np.abs(self.anim_b1))) if self.anim_b1.size else 0.0
-                )
-                self.anim_b1_scale = 1.5 / max(max_b1, 1e-6)
-            else:
-                self.anim_b1 = None
-                self.anim_b1_scale = 1.0
-
-            self.mag_3d.set_selector_limits(npos, nfreq, disable=mean_only)
-            self._refresh_vector_view(mean_only=mean_only)
-            self.time_control.set_time_range(self.playback_time)
-            self.time_control.setEnabled(True)
-
-        self.update_spatial_plot_from_last_result()
-        # Ensure heatmaps or lines are correctly refreshed based on current UI selection
-        self._refresh_mag_plots()
-        self._refresh_signal_plots()
+        finally:
+            self._plotting_in_progress = False
 
     def _precompute_plot_ranges(self, result):
         """Pre-calculate stable Y-ranges for plots based on the full dataset."""
         mx = result.get("mx")
         my = result.get("my")
         mz = result.get("mz")
+        signal = result.get("signal")
         initial_mag = self.initial_mz
 
         if mx is not None and my is not None and mz is not None:
             max_abs_mxy = float(np.nanmax(np.abs(np.sqrt(mx**2 + my**2))))
-            mxy_limit = max(initial_mag, max_abs_mxy) * 1.05
-            self.spatial_mxy_yrange = (-mxy_limit, mxy_limit)
+            mxy_limit = max(initial_mag, max_abs_mxy) * 1.2
 
-            max_abs_mz = float(np.nanmax(np.abs(mz)))
-            mz_limit = max(initial_mag, max_abs_mz) * 1.05
-            self.spatial_mz_yrange = (-mz_limit, mz_limit)
+            # Spatial transverse components extrema
+            mx_min = float(np.nanmin(mx))
+            mx_max = float(np.nanmax(mx))
+            my_min = float(np.nanmin(my))
+            my_max = float(np.nanmax(my))
+
+            spatial_trans_min = min(mx_min, my_min, -0.05 * mxy_limit)
+            spatial_trans_max = max(mx_max, my_max, mxy_limit)
+            self.spatial_mxy_yrange = (spatial_trans_min, spatial_trans_max)
+
+            # Spatial longitudinal extrema
+            mz_min = float(np.nanmin(mz))
+            mz_max = float(np.nanmax(mz))
+            mz_limit_min = min(mz_min, -initial_mag) * 1.1
+            mz_limit_max = max(mz_max, initial_mag) * 1.1
+            self.spatial_mz_yrange = (mz_limit_min, mz_limit_max)
+
+        # Precompute extrema for Spectrum view (constant limits)
+        if signal is not None and mz is not None:
+            # We want global min/max across all positions and frequencies
+            self.spectrum_global_extrema = {
+                "Magnitude": (0.0, max(initial_mag, float(np.nanmax(np.abs(signal))))),
+                "Real": (
+                    float(np.nanmin(np.real(signal))),
+                    float(np.nanmax(np.real(signal))),
+                ),
+                "Imaginary": (
+                    float(np.nanmin(np.imag(signal))),
+                    float(np.nanmax(np.imag(signal))),
+                ),
+                "Mz": (float(np.nanmin(mz)), float(np.nanmax(mz))),
+            }
+            # Add initial Mz to Mz range to ensure it's visible
+            mz_min, mz_max = self.spectrum_global_extrema["Mz"]
+            self.spectrum_global_extrema["Mz"] = (
+                min(mz_min, -initial_mag),
+                max(mz_max, initial_mag),
+            )
 
     def load_parameters(self):
         """Load simulation parameters from file."""
@@ -3818,7 +3974,10 @@ class BlochSimulatorGUI(QMainWindow):
                     "slice_thickness": self.sequence_designer.slice_thickness_spin.value(),
                     "slice_gradient": self.sequence_designer.slice_gradient_spin.value(),
                     "ssfp_repeats": self.sequence_designer.ssfp_repeats.value(),
-                    "ssfp_start_delay": self.sequence_designer.ssfp_start_delay.value(),
+                    "ssfp_use_ratios": self.sequence_designer.ssfp_use_ratios.isChecked(),
+                    "ssfp_tr_ratio": self.sequence_designer.ssfp_tr_ratio.value(),
+                    "ssfp_flip_ratio": self.sequence_designer.ssfp_flip_ratio.value(),
+                    "ssfp_start_tr": self.sequence_designer.ssfp_start_tr.value(),
                     "ssfp_start_flip": self.sequence_designer.ssfp_start_flip.value(),
                     "ssfp_start_phase": self.sequence_designer.ssfp_start_phase.value(),
                     "ssfp_alternate": self.sequence_designer.ssfp_alternate_phase.isChecked(),
@@ -4775,23 +4934,37 @@ class BlochSimulatorGUI(QMainWindow):
         if self.last_result is None or self.last_frequencies is None:
             return False
         sig = self.last_result.get("signal")
-        if sig is None:
+        mz = self.last_result.get("mz")
+        if sig is None or mz is None:
             return False
         sig_arr = np.asarray(sig)
+        mz_arr = np.asarray(mz)
         ntime = sig_arr.shape[0]
         if ntime == 0:
             return False
+
+        # Ensure consistent shapes (time, pos, freq)
         if sig_arr.ndim == 1:
             sig_arr = sig_arr[:, None, None]
         elif sig_arr.ndim == 2:
-            # Assume (time, freq) or (time, pos)
             if (
                 self.last_positions is not None
                 and sig_arr.shape[1] == self.last_positions.shape[0]
             ):
-                sig_arr = sig_arr[:, :, None]  # (time, pos, freq=1)
+                sig_arr = sig_arr[:, :, None]
             else:
-                sig_arr = sig_arr[:, None, :]  # (time, pos=1, freq)
+                sig_arr = sig_arr[:, None, :]
+
+        if mz_arr.ndim == 1:
+            mz_arr = mz_arr[:, None, None]
+        elif mz_arr.ndim == 2:
+            if (
+                self.last_positions is not None
+                and mz_arr.shape[1] == self.last_positions.shape[0]
+            ):
+                mz_arr = mz_arr[:, :, None]
+            else:
+                mz_arr = mz_arr[:, None, :]
 
         time_axis = (
             self.last_time
@@ -4817,37 +4990,51 @@ class BlochSimulatorGUI(QMainWindow):
         )
 
         # Snapshot spectrum at the selected time index
-        snapshot = sig_arr[t_idx]  # (npos, nfreq)
-        mean_series = np.mean(snapshot, axis=0) if pos_count > 0 else snapshot
-        selected_series = mean_series
+        snapshot_sig = sig_arr[t_idx]  # (npos, nfreq)
+        snapshot_mz = mz_arr[t_idx]
+
+        mean_sig = np.mean(snapshot_sig, axis=0) if pos_count > 0 else snapshot_sig
+        mean_mz = np.mean(snapshot_mz, axis=0) if pos_count > 0 else snapshot_mz
+
+        selected_sig = mean_sig
+        selected_mz = mean_mz
         selected_label = "Mean"
+
         if spectrum_mode == "Mean + individuals":
-            selected_series = snapshot[pos_sel] if pos_count else mean_series
+            selected_sig = snapshot_sig[pos_sel] if pos_count else mean_sig
+            selected_mz = snapshot_mz[pos_sel] if pos_count else mean_mz
             selected_label = f"Pos {pos_sel}"
         elif spectrum_mode == "Individual (select pos)":
-            selected_series = snapshot[pos_sel] if pos_count else mean_series
+            selected_sig = snapshot_sig[pos_sel] if pos_count else mean_sig
+            selected_mz = snapshot_mz[pos_sel] if pos_count else mean_mz
             selected_label = f"Pos {pos_sel}"
-            mean_series = None
+            mean_sig = None
+            mean_mz = None
 
         self.spectrum_plot.clear()
         selected_components = self.spectrum_component_combo.get_selected_items()
 
-        def get_component(data, comp):
+        def get_component(sig_data, mz_data, comp):
             if comp == "Magnitude":
-                return np.abs(data)
+                return np.abs(sig_data)
             if comp == "Phase":
-                return np.angle(data) / np.pi
+                return np.angle(sig_data) / np.pi
             if comp == "Phase (unwrapped)":
-                return np.unwrap(np.angle(data)) / np.pi
+                return np.unwrap(np.angle(sig_data)) / np.pi
             if comp == "Real":
-                return np.real(data)
+                return np.real(sig_data)
             if comp == "Imaginary":
-                return np.imag(data)
-            return np.abs(data)
+                return np.imag(sig_data)
+            if comp == "Mz":
+                return mz_data
+            return np.abs(sig_data)
+
+        # Track global limits for scaling
+        all_visible_data = []
 
         # Plot each selected component
         for component in selected_components:
-            if mean_series is not None:
+            if mean_sig is not None:
                 # Use fixed colors for components in the Mean plot
                 color = "c"  # Default Mean Magnitude
                 if component == "Real":
@@ -4856,10 +5043,15 @@ class BlochSimulatorGUI(QMainWindow):
                     color = "g"
                 elif component == "Phase" or component == "Phase (unwrapped)":
                     color = "y"
+                elif component == "Mz":
+                    color = "m"
+
+                comp_data = get_component(mean_sig, mean_mz, component)
+                all_visible_data.append(comp_data)
 
                 self.spectrum_plot.plot(
                     freq_axis,
-                    get_component(mean_series, component),
+                    comp_data,
                     pen=pg.mkPen(color, width=3),
                     name=f"Mean {component}",
                 )
@@ -4872,8 +5064,6 @@ class BlochSimulatorGUI(QMainWindow):
                     else "w"
                 )
 
-                # If only one component is selected, use the position-cycling color.
-                # If multiple components are selected, use fixed colors but different styles.
                 if len(selected_components) == 1:
                     pen = pg.mkPen(sel_color, width=2)
                 else:
@@ -4884,6 +5074,8 @@ class BlochSimulatorGUI(QMainWindow):
                         color = "g"
                     elif component == "Phase" or component == "Phase (unwrapped)":
                         color = "y"
+                    elif component == "Mz":
+                        color = "m"
                     pen = pg.mkPen(color, width=2)
 
                 if component == "Real":
@@ -4893,9 +5085,12 @@ class BlochSimulatorGUI(QMainWindow):
                 elif component == "Phase (unwrapped)":
                     pen.setStyle(Qt.SolidLine)
 
+                comp_data = get_component(selected_sig, selected_mz, component)
+                all_visible_data.append(comp_data)
+
                 self.spectrum_plot.plot(
                     freq_axis,
-                    get_component(selected_series, component),
+                    comp_data,
                     pen=pen,
                     name=f"{selected_label} {component}",
                 )
@@ -4917,22 +5112,61 @@ class BlochSimulatorGUI(QMainWindow):
                 float(np.nanmin(freq_axis)), float(np.nanmax(freq_axis)), padding=0.05
             )
 
-        y_min, y_max = -1.1, 1.1
-        if (
-            hasattr(self, "off_res_spectrum_yrange")
-            and self.off_res_spectrum_yrange is not None
-        ):
-            y_min, y_max = self.off_res_spectrum_yrange
+        # Constant Y-limit calculation based on global extrema
+        if hasattr(self, "spectrum_global_extrema"):
+            selected_extrema_min = []
+            selected_extrema_max = []
 
-        if "Phase (unwrapped)" in selected_components:
-            # Unwrapped phase can be large, use auto-range
-            self.spectrum_plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
-        elif "Phase" in selected_components and len(selected_components) == 1:
-            self.spectrum_plot.setYRange(-1.1, 1.1, padding=0)
-        elif "Magnitude" in selected_components and len(selected_components) == 1:
-            self.spectrum_plot.setYRange(0, y_max * 1.1, padding=0)
-        else:  # Mixed or Real/Imag
-            self.spectrum_plot.setYRange(-y_max * 1.1, y_max * 1.1, padding=0)
+            for component in selected_components:
+                # Use Magnitude extrema for Phase/Phase (unwrapped) if specific ones aren't stored
+                lookup_comp = component
+                if "Phase" in component:
+                    # Special handling for phase is done below
+                    continue
+
+                if lookup_comp in self.spectrum_global_extrema:
+                    c_min, c_max = self.spectrum_global_extrema[lookup_comp]
+                    selected_extrema_min.append(c_min)
+                    selected_extrema_max.append(c_max)
+
+            if "Phase (unwrapped)" in selected_components:
+                self.spectrum_plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+            elif "Phase" in selected_components and len(selected_components) == 1:
+                self.spectrum_plot.setYRange(-1.1, 1.1, padding=0)
+            elif selected_extrema_min or selected_extrema_max:
+                data_min = min(selected_extrema_min) if selected_extrema_min else 0.0
+                data_max = max(selected_extrema_max) if selected_extrema_max else 1.0
+
+                # If Magnitude is present and no "negative" components, min should be 0
+                has_negative_possible = any(
+                    c in selected_components for c in ["Real", "Imaginary", "Mz"]
+                )
+
+                y_min = 0.0
+                if has_negative_possible:
+                    y_min = data_min * 1.1 if data_min < 0 else 0.0
+
+                y_max = max(abs(data_max), abs(data_min)) * 1.2
+                if y_max <= 0:
+                    y_max = 1.2
+
+                self.spectrum_plot.setYRange(y_min, y_max, padding=0)
+
+        export_entry = {
+            "frequency": freq_axis,
+            "selected_magnitude": np.abs(selected_sig),
+            "selected_phase_rad": np.angle(selected_sig),
+            "selected_mz": selected_mz,
+            "mode": "off_res_spins_freq",
+            "time_idx": t_idx,
+            "time_s": float(time_axis[t_idx]) if t_idx < len(time_axis) else None,
+        }
+        if mean_sig is not None:
+            export_entry["mean_magnitude"] = np.abs(mean_sig)
+            export_entry["mean_phase_rad"] = np.angle(mean_sig)
+            export_entry["mean_mz"] = mean_mz
+        self._last_spectrum_export = export_entry
+        return True
 
         export_entry = {
             "frequency": freq_axis,
@@ -6422,7 +6656,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.statusBar().showMessage(msg)
         if self.tutorial_overlay:
             instruction = self.tutorial_manager.get_current_instruction()
-            self.tutorial_overlay.update_step(current, total, instruction)
+            description = self.tutorial_manager.get_current_description()
+            self.tutorial_overlay.update_step(current, total, instruction, description)
 
     def _on_tutorial_finished(self):
         self.statusBar().showMessage("Tutorial Completed!")

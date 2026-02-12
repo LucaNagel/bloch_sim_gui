@@ -14,8 +14,29 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox,
     QSlider,
     QToolButton,
+    QMenu,
+    QMenuBar,
+    QToolBar,
+    QRubberBand,
+    QAbstractItemView,
 )
-from PyQt5.QtCore import QObject, QEvent, pyqtSignal, Qt
+from PyQt5.QtCore import QObject, QEvent, pyqtSignal, Qt, QRect, QPoint
+
+
+class HighlightOverlay(QRubberBand):
+    """A translucent highlight overlay for specific UI elements."""
+
+    def __init__(self, parent=None):
+        super().__init__(QRubberBand.Rectangle, parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setStyleSheet(
+            """
+            QRubberBand {
+                border: 2px solid #149071;
+                background-color: rgba(152, 241, 219, 80);
+            }
+        """
+        )
 
 
 class TutorialManager(QObject):
@@ -39,11 +60,11 @@ class TutorialManager(QObject):
 
         # Styles for highlighting
         self.highlight_style = """
-            border: 3px solid #FFD700;
-            background-color: #FFF8DC;
-            border-radius: 4px;
+            border: 2px solid #149071;
+            background-color: #98F1DB;
         """
         self.original_styles = {}  # Store old styles to revert them
+        self.overlays = []  # List of HighlightOverlay instances
 
     def start_recording(self):
         self.steps = []
@@ -51,13 +72,56 @@ class TutorialManager(QObject):
         self.is_playing = False
         # Install event filter on the application to catch all clicks
         QApplication.instance().installEventFilter(self)
+        # Connect to all combo boxes to catch selections specifically
+        self._connect_combos(self.main_window)
         self.recording_started.emit()
+
+    def _connect_combos(self, parent):
+        for combo in parent.findChildren(QComboBox):
+            try:
+                combo.activated.connect(self._on_combo_activated)
+            except Exception:
+                pass
+
+    def _on_combo_activated(self, index):
+        if not self.is_recording:
+            return
+        combo = self.sender()
+        name = combo.objectName()
+        if name:
+            text = combo.itemText(index)
+            # Avoid duplicates if click also recorded
+            if (
+                self.steps
+                and self.steps[-1].get("name") == name
+                and self.steps[-1].get("type") == "click"
+            ):
+                self.steps[-1] = {
+                    "name": name,
+                    "type": "select",
+                    "index": index,
+                    "text": text,
+                }
+            else:
+                self.steps.append(
+                    {"name": name, "type": "select", "index": index, "text": text}
+                )
+            print(f"[Tutorial] Recorded selection: {name} -> {text}")
 
     def stop_recording(self):
         self.is_recording = False
         QApplication.instance().removeEventFilter(self)
+        # Disconnect combos
+        self._disconnect_combos(self.main_window)
         self.recording_stopped.emit(len(self.steps))
         return self.steps
+
+    def _disconnect_combos(self, parent):
+        for combo in parent.findChildren(QComboBox):
+            try:
+                combo.activated.disconnect(self._on_combo_activated)
+            except Exception:
+                pass
 
     def save_tutorial(self, name):
         folder = "tutorials"
@@ -83,17 +147,63 @@ class TutorialManager(QObject):
         self.is_recording = False
         self.current_step_idx = 0
         QApplication.instance().installEventFilter(self)
+        # Also listen for combo activations during playback to auto-advance
+        self._connect_combos_playback(self.main_window)
         self.playback_started.emit()
         self._highlight_current_step()
+
+    def _connect_combos_playback(self, parent):
+        for combo in parent.findChildren(QComboBox):
+            try:
+                combo.activated.connect(self._on_combo_activated_playback)
+            except Exception:
+                pass
+
+    def _on_combo_activated_playback(self, index):
+        if not self.is_playing:
+            return
+        target = self.steps[self.current_step_idx]
+        combo = self.sender()
+        if combo.objectName() == target["name"] and target.get("type") == "select":
+            if index == target["index"]:
+                self.next_step()
 
     def stop_playback(self):
         self._clear_highlights()
         self.is_playing = False
         QApplication.instance().removeEventFilter(self)
+        self._disconnect_combos_playback(self.main_window)
         self.playback_finished.emit()
+
+    def _disconnect_combos_playback(self, parent):
+        for combo in parent.findChildren(QComboBox):
+            try:
+                combo.activated.disconnect(self._on_combo_activated_playback)
+            except Exception:
+                pass
 
     def eventFilter(self, obj, event):
         if self.is_recording and event.type() == QEvent.MouseButtonRelease:
+            action_name = None
+
+            # Check for QAction via Menu/Toolbar/MenuBar
+            if isinstance(obj, (QMenu, QMenuBar, QToolBar)):
+                action = obj.actionAt(event.pos())
+                if action and action.objectName():
+                    action_name = action.objectName()
+                    # Record action immediately
+                    if not self.steps or self.steps[-1].get("name") != action_name:
+                        self.steps.append(
+                            {
+                                "name": action_name,
+                                "type": "action",
+                                "class": "QAction",
+                                "text": action.text().replace("&", ""),
+                            }
+                        )
+                        print(f"[Tutorial] Recorded action: {action_name}")
+                    return False  # Don't consume
+
             # If the widget itself has no name, crawl up to find first named parent
             curr = obj
             name = curr.objectName()
@@ -117,7 +227,6 @@ class TutorialManager(QObject):
                 QDoubleSpinBox,
                 QSlider,
                 QToolButton,
-                QAction,
             )
 
             if isinstance(obj, supported_classes):
@@ -154,37 +263,64 @@ class TutorialManager(QObject):
                                 f"[Tutorial] Recorded tab switch: {tab_name} -> index {idx}"
                             )
 
-        elif self.is_playing and event.type() == QEvent.MouseButtonRelease:
-            # Check if the clicked object is the one we are highlighting
-            if self.current_step_idx >= len(self.steps):
-                self.stop_playback()
-                return super().eventFilter(obj, event)
+        elif self.is_playing:
+            if event.type() == QEvent.MouseButtonRelease:
+                # Check if the clicked object is the one we are highlighting
+                if self.current_step_idx >= len(self.steps):
+                    self.stop_playback()
+                    return super().eventFilter(obj, event)
 
-            target = self.steps[self.current_step_idx]
-            obj_name = obj.objectName()
+                target = self.steps[self.current_step_idx]
+                obj_name = obj.objectName()
+                is_correct = False
 
-            is_correct = False
+                # 1. Check QAction via Menu/Toolbar
+                if target.get("type") == "action":
+                    if isinstance(obj, (QMenu, QMenuBar, QToolBar)):
+                        action = obj.actionAt(event.pos())
+                        if action and action.objectName() == target["name"]:
+                            is_correct = True
 
-            # 1. Check direct match
-            if obj_name == target["name"]:
-                is_correct = True
+                # 2. Check direct match (Widgets)
+                elif obj_name == target["name"]:
+                    is_correct = True
 
-            # 2. Check tab match
-            if target["type"] == "tab" and isinstance(obj, QTabBar):
-                # We need to check if this tab bar belongs to the named QTabWidget
-                parent = obj.parent()
-                while parent and not isinstance(parent, QTabWidget):
-                    parent = parent.parent()
+                # 3. Check tab match
+                elif target["type"] == "tab" and isinstance(obj, QTabBar):
+                    # We need to check if this tab bar belongs to the named QTabWidget
+                    parent = obj.parent()
+                    while parent and not isinstance(parent, QTabWidget):
+                        parent = parent.parent()
 
-                if parent and parent.objectName() == target["name"]:
-                    idx = obj.tabAt(event.pos())
-                    if idx == target["index"]:
-                        is_correct = True
+                    if parent and parent.objectName() == target["name"]:
+                        idx = obj.tabAt(event.pos())
+                        if idx == target["index"]:
+                            is_correct = True
 
-            if is_correct:
-                # Move to next step shortly after to allow the event to process
-                # We can't delay in eventFilter, so we just call next_step
-                self.next_step()
+                if is_correct:
+                    # Move to next step shortly after to allow the event to process
+                    self.next_step()
+
+            elif event.type() == QEvent.Show:
+                # Special handling for QComboBox popups to highlight the target item
+                if isinstance(obj, QAbstractItemView):
+                    parent = obj.parentWidget()
+                    while parent and not isinstance(parent, QComboBox):
+                        parent = parent.parentWidget()
+
+                    if parent:
+                        target = self.steps[self.current_step_idx]
+                        if (
+                            parent.objectName() == target.get("name")
+                            and target.get("type") == "select"
+                        ):
+                            idx = target.get("index")
+                            if idx is not None:
+                                # We highlight the item in the list view
+                                # This is best done by setting the current index
+                                obj.setCurrentIndex(obj.model().index(idx, 0))
+                                # Also scroll to it
+                                obj.scrollTo(obj.model().index(idx, 0))
 
         return super().eventFilter(obj, event)
 
@@ -211,33 +347,76 @@ class TutorialManager(QObject):
         if 0 <= self.current_step_idx < len(self.steps):
             step = self.steps[self.current_step_idx]
             name = step.get("name", "Unknown Widget")
+            if step.get("type") == "action":
+                text = step.get("text", name)
+                return f"Click '{text}' in menu or toolbar"
+
+            if step.get("type") == "select":
+                text = step.get("text", f"index {step.get('index')}")
+                return f"Select '{text}' in '{name}'"
+
             action = "Click" if step.get("type") == "click" else "Select"
             if step.get("type") == "tab":
-                return f"{action} tab on '{name}' (index {step.get('index')})"
+                return f"{action} tab index {step.get('index')} on '{name}'"
             return f"{action} '{name}'"
         return "Tutorial finished"
 
+    def get_current_description(self):
+        """Get optional description for the current step."""
+        if 0 <= self.current_step_idx < len(self.steps):
+            return self.steps[self.current_step_idx].get("description")
+        return None
+
     def _highlight_current_step(self):
         target = self.steps[self.current_step_idx]
+
+        # Handle Actions
+        if target.get("type") == "action":
+            # Try to find a widget associated with this action (e.g. Toolbar button)
+            action = self.main_window.findChild(QAction, target["name"])
+            if action:
+                for toolbar in self.main_window.findChildren(QToolBar):
+                    widget = toolbar.widgetForAction(action)
+                    if widget and widget.isVisible():
+                        self.original_styles[widget] = widget.styleSheet()
+                        widget.setStyleSheet(self.highlight_style)
+                        return
+            return
+
+        # Handle Widgets
         widget = self.main_window.findChild(QWidget, target["name"])
 
         if widget:
             if target.get("type") == "tab" and isinstance(widget, QTabWidget):
-                # For tabs, we highlight the tab bar
+                # For tabs, we highlight ONLY the specific tab in the bar
                 bar = widget.tabBar()
-                self.original_styles[bar] = bar.styleSheet()
-                bar.setStyleSheet(self.highlight_style)
+                idx = target.get("index")
+                if idx is not None and 0 <= idx < bar.count():
+                    rect = bar.tabRect(idx)
+                    # Create a highlight overlay over the tab
+                    overlay = HighlightOverlay(bar)
+                    overlay.setGeometry(rect)
+                    overlay.show()
+                    self.overlays.append(overlay)
+
+                    # Also scroll to the tab if it's hidden
+                    bar.setCurrentIndex(idx)
             else:
                 self.original_styles[widget] = widget.styleSheet()
-                # Append highlight style to existing style (or replace if empty)
-                new_style = self.highlight_style
-                widget.setStyleSheet(new_style)
+                widget.setStyleSheet(self.highlight_style)
 
     def _clear_highlights(self):
         for widget, style in self.original_styles.items():
             try:
                 widget.setStyleSheet(style)
             except RuntimeError:
-                # Widget might have been deleted
                 pass
         self.original_styles = {}
+
+        for overlay in self.overlays:
+            try:
+                overlay.hide()
+                overlay.deleteLater()
+            except RuntimeError:
+                pass
+        self.overlays = []

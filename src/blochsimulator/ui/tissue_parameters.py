@@ -71,14 +71,14 @@ class TissueParameterWidget(QGroupBox):
         t1_layout.addWidget(QLabel("T1 (ms):"))
         self.t1_spin = QDoubleSpinBox()
         self.t1_spin.setObjectName("t1_spin")
-        self.t1_spin.setRange(1, 5000)
+        self.t1_spin.setRange(1, 180000)
         self.t1_spin.setValue(1000)
         self.t1_spin.setSuffix(" ms")
         t1_layout.addWidget(self.t1_spin)
 
         self.t1_slider = QSlider(Qt.Horizontal)
         self.t1_slider.setObjectName("t1_slider")
-        self.t1_slider.setRange(1, 5000)
+        self.t1_slider.setRange(1, 180000)
         self.t1_slider.setValue(1000)
         self.t1_slider.valueChanged.connect(lambda v: self.t1_spin.setValue(v))
         self.t1_spin.valueChanged.connect(lambda v: self.t1_slider.setValue(int(v)))
@@ -90,14 +90,14 @@ class TissueParameterWidget(QGroupBox):
         t2_layout.addWidget(QLabel("T2 (ms):"))
         self.t2_spin = QDoubleSpinBox()
         self.t2_spin.setObjectName("t2_spin")
-        self.t2_spin.setRange(1, 2000)
+        self.t2_spin.setRange(1, 20000)
         self.t2_spin.setValue(100)
         self.t2_spin.setSuffix(" ms")
         t2_layout.addWidget(self.t2_spin)
 
         self.t2_slider = QSlider(Qt.Horizontal)
         self.t2_slider.setObjectName("t2_slider")
-        self.t2_slider.setRange(1, 2000)
+        self.t2_slider.setRange(1, 20000)
         self.t2_slider.setValue(100)
         self.t2_slider.valueChanged.connect(lambda v: self.t2_spin.setValue(v))
         self.t2_spin.valueChanged.connect(lambda v: self.t2_slider.setValue(int(v)))
@@ -131,8 +131,8 @@ class TissueParameterWidget(QGroupBox):
             tissue = TissueParameters.csf(field)
         elif preset == "Hyperpolarized 13C Pyruvate":
             # Typical HP 13C pyruvate values (approx.): long T1, slower decay
-            self.t1_spin.setValue(60000)  # 60 s
-            self.t2_spin.setValue(1000)  # 1 s
+            self.t1_spin.setValue(25000)  # 25 s
+            self.t2_spin.setValue(300)  # 0.3 s
             self.m0_spin.setValue(100000)
             return
         else:

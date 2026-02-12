@@ -166,6 +166,7 @@ class MagnetizationViewer(QWidget):
         self.mean_checkbox.setChecked(False)
         self.mean_checkbox.toggled.connect(self._toggle_mean_vector)
         controls_v.addWidget(self.mean_checkbox)
+
         control_container.setLayout(controls_v)
         self.control_container = control_container
         layout.addWidget(control_container)

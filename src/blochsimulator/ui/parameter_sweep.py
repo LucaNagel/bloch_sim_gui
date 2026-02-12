@@ -181,9 +181,9 @@ class ParameterSweepWidget(QWidget):
             self.end_spin.setRange(0, 9999)
             self.end_spin.setValue(90)
         elif "TE" in param or "TR" in param or "TI" in param:
-            self.start_spin.setRange(0.1, 10000)
+            self.start_spin.setRange(0.1, 1000000)
             self.start_spin.setValue(10)
-            self.end_spin.setRange(0.1, 10000)
+            self.end_spin.setRange(0.1, 1000000)
             self.end_spin.setValue(100)
         elif "B1 Scale" in param:
             self.start_spin.setRange(0, 5)
@@ -200,14 +200,14 @@ class ParameterSweepWidget(QWidget):
             self.end_spin.setValue(1.0)
             self.end_spin.setDecimals(4)
         elif "T1" in param:
-            self.start_spin.setRange(1, 5000)
+            self.start_spin.setRange(1, 180000)
             self.start_spin.setValue(500)
-            self.end_spin.setRange(1, 5000)
+            self.end_spin.setRange(1, 180000)
             self.end_spin.setValue(2000)
         elif "T2" in param:
-            self.start_spin.setRange(1, 2000)
+            self.start_spin.setRange(1, 20000)
             self.start_spin.setValue(20)
-            self.end_spin.setRange(1, 2000)
+            self.end_spin.setRange(1, 20000)
             self.end_spin.setValue(100)
         elif "Frequency" in param:
             self.start_spin.setRange(-10000, 10000)

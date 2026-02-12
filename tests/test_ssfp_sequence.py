@@ -34,8 +34,17 @@ class MockSequenceDesigner:
         self.ssfp_start_phase = MagicMock()
         self.ssfp_start_phase.value.return_value = 180.0
 
-        self.ssfp_start_delay = MagicMock()
-        self.ssfp_start_delay.value.return_value = 0.0
+        self.ssfp_start_tr = MagicMock()
+        self.ssfp_start_tr.value.return_value = 0.0
+
+        self.ssfp_use_ratios = MagicMock()
+        self.ssfp_use_ratios.isChecked.return_value = False
+
+        self.ssfp_tr_ratio = MagicMock()
+        self.ssfp_tr_ratio.value.return_value = 0.5
+
+        self.ssfp_flip_ratio = MagicMock()
+        self.ssfp_flip_ratio.value.return_value = 0.5
 
         self.ssfp_alternate_phase = MagicMock()
         self.ssfp_alternate_phase.isChecked.return_value = True
