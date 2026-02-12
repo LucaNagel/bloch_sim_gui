@@ -3,9 +3,7 @@ name: Publish to PyPI
 on:
   push:
     branches:
-      - main
-      - fixes
-      # - feature
+      - '**'
     tags:
       - 'v*'
   workflow_dispatch: # Allows manual triggering
@@ -74,8 +72,8 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install libomp
 
-      - name: Bump version for dev build (Feature Branch)
-        if: github.ref == 'refs/heads/feature'
+      - name: Bump version for dev build (Non-Main Branch)
+        if: github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           # Extract current version from pyproject.toml
@@ -106,8 +104,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Bump version for dev build (Feature Branch)
-        if: github.ref == 'refs/heads/feature'
+      - name: Bump version for dev build (Non-Main Branch)
+        if: github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           CURRENT_VER=$(grep -m1 'version = ' pyproject.toml | cut -d '"' -f 2)
@@ -144,8 +142,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Bump version for dev build (Feature Branch)
-        if: github.ref == 'refs/heads/feature'
+      - name: Bump version for dev build (Non-Main Branch)
+        if: github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           CURRENT_VER=$(grep -m1 'version = ' pyproject.toml | cut -d '"' -f 2)
@@ -215,7 +213,7 @@ jobs:
     name: Create Pre-Release (GitHub)
     needs: [build_wheels, build_sdist, build_apps]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/feature'
+    if: github.ref == 'refs/heads/pre-release'
     permissions:
       contents: write  # Required to create releases
     steps:
@@ -256,8 +254,8 @@ jobs:
     name: Publish to PyPI
     needs: [build_wheels, build_sdist]
     runs-on: ubuntu-latest
-    # Only run on tags OR manual trigger
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    # Only run on tags
+    if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
       - uses: actions/download-artifact@v4
