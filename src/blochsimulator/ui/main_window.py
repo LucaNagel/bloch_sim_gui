@@ -413,23 +413,8 @@ class BlochSimulatorGUI(QMainWindow):
         mag_header.addWidget(QLabel("Magnetization Evolution"))
         mag_header.addStretch()
 
-        mag_export_btn = QPushButton("Export ▼")
-        mag_export_menu = QMenu()
-        mag_export_menu.addAction(
-            "Image (PNG)...", lambda: self._export_magnetization_image("png")
-        )
-        mag_export_menu.addAction(
-            "Image (SVG)...", lambda: self._export_magnetization_image("svg")
-        )
-        mag_export_menu.addSeparator()
-        mag_export_menu.addAction(
-            "Animation (GIF/MP4)...", self._export_magnetization_animation
-        )
-        mag_export_menu.addAction(
-            "Export Traces (CSV/NPY)...", self._export_magnetization_data
-        )
-        mag_export_menu.addAction("Export Full Results...", self.export_results)
-        mag_export_btn.setMenu(mag_export_menu)
+        mag_export_btn = QPushButton("Export Results")
+        mag_export_btn.clicked.connect(self.export_results)
         mag_header.addWidget(mag_export_btn)
         mag_layout.addLayout(mag_header)
 
@@ -558,20 +543,8 @@ class BlochSimulatorGUI(QMainWindow):
         signal_header.addWidget(QLabel("Signal Evolution"))
         signal_header.addStretch()
 
-        signal_export_btn = QPushButton("Export ▼")
-        signal_export_menu = QMenu()
-        signal_export_menu.addAction(
-            "Image (PNG)...", lambda: self._export_signal_image("png")
-        )
-        signal_export_menu.addAction(
-            "Image (SVG)...", lambda: self._export_signal_image("svg")
-        )
-        signal_export_menu.addSeparator()
-        signal_export_menu.addAction(
-            "Animation (GIF/MP4)...", self._export_signal_animation
-        )
-        signal_export_menu.addAction("Data (CSV/NPY)...", self._export_signal_data)
-        signal_export_btn.setMenu(signal_export_menu)
+        signal_export_btn = QPushButton("Export Results")
+        signal_export_btn.clicked.connect(self.export_results)
         signal_header.addWidget(signal_export_btn)
         signal_layout.addLayout(signal_header)
 
@@ -668,20 +641,8 @@ class BlochSimulatorGUI(QMainWindow):
         spectrum_header.addWidget(QLabel("Frequency Spectrum"))
         spectrum_header.addStretch()
 
-        spectrum_export_btn = QPushButton("Export ▼")
-        spectrum_export_menu = QMenu()
-        spectrum_export_menu.addAction(
-            "Image (PNG)...", lambda: self._export_spectrum_image("png")
-        )
-        spectrum_export_menu.addAction(
-            "Image (SVG)...", lambda: self._export_spectrum_image("svg")
-        )
-        spectrum_export_menu.addSeparator()
-        spectrum_export_menu.addAction(
-            "Animation (GIF/MP4)...", self._export_spectrum_animation
-        )
-        spectrum_export_menu.addAction("Data (CSV/NPY)...", self._export_spectrum_data)
-        spectrum_export_btn.setMenu(spectrum_export_menu)
+        spectrum_export_btn = QPushButton("Export Results")
+        spectrum_export_btn.clicked.connect(self.export_results)
         spectrum_header.addWidget(spectrum_export_btn)
         spectrum_layout.addLayout(spectrum_header)
 
@@ -806,20 +767,8 @@ class BlochSimulatorGUI(QMainWindow):
         spatial_header.addWidget(QLabel("Spatial Profile"))
         spatial_header.addStretch()
 
-        spatial_export_btn = QPushButton("Export ▼")
-        spatial_export_menu = QMenu()
-        spatial_export_menu.addAction(
-            "Image (PNG)...", lambda: self._export_spatial_image("png")
-        )
-        spatial_export_menu.addAction(
-            "Image (SVG)...", lambda: self._export_spatial_image("svg")
-        )
-        spatial_export_menu.addSeparator()
-        spatial_export_menu.addAction(
-            "Animation (GIF/MP4)...", self._export_spatial_animation
-        )
-        spatial_export_menu.addAction("Data (CSV/NPY)...", self._export_spatial_data)
-        spatial_export_btn.setMenu(spatial_export_menu)
+        spatial_export_btn = QPushButton("Export Results")
+        spatial_export_btn.clicked.connect(self.export_results)
         spatial_header.addWidget(spatial_export_btn)
         spatial_layout.addLayout(spatial_header)
 
@@ -1077,12 +1026,6 @@ class BlochSimulatorGUI(QMainWindow):
         )
         self.spatial_mz_time_line.hide()
         self.spatial_mz_plot.addItem(self.spatial_mz_time_line)
-
-        # Ensure slice guides persist after clear()
-        for ln in self.spatial_slice_lines["mxy"]:
-            self.spatial_mxy_plot.addItem(ln)
-        for ln in self.spatial_slice_lines["mz"]:
-            self.spatial_mz_plot.addItem(ln)
 
         # Share spatial time lines with the 3D viewer for synchronized scrubbing
         self.mag_3d.spatial_mxy_time_line = self.spatial_mxy_time_line
@@ -3273,30 +3216,9 @@ class BlochSimulatorGUI(QMainWindow):
         tools_menu = menubar.addMenu("Tools")
         tools_menu.setObjectName("menu_tools")
 
-        act = tools_menu.addAction(
-            "Export Image (PNG)...", lambda: self._export_magnetization_image("png")
-        )
-        act.setObjectName("action_export_image_png")
-
-        act = tools_menu.addAction(
-            "Export Image (SVG)...", lambda: self._export_magnetization_image("svg")
-        )
-        act.setObjectName("action_export_image_svg")
-
-        tools_menu.addSeparator()
-
-        act = tools_menu.addAction(
-            "Export Animation (GIF/MP4)...", self._export_magnetization_animation
-        )
-        act.setObjectName("action_export_animation")
-
-        act = tools_menu.addAction(
-            "Export Traces (CSV/NPY)...", self._export_magnetization_data
-        )
-        act.setObjectName("action_export_traces")
-
-        act = tools_menu.addAction("Export Full Results...", self.export_results)
-        act.setObjectName("action_export_full_results")
+        export_results_action = tools_menu.addAction("Export Results...")
+        export_results_action.setObjectName("action_export_results_tools")
+        export_results_action.triggered.connect(self.export_results)
 
         # Tutorials menu
         tut_menu = menubar.addMenu("Tutorials")
@@ -3425,24 +3347,8 @@ class BlochSimulatorGUI(QMainWindow):
 
         self.toolbar_export_button = QToolButton()
         self.toolbar_export_button.setObjectName("toolbar_export_btn")
-        self.toolbar_export_button.setText("Export ")
-        self.toolbar_export_button.setPopupMode(QToolButton.InstantPopup)
-        export_menu = QMenu()
-        export_menu.addAction(
-            "Image (PNG)...", lambda: self._export_magnetization_image("png")
-        )
-        export_menu.addAction(
-            "Image (SVG)...", lambda: self._export_magnetization_image("svg")
-        )
-        export_menu.addSeparator()
-        export_menu.addAction(
-            "Animation (GIF/MP4)...", self._export_magnetization_animation
-        )
-        export_menu.addAction(
-            "Export Traces (CSV/NPY)...", self._export_magnetization_data
-        )
-        export_menu.addAction("Export Full Results...", self.export_results)
-        self.toolbar_export_button.setMenu(export_menu)
+        self.toolbar_export_button.setText("Export Results")
+        self.toolbar_export_button.clicked.connect(self.export_results)
         tb.addWidget(self.toolbar_export_button)
 
         spacer = QWidget()
@@ -3849,7 +3755,94 @@ class BlochSimulatorGUI(QMainWindow):
 
     def load_parameters(self):
         """Load simulation parameters from file."""
-        pass
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Parameters",
+            str(self._get_export_directory()),
+            "JSON Files (*.json)",
+        )
+        if not filename:
+            return
+
+        try:
+            with open(filename, "r") as f:
+                state = json.load(f)
+
+            if "tissue" in state:
+                if hasattr(self.tissue_widget, "set_state"):
+                    self.tissue_widget.set_state(state["tissue"])
+                else:
+                    # Fallback for old version or missing method
+                    tw = self.tissue_widget
+                    t_state = state["tissue"]
+                    if "preset" in t_state:
+                        tw.preset_combo.setCurrentText(t_state["preset"])
+                    if "field" in t_state:
+                        tw.field_combo.setCurrentText(t_state["field"])
+                    if "t1_ms" in t_state:
+                        tw.t1_spin.setValue(t_state["t1_ms"])
+                    if "t2_ms" in t_state:
+                        tw.t2_spin.setValue(t_state["t2_ms"])
+                    if "m0" in t_state:
+                        tw.m0_spin.setValue(t_state["m0"])
+
+            if "rf" in state:
+                self.rf_designer.set_state(state["rf"])
+
+            if "sequence" in state:
+                if hasattr(self.sequence_designer, "set_state"):
+                    self.sequence_designer.set_state(state["sequence"])
+                else:
+                    # Fallback
+                    sd = self.sequence_designer
+                    s_state = state["sequence"]
+                    if "type" in s_state:
+                        sd.sequence_type.setCurrentText(s_state["type"])
+                    if "te" in s_state:
+                        sd.te_spin.setValue(s_state["te"])
+                    if "tr" in s_state:
+                        sd.tr_spin.setValue(s_state["tr"])
+                    if "ti" in s_state:
+                        sd.ti_spin.setValue(s_state["ti"])
+                    if "echo_count" in s_state:
+                        sd.spin_echo_echoes.setValue(s_state["echo_count"])
+                    if "slice_thickness" in s_state:
+                        sd.slice_thickness_spin.setValue(s_state["slice_thickness"])
+                    if "slice_gradient" in s_state:
+                        sd.slice_gradient_spin.setValue(s_state["slice_gradient"])
+
+            if "simulation" in state:
+                sim = state["simulation"]
+                if "mode" in sim:
+                    self.mode_combo.setCurrentText(sim["mode"])
+                if "num_pos" in sim:
+                    self.pos_spin.setValue(sim["num_pos"])
+                if "pos_range" in sim:
+                    self.pos_range.setValue(sim["pos_range"])
+                if "num_freq" in sim:
+                    self.freq_spin.setValue(sim["num_freq"])
+                if "freq_range" in sim:
+                    self.freq_range.setValue(sim["freq_range"])
+                if "time_step" in sim:
+                    self.time_step_spin.setValue(sim["time_step"])
+                if "extra_tail" in sim:
+                    self.extra_tail_spin.setValue(sim["extra_tail"])
+                if "max_traces" in sim:
+                    self.max_traces_spin.setValue(sim["max_traces"])
+
+            self.log_message(f"Parameters loaded from {Path(filename).name}")
+            self.statusBar().showMessage(
+                f"Parameters loaded from {Path(filename).name}"
+            )
+
+            # Trigger diagram update
+            self.sequence_designer.update_diagram()
+
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Load Error", f"Failed to load parameters:\n{str(e)}"
+            )
+            self.log_message(f"Error loading parameters: {e}")
 
     def _animate_vector(self):
         """Advance the 3D vector animation if data is available."""
@@ -3957,42 +3950,10 @@ class BlochSimulatorGUI(QMainWindow):
             state = {
                 "version": "1.1",
                 "timestamp": timestamp,
-                "tissue": {
-                    "preset": self.tissue_widget.preset_combo.currentText(),
-                    "field": self.tissue_widget.field_combo.currentText(),
-                    "t1_ms": self.tissue_widget.t1_spin.value(),
-                    "t2_ms": self.tissue_widget.t2_spin.value(),
-                    "m0": self.tissue_widget.m0_spin.value(),
-                },
+                "tissue": self.tissue_widget.get_state(),
                 "rf": self.rf_designer.get_state(),
-                "sequence": {
-                    "type": self.sequence_designer.sequence_type.currentText(),
-                    "te": self.sequence_designer.te_spin.value(),
-                    "tr": self.sequence_designer.tr_spin.value(),
-                    "ti": self.sequence_designer.ti_spin.value(),
-                    "echo_count": self.sequence_designer.spin_echo_echoes.value(),
-                    "slice_thickness": self.sequence_designer.slice_thickness_spin.value(),
-                    "slice_gradient": self.sequence_designer.slice_gradient_spin.value(),
-                    "ssfp_repeats": self.sequence_designer.ssfp_repeats.value(),
-                    "ssfp_use_ratios": self.sequence_designer.ssfp_use_ratios.isChecked(),
-                    "ssfp_tr_ratio": self.sequence_designer.ssfp_tr_ratio.value(),
-                    "ssfp_flip_ratio": self.sequence_designer.ssfp_flip_ratio.value(),
-                    "ssfp_start_tr": self.sequence_designer.ssfp_start_tr.value(),
-                    "ssfp_start_flip": self.sequence_designer.ssfp_start_flip.value(),
-                    "ssfp_start_phase": self.sequence_designer.ssfp_start_phase.value(),
-                    "ssfp_alternate": self.sequence_designer.ssfp_alternate_phase.isChecked(),
-                    "rephase_pct": self.sequence_designer.rephase_percentage.value(),
-                },
-                "simulation": {
-                    "mode": self.mode_combo.currentText(),
-                    "num_pos": self.pos_spin.value(),
-                    "pos_range": self.pos_range.value(),
-                    "num_freq": self.freq_spin.value(),
-                    "freq_range": self.freq_range.value(),
-                    "time_step": self.time_step_spin.value(),
-                    "extra_tail": self.extra_tail_spin.value(),
-                    "max_traces": self.max_traces_spin.value(),
-                },
+                "sequence": self.sequence_designer.get_state(),
+                "simulation": self._collect_simulation_parameters(internal_format=True),
             }
 
             with open(filename, "w") as f:
@@ -4353,28 +4314,22 @@ class BlochSimulatorGUI(QMainWindow):
 
     def _collect_sequence_parameters(self):
         """Collect all pulse sequence parameters from GUI."""
-        seq_type = self.sequence_designer.sequence_type.currentText()
+        # Use the state from sequence designer as base
+        params = self.sequence_designer.get_state()
 
-        params = {
-            "sequence_type": seq_type,
-            "te": self.sequence_designer.te_spin.value() / 1000,  # ms to s
-            "tr": self.sequence_designer.tr_spin.value() / 1000,  # ms to s
-        }
+        # Add additional computed/internal parameters for export
+        params["te_s"] = params["te"] / 1000.0
+        params["tr_s"] = params["tr"] / 1000.0
+        params["ti_s"] = params["ti"] / 1000.0
 
-        # Add sequence-specific parameters
-        if "Echo" in seq_type or "Gradient" in seq_type:
-            if hasattr(self.sequence_designer, "flip_spin"):
-                params["flip_angle"] = self.sequence_designer.flip_spin.value()
-
-        if hasattr(self.sequence_designer, "echo_count_spin"):
-            params["echo_count"] = self.sequence_designer.echo_count_spin.value()
-
-        # RF pulse parameters
-        params["rf_pulse_type"] = self.rf_designer.pulse_type.currentText()
-        params["rf_flip_angle"] = self.rf_designer.flip_angle.value()
-        params["rf_duration"] = self.rf_designer.duration.value() / 1000  # ms to s
-        params["rf_time_bw_product"] = self.rf_designer.tbw.value()
-        params["rf_phase"] = self.rf_designer.phase.value()
+        # RF pulse parameters from designer
+        rf_state = self.rf_designer.get_state()
+        params["rf_pulse_type"] = rf_state.get("pulse_type", "sinc")
+        params["rf_flip_angle"] = rf_state.get("flip_angle", 90.0)
+        params["rf_duration_s"] = rf_state.get("duration", 1.0) / 1000.0
+        params["rf_time_bw_product"] = rf_state.get("time_bw_product", 4.0)
+        params["rf_phase"] = rf_state.get("phase", 0.0)
+        params["rf_freq_offset"] = rf_state.get("freq_offset", 0.0)
 
         # Store RF waveform if available
         if hasattr(self, "last_b1") and self.last_b1 is not None:
@@ -4385,8 +4340,20 @@ class BlochSimulatorGUI(QMainWindow):
 
         return params
 
-    def _collect_simulation_parameters(self):
+    def _collect_simulation_parameters(self, internal_format=False):
         """Collect all simulation parameters from GUI."""
+        if internal_format:
+            return {
+                "mode": self.mode_combo.currentText(),
+                "num_pos": self.pos_spin.value(),
+                "pos_range": self.pos_range.value(),
+                "num_freq": self.freq_spin.value(),
+                "freq_range": self.freq_range.value(),
+                "time_step": self.time_step_spin.value(),
+                "extra_tail": self.extra_tail_spin.value(),
+                "max_traces": self.max_traces_spin.value(),
+            }
+
         params = {
             "mode": (
                 "time-resolved"
@@ -4408,6 +4375,31 @@ class BlochSimulatorGUI(QMainWindow):
             ),
         }
 
+        # Include explicit axes if available
+        if hasattr(self, "last_positions") and self.last_positions is not None:
+            params["position_axis"] = self.last_positions
+        else:
+            # Reconstruct from range if missing but requested
+            npos = self.pos_spin.value()
+            pos_span_cm = self.pos_range.value()
+            span_m = pos_span_cm / 100.0
+            half_span = span_m / 2.0
+            positions = np.zeros((npos, 3))
+            if npos > 1:
+                positions[:, 2] = np.linspace(-half_span, half_span, npos)
+            params["position_axis"] = positions
+
+        if hasattr(self, "last_frequencies") and self.last_frequencies is not None:
+            params["frequency_axis"] = self.last_frequencies
+        else:
+            nfreq = self.freq_spin.value()
+            freq_range = self.freq_range.value()
+            if nfreq > 1:
+                frequencies = np.linspace(-freq_range / 2, freq_range / 2, nfreq)
+            else:
+                frequencies = np.array([0.0])
+            params["frequency_axis"] = frequencies
+
         # Store initial magnetization
         params["initial_mz"] = self.tissue_widget.get_initial_mz()
 
@@ -4416,12 +4408,7 @@ class BlochSimulatorGUI(QMainWindow):
     def _collect_all_parameters(self) -> Dict:
         """Collect all parameters (Tissue, Sequence, Simulation) for metadata export."""
         return {
-            "tissue": {
-                "name": self.tissue_widget.preset_combo.currentText(),
-                "t1": self.tissue_widget.t1_spin.value() / 1000,
-                "t2": self.tissue_widget.t2_spin.value() / 1000,
-                "density": self.tissue_widget.m0_spin.value(),
-            },
+            "tissue": self.tissue_widget.get_state(),
             "sequence": self._collect_sequence_parameters(),
             "simulation": self._collect_simulation_parameters(),
         }
@@ -5315,8 +5302,10 @@ class BlochSimulatorGUI(QMainWindow):
 
         exporter = AnimationExporter()
         if fmt == "gif":
+            # ImageIO v3 deprecated 'fps' for GIFs, use 'duration' (in ms)
+            duration_ms = 1000.0 / params["fps"]
             writer = vz_imageio.get_writer(
-                str(filepath), mode="I", fps=params["fps"], format="GIF"
+                str(filepath), mode="I", duration=duration_ms, format="GIF"
             )
         else:
             writer = vz_imageio.get_writer(
@@ -5732,8 +5721,10 @@ class BlochSimulatorGUI(QMainWindow):
 
         def _make_writer(target_path: Path):
             if fmt == "gif":
+                # ImageIO v3 deprecated 'fps' for GIFs, use 'duration' (in ms)
+                duration_ms = 1000.0 / params["fps"]
                 return imageio_lib.get_writer(
-                    str(target_path), mode="I", fps=params["fps"], format="GIF"
+                    str(target_path), mode="I", duration=duration_ms, format="GIF"
                 )
             return imageio_lib.get_writer(
                 str(target_path),

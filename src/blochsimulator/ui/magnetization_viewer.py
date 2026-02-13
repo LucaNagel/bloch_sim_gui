@@ -40,21 +40,9 @@ class MagnetizationViewer(QWidget):
         header_3d.addWidget(QLabel("3D Magnetization Vector"))
         header_3d.addStretch()
 
-        self.export_3d_btn = QPushButton("Export ▼")
+        self.export_3d_btn = QPushButton("Export Results")
         self.export_3d_btn.setObjectName("export_3d_btn")
-        export_3d_menu = QMenu()
-        export_3d_menu.addAction(
-            "Image (PNG)...", lambda: self._export_3d_screenshot("png")
-        )
-        export_3d_menu.addAction(
-            "Image (SVG)...", lambda: self._export_3d_screenshot("svg")
-        )
-        export_3d_menu.addSeparator()
-        export_3d_menu.addAction("Animation (GIF/MP4)...", self._export_3d_animation)
-        export_3d_menu.addAction(
-            "Sequence diagram (GIF/MP4)...", self._export_sequence_animation
-        )
-        self.export_3d_btn.setMenu(export_3d_menu)
+        self.export_3d_btn.clicked.connect(self._trigger_parent_export)
         header_3d.addWidget(self.export_3d_btn)
         layout.addLayout(header_3d)
 
@@ -510,3 +498,12 @@ class MagnetizationViewer(QWidget):
                 QMessageBox.critical(self, "Export Error", str(exc))
                 return
         self._show_not_implemented_3d("Sequence animation")
+
+    def _trigger_parent_export(self):
+        """Delegate unified export to the parent window."""
+        win = self.window()
+        if win and hasattr(win, "export_results"):
+            win.export_results()
+        else:
+            # Fallback to current screenshot if parent not found
+            self._export_3d_screenshot("png")

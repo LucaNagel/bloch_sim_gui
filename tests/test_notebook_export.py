@@ -13,6 +13,13 @@ from blochsimulator.notebook_exporter import export_notebook
 from pathlib import Path
 import subprocess
 
+# Test filenames
+H5_FILE = "test_notebook_data.h5"
+MODE_A_NB = "test_mode_a.ipynb"
+MODE_B_NB = "test_mode_b.ipynb"
+SWEEP_DATA = "test_sweep_data.npz"
+SWEEP_NB = "test_sweep.ipynb"
+
 
 def test_mode_a_notebook():
     """Test Mode A: Load data from HDF5."""
@@ -35,7 +42,7 @@ def test_mode_a_notebook():
     print(f"   ✓ Simulation complete")
 
     # 2. Save HDF5
-    h5_file = "test_notebook_data.h5"
+    h5_file = H5_FILE
     sequence_params = {
         "sequence_type": "Spin Echo",
         "te": 20e-3,
@@ -59,7 +66,7 @@ def test_mode_a_notebook():
     print(f"   ✓ HDF5 saved: {h5_file}")
 
     # 3. Export notebook (Mode A)
-    nb_file = "test_mode_a.ipynb"
+    nb_file = MODE_A_NB
     print(f"\n2. Exporting Mode A notebook...")
     export_notebook(
         mode="load_data",
@@ -96,8 +103,6 @@ def test_mode_a_notebook():
     assert "n_pos =" in nb_text, "Missing improved xarray construction code"
     print(f"   ✓ Notebook contains HDF5 loading and improved xarray code")
 
-    return h5_file, nb_file
-
 
 def test_mode_b_notebook():
     """Test Mode B: Re-run simulation."""
@@ -125,7 +130,7 @@ def test_mode_b_notebook():
     print(f"   ✓ Parameters prepared")
 
     # 2. Export notebook (Mode B)
-    nb_file = "test_mode_b.ipynb"
+    nb_file = MODE_B_NB
     print(f"\n2. Exporting Mode B notebook...")
     export_notebook(
         mode="resimulate",
@@ -160,8 +165,6 @@ def test_mode_b_notebook():
     assert "n_pos =" in nb_text, "Missing improved xarray construction code"
     print(f"   ✓ Parameters correctly embedded in notebook")
 
-    return nb_file
-
 
 def test_sweep_notebook():
     """Test Sweep Analysis: Parameter sweep notebook."""
@@ -173,7 +176,7 @@ def test_sweep_notebook():
     print("\n1. Creating dummy sweep data...")
     import json
 
-    filename = "test_sweep_data.npz"
+    filename = SWEEP_DATA
     param_name = "flip_angle"
     param_values = np.linspace(10, 90, 5)
 
@@ -203,7 +206,7 @@ def test_sweep_notebook():
     print(f"   ✓ Dummy data created: {filename}")
 
     # 2. Export notebook
-    nb_file = "test_sweep.ipynb"
+    nb_file = SWEEP_NB
     print(f"\n2. Exporting Sweep notebook...")
     export_notebook(
         mode="sweep",
@@ -231,8 +234,6 @@ def test_sweep_notebook():
     assert "categories['Sequence']" in nb_text, "Missing parameter categorization"
 
     print(f"   ✓ Notebook contains improved Xarray and plotting code")
-
-    return nb_file
 
 
 def helper_notebook_execution(nb_file):
@@ -298,14 +299,14 @@ def cleanup_test_files():
     print("=" * 60)
 
     files_to_remove = [
-        "test_notebook_data.h5",
-        "test_mode_a.ipynb",
-        "test_mode_b.ipynb",
-        "test_sweep_data.npz",
-        "test_sweep.ipynb",
-        "executed_test_mode_a.ipynb",
-        "executed_test_mode_b.ipynb",
-        "executed_test_sweep.ipynb",
+        H5_FILE,
+        MODE_A_NB,
+        MODE_B_NB,
+        SWEEP_DATA,
+        SWEEP_NB,
+        f"executed_{MODE_A_NB}",
+        f"executed_{MODE_B_NB}",
+        f"executed_{SWEEP_NB}",
     ]
 
     for fname in files_to_remove:
@@ -323,13 +324,13 @@ def main():
 
     try:
         # Test Mode A
-        h5_file, mode_a_nb = test_mode_a_notebook()
+        test_mode_a_notebook()
 
         # Test Mode B
-        mode_b_nb = test_mode_b_notebook()
+        test_mode_b_notebook()
 
         # Test Sweep
-        sweep_nb = test_sweep_notebook()
+        test_sweep_notebook()
 
         # Try to execute notebooks (optional - requires jupyter)
         print("\n" + "=" * 60)
@@ -338,9 +339,9 @@ def main():
         print("\nThese tests require 'jupyter' and 'nbconvert' installed.")
         print("They will be skipped if not available.\n")
 
-        helper_notebook_execution(mode_a_nb)
-        helper_notebook_execution(mode_b_nb)
-        helper_notebook_execution(sweep_nb)
+        helper_notebook_execution(MODE_A_NB)
+        helper_notebook_execution(MODE_B_NB)
+        helper_notebook_execution(SWEEP_NB)
 
         # Summary
         print("\n" + "=" * 70)
@@ -353,11 +354,11 @@ def main():
         print("✓ Proper cell structure and content")
         print("✓ Parameter embedding")
         print("\nGenerated notebooks:")
-        print(f"  - {mode_a_nb} (loads data from {h5_file})")
-        print(f"  - {mode_b_nb} (re-runs simulation)")
-        print(f"  - {sweep_nb} (sweep analysis)")
+        print(f"  - {MODE_A_NB} (loads data from {H5_FILE})")
+        print(f"  - {MODE_B_NB} (re-runs simulation)")
+        print(f"  - {SWEEP_NB} (sweep analysis)")
         print("\nYou can now:")
-        print(f"  1. Open notebooks in Jupyter: jupyter lab {mode_a_nb}")
+        print(f"  1. Open notebooks in Jupyter: jupyter lab {MODE_A_NB}")
         print(f"  2. Test in GUI: File → Export Results → Notebook options")
         print(f"  3. Proceed to Phase 3: Visualization export")
 

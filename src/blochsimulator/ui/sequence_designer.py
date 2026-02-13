@@ -1169,7 +1169,9 @@ class SequenceDesigner(QGroupBox):
         """Plot a lane-based sequence diagram (RF, Gradients)."""
         self.diagram_widget.clear()
         if self.playhead_line is not None:
-            self.diagram_widget.addItem(self.playhead_line)
+            # Check if already in the plot to avoid UserWarning
+            if self.playhead_line not in self.diagram_widget.items():
+                self.diagram_widget.addItem(self.playhead_line)
             self.playhead_line.hide()
         for arr in self.diagram_arrows:
             try:
@@ -1359,3 +1361,74 @@ class SequenceDesigner(QGroupBox):
             self.playhead_line.setVisible(True)
         except Exception:
             pass
+
+    def get_state(self) -> dict:
+        """Return current widget state as a dictionary."""
+        return {
+            "type": self.sequence_type.currentText(),
+            "te": self.te_spin.value(),
+            "tr": self.tr_spin.value(),
+            "ti": self.ti_spin.value(),
+            "echo_count": self.spin_echo_echoes.value(),
+            "ssfp_repeats": self.ssfp_repeats.value(),
+            "ssfp_use_ratios": self.ssfp_use_ratios.isChecked(),
+            "ssfp_start_tr": self.ssfp_start_tr.value(),
+            "ssfp_start_flip": self.ssfp_start_flip.value(),
+            "ssfp_tr_ratio": self.ssfp_tr_ratio.value(),
+            "ssfp_flip_ratio": self.ssfp_flip_ratio.value(),
+            "ssfp_start_phase": self.ssfp_start_phase.value(),
+            "ssfp_alternate": self.ssfp_alternate_phase.isChecked(),
+            "rephase_pct": self.rephase_percentage.value(),
+            "slice_thickness": self.slice_thickness_spin.value(),
+            "slice_gradient": self.slice_gradient_spin.value(),
+            "pulse_states": self.pulse_states,
+        }
+
+    def set_state(self, state: dict):
+        """Restore widget state from a dictionary."""
+        if not state:
+            return
+
+        self.blockSignals(True)
+        try:
+            if "type" in state:
+                self.sequence_type.setCurrentText(state["type"])
+            if "te" in state:
+                self.te_spin.setValue(state["te"])
+            if "tr" in state:
+                self.tr_spin.setValue(state["tr"])
+            if "ti" in state:
+                self.ti_spin.setValue(state["ti"])
+            if "echo_count" in state:
+                self.spin_echo_echoes.setValue(state["echo_count"])
+            if "ssfp_repeats" in state:
+                self.ssfp_repeats.setValue(state["ssfp_repeats"])
+            if "ssfp_use_ratios" in state:
+                self.ssfp_use_ratios.setChecked(state["ssfp_use_ratios"])
+            if "ssfp_start_tr" in state:
+                self.ssfp_start_tr.setValue(state["ssfp_start_tr"])
+            if "ssfp_start_flip" in state:
+                self.ssfp_start_flip.setValue(state["ssfp_start_flip"])
+            if "ssfp_tr_ratio" in state:
+                self.ssfp_tr_ratio.setValue(state["ssfp_tr_ratio"])
+            if "ssfp_flip_ratio" in state:
+                self.ssfp_flip_ratio.setValue(state["ssfp_flip_ratio"])
+            if "ssfp_start_phase" in state:
+                self.ssfp_start_phase.setValue(state["ssfp_start_phase"])
+            if "ssfp_alternate" in state:
+                self.ssfp_alternate_phase.setChecked(state["ssfp_alternate"])
+            if "rephase_pct" in state:
+                self.rephase_percentage.setValue(state["rephase_pct"])
+            if "slice_thickness" in state:
+                self.slice_thickness_spin.setValue(state["slice_thickness"])
+            if "slice_gradient" in state:
+                self.slice_gradient_spin.setValue(state["slice_gradient"])
+            if "pulse_states" in state:
+                self.pulse_states = state["pulse_states"]
+
+            # Update UI for current selection
+            self._update_sequence_options()
+            self._on_pulse_selection_changed(self.pulse_list.currentItem(), None)
+        finally:
+            self.blockSignals(False)
+            self.update_diagram()

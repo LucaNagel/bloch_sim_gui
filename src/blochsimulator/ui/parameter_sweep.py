@@ -266,7 +266,16 @@ class ParameterSweepWidget(QWidget):
                 sd = self.parent_gui.sequence_designer
                 constant_params["te"] = float(sd.te_spin.value() / 1000.0)
                 constant_params["tr"] = float(sd.tr_spin.value() / 1000.0)
+                constant_params["ti"] = float(sd.ti_spin.value() / 1000.0)
                 constant_params["sequence_type"] = str(sd.sequence_type.currentText())
+                constant_params["echo_count"] = int(sd.spin_echo_echoes.value())
+                constant_params["slice_thickness"] = float(
+                    sd.slice_thickness_spin.value()
+                )
+                constant_params["slice_gradient"] = float(
+                    sd.slice_gradient_spin.value()
+                )
+                constant_params["ssfp_repeats"] = int(sd.ssfp_repeats.value())
 
             # RF
             if hasattr(self.parent_gui, "rf_designer"):
@@ -274,13 +283,22 @@ class ParameterSweepWidget(QWidget):
                 constant_params["flip_angle"] = float(rd.flip_angle.value())
                 constant_params["pulse_duration"] = float(rd.duration.value() / 1000.0)
                 constant_params["pulse_type"] = str(rd.pulse_type.currentText())
+                constant_params["rf_phase"] = float(rd.phase.value())
+                constant_params["rf_freq_offset"] = float(rd.freq_offset.value())
+                constant_params["rf_time_bw_product"] = float(rd.tbw.value())
 
             # Simulation
             if hasattr(self.parent_gui, "pos_spin"):
                 constant_params["num_positions"] = int(self.parent_gui.pos_spin.value())
+                constant_params["position_range_cm"] = float(
+                    self.parent_gui.pos_range.value()
+                )
             if hasattr(self.parent_gui, "freq_spin"):
                 constant_params["num_frequencies"] = int(
                     self.parent_gui.freq_spin.value()
+                )
+                constant_params["frequency_range_hz"] = float(
+                    self.parent_gui.freq_range.value()
                 )
             if hasattr(self.parent_gui, "time_step_spin"):
                 constant_params["time_step"] = float(
@@ -408,6 +426,17 @@ class ParameterSweepWidget(QWidget):
                             and result.get("time") is not None
                         ):
                             results["time"] = result["time"]
+                            # Also capture positions and frequencies for full data exports
+                            if (
+                                "positions" not in results
+                                and result.get("mx") is not None
+                            ):
+                                # result is from SimulationThread, which might have them
+                                # or we get them from main_window
+                                results["positions"] = self.parent_gui.last_positions
+                                results["frequencies"] = (
+                                    self.parent_gui.last_frequencies
+                                )
 
                         for metric in selected_metrics:
                             value = self._extract_metric(metric, result, save_full)
@@ -751,6 +780,10 @@ class ParameterSweepWidget(QWidget):
         # Include time vector in sidecar if available
         if "time" in results:
             stacked_arrays["time"] = results["time"]
+        if "positions" in results:
+            stacked_arrays["positions"] = results["positions"]
+        if "frequencies" in results:
+            stacked_arrays["frequencies"] = results["frequencies"]
 
         if stacked_arrays:
             array_path = path.with_name(path.stem + "_arrays.npz")
@@ -774,6 +807,10 @@ class ParameterSweepWidget(QWidget):
         }
         if "time" in results:
             payload["time"] = results["time"]
+        if "positions" in results:
+            payload["positions"] = results["positions"]
+        if "frequencies" in results:
+            payload["frequencies"] = results["frequencies"]
 
         for metric, values in results["metrics"].items():
             payload[metric] = self._stack_metric_values(values)

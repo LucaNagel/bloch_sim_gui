@@ -114,53 +114,7 @@ class NotebookExporter:
 
         # Cell 3: Xarray Integration
         cells.append(new_markdown_cell("## Xarray Dataset"))
-        xr_code = """# Convert to xarray Dataset for advanced analysis
-# Extract info from metadata
-n_pos = data.get('simulation_params', {}).get('num_positions', 1)
-n_freq = data.get('simulation_params', {}).get('num_frequencies', 1)
-time = data.get('time')
-n_time = len(time) if time is not None else 0
-
-# Create DataArray for each component
-vars = {}
-coords = {}
-if time is not None: coords['time'] = time
-
-for k in ['mx', 'my', 'mz', 'signal']:
-    v = data[k]
-    dims = []
-
-    # Try to intelligently name dimensions
-    for i, dim_len in enumerate(v.shape):
-        if n_time > 0 and dim_len == n_time:
-            dims.append('time')
-        elif n_pos > 1 and dim_len == n_pos:
-            dims.append('position')
-        elif n_freq > 1 and dim_len == n_freq:
-            dims.append('frequency')
-        else:
-            dims.append(f'dim_{i}')
-
-    vars[k] = (dims, v)
-
-ds = xr.Dataset(vars, coords=coords)
-# Add metadata
-ds.attrs.update(data.get('simulation_params', {}))
-ds.attrs.update(data.get('sequence_params', {}))
-
-print('Xarray Dataset created:')
-print(ds)"""
-        cells.append(new_code_cell(xr_code))
-
-        # Cell 3b: Compatibility conversion
-        cells.append(
-            new_code_cell(
-                "# Prepare data for display (convert objects to dictionaries)\n"
-                "from dataclasses import asdict\n"
-                "if hasattr(data['tissue'], 't1'): # Check if object\n"
-                "    data['tissue'] = asdict(data['tissue'])"
-            )
-        )
+        cells.append(new_code_cell(self._generate_xarray_code()))
 
         # Cell 4: Display parameters
         cells.append(new_markdown_cell("## Simulation Parameters"))
@@ -652,43 +606,7 @@ else:
 
         # Cell 6b: Xarray Dataset
         cells.append(new_markdown_cell("## Xarray Dataset"))
-        xr_code = """# Convert to xarray Dataset for advanced analysis
-# Extract info from metadata
-n_pos = data.get('simulation_params', {}).get('num_positions', 1)
-n_freq = data.get('simulation_params', {}).get('num_frequencies', 1)
-time = data.get('time')
-n_time = len(time) if time is not None else 0
-
-# Create DataArray for each component
-vars = {}
-coords = {}
-if time is not None: coords['time'] = time
-
-for k in ['mx', 'my', 'mz', 'signal']:
-    v = data[k]
-    dims = []
-
-    # Try to intelligently name dimensions
-    for i, dim_len in enumerate(v.shape):
-        if n_time > 0 and dim_len == n_time:
-            dims.append('time')
-        elif n_pos > 1 and dim_len == n_pos:
-            dims.append('position')
-        elif n_freq > 1 and dim_len == n_freq:
-            dims.append('frequency')
-        else:
-            dims.append(f'dim_{i}')
-
-    vars[k] = (dims, v)
-
-ds = xr.Dataset(vars, coords=coords)
-# Add metadata
-ds.attrs.update(data.get('simulation_params', {}))
-ds.attrs.update(data.get('sequence_params', {}))
-
-print('Xarray Dataset created:')
-print(ds)"""
-        cells.append(new_code_cell(xr_code))
+        cells.append(new_code_cell(self._generate_xarray_code()))
 
         # Cell 7: Visualize results
         cells.append(new_markdown_cell("## Visualization"))
@@ -730,6 +648,11 @@ sim = BlochSimulator()
 sim.load_results(data_file)
 data = sim.last_result
 
+# Convert tissue to dictionary for consistent access
+from dataclasses import asdict
+if hasattr(data['tissue'], '__dataclass_fields__'):
+    data['tissue'] = asdict(data['tissue'])
+
 # Load additional parameters (metadata) not loaded by the simulator core
 with h5py.File(data_file, 'r') as f:
     # Load sequence parameters
@@ -758,6 +681,45 @@ if 'mx' in data:
 if 'time' in data:
     print(f"  Duration: {{data['time'][-1]*1000:.3f}} ms")
 """
+
+    def _generate_xarray_code(self) -> str:
+        """Generate code to convert simulation data to an xarray Dataset."""
+        return """# Convert to xarray Dataset for advanced analysis
+# Extract info from metadata
+n_pos = data.get('simulation_params', {}).get('num_positions', 1)
+n_freq = data.get('simulation_params', {}).get('num_frequencies', 1)
+time = data.get('time')
+n_time = len(time) if time is not None else 0
+
+# Create DataArray for each component
+vars = {}
+coords = {}
+if time is not None: coords['time'] = time
+
+for k in ['mx', 'my', 'mz', 'signal']:
+    v = data[k]
+    dims = []
+
+    # Try to intelligently name dimensions
+    for i, dim_len in enumerate(v.shape):
+        if n_time > 0 and dim_len == n_time:
+            dims.append('time')
+        elif n_pos > 1 and dim_len == n_pos:
+            dims.append('position')
+        elif n_freq > 1 and dim_len == n_freq:
+            dims.append('frequency')
+        else:
+            dims.append(f'dim_{i}')
+
+    vars[k] = (dims, v)
+
+ds = xr.Dataset(vars, coords=coords)
+# Add metadata
+ds.attrs.update(data.get('simulation_params', {}))
+ds.attrs.update(data.get('sequence_params', {}))
+
+print('Xarray Dataset created as "ds":')
+print(ds)"""
 
     def _generate_load_data_code(self, h5_filename: str) -> str:
         """Generate code to load HDF5 data (Legacy Manual Method)."""
@@ -1268,6 +1230,7 @@ result = sim.simulate(
 )
 
 # Extract results for easier access
+from dataclasses import asdict
 data = {
     'mx': result['mx'],
     'my': result['my'],
@@ -1276,10 +1239,14 @@ data = {
     'time': result['time'],
     'positions': result['positions'],
     'frequencies': result['frequencies'],
-    'tissue': {'name': tissue.name, 't1': tissue.t1, 't2': tissue.t2},
+    'tissue': asdict(tissue),
+    'sequence_params': sequence_params,
     'simulation_params': {
         'num_positions': len(positions),
-        'num_frequencies': len(frequencies)
+        'num_frequencies': len(frequencies),
+        'mode': 'time-resolved' if mode == 2 else 'endpoint',
+        'use_parallel': use_parallel,
+        'num_threads': num_threads
     }
 }
 

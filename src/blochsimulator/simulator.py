@@ -14,6 +14,7 @@ from scipy import signal
 from dataclasses import dataclass
 import h5py
 import xarray as xr
+import json
 from pathlib import Path
 from . import __version__
 
@@ -1994,9 +1995,24 @@ class BlochSimulator:
                 for key, value in sequence_params.items():
                     if value is not None:
                         if isinstance(value, (np.ndarray, list, tuple)):
-                            seq_group.create_dataset(key, data=value)
+                            try:
+                                seq_group.create_dataset(key, data=value)
+                            except (TypeError, ValueError):
+                                # Fallback for object arrays or other incompatible types
+                                try:
+                                    # Try converting to string array
+                                    str_data = np.asarray(value).astype(str)
+                                    seq_group.create_dataset(key, data=str_data)
+                                except Exception:
+                                    # Last resort: JSON string
+                                    seq_group.attrs[key] = json.dumps(value)
+                        elif isinstance(value, dict):
+                            seq_group.attrs[key] = json.dumps(value)
                         else:
-                            seq_group.attrs[key] = value
+                            try:
+                                seq_group.attrs[key] = value
+                            except Exception:
+                                seq_group.attrs[key] = str(value)
 
             # Save simulation parameters if provided
             if simulation_params is not None:
@@ -2004,9 +2020,21 @@ class BlochSimulator:
                 for key, value in simulation_params.items():
                     if value is not None:
                         if isinstance(value, (np.ndarray, list, tuple)):
-                            sim_group.create_dataset(key, data=value)
+                            try:
+                                sim_group.create_dataset(key, data=value)
+                            except (TypeError, ValueError):
+                                try:
+                                    str_data = np.asarray(value).astype(str)
+                                    sim_group.create_dataset(key, data=str_data)
+                                except Exception:
+                                    sim_group.attrs[key] = json.dumps(value)
+                        elif isinstance(value, dict):
+                            sim_group.attrs[key] = json.dumps(value)
                         else:
-                            sim_group.attrs[key] = value
+                            try:
+                                sim_group.attrs[key] = value
+                            except Exception:
+                                sim_group.attrs[key] = str(value)
 
             # Add metadata
             f.attrs["export_timestamp"] = str(np.datetime64("now"))

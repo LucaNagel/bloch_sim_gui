@@ -157,3 +157,43 @@ class TissueParameterWidget(QGroupBox):
     def _toggle_sequence_presets(self, enabled: bool):
         """Toggle automatic loading of sequence presets."""
         self.sequence_presets_enabled = enabled
+
+    def get_state(self) -> dict:
+        """Return current widget state as a dictionary."""
+        return {
+            "preset": self.preset_combo.currentText(),
+            "field": self.field_combo.currentText(),
+            "t1_ms": self.t1_spin.value(),
+            "t2_ms": self.t2_spin.value(),
+            "m0": self.m0_spin.value(),
+            "auto_load_presets": self.seq_preset_checkbox.isChecked(),
+        }
+
+    def set_state(self, state: dict):
+        """Restore widget state from a dictionary."""
+        if not state:
+            return
+
+        # Block signals to avoid triggering multiple preset loads
+        self.preset_combo.blockSignals(True)
+        self.field_combo.blockSignals(True)
+        self.seq_preset_checkbox.blockSignals(True)
+
+        try:
+            if "preset" in state:
+                self.preset_combo.setCurrentText(state["preset"])
+            if "field" in state:
+                self.field_combo.setCurrentText(state["field"])
+            if "t1_ms" in state:
+                self.t1_spin.setValue(state["t1_ms"])
+            if "t2_ms" in state:
+                self.t2_spin.setValue(state["t2_ms"])
+            if "m0" in state:
+                self.m0_spin.setValue(state["m0"])
+            if "auto_load_presets" in state:
+                self.seq_preset_checkbox.setChecked(state["auto_load_presets"])
+                self.sequence_presets_enabled = state["auto_load_presets"]
+        finally:
+            self.preset_combo.blockSignals(False)
+            self.field_combo.blockSignals(False)
+            self.seq_preset_checkbox.blockSignals(False)

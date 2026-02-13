@@ -1024,8 +1024,10 @@ class AnimationExporter:
 
         # Initialize Video Writer
         if fmt == "gif":
+            # ImageIO v3 deprecated 'fps' for GIFs, use 'duration' (in ms)
+            duration_ms = 1000.0 / fps
             writer = imageio.get_writer(
-                str(filepath), mode="I", fps=fps, format="GIF", loop=0
+                str(filepath), mode="I", duration=duration_ms, format="GIF", loop=0
             )
         else:
             writer = imageio.get_writer(
