@@ -7,6 +7,7 @@ A high-performance Python implementation of the Bloch equation solver originally
 ## Demo
 
 ![Spin Echo Animation](docs/_static/media/spin_echo.gif)
+*Demonstration of a Spin-Echo simulation*
 
 ## Features
 

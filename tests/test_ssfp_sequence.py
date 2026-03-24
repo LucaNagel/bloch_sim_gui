@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 # Ensure we import from src to test the local changes
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
+from blochsimulator.ui.main_window import BlochSimulatorGUI
 from blochsimulator.ui.sequence_designer import SequenceDesigner
 
 
@@ -115,3 +116,55 @@ def test_ssfp_block_pulse_duration():
     assert (
         non_zero_count == n_expected
     ), f"Expected {n_expected} points for block pulse, got {non_zero_count}."
+
+
+def test_set_custom_pulse_does_not_reset_ssfp_prep_settings():
+    """RF waveform updates must not overwrite the configured first SSFP pulse."""
+
+    class Dummy:
+        pass
+
+    dummy = Dummy()
+    dummy.current_role = "Pulse"
+    dummy.pulse_waveforms = {}
+    dummy.custom_pulse = None
+    dummy.parent_gui = MagicMock()
+    dummy.parent_gui.rf_designer = MagicMock()
+    dummy.ssfp_start_flip = MagicMock()
+    dummy.ssfp_flip_ratio = MagicMock()
+    dummy.ssfp_start_tr = MagicMock()
+    dummy.ssfp_tr_ratio = MagicMock()
+    dummy.update_diagram = MagicMock()
+
+    pulse = (np.ones(10, dtype=complex), np.arange(10) * 1e-5)
+
+    SequenceDesigner.set_custom_pulse(dummy, pulse)
+
+    assert dummy.pulse_waveforms["Pulse"] == pulse
+    assert dummy.custom_pulse == pulse
+    dummy.ssfp_start_flip.setValue.assert_not_called()
+    dummy.ssfp_flip_ratio.setValue.assert_not_called()
+    dummy.ssfp_start_tr.setValue.assert_not_called()
+    dummy.ssfp_tr_ratio.setValue.assert_not_called()
+    dummy.update_diagram.assert_called_once_with()
+
+
+def test_auto_update_ssfp_amplitude_preserves_prep_settings():
+    """RF parameter changes should refresh the preview without mutating SSFP prep controls."""
+
+    class Dummy:
+        pass
+
+    dummy = Dummy()
+    dummy.sequence_designer = MagicMock()
+    dummy.sequence_designer.sequence_type.currentText.return_value = "SSFP (Loop)"
+    dummy.sequence_designer.ssfp_start_flip = MagicMock()
+    dummy.sequence_designer.update_diagram = MagicMock()
+    dummy.rf_designer = MagicMock()
+    pulse = (np.ones(8, dtype=complex), np.arange(8) * 1e-5)
+    dummy.rf_designer.get_pulse.return_value = pulse
+
+    BlochSimulatorGUI._auto_update_ssfp_amplitude(dummy)
+
+    dummy.sequence_designer.ssfp_start_flip.setValue.assert_not_called()
+    dummy.sequence_designer.update_diagram.assert_called_once_with(pulse)

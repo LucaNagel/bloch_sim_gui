@@ -1496,28 +1496,10 @@ class BlochSimulatorGUI(QMainWindow):
         self.sequence_designer.update_diagram(self.rf_designer.get_pulse())
 
     def _auto_update_ssfp_amplitude(self):
-        """Auto-calculate SSFP pulse amplitude from flip angle, duration, and integration factor."""
+        """Refresh the SSFP preview after RF-designer changes."""
         try:
             if self.sequence_designer.sequence_type.currentText() != "SSFP (Loop)":
                 return
-            # Get params
-            flip_deg = self.rf_designer.flip_angle.value()
-            flip_rad = np.deg2rad(flip_deg)
-            duration_s = max(self.rf_designer.duration.value() / 1000.0, 1e-9)
-
-            gmr_1h_rad_Ts = 267522187.43999997
-            integfac = max(self.rf_designer.get_integration_factor(), 1e-6)
-
-            # Required amplitude (Tesla); convert to Gauss
-            amp_gauss = float(flip_rad / (gmr_1h_rad_Ts * integfac * duration_s)) * 1e4
-            if not np.isfinite(amp_gauss) or amp_gauss <= 0:
-                return
-            # Update SSFP start flip angle (default to alpha/2)
-            self.sequence_designer.ssfp_start_flip.blockSignals(True)
-            self.sequence_designer.ssfp_start_flip.setValue(flip_deg * 0.5)
-            self.sequence_designer.ssfp_start_flip.blockSignals(False)
-
-            # Keep duration/phase-driven diagram in sync
             self.sequence_designer.update_diagram(self.rf_designer.get_pulse())
         except Exception:
             # Fail silently to avoid interrupting UI flow

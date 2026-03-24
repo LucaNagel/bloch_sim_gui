@@ -1113,28 +1113,11 @@ class SequenceDesigner(QGroupBox):
                     )
 
     def set_custom_pulse(self, pulse):
-        """Store custom pulse for preview (used when sequence type is Custom)."""
+        """Store the current RF waveform and refresh the sequence preview."""
         if self.current_role:
             self.pulse_waveforms[self.current_role] = pulse
 
         self.custom_pulse = pulse
-        # If a custom pulse exists, sync SSFP parameter widgets to its basic stats
-        if pulse is not None:
-            b1_wave, t_wave = pulse
-            b1_wave = np.asarray(b1_wave, dtype=complex)
-            if b1_wave.size:
-                # Sync Start Flip to half of the designer's flip angle
-                main_flip = self.parent_gui.rf_designer.flip_angle.value()
-                self.ssfp_start_flip.setValue(main_flip / 2.0)
-                self.ssfp_flip_ratio.setValue(0.5)
-            if t_wave is not None and len(t_wave) > 1:
-                # Calculate dt from the first two points (assuming uniform spacing)
-                dt = float(t_wave[1] - t_wave[0])
-                # Duration is span + 1 dt (because samples are 0..N-1)
-                duration_s = float(t_wave[-1] - t_wave[0]) + dt
-                # Sync Start TR to 0
-                self.ssfp_start_tr.setValue(0.0)
-                self.ssfp_tr_ratio.setValue(0.0)
         self.update_diagram()
 
     def update_diagram(self, custom_pulse=None):
