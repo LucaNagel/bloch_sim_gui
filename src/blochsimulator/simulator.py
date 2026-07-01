@@ -16,6 +16,12 @@ import xarray as xr
 import json
 from pathlib import Path
 from . import __version__
+from .memory import (
+    MemoryPolicy,
+    enforce_memory_budget,
+    enforce_sequence_memory,
+    resolve_memory_budget,
+)
 
 # Import the Cython extension (will be available after building)
 HAS_CYTHON = False
@@ -514,6 +520,7 @@ class SpinEcho(PulseSequence):
         npoints = int(np.ceil(total_duration / dt))
 
         # Initialize arrays
+        enforce_sequence_memory(npoints)
         b1 = np.zeros(npoints, dtype=complex)
         gradients = np.zeros((npoints, 3))
         time = np.arange(npoints) * dt
@@ -658,6 +665,7 @@ class SpinEchoTipAxis(PulseSequence):
         total_duration = max(self.tr, min_duration)
         npoints = int(np.ceil(total_duration / dt))
 
+        enforce_sequence_memory(npoints)
         b1 = np.zeros(npoints, dtype=complex)
         gradients = np.zeros((npoints, 3))
         time = np.arange(npoints) * dt
@@ -807,6 +815,7 @@ class GradientEcho(PulseSequence):
         npoints = int(np.ceil(total_duration / dt))
 
         # Initialize arrays
+        enforce_sequence_memory(npoints)
         b1 = np.zeros(npoints, dtype=complex)
         gradients = np.zeros((npoints, 3))
         time = np.arange(npoints) * dt
@@ -948,6 +957,7 @@ class InversionRecovery(PulseSequence):
         total_duration = max(self.tr, min_duration)
         npoints = int(np.ceil(total_duration / dt))
 
+        enforce_sequence_memory(npoints)
         b1 = np.zeros(npoints, dtype=complex)
         gradients = np.zeros((npoints, 3))
         time = np.arange(npoints) * dt
@@ -1229,6 +1239,7 @@ class CustomPulse(PulseSequence):
         if actual_dt != dt and dt > 0:
             # Resample to new dt
             new_npoints = int(np.ceil((time[-1] - time[0]) / dt))
+            enforce_sequence_memory(new_npoints)
             new_time = np.linspace(time[0], time[-1], new_npoints)
             # Simple linear interpolation
             b1 = np.interp(new_time, time, b1)
@@ -1269,7 +1280,12 @@ class BlochSimulator:
     """
 
     def __init__(
-        self, use_parallel: bool = True, num_threads: int = 4, verbose: bool = False
+        self,
+        use_parallel: bool = True,
+        num_threads: int = 4,
+        verbose: bool = False,
+        memory_limit_bytes: Optional[int] = None,
+        memory_policy: Optional[MemoryPolicy] = None,
     ):
         """
         Initialize the Bloch simulator.
@@ -1282,11 +1298,76 @@ class BlochSimulator:
             Number of threads for parallel processing
         verbose : bool
             Print progress messages
+        memory_limit_bytes : int, optional
+            Explicit RAM budget for one simulation. If omitted, the budget is
+            derived from currently available system RAM.
+        memory_policy : MemoryPolicy, optional
+            Reserve-based or fixed-limit RAM policy. The process-wide GUI policy
+            is used when omitted.
         """
         self.use_parallel = use_parallel
         self.num_threads = num_threads
         self.verbose = verbose
+        self.memory_limit_bytes = memory_limit_bytes
+        self.memory_policy = memory_policy
         self.last_result = None
+
+        # Validate settings immediately instead of waiting for the first run.
+        self._memory_budget()
+
+    def _memory_budget(self):
+        return resolve_memory_budget(
+            policy=self.memory_policy,
+            explicit_limit_bytes=self.memory_limit_bytes,
+        )
+
+    def _check_standard_simulation_memory(
+        self, ntime: int, npos: int, nfreq: int, mode: int
+    ) -> None:
+        """Check peak memory before the Cython output buffers are allocated."""
+        ntout = ntime if (mode & 2) else 1
+        output_samples = ntout * npos * nfreq
+        spin_count = npos * nfreq
+
+        # Peak estimate includes Mx/My/Mz, the complex signal and NumPy/Cython
+        # temporaries. Sequence working arrays and initial magnetization are
+        # included separately. This is intentionally conservative.
+        estimated_bytes = output_samples * 64 + ntime * 64 + spin_count * 56
+        enforce_memory_budget(
+            estimated_bytes,
+            self._memory_budget(),
+            description=(
+                f"Requested {ntime:,} time points × {npos:,} positions × "
+                f"{nfreq:,} frequencies ({output_samples:,} output samples)"
+            ),
+            suggestions=(
+                "Use Endpoint mode, increase the time step, reduce positions or "
+                "frequencies, or enable Preview"
+            ),
+        )
+
+    def _check_phantom_simulation_memory(
+        self, ntime: int, n_active: int, n_voxels: int, mode: int
+    ) -> None:
+        """Check peak memory for active buffers plus full phantom reconstruction."""
+        ntout = ntime if (mode & 2) else 1
+        active_samples = ntout * n_active
+        full_samples = ntout * n_voxels
+        estimated_bytes = (
+            active_samples * 48 + full_samples * 56 + ntime * 64 + n_active * 96
+        )
+        enforce_memory_budget(
+            estimated_bytes,
+            self._memory_budget(),
+            description=(
+                f"Requested {ntime:,} time points × {n_active:,} active voxels "
+                f"in a {n_voxels:,}-voxel phantom"
+            ),
+            suggestions=(
+                "Use Endpoint mode, increase the time step, or reduce the phantom "
+                "resolution"
+            ),
+        )
 
     def log_message(self, message: str):
         """Print a message if verbose mode is enabled."""
@@ -1413,6 +1494,10 @@ class BlochSimulator:
         frequencies = np.ravel(frequencies)
         frequencies = np.ascontiguousarray(frequencies)
 
+        self._check_standard_simulation_memory(
+            len(time), positions.shape[0], frequencies.shape[0], mode
+        )
+
         # Prepare initial magnetization if provided (shape expected: 3 x (npos*nfreq))
         m_init = None
         if initial_magnetization is not None:
@@ -1444,15 +1529,6 @@ class BlochSimulator:
                     "Initial magnetization must be scalar, length-3 vector, or (3, npos*nfreq) array."
                 )
             m_init = np.ascontiguousarray(m_init, dtype=np.float64)
-
-        # Guard against unreasonably large allocations in time-resolved mode
-        ntout = len(time) if (mode & 2) else 1
-        total_points = ntout * positions.shape[0] * frequencies.shape[0]
-        if total_points > 5e7:
-            raise ValueError(
-                f"Requested simulation is too large ({total_points:.1e} samples). "
-                "Increase the time step, reduce positions/frequencies, or use Endpoint mode."
-            )
 
         # Time intervals
         if len(time) > 1:
@@ -1645,6 +1721,10 @@ class BlochSimulator:
                 "pd_weighted_signal": np.zeros(shape, dtype=np.complex128),
             }
 
+        self._check_phantom_simulation_memory(
+            len(time), n_active, phantom.nvoxels, mode
+        )
+
         # Convert positions from meters to cm (Bloch core uses Gauss/cm)
         positions_cm = props["positions"] * 100  # m -> cm
         positions_cm = np.ascontiguousarray(positions_cm, dtype=np.float64)
@@ -1655,14 +1735,9 @@ class BlochSimulator:
         # Initial magnetization
         m_init = np.ascontiguousarray(props["m0"], dtype=np.float64)
 
-        # Check memory requirements
+        # Log the output size after the memory check has accepted it.
         ntout = len(time) if (mode & 2) else 1
         total_samples = ntout * n_active
-        if total_samples > 1e8:
-            raise ValueError(
-                f"Phantom simulation too large ({total_samples:.1e} samples for {n_active} active voxels). "
-                f"Use smaller phantom, reduce time points, or use endpoint mode (mode=0)."
-            )
 
         self.log_message(
             f"Simulation size: {n_active} voxels × {ntout} time points = {total_samples:.1e} samples"

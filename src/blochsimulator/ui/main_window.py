@@ -37,13 +37,20 @@ from PyQt5.QtWidgets import (
     QFrame,
     QFileDialog,
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QSettings, QTimer
 from PyQt5.QtGui import QFont, QIcon, QImage, QPalette, QColor
 
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 
 from .. import __version__
+from ..memory import (
+    MEMORY_ERROR_PREFIX,
+    MemoryPolicy,
+    SimulationMemoryError,
+    enforce_sequence_memory,
+    set_default_memory_policy,
+)
 from ..simulator import BlochSimulator, TissueParameters
 from ..visualization import (
     ImageExporter,
@@ -83,6 +90,7 @@ from .magnetization_viewer import MagnetizationViewer
 from .parameter_sweep import ParameterSweepWidget
 from .tutorial_manager import TutorialManager
 from .tutorial_overlay import TutorialOverlay
+from .dialogs import MemorySettingsDialog
 
 
 def get_app_data_dir() -> Path:
@@ -107,6 +115,8 @@ class BlochSimulatorGUI(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self.app_settings = QSettings("BlochSimulator", "BlochSimulator")
+        set_default_memory_policy(self._load_memory_policy())
         self.simulator = BlochSimulator(use_parallel=True, num_threads=4)
         self.simulation_thread = None
         self.init_ui()
@@ -1552,6 +1562,7 @@ class BlochSimulatorGUI(QMainWindow):
         if n_tail <= 0:
             return (b1, gradients, time)
 
+        enforce_sequence_memory(len(time) + n_tail, estimated_bytes_per_point=96)
         tail_time = time[-1] + np.arange(1, n_tail + 1) * dt_use
         b1_tail = np.zeros(n_tail, dtype=complex)
         grad_tail = np.zeros((n_tail, gradients.shape[1]), dtype=float)
@@ -3302,6 +3313,11 @@ class BlochSimulatorGUI(QMainWindow):
         export_results_action.setObjectName("action_export_results_tools")
         export_results_action.triggered.connect(self.export_results)
 
+        tools_menu.addSeparator()
+        memory_action = tools_menu.addAction("Simulation Memory Settings...")
+        memory_action.setObjectName("action_memory_settings")
+        memory_action.triggered.connect(self.show_memory_settings)
+
         # Tutorials menu
         tut_menu = menubar.addMenu("Tutorials")
         tut_menu.setObjectName("menu_tutorials")
@@ -3328,6 +3344,34 @@ class BlochSimulatorGUI(QMainWindow):
         about_action = help_menu.addAction("About")
         about_action.setObjectName("action_about")
         about_action.triggered.connect(self.show_about)
+
+    def _load_memory_policy(self) -> MemoryPolicy:
+        """Load the persistent simulation-memory policy."""
+        try:
+            mode = str(self.app_settings.value("memory/mode", "automatic"))
+            reserve_gib = float(self.app_settings.value("memory/reserve_gib", 2.0))
+            limit_gib = float(self.app_settings.value("memory/limit_gib", 8.0))
+            return MemoryPolicy(
+                mode=mode,
+                reserve_bytes=int(reserve_gib * 1024**3),
+                limit_bytes=int(limit_gib * 1024**3),
+            )
+        except (TypeError, ValueError):
+            return MemoryPolicy()
+
+    def show_memory_settings(self):
+        """Show and persist simulation RAM settings."""
+        dialog = MemorySettingsDialog(self._load_memory_policy(), self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        policy = dialog.get_policy()
+        self.app_settings.setValue("memory/mode", policy.mode)
+        self.app_settings.setValue("memory/reserve_gib", policy.reserve_bytes / 1024**3)
+        self.app_settings.setValue("memory/limit_gib", policy.limit_bytes / 1024**3)
+        self.app_settings.sync()
+        set_default_memory_policy(policy)
+        self.statusBar().showMessage("Simulation memory settings updated", 5000)
 
     def _sync_preview_checkboxes(self, checked: bool):
         """Keep preview checkboxes in sync between footer and status bar."""
@@ -3474,17 +3518,23 @@ class BlochSimulatorGUI(QMainWindow):
         tissue = self.tissue_widget.get_parameters()
         pulse = self.rf_designer.get_pulse()
         dt_s = max(self.time_step_spin.value(), 0.1) * 1e-6
-        sequence_tuple = self.sequence_designer.compile_sequence(
-            custom_pulse=pulse, dt=dt_s, log_info=True
-        )
-        tail_ms = self.extra_tail_spin.value()
-        b1_orig_len = len(sequence_tuple[0])
-        sequence_tuple = self._extend_sequence_with_tail(sequence_tuple, tail_ms, dt_s)
-        if len(sequence_tuple[0]) > b1_orig_len:
-            added = len(sequence_tuple[0]) - b1_orig_len
-            self.log_message(
-                f"Appended {tail_ms:.3f} ms tail ({added} pts) after sequence."
+        try:
+            sequence_tuple = self.sequence_designer.compile_sequence(
+                custom_pulse=pulse, dt=dt_s, log_info=True
             )
+            tail_ms = self.extra_tail_spin.value()
+            b1_orig_len = len(sequence_tuple[0])
+            sequence_tuple = self._extend_sequence_with_tail(
+                sequence_tuple, tail_ms, dt_s
+            )
+            if len(sequence_tuple[0]) > b1_orig_len:
+                added = len(sequence_tuple[0]) - b1_orig_len
+                self.log_message(
+                    f"Appended {tail_ms:.3f} ms tail ({added} pts) after sequence."
+                )
+        except SimulationMemoryError as exc:
+            self.on_simulation_error(str(exc))
+            return
 
         b1_arr, gradients_arr, time_arr = sequence_tuple
         if not self._sweep_mode:
@@ -3533,9 +3583,8 @@ class BlochSimulatorGUI(QMainWindow):
 
         m0 = self.tissue_widget.get_initial_mz()
         self.initial_mz = abs(m0) if np.isfinite(m0) else 1.0
-        nfnpos = nfreq * npos
-        m_init = np.zeros((3, nfnpos))
-        m_init[2, :] = m0
+        # The simulator expands this scalar only after its RAM preflight passes.
+        m_init = m0
         self.mag_3d.set_length_scale(self.initial_mz)
 
         self.last_positions = positions
@@ -3634,7 +3683,40 @@ class BlochSimulatorGUI(QMainWindow):
             self.toolbar_cancel_action.setEnabled(False)
         if hasattr(self, "toolbar_progress"):
             self.toolbar_progress.setValue(0)
-        QMessageBox.critical(self, "Simulation Error", error_msg)
+        if str(error_msg).startswith(MEMORY_ERROR_PREFIX):
+            self.statusBar().showMessage("Simulation not started: RAM budget exceeded")
+            self._show_memory_limit_warning(str(error_msg))
+        else:
+            QMessageBox.critical(self, "Simulation Error", error_msg)
+
+    def _show_memory_limit_warning(self, error_msg: str):
+        """Show actionable choices for a rejected high-memory simulation."""
+        details = error_msg.removeprefix(MEMORY_ERROR_PREFIX).strip()
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setWindowTitle("Simulation exceeds RAM budget")
+        dialog.setText(
+            "The selected number of simulation points would use too much RAM."
+        )
+        dialog.setInformativeText(details)
+
+        endpoint_button = None
+        if self.mode_combo.currentText() == "Time-resolved":
+            endpoint_button = dialog.addButton(
+                "Use Endpoint Mode", QMessageBox.AcceptRole
+            )
+        settings_button = dialog.addButton("Memory Settings...", QMessageBox.ActionRole)
+        dialog.addButton(QMessageBox.Cancel)
+        dialog.exec_()
+
+        clicked = dialog.clickedButton()
+        if endpoint_button is not None and clicked is endpoint_button:
+            self.mode_combo.setCurrentText("Endpoint")
+            self.statusBar().showMessage(
+                "Endpoint mode selected; press Simulate to run again", 7000
+            )
+        elif clicked is settings_button:
+            self.show_memory_settings()
 
     def on_simulation_cancelled(self):
         """Handle user cancellation."""

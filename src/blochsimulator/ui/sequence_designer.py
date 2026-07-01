@@ -16,6 +16,7 @@ import pyqtgraph as pg
 from PyQt5.QtCore import Qt
 from typing import Optional
 
+from ..memory import enforce_sequence_memory
 from ..simulator import (
     PulseSequence,
     SpinEcho,
@@ -816,6 +817,7 @@ class SequenceDesigner(QGroupBox):
         required_pts = train_end_pts + spoil_pts + 1
         npoints = int(max(np.ceil(tr / dt), required_pts, exc_pts + 1))
 
+        enforce_sequence_memory(npoints)
         b1 = np.zeros(npoints, dtype=complex)
         gradients = np.zeros((npoints, 3))
 
@@ -964,6 +966,7 @@ class SequenceDesigner(QGroupBox):
         # Determine timeline length
         total_duration = start_delay + pulse_dur + tr * (n_reps - 1) + 0.5 * tr
         npoints = int(np.ceil(total_duration / dt)) + 1
+        enforce_sequence_memory(npoints)
         b1 = np.zeros(npoints, dtype=complex)
         gradients = np.zeros((npoints, 3), dtype=float)
         time = np.arange(npoints) * dt
@@ -1057,6 +1060,7 @@ class SequenceDesigner(QGroupBox):
         total_dur = max(te, (exc_pts + slice_gap_pts + rephase_pts) * dt + 0.001)
         npoints = int(np.ceil(total_dur / dt))
 
+        enforce_sequence_memory(npoints)
         b1 = np.zeros(npoints, dtype=complex)
         gradients = np.zeros((npoints, 3))
         time = np.arange(npoints) * dt
