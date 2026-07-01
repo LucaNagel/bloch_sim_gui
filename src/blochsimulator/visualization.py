@@ -550,8 +550,9 @@ class ExportDataDialog(QDialog):
         self.visual_group = QGroupBox("Visual Exports (Current View)")
         visual_layout = QVBoxLayout()
 
-        self.chk_image = QCheckBox("Static Image (PNG/SVG)")
+        self.chk_image = QCheckBox("Static Image")
         self.chk_image.setChecked(False)
+        self.chk_image.setToolTip("Filename and image options are selected next.")
         visual_layout.addWidget(self.chk_image)
 
         self.img_opts = QWidget()
@@ -563,12 +564,14 @@ class ExportDataDialog(QDialog):
         img_opts_layout.addWidget(self.img_format)
         self.img_opts.setLayout(img_opts_layout)
         self.img_opts.setVisible(False)
-        self.chk_image.toggled.connect(self.img_opts.setVisible)
         visual_layout.addWidget(self.img_opts)
 
         # 2. Animation Exports
-        self.chk_animation = QCheckBox("Animation (MP4/GIF)")
+        self.chk_animation = QCheckBox("Animation")
         self.chk_animation.setChecked(False)
+        self.chk_animation.setToolTip(
+            "Filename, format, frame range, and resolution are selected next."
+        )
         self.chk_animation.setEnabled(self.has_time_resolved)
         if not self.has_time_resolved:
             self.chk_animation.setToolTip(
@@ -598,8 +601,13 @@ class ExportDataDialog(QDialog):
 
         self.anim_opts.setLayout(anim_opts_layout)
         self.anim_opts.setVisible(False)
-        self.chk_animation.toggled.connect(self.anim_opts.setVisible)
         visual_layout.addWidget(self.anim_opts)
+
+        visual_hint = QLabel(
+            "Visual export filename and options are selected in the next dialog."
+        )
+        visual_hint.setWordWrap(True)
+        visual_layout.addWidget(visual_hint)
 
         self.visual_group.setLayout(visual_layout)
         layout.addWidget(self.visual_group)
@@ -656,22 +664,30 @@ class ExportDataDialog(QDialog):
         self.setMinimumWidth(400)
 
     def _on_export_clicked(self):
-        if not any(
+        visual_selected = self.chk_image.isChecked() or self.chk_animation.isChecked()
+        data_selected = any(
             [
-                self.chk_image.isChecked(),
-                self.chk_animation.isChecked(),
                 self.chk_hdf5.isChecked(),
                 self.chk_nb_analysis.isChecked(),
                 self.chk_nb_repro.isChecked(),
                 self.chk_csv.isChecked(),
             ]
-        ):
+        )
+        if not visual_selected and not data_selected:
             QMessageBox.warning(
                 self, "No Selection", "Please select at least one export format."
             )
             return
 
-        # Get base filename
+        # Visual exporters have their own filename/options dialog.  When no
+        # data artifact is requested, asking for a shared base name here would
+        # result in a redundant second filename prompt.
+        if visual_selected and not data_selected:
+            self.base_path = None
+            self.accept()
+            return
+
+        # Data and notebook artifacts share one base filename.
         default_path = self.default_directory / self.default_filename
         filename, _ = QFileDialog.getSaveFileName(
             self, "Export Results (Base Filename)", str(default_path), "All Files (*)"

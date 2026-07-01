@@ -11,7 +11,7 @@ Author: Bloch Simulator Team
 Date: 2024
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import json
 
 try:
@@ -23,7 +23,6 @@ except ImportError:
     HAS_NBFORMAT = False
     nbformat = None
 import numpy as np
-from typing import Dict, Optional, Tuple
 from pathlib import Path
 from . import __version__
 
@@ -1199,6 +1198,7 @@ raise NotImplementedError("This sequence type requires manual definition of wave
         """Generate position/frequency sampling code."""
         pos_range = simulation_params.get("position_range_cm", 0.0) / 100.0  # to meters
         freq_range = simulation_params.get("frequency_range_hz", 0.0)
+        freq_center = simulation_params.get("frequency_center_hz", 0.0)
 
         return f"""# Define spatial positions
 positions = np.zeros((num_positions, 3))
@@ -1207,9 +1207,9 @@ if num_positions > 1:
 
 # Define off-resonance frequencies
 if num_frequencies > 1:
-    frequencies = np.linspace(-{freq_range/2:.1f}, {freq_range/2:.1f}, num_frequencies)
+    frequencies = np.linspace({freq_center-freq_range/2:.1f}, {freq_center+freq_range/2:.1f}, num_frequencies)
 else:
-    frequencies = np.array([0.0])
+    frequencies = np.array([{freq_center:.1f}])
 
 print(f"Sampling:")
 print(f"  Positions: {{num_positions}}")

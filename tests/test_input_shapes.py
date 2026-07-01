@@ -48,6 +48,38 @@ class InputShapeTests(unittest.TestCase):
         self.assertIn("mz", result)
         self.assertEqual(result["mz"].shape, (positions.shape[0], frequencies.shape[0]))
 
+    def test_scalar_initial_magnetization_is_normalized(self):
+        """Scalar Mz input should reach the compiled backend as a 3xN state."""
+        sim = BlochSimulator(use_parallel=False)
+        result = sim.simulate(
+            (
+                np.zeros(self.ntime, dtype=complex),
+                np.zeros((self.ntime, 3)),
+                self.time,
+            ),
+            self.tissue,
+            initial_magnetization=0.5,
+            mode=0,
+        )
+        self.assertGreater(float(result["mz"][0, 0]), 0.5)
+        self.assertLess(float(result["mz"][0, 0]), 1.0)
+
+    def test_vector_initial_magnetization_is_normalized(self):
+        """A length-three vector should be accepted for every simulated spin."""
+        sim = BlochSimulator(use_parallel=False)
+        result = sim.simulate(
+            (
+                np.zeros(self.ntime, dtype=complex),
+                np.zeros((self.ntime, 3)),
+                self.time,
+            ),
+            self.tissue,
+            frequencies=np.array([-10.0, 10.0]),
+            initial_magnetization=np.array([0.0, 0.0, 0.5]),
+            mode=0,
+        )
+        self.assertEqual(result["mz"].shape, (1, 2))
+
 
 if __name__ == "__main__":
     unittest.main()

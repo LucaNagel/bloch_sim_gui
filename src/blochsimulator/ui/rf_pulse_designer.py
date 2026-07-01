@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
     QTextEdit,
     QMessageBox,
     QFileDialog,
+    QDialog,
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 import numpy as np
@@ -167,7 +168,7 @@ class RFPulseDesigner(QGroupBox):
 
         # RF Frequency Offset
         freq_offset_layout = QHBoxLayout()
-        freq_offset_layout.addWidget(QLabel("RF Frequency Offset (Hz):"))
+        freq_offset_layout.addWidget(QLabel("Sequence RF Carrier Offset (Hz):"))
         self.freq_offset = QDoubleSpinBox()
         self.freq_offset.setObjectName(f"{prefix}freq_offset")
         self.freq_offset.setRange(-10000, 10000)
@@ -305,21 +306,18 @@ class RFPulseDesigner(QGroupBox):
         pulse_amp_G = pulse_amp_T * 1e4
         return shape * pulse_amp_G * np.exp(1j * opt_phase)
 
-    def _apply_phase_and_offset(self, b1_wave, t_wave):
-        """Apply user-selected phase and frequency offset to a waveform."""
+    def _apply_phase(self, b1_wave):
+        """Apply the event phase while keeping the stored waveform at baseband."""
+        b1_wave = np.asarray(b1_wave, dtype=complex)
+        phase_rad = np.deg2rad(self.phase.value())
+        return b1_wave * np.exp(1j * phase_rad)
+
+    def _carrier_preview(self, b1_wave, t_wave):
+        """Return a pulse-local carrier preview without changing baseband storage."""
         b1_wave = np.asarray(b1_wave, dtype=complex)
         t_wave = np.asarray(t_wave, dtype=float)
-        if b1_wave.shape != t_wave.shape:
-            # Allow time to be length N while b1 is length N
-            pass
-        phase_rad = np.deg2rad(self.phase.value())
-        freq_hz = self.freq_offset.value()
-        if t_wave.size > 0:
-            t_rel = t_wave - t_wave[0]
-        else:
-            t_rel = t_wave
-        # Apply global phase and complex modulation for frequency offset
-        return b1_wave * np.exp(1j * (phase_rad + 2 * np.pi * freq_hz * t_rel))
+        t_rel = t_wave - t_wave[0] if t_wave.size else t_wave
+        return b1_wave * np.exp(2j * np.pi * self.freq_offset.value() * t_rel)
 
     def get_integration_factor(self) -> float:
         """Return best-known integration factor (cached or recomputed from current pulse)."""
@@ -364,7 +362,6 @@ class RFPulseDesigner(QGroupBox):
         duration = self.duration.value() / 1000  # Convert to seconds
         flip = self.flip_angle.value()
         b1_override = self.b1_amplitude.value()
-        freq_offset_hz = self.freq_offset.value()
         phase_rad = np.deg2rad(self.phase.value())
 
         # Handle Custom Pulse
@@ -434,11 +431,9 @@ class RFPulseDesigner(QGroupBox):
                 # Auto (Flip Angle)
                 b1 = self._scale_pulse_to_flip(b1, time, flip, integfac=integfac)
 
-            # Apply Phase and Frequency Offset
-            # Note: _apply_phase_and_offset handles self.phase and self.freq_offset internally
-            # but we extracted them above. Let's use the helper or manual.
-            # Helper uses self.phase/freq_offset.value() directly.
-            b1 = self._apply_phase_and_offset(b1, time)
+            # Store a baseband waveform. The sequence rasterizer applies the
+            # RF carrier later using absolute sequence time.
+            b1 = self._apply_phase(b1)
 
             self.current_pulse = (b1, time)
             self.pulse_changed.emit(self.current_pulse)
@@ -446,7 +441,7 @@ class RFPulseDesigner(QGroupBox):
             if not self._syncing:
                 self.parameters_changed.emit(self.get_state())
 
-            self._update_plot(b1, time)
+            self._update_plot(self._carrier_preview(b1, time), time)
             return
 
         # Handle Standard Pulses
@@ -511,18 +506,13 @@ class RFPulseDesigner(QGroupBox):
         total_phase = opt_phase + phase_rad
         b1 = shape * pulse_amp_G * np.exp(1j * total_phase)
 
-        # Frequency Offset
-        if freq_offset_hz != 0.0:
-            mod = np.exp(2j * np.pi * freq_offset_hz * time)
-            b1 = b1 * mod
-
         self.current_pulse = (b1, time)
         self.pulse_changed.emit(self.current_pulse)
 
         if not self._syncing:
             self.parameters_changed.emit(self.get_state())
 
-        self._update_plot(b1, time)
+        self._update_plot(self._carrier_preview(b1, time), time)
 
     def _update_plot(self, b1, time):
         """Helper to update the plot widget."""

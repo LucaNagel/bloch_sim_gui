@@ -123,6 +123,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.last_result = None
         self.last_positions = None
         self.last_frequencies = None
+        self.last_effective_frequencies = None
         self.anim_timer = QTimer()
         self.anim_timer.timeout.connect(self._animate_vector)
         self.anim_interval_ms = 30
@@ -291,18 +292,40 @@ class BlochSimulatorGUI(QMainWindow):
         self.freq_spin.setRange(1, 10000)
         self.freq_spin.setValue(31)
         freq_layout.addWidget(self.freq_spin)
+        freq_layout.addWidget(QLabel("Center (Hz):"))
+        self.freq_center = QDoubleSpinBox()
+        self.freq_center.setObjectName("freq_center")
+        self.freq_center.setRange(-1e6, 1e6)
+        self.freq_center.setDecimals(2)
+        self.freq_center.setValue(0.0)
+        freq_layout.addWidget(self.freq_center)
         freq_layout.addWidget(QLabel("Range (Hz):"))
         self.freq_range = QDoubleSpinBox()
         self.freq_range.setObjectName("freq_range")
-        # Avoid zero-span (forces unique frequencies)
-        self.freq_range.setRange(0.01, 1e4)
+        self.freq_range.setRange(0.0, 1e4)
         self.freq_range.setValue(100.0)
         freq_layout.addWidget(self.freq_range)
         control_layout.addLayout(freq_layout)
-        # Frequency helper text
-        self.freq_label = QLabel("Frequencies: [0]")
+        # Frequency-axis convention and helper text
+        axis_layout = QHBoxLayout()
+        axis_layout.addWidget(QLabel("Display axis:"))
+        self.freq_axis_mode = QComboBox()
+        self.freq_axis_mode.setObjectName("freq_axis_mode")
+        self.freq_axis_mode.addItems(
+            ["Spin offset (lab)", "Effective detuning (spin − RF)"]
+        )
+        axis_layout.addWidget(self.freq_axis_mode)
+        control_layout.addLayout(axis_layout)
+        self.freq_label = QLabel()
         self.freq_label.setWordWrap(True)
         control_layout.addWidget(self.freq_label)
+        self.freq_spin.valueChanged.connect(self._update_frequency_summary)
+        self.freq_center.valueChanged.connect(self._update_frequency_summary)
+        self.freq_range.valueChanged.connect(self._update_frequency_summary)
+        self.freq_axis_mode.currentTextChanged.connect(
+            self._on_frequency_axis_mode_changed
+        )
+        self._update_frequency_summary()
 
         # Time resolution control
         time_res_layout = QHBoxLayout()
@@ -1131,6 +1154,61 @@ class BlochSimulatorGUI(QMainWindow):
             self.spatial_component_combo.setVisible(not is_heatmap)
             if hasattr(self, "spatial_component_label"):
                 self.spatial_component_label.setVisible(not is_heatmap)
+
+    def _build_frequency_axis(self) -> np.ndarray:
+        """Build the laboratory-frame spin-offset sampling axis."""
+        count = int(self.freq_spin.value())
+        center = float(self.freq_center.value())
+        span = float(self.freq_range.value())
+        if count <= 1:
+            return np.array([center], dtype=float)
+        if span <= 0.0:
+            span = max(1.0, float(count - 1))
+        return np.linspace(center - span / 2.0, center + span / 2.0, count)
+
+    def _display_frequency_axis(self) -> Optional[np.ndarray]:
+        """Return frequencies in the currently selected display frame."""
+        if self.last_frequencies is None:
+            return None
+        if hasattr(
+            self, "freq_axis_mode"
+        ) and self.freq_axis_mode.currentText().startswith("Effective"):
+            if self.last_effective_frequencies is not None:
+                return np.asarray(self.last_effective_frequencies)
+            rf_offset = float(self.rf_designer.freq_offset.value())
+            return np.asarray(self.last_frequencies) - rf_offset
+        return np.asarray(self.last_frequencies)
+
+    def _frequency_axis_label(self) -> str:
+        if hasattr(
+            self, "freq_axis_mode"
+        ) and self.freq_axis_mode.currentText().startswith("Effective"):
+            return "Effective detuning Δfspin − fRF (Hz)"
+        return "Spin offset Δfspin (Hz)"
+
+    def _update_frequency_summary(self, *_):
+        if not hasattr(self, "freq_label"):
+            return
+        axis = self._build_frequency_axis()
+        if axis.size == 1:
+            text = f"Spin offsets: [{axis[0]:.2f}] Hz"
+        else:
+            text = (
+                f"Spin offsets: {axis[0]:.2f} … {axis[-1]:.2f} Hz "
+                f"({axis.size} samples)"
+            )
+        self.freq_label.setText(text)
+
+    def _on_frequency_axis_mode_changed(self, *_):
+        if self.last_result is None:
+            return
+        display_axis = self._display_frequency_axis()
+        self.mag_3d.last_frequencies = display_axis
+        self._invalidate_plot_caches()
+        self._refresh_mag_plots()
+        self._refresh_signal_plots()
+        self.update_spatial_plot_from_last_result()
+        self._refresh_spectrum()
 
     def _color_for_index(self, idx: int, total: int):
         """Consistent color cycling for multiple frequencies."""
@@ -2150,6 +2228,7 @@ class BlochSimulatorGUI(QMainWindow):
             return
         mode = self.mag_view_mode.currentText()
         slider = self.mag_view_selector
+        display_frequencies = self._display_frequency_axis()
 
         # Helper to find index closest to 0
         def _get_zero_idx(arr):
@@ -2163,23 +2242,23 @@ class BlochSimulatorGUI(QMainWindow):
             self.mag_view_selector_label.setText("All spins")
         elif mode == "Positions @ freq":
             max_idx = max(0, nfreq - 1)
+            old_max = slider.maximum()
             slider.setRange(0, max_idx)
             slider.setEnabled(nfreq > 1)
 
             # If current value is out of range or we just switched, try to set to 0 Hz
-            if slider.value() > max_idx:
+            if slider.value() > max_idx or old_max != max_idx:
                 target = (
-                    _get_zero_idx(self.last_frequencies)
-                    if self.last_frequencies is not None
+                    _get_zero_idx(display_frequencies)
+                    if display_frequencies is not None
                     else 0
                 )
                 slider.setValue(target)
 
             idx = slider.value()
             freq_hz_val = (
-                self.last_frequencies[idx]
-                if self.last_frequencies is not None
-                and idx < len(self.last_frequencies)
+                display_frequencies[idx]
+                if display_frequencies is not None and idx < len(display_frequencies)
                 else idx
             )
             self.mag_view_selector_label.setText(f"Freq: {freq_hz_val:.1f} Hz")
@@ -2232,6 +2311,8 @@ class BlochSimulatorGUI(QMainWindow):
             return
         mode = self.signal_view_mode.currentText()
         slider = self.signal_view_selector
+        display_frequencies = self._display_frequency_axis()
+        old_max = slider.maximum()
 
         if disable:
             max_idx = 0
@@ -2242,9 +2323,8 @@ class BlochSimulatorGUI(QMainWindow):
             prefix = "Freq"
             idx = min(slider.value(), max_idx)
             freq_hz_val = (
-                self.last_frequencies[idx]
-                if self.last_frequencies is not None
-                and idx < len(self.last_frequencies)
+                display_frequencies[idx]
+                if display_frequencies is not None and idx < len(display_frequencies)
                 else idx
             )
             label_text = f"{prefix}: {freq_hz_val:.1f} Hz"
@@ -2265,11 +2345,27 @@ class BlochSimulatorGUI(QMainWindow):
 
         slider.blockSignals(True)
         slider.setMaximum(max_idx)
-        slider.setValue(min(slider.value(), max_idx) if max_idx > 0 else 0)
+        if mode == "Positions @ freq" and old_max != max_idx:
+            target = (
+                int(np.argmin(np.abs(display_frequencies)))
+                if display_frequencies is not None and len(display_frequencies)
+                else 0
+            )
+            slider.setValue(min(target, max_idx))
+        else:
+            slider.setValue(min(slider.value(), max_idx) if max_idx > 0 else 0)
         slider.setEnabled(not disable and max_idx > 0)
         slider.setVisible(max_idx > 0)
         slider.blockSignals(False)
 
+        if mode == "Positions @ freq":
+            idx = slider.value()
+            freq_hz_val = (
+                display_frequencies[idx]
+                if display_frequencies is not None and idx < len(display_frequencies)
+                else idx
+            )
+            label_text = f"Freq: {freq_hz_val:.1f} Hz"
         self.signal_view_selector_label.setText(label_text)
 
     def _apply_pulse_region(self, plot_widget, attr_name):
@@ -2364,8 +2460,9 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Update label
         actual_freq = 0.0
-        if self.last_frequencies is not None and freq_sel < len(self.last_frequencies):
-            actual_freq = self.last_frequencies[freq_sel]
+        display_frequencies = self._display_frequency_axis()
+        if display_frequencies is not None and freq_sel < len(display_frequencies):
+            actual_freq = display_frequencies[freq_sel]
             self.spatial_freq_label.setText(f"Freq: {actual_freq:.1f} Hz")
         else:
             self.spatial_freq_label.setText(f"Freq idx: {freq_sel}")
@@ -2396,8 +2493,8 @@ class BlochSimulatorGUI(QMainWindow):
         )
 
         freq_axis = (
-            np.asarray(self.last_frequencies)
-            if self.last_frequencies is not None
+            np.asarray(display_frequencies)
+            if display_frequencies is not None
             else np.arange(freq_count)
         )
         if freq_axis.shape[0] != freq_count:
@@ -2860,12 +2957,10 @@ class BlochSimulatorGUI(QMainWindow):
                     for fi in freq_indices_to_mark:
                         # Ensure color is an RGBA tuple for consistent rendering
                         color = self._color_tuple(self._color_for_index(fi, nfreq))
-                        mxy_val = (
-                            np.sqrt(mx_display[:, fi] ** 2 + my_display[:, fi] ** 2)
-                            if mx_display.ndim == 2
-                            else mxy
+                        mxy_val = np.sqrt(
+                            mx_display[:, fi] ** 2 + my_display[:, fi] ** 2
                         )
-                        mz_val = mz_display[:, fi] if mz_display.ndim == 2 else mz_pos
+                        mz_val = mz_display[:, fi]
 
                         # Downsample position points to draw stems at
                         if npos <= max_markers:
@@ -2948,7 +3043,8 @@ class BlochSimulatorGUI(QMainWindow):
                 img_item.setImage(data, autoLevels=True, axisOrder="row-major")
                 img_item.setRect(pos_min, y_min, x_span, y_span)
                 plot_widget.setXRange(pos_min, pos_max, padding=0)
-                plot_widget.setYRange(y_min, y_max, padding=0)
+                plot_widget.setYRange(y_min, y_min + y_span, padding=0)
+                plot_widget.setLabel("left", self._frequency_axis_label())
                 if colorbar is not None:
                     finite_vals = data[np.isfinite(data)]
                     if finite_vals.size:
@@ -3089,6 +3185,7 @@ class BlochSimulatorGUI(QMainWindow):
             self.pos_spin,
             self.pos_range,
             self.freq_spin,
+            self.freq_center,
             self.freq_range,
             self.rf_designer.duration,
             self.rf_designer.phase,
@@ -3149,6 +3246,8 @@ class BlochSimulatorGUI(QMainWindow):
             self.pos_range.setValue(float(presets["position_range_cm"]))
         if "num_frequencies" in presets:
             self.freq_spin.setValue(int(presets["num_frequencies"]))
+        if "frequency_center_hz" in presets:
+            self.freq_center.setValue(float(presets["frequency_center_hz"]))
         if "frequency_range_hz" in presets:
             self.freq_range.setValue(float(presets["frequency_range_hz"]))
         if "time_step" in presets:
@@ -3157,6 +3256,7 @@ class BlochSimulatorGUI(QMainWindow):
         # Re-enable signals
         for widget in widgets_to_block:
             widget.blockSignals(False)
+        self._update_frequency_summary()
 
         # Force regeneration of the current pulse (Excitation) to match the new presets
         self.rf_designer.update_pulse()
@@ -3411,15 +3511,8 @@ class BlochSimulatorGUI(QMainWindow):
         if npos > 1:
             positions[:, 2] = np.linspace(-half_span, half_span, npos)
 
-        nfreq = self.freq_spin.value()
-        freq_range = self.freq_range.value()
-        if nfreq > 1 and freq_range <= 0:
-            freq_range = max(1.0, nfreq - 1)
-            self.freq_range.setValue(freq_range)
-        if nfreq > 1:
-            frequencies = np.linspace(-freq_range / 2, freq_range / 2, nfreq)
-        else:
-            frequencies = np.array([0.0])
+        frequencies = self._build_frequency_axis()
+        nfreq = frequencies.size
         mode = 2 if self.mode_combo.currentText() == "Time-resolved" else 0
 
         preview_on = self.preview_checkbox.isChecked() or (
@@ -3447,6 +3540,8 @@ class BlochSimulatorGUI(QMainWindow):
 
         self.last_positions = positions
         self.last_frequencies = frequencies
+        rf_carrier_offset = float(self.rf_designer.freq_offset.value())
+        self.last_effective_frequencies = frequencies - rf_carrier_offset
 
         self.simulation_thread = SimulationThread(
             self.simulator,
@@ -3457,6 +3552,7 @@ class BlochSimulatorGUI(QMainWindow):
             mode,
             dt=dt_s,
             m_init=m_init,
+            rf_carrier_offset=rf_carrier_offset,
         )
         self.simulation_thread.finished.connect(self.on_simulation_finished)
         self.simulation_thread.cancelled.connect(self.on_simulation_cancelled)
@@ -3496,7 +3592,14 @@ class BlochSimulatorGUI(QMainWindow):
         if result.get("mx", {}).ndim > 2:
             self._precompute_plot_ranges(result)
         self.mag_3d.last_positions = self.last_positions
-        self.mag_3d.last_frequencies = self.last_frequencies
+        self.last_effective_frequencies = np.asarray(
+            result.get(
+                "effective_frequencies",
+                np.asarray(self.last_frequencies)
+                - float(result.get("rf_carrier_offset", 0.0)),
+            )
+        )
+        self.mag_3d.last_frequencies = self._display_frequency_axis()
 
         # Prepare B1 for playback
         if hasattr(self, "last_b1") and self.last_b1 is not None:
@@ -3597,7 +3700,8 @@ class BlochSimulatorGUI(QMainWindow):
                     return 0
                 return int(np.argmin(np.abs(arr)))
 
-            f_idx = _get_zero_idx(self.last_frequencies, freq_len)
+            display_frequencies = self._display_frequency_axis()
+            f_idx = _get_zero_idx(display_frequencies, freq_len)
             if hasattr(self, "spatial_freq_slider"):
                 self.spatial_freq_slider.setValue(f_idx)
 
@@ -3613,10 +3717,18 @@ class BlochSimulatorGUI(QMainWindow):
                 self.spectrum_pos_slider.setValue(p_idx)
 
             if hasattr(self, "mag_view_selector"):
-                self.mag_view_selector.setValue(0)
+                self.mag_view_selector.setValue(
+                    f_idx
+                    if self.mag_view_mode.currentText() == "Positions @ freq"
+                    else 0
+                )
 
             if hasattr(self, "signal_view_selector"):
-                self.signal_view_selector.setValue(0)
+                self.signal_view_selector.setValue(
+                    f_idx
+                    if self.signal_view_mode.currentText() == "Positions @ freq"
+                    else 0
+                )
 
             ntime = mx_arr.shape[0]
             time_ms = self._normalize_time_length(raw_time, ntime) * 1000
@@ -3803,8 +3915,12 @@ class BlochSimulatorGUI(QMainWindow):
                     self.pos_range.setValue(sim["pos_range"])
                 if "num_freq" in sim:
                     self.freq_spin.setValue(sim["num_freq"])
+                if "freq_center" in sim:
+                    self.freq_center.setValue(sim["freq_center"])
                 if "freq_range" in sim:
                     self.freq_range.setValue(sim["freq_range"])
+                if "freq_axis_mode" in sim:
+                    self.freq_axis_mode.setCurrentText(sim["freq_axis_mode"])
                 if "time_step" in sim:
                     self.time_step_spin.setValue(sim["time_step"])
                 if "extra_tail" in sim:
@@ -3943,6 +4059,11 @@ class BlochSimulatorGUI(QMainWindow):
 
             self.log_message(f"Parameters saved to {Path(filename).name}")
             self.statusBar().showMessage(f"Parameters saved to {Path(filename).name}")
+            QMessageBox.information(
+                self,
+                "Save Successful",
+                f"Parameters saved successfully:\n{Path(filename)}",
+            )
 
         except Exception as e:
             QMessageBox.critical(
@@ -3969,6 +4090,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         options = dialog.get_export_options()
         base_path = options["base_path"]
+        exported_files = []
 
         # Collect complete metadata
         all_metadata = self._collect_all_parameters()
@@ -3979,7 +4101,6 @@ class BlochSimulatorGUI(QMainWindow):
         if options["image"]:
             fmt = options["image_format"]
             current_tab_text = self.tab_widget.tabText(self.tab_widget.currentIndex())
-            img_path = f"{base_path}_view.{fmt}"
             try:
                 if current_tab_text == "Magnetization":
                     self._export_magnetization_image(default_format=fmt)
@@ -3993,11 +4114,29 @@ class BlochSimulatorGUI(QMainWindow):
                     self._export_spatial_image(default_format=fmt)
                 else:
                     # Generic widget grab if not a specific plot tab
-                    exporter = ImageExporter()
-                    exporter.export_widget_screenshot(
-                        self.tab_widget.currentWidget(), img_path, format=fmt
-                    )
-                    self.log_message(f"Exported view image: {img_path}")
+                    if base_path:
+                        img_path = f"{base_path}_view.{fmt}"
+                    else:
+                        safe_tab_name = current_tab_text.lower().replace(" ", "_")
+                        default_path = (
+                            self._get_export_directory() / f"{safe_tab_name}_view.{fmt}"
+                        )
+                        img_path, _ = QFileDialog.getSaveFileName(
+                            self,
+                            "Export Current View",
+                            str(default_path),
+                            f"{fmt.upper()} Files (*.{fmt})",
+                        )
+                        if not img_path:
+                            img_path = None
+                    if img_path:
+                        exporter = ImageExporter()
+                        result_path = exporter.export_widget_screenshot(
+                            self.tab_widget.currentWidget(), img_path, format=fmt
+                        )
+                        self.log_message(f"Exported view image: {img_path}")
+                        if result_path:
+                            exported_files.append(str(result_path))
             except Exception as e:
                 self.log_message(f"Failed to export image: {e}")
 
@@ -4026,11 +4165,12 @@ class BlochSimulatorGUI(QMainWindow):
                 self.log_message(f"Failed to export animation: {e}")
 
         # 3. HDF5 Export
-        h5_path = f"{base_path}.h5"
+        h5_path = f"{base_path}.h5" if base_path else None
         if options["hdf5"]:
             try:
                 self.simulator.save_results(h5_path, sequence_params, simulation_params)
                 self.log_message(f"Exported HDF5: {h5_path}")
+                exported_files.append(h5_path)
             except Exception as e:
                 QMessageBox.critical(
                     self, "HDF5 Export Error", f"Failed to export HDF5:\n{str(e)}"
@@ -4063,6 +4203,7 @@ class BlochSimulatorGUI(QMainWindow):
                             title="Bloch Simulation Analysis",
                         )
                         self.log_message(f"Exported Analysis Notebook: {nb_path}")
+                        exported_files.append(nb_path)
                     except Exception as e:
                         self.log_message(f"Failed to export analysis notebook: {e}")
 
@@ -4086,6 +4227,9 @@ class BlochSimulatorGUI(QMainWindow):
                         )
                         self.log_message(f"Exported Repro Notebook: {nb_path}")
                         self.log_message(f"Exported Waveforms: {wf_path}")
+                        exported_files.append(nb_path)
+                        if Path(wf_path).exists():
+                            exported_files.append(wf_path)
                     except Exception as e:
                         self.log_message(f"Failed to export repro notebook: {e}")
 
@@ -4105,7 +4249,7 @@ class BlochSimulatorGUI(QMainWindow):
                     freq = self.last_result.get("frequencies")
 
                     if time_arr is not None and mx is not None:
-                        self.dataset_exporter.export_magnetization(
+                        result_path = self.dataset_exporter.export_magnetization(
                             time_arr,
                             mx,
                             my,
@@ -4116,11 +4260,19 @@ class BlochSimulatorGUI(QMainWindow):
                             format=fmt,
                             metadata=all_metadata,
                         )
-                        self.log_message(f"Exported Data ({fmt}): {csv_path}")
+                        self.log_message(f"Exported Data ({fmt}): {result_path}")
+                        exported_files.append(str(result_path))
             except Exception as e:
                 self.log_message(f"Failed to export CSV/Text data: {e}")
 
         self.statusBar().showMessage("Export completed")
+        if exported_files:
+            file_list = "\n".join(str(Path(path)) for path in exported_files)
+            QMessageBox.information(
+                self,
+                "Export Complete",
+                f"The following files were saved successfully:\n\n{file_list}",
+            )
 
     def _export_final_state_data(self):
         """Export the final magnetization state (Mx, My, Mz) for all positions/frequencies."""
@@ -4281,6 +4433,10 @@ class BlochSimulatorGUI(QMainWindow):
                 signal=self.last_result.get("signal"),
                 positions=self.last_positions,
                 frequencies=self.last_frequencies,
+                effective_frequencies=self.last_effective_frequencies,
+                rf_carrier_offset_hz=float(
+                    self.last_result.get("rf_carrier_offset", 0.0)
+                ),
             )
 
             self.statusBar().showMessage(f"Full simulation data exported to {path}")
@@ -4298,6 +4454,7 @@ class BlochSimulatorGUI(QMainWindow):
         """Collect all pulse sequence parameters from GUI."""
         # Use the state from sequence designer as base
         params = self.sequence_designer.get_state()
+        params["sequence_type"] = params["type"]
 
         # Add additional computed/internal parameters for export
         params["te_s"] = params["te"] / 1000.0
@@ -4330,7 +4487,9 @@ class BlochSimulatorGUI(QMainWindow):
                 "num_pos": self.pos_spin.value(),
                 "pos_range": self.pos_range.value(),
                 "num_freq": self.freq_spin.value(),
+                "freq_center": self.freq_center.value(),
                 "freq_range": self.freq_range.value(),
+                "freq_axis_mode": self.freq_axis_mode.currentText(),
                 "time_step": self.time_step_spin.value(),
                 "extra_tail": self.extra_tail_spin.value(),
                 "max_traces": self.max_traces_spin.value(),
@@ -4346,6 +4505,7 @@ class BlochSimulatorGUI(QMainWindow):
             "num_positions": self.pos_spin.value(),
             "position_range_cm": self.pos_range.value(),
             "num_frequencies": self.freq_spin.value(),
+            "frequency_center_hz": self.freq_center.value(),
             "frequency_range_hz": self.freq_range.value(),
             "extra_tail_ms": self.extra_tail_spin.value(),
             "use_parallel": self.simulator.use_parallel,
@@ -4374,13 +4534,11 @@ class BlochSimulatorGUI(QMainWindow):
         if hasattr(self, "last_frequencies") and self.last_frequencies is not None:
             params["frequency_axis"] = self.last_frequencies
         else:
-            nfreq = self.freq_spin.value()
-            freq_range = self.freq_range.value()
-            if nfreq > 1:
-                frequencies = np.linspace(-freq_range / 2, freq_range / 2, nfreq)
-            else:
-                frequencies = np.array([0.0])
-            params["frequency_axis"] = frequencies
+            params["frequency_axis"] = self._build_frequency_axis()
+        params["rf_carrier_offset_hz"] = float(self.rf_designer.freq_offset.value())
+        params["effective_frequency_axis"] = (
+            np.asarray(params["frequency_axis"]) - params["rf_carrier_offset_hz"]
+        )
 
         # Store initial magnetization
         params["initial_mz"] = self.tissue_widget.get_initial_mz()
@@ -4757,7 +4915,7 @@ class BlochSimulatorGUI(QMainWindow):
                     else:
                         data = snapshot[0]
 
-                    freqs = np.asarray(self.last_frequencies)
+                    freqs = self._display_frequency_axis()
 
         # 2. If not found, Try FFT
         if data is None:
@@ -4944,7 +5102,7 @@ class BlochSimulatorGUI(QMainWindow):
             time_idx = ntime - 1
         t_idx = int(max(0, min(time_idx, ntime - 1)))
 
-        freq_axis = np.asarray(self.last_frequencies)
+        freq_axis = np.asarray(self._display_frequency_axis())
         if freq_axis.shape[0] != sig_arr.shape[2]:
             freq_axis = np.linspace(-0.5, 0.5, sig_arr.shape[2])
 
@@ -5064,7 +5222,7 @@ class BlochSimulatorGUI(QMainWindow):
                     name=f"{selected_label} {component}",
                 )
 
-        self.spectrum_plot.setLabel("bottom", "Frequency", "Hz")
+        self.spectrum_plot.setLabel("bottom", self._frequency_axis_label())
         y_label = (
             "Signal"
             if len(selected_components) > 1
@@ -5134,20 +5292,6 @@ class BlochSimulatorGUI(QMainWindow):
             export_entry["mean_magnitude"] = np.abs(mean_sig)
             export_entry["mean_phase_rad"] = np.angle(mean_sig)
             export_entry["mean_mz"] = mean_mz
-        self._last_spectrum_export = export_entry
-        return True
-
-        export_entry = {
-            "frequency": freq_axis,
-            "selected_magnitude": np.abs(selected_series),
-            "selected_phase_rad": np.angle(selected_series),
-            "mode": "off_res_spins_freq",
-            "time_idx": t_idx,
-            "time_s": float(time_axis[t_idx]) if t_idx < len(time_axis) else None,
-        }
-        if mean_series is not None:
-            export_entry["mean_magnitude"] = np.abs(mean_series)
-            export_entry["mean_phase_rad"] = np.angle(mean_series)
         self._last_spectrum_export = export_entry
         return True
 
@@ -6291,16 +6435,19 @@ class BlochSimulatorGUI(QMainWindow):
         selector = (
             self.mag_view_selector.value() if hasattr(self, "mag_view_selector") else 0
         )
+        if hasattr(self, "mag_view_selector"):
+            self.mag_view_selector.setVisible(True)
+            self.mag_view_selector_label.setVisible(True)
 
         # Determine if view mode selector should be visible
         # Hide selector for single position/frequency cases
-        if view_mode == "Positions @ freq" and npos == 1:
-            # Only 1 position - no point showing position selector
+        if view_mode == "Positions @ freq" and nfreq == 1:
+            # Only one frequency is available for the frequency selector.
             if hasattr(self, "mag_view_selector"):
                 self.mag_view_selector.setVisible(False)
                 self.mag_view_selector_label.setVisible(False)
-        elif view_mode == "Freqs @ position" and nfreq == 1:
-            # Only 1 frequency - no point showing frequency selector
+        elif view_mode == "Freqs @ position" and npos == 1:
+            # Only one position is available for the position selector.
             if hasattr(self, "mag_view_selector"):
                 self.mag_view_selector.setVisible(False)
                 self.mag_view_selector_label.setVisible(False)
@@ -6320,7 +6467,7 @@ class BlochSimulatorGUI(QMainWindow):
         # Prepare data slices based on view mode
         y_min, y_max = 0, 0
 
-        if view_mode == "Positions @ freq" and nfreq > 1:
+        if view_mode == "Positions @ freq":
             # Show all positions at selected frequency
             fi = min(selector, nfreq - 1)
             mx_slice = mx_all[:, :, fi]  # (ntime, npos)
@@ -6337,17 +6484,18 @@ class BlochSimulatorGUI(QMainWindow):
                 y_label = "Position Index"
                 y_min, y_max = 0, npos
 
-        elif view_mode == "Freqs @ position" and npos > 1:
+        elif view_mode == "Freqs @ position":
             # Show all frequencies at selected position
             pi = min(selector, npos - 1)
             mx_slice = mx_all[:, pi, :]  # (ntime, nfreq)
             my_slice = my_all[:, pi, :]
             mz_slice = mz_all[:, pi, :]
 
-            y_label = "Frequency (Hz)"
+            y_label = self._frequency_axis_label()
             n_y = nfreq
-            if self.last_frequencies is not None:
-                y_min, y_max = self.last_frequencies[0], self.last_frequencies[-1]
+            display_frequencies = self._display_frequency_axis()
+            if display_frequencies is not None:
+                y_min, y_max = display_frequencies[0], display_frequencies[-1]
             else:
                 y_label = "Frequency Index"
                 y_min, y_max = 0, nfreq
@@ -6458,16 +6606,19 @@ class BlochSimulatorGUI(QMainWindow):
             if hasattr(self, "signal_view_selector")
             else 0
         )
+        if hasattr(self, "signal_view_selector"):
+            self.signal_view_selector.setVisible(True)
+            self.signal_view_selector_label.setVisible(True)
 
         # Determine if view mode selector should be visible
         # Hide selector for single position/frequency cases
-        if view_mode == "Positions @ freq" and npos == 1:
-            # Only 1 position - no point showing position selector
+        if view_mode == "Positions @ freq" and nfreq == 1:
+            # Only one frequency is available for the frequency selector.
             if hasattr(self, "signal_view_selector"):
                 self.signal_view_selector.setVisible(False)
                 self.signal_view_selector_label.setVisible(False)
-        elif view_mode == "Freqs @ position" and nfreq == 1:
-            # Only 1 frequency - no point showing frequency selector
+        elif view_mode == "Freqs @ position" and npos == 1:
+            # Only one position is available for the position selector.
             if hasattr(self, "signal_view_selector"):
                 self.signal_view_selector.setVisible(False)
                 self.signal_view_selector_label.setVisible(False)
@@ -6487,7 +6638,7 @@ class BlochSimulatorGUI(QMainWindow):
         # Prepare data slices based on view mode
         y_min, y_max = 0, 0
 
-        if view_mode == "Positions @ freq" and nfreq > 1:
+        if view_mode == "Positions @ freq":
             # Show all positions at selected frequency
             fi = min(selector, nfreq - 1)
             signal_slice = signal_all[:, :, fi]  # (ntime, npos)
@@ -6501,15 +6652,16 @@ class BlochSimulatorGUI(QMainWindow):
                 y_label = "Position Index"
                 y_min, y_max = 0, npos
 
-        elif view_mode == "Freqs @ position" and npos > 1:
+        elif view_mode == "Freqs @ position":
             # Show all frequencies at selected position
             pi = min(selector, npos - 1)
             signal_slice = signal_all[:, pi, :]  # (ntime, nfreq)
 
-            y_label = "Frequency (Hz)"
+            y_label = self._frequency_axis_label()
             n_y = nfreq
-            if self.last_frequencies is not None:
-                y_min, y_max = self.last_frequencies[0], self.last_frequencies[-1]
+            display_frequencies = self._display_frequency_axis()
+            if display_frequencies is not None:
+                y_min, y_max = display_frequencies[0], display_frequencies[-1]
             else:
                 y_label = "Frequency Index"
                 y_min, y_max = 0, nfreq

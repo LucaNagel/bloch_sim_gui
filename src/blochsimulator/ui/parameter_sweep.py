@@ -73,7 +73,8 @@ class ParameterSweepWidget(QWidget):
                 "B1 Amplitude (G)",
                 "T1 (ms)",
                 "T2 (ms)",
-                "Frequency Offset (Hz)",
+                "Spin Offset Center (Hz)",
+                "RF Carrier Offset (Hz)",
             ]
         )
         self.param_combo.currentTextChanged.connect(self._update_range_limits)
@@ -209,7 +210,7 @@ class ParameterSweepWidget(QWidget):
             self.start_spin.setValue(20)
             self.end_spin.setRange(1, 20000)
             self.end_spin.setValue(100)
-        elif "Frequency" in param:
+        elif "Spin Offset" in param or "RF Carrier" in param:
             self.start_spin.setRange(-10000, 10000)
             self.start_spin.setValue(-500)
             self.end_spin.setRange(-10000, 10000)
@@ -300,6 +301,9 @@ class ParameterSweepWidget(QWidget):
                 constant_params["frequency_range_hz"] = float(
                     self.parent_gui.freq_range.value()
                 )
+                constant_params["frequency_center_hz"] = float(
+                    self.parent_gui.freq_center.value()
+                )
             if hasattr(self.parent_gui, "time_step_spin"):
                 constant_params["time_step"] = float(
                     self.parent_gui.time_step_spin.value() * 1e-6
@@ -343,17 +347,10 @@ class ParameterSweepWidget(QWidget):
             initial_param_val = self.parent_gui.tissue_widget.t1_spin.value()
         elif "T2" in param_name:
             initial_param_val = self.parent_gui.tissue_widget.t2_spin.value()
-        elif "Frequency" in param_name:
-            initial_param_val = (
-                self.parent_gui.freq_center.value()
-                if hasattr(self.parent_gui, "freq_center")
-                else 0
-            )
-            initial_freq_range = (
-                self.parent_gui.freq_range.value()
-                if hasattr(self.parent_gui, "freq_range")
-                else 0
-            )
+        elif "Spin Offset" in param_name:
+            initial_param_val = self.parent_gui.freq_center.value()
+        elif "RF Carrier" in param_name:
+            initial_param_val = self.parent_gui.rf_designer.freq_offset.value()
         elif "B1 Scale" in param_name:
             initial_param_val = 1.0  # Scale factor is 1.0 relative to initial
         elif "B1 Amplitude" in param_name:
@@ -517,10 +514,10 @@ class ParameterSweepWidget(QWidget):
             self.parent_gui.tissue_widget.t1_spin.setValue(value)
         elif "T2" in param_name:
             self.parent_gui.tissue_widget.t2_spin.setValue(value)
-        elif "Frequency" in param_name:
-            # Set single frequency offset
-            self.parent_gui.freq_range.setValue(0)
+        elif "Spin Offset" in param_name:
             self.parent_gui.freq_center.setValue(value)
+        elif "RF Carrier" in param_name:
+            self.parent_gui.rf_designer.freq_offset.setValue(value)
 
     def _extract_metric(self, metric_name, result, save_full):
         """Extract metric value from simulation result based on mode."""

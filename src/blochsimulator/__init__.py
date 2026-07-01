@@ -11,6 +11,7 @@ from .simulator import (
     SliceSelectRephase,
     CustomPulse,
     design_rf_pulse,
+    apply_rf_carrier,
 )  # noqa: F401
 
 try:

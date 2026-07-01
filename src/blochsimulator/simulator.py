@@ -10,7 +10,6 @@ Date: 2024
 
 import numpy as np
 from typing import Optional, Tuple, Union, Dict
-from scipy import signal
 from dataclasses import dataclass
 import h5py
 import xarray as xr
@@ -246,6 +245,26 @@ def design_rf_pulse(
         b1 = b1 * phase_modulation
 
     return b1.astype(complex), time
+
+
+def apply_rf_carrier(
+    b1: np.ndarray, time: np.ndarray, frequency_offset_hz: float
+) -> np.ndarray:
+    """Apply an RF carrier using absolute sequence time.
+
+    ``b1`` is treated as a complex baseband waveform.  Using the absolute
+    sequence time here (rather than pulse-local time) preserves carrier phase
+    across separated pulses and phase-cycled pulse trains.
+    """
+    b1_arr = np.asarray(b1, dtype=complex)
+    time_arr = np.asarray(time, dtype=float)
+    if b1_arr.shape != time_arr.shape:
+        raise ValueError(
+            f"B1 and time must have identical shapes, got {b1_arr.shape} and {time_arr.shape}."
+        )
+    if frequency_offset_hz == 0.0:
+        return b1_arr.copy()
+    return b1_arr * np.exp(2j * np.pi * float(frequency_offset_hz) * time_arr)
 
 
 # Import pulse loader (optional - gracefully handle if module not available)
@@ -510,7 +529,7 @@ class SpinEcho(PulseSequence):
                 duration=exc_duration,
                 flip_angle=90,
                 npoints=int(exc_duration / dt),
-                freq_offset=self.rf_freq_offset,
+                freq_offset=0.0,
             )
             n_exc = len(exc_pulse)
             b1[:n_exc] = exc_pulse
@@ -525,7 +544,7 @@ class SpinEcho(PulseSequence):
                 duration=ref_duration,
                 flip_angle=180,
                 npoints=int(ref_duration / dt),
-                freq_offset=self.rf_freq_offset,
+                freq_offset=0.0,
             )
 
         for echo_idx in range(self.echo_count):
@@ -559,7 +578,7 @@ class SpinEcho(PulseSequence):
             if ref_start >= 0 and ref_start + len(ref_pulse) <= npoints:
                 gradients[ref_start : ref_start + len(ref_pulse), 2] = gz_amp
 
-        return b1, gradients, time
+        return apply_rf_carrier(b1, time, self.rf_freq_offset), gradients, time
 
 
 class SpinEchoTipAxis(PulseSequence):
@@ -654,7 +673,7 @@ class SpinEchoTipAxis(PulseSequence):
                 duration=1e-3,
                 flip_angle=90,
                 npoints=int(1e-3 / dt),
-                freq_offset=self.rf_freq_offset,
+                freq_offset=0.0,
             )
             n_exc = len(exc_pulse)
             b1[:n_exc] = exc_pulse
@@ -671,7 +690,7 @@ class SpinEchoTipAxis(PulseSequence):
                 duration=2e-3,
                 flip_angle=180,
                 npoints=int(2e-3 / dt),
-                freq_offset=self.rf_freq_offset,
+                freq_offset=0.0,
             )
 
         # Estimate excitation phase from non-zero samples; default to 0
@@ -713,7 +732,7 @@ class SpinEchoTipAxis(PulseSequence):
             if ref_start >= 0 and ref_start + len(ref_pulse) <= npoints:
                 gradients[ref_start : ref_start + len(ref_pulse), 2] = gz_amp
 
-        return b1, gradients, time
+        return apply_rf_carrier(b1, time, self.rf_freq_offset), gradients, time
 
 
 class GradientEcho(PulseSequence):
@@ -804,7 +823,7 @@ class GradientEcho(PulseSequence):
                 duration=exc_duration,
                 flip_angle=self.flip_angle,
                 npoints=int(exc_duration / dt),
-                freq_offset=self.rf_freq_offset,
+                freq_offset=0.0,
             )
             n_exc = len(exc_pulse)
             b1[:n_exc] = exc_pulse
@@ -832,7 +851,7 @@ class GradientEcho(PulseSequence):
         if readout_start >= 0 and readout_start + readout_pts <= npoints:
             gradients[readout_start : readout_start + readout_pts, 0] = 5e-3
 
-        return b1, gradients, time
+        return apply_rf_carrier(b1, time, self.rf_freq_offset), gradients, time
 
 
 class InversionRecovery(PulseSequence):
@@ -945,7 +964,7 @@ class InversionRecovery(PulseSequence):
                 duration=inv_duration,
                 flip_angle=180,
                 npoints=int(inv_duration / dt),
-                freq_offset=self.rf_freq_offset,
+                freq_offset=0.0,
             )
             n_inv = min(len(inv_pulse), npoints)
             b1[:n_inv] = inv_pulse[:n_inv]
@@ -977,7 +996,7 @@ class InversionRecovery(PulseSequence):
                 duration=exc_duration,
                 flip_angle=90,
                 npoints=int(exc_duration / dt),
-                freq_offset=self.rf_freq_offset,
+                freq_offset=0.0,
             )
 
         n_exc = len(exc_pulse)
@@ -1027,7 +1046,7 @@ class InversionRecovery(PulseSequence):
         if ro_start + ro_dur < npoints:
             gradients[ro_start : ro_start + ro_dur, 0] = 5e-3  # Readout gradient
 
-        return b1, gradients, time
+        return apply_rf_carrier(b1, time, self.rf_freq_offset), gradients, time
 
 
 class SliceSelectRephase(PulseSequence):
@@ -1283,6 +1302,7 @@ class BlochSimulator:
         initial_magnetization: Optional[np.ndarray] = None,
         dt: float = 1e-5,
         mode: int = 0,
+        rf_carrier_offset: Optional[float] = None,
     ) -> Dict:
         """
         Simulate MRI signal using Bloch equations.
@@ -1303,6 +1323,10 @@ class BlochSimulator:
             Time step for compilation
         mode : int
             Simulation mode (0: endpoint, 2: time-resolved)
+        rf_carrier_offset : float, optional
+            RF carrier offset in Hz. Used to report effective detuning as
+            ``frequencies - rf_carrier_offset``. For PulseSequence instances,
+            the sequence value is inferred when omitted.
 
         Returns
         -------
@@ -1312,8 +1336,15 @@ class BlochSimulator:
             - 'signal': Complex MRI signal
             - 'time': Time points
             - 'positions': Positions used
-            - 'frequencies': Frequencies used
+            - 'frequencies': Laboratory-frame spin offsets used
+            - 'effective_frequencies': Spin offsets relative to the RF carrier
+            - 'rf_carrier_offset': RF carrier offset in Hz
         """
+
+        if rf_carrier_offset is None:
+            rf_carrier_offset = float(getattr(sequence, "rf_freq_offset", 0.0))
+        else:
+            rf_carrier_offset = float(rf_carrier_offset)
 
         # Compile sequence if needed
         if isinstance(sequence, PulseSequence):
@@ -1446,7 +1477,7 @@ class BlochSimulator:
                 tissue.t2,
                 frequencies,
                 positions_cm,
-                initial_magnetization,
+                m_init,
                 mode,
                 self.num_threads,
             )
@@ -1459,7 +1490,7 @@ class BlochSimulator:
                 tissue.t2,
                 frequencies,
                 positions_cm,
-                initial_magnetization,
+                m_init,
                 mode,
             )
 
@@ -1475,6 +1506,8 @@ class BlochSimulator:
             "time": time,
             "positions": positions,
             "frequencies": frequencies,
+            "effective_frequencies": frequencies - rf_carrier_offset,
+            "rf_carrier_offset": rf_carrier_offset,
             "tissue": tissue,
         }
 
@@ -1825,6 +1858,7 @@ class BlochSimulator:
         attrs = {
             "simulator_version": __version__,
             "export_timestamp": str(np.datetime64("now")),
+            "rf_carrier_offset_hz": float(result.get("rf_carrier_offset", 0.0)),
         }
         if "tissue" in result:
             tissue = result["tissue"]
@@ -1933,6 +1967,10 @@ class BlochSimulator:
             coords["z"] = ("position", positions[:, 2])
         if "frequency" in dims:
             coords["frequency"] = frequencies
+            coords["effective_frequency"] = (
+                "frequency",
+                result.get("effective_frequencies", frequencies),
+            )
 
         ds = xr.Dataset(
             {
@@ -1978,6 +2016,15 @@ class BlochSimulator:
             f.create_dataset("time", data=self.last_result["time"])
             f.create_dataset("positions", data=self.last_result["positions"])
             f.create_dataset("frequencies", data=self.last_result["frequencies"])
+            f.create_dataset(
+                "effective_frequencies",
+                data=self.last_result.get(
+                    "effective_frequencies", self.last_result["frequencies"]
+                ),
+            )
+            f.attrs["rf_carrier_offset_hz"] = float(
+                self.last_result.get("rf_carrier_offset", 0.0)
+            )
 
             # Save tissue parameters
             tissue_group = f.create_group("tissue")
@@ -2084,6 +2131,12 @@ class BlochSimulator:
             },
             "positions": self.last_result["positions"].tolist(),
             "frequencies": self.last_result["frequencies"].tolist(),
+            "effective_frequencies": self.last_result.get(
+                "effective_frequencies", self.last_result["frequencies"]
+            ).tolist(),
+            "rf_carrier_offset_hz": float(
+                self.last_result.get("rf_carrier_offset", 0.0)
+            ),
             "time_points": int(len(self.last_result["time"])),
             "duration": (
                 float(self.last_result["time"][-1])
@@ -2128,6 +2181,8 @@ class BlochSimulator:
     def load_results(self, filename: str):
         """Load simulation results from HDF5 file."""
         with h5py.File(filename, "r") as f:
+            frequencies = f["frequencies"][...]
+            rf_carrier_offset = float(f.attrs.get("rf_carrier_offset_hz", 0.0))
             self.last_result = {
                 "mx": f["mx"][...],
                 "my": f["my"][...],
@@ -2135,7 +2190,13 @@ class BlochSimulator:
                 "signal": f["signal"][...],
                 "time": f["time"][...],
                 "positions": f["positions"][...],
-                "frequencies": f["frequencies"][...],
+                "frequencies": frequencies,
+                "effective_frequencies": (
+                    f["effective_frequencies"][...]
+                    if "effective_frequencies" in f
+                    else frequencies - rf_carrier_offset
+                ),
+                "rf_carrier_offset": rf_carrier_offset,
                 "tissue": TissueParameters(
                     name=f["tissue"].attrs["name"],
                     t1=f["tissue"].attrs["t1"],
