@@ -42,6 +42,7 @@ test_mode_b.ipynb
 # Ignore log files
 *.log
 *.h5
+!examples/spin_echo_analysis_data.h5
 
 .gemini/
 .claude/

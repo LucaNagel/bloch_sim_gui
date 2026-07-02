@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QGroupBox,
     QPushButton,
     QLabel,
@@ -90,7 +91,7 @@ from .magnetization_viewer import MagnetizationViewer
 from .parameter_sweep import ParameterSweepWidget
 from .tutorial_manager import TutorialManager
 from .tutorial_overlay import TutorialOverlay
-from .dialogs import MemorySettingsDialog
+from .dialogs import SettingsDialog
 
 
 def get_app_data_dir() -> Path:
@@ -264,71 +265,99 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Simulation controls
         control_group = QGroupBox("Simulation Controls")
-        control_layout = QVBoxLayout()
+        control_layout = QGridLayout()
+        control_layout.setHorizontalSpacing(12)
+        control_layout.setVerticalSpacing(8)
+        control_layout.setColumnStretch(1, 1)
+        self.simulation_controls_layout = control_layout
 
         # Mode selection
-        mode_layout = QHBoxLayout()
-        mode_layout.addWidget(QLabel("Mode:"))
+        control_layout.addWidget(QLabel("Mode:"), 0, 0)
         self.mode_combo = QComboBox()
         self.mode_combo.setObjectName("mode_combo")
         self.mode_combo.addItems(["Endpoint", "Time-resolved"])
+        self.mode_combo.setToolTip(
+            "Endpoint stores only the final magnetization state. "
+            "Time-resolved stores every time point for plots and animation and "
+            "therefore uses substantially more RAM."
+        )
         # Default to time-resolved so users see waveforms/animation without changing anything
         self.mode_combo.setCurrentText("Time-resolved")
-        mode_layout.addWidget(self.mode_combo)
-        control_layout.addLayout(mode_layout)
+        control_layout.addWidget(self.mode_combo, 0, 1)
 
         # Positions
-        pos_layout = QHBoxLayout()
-        pos_layout.addWidget(QLabel("Positions:"))
+        control_layout.addWidget(QLabel("Positions:"), 1, 0)
         self.pos_spin = QSpinBox()
         self.pos_spin.setObjectName("pos_spin")
         self.pos_spin.setRange(1, 1100)
         self.pos_spin.setValue(1)
-        pos_layout.addWidget(self.pos_spin)
-        pos_layout.addWidget(QLabel("Range (cm):"))
+        self.pos_spin.setToolTip(
+            "Number of spatial positions simulated along the selected range. "
+            "More positions increase runtime and result memory proportionally."
+        )
+        control_layout.addWidget(self.pos_spin, 1, 1)
+        control_layout.addWidget(QLabel("Position range (cm):"), 2, 0)
         self.pos_range = QDoubleSpinBox()
         self.pos_range.setObjectName("pos_range")
         self.pos_range.setRange(0.01, 9999.0)
         self.pos_range.setValue(2.0)
         self.pos_range.setSingleStep(1.0)
-        pos_layout.addWidget(self.pos_range)
-        control_layout.addLayout(pos_layout)
+        self.pos_range.setToolTip(
+            "Total spatial extent in centimeters. Positions are distributed "
+            "evenly across this range."
+        )
+        control_layout.addWidget(self.pos_range, 2, 1)
 
-        # Frequencies
-        freq_layout = QHBoxLayout()
-        freq_layout.addWidget(QLabel("Frequencies:"))
+        # Frequency sampling. Keep count on its own row so the labels do not
+        # collapse when the left panel is narrow.
+        control_layout.addWidget(QLabel("Frequencies:"), 3, 0)
         self.freq_spin = QSpinBox()
         self.freq_spin.setObjectName("freq_spin")
         self.freq_spin.setRange(1, 10000)
         self.freq_spin.setValue(31)
-        freq_layout.addWidget(self.freq_spin)
-        freq_layout.addWidget(QLabel("Center (Hz):"))
+        self.freq_spin.setToolTip(
+            "Number of off-resonance frequencies to simulate. More samples give "
+            "a denser spectrum but increase runtime and RAM usage proportionally."
+        )
+        control_layout.addWidget(self.freq_spin, 3, 1)
+
+        control_layout.addWidget(QLabel("Center (Hz):"), 4, 0)
         self.freq_center = QDoubleSpinBox()
         self.freq_center.setObjectName("freq_center")
         self.freq_center.setRange(-1e6, 1e6)
         self.freq_center.setDecimals(2)
         self.freq_center.setValue(0.0)
-        freq_layout.addWidget(self.freq_center)
-        freq_layout.addWidget(QLabel("Range (Hz):"))
+        self.freq_center.setToolTip(
+            "Center frequency of the simulated spin-offset interval in hertz."
+        )
+        control_layout.addWidget(self.freq_center, 4, 1)
+        control_layout.addWidget(QLabel("Range (Hz):"), 5, 0)
         self.freq_range = QDoubleSpinBox()
         self.freq_range.setObjectName("freq_range")
         self.freq_range.setRange(0.0, 1e4)
         self.freq_range.setValue(100.0)
-        freq_layout.addWidget(self.freq_range)
-        control_layout.addLayout(freq_layout)
+        self.freq_range.setToolTip(
+            "Full width of the simulated frequency interval in hertz. For "
+            "example, 100 Hz around 0 Hz covers −50 to +50 Hz."
+        )
+        control_layout.addWidget(self.freq_range, 5, 1)
+
         # Frequency-axis convention and helper text
-        axis_layout = QHBoxLayout()
-        axis_layout.addWidget(QLabel("Display axis:"))
+        control_layout.addWidget(QLabel("Display axis:"), 6, 0)
         self.freq_axis_mode = QComboBox()
         self.freq_axis_mode.setObjectName("freq_axis_mode")
         self.freq_axis_mode.addItems(
             ["Spin offset (lab)", "Effective detuning (spin − RF)"]
         )
-        axis_layout.addWidget(self.freq_axis_mode)
-        control_layout.addLayout(axis_layout)
+        self.freq_axis_mode.setToolTip(
+            "Choose whether plots show laboratory-frame spin offsets or "
+            "detuning relative to the RF carrier frequency."
+        )
+        control_layout.addWidget(self.freq_axis_mode, 6, 1)
         self.freq_label = QLabel()
         self.freq_label.setWordWrap(True)
-        control_layout.addWidget(self.freq_label)
+        self.freq_label.setObjectName("frequency_summary")
+        control_layout.addWidget(self.freq_label, 7, 0, 1, 2)
         self.freq_spin.valueChanged.connect(self._update_frequency_summary)
         self.freq_center.valueChanged.connect(self._update_frequency_summary)
         self.freq_range.valueChanged.connect(self._update_frequency_summary)
@@ -338,44 +367,64 @@ class BlochSimulatorGUI(QMainWindow):
         self._update_frequency_summary()
 
         # Time resolution control
-        time_res_layout = QHBoxLayout()
-        time_res_layout.addWidget(QLabel("Time step (us):"))
+        control_layout.addWidget(QLabel("Time step (us):"), 8, 0)
         self.time_step_spin = QDoubleSpinBox()
         self.time_step_spin.setObjectName("time_step_spin")
         self.time_step_spin.setRange(0.1, 5000)
         self.time_step_spin.setValue(10.0)
         self.time_step_spin.setDecimals(2)
         self.time_step_spin.setSingleStep(0.1)
+        self.time_step_spin.setToolTip(
+            "Simulation time step in microseconds. Smaller values improve time "
+            "resolution but create more points and can strongly increase runtime "
+            "and RAM usage."
+        )
         self.time_step_spin.valueChanged.connect(self._update_time_step)
-        time_res_layout.addWidget(self.time_step_spin)
-        control_layout.addLayout(time_res_layout)
+        control_layout.addWidget(self.time_step_spin, 8, 1)
 
         # Extra post-sequence simulation time
-        tail_layout = QHBoxLayout()
-        tail_layout.addWidget(QLabel("Extra tail (ms):"))
+        control_layout.addWidget(QLabel("Extra tail (ms):"), 9, 0)
         self.extra_tail_spin = QDoubleSpinBox()
         self.extra_tail_spin.setObjectName("extra_tail_spin")
         self.extra_tail_spin.setRange(0.0, 1e6)
         self.extra_tail_spin.setValue(5.0)
         self.extra_tail_spin.setDecimals(3)
         self.extra_tail_spin.setSingleStep(1.0)
-        tail_layout.addWidget(self.extra_tail_spin)
-        control_layout.addLayout(tail_layout)
+        self.extra_tail_spin.setToolTip(
+            "Additional simulation time after the sequence in milliseconds. "
+            "Useful for observing relaxation or signal decay after the final event."
+        )
+        control_layout.addWidget(self.extra_tail_spin, 9, 1)
 
         # Max traces control for performance
-        max_traces_layout = QHBoxLayout()
-        max_traces_layout.addWidget(QLabel("Max plot traces:"))
+        control_layout.addWidget(QLabel("Max plot traces:"), 10, 0)
         self.max_traces_spin = QSpinBox()
+        self.max_traces_spin.setObjectName("max_traces_spin")
         self.max_traces_spin.setRange(1, 500)
         self.max_traces_spin.setValue(50)
         self.max_traces_spin.setSingleStep(5)
         self.max_traces_spin.setToolTip(
-            "Maximum number of individual traces to plot (for performance)"
+            "Maximum number of individual curves drawn in line plots. This only "
+            "limits visualization complexity; it does not reduce simulated data."
         )
-        max_traces_layout.addWidget(self.max_traces_spin)
-        control_layout.addLayout(max_traces_layout)
+        control_layout.addWidget(self.max_traces_spin, 10, 1)
+
+        for field in (
+            self.mode_combo,
+            self.pos_spin,
+            self.pos_range,
+            self.freq_spin,
+            self.freq_center,
+            self.freq_range,
+            self.freq_axis_mode,
+            self.time_step_spin,
+            self.extra_tail_spin,
+            self.max_traces_spin,
+        ):
+            field.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         control_group.setLayout(control_layout)
+        control_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         left_layout.addWidget(control_group)
 
         left_layout.addStretch()
@@ -1115,6 +1164,305 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Initialize tab highlights
         self._update_tab_highlights()
+
+        # Ensure every interactive field in the main GUI explains its purpose.
+        self._configure_control_tooltips()
+
+    def _configure_control_tooltips(self):
+        """Add domain-specific tooltips to controls that do not define their own."""
+        entries = [
+            (
+                self.heatmap_colormap,
+                "Color map used by all heatmap views. This changes only the display, not the simulation data.",
+            ),
+            (
+                self.time_control.time_slider,
+                "Select the time point shown across synchronized plots and the 3D magnetization view.",
+            ),
+            (
+                self.time_control.speed_spin,
+                "Playback speed multiplier for time-resolved animation.",
+            ),
+            (
+                self.slice_explorer.flip_angle,
+                "RF excitation flip angle used by the slice-profile explorer, in degrees.",
+            ),
+            (
+                self.slice_explorer.duration,
+                "RF pulse duration used for the slice-profile calculation, in milliseconds.",
+            ),
+            (
+                self.slice_explorer.tbw,
+                "Time-bandwidth product controlling pulse bandwidth and slice-profile sharpness.",
+            ),
+            (
+                self.slice_explorer.apodization,
+                "Window applied to the slice-explorer RF pulse to control sidelobes.",
+            ),
+            (
+                self.slice_explorer.thickness,
+                "Target slice thickness used to derive the slice-selection gradient.",
+            ),
+            (
+                self.slice_explorer.use_rephase,
+                "Select whether and how strongly the slice-selection gradient is rephased.",
+            ),
+            (
+                self.slice_explorer.pos_range,
+                "Spatial range over which the slice profile is evaluated.",
+            ),
+            (
+                self.slice_explorer.num_points,
+                "Number of spatial samples in the slice profile. More points improve sampling but take longer.",
+            ),
+            (
+                self.param_sweep_widget.param_combo,
+                "Parameter varied across all simulations in the sweep.",
+            ),
+            (
+                self.param_sweep_widget.start_spin,
+                "First parameter value in the sweep.",
+            ),
+            (
+                self.param_sweep_widget.end_spin,
+                "Last parameter value in the sweep.",
+            ),
+            (
+                self.param_sweep_widget.steps_spin,
+                "Number of evenly spaced simulations in the sweep. More steps increase total runtime and stored data.",
+            ),
+            (
+                self.mean_only_checkbox,
+                "Show only the mean signal across the selected positions and frequencies.",
+            ),
+            (
+                self.spatial_plot_type,
+                "Choose between individual spatial curves and a two-dimensional heatmap.",
+            ),
+            (
+                self.spatial_heatmap_mode,
+                "Select the two dimensions represented by the spatial heatmap axes.",
+            ),
+            (
+                self.spatial_mode,
+                "Choose whether spatial curves are grouped by frequency or position.",
+            ),
+            (
+                self.spatial_freq_slider,
+                "Select the frequency displayed in the spatial line plot.",
+            ),
+            (
+                self.spatial_component_combo,
+                "Select one or more signal components displayed in the spatial plot.",
+            ),
+            (
+                self.spectrum_3d_toggle,
+                "Enable a three-dimensional spectrum visualization when supported by the selected plot mode.",
+            ),
+            (
+                self.spectrum_plot_type,
+                "Choose between spectrum curves and a heatmap representation.",
+            ),
+            (
+                self.spectrum_view_mode,
+                "Choose how positions are selected or combined in the spectrum view.",
+            ),
+            (
+                self.spectrum_pos_slider,
+                "Select the spatial position displayed in the spectrum line plot.",
+            ),
+            (
+                self.spectrum_component_combo,
+                "Select one or more complex-signal components displayed in the spectrum.",
+            ),
+            (
+                self.spectrum_heatmap_mode,
+                "Select the quantities represented on the spectrum heatmap axes.",
+            ),
+            (
+                self.signal_plot_type,
+                "Choose between signal curves and a heatmap representation.",
+            ),
+            (
+                self.signal_component,
+                "Signal component displayed in the current plot.",
+            ),
+            (
+                self.signal_view_mode,
+                "Choose which positions and frequencies are combined in the signal view.",
+            ),
+            (
+                self.signal_view_selector,
+                "Select the position or frequency used by the current signal view mode.",
+            ),
+            (
+                self.mag_plot_type,
+                "Choose between magnetization curves and a heatmap representation.",
+            ),
+            (
+                self.mag_component,
+                "Magnetization component displayed in the current plot.",
+            ),
+            (
+                self.mag_view_mode,
+                "Choose which positions and frequencies are combined in the magnetization view.",
+            ),
+            (
+                self.mag_view_selector,
+                "Select the position or frequency used by the current magnetization view mode.",
+            ),
+            (
+                self.mag_3d.time_slider,
+                "Select the time point displayed by the 3D magnetization vectors.",
+            ),
+            (
+                self.mag_3d.view_mode_combo,
+                "Choose which position/frequency subset is displayed as 3D vectors.",
+            ),
+            (
+                self.mag_3d.selector_slider,
+                "Select the position or frequency used by the current 3D view mode.",
+            ),
+            (
+                self.mag_3d.track_checkbox,
+                "Keep previous vector positions visible to show the magnetization trajectory.",
+            ),
+            (
+                self.mag_3d.mean_checkbox,
+                "Display the mean magnetization vector in addition to individual vectors.",
+            ),
+            (
+                self.tissue_widget.preset_combo,
+                "Load predefined relaxation parameters for a tissue type.",
+            ),
+            (
+                self.tissue_widget.field_combo,
+                "Main magnetic-field strength used when selecting tissue relaxation presets.",
+            ),
+            (
+                self.tissue_widget.t1_spin,
+                "Longitudinal relaxation time T1 in milliseconds.",
+            ),
+            (
+                self.tissue_widget.t1_slider,
+                "Adjust the longitudinal relaxation time T1.",
+            ),
+            (
+                self.tissue_widget.t2_spin,
+                "Transverse relaxation time T2 in milliseconds.",
+            ),
+            (
+                self.tissue_widget.t2_slider,
+                "Adjust the transverse relaxation time T2.",
+            ),
+            (
+                self.tissue_widget.m0_spin,
+                "Initial longitudinal magnetization M0 relative to equilibrium.",
+            ),
+            (
+                self.sequence_designer.sequence_type,
+                "MRI pulse-sequence family used to build the simulation timeline.",
+            ),
+            (
+                self.sequence_designer.spin_echo_echoes,
+                "Number of echoes generated by the spin-echo train.",
+            ),
+            (
+                self.sequence_designer.ssfp_repeats,
+                "Number of SSFP repetitions. More repetitions lengthen the sequence and increase runtime.",
+            ),
+            (
+                self.sequence_designer.ssfp_use_ratios,
+                "Express the SSFP startup pulse and delay relative to the main flip angle and TR.",
+            ),
+            (
+                self.sequence_designer.ssfp_start_tr,
+                "Absolute delay before the SSFP startup pulse, in milliseconds.",
+            ),
+            (
+                self.sequence_designer.ssfp_start_flip,
+                "Absolute flip angle of the SSFP startup pulse, in degrees.",
+            ),
+            (
+                self.sequence_designer.ssfp_tr_ratio,
+                "Startup delay as a multiple of the main repetition time TR.",
+            ),
+            (
+                self.sequence_designer.ssfp_flip_ratio,
+                "Startup flip angle as a fraction of the main flip angle.",
+            ),
+            (
+                self.sequence_designer.ssfp_start_phase,
+                "Phase of the SSFP startup pulse, in degrees.",
+            ),
+            (
+                self.sequence_designer.ssfp_alternate_phase,
+                "Alternate RF phase by 180 degrees between SSFP repetitions.",
+            ),
+            (
+                self.sequence_designer.te_spin,
+                "Echo time TE in milliseconds, measured from excitation to the echo center.",
+            ),
+            (
+                self.sequence_designer.slice_thickness_spin,
+                "Target slice thickness used by slice-selective gradients.",
+            ),
+            (
+                self.sequence_designer.slice_gradient_spin,
+                "Manual slice-selection gradient amplitude. Use zero for automatic calculation.",
+            ),
+            (
+                self.sequence_designer.tr_spin,
+                "Repetition time TR in milliseconds. Longer TR values create more simulation time points.",
+            ),
+            (
+                self.sequence_designer.ti_spin,
+                "Inversion time TI in milliseconds between inversion and excitation.",
+            ),
+            (
+                self.status_preview_checkbox,
+                "Run a reduced endpoint preview using fewer positions and frequencies for a fast estimate.",
+            ),
+        ]
+
+        rf_tooltips = (
+            ("pulse_type", "RF pulse envelope or adiabatic pulse family."),
+            ("flip_angle", "Nominal RF flip angle in degrees."),
+            ("duration", "RF pulse duration in milliseconds."),
+            (
+                "tbw",
+                "Time-bandwidth product controlling RF bandwidth and profile sharpness.",
+            ),
+            (
+                "sinc_lobes",
+                "Number of sinc sidelobes included on each side of the central lobe.",
+            ),
+            (
+                "apodization_combo",
+                "Window applied to the RF envelope to reduce sidelobes.",
+            ),
+            ("phase", "Constant RF phase in degrees."),
+            (
+                "freq_offset",
+                "RF carrier-frequency offset from the laboratory reference, in hertz.",
+            ),
+        )
+        for designer in (self.rf_designer_panel, self.rf_designer_tab):
+            entries.extend(
+                (getattr(designer, attribute), tooltip)
+                for attribute, tooltip in rf_tooltips
+            )
+
+        for control, tooltip in entries:
+            if control is not None and not control.toolTip().strip():
+                control.setToolTip(tooltip)
+
+        self._tooltip_registry = [
+            (widget, widget.toolTip())
+            for widget in self.findChildren(QWidget)
+            if widget.toolTip().strip()
+        ]
+        self._set_tooltips_enabled(self._load_tooltips_enabled())
 
     def _update_tab_highlights(self):
         """Update tab colors based on current sequence selection."""
@@ -3314,9 +3662,9 @@ class BlochSimulatorGUI(QMainWindow):
         export_results_action.triggered.connect(self.export_results)
 
         tools_menu.addSeparator()
-        memory_action = tools_menu.addAction("Simulation Memory Settings...")
-        memory_action.setObjectName("action_memory_settings")
-        memory_action.triggered.connect(self.show_memory_settings)
+        settings_action = tools_menu.addAction("Settings...")
+        settings_action.setObjectName("action_settings")
+        settings_action.triggered.connect(lambda: self.show_settings())
 
         # Tutorials menu
         tut_menu = menubar.addMenu("Tutorials")
@@ -3359,19 +3707,57 @@ class BlochSimulatorGUI(QMainWindow):
         except (TypeError, ValueError):
             return MemoryPolicy()
 
-    def show_memory_settings(self):
-        """Show and persist simulation RAM settings."""
-        dialog = MemorySettingsDialog(self._load_memory_policy(), self)
+    def _load_tooltips_enabled(self) -> bool:
+        """Return whether explanatory tooltips are enabled."""
+        return bool(
+            self.app_settings.value("interface/tooltips_enabled", True, type=bool)
+        )
+
+    def _set_tooltips_enabled(self, enabled: bool):
+        """Apply tooltip visibility without discarding their explanatory text."""
+        for widget, tooltip in getattr(self, "_tooltip_registry", []):
+            widget.setToolTip(tooltip if enabled else "")
+
+    def show_settings(self, initial_tab: str = "general"):
+        """Show and persist general, memory and interface settings."""
+        dialog = SettingsDialog(
+            policy=self._load_memory_policy(),
+            export_directory=self._get_export_directory(),
+            tooltips_enabled=self._load_tooltips_enabled(),
+            parent=self,
+            initial_tab=initial_tab,
+        )
         if dialog.exec_() != QDialog.Accepted:
+            return
+
+        export_directory = dialog.get_export_directory()
+        try:
+            export_directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "Invalid Export Directory",
+                f"The selected export directory cannot be created or written:\n{exc}",
+            )
             return
 
         policy = dialog.get_policy()
         self.app_settings.setValue("memory/mode", policy.mode)
         self.app_settings.setValue("memory/reserve_gib", policy.reserve_bytes / 1024**3)
         self.app_settings.setValue("memory/limit_gib", policy.limit_bytes / 1024**3)
+        self.app_settings.setValue(
+            "general/export_directory", str(export_directory.resolve())
+        )
+        tooltips_enabled = dialog.tooltips_enabled()
+        self.app_settings.setValue("interface/tooltips_enabled", tooltips_enabled)
         self.app_settings.sync()
         set_default_memory_policy(policy)
-        self.statusBar().showMessage("Simulation memory settings updated", 5000)
+        self._set_tooltips_enabled(tooltips_enabled)
+        self.statusBar().showMessage("Settings updated", 5000)
+
+    def show_memory_settings(self):
+        """Open the memory tab from RAM warnings and legacy call sites."""
+        self.show_settings(initial_tab="memory")
 
     def _sync_preview_checkboxes(self, checked: bool):
         """Keep preview checkboxes in sync between footer and status bar."""
@@ -4641,7 +5027,14 @@ class BlochSimulatorGUI(QMainWindow):
         if override:
             export_dir = Path(override).expanduser()
         else:
-            export_dir = get_app_data_dir() / "exports"
+            configured = str(
+                self.app_settings.value("general/export_directory", "")
+            ).strip()
+            export_dir = (
+                Path(configured).expanduser()
+                if configured
+                else get_app_data_dir() / "exports"
+            )
         try:
             export_dir.mkdir(parents=True, exist_ok=True)
         except Exception:

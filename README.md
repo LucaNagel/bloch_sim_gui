@@ -11,38 +11,84 @@ A high-performance Python implementation of the Bloch equation solver originally
 
 ## Features
 
-The Bloch Simulator can be accessed from 3 different directions:
+### Simulation and sequence design
 
-### Standalone **[GUI](https://github.com/LucaNagel/bloch_sim_gui/releases)**:
+- Fast C-based Bloch solver with parallel processing support.
+- Endpoint and full time-resolved simulations over multiple spatial positions
+  and off-resonance frequencies.
+- Configurable tissue properties including T1, T2, proton density, and initial
+  magnetization.
+- RF pulse design for rectangular, sinc, Gaussian, adiabatic half/full passage,
+  and BIR-4 pulses, including phase and carrier-frequency offsets.
+- Sequence support for FID, spin echo, gradient echo, inversion recovery,
+  slice-selective excitation, EPI, and SSFP.
+- Hardware-aware RAM protection for large simulation grids.
 
-Download and install **built package (*.exe*, *.app*)** **[here](https://github.com/LucaNagel/bloch_sim_gui/releases)**. Features:
-* High performance GUI for nice visualization
-* Easily modify and live update simulation:
-    * **Sample Parameters**: *T1*, *T2*, *Polarization level (enables simulation of hyperpolarized magnetization*), etc.
-    * **RF Pulses**: *Duration*, *Tip Angle*, *B1*, *Frequency*, *Phase*, *Pulse type* such as *sinc*, *Gaussian*, *Adiabatic Half Passage*, etc.
-    * **Pulse Sequence**: *Blockpulse*, *Spin Echo*, *Slice Selection*, *SSFP*, *Inversion Recovery*, etc.
-* Export:
-    * Python compatible simulation results (*.npy*, *.npz*, *.hdf5*)
-    * Automically generated IPython (*.ipynb*) notebooks for repeatility and modifications
-    * Animations (*.mp4*, *.gif*) and figures (*.svg*, *.png*)
+### Visualization and analysis
 
+- Live magnetization, signal, spectrum, spatial-profile, heatmap, and 3D-vector
+  views.
+- Synchronized time controls and animation for time-resolved results.
+- Named dimensions and metadata through direct `xarray.Dataset` conversion.
+- Static figures (`.png`, `.svg`) and animations (`.mp4`, `.gif`).
 
-### Python package **[blochsimulator](https://pypi.org/project/blochsimulator/)**
-**Install bloch simulator** package from [pypi.org](https://pypi.org/project/blochsimulator/) via `pip instal blochsimulator`. Features:
+### Export and reproducibility
 
-* Access simulation capabilites from IPython notebooks and python scripts
-* Highly customizable simulations
+- Numerical results in Python-compatible NumPy and HDF5 formats.
+- Automatically generated Jupyter notebooks using the parameters selected in
+  the GUI.
+- Parameter sweeps with final-state or full time-resolved result collection.
 
-### Online [GUI](https://lucanagel.github.io/bloch_sim_gui/)
-Access [here online](https://lucanagel.github.io/bloch_sim_gui/). Features:
+#### Jupyter notebook export
 
-* No installation required
-* Simple UI, live simulation
-* Simulate RF Pulse Parameters and Slice Selection Parameters
+The desktop app creates notebooks that match the selected tissue, sequence,
+RF, spatial, frequency, and simulation parameters.
+
+| Export mode | Purpose | Spin-echo example |
+| --- | --- | --- |
+| **Reproduction** | Embeds the selected parameters and re-runs the complete simulation from scratch. | [Open reproduction notebook](examples/spin_echo_reproduction.ipynb) |
+| **Analysis** | Loads exported results and prepares `numpy`, `matplotlib`, and `xarray` analyses without re-running the solver. | [Open analysis notebook](examples/spin_echo_analysis.ipynb) |
+
+The analysis example uses the accompanying
+[spin-echo result data](examples/spin_echo_analysis_data.h5). The GUI exports
+the matching data file together with the analysis workflow.
+
+#### Parameter sweeps
+
+The **Parameter Sweep** panel iterates over a parameter range and runs one
+simulation per step. Sweeps can vary flip angle, TE, TR, TI, B1 scaling or
+amplitude, T1, T2, spin-offset center, and RF-carrier offset. Results can be
+compared directly, exported, and opened in an automatically generated
+sweep-analysis notebook.
+
+## Ways to use the simulator
+
+### Desktop application
+
+Download the standalone application for Windows or macOS from
+[GitHub Releases](https://github.com/LucaNagel/bloch_sim_gui/releases). This is
+the recommended option for interactive simulation and requires no Python
+installation.
+
+### Python package
+
+Install [blochsimulator from PyPI](https://pypi.org/project/blochsimulator/)
+with `pip install blochsimulator`. The package exposes the full simulation API
+for Python scripts, Jupyter notebooks, and custom analysis pipelines.
+
+### Online GUI
+
+Use the [browser-based GUI](https://lucanagel.github.io/bloch_sim_gui/) without
+installation. It provides interactive RF-pulse and slice-selection simulations;
+the desktop application and Python package provide the complete feature set.
 
 ## Documentation
 
 For detailed instructions on installation, GUI features, and Python API usage, please refer to the **[User Guide](https://github.com/LucaNagel/bloch_sim_gui/blob/main/docs/USER_GUIDE.md)**.
+
+## License
+
+This project is licensed under the [GNU General Public License v3.0](LICENSE). You may copy, distribute, and modify the software under the terms of GPLv3. Modified versions distributed to others must also be licensed under GPLv3 and include the corresponding source code.
 
 ## Installation
 
@@ -147,6 +193,10 @@ In case of the MacOS app, this requires you to manually remove the *quarantine* 
 ### 🚀 Jupyter Notebook (Recommended)
 
 You can launch the interactive GUI directly from a cell in your Jupyter Notebook.
+
+You can also export the selected GUI simulation as a notebook. See the
+[spin-echo reproduction](examples/spin_echo_reproduction.ipynb) and
+[spin-echo analysis](examples/spin_echo_analysis.ipynb) examples.
 
 ```python
 # 0. Install from PyPI (run once) if not done before

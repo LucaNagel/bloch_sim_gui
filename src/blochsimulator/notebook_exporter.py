@@ -1226,7 +1226,8 @@ result = sim.simulate(
     tissue,
     positions=positions,
     frequencies=frequencies,
-    mode=mode
+    mode=mode,
+    dt=time_step_us * 1e-6
 )
 
 # Extract results for easier access

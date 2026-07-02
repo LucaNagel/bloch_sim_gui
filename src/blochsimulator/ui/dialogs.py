@@ -6,6 +6,13 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QDialogButtonBox,
+    QFileDialog,
+    QCheckBox,
+    QHBoxLayout,
+    QLineEdit,
+    QPushButton,
+    QTabWidget,
+    QWidget,
 )
 from typing import Optional
 from pathlib import Path
@@ -13,8 +20,8 @@ from pathlib import Path
 from ..memory import MemoryPolicy, format_bytes, resolve_memory_budget
 
 
-class MemorySettingsDialog(QDialog):
-    """Configure the RAM budget used by simulations."""
+class SettingsDialog(QDialog):
+    """Configure persistent application, memory and interface settings."""
 
     MODES = (
         ("Automatic reserve (recommended)", "automatic"),
@@ -22,12 +29,43 @@ class MemorySettingsDialog(QDialog):
         ("Fixed simulation limit", "fixed_limit"),
     )
 
-    def __init__(self, policy: MemoryPolicy, parent=None):
+    def __init__(
+        self,
+        policy: MemoryPolicy,
+        export_directory: Path,
+        tooltips_enabled: bool,
+        parent=None,
+        initial_tab: str = "general",
+    ):
         super().__init__(parent)
-        self.setWindowTitle("Simulation Memory Settings")
-        self.setMinimumWidth(520)
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(600)
 
         layout = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("settings_tabs")
+        layout.addWidget(self.tabs)
+
+        general_tab = QWidget()
+        general_form = QFormLayout(general_tab)
+        export_layout = QHBoxLayout()
+        self.export_directory_edit = QLineEdit(str(export_directory))
+        self.export_directory_edit.setObjectName("default_export_directory")
+        self.export_directory_edit.setToolTip(
+            "Default folder offered by image, data, animation and notebook export dialogs."
+        )
+        export_layout.addWidget(self.export_directory_edit, 1)
+        self.export_browse_button = QPushButton("Browse...")
+        self.export_browse_button.setToolTip(
+            "Choose an existing folder as the default export location."
+        )
+        self.export_browse_button.clicked.connect(self._browse_export_directory)
+        export_layout.addWidget(self.export_browse_button)
+        general_form.addRow("Default export directory:", export_layout)
+        self.tabs.addTab(general_tab, "General")
+
+        memory_tab = QWidget()
+        memory_layout = QVBoxLayout(memory_tab)
         form = QFormLayout()
 
         self.mode_combo = QComboBox()
@@ -36,6 +74,10 @@ class MemorySettingsDialog(QDialog):
             self.mode_combo.addItem(label, mode)
         mode_index = self.mode_combo.findData(policy.mode)
         self.mode_combo.setCurrentIndex(max(0, mode_index))
+        self.mode_combo.setToolTip(
+            "Choose automatic RAM reservation, a custom amount of memory kept "
+            "free, or a fixed maximum allocation per simulation."
+        )
         form.addRow("Policy:", self.mode_combo)
 
         self.reserve_spin = QDoubleSpinBox()
@@ -45,6 +87,9 @@ class MemorySettingsDialog(QDialog):
         self.reserve_spin.setSingleStep(0.5)
         self.reserve_spin.setSuffix(" GiB")
         self.reserve_spin.setValue(policy.reserve_bytes / 1024**3)
+        self.reserve_spin.setToolTip(
+            "Amount of currently available RAM that must remain unused by the simulation."
+        )
         form.addRow("Keep free:", self.reserve_spin)
 
         self.limit_spin = QDoubleSpinBox()
@@ -54,9 +99,12 @@ class MemorySettingsDialog(QDialog):
         self.limit_spin.setSingleStep(1.0)
         self.limit_spin.setSuffix(" GiB")
         self.limit_spin.setValue(policy.limit_bytes / 1024**3)
+        self.limit_spin.setToolTip(
+            "Maximum estimated RAM allocation permitted for one simulation."
+        )
         form.addRow("Maximum per simulation:", self.limit_spin)
 
-        layout.addLayout(form)
+        memory_layout.addLayout(form)
 
         explanation = QLabel(
             "Automatic mode keeps at least 2 GiB or 10% of total system RAM "
@@ -64,12 +112,26 @@ class MemorySettingsDialog(QDialog):
             "512 MiB emergency reserve."
         )
         explanation.setWordWrap(True)
-        layout.addWidget(explanation)
+        memory_layout.addWidget(explanation)
 
         self.status_label = QLabel()
         self.status_label.setObjectName("memory_budget_summary")
         self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
+        memory_layout.addWidget(self.status_label)
+        memory_layout.addStretch()
+        self.tabs.addTab(memory_tab, "Memory")
+
+        interface_tab = QWidget()
+        interface_layout = QVBoxLayout(interface_tab)
+        self.tooltips_checkbox = QCheckBox("Show explanatory tooltips")
+        self.tooltips_checkbox.setObjectName("tooltips_enabled")
+        self.tooltips_checkbox.setChecked(bool(tooltips_enabled))
+        self.tooltips_checkbox.setToolTip(
+            "Show short explanations when the pointer rests over controls and input fields."
+        )
+        interface_layout.addWidget(self.tooltips_checkbox)
+        interface_layout.addStretch()
+        self.tabs.addTab(interface_tab, "Interface")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -81,12 +143,29 @@ class MemorySettingsDialog(QDialog):
         self.limit_spin.valueChanged.connect(self._update_summary)
         self._update_summary()
 
+        tab_names = {"general": 0, "memory": 1, "interface": 2}
+        self.tabs.setCurrentIndex(tab_names.get(initial_tab, 0))
+
     def get_policy(self) -> MemoryPolicy:
         return MemoryPolicy(
             mode=str(self.mode_combo.currentData()),
             reserve_bytes=int(self.reserve_spin.value() * 1024**3),
             limit_bytes=int(self.limit_spin.value() * 1024**3),
         )
+
+    def get_export_directory(self) -> Path:
+        return Path(self.export_directory_edit.text()).expanduser()
+
+    def tooltips_enabled(self) -> bool:
+        return self.tooltips_checkbox.isChecked()
+
+    def _browse_export_directory(self):
+        current = str(self.get_export_directory())
+        selected = QFileDialog.getExistingDirectory(
+            self, "Select Default Export Directory", current
+        )
+        if selected:
+            self.export_directory_edit.setText(selected)
 
     def _update_summary(self):
         mode = str(self.mode_combo.currentData())
@@ -130,6 +209,9 @@ class PulseImportDialog(QDialog):
             ]
         )
         self.layout_mode.setCurrentIndex(0)
+        self.layout_mode.setToolTip(
+            "Describe how amplitude and phase values are arranged in the imported text file."
+        )
         form.addRow("Data layout:", self.layout_mode)
 
         self.amp_unit = QComboBox()
@@ -144,12 +226,16 @@ class PulseImportDialog(QDialog):
             ]
         )
         self.amp_unit.setCurrentIndex(0)
+        self.amp_unit.setToolTip(
+            "Physical or relative unit used by the imported RF amplitude values."
+        )
         form.addRow("Amplitude unit:", self.amp_unit)
 
         self.phase_unit = QComboBox()
         self.phase_unit.setObjectName("import_phase_unit")
         self.phase_unit.addItems(["Degrees", "Radians"])
         self.phase_unit.setCurrentIndex(0)
+        self.phase_unit.setToolTip("Angular unit used by imported RF phase values.")
         form.addRow("Phase unit:", self.phase_unit)
 
         self.duration_ms = QDoubleSpinBox()
@@ -158,6 +244,9 @@ class PulseImportDialog(QDialog):
         self.duration_ms.setDecimals(3)
         self.duration_ms.setSingleStep(0.1)
         self.duration_ms.setValue(1.0)
+        self.duration_ms.setToolTip(
+            "Total duration assigned to the imported RF waveform, in milliseconds."
+        )
         form.addRow("Duration (ms):", self.duration_ms)
 
         layout.addLayout(form)
