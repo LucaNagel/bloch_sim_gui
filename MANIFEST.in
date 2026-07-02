@@ -3,4 +3,8 @@ include src/blochsimulator/bloch_core.h
 include src/blochsimulator/bloch_wrapper.pyx
 include requirements.txt
 include README.md
+include LICENSE
+include examples/spin_echo_reproduction.ipynb
+include examples/spin_echo_analysis.ipynb
+include examples/spin_echo_analysis_data.h5
 recursive-include rfpulses *

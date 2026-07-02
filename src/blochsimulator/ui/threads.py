@@ -19,6 +19,7 @@ class SimulationThread(QThread):
         mode,
         dt=1e-5,
         m_init=None,
+        rf_carrier_offset=0.0,
     ):
         super().__init__()
         self.simulator = simulator
@@ -29,6 +30,7 @@ class SimulationThread(QThread):
         self.mode = mode
         self.dt = dt
         self.m_init = m_init
+        self.rf_carrier_offset = float(rf_carrier_offset)
         self._cancel_requested = False
 
     def request_cancel(self):
@@ -48,6 +50,7 @@ class SimulationThread(QThread):
                 initial_magnetization=self.m_init,
                 mode=self.mode,
                 dt=self.dt,
+                rf_carrier_offset=self.rf_carrier_offset,
             )
             if self._cancel_requested:
                 self.cancelled.emit()

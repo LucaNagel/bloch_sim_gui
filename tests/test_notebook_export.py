@@ -156,6 +156,7 @@ def test_mode_b_notebook():
     assert "SpinEcho" in nb_text, "Missing sequence import"
     assert "t1 =" in nb_text, "Missing parameter definitions"
     assert "sim.simulate" in nb_text, "Missing simulation call"
+    assert "dt=time_step_us * 1e-6" in nb_text, "Selected time step is not reproduced"
     print(f"   ✓ Notebook contains simulation code")
 
     # 5. Check parameter values are correct

@@ -10,6 +10,7 @@ Date: 2024
 import sys
 import unittest
 import tempfile
+from unittest.mock import patch
 from pathlib import Path
 import numpy as np
 from PyQt5.QtWidgets import QApplication
@@ -21,6 +22,7 @@ from blochsimulator.visualization import (
     ExportImageDialog,
     AnimationExporter,
     DatasetExporter,
+    ExportDataDialog,
 )
 
 try:
@@ -157,6 +159,33 @@ class TestExportImageDialog(unittest.TestCase):
         """Test that default width is set correctly."""
         dialog = ExportImageDialog()
         self.assertEqual(dialog.width_spin.value(), 2400)
+
+
+class TestExportDataDialog(unittest.TestCase):
+    """Tests for the unified export routing."""
+
+    @patch("blochsimulator.visualization.QFileDialog.getSaveFileName")
+    def test_visual_only_export_skips_base_filename_prompt(self, save_dialog):
+        dialog = ExportDataDialog()
+        dialog.chk_hdf5.setChecked(False)
+        dialog.chk_image.setChecked(True)
+
+        dialog._on_export_clicked()
+
+        save_dialog.assert_not_called()
+        self.assertEqual(dialog.result(), dialog.Accepted)
+        self.assertIsNone(dialog.base_path)
+
+    @patch("blochsimulator.visualization.QFileDialog.getSaveFileName")
+    def test_data_export_still_requests_shared_base_filename(self, save_dialog):
+        save_dialog.return_value = ("/tmp/bloch_results.h5", "")
+        dialog = ExportDataDialog()
+
+        dialog._on_export_clicked()
+
+        save_dialog.assert_called_once()
+        self.assertEqual(dialog.result(), dialog.Accepted)
+        self.assertEqual(dialog.base_path, "/tmp/bloch_results")
 
 
 class TestExportIntegration(unittest.TestCase):

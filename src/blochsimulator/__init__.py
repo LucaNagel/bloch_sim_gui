@@ -1,4 +1,4 @@
-__version__ = "1.0.15"
+__version__ = "1.1.0"
 
 from .simulator import (
     BlochSimulator,
@@ -11,6 +11,7 @@ from .simulator import (
     SliceSelectRephase,
     CustomPulse,
     design_rf_pulse,
+    apply_rf_carrier,
 )  # noqa: F401
 
 try:

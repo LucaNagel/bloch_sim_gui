@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../s
 
 from blochsimulator.ui.main_window import BlochSimulatorGUI
 from blochsimulator.ui.sequence_designer import SequenceDesigner
+from blochsimulator.simulator import design_rf_pulse
 
 
 class MockSequenceDesigner:
@@ -28,6 +29,8 @@ class MockSequenceDesigner:
         self.parent_gui.rf_designer.duration.value.return_value = 1.0  # 1.0 ms
         self.parent_gui.rf_designer.flip_angle = MagicMock()
         self.parent_gui.rf_designer.flip_angle.value.return_value = 90.0
+        self.parent_gui.rf_designer.freq_offset = MagicMock()
+        self.parent_gui.rf_designer.freq_offset.value.return_value = 0.0
 
         self.ssfp_start_flip = MagicMock()
         self.ssfp_start_flip.value.return_value = 45.0
@@ -168,3 +171,27 @@ def test_auto_update_ssfp_amplitude_preserves_prep_settings():
 
     dummy.sequence_designer.ssfp_start_flip.setValue.assert_not_called()
     dummy.sequence_designer.update_diagram.assert_called_once_with(pulse)
+
+
+def test_ssfp_rf_carrier_phase_is_continuous_across_repetitions():
+    """A non-zero RF carrier must accumulate phase between SSFP pulses."""
+    mock_self = MockSequenceDesigner()
+    mock_self.tr_spin.value.return_value = 5.0
+    mock_self.ssfp_repeats.value.return_value = 5
+    mock_self.ssfp_start_flip.value.return_value = 90.0
+    mock_self.ssfp_start_phase.value.return_value = 0.0
+    mock_self.ssfp_alternate_phase.isChecked.return_value = False
+    mock_self.parent_gui.rf_designer.freq_offset.value.return_value = 37.0
+    mock_self._rf_frequency_offset = lambda: 37.0
+
+    dt = 1e-5
+    pulse, pulse_time = design_rf_pulse(
+        "rect", duration=1e-3, flip_angle=90.0, npoints=100
+    )
+    baseband = SequenceDesigner._build_ssfp(mock_self, (pulse, pulse_time), dt)
+    b1, _, _ = SequenceDesigner._apply_current_rf_carrier(mock_self, baseband)
+
+    starts = np.rint(np.arange(5) * 5e-3 / dt).astype(int)
+    measured = np.unwrap(np.angle(b1[starts]))
+    expected = 2 * np.pi * 37.0 * np.arange(5) * 5e-3
+    assert np.allclose(measured, expected, atol=1e-12)

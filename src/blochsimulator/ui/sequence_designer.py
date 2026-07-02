@@ -16,6 +16,7 @@ import pyqtgraph as pg
 from PyQt5.QtCore import Qt
 from typing import Optional
 
+from ..memory import enforce_sequence_memory
 from ..simulator import (
     PulseSequence,
     SpinEcho,
@@ -24,6 +25,7 @@ from ..simulator import (
     SliceSelectRephase,
     InversionRecovery,
     design_rf_pulse,
+    apply_rf_carrier,
 )
 
 
@@ -557,6 +559,24 @@ class SequenceDesigner(QGroupBox):
         }
         return presets.get(seq_type, {})
 
+    def _rf_frequency_offset(self) -> float:
+        """Return the sequence-level RF carrier offset in Hz."""
+        if hasattr(self, "parent_gui") and self.parent_gui is not None:
+            designer = getattr(self.parent_gui, "rf_designer", None)
+            control = getattr(designer, "freq_offset", None)
+            if control is not None:
+                return float(control.value())
+        return 0.0
+
+    def _apply_current_rf_carrier(self, sequence_tuple):
+        """Apply the current RF carrier once, using absolute sequence time."""
+        b1, gradients, time = sequence_tuple
+        return (
+            apply_rf_carrier(b1, time, self._rf_frequency_offset()),
+            np.asarray(gradients, dtype=float),
+            np.asarray(time, dtype=float),
+        )
+
     def get_sequence(self, custom_pulse=None):
         """
         Get the current sequence parameters.
@@ -719,13 +739,15 @@ class SequenceDesigner(QGroupBox):
         dt = dt or self.default_dt
         seq_type = self.sequence_type.currentText()
         if seq_type == "EPI":
-            return self._build_epi(custom_pulse, dt)
+            return self._apply_current_rf_carrier(self._build_epi(custom_pulse, dt))
         if seq_type == "Inversion Recovery":
-            return self._build_ir(custom_pulse, dt)
+            return self._apply_current_rf_carrier(self._build_ir(custom_pulse, dt))
         if seq_type == "SSFP (Loop)":
-            return self._build_ssfp(custom_pulse, dt)
+            return self._apply_current_rf_carrier(self._build_ssfp(custom_pulse, dt))
         if seq_type == "Slice Select + Rephase":
-            return self._build_slice_select_rephase(custom_pulse, dt, log_info=log_info)
+            return self._apply_current_rf_carrier(
+                self._build_slice_select_rephase(custom_pulse, dt, log_info=log_info)
+            )
         seq = self.get_sequence(custom_pulse=custom_pulse)
         if isinstance(seq, PulseSequence):
             b1, gradients, time = seq.compile(dt=dt)
@@ -739,12 +761,7 @@ class SequenceDesigner(QGroupBox):
                 gradients = np.array(gradients, copy=True)
                 gradients[:, 2] *= scale
             return b1, gradients, time
-        b1, gradients, time = seq
-        return (
-            np.asarray(b1, dtype=complex),
-            np.asarray(gradients, dtype=float),
-            np.asarray(time, dtype=float),
-        )
+        return self._apply_current_rf_carrier(seq)
 
     def _build_epi(self, custom_pulse, dt):
         """
@@ -800,6 +817,7 @@ class SequenceDesigner(QGroupBox):
         required_pts = train_end_pts + spoil_pts + 1
         npoints = int(max(np.ceil(tr / dt), required_pts, exc_pts + 1))
 
+        enforce_sequence_memory(npoints)
         b1 = np.zeros(npoints, dtype=complex)
         gradients = np.zeros((npoints, 3))
 
@@ -948,6 +966,7 @@ class SequenceDesigner(QGroupBox):
         # Determine timeline length
         total_duration = start_delay + pulse_dur + tr * (n_reps - 1) + 0.5 * tr
         npoints = int(np.ceil(total_duration / dt)) + 1
+        enforce_sequence_memory(npoints)
         b1 = np.zeros(npoints, dtype=complex)
         gradients = np.zeros((npoints, 3), dtype=float)
         time = np.arange(npoints) * dt
@@ -1041,6 +1060,7 @@ class SequenceDesigner(QGroupBox):
         total_dur = max(te, (exc_pts + slice_gap_pts + rephase_pts) * dt + 0.001)
         npoints = int(np.ceil(total_dur / dt))
 
+        enforce_sequence_memory(npoints)
         b1 = np.zeros(npoints, dtype=complex)
         gradients = np.zeros((npoints, 3))
         time = np.arange(npoints) * dt

@@ -8,6 +8,7 @@ nbformat>=5.0.0
 ipykernel
 imageio>=2.34.0
 imageio-ffmpeg>=0.4.9
+psutil>=5.9.0; sys_platform != "emscripten"  # Hardware-aware RAM limits
 
 # GUI requirements
 PyQt5>=5.15.0
