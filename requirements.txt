@@ -19,6 +19,7 @@ PyOpenGL>=3.1.0
 h5py>=3.0.0        # For saving/loading results
 numba>=0.53.0       # For JIT compilation (optional optimization)
 jupyterlab>=3.0.0   # For interactive notebooks
+pypulseq>=1.5.0,<1.5.1  # Pulseq .seq import in the desktop app
 
 # For GPU acceleration (optional)
 # cupy>=9.0.0       # Uncomment if you have CUDA available

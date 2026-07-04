@@ -86,6 +86,7 @@ hiddenimports += collect_submodules("imageio")
 hiddenimports += collect_submodules("imageio_ffmpeg")
 hiddenimports += collect_submodules("h5py")
 hiddenimports += collect_submodules("nbformat")
+hiddenimports += collect_submodules("pypulseq")
 
 # Collect all imageio components (plugins, binaries, etc.)
 # tmp_ret = collect_all('imageio')

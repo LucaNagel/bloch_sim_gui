@@ -24,3 +24,14 @@ except ImportError:
 from . import kspace  # noqa: F401
 from . import phantom  # noqa: F401
 from . import pulse_loader  # noqa: F401
+from .sequence import (  # noqa: F401
+    ADCEvent,
+    CompiledSequence,
+    GradientEvent,
+    RFEvent,
+    SequenceCompiler,
+    SequenceProgram,
+    SequenceSimulationResult,
+    UnsupportedPulseqVersionError,
+    load_pulseq,
+)

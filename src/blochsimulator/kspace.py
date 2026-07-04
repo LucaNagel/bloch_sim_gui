@@ -373,12 +373,12 @@ class KSpaceSimulator:
         # Δk = γ × G × Δt, so G = Δk / (γ × Δt)
         # Full kx range = 2 × k_max_x, traversed in flat_time
         g_read_amplitude = (2 * k_max_x) / (self.gamma * params.flat_time)
-        g_read_amplitude_gcm = g_read_amplitude * 1e-2  # T/m to G/cm
+        g_read_amplitude_gcm = g_read_amplitude * 100.0  # T/m to G/cm
 
         # Phase-encode blip: one dk_y step
         dk_y = 1.0 / fov_y
         g_blip_amplitude = dk_y / (self.gamma * params.blip_duration)
-        g_blip_amplitude_gcm = g_blip_amplitude * 1e-2
+        g_blip_amplitude_gcm = g_blip_amplitude * 100.0
 
         # Build waveforms
         n_lines = params.lines_per_shot

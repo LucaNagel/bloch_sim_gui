@@ -9,6 +9,7 @@ Date: 2024/2025
 """
 
 import numpy as np
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, Dict, Union
 from pathlib import Path
@@ -37,6 +38,10 @@ class Phantom:
         Proton density (relative), range [0, 1]. Default: all ones
     df_map : ndarray, optional
         Off-resonance frequency in Hz (for B0 inhomogeneity). Default: all zeros
+    tx_sensitivity_map : ndarray, optional
+        Dimensionless complex single-transmit B1+ scaling, shape matches `shape`.
+    rx_sensitivity_maps : ndarray, optional
+        Dimensionless complex receive profiles, shape `(n_coils, *shape)`.
     m0_map : ndarray, optional
         Initial magnetization, shape (*shape, 3) for [Mx, My, Mz]. Default: [0, 0, 1]
     mask : ndarray, optional
@@ -67,10 +72,14 @@ class Phantom:
     t2_map: np.ndarray
     pd_map: Optional[np.ndarray] = None
     df_map: Optional[np.ndarray] = None
+    b0_map: Optional[np.ndarray] = None
+    chemical_shift_map: Optional[np.ndarray] = None
     m0_map: Optional[np.ndarray] = None
     mask: Optional[np.ndarray] = None
     name: str = "Phantom"
     metadata: Dict = field(default_factory=dict)
+    tx_sensitivity_map: Optional[np.ndarray] = None
+    rx_sensitivity_maps: Optional[np.ndarray] = None
 
     # Computed fields (populated in __post_init__)
     positions: np.ndarray = field(init=False, repr=False)
@@ -120,6 +129,49 @@ class Phantom:
                 f"DF map shape {self.df_map.shape} doesn't match phantom shape {self.shape}"
             )
 
+        if self.b0_map is not None and self.b0_map.shape != self.shape:
+            raise ValueError(
+                f"B0 map shape {self.b0_map.shape} doesn't match phantom shape {self.shape}"
+            )
+
+        if (
+            self.chemical_shift_map is not None
+            and self.chemical_shift_map.shape != self.shape
+        ):
+            raise ValueError(
+                "Chemical-shift map shape "
+                f"{self.chemical_shift_map.shape} doesn't match phantom shape {self.shape}"
+            )
+
+        if (
+            self.tx_sensitivity_map is not None
+            and self.tx_sensitivity_map.shape != self.shape
+        ):
+            raise ValueError(
+                "Tx sensitivity map shape "
+                f"{self.tx_sensitivity_map.shape} doesn't match phantom shape {self.shape}"
+            )
+
+        if self.rx_sensitivity_maps is not None:
+            expected_rx_shape = (self.rx_sensitivity_maps.shape[0], *self.shape)
+            if (
+                self.rx_sensitivity_maps.ndim != len(self.shape) + 1
+                or self.rx_sensitivity_maps.shape[0] < 1
+                or self.rx_sensitivity_maps.shape != expected_rx_shape
+            ):
+                raise ValueError(
+                    "Rx sensitivity maps must have shape "
+                    f"(n_coils, {', '.join(map(str, self.shape))})"
+                )
+
+        if self.df_map is not None and (
+            self.b0_map is not None or self.chemical_shift_map is not None
+        ):
+            raise ValueError(
+                "df_map is the legacy total off-resonance input and cannot be "
+                "combined with b0_map or chemical_shift_map"
+            )
+
         if self.mask is not None and self.mask.shape != self.shape:
             raise ValueError(
                 f"Mask shape {self.mask.shape} doesn't match phantom shape {self.shape}"
@@ -138,9 +190,43 @@ class Phantom:
         if self.pd_map is None:
             self.pd_map = np.ones(self.shape, dtype=np.float64)
 
-        # Default frequency offset: all zeros
-        if self.df_map is None:
-            self.df_map = np.zeros(self.shape, dtype=np.float64)
+        # Split off-resonance into physically distinct maps.  Keep df_map as a
+        # constructed compatibility view for older callers.
+        if self.df_map is not None:
+            warnings.warn(
+                "df_map is deprecated; use b0_map and chemical_shift_map",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self.b0_map = np.asarray(self.df_map, dtype=np.float64).copy()
+            self.chemical_shift_map = np.zeros(self.shape, dtype=np.float64)
+        else:
+            if self.b0_map is None:
+                self.b0_map = np.zeros(self.shape, dtype=np.float64)
+            else:
+                self.b0_map = np.asarray(self.b0_map, dtype=np.float64)
+            if self.chemical_shift_map is None:
+                self.chemical_shift_map = np.zeros(self.shape, dtype=np.float64)
+            else:
+                self.chemical_shift_map = np.asarray(
+                    self.chemical_shift_map, dtype=np.float64
+                )
+        self.df_map = self.effective_df_map.copy()
+
+        # Dimensionless complex B1+ scaling and receive profiles. A singleton
+        # unity receive map preserves the historic single-channel signal API.
+        if self.tx_sensitivity_map is None:
+            self.tx_sensitivity_map = np.ones(self.shape, dtype=np.complex128)
+        else:
+            self.tx_sensitivity_map = np.asarray(
+                self.tx_sensitivity_map, dtype=np.complex128
+            )
+        if self.rx_sensitivity_maps is None:
+            self.rx_sensitivity_maps = np.ones((1, *self.shape), dtype=np.complex128)
+        else:
+            self.rx_sensitivity_maps = np.asarray(
+                self.rx_sensitivity_maps, dtype=np.complex128
+            )
 
         # Default initial magnetization: equilibrium [0, 0, 1]
         if self.m0_map is None:
@@ -161,7 +247,8 @@ class Phantom:
             n = self.shape[i]
             fov = self.fov[i]
             # Center coordinates at 0
-            coords.append(np.linspace(-fov / 2, fov / 2, n, endpoint=True))
+            voxel_size = fov / n
+            coords.append(-fov / 2 + (np.arange(n) + 0.5) * voxel_size)
 
         if ndim == 1:
             self.x = coords[0]
@@ -184,6 +271,21 @@ class Phantom:
             self.positions = np.column_stack([self.x, self.y, self.z])
 
     @property
+    def effective_df_map(self) -> np.ndarray:
+        """Total off-resonance in Hz: static B0 plus chemical shift."""
+        b0 = (
+            np.zeros(self.shape, dtype=np.float64)
+            if self.b0_map is None
+            else np.asarray(self.b0_map, dtype=np.float64)
+        )
+        chemical = (
+            np.zeros(self.shape, dtype=np.float64)
+            if self.chemical_shift_map is None
+            else np.asarray(self.chemical_shift_map, dtype=np.float64)
+        )
+        return b0 + chemical
+
+    @property
     def ndim(self) -> int:
         """Number of spatial dimensions."""
         return len(self.shape)
@@ -197,6 +299,11 @@ class Phantom:
     def n_active(self) -> int:
         """Number of active (non-masked) voxels."""
         return int(self.mask.sum())
+
+    @property
+    def n_rx_coils(self) -> int:
+        """Number of receive sensitivity maps."""
+        return int(self.rx_sensitivity_maps.shape[0])
 
     @property
     def resolution(self) -> Tuple[float, ...]:
@@ -219,6 +326,8 @@ class Phantom:
             - 't2': (nvoxels,) array of T2 values in seconds
             - 'pd': (nvoxels,) array of proton density values
             - 'df': (nvoxels,) array of frequency offsets in Hz
+            - 'tx_sensitivity': (nvoxels,) complex B1+ scaling
+            - 'rx_sensitivities': (n_coils, nvoxels) complex receive profiles
             - 'm0': (nvoxels, 3) array of initial magnetization [Mx, My, Mz]
             - 'mask': (nvoxels,) boolean array
         """
@@ -227,7 +336,13 @@ class Phantom:
             "t1": self.t1_map.ravel().copy(),
             "t2": self.t2_map.ravel().copy(),
             "pd": self.pd_map.ravel().copy(),
-            "df": self.df_map.ravel().copy(),
+            "df": self.effective_df_map.ravel().copy(),
+            "b0": self.b0_map.ravel().copy(),
+            "chemical_shift": self.chemical_shift_map.ravel().copy(),
+            "tx_sensitivity": self.tx_sensitivity_map.ravel().copy(),
+            "rx_sensitivities": self.rx_sensitivity_maps.reshape(
+                self.n_rx_coils, -1
+            ).copy(),
             "m0": self.m0_map.reshape(-1, 3).copy(),
             "mask": self.mask.ravel().copy(),
         }
@@ -251,6 +366,10 @@ class Phantom:
             "t2": flat["t2"][active],
             "pd": flat["pd"][active],
             "df": flat["df"][active],
+            "b0": flat["b0"][active],
+            "chemical_shift": flat["chemical_shift"][active],
+            "tx_sensitivity": flat["tx_sensitivity"][active],
+            "rx_sensitivities": flat["rx_sensitivities"][:, active],
             "m0": flat["m0"][active],
             "mask": flat["mask"][active],
             "indices": np.where(active)[0],  # Original indices for reconstruction
@@ -326,7 +445,22 @@ class Phantom:
             t1_map=self.t1_map.copy(),
             t2_map=self.t2_map.copy(),
             pd_map=self.pd_map.copy() if self.pd_map is not None else None,
-            df_map=self.df_map.copy() if self.df_map is not None else None,
+            b0_map=self.b0_map.copy() if self.b0_map is not None else None,
+            chemical_shift_map=(
+                self.chemical_shift_map.copy()
+                if self.chemical_shift_map is not None
+                else None
+            ),
+            tx_sensitivity_map=(
+                self.tx_sensitivity_map.copy()
+                if self.tx_sensitivity_map is not None
+                else None
+            ),
+            rx_sensitivity_maps=(
+                self.rx_sensitivity_maps.copy()
+                if self.rx_sensitivity_maps is not None
+                else None
+            ),
             m0_map=self.m0_map.copy() if self.m0_map is not None else None,
             mask=self.mask.copy() if self.mask is not None else None,
             name=self.name,
@@ -352,7 +486,11 @@ class Phantom:
             "t1_map": self.t1_map,
             "t2_map": self.t2_map,
             "pd_map": self.pd_map,
-            "df_map": self.df_map,
+            "df_map": self.effective_df_map,
+            "b0_map": self.b0_map,
+            "chemical_shift_map": self.chemical_shift_map,
+            "tx_sensitivity_map": self.tx_sensitivity_map,
+            "rx_sensitivity_maps": self.rx_sensitivity_maps,
             "m0_map": self.m0_map,
             "mask": self.mask,
             "name": np.array(self.name),
@@ -365,8 +503,8 @@ class Phantom:
 
             with h5py.File(filename, "w") as f:
                 for key, value in data.items():
-                    if isinstance(value, str):
-                        f.attrs[key] = value
+                    if key == "name":
+                        f.attrs[key] = str(value)
                     else:
                         f.create_dataset(key, data=value)
         else:
@@ -391,13 +529,28 @@ class Phantom:
 
         if filename.suffix == ".npz":
             data = np.load(filename, allow_pickle=True)
+            has_split_maps = "b0_map" in data.files
             return cls(
                 shape=tuple(data["shape"]),
                 fov=tuple(data["fov"]),
                 t1_map=data["t1_map"],
                 t2_map=data["t2_map"],
                 pd_map=data["pd_map"],
-                df_map=data["df_map"],
+                df_map=None if has_split_maps else data["df_map"],
+                b0_map=data["b0_map"] if has_split_maps else None,
+                chemical_shift_map=(
+                    data["chemical_shift_map"] if has_split_maps else None
+                ),
+                tx_sensitivity_map=(
+                    data["tx_sensitivity_map"]
+                    if "tx_sensitivity_map" in data.files
+                    else None
+                ),
+                rx_sensitivity_maps=(
+                    data["rx_sensitivity_maps"]
+                    if "rx_sensitivity_maps" in data.files
+                    else None
+                ),
                 m0_map=data["m0_map"],
                 mask=data["mask"],
                 name=str(data["name"]),
@@ -406,16 +559,40 @@ class Phantom:
             import h5py
 
             with h5py.File(filename, "r") as f:
+                has_split_maps = "b0_map" in f
+                stored_name = (
+                    f["name"][()].decode()
+                    if "name" in f and isinstance(f["name"][()], bytes)
+                    else (
+                        str(f["name"][()])
+                        if "name" in f
+                        else f.attrs.get("name", "Phantom")
+                    )
+                )
                 return cls(
                     shape=tuple(f["shape"][...]),
                     fov=tuple(f["fov"][...]),
                     t1_map=f["t1_map"][...],
                     t2_map=f["t2_map"][...],
                     pd_map=f["pd_map"][...],
-                    df_map=f["df_map"][...],
+                    df_map=None if has_split_maps else f["df_map"][...],
+                    b0_map=f["b0_map"][...] if has_split_maps else None,
+                    chemical_shift_map=(
+                        f["chemical_shift_map"][...] if has_split_maps else None
+                    ),
+                    tx_sensitivity_map=(
+                        f["tx_sensitivity_map"][...]
+                        if "tx_sensitivity_map" in f
+                        else None
+                    ),
+                    rx_sensitivity_maps=(
+                        f["rx_sensitivity_maps"][...]
+                        if "rx_sensitivity_maps" in f
+                        else None
+                    ),
                     m0_map=f["m0_map"][...],
                     mask=f["mask"][...],
-                    name=f.attrs.get("name", "Phantom"),
+                    name=stored_name,
                 )
         else:
             raise ValueError(f"Unsupported file format: {filename.suffix}")
@@ -944,7 +1121,7 @@ class PhantomFactory:
         t1_map = np.zeros((n, n), dtype=np.float64)
         t2_map = np.zeros((n, n), dtype=np.float64)
         pd_map = np.zeros((n, n), dtype=np.float64)
-        df_map = np.zeros((n, n), dtype=np.float64)
+        chemical_shift_map = np.zeros((n, n), dtype=np.float64)
 
         # Water
         t1_map[water_mask] = water_t1
@@ -964,7 +1141,7 @@ class PhantomFactory:
         fat_shift_ppm = -3.5
         fat_shift_hz = fat_shift_ppm * 1e-6 * freq_hz
 
-        df_map[fat_mask] = fat_shift_hz
+        chemical_shift_map[fat_mask] = fat_shift_hz
 
         return Phantom(
             shape=(n, n),
@@ -972,7 +1149,7 @@ class PhantomFactory:
             t1_map=t1_map,
             t2_map=t2_map,
             pd_map=pd_map,
-            df_map=df_map,
+            chemical_shift_map=chemical_shift_map,
             mask=mask,
             name=f"Water-Fat {n}x{n} @ {field_strength}T",
             metadata={

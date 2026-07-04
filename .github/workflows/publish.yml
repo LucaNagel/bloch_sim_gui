@@ -24,7 +24,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest numpy scipy matplotlib cython PyQt5 pyqtgraph PyOpenGL imageio imageio-ffmpeg h5py nbformat
           # Install the package in editable mode to build C extension
-          pip install -e .
+          pip install -e ".[pulseq]"
 
       - name: Run tests
         run: |

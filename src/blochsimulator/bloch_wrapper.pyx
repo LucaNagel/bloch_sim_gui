@@ -56,6 +56,22 @@ cdef extern from "bloch_core.h":
         double *mx, double *my, double *mz,
         int mode, int num_threads) nogil
 
+    int blochsim_sequence_streaming(
+        double *rf_real_hz, double *rf_imag_hz,
+        double *gx_hz_m, double *gy_hz_m, double *gz_hz_m,
+        double *dt_s, int nintervals,
+        double *t1_s, double *t2_s, double *df_hz,
+        double *x_m, double *y_m, double *z_m, double *pd,
+        double *tx_real, double *tx_imag,
+        double *rx_real, double *rx_imag, int ncoils,
+        double *mx_init, double *my_init, double *mz_init, int nspins,
+        int *adc_state_indices, double *adc_demod_real, double *adc_demod_imag,
+        int nadc, int *checkpoint_state_indices, int ncheckpoints,
+        double *signal_real, double *signal_imag,
+        double *mx_final, double *my_final, double *mz_final,
+        double *mx_checkpoints, double *my_checkpoints, double *mz_checkpoints,
+        int num_threads) nogil
+
 # Type definitions
 ctypedef np.float64_t DTYPE_t
 ctypedef np.complex128_t CTYPE_t
@@ -706,3 +722,121 @@ def simulate_phantom_grouped(np.ndarray[CTYPE_t, ndim=1] b1_complex,
         mz_out = mz_buf
 
     return mx_out, my_out, mz_out
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def simulate_sequence_chunk(
+        np.ndarray[CTYPE_t, ndim=1] rf_hz,
+        np.ndarray[DTYPE_t, ndim=2] gradients_hz_per_m,
+        np.ndarray[DTYPE_t, ndim=1] dt_s,
+        np.ndarray[DTYPE_t, ndim=1] t1_s,
+        np.ndarray[DTYPE_t, ndim=1] t2_s,
+        np.ndarray[DTYPE_t, ndim=1] df_hz,
+        np.ndarray[DTYPE_t, ndim=2] positions_m,
+        np.ndarray[DTYPE_t, ndim=1] proton_density,
+        np.ndarray[CTYPE_t, ndim=1] tx_sensitivity,
+        np.ndarray[CTYPE_t, ndim=2] rx_sensitivities,
+        np.ndarray[DTYPE_t, ndim=2] m_init,
+        np.ndarray[np.int32_t, ndim=1] adc_state_indices,
+        np.ndarray[CTYPE_t, ndim=1] adc_demodulation,
+        np.ndarray[np.int32_t, ndim=1] checkpoint_state_indices,
+        int num_threads=1):
+    """Propagate one voxel chunk and collect sparse sequence output.
+
+    All inputs use canonical units: RF in Hz, gradients in Hz/m, positions in
+    metres, time in seconds, and off-resonance in Hz.
+    """
+    cdef int nintervals = rf_hz.shape[0]
+    cdef int nspins = t1_s.shape[0]
+    cdef int nadc = adc_state_indices.shape[0]
+    cdef int ncheckpoints = checkpoint_state_indices.shape[0]
+    cdef int ncoils = rx_sensitivities.shape[0]
+    if gradients_hz_per_m.shape[0] != nintervals or gradients_hz_per_m.shape[1] != 3:
+        raise ValueError("gradients_hz_per_m must have shape (nintervals, 3)")
+    if dt_s.shape[0] != nintervals:
+        raise ValueError("dt_s length must match rf_hz")
+    if t2_s.shape[0] != nspins or df_hz.shape[0] != nspins:
+        raise ValueError("T1, T2, and df arrays must have equal lengths")
+    if positions_m.shape[0] != nspins or positions_m.shape[1] != 3:
+        raise ValueError("positions_m must have shape (nspins, 3)")
+    if proton_density.shape[0] != nspins:
+        raise ValueError("proton_density length must match spin count")
+    if tx_sensitivity.shape[0] != nspins:
+        raise ValueError("tx_sensitivity length must match spin count")
+    if ncoils < 1 or rx_sensitivities.shape[1] != nspins:
+        raise ValueError("rx_sensitivities must have shape (ncoils, nspins)")
+    if m_init.shape[0] != nspins or m_init.shape[1] != 3:
+        raise ValueError("m_init must have shape (nspins, 3)")
+    if adc_demodulation.shape[0] != nadc:
+        raise ValueError("adc_demodulation length must match ADC indices")
+
+    cdef np.ndarray[CTYPE_t, ndim=1] rf_c = np.ascontiguousarray(rf_hz, dtype=np.complex128)
+    cdef np.ndarray[DTYPE_t, ndim=1] rf_real = np.ascontiguousarray(rf_c.real)
+    cdef np.ndarray[DTYPE_t, ndim=1] rf_imag = np.ascontiguousarray(rf_c.imag)
+    cdef np.ndarray[DTYPE_t, ndim=2] grad_c = np.ascontiguousarray(gradients_hz_per_m, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] gx = np.ascontiguousarray(grad_c[:, 0])
+    cdef np.ndarray[DTYPE_t, ndim=1] gy = np.ascontiguousarray(grad_c[:, 1])
+    cdef np.ndarray[DTYPE_t, ndim=1] gz = np.ascontiguousarray(grad_c[:, 2])
+    cdef np.ndarray[DTYPE_t, ndim=1] dt_c = np.ascontiguousarray(dt_s, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] t1_c = np.ascontiguousarray(t1_s, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] t2_c = np.ascontiguousarray(t2_s, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] df_c = np.ascontiguousarray(df_hz, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=2] pos_c = np.ascontiguousarray(positions_m, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] x = np.ascontiguousarray(pos_c[:, 0])
+    cdef np.ndarray[DTYPE_t, ndim=1] y = np.ascontiguousarray(pos_c[:, 1])
+    cdef np.ndarray[DTYPE_t, ndim=1] z = np.ascontiguousarray(pos_c[:, 2])
+    cdef np.ndarray[DTYPE_t, ndim=1] pd_c = np.ascontiguousarray(proton_density, dtype=np.float64)
+    cdef np.ndarray[CTYPE_t, ndim=1] tx_c = np.ascontiguousarray(tx_sensitivity, dtype=np.complex128)
+    cdef np.ndarray[DTYPE_t, ndim=1] tx_real = np.ascontiguousarray(tx_c.real)
+    cdef np.ndarray[DTYPE_t, ndim=1] tx_imag = np.ascontiguousarray(tx_c.imag)
+    cdef np.ndarray[CTYPE_t, ndim=2] rx_c = np.ascontiguousarray(rx_sensitivities, dtype=np.complex128)
+    cdef np.ndarray[DTYPE_t, ndim=2] rx_real = np.ascontiguousarray(rx_c.real)
+    cdef np.ndarray[DTYPE_t, ndim=2] rx_imag = np.ascontiguousarray(rx_c.imag)
+    cdef np.ndarray[DTYPE_t, ndim=2] m_c = np.ascontiguousarray(m_init, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] mx_init = np.ascontiguousarray(m_c[:, 0])
+    cdef np.ndarray[DTYPE_t, ndim=1] my_init = np.ascontiguousarray(m_c[:, 1])
+    cdef np.ndarray[DTYPE_t, ndim=1] mz_init = np.ascontiguousarray(m_c[:, 2])
+    cdef np.ndarray[np.int32_t, ndim=1] adc_indices_c = np.ascontiguousarray(adc_state_indices, dtype=np.int32)
+    cdef np.ndarray[CTYPE_t, ndim=1] demod_c = np.ascontiguousarray(adc_demodulation, dtype=np.complex128)
+    cdef np.ndarray[DTYPE_t, ndim=1] demod_real = np.ascontiguousarray(demod_c.real)
+    cdef np.ndarray[DTYPE_t, ndim=1] demod_imag = np.ascontiguousarray(demod_c.imag)
+    cdef np.ndarray[np.int32_t, ndim=1] checkpoint_indices_c = np.ascontiguousarray(checkpoint_state_indices, dtype=np.int32)
+
+    cdef np.ndarray[DTYPE_t, ndim=1] signal_real = np.zeros(ncoils * nadc, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] signal_imag = np.zeros(ncoils * nadc, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] mx_final = np.empty(nspins, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] my_final = np.empty(nspins, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] mz_final = np.empty(nspins, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] mx_check = np.empty(ncheckpoints * nspins, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] my_check = np.empty(ncheckpoints * nspins, dtype=np.float64)
+    cdef np.ndarray[DTYPE_t, ndim=1] mz_check = np.empty(ncheckpoints * nspins, dtype=np.float64)
+    cdef int status
+
+    with nogil:
+        status = blochsim_sequence_streaming(
+            <double*>rf_real.data, <double*>rf_imag.data,
+            <double*>gx.data, <double*>gy.data, <double*>gz.data,
+            <double*>dt_c.data, nintervals,
+            <double*>t1_c.data, <double*>t2_c.data, <double*>df_c.data,
+            <double*>x.data, <double*>y.data, <double*>z.data, <double*>pd_c.data,
+            <double*>tx_real.data, <double*>tx_imag.data,
+            <double*>rx_real.data, <double*>rx_imag.data, ncoils,
+            <double*>mx_init.data, <double*>my_init.data, <double*>mz_init.data, nspins,
+            <int*>adc_indices_c.data, <double*>demod_real.data, <double*>demod_imag.data,
+            nadc, <int*>checkpoint_indices_c.data, ncheckpoints,
+            <double*>signal_real.data, <double*>signal_imag.data,
+            <double*>mx_final.data, <double*>my_final.data, <double*>mz_final.data,
+            <double*>mx_check.data, <double*>my_check.data, <double*>mz_check.data,
+            num_threads)
+    if status != 0:
+        raise MemoryError("native streaming kernel could not allocate ADC accumulators")
+
+    signal = (signal_real + 1j * signal_imag).reshape((ncoils, nadc))
+    final = np.column_stack((mx_final, my_final, mz_final))
+    checkpoints = np.empty((ncheckpoints, nspins, 3), dtype=np.float64)
+    if ncheckpoints:
+        checkpoints[:, :, 0] = mx_check.reshape((ncheckpoints, nspins))
+        checkpoints[:, :, 1] = my_check.reshape((ncheckpoints, nspins))
+        checkpoints[:, :, 2] = mz_check.reshape((ncheckpoints, nspins))
+    return signal, final, checkpoints

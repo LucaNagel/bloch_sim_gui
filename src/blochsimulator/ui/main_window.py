@@ -92,6 +92,7 @@ from .parameter_sweep import ParameterSweepWidget
 from .tutorial_manager import TutorialManager
 from .tutorial_overlay import TutorialOverlay
 from .dialogs import SettingsDialog
+from .sequence_simulation_widget import SequenceSimulationWidget
 
 
 def get_app_data_dir() -> Path:
@@ -1021,6 +1022,21 @@ class BlochSimulatorGUI(QMainWindow):
         spatial_container.setLayout(spatial_layout)
         self.tab_widget.addTab(self._wrap_in_scroll_area(spatial_container), "Spatial")
 
+        # === EVENT-BASED 3D SEQUENCE SIMULATION ===
+        self.sequence_simulation_widget = None
+        self.sequence_simulation_placeholder = QWidget()
+        placeholder_layout = QVBoxLayout(self.sequence_simulation_placeholder)
+        placeholder_layout.addWidget(
+            QLabel("Open this tab to initialize the 3D sequence simulation workspace.")
+        )
+        placeholder_layout.addStretch()
+        self.sequence_simulation_tab_index = self.tab_widget.addTab(
+            self.sequence_simulation_placeholder, "Sequence Simulation"
+        )
+        self.tab_widget.currentChanged.connect(
+            self._ensure_sequence_simulation_workspace
+        )
+
         # === PHANTOM TAB (2D/3D Imaging) ===
         if PHANTOM_AVAILABLE:
             self.phantom_widget = PhantomWidget(self)
@@ -1167,6 +1183,22 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Ensure every interactive field in the main GUI explains its purpose.
         self._configure_control_tooltips()
+
+    def _ensure_sequence_simulation_workspace(self, index: int):
+        """Create heavy sequence plots only when their tab is opened."""
+        if (
+            index != getattr(self, "sequence_simulation_tab_index", -1)
+            or self.sequence_simulation_widget is not None
+        ):
+            return
+        layout = self.sequence_simulation_placeholder.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.sequence_simulation_widget = SequenceSimulationWidget(self)
+        layout.addWidget(self.sequence_simulation_widget)
 
     def _configure_control_tooltips(self):
         """Add domain-specific tooltips to controls that do not define their own."""

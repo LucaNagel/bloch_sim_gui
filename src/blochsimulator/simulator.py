@@ -1652,7 +1652,7 @@ class BlochSimulator:
         """
         # Import Phantom class (avoid circular import)
         try:
-            from phantom import Phantom
+            from .phantom import Phantom
         except ImportError:
             raise ImportError(
                 "Phantom module not found. Ensure phantom.py is available."
@@ -1838,6 +1838,196 @@ class BlochSimulator:
 
         return self.last_result
 
+    def simulate_sequence(
+        self,
+        program,
+        phantom,
+        *,
+        checkpoints_s=(),
+        chunk_voxels: Optional[int] = None,
+        progress_callback=None,
+        cancel_callback=None,
+    ):
+        """Simulate an event-based sequence on a heterogeneous 1D/2D/3D object.
+
+        The streaming path stores only ADC samples, explicitly requested
+        checkpoint states, and final magnetization. Canonical sequence units are
+        Hz, Hz/m, metres, and seconds.
+        """
+        from .phantom import Phantom
+        from .sequence import (
+            SequenceCompiler,
+            SequenceProgram,
+            SequenceSimulationResult,
+        )
+
+        if not isinstance(program, SequenceProgram):
+            raise TypeError(f"program must be SequenceProgram, got {type(program)}")
+        if not isinstance(phantom, Phantom):
+            raise TypeError(f"phantom must be Phantom, got {type(phantom)}")
+
+        compiled = SequenceCompiler().compile(program, checkpoints_s=checkpoints_s)
+        props = phantom.get_active_properties()
+        n_active = int(props["indices"].size)
+        n_checkpoints = int(compiled.checkpoint_times_s.size)
+        n_adc = int(compiled.adc_times_s.size)
+        n_rx_coils = int(props["rx_sensitivities"].shape[0])
+        native_threads = self.num_threads if self.use_parallel else 1
+        if n_active == 0:
+            raise ValueError("phantom has no active voxels")
+
+        arrays_to_validate = {
+            "T1": props["t1"],
+            "T2": props["t2"],
+            "proton density": props["pd"],
+            "off-resonance": props["df"],
+            "Tx sensitivity": props["tx_sensitivity"],
+            "Rx sensitivities": props["rx_sensitivities"],
+            "positions": props["positions"],
+            "initial magnetization": props["m0"],
+        }
+        for name, values in arrays_to_validate.items():
+            if not np.all(np.isfinite(values)):
+                raise ValueError(
+                    f"active phantom {name} contains NaN or infinite values"
+                )
+        if np.any(props["t1"] <= 0) or np.any(props["t2"] <= 0):
+            raise ValueError("active phantom voxels require T1 > 0 and T2 > 0")
+        if np.any(props["pd"] < 0):
+            raise ValueError("active phantom proton density must not be negative")
+
+        if chunk_voxels is None:
+            chunk_voxels = min(n_active, 65536)
+        if int(chunk_voxels) != chunk_voxels or chunk_voxels <= 0:
+            raise ValueError("chunk_voxels must be a positive integer")
+        chunk_voxels = min(int(chunk_voxels), n_active)
+
+        # Final/checkpoint reconstructions dominate persistent output. Thread-local
+        # ADC accumulators and one native chunk are the main working allocations.
+        persistent_bytes = (
+            phantom.nvoxels * 3 * 8
+            + n_checkpoints * phantom.nvoxels * 3 * 8
+            + n_rx_coils * n_adc * 16
+            + n_active * (3 * 8 + 7 * 8 + 16)
+            + n_rx_coils * n_active * 16
+        )
+        working_bytes = (
+            native_threads * n_rx_coils * max(1, n_adc) * 2 * 8
+            + chunk_voxels * (3 * 8 + n_checkpoints * 3 * 8)
+            + compiled.n_intervals * 6 * 8
+        )
+        enforce_memory_budget(
+            persistent_bytes + working_bytes,
+            self._memory_budget(),
+            description=(
+                f"Streaming sequence with {compiled.n_intervals:,} intervals, "
+                f"{n_active:,} active voxels, {n_adc:,} ADC samples, and "
+                f"{n_checkpoints:,} checkpoints"
+            ),
+            suggestions=(
+                "remove checkpoints, reduce object resolution or ADC samples, "
+                "or choose a smaller voxel chunk"
+            ),
+        )
+
+        try:
+            from .blochsimulator_cy import simulate_sequence_chunk
+        except ImportError as exc:
+            raise ImportError(
+                "blochsimulator_cy does not contain the streaming sequence kernel; "
+                "rebuild the extension"
+            ) from exc
+
+        coil_signal = np.zeros((n_rx_coils, n_adc), dtype=np.complex128)
+        final_active = np.empty((n_active, 3), dtype=np.float64)
+        checkpoints_active = np.empty((n_checkpoints, n_active, 3), dtype=np.float64)
+        positions = np.ascontiguousarray(props["positions"], dtype=np.float64)
+        t1 = np.ascontiguousarray(props["t1"], dtype=np.float64)
+        t2 = np.ascontiguousarray(props["t2"], dtype=np.float64)
+        df = np.ascontiguousarray(props["df"], dtype=np.float64)
+        pd = np.ascontiguousarray(props["pd"], dtype=np.float64)
+        tx_sensitivity = np.ascontiguousarray(
+            props["tx_sensitivity"], dtype=np.complex128
+        )
+        rx_sensitivities = np.ascontiguousarray(
+            props["rx_sensitivities"], dtype=np.complex128
+        )
+        m0 = np.ascontiguousarray(props["m0"], dtype=np.float64)
+
+        chunks = (n_active + chunk_voxels - 1) // chunk_voxels
+        for chunk_index, start in enumerate(range(0, n_active, chunk_voxels)):
+            if cancel_callback is not None and cancel_callback():
+                raise RuntimeError("sequence simulation cancelled")
+            end = min(start + chunk_voxels, n_active)
+            chunk_signal, chunk_final, chunk_checkpoints = simulate_sequence_chunk(
+                compiled.rf_hz,
+                compiled.gradient_hz_per_m,
+                compiled.dt_s,
+                t1[start:end],
+                t2[start:end],
+                df[start:end],
+                positions[start:end],
+                pd[start:end],
+                tx_sensitivity[start:end],
+                rx_sensitivities[:, start:end],
+                m0[start:end],
+                compiled.adc_state_indices,
+                compiled.adc_demodulation,
+                compiled.checkpoint_state_indices,
+                native_threads,
+            )
+            coil_signal += chunk_signal
+            final_active[start:end] = chunk_final
+            if n_checkpoints:
+                checkpoints_active[:, start:end] = chunk_checkpoints
+            if progress_callback is not None:
+                progress_callback(chunk_index + 1, chunks)
+
+        active_indices = props["indices"]
+        final_flat = np.zeros((phantom.nvoxels, 3), dtype=np.float64)
+        final_flat[active_indices] = final_active
+        final_magnetization = final_flat.reshape(phantom.shape + (3,))
+        checkpoint_magnetization = None
+        if n_checkpoints:
+            checkpoint_flat = np.zeros(
+                (n_checkpoints, phantom.nvoxels, 3), dtype=np.float64
+            )
+            checkpoint_flat[:, active_indices] = checkpoints_active
+            checkpoint_magnetization = checkpoint_flat.reshape(
+                (n_checkpoints,) + phantom.shape + (3,)
+            )
+
+        signal = coil_signal[0] if n_rx_coils == 1 else coil_signal
+        result = SequenceSimulationResult(
+            signal=signal,
+            adc_times_s=compiled.adc_times_s,
+            final_magnetization=final_magnetization,
+            checkpoint_magnetization=checkpoint_magnetization,
+            checkpoint_times_s=compiled.checkpoint_times_s,
+            metadata={
+                "sequence_source": program.source,
+                "sequence_version": program.version,
+                "duration_s": program.duration_s,
+                "n_intervals": compiled.n_intervals,
+                "n_active_voxels": n_active,
+                "n_rx_coils": n_rx_coils,
+                "chunk_voxels": chunk_voxels,
+                "units": {
+                    "time": "s",
+                    "position": "m",
+                    "rf": "Hz",
+                    "gradient": "Hz/m",
+                    "off_resonance": "Hz",
+                    "tx_sensitivity": "dimensionless complex B1+ scale",
+                    "rx_sensitivity": "dimensionless complex receive scale",
+                },
+            },
+        )
+        self.last_result = result.to_dict()
+        self.last_result["phantom"] = phantom
+        self.last_result["program"] = program
+        return result
+
     def plot_magnetization(
         self, component: str = "all", position_idx: int = 0, freq_idx: int = 0
     ):
@@ -1923,6 +2113,41 @@ class BlochSimulator:
             raise ValueError("No simulation results available")
 
         result = self.last_result
+        if "adc_times_s" in result:
+            phantom = result.get("phantom")
+            final = result["final_magnetization"]
+            spatial_dims = (
+                list(("x", "y", "z")[: phantom.ndim])
+                if phantom is not None
+                else [f"spatial_{index}" for index in range(final.ndim - 1)]
+            )
+            coords = {"adc": np.arange(len(result["adc_times_s"]))}
+            coords["adc_time_s"] = ("adc", result["adc_times_s"])
+            data_vars = {
+                "signal": (("adc",), result["signal"]),
+                "mx": (spatial_dims, result["mx"]),
+                "my": (spatial_dims, result["my"]),
+                "mz": (spatial_dims, result["mz"]),
+            }
+            checkpoints = result.get("checkpoint_magnetization")
+            if checkpoints is not None:
+                coords["checkpoint"] = result["checkpoint_times_s"]
+                data_vars["checkpoint_magnetization"] = (
+                    ["checkpoint"] + spatial_dims + ["component"],
+                    checkpoints,
+                )
+                coords["component"] = ["mx", "my", "mz"]
+            attrs = {
+                "simulator_version": __version__,
+                "export_timestamp": str(np.datetime64("now")),
+                **{
+                    key: value
+                    for key, value in result.get("metadata", {}).items()
+                    if isinstance(value, (str, int, float, bool))
+                },
+            }
+            return xr.Dataset(data_vars, coords=coords, attrs=attrs)
+
         mx = result["mx"]
         my = result["my"]
         mz = result["mz"]
@@ -2081,6 +2306,31 @@ class BlochSimulator:
             raise ValueError("No simulation results available")
 
         with h5py.File(filename, "w") as f:
+            if "adc_times_s" in self.last_result:
+                result = self.last_result
+                f.create_dataset("signal", data=result["signal"])
+                f.create_dataset("adc_times_s", data=result["adc_times_s"])
+                f.create_dataset(
+                    "final_magnetization", data=result["final_magnetization"]
+                )
+                f.create_dataset("mx", data=result["mx"])
+                f.create_dataset("my", data=result["my"])
+                f.create_dataset("mz", data=result["mz"])
+                if result.get("checkpoint_magnetization") is not None:
+                    f.create_dataset(
+                        "checkpoint_magnetization",
+                        data=result["checkpoint_magnetization"],
+                    )
+                f.create_dataset(
+                    "checkpoint_times_s", data=result["checkpoint_times_s"]
+                )
+                f.attrs["metadata_json"] = json.dumps(
+                    result.get("metadata", {}), default=str
+                )
+                f.attrs["export_timestamp"] = str(np.datetime64("now"))
+                f.attrs["simulator_version"] = __version__
+                return
+
             # Save magnetization data
             f.create_dataset("mx", data=self.last_result["mx"])
             f.create_dataset("my", data=self.last_result["my"])

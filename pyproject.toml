@@ -3,7 +3,7 @@ requires = ["setuptools>=42", "wheel", "Cython>=0.29", "numpy>=1.20"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["blochsimulator"]
+packages = ["blochsimulator", "blochsimulator.ui", "blochsimulator.sequence"]
 package-dir = {"" = "src"}
 
 [project]
@@ -38,6 +38,9 @@ gui = [
     "PyQt5>=5.15.0",
     "pyqtgraph>=0.12.0",
     "PyOpenGL>=3.1.0",
+]
+pulseq = [
+    "pypulseq>=1.5.0,<1.5.1",
 ]
 
 [project.urls]

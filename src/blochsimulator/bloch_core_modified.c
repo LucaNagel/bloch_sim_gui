@@ -798,4 +798,155 @@ void blochsim_heterogeneous_grouped(
     free(e2_table);
 }
 
+/*
+ * Streaming sequence simulation.
+ *
+ * Unlike the legacy transient mode this routine never allocates or returns a
+ * time-by-spin magnetization array. Each spin is propagated through all
+ * intervals and contributes only at requested ADC state boundaries. Checkpoint
+ * arrays use checkpoint-major layout: checkpoint * nspins + spin.
+ */
+int blochsim_sequence_streaming(
+    double *rf_real_hz, double *rf_imag_hz,
+    double *gx_hz_m, double *gy_hz_m, double *gz_hz_m,
+    double *dt_s, int nintervals,
+    double *t1_s, double *t2_s, double *df_hz,
+    double *x_m, double *y_m, double *z_m, double *pd,
+    double *tx_real, double *tx_imag,
+    double *rx_real, double *rx_imag, int ncoils,
+    double *mx_init, double *my_init, double *mz_init, int nspins,
+    int *adc_state_indices, double *adc_demod_real, double *adc_demod_imag,
+    int nadc, int *checkpoint_state_indices, int ncheckpoints,
+    double *signal_real, double *signal_imag,
+    double *mx_final, double *my_final, double *mz_final,
+    double *mx_checkpoints, double *my_checkpoints, double *mz_checkpoints,
+    int num_threads)
+{
+    int thread_count = num_threads > 0 ? num_threads : 1;
+#ifndef _OPENMP
+    thread_count = 1;
+#endif
+    size_t samples_per_thread = (size_t)ncoils * (size_t)(nadc > 0 ? nadc : 1);
+    size_t signal_count = (size_t)thread_count * samples_per_thread;
+    double *thread_signal_real = (double *)calloc(signal_count, sizeof(double));
+    double *thread_signal_imag = (double *)calloc(signal_count, sizeof(double));
+    if (thread_signal_real == NULL || thread_signal_imag == NULL) {
+        if (thread_signal_real) free(thread_signal_real);
+        if (thread_signal_imag) free(thread_signal_imag);
+        return -1;
+    }
+
+    for (int sample = 0; sample < ncoils * nadc; sample++) {
+        signal_real[sample] = 0.0;
+        signal_imag[sample] = 0.0;
+    }
+
+#ifdef _OPENMP
+    omp_set_num_threads(thread_count);
+#pragma omp parallel for schedule(static)
+#endif
+    for (int spin = 0; spin < nspins; spin++) {
+        int thread_id = 0;
+#ifdef _OPENMP
+        thread_id = omp_get_thread_num();
+#endif
+        double *local_real = thread_signal_real + (size_t)thread_id * samples_per_thread;
+        double *local_imag = thread_signal_imag + (size_t)thread_id * samples_per_thread;
+        double magnetization[3] = {mx_init[spin], my_init[spin], mz_init[spin]};
+        int adc_cursor = 0;
+        int checkpoint_cursor = 0;
+
+        while (adc_cursor < nadc && adc_state_indices[adc_cursor] == 0) {
+            double demod_real = adc_demod_real[adc_cursor];
+            double demod_imag = adc_demod_imag[adc_cursor];
+            for (int coil = 0; coil < ncoils; coil++) {
+                size_t rx_offset = (size_t)coil * (size_t)nspins + (size_t)spin;
+                size_t signal_offset = (size_t)coil * (size_t)(nadc > 0 ? nadc : 1) + (size_t)adc_cursor;
+                double weighted_x = pd[spin] * (magnetization[0] * rx_real[rx_offset]
+                                                 - magnetization[1] * rx_imag[rx_offset]);
+                double weighted_y = pd[spin] * (magnetization[0] * rx_imag[rx_offset]
+                                                 + magnetization[1] * rx_real[rx_offset]);
+                local_real[signal_offset] += weighted_x * demod_real - weighted_y * demod_imag;
+                local_imag[signal_offset] += weighted_x * demod_imag + weighted_y * demod_real;
+            }
+            adc_cursor++;
+        }
+        while (checkpoint_cursor < ncheckpoints && checkpoint_state_indices[checkpoint_cursor] == 0) {
+            size_t offset = (size_t)checkpoint_cursor * (size_t)nspins + (size_t)spin;
+            mx_checkpoints[offset] = magnetization[0];
+            my_checkpoints[offset] = magnetization[1];
+            mz_checkpoints[offset] = magnetization[2];
+            checkpoint_cursor++;
+        }
+
+        for (int interval = 0; interval < nintervals; interval++) {
+            double dt = dt_s[interval];
+            double rotation[9];
+            double rotated[3];
+            double effective_rf_real = rf_real_hz[interval] * tx_real[spin]
+                                     - rf_imag_hz[interval] * tx_imag[spin];
+            double effective_rf_imag = rf_real_hz[interval] * tx_imag[spin]
+                                     + rf_imag_hz[interval] * tx_real[spin];
+            double rotx = -TWOPI * effective_rf_real * dt;
+            double roty = +TWOPI * effective_rf_imag * dt;
+            double frequency = gx_hz_m[interval] * x_m[spin]
+                             + gy_hz_m[interval] * y_m[spin]
+                             + gz_hz_m[interval] * z_m[spin]
+                             + df_hz[spin];
+            double rotz = -TWOPI * frequency * dt;
+            calcrotmat(rotx, roty, rotz, rotation);
+            multmatvec(rotation, magnetization, rotated);
+
+            double e1 = exp(-dt / t1_s[spin]);
+            double e2 = exp(-dt / t2_s[spin]);
+            magnetization[0] = rotated[0] * e2;
+            magnetization[1] = rotated[1] * e2;
+            magnetization[2] = rotated[2] * e1 + (1.0 - e1);
+
+            int state_index = interval + 1;
+            while (adc_cursor < nadc && adc_state_indices[adc_cursor] == state_index) {
+                double demod_real = adc_demod_real[adc_cursor];
+                double demod_imag = adc_demod_imag[adc_cursor];
+                for (int coil = 0; coil < ncoils; coil++) {
+                    size_t rx_offset = (size_t)coil * (size_t)nspins + (size_t)spin;
+                    size_t signal_offset = (size_t)coil * (size_t)(nadc > 0 ? nadc : 1) + (size_t)adc_cursor;
+                    double weighted_x = pd[spin] * (magnetization[0] * rx_real[rx_offset]
+                                                     - magnetization[1] * rx_imag[rx_offset]);
+                    double weighted_y = pd[spin] * (magnetization[0] * rx_imag[rx_offset]
+                                                     + magnetization[1] * rx_real[rx_offset]);
+                    local_real[signal_offset] += weighted_x * demod_real - weighted_y * demod_imag;
+                    local_imag[signal_offset] += weighted_x * demod_imag + weighted_y * demod_real;
+                }
+                adc_cursor++;
+            }
+            while (checkpoint_cursor < ncheckpoints && checkpoint_state_indices[checkpoint_cursor] == state_index) {
+                size_t offset = (size_t)checkpoint_cursor * (size_t)nspins + (size_t)spin;
+                mx_checkpoints[offset] = magnetization[0];
+                my_checkpoints[offset] = magnetization[1];
+                mz_checkpoints[offset] = magnetization[2];
+                checkpoint_cursor++;
+            }
+        }
+
+        mx_final[spin] = magnetization[0];
+        my_final[spin] = magnetization[1];
+        mz_final[spin] = magnetization[2];
+    }
+
+    for (int thread = 0; thread < thread_count; thread++) {
+        size_t base = (size_t)thread * samples_per_thread;
+        for (int coil = 0; coil < ncoils; coil++) {
+            for (int sample = 0; sample < nadc; sample++) {
+                size_t offset = (size_t)coil * (size_t)nadc + (size_t)sample;
+                signal_real[offset] += thread_signal_real[base + offset];
+                signal_imag[offset] += thread_signal_imag[base + offset];
+            }
+        }
+    }
+
+    free(thread_signal_real);
+    free(thread_signal_imag);
+    return 0;
+}
+
 /* End of file */

@@ -31,6 +31,9 @@ __pycache__/
 !USER_GUIDE.md
 !DEVELOPER_GUIDE.md
 !docs/TUTORIAL_MODE.md
+!docs/sequence_simulation_plan.md
+!docs/sequence_simulation_architecture.md
+!docs/sequence_simulation_roadmap.md
 
 # Generated C files
 src/blochsimulator/bloch_wrapper.c
