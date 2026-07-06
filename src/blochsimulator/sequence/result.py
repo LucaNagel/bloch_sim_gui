@@ -22,6 +22,7 @@ class SequenceSimulationResult:
     checkpoint_magnetization: Optional[np.ndarray]
     checkpoint_times_s: np.ndarray
     metadata: Dict[str, Any] = field(default_factory=dict)
+    adc_gradient_moment_cyc_per_m: Optional[np.ndarray] = None
 
     @property
     def mx(self) -> np.ndarray:
@@ -46,6 +47,7 @@ class SequenceSimulationResult:
             "mz": self.mz,
             "checkpoint_magnetization": self.checkpoint_magnetization,
             "checkpoint_times_s": self.checkpoint_times_s,
+            "adc_gradient_moment_cyc_per_m": self.adc_gradient_moment_cyc_per_m,
             "metadata": self.metadata,
         }
 
@@ -73,6 +75,17 @@ class SequenceSimulationResult:
         }
         if self.signal.ndim == 2:
             coords["coil"] = np.arange(self.signal.shape[0])
+        if self.adc_gradient_moment_cyc_per_m is not None:
+            moments = np.asarray(self.adc_gradient_moment_cyc_per_m)
+            if moments.shape != (self.adc_times_s.size, 3):
+                raise ValueError(
+                    "adc_gradient_moment_cyc_per_m must have shape (adc, 3)"
+                )
+            coords["gradient_axis"] = ["x", "y", "z"]
+            data_vars["adc_gradient_moment_cyc_per_m"] = (
+                ("adc", "gradient_axis"),
+                moments,
+            )
         if self.checkpoint_magnetization is not None:
             coords["checkpoint"] = self.checkpoint_times_s
             data_vars["checkpoint_magnetization"] = (
@@ -85,3 +98,36 @@ class SequenceSimulationResult:
             if isinstance(value, (str, int, float, bool))
         }
         return xr.Dataset(data_vars, coords=coords, attrs=attrs)
+
+    def to_cartesian_kspace(self, acquisition, *, validate: bool = True) -> np.ndarray:
+        """Reshape chronological ADC data with a Cartesian acquisition layout."""
+        if validate:
+            acquisition.validate_adc_times(self.adc_times_s)
+            if self.adc_gradient_moment_cyc_per_m is not None:
+                acquisition.validate_gradient_moments(
+                    self.adc_gradient_moment_cyc_per_m
+                )
+        return acquisition.reshape_signal(self.signal)
+
+    def reconstruct_cartesian(
+        self,
+        acquisition,
+        *,
+        validate: bool = True,
+        norm: Optional[str] = None,
+        coil_combine: Optional[str] = None,
+        voxel_centered: bool = True,
+    ) -> np.ndarray:
+        """Validate, reshape, and inverse-FFT a Cartesian ADC stream."""
+        if validate:
+            acquisition.validate_adc_times(self.adc_times_s)
+            if self.adc_gradient_moment_cyc_per_m is not None:
+                acquisition.validate_gradient_moments(
+                    self.adc_gradient_moment_cyc_per_m
+                )
+        return acquisition.reconstruct(
+            self.signal,
+            norm=norm,
+            coil_combine=coil_combine,
+            voxel_centered=voxel_centered,
+        )

@@ -1838,6 +1838,101 @@ class BlochSimulator:
 
         return self.last_result
 
+    def simulate_spectral_sequence(
+        self,
+        program,
+        phantom,
+        *,
+        checkpoints_s=(),
+        chunk_voxels: Optional[int] = None,
+        signal_weighting: str = "voxel",
+        progress_callback=None,
+        cancel_callback=None,
+    ):
+        """Simulate independent Lorentzian spectral components and sum signals.
+
+        Each spectral peak is represented by an independent isochromat with its
+        own centre frequency and ``T2*`` transverse decay. This produces a
+        Lorentzian frequency-domain line. Chemical exchange and J-coupling are
+        intentionally not part of this independent-component model.
+        """
+        from .sequence import SequenceSimulationResult
+        from .spectral_phantom import SpectralPhantom
+
+        if not isinstance(phantom, SpectralPhantom):
+            raise TypeError(f"phantom must be SpectralPhantom, got {type(phantom)}")
+        components = phantom.to_component_phantoms()
+        if not components:
+            raise ValueError("spectral phantom has no active components")
+
+        combined_signal = None
+        final_numerator = np.zeros(phantom.shape + (3,), dtype=np.float64)
+        checkpoint_numerator = None
+        total_concentration = phantom.get_total_concentration()
+        first_result = None
+
+        for component_index, (name, component) in enumerate(components):
+            if cancel_callback is not None and cancel_callback():
+                raise RuntimeError("sequence simulation cancelled")
+            result = self.simulate_sequence(
+                program,
+                component,
+                checkpoints_s=checkpoints_s,
+                chunk_voxels=chunk_voxels,
+                signal_weighting=signal_weighting,
+                cancel_callback=cancel_callback,
+            )
+            if first_result is None:
+                first_result = result
+                combined_signal = np.zeros_like(result.signal)
+                if result.checkpoint_magnetization is not None:
+                    checkpoint_numerator = np.zeros_like(
+                        result.checkpoint_magnetization
+                    )
+            combined_signal += result.signal
+            concentration = component.pd_map
+            final_numerator += result.final_magnetization * concentration[..., None]
+            if checkpoint_numerator is not None:
+                checkpoint_numerator += (
+                    result.checkpoint_magnetization * concentration[None, ..., None]
+                )
+            if progress_callback is not None:
+                progress_callback(component_index + 1, len(components))
+
+        denominator = total_concentration[..., None]
+        final_magnetization = np.divide(
+            final_numerator,
+            denominator,
+            out=np.zeros_like(final_numerator),
+            where=denominator > 0,
+        )
+        checkpoint_magnetization = None
+        if checkpoint_numerator is not None:
+            checkpoint_magnetization = np.divide(
+                checkpoint_numerator,
+                denominator[None, ...],
+                out=np.zeros_like(checkpoint_numerator),
+                where=denominator[None, ...] > 0,
+            )
+        metadata = dict(first_result.metadata)
+        metadata.update(
+            {
+                "spectral_phantom": True,
+                "spectral_components": [name for name, _ in components],
+                "spectral_component_count": len(components),
+                "spectral_model": "independent Lorentzian T2* components",
+            }
+        )
+        return SequenceSimulationResult(
+            signal=combined_signal,
+            adc_times_s=first_result.adc_times_s,
+            final_magnetization=final_magnetization,
+            checkpoint_magnetization=checkpoint_magnetization,
+            checkpoint_times_s=first_result.checkpoint_times_s,
+            metadata=metadata,
+            adc_gradient_moment_cyc_per_m=(first_result.adc_gradient_moment_cyc_per_m),
+        )
+
     def simulate_sequence(
         self,
         program,
@@ -1845,6 +1940,7 @@ class BlochSimulator:
         *,
         checkpoints_s=(),
         chunk_voxels: Optional[int] = None,
+        signal_weighting: str = "voxel",
         progress_callback=None,
         cancel_callback=None,
     ):
@@ -1853,6 +1949,10 @@ class BlochSimulator:
         The streaming path stores only ADC samples, explicitly requested
         checkpoint states, and final magnetization. Canonical sequence units are
         Hz, Hz/m, metres, and seconds.
+
+        ``signal_weighting='voxel'`` preserves the historical relative signal
+        sum. ``'voxel_volume'`` additionally multiplies proton density by the
+        physical voxel volume of a 3D phantom.
         """
         from .phantom import Phantom
         from .sequence import (
@@ -1875,6 +1975,8 @@ class BlochSimulator:
         native_threads = self.num_threads if self.use_parallel else 1
         if n_active == 0:
             raise ValueError("phantom has no active voxels")
+        if signal_weighting not in {"voxel", "voxel_volume"}:
+            raise ValueError("signal_weighting must be 'voxel' or 'voxel_volume'")
 
         arrays_to_validate = {
             "T1": props["t1"],
@@ -1946,6 +2048,8 @@ class BlochSimulator:
         t2 = np.ascontiguousarray(props["t2"], dtype=np.float64)
         df = np.ascontiguousarray(props["df"], dtype=np.float64)
         pd = np.ascontiguousarray(props["pd"], dtype=np.float64)
+        if signal_weighting == "voxel_volume":
+            pd = pd * phantom.voxel_volume_m3
         tx_sensitivity = np.ascontiguousarray(
             props["tx_sensitivity"], dtype=np.complex128
         )
@@ -2004,6 +2108,7 @@ class BlochSimulator:
             final_magnetization=final_magnetization,
             checkpoint_magnetization=checkpoint_magnetization,
             checkpoint_times_s=compiled.checkpoint_times_s,
+            adc_gradient_moment_cyc_per_m=(compiled.adc_gradient_moment_cyc_per_m),
             metadata={
                 "sequence_source": program.source,
                 "sequence_version": program.version,
@@ -2012,6 +2117,12 @@ class BlochSimulator:
                 "n_active_voxels": n_active,
                 "n_rx_coils": n_rx_coils,
                 "chunk_voxels": chunk_voxels,
+                "signal_weighting": signal_weighting,
+                "voxel_volume_m3": (
+                    phantom.voxel_volume_m3
+                    if signal_weighting == "voxel_volume"
+                    else None
+                ),
                 "units": {
                     "time": "s",
                     "position": "m",
@@ -2123,12 +2234,23 @@ class BlochSimulator:
             )
             coords = {"adc": np.arange(len(result["adc_times_s"]))}
             coords["adc_time_s"] = ("adc", result["adc_times_s"])
+            signal = np.asarray(result["signal"])
+            signal_dims = ("adc",) if signal.ndim == 1 else ("coil", "adc")
             data_vars = {
-                "signal": (("adc",), result["signal"]),
+                "signal": (signal_dims, signal),
                 "mx": (spatial_dims, result["mx"]),
                 "my": (spatial_dims, result["my"]),
                 "mz": (spatial_dims, result["mz"]),
             }
+            if signal.ndim == 2:
+                coords["coil"] = np.arange(signal.shape[0])
+            moments = result.get("adc_gradient_moment_cyc_per_m")
+            if moments is not None:
+                coords["gradient_axis"] = ["x", "y", "z"]
+                data_vars["adc_gradient_moment_cyc_per_m"] = (
+                    ("adc", "gradient_axis"),
+                    moments,
+                )
             checkpoints = result.get("checkpoint_magnetization")
             if checkpoints is not None:
                 coords["checkpoint"] = result["checkpoint_times_s"]
@@ -2310,6 +2432,11 @@ class BlochSimulator:
                 result = self.last_result
                 f.create_dataset("signal", data=result["signal"])
                 f.create_dataset("adc_times_s", data=result["adc_times_s"])
+                if result.get("adc_gradient_moment_cyc_per_m") is not None:
+                    f.create_dataset(
+                        "adc_gradient_moment_cyc_per_m",
+                        data=result["adc_gradient_moment_cyc_per_m"],
+                    )
                 f.create_dataset(
                     "final_magnetization", data=result["final_magnetization"]
                 )
@@ -2506,6 +2633,30 @@ class BlochSimulator:
     def load_results(self, filename: str):
         """Load simulation results from HDF5 file."""
         with h5py.File(filename, "r") as f:
+            if "adc_times_s" in f:
+                final = f["final_magnetization"][...]
+                metadata = json.loads(f.attrs.get("metadata_json", "{}"))
+                self.last_result = {
+                    "signal": f["signal"][...],
+                    "adc_times_s": f["adc_times_s"][...],
+                    "adc_gradient_moment_cyc_per_m": (
+                        f["adc_gradient_moment_cyc_per_m"][...]
+                        if "adc_gradient_moment_cyc_per_m" in f
+                        else None
+                    ),
+                    "final_magnetization": final,
+                    "mx": final[..., 0],
+                    "my": final[..., 1],
+                    "mz": final[..., 2],
+                    "checkpoint_magnetization": (
+                        f["checkpoint_magnetization"][...]
+                        if "checkpoint_magnetization" in f
+                        else None
+                    ),
+                    "checkpoint_times_s": f["checkpoint_times_s"][...],
+                    "metadata": metadata,
+                }
+                return
             frequencies = f["frequencies"][...]
             rf_carrier_offset = float(f.attrs.get("rf_carrier_offset_hz", 0.0))
             self.last_result = {

@@ -19,7 +19,9 @@ decisions are documented in
 | 4. Pulseq 1.5.0 import | Complete | Optional PyPulseq; RF/grad/ADC, trigger metadata, version gate |
 | 5. Integrated GUI | Complete | Lazy desktop tab with loader, object controls, run/cancel, plots |
 | 6. Single-Tx and Multi-Rx | Complete | Complex voxelwise B1+ scaling and coil-resolved ADC reduction; compiler timing unchanged |
-| 7. Multi-Tx, multi-species, WASM | Deferred | Separate follow-up milestones |
+| 7. Cartesian acquisition/reconstruction | Complete | ADC moments, bandwidth/layout model, EPI builder, 2D FFT/coil combination, GUI controls and views |
+| 8. Spectral phantom designer/viewers | Complete | Shape ROIs, Lorentz peaks, persistence, independent-component simulation, orthogonal/3D views |
+| 9. Multi-Tx, coupled species, WASM | Deferred | Separate follow-up milestones |
 
 ## Repository baseline
 
@@ -55,11 +57,54 @@ decisions are documented in
   backward-compatible; multi-coil output is coil-resolved.
 - 2026-07-04: native extension rebuilt successfully; complete offscreen suite:
   89 tests passed.
+- 2026-07-04: baseline committed as `464cbae5` before acquisition work; user
+  README/notebook/data changes remained outside the commit.
+- 2026-07-04: Cartesian acquisition/reconstruction milestone implemented.
+  Results now expose ADC gradient moments; `CartesianAcquisition` validates
+  dwell/grid ordering, reverses EPI lines, and reconstructs voxel-centred 2D
+  images. `make_cartesian_epi` derives gradients and ADC timing from matrix,
+  FOV, and dwell. Optional 3D voxel-volume signal weighting was added without
+  changing the default signal scale. Complete offscreen suite: 94 tests passed;
+  the 8x8 example reconstructed unit peak amplitude end-to-end.
+- 2026-07-04: the Sequence Simulation GUI gained a Cartesian EPI source with
+  independent read/phase matrices and sampling bandwidth, derived dwell/pixel
+  bandwidth, signal-weighting selection, and k-space/IFFT result tabs. Complete
+  offscreen suite: 96 tests passed.
+- 2026-07-05: the Sequence Simulation control column was made vertically
+  scrollable after validation at reduced window height, keeping Run/Cancel
+  reachable with the expanded acquisition controls. Complete offscreen suite:
+  97 tests passed.
+- 2026-07-05: imported single-acquisition 2D Pulseq EPI gained strict Cartesian
+  inference from ADC gradient moments and FOV, including fractional grid
+  offsets. The example ADC aperture was centred correctly, numerically duplicate
+  compiler boundaries are coalesced, Pulseq FOV synchronizes independent
+  in-plane/through-plane object controls, and final-Mz display levels use the
+  complete volume. Corrected 16x16 EPI was loaded, simulated, displayed, and
+  reconstructed offscreen. Complete suite: 101 tests passed.
+- 2026-07-06: added an interactive multi-shape spectral phantom designer with
+  draggable ellipsoid/box ROIs, z extent, T1/B0 properties, and arbitrary
+  amplitude/frequency/T2* Lorentz peaks. Spectral phantoms persist to NPZ/HDF5,
+  load in the Phantom tab, and run in Sequence Simulation as independent
+  components. Phantom and sequence-result workspaces gained orthogonal-slice,
+  OpenGL 3D, voxel-spectrum, and checkpoint views with explicit slice-selection
+  versus kz-IFFT semantics. The previously hard-disabled Phantom tab was
+  re-enabled with lazy initialization; OpenGL is skipped only on the offscreen
+  test platform. Complete offscreen suite: 108 tests passed. The shared volume
+  viewer now also normalizes 1D/2D masks together with their data and resets
+  stale slice indices when dimensions change.
 
 ## Current limitations
 
-- Pulseq 1.5.1, soft delays, multiple transmit channels, multiple species,
+- Pulseq 1.5.1, soft delays, multiple transmit channels, coupled species,
   exchange, diffusion, flow, motion, and WASM are intentionally deferred.
+- Spectral peaks are independent Lorentzian/T2* components. Coupled spin
+  systems, exchange, J-coupling, and density-matrix evolution remain deferred.
+- Receiver aperture/filtering and oversampling/decimation are not yet modeled;
+  ADC values are instantaneous observations at dwell centres.
+- Cartesian reshaping currently targets one 2D acquisition. Slice, echo,
+  repetition, and Pulseq label dimensions remain chronological metadata work.
+  Automatic inference is limited to x-read/y-phase ADC blocks with a Pulseq FOV
+  definition and rejects unequal per-line kx grids.
 - Pulseq triggers do not influence magnetization; they are retained as metadata.
 - Checkpoints intentionally allocate `Ncheckpoint x Nvoxel x 3`; memory policy
   rejects unsafe requests before native execution.
@@ -68,6 +113,8 @@ decisions are documented in
 
 ## Next action
 
-Implement Pulseq 1.5.1 extensions and soft-delay handling as a separately
-versioned importer milestone, then design Multi-Tx without changing the
-compiled sequence timing contract.
+Add acquisition models for radial UTE and true 3D Cartesian kz encoding. The
+former needs excitation-relative trajectories plus density compensation and
+NUFFT/gridding; the latter needs partition metadata and a centred 3D IFFT.
+Pulseq labels/outer dimensions, receiver filtering, Pulseq 1.5.1/soft delays,
+and Multi-Tx remain separate versioned milestones.

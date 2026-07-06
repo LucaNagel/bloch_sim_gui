@@ -23,9 +23,16 @@ except ImportError:
 # from . import visualization
 from . import kspace  # noqa: F401
 from . import phantom  # noqa: F401
+from .phantom_design import (  # noqa: F401
+    PhantomDesign,
+    ShapeDefinition,
+    SpectralPeakDefinition,
+)
+from .spectral_phantom import ChemicalSpecies, SpectralPhantom  # noqa: F401
 from . import pulse_loader  # noqa: F401
 from .sequence import (  # noqa: F401
     ADCEvent,
+    CartesianAcquisition,
     CompiledSequence,
     GradientEvent,
     RFEvent,
@@ -33,5 +40,7 @@ from .sequence import (  # noqa: F401
     SequenceProgram,
     SequenceSimulationResult,
     UnsupportedPulseqVersionError,
+    infer_cartesian_acquisition,
     load_pulseq,
+    make_cartesian_epi,
 )

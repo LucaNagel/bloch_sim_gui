@@ -427,10 +427,16 @@ Artifact: `dist/BlochSimulator` (single binary; `.exe` on Windows).
 The simulator solves the Bloch equations:
 
 $$
-\frac{d\vec{M}}{dt} = \gamma (\vec{M} \times \vec{B}) - \begin{pmatrix} M_x / T_2 \\ M_y / T_2 \\ (M_z - M_0) / T_1 \end{pmatrix}
+\frac{d\mathbf{M}}{dt}
+=
+\gamma\left(\mathbf{M}\times\mathbf{B}\right)
+-\frac{M_x}{T_2}\,\hat{\mathbf{x}}
+-\frac{M_y}{T_2}\,\hat{\mathbf{y}}
+-\frac{M_z-M_0}{T_1}\,\hat{\mathbf{z}}
 $$
 
 Using:
+
 - Rotation matrices for RF and gradient effects
 - Exponential decay for relaxation
 - Cayley-Klein parameters for efficient rotation calculation

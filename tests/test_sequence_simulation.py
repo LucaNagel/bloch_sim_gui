@@ -112,12 +112,15 @@ def test_multi_rx_maps_return_independent_coil_signals():
         rx_sensitivities=np.array([[1.0 + 0j], [0.0 + 2.0j]]),
     )
     program = SequenceProgram((ADCEvent(0.0, 1, 1e-3),), duration_s=1e-3)
-    result = BlochSimulator(use_parallel=False).simulate_sequence(program, phantom)
+    simulator = BlochSimulator(use_parallel=False)
+    result = simulator.simulate_sequence(program, phantom)
     assert result.signal.shape == (2, 1)
     assert result.signal[:, 0] == pytest.approx([1.0 + 0j, 0.0 + 2.0j])
     dataset = result.to_xarray()
     assert dataset["signal"].dims == ("coil", "adc")
     assert dataset.sizes["coil"] == 2
+    simulator_dataset = simulator.get_results_as_xarray()
+    assert simulator_dataset["signal"].dims == ("coil", "adc")
 
 
 def test_gradient_phase_is_generated_once_by_bloch_kernel():
@@ -199,6 +202,7 @@ def test_sparse_result_xarray_and_hdf5_export(tmp_path):
     dataset = result.to_xarray()
     assert dataset.sizes["adc"] == 2
     assert dataset.sizes["checkpoint"] == 1
+    assert dataset["adc_gradient_moment_cyc_per_m"].shape == (2, 3)
     simulator_dataset = simulator.get_results_as_xarray()
     assert simulator_dataset.sizes["adc"] == 2
 
@@ -208,8 +212,17 @@ def test_sparse_result_xarray_and_hdf5_export(tmp_path):
 
     with h5py.File(filename, "r") as handle:
         assert handle["signal"].shape == (2,)
+        assert handle["adc_gradient_moment_cyc_per_m"].shape == (2, 3)
         assert handle["final_magnetization"].shape == (1, 3)
         assert handle["checkpoint_magnetization"].shape == (1, 1, 3)
+
+    loaded = BlochSimulator(use_parallel=False)
+    loaded.load_results(filename)
+    assert np.array_equal(loaded.last_result["signal"], result.signal)
+    assert np.array_equal(
+        loaded.last_result["adc_gradient_moment_cyc_per_m"],
+        result.adc_gradient_moment_cyc_per_m,
+    )
 
 
 def test_phantom_split_maps_round_trip_npz_and_hdf5(tmp_path):

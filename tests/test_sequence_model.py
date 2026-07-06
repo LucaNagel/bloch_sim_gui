@@ -110,6 +110,16 @@ def test_compiler_rf_gradient_overlap_uses_fine_boundaries():
     assert np.allclose(compiled.gradient_hz_per_m[:, 2], [1, 2, 3, 4])
 
 
+def test_compiler_coalesces_numerically_duplicate_raster_boundaries():
+    rf = RFEvent(100e-6, np.ones(3000), 1e-6)
+    gradient = GradientEvent("z", 0.0, np.ones(400), 10e-6)
+    program = SequenceProgram((rf, gradient), duration_s=4e-3)
+    compiled = SequenceCompiler().compile(program)
+
+    assert np.min(compiled.dt_s) == pytest.approx(1e-6)
+    assert np.all(np.abs(compiled.rf_hz[compiled.rf_hz != 0]) > 0)
+
+
 def test_adc_zero_and_checkpoint_state_indices():
     program = SequenceProgram(
         (ADCEvent(0.0, 3, 0.5),),

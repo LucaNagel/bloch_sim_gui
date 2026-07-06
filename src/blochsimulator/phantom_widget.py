@@ -50,6 +50,12 @@ import pyqtgraph as pg
 
 # Import phantom module
 from .phantom import Phantom, PhantomFactory
+from .spectral_phantom import SpectralPhantom
+from .ui.phantom_designer import (
+    SpectralPhantomDesignerDialog,
+    load_any_phantom,
+)
+from .ui.volume_viewer import PhantomInspectorWidget
 
 # Import simulator
 from .simulator import BlochSimulator
@@ -122,6 +128,7 @@ class PhantomCreatorWidget(QGroupBox):
                 "Multi-Tissue 2D",
                 "Chemical Shift (Water/Fat)",
                 "Spherical 3D",
+                "Spectral Shape Designer...",
                 "Load from File...",
             ]
         )
@@ -227,6 +234,15 @@ class PhantomCreatorWidget(QGroupBox):
         if phantom_type == "Load from File...":
             self.load_phantom()
             return
+        if phantom_type == "Spectral Shape Designer...":
+            dialog = SpectralPhantomDesignerDialog(self)
+            if dialog.exec_() == QDialog.Accepted:
+                phantom = dialog.get_phantom()
+                self.current_phantom = phantom
+                self._update_info()
+                self.save_btn.setEnabled(True)
+                self.phantom_created.emit(phantom)
+            return
 
         try:
             n = self.resolution_spin.value()
@@ -263,7 +279,7 @@ class PhantomCreatorWidget(QGroupBox):
         )
         if filename:
             try:
-                phantom = Phantom.load(filename)
+                phantom = load_any_phantom(filename)
                 self.current_phantom = phantom
                 self._update_info()
                 self.save_btn.setEnabled(True)
@@ -355,6 +371,9 @@ class PhantomViewerWidget(QWidget):
 
         prop_widget.setLayout(prop_layout)
         self.tabs.addTab(prop_widget, "Phantom Properties")
+
+        self.volume_inspector = PhantomInspectorWidget()
+        self.tabs.addTab(self.volume_inspector, "3D / Frequency")
 
         # === SIMULATION RESULTS TAB ===
         result_widget = QWidget()
@@ -453,9 +472,11 @@ class PhantomViewerWidget(QWidget):
         """Set phantom to display."""
         self.phantom = phantom
         self._update_property_view()
+        if phantom is not None:
+            self.volume_inspector.set_phantom(phantom)
 
         # Switch to properties tab
-        self.tabs.setCurrentIndex(0)
+        self.tabs.setCurrentIndex(1 if hasattr(phantom, "species") else 0)
 
     def set_result(self, result: Optional[Dict], phantom: Optional[Phantom] = None):
         """Set simulation result to display."""
@@ -487,9 +508,9 @@ class PhantomViewerWidget(QWidget):
 
         # Switch to signal tab for time-resolved, results tab for endpoint
         if self.time_slider.isEnabled():
-            self.tabs.setCurrentIndex(2)  # Signal tab
+            self.tabs.setCurrentIndex(3)  # Signal tab
         else:
-            self.tabs.setCurrentIndex(1)  # Spatial maps tab
+            self.tabs.setCurrentIndex(2)  # Spatial maps tab
 
     def _update_property_view(self):
         """Update property map display."""
@@ -747,7 +768,7 @@ class PhantomWidget(QWidget):
         left_layout.addWidget(self.phantom_creator)
 
         # Simulation settings
-        sim_group = QGroupBox("Simulation Settings")
+        sim_group = QGroupBox("Legacy Phantom Simulation")
         sim_layout = QVBoxLayout()
 
         # Mode selection
@@ -762,7 +783,10 @@ class PhantomWidget(QWidget):
         sim_layout.addLayout(mode_layout)
 
         # Info about sequence source
-        self.seq_info = QLabel("<i>Uses sequence from main GUI panel</i>")
+        self.seq_info = QLabel(
+            "<i>Legacy array-based path using the main GUI sequence. "
+            "Use Sequence Simulation for event-based and spectral phantoms.</i>"
+        )
         self.seq_info.setWordWrap(True)
         self.seq_info.setStyleSheet("color: #666; font-size: 10px; padding: 5px;")
         sim_layout.addWidget(self.seq_info)
@@ -774,7 +798,7 @@ class PhantomWidget(QWidget):
         run_group = QGroupBox("Run")
         run_layout = QVBoxLayout()
 
-        self.run_btn = QPushButton("Run Phantom Simulation")
+        self.run_btn = QPushButton("Run Legacy Phantom Simulation")
         self.run_btn.clicked.connect(self.run_simulation)
         self.run_btn.setEnabled(False)
         self.run_btn.setStyleSheet("font-weight: bold; padding: 8px;")
@@ -823,8 +847,16 @@ class PhantomWidget(QWidget):
         """Handle new phantom creation."""
         self.current_phantom = phantom
         self.viewer.set_phantom(phantom)
-        self.run_btn.setEnabled(True)
-        self.status_label.setText(f"Phantom ready: {phantom.n_active} voxels")
+        is_spectral = isinstance(phantom, SpectralPhantom)
+        self.run_btn.setEnabled(not is_spectral)
+        self.status_label.setText(
+            f"Phantom ready: {phantom.n_active} voxels"
+            + (
+                "; run it from Sequence Simulation to preserve all peaks"
+                if is_spectral
+                else ""
+            )
+        )
         self.status_label.setStyleSheet("color: green; padding: 3px;")
         self.log(
             f"Phantom created: {phantom.name}, {phantom.shape}, {phantom.n_active} active voxels"

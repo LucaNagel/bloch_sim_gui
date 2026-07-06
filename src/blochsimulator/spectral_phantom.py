@@ -19,6 +19,7 @@ Date: 2025
 """
 
 import numpy as np
+import json
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
 from pathlib import Path
@@ -64,10 +65,22 @@ class ChemicalSpecies:
     multiplicity: int = 1
     j_coupling_hz: float = 0.0
     j_partners: List[str] = field(default_factory=list)
+    frequency_offset_hz: Optional[float] = None
 
     def __post_init__(self):
         if self.t2_star is None:
             self.t2_star = self.t2
+        for name, value in (
+            ("t1", self.t1),
+            ("t2", self.t2),
+            ("t2_star", self.t2_star),
+        ):
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be positive and finite")
+        if self.frequency_offset_hz is not None and not np.isfinite(
+            self.frequency_offset_hz
+        ):
+            raise ValueError("frequency_offset_hz must be finite")
 
     def get_frequency_offset(self, field_strength: float, nucleus: str = "H1") -> float:
         """
@@ -85,6 +98,9 @@ class ChemicalSpecies:
         float
             Frequency offset in Hz
         """
+        if self.frequency_offset_hz is not None:
+            return float(self.frequency_offset_hz)
+
         # Larmor frequencies at 1T (MHz)
         larmor_1t = {
             "H1": 42.576,
@@ -329,6 +345,7 @@ class SpectralPhantom:
     field_strength: float = 3.0
     nucleus: str = "H1"
     name: str = "Spectral Phantom"
+    metadata: Dict = field(default_factory=dict)
 
     # Computed fields
     positions: np.ndarray = field(init=False, repr=False)
@@ -348,6 +365,10 @@ class SpectralPhantom:
 
         if len(self.fov) != ndim:
             raise ValueError(f"FOV dimensions must match shape dimensions")
+        if len({species.name for species in self.species}) != len(self.species):
+            raise ValueError("Spectral species names must be unique")
+        if not self.species:
+            raise ValueError("Spectral phantom requires at least one species")
 
         # Validate concentration maps
         for species in self.species:
@@ -360,6 +381,10 @@ class SpectralPhantom:
                 raise ValueError(
                     f"Concentration map for '{name}' has shape {cmap.shape}, "
                     f"expected {self.shape}"
+                )
+            if not np.all(np.isfinite(cmap)) or np.any(cmap < 0):
+                raise ValueError(
+                    f"Concentration map for '{name}' must be finite and non-negative"
                 )
 
         # Validate optional maps
@@ -377,7 +402,7 @@ class SpectralPhantom:
         for i in range(ndim):
             n = self.shape[i]
             fov = self.fov[i]
-            coords.append(np.linspace(-fov / 2, fov / 2, n, endpoint=True))
+            coords.append(-fov / 2 + (np.arange(n) + 0.5) * fov / n)
 
         if ndim == 1:
             self.positions = np.column_stack(
@@ -411,9 +436,33 @@ class SpectralPhantom:
         return int(np.prod(self.shape))
 
     @property
+    def n_active(self) -> int:
+        return int(np.count_nonzero(self.mask))
+
+    @property
     def n_species(self) -> int:
         """Number of chemical species."""
         return len(self.species)
+
+    @property
+    def mask(self) -> np.ndarray:
+        """Voxels containing at least one non-zero spectral component."""
+        return self.get_total_concentration() > 0
+
+    @property
+    def effective_df_map(self) -> np.ndarray:
+        """Concentration-weighted mean frequency map for visualization only."""
+        return self.df_map
+
+    @property
+    def resolution(self) -> Tuple[float, ...]:
+        return tuple(f / n for f, n in zip(self.fov, self.shape))
+
+    @property
+    def voxel_volume_m3(self) -> float:
+        if self.ndim != 3:
+            raise ValueError("voxel volume requires a 3D spectral phantom")
+        return float(np.prod(self.resolution))
 
     @property
     def pd_map(self) -> np.ndarray:
@@ -491,6 +540,209 @@ class SpectralPhantom:
         for name, cmap in self.concentration_maps.items():
             total += cmap
         return total
+
+    def spectrum_at(
+        self,
+        index: Tuple[int, ...],
+        frequency_hz: Optional[np.ndarray] = None,
+        points: int = 1024,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Return the Lorentzian spectrum at one spatial voxel.
+
+        A component with transverse decay ``T2*`` has
+        ``FWHM = 1 / (pi*T2*)``. Amplitudes are taken from the corresponding
+        concentration maps.
+        """
+        if len(index) != self.ndim:
+            raise ValueError("index dimensionality must match spectral phantom")
+        centres = np.asarray(
+            [self.get_frequency_offset(species.name) for species in self.species]
+        )
+        widths = np.asarray(
+            [1.0 / (np.pi * species.t2_star) for species in self.species]
+        )
+        if frequency_hz is None:
+            lower = float(np.min(centres - 8 * widths))
+            upper = float(np.max(centres + 8 * widths))
+            if np.isclose(lower, upper):
+                lower, upper = lower - 100.0, upper + 100.0
+            frequency_hz = np.linspace(lower, upper, int(points))
+        frequency_hz = np.asarray(frequency_hz, dtype=float)
+        spectrum = np.zeros(frequency_hz.shape, dtype=float)
+        b0 = 0.0 if self.b0_map is None else float(self.b0_map[index])
+        for species, centre, fwhm in zip(self.species, centres, widths):
+            amplitude = float(self.concentration_maps[species.name][index])
+            half_width = fwhm / 2.0
+            spectrum += amplitude / (
+                1.0 + ((frequency_hz - (centre + b0)) / half_width) ** 2
+            )
+        return frequency_hz, spectrum
+
+    def to_component_phantoms(self) -> List[Tuple[str, "Phantom"]]:
+        """Expand spectral components into independently simulated phantoms."""
+        if Phantom is None:
+            raise ImportError("phantom module not available")
+        b0 = (
+            np.zeros(self.shape, dtype=float)
+            if self.b0_map is None
+            else np.asarray(self.b0_map, dtype=float)
+        )
+        components = []
+        for species in self.species:
+            concentration = np.asarray(
+                self.concentration_maps[species.name], dtype=float
+            )
+            active = concentration > 0
+            if not np.any(active):
+                continue
+            t2_star = (
+                np.asarray(self.t2_star_map, dtype=float)
+                if self.t2_star_map is not None
+                else np.full(self.shape, species.t2_star, dtype=float)
+            )
+            components.append(
+                (
+                    species.name,
+                    Phantom(
+                        shape=self.shape,
+                        fov=self.fov,
+                        t1_map=np.full(self.shape, species.t1, dtype=float),
+                        t2_map=t2_star,
+                        pd_map=concentration,
+                        b0_map=b0,
+                        chemical_shift_map=np.full(
+                            self.shape, self.get_frequency_offset(species.name)
+                        ),
+                        mask=active,
+                        name=f"{self.name} - {species.name}",
+                    ),
+                )
+            )
+        return components
+
+    def save(self, filename: Union[str, Path]) -> None:
+        """Save all spectral maps, peak definitions, and designer metadata."""
+        filename = Path(filename)
+        species_data = [
+            {
+                "name": species.name,
+                "chemical_shift_ppm": species.chemical_shift_ppm,
+                "t1": species.t1,
+                "t2": species.t2,
+                "t2_star": species.t2_star,
+                "multiplicity": species.multiplicity,
+                "j_coupling_hz": species.j_coupling_hz,
+                "j_partners": species.j_partners,
+                "frequency_offset_hz": species.frequency_offset_hz,
+            }
+            for species in self.species
+        ]
+        header = {
+            "format": "blochsimulator-spectral-phantom",
+            "version": 1,
+            "name": self.name,
+            "field_strength": self.field_strength,
+            "nucleus": self.nucleus,
+            "species": species_data,
+            "metadata": self.metadata,
+        }
+        if filename.suffix == ".npz":
+            arrays = {
+                f"concentration_{index}": self.concentration_maps[species.name]
+                for index, species in enumerate(self.species)
+            }
+            np.savez_compressed(
+                filename,
+                spectral_header=np.asarray(json.dumps(header)),
+                shape=np.asarray(self.shape),
+                fov=np.asarray(self.fov),
+                b0_map=(
+                    np.asarray(self.b0_map)
+                    if self.b0_map is not None
+                    else np.zeros(self.shape)
+                ),
+                has_b0=np.asarray(self.b0_map is not None),
+                t2_star_map=(
+                    np.asarray(self.t2_star_map)
+                    if self.t2_star_map is not None
+                    else np.zeros(self.shape)
+                ),
+                has_t2_star=np.asarray(self.t2_star_map is not None),
+                **arrays,
+            )
+        elif filename.suffix in (".h5", ".hdf5"):
+            import h5py
+
+            with h5py.File(filename, "w") as handle:
+                handle.attrs["spectral_header"] = json.dumps(header)
+                handle.create_dataset("shape", data=self.shape)
+                handle.create_dataset("fov", data=self.fov)
+                if self.b0_map is not None:
+                    handle.create_dataset("b0_map", data=self.b0_map)
+                if self.t2_star_map is not None:
+                    handle.create_dataset("t2_star_map", data=self.t2_star_map)
+                group = handle.create_group("concentration_maps")
+                for index, species in enumerate(self.species):
+                    group.create_dataset(
+                        str(index), data=self.concentration_maps[species.name]
+                    )
+        else:
+            raise ValueError(f"Unsupported file format: {filename.suffix}")
+
+    @classmethod
+    def load(cls, filename: Union[str, Path]) -> "SpectralPhantom":
+        """Load a spectral phantom saved by :meth:`save`."""
+        filename = Path(filename)
+        if filename.suffix == ".npz":
+            with np.load(filename, allow_pickle=False) as data:
+                if "spectral_header" not in data.files:
+                    raise ValueError("file is not a spectral phantom")
+                header = json.loads(str(data["spectral_header"]))
+                shape = tuple(int(value) for value in data["shape"])
+                fov = tuple(float(value) for value in data["fov"])
+                species = [ChemicalSpecies(**item) for item in header["species"]]
+                maps = {
+                    item.name: np.asarray(data[f"concentration_{index}"])
+                    for index, item in enumerate(species)
+                }
+                b0 = np.asarray(data["b0_map"]) if bool(data["has_b0"]) else None
+                t2_star = (
+                    np.asarray(data["t2_star_map"])
+                    if bool(data["has_t2_star"])
+                    else None
+                )
+        elif filename.suffix in (".h5", ".hdf5"):
+            import h5py
+
+            with h5py.File(filename, "r") as handle:
+                if "spectral_header" not in handle.attrs:
+                    raise ValueError("file is not a spectral phantom")
+                header = json.loads(handle.attrs["spectral_header"])
+                shape = tuple(int(value) for value in handle["shape"][...])
+                fov = tuple(float(value) for value in handle["fov"][...])
+                species = [ChemicalSpecies(**item) for item in header["species"]]
+                maps = {
+                    item.name: handle["concentration_maps"][str(index)][...]
+                    for index, item in enumerate(species)
+                }
+                b0 = handle["b0_map"][...] if "b0_map" in handle else None
+                t2_star = (
+                    handle["t2_star_map"][...] if "t2_star_map" in handle else None
+                )
+        else:
+            raise ValueError(f"Unsupported file format: {filename.suffix}")
+        return cls(
+            shape=shape,
+            fov=fov,
+            species=species,
+            concentration_maps=maps,
+            t2_star_map=t2_star,
+            b0_map=b0,
+            field_strength=float(header["field_strength"]),
+            nucleus=str(header["nucleus"]),
+            name=str(header["name"]),
+            metadata=dict(header.get("metadata", {})),
+        )
 
     def get_species_properties(self, species_name: str = None) -> Dict[str, np.ndarray]:
         """

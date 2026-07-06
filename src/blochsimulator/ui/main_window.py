@@ -69,7 +69,7 @@ try:
     from ..phantom import Phantom, PhantomFactory
     from ..phantom_widget import PhantomWidget
 
-    PHANTOM_AVAILABLE = False  # Disabled per user request
+    PHANTOM_AVAILABLE = True
 except ImportError:
     PHANTOM_AVAILABLE = False
 
@@ -1039,12 +1039,20 @@ class BlochSimulatorGUI(QMainWindow):
 
         # === PHANTOM TAB (2D/3D Imaging) ===
         if PHANTOM_AVAILABLE:
-            self.phantom_widget = PhantomWidget(self)
-            self.tab_widget.addTab(
-                self._wrap_in_scroll_area(self.phantom_widget), "🔬 Phantom"
+            self.phantom_widget = None
+            self.phantom_placeholder = QWidget()
+            phantom_layout = QVBoxLayout(self.phantom_placeholder)
+            phantom_layout.addWidget(
+                QLabel("Open this tab to initialize the Phantom workspace.")
             )
+            phantom_layout.addStretch()
+            self.phantom_tab_index = self.tab_widget.addTab(
+                self.phantom_placeholder, "🔬 Phantom"
+            )
+            self.tab_widget.currentChanged.connect(self._ensure_phantom_workspace)
         else:
             self.phantom_widget = None
+            self.phantom_tab_index = -1
 
         # === K-SPACE TAB (Signal-based simulation) ===
         if KSPACE_AVAILABLE:
@@ -1052,8 +1060,7 @@ class BlochSimulatorGUI(QMainWindow):
             def get_phantom_for_kspace():
                 """Get current phantom from PhantomWidget."""
                 if self.phantom_widget is not None:
-                    if hasattr(self.phantom_widget, "creator"):
-                        return self.phantom_widget.creator.current_phantom
+                    return self.phantom_widget.current_phantom
                 return None
 
             def get_magnetization_for_kspace():
@@ -1199,6 +1206,35 @@ class BlochSimulatorGUI(QMainWindow):
                 widget.deleteLater()
         self.sequence_simulation_widget = SequenceSimulationWidget(self)
         layout.addWidget(self.sequence_simulation_widget)
+        self._connect_phantom_sequence_workspaces()
+
+    def _ensure_phantom_workspace(self, index: int):
+        """Create phantom designer/viewers only when their tab is opened."""
+        if (
+            index != getattr(self, "phantom_tab_index", -1)
+            or self.phantom_widget is not None
+        ):
+            return
+        layout = self.phantom_placeholder.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.phantom_widget = PhantomWidget(self)
+        layout.addWidget(self.phantom_widget)
+        self._connect_phantom_sequence_workspaces()
+
+    def _connect_phantom_sequence_workspaces(self):
+        """Keep the Sequence Simulation phantom summary synchronized."""
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        phantom_widget = getattr(self, "phantom_widget", None)
+        if sequence_widget is None or phantom_widget is None:
+            return
+        phantom_widget.phantom_creator.phantom_created.connect(
+            sequence_widget.refresh_object_summary
+        )
+        sequence_widget.refresh_object_summary()
 
     def _configure_control_tooltips(self):
         """Add domain-specific tooltips to controls that do not define their own."""
@@ -3824,7 +3860,7 @@ class BlochSimulatorGUI(QMainWindow):
         layout.setContentsMargins(4, 0, 4, 0)
         layout.setSpacing(8)
 
-        self.status_run_button = QPushButton("Run Simulation")
+        self.status_run_button = QPushButton("Run Single-Spin Simulation")
         self.status_run_button.setObjectName("run_btn")
         self.status_run_button.clicked.connect(self.run_simulation)
         self.status_run_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -3867,7 +3903,7 @@ class BlochSimulatorGUI(QMainWindow):
         tb.setMovable(False)
         tb.setFloatable(False)
 
-        self.toolbar_run_action = tb.addAction("Run Simulation")
+        self.toolbar_run_action = tb.addAction("Run Single-Spin Simulation")
         self.toolbar_run_action.setObjectName("action_toolbar_run")
         self.toolbar_run_action.triggered.connect(self.run_simulation)
 

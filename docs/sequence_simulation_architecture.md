@@ -29,6 +29,9 @@ kernel applies the rotation vector
 
 followed by T1/T2 relaxation and recovery toward normalized `Mz=1`.
 Proton density weights received signal; it does not change normalized state.
+`simulate_sequence(signal_weighting="voxel")` preserves the historical
+per-voxel sum. The opt-in `"voxel_volume"` mode multiplies PD by the physical
+3D voxel volume so absolute signal is invariant to spatial discretization.
 
 ## Timing model
 
@@ -45,7 +48,9 @@ RF-active intervals follow RF and gradient raster boundaries. In RF-free
 regions, z rotations commute with isotropic transverse relaxation, so arbitrary
 gradient evolution can be represented exactly by its interval area. These
 regions are split only at ADC samples, checkpoints, event boundaries, or the
-end of the sequence.
+end of the sequence. Boundaries calculated through different raster arithmetic
+are coalesced within a machine-precision tolerance; this prevents zero-duration
+intervals without merging physically distinct sequence events.
 
 ## Data flow
 
@@ -64,6 +69,50 @@ second time by the legacy analytical k-space module.
 The compiler accumulates each sparse RF/gradient event only into the intervals
 it overlaps. This preserves the timing representation while avoiding an
 `Ninterval x Nevent` traversal for full imaging sequences.
+
+## ADC acquisition and reconstruction
+
+Each ADC value is an instantaneous observation at its sample centre. The
+compiler also integrates the gradient waveform to every ADC state and exposes
+the raw moment in cycles/m as `adc_gradient_moment_cyc_per_m`. This diagnostic
+moment is exact for the event stream, but it is not universally a single
+coherence-pathway k-space coordinate after arbitrary refocusing RF pulses.
+
+`CartesianAcquisition` separately describes a 2D ADC layout: read/phase matrix,
+FOV, dwell, phase-row order, readout direction per acquired line, and optional
+fractional kx/ky cell offsets. It maps the chronological signal to
+`(coil, phase, read)` or `(phase, read)`, validates ADC times and gradient
+moments, and performs a centred inverse 2D FFT. The FFT applies the half-voxel
+phase correction required by the Phantom voxel-centre coordinate convention.
+Alternating EPI lines are reversed before the FFT.
+
+`infer_cartesian_acquisition` is deliberately conservative. It currently
+accepts one chronological ADC event per phase line, x readout, y phase encoding,
+a Pulseq FOV definition, and one common regular kx/ky grid. It derives matrix,
+dwell, line direction, phase order, and fractional grid offsets from compiled
+ADC gradient moments. Alternating lines on different grids, multiple slices or
+repetitions, missing FOV, and non-Cartesian trajectories are rejected instead
+of being silently reshaped.
+
+`make_cartesian_epi` is the first reference builder. It derives read gradient,
+prephaser, phase blips/flybacks, and ADC timing from the acquisition object.
+The receiver sampling bandwidth is `1/dwell`; nominal readout pixel bandwidth
+is `1/(read_matrix*dwell)`. Finite ADC aperture, analogue/digital receiver
+filters, oversampling, and polyphase decimation are intentionally separate
+future receiver-model operations rather than Bloch-kernel responsibilities.
+
+The desktop `Sequence Simulation` tab exposes this path as a `Cartesian EPI`
+source. Simulation matrix and object FOV remain object controls; read matrix,
+phase matrix, and sampling bandwidth are independent acquisition controls. For
+imported Pulseq, a successfully inferred Cartesian layout enables k-space and
+IFFT views; rejected streams continue to show ADC/final state with the concrete
+inference error. Pulseq FOV definitions synchronize square in-plane and
+through-plane object FOV controls so a thin slice is not accidentally sampled
+by a coarse full-volume z grid. In-plane and through-plane matrix sizes remain
+independent. Final-Mz levels are based on the complete volume, preventing a
+numerically constant displayed slice from being stretched to full contrast.
+The complete left control column lives in a vertical scroll area so Run/Cancel
+and sparse-output controls remain reachable at reduced window heights.
 
 ## Object model
 
@@ -84,8 +133,40 @@ The default is one unity map. Consequently `result.signal` remains `(Nadc,)`
 for the default/single-coil case and is `(Ncoil, Nadc)` for multiple coils.
 Final and checkpoint magnetization remain coil-independent and normalized.
 
-Multiple transmit channels and multiple chemical species per voxel are later
-extensions of the same streaming interface.
+Multiple transmit channels and coupled chemical-species dynamics are later
+extensions of the same streaming interface. Independent spectral components
+use the composition model below.
+
+## Shape-designed spectral phantoms
+
+`PhantomDesign` stores editable ellipsoid/box geometry in normalized spatial
+coordinates. Each shape has T1 and B0 properties plus one or more
+`SpectralPeakDefinition` entries containing amplitude, centre frequency in Hz,
+and T2*. Rasterization creates a `SpectralPhantom`: every shape/peak pair is an
+independent concentration map and `ChemicalSpecies`. Overlapping spectral
+components add; for the single shared B0 map, later shapes overwrite earlier
+shapes in overlapping voxels.
+
+For event-based simulation, every active spectral component is passed through
+the same Bloch sequence independently. Its frequency centre becomes the
+chemical-shift offset, its concentration becomes PD, and its T2* is used as the
+transverse decay constant. The resulting exponential FID corresponds to a
+Lorentzian line with `FWHM = 1/(pi*T2*)`. ADC signals are coherently summed.
+Final/checkpoint magnetization is concentration-weighted back onto the spatial
+voxel grid. This model supports independent peaks; exchange, J-coupling, and
+coupled density-matrix evolution are not implied.
+
+Spectral `.npz` and `.h5` files preserve matrix/FOV, all concentration maps,
+peak definitions, B0/T2* maps, and editable designer geometry. Conventional
+`Phantom` files remain readable through the same GUI loader.
+
+The phantom inspector displays orthogonal slices, an OpenGL point-cloud volume,
+and the Lorentzian spectrum at the selected voxel. The sequence-result viewer
+displays spatial Mx/My/Mz, magnitude/phase, and checkpoints. These magnetization
+arrays are already in object coordinates and receive no z Fourier transform.
+Slice-selective RF determines which z positions are excited. A z-IFFT is only
+valid when an acquisition explicitly samples a Cartesian kz dimension; the
+current `CartesianAcquisition` and image reconstruction remain 2D.
 
 ## Memory and parallelism
 

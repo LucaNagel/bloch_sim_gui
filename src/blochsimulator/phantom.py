@@ -310,6 +310,15 @@ class Phantom:
         """Voxel size in meters for each dimension."""
         return tuple(f / n for f, n in zip(self.fov, self.shape))
 
+    @property
+    def voxel_volume_m3(self) -> float:
+        """Physical voxel volume in m³ for a 3D phantom."""
+        if self.ndim != 3:
+            raise ValueError(
+                "voxel volume requires a 3D phantom with explicit slice thickness"
+            )
+        return float(np.prod(self.resolution))
+
     def get_flat_properties(self) -> Dict[str, np.ndarray]:
         """
         Return flattened arrays for simulation.

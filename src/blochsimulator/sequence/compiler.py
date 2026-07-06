@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Sequence, Tuple
 
 import numpy as np
@@ -25,6 +25,9 @@ class CompiledSequence:
     checkpoint_state_indices: np.ndarray
     duration_s: float
     metadata: dict
+    adc_gradient_moment_cyc_per_m: np.ndarray = field(
+        default_factory=lambda: np.zeros((0, 3), dtype=float)
+    )
 
     def __post_init__(self) -> None:
         for name in (
@@ -35,6 +38,7 @@ class CompiledSequence:
             "adc_times_s",
             "adc_state_indices",
             "adc_demodulation",
+            "adc_gradient_moment_cyc_per_m",
             "checkpoint_times_s",
             "checkpoint_state_indices",
         ):
@@ -102,6 +106,12 @@ class SequenceCompiler:
 
         adc_states = self._times_to_state_indices(boundaries, adc_times)
         checkpoint_states = self._times_to_state_indices(boundaries, checkpoints)
+        state_gradient_moments = np.vstack(
+            (
+                np.zeros((1, 3), dtype=float),
+                np.cumsum(gradients * dt[:, None], axis=0),
+            )
+        )
         return CompiledSequence(
             dt_s=np.asarray(dt, dtype=np.float64),
             interval_end_s=np.asarray(interval_end, dtype=np.float64),
@@ -110,6 +120,7 @@ class SequenceCompiler:
             adc_times_s=adc_times,
             adc_state_indices=adc_states,
             adc_demodulation=adc_demod,
+            adc_gradient_moment_cyc_per_m=state_gradient_moments[adc_states],
             checkpoint_times_s=checkpoints,
             checkpoint_state_indices=checkpoint_states,
             duration_s=program.duration_s,
@@ -189,14 +200,29 @@ class SequenceCompiler:
                             + np.arange(first, last + 1, dtype=float) * event.raster_s
                         ).tolist()
                     )
-        boundaries = np.unique(np.asarray(values, dtype=float))
-        tolerance = max(1e-15, max(1.0, program.duration_s) * 1e-13)
+        boundaries = np.sort(np.asarray(values, dtype=float))
+        tolerance = max(
+            1e-15,
+            32 * np.spacing(max(1.0, abs(program.duration_s))),
+        )
         boundaries[np.abs(boundaries) < tolerance] = 0.0
         boundaries[np.abs(boundaries - program.duration_s) < tolerance] = (
             program.duration_s
         )
         boundaries = boundaries[(boundaries >= 0) & (boundaries <= program.duration_s)]
-        return np.unique(boundaries)
+        if boundaries.size == 0:
+            return boundaries
+        coalesced = [float(boundaries[0])]
+        group_anchor = float(boundaries[0])
+        for value in boundaries[1:]:
+            value = float(value)
+            if value - group_anchor <= tolerance:
+                if value == program.duration_s:
+                    coalesced[-1] = value
+                continue
+            coalesced.append(value)
+            group_anchor = value
+        return np.asarray(coalesced, dtype=float)
 
     @staticmethod
     def _rf_event_integral(event: RFEvent, start: float, end: float):

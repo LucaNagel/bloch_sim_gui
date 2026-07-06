@@ -16,7 +16,11 @@ class TissueParameterWidget(QGroupBox):
     """Widget for setting tissue parameters."""
 
     def __init__(self):
-        super().__init__("Tissue Parameters")
+        super().__init__("Single-Spin / Ensemble Tissue")
+        self.setToolTip(
+            "Parameters for the classic single-spin/ensemble simulation. "
+            "Sequence Simulation uses the selected phantom maps instead."
+        )
         self.sequence_presets_enabled = True  # Default: auto-load presets
         self.init_ui()
 

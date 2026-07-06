@@ -1,5 +1,7 @@
 import numpy as np
 import pytest
+import runpy
+from pathlib import Path
 
 pypulseq = pytest.importorskip("pypulseq")
 
@@ -11,8 +13,14 @@ from blochsimulator.sequence import (
     RFEvent,
     SequenceCompiler,
     UnsupportedPulseqVersionError,
+    infer_cartesian_acquisition,
     load_pulseq,
 )
+
+
+EXAMPLE_MAIN = runpy.run_path(
+    str(Path(__file__).parents[1] / "examples" / "generate_epi.py")
+)["main"]
 
 
 def _write_reference_sequence(path):
@@ -185,3 +193,27 @@ def test_pulseq_multiblock_epi_readout_import(tmp_path):
     assert len(program.adc_events) == 4
     assert compiled.adc_times_s.size == 16
     assert np.all(np.diff(compiled.adc_times_s) > 0)
+
+
+def test_generated_epi_infers_one_cartesian_grid(tmp_path):
+    path = tmp_path / "generated_epi.seq"
+    EXAMPLE_MAIN(
+        write_seq=True,
+        seq_filename=str(path),
+        fov=(0.22, 0.24),
+        n_x=8,
+        n_y=6,
+        slice_thickness=4e-3,
+        n_slices=1,
+    )
+    program = load_pulseq(path)
+    compiled = SequenceCompiler().compile(program)
+    acquisition = infer_cartesian_acquisition(program, compiled=compiled)
+
+    assert acquisition.read_matrix == 8
+    assert acquisition.phase_matrix == 6
+    assert acquisition.fov_m == pytest.approx((0.22, 0.24))
+    assert acquisition.dwell_s == pytest.approx(4e-6)
+    assert acquisition.kx_offset_cells == pytest.approx(0.5)
+    assert acquisition.ky_offset_cells == pytest.approx(0.0)
+    acquisition.validate_gradient_moments(compiled.adc_gradient_moment_cyc_per_m)

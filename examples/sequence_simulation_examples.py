@@ -5,8 +5,15 @@ from __future__ import annotations
 import numpy as np
 
 from blochsimulator import BlochSimulator
-from blochsimulator.phantom import PhantomFactory
-from blochsimulator.sequence import ADCEvent, GradientEvent, RFEvent, SequenceProgram
+from blochsimulator.phantom import Phantom, PhantomFactory
+from blochsimulator.sequence import (
+    ADCEvent,
+    CartesianAcquisition,
+    GradientEvent,
+    RFEvent,
+    SequenceProgram,
+    make_cartesian_epi,
+)
 
 
 def fid_program(samples=256, dwell_s=100e-6):
@@ -74,6 +81,31 @@ def run_example(program=None):
         pd=1.0,
     )
     return BlochSimulator(use_parallel=True).simulate_sequence(program, phantom)
+
+
+def reconstruct_cartesian_epi_example(matrix=(16, 16), dwell_s=20e-6):
+    """Simulate Cartesian EPI and return raw ADC, k-space, and FFT image."""
+    fov = (0.16, 0.16)
+    pd = np.zeros(matrix)
+    pd[matrix[0] // 4 : 3 * matrix[0] // 4, matrix[1] // 3 : 2 * matrix[1] // 3] = 1
+    phantom = Phantom(
+        shape=matrix,
+        fov=fov,
+        t1_map=np.full(matrix, 1e9),
+        t2_map=np.full(matrix, 1e9),
+        pd_map=pd,
+    )
+    acquisition = CartesianAcquisition.epi(
+        read_matrix=matrix[0],
+        phase_matrix=matrix[1],
+        fov_m=fov,
+        dwell_s=dwell_s,
+    )
+    program = make_cartesian_epi(acquisition)
+    result = BlochSimulator(use_parallel=True).simulate_sequence(program, phantom)
+    kspace = result.to_cartesian_kspace(acquisition)
+    image = result.reconstruct_cartesian(acquisition)
+    return result, kspace, image
 
 
 if __name__ == "__main__":
