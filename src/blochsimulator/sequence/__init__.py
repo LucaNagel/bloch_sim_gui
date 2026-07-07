@@ -1,8 +1,11 @@
 """Event-based, spatially resolved MRI sequence simulation interfaces."""
 
 from .acquisition import (
+    AcquisitionDimensions,
     CartesianAcquisition,
+    CartesianAcquisitionFrames,
     infer_cartesian_acquisition,
+    infer_cartesian_acquisition_frames,
     make_cartesian_epi,
 )
 from .compiler import CompiledSequence, SequenceCompiler
@@ -17,7 +20,9 @@ from .pulseq import (
 
 __all__ = [
     "ADCEvent",
+    "AcquisitionDimensions",
     "CartesianAcquisition",
+    "CartesianAcquisitionFrames",
     "CompiledSequence",
     "GradientEvent",
     "RFEvent",
@@ -27,6 +32,7 @@ __all__ = [
     "PulseqImportError",
     "UnsupportedPulseqVersionError",
     "infer_cartesian_acquisition",
+    "infer_cartesian_acquisition_frames",
     "load_pulseq",
     "make_cartesian_epi",
 ]

@@ -12,6 +12,13 @@ import numpy as np
 
 
 PROTON_GAMMA_HZ_PER_T = 42.576e6
+NUCLEUS_GAMMA_HZ_PER_T = {
+    "H1": PROTON_GAMMA_HZ_PER_T,
+    "C13": 10.705e6,
+    "P31": 17.235e6,
+    "F19": 40.052e6,
+    "Na23": 11.262e6,
+}
 GAUSS_PER_TESLA = 1.0e4
 CM_PER_M = 100.0
 LEGACY_GAMMA_RAD_PER_S_PER_GAUSS = 26753.0
@@ -41,3 +48,19 @@ def gradient_hz_per_m_to_g_per_cm(values):
 def gradient_t_per_m_to_g_per_cm(values):
     """Convert T/m to G/cm (1 T/m = 100 G/cm)."""
     return np.asarray(values) * (GAUSS_PER_TESLA / CM_PER_M)
+
+
+def ppm_to_hz(values, field_strength_t: float, nucleus: str = "H1"):
+    """Convert a relative frequency offset from ppm to Hz."""
+    field = float(field_strength_t)
+    if not np.isfinite(field) or field <= 0:
+        raise ValueError("field_strength_t must be positive and finite")
+    if nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
+        raise ValueError(f"unsupported nucleus {nucleus!r}")
+    return np.asarray(values) * 1e-6 * NUCLEUS_GAMMA_HZ_PER_T[nucleus] * field
+
+
+def hz_to_ppm(values, field_strength_t: float, nucleus: str = "H1"):
+    """Convert a relative frequency offset from Hz to ppm."""
+    scale = ppm_to_hz(1.0, field_strength_t, nucleus)
+    return np.asarray(values) / scale

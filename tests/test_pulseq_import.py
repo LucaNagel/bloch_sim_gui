@@ -9,17 +9,19 @@ from blochsimulator import BlochSimulator
 from blochsimulator.phantom import PhantomFactory
 from blochsimulator.sequence import (
     ADCEvent,
+    AcquisitionDimensions,
     GradientEvent,
     RFEvent,
     SequenceCompiler,
     UnsupportedPulseqVersionError,
     infer_cartesian_acquisition,
+    infer_cartesian_acquisition_frames,
     load_pulseq,
 )
 
 
 EXAMPLE_MAIN = runpy.run_path(
-    str(Path(__file__).parents[1] / "examples" / "generate_epi.py")
+    str(Path(__file__).parents[1] / "sequences" / "scripts" / "generate_epi.py")
 )["main"]
 
 
@@ -83,6 +85,34 @@ def test_load_pulseq_preserves_events_duration_and_adc_times(tmp_path):
     assert area == pytest.approx(gradient.area, rel=1e-10, abs=1e-12)
 
 
+def test_load_pulseq_defaults_missing_optional_ppm_fields_to_zero(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "legacy_offsets.seq"
+    _write_reference_sequence(path)
+    original_get_block = pypulseq.Sequence.get_block
+
+    def get_block_without_ppm(sequence, block_index):
+        block = original_get_block(sequence, block_index)
+        for event_name in ("rf", "adc"):
+            event = getattr(block, event_name, None)
+            if event is not None:
+                for field in ("freq_ppm", "phase_ppm"):
+                    if hasattr(event, field):
+                        delattr(event, field)
+        return block
+
+    monkeypatch.setattr(pypulseq.Sequence, "get_block", get_block_without_ppm)
+    program = load_pulseq(path)
+
+    assert program.rf_events[0].frequency_offset_hz == pytest.approx(25.0)
+    assert program.rf_events[0].phase_offset_rad == pytest.approx(
+        0.1 + 2 * np.pi * 25.0 * program.rf_events[0].raster_s / 2
+    )
+    assert program.adc_events[0].frequency_offset_hz == pytest.approx(10.0)
+    assert program.adc_events[0].phase_offset_rad == pytest.approx(0.2)
+
+
 def test_pulseq_to_adc_signal_end_to_end(tmp_path):
     path = tmp_path / "reference.seq"
     _write_reference_sequence(path)
@@ -112,6 +142,39 @@ def test_pulseq_trigger_is_retained_as_metadata(tmp_path):
     with pytest.warns(RuntimeWarning, match="trigger retained"):
         program = load_pulseq(path)
     assert len(program.metadata["triggers"]) == 1
+
+
+def test_pulseq_labels_define_outer_indices_at_each_adc_event(tmp_path):
+    sequence = pypulseq.Sequence()
+    adc = pypulseq.make_adc(num_samples=2, dwell=10e-6)
+    sequence.add_block(
+        pypulseq.make_label("SLC", "SET", 3),
+        pypulseq.make_label("REP", "SET", 0),
+        adc,
+    )
+    sequence.add_block(
+        pypulseq.make_label("REP", "INC", 1),
+        pypulseq.make_label("ECO", "SET", 2),
+        adc,
+    )
+    path = tmp_path / "labels.seq"
+    sequence.write(str(path))
+
+    program = load_pulseq(path)
+    dimensions = AcquisitionDimensions.from_program(program)
+    assert program.metadata["adc_label_values"] == {
+        "SLC": (3, 3),
+        "REP": (0, 1),
+        "ECO": (0, 2),
+    }
+    assert dimensions.slice_indices == (3, 3)
+    assert dimensions.repetition_indices == (0, 1)
+    assert dimensions.echo_indices == (0, 2)
+    assert program.metadata["labels"][0]["events"][0] == {
+        "type": "labelset",
+        "name": "SLC",
+        "value": 3,
+    }
 
 
 def test_pulseq_extended_gradient_preserves_area(tmp_path):
@@ -217,3 +280,36 @@ def test_generated_epi_infers_one_cartesian_grid(tmp_path):
     assert acquisition.kx_offset_cells == pytest.approx(0.5)
     assert acquisition.ky_offset_cells == pytest.approx(0.0)
     acquisition.validate_gradient_moments(compiled.adc_gradient_moment_cyc_per_m)
+
+
+def test_generated_multislice_epi_infers_excitation_relative_2d_frames(tmp_path):
+    path = tmp_path / "multislice_epi.seq"
+    EXAMPLE_MAIN(
+        write_seq=True,
+        seq_filename=str(path),
+        fov=(0.22, 0.24),
+        n_x=8,
+        n_y=6,
+        slice_thickness=4e-3,
+        n_slices=3,
+    )
+    program = load_pulseq(path)
+    compiled = SequenceCompiler().compile(program)
+    frames = infer_cartesian_acquisition_frames(program, compiled=compiled)
+
+    assert frames.num_frames == 3
+    assert frames.varying_axes == ("slice",)
+    assert frames.dimensions.source == "rf_frequency_offsets"
+    assert [frames.frame_label(index) for index in range(3)] == [
+        "slice=0",
+        "slice=1",
+        "slice=2",
+    ]
+    assert all(item.read_matrix == 8 for item in frames.acquisitions)
+    assert all(item.phase_matrix == 6 for item in frames.acquisitions)
+    assert all(
+        item.kx_offset_cells == pytest.approx(0.5) for item in frames.acquisitions
+    )
+    assert all(
+        item.ky_offset_cells == pytest.approx(0.0) for item in frames.acquisitions
+    )

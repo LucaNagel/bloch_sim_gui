@@ -8,6 +8,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 from .spectral_phantom import ChemicalSpecies, SpectralPhantom
+from .units import hz_to_ppm
 
 
 @dataclass
@@ -16,16 +17,19 @@ class SpectralPeakDefinition:
 
     name: str = "Water"
     amplitude: float = 1.0
-    frequency_hz: float = 0.0
+    frequency_ppm: float = 0.0
     t2_star_s: float = 0.050
+    frequency_hz: float = None
 
     def validate(self) -> None:
         if not self.name.strip():
             raise ValueError("peak name must not be empty")
         if not np.isfinite(self.amplitude) or self.amplitude < 0:
             raise ValueError("peak amplitude must be finite and non-negative")
-        if not np.isfinite(self.frequency_hz):
+        if not np.isfinite(self.frequency_ppm):
             raise ValueError("peak frequency must be finite")
+        if self.frequency_hz is not None and not np.isfinite(self.frequency_hz):
+            raise ValueError("legacy peak frequency must be finite")
         if not np.isfinite(self.t2_star_s) or self.t2_star_s <= 0:
             raise ValueError("peak T2* must be positive and finite")
 
@@ -39,10 +43,11 @@ class ShapeDefinition:
     center: Tuple[float, float, float] = (0.5, 0.5, 0.5)
     size: Tuple[float, float, float] = (0.5, 0.5, 0.5)
     t1_s: float = 1.0
-    b0_hz: float = 0.0
+    b0_ppm: float = 0.0
     peaks: List[SpectralPeakDefinition] = field(
         default_factory=lambda: [SpectralPeakDefinition()]
     )
+    b0_hz: float = None
 
     def validate(self) -> None:
         if self.kind not in {"ellipsoid", "box"}:
@@ -57,8 +62,10 @@ class ShapeDefinition:
             raise ValueError("shape size must be positive")
         if not np.isfinite(self.t1_s) or self.t1_s <= 0:
             raise ValueError("shape T1 must be positive and finite")
-        if not np.isfinite(self.b0_hz):
+        if not np.isfinite(self.b0_ppm):
             raise ValueError("shape B0 offset must be finite")
+        if self.b0_hz is not None and not np.isfinite(self.b0_hz):
+            raise ValueError("legacy shape B0 offset must be finite")
         if not self.peaks:
             raise ValueError("each shape requires at least one spectral peak")
         for peak in self.peaks:
@@ -70,8 +77,8 @@ class PhantomDesign:
     """Editable geometry which can be rasterized to a :class:`SpectralPhantom`."""
 
     name: str = "Designed spectral phantom"
-    shape: Tuple[int, int, int] = (32, 32, 16)
-    fov_m: Tuple[float, float, float] = (0.22, 0.22, 0.006)
+    shape: Tuple[int, int, int] = (128, 128, 128)
+    fov_m: Tuple[float, float, float] = (0.22, 0.22, 0.22)
     shapes: List[ShapeDefinition] = field(default_factory=list)
 
     def validate(self) -> None:
@@ -112,16 +119,19 @@ class PhantomDesign:
         self.validate()
         species = []
         concentration_maps: Dict[str, np.ndarray] = {}
+        uses_legacy_b0 = any(item.b0_hz is not None for item in self.shapes)
+        if uses_legacy_b0 and any(item.b0_hz is None for item in self.shapes):
+            raise ValueError("cannot mix ppm and legacy Hz B0 shape definitions")
         b0_map = np.zeros(self.shape, dtype=float)
         for item in self.shapes:
             region = self.rasterize_mask(item)
-            b0_map[region] = item.b0_hz
+            b0_map[region] = item.b0_hz if uses_legacy_b0 else item.b0_ppm
             for peak in item.peaks:
                 component_name = f"{item.name}: {peak.name}"
                 species.append(
                     ChemicalSpecies(
                         name=component_name,
-                        chemical_shift_ppm=0.0,
+                        chemical_shift_ppm=peak.frequency_ppm,
                         t1=item.t1_s,
                         t2=peak.t2_star_s,
                         t2_star=peak.t2_star_s,
@@ -136,7 +146,8 @@ class PhantomDesign:
             fov=tuple(float(value) for value in self.fov_m),
             species=species,
             concentration_maps=concentration_maps,
-            b0_map=b0_map,
+            b0_map=b0_map if uses_legacy_b0 else None,
+            b0_map_ppm=None if uses_legacy_b0 else b0_map,
             name=self.name,
             metadata={"phantom_design": self.to_dict()},
         )
@@ -145,10 +156,57 @@ class PhantomDesign:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "PhantomDesign":
+    def from_dict(
+        cls,
+        data: Dict,
+        *,
+        legacy_field_strength_t: float = 3.0,
+        legacy_nucleus: str = "H1",
+    ) -> "PhantomDesign":
         shapes = []
         for item in data.get("shapes", []):
-            peaks = [SpectralPeakDefinition(**peak) for peak in item.get("peaks", [])]
+            peaks = []
+            for peak in item.get("peaks", []):
+                frequency_ppm = peak.get("frequency_ppm")
+                legacy_frequency_hz = peak.get("frequency_hz")
+                if legacy_frequency_hz is not None:
+                    if frequency_ppm not in (None, 0, 0.0):
+                        raise ValueError(
+                            "peak metadata cannot combine ppm and legacy Hz frequency"
+                        )
+                    frequency_ppm = float(
+                        hz_to_ppm(
+                            legacy_frequency_hz,
+                            legacy_field_strength_t,
+                            legacy_nucleus,
+                        )
+                    )
+                elif frequency_ppm is None:
+                    frequency_ppm = 0.0
+                peaks.append(
+                    SpectralPeakDefinition(
+                        name=str(peak.get("name", "Water")),
+                        amplitude=float(peak.get("amplitude", 1.0)),
+                        frequency_ppm=float(frequency_ppm),
+                        t2_star_s=float(peak.get("t2_star_s", 0.050)),
+                    )
+                )
+            b0_ppm = item.get("b0_ppm")
+            legacy_b0_hz = item.get("b0_hz")
+            if legacy_b0_hz is not None:
+                if b0_ppm not in (None, 0, 0.0):
+                    raise ValueError(
+                        "shape metadata cannot combine ppm and legacy Hz B0"
+                    )
+                b0_ppm = float(
+                    hz_to_ppm(
+                        legacy_b0_hz,
+                        legacy_field_strength_t,
+                        legacy_nucleus,
+                    )
+                )
+            elif b0_ppm is None:
+                b0_ppm = 0.0
             shapes.append(
                 ShapeDefinition(
                     name=item["name"],
@@ -156,15 +214,15 @@ class PhantomDesign:
                     center=tuple(item.get("center", (0.5, 0.5, 0.5))),
                     size=tuple(item.get("size", (0.5, 0.5, 0.5))),
                     t1_s=float(item.get("t1_s", 1.0)),
-                    b0_hz=float(item.get("b0_hz", 0.0)),
+                    b0_ppm=float(b0_ppm),
                     peaks=peaks or [SpectralPeakDefinition()],
                 )
             )
         return cls(
             name=str(data.get("name", "Designed spectral phantom")),
-            shape=tuple(int(value) for value in data.get("shape", (32, 32, 16))),
+            shape=tuple(int(value) for value in data.get("shape", (128, 128, 128))),
             fov_m=tuple(
-                float(value) for value in data.get("fov_m", (0.22, 0.22, 0.006))
+                float(value) for value in data.get("fov_m", (0.22, 0.22, 0.22))
             ),
             shapes=shapes,
         )
@@ -176,4 +234,8 @@ class PhantomDesign:
             raise ValueError(
                 "spectral phantom does not contain editable shape metadata"
             )
-        return cls.from_dict(data)
+        return cls.from_dict(
+            data,
+            legacy_field_strength_t=phantom.field_strength,
+            legacy_nucleus=phantom.nucleus,
+        )

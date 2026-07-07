@@ -110,6 +110,42 @@ def test_compiler_rf_gradient_overlap_uses_fine_boundaries():
     assert np.allclose(compiled.gradient_hz_per_m[:, 2], [1, 2, 3, 4])
 
 
+def test_compiler_reports_meaningful_status_stages():
+    messages = []
+    program = SequenceProgram(
+        (
+            RFEvent(0.0, np.ones(2), 1e-3),
+            ADCEvent(2e-3, 2, 1e-3),
+        ),
+        duration_s=4e-3,
+    )
+
+    SequenceCompiler().compile(program, status_callback=messages.append)
+
+    assert any("Validating" in message for message in messages)
+    assert any("sparse sequence timeline" in message for message in messages)
+    assert any("Finalizing" in message for message in messages)
+
+
+def test_compiler_uses_configured_rf_active_simulation_timestep():
+    rf = RFEvent(0.0, np.arange(1.0, 11.0), 1e-6)
+    program = SequenceProgram((rf,), duration_s=10e-6)
+
+    native = SequenceCompiler().compile(program)
+    coarse = SequenceCompiler().compile(program, simulation_timestep_s=5e-6)
+
+    assert native.n_intervals == 10
+    assert coarse.n_intervals == 2
+    assert np.allclose(coarse.dt_s, [5e-6, 5e-6])
+    assert np.allclose(coarse.rf_hz, [3.0, 8.0])
+
+
+def test_compiler_rejects_invalid_simulation_timestep():
+    program = SequenceProgram((), duration_s=0.0)
+    with pytest.raises(ValueError, match="simulation_timestep_s"):
+        SequenceCompiler().compile(program, simulation_timestep_s=0.0)
+
+
 def test_compiler_coalesces_numerically_duplicate_raster_boundaries():
     rf = RFEvent(100e-6, np.ones(3000), 1e-6)
     gradient = GradientEvent("z", 0.0, np.ones(400), 10e-6)

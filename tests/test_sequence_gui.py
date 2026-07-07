@@ -12,7 +12,7 @@ from blochsimulator.sequence import SequenceCompiler
 
 
 EXAMPLE_MAIN = runpy.run_path(
-    str(Path(__file__).parents[1] / "examples" / "generate_epi.py")
+    str(Path(__file__).parents[1] / "sequences" / "scripts" / "generate_epi.py")
 )["main"]
 
 
@@ -22,6 +22,8 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection():
     assert window.sequence_simulation_widget is None
     window.tab_widget.setCurrentIndex(window.sequence_simulation_tab_index)
     app.processEvents()
+
+    assert window.sequence_simulation_widget.simulation_timestep_us.value() == 1.0
     assert isinstance(window.sequence_simulation_widget, SequenceSimulationWidget)
     assert window.sequence_simulation_widget.program.source == "internal-fid"
     window.close()
@@ -151,6 +153,49 @@ def test_sequence_workspace_infers_imported_epi_and_syncs_fov(tmp_path):
     assert widget.kspace_view.image.shape == (4, 4)
     assert widget.reconstruction_view.image.shape == (4, 4)
     assert np.ptp(widget.state_view.image) < 1e-10
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_workspace_selects_multislice_cartesian_frames(tmp_path):
+    path = tmp_path / "multislice_epi.seq"
+    EXAMPLE_MAIN(
+        write_seq=True,
+        seq_filename=str(path),
+        fov=0.22,
+        n_x=4,
+        n_y=4,
+        slice_thickness=4e-3,
+        n_slices=3,
+    )
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.object_source.setCurrentIndex(1)
+    widget._load_pulseq_path(path)
+    widget.matrix_size.setValue(4)
+    widget.z_matrix_size.setValue(3)
+    widget._build_phantom()
+    result = widget.simulator.simulate_sequence(widget.program, widget.phantom)
+    widget._finished(result)
+    app.processEvents()
+
+    assert widget.acquisition_frames.num_frames == 3
+    assert widget.frame_selector.count() == 4
+    assert widget.frame_selector.itemText(0) == "All 3 frames (montage)"
+    assert widget.frame_selector.itemText(2) == "slice=1"
+    assert widget.kspace_view.image.shape == (14, 4)
+    assert widget.reconstruction_view.image.shape == (14, 4)
+    assert "montage of 3 frames" in widget.reconstruction_info.text()
+    widget.frame_selector.setCurrentIndex(3)
+    assert widget.reconstruction_view.image.shape == (4, 4)
+    assert "slice=2" in widget.reconstruction_info.text()
+    assert widget.kspace_zoom_info.text().startswith("Zoom: ")
+    assert widget.kspace_view.ui.histogram.axis.tickStrings([1.234], 1.0, 0.1) == [
+        "1.23"
+    ]
+    assert np.array_equal(np.unique(result.to_xarray().slice_index), [0, 1, 2])
 
     widget.close()
     widget.deleteLater()

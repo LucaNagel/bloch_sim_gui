@@ -11,10 +11,23 @@ venv_test/
 exports/*
 !exports/.gitkeep
 
+# Local sequence and phantom libraries
+sequences/*
+!sequences/.gitkeep
+!sequences/scripts/
+!sequences/scripts/*.py
+phantoms/*
+!phantoms/.gitkeep
+
+# Examples
+examples/
+
+*.npz
 *.png
 *.mp4
 *.svg
 *.gif
+*.ipynb
 
 !docs/_static/media/*.gif
 !docs/_static/media/*.png

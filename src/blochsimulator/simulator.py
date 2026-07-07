@@ -1846,8 +1846,13 @@ class BlochSimulator:
         checkpoints_s=(),
         chunk_voxels: Optional[int] = None,
         signal_weighting: str = "voxel",
+        field_strength_t: Optional[float] = None,
+        nucleus: Optional[str] = None,
         progress_callback=None,
+        preview_callback=None,
         cancel_callback=None,
+        status_callback=None,
+        simulation_timestep_s=None,
     ):
         """Simulate independent Lorentzian spectral components and sum signals.
 
@@ -1861,7 +1866,13 @@ class BlochSimulator:
 
         if not isinstance(phantom, SpectralPhantom):
             raise TypeError(f"phantom must be SpectralPhantom, got {type(phantom)}")
-        components = phantom.to_component_phantoms()
+        effective_field = (
+            phantom.field_strength
+            if field_strength_t is None
+            else float(field_strength_t)
+        )
+        effective_nucleus = phantom.nucleus if nucleus is None else str(nucleus)
+        components = phantom.to_component_phantoms(effective_field, effective_nucleus)
         if not components:
             raise ValueError("spectral phantom has no active components")
 
@@ -1874,13 +1885,35 @@ class BlochSimulator:
         for component_index, (name, component) in enumerate(components):
             if cancel_callback is not None and cancel_callback():
                 raise RuntimeError("sequence simulation cancelled")
+
+            def component_preview(fraction, partial_signal):
+                if preview_callback is None:
+                    return
+                signal = np.asarray(partial_signal)
+                if combined_signal is not None:
+                    signal = combined_signal + signal
+                preview_callback(
+                    (component_index + float(fraction)) / len(components),
+                    signal,
+                )
+
+            def component_status(message):
+                if status_callback is not None:
+                    status_callback(
+                        f"Component {component_index + 1}/{len(components)} "
+                        f"({name}): {message}"
+                    )
+
             result = self.simulate_sequence(
                 program,
                 component,
                 checkpoints_s=checkpoints_s,
                 chunk_voxels=chunk_voxels,
                 signal_weighting=signal_weighting,
+                preview_callback=(component_preview if preview_callback else None),
                 cancel_callback=cancel_callback,
+                status_callback=component_status,
+                simulation_timestep_s=simulation_timestep_s,
             )
             if first_result is None:
                 first_result = result
@@ -1921,6 +1954,9 @@ class BlochSimulator:
                 "spectral_components": [name for name, _ in components],
                 "spectral_component_count": len(components),
                 "spectral_model": "independent Lorentzian T2* components",
+                "field_strength_t": effective_field,
+                "nucleus": effective_nucleus,
+                "frequency_input_unit": "ppm",
             }
         )
         return SequenceSimulationResult(
@@ -1942,7 +1978,10 @@ class BlochSimulator:
         chunk_voxels: Optional[int] = None,
         signal_weighting: str = "voxel",
         progress_callback=None,
+        preview_callback=None,
         cancel_callback=None,
+        status_callback=None,
+        simulation_timestep_s=None,
     ):
         """Simulate an event-based sequence on a heterogeneous 1D/2D/3D object.
 
@@ -1952,7 +1991,9 @@ class BlochSimulator:
 
         ``signal_weighting='voxel'`` preserves the historical relative signal
         sum. ``'voxel_volume'`` additionally multiplies proton density by the
-        physical voxel volume of a 3D phantom.
+        physical voxel volume of a 3D phantom. ``simulation_timestep_s`` sets
+        the maximum compiler interval while RF is active; event boundaries and
+        ADC observation times are always retained exactly.
         """
         from .phantom import Phantom
         from .sequence import (
@@ -1966,7 +2007,17 @@ class BlochSimulator:
         if not isinstance(phantom, Phantom):
             raise TypeError(f"phantom must be Phantom, got {type(phantom)}")
 
-        compiled = SequenceCompiler().compile(program, checkpoints_s=checkpoints_s)
+        compiled = SequenceCompiler().compile(
+            program,
+            checkpoints_s=checkpoints_s,
+            simulation_timestep_s=simulation_timestep_s,
+            status_callback=status_callback,
+        )
+        if status_callback is not None:
+            status_callback(
+                f"Compiled {compiled.n_intervals:,} intervals and "
+                f"{compiled.adc_times_s.size:,} ADC samples."
+            )
         props = phantom.get_active_properties()
         n_active = int(props["indices"].size)
         n_checkpoints = int(compiled.checkpoint_times_s.size)
@@ -2059,10 +2110,20 @@ class BlochSimulator:
         m0 = np.ascontiguousarray(props["m0"], dtype=np.float64)
 
         chunks = (n_active + chunk_voxels - 1) // chunk_voxels
+        if status_callback is not None:
+            status_callback(
+                f"Starting {compiled.n_intervals * n_active:,} spin-interval "
+                f"updates in {chunks:,} chunk(s) on {native_threads} thread(s)."
+            )
         for chunk_index, start in enumerate(range(0, n_active, chunk_voxels)):
             if cancel_callback is not None and cancel_callback():
                 raise RuntimeError("sequence simulation cancelled")
             end = min(start + chunk_voxels, n_active)
+            if status_callback is not None:
+                status_callback(
+                    f"Simulating chunk {chunk_index + 1}/{chunks} "
+                    f"({end - start:,} active voxels)…"
+                )
             chunk_signal, chunk_final, chunk_checkpoints = simulate_sequence_chunk(
                 compiled.rf_hz,
                 compiled.gradient_hz_per_m,
@@ -2086,6 +2147,12 @@ class BlochSimulator:
                 checkpoints_active[:, start:end] = chunk_checkpoints
             if progress_callback is not None:
                 progress_callback(chunk_index + 1, chunks)
+            if preview_callback is not None:
+                partial_signal = coil_signal[0] if n_rx_coils == 1 else coil_signal
+                preview_callback(
+                    (chunk_index + 1) / chunks,
+                    np.array(partial_signal, copy=True),
+                )
 
         active_indices = props["indices"]
         final_flat = np.zeros((phantom.nvoxels, 3), dtype=np.float64)
@@ -2102,6 +2169,9 @@ class BlochSimulator:
             )
 
         signal = coil_signal[0] if n_rx_coils == 1 else coil_signal
+        from .sequence import AcquisitionDimensions
+
+        acquisition_dimensions = AcquisitionDimensions.from_program(program)
         result = SequenceSimulationResult(
             signal=signal,
             adc_times_s=compiled.adc_times_s,
@@ -2117,12 +2187,17 @@ class BlochSimulator:
                 "n_active_voxels": n_active,
                 "n_rx_coils": n_rx_coils,
                 "chunk_voxels": chunk_voxels,
+                "simulation_timestep_s": simulation_timestep_s,
                 "signal_weighting": signal_weighting,
+                "phantom_metadata": dict(phantom.metadata),
+                "field_strength_t": phantom.metadata.get("field_strength_t"),
+                "nucleus": phantom.metadata.get("nucleus"),
                 "voxel_volume_m3": (
                     phantom.voxel_volume_m3
                     if signal_weighting == "voxel_volume"
                     else None
                 ),
+                "acquisition_dimensions": acquisition_dimensions.to_metadata(),
                 "units": {
                     "time": "s",
                     "position": "m",
@@ -2244,6 +2319,24 @@ class BlochSimulator:
             }
             if signal.ndim == 2:
                 coords["coil"] = np.arange(signal.shape[0])
+            acquisition_metadata = result.get("metadata", {}).get(
+                "acquisition_dimensions"
+            )
+            if acquisition_metadata is not None:
+                from .sequence import AcquisitionDimensions
+
+                acquisition_dimensions = AcquisitionDimensions.from_metadata(
+                    acquisition_metadata
+                )
+                if acquisition_dimensions.num_samples != len(result["adc_times_s"]):
+                    raise ValueError(
+                        "acquisition dimension metadata does not match the ADC stream"
+                    )
+                for axis in acquisition_dimensions.AXIS_NAMES:
+                    coords[f"{axis}_index"] = (
+                        "adc",
+                        acquisition_dimensions.sample_indices(axis),
+                    )
             moments = result.get("adc_gradient_moment_cyc_per_m")
             if moments is not None:
                 coords["gradient_axis"] = ["x", "y", "z"]

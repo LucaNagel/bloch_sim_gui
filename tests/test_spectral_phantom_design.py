@@ -2,7 +2,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from PyQt5.QtWidgets import QApplication, QWidget
+from PyQt5.QtWidgets import QApplication, QDialog, QWidget
+from unittest.mock import MagicMock, patch
 
 from blochsimulator import BlochSimulator
 from blochsimulator.phantom_design import (
@@ -15,6 +16,8 @@ from blochsimulator.spectral_phantom import SpectralPhantom
 from blochsimulator.ui.phantom_designer import SpectralPhantomDesignerDialog
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
 from blochsimulator.ui.volume_viewer import VolumeViewerWidget
+from blochsimulator.phantom_widget import PhantomCreatorWidget
+from blochsimulator.units import hz_to_ppm, ppm_to_hz
 
 
 def _spectral_design():
@@ -29,10 +32,14 @@ def _spectral_design():
                 center=(0.5, 0.5, 0.5),
                 size=(0.6, 0.6, 1.0),
                 t1_s=1.2,
-                b0_hz=10.0,
+                b0_ppm=float(hz_to_ppm(10.0, 3.0)),
                 peaks=[
-                    SpectralPeakDefinition("Water", 1.0, -100.0, 0.020),
-                    SpectralPeakDefinition("Metabolite", 0.25, 80.0, 0.010),
+                    SpectralPeakDefinition(
+                        "Water", 1.0, float(hz_to_ppm(-100.0, 3.0)), 0.020
+                    ),
+                    SpectralPeakDefinition(
+                        "Metabolite", 0.25, float(hz_to_ppm(80.0, 3.0)), 0.010
+                    ),
                 ],
             )
         ],
@@ -47,13 +54,63 @@ def test_shape_design_builds_lorentzian_components():
     assert np.allclose(phantom.positions.mean(axis=0), 0.0)
 
     species = phantom.species[0]
-    centre = species.frequency_offset_hz + 10.0
+    centre = phantom.get_frequency_offset(species.name) + float(
+        phantom.get_b0_offset_map_hz()[3, 3, 2]
+    )
     half_width = 1.0 / (2 * np.pi * species.t2_star)
     frequency = np.asarray([centre, centre + half_width])
     _, spectrum = phantom.spectrum_at((3, 3, 2), frequency_hz=frequency)
     # The distant second peak contributes slightly at both points.
     assert spectrum[0] == pytest.approx(1.0, rel=2e-3)
     assert spectrum[1] == pytest.approx(0.5, rel=1e-2)
+
+
+def test_spectral_ppm_offsets_are_converted_at_simulation_field_strength():
+    phantom = _spectral_design().build()
+    at_3t = phantom.to_component_phantoms(field_strength=3.0)[0][1]
+    at_7t = phantom.to_component_phantoms(field_strength=7.0)[0][1]
+
+    expected_ppm = phantom.species[0].chemical_shift_ppm
+    assert at_3t.chemical_shift_map[3, 3, 2] == pytest.approx(
+        ppm_to_hz(expected_ppm, 3.0)
+    )
+    assert at_7t.chemical_shift_map[3, 3, 2] == pytest.approx(
+        ppm_to_hz(expected_ppm, 7.0)
+    )
+    assert at_7t.b0_map[3, 3, 2] / at_3t.b0_map[3, 3, 2] == pytest.approx(7.0 / 3.0)
+
+
+def test_legacy_hz_design_metadata_is_migrated_using_saved_field_strength():
+    design = PhantomDesign.from_dict(
+        {
+            "shape": (2, 2, 2),
+            "fov_m": (0.02, 0.02, 0.02),
+            "shapes": [
+                {
+                    "name": "Legacy",
+                    "b0_hz": 10.0,
+                    "peaks": [
+                        {
+                            "name": "Peak",
+                            "amplitude": 1.0,
+                            "frequency_hz": -100.0,
+                            "t2_star_s": 0.02,
+                        }
+                    ],
+                }
+            ],
+        },
+        legacy_field_strength_t=3.0,
+        legacy_nucleus="H1",
+    )
+    phantom = design.build()
+
+    assert ppm_to_hz(design.shapes[0].b0_ppm, 3.0) == pytest.approx(10.0)
+    assert ppm_to_hz(design.shapes[0].peaks[0].frequency_ppm, 3.0) == pytest.approx(
+        -100.0
+    )
+    assert phantom.b0_map is None
+    assert phantom.b0_map_ppm is not None
 
 
 @pytest.mark.parametrize("suffix", [".npz", ".h5"])
@@ -113,6 +170,27 @@ def test_designer_and_sequence_workspace_accept_spectral_phantom():
     app.processEvents()
 
 
+def test_phantom_creator_retains_spectral_designer_dialog_lifetime():
+    app = QApplication.instance() or QApplication([])
+    creator = PhantomCreatorWidget()
+    phantom = _spectral_design().build()
+    dialog = MagicMock()
+    dialog.exec_.return_value = QDialog.Accepted
+    dialog.get_phantom.return_value = phantom
+    creator.type_combo.setCurrentText("Spectral Shape Designer...")
+
+    with patch(
+        "blochsimulator.phantom_widget.SpectralPhantomDesignerDialog",
+        return_value=dialog,
+    ):
+        creator.create_phantom()
+
+    assert creator.current_phantom is phantom
+    assert creator._retained_spectral_designer_dialogs == [dialog]
+    creator.close()
+    app.processEvents()
+
+
 def test_volume_viewer_normalizes_2d_mask_and_resets_stale_indices():
     app = QApplication.instance() or QApplication([])
     viewer = VolumeViewerWidget()
@@ -127,5 +205,29 @@ def test_volume_viewer_normalizes_2d_mask_and_resets_stale_indices():
     assert viewer.mask.shape == viewer.data.shape
     assert viewer.indices == (0, 32, 0)
     viewer._indices_updated()
+    viewer.close()
+    app.processEvents()
+
+
+def test_volume_viewer_handles_fully_masked_and_nonfinite_slices():
+    app = QApplication.instance() or QApplication([])
+    viewer = VolumeViewerWidget()
+    data = np.zeros((3, 3, 3), dtype=float)
+    data[1, 1, 1] = 5.0
+    data[2, 2, 2] = np.inf
+    mask = np.zeros(data.shape, dtype=bool)
+    mask[1, 1, 1] = True
+    mask[2, 2, 2] = True
+
+    viewer.set_volume(data, mask=mask)
+    previous = viewer.sliders[0].blockSignals(True)
+    viewer.sliders[0].setValue(0)
+    viewer.sliders[0].blockSignals(previous)
+    viewer._indices_updated()
+
+    assert np.all(np.isfinite(viewer.xy_view.image))
+    assert np.all(np.isfinite(viewer.xz_view.image))
+    assert np.all(np.isfinite(viewer.yz_view.image))
+    assert viewer.yz_view.getLevels() == pytest.approx((4.999995, 5.000005))
     viewer.close()
     app.processEvents()

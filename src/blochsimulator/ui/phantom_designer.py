@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..phantom import Phantom
+from ..paths import workspace_directory
 from ..phantom_design import (
     PhantomDesign,
     ShapeDefinition,
@@ -138,13 +139,13 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.z_center = self._percent_spin(50.0)
         self.z_size = self._percent_spin(50.0)
         self.t1_ms = self._number_spin(0.1, 10000.0, 1000.0, " ms")
-        self.b0_hz = self._number_spin(-100000.0, 100000.0, 0.0, " Hz")
-        for widget in (self.z_center, self.z_size, self.t1_ms, self.b0_hz):
+        self.b0_ppm = self._number_spin(-1000.0, 1000.0, 0.0, " ppm")
+        for widget in (self.z_center, self.z_size, self.t1_ms, self.b0_ppm):
             widget.valueChanged.connect(self._properties_changed)
         form.addRow("Z centre", self.z_center)
         form.addRow("Z thickness", self.z_size)
         form.addRow("T1", self.t1_ms)
-        form.addRow("B0 offset", self.b0_hz)
+        form.addRow("B0 inhomogeneity", self.b0_ppm)
         self.xy_info = QLabel()
         form.addRow("XY geometry", self.xy_info)
         property_layout.addLayout(form)
@@ -154,7 +155,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         )
         self.peak_table = QTableWidget(0, 4)
         self.peak_table.setHorizontalHeaderLabels(
-            ["Name", "Amplitude", "Frequency (Hz)", "T2* (ms)"]
+            ["Name", "Amplitude", "Frequency offset (ppm)", "T2* (ms)"]
         )
         self.peak_table.cellChanged.connect(self._peaks_changed)
         property_layout.addWidget(self.peak_table)
@@ -255,7 +256,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.z_center.setValue(item.center[2] * 100.0)
         self.z_size.setValue(item.size[2] * 100.0)
         self.t1_ms.setValue(item.t1_s * 1000.0)
-        self.b0_hz.setValue(item.b0_hz)
+        self.b0_ppm.setValue(item.b0_ppm)
         self._populate_peaks(item)
         self._update_xy_info(row)
         self._updating = False
@@ -294,7 +295,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         item.center = (item.center[0], item.center[1], self.z_center.value() / 100.0)
         item.size = (item.size[0], item.size[1], self.z_size.value() / 100.0)
         item.t1_s = self.t1_ms.value() / 1000.0
-        item.b0_hz = self.b0_hz.value()
+        item.b0_ppm = self.b0_ppm.value()
+        item.b0_hz = None
         self.shape_list.item(row).setText(item.name)
 
     def _populate_peaks(self, item):
@@ -302,7 +304,12 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.peak_table.setRowCount(len(item.peaks))
         for row, peak in enumerate(item.peaks):
             for column, value in enumerate(
-                (peak.name, peak.amplitude, peak.frequency_hz, peak.t2_star_s * 1000)
+                (
+                    peak.name,
+                    peak.amplitude,
+                    peak.frequency_ppm,
+                    peak.t2_star_s * 1000,
+                )
             ):
                 self.peak_table.setItem(row, column, QTableWidgetItem(str(value)))
         self.peak_table.blockSignals(False)
@@ -323,7 +330,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             peak = SpectralPeakDefinition(
                 name=self.peak_table.item(peak_row, 0).text(),
                 amplitude=float(self.peak_table.item(peak_row, 1).text()),
-                frequency_hz=float(self.peak_table.item(peak_row, 2).text()),
+                frequency_ppm=float(self.peak_table.item(peak_row, 2).text()),
                 t2_star_s=float(self.peak_table.item(peak_row, 3).text()) / 1000.0,
             )
             peak.validate()
@@ -390,10 +397,13 @@ class SpectralPhantomDesignerDialog(QDialog):
             QMessageBox.critical(self, "Invalid phantom", str(exc))
 
     def _save(self):
+        default_path = workspace_directory("phantoms") / (
+            f"{self.name_edit.text() or 'spectral_phantom'}.npz"
+        )
         filename, _ = QFileDialog.getSaveFileName(
             self,
             "Save spectral phantom",
-            f"{self.name_edit.text() or 'spectral_phantom'}.npz",
+            str(default_path),
             "Spectral phantom (*.npz *.h5)",
         )
         if not filename:
@@ -408,7 +418,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         filename, _ = QFileDialog.getOpenFileName(
             self,
             "Load spectral phantom",
-            "",
+            str(workspace_directory("phantoms")),
             "Spectral phantom (*.npz *.h5 *.hdf5)",
         )
         if not filename:

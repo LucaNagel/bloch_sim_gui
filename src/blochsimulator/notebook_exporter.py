@@ -1351,6 +1351,64 @@ def export_notebook(
     print(f"Notebook exported: {filename}")
 
 
+def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
+    """Create an xarray-based analysis notebook for sparse sequence output."""
+    if not HAS_NBFORMAT:
+        raise ImportError("Jupyter notebook export requires nbformat")
+    notebook_path = Path(filename)
+    data_path = Path(data_filename)
+    relative_data = data_path.name
+    notebook = new_notebook(
+        cells=[
+            new_markdown_cell(
+                "# Sequence simulation result\n\n"
+                f"BlochSimulator {__version__} sparse event-based result. "
+                f"The xarray dataset is stored in `{relative_data}`."
+            ),
+            new_code_cell(
+                "from pathlib import Path\n"
+                "import numpy as np\n"
+                "import xarray as xr\n"
+                "import matplotlib.pyplot as plt\n\n"
+                f"data_path = Path({relative_data!r})\n"
+                "ds = xr.open_dataset(data_path)\n"
+                "if 'signal_real' in ds and 'signal_imag' in ds:\n"
+                "    ds['signal'] = ds.signal_real + 1j * ds.signal_imag\n"
+                "ds"
+            ),
+            new_markdown_cell("## ADC signal"),
+            new_code_cell(
+                "signal = ds.signal.values\n"
+                "time_ms = ds.adc_time_s.values * 1e3\n"
+                "fig, ax = plt.subplots(figsize=(9, 4))\n"
+                "if signal.ndim == 1:\n"
+                "    ax.plot(time_ms, np.abs(signal), label='Magnitude')\n"
+                "else:\n"
+                "    for coil, values in enumerate(signal):\n"
+                "        ax.plot(time_ms, np.abs(values), label=f'Coil {coil + 1}')\n"
+                "ax.set(xlabel='Time (ms)', ylabel='Signal (a.u.)')\n"
+                "ax.legend(); ax.grid(True); plt.show()"
+            ),
+            new_markdown_cell("## Final longitudinal magnetization"),
+            new_code_cell(
+                "mz = ds.final_magnetization.sel(component='mz').values\n"
+                "while mz.ndim > 2:\n"
+                "    mz = np.take(mz, mz.shape[-1] // 2, axis=-1)\n"
+                "fig, ax = plt.subplots(figsize=(6, 5))\n"
+                "if mz.ndim == 1:\n"
+                "    ax.plot(mz)\n"
+                "else:\n"
+                "    image = ax.imshow(mz.T, origin='lower', cmap='viridis')\n"
+                "    fig.colorbar(image, ax=ax, label='Mz')\n"
+                "ax.set_title('Final Mz (central slice)'); plt.show()"
+            ),
+        ]
+    )
+    with notebook_path.open("w", encoding="utf-8") as handle:
+        nbformat.write(notebook, handle)
+    return notebook_path
+
+
 if __name__ == "__main__":
     print("Notebook Exporter for Bloch Simulator")
     print("=" * 60)

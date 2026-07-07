@@ -4,10 +4,51 @@ import pytest
 from blochsimulator import BlochSimulator
 from blochsimulator.phantom import Phantom
 from blochsimulator.sequence import (
+    AcquisitionDimensions,
     CartesianAcquisition,
     SequenceCompiler,
+    SequenceProgram,
+    infer_cartesian_acquisition,
     make_cartesian_epi,
 )
+
+
+def test_acquisition_dimensions_expand_event_indices_and_round_trip_metadata():
+    dimensions = AcquisitionDimensions(
+        adc_event_sample_counts=(3, 2),
+        slice_indices=(4, 4),
+        echo_indices=(0, 1),
+        repetition_indices=(2, 2),
+        segment_indices=(0, 0),
+        partition_indices=(7, 7),
+        source="test",
+    )
+
+    assert dimensions.num_adc_events == 2
+    assert dimensions.num_samples == 5
+    assert dimensions.varying_axes == ("echo",)
+    assert np.array_equal(dimensions.sample_indices("echo"), [0, 0, 0, 1, 1])
+    assert AcquisitionDimensions.from_metadata(dimensions.to_metadata()) == dimensions
+
+
+def test_single_2d_inference_rejects_varying_outer_dimensions_explicitly():
+    acquisition = CartesianAcquisition.epi(4, 2, (0.04, 0.02), 10e-6)
+    base = make_cartesian_epi(acquisition)
+    dimensions = AcquisitionDimensions(
+        adc_event_sample_counts=(4, 4),
+        repetition_indices=(0, 1),
+    )
+    program = SequenceProgram(
+        base.events,
+        duration_s=base.duration_s,
+        metadata={
+            "acquisition_dimensions": dimensions.to_metadata(),
+            "definitions": {"FOV": (0.04, 0.02)},
+        },
+    )
+
+    with pytest.raises(ValueError, match="varying outer.*repetition"):
+        infer_cartesian_acquisition(program)
 
 
 def test_cartesian_layout_bandwidth_and_epi_reordering():

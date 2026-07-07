@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from blochsimulator import BlochSimulator, TissueParameters
+from blochsimulator.notebook_exporter import export_sequence_result_notebook
 from blochsimulator.phantom import Phantom
 from blochsimulator.sequence import ADCEvent, GradientEvent, RFEvent, SequenceProgram
 
@@ -88,6 +89,24 @@ def test_receiver_demodulation_phase():
     assert result.signal[0] == pytest.approx(-1j, abs=1e-10)
 
 
+def test_sequence_preview_reports_cumulative_signal_and_finishes_at_one():
+    phantom = _phantom(shape=(4,), m0=(1.0, 0.0, 0.0))
+    program = SequenceProgram((ADCEvent(0.0, 2, 0.001),), duration_s=0.002)
+    previews = []
+
+    result = BlochSimulator(use_parallel=False).simulate_sequence(
+        program,
+        phantom,
+        chunk_voxels=2,
+        preview_callback=lambda fraction, signal: previews.append(
+            (fraction, np.array(signal, copy=True))
+        ),
+    )
+
+    assert [fraction for fraction, _ in previews] == pytest.approx([0.5, 1.0])
+    assert previews[-1][1] == pytest.approx(result.signal)
+
+
 def test_single_tx_map_scales_local_rf_amplitude_and_phase():
     phantom = _phantom(
         t1=1e9,
@@ -153,6 +172,29 @@ def test_chunk_size_does_not_change_signal_or_state():
     assert np.allclose(one.final_magnetization, all_at_once.final_magnetization)
 
 
+def test_sequence_simulation_reports_compile_and_chunk_status():
+    phantom = _phantom(shape=(2,), t1=1e9, t2=1e9)
+    program = SequenceProgram(
+        (ADCEvent(0.0, 2, 1e-3),),
+        duration_s=2e-3,
+    )
+    messages = []
+
+    result = BlochSimulator(use_parallel=False).simulate_sequence(
+        program,
+        phantom,
+        chunk_voxels=1,
+        simulation_timestep_s=5e-6,
+        status_callback=messages.append,
+    )
+
+    assert result.metadata["simulation_timestep_s"] == pytest.approx(5e-6)
+    assert any("Compiled" in message for message in messages)
+    assert any("spin-interval updates" in message for message in messages)
+    assert any("Simulating chunk 1/2" in message for message in messages)
+    assert any("Simulating chunk 2/2" in message for message in messages)
+
+
 def test_multi_rx_chunking_and_openmp_do_not_change_signal():
     shape = (2, 2, 2)
     rx = np.stack(
@@ -203,6 +245,11 @@ def test_sparse_result_xarray_and_hdf5_export(tmp_path):
     assert dataset.sizes["adc"] == 2
     assert dataset.sizes["checkpoint"] == 1
     assert dataset["adc_gradient_moment_cyc_per_m"].shape == (2, 3)
+    assert np.array_equal(dataset["t"], result.adc_times_s)
+    assert np.array_equal(dataset["kx"], [0.0, 0.0])
+    assert np.array_equal(dataset["ky"], [0.0, 0.0])
+    assert np.array_equal(dataset["kz"], [0.0, 0.0])
+    assert dataset["kx"].attrs["units"] == "cycles/m"
     simulator_dataset = simulator.get_results_as_xarray()
     assert simulator_dataset.sizes["adc"] == 2
 
@@ -223,6 +270,72 @@ def test_sparse_result_xarray_and_hdf5_export(tmp_path):
         loaded.last_result["adc_gradient_moment_cyc_per_m"],
         result.adc_gradient_moment_cyc_per_m,
     )
+
+
+def test_outer_acquisition_indices_are_exposed_per_adc_sample():
+    phantom = _phantom(t1=1e9, t2=1e9, m0=(1.0, 0.0, 0.0))
+    program = SequenceProgram(
+        (ADCEvent(0.0, 2, 1e-3), ADCEvent(3e-3, 1, 1e-3)),
+        duration_s=4e-3,
+        metadata={
+            "adc_label_values": {
+                "SLC": (2, 3),
+                "ECO": (0, 1),
+                "REP": (4, 4),
+            }
+        },
+    )
+
+    result = BlochSimulator(use_parallel=False).simulate_sequence(program, phantom)
+    dimensions = result.acquisition_dimensions
+    assert dimensions.source == "pulseq_labels"
+    assert dimensions.varying_axes == ("slice", "echo")
+    dataset = result.to_xarray()
+    assert np.array_equal(dataset["slice_index"], [2, 2, 3])
+    assert np.array_equal(dataset["echo_index"], [0, 0, 1])
+    assert np.array_equal(dataset["repetition_index"], [4, 4, 4])
+    assert np.array_equal(dataset["adc_event_index"], [0, 0, 1])
+    assert np.array_equal(dataset["readout_sample_index"], [0, 1, 0])
+
+
+@pytest.mark.parametrize("suffix", [".npz", ".h5", ".nc"])
+def test_sequence_result_export_formats(tmp_path, suffix):
+    phantom = _phantom(t1=1e9, t2=1e9, m0=(1.0, 0.0, 0.0))
+    program = SequenceProgram((ADCEvent(0.0, 2, 1e-3),), duration_s=2e-3)
+    result = BlochSimulator(use_parallel=False).simulate_sequence(program, phantom)
+    path = result.save(tmp_path / f"result{suffix}")
+
+    assert path.is_file()
+    if suffix == ".npz":
+        with np.load(path, allow_pickle=False) as data:
+            assert np.array_equal(data["signal"], result.signal)
+    elif suffix == ".h5":
+        import h5py
+
+        with h5py.File(path, "r") as handle:
+            assert np.array_equal(handle["signal"][...], result.signal)
+    else:
+        import xarray as xr
+
+        with xr.open_dataset(path) as dataset:
+            signal = dataset.signal_real + 1j * dataset.signal_imag
+            assert np.array_equal(signal, result.signal)
+            assert np.array_equal(dataset.t, result.adc_times_s)
+            assert all(axis in dataset.coords for axis in ("kx", "ky", "kz"))
+
+
+def test_sequence_result_notebook_uses_xarray_dataset(tmp_path):
+    phantom = _phantom(t1=1e9, t2=1e9, m0=(1.0, 0.0, 0.0))
+    program = SequenceProgram((ADCEvent(0.0, 1, 1e-3),), duration_s=1e-3)
+    result = BlochSimulator(use_parallel=False).simulate_sequence(program, phantom)
+    data_path = result.save(tmp_path / "result.nc")
+    notebook_path = export_sequence_result_notebook(
+        str(tmp_path / "analysis.ipynb"), str(data_path)
+    )
+
+    text = notebook_path.read_text(encoding="utf-8")
+    assert "xr.open_dataset" in text
+    assert "result.nc" in text
 
 
 def test_phantom_split_maps_round_trip_npz_and_hdf5(tmp_path):

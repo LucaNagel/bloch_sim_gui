@@ -94,6 +94,9 @@ class VolumeViewerWidget(QWidget):
         view = pg.ImageView()
         view.ui.roiBtn.hide()
         view.ui.menuBtn.hide()
+        view.ui.histogram.axis.tickStrings = lambda values, scale, spacing: [
+            f"{value * scale:.2f}" for value in values
+        ]
         view.setObjectName(title)
         view.setToolTip(title)
         return view
@@ -197,10 +200,29 @@ class VolumeViewerWidget(QWidget):
         xy = np.where(self.mask[:, :, iz], self.data[:, :, iz], np.nan)
         xz = np.where(self.mask[:, iy, :], self.data[:, iy, :], np.nan)
         yz = np.where(self.mask[ix, :, :], self.data[ix, :, :], np.nan)
-        self.xy_view.setImage(xy.T, autoLevels=False, levels=levels)
-        self.xz_view.setImage(xz.T, autoLevels=False, levels=levels)
-        self.yz_view.setImage(yz.T, autoLevels=False, levels=levels)
+        self._set_slice_image(self.xy_view, xy, levels)
+        self._set_slice_image(self.xz_view, xz, levels)
+        self._set_slice_image(self.yz_view, yz, levels)
         self.indices_changed.emit(indices)
+
+    @staticmethod
+    def _set_slice_image(view: pg.ImageView, values, levels) -> None:
+        """Display a slice without passing NaN/Inf histogram ranges to Qt."""
+        low, high = levels
+        display = np.nan_to_num(
+            np.asarray(values, dtype=float),
+            copy=True,
+            nan=low,
+            posinf=high,
+            neginf=low,
+        )
+        view.setImage(
+            display.T,
+            autoLevels=False,
+            levels=levels,
+            autoHistogramRange=False,
+        )
+        view.ui.histogram.setHistogramRange(low, high)
 
     def _levels(self):
         valid = self.data[self.mask & np.isfinite(self.data)]
@@ -288,12 +310,16 @@ class PhantomInspectorWidget(QWidget):
             data = self.phantom.t2_map * 1000
             unit = "ms"
         elif choice == "B0":
-            data = (
-                np.zeros(self.phantom.shape)
-                if self.phantom.b0_map is None
-                else self.phantom.b0_map
-            )
-            unit = "Hz"
+            if getattr(self.phantom, "b0_map_ppm", None) is not None:
+                data = self.phantom.b0_map_ppm
+                unit = "ppm"
+            else:
+                data = (
+                    np.zeros(self.phantom.shape)
+                    if self.phantom.b0_map is None
+                    else self.phantom.b0_map
+                )
+                unit = "Hz"
         elif choice == "Mean frequency":
             data = self.phantom.effective_df_map
             unit = "Hz"

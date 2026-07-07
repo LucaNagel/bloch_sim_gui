@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
 from pathlib import Path
 
+from .units import NUCLEUS_GAMMA_HZ_PER_T, ppm_to_hz
+
 # Import base phantom class
 try:
     from .phantom import Phantom, PhantomFactory
@@ -101,19 +103,9 @@ class ChemicalSpecies:
         if self.frequency_offset_hz is not None:
             return float(self.frequency_offset_hz)
 
-        # Larmor frequencies at 1T (MHz)
-        larmor_1t = {
-            "H1": 42.576,
-            "C13": 10.705,
-            "P31": 17.235,
-            "F19": 40.052,
-            "Na23": 11.262,
-        }
-
-        gamma_mhz = larmor_1t.get(nucleus, 42.576)
-        larmor_hz = gamma_mhz * 1e6 * field_strength
-
-        return self.chemical_shift_ppm * 1e-6 * larmor_hz
+        if nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
+            raise ValueError(f"unsupported nucleus {nucleus!r}")
+        return float(ppm_to_hz(self.chemical_shift_ppm, field_strength, nucleus))
 
 
 # =============================================================================
@@ -328,6 +320,8 @@ class SpectralPhantom:
         Spatially-varying T2* map (overrides species T2*)
     b0_map : ndarray, optional
         B0 inhomogeneity map in Hz
+    b0_map_ppm : ndarray, optional
+        Field-independent B0 inhomogeneity map in ppm
     field_strength : float
         B0 field strength in Tesla
     nucleus : str
@@ -342,6 +336,7 @@ class SpectralPhantom:
     concentration_maps: Dict[str, np.ndarray]
     t2_star_map: np.ndarray = None
     b0_map: np.ndarray = None
+    b0_map_ppm: np.ndarray = None
     field_strength: float = 3.0
     nucleus: str = "H1"
     name: str = "Spectral Phantom"
@@ -393,6 +388,14 @@ class SpectralPhantom:
 
         if self.b0_map is not None and self.b0_map.shape != self.shape:
             raise ValueError("B0 map shape must match phantom shape")
+        if self.b0_map_ppm is not None and self.b0_map_ppm.shape != self.shape:
+            raise ValueError("B0 ppm map shape must match phantom shape")
+        if self.b0_map is not None and self.b0_map_ppm is not None:
+            raise ValueError("b0_map and b0_map_ppm cannot be combined")
+        if not np.isfinite(self.field_strength) or self.field_strength <= 0:
+            raise ValueError("field_strength must be positive and finite")
+        if self.nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
+            raise ValueError(f"unsupported nucleus {self.nucleus!r}")
 
     def _compute_coordinates(self):
         """Compute spatial coordinates."""
@@ -518,8 +521,7 @@ class SpectralPhantom:
             df += weight * self.get_frequency_offset(species.name)
 
         # Add B0 inhomogeneity
-        if self.b0_map is not None:
-            df = df + self.b0_map
+        df = df + self.get_b0_offset_map_hz()
 
         return df
 
@@ -530,9 +532,34 @@ class SpectralPhantom:
                 return s
         return None
 
-    def get_frequency_offset(self, name: str) -> float:
+    def get_frequency_offset(
+        self, name: str, field_strength: Optional[float] = None, nucleus: str = None
+    ) -> float:
         """Get frequency offset for species in Hz."""
-        return self._frequency_offsets.get(name, 0.0)
+        species = self.get_species(name)
+        if species is None:
+            return 0.0
+        return species.get_frequency_offset(
+            self.field_strength if field_strength is None else field_strength,
+            self.nucleus if nucleus is None else nucleus,
+        )
+
+    def get_b0_offset_map_hz(
+        self, field_strength: Optional[float] = None, nucleus: str = None
+    ) -> np.ndarray:
+        """Return the spatial B0 offset converted to Hz for one field."""
+        if self.b0_map_ppm is not None:
+            return np.asarray(
+                ppm_to_hz(
+                    self.b0_map_ppm,
+                    self.field_strength if field_strength is None else field_strength,
+                    self.nucleus if nucleus is None else nucleus,
+                ),
+                dtype=float,
+            )
+        if self.b0_map is not None:
+            return np.asarray(self.b0_map, dtype=float)
+        return np.zeros(self.shape, dtype=float)
 
     def get_total_concentration(self) -> np.ndarray:
         """Get sum of all species concentrations."""
@@ -569,7 +596,7 @@ class SpectralPhantom:
             frequency_hz = np.linspace(lower, upper, int(points))
         frequency_hz = np.asarray(frequency_hz, dtype=float)
         spectrum = np.zeros(frequency_hz.shape, dtype=float)
-        b0 = 0.0 if self.b0_map is None else float(self.b0_map[index])
+        b0 = float(self.get_b0_offset_map_hz()[index])
         for species, centre, fwhm in zip(self.species, centres, widths):
             amplitude = float(self.concentration_maps[species.name][index])
             half_width = fwhm / 2.0
@@ -578,15 +605,17 @@ class SpectralPhantom:
             )
         return frequency_hz, spectrum
 
-    def to_component_phantoms(self) -> List[Tuple[str, "Phantom"]]:
+    def to_component_phantoms(
+        self, field_strength: Optional[float] = None, nucleus: str = None
+    ) -> List[Tuple[str, "Phantom"]]:
         """Expand spectral components into independently simulated phantoms."""
         if Phantom is None:
             raise ImportError("phantom module not available")
-        b0 = (
-            np.zeros(self.shape, dtype=float)
-            if self.b0_map is None
-            else np.asarray(self.b0_map, dtype=float)
+        effective_field = (
+            self.field_strength if field_strength is None else float(field_strength)
         )
+        effective_nucleus = self.nucleus if nucleus is None else str(nucleus)
+        b0 = self.get_b0_offset_map_hz(effective_field, effective_nucleus)
         components = []
         for species in self.species:
             concentration = np.asarray(
@@ -611,7 +640,10 @@ class SpectralPhantom:
                         pd_map=concentration,
                         b0_map=b0,
                         chemical_shift_map=np.full(
-                            self.shape, self.get_frequency_offset(species.name)
+                            self.shape,
+                            self.get_frequency_offset(
+                                species.name, effective_field, effective_nucleus
+                            ),
                         ),
                         mask=active,
                         name=f"{self.name} - {species.name}",
@@ -639,7 +671,7 @@ class SpectralPhantom:
         ]
         header = {
             "format": "blochsimulator-spectral-phantom",
-            "version": 1,
+            "version": 2,
             "name": self.name,
             "field_strength": self.field_strength,
             "nucleus": self.nucleus,
@@ -662,6 +694,12 @@ class SpectralPhantom:
                     else np.zeros(self.shape)
                 ),
                 has_b0=np.asarray(self.b0_map is not None),
+                b0_map_ppm=(
+                    np.asarray(self.b0_map_ppm)
+                    if self.b0_map_ppm is not None
+                    else np.zeros(self.shape)
+                ),
+                has_b0_ppm=np.asarray(self.b0_map_ppm is not None),
                 t2_star_map=(
                     np.asarray(self.t2_star_map)
                     if self.t2_star_map is not None
@@ -679,6 +717,8 @@ class SpectralPhantom:
                 handle.create_dataset("fov", data=self.fov)
                 if self.b0_map is not None:
                     handle.create_dataset("b0_map", data=self.b0_map)
+                if self.b0_map_ppm is not None:
+                    handle.create_dataset("b0_map_ppm", data=self.b0_map_ppm)
                 if self.t2_star_map is not None:
                     handle.create_dataset("t2_star_map", data=self.t2_star_map)
                 group = handle.create_group("concentration_maps")
@@ -706,6 +746,11 @@ class SpectralPhantom:
                     for index, item in enumerate(species)
                 }
                 b0 = np.asarray(data["b0_map"]) if bool(data["has_b0"]) else None
+                b0_ppm = (
+                    np.asarray(data["b0_map_ppm"])
+                    if "has_b0_ppm" in data.files and bool(data["has_b0_ppm"])
+                    else None
+                )
                 t2_star = (
                     np.asarray(data["t2_star_map"])
                     if bool(data["has_t2_star"])
@@ -726,6 +771,7 @@ class SpectralPhantom:
                     for index, item in enumerate(species)
                 }
                 b0 = handle["b0_map"][...] if "b0_map" in handle else None
+                b0_ppm = handle["b0_map_ppm"][...] if "b0_map_ppm" in handle else None
                 t2_star = (
                     handle["t2_star_map"][...] if "t2_star_map" in handle else None
                 )
@@ -738,6 +784,7 @@ class SpectralPhantom:
             concentration_maps=maps,
             t2_star_map=t2_star,
             b0_map=b0,
+            b0_map_ppm=b0_ppm,
             field_strength=float(header["field_strength"]),
             nucleus=str(header["nucleus"]),
             name=str(header["name"]),

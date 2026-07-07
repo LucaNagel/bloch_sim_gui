@@ -18,6 +18,22 @@ from blochsimulator.ui.dialogs import PulseImportDialog, SettingsDialog
 from blochsimulator.ui.main_window import BlochSimulatorGUI
 
 
+def test_log_messages_include_local_timestamp():
+    window = MagicMock()
+    cursor = window.log_widget.textCursor.return_value
+
+    with patch(
+        "blochsimulator.ui.main_window.time.strftime",
+        return_value="2026-07-07 14:05:09",
+    ):
+        BlochSimulatorGUI.log_message(window, "Compiling sequence…")
+
+    window.log_widget.append.assert_called_once_with(
+        "[2026-07-07 14:05:09] Compiling sequence…"
+    )
+    window.log_widget.moveCursor.assert_called_once_with(cursor.End)
+
+
 def test_gui_instantiation():
     """Smoke test to ensure the main window can be instantiated without crashing."""
     # Ensure a QApplication exists
@@ -56,6 +72,7 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     assert not dialog.limit_spin.isEnabled()
     assert dialog.get_export_directory() == tmp_path
     assert dialog.tooltips_enabled()
+    assert dialog.sequence_live_progress_enabled()
     assert [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())] == [
         "General",
         "Memory",

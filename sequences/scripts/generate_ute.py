@@ -14,7 +14,7 @@ def main(
     plot: bool = False,
     test_report: bool = False,
     write_seq: bool = False,
-    seq_filename: str = 'ute_pypulseq.seq',
+    seq_filename: str = "ute_pypulseq.seq",
     *,
     fov: float | tuple[float, float] = 250e-3,
     n_x: int = 64,
@@ -73,9 +73,9 @@ def main(
     # Set system limits
     system = pp.Opts(
         max_grad=28,
-        grad_unit='mT/m',
+        grad_unit="mT/m",
         max_slew=100,
-        slew_unit='T/m/s',
+        slew_unit="T/m/s",
         rf_ringdown_time=20e-6,
         rf_dead_time=100e-6,
         adc_dead_time=10e-6,
@@ -94,26 +94,37 @@ def main(
         system=system,
         return_gz=True,
         delay=system.rf_dead_time,
-        use='excitation',
+        use="excitation",
     )
 
     # Align RO asymmetry to ADC samples
     n_x_oversampled = np.round(readout_oversampling * n_x)
-    readout_asymmetry = pp.round_half_up(readout_asymmetry * n_x_oversampled / 2) / n_x_oversampled * 2
+    readout_asymmetry = (
+        pp.round_half_up(readout_asymmetry * n_x_oversampled / 2) / n_x_oversampled * 2
+    )
 
     # Define other gradients and ADC events
     delta_kx = 1 / fov_x / (1 + readout_asymmetry)
     ro_area = n_x * delta_kx
-    gx = pp.make_trapezoid(channel='x', flat_area=ro_area, flat_time=readout_duration, system=system)
-    adc = pp.make_adc(num_samples=n_x_oversampled, duration=gx.flat_time, delay=gx.rise_time, system=system)
+    gx = pp.make_trapezoid(
+        channel="x", flat_area=ro_area, flat_time=readout_duration, system=system
+    )
+    adc = pp.make_adc(
+        num_samples=n_x_oversampled,
+        duration=gx.flat_time,
+        delay=gx.rise_time,
+        system=system,
+    )
     gx_pre = pp.make_trapezoid(
-        channel='x',
-        area=-(gx.area - ro_area) / 2 - gx.amplitude * adc.dwell / 2 - ro_area / 2 * (1 - readout_asymmetry),
+        channel="x",
+        area=-(gx.area - ro_area) / 2
+        - gx.amplitude * adc.dwell / 2
+        - ro_area / 2 * (1 - readout_asymmetry),
         system=system,
     )
 
     # Gradient spoiling
-    gx_spoil = pp.make_trapezoid(channel='x', area=0.2 * n_x * delta_kx, system=system)
+    gx_spoil = pp.make_trapezoid(channel="x", area=0.2 * n_x * delta_kx, system=system)
 
     # Calculate timing
     te = (
@@ -122,11 +133,16 @@ def main(
         + gx.rise_time
         + adc.dwell * n_x_oversampled / 2 * (1 - readout_asymmetry)
     )
-    tr_delay = tr - pp.calc_duration(gx_pre, gz_reph) - pp.calc_duration(gz) - pp.calc_duration(gx)
+    tr_delay = (
+        tr
+        - pp.calc_duration(gx_pre, gz_reph)
+        - pp.calc_duration(gz)
+        - pp.calc_duration(gx)
+    )
     tr_delay = np.ceil(tr_delay / seq.grad_raster_time) * seq.grad_raster_time
     assert np.all(tr_delay >= pp.calc_duration(gx_spoil))
 
-    print(f'TE = {te * 1e6:.0f} us')
+    print(f"TE = {te * 1e6:.0f} us")
 
     if pp.calc_duration(gz_reph) > pp.calc_duration(gx_pre):
         gx_pre.delay = pp.calc_duration(gz_reph) - pp.calc_duration(gx_pre)
@@ -151,19 +167,19 @@ def main(
             gps = copy(gx_pre)
             gpc.amplitude = gx_pre.amplitude * np.cos(phi)
             gps.amplitude = gx_pre.amplitude * np.sin(phi)
-            gps.channel = 'y'
+            gps.channel = "y"
 
             grc = copy(gx)
             grs = copy(gx)
             grc.amplitude = gx.amplitude * np.cos(phi)
             grs.amplitude = gx.amplitude * np.sin(phi)
-            grs.channel = 'y'
+            grs.channel = "y"
 
             gsc = copy(gx_spoil)
             gss = copy(gx_spoil)
             gsc.amplitude = gx_spoil.amplitude * np.cos(phi)
             gss.amplitude = gx_spoil.amplitude * np.sin(phi)
-            gss.channel = 'y'
+            gss.channel = "y"
 
             seq.add_block(gpc, gps, gz_reph)
             seq.add_block(grc, grs, adc)
@@ -171,9 +187,9 @@ def main(
 
     ok, error_report = seq.check_timing()
     if ok:
-        print('Timing check passed successfully')
+        print("Timing check passed successfully")
     else:
-        print('Timing check failed. Error listing follows:')
+        print("Timing check failed. Error listing follows:")
         [print(e) for e in error_report]
 
     if test_report:
@@ -188,8 +204,8 @@ def main(
         plt.plot(gw[0][0], gw[0][1], gw[1][0], gw[1][1], gw[2][0], gw[2][1])
         plt.show()
 
-    seq.set_definition(key='FOV', value=[fov_x, fov_y, slice_thickness])
-    seq.set_definition(key='Name', value='ute')
+    seq.set_definition(key="FOV", value=[fov_x, fov_y, slice_thickness])
+    seq.set_definition(key="Name", value="ute")
 
     if write_seq:
         seq.write(seq_filename)
@@ -197,5 +213,5 @@ def main(
     return seq
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main(plot=True, write_seq=True)

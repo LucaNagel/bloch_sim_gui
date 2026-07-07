@@ -32,7 +32,9 @@ from .spectral_phantom import ChemicalSpecies, SpectralPhantom  # noqa: F401
 from . import pulse_loader  # noqa: F401
 from .sequence import (  # noqa: F401
     ADCEvent,
+    AcquisitionDimensions,
     CartesianAcquisition,
+    CartesianAcquisitionFrames,
     CompiledSequence,
     GradientEvent,
     RFEvent,
@@ -41,6 +43,7 @@ from .sequence import (  # noqa: F401
     SequenceSimulationResult,
     UnsupportedPulseqVersionError,
     infer_cartesian_acquisition,
+    infer_cartesian_acquisition_frames,
     load_pulseq,
     make_cartesian_epi,
 )

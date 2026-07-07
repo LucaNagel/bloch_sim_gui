@@ -3,11 +3,291 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from types import SimpleNamespace
+from typing import ClassVar, Mapping, Optional, Tuple
 
 import numpy as np
 
 from .model import ADCEvent, GradientEvent, RFEvent, SequenceProgram
+
+
+@dataclass(frozen=True)
+class AcquisitionDimensions:
+    """Map chronological ADC events to explicit outer acquisition indices.
+
+    The indices are deliberately separate from a Cartesian or non-Cartesian
+    trajectory. Each value applies to one complete :class:`ADCEvent`; sample
+    coordinates can be expanded without changing the chronological signal.
+    """
+
+    AXIS_NAMES: ClassVar[Tuple[str, ...]] = (
+        "slice",
+        "echo",
+        "repetition",
+        "segment",
+        "partition",
+    )
+    PULSEQ_LABELS: ClassVar[Mapping[str, str]] = {
+        "slice": "SLC",
+        "echo": "ECO",
+        "repetition": "REP",
+        "segment": "SEG",
+        "partition": "PAR",
+    }
+
+    adc_event_sample_counts: Tuple[int, ...]
+    slice_indices: Tuple[int, ...] = ()
+    echo_indices: Tuple[int, ...] = ()
+    repetition_indices: Tuple[int, ...] = ()
+    segment_indices: Tuple[int, ...] = ()
+    partition_indices: Tuple[int, ...] = ()
+    source: str = "default"
+
+    def __post_init__(self) -> None:
+        counts = tuple(
+            _positive_integer(value, "ADC event sample count")
+            for value in self.adc_event_sample_counts
+        )
+        object.__setattr__(self, "adc_event_sample_counts", counts)
+        event_count = len(counts)
+        for axis in self.AXIS_NAMES:
+            field_name = f"{axis}_indices"
+            values = tuple(getattr(self, field_name))
+            if not values and event_count:
+                values = (0,) * event_count
+            if len(values) != event_count:
+                raise ValueError(f"{field_name} must contain one value per ADC event")
+            normalized = []
+            for value in values:
+                integer = int(value)
+                if integer != value:
+                    raise ValueError(f"{field_name} must contain integer values")
+                normalized.append(integer)
+            object.__setattr__(self, field_name, tuple(normalized))
+        object.__setattr__(self, "source", str(self.source))
+
+    @property
+    def num_adc_events(self) -> int:
+        return len(self.adc_event_sample_counts)
+
+    @property
+    def num_samples(self) -> int:
+        return int(sum(self.adc_event_sample_counts))
+
+    @property
+    def varying_axes(self) -> Tuple[str, ...]:
+        return tuple(
+            axis for axis in self.AXIS_NAMES if len(set(self.event_indices(axis))) > 1
+        )
+
+    def event_indices(self, axis: str) -> Tuple[int, ...]:
+        """Return one index per ADC event for a canonical outer axis."""
+        name = str(axis).lower()
+        if name not in self.AXIS_NAMES:
+            raise ValueError(
+                f"axis must be one of {', '.join(self.AXIS_NAMES)}, got {axis!r}"
+            )
+        return getattr(self, f"{name}_indices")
+
+    def sample_indices(self, axis: str) -> np.ndarray:
+        """Expand event indices to one read-only value per ADC sample."""
+        values = np.repeat(
+            np.asarray(self.event_indices(axis), dtype=np.int64),
+            np.asarray(self.adc_event_sample_counts, dtype=np.int64),
+        )
+        values.setflags(write=False)
+        return values
+
+    def to_metadata(self) -> dict:
+        """Return a JSON-compatible representation."""
+        return {
+            "type": "acquisition_outer_dimensions",
+            "source": self.source,
+            "adc_event_sample_counts": self.adc_event_sample_counts,
+            "event_indices": {
+                axis: self.event_indices(axis) for axis in self.AXIS_NAMES
+            },
+        }
+
+    @classmethod
+    def from_metadata(cls, metadata: Mapping) -> "AcquisitionDimensions":
+        """Restore an explicit acquisition-dimension metadata mapping."""
+        if not isinstance(metadata, Mapping):
+            raise TypeError("acquisition dimension metadata must be a mapping")
+        kind = metadata.get("type", "acquisition_outer_dimensions")
+        if kind != "acquisition_outer_dimensions":
+            raise ValueError(f"unsupported acquisition dimension type {kind!r}")
+        indices = metadata.get("event_indices", {})
+        if not isinstance(indices, Mapping):
+            raise ValueError("event_indices must be a mapping")
+        return cls(
+            adc_event_sample_counts=tuple(metadata.get("adc_event_sample_counts", ())),
+            slice_indices=tuple(indices.get("slice", ())),
+            echo_indices=tuple(indices.get("echo", ())),
+            repetition_indices=tuple(indices.get("repetition", ())),
+            segment_indices=tuple(indices.get("segment", ())),
+            partition_indices=tuple(indices.get("partition", ())),
+            source=str(metadata.get("source", "metadata")),
+        )
+
+    @classmethod
+    def from_program(cls, program: SequenceProgram) -> "AcquisitionDimensions":
+        """Use explicit metadata or Pulseq label state for each ADC event."""
+        sample_counts = tuple(event.num_samples for event in program.adc_events)
+        explicit = program.metadata.get("acquisition_dimensions")
+        if explicit is not None:
+            dimensions = cls.from_metadata(explicit)
+            if dimensions.adc_event_sample_counts != sample_counts:
+                raise ValueError(
+                    "acquisition dimension metadata does not match ADC events"
+                )
+            return dimensions
+
+        label_values = program.metadata.get("adc_label_values", {})
+        if not isinstance(label_values, Mapping):
+            raise ValueError("adc_label_values must be a mapping")
+        axis_values = {}
+        used_labels = False
+        for axis, label in cls.PULSEQ_LABELS.items():
+            values = label_values.get(label)
+            if values is None:
+                axis_values[axis] = (0,) * len(sample_counts)
+                continue
+            values = tuple(values)
+            if len(values) != len(sample_counts):
+                raise ValueError(
+                    f"Pulseq {label} label count does not match ADC events"
+                )
+            axis_values[axis] = values
+            used_labels = True
+        return cls(
+            adc_event_sample_counts=sample_counts,
+            slice_indices=axis_values["slice"],
+            echo_indices=axis_values["echo"],
+            repetition_indices=axis_values["repetition"],
+            segment_indices=axis_values["segment"],
+            partition_indices=axis_values["partition"],
+            source="pulseq_labels" if used_labels else "default",
+        )
+
+
+@dataclass(frozen=True)
+class CartesianAcquisitionFrames:
+    """Validated Cartesian 2D frames within one chronological ADC stream."""
+
+    acquisitions: Tuple["CartesianAcquisition", ...]
+    sample_indices: Tuple[Tuple[int, ...], ...]
+    frame_indices: Tuple[Tuple[int, ...], ...]
+    dimensions: AcquisitionDimensions
+    moment_origins_cyc_per_m: Tuple[Tuple[float, float, float], ...] = ()
+
+    def __post_init__(self) -> None:
+        acquisitions = tuple(self.acquisitions)
+        samples = tuple(
+            tuple(int(value) for value in item) for item in self.sample_indices
+        )
+        frames = tuple(
+            tuple(int(value) for value in item) for item in self.frame_indices
+        )
+        origins = tuple(
+            tuple(float(value) for value in item)
+            for item in self.moment_origins_cyc_per_m
+        )
+        if not origins:
+            origins = tuple((0.0, 0.0, 0.0) for _ in acquisitions)
+        if (
+            not acquisitions
+            or len(acquisitions) != len(samples)
+            or len(frames) != len(samples)
+        ):
+            raise ValueError(
+                "Cartesian frame metadata must contain equal non-zero lengths"
+            )
+        if any(len(item) != len(AcquisitionDimensions.AXIS_NAMES) for item in frames):
+            raise ValueError("each Cartesian frame index must contain all outer axes")
+        if len(origins) != len(acquisitions) or any(len(item) != 3 for item in origins):
+            raise ValueError("each Cartesian frame requires one 3D moment origin")
+        flattened = [value for item in samples for value in item]
+        if len(flattened) != self.dimensions.num_samples:
+            raise ValueError("Cartesian frames do not cover the complete ADC stream")
+        if sorted(flattened) != list(range(self.dimensions.num_samples)):
+            raise ValueError("Cartesian frame sample indices must be a permutation")
+        for acquisition, item in zip(acquisitions, samples):
+            if len(item) != acquisition.num_samples:
+                raise ValueError(
+                    "Cartesian frame sample count does not match its layout"
+                )
+        object.__setattr__(self, "acquisitions", acquisitions)
+        object.__setattr__(self, "sample_indices", samples)
+        object.__setattr__(self, "frame_indices", frames)
+        object.__setattr__(self, "moment_origins_cyc_per_m", origins)
+
+    @property
+    def num_frames(self) -> int:
+        return len(self.acquisitions)
+
+    @property
+    def varying_axes(self) -> Tuple[str, ...]:
+        return tuple(
+            axis
+            for index, axis in enumerate(AcquisitionDimensions.AXIS_NAMES)
+            if len({frame[index] for frame in self.frame_indices}) > 1
+        )
+
+    def frame_label(self, frame: int) -> str:
+        values = self.frame_indices[int(frame)]
+        axes = self.varying_axes or ("frame",)
+        if axes == ("frame",):
+            return f"frame={int(frame)}"
+        return ", ".join(
+            f"{axis}={values[AcquisitionDimensions.AXIS_NAMES.index(axis)]}"
+            for axis in axes
+        )
+
+    def _frame_values(self, values, frame: int) -> np.ndarray:
+        array = np.asarray(values)
+        if array.shape[-1] != self.dimensions.num_samples:
+            raise ValueError(
+                "values do not match the complete chronological ADC stream"
+            )
+        return np.take(array, self.sample_indices[int(frame)], axis=-1)
+
+    def to_cartesian_kspace(self, result, frame: int) -> np.ndarray:
+        """Validate and reshape one selected 2D frame from a result."""
+        frame = int(frame)
+        acquisition = self.acquisitions[frame]
+        times = self._frame_values(result.adc_times_s, frame)
+        acquisition.validate_adc_times(times)
+        if result.adc_gradient_moment_cyc_per_m is not None:
+            moments = np.take(
+                np.asarray(result.adc_gradient_moment_cyc_per_m),
+                self.sample_indices[frame],
+                axis=0,
+            )
+            moments = moments - np.asarray(
+                self.moment_origins_cyc_per_m[frame], dtype=float
+            )
+            acquisition.validate_gradient_moments(moments)
+        return acquisition.reshape_signal(self._frame_values(result.signal, frame))
+
+    def reconstruct(
+        self,
+        result,
+        frame: int,
+        *,
+        norm: Optional[str] = None,
+        coil_combine: Optional[str] = None,
+        voxel_centered: bool = True,
+    ) -> np.ndarray:
+        """Reconstruct one selected validated Cartesian frame."""
+        frame = int(frame)
+        self.to_cartesian_kspace(result, frame)
+        return self.acquisitions[frame].reconstruct(
+            self._frame_values(result.signal, frame),
+            norm=norm,
+            coil_combine=coil_combine,
+            voxel_centered=voxel_centered,
+        )
 
 
 @dataclass(frozen=True)
@@ -242,6 +522,13 @@ def infer_cartesian_acquisition(
     adc_events = program.adc_events
     if not adc_events:
         raise ValueError("sequence contains no ADC events")
+    outer_dimensions = AcquisitionDimensions.from_program(program)
+    if outer_dimensions.varying_axes:
+        axes = ", ".join(outer_dimensions.varying_axes)
+        raise ValueError(
+            "single 2D Cartesian inference does not support varying outer "
+            f"acquisition dimensions: {axes}"
+        )
     read_matrix = adc_events[0].num_samples
     if read_matrix < 2:
         raise ValueError("Cartesian inference requires at least two samples per line")
@@ -360,6 +647,202 @@ def infer_cartesian_acquisition(
     acquisition.validate_adc_times(compiled.adc_times_s)
     acquisition.validate_gradient_moments(moments)
     return acquisition
+
+
+def infer_cartesian_acquisition_frames(
+    program: SequenceProgram,
+    *,
+    compiled=None,
+) -> CartesianAcquisitionFrames:
+    """Infer complete Cartesian 2D frames grouped by outer dimensions.
+
+    Pulseq outer labels are preferred. If they are absent, multiple frames are
+    derived only when at least two RF-delimited groups each contain multiple ADC
+    lines. Distinct RF frequency offsets are interpreted as slice indices;
+    otherwise the groups are repetitions. Every group is independently passed
+    through the strict single-frame Cartesian validator.
+    """
+    from .compiler import SequenceCompiler
+
+    adc_events = program.adc_events
+    if not adc_events:
+        raise ValueError("sequence contains no ADC events")
+    compiled = SequenceCompiler().compile(program) if compiled is None else compiled
+    dimensions = AcquisitionDimensions.from_program(program)
+
+    if dimensions.varying_axes:
+        event_frames = [
+            tuple(
+                dimensions.event_indices(axis)[index] for axis in dimensions.AXIS_NAMES
+            )
+            for index in range(dimensions.num_adc_events)
+        ]
+    else:
+        event_frames, dimensions = _derive_rf_delimited_dimensions(program, dimensions)
+
+    grouped_events = {}
+    for event_index, frame_index in enumerate(event_frames):
+        grouped_events.setdefault(frame_index, []).append(event_index)
+    if len(grouped_events) < 2:
+        raise ValueError("sequence does not contain multiple explicit 2D frames")
+
+    event_offsets = np.concatenate(
+        ([0], np.cumsum(dimensions.adc_event_sample_counts, dtype=np.int64))
+    )
+    acquisitions = []
+    frame_samples = []
+    frame_indices = []
+    moment_origins = []
+    for frame_index, event_indices in grouped_events.items():
+        sample_indices = tuple(
+            value
+            for event_index in event_indices
+            for value in range(
+                int(event_offsets[event_index]), int(event_offsets[event_index + 1])
+            )
+        )
+        subset_dimensions = AcquisitionDimensions(
+            adc_event_sample_counts=tuple(
+                adc_events[index].num_samples for index in event_indices
+            ),
+            slice_indices=tuple(frame_index[0] for _ in event_indices),
+            echo_indices=tuple(frame_index[1] for _ in event_indices),
+            repetition_indices=tuple(frame_index[2] for _ in event_indices),
+            segment_indices=tuple(frame_index[3] for _ in event_indices),
+            partition_indices=tuple(frame_index[4] for _ in event_indices),
+            source=dimensions.source,
+        )
+        subset_metadata = dict(program.metadata)
+        subset_metadata["acquisition_dimensions"] = subset_dimensions.to_metadata()
+        subset_program = SequenceProgram(
+            events=tuple(adc_events[index] for index in event_indices),
+            duration_s=program.duration_s,
+            source=program.source,
+            version=program.version,
+            metadata=subset_metadata,
+        )
+        moment_origin = _frame_gradient_moment_origin(
+            program, compiled, adc_events[event_indices[0]].start_s
+        )
+        subset_compiled = SimpleNamespace(
+            adc_times_s=np.take(compiled.adc_times_s, sample_indices),
+            adc_gradient_moment_cyc_per_m=(
+                np.take(compiled.adc_gradient_moment_cyc_per_m, sample_indices, axis=0)
+                - moment_origin
+            ),
+        )
+        acquisitions.append(
+            infer_cartesian_acquisition(subset_program, compiled=subset_compiled)
+        )
+        frame_samples.append(sample_indices)
+        frame_indices.append(frame_index)
+        moment_origins.append(tuple(float(value) for value in moment_origin))
+
+    return CartesianAcquisitionFrames(
+        acquisitions=tuple(acquisitions),
+        sample_indices=tuple(frame_samples),
+        frame_indices=tuple(frame_indices),
+        dimensions=dimensions,
+        moment_origins_cyc_per_m=tuple(moment_origins),
+    )
+
+
+def _frame_gradient_moment_origin(
+    program: SequenceProgram, compiled, first_adc_start_s: float
+) -> np.ndarray:
+    preceding_rf = [
+        rf for rf in program.rf_events if rf.end_s <= first_adc_start_s + 1e-15
+    ]
+    if not preceding_rf:
+        return np.zeros(3, dtype=float)
+    reference_time = preceding_rf[-1].start_s
+    boundaries = np.concatenate(([0.0], np.asarray(compiled.interval_end_s)))
+    moments = np.vstack(
+        (
+            np.zeros((1, 3), dtype=float),
+            np.cumsum(
+                np.asarray(compiled.gradient_hz_per_m)
+                * np.asarray(compiled.dt_s)[:, None],
+                axis=0,
+            ),
+        )
+    )
+    index = int(np.argmin(np.abs(boundaries - reference_time)))
+    tolerance = max(1e-12, abs(reference_time) * 1e-10)
+    if abs(boundaries[index] - reference_time) > tolerance:
+        raise ValueError("RF reference time is not a compiled sequence boundary")
+    return moments[index]
+
+
+def _derive_rf_delimited_dimensions(
+    program: SequenceProgram,
+    dimensions: AcquisitionDimensions,
+):
+    rf_events = program.rf_events
+    if len(rf_events) < 2:
+        raise ValueError("outer dimensions are absent and cannot be derived")
+
+    rf_group_for_event = []
+    for adc in program.adc_events:
+        preceding = [
+            index
+            for index, rf in enumerate(rf_events)
+            if rf.end_s <= adc.start_s + 1e-15
+        ]
+        if not preceding:
+            raise ValueError("an ADC event precedes the first RF excitation")
+        rf_group_for_event.append(preceding[-1])
+    used_groups = tuple(dict.fromkeys(rf_group_for_event))
+    counts = [rf_group_for_event.count(group) for group in used_groups]
+    if len(used_groups) < 2 or min(counts) < 2:
+        raise ValueError(
+            "RF-delimited frame derivation requires multiple ADC lines per frame"
+        )
+
+    offsets = np.asarray(
+        [rf_events[group].frequency_offset_hz for group in used_groups], dtype=float
+    )
+    slice_selective = all(
+        any(
+            gradient.axis == "z"
+            and gradient.start_s < rf_events[group].end_s
+            and gradient.end_s > rf_events[group].start_s
+            and np.any(gradient.samples_hz_per_m != 0)
+            for gradient in program.gradient_events
+        )
+        for group in used_groups
+    )
+    if slice_selective and np.unique(np.round(offsets, decimals=9)).size == len(
+        used_groups
+    ):
+        ordered = np.argsort(offsets)
+        group_values = {
+            used_groups[int(group_position)]: int(rank)
+            for rank, group_position in enumerate(ordered)
+        }
+        axis = "slice"
+        source = "rf_frequency_offsets"
+    else:
+        group_values = {group: index for index, group in enumerate(used_groups)}
+        axis = "repetition"
+        source = "rf_delimited_repetitions"
+
+    derived = {name: [0] * dimensions.num_adc_events for name in dimensions.AXIS_NAMES}
+    derived[axis] = [group_values[group] for group in rf_group_for_event]
+    updated = AcquisitionDimensions(
+        adc_event_sample_counts=dimensions.adc_event_sample_counts,
+        slice_indices=tuple(derived["slice"]),
+        echo_indices=tuple(derived["echo"]),
+        repetition_indices=tuple(derived["repetition"]),
+        segment_indices=tuple(derived["segment"]),
+        partition_indices=tuple(derived["partition"]),
+        source=source,
+    )
+    event_frames = [
+        tuple(updated.event_indices(name)[index] for name in updated.AXIS_NAMES)
+        for index in range(updated.num_adc_events)
+    ]
+    return event_frames, updated
 
 
 def make_cartesian_epi(

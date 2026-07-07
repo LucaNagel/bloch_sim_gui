@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence, Tuple
+from typing import Callable, Iterable, Sequence, Tuple
 
 import numpy as np
 
@@ -59,12 +59,36 @@ class SequenceCompiler:
         program: SequenceProgram,
         *,
         checkpoints_s: Sequence[float] = (),
+        simulation_timestep_s: float | None = None,
+        status_callback: Callable[[str], None] | None = None,
     ) -> CompiledSequence:
+        def status(message: str) -> None:
+            if status_callback is not None:
+                status_callback(message)
+
+        if simulation_timestep_s is not None and (
+            not np.isfinite(simulation_timestep_s) or simulation_timestep_s <= 0
+        ):
+            raise ValueError("simulation_timestep_s must be finite and positive")
+
+        status(f"Validating {len(program.events):,} sequence events…")
         checkpoints = self._validate_checkpoints(checkpoints_s, program.duration_s)
         self._validate_gradient_overlaps(program.gradient_events)
 
+        status(f"Expanding {len(program.adc_events):,} ADC events…")
         adc_times, adc_demod = self._adc_samples(program.adc_events)
-        boundaries = self._build_boundaries(program, adc_times, checkpoints)
+        resolution = (
+            "native event rasters"
+            if simulation_timestep_s is None
+            else f"{simulation_timestep_s * 1e6:g} µs RF-active time step"
+        )
+        status(f"Building the sparse sequence timeline ({resolution})…")
+        boundaries = self._build_boundaries(
+            program,
+            adc_times,
+            checkpoints,
+            simulation_timestep_s,
+        )
         if boundaries.size == 1:
             dt = np.zeros(0, dtype=float)
             interval_end = np.zeros(0, dtype=float)
@@ -80,6 +104,7 @@ class SequenceCompiler:
             # Accumulate each event only into intervals it overlaps. Iterating over
             # every event for every interval made full GRE/EPI programs quadratic
             # in practice, even though the event collection is sparse.
+            status(f"Rasterizing {len(program.rf_events):,} RF events…")
             for event in program.rf_events:
                 first, last = self._overlapping_interval_range(
                     interval_end, starts, event.start_s, event.end_s
@@ -88,6 +113,7 @@ class SequenceCompiler:
                     rf_integrals[index] += self._rf_event_integral(
                         event, starts[index], interval_end[index]
                     )
+            status(f"Rasterizing {len(program.gradient_events):,} gradient events…")
             for event in program.gradient_events:
                 axis_index = "xyz".index(event.axis)
                 first, last = self._overlapping_interval_range(
@@ -104,6 +130,7 @@ class SequenceCompiler:
             rf = rf_integrals / dt
             gradients = gradient_integrals / dt[:, None]
 
+        status(f"Finalizing {dt.size:,} compiled intervals…")
         adc_states = self._times_to_state_indices(boundaries, adc_times)
         checkpoint_states = self._times_to_state_indices(boundaries, checkpoints)
         state_gradient_moments = np.vstack(
@@ -166,21 +193,45 @@ class SequenceCompiler:
         program: SequenceProgram,
         adc_times: np.ndarray,
         checkpoints: np.ndarray,
+        simulation_timestep_s: float | None,
     ) -> np.ndarray:
         values = [0.0, program.duration_s]
         values.extend(adc_times.tolist())
         values.extend(checkpoints.tolist())
         for event in program.events:
             values.extend((event.start_s, event.end_s))
-        rf_ranges = [(event.start_s, event.end_s) for event in program.rf_events]
+        rf_ranges = sorted(
+            ((event.start_s, event.end_s) for event in program.rf_events),
+            key=lambda value: value[0],
+        )
+        rf_starts = np.asarray([value[0] for value in rf_ranges], dtype=float)
+        rf_ends = np.asarray([value[1] for value in rf_ranges], dtype=float)
+        rf_max_ends = np.maximum.accumulate(rf_ends)
         for event in program.rf_events:
-            values.extend(
-                (
-                    event.start_s + np.arange(1, event.samples_hz.size) * event.raster_s
-                ).tolist()
+            step = (
+                event.raster_s
+                if simulation_timestep_s is None
+                else max(event.raster_s, simulation_timestep_s)
             )
+            internal_count = max(
+                0,
+                int(np.ceil((event.end_s - event.start_s) / step)) - 1,
+            )
+            values.extend(
+                (event.start_s + np.arange(1, internal_count + 1) * step).tolist()
+            )
+        if simulation_timestep_s is not None:
+            return self._coalesce_boundaries(values, program.duration_s)
         for event in program.gradient_events:
-            for rf_start, rf_end in rf_ranges:
+            # Only RF events that can overlap this gradient need inspection.
+            # The former all-gradient x all-RF loop dominated compilation of
+            # long 3D acquisitions even though most pairs are far apart.
+            first_rf = int(np.searchsorted(rf_max_ends, event.start_s, side="right"))
+            for rf_index in range(first_rf, rf_starts.size):
+                rf_start = rf_starts[rf_index]
+                if rf_start >= event.end_s:
+                    break
+                rf_end = rf_ends[rf_index]
                 overlap_start = max(event.start_s, rf_start)
                 overlap_end = min(event.end_s, rf_end)
                 if overlap_start >= overlap_end:
@@ -200,16 +251,18 @@ class SequenceCompiler:
                             + np.arange(first, last + 1, dtype=float) * event.raster_s
                         ).tolist()
                     )
+        return self._coalesce_boundaries(values, program.duration_s)
+
+    @staticmethod
+    def _coalesce_boundaries(values, duration: float) -> np.ndarray:
         boundaries = np.sort(np.asarray(values, dtype=float))
         tolerance = max(
             1e-15,
-            32 * np.spacing(max(1.0, abs(program.duration_s))),
+            32 * np.spacing(max(1.0, abs(duration))),
         )
         boundaries[np.abs(boundaries) < tolerance] = 0.0
-        boundaries[np.abs(boundaries - program.duration_s) < tolerance] = (
-            program.duration_s
-        )
-        boundaries = boundaries[(boundaries >= 0) & (boundaries <= program.duration_s)]
+        boundaries[np.abs(boundaries - duration) < tolerance] = duration
+        boundaries = boundaries[(boundaries >= 0) & (boundaries <= duration)]
         if boundaries.size == 0:
             return boundaries
         coalesced = [float(boundaries[0])]
@@ -217,7 +270,7 @@ class SequenceCompiler:
         for value in boundaries[1:]:
             value = float(value)
             if value - group_anchor <= tolerance:
-                if value == program.duration_s:
+                if value == duration:
                     coalesced[-1] = value
                 continue
             coalesced.append(value)

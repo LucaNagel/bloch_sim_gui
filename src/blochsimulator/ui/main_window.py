@@ -1990,7 +1990,8 @@ class BlochSimulatorGUI(QMainWindow):
 
     def log_message(self, message: str):
         """Append a message to the log console."""
-        self.log_widget.append(message)
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.log_widget.append(f"[{timestamp}] {message}")
         self.log_widget.moveCursor(self.log_widget.textCursor().End)
 
     def _update_time_step(self, us_value: float):
@@ -3794,6 +3795,9 @@ class BlochSimulatorGUI(QMainWindow):
             tooltips_enabled=self._load_tooltips_enabled(),
             parent=self,
             initial_tab=initial_tab,
+            sequence_live_progress_enabled=self.app_settings.value(
+                "sequence/live_progress_enabled", True, type=bool
+            ),
         )
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -3818,9 +3822,16 @@ class BlochSimulatorGUI(QMainWindow):
         )
         tooltips_enabled = dialog.tooltips_enabled()
         self.app_settings.setValue("interface/tooltips_enabled", tooltips_enabled)
+        live_progress_enabled = dialog.sequence_live_progress_enabled()
+        self.app_settings.setValue(
+            "sequence/live_progress_enabled", live_progress_enabled
+        )
         self.app_settings.sync()
         set_default_memory_policy(policy)
         self._set_tooltips_enabled(tooltips_enabled)
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        if sequence_widget is not None:
+            sequence_widget.set_live_preview_enabled(live_progress_enabled)
         self.statusBar().showMessage("Settings updated", 5000)
 
     def show_memory_settings(self):

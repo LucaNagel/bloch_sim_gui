@@ -29,18 +29,23 @@ from PyQt5.QtWidgets import (
 )
 
 from ..phantom import Phantom, PhantomFactory
+from ..notebook_exporter import export_sequence_result_notebook
+from ..paths import workspace_directory
 from ..spectral_phantom import SpectralPhantom
 from ..sequence import (
     ADCEvent,
     CartesianAcquisition,
+    CartesianAcquisitionFrames,
     RFEvent,
     SequenceCompiler,
     SequenceProgram,
     infer_cartesian_acquisition,
+    infer_cartesian_acquisition_frames,
     load_pulseq,
     make_cartesian_epi,
 )
 from ..simulator import BlochSimulator
+from ..units import NUCLEUS_GAMMA_HZ_PER_T, ppm_to_hz
 from .volume_viewer import SequenceResultVolumeViewer
 
 
@@ -48,6 +53,8 @@ class SequenceSimulationThread(QThread):
     """Run chunked sequence simulation without blocking Qt."""
 
     progress = pyqtSignal(int, int)
+    stage = pyqtSignal(str)
+    preview = pyqtSignal(float, object)
     result_ready = pyqtSignal(object)
     failed = pyqtSignal(str)
 
@@ -58,6 +65,11 @@ class SequenceSimulationThread(QThread):
         phantom,
         checkpoints_s,
         signal_weighting="voxel",
+        field_strength_t=3.0,
+        nucleus="H1",
+        live_preview=True,
+        chunk_voxels=None,
+        simulation_timestep_s=1e-6,
     ):
         super().__init__()
         self.simulator = simulator
@@ -65,6 +77,11 @@ class SequenceSimulationThread(QThread):
         self.phantom = phantom
         self.checkpoints_s = checkpoints_s
         self.signal_weighting = signal_weighting
+        self.field_strength_t = field_strength_t
+        self.nucleus = nucleus
+        self.live_preview = bool(live_preview)
+        self.chunk_voxels = chunk_voxels
+        self.simulation_timestep_s = simulation_timestep_s
         self._cancel_requested = False
 
     def request_cancel(self):
@@ -77,14 +94,27 @@ class SequenceSimulationThread(QThread):
                 if isinstance(self.phantom, SpectralPhantom)
                 else self.simulator.simulate_sequence
             )
-            result = simulate(
-                self.program,
-                self.phantom,
-                checkpoints_s=self.checkpoints_s,
-                signal_weighting=self.signal_weighting,
-                progress_callback=lambda done, total: self.progress.emit(done, total),
-                cancel_callback=lambda: self._cancel_requested,
-            )
+            kwargs = {
+                "checkpoints_s": self.checkpoints_s,
+                "signal_weighting": self.signal_weighting,
+                "progress_callback": lambda done, total: self.progress.emit(
+                    done, total
+                ),
+                "chunk_voxels": self.chunk_voxels,
+                "cancel_callback": lambda: self._cancel_requested,
+                "status_callback": lambda message: self.stage.emit(message),
+                "simulation_timestep_s": self.simulation_timestep_s,
+            }
+            if self.live_preview:
+                kwargs["preview_callback"] = lambda fraction, signal: (
+                    self.preview.emit(fraction, signal)
+                )
+            if isinstance(self.phantom, SpectralPhantom):
+                kwargs.update(
+                    field_strength_t=self.field_strength_t,
+                    nucleus=self.nucleus,
+                )
+            result = simulate(self.program, self.phantom, **kwargs)
             if not self._cancel_requested:
                 self.result_ready.emit(result)
         except Exception as exc:
@@ -101,9 +131,16 @@ class SequenceSimulationWidget(QWidget):
         super().__init__(parent)
         self.program: Optional[SequenceProgram] = None
         self.acquisition: Optional[CartesianAcquisition] = None
+        self.acquisition_frames: Optional[CartesianAcquisitionFrames] = None
         self.phantom: Optional[Phantom] = None
         self.result = None
         self.worker = None
+        settings = getattr(parent, "app_settings", None)
+        self.live_preview_enabled = (
+            bool(settings.value("sequence/live_progress_enabled", True, type=bool))
+            if settings is not None
+            else True
+        )
         self.acquisition_note = ""
         self.simulator = BlochSimulator(use_parallel=True, num_threads=4)
         self._build_ui()
@@ -180,6 +217,22 @@ class SequenceSimulationWidget(QWidget):
         self.object_source = QComboBox()
         self.object_source.addItems(["Phantom tab / designer", "Built-in quick object"])
         object_form.addRow("Source", self.object_source)
+        self.field_strength_t = QDoubleSpinBox()
+        self.field_strength_t.setRange(0.01, 30.0)
+        self.field_strength_t.setDecimals(4)
+        self.field_strength_t.setValue(3.0)
+        self.field_strength_t.setSuffix(" T")
+        self.field_strength_t.setToolTip(
+            "Converts field-independent phantom frequency offsets from ppm to Hz"
+        )
+        object_form.addRow("Field strength B0", self.field_strength_t)
+        self.nucleus = QComboBox()
+        self.nucleus.addItems(list(NUCLEUS_GAMMA_HZ_PER_T))
+        self.nucleus.setToolTip("Reference nucleus used for ppm-to-Hz conversion")
+        object_form.addRow("Nucleus", self.nucleus)
+        self.frequency_reference_info = QLabel()
+        self.frequency_reference_info.setWordWrap(True)
+        object_form.addRow("Frequency model", self.frequency_reference_info)
         self.object_type = QComboBox()
         self.object_type.addItems(
             ["None — defined in Phantom tab", "Uniform cube", "Sphere"]
@@ -207,13 +260,13 @@ class SequenceSimulationWidget(QWidget):
         self.t1_ms = self._parameter_spin(1.0, 10000.0, 1000.0, " ms")
         self.t2_ms = self._parameter_spin(0.1, 5000.0, 100.0, " ms")
         self.pd = self._parameter_spin(0.0, 10.0, 1.0, "")
-        self.b0_hz = self._parameter_spin(-10000.0, 10000.0, 0.0, " Hz")
-        self.chemical_hz = self._parameter_spin(-10000.0, 10000.0, 0.0, " Hz")
+        self.b0_ppm = self._parameter_spin(-1000.0, 1000.0, 0.0, " ppm")
+        self.chemical_ppm = self._parameter_spin(-1000.0, 1000.0, 0.0, " ppm")
         object_form.addRow("T1", self.t1_ms)
         object_form.addRow("T2", self.t2_ms)
         object_form.addRow("Proton density", self.pd)
-        object_form.addRow("B0 offset", self.b0_hz)
-        object_form.addRow("Chemical shift", self.chemical_hz)
+        object_form.addRow("B0 inhomogeneity", self.b0_ppm)
+        object_form.addRow("Chemical shift", self.chemical_ppm)
         self.phantom_summary = QLabel()
         self.phantom_summary.setWordWrap(True)
         object_form.addRow("Selected phantom", self.phantom_summary)
@@ -231,8 +284,8 @@ class SequenceSimulationWidget(QWidget):
             self.t1_ms,
             self.t2_ms,
             self.pd,
-            self.b0_hz,
-            self.chemical_hz,
+            self.b0_ppm,
+            self.chemical_ppm,
         )
         self.object_source.currentIndexChanged.connect(self._object_source_changed)
 
@@ -246,11 +299,30 @@ class SequenceSimulationWidget(QWidget):
             ["Relative voxel sum", "Physical voxel volume (3D)"]
         )
         output_form.addRow("Signal weighting", self.signal_weighting)
+        self.frame_selector = QComboBox()
+        self.frame_selector.setEnabled(False)
+        self.frame_selector.currentIndexChanged.connect(self._frame_changed)
+        output_form.addRow("2D acquisition frame", self.frame_selector)
         controls_layout.addWidget(output_group)
         controls_layout.addStretch()
 
         run_panel = QGroupBox("Run")
         run_panel_layout = QVBoxLayout(run_panel)
+        timestep_form = QFormLayout()
+        self.simulation_timestep_us = QDoubleSpinBox()
+        self.simulation_timestep_us.setObjectName("sequence_simulation_timestep_us")
+        self.simulation_timestep_us.setRange(0.1, 1000.0)
+        self.simulation_timestep_us.setDecimals(2)
+        self.simulation_timestep_us.setSingleStep(0.1)
+        self.simulation_timestep_us.setValue(1.0)
+        self.simulation_timestep_us.setSuffix(" µs")
+        self.simulation_timestep_us.setToolTip(
+            "Time step while RF is active. Larger values average RF and "
+            "simultaneous gradients over fewer intervals and can substantially "
+            "reduce runtime. ADC times and event boundaries remain exact."
+        )
+        timestep_form.addRow("Simulation time step", self.simulation_timestep_us)
+        run_panel_layout.addLayout(timestep_form)
         run_row = QHBoxLayout()
         self.run_button = QPushButton("Run sequence simulation")
         self.run_button.clicked.connect(self._run)
@@ -261,7 +333,15 @@ class SequenceSimulationWidget(QWidget):
         run_row.addWidget(self.cancel_button)
         run_panel_layout.addLayout(run_row)
         self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setTextVisible(True)
+        self.progress.setFormat("Not started")
         run_panel_layout.addWidget(self.progress)
+        self.export_button = QPushButton("Export results…")
+        self.export_button.setEnabled(False)
+        self.export_button.clicked.connect(self._export_results)
+        run_panel_layout.addWidget(self.export_button)
         self.status = QLabel("Ready")
         self.status.setWordWrap(True)
         run_panel_layout.addWidget(self.status)
@@ -288,6 +368,14 @@ class SequenceSimulationWidget(QWidget):
         self.gradient_plot.setLabel("left", "Gradient", "kHz/m")
         self.gradient_plot.setLabel("bottom", "Time", "ms")
         self.gradient_plot.addLegend()
+        self.rf_progress_cursor = pg.InfiniteLine(
+            pos=0.0, angle=90, movable=False, pen=pg.mkPen("y", width=2)
+        )
+        self.gradient_progress_cursor = pg.InfiniteLine(
+            pos=0.0, angle=90, movable=False, pen=pg.mkPen("y", width=2)
+        )
+        self.rf_progress_cursor.setVisible(self.live_preview_enabled)
+        self.gradient_progress_cursor.setVisible(self.live_preview_enabled)
         timeline_layout.addWidget(self.rf_plot)
         timeline_layout.addWidget(self.gradient_plot)
         views.addTab(timeline, "Sequence")
@@ -306,7 +394,10 @@ class SequenceSimulationWidget(QWidget):
         self.kspace_view = pg.ImageView()
         self.kspace_view.ui.roiBtn.hide()
         self.kspace_view.ui.menuBtn.hide()
+        self._format_colorbar(self.kspace_view)
         kspace_layout.addWidget(self.kspace_view)
+        self.kspace_zoom_info = QLabel("Zoom: —")
+        kspace_layout.addWidget(self.kspace_zoom_info)
         self.kspace_info = QLabel("No 2D Cartesian result")
         kspace_layout.addWidget(self.kspace_info)
         views.addTab(kspace_page, "2D k-space")
@@ -316,7 +407,10 @@ class SequenceSimulationWidget(QWidget):
         self.reconstruction_view = pg.ImageView()
         self.reconstruction_view.ui.roiBtn.hide()
         self.reconstruction_view.ui.menuBtn.hide()
+        self._format_colorbar(self.reconstruction_view)
         reconstruction_layout.addWidget(self.reconstruction_view)
+        self.reconstruction_zoom_info = QLabel("Zoom: —")
+        reconstruction_layout.addWidget(self.reconstruction_zoom_info)
         self.reconstruction_info = QLabel("No 2D Cartesian result")
         reconstruction_layout.addWidget(self.reconstruction_info)
         views.addTab(reconstruction_page, "2D Reconstruction")
@@ -326,13 +420,46 @@ class SequenceSimulationWidget(QWidget):
         self.state_view = pg.ImageView()
         self.state_view.ui.roiBtn.hide()
         self.state_view.ui.menuBtn.hide()
+        self._format_colorbar(self.state_view)
         state_layout.addWidget(self.state_view)
+        self.state_zoom_info = QLabel("Zoom: —")
+        state_layout.addWidget(self.state_zoom_info)
         self.state_info = QLabel("No result")
         state_layout.addWidget(self.state_info)
         views.addTab(state_page, "Final Mz")
 
         self.result_volume_viewer = SequenceResultVolumeViewer()
         views.addTab(self.result_volume_viewer, "Spatial Magnetization")
+
+        for view, label in (
+            (self.kspace_view, self.kspace_zoom_info),
+            (self.reconstruction_view, self.reconstruction_zoom_info),
+            (self.state_view, self.state_zoom_info),
+        ):
+            view.getView().sigRangeChanged.connect(
+                lambda *_, image_view=view, zoom_label=label: self._update_zoom_label(
+                    image_view, zoom_label
+                )
+            )
+
+    @staticmethod
+    def _format_colorbar(view):
+        view.ui.histogram.axis.tickStrings = lambda values, scale, spacing: [
+            f"{value * scale:.2f}" for value in values
+        ]
+
+    @staticmethod
+    def _update_zoom_label(view, label):
+        image = getattr(view, "image", None)
+        if image is None or np.asarray(image).ndim < 2:
+            label.setText("Zoom: —")
+            return
+        x_range, y_range = view.getView().viewRange()
+        visible_x = max(float(x_range[1] - x_range[0]), 1e-12)
+        visible_y = max(float(y_range[1] - y_range[0]), 1e-12)
+        shape = np.asarray(image).shape
+        zoom = max(1.0, min(shape[0] / visible_x, shape[1] / visible_y))
+        label.setText(f"Zoom: {zoom:.2f}×")
 
     @staticmethod
     def _parameter_spin(minimum, maximum, value, suffix):
@@ -357,6 +484,7 @@ class SequenceSimulationWidget(QWidget):
         self.phantom_summary.setVisible(phantom_selected)
         self.open_phantom_button.setVisible(phantom_selected)
         self.refresh_object_summary()
+        self._update_frequency_reference_info()
         if not phantom_selected and self.sequence_source.currentIndex() == 1:
             self._load_cartesian_epi()
 
@@ -391,8 +519,27 @@ class SequenceSimulationWidget(QWidget):
             f"FOV {fov_cm} cm, {phantom.n_active} active voxels\n"
             f"{relaxation_text}"
         )
+        self._update_frequency_reference_info()
         if self.sequence_source.currentIndex() == 1:
             self._load_cartesian_epi()
+
+    def _update_frequency_reference_info(self):
+        if self.object_source.currentIndex() != 0:
+            text = "Built-in B0 and chemical-shift values are entered in ppm."
+        else:
+            phantom = self._selected_designed_phantom()
+            if isinstance(phantom, SpectralPhantom):
+                text = (
+                    "Spectral B0 and peak offsets are converted from ppm at run time."
+                )
+            elif phantom is not None:
+                text = (
+                    "This conventional phantom stores fixed frequency maps in Hz; "
+                    "field/nucleus conversion applies only to ppm spectral designs."
+                )
+            else:
+                text = "ppm conversion applies after a spectral phantom is selected."
+        self.frequency_reference_info.setText(text)
 
     def _open_phantom_tab(self):
         main_window = self.window()
@@ -436,6 +583,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _load_internal_sequence(self):
         self.acquisition = None
+        self.acquisition_frames = None
         self.acquisition_note = ""
         rf_duration = 1e-3
         dwell = 100e-6
@@ -453,6 +601,7 @@ class SequenceSimulationWidget(QWidget):
         self._show_program()
 
     def _load_cartesian_epi(self):
+        self.acquisition_frames = None
         bandwidth_hz = self.sampling_bandwidth_khz.value() * 1000.0
         designed = (
             self._selected_designed_phantom()
@@ -481,7 +630,10 @@ class SequenceSimulationWidget(QWidget):
 
     def _load_pulseq_file(self):
         filename, _ = QFileDialog.getOpenFileName(
-            self, "Load Pulseq sequence", "", "Pulseq sequence (*.seq);;All files (*)"
+            self,
+            "Load Pulseq sequence",
+            str(workspace_directory("sequences")),
+            "Pulseq sequence (*.seq);;All files (*)",
         )
         if not filename:
             return
@@ -494,17 +646,44 @@ class SequenceSimulationWidget(QWidget):
         """Load a Pulseq file and attach a validated 2D Cartesian layout."""
         self.program = load_pulseq(filename)
         compiled = SequenceCompiler().compile(self.program)
+        self.acquisition_frames = None
         try:
             self.acquisition = infer_cartesian_acquisition(
                 self.program, compiled=compiled
             )
             self.acquisition_note = "Cartesian acquisition inferred from ADC moments"
-        except ValueError as exc:
-            self.acquisition = None
-            self.acquisition_note = f"Cartesian inference unavailable: {exc}"
+        except ValueError as single_error:
+            try:
+                self.acquisition_frames = infer_cartesian_acquisition_frames(
+                    self.program, compiled=compiled
+                )
+                self.acquisition = self.acquisition_frames.acquisitions[0]
+                metadata = dict(self.program.metadata)
+                metadata["acquisition_dimensions"] = (
+                    self.acquisition_frames.dimensions.to_metadata()
+                )
+                self.program = SequenceProgram(
+                    events=self.program.events,
+                    duration_s=self.program.duration_s,
+                    source=self.program.source,
+                    version=self.program.version,
+                    metadata=metadata,
+                )
+                axes = ", ".join(self.acquisition_frames.varying_axes)
+                self.acquisition_note = (
+                    f"{self.acquisition_frames.num_frames} Cartesian 2D frames "
+                    f"inferred ({axes})"
+                )
+            except ValueError as frame_error:
+                self.acquisition = None
+                self.acquisition_note = (
+                    f"Cartesian inference unavailable: {single_error}; "
+                    f"frame grouping unavailable: {frame_error}"
+                )
         self._apply_pulseq_fov()
         self.sequence_source.setCurrentIndex(2)
         self._show_program()
+        self._configure_frame_selector()
         status = f"Loaded {Path(filename).name}"
         if self.acquisition_note:
             status += f"; {self.acquisition_note}"
@@ -547,6 +726,11 @@ class SequenceSimulationWidget(QWidget):
                 f"BW: {self.acquisition.sampling_bandwidth_hz/1000:.3f} kHz"
                 f"{offsets}"
             )
+            if self.acquisition_frames is not None:
+                acquisition_text += (
+                    f"; frames={self.acquisition_frames.num_frames} "
+                    f"({', '.join(self.acquisition_frames.varying_axes)})"
+                )
         elif self.acquisition_note:
             acquisition_text = f"\n{self.acquisition_note}"
         self.sequence_info.setText(
@@ -582,6 +766,9 @@ class SequenceSimulationWidget(QWidget):
                 symbolBrush="y",
                 name="ADC",
             )
+        self.rf_plot.addItem(self.rf_progress_cursor)
+        self.gradient_plot.addItem(self.gradient_progress_cursor)
+        self._set_sequence_cursor(0.0)
 
     def _build_phantom(self):
         if self.object_source.currentIndex() == 0:
@@ -613,10 +800,32 @@ class SequenceSimulationWidget(QWidget):
             t1_map=np.where(mask, t1, 0.0),
             t2_map=np.where(mask, t2, 0.0),
             pd_map=np.where(mask, pd, 0.0),
-            b0_map=np.where(mask, self.b0_hz.value(), 0.0),
-            chemical_shift_map=np.where(mask, self.chemical_hz.value(), 0.0),
+            b0_map=np.where(
+                mask,
+                ppm_to_hz(
+                    self.b0_ppm.value(),
+                    self.field_strength_t.value(),
+                    self.nucleus.currentText(),
+                ),
+                0.0,
+            ),
+            chemical_shift_map=np.where(
+                mask,
+                ppm_to_hz(
+                    self.chemical_ppm.value(),
+                    self.field_strength_t.value(),
+                    self.nucleus.currentText(),
+                ),
+                0.0,
+            ),
             mask=mask,
             name="Sequence simulation object",
+            metadata={
+                "field_strength_t": self.field_strength_t.value(),
+                "nucleus": self.nucleus.currentText(),
+                "b0_inhomogeneity_ppm": self.b0_ppm.value(),
+                "chemical_shift_ppm": self.chemical_ppm.value(),
+            },
         )
 
     def _checkpoint_seconds(self):
@@ -638,37 +847,125 @@ class SequenceSimulationWidget(QWidget):
         try:
             self._build_phantom()
             checkpoints = self._checkpoint_seconds()
-            compiled = SequenceCompiler().compile(
-                self.program, checkpoints_s=checkpoints
-            )
-            if self.acquisition is not None:
-                self.acquisition.validate_adc_times(compiled.adc_times_s)
-                self.acquisition.validate_gradient_moments(
-                    compiled.adc_gradient_moment_cyc_per_m
-                )
         except Exception as exc:
             QMessageBox.critical(self, "Invalid simulation", str(exc))
             return
         self.run_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
-        self.progress.setRange(0, 0)
-        self.status.setText("Simulating…")
+        self.export_button.setEnabled(False)
+        work_units = self._estimated_work_units()
+        self.progress.setRange(0, work_units)
+        self.progress.setValue(0)
+        self.progress.setFormat("Simulation %v/%m")
+        self._status_update("Preparing and compiling sequence…")
+        chunk_voxels = self._preview_chunk_voxels()
         self.worker = SequenceSimulationThread(
             self.simulator,
             self.program,
             self.phantom,
             checkpoints,
             self._signal_weighting_mode(),
+            self.field_strength_t.value(),
+            self.nucleus.currentText(),
+            self.live_preview_enabled,
+            chunk_voxels,
+            simulation_timestep_s=self.simulation_timestep_us.value() * 1e-6,
         )
         self.worker.progress.connect(self._progress)
+        self.worker.stage.connect(self._status_update)
+        self.worker.preview.connect(self._preview)
         self.worker.result_ready.connect(self._finished)
         self.worker.failed.connect(self._failed)
         self.worker.start()
 
+    def _status_update(self, message):
+        """Show worker stages in both the workspace and the main log."""
+        message = str(message)
+        self.status.setText(message)
+        logger = getattr(self.window(), "log_message", None)
+        if callable(logger):
+            logger(f"Sequence simulation: {message}")
+
     def _progress(self, done, total):
         self.progress.setRange(0, total)
         self.progress.setValue(done)
-        self.status.setText(f"Chunk {done}/{total}")
+        self.progress.setFormat("Simulation %v/%m")
+        unit = "Component" if isinstance(self.phantom, SpectralPhantom) else "Chunk"
+        self.status.setText(f"{unit} {done}/{total}")
+
+    def _estimated_work_units(self):
+        if isinstance(self.phantom, SpectralPhantom):
+            return max(
+                1,
+                sum(
+                    bool(np.any(values > 0))
+                    for values in self.phantom.concentration_maps.values()
+                ),
+            )
+        chunk_voxels = self._preview_chunk_voxels()
+        if chunk_voxels is None:
+            chunk_voxels = 65536
+        return max(1, int(np.ceil(self.phantom.n_active / chunk_voxels)))
+
+    def _preview_chunk_voxels(self):
+        if not self.live_preview_enabled or isinstance(self.phantom, SpectralPhantom):
+            return None
+        return min(65536, max(256, int(np.ceil(self.phantom.n_active / 32))))
+
+    def set_live_preview_enabled(self, enabled):
+        """Apply the persisted live sequence visualization preference."""
+        self.live_preview_enabled = bool(enabled)
+        self.rf_progress_cursor.setVisible(self.live_preview_enabled)
+        self.gradient_progress_cursor.setVisible(self.live_preview_enabled)
+
+    def _set_sequence_cursor(self, fraction):
+        duration_ms = self.program.duration_s * 1000.0 if self.program else 0.0
+        position = float(np.clip(fraction, 0.0, 1.0)) * duration_ms
+        self.rf_progress_cursor.setPos(position)
+        self.gradient_progress_cursor.setPos(position)
+
+    def _preview(self, fraction, signal):
+        """Render a throttled intermediate timeline, k-space and image state."""
+        if not self.live_preview_enabled or self.program is None:
+            return
+        fraction = float(np.clip(fraction, 0.0, 1.0))
+        self._set_sequence_cursor(fraction)
+        if self.acquisition is None:
+            return
+        adc_times = (
+            np.concatenate([event.sample_times_s for event in self.program.adc_events])
+            if self.program.adc_events
+            else np.empty(0)
+        )
+        acquired = int(
+            np.count_nonzero(adc_times <= fraction * self.program.duration_s)
+        )
+        partial_signal = np.array(signal, copy=True)
+        partial_signal[..., acquired:] = 0.0
+        self._show_live_cartesian(partial_signal, acquired, adc_times.size)
+
+    def _show_live_cartesian(self, signal, acquired, total):
+        selected = self.frame_selector.currentData()
+        frame = max(0, 0 if selected is None or int(selected) < 0 else int(selected))
+        if self.acquisition_frames is not None:
+            acquisition = self.acquisition_frames.acquisitions[frame]
+            frame_signal = self.acquisition_frames._frame_values(signal, frame)
+        else:
+            acquisition = self.acquisition
+            frame_signal = signal
+        kspace = acquisition.reshape_signal(frame_signal)
+        if kspace.ndim == 3:
+            kspace_magnitude = np.sqrt(np.sum(np.abs(kspace) ** 2, axis=0))
+            image = acquisition.reconstruct(frame_signal, coil_combine="rss")
+        else:
+            kspace_magnitude = np.abs(kspace)
+            image = acquisition.reconstruct(frame_signal)
+        self.kspace_view.setImage(np.log1p(kspace_magnitude).T, autoLevels=True)
+        self.reconstruction_view.setImage(np.abs(image).T, autoLevels=True)
+        self.kspace_info.setText(f"Live k-space: {acquired}/{total} ADC samples")
+        self.reconstruction_info.setText(
+            f"Live |IFFT2| from {acquired}/{total} ADC samples"
+        )
 
     def _cancel(self):
         if self.worker is not None:
@@ -677,8 +974,11 @@ class SequenceSimulationWidget(QWidget):
 
     def _finished(self, result):
         self.result = result
-        self._reset_run_controls()
-        self.status.setText("Simulation complete")
+        self._reset_run_controls(completed=True)
+        self.export_button.setEnabled(True)
+        self._status_update("Simulation complete")
+        self._set_sequence_cursor(1.0)
+        self._configure_frame_selector()
         self.signal_plot.clear()
         time_ms = result.adc_times_s * 1000
         signal = np.asarray(result.signal)
@@ -715,12 +1015,34 @@ class SequenceSimulationWidget(QWidget):
         else:
             levels = (mz_min, mz_max)
         self.state_view.setImage(np.asarray(image).T, autoLevels=False, levels=levels)
+        self._update_zoom_label(self.state_view, self.state_zoom_info)
         self.state_info.setText(
             f"Final Mz: min={mz_min:.5g}, max={mz_max:.5g}; "
             f"ADC samples={result.adc_times_s.size}{coil_text}{slice_text}"
         )
         self.result_volume_viewer.set_result(result, self.phantom)
         self._show_cartesian_result(result)
+
+    def _configure_frame_selector(self):
+        self.frame_selector.blockSignals(True)
+        self.frame_selector.clear()
+        if self.acquisition_frames is None:
+            self.frame_selector.addItem("Single 2D frame", 0)
+            self.frame_selector.setEnabled(False)
+        else:
+            self.frame_selector.addItem(
+                f"All {self.acquisition_frames.num_frames} frames (montage)", -1
+            )
+            for frame in range(self.acquisition_frames.num_frames):
+                self.frame_selector.addItem(
+                    self.acquisition_frames.frame_label(frame), frame
+                )
+            self.frame_selector.setEnabled(True)
+        self.frame_selector.blockSignals(False)
+
+    def _frame_changed(self, *_):
+        if self.result is not None:
+            self._show_cartesian_result(self.result)
 
     def _show_cartesian_result(self, result):
         if self.acquisition is None:
@@ -730,33 +1052,52 @@ class SequenceSimulationWidget(QWidget):
             self.reconstruction_info.setText("No Cartesian acquisition metadata")
             return
         try:
-            kspace = result.to_cartesian_kspace(self.acquisition)
-            if kspace.ndim == 3:
-                kspace_magnitude = np.sqrt(np.sum(np.abs(kspace) ** 2, axis=0))
-                image = result.reconstruct_cartesian(
-                    self.acquisition, coil_combine="rss"
-                )
-                coil_text = f", {kspace.shape[0]} coils (RSS)"
+            selected_frame = self.frame_selector.currentData()
+            selected_frame = 0 if selected_frame is None else int(selected_frame)
+            if self.acquisition_frames is not None and selected_frame < 0:
+                frame_views = [
+                    self._cartesian_frame_views(result, frame)
+                    for frame in range(self.acquisition_frames.num_frames)
+                ]
+                kspace_magnitude = self._montage([item[0] for item in frame_views])
+                image = self._montage([item[1] for item in frame_views])
+                acquisition = frame_views[0][2]
+                coil_text = frame_views[0][3]
+                frame_text = f", montage of {self.acquisition_frames.num_frames} frames"
             else:
-                kspace_magnitude = np.abs(kspace)
-                image = np.abs(result.reconstruct_cartesian(self.acquisition))
-                coil_text = ""
+                frame = max(0, selected_frame)
+                kspace_magnitude, image, acquisition, coil_text = (
+                    self._cartesian_frame_views(result, frame)
+                )
+                frame_text = (
+                    f", {self.acquisition_frames.frame_label(frame)}"
+                    if self.acquisition_frames is not None
+                    else ""
+                )
             self.kspace_view.setImage(np.log1p(kspace_magnitude).T, autoLevels=True)
             self.reconstruction_view.setImage(
                 np.asarray(np.abs(image)).T, autoLevels=True
             )
+            self._update_zoom_label(self.kspace_view, self.kspace_zoom_info)
+            self._update_zoom_label(
+                self.reconstruction_view, self.reconstruction_zoom_info
+            )
             self.kspace_info.setText(
-                f"2D log(1+|k|), grid={self.acquisition.phase_matrix}×"
-                f"{self.acquisition.read_matrix}{coil_text}"
+                f"2D log(1+|k|), grid={acquisition.phase_matrix}×"
+                f"{acquisition.read_matrix}{coil_text}{frame_text}"
             )
-            z_note = (
-                "; z-integrated signal (no kz encoding)"
-                if self.phantom.ndim == 3 and self.phantom.shape[2] > 1
-                else "; no kz encoding"
-            )
+            if (
+                self.acquisition_frames is not None
+                and "slice" in self.acquisition_frames.varying_axes
+            ):
+                z_note = "; slice-selective 2D frames (no kz encoding)"
+            elif self.phantom.ndim == 3 and self.phantom.shape[2] > 1:
+                z_note = "; z-integrated signal (no kz encoding)"
+            else:
+                z_note = "; no kz encoding"
             self.reconstruction_info.setText(
                 f"2D |IFFT2|, min={np.min(np.abs(image)):.5g}, "
-                f"max={np.max(np.abs(image)):.5g}{coil_text}{z_note}"
+                f"max={np.max(np.abs(image)):.5g}{coil_text}{frame_text}{z_note}"
             )
         except Exception as exc:
             self.kspace_view.clear()
@@ -765,14 +1106,114 @@ class SequenceSimulationWidget(QWidget):
             self.kspace_info.setText(message)
             self.reconstruction_info.setText(message)
 
+    def _cartesian_frame_views(self, result, frame):
+        if self.acquisition_frames is not None:
+            acquisition = self.acquisition_frames.acquisitions[frame]
+            kspace = self.acquisition_frames.to_cartesian_kspace(result, frame)
+        else:
+            acquisition = self.acquisition
+            kspace = result.to_cartesian_kspace(acquisition)
+        if kspace.ndim == 3:
+            kspace_magnitude = np.sqrt(np.sum(np.abs(kspace) ** 2, axis=0))
+            if self.acquisition_frames is not None:
+                image = self.acquisition_frames.reconstruct(
+                    result, frame, coil_combine="rss"
+                )
+            else:
+                image = result.reconstruct_cartesian(acquisition, coil_combine="rss")
+            coil_text = f", {kspace.shape[0]} coils (RSS)"
+        else:
+            kspace_magnitude = np.abs(kspace)
+            if self.acquisition_frames is not None:
+                image = np.abs(self.acquisition_frames.reconstruct(result, frame))
+            else:
+                image = np.abs(result.reconstruct_cartesian(acquisition))
+            coil_text = ""
+        return (
+            np.asarray(kspace_magnitude),
+            np.asarray(np.abs(image)),
+            acquisition,
+            coil_text,
+        )
+
+    @staticmethod
+    def _montage(images, *, maximum_columns=4, gap=1):
+        arrays = [np.asarray(image) for image in images]
+        if not arrays or any(array.ndim != 2 for array in arrays):
+            raise ValueError("montage requires at least one 2D image")
+        columns = min(len(arrays), int(maximum_columns))
+        rows = int(np.ceil(len(arrays) / columns))
+        height = max(array.shape[0] for array in arrays)
+        width = max(array.shape[1] for array in arrays)
+        canvas = np.zeros(
+            (
+                rows * height + (rows - 1) * gap,
+                columns * width + (columns - 1) * gap,
+            ),
+            dtype=np.result_type(*arrays),
+        )
+        for index, array in enumerate(arrays):
+            row, column = divmod(index, columns)
+            y = row * (height + gap)
+            x = column * (width + gap)
+            canvas[y : y + array.shape[0], x : x + array.shape[1]] = array
+        return canvas
+
     def _failed(self, message):
         self._reset_run_controls()
         self.status.setText(message)
         if message != "Simulation cancelled":
             QMessageBox.critical(self, "Sequence simulation failed", message)
 
-    def _reset_run_controls(self):
+    def _reset_run_controls(self, *, completed=False):
         self.run_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
-        self.progress.setRange(0, 1)
-        self.progress.setValue(1)
+        if completed:
+            self.progress.setValue(self.progress.maximum())
+            self.progress.setFormat("Complete")
+        else:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
+            self.progress.setFormat("Stopped")
+
+    def _export_results(self):
+        if self.result is None:
+            QMessageBox.warning(self, "No result", "Run a simulation first.")
+            return
+        default_path = workspace_directory("exports") / "sequence_result.nc"
+        filename, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export sequence simulation result",
+            str(default_path),
+            (
+                "xarray NetCDF (*.nc);;HDF5 (*.h5);;NumPy archive (*.npz);;"
+                "Jupyter notebook (*.ipynb)"
+            ),
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        if not path.suffix:
+            suffixes = {
+                "xarray NetCDF (*.nc)": ".nc",
+                "HDF5 (*.h5)": ".h5",
+                "NumPy archive (*.npz)": ".npz",
+                "Jupyter notebook (*.ipynb)": ".ipynb",
+            }
+            path = path.with_suffix(suffixes.get(selected_filter, ".nc"))
+        try:
+            if path.suffix.lower() == ".ipynb":
+                data_path = path.with_suffix(".nc")
+                self.result.save(data_path)
+                export_sequence_result_notebook(str(path), str(data_path))
+                exported = f"{path.name}\n{data_path.name}"
+            else:
+                self.result.save(path)
+                exported = path.name
+            QMessageBox.information(
+                self,
+                "Export complete",
+                f"Exported to {path.parent}:\n{exported}",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))

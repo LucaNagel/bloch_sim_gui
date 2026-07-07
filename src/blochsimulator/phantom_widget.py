@@ -50,6 +50,7 @@ import pyqtgraph as pg
 
 # Import phantom module
 from .phantom import Phantom, PhantomFactory
+from .paths import workspace_directory
 from .spectral_phantom import SpectralPhantom
 from .ui.phantom_designer import (
     SpectralPhantomDesignerDialog,
@@ -112,6 +113,12 @@ class PhantomCreatorWidget(QGroupBox):
     def __init__(self):
         super().__init__("Phantom Configuration")
         self.current_phantom = None
+        # Spectral designer dialogs contain nested PyQtGraph scenes and signal
+        # cycles. Letting the last Python reference disappear after exec_() can
+        # defer their destruction until an unrelated GC pass, which is unsafe
+        # while another Qt worker is active on macOS. Retain them for the
+        # lifetime of their parent and let Qt tear down the full tree in order.
+        self._retained_spectral_designer_dialogs = []
         self.init_ui()
 
     def init_ui(self):
@@ -236,6 +243,7 @@ class PhantomCreatorWidget(QGroupBox):
             return
         if phantom_type == "Spectral Shape Designer...":
             dialog = SpectralPhantomDesignerDialog(self)
+            self._retained_spectral_designer_dialogs.append(dialog)
             if dialog.exec_() == QDialog.Accepted:
                 phantom = dialog.get_phantom()
                 self.current_phantom = phantom
@@ -275,7 +283,10 @@ class PhantomCreatorWidget(QGroupBox):
     def load_phantom(self):
         """Load phantom from file."""
         filename, _ = QFileDialog.getOpenFileName(
-            self, "Load Phantom", "", "Phantom Files (*.npz *.h5 *.hdf5);;All Files (*)"
+            self,
+            "Load Phantom",
+            str(workspace_directory("phantoms")),
+            "Phantom Files (*.npz *.h5 *.hdf5);;All Files (*)",
         )
         if filename:
             try:
@@ -295,7 +306,7 @@ class PhantomCreatorWidget(QGroupBox):
         filename, _ = QFileDialog.getSaveFileName(
             self,
             "Save Phantom",
-            f"{self.current_phantom.name}.npz",
+            str(workspace_directory("phantoms") / f"{self.current_phantom.name}.npz"),
             "NumPy Archive (*.npz);;HDF5 File (*.h5)",
         )
         if filename:

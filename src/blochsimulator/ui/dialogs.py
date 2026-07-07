@@ -36,6 +36,7 @@ class SettingsDialog(QDialog):
         tooltips_enabled: bool,
         parent=None,
         initial_tab: str = "general",
+        sequence_live_progress_enabled: bool = True,
     ):
         super().__init__(parent)
         self.setWindowTitle("Settings")
@@ -130,6 +131,20 @@ class SettingsDialog(QDialog):
             "Show short explanations when the pointer rests over controls and input fields."
         )
         interface_layout.addWidget(self.tooltips_checkbox)
+        self.sequence_live_progress_checkbox = QCheckBox(
+            "Show live progress during sequence simulations"
+        )
+        self.sequence_live_progress_checkbox.setObjectName(
+            "sequence_live_progress_enabled"
+        )
+        self.sequence_live_progress_checkbox.setChecked(
+            bool(sequence_live_progress_enabled)
+        )
+        self.sequence_live_progress_checkbox.setToolTip(
+            "Move a cursor through the sequence and update k-space and the "
+            "intermediate reconstruction while a sequence simulation runs."
+        )
+        interface_layout.addWidget(self.sequence_live_progress_checkbox)
         interface_layout.addStretch()
         self.tabs.addTab(interface_tab, "Interface")
 
@@ -158,6 +173,9 @@ class SettingsDialog(QDialog):
 
     def tooltips_enabled(self) -> bool:
         return self.tooltips_checkbox.isChecked()
+
+    def sequence_live_progress_enabled(self) -> bool:
+        return self.sequence_live_progress_checkbox.isChecked()
 
     def _browse_export_directory(self):
         current = str(self.get_export_directory())

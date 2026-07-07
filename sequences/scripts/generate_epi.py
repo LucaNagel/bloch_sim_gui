@@ -1,11 +1,12 @@
 import numpy as np
 import pypulseq as pp
 
+
 def main(
     plot: bool = False,
     test_report: bool = False,
     write_seq: bool = False,
-    seq_filename: str = 'epi_pypulseq.seq',
+    seq_filename: str = "epi_pypulseq.seq",
     *,
     fov: float | tuple[float, float] = 220e-3,
     n_x: int = 64,
@@ -47,9 +48,9 @@ def main(
     # Set system limits
     system = pp.Opts(
         max_grad=32,
-        grad_unit='mT/m',
+        grad_unit="mT/m",
         max_slew=130,
-        slew_unit='T/m/s',
+        slew_unit="T/m/s",
         rf_ringdown_time=30e-6,
         rf_dead_time=100e-6,
     )
@@ -66,7 +67,7 @@ def main(
         time_bw_product=4,
         return_gz=True,
         delay=system.rf_dead_time,
-        use='excitation',
+        use="excitation",
     )
 
     # Define other gradients and ADC events
@@ -78,7 +79,7 @@ def main(
     gx_flat_time = adc_duration
     gx_flat_time = np.ceil(gx_flat_time * 1e5) * 1e-5  # Round-up to the gradient raster
     gx = pp.make_trapezoid(
-        channel='x',
+        channel="x",
         system=system,
         amplitude=k_width / adc_duration,
         flat_time=gx_flat_time,
@@ -94,14 +95,22 @@ def main(
 
     # Pre-phasing gradients
     pre_time = 8e-4
-    gx_pre = pp.make_trapezoid(channel='x', system=system, area=-gx.area / 2, duration=pre_time)
-    gz_reph = pp.make_trapezoid(channel='z', system=system, area=-gz.area / 2, duration=pre_time)
-    gy_pre = pp.make_trapezoid(channel='y', system=system, area=-n_y / 2 * delta_ky, duration=pre_time)
+    gx_pre = pp.make_trapezoid(
+        channel="x", system=system, area=-gx.area / 2, duration=pre_time
+    )
+    gz_reph = pp.make_trapezoid(
+        channel="z", system=system, area=-gz.area / 2, duration=pre_time
+    )
+    gy_pre = pp.make_trapezoid(
+        channel="y", system=system, area=-n_y / 2 * delta_ky, duration=pre_time
+    )
 
     # Phase blip in the shortest possible time
     gy_blip_duration = 2 * np.sqrt(delta_ky / system.max_slew)
     gy_blip_duration = np.ceil(gy_blip_duration / 10e-6) * 10e-6
-    gy = pp.make_trapezoid(channel='y', system=system, area=delta_ky, duration=gy_blip_duration)
+    gy = pp.make_trapezoid(
+        channel="y", system=system, area=delta_ky, duration=gy_blip_duration
+    )
 
     # Loop over slices
     for i_slice in range(n_slices):
@@ -115,9 +124,9 @@ def main(
 
     ok, error_report = seq.check_timing()
     if ok:
-        print('Timing check passed successfully')
+        print("Timing check passed successfully")
     else:
-        print('Timing check failed. Error listing follows:')
+        print("Timing check failed. Error listing follows:")
         [print(e) for e in error_report]
 
     if test_report:
@@ -126,14 +135,20 @@ def main(
     if plot:
         seq.plot()
 
-    seq.set_definition(key='FOV', value=[fov_x, fov_y, slice_thickness * n_slices])
-    seq.set_definition(key='Name', value='epi')
+    seq.set_definition(key="FOV", value=[fov_x, fov_y, slice_thickness * n_slices])
+    seq.set_definition(key="Name", value="epi")
 
     if write_seq:
-        seq.write(seq_filename)
+        from pathlib import Path
+
+        script_dir = Path(__file__).resolve().parent
+        output_path = script_dir.parent / "sequences" / seq_filename
+
+        seq.write(output_path)
+        print(f"Sequence written to {output_path}")
 
     return seq
 
 
-if __name__ == '__main__':
-    main(plot=False, write_seq=True, n_x=16, n_y=16, n_slices=1)
+if __name__ == "__main__":
+    main(plot=False, write_seq=True, n_x=64, n_y=64, n_slices=3)

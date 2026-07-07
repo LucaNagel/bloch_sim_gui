@@ -77,6 +77,10 @@ def load_pulseq(path, strict: bool = True) -> SequenceProgram:
     gradient_raster = float(sequence.system.grad_raster_time)
     rf_raster = float(sequence.system.rf_raster_time)
     gamma_b0 = float(sequence.system.gamma * sequence.system.B0)
+    adc_label_values = {
+        str(name): tuple(int(value) for value in np.asarray(values).reshape(-1))
+        for name, values in sequence.evaluate_labels(evolution="adc").items()
+    }
 
     for block_index in sequence.block_events.keys():
         block = sequence.get_block(block_index)
@@ -92,7 +96,19 @@ def load_pulseq(path, strict: bool = True) -> SequenceProgram:
 
         label = getattr(block, "label", None)
         if label:
-            labels.append({"block": int(block_index), "label": label})
+            labels.append(
+                {
+                    "block": int(block_index),
+                    "events": tuple(
+                        {
+                            "type": str(value.type),
+                            "name": str(value.label),
+                            "value": int(value.value),
+                        }
+                        for value in label.values()
+                    ),
+                }
+            )
         trigger = getattr(block, "trigger", None)
         if trigger:
             triggers.append(
@@ -148,8 +164,14 @@ def load_pulseq(path, strict: bool = True) -> SequenceProgram:
                 rf_samples = signal
             else:
                 rf_samples = _rasterize_linear(times, signal, rf_raster)
-            full_frequency = float(rf.freq_offset + rf.freq_ppm * 1e-6 * gamma_b0)
-            full_phase = float(rf.phase_offset + rf.phase_ppm * 1e-6 * gamma_b0)
+            full_frequency = float(
+                getattr(rf, "freq_offset", 0.0)
+                + getattr(rf, "freq_ppm", 0.0) * 1e-6 * gamma_b0
+            )
+            full_phase = float(
+                getattr(rf, "phase_offset", 0.0)
+                + getattr(rf, "phase_ppm", 0.0) * 1e-6 * gamma_b0
+            )
             events.append(
                 RFEvent(
                     start_s=block_start + float(rf.delay),
@@ -178,8 +200,14 @@ def load_pulseq(path, strict: bool = True) -> SequenceProgram:
 
         adc = getattr(block, "adc", None)
         if adc is not None:
-            full_frequency = float(adc.freq_offset + adc.freq_ppm * 1e-6 * gamma_b0)
-            full_phase = float(adc.phase_offset + adc.phase_ppm * 1e-6 * gamma_b0)
+            full_frequency = float(
+                getattr(adc, "freq_offset", 0.0)
+                + getattr(adc, "freq_ppm", 0.0) * 1e-6 * gamma_b0
+            )
+            full_phase = float(
+                getattr(adc, "phase_offset", 0.0)
+                + getattr(adc, "phase_ppm", 0.0) * 1e-6 * gamma_b0
+            )
             # PyPulseq defines ADC samples at dwell centres.
             first_sample = block_start + float(adc.delay) + float(adc.dwell) / 2
             events.append(
@@ -209,6 +237,7 @@ def load_pulseq(path, strict: bool = True) -> SequenceProgram:
             "format": "pulseq",
             "definitions": dict(sequence.definitions),
             "labels": labels,
+            "adc_label_values": adc_label_values,
             "triggers": triggers,
             "warnings": import_warnings,
             "blocks": len(sequence.block_events),
