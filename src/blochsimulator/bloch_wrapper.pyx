@@ -72,6 +72,22 @@ cdef extern from "bloch_core.h":
         double *mx_checkpoints, double *my_checkpoints, double *mz_checkpoints,
         int num_threads) nogil
 
+    int blochsim_sequence_streaming_optimized(
+        double *rf_real_hz, double *rf_imag_hz,
+        double *gx_hz_m, double *gy_hz_m, double *gz_hz_m,
+        double *dt_s, int nintervals,
+        double *t1_s, double *t2_s, double *df_hz,
+        double *x_m, double *y_m, double *z_m, double *pd,
+        double *tx_real, double *tx_imag,
+        double *rx_real, double *rx_imag, int ncoils,
+        double *mx_init, double *my_init, double *mz_init, int nspins,
+        int *adc_state_indices, double *adc_demod_real, double *adc_demod_imag,
+        int nadc, int *checkpoint_state_indices, int ncheckpoints,
+        double *signal_real, double *signal_imag,
+        double *mx_final, double *my_final, double *mz_final,
+        double *mx_checkpoints, double *my_checkpoints, double *mz_checkpoints,
+        int num_threads) nogil
+
 # Type definitions
 ctypedef np.float64_t DTYPE_t
 ctypedef np.complex128_t CTYPE_t
@@ -741,17 +757,26 @@ def simulate_sequence_chunk(
         np.ndarray[np.int32_t, ndim=1] adc_state_indices,
         np.ndarray[CTYPE_t, ndim=1] adc_demodulation,
         np.ndarray[np.int32_t, ndim=1] checkpoint_state_indices,
-        int num_threads=1):
+        int num_threads=1,
+        str kernel="optimized"):
     """Propagate one voxel chunk and collect sparse sequence output.
 
     All inputs use canonical units: RF in Hz, gradients in Hz/m, positions in
-    metres, time in seconds, and off-resonance in Hz.
+    metres, time in seconds, and off-resonance in Hz. ``kernel`` can be
+    ``"reference"`` or ``"optimized"``.
     """
     cdef int nintervals = rf_hz.shape[0]
     cdef int nspins = t1_s.shape[0]
     cdef int nadc = adc_state_indices.shape[0]
     cdef int ncheckpoints = checkpoint_state_indices.shape[0]
     cdef int ncoils = rx_sensitivities.shape[0]
+    cdef bint use_optimized
+    if kernel == "optimized":
+        use_optimized = True
+    elif kernel == "reference":
+        use_optimized = False
+    else:
+        raise ValueError("kernel must be 'reference' or 'optimized'")
     if gradients_hz_per_m.shape[0] != nintervals or gradients_hz_per_m.shape[1] != 3:
         raise ValueError("gradients_hz_per_m must have shape (nintervals, 3)")
     if dt_s.shape[0] != nintervals:
@@ -813,22 +838,40 @@ def simulate_sequence_chunk(
     cdef np.ndarray[DTYPE_t, ndim=1] mz_check = np.empty(ncheckpoints * nspins, dtype=np.float64)
     cdef int status
 
-    with nogil:
-        status = blochsim_sequence_streaming(
-            <double*>rf_real.data, <double*>rf_imag.data,
-            <double*>gx.data, <double*>gy.data, <double*>gz.data,
-            <double*>dt_c.data, nintervals,
-            <double*>t1_c.data, <double*>t2_c.data, <double*>df_c.data,
-            <double*>x.data, <double*>y.data, <double*>z.data, <double*>pd_c.data,
-            <double*>tx_real.data, <double*>tx_imag.data,
-            <double*>rx_real.data, <double*>rx_imag.data, ncoils,
-            <double*>mx_init.data, <double*>my_init.data, <double*>mz_init.data, nspins,
-            <int*>adc_indices_c.data, <double*>demod_real.data, <double*>demod_imag.data,
-            nadc, <int*>checkpoint_indices_c.data, ncheckpoints,
-            <double*>signal_real.data, <double*>signal_imag.data,
-            <double*>mx_final.data, <double*>my_final.data, <double*>mz_final.data,
-            <double*>mx_check.data, <double*>my_check.data, <double*>mz_check.data,
-            num_threads)
+    if use_optimized:
+        with nogil:
+            status = blochsim_sequence_streaming_optimized(
+                <double*>rf_real.data, <double*>rf_imag.data,
+                <double*>gx.data, <double*>gy.data, <double*>gz.data,
+                <double*>dt_c.data, nintervals,
+                <double*>t1_c.data, <double*>t2_c.data, <double*>df_c.data,
+                <double*>x.data, <double*>y.data, <double*>z.data, <double*>pd_c.data,
+                <double*>tx_real.data, <double*>tx_imag.data,
+                <double*>rx_real.data, <double*>rx_imag.data, ncoils,
+                <double*>mx_init.data, <double*>my_init.data, <double*>mz_init.data, nspins,
+                <int*>adc_indices_c.data, <double*>demod_real.data, <double*>demod_imag.data,
+                nadc, <int*>checkpoint_indices_c.data, ncheckpoints,
+                <double*>signal_real.data, <double*>signal_imag.data,
+                <double*>mx_final.data, <double*>my_final.data, <double*>mz_final.data,
+                <double*>mx_check.data, <double*>my_check.data, <double*>mz_check.data,
+                num_threads)
+    else:
+        with nogil:
+            status = blochsim_sequence_streaming(
+                <double*>rf_real.data, <double*>rf_imag.data,
+                <double*>gx.data, <double*>gy.data, <double*>gz.data,
+                <double*>dt_c.data, nintervals,
+                <double*>t1_c.data, <double*>t2_c.data, <double*>df_c.data,
+                <double*>x.data, <double*>y.data, <double*>z.data, <double*>pd_c.data,
+                <double*>tx_real.data, <double*>tx_imag.data,
+                <double*>rx_real.data, <double*>rx_imag.data, ncoils,
+                <double*>mx_init.data, <double*>my_init.data, <double*>mz_init.data, nspins,
+                <int*>adc_indices_c.data, <double*>demod_real.data, <double*>demod_imag.data,
+                nadc, <int*>checkpoint_indices_c.data, ncheckpoints,
+                <double*>signal_real.data, <double*>signal_imag.data,
+                <double*>mx_final.data, <double*>my_final.data, <double*>mz_final.data,
+                <double*>mx_check.data, <double*>my_check.data, <double*>mz_check.data,
+                num_threads)
     if status != 0:
         raise MemoryError("native streaming kernel could not allocate ADC accumulators")
 

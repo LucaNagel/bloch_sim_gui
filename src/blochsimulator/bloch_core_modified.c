@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <stdint.h>
 #include <string.h>
 #include "bloch_core.h"
 
@@ -238,6 +239,32 @@ else
 	*rmat++ =  arbi2-aibr2;
 	*rmat++ = arar+aiai-brbr-bibi;
 	}
+}
+
+
+static inline void rotate_vector_quaternion(
+    double nx, double ny, double nz, const double *vector, double *rotated)
+{
+    double phi = sqrt(nx * nx + ny * ny + nz * nz);
+    if (phi == 0.0) {
+        rotated[0] = vector[0];
+        rotated[1] = vector[1];
+        rotated[2] = vector[2];
+        return;
+    }
+
+    double half_sine_over_phi = sin(phi / 2.0) / phi;
+    double qw = cos(phi / 2.0);
+    double qx = nx * half_sine_over_phi;
+    double qy = ny * half_sine_over_phi;
+    double qz = nz * half_sine_over_phi;
+    double tx = 2.0 * (qy * vector[2] - qz * vector[1]);
+    double ty = 2.0 * (qz * vector[0] - qx * vector[2]);
+    double tz = 2.0 * (qx * vector[1] - qy * vector[0]);
+
+    rotated[0] = vector[0] + qw * tx + (qy * tz - qz * ty);
+    rotated[1] = vector[1] + qw * ty + (qz * tx - qx * tz);
+    rotated[2] = vector[2] + qw * tz + (qx * ty - qy * tx);
 }
 
 
@@ -806,7 +833,7 @@ void blochsim_heterogeneous_grouped(
  * intervals and contributes only at requested ADC state boundaries. Checkpoint
  * arrays use checkpoint-major layout: checkpoint * nspins + spin.
  */
-int blochsim_sequence_streaming(
+static int blochsim_sequence_streaming_impl(
     double *rf_real_hz, double *rf_imag_hz,
     double *gx_hz_m, double *gy_hz_m, double *gz_hz_m,
     double *dt_s, int nintervals,
@@ -820,7 +847,7 @@ int blochsim_sequence_streaming(
     double *signal_real, double *signal_imag,
     double *mx_final, double *my_final, double *mz_final,
     double *mx_checkpoints, double *my_checkpoints, double *mz_checkpoints,
-    int num_threads)
+    int num_threads, int optimized)
 {
     int thread_count = num_threads > 0 ? num_threads : 1;
 #ifndef _OPENMP
@@ -834,6 +861,77 @@ int blochsim_sequence_streaming(
         if (thread_signal_real) free(thread_signal_real);
         if (thread_signal_imag) free(thread_signal_imag);
         return -1;
+    }
+
+    /* Most segmented phantoms contain only a few exact T1/T2 pairs. Detect a
+     * bounded number of groups and evaluate relaxation exponentials once per
+     * group and interval. Continuous parameter maps automatically fall back to
+     * per-spin evaluation after the group limit is exceeded. */
+    enum { MAX_RELAXATION_GROUPS = 64 };
+    int *relaxation_labels = NULL;
+    double relaxation_t1[MAX_RELAXATION_GROUPS];
+    double relaxation_t2[MAX_RELAXATION_GROUPS];
+    double *group_e1 = NULL;
+    double *group_e2 = NULL;
+    int relaxation_group_count = 0;
+    int grouped_relaxation = optimized && nspins > 0 && nintervals > 0;
+    if (grouped_relaxation) {
+        relaxation_labels = (int *)malloc((size_t)nspins * sizeof(int));
+        if (relaxation_labels == NULL) {
+            grouped_relaxation = 0;
+        }
+    }
+    if (grouped_relaxation) {
+        for (int spin = 0; spin < nspins; spin++) {
+            int label = -1;
+            for (int group = 0; group < relaxation_group_count; group++) {
+                if (t1_s[spin] == relaxation_t1[group]
+                    && t2_s[spin] == relaxation_t2[group]) {
+                    label = group;
+                    break;
+                }
+            }
+            if (label < 0) {
+                if (relaxation_group_count == MAX_RELAXATION_GROUPS) {
+                    grouped_relaxation = 0;
+                    break;
+                }
+                label = relaxation_group_count++;
+                relaxation_t1[label] = t1_s[spin];
+                relaxation_t2[label] = t2_s[spin];
+            }
+            relaxation_labels[spin] = label;
+        }
+    }
+    if (grouped_relaxation) {
+        size_t max_intervals = SIZE_MAX
+            / (size_t)relaxation_group_count
+            / sizeof(double);
+        if ((size_t)nintervals > max_intervals) {
+            grouped_relaxation = 0;
+        } else {
+            size_t table_count =
+                (size_t)relaxation_group_count * (size_t)nintervals;
+            group_e1 = (double *)malloc(table_count * sizeof(double));
+            group_e2 = (double *)malloc(table_count * sizeof(double));
+            if (group_e1 == NULL || group_e2 == NULL) {
+                if (group_e1) free(group_e1);
+                if (group_e2) free(group_e2);
+                group_e1 = NULL;
+                group_e2 = NULL;
+                grouped_relaxation = 0;
+            } else {
+                for (int group = 0; group < relaxation_group_count; group++) {
+                    size_t base = (size_t)group * (size_t)nintervals;
+                    for (int interval = 0; interval < nintervals; interval++) {
+                        group_e1[base + interval] =
+                            exp(-dt_s[interval] / relaxation_t1[group]);
+                        group_e2[base + interval] =
+                            exp(-dt_s[interval] / relaxation_t2[group]);
+                    }
+                }
+            }
+        }
     }
 
     for (int sample = 0; sample < ncoils * nadc; sample++) {
@@ -881,24 +979,62 @@ int blochsim_sequence_streaming(
 
         for (int interval = 0; interval < nintervals; interval++) {
             double dt = dt_s[interval];
-            double rotation[9];
             double rotated[3];
-            double effective_rf_real = rf_real_hz[interval] * tx_real[spin]
-                                     - rf_imag_hz[interval] * tx_imag[spin];
-            double effective_rf_imag = rf_real_hz[interval] * tx_imag[spin]
-                                     + rf_imag_hz[interval] * tx_real[spin];
-            double rotx = -TWOPI * effective_rf_real * dt;
-            double roty = +TWOPI * effective_rf_imag * dt;
             double frequency = gx_hz_m[interval] * x_m[spin]
                              + gy_hz_m[interval] * y_m[spin]
                              + gz_hz_m[interval] * z_m[spin]
                              + df_hz[spin];
             double rotz = -TWOPI * frequency * dt;
-            calcrotmat(rotx, roty, rotz, rotation);
-            multmatvec(rotation, magnetization, rotated);
 
-            double e1 = exp(-dt / t1_s[spin]);
-            double e2 = exp(-dt / t2_s[spin]);
+            if (optimized && rf_real_hz[interval] == 0.0 && rf_imag_hz[interval] == 0.0) {
+                /* Preserve the reference kernel's half-angle construction while
+                 * avoiding the unused general 3x3 rotation matrix. */
+                if (rotz == 0.0) {
+                    rotated[0] = magnetization[0];
+                    rotated[1] = magnetization[1];
+                    rotated[2] = magnetization[2];
+                } else {
+                    double phi = sqrt(rotz * rotz);
+                    double cp = cos(phi / 2.0);
+                    double sp = sin(phi / 2.0) / phi;
+                    double ai = -rotz * sp;
+                    double arar = cp * cp;
+                    double aiai = ai * ai;
+                    double arai2 = 2.0 * cp * ai;
+                    double transverse_scale = arar - aiai;
+                    rotated[0] = transverse_scale * magnetization[0]
+                               + arai2 * magnetization[1];
+                    rotated[1] = -arai2 * magnetization[0]
+                               + transverse_scale * magnetization[1];
+                    rotated[2] = (arar + aiai) * magnetization[2];
+                }
+            } else {
+                double effective_rf_real = rf_real_hz[interval] * tx_real[spin]
+                                         - rf_imag_hz[interval] * tx_imag[spin];
+                double effective_rf_imag = rf_real_hz[interval] * tx_imag[spin]
+                                         + rf_imag_hz[interval] * tx_real[spin];
+                double rotx = -TWOPI * effective_rf_real * dt;
+                double roty = +TWOPI * effective_rf_imag * dt;
+                if (optimized) {
+                    rotate_vector_quaternion(
+                        rotx, roty, rotz, magnetization, rotated);
+                } else {
+                    double rotation[9];
+                    calcrotmat(rotx, roty, rotz, rotation);
+                    multmatvec(rotation, magnetization, rotated);
+                }
+            }
+
+            size_t relaxation_offset = grouped_relaxation
+                ? (size_t)relaxation_labels[spin] * (size_t)nintervals
+                    + (size_t)interval
+                : 0;
+            double e1 = grouped_relaxation
+                      ? group_e1[relaxation_offset]
+                      : exp(-dt / t1_s[spin]);
+            double e2 = grouped_relaxation
+                      ? group_e2[relaxation_offset]
+                      : exp(-dt / t2_s[spin]);
             magnetization[0] = rotated[0] * e2;
             magnetization[1] = rotated[1] * e2;
             magnetization[2] = rotated[2] * e1 + (1.0 - e1);
@@ -946,7 +1082,44 @@ int blochsim_sequence_streaming(
 
     free(thread_signal_real);
     free(thread_signal_imag);
+    if (relaxation_labels) free(relaxation_labels);
+    if (group_e1) free(group_e1);
+    if (group_e2) free(group_e2);
     return 0;
 }
+
+#define STREAMING_ARGUMENTS \
+    rf_real_hz, rf_imag_hz, gx_hz_m, gy_hz_m, gz_hz_m, dt_s, nintervals, \
+    t1_s, t2_s, df_hz, x_m, y_m, z_m, pd, tx_real, tx_imag, rx_real, \
+    rx_imag, ncoils, mx_init, my_init, mz_init, nspins, adc_state_indices, \
+    adc_demod_real, adc_demod_imag, nadc, checkpoint_state_indices, \
+    ncheckpoints, signal_real, signal_imag, mx_final, my_final, mz_final, \
+    mx_checkpoints, my_checkpoints, mz_checkpoints, num_threads
+
+#define DEFINE_STREAMING_KERNEL(name, optimized_flag) \
+int name( \
+    double *rf_real_hz, double *rf_imag_hz, \
+    double *gx_hz_m, double *gy_hz_m, double *gz_hz_m, \
+    double *dt_s, int nintervals, \
+    double *t1_s, double *t2_s, double *df_hz, \
+    double *x_m, double *y_m, double *z_m, double *pd, \
+    double *tx_real, double *tx_imag, \
+    double *rx_real, double *rx_imag, int ncoils, \
+    double *mx_init, double *my_init, double *mz_init, int nspins, \
+    int *adc_state_indices, double *adc_demod_real, double *adc_demod_imag, \
+    int nadc, int *checkpoint_state_indices, int ncheckpoints, \
+    double *signal_real, double *signal_imag, \
+    double *mx_final, double *my_final, double *mz_final, \
+    double *mx_checkpoints, double *my_checkpoints, double *mz_checkpoints, \
+    int num_threads) \
+{ \
+    return blochsim_sequence_streaming_impl(STREAMING_ARGUMENTS, optimized_flag); \
+}
+
+DEFINE_STREAMING_KERNEL(blochsim_sequence_streaming, 0)
+DEFINE_STREAMING_KERNEL(blochsim_sequence_streaming_optimized, 1)
+
+#undef DEFINE_STREAMING_KERNEL
+#undef STREAMING_ARGUMENTS
 
 /* End of file */

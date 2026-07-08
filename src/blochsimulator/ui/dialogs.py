@@ -5,6 +5,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QComboBox,
     QDoubleSpinBox,
+    QSpinBox,
     QDialogButtonBox,
     QFileDialog,
     QCheckBox,
@@ -28,6 +29,16 @@ class SettingsDialog(QDialog):
         ("Custom free-memory reserve", "custom_reserve"),
         ("Fixed simulation limit", "fixed_limit"),
     )
+    SEQUENCE_KERNELS = (
+        ("Optimized (recommended)", "optimized"),
+        ("Reference", "reference"),
+    )
+    SEQUENCE_TIMESTEP_PRESETS = (
+        ("Accurate — 1 µs", "accurate", 1.0),
+        ("Balanced — 5 µs", "balanced", 5.0),
+        ("Fast — 10 µs", "fast", 10.0),
+        ("Custom", "custom", None),
+    )
 
     def __init__(
         self,
@@ -37,6 +48,12 @@ class SettingsDialog(QDialog):
         parent=None,
         initial_tab: str = "general",
         sequence_live_progress_enabled: bool = True,
+        sequence_kernel: str = "optimized",
+        sequence_timestep_preset: str = "balanced",
+        sequence_timestep_us: float = 5.0,
+        thread_mode: str = "automatic",
+        manual_thread_count: int = 4,
+        detected_thread_count: Optional[int] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Settings")
@@ -64,6 +81,76 @@ class SettingsDialog(QDialog):
         export_layout.addWidget(self.export_browse_button)
         general_form.addRow("Default export directory:", export_layout)
         self.tabs.addTab(general_tab, "General")
+
+        simulation_tab = QWidget()
+        simulation_form = QFormLayout(simulation_tab)
+
+        self.sequence_timestep_preset_combo = QComboBox()
+        self.sequence_timestep_preset_combo.setObjectName("sequence_timestep_preset")
+        for label, preset, _ in self.SEQUENCE_TIMESTEP_PRESETS:
+            self.sequence_timestep_preset_combo.addItem(label, preset)
+        preset_index = self.sequence_timestep_preset_combo.findData(
+            sequence_timestep_preset
+        )
+        self.sequence_timestep_preset_combo.setCurrentIndex(max(0, preset_index))
+        self.sequence_timestep_preset_combo.setToolTip(
+            "Larger RF-active time steps reduce runtime by averaging RF and "
+            "simultaneous gradients. ADC times and event boundaries remain exact."
+        )
+        simulation_form.addRow(
+            "Sequence time-step preset:", self.sequence_timestep_preset_combo
+        )
+
+        self.sequence_timestep_us_spin = QDoubleSpinBox()
+        self.sequence_timestep_us_spin.setObjectName("sequence_timestep_us")
+        self.sequence_timestep_us_spin.setRange(0.1, 1000.0)
+        self.sequence_timestep_us_spin.setDecimals(2)
+        self.sequence_timestep_us_spin.setSingleStep(0.1)
+        self.sequence_timestep_us_spin.setSuffix(" µs")
+        self.sequence_timestep_us_spin.setValue(float(sequence_timestep_us))
+        self.sequence_timestep_us_spin.setToolTip(
+            "Custom maximum interval while RF is active, in microseconds."
+        )
+        simulation_form.addRow(
+            "RF-active simulation time step:", self.sequence_timestep_us_spin
+        )
+
+        detected_threads = max(1, int(detected_thread_count or 1))
+        self.thread_mode_combo = QComboBox()
+        self.thread_mode_combo.setObjectName("simulation_thread_mode")
+        self.thread_mode_combo.addItem(
+            f"Automatic ({detected_threads} threads)", "automatic"
+        )
+        self.thread_mode_combo.addItem("Manual", "manual")
+        thread_mode_index = self.thread_mode_combo.findData(thread_mode)
+        self.thread_mode_combo.setCurrentIndex(max(0, thread_mode_index))
+        self.thread_mode_combo.setToolTip(
+            "Automatic uses all logical processors reported by the operating system."
+        )
+        simulation_form.addRow("CPU threads:", self.thread_mode_combo)
+
+        self.manual_thread_count_spin = QSpinBox()
+        self.manual_thread_count_spin.setObjectName("simulation_manual_threads")
+        self.manual_thread_count_spin.setRange(1, max(256, detected_threads * 4))
+        self.manual_thread_count_spin.setValue(max(1, int(manual_thread_count)))
+        self.manual_thread_count_spin.setToolTip(
+            "Native worker count used when CPU thread selection is manual."
+        )
+        simulation_form.addRow("Manual thread count:", self.manual_thread_count_spin)
+
+        self.sequence_kernel_combo = QComboBox()
+        self.sequence_kernel_combo.setObjectName("sequence_simulation_kernel")
+        for label, kernel in self.SEQUENCE_KERNELS:
+            self.sequence_kernel_combo.addItem(label, kernel)
+        kernel_index = self.sequence_kernel_combo.findData(sequence_kernel)
+        self.sequence_kernel_combo.setCurrentIndex(max(0, kernel_index))
+        self.sequence_kernel_combo.setToolTip(
+            "The optimized Bloch kernel uses equivalent RF-free and uniform-"
+            "relaxation fast paths. Reference keeps the original propagation "
+            "path for numerical comparisons."
+        )
+        simulation_form.addRow("Sequence Bloch kernel:", self.sequence_kernel_combo)
+        self.tabs.addTab(simulation_tab, "Simulation")
 
         memory_tab = QWidget()
         memory_layout = QVBoxLayout(memory_tab)
@@ -156,9 +243,16 @@ class SettingsDialog(QDialog):
         self.mode_combo.currentIndexChanged.connect(self._update_summary)
         self.reserve_spin.valueChanged.connect(self._update_summary)
         self.limit_spin.valueChanged.connect(self._update_summary)
+        self.sequence_timestep_preset_combo.currentIndexChanged.connect(
+            self._update_simulation_controls
+        )
+        self.thread_mode_combo.currentIndexChanged.connect(
+            self._update_simulation_controls
+        )
         self._update_summary()
+        self._update_simulation_controls()
 
-        tab_names = {"general": 0, "memory": 1, "interface": 2}
+        tab_names = {"general": 0, "simulation": 1, "memory": 2, "interface": 3}
         self.tabs.setCurrentIndex(tab_names.get(initial_tab, 0))
 
     def get_policy(self) -> MemoryPolicy:
@@ -176,6 +270,29 @@ class SettingsDialog(QDialog):
 
     def sequence_live_progress_enabled(self) -> bool:
         return self.sequence_live_progress_checkbox.isChecked()
+
+    def sequence_kernel(self) -> str:
+        return str(self.sequence_kernel_combo.currentData())
+
+    def sequence_timestep_preset(self) -> str:
+        return str(self.sequence_timestep_preset_combo.currentData())
+
+    def sequence_timestep_us(self) -> float:
+        return float(self.sequence_timestep_us_spin.value())
+
+    def thread_mode(self) -> str:
+        return str(self.thread_mode_combo.currentData())
+
+    def manual_thread_count(self) -> int:
+        return int(self.manual_thread_count_spin.value())
+
+    def _update_simulation_controls(self):
+        preset = self.sequence_timestep_preset()
+        preset_values = {key: value for _, key, value in self.SEQUENCE_TIMESTEP_PRESETS}
+        if preset != "custom":
+            self.sequence_timestep_us_spin.setValue(preset_values[preset])
+        self.sequence_timestep_us_spin.setEnabled(preset == "custom")
+        self.manual_thread_count_spin.setEnabled(self.thread_mode() == "manual")
 
     def _browse_export_directory(self):
         current = str(self.get_export_directory())

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import h5py
 import xarray as xr
 import json
+import os
 from pathlib import Path
 from . import __version__
 from .memory import (
@@ -49,6 +50,21 @@ except ImportError:
     def calculate_signal(mx, my, mz, receiver_phase=0.0):
         phase_factor = np.exp(-1j * receiver_phase)
         return (mx + 1j * my) * phase_factor
+
+
+def resolve_num_threads(num_threads: Optional[int] = None) -> int:
+    """Resolve an explicit or automatic native worker count."""
+    if num_threads is None:
+        return max(1, int(os.cpu_count() or 1))
+    if isinstance(num_threads, bool):
+        raise ValueError("num_threads must be a positive integer, zero, or None")
+    if num_threads == 0:
+        return max(1, int(os.cpu_count() or 1))
+    if int(num_threads) != num_threads:
+        raise ValueError("num_threads must be a positive integer, zero, or None")
+    if num_threads < 0:
+        raise ValueError("num_threads must be a positive integer, zero, or None")
+    return int(num_threads)
 
 
 def design_rf_pulse(
@@ -1282,10 +1298,11 @@ class BlochSimulator:
     def __init__(
         self,
         use_parallel: bool = True,
-        num_threads: int = 4,
+        num_threads: Optional[int] = None,
         verbose: bool = False,
         memory_limit_bytes: Optional[int] = None,
         memory_policy: Optional[MemoryPolicy] = None,
+        sequence_kernel: str = "optimized",
     ):
         """
         Initialize the Bloch simulator.
@@ -1294,8 +1311,9 @@ class BlochSimulator:
         ----------
         use_parallel : bool
             Use parallel processing
-        num_threads : int
-            Number of threads for parallel processing
+        num_threads : int, optional
+            Number of threads for parallel processing. ``None`` or zero uses
+            all logical processors reported by the operating system.
         verbose : bool
             Print progress messages
         memory_limit_bytes : int, optional
@@ -1304,12 +1322,18 @@ class BlochSimulator:
         memory_policy : MemoryPolicy, optional
             Reserve-based or fixed-limit RAM policy. The process-wide GUI policy
             is used when omitted.
+        sequence_kernel : {"optimized", "reference"}
+            Native kernel used by event-based sequence simulations. The reference
+            kernel remains available for numerical comparisons.
         """
         self.use_parallel = use_parallel
-        self.num_threads = num_threads
+        self.num_threads = resolve_num_threads(num_threads)
         self.verbose = verbose
         self.memory_limit_bytes = memory_limit_bytes
         self.memory_policy = memory_policy
+        if sequence_kernel not in {"optimized", "reference"}:
+            raise ValueError("sequence_kernel must be 'optimized' or 'reference'")
+        self.sequence_kernel = sequence_kernel
         self.last_result = None
 
         # Validate settings immediately instead of waiting for the first run.
@@ -1853,6 +1877,7 @@ class BlochSimulator:
         cancel_callback=None,
         status_callback=None,
         simulation_timestep_s=None,
+        sequence_kernel=None,
     ):
         """Simulate independent Lorentzian spectral components and sum signals.
 
@@ -1914,6 +1939,7 @@ class BlochSimulator:
                 cancel_callback=cancel_callback,
                 status_callback=component_status,
                 simulation_timestep_s=simulation_timestep_s,
+                sequence_kernel=sequence_kernel,
             )
             if first_result is None:
                 first_result = result
@@ -1982,6 +2008,7 @@ class BlochSimulator:
         cancel_callback=None,
         status_callback=None,
         simulation_timestep_s=None,
+        sequence_kernel=None,
     ):
         """Simulate an event-based sequence on a heterogeneous 1D/2D/3D object.
 
@@ -1993,7 +2020,9 @@ class BlochSimulator:
         sum. ``'voxel_volume'`` additionally multiplies proton density by the
         physical voxel volume of a 3D phantom. ``simulation_timestep_s`` sets
         the maximum compiler interval while RF is active; event boundaries and
-        ADC observation times are always retained exactly.
+        ADC observation times are always retained exactly. ``sequence_kernel``
+        overrides the simulator's ``"optimized"`` or ``"reference"`` kernel
+        selection for this call.
         """
         from .phantom import Phantom
         from .sequence import (
@@ -2024,6 +2053,11 @@ class BlochSimulator:
         n_adc = int(compiled.adc_times_s.size)
         n_rx_coils = int(props["rx_sensitivities"].shape[0])
         native_threads = self.num_threads if self.use_parallel else 1
+        selected_kernel = (
+            self.sequence_kernel if sequence_kernel is None else sequence_kernel
+        )
+        if selected_kernel not in {"optimized", "reference"}:
+            raise ValueError("sequence_kernel must be 'optimized' or 'reference'")
         if n_active == 0:
             raise ValueError("phantom has no active voxels")
         if signal_weighting not in {"voxel", "voxel_volume"}:
@@ -2068,6 +2102,8 @@ class BlochSimulator:
             native_threads * n_rx_coils * max(1, n_adc) * 2 * 8
             + chunk_voxels * (3 * 8 + n_checkpoints * 3 * 8)
             + compiled.n_intervals * 6 * 8
+            + chunk_voxels * 4
+            + min(chunk_voxels, 64) * compiled.n_intervals * 2 * 8
         )
         enforce_memory_budget(
             persistent_bytes + working_bytes,
@@ -2140,6 +2176,7 @@ class BlochSimulator:
                 compiled.adc_demodulation,
                 compiled.checkpoint_state_indices,
                 native_threads,
+                selected_kernel,
             )
             coil_signal += chunk_signal
             final_active[start:end] = chunk_final
@@ -2198,6 +2235,7 @@ class BlochSimulator:
                 "chunk_voxels": chunk_voxels,
                 "simulation_timestep_s": simulation_timestep_s,
                 "signal_weighting": signal_weighting,
+                "sequence_kernel": selected_kernel,
                 "phantom_metadata": dict(phantom.metadata),
                 "field_strength_t": phantom.metadata.get("field_strength_t"),
                 "nucleus": phantom.metadata.get("nucleus"),

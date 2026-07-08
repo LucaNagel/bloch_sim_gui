@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
     QComboBox,
+    QDialog,
     QGridLayout,
     QLineEdit,
     QRadioButton,
@@ -61,7 +62,9 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     if app is None:
         app = QApplication(sys.argv)
 
-    dialog = SettingsDialog(MemoryPolicy(), tmp_path, tooltips_enabled=True)
+    dialog = SettingsDialog(
+        MemoryPolicy(), tmp_path, tooltips_enabled=True, detected_thread_count=8
+    )
     dialog.mode_combo.setCurrentIndex(dialog.mode_combo.findData("custom_reserve"))
     dialog.reserve_spin.setValue(3.5)
 
@@ -73,8 +76,32 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     assert dialog.get_export_directory() == tmp_path
     assert dialog.tooltips_enabled()
     assert dialog.sequence_live_progress_enabled()
+    assert dialog.sequence_kernel() == "optimized"
+    dialog.sequence_kernel_combo.setCurrentIndex(
+        dialog.sequence_kernel_combo.findData("reference")
+    )
+    assert dialog.sequence_kernel() == "reference"
+    assert dialog.sequence_timestep_preset() == "balanced"
+    assert dialog.sequence_timestep_us() == pytest.approx(5.0)
+    assert not dialog.sequence_timestep_us_spin.isEnabled()
+    dialog.sequence_timestep_preset_combo.setCurrentIndex(
+        dialog.sequence_timestep_preset_combo.findData("custom")
+    )
+    dialog.sequence_timestep_us_spin.setValue(7.5)
+    assert dialog.sequence_timestep_us() == pytest.approx(7.5)
+    assert dialog.sequence_timestep_us_spin.isEnabled()
+    assert dialog.thread_mode() == "automatic"
+    assert not dialog.manual_thread_count_spin.isEnabled()
+    dialog.thread_mode_combo.setCurrentIndex(
+        dialog.thread_mode_combo.findData("manual")
+    )
+    dialog.manual_thread_count_spin.setValue(3)
+    assert dialog.thread_mode() == "manual"
+    assert dialog.manual_thread_count() == 3
+    assert dialog.manual_thread_count_spin.isEnabled()
     assert [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())] == [
         "General",
+        "Simulation",
         "Memory",
         "Interface",
     ]
@@ -206,9 +233,54 @@ def test_configured_export_directory_is_used(tmp_path, monkeypatch):
     window.app_settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
     export_directory = tmp_path / "custom-exports"
     window.app_settings.setValue("general/export_directory", str(export_directory))
+    window.app_settings.setValue("sequence/kernel", "reference")
+    window.app_settings.setValue("sequence/timestep_preset", "fast")
+    window.app_settings.setValue("sequence/timestep_us", 10.0)
+    window.app_settings.setValue("simulation/thread_mode", "manual")
+    window.app_settings.setValue("simulation/manual_threads", 3)
 
     assert window._get_export_directory() == export_directory
     assert export_directory.is_dir()
+    assert window._load_sequence_kernel() == "reference"
+    assert window._load_sequence_timestep_preset() == "fast"
+    assert window._load_sequence_timestep_us() == pytest.approx(10.0)
+    assert window._load_configured_num_threads() == 3
+
+    window.app_settings.setValue("sequence/kernel", "invalid")
+    assert window._load_sequence_kernel() == "optimized"
+
+
+def test_simulation_settings_are_persisted_and_applied(tmp_path):
+    window = BlochSimulatorGUI()
+    window.app_settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    window.sequence_simulation_widget = MagicMock()
+    dialog = MagicMock()
+    dialog.exec_.return_value = QDialog.Accepted
+    dialog.get_export_directory.return_value = tmp_path
+    dialog.get_policy.return_value = MemoryPolicy()
+    dialog.tooltips_enabled.return_value = True
+    dialog.sequence_live_progress_enabled.return_value = False
+    dialog.sequence_kernel.return_value = "reference"
+    dialog.sequence_timestep_preset.return_value = "fast"
+    dialog.sequence_timestep_us.return_value = 10.0
+    dialog.thread_mode.return_value = "manual"
+    dialog.manual_thread_count.return_value = 2
+
+    with patch("blochsimulator.ui.main_window.SettingsDialog", return_value=dialog):
+        window.show_settings(initial_tab="simulation")
+
+    assert window.app_settings.value("sequence/timestep_preset") == "fast"
+    assert float(window.app_settings.value("sequence/timestep_us")) == 10.0
+    assert window.app_settings.value("simulation/thread_mode") == "manual"
+    assert int(window.app_settings.value("simulation/manual_threads")) == 2
+    assert window.simulator.sequence_kernel == "reference"
+    assert window.simulator.num_threads == 2
+    window.sequence_simulation_widget.set_sequence_timestep_us.assert_called_once_with(
+        10.0
+    )
+    window.sequence_simulation_widget.set_thread_configuration.assert_called_once_with(
+        "manual", 2
+    )
 
 
 if __name__ == "__main__":

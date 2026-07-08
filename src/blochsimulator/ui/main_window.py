@@ -52,7 +52,7 @@ from ..memory import (
     enforce_sequence_memory,
     set_default_memory_policy,
 )
-from ..simulator import BlochSimulator, TissueParameters
+from ..simulator import BlochSimulator, TissueParameters, resolve_num_threads
 from ..visualization import (
     ImageExporter,
     ExportImageDialog,
@@ -119,7 +119,11 @@ class BlochSimulatorGUI(QMainWindow):
         super().__init__()
         self.app_settings = QSettings("BlochSimulator", "BlochSimulator")
         set_default_memory_policy(self._load_memory_policy())
-        self.simulator = BlochSimulator(use_parallel=True, num_threads=4)
+        self.simulator = BlochSimulator(
+            use_parallel=True,
+            num_threads=self._load_configured_num_threads(),
+            sequence_kernel=self._load_sequence_kernel(),
+        )
         self.simulation_thread = None
         self.init_ui()
 
@@ -3879,6 +3883,49 @@ class BlochSimulatorGUI(QMainWindow):
             self.app_settings.value("interface/tooltips_enabled", True, type=bool)
         )
 
+    def _load_sequence_kernel(self) -> str:
+        """Load the persistent event-based sequence kernel selection."""
+        kernel = str(self.app_settings.value("sequence/kernel", "optimized"))
+        return kernel if kernel in {"optimized", "reference"} else "optimized"
+
+    def _load_sequence_timestep_preset(self) -> str:
+        """Load the persistent RF-active sequence time-step preset."""
+        preset = str(self.app_settings.value("sequence/timestep_preset", "balanced"))
+        return (
+            preset
+            if preset in {"accurate", "balanced", "fast", "custom"}
+            else "balanced"
+        )
+
+    def _load_sequence_timestep_us(self) -> float:
+        """Resolve the configured RF-active sequence time step in microseconds."""
+        preset = self._load_sequence_timestep_preset()
+        preset_values = {"accurate": 1.0, "balanced": 5.0, "fast": 10.0}
+        if preset in preset_values:
+            return preset_values[preset]
+        try:
+            value = float(self.app_settings.value("sequence/timestep_us", 5.0))
+        except (TypeError, ValueError):
+            return 5.0
+        return value if 0.1 <= value <= 1000.0 else 5.0
+
+    def _load_thread_mode(self) -> str:
+        mode = str(self.app_settings.value("simulation/thread_mode", "automatic"))
+        return mode if mode in {"automatic", "manual"} else "automatic"
+
+    def _load_manual_thread_count(self) -> int:
+        try:
+            count = int(self.app_settings.value("simulation/manual_threads", 4))
+        except (TypeError, ValueError):
+            return 4
+        return max(1, count)
+
+    def _load_configured_num_threads(self):
+        """Return None for automatic selection or the configured manual count."""
+        if self._load_thread_mode() == "automatic":
+            return None
+        return self._load_manual_thread_count()
+
     def _set_tooltips_enabled(self, enabled: bool):
         """Apply tooltip visibility without discarding their explanatory text."""
         for widget, tooltip in getattr(self, "_tooltip_registry", []):
@@ -3895,6 +3942,12 @@ class BlochSimulatorGUI(QMainWindow):
             sequence_live_progress_enabled=self.app_settings.value(
                 "sequence/live_progress_enabled", True, type=bool
             ),
+            sequence_kernel=self._load_sequence_kernel(),
+            sequence_timestep_preset=self._load_sequence_timestep_preset(),
+            sequence_timestep_us=self._load_sequence_timestep_us(),
+            thread_mode=self._load_thread_mode(),
+            manual_thread_count=self._load_manual_thread_count(),
+            detected_thread_count=resolve_num_threads(None),
         )
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -3923,12 +3976,29 @@ class BlochSimulatorGUI(QMainWindow):
         self.app_settings.setValue(
             "sequence/live_progress_enabled", live_progress_enabled
         )
+        sequence_kernel = dialog.sequence_kernel()
+        self.app_settings.setValue("sequence/kernel", sequence_kernel)
+        timestep_preset = dialog.sequence_timestep_preset()
+        timestep_us = dialog.sequence_timestep_us()
+        self.app_settings.setValue("sequence/timestep_preset", timestep_preset)
+        self.app_settings.setValue("sequence/timestep_us", timestep_us)
+        thread_mode = dialog.thread_mode()
+        manual_thread_count = dialog.manual_thread_count()
+        self.app_settings.setValue("simulation/thread_mode", thread_mode)
+        self.app_settings.setValue("simulation/manual_threads", manual_thread_count)
         self.app_settings.sync()
         set_default_memory_policy(policy)
         self._set_tooltips_enabled(tooltips_enabled)
         sequence_widget = getattr(self, "sequence_simulation_widget", None)
         if sequence_widget is not None:
             sequence_widget.set_live_preview_enabled(live_progress_enabled)
+            sequence_widget.set_sequence_kernel(sequence_kernel)
+            sequence_widget.set_sequence_timestep_us(timestep_us)
+            sequence_widget.set_thread_configuration(thread_mode, manual_thread_count)
+        self.simulator.sequence_kernel = sequence_kernel
+        self.simulator.num_threads = resolve_num_threads(
+            None if thread_mode == "automatic" else manual_thread_count
+        )
         self.statusBar().showMessage("Settings updated", 5000)
 
     def show_memory_settings(self):

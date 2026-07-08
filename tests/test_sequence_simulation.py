@@ -5,6 +5,7 @@ from blochsimulator import BlochSimulator, TissueParameters
 from blochsimulator.notebook_exporter import export_sequence_result_notebook
 from blochsimulator.phantom import Phantom
 from blochsimulator.sequence import ADCEvent, GradientEvent, RFEvent, SequenceProgram
+from blochsimulator.simulator import resolve_num_threads
 
 
 def _phantom(
@@ -33,6 +34,17 @@ def _phantom(
         tx_sensitivity_map=tx_sensitivity,
         rx_sensitivity_maps=rx_sensitivities,
     )
+
+
+def test_automatic_thread_count_uses_available_logical_processors(monkeypatch):
+    monkeypatch.setattr("blochsimulator.simulator.os.cpu_count", lambda: 12)
+
+    assert resolve_num_threads(None) == 12
+    assert resolve_num_threads(0) == 12
+    assert resolve_num_threads(3) == 3
+    assert BlochSimulator().num_threads == 12
+    with pytest.raises(ValueError, match="num_threads"):
+        resolve_num_threads(-1)
 
 
 def test_free_relaxation_final_and_checkpoints():
@@ -223,6 +235,89 @@ def test_multi_rx_chunking_and_openmp_do_not_change_signal():
     assert serial.signal.shape == (2, 3)
     assert np.allclose(serial.signal, parallel.signal)
     assert np.allclose(serial.final_magnetization, parallel.final_magnetization)
+
+
+@pytest.mark.parametrize("relaxation_model", ["uniform", "discrete", "continuous"])
+def test_optimized_sequence_kernel_matches_reference(relaxation_model):
+    """Keep the optimized native path tied to the reference implementation."""
+    rng = np.random.default_rng(20260708)
+    shape = (5, 4, 4)
+    t1 = np.full(shape, 1.1)
+    t2 = np.full(shape, 0.09)
+    if relaxation_model == "discrete":
+        labels = np.arange(np.prod(shape)).reshape(shape) % 4
+        t1 = np.choose(labels, [0.7, 0.9, 1.2, 1.6])
+        t2 = np.choose(labels, [0.05, 0.07, 0.1, 0.14])
+    elif relaxation_model == "continuous":
+        t1 += rng.uniform(-0.2, 0.2, shape)
+        t2 += rng.uniform(-0.01, 0.01, shape)
+    m0 = rng.normal(size=shape + (3,))
+    m0 /= np.linalg.norm(m0, axis=-1, keepdims=True)
+    rx = rng.normal(size=(2,) + shape) + 1j * rng.normal(size=(2,) + shape)
+    phantom = Phantom(
+        shape=shape,
+        fov=(0.04, 0.03, 0.02),
+        t1_map=t1,
+        t2_map=t2,
+        pd_map=rng.uniform(0.3, 1.0, shape),
+        b0_map=rng.uniform(-40.0, 40.0, shape),
+        chemical_shift_map=rng.uniform(-10.0, 10.0, shape),
+        m0_map=m0,
+        tx_sensitivity_map=(
+            rng.normal(1.0, 0.05, shape) + 1j * rng.normal(0.0, 0.03, shape)
+        ),
+        rx_sensitivity_maps=rx,
+    )
+    raster = 20e-6
+    interval_count = 24
+    program = SequenceProgram(
+        (
+            RFEvent(
+                2 * raster,
+                np.array([80 + 20j, 120 - 10j, 60 + 5j, 0j]),
+                raster,
+            ),
+            GradientEvent("x", 0.0, np.linspace(-150.0, 200.0, interval_count), raster),
+            GradientEvent("z", 0.0, np.linspace(80.0, -60.0, interval_count), raster),
+            ADCEvent(0.0, 12, 2 * raster, phase_offset_rad=0.37),
+        ),
+        duration_s=interval_count * raster,
+    )
+    simulator = BlochSimulator(use_parallel=True, num_threads=2)
+    reference = simulator.simulate_sequence(
+        program,
+        phantom,
+        checkpoints_s=(0.0, 6 * raster, 13 * raster, interval_count * raster),
+        chunk_voxels=np.prod(shape),
+        sequence_kernel="reference",
+    )
+    optimized = simulator.simulate_sequence(
+        program,
+        phantom,
+        checkpoints_s=(0.0, 6 * raster, 13 * raster, interval_count * raster),
+        chunk_voxels=np.prod(shape),
+        sequence_kernel="optimized",
+    )
+
+    assert optimized.metadata["sequence_kernel"] == "optimized"
+    assert np.allclose(optimized.signal, reference.signal, rtol=5e-13, atol=5e-13)
+    assert np.allclose(
+        optimized.final_magnetization,
+        reference.final_magnetization,
+        rtol=5e-13,
+        atol=5e-13,
+    )
+    assert np.allclose(
+        optimized.checkpoint_magnetization,
+        reference.checkpoint_magnetization,
+        rtol=5e-13,
+        atol=5e-13,
+    )
+
+
+def test_invalid_sequence_kernel_is_rejected():
+    with pytest.raises(ValueError, match="sequence_kernel"):
+        BlochSimulator(sequence_kernel="unknown")
 
 
 def test_invalid_active_relaxation_rejected():

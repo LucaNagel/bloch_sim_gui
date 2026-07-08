@@ -112,4 +112,21 @@ int blochsim_sequence_streaming(
     double *mx_checkpoints, double *my_checkpoints, double *mz_checkpoints,
     int num_threads);
 
+/* Optimized streaming kernel with the same numerical model and output layout. */
+int blochsim_sequence_streaming_optimized(
+    double *rf_real_hz, double *rf_imag_hz,
+    double *gx_hz_m, double *gy_hz_m, double *gz_hz_m,
+    double *dt_s, int nintervals,
+    double *t1_s, double *t2_s, double *df_hz,
+    double *x_m, double *y_m, double *z_m, double *pd,
+    double *tx_real, double *tx_imag,
+    double *rx_real, double *rx_imag, int ncoils,
+    double *mx_init, double *my_init, double *mz_init, int nspins,
+    int *adc_state_indices, double *adc_demod_real, double *adc_demod_imag,
+    int nadc, int *checkpoint_state_indices, int ncheckpoints,
+    double *signal_real, double *signal_imag,
+    double *mx_final, double *my_final, double *mz_final,
+    double *mx_checkpoints, double *my_checkpoints, double *mz_checkpoints,
+    int num_threads);
+
 #endif /* BLOCH_CORE_H */

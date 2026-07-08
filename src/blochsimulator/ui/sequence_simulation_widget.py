@@ -49,7 +49,7 @@ from ..sequence import (
     load_pulseq,
     make_cartesian_epi,
 )
-from ..simulator import BlochSimulator
+from ..simulator import BlochSimulator, resolve_num_threads
 from ..units import NUCLEUS_GAMMA_HZ_PER_T, ppm_to_hz
 from .volume_viewer import SequenceResultVolumeViewer
 
@@ -148,8 +148,51 @@ class SequenceSimulationWidget(QWidget):
             if settings is not None
             else True
         )
+        sequence_kernel = (
+            str(settings.value("sequence/kernel", "optimized"))
+            if settings is not None
+            else "optimized"
+        )
+        if sequence_kernel not in {"optimized", "reference"}:
+            sequence_kernel = "optimized"
+        try:
+            sequence_timestep_us = float(
+                settings.value("sequence/timestep_us", 5.0)
+                if settings is not None
+                else 5.0
+            )
+        except (TypeError, ValueError):
+            sequence_timestep_us = 5.0
+        if (
+            not np.isfinite(sequence_timestep_us)
+            or not 0.1 <= sequence_timestep_us <= 1000.0
+        ):
+            sequence_timestep_us = 5.0
+        thread_mode = (
+            str(settings.value("simulation/thread_mode", "automatic"))
+            if settings is not None
+            else "automatic"
+        )
+        try:
+            manual_threads = int(
+                settings.value("simulation/manual_threads", 4)
+                if settings is not None
+                else 4
+            )
+        except (TypeError, ValueError):
+            manual_threads = 4
+        if thread_mode not in {"automatic", "manual"}:
+            thread_mode = "automatic"
+        configured_threads = (
+            None if thread_mode == "automatic" else max(1, manual_threads)
+        )
         self.acquisition_note = ""
-        self.simulator = BlochSimulator(use_parallel=True, num_threads=4)
+        self.simulator = BlochSimulator(
+            use_parallel=True,
+            num_threads=configured_threads,
+            sequence_kernel=sequence_kernel,
+        )
+        self._initial_sequence_timestep_us = sequence_timestep_us
         self._build_ui()
         self._load_internal_sequence()
 
@@ -357,7 +400,7 @@ class SequenceSimulationWidget(QWidget):
         self.simulation_timestep_us.setRange(0.1, 1000.0)
         self.simulation_timestep_us.setDecimals(2)
         self.simulation_timestep_us.setSingleStep(0.1)
-        self.simulation_timestep_us.setValue(1.0)
+        self.simulation_timestep_us.setValue(self._initial_sequence_timestep_us)
         self.simulation_timestep_us.setSuffix(" µs")
         self.simulation_timestep_us.setToolTip(
             "Time step while RF is active. Larger values average RF and "
@@ -1100,6 +1143,26 @@ class SequenceSimulationWidget(QWidget):
         self.live_preview_enabled = bool(enabled)
         self.rf_progress_cursor.setVisible(self.live_preview_enabled)
         self.gradient_progress_cursor.setVisible(self.live_preview_enabled)
+
+    def set_sequence_kernel(self, kernel):
+        """Apply the persistent sequence-kernel setting to future runs."""
+        if kernel not in {"optimized", "reference"}:
+            raise ValueError("sequence kernel must be 'optimized' or 'reference'")
+        self.simulator.sequence_kernel = kernel
+
+    def set_sequence_timestep_us(self, value):
+        """Apply the persistent RF-active time-step default."""
+        value = float(value)
+        if not np.isfinite(value) or not 0.1 <= value <= 1000.0:
+            raise ValueError("sequence time step must be between 0.1 and 1000 µs")
+        self.simulation_timestep_us.setValue(value)
+
+    def set_thread_configuration(self, mode, manual_thread_count):
+        """Apply automatic or manual native worker selection."""
+        if mode not in {"automatic", "manual"}:
+            raise ValueError("thread mode must be 'automatic' or 'manual'")
+        requested = None if mode == "automatic" else manual_thread_count
+        self.simulator.num_threads = resolve_num_threads(requested)
 
     def _set_sequence_cursor(self, fraction):
         duration_ms = self.program.duration_s * 1000.0 if self.program else 0.0

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QSettings, Qt
 from PyQt5.QtWidgets import QApplication
 
 from blochsimulator.ui.main_window import BlochSimulatorGUI
@@ -21,14 +21,22 @@ EXAMPLE_MAIN = runpy.run_path(
 )["main"]
 
 
-def test_sequence_workspace_is_lazy_and_initializes_on_selection():
+def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     app = QApplication.instance() or QApplication(sys.argv)
     window = BlochSimulatorGUI()
+    window.app_settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    window.app_settings.setValue("sequence/kernel", "reference")
+    window.app_settings.setValue("sequence/timestep_preset", "fast")
+    window.app_settings.setValue("sequence/timestep_us", 10.0)
+    window.app_settings.setValue("simulation/thread_mode", "manual")
+    window.app_settings.setValue("simulation/manual_threads", 2)
     assert window.sequence_simulation_widget is None
     window.tab_widget.setCurrentIndex(window.sequence_simulation_tab_index)
     app.processEvents()
 
-    assert window.sequence_simulation_widget.simulation_timestep_us.value() == 1.0
+    assert window.sequence_simulation_widget.simulation_timestep_us.value() == 10.0
+    assert window.sequence_simulation_widget.simulator.sequence_kernel == "reference"
+    assert window.sequence_simulation_widget.simulator.num_threads == 2
     assert isinstance(window.sequence_simulation_widget, SequenceSimulationWidget)
     assert window.sequence_simulation_widget.program.source == "internal-fid"
     assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is window.workspace_switch
