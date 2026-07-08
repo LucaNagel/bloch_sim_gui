@@ -50,6 +50,7 @@ import pyqtgraph as pg
 
 # Import phantom module
 from .phantom import Phantom, PhantomFactory
+from .phantom_design import PhantomDesign
 from .paths import workspace_directory
 from .spectral_phantom import SpectralPhantom
 from .ui.phantom_designer import (
@@ -145,7 +146,8 @@ class PhantomCreatorWidget(QGroupBox):
 
         # Resolution
         res_layout = QHBoxLayout()
-        res_layout.addWidget(QLabel("Matrix Size:"))
+        self.resolution_label = QLabel("Matrix Size:")
+        res_layout.addWidget(self.resolution_label)
         self.resolution_spin = QSpinBox()
         self.resolution_spin.setRange(8, 256)
         self.resolution_spin.setValue(32)
@@ -158,7 +160,8 @@ class PhantomCreatorWidget(QGroupBox):
 
         # FOV
         fov_layout = QHBoxLayout()
-        fov_layout.addWidget(QLabel("FOV:"))
+        self.fov_label = QLabel("FOV:")
+        fov_layout.addWidget(self.fov_label)
         self.fov_spin = QDoubleSpinBox()
         self.fov_spin.setRange(1, 100)
         self.fov_spin.setValue(24)
@@ -171,7 +174,8 @@ class PhantomCreatorWidget(QGroupBox):
 
         # Field strength
         field_layout = QHBoxLayout()
-        field_layout.addWidget(QLabel("B0:"))
+        self.field_label = QLabel("B0:")
+        field_layout.addWidget(self.field_label)
         self.field_combo = QComboBox()
         self.field_combo.addItems(["1.5T", "3.0T", "7.0T"])
         self.field_combo.setCurrentText("3.0T")
@@ -200,6 +204,14 @@ class PhantomCreatorWidget(QGroupBox):
         self.create_btn.setStyleSheet("font-weight: bold;")
         btn_layout.addWidget(self.create_btn)
 
+        self.edit_btn = QPushButton("Edit Current...")
+        self.edit_btn.clicked.connect(self.edit_current_phantom)
+        self.edit_btn.setToolTip(
+            "Reopen the current spectral phantom with its unsaved shape design"
+        )
+        self.edit_btn.setVisible(False)
+        btn_layout.addWidget(self.edit_btn)
+
         self.save_btn = QPushButton("Save...")
         self.save_btn.clicked.connect(self.save_phantom)
         self.save_btn.setEnabled(False)
@@ -217,11 +229,26 @@ class PhantomCreatorWidget(QGroupBox):
 
     def _on_type_changed(self, type_name: str):
         """Update UI based on selected phantom type."""
+        external_editor = type_name in {
+            "Spectral Shape Designer...",
+            "Load from File...",
+        }
+        for widget in (
+            self.resolution_label,
+            self.resolution_spin,
+            self.fov_label,
+            self.fov_spin,
+            self.field_label,
+            self.field_combo,
+        ):
+            widget.setEnabled(not external_editor)
         # Show/hide tissue selector
         single_tissue_types = ["Cylindrical 2D", "Spherical 3D"]
         show_tissue = type_name in single_tissue_types
         self.tissue_label.setVisible(show_tissue)
         self.tissue_combo.setVisible(show_tissue)
+        self.tissue_label.setEnabled(not external_editor)
+        self.tissue_combo.setEnabled(not external_editor)
 
         # Limit resolution for 3D
         if "3D" in type_name:
@@ -230,6 +257,12 @@ class PhantomCreatorWidget(QGroupBox):
                 self.resolution_spin.setValue(32)
         else:
             self.resolution_spin.setMaximum(256)
+        self.create_btn.setText(
+            "Create New..."
+            if type_name == "Spectral Shape Designer..."
+            else "Create Phantom"
+        )
+        self._update_edit_button()
 
     def get_field_strength(self) -> float:
         return float(self.field_combo.currentText().replace("T", ""))
@@ -242,14 +275,7 @@ class PhantomCreatorWidget(QGroupBox):
             self.load_phantom()
             return
         if phantom_type == "Spectral Shape Designer...":
-            dialog = SpectralPhantomDesignerDialog(self)
-            self._retained_spectral_designer_dialogs.append(dialog)
-            if dialog.exec_() == QDialog.Accepted:
-                phantom = dialog.get_phantom()
-                self.current_phantom = phantom
-                self._update_info()
-                self.save_btn.setEnabled(True)
-                self.phantom_created.emit(phantom)
+            self._open_spectral_designer()
             return
 
         try:
@@ -275,6 +301,7 @@ class PhantomCreatorWidget(QGroupBox):
             self.current_phantom = phantom
             self._update_info()
             self.save_btn.setEnabled(True)
+            self._update_edit_button()
             self.phantom_created.emit(phantom)
 
         except Exception as e:
@@ -294,6 +321,7 @@ class PhantomCreatorWidget(QGroupBox):
                 self.current_phantom = phantom
                 self._update_info()
                 self.save_btn.setEnabled(True)
+                self._update_edit_button()
                 self.phantom_created.emit(phantom)
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load phantom:\n{e}")
@@ -315,6 +343,47 @@ class PhantomCreatorWidget(QGroupBox):
                 QMessageBox.information(self, "Saved", f"Phantom saved to:\n{filename}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save phantom:\n{e}")
+
+    def _open_spectral_designer(self, design=None):
+        dialog = SpectralPhantomDesignerDialog(self, design=design)
+        self._retained_spectral_designer_dialogs.append(dialog)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        phantom = dialog.get_phantom()
+        self.current_phantom = phantom
+        self._update_info()
+        self.save_btn.setEnabled(True)
+        self._update_edit_button()
+        self.phantom_created.emit(phantom)
+
+    def edit_current_phantom(self):
+        """Reopen editable in-memory shape metadata without requiring a save."""
+        if not isinstance(self.current_phantom, SpectralPhantom):
+            QMessageBox.information(
+                self,
+                "Phantom is not editable",
+                "Only spectral shape-designer phantoms can be reopened here.",
+            )
+            return
+        try:
+            design = PhantomDesign.from_phantom(self.current_phantom)
+        except ValueError as exc:
+            QMessageBox.information(self, "Phantom is not editable", str(exc))
+            return
+        self._open_spectral_designer(design=design)
+
+    def _update_edit_button(self):
+        editable = False
+        if isinstance(self.current_phantom, SpectralPhantom):
+            try:
+                PhantomDesign.from_phantom(self.current_phantom)
+                editable = True
+            except ValueError:
+                pass
+        self.edit_btn.setVisible(
+            editable and self.type_combo.currentText() == "Spectral Shape Designer..."
+        )
+        self.edit_btn.setEnabled(editable)
 
     def _update_info(self):
         """Update info label with phantom details."""
@@ -374,6 +443,7 @@ class PhantomViewerWidget(QWidget):
         self.prop_image = pg.ImageView()
         self.prop_image.ui.roiBtn.hide()
         self.prop_image.ui.menuBtn.hide()
+        self.prop_image.getView().setAspectLocked(True)
         prop_layout.addWidget(self.prop_image)
 
         self.prop_info = QLabel("")
@@ -559,18 +629,45 @@ class PhantomViewerWidget(QWidget):
             display_data = data[:, :, slice_idx]
             mask_2d = self.phantom.mask[:, :, slice_idx]
 
-        # Mask background
-        display_data = np.where(mask_2d, display_data, np.nan)
-
-        self.prop_image.setImage(display_data.T, autoLevels=True)
-
-        # Update info
-        valid = data[self.phantom.mask]
-        if len(valid) > 0:
+        valid = np.asarray(data)[self.phantom.mask & np.isfinite(data)]
+        if valid.size > 0:
+            low = float(valid.min())
+            high = float(valid.max())
+            span = high - low
+            padding = (
+                max(1e-6, abs(low) * 1e-3)
+                if np.isclose(low, high)
+                else max(1e-12, 0.05 * span)
+            )
+            background = low - padding
+            levels = (background, high if high > background else low + padding)
+            display = np.where(mask_2d, display_data, background)
+            display = np.nan_to_num(
+                display,
+                copy=True,
+                nan=background,
+                posinf=levels[1],
+                neginf=background,
+            )
+            fov_x, fov_y = (float(value) for value in self.phantom.fov[:2])
+            self.prop_image.setImage(
+                display,
+                autoLevels=False,
+                levels=levels,
+                autoHistogramRange=False,
+                pos=(-fov_x * 500.0, -fov_y * 500.0),
+                scale=(
+                    fov_x * 1000.0 / display.shape[0],
+                    fov_y * 1000.0 / display.shape[1],
+                ),
+            )
+            self.prop_image.ui.histogram.setHistogramRange(*levels)
+            self.prop_image.getView().autoRange()
             self.prop_info.setText(
                 f"Range: {valid.min():.2f} - {valid.max():.2f} {unit}"
             )
         else:
+            self.prop_image.clear()
             self.prop_info.setText("No data")
 
     def _update_result_view(self):

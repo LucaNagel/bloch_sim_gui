@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Optional
+import weakref
 
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt
@@ -55,7 +56,9 @@ class SpectralPhantomDesignerDialog(QDialog):
 
     def __init__(self, parent=None, design: Optional[PhantomDesign] = None):
         super().__init__(parent)
-        self.setWindowTitle("Spectral Phantom Designer")
+        self.setWindowTitle(
+            "Edit Spectral Phantom" if design is not None else "New Spectral Phantom"
+        )
         self.resize(1250, 850)
         self.design = design or PhantomDesign(shapes=[ShapeDefinition(name="Shape 1")])
         self.phantom = None
@@ -93,6 +96,28 @@ class SpectralPhantomDesignerDialog(QDialog):
             self.fov_spins.append(fov)
         draw_layout.addLayout(global_row)
 
+        b0_row = QHBoxLayout()
+        b0_row.addWidget(QLabel("Global B0 inhomogeneity"))
+        self.b0_mode_combo = QComboBox()
+        self.b0_mode_combo.addItem("None", "none")
+        self.b0_mode_combo.addItem("Linear X (2D)", "linear_x")
+        self.b0_mode_combo.addItem("Linear Y (2D)", "linear_y")
+        self.b0_mode_combo.addItem("Linear Z (3D)", "linear_z")
+        self.b0_mode_combo.addItem("Radial XY (2D)", "radial_xy")
+        self.b0_mode_combo.addItem("Radial XYZ (3D)", "radial_xyz")
+        self.b0_mode_combo.setToolTip(
+            "Analytic spatial B0 variation added to each shape's constant offset"
+        )
+        b0_row.addWidget(self.b0_mode_combo)
+        self.b0_inhomogeneity_ppm = self._number_spin(-1000.0, 1000.0, 0.0, " ppm")
+        self.b0_inhomogeneity_ppm.setToolTip(
+            "Signed maximum deviation at the edge/corners of the FOV"
+        )
+        b0_row.addWidget(QLabel("Edge amplitude"))
+        b0_row.addWidget(self.b0_inhomogeneity_ppm)
+        b0_row.addStretch()
+        draw_layout.addLayout(b0_row)
+
         splitter = QSplitter(Qt.Horizontal)
         draw_layout.addWidget(splitter)
 
@@ -118,13 +143,29 @@ class SpectralPhantomDesignerDialog(QDialog):
         canvas_panel = QWidget()
         canvas_layout = QVBoxLayout(canvas_panel)
         canvas_layout.addWidget(
-            QLabel("Drag and resize shapes in the normalized axial XY plane")
+            QLabel("Drag and resize shapes in the axial XY plane (physical FOV axes)")
         )
         self.canvas = pg.PlotWidget()
         self.canvas.setAspectLocked(True)
         self.canvas.setXRange(0, 1)
         self.canvas.setYRange(0, 1)
         self.canvas.showGrid(x=True, y=True, alpha=0.3)
+        self.canvas.setLabel("bottom", "x", units="cm")
+        self.canvas.setLabel("left", "y", units="cm")
+        dialog_ref = weakref.ref(self)
+
+        def physical_ticks(axis_index):
+            def tick_strings(values, scale, spacing):
+                dialog = dialog_ref()
+                fov_cm = dialog.fov_spins[axis_index].value() if dialog else 1.0
+                return [f"{(value - 0.5) * fov_cm:.3g}" for value in values]
+
+            return tick_strings
+
+        self.canvas.getAxis("bottom").tickStrings = physical_ticks(0)
+        self.canvas.getAxis("left").tickStrings = physical_ticks(1)
+        for spin in self.fov_spins[:2]:
+            spin.valueChanged.connect(self._update_canvas_axes)
         canvas_layout.addWidget(self.canvas)
         splitter.addWidget(canvas_panel)
 
@@ -218,6 +259,9 @@ class SpectralPhantomDesignerDialog(QDialog):
             widget.setValue(int(value))
         for widget, value in zip(self.fov_spins, self.design.fov_m):
             widget.setValue(float(value) * 100.0)
+        mode_index = self.b0_mode_combo.findData(self.design.b0_inhomogeneity_mode)
+        self.b0_mode_combo.setCurrentIndex(max(0, mode_index))
+        self.b0_inhomogeneity_ppm.setValue(self.design.b0_inhomogeneity_ppm)
         self.shape_list.clear()
         for roi in self._rois:
             self.canvas.removeItem(roi)
@@ -281,10 +325,27 @@ class SpectralPhantomDesignerDialog(QDialog):
 
     def _update_xy_info(self, row):
         item = self.design.shapes[row]
-        self.xy_info.setText(
-            f"centre=({item.center[0]:.3f}, {item.center[1]:.3f}); "
-            f"size=({item.size[0]:.3f}, {item.size[1]:.3f})"
+        center_mm = tuple(
+            (item.center[index] - 0.5) * self.fov_spins[index].value() * 10.0
+            for index in range(2)
         )
+        size_mm = tuple(
+            item.size[index] * self.fov_spins[index].value() * 10.0
+            for index in range(2)
+        )
+        self.xy_info.setText(
+            f"centre=({center_mm[0]:.3g}, {center_mm[1]:.3g}) mm; "
+            f"size=({size_mm[0]:.3g}, {size_mm[1]:.3g}) mm"
+        )
+
+    def _update_canvas_axes(self, *_):
+        for name in ("bottom", "left"):
+            axis = self.canvas.getAxis(name)
+            axis.picture = None
+            axis.update()
+        row = self._current_row()
+        if row is not None:
+            self._update_xy_info(row)
 
     def _properties_changed(self):
         row = self._current_row()
@@ -386,6 +447,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.design.name = self.name_edit.text().strip() or "Designed spectral phantom"
         self.design.shape = tuple(widget.value() for widget in self.matrix_spins)
         self.design.fov_m = tuple(widget.value() / 100.0 for widget in self.fov_spins)
+        self.design.b0_inhomogeneity_mode = str(self.b0_mode_combo.currentData())
+        self.design.b0_inhomogeneity_ppm = self.b0_inhomogeneity_ppm.value()
 
     def _preview(self):
         try:

@@ -291,6 +291,216 @@ class CartesianAcquisitionFrames:
 
 
 @dataclass(frozen=True)
+class SpectroscopicAcquisition:
+    """Map phase-encoded 2D CSI data to ``(ky, kx, spectral_point)``.
+
+    Unlike a Cartesian imaging readout, every ADC event is an FID acquired at
+    one fixed spatial k-space coordinate.  Treating the spectral samples as a
+    readout axis would therefore produce a physically invalid reconstruction.
+    """
+
+    matrix: Tuple[int, int]
+    fov_m: Tuple[float, float]
+    spectral_points: int
+    dwell_s: float
+    encoding_indices: Tuple[Tuple[int, int], ...]
+    moment_origins_cyc_per_m: Tuple[Tuple[float, float, float], ...] = ()
+
+    def __post_init__(self) -> None:
+        matrix = tuple(
+            _positive_integer(value, "CSI matrix size") for value in self.matrix
+        )
+        if len(matrix) != 2:
+            raise ValueError("CSI matrix must contain x and y sizes")
+        fov = tuple(float(value) for value in self.fov_m)
+        if len(fov) != 2 or not np.all(np.isfinite(fov)) or min(fov) <= 0:
+            raise ValueError("CSI fov_m must contain two positive finite values")
+        points = _positive_integer(self.spectral_points, "spectral_points")
+        dwell = float(self.dwell_s)
+        if not np.isfinite(dwell) or dwell <= 0:
+            raise ValueError("CSI dwell_s must be positive and finite")
+        indices = tuple((int(x), int(y)) for x, y in self.encoding_indices)
+        expected = {(x, y) for y in range(matrix[1]) for x in range(matrix[0])}
+        if len(indices) != matrix[0] * matrix[1] or set(indices) != expected:
+            raise ValueError("CSI encoding_indices must cover the spatial grid once")
+        origins = tuple(
+            tuple(float(value) for value in origin)
+            for origin in self.moment_origins_cyc_per_m
+        )
+        if not origins:
+            origins = tuple((0.0, 0.0, 0.0) for _ in indices)
+        if len(origins) != len(indices) or any(len(origin) != 3 for origin in origins):
+            raise ValueError("CSI requires one 3D gradient-moment origin per FID")
+        object.__setattr__(self, "matrix", matrix)
+        object.__setattr__(self, "fov_m", fov)
+        object.__setattr__(self, "spectral_points", points)
+        object.__setattr__(self, "dwell_s", dwell)
+        object.__setattr__(self, "encoding_indices", indices)
+        object.__setattr__(self, "moment_origins_cyc_per_m", origins)
+
+    @property
+    def num_encodings(self) -> int:
+        return self.matrix[0] * self.matrix[1]
+
+    @property
+    def num_samples(self) -> int:
+        return self.num_encodings * self.spectral_points
+
+    @property
+    def spectral_bandwidth_hz(self) -> float:
+        return 1.0 / self.dwell_s
+
+    @property
+    def spectral_resolution_hz(self) -> float:
+        return self.spectral_bandwidth_hz / self.spectral_points
+
+    @property
+    def kx_cyc_per_m(self) -> np.ndarray:
+        return (
+            np.arange(self.matrix[0], dtype=float) - self.matrix[0] // 2
+        ) / self.fov_m[0]
+
+    @property
+    def ky_cyc_per_m(self) -> np.ndarray:
+        return (
+            np.arange(self.matrix[1], dtype=float) - self.matrix[1] // 2
+        ) / self.fov_m[1]
+
+    @property
+    def spectral_time_s(self) -> np.ndarray:
+        return np.arange(self.spectral_points, dtype=float) * self.dwell_s
+
+    @property
+    def frequency_hz(self) -> np.ndarray:
+        return np.fft.fftshift(np.fft.fftfreq(self.spectral_points, self.dwell_s))
+
+    def reshape_signal(self, signal: np.ndarray) -> np.ndarray:
+        """Return chronological signal as ``(..., ky, kx, spectral_point)``."""
+        values = np.asarray(signal)
+        if values.ndim not in (1, 2) or values.shape[-1] != self.num_samples:
+            raise ValueError(
+                f"signal must end with {self.num_samples} chronological CSI samples"
+            )
+        raw = values.reshape(
+            values.shape[:-1] + (self.num_encodings, self.spectral_points)
+        )
+        grid = np.empty(
+            values.shape[:-1] + (self.matrix[1], self.matrix[0], self.spectral_points),
+            dtype=values.dtype,
+        )
+        for acquired, (x_index, y_index) in enumerate(self.encoding_indices):
+            grid[..., y_index, x_index, :] = raw[..., acquired, :]
+        return grid
+
+    def reconstruct_spatial(
+        self,
+        signal: np.ndarray,
+        *,
+        norm: Optional[str] = None,
+        voxel_centered: bool = True,
+    ) -> np.ndarray:
+        """Apply the spatial 2D inverse FFT while retaining the complete FID."""
+        kspace = self.reshape_signal(signal)
+        if voxel_centered:
+            dx = self.fov_m[0] / self.matrix[0]
+            dy = self.fov_m[1] / self.matrix[1]
+            phase = np.exp(
+                2j
+                * np.pi
+                * (
+                    self.ky_cyc_per_m[:, None] * dy / 2
+                    + self.kx_cyc_per_m[None, :] * dx / 2
+                )
+            )
+            kspace = kspace * phase[..., None]
+        axes = (-3, -2)
+        return np.fft.fftshift(
+            np.fft.ifft2(np.fft.ifftshift(kspace, axes=axes), axes=axes, norm=norm),
+            axes=axes,
+        )
+
+    def reconstruct_spectra(
+        self,
+        signal: np.ndarray,
+        *,
+        norm: Optional[str] = None,
+        voxel_centered: bool = True,
+    ) -> np.ndarray:
+        """Return spatially reconstructed complex spectra as ``(..., y, x, f)``."""
+        fid = self.reconstruct_spatial(signal, norm=norm, voxel_centered=voxel_centered)
+        return np.fft.fftshift(np.fft.fft(fid, axis=-1), axes=-1)
+
+    def validate_adc_times(self, adc_times_s: np.ndarray) -> None:
+        times = np.asarray(adc_times_s, dtype=float)
+        if times.shape != (self.num_samples,) or not np.all(np.isfinite(times)):
+            raise ValueError("ADC times do not match the CSI acquisition")
+        fids = times.reshape(self.num_encodings, self.spectral_points)
+        if self.spectral_points > 1 and not np.allclose(
+            np.diff(fids, axis=1), self.dwell_s, rtol=0.0, atol=1e-12
+        ):
+            raise ValueError(
+                "CSI spectral dwell spacing does not match the acquisition"
+            )
+
+    def validate_gradient_moments(self, moments_cyc_per_m: np.ndarray) -> None:
+        moments = np.asarray(moments_cyc_per_m, dtype=float)
+        if moments.shape != (self.num_samples, 3):
+            raise ValueError("CSI gradient moments must have shape (num_samples, 3)")
+        raw = moments.reshape(self.num_encodings, self.spectral_points, 3)
+        origins = np.asarray(self.moment_origins_cyc_per_m)[:, None, :]
+        relative = raw - origins
+        tolerance_x = max(1e-9, 1e-3 / self.fov_m[0])
+        tolerance_y = max(1e-9, 1e-3 / self.fov_m[1])
+        for acquired, (x_index, y_index) in enumerate(self.encoding_indices):
+            if not np.allclose(
+                relative[acquired, :, 0],
+                self.kx_cyc_per_m[x_index],
+                rtol=0.0,
+                atol=tolerance_x,
+            ):
+                raise ValueError(
+                    "CSI x phase encoding does not match the declared grid"
+                )
+            if not np.allclose(
+                relative[acquired, :, 1],
+                self.ky_cyc_per_m[y_index],
+                rtol=0.0,
+                atol=tolerance_y,
+            ):
+                raise ValueError(
+                    "CSI y phase encoding does not match the declared grid"
+                )
+
+    def to_metadata(self) -> dict:
+        return {
+            "type": "csi_2d",
+            "matrix": self.matrix,
+            "fov_m": self.fov_m,
+            "spectral_points": self.spectral_points,
+            "dwell_s": self.dwell_s,
+            "encoding_indices": self.encoding_indices,
+            "moment_origins_cyc_per_m": self.moment_origins_cyc_per_m,
+        }
+
+    @classmethod
+    def from_metadata(cls, metadata: Mapping) -> "SpectroscopicAcquisition":
+        if metadata.get("type") != "csi_2d":
+            raise ValueError("unsupported spectroscopic acquisition metadata")
+        return cls(
+            matrix=tuple(metadata["matrix"]),
+            fov_m=tuple(metadata["fov_m"]),
+            spectral_points=metadata["spectral_points"],
+            dwell_s=metadata["dwell_s"],
+            encoding_indices=tuple(
+                tuple(value) for value in metadata["encoding_indices"]
+            ),
+            moment_origins_cyc_per_m=tuple(
+                tuple(value) for value in metadata.get("moment_origins_cyc_per_m", ())
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class CartesianAcquisition:
     """Describe how a chronological ADC stream maps to a 2D Cartesian grid."""
 
@@ -646,6 +856,87 @@ def infer_cartesian_acquisition(
     )
     acquisition.validate_adc_times(compiled.adc_times_s)
     acquisition.validate_gradient_moments(moments)
+    return acquisition
+
+
+def infer_spectroscopic_acquisition(
+    program: SequenceProgram,
+    *,
+    compiled=None,
+) -> SpectroscopicAcquisition:
+    """Infer a labelled phase-encoded 2D CSI acquisition.
+
+    CSI is identified conservatively from ``MatrixSize``/``SpectralPoints``
+    definitions plus Pulseq ``LIN`` and ``PAR`` labels.  The gradient moments
+    are validated relative to the RF event preceding each FID so that moments
+    accumulated during earlier repetitions are not mistaken for encoding.
+    """
+    from .compiler import SequenceCompiler
+
+    adc_events = program.adc_events
+    if not adc_events:
+        raise ValueError("sequence contains no ADC events")
+    definitions = {
+        str(key).lower(): value
+        for key, value in dict(program.metadata.get("definitions", {})).items()
+    }
+    matrix_value = definitions.get("matrixsize")
+    spectral_value = definitions.get("spectralpoints")
+    fov_value = definitions.get("fov")
+    if matrix_value is None or fov_value is None:
+        raise ValueError("CSI inference requires MatrixSize and FOV definitions")
+    matrix_values = np.asarray(matrix_value, dtype=float).reshape(-1)
+    if matrix_values.size < 3:
+        raise ValueError("CSI MatrixSize must contain x, y, and spectral sizes")
+    nx, ny, matrix_spectral = (
+        _positive_integer(value, "CSI MatrixSize") for value in matrix_values[:3]
+    )
+    spectral_points = (
+        matrix_spectral
+        if spectral_value is None
+        else _positive_integer(spectral_value, "SpectralPoints")
+    )
+    if spectral_points != matrix_spectral:
+        raise ValueError("CSI MatrixSize and SpectralPoints definitions disagree")
+    if len(adc_events) != nx * ny:
+        raise ValueError("ADC event count does not match the declared CSI grid")
+    if any(event.num_samples != spectral_points for event in adc_events):
+        raise ValueError("ADC event sizes do not match CSI SpectralPoints")
+    dwell_s = adc_events[0].dwell_s
+    if any(
+        not np.isclose(event.dwell_s, dwell_s, rtol=0.0, atol=1e-15)
+        for event in adc_events
+    ):
+        raise ValueError("CSI ADC events do not have a common spectral dwell")
+
+    fov = np.asarray(fov_value, dtype=float).reshape(-1)
+    if fov.size < 2 or not np.all(np.isfinite(fov[:2])) or np.any(fov[:2] <= 0):
+        raise ValueError("CSI FOV definition does not contain valid x/y values")
+    labels = program.metadata.get("adc_label_values", {})
+    lin = tuple(labels.get("LIN", ()))
+    par = tuple(labels.get("PAR", ()))
+    if len(lin) != len(adc_events) or len(par) != len(adc_events):
+        raise ValueError("CSI inference requires one LIN and PAR label per FID")
+    encoding_indices = tuple((int(x), int(y)) for x, y in zip(lin, par))
+
+    compiled = SequenceCompiler().compile(program) if compiled is None else compiled
+    origins = tuple(
+        tuple(
+            float(value)
+            for value in _frame_gradient_moment_origin(program, compiled, event.start_s)
+        )
+        for event in adc_events
+    )
+    acquisition = SpectroscopicAcquisition(
+        matrix=(nx, ny),
+        fov_m=(float(fov[0]), float(fov[1])),
+        spectral_points=spectral_points,
+        dwell_s=dwell_s,
+        encoding_indices=encoding_indices,
+        moment_origins_cyc_per_m=origins,
+    )
+    acquisition.validate_adc_times(compiled.adc_times_s)
+    acquisition.validate_gradient_moments(compiled.adc_gradient_moment_cyc_per_m)
     return acquisition
 
 

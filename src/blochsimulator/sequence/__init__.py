@@ -4,8 +4,10 @@ from .acquisition import (
     AcquisitionDimensions,
     CartesianAcquisition,
     CartesianAcquisitionFrames,
+    SpectroscopicAcquisition,
     infer_cartesian_acquisition,
     infer_cartesian_acquisition_frames,
+    infer_spectroscopic_acquisition,
     make_cartesian_epi,
 )
 from .compiler import CompiledSequence, SequenceCompiler
@@ -23,6 +25,7 @@ __all__ = [
     "AcquisitionDimensions",
     "CartesianAcquisition",
     "CartesianAcquisitionFrames",
+    "SpectroscopicAcquisition",
     "CompiledSequence",
     "GradientEvent",
     "RFEvent",
@@ -33,6 +36,7 @@ __all__ = [
     "UnsupportedPulseqVersionError",
     "infer_cartesian_acquisition",
     "infer_cartesian_acquisition_frames",
+    "infer_spectroscopic_acquisition",
     "load_pulseq",
     "make_cartesian_epi",
 ]

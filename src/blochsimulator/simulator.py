@@ -2170,8 +2170,17 @@ class BlochSimulator:
 
         signal = coil_signal[0] if n_rx_coils == 1 else coil_signal
         from .sequence import AcquisitionDimensions
+        from .sequence.acquisition import infer_spectroscopic_acquisition
 
         acquisition_dimensions = AcquisitionDimensions.from_program(program)
+        spectroscopic_metadata = program.metadata.get("spectroscopic_acquisition")
+        if spectroscopic_metadata is None:
+            try:
+                spectroscopic_metadata = infer_spectroscopic_acquisition(
+                    program, compiled=compiled
+                ).to_metadata()
+            except ValueError:
+                spectroscopic_metadata = None
         result = SequenceSimulationResult(
             signal=signal,
             adc_times_s=compiled.adc_times_s,
@@ -2198,6 +2207,8 @@ class BlochSimulator:
                     else None
                 ),
                 "acquisition_dimensions": acquisition_dimensions.to_metadata(),
+                "spectroscopic_acquisition": spectroscopic_metadata,
+                "sequence_definitions": dict(program.metadata.get("definitions", {})),
                 "units": {
                     "time": "s",
                     "position": "m",

@@ -7,8 +7,9 @@ from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import QRectF, Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -21,7 +22,9 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QProgressBar,
     QScrollArea,
+    QSlider,
     QSpinBox,
+    QStackedWidget,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
@@ -36,11 +39,13 @@ from ..sequence import (
     ADCEvent,
     CartesianAcquisition,
     CartesianAcquisitionFrames,
+    SpectroscopicAcquisition,
     RFEvent,
     SequenceCompiler,
     SequenceProgram,
     infer_cartesian_acquisition,
     infer_cartesian_acquisition_frames,
+    infer_spectroscopic_acquisition,
     load_pulseq,
     make_cartesian_epi,
 )
@@ -132,8 +137,10 @@ class SequenceSimulationWidget(QWidget):
         self.program: Optional[SequenceProgram] = None
         self.acquisition: Optional[CartesianAcquisition] = None
         self.acquisition_frames: Optional[CartesianAcquisitionFrames] = None
+        self.spectroscopic_acquisition: Optional[SpectroscopicAcquisition] = None
         self.phantom: Optional[Phantom] = None
         self.result = None
+        self._split_csi_data = None
         self.worker = None
         settings = getattr(parent, "app_settings", None)
         self.live_preview_enabled = (
@@ -167,12 +174,10 @@ class SequenceSimulationWidget(QWidget):
         sequence_layout = QVBoxLayout(sequence_group)
         sequence_layout.addWidget(QLabel("Source / mode"))
         self.sequence_source = QComboBox()
-        self.sequence_source.addItems(
-            ["Internal FID", "Cartesian EPI", "Pulseq .seq file"]
-        )
+        self.sequence_source.addItems(["Internal FID", "EPI", "Pulseq .seq file"])
         self.sequence_source.currentIndexChanged.connect(self._source_changed)
         self.sequence_source.setToolTip(
-            "Choose Cartesian EPI to configure matrix and receiver bandwidth"
+            "Choose EPI to configure matrix and receiver bandwidth"
         )
         sequence_layout.addWidget(self.sequence_source)
         load_button = QPushButton("Load Pulseq…")
@@ -183,11 +188,10 @@ class SequenceSimulationWidget(QWidget):
         sequence_layout.addWidget(self.sequence_info)
         controls_layout.addWidget(sequence_group)
 
-        self.acquisition_group = QGroupBox("Cartesian acquisition")
+        self.acquisition_group = QGroupBox("EPI acquisition")
         acquisition_form = QFormLayout(self.acquisition_group)
         self.acquisition_hint = QLabel(
-            "Select ‘Cartesian EPI’ under Source / mode to configure a 2D "
-            "kx-ky acquisition."
+            "EPI uses an x readout and y phase encoding on a Cartesian grid."
         )
         self.acquisition_hint.setWordWrap(True)
         self.read_matrix = QSpinBox()
@@ -209,7 +213,7 @@ class SequenceSimulationWidget(QWidget):
         acquisition_form.addRow("Sampling bandwidth", self.sampling_bandwidth_khz)
         acquisition_form.addRow("ADC dwell", self.dwell_info)
         acquisition_form.addRow("Pixel bandwidth", self.pixel_bandwidth_info)
-        self.acquisition_group.setEnabled(False)
+        self.acquisition_group.setVisible(False)
         controls_layout.addWidget(self.acquisition_group)
 
         object_group = QGroupBox("Simulation object")
@@ -233,40 +237,44 @@ class SequenceSimulationWidget(QWidget):
         self.frequency_reference_info = QLabel()
         self.frequency_reference_info.setWordWrap(True)
         object_form.addRow("Frequency model", self.frequency_reference_info)
+
+        self.built_in_properties_group = QGroupBox("Built-in phantom properties")
+        built_in_form = QFormLayout(self.built_in_properties_group)
         self.object_type = QComboBox()
         self.object_type.addItems(
             ["None — defined in Phantom tab", "Uniform cube", "Sphere"]
         )
-        object_form.addRow("Type", self.object_type)
+        built_in_form.addRow("Type", self.object_type)
         self.matrix_size = QSpinBox()
         self.matrix_size.setRange(2, 128)
         self.matrix_size.setValue(16)
-        object_form.addRow("In-plane matrix", self.matrix_size)
+        built_in_form.addRow("In-plane matrix", self.matrix_size)
         self.z_matrix_size = QSpinBox()
         self.z_matrix_size.setRange(1, 128)
         self.z_matrix_size.setValue(16)
-        object_form.addRow("Through-plane matrix", self.z_matrix_size)
+        built_in_form.addRow("Through-plane matrix", self.z_matrix_size)
         self.fov_cm = QDoubleSpinBox()
         self.fov_cm.setRange(0.1, 100.0)
         self.fov_cm.setValue(20.0)
         self.fov_cm.setSuffix(" cm")
-        object_form.addRow("In-plane FOV", self.fov_cm)
+        built_in_form.addRow("In-plane FOV", self.fov_cm)
         self.fov_z_cm = QDoubleSpinBox()
         self.fov_z_cm.setRange(0.001, 100.0)
         self.fov_z_cm.setDecimals(4)
         self.fov_z_cm.setValue(20.0)
         self.fov_z_cm.setSuffix(" cm")
-        object_form.addRow("Through-plane FOV", self.fov_z_cm)
+        built_in_form.addRow("Through-plane FOV", self.fov_z_cm)
         self.t1_ms = self._parameter_spin(1.0, 10000.0, 1000.0, " ms")
         self.t2_ms = self._parameter_spin(0.1, 5000.0, 100.0, " ms")
         self.pd = self._parameter_spin(0.0, 10.0, 1.0, "")
         self.b0_ppm = self._parameter_spin(-1000.0, 1000.0, 0.0, " ppm")
         self.chemical_ppm = self._parameter_spin(-1000.0, 1000.0, 0.0, " ppm")
-        object_form.addRow("T1", self.t1_ms)
-        object_form.addRow("T2", self.t2_ms)
-        object_form.addRow("Proton density", self.pd)
-        object_form.addRow("B0 inhomogeneity", self.b0_ppm)
-        object_form.addRow("Chemical shift", self.chemical_ppm)
+        built_in_form.addRow("T1", self.t1_ms)
+        built_in_form.addRow("T2", self.t2_ms)
+        built_in_form.addRow("Proton density", self.pd)
+        built_in_form.addRow("B0 inhomogeneity", self.b0_ppm)
+        built_in_form.addRow("Chemical shift", self.chemical_ppm)
+        object_form.addRow(self.built_in_properties_group)
         self.phantom_summary = QLabel()
         self.phantom_summary.setWordWrap(True)
         object_form.addRow("Selected phantom", self.phantom_summary)
@@ -303,6 +311,41 @@ class SequenceSimulationWidget(QWidget):
         self.frame_selector.setEnabled(False)
         self.frame_selector.currentIndexChanged.connect(self._frame_changed)
         output_form.addRow("2D acquisition frame", self.frame_selector)
+        self.frame_slider = QSlider(Qt.Horizontal)
+        self.frame_slider.setRange(0, 0)
+        self.frame_slider.setEnabled(False)
+        self.frame_slider.setTracking(True)
+        self.frame_slider.setToolTip(
+            "Browse inferred slice, repetition, echo, segment, or partition frames"
+        )
+        self.frame_slider.valueChanged.connect(self._frame_slider_changed)
+        output_form.addRow("Frame index", self.frame_slider)
+        self.spectral_point_selector = QSpinBox()
+        self.spectral_point_selector.setRange(0, 0)
+        self.spectral_point_selector.setEnabled(False)
+        self.spectral_point_selector.valueChanged.connect(self._spectral_view_changed)
+        self.spectral_point_selector.setToolTip(
+            "FID sample shown in spatial k-space and the spatial reconstruction"
+        )
+        self.spectral_point_slider = QSlider(Qt.Horizontal)
+        self.spectral_point_slider.setRange(0, 0)
+        self.spectral_point_slider.setEnabled(False)
+        self.spectral_point_slider.setTracking(True)
+        self.spectral_point_slider.setToolTip(
+            "Browse the FID time dimension shown in k-space and image space"
+        )
+        self.spectral_point_slider.valueChanged.connect(
+            self.spectral_point_selector.setValue
+        )
+        self.spectral_point_selector.valueChanged.connect(
+            self.spectral_point_slider.setValue
+        )
+        spectral_point_control = QWidget()
+        spectral_point_layout = QHBoxLayout(spectral_point_control)
+        spectral_point_layout.setContentsMargins(0, 0, 0, 0)
+        spectral_point_layout.addWidget(self.spectral_point_slider, 1)
+        spectral_point_layout.addWidget(self.spectral_point_selector)
+        output_form.addRow("CSI FID sample", spectral_point_control)
         controls_layout.addWidget(output_group)
         controls_layout.addStretch()
 
@@ -354,8 +397,38 @@ class SequenceSimulationWidget(QWidget):
         self._update_bandwidth_labels()
         self._object_source_changed()
 
+        viewer_column = QWidget()
+        viewer_column_layout = QVBoxLayout(viewer_column)
+        viewer_column_layout.setContentsMargins(0, 0, 0, 0)
+        view_mode_row = QHBoxLayout()
+        self.split_view_checkbox = QCheckBox("Split view")
+        self.split_view_checkbox.setEnabled(False)
+        self.split_view_checkbox.setToolTip(
+            "Show image or k-space beside the selected voxel FID or spectrum"
+        )
+        self.split_view_checkbox.toggled.connect(self._toggle_split_view)
+        view_mode_row.addWidget(self.split_view_checkbox)
+        view_mode_row.addWidget(QLabel("Left"))
+        self.split_image_source = QComboBox()
+        self.split_image_source.addItems(["Reconstruction", "K-space"])
+        self.split_image_source.setEnabled(False)
+        self.split_image_source.currentIndexChanged.connect(self._refresh_split_view)
+        view_mode_row.addWidget(self.split_image_source)
+        view_mode_row.addWidget(QLabel("Right"))
+        self.split_signal_source = QComboBox()
+        self.split_signal_source.addItems(["Spectrum", "FID"])
+        self.split_signal_source.setEnabled(False)
+        self.split_signal_source.currentIndexChanged.connect(self._refresh_split_view)
+        view_mode_row.addWidget(self.split_signal_source)
+        view_mode_row.addStretch()
+        viewer_column_layout.addLayout(view_mode_row)
+
+        self.view_stack = QStackedWidget()
+        viewer_column_layout.addWidget(self.view_stack, 1)
         views = QTabWidget()
-        splitter.addWidget(views)
+        self.views = views
+        self.view_stack.addWidget(views)
+        splitter.addWidget(viewer_column)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
 
@@ -382,12 +455,43 @@ class SequenceSimulationWidget(QWidget):
 
         signal_page = QWidget()
         signal_layout = QVBoxLayout(signal_page)
+        spectrum_controls = QHBoxLayout()
+        self.spectrum_x_selector = QSpinBox()
+        self.spectrum_y_selector = QSpinBox()
+        self.spectrum_x_slider = QSlider(Qt.Horizontal)
+        self.spectrum_y_slider = QSlider(Qt.Horizontal)
+        for axis, selector, slider in (
+            ("x", self.spectrum_x_selector, self.spectrum_x_slider),
+            ("y", self.spectrum_y_selector, self.spectrum_y_slider),
+        ):
+            selector.setRange(0, 0)
+            selector.setEnabled(False)
+            selector.valueChanged.connect(self._spectral_view_changed)
+            slider.setRange(0, 0)
+            slider.setEnabled(False)
+            slider.setTracking(True)
+            slider.setMinimumWidth(100)
+            tooltip = f"Browse the reconstructed CSI voxel {axis} coordinate"
+            selector.setToolTip(tooltip)
+            slider.setToolTip(tooltip)
+            slider.valueChanged.connect(selector.setValue)
+            selector.valueChanged.connect(slider.setValue)
+        spectrum_controls.addWidget(QLabel("CSI voxel x"))
+        spectrum_controls.addWidget(self.spectrum_x_slider, 1)
+        spectrum_controls.addWidget(self.spectrum_x_selector)
+        spectrum_controls.addWidget(QLabel("y"))
+        spectrum_controls.addWidget(self.spectrum_y_slider, 1)
+        spectrum_controls.addWidget(self.spectrum_y_selector)
+        spectrum_controls.addStretch()
+        signal_layout.addLayout(spectrum_controls)
         self.signal_plot = pg.PlotWidget(title="Received ADC signal")
         self.signal_plot.setLabel("left", "Signal", "a.u.")
         self.signal_plot.setLabel("bottom", "Time", "ms")
         self.signal_plot.addLegend()
         signal_layout.addWidget(self.signal_plot)
-        views.addTab(signal_page, "ADC signal")
+        self.spectrum_info = QLabel("No spectroscopic result")
+        signal_layout.addWidget(self.spectrum_info)
+        views.addTab(signal_page, "Signal / CSI spectrum")
 
         kspace_page = QWidget()
         kspace_layout = QVBoxLayout(kspace_page)
@@ -430,6 +534,47 @@ class SequenceSimulationWidget(QWidget):
 
         self.result_volume_viewer = SequenceResultVolumeViewer()
         views.addTab(self.result_volume_viewer, "Spatial Magnetization")
+
+        split_page = QWidget()
+        split_page_layout = QVBoxLayout(split_page)
+        split_views = QSplitter(Qt.Horizontal)
+        split_page_layout.addWidget(split_views, 1)
+
+        split_image_panel = QWidget()
+        split_image_layout = QVBoxLayout(split_image_panel)
+        self.split_image_plot = pg.PlotWidget(title="CSI reconstruction")
+        self.split_image_plot.setAspectLocked(True)
+        self.split_image_plot.setLabel("bottom", "x index")
+        self.split_image_plot.setLabel("left", "y index")
+        self.split_image_item = pg.ImageItem()
+        self.split_image_plot.addItem(self.split_image_item)
+        self.split_voxel_marker = pg.ScatterPlotItem(
+            size=15,
+            symbol="s",
+            pen=pg.mkPen("y", width=2),
+            brush=pg.mkBrush(0, 0, 0, 0),
+        )
+        self.split_image_plot.addItem(self.split_voxel_marker)
+        self.split_image_plot.scene().sigMouseClicked.connect(self._split_image_clicked)
+        split_image_layout.addWidget(self.split_image_plot, 1)
+        self.split_image_info = QLabel("Run a CSI simulation to populate this view")
+        self.split_image_info.setWordWrap(True)
+        split_image_layout.addWidget(self.split_image_info)
+        split_views.addWidget(split_image_panel)
+
+        split_signal_panel = QWidget()
+        split_signal_layout = QVBoxLayout(split_signal_panel)
+        self.split_signal_plot = pg.PlotWidget(title="Voxel spectrum")
+        self.split_signal_plot.setLabel("left", "Signal", "a.u.")
+        self.split_signal_plot.setLabel("bottom", "Frequency", "Hz")
+        self.split_signal_plot.addLegend()
+        split_signal_layout.addWidget(self.split_signal_plot, 1)
+        self.split_signal_info = QLabel("Select a voxel in the image")
+        self.split_signal_info.setWordWrap(True)
+        split_signal_layout.addWidget(self.split_signal_info)
+        split_views.addWidget(split_signal_panel)
+        split_views.setSizes([1, 1])
+        self.view_stack.addWidget(split_page)
 
         for view, label in (
             (self.kspace_view, self.kspace_zoom_info),
@@ -481,6 +626,8 @@ class SequenceSimulationWidget(QWidget):
         self.object_type.blockSignals(False)
         for widget in self._built_in_object_widgets:
             widget.setEnabled(not phantom_selected)
+        self.built_in_properties_group.setVisible(not phantom_selected)
+        self.built_in_properties_group.setEnabled(not phantom_selected)
         self.phantom_summary.setVisible(phantom_selected)
         self.open_phantom_button.setVisible(phantom_selected)
         self.refresh_object_summary()
@@ -526,19 +673,25 @@ class SequenceSimulationWidget(QWidget):
     def _update_frequency_reference_info(self):
         if self.object_source.currentIndex() != 0:
             text = "Built-in B0 and chemical-shift values are entered in ppm."
+            conversion_enabled = True
         else:
             phantom = self._selected_designed_phantom()
             if isinstance(phantom, SpectralPhantom):
                 text = (
                     "Spectral B0 and peak offsets are converted from ppm at run time."
                 )
+                conversion_enabled = True
             elif phantom is not None:
                 text = (
                     "This conventional phantom stores fixed frequency maps in Hz; "
                     "field/nucleus conversion applies only to ppm spectral designs."
                 )
+                conversion_enabled = False
             else:
                 text = "ppm conversion applies after a spectral phantom is selected."
+                conversion_enabled = False
+        self.field_strength_t.setEnabled(conversion_enabled)
+        self.nucleus.setEnabled(conversion_enabled)
         self.frequency_reference_info.setText(text)
 
     def _open_phantom_tab(self):
@@ -557,12 +710,13 @@ class SequenceSimulationWidget(QWidget):
     def _source_changed(self, *_):
         source_index = self.sequence_source.currentIndex()
         epi_selected = source_index == 1
+        self.acquisition_group.setVisible(epi_selected)
         self.acquisition_group.setEnabled(epi_selected)
         self.acquisition_hint.setText(
             "Read/phase matrix and sampling bandwidth define a 2D kx-ky "
             "acquisition. No kz encoding is performed."
             if epi_selected
-            else "Select ‘Cartesian EPI’ under Source / mode to enable these settings."
+            else "Select EPI under Source / mode to enable these settings."
         )
         if source_index == 0:
             self._load_internal_sequence()
@@ -584,6 +738,7 @@ class SequenceSimulationWidget(QWidget):
     def _load_internal_sequence(self):
         self.acquisition = None
         self.acquisition_frames = None
+        self.spectroscopic_acquisition = None
         self.acquisition_note = ""
         rf_duration = 1e-3
         dwell = 100e-6
@@ -598,10 +753,13 @@ class SequenceSimulationWidget(QWidget):
             duration_s=duration,
             source="internal-fid",
         )
+        self._configure_frame_selector()
+        self._configure_spectroscopy_selectors()
         self._show_program()
 
     def _load_cartesian_epi(self):
         self.acquisition_frames = None
+        self.spectroscopic_acquisition = None
         bandwidth_hz = self.sampling_bandwidth_khz.value() * 1000.0
         designed = (
             self._selected_designed_phantom()
@@ -622,6 +780,8 @@ class SequenceSimulationWidget(QWidget):
             )
             self.program = make_cartesian_epi(self.acquisition)
             self.acquisition_note = ""
+            self._configure_frame_selector()
+            self._configure_spectroscopy_selectors()
             self._show_program()
         except Exception as exc:
             self.acquisition = None
@@ -647,43 +807,58 @@ class SequenceSimulationWidget(QWidget):
         self.program = load_pulseq(filename)
         compiled = SequenceCompiler().compile(self.program)
         self.acquisition_frames = None
+        self.spectroscopic_acquisition = None
         try:
-            self.acquisition = infer_cartesian_acquisition(
+            self.spectroscopic_acquisition = infer_spectroscopic_acquisition(
                 self.program, compiled=compiled
             )
-            self.acquisition_note = "Cartesian acquisition inferred from ADC moments"
-        except ValueError as single_error:
+            self.acquisition = None
+            csi = self.spectroscopic_acquisition
+            self.acquisition_note = (
+                f"2D CSI {csi.matrix[0]}×{csi.matrix[1]}×"
+                f"{csi.spectral_points}; BW={csi.spectral_bandwidth_hz:.6g} Hz"
+            )
+        except ValueError as spectroscopy_error:
             try:
-                self.acquisition_frames = infer_cartesian_acquisition_frames(
+                self.acquisition = infer_cartesian_acquisition(
                     self.program, compiled=compiled
                 )
-                self.acquisition = self.acquisition_frames.acquisitions[0]
-                metadata = dict(self.program.metadata)
-                metadata["acquisition_dimensions"] = (
-                    self.acquisition_frames.dimensions.to_metadata()
-                )
-                self.program = SequenceProgram(
-                    events=self.program.events,
-                    duration_s=self.program.duration_s,
-                    source=self.program.source,
-                    version=self.program.version,
-                    metadata=metadata,
-                )
-                axes = ", ".join(self.acquisition_frames.varying_axes)
                 self.acquisition_note = (
-                    f"{self.acquisition_frames.num_frames} Cartesian 2D frames "
-                    f"inferred ({axes})"
+                    "Cartesian acquisition inferred from ADC moments"
                 )
-            except ValueError as frame_error:
-                self.acquisition = None
-                self.acquisition_note = (
-                    f"Cartesian inference unavailable: {single_error}; "
-                    f"frame grouping unavailable: {frame_error}"
-                )
+            except ValueError as single_error:
+                try:
+                    self.acquisition_frames = infer_cartesian_acquisition_frames(
+                        self.program, compiled=compiled
+                    )
+                    self.acquisition = self.acquisition_frames.acquisitions[0]
+                    metadata = dict(self.program.metadata)
+                    metadata["acquisition_dimensions"] = (
+                        self.acquisition_frames.dimensions.to_metadata()
+                    )
+                    self.program = SequenceProgram(
+                        events=self.program.events,
+                        duration_s=self.program.duration_s,
+                        source=self.program.source,
+                        version=self.program.version,
+                        metadata=metadata,
+                    )
+                    axes = ", ".join(self.acquisition_frames.varying_axes)
+                    self.acquisition_note = (
+                        f"{self.acquisition_frames.num_frames} Cartesian 2D frames "
+                        f"inferred ({axes})"
+                    )
+                except ValueError as frame_error:
+                    self.acquisition = None
+                    self.acquisition_note = (
+                        f"Acquisition inference unavailable: CSI: {spectroscopy_error}; "
+                        f"Cartesian: {single_error}; frames: {frame_error}"
+                    )
         self._apply_pulseq_fov()
         self.sequence_source.setCurrentIndex(2)
         self._show_program()
         self._configure_frame_selector()
+        self._configure_spectroscopy_selectors()
         status = f"Loaded {Path(filename).name}"
         if self.acquisition_note:
             status += f"; {self.acquisition_note}"
@@ -731,6 +906,14 @@ class SequenceSimulationWidget(QWidget):
                     f"; frames={self.acquisition_frames.num_frames} "
                     f"({', '.join(self.acquisition_frames.varying_axes)})"
                 )
+        elif self.spectroscopic_acquisition is not None:
+            csi = self.spectroscopic_acquisition
+            acquisition_text = (
+                f"\nCSI grid: {csi.matrix[1]}×{csi.matrix[0]}; "
+                f"spectral points={csi.spectral_points}; "
+                f"BW={csi.spectral_bandwidth_hz:.6g} Hz; "
+                f"resolution={csi.spectral_resolution_hz:.6g} Hz"
+            )
         elif self.acquisition_note:
             acquisition_text = f"\n{self.acquisition_note}"
         self.sequence_info.setText(
@@ -930,7 +1113,7 @@ class SequenceSimulationWidget(QWidget):
             return
         fraction = float(np.clip(fraction, 0.0, 1.0))
         self._set_sequence_cursor(fraction)
-        if self.acquisition is None:
+        if self.acquisition is None and self.spectroscopic_acquisition is None:
             return
         adc_times = (
             np.concatenate([event.sample_times_s for event in self.program.adc_events])
@@ -942,7 +1125,29 @@ class SequenceSimulationWidget(QWidget):
         )
         partial_signal = np.array(signal, copy=True)
         partial_signal[..., acquired:] = 0.0
-        self._show_live_cartesian(partial_signal, acquired, adc_times.size)
+        if self.spectroscopic_acquisition is not None:
+            self._show_live_spectroscopy(partial_signal, acquired, adc_times.size)
+        else:
+            self._show_live_cartesian(partial_signal, acquired, adc_times.size)
+
+    def _show_live_spectroscopy(self, signal, acquired, total):
+        csi = self.spectroscopic_acquisition
+        point = min(self.spectral_point_selector.value(), csi.spectral_points - 1)
+        kspace = csi.reshape_signal(signal)
+        fid = csi.reconstruct_spatial(signal)
+        if kspace.ndim == 4:
+            kspace_image = np.sqrt(np.sum(np.abs(kspace[..., point]) ** 2, axis=0))
+            spatial_image = np.sqrt(np.sum(np.abs(fid[..., point]) ** 2, axis=0))
+        else:
+            kspace_image = np.abs(kspace[..., point])
+            spatial_image = np.abs(fid[..., point])
+        self.kspace_view.setImage(np.log1p(kspace_image).T, autoLevels=True)
+        self.reconstruction_view.setImage(spatial_image.T, autoLevels=True)
+        self.kspace_info.setText(
+            f"Live CSI k-space, FID sample {point + 1}/{csi.spectral_points}; "
+            f"{acquired}/{total} ADC samples"
+        )
+        self.reconstruction_info.setText("Live spatial 2D IFFT of CSI FID")
 
     def _show_live_cartesian(self, signal, acquired, total):
         selected = self.frame_selector.currentData()
@@ -979,23 +1184,42 @@ class SequenceSimulationWidget(QWidget):
         self._status_update("Simulation complete")
         self._set_sequence_cursor(1.0)
         self._configure_frame_selector()
+        self._configure_spectroscopy_selectors()
         self.signal_plot.clear()
+        self.signal_plot.setTitle("Received ADC signal")
+        self.signal_plot.setLabel("bottom", "Time", "ms")
         time_ms = result.adc_times_s * 1000
         signal = np.asarray(result.signal)
-        if signal.ndim == 1:
-            self.signal_plot.plot(time_ms, np.abs(signal), pen="w", name="Magnitude")
-            self.signal_plot.plot(time_ms, signal.real, pen="g", name="Real")
-            self.signal_plot.plot(time_ms, signal.imag, pen="r", name="Imaginary")
+        if self.spectroscopic_acquisition is not None:
+            csi = self.spectroscopic_acquisition
+            center_event = csi.encoding_indices.index(
+                (csi.matrix[0] // 2, csi.matrix[1] // 2)
+            )
+            start = center_event * csi.spectral_points
+            stop = start + csi.spectral_points
+            plot_signal = signal[..., start:stop]
+            plot_time = csi.spectral_time_s * 1000.0
+        else:
+            plot_signal = signal
+            plot_time = time_ms
+        if plot_signal.ndim == 1:
+            self.signal_plot.plot(
+                plot_time, np.abs(plot_signal), pen="w", name="Magnitude"
+            )
+            self.signal_plot.plot(plot_time, plot_signal.real, pen="g", name="Real")
+            self.signal_plot.plot(
+                plot_time, plot_signal.imag, pen="r", name="Imaginary"
+            )
             coil_text = ""
         else:
-            for coil, coil_signal in enumerate(signal):
+            for coil, coil_signal in enumerate(plot_signal):
                 self.signal_plot.plot(
-                    time_ms,
+                    plot_time,
                     np.abs(coil_signal),
-                    pen=pg.intColor(coil, hues=signal.shape[0]),
+                    pen=pg.intColor(coil, hues=plot_signal.shape[0]),
                     name=f"Coil {coil + 1}",
                 )
-            coil_text = f"; Rx coils={signal.shape[0]}"
+            coil_text = f"; Rx coils={plot_signal.shape[0]}"
         mz = result.mz
         if mz.ndim == 3:
             z_index = mz.shape[2] // 2
@@ -1021,14 +1245,21 @@ class SequenceSimulationWidget(QWidget):
             f"ADC samples={result.adc_times_s.size}{coil_text}{slice_text}"
         )
         self.result_volume_viewer.set_result(result, self.phantom)
-        self._show_cartesian_result(result)
+        if self.spectroscopic_acquisition is not None:
+            self._show_spectroscopic_result(result)
+        else:
+            self._show_cartesian_result(result)
 
     def _configure_frame_selector(self):
         self.frame_selector.blockSignals(True)
+        self.frame_slider.blockSignals(True)
         self.frame_selector.clear()
         if self.acquisition_frames is None:
             self.frame_selector.addItem("Single 2D frame", 0)
             self.frame_selector.setEnabled(False)
+            self.frame_slider.setRange(0, 0)
+            self.frame_slider.setValue(0)
+            self.frame_slider.setEnabled(False)
         else:
             self.frame_selector.addItem(
                 f"All {self.acquisition_frames.num_frames} frames (montage)", -1
@@ -1038,11 +1269,255 @@ class SequenceSimulationWidget(QWidget):
                     self.acquisition_frames.frame_label(frame), frame
                 )
             self.frame_selector.setEnabled(True)
+            self.frame_slider.setRange(-1, self.acquisition_frames.num_frames - 1)
+            self.frame_slider.setValue(-1)
+            self.frame_slider.setEnabled(True)
         self.frame_selector.blockSignals(False)
+        self.frame_slider.blockSignals(False)
+
+    def _configure_spectroscopy_selectors(self):
+        csi = self.spectroscopic_acquisition
+        selectors = (
+            self.spectral_point_selector,
+            self.spectral_point_slider,
+            self.spectrum_x_selector,
+            self.spectrum_x_slider,
+            self.spectrum_y_selector,
+            self.spectrum_y_slider,
+        )
+        for selector in selectors:
+            selector.blockSignals(True)
+        try:
+            if csi is None:
+                self._split_csi_data = None
+                self.split_view_checkbox.setChecked(False)
+                self.split_view_checkbox.setEnabled(False)
+                self.split_image_source.setEnabled(False)
+                self.split_signal_source.setEnabled(False)
+                for selector in selectors:
+                    selector.setRange(0, 0)
+                    selector.setValue(0)
+                    selector.setEnabled(False)
+                return
+            self.split_view_checkbox.setEnabled(True)
+            self.split_image_source.setEnabled(self.split_view_checkbox.isChecked())
+            self.split_signal_source.setEnabled(self.split_view_checkbox.isChecked())
+            self.spectral_point_selector.setRange(0, csi.spectral_points - 1)
+            self.spectral_point_selector.setValue(0)
+            self.spectral_point_slider.setRange(0, csi.spectral_points - 1)
+            self.spectral_point_slider.setValue(0)
+            self.spectrum_x_selector.setRange(0, csi.matrix[0] - 1)
+            self.spectrum_x_selector.setValue(csi.matrix[0] // 2)
+            self.spectrum_x_slider.setRange(0, csi.matrix[0] - 1)
+            self.spectrum_x_slider.setValue(csi.matrix[0] // 2)
+            self.spectrum_y_selector.setRange(0, csi.matrix[1] - 1)
+            self.spectrum_y_selector.setValue(csi.matrix[1] // 2)
+            self.spectrum_y_slider.setRange(0, csi.matrix[1] - 1)
+            self.spectrum_y_slider.setValue(csi.matrix[1] // 2)
+            for selector in selectors:
+                selector.setEnabled(True)
+        finally:
+            for selector in selectors:
+                selector.blockSignals(False)
+
+    def _spectral_view_changed(self, *_):
+        if self.result is not None and self.spectroscopic_acquisition is not None:
+            self._show_spectroscopic_result(self.result)
+
+    def _toggle_split_view(self, enabled):
+        enabled = bool(enabled)
+        self.view_stack.setCurrentIndex(1 if enabled else 0)
+        active = enabled and self.spectroscopic_acquisition is not None
+        self.split_image_source.setEnabled(active)
+        self.split_signal_source.setEnabled(active)
+        if active:
+            self._refresh_split_view()
+
+    def _refresh_split_view(self, *_):
+        if self._split_csi_data is None:
+            return
+        self._update_split_view(*self._split_csi_data)
+
+    def _set_csi_voxel(self, x_index, y_index):
+        csi = self.spectroscopic_acquisition
+        if csi is None:
+            return
+        x_index = int(np.clip(x_index, 0, csi.matrix[0] - 1))
+        y_index = int(np.clip(y_index, 0, csi.matrix[1] - 1))
+        controls = (
+            (self.spectrum_x_selector, x_index),
+            (self.spectrum_x_slider, x_index),
+            (self.spectrum_y_selector, y_index),
+            (self.spectrum_y_slider, y_index),
+        )
+        for control, value in controls:
+            control.blockSignals(True)
+            control.setValue(value)
+            control.blockSignals(False)
+        if self.result is not None:
+            self._show_spectroscopic_result(self.result)
+        else:
+            self._refresh_split_view()
+
+    def _split_image_clicked(self, event):
+        if self._split_csi_data is None or event.button() != Qt.LeftButton:
+            return
+        view_box = self.split_image_plot.getViewBox()
+        if not view_box.sceneBoundingRect().contains(event.scenePos()):
+            return
+        point = view_box.mapSceneToView(event.scenePos())
+        self._set_csi_voxel(round(point.x()), round(point.y()))
+
+    def _update_split_view(self, csi, kspace, spatial_fid, spectra):
+        self._split_csi_data = (csi, kspace, spatial_fid, spectra)
+        point = min(self.spectral_point_selector.value(), csi.spectral_points - 1)
+        x_index = min(self.spectrum_x_selector.value(), csi.matrix[0] - 1)
+        y_index = min(self.spectrum_y_selector.value(), csi.matrix[1] - 1)
+
+        if self.split_image_source.currentText() == "K-space":
+            values = kspace[..., point]
+            title = "CSI k-space"
+            image_note = (
+                "Click maps the displayed grid index to the corresponding image "
+                "voxel selector. K-space coordinates themselves are not voxels."
+            )
+        else:
+            values = spatial_fid[..., point]
+            title = "CSI spatial reconstruction"
+            image_note = "Click a voxel to update the FID or spectrum."
+        if values.ndim == 3:
+            image = np.sqrt(np.sum(np.abs(values) ** 2, axis=0))
+        else:
+            image = np.abs(values)
+        self.split_image_item.setImage(np.asarray(image).T, autoLevels=True)
+        self.split_image_item.setRect(QRectF(-0.5, -0.5, csi.matrix[0], csi.matrix[1]))
+        self.split_image_plot.setTitle(
+            f"{title} — FID sample {point}/{csi.spectral_points - 1}"
+        )
+        self.split_voxel_marker.setData([x_index], [y_index])
+        self.split_image_info.setText(image_note)
+
+        self.split_signal_plot.clear()
+        if self.split_signal_source.currentText() == "FID":
+            voxel_signal = spatial_fid[..., y_index, x_index, :]
+            x_values = csi.spectral_time_s * 1000.0
+            self.split_signal_plot.setTitle("Spatially reconstructed voxel FID")
+            self.split_signal_plot.setLabel("bottom", "Time", "ms")
+        else:
+            voxel_signal = spectra[..., y_index, x_index, :]
+            x_values = csi.frequency_hz
+            self.split_signal_plot.setTitle("Spatially reconstructed voxel spectrum")
+            self.split_signal_plot.setLabel("bottom", "Frequency", "Hz")
+        if voxel_signal.ndim == 2:
+            magnitude = np.sqrt(np.sum(np.abs(voxel_signal) ** 2, axis=0))
+            self.split_signal_plot.plot(
+                x_values, magnitude, pen="w", name="Magnitude (RSS)"
+            )
+        else:
+            self.split_signal_plot.plot(
+                x_values, np.abs(voxel_signal), pen="w", name="Magnitude"
+            )
+            self.split_signal_plot.plot(
+                x_values, voxel_signal.real, pen="g", name="Real"
+            )
+            self.split_signal_plot.plot(
+                x_values, voxel_signal.imag, pen="r", name="Imaginary"
+            )
+        x_mm = ((x_index + 0.5) / csi.matrix[0] - 0.5) * csi.fov_m[0] * 1000
+        y_mm = ((y_index + 0.5) / csi.matrix[1] - 0.5) * csi.fov_m[1] * 1000
+        self.split_signal_info.setText(
+            f"Voxel (x={x_index}, y={y_index}) at " f"({x_mm:.4g}, {y_mm:.4g}) mm"
+        )
+
+    def _show_spectroscopic_result(self, result):
+        csi = self.spectroscopic_acquisition
+        try:
+            csi.validate_adc_times(result.adc_times_s)
+            if result.adc_gradient_moment_cyc_per_m is not None:
+                csi.validate_gradient_moments(result.adc_gradient_moment_cyc_per_m)
+            kspace = csi.reshape_signal(result.signal)
+            spatial_fid = csi.reconstruct_spatial(result.signal)
+            spectra = csi.reconstruct_spectra(result.signal)
+            point = min(self.spectral_point_selector.value(), csi.spectral_points - 1)
+            if kspace.ndim == 4:
+                kspace_image = np.sqrt(np.sum(np.abs(kspace[..., point]) ** 2, axis=0))
+                spatial_image = np.sqrt(
+                    np.sum(np.abs(spatial_fid[..., point]) ** 2, axis=0)
+                )
+                coil_text = f", {kspace.shape[0]} coils (RSS)"
+            else:
+                kspace_image = np.abs(kspace[..., point])
+                spatial_image = np.abs(spatial_fid[..., point])
+                coil_text = ""
+            self.kspace_view.setImage(np.log1p(kspace_image).T, autoLevels=True)
+            self.reconstruction_view.setImage(spatial_image.T, autoLevels=True)
+            self._update_zoom_label(self.kspace_view, self.kspace_zoom_info)
+            self._update_zoom_label(
+                self.reconstruction_view, self.reconstruction_zoom_info
+            )
+            time_ms = csi.spectral_time_s[point] * 1000.0
+            self.kspace_info.setText(
+                f"CSI log(1+|k|), grid={csi.matrix[1]}×{csi.matrix[0]}, "
+                f"FID sample={point} ({time_ms:.4g} ms){coil_text}"
+            )
+            self.reconstruction_info.setText(
+                f"CSI spatial |IFFT2| at FID sample {point}; "
+                f"min={spatial_image.min():.5g}, max={spatial_image.max():.5g}"
+                f"{coil_text}; spectral FFT is shown in the signal tab"
+            )
+
+            x_index = min(self.spectrum_x_selector.value(), csi.matrix[0] - 1)
+            y_index = min(self.spectrum_y_selector.value(), csi.matrix[1] - 1)
+            voxel_spectrum = spectra[..., y_index, x_index, :]
+            self.signal_plot.clear()
+            self.signal_plot.setTitle("Spatially reconstructed CSI spectrum")
+            self.signal_plot.setLabel("bottom", "Frequency", "Hz")
+            if voxel_spectrum.ndim == 2:
+                magnitude = np.sqrt(np.sum(np.abs(voxel_spectrum) ** 2, axis=0))
+                self.signal_plot.plot(
+                    csi.frequency_hz, magnitude, pen="w", name="Magnitude (RSS)"
+                )
+            else:
+                magnitude = np.abs(voxel_spectrum)
+                self.signal_plot.plot(
+                    csi.frequency_hz, magnitude, pen="w", name="Magnitude"
+                )
+                self.signal_plot.plot(
+                    csi.frequency_hz, voxel_spectrum.real, pen="g", name="Real"
+                )
+                self.signal_plot.plot(
+                    csi.frequency_hz, voxel_spectrum.imag, pen="r", name="Imaginary"
+                )
+            x_mm = ((x_index + 0.5) / csi.matrix[0] - 0.5) * csi.fov_m[0] * 1000
+            y_mm = ((y_index + 0.5) / csi.matrix[1] - 0.5) * csi.fov_m[1] * 1000
+            self.spectrum_info.setText(
+                f"Voxel (x={x_index}, y={y_index}) at ({x_mm:.4g}, {y_mm:.4g}) mm; "
+                f"BW={csi.spectral_bandwidth_hz:.6g} Hz; "
+                f"resolution={csi.spectral_resolution_hz:.6g} Hz"
+            )
+            self._update_split_view(csi, kspace, spatial_fid, spectra)
+        except Exception as exc:
+            self.kspace_view.clear()
+            self.reconstruction_view.clear()
+            self.signal_plot.clear()
+            message = f"CSI reconstruction unavailable: {exc}"
+            self.kspace_info.setText(message)
+            self.reconstruction_info.setText(message)
+            self.spectrum_info.setText(message)
 
     def _frame_changed(self, *_):
+        selected = self.frame_selector.currentData()
+        if selected is not None:
+            self.frame_slider.blockSignals(True)
+            self.frame_slider.setValue(int(selected))
+            self.frame_slider.blockSignals(False)
         if self.result is not None:
             self._show_cartesian_result(self.result)
+
+    def _frame_slider_changed(self, frame):
+        combo_index = self.frame_selector.findData(int(frame))
+        if combo_index >= 0:
+            self.frame_selector.setCurrentIndex(combo_index)
 
     def _show_cartesian_result(self, result):
         if self.acquisition is None:

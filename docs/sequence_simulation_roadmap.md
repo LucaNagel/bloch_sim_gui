@@ -21,7 +21,9 @@ decisions are documented in
 | 6. Single-Tx and Multi-Rx | Complete | Complex voxelwise B1+ scaling and coil-resolved ADC reduction; compiler timing unchanged |
 | 7. Cartesian acquisition/reconstruction | Complete | ADC moments, bandwidth/layout model, EPI builder, 2D FFT/coil combination, GUI controls and views |
 | 8. Spectral phantom designer/viewers | Complete | Shape ROIs, Lorentz peaks, persistence, independent-component simulation, orthogonal/3D views |
-| 9. Multi-Tx, coupled species, WASM | Deferred | Separate follow-up milestones |
+| 9. CSI acquisition/export and physical phantom views | Complete | Explicit ky-kx-FID layout, spatial/spectral FFTs, structured export, mm axes, analytic 2D/3D B0 maps |
+| 10. Dynamic coupled species | Designed | Requires a Bloch-McConnell state kernel; implementation deferred |
+| 11. Multi-Tx and WASM | Deferred | Separate follow-up milestones |
 
 ## Repository baseline
 
@@ -92,6 +94,25 @@ decisions are documented in
   test platform. Complete offscreen suite: 108 tests passed. The shared volume
   viewer now also normalizes 1D/2D masks together with their data and resets
   stale slice indices when dimensions change.
+- 2026-07-07: added an explicit 2D CSI acquisition model and validated the
+  checked-in `csi_2d_centric.seq` end-to-end as 16x16 spatial encodings with
+  256-point FIDs. The GUI now shows selected-FID k-space, spatial IFFT, and a
+  voxel spectrum. NetCDF/NPZ/HDF5 exports contain sorted CSI k-space, spatial
+  FIDs, spectra, and physical k/time/frequency coordinates. Phantom views use
+  physical mm coordinates and a clearer 3D FOV frame; the designer gained
+  linear/radial 2D/3D B0 maps and disables controls owned by external phantom
+  editors. All 150 tests passed when test modules were run in isolated
+  processes. A single monolithic offscreen run remains nondeterministic on
+  macOS because PyQtGraph occasionally crashes natively after repeated widget
+  construction; affected modules pass independently.
+- 2026-07-08: added a CSI split view with reconstruction/k-space and
+  spectrum/FID toggles, click-to-select voxel synchronization, and coupled
+  multidimensional sliders. The main GUI now switches between Free Mode and a
+  focused Sequence Mode that removes legacy single-spin, global playback, and
+  run controls while retaining Sequence Simulation and Phantom workspaces.
+- 2026-07-08: collapsed EPI and built-in phantom controls when another source
+  owns their settings, repaired masked/constant spectral property-map display,
+  and added in-memory reopening of the current spectral shape design.
 
 ## Current limitations
 
@@ -99,6 +120,9 @@ decisions are documented in
   exchange, diffusion, flow, motion, and WASM are intentionally deferred.
 - Spectral peaks are independent Lorentzian/T2* components. Coupled spin
   systems, exchange, J-coupling, and density-matrix evolution remain deferred.
+- Dynamic pyruvate-to-lactate conversion is not approximated by rescaling
+  already simulated static signals. Correct conversion requires coupled
+  species state evolution during RF, relaxation, exchange, and ADC sampling.
 - Receiver aperture/filtering and oversampling/decimation are not yet modeled;
   ADC values are instantaneous observations at dwell centres.
 - Cartesian reshaping currently targets one 2D acquisition. Slice, echo,
@@ -113,8 +137,10 @@ decisions are documented in
 
 ## Next action
 
-Add acquisition models for radial UTE and true 3D Cartesian kz encoding. The
-former needs excitation-relative trajectories plus density compensation and
-NUFFT/gridding; the latter needs partition metadata and a centred 3D IFFT.
-Pulseq labels/outer dimensions, receiver filtering, Pulseq 1.5.1/soft delays,
-and Multi-Tx remain separate versioned milestones.
+Implement a coupled-species Bloch-McConnell kernel as the next spectral
+milestone. Start with irreversible two-pool pyruvate-to-lactate exchange,
+voxelwise initial concentrations and rate maps, then validate zero-exchange,
+mass-balance, no-RF analytic, and static-phantom limits before exposing kinetic
+controls in the Phantom designer. Radial UTE, true 3D Cartesian kz encoding,
+receiver filtering, Pulseq 1.5.1/soft delays, and Multi-Tx remain separate
+versioned milestones.

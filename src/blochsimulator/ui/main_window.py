@@ -449,6 +449,7 @@ class BlochSimulatorGUI(QMainWindow):
         left_container.setLayout(left_container_layout)
         left_container.setMinimumWidth(left_panel.minimumWidth())
         left_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.free_mode_left_container = left_container
 
         # Build run bars early so references are available if needed
         self._build_status_run_bar()
@@ -466,7 +467,9 @@ class BlochSimulatorGUI(QMainWindow):
         right_panel.setLayout(right_layout)
 
         # Shared heatmap colormap selector for all tabs
-        colormap_layout = QHBoxLayout()
+        self.free_mode_playback_header = QWidget()
+        colormap_layout = QHBoxLayout(self.free_mode_playback_header)
+        colormap_layout.setContentsMargins(0, 0, 0, 0)
         colormap_layout.addWidget(QLabel("Heatmap colormap:"))
         self.heatmap_colormap = QComboBox()
         self.heatmap_colormap.addItems(
@@ -480,7 +483,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.time_control = UniversalTimeControl()
         self.time_control.setEnabled(False)
         colormap_layout.addWidget(self.time_control, 1)
-        right_layout.addLayout(colormap_layout)
+        right_layout.addWidget(self.free_mode_playback_header)
 
         # Tab widget for different views
         self.tab_widget = QTabWidget()
@@ -1156,19 +1159,20 @@ class BlochSimulatorGUI(QMainWindow):
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
 
         # Add panels to main layout
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(left_container)
-        splitter.addWidget(right_panel)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
-        splitter.setSizes([420, 1000])
-        main_layout.addWidget(splitter)
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.addWidget(left_container)
+        self.main_splitter.addWidget(right_panel)
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 3)
+        self.main_splitter.setSizes([420, 1000])
+        main_layout.addWidget(self.main_splitter)
 
         # Push initial time-step into designers
         self._update_time_step(self.time_step_spin.value())
 
         # Menu bar
         self.create_menu()
+        self.set_workspace_mode("free")
 
         # Status bar
         self.statusBar().showMessage("Ready")
@@ -1203,6 +1207,7 @@ class BlochSimulatorGUI(QMainWindow):
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()
                 widget.deleteLater()
         self.sequence_simulation_widget = SequenceSimulationWidget(self)
         layout.addWidget(self.sequence_simulation_widget)
@@ -1220,6 +1225,7 @@ class BlochSimulatorGUI(QMainWindow):
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()
                 widget.deleteLater()
         self.phantom_widget = PhantomWidget(self)
         layout.addWidget(self.phantom_widget)
@@ -3735,6 +3741,41 @@ class BlochSimulatorGUI(QMainWindow):
         settings_action.setObjectName("action_settings")
         settings_action.triggered.connect(lambda: self.show_settings())
 
+        view_menu = menubar.addMenu("View")
+        view_menu.setObjectName("menu_view")
+        self.free_workspace_action = view_menu.addAction("Free Mode")
+        self.free_workspace_action.setCheckable(True)
+        self.free_workspace_action.triggered.connect(
+            lambda: self.set_workspace_mode("free")
+        )
+        self.sequence_workspace_action = view_menu.addAction("Sequence Mode")
+        self.sequence_workspace_action.setCheckable(True)
+        self.sequence_workspace_action.triggered.connect(
+            lambda: self.set_workspace_mode("sequence")
+        )
+
+        workspace_switch = QWidget()
+        workspace_switch_layout = QHBoxLayout(workspace_switch)
+        workspace_switch_layout.setContentsMargins(4, 0, 6, 0)
+        workspace_switch_layout.addWidget(QLabel("Workspace:"))
+        self.workspace_mode_selector = QComboBox()
+        self.workspace_mode_selector.addItem("Free Mode", "free")
+        self.workspace_mode_selector.addItem("Sequence Mode", "sequence")
+        self.workspace_mode_selector.setToolTip(
+            "Free Mode shows the single-spin tools; Sequence Mode maximizes "
+            "the sequence simulation and phantom workspaces."
+        )
+        self.workspace_mode_selector.currentIndexChanged.connect(
+            lambda: self.set_workspace_mode(
+                str(self.workspace_mode_selector.currentData())
+            )
+        )
+        workspace_switch_layout.addWidget(self.workspace_mode_selector)
+        # QMenuBar corner widgets disappear into the native global menu bar on
+        # macOS. The main tab bar is always rendered inside the application.
+        self.tab_widget.setCornerWidget(workspace_switch, Qt.TopRightCorner)
+        self.workspace_switch = workspace_switch
+
         # Tutorials menu
         tut_menu = menubar.addMenu("Tutorials")
         tut_menu.setObjectName("menu_tutorials")
@@ -3761,6 +3802,62 @@ class BlochSimulatorGUI(QMainWindow):
         about_action = help_menu.addAction("About")
         about_action.setObjectName("action_about")
         about_action.triggered.connect(self.show_about)
+
+    def set_workspace_mode(self, mode: str):
+        """Switch between single-spin tools and the focused sequence workspace."""
+        mode = str(mode).lower()
+        if mode not in {"free", "sequence"}:
+            raise ValueError("workspace mode must be 'free' or 'sequence'")
+        if not hasattr(self, "tab_widget"):
+            return
+
+        sequence_mode = mode == "sequence"
+        previous_mode = getattr(self, "workspace_mode", None)
+        if sequence_mode and previous_mode != "sequence":
+            current = self.tab_widget.currentIndex()
+            if current not in {
+                self.sequence_simulation_tab_index,
+                self.phantom_tab_index,
+            }:
+                self._free_mode_tab_index = current
+
+        self.workspace_mode = mode
+        self.free_mode_left_container.setVisible(not sequence_mode)
+        self.free_mode_playback_header.setVisible(not sequence_mode)
+        self.toolbar_run_bar.setVisible(not sequence_mode)
+        self.status_run_bar.setVisible(not sequence_mode)
+
+        allowed_sequence_tabs = {
+            self.sequence_simulation_tab_index,
+            self.phantom_tab_index,
+        }
+        for index in range(self.tab_widget.count()):
+            visible = not sequence_mode or index in allowed_sequence_tabs
+            if hasattr(self.tab_widget, "setTabVisible"):
+                self.tab_widget.setTabVisible(index, visible)
+            else:
+                self.tab_widget.tabBar().setTabVisible(index, visible)
+
+        if sequence_mode:
+            self.main_splitter.setSizes([0, max(1, self.width())])
+            self.tab_widget.setCurrentIndex(self.sequence_simulation_tab_index)
+        else:
+            self.main_splitter.setSizes([420, max(1, self.width() - 420)])
+            restore_index = getattr(self, "_free_mode_tab_index", 1)
+            if 0 <= restore_index < self.tab_widget.count():
+                self.tab_widget.setCurrentIndex(restore_index)
+
+        if hasattr(self, "workspace_mode_selector"):
+            index = self.workspace_mode_selector.findData(mode)
+            blocked = self.workspace_mode_selector.blockSignals(True)
+            self.workspace_mode_selector.setCurrentIndex(index)
+            self.workspace_mode_selector.blockSignals(blocked)
+        if hasattr(self, "free_workspace_action"):
+            self.free_workspace_action.setChecked(not sequence_mode)
+            self.sequence_workspace_action.setChecked(sequence_mode)
+        self.statusBar().showMessage(
+            "Sequence workspace" if sequence_mode else "Free simulation workspace"
+        )
 
     def _load_memory_policy(self) -> MemoryPolicy:
         """Load the persistent simulation-memory policy."""
@@ -7362,6 +7459,12 @@ class BlochSimulatorGUI(QMainWindow):
 
 def main():
     """Main entry point for the GUI application."""
+    # pyqtgraph 0.14 caches shader programs at class level.  The application
+    # creates several GLViewWidgets, so their contexts must share those shader
+    # resources; otherwise a shader compiled by one view is invalid when a
+    # second view calls glUseProgram (GL_INVALID_OPERATION / error 1282).
+    # Qt requires this attribute to be enabled before QApplication is created.
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
 
     # Set application style

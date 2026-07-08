@@ -53,6 +53,19 @@ class SequenceSimulationResult:
             )
         return dimensions
 
+    @property
+    def spectroscopic_acquisition(self):
+        """Return an explicit 2D CSI layout when present in result metadata."""
+        metadata = self.metadata.get("spectroscopic_acquisition")
+        if metadata is None:
+            return None
+        from .acquisition import SpectroscopicAcquisition
+
+        acquisition = SpectroscopicAcquisition.from_metadata(metadata)
+        if acquisition.num_samples != self.adc_times_s.size:
+            raise ValueError("CSI acquisition metadata does not match the ADC stream")
+        return acquisition
+
     def to_dict(self) -> Dict[str, Any]:
         """Return a compatibility-friendly dictionary without copying arrays."""
         return {
@@ -138,6 +151,46 @@ class SequenceSimulationResult:
                 ["checkpoint"] + spatial_dims + ["component"],
                 self.checkpoint_magnetization,
             )
+        spectroscopy = self.spectroscopic_acquisition
+        if spectroscopy is not None:
+            csi_dims = ["phase_y", "phase_x", "spectral_point"]
+            if self.signal.ndim == 2:
+                csi_dims.insert(0, "coil")
+            coords.update(
+                {
+                    "phase_x": np.arange(spectroscopy.matrix[0]),
+                    "phase_y": np.arange(spectroscopy.matrix[1]),
+                    "spectral_point": np.arange(spectroscopy.spectral_points),
+                    "spatial_kx_cyc_per_m": (
+                        "phase_x",
+                        spectroscopy.kx_cyc_per_m,
+                    ),
+                    "spatial_ky_cyc_per_m": (
+                        "phase_y",
+                        spectroscopy.ky_cyc_per_m,
+                    ),
+                    "spectral_time_s": (
+                        "spectral_point",
+                        spectroscopy.spectral_time_s,
+                    ),
+                    "spectral_frequency_hz": (
+                        "spectral_point",
+                        spectroscopy.frequency_hz,
+                    ),
+                }
+            )
+            data_vars["csi_kspace"] = (
+                csi_dims,
+                spectroscopy.reshape_signal(self.signal),
+            )
+            data_vars["csi_spatial_fid"] = (
+                csi_dims,
+                spectroscopy.reconstruct_spatial(self.signal),
+            )
+            data_vars["csi_spectrum"] = (
+                csi_dims,
+                spectroscopy.reconstruct_spectra(self.signal),
+            )
         attrs = {
             key: value
             for key, value in self.metadata.items()
@@ -156,6 +209,12 @@ class SequenceSimulationResult:
                     long_name=f"{axis} gradient moment at ADC sample",
                     units="cycles/m",
                 )
+        for axis in ("spatial_kx_cyc_per_m", "spatial_ky_cyc_per_m"):
+            if axis in dataset.coords:
+                dataset[axis].attrs.update(units="cycles/m")
+        if "spectral_time_s" in dataset.coords:
+            dataset["spectral_time_s"].attrs.update(units="s")
+            dataset["spectral_frequency_hz"].attrs.update(units="Hz")
         return dataset
 
     def save(self, filename) -> Path:
@@ -164,12 +223,20 @@ class SequenceSimulationResult:
         suffix = path.suffix.lower()
         if suffix == ".nc":
             dataset = self.to_xarray()
-            if np.iscomplexobj(dataset["signal"].data):
-                signal = dataset["signal"]
-                dataset["signal_real"] = signal.real
-                dataset["signal_imag"] = signal.imag
-                dataset = dataset.drop_vars("signal")
-                dataset.attrs["complex_signal"] = "signal_real + 1j*signal_imag"
+            complex_names = [
+                name
+                for name, values in dataset.data_vars.items()
+                if np.iscomplexobj(values.data)
+            ]
+            for name in complex_names:
+                values = dataset[name]
+                dataset[f"{name}_real"] = values.real
+                dataset[f"{name}_imag"] = values.imag
+                dataset = dataset.drop_vars(name)
+            if complex_names:
+                dataset.attrs["complex_variables"] = ", ".join(
+                    f"{name}={name}_real+1j*{name}_imag" for name in complex_names
+                )
             dataset.to_netcdf(path)
             return path
 
@@ -183,6 +250,19 @@ class SequenceSimulationResult:
             arrays["checkpoint_magnetization"] = self.checkpoint_magnetization
         if self.adc_gradient_moment_cyc_per_m is not None:
             arrays["adc_gradient_moment_cyc_per_m"] = self.adc_gradient_moment_cyc_per_m
+        spectroscopy = self.spectroscopic_acquisition
+        if spectroscopy is not None:
+            arrays.update(
+                {
+                    "csi_kspace": spectroscopy.reshape_signal(self.signal),
+                    "csi_spatial_fid": spectroscopy.reconstruct_spatial(self.signal),
+                    "csi_spectrum": spectroscopy.reconstruct_spectra(self.signal),
+                    "csi_kx_cyc_per_m": spectroscopy.kx_cyc_per_m,
+                    "csi_ky_cyc_per_m": spectroscopy.ky_cyc_per_m,
+                    "csi_spectral_time_s": spectroscopy.spectral_time_s,
+                    "csi_frequency_hz": spectroscopy.frequency_hz,
+                }
+            )
         metadata_json = json.dumps(self.metadata, default=str)
         if suffix == ".npz":
             np.savez_compressed(path, metadata_json=np.asarray(metadata_json), **arrays)

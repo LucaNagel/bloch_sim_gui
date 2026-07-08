@@ -66,3 +66,7 @@ test_mode_b.ipynb
 .github/workflows/*
 !.github/workflows/*.yml
 gha-creds-*.json
+
+# Test generated during commit:
+test_sweep.ipynb
+test_sweep_data.npz

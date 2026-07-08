@@ -16,7 +16,7 @@ from blochsimulator.spectral_phantom import SpectralPhantom
 from blochsimulator.ui.phantom_designer import SpectralPhantomDesignerDialog
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
 from blochsimulator.ui.volume_viewer import VolumeViewerWidget
-from blochsimulator.phantom_widget import PhantomCreatorWidget
+from blochsimulator.phantom_widget import PhantomCreatorWidget, PhantomViewerWidget
 from blochsimulator.units import hz_to_ppm, ppm_to_hz
 
 
@@ -78,6 +78,27 @@ def test_spectral_ppm_offsets_are_converted_at_simulation_field_strength():
         ppm_to_hz(expected_ppm, 7.0)
     )
     assert at_7t.b0_map[3, 3, 2] / at_3t.b0_map[3, 3, 2] == pytest.approx(7.0 / 3.0)
+
+
+@pytest.mark.parametrize(
+    "mode,constant_axis",
+    [("linear_x", 0), ("linear_y", 1), ("linear_z", 2), ("radial_xy", 2)],
+)
+def test_designer_builds_spatial_b0_inhomogeneity(mode, constant_axis):
+    design = _spectral_design()
+    design.b0_inhomogeneity_mode = mode
+    design.b0_inhomogeneity_ppm = 2.0
+    added = design.rasterize_b0_inhomogeneity()
+    phantom = design.build()
+
+    assert added.shape == design.shape
+    assert np.ptp(added) > 0
+    if mode.startswith("linear"):
+        for axis in range(3):
+            if axis != constant_axis:
+                assert np.allclose(np.diff(added, axis=axis), 0.0)
+    assert phantom.b0_map_ppm is not None
+    assert PhantomDesign.from_phantom(phantom).b0_inhomogeneity_mode == mode
 
 
 def test_legacy_hz_design_metadata_is_migrated_using_saved_field_strength():
@@ -159,6 +180,12 @@ def test_designer_and_sequence_workspace_accept_spectral_phantom():
     dialog._preview()
     assert dialog.phantom.n_species == 2
     assert dialog.inspector.volume.data.shape == dialog.phantom.shape
+    dialog.inspector.volume._select_plane_coordinates("xy", 15.0, -5.0)
+    assert dialog.inspector.volume.indices == (4, 2, 2)
+    assert "Voxel (4, 2, 2)" in dialog.inspector.spectrum_info.text()
+    marker_x, marker_y = dialog.inspector.volume.slice_markers["xy"].getData()
+    assert marker_x[0] == pytest.approx(15.0)
+    assert marker_y[0] == pytest.approx(-5.0)
 
     host = QWidget()
     host.phantom_widget = SimpleNamespace(current_phantom=dialog.phantom)
@@ -178,6 +205,9 @@ def test_phantom_creator_retains_spectral_designer_dialog_lifetime():
     dialog.exec_.return_value = QDialog.Accepted
     dialog.get_phantom.return_value = phantom
     creator.type_combo.setCurrentText("Spectral Shape Designer...")
+    assert not creator.resolution_spin.isEnabled()
+    assert not creator.fov_spin.isEnabled()
+    assert not creator.field_combo.isEnabled()
 
     with patch(
         "blochsimulator.phantom_widget.SpectralPhantomDesignerDialog",
@@ -187,7 +217,42 @@ def test_phantom_creator_retains_spectral_designer_dialog_lifetime():
 
     assert creator.current_phantom is phantom
     assert creator._retained_spectral_designer_dialogs == [dialog]
+    assert not creator.edit_btn.isHidden()
+
+    edited_design = _spectral_design()
+    edited_design.name = "Edited in memory"
+    edited_phantom = edited_design.build()
+    edit_dialog = MagicMock()
+    edit_dialog.exec_.return_value = QDialog.Accepted
+    edit_dialog.get_phantom.return_value = edited_phantom
+    with patch(
+        "blochsimulator.phantom_widget.SpectralPhantomDesignerDialog",
+        return_value=edit_dialog,
+    ) as designer_class:
+        creator.edit_current_phantom()
+
+    reopened_design = designer_class.call_args.kwargs["design"]
+    assert reopened_design.to_dict() == _spectral_design().to_dict()
+    assert creator.current_phantom.name == "Edited in memory"
     creator.close()
+    app.processEvents()
+
+
+def test_spectral_phantom_property_image_is_finite_and_fills_xy_view():
+    app = QApplication.instance() or QApplication([])
+    viewer = PhantomViewerWidget()
+    phantom = _spectral_design().build()
+    viewer.set_phantom(phantom)
+    viewer.tabs.setCurrentIndex(0)
+    viewer.prop_combo.setCurrentText("T1 Map")
+
+    assert viewer.prop_image.image.shape == phantom.shape[:2]
+    assert np.all(np.isfinite(viewer.prop_image.image))
+    transform = viewer.prop_image.getImageItem().transform()
+    assert transform.m11() == pytest.approx(10.0)
+    assert transform.m22() == pytest.approx(10.0)
+    assert "Range: 1200.00 - 1200.00 ms" in viewer.prop_info.text()
+    viewer.close()
     app.processEvents()
 
 
@@ -195,7 +260,26 @@ def test_volume_viewer_normalizes_2d_mask_and_resets_stale_indices():
     app = QApplication.instance() or QApplication([])
     viewer = VolumeViewerWidget()
 
-    viewer.set_volume(np.ones((64, 8, 4)), mask=np.ones((64, 8, 4), dtype=bool))
+    viewer.set_volume(
+        np.ones((64, 8, 4)),
+        mask=np.ones((64, 8, 4), dtype=bool),
+        fov_m=(0.064, 0.008, 0.004),
+    )
+    transform = viewer.xy_view.getImageItem().transform()
+    assert transform.m11() == pytest.approx(1.0)
+    assert transform.m22() == pytest.approx(1.0)
+    assert "mm" in viewer.index_labels[0].text()
+
+    viewer._select_plane_coordinates("xy", -31.5, 2.5)
+    assert viewer.indices == (0, 6, 2)
+    viewer._select_plane_coordinates("xz", 10.5, -1.5)
+    assert viewer.indices == (42, 6, 0)
+    viewer._select_plane_coordinates("yz", -3.5, 1.5)
+    assert viewer.indices == (42, 0, 3)
+    marker_x, marker_z = viewer.slice_markers["xz"].getData()
+    assert marker_x[0] == pytest.approx(10.5)
+    assert marker_z[0] == pytest.approx(1.5)
+
     viewer.sliders[0].setValue(48)
 
     data = np.arange(64.0)[None, :]

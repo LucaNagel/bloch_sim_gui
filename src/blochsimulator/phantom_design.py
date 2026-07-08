@@ -80,6 +80,8 @@ class PhantomDesign:
     shape: Tuple[int, int, int] = (128, 128, 128)
     fov_m: Tuple[float, float, float] = (0.22, 0.22, 0.22)
     shapes: List[ShapeDefinition] = field(default_factory=list)
+    b0_inhomogeneity_mode: str = "none"
+    b0_inhomogeneity_ppm: float = 0.0
 
     def validate(self) -> None:
         if len(self.shape) != 3 or any(
@@ -90,6 +92,17 @@ class PhantomDesign:
             raise ValueError("design FOV must contain three finite values")
         if np.any(np.asarray(self.fov_m) <= 0):
             raise ValueError("design FOV must be positive")
+        if self.b0_inhomogeneity_mode not in {
+            "none",
+            "linear_x",
+            "linear_y",
+            "linear_z",
+            "radial_xy",
+            "radial_xyz",
+        }:
+            raise ValueError("unsupported B0 inhomogeneity mode")
+        if not np.isfinite(self.b0_inhomogeneity_ppm):
+            raise ValueError("B0 inhomogeneity amplitude must be finite")
         if not self.shapes:
             raise ValueError("design requires at least one shape")
         names = [shape.name for shape in self.shapes]
@@ -114,6 +127,29 @@ class PhantomDesign:
             (y - centre[1]) / half_size[1]
         ) ** 2 + ((z - centre[2]) / half_size[2]) ** 2 <= 1.0
 
+    def rasterize_b0_inhomogeneity(self) -> np.ndarray:
+        """Return an analytic 2D/3D B0 map with edge amplitude in ppm."""
+        mode = self.b0_inhomogeneity_mode
+        amplitude = float(self.b0_inhomogeneity_ppm)
+        if mode == "none" or amplitude == 0.0:
+            return np.zeros(self.shape, dtype=float)
+        axes = [
+            2.0 * (np.arange(count, dtype=float) + 0.5) / count - 1.0
+            for count in self.shape
+        ]
+        x, y, z = np.meshgrid(*axes, indexing="ij")
+        if mode == "linear_x":
+            normalized = x
+        elif mode == "linear_y":
+            normalized = y
+        elif mode == "linear_z":
+            normalized = z
+        elif mode == "radial_xy":
+            normalized = 2.0 * np.sqrt((x * x + y * y) / 2.0) - 1.0
+        else:
+            normalized = 2.0 * np.sqrt((x * x + y * y + z * z) / 3.0) - 1.0
+        return amplitude * normalized
+
     def build(self) -> SpectralPhantom:
         """Build independent spectral components from all shapes and peaks."""
         self.validate()
@@ -122,6 +158,8 @@ class PhantomDesign:
         uses_legacy_b0 = any(item.b0_hz is not None for item in self.shapes)
         if uses_legacy_b0 and any(item.b0_hz is None for item in self.shapes):
             raise ValueError("cannot mix ppm and legacy Hz B0 shape definitions")
+        if uses_legacy_b0 and self.b0_inhomogeneity_mode != "none":
+            raise ValueError("cannot add a ppm B0 inhomogeneity to legacy Hz B0 data")
         b0_map = np.zeros(self.shape, dtype=float)
         for item in self.shapes:
             region = self.rasterize_mask(item)
@@ -141,6 +179,8 @@ class PhantomDesign:
                 concentration_maps[component_name] = (
                     region.astype(float) * peak.amplitude
                 )
+        if not uses_legacy_b0:
+            b0_map += self.rasterize_b0_inhomogeneity()
         return SpectralPhantom(
             shape=tuple(int(value) for value in self.shape),
             fov=tuple(float(value) for value in self.fov_m),
@@ -225,6 +265,8 @@ class PhantomDesign:
                 float(value) for value in data.get("fov_m", (0.22, 0.22, 0.22))
             ),
             shapes=shapes,
+            b0_inhomogeneity_mode=str(data.get("b0_inhomogeneity_mode", "none")),
+            b0_inhomogeneity_ppm=float(data.get("b0_inhomogeneity_ppm", 0.0)),
         )
 
     @classmethod

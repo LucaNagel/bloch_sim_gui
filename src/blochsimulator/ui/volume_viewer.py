@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import weakref
 from typing import Optional, Tuple
 
 import numpy as np
@@ -47,9 +48,32 @@ class VolumeViewerWidget(QWidget):
 
         slices = QWidget()
         slices_layout = QGridLayout(slices)
-        self.xy_view = self._image_view("Axial (XY)")
-        self.xz_view = self._image_view("Coronal (XZ)")
-        self.yz_view = self._image_view("Sagittal (YZ)")
+        self.xy_view = self._image_view("Axial (XY)", "x", "y")
+        self.xz_view = self._image_view("Coronal (XZ)", "x", "z")
+        self.yz_view = self._image_view("Sagittal (YZ)", "y", "z")
+        self.slice_markers = {}
+        viewer_ref = weakref.ref(self)
+        for plane, view in (
+            ("xy", self.xy_view),
+            ("xz", self.xz_view),
+            ("yz", self.yz_view),
+        ):
+            marker = pg.ScatterPlotItem(
+                size=16,
+                symbol="+",
+                pen=pg.mkPen("y", width=2),
+                brush=None,
+            )
+            marker.setZValue(100)
+            view.getView().addItem(marker, ignoreBounds=True)
+            self.slice_markers[plane] = marker
+
+            def select_from_click(event, selected_plane=plane, ref=viewer_ref):
+                viewer = ref()
+                if viewer is not None:
+                    viewer._slice_clicked(selected_plane, event)
+
+            view.getView().scene().sigMouseClicked.connect(select_from_click)
         slices_layout.addWidget(self.xy_view, 0, 0)
         slices_layout.addWidget(self.xz_view, 0, 1)
         slices_layout.addWidget(self.yz_view, 0, 2)
@@ -71,12 +95,21 @@ class VolumeViewerWidget(QWidget):
 
         self.gl_view = None
         self.scatter = None
+        self.bounds = None
+        self.gl_grid = None
         if HAS_OPENGL and os.environ.get("QT_QPA_PLATFORM", "").lower() != "offscreen":
             self.gl_view = gl.GLViewWidget()
-            self.gl_view.setCameraPosition(distance=2.5)
-            axis = gl.GLAxisItem()
-            axis.setSize(1, 1, 1)
-            self.gl_view.addItem(axis)
+            self.gl_view.setCameraPosition(distance=300, elevation=25, azimuth=35)
+            self.gl_grid = gl.GLGridItem()
+            self.gl_view.addItem(self.gl_grid)
+            self.bounds = gl.GLLinePlotItem(
+                pos=np.zeros((0, 3)),
+                color=(0.85, 0.85, 0.85, 0.8),
+                width=1.5,
+                mode="lines",
+                antialias=True,
+            )
+            self.gl_view.addItem(self.bounds)
             self.scatter = gl.GLScatterPlotItem(
                 pos=np.zeros((0, 3)), color=(1, 1, 1, 1), size=3
             )
@@ -90,7 +123,9 @@ class VolumeViewerWidget(QWidget):
         layout.addWidget(self.info)
 
     @staticmethod
-    def _image_view(title: str) -> pg.ImageView:
+    def _image_view(
+        title: str, horizontal_axis: str, vertical_axis: str
+    ) -> pg.ImageView:
         view = pg.ImageView()
         view.ui.roiBtn.hide()
         view.ui.menuBtn.hide()
@@ -98,7 +133,10 @@ class VolumeViewerWidget(QWidget):
             f"{value * scale:.2f}" for value in values
         ]
         view.setObjectName(title)
-        view.setToolTip(title)
+        view.setToolTip(
+            f"{title}; horizontal {horizontal_axis} [mm], "
+            f"vertical {vertical_axis} [mm]. Click to select a voxel."
+        )
         return view
 
     @property
@@ -150,7 +188,12 @@ class VolumeViewerWidget(QWidget):
         self.mask = volume_mask
         if fov_m is not None:
             fov = tuple(float(value) for value in fov_m)
-            self.fov_m = fov + (1.0,) * (3 - len(fov))
+            if len(fov) < 3:
+                in_plane_voxel = min(
+                    fov[index] / values.shape[index] for index in range(len(fov))
+                )
+                fov = fov + (in_plane_voxel,) * (3 - len(fov))
+            self.fov_m = fov[:3]
         previous_signal_states = [slider.blockSignals(True) for slider in self.sliders]
         try:
             for slider, count in zip(self.sliders, values.shape):
@@ -194,19 +237,63 @@ class VolumeViewerWidget(QWidget):
                 slider.setValue(value)
                 slider.blockSignals(previous)
         ix, iy, iz = indices
-        for label, value in zip(self.index_labels, indices):
-            label.setText(str(value))
+        for axis, (label, value, count, fov) in enumerate(
+            zip(self.index_labels, indices, self.data.shape, self.fov_m)
+        ):
+            position_mm = ((value + 0.5) / count - 0.5) * fov * 1000.0
+            label.setText(f"{value} ({position_mm:.4g} mm)")
         levels = self._levels()
         xy = np.where(self.mask[:, :, iz], self.data[:, :, iz], np.nan)
         xz = np.where(self.mask[:, iy, :], self.data[:, iy, :], np.nan)
         yz = np.where(self.mask[ix, :, :], self.data[ix, :, :], np.nan)
-        self._set_slice_image(self.xy_view, xy, levels)
-        self._set_slice_image(self.xz_view, xz, levels)
-        self._set_slice_image(self.yz_view, yz, levels)
+        self._set_slice_image(self.xy_view, xy, levels, (self.fov_m[0], self.fov_m[1]))
+        self._set_slice_image(self.xz_view, xz, levels, (self.fov_m[0], self.fov_m[2]))
+        self._set_slice_image(self.yz_view, yz, levels, (self.fov_m[1], self.fov_m[2]))
+        positions_mm = tuple(
+            ((value + 0.5) / count - 0.5) * fov * 1000.0
+            for value, count, fov in zip(indices, self.data.shape, self.fov_m)
+        )
+        self.slice_markers["xy"].setData([positions_mm[0]], [positions_mm[1]])
+        self.slice_markers["xz"].setData([positions_mm[0]], [positions_mm[2]])
+        self.slice_markers["yz"].setData([positions_mm[1]], [positions_mm[2]])
         self.indices_changed.emit(indices)
 
+    def _slice_clicked(self, plane: str, event) -> None:
+        if event.button() != Qt.LeftButton:
+            return
+        view = {"xy": self.xy_view, "xz": self.xz_view, "yz": self.yz_view}[plane]
+        view_box = view.getView()
+        if not view_box.sceneBoundingRect().contains(event.scenePos()):
+            return
+        point = view_box.mapSceneToView(event.scenePos())
+        self._select_plane_coordinates(plane, point.x(), point.y())
+
+    def _select_plane_coordinates(
+        self, plane: str, horizontal_mm: float, vertical_mm: float
+    ) -> None:
+        """Select a voxel from physical coordinates in an orthogonal plane."""
+        axes = {"xy": (0, 1), "xz": (0, 2), "yz": (1, 2)}
+        if plane not in axes:
+            raise ValueError("plane must be 'xy', 'xz', or 'yz'")
+        selected = list(self.indices)
+        for axis, coordinate_mm in zip(
+            axes[plane], (float(horizontal_mm), float(vertical_mm))
+        ):
+            count = self.data.shape[axis]
+            extent_mm = self.fov_m[axis] * 1000.0
+            index = int(np.floor((coordinate_mm / extent_mm + 0.5) * count))
+            selected[axis] = int(np.clip(index, 0, count - 1))
+        previous_states = [slider.blockSignals(True) for slider in self.sliders]
+        try:
+            for slider, value in zip(self.sliders, selected):
+                slider.setValue(value)
+        finally:
+            for slider, was_blocked in zip(self.sliders, previous_states):
+                slider.blockSignals(was_blocked)
+        self._indices_updated()
+
     @staticmethod
-    def _set_slice_image(view: pg.ImageView, values, levels) -> None:
+    def _set_slice_image(view: pg.ImageView, values, levels, fov_m) -> None:
         """Display a slice without passing NaN/Inf histogram ranges to Qt."""
         low, high = levels
         display = np.nan_to_num(
@@ -217,10 +304,15 @@ class VolumeViewerWidget(QWidget):
             neginf=low,
         )
         view.setImage(
-            display.T,
+            display,
             autoLevels=False,
             levels=levels,
             autoHistogramRange=False,
+            pos=(-fov_m[0] * 500.0, -fov_m[1] * 500.0),
+            scale=(
+                fov_m[0] * 1000.0 / display.shape[0],
+                fov_m[1] * 1000.0 / display.shape[1],
+            ),
         )
         view.ui.histogram.setHistogramRange(low, high)
 
@@ -245,7 +337,8 @@ class VolumeViewerWidget(QWidget):
         stride = max(1, int(np.ceil(len(indices) / maximum_points)))
         indices = indices[::stride]
         shape = np.asarray(self.data.shape, dtype=float)
-        positions = (indices + 0.5) / shape - 0.5
+        fov_mm = np.asarray(self.fov_m, dtype=float) * 1000.0
+        positions = ((indices + 0.5) / shape - 0.5) * fov_mm
         values = self.data[tuple(indices.T)]
         low, high = self._levels()
         normalized = np.clip((values - low) / max(high - low, 1e-15), 0, 1)
@@ -256,6 +349,42 @@ class VolumeViewerWidget(QWidget):
             color=np.asarray(colors, dtype=np.float32),
             size=size,
         )
+        half = fov_mm / 2.0
+        corners = np.asarray(
+            [
+                (x, y, z)
+                for z in (-half[2], half[2])
+                for y in (-half[1], half[1])
+                for x in (-half[0], half[0])
+            ],
+            dtype=np.float32,
+        )
+        edge_indices = (
+            (0, 1),
+            (2, 3),
+            (4, 5),
+            (6, 7),
+            (0, 2),
+            (1, 3),
+            (4, 6),
+            (5, 7),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
+        )
+        self.bounds.setData(
+            pos=np.vstack([corners[list(edge)] for edge in edge_indices])
+        )
+        self.gl_grid.setSize(x=fov_mm[0], y=fov_mm[1], z=0)
+        self.gl_grid.setSpacing(
+            x=max(fov_mm[0] / 10.0, 1e-6),
+            y=max(fov_mm[1] / 10.0, 1e-6),
+            z=1.0,
+        )
+        self.gl_grid.resetTransform()
+        self.gl_grid.translate(0, 0, -half[2])
+        self.gl_view.setCameraPosition(distance=float(max(fov_mm) * 1.8))
 
 
 class PhantomInspectorWidget(QWidget):

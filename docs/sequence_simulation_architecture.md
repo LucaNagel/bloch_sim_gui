@@ -94,6 +94,38 @@ ADC gradient moments. Alternating lines on different grids, multiple slices or
 repetitions, missing FOV, and non-Cartesian trajectories are rejected instead
 of being silently reshaped.
 
+`SpectroscopicAcquisition` is a separate model for phase-encoded 2D CSI. One
+ADC event is one FID at a fixed `(kx, ky)` point, so its chronological samples
+map to `(ky, kx, spectral_point)` rather than to an imaging readout axis.
+Inference requires Pulseq `MatrixSize`, `FOV`, `LIN`, and `PAR` metadata and
+validates gradient moments relative to the RF event preceding each FID. It
+performs a spatial 2D inverse FFT while retaining the FID, followed by an
+independent spectral FFT. xarray, NPZ, and HDF5 exports include the sorted CSI
+k-space, spatial FID, spectra, k-space coordinates, spectral time, and
+frequency axes in addition to the original chronological stream.
+The desktop viewer exposes coupled slider/spin controls for the CSI FID point
+and reconstructed voxel x/y coordinates. Inferred Cartesian outer dimensions
+(slice, repetition, echo, segment, or partition) share a frame slider with the
+descriptive frame selector; montage remains the slider's `-1` position.
+An optional split view places reconstruction or k-space beside the selected
+voxel FID or spectrum. Clicking the reconstruction updates the voxel selectors;
+clicking k-space maps its displayed grid index to the same selector as a UI
+convenience and explicitly does not reinterpret a k-space coordinate as a
+physical voxel.
+
+The main window has two presentation modes. Free Mode retains the single-spin
+parameter panel, global run controls, playback controls, and all analysis tabs.
+Sequence Mode hides those controls, collapses the legacy left panel, and shows
+only Sequence Simulation and Phantom tabs. The workspace selector remains in
+the menu-bar corner so the full interface can be restored without reopening
+the application.
+
+Sequence-side EPI controls are shown only for the internal EPI source, and the
+built-in object property group is shown only when the built-in quick object
+owns those values. Shape-designed spectral phantoms retain their editable
+`phantom_design` metadata in memory, so the Phantom workspace can reopen and
+replace the current design without first saving it to disk.
+
 `make_cartesian_epi` is the first reference builder. It derives read gradient,
 prephaser, phase blips/flybacks, and ADC timing from the acquisition object.
 The receiver sampling bandwidth is `1/dwell`; nominal readout pixel bandwidth
@@ -167,6 +199,30 @@ arrays are already in object coordinates and receive no z Fourier transform.
 Slice-selective RF determines which z positions are excited. A z-IFFT is only
 valid when an acquisition explicitly samples a Cartesian kz dimension; the
 current `CartesianAcquisition` and image reconstruction remain 2D.
+
+The designer can add an analytic B0 variation to the constant shape offsets:
+linear x/y/z and radial XY/XYZ modes are stored in ppm and converted using the
+selected simulation field and nucleus. Slice viewers use centred physical mm
+coordinates; the OpenGL point cloud and its FOV bounding box use the same
+coordinate system.
+
+## Dynamic spectral phantoms
+
+Pyruvate-to-lactate conversion must evolve coupled magnetization states, not
+only concentration weights. The required state per active voxel is
+`(Mx, My, Mz)` for every species. Between event boundaries a Bloch-McConnell
+operator combines species-specific off-resonance/relaxation with a kinetic
+rate matrix; RF rotations and ADC receive weighting act on the resulting
+species states. Initial concentration maps and voxelwise rate maps belong to a
+dynamic spectral phantom, while the sequence remains unchanged.
+
+The first implementation should support a two-pool irreversible model and
+must pass four limiting cases before GUI exposure: zero exchange equals the
+current independent-component solver, no-RF evolution matches the analytic
+rate equations, total pool mass is conserved when relaxation/input are off,
+and zero-rate dynamic output equals a static spectral phantom. A post-hoc
+time-dependent scaling of static signals is explicitly rejected because it
+cannot model converted longitudinal magnetization or repeated RF depletion.
 
 ## Memory and parallelism
 
