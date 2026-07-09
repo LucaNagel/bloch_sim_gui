@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import h5py
 
 from blochsimulator import BlochSimulator
 from blochsimulator.phantom import Phantom
@@ -29,6 +30,94 @@ def test_acquisition_dimensions_expand_event_indices_and_round_trip_metadata():
     assert dimensions.varying_axes == ("echo",)
     assert np.array_equal(dimensions.sample_indices("echo"), [0, 0, 0, 1, 1])
     assert AcquisitionDimensions.from_metadata(dimensions.to_metadata()) == dimensions
+
+
+@pytest.mark.parametrize("suffix", [".npz", ".h5"])
+def test_sparse_exports_include_per_sample_kspace_and_outer_indices(tmp_path, suffix):
+    acquisition = CartesianAcquisition.epi(2, 2, (0.02, 0.02), 10e-6)
+    program = make_cartesian_epi(acquisition)
+    result = BlochSimulator(use_parallel=False).simulate_sequence(
+        program,
+        Phantom(
+            shape=(1, 1),
+            fov=(0.02, 0.02),
+            t1_map=np.ones((1, 1)),
+            t2_map=np.ones((1, 1)),
+        ),
+    )
+    path = tmp_path / f"result{suffix}"
+    result.save(path)
+
+    if suffix == ".npz":
+        with np.load(path) as exported:
+            values = {name: exported[name] for name in exported.files}
+    else:
+        with h5py.File(path) as exported:
+            values = {name: exported[name][...] for name in exported.keys()}
+
+    for name in (
+        "kx_cyc_per_m",
+        "ky_cyc_per_m",
+        "kz_cyc_per_m",
+        "adc_event_index",
+        "readout_sample_index",
+        "repetition_index",
+        "partition_index",
+    ):
+        assert values[name].shape == result.signal.shape
+    assert np.array_equal(
+        values["kx_cyc_per_m"], result.adc_gradient_moment_cyc_per_m[:, 0]
+    )
+    assert values["cartesian_kspace"].shape == (2, 2)
+    assert values["cartesian_image"].shape == (2, 2)
+    assert np.array_equal(
+        values["cartesian_kspace"], acquisition.reshape_signal(result.signal)
+    )
+    assert np.array_equal(values["cartesian_kx_cyc_per_m"], acquisition.kx_cyc_per_m)
+    assert np.array_equal(values["cartesian_ky_cyc_per_m"], acquisition.ky_cyc_per_m)
+
+
+def test_cartesian_epi_xarray_export_contains_sorted_grid_and_image(tmp_path):
+    shape = (4, 4)
+    phantom = Phantom(
+        shape=shape,
+        fov=(0.04, 0.04),
+        t1_map=np.full(shape, 1e9),
+        t2_map=np.full(shape, 1e9),
+        pd_map=np.eye(shape[0]),
+    )
+    acquisition = CartesianAcquisition.epi(
+        read_matrix=shape[0],
+        phase_matrix=shape[1],
+        fov_m=phantom.fov,
+        dwell_s=50e-6,
+    )
+    result = BlochSimulator(use_parallel=False).simulate_sequence(
+        make_cartesian_epi(
+            acquisition,
+            rf_duration_s=100e-6,
+            prephaser_duration_s=100e-6,
+            blip_duration_s=50e-6,
+        ),
+        phantom,
+    )
+
+    dataset = result.to_xarray()
+    assert dataset["cartesian_kspace"].dims == ("phase_y", "read_x")
+    assert dataset["cartesian_kspace"].shape == shape
+    assert np.array_equal(
+        dataset["cartesian_kspace"], acquisition.reshape_signal(result.signal)
+    )
+    assert np.array_equal(dataset["cartesian_kx_cyc_per_m"], acquisition.kx_cyc_per_m)
+    assert np.array_equal(dataset["cartesian_ky_cyc_per_m"], acquisition.ky_cyc_per_m)
+
+    output = result.save(tmp_path / "epi_result.nc")
+    import xarray as xr
+
+    with xr.open_dataset(output) as saved:
+        assert saved["cartesian_kspace_real"].shape == shape
+        assert saved["cartesian_kspace_imag"].shape == shape
+        assert saved["cartesian_image_magnitude"].shape == shape
 
 
 def test_single_2d_inference_rejects_varying_outer_dimensions_explicitly():

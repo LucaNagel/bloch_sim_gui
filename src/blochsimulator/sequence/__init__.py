@@ -13,6 +13,7 @@ from .acquisition import (
 from .compiler import CompiledSequence, SequenceCompiler
 from .model import ADCEvent, GradientEvent, RFEvent, SequenceProgram
 from .result import SequenceSimulationResult
+from .bruker_export import BrukerExportOptions, export_bruker_raw
 
 from .pulseq import (
     PulseqImportError,
@@ -32,6 +33,8 @@ __all__ = [
     "SequenceCompiler",
     "SequenceProgram",
     "SequenceSimulationResult",
+    "BrukerExportOptions",
+    "export_bruker_raw",
     "PulseqImportError",
     "UnsupportedPulseqVersionError",
     "infer_cartesian_acquisition",

@@ -1,0 +1,416 @@
+"""Generate a dynamic Cartesian 3D balanced-SSFP sequence.
+
+The read, phase-encoding, and partition-encoding gradient moments are rewound
+within every TR.  The default RF excitation is an arbitrary SLR waveform loaded
+from ``rfpulses/SLR_sharpness_5.txt`` and scaled to the requested flip angle.
+The RF pulse remains non-slice-selective: in 3D imaging the excited volume is
+encoded along z rather than selected as an individual 2D slice.  Restricting the
+excited volume to a slab would require an additional fully balanced slab-select
+gradient.
+
+Dynamic volumes are identified with Pulseq ``REP`` labels and partitions with
+``PAR`` labels.  ``rf_frequency_offsets_hz`` optionally cycles the RF carrier
+between frames.  This supports the alternating-frequency excitation pattern
+described by Skinner et al. (MRM 2023, DOI 10.1002/mrm.29676) while keeping the
+scanner- and metabolite-specific offsets configurable.
+"""
+
+from pathlib import Path
+
+import numpy as np
+from matplotlib import pyplot as plt
+
+import pypulseq as pp
+
+
+def _as_3d_fov(fov: float | tuple[float, float, float]) -> tuple[float, float, float]:
+    if isinstance(fov, (int, float)):
+        values = (float(fov),) * 3
+    else:
+        if len(fov) != 3:
+            raise ValueError("fov must be a scalar or a three-element tuple")
+        values = tuple(float(value) for value in fov)
+
+    if any(value <= 0 for value in values):
+        raise ValueError("all FOV values must be positive")
+    return values
+
+
+def _encoding_areas(matrix_size: int, delta_k: float) -> np.ndarray:
+    """Return Cartesian encoding moments with a sample at k=0."""
+    if not isinstance(matrix_size, (int, np.integer)) or matrix_size <= 0:
+        raise ValueError("matrix sizes must be positive integers")
+    return (np.arange(matrix_size) - matrix_size // 2) * delta_k
+
+
+def _default_slr_pulse_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "rfpulses" / "SLR_sharpness_5.txt"
+
+
+def _load_amp_phase_waveform(path: str | Path) -> np.ndarray:
+    data = np.loadtxt(Path(path), delimiter=",")
+    flat = np.asarray(data, dtype=float).reshape(-1)
+    if flat.size < 2 or flat.size % 2:
+        raise ValueError("SLR pulse file must contain amp, phase pairs")
+
+    amplitudes = flat[0::2]
+    phases_rad = np.deg2rad(flat[1::2])
+    signal = amplitudes * np.exp(1j * phases_rad)
+    if not np.any(np.abs(signal) > 0):
+        raise ValueError("SLR pulse waveform is empty")
+    return signal.astype(np.complex128)
+
+
+def _resample_waveform_to_raster(
+    signal: np.ndarray,
+    *,
+    duration: float,
+    raster: float,
+) -> tuple[np.ndarray, float]:
+    n_samples = int(np.round(duration / raster))
+    if n_samples <= 0:
+        raise ValueError("rf_duration must be at least one RF raster interval")
+    actual_duration = n_samples * raster
+    if signal.size == n_samples:
+        return signal, actual_duration
+
+    source = np.linspace(0.0, 1.0, signal.size, endpoint=True)
+    target = np.linspace(0.0, 1.0, n_samples, endpoint=True)
+    resampled = np.interp(target, source, signal.real) + 1j * np.interp(
+        target, source, signal.imag
+    )
+    return resampled.astype(np.complex128), actual_duration
+
+
+def _make_rf_pulse(
+    *,
+    pulse_type: str,
+    flip_angle_rad: float,
+    duration: float,
+    system,
+    slr_pulse_path: str | Path | None,
+):
+    pulse_type = pulse_type.lower()
+    if pulse_type == "block":
+        return pp.make_block_pulse(
+            flip_angle=flip_angle_rad,
+            duration=duration,
+            delay=system.rf_dead_time,
+            system=system,
+            use="excitation",
+        )
+    if pulse_type == "slr":
+        signal = _load_amp_phase_waveform(
+            _default_slr_pulse_path() if slr_pulse_path is None else slr_pulse_path
+        )
+        signal, _ = _resample_waveform_to_raster(
+            signal,
+            duration=duration,
+            raster=system.rf_raster_time,
+        )
+        return pp.make_arbitrary_rf(
+            signal=signal,
+            flip_angle=flip_angle_rad,
+            dwell=system.rf_raster_time,
+            delay=system.rf_dead_time,
+            system=system,
+            use="excitation",
+        )
+    raise ValueError("rf_pulse_type must be 'slr' or 'block'")
+
+
+def main(
+    plot: bool = False,
+    test_report: bool = False,
+    write_seq: bool = False,
+    seq_filename: str = "bssfp_3d_dynamic.seq",
+    *,
+    fov: float | tuple[float, float, float] = (220e-3, 220e-3, 160e-3),
+    n_read: int = 64,
+    n_phase: int = 64,
+    n_partition: int = 32,
+    n_repetition: int = 1,
+    rf_frequency_offsets_hz: tuple[float, ...] = (0.0,),
+    flip_angle_deg: float = 15,
+    rf_duration: float = 1e-3,
+    rf_pulse_type: str = "slr",
+    slr_pulse_path: str | Path | None = None,
+    adc_dwell: float = 100e-6,
+    encoding_duration: float = 1e-3,
+    rf_phase_start: float = 180,
+    rf_phase_increment: float = 180,
+    dummy_repetitions: int = 1,
+    use_alpha_half: bool = True,
+):
+    """Create a Cartesian 3D bSSFP sequence.
+
+    Parameters are expressed in SI units. ``fov`` is ordered as
+    ``(fov_x, fov_y, fov_z)`` and the acquired data are ordered as partition,
+    phase-encode, readout. RF phase cycling is continuous through dummy and
+    acquired repetitions. ``rf_frequency_offsets_hz`` contains absolute RF
+    carrier offsets relative to the sequence centre frequency and is cycled
+    over dynamic frames. ``rf_pulse_type`` defaults to ``"slr"``; ``"block"``
+    remains available for deliberately broad-band control simulations.
+    """
+    fov_x, fov_y, fov_z = _as_3d_fov(fov)
+    _encoding_areas(n_read, 1.0)  # Validate the readout matrix size as well.
+    ky_areas = _encoding_areas(n_phase, 1 / fov_y)
+    kz_areas = _encoding_areas(n_partition, 1 / fov_z)
+
+    if flip_angle_deg <= 0:
+        raise ValueError("flip_angle_deg must be positive")
+    if rf_duration <= 0 or adc_dwell <= 0 or encoding_duration <= 0:
+        raise ValueError("event durations must be positive")
+    if not isinstance(dummy_repetitions, (int, np.integer)) or dummy_repetitions < 0:
+        raise ValueError("dummy_repetitions must be a non-negative integer")
+    if not isinstance(n_repetition, (int, np.integer)) or n_repetition <= 0:
+        raise ValueError("n_repetition must be a positive integer")
+    rf_frequency_offsets_hz = tuple(float(value) for value in rf_frequency_offsets_hz)
+    if not rf_frequency_offsets_hz or not np.all(np.isfinite(rf_frequency_offsets_hz)):
+        raise ValueError("rf_frequency_offsets_hz must contain finite values")
+
+    system = pp.Opts(
+        max_grad=28,
+        grad_unit="mT/m",
+        max_slew=150,
+        slew_unit="T/m/s",
+        rf_ringdown_time=20e-6,
+        rf_dead_time=100e-6,
+        adc_dead_time=20e-6,
+    )
+    seq = pp.Sequence(system)
+
+    rf = _make_rf_pulse(
+        pulse_type=rf_pulse_type,
+        flip_angle_rad=np.deg2rad(flip_angle_deg),
+        duration=rf_duration,
+        system=system,
+        slr_pulse_path=slr_pulse_path,
+    )
+    rf_alpha_half = _make_rf_pulse(
+        pulse_type=rf_pulse_type,
+        flip_angle_rad=np.deg2rad(flip_angle_deg / 2),
+        duration=rf_duration,
+        system=system,
+        slr_pulse_path=slr_pulse_path,
+    )
+
+    readout_duration = n_read * adc_dwell
+    readout_amplitude = 1 / (fov_x * adc_dwell)
+    readout_rise_time = max(
+        system.adc_dead_time,
+        np.ceil(abs(readout_amplitude) / system.max_slew / system.grad_raster_time)
+        * system.grad_raster_time,
+    )
+    gx = pp.make_trapezoid(
+        channel="x",
+        flat_area=n_read / fov_x,
+        flat_time=readout_duration,
+        rise_time=readout_rise_time,
+        system=system,
+    )
+    adc = pp.make_adc(
+        num_samples=n_read,
+        duration=readout_duration,
+        delay=gx.rise_time,
+        system=system,
+    )
+    gx_pre = pp.make_trapezoid(
+        channel="x",
+        area=-gx.area / 2,
+        duration=encoding_duration,
+        system=system,
+    )
+
+    # RF dead time occurs before the RF envelope and ringdown after it. Add the
+    # difference after RF so that the ADC center lies halfway between RF centers.
+    rf_center, _ = pp.calc_rf_center(rf)
+    rf_center_from_block_start = rf.delay + rf_center
+    rf_block_duration = pp.calc_duration(rf)
+    read_block_duration = max(pp.calc_duration(gx), pp.calc_duration(adc))
+    adc_center_from_block_start = adc.delay + adc.num_samples * adc.dwell / 2
+    rf_balance_delay_value = (
+        2 * rf_center_from_block_start
+        + read_block_duration
+        - 2 * adc_center_from_block_start
+        - rf_block_duration
+    )
+    raster = system.block_duration_raster
+    rf_balance_delay_value = np.round(rf_balance_delay_value / raster) * raster
+    if rf_balance_delay_value < 0:
+        raise ValueError("RF timing cannot be centered with a non-negative delay")
+    rf_balance_delay = (
+        pp.make_delay(rf_balance_delay_value) if rf_balance_delay_value > 0 else None
+    )
+
+    pre_duration = pp.calc_duration(gx_pre)
+    tr = (
+        rf_block_duration
+        + rf_balance_delay_value
+        + 2 * pre_duration
+        + read_block_duration
+    )
+    te = tr / 2
+
+    rf_alpha_half_center, _ = pp.calc_rf_center(rf_alpha_half)
+
+    def set_rf_and_adc_offsets(base_phase_deg: float, frame_frequency_hz: float):
+        base_phase_rad = np.deg2rad(base_phase_deg)
+        rf.freq_offset = frame_frequency_hz
+        rf.phase_offset = base_phase_rad - 2 * np.pi * frame_frequency_hz * rf_center
+        adc.freq_offset = frame_frequency_hz
+        adc.phase_offset = base_phase_rad
+
+    for rep in range(n_repetition):
+        print(f"Repetition {rep + 1} of {n_repetition}")
+        frame_frequency_hz = rf_frequency_offsets_hz[rep % len(rf_frequency_offsets_hz)]
+
+        # An alpha/2 pulse one half-TR before the first full pulse provides the
+        # standard catalyzation used by the Pulseq TrueFISP reference sequence.
+        if use_alpha_half:
+            rf_alpha_half.freq_offset = frame_frequency_hz
+            rf_alpha_half.phase_offset = (
+                -2 * np.pi * frame_frequency_hz * rf_alpha_half_center
+            )
+            alpha_half_delay_value = tr / 2 - pp.calc_duration(rf_alpha_half)
+            alpha_half_delay_value = np.round(alpha_half_delay_value / raster) * raster
+            if alpha_half_delay_value < 0:
+                raise ValueError("TR is too short for alpha/2 preparation")
+            seq.add_block(rf_alpha_half)
+            if alpha_half_delay_value > 0:
+                seq.add_block(pp.make_delay(alpha_half_delay_value))
+
+        rf_phase = float(rf_phase_start)
+
+        def add_repetition(
+            ky: float,
+            kz: float,
+            acquire: bool,
+            partition_index: int | None = None,
+        ) -> None:
+            nonlocal rf_phase
+
+            set_rf_and_adc_offsets(rf_phase, frame_frequency_hz)
+            rf_phase = np.mod(rf_phase + rf_phase_increment, 360.0)
+
+            gy_pre = pp.make_trapezoid(
+                channel="y", area=ky, duration=encoding_duration, system=system
+            )
+            gy_reph = pp.make_trapezoid(
+                channel="y", area=-ky, duration=encoding_duration, system=system
+            )
+            gz_pre = pp.make_trapezoid(
+                channel="z", area=kz, duration=encoding_duration, system=system
+            )
+            gz_reph = pp.make_trapezoid(
+                channel="z", area=-kz, duration=encoding_duration, system=system
+            )
+
+            seq.add_block(rf)
+            if rf_balance_delay is not None:
+                seq.add_block(rf_balance_delay)
+            seq.add_block(gx_pre, gy_pre, gz_pre)
+            if acquire:
+                if partition_index is None:
+                    raise ValueError("acquired repetitions require a partition index")
+                partition_label = pp.make_label(
+                    label="PAR",
+                    type="SET",
+                    value=partition_index,
+                )
+                repetition_label = pp.make_label(
+                    label="REP",
+                    type="SET",
+                    value=rep,
+                )
+                seq.add_block(gx, adc, partition_label, repetition_label)
+            else:
+                # ADC dead time can make the acquired readout block longer than
+                # the gradient alone. Preserve an identical TR during dummy scans.
+                seq.add_block(gx, pp.make_delay(read_block_duration))
+            seq.add_block(gx_pre, gy_reph, gz_reph)
+
+        for _ in range(dummy_repetitions):
+            add_repetition(ky=0.0, kz=0.0, acquire=False)
+
+        # Linear partition-major ordering. The RF/ADC phase is deliberately not
+        # reset at partition boundaries, preserving the continuous bSSFP pulse train.
+        for partition_index, kz in enumerate(kz_areas):
+            for ky in ky_areas:
+                add_repetition(
+                    ky=float(ky),
+                    kz=float(kz),
+                    acquire=True,
+                    partition_index=partition_index,
+                )
+
+    ok, error_report = seq.check_timing()
+    if ok:
+        print("Timing check passed successfully")
+    else:
+        print("Timing check failed. Error listing follows:")
+        for error in error_report:
+            print(error)
+
+    print(f"TR = {tr * 1e3:.3f} ms, TE = {te * 1e3:.3f} ms")
+
+    if test_report:
+        print(seq.test_report())
+
+    if plot:
+        preparation_duration = (
+            tr / 2 + dummy_repetitions * tr
+            if use_alpha_half
+            else dummy_repetitions * tr
+        )
+        seq.plot(time_range=(preparation_duration, preparation_duration + 2 * tr))
+
+        waveforms = seq.waveforms_and_times()[0]
+        plt.figure()
+        plt.plot(
+            waveforms[0][0],
+            waveforms[0][1],
+            waveforms[1][0],
+            waveforms[1][1],
+            waveforms[2][0],
+            waveforms[2][1],
+        )
+        plt.show()
+
+    seq.set_definition(key="FOV", value=[fov_x, fov_y, fov_z])
+    seq.set_definition(key="Name", value="bssfp_3d_dynamic")
+    seq.set_definition(key="MatrixSize", value=[n_read, n_phase, n_partition])
+    seq.set_definition(key="DynamicFrames", value=int(n_repetition))
+    seq.set_definition(key="RFFrequencyOffsetsHz", value=list(rf_frequency_offsets_hz))
+    seq.set_definition(key="RFPulseType", value=str(rf_pulse_type).lower())
+    if str(rf_pulse_type).lower() == "slr":
+        seq.set_definition(
+            key="RFPulseFile",
+            value=str(
+                _default_slr_pulse_path() if slr_pulse_path is None else slr_pulse_path
+            ),
+        )
+    seq.set_definition(key="TR", value=tr)
+    seq.set_definition(key="TE", value=te)
+
+    if write_seq:
+        script_dir = Path(__file__).resolve().parent
+        output_path = script_dir.parent / "sequences" / seq_filename
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        # Keep the generated file readable by Pulseq 1.4.x consumers as well
+        # as PyPulseq 1.5. The sequence does not require any 1.5-only events.
+        seq.write(str(output_path), v141_compat=True)
+        print(f"Sequence written to {output_path}")
+
+    return seq
+
+
+if __name__ == "__main__":
+    main(
+        plot=True,
+        write_seq=True,
+        n_read=16,
+        n_phase=16,
+        n_partition=16,
+        n_repetition=2,
+    )

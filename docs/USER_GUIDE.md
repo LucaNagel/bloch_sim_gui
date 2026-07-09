@@ -118,6 +118,46 @@ You can save the entire state of the GUI (tissue params, sequence settings, puls
     *   Ensure you have `ffmpeg` installed on your system if exporting MP4. GIF export usually works out-of-the-box.
 
 ## 7. Python API (Quick Reference)
+
+### Sequence-result ADC and k-space ordering
+
+Sequence results store `signal` chronologically. NetCDF exports attach `kx`,
+`ky`, and `kz` (cycles/m) to every ADC sample, together with
+`adc_event_index`, `readout_sample_index`, and Pulseq outer indices such as
+`repetition_index` and `partition_index`. NPZ and HDF5 exports contain the same
+arrays as datasets. Do not reshape `signal` solely from its length: first group
+by the exported outer indices and verify the k-space coordinates.
+
+For 2D CSI, the export already contains `csi_kspace` ordered as
+`(..., phase_y, phase_x, spectral_point)`, plus `csi_spatial_fid` and
+`csi_spectrum`. NetCDF is the preferred format because these dimension names
+and physical coordinates are retained directly.
+
+### Dynamic pyruvate/lactate phantom
+
+Open **Spectral Shape Designer** and define peaks whose names match the
+configured pyruvate and lactate pool names. In the **Kinetics / kPL** tab:
+
+1. Enable pyruvate-to-lactate conversion.
+2. Set the default `kPL` in `s⁻¹`.
+3. Add box or ellipsoid regions with center/size in percent of the phantom FOV.
+4. Use **Update preview** to inspect the rasterized `kPL` map.
+
+Later kinetic-region rows overwrite earlier rows in overlaps. Run the complete
+dynamic sequence from **Sequence Simulation**. The signal plot shows total and
+pool-resolved signals; **Spatial Magnetization** can display the sum, pyruvate,
+or lactate state. Exports contain `species_signal`,
+`final_pool_magnetization`, and pool-resolved CSI arrays when applicable.
+
+The command-line phantom builder is:
+
+```bash
+python sequences/scripts/simulate_dynamic_pyruvate_lactate.py
+```
+
+It creates `dynamic_kpl_phantom.npz` only. Load that file in the Phantom tab
+and run the desired sequence separately from Sequence Simulation.
+
 For advanced scripting, import the core classes:
 
 ```python

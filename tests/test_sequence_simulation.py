@@ -4,7 +4,15 @@ import pytest
 from blochsimulator import BlochSimulator, TissueParameters
 from blochsimulator.notebook_exporter import export_sequence_result_notebook
 from blochsimulator.phantom import Phantom
-from blochsimulator.sequence import ADCEvent, GradientEvent, RFEvent, SequenceProgram
+from blochsimulator.sequence import (
+    ADCEvent,
+    BrukerExportOptions,
+    GradientEvent,
+    RFEvent,
+    SequenceProgram,
+    SequenceSimulationResult,
+    export_bruker_raw,
+)
 from blochsimulator.simulator import resolve_num_threads
 
 
@@ -419,6 +427,109 @@ def test_sequence_result_export_formats(tmp_path, suffix):
             assert all(axis in dataset.coords for axis in ("kx", "ky", "kz"))
 
 
+def test_sequence_result_bruker_raw_export_writes_interleaved_fid(tmp_path):
+    result = SequenceSimulationResult(
+        signal=np.asarray([1.0 + 2.0j, -3.0 + 4.0j], dtype=np.complex128),
+        adc_times_s=np.asarray([0.0, 1e-3]),
+        final_magnetization=np.zeros((1, 3), dtype=float),
+        checkpoint_magnetization=None,
+        checkpoint_times_s=np.asarray([], dtype=float),
+        metadata={"field_strength_t": 7.0, "nucleus": "H1"},
+    )
+    program = SequenceProgram((ADCEvent(0.0, 2, 1e-3),), duration_s=2e-3)
+
+    output = export_bruker_raw(
+        result, tmp_path / "bruker" / "1", program=program, scale=1000
+    )
+
+    assert output.is_dir()
+    assert (output / "pdata").is_dir()
+    assert not (output / "rawdata.job0").exists()
+    fid = np.fromfile(output / "fid", dtype="<i4")
+    assert fid.size == 256
+    assert np.array_equal(
+        fid[:4], np.asarray([1000, 2000, -3000, 4000], dtype=np.int32)
+    )
+    assert np.count_nonzero(fid[4:]) == 0
+    acqp = (output / "acqp").read_text()
+    method = (output / "method").read_text()
+    assert "##$ACQ_scan_name=<BlochSimulator " in acqp
+    assert "##$GO_raw_data_format=GO_32BIT_SGN_INT" in acqp
+    assert "##$BYTORDA=little" in acqp
+    assert "##$BLOCHSIM_signal_scale=1000" in acqp
+    assert "##$PVM_EncNReceivers=1" in method
+    assert "##$PVM_EncSpectroscopy=No" in method
+    assert "##$Method=<Bruker:RARE>" in method
+
+
+def test_bruker_export_accepts_method_and_spatial_metadata_overrides(tmp_path):
+    result = SequenceSimulationResult(
+        signal=np.ones(4, dtype=np.complex128),
+        adc_times_s=np.arange(4, dtype=float) * 1e-3,
+        final_magnetization=np.zeros((1, 3), dtype=float),
+        checkpoint_magnetization=None,
+        checkpoint_times_s=np.asarray([], dtype=float),
+    )
+    program = SequenceProgram((ADCEvent(0.0, 4, 1e-3),), duration_s=4e-3)
+    options = BrukerExportOptions(
+        method_name="Bruker:FLASH",
+        scan_name="custom scan",
+        matrix=(64, 32),
+        fov_m=(0.06, 0.03),
+        slice_thickness_mm=2.5,
+    )
+
+    output = export_bruker_raw(
+        result, tmp_path / "bruker_custom", program=program, options=options
+    )
+
+    acqp = (output / "acqp").read_text()
+    method = (output / "method").read_text()
+    assert "##$ACQ_scan_name=<custom scan>" in acqp
+    assert "##$ACQ_method=<Bruker:FLASH>" in acqp
+    assert "##$Method=<Bruker:FLASH>" in method
+    assert "##$PVM_Matrix=( 2 )\n64 32" in method
+    assert "##$PVM_Fov=( 2 )\n60 30" in method
+    assert "##$PVM_SpatResol=( 2 )\n0.9375 0.9375" in method
+    assert "##$PVM_SliceThick=2.5" in method
+
+
+def test_bruker_export_can_write_rawdata_job0_or_both(tmp_path):
+    result = SequenceSimulationResult(
+        signal=np.asarray([1.0 + 2.0j, -3.0 + 4.0j], dtype=np.complex128),
+        adc_times_s=np.asarray([0.0, 1e-3]),
+        final_magnetization=np.zeros((1, 3), dtype=float),
+        checkpoint_magnetization=None,
+        checkpoint_times_s=np.asarray([], dtype=float),
+    )
+    program = SequenceProgram((ADCEvent(0.0, 2, 1e-3),), duration_s=2e-3)
+
+    raw_only = export_bruker_raw(
+        result,
+        tmp_path / "raw_only",
+        program=program,
+        scale=1000,
+        options=BrukerExportOptions(raw_data_files="rawdata.job0"),
+    )
+
+    assert not (raw_only / "fid").exists()
+    assert np.array_equal(
+        np.fromfile(raw_only / "rawdata.job0", dtype="<i4"),
+        np.asarray([1000, 2000, -3000, 4000], dtype=np.int32),
+    )
+
+    both = export_bruker_raw(
+        result,
+        tmp_path / "both",
+        program=program,
+        scale=1000,
+        options=BrukerExportOptions(raw_data_files="both"),
+    )
+
+    assert (both / "fid").is_file()
+    assert (both / "rawdata.job0").is_file()
+
+
 def test_sequence_result_notebook_uses_xarray_dataset(tmp_path):
     phantom = _phantom(t1=1e9, t2=1e9, m0=(1.0, 0.0, 0.0))
     program = SequenceProgram((ADCEvent(0.0, 1, 1e-3),), duration_s=1e-3)
@@ -431,24 +542,57 @@ def test_sequence_result_notebook_uses_xarray_dataset(tmp_path):
     text = notebook_path.read_text(encoding="utf-8")
     assert "xr.open_dataset" in text
     assert "result.nc" in text
+    assert "adc_event_index" in text
+    assert "cartesian_kspace" in text
+    assert "cartesian_image_magnitude" in text
+    import nbformat
+
+    notebook = nbformat.read(notebook_path, as_version=4)
+    for cell in notebook.cells:
+        if cell.cell_type == "code":
+            compile(cell.source, str(notebook_path), "exec")
 
 
-def test_phantom_split_maps_round_trip_npz_and_hdf5(tmp_path):
+@pytest.mark.parametrize("suffix", [".npz", ".h5", ".nc"])
+def test_phantom_split_maps_round_trip_npz_hdf5_and_xarray(tmp_path, suffix):
     phantom = _phantom(
+        shape=(2, 2, 2),
         b0=11.0,
         chemical_shift=-4.0,
-        tx_sensitivity=np.array([0.8 + 0.1j]),
-        rx_sensitivities=np.array([[1.0 + 0j], [0.5 - 0.25j]]),
+        tx_sensitivity=np.full((2, 2, 2), 0.8 + 0.1j),
+        rx_sensitivities=np.stack(
+            [
+                np.ones((2, 2, 2), dtype=np.complex128),
+                np.full((2, 2, 2), 0.5 - 0.25j),
+            ]
+        ),
     )
-    for suffix in (".npz", ".h5"):
-        filename = tmp_path / f"phantom{suffix}"
-        phantom.save(filename)
-        loaded = Phantom.load(filename)
-        assert np.array_equal(loaded.b0_map, phantom.b0_map)
-        assert np.array_equal(loaded.chemical_shift_map, phantom.chemical_shift_map)
-        assert np.array_equal(loaded.effective_df_map, phantom.effective_df_map)
-        assert np.array_equal(loaded.tx_sensitivity_map, phantom.tx_sensitivity_map)
-        assert np.array_equal(loaded.rx_sensitivity_maps, phantom.rx_sensitivity_maps)
+    filename = tmp_path / f"phantom{suffix}"
+    phantom.save(filename)
+    loaded = Phantom.load(filename)
+
+    assert np.array_equal(loaded.b0_map, phantom.b0_map)
+    assert np.array_equal(loaded.chemical_shift_map, phantom.chemical_shift_map)
+    assert np.array_equal(loaded.effective_df_map, phantom.effective_df_map)
+    assert np.array_equal(loaded.tx_sensitivity_map, phantom.tx_sensitivity_map)
+    assert np.array_equal(loaded.rx_sensitivity_maps, phantom.rx_sensitivity_maps)
+    assert loaded.coordinate_system == "object_xyz"
+    assert np.array_equal(loaded.affine_ijk_to_xyz_m, phantom.affine_ijk_to_xyz_m)
+
+
+def test_phantom_xarray_dataset_exposes_physical_coordinates():
+    phantom = _phantom(shape=(2, 3, 4))
+    dataset = phantom.to_xarray()
+
+    assert dataset["t1"].dims == ("x", "y", "z")
+    assert dataset["m0"].dims == ("x", "y", "z", "component")
+    assert dataset["rx_sensitivity_real"].dims == ("coil", "x", "y", "z")
+    assert dataset.attrs["coordinate_system"] == "object_xyz"
+    assert dataset.attrs["affine_ijk_to_xyz_m"].shape == (16,)
+    assert np.asarray(dataset.coords["x"]) == pytest.approx([-0.005, 0.005])
+    assert np.asarray(dataset.coords["z"]) == pytest.approx(
+        [-0.0075, -0.0025, 0.0025, 0.0075]
+    )
 
 
 def test_legacy_adapter_matches_existing_endpoint_solver():

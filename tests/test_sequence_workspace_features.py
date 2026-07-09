@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import QApplication
 from blochsimulator import BlochSimulator
 from blochsimulator.paths import workspace_directory
 from blochsimulator.phantom_design import PhantomDesign
+from blochsimulator.sequence import BrukerExportOptions
 from blochsimulator.ui.phantom_designer import SpectralPhantomDesignerDialog
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
 
@@ -110,5 +111,42 @@ def test_sequence_workspace_exports_xarray_result(tmp_path):
         widget._export_results()
 
     assert output.is_file()
+    widget.close()
+    app.processEvents()
+
+
+def test_sequence_workspace_exports_bruker_raw_directory(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+    widget.object_source.setCurrentIndex(1)
+    widget.matrix_size.setValue(2)
+    widget.z_matrix_size.setValue(1)
+    widget._build_phantom()
+    widget.result = BlochSimulator(use_parallel=False).simulate_sequence(
+        widget.program, widget.phantom
+    )
+    output = tmp_path / "bruker_export" / "1"
+
+    with (
+        patch(
+            "blochsimulator.ui.sequence_simulation_widget.QFileDialog.getSaveFileName",
+            return_value=(str(output), "Bruker raw dataset (directory)"),
+        ),
+        patch.object(
+            widget,
+            "_prompt_bruker_export_options",
+            return_value=BrukerExportOptions(
+                method_name="Bruker:RARE",
+                raw_data_files="both",
+            ),
+        ),
+        patch("blochsimulator.ui.sequence_simulation_widget.QMessageBox.information"),
+    ):
+        widget._export_results()
+
+    assert (output / "fid").is_file()
+    assert (output / "rawdata.job0").is_file()
+    assert (output / "acqp").is_file()
+    assert (output / "method").is_file()
     widget.close()
     app.processEvents()

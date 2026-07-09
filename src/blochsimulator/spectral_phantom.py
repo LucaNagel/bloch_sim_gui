@@ -326,6 +326,14 @@ class SpectralPhantom:
         B0 field strength in Tesla
     nucleus : str
         Nucleus type ('H1', 'C13', etc.)
+    spectral_reference_ppm : float
+        Absolute ppm value of the scanner reference. Peak shifts stored in
+        species are relative to this reference, so the simulated carrier is
+        always 0 ppm.
+    spectral_bandwidth_ppm : float
+        Default spectral display bandwidth centered on the scanner reference.
+    spectral_points : int
+        Default number of frequency samples for spectral display.
     name : str
         Phantom name
     """
@@ -334,13 +342,19 @@ class SpectralPhantom:
     fov: Tuple[float, ...]
     species: List[ChemicalSpecies]
     concentration_maps: Dict[str, np.ndarray]
+    initial_mz_maps: Optional[Dict[str, np.ndarray]] = None
     t2_star_map: np.ndarray = None
     b0_map: np.ndarray = None
     b0_map_ppm: np.ndarray = None
     field_strength: float = 3.0
     nucleus: str = "H1"
+    spectral_reference_ppm: float = 0.0
+    spectral_bandwidth_ppm: float = 20.0
+    spectral_points: int = 1024
     name: str = "Spectral Phantom"
     metadata: Dict = field(default_factory=dict)
+    coordinate_system: str = "object_xyz"
+    affine_ijk_to_xyz_m: Optional[np.ndarray] = None
 
     # Computed fields
     positions: np.ndarray = field(init=False, repr=False)
@@ -360,6 +374,15 @@ class SpectralPhantom:
 
         if len(self.fov) != ndim:
             raise ValueError(f"FOV dimensions must match shape dimensions")
+        if not str(self.coordinate_system).strip():
+            raise ValueError("coordinate_system must not be empty")
+        if self.affine_ijk_to_xyz_m is None:
+            self.affine_ijk_to_xyz_m = Phantom.default_affine(self.shape, self.fov)
+        else:
+            affine = np.asarray(self.affine_ijk_to_xyz_m, dtype=np.float64)
+            if affine.shape != (4, 4) or not np.all(np.isfinite(affine)):
+                raise ValueError("affine_ijk_to_xyz_m must be a finite 4x4 matrix")
+            self.affine_ijk_to_xyz_m = affine
         if len({species.name for species in self.species}) != len(self.species):
             raise ValueError("Spectral species names must be unique")
         if not self.species:
@@ -382,6 +405,27 @@ class SpectralPhantom:
                     f"Concentration map for '{name}' must be finite and non-negative"
                 )
 
+        if self.initial_mz_maps is None:
+            self.initial_mz_maps = {
+                species.name: np.ones(self.shape, dtype=np.float64)
+                for species in self.species
+            }
+        for species in self.species:
+            name = species.name
+            if name not in self.initial_mz_maps:
+                self.initial_mz_maps[name] = np.ones(self.shape, dtype=np.float64)
+            mz_map = np.asarray(self.initial_mz_maps[name], dtype=np.float64)
+            if mz_map.shape != self.shape:
+                raise ValueError(
+                    f"Initial Mz map for '{name}' has shape {mz_map.shape}, "
+                    f"expected {self.shape}"
+                )
+            if not np.all(np.isfinite(mz_map)) or np.any(mz_map < 0):
+                raise ValueError(
+                    f"Initial Mz map for '{name}' must be finite and non-negative"
+                )
+            self.initial_mz_maps[name] = mz_map
+
         # Validate optional maps
         if self.t2_star_map is not None and self.t2_star_map.shape != self.shape:
             raise ValueError("T2* map shape must match phantom shape")
@@ -396,16 +440,23 @@ class SpectralPhantom:
             raise ValueError("field_strength must be positive and finite")
         if self.nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
             raise ValueError(f"unsupported nucleus {self.nucleus!r}")
+        if not np.isfinite(self.spectral_reference_ppm):
+            raise ValueError("spectral_reference_ppm must be finite")
+        if (
+            not np.isfinite(self.spectral_bandwidth_ppm)
+            or self.spectral_bandwidth_ppm <= 0
+        ):
+            raise ValueError("spectral_bandwidth_ppm must be positive and finite")
+        if (
+            int(self.spectral_points) != self.spectral_points
+            or self.spectral_points < 2
+        ):
+            raise ValueError("spectral_points must be an integer >= 2")
 
     def _compute_coordinates(self):
         """Compute spatial coordinates."""
         ndim = len(self.shape)
-
-        coords = []
-        for i in range(ndim):
-            n = self.shape[i]
-            fov = self.fov[i]
-            coords.append(-fov / 2 + (np.arange(n) + 0.5) * fov / n)
+        coords = Phantom.coordinate_vectors(self.shape, self.affine_ijk_to_xyz_m)
 
         if ndim == 1:
             self.positions = np.column_stack(
@@ -568,11 +619,29 @@ class SpectralPhantom:
             total += cmap
         return total
 
+    def get_initial_mz_map(self, species_name: str = None) -> np.ndarray:
+        """Return species-specific or concentration-weighted initial Mz."""
+        if species_name is not None:
+            if species_name not in self.initial_mz_maps:
+                raise ValueError(f"Unknown species: {species_name}")
+            return self.initial_mz_maps[species_name].copy()
+        total = self.get_total_concentration()
+        weighted = np.zeros(self.shape, dtype=np.float64)
+        for species in self.species:
+            concentration = self.concentration_maps[species.name]
+            weighted += concentration * self.initial_mz_maps[species.name]
+        return np.divide(
+            weighted,
+            total,
+            out=np.zeros_like(weighted),
+            where=total > 0,
+        )
+
     def spectrum_at(
         self,
         index: Tuple[int, ...],
         frequency_hz: Optional[np.ndarray] = None,
-        points: int = 1024,
+        points: Optional[int] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Return the Lorentzian spectrum at one spatial voxel.
 
@@ -589,16 +658,26 @@ class SpectralPhantom:
             [1.0 / (np.pi * species.t2_star) for species in self.species]
         )
         if frequency_hz is None:
-            lower = float(np.min(centres - 8 * widths))
-            upper = float(np.max(centres + 8 * widths))
-            if np.isclose(lower, upper):
-                lower, upper = lower - 100.0, upper + 100.0
-            frequency_hz = np.linspace(lower, upper, int(points))
+            if points is None:
+                points = self.spectral_points
+            half_bandwidth_hz = float(
+                ppm_to_hz(
+                    self.spectral_bandwidth_ppm / 2.0,
+                    self.field_strength,
+                    self.nucleus,
+                )
+            )
+            frequency_hz = np.linspace(
+                -half_bandwidth_hz,
+                half_bandwidth_hz,
+                int(points),
+            )
         frequency_hz = np.asarray(frequency_hz, dtype=float)
         spectrum = np.zeros(frequency_hz.shape, dtype=float)
         b0 = float(self.get_b0_offset_map_hz()[index])
         for species, centre, fwhm in zip(self.species, centres, widths):
             amplitude = float(self.concentration_maps[species.name][index])
+            amplitude *= float(self.initial_mz_maps[species.name][index])
             half_width = fwhm / 2.0
             spectrum += amplitude / (
                 1.0 + ((frequency_hz - (centre + b0)) / half_width) ** 2
@@ -645,12 +724,226 @@ class SpectralPhantom:
                                 species.name, effective_field, effective_nucleus
                             ),
                         ),
+                        m0_map=self._component_m0_map(species.name),
                         mask=active,
                         name=f"{self.name} - {species.name}",
+                        coordinate_system=self.coordinate_system,
+                        affine_ijk_to_xyz_m=self.affine_ijk_to_xyz_m,
                     ),
                 )
             )
         return components
+
+    def _component_m0_map(self, species_name: str) -> np.ndarray:
+        m0_map = np.zeros(self.shape + (3,), dtype=np.float64)
+        m0_map[..., 2] = self.initial_mz_maps[species_name]
+        return m0_map
+
+    def to_xarray(self):
+        """Return this spectral phantom as a coordinate-aware xarray Dataset."""
+        import xarray as xr
+
+        spatial_dims = tuple("xyz"[: self.ndim])
+        species_names = [species.name for species in self.species]
+        coords = {
+            dim: (
+                dim,
+                values,
+                {
+                    "units": "m",
+                    "long_name": f"{dim} coordinate in {self.coordinate_system}",
+                },
+            )
+            for dim, values in zip(
+                spatial_dims,
+                Phantom.coordinate_vectors(self.shape, self.affine_ijk_to_xyz_m),
+            )
+        }
+        coords["species"] = ("species", species_names)
+        data_vars = {
+            "concentration": (
+                ("species",) + spatial_dims,
+                np.stack([self.concentration_maps[name] for name in species_names]),
+                {"units": "relative"},
+            ),
+            "initial_mz": (
+                ("species",) + spatial_dims,
+                np.stack([self.initial_mz_maps[name] for name in species_names]),
+                {"units": "relative"},
+            ),
+            "b0_ppm": (
+                spatial_dims,
+                (
+                    self.b0_map_ppm
+                    if self.b0_map_ppm is not None
+                    else np.zeros(self.shape, dtype=float)
+                ),
+                {"units": "ppm"},
+            ),
+            "b0_hz": (
+                spatial_dims,
+                (
+                    self.b0_map
+                    if self.b0_map is not None
+                    else np.zeros(self.shape, dtype=float)
+                ),
+                {"units": "Hz"},
+            ),
+            "t2_star_map": (
+                spatial_dims,
+                (
+                    self.t2_star_map
+                    if self.t2_star_map is not None
+                    else np.zeros(self.shape, dtype=float)
+                ),
+                {"units": "s"},
+            ),
+            "species_chemical_shift_ppm": (
+                "species",
+                [species.chemical_shift_ppm for species in self.species],
+                {"units": "ppm"},
+            ),
+            "species_t1": (
+                "species",
+                [species.t1 for species in self.species],
+                {"units": "s"},
+            ),
+            "species_t2": (
+                "species",
+                [species.t2 for species in self.species],
+                {"units": "s"},
+            ),
+            "species_t2_star": (
+                "species",
+                [species.t2_star for species in self.species],
+                {"units": "s"},
+            ),
+            "species_frequency_offset_hz": (
+                "species",
+                [
+                    (
+                        np.nan
+                        if species.frequency_offset_hz is None
+                        else species.frequency_offset_hz
+                    )
+                    for species in self.species
+                ],
+                {"units": "Hz"},
+            ),
+        }
+        header = {
+            "species": [
+                {
+                    "name": species.name,
+                    "chemical_shift_ppm": species.chemical_shift_ppm,
+                    "t1": species.t1,
+                    "t2": species.t2,
+                    "t2_star": species.t2_star,
+                    "multiplicity": species.multiplicity,
+                    "j_coupling_hz": species.j_coupling_hz,
+                    "j_partners": species.j_partners,
+                    "frequency_offset_hz": species.frequency_offset_hz,
+                }
+                for species in self.species
+            ],
+            "metadata": self.metadata,
+        }
+        return xr.Dataset(
+            data_vars=data_vars,
+            coords=coords,
+            attrs={
+                "format": "blochsimulator-spectral-phantom-xarray",
+                "version": 1,
+                "name": self.name,
+                "fov_m": np.asarray(self.fov, dtype=np.float64),
+                "field_strength": self.field_strength,
+                "nucleus": self.nucleus,
+                "spectral_reference_ppm": self.spectral_reference_ppm,
+                "spectral_bandwidth_ppm": self.spectral_bandwidth_ppm,
+                "spectral_points": self.spectral_points,
+                "has_b0_map": self.b0_map is not None,
+                "has_b0_map_ppm": self.b0_map_ppm is not None,
+                "has_t2_star_map": self.t2_star_map is not None,
+                "coordinate_system": self.coordinate_system,
+                "affine_ijk_to_xyz_m": self.affine_ijk_to_xyz_m.reshape(-1),
+                "spectral_header_json": json.dumps(header, default=str),
+            },
+        )
+
+    @classmethod
+    def from_xarray(cls, dataset) -> "SpectralPhantom":
+        """Create a :class:`SpectralPhantom` from an xarray Dataset."""
+        ds = dataset.load()
+        spatial_dims = tuple(dim for dim in ("x", "y", "z") if dim in ds.sizes)
+        if "species" not in ds.sizes or not spatial_dims:
+            raise ValueError("spectral phantom dataset requires species and x/y/z dims")
+        shape = tuple(int(ds.sizes[dim]) for dim in spatial_dims)
+        fov = tuple(float(value) for value in np.asarray(ds.attrs["fov_m"]).ravel())
+        affine = np.asarray(ds.attrs["affine_ijk_to_xyz_m"], dtype=float).reshape(4, 4)
+        header = json.loads(ds.attrs.get("spectral_header_json", "{}"))
+        species_metadata = header.get("species", [])
+        species_names = [str(value) for value in np.asarray(ds.coords["species"])]
+        species = []
+        for index, name in enumerate(species_names):
+            if index < len(species_metadata):
+                item = dict(species_metadata[index])
+                item["name"] = name
+                species.append(ChemicalSpecies(**item))
+            else:
+                frequency_hz = float(ds["species_frequency_offset_hz"][index])
+                species.append(
+                    ChemicalSpecies(
+                        name=name,
+                        chemical_shift_ppm=float(
+                            ds["species_chemical_shift_ppm"][index]
+                        ),
+                        t1=float(ds["species_t1"][index]),
+                        t2=float(ds["species_t2"][index]),
+                        t2_star=float(ds["species_t2_star"][index]),
+                        frequency_offset_hz=(
+                            None if np.isnan(frequency_hz) else frequency_hz
+                        ),
+                    )
+                )
+        concentration_maps = {
+            name: np.asarray(ds["concentration"].sel(species=name))
+            for name in species_names
+        }
+        initial_mz_maps = {
+            name: np.asarray(ds["initial_mz"].sel(species=name))
+            for name in species_names
+        }
+        return cls(
+            shape=shape,
+            fov=fov,
+            species=species,
+            concentration_maps=concentration_maps,
+            initial_mz_maps=initial_mz_maps,
+            t2_star_map=(
+                np.asarray(ds["t2_star_map"])
+                if bool(ds.attrs.get("has_t2_star_map", False))
+                else None
+            ),
+            b0_map=(
+                np.asarray(ds["b0_hz"])
+                if bool(ds.attrs.get("has_b0_map", False))
+                else None
+            ),
+            b0_map_ppm=(
+                np.asarray(ds["b0_ppm"])
+                if bool(ds.attrs.get("has_b0_map_ppm", False))
+                else None
+            ),
+            field_strength=float(ds.attrs["field_strength"]),
+            nucleus=str(ds.attrs["nucleus"]),
+            spectral_reference_ppm=float(ds.attrs.get("spectral_reference_ppm", 0.0)),
+            spectral_bandwidth_ppm=float(ds.attrs.get("spectral_bandwidth_ppm", 20.0)),
+            spectral_points=int(ds.attrs.get("spectral_points", 1024)),
+            name=str(ds.attrs.get("name", "Spectral Phantom")),
+            metadata=dict(header.get("metadata", {})),
+            coordinate_system=str(ds.attrs.get("coordinate_system", "object_xyz")),
+            affine_ijk_to_xyz_m=affine,
+        )
 
     def save(self, filename: Union[str, Path]) -> None:
         """Save all spectral maps, peak definitions, and designer metadata."""
@@ -671,10 +964,15 @@ class SpectralPhantom:
         ]
         header = {
             "format": "blochsimulator-spectral-phantom",
-            "version": 2,
+            "version": 3,
             "name": self.name,
             "field_strength": self.field_strength,
             "nucleus": self.nucleus,
+            "spectral_reference_ppm": self.spectral_reference_ppm,
+            "spectral_bandwidth_ppm": self.spectral_bandwidth_ppm,
+            "spectral_points": self.spectral_points,
+            "coordinate_system": self.coordinate_system,
+            "affine_ijk_to_xyz_m": self.affine_ijk_to_xyz_m.tolist(),
             "species": species_data,
             "metadata": self.metadata,
         }
@@ -683,6 +981,12 @@ class SpectralPhantom:
                 f"concentration_{index}": self.concentration_maps[species.name]
                 for index, species in enumerate(self.species)
             }
+            arrays.update(
+                {
+                    f"initial_mz_{index}": self.initial_mz_maps[species.name]
+                    for index, species in enumerate(self.species)
+                }
+            )
             np.savez_compressed(
                 filename,
                 spectral_header=np.asarray(json.dumps(header)),
@@ -708,6 +1012,8 @@ class SpectralPhantom:
                 has_t2_star=np.asarray(self.t2_star_map is not None),
                 **arrays,
             )
+        elif filename.suffix == ".nc":
+            self.to_xarray().to_netcdf(filename)
         elif filename.suffix in (".h5", ".hdf5"):
             import h5py
 
@@ -725,6 +1031,11 @@ class SpectralPhantom:
                 for index, species in enumerate(self.species):
                     group.create_dataset(
                         str(index), data=self.concentration_maps[species.name]
+                    )
+                mz_group = handle.create_group("initial_mz_maps")
+                for index, species in enumerate(self.species):
+                    mz_group.create_dataset(
+                        str(index), data=self.initial_mz_maps[species.name]
                     )
         else:
             raise ValueError(f"Unsupported file format: {filename.suffix}")
@@ -745,6 +1056,14 @@ class SpectralPhantom:
                     item.name: np.asarray(data[f"concentration_{index}"])
                     for index, item in enumerate(species)
                 }
+                initial_mz_maps = {
+                    item.name: (
+                        np.asarray(data[f"initial_mz_{index}"])
+                        if f"initial_mz_{index}" in data.files
+                        else np.ones(shape, dtype=np.float64)
+                    )
+                    for index, item in enumerate(species)
+                }
                 b0 = np.asarray(data["b0_map"]) if bool(data["has_b0"]) else None
                 b0_ppm = (
                     np.asarray(data["b0_map_ppm"])
@@ -756,6 +1075,11 @@ class SpectralPhantom:
                     if bool(data["has_t2_star"])
                     else None
                 )
+        elif filename.suffix == ".nc":
+            import xarray as xr
+
+            with xr.open_dataset(filename) as dataset:
+                return cls.from_xarray(dataset)
         elif filename.suffix in (".h5", ".hdf5"):
             import h5py
 
@@ -770,6 +1094,15 @@ class SpectralPhantom:
                     item.name: handle["concentration_maps"][str(index)][...]
                     for index, item in enumerate(species)
                 }
+                if "initial_mz_maps" in handle:
+                    initial_mz_maps = {
+                        item.name: handle["initial_mz_maps"][str(index)][...]
+                        for index, item in enumerate(species)
+                    }
+                else:
+                    initial_mz_maps = {
+                        item.name: np.ones(shape, dtype=np.float64) for item in species
+                    }
                 b0 = handle["b0_map"][...] if "b0_map" in handle else None
                 b0_ppm = handle["b0_map_ppm"][...] if "b0_map_ppm" in handle else None
                 t2_star = (
@@ -782,13 +1115,19 @@ class SpectralPhantom:
             fov=fov,
             species=species,
             concentration_maps=maps,
+            initial_mz_maps=initial_mz_maps,
             t2_star_map=t2_star,
             b0_map=b0,
             b0_map_ppm=b0_ppm,
             field_strength=float(header["field_strength"]),
             nucleus=str(header["nucleus"]),
+            spectral_reference_ppm=float(header.get("spectral_reference_ppm", 0.0)),
+            spectral_bandwidth_ppm=float(header.get("spectral_bandwidth_ppm", 20.0)),
+            spectral_points=int(header.get("spectral_points", 1024)),
             name=str(header["name"]),
             metadata=dict(header.get("metadata", {})),
+            coordinate_system=str(header.get("coordinate_system", "object_xyz")),
+            affine_ijk_to_xyz_m=header.get("affine_ijk_to_xyz_m"),
         )
 
     def get_species_properties(self, species_name: str = None) -> Dict[str, np.ndarray]:
@@ -825,6 +1164,7 @@ class SpectralPhantom:
                 t2_star = self.t2_star_map.ravel()
             else:
                 t2_star = np.full(self.nvoxels, species.t2_star)
+            initial_mz = self.initial_mz_maps[species_name].ravel()
 
         else:
             # Combined: weighted average of properties
@@ -845,10 +1185,13 @@ class SpectralPhantom:
                 t2_star = self.t2_star_map.ravel()
             else:
                 t2_star = t2.copy()
+            initial_mz = self.get_initial_mz_map().ravel()
 
         # Add B0 inhomogeneity to frequency offset
         if self.b0_map is not None:
             df = df + self.b0_map.ravel()
+        elif self.b0_map_ppm is not None:
+            df = df + self.get_b0_offset_map_hz().ravel()
 
         return {
             "positions": self.positions.copy(),
@@ -857,6 +1200,7 @@ class SpectralPhantom:
             "t2_star": t2_star,
             "df": df,
             "concentration": concentration,
+            "initial_mz": initial_mz,
         }
 
     def to_phantom(self, species_name: str = None) -> "Phantom":
@@ -886,8 +1230,16 @@ class SpectralPhantom:
             t2_map=props["t2"].reshape(self.shape),
             pd_map=props["concentration"].reshape(self.shape),
             df_map=props["df"].reshape(self.shape),
+            m0_map=self._m0_map_from_mz(props["initial_mz"].reshape(self.shape)),
             name=f"{self.name} - {species_name or 'combined'}",
+            coordinate_system=self.coordinate_system,
+            affine_ijk_to_xyz_m=self.affine_ijk_to_xyz_m,
         )
+
+    def _m0_map_from_mz(self, initial_mz: np.ndarray) -> np.ndarray:
+        m0_map = np.zeros(self.shape + (3,), dtype=np.float64)
+        m0_map[..., 2] = initial_mz
+        return m0_map
 
     def simulate_fid(
         self,

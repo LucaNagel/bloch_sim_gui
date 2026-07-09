@@ -289,6 +289,42 @@ class CartesianAcquisitionFrames:
             voxel_centered=voxel_centered,
         )
 
+    def to_metadata(self) -> dict:
+        return {
+            "type": "cartesian_2d_frames",
+            "acquisitions": [
+                acquisition.to_metadata() for acquisition in self.acquisitions
+            ],
+            "sample_indices": self.sample_indices,
+            "frame_indices": self.frame_indices,
+            "dimensions": self.dimensions.to_metadata(),
+            "moment_origins_cyc_per_m": self.moment_origins_cyc_per_m,
+        }
+
+    @classmethod
+    def from_metadata(cls, metadata: Mapping) -> "CartesianAcquisitionFrames":
+        if metadata.get("type") != "cartesian_2d_frames":
+            raise ValueError("unsupported Cartesian frame metadata")
+        return cls(
+            acquisitions=tuple(
+                CartesianAcquisition.from_metadata(item)
+                for item in metadata["acquisitions"]
+            ),
+            sample_indices=tuple(
+                tuple(int(value) for value in item)
+                for item in metadata["sample_indices"]
+            ),
+            frame_indices=tuple(
+                tuple(int(value) for value in item)
+                for item in metadata["frame_indices"]
+            ),
+            dimensions=AcquisitionDimensions.from_metadata(metadata["dimensions"]),
+            moment_origins_cyc_per_m=tuple(
+                tuple(float(value) for value in item)
+                for item in metadata.get("moment_origins_cyc_per_m", ())
+            ),
+        )
+
 
 @dataclass(frozen=True)
 class SpectroscopicAcquisition:
@@ -713,6 +749,21 @@ class CartesianAcquisition:
             "kx_offset_cells": self.kx_offset_cells,
             "ky_offset_cells": self.ky_offset_cells,
         }
+
+    @classmethod
+    def from_metadata(cls, metadata: Mapping) -> "CartesianAcquisition":
+        if metadata.get("type") != "cartesian_2d":
+            raise ValueError("unsupported Cartesian acquisition metadata")
+        return cls(
+            read_matrix=metadata["read_matrix"],
+            phase_matrix=metadata["phase_matrix"],
+            fov_m=tuple(metadata["fov_m"]),
+            dwell_s=metadata["dwell_s"],
+            phase_indices=tuple(metadata["phase_indices"]),
+            readout_directions=tuple(metadata["readout_directions"]),
+            kx_offset_cells=metadata.get("kx_offset_cells", 0.0),
+            ky_offset_cells=metadata.get("ky_offset_cells", 0.0),
+        )
 
 
 def infer_cartesian_acquisition(

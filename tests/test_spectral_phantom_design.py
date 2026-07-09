@@ -65,6 +65,33 @@ def test_shape_design_builds_lorentzian_components():
     assert spectrum[1] == pytest.approx(0.5, rel=1e-2)
 
 
+def test_shape_design_builds_hyperpolarized_initial_mz_maps():
+    design = PhantomDesign(
+        name="Hyperpolarized voxel",
+        shape=(2, 2, 2),
+        fov_m=(0.02, 0.02, 0.02),
+        shapes=[
+            ShapeDefinition(
+                name="HP",
+                kind="box",
+                size=(1.0, 1.0, 1.0),
+                initial_mz=50.0,
+                peaks=[SpectralPeakDefinition("Pyruvate", 2.0, 0.0, 0.020)],
+            )
+        ],
+    )
+    phantom = design.build()
+    component_name, component = phantom.to_component_phantoms()[0]
+    frequency = np.asarray([phantom.get_frequency_offset(component_name)])
+    _, spectrum = phantom.spectrum_at((0, 0, 0), frequency_hz=frequency)
+
+    assert phantom.concentration_maps[component_name][0, 0, 0] == pytest.approx(2.0)
+    assert phantom.initial_mz_maps[component_name][0, 0, 0] == pytest.approx(50.0)
+    assert component.m0_map[0, 0, 0, 2] == pytest.approx(50.0)
+    assert component.pd_map[0, 0, 0] == pytest.approx(2.0)
+    assert spectrum[0] == pytest.approx(100.0)
+
+
 def test_spectral_ppm_offsets_are_converted_at_simulation_field_strength():
     phantom = _spectral_design().build()
     at_3t = phantom.to_component_phantoms(field_strength=3.0)[0][1]
@@ -78,6 +105,43 @@ def test_spectral_ppm_offsets_are_converted_at_simulation_field_strength():
         ppm_to_hz(expected_ppm, 7.0)
     )
     assert at_7t.b0_map[3, 3, 2] / at_3t.b0_map[3, 3, 2] == pytest.approx(7.0 / 3.0)
+
+
+def test_spectral_reference_keeps_simulation_offsets_centered_on_zero_ppm():
+    design = PhantomDesign(
+        name="C13 absolute ppm example",
+        shape=(2, 2, 2),
+        fov_m=(0.02, 0.02, 0.02),
+        spectral_reference_ppm=175.0,
+        spectral_bandwidth_ppm=12.0,
+        spectral_points=129,
+        shapes=[
+            ShapeDefinition(
+                name="Voxel",
+                kind="box",
+                peaks=[
+                    SpectralPeakDefinition("Peak170", 1.0, 170.0 - 175.0, 0.02),
+                    SpectralPeakDefinition("Peak180", 1.0, 180.0 - 175.0, 0.02),
+                ],
+            )
+        ],
+    )
+    phantom = design.build()
+    component_offsets = [
+        component.chemical_shift_map[0, 0, 0]
+        for _, component in phantom.to_component_phantoms(
+            field_strength=3.0, nucleus="C13"
+        )
+    ]
+    frequency, _ = phantom.spectrum_at((0, 0, 0))
+
+    assert phantom.spectral_reference_ppm == 175.0
+    assert component_offsets == pytest.approx(
+        [ppm_to_hz(-5.0, 3.0, "C13"), ppm_to_hz(5.0, 3.0, "C13")]
+    )
+    assert frequency.size == 129
+    assert frequency[0] == pytest.approx(ppm_to_hz(-6.0, 3.0))
+    assert frequency[-1] == pytest.approx(ppm_to_hz(6.0, 3.0))
 
 
 @pytest.mark.parametrize(
@@ -99,6 +163,28 @@ def test_designer_builds_spatial_b0_inhomogeneity(mode, constant_axis):
                 assert np.allclose(np.diff(added, axis=axis), 0.0)
     assert phantom.b0_map_ppm is not None
     assert PhantomDesign.from_phantom(phantom).b0_inhomogeneity_mode == mode
+
+
+def test_spatial_b0_inhomogeneity_changes_the_simulated_adc_signal():
+    reference_design = _spectral_design()
+    inhomogeneous_design = _spectral_design()
+    inhomogeneous_design.b0_inhomogeneity_mode = "linear_x"
+    inhomogeneous_design.b0_inhomogeneity_ppm = 2.0
+    program = SequenceProgram(
+        events=(
+            RFEvent(0.0, np.asarray([250.0]), 1e-3),
+            ADCEvent(10e-3, 1, 100e-6),
+        ),
+        duration_s=11e-3,
+    )
+    simulator = BlochSimulator(use_parallel=False)
+
+    reference = simulator.simulate_spectral_sequence(program, reference_design.build())
+    inhomogeneous = simulator.simulate_spectral_sequence(
+        program, inhomogeneous_design.build()
+    )
+
+    assert not np.allclose(inhomogeneous.signal, reference.signal)
 
 
 def test_legacy_hz_design_metadata_is_migrated_using_saved_field_strength():
@@ -134,9 +220,11 @@ def test_legacy_hz_design_metadata_is_migrated_using_saved_field_strength():
     assert phantom.b0_map_ppm is not None
 
 
-@pytest.mark.parametrize("suffix", [".npz", ".h5"])
+@pytest.mark.parametrize("suffix", [".npz", ".h5", ".nc"])
 def test_spectral_phantom_round_trip_preserves_design(tmp_path, suffix):
-    phantom = _spectral_design().build()
+    design = _spectral_design()
+    design.shapes[0].initial_mz = 25.0
+    phantom = design.build()
     path = tmp_path / f"spectral{suffix}"
     phantom.save(path)
     loaded = SpectralPhantom.load(path)
@@ -146,11 +234,33 @@ def test_spectral_phantom_round_trip_preserves_design(tmp_path, suffix):
     assert [item.name for item in loaded.species] == [
         item.name for item in phantom.species
     ]
-    assert PhantomDesign.from_phantom(loaded).to_dict() == _spectral_design().to_dict()
+    assert PhantomDesign.from_phantom(loaded).to_dict() == design.to_dict()
     for name in phantom.concentration_maps:
         assert np.array_equal(
             loaded.concentration_maps[name], phantom.concentration_maps[name]
         )
+        assert np.array_equal(
+            loaded.initial_mz_maps[name], phantom.initial_mz_maps[name]
+        )
+    assert loaded.coordinate_system == "object_xyz"
+    assert np.array_equal(loaded.affine_ijk_to_xyz_m, phantom.affine_ijk_to_xyz_m)
+
+
+def test_spectral_phantom_xarray_dataset_labels_species_and_coordinates():
+    phantom = _spectral_design().build()
+    dataset = phantom.to_xarray()
+
+    assert dataset["concentration"].dims == ("species", "x", "y", "z")
+    assert dataset["initial_mz"].dims == ("species", "x", "y", "z")
+    assert list(dataset.coords["species"].values) == [
+        "Object: Water",
+        "Object: Metabolite",
+    ]
+    assert dataset.attrs["coordinate_system"] == "object_xyz"
+    assert dataset.attrs["affine_ijk_to_xyz_m"].shape == (16,)
+    assert np.asarray(dataset.coords["x"]) == pytest.approx(
+        [-0.025, -0.015, -0.005, 0.005, 0.015, 0.025]
+    )
 
 
 def test_spectral_sequence_signal_is_sum_of_independent_components():
@@ -194,6 +304,72 @@ def test_designer_and_sequence_workspace_accept_spectral_phantom():
     assert widget.phantom is dialog.phantom
     dialog.close()
     host.close()
+    app.processEvents()
+
+
+def test_designer_supports_exact_numeric_xy_shape_placement():
+    app = QApplication.instance() or QApplication([])
+    dialog = SpectralPhantomDesignerDialog(design=_spectral_design())
+    dialog.x_center.setValue(25.0)
+    dialog.y_center.setValue(75.0)
+    dialog.x_size.setValue(40.0)
+    dialog.y_size.setValue(20.0)
+
+    shape = dialog.design.shapes[0]
+    assert shape.center[:2] == pytest.approx((0.25, 0.75))
+    assert shape.size[:2] == pytest.approx((0.4, 0.2))
+    assert "centre=(-15, 15) mm" in dialog.xy_info.text()
+    dialog.close()
+    app.processEvents()
+
+
+def test_designer_selects_shape_by_roi_and_highlights_current_shape():
+    app = QApplication.instance() or QApplication([])
+    design = _spectral_design()
+    design.shapes.append(
+        ShapeDefinition(
+            name="Second",
+            kind="box",
+            center=(0.25, 0.25, 0.5),
+            size=(0.2, 0.2, 1.0),
+            initial_mz=10.0,
+        )
+    )
+    dialog = SpectralPhantomDesignerDialog(design=design)
+
+    dialog._select_roi(dialog._rois[1])
+
+    assert dialog.shape_list.currentRow() == 1
+    assert dialog.initial_mz.value() == pytest.approx(10.0)
+    assert dialog._rois[1].pen.width() > dialog._rois[0].pen.width()
+    dialog.close()
+    app.processEvents()
+
+
+def test_designer_displays_absolute_peak_ppm_but_stores_relative_offsets():
+    app = QApplication.instance() or QApplication([])
+    design = PhantomDesign(
+        spectral_reference_ppm=175.0,
+        shape=(2, 2, 2),
+        fov_m=(0.02, 0.02, 0.02),
+        shapes=[
+            ShapeDefinition(
+                name="C13",
+                peaks=[
+                    SpectralPeakDefinition("P170", 1.0, -5.0, 0.02),
+                    SpectralPeakDefinition("P180", 1.0, 5.0, 0.02),
+                ],
+            )
+        ],
+    )
+    dialog = SpectralPhantomDesignerDialog(design=design)
+
+    assert float(dialog.peak_table.item(0, 2).text()) == pytest.approx(170.0)
+    assert float(dialog.peak_table.item(1, 2).text()) == pytest.approx(180.0)
+    assert [peak.frequency_ppm for peak in dialog._read_peak_table()] == pytest.approx(
+        [-5.0, 5.0]
+    )
+    dialog.close()
     app.processEvents()
 
 
@@ -252,6 +428,17 @@ def test_spectral_phantom_property_image_is_finite_and_fills_xy_view():
     assert transform.m11() == pytest.approx(10.0)
     assert transform.m22() == pytest.approx(10.0)
     assert "Range: 1200.00 - 1200.00 ms" in viewer.prop_info.text()
+    assert viewer.prop_image.ui.histogram.maximumWidth() == 88
+    assert set(viewer.property_overview_views) == {
+        "T1 Map",
+        "T2 Map",
+        "Proton Density",
+        "Off-resonance (dF)",
+        "Mask",
+    }
+    for image_view in viewer.property_overview_views.values():
+        assert image_view.image.shape == phantom.shape[:2]
+        assert image_view.ui.histogram.maximumWidth() == 34
     viewer.close()
     app.processEvents()
 

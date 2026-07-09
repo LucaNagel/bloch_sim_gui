@@ -1983,6 +1983,9 @@ class BlochSimulator:
                 "field_strength_t": effective_field,
                 "nucleus": effective_nucleus,
                 "frequency_input_unit": "ppm",
+                "spectral_reference_ppm": phantom.spectral_reference_ppm,
+                "spectral_bandwidth_ppm": phantom.spectral_bandwidth_ppm,
+                "spectral_points": phantom.spectral_points,
             }
         )
         return SequenceSimulationResult(
@@ -1994,6 +1997,12 @@ class BlochSimulator:
             metadata=metadata,
             adc_gradient_moment_cyc_per_m=(first_result.adc_gradient_moment_cyc_per_m),
         )
+
+    def simulate_dynamic_sequence(self, program, phantom, **kwargs):
+        """Simulate a regional two-pool hyperpolarized dynamic phantom."""
+        from .dynamic_phantom import simulate_dynamic_sequence
+
+        return simulate_dynamic_sequence(program, phantom, **kwargs)
 
     def simulate_sequence(
         self,
@@ -2207,7 +2216,11 @@ class BlochSimulator:
 
         signal = coil_signal[0] if n_rx_coils == 1 else coil_signal
         from .sequence import AcquisitionDimensions
-        from .sequence.acquisition import infer_spectroscopic_acquisition
+        from .sequence.acquisition import (
+            infer_cartesian_acquisition,
+            infer_cartesian_acquisition_frames,
+            infer_spectroscopic_acquisition,
+        )
 
         acquisition_dimensions = AcquisitionDimensions.from_program(program)
         spectroscopic_metadata = program.metadata.get("spectroscopic_acquisition")
@@ -2218,6 +2231,28 @@ class BlochSimulator:
                 ).to_metadata()
             except ValueError:
                 spectroscopic_metadata = None
+        cartesian_metadata = program.metadata.get("cartesian_acquisition")
+        if cartesian_metadata is None:
+            program_acquisition = program.metadata.get("acquisition")
+            if (
+                isinstance(program_acquisition, dict)
+                and program_acquisition.get("type") == "cartesian_2d"
+            ):
+                cartesian_metadata = program_acquisition
+        cartesian_frame_metadata = program.metadata.get("cartesian_acquisition_frames")
+        if spectroscopic_metadata is None and cartesian_metadata is None:
+            try:
+                cartesian_metadata = infer_cartesian_acquisition(
+                    program, compiled=compiled
+                ).to_metadata()
+            except ValueError:
+                if cartesian_frame_metadata is None:
+                    try:
+                        cartesian_frame_metadata = infer_cartesian_acquisition_frames(
+                            program, compiled=compiled
+                        ).to_metadata()
+                    except ValueError:
+                        cartesian_frame_metadata = None
         result = SequenceSimulationResult(
             signal=signal,
             adc_times_s=compiled.adc_times_s,
@@ -2246,6 +2281,8 @@ class BlochSimulator:
                 ),
                 "acquisition_dimensions": acquisition_dimensions.to_metadata(),
                 "spectroscopic_acquisition": spectroscopic_metadata,
+                "cartesian_acquisition": cartesian_metadata,
+                "cartesian_acquisition_frames": cartesian_frame_metadata,
                 "sequence_definitions": dict(program.metadata.get("definitions", {})),
                 "units": {
                     "time": "s",

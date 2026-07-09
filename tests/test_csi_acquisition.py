@@ -4,8 +4,10 @@ import numpy as np
 import pytest
 
 from blochsimulator.sequence import (
+    BrukerExportOptions,
     SequenceCompiler,
     SequenceSimulationResult,
+    export_bruker_raw,
     infer_spectroscopic_acquisition,
     load_pulseq,
 )
@@ -94,3 +96,47 @@ def test_csi_export_contains_sorted_kspace_fid_and_spectrum(
     with xr.open_dataset(nc_output) as saved:
         assert saved["csi_kspace_real"].shape == (16, 16, 256)
         assert saved["csi_kspace_imag"].shape == (16, 16, 256)
+
+
+def test_csi_bruker_export_writes_rawdata_job0_in_linear_grid_order(
+    tmp_path, acquisition_and_compiled
+):
+    acquisition, compiled = acquisition_and_compiled
+    chronological = np.arange(
+        acquisition.num_samples, dtype=np.float64
+    ) + 1j * np.arange(acquisition.num_samples, dtype=np.float64)
+    result = SequenceSimulationResult(
+        signal=chronological,
+        adc_times_s=compiled.adc_times_s,
+        final_magnetization=np.zeros((1, 1, 1, 3)),
+        checkpoint_magnetization=None,
+        checkpoint_times_s=np.empty(0),
+        adc_gradient_moment_cyc_per_m=compiled.adc_gradient_moment_cyc_per_m,
+        metadata={"spectroscopic_acquisition": acquisition.to_metadata()},
+    )
+    program = load_pulseq(CSI_PATH)
+
+    output = export_bruker_raw(
+        result,
+        tmp_path / "bruker_csi",
+        program=program,
+        options=BrukerExportOptions(
+            method_name="Bruker:CSI",
+            raw_data_files="both",
+        ),
+        scale=1.0,
+    )
+
+    rawdata = np.fromfile(output / "rawdata.job0", dtype="<i4")
+    assert rawdata.size == acquisition.num_samples * 2
+    expected = acquisition.reshape_signal(chronological).reshape(-1)
+    assert np.array_equal(rawdata[0::2], np.rint(expected.real).astype(np.int32))
+    assert np.array_equal(rawdata[1::2], np.rint(expected.imag).astype(np.int32))
+    assert (output / "fid").is_file()
+    assert (output / "rawdata.job0").is_file()
+
+    method = (output / "method").read_text()
+    assert "##$Method=<Bruker:CSI>" in method
+    assert "##$PVM_EncSpectroscopy=Yes" in method
+    assert "##$PVM_SpecMatrix=256" in method
+    assert "##$PVM_EncOrder=LINEAR_ENC LINEAR_ENC" in method

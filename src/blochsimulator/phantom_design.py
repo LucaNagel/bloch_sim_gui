@@ -8,6 +8,11 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 from .spectral_phantom import ChemicalSpecies, SpectralPhantom
+from .dynamic_phantom import (
+    DynamicSpectralPhantom,
+    KineticRegionDefinition,
+    rasterize_kpl_regions,
+)
 from .units import hz_to_ppm
 
 
@@ -43,6 +48,7 @@ class ShapeDefinition:
     center: Tuple[float, float, float] = (0.5, 0.5, 0.5)
     size: Tuple[float, float, float] = (0.5, 0.5, 0.5)
     t1_s: float = 1.0
+    initial_mz: float = 1.0
     b0_ppm: float = 0.0
     peaks: List[SpectralPeakDefinition] = field(
         default_factory=lambda: [SpectralPeakDefinition()]
@@ -62,6 +68,8 @@ class ShapeDefinition:
             raise ValueError("shape size must be positive")
         if not np.isfinite(self.t1_s) or self.t1_s <= 0:
             raise ValueError("shape T1 must be positive and finite")
+        if not np.isfinite(self.initial_mz) or self.initial_mz < 0:
+            raise ValueError("shape initial Mz must be finite and non-negative")
         if not np.isfinite(self.b0_ppm):
             raise ValueError("shape B0 offset must be finite")
         if self.b0_hz is not None and not np.isfinite(self.b0_hz):
@@ -79,9 +87,17 @@ class PhantomDesign:
     name: str = "Designed spectral phantom"
     shape: Tuple[int, int, int] = (128, 128, 128)
     fov_m: Tuple[float, float, float] = (0.22, 0.22, 0.22)
+    spectral_reference_ppm: float = 0.0
+    spectral_bandwidth_ppm: float = 20.0
+    spectral_points: int = 1024
     shapes: List[ShapeDefinition] = field(default_factory=list)
     b0_inhomogeneity_mode: str = "none"
     b0_inhomogeneity_ppm: float = 0.0
+    dynamic_enabled: bool = False
+    pyruvate_peak_name: str = "Pyruvate"
+    lactate_peak_name: str = "Lactate"
+    default_kpl_s_inv: float = 0.0
+    kinetic_regions: List[KineticRegionDefinition] = field(default_factory=list)
 
     def validate(self) -> None:
         if len(self.shape) != 3 or any(
@@ -92,6 +108,18 @@ class PhantomDesign:
             raise ValueError("design FOV must contain three finite values")
         if np.any(np.asarray(self.fov_m) <= 0):
             raise ValueError("design FOV must be positive")
+        if not np.isfinite(self.spectral_reference_ppm):
+            raise ValueError("spectral reference must be finite")
+        if (
+            not np.isfinite(self.spectral_bandwidth_ppm)
+            or self.spectral_bandwidth_ppm <= 0
+        ):
+            raise ValueError("spectral bandwidth must be positive and finite")
+        if (
+            int(self.spectral_points) != self.spectral_points
+            or self.spectral_points < 2
+        ):
+            raise ValueError("spectral points must be an integer >= 2")
         if self.b0_inhomogeneity_mode not in {
             "none",
             "linear_x",
@@ -103,6 +131,17 @@ class PhantomDesign:
             raise ValueError("unsupported B0 inhomogeneity mode")
         if not np.isfinite(self.b0_inhomogeneity_ppm):
             raise ValueError("B0 inhomogeneity amplitude must be finite")
+        if not np.isfinite(self.default_kpl_s_inv) or self.default_kpl_s_inv < 0:
+            raise ValueError("default kPL must be finite and non-negative")
+        if not self.pyruvate_peak_name.strip() or not self.lactate_peak_name.strip():
+            raise ValueError("dynamic pool peak names must not be empty")
+        if self.pyruvate_peak_name == self.lactate_peak_name:
+            raise ValueError("pyruvate and lactate peak names must differ")
+        region_names = [region.name for region in self.kinetic_regions]
+        if len(region_names) != len(set(region_names)):
+            raise ValueError("kinetic region names must be unique")
+        for region in self.kinetic_regions:
+            region.validate()
         if not self.shapes:
             raise ValueError("design requires at least one shape")
         names = [shape.name for shape in self.shapes]
@@ -150,11 +189,12 @@ class PhantomDesign:
             normalized = 2.0 * np.sqrt((x * x + y * y + z * z) / 3.0) - 1.0
         return amplitude * normalized
 
-    def build(self) -> SpectralPhantom:
+    def build(self):
         """Build independent spectral components from all shapes and peaks."""
         self.validate()
         species = []
         concentration_maps: Dict[str, np.ndarray] = {}
+        initial_mz_maps: Dict[str, np.ndarray] = {}
         uses_legacy_b0 = any(item.b0_hz is not None for item in self.shapes)
         if uses_legacy_b0 and any(item.b0_hz is None for item in self.shapes):
             raise ValueError("cannot mix ppm and legacy Hz B0 shape definitions")
@@ -179,15 +219,81 @@ class PhantomDesign:
                 concentration_maps[component_name] = (
                     region.astype(float) * peak.amplitude
                 )
+                initial_mz_maps[component_name] = region.astype(
+                    float
+                ) * item.initial_mz + (~region).astype(float)
         if not uses_legacy_b0:
             b0_map += self.rasterize_b0_inhomogeneity()
+        if self.dynamic_enabled:
+            if uses_legacy_b0:
+                raise ValueError("dynamic designs require ppm-based B0 maps")
+            target_names = (self.pyruvate_peak_name, self.lactate_peak_name)
+            maps = {name: np.zeros(self.shape, dtype=float) for name in target_names}
+            definitions = {name: [] for name in target_names}
+            for item in self.shapes:
+                region = self.rasterize_mask(item)
+                for peak in item.peaks:
+                    if peak.name in maps:
+                        maps[peak.name] += (
+                            region.astype(float) * peak.amplitude * item.initial_mz
+                        )
+                        definitions[peak.name].append((item, peak))
+            missing = [name for name in target_names if not definitions[name]]
+            if missing:
+                raise ValueError(
+                    "dynamic design is missing peak definition(s): "
+                    + ", ".join(missing)
+                )
+            pools = []
+            for name in target_names:
+                first_shape, first_peak = definitions[name][0]
+                for item, peak in definitions[name][1:]:
+                    if (
+                        not np.isclose(item.t1_s, first_shape.t1_s)
+                        or not np.isclose(peak.t2_star_s, first_peak.t2_star_s)
+                        or not np.isclose(peak.frequency_ppm, first_peak.frequency_ppm)
+                    ):
+                        raise ValueError(
+                            f"all {name!r} peaks require identical T1, T2*, and frequency"
+                        )
+                pools.append(
+                    ChemicalSpecies(
+                        name=name,
+                        chemical_shift_ppm=first_peak.frequency_ppm,
+                        t1=first_shape.t1_s,
+                        t2=first_peak.t2_star_s,
+                        t2_star=first_peak.t2_star_s,
+                    )
+                )
+            return DynamicSpectralPhantom(
+                shape=tuple(int(value) for value in self.shape),
+                fov=tuple(float(value) for value in self.fov_m),
+                pools=tuple(pools),
+                initial_concentration_maps=maps,
+                kpl_map_s_inv=rasterize_kpl_regions(
+                    self.shape,
+                    tuple(self.kinetic_regions),
+                    self.default_kpl_s_inv,
+                ),
+                b0_map_ppm=b0_map,
+                spectral_reference_ppm=float(self.spectral_reference_ppm),
+                spectral_bandwidth_ppm=float(self.spectral_bandwidth_ppm),
+                spectral_points=int(self.spectral_points),
+                name=self.name,
+                kinetic_regions=tuple(self.kinetic_regions),
+                metadata={"phantom_design": self.to_dict()},
+            )
         return SpectralPhantom(
             shape=tuple(int(value) for value in self.shape),
             fov=tuple(float(value) for value in self.fov_m),
             species=species,
             concentration_maps=concentration_maps,
+            initial_mz_maps=initial_mz_maps,
             b0_map=b0_map if uses_legacy_b0 else None,
             b0_map_ppm=None if uses_legacy_b0 else b0_map,
+            spectral_reference_ppm=float(self.spectral_reference_ppm),
+            spectral_bandwidth_ppm=float(self.spectral_bandwidth_ppm),
+            spectral_points=int(self.spectral_points),
             name=self.name,
             metadata={"phantom_design": self.to_dict()},
         )
@@ -254,6 +360,7 @@ class PhantomDesign:
                     center=tuple(item.get("center", (0.5, 0.5, 0.5))),
                     size=tuple(item.get("size", (0.5, 0.5, 0.5))),
                     t1_s=float(item.get("t1_s", 1.0)),
+                    initial_mz=float(item.get("initial_mz", 1.0)),
                     b0_ppm=float(b0_ppm),
                     peaks=peaks or [SpectralPeakDefinition()],
                 )
@@ -264,9 +371,26 @@ class PhantomDesign:
             fov_m=tuple(
                 float(value) for value in data.get("fov_m", (0.22, 0.22, 0.22))
             ),
+            spectral_reference_ppm=float(data.get("spectral_reference_ppm", 0.0)),
+            spectral_bandwidth_ppm=float(data.get("spectral_bandwidth_ppm", 20.0)),
+            spectral_points=int(data.get("spectral_points", 1024)),
             shapes=shapes,
             b0_inhomogeneity_mode=str(data.get("b0_inhomogeneity_mode", "none")),
             b0_inhomogeneity_ppm=float(data.get("b0_inhomogeneity_ppm", 0.0)),
+            dynamic_enabled=bool(data.get("dynamic_enabled", False)),
+            pyruvate_peak_name=str(data.get("pyruvate_peak_name", "Pyruvate")),
+            lactate_peak_name=str(data.get("lactate_peak_name", "Lactate")),
+            default_kpl_s_inv=float(data.get("default_kpl_s_inv", 0.0)),
+            kinetic_regions=[
+                KineticRegionDefinition(
+                    name=item["name"],
+                    kind=item.get("kind", "ellipsoid"),
+                    center=tuple(item.get("center", (0.5, 0.5, 0.5))),
+                    size=tuple(item.get("size", (0.5, 0.5, 0.5))),
+                    kpl_s_inv=float(item.get("kpl_s_inv", 0.0)),
+                )
+                for item in data.get("kinetic_regions", [])
+            ],
         )
 
     @classmethod

@@ -53,6 +53,7 @@ from .phantom import Phantom, PhantomFactory
 from .phantom_design import PhantomDesign
 from .paths import workspace_directory
 from .spectral_phantom import SpectralPhantom
+from .dynamic_phantom import DynamicSpectralPhantom
 from .ui.phantom_designer import (
     SpectralPhantomDesignerDialog,
     load_any_phantom,
@@ -313,12 +314,14 @@ class PhantomCreatorWidget(QGroupBox):
             self,
             "Load Phantom",
             str(workspace_directory("phantoms")),
-            "Phantom Files (*.npz *.h5 *.hdf5);;All Files (*)",
+            "Phantom Files (*.npz *.h5 *.hdf5 *.nc);;All Files (*)",
         )
         if filename:
             try:
                 phantom = load_any_phantom(filename)
                 self.current_phantom = phantom
+                if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+                    self.type_combo.setCurrentText("Spectral Shape Designer...")
                 self._update_info()
                 self.save_btn.setEnabled(True)
                 self._update_edit_button()
@@ -335,7 +338,7 @@ class PhantomCreatorWidget(QGroupBox):
             self,
             "Save Phantom",
             str(workspace_directory("phantoms") / f"{self.current_phantom.name}.npz"),
-            "NumPy Archive (*.npz);;HDF5 File (*.h5)",
+            "NumPy Archive (*.npz);;HDF5 File (*.h5);;xarray NetCDF (*.nc)",
         )
         if filename:
             try:
@@ -358,7 +361,9 @@ class PhantomCreatorWidget(QGroupBox):
 
     def edit_current_phantom(self):
         """Reopen editable in-memory shape metadata without requiring a save."""
-        if not isinstance(self.current_phantom, SpectralPhantom):
+        if not isinstance(
+            self.current_phantom, (SpectralPhantom, DynamicSpectralPhantom)
+        ):
             QMessageBox.information(
                 self,
                 "Phantom is not editable",
@@ -374,7 +379,7 @@ class PhantomCreatorWidget(QGroupBox):
 
     def _update_edit_button(self):
         editable = False
-        if isinstance(self.current_phantom, SpectralPhantom):
+        if isinstance(self.current_phantom, (SpectralPhantom, DynamicSpectralPhantom)):
             try:
                 PhantomDesign.from_phantom(self.current_phantom)
                 editable = True
@@ -427,6 +432,32 @@ class PhantomViewerWidget(QWidget):
         prop_widget = QWidget()
         prop_layout = QVBoxLayout()
 
+        overview_layout = QHBoxLayout()
+        self.property_overview_views = {}
+        for title in (
+            "T1 Map",
+            "T2 Map",
+            "Proton Density",
+            "Off-resonance (dF)",
+            "Mask",
+        ):
+            panel = QWidget()
+            panel_layout = QVBoxLayout(panel)
+            panel_layout.setContentsMargins(0, 0, 0, 0)
+            label = QLabel(title)
+            label.setAlignment(Qt.AlignCenter)
+            panel_layout.addWidget(label)
+            view = pg.ImageView()
+            self._configure_property_image_view(view, compact=True)
+            # Diverging seismic colormap for off-resonance
+            if title == "Off-resonance (dF)":
+                view.setColorMap(pg.colormap.get("seismic", source="matplotlib"))
+            view.setMinimumWidth(130)
+            panel_layout.addWidget(view)
+            self.property_overview_views[title] = view
+            overview_layout.addWidget(panel)
+        prop_layout.addLayout(overview_layout)
+
         # Property selector
         prop_select_layout = QHBoxLayout()
         prop_select_layout.addWidget(QLabel("Display:"))
@@ -441,9 +472,7 @@ class PhantomViewerWidget(QWidget):
 
         # Property image view
         self.prop_image = pg.ImageView()
-        self.prop_image.ui.roiBtn.hide()
-        self.prop_image.ui.menuBtn.hide()
-        self.prop_image.getView().setAspectLocked(True)
+        self._configure_property_image_view(self.prop_image, compact=False)
         prop_layout.addWidget(self.prop_image)
 
         self.prop_info = QLabel("")
@@ -549,9 +578,26 @@ class PhantomViewerWidget(QWidget):
         layout.addWidget(self.tabs)
         self.setLayout(layout)
 
+    @staticmethod
+    def _configure_property_image_view(view, *, compact: bool):
+        view.ui.roiBtn.hide()
+        view.ui.menuBtn.hide()
+        view.getView().setAspectLocked(True)
+        histogram = view.ui.histogram
+        axis = histogram.axis
+        if compact:
+            histogram.setFixedWidth(34)
+            axis.setStyle(showValues=False, tickLength=3)
+            axis.setWidth(6)
+        else:
+            histogram.setMaximumWidth(88)
+            axis.setWidth(46)
+            axis.setStyle(tickLength=4)
+
     def set_phantom(self, phantom: Optional[Phantom]):
         """Set phantom to display."""
         self.phantom = phantom
+        self._update_property_overview()
         self._update_property_view()
         if phantom is not None:
             self.volume_inspector.set_phantom(phantom)
@@ -601,35 +647,58 @@ class PhantomViewerWidget(QWidget):
             return
 
         view = self.prop_combo.currentText()
-
-        if "T1" in view:
-            data = self.phantom.t1_map * 1000  # Convert to ms
-            unit = "ms"
-        elif "T2" in view:
-            data = self.phantom.t2_map * 1000  # Convert to ms
-            unit = "ms"
-        elif "Proton" in view:
-            data = self.phantom.pd_map
-            unit = ""
-        elif "dF" in view or "Off" in view:
-            data = self.phantom.df_map
-            unit = "Hz"
-        elif "Mask" in view:
-            data = self.phantom.mask.astype(float)
-            unit = ""
-        else:
+        try:
+            data, unit = self._property_map_data(view)
+        except AttributeError:
+            self.prop_image.clear()
+            self.prop_info.setText("No data")
             return
 
+        text = self._display_property_map(self.prop_image, data, unit)
+        self.prop_info.setText(text)
+
+    def _update_property_overview(self):
+        if not hasattr(self, "property_overview_views"):
+            return
+        if self.phantom is None:
+            for view in self.property_overview_views.values():
+                view.clear()
+            return
+        for title, image_view in self.property_overview_views.items():
+            try:
+                data, unit = self._property_map_data(title)
+            except AttributeError:
+                image_view.clear()
+                continue
+            self._display_property_map(image_view, data, unit)
+
+    def _property_map_data(self, view):
+        if "T1" in view:
+            return self.phantom.t1_map * 1000, "ms"
+        if "T2" in view:
+            return self.phantom.t2_map * 1000, "ms"
+        if "Proton" in view:
+            return self.phantom.pd_map, ""
+        if "dF" in view or "Off" in view:
+            if hasattr(self.phantom, "df_map"):
+                return self.phantom.df_map, "Hz"
+            return self.phantom.effective_df_map, "Hz"
+        if "Mask" in view:
+            return self.phantom.mask.astype(float), ""
+        raise AttributeError(view)
+
+    def _display_property_map(self, image_view, data, unit):
         # Handle 3D (show middle slice)
-        display_data = data.copy()
+        values = np.asarray(data)
+        display_data = values.copy()
         mask_2d = self.phantom.mask
 
-        if data.ndim == 3:
-            slice_idx = data.shape[2] // 2
-            display_data = data[:, :, slice_idx]
+        if values.ndim == 3:
+            slice_idx = values.shape[2] // 2
+            display_data = values[:, :, slice_idx]
             mask_2d = self.phantom.mask[:, :, slice_idx]
 
-        valid = np.asarray(data)[self.phantom.mask & np.isfinite(data)]
+        valid = values[self.phantom.mask & np.isfinite(values)]
         if valid.size > 0:
             low = float(valid.min())
             high = float(valid.max())
@@ -650,7 +719,7 @@ class PhantomViewerWidget(QWidget):
                 neginf=background,
             )
             fov_x, fov_y = (float(value) for value in self.phantom.fov[:2])
-            self.prop_image.setImage(
+            image_view.setImage(
                 display,
                 autoLevels=False,
                 levels=levels,
@@ -661,14 +730,11 @@ class PhantomViewerWidget(QWidget):
                     fov_y * 1000.0 / display.shape[1],
                 ),
             )
-            self.prop_image.ui.histogram.setHistogramRange(*levels)
-            self.prop_image.getView().autoRange()
-            self.prop_info.setText(
-                f"Range: {valid.min():.2f} - {valid.max():.2f} {unit}"
-            )
-        else:
-            self.prop_image.clear()
-            self.prop_info.setText("No data")
+            image_view.ui.histogram.setHistogramRange(*levels)
+            image_view.getView().autoRange()
+            return f"Range: {valid.min():.2f} - {valid.max():.2f} {unit}"
+        image_view.clear()
+        return "No data"
 
     def _update_result_view(self):
         """Update simulation result display."""
@@ -955,7 +1021,7 @@ class PhantomWidget(QWidget):
         """Handle new phantom creation."""
         self.current_phantom = phantom
         self.viewer.set_phantom(phantom)
-        is_spectral = isinstance(phantom, SpectralPhantom)
+        is_spectral = isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom))
         self.run_btn.setEnabled(not is_spectral)
         self.status_label.setText(
             f"Phantom ready: {phantom.n_active} voxels"

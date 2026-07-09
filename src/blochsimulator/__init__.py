@@ -29,6 +29,11 @@ from .phantom_design import (  # noqa: F401
     SpectralPeakDefinition,
 )
 from .spectral_phantom import ChemicalSpecies, SpectralPhantom  # noqa: F401
+from .dynamic_phantom import (  # noqa: F401
+    DynamicSpectralPhantom,
+    KineticRegionDefinition,
+    rasterize_kpl_regions,
+)
 from . import pulse_loader  # noqa: F401
 from .sequence import (  # noqa: F401
     ADCEvent,

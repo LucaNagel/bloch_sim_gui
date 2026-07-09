@@ -11,6 +11,8 @@ from PyQt5.QtCore import QRectF, Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -35,14 +37,17 @@ from ..phantom import Phantom, PhantomFactory
 from ..notebook_exporter import export_sequence_result_notebook
 from ..paths import workspace_directory
 from ..spectral_phantom import SpectralPhantom
+from ..dynamic_phantom import DynamicSpectralPhantom
 from ..sequence import (
     ADCEvent,
+    BrukerExportOptions,
     CartesianAcquisition,
     CartesianAcquisitionFrames,
     SpectroscopicAcquisition,
     RFEvent,
     SequenceCompiler,
     SequenceProgram,
+    export_bruker_raw,
     infer_cartesian_acquisition,
     infer_cartesian_acquisition_frames,
     infer_spectroscopic_acquisition,
@@ -94,11 +99,12 @@ class SequenceSimulationThread(QThread):
 
     def run(self):
         try:
-            simulate = (
-                self.simulator.simulate_spectral_sequence
-                if isinstance(self.phantom, SpectralPhantom)
-                else self.simulator.simulate_sequence
-            )
+            if isinstance(self.phantom, DynamicSpectralPhantom):
+                simulate = self.simulator.simulate_dynamic_sequence
+            elif isinstance(self.phantom, SpectralPhantom):
+                simulate = self.simulator.simulate_spectral_sequence
+            else:
+                simulate = self.simulator.simulate_sequence
             kwargs = {
                 "checkpoints_s": self.checkpoints_s,
                 "signal_weighting": self.signal_weighting,
@@ -114,7 +120,7 @@ class SequenceSimulationThread(QThread):
                 kwargs["preview_callback"] = lambda fraction, signal: (
                     self.preview.emit(fraction, signal)
                 )
-            if isinstance(self.phantom, SpectralPhantom):
+            if isinstance(self.phantom, (SpectralPhantom, DynamicSpectralPhantom)):
                 kwargs.update(
                     field_strength_t=self.field_strength_t,
                     nucleus=self.nucleus,
@@ -694,6 +700,11 @@ class SequenceSimulationWidget(QWidget):
             )
             return
         active = np.asarray(phantom.mask, dtype=bool)
+        if isinstance(phantom, DynamicSpectralPhantom):
+            self.field_strength_t.setValue(phantom.field_strength)
+            nucleus_index = self.nucleus.findText(phantom.nucleus)
+            if nucleus_index >= 0:
+                self.nucleus.setCurrentIndex(nucleus_index)
         t1 = np.asarray(phantom.t1_map)[active] * 1000.0
         t2 = np.asarray(phantom.t2_map)[active] * 1000.0
         fov_cm = " × ".join(f"{value * 100:.4g}" for value in phantom.fov)
@@ -719,9 +730,11 @@ class SequenceSimulationWidget(QWidget):
             conversion_enabled = True
         else:
             phantom = self._selected_designed_phantom()
-            if isinstance(phantom, SpectralPhantom):
+            if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
                 text = (
-                    "Spectral B0 and peak offsets are converted from ppm at run time."
+                    "Spectral B0 and peak offsets are converted from ppm at run time; "
+                    "the sequence carrier is 0 ppm and phantom peaks are offsets "
+                    "from the phantom spectral reference."
                 )
                 conversion_enabled = True
             elif phantom is not None:
@@ -1116,10 +1129,17 @@ class SequenceSimulationWidget(QWidget):
         self.progress.setRange(0, total)
         self.progress.setValue(done)
         self.progress.setFormat("Simulation %v/%m")
-        unit = "Component" if isinstance(self.phantom, SpectralPhantom) else "Chunk"
+        if isinstance(self.phantom, DynamicSpectralPhantom):
+            unit = "Interval"
+        elif isinstance(self.phantom, SpectralPhantom):
+            unit = "Component"
+        else:
+            unit = "Chunk"
         self.status.setText(f"{unit} {done}/{total}")
 
     def _estimated_work_units(self):
+        if isinstance(self.phantom, DynamicSpectralPhantom):
+            return max(1, SequenceCompiler().compile(self.program).n_intervals)
         if isinstance(self.phantom, SpectralPhantom):
             return max(
                 1,
@@ -1134,7 +1154,9 @@ class SequenceSimulationWidget(QWidget):
         return max(1, int(np.ceil(self.phantom.n_active / chunk_voxels)))
 
     def _preview_chunk_voxels(self):
-        if not self.live_preview_enabled or isinstance(self.phantom, SpectralPhantom):
+        if not self.live_preview_enabled or isinstance(
+            self.phantom, (SpectralPhantom, DynamicSpectralPhantom)
+        ):
             return None
         return min(65536, max(256, int(np.ceil(self.phantom.n_active / 32))))
 
@@ -1283,6 +1305,18 @@ class SequenceSimulationWidget(QWidget):
                     name=f"Coil {coil + 1}",
                 )
             coil_text = f"; Rx coils={plot_signal.shape[0]}"
+        if result.species_signal is not None:
+            pool_signal = np.asarray(result.species_signal)
+            if self.spectroscopic_acquisition is not None:
+                pool_signal = pool_signal[..., start:stop]
+            colors = ("#ffb000", "#00b7ff", "#d95fef", "#7ad151")
+            for pool_index, name in enumerate(result.pool_names):
+                self.signal_plot.plot(
+                    plot_time,
+                    np.abs(pool_signal[pool_index]),
+                    pen=pg.mkPen(colors[pool_index % len(colors)], width=2),
+                    name=f"|{name}|",
+                )
         mz = result.mz
         if mz.ndim == 3:
             z_index = mz.shape[2] // 2
@@ -1718,6 +1752,7 @@ class SequenceSimulationWidget(QWidget):
         if self.result is None:
             QMessageBox.warning(self, "No result", "Run a simulation first.")
             return
+        bruker_filter = "Bruker raw dataset (directory)"
         default_path = workspace_directory("exports") / "sequence_result.nc"
         filename, selected_filter = QFileDialog.getSaveFileName(
             self,
@@ -1725,13 +1760,13 @@ class SequenceSimulationWidget(QWidget):
             str(default_path),
             (
                 "xarray NetCDF (*.nc);;HDF5 (*.h5);;NumPy archive (*.npz);;"
-                "Jupyter notebook (*.ipynb)"
+                "Jupyter notebook (*.ipynb);;Bruker raw dataset (directory)"
             ),
         )
         if not filename:
             return
         path = Path(filename)
-        if not path.suffix:
+        if selected_filter != bruker_filter and not path.suffix:
             suffixes = {
                 "xarray NetCDF (*.nc)": ".nc",
                 "HDF5 (*.h5)": ".h5",
@@ -1740,7 +1775,21 @@ class SequenceSimulationWidget(QWidget):
             }
             path = path.with_suffix(suffixes.get(selected_filter, ".nc"))
         try:
-            if path.suffix.lower() == ".ipynb":
+            if selected_filter == bruker_filter:
+                options = self._prompt_bruker_export_options(path)
+                if options is None:
+                    return
+                export_bruker_raw(
+                    self.result,
+                    path,
+                    program=self.program,
+                    phantom=self.phantom,
+                    acquisition=self.acquisition,
+                    acquisition_frames=self.acquisition_frames,
+                    options=options,
+                )
+                exported = "fid\nacqp\nmethod\nvisu_pars\npulseprogram"
+            elif path.suffix.lower() == ".ipynb":
                 data_path = path.with_suffix(".nc")
                 self.result.save(data_path)
                 export_sequence_result_notebook(str(path), str(data_path))
@@ -1755,3 +1804,113 @@ class SequenceSimulationWidget(QWidget):
             )
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
+
+    def _prompt_bruker_export_options(self, path: Path):
+        matrix, fov_m = self._default_bruker_spatial_metadata()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Bruker export metadata")
+        layout = QFormLayout(dialog)
+
+        method_name = QComboBox()
+        method_name.setEditable(True)
+        method_name.addItems(
+            [
+                "Bruker:RARE",
+                "Bruker:FLASH",
+                "Bruker:CSI",
+                "User:pulseq",
+                "BlochSimulator:SequenceSimulation",
+            ]
+        )
+        method_name.setCurrentText("Bruker:RARE")
+        layout.addRow("Method", method_name)
+
+        scan_name = QLineEdit()
+        default_scan_name = f"BlochSimulator {path.name or 'sequence'}"
+        if self.program is not None and self.program.source:
+            default_scan_name = f"BlochSimulator {Path(self.program.source).name}"
+        scan_name.setText(default_scan_name)
+        layout.addRow("Scan name", scan_name)
+
+        matrix_widget = QWidget()
+        matrix_layout = QHBoxLayout(matrix_widget)
+        matrix_layout.setContentsMargins(0, 0, 0, 0)
+        matrix_read = QSpinBox()
+        matrix_read.setRange(1, 8192)
+        matrix_read.setValue(int(matrix[0]))
+        matrix_phase = QSpinBox()
+        matrix_phase.setRange(1, 8192)
+        matrix_phase.setValue(int(matrix[1]))
+        matrix_layout.addWidget(matrix_read)
+        matrix_layout.addWidget(QLabel("read x phase"))
+        matrix_layout.addWidget(matrix_phase)
+        layout.addRow("PVM_Matrix", matrix_widget)
+
+        fov_widget = QWidget()
+        fov_layout = QHBoxLayout(fov_widget)
+        fov_layout.setContentsMargins(0, 0, 0, 0)
+        fov_read = QDoubleSpinBox()
+        fov_read.setRange(0.001, 10000.0)
+        fov_read.setDecimals(4)
+        fov_read.setValue(float(fov_m[0]) * 1000.0)
+        fov_read.setSuffix(" mm")
+        fov_phase = QDoubleSpinBox()
+        fov_phase.setRange(0.001, 10000.0)
+        fov_phase.setDecimals(4)
+        fov_phase.setValue(float(fov_m[1]) * 1000.0)
+        fov_phase.setSuffix(" mm")
+        fov_layout.addWidget(fov_read)
+        fov_layout.addWidget(QLabel("read x phase"))
+        fov_layout.addWidget(fov_phase)
+        layout.addRow("PVM_Fov", fov_widget)
+
+        slice_thickness = QDoubleSpinBox()
+        slice_thickness.setRange(0.001, 10000.0)
+        slice_thickness.setDecimals(4)
+        slice_thickness.setValue(1.0)
+        slice_thickness.setSuffix(" mm")
+        layout.addRow("PVM_SliceThick", slice_thickness)
+
+        raw_data_files = QComboBox()
+        raw_data_files.addItems(["fid", "rawdata.job0", "both"])
+        raw_data_files.setCurrentText("fid")
+        layout.addRow("Raw data file", raw_data_files)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return None
+        return BrukerExportOptions(
+            method_name=method_name.currentText(),
+            scan_name=scan_name.text(),
+            matrix=(matrix_read.value(), matrix_phase.value()),
+            fov_m=(fov_read.value() / 1000.0, fov_phase.value() / 1000.0),
+            slice_thickness_mm=slice_thickness.value(),
+            raw_data_files=raw_data_files.currentText(),
+        )
+
+    def _default_bruker_spatial_metadata(self):
+        acquisition = self.acquisition
+        if acquisition is not None:
+            return (
+                (acquisition.read_matrix, acquisition.phase_matrix),
+                acquisition.fov_m,
+            )
+        spectroscopy = self.spectroscopic_acquisition
+        if spectroscopy is None and self.result is not None:
+            try:
+                spectroscopy = self.result.spectroscopic_acquisition
+            except Exception:
+                spectroscopy = None
+        if spectroscopy is not None:
+            return (spectroscopy.matrix, spectroscopy.fov_m)
+        if self.phantom is not None and hasattr(self.phantom, "fov"):
+            fov = tuple(float(value) for value in self.phantom.fov)
+            if len(fov) >= 2:
+                return ((self.result.signal.shape[-1], 1), (fov[0], fov[1]))
+            if len(fov) == 1:
+                return ((self.result.signal.shape[-1], 1), (fov[0], fov[0]))
+        return ((self.result.signal.shape[-1], 1), (1.0, 1.0))

@@ -313,3 +313,43 @@ def test_generated_multislice_epi_infers_excitation_relative_2d_frames(tmp_path)
     assert all(
         item.ky_offset_cells == pytest.approx(0.0) for item in frames.acquisitions
     )
+    assert all(
+        origin[0] == pytest.approx(0.0, abs=5e-6)
+        and origin[1] == pytest.approx(0.0, abs=5e-6)
+        for origin in frames.moment_origins_cyc_per_m
+    )
+
+
+def test_generated_multislice_epi_supports_edge_to_edge_slice_gaps(tmp_path):
+    path = tmp_path / "multislice_epi_gap.seq"
+    EXAMPLE_MAIN(
+        write_seq=True,
+        seq_filename=str(path),
+        fov=(0.22, 0.24),
+        n_x=4,
+        n_y=4,
+        slice_thickness=4e-3,
+        slice_gap=2e-3,
+        n_slices=3,
+    )
+    program = load_pulseq(path)
+    definitions = program.metadata["definitions"]
+
+    assert definitions["SliceThickness"] == pytest.approx(4e-3)
+    assert definitions["SliceGap"] == pytest.approx(2e-3)
+    assert definitions["SliceSpacing"] == pytest.approx(6e-3)
+    assert definitions["SlicePositions"] == pytest.approx([-6e-3, 0.0, 6e-3])
+    assert definitions["FOV"] == pytest.approx([0.22, 0.24, 16e-3])
+    assert definitions["UseSliceLabels"] == pytest.approx(0.0)
+    assert bool(definitions["SpoilAfterSlice"]) is True
+    assert definitions["SpoilerCyclesPerSlice"] == pytest.approx(8.0)
+    assert definitions["SpoilerCyclesPerVoxel"] == pytest.approx(0.0)
+    rf_offsets = sorted({event.frequency_offset_hz for event in program.rf_events})
+    assert len(rf_offsets) == 3
+    assert rf_offsets[1] == pytest.approx(0.0)
+    assert rf_offsets[2] - rf_offsets[1] == pytest.approx(rf_offsets[1] - rf_offsets[0])
+
+
+def test_generated_epi_rejects_negative_slice_gap():
+    with pytest.raises(ValueError, match="slice_gap"):
+        EXAMPLE_MAIN(slice_gap=-1e-3)

@@ -8,6 +8,7 @@ import weakref
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -30,6 +31,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..phantom import Phantom
+from ..dynamic_phantom import DynamicSpectralPhantom, KineticRegionDefinition
 from ..paths import workspace_directory
 from ..phantom_design import (
     PhantomDesign,
@@ -43,12 +45,15 @@ from .volume_viewer import PhantomInspectorWidget
 def load_any_phantom(filename):
     """Load either a conventional or spectral phantom file."""
     try:
-        return SpectralPhantom.load(filename)
-    except ValueError as spectral_error:
+        return DynamicSpectralPhantom.load(filename)
+    except ValueError:
         try:
-            return Phantom.load(filename)
-        except Exception:
-            raise spectral_error
+            return SpectralPhantom.load(filename)
+        except ValueError as spectral_error:
+            try:
+                return Phantom.load(filename)
+            except Exception:
+                raise spectral_error
 
 
 class SpectralPhantomDesignerDialog(QDialog):
@@ -95,6 +100,40 @@ class SpectralPhantomDesignerDialog(QDialog):
             global_row.addWidget(fov)
             self.fov_spins.append(fov)
         draw_layout.addLayout(global_row)
+
+        spectral_row = QHBoxLayout()
+        spectral_row.addWidget(QLabel("Spectral reference"))
+        self.spectral_reference_ppm = self._number_spin(-10000.0, 10000.0, 0.0, " ppm")
+        self.spectral_reference_ppm.setToolTip(
+            "Scanner carrier/reference in absolute ppm. Internally the sequence "
+            "is simulated at 0 ppm and peaks are stored as offsets from this value."
+        )
+        spectral_row.addWidget(self.spectral_reference_ppm)
+        spectral_row.addWidget(QLabel("Bandwidth"))
+        self.spectral_bandwidth_ppm = self._number_spin(0.0001, 10000.0, 20.0, " ppm")
+        self.spectral_bandwidth_ppm.setToolTip(
+            "Default frequency span for per-voxel spectral previews, centered on 0 ppm."
+        )
+        spectral_row.addWidget(self.spectral_bandwidth_ppm)
+        spectral_row.addWidget(QLabel("Points"))
+        self.spectral_points = QSpinBox()
+        self.spectral_points.setRange(2, 65536)
+        self.spectral_points.setValue(1024)
+        self.spectral_points.setToolTip(
+            "Default number of samples in spectral previews"
+        )
+        spectral_row.addWidget(self.spectral_points)
+        self.spectral_resolution_info = QLabel()
+        spectral_row.addWidget(self.spectral_resolution_info)
+        spectral_row.addStretch()
+        self.spectral_reference_ppm.valueChanged.connect(
+            self._spectral_settings_changed
+        )
+        self.spectral_bandwidth_ppm.valueChanged.connect(
+            self._spectral_settings_changed
+        )
+        self.spectral_points.valueChanged.connect(self._spectral_settings_changed)
+        draw_layout.addLayout(spectral_row)
 
         b0_row = QHBoxLayout()
         b0_row.addWidget(QLabel("Global B0 inhomogeneity"))
@@ -152,6 +191,13 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.canvas.showGrid(x=True, y=True, alpha=0.3)
         self.canvas.setLabel("bottom", "x", units="cm")
         self.canvas.setLabel("left", "y", units="cm")
+        self.fov_outline = pg.PlotDataItem(
+            [0, 1, 1, 0, 0],
+            [0, 0, 1, 1, 0],
+            pen=pg.mkPen((240, 240, 240), width=3),
+        )
+        self.fov_outline.setZValue(1000)
+        self.canvas.addItem(self.fov_outline)
         dialog_ref = weakref.ref(self)
 
         def physical_ticks(axis_index):
@@ -177,26 +223,49 @@ class SpectralPhantomDesignerDialog(QDialog):
         form.addRow("Shape name", self.shape_name)
         self.kind_label = QLabel()
         form.addRow("Kind", self.kind_label)
-        self.z_center = self._percent_spin(50.0)
+        self.x_center = self._position_percent_spin(50.0)
+        self.y_center = self._position_percent_spin(50.0)
+        self.z_center = self._position_percent_spin(50.0)
+        self.x_size = self._percent_spin(50.0)
+        self.y_size = self._percent_spin(50.0)
         self.z_size = self._percent_spin(50.0)
         self.t1_ms = self._number_spin(0.1, 10000.0, 1000.0, " ms")
+        self.initial_mz = self._number_spin(0.0, 1e9, 1.0, "")
         self.b0_ppm = self._number_spin(-1000.0, 1000.0, 0.0, " ppm")
-        for widget in (self.z_center, self.z_size, self.t1_ms, self.b0_ppm):
+        for widget in (
+            self.x_center,
+            self.y_center,
+            self.z_center,
+            self.x_size,
+            self.y_size,
+            self.z_size,
+            self.t1_ms,
+            self.initial_mz,
+            self.b0_ppm,
+        ):
             widget.valueChanged.connect(self._properties_changed)
+        form.addRow("X centre", self.x_center)
+        form.addRow("Y centre", self.y_center)
         form.addRow("Z centre", self.z_center)
+        form.addRow("X size", self.x_size)
+        form.addRow("Y size", self.y_size)
         form.addRow("Z thickness", self.z_size)
         form.addRow("T1", self.t1_ms)
+        form.addRow("Initial Mz", self.initial_mz)
         form.addRow("B0 inhomogeneity", self.b0_ppm)
         self.xy_info = QLabel()
         form.addRow("XY geometry", self.xy_info)
         property_layout.addLayout(form)
 
         property_layout.addWidget(
-            QLabel("Lorentz peaks: name, amplitude, centre frequency, T2*")
+            QLabel(
+                "Lorentz peaks: name, amplitude, absolute peak ppm, T2*. "
+                "Simulation offsets are peak ppm minus spectral reference."
+            )
         )
         self.peak_table = QTableWidget(0, 4)
         self.peak_table.setHorizontalHeaderLabels(
-            ["Name", "Amplitude", "Frequency offset (ppm)", "T2* (ms)"]
+            ["Name", "Amplitude", "Peak position (ppm)", "T2* (ms)"]
         )
         self.peak_table.cellChanged.connect(self._peaks_changed)
         property_layout.addWidget(self.peak_table)
@@ -213,6 +282,45 @@ class SpectralPhantomDesignerDialog(QDialog):
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
         self.tabs.addTab(draw_page, "Draw and edit")
+
+        kinetics_page = QWidget()
+        kinetics_layout = QVBoxLayout(kinetics_page)
+        kinetics_form = QFormLayout()
+        self.dynamic_enabled = QCheckBox("Enable pyruvate → lactate conversion")
+        kinetics_form.addRow(self.dynamic_enabled)
+        self.pyruvate_peak_name = QLineEdit("Pyruvate")
+        self.lactate_peak_name = QLineEdit("Lactate")
+        self.default_kpl = self._number_spin(0.0, 10.0, 0.0, " s⁻¹")
+        kinetics_form.addRow("Pyruvate peak name", self.pyruvate_peak_name)
+        kinetics_form.addRow("Lactate peak name", self.lactate_peak_name)
+        kinetics_form.addRow("Default kPL", self.default_kpl)
+        kinetics_layout.addLayout(kinetics_form)
+        kinetics_layout.addWidget(
+            QLabel(
+                "Ordered kinetic regions; later rows overwrite earlier rows. "
+                "Center and size use percent of the phantom FOV."
+            )
+        )
+        self.kinetic_table = QTableWidget(0, 9)
+        self.kinetic_table.setHorizontalHeaderLabels(
+            ["Name", "Kind", "Cx %", "Cy %", "Cz %", "Sx %", "Sy %", "Sz %", "kPL s⁻¹"]
+        )
+        kinetics_layout.addWidget(self.kinetic_table)
+        kinetic_buttons = QHBoxLayout()
+        add_kinetic_ellipse = QPushButton("Add ellipsoid")
+        add_kinetic_ellipse.clicked.connect(
+            lambda: self._add_kinetic_region("ellipsoid")
+        )
+        add_kinetic_box = QPushButton("Add box")
+        add_kinetic_box.clicked.connect(lambda: self._add_kinetic_region("box"))
+        remove_kinetic = QPushButton("Remove")
+        remove_kinetic.clicked.connect(self._remove_kinetic_region)
+        kinetic_buttons.addWidget(add_kinetic_ellipse)
+        kinetic_buttons.addWidget(add_kinetic_box)
+        kinetic_buttons.addWidget(remove_kinetic)
+        kinetic_buttons.addStretch()
+        kinetics_layout.addLayout(kinetic_buttons)
+        self.tabs.addTab(kinetics_page, "Kinetics / kPL")
 
         self.inspector = PhantomInspectorWidget()
         self.tabs.addTab(self.inspector, "3D / frequency preview")
@@ -244,6 +352,12 @@ class SpectralPhantomDesignerDialog(QDialog):
         return widget
 
     @staticmethod
+    def _position_percent_spin(value):
+        widget = SpectralPhantomDesignerDialog._percent_spin(value)
+        widget.setRange(0.0, 100.0)
+        return widget
+
+    @staticmethod
     def _number_spin(minimum, maximum, value, suffix):
         widget = QDoubleSpinBox()
         widget.setRange(minimum, maximum)
@@ -259,9 +373,18 @@ class SpectralPhantomDesignerDialog(QDialog):
             widget.setValue(int(value))
         for widget, value in zip(self.fov_spins, self.design.fov_m):
             widget.setValue(float(value) * 100.0)
+        self.spectral_reference_ppm.setValue(self.design.spectral_reference_ppm)
+        self.spectral_bandwidth_ppm.setValue(self.design.spectral_bandwidth_ppm)
+        self.spectral_points.setValue(int(self.design.spectral_points))
+        self._update_spectral_resolution_info()
         mode_index = self.b0_mode_combo.findData(self.design.b0_inhomogeneity_mode)
         self.b0_mode_combo.setCurrentIndex(max(0, mode_index))
         self.b0_inhomogeneity_ppm.setValue(self.design.b0_inhomogeneity_ppm)
+        self.dynamic_enabled.setChecked(self.design.dynamic_enabled)
+        self.pyruvate_peak_name.setText(self.design.pyruvate_peak_name)
+        self.lactate_peak_name.setText(self.design.lactate_peak_name)
+        self.default_kpl.setValue(self.design.default_kpl_s_inv)
+        self._populate_kinetic_regions()
         self.shape_list.clear()
         for roi in self._rois:
             self.canvas.removeItem(roi)
@@ -279,12 +402,36 @@ class SpectralPhantomDesignerDialog(QDialog):
             item.center[1] - item.size[1] / 2,
         )
         size = item.size[:2]
-        pen = pg.intColor(index, hues=max(1, len(self.design.shapes)), alpha=220)
         roi_class = pg.EllipseROI if item.kind == "ellipsoid" else pg.RectROI
-        roi = roi_class(position, size, pen=pen)
+        roi = roi_class(position, size, pen=self._roi_pen(index, False))
         roi.sigRegionChangeFinished.connect(self._roi_changed)
+        original_mouse_click = roi.mouseClickEvent
+
+        def select_on_click(event, roi=roi, original_mouse_click=original_mouse_click):
+            self._select_roi(roi)
+            original_mouse_click(event)
+
+        roi.mouseClickEvent = select_on_click
         self.canvas.addItem(roi)
         self._rois.append(roi)
+        self._update_roi_highlights()
+
+    def _roi_pen(self, index, selected):
+        color = pg.intColor(index, hues=max(1, len(self.design.shapes)), alpha=245)
+        return pg.mkPen(color, width=5 if selected else 2)
+
+    def _select_roi(self, roi):
+        try:
+            row = self._rois.index(roi)
+        except ValueError:
+            return
+        self.shape_list.setCurrentRow(row)
+
+    def _update_roi_highlights(self, selected_row=None):
+        if selected_row is None:
+            selected_row = self._current_row()
+        for index, roi in enumerate(self._rois):
+            roi.setPen(self._roi_pen(index, index == selected_row))
 
     def _current_row(self):
         row = self.shape_list.currentRow()
@@ -297,13 +444,19 @@ class SpectralPhantomDesignerDialog(QDialog):
         item = self.design.shapes[row]
         self.shape_name.setText(item.name)
         self.kind_label.setText(item.kind)
+        self.x_center.setValue(item.center[0] * 100.0)
+        self.y_center.setValue(item.center[1] * 100.0)
         self.z_center.setValue(item.center[2] * 100.0)
+        self.x_size.setValue(item.size[0] * 100.0)
+        self.y_size.setValue(item.size[1] * 100.0)
         self.z_size.setValue(item.size[2] * 100.0)
         self.t1_ms.setValue(item.t1_s * 1000.0)
+        self.initial_mz.setValue(item.initial_mz)
         self.b0_ppm.setValue(item.b0_ppm)
         self._populate_peaks(item)
         self._update_xy_info(row)
         self._updating = False
+        self._update_roi_highlights(row)
 
     def _roi_changed(self):
         if self._updating:
@@ -320,6 +473,12 @@ class SpectralPhantomDesignerDialog(QDialog):
                 )
                 item.size = (float(size.x()), float(size.y()), item.size[2])
                 self.shape_list.setCurrentRow(row)
+                self._updating = True
+                self.x_center.setValue(item.center[0] * 100.0)
+                self.y_center.setValue(item.center[1] * 100.0)
+                self.x_size.setValue(item.size[0] * 100.0)
+                self.y_size.setValue(item.size[1] * 100.0)
+                self._updating = False
                 self._update_xy_info(row)
                 break
 
@@ -347,18 +506,48 @@ class SpectralPhantomDesignerDialog(QDialog):
         if row is not None:
             self._update_xy_info(row)
 
+    def _spectral_settings_changed(self, *_):
+        if self._updating:
+            return
+        self._update_spectral_resolution_info()
+
+    def _update_spectral_resolution_info(self):
+        points = max(2, int(self.spectral_points.value()))
+        resolution = self.spectral_bandwidth_ppm.value() / (points - 1)
+        self.spectral_resolution_info.setText(f"Resolution {resolution:.5g} ppm/pt")
+
     def _properties_changed(self):
         row = self._current_row()
         if self._updating or row is None:
             return
         item = self.design.shapes[row]
         item.name = self.shape_name.text().strip() or item.name
-        item.center = (item.center[0], item.center[1], self.z_center.value() / 100.0)
-        item.size = (item.size[0], item.size[1], self.z_size.value() / 100.0)
+        size = (
+            self.x_size.value() / 100.0,
+            self.y_size.value() / 100.0,
+            self.z_size.value() / 100.0,
+        )
+        center = (
+            self.x_center.value() / 100.0,
+            self.y_center.value() / 100.0,
+            self.z_center.value() / 100.0,
+        )
+        item.center = center
+        item.size = size
         item.t1_s = self.t1_ms.value() / 1000.0
+        item.initial_mz = self.initial_mz.value()
         item.b0_ppm = self.b0_ppm.value()
         item.b0_hz = None
         self.shape_list.item(row).setText(item.name)
+        roi = self._rois[row]
+        previous = roi.blockSignals(True)
+        roi.setPos(
+            item.center[0] - item.size[0] / 2,
+            item.center[1] - item.size[1] / 2,
+        )
+        roi.setSize(item.size[:2])
+        roi.blockSignals(previous)
+        self._update_xy_info(row)
 
     def _populate_peaks(self, item):
         self.peak_table.blockSignals(True)
@@ -368,7 +557,7 @@ class SpectralPhantomDesignerDialog(QDialog):
                 (
                     peak.name,
                     peak.amplitude,
-                    peak.frequency_ppm,
+                    peak.frequency_ppm + self.spectral_reference_ppm.value(),
                     peak.t2_star_s * 1000,
                 )
             ):
@@ -387,16 +576,63 @@ class SpectralPhantomDesignerDialog(QDialog):
 
     def _read_peak_table(self):
         peaks = []
+        reference_ppm = self.spectral_reference_ppm.value()
         for peak_row in range(self.peak_table.rowCount()):
             peak = SpectralPeakDefinition(
                 name=self.peak_table.item(peak_row, 0).text(),
                 amplitude=float(self.peak_table.item(peak_row, 1).text()),
-                frequency_ppm=float(self.peak_table.item(peak_row, 2).text()),
+                frequency_ppm=(
+                    float(self.peak_table.item(peak_row, 2).text()) - reference_ppm
+                ),
                 t2_star_s=float(self.peak_table.item(peak_row, 3).text()) / 1000.0,
             )
             peak.validate()
             peaks.append(peak)
         return peaks
+
+    def _populate_kinetic_regions(self):
+        self.kinetic_table.setRowCount(len(self.design.kinetic_regions))
+        for row, region in enumerate(self.design.kinetic_regions):
+            values = (
+                region.name,
+                region.kind,
+                *(value * 100.0 for value in region.center),
+                *(value * 100.0 for value in region.size),
+                region.kpl_s_inv,
+            )
+            for column, value in enumerate(values):
+                self.kinetic_table.setItem(row, column, QTableWidgetItem(str(value)))
+
+    def _read_kinetic_regions(self):
+        regions = []
+        for row in range(self.kinetic_table.rowCount()):
+
+            def text(column):
+                return self.kinetic_table.item(row, column).text()
+
+            region = KineticRegionDefinition(
+                name=text(0).strip(),
+                kind=text(1).strip().lower(),
+                center=tuple(float(text(column)) / 100.0 for column in range(2, 5)),
+                size=tuple(float(text(column)) / 100.0 for column in range(5, 8)),
+                kpl_s_inv=float(text(8)),
+            )
+            region.validate()
+            regions.append(region)
+        return regions
+
+    def _add_kinetic_region(self, kind):
+        row = self.kinetic_table.rowCount()
+        self.kinetic_table.insertRow(row)
+        values = (f"kPL region {row + 1}", kind, 50, 50, 50, 50, 50, 50, 0.05)
+        for column, value in enumerate(values):
+            self.kinetic_table.setItem(row, column, QTableWidgetItem(str(value)))
+        self.dynamic_enabled.setChecked(True)
+
+    def _remove_kinetic_region(self):
+        row = self.kinetic_table.currentRow()
+        if row >= 0:
+            self.kinetic_table.removeRow(row)
 
     def _add_shape(self, kind):
         self._sync_global()
@@ -416,6 +652,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.shape_list.takeItem(row)
         if self.design.shapes:
             self.shape_list.setCurrentRow(min(row, len(self.design.shapes) - 1))
+        self._update_roi_highlights()
 
     def _add_peak(self):
         row = self._current_row()
@@ -447,15 +684,29 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.design.name = self.name_edit.text().strip() or "Designed spectral phantom"
         self.design.shape = tuple(widget.value() for widget in self.matrix_spins)
         self.design.fov_m = tuple(widget.value() / 100.0 for widget in self.fov_spins)
+        self.design.spectral_reference_ppm = self.spectral_reference_ppm.value()
+        self.design.spectral_bandwidth_ppm = self.spectral_bandwidth_ppm.value()
+        self.design.spectral_points = self.spectral_points.value()
         self.design.b0_inhomogeneity_mode = str(self.b0_mode_combo.currentData())
         self.design.b0_inhomogeneity_ppm = self.b0_inhomogeneity_ppm.value()
+        self.design.dynamic_enabled = self.dynamic_enabled.isChecked()
+        self.design.pyruvate_peak_name = self.pyruvate_peak_name.text().strip()
+        self.design.lactate_peak_name = self.lactate_peak_name.text().strip()
+        self.design.default_kpl_s_inv = self.default_kpl.value()
+        self.design.kinetic_regions = self._read_kinetic_regions()
 
     def _preview(self):
         try:
             self._sync_global()
             self.phantom = self.design.build()
             self.inspector.set_phantom(self.phantom)
-            self.tabs.setCurrentIndex(1)
+            if self.design.dynamic_enabled:
+                self.inspector.map_combo.setCurrentText("kPL")
+            elif self.design.b0_inhomogeneity_mode != "none" or any(
+                shape.b0_ppm != 0.0 for shape in self.design.shapes
+            ):
+                self.inspector.map_combo.setCurrentText("B0")
+            self.tabs.setCurrentWidget(self.inspector)
         except Exception as exc:
             QMessageBox.critical(self, "Invalid phantom", str(exc))
 
@@ -467,7 +718,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             self,
             "Save spectral phantom",
             str(default_path),
-            "Spectral phantom (*.npz *.h5)",
+            "Spectral phantom (*.npz *.h5 *.nc)",
         )
         if not filename:
             return
@@ -482,12 +733,12 @@ class SpectralPhantomDesignerDialog(QDialog):
             self,
             "Load spectral phantom",
             str(workspace_directory("phantoms")),
-            "Spectral phantom (*.npz *.h5 *.hdf5)",
+            "Spectral phantom (*.npz *.h5 *.hdf5 *.nc)",
         )
         if not filename:
             return
         try:
-            phantom = SpectralPhantom.load(filename)
+            phantom = load_any_phantom(filename)
             self.design = PhantomDesign.from_phantom(phantom)
             self.phantom = phantom
             self._load_design_into_ui()

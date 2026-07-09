@@ -210,11 +210,13 @@ coordinate system.
 
 Pyruvate-to-lactate conversion must evolve coupled magnetization states, not
 only concentration weights. The required state per active voxel is
-`(Mx, My, Mz)` for every species. Between event boundaries a Bloch-McConnell
-operator combines species-specific off-resonance/relaxation with a kinetic
-rate matrix; RF rotations and ADC receive weighting act on the resulting
-species states. Initial concentration maps and voxelwise rate maps belong to a
-dynamic spectral phantom, while the sequence remains unchanged.
+`(Mx, My, Mz)` for every species. The first pharmacokinetic model transfers
+longitudinal pyruvate magnetization to longitudinal lactate with voxelwise
+`kPL`, while transverse states retain species-specific off-resonance and T2
+evolution. RF rotations and ADC receive weighting act on the resulting species
+states. A fully coherent transverse Bloch-McConnell exchange model is a later,
+explicit alternative. Initial magnetization maps and voxelwise rate maps belong
+to a dynamic spectral phantom, while the sequence remains unchanged.
 
 The first implementation should support a two-pool irreversible model and
 must pass four limiting cases before GUI exposure: zero exchange equals the

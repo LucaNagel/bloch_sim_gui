@@ -7,6 +7,8 @@ The original detailed implementation plan is preserved in
 [sequence_simulation_plan.md](sequence_simulation_plan.md). Stable technical
 decisions are documented in
 [sequence_simulation_architecture.md](sequence_simulation_architecture.md).
+The implementation design for regional pyruvate/lactate kinetics is in
+[dynamic_phantom_design.md](dynamic_phantom_design.md).
 
 ## Milestones
 
@@ -22,8 +24,9 @@ decisions are documented in
 | 7. Cartesian acquisition/reconstruction | Complete | ADC moments, bandwidth/layout model, EPI builder, 2D FFT/coil combination, GUI controls and views |
 | 8. Spectral phantom designer/viewers | Complete | Shape ROIs, Lorentz peaks, persistence, independent-component simulation, orthogonal/3D views |
 | 9. CSI acquisition/export and physical phantom views | Complete | Explicit ky-kx-FID layout, spatial/spectral FFTs, structured export, mm axes, analytic 2D/3D B0 maps |
-| 10. Dynamic coupled species | Designed | Requires a Bloch-McConnell state kernel; implementation deferred |
+| 10. Dynamic coupled species | Python reference complete | Regional kPL maps, two-pool longitudinal conversion, pool-resolved sparse output, persistence, designer controls, and Sequence Simulation integration complete; native optimization and perfusion remain |
 | 11. Multi-Tx and WASM | Deferred | Separate follow-up milestones |
+| 12. Dynamic 3D bSSFP export | Partial | Pulseq REP/PAR labels, alternating RF offsets, timing and import roundtrip complete; exact Skinner scanner protocol still needs sequence-specific RF waveforms/parameters |
 
 ## Repository baseline
 
@@ -113,6 +116,22 @@ decisions are documented in
 - 2026-07-08: collapsed EPI and built-in phantom controls when another source
   owns their settings, repaired masked/constant spectral property-map display,
   and added in-memory reopening of the current spectral shape design.
+- 2026-07-08: dynamic 3D bSSFP now emits Pulseq `REP`/`PAR` labels and supports
+  alternating RF frequency offsets across frames. Small-matrix generation,
+  Pulseq 1.4.1-compatible serialization/import, timing, frame labels, and RF
+  offsets are tested. Sparse NPZ/HDF5 exports now contain per-sample kx/ky/kz,
+  ADC event/readout indices, and all Pulseq outer indices; generated notebooks
+  explain chronological sorting and the already reshaped CSI datasets. The
+  phantom designer gained a strong FOV outline, exact numeric
+  XY centre/size controls, and automatic B0-map preview for analytic 2D/3D B0.
+- 2026-07-08: added a complete Python reference implementation for dynamic
+  hyperpolarized pyruvate/lactate phantoms. Ordered box/ellipsoid regions
+  rasterize voxelwise `kPL` maps; the phantom designer exposes a Kinetics tab
+  and kPL preview. Sequence Simulation propagates absolute six-component pool
+  state continuously through RF, gradients, relaxation, and longitudinal
+  conversion, displays pool-resolved signal/magnetization, and exports pool
+  arrays. The analytic two-site limit, region priority, persistence, GUI, and
+  xarray dimensions are tested. Native acceleration and perfusion input remain.
 
 ## Current limitations
 

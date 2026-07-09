@@ -10,6 +10,7 @@ Date: 2024/2025
 
 import numpy as np
 import warnings
+import json
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, Dict, Union
 from pathlib import Path
@@ -80,6 +81,8 @@ class Phantom:
     metadata: Dict = field(default_factory=dict)
     tx_sensitivity_map: Optional[np.ndarray] = None
     rx_sensitivity_maps: Optional[np.ndarray] = None
+    coordinate_system: str = "object_xyz"
+    affine_ijk_to_xyz_m: Optional[np.ndarray] = None
 
     # Computed fields (populated in __post_init__)
     positions: np.ndarray = field(init=False, repr=False)
@@ -106,6 +109,12 @@ class Phantom:
             raise ValueError(
                 f"FOV dimensions ({len(self.fov)}) must match shape dimensions ({ndim})"
             )
+        if not str(self.coordinate_system).strip():
+            raise ValueError("coordinate_system must not be empty")
+        if self.affine_ijk_to_xyz_m is not None:
+            affine = np.asarray(self.affine_ijk_to_xyz_m, dtype=np.float64)
+            if affine.shape != (4, 4) or not np.all(np.isfinite(affine)):
+                raise ValueError("affine_ijk_to_xyz_m must be a finite 4x4 matrix")
 
         # Check T1/T2 maps
         if self.t1_map.shape != self.shape:
@@ -236,19 +245,20 @@ class Phantom:
         # Default mask: all tissue
         if self.mask is None:
             self.mask = np.ones(self.shape, dtype=bool)
+        if self.affine_ijk_to_xyz_m is None:
+            self.affine_ijk_to_xyz_m = self.default_affine(
+                self.shape,
+                self.fov,
+            )
+        else:
+            self.affine_ijk_to_xyz_m = np.asarray(
+                self.affine_ijk_to_xyz_m, dtype=np.float64
+            )
 
     def _compute_coordinates(self):
         """Compute position arrays for each voxel."""
-        ndim = len(self.shape)
-
-        # Create coordinate arrays for each dimension
-        coords = []
-        for i in range(ndim):
-            n = self.shape[i]
-            fov = self.fov[i]
-            # Center coordinates at 0
-            voxel_size = fov / n
-            coords.append(-fov / 2 + (np.arange(n) + 0.5) * voxel_size)
+        coords = self.coordinate_vectors(self.shape, self.affine_ijk_to_xyz_m)
+        ndim = self.ndim
 
         if ndim == 1:
             self.x = coords[0]
@@ -269,6 +279,29 @@ class Phantom:
             self.y = Y.ravel()
             self.z = Z.ravel()
             self.positions = np.column_stack([self.x, self.y, self.z])
+
+    @staticmethod
+    def default_affine(shape: Tuple[int, ...], fov: Tuple[float, ...]) -> np.ndarray:
+        """Return the current object-space voxel-center affine in metres."""
+        affine = np.eye(4, dtype=np.float64)
+        for axis, (count, extent) in enumerate(zip(shape, fov)):
+            voxel_size = float(extent) / int(count)
+            affine[axis, axis] = voxel_size
+            affine[axis, 3] = -float(extent) / 2.0 + voxel_size / 2.0
+        return affine
+
+    @staticmethod
+    def coordinate_vectors(
+        shape: Tuple[int, ...],
+        affine_ijk_to_xyz_m: np.ndarray,
+    ) -> Tuple[np.ndarray, ...]:
+        """Return 1D physical coordinate vectors for axis-aligned grids."""
+        affine = np.asarray(affine_ijk_to_xyz_m, dtype=np.float64)
+        coords = []
+        for axis, count in enumerate(shape):
+            indices = np.arange(int(count), dtype=np.float64)
+            coords.append(affine[axis, axis] * indices + affine[axis, 3])
+        return tuple(coords)
 
     @property
     def effective_df_map(self) -> np.ndarray:
@@ -474,6 +507,131 @@ class Phantom:
             mask=self.mask.copy() if self.mask is not None else None,
             name=self.name,
             metadata=self.metadata.copy(),
+            coordinate_system=self.coordinate_system,
+            affine_ijk_to_xyz_m=self.affine_ijk_to_xyz_m.copy(),
+        )
+
+    def to_xarray(self):
+        """Return this phantom as a coordinate-aware ``xarray.Dataset``."""
+        import xarray as xr
+
+        spatial_dims = tuple("xyz"[: self.ndim])
+        coords = {
+            dim: (
+                dim,
+                values,
+                {
+                    "units": "m",
+                    "long_name": f"{dim} coordinate in {self.coordinate_system}",
+                },
+            )
+            for dim, values in zip(
+                spatial_dims,
+                self.coordinate_vectors(self.shape, self.affine_ijk_to_xyz_m),
+            )
+        }
+        coords["component"] = ("component", ["mx", "my", "mz"])
+        coords["coil"] = ("coil", np.arange(self.n_rx_coils, dtype=np.int64))
+        data_vars = {
+            "t1": (spatial_dims, self.t1_map, {"units": "s"}),
+            "t2": (spatial_dims, self.t2_map, {"units": "s"}),
+            "pd": (spatial_dims, self.pd_map, {"units": "relative"}),
+            "b0": (spatial_dims, self.b0_map, {"units": "Hz"}),
+            "chemical_shift": (
+                spatial_dims,
+                self.chemical_shift_map,
+                {"units": "Hz"},
+            ),
+            "df": (spatial_dims, self.effective_df_map, {"units": "Hz"}),
+            "m0": (
+                spatial_dims + ("component",),
+                self.m0_map,
+                {"units": "relative"},
+            ),
+            "mask": (spatial_dims, self.mask),
+            "tx_sensitivity_real": (spatial_dims, self.tx_sensitivity_map.real),
+            "tx_sensitivity_imag": (spatial_dims, self.tx_sensitivity_map.imag),
+            "rx_sensitivity_real": (
+                ("coil",) + spatial_dims,
+                self.rx_sensitivity_maps.real,
+            ),
+            "rx_sensitivity_imag": (
+                ("coil",) + spatial_dims,
+                self.rx_sensitivity_maps.imag,
+            ),
+        }
+        return xr.Dataset(
+            data_vars=data_vars,
+            coords=coords,
+            attrs={
+                "format": "blochsimulator-phantom-xarray",
+                "version": 1,
+                "name": self.name,
+                "fov_m": np.asarray(self.fov, dtype=np.float64),
+                "coordinate_system": self.coordinate_system,
+                "affine_ijk_to_xyz_m": self.affine_ijk_to_xyz_m.reshape(-1),
+                "metadata_json": json.dumps(self.metadata, default=str),
+            },
+        )
+
+    @classmethod
+    def from_xarray(cls, dataset) -> "Phantom":
+        """Create a :class:`Phantom` from a coordinate-aware xarray Dataset."""
+        ds = dataset.load()
+        spatial_dims = tuple(dim for dim in ("x", "y", "z") if dim in ds.sizes)
+        if not spatial_dims:
+            raise ValueError("phantom xarray dataset requires at least an x dimension")
+        shape = tuple(int(ds.sizes[dim]) for dim in spatial_dims)
+        affine_attr = ds.attrs.get("affine_ijk_to_xyz_m")
+        if affine_attr is None:
+            fov_attr = ds.attrs.get("fov_m")
+            if fov_attr is None:
+                fov = tuple(
+                    float(abs(ds.coords[dim][-1] - ds.coords[dim][0]))
+                    * int(ds.sizes[dim])
+                    / max(int(ds.sizes[dim]) - 1, 1)
+                    for dim in spatial_dims
+                )
+            else:
+                fov = tuple(float(value) for value in np.asarray(fov_attr).ravel())
+            affine = cls.default_affine(shape, fov)
+        else:
+            affine = np.asarray(affine_attr, dtype=np.float64).reshape(4, 4)
+            fov_attr = ds.attrs.get("fov_m")
+            if fov_attr is None:
+                fov = tuple(
+                    abs(float(affine[index, index])) * count
+                    for index, count in enumerate(shape)
+                )
+            else:
+                fov = tuple(float(value) for value in np.asarray(fov_attr).ravel())
+        metadata_json = ds.attrs.get("metadata_json", "{}")
+        try:
+            metadata = json.loads(metadata_json)
+        except TypeError:
+            metadata = {}
+        tx = np.asarray(ds["tx_sensitivity_real"]) + 1j * np.asarray(
+            ds["tx_sensitivity_imag"]
+        )
+        rx = np.asarray(ds["rx_sensitivity_real"]) + 1j * np.asarray(
+            ds["rx_sensitivity_imag"]
+        )
+        return cls(
+            shape=shape,
+            fov=fov,
+            t1_map=np.asarray(ds["t1"]),
+            t2_map=np.asarray(ds["t2"]),
+            pd_map=np.asarray(ds["pd"]),
+            b0_map=np.asarray(ds["b0"]),
+            chemical_shift_map=np.asarray(ds["chemical_shift"]),
+            tx_sensitivity_map=tx,
+            rx_sensitivity_maps=rx,
+            m0_map=np.asarray(ds["m0"]),
+            mask=np.asarray(ds["mask"], dtype=bool),
+            name=str(ds.attrs.get("name", "Phantom")),
+            metadata=metadata,
+            coordinate_system=str(ds.attrs.get("coordinate_system", "object_xyz")),
+            affine_ijk_to_xyz_m=affine,
         )
 
     def save(self, filename: Union[str, Path]):
@@ -503,16 +661,21 @@ class Phantom:
             "m0_map": self.m0_map,
             "mask": self.mask,
             "name": np.array(self.name),
+            "coordinate_system": np.array(self.coordinate_system),
+            "affine_ijk_to_xyz_m": self.affine_ijk_to_xyz_m,
+            "metadata_json": np.array(json.dumps(self.metadata, default=str)),
         }
 
         if filename.suffix == ".npz":
             np.savez_compressed(filename, **data)
+        elif filename.suffix == ".nc":
+            self.to_xarray().to_netcdf(filename)
         elif filename.suffix in (".h5", ".hdf5"):
             import h5py
 
             with h5py.File(filename, "w") as f:
                 for key, value in data.items():
-                    if key == "name":
+                    if key in {"name", "coordinate_system", "metadata_json"}:
                         f.attrs[key] = str(value)
                     else:
                         f.create_dataset(key, data=value)
@@ -539,6 +702,16 @@ class Phantom:
         if filename.suffix == ".npz":
             data = np.load(filename, allow_pickle=True)
             has_split_maps = "b0_map" in data.files
+            coordinate_system = (
+                str(data["coordinate_system"])
+                if "coordinate_system" in data.files
+                else "object_xyz"
+            )
+            metadata = (
+                json.loads(str(data["metadata_json"]))
+                if "metadata_json" in data.files
+                else {}
+            )
             return cls(
                 shape=tuple(data["shape"]),
                 fov=tuple(data["fov"]),
@@ -563,7 +736,19 @@ class Phantom:
                 m0_map=data["m0_map"],
                 mask=data["mask"],
                 name=str(data["name"]),
+                metadata=metadata,
+                coordinate_system=coordinate_system,
+                affine_ijk_to_xyz_m=(
+                    data["affine_ijk_to_xyz_m"]
+                    if "affine_ijk_to_xyz_m" in data.files
+                    else None
+                ),
             )
+        elif filename.suffix == ".nc":
+            import xarray as xr
+
+            with xr.open_dataset(filename) as dataset:
+                return cls.from_xarray(dataset)
         elif filename.suffix in (".h5", ".hdf5"):
             import h5py
 
@@ -578,6 +763,8 @@ class Phantom:
                         else f.attrs.get("name", "Phantom")
                     )
                 )
+                metadata_json = f.attrs.get("metadata_json", "{}")
+                metadata = json.loads(metadata_json)
                 return cls(
                     shape=tuple(f["shape"][...]),
                     fov=tuple(f["fov"][...]),
@@ -602,6 +789,13 @@ class Phantom:
                     m0_map=f["m0_map"][...],
                     mask=f["mask"][...],
                     name=stored_name,
+                    metadata=metadata,
+                    coordinate_system=f.attrs.get("coordinate_system", "object_xyz"),
+                    affine_ijk_to_xyz_m=(
+                        f["affine_ijk_to_xyz_m"][...]
+                        if "affine_ijk_to_xyz_m" in f
+                        else None
+                    ),
                 )
         else:
             raise ValueError(f"Unsupported file format: {filename.suffix}")

@@ -25,6 +25,10 @@ class SequenceSimulationResult:
     checkpoint_times_s: np.ndarray
     metadata: Dict[str, Any] = field(default_factory=dict)
     adc_gradient_moment_cyc_per_m: Optional[np.ndarray] = None
+    pool_names: tuple = ()
+    species_signal: Optional[np.ndarray] = None
+    final_pool_magnetization: Optional[np.ndarray] = None
+    checkpoint_pool_magnetization: Optional[np.ndarray] = None
 
     @property
     def mx(self) -> np.ndarray:
@@ -66,6 +70,34 @@ class SequenceSimulationResult:
             raise ValueError("CSI acquisition metadata does not match the ADC stream")
         return acquisition
 
+    @property
+    def cartesian_acquisition(self):
+        """Return an explicit 2D Cartesian layout when present in metadata."""
+        metadata = self.metadata.get("cartesian_acquisition")
+        if metadata is None:
+            return None
+        from .acquisition import CartesianAcquisition
+
+        acquisition = CartesianAcquisition.from_metadata(metadata)
+        if acquisition.num_samples != self.adc_times_s.size:
+            raise ValueError(
+                "Cartesian acquisition metadata does not match the ADC stream"
+            )
+        return acquisition
+
+    @property
+    def cartesian_acquisition_frames(self):
+        """Return explicit Cartesian frame layouts when present in metadata."""
+        metadata = self.metadata.get("cartesian_acquisition_frames")
+        if metadata is None:
+            return None
+        from .acquisition import CartesianAcquisitionFrames
+
+        frames = CartesianAcquisitionFrames.from_metadata(metadata)
+        if frames.dimensions.num_samples != self.adc_times_s.size:
+            raise ValueError("Cartesian frame metadata does not match the ADC stream")
+        return frames
+
     def to_dict(self) -> Dict[str, Any]:
         """Return a compatibility-friendly dictionary without copying arrays."""
         return {
@@ -78,6 +110,10 @@ class SequenceSimulationResult:
             "checkpoint_magnetization": self.checkpoint_magnetization,
             "checkpoint_times_s": self.checkpoint_times_s,
             "adc_gradient_moment_cyc_per_m": self.adc_gradient_moment_cyc_per_m,
+            "pool_names": self.pool_names,
+            "species_signal": self.species_signal,
+            "final_pool_magnetization": self.final_pool_magnetization,
+            "checkpoint_pool_magnetization": self.checkpoint_pool_magnetization,
             "metadata": self.metadata,
         }
 
@@ -145,12 +181,110 @@ class SequenceSimulationResult:
                 ("adc", "gradient_axis"),
                 moments,
             )
+        cartesian = self.cartesian_acquisition
+        cartesian_frames = self.cartesian_acquisition_frames
+        if cartesian is not None:
+            kspace = self.to_cartesian_kspace(cartesian)
+            image = self.reconstruct_cartesian(cartesian)
+            cartesian_dims = ["phase_y", "read_x"]
+            if self.signal.ndim == 2:
+                cartesian_dims.insert(0, "coil")
+            coords.update(
+                {
+                    "phase_y": np.arange(cartesian.phase_matrix),
+                    "read_x": np.arange(cartesian.read_matrix),
+                    "cartesian_kx_cyc_per_m": (
+                        "read_x",
+                        cartesian.kx_cyc_per_m,
+                    ),
+                    "cartesian_ky_cyc_per_m": (
+                        "phase_y",
+                        cartesian.ky_cyc_per_m,
+                    ),
+                }
+            )
+            data_vars["cartesian_kspace"] = (cartesian_dims, kspace)
+            data_vars["cartesian_image"] = (cartesian_dims, image)
+            data_vars["cartesian_image_magnitude"] = (
+                cartesian_dims,
+                np.abs(image),
+            )
+        elif cartesian_frames is not None:
+            first = cartesian_frames.acquisitions[0]
+            same_grid = all(
+                acquisition.read_matrix == first.read_matrix
+                and acquisition.phase_matrix == first.phase_matrix
+                and np.allclose(acquisition.kx_cyc_per_m, first.kx_cyc_per_m)
+                and np.allclose(acquisition.ky_cyc_per_m, first.ky_cyc_per_m)
+                for acquisition in cartesian_frames.acquisitions
+            )
+            if same_grid:
+                kspace = np.stack(
+                    [
+                        cartesian_frames.to_cartesian_kspace(self, frame)
+                        for frame in range(cartesian_frames.num_frames)
+                    ],
+                    axis=0,
+                )
+                image = np.stack(
+                    [
+                        cartesian_frames.reconstruct(self, frame)
+                        for frame in range(cartesian_frames.num_frames)
+                    ],
+                    axis=0,
+                )
+                cartesian_dims = ["cartesian_frame", "phase_y", "read_x"]
+                if self.signal.ndim == 2:
+                    cartesian_dims.insert(1, "coil")
+                coords.update(
+                    {
+                        "cartesian_frame": np.arange(cartesian_frames.num_frames),
+                        "phase_y": np.arange(first.phase_matrix),
+                        "read_x": np.arange(first.read_matrix),
+                        "cartesian_kx_cyc_per_m": (
+                            "read_x",
+                            first.kx_cyc_per_m,
+                        ),
+                        "cartesian_ky_cyc_per_m": (
+                            "phase_y",
+                            first.ky_cyc_per_m,
+                        ),
+                    }
+                )
+                for axis_index, axis in enumerate(
+                    cartesian_frames.dimensions.AXIS_NAMES
+                ):
+                    coords[f"cartesian_frame_{axis}_index"] = (
+                        "cartesian_frame",
+                        [frame[axis_index] for frame in cartesian_frames.frame_indices],
+                    )
+                data_vars["cartesian_kspace"] = (cartesian_dims, kspace)
+                data_vars["cartesian_image"] = (cartesian_dims, image)
+                data_vars["cartesian_image_magnitude"] = (
+                    cartesian_dims,
+                    np.abs(image),
+                )
         if self.checkpoint_magnetization is not None:
             coords["checkpoint"] = self.checkpoint_times_s
             data_vars["checkpoint_magnetization"] = (
                 ["checkpoint"] + spatial_dims + ["component"],
                 self.checkpoint_magnetization,
             )
+        if self.species_signal is not None:
+            coords["pool"] = list(self.pool_names)
+            pool_signal_dims = ("pool", "adc")
+            if self.signal.ndim == 2:
+                pool_signal_dims = ("pool", "coil", "adc")
+            data_vars["species_signal"] = (pool_signal_dims, self.species_signal)
+            data_vars["final_pool_magnetization"] = (
+                ["pool"] + spatial_dims + ["component"],
+                self.final_pool_magnetization,
+            )
+            if self.checkpoint_pool_magnetization is not None:
+                data_vars["checkpoint_pool_magnetization"] = (
+                    ["checkpoint", "pool"] + spatial_dims + ["component"],
+                    self.checkpoint_pool_magnetization,
+                )
         spectroscopy = self.spectroscopic_acquisition
         if spectroscopy is not None:
             csi_dims = ["phase_y", "phase_x", "spectral_point"]
@@ -191,6 +325,22 @@ class SequenceSimulationResult:
                 csi_dims,
                 spectroscopy.reconstruct_spectra(self.signal),
             )
+            if self.species_signal is not None:
+                pool_csi_dims = ["pool", "phase_y", "phase_x", "spectral_point"]
+                if self.species_signal.ndim == 3:
+                    pool_csi_dims.insert(1, "coil")
+                data_vars["species_csi_kspace"] = (
+                    pool_csi_dims,
+                    spectroscopy.reshape_signal(self.species_signal),
+                )
+                data_vars["species_csi_spatial_fid"] = (
+                    pool_csi_dims,
+                    spectroscopy.reconstruct_spatial(self.species_signal),
+                )
+                data_vars["species_csi_spectrum"] = (
+                    pool_csi_dims,
+                    spectroscopy.reconstruct_spectra(self.species_signal),
+                )
         attrs = {
             key: value
             for key, value in self.metadata.items()
@@ -210,6 +360,9 @@ class SequenceSimulationResult:
                     units="cycles/m",
                 )
         for axis in ("spatial_kx_cyc_per_m", "spatial_ky_cyc_per_m"):
+            if axis in dataset.coords:
+                dataset[axis].attrs.update(units="cycles/m")
+        for axis in ("cartesian_kx_cyc_per_m", "cartesian_ky_cyc_per_m"):
             if axis in dataset.coords:
                 dataset[axis].attrs.update(units="cycles/m")
         if "spectral_time_s" in dataset.coords:
@@ -250,6 +403,85 @@ class SequenceSimulationResult:
             arrays["checkpoint_magnetization"] = self.checkpoint_magnetization
         if self.adc_gradient_moment_cyc_per_m is not None:
             arrays["adc_gradient_moment_cyc_per_m"] = self.adc_gradient_moment_cyc_per_m
+            moments = np.asarray(self.adc_gradient_moment_cyc_per_m)
+            arrays["kx_cyc_per_m"] = moments[:, 0]
+            arrays["ky_cyc_per_m"] = moments[:, 1]
+            arrays["kz_cyc_per_m"] = moments[:, 2]
+        dimensions = self.acquisition_dimensions
+        if dimensions is not None:
+            event_counts = np.asarray(
+                dimensions.adc_event_sample_counts, dtype=np.int64
+            )
+            arrays["adc_event_index"] = np.repeat(
+                np.arange(event_counts.size, dtype=np.int64), event_counts
+            )
+            arrays["readout_sample_index"] = np.concatenate(
+                [np.arange(count, dtype=np.int64) for count in event_counts]
+            )
+            for axis in dimensions.AXIS_NAMES:
+                arrays[f"{axis}_index"] = dimensions.sample_indices(axis)
+        if self.species_signal is not None:
+            arrays["species_signal"] = self.species_signal
+            arrays["final_pool_magnetization"] = self.final_pool_magnetization
+            arrays["pool_names"] = np.asarray(self.pool_names, dtype="S")
+            if self.checkpoint_pool_magnetization is not None:
+                arrays["checkpoint_pool_magnetization"] = (
+                    self.checkpoint_pool_magnetization
+                )
+        cartesian = self.cartesian_acquisition
+        cartesian_frames = self.cartesian_acquisition_frames
+        if cartesian is not None:
+            image = self.reconstruct_cartesian(cartesian)
+            arrays.update(
+                {
+                    "cartesian_kspace": self.to_cartesian_kspace(cartesian),
+                    "cartesian_image": image,
+                    "cartesian_image_magnitude": np.abs(image),
+                    "cartesian_kx_cyc_per_m": cartesian.kx_cyc_per_m,
+                    "cartesian_ky_cyc_per_m": cartesian.ky_cyc_per_m,
+                    "cartesian_phase_indices": np.asarray(
+                        cartesian.phase_indices, dtype=np.int64
+                    ),
+                    "cartesian_readout_directions": np.asarray(
+                        cartesian.readout_directions, dtype=np.int64
+                    ),
+                }
+            )
+        elif cartesian_frames is not None:
+            first = cartesian_frames.acquisitions[0]
+            same_grid = all(
+                acquisition.read_matrix == first.read_matrix
+                and acquisition.phase_matrix == first.phase_matrix
+                and np.allclose(acquisition.kx_cyc_per_m, first.kx_cyc_per_m)
+                and np.allclose(acquisition.ky_cyc_per_m, first.ky_cyc_per_m)
+                for acquisition in cartesian_frames.acquisitions
+            )
+            if same_grid:
+                image = np.stack(
+                    [
+                        cartesian_frames.reconstruct(self, frame)
+                        for frame in range(cartesian_frames.num_frames)
+                    ],
+                    axis=0,
+                )
+                arrays.update(
+                    {
+                        "cartesian_kspace": np.stack(
+                            [
+                                cartesian_frames.to_cartesian_kspace(self, frame)
+                                for frame in range(cartesian_frames.num_frames)
+                            ],
+                            axis=0,
+                        ),
+                        "cartesian_image": image,
+                        "cartesian_image_magnitude": np.abs(image),
+                        "cartesian_kx_cyc_per_m": first.kx_cyc_per_m,
+                        "cartesian_ky_cyc_per_m": first.ky_cyc_per_m,
+                        "cartesian_frame_indices": np.asarray(
+                            cartesian_frames.frame_indices, dtype=np.int64
+                        ),
+                    }
+                )
         spectroscopy = self.spectroscopic_acquisition
         if spectroscopy is not None:
             arrays.update(
@@ -263,6 +495,20 @@ class SequenceSimulationResult:
                     "csi_frequency_hz": spectroscopy.frequency_hz,
                 }
             )
+            if self.species_signal is not None:
+                arrays.update(
+                    {
+                        "species_csi_kspace": spectroscopy.reshape_signal(
+                            self.species_signal
+                        ),
+                        "species_csi_spatial_fid": spectroscopy.reconstruct_spatial(
+                            self.species_signal
+                        ),
+                        "species_csi_spectrum": spectroscopy.reconstruct_spectra(
+                            self.species_signal
+                        ),
+                    }
+                )
         metadata_json = json.dumps(self.metadata, default=str)
         if suffix == ".npz":
             np.savez_compressed(path, metadata_json=np.asarray(metadata_json), **arrays)
@@ -278,6 +524,12 @@ class SequenceSimulationResult:
                 handle.attrs["version"] = 1
             return path
         raise ValueError("sequence results require a .nc, .npz, .h5, or .hdf5 file")
+
+    def save_bruker(self, directory, **kwargs) -> Path:
+        """Save the ADC stream as a Bruker-style raw-data directory."""
+        from .bruker_export import export_bruker_raw
+
+        return export_bruker_raw(self, directory, **kwargs)
 
     def to_cartesian_kspace(self, acquisition, *, validate: bool = True) -> np.ndarray:
         """Reshape chronological ADC data with a Cartesian acquisition layout."""

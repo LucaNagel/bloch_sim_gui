@@ -422,6 +422,8 @@ class PhantomInspectorWidget(QWidget):
             self.map_combo.addItems(
                 [f"Peak: {species.name}" for species in phantom.species]
             )
+        if hasattr(phantom, "kpl_map_s_inv"):
+            self.map_combo.addItem("kPL")
         self.map_combo.blockSignals(False)
         self._map_changed()
 
@@ -454,6 +456,9 @@ class PhantomInspectorWidget(QWidget):
             unit = "Hz"
         elif choice == "Mask":
             data = self.phantom.mask.astype(float)
+        elif choice == "kPL":
+            data = self.phantom.kpl_map_s_inv
+            unit = "s⁻¹"
         elif choice.startswith("Peak: "):
             name = choice[len("Peak: ") :]
             data = self.phantom.concentration_maps[name]
@@ -476,8 +481,16 @@ class PhantomInspectorWidget(QWidget):
         native_index = index[: len(self.phantom.shape)]
         frequency, spectrum = self.phantom.spectrum_at(native_index)
         self.spectrum_plot.plot(frequency, spectrum, pen=pg.mkPen("c", width=2))
+        bandwidth = getattr(self.phantom, "spectral_bandwidth_ppm", None)
+        points = getattr(self.phantom, "spectral_points", None)
+        spectral_suffix = (
+            f"; BW {bandwidth:g} ppm, {points} points"
+            if bandwidth is not None and points is not None
+            else ""
+        )
         self.spectrum_info.setText(
             f"Voxel {native_index}; {self.phantom.n_species} Lorentzian components"
+            f"{spectral_suffix}"
         )
 
 
@@ -506,6 +519,11 @@ class SequenceResultVolumeViewer(QWidget):
         self.state_combo.currentIndexChanged.connect(self._update)
         row.addWidget(QLabel("State"))
         row.addWidget(self.state_combo)
+        self.pool_combo = QComboBox()
+        self.pool_combo.addItem("Sum")
+        self.pool_combo.currentIndexChanged.connect(self._update)
+        row.addWidget(QLabel("Pool"))
+        row.addWidget(self.pool_combo)
         row.addStretch()
         layout.addLayout(row)
         self.volume = VolumeViewerWidget()
@@ -520,12 +538,25 @@ class SequenceResultVolumeViewer(QWidget):
         for value in np.asarray(result.checkpoint_times_s):
             self.state_combo.addItem(f"Checkpoint {value * 1000:.3f} ms")
         self.state_combo.blockSignals(False)
+        self.pool_combo.blockSignals(True)
+        self.pool_combo.clear()
+        self.pool_combo.addItem("Sum")
+        for name in getattr(result, "pool_names", ()):
+            self.pool_combo.addItem(str(name))
+        self.pool_combo.setEnabled(bool(getattr(result, "pool_names", ())))
+        self.pool_combo.blockSignals(False)
         self._update()
 
     def _magnetization(self):
+        pool_index = self.pool_combo.currentIndex() - 1
         if self.state_combo.currentIndex() == 0:
+            if pool_index >= 0 and self.result.final_pool_magnetization is not None:
+                return self.result.final_pool_magnetization[pool_index]
             return self.result.final_magnetization
-        return self.result.checkpoint_magnetization[self.state_combo.currentIndex() - 1]
+        checkpoint = self.state_combo.currentIndex() - 1
+        if pool_index >= 0 and self.result.checkpoint_pool_magnetization is not None:
+            return self.result.checkpoint_pool_magnetization[checkpoint, pool_index]
+        return self.result.checkpoint_magnetization[checkpoint]
 
     def _update(self):
         if self.result is None:
