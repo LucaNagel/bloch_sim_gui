@@ -880,7 +880,12 @@ def infer_cartesian_acquisition(
     ):
         raise ValueError("kx coordinates cannot be represented by one Cartesian grid")
     rounded_kx_offset = round(2.0 * kx_offset) / 2.0
-    if abs(kx_offset - rounded_kx_offset) <= tolerance_x * fov_x:
+    if np.allclose(
+        ordered_x * fov_x,
+        base_x + rounded_kx_offset,
+        rtol=0.0,
+        atol=tolerance_x * fov_x,
+    ):
         kx_offset = rounded_kx_offset
     base_y = np.arange(phase_matrix, dtype=float) - phase_matrix // 2
     ky_offset = float(np.mean(sorted_y * fov_y - base_y))
@@ -892,7 +897,12 @@ def infer_cartesian_acquisition(
     ):
         raise ValueError("ky coordinates cannot be represented by one Cartesian grid")
     rounded_ky_offset = round(2.0 * ky_offset) / 2.0
-    if abs(ky_offset - rounded_ky_offset) <= tolerance_y * fov_y:
+    if np.allclose(
+        sorted_y * fov_y,
+        base_y + rounded_ky_offset,
+        rtol=0.0,
+        atol=tolerance_y * fov_y,
+    ):
         ky_offset = rounded_ky_offset
 
     acquisition = CartesianAcquisition(

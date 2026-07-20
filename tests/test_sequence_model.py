@@ -166,6 +166,26 @@ def test_adc_zero_and_checkpoint_state_indices():
     assert np.array_equal(compiled.checkpoint_state_indices, [1, 4])
 
 
+def test_compiler_maps_observation_to_nearest_coalesced_boundary():
+    event_end = 1.2129899999999882
+    checkpoint = 1.21299
+    program = SequenceProgram(
+        events=(GradientEvent("x", 0.0, np.array([1.0]), event_end),),
+        duration_s=1.3,
+    )
+
+    compiled = SequenceCompiler().compile(
+        program,
+        checkpoints_s=(checkpoint,),
+        simulation_timestep_s=5e-6,
+    )
+
+    state_index = compiled.checkpoint_state_indices[0]
+    boundaries = np.concatenate(([0.0], compiled.interval_end_s))
+    assert compiled.checkpoint_times_s == pytest.approx([checkpoint])
+    assert boundaries[state_index] == pytest.approx(event_end, abs=1e-13)
+
+
 def test_same_axis_gradient_overlap_rejected():
     program = SequenceProgram(
         (

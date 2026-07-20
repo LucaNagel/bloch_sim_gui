@@ -11,6 +11,7 @@ import pyqtgraph as pg
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QComboBox,
+    QDoubleSpinBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -19,6 +20,8 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from ..units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm, ppm_to_hz
 
 try:
     import pyqtgraph.opengl as gl
@@ -399,13 +402,33 @@ class PhantomInspectorWidget(QWidget):
         self.map_combo = QComboBox()
         self.map_combo.currentTextChanged.connect(self._map_changed)
         row.addWidget(self.map_combo)
+        row.addWidget(QLabel("Frequency display"))
+        self.frequency_unit_combo = QComboBox()
+        self.frequency_unit_combo.addItems(["ppm", "Hz", "kHz"])
+        self.frequency_unit_combo.currentTextChanged.connect(
+            self._frequency_display_changed
+        )
+        row.addWidget(self.frequency_unit_combo)
+        self.preview_field_strength = QDoubleSpinBox()
+        self.preview_field_strength.setRange(0.001, 1000.0)
+        self.preview_field_strength.setDecimals(4)
+        self.preview_field_strength.setValue(7.0)
+        self.preview_field_strength.setSuffix(" T")
+        self.preview_field_strength.valueChanged.connect(
+            self._frequency_display_changed
+        )
+        row.addWidget(self.preview_field_strength)
+        self.preview_nucleus = QComboBox()
+        self.preview_nucleus.addItems(sorted(NUCLEUS_GAMMA_HZ_PER_T))
+        self.preview_nucleus.currentTextChanged.connect(self._frequency_display_changed)
+        row.addWidget(self.preview_nucleus)
         row.addStretch()
         layout.addLayout(row)
         self.volume = VolumeViewerWidget()
         self.volume.indices_changed.connect(self._update_spectrum)
         layout.addWidget(self.volume, 3)
         self.spectrum_plot = pg.PlotWidget(title="Frequency distribution at voxel")
-        self.spectrum_plot.setLabel("bottom", "Frequency", "Hz")
+        self.spectrum_plot.setLabel("bottom", "Frequency", "ppm")
         self.spectrum_plot.setLabel("left", "Amplitude", "a.u.")
         layout.addWidget(self.spectrum_plot, 1)
         self.spectrum_info = QLabel("No spectral distribution")
@@ -413,6 +436,19 @@ class PhantomInspectorWidget(QWidget):
 
     def set_phantom(self, phantom) -> None:
         self.phantom = phantom
+        self.preview_field_strength.blockSignals(True)
+        self.preview_nucleus.blockSignals(True)
+        self.frequency_unit_combo.blockSignals(True)
+        self.preview_field_strength.setValue(
+            float(getattr(phantom, "field_strength", 7.0))
+        )
+        nucleus = str(getattr(phantom, "nucleus", "C13"))
+        nucleus_index = self.preview_nucleus.findText(nucleus)
+        self.preview_nucleus.setCurrentIndex(max(0, nucleus_index))
+        self.frequency_unit_combo.setCurrentText("ppm")
+        self.frequency_unit_combo.blockSignals(False)
+        self.preview_nucleus.blockSignals(False)
+        self.preview_field_strength.blockSignals(False)
         self.map_combo.blockSignals(True)
         self.map_combo.clear()
         self.map_combo.addItems(
@@ -426,6 +462,63 @@ class PhantomInspectorWidget(QWidget):
             self.map_combo.addItem("kPL")
         self.map_combo.blockSignals(False)
         self._map_changed()
+
+    def _frequency_display_changed(self, *_):
+        if self.map_combo.currentText() in {"B0", "Mean frequency"}:
+            self._map_changed()
+        else:
+            self._update_spectrum()
+
+    def _frequency_display(self):
+        unit = self.frequency_unit_combo.currentText()
+        field_strength = self.preview_field_strength.value()
+        nucleus = self.preview_nucleus.currentText()
+        scale = 1.0
+        if unit == "kHz":
+            scale = 1e-3
+        return unit, field_strength, nucleus, scale
+
+    def _b0_map_for_display(self):
+        unit, field_strength, nucleus, scale = self._frequency_display()
+        if unit == "ppm":
+            if hasattr(self.phantom, "get_b0_offset_map_ppm"):
+                return (
+                    self.phantom.get_b0_offset_map_ppm(field_strength, nucleus),
+                    "ppm",
+                )
+            b0 = (
+                np.zeros(self.phantom.shape)
+                if self.phantom.b0_map is None
+                else self.phantom.b0_map
+            )
+            return hz_to_ppm(b0, field_strength, nucleus), "ppm"
+        if hasattr(self.phantom, "get_b0_offset_map_hz"):
+            data = self.phantom.get_b0_offset_map_hz(field_strength, nucleus)
+        elif hasattr(self.phantom, "b0_offset_hz"):
+            data = self.phantom.b0_offset_hz(field_strength, nucleus)
+        else:
+            data = (
+                np.zeros(self.phantom.shape)
+                if self.phantom.b0_map is None
+                else self.phantom.b0_map
+            )
+        return data * scale, unit
+
+    def _mean_frequency_for_display(self):
+        unit, field_strength, nucleus, scale = self._frequency_display()
+        if unit == "ppm":
+            if hasattr(self.phantom, "df_map_ppm"):
+                return self.phantom.df_map_ppm, "ppm"
+            return (
+                hz_to_ppm(self.phantom.effective_df_map, field_strength, nucleus),
+                "ppm",
+            )
+        if hasattr(self.phantom, "df_map_ppm"):
+            return (
+                ppm_to_hz(self.phantom.df_map_ppm, field_strength, nucleus) * scale,
+                unit,
+            )
+        return self.phantom.effective_df_map * scale, unit
 
     def _map_changed(self):
         if self.phantom is None:
@@ -441,19 +534,9 @@ class PhantomInspectorWidget(QWidget):
             data = self.phantom.t2_map * 1000
             unit = "ms"
         elif choice == "B0":
-            if getattr(self.phantom, "b0_map_ppm", None) is not None:
-                data = self.phantom.b0_map_ppm
-                unit = "ppm"
-            else:
-                data = (
-                    np.zeros(self.phantom.shape)
-                    if self.phantom.b0_map is None
-                    else self.phantom.b0_map
-                )
-                unit = "Hz"
+            data, unit = self._b0_map_for_display()
         elif choice == "Mean frequency":
-            data = self.phantom.effective_df_map
-            unit = "Hz"
+            data, unit = self._mean_frequency_for_display()
         elif choice == "Mask":
             data = self.phantom.mask.astype(float)
         elif choice == "kPL":
@@ -479,7 +562,31 @@ class PhantomInspectorWidget(QWidget):
             return
         index = self.volume.indices if index is None else tuple(index)
         native_index = index[: len(self.phantom.shape)]
-        frequency, spectrum = self.phantom.spectrum_at(native_index)
+        unit, field_strength, nucleus, scale = self._frequency_display()
+        if unit == "ppm" and hasattr(self.phantom, "spectrum_at_ppm"):
+            frequency, spectrum = self.phantom.spectrum_at_ppm(
+                native_index,
+                absolute=True,
+                linewidth_field_strength=field_strength,
+                nucleus=nucleus,
+            )
+            axis_label = "Frequency"
+            axis_unit = "ppm"
+            reference = getattr(self.phantom, "spectral_reference_ppm", None)
+            reference_suffix = (
+                f"; reference {reference:g} ppm" if reference is not None else ""
+            )
+        else:
+            frequency, spectrum = self.phantom.spectrum_at(
+                native_index,
+                field_strength=field_strength,
+                nucleus=nucleus,
+            )
+            frequency = frequency * scale
+            axis_label = "Frequency offset"
+            axis_unit = unit
+            reference_suffix = f"; {field_strength:g} T {nucleus}"
+        self.spectrum_plot.setLabel("bottom", axis_label, axis_unit)
         self.spectrum_plot.plot(frequency, spectrum, pen=pg.mkPen("c", width=2))
         bandwidth = getattr(self.phantom, "spectral_bandwidth_ppm", None)
         points = getattr(self.phantom, "spectral_points", None)
@@ -490,7 +597,7 @@ class PhantomInspectorWidget(QWidget):
         )
         self.spectrum_info.setText(
             f"Voxel {native_index}; {self.phantom.n_species} Lorentzian components"
-            f"{spectral_suffix}"
+            f"{spectral_suffix}{reference_suffix}"
         )
 
 

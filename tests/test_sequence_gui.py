@@ -8,9 +8,15 @@ from PyQt5.QtCore import QSettings, Qt
 from PyQt5.QtWidgets import QApplication
 
 from blochsimulator.ui.main_window import BlochSimulatorGUI
-from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
+from blochsimulator.ui.sequence_simulation_widget import (
+    SequenceSimulationWidget,
+    _event_step_plot_data,
+)
 from blochsimulator.sequence import (
+    GradientEvent,
+    RFEvent,
     SequenceCompiler,
+    SequenceProbeResult,
     SequenceSimulationResult,
     SpectroscopicAcquisition,
 )
@@ -294,10 +300,174 @@ def test_sequence_workspace_keeps_run_button_outside_scroll_area():
     widget.show()
     app.processEvents()
 
-    scroll_bar = widget.controls_scroll.verticalScrollBar()
-    assert scroll_bar.maximum() > 0
     assert widget.run_button.isVisible()
     assert not widget.controls_scroll.viewport().isAncestorOf(widget.run_button)
+    assert widget.output_group.isHidden()
+    assert not widget.probe_group.isChecked()
+    assert widget.probe_controls.isHidden()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_workspace_builds_geometry_probe_positions():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.object_source.setCurrentIndex(1)
+    widget.matrix_size.setValue(4)
+    widget.z_matrix_size.setValue(3)
+    widget._build_phantom()
+    widget.probe_max_positions.setValue(5)
+
+    positions = widget._probe_geometry_positions_m()
+    ppm_axis, hz_axis = widget._probe_single_frequency_axis_hz()
+
+    assert positions.shape == (5, 3)
+    assert np.all(np.isfinite(positions))
+    assert ppm_axis.shape == (1,)
+    assert hz_axis.shape == (1,)
+    assert widget.probe_frequency_units.currentText() == "Hz"
+    assert widget.probe_initial_mz.maximum() == pytest.approx(1e7)
+    widget.probe_initial_mz.setValue(2.5e6)
+    assert widget.probe_initial_mz.value() == pytest.approx(2.5e6)
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_workspace_passes_large_initial_mz_to_probe_worker(monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    monkeypatch.setattr(
+        "blochsimulator.ui.sequence_simulation_widget.SequenceProbeThread.start",
+        lambda _worker: None,
+    )
+    widget.probe_initial_mz.setValue(3e6)
+
+    widget._start_probe(
+        positions=np.array([[0.0, 0.0, 0.0]]),
+        hz_axis=np.array([0.0]),
+        display_axis=np.array([0.0]),
+        checkpoints=np.array([0.0]),
+        label="spectral",
+    )
+
+    assert widget.probe_worker.initial_magnetization == pytest.approx((0.0, 0.0, 3e6))
+    widget.probe_worker.deleteLater()
+    widget.probe_worker = None
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_probe_defaults_to_individual_rf_event_ends():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.program = widget.program.__class__(
+        events=(
+            RFEvent(0.001, np.array([100.0, 200.0]), 1e-3),
+            RFEvent(0.010, np.array([300.0]), 2e-3),
+        ),
+        duration_s=0.020,
+        metadata={"definitions": {"EndImageSpoilerEndTimes": [0.018]}},
+    )
+
+    assert widget._probe_checkpoints_s() == pytest.approx(
+        [0.0, 0.003, 0.012, 0.018, 0.020]
+    )
+    widget.probe_time_sampling.setCurrentText("Uniform timeline")
+    widget.probe_time_points.setValue(5)
+    assert widget._probe_checkpoints_s() == pytest.approx(
+        [0.0, 0.005, 0.010, 0.015, 0.020]
+    )
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_plot_data_retains_event_extrema_and_resolves_zoom():
+    samples = np.linspace(-10.0, 10.0, 1001)
+    event = GradientEvent("x", 0.0, samples, 1e-6)
+
+    overview_x, overview_y = _event_step_plot_data(
+        (event,),
+        samples_attribute="samples_hz_per_m",
+        start_s=0.0,
+        end_s=event.end_s,
+        max_vertices=60,
+    )
+    zoom_x, zoom_y = _event_step_plot_data(
+        (event,),
+        samples_attribute="samples_hz_per_m",
+        start_s=0.0004,
+        end_s=0.0006,
+        max_vertices=6000,
+    )
+
+    assert np.nanmin(overview_y) == pytest.approx(-10.0)
+    assert np.nanmax(overview_y) == pytest.approx(10.0)
+    assert np.count_nonzero(np.isfinite(zoom_y)) > np.count_nonzero(
+        np.isfinite(overview_y)
+    )
+    assert np.all(np.diff(overview_x[np.isfinite(overview_x)]) >= 0)
+
+
+def test_sequence_workspace_displays_geometry_probe_result(monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    playback_clock = [100.0]
+    monkeypatch.setattr(
+        "blochsimulator.ui.sequence_simulation_widget.time.monotonic",
+        lambda: playback_clock[0],
+    )
+    positions = np.array(
+        [
+            [-0.01, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.01, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+    result = SequenceProbeResult(
+        time_s=np.array([0.0, 0.01]),
+        positions_m=positions,
+        frequency_offsets_hz=np.array([0.0]),
+        magnetization=np.ones((2, 3, 1, 3), dtype=float),
+        metadata={"probe_type": "geometry", "frequency_offsets_ppm": np.array([0.0])},
+    )
+
+    widget.probe_result = result
+    widget._show_probe_result()
+
+    assert "Geometry probe" in widget.probe_info.text()
+    assert widget.probe_spatial_viewer.result is result
+    assert widget.probe_spectrum_viewer.result is result
+    assert widget.probe_spatial_viewer.mxy_plot.listDataItems()
+    assert widget.probe_time_control.isEnabled()
+    assert widget.probe_time_control.time_slider.maximum() == 1
+    assert widget.probe_time_control.time_slider.value() == 1
+
+    widget.probe_time_control.time_slider.setValue(0)
+    assert widget.probe_spectrum_viewer.time_index == 0
+    assert widget.probe_spatial_viewer.time_index == 0
+    assert widget.probe_magnetization_viewer.time_slider.value() == 0
+
+    widget.probe_time_control.speed_spin.setValue(2.5)
+    widget.probe_time_control.play_pause_button.setChecked(True)
+    assert widget.probe_playback_timer.isActive()
+    assert widget.probe_time_control.play_pause_button.text() == "Pause"
+
+    playback_clock[0] += 4.0
+    widget._advance_probe_playback()
+    assert widget.probe_time_control.time_slider.value() == 1
+
+    widget.probe_time_control.reset_button.click()
+    assert not widget.probe_playback_timer.isActive()
+    assert widget.probe_time_control.time_slider.value() == 0
+    assert widget.probe_time_control.play_pause_button.text() == "Play"
 
     widget.close()
     widget.deleteLater()

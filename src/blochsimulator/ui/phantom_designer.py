@@ -229,7 +229,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.x_size = self._percent_spin(50.0)
         self.y_size = self._percent_spin(50.0)
         self.z_size = self._percent_spin(50.0)
-        self.t1_ms = self._number_spin(0.1, 10000.0, 1000.0, " ms")
+        self.t1_ms = self._number_spin(0.1, 500000.0, 1000.0, " ms")
         self.initial_mz = self._number_spin(0.0, 1e9, 1.0, "")
         self.b0_ppm = self._number_spin(-1000.0, 1000.0, 0.0, " ppm")
         for widget in (

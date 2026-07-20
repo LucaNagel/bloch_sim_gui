@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QRectF, Qt, QThread, pyqtSignal
+from PyQt5.QtCore import QRectF, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -56,7 +57,96 @@ from ..sequence import (
 )
 from ..simulator import BlochSimulator, resolve_num_threads
 from ..units import NUCLEUS_GAMMA_HZ_PER_T, ppm_to_hz
+from .controls import UniversalTimeControl
+from .magnetization_viewer import MagnetizationViewer
+from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumViewer
 from .volume_viewer import SequenceResultVolumeViewer
+
+
+def _representative_sample_indices(values, max_samples):
+    """Select raster cells without losing event endpoints or extrema."""
+    values = np.asarray(values)
+    count = int(values.size)
+    max_samples = max(2, int(max_samples))
+    if count <= max_samples:
+        return np.arange(count, dtype=int)
+    base_count = max(2, max_samples - 2)
+    selected = set(np.linspace(0, count - 1, base_count, dtype=int))
+    selected.add(int(np.argmin(values)))
+    selected.add(int(np.argmax(values)))
+    return np.asarray(sorted(selected), dtype=int)
+
+
+def _event_step_plot_data(
+    events,
+    *,
+    samples_attribute,
+    start_s,
+    end_s,
+    scale=1.0,
+    magnitude=False,
+    max_vertices=50000,
+):
+    """Build zoom-aware connected waveforms from canonical sequence events.
+
+    Events are separated by NaNs so silent gaps remain silent. Representative
+    raster samples are connected inside each event, making short RF and
+    gradient events visible even in a long-sequence overview. Per-event extrema
+    are retained, while zoomed ranges expose many more native raster samples.
+    """
+    start_s = float(start_s)
+    end_s = float(end_s)
+    visible = [
+        event for event in events if event.end_s > start_s and event.start_s < end_s
+    ]
+    if not visible:
+        return np.empty(0), np.empty(0)
+    samples_per_event = max(4, int(max_vertices // len(visible)) - 5)
+    x_parts = []
+    y_parts = []
+    for event in visible:
+        raw = np.asarray(getattr(event, samples_attribute))
+        values = np.abs(raw) if magnitude else np.asarray(raw, dtype=float)
+        first = max(0, int(np.floor((start_s - event.start_s) / event.raster_s)))
+        stop = min(
+            values.size,
+            int(np.ceil((end_s - event.start_s) / event.raster_s)),
+        )
+        if stop <= first:
+            continue
+        window = values[first:stop] * float(scale)
+        local_indices = _representative_sample_indices(window, samples_per_event)
+        indices = first + local_indices
+        visible_start = max(event.start_s, start_s)
+        visible_end = min(event.end_s, end_s)
+        sample_centres = np.clip(
+            event.start_s + (indices + 0.5) * event.raster_s,
+            visible_start,
+            visible_end,
+        )
+        x = (
+            np.concatenate(
+                (
+                    [visible_start, visible_start],
+                    sample_centres,
+                    [visible_end, visible_end, np.nan],
+                )
+            )
+            * 1000.0
+        )
+        selected_values = window[local_indices]
+        y = np.concatenate(
+            (
+                [0.0, selected_values[0]],
+                selected_values,
+                [selected_values[-1], 0.0, np.nan],
+            )
+        )
+        x_parts.append(x)
+        y_parts.append(y)
+    if not x_parts:
+        return np.empty(0), np.empty(0)
+    return np.concatenate(x_parts), np.concatenate(y_parts)
 
 
 class SequenceSimulationThread(QThread):
@@ -75,8 +165,8 @@ class SequenceSimulationThread(QThread):
         phantom,
         checkpoints_s,
         signal_weighting="voxel",
-        field_strength_t=3.0,
-        nucleus="H1",
+        field_strength_t=7.0,
+        nucleus="C13",
         live_preview=True,
         chunk_voxels=None,
         simulation_timestep_s=1e-6,
@@ -135,6 +225,65 @@ class SequenceSimulationThread(QThread):
                 self.failed.emit(str(exc))
 
 
+class SequenceProbeThread(QThread):
+    """Run explicit spin probes without blocking Qt."""
+
+    progress = pyqtSignal(int, int)
+    stage = pyqtSignal(str)
+    result_ready = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        simulator,
+        program,
+        positions_m,
+        frequency_offsets_hz,
+        checkpoints_s,
+        t1_s,
+        t2_s,
+        initial_magnetization=(0.0, 0.0, 1.0),
+        simulation_timestep_s=1e-6,
+    ):
+        super().__init__()
+        self.simulator = simulator
+        self.program = program
+        self.positions_m = positions_m
+        self.frequency_offsets_hz = frequency_offsets_hz
+        self.checkpoints_s = checkpoints_s
+        self.t1_s = t1_s
+        self.t2_s = t2_s
+        self.initial_magnetization = initial_magnetization
+        self.simulation_timestep_s = simulation_timestep_s
+        self._cancel_requested = False
+
+    def request_cancel(self):
+        self._cancel_requested = True
+
+    def run(self):
+        try:
+            result = self.simulator.simulate_sequence_probes(
+                self.program,
+                self.positions_m,
+                self.frequency_offsets_hz,
+                checkpoints_s=self.checkpoints_s,
+                t1_s=self.t1_s,
+                t2_s=self.t2_s,
+                initial_magnetization=self.initial_magnetization,
+                progress_callback=lambda done, total: self.progress.emit(done, total),
+                cancel_callback=lambda: self._cancel_requested,
+                status_callback=lambda message: self.stage.emit(message),
+                simulation_timestep_s=self.simulation_timestep_s,
+            )
+            if not self._cancel_requested:
+                self.result_ready.emit(result)
+        except Exception as exc:
+            if self._cancel_requested:
+                self.failed.emit("Probe simulation cancelled")
+            else:
+                self.failed.emit(str(exc))
+
+
 class SequenceSimulationWidget(QWidget):
     """Load/build sequences, configure a 3D object, and inspect sparse output."""
 
@@ -146,8 +295,26 @@ class SequenceSimulationWidget(QWidget):
         self.spectroscopic_acquisition: Optional[SpectroscopicAcquisition] = None
         self.phantom: Optional[Phantom] = None
         self.result = None
+        self.probe_result = None
         self._split_csi_data = None
         self.worker = None
+        self.probe_worker = None
+        self._probe_playback_anchor_wall = None
+        self._probe_playback_anchor_time_ms = None
+        self._sequence_plot_window_s = None
+        self._sequence_plot_pending_window_s = None
+        self._rf_waveform_item = None
+        self._gradient_waveform_items = {}
+        self._sequence_spoiler_markers = []
+        self.probe_playback_timer = QTimer(self)
+        self.probe_playback_timer.setInterval(16)
+        self.probe_playback_timer.timeout.connect(self._advance_probe_playback)
+        self.sequence_plot_refresh_timer = QTimer(self)
+        self.sequence_plot_refresh_timer.setSingleShot(True)
+        self.sequence_plot_refresh_timer.setInterval(60)
+        self.sequence_plot_refresh_timer.timeout.connect(
+            self._refresh_pending_sequence_plot
+        )
         settings = getattr(parent, "app_settings", None)
         self.live_preview_enabled = (
             bool(settings.value("sequence/live_progress_enabled", True, type=bool))
@@ -346,8 +513,8 @@ class SequenceSimulationWidget(QWidget):
         )
         self.object_source.currentIndexChanged.connect(self._object_source_changed)
 
-        output_group = QGroupBox("Sparse output")
-        output_form = QFormLayout(output_group)
+        self.output_group = QGroupBox("Sparse output")
+        output_form = QFormLayout(self.output_group)
         self.checkpoints = QLineEdit()
         self.checkpoints.setPlaceholderText("e.g. 1.0, 5.0 (ms)")
         output_form.addRow("Checkpoints", self.checkpoints)
@@ -395,7 +562,124 @@ class SequenceSimulationWidget(QWidget):
         spectral_point_layout.addWidget(self.spectral_point_slider, 1)
         spectral_point_layout.addWidget(self.spectral_point_selector)
         output_form.addRow("CSI FID sample", spectral_point_control)
-        controls_layout.addWidget(output_group)
+        controls_layout.addWidget(self.output_group)
+        self.output_group.hide()
+
+        self.probe_group = QGroupBox("Spin probes")
+        self.probe_group.setCheckable(True)
+        self.probe_group.setChecked(False)
+        probe_group_layout = QVBoxLayout(self.probe_group)
+        self.probe_controls = QWidget()
+        probe_form = QFormLayout(self.probe_controls)
+        self.probe_points = QSpinBox()
+        self.probe_points.setRange(2, 65536)
+        self.probe_points.setValue(1024)
+        probe_form.addRow("Spectral points", self.probe_points)
+        self.probe_frequency_units = QComboBox()
+        self.probe_frequency_units.addItems(["Hz", "ppm"])
+        self.probe_frequency_units.setCurrentText("Hz")
+        self._probe_frequency_unit = "Hz"
+        self.probe_frequency_units.currentTextChanged.connect(
+            self._probe_frequency_unit_changed
+        )
+        probe_form.addRow("Frequency units", self.probe_frequency_units)
+        self.probe_ppm_min = QDoubleSpinBox()
+        self.probe_ppm_min.setRange(-1e7, 1e7)
+        self.probe_ppm_min.setDecimals(4)
+        self.probe_ppm_min.setValue(-2000.0)
+        self.probe_ppm_min.setSuffix(" Hz")
+        probe_form.addRow("Frequency min", self.probe_ppm_min)
+        self.probe_ppm_max = QDoubleSpinBox()
+        self.probe_ppm_max.setRange(-1e7, 1e7)
+        self.probe_ppm_max.setDecimals(4)
+        self.probe_ppm_max.setValue(2000.0)
+        self.probe_ppm_max.setSuffix(" Hz")
+        probe_form.addRow("Frequency max", self.probe_ppm_max)
+        self.probe_frequency_ppm = QDoubleSpinBox()
+        self.probe_frequency_ppm.setRange(-1e7, 1e7)
+        self.probe_frequency_ppm.setDecimals(4)
+        self.probe_frequency_ppm.setValue(0.0)
+        self.probe_frequency_ppm.setSuffix(" Hz")
+        self.probe_frequency_ppm.setToolTip("Frequency offset used for geometry probes")
+        probe_form.addRow("Single frequency", self.probe_frequency_ppm)
+        self.probe_position_x_mm = QDoubleSpinBox()
+        self.probe_position_y_mm = QDoubleSpinBox()
+        self.probe_position_z_mm = QDoubleSpinBox()
+        for spin in (
+            self.probe_position_x_mm,
+            self.probe_position_y_mm,
+            self.probe_position_z_mm,
+        ):
+            spin.setRange(-1000.0, 1000.0)
+            spin.setDecimals(4)
+            spin.setSuffix(" mm")
+        probe_form.addRow("Position x", self.probe_position_x_mm)
+        probe_form.addRow("Position y", self.probe_position_y_mm)
+        probe_form.addRow("Position z", self.probe_position_z_mm)
+        self.probe_t1_ms = QDoubleSpinBox()
+        self.probe_t1_ms.setRange(0.001, 1e9)
+        self.probe_t1_ms.setDecimals(4)
+        self.probe_t1_ms.setValue(25000.0)
+        self.probe_t1_ms.setSuffix(" ms")
+        probe_form.addRow("Probe T1", self.probe_t1_ms)
+        self.probe_t2_ms = QDoubleSpinBox()
+        self.probe_t2_ms.setRange(0.001, 1e9)
+        self.probe_t2_ms.setDecimals(4)
+        self.probe_t2_ms.setValue(300.0)
+        self.probe_t2_ms.setSuffix(" ms")
+        probe_form.addRow("Probe T2/T2*", self.probe_t2_ms)
+        self.probe_initial_mz = QDoubleSpinBox()
+        self.probe_initial_mz.setRange(0.0, 1e7)
+        self.probe_initial_mz.setDecimals(4)
+        self.probe_initial_mz.setValue(1.0)
+        self.probe_initial_mz.setToolTip(
+            "Initial longitudinal magnetization Mz. Values above one can model "
+            "hyperpolarized starting magnetization."
+        )
+        probe_form.addRow("Initial Mz", self.probe_initial_mz)
+        self.probe_time_points = QSpinBox()
+        self.probe_time_points.setRange(2, 20000)
+        self.probe_time_points.setValue(512)
+        probe_form.addRow("Time samples", self.probe_time_points)
+        self.probe_time_sampling = QComboBox()
+        self.probe_time_sampling.addItems(["RF pulse ends", "Uniform timeline"])
+        self.probe_time_sampling.setToolTip(
+            "RF pulse ends shows the response after each individual RF pulse; "
+            "uniform sampling is intended for continuous playback."
+        )
+        self.probe_time_sampling.currentIndexChanged.connect(
+            lambda index: self.probe_time_points.setEnabled(index == 1)
+        )
+        self.probe_time_points.setEnabled(False)
+        probe_form.addRow("Time sampling", self.probe_time_sampling)
+        self.probe_max_positions = QSpinBox()
+        self.probe_max_positions.setRange(1, 200000)
+        self.probe_max_positions.setValue(8192)
+        self.probe_max_positions.setToolTip(
+            "Maximum active phantom positions used by a geometry probe"
+        )
+        probe_form.addRow("Max geometry positions", self.probe_max_positions)
+        probe_buttons = QWidget()
+        probe_button_layout = QHBoxLayout(probe_buttons)
+        probe_button_layout.setContentsMargins(0, 0, 0, 0)
+        self.run_probe_button = QPushButton("Run spectral probe")
+        self.run_probe_button.clicked.connect(self._run_spectral_probe)
+        self.run_geometry_probe_button = QPushButton("Run geometry probe")
+        self.run_geometry_probe_button.clicked.connect(self._run_geometry_probe)
+        self.cancel_probe_button = QPushButton("Cancel")
+        self.cancel_probe_button.setEnabled(False)
+        self.cancel_probe_button.clicked.connect(self._cancel_probe)
+        probe_button_layout.addWidget(self.run_probe_button)
+        probe_button_layout.addWidget(self.run_geometry_probe_button)
+        probe_button_layout.addWidget(self.cancel_probe_button)
+        probe_form.addRow(probe_buttons)
+        self.probe_status = QLabel("No spin probe result")
+        self.probe_status.setWordWrap(True)
+        probe_form.addRow(self.probe_status)
+        probe_group_layout.addWidget(self.probe_controls)
+        self.probe_controls.setVisible(False)
+        self.probe_group.toggled.connect(self.probe_controls.setVisible)
+        controls_layout.addWidget(self.probe_group)
         controls_layout.addStretch()
 
         run_panel = QGroupBox("Run")
@@ -490,6 +774,8 @@ class SequenceSimulationWidget(QWidget):
         self.gradient_plot.setLabel("left", "Gradient", "kHz/m")
         self.gradient_plot.setLabel("bottom", "Time", "ms")
         self.gradient_plot.addLegend()
+        self.gradient_plot.setXLink(self.rf_plot)
+        self.rf_plot.sigXRangeChanged.connect(self._sequence_plot_range_changed)
         self.rf_progress_cursor = pg.InfiniteLine(
             pos=0.0, angle=90, movable=False, pen=pg.mkPen("y", width=2)
         )
@@ -583,6 +869,44 @@ class SequenceSimulationWidget(QWidget):
 
         self.result_volume_viewer = SequenceResultVolumeViewer()
         views.addTab(self.result_volume_viewer, "Spatial Magnetization")
+
+        probe_page = QWidget()
+        probe_layout = QVBoxLayout(probe_page)
+        self.probe_info = QLabel("Run a spin probe to populate these views")
+        self.probe_info.setWordWrap(True)
+        probe_layout.addWidget(self.probe_info)
+        self.probe_coherence_info = QLabel()
+        self.probe_coherence_info.setWordWrap(True)
+        probe_layout.addWidget(self.probe_coherence_info)
+        self.probe_time_control = UniversalTimeControl()
+        self.probe_time_control.setObjectName("sequence_probe_playback_control")
+        self.probe_time_control.setEnabled(False)
+        self.probe_time_control.time_changed.connect(self._set_probe_time_index)
+        self.probe_time_control.play_pause_button.toggled.connect(
+            self._probe_playback_toggled
+        )
+        self.probe_time_control.reset_button.clicked.connect(self._reset_probe_playback)
+        self.probe_time_control.speed_spin.valueChanged.connect(
+            self._probe_playback_speed_changed
+        )
+        probe_layout.addWidget(self.probe_time_control)
+        self.probe_views = QTabWidget()
+        self.probe_spectrum_viewer = SequenceProbeSpectrumViewer()
+        self.probe_spatial_viewer = SequenceProbeSpatialViewer()
+        self.probe_magnetization_viewer = MagnetizationViewer()
+        self.probe_magnetization_viewer.export_3d_btn.setVisible(False)
+        self.probe_magnetization_viewer.position_changed.connect(
+            self._update_probe_vector
+        )
+        self.probe_magnetization_viewer.view_filter_changed.connect(
+            self._update_probe_vector
+        )
+        self.probe_views.addTab(self.probe_spectrum_viewer, "Spectrum")
+        self.probe_views.addTab(self.probe_spatial_viewer, "Spatial")
+        self.probe_views.addTab(self.probe_magnetization_viewer, "3D Vector")
+        self.probe_views.currentChanged.connect(self._probe_view_changed)
+        probe_layout.addWidget(self.probe_views, 1)
+        views.addTab(probe_page, "Spin Probe")
 
         split_page = QWidget()
         split_page_layout = QVBoxLayout(split_page)
@@ -705,6 +1029,8 @@ class SequenceSimulationWidget(QWidget):
             nucleus_index = self.nucleus.findText(phantom.nucleus)
             if nucleus_index >= 0:
                 self.nucleus.setCurrentIndex(nucleus_index)
+        if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+            self._apply_probe_defaults_from_phantom(phantom)
         t1 = np.asarray(phantom.t1_map)[active] * 1000.0
         t2 = np.asarray(phantom.t2_map)[active] * 1000.0
         fov_cm = " × ".join(f"{value * 100:.4g}" for value in phantom.fov)
@@ -809,6 +1135,7 @@ class SequenceSimulationWidget(QWidget):
             duration_s=duration,
             source="internal-fid",
         )
+        self._apply_probe_defaults_from_program()
         self._configure_frame_selector()
         self._configure_spectroscopy_selectors()
         self._show_program()
@@ -911,6 +1238,8 @@ class SequenceSimulationWidget(QWidget):
                         f"Cartesian: {single_error}; frames: {frame_error}"
                     )
         self._apply_pulseq_fov()
+        self._apply_pulseq_frequency_reference()
+        self._apply_probe_defaults_from_program()
         self.sequence_source.setCurrentIndex(2)
         self._show_program()
         self._configure_frame_selector()
@@ -934,6 +1263,25 @@ class SequenceSimulationWidget(QWidget):
                 self.fov_cm.setValue(float(fov[0]) * 100.0)
         if fov.size >= 3 and np.isfinite(fov[2]) and fov[2] > 0:
             self.fov_z_cm.setValue(float(fov[2]) * 100.0)
+
+    def _apply_pulseq_frequency_reference(self):
+        definitions = {
+            str(key).lower(): value
+            for key, value in self.program.metadata.get("definitions", {}).items()
+        }
+        field_value = definitions.get("fieldstrengtht")
+        try:
+            field_strength = float(np.asarray(field_value).reshape(-1)[0])
+        except (TypeError, ValueError, IndexError):
+            field_strength = np.nan
+        if np.isfinite(field_strength) and field_strength > 0:
+            self.field_strength_t.setValue(field_strength)
+        nucleus_value = definitions.get("nucleus")
+        if nucleus_value is not None:
+            nucleus = str(nucleus_value).strip()
+            nucleus_index = self.nucleus.findText(nucleus)
+            if nucleus_index >= 0:
+                self.nucleus.setCurrentIndex(nucleus_index)
 
     def _show_program(self):
         if self.program is None:
@@ -972,42 +1320,133 @@ class SequenceSimulationWidget(QWidget):
             )
         elif self.acquisition_note:
             acquisition_text = f"\n{self.acquisition_note}"
+        definitions = dict(self.program.metadata.get("definitions", {}))
+        spoiler_end_times = np.asarray(
+            definitions.get("EndImageSpoilerEndTimes", ()), dtype=float
+        ).reshape(-1)
+        spoiler_end_times = spoiler_end_times[np.isfinite(spoiler_end_times)]
+        spoiler_text = ""
+        if spoiler_end_times.size:
+            cycles = definitions.get("EndImageSpoilerCyclesPerFOV", "?")
+            axes = definitions.get("EndImageSpoilerAxes", "xyz")
+            spoiler_text = (
+                f"\nEnd-image spoilers: {spoiler_end_times.size}; "
+                f"{cycles} cycles/FOV on {axes}"
+            )
         self.sequence_info.setText(
             f"{self.program.source}\nDuration: {self.program.duration_s*1000:.3f} ms\n"
             f"Events: {len(self.program.events)}, intervals: {compiled.n_intervals}, "
-            f"ADC samples: {compiled.adc_times_s.size}{acquisition_text}"
+            f"ADC samples: {compiled.adc_times_s.size}{acquisition_text}{spoiler_text}"
         )
         self.rf_plot.clear()
         self.gradient_plot.clear()
-        if compiled.n_intervals:
-            starts = np.concatenate(([0.0], compiled.interval_end_s[:-1])) * 1000
-            ends = compiled.interval_end_s * 1000
-            x = np.column_stack((starts, ends)).ravel()
-            max_points = 20000
-            stride = max(1, int(np.ceil(x.size / max_points)))
-            rf_y = np.repeat(np.abs(compiled.rf_hz), 2)
-            self.rf_plot.plot(x[::stride], rf_y[::stride], pen=pg.mkPen("m"))
-            colors = ("r", "g", "b")
-            for axis, color, values in zip(
-                "xyz", colors, compiled.gradient_hz_per_m.T / 1000.0
-            ):
-                y = np.repeat(values, 2)
-                self.gradient_plot.plot(
-                    x[::stride], y[::stride], pen=pg.mkPen(color), name=f"G{axis}"
-                )
+        self._rf_waveform_item = self.rf_plot.plot(
+            np.empty(0), np.empty(0), pen=pg.mkPen("m", width=1.5)
+        )
+        self._gradient_waveform_items = {
+            axis: self.gradient_plot.plot(
+                np.empty(0),
+                np.empty(0),
+                pen=pg.mkPen(color, width=1.25),
+                name=f"G{axis}",
+            )
+            for axis, color in zip("xyz", ("r", "g", "b"))
+        }
         if compiled.adc_times_s.size:
             self.gradient_plot.plot(
                 compiled.adc_times_s * 1000,
                 np.zeros_like(compiled.adc_times_s),
                 pen=None,
                 symbol="o",
-                symbolSize=4,
-                symbolBrush="y",
+                symbolSize=3,
+                symbolBrush=pg.mkBrush(255, 230, 0, 180),
                 name="ADC",
             )
+        self._sequence_spoiler_markers = []
+        for spoiler_end in spoiler_end_times:
+            marker = pg.InfiniteLine(
+                pos=float(spoiler_end) * 1000.0,
+                angle=90,
+                movable=False,
+                pen=pg.mkPen("#ff9800", width=1.5, style=Qt.DashLine),
+            )
+            marker.setToolTip("End-image spoiler")
+            self.gradient_plot.addItem(marker)
+            self._sequence_spoiler_markers.append(marker)
         self.rf_plot.addItem(self.rf_progress_cursor)
         self.gradient_plot.addItem(self.gradient_progress_cursor)
+        self._sequence_plot_window_s = None
+        duration = max(float(self.program.duration_s), 1e-9)
+        self.rf_plot.setXRange(0.0, duration * 1000.0, padding=0)
+        self._refresh_sequence_waveforms(0.0, duration)
+        if self.program.rf_events:
+            rf_peak = max(
+                float(np.max(np.abs(event.samples_hz)))
+                for event in self.program.rf_events
+            )
+            self.rf_plot.setYRange(0.0, max(rf_peak * 1.05, 1e-9), padding=0)
+        gradient_values = [
+            np.asarray(event.samples_hz_per_m, dtype=float) * 1e-3
+            for event in self.program.gradient_events
+        ]
+        if gradient_values:
+            gradient_limit = max(
+                float(np.max(np.abs(values))) for values in gradient_values
+            )
+            self.gradient_plot.setYRange(
+                -max(gradient_limit * 1.05, 1e-9),
+                max(gradient_limit * 1.05, 1e-9),
+                padding=0,
+            )
         self._set_sequence_cursor(0.0)
+
+    def _sequence_plot_range_changed(self, _view_box, x_range):
+        if self.program is None or x_range is None or len(x_range) != 2:
+            return
+        start_s = max(0.0, float(x_range[0]) / 1000.0)
+        end_s = min(float(self.program.duration_s), float(x_range[1]) / 1000.0)
+        if end_s <= start_s:
+            return
+        self._sequence_plot_pending_window_s = (start_s, end_s)
+        self.sequence_plot_refresh_timer.start()
+
+    def _refresh_pending_sequence_plot(self):
+        if self._sequence_plot_pending_window_s is None:
+            return
+        start_s, end_s = self._sequence_plot_pending_window_s
+        self._sequence_plot_pending_window_s = None
+        self._refresh_sequence_waveforms(start_s, end_s)
+
+    def _refresh_sequence_waveforms(self, start_s, end_s):
+        if self.program is None or self._rf_waveform_item is None:
+            return
+        window = (float(start_s), float(end_s))
+        if self._sequence_plot_window_s is not None and np.allclose(
+            window, self._sequence_plot_window_s, rtol=0.0, atol=1e-12
+        ):
+            return
+        self._sequence_plot_window_s = window
+        rf_x, rf_y = _event_step_plot_data(
+            self.program.rf_events,
+            samples_attribute="samples_hz",
+            start_s=window[0],
+            end_s=window[1],
+            magnitude=True,
+        )
+        self._rf_waveform_item.setData(rf_x, rf_y, connect="finite")
+        gradients = self.program.gradient_events
+        for axis in "xyz":
+            events = tuple(event for event in gradients if event.axis == axis)
+            grad_x, grad_y = _event_step_plot_data(
+                events,
+                samples_attribute="samples_hz_per_m",
+                start_s=window[0],
+                end_s=window[1],
+                scale=1e-3,
+            )
+            self._gradient_waveform_items[axis].setData(
+                grad_x, grad_y, connect="finite"
+            )
 
     def _build_phantom(self):
         if self.object_source.currentIndex() == 0:
@@ -1074,10 +1513,477 @@ class SequenceSimulationWidget(QWidget):
         values = tuple(float(value.strip()) / 1000.0 for value in text.split(","))
         return values
 
+    def _probe_hz_per_ppm(self):
+        return float(
+            ppm_to_hz(
+                1.0,
+                self.field_strength_t.value(),
+                self.nucleus.currentText(),
+            )
+        )
+
+    def _probe_frequency_unit_changed(self, unit):
+        unit = str(unit)
+        previous = getattr(self, "_probe_frequency_unit", unit)
+        if unit == previous:
+            return
+        factor = self._probe_hz_per_ppm()
+        conversion = 1.0 / factor if previous == "Hz" and unit == "ppm" else factor
+        widgets = (self.probe_ppm_min, self.probe_ppm_max, self.probe_frequency_ppm)
+        for spin in widgets:
+            spin.blockSignals(True)
+            spin.setValue(float(spin.value()) * conversion)
+            spin.setSuffix(f" {unit}")
+            spin.blockSignals(False)
+        self._probe_frequency_unit = unit
+
+    def _apply_probe_defaults_from_program(self):
+        if self.program is None or not self.program.rf_events:
+            return
+        definitions = dict(self.program.metadata.get("definitions", {}))
+        centres = np.asarray(
+            [event.frequency_offset_hz for event in self.program.rf_events],
+            dtype=float,
+        )
+        bandwidth_candidates = []
+        for key in ("SpectralRFFWHM", "SpectralRFBandwidthHz"):
+            value = definitions.get(key)
+            try:
+                bandwidth = float(np.asarray(value).reshape(-1)[0])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if np.isfinite(bandwidth) and bandwidth > 0:
+                bandwidth_candidates.append(bandwidth)
+        margin = max([500.0, *bandwidth_candidates])
+        self.probe_frequency_units.setCurrentText("Hz")
+        self.probe_ppm_min.setValue(float(np.min(centres) - margin))
+        self.probe_ppm_max.setValue(float(np.max(centres) + margin))
+
+    def _probe_frequency_axis_hz(self):
+        points = int(self.probe_points.value())
+        frequency_min = float(self.probe_ppm_min.value())
+        frequency_max = float(self.probe_ppm_max.value())
+        if frequency_min >= frequency_max:
+            raise ValueError("probe frequency min must be smaller than max")
+        display_axis = np.linspace(frequency_min, frequency_max, points)
+        if self.probe_frequency_units.currentText() == "Hz":
+            hz_axis = display_axis
+        else:
+            hz_axis = ppm_to_hz(
+                display_axis,
+                self.field_strength_t.value(),
+                self.nucleus.currentText(),
+            )
+        return display_axis, np.asarray(hz_axis, dtype=float)
+
+    def _probe_single_frequency_axis_hz(self):
+        display_axis = np.asarray(
+            [float(self.probe_frequency_ppm.value())], dtype=float
+        )
+        if self.probe_frequency_units.currentText() == "Hz":
+            hz_axis = display_axis
+        else:
+            hz_axis = ppm_to_hz(
+                display_axis,
+                self.field_strength_t.value(),
+                self.nucleus.currentText(),
+            )
+        return display_axis, np.asarray(hz_axis, dtype=float)
+
+    def _probe_checkpoints_s(self):
+        if self.program is None:
+            raise ValueError("Choose or load a sequence first")
+        if self.probe_time_sampling.currentIndex() == 0:
+            checkpoints = [0.0]
+            checkpoints.extend(event.end_s for event in self.program.rf_events)
+            definitions = dict(self.program.metadata.get("definitions", {}))
+            spoiler_times = definitions.get("EndImageSpoilerEndTimes", ())
+            try:
+                checkpoints.extend(np.asarray(spoiler_times, dtype=float).reshape(-1))
+            except (TypeError, ValueError):
+                pass
+            checkpoints.append(float(self.program.duration_s))
+            return np.unique(
+                np.clip(
+                    np.asarray(checkpoints, dtype=float), 0.0, self.program.duration_s
+                )
+            )
+        return np.linspace(
+            0.0,
+            float(self.program.duration_s),
+            int(self.probe_time_points.value()),
+        )
+
+    def _probe_position_m(self):
+        return np.asarray(
+            [
+                [
+                    self.probe_position_x_mm.value() / 1000.0,
+                    self.probe_position_y_mm.value() / 1000.0,
+                    self.probe_position_z_mm.value() / 1000.0,
+                ]
+            ],
+            dtype=float,
+        )
+
+    def _probe_geometry_positions_m(self):
+        if self.phantom is None:
+            raise ValueError(
+                "Choose or build a phantom before running a geometry probe"
+            )
+        positions = np.asarray(getattr(self.phantom, "positions", ()), dtype=float)
+        if positions.ndim != 2 or positions.shape[1] != 3 or positions.shape[0] == 0:
+            raise ValueError("current phantom does not expose 3D spin positions")
+        mask = np.asarray(
+            getattr(self.phantom, "mask", np.ones(positions.shape[0], dtype=bool)),
+            dtype=bool,
+        ).ravel()
+        if mask.size == positions.shape[0]:
+            positions = positions[mask]
+        if positions.shape[0] == 0:
+            raise ValueError("current phantom contains no active spin positions")
+        max_positions = int(self.probe_max_positions.value())
+        if positions.shape[0] > max_positions:
+            indices = np.linspace(0, positions.shape[0] - 1, max_positions, dtype=int)
+            positions = positions[indices]
+        return positions
+
+    def _apply_probe_defaults_from_phantom(self, phantom):
+        if not isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+            return
+        half_bandwidth = float(phantom.spectral_bandwidth_ppm) / 2.0
+        if np.isfinite(half_bandwidth) and half_bandwidth > 0:
+            if self.probe_frequency_units.currentText() == "Hz":
+                half_bandwidth *= self._probe_hz_per_ppm()
+            self.probe_ppm_min.setValue(-half_bandwidth)
+            self.probe_ppm_max.setValue(half_bandwidth)
+        points = int(getattr(phantom, "spectral_points", self.probe_points.value()))
+        if self.probe_points.minimum() <= points <= self.probe_points.maximum():
+            self.probe_points.setValue(points)
+
+    def _can_start_probe(self):
+        if self.program is None:
+            QMessageBox.warning(self, "No sequence", "Choose or load a sequence first.")
+            return False
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.warning(
+                self,
+                "Simulation running",
+                "Wait for the sequence simulation to finish before running a probe.",
+            )
+            return False
+        if self.probe_worker is not None and self.probe_worker.isRunning():
+            QMessageBox.warning(
+                self, "Probe running", "Cancel the current probe first."
+            )
+            return False
+        return True
+
+    def _run_spectral_probe(self):
+        if not self._can_start_probe():
+            return
+        try:
+            display_axis, hz_axis = self._probe_frequency_axis_hz()
+            checkpoints = self._probe_checkpoints_s()
+            positions = self._probe_position_m()
+        except Exception as exc:
+            QMessageBox.critical(self, "Invalid spin probe", str(exc))
+            return
+        self._start_probe(positions, hz_axis, display_axis, checkpoints, "spectral")
+
+    def _run_geometry_probe(self):
+        if not self._can_start_probe():
+            return
+        try:
+            display_axis, hz_axis = self._probe_single_frequency_axis_hz()
+            checkpoints = self._probe_checkpoints_s()
+            positions = self._probe_geometry_positions_m()
+        except Exception as exc:
+            QMessageBox.critical(self, "Invalid geometry probe", str(exc))
+            return
+        self._start_probe(positions, hz_axis, display_axis, checkpoints, "geometry")
+
+    def _start_probe(self, positions, hz_axis, display_axis, checkpoints, label):
+        self._stop_probe_playback()
+        self.probe_time_control.setEnabled(False)
+        self.probe_time_control.set_time_range(None)
+        self.run_probe_button.setEnabled(False)
+        self.run_geometry_probe_button.setEnabled(False)
+        self.cancel_probe_button.setEnabled(True)
+        self.probe_status.setText(f"Preparing {label} probe…")
+        self.probe_result = None
+        self.probe_worker = SequenceProbeThread(
+            self.simulator,
+            self.program,
+            positions,
+            hz_axis,
+            checkpoints,
+            self.probe_t1_ms.value() / 1000.0,
+            self.probe_t2_ms.value() / 1000.0,
+            initial_magnetization=(0.0, 0.0, self.probe_initial_mz.value()),
+            simulation_timestep_s=self.simulation_timestep_us.value() * 1e-6,
+        )
+        self.probe_worker.stage.connect(self._probe_status_update)
+        self.probe_worker.progress.connect(self._probe_progress)
+        self.probe_worker.result_ready.connect(
+            lambda result, axis=display_axis, unit=self.probe_frequency_units.currentText(), mode=label: self._probe_finished(
+                result, axis, unit, mode
+            )
+        )
+        self.probe_worker.failed.connect(self._probe_failed)
+        self.probe_worker.start()
+
+    def _cancel_probe(self):
+        if self.probe_worker is not None:
+            self.probe_worker.request_cancel()
+            self.probe_status.setText("Cancelling spin probe…")
+
+    def _probe_progress(self, done, total):
+        self.probe_status.setText(f"Probe chunk {done}/{total}")
+
+    def _probe_status_update(self, message):
+        message = str(message)
+        self.probe_status.setText(message)
+        logger = getattr(self.window(), "log_message", None)
+        if callable(logger):
+            logger(f"Sequence probe: {message}")
+
+    def _probe_failed(self, message):
+        self.run_probe_button.setEnabled(True)
+        self.run_geometry_probe_button.setEnabled(True)
+        self.cancel_probe_button.setEnabled(False)
+        self.probe_status.setText(message)
+        if message != "Probe simulation cancelled":
+            QMessageBox.critical(self, "Spin probe failed", message)
+
+    def _probe_finished(self, result, frequency_axis, frequency_unit, mode=None):
+        self._stop_probe_playback()
+        self.probe_result = result
+        frequency_axis = np.asarray(frequency_axis, dtype=float)
+        result.metadata["frequency_axis_unit"] = str(frequency_unit)
+        result.metadata[f"frequency_offsets_{str(frequency_unit).lower()}"] = (
+            frequency_axis
+        )
+        if mode is not None:
+            result.metadata["ui_probe_mode"] = str(mode)
+        self.run_probe_button.setEnabled(True)
+        self.run_geometry_probe_button.setEnabled(True)
+        self.cancel_probe_button.setEnabled(False)
+        self.probe_status.setText("Spin probe complete")
+        self._show_probe_result()
+
+    def _show_probe_result(self):
+        result = self.probe_result
+        if result is None or result.time_s.size == 0:
+            return
+        time_ms = result.time_s * 1000.0
+        probe_type = str(result.metadata.get("probe_type", "grid"))
+        if probe_type == "spectral":
+            info = (
+                f"Spectral probe: {result.frequency_offsets_hz.size} frequencies, "
+                f"{result.time_s.size} time samples, "
+                f"{self.field_strength_t.value():.4g} T {self.nucleus.currentText()}"
+            )
+        elif probe_type == "geometry":
+            info = (
+                f"Geometry probe: {result.positions_m.shape[0]} positions, "
+                f"{result.time_s.size} time samples, "
+                f"frequency {result.frequency_offsets_hz[0]:.5g} Hz"
+            )
+        else:
+            info = (
+                f"Spin probe grid: {result.positions_m.shape[0]} positions, "
+                f"{result.frequency_offsets_hz.size} frequencies, "
+                f"{result.time_s.size} time samples"
+            )
+        self.probe_info.setText(info)
+        self.probe_time_control.setEnabled(True)
+        self.probe_time_control.set_time_range(result.time_s)
+        self.probe_spectrum_viewer.set_result(result)
+        self.probe_spatial_viewer.set_result(result)
+        self.probe_magnetization_viewer.last_positions = result.positions_m
+        self.probe_magnetization_viewer.last_frequencies = result.frequency_offsets_hz
+        self.probe_magnetization_viewer.set_selector_limits(
+            result.positions_m.shape[0],
+            result.frequency_offsets_hz.size,
+            disable=False,
+        )
+        mean = result.magnetization.mean(axis=(1, 2))
+        self.probe_magnetization_viewer.set_length_scale(
+            max(1e-9, float(np.nanmax(np.linalg.norm(result.magnetization, axis=-1))))
+        )
+        self.probe_magnetization_viewer.set_preview_data(
+            time_ms,
+            mean[:, 0],
+            mean[:, 1],
+            mean[:, 2],
+        )
+        initial_index = 1 if result.time_s.size > 1 else 0
+        self.probe_time_control.set_time_index(initial_index)
+        self._update_probe_vector(initial_index)
+
+    def _set_probe_time_index(self, time_index):
+        result = self.probe_result
+        if result is None or result.time_s.size == 0:
+            return
+        time_index = int(np.clip(time_index, 0, result.time_s.size - 1))
+        self.probe_time_control.set_time_index(time_index)
+        self._update_probe_vector(time_index)
+        if self.probe_playback_timer.isActive():
+            self._reset_probe_playback_anchor(time_index)
+
+    def _reset_probe_playback_anchor(self, time_index=None):
+        result = self.probe_result
+        if result is None or result.time_s.size == 0:
+            self._probe_playback_anchor_wall = None
+            self._probe_playback_anchor_time_ms = None
+            return
+        if time_index is None:
+            time_index = self.probe_time_control.time_slider.value()
+        time_index = int(np.clip(time_index, 0, result.time_s.size - 1))
+        self._probe_playback_anchor_wall = time.monotonic()
+        self._probe_playback_anchor_time_ms = float(result.time_s[time_index] * 1000.0)
+
+    def _probe_playback_toggled(self, playing):
+        result = self.probe_result
+        if not playing:
+            self._stop_probe_playback()
+            return
+        if result is None or result.time_s.size < 2:
+            self._stop_probe_playback()
+            return
+
+        time_index = self.probe_time_control.time_slider.value()
+        if time_index >= result.time_s.size - 1:
+            time_index = 0
+            self.probe_magnetization_viewer._clear_path()
+            self._set_probe_time_index(time_index)
+        self._reset_probe_playback_anchor(time_index)
+        self.probe_playback_timer.start()
+
+    def _stop_probe_playback(self):
+        self.probe_playback_timer.stop()
+        self._probe_playback_anchor_wall = None
+        self._probe_playback_anchor_time_ms = None
+        if hasattr(self, "probe_time_control"):
+            self.probe_time_control.sync_play_state(False)
+
+    def _reset_probe_playback(self):
+        self._stop_probe_playback()
+        if self.probe_result is None or self.probe_result.time_s.size == 0:
+            return
+        self.probe_magnetization_viewer._clear_path()
+        self._set_probe_time_index(0)
+
+    def _probe_playback_speed_changed(self, _speed):
+        if self.probe_playback_timer.isActive():
+            self._reset_probe_playback_anchor()
+
+    def _advance_probe_playback(self):
+        result = self.probe_result
+        if result is None or result.time_s.size < 2:
+            self._stop_probe_playback()
+            return
+        if (
+            self._probe_playback_anchor_wall is None
+            or self._probe_playback_anchor_time_ms is None
+        ):
+            self._reset_probe_playback_anchor()
+            return
+
+        time_ms = np.asarray(result.time_s, dtype=float) * 1000.0
+        start_ms = float(time_ms[0])
+        end_ms = float(time_ms[-1])
+        duration_ms = end_ms - start_ms
+        if not np.isfinite(duration_ms) or duration_ms <= 0:
+            self._stop_probe_playback()
+            return
+
+        now = time.monotonic()
+        elapsed_s = max(0.0, now - self._probe_playback_anchor_wall)
+        target_ms = self._probe_playback_anchor_time_ms + elapsed_s * max(
+            float(self.probe_time_control.speed_spin.value()), 0.001
+        )
+        if target_ms > end_ms:
+            target_ms = start_ms + (target_ms - start_ms) % duration_ms
+            self._probe_playback_anchor_wall = now
+            self._probe_playback_anchor_time_ms = target_ms
+            self.probe_magnetization_viewer._clear_path()
+
+        time_index = int(np.searchsorted(time_ms, target_ms, side="left"))
+        time_index = min(max(time_index, 0), time_ms.size - 1)
+        if time_index > 0 and abs(target_ms - time_ms[time_index - 1]) < abs(
+            time_ms[time_index] - target_ms
+        ):
+            time_index -= 1
+        if time_index == self.probe_time_control.time_slider.value():
+            return
+        self.probe_time_control.set_time_index(time_index)
+        self._update_probe_vector(time_index)
+
+    def _probe_view_changed(self, _index):
+        if self.probe_result is None or self.probe_result.time_s.size == 0:
+            return
+        self._update_probe_vector(self.probe_time_control.time_slider.value())
+
+    def _update_probe_vector(self, time_index=None):
+        result = self.probe_result
+        if result is None or result.time_s.size == 0:
+            return
+        if time_index is None:
+            time_index = self.probe_magnetization_viewer.time_slider.value()
+        time_index = int(np.clip(time_index, 0, result.time_s.size - 1))
+        coherent = result.coherent_mxy_magnitude[time_index]
+        mean_spin_magnitude = np.mean(np.abs(result.mxy[time_index]), axis=0)
+        if result.positions_m.shape[0] == 1:
+            self.probe_coherence_info.setText(
+                "Single-position probe: a gradient spoiler changes phase but cannot "
+                "reduce the spin's |Mxy|; at position (0, 0, 0) even the gradient "
+                "phase is zero. Use Run geometry probe to inspect coherent spoiling."
+            )
+        else:
+            self.probe_coherence_info.setText(
+                "Coherent ensemble |mean(Mxy)|: "
+                f"{float(np.mean(coherent)):.5g}; mean individual |Mxy|: "
+                f"{float(np.mean(mean_spin_magnitude)):.5g}. "
+                "A working spoiler lowers the coherent value, not each spin magnitude."
+            )
+        self.probe_magnetization_viewer.set_cursor_index(time_index)
+        self.probe_spectrum_viewer.time_index = time_index
+        self.probe_spatial_viewer.time_index = time_index
+
+        current_view = self.probe_views.currentIndex()
+        if current_view == 0:
+            self.probe_spectrum_viewer.refresh()
+            return
+        if current_view == 1:
+            self.probe_spatial_viewer.refresh()
+            return
+
+        frame = result.magnetization[time_index]
+        mode = self.probe_magnetization_viewer.get_view_mode()
+        selector = self.probe_magnetization_viewer.get_selector_index()
+        if mode == "Positions @ freq":
+            index = min(selector, frame.shape[1] - 1)
+            vectors = frame[:, index, :]
+        elif mode == "Freqs @ position":
+            index = min(selector, frame.shape[0] - 1)
+            vectors = frame[index, :, :]
+        else:
+            vectors = frame.reshape(-1, 3)
+        self.probe_magnetization_viewer.update_magnetization(vectors)
+
     def _signal_weighting_mode(self):
         return "voxel_volume" if self.signal_weighting.currentIndex() == 1 else "voxel"
 
     def _run(self):
+        if self.probe_worker is not None and self.probe_worker.isRunning():
+            QMessageBox.warning(
+                self,
+                "Probe running",
+                "Cancel the spin probe before running a sequence simulation.",
+            )
+            return
         if self.sequence_source.currentIndex() == 1:
             self._load_cartesian_epi()
         if self.program is None:

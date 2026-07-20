@@ -2004,6 +2004,150 @@ class BlochSimulator:
 
         return simulate_dynamic_sequence(program, phantom, **kwargs)
 
+    def simulate_sequence_probes(
+        self,
+        program,
+        positions_m,
+        frequency_offsets_hz,
+        *,
+        checkpoints_s,
+        t1_s: float = 25.0,
+        t2_s: float = 0.3,
+        initial_magnetization=(0.0, 0.0, 1.0),
+        chunk_voxels: Optional[int] = None,
+        signal_weighting: str = "voxel",
+        progress_callback=None,
+        preview_callback=None,
+        cancel_callback=None,
+        status_callback=None,
+        simulation_timestep_s=None,
+        sequence_kernel=None,
+    ):
+        """Simulate explicit position/frequency spin probes over a sequence.
+
+        ``positions_m`` is ``(position, xyz)`` and ``frequency_offsets_hz`` is
+        one-dimensional.  The simulator evaluates the Cartesian product of both
+        axes and returns time-resolved magnetization at ``checkpoints_s``.
+        """
+        from .phantom import Phantom
+        from .sequence import SequenceProbeResult, SequenceProgram
+
+        if not isinstance(program, SequenceProgram):
+            raise TypeError(f"program must be SequenceProgram, got {type(program)}")
+        checkpoints = np.asarray(tuple(checkpoints_s), dtype=float)
+        if checkpoints.ndim != 1 or checkpoints.size == 0:
+            raise ValueError("checkpoints_s must contain at least one time point")
+        if not np.all(np.isfinite(checkpoints)):
+            raise ValueError("checkpoints_s must be finite")
+        if np.any(checkpoints < 0) or np.any(checkpoints > program.duration_s):
+            raise ValueError("checkpoints_s values must lie within the sequence")
+
+        positions = np.asarray(positions_m, dtype=float)
+        if positions.ndim == 1:
+            positions = positions.reshape(1, -1)
+        if positions.ndim != 2 or positions.shape[1] != 3:
+            raise ValueError("positions_m must have shape (position, 3)")
+        if positions.shape[0] == 0 or not np.all(np.isfinite(positions)):
+            raise ValueError("positions_m must contain finite positions")
+
+        frequencies = np.asarray(frequency_offsets_hz, dtype=float)
+        if frequencies.ndim == 0:
+            frequencies = frequencies.reshape(1)
+        if frequencies.ndim != 1 or frequencies.size == 0:
+            raise ValueError("frequency_offsets_hz must be a non-empty 1D array")
+        if not np.all(np.isfinite(frequencies)):
+            raise ValueError("frequency_offsets_hz must be finite")
+        if not np.isfinite(t1_s) or t1_s <= 0 or not np.isfinite(t2_s) or t2_s <= 0:
+            raise ValueError("t1_s and t2_s must be positive and finite")
+
+        n_positions = positions.shape[0]
+        n_frequencies = frequencies.size
+        n_spins = n_positions * n_frequencies
+        repeated_positions = np.repeat(positions, n_frequencies, axis=0)
+        tiled_frequencies = np.tile(frequencies, n_positions)
+        m0 = np.asarray(initial_magnetization, dtype=float)
+        if m0.shape == (3,):
+            m0_map = np.broadcast_to(m0, (n_spins, 3)).copy()
+        elif m0.shape == (n_spins, 3):
+            m0_map = m0.copy()
+        else:
+            raise ValueError(
+                "initial_magnetization must have shape (3,) or (n_spins, 3)"
+            )
+        if not np.all(np.isfinite(m0_map)):
+            raise ValueError("initial_magnetization must be finite")
+
+        phantom = Phantom(
+            shape=(n_spins,),
+            fov=(1.0,),
+            t1_map=np.full((n_spins,), float(t1_s), dtype=float),
+            t2_map=np.full((n_spins,), float(t2_s), dtype=float),
+            pd_map=np.ones((n_spins,), dtype=float),
+            chemical_shift_map=tiled_frequencies,
+            m0_map=m0_map,
+            mask=np.ones((n_spins,), dtype=bool),
+            name="Sequence spin probes",
+            metadata={
+                "probe_phantom": True,
+                "n_probe_positions": n_positions,
+                "n_probe_frequencies": n_frequencies,
+            },
+        )
+        # Probe coordinates are not constrained to an axis-aligned grid.
+        phantom.positions = repeated_positions.copy()
+        phantom.x = repeated_positions[:, 0].copy()
+        phantom.y = repeated_positions[:, 1].copy()
+        phantom.z = repeated_positions[:, 2].copy()
+
+        result = self.simulate_sequence(
+            program,
+            phantom,
+            checkpoints_s=tuple(float(value) for value in checkpoints),
+            chunk_voxels=chunk_voxels,
+            signal_weighting=signal_weighting,
+            progress_callback=progress_callback,
+            preview_callback=preview_callback,
+            cancel_callback=cancel_callback,
+            status_callback=status_callback,
+            simulation_timestep_s=simulation_timestep_s,
+            sequence_kernel=sequence_kernel,
+        )
+        if result.checkpoint_magnetization is None:
+            raise RuntimeError("probe simulation did not return checkpoint states")
+        magnetization = np.asarray(result.checkpoint_magnetization).reshape(
+            checkpoints.size,
+            n_positions,
+            n_frequencies,
+            3,
+        )
+        return SequenceProbeResult(
+            time_s=np.asarray(result.checkpoint_times_s, dtype=float),
+            positions_m=positions,
+            frequency_offsets_hz=frequencies,
+            magnetization=magnetization,
+            metadata={
+                "sequence_source": program.source,
+                "sequence_version": program.version,
+                "duration_s": program.duration_s,
+                "n_positions": n_positions,
+                "n_frequencies": n_frequencies,
+                "t1_s": float(t1_s),
+                "t2_s": float(t2_s),
+                "initial_magnetization": (
+                    m0.tolist() if m0.shape == (3,) else "per-spin"
+                ),
+                "simulation_timestep_s": simulation_timestep_s,
+                "sequence_kernel": result.metadata.get("sequence_kernel"),
+                "probe_type": (
+                    "spectral"
+                    if n_positions == 1 and n_frequencies > 1
+                    else (
+                        "geometry" if n_positions > 1 and n_frequencies == 1 else "grid"
+                    )
+                ),
+            },
+        )
+
     def simulate_sequence(
         self,
         program,

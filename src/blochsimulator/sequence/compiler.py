@@ -365,10 +365,17 @@ class SequenceCompiler:
     ) -> np.ndarray:
         if times.size == 0:
             return np.zeros(0, dtype=np.int32)
-        indices = np.searchsorted(boundaries, times, side="left")
-        if np.any(indices >= boundaries.size) or not np.allclose(
-            boundaries[indices], times, rtol=0.0, atol=1e-12
-        ):
+        insertions = np.searchsorted(boundaries, times, side="left")
+        right = np.clip(insertions, 0, boundaries.size - 1)
+        left = np.clip(insertions - 1, 0, boundaries.size - 1)
+        right_distance = np.abs(boundaries[right] - times)
+        left_distance = np.abs(boundaries[left] - times)
+        indices = np.where(left_distance <= right_distance, left, right)
+        tolerance = max(
+            1e-12,
+            32 * np.spacing(max(1.0, abs(float(boundaries[-1])))),
+        )
+        if np.any(np.abs(boundaries[indices] - times) > tolerance):
             raise RuntimeError("compiler failed to place an observation on a boundary")
         if np.any(indices > np.iinfo(np.int32).max):
             raise ValueError("compiled sequence has too many state boundaries")

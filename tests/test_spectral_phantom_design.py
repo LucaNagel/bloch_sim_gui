@@ -144,6 +144,47 @@ def test_spectral_reference_keeps_simulation_offsets_centered_on_zero_ppm():
     assert frequency[-1] == pytest.approx(ppm_to_hz(6.0, 3.0))
 
 
+def test_spectral_preview_uses_absolute_ppm_by_default_and_optional_hz_conversion():
+    design = PhantomDesign(
+        name="C13 pyruvate lactate preview",
+        shape=(2, 2, 2),
+        fov_m=(0.02, 0.02, 0.02),
+        spectral_reference_ppm=171.0,
+        spectral_bandwidth_ppm=30.0,
+        spectral_points=1024,
+        shapes=[
+            ShapeDefinition(
+                name="Mixture",
+                kind="box",
+                peaks=[
+                    SpectralPeakDefinition("Pyruvate", 1.0, 171.0 - 171.0, 0.3),
+                    SpectralPeakDefinition("Lactate", 1.0, 183.35 - 171.0, 0.3),
+                ],
+            )
+        ],
+    )
+    phantom = design.build()
+    ppm_axis, ppm_spectrum = phantom.spectrum_at_ppm((0, 0, 0))
+    hz_axis, hz_spectrum = phantom.spectrum_at(
+        (0, 0, 0),
+        field_strength=7.0,
+        nucleus="C13",
+    )
+
+    assert ppm_axis[0] == pytest.approx(156.0)
+    assert ppm_axis[-1] == pytest.approx(186.0)
+    assert ppm_axis[np.argmax(ppm_spectrum[: ppm_spectrum.size // 2])] == pytest.approx(
+        171.0,
+        abs=0.02,
+    )
+    assert ppm_axis[
+        ppm_spectrum.size // 2 + np.argmax(ppm_spectrum[ppm_spectrum.size // 2 :])
+    ] == pytest.approx(183.35, abs=0.02)
+    assert hz_axis[hz_axis.size // 2] == pytest.approx(0.0, abs=2.0)
+    assert ppm_to_hz(183.35 - 171.0, 7.0, "C13") == pytest.approx(925.0, rel=5e-3)
+    assert hz_spectrum.max() > 0
+
+
 @pytest.mark.parametrize(
     "mode,constant_axis",
     [("linear_x", 0), ("linear_y", 1), ("linear_z", 2), ("radial_xy", 2)],

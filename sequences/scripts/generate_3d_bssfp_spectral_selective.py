@@ -5,7 +5,8 @@ target frequency offset.  This is useful for hyperpolarized 13C simulations
 where separate pyruvate/lactate images are acquired by alternating the RF
 carrier.  The read, phase, and partition gradients are balanced within every
 TR, so the sequence remains a true 3D bSSFP readout rather than a slice-select
-2D acquisition.
+2D acquisition.  A separate end-of-image spoiler is applied after each 3D
+volume; it is deliberately outside the balanced readout train.
 
 Offsets are specified in Hz relative to the sequence centre frequency.  For
 example, pass two offsets for pyruvate and lactate and set ``n_repetition=2``
@@ -43,6 +44,21 @@ def _target_offsets(values: tuple[float, ...]) -> tuple[float, ...]:
     offsets = tuple(float(value) for value in values)
     if not offsets or not np.all(np.isfinite(offsets)):
         raise ValueError("target_frequency_offsets_hz must contain finite values")
+    return offsets
+
+
+def _receiver_offsets(
+    values: tuple[float, ...] | None,
+    *,
+    n_targets: int,
+) -> tuple[float, ...]:
+    if values is None:
+        return ()
+    offsets = tuple(float(value) for value in values)
+    if len(offsets) != n_targets or not np.all(np.isfinite(offsets)):
+        raise ValueError(
+            "receiver_frequency_offsets_hz must contain one finite value per target"
+        )
     return offsets
 
 
@@ -247,6 +263,7 @@ def main(
     n_partition: int = 12,
     n_repetition: int = 2,
     target_frequency_offsets_hz: tuple[float, ...] = (1655.0, -245.0),
+    receiver_frequency_offsets_hz: tuple[float, ...] | None = (925.44725, 0.0),
     target_metabolite_names: tuple[str, ...] = ("Lac", "Py"),
     flip_angle_deg: float | tuple[float, ...] = (90.0, 4.0),
     spectral_rf_duration: float = 2.33e-3,
@@ -265,30 +282,49 @@ def main(
     rf_phase_increment: float = 0.0,
     dummy_repetitions: int = 0,
     use_alpha_half: bool = True,
+    alpha_half_center_spacing: float = 4.31e-3,
+    end_image_spoiler_cycles_per_fov: float = 4.0,
+    end_image_spoiler_duration: float = 1.0e-3,
     use_labels: bool = True,
     v141_compat: bool = True,
     max_grad_mtm: float = 100.0,
     max_slew_tms: float = 1000.0,
+    field_strength_t: float = 7.0,
+    nucleus: str = "C13",
 ):
     """Create a spectrally selective Cartesian 3D bSSFP sequence.
 
-    Parameters are in SI units. ``target_frequency_offsets_hz`` contains the RF
-    and receiver offsets used for spectral selection. The offsets are cycled
-    over ``n_repetition`` dynamic volumes. ``flip_angle_deg`` may be a scalar or
-    a tuple matching ``target_frequency_offsets_hz`` for metabolite-specific
-    nominal flip angles. Defaults follow Skinner et al. 2023 for alternating
+    Parameters are in SI units. ``target_frequency_offsets_hz`` contains the
+    off-resonant RF centre frequencies used for spectral selection.
+    ``receiver_frequency_offsets_hz`` contains the ADC demodulation frequencies;
+    set it to ``None`` to use the RF centre frequencies for legacy behaviour.
+    The offsets are cycled over ``n_repetition`` dynamic volumes.
+    ``flip_angle_deg`` may be a scalar or a tuple matching
+    ``target_frequency_offsets_hz`` for metabolite-specific nominal flip
+    angles. Defaults follow Skinner et al. 2023 for alternating
     lactate/pyruvate 3D bSSFP: TR 6.29 ms, TE TR/2, FOV 56 x 28 x 21 mm3,
     matrix 32 x 16 x 12, 10 kHz readout bandwidth, 2.33 ms SLR RF with
     bandwidth factor 2100 Hz ms, FWHM 900 Hz, and nominal flip angles
-    alpha_Lac=90 degrees and alpha_Py=4 degrees. The bundled default SLR
-    waveform is loaded from ``rfpulses/SLR_sharpness_1.txt`` unless an explicit
-    ``spectral_slr_pulse_path`` is provided.
+    alpha_Lac=90 degrees and alpha_Py=4 degrees. The default receiver offsets
+    demodulate lactate/pyruvate at 183.35/171.0 ppm for 7 T 13C. The bundled
+    default SLR waveform is loaded from ``rfpulses/SLR_sharpness_1.txt`` unless
+    an explicit ``spectral_slr_pulse_path`` is provided.  The default
+    ``alpha_half_center_spacing`` reproduces the reported 4.31 ms separation
+    between the preparation-pulse and first readout-pulse centres.  The
+    end-of-image spoiler dephases by the requested number of cycles across
+    each FOV dimension and is disabled by setting its cycles to zero.
     """
     fov_x, fov_y, fov_z = _as_3d_fov(fov)
     _encoding_areas(n_read, 1.0)  # Validate readout matrix size.
     ky_areas = _encoding_areas(n_phase, 1 / fov_y)
     kz_areas = _encoding_areas(n_partition, 1 / fov_z)
     target_offsets = _target_offsets(target_frequency_offsets_hz)
+    receiver_offsets = _receiver_offsets(
+        receiver_frequency_offsets_hz,
+        n_targets=len(target_offsets),
+    )
+    if not receiver_offsets:
+        receiver_offsets = target_offsets
     target_names = _target_names(target_metabolite_names, n_targets=len(target_offsets))
     target_flip_angles = _target_flip_angles(
         flip_angle_deg,
@@ -315,8 +351,23 @@ def main(
         raise ValueError("target_tr must be positive and finite")
     if not isinstance(dummy_repetitions, (int, np.integer)) or dummy_repetitions < 0:
         raise ValueError("dummy_repetitions must be a non-negative integer")
+    if alpha_half_center_spacing <= 0 or not np.isfinite(alpha_half_center_spacing):
+        raise ValueError("alpha_half_center_spacing must be positive and finite")
+    if end_image_spoiler_cycles_per_fov < 0 or not np.isfinite(
+        end_image_spoiler_cycles_per_fov
+    ):
+        raise ValueError(
+            "end_image_spoiler_cycles_per_fov must be non-negative and finite"
+        )
+    if end_image_spoiler_duration <= 0 or not np.isfinite(end_image_spoiler_duration):
+        raise ValueError("end_image_spoiler_duration must be positive and finite")
     if max_grad_mtm <= 0 or max_slew_tms <= 0:
         raise ValueError("gradient limits must be positive")
+    if field_strength_t <= 0 or not np.isfinite(field_strength_t):
+        raise ValueError("field_strength_t must be positive and finite")
+    nucleus = str(nucleus).strip()
+    if not nucleus:
+        raise ValueError("nucleus must not be empty")
 
     system = pp.Opts(
         max_grad=max_grad_mtm,
@@ -343,6 +394,9 @@ def main(
         for flip_angle in target_flip_angles
     )
     rf = rfs[0]
+    if plot:
+        fig, ax = plt.subplots(1, 1, figsize=(6, 3))
+        ax.plot(np.real(rf.signal))
     if readout_bandwidth_hz is None and adc_dwell is None:
         readout_bandwidth_hz = n_read / 3.8e-3
     adc_dwell = _readout_dwell(
@@ -432,30 +486,47 @@ def main(
     )
     te = tr / 2
 
+    end_image_spoilers = ()
+    if end_image_spoiler_cycles_per_fov > 0:
+        end_image_spoilers = tuple(
+            pp.make_trapezoid(
+                channel=axis,
+                area=end_image_spoiler_cycles_per_fov / axis_fov,
+                duration=end_image_spoiler_duration,
+                system=system,
+            )
+            for axis, axis_fov in zip("xyz", (fov_x, fov_y, fov_z))
+        )
+
+    spoiler_end_times = []
+
     def set_rf_and_adc_offsets(
         rf_event,
         rf_center_value: float,
         base_phase_deg: float,
         target_frequency_hz: float,
+        receiver_frequency_hz: float,
     ):
         base_phase_rad = np.deg2rad(base_phase_deg)
         rf_event.freq_offset = target_frequency_hz
         rf_event.phase_offset = (
             base_phase_rad - 2 * np.pi * target_frequency_hz * rf_center_value
         )
-        adc.freq_offset = target_frequency_hz
+        adc.freq_offset = receiver_frequency_hz
         adc.phase_offset = base_phase_rad
 
     for rep in range(n_repetition):
         target_index = rep % len(target_offsets)
         target_frequency_hz = target_offsets[target_index]
+        receiver_frequency_hz = receiver_offsets[target_index]
         target_name = target_names[target_index]
         target_flip_angle = target_flip_angles[target_index]
         rf_frame = rfs[target_index]
         rf_frame_center, _ = pp.calc_rf_center(rf_frame)
         print(
             f"Spectral frame {rep + 1}/{n_repetition}: "
-            f"{target_name}, RF/ADC offset {target_frequency_hz:.3f} Hz, "
+            f"{target_name}, RF offset {target_frequency_hz:.3f} Hz, "
+            f"receiver offset {receiver_frequency_hz:.3f} Hz, "
             f"flip {target_flip_angle:.3f} deg"
         )
 
@@ -476,10 +547,14 @@ def main(
             rf_alpha_half.phase_offset = (
                 alpha_phase_rad - 2 * np.pi * target_frequency_hz * rf_alpha_half_center
             )
-            alpha_half_delay_value = tr / 2 - pp.calc_duration(rf_alpha_half)
+            alpha_half_delay_value = alpha_half_center_spacing - pp.calc_duration(
+                rf_alpha_half
+            )
             alpha_half_delay_value = np.round(alpha_half_delay_value / raster) * raster
             if alpha_half_delay_value < 0:
-                raise ValueError("TR is too short for alpha/2 preparation")
+                raise ValueError(
+                    "alpha_half_center_spacing is shorter than the alpha/2 RF block"
+                )
             seq.add_block(rf_alpha_half)
             if alpha_half_delay_value > 0:
                 seq.add_block(pp.make_delay(alpha_half_delay_value))
@@ -499,6 +574,7 @@ def main(
                 rf_frame_center,
                 rf_phase,
                 target_frequency_hz,
+                receiver_frequency_hz,
             )
             rf_phase = np.mod(rf_phase + rf_phase_increment, 360.0)
 
@@ -546,6 +622,10 @@ def main(
                     partition_index=partition_index,
                 )
 
+        if end_image_spoilers:
+            seq.add_block(*end_image_spoilers)
+            spoiler_end_times.append(float(seq.duration()[0]))
+
     ok, error_report = seq.check_timing()
     if ok:
         print("Timing check passed successfully")
@@ -568,7 +648,7 @@ def main(
 
     if plot:
         preparation_duration = (
-            tr / 2 + dummy_repetitions * tr
+            alpha_half_center_spacing + dummy_repetitions * tr
             if use_alpha_half
             else dummy_repetitions * tr
         )
@@ -588,8 +668,11 @@ def main(
 
     seq.set_definition(key="FOV", value=[fov_x, fov_y, fov_z])
     seq.set_definition(key="MatrixSize", value=[n_read, n_phase, n_partition])
+    seq.set_definition(key="FieldStrengthT", value=field_strength_t)
+    seq.set_definition(key="Nucleus", value=nucleus)
     seq.set_definition(key="DynamicFrames", value=int(n_repetition))
     seq.set_definition(key="SpectralTargetOffsetsHz", value=list(target_offsets))
+    seq.set_definition(key="SpectralReceiverOffsetsHz", value=list(receiver_offsets))
     seq.set_definition(key="SpectralTargetNames", value=list(target_names))
     seq.set_definition(key="FlipAngleDeg", value=list(target_flip_angles))
     seq.set_definition(key="SpectralRFBandwidthHz", value=spectral_rf_bandwidth_hz)
@@ -599,6 +682,20 @@ def main(
     )
     seq.set_definition(key="SpectralRFFWHM", value=spectral_rf_fwhm_hz)
     seq.set_definition(key="SpectralRFDuration", value=spectral_rf_duration)
+    seq.set_definition(
+        key="AlphaHalfCenterSpacing",
+        value=alpha_half_center_spacing if use_alpha_half else 0.0,
+    )
+    seq.set_definition(
+        key="EndImageSpoilerCyclesPerFOV",
+        value=end_image_spoiler_cycles_per_fov,
+    )
+    seq.set_definition(
+        key="EndImageSpoilerDuration",
+        value=end_image_spoiler_duration,
+    )
+    seq.set_definition(key="EndImageSpoilerAxes", value="xyz")
+    seq.set_definition(key="EndImageSpoilerEndTimes", value=spoiler_end_times)
     seq.set_definition(
         key="SingleMetaboliteAcquisitionTime",
         value=n_phase * n_partition * tr,
@@ -636,7 +733,7 @@ def main(
 
 if __name__ == "__main__":
     main(
-        plot=False,
+        plot=True,
         write_seq=True,
         n_repetition=6,
         # fov = (220e-3, 220e-3, 220e-3),

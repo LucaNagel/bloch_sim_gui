@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
 from pathlib import Path
 
-from .units import NUCLEUS_GAMMA_HZ_PER_T, ppm_to_hz
+from .units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm, ppm_to_hz
 
 # Import base phantom class
 try:
@@ -595,6 +595,23 @@ class SpectralPhantom:
             self.nucleus if nucleus is None else nucleus,
         )
 
+    def get_frequency_offset_ppm(
+        self, name: str, field_strength: Optional[float] = None, nucleus: str = None
+    ) -> float:
+        """Get frequency offset for species in ppm."""
+        species = self.get_species(name)
+        if species is None:
+            return 0.0
+        if species.frequency_offset_hz is None:
+            return float(species.chemical_shift_ppm)
+        return float(
+            hz_to_ppm(
+                species.frequency_offset_hz,
+                self.field_strength if field_strength is None else field_strength,
+                self.nucleus if nucleus is None else nucleus,
+            )
+        )
+
     def get_b0_offset_map_hz(
         self, field_strength: Optional[float] = None, nucleus: str = None
     ) -> np.ndarray:
@@ -611,6 +628,34 @@ class SpectralPhantom:
         if self.b0_map is not None:
             return np.asarray(self.b0_map, dtype=float)
         return np.zeros(self.shape, dtype=float)
+
+    def get_b0_offset_map_ppm(
+        self, field_strength: Optional[float] = None, nucleus: str = None
+    ) -> np.ndarray:
+        """Return the spatial B0 offset in ppm."""
+        if self.b0_map_ppm is not None:
+            return np.asarray(self.b0_map_ppm, dtype=float)
+        if self.b0_map is not None:
+            return np.asarray(
+                hz_to_ppm(
+                    self.b0_map,
+                    self.field_strength if field_strength is None else field_strength,
+                    self.nucleus if nucleus is None else nucleus,
+                ),
+                dtype=float,
+            )
+        return np.zeros(self.shape, dtype=float)
+
+    @property
+    def df_map_ppm(self) -> np.ndarray:
+        """Concentration-weighted mean frequency map in ppm for visualization."""
+        total_conc = self.get_total_concentration()
+        df = np.zeros(self.shape, dtype=float)
+        for species in self.species:
+            c = self.concentration_maps[species.name]
+            weight = c / np.maximum(total_conc, 1e-10)
+            df += weight * self.get_frequency_offset_ppm(species.name)
+        return df + self.get_b0_offset_map_ppm()
 
     def get_total_concentration(self) -> np.ndarray:
         """Get sum of all species concentrations."""
@@ -642,6 +687,8 @@ class SpectralPhantom:
         index: Tuple[int, ...],
         frequency_hz: Optional[np.ndarray] = None,
         points: Optional[int] = None,
+        field_strength: Optional[float] = None,
+        nucleus: str = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Return the Lorentzian spectrum at one spatial voxel.
 
@@ -651,8 +698,17 @@ class SpectralPhantom:
         """
         if len(index) != self.ndim:
             raise ValueError("index dimensionality must match spectral phantom")
+        effective_field = (
+            self.field_strength if field_strength is None else float(field_strength)
+        )
+        effective_nucleus = self.nucleus if nucleus is None else str(nucleus)
         centres = np.asarray(
-            [self.get_frequency_offset(species.name) for species in self.species]
+            [
+                self.get_frequency_offset(
+                    species.name, effective_field, effective_nucleus
+                )
+                for species in self.species
+            ]
         )
         widths = np.asarray(
             [1.0 / (np.pi * species.t2_star) for species in self.species]
@@ -663,8 +719,8 @@ class SpectralPhantom:
             half_bandwidth_hz = float(
                 ppm_to_hz(
                     self.spectral_bandwidth_ppm / 2.0,
-                    self.field_strength,
-                    self.nucleus,
+                    effective_field,
+                    effective_nucleus,
                 )
             )
             frequency_hz = np.linspace(
@@ -674,7 +730,7 @@ class SpectralPhantom:
             )
         frequency_hz = np.asarray(frequency_hz, dtype=float)
         spectrum = np.zeros(frequency_hz.shape, dtype=float)
-        b0 = float(self.get_b0_offset_map_hz()[index])
+        b0 = float(self.get_b0_offset_map_hz(effective_field, effective_nucleus)[index])
         for species, centre, fwhm in zip(self.species, centres, widths):
             amplitude = float(self.concentration_maps[species.name][index])
             amplitude *= float(self.initial_mz_maps[species.name][index])
@@ -683,6 +739,79 @@ class SpectralPhantom:
                 1.0 + ((frequency_hz - (centre + b0)) / half_width) ** 2
             )
         return frequency_hz, spectrum
+
+    def spectrum_at_ppm(
+        self,
+        index: Tuple[int, ...],
+        frequency_ppm: Optional[np.ndarray] = None,
+        points: Optional[int] = None,
+        *,
+        absolute: bool = True,
+        linewidth_field_strength: Optional[float] = None,
+        nucleus: str = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Return the Lorentzian spectrum on a ppm axis.
+
+        Peak positions and B0 offsets remain field-independent ppm values.
+        T2* linewidths are converted from Hz to ppm using the supplied field
+        and nucleus only for display.
+        """
+        if len(index) != self.ndim:
+            raise ValueError("index dimensionality must match spectral phantom")
+        if points is None:
+            points = self.spectral_points
+        if frequency_ppm is None:
+            centre = self.spectral_reference_ppm if absolute else 0.0
+            half_bandwidth_ppm = self.spectral_bandwidth_ppm / 2.0
+            frequency_ppm = np.linspace(
+                centre - half_bandwidth_ppm,
+                centre + half_bandwidth_ppm,
+                int(points),
+            )
+        frequency_ppm = np.asarray(frequency_ppm, dtype=float)
+        relative_frequency_ppm = (
+            frequency_ppm - self.spectral_reference_ppm if absolute else frequency_ppm
+        )
+        effective_field = (
+            self.field_strength
+            if linewidth_field_strength is None
+            else float(linewidth_field_strength)
+        )
+        effective_nucleus = self.nucleus if nucleus is None else str(nucleus)
+        centres = np.asarray(
+            [
+                self.get_frequency_offset_ppm(
+                    species.name, effective_field, effective_nucleus
+                )
+                for species in self.species
+            ]
+        )
+        widths_ppm = np.abs(
+            np.asarray(
+                [
+                    hz_to_ppm(
+                        1.0 / (np.pi * species.t2_star),
+                        effective_field,
+                        effective_nucleus,
+                    )
+                    for species in self.species
+                ],
+                dtype=float,
+            )
+        )
+        b0_ppm = float(
+            self.get_b0_offset_map_ppm(effective_field, effective_nucleus)[index]
+        )
+        spectrum = np.zeros(frequency_ppm.shape, dtype=float)
+        for species, centre, fwhm_ppm in zip(self.species, centres, widths_ppm):
+            amplitude = float(self.concentration_maps[species.name][index])
+            amplitude *= float(self.initial_mz_maps[species.name][index])
+            half_width_ppm = max(fwhm_ppm / 2.0, np.finfo(float).eps)
+            spectrum += amplitude / (
+                1.0
+                + ((relative_frequency_ppm - (centre + b0_ppm)) / half_width_ppm) ** 2
+            )
+        return frequency_ppm, spectrum
 
     def to_component_phantoms(
         self, field_strength: Optional[float] = None, nucleus: str = None

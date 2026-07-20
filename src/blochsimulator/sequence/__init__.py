@@ -12,6 +12,7 @@ from .acquisition import (
 )
 from .compiler import CompiledSequence, SequenceCompiler
 from .model import ADCEvent, GradientEvent, RFEvent, SequenceProgram
+from .probe import SequenceProbeResult
 from .result import SequenceSimulationResult
 from .bruker_export import BrukerExportOptions, export_bruker_raw
 
@@ -31,6 +32,7 @@ __all__ = [
     "GradientEvent",
     "RFEvent",
     "SequenceCompiler",
+    "SequenceProbeResult",
     "SequenceProgram",
     "SequenceSimulationResult",
     "BrukerExportOptions",

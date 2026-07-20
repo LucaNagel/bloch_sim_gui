@@ -245,6 +245,88 @@ def test_multi_rx_chunking_and_openmp_do_not_change_signal():
     assert np.allclose(serial.final_magnetization, parallel.final_magnetization)
 
 
+def test_sequence_spectral_probe_tracks_frequency_axis():
+    program = SequenceProgram((), duration_s=0.01)
+    frequencies = np.array([-100.0, 0.0, 100.0])
+    checkpoints = np.array([0.0, 0.005, 0.01])
+
+    result = BlochSimulator(use_parallel=False).simulate_sequence_probes(
+        program,
+        positions_m=np.array([[0.0, 0.0, 0.0]]),
+        frequency_offsets_hz=frequencies,
+        checkpoints_s=checkpoints,
+        t1_s=1e9,
+        t2_s=1e9,
+        initial_magnetization=(1.0, 0.0, 0.0),
+    )
+
+    assert result.magnetization.shape == (3, 1, 3, 3)
+    assert np.allclose(result.positions_m, [[0.0, 0.0, 0.0]])
+    assert result.frequency_offsets_hz == pytest.approx(frequencies)
+    transverse = result.mx[:, 0, :] + 1j * result.my[:, 0, :]
+    expected = np.exp(-1j * 2 * np.pi * checkpoints[:, None] * frequencies[None, :])
+    assert transverse == pytest.approx(expected, abs=1e-8)
+    assert result.metadata["probe_type"] == "spectral"
+    dataset = result.to_xarray()
+    assert dataset["magnetization"].dims == (
+        "time",
+        "position",
+        "frequency",
+        "component",
+    )
+
+
+def test_sequence_probe_accepts_large_initial_magnetization():
+    program = SequenceProgram((), duration_s=0.0)
+    initial_mz = 1e7
+
+    result = BlochSimulator(use_parallel=False).simulate_sequence_probes(
+        program,
+        positions_m=np.array([[0.0, 0.0, 0.0]]),
+        frequency_offsets_hz=np.array([0.0]),
+        checkpoints_s=(0.0,),
+        t1_s=1e9,
+        t2_s=1e9,
+        initial_magnetization=(0.0, 0.0, initial_mz),
+    )
+
+    assert result.mz[0, 0, 0] == pytest.approx(initial_mz)
+    assert result.metadata["initial_magnetization"] == pytest.approx(
+        [0.0, 0.0, initial_mz]
+    )
+
+
+def test_sequence_geometry_probe_preserves_explicit_positions():
+    program = SequenceProgram(
+        (GradientEvent("x", 0.0, np.array([100.0]), 0.01),),
+        duration_s=0.01,
+    )
+    positions = np.array([[-0.01, 0.0, 0.0], [0.0, 0.0, 0.0], [0.01, 0.0, 0.0]])
+
+    result = BlochSimulator(use_parallel=False).simulate_sequence_probes(
+        program,
+        positions_m=positions,
+        frequency_offsets_hz=np.array([0.0]),
+        checkpoints_s=(0.01,),
+        t1_s=1e9,
+        t2_s=1e9,
+        initial_magnetization=(1.0, 0.0, 0.0),
+    )
+
+    assert result.magnetization.shape == (1, 3, 1, 3)
+    assert np.allclose(result.positions_m, positions)
+    transverse = result.mx[0, :, 0] + 1j * result.my[0, :, 0]
+    expected = np.exp(-1j * 2 * np.pi * 100.0 * positions[:, 0] * 0.01)
+    assert transverse == pytest.approx(expected, abs=1e-8)
+    assert result.metadata["probe_type"] == "geometry"
+    assert result.coherent_mxy[0, 0] == pytest.approx(np.mean(expected), abs=1e-8)
+    assert result.coherent_mxy_magnitude[0, 0] == pytest.approx(
+        abs(np.mean(expected)), abs=1e-8
+    )
+    dataset = result.to_xarray()
+    assert dataset["coherent_mxy_magnitude"].dims == ("time", "frequency")
+
+
 @pytest.mark.parametrize("relaxation_model", ["uniform", "discrete", "continuous"])
 def test_optimized_sequence_kernel_matches_reference(relaxation_model):
     """Keep the optimized native path tied to the reference implementation."""
