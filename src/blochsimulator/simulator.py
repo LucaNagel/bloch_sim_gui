@@ -2002,6 +2002,7 @@ class BlochSimulator:
         """Simulate a regional two-pool hyperpolarized dynamic phantom."""
         from .dynamic_phantom import simulate_dynamic_sequence
 
+        kwargs.setdefault("sequence_kernel", self.sequence_kernel)
         return simulate_dynamic_sequence(program, phantom, **kwargs)
 
     def simulate_sequence_probes(
@@ -2361,8 +2362,10 @@ class BlochSimulator:
         signal = coil_signal[0] if n_rx_coils == 1 else coil_signal
         from .sequence import AcquisitionDimensions
         from .sequence.acquisition import (
+            CartesianAcquisitionFrames,
             infer_cartesian_acquisition,
             infer_cartesian_acquisition_frames,
+            infer_cartesian_acquisition_volumes,
             infer_spectroscopic_acquisition,
         )
 
@@ -2384,6 +2387,9 @@ class BlochSimulator:
             ):
                 cartesian_metadata = program_acquisition
         cartesian_frame_metadata = program.metadata.get("cartesian_acquisition_frames")
+        cartesian_volume_metadata = program.metadata.get(
+            "cartesian_acquisition_volumes"
+        )
         if spectroscopic_metadata is None and cartesian_metadata is None:
             try:
                 cartesian_metadata = infer_cartesian_acquisition(
@@ -2397,6 +2403,22 @@ class BlochSimulator:
                         ).to_metadata()
                     except ValueError:
                         cartesian_frame_metadata = None
+        if (
+            spectroscopic_metadata is None
+            and cartesian_metadata is None
+            and cartesian_frame_metadata is not None
+            and cartesian_volume_metadata is None
+        ):
+            try:
+                cartesian_volume_metadata = infer_cartesian_acquisition_volumes(
+                    program,
+                    compiled=compiled,
+                    frames=CartesianAcquisitionFrames.from_metadata(
+                        cartesian_frame_metadata
+                    ),
+                ).to_metadata()
+            except ValueError:
+                cartesian_volume_metadata = None
         result = SequenceSimulationResult(
             signal=signal,
             adc_times_s=compiled.adc_times_s,
@@ -2427,6 +2449,7 @@ class BlochSimulator:
                 "spectroscopic_acquisition": spectroscopic_metadata,
                 "cartesian_acquisition": cartesian_metadata,
                 "cartesian_acquisition_frames": cartesian_frame_metadata,
+                "cartesian_acquisition_volumes": cartesian_volume_metadata,
                 "sequence_definitions": dict(program.metadata.get("definitions", {})),
                 "units": {
                     "time": "s",
