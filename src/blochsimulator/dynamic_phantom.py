@@ -890,10 +890,18 @@ def _longitudinal_step(
     source_start=None,
     source_end=None,
     prepared=None,
+    scratch=None,
 ):
     if duration == 0:
         return
-    pyruvate = state[0, :, 2].copy()
+    if scratch is None:
+        pyruvate = state[0, :, 2].copy()
+        transfer = np.empty_like(pyruvate)
+        regular_mode = 0
+        decay_delta = None
+    else:
+        pyruvate, transfer, decay_delta, regular_mode = scratch
+        np.copyto(pyruvate, state[0, :, 2])
     lactate = state[1, :, 2]
     with_source = source_start is not None or source_end is not None
     if prepared is None:
@@ -905,16 +913,36 @@ def _longitudinal_step(
             with_source=with_source,
         )
     exp_a, exp_b, difference, regular, source_coefficients = prepared
-    transfer = np.empty_like(pyruvate)
-    transfer[regular] = (
-        kpl[regular]
-        * pyruvate[regular]
-        * (exp_b - exp_a[regular])
-        / difference[regular]
-    )
-    transfer[~regular] = kpl[~regular] * pyruvate[~regular] * duration * exp_b
-    pyruvate_next = pyruvate * exp_a
-    lactate_next = lactate * exp_b + transfer
+    if scratch is None:
+        transfer[regular] = (
+            kpl[regular]
+            * pyruvate[regular]
+            * (exp_b - exp_a[regular])
+            / difference[regular]
+        )
+        transfer[~regular] = kpl[~regular] * pyruvate[~regular] * duration * exp_b
+        pyruvate_next = pyruvate * exp_a
+        lactate_next = lactate * exp_b + transfer
+    else:
+        np.multiply(kpl, pyruvate, out=transfer)
+        if regular_mode == 1:
+            np.subtract(exp_b, exp_a, out=decay_delta)
+            np.multiply(transfer, decay_delta, out=transfer)
+            np.divide(transfer, difference, out=transfer)
+        elif regular_mode == -1:
+            np.multiply(transfer, duration, out=transfer)
+            np.multiply(transfer, exp_b, out=transfer)
+        else:
+            np.subtract(exp_b, exp_a, out=decay_delta)
+            transfer[regular] = (
+                transfer[regular] * decay_delta[regular] / difference[regular]
+            )
+            transfer[~regular] = transfer[~regular] * duration * exp_b
+        pyruvate_next = state[0, :, 2]
+        np.multiply(pyruvate, exp_a, out=pyruvate_next)
+        lactate_next = lactate
+        np.multiply(lactate_next, exp_b, out=lactate_next)
+        np.add(lactate_next, transfer, out=lactate_next)
 
     if source_start is not None or source_end is not None:
         if source_start is None:
@@ -1056,19 +1084,26 @@ def _free_step(
     source_end=None,
     transverse_factors=None,
     longitudinal_prepared=None,
+    transverse_state=None,
+    longitudinal_scratch=None,
 ):
     if duration == 0:
         return
     for pool in range(2):
-        transverse = state[pool, :, 0] + 1j * state[pool, :, 1]
+        transverse = (
+            state[pool, :, 0] + 1j * state[pool, :, 1]
+            if transverse_state is None
+            else transverse_state[pool]
+        )
         factor = (
             np.exp(-duration / t2[pool] - 2j * np.pi * phase_cycles[pool])
             if transverse_factors is None
             else transverse_factors[pool]
         )
         transverse *= factor
-        state[pool, :, 0] = transverse.real
-        state[pool, :, 1] = transverse.imag
+        if transverse_state is None:
+            state[pool, :, 0] = transverse.real
+            state[pool, :, 1] = transverse.imag
     _longitudinal_step(
         state,
         kpl,
@@ -1078,6 +1113,7 @@ def _free_step(
         source_start=source_start,
         source_end=source_end,
         prepared=longitudinal_prepared,
+        scratch=longitudinal_scratch,
     )
 
 
@@ -1155,6 +1191,9 @@ def simulate_dynamic_sequence(
     state = phantom.initial_magnetization.reshape(2, phantom.nvoxels, 3)[
         :, active
     ].copy()
+    transverse_state = (
+        state[:, :, 0] + 1j * state[:, :, 1] if sequence_kernel == "optimized" else None
+    )
     positions = phantom.positions[active]
     kpl = phantom.kpl_map_s_inv.ravel()[active]
     b0 = phantom.b0_offset_hz(field, effective_nucleus).ravel()[active]
@@ -1185,6 +1224,11 @@ def simulate_dynamic_sequence(
     adc_cursor = 0
     checkpoint_cursor = 0
 
+    def sync_transverse_to_state():
+        if transverse_state is not None:
+            state[:, :, 0] = transverse_state.real
+            state[:, :, 1] = transverse_state.imag
+
     def observe(state_index):
         nonlocal adc_cursor, checkpoint_cursor
         while (
@@ -1193,16 +1237,20 @@ def simulate_dynamic_sequence(
         ):
             demodulation = compiled.adc_demodulation[adc_cursor]
             for pool in range(2):
+                transverse = (
+                    state[pool, :, 0] + 1j * state[pool, :, 1]
+                    if transverse_state is None
+                    else transverse_state[pool]
+                )
                 species_signal[pool, adc_cursor] = (
-                    np.sum(state[pool, :, 0] + 1j * state[pool, :, 1])
-                    * signal_scale
-                    * demodulation
+                    np.sum(transverse) * signal_scale * demodulation
                 )
             adc_cursor += 1
         while (
             checkpoint_cursor < compiled.checkpoint_state_indices.size
             and compiled.checkpoint_state_indices[checkpoint_cursor] == state_index
         ):
+            sync_transverse_to_state()
             checkpoint_states[checkpoint_cursor] = state
             checkpoint_cursor += 1
 
@@ -1213,8 +1261,22 @@ def simulate_dynamic_sequence(
         _BoundedArrayCache(16 * 1024**2) if sequence_kernel == "optimized" else None
     )
     transverse_cache = (
-        _BoundedArrayCache(48 * 1024**2)
-        if sequence_kernel == "optimized" and phantom.dynamic_b0 is None
+        _BoundedArrayCache(48 * 1024**2) if sequence_kernel == "optimized" else None
+    )
+    longitudinal_regular = np.abs(r1[0] + kpl - r1[1]) > 1e-12
+    regular_mode = (
+        1
+        if np.all(longitudinal_regular)
+        else -1 if not np.any(longitudinal_regular) else 0
+    )
+    longitudinal_scratch = (
+        (
+            np.empty_like(kpl),
+            np.empty_like(kpl),
+            np.empty_like(kpl),
+            regular_mode,
+        )
+        if sequence_kernel == "optimized"
         else None
     )
     interval_start = 0.0
@@ -1293,72 +1355,62 @@ def simulate_dynamic_sequence(
             first_phase_duration = interval_mid - interval_start
             second_phase_duration = interval_end - interval_mid
             if phantom.dynamic_b0 is None:
-                gradient_key = tuple(float(value) for value in gradient)
-                first_transverse_key = (
-                    float(half_duration),
-                    float(first_phase_duration),
-                    gradient_key,
-                )
-                second_transverse_key = (
-                    float(half_duration),
-                    float(second_phase_duration),
-                    gradient_key,
-                )
-                first_transverse_factors = transverse_cache.get(first_transverse_key)
-                second_transverse_factors = transverse_cache.get(second_transverse_key)
-                static_frequencies = None
-                if (
-                    first_transverse_factors is None
-                    or second_transverse_factors is None
-                ):
-                    gradient_frequency = positions @ gradient
-                    static_frequencies = (
-                        b0[None, :]
-                        + pool_offsets[:, None]
-                        + gradient_frequency[None, :]
-                    )
-                if first_transverse_factors is None:
-                    first_phase = static_frequencies * first_phase_duration
-                    first_transverse_factors = _prepare_transverse_factors(
-                        first_phase, t2, half_duration
-                    )
-                    transverse_cache.put(first_transverse_key, first_transverse_factors)
-                if first_transverse_key == second_transverse_key:
-                    second_transverse_factors = first_transverse_factors
-                elif second_transverse_factors is None:
-                    second_phase = static_frequencies * second_phase_duration
-                    second_transverse_factors = _prepare_transverse_factors(
-                        second_phase, t2, half_duration
-                    )
-                    transverse_cache.put(
-                        second_transverse_key, second_transverse_factors
-                    )
-                first_phase = second_phase = None
+                first_dynamic_integral = second_dynamic_integral = None
             else:
+                first_dynamic_integral = phantom.dynamic_b0.offset_curve_hz.integral(
+                    interval_start, interval_mid
+                )
+                second_dynamic_integral = phantom.dynamic_b0.offset_curve_hz.integral(
+                    interval_mid, interval_end
+                )
+            gradient_key = tuple(float(value) for value in gradient)
+            first_transverse_key = (
+                float(half_duration),
+                float(first_phase_duration),
+                gradient_key,
+                first_dynamic_integral,
+            )
+            second_transverse_key = (
+                float(half_duration),
+                float(second_phase_duration),
+                gradient_key,
+                second_dynamic_integral,
+            )
+            first_transverse_factors = transverse_cache.get(first_transverse_key)
+            second_transverse_factors = transverse_cache.get(second_transverse_key)
+            static_frequencies = None
+            if first_transverse_factors is None or second_transverse_factors is None:
                 gradient_frequency = positions @ gradient
                 static_frequencies = (
                     b0[None, :] + pool_offsets[:, None] + gradient_frequency[None, :]
                 )
+            if first_transverse_factors is None:
                 first_phase = static_frequencies * first_phase_duration
-                first_dynamic_integral = phantom.dynamic_b0.offset_curve_hz.integral(
-                    interval_start, interval_mid
+                if first_dynamic_integral is not None:
+                    first_phase = first_phase + (
+                        dynamic_b0_pool_scale
+                        * dynamic_b0_scale[None, :]
+                        * first_dynamic_integral
+                    )
+                first_transverse_factors = _prepare_transverse_factors(
+                    first_phase, t2, half_duration
                 )
-                first_phase = first_phase + (
-                    dynamic_b0_pool_scale
-                    * dynamic_b0_scale[None, :]
-                    * first_dynamic_integral
-                )
+                transverse_cache.put(first_transverse_key, first_transverse_factors)
+            if first_transverse_key == second_transverse_key:
+                second_transverse_factors = first_transverse_factors
+            elif second_transverse_factors is None:
                 second_phase = static_frequencies * second_phase_duration
-                second_dynamic_integral = phantom.dynamic_b0.offset_curve_hz.integral(
-                    interval_mid, interval_end
+                if second_dynamic_integral is not None:
+                    second_phase = second_phase + (
+                        dynamic_b0_pool_scale
+                        * dynamic_b0_scale[None, :]
+                        * second_dynamic_integral
+                    )
+                second_transverse_factors = _prepare_transverse_factors(
+                    second_phase, t2, half_duration
                 )
-                second_phase = second_phase + (
-                    dynamic_b0_pool_scale
-                    * dynamic_b0_scale[None, :]
-                    * second_dynamic_integral
-                )
-                first_transverse_factors = None
-                second_transverse_factors = None
+                transverse_cache.put(second_transverse_key, second_transverse_factors)
+            first_phase = second_phase = None
 
             if phantom.pyruvate_inflow is None:
                 source_start = source_mid = source_end = None
@@ -1381,9 +1433,13 @@ def simulate_dynamic_sequence(
                 source_mid,
                 transverse_factors=first_transverse_factors,
                 longitudinal_prepared=longitudinal_prepared,
+                transverse_state=transverse_state,
+                longitudinal_scratch=longitudinal_scratch,
             )
             if compiled.rf_hz[interval] != 0.0:
+                sync_transverse_to_state()
                 _rf_rotate(state, compiled.rf_hz[interval], dt)
+                transverse_state[:] = state[:, :, 0] + 1j * state[:, :, 1]
             if phantom.pyruvate_inflow is not None:
                 mid_value, end_value = (
                     phantom.pyruvate_inflow.rate_curve_s_inv.interval_values(
@@ -1403,6 +1459,8 @@ def simulate_dynamic_sequence(
                 source_end,
                 transverse_factors=second_transverse_factors,
                 longitudinal_prepared=longitudinal_prepared,
+                transverse_state=transverse_state,
+                longitudinal_scratch=longitudinal_scratch,
             )
         observe(interval + 1)
         interval_start = interval_end
@@ -1413,6 +1471,7 @@ def simulate_dynamic_sequence(
         if preview_callback is not None and interval + 1 == interval_count:
             preview_callback(1.0, species_signal.sum(axis=0))
 
+    sync_transverse_to_state()
     final_pool = np.zeros((2, phantom.nvoxels, 3), dtype=np.float64)
     final_pool[:, active] = state
     final_pool = final_pool.reshape((2,) + phantom.shape + (3,))

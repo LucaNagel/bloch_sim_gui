@@ -222,8 +222,17 @@ def test_dynamic_sequence_returns_pool_resolved_adc_and_xarray():
 
 
 @pytest.mark.parametrize("with_drivers", [False, True])
-def test_optimized_dynamic_kernel_is_bitwise_equal_to_reference(with_drivers):
-    phantom = _dynamic_phantom()
+@pytest.mark.parametrize(
+    "kpl",
+    [
+        (0.0, 0.1),
+        (1.0 / 25.0 - 1.0 / 30.0, 0.1),
+        (1.0 / 25.0 - 1.0 / 30.0,) * 2,
+    ],
+    ids=("regular", "mixed-rates", "equal-rates"),
+)
+def test_optimized_dynamic_kernel_is_bitwise_equal_to_reference(with_drivers, kpl):
+    phantom = _dynamic_phantom(kpl)
     raster = 20e-6
     if with_drivers:
         phantom.pyruvate_inflow = PyruvateInflow(
