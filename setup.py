@@ -27,6 +27,8 @@ is_linux = platform.system() == "Linux"
 extra_compile_args = []
 extra_link_args = []
 define_macros = []
+strict_compile_args = []
+strict_link_args = []
 
 # Architecture optimization flags
 arch_flags = []
@@ -37,10 +39,14 @@ if is_emscripten:
     # Disable OpenMP for initial compatibility (single-threaded)
     extra_compile_args = ["-O3", "-ffast-math"]
     extra_link_args = ["-lm"]
+    strict_compile_args = ["-O3", "-fno-fast-math", "-ffp-contract=off"]
+    strict_link_args = ["-lm"]
 elif is_windows:
     # Windows with MSVC
     extra_compile_args = ["/openmp", "/O2"]
     extra_link_args = []
+    strict_compile_args = ["/openmp", "/O2", "/fp:strict"]
+    strict_link_args = []
 elif is_mac:
     # macOS with clang; try OpenMP if libomp is available
     libomp_paths = [
@@ -58,14 +64,37 @@ elif is_mac:
             f'-I{os.path.join(libomp_root, "include")}',
         ] + arch_flags
         extra_link_args = ["-lomp", f"-L{libomp_lib}"]
+        strict_compile_args = [
+            "-Xpreprocessor",
+            "-fopenmp",
+            "-O3",
+            "-fno-fast-math",
+            "-ffp-contract=off",
+            f'-I{os.path.join(libomp_root, "include")}',
+        ] + arch_flags
+        strict_link_args = ["-lomp", f"-L{libomp_lib}"]
     else:
         # Build without OpenMP; prange falls back to serial execution
         extra_compile_args = ["-O3", "-ffast-math"] + arch_flags
         extra_link_args = []
+        strict_compile_args = [
+            "-O3",
+            "-fno-fast-math",
+            "-ffp-contract=off",
+        ] + arch_flags
+        strict_link_args = []
 else:
     # Linux with gcc
     extra_compile_args = ["-fopenmp", "-O3", "-ffast-math"] + arch_flags
     extra_link_args = ["-fopenmp", "-lm"]
+    strict_compile_args = [
+        "-fopenmp",
+        "-O3",
+        "-fno-fast-math",
+        "-fno-associative-math",
+        "-ffp-contract=off",
+    ] + arch_flags
+    strict_link_args = ["-fopenmp", "-lm"]
 
 # Define extension without numpy include first (added in CustomBuildExt)
 extensions = [
@@ -80,7 +109,14 @@ extensions = [
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,
         language="c",
-    )
+    ),
+    Extension(
+        "blochsimulator.dynamic_bloch_cy",
+        sources=["src/blochsimulator/dynamic_bloch_wrapper.pyx"],
+        extra_compile_args=strict_compile_args,
+        extra_link_args=strict_link_args,
+        language="c",
+    ),
 ]
 
 

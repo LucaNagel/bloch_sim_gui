@@ -12,7 +12,7 @@ import numpy as np
 
 from .phantom import Phantom
 from .spectral_phantom import ChemicalSpecies
-from .units import NUCLEUS_GAMMA_HZ_PER_T, ppm_to_hz
+from .units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm, ppm_to_hz
 
 
 class _BoundedArrayCache:
@@ -457,6 +457,175 @@ class DynamicSpectralPhantom:
         if self.b0_map is not None:
             return self.b0_map
         return np.zeros(self.shape, dtype=float)
+
+    def get_b0_offset_map_hz(self, field_strength=None, nucleus=None) -> np.ndarray:
+        """Return the static B0 map in Hz for spectral-viewer compatibility."""
+        return self.b0_offset_hz(field_strength, nucleus)
+
+    def get_b0_offset_map_ppm(self, field_strength=None, nucleus=None) -> np.ndarray:
+        """Return the static B0 map in ppm for spectral-viewer compatibility."""
+        if self.b0_map_ppm is not None:
+            return np.asarray(self.b0_map_ppm, dtype=float)
+        effective_field = (
+            self.field_strength if field_strength is None else float(field_strength)
+        )
+        effective_nucleus = self.nucleus if nucleus is None else str(nucleus)
+        if self.b0_map is not None:
+            return np.asarray(
+                hz_to_ppm(self.b0_map, effective_field, effective_nucleus),
+                dtype=float,
+            )
+        return np.zeros(self.shape, dtype=float)
+
+    def get_frequency_offset(self, name, field_strength=None, nucleus=None) -> float:
+        """Return one pool frequency in Hz at the requested field strength."""
+        for pool in self.pools:
+            if pool.name == name:
+                return pool.get_frequency_offset(
+                    (
+                        self.field_strength
+                        if field_strength is None
+                        else float(field_strength)
+                    ),
+                    self.nucleus if nucleus is None else str(nucleus),
+                )
+        return 0.0
+
+    def get_frequency_offset_ppm(
+        self, name, field_strength=None, nucleus=None
+    ) -> float:
+        """Return one pool frequency as an offset from the spectral reference."""
+        for pool in self.pools:
+            if pool.name != name:
+                continue
+            if pool.frequency_offset_hz is None:
+                return float(pool.chemical_shift_ppm)
+            effective_field = (
+                self.field_strength if field_strength is None else float(field_strength)
+            )
+            effective_nucleus = self.nucleus if nucleus is None else str(nucleus)
+            return float(
+                hz_to_ppm(
+                    pool.frequency_offset_hz,
+                    effective_field,
+                    effective_nucleus,
+                )
+            )
+        return 0.0
+
+    @property
+    def df_map_ppm(self) -> np.ndarray:
+        """Concentration-weighted initial mean frequency map in ppm."""
+        total = self.pd_map
+        result = self.get_b0_offset_map_ppm()
+        for pool in self.pools:
+            result = result + self.initial_concentration_maps[pool.name] * (
+                self.get_frequency_offset_ppm(pool.name) / np.maximum(total, 1e-15)
+            )
+        return result
+
+    def spectrum_at(
+        self,
+        index,
+        frequency_hz=None,
+        points=None,
+        field_strength=None,
+        nucleus=None,
+    ):
+        """Return the initial two-pool Lorentzian spectrum at one voxel."""
+        if len(index) != self.ndim:
+            raise ValueError("index dimensionality must match dynamic phantom")
+        effective_field = (
+            self.field_strength if field_strength is None else float(field_strength)
+        )
+        effective_nucleus = self.nucleus if nucleus is None else str(nucleus)
+        if points is None:
+            points = self.spectral_points
+        if frequency_hz is None:
+            half_bandwidth_hz = float(
+                ppm_to_hz(
+                    self.spectral_bandwidth_ppm / 2.0,
+                    effective_field,
+                    effective_nucleus,
+                )
+            )
+            frequency_hz = np.linspace(
+                -half_bandwidth_hz,
+                half_bandwidth_hz,
+                int(points),
+            )
+        frequency_hz = np.asarray(frequency_hz, dtype=float)
+        spectrum = np.zeros(frequency_hz.shape, dtype=float)
+        b0_hz = float(self.b0_offset_hz(effective_field, effective_nucleus)[index])
+        for pool in self.pools:
+            centre_hz = self.get_frequency_offset(
+                pool.name, effective_field, effective_nucleus
+            )
+            half_width_hz = 1.0 / (2.0 * np.pi * pool.t2_star)
+            amplitude = float(self.initial_concentration_maps[pool.name][index])
+            spectrum += amplitude / (
+                1.0 + ((frequency_hz - (centre_hz + b0_hz)) / half_width_hz) ** 2
+            )
+        return frequency_hz, spectrum
+
+    def spectrum_at_ppm(
+        self,
+        index,
+        frequency_ppm=None,
+        points=None,
+        *,
+        absolute=True,
+        linewidth_field_strength=None,
+        nucleus=None,
+    ):
+        """Return the initial two-pool Lorentzian spectrum on a ppm axis."""
+        if len(index) != self.ndim:
+            raise ValueError("index dimensionality must match dynamic phantom")
+        if points is None:
+            points = self.spectral_points
+        if frequency_ppm is None:
+            centre_ppm = self.spectral_reference_ppm if absolute else 0.0
+            half_bandwidth_ppm = self.spectral_bandwidth_ppm / 2.0
+            frequency_ppm = np.linspace(
+                centre_ppm - half_bandwidth_ppm,
+                centre_ppm + half_bandwidth_ppm,
+                int(points),
+            )
+        frequency_ppm = np.asarray(frequency_ppm, dtype=float)
+        relative_frequency_ppm = (
+            frequency_ppm - self.spectral_reference_ppm if absolute else frequency_ppm
+        )
+        effective_field = (
+            self.field_strength
+            if linewidth_field_strength is None
+            else float(linewidth_field_strength)
+        )
+        effective_nucleus = self.nucleus if nucleus is None else str(nucleus)
+        b0_ppm = float(
+            self.get_b0_offset_map_ppm(effective_field, effective_nucleus)[index]
+        )
+        spectrum = np.zeros(frequency_ppm.shape, dtype=float)
+        for pool in self.pools:
+            centre_ppm = self.get_frequency_offset_ppm(
+                pool.name, effective_field, effective_nucleus
+            )
+            fwhm_ppm = abs(
+                float(
+                    hz_to_ppm(
+                        1.0 / (np.pi * pool.t2_star),
+                        effective_field,
+                        effective_nucleus,
+                    )
+                )
+            )
+            half_width_ppm = max(fwhm_ppm / 2.0, np.finfo(float).eps)
+            amplitude = float(self.initial_concentration_maps[pool.name][index])
+            spectrum += amplitude / (
+                1.0
+                + ((relative_frequency_ppm - (centre_ppm + b0_ppm)) / half_width_ppm)
+                ** 2
+            )
+        return frequency_ppm, spectrum
 
     @property
     def effective_df_map(self) -> np.ndarray:
@@ -1125,15 +1294,31 @@ def _prepare_transverse_factors(phase_cycles, t2, duration):
     )
 
 
-def _rf_rotate(state, rf_hz, duration):
+def _prepare_rf_rotation(rf_hz, duration):
+    """Return the already-rounded scalar coefficients for one RF rotation."""
     nx = -2 * np.pi * rf_hz.real * duration
     ny = 2 * np.pi * rf_hz.imag * duration
     angle = float(np.hypot(nx, ny))
     if angle == 0:
-        return
+        return None
     axis = np.asarray([nx / angle, ny / angle, 0.0])
     cosine = np.cos(angle)
     sine = np.sin(angle)
+    return (
+        float(axis[0]),
+        float(axis[1]),
+        float(cosine),
+        float(sine),
+        float(1.0 - cosine),
+    )
+
+
+def _rf_rotate(state, rf_hz, duration):
+    prepared = _prepare_rf_rotation(rf_hz, duration)
+    if prepared is None:
+        return
+    axis_x, axis_y, cosine, sine, one_minus_cosine = prepared
+    axis = np.asarray([axis_x, axis_y, 0.0])
     for pool in range(2):
         vectors = state[pool]
         cross = np.cross(np.broadcast_to(axis, vectors.shape), vectors)
@@ -1141,7 +1326,7 @@ def _rf_rotate(state, rf_hz, duration):
         state[pool] = (
             vectors * cosine
             + cross * sine
-            + projection[:, None] * axis * (1.0 - cosine)
+            + projection[:, None] * axis * one_minus_cosine
         )
 
 
@@ -1159,6 +1344,9 @@ def simulate_dynamic_sequence(
     simulation_timestep_s=1e-6,
     signal_weighting="voxel",
     sequence_kernel="optimized",
+    use_parallel=True,
+    num_threads=1,
+    memory_budget_bytes=None,
     **_ignored,
 ):
     """Run the complete sequence on a regional two-pool dynamic phantom."""
@@ -1174,8 +1362,39 @@ def simulate_dynamic_sequence(
     effective_nucleus = phantom.nucleus if nucleus is None else str(nucleus)
     if sequence_kernel is None:
         sequence_kernel = "optimized"
-    if sequence_kernel not in {"optimized", "reference"}:
-        raise ValueError("sequence_kernel must be 'optimized' or 'reference'")
+    if sequence_kernel not in {
+        "optimized",
+        "reference",
+        "native_serial",
+        "native_parallel",
+    }:
+        raise ValueError(
+            "sequence_kernel must be 'optimized', 'reference', 'native_serial', "
+            "or 'native_parallel'"
+        )
+    requested_sequence_kernel = sequence_kernel
+    native_fallback_reason = None
+    native_longitudinal_step = None
+    native_longitudinal_block = None
+    native_rf_rotation_block = None
+    if sequence_kernel in {"native_serial", "native_parallel"}:
+        if phantom.pyruvate_inflow is not None or phantom.dynamic_b0 is not None:
+            native_fallback_reason = "dynamic drivers are not supported by the pilot"
+            sequence_kernel = "optimized"
+        else:
+            try:
+                from .dynamic_bloch_cy import (
+                    apply_longitudinal_block_no_inflow,
+                    apply_longitudinal_step_no_inflow,
+                    apply_rf_rotation_transverse_block,
+                )
+
+                native_longitudinal_step = apply_longitudinal_step_no_inflow
+                native_longitudinal_block = apply_longitudinal_block_no_inflow
+                native_rf_rotation_block = apply_rf_rotation_transverse_block
+            except ImportError:
+                native_fallback_reason = "strict native extension is unavailable"
+                sequence_kernel = "optimized"
     compiled = SequenceCompiler().compile(
         program,
         checkpoints_s=checkpoints_s,
@@ -1192,7 +1411,9 @@ def simulate_dynamic_sequence(
         :, active
     ].copy()
     transverse_state = (
-        state[:, :, 0] + 1j * state[:, :, 1] if sequence_kernel == "optimized" else None
+        state[:, :, 0] + 1j * state[:, :, 1]
+        if sequence_kernel in {"optimized", "native_serial", "native_parallel"}
+        else None
     )
     positions = phantom.positions[active]
     kpl = phantom.kpl_map_s_inv.ravel()[active]
@@ -1258,10 +1479,14 @@ def simulate_dynamic_sequence(
     interval_count = compiled.n_intervals
     progress_stride = max(1, interval_count // 100)
     coefficient_cache = (
-        _BoundedArrayCache(16 * 1024**2) if sequence_kernel == "optimized" else None
+        _BoundedArrayCache(16 * 1024**2)
+        if sequence_kernel in {"optimized", "native_serial", "native_parallel"}
+        else None
     )
     transverse_cache = (
-        _BoundedArrayCache(48 * 1024**2) if sequence_kernel == "optimized" else None
+        _BoundedArrayCache(48 * 1024**2)
+        if sequence_kernel in {"optimized", "native_serial", "native_parallel"}
+        else None
     )
     longitudinal_regular = np.abs(r1[0] + kpl - r1[1]) > 1e-12
     regular_mode = (
@@ -1276,9 +1501,105 @@ def simulate_dynamic_sequence(
             np.empty_like(kpl),
             regular_mode,
         )
-        if sequence_kernel == "optimized"
+        if sequence_kernel in {"optimized", "native_serial", "native_parallel"}
         else None
     )
+    native_parallel_threshold = 1024
+    requested_native_threads = max(1, int(num_threads)) if use_parallel else 1
+    native_threads = (
+        requested_native_threads if active.size >= native_parallel_threshold else 1
+    )
+    native_rf_threads = native_threads if sequence_kernel == "native_parallel" else 1
+    native_block_interval_limit = 256
+    native_block_table_limit_bytes = 8 * 1024**2
+    if memory_budget_bytes is not None:
+        native_block_table_limit_bytes = min(
+            native_block_table_limit_bytes,
+            max(0, int(memory_budget_bytes) // 16),
+        )
+    native_block_enabled = native_block_table_limit_bytes >= active.size * 8
+    if not native_block_enabled:
+        native_threads = 1
+    if status_callback is not None and native_rf_rotation_block is not None:
+        status_callback(
+            f"Using the strict native RF voxel-block kernel with "
+            f"{native_rf_threads} thread(s) for {active.size:,} active voxels."
+        )
+    native_preapplied_end = 0
+    checkpoint_state_set = set(
+        int(value) for value in compiled.checkpoint_state_indices
+    )
+
+    def preapply_native_longitudinal_block(first_interval):
+        """Advance Mz through one RF-free, checkpoint-free bounded block."""
+        nonlocal native_preapplied_end
+        max_groups = max(
+            1,
+            native_block_table_limit_bytes // max(1, active.size * 8),
+        )
+        end = first_interval
+        half_durations = []
+        seen_durations = set()
+        hard_end = min(interval_count, first_interval + native_block_interval_limit)
+        while end < hard_end:
+            if compiled.rf_hz[end] != 0.0:
+                break
+            half_duration = float(compiled.dt_s[end] / 2.0)
+            if half_duration not in seen_durations:
+                if len(seen_durations) >= max_groups:
+                    break
+                seen_durations.add(half_duration)
+            half_durations.append(half_duration)
+            end += 1
+            if end in checkpoint_state_set:
+                break
+        if end == first_interval:
+            native_preapplied_end = first_interval
+            return
+
+        group_by_duration = {}
+        prepared_by_group = []
+        duration_by_group = []
+        step_groups = []
+        for half_duration in half_durations:
+            group = group_by_duration.get(half_duration)
+            if group is None:
+                group = len(prepared_by_group)
+                group_by_duration[half_duration] = group
+                prepared = coefficient_cache.get(half_duration)
+                if prepared is None:
+                    prepared = _prepare_longitudinal_step(
+                        kpl,
+                        r1[0],
+                        r1[1],
+                        half_duration,
+                        with_source=False,
+                    )
+                    coefficient_cache.put(half_duration, prepared)
+                prepared_by_group.append(prepared)
+                duration_by_group.append(half_duration)
+            step_groups.extend((group, group))
+        exp_a_by_group = np.ascontiguousarray(
+            np.stack([prepared[0] for prepared in prepared_by_group]),
+            dtype=np.float64,
+        )
+        exp_b_by_group = np.ascontiguousarray(
+            [prepared[1] for prepared in prepared_by_group], dtype=np.float64
+        )
+        native_longitudinal_block(
+            state,
+            kpl,
+            exp_a_by_group,
+            exp_b_by_group,
+            prepared_by_group[0][2],
+            prepared_by_group[0][3],
+            np.ascontiguousarray(step_groups, dtype=np.int32),
+            np.ascontiguousarray(duration_by_group, dtype=np.float64),
+            regular_mode,
+            native_threads,
+        )
+        native_preapplied_end = end
+
     interval_start = 0.0
     for interval in range(interval_count):
         if cancel_callback is not None and cancel_callback():
@@ -1287,6 +1608,18 @@ def simulate_dynamic_sequence(
         interval_end = float(compiled.interval_end_s[interval])
         interval_mid = interval_start + dt / 2.0
         gradient = compiled.gradient_hz_per_m[interval]
+        if (
+            sequence_kernel == "native_parallel"
+            and native_block_enabled
+            and interval >= native_preapplied_end
+            and compiled.rf_hz[interval] == 0.0
+        ):
+            preapply_native_longitudinal_block(interval)
+        longitudinal_preapplied = (
+            sequence_kernel == "native_parallel"
+            and interval < native_preapplied_end
+            and compiled.rf_hz[interval] == 0.0
+        )
         if sequence_kernel == "reference":
             gradient_frequency = positions @ gradient
             static_frequencies = (
@@ -1422,24 +1755,53 @@ def simulate_dynamic_sequence(
                 )
                 source_start = inflow_delivery * start_value
                 source_mid = inflow_delivery * mid_value
-            _free_step(
-                state,
-                first_phase,
-                t2,
-                kpl,
-                r1,
-                half_duration,
-                source_start,
-                source_mid,
-                transverse_factors=first_transverse_factors,
-                longitudinal_prepared=longitudinal_prepared,
-                transverse_state=transverse_state,
-                longitudinal_scratch=longitudinal_scratch,
-            )
+            if native_longitudinal_step is None:
+                _free_step(
+                    state,
+                    first_phase,
+                    t2,
+                    kpl,
+                    r1,
+                    half_duration,
+                    source_start,
+                    source_mid,
+                    transverse_factors=first_transverse_factors,
+                    longitudinal_prepared=longitudinal_prepared,
+                    transverse_state=transverse_state,
+                    longitudinal_scratch=longitudinal_scratch,
+                )
+            else:
+                for pool in range(2):
+                    transverse_state[pool] *= first_transverse_factors[pool]
+                if not longitudinal_preapplied:
+                    native_longitudinal_step(
+                        state,
+                        kpl,
+                        longitudinal_prepared[0],
+                        longitudinal_prepared[1],
+                        longitudinal_prepared[2],
+                        longitudinal_prepared[3],
+                        half_duration,
+                        regular_mode,
+                    )
             if compiled.rf_hz[interval] != 0.0:
-                sync_transverse_to_state()
-                _rf_rotate(state, compiled.rf_hz[interval], dt)
-                transverse_state[:] = state[:, :, 0] + 1j * state[:, :, 1]
+                if native_rf_rotation_block is None:
+                    sync_transverse_to_state()
+                    _rf_rotate(state, compiled.rf_hz[interval], dt)
+                    transverse_state[:] = state[:, :, 0] + 1j * state[:, :, 1]
+                else:
+                    rf_prepared = _prepare_rf_rotation(compiled.rf_hz[interval], dt)
+                    if rf_prepared is not None:
+                        native_rf_rotation_block(
+                            state,
+                            transverse_state,
+                            rf_prepared[0],
+                            rf_prepared[1],
+                            rf_prepared[2],
+                            rf_prepared[3],
+                            rf_prepared[4],
+                            native_rf_threads,
+                        )
             if phantom.pyruvate_inflow is not None:
                 mid_value, end_value = (
                     phantom.pyruvate_inflow.rate_curve_s_inv.interval_values(
@@ -1448,28 +1810,48 @@ def simulate_dynamic_sequence(
                 )
                 source_mid = inflow_delivery * mid_value
                 source_end = inflow_delivery * end_value
-            _free_step(
-                state,
-                second_phase,
-                t2,
-                kpl,
-                r1,
-                half_duration,
-                source_mid,
-                source_end,
-                transverse_factors=second_transverse_factors,
-                longitudinal_prepared=longitudinal_prepared,
-                transverse_state=transverse_state,
-                longitudinal_scratch=longitudinal_scratch,
-            )
+            if native_longitudinal_step is None:
+                _free_step(
+                    state,
+                    second_phase,
+                    t2,
+                    kpl,
+                    r1,
+                    half_duration,
+                    source_mid,
+                    source_end,
+                    transverse_factors=second_transverse_factors,
+                    longitudinal_prepared=longitudinal_prepared,
+                    transverse_state=transverse_state,
+                    longitudinal_scratch=longitudinal_scratch,
+                )
+            else:
+                for pool in range(2):
+                    transverse_state[pool] *= second_transverse_factors[pool]
+                if not longitudinal_preapplied:
+                    native_longitudinal_step(
+                        state,
+                        kpl,
+                        longitudinal_prepared[0],
+                        longitudinal_prepared[1],
+                        longitudinal_prepared[2],
+                        longitudinal_prepared[3],
+                        half_duration,
+                        regular_mode,
+                    )
         observe(interval + 1)
         interval_start = interval_end
         if progress_callback is not None and (
             interval % progress_stride == 0 or interval + 1 == interval_count
         ):
             progress_callback(interval + 1, interval_count)
-        if preview_callback is not None and interval + 1 == interval_count:
-            preview_callback(1.0, species_signal.sum(axis=0))
+        if preview_callback is not None and (
+            interval % progress_stride == 0 or interval + 1 == interval_count
+        ):
+            preview_callback(
+                (interval + 1) / interval_count,
+                species_signal.sum(axis=0),
+            )
 
     sync_transverse_to_state()
     final_pool = np.zeros((2, phantom.nvoxels, 3), dtype=np.float64)
@@ -1517,6 +1899,23 @@ def simulate_dynamic_sequence(
             "spectral_points": phantom.spectral_points,
             "signal_weighting": signal_weighting,
             "sequence_kernel": sequence_kernel,
+            "requested_sequence_kernel": requested_sequence_kernel,
+            "native_fallback_reason": native_fallback_reason,
+            "native_parallel_threads": (
+                native_threads if sequence_kernel == "native_parallel" else 1
+            ),
+            "native_rf_threads": (
+                native_rf_threads
+                if sequence_kernel in {"native_serial", "native_parallel"}
+                else 1
+            ),
+            "native_rf_block_enabled": native_rf_rotation_block is not None,
+            "native_parallel_threshold": native_parallel_threshold,
+            "native_block_interval_limit": native_block_interval_limit,
+            "native_block_table_limit_bytes": native_block_table_limit_bytes,
+            "native_parallel_memory_limited": (
+                sequence_kernel == "native_parallel" and not native_block_enabled
+            ),
             "pyruvate_inflow": phantom.pyruvate_inflow is not None,
             "dynamic_b0": phantom.dynamic_b0 is not None,
             "pyruvate_inflow_curve": (

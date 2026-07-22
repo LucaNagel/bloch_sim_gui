@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -56,6 +58,9 @@ from ..sequence import (
     infer_spectroscopic_acquisition,
     load_pulseq,
     make_cartesian_epi,
+    make_pulseq_bssfp,
+    make_pulseq_csi,
+    make_pulseq_epi,
 )
 from ..simulator import BlochSimulator, resolve_num_threads
 from ..units import NUCLEUS_GAMMA_HZ_PER_T, ppm_to_hz
@@ -63,6 +68,21 @@ from .controls import UniversalTimeControl
 from .magnetization_viewer import MagnetizationViewer
 from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumViewer
 from .volume_viewer import SequenceResultVolumeViewer
+
+
+def _format_duration(seconds):
+    """Format a short, stable duration for progress and completion messages."""
+    seconds = max(0.0, float(seconds))
+    if seconds < 1.0:
+        return "<1s"
+    total_seconds = int(math.ceil(seconds))
+    if total_seconds < 60:
+        return f"{total_seconds}s"
+    minutes, remaining_seconds = divmod(total_seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {remaining_seconds:02d}s"
+    hours, remaining_minutes = divmod(minutes, 60)
+    return f"{hours}h {remaining_minutes:02d}m"
 
 
 def _representative_sample_indices(values, max_samples):
@@ -292,6 +312,7 @@ class SequenceSimulationWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.program: Optional[SequenceProgram] = None
+        self._generated_pulseq_sequence = None
         self.acquisition: Optional[CartesianAcquisition] = None
         self.acquisition_frames: Optional[CartesianAcquisitionFrames] = None
         self.acquisition_volumes: Optional[CartesianAcquisitionVolumes] = None
@@ -302,6 +323,7 @@ class SequenceSimulationWidget(QWidget):
         self._split_csi_data = None
         self.worker = None
         self.probe_worker = None
+        self._simulation_started_at = None
         self._probe_playback_anchor_wall = None
         self._probe_playback_anchor_time_ms = None
         self._sequence_plot_window_s = None
@@ -331,6 +353,18 @@ class SequenceSimulationWidget(QWidget):
         )
         if sequence_kernel not in {"optimized", "reference"}:
             sequence_kernel = "optimized"
+        dynamic_sequence_kernel = (
+            str(settings.value("sequence/dynamic_kernel", "optimized"))
+            if settings is not None
+            else "optimized"
+        )
+        if dynamic_sequence_kernel not in {
+            "optimized",
+            "native_parallel",
+            "native_serial",
+            "reference",
+        }:
+            dynamic_sequence_kernel = "optimized"
         try:
             sequence_timestep_us = float(
                 settings.value("sequence/timestep_us", 5.0)
@@ -367,6 +401,7 @@ class SequenceSimulationWidget(QWidget):
             use_parallel=True,
             num_threads=configured_threads,
             sequence_kernel=sequence_kernel,
+            dynamic_sequence_kernel=dynamic_sequence_kernel,
         )
         self._initial_sequence_timestep_us = sequence_timestep_us
         self._build_ui()
@@ -393,15 +428,24 @@ class SequenceSimulationWidget(QWidget):
         sequence_layout = QVBoxLayout(sequence_group)
         sequence_layout.addWidget(QLabel("Source / mode"))
         self.sequence_source = QComboBox()
-        self.sequence_source.addItems(["Internal FID", "EPI", "Pulseq .seq file"])
+        self.sequence_source.addItems(
+            ["Internal FID", "EPI", "CSI", "bSSFP (3D)", "Pulseq .seq file"]
+        )
         self.sequence_source.currentIndexChanged.connect(self._source_changed)
         self.sequence_source.setToolTip(
-            "Choose EPI to configure matrix and receiver bandwidth"
+            "Build EPI, CSI, or bSSFP interactively, or load a Pulseq file"
         )
         sequence_layout.addWidget(self.sequence_source)
         load_button = QPushButton("Load Pulseq…")
         load_button.clicked.connect(self._load_pulseq_file)
         sequence_layout.addWidget(load_button)
+        self.export_pulseq_button = QPushButton("Export Pulseq…")
+        self.export_pulseq_button.setEnabled(False)
+        self.export_pulseq_button.setToolTip(
+            "Export the current generated EPI, CSI, or bSSFP sequence as .seq"
+        )
+        self.export_pulseq_button.clicked.connect(self._export_pulseq)
+        sequence_layout.addWidget(self.export_pulseq_button)
         self.sequence_info = QLabel()
         self.sequence_info.setWordWrap(True)
         sequence_layout.addWidget(self.sequence_info)
@@ -496,6 +540,115 @@ class SequenceSimulationWidget(QWidget):
         acquisition_form.addRow("Pixel bandwidth", self.pixel_bandwidth_info)
         self.acquisition_group.setVisible(False)
         controls_layout.addWidget(self.acquisition_group)
+
+        self.csi_group = QGroupBox("CSI acquisition")
+        csi_form = QFormLayout(self.csi_group)
+        csi_hint = QLabel(
+            "2D phase-encoded chemical-shift imaging with one FID per k-space "
+            "location. Spectral bandwidth and points define the FID."
+        )
+        csi_hint.setWordWrap(True)
+        self.csi_read_matrix = QSpinBox()
+        self.csi_read_matrix.setRange(1, 128)
+        self.csi_read_matrix.setValue(8)
+        self.csi_phase_matrix = QSpinBox()
+        self.csi_phase_matrix.setRange(1, 128)
+        self.csi_phase_matrix.setValue(8)
+        self.csi_spectral_points = QSpinBox()
+        self.csi_spectral_points.setRange(2, 8192)
+        self.csi_spectral_points.setValue(128)
+        self.csi_bandwidth_hz = QDoubleSpinBox()
+        self.csi_bandwidth_hz.setRange(10.0, 1_000_000.0)
+        self.csi_bandwidth_hz.setDecimals(3)
+        self.csi_bandwidth_hz.setValue(4000.0)
+        self.csi_bandwidth_hz.setSuffix(" Hz")
+        self.csi_encoding_order = QComboBox()
+        self.csi_encoding_order.addItems(["linear", "centric", "spiral"])
+        self.csi_flip_angle_deg = self._parameter_spin(0.1, 360.0, 15.0, "°")
+        self.csi_slice_thickness_mm = self._parameter_spin(0.05, 100.0, 10.0, " mm")
+        self.csi_echo_time_ms = self._parameter_spin(0.1, 10000.0, 6.0, " ms")
+        self.csi_repetition_time_ms = self._parameter_spin(0.1, 100000.0, 100.0, " ms")
+        self.csi_spoil_after_readout = QCheckBox("Enable after each FID")
+        self.csi_spoil_after_readout.setChecked(True)
+        self.csi_spoiler_cycles_per_slice = self._parameter_spin(
+            0.0, 1000.0, 4.0, " cycles/slice"
+        )
+        self.csi_spoiler_cycles_per_voxel = self._parameter_spin(
+            0.0, 1000.0, 0.0, " cycles/voxel"
+        )
+        self.csi_spoiler_duration_ms = self._parameter_spin(0.001, 1000.0, 2.0, " ms")
+        self.csi_dwell_info = QLabel()
+        self.csi_resolution_info = QLabel()
+        csi_form.addRow(csi_hint)
+        csi_form.addRow("x phase matrix", self.csi_read_matrix)
+        csi_form.addRow("y phase matrix", self.csi_phase_matrix)
+        csi_form.addRow("Spectral points", self.csi_spectral_points)
+        csi_form.addRow("Spectral bandwidth", self.csi_bandwidth_hz)
+        csi_form.addRow("Encoding order", self.csi_encoding_order)
+        csi_form.addRow("Flip angle", self.csi_flip_angle_deg)
+        csi_form.addRow("Slice thickness", self.csi_slice_thickness_mm)
+        csi_form.addRow("Echo time (TE)", self.csi_echo_time_ms)
+        csi_form.addRow("Repetition time (TR)", self.csi_repetition_time_ms)
+        csi_form.addRow("Gradient spoiler", self.csi_spoil_after_readout)
+        csi_form.addRow("Through-slice spoiler", self.csi_spoiler_cycles_per_slice)
+        csi_form.addRow("In-plane spoiler", self.csi_spoiler_cycles_per_voxel)
+        csi_form.addRow("Spoiler duration", self.csi_spoiler_duration_ms)
+        csi_form.addRow("ADC dwell", self.csi_dwell_info)
+        csi_form.addRow("Spectral resolution", self.csi_resolution_info)
+        self.csi_group.setVisible(False)
+        controls_layout.addWidget(self.csi_group)
+
+        self.bssfp_group = QGroupBox("bSSFP acquisition (3D)")
+        bssfp_form = QFormLayout(self.bssfp_group)
+        bssfp_hint = QLabel(
+            "Fully balanced non-selective 3D Cartesian bSSFP. Phase and "
+            "partition gradients are rewound in every TR."
+        )
+        bssfp_hint.setWordWrap(True)
+        self.bssfp_read_matrix = QSpinBox()
+        self.bssfp_read_matrix.setRange(2, 256)
+        self.bssfp_read_matrix.setValue(8)
+        self.bssfp_phase_matrix = QSpinBox()
+        self.bssfp_phase_matrix.setRange(1, 256)
+        self.bssfp_phase_matrix.setValue(8)
+        self.bssfp_partition_matrix = QSpinBox()
+        self.bssfp_partition_matrix.setRange(1, 256)
+        self.bssfp_partition_matrix.setValue(4)
+        self.bssfp_bandwidth_khz = QDoubleSpinBox()
+        self.bssfp_bandwidth_khz.setRange(0.1, 2000.0)
+        self.bssfp_bandwidth_khz.setDecimals(3)
+        self.bssfp_bandwidth_khz.setValue(10.0)
+        self.bssfp_bandwidth_khz.setSuffix(" kHz")
+        self.bssfp_flip_angle_deg = self._parameter_spin(0.1, 360.0, 15.0, "°")
+        self.bssfp_rf_duration_ms = self._parameter_spin(0.01, 100.0, 1.0, " ms")
+        self.bssfp_repetition_time_ms = self._parameter_spin(0.1, 10000.0, 10.0, " ms")
+        self.bssfp_phase_start_deg = self._parameter_spin(-360.0, 360.0, 180.0, "°")
+        self.bssfp_phase_increment_deg = self._parameter_spin(-360.0, 360.0, 180.0, "°")
+        self.bssfp_dummy_repetitions = QSpinBox()
+        self.bssfp_dummy_repetitions.setRange(0, 10000)
+        self.bssfp_dummy_repetitions.setValue(1)
+        self.bssfp_repetitions = QSpinBox()
+        self.bssfp_repetitions.setRange(1, 10000)
+        self.bssfp_repetitions.setValue(1)
+        self.bssfp_alpha_half = QCheckBox("Enable α/2 preparation")
+        self.bssfp_alpha_half.setChecked(True)
+        self.bssfp_dwell_info = QLabel()
+        bssfp_form.addRow(bssfp_hint)
+        bssfp_form.addRow("Read matrix", self.bssfp_read_matrix)
+        bssfp_form.addRow("Phase matrix", self.bssfp_phase_matrix)
+        bssfp_form.addRow("Partition matrix", self.bssfp_partition_matrix)
+        bssfp_form.addRow("Sampling bandwidth", self.bssfp_bandwidth_khz)
+        bssfp_form.addRow("Flip angle", self.bssfp_flip_angle_deg)
+        bssfp_form.addRow("RF duration", self.bssfp_rf_duration_ms)
+        bssfp_form.addRow("Repetition time (TR)", self.bssfp_repetition_time_ms)
+        bssfp_form.addRow("RF phase start", self.bssfp_phase_start_deg)
+        bssfp_form.addRow("RF phase increment", self.bssfp_phase_increment_deg)
+        bssfp_form.addRow("Dummy repetitions", self.bssfp_dummy_repetitions)
+        bssfp_form.addRow("Dynamic volumes", self.bssfp_repetitions)
+        bssfp_form.addRow("Preparation", self.bssfp_alpha_half)
+        bssfp_form.addRow("ADC dwell", self.bssfp_dwell_info)
+        self.bssfp_group.setVisible(False)
+        controls_layout.addWidget(self.bssfp_group)
 
         object_group = QGroupBox("Simulation object")
         object_form = QFormLayout(object_group)
@@ -813,8 +966,51 @@ class SequenceSimulationWidget(QWidget):
         self.epi_spoil_after_slice.toggled.connect(
             self.epi_spoiler_duration_ms.setEnabled
         )
+        for widget in (
+            self.csi_read_matrix,
+            self.csi_phase_matrix,
+            self.csi_spectral_points,
+            self.csi_bandwidth_hz,
+            self.csi_flip_angle_deg,
+            self.csi_slice_thickness_mm,
+            self.csi_echo_time_ms,
+            self.csi_repetition_time_ms,
+            self.csi_spoiler_cycles_per_slice,
+            self.csi_spoiler_cycles_per_voxel,
+            self.csi_spoiler_duration_ms,
+        ):
+            widget.valueChanged.connect(self._csi_changed)
+        self.csi_encoding_order.currentIndexChanged.connect(self._csi_changed)
+        self.csi_spoil_after_readout.toggled.connect(self._csi_changed)
+        self.csi_spoil_after_readout.toggled.connect(
+            self.csi_spoiler_cycles_per_slice.setEnabled
+        )
+        self.csi_spoil_after_readout.toggled.connect(
+            self.csi_spoiler_cycles_per_voxel.setEnabled
+        )
+        self.csi_spoil_after_readout.toggled.connect(
+            self.csi_spoiler_duration_ms.setEnabled
+        )
+        for widget in (
+            self.bssfp_read_matrix,
+            self.bssfp_phase_matrix,
+            self.bssfp_partition_matrix,
+            self.bssfp_bandwidth_khz,
+            self.bssfp_flip_angle_deg,
+            self.bssfp_rf_duration_ms,
+            self.bssfp_repetition_time_ms,
+            self.bssfp_phase_start_deg,
+            self.bssfp_phase_increment_deg,
+            self.bssfp_dummy_repetitions,
+            self.bssfp_repetitions,
+        ):
+            widget.valueChanged.connect(self._bssfp_changed)
+        self.bssfp_alpha_half.toggled.connect(self._bssfp_changed)
         self.fov_cm.valueChanged.connect(self._acquisition_changed)
+        self.fov_z_cm.valueChanged.connect(self._acquisition_changed)
         self._update_bandwidth_labels()
+        self._update_csi_labels()
+        self._update_bssfp_labels()
         self._object_source_changed()
 
         viewer_column = QWidget()
@@ -1092,8 +1288,8 @@ class SequenceSimulationWidget(QWidget):
         self.open_phantom_button.setVisible(phantom_selected)
         self.refresh_object_summary()
         self._update_frequency_reference_info()
-        if not phantom_selected and self.sequence_source.currentIndex() == 1:
-            self._load_cartesian_epi()
+        if not phantom_selected:
+            self._reload_selected_generated_sequence()
 
     def _selected_designed_phantom(self):
         main_window = self.window()
@@ -1111,12 +1307,11 @@ class SequenceSimulationWidget(QWidget):
             )
             return
         active = np.asarray(phantom.mask, dtype=bool)
-        if isinstance(phantom, DynamicSpectralPhantom):
+        if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
             self.field_strength_t.setValue(phantom.field_strength)
             nucleus_index = self.nucleus.findText(phantom.nucleus)
             if nucleus_index >= 0:
                 self.nucleus.setCurrentIndex(nucleus_index)
-        if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
             self._apply_probe_defaults_from_phantom(phantom)
         t1 = np.asarray(phantom.t1_map)[active] * 1000.0
         t2 = np.asarray(phantom.t2_map)[active] * 1000.0
@@ -1127,15 +1322,39 @@ class SequenceSimulationWidget(QWidget):
             if t1.size and t2.size
             else "No active tissue voxels"
         )
+        b0_text = ""
+        if isinstance(phantom, SpectralPhantom):
+            b0_hz = phantom.get_b0_offset_map_hz(
+                phantom.field_strength, phantom.nucleus
+            )
+        elif isinstance(phantom, DynamicSpectralPhantom):
+            b0_hz = phantom.b0_offset_hz(phantom.field_strength, phantom.nucleus)
+        else:
+            b0_hz = None
+        if b0_hz is not None:
+            active_b0 = np.asarray(b0_hz, dtype=float)[active]
+            if active_b0.size:
+                b0_text = (
+                    f"\nB0 {phantom.field_strength:g} T {phantom.nucleus}; "
+                    f"offset {active_b0.min():.4g}–{active_b0.max():.4g} Hz"
+                )
         self.phantom_summary.setText(
             f"{phantom.name}\n"
             f"{phantom.ndim}D, matrix {tuple(phantom.shape)}, "
             f"FOV {fov_cm} cm, {phantom.n_active} active voxels\n"
-            f"{relaxation_text}"
+            f"{relaxation_text}{b0_text}"
         )
         self._update_frequency_reference_info()
-        if self.sequence_source.currentIndex() == 1:
+        self._reload_selected_generated_sequence()
+
+    def _reload_selected_generated_sequence(self):
+        source_index = self.sequence_source.currentIndex()
+        if source_index == 1:
             self._load_cartesian_epi()
+        elif source_index == 2:
+            self._load_csi()
+        elif source_index == 3:
+            self._load_bssfp()
 
     def _update_frequency_reference_info(self):
         if self.object_source.currentIndex() != 0:
@@ -1179,8 +1398,15 @@ class SequenceSimulationWidget(QWidget):
     def _source_changed(self, *_):
         source_index = self.sequence_source.currentIndex()
         epi_selected = source_index == 1
+        csi_selected = source_index == 2
+        bssfp_selected = source_index == 3
         self.acquisition_group.setVisible(epi_selected)
         self.acquisition_group.setEnabled(epi_selected)
+        self.csi_group.setVisible(csi_selected)
+        self.csi_group.setEnabled(csi_selected)
+        self.bssfp_group.setVisible(bssfp_selected)
+        self.bssfp_group.setEnabled(bssfp_selected)
+        self.export_pulseq_button.setEnabled(source_index in {1, 2, 3})
         self.acquisition_hint.setText(
             "Read/phase matrix and sampling bandwidth define each 2D kx-ky "
             "frame. Slices are acquired sequentially without kz encoding."
@@ -1189,13 +1415,22 @@ class SequenceSimulationWidget(QWidget):
         )
         if source_index == 0:
             self._load_internal_sequence()
-        elif source_index == 1:
-            self._load_cartesian_epi()
+        elif source_index in {1, 2, 3}:
+            self._reload_selected_generated_sequence()
 
     def _acquisition_changed(self, *_):
         self._update_bandwidth_labels()
-        if self.sequence_source.currentIndex() == 1:
-            self._load_cartesian_epi()
+        self._reload_selected_generated_sequence()
+
+    def _csi_changed(self, *_):
+        self._update_csi_labels()
+        if self.sequence_source.currentIndex() == 2:
+            self._load_csi()
+
+    def _bssfp_changed(self, *_):
+        self._update_bssfp_labels()
+        if self.sequence_source.currentIndex() == 3:
+            self._load_bssfp()
 
     def _update_bandwidth_labels(self):
         bandwidth_hz = self.sampling_bandwidth_khz.value() * 1000.0
@@ -1204,7 +1439,41 @@ class SequenceSimulationWidget(QWidget):
         self.dwell_info.setText(f"{dwell_us:.3f} µs")
         self.pixel_bandwidth_info.setText(f"{pixel_bandwidth_hz:.3f} Hz/px")
 
+    def _update_csi_labels(self):
+        bandwidth_hz = self.csi_bandwidth_hz.value()
+        points = self.csi_spectral_points.value()
+        self.csi_dwell_info.setText(f"{1e6 / bandwidth_hz:.3f} µs")
+        self.csi_resolution_info.setText(f"{bandwidth_hz / points:.6g} Hz")
+
+    def _update_bssfp_labels(self):
+        bandwidth_hz = self.bssfp_bandwidth_khz.value() * 1000.0
+        self.bssfp_dwell_info.setText(f"{1e6 / bandwidth_hz:.3f} µs")
+
+    def _current_fov_2d_m(self):
+        designed = (
+            self._selected_designed_phantom()
+            if self.object_source.currentIndex() == 0
+            else None
+        )
+        if designed is not None and designed.ndim >= 2:
+            return tuple(float(value) for value in designed.fov[:2])
+        local_fov = self.fov_cm.value() / 100.0
+        return local_fov, local_fov
+
+    def _current_fov_3d_m(self):
+        designed = (
+            self._selected_designed_phantom()
+            if self.object_source.currentIndex() == 0
+            else None
+        )
+        if designed is not None and designed.ndim >= 3:
+            return tuple(float(value) for value in designed.fov[:3])
+        fov_xy = self._current_fov_2d_m()
+        return fov_xy + (self.fov_z_cm.value() / 100.0,)
+
     def _load_internal_sequence(self):
+        self._generated_pulseq_sequence = None
+        self.export_pulseq_button.setEnabled(False)
         self.acquisition = None
         self.acquisition_frames = None
         self.acquisition_volumes = None
@@ -1229,20 +1498,13 @@ class SequenceSimulationWidget(QWidget):
         self._show_program()
 
     def _load_cartesian_epi(self):
+        self._generated_pulseq_sequence = None
+        self.export_pulseq_button.setEnabled(True)
         self.acquisition_frames = None
         self.acquisition_volumes = None
         self.spectroscopic_acquisition = None
         bandwidth_hz = self.sampling_bandwidth_khz.value() * 1000.0
-        designed = (
-            self._selected_designed_phantom()
-            if self.object_source.currentIndex() == 0
-            else None
-        )
-        if designed is not None and designed.ndim >= 2:
-            fov_m = tuple(float(value) for value in designed.fov[:2])
-        else:
-            local_fov = self.fov_cm.value() / 100.0
-            fov_m = (local_fov, local_fov)
+        fov_m = self._current_fov_2d_m()
         try:
             self.acquisition = CartesianAcquisition.epi(
                 read_matrix=self.read_matrix.value(),
@@ -1283,6 +1545,158 @@ class SequenceSimulationWidget(QWidget):
             self.program = None
             self.sequence_info.setText(f"Invalid Cartesian acquisition: {exc}")
 
+    def _load_csi(self):
+        try:
+            sequence = make_pulseq_csi(
+                fov_m=self._current_fov_2d_m(),
+                matrix=(self.csi_read_matrix.value(), self.csi_phase_matrix.value()),
+                slice_thickness_m=self.csi_slice_thickness_mm.value() / 1000.0,
+                spectral_bandwidth_hz=self.csi_bandwidth_hz.value(),
+                spectral_points=self.csi_spectral_points.value(),
+                phase_encoding_order=self.csi_encoding_order.currentText(),
+                flip_angle_deg=self.csi_flip_angle_deg.value(),
+                echo_time_s=self.csi_echo_time_ms.value() / 1000.0,
+                repetition_time_s=self.csi_repetition_time_ms.value() / 1000.0,
+                spoil_after_readout=self.csi_spoil_after_readout.isChecked(),
+                spoiler_cycles_per_slice=(self.csi_spoiler_cycles_per_slice.value()),
+                spoiler_cycles_per_voxel=(self.csi_spoiler_cycles_per_voxel.value()),
+                spoiler_duration_s=self.csi_spoiler_duration_ms.value() / 1000.0,
+            )
+            self._set_generated_pulseq_sequence(sequence, "internal-csi")
+        except Exception as exc:
+            self._generated_pulseq_sequence = None
+            self.program = None
+            self.acquisition = None
+            self.spectroscopic_acquisition = None
+            self.sequence_info.setText(f"Invalid CSI sequence: {exc}")
+
+    def _load_bssfp(self):
+        try:
+            sequence = make_pulseq_bssfp(
+                fov_m=self._current_fov_3d_m(),
+                matrix=(
+                    self.bssfp_read_matrix.value(),
+                    self.bssfp_phase_matrix.value(),
+                    self.bssfp_partition_matrix.value(),
+                ),
+                sampling_bandwidth_hz=self.bssfp_bandwidth_khz.value() * 1000.0,
+                flip_angle_deg=self.bssfp_flip_angle_deg.value(),
+                rf_duration_s=self.bssfp_rf_duration_ms.value() / 1000.0,
+                repetition_time_s=(self.bssfp_repetition_time_ms.value() / 1000.0),
+                rf_phase_start_deg=self.bssfp_phase_start_deg.value(),
+                rf_phase_increment_deg=self.bssfp_phase_increment_deg.value(),
+                dummy_repetitions=self.bssfp_dummy_repetitions.value(),
+                repetitions=self.bssfp_repetitions.value(),
+                use_alpha_half=self.bssfp_alpha_half.isChecked(),
+            )
+            self._set_generated_pulseq_sequence(sequence, "internal-bssfp-3d")
+        except Exception as exc:
+            self._generated_pulseq_sequence = None
+            self.program = None
+            self.acquisition = None
+            self.acquisition_frames = None
+            self.acquisition_volumes = None
+            self.sequence_info.setText(f"Invalid bSSFP sequence: {exc}")
+
+    def _set_generated_pulseq_sequence(self, sequence, source):
+        with tempfile.TemporaryDirectory(prefix="blochsimulator-pulseq-") as directory:
+            path = Path(directory) / "generated.seq"
+            sequence.write(str(path), v141_compat=True)
+            imported = load_pulseq(path)
+        self.program = SequenceProgram(
+            events=imported.events,
+            duration_s=imported.duration_s,
+            source=source,
+            version=imported.version,
+            metadata=imported.metadata,
+        )
+        self._generated_pulseq_sequence = sequence
+        self._infer_current_acquisition()
+        self._apply_probe_defaults_from_program()
+        self._configure_frame_selector()
+        self._configure_spectroscopy_selectors()
+        self._show_program()
+
+    def _infer_current_acquisition(self):
+        """Attach CSI, 2D-frame, or 3D-volume layout to the current program."""
+        compiled = SequenceCompiler().compile(self.program)
+        self.acquisition = None
+        self.acquisition_frames = None
+        self.acquisition_volumes = None
+        self.spectroscopic_acquisition = None
+        try:
+            self.spectroscopic_acquisition = infer_spectroscopic_acquisition(
+                self.program, compiled=compiled
+            )
+            csi = self.spectroscopic_acquisition
+            self.acquisition_note = (
+                f"2D CSI {csi.matrix[0]}×{csi.matrix[1]}×"
+                f"{csi.spectral_points}; BW={csi.spectral_bandwidth_hz:.6g} Hz"
+            )
+            return
+        except ValueError as exc:
+            spectroscopy_error = str(exc)
+        single_error = None
+        try:
+            self.acquisition = infer_cartesian_acquisition(
+                self.program, compiled=compiled
+            )
+            self.acquisition_note = "Cartesian acquisition inferred from ADC moments"
+            return
+        except ValueError as exc:
+            single_error = str(exc)
+        try:
+            self.acquisition_frames = infer_cartesian_acquisition_frames(
+                self.program, compiled=compiled
+            )
+            try:
+                self.acquisition_volumes = infer_cartesian_acquisition_volumes(
+                    self.program,
+                    compiled=compiled,
+                    frames=self.acquisition_frames,
+                )
+            except ValueError:
+                self.acquisition_volumes = None
+            self.acquisition = self.acquisition_frames.acquisitions[0]
+            metadata = dict(self.program.metadata)
+            metadata["acquisition_dimensions"] = (
+                self.acquisition_frames.dimensions.to_metadata()
+            )
+            metadata["cartesian_acquisition_frames"] = (
+                self.acquisition_frames.to_metadata()
+            )
+            if self.acquisition_volumes is not None:
+                metadata["cartesian_acquisition_volumes"] = (
+                    self.acquisition_volumes.to_metadata()
+                )
+            self.program = SequenceProgram(
+                events=self.program.events,
+                duration_s=self.program.duration_s,
+                source=self.program.source,
+                version=self.program.version,
+                metadata=metadata,
+            )
+            if self.acquisition_volumes is not None:
+                axes = ", ".join(self.acquisition_volumes.varying_axes)
+                axes = axes or "single volume"
+                nx, ny, nz = self.acquisition_volumes.matrix
+                self.acquisition_note = (
+                    f"{self.acquisition_volumes.num_volumes} Cartesian 3D "
+                    f"volume(s) inferred ({nx}×{ny}×{nz}; {axes})"
+                )
+            else:
+                axes = ", ".join(self.acquisition_frames.varying_axes)
+                self.acquisition_note = (
+                    f"{self.acquisition_frames.num_frames} Cartesian 2D frames "
+                    f"inferred ({axes})"
+                )
+        except ValueError as frame_error:
+            self.acquisition = None
+            self.acquisition_note = (
+                f"Acquisition inference unavailable: CSI: {spectroscopy_error}; "
+                f"Cartesian: {single_error}; frames: {frame_error}"
+            )
+
     def _load_pulseq_file(self):
         filename, _ = QFileDialog.getOpenFileName(
             self,
@@ -1297,87 +1711,76 @@ class SequenceSimulationWidget(QWidget):
         except Exception as exc:
             QMessageBox.critical(self, "Pulseq import failed", str(exc))
 
+    def _build_epi_pulseq(self):
+        return make_pulseq_epi(
+            fov_m=self._current_fov_2d_m(),
+            matrix=(self.read_matrix.value(), self.phase_matrix.value()),
+            sampling_bandwidth_hz=self.sampling_bandwidth_khz.value() * 1000.0,
+            flip_angle_deg=self.epi_flip_angle_deg.value(),
+            slice_thickness_m=self.epi_slice_thickness_mm.value() / 1000.0,
+            n_slices=self.epi_slice_count.value(),
+            repetitions=self.epi_repetitions.value(),
+            repetition_time_s=self.epi_repetition_time_ms.value() / 1000.0,
+            spoil_after_slice=self.epi_spoil_after_slice.isChecked(),
+            spoiler_cycles_per_slice=self.epi_spoiler_cycles_per_slice.value(),
+            spoiler_cycles_per_voxel=self.epi_spoiler_cycles_per_voxel.value(),
+            spoiler_duration_s=self.epi_spoiler_duration_ms.value() / 1000.0,
+        )
+
+    def _write_pulseq_path(self, filename):
+        """Write the selected generated sequence and return the final path."""
+        source_index = self.sequence_source.currentIndex()
+        if source_index == 1:
+            sequence = self._build_epi_pulseq()
+        elif source_index in {2, 3}:
+            self._reload_selected_generated_sequence()
+            sequence = self._generated_pulseq_sequence
+        else:
+            raise ValueError("Select a generated EPI, CSI, or bSSFP sequence")
+        if sequence is None:
+            raise ValueError("The current sequence settings are invalid")
+        path = Path(filename)
+        if path.suffix.lower() != ".seq":
+            path = path.with_suffix(".seq")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sequence.write(str(path), v141_compat=True)
+        return path
+
+    def _export_pulseq(self):
+        source_names = {1: "epi.seq", 2: "csi.seq", 3: "bssfp_3d.seq"}
+        default_name = source_names.get(self.sequence_source.currentIndex())
+        if default_name is None:
+            QMessageBox.warning(
+                self,
+                "No generated sequence",
+                "Select EPI, CSI, or bSSFP before exporting Pulseq.",
+            )
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Pulseq sequence",
+            str(workspace_directory("sequences") / default_name),
+            "Pulseq sequence (*.seq)",
+        )
+        if not filename:
+            return
+        try:
+            path = self._write_pulseq_path(filename)
+            QMessageBox.information(
+                self, "Pulseq export complete", f"Exported {path.name} to {path.parent}"
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Pulseq export failed", str(exc))
+
     def _load_pulseq_path(self, filename):
         """Load a Pulseq file and attach a validated 2D Cartesian layout."""
         self.program = load_pulseq(filename)
-        compiled = SequenceCompiler().compile(self.program)
-        self.acquisition_frames = None
-        self.acquisition_volumes = None
-        self.spectroscopic_acquisition = None
-        try:
-            self.spectroscopic_acquisition = infer_spectroscopic_acquisition(
-                self.program, compiled=compiled
-            )
-            self.acquisition = None
-            csi = self.spectroscopic_acquisition
-            self.acquisition_note = (
-                f"2D CSI {csi.matrix[0]}×{csi.matrix[1]}×"
-                f"{csi.spectral_points}; BW={csi.spectral_bandwidth_hz:.6g} Hz"
-            )
-        except ValueError as spectroscopy_error:
-            try:
-                self.acquisition = infer_cartesian_acquisition(
-                    self.program, compiled=compiled
-                )
-                self.acquisition_note = (
-                    "Cartesian acquisition inferred from ADC moments"
-                )
-            except ValueError as single_error:
-                try:
-                    self.acquisition_frames = infer_cartesian_acquisition_frames(
-                        self.program, compiled=compiled
-                    )
-                    try:
-                        self.acquisition_volumes = infer_cartesian_acquisition_volumes(
-                            self.program,
-                            compiled=compiled,
-                            frames=self.acquisition_frames,
-                        )
-                    except ValueError:
-                        self.acquisition_volumes = None
-                    self.acquisition = self.acquisition_frames.acquisitions[0]
-                    metadata = dict(self.program.metadata)
-                    metadata["acquisition_dimensions"] = (
-                        self.acquisition_frames.dimensions.to_metadata()
-                    )
-                    metadata["cartesian_acquisition_frames"] = (
-                        self.acquisition_frames.to_metadata()
-                    )
-                    if self.acquisition_volumes is not None:
-                        metadata["cartesian_acquisition_volumes"] = (
-                            self.acquisition_volumes.to_metadata()
-                        )
-                    self.program = SequenceProgram(
-                        events=self.program.events,
-                        duration_s=self.program.duration_s,
-                        source=self.program.source,
-                        version=self.program.version,
-                        metadata=metadata,
-                    )
-                    if self.acquisition_volumes is not None:
-                        axes = ", ".join(self.acquisition_volumes.varying_axes)
-                        axes = axes or "single volume"
-                        nx, ny, nz = self.acquisition_volumes.matrix
-                        self.acquisition_note = (
-                            f"{self.acquisition_volumes.num_volumes} Cartesian 3D "
-                            f"volume(s) inferred ({nx}×{ny}×{nz}; {axes})"
-                        )
-                    else:
-                        axes = ", ".join(self.acquisition_frames.varying_axes)
-                        self.acquisition_note = (
-                            f"{self.acquisition_frames.num_frames} Cartesian 2D frames "
-                            f"inferred ({axes})"
-                        )
-                except ValueError as frame_error:
-                    self.acquisition = None
-                    self.acquisition_note = (
-                        f"Acquisition inference unavailable: CSI: {spectroscopy_error}; "
-                        f"Cartesian: {single_error}; frames: {frame_error}"
-                    )
+        self._generated_pulseq_sequence = None
+        self._infer_current_acquisition()
+        self.sequence_source.setCurrentIndex(4)
         self._apply_pulseq_fov()
         self._apply_pulseq_frequency_reference()
         self._apply_probe_defaults_from_program()
-        self.sequence_source.setCurrentIndex(2)
         self._show_program()
         self._configure_frame_selector()
         self._configure_spectroscopy_selectors()
@@ -2148,8 +2551,8 @@ class SequenceSimulationWidget(QWidget):
                 "Cancel the spin probe before running a sequence simulation.",
             )
             return
-        if self.sequence_source.currentIndex() == 1:
-            self._load_cartesian_epi()
+        if self.sequence_source.currentIndex() in {1, 2, 3}:
+            self._reload_selected_generated_sequence()
         if self.program is None:
             QMessageBox.warning(self, "No sequence", "Choose or load a sequence first.")
             return
@@ -2163,9 +2566,11 @@ class SequenceSimulationWidget(QWidget):
         self.cancel_button.setEnabled(True)
         self.export_button.setEnabled(False)
         work_units = self._estimated_work_units()
+        self._clear_previous_simulation_views()
         self.progress.setRange(0, work_units)
         self.progress.setValue(0)
-        self.progress.setFormat("Simulation %v/%m")
+        self.progress.setFormat("0% · Estimating remaining time…")
+        self._simulation_started_at = time.monotonic()
         self._status_update("Preparing and compiling sequence…")
         chunk_voxels = self._preview_chunk_voxels()
         self.worker = SequenceSimulationThread(
@@ -2196,16 +2601,36 @@ class SequenceSimulationWidget(QWidget):
             logger(f"Sequence simulation: {message}")
 
     def _progress(self, done, total):
+        total = max(1, int(total))
+        done = min(total, max(0, int(done)))
         self.progress.setRange(0, total)
         self.progress.setValue(done)
-        self.progress.setFormat("Simulation %v/%m")
+        percent = min(100, int(round(100.0 * done / total)))
+        now = time.monotonic()
+        if self._simulation_started_at is None:
+            self._simulation_started_at = now
+        elapsed_s = max(0.0, now - self._simulation_started_at)
+        if done >= total:
+            progress_text = "100% · Finishing…"
+            eta_text = None
+        elif done > 0 and elapsed_s > 0.0:
+            remaining_s = elapsed_s * (total - done) / done
+            eta_text = _format_duration(remaining_s)
+            progress_text = f"{percent}% · ETA {eta_text}"
+        else:
+            eta_text = None
+            progress_text = f"{percent}% · Estimating remaining time…"
+        self.progress.setFormat(progress_text)
         if isinstance(self.phantom, DynamicSpectralPhantom):
             unit = "Interval"
         elif isinstance(self.phantom, SpectralPhantom):
             unit = "Component"
         else:
             unit = "Chunk"
-        self.status.setText(f"{unit} {done}/{total}")
+        status_text = f"{unit} {done}/{total} · {percent}%"
+        if eta_text is not None:
+            status_text += f" · approximately {eta_text} remaining"
+        self.status.setText(status_text)
 
     def _estimated_work_units(self):
         if isinstance(self.phantom, DynamicSpectralPhantom):
@@ -2242,6 +2667,17 @@ class SequenceSimulationWidget(QWidget):
             raise ValueError("sequence kernel must be 'optimized' or 'reference'")
         self.simulator.sequence_kernel = kernel
 
+    def set_dynamic_sequence_kernel(self, kernel):
+        """Apply the dynamic two-pool kernel setting to future runs."""
+        if kernel not in {
+            "optimized",
+            "native_parallel",
+            "native_serial",
+            "reference",
+        }:
+            raise ValueError("unsupported dynamic sequence kernel")
+        self.simulator.dynamic_sequence_kernel = kernel
+
     def set_sequence_timestep_us(self, value):
         """Apply the persistent RF-active time-step default."""
         value = float(value)
@@ -2262,6 +2698,26 @@ class SequenceSimulationWidget(QWidget):
         self.rf_progress_cursor.setPos(position)
         self.gradient_progress_cursor.setPos(position)
 
+    def _clear_previous_simulation_views(self):
+        """Remove stale result data before the next simulation starts."""
+        self.result = None
+        self._split_csi_data = None
+        self.signal_plot.clear()
+        self.signal_plot.setTitle("Received ADC signal — current simulation")
+        self.signal_plot.setLabel("bottom", "Time", "ms")
+        self.kspace_view.clear()
+        self.reconstruction_view.clear()
+        self.kspace_zoom_info.setText("Zoom: —")
+        self.reconstruction_zoom_info.setText("Zoom: —")
+        if self.live_preview_enabled:
+            message = "Waiting for data from the current simulation…"
+        else:
+            message = "Current simulation running; live preview is disabled"
+        self.spectrum_info.setText(message)
+        self.kspace_info.setText(message)
+        self.reconstruction_info.setText(message)
+        self._set_sequence_cursor(0.0)
+
     def _preview(self, fraction, signal):
         """Render a throttled intermediate timeline, k-space and image state."""
         if not self.live_preview_enabled or self.program is None:
@@ -2279,13 +2735,56 @@ class SequenceSimulationWidget(QWidget):
             np.count_nonzero(adc_times <= fraction * self.program.duration_s)
         )
         partial_signal = np.array(signal, copy=True)
-        partial_signal[..., acquired:] = 0.0
-        if self.spectroscopic_acquisition is not None:
-            self._show_live_spectroscopy(partial_signal, acquired, adc_times.size)
+        if isinstance(self.phantom, DynamicSpectralPhantom):
+            visible_samples = acquired
+            partial_signal[..., visible_samples:] = 0.0
+            preview_summary = f"{visible_samples}/{adc_times.size} ADC samples"
         else:
-            self._show_live_cartesian(partial_signal, acquired, adc_times.size)
+            # Static and spectral previews accumulate complete-sequence signal
+            # contributions one voxel chunk or spectral component at a time.
+            visible_samples = adc_times.size
+            preview_summary = f"{int(round(fraction * 100.0))}% of simulation work"
+        self._show_live_signal(
+            partial_signal,
+            adc_times,
+            visible_samples,
+            preview_summary,
+        )
+        if self.spectroscopic_acquisition is not None:
+            self._show_live_spectroscopy(partial_signal, preview_summary)
+        else:
+            self._show_live_cartesian(partial_signal, preview_summary)
 
-    def _show_live_spectroscopy(self, signal, acquired, total):
+    def _show_live_signal(self, signal, adc_times, visible_samples, preview_summary):
+        """Plot only ADC data produced by the simulation currently running."""
+        self.signal_plot.clear()
+        self.signal_plot.setTitle("Live received ADC signal")
+        self.signal_plot.setLabel("bottom", "Time", "ms")
+        visible_samples = min(int(visible_samples), int(adc_times.size))
+        if visible_samples > 0:
+            live_signal = np.asarray(signal)[..., :visible_samples]
+            live_time_ms = np.asarray(adc_times[:visible_samples]) * 1000.0
+            if live_signal.ndim == 1:
+                self.signal_plot.plot(
+                    live_time_ms, np.abs(live_signal), pen="w", name="Magnitude"
+                )
+                self.signal_plot.plot(
+                    live_time_ms, live_signal.real, pen="g", name="Real"
+                )
+                self.signal_plot.plot(
+                    live_time_ms, live_signal.imag, pen="r", name="Imaginary"
+                )
+            else:
+                for coil, coil_signal in enumerate(live_signal):
+                    self.signal_plot.plot(
+                        live_time_ms,
+                        np.abs(coil_signal),
+                        pen=pg.intColor(coil, hues=live_signal.shape[0]),
+                        name=f"Coil {coil + 1}",
+                    )
+        self.spectrum_info.setText(f"Current simulation: {preview_summary}")
+
+    def _show_live_spectroscopy(self, signal, preview_summary):
         csi = self.spectroscopic_acquisition
         point = min(self.spectral_point_selector.value(), csi.spectral_points - 1)
         kspace = csi.reshape_signal(signal)
@@ -2300,11 +2799,11 @@ class SequenceSimulationWidget(QWidget):
         self.reconstruction_view.setImage(spatial_image.T, autoLevels=True)
         self.kspace_info.setText(
             f"Live CSI k-space, FID sample {point + 1}/{csi.spectral_points}; "
-            f"{acquired}/{total} ADC samples"
+            f"{preview_summary}"
         )
         self.reconstruction_info.setText("Live spatial 2D IFFT of CSI FID")
 
-    def _show_live_cartesian(self, signal, acquired, total):
+    def _show_live_cartesian(self, signal, preview_summary):
         selected = self.frame_selector.currentData()
         selected_index = max(
             0, 0 if selected is None or int(selected) < 0 else int(selected)
@@ -2331,14 +2830,14 @@ class SequenceSimulationWidget(QWidget):
             image = acquisition.reconstruct(frame_signal)
         self.kspace_view.setImage(np.log1p(kspace_magnitude).T, autoLevels=True)
         self.reconstruction_view.setImage(np.abs(image).T, autoLevels=True)
-        self.kspace_info.setText(f"Live k-space: {acquired}/{total} ADC samples")
+        self.kspace_info.setText(f"Live k-space: {preview_summary}")
         reconstruction_kind = (
             "central-kz hybrid |IFFT2|"
             if self.acquisition_volumes is not None
             else "|IFFT2|"
         )
         self.reconstruction_info.setText(
-            f"Live {reconstruction_kind} from {acquired}/{total} ADC samples"
+            f"Live {reconstruction_kind} from {preview_summary}"
         )
 
     def _cancel(self):
@@ -2911,11 +3410,18 @@ class SequenceSimulationWidget(QWidget):
         self.cancel_button.setEnabled(False)
         if completed:
             self.progress.setValue(self.progress.maximum())
-            self.progress.setFormat("Complete")
+            if self._simulation_started_at is None:
+                self.progress.setFormat("100% · Complete")
+            else:
+                elapsed_s = max(0.0, time.monotonic() - self._simulation_started_at)
+                self.progress.setFormat(
+                    f"100% · Complete in {_format_duration(elapsed_s)}"
+                )
         else:
             self.progress.setRange(0, 100)
             self.progress.setValue(0)
             self.progress.setFormat("Stopped")
+        self._simulation_started_at = None
 
     def _export_results(self):
         if self.result is None:

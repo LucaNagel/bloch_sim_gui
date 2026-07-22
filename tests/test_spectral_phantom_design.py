@@ -80,6 +80,24 @@ def test_peak_specific_t1_overrides_shape_default_and_round_trips():
     assert restored.shapes[0].peaks[1].t1_s is None
 
 
+def test_design_preserves_field_nucleus_and_b0_conversion():
+    design = _spectral_design()
+    design.field_strength_t = 7.0
+    design.nucleus = "C13"
+    design.shapes[0].b0_ppm = 1.25
+
+    phantom = design.build()
+    restored = PhantomDesign.from_phantom(phantom)
+
+    assert phantom.field_strength == pytest.approx(7.0)
+    assert phantom.nucleus == "C13"
+    assert phantom.get_b0_offset_map_hz()[3, 3, 2] == pytest.approx(
+        ppm_to_hz(1.25, 7.0, "C13")
+    )
+    assert restored.field_strength_t == pytest.approx(7.0)
+    assert restored.nucleus == "C13"
+
+
 def test_shape_design_builds_hyperpolarized_initial_mz_maps():
     design = PhantomDesign(
         name="Hyperpolarized voxel",
@@ -342,7 +360,10 @@ def test_spectral_sequence_signal_is_sum_of_independent_components():
 
 def test_designer_and_sequence_workspace_accept_spectral_phantom():
     app = QApplication.instance() or QApplication([])
-    dialog = SpectralPhantomDesignerDialog(design=_spectral_design())
+    design = _spectral_design()
+    design.field_strength_t = 7.0
+    design.nucleus = "C13"
+    dialog = SpectralPhantomDesignerDialog(design=design)
     dialog._preview()
     assert dialog.phantom.n_species == 2
     assert dialog.inspector.volume.data.shape == dialog.phantom.shape
@@ -358,6 +379,9 @@ def test_designer_and_sequence_workspace_accept_spectral_phantom():
     widget = SequenceSimulationWidget(host)
     widget._build_phantom()
     assert widget.phantom is dialog.phantom
+    assert widget.field_strength_t.value() == pytest.approx(7.0)
+    assert widget.nucleus.currentText() == "C13"
+    assert "B0 7 T C13" in widget.phantom_summary.text()
     dialog.close()
     host.close()
     app.processEvents()

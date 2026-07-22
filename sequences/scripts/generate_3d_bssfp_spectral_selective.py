@@ -746,7 +746,7 @@ if __name__ == "__main__":
         spectral_slr_sharpness=1.0,
         plot=False,
         write_seq=True,
-        n_repetition=30,
+        n_repetition=50,
         rf_phase_increment=0.0,  # phase increment in degrees for bSSFP phase cycling
         seq_filename="bssfp_3d_spectral_selective_skinner.seq",
     )

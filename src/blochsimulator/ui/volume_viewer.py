@@ -462,6 +462,10 @@ class PhantomInspectorWidget(QWidget):
             self.map_combo.addItem("kPL")
         self.map_combo.blockSignals(False)
         self._map_changed()
+        # Updating the volume normally emits an index change, but an already
+        # selected centre voxel may not emit one on every Qt backend. Refresh
+        # explicitly so a just-loaded phantom always displays its spectrum.
+        self._update_spectrum()
 
     def _frequency_display_changed(self, *_):
         if self.map_combo.currentText() in {"B0", "Mean frequency"}:

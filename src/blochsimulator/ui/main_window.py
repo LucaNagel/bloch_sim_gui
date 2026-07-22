@@ -123,6 +123,7 @@ class BlochSimulatorGUI(QMainWindow):
             use_parallel=True,
             num_threads=self._load_configured_num_threads(),
             sequence_kernel=self._load_sequence_kernel(),
+            dynamic_sequence_kernel=self._load_dynamic_sequence_kernel(),
         )
         self.simulation_thread = None
         self.init_ui()
@@ -3888,6 +3889,15 @@ class BlochSimulatorGUI(QMainWindow):
         kernel = str(self.app_settings.value("sequence/kernel", "optimized"))
         return kernel if kernel in {"optimized", "reference"} else "optimized"
 
+    def _load_dynamic_sequence_kernel(self) -> str:
+        """Load the persistent dynamic two-pool kernel selection."""
+        kernel = str(self.app_settings.value("sequence/dynamic_kernel", "optimized"))
+        return (
+            kernel
+            if kernel in {"optimized", "native_parallel", "native_serial", "reference"}
+            else "optimized"
+        )
+
     def _load_sequence_timestep_preset(self) -> str:
         """Load the persistent RF-active sequence time-step preset."""
         preset = str(self.app_settings.value("sequence/timestep_preset", "balanced"))
@@ -3943,6 +3953,7 @@ class BlochSimulatorGUI(QMainWindow):
                 "sequence/live_progress_enabled", True, type=bool
             ),
             sequence_kernel=self._load_sequence_kernel(),
+            dynamic_sequence_kernel=self._load_dynamic_sequence_kernel(),
             sequence_timestep_preset=self._load_sequence_timestep_preset(),
             sequence_timestep_us=self._load_sequence_timestep_us(),
             thread_mode=self._load_thread_mode(),
@@ -3978,6 +3989,8 @@ class BlochSimulatorGUI(QMainWindow):
         )
         sequence_kernel = dialog.sequence_kernel()
         self.app_settings.setValue("sequence/kernel", sequence_kernel)
+        dynamic_sequence_kernel = dialog.dynamic_sequence_kernel()
+        self.app_settings.setValue("sequence/dynamic_kernel", dynamic_sequence_kernel)
         timestep_preset = dialog.sequence_timestep_preset()
         timestep_us = dialog.sequence_timestep_us()
         self.app_settings.setValue("sequence/timestep_preset", timestep_preset)
@@ -3993,9 +4006,11 @@ class BlochSimulatorGUI(QMainWindow):
         if sequence_widget is not None:
             sequence_widget.set_live_preview_enabled(live_progress_enabled)
             sequence_widget.set_sequence_kernel(sequence_kernel)
+            sequence_widget.set_dynamic_sequence_kernel(dynamic_sequence_kernel)
             sequence_widget.set_sequence_timestep_us(timestep_us)
             sequence_widget.set_thread_configuration(thread_mode, manual_thread_count)
         self.simulator.sequence_kernel = sequence_kernel
+        self.simulator.dynamic_sequence_kernel = dynamic_sequence_kernel
         self.simulator.num_threads = resolve_num_threads(
             None if thread_mode == "automatic" else manual_thread_count
         )

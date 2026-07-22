@@ -22,6 +22,7 @@ from blochsimulator.sequence import ADCEvent, GradientEvent, RFEvent, SequencePr
 from blochsimulator.spectral_phantom import ChemicalSpecies
 from blochsimulator.ui.phantom_designer import SpectralPhantomDesignerDialog
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationThread
+from blochsimulator.ui.volume_viewer import PhantomInspectorWidget
 
 
 def _dynamic_phantom(kpl=(0.0, 0.1)):
@@ -54,6 +55,31 @@ def test_kinetic_regions_rasterize_with_later_region_priority():
     assert np.array_equal(result[:, 0, 0], [0.02, 0.02, 0.08, 0.08])
 
 
+def test_dynamic_phantom_exposes_initial_spectrum_to_inspector():
+    app = QApplication.instance() or QApplication([])
+    phantom = _dynamic_phantom()
+    phantom.initial_concentration_maps["Lactate"][:] = 0.5
+    phantom.spectral_bandwidth_ppm = 30.0
+
+    frequency_ppm, spectrum = phantom.spectrum_at_ppm(
+        (0, 0, 0), frequency_ppm=np.asarray([0.0, 12.0]), absolute=False
+    )
+
+    assert frequency_ppm == pytest.approx([0.0, 12.0])
+    assert spectrum[0] == pytest.approx(1.0, rel=2e-3)
+    assert spectrum[1] == pytest.approx(0.5, rel=2e-3)
+
+    inspector = PhantomInspectorWidget()
+    inspector.set_phantom(phantom)
+    plotted = inspector.spectrum_plot.listDataItems()
+
+    assert len(plotted) == 1
+    assert np.max(plotted[0].getData()[1]) > 0.0
+    assert "2 Lorentzian components" in inspector.spectrum_info.text()
+    inspector.close()
+    app.processEvents()
+
+
 def test_no_rf_dynamic_sequence_matches_irreversible_analytic_solution():
     phantom = _dynamic_phantom()
     duration = 2.0
@@ -73,6 +99,28 @@ def test_no_rf_dynamic_sequence_matches_irreversible_analytic_solution():
         )
         assert final[0, voxel, 0, 0] == pytest.approx(expected_pyruvate)
         assert final[1, voxel, 0, 0] == pytest.approx(expected_lactate)
+
+
+def test_dynamic_sequence_reports_intermediate_live_previews():
+    phantom = _dynamic_phantom()
+    program = SequenceProgram(
+        (ADCEvent(0.0, 4, 1e-3),),
+        duration_s=4e-3,
+    )
+    previews = []
+
+    result = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        program,
+        phantom,
+        preview_callback=lambda fraction, signal: previews.append(
+            (fraction, np.array(signal, copy=True))
+        ),
+    )
+
+    assert len(previews) > 1
+    assert 0.0 < previews[0][0] < 1.0
+    assert previews[-1][0] == pytest.approx(1.0)
+    assert previews[-1][1] == pytest.approx(result.signal)
 
 
 def test_time_curve_integrates_linear_step_and_outside_regions():
@@ -302,6 +350,221 @@ def test_optimized_dynamic_kernel_is_bitwise_equal_to_reference(with_drivers, kp
         assert np.array_equal(getattr(optimized, name), getattr(reference, name))
 
 
+@pytest.mark.parametrize(
+    "kpl",
+    [
+        (0.0, 0.1),
+        (1.0 / 25.0 - 1.0 / 30.0, 0.1),
+        (1.0 / 25.0 - 1.0 / 30.0,) * 2,
+    ],
+    ids=("regular", "mixed-rates", "equal-rates"),
+)
+def test_native_serial_dynamic_pilot_is_bitwise_equal(kpl):
+    phantom = _dynamic_phantom(kpl)
+    raster = 20e-6
+    program = SequenceProgram(
+        (
+            RFEvent(
+                2 * raster,
+                np.asarray([80.0 + 20.0j, 120.0 - 10.0j, 0.0j]),
+                raster,
+            ),
+            GradientEvent("x", 0.0, np.linspace(-150.0, 200.0, 12), raster),
+            ADCEvent(0.0, 6, 2 * raster, phase_offset_rad=0.37),
+        ),
+        duration_s=12 * raster,
+    )
+    simulator = BlochSimulator(use_parallel=False)
+    kwargs = {
+        "checkpoints_s": (0.0, 7 * raster, 12 * raster),
+        "simulation_timestep_s": 5e-6,
+    }
+    reference = simulator.simulate_dynamic_sequence(
+        program, phantom, sequence_kernel="reference", **kwargs
+    )
+    optimized = simulator.simulate_dynamic_sequence(
+        program, phantom, sequence_kernel="optimized", **kwargs
+    )
+    native = simulator.simulate_dynamic_sequence(
+        program, phantom, sequence_kernel="native_serial", **kwargs
+    )
+
+    assert native.metadata["sequence_kernel"] == "native_serial"
+    assert native.metadata["native_fallback_reason"] is None
+    assert native.metadata["native_rf_block_enabled"] is True
+    assert native.metadata["native_rf_threads"] == 1
+    for name in (
+        "signal",
+        "species_signal",
+        "final_magnetization",
+        "final_pool_magnetization",
+        "checkpoint_magnetization",
+        "checkpoint_pool_magnetization",
+    ):
+        assert np.array_equal(getattr(native, name), getattr(reference, name))
+        assert np.array_equal(getattr(native, name), getattr(optimized, name))
+
+
+def test_configured_dynamic_kernel_is_used_without_call_override():
+    result = BlochSimulator(
+        use_parallel=False, dynamic_sequence_kernel="native_serial"
+    ).simulate_dynamic_sequence(
+        SequenceProgram((), duration_s=1e-3),
+        _dynamic_phantom(),
+    )
+
+    assert result.metadata["requested_sequence_kernel"] == "native_serial"
+    assert result.metadata["sequence_kernel"] == "native_serial"
+
+
+@pytest.mark.parametrize("num_threads", [1, 2, 4, 8])
+@pytest.mark.parametrize(
+    "rf_hz",
+    [123.4 + 56.7j, -987.6 + 1.2j, 250.0j],
+    ids=("complex-axis", "negative-x", "y-axis"),
+)
+def test_native_rf_voxel_block_is_bitwise_equal_to_numpy(num_threads, rf_hz):
+    from blochsimulator.dynamic_bloch_cy import (
+        apply_rf_rotation_transverse_block,
+    )
+    from blochsimulator.dynamic_phantom import _prepare_rf_rotation, _rf_rotate
+
+    rng = np.random.default_rng(20260722)
+    state = rng.standard_normal((2, 1728, 3))
+    expected = state.copy()
+    transverse = state[:, :, 0] + 1j * state[:, :, 1]
+    duration_s = 10e-6
+
+    _rf_rotate(expected, rf_hz, duration_s)
+    prepared = _prepare_rf_rotation(rf_hz, duration_s)
+    apply_rf_rotation_transverse_block(
+        state,
+        transverse,
+        prepared[0],
+        prepared[1],
+        prepared[2],
+        prepared[3],
+        prepared[4],
+        num_threads,
+    )
+    state[:, :, 0] = transverse.real
+    state[:, :, 1] = transverse.imag
+
+    assert np.array_equal(state, expected)
+
+
+@pytest.mark.parametrize("kernel", ["native_serial", "native_parallel"])
+@pytest.mark.parametrize("driver", ["inflow", "dynamic_b0"])
+def test_native_dynamic_kernel_reports_driver_fallback(driver, kernel):
+    phantom = _dynamic_phantom()
+    curve = TimeCurve((0.0, 1e-3), (0.0, 1.0), "linear", "hold")
+    if driver == "inflow":
+        phantom.pyruvate_inflow = PyruvateInflow(curve, np.ones(phantom.shape))
+    else:
+        phantom.dynamic_b0 = DynamicB0(curve, np.ones(phantom.shape))
+    program = SequenceProgram((), duration_s=1e-3)
+
+    native = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        program, phantom, sequence_kernel=kernel
+    )
+    optimized = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        program, phantom, sequence_kernel="optimized"
+    )
+
+    assert native.metadata["requested_sequence_kernel"] == kernel
+    assert native.metadata["sequence_kernel"] == "optimized"
+    assert native.metadata["native_fallback_reason"]
+    for name in (
+        "signal",
+        "species_signal",
+        "final_magnetization",
+        "final_pool_magnetization",
+    ):
+        assert np.array_equal(getattr(native, name), getattr(optimized, name))
+
+
+@pytest.mark.parametrize("num_threads", [1, 2, 4, 8])
+def test_native_parallel_dynamic_kernel_is_bitwise_equal(num_threads):
+    shape = (12, 12, 12)
+    phantom = DynamicSpectralPhantom(
+        shape=shape,
+        fov=(0.12, 0.12, 0.12),
+        pools=(
+            ChemicalSpecies("Pyruvate", 0.0, 30.0, 1.0),
+            ChemicalSpecies("Lactate", 12.0, 25.0, 1.0),
+        ),
+        initial_concentration_maps={
+            "Pyruvate": np.ones(shape),
+            "Lactate": np.zeros(shape),
+        },
+        kpl_map_s_inv=np.linspace(0.0, 0.1, np.prod(shape)).reshape(shape),
+        b0_map=np.linspace(-8.0, 8.0, np.prod(shape)).reshape(shape),
+        nucleus="C13",
+    )
+    raster = 20e-6
+    program = SequenceProgram(
+        (
+            RFEvent(2 * raster, np.asarray([80.0 + 20.0j, 0.0j]), raster),
+            GradientEvent("x", 0.0, np.linspace(-150.0, 200.0, 32), raster),
+            ADCEvent(0.0, 16, 2 * raster, phase_offset_rad=0.37),
+        ),
+        duration_s=32 * raster,
+    )
+    kwargs = {
+        "checkpoints_s": (0.0, 17 * raster, 32 * raster),
+        "simulation_timestep_s": 5e-6,
+    }
+    simulator = BlochSimulator(use_parallel=True, num_threads=num_threads)
+    reference = simulator.simulate_dynamic_sequence(
+        program, phantom, sequence_kernel="reference", **kwargs
+    )
+    native = simulator.simulate_dynamic_sequence(
+        program, phantom, sequence_kernel="native_parallel", **kwargs
+    )
+
+    assert native.metadata["sequence_kernel"] == "native_parallel"
+    assert native.metadata["native_parallel_threads"] == num_threads
+    assert native.metadata["native_rf_block_enabled"] is True
+    assert native.metadata["native_rf_threads"] == num_threads
+    for name in (
+        "signal",
+        "species_signal",
+        "final_magnetization",
+        "final_pool_magnetization",
+        "checkpoint_magnetization",
+        "checkpoint_pool_magnetization",
+    ):
+        assert np.array_equal(getattr(native, name), getattr(reference, name))
+
+
+def test_native_parallel_dynamic_kernel_respects_tiny_block_budget():
+    phantom = _dynamic_phantom()
+    program = SequenceProgram((), duration_s=1e-3)
+    simulator = BlochSimulator(use_parallel=True, num_threads=8)
+    optimized = simulator.simulate_dynamic_sequence(
+        program, phantom, sequence_kernel="optimized", checkpoints_s=(5e-4,)
+    )
+    native = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        sequence_kernel="native_parallel",
+        checkpoints_s=(5e-4,),
+        memory_budget_bytes=1,
+    )
+
+    assert native.metadata["native_parallel_memory_limited"] is True
+    assert native.metadata["native_parallel_threads"] == 1
+    for name in (
+        "signal",
+        "species_signal",
+        "final_magnetization",
+        "final_pool_magnetization",
+        "checkpoint_magnetization",
+        "checkpoint_pool_magnetization",
+    ):
+        assert np.array_equal(getattr(native, name), getattr(optimized, name))
+
+
 @pytest.mark.parametrize("suffix", [".npz", ".h5", ".nc"])
 def test_dynamic_phantom_round_trip(tmp_path, suffix):
     phantom = _dynamic_phantom()
@@ -379,6 +642,7 @@ def test_phantom_design_builds_dynamic_pool_maps_and_kpl_regions():
     phantom = design.build()
 
     assert isinstance(phantom, DynamicSpectralPhantom)
+    assert phantom.nucleus == "C13"
     assert np.array_equal(phantom.kpl_map_s_inv[:, 0, 0], [0.0, 0.0, 0.08, 0.08])
     assert PhantomDesign.from_phantom(phantom).dynamic_enabled
 

@@ -16,7 +16,7 @@ from .dynamic_phantom import (
     TimeCurve,
     rasterize_kpl_regions,
 )
-from .units import hz_to_ppm
+from .units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm
 
 
 @dataclass
@@ -97,6 +97,8 @@ class PhantomDesign:
     name: str = "Designed spectral phantom"
     shape: Tuple[int, int, int] = (128, 128, 128)
     fov_m: Tuple[float, float, float] = (0.22, 0.22, 0.22)
+    field_strength_t: float = 3.0
+    nucleus: Optional[str] = None
     spectral_reference_ppm: float = 0.0
     spectral_bandwidth_ppm: float = 20.0
     spectral_points: int = 1024
@@ -120,6 +122,10 @@ class PhantomDesign:
             raise ValueError("design FOV must contain three finite values")
         if np.any(np.asarray(self.fov_m) <= 0):
             raise ValueError("design FOV must be positive")
+        if not np.isfinite(self.field_strength_t) or self.field_strength_t <= 0:
+            raise ValueError("design field strength must be positive and finite")
+        if self.nucleus is not None and self.nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
+            raise ValueError(f"unsupported nucleus {self.nucleus!r}")
         if not np.isfinite(self.spectral_reference_ppm):
             raise ValueError("spectral reference must be finite")
         if (
@@ -208,6 +214,7 @@ class PhantomDesign:
     def build(self):
         """Build independent spectral components from all shapes and peaks."""
         self.validate()
+        effective_nucleus = self.nucleus or ("C13" if self.dynamic_enabled else "H1")
         species = []
         concentration_maps: Dict[str, np.ndarray] = {}
         initial_mz_maps: Dict[str, np.ndarray] = {}
@@ -297,6 +304,8 @@ class PhantomDesign:
                     self.default_kpl_s_inv,
                 ),
                 b0_map_ppm=b0_map,
+                field_strength=float(self.field_strength_t),
+                nucleus=effective_nucleus,
                 spectral_reference_ppm=float(self.spectral_reference_ppm),
                 spectral_bandwidth_ppm=float(self.spectral_bandwidth_ppm),
                 spectral_points=int(self.spectral_points),
@@ -328,6 +337,8 @@ class PhantomDesign:
             initial_mz_maps=initial_mz_maps,
             b0_map=b0_map if uses_legacy_b0 else None,
             b0_map_ppm=None if uses_legacy_b0 else b0_map,
+            field_strength=float(self.field_strength_t),
+            nucleus=effective_nucleus,
             spectral_reference_ppm=float(self.spectral_reference_ppm),
             spectral_bandwidth_ppm=float(self.spectral_bandwidth_ppm),
             spectral_points=int(self.spectral_points),
@@ -410,6 +421,14 @@ class PhantomDesign:
             shape=tuple(int(value) for value in data.get("shape", (128, 128, 128))),
             fov_m=tuple(
                 float(value) for value in data.get("fov_m", (0.22, 0.22, 0.22))
+            ),
+            field_strength_t=float(
+                data.get("field_strength_t", legacy_field_strength_t)
+            ),
+            nucleus=(
+                None
+                if data.get("nucleus") is None and "nucleus" in data
+                else str(data.get("nucleus", legacy_nucleus))
             ),
             spectral_reference_ppm=float(data.get("spectral_reference_ppm", 0.0)),
             spectral_bandwidth_ppm=float(data.get("spectral_bandwidth_ppm", 20.0)),

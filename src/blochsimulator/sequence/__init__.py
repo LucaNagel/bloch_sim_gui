@@ -47,6 +47,7 @@ from .pulseq import (
     UnsupportedPulseqVersionError,
     load_pulseq,
 )
+from .pulseq_builders import make_pulseq_bssfp, make_pulseq_csi, make_pulseq_epi
 
 __all__ = [
     "ADCEvent",
@@ -93,4 +94,7 @@ __all__ = [
     "infer_spectroscopic_acquisition",
     "load_pulseq",
     "make_cartesian_epi",
+    "make_pulseq_bssfp",
+    "make_pulseq_csi",
+    "make_pulseq_epi",
 ]

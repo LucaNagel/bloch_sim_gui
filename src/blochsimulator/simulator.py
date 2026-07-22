@@ -1303,6 +1303,7 @@ class BlochSimulator:
         memory_limit_bytes: Optional[int] = None,
         memory_policy: Optional[MemoryPolicy] = None,
         sequence_kernel: str = "optimized",
+        dynamic_sequence_kernel: str = "optimized",
     ):
         """
         Initialize the Bloch simulator.
@@ -1325,6 +1326,8 @@ class BlochSimulator:
         sequence_kernel : {"optimized", "reference"}
             Native kernel used by event-based sequence simulations. The reference
             kernel remains available for numerical comparisons.
+        dynamic_sequence_kernel : {"optimized", "native_parallel", "native_serial", "reference"}
+            Kernel used specifically for dynamic two-pool sequence simulations.
         """
         self.use_parallel = use_parallel
         self.num_threads = resolve_num_threads(num_threads)
@@ -1334,6 +1337,17 @@ class BlochSimulator:
         if sequence_kernel not in {"optimized", "reference"}:
             raise ValueError("sequence_kernel must be 'optimized' or 'reference'")
         self.sequence_kernel = sequence_kernel
+        if dynamic_sequence_kernel not in {
+            "optimized",
+            "native_parallel",
+            "native_serial",
+            "reference",
+        }:
+            raise ValueError(
+                "dynamic_sequence_kernel must be 'optimized', 'native_parallel', "
+                "'native_serial', or 'reference'"
+            )
+        self.dynamic_sequence_kernel = dynamic_sequence_kernel
         self.last_result = None
 
         # Validate settings immediately instead of waiting for the first run.
@@ -2002,7 +2016,10 @@ class BlochSimulator:
         """Simulate a regional two-pool hyperpolarized dynamic phantom."""
         from .dynamic_phantom import simulate_dynamic_sequence
 
-        kwargs.setdefault("sequence_kernel", self.sequence_kernel)
+        kwargs.setdefault("sequence_kernel", self.dynamic_sequence_kernel)
+        kwargs.setdefault("use_parallel", self.use_parallel)
+        kwargs.setdefault("num_threads", self.num_threads)
+        kwargs.setdefault("memory_budget_bytes", self._memory_budget().limit_bytes)
         return simulate_dynamic_sequence(program, phantom, **kwargs)
 
     def simulate_sequence_probes(

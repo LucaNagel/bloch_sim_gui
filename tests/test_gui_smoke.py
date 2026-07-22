@@ -81,6 +81,11 @@ def test_settings_dialog_returns_selected_values(tmp_path):
         dialog.sequence_kernel_combo.findData("reference")
     )
     assert dialog.sequence_kernel() == "reference"
+    assert dialog.dynamic_sequence_kernel() == "optimized"
+    dialog.dynamic_sequence_kernel_combo.setCurrentIndex(
+        dialog.dynamic_sequence_kernel_combo.findData("native_parallel")
+    )
+    assert dialog.dynamic_sequence_kernel() == "native_parallel"
     assert dialog.sequence_timestep_preset() == "balanced"
     assert dialog.sequence_timestep_us() == pytest.approx(5.0)
     assert not dialog.sequence_timestep_us_spin.isEnabled()
@@ -234,6 +239,7 @@ def test_configured_export_directory_is_used(tmp_path, monkeypatch):
     export_directory = tmp_path / "custom-exports"
     window.app_settings.setValue("general/export_directory", str(export_directory))
     window.app_settings.setValue("sequence/kernel", "reference")
+    window.app_settings.setValue("sequence/dynamic_kernel", "native_parallel")
     window.app_settings.setValue("sequence/timestep_preset", "fast")
     window.app_settings.setValue("sequence/timestep_us", 10.0)
     window.app_settings.setValue("simulation/thread_mode", "manual")
@@ -242,12 +248,15 @@ def test_configured_export_directory_is_used(tmp_path, monkeypatch):
     assert window._get_export_directory() == export_directory
     assert export_directory.is_dir()
     assert window._load_sequence_kernel() == "reference"
+    assert window._load_dynamic_sequence_kernel() == "native_parallel"
     assert window._load_sequence_timestep_preset() == "fast"
     assert window._load_sequence_timestep_us() == pytest.approx(10.0)
     assert window._load_configured_num_threads() == 3
 
     window.app_settings.setValue("sequence/kernel", "invalid")
     assert window._load_sequence_kernel() == "optimized"
+    window.app_settings.setValue("sequence/dynamic_kernel", "invalid")
+    assert window._load_dynamic_sequence_kernel() == "optimized"
 
 
 def test_simulation_settings_are_persisted_and_applied(tmp_path):
@@ -261,6 +270,7 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     dialog.tooltips_enabled.return_value = True
     dialog.sequence_live_progress_enabled.return_value = False
     dialog.sequence_kernel.return_value = "reference"
+    dialog.dynamic_sequence_kernel.return_value = "native_parallel"
     dialog.sequence_timestep_preset.return_value = "fast"
     dialog.sequence_timestep_us.return_value = 10.0
     dialog.thread_mode.return_value = "manual"
@@ -274,9 +284,13 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     assert window.app_settings.value("simulation/thread_mode") == "manual"
     assert int(window.app_settings.value("simulation/manual_threads")) == 2
     assert window.simulator.sequence_kernel == "reference"
+    assert window.simulator.dynamic_sequence_kernel == "native_parallel"
     assert window.simulator.num_threads == 2
     window.sequence_simulation_widget.set_sequence_timestep_us.assert_called_once_with(
         10.0
+    )
+    window.sequence_simulation_widget.set_dynamic_sequence_kernel.assert_called_once_with(
+        "native_parallel"
     )
     window.sequence_simulation_widget.set_thread_configuration.assert_called_once_with(
         "manual", 2

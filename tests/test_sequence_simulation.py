@@ -409,6 +409,9 @@ def test_invalid_sequence_kernel_is_rejected():
     with pytest.raises(ValueError, match="sequence_kernel"):
         BlochSimulator(sequence_kernel="unknown")
 
+    with pytest.raises(ValueError, match="dynamic_sequence_kernel"):
+        BlochSimulator(dynamic_sequence_kernel="unknown")
+
 
 def test_invalid_active_relaxation_rejected():
     phantom = _phantom(t1=0.0)

@@ -33,6 +33,12 @@ class SettingsDialog(QDialog):
         ("Optimized (recommended)", "optimized"),
         ("Reference", "reference"),
     )
+    DYNAMIC_SEQUENCE_KERNELS = (
+        ("Optimized NumPy (recommended)", "optimized"),
+        ("Native RF-block parallel (experimental)", "native_parallel"),
+        ("Native RF-block serial (experimental)", "native_serial"),
+        ("Reference", "reference"),
+    )
     SEQUENCE_TIMESTEP_PRESETS = (
         ("Accurate — 1 µs", "accurate", 1.0),
         ("Balanced — 5 µs", "balanced", 5.0),
@@ -49,6 +55,7 @@ class SettingsDialog(QDialog):
         initial_tab: str = "general",
         sequence_live_progress_enabled: bool = True,
         sequence_kernel: str = "optimized",
+        dynamic_sequence_kernel: str = "optimized",
         sequence_timestep_preset: str = "balanced",
         sequence_timestep_us: float = 5.0,
         thread_mode: str = "automatic",
@@ -150,6 +157,26 @@ class SettingsDialog(QDialog):
             "path for numerical comparisons."
         )
         simulation_form.addRow("Sequence Bloch kernel:", self.sequence_kernel_combo)
+
+        self.dynamic_sequence_kernel_combo = QComboBox()
+        self.dynamic_sequence_kernel_combo.setObjectName(
+            "dynamic_sequence_simulation_kernel"
+        )
+        for label, kernel in self.DYNAMIC_SEQUENCE_KERNELS:
+            self.dynamic_sequence_kernel_combo.addItem(label, kernel)
+        dynamic_kernel_index = self.dynamic_sequence_kernel_combo.findData(
+            dynamic_sequence_kernel
+        )
+        self.dynamic_sequence_kernel_combo.setCurrentIndex(max(0, dynamic_kernel_index))
+        self.dynamic_sequence_kernel_combo.setToolTip(
+            "Kernel for dynamic two-pool pyruvate/lactate phantoms. Native "
+            "RF-block kernels remove temporary RF rotation arrays; the parallel "
+            "variant also uses multiple CPU cores for supported static-B0 cases. "
+            "Inflow and dynamic B0 currently fall back safely to optimized NumPy."
+        )
+        simulation_form.addRow(
+            "Dynamic two-pool kernel:", self.dynamic_sequence_kernel_combo
+        )
         self.tabs.addTab(simulation_tab, "Simulation")
 
         memory_tab = QWidget()
@@ -273,6 +300,9 @@ class SettingsDialog(QDialog):
 
     def sequence_kernel(self) -> str:
         return str(self.sequence_kernel_combo.currentData())
+
+    def dynamic_sequence_kernel(self) -> str:
+        return str(self.dynamic_sequence_kernel_combo.currentData())
 
     def sequence_timestep_preset(self) -> str:
         return str(self.sequence_timestep_preset_combo.currentData())

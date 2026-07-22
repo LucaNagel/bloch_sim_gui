@@ -47,6 +47,7 @@ from ..phantom_design import (
     SpectralPeakDefinition,
 )
 from ..spectral_phantom import SpectralPhantom
+from ..units import NUCLEUS_GAMMA_HZ_PER_T
 from .volume_viewer import PhantomInspectorWidget
 
 
@@ -217,6 +218,22 @@ class SpectralPhantomDesignerDialog(QDialog):
         draw_layout.addLayout(global_row)
 
         spectral_row = QHBoxLayout()
+        spectral_row.addWidget(QLabel("B0"))
+        self.field_strength_t = self._number_spin(0.001, 1000.0, 3.0, " T")
+        self.field_strength_t.setToolTip(
+            "Main field used to convert ppm peak and B0 offsets to Hz"
+        )
+        spectral_row.addWidget(self.field_strength_t)
+        spectral_row.addWidget(QLabel("Nucleus"))
+        self.nucleus = QComboBox()
+        self.nucleus.addItem("Auto (H1 static / C13 dynamic)", None)
+        for nucleus in sorted(NUCLEUS_GAMMA_HZ_PER_T):
+            self.nucleus.addItem(nucleus, nucleus)
+        self.nucleus.setToolTip(
+            "Nucleus used together with B0 for ppm-to-Hz conversion; Auto "
+            "preserves the H1 static and C13 dynamic defaults"
+        )
+        spectral_row.addWidget(self.nucleus)
         spectral_row.addWidget(QLabel("Spectral reference"))
         self.spectral_reference_ppm = self._number_spin(-10000.0, 10000.0, 0.0, " ppm")
         self.spectral_reference_ppm.setToolTip(
@@ -244,6 +261,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.spectral_reference_ppm.valueChanged.connect(
             self._spectral_settings_changed
         )
+        self.field_strength_t.valueChanged.connect(self._spectral_settings_changed)
+        self.nucleus.currentIndexChanged.connect(self._spectral_settings_changed)
         self.spectral_bandwidth_ppm.valueChanged.connect(
             self._spectral_settings_changed
         )
@@ -695,6 +714,9 @@ class SpectralPhantomDesignerDialog(QDialog):
             widget.setValue(int(value))
         for widget, value in zip(self.fov_spins, self.design.fov_m):
             widget.setValue(float(value) * 100.0)
+        self.field_strength_t.setValue(float(self.design.field_strength_t))
+        nucleus_index = self.nucleus.findData(self.design.nucleus)
+        self.nucleus.setCurrentIndex(max(0, nucleus_index))
         self.spectral_reference_ppm.setValue(self.design.spectral_reference_ppm)
         self.spectral_bandwidth_ppm.setValue(self.design.spectral_bandwidth_ppm)
         self.spectral_points.setValue(int(self.design.spectral_points))
@@ -1344,6 +1366,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.design.name = self.name_edit.text().strip() or "Designed spectral phantom"
         self.design.shape = tuple(widget.value() for widget in self.matrix_spins)
         self.design.fov_m = tuple(widget.value() / 100.0 for widget in self.fov_spins)
+        self.design.field_strength_t = self.field_strength_t.value()
+        self.design.nucleus = self.nucleus.currentData()
         self.design.spectral_reference_ppm = self.spectral_reference_ppm.value()
         self.design.spectral_bandwidth_ppm = self.spectral_bandwidth_ppm.value()
         self.design.spectral_points = self.spectral_points.value()
@@ -1419,6 +1443,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             self.phantom = phantom
             self._load_design_into_ui()
             self.inspector.set_phantom(phantom)
+            self.tabs.setCurrentWidget(self.inspector)
         except Exception as exc:
             QMessageBox.critical(self, "Load failed", str(exc))
 
