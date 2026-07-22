@@ -266,6 +266,7 @@ def test_generated_epi_infers_one_cartesian_grid(tmp_path):
         fov=(0.22, 0.24),
         n_x=8,
         n_y=6,
+        flip_angle_deg=30.0,
         slice_thickness=4e-3,
         n_slices=1,
     )
@@ -279,6 +280,10 @@ def test_generated_epi_infers_one_cartesian_grid(tmp_path):
     assert acquisition.dwell_s == pytest.approx(4e-6)
     assert acquisition.kx_offset_cells == pytest.approx(0.5)
     assert acquisition.ky_offset_cells == pytest.approx(0.0)
+    assert program.metadata["definitions"]["FlipAngleDeg"] == pytest.approx(30.0)
+    assert 360.0 * abs(np.sum(compiled.rf_hz * compiled.dt_s)) == pytest.approx(
+        30.0, rel=1e-5
+    )
     acquisition.validate_gradient_moments(compiled.adc_gradient_moment_cyc_per_m)
 
 
@@ -344,12 +349,96 @@ def test_generated_multislice_epi_supports_edge_to_edge_slice_gaps(tmp_path):
     assert bool(definitions["SpoilAfterSlice"]) is True
     assert definitions["SpoilerCyclesPerSlice"] == pytest.approx(8.0)
     assert definitions["SpoilerCyclesPerVoxel"] == pytest.approx(0.0)
+    assert definitions["SpoilerDuration"] == pytest.approx(4e-3)
+    assert definitions["SpoilerAxes"] == "z"
+    assert np.asarray(definitions["SpoilerEndTimes"]).size == 3
     rf_offsets = sorted({event.frequency_offset_hz for event in program.rf_events})
     assert len(rf_offsets) == 3
     assert rf_offsets[1] == pytest.approx(0.0)
     assert rf_offsets[2] - rf_offsets[1] == pytest.approx(rf_offsets[1] - rf_offsets[0])
 
 
+def test_generated_epi_supports_in_plane_only_spoilers(tmp_path):
+    path = tmp_path / "epi_in_plane_spoiler.seq"
+    fov = (0.22, 0.24)
+    sequence = EXAMPLE_MAIN(
+        write_seq=True,
+        seq_filename=str(path),
+        fov=fov,
+        n_x=4,
+        n_y=2,
+        n_slices=1,
+        spoiler_cycles_per_slice=0.0,
+        spoiler_cycles_per_voxel=0.5,
+        spoiler_duration=2e-3,
+    )
+    assert sequence.check_timing()[0]
+    program = load_pulseq(path)
+    definitions = program.metadata["definitions"]
+
+    assert definitions["SpoilerAxes"] == "xy"
+    spoiler_end = float(np.asarray(definitions["SpoilerEndTimes"]).reshape(-1)[0])
+    events = [
+        event
+        for event in program.gradient_events
+        if np.isclose(event.end_s, spoiler_end, rtol=0.0, atol=1e-9)
+    ]
+    assert {event.axis for event in events} == {"x", "y"}
+    voxel_sizes = {"x": fov[0] / 4, "y": fov[1] / 2}
+    for event in events:
+        moment = np.sum(event.samples_hz_per_m) * event.raster_s
+        assert moment * voxel_sizes[event.axis] == pytest.approx(0.5, abs=2e-5)
+
+
+def test_generated_multislice_epi_supports_repetitions_and_repetition_time(tmp_path):
+    path = tmp_path / "multislice_repeated_epi.seq"
+    sequence = EXAMPLE_MAIN(
+        write_seq=True,
+        seq_filename=str(path),
+        n_x=4,
+        n_y=4,
+        slice_thickness=4e-3,
+        n_slices=2,
+        n_repetitions=3,
+        repetition_time=100e-3,
+    )
+    program = load_pulseq(path)
+    compiled = SequenceCompiler().compile(program)
+    frames = infer_cartesian_acquisition_frames(program, compiled=compiled)
+    definitions = program.metadata["definitions"]
+
+    assert sequence.duration()[0] == pytest.approx(300e-3)
+    assert definitions["Repetitions"] == pytest.approx(3)
+    assert definitions["RepetitionTime"] == pytest.approx(100e-3)
+    assert definitions["MinimumRepetitionTime"] < definitions["RepetitionTime"]
+    assert frames.num_frames == 6
+    assert frames.varying_axes == ("slice", "repetition")
+    assert frames.dimensions.source == "rf_frequency_offsets_and_repetitions"
+    assert [frames.frame_label(index) for index in range(6)] == [
+        "slice=0, repetition=0",
+        "slice=1, repetition=0",
+        "slice=0, repetition=1",
+        "slice=1, repetition=1",
+        "slice=0, repetition=2",
+        "slice=1, repetition=2",
+    ]
+
+
 def test_generated_epi_rejects_negative_slice_gap():
     with pytest.raises(ValueError, match="slice_gap"):
         EXAMPLE_MAIN(slice_gap=-1e-3)
+
+
+def test_generated_epi_rejects_invalid_repetition_settings():
+    with pytest.raises(ValueError, match="flip_angle_deg"):
+        EXAMPLE_MAIN(flip_angle_deg=0.0)
+    with pytest.raises(ValueError, match="n_repetitions"):
+        EXAMPLE_MAIN(n_repetitions=0)
+    with pytest.raises(ValueError, match="shorter than the minimum"):
+        EXAMPLE_MAIN(
+            n_x=4,
+            n_y=4,
+            n_slices=2,
+            n_repetitions=2,
+            repetition_time=1e-3,
+        )

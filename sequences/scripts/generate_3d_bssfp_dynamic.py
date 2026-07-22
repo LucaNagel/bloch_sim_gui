@@ -141,6 +141,8 @@ def main(
     rf_phase_increment: float = 180,
     dummy_repetitions: int = 1,
     use_alpha_half: bool = True,
+    end_image_spoiler_cycles_per_fov: float = 4.0,
+    end_image_spoiler_duration: float = 1e-3,
 ):
     """Create a Cartesian 3D bSSFP sequence.
 
@@ -150,7 +152,10 @@ def main(
     acquired repetitions. ``rf_frequency_offsets_hz`` contains absolute RF
     carrier offsets relative to the sequence centre frequency and is cycled
     over dynamic frames. ``rf_pulse_type`` defaults to ``"slr"``; ``"block"``
-    remains available for deliberately broad-band control simulations.
+    remains available for deliberately broad-band control simulations. The
+    end-of-image spoiler is applied simultaneously on x, y, and z after every
+    acquired 3D frame. Its moment is expressed in cycles across the respective
+    FOV and it can be disabled by setting its cycles to zero.
     """
     fov_x, fov_y, fov_z = _as_3d_fov(fov)
     _encoding_areas(n_read, 1.0)  # Validate the readout matrix size as well.
@@ -168,6 +173,14 @@ def main(
     rf_frequency_offsets_hz = tuple(float(value) for value in rf_frequency_offsets_hz)
     if not rf_frequency_offsets_hz or not np.all(np.isfinite(rf_frequency_offsets_hz)):
         raise ValueError("rf_frequency_offsets_hz must contain finite values")
+    if end_image_spoiler_cycles_per_fov < 0 or not np.isfinite(
+        end_image_spoiler_cycles_per_fov
+    ):
+        raise ValueError(
+            "end_image_spoiler_cycles_per_fov must be non-negative and finite"
+        )
+    if end_image_spoiler_duration <= 0 or not np.isfinite(end_image_spoiler_duration):
+        raise ValueError("end_image_spoiler_duration must be positive and finite")
 
     system = pp.Opts(
         max_grad=28,
@@ -253,6 +266,19 @@ def main(
     te = tr / 2
 
     rf_alpha_half_center, _ = pp.calc_rf_center(rf_alpha_half)
+
+    end_image_spoilers = ()
+    if end_image_spoiler_cycles_per_fov > 0:
+        end_image_spoilers = tuple(
+            pp.make_trapezoid(
+                channel=axis,
+                area=end_image_spoiler_cycles_per_fov / axis_fov,
+                duration=end_image_spoiler_duration,
+                system=system,
+            )
+            for axis, axis_fov in zip("xyz", (fov_x, fov_y, fov_z))
+        )
+    spoiler_end_times = []
 
     def set_rf_and_adc_offsets(base_phase_deg: float, frame_frequency_hz: float):
         base_phase_rad = np.deg2rad(base_phase_deg)
@@ -344,6 +370,10 @@ def main(
                     partition_index=partition_index,
                 )
 
+        if end_image_spoilers:
+            seq.add_block(*end_image_spoilers)
+            spoiler_end_times.append(float(seq.duration()[0]))
+
     ok, error_report = seq.check_timing()
     if ok:
         print("Timing check passed successfully")
@@ -392,6 +422,16 @@ def main(
         )
     seq.set_definition(key="TR", value=tr)
     seq.set_definition(key="TE", value=te)
+    seq.set_definition(
+        key="EndImageSpoilerCyclesPerFOV",
+        value=end_image_spoiler_cycles_per_fov,
+    )
+    seq.set_definition(
+        key="EndImageSpoilerDuration",
+        value=end_image_spoiler_duration,
+    )
+    seq.set_definition(key="EndImageSpoilerAxes", value="xyz")
+    seq.set_definition(key="EndImageSpoilerEndTimes", value=spoiler_end_times)
 
     if write_seq:
         script_dir = Path(__file__).resolve().parent

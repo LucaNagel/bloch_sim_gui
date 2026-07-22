@@ -6,10 +6,15 @@ import pytest
 
 pypulseq = pytest.importorskip("pypulseq")
 
+from blochsimulator import BlochSimulator
+from blochsimulator.phantom import Phantom
 from blochsimulator.sequence import (
     AcquisitionDimensions,
     SequenceCompiler,
+    SequenceSimulationResult,
     infer_cartesian_acquisition,
+    infer_cartesian_acquisition_frames,
+    infer_cartesian_acquisition_volumes,
     load_pulseq,
 )
 
@@ -149,6 +154,29 @@ def test_spectral_selective_3d_bssfp_adds_published_starter_and_volume_spoiler(
             assert moments[axis] * axis_fov == pytest.approx(4.0, abs=2e-5)
 
 
+def test_spectral_selective_3d_bssfp_allows_adjusting_initial_pulse_spacing():
+    requested_spacing = 5.0e-3
+    sequence = SPECTRAL_BSSFP_MAIN(
+        n_read=4,
+        n_phase=1,
+        n_partition=1,
+        n_repetition=1,
+        dummy_repetitions=0,
+        alpha_half_center_spacing=requested_spacing,
+        target_tr=8e-3,
+        end_image_spoiler_cycles_per_fov=0,
+    )
+
+    rf_center_times = sequence.rf_times()[0]
+    assert rf_center_times[1] - rf_center_times[0] == pytest.approx(
+        requested_spacing,
+        abs=1e-9,
+    )
+    assert sequence.definitions["AlphaHalfCenterSpacing"] == pytest.approx(
+        requested_spacing
+    )
+
+
 def test_spectral_selective_bssfp_cartesian_inference_keeps_serialization_residual(
     tmp_path,
 ):
@@ -172,6 +200,116 @@ def test_spectral_selective_bssfp_cartesian_inference_keeps_serialization_residu
     # Text serialization leaves a tiny line-to-line residual.  It is retained
     # instead of being rounded to a half-cell that no longer validates.
     assert acquisition.kx_offset_cells == pytest.approx(0.49902336, abs=2e-6)
+
+
+def test_spectral_selective_bssfp_builds_position_sorted_3d_volumes(tmp_path):
+    fov = (56e-3, 28e-3, 21e-3)
+    sequence = SPECTRAL_BSSFP_MAIN(
+        fov=fov,
+        n_read=4,
+        n_phase=3,
+        n_partition=2,
+        n_repetition=2,
+        dummy_repetitions=0,
+        use_alpha_half=False,
+        target_tr=8e-3,
+    )
+    path = tmp_path / "position_sorted_3d_bssfp.seq"
+    sequence.write(str(path), v141_compat=True)
+    program = load_pulseq(path)
+    compiled = SequenceCompiler().compile(program)
+    frames = infer_cartesian_acquisition_frames(program, compiled=compiled)
+    volumes = infer_cartesian_acquisition_volumes(
+        program, compiled=compiled, frames=frames
+    )
+
+    assert volumes.matrix == (4, 3, 2)
+    assert volumes.num_volumes == 2
+    assert volumes.varying_axes == ("repetition",)
+    assert volumes.volume_indices == ((0, 0, 0, 0), (0, 0, 1, 0))
+    assert volumes.volume_frame_indices == ((0, 1), (2, 3))
+    assert volumes.kz_cyc_per_m * fov[2] == pytest.approx([-1.0, 0.0])
+
+    result = BlochSimulator(use_parallel=False).simulate_sequence(
+        program,
+        Phantom(
+            shape=(1, 1, 1),
+            fov=fov,
+            t1_map=np.full((1, 1, 1), 10.0),
+            t2_map=np.full((1, 1, 1), 1.0),
+        ),
+        simulation_timestep_s=20e-6,
+    )
+    inferred = result.cartesian_acquisition_volumes
+    assert inferred is not None
+    assert result.to_cartesian_3d_kspace().shape == (2, 2, 3, 4)
+
+    known_image = np.zeros((2, 2, 3, 4), dtype=np.complex128)
+    known_image[0, 0, 1, 2] = 1.0
+    known_image[0, 1, 2, 0] = 0.25 - 0.5j
+    known_image[1, 0, 0, 3] = 0.75 + 0.25j
+    known_image[1, 1, 1, 1] = 0.5
+    dx = inferred.fov_m[0] / inferred.read_matrix
+    dy = inferred.fov_m[1] / inferred.phase_matrix
+    dz = inferred.fov_m[2] / inferred.partition_matrix
+    centre_phase = np.exp(
+        2j
+        * np.pi
+        * (
+            inferred.kz_cyc_per_m[:, None, None] * dz / 2
+            + inferred.ky_cyc_per_m[None, :, None] * dy / 2
+            + inferred.kx_cyc_per_m[None, None, :] * dx / 2
+        )
+    )
+    axes = (-3, -2, -1)
+    corrected_kspace = np.fft.fftshift(
+        np.fft.fftn(np.fft.ifftshift(known_image, axes=axes), axes=axes),
+        axes=axes,
+    )
+    sorted_kspace = corrected_kspace / centre_phase
+    chronological = np.zeros(result.adc_times_s.size, dtype=np.complex128)
+    for volume, frame_group in enumerate(inferred.volume_frame_indices):
+        for z_index, frame in enumerate(frame_group):
+            acquisition = inferred.frames.acquisitions[frame]
+            raw = np.empty(
+                (acquisition.phase_matrix, acquisition.read_matrix),
+                dtype=np.complex128,
+            )
+            for acquired_line, phase_index in enumerate(acquisition.phase_indices):
+                line = sorted_kspace[volume, z_index, phase_index]
+                if acquisition.readout_directions[acquired_line] < 0:
+                    line = line[::-1]
+                raw[acquired_line] = line
+            chronological[np.asarray(inferred.frames.sample_indices[frame])] = (
+                raw.reshape(-1)
+            )
+
+    synthetic = SequenceSimulationResult(
+        signal=chronological,
+        adc_times_s=result.adc_times_s,
+        final_magnetization=result.final_magnetization,
+        checkpoint_magnetization=None,
+        checkpoint_times_s=np.zeros(0),
+        metadata=result.metadata,
+        adc_gradient_moment_cyc_per_m=result.adc_gradient_moment_cyc_per_m,
+    )
+    assert np.allclose(synthetic.reconstruct_cartesian_3d(), known_image, atol=1e-12)
+
+    dataset = synthetic.to_xarray()
+    assert dataset["cartesian_3d_kspace"].dims == (
+        "repetition",
+        "partition_z",
+        "phase_y",
+        "read_x",
+    )
+    assert dataset["cartesian_3d_kspace"].shape == (2, 2, 3, 4)
+    assert np.array_equal(dataset["repetition"], [0, 1])
+
+    output = synthetic.save(tmp_path / "position_sorted_3d_bssfp.npz")
+    with np.load(output) as exported:
+        assert exported["cartesian_3d_kspace"].shape == (2, 2, 3, 4)
+        assert exported["cartesian_3d_image"].shape == (2, 2, 3, 4)
+        assert np.array_equal(exported["cartesian_3d_repetition_index"], [0, 1])
 
 
 def test_spectral_selective_3d_bssfp_uses_metabolite_specific_flip_angles(tmp_path):

@@ -13,6 +13,7 @@ from blochsimulator.ui.sequence_simulation_widget import (
     _event_step_plot_data,
 )
 from blochsimulator.sequence import (
+    AcquisitionDimensions,
     GradientEvent,
     RFEvent,
     SequenceCompiler,
@@ -24,6 +25,14 @@ from blochsimulator.sequence import (
 
 EXAMPLE_MAIN = runpy.run_path(
     str(Path(__file__).parents[1] / "sequences" / "scripts" / "generate_epi.py")
+)["main"]
+SPECTRAL_3D_MAIN = runpy.run_path(
+    str(
+        Path(__file__).parents[1]
+        / "sequences"
+        / "scripts"
+        / "generate_3d_bssfp_spectral_selective.py"
+    )
 )["main"]
 
 
@@ -97,6 +106,9 @@ def test_sequence_workspace_builds_cartesian_epi_from_controls():
     widget.read_matrix.setValue(6)
     widget.phase_matrix.setValue(4)
     widget.sampling_bandwidth_khz.setValue(25.0)
+    widget.epi_spoiler_cycles_per_slice.setValue(6.0)
+    widget.epi_spoiler_cycles_per_voxel.setValue(0.25)
+    widget.epi_spoiler_duration_ms.setValue(2.0)
     app.processEvents()
 
     assert widget.acquisition is not None
@@ -104,10 +116,24 @@ def test_sequence_workspace_builds_cartesian_epi_from_controls():
     assert widget.acquisition.read_matrix == 6
     assert widget.acquisition.phase_matrix == 4
     assert widget.acquisition.dwell_s == 40e-6
+    definitions = widget.program.metadata["definitions"]
+    assert definitions["SpoilAfterSlice"]
+    assert definitions["SpoilerCyclesPerSlice"] == pytest.approx(6.0)
+    assert definitions["SpoilerCyclesPerVoxel"] == pytest.approx(0.25)
+    assert definitions["SpoilerDuration"] == pytest.approx(2e-3)
+    assert definitions["SpoilerAxes"] == "xyz"
+    assert len(definitions["SpoilerEndTimes"]) == 1
     compiled = SequenceCompiler().compile(widget.program)
     assert compiled.adc_times_s.size == 24
     widget.acquisition.validate_gradient_moments(compiled.adc_gradient_moment_cyc_per_m)
     assert "25.000 kHz" in widget.sequence_info.text()
+    assert "Spoilers: 1" in widget.sequence_info.text()
+
+    widget.epi_spoil_after_slice.setChecked(False)
+    app.processEvents()
+    assert not widget.epi_spoiler_cycles_per_slice.isEnabled()
+    assert widget.program.metadata["definitions"]["SpoilerAxes"] == "none"
+    widget.epi_spoil_after_slice.setChecked(True)
 
     widget.spectroscopic_acquisition = SpectroscopicAcquisition(
         matrix=(4, 3),
@@ -175,6 +201,44 @@ def test_sequence_workspace_scopes_object_controls_to_the_selected_source():
     assert widget.t1_ms.isEnabled()
     assert not widget.built_in_properties_group.isHidden()
     assert widget.phantom_summary.isHidden()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_workspace_builds_multislice_repeated_epi_from_controls():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(1)
+    widget.read_matrix.setValue(4)
+    widget.phase_matrix.setValue(4)
+    widget.epi_flip_angle_deg.setValue(30.0)
+    widget.epi_slice_count.setValue(2)
+    widget.epi_repetitions.setValue(3)
+    widget.epi_repetition_time_ms.setValue(100.0)
+    widget.epi_slice_thickness_mm.setValue(4.0)
+    app.processEvents()
+
+    compiled = SequenceCompiler().compile(widget.program)
+    dimensions = AcquisitionDimensions.from_program(widget.program)
+    definitions = widget.program.metadata["definitions"]
+
+    assert widget.program.duration_s == pytest.approx(300e-3)
+    assert compiled.adc_times_s.size == 4 * 4 * 2 * 3
+    assert dimensions.varying_axes == ("slice", "repetition")
+    assert widget.acquisition_frames.num_frames == 6
+    assert widget.acquisition_frames.varying_axes == ("slice", "repetition")
+    assert widget.frame_selector.count() == 7
+    assert widget.frame_selector.itemText(6) == "slice=1, repetition=2"
+    assert definitions["SliceThickness"] == pytest.approx(4e-3)
+    assert definitions["FlipAngleDeg"] == pytest.approx(30.0)
+    assert definitions["Repetitions"] == 3
+    assert definitions["RepetitionTime"] == pytest.approx(100e-3)
+    assert len({event.frequency_offset_hz for event in widget.program.rf_events}) == 2
+    rf = widget.program.rf_events[0]
+    assert 360.0 * abs(np.sum(rf.samples_hz) * rf.raster_s) == pytest.approx(30.0)
+    assert "frames=6 (slice, repetition)" in widget.sequence_info.text()
 
     widget.close()
     widget.deleteLater()
@@ -287,6 +351,58 @@ def test_sequence_workspace_selects_multislice_cartesian_frames(tmp_path):
         "1.23"
     ]
     assert np.array_equal(np.unique(result.to_xarray().slice_index), [0, 1, 2])
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_workspace_selects_position_sorted_3d_volumes(tmp_path):
+    path = tmp_path / "cartesian_3d.seq"
+    SPECTRAL_3D_MAIN(
+        write_seq=True,
+        seq_filename=str(path),
+        n_read=4,
+        n_phase=2,
+        n_partition=2,
+        n_repetition=2,
+        dummy_repetitions=0,
+        use_alpha_half=False,
+        target_tr=8e-3,
+    )
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget._load_pulseq_path(path)
+    compiled = SequenceCompiler().compile(widget.program)
+    result = SequenceSimulationResult(
+        signal=np.ones(compiled.adc_times_s.size, dtype=np.complex128),
+        adc_times_s=compiled.adc_times_s,
+        final_magnetization=np.zeros((1, 1, 1, 3)),
+        checkpoint_magnetization=None,
+        checkpoint_times_s=np.empty(0),
+        adc_gradient_moment_cyc_per_m=compiled.adc_gradient_moment_cyc_per_m,
+        metadata={
+            "acquisition_dimensions": widget.acquisition_frames.dimensions.to_metadata(),
+            "cartesian_acquisition_frames": widget.acquisition_frames.to_metadata(),
+            "cartesian_acquisition_volumes": widget.acquisition_volumes.to_metadata(),
+        },
+    )
+    widget.result = result
+    widget._configure_frame_selector()
+    widget._show_cartesian_result(result)
+    app.processEvents()
+
+    assert widget.acquisition_volumes.matrix == (4, 2, 2)
+    assert widget.frame_selector.count() == 3
+    assert widget.frame_selector.itemText(0) == "All 2 volumes (montage)"
+    assert widget.frame_selector.itemText(2) == "repetition=1"
+    assert widget.kspace_view.image.shape == (9, 2)
+    assert widget.reconstruction_view.image.shape == (9, 2)
+    assert "3D |IFFT3|" in widget.reconstruction_info.text()
+    widget.frame_selector.setCurrentIndex(2)
+    assert widget.kspace_view.image.shape == (4, 2)
+    assert widget.reconstruction_view.image.shape == (4, 2)
+    assert "repetition=1" in widget.reconstruction_info.text()
 
     widget.close()
     widget.deleteLater()

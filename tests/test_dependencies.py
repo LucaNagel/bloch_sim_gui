@@ -23,6 +23,7 @@ REQUIRED_MODULES = [
     ("imageio_ffmpeg", "MP4 export support"),
     ("h5py", "HDF5 data export/import"),
     ("nbformat", "Jupyter notebook export"),
+    ("ipywidgets", "Interactive Jupyter result exploration"),
     ("cython", "C-extension compilation support"),
 ]
 

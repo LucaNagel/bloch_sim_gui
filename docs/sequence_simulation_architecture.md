@@ -52,6 +52,67 @@ end of the sequence. Boundaries calculated through different raster arithmetic
 are coalesced within a machine-precision tolerance; this prevents zero-duration
 intervals without merging physically distinct sequence events.
 
+## Time-step convergence validation
+
+`simulate_reference_sequence` is the independent correctness oracle for small
+spin ensembles. It does not call `SequenceCompiler` or a native kernel. Instead,
+it expands RF and gradient events at their native rasters and solves the affine
+Bloch equation, including relaxation and recovery, with a 4x4 matrix
+exponential on every constant interval.
+
+`SpinProbeEnsemble.from_axes` creates a Cartesian product of physical positions,
+frequency offsets, complex B1 scales, and explicit T1/T2 pairs.
+`run_timestep_convergence` simulates that ensemble with each requested
+production time step and reports maximum and RMS local magnetization-vector
+errors against the oracle, along with runtime, compiled interval count, and the
+worst probe. By default it observes RF event ends and the sequence end. Those
+times are already event boundaries, so convergence checkpoints do not
+artificially refine the interior of a coarse RF interval.
+
+The default pass limits are an absolute maximum vector error of `1e-3` and RMS
+vector error of `2e-4`. Magnetization is normalized to equilibrium `Mz=1`.
+These probe tests are intended to select candidate time steps before the more
+expensive full-phantom, ADC-signal, and reconstruction validation.
+
+`make_default_sequence_convergence_cases` supplies representative motifs for
+non-selective FID/GRE excitation, slice-selective EPI/UTE/CSI excitation, spin
+echo, repeated bSSFP, an MPRAGE inversion/readout train, phase-modulated
+spectral-selective RF, and adiabatic inversion. The motifs are deliberately
+small but retain the RF dynamics that make each class sensitive to temporal
+coarsening. `run_sequence_convergence_suite` identifies both the limiting case
+at every candidate step and the coarsest candidate passed by every case.
+
+The command-line runner writes detailed and summary CSV files when requested:
+
+```bash
+python scripts/run_timestep_convergence.py \
+  --rf-raster-us 1 \
+  --timesteps-us native 1 2 5 10 20 50 100 \
+  --output-csv /tmp/timestep_cases.csv \
+  --summary-csv /tmp/timestep_summary.csv
+```
+
+With 1 us native RF waveforms and the default strict criteria, the initial
+motif baseline is:
+
+| Candidate | All motifs pass | Limiting motif | Maximum error | Largest RMS |
+| --- | --- | --- | ---: | ---: |
+| Native | yes | Spin echo | 9.92e-6 | 6.17e-6 |
+| 1 us | yes | Spin echo | 9.92e-6 | 6.17e-6 |
+| 2 us | yes | Adiabatic inversion | 9.73e-5 | 3.52e-5 |
+| 5 us | no | Adiabatic inversion | 7.77e-4 | 2.77e-4 |
+| 10 us | no | Adiabatic inversion | 3.20e-3 | 1.14e-3 |
+| 20 us | no | Adiabatic inversion | 1.29e-2 | 4.60e-3 |
+| 50 us | no | Adiabatic inversion | 8.00e-2 | 2.87e-2 |
+| 100 us | no | Adiabatic inversion | 3.09e-1 | 1.13e-1 |
+
+This is a regression baseline for the representative motifs, not yet a global
+recommendation for arbitrary imported sequences. Full ADC and image validation
+must still confirm the surviving candidates on actual sequence programs.
+RF-discretization in dynamic hyperpolarized bSSFP is represented by the bSSFP
+motif, but the independent oracle does not yet solve coupled exchange or inflow;
+those dynamic equations require a separate convergence validation.
+
 ## Data flow
 
 1. Internal events, legacy arrays, or a Pulseq importer create a
@@ -93,6 +154,15 @@ dwell, line direction, phase order, and fractional grid offsets from compiled
 ADC gradient moments. Alternating lines on different grids, multiple slices or
 repetitions, missing FOV, and non-Cartesian trajectories are rejected instead
 of being silently reshaped.
+
+`infer_cartesian_acquisition_volumes` builds on the validated 2D frame mapping
+for acquisitions that declare three-element `MatrixSize` and `FOV` definitions.
+It subtracts the RF-relative moment origin, sorts planes by their measured kz
+coordinate, validates `PAR` labels against that ordering, and retains slice,
+echo, repetition, and segment as explicit outer dimensions. Results expose
+`cartesian_3d_kspace(..., partition_z, phase_y, read_x)` and a centred 3D IFFT;
+the chronological signal and flat 2D frame arrays remain available for audit.
+Missing, duplicate, irregular, or inconsistent Cartesian cells are rejected.
 
 `SpectroscopicAcquisition` is a separate model for phase-encoded 2D CSI. One
 ADC event is one FID at a fixed `(kx, ky)` point, so its chronological samples
@@ -197,14 +267,17 @@ and the Lorentzian spectrum at the selected voxel. The sequence-result viewer
 displays spatial Mx/My/Mz, magnitude/phase, and checkpoints. These magnetization
 arrays are already in object coordinates and receive no z Fourier transform.
 Slice-selective RF determines which z positions are excited. A z-IFFT is only
-valid when an acquisition explicitly samples a Cartesian kz dimension; the
-current `CartesianAcquisition` and image reconstruction remain 2D.
+applied when volume inference verifies an explicitly sampled, regular Cartesian
+kz dimension. Individual xy-IFFTs at fixed kz remain hybrid-space planes
+`I(x, y, kz)`, not physical z slices.
 
 The designer can add an analytic B0 variation to the constant shape offsets:
 linear x/y/z and radial XY/XYZ modes are stored in ppm and converted using the
 selected simulation field and nucleus. Slice viewers use centred physical mm
 coordinates; the OpenGL point cloud and its FOV bounding box use the same
-coordinate system.
+coordinate system. New boxes and ellipsoids can be created by dragging their XY
+bounds directly on the designer canvas; the resulting ROI remains numerically
+editable, movable, and resizable.
 
 ## Dynamic spectral phantoms
 
@@ -218,11 +291,25 @@ states. A fully coherent transverse Bloch-McConnell exchange model is a later,
 explicit alternative. Initial magnetization maps and voxelwise rate maps belong
 to a dynamic spectral phantom, while the sequence remains unchanged.
 
-The first implementation should support a two-pool irreversible model and
-must pass four limiting cases before GUI exposure: zero exchange equals the
+Dynamic phantoms may additionally contain a piecewise-linear pyruvate input
+curve and a voxelwise delivery map. Their product is a longitudinal source term
+inside the coupled rate equations, so newly delivered magnetization retains the
+correct RF history instead of resetting `Mz` at acquisition-frame boundaries.
+The active simulation support is the union of initially magnetized voxels and
+the delivery map.
+
+A piecewise-linear dynamic B0 curve in Hz can be combined with a voxelwise
+scale map. RF-free transverse evolution uses the exact frequency integral over
+each compiled interval. The sequence compiler merges phantom curve knots with
+Pulseq event boundaries, ADC samples, and checkpoints. Pulseq RF/ADC carrier
+offsets remain sequence properties and are not conflated with this dynamic
+object frequency.
+
+The two-pool irreversible model must pass four limiting cases: zero exchange equals the
 current independent-component solver, no-RF evolution matches the analytic
-rate equations, total pool mass is conserved when relaxation/input are off,
-and zero-rate dynamic output equals a static spectral phantom. A post-hoc
+rate equations, total pool mass is conserved when relaxation and input are off,
+added mass equals the integrated source when relaxation is off, and zero-rate
+dynamic output equals a static spectral phantom. A post-hoc
 time-dependent scaling of static signals is explicitly rejected because it
 cannot model converted longitudinal magnetization or repeated RF depletion.
 

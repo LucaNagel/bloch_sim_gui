@@ -30,9 +30,13 @@ from .phantom_design import (  # noqa: F401
 )
 from .spectral_phantom import ChemicalSpecies, SpectralPhantom  # noqa: F401
 from .dynamic_phantom import (  # noqa: F401
+    DynamicB0,
     DynamicSpectralPhantom,
     KineticRegionDefinition,
+    PyruvateInflow,
+    TimeCurve,
     rasterize_kpl_regions,
+    simulate_two_pool_kinetics,
 )
 from . import pulse_loader  # noqa: F401
 from .sequence import (  # noqa: F401
@@ -40,6 +44,7 @@ from .sequence import (  # noqa: F401
     AcquisitionDimensions,
     CartesianAcquisition,
     CartesianAcquisitionFrames,
+    CartesianAcquisitionVolumes,
     CompiledSequence,
     GradientEvent,
     RFEvent,
@@ -49,6 +54,7 @@ from .sequence import (  # noqa: F401
     UnsupportedPulseqVersionError,
     infer_cartesian_acquisition,
     infer_cartesian_acquisition_frames,
+    infer_cartesian_acquisition_volumes,
     load_pulseq,
     make_cartesian_epi,
 )

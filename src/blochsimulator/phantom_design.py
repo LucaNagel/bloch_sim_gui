@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from .spectral_phantom import ChemicalSpecies, SpectralPhantom
 from .dynamic_phantom import (
+    DynamicB0,
     DynamicSpectralPhantom,
     KineticRegionDefinition,
+    PyruvateInflow,
+    TimeCurve,
     rasterize_kpl_regions,
 )
 from .units import hz_to_ppm
@@ -25,6 +28,7 @@ class SpectralPeakDefinition:
     frequency_ppm: float = 0.0
     t2_star_s: float = 0.050
     frequency_hz: float = None
+    t1_s: Optional[float] = None
 
     def validate(self) -> None:
         if not self.name.strip():
@@ -37,6 +41,12 @@ class SpectralPeakDefinition:
             raise ValueError("legacy peak frequency must be finite")
         if not np.isfinite(self.t2_star_s) or self.t2_star_s <= 0:
             raise ValueError("peak T2* must be positive and finite")
+        if self.t1_s is not None and (not np.isfinite(self.t1_s) or self.t1_s <= 0):
+            raise ValueError("peak T1 must be positive and finite")
+
+    def effective_t1_s(self, fallback_t1_s: float) -> float:
+        """Return this metabolite's T1 or the enclosing shape default."""
+        return float(fallback_t1_s if self.t1_s is None else self.t1_s)
 
 
 @dataclass
@@ -98,6 +108,8 @@ class PhantomDesign:
     lactate_peak_name: str = "Lactate"
     default_kpl_s_inv: float = 0.0
     kinetic_regions: List[KineticRegionDefinition] = field(default_factory=list)
+    pyruvate_inflow_curve: Optional[TimeCurve] = None
+    dynamic_b0_curve: Optional[TimeCurve] = None
 
     def validate(self) -> None:
         if len(self.shape) != 3 or any(
@@ -133,6 +145,10 @@ class PhantomDesign:
             raise ValueError("B0 inhomogeneity amplitude must be finite")
         if not np.isfinite(self.default_kpl_s_inv) or self.default_kpl_s_inv < 0:
             raise ValueError("default kPL must be finite and non-negative")
+        if self.pyruvate_inflow_curve is not None and np.any(
+            np.asarray(self.pyruvate_inflow_curve.values) < 0
+        ):
+            raise ValueError("pyruvate inflow rates must be non-negative")
         if not self.pyruvate_peak_name.strip() or not self.lactate_peak_name.strip():
             raise ValueError("dynamic pool peak names must not be empty")
         if self.pyruvate_peak_name == self.lactate_peak_name:
@@ -210,7 +226,7 @@ class PhantomDesign:
                     ChemicalSpecies(
                         name=component_name,
                         chemical_shift_ppm=peak.frequency_ppm,
-                        t1=item.t1_s,
+                        t1=peak.effective_t1_s(item.t1_s),
                         t2=peak.t2_star_s,
                         t2_star=peak.t2_star_s,
                         frequency_offset_hz=peak.frequency_hz,
@@ -247,9 +263,10 @@ class PhantomDesign:
             pools = []
             for name in target_names:
                 first_shape, first_peak = definitions[name][0]
+                first_t1_s = first_peak.effective_t1_s(first_shape.t1_s)
                 for item, peak in definitions[name][1:]:
                     if (
-                        not np.isclose(item.t1_s, first_shape.t1_s)
+                        not np.isclose(peak.effective_t1_s(item.t1_s), first_t1_s)
                         or not np.isclose(peak.t2_star_s, first_peak.t2_star_s)
                         or not np.isclose(peak.frequency_ppm, first_peak.frequency_ppm)
                     ):
@@ -260,11 +277,15 @@ class PhantomDesign:
                     ChemicalSpecies(
                         name=name,
                         chemical_shift_ppm=first_peak.frequency_ppm,
-                        t1=first_shape.t1_s,
+                        t1=first_t1_s,
                         t2=first_peak.t2_star_s,
                         t2_star=first_peak.t2_star_s,
                     )
                 )
+            delivery_map = np.zeros(self.shape, dtype=float)
+            for item in self.shapes:
+                if any(peak.name == self.pyruvate_peak_name for peak in item.peaks):
+                    delivery_map += self.rasterize_mask(item).astype(float)
             return DynamicSpectralPhantom(
                 shape=tuple(int(value) for value in self.shape),
                 fov=tuple(float(value) for value in self.fov_m),
@@ -281,6 +302,22 @@ class PhantomDesign:
                 spectral_points=int(self.spectral_points),
                 name=self.name,
                 kinetic_regions=tuple(self.kinetic_regions),
+                pyruvate_inflow=(
+                    None
+                    if self.pyruvate_inflow_curve is None
+                    else PyruvateInflow(
+                        rate_curve_s_inv=self.pyruvate_inflow_curve,
+                        delivery_map=delivery_map,
+                    )
+                ),
+                dynamic_b0=(
+                    None
+                    if self.dynamic_b0_curve is None
+                    else DynamicB0(
+                        offset_curve_hz=self.dynamic_b0_curve,
+                        spatial_scale_map=np.ones(self.shape, dtype=float),
+                    )
+                ),
                 metadata={"phantom_design": self.to_dict()},
             )
         return SpectralPhantom(
@@ -335,6 +372,9 @@ class PhantomDesign:
                         amplitude=float(peak.get("amplitude", 1.0)),
                         frequency_ppm=float(frequency_ppm),
                         t2_star_s=float(peak.get("t2_star_s", 0.050)),
+                        t1_s=(
+                            None if peak.get("t1_s") is None else float(peak["t1_s"])
+                        ),
                     )
                 )
             b0_ppm = item.get("b0_ppm")
@@ -391,6 +431,16 @@ class PhantomDesign:
                 )
                 for item in data.get("kinetic_regions", [])
             ],
+            pyruvate_inflow_curve=(
+                None
+                if data.get("pyruvate_inflow_curve") is None
+                else TimeCurve.from_dict(data["pyruvate_inflow_curve"])
+            ),
+            dynamic_b0_curve=(
+                None
+                if data.get("dynamic_b0_curve") is None
+                else TimeCurve.from_dict(data["dynamic_b0_curve"])
+            ),
         )
 
     @classmethod

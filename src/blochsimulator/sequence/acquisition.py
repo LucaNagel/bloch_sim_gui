@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import product
 from types import SimpleNamespace
 from typing import ClassVar, Mapping, Optional, Tuple
 
@@ -323,6 +324,325 @@ class CartesianAcquisitionFrames:
                 tuple(float(value) for value in item)
                 for item in metadata.get("moment_origins_cyc_per_m", ())
             ),
+        )
+
+
+@dataclass(frozen=True)
+class CartesianAcquisitionVolumes:
+    """Validated Cartesian 3D volumes assembled from sorted 2D k-space planes.
+
+    ``volume_frame_indices`` contains one frame index for every increasing kz
+    plane. ``volume_indices`` retains the non-spatial Pulseq dimensions in the
+    canonical order ``(slice, echo, repetition, segment)``.  The chronological
+    ADC stream therefore remains untouched while an explicit index mapping
+    provides arrays shaped as ``(..., partition_z, phase_y, read_x)``.
+    """
+
+    OUTER_AXIS_NAMES: ClassVar[Tuple[str, ...]] = tuple(
+        axis for axis in AcquisitionDimensions.AXIS_NAMES if axis != "partition"
+    )
+
+    frames: CartesianAcquisitionFrames
+    volume_frame_indices: Tuple[Tuple[int, ...], ...]
+    volume_indices: Tuple[Tuple[int, ...], ...]
+    partition_matrix: int
+    fov_z_m: float
+    kz_offset_cells: float = 0.0
+
+    def __post_init__(self) -> None:
+        frame_indices = tuple(
+            tuple(int(value) for value in item) for item in self.volume_frame_indices
+        )
+        volume_indices = tuple(
+            tuple(int(value) for value in item) for item in self.volume_indices
+        )
+        partition_matrix = _positive_integer(self.partition_matrix, "partition_matrix")
+        fov_z = float(self.fov_z_m)
+        kz_offset = float(self.kz_offset_cells)
+        if not np.isfinite(fov_z) or fov_z <= 0:
+            raise ValueError("fov_z_m must be positive and finite")
+        if not np.isfinite(kz_offset):
+            raise ValueError("kz_offset_cells must be finite")
+        if (
+            not frame_indices
+            or len(frame_indices) != len(volume_indices)
+            or any(len(item) != partition_matrix for item in frame_indices)
+        ):
+            raise ValueError(
+                "Cartesian volumes require one complete ordered frame set per volume"
+            )
+        if any(len(item) != len(self.OUTER_AXIS_NAMES) for item in volume_indices):
+            raise ValueError("each Cartesian volume index must contain all outer axes")
+        if len(set(volume_indices)) != len(volume_indices):
+            raise ValueError("Cartesian volume indices must be unique")
+        flattened = [value for item in frame_indices for value in item]
+        if sorted(flattened) != list(range(self.frames.num_frames)):
+            raise ValueError("Cartesian volumes must use every 2D frame exactly once")
+
+        first = self.frames.acquisitions[0]
+        tolerance_x = max(1e-9, 1e-3 / first.fov_m[0])
+        tolerance_y = max(1e-9, 1e-3 / first.fov_m[1])
+        for acquisition in self.frames.acquisitions[1:]:
+            if (
+                acquisition.read_matrix != first.read_matrix
+                or acquisition.phase_matrix != first.phase_matrix
+                or not np.allclose(acquisition.fov_m, first.fov_m)
+                or not np.allclose(
+                    acquisition.kx_cyc_per_m,
+                    first.kx_cyc_per_m,
+                    rtol=0.0,
+                    atol=tolerance_x,
+                )
+                or not np.allclose(
+                    acquisition.ky_cyc_per_m,
+                    first.ky_cyc_per_m,
+                    rtol=0.0,
+                    atol=tolerance_y,
+                )
+            ):
+                raise ValueError("Cartesian volume planes do not share one xy grid")
+
+        varying = self._varying_axes(volume_indices)
+        expected = set(
+            product(*[self._axis_values(volume_indices, axis) for axis in varying])
+        )
+        actual = {
+            tuple(item[self.OUTER_AXIS_NAMES.index(axis)] for axis in varying)
+            for item in volume_indices
+        }
+        if actual != expected:
+            raise ValueError(
+                "Cartesian volumes do not cover the outer acquisition grid exactly once"
+            )
+
+        object.__setattr__(self, "volume_frame_indices", frame_indices)
+        object.__setattr__(self, "volume_indices", volume_indices)
+        object.__setattr__(self, "partition_matrix", partition_matrix)
+        object.__setattr__(self, "fov_z_m", fov_z)
+        object.__setattr__(self, "kz_offset_cells", kz_offset)
+
+    @staticmethod
+    def _varying_axes(volume_indices) -> Tuple[str, ...]:
+        return tuple(
+            axis
+            for index, axis in enumerate(CartesianAcquisitionVolumes.OUTER_AXIS_NAMES)
+            if len({item[index] for item in volume_indices}) > 1
+        )
+
+    @staticmethod
+    def _axis_values(volume_indices, axis: str) -> Tuple[int, ...]:
+        index = CartesianAcquisitionVolumes.OUTER_AXIS_NAMES.index(axis)
+        return tuple(sorted({item[index] for item in volume_indices}))
+
+    @property
+    def num_volumes(self) -> int:
+        return len(self.volume_frame_indices)
+
+    @property
+    def varying_axes(self) -> Tuple[str, ...]:
+        return self._varying_axes(self.volume_indices)
+
+    def axis_values(self, axis: str) -> Tuple[int, ...]:
+        if axis not in self.OUTER_AXIS_NAMES:
+            raise ValueError(
+                f"axis must be one of {', '.join(self.OUTER_AXIS_NAMES)}, got {axis!r}"
+            )
+        return self._axis_values(self.volume_indices, axis)
+
+    @property
+    def outer_shape(self) -> Tuple[int, ...]:
+        return tuple(len(self.axis_values(axis)) for axis in self.varying_axes)
+
+    @property
+    def read_matrix(self) -> int:
+        return self.frames.acquisitions[0].read_matrix
+
+    @property
+    def phase_matrix(self) -> int:
+        return self.frames.acquisitions[0].phase_matrix
+
+    @property
+    def fov_m(self) -> Tuple[float, float, float]:
+        in_plane = self.frames.acquisitions[0].fov_m
+        return (in_plane[0], in_plane[1], self.fov_z_m)
+
+    @property
+    def matrix(self) -> Tuple[int, int, int]:
+        return (self.read_matrix, self.phase_matrix, self.partition_matrix)
+
+    @property
+    def kx_cyc_per_m(self) -> np.ndarray:
+        return np.mean(
+            np.stack([item.kx_cyc_per_m for item in self.frames.acquisitions], axis=0),
+            axis=0,
+        )
+
+    @property
+    def ky_cyc_per_m(self) -> np.ndarray:
+        return np.mean(
+            np.stack([item.ky_cyc_per_m for item in self.frames.acquisitions], axis=0),
+            axis=0,
+        )
+
+    @property
+    def kz_cyc_per_m(self) -> np.ndarray:
+        return (
+            np.arange(self.partition_matrix, dtype=float)
+            - self.partition_matrix // 2
+            + self.kz_offset_cells
+        ) / self.fov_z_m
+
+    def volume_label(self, volume: int) -> str:
+        values = self.volume_indices[int(volume)]
+        axes = self.varying_axes or ("volume",)
+        if axes == ("volume",):
+            return f"volume={int(volume)}"
+        return ", ".join(
+            f"{axis}={values[self.OUTER_AXIS_NAMES.index(axis)]}" for axis in axes
+        )
+
+    def _volume_grid_position(self, volume: int) -> Tuple[int, ...]:
+        values = self.volume_indices[int(volume)]
+        return tuple(
+            self.axis_values(axis).index(values[self.OUTER_AXIS_NAMES.index(axis)])
+            for axis in self.varying_axes
+        )
+
+    def _validate_frame_kz(self, result, frame: int, z_index: int) -> None:
+        if result.adc_gradient_moment_cyc_per_m is None:
+            return
+        moments = np.take(
+            np.asarray(result.adc_gradient_moment_cyc_per_m),
+            self.frames.sample_indices[int(frame)],
+            axis=0,
+        )
+        moments = moments - np.asarray(
+            self.frames.moment_origins_cyc_per_m[int(frame)], dtype=float
+        )
+        tolerance = max(1e-9, 1e-3 / self.fov_z_m)
+        if not np.allclose(
+            moments[:, 2],
+            self.kz_cyc_per_m[int(z_index)],
+            rtol=0.0,
+            atol=tolerance,
+        ):
+            raise ValueError("partition gradient moments do not match the 3D grid")
+
+    def to_cartesian_kspace(self, result, volume: int) -> np.ndarray:
+        """Return one volume as ``(..., partition_z, phase_y, read_x)``."""
+        planes = []
+        for z_index, frame in enumerate(self.volume_frame_indices[int(volume)]):
+            self._validate_frame_kz(result, frame, z_index)
+            planes.append(self.frames.to_cartesian_kspace(result, frame))
+        return np.stack(planes, axis=-3)
+
+    def reconstruct(
+        self,
+        result,
+        volume: int,
+        *,
+        norm: Optional[str] = None,
+        coil_combine: Optional[str] = None,
+        voxel_centered: bool = True,
+    ) -> np.ndarray:
+        """Reconstruct one validated Cartesian volume with a centred 3D IFFT."""
+        kspace = self.to_cartesian_kspace(result, volume)
+        if voxel_centered:
+            dx = self.fov_m[0] / self.read_matrix
+            dy = self.fov_m[1] / self.phase_matrix
+            dz = self.fov_m[2] / self.partition_matrix
+            centre_phase = np.exp(
+                2j
+                * np.pi
+                * (
+                    self.kz_cyc_per_m[:, None, None] * dz / 2
+                    + self.ky_cyc_per_m[None, :, None] * dy / 2
+                    + self.kx_cyc_per_m[None, None, :] * dx / 2
+                )
+            )
+            kspace = kspace * centre_phase
+        axes = (-3, -2, -1)
+        image = np.fft.fftshift(
+            np.fft.ifftn(np.fft.ifftshift(kspace, axes=axes), axes=axes, norm=norm),
+            axes=axes,
+        )
+        if coil_combine is None:
+            return image
+        if image.ndim != 4:
+            raise ValueError("coil combination requires signal shape (coil, adc)")
+        if coil_combine == "rss":
+            return np.sqrt(np.sum(np.abs(image) ** 2, axis=0))
+        if coil_combine == "sum":
+            return np.sum(image, axis=0)
+        raise ValueError("coil_combine must be None, 'rss', or 'sum'")
+
+    def dimensioned_kspace(self, result) -> np.ndarray:
+        """Return all volumes with explicit non-spatial dimensions."""
+        volumes = [
+            self.to_cartesian_kspace(result, item) for item in range(self.num_volumes)
+        ]
+        if not self.varying_axes:
+            return volumes[0]
+        output = np.empty(self.outer_shape + volumes[0].shape, dtype=volumes[0].dtype)
+        for volume, values in enumerate(volumes):
+            output[self._volume_grid_position(volume)] = values
+        return output
+
+    def dimensioned_reconstruction(
+        self,
+        result,
+        *,
+        norm: Optional[str] = None,
+        coil_combine: Optional[str] = None,
+        voxel_centered: bool = True,
+    ) -> np.ndarray:
+        """Return reconstructed volumes with explicit non-spatial dimensions."""
+        images = [
+            self.reconstruct(
+                result,
+                item,
+                norm=norm,
+                coil_combine=coil_combine,
+                voxel_centered=voxel_centered,
+            )
+            for item in range(self.num_volumes)
+        ]
+        if not self.varying_axes:
+            return images[0]
+        output = np.empty(self.outer_shape + images[0].shape, dtype=images[0].dtype)
+        for volume, values in enumerate(images):
+            output[self._volume_grid_position(volume)] = values
+        return output
+
+    def to_metadata(self) -> dict:
+        return {
+            "type": "cartesian_3d_volumes",
+            "frames": self.frames.to_metadata(),
+            "volume_frame_indices": self.volume_frame_indices,
+            "volume_indices": self.volume_indices,
+            "outer_axis_names": self.OUTER_AXIS_NAMES,
+            "partition_matrix": self.partition_matrix,
+            "fov_z_m": self.fov_z_m,
+            "kz_offset_cells": self.kz_offset_cells,
+        }
+
+    @classmethod
+    def from_metadata(cls, metadata: Mapping) -> "CartesianAcquisitionVolumes":
+        if metadata.get("type") != "cartesian_3d_volumes":
+            raise ValueError("unsupported Cartesian volume metadata")
+        return cls(
+            frames=CartesianAcquisitionFrames.from_metadata(metadata["frames"]),
+            volume_frame_indices=tuple(
+                tuple(int(value) for value in item)
+                for item in metadata["volume_frame_indices"]
+            ),
+            volume_indices=tuple(
+                tuple(int(value) for value in item)
+                for item in metadata["volume_indices"]
+            ),
+            partition_matrix=metadata["partition_matrix"],
+            fov_z_m=metadata["fov_z_m"],
+            kz_offset_cells=metadata.get("kz_offset_cells", 0.0),
         )
 
 
@@ -1011,8 +1331,9 @@ def infer_cartesian_acquisition_frames(
     Pulseq outer labels are preferred. If they are absent, multiple frames are
     derived only when at least two RF-delimited groups each contain multiple ADC
     lines. Distinct RF frequency offsets are interpreted as slice indices;
-    otherwise the groups are repetitions. Every group is independently passed
-    through the strict single-frame Cartesian validator.
+    recurring offsets additionally identify repetitions. Otherwise the groups
+    are repetitions. Every group is independently passed through the strict
+    single-frame Cartesian validator.
     """
     from .compiler import SequenceCompiler
 
@@ -1099,6 +1420,158 @@ def infer_cartesian_acquisition_frames(
     )
 
 
+def infer_cartesian_acquisition_volumes(
+    program: SequenceProgram,
+    *,
+    compiled=None,
+    frames: Optional[CartesianAcquisitionFrames] = None,
+) -> CartesianAcquisitionVolumes:
+    """Infer complete Cartesian 3D volumes from ADC k-space coordinates.
+
+    The Pulseq ``MatrixSize`` and ``FOV`` definitions declare the intended
+    regular grid.  Chronological 2D frames are sorted by their RF-relative kz
+    moments, while ``PAR`` labels are retained only as a consistency check.
+    Non-spatial dimensions such as repetition remain explicit outer axes.
+    """
+    from .compiler import SequenceCompiler
+
+    definitions = {
+        str(key).lower(): value
+        for key, value in dict(program.metadata.get("definitions", {})).items()
+    }
+    matrix_value = definitions.get("matrixsize")
+    fov_value = definitions.get("fov")
+    if matrix_value is None or fov_value is None:
+        raise ValueError(
+            "3D Cartesian inference requires MatrixSize and FOV definitions"
+        )
+    matrix = np.asarray(matrix_value, dtype=float).reshape(-1)
+    fov = np.asarray(fov_value, dtype=float).reshape(-1)
+    if matrix.size < 3:
+        raise ValueError("3D Cartesian MatrixSize must contain x, y, and z sizes")
+    if fov.size < 3 or not np.all(np.isfinite(fov[:3])) or np.any(fov[:3] <= 0):
+        raise ValueError("3D Cartesian FOV must contain positive x, y, and z values")
+    read_matrix, phase_matrix, partition_matrix = (
+        _positive_integer(value, "3D Cartesian MatrixSize") for value in matrix[:3]
+    )
+    if partition_matrix < 2:
+        raise ValueError("3D Cartesian inference requires at least two kz partitions")
+
+    compiled = SequenceCompiler().compile(program) if compiled is None else compiled
+    frames = (
+        infer_cartesian_acquisition_frames(program, compiled=compiled)
+        if frames is None
+        else frames
+    )
+    if frames.dimensions.num_samples != compiled.adc_times_s.size:
+        raise ValueError("Cartesian frames do not match the compiled ADC stream")
+    for acquisition in frames.acquisitions:
+        if (
+            acquisition.read_matrix != read_matrix
+            or acquisition.phase_matrix != phase_matrix
+        ):
+            raise ValueError("2D frame grid does not match the declared 3D MatrixSize")
+        if not np.allclose(acquisition.fov_m, fov[:2], rtol=0.0, atol=1e-12):
+            raise ValueError("2D frame FOV does not match the declared 3D FOV")
+
+    moments = np.asarray(compiled.adc_gradient_moment_cyc_per_m, dtype=float)
+    if moments.shape != (frames.dimensions.num_samples, 3):
+        raise ValueError("compiled ADC gradient moments have an invalid shape")
+
+    partition_axis = AcquisitionDimensions.AXIS_NAMES.index("partition")
+    outer_axes = tuple(
+        index
+        for index, axis in enumerate(AcquisitionDimensions.AXIS_NAMES)
+        if axis != "partition"
+    )
+    grouped_frames = {}
+    for frame, frame_index in enumerate(frames.frame_indices):
+        outer_index = tuple(frame_index[index] for index in outer_axes)
+        grouped_frames.setdefault(outer_index, []).append(frame)
+    if any(len(items) != partition_matrix for items in grouped_frames.values()):
+        raise ValueError(
+            "each Cartesian volume must contain the declared number of kz partitions"
+        )
+
+    tolerance_z = max(1e-9, 1e-3 / float(fov[2]))
+    volume_frame_indices = []
+    volume_indices = []
+    volume_kz = []
+    partition_orders = []
+    for outer_index, frame_group in grouped_frames.items():
+        frame_coordinates = []
+        for frame in frame_group:
+            relative = np.take(moments, frames.sample_indices[frame], axis=0)
+            relative = relative - np.asarray(
+                frames.moment_origins_cyc_per_m[frame], dtype=float
+            )
+            kz = float(np.mean(relative[:, 2]))
+            if not np.allclose(relative[:, 2], kz, rtol=0.0, atol=tolerance_z):
+                raise ValueError("kz changes within one Cartesian partition frame")
+            frame_coordinates.append((kz, frame))
+        frame_coordinates.sort(key=lambda item: item[0])
+        sorted_kz = np.asarray([item[0] for item in frame_coordinates], dtype=float)
+        if partition_matrix > 1 and not np.allclose(
+            np.diff(sorted_kz),
+            1.0 / float(fov[2]),
+            rtol=0.0,
+            atol=tolerance_z,
+        ):
+            raise ValueError("ADC frames do not form one regular Cartesian kz grid")
+        ordered_frames = tuple(item[1] for item in frame_coordinates)
+        partition_order = tuple(
+            frames.frame_indices[frame][partition_axis] for frame in ordered_frames
+        )
+        if len(set(partition_order)) != partition_matrix:
+            raise ValueError(
+                "PAR labels do not identify every kz partition exactly once"
+            )
+        volume_frame_indices.append(ordered_frames)
+        volume_indices.append(tuple(int(value) for value in outer_index))
+        volume_kz.append(sorted_kz)
+        partition_orders.append(partition_order)
+
+    if any(order != partition_orders[0] for order in partition_orders[1:]):
+        raise ValueError("PAR-to-kz ordering changes between Cartesian volumes")
+    common_kz = np.mean(np.stack(volume_kz, axis=0), axis=0)
+    if not all(
+        np.allclose(values, common_kz, rtol=0.0, atol=tolerance_z)
+        for values in volume_kz
+    ):
+        raise ValueError("Cartesian volumes do not share one common kz grid")
+
+    base_z = np.arange(partition_matrix, dtype=float) - partition_matrix // 2
+    kz_offset = float(np.mean(common_kz * float(fov[2]) - base_z))
+    if not np.allclose(
+        common_kz * float(fov[2]),
+        base_z + kz_offset,
+        rtol=0.0,
+        atol=tolerance_z * float(fov[2]),
+    ):
+        raise ValueError("kz coordinates cannot be represented by one Cartesian grid")
+    rounded_kz_offset = round(2.0 * kz_offset) / 2.0
+    if np.allclose(
+        common_kz * float(fov[2]),
+        base_z + rounded_kz_offset,
+        rtol=0.0,
+        atol=tolerance_z * float(fov[2]),
+    ):
+        kz_offset = rounded_kz_offset
+
+    volumes = CartesianAcquisitionVolumes(
+        frames=frames,
+        volume_frame_indices=tuple(volume_frame_indices),
+        volume_indices=tuple(volume_indices),
+        partition_matrix=partition_matrix,
+        fov_z_m=float(fov[2]),
+        kz_offset_cells=kz_offset,
+    )
+    expected = (read_matrix, phase_matrix, partition_matrix)
+    if volumes.matrix != expected:
+        raise ValueError("inferred Cartesian volume matrix is inconsistent")
+    return volumes
+
+
 def _frame_gradient_moment_origin(
     program: SequenceProgram, compiled, first_adc_start_s: float
 ) -> np.ndarray:
@@ -1164,23 +1637,40 @@ def _derive_rf_delimited_dimensions(
         )
         for group in used_groups
     )
-    if slice_selective and np.unique(np.round(offsets, decimals=9)).size == len(
-        used_groups
-    ):
-        ordered = np.argsort(offsets)
-        group_values = {
-            used_groups[int(group_position)]: int(rank)
-            for rank, group_position in enumerate(ordered)
-        }
-        axis = "slice"
-        source = "rf_frequency_offsets"
-    else:
-        group_values = {group: index for index, group in enumerate(used_groups)}
-        axis = "repetition"
-        source = "rf_delimited_repetitions"
-
     derived = {name: [0] * dimensions.num_adc_events for name in dimensions.AXIS_NAMES}
-    derived[axis] = [group_values[group] for group in rf_group_for_event]
+    rounded_offsets = np.round(offsets, decimals=9)
+    unique_offsets = np.unique(rounded_offsets)
+    inferred_slice_repetitions = False
+    if slice_selective and unique_offsets.size > 1:
+        slice_rank = {
+            float(value): rank for rank, value in enumerate(sorted(unique_offsets))
+        }
+        group_slices = {
+            group: slice_rank[float(offset)]
+            for group, offset in zip(used_groups, rounded_offsets)
+        }
+        occurrences = {rank: 0 for rank in range(unique_offsets.size)}
+        group_repetitions = {}
+        for group in used_groups:
+            slice_index = group_slices[group]
+            group_repetitions[group] = occurrences[slice_index]
+            occurrences[slice_index] += 1
+        inferred_slice_repetitions = len(set(occurrences.values())) == 1
+        if inferred_slice_repetitions:
+            derived["slice"] = [group_slices[group] for group in rf_group_for_event]
+            derived["repetition"] = [
+                group_repetitions[group] for group in rf_group_for_event
+            ]
+            source = (
+                "rf_frequency_offsets"
+                if max(group_repetitions.values()) == 0
+                else "rf_frequency_offsets_and_repetitions"
+            )
+
+    if not inferred_slice_repetitions:
+        group_values = {group: index for index, group in enumerate(used_groups)}
+        derived["repetition"] = [group_values[group] for group in rf_group_for_event]
+        source = "rf_delimited_repetitions"
     updated = AcquisitionDimensions(
         adc_event_sample_counts=dimensions.adc_event_sample_counts,
         slice_indices=tuple(derived["slice"]),
@@ -1206,116 +1696,334 @@ def make_cartesian_epi(
     blip_duration_s: float = 100e-6,
     delay_after_prephaser_s: float = 0.0,
     tail_s: float = 0.0,
+    n_slices: int = 1,
+    slice_thickness_m: Optional[float] = None,
+    slice_gap_m: float = 0.0,
+    repetitions: int = 1,
+    repetition_time_s: Optional[float] = None,
+    spoil_after_slice: bool = False,
+    spoiler_cycles_per_slice: float = 8.0,
+    spoiler_cycles_per_voxel: float = 0.0,
+    spoiler_duration_s: float = 4e-3,
 ) -> SequenceProgram:
-    """Build a non-slice-selective single-shot Cartesian EPI program."""
+    """Build a single-shot Cartesian EPI program.
+
+    Passing ``slice_thickness_m`` enables a rectangular slice-selective RF
+    pulse. Multiple slices are centred around z=0 and played sequentially
+    within each repetition. ``repetition_time_s`` is the time between the
+    first slice excitations of consecutive repetitions; when omitted, the
+    shortest possible repetition time is used. ``spoil_after_slice`` adds a
+    rectangular spoiler after the rewinder. Its z moment is measured in cycles
+    across the slice thickness and its optional x/y moment in cycles across an
+    acquired voxel.
+    """
     for name, value, allow_zero in (
         ("rf_duration_s", rf_duration_s, False),
         ("prephaser_duration_s", prephaser_duration_s, False),
         ("blip_duration_s", blip_duration_s, False),
         ("delay_after_prephaser_s", delay_after_prephaser_s, True),
         ("tail_s", tail_s, True),
+        ("spoiler_duration_s", spoiler_duration_s, False),
     ):
         if not np.isfinite(value) or value < 0 or (not allow_zero and value == 0):
             raise ValueError(f"{name} has an invalid duration")
     if not np.isfinite(flip_angle_deg):
         raise ValueError("flip_angle_deg must be finite")
+    n_slices = _positive_integer(n_slices, "n_slices")
+    repetitions = _positive_integer(repetitions, "repetitions")
+    if slice_thickness_m is None:
+        if n_slices != 1:
+            raise ValueError("multiple slices require slice_thickness_m")
+        slice_positions = np.asarray([0.0])
+    else:
+        slice_thickness_m = float(slice_thickness_m)
+        if not np.isfinite(slice_thickness_m) or slice_thickness_m <= 0:
+            raise ValueError("slice_thickness_m must be positive and finite")
+        if not np.isfinite(slice_gap_m) or slice_gap_m < 0:
+            raise ValueError("slice_gap_m must be finite and non-negative")
+        slice_spacing = slice_thickness_m + float(slice_gap_m)
+        slice_positions = (
+            np.arange(n_slices, dtype=float) - (n_slices - 1) / 2.0
+        ) * slice_spacing
+    if repetition_time_s is not None and (
+        not np.isfinite(repetition_time_s) or repetition_time_s <= 0
+    ):
+        raise ValueError("repetition_time_s must be positive and finite")
+    if not np.isfinite(spoiler_cycles_per_slice) or spoiler_cycles_per_slice < 0:
+        raise ValueError("spoiler_cycles_per_slice must be finite and non-negative")
+    if not np.isfinite(spoiler_cycles_per_voxel) or spoiler_cycles_per_voxel < 0:
+        raise ValueError("spoiler_cycles_per_voxel must be finite and non-negative")
+    if spoil_after_slice and spoiler_cycles_per_slice > 0 and slice_thickness_m is None:
+        raise ValueError(
+            "a through-slice spoiler requires slice_thickness_m; set "
+            "spoiler_cycles_per_slice to zero for an in-plane-only spoiler"
+        )
 
     nx = acquisition.read_matrix
     ny = acquisition.phase_matrix
     fov_x, fov_y = acquisition.fov_m
     dwell = acquisition.dwell_s
     readout_duration = nx * dwell
-    events = []
-
     rf_hz = np.deg2rad(flip_angle_deg) / (2 * np.pi * rf_duration_s)
-    events.append(RFEvent(0.0, np.asarray([rf_hz]), rf_duration_s))
-
-    first_direction = acquisition.readout_directions[0]
-    first_kx = (
-        acquisition.kx_cyc_per_m[0]
-        if first_direction > 0
-        else acquisition.kx_cyc_per_m[-1]
+    slice_selective = slice_thickness_m is not None
+    slice_gradient_hz_per_m = (
+        0.0 if not slice_selective else 1.0 / (rf_duration_s * slice_thickness_m)
     )
-    current_x = first_kx - first_direction * 0.5 / fov_x
-    first_phase_index = acquisition.phase_indices[0]
-    current_y = acquisition.ky_cyc_per_m[first_phase_index]
-    prephaser_start = rf_duration_s
-    if current_x != 0:
-        events.append(
-            GradientEvent(
-                "x",
-                prephaser_start,
-                np.asarray([current_x / prephaser_duration_s]),
-                prephaser_duration_s,
-            )
-        )
-    if current_y != 0:
-        events.append(
-            GradientEvent(
-                "y",
-                prephaser_start,
-                np.asarray([current_y / prephaser_duration_s]),
-                prephaser_duration_s,
-            )
+    spoiler_enabled = bool(spoil_after_slice) and (
+        spoiler_cycles_per_slice > 0 or spoiler_cycles_per_voxel > 0
+    )
+    rewind_after_frame = (
+        slice_selective or n_slices > 1 or repetitions > 1 or spoiler_enabled
+    )
+    frame_duration_s = (
+        rf_duration_s
+        + prephaser_duration_s
+        + delay_after_prephaser_s
+        + ny * readout_duration
+        + max(ny - 1, 0) * blip_duration_s
+        + (prephaser_duration_s if rewind_after_frame else 0.0)
+        + (spoiler_duration_s if spoiler_enabled else 0.0)
+    )
+    minimum_repetition_time_s = n_slices * frame_duration_s
+    actual_repetition_time_s = (
+        minimum_repetition_time_s
+        if repetition_time_s is None
+        else float(repetition_time_s)
+    )
+    tolerance = max(1e-12, minimum_repetition_time_s * 1e-10)
+    if actual_repetition_time_s < minimum_repetition_time_s - tolerance:
+        raise ValueError(
+            "repetition_time_s is shorter than the minimum multi-slice "
+            f"acquisition time ({minimum_repetition_time_s:.9g} s)"
         )
 
-    time_s = prephaser_start + prephaser_duration_s + delay_after_prephaser_s
-    for line in range(ny):
-        direction = acquisition.readout_directions[line]
-        read_gradient = direction / (fov_x * dwell)
-        events.append(
-            GradientEvent("x", time_s, np.asarray([read_gradient]), readout_duration)
-        )
-        events.append(
-            ADCEvent(
-                start_s=time_s + dwell / 2,
-                num_samples=nx,
-                dwell_s=dwell,
-            )
-        )
-        current_x += direction * nx / fov_x
-        time_s += readout_duration
+    events = []
+    adc_counts = []
+    slice_indices = []
+    repetition_indices = []
+    spoiler_end_times = []
 
-        if line == ny - 1:
-            continue
-        next_direction = acquisition.readout_directions[line + 1]
-        next_first_kx = (
-            acquisition.kx_cyc_per_m[0]
-            if next_direction > 0
-            else acquisition.kx_cyc_per_m[-1]
+    for repetition in range(repetitions):
+        repetition_start = repetition * actual_repetition_time_s
+        for slice_index, slice_position in enumerate(slice_positions):
+            frame_start = repetition_start + slice_index * frame_duration_s
+            frequency_offset_hz = slice_gradient_hz_per_m * slice_position
+            events.append(
+                RFEvent(
+                    frame_start,
+                    np.asarray([rf_hz]),
+                    rf_duration_s,
+                    frequency_offset_hz=frequency_offset_hz,
+                    phase_offset_rad=(
+                        -2 * np.pi * frequency_offset_hz * rf_duration_s / 2
+                    ),
+                )
+            )
+            if slice_selective:
+                events.append(
+                    GradientEvent(
+                        "z",
+                        frame_start,
+                        np.asarray([slice_gradient_hz_per_m]),
+                        rf_duration_s,
+                    )
+                )
+
+            first_direction = acquisition.readout_directions[0]
+            first_kx = (
+                acquisition.kx_cyc_per_m[0]
+                if first_direction > 0
+                else acquisition.kx_cyc_per_m[-1]
+            )
+            current_x = first_kx - first_direction * 0.5 / fov_x
+            first_phase_index = acquisition.phase_indices[0]
+            current_y = acquisition.ky_cyc_per_m[first_phase_index]
+            prephaser_start = frame_start + rf_duration_s
+            if current_x != 0:
+                events.append(
+                    GradientEvent(
+                        "x",
+                        prephaser_start,
+                        np.asarray([current_x / prephaser_duration_s]),
+                        prephaser_duration_s,
+                    )
+                )
+            if current_y != 0:
+                events.append(
+                    GradientEvent(
+                        "y",
+                        prephaser_start,
+                        np.asarray([current_y / prephaser_duration_s]),
+                        prephaser_duration_s,
+                    )
+                )
+            if slice_selective:
+                events.append(
+                    GradientEvent(
+                        "z",
+                        prephaser_start,
+                        np.asarray([-slice_gradient_hz_per_m * rf_duration_s / 2])
+                        / prephaser_duration_s,
+                        prephaser_duration_s,
+                    )
+                )
+
+            time_s = prephaser_start + prephaser_duration_s + delay_after_prephaser_s
+            for line in range(ny):
+                direction = acquisition.readout_directions[line]
+                read_gradient = direction / (fov_x * dwell)
+                events.append(
+                    GradientEvent(
+                        "x", time_s, np.asarray([read_gradient]), readout_duration
+                    )
+                )
+                events.append(
+                    ADCEvent(
+                        start_s=time_s + dwell / 2,
+                        num_samples=nx,
+                        dwell_s=dwell,
+                    )
+                )
+                adc_counts.append(nx)
+                slice_indices.append(slice_index)
+                repetition_indices.append(repetition)
+                current_x += direction * nx / fov_x
+                time_s += readout_duration
+
+                if line == ny - 1:
+                    continue
+                next_direction = acquisition.readout_directions[line + 1]
+                next_first_kx = (
+                    acquisition.kx_cyc_per_m[0]
+                    if next_direction > 0
+                    else acquisition.kx_cyc_per_m[-1]
+                )
+                desired_x = next_first_kx - next_direction * 0.5 / fov_x
+                next_phase_index = acquisition.phase_indices[line + 1]
+                desired_y = acquisition.ky_cyc_per_m[next_phase_index]
+                x_area = desired_x - current_x
+                y_area = desired_y - current_y
+                if x_area != 0:
+                    events.append(
+                        GradientEvent(
+                            "x",
+                            time_s,
+                            np.asarray([x_area / blip_duration_s]),
+                            blip_duration_s,
+                        )
+                    )
+                if y_area != 0:
+                    events.append(
+                        GradientEvent(
+                            "y",
+                            time_s,
+                            np.asarray([y_area / blip_duration_s]),
+                            blip_duration_s,
+                        )
+                    )
+                current_x = desired_x
+                current_y = desired_y
+                time_s += blip_duration_s
+
+            if rewind_after_frame:
+                if current_x != 0:
+                    events.append(
+                        GradientEvent(
+                            "x",
+                            time_s,
+                            np.asarray([-current_x / prephaser_duration_s]),
+                            prephaser_duration_s,
+                        )
+                    )
+                if current_y != 0:
+                    events.append(
+                        GradientEvent(
+                            "y",
+                            time_s,
+                            np.asarray([-current_y / prephaser_duration_s]),
+                            prephaser_duration_s,
+                        )
+                    )
+                time_s += prephaser_duration_s
+
+            if spoiler_enabled:
+                if spoiler_cycles_per_voxel > 0:
+                    for axis, voxel_size in zip("xy", (fov_x / nx, fov_y / ny)):
+                        events.append(
+                            GradientEvent(
+                                axis,
+                                time_s,
+                                np.asarray(
+                                    [
+                                        spoiler_cycles_per_voxel
+                                        / voxel_size
+                                        / spoiler_duration_s
+                                    ]
+                                ),
+                                spoiler_duration_s,
+                            )
+                        )
+                if spoiler_cycles_per_slice > 0:
+                    events.append(
+                        GradientEvent(
+                            "z",
+                            time_s,
+                            np.asarray(
+                                [
+                                    spoiler_cycles_per_slice
+                                    / slice_thickness_m
+                                    / spoiler_duration_s
+                                ]
+                            ),
+                            spoiler_duration_s,
+                        )
+                    )
+                spoiler_end_times.append(time_s + spoiler_duration_s)
+
+    dimensions = AcquisitionDimensions(
+        adc_event_sample_counts=tuple(adc_counts),
+        slice_indices=tuple(slice_indices),
+        repetition_indices=tuple(repetition_indices),
+        source="internal_cartesian_epi",
+    )
+    definitions = {
+        "FOV": (fov_x, fov_y),
+        "MatrixSize": (nx, ny),
+        "FlipAngleDeg": float(flip_angle_deg),
+        "Repetitions": repetitions,
+        "RepetitionTime": actual_repetition_time_s,
+        "MinimumRepetitionTime": minimum_repetition_time_s,
+        "SpoilAfterSlice": bool(spoil_after_slice),
+        "SpoilerCyclesPerSlice": float(spoiler_cycles_per_slice),
+        "SpoilerCyclesPerVoxel": float(spoiler_cycles_per_voxel),
+        "SpoilerDuration": float(spoiler_duration_s),
+        "SpoilerAxes": (
+            ("xy" if spoiler_cycles_per_voxel > 0 else "")
+            + ("z" if spoiler_cycles_per_slice > 0 and slice_selective else "")
+            if spoiler_enabled
+            else "none"
+        ),
+        "SpoilerEndTimes": tuple(float(value) for value in spoiler_end_times),
+    }
+    if slice_selective:
+        definitions.update(
+            {
+                "SliceThickness": slice_thickness_m,
+                "SliceGap": float(slice_gap_m),
+                "SliceSpacing": slice_thickness_m + float(slice_gap_m),
+                "SlicePositions": tuple(float(value) for value in slice_positions),
+            }
         )
-        desired_x = next_first_kx - next_direction * 0.5 / fov_x
-        next_phase_index = acquisition.phase_indices[line + 1]
-        desired_y = acquisition.ky_cyc_per_m[next_phase_index]
-        x_area = desired_x - current_x
-        y_area = desired_y - current_y
-        if x_area != 0:
-            events.append(
-                GradientEvent(
-                    "x",
-                    time_s,
-                    np.asarray([x_area / blip_duration_s]),
-                    blip_duration_s,
-                )
-            )
-        if y_area != 0:
-            events.append(
-                GradientEvent(
-                    "y",
-                    time_s,
-                    np.asarray([y_area / blip_duration_s]),
-                    blip_duration_s,
-                )
-            )
-        current_x = desired_x
-        current_y = desired_y
-        time_s += blip_duration_s
 
     return SequenceProgram(
         events=tuple(events),
-        duration_s=time_s + tail_s,
+        duration_s=repetitions * actual_repetition_time_s + tail_s,
         source="internal-cartesian-epi",
-        metadata={"acquisition": acquisition.to_metadata()},
+        metadata={
+            "acquisition": acquisition.to_metadata(),
+            "acquisition_dimensions": dimensions.to_metadata(),
+            "definitions": definitions,
+        },
     )
 
 

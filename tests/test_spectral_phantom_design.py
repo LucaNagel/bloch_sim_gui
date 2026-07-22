@@ -2,7 +2,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from PyQt5.QtWidgets import QApplication, QDialog, QWidget
+from PyQt5.QtCore import QPointF, Qt
+from PyQt5.QtTest import QTest
+from PyQt5.QtWidgets import QApplication, QDialog, QHeaderView, QWidget
 from unittest.mock import MagicMock, patch
 
 from blochsimulator import BlochSimulator
@@ -63,6 +65,19 @@ def test_shape_design_builds_lorentzian_components():
     # The distant second peak contributes slightly at both points.
     assert spectrum[0] == pytest.approx(1.0, rel=2e-3)
     assert spectrum[1] == pytest.approx(0.5, rel=1e-2)
+
+
+def test_peak_specific_t1_overrides_shape_default_and_round_trips():
+    design = _spectral_design()
+    design.shapes[0].peaks[0].t1_s = 0.7
+    design.shapes[0].peaks[1].t1_s = None
+
+    phantom = design.build()
+    restored = PhantomDesign.from_dict(design.to_dict())
+
+    assert [species.t1 for species in phantom.species] == pytest.approx([0.7, 1.2])
+    assert restored.shapes[0].peaks[0].t1_s == pytest.approx(0.7)
+    assert restored.shapes[0].peaks[1].t1_s is None
 
 
 def test_shape_design_builds_hyperpolarized_initial_mz_maps():
@@ -364,6 +379,26 @@ def test_designer_supports_exact_numeric_xy_shape_placement():
     app.processEvents()
 
 
+def test_designer_uses_compact_shape_controls_and_wide_peak_columns():
+    app = QApplication.instance() or QApplication([])
+    dialog = SpectralPhantomDesignerDialog(design=_spectral_design())
+    shape_panel = dialog.shape_splitter.widget(0)
+    shape_button_grid = shape_panel.layout().itemAt(2).layout()
+
+    assert shape_panel.maximumWidth() == 300
+    assert shape_button_grid.rowCount() == 5
+    assert shape_button_grid.columnCount() == 1
+    assert (
+        dialog.peak_table.horizontalHeader().sectionResizeMode(0) == QHeaderView.Stretch
+    )
+    assert (
+        dialog.peak_table.horizontalHeader().sectionResizeMode(1)
+        == QHeaderView.ResizeToContents
+    )
+    dialog.close()
+    app.processEvents()
+
+
 def test_designer_selects_shape_by_roi_and_highlights_current_shape():
     app = QApplication.instance() or QApplication([])
     design = _spectral_design()
@@ -383,6 +418,34 @@ def test_designer_selects_shape_by_roi_and_highlights_current_shape():
     assert dialog.shape_list.currentRow() == 1
     assert dialog.initial_mz.value() == pytest.approx(10.0)
     assert dialog._rois[1].pen.width() > dialog._rois[0].pen.width()
+    dialog.close()
+    app.processEvents()
+
+
+def test_designer_creates_shape_from_mouse_drawn_bounds():
+    app = QApplication.instance() or QApplication([])
+    dialog = SpectralPhantomDesignerDialog(design=_spectral_design())
+    dialog.show()
+    app.processEvents()
+    original_count = len(dialog.design.shapes)
+
+    dialog._start_shape_drawing("box")
+    assert dialog.canvas.drawing_kind == "box"
+    view_box = dialog.canvas.plotItem.vb
+    start = dialog.canvas.mapFromScene(view_box.mapViewToScene(QPointF(0.1, 0.2)))
+    end = dialog.canvas.mapFromScene(view_box.mapViewToScene(QPointF(0.4, 0.6)))
+    QTest.mousePress(dialog.canvas.viewport(), Qt.LeftButton, pos=start)
+    QTest.mouseMove(dialog.canvas.viewport(), end, 20)
+    QTest.mouseRelease(dialog.canvas.viewport(), Qt.LeftButton, pos=end)
+    app.processEvents()
+
+    shape = dialog.design.shapes[-1]
+    assert len(dialog.design.shapes) == original_count + 1
+    assert shape.kind == "box"
+    assert shape.center == pytest.approx((0.25, 0.4, 0.5), abs=0.01)
+    assert shape.size == pytest.approx((0.3, 0.4, 0.5), abs=0.01)
+    assert dialog._rois[-1].pos().x() == pytest.approx(0.1, abs=0.01)
+    assert dialog._rois[-1].pos().y() == pytest.approx(0.2, abs=0.01)
     dialog.close()
     app.processEvents()
 
@@ -410,6 +473,27 @@ def test_designer_displays_absolute_peak_ppm_but_stores_relative_offsets():
     assert [peak.frequency_ppm for peak in dialog._read_peak_table()] == pytest.approx(
         [-5.0, 5.0]
     )
+    dialog.close()
+    app.processEvents()
+
+
+def test_designer_edits_optional_metabolite_t1_and_preserves_default_fallback():
+    app = QApplication.instance() or QApplication([])
+    design = _spectral_design()
+    design.shapes[0].peaks[0].t1_s = 0.7
+    design.shapes[0].peaks[1].t1_s = None
+    dialog = SpectralPhantomDesignerDialog(design=design)
+
+    assert float(dialog.peak_table.item(0, 3).text()) == pytest.approx(700.0)
+    assert dialog.peak_table.item(1, 3).text() == ""
+    peaks = dialog._read_peak_table()
+    assert peaks[0].t1_s == pytest.approx(0.7)
+    assert peaks[1].t1_s is None
+    assert (
+        "initial pool weight"
+        in dialog.peak_table.horizontalHeaderItem(1).text().lower()
+    )
+
     dialog.close()
     app.processEvents()
 

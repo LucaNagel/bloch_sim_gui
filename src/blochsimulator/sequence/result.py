@@ -98,6 +98,19 @@ class SequenceSimulationResult:
             raise ValueError("Cartesian frame metadata does not match the ADC stream")
         return frames
 
+    @property
+    def cartesian_acquisition_volumes(self):
+        """Return explicit Cartesian 3D volume layouts when present."""
+        metadata = self.metadata.get("cartesian_acquisition_volumes")
+        if metadata is None:
+            return None
+        from .acquisition import CartesianAcquisitionVolumes
+
+        volumes = CartesianAcquisitionVolumes.from_metadata(metadata)
+        if volumes.frames.dimensions.num_samples != self.adc_times_s.size:
+            raise ValueError("Cartesian volume metadata does not match the ADC stream")
+        return volumes
+
     def to_dict(self) -> Dict[str, Any]:
         """Return a compatibility-friendly dictionary without copying arrays."""
         return {
@@ -183,6 +196,7 @@ class SequenceSimulationResult:
             )
         cartesian = self.cartesian_acquisition
         cartesian_frames = self.cartesian_acquisition_frames
+        cartesian_volumes = self.cartesian_acquisition_volumes
         if cartesian is not None:
             kspace = self.to_cartesian_kspace(cartesian)
             image = self.reconstruct_cartesian(cartesian)
@@ -264,6 +278,46 @@ class SequenceSimulationResult:
                     cartesian_dims,
                     np.abs(image),
                 )
+        if cartesian_volumes is not None:
+            kspace_3d = cartesian_volumes.dimensioned_kspace(self)
+            image_3d = cartesian_volumes.dimensioned_reconstruction(self)
+            volume_dims = list(cartesian_volumes.varying_axes)
+            if self.signal.ndim == 2:
+                volume_dims.append("coil")
+            volume_dims.extend(("partition_z", "phase_y", "read_x"))
+            coords.update(
+                {
+                    axis: np.asarray(
+                        cartesian_volumes.axis_values(axis), dtype=np.int64
+                    )
+                    for axis in cartesian_volumes.varying_axes
+                }
+            )
+            coords.update(
+                {
+                    "partition_z": np.arange(cartesian_volumes.partition_matrix),
+                    "phase_y": np.arange(cartesian_volumes.phase_matrix),
+                    "read_x": np.arange(cartesian_volumes.read_matrix),
+                    "cartesian_kx_cyc_per_m": (
+                        "read_x",
+                        cartesian_volumes.kx_cyc_per_m,
+                    ),
+                    "cartesian_ky_cyc_per_m": (
+                        "phase_y",
+                        cartesian_volumes.ky_cyc_per_m,
+                    ),
+                    "cartesian_kz_cyc_per_m": (
+                        "partition_z",
+                        cartesian_volumes.kz_cyc_per_m,
+                    ),
+                }
+            )
+            data_vars["cartesian_3d_kspace"] = (volume_dims, kspace_3d)
+            data_vars["cartesian_3d_image"] = (volume_dims, image_3d)
+            data_vars["cartesian_3d_image_magnitude"] = (
+                volume_dims,
+                np.abs(image_3d),
+            )
         if self.checkpoint_magnetization is not None:
             coords["checkpoint"] = self.checkpoint_times_s
             data_vars["checkpoint_magnetization"] = (
@@ -362,7 +416,11 @@ class SequenceSimulationResult:
         for axis in ("spatial_kx_cyc_per_m", "spatial_ky_cyc_per_m"):
             if axis in dataset.coords:
                 dataset[axis].attrs.update(units="cycles/m")
-        for axis in ("cartesian_kx_cyc_per_m", "cartesian_ky_cyc_per_m"):
+        for axis in (
+            "cartesian_kx_cyc_per_m",
+            "cartesian_ky_cyc_per_m",
+            "cartesian_kz_cyc_per_m",
+        ):
             if axis in dataset.coords:
                 dataset[axis].attrs.update(units="cycles/m")
         if "spectral_time_s" in dataset.coords:
@@ -430,6 +488,7 @@ class SequenceSimulationResult:
                 )
         cartesian = self.cartesian_acquisition
         cartesian_frames = self.cartesian_acquisition_frames
+        cartesian_volumes = self.cartesian_acquisition_volumes
         if cartesian is not None:
             image = self.reconstruct_cartesian(cartesian)
             arrays.update(
@@ -481,6 +540,26 @@ class SequenceSimulationResult:
                             cartesian_frames.frame_indices, dtype=np.int64
                         ),
                     }
+                )
+        if cartesian_volumes is not None:
+            image_3d = cartesian_volumes.dimensioned_reconstruction(self)
+            arrays.update(
+                {
+                    "cartesian_3d_kspace": cartesian_volumes.dimensioned_kspace(self),
+                    "cartesian_3d_image": image_3d,
+                    "cartesian_3d_image_magnitude": np.abs(image_3d),
+                    "cartesian_kz_cyc_per_m": cartesian_volumes.kz_cyc_per_m,
+                    "cartesian_3d_volume_indices": np.asarray(
+                        cartesian_volumes.volume_indices, dtype=np.int64
+                    ),
+                    "cartesian_3d_outer_axis_names": np.asarray(
+                        cartesian_volumes.OUTER_AXIS_NAMES, dtype="S"
+                    ),
+                }
+            )
+            for axis in cartesian_volumes.varying_axes:
+                arrays[f"cartesian_3d_{axis}_index"] = np.asarray(
+                    cartesian_volumes.axis_values(axis), dtype=np.int64
                 )
         spectroscopy = self.spectroscopic_acquisition
         if spectroscopy is not None:
@@ -559,6 +638,36 @@ class SequenceSimulationResult:
                 )
         return acquisition.reconstruct(
             self.signal,
+            norm=norm,
+            coil_combine=coil_combine,
+            voxel_centered=voxel_centered,
+        )
+
+    def to_cartesian_3d_kspace(self, acquisition=None) -> np.ndarray:
+        """Return automatically dimensioned Cartesian 3D k-space."""
+        acquisition = (
+            self.cartesian_acquisition_volumes if acquisition is None else acquisition
+        )
+        if acquisition is None:
+            raise ValueError("result has no inferred Cartesian 3D acquisition")
+        return acquisition.dimensioned_kspace(self)
+
+    def reconstruct_cartesian_3d(
+        self,
+        acquisition=None,
+        *,
+        norm: Optional[str] = None,
+        coil_combine: Optional[str] = None,
+        voxel_centered: bool = True,
+    ) -> np.ndarray:
+        """Return automatically dimensioned Cartesian 3D reconstructions."""
+        acquisition = (
+            self.cartesian_acquisition_volumes if acquisition is None else acquisition
+        )
+        if acquisition is None:
+            raise ValueError("result has no inferred Cartesian 3D acquisition")
+        return acquisition.dimensioned_reconstruction(
+            self,
             norm=norm,
             coil_combine=coil_combine,
             voxel_centered=voxel_centered,

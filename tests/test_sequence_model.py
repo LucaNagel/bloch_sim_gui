@@ -100,6 +100,15 @@ def test_sparse_compiler_collapses_long_rf_free_gradient():
     )
 
 
+def test_compiler_retains_extra_dynamic_boundaries():
+    program = SequenceProgram((), duration_s=2.0)
+
+    compiled = SequenceCompiler().compile(program, extra_boundaries_s=(0.25, 1.25))
+
+    assert compiled.interval_end_s == pytest.approx([0.25, 1.25, 2.0])
+    assert compiled.metadata["extra_boundary_count"] == 2
+
+
 def test_compiler_rf_gradient_overlap_uses_fine_boundaries():
     rf = RFEvent(0.0, np.array([10.0, 20.0]), 1e-3)
     gradient = GradientEvent("z", 0.0, np.array([1.0, 2.0, 3.0, 4.0]), 0.5e-3)

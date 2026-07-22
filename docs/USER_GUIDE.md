@@ -133,21 +133,89 @@ For 2D CSI, the export already contains `csi_kspace` ordered as
 `csi_spectrum`. NetCDF is the preferred format because these dimension names
 and physical coordinates are retained directly.
 
+Validated Cartesian 3D acquisitions additionally contain
+`cartesian_3d_kspace` and `cartesian_3d_image`, ordered with explicit outer
+dimensions followed by `(partition_z, phase_y, read_x)`. For example, a dynamic
+3D acquisition is exported as `(repetition, partition_z, phase_y, read_x)`;
+manual reshaping of the chronological ADC stream is not required.
+
+The analysis notebook generated with **Export results** includes an adaptive
+`ipywidgets` explorer. Its `x`, `y`, and `z` sliders move linked orthogonal
+reconstruction slices and the k-space crosshair. `Repetition` selects a dynamic
+3D volume (or a 2D frame), while `Spectral point` selects the CSI time/frequency
+sample. The views update continuously while a slider is being dragged. Sliders
+whose dimensions are not present in a particular result are disabled
+automatically.
+
 ### Dynamic pyruvate/lactate phantom
 
 Open **Spectral Shape Designer** and define peaks whose names match the
-configured pyruvate and lactate pool names. In the **Kinetics / kPL** tab:
+configured pyruvate and lactate pool names. Existing shapes can be moved and
+resized through their handles. To create geometry directly with the mouse,
+choose **Draw ellipsoid** or **Draw box**, then hold the left mouse button and
+drag across the axial XY canvas. Right-click or press Escape to cancel drawing.
+
+For each shape, the initial hyperpolarized longitudinal magnetization of a
+metabolite is `Initial HP Mz scale × initial pool weight`. For example, a scale
+of 100 with pyruvate weight 1 and lactate weight 0 starts with `Pz=100` and
+`Lz=0`. A zero weight keeps the pool and its peak definition present; positive
+`kPL` can therefore create lactate from an initially empty lactate pool. The
+**Set selected shape to initial Lz = 0** button applies this setup directly.
+Each peak can have its own T1; an empty metabolite T1 cell uses the shape's
+**Default T1** for compatibility with older designs.
+
+In the hyperpolarized model, `HP Mz=1` means 100% of the initial normalized
+hyperpolarized excess magnetization. It is not the thermal equilibrium target.
+Because the thermal carbon-13 signal is negligible relative to the
+hyperpolarized signal, T1 relaxation drives this state approximately toward
+zero. This differs from a conventional normalized Bloch model that recovers
+toward equilibrium `Mz=1`.
+For a pyruvate-injection experiment, lactate will therefore normally start with
+initial pool weight 0. If both weights and both T1 values are equal while
+`kPL=0`, `Pz(t)` and `Lz(t)` are identical; the preview draws lactate dashed so
+the overlapping curves remain visible.
+
+In the **Kinetics / kPL** tab:
 
 1. Enable pyruvate-to-lactate conversion.
-2. Set the default `kPL` in `s⁻¹`.
-3. Add box or ellipsoid regions with center/size in percent of the phantom FOV.
-4. Use **Update preview** to inspect the rasterized `kPL` map.
+2. Set the default `kPL` in `s⁻¹`. It applies everywhere unless an optional
+   spatial region overrides it. Zero means no conversion except in regions with
+   a positive override; without any positive default or regional `kPL`, no new
+   lactate is produced.
+3. Optionally add box or ellipsoid kPL regions with center/size in percent of
+   the phantom FOV. A region overrides the default `kPL` in its voxels; if
+   regions overlap, the last table row wins.
+4. Optionally enable pyruvate inflow and enter time/source samples. Every point
+   is a `(time in s, relative Mz per s)` sample of the pyruvate source. The curve
+   is linearly interpolated, is zero outside its listed interval, and adds
+   longitudinal pyruvate magnetization to every shape containing the selected
+   pyruvate peak. Inflow supplies pyruvate; `kPL` independently determines how
+   much of it is converted to lactate.
+5. Optionally enable dynamic B0 and enter time/frequency samples in Hz. This is
+   an object-frequency offset, separate from Pulseq RF and ADC carrier offsets.
+6. Use **Update preview** to inspect the rasterized `kPL` map.
 
 Later kinetic-region rows overwrite earlier rows in overlaps. Run the complete
 dynamic sequence from **Sequence Simulation**. The signal plot shows total and
 pool-resolved signals; **Spatial Magnetization** can display the sum, pyruvate,
 or lactate state. Exports contain `species_signal`,
 `final_pool_magnetization`, and pool-resolved CSI arrays when applicable.
+Inflow, conversion, T1 decay, RF depletion, and dynamic B0 evolution are
+integrated continuously over the Pulseq timeline; repetition labels do not
+reset the phantom state.
+
+The right-hand **Live conversion preview** represents one voxel, not a spatial
+average. **Shape / object to preview** selects the shape whose initial pool
+weights and metabolite T1 values are used. **kPL source for this voxel** then
+selects either the default value or one region's override. Selecting a row in
+the kPL-region table selects that region automatically. The preview updates
+immediately when these values or the inflow points change. Its upper plot shows
+the pyruvate source, while the lower plot shows solid `Pz(t)` and dashed
+`Lz(t)`. An explanatory message identifies `kPL=0`, initially present lactate,
+and exactly overlapping pool curves. The preview uses the same free
+longitudinal two-pool integrator as the sequence simulation, but deliberately
+excludes RF depletion and gradients; those effects remain visible only in the
+complete Pulseq simulation.
 
 The command-line phantom builder is:
 

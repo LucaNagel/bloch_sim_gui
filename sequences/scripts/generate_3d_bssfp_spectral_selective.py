@@ -542,18 +542,26 @@ def main(
                 slr_sharpness=spectral_slr_sharpness,
             )
             rf_alpha_half_center, _ = pp.calc_rf_center(rf_alpha_half)
+            rf_alpha_half_center_from_block_start = (
+                rf_alpha_half.delay + rf_alpha_half_center
+            )
+            rf_frame_center_from_block_start = rf_frame.delay + rf_frame_center
             alpha_phase_rad = np.deg2rad(rf_phase_start)
             rf_alpha_half.freq_offset = target_frequency_hz
             rf_alpha_half.phase_offset = (
                 alpha_phase_rad - 2 * np.pi * target_frequency_hz * rf_alpha_half_center
             )
-            alpha_half_delay_value = alpha_half_center_spacing - pp.calc_duration(
-                rf_alpha_half
+            alpha_half_delay_value = (
+                alpha_half_center_spacing
+                - pp.calc_duration(rf_alpha_half)
+                + rf_alpha_half_center_from_block_start
+                - rf_frame_center_from_block_start
             )
             alpha_half_delay_value = np.round(alpha_half_delay_value / raster) * raster
             if alpha_half_delay_value < 0:
                 raise ValueError(
-                    "alpha_half_center_spacing is shorter than the alpha/2 RF block"
+                    "alpha_half_center_spacing is shorter than the minimum "
+                    "non-overlapping RF-pulse center spacing"
                 )
             seq.add_block(rf_alpha_half)
             if alpha_half_delay_value > 0:
@@ -733,8 +741,12 @@ def main(
 
 if __name__ == "__main__":
     main(
-        plot=True,
+        spectral_pulse_type="slr",
+        alpha_half_center_spacing=6.29e-3,
+        spectral_slr_sharpness=1.0,
+        plot=False,
         write_seq=True,
-        n_repetition=6,
-        # fov = (220e-3, 220e-3, 220e-3),
+        n_repetition=30,
+        rf_phase_increment=0.0,  # phase increment in degrees for bSSFP phase cycling
+        seq_filename="bssfp_3d_spectral_selective_skinner.seq",
     )

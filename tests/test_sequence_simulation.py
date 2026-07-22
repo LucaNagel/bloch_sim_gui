@@ -627,6 +627,14 @@ def test_sequence_result_notebook_uses_xarray_dataset(tmp_path):
     assert "adc_event_index" in text
     assert "cartesian_kspace" in text
     assert "cartesian_image_magnitude" in text
+    assert "import ipywidgets as widgets" in text
+    assert "x_slider = _index_slider('x', x_dim)" in text
+    assert "y_slider = _index_slider('y', y_dim)" in text
+    assert "z_slider = _index_slider('z', z_dim)" in text
+    assert "repetition_slider = _index_slider('Repetition'" in text
+    assert "spectral_point_slider = _index_slider(" in text
+    assert "widgets.interactive_output" in text
+    assert "continuous_update=True" in text
     import nbformat
 
     notebook = nbformat.read(notebook_path, as_version=4)

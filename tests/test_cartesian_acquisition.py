@@ -1,15 +1,19 @@
+from types import SimpleNamespace
+
+import h5py
 import numpy as np
 import pytest
-import h5py
 
 from blochsimulator import BlochSimulator
 from blochsimulator.phantom import Phantom
 from blochsimulator.sequence import (
     AcquisitionDimensions,
     CartesianAcquisition,
+    CartesianAcquisitionFrames,
     SequenceCompiler,
     SequenceProgram,
     infer_cartesian_acquisition,
+    infer_cartesian_acquisition_volumes,
     make_cartesian_epi,
 )
 
@@ -30,6 +34,75 @@ def test_acquisition_dimensions_expand_event_indices_and_round_trip_metadata():
     assert dimensions.varying_axes == ("echo",)
     assert np.array_equal(dimensions.sample_indices("echo"), [0, 0, 0, 1, 1])
     assert AcquisitionDimensions.from_metadata(dimensions.to_metadata()) == dimensions
+
+
+def test_3d_volume_inference_sorts_kz_positions_not_chronological_frames():
+    acquisition = CartesianAcquisition(
+        read_matrix=2,
+        phase_matrix=2,
+        fov_m=(0.02, 0.02),
+        dwell_s=10e-6,
+        phase_indices=(1, 0),
+        readout_directions=(-1, 1),
+        kx_offset_cells=0.5,
+    )
+    dimensions = AcquisitionDimensions(
+        adc_event_sample_counts=(2,) * 8,
+        repetition_indices=(0, 0, 0, 0, 1, 1, 1, 1),
+        partition_indices=(1, 1, 0, 0, 1, 1, 0, 0),
+        source="test",
+    )
+    frames = CartesianAcquisitionFrames(
+        acquisitions=(acquisition,) * 4,
+        sample_indices=(
+            tuple(range(0, 4)),
+            tuple(range(4, 8)),
+            tuple(range(8, 12)),
+            tuple(range(12, 16)),
+        ),
+        frame_indices=(
+            (0, 0, 0, 0, 1),
+            (0, 0, 0, 0, 0),
+            (0, 0, 1, 0, 1),
+            (0, 0, 1, 0, 0),
+        ),
+        dimensions=dimensions,
+        moment_origins_cyc_per_m=(
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (200.0, 200.0, 200.0),
+            (200.0, 200.0, 200.0),
+        ),
+    )
+    moments = np.empty((16, 3), dtype=float)
+    for frame, kz in enumerate((0.0, -50.0, 0.0, -50.0)):
+        origin = np.asarray(frames.moment_origins_cyc_per_m[frame])
+        raw = np.empty((2, 2, 3), dtype=float)
+        for acquired_line, phase_index in enumerate(acquisition.phase_indices):
+            kx = acquisition.kx_cyc_per_m
+            if acquisition.readout_directions[acquired_line] < 0:
+                kx = kx[::-1]
+            raw[acquired_line, :, 0] = kx
+            raw[acquired_line, :, 1] = acquisition.ky_cyc_per_m[phase_index]
+            raw[acquired_line, :, 2] = kz
+        moments[np.asarray(frames.sample_indices[frame])] = raw.reshape(-1, 3) + origin
+
+    program = SequenceProgram(
+        events=(),
+        duration_s=0.0,
+        metadata={"definitions": {"FOV": (0.02, 0.02, 0.02), "MatrixSize": (2, 2, 2)}},
+    )
+    compiled = SimpleNamespace(
+        adc_times_s=np.arange(16, dtype=float),
+        adc_gradient_moment_cyc_per_m=moments,
+    )
+    volumes = infer_cartesian_acquisition_volumes(
+        program, compiled=compiled, frames=frames
+    )
+
+    assert volumes.volume_frame_indices == ((1, 0), (3, 2))
+    assert volumes.volume_indices == ((0, 0, 0, 0), (0, 0, 1, 0))
+    assert volumes.kz_cyc_per_m == pytest.approx([-50.0, 0.0])
 
 
 @pytest.mark.parametrize("suffix", [".npz", ".h5"])
@@ -169,6 +242,53 @@ def test_cartesian_epi_compiles_to_declared_adc_grid():
     assert compiled.adc_times_s.size == acquisition.num_samples
     acquisition.validate_adc_times(compiled.adc_times_s)
     acquisition.validate_gradient_moments(compiled.adc_gradient_moment_cyc_per_m)
+
+
+def test_cartesian_epi_adds_configurable_spoilers_after_each_slice():
+    acquisition = CartesianAcquisition.epi(
+        read_matrix=4,
+        phase_matrix=2,
+        fov_m=(0.04, 0.02),
+        dwell_s=20e-6,
+    )
+    slice_thickness = 4e-3
+    program = make_cartesian_epi(
+        acquisition,
+        n_slices=2,
+        slice_thickness_m=slice_thickness,
+        spoil_after_slice=True,
+        spoiler_cycles_per_slice=6.0,
+        spoiler_cycles_per_voxel=0.25,
+        spoiler_duration_s=2e-3,
+    )
+    definitions = program.metadata["definitions"]
+
+    assert definitions["SpoilAfterSlice"]
+    assert definitions["SpoilerAxes"] == "xyz"
+    assert definitions["SpoilerDuration"] == pytest.approx(2e-3)
+    assert len(definitions["SpoilerEndTimes"]) == 2
+    for spoiler_end in definitions["SpoilerEndTimes"]:
+        events = [
+            event
+            for event in program.gradient_events
+            if event.end_s == pytest.approx(spoiler_end)
+        ]
+        assert {event.axis for event in events} == {"x", "y", "z"}
+        extents = {
+            "x": acquisition.fov_m[0] / acquisition.read_matrix,
+            "y": acquisition.fov_m[1] / acquisition.phase_matrix,
+            "z": slice_thickness,
+        }
+        expected = {"x": 0.25, "y": 0.25, "z": 6.0}
+        for event in events:
+            moment = np.sum(event.samples_hz_per_m) * event.raster_s
+            assert moment * extents[event.axis] == pytest.approx(expected[event.axis])
+
+
+def test_cartesian_epi_requires_slice_thickness_for_through_slice_spoiler():
+    acquisition = CartesianAcquisition.epi(4, 2, (0.04, 0.02), 20e-6)
+    with pytest.raises(ValueError, match="through-slice spoiler"):
+        make_cartesian_epi(acquisition, spoil_after_slice=True)
 
 
 def test_cartesian_epi_end_to_end_fft_recovers_object_magnitude():

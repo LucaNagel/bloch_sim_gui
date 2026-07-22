@@ -44,6 +44,7 @@ from ..sequence import (
     BrukerExportOptions,
     CartesianAcquisition,
     CartesianAcquisitionFrames,
+    CartesianAcquisitionVolumes,
     SpectroscopicAcquisition,
     RFEvent,
     SequenceCompiler,
@@ -51,6 +52,7 @@ from ..sequence import (
     export_bruker_raw,
     infer_cartesian_acquisition,
     infer_cartesian_acquisition_frames,
+    infer_cartesian_acquisition_volumes,
     infer_spectroscopic_acquisition,
     load_pulseq,
     make_cartesian_epi,
@@ -292,6 +294,7 @@ class SequenceSimulationWidget(QWidget):
         self.program: Optional[SequenceProgram] = None
         self.acquisition: Optional[CartesianAcquisition] = None
         self.acquisition_frames: Optional[CartesianAcquisitionFrames] = None
+        self.acquisition_volumes: Optional[CartesianAcquisitionVolumes] = None
         self.spectroscopic_acquisition: Optional[SpectroscopicAcquisition] = None
         self.phantom: Optional[Phantom] = None
         self.result = None
@@ -421,12 +424,74 @@ class SequenceSimulationWidget(QWidget):
         self.sampling_bandwidth_khz.setDecimals(3)
         self.sampling_bandwidth_khz.setValue(50.0)
         self.sampling_bandwidth_khz.setSuffix(" kHz")
+        self.epi_flip_angle_deg = QDoubleSpinBox()
+        self.epi_flip_angle_deg.setRange(0.1, 360.0)
+        self.epi_flip_angle_deg.setDecimals(2)
+        self.epi_flip_angle_deg.setValue(90.0)
+        self.epi_flip_angle_deg.setSuffix("°")
+        self.epi_slice_count = QSpinBox()
+        self.epi_slice_count.setRange(1, 128)
+        self.epi_slice_count.setValue(1)
+        self.epi_repetitions = QSpinBox()
+        self.epi_repetitions.setRange(1, 10000)
+        self.epi_repetitions.setValue(1)
+        self.epi_repetition_time_ms = QDoubleSpinBox()
+        self.epi_repetition_time_ms.setRange(0.1, 100000.0)
+        self.epi_repetition_time_ms.setDecimals(3)
+        self.epi_repetition_time_ms.setValue(1000.0)
+        self.epi_repetition_time_ms.setSuffix(" ms")
+        self.epi_repetition_time_ms.setToolTip(
+            "Time between excitations of the first slice in consecutive repetitions"
+        )
+        self.epi_slice_thickness_mm = QDoubleSpinBox()
+        self.epi_slice_thickness_mm.setRange(0.05, 100.0)
+        self.epi_slice_thickness_mm.setDecimals(3)
+        self.epi_slice_thickness_mm.setValue(3.0)
+        self.epi_slice_thickness_mm.setSuffix(" mm")
+        self.epi_spoil_after_slice = QCheckBox("Enable after each slice")
+        self.epi_spoil_after_slice.setChecked(True)
+        self.epi_spoil_after_slice.setToolTip(
+            "Apply the configured gradient spoiler after every EPI slice readout"
+        )
+        self.epi_spoiler_cycles_per_slice = QDoubleSpinBox()
+        self.epi_spoiler_cycles_per_slice.setRange(0.0, 1000.0)
+        self.epi_spoiler_cycles_per_slice.setDecimals(3)
+        self.epi_spoiler_cycles_per_slice.setValue(8.0)
+        self.epi_spoiler_cycles_per_slice.setSuffix(" cycles/slice")
+        self.epi_spoiler_cycles_per_slice.setToolTip(
+            "Through-slice dephasing across one slice thickness"
+        )
+        self.epi_spoiler_cycles_per_voxel = QDoubleSpinBox()
+        self.epi_spoiler_cycles_per_voxel.setRange(0.0, 1000.0)
+        self.epi_spoiler_cycles_per_voxel.setDecimals(3)
+        self.epi_spoiler_cycles_per_voxel.setValue(0.0)
+        self.epi_spoiler_cycles_per_voxel.setSuffix(" cycles/voxel")
+        self.epi_spoiler_cycles_per_voxel.setToolTip(
+            "Additional x/y dephasing across one acquired voxel; a non-integer "
+            "value avoids exact refocusing on the voxel grid"
+        )
+        self.epi_spoiler_duration_ms = QDoubleSpinBox()
+        self.epi_spoiler_duration_ms.setRange(0.001, 1000.0)
+        self.epi_spoiler_duration_ms.setDecimals(3)
+        self.epi_spoiler_duration_ms.setValue(4.0)
+        self.epi_spoiler_duration_ms.setSuffix(" ms")
         self.dwell_info = QLabel()
         self.pixel_bandwidth_info = QLabel()
         acquisition_form.addRow(self.acquisition_hint)
         acquisition_form.addRow("Read matrix", self.read_matrix)
         acquisition_form.addRow("Phase matrix", self.phase_matrix)
         acquisition_form.addRow("Sampling bandwidth", self.sampling_bandwidth_khz)
+        acquisition_form.addRow("Flip angle", self.epi_flip_angle_deg)
+        acquisition_form.addRow("Slices", self.epi_slice_count)
+        acquisition_form.addRow("Repetitions", self.epi_repetitions)
+        acquisition_form.addRow("Repetition time (TR)", self.epi_repetition_time_ms)
+        acquisition_form.addRow("Slice thickness", self.epi_slice_thickness_mm)
+        acquisition_form.addRow("Gradient spoiler", self.epi_spoil_after_slice)
+        acquisition_form.addRow(
+            "Through-slice spoiler", self.epi_spoiler_cycles_per_slice
+        )
+        acquisition_form.addRow("In-plane spoiler", self.epi_spoiler_cycles_per_voxel)
+        acquisition_form.addRow("Spoiler duration", self.epi_spoiler_duration_ms)
         acquisition_form.addRow("ADC dwell", self.dwell_info)
         acquisition_form.addRow("Pixel bandwidth", self.pixel_bandwidth_info)
         self.acquisition_group.setVisible(False)
@@ -726,6 +791,28 @@ class SequenceSimulationWidget(QWidget):
         self.read_matrix.valueChanged.connect(self._acquisition_changed)
         self.phase_matrix.valueChanged.connect(self._acquisition_changed)
         self.sampling_bandwidth_khz.valueChanged.connect(self._acquisition_changed)
+        self.epi_flip_angle_deg.valueChanged.connect(self._acquisition_changed)
+        self.epi_slice_count.valueChanged.connect(self._acquisition_changed)
+        self.epi_repetitions.valueChanged.connect(self._acquisition_changed)
+        self.epi_repetition_time_ms.valueChanged.connect(self._acquisition_changed)
+        self.epi_slice_thickness_mm.valueChanged.connect(self._acquisition_changed)
+        self.epi_spoil_after_slice.toggled.connect(self._acquisition_changed)
+        self.epi_spoiler_cycles_per_slice.valueChanged.connect(
+            self._acquisition_changed
+        )
+        self.epi_spoiler_cycles_per_voxel.valueChanged.connect(
+            self._acquisition_changed
+        )
+        self.epi_spoiler_duration_ms.valueChanged.connect(self._acquisition_changed)
+        self.epi_spoil_after_slice.toggled.connect(
+            self.epi_spoiler_cycles_per_slice.setEnabled
+        )
+        self.epi_spoil_after_slice.toggled.connect(
+            self.epi_spoiler_cycles_per_voxel.setEnabled
+        )
+        self.epi_spoil_after_slice.toggled.connect(
+            self.epi_spoiler_duration_ms.setEnabled
+        )
         self.fov_cm.valueChanged.connect(self._acquisition_changed)
         self._update_bandwidth_labels()
         self._object_source_changed()
@@ -1095,8 +1182,8 @@ class SequenceSimulationWidget(QWidget):
         self.acquisition_group.setVisible(epi_selected)
         self.acquisition_group.setEnabled(epi_selected)
         self.acquisition_hint.setText(
-            "Read/phase matrix and sampling bandwidth define a 2D kx-ky "
-            "acquisition. No kz encoding is performed."
+            "Read/phase matrix and sampling bandwidth define each 2D kx-ky "
+            "frame. Slices are acquired sequentially without kz encoding."
             if epi_selected
             else "Select EPI under Source / mode to enable these settings."
         )
@@ -1120,6 +1207,7 @@ class SequenceSimulationWidget(QWidget):
     def _load_internal_sequence(self):
         self.acquisition = None
         self.acquisition_frames = None
+        self.acquisition_volumes = None
         self.spectroscopic_acquisition = None
         self.acquisition_note = ""
         rf_duration = 1e-3
@@ -1142,6 +1230,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _load_cartesian_epi(self):
         self.acquisition_frames = None
+        self.acquisition_volumes = None
         self.spectroscopic_acquisition = None
         bandwidth_hz = self.sampling_bandwidth_khz.value() * 1000.0
         designed = (
@@ -1161,8 +1250,31 @@ class SequenceSimulationWidget(QWidget):
                 fov_m=fov_m,
                 dwell_s=1.0 / bandwidth_hz,
             )
-            self.program = make_cartesian_epi(self.acquisition)
-            self.acquisition_note = ""
+            self.program = make_cartesian_epi(
+                self.acquisition,
+                flip_angle_deg=self.epi_flip_angle_deg.value(),
+                n_slices=self.epi_slice_count.value(),
+                slice_thickness_m=self.epi_slice_thickness_mm.value() / 1000.0,
+                repetitions=self.epi_repetitions.value(),
+                repetition_time_s=self.epi_repetition_time_ms.value() / 1000.0,
+                spoil_after_slice=self.epi_spoil_after_slice.isChecked(),
+                spoiler_cycles_per_slice=self.epi_spoiler_cycles_per_slice.value(),
+                spoiler_cycles_per_voxel=self.epi_spoiler_cycles_per_voxel.value(),
+                spoiler_duration_s=self.epi_spoiler_duration_ms.value() / 1000.0,
+            )
+            if self.epi_slice_count.value() > 1 or self.epi_repetitions.value() > 1:
+                compiled = SequenceCompiler().compile(self.program)
+                self.acquisition_frames = infer_cartesian_acquisition_frames(
+                    self.program, compiled=compiled
+                )
+                self.acquisition = self.acquisition_frames.acquisitions[0]
+                axes = ", ".join(self.acquisition_frames.varying_axes)
+                self.acquisition_note = (
+                    f"{self.acquisition_frames.num_frames} Cartesian 2D frames "
+                    f"({axes})"
+                )
+            else:
+                self.acquisition_note = ""
             self._configure_frame_selector()
             self._configure_spectroscopy_selectors()
             self._show_program()
@@ -1190,6 +1302,7 @@ class SequenceSimulationWidget(QWidget):
         self.program = load_pulseq(filename)
         compiled = SequenceCompiler().compile(self.program)
         self.acquisition_frames = None
+        self.acquisition_volumes = None
         self.spectroscopic_acquisition = None
         try:
             self.spectroscopic_acquisition = infer_spectroscopic_acquisition(
@@ -1214,11 +1327,26 @@ class SequenceSimulationWidget(QWidget):
                     self.acquisition_frames = infer_cartesian_acquisition_frames(
                         self.program, compiled=compiled
                     )
+                    try:
+                        self.acquisition_volumes = infer_cartesian_acquisition_volumes(
+                            self.program,
+                            compiled=compiled,
+                            frames=self.acquisition_frames,
+                        )
+                    except ValueError:
+                        self.acquisition_volumes = None
                     self.acquisition = self.acquisition_frames.acquisitions[0]
                     metadata = dict(self.program.metadata)
                     metadata["acquisition_dimensions"] = (
                         self.acquisition_frames.dimensions.to_metadata()
                     )
+                    metadata["cartesian_acquisition_frames"] = (
+                        self.acquisition_frames.to_metadata()
+                    )
+                    if self.acquisition_volumes is not None:
+                        metadata["cartesian_acquisition_volumes"] = (
+                            self.acquisition_volumes.to_metadata()
+                        )
                     self.program = SequenceProgram(
                         events=self.program.events,
                         duration_s=self.program.duration_s,
@@ -1226,11 +1354,20 @@ class SequenceSimulationWidget(QWidget):
                         version=self.program.version,
                         metadata=metadata,
                     )
-                    axes = ", ".join(self.acquisition_frames.varying_axes)
-                    self.acquisition_note = (
-                        f"{self.acquisition_frames.num_frames} Cartesian 2D frames "
-                        f"inferred ({axes})"
-                    )
+                    if self.acquisition_volumes is not None:
+                        axes = ", ".join(self.acquisition_volumes.varying_axes)
+                        axes = axes or "single volume"
+                        nx, ny, nz = self.acquisition_volumes.matrix
+                        self.acquisition_note = (
+                            f"{self.acquisition_volumes.num_volumes} Cartesian 3D "
+                            f"volume(s) inferred ({nx}×{ny}×{nz}; {axes})"
+                        )
+                    else:
+                        axes = ", ".join(self.acquisition_frames.varying_axes)
+                        self.acquisition_note = (
+                            f"{self.acquisition_frames.num_frames} Cartesian 2D frames "
+                            f"inferred ({axes})"
+                        )
                 except ValueError as frame_error:
                     self.acquisition = None
                     self.acquisition_note = (
@@ -1310,6 +1447,13 @@ class SequenceSimulationWidget(QWidget):
                     f"; frames={self.acquisition_frames.num_frames} "
                     f"({', '.join(self.acquisition_frames.varying_axes)})"
                 )
+            if self.acquisition_volumes is not None:
+                acquisition_text += (
+                    f"; 3D volumes={self.acquisition_volumes.num_volumes}, "
+                    f"matrix={self.acquisition_volumes.matrix[0]}×"
+                    f"{self.acquisition_volumes.matrix[1]}×"
+                    f"{self.acquisition_volumes.matrix[2]}"
+                )
         elif self.spectroscopic_acquisition is not None:
             csi = self.spectroscopic_acquisition
             acquisition_text = (
@@ -1321,18 +1465,33 @@ class SequenceSimulationWidget(QWidget):
         elif self.acquisition_note:
             acquisition_text = f"\n{self.acquisition_note}"
         definitions = dict(self.program.metadata.get("definitions", {}))
+        end_image_spoilers = "EndImageSpoilerEndTimes" in definitions
         spoiler_end_times = np.asarray(
-            definitions.get("EndImageSpoilerEndTimes", ()), dtype=float
+            definitions.get(
+                "EndImageSpoilerEndTimes",
+                definitions.get("SpoilerEndTimes", ()),
+            ),
+            dtype=float,
         ).reshape(-1)
         spoiler_end_times = spoiler_end_times[np.isfinite(spoiler_end_times)]
         spoiler_text = ""
         if spoiler_end_times.size:
-            cycles = definitions.get("EndImageSpoilerCyclesPerFOV", "?")
-            axes = definitions.get("EndImageSpoilerAxes", "xyz")
-            spoiler_text = (
-                f"\nEnd-image spoilers: {spoiler_end_times.size}; "
-                f"{cycles} cycles/FOV on {axes}"
-            )
+            if end_image_spoilers:
+                cycles = definitions.get("EndImageSpoilerCyclesPerFOV", "?")
+                axes = definitions.get("EndImageSpoilerAxes", "xyz")
+                spoiler_text = (
+                    f"\nEnd-image spoilers: {spoiler_end_times.size}; "
+                    f"{cycles} cycles/FOV on {axes}"
+                )
+            else:
+                slice_cycles = definitions.get("SpoilerCyclesPerSlice", "?")
+                voxel_cycles = definitions.get("SpoilerCyclesPerVoxel", "?")
+                axes = definitions.get("SpoilerAxes", "?")
+                spoiler_text = (
+                    f"\nSpoilers: {spoiler_end_times.size}; "
+                    f"{slice_cycles} cycles/slice, {voxel_cycles} cycles/voxel "
+                    f"on {axes}"
+                )
         self.sequence_info.setText(
             f"{self.program.source}\nDuration: {self.program.duration_s*1000:.3f} ms\n"
             f"Events: {len(self.program.events)}, intervals: {compiled.n_intervals}, "
@@ -1370,7 +1529,9 @@ class SequenceSimulationWidget(QWidget):
                 movable=False,
                 pen=pg.mkPen("#ff9800", width=1.5, style=Qt.DashLine),
             )
-            marker.setToolTip("End-image spoiler")
+            marker.setToolTip(
+                "End-image spoiler" if end_image_spoilers else "Gradient spoiler"
+            )
             self.gradient_plot.addItem(marker)
             self._sequence_spoiler_markers.append(marker)
         self.rf_plot.addItem(self.rf_progress_cursor)
@@ -1597,7 +1758,10 @@ class SequenceSimulationWidget(QWidget):
             checkpoints = [0.0]
             checkpoints.extend(event.end_s for event in self.program.rf_events)
             definitions = dict(self.program.metadata.get("definitions", {}))
-            spoiler_times = definitions.get("EndImageSpoilerEndTimes", ())
+            spoiler_times = definitions.get(
+                "EndImageSpoilerEndTimes",
+                definitions.get("SpoilerEndTimes", ()),
+            )
             try:
                 checkpoints.extend(np.asarray(spoiler_times, dtype=float).reshape(-1))
             except (TypeError, ValueError):
@@ -2142,7 +2306,16 @@ class SequenceSimulationWidget(QWidget):
 
     def _show_live_cartesian(self, signal, acquired, total):
         selected = self.frame_selector.currentData()
-        frame = max(0, 0 if selected is None or int(selected) < 0 else int(selected))
+        selected_index = max(
+            0, 0 if selected is None or int(selected) < 0 else int(selected)
+        )
+        if self.acquisition_volumes is not None:
+            volume = min(selected_index, self.acquisition_volumes.num_volumes - 1)
+            frame = self.acquisition_volumes.volume_frame_indices[volume][
+                self.acquisition_volumes.partition_matrix // 2
+            ]
+        else:
+            frame = selected_index
         if self.acquisition_frames is not None:
             acquisition = self.acquisition_frames.acquisitions[frame]
             frame_signal = self.acquisition_frames._frame_values(signal, frame)
@@ -2159,8 +2332,13 @@ class SequenceSimulationWidget(QWidget):
         self.kspace_view.setImage(np.log1p(kspace_magnitude).T, autoLevels=True)
         self.reconstruction_view.setImage(np.abs(image).T, autoLevels=True)
         self.kspace_info.setText(f"Live k-space: {acquired}/{total} ADC samples")
+        reconstruction_kind = (
+            "central-kz hybrid |IFFT2|"
+            if self.acquisition_volumes is not None
+            else "|IFFT2|"
+        )
         self.reconstruction_info.setText(
-            f"Live |IFFT2| from {acquired}/{total} ADC samples"
+            f"Live {reconstruction_kind} from {acquired}/{total} ADC samples"
         )
 
     def _cancel(self):
@@ -2257,7 +2435,19 @@ class SequenceSimulationWidget(QWidget):
         self.frame_selector.blockSignals(True)
         self.frame_slider.blockSignals(True)
         self.frame_selector.clear()
-        if self.acquisition_frames is None:
+        if self.acquisition_volumes is not None:
+            self.frame_selector.addItem(
+                f"All {self.acquisition_volumes.num_volumes} volumes (montage)", -1
+            )
+            for volume in range(self.acquisition_volumes.num_volumes):
+                self.frame_selector.addItem(
+                    self.acquisition_volumes.volume_label(volume), volume
+                )
+            self.frame_selector.setEnabled(True)
+            self.frame_slider.setRange(-1, self.acquisition_volumes.num_volumes - 1)
+            self.frame_slider.setValue(-1)
+            self.frame_slider.setEnabled(True)
+        elif self.acquisition_frames is None:
             self.frame_selector.addItem("Single 2D frame", 0)
             self.frame_selector.setEnabled(False)
             self.frame_slider.setRange(0, 0)
@@ -2529,6 +2719,9 @@ class SequenceSimulationWidget(QWidget):
             self.kspace_info.setText("No Cartesian acquisition metadata")
             self.reconstruction_info.setText("No Cartesian acquisition metadata")
             return
+        if self.acquisition_volumes is not None:
+            self._show_cartesian_volume_result(result)
+            return
         try:
             selected_frame = self.frame_selector.currentData()
             selected_frame = 0 if selected_frame is None else int(selected_frame)
@@ -2564,7 +2757,12 @@ class SequenceSimulationWidget(QWidget):
                 f"2D log(1+|k|), grid={acquisition.phase_matrix}×"
                 f"{acquisition.read_matrix}{coil_text}{frame_text}"
             )
-            if (
+            if self.acquisition_volumes is not None:
+                z_note = (
+                    "; xy-IFFT hybrid-space plane I(x,y,kz); "
+                    "validated 3D IFFT available in export"
+                )
+            elif (
                 self.acquisition_frames is not None
                 and "slice" in self.acquisition_frames.varying_axes
             ):
@@ -2583,6 +2781,71 @@ class SequenceSimulationWidget(QWidget):
             message = f"Cartesian reconstruction unavailable: {exc}"
             self.kspace_info.setText(message)
             self.reconstruction_info.setText(message)
+
+    def _show_cartesian_volume_result(self, result):
+        try:
+            selected = self.frame_selector.currentData()
+            selected = 0 if selected is None else int(selected)
+            if selected < 0:
+                views = [
+                    self._cartesian_volume_views(result, volume)
+                    for volume in range(self.acquisition_volumes.num_volumes)
+                ]
+                kspace_magnitude = self._montage([item[0] for item in views])
+                image = self._montage([item[1] for item in views])
+                coil_text = views[0][2]
+                volume_text = (
+                    f", montage of {self.acquisition_volumes.num_volumes} volumes"
+                )
+            else:
+                volume = min(selected, self.acquisition_volumes.num_volumes - 1)
+                kspace_magnitude, image, coil_text = self._cartesian_volume_views(
+                    result, volume
+                )
+                volume_text = f", {self.acquisition_volumes.volume_label(volume)}"
+            self.kspace_view.setImage(np.log1p(kspace_magnitude).T, autoLevels=True)
+            self.reconstruction_view.setImage(np.asarray(image).T, autoLevels=True)
+            self._update_zoom_label(self.kspace_view, self.kspace_zoom_info)
+            self._update_zoom_label(
+                self.reconstruction_view, self.reconstruction_zoom_info
+            )
+            nx, ny, nz = self.acquisition_volumes.matrix
+            self.kspace_info.setText(
+                f"3D log(1+|k|), central kz plane, grid={nz}×{ny}×{nx}"
+                f"{coil_text}{volume_text}"
+            )
+            z_index = nz // 2
+            z_mm = ((z_index + 0.5) / nz - 0.5) * self.acquisition_volumes.fov_z_m * 1e3
+            self.reconstruction_info.setText(
+                f"3D |IFFT3|, central z={z_mm:.4g} mm, "
+                f"min={np.min(image):.5g}, max={np.max(image):.5g}"
+                f"{coil_text}{volume_text}"
+            )
+        except Exception as exc:
+            self.kspace_view.clear()
+            self.reconstruction_view.clear()
+            message = f"Cartesian 3D reconstruction unavailable: {exc}"
+            self.kspace_info.setText(message)
+            self.reconstruction_info.setText(message)
+
+    def _cartesian_volume_views(self, result, volume):
+        kspace = self.acquisition_volumes.to_cartesian_kspace(result, volume)
+        if kspace.ndim == 4:
+            kspace_magnitude = np.sqrt(np.sum(np.abs(kspace) ** 2, axis=0))
+            image = self.acquisition_volumes.reconstruct(
+                result, volume, coil_combine="rss"
+            )
+            coil_text = f", {kspace.shape[0]} coils (RSS)"
+        else:
+            kspace_magnitude = np.abs(kspace)
+            image = np.abs(self.acquisition_volumes.reconstruct(result, volume))
+            coil_text = ""
+        centre = self.acquisition_volumes.partition_matrix // 2
+        return (
+            np.asarray(kspace_magnitude[centre]),
+            np.asarray(np.abs(image[centre])),
+            coil_text,
+        )
 
     def _cartesian_frame_views(self, result, frame):
         if self.acquisition_frames is not None:

@@ -13,6 +13,7 @@ Date: 2024
 
 from typing import List, Dict, Any, Optional, Tuple
 import json
+from textwrap import dedent
 
 try:
     import nbformat
@@ -1351,6 +1352,283 @@ def export_notebook(
     print(f"Notebook exported: {filename}")
 
 
+def _sequence_result_explorer_code() -> str:
+    """Return the adaptive ipywidgets explorer used by result notebooks."""
+    return dedent(
+        """
+        try:
+            import ipywidgets as widgets
+            from IPython.display import display
+        except ImportError as exc:
+            raise ImportError(
+                "The interactive result explorer requires ipywidgets. "
+                "Install it with `%pip install ipywidgets`."
+            ) from exc
+
+        if 'cartesian_3d_image_magnitude' in ds:
+            explorer_kind = 'cartesian_3d'
+            x_dim, y_dim, z_dim = 'read_x', 'phase_y', 'partition_z'
+            repetition_dim = 'repetition' if 'repetition' in ds.dims else None
+            spectral_dim = None
+        elif 'csi_kspace' in ds:
+            explorer_kind = 'csi'
+            x_dim, y_dim, z_dim = 'phase_x', 'phase_y', None
+            repetition_dim = 'repetition' if 'repetition' in ds.dims else None
+            spectral_dim = 'spectral_point'
+        elif 'cartesian_image_magnitude' in ds or 'cartesian_image' in ds:
+            explorer_kind = 'cartesian_2d'
+            x_dim, y_dim, z_dim = 'read_x', 'phase_y', None
+            repetition_dim = (
+                'cartesian_frame' if 'cartesian_frame' in ds.dims else None
+            )
+            spectral_dim = None
+        else:
+            explorer_kind = 'raw_signal'
+            x_dim = y_dim = z_dim = repetition_dim = spectral_dim = None
+
+
+        def _index_slider(label, dim, initial=None):
+            available = dim is not None and dim in ds.sizes
+            size = int(ds.sizes[dim]) if available else 1
+            if initial is None:
+                initial = size // 2 if label in {'x', 'y', 'z'} else 0
+            return widgets.IntSlider(
+                value=min(int(initial), size - 1),
+                min=0,
+                max=size - 1,
+                step=1,
+                description=label if available else f'{label} (n/a)',
+                disabled=not available or size == 1,
+                continuous_update=True,
+                style={'description_width': 'initial'},
+                layout=widgets.Layout(width='260px'),
+            )
+
+
+        def _rss_magnitude(data):
+            if 'coil' in data.dims:
+                return np.sqrt((np.abs(data) ** 2).sum('coil'))
+            return np.abs(data)
+
+
+        def _select_outer(data, keep_dims, repetition):
+            selectors = {}
+            for dim in data.dims:
+                if dim in keep_dims or dim == 'coil':
+                    continue
+                selectors[dim] = repetition if dim == repetition_dim else 0
+            return data.isel(selectors)
+
+
+        def _crosshair(axis, horizontal, vertical):
+            axis.axhline(horizontal, color='cyan', linewidth=0.8, alpha=0.8)
+            axis.axvline(vertical, color='cyan', linewidth=0.8, alpha=0.8)
+
+
+        def _repetition_label(index):
+            if repetition_dim is None:
+                return 'n/a'
+            coordinate_name = repetition_dim
+            if (
+                explorer_kind == 'cartesian_2d'
+                and 'cartesian_frame_repetition_index' in ds.coords
+            ):
+                coordinate_name = 'cartesian_frame_repetition_index'
+            if coordinate_name in ds.coords:
+                value = np.asarray(ds.coords[coordinate_name].values)[index]
+                return str(value.item() if hasattr(value, 'item') else value)
+            return str(index)
+
+
+        def _show_cartesian_3d(x, y, z, repetition):
+            spatial_dims = {'partition_z', 'phase_y', 'read_x'}
+            image = _select_outer(
+                ds['cartesian_3d_image_magnitude'], spatial_dims, repetition
+            )
+            kspace = _select_outer(
+                ds['cartesian_3d_kspace'], spatial_dims, repetition
+            )
+            image = _rss_magnitude(image).transpose(
+                'partition_z', 'phase_y', 'read_x'
+            )
+            kspace = _rss_magnitude(kspace).transpose(
+                'partition_z', 'phase_y', 'read_x'
+            )
+            volume = np.asarray(image)
+            kspace_volume = np.asarray(kspace)
+
+            fig, axes = plt.subplots(2, 2, figsize=(11, 8), constrained_layout=True)
+            axes[0, 0].imshow(volume[z], origin='lower', cmap='gray', aspect='auto')
+            _crosshair(axes[0, 0], y, x)
+            axes[0, 0].set(title=f'XY reconstruction at z={z}', xlabel='x', ylabel='y')
+
+            axes[0, 1].imshow(
+                volume[:, y, :], origin='lower', cmap='gray', aspect='auto'
+            )
+            _crosshair(axes[0, 1], z, x)
+            axes[0, 1].set(title=f'XZ reconstruction at y={y}', xlabel='x', ylabel='z')
+
+            axes[1, 0].imshow(
+                volume[:, :, x], origin='lower', cmap='gray', aspect='auto'
+            )
+            _crosshair(axes[1, 0], z, y)
+            axes[1, 0].set(title=f'YZ reconstruction at x={x}', xlabel='y', ylabel='z')
+
+            axes[1, 1].imshow(
+                np.log1p(kspace_volume[z]),
+                origin='lower',
+                cmap='magma',
+                aspect='auto',
+            )
+            _crosshair(axes[1, 1], y, x)
+            axes[1, 1].set(
+                title=f'log(1 + |k-space|) at kz index {z}',
+                xlabel='kx',
+                ylabel='ky',
+            )
+            fig.suptitle(
+                f'Repetition { _repetition_label(repetition) } · '
+                f'voxel (x={x}, y={y}, z={z}) · magnitude={volume[z, y, x]:.5g}'
+            )
+            plt.show()
+
+
+        def _show_cartesian_2d(x, y, repetition):
+            spatial_dims = {'phase_y', 'read_x'}
+            image_name = (
+                'cartesian_image_magnitude'
+                if 'cartesian_image_magnitude' in ds
+                else 'cartesian_image'
+            )
+            image = _rss_magnitude(
+                _select_outer(ds[image_name], spatial_dims, repetition)
+            ).transpose('phase_y', 'read_x')
+            kspace = _rss_magnitude(
+                _select_outer(ds['cartesian_kspace'], spatial_dims, repetition)
+            ).transpose('phase_y', 'read_x')
+            image_values = np.asarray(image)
+            kspace_values = np.asarray(kspace)
+
+            fig, axes = plt.subplots(1, 2, figsize=(11, 4), constrained_layout=True)
+            axes[0].imshow(
+                np.log1p(kspace_values), origin='lower', cmap='magma', aspect='auto'
+            )
+            _crosshair(axes[0], y, x)
+            axes[0].set(title='log(1 + |k-space|)', xlabel='kx', ylabel='ky')
+            axes[1].imshow(image_values, origin='lower', cmap='gray', aspect='auto')
+            _crosshair(axes[1], y, x)
+            axes[1].set(title='Reconstruction', xlabel='x', ylabel='y')
+            fig.suptitle(
+                f'Repetition/frame { _repetition_label(repetition) } · '
+                f'pixel (x={x}, y={y}) · magnitude={image_values[y, x]:.5g}'
+            )
+            plt.show()
+
+
+        def _show_csi(x, y, spectral_point, repetition):
+            cube_dims = {'phase_y', 'phase_x', 'spectral_point'}
+            kspace = _rss_magnitude(
+                _select_outer(ds['csi_kspace'], cube_dims, repetition)
+            ).transpose('phase_y', 'phase_x', 'spectral_point')
+            spatial_fid = _rss_magnitude(
+                _select_outer(ds['csi_spatial_fid'], cube_dims, repetition)
+            ).transpose('phase_y', 'phase_x', 'spectral_point')
+            spectrum = _rss_magnitude(
+                _select_outer(ds['csi_spectrum'], cube_dims, repetition)
+            ).transpose('phase_y', 'phase_x', 'spectral_point')
+
+            kspace_map = np.asarray(kspace.isel(spectral_point=spectral_point))
+            fid_map = np.asarray(spatial_fid.isel(spectral_point=spectral_point))
+            spectrum_line = np.asarray(spectrum.isel(phase_y=y, phase_x=x))
+            if 'spectral_frequency_hz' in ds.coords:
+                spectral_axis = np.asarray(ds.spectral_frequency_hz)
+                spectral_label = 'Frequency (Hz)'
+            else:
+                spectral_axis = np.arange(spectrum_line.size)
+                spectral_label = 'Spectral point'
+
+            fig, axes = plt.subplots(1, 3, figsize=(14, 4), constrained_layout=True)
+            axes[0].imshow(kspace_map, origin='lower', cmap='magma', aspect='auto')
+            _crosshair(axes[0], y, x)
+            axes[0].set(
+                title=f'CSI k-space · point {spectral_point}',
+                xlabel='kx index',
+                ylabel='ky index',
+            )
+            axes[1].imshow(fid_map, origin='lower', cmap='gray', aspect='auto')
+            _crosshair(axes[1], y, x)
+            axes[1].set(
+                title=f'Spatial FID magnitude · point {spectral_point}',
+                xlabel='x',
+                ylabel='y',
+            )
+            axes[2].plot(spectral_axis, spectrum_line)
+            axes[2].axvline(
+                spectral_axis[spectral_point], color='tab:red', linewidth=1.0
+            )
+            axes[2].set(
+                title=f'Spectrum at (x={x}, y={y})',
+                xlabel=spectral_label,
+                ylabel='Magnitude',
+            )
+            fig.suptitle(
+                f'Spectral point {spectral_point} · '
+                f'spectrum magnitude={spectrum_line[spectral_point]:.5g}'
+            )
+            plt.show()
+
+
+        def _render_explorer(x, y, z, repetition, spectral_point):
+            if explorer_kind == 'cartesian_3d':
+                _show_cartesian_3d(x, y, z, repetition)
+            elif explorer_kind == 'cartesian_2d':
+                _show_cartesian_2d(x, y, repetition)
+            elif explorer_kind == 'csi':
+                _show_csi(x, y, spectral_point, repetition)
+            else:
+                print(
+                    'No gridded Cartesian or CSI data were found. '
+                    'Inspect signal with the ADC-coordinate table above.'
+                )
+
+
+        x_slider = _index_slider('x', x_dim)
+        y_slider = _index_slider('y', y_dim)
+        z_slider = _index_slider('z', z_dim)
+        repetition_slider = _index_slider('Repetition', repetition_dim, initial=0)
+        spectral_point_slider = _index_slider(
+            'Spectral point', spectral_dim, initial=0
+        )
+        controls = {
+            'x': x_slider,
+            'y': y_slider,
+            'z': z_slider,
+            'repetition': repetition_slider,
+            'spectral_point': spectral_point_slider,
+        }
+        output = widgets.interactive_output(_render_explorer, controls)
+        control_row = widgets.Box(
+            list(controls.values()),
+            layout=widgets.Layout(
+                display='flex', flex_flow='row wrap', align_items='center'
+            ),
+        )
+        display(
+            widgets.VBox(
+                [
+                    widgets.HTML(
+                        f'<b>Detected data:</b> {explorer_kind}. '
+                        'Move a slider to update all linked views.'
+                    ),
+                    control_row,
+                    output,
+                ]
+            )
+        )
+        """
+    ).strip()
+
+
 def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
     """Create an xarray-based analysis notebook for sparse sequence output."""
     if not HAS_NBFORMAT:
@@ -1404,7 +1682,9 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
                 "Use these coordinates for auditing and grouping; do not infer "
                 "spatial ordering from array length. Cartesian/EPI exports contain "
                 "the already sorted `cartesian_kspace(phase_y, read_x)` array and "
-                "`cartesian_image`. CSI exports contain the already sorted "
+                "`cartesian_image`. Cartesian 3D acquisitions additionally contain "
+                "`cartesian_3d_kspace(..., partition_z, phase_y, read_x)` and the "
+                "corresponding 3D reconstruction. CSI exports contain the already sorted "
                 "`csi_kspace(phase_y, phase_x, spectral_point)` array."
             ),
             new_code_cell(
@@ -1419,7 +1699,26 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
                 "adc_table.head()"
             ),
             new_code_cell(
-                "if 'cartesian_kspace' in ds:\n"
+                "if 'cartesian_3d_kspace' in ds:\n"
+                "    kspace_3d = ds.cartesian_3d_kspace\n"
+                "    image_3d = ds.cartesian_3d_image_magnitude\n"
+                "    selectors = {dim: 0 for dim in kspace_3d.dims "
+                "if dim not in {'coil', 'partition_z', 'phase_y', 'read_x'}}\n"
+                "    kspace_volume = kspace_3d.isel(selectors)\n"
+                "    image_volume = image_3d.isel(selectors)\n"
+                "    if 'coil' in kspace_volume.dims:\n"
+                "        kspace_volume = np.sqrt((abs(kspace_volume) ** 2).sum('coil'))\n"
+                "        image_volume = np.sqrt((abs(image_volume) ** 2).sum('coil'))\n"
+                "    kz_mid = kspace_volume.sizes['partition_z'] // 2\n"
+                "    z_mid = image_volume.sizes['partition_z'] // 2\n"
+                "    print('Sorted Cartesian 3D k-space:', kspace_3d.dims, kspace_3d.shape)\n"
+                "    fig, axes = plt.subplots(1, 2, figsize=(10, 4))\n"
+                "    axes[0].imshow(np.log1p(abs(kspace_volume.isel(partition_z=kz_mid))), origin='lower', cmap='magma')\n"
+                "    axes[0].set_title('Central kz plane')\n"
+                "    axes[1].imshow(abs(image_volume.isel(partition_z=z_mid)), origin='lower', cmap='gray')\n"
+                "    axes[1].set_title('Central reconstructed z slice')\n"
+                "    plt.tight_layout(); plt.show()\n"
+                "elif 'cartesian_kspace' in ds:\n"
                 "    kspace = ds.cartesian_kspace\n"
                 "    image = ds.cartesian_image_magnitude if 'cartesian_image_magnitude' in ds else abs(ds.cartesian_image)\n"
                 "    if 'cartesian_frame' in kspace.dims:\n"
@@ -1450,6 +1749,15 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
                 "export does not contain Cartesian layout metadata, so reshape only "
                 "after validating the acquisition grid.')"
             ),
+            new_markdown_cell(
+                "## Interactive multidimensional explorer\n\n"
+                "The controls below are connected to the gridded xarray data. "
+                "Use the `x`, `y`, and `z` sliders to move the crosshair and "
+                "orthogonal slices, `Repetition` to select a dynamic volume or "
+                "2D frame, and `Spectral point` to inspect CSI data. Controls "
+                "without a matching dataset dimension are disabled automatically."
+            ),
+            new_code_cell(_sequence_result_explorer_code()),
             new_markdown_cell("## Final longitudinal magnetization"),
             new_code_cell(
                 "mz = ds.final_magnetization.sel(component='mz').values\n"

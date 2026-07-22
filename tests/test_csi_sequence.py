@@ -4,6 +4,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from blochsimulator.sequence import load_pulseq
+
 
 pypulseq = pytest.importorskip("pypulseq")
 
@@ -73,3 +75,59 @@ def test_csi_resolution_can_determine_number_of_points():
     )
     assert sequence.definitions["SpectralPoints"] == 34
     assert sequence.definitions["SpectralResolution"] <= 30.0
+
+
+def test_csi_adds_configurable_readout_spoilers(tmp_path):
+    fov = (0.02, 0.04)
+    slice_thickness = 0.01
+    sequence = main(
+        fov=fov,
+        n_x=1,
+        n_y=1,
+        slice_thickness=slice_thickness,
+        n_spectral_points=8,
+        spectral_bandwidth_hz=2000.0,
+        te=6e-3,
+        tr=30e-3,
+        spoiler_duration=2e-3,
+        spoiler_cycles=3.0,
+        spoiler_cycles_per_voxel=0.5,
+    )
+    path = tmp_path / "csi_spoilers.seq"
+    sequence.write(str(path), v141_compat=True)
+    program = load_pulseq(path)
+
+    definitions = program.metadata["definitions"]
+    assert definitions["SpoilAfterReadout"]
+    assert definitions["SpoilerAxes"] == "xyz"
+    assert definitions["SpoilerDuration"] == pytest.approx(2e-3)
+    spoiler_end = float(np.asarray(definitions["SpoilerEndTimes"]).reshape(-1)[0])
+    events = [
+        event
+        for event in program.gradient_events
+        if np.isclose(event.end_s, spoiler_end, rtol=0.0, atol=1e-9)
+    ]
+    assert {event.axis for event in events} == {"x", "y", "z"}
+    expected_cycles = {"x": 0.5, "y": 0.5, "z": 3.0}
+    extents = {"x": fov[0], "y": fov[1], "z": slice_thickness}
+    for event in events:
+        moment = np.sum(event.samples_hz_per_m) * event.raster_s
+        assert moment * extents[event.axis] == pytest.approx(
+            expected_cycles[event.axis], abs=2e-5
+        )
+
+
+def test_csi_spoiler_can_be_disabled():
+    sequence = main(
+        n_x=1,
+        n_y=1,
+        n_spectral_points=8,
+        spectral_bandwidth_hz=2000.0,
+        te=6e-3,
+        tr=20e-3,
+        spoil_after_readout=False,
+    )
+
+    assert not sequence.definitions["SpoilAfterReadout"]
+    assert sequence.definitions["SpoilerAxes"] == "none"
+    assert sequence.definitions["SpoilerEndTimes"] == []

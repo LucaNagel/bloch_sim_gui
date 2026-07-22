@@ -59,6 +59,7 @@ class SequenceCompiler:
         program: SequenceProgram,
         *,
         checkpoints_s: Sequence[float] = (),
+        extra_boundaries_s: Sequence[float] = (),
         simulation_timestep_s: float | None = None,
         status_callback: Callable[[str], None] | None = None,
     ) -> CompiledSequence:
@@ -73,6 +74,9 @@ class SequenceCompiler:
 
         status(f"Validating {len(program.events):,} sequence events…")
         checkpoints = self._validate_checkpoints(checkpoints_s, program.duration_s)
+        extra_boundaries = self._validate_extra_boundaries(
+            extra_boundaries_s, program.duration_s
+        )
         self._validate_gradient_overlaps(program.gradient_events)
 
         status(f"Expanding {len(program.adc_events):,} ADC events…")
@@ -87,6 +91,7 @@ class SequenceCompiler:
             program,
             adc_times,
             checkpoints,
+            extra_boundaries,
             simulation_timestep_s,
         )
         if boundaries.size == 1:
@@ -155,6 +160,7 @@ class SequenceCompiler:
                 "source": program.source,
                 "version": program.version,
                 "program_metadata": dict(program.metadata),
+                "extra_boundary_count": int(extra_boundaries.size),
             },
         )
 
@@ -168,6 +174,21 @@ class SequenceCompiler:
         if np.any(checkpoints < 0) or np.any(checkpoints > duration):
             raise ValueError("checkpoint times must lie within the sequence")
         return np.unique(checkpoints)
+
+    @staticmethod
+    def _validate_extra_boundaries(
+        values: Sequence[float], duration: float
+    ) -> np.ndarray:
+        boundaries = np.asarray(tuple(values), dtype=float)
+        if boundaries.size == 0:
+            return np.zeros(0, dtype=float)
+        if boundaries.ndim != 1 or not np.all(np.isfinite(boundaries)):
+            raise ValueError(
+                "extra_boundaries_s must be a finite one-dimensional sequence"
+            )
+        if np.any(boundaries < 0) or np.any(boundaries > duration):
+            raise ValueError("extra sequence boundaries must lie within the sequence")
+        return np.unique(boundaries)
 
     @staticmethod
     def _validate_gradient_overlaps(events: Iterable[GradientEvent]) -> None:
@@ -193,11 +214,13 @@ class SequenceCompiler:
         program: SequenceProgram,
         adc_times: np.ndarray,
         checkpoints: np.ndarray,
+        extra_boundaries: np.ndarray,
         simulation_timestep_s: float | None,
     ) -> np.ndarray:
         values = [0.0, program.duration_s]
         values.extend(adc_times.tolist())
         values.extend(checkpoints.tolist())
+        values.extend(extra_boundaries.tolist())
         for event in program.events:
             values.extend((event.start_s, event.end_s))
         rf_ranges = sorted(

@@ -130,7 +130,7 @@ def main(
     write_seq: bool = False,
     seq_filename: str = "csi_2d.seq",
     *,
-    fov: float | tuple[float, float] = (160e-3, 160e-3),
+    fov: float | tuple[float, float] = (210e-3, 210e-3),
     n_x: int = 16,
     n_y: int = 16,
     slice_thickness: float = 10e-3,
@@ -138,14 +138,16 @@ def main(
     n_spectral_points: int = 1024,
     spectral_resolution_hz: float | None = None,
     phase_encoding_order: PhaseEncodingOrder = "linear",
-    flip_angle_deg: float = 90.0,
+    flip_angle_deg: float = 15.0,
     rf_duration: float = 3e-3,
     rf_time_bandwidth_product: float = 4.0,
     encoding_duration: float = 2e-3,
     te: float = 5e-3,
     tr: float = 1.0,
+    spoil_after_readout: bool = True,
     spoiler_duration: float = 2e-3,
     spoiler_cycles: float = 4.0,
+    spoiler_cycles_per_voxel: float = 0.0,
 ):
     """Create a 2D CSI sequence using SI units.
 
@@ -153,7 +155,9 @@ def main(
     FID duration.  Alternatively, set ``spectral_resolution_hz``; then the
     point count is chosen as ``ceil(bandwidth / resolution)``.  The exact
     hardware-raster bandwidth and resulting resolution are stored in the
-    sequence definitions.
+    sequence definitions. The optional spoiler is played after every FID. Its
+    through-slice moment is given by ``spoiler_cycles``; an additional x/y
+    moment can be requested in cycles across one CSI voxel.
     """
     fov_x, fov_y = _as_2d_fov(fov)
     n_x = _matrix_size(n_x, "n_x")
@@ -169,8 +173,14 @@ def main(
         n_spectral_points = _matrix_size(n_spectral_points, "n_spectral_points")
     if flip_angle_deg <= 0 or rf_duration <= 0 or encoding_duration <= 0:
         raise ValueError("flip angle and event durations must be positive")
-    if te <= 0 or tr <= 0 or spoiler_duration <= 0 or spoiler_cycles < 0:
-        raise ValueError("TE, TR, spoiler duration must be positive")
+    if te <= 0 or tr <= 0:
+        raise ValueError("TE and TR must be positive")
+    if not np.isfinite(spoiler_duration) or spoiler_duration <= 0:
+        raise ValueError("spoiler_duration must be positive and finite")
+    if not np.isfinite(spoiler_cycles) or spoiler_cycles < 0:
+        raise ValueError("spoiler_cycles must be non-negative and finite")
+    if not np.isfinite(spoiler_cycles_per_voxel) or spoiler_cycles_per_voxel < 0:
+        raise ValueError("spoiler_cycles_per_voxel must be non-negative and finite")
 
     system = pp.Opts(
         max_grad=32,
@@ -210,11 +220,31 @@ def main(
         delay=system.adc_dead_time,
         system=system,
     )
-    spoiler = pp.make_trapezoid(
-        channel="z",
-        area=spoiler_cycles / slice_thickness,
-        duration=spoiler_duration,
-        system=system,
+    spoiler_events = []
+    if spoil_after_readout:
+        if spoiler_cycles_per_voxel > 0:
+            spoiler_events.extend(
+                pp.make_trapezoid(
+                    channel=axis,
+                    area=spoiler_cycles_per_voxel / voxel_size,
+                    duration=spoiler_duration,
+                    system=system,
+                )
+                for axis, voxel_size in zip("xy", (fov_x / n_x, fov_y / n_y))
+            )
+        if spoiler_cycles > 0:
+            spoiler_events.append(
+                pp.make_trapezoid(
+                    channel="z",
+                    area=spoiler_cycles / slice_thickness,
+                    duration=spoiler_duration,
+                    system=system,
+                )
+            )
+    spoiler_block_duration = (
+        max(pp.calc_duration(event) for event in spoiler_events)
+        if spoiler_events
+        else 0.0
     )
 
     rf_center, _ = pp.calc_rf_center(rf)
@@ -245,7 +275,7 @@ def main(
         + encoding_duration
         + te_delay_value
         + adc_block_duration
-        + pp.calc_duration(spoiler)
+        + spoiler_block_duration
     )
     tr_delay_value = tr - repetition_without_tr_delay
     if tr_delay_value < 0:
@@ -268,6 +298,7 @@ def main(
     x_areas = (np.arange(n_x) - n_x // 2) / fov_x
     y_areas = (np.arange(n_y) - n_y // 2) / fov_y
     order = phase_encoding_indices(n_x, n_y, phase_encoding_order, fov=(fov_x, fov_y))
+    spoiler_end_times = []
     for acquisition_index, (x_index, y_index) in enumerate(order):
         gx_phase = pp.make_trapezoid(
             "x", area=float(x_areas[x_index]), duration=encoding_duration, system=system
@@ -288,7 +319,9 @@ def main(
             pp.make_label("PAR", "SET", y_index),
             pp.make_label("REP", "SET", acquisition_index),
         )
-        seq.add_block(spoiler)
+        if spoiler_events:
+            seq.add_block(*spoiler_events)
+            spoiler_end_times.append(float(seq.duration()[0]))
         if tr_delay is not None:
             seq.add_block(tr_delay)
 
@@ -298,9 +331,13 @@ def main(
         raise RuntimeError(f"CSI sequence timing check failed:\n{details}")
 
     print(
-        f"CSI: {n_x} x {n_y}, {n_spectral_points} spectral points, "
+        f"CSI: {n_x} x {n_y}, FOV: {fov_x * 1e3:.1f} x {fov_y * 1e3:.1f} mm, "
+        f"{n_spectral_points} spectral points, "
         f"bandwidth = {actual_bandwidth:.6g} Hz, "
         f"resolution = {actual_resolution:.6g} Hz/point"
+        f"Using {phase_encoding_order} phase encoding, "
+        f"TR = {actual_tr * 1e3:.3f} ms, TE = {actual_te * 1e3:.3f} ms, "
+        f"spoiler after readout = {spoil_after_readout}, "
     )
     print(f"TR = {actual_tr * 1e3:.3f} ms, TE = {actual_te * 1e3:.3f} ms")
 
@@ -313,6 +350,15 @@ def main(
     seq.set_definition("PhaseEncodingOrder", phase_encoding_order)
     seq.set_definition("TR", actual_tr)
     seq.set_definition("TE", actual_te)
+    seq.set_definition("SpoilAfterReadout", bool(spoil_after_readout))
+    seq.set_definition("SpoilerCyclesPerSlice", spoiler_cycles)
+    seq.set_definition("SpoilerCyclesPerVoxel", spoiler_cycles_per_voxel)
+    seq.set_definition("SpoilerDuration", spoiler_duration)
+    seq.set_definition(
+        "SpoilerAxes",
+        "".join(event.channel for event in spoiler_events) or "none",
+    )
+    seq.set_definition("SpoilerEndTimes", spoiler_end_times)
 
     if test_report:
         print(seq.test_report())
@@ -339,7 +385,14 @@ def main(
 if __name__ == "__main__":
     main(
         write_seq=True,
-        phase_encoding_order="centric",
+        seq_filename="csi_2d_linear.seq",
+        phase_encoding_order="linear",
         plot=False,
         n_spectral_points=256,
+        flip_angle_deg=12.0,
+        n_x=16,
+        n_y=16,
+        fov=(21e-3, 21e-3),
+        tr=0.2,
+        spoil_after_readout=True,
     )

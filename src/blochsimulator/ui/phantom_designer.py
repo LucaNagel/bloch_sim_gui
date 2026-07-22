@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import Optional
 import weakref
 
+import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -15,6 +16,8 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -31,7 +34,12 @@ from PyQt5.QtWidgets import (
 )
 
 from ..phantom import Phantom
-from ..dynamic_phantom import DynamicSpectralPhantom, KineticRegionDefinition
+from ..dynamic_phantom import (
+    DynamicSpectralPhantom,
+    KineticRegionDefinition,
+    TimeCurve,
+    simulate_two_pool_kinetics,
+)
 from ..paths import workspace_directory
 from ..phantom_design import (
     PhantomDesign,
@@ -40,6 +48,113 @@ from ..phantom_design import (
 )
 from ..spectral_phantom import SpectralPhantom
 from .volume_viewer import PhantomInspectorWidget
+
+
+class ShapeDrawingPlotWidget(pg.PlotWidget):
+    """Plot widget with a one-shot drag-to-create shape mode."""
+
+    shapeDrawn = pyqtSignal(str, float, float, float, float)
+    drawingCancelled = pyqtSignal()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._drawing_kind = None
+        self._drawing_start = None
+        self._drawing_guide = pg.PlotDataItem(
+            pen=pg.mkPen((255, 220, 80), width=3, style=Qt.DashLine)
+        )
+        self._drawing_guide.setZValue(2000)
+        self.addItem(self._drawing_guide)
+
+    @property
+    def drawing_kind(self):
+        return self._drawing_kind
+
+    def start_shape_drawing(self, kind):
+        if kind not in {"ellipsoid", "box"}:
+            raise ValueError("drawing kind must be 'ellipsoid' or 'box'")
+        self._drawing_kind = kind
+        self._drawing_start = None
+        self._drawing_guide.setData([], [])
+        self.setCursor(Qt.CrossCursor)
+
+    def cancel_shape_drawing(self):
+        was_active = self._drawing_kind is not None
+        self._drawing_kind = None
+        self._drawing_start = None
+        self._drawing_guide.setData([], [])
+        self.unsetCursor()
+        if was_active:
+            self.drawingCancelled.emit()
+
+    def _plot_position(self, event):
+        scene_position = self.mapToScene(event.pos())
+        return self.plotItem.vb.mapSceneToView(scene_position)
+
+    def _update_drawing_guide(self, end):
+        start = self._drawing_start
+        if start is None:
+            return
+        left, right = sorted((float(start.x()), float(end.x())))
+        bottom, top = sorted((float(start.y()), float(end.y())))
+        if self._drawing_kind == "box":
+            x = [left, right, right, left, left]
+            y = [bottom, bottom, top, top, bottom]
+        else:
+            angle = np.linspace(0.0, 2.0 * np.pi, 65)
+            x = (left + right) / 2.0 + (right - left) / 2.0 * np.cos(angle)
+            y = (bottom + top) / 2.0 + (top - bottom) / 2.0 * np.sin(angle)
+        self._drawing_guide.setData(x, y)
+
+    def mousePressEvent(self, event):
+        if self._drawing_kind is not None and event.button() == Qt.LeftButton:
+            self._drawing_start = self._plot_position(event)
+            self._update_drawing_guide(self._drawing_start)
+            event.accept()
+            return
+        if self._drawing_kind is not None and event.button() == Qt.RightButton:
+            self.cancel_shape_drawing()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drawing_kind is not None and self._drawing_start is not None:
+            self._update_drawing_guide(self._plot_position(event))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if (
+            self._drawing_kind is not None
+            and self._drawing_start is not None
+            and event.button() == Qt.LeftButton
+        ):
+            end = self._plot_position(event)
+            left, right = sorted((float(self._drawing_start.x()), float(end.x())))
+            bottom, top = sorted((float(self._drawing_start.y()), float(end.y())))
+            left, right = np.clip((left, right), 0.0, 1.0)
+            bottom, top = np.clip((bottom, top), 0.0, 1.0)
+            kind = self._drawing_kind
+            self._drawing_kind = None
+            self._drawing_start = None
+            self._drawing_guide.setData([], [])
+            self.unsetCursor()
+            if right - left >= 1e-4 and top - bottom >= 1e-4:
+                self.shapeDrawn.emit(kind, left, bottom, right - left, top - bottom)
+            else:
+                self.drawingCancelled.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if self._drawing_kind is not None and event.key() == Qt.Key_Escape:
+            self.cancel_shape_drawing()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 def load_any_phantom(filename):
@@ -157,34 +272,51 @@ class SpectralPhantomDesignerDialog(QDialog):
         b0_row.addStretch()
         draw_layout.addLayout(b0_row)
 
-        splitter = QSplitter(Qt.Horizontal)
+        self.shape_splitter = QSplitter(Qt.Horizontal)
+        splitter = self.shape_splitter
         draw_layout.addWidget(splitter)
 
         shape_panel = QWidget()
+        shape_panel.setMinimumWidth(170)
+        shape_panel.setMaximumWidth(300)
         shape_layout = QVBoxLayout(shape_panel)
-        shape_layout.addWidget(QLabel("Shapes (later shapes overwrite B0 in overlaps)"))
+        shape_heading = QLabel("Shapes")
+        shape_heading.setToolTip("Later shapes overwrite B0 values in overlaps")
+        shape_layout.addWidget(shape_heading)
         self.shape_list = QListWidget()
         self.shape_list.currentRowChanged.connect(self._shape_selected)
         shape_layout.addWidget(self.shape_list)
-        add_row = QHBoxLayout()
+        shape_buttons = QGridLayout()
         add_ellipse = QPushButton("Add ellipsoid")
         add_ellipse.clicked.connect(lambda: self._add_shape("ellipsoid"))
         add_box = QPushButton("Add box")
         add_box.clicked.connect(lambda: self._add_shape("box"))
+        draw_ellipse = QPushButton("Draw ellipsoid")
+        draw_ellipse.setToolTip("Drag a new ellipsoid directly in the XY canvas")
+        draw_ellipse.clicked.connect(lambda: self._start_shape_drawing("ellipsoid"))
+        draw_box = QPushButton("Draw box")
+        draw_box.setToolTip("Drag a new box directly in the XY canvas")
+        draw_box.clicked.connect(lambda: self._start_shape_drawing("box"))
         remove = QPushButton("Remove")
         remove.clicked.connect(self._remove_shape)
-        add_row.addWidget(add_ellipse)
-        add_row.addWidget(add_box)
-        add_row.addWidget(remove)
-        shape_layout.addLayout(add_row)
+        shape_buttons.addWidget(add_ellipse, 0, 0)
+        shape_buttons.addWidget(add_box, 1, 0)
+        shape_buttons.addWidget(draw_ellipse, 2, 0)
+        shape_buttons.addWidget(draw_box, 3, 0)
+        shape_buttons.addWidget(remove, 4, 0)
+        shape_layout.addLayout(shape_buttons)
         splitter.addWidget(shape_panel)
 
         canvas_panel = QWidget()
+        canvas_panel.setMinimumWidth(420)
         canvas_layout = QVBoxLayout(canvas_panel)
-        canvas_layout.addWidget(
-            QLabel("Drag and resize shapes in the axial XY plane (physical FOV axes)")
+        self.canvas_instruction = QLabel(
+            "Move/resize existing shapes, or choose Draw and drag in the axial XY plane"
         )
-        self.canvas = pg.PlotWidget()
+        canvas_layout.addWidget(self.canvas_instruction)
+        self.canvas = ShapeDrawingPlotWidget()
+        self.canvas.shapeDrawn.connect(self._shape_drawn)
+        self.canvas.drawingCancelled.connect(self._shape_drawing_cancelled)
         self.canvas.setAspectLocked(True)
         self.canvas.setXRange(0, 1)
         self.canvas.setYRange(0, 1)
@@ -232,6 +364,14 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.t1_ms = self._number_spin(0.1, 500000.0, 1000.0, " ms")
         self.initial_mz = self._number_spin(0.0, 1e9, 1.0, "")
         self.b0_ppm = self._number_spin(-1000.0, 1000.0, 0.0, " ppm")
+        self.t1_ms.setToolTip(
+            "Fallback T1 for peaks whose metabolite-specific T1 cell is empty."
+        )
+        self.initial_mz.setToolTip(
+            "Common initial scale for all hyperpolarized pools in this shape. "
+            "In the dynamic model this is excess magnetization above thermal "
+            "equilibrium and relaxes toward zero."
+        )
         for widget in (
             self.x_center,
             self.y_center,
@@ -250,23 +390,34 @@ class SpectralPhantomDesignerDialog(QDialog):
         form.addRow("X size", self.x_size)
         form.addRow("Y size", self.y_size)
         form.addRow("Z thickness", self.z_size)
-        form.addRow("T1", self.t1_ms)
-        form.addRow("Initial Mz", self.initial_mz)
+        form.addRow("Default T1", self.t1_ms)
+        form.addRow("Initial HP Mz scale", self.initial_mz)
         form.addRow("B0 inhomogeneity", self.b0_ppm)
         self.xy_info = QLabel()
         form.addRow("XY geometry", self.xy_info)
         property_layout.addLayout(form)
 
-        property_layout.addWidget(
-            QLabel(
-                "Lorentz peaks: name, amplitude, absolute peak ppm, T2*. "
-                "Simulation offsets are peak ppm minus spectral reference."
-            )
+        peak_explanation = QLabel(
+            "Dynamic phantoms: initial HP pool Mz = Initial HP Mz scale × Initial "
+            "pool weight. A weight of 0 keeps the pool defined, so conversion can "
+            "populate it. Leave T1 empty to use Default T1."
         )
-        self.peak_table = QTableWidget(0, 4)
+        peak_explanation.setWordWrap(True)
+        property_layout.addWidget(peak_explanation)
+        self.peak_table = QTableWidget(0, 5)
         self.peak_table.setHorizontalHeaderLabels(
-            ["Name", "Amplitude", "Peak position (ppm)", "T2* (ms)"]
+            [
+                "Name",
+                "Initial pool weight (0=empty)",
+                "Peak position (ppm)",
+                "T1 (ms; blank=default)",
+                "T2* (ms)",
+            ]
         )
+        peak_header = self.peak_table.horizontalHeader()
+        peak_header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for column in range(1, 5):
+            peak_header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
         self.peak_table.cellChanged.connect(self._peaks_changed)
         property_layout.addWidget(self.peak_table)
         peak_row = QHBoxLayout()
@@ -280,46 +431,217 @@ class SpectralPhantomDesignerDialog(QDialog):
         splitter.addWidget(property_panel)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 0)
+        splitter.setStretchFactor(2, 2)
+        splitter.setSizes([210, 450, 590])
         self.tabs.addTab(draw_page, "Draw and edit")
 
         kinetics_page = QWidget()
-        kinetics_layout = QVBoxLayout(kinetics_page)
+        kinetics_page_layout = QHBoxLayout(kinetics_page)
+        kinetics_splitter = QSplitter(Qt.Horizontal)
+        kinetics_controls = QWidget()
+        kinetics_layout = QVBoxLayout(kinetics_controls)
         kinetics_form = QFormLayout()
         self.dynamic_enabled = QCheckBox("Enable pyruvate → lactate conversion")
         kinetics_form.addRow(self.dynamic_enabled)
         self.pyruvate_peak_name = QLineEdit("Pyruvate")
         self.lactate_peak_name = QLineEdit("Lactate")
         self.default_kpl = self._number_spin(0.0, 10.0, 0.0, " s⁻¹")
+        self.default_kpl.setToolTip(
+            "kPL used everywhere unless an optional spatial region overrides it. "
+            "Zero means no conversion without a positive regional override."
+        )
+        self.default_kpl.valueChanged.connect(self._update_kinetics_preview)
+        self.pyruvate_peak_name.textChanged.connect(self._update_kinetics_preview)
+        self.lactate_peak_name.textChanged.connect(self._update_kinetics_preview)
         kinetics_form.addRow("Pyruvate peak name", self.pyruvate_peak_name)
         kinetics_form.addRow("Lactate peak name", self.lactate_peak_name)
         kinetics_form.addRow("Default kPL", self.default_kpl)
-        kinetics_layout.addLayout(kinetics_form)
-        kinetics_layout.addWidget(
-            QLabel(
-                "Ordered kinetic regions; later rows overwrite earlier rows. "
-                "Center and size use percent of the phantom FOV."
-            )
+        self.inflow_enabled = QCheckBox(
+            "Enable tabulated pyruvate inflow into pyruvate-shape regions"
         )
+        self.inflow_enabled.toggled.connect(self._update_kinetics_preview)
+        kinetics_form.addRow(self.inflow_enabled)
+        self.dynamic_b0_enabled = QCheckBox("Enable uniform time-dependent B0 offset")
+        kinetics_form.addRow(self.dynamic_b0_enabled)
+        kinetics_layout.addLayout(kinetics_form)
+        background_kpl_help = QLabel(
+            "Default kPL is used everywhere in the phantom. Optional spatial kPL "
+            "regions below override it only inside their geometry. 0 s⁻¹ means no "
+            "pyruvate → lactate conversion unless a region supplies a positive kPL."
+        )
+        background_kpl_help.setWordWrap(True)
+        kinetics_layout.addWidget(background_kpl_help)
+
+        inflow_help = QLabel(
+            "Pyruvate inflow points define a longitudinal source added to Pz "
+            "inside pyruvate shapes. Values are linearly interpolated and zero "
+            "outside the listed time interval."
+        )
+        inflow_help.setWordWrap(True)
+        kinetics_layout.addWidget(inflow_help)
+        self.inflow_curve_table = QTableWidget(0, 2)
+        self.inflow_curve_table.setHorizontalHeaderLabels(
+            ["Time (s)", "Source (relative Mz/s)"]
+        )
+        self.inflow_curve_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        self.inflow_curve_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.Stretch
+        )
+        self.inflow_curve_table.setMaximumHeight(150)
+        self.inflow_curve_table.cellChanged.connect(self._update_kinetics_preview)
+        kinetics_layout.addWidget(self.inflow_curve_table)
+        inflow_buttons = QHBoxLayout()
+        add_inflow_point = QPushButton("Add inflow point")
+        add_inflow_point.clicked.connect(
+            lambda: self._add_curve_point(self.inflow_curve_table)
+        )
+        remove_inflow_point = QPushButton("Remove inflow point")
+        remove_inflow_point.clicked.connect(
+            lambda: self._remove_curve_point(self.inflow_curve_table)
+        )
+        inflow_buttons.addWidget(add_inflow_point)
+        inflow_buttons.addWidget(remove_inflow_point)
+        inflow_buttons.addStretch()
+        kinetics_layout.addLayout(inflow_buttons)
+
+        dynamic_b0_help = QLabel(
+            "Dynamic B0 curve: time and additional object frequency in Hz. "
+            "Linear interpolation; endpoint values are held outside the table."
+        )
+        dynamic_b0_help.setWordWrap(True)
+        kinetics_layout.addWidget(dynamic_b0_help)
+        self.dynamic_b0_curve_table = QTableWidget(0, 2)
+        self.dynamic_b0_curve_table.setHorizontalHeaderLabels(
+            ["Time (s)", "Offset (Hz)"]
+        )
+        self.dynamic_b0_curve_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        self.dynamic_b0_curve_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.Stretch
+        )
+        self.dynamic_b0_curve_table.setMaximumHeight(130)
+        kinetics_layout.addWidget(self.dynamic_b0_curve_table)
+        b0_curve_buttons = QHBoxLayout()
+        add_b0_point = QPushButton("Add B0 point")
+        add_b0_point.clicked.connect(
+            lambda: self._add_curve_point(self.dynamic_b0_curve_table)
+        )
+        remove_b0_point = QPushButton("Remove B0 point")
+        remove_b0_point.clicked.connect(
+            lambda: self._remove_curve_point(self.dynamic_b0_curve_table)
+        )
+        b0_curve_buttons.addWidget(add_b0_point)
+        b0_curve_buttons.addWidget(remove_b0_point)
+        b0_curve_buttons.addStretch()
+        kinetics_layout.addLayout(b0_curve_buttons)
+
+        kinetic_regions_help = QLabel(
+            "Optional spatial kPL regions: each row assigns a different kPL to "
+            "an ellipsoid or box. If regions overlap, the last row wins. Center "
+            "and size use percent of the phantom FOV."
+        )
+        kinetic_regions_help.setWordWrap(True)
+        kinetics_layout.addWidget(kinetic_regions_help)
         self.kinetic_table = QTableWidget(0, 9)
         self.kinetic_table.setHorizontalHeaderLabels(
             ["Name", "Kind", "Cx %", "Cy %", "Cz %", "Sx %", "Sy %", "Sz %", "kPL s⁻¹"]
         )
+        self.kinetic_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.kinetic_table.cellChanged.connect(self._kinetic_table_changed)
+        self.kinetic_table.currentCellChanged.connect(
+            self._kinetic_region_selected_for_preview
+        )
         kinetics_layout.addWidget(self.kinetic_table)
         kinetic_buttons = QHBoxLayout()
-        add_kinetic_ellipse = QPushButton("Add ellipsoid")
+        add_kinetic_ellipse = QPushButton("Add kPL ellipsoid region")
         add_kinetic_ellipse.clicked.connect(
             lambda: self._add_kinetic_region("ellipsoid")
         )
-        add_kinetic_box = QPushButton("Add box")
+        add_kinetic_box = QPushButton("Add kPL box region")
         add_kinetic_box.clicked.connect(lambda: self._add_kinetic_region("box"))
-        remove_kinetic = QPushButton("Remove")
+        remove_kinetic = QPushButton("Remove selected kPL region")
         remove_kinetic.clicked.connect(self._remove_kinetic_region)
         kinetic_buttons.addWidget(add_kinetic_ellipse)
         kinetic_buttons.addWidget(add_kinetic_box)
         kinetic_buttons.addWidget(remove_kinetic)
         kinetic_buttons.addStretch()
         kinetics_layout.addLayout(kinetic_buttons)
+
+        preview_panel = QWidget()
+        preview_layout = QVBoxLayout(preview_panel)
+        preview_title = QLabel(
+            "Representative-voxel preview for one selected shape/object. This is "
+            "not a spatial average; RF pulses and gradients are not included."
+        )
+        preview_title.setWordWrap(True)
+        preview_layout.addWidget(preview_title)
+        hp_mz_help = QLabel(
+            "HP Mz is normalized hyperpolarized excess magnetization: HP Mz=1 is "
+            "the initial hyperpolarized level, not the thermal equilibrium value. "
+            "T1 relaxation therefore drives it toward approximately 0."
+        )
+        hp_mz_help.setWordWrap(True)
+        preview_layout.addWidget(hp_mz_help)
+        preview_form = QFormLayout()
+        self.kinetics_preview_shape = QComboBox()
+        self.kinetics_preview_shape.currentIndexChanged.connect(
+            self._kinetics_preview_shape_changed
+        )
+        preview_form.addRow("Shape / object to preview", self.kinetics_preview_shape)
+        self.kinetics_preview_region = QComboBox()
+        self.kinetics_preview_region.currentIndexChanged.connect(
+            self._update_kinetics_preview
+        )
+        preview_form.addRow("kPL source for this voxel", self.kinetics_preview_region)
+        self.zero_lactate_button = QPushButton("Set selected shape to initial Lz = 0")
+        self.zero_lactate_button.setToolTip(
+            "Sets the Lactate initial pool weight to zero without removing the "
+            "Lactate pool; positive kPL can then create Lactate from Pyruvate."
+        )
+        self.zero_lactate_button.clicked.connect(self._set_selected_shape_lactate_zero)
+        preview_form.addRow("Pyruvate-only start", self.zero_lactate_button)
+        self.kinetics_preview_duration = self._number_spin(0.1, 10000.0, 30.0, " s")
+        self.kinetics_preview_duration.valueChanged.connect(
+            self._update_kinetics_preview
+        )
+        preview_form.addRow("Duration", self.kinetics_preview_duration)
+        preview_layout.addLayout(preview_form)
+
+        self.kinetics_preview_graphics = pg.GraphicsLayoutWidget()
+        self.kinetics_preview_graphics.setMinimumWidth(420)
+        self.inflow_preview_plot = self.kinetics_preview_graphics.addPlot(row=0, col=0)
+        self.inflow_preview_plot.setLabel("left", "Inflow", units="rel. Mz/s")
+        self.inflow_preview_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.inflow_preview_curve = self.inflow_preview_plot.plot(
+            pen=pg.mkPen("y", width=2),
+            fillLevel=0.0,
+            brush=pg.mkBrush(255, 255, 0, 45),
+        )
+        self.pool_preview_plot = self.kinetics_preview_graphics.addPlot(row=1, col=0)
+        self.pool_preview_plot.setLabel("left", "Hyperpolarized Mz")
+        self.pool_preview_plot.setLabel("bottom", "Time", units="s")
+        self.pool_preview_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.pool_preview_plot.addLegend(offset=(8, 8))
+        self.pyruvate_preview_curve = self.pool_preview_plot.plot(
+            pen=pg.mkPen("c", width=2), name="Pyruvate Pz"
+        )
+        self.lactate_preview_curve = self.pool_preview_plot.plot(
+            pen=pg.mkPen("m", width=2, style=Qt.DashLine), name="Lactate Lz"
+        )
+        self.pool_preview_plot.setXLink(self.inflow_preview_plot)
+        preview_layout.addWidget(self.kinetics_preview_graphics)
+        self.kinetics_preview_info = QLabel()
+        self.kinetics_preview_info.setWordWrap(True)
+        preview_layout.addWidget(self.kinetics_preview_info)
+
+        kinetics_splitter.addWidget(kinetics_controls)
+        kinetics_splitter.addWidget(preview_panel)
+        kinetics_splitter.setStretchFactor(0, 1)
+        kinetics_splitter.setStretchFactor(1, 1)
+        kinetics_page_layout.addWidget(kinetics_splitter)
         self.tabs.addTab(kinetics_page, "Kinetics / kPL")
 
         self.inspector = PhantomInspectorWidget()
@@ -384,7 +706,20 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.pyruvate_peak_name.setText(self.design.pyruvate_peak_name)
         self.lactate_peak_name.setText(self.design.lactate_peak_name)
         self.default_kpl.setValue(self.design.default_kpl_s_inv)
+        self.inflow_enabled.setChecked(self.design.pyruvate_inflow_curve is not None)
+        self.dynamic_b0_enabled.setChecked(self.design.dynamic_b0_curve is not None)
+        self._populate_time_curve(
+            self.inflow_curve_table,
+            self.design.pyruvate_inflow_curve,
+            default=((0.0, 0.0), (5.0, 0.1), (15.0, 0.0)),
+        )
+        self._populate_time_curve(
+            self.dynamic_b0_curve_table,
+            self.design.dynamic_b0_curve,
+            default=((0.0, 0.0), (10.0, 0.0)),
+        )
         self._populate_kinetic_regions()
+        self._refresh_kinetics_preview_regions()
         self.shape_list.clear()
         for roi in self._rois:
             self.canvas.removeItem(roi)
@@ -392,9 +727,12 @@ class SpectralPhantomDesignerDialog(QDialog):
         for index, item in enumerate(self.design.shapes):
             self.shape_list.addItem(item.name)
             self._create_roi(item, index)
+        self._refresh_kinetics_preview_shapes()
         self._updating = False
         if self.design.shapes:
             self.shape_list.setCurrentRow(0)
+        else:
+            self._update_kinetics_preview()
 
     def _create_roi(self, item, index):
         position = (
@@ -456,7 +794,9 @@ class SpectralPhantomDesignerDialog(QDialog):
         self._populate_peaks(item)
         self._update_xy_info(row)
         self._updating = False
+        self._set_kinetics_preview_shape(row)
         self._update_roi_highlights(row)
+        self._update_kinetics_preview()
 
     def _roi_changed(self):
         if self._updating:
@@ -521,6 +861,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         if self._updating or row is None:
             return
         item = self.design.shapes[row]
+        previous_name = item.name
         item.name = self.shape_name.text().strip() or item.name
         size = (
             self.x_size.value() / 100.0,
@@ -548,6 +889,9 @@ class SpectralPhantomDesignerDialog(QDialog):
         roi.setSize(item.size[:2])
         roi.blockSignals(previous)
         self._update_xy_info(row)
+        if item.name != previous_name:
+            self._refresh_kinetics_preview_shapes()
+        self._update_kinetics_preview()
 
     def _populate_peaks(self, item):
         self.peak_table.blockSignals(True)
@@ -558,6 +902,7 @@ class SpectralPhantomDesignerDialog(QDialog):
                     peak.name,
                     peak.amplitude,
                     peak.frequency_ppm + self.spectral_reference_ppm.value(),
+                    "" if peak.t1_s is None else peak.t1_s * 1000,
                     peak.t2_star_s * 1000,
                 )
             ):
@@ -573,24 +918,28 @@ class SpectralPhantomDesignerDialog(QDialog):
         except (AttributeError, ValueError):
             return
         self.design.shapes[row].peaks = peaks
+        self._update_kinetics_preview()
 
     def _read_peak_table(self):
         peaks = []
         reference_ppm = self.spectral_reference_ppm.value()
         for peak_row in range(self.peak_table.rowCount()):
+            t1_text = self.peak_table.item(peak_row, 3).text().strip()
             peak = SpectralPeakDefinition(
                 name=self.peak_table.item(peak_row, 0).text(),
                 amplitude=float(self.peak_table.item(peak_row, 1).text()),
                 frequency_ppm=(
                     float(self.peak_table.item(peak_row, 2).text()) - reference_ppm
                 ),
-                t2_star_s=float(self.peak_table.item(peak_row, 3).text()) / 1000.0,
+                t2_star_s=float(self.peak_table.item(peak_row, 4).text()) / 1000.0,
+                t1_s=None if not t1_text else float(t1_text) / 1000.0,
             )
             peak.validate()
             peaks.append(peak)
         return peaks
 
     def _populate_kinetic_regions(self):
+        previous = self.kinetic_table.blockSignals(True)
         self.kinetic_table.setRowCount(len(self.design.kinetic_regions))
         for row, region in enumerate(self.design.kinetic_regions):
             values = (
@@ -602,6 +951,272 @@ class SpectralPhantomDesignerDialog(QDialog):
             )
             for column, value in enumerate(values):
                 self.kinetic_table.setItem(row, column, QTableWidgetItem(str(value)))
+        self.kinetic_table.blockSignals(previous)
+
+    @staticmethod
+    def _populate_time_curve(table, curve, default):
+        samples = default if curve is None else zip(curve.times_s, curve.values)
+        samples = tuple(samples)
+        table.setRowCount(len(samples))
+        for row, (time_s, value) in enumerate(samples):
+            table.setItem(row, 0, QTableWidgetItem(str(time_s)))
+            table.setItem(row, 1, QTableWidgetItem(str(value)))
+
+    @staticmethod
+    def _read_time_curve(table, *, outside):
+        samples = []
+        for row in range(table.rowCount()):
+            time_item = table.item(row, 0)
+            value_item = table.item(row, 1)
+            if time_item is None or value_item is None:
+                raise ValueError("time-curve rows require both time and value")
+            samples.append((float(time_item.text()), float(value_item.text())))
+        if not samples:
+            raise ValueError("enabled time curve requires at least one sample")
+        return TimeCurve(
+            times_s=tuple(item[0] for item in samples),
+            values=tuple(item[1] for item in samples),
+            interpolation="linear",
+            outside=outside,
+        )
+
+    def _add_curve_point(self, table):
+        row = table.rowCount()
+        if row:
+            previous_time = float(table.item(row - 1, 0).text())
+            previous_value = float(table.item(row - 1, 1).text())
+            values = (previous_time + 1.0, previous_value)
+        else:
+            values = (0.0, 0.0)
+        table.insertRow(row)
+        for column, value in enumerate(values):
+            table.setItem(row, column, QTableWidgetItem(str(value)))
+        table.setCurrentCell(row, 0)
+        if table is self.inflow_curve_table:
+            self._update_kinetics_preview()
+
+    def _remove_curve_point(self, table):
+        row = table.currentRow()
+        if row >= 0:
+            table.removeRow(row)
+        if table is self.inflow_curve_table:
+            self._update_kinetics_preview()
+
+    def _refresh_kinetics_preview_regions(self):
+        if not hasattr(self, "kinetics_preview_region"):
+            return
+        selected_row = self.kinetics_preview_region.currentData()
+        previous = self.kinetics_preview_region.blockSignals(True)
+        self.kinetics_preview_region.clear()
+        self.kinetics_preview_region.addItem("Default kPL", -1)
+        for row in range(self.kinetic_table.rowCount()):
+            name_item = self.kinetic_table.item(row, 0)
+            name = name_item.text().strip() if name_item is not None else ""
+            self.kinetics_preview_region.addItem(f"Region: {name or row + 1}", row)
+        selected_index = self.kinetics_preview_region.findData(selected_row)
+        self.kinetics_preview_region.setCurrentIndex(max(0, selected_index))
+        self.kinetics_preview_region.blockSignals(previous)
+
+    def _refresh_kinetics_preview_shapes(self):
+        if not hasattr(self, "kinetics_preview_shape"):
+            return
+        selected_row = self.kinetics_preview_shape.currentData()
+        if selected_row is None:
+            selected_row = self._current_row()
+        previous = self.kinetics_preview_shape.blockSignals(True)
+        self.kinetics_preview_shape.clear()
+        for row, shape in enumerate(self.design.shapes):
+            self.kinetics_preview_shape.addItem(shape.name, row)
+        selected_index = self.kinetics_preview_shape.findData(selected_row)
+        self.kinetics_preview_shape.setCurrentIndex(max(0, selected_index))
+        self.kinetics_preview_shape.blockSignals(previous)
+
+    def _set_kinetics_preview_shape(self, row):
+        if not hasattr(self, "kinetics_preview_shape"):
+            return
+        index = self.kinetics_preview_shape.findData(row)
+        if index < 0 or index == self.kinetics_preview_shape.currentIndex():
+            return
+        previous = self.kinetics_preview_shape.blockSignals(True)
+        self.kinetics_preview_shape.setCurrentIndex(index)
+        self.kinetics_preview_shape.blockSignals(previous)
+
+    def _kinetics_preview_shape_changed(self, _index):
+        if self._updating:
+            return
+        shape_row = self.kinetics_preview_shape.currentData()
+        if shape_row is None:
+            self._update_kinetics_preview()
+            return
+        shape_row = int(shape_row)
+        if self.shape_list.currentRow() != shape_row:
+            self.shape_list.setCurrentRow(shape_row)
+        else:
+            self._update_kinetics_preview()
+
+    def _kinetic_table_changed(self, _row, column):
+        if self._updating:
+            return
+        if column == 0:
+            self._refresh_kinetics_preview_regions()
+        self._update_kinetics_preview()
+
+    def _kinetic_region_selected_for_preview(
+        self, current_row, _current_column, _previous_row, _previous_column
+    ):
+        if self._updating or current_row < 0:
+            return
+        preview_index = self.kinetics_preview_region.findData(current_row)
+        if preview_index >= 0:
+            self.kinetics_preview_region.setCurrentIndex(preview_index)
+
+    def _preview_kpl(self):
+        region_row = self.kinetics_preview_region.currentData()
+        if region_row is None or int(region_row) < 0:
+            return self.default_kpl.value(), "default kPL"
+        region_row = int(region_row)
+        kpl_item = self.kinetic_table.item(region_row, 8)
+        name_item = self.kinetic_table.item(region_row, 0)
+        if kpl_item is None:
+            raise ValueError("selected kinetic region has no kPL value")
+        name = "" if name_item is None else name_item.text().strip()
+        return float(kpl_item.text()), f"region {name or region_row + 1}"
+
+    def _set_selected_shape_lactate_zero(self):
+        shape_row = self.kinetics_preview_shape.currentData()
+        if shape_row is None:
+            self.kinetics_preview_info.setText(
+                "Preview unavailable: select a shape containing a Lactate pool"
+            )
+            return
+        shape_row = int(shape_row)
+        shape = self.design.shapes[shape_row]
+        lactate_name = self.lactate_peak_name.text().strip()
+        lactate_peak = next(
+            (peak for peak in shape.peaks if peak.name == lactate_name), None
+        )
+        if lactate_peak is None:
+            self.kinetics_preview_info.setText(
+                f"Preview unavailable: {shape.name} has no {lactate_name!r} pool"
+            )
+            return
+        lactate_peak.amplitude = 0.0
+        if self._current_row() == shape_row:
+            self._populate_peaks(shape)
+        self._update_kinetics_preview()
+
+    def _update_kinetics_preview(self, *_):
+        if self._updating or not hasattr(self, "pyruvate_preview_curve"):
+            return
+        try:
+            shape_row = self.kinetics_preview_shape.currentData()
+            if shape_row is None:
+                shape_row = self._current_row()
+            if shape_row is None:
+                raise ValueError("select a shape containing both dynamic pools")
+            shape_row = int(shape_row)
+            shape = self.design.shapes[shape_row]
+            peaks = {peak.name: peak for peak in shape.peaks}
+            pyruvate_name = self.pyruvate_peak_name.text().strip()
+            lactate_name = self.lactate_peak_name.text().strip()
+            missing = [
+                name for name in (pyruvate_name, lactate_name) if name not in peaks
+            ]
+            if missing:
+                raise ValueError(
+                    f"current shape is missing peak(s): {', '.join(missing)}"
+                )
+            pyruvate_peak = peaks[pyruvate_name]
+            lactate_peak = peaks[lactate_name]
+            initial_mz = (
+                shape.initial_mz * pyruvate_peak.amplitude,
+                shape.initial_mz * lactate_peak.amplitude,
+            )
+            t1_s = (
+                pyruvate_peak.effective_t1_s(shape.t1_s),
+                lactate_peak.effective_t1_s(shape.t1_s),
+            )
+            kpl_s_inv, kpl_label = self._preview_kpl()
+            inflow_curve = (
+                self._read_time_curve(self.inflow_curve_table, outside="zero")
+                if self.inflow_enabled.isChecked()
+                else None
+            )
+            duration_s = self.kinetics_preview_duration.value()
+            times_s = np.linspace(0.0, duration_s, 601)
+            if inflow_curve is not None:
+                visible_knots = [
+                    value
+                    for value in inflow_curve.times_s
+                    if 0.0 <= value <= duration_s
+                ]
+                times_s = np.unique(np.concatenate((times_s, visible_knots)))
+            pools = simulate_two_pool_kinetics(
+                times_s,
+                initial_mz,
+                t1_s,
+                kpl_s_inv,
+                inflow_curve,
+            )
+            inflow = (
+                np.zeros_like(times_s)
+                if inflow_curve is None
+                else np.asarray([inflow_curve.value_at(value) for value in times_s])
+            )
+            self.inflow_preview_curve.setData(times_s, inflow)
+            self.pyruvate_preview_curve.setData(times_s, pools[0])
+            self.lactate_preview_curve.setData(times_s, pools[1])
+            self.inflow_preview_plot.setXRange(0.0, duration_s, padding=0.0)
+            self.pool_preview_plot.setXRange(0.0, duration_s, padding=0.0)
+            if np.any(np.abs(inflow) > 1e-15):
+                self.inflow_preview_plot.enableAutoRange(axis=pg.ViewBox.YAxis)
+            else:
+                self.inflow_preview_plot.disableAutoRange(axis=pg.ViewBox.YAxis)
+                self.inflow_preview_plot.setYRange(0.0, 1.0, padding=0.05)
+            self.pool_preview_plot.enableAutoRange(axis=pg.ViewBox.YAxis)
+            details = (
+                f"Representative voxel in {shape.name} · kPL source: {kpl_label}. "
+                f"kPL={kpl_s_inv:.4g} s⁻¹, "
+                f"T1(P/L)=({t1_s[0]:.4g}/{t1_s[1]:.4g}) s, "
+                f"HP Mz(0)=({initial_mz[0]:.4g}/{initial_mz[1]:.4g}), "
+                f"HP Mz({duration_s:.4g} s)=({pools[0, -1]:.4g}/"
+                f"{pools[1, -1]:.4g})."
+            )
+            explanations = []
+            if kpl_s_inv == 0.0:
+                explanations.append(
+                    "kPL=0: no P→L conversion; each existing pool only follows its "
+                    "own T1 decay toward zero, while enabled inflow is added only "
+                    "to Pz. HP Mz=1 is an initial normalization, not an equilibrium "
+                    "target."
+                )
+                if initial_mz[1] > 0:
+                    explanations.append(
+                        "Lz starts above zero because the Lactate initial pool "
+                        "weight is non-zero; this lactate was initialized, not "
+                        "created by conversion."
+                    )
+                else:
+                    explanations.append(
+                        "Lz starts at zero and remains zero until kPL is set above "
+                        "zero for this voxel."
+                    )
+            elif initial_mz[1] == 0.0:
+                explanations.append(
+                    "Lz starts at zero; all subsequent Lactate is created from "
+                    "Pyruvate by kPL conversion."
+                )
+            if np.allclose(pools[0], pools[1], rtol=1e-7, atol=1e-10):
+                explanations.append(
+                    "Pz and Lz are identical and overlap: cyan is solid, magenta is "
+                    "dashed so both curves remain recognizable."
+                )
+            self.kinetics_preview_info.setText("\n".join((details, *explanations)))
+        except (AttributeError, IndexError, TypeError, ValueError) as exc:
+            self.inflow_preview_curve.setData([], [])
+            self.pyruvate_preview_curve.setData([], [])
+            self.lactate_preview_curve.setData([], [])
+            self.kinetics_preview_info.setText(f"Preview unavailable: {exc}")
 
     def _read_kinetic_regions(self):
         regions = []
@@ -623,25 +1238,66 @@ class SpectralPhantomDesignerDialog(QDialog):
 
     def _add_kinetic_region(self, kind):
         row = self.kinetic_table.rowCount()
+        previous = self.kinetic_table.blockSignals(True)
         self.kinetic_table.insertRow(row)
         values = (f"kPL region {row + 1}", kind, 50, 50, 50, 50, 50, 50, 0.05)
         for column, value in enumerate(values):
             self.kinetic_table.setItem(row, column, QTableWidgetItem(str(value)))
+        self.kinetic_table.blockSignals(previous)
         self.dynamic_enabled.setChecked(True)
+        self._refresh_kinetics_preview_regions()
+        self.kinetics_preview_region.setCurrentIndex(row + 1)
+        self._update_kinetics_preview()
 
     def _remove_kinetic_region(self):
         row = self.kinetic_table.currentRow()
         if row >= 0:
             self.kinetic_table.removeRow(row)
+            self._refresh_kinetics_preview_regions()
+            self._update_kinetics_preview()
 
-    def _add_shape(self, kind):
-        self._sync_global()
-        number = len(self.design.shapes) + 1
-        item = ShapeDefinition(name=f"Shape {number}", kind=kind)
+    def _next_shape_name(self):
+        existing = {item.name for item in self.design.shapes}
+        number = len(existing) + 1
+        while f"Shape {number}" in existing:
+            number += 1
+        return f"Shape {number}"
+
+    def _append_shape(self, item):
         self.design.shapes.append(item)
         self.shape_list.addItem(item.name)
         self._create_roi(item, len(self.design.shapes) - 1)
+        self._refresh_kinetics_preview_shapes()
         self.shape_list.setCurrentRow(len(self.design.shapes) - 1)
+
+    def _add_shape(self, kind):
+        self._sync_global()
+        item = ShapeDefinition(name=self._next_shape_name(), kind=kind)
+        self._append_shape(item)
+
+    def _start_shape_drawing(self, kind):
+        self._sync_global()
+        self.canvas.start_shape_drawing(kind)
+        self.canvas_instruction.setText(
+            f"Draw {kind}: hold the left mouse button and drag; Esc/right-click cancels"
+        )
+
+    def _shape_drawing_cancelled(self):
+        self.canvas_instruction.setText(
+            "Move/resize existing shapes, or choose Draw and drag in the axial XY plane"
+        )
+
+    def _shape_drawn(self, kind, left, bottom, width, height):
+        if self.canvas.drawing_kind is not None:
+            self.canvas.cancel_shape_drawing()
+        item = ShapeDefinition(
+            name=self._next_shape_name(),
+            kind=kind,
+            center=(left + width / 2.0, bottom + height / 2.0, 0.5),
+            size=(width, height, 0.5),
+        )
+        self._append_shape(item)
+        self._shape_drawing_cancelled()
 
     def _remove_shape(self):
         row = self._current_row()
@@ -650,9 +1306,11 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.canvas.removeItem(self._rois.pop(row))
         self.design.shapes.pop(row)
         self.shape_list.takeItem(row)
+        self._refresh_kinetics_preview_shapes()
         if self.design.shapes:
             self.shape_list.setCurrentRow(min(row, len(self.design.shapes) - 1))
         self._update_roi_highlights()
+        self._update_kinetics_preview()
 
     def _add_peak(self):
         row = self._current_row()
@@ -664,6 +1322,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             )
         )
         self._populate_peaks(self.design.shapes[row])
+        self._update_kinetics_preview()
 
     def _remove_peak(self):
         shape_row = self._current_row()
@@ -675,6 +1334,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             return
         peaks.pop(peak_row)
         self._populate_peaks(self.design.shapes[shape_row])
+        self._update_kinetics_preview()
 
     def _sync_global(self):
         self._properties_changed()
@@ -689,11 +1349,27 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.design.spectral_points = self.spectral_points.value()
         self.design.b0_inhomogeneity_mode = str(self.b0_mode_combo.currentData())
         self.design.b0_inhomogeneity_ppm = self.b0_inhomogeneity_ppm.value()
-        self.design.dynamic_enabled = self.dynamic_enabled.isChecked()
+        dynamic_requested = (
+            self.dynamic_enabled.isChecked()
+            or self.inflow_enabled.isChecked()
+            or self.dynamic_b0_enabled.isChecked()
+        )
+        self.dynamic_enabled.setChecked(dynamic_requested)
+        self.design.dynamic_enabled = dynamic_requested
         self.design.pyruvate_peak_name = self.pyruvate_peak_name.text().strip()
         self.design.lactate_peak_name = self.lactate_peak_name.text().strip()
         self.design.default_kpl_s_inv = self.default_kpl.value()
         self.design.kinetic_regions = self._read_kinetic_regions()
+        self.design.pyruvate_inflow_curve = (
+            self._read_time_curve(self.inflow_curve_table, outside="zero")
+            if self.inflow_enabled.isChecked()
+            else None
+        )
+        self.design.dynamic_b0_curve = (
+            self._read_time_curve(self.dynamic_b0_curve_table, outside="hold")
+            if self.dynamic_b0_enabled.isChecked()
+            else None
+        )
 
     def _preview(self):
         try:
