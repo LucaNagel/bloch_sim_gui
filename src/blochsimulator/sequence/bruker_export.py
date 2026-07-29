@@ -192,6 +192,41 @@ class _ExportContext:
         return 1
 
     @property
+    def definitions(self) -> dict:
+        if self.program is None:
+            return {}
+        values = self.program.metadata.get("definitions", {})
+        return values if isinstance(values, dict) else {}
+
+    def definition_float(self, name: str) -> Optional[float]:
+        value = self.definitions.get(name)
+        try:
+            scalar = float(np.asarray(value, dtype=float).reshape(-1)[0])
+        except (TypeError, ValueError, IndexError):
+            return None
+        return scalar if np.isfinite(scalar) else None
+
+    @property
+    def repetition_time_ms(self) -> float:
+        value = self.definition_float("TR")
+        if value is not None and value > 0:
+            return value * 1000.0
+        spectroscopy = self.spectroscopy
+        if spectroscopy is not None and spectroscopy.num_encodings > 0:
+            return self.duration_ms / spectroscopy.num_encodings
+        return self.duration_ms
+
+    @property
+    def echo_time_ms(self) -> float:
+        value = self.definition_float("TE")
+        return max(0.0, value * 1000.0) if value is not None else 0.0
+
+    @property
+    def flip_angle_deg(self) -> float:
+        value = self.definition_float("FlipAngleDeg")
+        return value if value is not None else 0.0
+
+    @property
     def fov_m(self) -> tuple[float, float]:
         if self.options.fov_m is not None:
             return self.options.fov_m
@@ -254,8 +289,24 @@ class _ExportContext:
         return self.options.method_name
 
     @property
+    def is_luca_csi4(self) -> bool:
+        return (
+            self.spectroscopy is not None
+            and self.method_name.strip().lower() == "user:lucacsi4"
+        )
+
+    @property
     def nucleus(self) -> str:
         return str(self.result.metadata.get("nucleus") or "H1")
+
+    @property
+    def bruker_nucleus(self) -> str:
+        normalized = self.nucleus.upper().replace("-", "")
+        if normalized in {"13C", "C13"}:
+            return "13C"
+        if normalized in {"1H", "H1"}:
+            return "1H"
+        return self.nucleus
 
     @property
     def field_strength_t(self) -> Optional[float]:
@@ -273,6 +324,27 @@ class _ExportContext:
         if self.nucleus.upper().replace("-", "") in {"13C", "C13"}:
             gamma_hz_per_t = 10_708_400.0
         return self.field_strength_t * gamma_hz_per_t / 1e6
+
+    @property
+    def spectral_reference_ppm(self) -> float:
+        value = self.result.metadata.get("spectral_reference_ppm")
+        if value is None and self.phantom is not None:
+            value = getattr(self.phantom, "spectral_reference_ppm", None)
+        try:
+            scalar = float(value)
+        except (TypeError, ValueError):
+            return 4.7 if self.bruker_nucleus == "1H" else 0.0
+        return scalar if np.isfinite(scalar) else 0.0
+
+    @property
+    def working_frequency_mhz(self) -> float:
+        return self.reference_frequency_mhz * (1.0 + self.spectral_reference_ppm * 1e-6)
+
+    @property
+    def spectral_bandwidth_ppm(self) -> float:
+        if self.reference_frequency_mhz <= 0:
+            return 0.0
+        return (1.0 / self.dwell_s) / self.reference_frequency_mhz
 
     @property
     def spectroscopy(self):
@@ -442,6 +514,14 @@ def _bruker_fid_int32(context: _ExportContext) -> np.ndarray:
 def _rawdata_job0_int32(context: _ExportContext) -> np.ndarray:
     spectroscopy = context.spectroscopy
     if spectroscopy is not None:
+        if context.is_luca_csi4:
+            chronological = context.signal.reshape(
+                context.num_coils,
+                spectroscopy.num_encodings,
+                spectroscopy.spectral_points,
+            )
+            line_values = np.moveaxis(chronological, 0, 1).reshape(-1)
+            return _interleaved_int32(line_values, context.scale)
         grid = spectroscopy.reshape_signal(context.signal)
         line_values = np.moveaxis(grid, 0, -2) if context.signal.ndim == 2 else grid
         line_values = np.asarray(line_values).reshape(-1)
@@ -457,10 +537,92 @@ def _standard_kblock_complex_size(readout_samples: int, num_coils: int) -> int:
     return int(block_ints * 1024.0 / bytes_per_int / 2)
 
 
+def _csi_encoding_metadata(context: _ExportContext) -> dict[str, tuple]:
+    spectroscopy = context.spectroscopy
+    if spectroscopy is None:
+        raise ValueError("CSI encoding metadata requires a spectroscopic acquisition")
+    if tuple(context.matrix) != tuple(spectroscopy.matrix):
+        raise ValueError(
+            "CSI export requires PVM_Matrix to match the simulated CSI grid"
+        )
+
+    n_x, n_y = context.matrix
+    chronological = tuple(
+        index
+        for index, repetition in zip(
+            spectroscopy.encoding_indices, spectroscopy.repetition_indices
+        )
+        if repetition == 0
+    )
+    if len(chronological) != n_x * n_y:
+        raise ValueError("CSI export requires one complete first repetition")
+    for repetition in range(1, spectroscopy.num_repetitions):
+        repeated_order = tuple(
+            index
+            for index, value in zip(
+                spectroscopy.encoding_indices, spectroscopy.repetition_indices
+            )
+            if value == repetition
+        )
+        if repeated_order != chronological:
+            raise ValueError(
+                "Bruker CSI export requires the same phase-encoding order in "
+                "every repetition"
+            )
+
+    steps_x = tuple(int(index - n_x // 2) for index in range(n_x))
+    steps_y = tuple(int(index - n_y // 2) for index in range(n_y))
+    signed_x = tuple(int(x - n_x // 2) for x, _ in chronological)
+    signed_y = tuple(int(y - n_y // 2) for _, y in chronological)
+    values_x = tuple(2.0 * value / n_x for value in steps_x)
+    values_y = tuple(2.0 * value / n_y for value in steps_y)
+    chronological_values_x = tuple(values_x[x] for x, _ in chronological)
+    chronological_values_y = tuple(values_y[y] for _, y in chronological)
+    fov_mm = tuple(value * 1000.0 for value in context.fov_m)
+    distances = tuple(
+        float(np.hypot(x / fov_mm[0], y / fov_mm[1]))
+        for x, y in zip(signed_x, signed_y)
+    )
+    if context.is_luca_csi4 and np.any(np.diff(distances) < -1e-12):
+        raise ValueError(
+            "User:lucaCSI4 export requires a centric CSI acquisition order"
+        )
+    return {
+        "indices": chronological,
+        "steps_x": steps_x,
+        "steps_y": steps_y,
+        "signed_x": signed_x,
+        "signed_y": signed_y,
+        "values_x": values_x,
+        "values_y": values_y,
+        "chronological_values_x": chronological_values_x,
+        "chronological_values_y": chronological_values_y,
+        "distances": distances,
+        "reco_x": tuple(x for x, _ in chronological),
+        "reco_y": tuple(y for _, y in chronological),
+    }
+
+
 def _write_acqp(path: Path, context: _ExportContext) -> None:
     readout = context.readout_samples
     readouts = context.readouts_per_frame
     frame_count = context.raw_frame_count
+    spectroscopy = context.spectroscopy
+    if spectroscopy is not None:
+        acq_dim = 3
+        acq_dim_desc = (
+            _bare("Spectroscopic"),
+            _bare("Spatial"),
+            _bare("Spatial"),
+        )
+        acq_size = (2 * readout, context.matrix[0], context.matrix[1])
+        frame_count = 1
+        repetitions = spectroscopy.num_repetitions
+    else:
+        acq_dim = 2
+        acq_dim_desc = (_bare("Spatial"), _bare("Spatial"))
+        acq_size = (2 * readout, readouts)
+        repetitions = 1
     lines = [
         _jcamp_scalar("ACQ_scan_name", _angle(context.scan_name)),
         _jcamp_scalar(
@@ -470,12 +632,12 @@ def _write_acqp(path: Path, context: _ExportContext) -> None:
         _jcamp_scalar("ACQ_method", _angle(context.method_name)),
         _jcamp_scalar("PULPROG", _angle("BlochSimulator.ppg")),
         _jcamp_scalar("ACQ_experiment_mode", "SingleExperiment"),
-        _jcamp_scalar("ACQ_dim", 2),
-        _jcamp_array("ACQ_dim_desc", (2,), (_bare("Spatial"), _bare("Spatial"))),
-        _jcamp_array("ACQ_size", (2,), (2 * readout, readouts)),
+        _jcamp_scalar("ACQ_dim", acq_dim),
+        _jcamp_array("ACQ_dim_desc", (acq_dim,), acq_dim_desc),
+        _jcamp_array("ACQ_size", (acq_dim,), acq_size),
         _jcamp_scalar("NI", frame_count),
         _jcamp_scalar("NA", 1),
-        _jcamp_scalar("NR", 1),
+        _jcamp_scalar("NR", repetitions),
         _jcamp_scalar("DS", 0),
         _jcamp_scalar("SW_h", 1.0 / context.dwell_s),
         _jcamp_scalar("DW", context.dwell_s * 1e6),
@@ -487,9 +649,54 @@ def _write_acqp(path: Path, context: _ExportContext) -> None:
         _jcamp_scalar("GO_block_size", "Standard_KBlock_Format"),
         _jcamp_scalar("ACQ_ReceiverChannels", context.num_coils),
         _jcamp_scalar("BLOCHSIM_signal_scale", context.scale),
-        _jcamp_scalar("BLOCHSIM_signal_order", _angle("coil,adc,real_imag")),
+        _jcamp_scalar(
+            "BLOCHSIM_signal_order",
+            _angle(
+                "encoding,coil,spectral_point,real_imag"
+                if context.is_luca_csi4
+                else "coil,adc,real_imag"
+            ),
+        ),
         _jcamp_scalar("BLOCHSIM_adc_samples", context.num_adc_samples),
     ]
+    if spectroscopy is not None:
+        encoding = _csi_encoding_metadata(context)
+        lines.extend(
+            [
+                _jcamp_scalar("ACQ_flip_angle", context.flip_angle_deg),
+                _jcamp_array(
+                    "ACQ_repetition_time", (1,), (context.repetition_time_ms,)
+                ),
+                _jcamp_array(
+                    "ACQ_phase_encoding_mode",
+                    (2,),
+                    (
+                        _bare("User_Defined_Encoding"),
+                        _bare("User_Defined_Encoding"),
+                    ),
+                ),
+                _jcamp_array("ACQ_phase_enc_start", (2,), (-1, -1)),
+                _jcamp_scalar(
+                    "ACQ_spatial_size_0", spectroscopy.encodings_per_repetition
+                ),
+                _jcamp_array(
+                    "ACQ_spatial_phase_0",
+                    (spectroscopy.encodings_per_repetition,),
+                    encoding["chronological_values_x"],
+                ),
+                _jcamp_scalar(
+                    "ACQ_spatial_size_1", spectroscopy.encodings_per_repetition
+                ),
+                _jcamp_array(
+                    "ACQ_spatial_phase_1",
+                    (spectroscopy.encodings_per_repetition,),
+                    encoding["chronological_values_y"],
+                ),
+                _jcamp_scalar("BF1", context.reference_frequency_mhz),
+                _jcamp_scalar("SFO1", context.working_frequency_mhz),
+                _jcamp_array("NUC1", (8,), (_angle(context.bruker_nucleus),)),
+            ]
+        )
     _write_jcamp(
         path, "Parameter List, BlochSimulator Bruker raw export", lines, context
     )
@@ -500,6 +707,9 @@ def _write_method(path: Path, context: _ExportContext) -> None:
     spectroscopy = context.spectroscopy
     fov_mm = tuple(value * 1000.0 for value in context.fov_m)
     resolution = tuple(fov / max(size, 1) for fov, size in zip(fov_mm, matrix))
+    repetitions = spectroscopy.num_repetitions if spectroscopy is not None else 1
+    object_count = 1 if spectroscopy is not None else context.frame_count
+    bandwidth_hz = 1.0 / context.dwell_s
     lines = [
         _jcamp_scalar("Method", _angle(context.method_name)),
         _jcamp_scalar("BLOCHSIM_Source", _angle(context.source)),
@@ -514,64 +724,149 @@ def _write_method(path: Path, context: _ExportContext) -> None:
         _jcamp_array("PVM_SpatResol", (2,), resolution),
         _jcamp_scalar("PVM_SpatDimEnum", _angle("2D" if matrix[1] > 1 else "1D")),
         _jcamp_scalar("PVM_NAverages", 1),
-        _jcamp_scalar("PVM_NRepetitions", 1),
+        _jcamp_scalar("PVM_NRepetitions", repetitions),
         _jcamp_scalar("PVM_NEchoImages", 1),
         _jcamp_scalar("PVM_EncNReceivers", context.num_coils),
-        _jcamp_scalar("PVM_EncSpectroscopy", "Yes" if spectroscopy else "No"),
-        _jcamp_scalar("PVM_NSPacks", 1),
-        _jcamp_array("PVM_SPackArrNSlices", (1,), (context.frame_count,)),
+        _jcamp_scalar("PVM_EncUseMultiRec", "Yes" if context.num_coils > 1 else "No"),
         _jcamp_array(
-            "PVM_ObjOrderList", (context.frame_count,), range(context.frame_count)
+            "PVM_EncActReceivers", (context.num_coils,), ("On",) * context.num_coils
         ),
+        _jcamp_scalar(
+            "PVM_EncSpectroscopy",
+            "No" if context.is_luca_csi4 else ("Yes" if spectroscopy else "No"),
+        ),
+        _jcamp_scalar("PVM_NSPacks", 1),
+        _jcamp_array("PVM_SPackArrNSlices", (1,), (object_count,)),
+        _jcamp_array("PVM_ObjOrderList", (object_count,), range(object_count)),
         _jcamp_scalar("PVM_SliceThick", context.options.slice_thickness_mm),
         _jcamp_array("PVM_SPackArrSliceGap", (1,), (0.0,)),
         _jcamp_array("PVM_SPackArrReadOffset", (1,), (0.0,)),
         _jcamp_array("PVM_SPackArrPhase0Offset", (1,), (0.0,)),
         _jcamp_array("PVM_SPackArrPhase1Offset", (1,), (0.0,)),
         _jcamp_array("PVM_SPackArrSliceOffset", (1,), (0.0,)),
-        _jcamp_array(
-            "PVM_SliceOffset", (context.frame_count,), (0.0,) * context.frame_count
-        ),
+        _jcamp_array("PVM_SliceOffset", (object_count,), (0.0,) * object_count),
         _jcamp_scalar("PVM_SPackArrReadOrient", context.options.read_orientation),
         _jcamp_scalar("PVM_SPackArrSliceOrient", context.options.slice_orientation),
-        _jcamp_scalar("PVM_RepetitionTime", context.duration_ms),
-        _jcamp_scalar("PVM_EchoTime", 0.0),
+        _jcamp_scalar("PVM_RepetitionTime", context.repetition_time_ms),
+        _jcamp_scalar("PVM_EchoTime", context.echo_time_ms),
         _jcamp_scalar("PVM_ScanTime", context.duration_ms),
-        _jcamp_scalar("PVM_EffSwh", 1.0 / context.dwell_s),
-        _jcamp_scalar("PVM_EffSWh", 1.0 / context.dwell_s),
+        _jcamp_scalar("PVM_EffSwh", bandwidth_hz),
+        _jcamp_scalar("PVM_EffSWh", bandwidth_hz),
         _jcamp_scalar("PVM_Dw", context.dwell_s * 1e6),
-        _jcamp_scalar("PVM_DigDw", context.dwell_s * 1e6),
-        _jcamp_scalar("PVM_Nucleus1Enum", _angle(context.nucleus)),
-        _jcamp_array("PVM_Nucleus1", (8,), (_angle(context.nucleus),)),
+        _jcamp_scalar("PVM_DigDw", context.dwell_s * 1000.0),
+        _jcamp_scalar("PVM_Nucleus1Enum", _angle(context.bruker_nucleus)),
+        _jcamp_array("PVM_Nucleus1", (8,), (_angle(context.bruker_nucleus),)),
         _jcamp_array(
             "PVM_FrqRef", (8,), (context.reference_frequency_mhz,) + (0.0,) * 7
         ),
         _jcamp_array(
-            "PVM_FrqWork", (8,), (context.reference_frequency_mhz,) + (0.0,) * 7
+            "PVM_FrqWork", (8,), (context.working_frequency_mhz,) + (0.0,) * 7
         ),
-        _jcamp_array("PVM_FrqWorkPpm", (8,), (4.7,) + (0.0,) * 7),
+        _jcamp_array(
+            "PVM_FrqWorkOffset",
+            (8,),
+            (context.spectral_reference_ppm * context.reference_frequency_mhz,)
+            + (0.0,) * 7,
+        ),
+        _jcamp_array("PVM_FrqRefPpm", (8,), (0.0,) * 8),
+        _jcamp_array(
+            "PVM_FrqWorkOffsetPpm",
+            (8,),
+            (context.spectral_reference_ppm,) + (0.0,) * 7,
+        ),
+        _jcamp_array(
+            "PVM_FrqWorkPpm",
+            (8,),
+            (context.spectral_reference_ppm,) + (0.0,) * 7,
+        ),
     ]
     if spectroscopy is not None:
-        steps_x = tuple(
-            int(value) for value in np.arange(matrix[0], dtype=int) - matrix[0] // 2
-        )
-        steps_y = tuple(
-            int(value) for value in np.arange(matrix[1], dtype=int) - matrix[1] // 2
-        )
-        lines.extend(
-            [
+        encoding = _csi_encoding_metadata(context)
+        spec_acq_time_ms = spectroscopy.spectral_points * spectroscopy.dwell_s * 1000.0
+        if context.is_luca_csi4:
+            spec_lines = [
+                _jcamp_array(
+                    "PVM_EncOrder",
+                    (2,),
+                    (_bare("LINEAR_ENC"), _bare("LINEAR_ENC")),
+                ),
+                _jcamp_array("PVM_SpecMatrix", (1,), (spectroscopy.spectral_points,)),
+                _jcamp_array(
+                    "PVM_SpecSWH", (1,), (spectroscopy.spectral_bandwidth_hz,)
+                ),
+                _jcamp_array("PVM_SpecSW", (1,), (context.spectral_bandwidth_ppm,)),
+                _jcamp_array("PVM_SpecDwellTime", (1,), (spectroscopy.dwell_s * 5e5,)),
+                _jcamp_array(
+                    "PVM_SpecNomRes",
+                    (1,),
+                    (
+                        spectroscopy.spectral_bandwidth_hz
+                        / (2.0 * spectroscopy.spectral_points),
+                    ),
+                ),
+            ]
+        else:
+            spec_lines = [
                 _jcamp_scalar("PVM_EncOrder", _bare("LINEAR_ENC LINEAR_ENC")),
-                _jcamp_array("PVM_EncSteps0", (matrix[0],), steps_x),
-                _jcamp_array("PVM_EncSteps1", (matrix[1],), steps_y),
                 _jcamp_scalar("PVM_SpecMatrix", spectroscopy.spectral_points),
                 _jcamp_scalar("PVM_SpecSWH", spectroscopy.spectral_bandwidth_hz),
                 _jcamp_scalar("PVM_SpecDwellTime", spectroscopy.dwell_s * 1e6),
+            ]
+        lines.extend(
+            [
+                *spec_lines,
+                _jcamp_scalar("PVM_SpecDimEnum", _angle("1D")),
+                _jcamp_array("PVM_EncSteps0", (matrix[0],), encoding["steps_x"]),
+                _jcamp_array("PVM_EncSteps1", (matrix[1],), encoding["steps_y"]),
+                _jcamp_array("PVM_EncValues0", (matrix[0],), encoding["values_x"]),
+                _jcamp_array("PVM_EncValues1", (matrix[1],), encoding["values_y"]),
+                _jcamp_scalar("PVM_EncCentralStep0", 1),
+                _jcamp_scalar("PVM_EncCentralStep1", 1),
+                _jcamp_array("PVM_EncStart", (2,), (-1, -1)),
                 _jcamp_scalar(
                     "PVM_SpecAcquisitionTime",
-                    spectroscopy.spectral_points * spectroscopy.dwell_s * 1000.0,
+                    spec_acq_time_ms,
                 ),
+                _jcamp_scalar("PVM_SpecOffsetHz", 0.0),
+                _jcamp_scalar("PVM_SpecOffsetppm", 0.0),
+                _jcamp_scalar("PVM_DigNp", spectroscopy.spectral_points),
+                _jcamp_scalar("PVM_DigSw", spectroscopy.spectral_bandwidth_hz),
+                _jcamp_scalar("PVM_DigDur", spec_acq_time_ms),
             ]
         )
+        if not context.is_luca_csi4:
+            lines.append(
+                _jcamp_scalar(
+                    "PVM_SpecNomRes",
+                    spectroscopy.spectral_bandwidth_hz
+                    / (2.0 * spectroscopy.spectral_points),
+                )
+            )
+        if context.is_luca_csi4:
+            count = spectroscopy.encodings_per_repetition
+            zeros = (0.0,) * count
+            lines.extend(
+                [
+                    _jcamp_scalar("CentricEncOrder_OnOff", "On"),
+                    _jcamp_array(
+                        "CentricEncOrderMatrixx", (count,), encoding["signed_x"]
+                    ),
+                    _jcamp_array(
+                        "CentricEncOrderMatrixy", (count,), encoding["signed_y"]
+                    ),
+                    _jcamp_array(
+                        "Distance2kspacecenter", (count,), encoding["distances"]
+                    ),
+                    _jcamp_array("Angles", (count,), zeros),
+                    _jcamp_scalar("SpiralEncOrder_OnOff", "Off"),
+                    _jcamp_array("SpiralEncOrderMatrixx", (count,), (0,) * count),
+                    _jcamp_array("SpiralEncOrderMatrixy", (count,), (0,) * count),
+                    _jcamp_scalar("PhaseEncGrad_OnOff", "On"),
+                    _jcamp_scalar("KFiltering", "On"),
+                    _jcamp_array("Reco_x", (count,), encoding["reco_x"]),
+                    _jcamp_array("Reco_y", (count,), encoding["reco_y"]),
+                ]
+            )
     if context.field_strength_t is not None:
         lines.append(_jcamp_scalar("BLOCHSIM_FieldStrengthT", context.field_strength_t))
     _write_jcamp(path, "Parameter List, BlochSimulator method", lines, context)
@@ -580,6 +875,25 @@ def _write_method(path: Path, context: _ExportContext) -> None:
 def _write_visu_pars(path: Path, context: _ExportContext) -> None:
     matrix = context.matrix
     fov_mm = tuple(value * 1000.0 for value in context.fov_m)
+    spectroscopy = context.spectroscopy
+    if spectroscopy is not None:
+        core_dim = 3
+        core_size = (spectroscopy.spectral_points, matrix[0], matrix[1])
+        core_desc = (
+            _bare("spectroscopic"),
+            _bare("spatial"),
+            _bare("spatial"),
+        )
+        core_extent = (context.spectral_bandwidth_ppm,) + fov_mm
+        core_units = (_angle("ppm"), _angle("mm"), _angle("mm"))
+        frame_count = spectroscopy.num_repetitions
+    else:
+        core_dim = 2
+        core_size = matrix
+        core_desc = (_bare("spatial"), _bare("spatial"))
+        core_extent = fov_mm
+        core_units = (_angle("mm"), _angle("mm"))
+        frame_count = context.frame_count
     lines = [
         _jcamp_scalar("VisuVersion", 3),
         _jcamp_scalar("VisuCreator", _angle("BlochSimulator")),
@@ -590,12 +904,12 @@ def _write_visu_pars(path: Path, context: _ExportContext) -> None:
         ),
         _jcamp_scalar("VisuInstanceType", "STANDARD_INSTANCE"),
         _jcamp_array("VisuInstanceModality", (65,), (_angle("MR"),)),
-        _jcamp_scalar("VisuCoreFrameCount", context.frame_count),
-        _jcamp_scalar("VisuCoreDim", 2),
-        _jcamp_array("VisuCoreSize", (2,), matrix),
-        _jcamp_array("VisuCoreDimDesc", (2,), (_bare("spatial"), _bare("spatial"))),
-        _jcamp_array("VisuCoreExtent", (2,), fov_mm),
-        _jcamp_array("VisuCoreUnits", (2, 65), (_angle("mm"), _angle("mm"))),
+        _jcamp_scalar("VisuCoreFrameCount", frame_count),
+        _jcamp_scalar("VisuCoreDim", core_dim),
+        _jcamp_array("VisuCoreSize", (core_dim,), core_size),
+        _jcamp_array("VisuCoreDimDesc", (core_dim,), core_desc),
+        _jcamp_array("VisuCoreExtent", (core_dim,), core_extent),
+        _jcamp_array("VisuCoreUnits", (core_dim, 65), core_units),
         _jcamp_scalar("VisuCoreWordType", "_32BIT_SGN_INT"),
         _jcamp_scalar("VisuCoreByteOrder", "littleEndian"),
         _jcamp_array("VisuSubjectName", (65,), (_angle("BlochSimulator"),)),
@@ -623,16 +937,10 @@ def _write_pulseprogram(path: Path, context: _ExportContext) -> None:
 
 
 def _write_specpar(path: Path, context: _ExportContext) -> None:
-    frequency_mhz = 0.0
-    if context.field_strength_t is not None:
-        gamma_hz_per_t = 42_577_478.518
-        if context.nucleus.upper().replace("-", "") in {"13C", "C13"}:
-            gamma_hz_per_t = 10_708_400.0
-        frequency_mhz = context.field_strength_t * gamma_hz_per_t / 1e6
     lines = [
-        _jcamp_scalar("BF1", frequency_mhz),
-        _jcamp_scalar("SFO1", frequency_mhz),
-        _jcamp_scalar("NUC1", _angle(context.nucleus)),
+        _jcamp_scalar("BF1", context.reference_frequency_mhz),
+        _jcamp_scalar("SFO1", context.working_frequency_mhz),
+        _jcamp_scalar("NUC1", _angle(context.bruker_nucleus)),
     ]
     _write_jcamp(
         path, "Parameter List, BlochSimulator spectrometer placeholder", lines, context
@@ -674,6 +982,9 @@ def _write_placeholder_files(output_dir: Path, context: _ExportContext) -> None:
 
 
 def _write_reconstructed_pdata(path: Path, context: _ExportContext) -> None:
+    if context.spectroscopy is not None:
+        _write_reconstructed_csi_pdata(path, context)
+        return
     image_stack = _reconstruct_image_stack(context)
     if image_stack is None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -730,6 +1041,106 @@ def _write_reconstructed_pdata(path: Path, context: _ExportContext) -> None:
     _write_jcamp(
         path / "visu_pars",
         "Parameter List, BlochSimulator pdata visu_pars",
+        visu_lines,
+        context,
+    )
+
+
+def _write_reconstructed_csi_pdata(path: Path, context: _ExportContext) -> None:
+    spectroscopy = context.spectroscopy
+    spectra = np.asarray(spectroscopy.reconstruct_spectra(context.signal))
+    magnitude = np.sqrt(np.sum(np.abs(spectra) ** 2, axis=0))
+    if spectroscopy.num_repetitions == 1:
+        magnitude = magnitude[None, ...]
+
+    path.mkdir(parents=True, exist_ok=True)
+    peak = float(np.max(magnitude)) if magnitude.size else 0.0
+    slope = peak / float(np.iinfo(np.int16).max) if peak > 0 else 1.0
+    int_spectra = np.rint(magnitude / slope).clip(0, np.iinfo(np.int16).max)
+    np.ascontiguousarray(int_spectra.astype("<i2", copy=False)).tofile(path / "2dseq")
+
+    repetitions = spectroscopy.num_repetitions
+    n_x, n_y = context.matrix
+    size = (spectroscopy.spectral_points, n_x, n_y)
+    fov_mm = tuple(value * 1000.0 for value in context.fov_m)
+    # ParaVision's spectroscopic reco header repeats the x FOV for the
+    # spectroscopic axis before the two spatial FOV entries.
+    reco_fov_cm = (
+        fov_mm[0] / 10.0,
+        fov_mm[0] / 10.0,
+        fov_mm[1] / 10.0,
+    )
+    reco_lines = [
+        _jcamp_scalar("RecoDim", 3),
+        _jcamp_scalar("RecoObjectsPerRepetition", 1),
+        _jcamp_scalar("RecoNumRepetitions", repetitions),
+        _jcamp_array("RECO_size", (3,), size),
+        _jcamp_array("RECO_inp_size", (3,), size),
+        _jcamp_array("RECO_ft_size", (3,), size),
+        _jcamp_array("RECO_fov", (3,), reco_fov_cm),
+        _jcamp_scalar("RECO_wordtype", "_16BIT_SGN_INT"),
+        _jcamp_scalar("RECO_byte_order", "littleEndian"),
+        _jcamp_scalar("RECO_image_type", "MAGNITUDE_IMAGE"),
+        _jcamp_array("RECO_map_slope", (repetitions,), (slope,) * repetitions),
+    ]
+    _write_jcamp(
+        path / "reco", "Parameter List, BlochSimulator CSI reco", reco_lines, context
+    )
+    _write_jcamp(
+        path / "procs",
+        "Parameter List, BlochSimulator CSI procs",
+        [
+            _jcamp_scalar("SF", context.reference_frequency_mhz),
+            _jcamp_scalar(
+                "OFFSET",
+                context.spectral_reference_ppm + context.spectral_bandwidth_ppm / 2.0,
+            ),
+            _jcamp_scalar("SW_p", spectroscopy.spectral_bandwidth_hz),
+            _jcamp_scalar("SI", spectroscopy.spectral_points),
+        ],
+        context,
+    )
+    _write_jcamp(
+        path / "methreco", "Parameter List, BlochSimulator methreco", [], context
+    )
+    _write_jcamp(path / "id", "Parameter List, BlochSimulator id", [], context)
+
+    visu_lines = [
+        _jcamp_scalar("VisuVersion", 3),
+        _jcamp_scalar("VisuCreator", _angle("BlochSimulator")),
+        _jcamp_scalar("VisuCreatorVersion", _angle("7.0.0")),
+        _jcamp_scalar("VisuCoreFrameCount", repetitions),
+        _jcamp_scalar("VisuCoreDim", 3),
+        _jcamp_array("VisuCoreSize", (3,), size),
+        _jcamp_array(
+            "VisuCoreDimDesc",
+            (3,),
+            (_bare("spectroscopic"), _bare("spatial"), _bare("spatial")),
+        ),
+        _jcamp_array(
+            "VisuCoreExtent", (3,), (context.spectral_bandwidth_ppm,) + fov_mm
+        ),
+        _jcamp_array(
+            "VisuCoreUnits",
+            (3, 65),
+            (_angle("ppm"), _angle("mm"), _angle("mm")),
+        ),
+        _jcamp_array("VisuCoreDataSlope", (repetitions,), (slope,) * repetitions),
+        _jcamp_array("VisuCoreDataOffs", (repetitions,), (0.0,) * repetitions),
+        _jcamp_array("VisuCoreFrameType", (1,), (_bare("MAGNITUDE_IMAGE"),)),
+        _jcamp_scalar("VisuCoreWordType", "_16BIT_SGN_INT"),
+        _jcamp_scalar("VisuCoreByteOrder", "littleEndian"),
+        _jcamp_array("VisuCorePosition", (repetitions, 3), (0.0,) * repetitions * 3),
+        _jcamp_scalar("VisuFGOrderDescDim", 1),
+        _jcamp_array(
+            "VisuFGOrderDesc",
+            (1,),
+            (_bare(f"({repetitions}, <FG_MOVIE>, <>, 0, 3)"),),
+        ),
+    ]
+    _write_jcamp(
+        path / "visu_pars",
+        "Parameter List, BlochSimulator CSI pdata visu_pars",
         visu_lines,
         context,
     )

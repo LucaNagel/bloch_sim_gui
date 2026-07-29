@@ -46,6 +46,7 @@ __pycache__/
 !docs/TUTORIAL_MODE.md
 !docs/sequence_simulation_plan.md
 !docs/sequence_simulation_architecture.md
+!docs/dynamic_simulation_performance.md
 !docs/sequence_simulation_roadmap.md
 
 # Generated C files

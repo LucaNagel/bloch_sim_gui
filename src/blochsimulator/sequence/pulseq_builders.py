@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
+
+from .flip_angles import VFA_REFERENCE_DOI, variable_flip_angle_schedule
+from .rf_pulses import design_rf_envelope, scale_rf_envelope_to_flip
+from .scanner import ScannerParameters
 
 
 def _pypulseq():
@@ -34,6 +38,105 @@ def _positive_values(values: Sequence[float], name: str) -> tuple[float, ...]:
 def _ceil_to_raster(value: float, raster: float) -> float:
     """Round a non-negative duration up without changing exact multiples."""
     return float(np.ceil((float(value) - 1e-12) / raster) * raster)
+
+
+def _make_scanner_system(
+    pp,
+    scanner_parameters: ScannerParameters | Mapping[str, float] | None,
+    *,
+    legacy_kwargs: Mapping[str, float | str],
+):
+    """Create Pulseq limits while preserving legacy standalone defaults."""
+    if scanner_parameters is None:
+        return pp.Opts(**dict(legacy_kwargs))
+    profile = ScannerParameters.from_mapping(scanner_parameters)
+    return pp.Opts(**profile.to_pypulseq_kwargs())
+
+
+def _make_slice_selective_rf_events(
+    pp,
+    system,
+    *,
+    flip_angle_schedule_deg: Sequence[float],
+    slice_thickness_m: float,
+    rf_pulse_type: str,
+    rf_duration_s: float,
+    rf_time_bandwidth_product: float,
+    rf_apodization: float,
+    rf_slr_sharpness: float,
+    rf_custom_waveform_hz: Sequence[complex] | None,
+    rf_custom_raster_s: float | None,
+    rf_custom_flip_angle_deg: float | None,
+):
+    """Return slice-selective RF/gradient pairs built from one shared shape."""
+    envelope, actual_duration_s, effective_tbw, pulse_type = design_rf_envelope(
+        pulse_type=rf_pulse_type,
+        duration_s=rf_duration_s,
+        raster_s=system.rf_raster_time,
+        time_bandwidth_product=rf_time_bandwidth_product,
+        apodization=rf_apodization,
+        slr_sharpness=rf_slr_sharpness,
+        custom_waveform=rf_custom_waveform_hz,
+        custom_raster_s=rf_custom_raster_s,
+    )
+    designer_pulse = pulse_type == "designer"
+    rf_events = []
+    for angle_deg in flip_angle_schedule_deg:
+        signal = (
+            scale_rf_envelope_to_flip(
+                envelope,
+                flip_angle_deg=angle_deg,
+                raster_s=system.rf_raster_time,
+                reference_flip_angle_deg=rf_custom_flip_angle_deg,
+            )
+            if designer_pulse
+            else envelope
+        )
+        rf_events.append(
+            pp.make_arbitrary_rf(
+                signal=signal,
+                flip_angle=np.deg2rad(angle_deg),
+                dwell=system.rf_raster_time,
+                bandwidth=effective_tbw / actual_duration_s,
+                time_bw_product=effective_tbw,
+                slice_thickness=slice_thickness_m,
+                return_gz=True,
+                no_signal_scaling=designer_pulse,
+                delay=system.rf_dead_time,
+                system=system,
+                use="excitation",
+            )
+        )
+    return rf_events, actual_duration_s, effective_tbw, pulse_type
+
+
+def _set_rf_definitions(
+    sequence,
+    *,
+    pulse_type: str,
+    requested_duration_s: float,
+    actual_duration_s: float,
+    time_bandwidth_product: float,
+    apodization: float,
+    slr_sharpness: float,
+    custom_name: str | None,
+    custom_flip_angle_deg: float | None,
+    frequency_offset_hz: float,
+) -> None:
+    """Persist the RF design inputs needed to reproduce a sequence."""
+    sequence.set_definition("RFPulseType", pulse_type)
+    sequence.set_definition("RFDuration", actual_duration_s)
+    sequence.set_definition("RequestedRFDuration", requested_duration_s)
+    sequence.set_definition("RFTimeBandwidthProduct", time_bandwidth_product)
+    sequence.set_definition("RFBandwidth", time_bandwidth_product / actual_duration_s)
+    sequence.set_definition("RFFrequencyOffset", frequency_offset_hz)
+    if pulse_type == "sinc":
+        sequence.set_definition("RFApodization", apodization)
+    if pulse_type == "slr":
+        sequence.set_definition("RFSLRSharpness", slr_sharpness)
+    if pulse_type == "designer":
+        sequence.set_definition("RFDesignerPulseName", custom_name or "custom")
+        sequence.set_definition("RFDesignerFlipAngleDeg", custom_flip_angle_deg)
 
 
 def _phase_encoding_indices(
@@ -92,16 +195,24 @@ def make_pulseq_csi(
     spectral_points: int = 128,
     phase_encoding_order: str = "linear",
     flip_angle_deg: float = 15.0,
+    variable_flip_angle: bool = False,
+    vfa_final_flip_angle_deg: float = 90.0,
     rf_duration_s: float = 3e-3,
     encoding_duration_s: float = 2e-3,
     echo_time_s: float = 6e-3,
     repetition_time_s: float = 0.1,
+    repetitions: int = 1,
     spoil_after_readout: bool = True,
     spoiler_cycles_per_slice: float = 4.0,
     spoiler_cycles_per_voxel: float = 0.0,
     spoiler_duration_s: float = 2e-3,
+    scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
 ):
-    """Build a slice-selective Cartesian 2D CSI Pulseq sequence."""
+    """Build a repeated slice-selective Cartesian 2D CSI Pulseq sequence.
+
+    Variable flip angles advance with the chronological phase-encoding order
+    and restart at the beginning of every complete CSI repetition.
+    """
     pp = _pypulseq()
     fov_x, fov_y = _positive_values(fov_m, "FOV")
     if len(tuple(fov_m)) != 2:
@@ -110,6 +221,7 @@ def make_pulseq_csi(
     if len(tuple(matrix)) != 2:
         raise ValueError("matrix must contain two values")
     spectral_points = _positive_integer(spectral_points, "spectral_points")
+    repetitions = _positive_integer(repetitions, "repetitions")
     positive_parameters = {
         "slice_thickness_m": slice_thickness_m,
         "spectral_bandwidth_hz": spectral_bandwidth_hz,
@@ -131,15 +243,26 @@ def make_pulseq_csi(
             raise ValueError(f"{name} must be non-negative and finite")
 
     order = _phase_encoding_indices(n_x, n_y, phase_encoding_order, (fov_x, fov_y))
-    system = pp.Opts(
-        max_grad=32,
-        grad_unit="mT/m",
-        max_slew=130,
-        slew_unit="T/m/s",
-        grad_raster_time=10e-6,
-        rf_ringdown_time=30e-6,
-        rf_dead_time=100e-6,
-        adc_dead_time=20e-6,
+    if variable_flip_angle:
+        flip_angle_schedule_deg = variable_flip_angle_schedule(
+            len(order),
+            final_flip_angle_deg=vfa_final_flip_angle_deg,
+        )
+    else:
+        flip_angle_schedule_deg = np.asarray([flip_angle_deg], dtype=float)
+    system = _make_scanner_system(
+        pp,
+        scanner_parameters,
+        legacy_kwargs={
+            "max_grad": 32,
+            "grad_unit": "mT/m",
+            "max_slew": 130,
+            "slew_unit": "T/m/s",
+            "grad_raster_time": 10e-6,
+            "rf_ringdown_time": 30e-6,
+            "rf_dead_time": 100e-6,
+            "adc_dead_time": 20e-6,
+        },
     )
     sequence = pp.Sequence(system)
     requested_dwell = 1.0 / float(spectral_bandwidth_hz)
@@ -148,17 +271,21 @@ def make_pulseq_csi(
         raise ValueError("spectral bandwidth exceeds the ADC raster capability")
     actual_bandwidth = 1.0 / dwell
 
-    rf, gz, _ = pp.make_sinc_pulse(
-        flip_angle=np.deg2rad(flip_angle_deg),
-        duration=rf_duration_s,
-        slice_thickness=slice_thickness_m,
-        apodization=0.5,
-        time_bw_product=4.0,
-        delay=system.rf_dead_time,
-        system=system,
-        return_gz=True,
-        use="excitation",
-    )
+    rf_events = [
+        pp.make_sinc_pulse(
+            flip_angle=np.deg2rad(angle_deg),
+            duration=rf_duration_s,
+            slice_thickness=slice_thickness_m,
+            apodization=0.5,
+            time_bw_product=4.0,
+            delay=system.rf_dead_time,
+            system=system,
+            return_gz=True,
+            use="excitation",
+        )[:2]
+        for angle_deg in flip_angle_schedule_deg
+    ]
+    rf, gz = rf_events[0]
     adc = pp.make_adc(
         num_samples=spectral_points,
         dwell=dwell,
@@ -230,37 +357,39 @@ def make_pulseq_csi(
     x_areas = (np.arange(n_x) - n_x // 2) / fov_x
     y_areas = (np.arange(n_y) - n_y // 2) / fov_y
     spoiler_end_times = []
-    for acquisition_index, (x_index, y_index) in enumerate(order):
-        gx_phase = pp.make_trapezoid(
-            "x",
-            area=float(x_areas[x_index]),
-            duration=encoding_duration_s,
-            system=system,
-        )
-        gy_phase = pp.make_trapezoid(
-            "y",
-            area=float(y_areas[y_index]),
-            duration=encoding_duration_s,
-            system=system,
-        )
-        gz_rephase = pp.make_trapezoid(
-            "z", area=-gz.area / 2, duration=encoding_duration_s, system=system
-        )
-        sequence.add_block(rf, gz)
-        sequence.add_block(gx_phase, gy_phase, gz_rephase)
-        if te_delay_value:
-            sequence.add_block(pp.make_delay(te_delay_value))
-        sequence.add_block(
-            adc,
-            pp.make_label("LIN", "SET", x_index),
-            pp.make_label("PAR", "SET", y_index),
-            pp.make_label("REP", "SET", acquisition_index),
-        )
-        if spoiler_events:
-            sequence.add_block(*spoiler_events)
-            spoiler_end_times.append(float(sequence.duration()[0]))
-        if tr_delay_value:
-            sequence.add_block(pp.make_delay(tr_delay_value))
+    for repetition in range(repetitions):
+        for encoding_index, (x_index, y_index) in enumerate(order):
+            rf, gz = rf_events[encoding_index if variable_flip_angle else 0]
+            gx_phase = pp.make_trapezoid(
+                "x",
+                area=float(x_areas[x_index]),
+                duration=encoding_duration_s,
+                system=system,
+            )
+            gy_phase = pp.make_trapezoid(
+                "y",
+                area=float(y_areas[y_index]),
+                duration=encoding_duration_s,
+                system=system,
+            )
+            gz_rephase = pp.make_trapezoid(
+                "z", area=-gz.area / 2, duration=encoding_duration_s, system=system
+            )
+            sequence.add_block(rf, gz)
+            sequence.add_block(gx_phase, gy_phase, gz_rephase)
+            if te_delay_value:
+                sequence.add_block(pp.make_delay(te_delay_value))
+            sequence.add_block(
+                adc,
+                pp.make_label("LIN", "SET", x_index),
+                pp.make_label("PAR", "SET", y_index),
+                pp.make_label("REP", "SET", repetition),
+            )
+            if spoiler_events:
+                sequence.add_block(*spoiler_events)
+                spoiler_end_times.append(float(sequence.duration()[0]))
+            if tr_delay_value:
+                sequence.add_block(pp.make_delay(tr_delay_value))
 
     _raise_for_timing_errors(sequence, "CSI")
     sequence.set_definition("Name", "csi_2d")
@@ -270,9 +399,24 @@ def make_pulseq_csi(
     sequence.set_definition("SpectralPoints", spectral_points)
     sequence.set_definition("SpectralResolution", actual_bandwidth / spectral_points)
     sequence.set_definition("PhaseEncodingOrder", phase_encoding_order)
-    sequence.set_definition("FlipAngleDeg", float(flip_angle_deg))
+    sequence.set_definition(
+        "FlipAngleDeg",
+        float(vfa_final_flip_angle_deg if variable_flip_angle else flip_angle_deg),
+    )
+    sequence.set_definition("VariableFlipAngle", bool(variable_flip_angle))
+    if variable_flip_angle:
+        sequence.set_definition("VariableFlipAngleDimension", "phase_encode")
+        sequence.set_definition(
+            "VariableFlipAngleFinalDeg", float(vfa_final_flip_angle_deg)
+        )
+        sequence.set_definition(
+            "FlipAngleScheduleDeg",
+            [float(value) for value in flip_angle_schedule_deg],
+        )
+        sequence.set_definition("VariableFlipAngleReferenceDOI", VFA_REFERENCE_DOI)
     sequence.set_definition("TR", actual_tr)
     sequence.set_definition("TE", actual_te)
+    sequence.set_definition("Repetitions", repetitions)
     sequence.set_definition("SpoilAfterReadout", bool(spoil_after_readout))
     sequence.set_definition("SpoilerCyclesPerSlice", spoiler_cycles_per_slice)
     sequence.set_definition("SpoilerCyclesPerVoxel", spoiler_cycles_per_voxel)
@@ -298,6 +442,7 @@ def make_pulseq_bssfp(
     dummy_repetitions: int = 1,
     repetitions: int = 1,
     use_alpha_half: bool = True,
+    scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
 ):
     """Build a fully balanced, non-selective Cartesian 3D bSSFP sequence."""
     pp = _pypulseq()
@@ -322,14 +467,18 @@ def make_pulseq_bssfp(
         if not np.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be positive and finite")
 
-    system = pp.Opts(
-        max_grad=28,
-        grad_unit="mT/m",
-        max_slew=150,
-        slew_unit="T/m/s",
-        rf_ringdown_time=20e-6,
-        rf_dead_time=100e-6,
-        adc_dead_time=20e-6,
+    system = _make_scanner_system(
+        pp,
+        scanner_parameters,
+        legacy_kwargs={
+            "max_grad": 28,
+            "grad_unit": "mT/m",
+            "max_slew": 150,
+            "slew_unit": "T/m/s",
+            "rf_ringdown_time": 20e-6,
+            "rf_dead_time": 100e-6,
+            "adc_dead_time": 20e-6,
+        },
     )
     sequence = pp.Sequence(system)
     requested_dwell = 1.0 / float(sampling_bandwidth_hz)
@@ -503,7 +652,20 @@ def make_pulseq_epi(
     matrix: Sequence[int] = (16, 16),
     sampling_bandwidth_hz: float = 50_000.0,
     flip_angle_deg: float = 90.0,
+    variable_flip_angle: bool = False,
+    vfa_final_flip_angle_deg: float = 90.0,
+    rf_pulse_type: str = "sinc",
+    rf_duration_s: float = 3e-3,
+    rf_time_bandwidth_product: float = 4.0,
+    rf_apodization: float = 0.5,
+    rf_slr_sharpness: float = 1.0,
+    rf_custom_waveform_hz: Sequence[complex] | None = None,
+    rf_custom_raster_s: float | None = None,
+    rf_custom_flip_angle_deg: float | None = None,
+    rf_custom_name: str | None = None,
+    rf_frequency_offset_hz: float = 0.0,
     slice_thickness_m: float = 3e-3,
+    slice_gap_m: float = 0.0,
     n_slices: int = 1,
     repetitions: int = 1,
     repetition_time_s: float | None = 1.0,
@@ -511,8 +673,13 @@ def make_pulseq_epi(
     spoiler_cycles_per_slice: float = 8.0,
     spoiler_cycles_per_voxel: float = 0.0,
     spoiler_duration_s: float = 4e-3,
+    scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
 ):
-    """Build a Cartesian single-shot EPI Pulseq sequence for export."""
+    """Build a Cartesian single-shot EPI Pulseq sequence for export.
+
+    Variable flip angles advance once per repetition and are shared by every
+    slice acquired within that repetition.
+    """
     pp = _pypulseq()
     fov_x, fov_y = _positive_values(fov_m, "FOV")
     if len(tuple(fov_m)) != 2:
@@ -522,6 +689,13 @@ def make_pulseq_epi(
         raise ValueError("matrix must contain two values")
     n_slices = _positive_integer(n_slices, "n_slices")
     repetitions = _positive_integer(repetitions, "repetitions")
+    if variable_flip_angle:
+        flip_angle_schedule_deg = variable_flip_angle_schedule(
+            repetitions,
+            final_flip_angle_deg=vfa_final_flip_angle_deg,
+        )
+    else:
+        flip_angle_schedule_deg = np.asarray([flip_angle_deg], dtype=float)
     for name, value in {
         "sampling_bandwidth_hz": sampling_bandwidth_hz,
         "flip_angle_deg": flip_angle_deg,
@@ -530,6 +704,10 @@ def make_pulseq_epi(
     }.items():
         if not np.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be positive and finite")
+    if not np.isfinite(slice_gap_m) or slice_gap_m < 0:
+        raise ValueError("slice_gap_m must be non-negative and finite")
+    if not np.isfinite(rf_frequency_offset_hz):
+        raise ValueError("rf_frequency_offset_hz must be finite")
     for name, value in {
         "spoiler_cycles_per_slice": spoiler_cycles_per_slice,
         "spoiler_cycles_per_voxel": spoiler_cycles_per_voxel,
@@ -537,14 +715,18 @@ def make_pulseq_epi(
         if not np.isfinite(value) or value < 0:
             raise ValueError(f"{name} must be non-negative and finite")
 
-    system = pp.Opts(
-        max_grad=32,
-        grad_unit="mT/m",
-        max_slew=130,
-        slew_unit="T/m/s",
-        rf_ringdown_time=30e-6,
-        rf_dead_time=100e-6,
-        adc_dead_time=20e-6,
+    system = _make_scanner_system(
+        pp,
+        scanner_parameters,
+        legacy_kwargs={
+            "max_grad": 32,
+            "grad_unit": "mT/m",
+            "max_slew": 130,
+            "slew_unit": "T/m/s",
+            "rf_ringdown_time": 30e-6,
+            "rf_dead_time": 100e-6,
+            "adc_dead_time": 20e-6,
+        },
     )
     sequence = pp.Sequence(system)
     dwell = (
@@ -553,17 +735,23 @@ def make_pulseq_epi(
     )
     if dwell <= 0:
         raise ValueError("sampling bandwidth exceeds the ADC raster capability")
-    rf, gz, _ = pp.make_sinc_pulse(
-        flip_angle=np.deg2rad(flip_angle_deg),
-        duration=3e-3,
-        slice_thickness=slice_thickness_m,
-        apodization=0.5,
-        time_bw_product=4.0,
-        return_gz=True,
-        delay=system.rf_dead_time,
-        system=system,
-        use="excitation",
+    rf_events, actual_rf_duration_s, effective_rf_tbw, rf_pulse_type = (
+        _make_slice_selective_rf_events(
+            pp,
+            system,
+            flip_angle_schedule_deg=flip_angle_schedule_deg,
+            slice_thickness_m=slice_thickness_m,
+            rf_pulse_type=rf_pulse_type,
+            rf_duration_s=rf_duration_s,
+            rf_time_bandwidth_product=rf_time_bandwidth_product,
+            rf_apodization=rf_apodization,
+            rf_slr_sharpness=rf_slr_sharpness,
+            rf_custom_waveform_hz=rf_custom_waveform_hz,
+            rf_custom_raster_s=rf_custom_raster_s,
+            rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        )
     )
+    rf, gz = rf_events[0]
     delta_kx, delta_ky = 1.0 / fov_x, 1.0 / fov_y
     adc_duration = n_x * dwell
     flat_time = _ceil_to_raster(adc_duration, system.grad_raster_time)
@@ -624,20 +812,22 @@ def make_pulseq_epi(
                 )
             )
 
-    slice_positions = (
-        np.arange(n_slices, dtype=float) - (n_slices - 1) / 2
-    ) * slice_thickness_m
+    slice_positions = (np.arange(n_slices, dtype=float) - (n_slices - 1) / 2) * (
+        slice_thickness_m + slice_gap_m
+    )
     rf_center, _ = pp.calc_rf_center(rf)
     package_duration = None
     actual_repetition_time = None
     spoiler_end_times = []
     for repetition in range(repetitions):
+        rf, gz = rf_events[repetition if variable_flip_angle else 0]
         repetition_start = (
             0.0 if not sequence.block_events else float(sequence.duration()[0])
         )
         for slice_index, position in enumerate(slice_positions):
-            rf.freq_offset = gz.amplitude * position
-            rf.phase_offset = -2 * np.pi * rf.freq_offset * rf_center
+            slice_frequency_offset_hz = gz.amplitude * position
+            rf.freq_offset = rf_frequency_offset_hz + slice_frequency_offset_hz
+            rf.phase_offset = -2 * np.pi * slice_frequency_offset_hz * rf_center
             sequence.add_block(
                 rf,
                 gz,
@@ -669,14 +859,379 @@ def make_pulseq_epi(
 
     _raise_for_timing_errors(sequence, "EPI")
     sequence.set_definition("Name", "epi_2d")
-    sequence.set_definition("FOV", [fov_x, fov_y, n_slices * slice_thickness_m])
+    slice_extent = n_slices * slice_thickness_m + (n_slices - 1) * slice_gap_m
+    sequence.set_definition("FOV", [fov_x, fov_y, slice_extent])
     sequence.set_definition("MatrixSize", [n_x, n_y])
     sequence.set_definition("SamplingBandwidth", 1.0 / dwell)
-    sequence.set_definition("FlipAngleDeg", float(flip_angle_deg))
+    sequence.set_definition(
+        "FlipAngleDeg",
+        float(vfa_final_flip_angle_deg if variable_flip_angle else flip_angle_deg),
+    )
+    _set_rf_definitions(
+        sequence,
+        pulse_type=rf_pulse_type,
+        requested_duration_s=rf_duration_s,
+        actual_duration_s=actual_rf_duration_s,
+        time_bandwidth_product=effective_rf_tbw,
+        apodization=rf_apodization,
+        slr_sharpness=rf_slr_sharpness,
+        custom_name=rf_custom_name,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        frequency_offset_hz=rf_frequency_offset_hz,
+    )
+    sequence.set_definition("VariableFlipAngle", bool(variable_flip_angle))
+    if variable_flip_angle:
+        sequence.set_definition("VariableFlipAngleDimension", "repetition")
+        sequence.set_definition(
+            "VariableFlipAngleFinalDeg", float(vfa_final_flip_angle_deg)
+        )
+        sequence.set_definition(
+            "FlipAngleScheduleDeg",
+            [float(value) for value in flip_angle_schedule_deg],
+        )
+        sequence.set_definition("VariableFlipAngleReferenceDOI", VFA_REFERENCE_DOI)
     sequence.set_definition("SliceThickness", slice_thickness_m)
+    sequence.set_definition("SliceGap", slice_gap_m)
+    sequence.set_definition("SliceSpacing", slice_thickness_m + slice_gap_m)
+    sequence.set_definition(
+        "SlicePositions", [float(value) for value in slice_positions]
+    )
     sequence.set_definition("Repetitions", repetitions)
     sequence.set_definition("RepetitionTime", actual_repetition_time)
     sequence.set_definition("MinimumRepetitionTime", package_duration)
+    sequence.set_definition("SpoilAfterSlice", bool(spoil_after_slice))
+    sequence.set_definition("SpoilerCyclesPerSlice", spoiler_cycles_per_slice)
+    sequence.set_definition("SpoilerCyclesPerVoxel", spoiler_cycles_per_voxel)
+    sequence.set_definition("SpoilerDuration", spoiler_duration_s)
+    sequence.set_definition(
+        "SpoilerAxes", "".join(event.channel for event in spoilers) or "none"
+    )
+    sequence.set_definition("SpoilerEndTimes", spoiler_end_times)
+    return sequence
+
+
+def _spiral_waveforms(
+    *,
+    matrix: tuple[int, int],
+    fov_m: tuple[float, float],
+    requested_dwell_s: float,
+    turns: float,
+    system,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Return hardware-limited, raster-aligned spiral gradient waveforms."""
+    n_x, n_y = matrix
+    sample_count = n_x * n_y
+    adc_raster = float(system.adc_raster_time)
+    grad_raster = float(system.grad_raster_time)
+    raster_ratio = int(round(grad_raster / adc_raster))
+    if raster_ratio <= 0 or not np.isclose(
+        raster_ratio * adc_raster, grad_raster, rtol=0.0, atol=1e-15
+    ):
+        raise ValueError("gradient and ADC rasters are not commensurate")
+
+    requested_steps = max(1, int(np.ceil(requested_dwell_s / adc_raster - 1e-12)))
+
+    def aligned_dwell_steps(minimum_steps: int) -> int:
+        steps = max(1, int(minimum_steps))
+        while (sample_count * steps) % raster_ratio:
+            steps += 1
+        return steps
+
+    dwell_steps = aligned_dwell_steps(requested_steps)
+    max_grad = float(system.max_grad)
+    max_slew = float(system.max_slew)
+    for _ in range(20):
+        dwell = dwell_steps * adc_raster
+        duration = sample_count * dwell
+        gradient_samples = int(round(duration / grad_raster))
+        edges = np.linspace(0.0, 1.0, gradient_samples + 1)
+        # Smoothstep makes dk/dt zero at both ends, allowing the arbitrary
+        # gradient to connect to zero without an instantaneous slew jump.
+        progress = edges * edges * (3.0 - 2.0 * edges)
+        angle = 2.0 * np.pi * float(turns) * progress
+        kx_edges = n_x / (2.0 * fov_m[0]) * progress * np.cos(angle)
+        ky_edges = n_y / (2.0 * fov_m[1]) * progress * np.sin(angle)
+        gx = np.diff(kx_edges) / grad_raster
+        gy = np.diff(ky_edges) / grad_raster
+        amplitude_ratio = max(
+            float(np.max(np.abs(gx))) / max_grad,
+            float(np.max(np.abs(gy))) / max_grad,
+        )
+        slew_x = np.concatenate(([-2.0 * gx[0]], np.diff(gx), [-2.0 * gx[-1]]))
+        slew_y = np.concatenate(([-2.0 * gy[0]], np.diff(gy), [-2.0 * gy[-1]]))
+        slew_ratio = max(
+            float(np.max(np.abs(slew_x))) / (grad_raster * max_slew),
+            float(np.max(np.abs(slew_y))) / (grad_raster * max_slew),
+        )
+        limit_ratio = max(amplitude_ratio, np.sqrt(slew_ratio))
+        if limit_ratio <= 1.0 + 1e-10:
+            return gx, gy, dwell
+        dwell_steps = aligned_dwell_steps(
+            int(np.ceil(dwell_steps * limit_ratio * 1.01))
+        )
+    raise ValueError("unable to design a spiral readout within the system limits")
+
+
+def make_pulseq_spiral(
+    *,
+    fov_m: Sequence[float] = (0.22, 0.22),
+    matrix: Sequence[int] = (16, 16),
+    sampling_bandwidth_hz: float = 50_000.0,
+    spiral_turns: float | None = None,
+    flip_angle_deg: float = 90.0,
+    variable_flip_angle: bool = False,
+    vfa_final_flip_angle_deg: float = 90.0,
+    rf_pulse_type: str = "sinc",
+    rf_duration_s: float = 3e-3,
+    rf_time_bandwidth_product: float = 4.0,
+    rf_apodization: float = 0.5,
+    rf_slr_sharpness: float = 1.0,
+    rf_custom_waveform_hz: Sequence[complex] | None = None,
+    rf_custom_raster_s: float | None = None,
+    rf_custom_flip_angle_deg: float | None = None,
+    rf_custom_name: str | None = None,
+    rf_frequency_offset_hz: float = 0.0,
+    slice_thickness_m: float = 3e-3,
+    slice_gap_m: float = 0.0,
+    n_slices: int = 1,
+    repetitions: int = 1,
+    repetition_time_s: float | None = 1.0,
+    spoil_after_slice: bool = True,
+    spoiler_cycles_per_slice: float = 8.0,
+    spoiler_cycles_per_voxel: float = 0.0,
+    spoiler_duration_s: float = 4e-3,
+    scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
+):
+    """Build a single-shot, centre-out 2D spiral Pulseq acquisition.
+
+    One continuous spiral interleaf with ``matrix[0] * matrix[1]`` ADC samples
+    is acquired for every slice and repetition. The requested receiver
+    bandwidth is reduced automatically when necessary to satisfy the gradient
+    amplitude and slew-rate limits.
+    """
+    pp = _pypulseq()
+    fov_x, fov_y = _positive_values(fov_m, "FOV")
+    if len(tuple(fov_m)) != 2:
+        raise ValueError("fov_m must contain two values")
+    n_x, n_y = (_positive_integer(value, "matrix size") for value in matrix)
+    if len(tuple(matrix)) != 2:
+        raise ValueError("matrix must contain two values")
+    n_slices = _positive_integer(n_slices, "n_slices")
+    repetitions = _positive_integer(repetitions, "repetitions")
+    for name, value in {
+        "sampling_bandwidth_hz": sampling_bandwidth_hz,
+        "flip_angle_deg": flip_angle_deg,
+        "slice_thickness_m": slice_thickness_m,
+        "spoiler_duration_s": spoiler_duration_s,
+    }.items():
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be positive and finite")
+    for name, value in {
+        "slice_gap_m": slice_gap_m,
+        "spoiler_cycles_per_slice": spoiler_cycles_per_slice,
+        "spoiler_cycles_per_voxel": spoiler_cycles_per_voxel,
+    }.items():
+        if not np.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be non-negative and finite")
+    if spiral_turns is None:
+        spiral_turns = max(1.0, min(n_x, n_y) / 2.0)
+    spiral_turns = float(spiral_turns)
+    if not np.isfinite(spiral_turns) or spiral_turns <= 0:
+        raise ValueError("spiral_turns must be positive and finite")
+    if repetition_time_s is not None and (
+        not np.isfinite(repetition_time_s) or repetition_time_s <= 0
+    ):
+        raise ValueError("repetition_time_s must be positive and finite")
+    if not np.isfinite(rf_frequency_offset_hz):
+        raise ValueError("rf_frequency_offset_hz must be finite")
+
+    if variable_flip_angle:
+        flip_angle_schedule_deg = variable_flip_angle_schedule(
+            repetitions,
+            final_flip_angle_deg=vfa_final_flip_angle_deg,
+        )
+    else:
+        flip_angle_schedule_deg = np.asarray([flip_angle_deg], dtype=float)
+
+    system = _make_scanner_system(
+        pp,
+        scanner_parameters,
+        legacy_kwargs={
+            "max_grad": 32,
+            "grad_unit": "mT/m",
+            "max_slew": 130,
+            "slew_unit": "T/m/s",
+            "grad_raster_time": 10e-6,
+            "rf_ringdown_time": 30e-6,
+            "rf_dead_time": 100e-6,
+            "adc_dead_time": 20e-6,
+        },
+    )
+    sequence = pp.Sequence(system)
+    gx_waveform, gy_waveform, dwell = _spiral_waveforms(
+        matrix=(n_x, n_y),
+        fov_m=(fov_x, fov_y),
+        requested_dwell_s=1.0 / float(sampling_bandwidth_hz),
+        turns=spiral_turns,
+        system=system,
+    )
+    gradient_delay = system.adc_dead_time
+    gx = pp.make_arbitrary_grad(
+        "x", gx_waveform, first=0.0, last=0.0, delay=gradient_delay, system=system
+    )
+    gy = pp.make_arbitrary_grad(
+        "y", gy_waveform, first=0.0, last=0.0, delay=gradient_delay, system=system
+    )
+    adc = pp.make_adc(
+        num_samples=n_x * n_y,
+        dwell=dwell,
+        delay=gradient_delay,
+        system=system,
+    )
+
+    rf_events, actual_rf_duration_s, effective_rf_tbw, rf_pulse_type = (
+        _make_slice_selective_rf_events(
+            pp,
+            system,
+            flip_angle_schedule_deg=flip_angle_schedule_deg,
+            slice_thickness_m=slice_thickness_m,
+            rf_pulse_type=rf_pulse_type,
+            rf_duration_s=rf_duration_s,
+            rf_time_bandwidth_product=rf_time_bandwidth_product,
+            rf_apodization=rf_apodization,
+            rf_slr_sharpness=rf_slr_sharpness,
+            rf_custom_waveform_hz=rf_custom_waveform_hz,
+            rf_custom_raster_s=rf_custom_raster_s,
+            rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        )
+    )
+    rf, gz = rf_events[0]
+    rephase_time = 0.8e-3
+    gz_rephase = pp.make_trapezoid(
+        "z", area=-gz.area / 2.0, duration=rephase_time, system=system
+    )
+    gx_rewind = pp.make_trapezoid("x", area=-gx.area, system=system)
+    gy_rewind = pp.make_trapezoid("y", area=-gy.area, system=system)
+    rewind_duration = max(pp.calc_duration(gx_rewind), pp.calc_duration(gy_rewind))
+    gx_rewind = pp.make_trapezoid(
+        "x", area=-gx.area, duration=rewind_duration, system=system
+    )
+    gy_rewind = pp.make_trapezoid(
+        "y", area=-gy.area, duration=rewind_duration, system=system
+    )
+
+    spoilers = []
+    if spoil_after_slice:
+        if spoiler_cycles_per_voxel > 0:
+            for axis, voxel_size in zip("xy", (fov_x / n_x, fov_y / n_y)):
+                spoilers.append(
+                    pp.make_trapezoid(
+                        axis,
+                        area=spoiler_cycles_per_voxel / voxel_size,
+                        duration=spoiler_duration_s,
+                        system=system,
+                    )
+                )
+        if spoiler_cycles_per_slice > 0:
+            spoilers.append(
+                pp.make_trapezoid(
+                    "z",
+                    area=spoiler_cycles_per_slice / slice_thickness_m,
+                    duration=spoiler_duration_s,
+                    system=system,
+                )
+            )
+
+    slice_spacing = slice_thickness_m + slice_gap_m
+    slice_positions = (
+        np.arange(n_slices, dtype=float) - (n_slices - 1) / 2.0
+    ) * slice_spacing
+    rf_center, _ = pp.calc_rf_center(rf)
+    minimum_repetition_time = None
+    actual_repetition_time = None
+    spoiler_end_times = []
+    for repetition in range(repetitions):
+        rf, gz = rf_events[repetition if variable_flip_angle else 0]
+        repetition_start = (
+            0.0 if not sequence.block_events else float(sequence.duration()[0])
+        )
+        for slice_index, position in enumerate(slice_positions):
+            slice_frequency_offset_hz = gz.amplitude * position
+            rf.freq_offset = rf_frequency_offset_hz + slice_frequency_offset_hz
+            rf.phase_offset = -2.0 * np.pi * slice_frequency_offset_hz * rf_center
+            sequence.add_block(
+                rf,
+                gz,
+                pp.make_label("SLC", "SET", slice_index),
+                pp.make_label("REP", "SET", repetition),
+            )
+            sequence.add_block(gz_rephase)
+            sequence.add_block(gx, gy, adc)
+            sequence.add_block(gx_rewind, gy_rewind)
+            if spoilers:
+                sequence.add_block(*spoilers)
+                spoiler_end_times.append(float(sequence.duration()[0]))
+        acquired = float(sequence.duration()[0]) - repetition_start
+        if minimum_repetition_time is None:
+            minimum_repetition_time = acquired
+            actual_repetition_time = (
+                acquired if repetition_time_s is None else float(repetition_time_s)
+            )
+            if actual_repetition_time < acquired - 1e-12:
+                raise ValueError(
+                    f"repetition_time_s is too short; minimum is {acquired:.9g} s"
+                )
+        delay = actual_repetition_time - acquired
+        if delay > 1e-12:
+            sequence.add_block(pp.make_delay(delay))
+
+    _raise_for_timing_errors(sequence, "spiral")
+    slice_extent = n_slices * slice_thickness_m + (n_slices - 1) * slice_gap_m
+    sequence.set_definition("Name", "spiral_2d")
+    sequence.set_definition("Trajectory", "spiral")
+    sequence.set_definition("FOV", [fov_x, fov_y, slice_extent])
+    sequence.set_definition("MatrixSize", [n_x, n_y])
+    sequence.set_definition("SamplingBandwidth", 1.0 / dwell)
+    sequence.set_definition("RequestedSamplingBandwidth", sampling_bandwidth_hz)
+    sequence.set_definition("ReadoutDuration", n_x * n_y * dwell)
+    sequence.set_definition("SpiralTurns", spiral_turns)
+    sequence.set_definition("SpiralInterleaves", 1)
+    sequence.set_definition(
+        "FlipAngleDeg",
+        float(vfa_final_flip_angle_deg if variable_flip_angle else flip_angle_deg),
+    )
+    _set_rf_definitions(
+        sequence,
+        pulse_type=rf_pulse_type,
+        requested_duration_s=rf_duration_s,
+        actual_duration_s=actual_rf_duration_s,
+        time_bandwidth_product=effective_rf_tbw,
+        apodization=rf_apodization,
+        slr_sharpness=rf_slr_sharpness,
+        custom_name=rf_custom_name,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        frequency_offset_hz=rf_frequency_offset_hz,
+    )
+    sequence.set_definition("VariableFlipAngle", bool(variable_flip_angle))
+    if variable_flip_angle:
+        sequence.set_definition("VariableFlipAngleDimension", "repetition")
+        sequence.set_definition(
+            "VariableFlipAngleFinalDeg", float(vfa_final_flip_angle_deg)
+        )
+        sequence.set_definition(
+            "FlipAngleScheduleDeg",
+            [float(value) for value in flip_angle_schedule_deg],
+        )
+        sequence.set_definition("VariableFlipAngleReferenceDOI", VFA_REFERENCE_DOI)
+    sequence.set_definition("SliceThickness", slice_thickness_m)
+    sequence.set_definition("SliceGap", slice_gap_m)
+    sequence.set_definition("SliceSpacing", slice_spacing)
+    sequence.set_definition(
+        "SlicePositions", [float(value) for value in slice_positions]
+    )
+    sequence.set_definition("Repetitions", repetitions)
+    sequence.set_definition("RepetitionTime", actual_repetition_time)
+    sequence.set_definition("MinimumRepetitionTime", minimum_repetition_time)
     sequence.set_definition("SpoilAfterSlice", bool(spoil_after_slice))
     sequence.set_definition("SpoilerCyclesPerSlice", spoiler_cycles_per_slice)
     sequence.set_definition("SpoilerCyclesPerVoxel", spoiler_cycles_per_voxel)

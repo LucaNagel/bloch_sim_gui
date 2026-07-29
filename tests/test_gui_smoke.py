@@ -1,6 +1,8 @@
-import pytest
+import json
 import sys
 from unittest.mock import MagicMock, patch
+
+import pytest
 from PyQt5.QtCore import QSettings
 from PyQt5.QtWidgets import (
     QAction,
@@ -15,6 +17,7 @@ from PyQt5.QtWidgets import (
     QSlider,
 )
 from blochsimulator.memory import GIB, MemoryPolicy
+from blochsimulator.sequence import ScannerParameters
 from blochsimulator.ui.dialogs import PulseImportDialog, SettingsDialog
 from blochsimulator.ui.main_window import BlochSimulatorGUI
 
@@ -104,9 +107,15 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     assert dialog.thread_mode() == "manual"
     assert dialog.manual_thread_count() == 3
     assert dialog.manual_thread_count_spin.isEnabled()
+    dialog.scanner_max_grad_spin.setValue(40.0)
+    dialog.scanner_max_slew_spin.setValue(180.0)
+    scanner = dialog.scanner_parameters()
+    assert scanner.max_grad_mtm == pytest.approx(40.0)
+    assert scanner.max_slew_tms == pytest.approx(180.0)
     assert [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())] == [
         "General",
         "Simulation",
+        "Scanner",
         "Memory",
         "Interface",
     ]
@@ -145,6 +154,50 @@ def test_simulation_controls_use_non_overlapping_grid_rows():
     assert position(window.freq_center) == (4, 1, 1, 1)
     assert position(window.freq_range) == (5, 1, 1, 1)
     assert position(window.freq_axis_mode) == (6, 1, 1, 1)
+
+
+def test_free_mode_and_slice_explorer_spatial_controls_use_mm():
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+
+    window = BlochSimulatorGUI()
+    window.pos_spin.setValue(3)
+    window.pos_range.setValue(20.0)
+
+    assert window.pos_range.suffix() == " mm"
+    assert window._collect_simulation_parameters(internal_format=True)[
+        "pos_range_mm"
+    ] == pytest.approx(20.0)
+    parameters = window._collect_simulation_parameters()
+    assert parameters["position_range_mm"] == pytest.approx(20.0)
+    assert parameters["position_range_cm"] == pytest.approx(2.0)
+    assert parameters["position_axis"][:, 2] == pytest.approx([-0.01, 0.0, 0.01])
+
+    explorer = window.slice_explorer
+    assert explorer.pos_range.suffix() == " mm"
+    assert explorer.pos_range.value() == pytest.approx(40.0)
+    assert explorer.plot_profile.getAxis("bottom").labelText == "Position (mm)"
+    explorer.num_points.setValue(51)
+    explorer.run_simulation()
+    profile_x, _ = explorer.plot_profile.listDataItems()[0].getData()
+    assert profile_x[[0, -1]] == pytest.approx([-20.0, 20.0])
+
+
+def test_parameter_loader_migrates_legacy_cm_position_range(tmp_path):
+    window = BlochSimulatorGUI()
+    legacy_path = tmp_path / "legacy_cm.json"
+    legacy_path.write_text(
+        json.dumps({"version": "1.1", "simulation": {"pos_range": 2.0}})
+    )
+
+    with patch(
+        "blochsimulator.ui.main_window.QFileDialog.getOpenFileName",
+        return_value=(str(legacy_path), "JSON Files (*.json)"),
+    ):
+        window.load_parameters()
+
+    assert window.pos_range.value() == pytest.approx(20.0)
 
 
 def test_simulation_controls_have_explanatory_tooltips():
@@ -275,6 +328,8 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     dialog.sequence_timestep_us.return_value = 10.0
     dialog.thread_mode.return_value = "manual"
     dialog.manual_thread_count.return_value = 2
+    scanner_parameters = ScannerParameters(max_grad_mtm=40.0, max_slew_tms=180.0)
+    dialog.scanner_parameters.return_value = scanner_parameters
 
     with patch("blochsimulator.ui.main_window.SettingsDialog", return_value=dialog):
         window.show_settings(initial_tab="simulation")
@@ -283,6 +338,8 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     assert float(window.app_settings.value("sequence/timestep_us")) == 10.0
     assert window.app_settings.value("simulation/thread_mode") == "manual"
     assert int(window.app_settings.value("simulation/manual_threads")) == 2
+    assert float(window.app_settings.value("scanner/max_grad_mtm")) == 40.0
+    assert float(window.app_settings.value("scanner/max_slew_tms")) == 180.0
     assert window.simulator.sequence_kernel == "reference"
     assert window.simulator.dynamic_sequence_kernel == "native_parallel"
     assert window.simulator.num_threads == 2
@@ -294,6 +351,9 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     )
     window.sequence_simulation_widget.set_thread_configuration.assert_called_once_with(
         "manual", 2
+    )
+    window.sequence_simulation_widget.set_scanner_parameters.assert_called_once_with(
+        scanner_parameters
     )
 
 

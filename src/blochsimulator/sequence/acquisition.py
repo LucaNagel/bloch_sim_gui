@@ -5,11 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import product
 from types import SimpleNamespace
-from typing import ClassVar, Mapping, Optional, Tuple
+from typing import ClassVar, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .flip_angles import VFA_REFERENCE_DOI, variable_flip_angle_schedule
 from .model import ADCEvent, GradientEvent, RFEvent, SequenceProgram
+from .rf_pulses import design_rf_envelope, scale_rf_envelope_to_flip
 
 
 @dataclass(frozen=True)
@@ -323,6 +325,225 @@ class CartesianAcquisitionFrames:
             moment_origins_cyc_per_m=tuple(
                 tuple(float(value) for value in item)
                 for item in metadata.get("moment_origins_cyc_per_m", ())
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class SpiralAcquisition:
+    """Single-shot 2D spiral frames within one chronological ADC stream.
+
+    The trajectory itself remains in the compiled/result ADC gradient moments.
+    This object records how those samples are split into slices and repetitions
+    and provides a lightweight linear gridding reconstruction.
+    """
+
+    matrix: Tuple[int, int]
+    fov_m: Tuple[float, float]
+    dwell_s: float
+    sample_indices: Tuple[Tuple[int, ...], ...]
+    frame_indices: Tuple[Tuple[int, ...], ...]
+    dimensions: AcquisitionDimensions
+    moment_origins_cyc_per_m: Tuple[Tuple[float, float, float], ...]
+
+    def __post_init__(self) -> None:
+        matrix = tuple(
+            _positive_integer(value, "spiral matrix size") for value in self.matrix
+        )
+        if len(matrix) != 2:
+            raise ValueError("spiral matrix must contain x and y sizes")
+        fov = tuple(float(value) for value in self.fov_m)
+        if len(fov) != 2 or not np.all(np.isfinite(fov)) or min(fov) <= 0:
+            raise ValueError("spiral fov_m must contain two positive finite values")
+        dwell = float(self.dwell_s)
+        if not np.isfinite(dwell) or dwell <= 0:
+            raise ValueError("spiral dwell_s must be positive and finite")
+        samples = tuple(
+            tuple(int(value) for value in item) for item in self.sample_indices
+        )
+        frames = tuple(
+            tuple(int(value) for value in item) for item in self.frame_indices
+        )
+        origins = tuple(
+            tuple(float(value) for value in item)
+            for item in self.moment_origins_cyc_per_m
+        )
+        if not samples or len(samples) != len(frames) or len(samples) != len(origins):
+            raise ValueError(
+                "spiral frame metadata must contain equal non-zero lengths"
+            )
+        if any(len(item) != matrix[0] * matrix[1] for item in samples):
+            raise ValueError(
+                "each spiral frame must contain matrix_x * matrix_y samples"
+            )
+        if any(len(item) != len(AcquisitionDimensions.AXIS_NAMES) for item in frames):
+            raise ValueError("each spiral frame index must contain all outer axes")
+        if any(len(item) != 3 or not np.all(np.isfinite(item)) for item in origins):
+            raise ValueError("each spiral frame requires one finite 3D moment origin")
+        flattened = [value for item in samples for value in item]
+        if sorted(flattened) != list(range(self.dimensions.num_samples)):
+            raise ValueError("spiral frames must cover the complete ADC stream once")
+        object.__setattr__(self, "matrix", matrix)
+        object.__setattr__(self, "fov_m", fov)
+        object.__setattr__(self, "dwell_s", dwell)
+        object.__setattr__(self, "sample_indices", samples)
+        object.__setattr__(self, "frame_indices", frames)
+        object.__setattr__(self, "moment_origins_cyc_per_m", origins)
+
+    @property
+    def num_frames(self) -> int:
+        return len(self.sample_indices)
+
+    @property
+    def samples_per_frame(self) -> int:
+        return self.matrix[0] * self.matrix[1]
+
+    @property
+    def num_samples(self) -> int:
+        return self.dimensions.num_samples
+
+    @property
+    def sampling_bandwidth_hz(self) -> float:
+        return 1.0 / self.dwell_s
+
+    @property
+    def varying_axes(self) -> Tuple[str, ...]:
+        return tuple(
+            axis
+            for index, axis in enumerate(AcquisitionDimensions.AXIS_NAMES)
+            if len({frame[index] for frame in self.frame_indices}) > 1
+        )
+
+    @property
+    def kx_grid_cyc_per_m(self) -> np.ndarray:
+        return (
+            np.arange(self.matrix[0], dtype=float) - self.matrix[0] // 2
+        ) / self.fov_m[0]
+
+    @property
+    def ky_grid_cyc_per_m(self) -> np.ndarray:
+        return (
+            np.arange(self.matrix[1], dtype=float) - self.matrix[1] // 2
+        ) / self.fov_m[1]
+
+    def frame_label(self, frame: int) -> str:
+        values = self.frame_indices[int(frame)]
+        axes = self.varying_axes
+        if not axes:
+            return "single spiral frame"
+        return ", ".join(
+            f"{axis}={values[AcquisitionDimensions.AXIS_NAMES.index(axis)]}"
+            for axis in axes
+        )
+
+    def _frame_values(self, values, frame: int) -> np.ndarray:
+        array = np.asarray(values)
+        if array.shape[-1] != self.num_samples:
+            raise ValueError("values do not match the complete spiral ADC stream")
+        return np.take(array, self.sample_indices[int(frame)], axis=-1)
+
+    def trajectory(self, moments_cyc_per_m, frame: int) -> np.ndarray:
+        moments = np.asarray(moments_cyc_per_m, dtype=float)
+        if moments.shape != (self.num_samples, 3):
+            raise ValueError("spiral gradient moments must have shape (num_samples, 3)")
+        selected = np.take(moments, self.sample_indices[int(frame)], axis=0)
+        relative = selected - np.asarray(
+            self.moment_origins_cyc_per_m[int(frame)], dtype=float
+        )
+        if not np.all(np.isfinite(relative)):
+            raise ValueError("spiral trajectory contains non-finite values")
+        if np.ptp(relative[:, 0]) <= 0 or np.ptp(relative[:, 1]) <= 0:
+            raise ValueError("spiral trajectory must vary on both in-plane axes")
+        return relative
+
+    def grid_kspace(self, result, frame: int) -> np.ndarray:
+        """Linearly grid one non-Cartesian frame onto its nominal matrix."""
+        if result.adc_gradient_moment_cyc_per_m is None:
+            raise ValueError("spiral gridding requires ADC gradient moments")
+        trajectory = self.trajectory(result.adc_gradient_moment_cyc_per_m, frame)
+        values = self._frame_values(result.signal, frame)
+        from scipy.interpolate import griddata
+
+        target_x, target_y = np.meshgrid(
+            self.kx_grid_cyc_per_m,
+            self.ky_grid_cyc_per_m,
+            indexing="xy",
+        )
+        points = trajectory[:, :2]
+        leading_shape = values.shape[:-1]
+        flattened = values.reshape((-1, self.samples_per_frame))
+        grids = []
+        for channel in flattened:
+            try:
+                grid = griddata(
+                    points,
+                    channel,
+                    (target_x, target_y),
+                    method="linear",
+                    fill_value=0.0,
+                )
+            except Exception:
+                grid = griddata(
+                    points,
+                    channel,
+                    (target_x, target_y),
+                    method="nearest",
+                    fill_value=0.0,
+                )
+            grids.append(np.asarray(grid))
+        return np.stack(grids).reshape(leading_shape + (self.matrix[1], self.matrix[0]))
+
+    def reconstruct(
+        self,
+        result,
+        frame: int,
+        *,
+        norm: Optional[str] = None,
+        coil_combine: Optional[str] = None,
+    ) -> np.ndarray:
+        """Grid and reconstruct one spiral frame with a centred 2D IFFT."""
+        kspace = self.grid_kspace(result, frame)
+        image = np.fft.fftshift(
+            np.fft.ifft2(
+                np.fft.ifftshift(kspace, axes=(-2, -1)), axes=(-2, -1), norm=norm
+            ),
+            axes=(-2, -1),
+        )
+        if coil_combine is None:
+            return image
+        if image.ndim != 3:
+            raise ValueError("coil combination requires signal shape (coil, adc)")
+        if coil_combine == "rss":
+            return np.sqrt(np.sum(np.abs(image) ** 2, axis=0))
+        if coil_combine == "sum":
+            return np.sum(image, axis=0)
+        raise ValueError("coil_combine must be None, 'rss', or 'sum'")
+
+    def to_metadata(self) -> dict:
+        return {
+            "type": "spiral_2d_frames",
+            "matrix": self.matrix,
+            "fov_m": self.fov_m,
+            "dwell_s": self.dwell_s,
+            "sample_indices": self.sample_indices,
+            "frame_indices": self.frame_indices,
+            "dimensions": self.dimensions.to_metadata(),
+            "moment_origins_cyc_per_m": self.moment_origins_cyc_per_m,
+        }
+
+    @classmethod
+    def from_metadata(cls, metadata: Mapping) -> "SpiralAcquisition":
+        if metadata.get("type") != "spiral_2d_frames":
+            raise ValueError("unsupported spiral acquisition metadata")
+        return cls(
+            matrix=tuple(metadata["matrix"]),
+            fov_m=tuple(metadata["fov_m"]),
+            dwell_s=metadata["dwell_s"],
+            sample_indices=tuple(tuple(item) for item in metadata["sample_indices"]),
+            frame_indices=tuple(tuple(item) for item in metadata["frame_indices"]),
+            dimensions=AcquisitionDimensions.from_metadata(metadata["dimensions"]),
+            moment_origins_cyc_per_m=tuple(
+                tuple(item) for item in metadata["moment_origins_cyc_per_m"]
             ),
         )
 
@@ -648,11 +869,13 @@ class CartesianAcquisitionVolumes:
 
 @dataclass(frozen=True)
 class SpectroscopicAcquisition:
-    """Map phase-encoded 2D CSI data to ``(ky, kx, spectral_point)``.
+    """Map repeated phase-encoded CSI data to spatial grids plus FIDs.
 
     Unlike a Cartesian imaging readout, every ADC event is an FID acquired at
     one fixed spatial k-space coordinate.  Treating the spectral samples as a
     readout axis would therefore produce a physically invalid reconstruction.
+    For multiple repetitions the returned arrays have an explicit leading
+    ``repetition`` dimension before ``(ky, kx, spectral_point)``.
     """
 
     matrix: Tuple[int, int]
@@ -660,6 +883,7 @@ class SpectroscopicAcquisition:
     spectral_points: int
     dwell_s: float
     encoding_indices: Tuple[Tuple[int, int], ...]
+    repetition_indices: Tuple[int, ...] = ()
     moment_origins_cyc_per_m: Tuple[Tuple[float, float, float], ...] = ()
 
     def __post_init__(self) -> None:
@@ -677,8 +901,30 @@ class SpectroscopicAcquisition:
             raise ValueError("CSI dwell_s must be positive and finite")
         indices = tuple((int(x), int(y)) for x, y in self.encoding_indices)
         expected = {(x, y) for y in range(matrix[1]) for x in range(matrix[0])}
-        if len(indices) != matrix[0] * matrix[1] or set(indices) != expected:
-            raise ValueError("CSI encoding_indices must cover the spatial grid once")
+        repetitions = tuple(int(value) for value in self.repetition_indices)
+        if not repetitions and indices:
+            repetitions = (0,) * len(indices)
+        if len(repetitions) != len(indices) or any(value < 0 for value in repetitions):
+            raise ValueError("CSI requires one non-negative repetition index per FID")
+        repetition_values = tuple(sorted(set(repetitions)))
+        if not repetition_values:
+            raise ValueError("CSI requires at least one complete repetition")
+        if repetition_values != tuple(range(len(repetition_values))):
+            raise ValueError("CSI repetition indices must be contiguous from zero")
+        if len(indices) != matrix[0] * matrix[1] * len(repetition_values):
+            raise ValueError("CSI FID count does not match its repetitions and matrix")
+        for repetition in repetition_values:
+            repetition_grid = {
+                index
+                for index, value in zip(indices, repetitions)
+                if value == repetition
+            }
+            if repetition_grid != expected or repetitions.count(repetition) != len(
+                expected
+            ):
+                raise ValueError(
+                    "each CSI repetition must cover the spatial grid exactly once"
+                )
         origins = tuple(
             tuple(float(value) for value in origin)
             for origin in self.moment_origins_cyc_per_m
@@ -692,10 +938,19 @@ class SpectroscopicAcquisition:
         object.__setattr__(self, "spectral_points", points)
         object.__setattr__(self, "dwell_s", dwell)
         object.__setattr__(self, "encoding_indices", indices)
+        object.__setattr__(self, "repetition_indices", repetitions)
         object.__setattr__(self, "moment_origins_cyc_per_m", origins)
 
     @property
     def num_encodings(self) -> int:
+        return len(self.encoding_indices)
+
+    @property
+    def num_repetitions(self) -> int:
+        return len(set(self.repetition_indices))
+
+    @property
+    def encodings_per_repetition(self) -> int:
         return self.matrix[0] * self.matrix[1]
 
     @property
@@ -731,9 +986,9 @@ class SpectroscopicAcquisition:
         return np.fft.fftshift(np.fft.fftfreq(self.spectral_points, self.dwell_s))
 
     def reshape_signal(self, signal: np.ndarray) -> np.ndarray:
-        """Return chronological signal as ``(..., ky, kx, spectral_point)``."""
+        """Return chronological data with an explicit repetition dimension."""
         values = np.asarray(signal)
-        if values.ndim not in (1, 2) or values.shape[-1] != self.num_samples:
+        if values.ndim < 1 or values.shape[-1] != self.num_samples:
             raise ValueError(
                 f"signal must end with {self.num_samples} chronological CSI samples"
             )
@@ -741,12 +996,31 @@ class SpectroscopicAcquisition:
             values.shape[:-1] + (self.num_encodings, self.spectral_points)
         )
         grid = np.empty(
-            values.shape[:-1] + (self.matrix[1], self.matrix[0], self.spectral_points),
+            values.shape[:-1]
+            + (
+                self.num_repetitions,
+                self.matrix[1],
+                self.matrix[0],
+                self.spectral_points,
+            ),
             dtype=values.dtype,
         )
-        for acquired, (x_index, y_index) in enumerate(self.encoding_indices):
-            grid[..., y_index, x_index, :] = raw[..., acquired, :]
-        return grid
+        for acquired, ((x_index, y_index), repetition) in enumerate(
+            zip(self.encoding_indices, self.repetition_indices)
+        ):
+            grid[..., repetition, y_index, x_index, :] = raw[..., acquired, :]
+        return grid[..., 0, :, :, :] if self.num_repetitions == 1 else grid
+
+    def encoding_event_index(self, repetition: int, x_index: int, y_index: int) -> int:
+        """Return the chronological FID index for one CSI grid location."""
+        target = (int(x_index), int(y_index))
+        repetition = int(repetition)
+        for event, (index, value) in enumerate(
+            zip(self.encoding_indices, self.repetition_indices)
+        ):
+            if index == target and value == repetition:
+                return event
+        raise ValueError("CSI repetition/grid location is not present")
 
     def reconstruct_spatial(
         self,
@@ -835,6 +1109,7 @@ class SpectroscopicAcquisition:
             "spectral_points": self.spectral_points,
             "dwell_s": self.dwell_s,
             "encoding_indices": self.encoding_indices,
+            "repetition_indices": self.repetition_indices,
             "moment_origins_cyc_per_m": self.moment_origins_cyc_per_m,
         }
 
@@ -850,6 +1125,7 @@ class SpectroscopicAcquisition:
             encoding_indices=tuple(
                 tuple(value) for value in metadata["encoding_indices"]
             ),
+            repetition_indices=tuple(metadata.get("repetition_indices", ())),
             moment_origins_cyc_per_m=tuple(
                 tuple(value) for value in metadata.get("moment_origins_cyc_per_m", ())
             ),
@@ -1086,6 +1362,104 @@ class CartesianAcquisition:
         )
 
 
+def infer_spiral_acquisition(
+    program: SequenceProgram,
+    *,
+    compiled=None,
+) -> SpiralAcquisition:
+    """Infer generated single-interleaf 2D spiral frames from ADC moments."""
+    from .compiler import SequenceCompiler
+
+    definitions = {
+        str(key).lower(): value
+        for key, value in dict(program.metadata.get("definitions", {})).items()
+    }
+    trajectory_name = str(definitions.get("trajectory", "")).strip().lower()
+    sequence_name = str(definitions.get("name", "")).strip().lower()
+    if trajectory_name != "spiral" and "spiral" not in sequence_name:
+        raise ValueError("sequence is not declared as a spiral acquisition")
+    matrix_value = np.asarray(definitions.get("matrixsize", ()), dtype=float).reshape(
+        -1
+    )
+    fov_value = np.asarray(definitions.get("fov", ()), dtype=float).reshape(-1)
+    if matrix_value.size < 2:
+        raise ValueError("spiral acquisition requires a 2D MatrixSize definition")
+    if fov_value.size < 2:
+        raise ValueError("spiral acquisition requires a 2D FOV definition")
+    matrix = tuple(
+        _positive_integer(value, "spiral MatrixSize") for value in matrix_value[:2]
+    )
+    fov = tuple(float(value) for value in fov_value[:2])
+    if not np.all(np.isfinite(fov)) or min(fov) <= 0:
+        raise ValueError("spiral FOV values must be positive and finite")
+
+    adc_events = program.adc_events
+    if not adc_events:
+        raise ValueError("spiral sequence contains no ADC events")
+    samples_per_frame = matrix[0] * matrix[1]
+    if any(event.num_samples != samples_per_frame for event in adc_events):
+        raise ValueError(
+            "each spiral ADC event must contain matrix_x * matrix_y samples"
+        )
+    dwell = adc_events[0].dwell_s
+    if any(
+        not np.isclose(event.dwell_s, dwell, rtol=0.0, atol=1e-15)
+        for event in adc_events
+    ):
+        raise ValueError("spiral ADC events do not share one dwell time")
+
+    dimensions = AcquisitionDimensions.from_program(program)
+    if dimensions.num_adc_events != len(adc_events):
+        raise ValueError("spiral acquisition dimensions do not match ADC events")
+    compiled = (
+        SequenceCompiler().compile_acquisition(program)
+        if compiled is None
+        else compiled
+    )
+    moments = np.asarray(compiled.adc_gradient_moment_cyc_per_m, dtype=float)
+    if moments.shape != (dimensions.num_samples, 3):
+        raise ValueError("compiled spiral ADC moments have an invalid shape")
+
+    sample_indices = []
+    frame_indices = []
+    origins = []
+    cursor = 0
+    for event_index, count in enumerate(dimensions.adc_event_sample_counts):
+        indices = tuple(range(cursor, cursor + count))
+        sample_indices.append(indices)
+        frame_indices.append(
+            tuple(
+                int(dimensions.event_indices(axis)[event_index])
+                for axis in dimensions.AXIS_NAMES
+            )
+        )
+        origins.append(tuple(float(value) for value in moments[cursor]))
+        cursor += count
+
+    acquisition = SpiralAcquisition(
+        matrix=matrix,
+        fov_m=fov,
+        dwell_s=dwell,
+        sample_indices=tuple(sample_indices),
+        frame_indices=tuple(frame_indices),
+        dimensions=dimensions,
+        moment_origins_cyc_per_m=tuple(origins),
+    )
+    reference = acquisition.trajectory(moments, 0)
+    scale = np.asarray((matrix[0] / (2 * fov[0]), matrix[1] / (2 * fov[1])))
+    normalized_radius = np.hypot(reference[:, 0] / scale[0], reference[:, 1] / scale[1])
+    if float(np.max(normalized_radius)) < 0.75:
+        raise ValueError("spiral trajectory does not reach the declared matrix extent")
+    for frame in range(1, acquisition.num_frames):
+        candidate = acquisition.trajectory(moments, frame)
+        tolerance = max(1e-8, 1e-5 * float(np.max(np.abs(reference))))
+        if not np.allclose(
+            candidate[:, :2], reference[:, :2], rtol=0.0, atol=tolerance
+        ):
+            raise ValueError("spiral trajectory changes between acquisition frames")
+    return acquisition
+
+
 def infer_cartesian_acquisition(
     program: SequenceProgram,
     *,
@@ -1279,8 +1653,12 @@ def infer_spectroscopic_acquisition(
     )
     if spectral_points != matrix_spectral:
         raise ValueError("CSI MatrixSize and SpectralPoints definitions disagree")
-    if len(adc_events) != nx * ny:
-        raise ValueError("ADC event count does not match the declared CSI grid")
+    repetitions_value = definitions.get("repetitions", 1)
+    repetitions = _positive_integer(repetitions_value, "CSI Repetitions")
+    if len(adc_events) != nx * ny * repetitions:
+        raise ValueError(
+            "ADC event count does not match the declared CSI grid and repetitions"
+        )
     if any(event.num_samples != spectral_points for event in adc_events):
         raise ValueError("ADC event sizes do not match CSI SpectralPoints")
     dwell_s = adc_events[0].dwell_s
@@ -1299,6 +1677,12 @@ def infer_spectroscopic_acquisition(
     if len(lin) != len(adc_events) or len(par) != len(adc_events):
         raise ValueError("CSI inference requires one LIN and PAR label per FID")
     encoding_indices = tuple((int(x), int(y)) for x, y in zip(lin, par))
+    if repetitions == 1:
+        repetition_indices = (0,) * len(adc_events)
+    else:
+        repetition_indices = tuple(int(value) for value in labels.get("REP", ()))
+        if len(repetition_indices) != len(adc_events):
+            raise ValueError("repeated CSI requires one REP label per FID")
 
     compiled = SequenceCompiler().compile(program) if compiled is None else compiled
     origins = tuple(
@@ -1314,6 +1698,7 @@ def infer_spectroscopic_acquisition(
         spectral_points=spectral_points,
         dwell_s=dwell_s,
         encoding_indices=encoding_indices,
+        repetition_indices=repetition_indices,
         moment_origins_cyc_per_m=origins,
     )
     acquisition.validate_adc_times(compiled.adc_times_s)
@@ -1691,7 +2076,19 @@ def make_cartesian_epi(
     acquisition: CartesianAcquisition,
     *,
     flip_angle_deg: float = 90.0,
+    variable_flip_angle: bool = False,
+    vfa_final_flip_angle_deg: float = 90.0,
+    rf_pulse_type: str = "block",
     rf_duration_s: float = 1e-3,
+    rf_time_bandwidth_product: float = 4.0,
+    rf_apodization: float = 0.5,
+    rf_slr_sharpness: float = 1.0,
+    rf_raster_s: float = 1e-6,
+    rf_custom_waveform_hz: Optional[Sequence[complex]] = None,
+    rf_custom_raster_s: Optional[float] = None,
+    rf_custom_flip_angle_deg: Optional[float] = None,
+    rf_custom_name: Optional[str] = None,
+    rf_frequency_offset_hz: float = 0.0,
     prephaser_duration_s: float = 1e-3,
     blip_duration_s: float = 100e-6,
     delay_after_prephaser_s: float = 0.0,
@@ -1708,17 +2105,21 @@ def make_cartesian_epi(
 ) -> SequenceProgram:
     """Build a single-shot Cartesian EPI program.
 
-    Passing ``slice_thickness_m`` enables a rectangular slice-selective RF
-    pulse. Multiple slices are centred around z=0 and played sequentially
-    within each repetition. ``repetition_time_s`` is the time between the
+    Passing ``slice_thickness_m`` enables a slice-selective RF pulse. ``sinc``,
+    ``slr``, and ``block`` envelopes are supported. Multiple slices are centred
+    around z=0 and played sequentially within each repetition;
+    ``slice_gap_m`` is their edge-to-edge separation.
+    ``repetition_time_s`` is the time between the
     first slice excitations of consecutive repetitions; when omitted, the
     shortest possible repetition time is used. ``spoil_after_slice`` adds a
     rectangular spoiler after the rewinder. Its z moment is measured in cycles
     across the slice thickness and its optional x/y moment in cycles across an
-    acquired voxel.
+    acquired voxel. With ``variable_flip_angle`` enabled, one flip angle is
+    calculated per repetition and shared by all slices in that repetition.
     """
     for name, value, allow_zero in (
         ("rf_duration_s", rf_duration_s, False),
+        ("rf_raster_s", rf_raster_s, False),
         ("prephaser_duration_s", prephaser_duration_s, False),
         ("blip_duration_s", blip_duration_s, False),
         ("delay_after_prephaser_s", delay_after_prephaser_s, True),
@@ -1729,6 +2130,8 @@ def make_cartesian_epi(
             raise ValueError(f"{name} has an invalid duration")
     if not np.isfinite(flip_angle_deg):
         raise ValueError("flip_angle_deg must be finite")
+    if not np.isfinite(rf_frequency_offset_hz):
+        raise ValueError("rf_frequency_offset_hz must be finite")
     n_slices = _positive_integer(n_slices, "n_slices")
     repetitions = _positive_integer(repetitions, "repetitions")
     if slice_thickness_m is None:
@@ -1764,10 +2167,40 @@ def make_cartesian_epi(
     fov_x, fov_y = acquisition.fov_m
     dwell = acquisition.dwell_s
     readout_duration = nx * dwell
-    rf_hz = np.deg2rad(flip_angle_deg) / (2 * np.pi * rf_duration_s)
+    if variable_flip_angle:
+        flip_angle_schedule_deg = variable_flip_angle_schedule(
+            repetitions,
+            final_flip_angle_deg=vfa_final_flip_angle_deg,
+        )
+    else:
+        flip_angle_schedule_deg = np.full(repetitions, flip_angle_deg, dtype=float)
+    requested_rf_duration_s = float(rf_duration_s)
+    rf_envelope, rf_duration_s, effective_rf_tbw, rf_pulse_type = design_rf_envelope(
+        pulse_type=rf_pulse_type,
+        duration_s=rf_duration_s,
+        raster_s=rf_raster_s,
+        time_bandwidth_product=rf_time_bandwidth_product,
+        apodization=rf_apodization,
+        slr_sharpness=rf_slr_sharpness,
+        custom_waveform=rf_custom_waveform_hz,
+        custom_raster_s=rf_custom_raster_s,
+    )
+    rf_samples_by_repetition = [
+        scale_rf_envelope_to_flip(
+            rf_envelope,
+            flip_angle_deg=angle_deg,
+            raster_s=rf_raster_s,
+            reference_flip_angle_deg=(
+                rf_custom_flip_angle_deg if rf_pulse_type == "designer" else None
+            ),
+        )
+        for angle_deg in flip_angle_schedule_deg
+    ]
     slice_selective = slice_thickness_m is not None
     slice_gradient_hz_per_m = (
-        0.0 if not slice_selective else 1.0 / (rf_duration_s * slice_thickness_m)
+        0.0
+        if not slice_selective
+        else effective_rf_tbw / (rf_duration_s * slice_thickness_m)
     )
     spoiler_enabled = bool(spoil_after_slice) and (
         spoiler_cycles_per_slice > 0 or spoiler_cycles_per_voxel > 0
@@ -1804,18 +2237,20 @@ def make_cartesian_epi(
     spoiler_end_times = []
 
     for repetition in range(repetitions):
+        rf_samples_hz = rf_samples_by_repetition[repetition]
         repetition_start = repetition * actual_repetition_time_s
         for slice_index, slice_position in enumerate(slice_positions):
             frame_start = repetition_start + slice_index * frame_duration_s
-            frequency_offset_hz = slice_gradient_hz_per_m * slice_position
+            slice_frequency_offset_hz = slice_gradient_hz_per_m * slice_position
+            frequency_offset_hz = rf_frequency_offset_hz + slice_frequency_offset_hz
             events.append(
                 RFEvent(
                     frame_start,
-                    np.asarray([rf_hz]),
-                    rf_duration_s,
+                    rf_samples_hz,
+                    rf_raster_s,
                     frequency_offset_hz=frequency_offset_hz,
                     phase_offset_rad=(
-                        -2 * np.pi * frequency_offset_hz * rf_duration_s / 2
+                        -2 * np.pi * slice_frequency_offset_hz * rf_duration_s / 2
                     ),
                 )
             )
@@ -1989,7 +2424,16 @@ def make_cartesian_epi(
     definitions = {
         "FOV": (fov_x, fov_y),
         "MatrixSize": (nx, ny),
-        "FlipAngleDeg": float(flip_angle_deg),
+        "FlipAngleDeg": float(
+            vfa_final_flip_angle_deg if variable_flip_angle else flip_angle_deg
+        ),
+        "RFPulseType": rf_pulse_type,
+        "RFDuration": float(rf_duration_s),
+        "RequestedRFDuration": requested_rf_duration_s,
+        "RFTimeBandwidthProduct": float(effective_rf_tbw),
+        "RFBandwidth": float(effective_rf_tbw / rf_duration_s),
+        "RFFrequencyOffset": float(rf_frequency_offset_hz),
+        "VariableFlipAngle": bool(variable_flip_angle),
         "Repetitions": repetitions,
         "RepetitionTime": actual_repetition_time_s,
         "MinimumRepetitionTime": minimum_repetition_time_s,
@@ -2005,9 +2449,31 @@ def make_cartesian_epi(
         ),
         "SpoilerEndTimes": tuple(float(value) for value in spoiler_end_times),
     }
-    if slice_selective:
+    if rf_pulse_type == "sinc":
+        definitions["RFApodization"] = float(rf_apodization)
+    if rf_pulse_type == "slr":
+        definitions["RFSLRSharpness"] = float(rf_slr_sharpness)
+    if rf_pulse_type == "designer":
+        definitions["RFDesignerPulseName"] = rf_custom_name or "custom"
+        definitions["RFDesignerFlipAngleDeg"] = float(rf_custom_flip_angle_deg)
+    if variable_flip_angle:
         definitions.update(
             {
+                "VariableFlipAngleDimension": "repetition",
+                "VariableFlipAngleFinalDeg": float(vfa_final_flip_angle_deg),
+                "FlipAngleScheduleDeg": tuple(
+                    float(value) for value in flip_angle_schedule_deg
+                ),
+                "VariableFlipAngleReferenceDOI": VFA_REFERENCE_DOI,
+            }
+        )
+    if slice_selective:
+        slice_extent = n_slices * slice_thickness_m + (n_slices - 1) * float(
+            slice_gap_m
+        )
+        definitions.update(
+            {
+                "FOV": (fov_x, fov_y, slice_extent),
                 "SliceThickness": slice_thickness_m,
                 "SliceGap": float(slice_gap_m),
                 "SliceSpacing": slice_thickness_m + float(slice_gap_m),

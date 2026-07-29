@@ -3,10 +3,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import xarray as xr
 
 pypulseq = pytest.importorskip("pypulseq")
 
 from blochsimulator import BlochSimulator
+from blochsimulator.dynamic_phantom import DynamicSpectralPhantom
 from blochsimulator.phantom import Phantom
 from blochsimulator.sequence import (
     AcquisitionDimensions,
@@ -17,6 +19,7 @@ from blochsimulator.sequence import (
     infer_cartesian_acquisition_volumes,
     load_pulseq,
 )
+from blochsimulator.spectral_phantom import ChemicalSpecies
 
 
 SPECTRAL_BSSFP_MAIN = runpy.run_path(
@@ -310,6 +313,59 @@ def test_spectral_selective_bssfp_builds_position_sorted_3d_volumes(tmp_path):
         assert exported["cartesian_3d_kspace"].shape == (2, 2, 3, 4)
         assert exported["cartesian_3d_image"].shape == (2, 2, 3, 4)
         assert np.array_equal(exported["cartesian_3d_repetition_index"], [0, 1])
+
+
+def test_dynamic_spectral_bssfp_exports_inferred_3d_volumes(tmp_path):
+    fov = (56e-3, 28e-3, 21e-3)
+    sequence = SPECTRAL_BSSFP_MAIN(
+        fov=fov,
+        n_read=4,
+        n_phase=2,
+        n_partition=2,
+        n_repetition=2,
+        dummy_repetitions=0,
+        use_alpha_half=False,
+        target_tr=8e-3,
+    )
+    path = tmp_path / "dynamic_spectral_3d_bssfp.seq"
+    sequence.write(str(path), v141_compat=True)
+    program = load_pulseq(path)
+    phantom = DynamicSpectralPhantom(
+        shape=(1, 1, 1),
+        fov=fov,
+        pools=(
+            ChemicalSpecies("Pyruvate", 0.0, 30.0, 1.0),
+            ChemicalSpecies("Lactate", 12.0, 25.0, 1.0),
+        ),
+        initial_concentration_maps={
+            "Pyruvate": np.ones((1, 1, 1)),
+            "Lactate": np.zeros((1, 1, 1)),
+        },
+        kpl_map_s_inv=np.zeros((1, 1, 1)),
+        nucleus="C13",
+    )
+
+    result = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        program,
+        phantom,
+        simulation_timestep_s=20e-6,
+    )
+    dataset = result.to_xarray()
+
+    assert result.cartesian_acquisition_volumes is not None
+    assert dataset["cartesian_3d_kspace"].dims == (
+        "repetition",
+        "partition_z",
+        "phase_y",
+        "read_x",
+    )
+    assert dataset["cartesian_3d_kspace"].shape == (2, 2, 2, 4)
+    assert dataset["cartesian_3d_image_magnitude"].shape == (2, 2, 2, 4)
+    output = result.save(tmp_path / "dynamic_spectral_3d_bssfp.nc")
+    with xr.open_dataset(output) as exported:
+        assert exported["cartesian_3d_kspace_real"].shape == (2, 2, 2, 4)
+        assert exported["cartesian_3d_kspace_imag"].shape == (2, 2, 2, 4)
+        assert exported["cartesian_3d_image_magnitude"].shape == (2, 2, 2, 4)
 
 
 def test_spectral_selective_3d_bssfp_uses_metabolite_specific_flip_angles(tmp_path):

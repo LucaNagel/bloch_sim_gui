@@ -9,6 +9,8 @@ decisions are documented in
 [sequence_simulation_architecture.md](sequence_simulation_architecture.md).
 The implementation design for regional pyruvate/lactate kinetics is in
 [dynamic_phantom_design.md](dynamic_phantom_design.md).
+Implemented dynamic-solver performance paths and benchmarks are recorded in
+[dynamic_simulation_performance.md](dynamic_simulation_performance.md).
 
 ## Milestones
 
@@ -24,7 +26,7 @@ The implementation design for regional pyruvate/lactate kinetics is in
 | 7. Cartesian acquisition/reconstruction | Complete | ADC moments, bandwidth/layout model, EPI builder, 2D FFT/coil combination, GUI controls and views |
 | 8. Spectral phantom designer/viewers | Complete | Shape ROIs, Lorentz peaks, persistence, independent-component simulation, orthogonal/3D views |
 | 9. CSI acquisition/export and physical phantom views | Complete | Explicit ky-kx-FID layout, spatial/spectral FFTs, structured export, mm axes, analytic 2D/3D B0 maps |
-| 10. Dynamic coupled species | Python reference complete | Regional kPL maps, two-pool longitudinal conversion, pool-resolved sparse output, persistence, designer controls, and Sequence Simulation integration complete; native optimization and perfusion remain |
+| 10. Dynamic coupled species | CPU implementation complete | Regional kPL maps, inflow, dynamic B0, pool-resolved output, optimized NumPy execution, and strict native static-B0/no-inflow block primitives are integrated; GPU execution remains experimental work |
 | 11. Multi-Tx and WASM | Deferred | Separate follow-up milestones |
 | 12. Dynamic 3D bSSFP export | Partial | Pulseq REP/PAR labels, alternating RF offsets, timing and import roundtrip complete; exact Skinner scanner protocol still needs sequence-specific RF waveforms/parameters |
 
@@ -132,6 +134,23 @@ The implementation design for regional pyruvate/lactate kinetics is in
   conversion, displays pool-resolved signal/magnetization, and exports pool
   arrays. The analytic two-site limit, region priority, persistence, GUI, and
   xarray dimensions are tested. Native acceleration and perfusion input remain.
+- 2026-07-22: the dynamic driver gained bounded coefficient/factor caches,
+  persistent complex transverse state, and allocation-reusing longitudinal
+  scratch arrays while retaining bit-identical public results.  A separate
+  strict Cython extension now accelerates longitudinal blocks and complete
+  RF voxel-block rotations without fast math or contraction.  A four-TR
+  spectral-selective 3D bSSFP benchmark with 19,086 active voxels improved from
+  about 1.209 s to 0.214 s (5.64x) in the native serial path; additional OpenMP
+  threads gave only a small further gain.  The GUI exposes the kernel and time
+  step, reports percentage/ETA, and replaces stale signal/k-space/
+  reconstruction views with live simulation data.
+- 2026-07-22: added an explicit CPU `float32`/`complex64` shadow path and a
+  reproducible precision-report script.  The strict `float64` default and
+  bit-exact native tests remain unchanged.  On the Skinner-style spectral
+  bSSFP sequence, signal NRMSE grew from 4.07e-5 after four TRs to 9.01e-4
+  after one 192-TR volume and 3.06e-3 after five volumes.  A naive per-interval
+  float32 GPU translation is therefore rejected; the next experiment is a
+  fused, once-rounded RF block propagator.
 
 ## Current limitations
 
@@ -156,10 +175,9 @@ The implementation design for regional pyruvate/lactate kinetics is in
 
 ## Next action
 
-Implement a coupled-species Bloch-McConnell kernel as the next spectral
-milestone. Start with irreversible two-pool pyruvate-to-lactate exchange,
-voxelwise initial concentrations and rate maps, then validate zero-exchange,
-mass-balance, no-RF analytic, and static-phantom limits before exposing kinetic
-controls in the Phantom designer. Radial UTE, true 3D Cartesian kz encoding,
-receiver filtering, Pulseq 1.5.1/soft delays, and Multi-Tx remain separate
-versioned milestones.
+Validate `float32`/`complex64` over the complete dynamic 3D bSSFP timeline in a
+separate CPU shadow path.  If signal, k-space, reconstruction, and pool-state
+errors meet the scientific acceptance limits, use that result as the numerical
+gate for a fused Metal GPU backend.  The strict CPU `float64` implementation
+remains the bit-exact reference and default.  Radial UTE, receiver filtering,
+Pulseq 1.5.1/soft delays, and Multi-Tx remain separate versioned milestones.

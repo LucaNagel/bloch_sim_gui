@@ -38,6 +38,7 @@ from ..dynamic_phantom import (
     DynamicSpectralPhantom,
     KineticRegionDefinition,
     TimeCurve,
+    kinetic_preroll_start_s,
     simulate_two_pool_kinetics,
 )
 from ..paths import workspace_directory
@@ -209,9 +210,9 @@ class SpectralPhantomDesignerDialog(QDialog):
             self.matrix_spins.append(matrix)
         for axis in "XYZ":
             fov = QDoubleSpinBox()
-            fov.setRange(0.001, 100.0)
-            fov.setDecimals(4)
-            fov.setSuffix(" cm")
+            fov.setRange(0.01, 1000.0)
+            fov.setDecimals(3)
+            fov.setSuffix(" mm")
             global_row.addWidget(QLabel(f"FOV {axis}"))
             global_row.addWidget(fov)
             self.fov_spins.append(fov)
@@ -340,8 +341,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.canvas.setXRange(0, 1)
         self.canvas.setYRange(0, 1)
         self.canvas.showGrid(x=True, y=True, alpha=0.3)
-        self.canvas.setLabel("bottom", "x", units="cm")
-        self.canvas.setLabel("left", "y", units="cm")
+        self.canvas.setLabel("bottom", "x", units="mm")
+        self.canvas.setLabel("left", "y", units="mm")
         self.fov_outline = pg.PlotDataItem(
             [0, 1, 1, 0, 0],
             [0, 0, 1, 1, 0],
@@ -354,8 +355,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         def physical_ticks(axis_index):
             def tick_strings(values, scale, spacing):
                 dialog = dialog_ref()
-                fov_cm = dialog.fov_spins[axis_index].value() if dialog else 1.0
-                return [f"{(value - 0.5) * fov_cm:.3g}" for value in values]
+                fov_mm = dialog.fov_spins[axis_index].value() if dialog else 1.0
+                return [f"{(value - 0.5) * fov_mm:.3g}" for value in values]
 
             return tick_strings
 
@@ -465,16 +466,35 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.pyruvate_peak_name = QLineEdit("Pyruvate")
         self.lactate_peak_name = QLineEdit("Lactate")
         self.default_kpl = self._number_spin(0.0, 10.0, 0.0, " s⁻¹")
+        self.conversion_start_s = self._number_spin(-10000.0, 10000.0, 0.0, " s")
+        self.kinetics_time_offset_s = self._number_spin(-10000.0, 10000.0, 0.0, " s")
         self.default_kpl.setToolTip(
             "kPL used everywhere unless an optional spatial region overrides it. "
             "Zero means no conversion without a positive regional override."
         )
+        self.conversion_start_s.setToolTip(
+            "kPL is zero before this time on the shared kinetics timeline and active "
+            "afterwards."
+        )
+        self.kinetics_time_offset_s.setToolTip(
+            "Selects which time on the shared inflow/conversion timeline coincides "
+            "with sequence t=0. For example, +5 s starts the sequence 5 s into both "
+            "curves; -5 s starts it 5 s before them."
+        )
         self.default_kpl.valueChanged.connect(self._update_kinetics_preview)
+        self.conversion_start_s.valueChanged.connect(self._update_kinetics_preview)
+        self.kinetics_time_offset_s.valueChanged.connect(self._update_kinetics_preview)
         self.pyruvate_peak_name.textChanged.connect(self._update_kinetics_preview)
         self.lactate_peak_name.textChanged.connect(self._update_kinetics_preview)
         kinetics_form.addRow("Pyruvate peak name", self.pyruvate_peak_name)
         kinetics_form.addRow("Lactate peak name", self.lactate_peak_name)
         kinetics_form.addRow("Default kPL", self.default_kpl)
+        kinetics_form.addRow(
+            "Conversion starts at (kinetics time)", self.conversion_start_s
+        )
+        kinetics_form.addRow(
+            "Kinetics time at sequence t=0", self.kinetics_time_offset_s
+        )
         self.inflow_enabled = QCheckBox(
             "Enable tabulated pyruvate inflow into pyruvate-shape regions"
         )
@@ -494,13 +514,16 @@ class SpectralPhantomDesignerDialog(QDialog):
         inflow_help = QLabel(
             "Pyruvate inflow points define a longitudinal source added to Pz "
             "inside pyruvate shapes. Values are linearly interpolated and zero "
-            "outside the listed time interval."
+            "outside the listed kinetics-time interval. The global kinetics-time "
+            "setting shifts inflow and conversion together relative to sequence "
+            "time zero. Any part before sequence t=0 forms a free kinetic pre-roll "
+            "that sets the initial Pz/Lz distribution."
         )
         inflow_help.setWordWrap(True)
         kinetics_layout.addWidget(inflow_help)
         self.inflow_curve_table = QTableWidget(0, 2)
         self.inflow_curve_table.setHorizontalHeaderLabels(
-            ["Time (s)", "Source (relative Mz/s)"]
+            ["Kinetics time (s)", "Source (relative Mz/s)"]
         )
         self.inflow_curve_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeToContents
@@ -509,7 +532,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             1, QHeaderView.Stretch
         )
         self.inflow_curve_table.setMaximumHeight(150)
-        self.inflow_curve_table.cellChanged.connect(self._update_kinetics_preview)
+        self.inflow_curve_table.cellChanged.connect(self._inflow_curve_table_changed)
         kinetics_layout.addWidget(self.inflow_curve_table)
         inflow_buttons = QHBoxLayout()
         add_inflow_point = QPushButton("Add inflow point")
@@ -639,6 +662,12 @@ class SpectralPhantomDesignerDialog(QDialog):
             fillLevel=0.0,
             brush=pg.mkBrush(255, 255, 0, 45),
         )
+        self.inflow_sequence_start_line = pg.InfiniteLine(
+            pos=0.0,
+            angle=90,
+            pen=pg.mkPen((180, 180, 180), width=1, style=Qt.DashLine),
+        )
+        self.inflow_preview_plot.addItem(self.inflow_sequence_start_line)
         self.pool_preview_plot = self.kinetics_preview_graphics.addPlot(row=1, col=0)
         self.pool_preview_plot.setLabel("left", "Hyperpolarized Mz")
         self.pool_preview_plot.setLabel("bottom", "Time", units="s")
@@ -650,6 +679,18 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.lactate_preview_curve = self.pool_preview_plot.plot(
             pen=pg.mkPen("m", width=2, style=Qt.DashLine), name="Lactate Lz"
         )
+        self.pool_sequence_start_line = pg.InfiniteLine(
+            pos=0.0,
+            angle=90,
+            pen=pg.mkPen((180, 180, 180), width=1, style=Qt.DashLine),
+        )
+        self.conversion_start_line = pg.InfiniteLine(
+            pos=0.0,
+            angle=90,
+            pen=pg.mkPen((255, 150, 60), width=1, style=Qt.DotLine),
+        )
+        self.pool_preview_plot.addItem(self.pool_sequence_start_line)
+        self.pool_preview_plot.addItem(self.conversion_start_line)
         self.pool_preview_plot.setXLink(self.inflow_preview_plot)
         preview_layout.addWidget(self.kinetics_preview_graphics)
         self.kinetics_preview_info = QLabel()
@@ -713,7 +754,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         for widget, value in zip(self.matrix_spins, self.design.shape):
             widget.setValue(int(value))
         for widget, value in zip(self.fov_spins, self.design.fov_m):
-            widget.setValue(float(value) * 100.0)
+            widget.setValue(float(value) * 1000.0)
         self.field_strength_t.setValue(float(self.design.field_strength_t))
         nucleus_index = self.nucleus.findData(self.design.nucleus)
         self.nucleus.setCurrentIndex(max(0, nucleus_index))
@@ -728,6 +769,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.pyruvate_peak_name.setText(self.design.pyruvate_peak_name)
         self.lactate_peak_name.setText(self.design.lactate_peak_name)
         self.default_kpl.setValue(self.design.default_kpl_s_inv)
+        self.conversion_start_s.setValue(self.design.conversion_start_s)
+        self.kinetics_time_offset_s.setValue(self.design.kinetics_time_offset_s)
         self.inflow_enabled.setChecked(self.design.pyruvate_inflow_curve is not None)
         self.dynamic_b0_enabled.setChecked(self.design.dynamic_b0_curve is not None)
         self._populate_time_curve(
@@ -847,12 +890,11 @@ class SpectralPhantomDesignerDialog(QDialog):
     def _update_xy_info(self, row):
         item = self.design.shapes[row]
         center_mm = tuple(
-            (item.center[index] - 0.5) * self.fov_spins[index].value() * 10.0
+            (item.center[index] - 0.5) * self.fov_spins[index].value()
             for index in range(2)
         )
         size_mm = tuple(
-            item.size[index] * self.fov_spins[index].value() * 10.0
-            for index in range(2)
+            item.size[index] * self.fov_spins[index].value() for index in range(2)
         )
         self.xy_info.setText(
             f"centre=({center_mm[0]:.3g}, {center_mm[1]:.3g}) mm; "
@@ -1017,6 +1059,45 @@ class SpectralPhantomDesignerDialog(QDialog):
         if table is self.inflow_curve_table:
             self._update_kinetics_preview()
 
+    def _inflow_curve_table_changed(self, row, column):
+        if column == 0:
+            self._sort_time_curve_table(self.inflow_curve_table, row, column)
+        self._update_kinetics_preview()
+
+    @staticmethod
+    def _sort_time_curve_table(table, edited_row, edited_column):
+        rows = []
+        for row in range(table.rowCount()):
+            time_item = table.item(row, 0)
+            value_item = table.item(row, 1)
+            if time_item is None or value_item is None:
+                return
+            try:
+                time_s = float(time_item.text())
+            except ValueError:
+                return
+            rows.append((time_s, row, time_item, value_item))
+
+        sorted_rows = sorted(rows, key=lambda item: item[0])
+        if all(
+            original_row == new_row
+            for new_row, (_, original_row, *_) in enumerate(sorted_rows)
+        ):
+            return
+
+        previous = table.blockSignals(True)
+        for row in range(table.rowCount()):
+            table.takeItem(row, 0)
+            table.takeItem(row, 1)
+        new_edited_row = edited_row
+        for new_row, (_, original_row, time_item, value_item) in enumerate(sorted_rows):
+            table.setItem(new_row, 0, time_item)
+            table.setItem(new_row, 1, value_item)
+            if original_row == edited_row:
+                new_edited_row = new_row
+        table.setCurrentCell(new_edited_row, edited_column)
+        table.blockSignals(previous)
+
     def _remove_curve_point(self, table):
         row = table.currentRow()
         if row >= 0:
@@ -1164,43 +1245,78 @@ class SpectralPhantomDesignerDialog(QDialog):
                 if self.inflow_enabled.isChecked()
                 else None
             )
+            conversion_start_s = self.conversion_start_s.value()
+            kinetics_time_offset_s = self.kinetics_time_offset_s.value()
+            sequence_inflow_curve = (
+                None
+                if inflow_curve is None
+                else inflow_curve.shifted(-kinetics_time_offset_s)
+            )
+            sequence_conversion_start_s = conversion_start_s - kinetics_time_offset_s
+            preview_start_s = kinetic_preroll_start_s(
+                inflow_curve,
+                conversion_start_s,
+                kinetics_time_offset_s,
+            )
             duration_s = self.kinetics_preview_duration.value()
-            times_s = np.linspace(0.0, duration_s, 601)
-            if inflow_curve is not None:
-                visible_knots = [
+            times_s = np.linspace(preview_start_s, duration_s, 601)
+            visible_knots = [0.0]
+            if sequence_inflow_curve is not None:
+                visible_knots.extend(
                     value
-                    for value in inflow_curve.times_s
-                    if 0.0 <= value <= duration_s
-                ]
-                times_s = np.unique(np.concatenate((times_s, visible_knots)))
+                    for value in sequence_inflow_curve.times_s
+                    if preview_start_s <= value <= duration_s
+                )
+            if preview_start_s <= sequence_conversion_start_s <= duration_s:
+                visible_knots.append(sequence_conversion_start_s)
+            times_s = np.unique(np.concatenate((times_s, visible_knots)))
             pools = simulate_two_pool_kinetics(
                 times_s,
                 initial_mz,
                 t1_s,
                 kpl_s_inv,
-                inflow_curve,
+                inflow_curve=inflow_curve,
+                conversion_start_s=conversion_start_s,
+                initial_time_s=preview_start_s,
+                kinetics_time_offset_s=kinetics_time_offset_s,
             )
             inflow = (
                 np.zeros_like(times_s)
-                if inflow_curve is None
-                else np.asarray([inflow_curve.value_at(value) for value in times_s])
+                if sequence_inflow_curve is None
+                else np.asarray(
+                    [sequence_inflow_curve.value_at(value) for value in times_s]
+                )
             )
             self.inflow_preview_curve.setData(times_s, inflow)
             self.pyruvate_preview_curve.setData(times_s, pools[0])
             self.lactate_preview_curve.setData(times_s, pools[1])
-            self.inflow_preview_plot.setXRange(0.0, duration_s, padding=0.0)
-            self.pool_preview_plot.setXRange(0.0, duration_s, padding=0.0)
+            self.inflow_preview_plot.setXRange(preview_start_s, duration_s, padding=0.0)
+            self.pool_preview_plot.setXRange(preview_start_s, duration_s, padding=0.0)
+            has_preroll = preview_start_s < 0.0
+            self.inflow_sequence_start_line.setVisible(has_preroll)
+            self.pool_sequence_start_line.setVisible(has_preroll)
+            self.conversion_start_line.setPos(sequence_conversion_start_s)
+            self.conversion_start_line.setVisible(
+                not np.isclose(sequence_conversion_start_s, 0.0)
+            )
             if np.any(np.abs(inflow) > 1e-15):
                 self.inflow_preview_plot.enableAutoRange(axis=pg.ViewBox.YAxis)
             else:
                 self.inflow_preview_plot.disableAutoRange(axis=pg.ViewBox.YAxis)
                 self.inflow_preview_plot.setYRange(0.0, 1.0, padding=0.05)
             self.pool_preview_plot.enableAutoRange(axis=pg.ViewBox.YAxis)
+            zero_index = int(np.searchsorted(times_s, 0.0))
             details = (
                 f"Representative voxel in {shape.name} · kPL source: {kpl_label}. "
-                f"kPL={kpl_s_inv:.4g} s⁻¹, "
+                f"kinetics t at sequence t=0: {kinetics_time_offset_s:.4g} s; "
+                f"kPL={kpl_s_inv:.4g} s⁻¹ from sequence "
+                f"t={sequence_conversion_start_s:.4g} s "
+                f"(kinetics t={conversion_start_s:.4g} s), "
                 f"T1(P/L)=({t1_s[0]:.4g}/{t1_s[1]:.4g}) s, "
-                f"HP Mz(0)=({initial_mz[0]:.4g}/{initial_mz[1]:.4g}), "
+                f"initial HP Mz at sequence t={preview_start_s:.4g} s="
+                f"({initial_mz[0]:.4g}/{initial_mz[1]:.4g}), "
+                f"sequence-start HP Mz at t=0="
+                f"({pools[0, zero_index]:.4g}/{pools[1, zero_index]:.4g}), "
                 f"HP Mz({duration_s:.4g} s)=({pools[0, -1]:.4g}/"
                 f"{pools[1, -1]:.4g})."
             )
@@ -1365,7 +1481,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             self.design.shapes[row].peaks = self._read_peak_table()
         self.design.name = self.name_edit.text().strip() or "Designed spectral phantom"
         self.design.shape = tuple(widget.value() for widget in self.matrix_spins)
-        self.design.fov_m = tuple(widget.value() / 100.0 for widget in self.fov_spins)
+        self.design.fov_m = tuple(widget.value() / 1000.0 for widget in self.fov_spins)
         self.design.field_strength_t = self.field_strength_t.value()
         self.design.nucleus = self.nucleus.currentData()
         self.design.spectral_reference_ppm = self.spectral_reference_ppm.value()
@@ -1383,6 +1499,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.design.pyruvate_peak_name = self.pyruvate_peak_name.text().strip()
         self.design.lactate_peak_name = self.lactate_peak_name.text().strip()
         self.design.default_kpl_s_inv = self.default_kpl.value()
+        self.design.conversion_start_s = self.conversion_start_s.value()
+        self.design.kinetics_time_offset_s = self.kinetics_time_offset_s.value()
         self.design.kinetic_regions = self._read_kinetic_regions()
         self.design.pyruvate_inflow_curve = (
             self._read_time_curve(self.inflow_curve_table, outside="zero")

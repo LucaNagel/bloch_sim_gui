@@ -111,6 +111,8 @@ class PhantomCreatorWidget(QGroupBox):
     """Widget for creating and configuring phantoms."""
 
     phantom_created = pyqtSignal(object)  # Emits Phantom object
+    PHANTOM_DESIGNER_TYPE = "Phantom Designer..."
+    LOAD_FROM_FILE_TYPE = "Load from File..."
 
     def __init__(self):
         super().__init__("Phantom Configuration")
@@ -132,13 +134,13 @@ class PhantomCreatorWidget(QGroupBox):
         self.type_combo = QComboBox()
         self.type_combo.addItems(
             [
+                self.PHANTOM_DESIGNER_TYPE,
                 "Shepp-Logan 2D",
                 "Cylindrical 2D",
                 "Multi-Tissue 2D",
                 "Chemical Shift (Water/Fat)",
                 "Spherical 3D",
-                "Spectral Shape Designer...",
-                "Load from File...",
+                self.LOAD_FROM_FILE_TYPE,
             ]
         )
         self.type_combo.currentTextChanged.connect(self._on_type_changed)
@@ -164,12 +166,12 @@ class PhantomCreatorWidget(QGroupBox):
         self.fov_label = QLabel("FOV:")
         fov_layout.addWidget(self.fov_label)
         self.fov_spin = QDoubleSpinBox()
-        self.fov_spin.setRange(1, 100)
-        self.fov_spin.setValue(24)
-        self.fov_spin.setSingleStep(1)
-        self.fov_spin.setSuffix(" cm")
+        self.fov_spin.setRange(10, 1000)
+        self.fov_spin.setValue(240)
+        self.fov_spin.setSingleStep(10)
+        self.fov_spin.setSuffix(" mm")
         self.fov_spin.setDecimals(1)
-        self.fov_spin.setToolTip("Field of view in centimeters")
+        self.fov_spin.setToolTip("Field of view in millimeters")
         fov_layout.addWidget(self.fov_spin)
         layout.addLayout(fov_layout)
 
@@ -216,6 +218,7 @@ class PhantomCreatorWidget(QGroupBox):
         self.save_btn = QPushButton("Save...")
         self.save_btn.clicked.connect(self.save_phantom)
         self.save_btn.setEnabled(False)
+        self.save_btn.setVisible(False)
         btn_layout.addWidget(self.save_btn)
         layout.addLayout(btn_layout)
 
@@ -231,8 +234,8 @@ class PhantomCreatorWidget(QGroupBox):
     def _on_type_changed(self, type_name: str):
         """Update UI based on selected phantom type."""
         external_editor = type_name in {
-            "Spectral Shape Designer...",
-            "Load from File...",
+            self.PHANTOM_DESIGNER_TYPE,
+            self.LOAD_FROM_FILE_TYPE,
         }
         for widget in (
             self.resolution_label,
@@ -242,14 +245,12 @@ class PhantomCreatorWidget(QGroupBox):
             self.field_label,
             self.field_combo,
         ):
-            widget.setEnabled(not external_editor)
+            widget.setVisible(not external_editor)
         # Show/hide tissue selector
         single_tissue_types = ["Cylindrical 2D", "Spherical 3D"]
         show_tissue = type_name in single_tissue_types
         self.tissue_label.setVisible(show_tissue)
         self.tissue_combo.setVisible(show_tissue)
-        self.tissue_label.setEnabled(not external_editor)
-        self.tissue_combo.setEnabled(not external_editor)
 
         # Limit resolution for 3D
         if "3D" in type_name:
@@ -258,11 +259,15 @@ class PhantomCreatorWidget(QGroupBox):
                 self.resolution_spin.setValue(32)
         else:
             self.resolution_spin.setMaximum(256)
-        self.create_btn.setText(
-            "Create New..."
-            if type_name == "Spectral Shape Designer..."
-            else "Create Phantom"
-        )
+        if type_name == self.PHANTOM_DESIGNER_TYPE:
+            action_text = "Create New..."
+        elif type_name == self.LOAD_FROM_FILE_TYPE:
+            action_text = "Load Phantom..."
+        else:
+            action_text = "Create Phantom"
+        self.create_btn.setText(action_text)
+        if self.current_phantom is None:
+            self.info_label.setText(f"Click '{action_text}' to begin")
         self._update_edit_button()
 
     def get_field_strength(self) -> float:
@@ -272,17 +277,17 @@ class PhantomCreatorWidget(QGroupBox):
         """Create phantom based on current settings."""
         phantom_type = self.type_combo.currentText()
 
-        if phantom_type == "Load from File...":
+        if phantom_type == self.LOAD_FROM_FILE_TYPE:
             self.load_phantom()
             return
-        if phantom_type == "Spectral Shape Designer...":
+        if phantom_type == self.PHANTOM_DESIGNER_TYPE:
             self._open_spectral_designer()
             return
 
         try:
             n = self.resolution_spin.value()
-            fov_cm = self.fov_spin.value()
-            fov_m = fov_cm / 100.0  # Convert cm to m
+            fov_mm = self.fov_spin.value()
+            fov_m = fov_mm / 1000.0
             field = self.get_field_strength()
             tissue = self.tissue_combo.currentText()
 
@@ -302,6 +307,7 @@ class PhantomCreatorWidget(QGroupBox):
             self.current_phantom = phantom
             self._update_info()
             self.save_btn.setEnabled(True)
+            self.save_btn.setVisible(True)
             self._update_edit_button()
             self.phantom_created.emit(phantom)
 
@@ -321,9 +327,10 @@ class PhantomCreatorWidget(QGroupBox):
                 phantom = load_any_phantom(filename)
                 self.current_phantom = phantom
                 if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
-                    self.type_combo.setCurrentText("Spectral Shape Designer...")
+                    self.type_combo.setCurrentText(self.PHANTOM_DESIGNER_TYPE)
                 self._update_info()
                 self.save_btn.setEnabled(True)
+                self.save_btn.setVisible(True)
                 self._update_edit_button()
                 self.phantom_created.emit(phantom)
             except Exception as e:
@@ -356,6 +363,7 @@ class PhantomCreatorWidget(QGroupBox):
         self.current_phantom = phantom
         self._update_info()
         self.save_btn.setEnabled(True)
+        self.save_btn.setVisible(True)
         self._update_edit_button()
         self.phantom_created.emit(phantom)
 
@@ -367,7 +375,7 @@ class PhantomCreatorWidget(QGroupBox):
             QMessageBox.information(
                 self,
                 "Phantom is not editable",
-                "Only spectral shape-designer phantoms can be reopened here.",
+                "Only phantoms created with Phantom Designer can be reopened here.",
             )
             return
         try:
@@ -386,7 +394,7 @@ class PhantomCreatorWidget(QGroupBox):
             except ValueError:
                 pass
         self.edit_btn.setVisible(
-            editable and self.type_combo.currentText() == "Spectral Shape Designer..."
+            editable and self.type_combo.currentText() == self.PHANTOM_DESIGNER_TYPE
         )
         self.edit_btn.setEnabled(editable)
 
@@ -908,6 +916,8 @@ class PhantomWidget(QWidget):
         Function to log messages to main GUI console
     """
 
+    CONFIGURATION_PANEL_WIDTH = 420
+
     def __init__(
         self,
         parent=None,
@@ -966,6 +976,8 @@ class PhantomWidget(QWidget):
         sim_layout.addWidget(self.seq_info)
 
         sim_group.setLayout(sim_layout)
+        sim_group.setVisible(False)
+        self.legacy_simulation_group = sim_group
         left_layout.addWidget(sim_group)
 
         # Run controls
@@ -993,6 +1005,8 @@ class PhantomWidget(QWidget):
         run_layout.addWidget(self.status_label)
 
         run_group.setLayout(run_layout)
+        run_group.setVisible(False)
+        self.legacy_run_group = run_group
         left_layout.addWidget(run_group)
 
         left_layout.addStretch()
@@ -1001,8 +1015,9 @@ class PhantomWidget(QWidget):
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setWidget(left_panel)
-        left_scroll.setMaximumWidth(320)
-        left_scroll.setMinimumWidth(250)
+        left_scroll.setMaximumWidth(480)
+        left_scroll.setMinimumWidth(360)
+        self.configuration_scroll = left_scroll
 
         # === RIGHT PANEL - Visualization ===
         self.viewer = PhantomViewerWidget()
@@ -1013,6 +1028,8 @@ class PhantomWidget(QWidget):
         splitter.addWidget(self.viewer)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+        splitter.setSizes([self.CONFIGURATION_PANEL_WIDTH, 1000])
+        self.configuration_splitter = splitter
 
         main_layout.addWidget(splitter)
         self.setLayout(main_layout)
@@ -1022,6 +1039,8 @@ class PhantomWidget(QWidget):
         self.current_phantom = phantom
         self.viewer.set_phantom(phantom)
         is_spectral = isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom))
+        self.legacy_simulation_group.setVisible(not is_spectral)
+        self.legacy_run_group.setVisible(not is_spectral)
         self.run_btn.setEnabled(not is_spectral)
         self.status_label.setText(
             f"Phantom ready: {phantom.n_active} voxels"

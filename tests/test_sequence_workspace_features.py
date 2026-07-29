@@ -51,6 +51,38 @@ def test_file_dialogs_start_in_sequence_and_phantom_directories(tmp_path, monkey
     app.processEvents()
 
 
+def test_pulseq_file_dialog_loads_in_background(tmp_path):
+    pypulseq = pytest.importorskip("pypulseq")
+    sequence = pypulseq.Sequence()
+    sequence.add_block(pypulseq.make_adc(num_samples=4, dwell=10e-6))
+    path = tmp_path / "background.seq"
+    sequence.write(str(path))
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+
+    with patch(
+        "blochsimulator.ui.sequence_simulation_widget.QFileDialog.getOpenFileName",
+        return_value=(str(path), "Pulseq sequence (*.seq)"),
+    ):
+        widget._load_pulseq_file()
+
+    worker = widget.pulseq_load_worker
+    assert worker is not None
+    assert not widget.load_pulseq_button.isEnabled()
+    assert widget.progress.minimum() == 0
+    assert widget.progress.maximum() == 0
+    assert worker.wait(10_000)
+    app.processEvents()
+
+    assert widget.pulseq_load_worker is None
+    assert widget.load_pulseq_button.isEnabled()
+    assert widget.run_button.isEnabled()
+    assert widget.program.source == str(path)
+    assert widget.progress.format() == "Pulseq loaded"
+    widget.close()
+    app.processEvents()
+
+
 def test_sequence_progress_is_determinate_from_simulation_start():
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()
@@ -177,6 +209,38 @@ def test_sequence_workspace_exports_xarray_result(tmp_path):
         widget._export_results()
 
     assert output.is_file()
+    widget.close()
+    app.processEvents()
+
+
+def test_sequence_workspace_exports_result_data_and_notebook_by_default(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+    widget.object_source.setCurrentIndex(1)
+    widget.matrix_size.setValue(2)
+    widget.z_matrix_size.setValue(1)
+    widget._build_phantom()
+    widget.result = BlochSimulator(use_parallel=False).simulate_sequence(
+        widget.program, widget.phantom
+    )
+    output = tmp_path / "sequence_result.nc"
+    combined_filter = "xarray NetCDF + Jupyter notebook (*.nc)"
+
+    with (
+        patch(
+            "blochsimulator.ui.sequence_simulation_widget.QFileDialog.getSaveFileName",
+            return_value=(str(output), combined_filter),
+        ) as save_dialog,
+        patch("blochsimulator.ui.sequence_simulation_widget.QMessageBox.information"),
+    ):
+        widget._export_results()
+
+    notebook = output.with_suffix(".ipynb")
+    assert output.is_file()
+    assert notebook.is_file()
+    assert "sequence_result.nc" in notebook.read_text(encoding="utf-8")
+    assert save_dialog.call_args.args[3].startswith(combined_filter)
+
     widget.close()
     app.processEvents()
 

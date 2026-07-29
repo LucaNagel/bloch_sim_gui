@@ -2,12 +2,23 @@
 
 [![Live Demo](https://img.shields.io/badge/Live-Demo-blue?style=for-the-badge&logo=github)](https://lucanagel.github.io/bloch_sim_gui/)
 
-A high-performance Python implementation of the Bloch equation solver originally developed by Brian Hargreaves at Stanford University. This package provides a fast C-based core with Python bindings, parallel processing support, and an interactive GUI for MRI pulse sequence simulation.
+A high-performance Python implementation of the Bloch equation solver originally developed by Brian Hargreaves at Stanford University. This package provides a fast C-based core with Python bindings, parallel processing support, and an interactive GUI with classic waveform simulation and an event-based Sequence mode for Pulseq workflows.
 
 ## Demo
 
+### Classic simulation
+
 ![Spin Echo Animation](docs/_static/media/spin_echo.gif)
 *Demonstration of a Spin-Echo simulation*
+
+### Sequence mode
+
+| Sequence workspace | Simulation results |
+| --- | --- |
+| ![Placeholder for the Sequence mode screenshot](docs/_static/media/sequence_mode_placeholder.svg) | ![Placeholder for the sequence simulation results screenshot](docs/_static/media/sequence_results_placeholder.svg) |
+| *Screenshot placeholder: Pulseq sequence and phantom setup.* | *Screenshot placeholder: signal, k-space, reconstruction, and spatial results.* |
+
+<!-- Replace the two placeholder SVGs above with the final Sequence mode and result screenshots. -->
 
 ## Features
 
@@ -22,6 +33,13 @@ A high-performance Python implementation of the Bloch equation solver originally
   and BIR-4 pulses, including phase and carrier-frequency offsets.
 - Sequence support for FID, spin echo, gradient echo, inversion recovery,
   slice-selective excitation, EPI, and SSFP.
+- Dedicated event-based **Sequence mode** for loading and simulating Pulseq
+  `.seq` files.
+- Interactive generation of Pulseq EPI, centre-out 2D spiral, 2D CSI, and 3D
+  bSSFP sequences, with export to `.seq` files and reproducing Jupyter notebooks.
+- Spectral and dynamic phantom design with spatial peak distributions,
+  pyruvate-to-lactate kinetics, spatial B0 inhomogeneity maps, and optional
+  time-dependent B0 offsets.
 - Hardware-aware RAM protection for large simulation grids.
 
 ### Visualization and analysis
@@ -29,12 +47,18 @@ A high-performance Python implementation of the Bloch equation solver originally
 - Live magnetization, signal, spectrum, spatial-profile, heatmap, and 3D-vector
   views.
 - Synchronized time controls and animation for time-resolved results.
+- Sequence timeline, ADC signal, CSI spectrum, k-space, reconstruction, final
+  state, spatial magnetization, and spin-probe views.
 - Named dimensions and metadata through direct `xarray.Dataset` conversion.
 - Static figures (`.png`, `.svg`) and animations (`.mp4`, `.gif`).
 
 ### Export and reproducibility
 
 - Numerical results in Python-compatible NumPy and HDF5 formats.
+- Sequence results as `xarray.Dataset` objects or NetCDF (`.nc`) files with
+  named acquisition, spatial, spectral, dynamic, and pool dimensions.
+- Experimental export of simulated acquisitions as Bruker raw datasets,
+  including `fid` and/or `rawdata.job0` plus the associated parameter files.
 - Automatically generated Jupyter notebooks using the parameters selected in
   the GUI.
 - Parameter sweeps with final-state or full time-resolved result collection.
@@ -60,6 +84,70 @@ simulation per step. Sweeps can vary flip angle, TE, TR, TI, B1 scaling or
 amplitude, T1, T2, spin-offset center, and RF-carrier offset. Results can be
 compared directly, exported, and opened in an automatically generated
 sweep-analysis notebook.
+
+## Sequence mode
+
+The **Sequence Simulation** workspace provides an event-based workflow for
+complete Pulseq acquisitions. It keeps RF, gradient, ADC, and label timing from
+the sequence and runs the acquisition on a spatial, spectral, or dynamic
+phantom without expanding the full sequence into a permanently stored dense
+waveform.
+
+### Pulseq import and dynamic sequence generation
+
+- Load Pulseq `.seq` files and inspect their RF, gradient, and ADC timeline
+  before simulation.
+- Simulate imported Pulseq sequences directly on 1D, 2D, or 3D phantoms.
+- Configure Cartesian EPI or spiral readouts, including multi-slice gap and
+  spacing and configurable Sinc, SLR, block, or RF-Designer excitation pulses,
+  plus 2D CSI and 3D bSSFP acquisitions interactively. The generated sequence
+  is updated from the current acquisition parameters and can be exported as a
+  Pulseq `.seq` file, a reproducing Jupyter notebook, or both.
+- Use millimeters consistently for MRI geometry controls such as FOV, slice
+  thickness, slice gap, and spatial probe positions; simulations and exports
+  continue to use SI meters internally.
+- Preserve Pulseq acquisition labels for ordered repetitions, echoes, slices,
+  segments, and partitions in the result metadata.
+
+When installing the Python package, enable Pulseq and GUI support with:
+
+```bash
+pip install "blochsimulator[gui,pulseq]"
+```
+
+The standalone desktop application already bundles the dependencies required
+for the Sequence mode.
+
+### Spectral and dynamic phantom designer
+
+The **Phantom Designer** creates multi-shape phantoms from boxes and
+ellipsoids and assigns spatially resolved spectral peaks and relaxation
+properties to them. It supports per-shape B0 offsets as well as analytic
+linear or radial B0 inhomogeneity maps.
+
+Dynamic phantoms extend the same design with a hyperpolarized
+pyruvate-to-lactate model. Pool-specific initial magnetization and relaxation,
+spatial `kPL` regions, tabulated pyruvate inflow, and a time-dependent B0 offset
+can be configured in the **Kinetics / kPL** tab. Total and pool-resolved signals
+and magnetization remain available after simulation.
+
+### Results and export
+
+Sequence simulations retain the chronological ADC signal, k-space coordinates,
+acquisition labels, final magnetization, and optional checkpoints. Cartesian
+and spectroscopic acquisitions additionally provide ready-to-use k-space,
+reconstruction, FID, and spectrum arrays where applicable.
+
+Use `SequenceSimulationResult.to_xarray()` for an in-memory `xarray.Dataset`,
+or export from **Export results…**. The default export writes both a NetCDF
+dataset and an analysis notebook; NetCDF-only, HDF5, and NumPy archives are
+also available.
+
+The **Bruker raw dataset** export is experimental. It writes simulated complex
+ADC data as `fid`, `rawdata.job0`, or both, together with Bruker-style `acqp`,
+`method`, `visu_pars`, and `pulseprogram` files. Export metadata should be
+reviewed before using these datasets in scanner-specific reconstruction
+pipelines.
 
 ## Ways to use the simulator
 
@@ -210,7 +298,7 @@ You can also export the selected GUI simulation as a notebook. See the
 
 ### 1. GUI Application
 
-Once installed, you can launch the GUI from any terminal or shell:
+Once installed, you can launch the GUI from any terminal or shell or from the applications folder:
 
 ```bash
 blochsimulator-gui
@@ -307,7 +395,7 @@ b1_phased = b1 * np.exp(1j * phase)
 
 ```python
 # Simulate multiple positions and frequencies in parallel
-positions = np.random.randn(100, 3) * 0.01  # Random positions in 1cm cube
+positions = np.random.randn(100, 3) * 0.01  # Position scale: 10 mm
 frequencies = np.linspace(-200, 200, 41)     # 41 frequencies
 
 result = sim.simulate(

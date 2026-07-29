@@ -111,6 +111,8 @@ class PhantomDesign:
     default_kpl_s_inv: float = 0.0
     kinetic_regions: List[KineticRegionDefinition] = field(default_factory=list)
     pyruvate_inflow_curve: Optional[TimeCurve] = None
+    conversion_start_s: float = 0.0
+    kinetics_time_offset_s: float = 0.0
     dynamic_b0_curve: Optional[TimeCurve] = None
 
     def validate(self) -> None:
@@ -151,6 +153,10 @@ class PhantomDesign:
             raise ValueError("B0 inhomogeneity amplitude must be finite")
         if not np.isfinite(self.default_kpl_s_inv) or self.default_kpl_s_inv < 0:
             raise ValueError("default kPL must be finite and non-negative")
+        if not np.isfinite(self.conversion_start_s):
+            raise ValueError("conversion start time must be finite")
+        if not np.isfinite(self.kinetics_time_offset_s):
+            raise ValueError("kinetics time offset must be finite")
         if self.pyruvate_inflow_curve is not None and np.any(
             np.asarray(self.pyruvate_inflow_curve.values) < 0
         ):
@@ -319,6 +325,8 @@ class PhantomDesign:
                         delivery_map=delivery_map,
                     )
                 ),
+                conversion_start_s=float(self.conversion_start_s),
+                kinetics_time_offset_s=float(self.kinetics_time_offset_s),
                 dynamic_b0=(
                     None
                     if self.dynamic_b0_curve is None
@@ -455,6 +463,8 @@ class PhantomDesign:
                 if data.get("pyruvate_inflow_curve") is None
                 else TimeCurve.from_dict(data["pyruvate_inflow_curve"])
             ),
+            conversion_start_s=float(data.get("conversion_start_s", 0.0)),
+            kinetics_time_offset_s=float(data.get("kinetics_time_offset_s", 0.0)),
             dynamic_b0_curve=(
                 None
                 if data.get("dynamic_b0_curve") is None

@@ -1,11 +1,12 @@
 import sys
 import runpy
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 from PyQt5.QtCore import QSettings, Qt
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QMessageBox
 
 from blochsimulator.ui.main_window import BlochSimulatorGUI
 from blochsimulator.ui.sequence_simulation_widget import (
@@ -13,14 +14,18 @@ from blochsimulator.ui.sequence_simulation_widget import (
     _event_step_plot_data,
 )
 from blochsimulator.sequence import (
+    ADCEvent,
     AcquisitionDimensions,
     GradientEvent,
     RFEvent,
     SequenceCompiler,
     SequenceProbeResult,
+    SequenceProgram,
     SequenceSimulationResult,
     SpectroscopicAcquisition,
+    load_pulseq,
 )
+from blochsimulator.units import rf_hz_to_gauss
 
 
 EXAMPLE_MAIN = runpy.run_path(
@@ -59,7 +64,24 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert window.sequence_simulation_widget.simulator.num_threads == 2
     assert isinstance(window.sequence_simulation_widget, SequenceSimulationWidget)
     assert window.sequence_simulation_widget.program.source == "internal-fid"
+    assert window.sequence_simulation_widget._rf_designer is window.rf_designer
+    assert window.sequence_simulation_widget._rf_designer_pulse_data is not None
     assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is window.workspace_switch
+
+    sequence_widget = window.sequence_simulation_widget
+    sequence_widget.sequence_source.setCurrentIndex(1)
+    sequence_widget.read_matrix.setValue(4)
+    sequence_widget.phase_matrix.setValue(3)
+    sequence_widget.epi_repetition_time_ms.setValue(100.0)
+    sequence_widget.epi_rf_pulse_type.setCurrentText("RF Pulse Designer")
+    window.rf_designer.duration.setValue(2.0)
+    app.processEvents()
+    assert sequence_widget.program.metadata["definitions"]["RFPulseType"] == (
+        "designer"
+    )
+    assert sequence_widget.program.metadata["definitions"]["RFDuration"] == (
+        pytest.approx(2e-3)
+    )
 
     window.set_workspace_mode("sequence")
     assert window.workspace_mode == "sequence"
@@ -77,6 +99,29 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert not window.free_mode_left_container.isHidden()
     assert not window.free_mode_playback_header.isHidden()
     assert window.tab_widget.isTabVisible(0)
+
+    tab_changes = []
+    window.tab_widget.currentChanged.connect(tab_changes.append)
+    window.workspace_mode_selector.setCurrentIndex(
+        window.workspace_mode_selector.findData("sequence")
+    )
+    app.processEvents()
+    window.workspace_mode_selector.setCurrentIndex(
+        window.workspace_mode_selector.findData("free")
+    )
+    app.processEvents()
+    window.workspace_mode_selector.setCurrentIndex(
+        window.workspace_mode_selector.findData("sequence")
+    )
+    app.processEvents()
+
+    assert window.workspace_mode == "sequence"
+    assert window.tab_widget.currentIndex() == window.sequence_simulation_tab_index
+    assert tab_changes == [
+        window.sequence_simulation_tab_index,
+        window._free_mode_tab_index,
+        window.sequence_simulation_tab_index,
+    ]
     window.close()
     window.deleteLater()
     app.processEvents()
@@ -189,6 +234,91 @@ def test_sequence_workspace_builds_cartesian_epi_from_controls():
     app.processEvents()
 
 
+def test_generated_sequence_fov_warning_lists_undersized_in_plane_axes(monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(1)
+    widget.epi_read_fov_mm.setValue(100.0)
+    widget.epi_phase_fov_mm.setValue(150.0)
+    widget.epi_slice_thickness_mm.setValue(5.0)
+    widget.epi_slice_count.setValue(2)
+    widget.phantom = type("PhantomExtent", (), {"fov": (0.2, 0.15, 0.03)})()
+    warning = {}
+
+    def capture_warning(_parent, title, message, buttons, default):
+        warning.update(
+            title=title,
+            message=message,
+            buttons=buttons,
+            default=default,
+        )
+        return QMessageBox.No
+
+    monkeypatch.setattr(QMessageBox, "warning", capture_warning)
+
+    assert not widget._confirm_generated_sequence_fov()
+    assert warning["title"] == "Sequence FOV is smaller than the phantom"
+    assert "Read / x: sequence 100 mm < phantom 200 mm" in warning["message"]
+    assert "Phase / y" not in warning["message"]
+    assert "Slice / partition / z" not in warning["message"]
+    assert warning["buttons"] == QMessageBox.Yes | QMessageBox.No
+    assert warning["default"] == QMessageBox.No
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_generated_sequence_fov_warning_ignores_slice_extent(monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(1)
+    widget.epi_read_fov_mm.setValue(200.0)
+    widget.epi_phase_fov_mm.setValue(150.0)
+    widget.epi_slice_thickness_mm.setValue(5.0)
+    widget.epi_slice_count.setValue(2)
+    widget.phantom = type("PhantomExtent", (), {"fov": (0.2, 0.15, 0.03)})()
+    warning = MagicMock()
+    monkeypatch.setattr(QMessageBox, "warning", warning)
+
+    assert widget._confirm_generated_sequence_fov()
+    warning.assert_not_called()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+@pytest.mark.parametrize(
+    "source_index,expected_fov_m",
+    [
+        (1, (0.12, 0.13, 0.014)),
+        (2, (0.14, 0.15, 0.016)),
+        (3, (0.17, 0.18, 0.19)),
+    ],
+)
+def test_generated_sequence_fov_uses_current_controls(source_index, expected_fov_m):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.epi_read_fov_mm.setValue(120.0)
+    widget.epi_phase_fov_mm.setValue(130.0)
+    widget.epi_slice_thickness_mm.setValue(7.0)
+    widget.epi_slice_count.setValue(2)
+    widget.csi_read_fov_mm.setValue(140.0)
+    widget.csi_phase_fov_mm.setValue(150.0)
+    widget.csi_slice_thickness_mm.setValue(16.0)
+    widget.bssfp_read_fov_mm.setValue(170.0)
+    widget.bssfp_phase_fov_mm.setValue(180.0)
+    widget.bssfp_partition_fov_mm.setValue(190.0)
+    widget.sequence_source.setCurrentIndex(source_index)
+
+    assert widget._generated_sequence_fov_m() == pytest.approx(expected_fov_m)
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
 def test_sequence_workspace_scopes_object_controls_to_the_selected_source():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
@@ -199,6 +329,7 @@ def test_sequence_workspace_scopes_object_controls_to_the_selected_source():
     assert not widget.t1_ms.isEnabled()
     assert widget.built_in_properties_group.isHidden()
     assert "No phantom selected" in widget.phantom_summary.text()
+    assert widget.probe_group.isHidden()
 
     widget.object_source.setCurrentIndex(1)
     assert widget.object_type.currentText() == "Uniform cube"
@@ -206,6 +337,20 @@ def test_sequence_workspace_scopes_object_controls_to_the_selected_source():
     assert widget.t1_ms.isEnabled()
     assert not widget.built_in_properties_group.isHidden()
     assert widget.phantom_summary.isHidden()
+    assert widget.probe_group.isHidden()
+
+    widget.object_source.setCurrentIndex(2)
+    assert widget.object_source.currentText() == "Spin probe"
+    assert widget.built_in_properties_group.isHidden()
+    assert widget.phantom_summary.isHidden()
+    assert not widget.probe_group.isHidden()
+    assert not widget.probe_controls.isHidden()
+    assert widget.run_button.isHidden()
+    assert widget.progress.isHidden()
+
+    widget.object_source.setCurrentIndex(0)
+    assert widget.probe_group.isHidden()
+    assert not widget.run_button.isHidden()
 
     widget.close()
     widget.deleteLater()
@@ -223,6 +368,7 @@ def test_sequence_workspace_builds_multislice_repeated_epi_from_controls():
     widget.epi_repetitions.setValue(3)
     widget.epi_repetition_time_ms.setValue(100.0)
     widget.epi_slice_thickness_mm.setValue(4.0)
+    widget.epi_slice_gap_mm.setValue(2.0)
     app.processEvents()
 
     compiled = SequenceCompiler().compile(widget.program)
@@ -237,6 +383,10 @@ def test_sequence_workspace_builds_multislice_repeated_epi_from_controls():
     assert widget.frame_selector.count() == 7
     assert widget.frame_selector.itemText(6) == "slice=1, repetition=2"
     assert definitions["SliceThickness"] == pytest.approx(4e-3)
+    assert definitions["SliceGap"] == pytest.approx(2e-3)
+    assert definitions["SliceSpacing"] == pytest.approx(6e-3)
+    assert definitions["SlicePositions"] == pytest.approx((-3e-3, 3e-3))
+    assert definitions["FOV"] == pytest.approx((0.22, 0.22, 10e-3))
     assert definitions["FlipAngleDeg"] == pytest.approx(30.0)
     assert definitions["Repetitions"] == 3
     assert definitions["RepetitionTime"] == pytest.approx(100e-3)
@@ -244,6 +394,131 @@ def test_sequence_workspace_builds_multislice_repeated_epi_from_controls():
     rf = widget.program.rf_events[0]
     assert 360.0 * abs(np.sum(rf.samples_hz) * rf.raster_s) == pytest.approx(30.0)
     assert "frames=6 (slice, repetition)" in widget.sequence_info.text()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_workspace_configures_rf_pulse_for_epi_and_spiral(tmp_path):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(1)
+    widget.read_matrix.setValue(4)
+    widget.phase_matrix.setValue(3)
+    widget.epi_repetition_time_ms.setValue(100.0)
+    widget.epi_flip_angle_deg.setValue(35.0)
+    widget.epi_rf_pulse_type.setCurrentText("SLR")
+    widget.epi_rf_duration_ms.setValue(2.5)
+    widget.epi_rf_time_bandwidth_product.setValue(3.5)
+    widget.epi_rf_slr_sharpness.setCurrentText("5")
+    app.processEvents()
+
+    definitions = widget.program.metadata["definitions"]
+    rf = widget.program.rf_events[0]
+    assert definitions["RFPulseType"] == "slr"
+    assert definitions["RFDuration"] == pytest.approx(2.5e-3)
+    assert definitions["RFTimeBandwidthProduct"] == pytest.approx(3.5)
+    assert definitions["RFSLRSharpness"] == pytest.approx(5.0)
+    assert rf.samples_hz.size * rf.raster_s == pytest.approx(2.5e-3)
+    assert 360.0 * abs(np.sum(rf.samples_hz) * rf.raster_s) == pytest.approx(35.0)
+    assert widget.epi_rf_time_bandwidth_product.isEnabled()
+    assert not widget.epi_rf_apodization.isEnabled()
+    assert widget.epi_rf_slr_sharpness.isEnabled()
+
+    widget.epi_readout_trajectory.setCurrentText("Spiral")
+    app.processEvents()
+    assert widget.program.metadata["definitions"]["RFPulseType"] == "slr"
+    assert widget.program.metadata["definitions"]["RFDuration"] == pytest.approx(2.5e-3)
+    output = widget._write_pulseq_path(tmp_path / "spiral_slr.seq")
+    exported = load_pulseq(output).metadata["definitions"]
+    assert exported["RFPulseType"] == "slr"
+    assert exported["RFSLRSharpness"] == pytest.approx(5.0)
+
+    widget.epi_rf_pulse_type.setCurrentText("Block")
+    app.processEvents()
+    assert not widget.epi_rf_time_bandwidth_product.isEnabled()
+    assert not widget.epi_rf_apodization.isEnabled()
+    assert not widget.epi_rf_slr_sharpness.isEnabled()
+    assert widget.program.metadata["definitions"]["RFPulseType"] == "block"
+    assert widget.program.metadata["definitions"][
+        "RFTimeBandwidthProduct"
+    ] == pytest.approx(1.0)
+
+    designer_raster_s = 10e-6
+    designer_samples = 100
+    designer_flip_angle_deg = 30.0
+    designer_waveform_hz = np.full(
+        designer_samples,
+        designer_flip_angle_deg
+        / (360.0 * designer_samples * designer_raster_s)
+        * np.exp(1j * np.pi / 4.0),
+        dtype=np.complex128,
+    )
+    widget.set_rf_designer_pulse(
+        (
+            rf_hz_to_gauss(designer_waveform_hz),
+            np.arange(designer_samples) * designer_raster_s,
+        ),
+        {
+            "duration": designer_samples * designer_raster_s * 1000.0,
+            "flip_angle": designer_flip_angle_deg,
+            "pulse_type": "Gaussian",
+            "freq_offset": 75.0,
+        },
+    )
+    widget.epi_rf_pulse_type.setCurrentText("RF Pulse Designer")
+    app.processEvents()
+    definitions = widget.program.metadata["definitions"]
+    rf_integral = (
+        np.sum(widget.program.rf_events[0].samples_hz)
+        * widget.program.rf_events[0].raster_s
+    )
+    assert definitions["RFPulseType"] == "designer"
+    assert definitions["RFDesignerPulseName"] == "Gaussian"
+    assert definitions["RFDesignerFlipAngleDeg"] == pytest.approx(30.0)
+    assert definitions["RFFrequencyOffset"] == pytest.approx(75.0)
+    assert not widget.epi_rf_duration_ms.isEnabled()
+    assert widget.epi_rf_duration_ms.value() == pytest.approx(1.0)
+    assert 360.0 * abs(rf_integral) == pytest.approx(35.0)
+    assert np.angle(rf_integral) == pytest.approx(np.pi / 4.0)
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_workspace_builds_spiral_readout_from_controls(tmp_path):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(1)
+    widget.read_matrix.setValue(8)
+    widget.phase_matrix.setValue(8)
+    widget.epi_slice_count.setValue(2)
+    widget.epi_slice_thickness_mm.setValue(4.0)
+    widget.epi_slice_gap_mm.setValue(2.0)
+    widget.epi_repetitions.setValue(2)
+    widget.epi_repetition_time_ms.setValue(100.0)
+    widget.epi_spiral_turns.setValue(4.0)
+    widget.epi_readout_trajectory.setCurrentText("Spiral")
+    app.processEvents()
+
+    assert widget.program.source == "internal-spiral"
+    assert widget.acquisition is None
+    assert widget.spiral_acquisition is not None
+    assert widget.spiral_acquisition.matrix == (8, 8)
+    assert widget.spiral_acquisition.num_frames == 4
+    assert widget.spiral_acquisition.varying_axes == ("slice", "repetition")
+    assert widget.frame_selector.count() == 5
+    definitions = widget.program.metadata["definitions"]
+    assert definitions["Trajectory"] == "spiral"
+    assert definitions["SpiralTurns"] == pytest.approx(4.0)
+    assert definitions["SliceGap"] == pytest.approx(2e-3)
+    assert definitions["FOV"] == pytest.approx((0.22, 0.22, 10e-3))
+    assert "Spiral:" in widget.sequence_info.text()
+    output = widget._write_pulseq_path(tmp_path / "interactive_spiral.seq")
+    exported = SequenceCompiler().compile(load_pulseq(output))
+    assert exported.adc_times_s.size == 8 * 8 * 2 * 2
 
     widget.close()
     widget.deleteLater()
@@ -275,7 +550,7 @@ def test_sequence_workspace_displays_cartesian_kspace_and_reconstruction():
     app.processEvents()
 
 
-def test_sequence_workspace_infers_imported_epi_and_syncs_fov(tmp_path):
+def test_sequence_workspace_infers_imported_epi_and_syncs_fov(tmp_path, monkeypatch):
     path = tmp_path / "generated_epi.seq"
     EXAMPLE_MAIN(
         write_seq=True,
@@ -289,6 +564,16 @@ def test_sequence_workspace_infers_imported_epi_and_syncs_fov(tmp_path):
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
     widget.object_source.setCurrentIndex(1)
+    original_compile_acquisition = SequenceCompiler.compile_acquisition
+    compile_calls = []
+
+    def counting_compile_acquisition(compiler, *args, **kwargs):
+        compile_calls.append(1)
+        return original_compile_acquisition(compiler, *args, **kwargs)
+
+    monkeypatch.setattr(
+        SequenceCompiler, "compile_acquisition", counting_compile_acquisition
+    )
     widget._load_pulseq_path(path)
     widget.matrix_size.setValue(4)
     widget.z_matrix_size.setValue(4)
@@ -296,8 +581,12 @@ def test_sequence_workspace_infers_imported_epi_and_syncs_fov(tmp_path):
     assert widget.acquisition is not None
     assert widget.acquisition.read_matrix == 4
     assert widget.acquisition.phase_matrix == 4
-    assert widget.fov_cm.value() == pytest.approx(22.0)
-    assert widget.fov_z_cm.value() == pytest.approx(0.4)
+    assert len(compile_calls) == 1
+    assert widget.epi_read_fov_mm.suffix() == " mm"
+    assert widget.fov_mm.suffix() == " mm"
+    assert widget.fov_z_mm.suffix() == " mm"
+    assert widget.fov_mm.value() == pytest.approx(220.0)
+    assert widget.fov_z_mm.value() == pytest.approx(4.0)
 
     widget._build_phantom()
     result = widget.simulator.simulate_sequence(widget.program, widget.phantom)
@@ -424,9 +713,51 @@ def test_sequence_workspace_keeps_run_button_outside_scroll_area():
     assert widget.run_button.isVisible()
     assert not widget.controls_scroll.viewport().isAncestorOf(widget.run_button)
     assert widget.output_group.isHidden()
-    assert not widget.probe_group.isChecked()
-    assert widget.probe_controls.isHidden()
+    assert widget.probe_group.isHidden()
 
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_focused_sequence_workspace_uses_wider_control_panel():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.resize(1800, 900)
+    widget.show()
+    app.processEvents()
+
+    widget.activate_focused_workspace_layout()
+    app.processEvents()
+
+    control_width, viewer_width = widget.workspace_splitter.sizes()
+    assert control_width == widget.FOCUSED_CONTROL_WIDTH
+    assert viewer_width >= widget.MINIMUM_FOCUSED_VIEWER_WIDTH
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_starting_sequence_opens_signal_tab(monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.object_source.setCurrentIndex(1)
+    widget.views.setCurrentIndex(0)
+    widget.view_stack.setCurrentIndex(1)
+    monkeypatch.setattr(
+        "blochsimulator.ui.sequence_simulation_widget.SequenceSimulationThread.start",
+        lambda _worker: None,
+    )
+
+    widget._run()
+
+    assert widget.view_stack.currentWidget() is widget.views
+    assert widget.views.currentIndex() == widget.signal_tab_index
+    assert widget.views.tabText(widget.views.currentIndex()) == "Signal / CSI spectrum"
+
+    widget.worker.deleteLater()
+    widget.worker = None
     widget.close()
     widget.deleteLater()
     app.processEvents()
@@ -534,6 +865,44 @@ def test_sequence_plot_data_retains_event_extrema_and_resolves_zoom():
         np.isfinite(overview_y)
     )
     assert np.all(np.diff(overview_x[np.isfinite(overview_x)]) >= 0)
+
+
+def test_sequence_plot_data_caps_vertices_when_many_events_are_visible():
+    events = tuple(
+        GradientEvent("x", index * 2e-6, np.asarray([float(index)]), 1e-6)
+        for index in range(2000)
+    )
+
+    x, y = _event_step_plot_data(
+        events,
+        samples_attribute="samples_hz_per_m",
+        start_s=0.0,
+        end_s=events[-1].end_s,
+        max_vertices=900,
+    )
+
+    assert x.size <= 900
+    assert y.size == x.size
+
+
+def test_sequence_workspace_caps_overview_adc_markers():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.program = SequenceProgram((ADCEvent(0.0, 10_000, 1e-6),), duration_s=10e-3)
+    widget._acquisition_compiled = None
+
+    widget._show_program()
+
+    adc_items = [
+        item
+        for item in widget.gradient_plot.listDataItems()
+        if item.opts.get("symbol") == "o"
+    ]
+    assert len(adc_items) == 1
+    assert adc_items[0].xData.size <= 5000
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
 
 
 def test_sequence_workspace_displays_geometry_probe_result(monkeypatch):

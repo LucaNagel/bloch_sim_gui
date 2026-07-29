@@ -5,11 +5,13 @@ from .acquisition import (
     CartesianAcquisition,
     CartesianAcquisitionFrames,
     CartesianAcquisitionVolumes,
+    SpiralAcquisition,
     SpectroscopicAcquisition,
     infer_cartesian_acquisition,
     infer_cartesian_acquisition_frames,
     infer_cartesian_acquisition_volumes,
     infer_spectroscopic_acquisition,
+    infer_spiral_acquisition,
     make_cartesian_epi,
 )
 from .compiler import CompiledSequence, SequenceCompiler
@@ -37,9 +39,15 @@ from .convergence_suite import (
     run_sequence_convergence_suite,
 )
 from .model import ADCEvent, GradientEvent, RFEvent, SequenceProgram
+from .flip_angles import VFA_REFERENCE_DOI, variable_flip_angle_schedule
 from .probe import SequenceProbeResult
 from .reference import ReferenceSimulationResult, simulate_reference_sequence
 from .result import SequenceSimulationResult
+from .scanner import (
+    ScannerParameters,
+    load_scanner_parameters,
+    save_scanner_parameters,
+)
 from .bruker_export import BrukerExportOptions, export_bruker_raw
 
 from .pulseq import (
@@ -47,7 +55,12 @@ from .pulseq import (
     UnsupportedPulseqVersionError,
     load_pulseq,
 )
-from .pulseq_builders import make_pulseq_bssfp, make_pulseq_csi, make_pulseq_epi
+from .pulseq_builders import (
+    make_pulseq_bssfp,
+    make_pulseq_csi,
+    make_pulseq_epi,
+    make_pulseq_spiral,
+)
 
 __all__ = [
     "ADCEvent",
@@ -55,6 +68,7 @@ __all__ = [
     "CartesianAcquisition",
     "CartesianAcquisitionFrames",
     "CartesianAcquisitionVolumes",
+    "SpiralAcquisition",
     "SpectroscopicAcquisition",
     "CompiledSequence",
     "ConvergenceCriteria",
@@ -67,11 +81,13 @@ __all__ = [
     "SequenceConvergenceSuiteResult",
     "SequenceProbeResult",
     "SequenceProgram",
+    "ScannerParameters",
     "ReferenceSimulationResult",
     "SequenceSimulationResult",
     "SpinProbeEnsemble",
     "TimestepConvergencePoint",
     "TimestepConvergenceResult",
+    "VFA_REFERENCE_DOI",
     "default_probe_checkpoints",
     "make_adiabatic_inversion_case",
     "make_bssfp_case",
@@ -84,6 +100,7 @@ __all__ = [
     "run_sequence_convergence_suite",
     "run_timestep_convergence",
     "simulate_reference_sequence",
+    "variable_flip_angle_schedule",
     "BrukerExportOptions",
     "export_bruker_raw",
     "PulseqImportError",
@@ -92,9 +109,13 @@ __all__ = [
     "infer_cartesian_acquisition_frames",
     "infer_cartesian_acquisition_volumes",
     "infer_spectroscopic_acquisition",
+    "infer_spiral_acquisition",
     "load_pulseq",
+    "load_scanner_parameters",
     "make_cartesian_epi",
     "make_pulseq_bssfp",
     "make_pulseq_csi",
     "make_pulseq_epi",
+    "make_pulseq_spiral",
+    "save_scanner_parameters",
 ]

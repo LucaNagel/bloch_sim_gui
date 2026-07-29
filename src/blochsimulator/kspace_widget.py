@@ -192,19 +192,21 @@ class TrajectoryWidget(QGroupBox):
         self.matrix_y_spin.valueChanged.connect(self.settings_changed.emit)
         spatial_layout.addWidget(self.matrix_y_spin, 0, 3)
 
-        spatial_layout.addWidget(QLabel("FOV X (cm):"), 1, 0)
+        spatial_layout.addWidget(QLabel("FOV X (mm):"), 1, 0)
         self.fov_x_spin = QDoubleSpinBox()
-        self.fov_x_spin.setRange(1, 50)
-        self.fov_x_spin.setValue(24)
+        self.fov_x_spin.setRange(10, 500)
+        self.fov_x_spin.setValue(240)
         self.fov_x_spin.setDecimals(1)
+        self.fov_x_spin.setSuffix(" mm")
         self.fov_x_spin.valueChanged.connect(self.settings_changed.emit)
         spatial_layout.addWidget(self.fov_x_spin, 1, 1)
 
-        spatial_layout.addWidget(QLabel("FOV Y (cm):"), 1, 2)
+        spatial_layout.addWidget(QLabel("FOV Y (mm):"), 1, 2)
         self.fov_y_spin = QDoubleSpinBox()
-        self.fov_y_spin.setRange(1, 50)
-        self.fov_y_spin.setValue(24)
+        self.fov_y_spin.setRange(10, 500)
+        self.fov_y_spin.setValue(240)
         self.fov_y_spin.setDecimals(1)
+        self.fov_y_spin.setSuffix(" mm")
         self.fov_y_spin.valueChanged.connect(self.settings_changed.emit)
         spatial_layout.addWidget(self.fov_y_spin, 1, 3)
 
@@ -314,7 +316,7 @@ class TrajectoryWidget(QGroupBox):
 
     def get_fov(self) -> Tuple[float, float]:
         """Get FOV in meters."""
-        return (self.fov_x_spin.value() / 100, self.fov_y_spin.value() / 100)
+        return (self.fov_x_spin.value() / 1000, self.fov_y_spin.value() / 1000)
 
     def set_from_phantom(self, phantom):
         """Set matrix and FOV to match phantom."""
@@ -326,8 +328,8 @@ class TrajectoryWidget(QGroupBox):
             self.matrix_y_spin.setValue(phantom.shape[1])
 
         if hasattr(phantom, "fov") and len(phantom.fov) >= 2:
-            self.fov_x_spin.setValue(phantom.fov[0] * 100)  # m to cm
-            self.fov_y_spin.setValue(phantom.fov[1] * 100)
+            self.fov_x_spin.setValue(phantom.fov[0] * 1000)
+            self.fov_y_spin.setValue(phantom.fov[1] * 1000)
 
     def get_epi_params(self) -> EPIParameters:
         return EPIParameters(

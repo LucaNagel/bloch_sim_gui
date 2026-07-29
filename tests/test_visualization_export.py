@@ -168,6 +168,7 @@ class TestExportDataDialog(unittest.TestCase):
     def test_visual_only_export_skips_base_filename_prompt(self, save_dialog):
         dialog = ExportDataDialog()
         dialog.chk_hdf5.setChecked(False)
+        dialog.chk_nb_analysis.setChecked(False)
         dialog.chk_image.setChecked(True)
 
         dialog._on_export_clicked()
@@ -175,6 +176,15 @@ class TestExportDataDialog(unittest.TestCase):
         save_dialog.assert_not_called()
         self.assertEqual(dialog.result(), dialog.Accepted)
         self.assertIsNone(dialog.base_path)
+
+    def test_data_and_analysis_notebook_are_enabled_by_default(self):
+        dialog = ExportDataDialog()
+
+        options = dialog.get_export_options()
+
+        self.assertTrue(options["hdf5"])
+        self.assertTrue(options["notebook_analysis"])
+        self.assertFalse(options["notebook_repro"])
 
     @patch("blochsimulator.visualization.QFileDialog.getSaveFileName")
     def test_data_export_still_requests_shared_base_filename(self, save_dialog):

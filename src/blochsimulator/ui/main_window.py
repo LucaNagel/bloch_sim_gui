@@ -53,6 +53,7 @@ from ..memory import (
     set_default_memory_policy,
 )
 from ..simulator import BlochSimulator, TissueParameters, resolve_num_threads
+from ..sequence import load_scanner_parameters, save_scanner_parameters
 from ..visualization import (
     ImageExporter,
     ExportImageDialog,
@@ -302,14 +303,15 @@ class BlochSimulatorGUI(QMainWindow):
             "More positions increase runtime and result memory proportionally."
         )
         control_layout.addWidget(self.pos_spin, 1, 1)
-        control_layout.addWidget(QLabel("Position range (cm):"), 2, 0)
+        control_layout.addWidget(QLabel("Position range (mm):"), 2, 0)
         self.pos_range = QDoubleSpinBox()
         self.pos_range.setObjectName("pos_range")
-        self.pos_range.setRange(0.01, 9999.0)
-        self.pos_range.setValue(2.0)
-        self.pos_range.setSingleStep(1.0)
+        self.pos_range.setRange(0.1, 99990.0)
+        self.pos_range.setValue(20.0)
+        self.pos_range.setSingleStep(10.0)
+        self.pos_range.setSuffix(" mm")
         self.pos_range.setToolTip(
-            "Total spatial extent in centimeters. Positions are distributed "
+            "Total spatial extent in millimeters. Positions are distributed "
             "evenly across this range."
         )
         control_layout.addWidget(self.pos_range, 2, 1)
@@ -782,7 +784,7 @@ class BlochSimulatorGUI(QMainWindow):
                 else None
             )
         )
-        self.spectrum_pos_label = QLabel("Pos: 0.00 cm")
+        self.spectrum_pos_label = QLabel("Pos: 0.00 mm")
         spectrum_controls.addWidget(self.spectrum_pos_label)
         spectrum_controls.addWidget(self.spectrum_pos_slider)
         spectrum_layout.addLayout(spectrum_controls)
@@ -952,7 +954,7 @@ class BlochSimulatorGUI(QMainWindow):
         # Mxy vs position plot
         self.spatial_mxy_plot = pg.PlotWidget()
         self.spatial_mxy_plot.setLabel("left", "Mxy (transverse)")
-        self.spatial_mxy_plot.setLabel("bottom", "Position", "m")
+        self.spatial_mxy_plot.setLabel("bottom", "Position", "mm")
         self.spatial_mxy_plot.enableAutoRange(x=False, y=False)
         self.spatial_mxy_plot.setDownsampling(mode="peak")
         self.spatial_mxy_plot.setClipToView(True)
@@ -975,7 +977,7 @@ class BlochSimulatorGUI(QMainWindow):
         # Mz vs position plot
         self.spatial_mz_plot = pg.PlotWidget()
         self.spatial_mz_plot.setLabel("left", "Mz (longitudinal)")
-        self.spatial_mz_plot.setLabel("bottom", "Position", "m")
+        self.spatial_mz_plot.setLabel("bottom", "Position", "mm")
         self.spatial_mz_plot.enableAutoRange(x=False, y=False)
         self.spatial_mz_plot.setDownsampling(mode="peak")
         self.spatial_mz_plot.setClipToView(True)
@@ -992,7 +994,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         self.spatial_heatmap_mxy_layout = pg.GraphicsLayoutWidget()
         self.spatial_heatmap_mxy = self.spatial_heatmap_mxy_layout.addPlot(row=0, col=0)
-        self.spatial_heatmap_mxy.setLabel("bottom", "Position", "m")
+        self.spatial_heatmap_mxy.setLabel("bottom", "Position", "mm")
         self.spatial_heatmap_mxy.setLabel("left", "Frequency", "Hz")
         self.spatial_heatmap_mxy.setTitle("Mxy magnitude (|Mxy|)")
         self.spatial_heatmap_mxy_item = pg.ImageItem()
@@ -1008,7 +1010,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         self.spatial_heatmap_mz_layout = pg.GraphicsLayoutWidget()
         self.spatial_heatmap_mz = self.spatial_heatmap_mz_layout.addPlot(row=0, col=0)
-        self.spatial_heatmap_mz.setLabel("bottom", "Position", "m")
+        self.spatial_heatmap_mz.setLabel("bottom", "Position", "mm")
         self.spatial_heatmap_mz.setLabel("left", "Frequency", "Hz")
         self.spatial_heatmap_mz.setTitle("Mz")
         self.spatial_heatmap_mz_item = pg.ImageItem()
@@ -2709,7 +2711,7 @@ class BlochSimulatorGUI(QMainWindow):
             # If current value is out of range or we just switched, try to set to 0 cm
             if slider.value() > max_idx:
                 target = (
-                    _get_zero_idx(self.last_positions[:, 2] * 100)
+                    _get_zero_idx(self.last_positions[:, 2] * 1000)
                     if self.last_positions is not None
                     else 0
                 )
@@ -2717,11 +2719,11 @@ class BlochSimulatorGUI(QMainWindow):
 
             idx = slider.value()
             pos_val = (
-                self.last_positions[idx, 2] * 100
+                self.last_positions[idx, 2] * 1000
                 if self.last_positions is not None and idx < len(self.last_positions)
                 else idx
             )
-            self.mag_view_selector_label.setText(f"Pos: {pos_val:.2f} cm")
+            self.mag_view_selector_label.setText(f"Pos: {pos_val:.2f} mm")
         else:
             slider.setRange(0, 0)
             slider.setEnabled(False)
@@ -2772,11 +2774,11 @@ class BlochSimulatorGUI(QMainWindow):
             prefix = "Pos"
             idx = min(slider.value(), max_idx)
             pos_val = (
-                self.last_positions[idx, 2] * 100
+                self.last_positions[idx, 2] * 1000
                 if self.last_positions is not None and idx < len(self.last_positions)
                 else idx
             )
-            label_text = f"{prefix}: {pos_val:.2f} cm"
+            label_text = f"{prefix}: {pos_val:.2f} mm"
         else:
             max_idx = 0
             prefix = "All"
@@ -2925,10 +2927,11 @@ class BlochSimulatorGUI(QMainWindow):
         pos_axis = self.last_positions
         spans = np.ptp(pos_axis, axis=0)  # max - min per axis
         axis_idx = int(np.argmax(spans))
-        pos_distance = pos_axis[:, axis_idx]
+        pos_distance_m = pos_axis[:, axis_idx]
+        pos_distance_mm = pos_distance_m * 1000.0
 
         self.log_message(
-            f"Spatial plot: mxy_pos shape = {mxy_pos.shape}, mz_pos shape = {mz_pos.shape}, pos_distance shape = {pos_distance.shape}"
+            f"Spatial plot: mxy_pos shape = {mxy_pos.shape}, mz_pos shape = {mz_pos.shape}, pos_distance shape = {pos_distance_m.shape}"
         )
 
         freq_axis = (
@@ -2945,7 +2948,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Cache data for export and heatmap updates
         self._last_spatial_export = {
-            "position_m": pos_distance,
+            "position_m": pos_distance_m,
             "mxy": mxy_pos,
             "mz": mz_pos,
             "freq_index": freq_sel,
@@ -2990,7 +2993,7 @@ class BlochSimulatorGUI(QMainWindow):
                     }
                 )
                 self._update_spatial_time_heatmaps(
-                    pos_distance, self.last_time, mxy_time, mz_time, freq_sel
+                    pos_distance_mm, self.last_time, mxy_time, mz_time, freq_sel
                 )
             elif heatmap_mode == "Position vs Time" and not is_time_resolved:
                 self.log_message(
@@ -2998,7 +3001,7 @@ class BlochSimulatorGUI(QMainWindow):
                 )
                 self._last_spatial_export["heatmap_mode"] = "frequency"
                 self._update_spatial_heatmaps(
-                    pos_distance,
+                    pos_distance_mm,
                     self._last_spatial_export["mxy_per_freq"],
                     mz_display,
                     freq_axis,
@@ -3006,7 +3009,7 @@ class BlochSimulatorGUI(QMainWindow):
             else:
                 self._last_spatial_export["heatmap_mode"] = "frequency"
                 self._update_spatial_heatmaps(
-                    pos_distance,
+                    pos_distance_mm,
                     self._last_spatial_export["mxy_per_freq"],
                     mz_display,
                     freq_axis,
@@ -3014,7 +3017,7 @@ class BlochSimulatorGUI(QMainWindow):
         else:
             # Line plot mode
             self._update_spatial_line_plots(
-                pos_distance,
+                pos_distance_mm,
                 mxy_pos,
                 mz_pos,
                 mx_display,
@@ -3345,8 +3348,8 @@ class BlochSimulatorGUI(QMainWindow):
                 slice_thk = None
             if slice_thk is not None and slice_thk > 0 and np.isfinite(slice_thk):
                 center = float(np.median(position))
-                half = slice_thk / 2.0
-                positions = [center - half, center + half]
+                half_mm = slice_thk * 500.0
+                positions = [center - half_mm, center + half_mm]
                 for line, pos in zip(self.spatial_slice_lines["mxy"], positions):
                     line.setValue(pos)
                     line.setVisible(True)
@@ -3568,7 +3571,7 @@ class BlochSimulatorGUI(QMainWindow):
                 img_item.setRect(pos_min, t_min, x_span, t_span)
                 plot_widget.setXRange(pos_min, pos_max, padding=0)
                 plot_widget.setYRange(t_min, t_max, padding=0)
-                plot_widget.setLabel("bottom", "Position", "m")
+                plot_widget.setLabel("bottom", "Position", "mm")
                 plot_widget.setLabel("left", "Time", "ms")
                 plot_widget.setTitle(title)
                 if colorbar is not None:
@@ -3682,7 +3685,7 @@ class BlochSimulatorGUI(QMainWindow):
         if "num_positions" in presets:
             self.pos_spin.setValue(int(presets["num_positions"]))
         if "position_range_cm" in presets:
-            self.pos_range.setValue(float(presets["position_range_cm"]))
+            self.pos_range.setValue(float(presets["position_range_cm"]) * 10.0)
         if "num_frequencies" in presets:
             self.freq_spin.setValue(int(presets["num_frequencies"]))
         if "frequency_center_hz" in presets:
@@ -3832,6 +3835,15 @@ class BlochSimulatorGUI(QMainWindow):
         self.toolbar_run_bar.setVisible(not sequence_mode)
         self.status_run_bar.setVisible(not sequence_mode)
 
+        if sequence_mode:
+            # Select the one tab that remains active before hiding the Free Mode
+            # tabs. Otherwise Qt successively selects every next visible tab as
+            # the current one disappears. Besides producing re-entrant tab
+            # changes, that needlessly refreshes the Spectrum and Spatial plots
+            # and can make repeated workspace switches appear to freeze.
+            self.main_splitter.setSizes([0, max(1, self.width())])
+            self.tab_widget.setCurrentIndex(self.sequence_simulation_tab_index)
+
         allowed_sequence_tabs = {
             self.sequence_simulation_tab_index,
             self.phantom_tab_index,
@@ -3844,8 +3856,9 @@ class BlochSimulatorGUI(QMainWindow):
                 self.tab_widget.tabBar().setTabVisible(index, visible)
 
         if sequence_mode:
-            self.main_splitter.setSizes([0, max(1, self.width())])
-            self.tab_widget.setCurrentIndex(self.sequence_simulation_tab_index)
+            sequence_widget = getattr(self, "sequence_simulation_widget", None)
+            if sequence_widget is not None:
+                sequence_widget.activate_focused_workspace_layout()
         else:
             self.main_splitter.setSizes([420, max(1, self.width() - 420)])
             restore_index = getattr(self, "_free_mode_tab_index", 1)
@@ -3883,6 +3896,10 @@ class BlochSimulatorGUI(QMainWindow):
         return bool(
             self.app_settings.value("interface/tooltips_enabled", True, type=bool)
         )
+
+    def _load_scanner_parameters(self):
+        """Load the persistent scanner hardware limits and timing profile."""
+        return load_scanner_parameters(self.app_settings)
 
     def _load_sequence_kernel(self) -> str:
         """Load the persistent event-based sequence kernel selection."""
@@ -3942,7 +3959,7 @@ class BlochSimulatorGUI(QMainWindow):
             widget.setToolTip(tooltip if enabled else "")
 
     def show_settings(self, initial_tab: str = "general"):
-        """Show and persist general, memory and interface settings."""
+        """Show and persist application, simulation and scanner settings."""
         dialog = SettingsDialog(
             policy=self._load_memory_policy(),
             export_directory=self._get_export_directory(),
@@ -3959,6 +3976,7 @@ class BlochSimulatorGUI(QMainWindow):
             thread_mode=self._load_thread_mode(),
             manual_thread_count=self._load_manual_thread_count(),
             detected_thread_count=resolve_num_threads(None),
+            scanner_parameters=self._load_scanner_parameters(),
         )
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -3999,6 +4017,8 @@ class BlochSimulatorGUI(QMainWindow):
         manual_thread_count = dialog.manual_thread_count()
         self.app_settings.setValue("simulation/thread_mode", thread_mode)
         self.app_settings.setValue("simulation/manual_threads", manual_thread_count)
+        scanner_parameters = dialog.scanner_parameters()
+        save_scanner_parameters(self.app_settings, scanner_parameters)
         self.app_settings.sync()
         set_default_memory_policy(policy)
         self._set_tooltips_enabled(tooltips_enabled)
@@ -4009,6 +4029,7 @@ class BlochSimulatorGUI(QMainWindow):
             sequence_widget.set_dynamic_sequence_kernel(dynamic_sequence_kernel)
             sequence_widget.set_sequence_timestep_us(timestep_us)
             sequence_widget.set_thread_configuration(thread_mode, manual_thread_count)
+            sequence_widget.set_scanner_parameters(scanner_parameters)
         self.simulator.sequence_kernel = sequence_kernel
         self.simulator.dynamic_sequence_kernel = dynamic_sequence_kernel
         self.simulator.num_threads = resolve_num_threads(
@@ -4201,8 +4222,8 @@ class BlochSimulatorGUI(QMainWindow):
             self.last_pulse_range = None
 
         npos = self.pos_spin.value()
-        pos_span_cm = self.pos_range.value()
-        span_m = pos_span_cm / 100.0
+        pos_span_mm = self.pos_range.value()
+        span_m = pos_span_mm / 1000.0
         half_span = span_m / 2.0
         positions = np.zeros((npos, 3))
         if npos > 1:
@@ -4436,7 +4457,7 @@ class BlochSimulatorGUI(QMainWindow):
 
             p_idx = _get_zero_idx(
                 (
-                    self.last_positions[:, 2] * 100
+                    self.last_positions[:, 2] * 1000
                     if self.last_positions is not None
                     else None
                 ),
@@ -4640,8 +4661,11 @@ class BlochSimulatorGUI(QMainWindow):
                     self.mode_combo.setCurrentText(sim["mode"])
                 if "num_pos" in sim:
                     self.pos_spin.setValue(sim["num_pos"])
-                if "pos_range" in sim:
-                    self.pos_range.setValue(sim["pos_range"])
+                if "pos_range_mm" in sim:
+                    self.pos_range.setValue(sim["pos_range_mm"])
+                elif "pos_range" in sim:
+                    # Parameter files through v1.1 stored this value in cm.
+                    self.pos_range.setValue(float(sim["pos_range"]) * 10.0)
                 if "num_freq" in sim:
                     self.freq_spin.setValue(sim["num_freq"])
                 if "freq_center" in sim:
@@ -4775,7 +4799,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         try:
             state = {
-                "version": "1.1",
+                "version": "1.2",
                 "timestamp": timestamp,
                 "tissue": self.tissue_widget.get_state(),
                 "rf": self.rf_designer.get_state(),
@@ -5214,7 +5238,7 @@ class BlochSimulatorGUI(QMainWindow):
             return {
                 "mode": self.mode_combo.currentText(),
                 "num_pos": self.pos_spin.value(),
-                "pos_range": self.pos_range.value(),
+                "pos_range_mm": self.pos_range.value(),
                 "num_freq": self.freq_spin.value(),
                 "freq_center": self.freq_center.value(),
                 "freq_range": self.freq_range.value(),
@@ -5232,7 +5256,8 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             "time_step_us": self.time_step_spin.value(),
             "num_positions": self.pos_spin.value(),
-            "position_range_cm": self.pos_range.value(),
+            "position_range_mm": self.pos_range.value(),
+            "position_range_cm": self.pos_range.value() / 10.0,
             "num_frequencies": self.freq_spin.value(),
             "frequency_center_hz": self.freq_center.value(),
             "frequency_range_hz": self.freq_range.value(),
@@ -5252,8 +5277,8 @@ class BlochSimulatorGUI(QMainWindow):
         else:
             # Reconstruct from range if missing but requested
             npos = self.pos_spin.value()
-            pos_span_cm = self.pos_range.value()
-            span_m = pos_span_cm / 100.0
+            pos_span_mm = self.pos_range.value()
+            span_m = pos_span_mm / 1000.0
             half_span = span_m / 2.0
             positions = np.zeros((npos, 3))
             if npos > 1:
@@ -5396,10 +5421,10 @@ class BlochSimulatorGUI(QMainWindow):
             min(self.spectrum_pos_slider.value(), pos_count - 1) if pos_count > 0 else 0
         )
 
-        actual_pos_cm = 0.0
+        actual_pos_mm = 0.0
         if self.last_positions is not None and pos_sel < len(self.last_positions):
-            actual_pos_cm = self.last_positions[pos_sel, 2] * 100
-            self.spectrum_pos_label.setText(f"Pos: {actual_pos_cm:.3f} cm")
+            actual_pos_mm = self.last_positions[pos_sel, 2] * 1000
+            self.spectrum_pos_label.setText(f"Pos: {actual_pos_mm:.3f} mm")
         else:
             self.spectrum_pos_label.setText(f"Pos idx: {pos_sel}")
 
@@ -7210,11 +7235,11 @@ class BlochSimulatorGUI(QMainWindow):
             my_slice = my_all[:, :, fi]
             mz_slice = mz_all[:, :, fi]
 
-            y_label = "Position (cm)"
+            y_label = "Position (mm)"
             n_y = npos
             if self.last_positions is not None:
                 # Assume Z-axis varying
-                pos_vals = self.last_positions[:, 2] * 100
+                pos_vals = self.last_positions[:, 2] * 1000
                 y_min, y_max = pos_vals[0], pos_vals[-1]
             else:
                 y_label = "Position Index"
@@ -7379,10 +7404,10 @@ class BlochSimulatorGUI(QMainWindow):
             fi = min(selector, nfreq - 1)
             signal_slice = signal_all[:, :, fi]  # (ntime, npos)
 
-            y_label = "Position (cm)"
+            y_label = "Position (mm)"
             n_y = npos
             if self.last_positions is not None:
-                pos_vals = self.last_positions[:, 2] * 100
+                pos_vals = self.last_positions[:, 2] * 1000
                 y_min, y_max = pos_vals[0], pos_vals[-1]
             else:
                 y_label = "Position Index"

@@ -136,6 +136,27 @@ def test_compiler_reports_meaningful_status_stages():
     assert any("Finalizing" in message for message in messages)
 
 
+def test_acquisition_compiler_matches_full_adc_gradient_moments_without_rf_raster():
+    rf = RFEvent(0.0, np.linspace(1.0, 2.0, 1000), 1e-6)
+    gradient = GradientEvent("x", 0.0, np.linspace(-2.0, 3.0, 200), 10e-6)
+    adc = ADCEvent(0.25e-3, 6, 0.25e-3)
+    program = SequenceProgram((rf, gradient, adc), duration_s=2e-3)
+
+    full = SequenceCompiler().compile(program)
+    acquisition = SequenceCompiler().compile_acquisition(program)
+
+    assert acquisition.metadata["acquisition_only"] is True
+    assert acquisition.n_intervals < full.n_intervals
+    assert np.all(acquisition.rf_hz == 0.0)
+    np.testing.assert_allclose(acquisition.adc_times_s, full.adc_times_s, atol=0.0)
+    np.testing.assert_allclose(
+        acquisition.adc_gradient_moment_cyc_per_m,
+        full.adc_gradient_moment_cyc_per_m,
+        rtol=1e-13,
+        atol=1e-15,
+    )
+
+
 def test_compiler_uses_configured_rf_active_simulation_timestep():
     rf = RFEvent(0.0, np.arange(1.0, 11.0), 1e-6)
     program = SequenceProgram((rf,), duration_s=10e-6)

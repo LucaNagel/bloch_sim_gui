@@ -337,11 +337,11 @@ class MagnetizationViewer(QWidget):
             max_idx = max(0, self._npos - 1)
             idx = min(self.selector_slider.value(), max_idx)
             pos_val = (
-                self.last_positions[idx, 2] * 100
+                self.last_positions[idx, 2] * 1000
                 if self.last_positions is not None and idx < len(self.last_positions)
                 else idx
             )
-            label_text = f"Pos: {pos_val:.2f} cm"
+            label_text = f"Pos: {pos_val:.2f} mm"
         else:
             max_idx = 0
             label_text = "All spins"

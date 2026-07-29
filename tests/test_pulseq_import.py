@@ -3,6 +3,8 @@ import pytest
 import runpy
 from pathlib import Path
 
+import blochsimulator.sequence.pulseq as pulseq_import_module
+
 pypulseq = pytest.importorskip("pypulseq")
 
 from blochsimulator import BlochSimulator
@@ -83,6 +85,45 @@ def test_load_pulseq_preserves_events_duration_and_adc_times(tmp_path):
     assert np.allclose(compiled.adc_times_s, expected_adc, atol=1e-12)
     area = np.sum(compiled.gradient_hz_per_m[:, 0] * compiled.dt_s)
     assert area == pytest.approx(gradient.area, rel=1e-10, abs=1e-12)
+
+
+def test_load_pulseq_reuses_identical_gradient_rasterizations(tmp_path, monkeypatch):
+    system = pypulseq.Opts(max_grad=1e6, max_slew=1e12)
+    sequence = pypulseq.Sequence(system)
+    gradient = pypulseq.make_trapezoid(
+        "x",
+        amplitude=1200.0,
+        rise_time=40e-6,
+        flat_time=80e-6,
+        fall_time=40e-6,
+        system=system,
+    )
+    for _ in range(12):
+        sequence.add_block(gradient)
+    path = tmp_path / "repeated_gradient.seq"
+    sequence.write(str(path))
+    original = pulseq_import_module._gradient_samples
+    calls = []
+
+    def counting_gradient_samples(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        pulseq_import_module, "_gradient_samples", counting_gradient_samples
+    )
+
+    program = load_pulseq(path)
+
+    assert len(program.gradient_events) == 12
+    assert len(calls) == 1
+    assert all(
+        np.array_equal(
+            event.samples_hz_per_m,
+            program.gradient_events[0].samples_hz_per_m,
+        )
+        for event in program.gradient_events
+    )
 
 
 def test_load_pulseq_defaults_missing_optional_ppm_fields_to_zero(

@@ -59,7 +59,7 @@ class Phantom:
     >>> t2 = np.ones((64, 64)) * 0.1  # 100 ms T2
     >>> phantom = Phantom(
     ...     shape=(64, 64),
-    ...     fov=(0.24, 0.24),  # 24 cm FOV
+    ...     fov=(0.24, 0.24),  # 240 mm FOV
     ...     t1_map=t1,
     ...     t2_map=t2
     ... )

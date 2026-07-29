@@ -77,6 +77,7 @@ def load_pulseq(path, strict: bool = True) -> SequenceProgram:
     gradient_raster = float(sequence.system.grad_raster_time)
     rf_raster = float(sequence.system.rf_raster_time)
     gamma_b0 = float(sequence.system.gamma * sequence.system.B0)
+    gradient_sample_cache = {}
     adc_label_values = {
         str(name): tuple(int(value) for value in np.asarray(values).reshape(-1))
         for name, values in sequence.evaluate_labels(evolution="adc").items()
@@ -188,7 +189,12 @@ def load_pulseq(path, strict: bool = True) -> SequenceProgram:
             gradient = getattr(block, axis_name, None)
             if gradient is None:
                 continue
-            samples = _gradient_samples(gradient, gradient_raster, block_index)
+            cache_key = _gradient_sample_cache_key(gradient, gradient_raster)
+            samples = gradient_sample_cache.get(cache_key)
+            if samples is None:
+                samples = _gradient_samples(gradient, gradient_raster, block_index)
+                samples.setflags(write=False)
+                gradient_sample_cache[cache_key] = samples
             events.append(
                 GradientEvent(
                     axis=axis_name[-1],
@@ -293,6 +299,32 @@ def _gradient_samples(gradient, raster: float, block_index: int) -> np.ndarray:
     return _rasterize_linear(times, amplitudes, raster)
 
 
+def _gradient_sample_cache_key(gradient, raster: float):
+    """Return a stable key for Pulseq library gradients reused across blocks."""
+    if gradient.type == "trap":
+        return (
+            "trap",
+            float(raster),
+            float(gradient.rise_time),
+            float(gradient.flat_time),
+            float(gradient.fall_time),
+            float(gradient.amplitude),
+        )
+    if gradient.type == "grad":
+        waveform = np.ascontiguousarray(gradient.waveform, dtype=float)
+        times = np.ascontiguousarray(gradient.tt, dtype=float)
+        return (
+            "grad",
+            float(raster),
+            float(gradient.first),
+            float(gradient.last),
+            waveform.shape,
+            waveform.tobytes(),
+            times.tobytes(),
+        )
+    return (str(gradient.type), id(gradient))
+
+
 def _rasterize_linear(
     times: np.ndarray, amplitudes: np.ndarray, raster: float
 ) -> np.ndarray:
@@ -304,15 +336,34 @@ def _rasterize_linear(
         raise PulseqImportError(
             "gradient duration is not aligned to the gradient raster"
         )
-    result = np.empty(sample_count, dtype=np.result_type(amplitudes.dtype, float))
-    for index in range(sample_count):
-        start = index * raster
-        end = start + raster
-        internal = times[(times > start) & (times < end)]
-        points = np.concatenate(([start], internal, [end]))
-        values = np.interp(points, times, amplitudes)
-        result[index] = np.trapezoid(values, points) / raster
-    return result
+    dtype = np.result_type(amplitudes.dtype, float)
+    times = np.asarray(times, dtype=float)
+    amplitudes = np.asarray(amplitudes, dtype=dtype)
+    widths = np.diff(times)
+    slopes = np.diff(amplitudes) / widths
+    cumulative = np.concatenate(
+        (
+            np.asarray([amplitudes[0] * times[0]], dtype=dtype),
+            amplitudes[0] * times[0]
+            + np.cumsum(0.5 * (amplitudes[:-1] + amplitudes[1:]) * widths),
+        )
+    )
+    edges = np.arange(sample_count + 1, dtype=float) * raster
+    segment = np.searchsorted(times, edges, side="right") - 1
+    before = segment < 0
+    after = segment >= times.size - 1
+    segment = np.clip(segment, 0, times.size - 2)
+    offsets = edges - times[segment]
+    integral = (
+        cumulative[segment]
+        + amplitudes[segment] * offsets
+        + 0.5 * slopes[segment] * offsets**2
+    )
+    if np.any(before):
+        integral[before] = amplitudes[0] * edges[before]
+    if np.any(after):
+        integral[after] = cumulative[-1] + amplitudes[-1] * (edges[after] - times[-1])
+    return np.diff(integral) / raster
 
 
 def _read_text_version(path: Path):

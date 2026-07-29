@@ -1,8 +1,12 @@
 import numpy as np
 import pytest
+import xarray as xr
 
 from blochsimulator import BlochSimulator, TissueParameters
-from blochsimulator.notebook_exporter import export_sequence_result_notebook
+from blochsimulator.notebook_exporter import (
+    _sequence_result_reconstruction_code,
+    export_sequence_result_notebook,
+)
 from blochsimulator.phantom import Phantom
 from blochsimulator.sequence import (
     ADCEvent,
@@ -636,14 +640,105 @@ def test_sequence_result_notebook_uses_xarray_dataset(tmp_path):
     assert "z_slider = _index_slider('z', z_dim)" in text
     assert "repetition_slider = _index_slider('Repetition'" in text
     assert "spectral_point_slider = _index_slider(" in text
+    assert "display_range_slider = _display_range_slider()" in text
+    assert "widgets.FloatRangeSlider" in text
     assert "widgets.interactive_output" in text
     assert "continuous_update=True" in text
     import nbformat
+
+    explorer_code = next(
+        cell.source
+        for cell in nbformat.read(notebook_path, as_version=4).cells
+        if cell.cell_type == "code" and "widgets.interactive_output" in cell.source
+    )
+    assert "def _display_figure_once(fig):" in explorer_code
+    assert explorer_code.count("\n    _display_figure_once(fig)") == 3
+    assert "display(fig)" in explorer_code
+    assert "plt.close(fig)" in explorer_code
+    assert "plt.show()" not in explorer_code
+    assert "vmin=display_min" in explorer_code
+    assert "vmax=display_max" in explorer_code
+    assert "axes[2].set_ylim(*_display_limits(display_range))" in explorer_code
 
     notebook = nbformat.read(notebook_path, as_version=4)
     for cell in notebook.cells:
         if cell.cell_type == "code":
             compile(cell.source, str(notebook_path), "exec")
+
+
+def test_sequence_result_notebook_reconstructs_labelled_raw_3d_adc():
+    repetitions, partitions, phases, reads = 2, 2, 3, 4
+    shape = (repetitions, partitions, phases, reads)
+    expected = np.zeros(shape, dtype=np.complex128)
+    expected[0, 0, 1, 2] = 1.0 + 0.25j
+    expected[1, 1, 2, 0] = 0.5 - 0.75j
+
+    x_cells = np.arange(reads) - reads // 2 + 0.5
+    y_cells = np.arange(phases) - phases // 2
+    z_cells = np.arange(partitions) - partitions // 2
+    centre_phase = np.exp(
+        1j
+        * np.pi
+        * (
+            z_cells[:, None, None] / partitions
+            + y_cells[None, :, None] / phases
+            + x_cells[None, None, :] / reads
+        )
+    )
+    spatial_axes = (-3, -2, -1)
+    corrected_kspace = np.fft.fftshift(
+        np.fft.fftn(np.fft.ifftshift(expected, axes=spatial_axes), axes=spatial_axes),
+        axes=spatial_axes,
+    )
+    kspace = corrected_kspace / centre_phase
+    signal = kspace.reshape(-1)
+    event_count = repetitions * partitions * phases
+
+    dataset = xr.Dataset(
+        data_vars={
+            "signal": ("adc", signal),
+            "species_signal": (
+                ("pool", "adc"),
+                np.stack((0.25 * signal, 0.75 * signal)),
+            ),
+        },
+        coords={
+            "adc": np.arange(signal.size),
+            "pool": ["Pyruvate", "Lactate"],
+            "adc_event_index": ("adc", np.repeat(np.arange(event_count), reads)),
+            "readout_sample_index": ("adc", np.tile(np.arange(reads), event_count)),
+            "slice_index": ("adc", np.zeros(signal.size, dtype=int)),
+            "echo_index": ("adc", np.zeros(signal.size, dtype=int)),
+            "repetition_index": (
+                "adc",
+                np.repeat(np.arange(repetitions), partitions * phases * reads),
+            ),
+            "segment_index": ("adc", np.zeros(signal.size, dtype=int)),
+            "partition_index": (
+                "adc",
+                np.tile(np.repeat(np.arange(partitions), phases * reads), repetitions),
+            ),
+            "kx": ("adc", np.tile(x_cells * 10.0, event_count)),
+            "ky": (
+                "adc",
+                np.tile(np.repeat(y_cells * 20.0, reads), repetitions * partitions),
+            ),
+            "kz": (
+                "adc",
+                np.tile(np.repeat(z_cells * 30.0, phases * reads), repetitions),
+            ),
+        },
+    )
+    namespace = {"ds": dataset, "np": np, "xr": xr}
+
+    exec(_sequence_result_reconstruction_code(), namespace)
+
+    reconstructed = namespace["ds"].notebook_cartesian_3d_image.values
+    species = namespace["ds"].species_cartesian_3d_image.values
+    assert reconstructed.shape == shape
+    np.testing.assert_allclose(reconstructed, expected, atol=1e-12)
+    np.testing.assert_allclose(species[0], 0.25 * expected, atol=1e-12)
+    np.testing.assert_allclose(species[1], 0.75 * expected, atol=1e-12)
 
 
 @pytest.mark.parametrize("suffix", [".npz", ".h5", ".nc"])

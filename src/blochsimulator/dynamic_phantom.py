@@ -116,8 +116,8 @@ class TimeCurve:
         object.__setattr__(self, "values", values)
         if not times or len(times) != len(values):
             raise ValueError("time curve requires equally sized, non-empty samples")
-        if not np.all(np.isfinite(times)) or np.any(np.asarray(times) < 0):
-            raise ValueError("time curve times must be finite and non-negative")
+        if not np.all(np.isfinite(times)):
+            raise ValueError("time curve times must be finite")
         if len(times) > 1 and np.any(np.diff(times) <= 0):
             raise ValueError("time curve times must be strictly increasing")
         if not np.all(np.isfinite(values)):
@@ -190,6 +190,18 @@ class TimeCurve:
         """Return curve knots lying on the requested simulation timeline."""
         duration_s = float(duration_s)
         return tuple(value for value in self.times_s if 0.0 <= value <= duration_s)
+
+    def shifted(self, offset_s: float) -> "TimeCurve":
+        """Return a copy whose sample times are translated by ``offset_s``."""
+        offset_s = float(offset_s)
+        if not np.isfinite(offset_s):
+            raise ValueError("time curve offset must be finite")
+        return TimeCurve(
+            times_s=tuple(value + offset_s for value in self.times_s),
+            values=self.values,
+            interpolation=self.interpolation,
+            outside=self.outside,
+        )
 
     def to_dict(self) -> Dict:
         return {
@@ -290,6 +302,8 @@ class DynamicSpectralPhantom:
     kinetic_regions: Tuple[KineticRegionDefinition, ...] = ()
     pyruvate_inflow: Optional[PyruvateInflow] = None
     dynamic_b0: Optional[DynamicB0] = None
+    conversion_start_s: float = 0.0
+    kinetics_time_offset_s: float = 0.0
     metadata: Dict = field(default_factory=dict)
     coordinate_system: str = "object_xyz"
     affine_ijk_to_xyz_m: Optional[np.ndarray] = None
@@ -370,6 +384,12 @@ class DynamicSpectralPhantom:
             self.pyruvate_inflow.validate(self.shape)
         if self.dynamic_b0 is not None:
             self.dynamic_b0.validate(self.shape)
+        self.conversion_start_s = float(self.conversion_start_s)
+        if not np.isfinite(self.conversion_start_s):
+            raise ValueError("conversion start time must be finite")
+        self.kinetics_time_offset_s = float(self.kinetics_time_offset_s)
+        if not np.isfinite(self.kinetics_time_offset_s):
+            raise ValueError("kinetics time offset must be finite")
         axes = Phantom.coordinate_vectors(self.shape, self.affine_ijk_to_xyz_m)
         x, y, z = np.meshgrid(*axes, indexing="ij")
         self.positions = np.column_stack((x.ravel(), y.ravel(), z.ravel()))
@@ -439,11 +459,28 @@ class DynamicSpectralPhantom:
         values = []
         if self.pyruvate_inflow is not None:
             values.extend(
-                self.pyruvate_inflow.rate_curve_s_inv.breakpoints_s(duration_s)
+                self.inflow_curve_on_sequence_timeline.breakpoints_s(duration_s)
             )
         if self.dynamic_b0 is not None:
             values.extend(self.dynamic_b0.offset_curve_hz.breakpoints_s(duration_s))
+        conversion_start_s = self.conversion_start_on_sequence_timeline_s
+        if 0.0 <= conversion_start_s <= duration_s:
+            values.append(conversion_start_s)
         return tuple(sorted(set(values)))
+
+    @property
+    def conversion_start_on_sequence_timeline_s(self) -> float:
+        """Return when conversion starts relative to Pulseq sequence time zero."""
+        return self.conversion_start_s - self.kinetics_time_offset_s
+
+    @property
+    def inflow_curve_on_sequence_timeline(self) -> Optional[TimeCurve]:
+        """Return the inflow curve expressed relative to sequence time zero."""
+        if self.pyruvate_inflow is None:
+            return None
+        return self.pyruvate_inflow.rate_curve_s_inv.shifted(
+            -self.kinetics_time_offset_s
+        )
 
     def b0_offset_hz(self, field_strength=None, nucleus=None) -> np.ndarray:
         if self.b0_map_ppm is not None:
@@ -684,6 +721,8 @@ class DynamicSpectralPhantom:
                     "pool_scale": self.dynamic_b0.pool_scale,
                 }
             ),
+            "conversion_start_s": self.conversion_start_s,
+            "kinetics_time_offset_s": self.kinetics_time_offset_s,
             "metadata": self.metadata,
         }
         data_vars = {
@@ -861,6 +900,8 @@ class DynamicSpectralPhantom:
             kinetic_regions=regions,
             pyruvate_inflow=pyruvate_inflow,
             dynamic_b0=dynamic_b0,
+            conversion_start_s=float(header.get("conversion_start_s", 0.0)),
+            kinetics_time_offset_s=float(header.get("kinetics_time_offset_s", 0.0)),
             metadata=dict(header.get("metadata", {})),
             coordinate_system=str(ds.attrs.get("coordinate_system", "object_xyz")),
             affine_ijk_to_xyz_m=affine,
@@ -896,6 +937,8 @@ class DynamicSpectralPhantom:
                     "pool_scale": self.dynamic_b0.pool_scale,
                 }
             ),
+            "conversion_start_s": self.conversion_start_s,
+            "kinetics_time_offset_s": self.kinetics_time_offset_s,
             "metadata": self.metadata,
             "has_b0_map": self.b0_map is not None,
             "has_b0_map_ppm": self.b0_map_ppm is not None,
@@ -1001,6 +1044,8 @@ class DynamicSpectralPhantom:
             kinetic_regions=regions,
             pyruvate_inflow=pyruvate_inflow,
             dynamic_b0=dynamic_b0,
+            conversion_start_s=float(header.get("conversion_start_s", 0.0)),
+            kinetics_time_offset_s=float(header.get("kinetics_time_offset_s", 0.0)),
             metadata=header.get("metadata", {}),
             coordinate_system=header.get("coordinate_system", "object_xyz"),
             affine_ijk_to_xyz_m=header.get("affine_ijk_to_xyz_m"),
@@ -1118,8 +1163,8 @@ def _longitudinal_step(
             source_start = source_end
         if source_end is None:
             source_end = source_start
-        source_start = np.asarray(source_start, dtype=float)
-        source_end = np.asarray(source_end, dtype=float)
+        source_start = np.asarray(source_start, dtype=state.dtype)
+        source_end = np.asarray(source_end, dtype=state.dtype)
         slope = (source_end - source_start) / duration
         if source_coefficients is None:
             raise RuntimeError("prepared longitudinal step lacks inflow coefficients")
@@ -1169,19 +1214,125 @@ def _prepare_longitudinal_step(
     return exp_a, exp_b, difference, regular, source_coefficients
 
 
+def _prepare_longitudinal_step_for_dtype(
+    kpl,
+    r1_p,
+    r1_l,
+    duration,
+    *,
+    with_source,
+    dtype,
+):
+    """Prepare in float64, then round once to the requested state dtype."""
+    dtype = np.dtype(dtype)
+    if dtype == np.dtype(np.float64):
+        return _prepare_longitudinal_step(
+            kpl,
+            r1_p,
+            r1_l,
+            duration,
+            with_source=with_source,
+        )
+    prepared = _prepare_longitudinal_step(
+        np.asarray(kpl, dtype=np.float64),
+        float(r1_p),
+        float(r1_l),
+        float(duration),
+        with_source=with_source,
+    )
+    exp_a, exp_b, difference, regular, source_coefficients = prepared
+    if source_coefficients is not None:
+        source_coefficients = tuple(
+            np.asarray(value, dtype=dtype) for value in source_coefficients
+        )
+    return (
+        np.asarray(exp_a, dtype=dtype),
+        dtype.type(exp_b),
+        np.asarray(difference, dtype=dtype),
+        regular,
+        source_coefficients,
+    )
+
+
+def kinetic_preroll_start_s(
+    inflow_curve: Optional[TimeCurve],
+    conversion_start_s: float,
+    kinetics_time_offset_s: float = 0.0,
+) -> float:
+    """Return the earliest sequence-relative free-kinetics pre-roll time."""
+    conversion_start_s = float(conversion_start_s)
+    kinetics_time_offset_s = float(kinetics_time_offset_s)
+    if not np.isfinite(conversion_start_s):
+        raise ValueError("conversion start time must be finite")
+    if not np.isfinite(kinetics_time_offset_s):
+        raise ValueError("kinetics time offset must be finite")
+    candidates = [0.0, conversion_start_s - kinetics_time_offset_s]
+    if inflow_curve is not None:
+        candidates.append(float(inflow_curve.times_s[0]) - kinetics_time_offset_s)
+    return min(candidates)
+
+
+def _advance_longitudinal_kinetics(
+    state,
+    kpl,
+    r1,
+    start_s,
+    end_s,
+    *,
+    inflow_curve: Optional[TimeCurve],
+    inflow_delivery,
+    conversion_start_s,
+):
+    if end_s < start_s:
+        raise ValueError("kinetics interval end must not precede its start")
+    internal_knots = []
+    if inflow_curve is not None:
+        internal_knots.extend(
+            knot for knot in inflow_curve.times_s if start_s < knot < end_s
+        )
+    if start_s < conversion_start_s < end_s:
+        internal_knots.append(float(conversion_start_s))
+    boundaries = (float(start_s), *sorted(set(internal_knots)), float(end_s))
+    zero_kpl = np.zeros_like(kpl)
+    for start, end in zip(boundaries[:-1], boundaries[1:]):
+        if end == start:
+            continue
+        interval_kpl = kpl if (start + end) / 2.0 >= conversion_start_s else zero_kpl
+        if inflow_curve is None:
+            source_start = source_end = None
+        else:
+            start_value, end_value = inflow_curve.interval_values(start, end)
+            source_start = inflow_delivery * start_value
+            source_end = inflow_delivery * end_value
+        _longitudinal_step(
+            state,
+            interval_kpl,
+            r1[0],
+            r1[1],
+            end - start,
+            source_start,
+            source_end,
+        )
+
+
 def simulate_two_pool_kinetics(
     times_s,
     initial_mz,
     t1_s,
     kpl_s_inv,
     inflow_curve: Optional[TimeCurve] = None,
+    conversion_start_s: float = 0.0,
+    initial_time_s: float = 0.0,
+    kinetics_time_offset_s: float = 0.0,
 ):
-    """Evaluate free pyruvate/lactate kinetics at requested absolute times.
+    """Evaluate free pyruvate/lactate kinetics at sequence-relative times.
 
     This is the longitudinal part of the dynamic sequence solver without RF or
     gradients. Inflow is integrated piecewise-exactly using the same solver as
     :func:`simulate_dynamic_sequence`. The returned array has shape
-    ``(2, n_times)`` in pyruvate/lactate order.
+    ``(2, n_times)`` in pyruvate/lactate order. Inflow and conversion times are
+    on the shared kinetics timeline; ``kinetics_time_offset_s`` selects its time
+    at sequence ``t=0``.
     """
     times = np.asarray(times_s, dtype=float)
     initial = np.asarray(initial_mz, dtype=float)
@@ -1189,8 +1340,8 @@ def simulate_two_pool_kinetics(
     kpl = float(kpl_s_inv)
     if times.ndim != 1 or not times.size:
         raise ValueError("kinetics preview times must be a non-empty 1D array")
-    if not np.all(np.isfinite(times)) or np.any(times < 0):
-        raise ValueError("kinetics preview times must be finite and non-negative")
+    if not np.all(np.isfinite(times)):
+        raise ValueError("kinetics preview times must be finite")
     if np.any(np.diff(times) < 0):
         raise ValueError("kinetics preview times must be sorted")
     if initial.shape != (2,) or not np.all(np.isfinite(initial)):
@@ -1201,42 +1352,40 @@ def simulate_two_pool_kinetics(
         raise ValueError("pyruvate/lactate T1 must be positive")
     if not np.isfinite(kpl) or kpl < 0:
         raise ValueError("kPL must be finite and non-negative")
+    conversion_start_s = float(conversion_start_s)
+    initial_time_s = float(initial_time_s)
+    kinetics_time_offset_s = float(kinetics_time_offset_s)
+    if not np.isfinite(conversion_start_s):
+        raise ValueError("conversion start time must be finite")
+    if not np.isfinite(kinetics_time_offset_s):
+        raise ValueError("kinetics time offset must be finite")
+    if not np.isfinite(initial_time_s) or initial_time_s > times[0]:
+        raise ValueError(
+            "initial kinetics time must be finite and not exceed the first sample"
+        )
 
+    sequence_inflow_curve = (
+        None if inflow_curve is None else inflow_curve.shifted(-kinetics_time_offset_s)
+    )
+    sequence_conversion_start_s = conversion_start_s - kinetics_time_offset_s
     state = np.zeros((2, 1, 3), dtype=float)
     state[:, 0, 2] = initial
     result = np.empty((2, times.size), dtype=float)
     kpl_array = np.asarray([kpl], dtype=float)
     r1 = 1.0 / relaxation
-    current_time = 0.0
+    inflow_delivery = np.ones(1, dtype=float)
+    current_time = initial_time_s
     for index, target_time in enumerate(times):
-        internal_knots = (
-            ()
-            if inflow_curve is None
-            else tuple(
-                knot
-                for knot in inflow_curve.times_s
-                if current_time < knot < target_time
-            )
+        _advance_longitudinal_kinetics(
+            state,
+            kpl_array,
+            r1,
+            current_time,
+            float(target_time),
+            inflow_curve=sequence_inflow_curve,
+            inflow_delivery=inflow_delivery,
+            conversion_start_s=sequence_conversion_start_s,
         )
-        boundaries = (current_time, *internal_knots, float(target_time))
-        for start, end in zip(boundaries[:-1], boundaries[1:]):
-            if end == start:
-                continue
-            if inflow_curve is None:
-                source_start = source_end = None
-            else:
-                start_value, end_value = inflow_curve.interval_values(start, end)
-                source_start = np.asarray([start_value], dtype=float)
-                source_end = np.asarray([end_value], dtype=float)
-            _longitudinal_step(
-                state,
-                kpl_array,
-                r1[0],
-                r1[1],
-                end - start,
-                source_start,
-                source_end,
-            )
         result[:, index] = state[:, 0, 2]
         current_time = float(target_time)
     return result
@@ -1294,6 +1443,19 @@ def _prepare_transverse_factors(phase_cycles, t2, duration):
     )
 
 
+def _prepare_transverse_factors_for_dtype(phase_cycles, t2, duration, dtype):
+    """Prepare complex factors in float64 and round once for float32 runs."""
+    dtype = np.dtype(dtype)
+    if dtype == np.dtype(np.float64):
+        return _prepare_transverse_factors(phase_cycles, t2, duration)
+    prepared = _prepare_transverse_factors(
+        np.asarray(phase_cycles, dtype=np.float64),
+        np.asarray(t2, dtype=np.float64),
+        float(duration),
+    )
+    return tuple(np.asarray(value, dtype=np.complex64) for value in prepared)
+
+
 def _prepare_rf_rotation(rf_hz, duration):
     """Return the already-rounded scalar coefficients for one RF rotation."""
     nx = -2 * np.pi * rf_hz.real * duration
@@ -1311,6 +1473,34 @@ def _prepare_rf_rotation(rf_hz, duration):
         float(sine),
         float(1.0 - cosine),
     )
+
+
+def _prepare_rf_rotation_for_dtype(rf_hz, duration, dtype):
+    """Prepare RF scalars in float64 and round once for float32 execution."""
+    prepared = _prepare_rf_rotation(complex(rf_hz), float(duration))
+    dtype = np.dtype(dtype)
+    if prepared is None or dtype == np.dtype(np.float64):
+        return prepared
+    return tuple(dtype.type(value) for value in prepared)
+
+
+def _rf_rotate_float32(state, prepared):
+    """Apply one xy-axis RF rotation in a stable float32 plane basis."""
+    if prepared is None:
+        return
+    axis_x, axis_y, cosine, sine, one_minus_cosine = prepared
+    for pool in range(2):
+        vectors = state[pool]
+        value_x = vectors[:, 0]
+        value_y = vectors[:, 1]
+        value_z = vectors[:, 2]
+        parallel = value_x * axis_x + value_y * axis_y
+        perpendicular = -value_x * axis_y + value_y * axis_x
+        rotated_perpendicular = perpendicular * cosine - value_z * sine
+        rotated_z = perpendicular * sine + value_z * cosine
+        vectors[:, 0] = parallel * axis_x - rotated_perpendicular * axis_y
+        vectors[:, 1] = parallel * axis_y + rotated_perpendicular * axis_x
+        vectors[:, 2] = rotated_z
 
 
 def _rf_rotate(state, rf_hz, duration):
@@ -1344,6 +1534,7 @@ def simulate_dynamic_sequence(
     simulation_timestep_s=1e-6,
     signal_weighting="voxel",
     sequence_kernel="optimized",
+    simulation_precision="float64",
     use_parallel=True,
     num_threads=1,
     memory_budget_bytes=None,
@@ -1355,11 +1546,20 @@ def simulate_dynamic_sequence(
         SequenceCompiler,
         SequenceSimulationResult,
     )
+    from .sequence.acquisition import (
+        CartesianAcquisitionFrames,
+        infer_cartesian_acquisition,
+        infer_cartesian_acquisition_frames,
+        infer_cartesian_acquisition_volumes,
+        infer_spectroscopic_acquisition,
+    )
 
     field = (
         phantom.field_strength if field_strength_t is None else float(field_strength_t)
     )
     effective_nucleus = phantom.nucleus if nucleus is None else str(nucleus)
+    inflow_curve = phantom.inflow_curve_on_sequence_timeline
+    conversion_start_s = phantom.conversion_start_on_sequence_timeline_s
     if sequence_kernel is None:
         sequence_kernel = "optimized"
     if sequence_kernel not in {
@@ -1372,13 +1572,28 @@ def simulate_dynamic_sequence(
             "sequence_kernel must be 'optimized', 'reference', 'native_serial', "
             "or 'native_parallel'"
         )
+    if simulation_precision not in {"float64", "float32"}:
+        raise ValueError("simulation_precision must be 'float64' or 'float32'")
+    if simulation_precision == "float32" and sequence_kernel != "optimized":
+        raise ValueError(
+            "float32 precision currently requires sequence_kernel='optimized'"
+        )
+    real_dtype = np.dtype(simulation_precision)
+    complex_dtype = np.dtype(
+        np.complex64 if real_dtype == np.dtype(np.float32) else np.complex128
+    )
+    real_type = real_dtype.type
     requested_sequence_kernel = sequence_kernel
     native_fallback_reason = None
     native_longitudinal_step = None
     native_longitudinal_block = None
     native_rf_rotation_block = None
     if sequence_kernel in {"native_serial", "native_parallel"}:
-        if phantom.pyruvate_inflow is not None or phantom.dynamic_b0 is not None:
+        if (
+            inflow_curve is not None
+            or phantom.dynamic_b0 is not None
+            or conversion_start_s > 0.0
+        ):
             native_fallback_reason = "dynamic drivers are not supported by the pilot"
             sequence_kernel = "optimized"
         else:
@@ -1407,40 +1622,88 @@ def simulate_dynamic_sequence(
         raise ValueError(
             "dynamic phantom has neither initial magnetization nor inflow support"
         )
-    state = phantom.initial_magnetization.reshape(2, phantom.nvoxels, 3)[
-        :, active
-    ].copy()
+    state = (
+        np.asarray(phantom.initial_magnetization, dtype=real_dtype)
+        .reshape(2, phantom.nvoxels, 3)[:, active]
+        .copy()
+    )
+    positions = np.asarray(phantom.positions[active], dtype=np.float64)
+    coefficient_kpl = np.asarray(
+        phantom.kpl_map_s_inv.ravel()[active], dtype=np.float64
+    )
+    kpl = np.asarray(coefficient_kpl, dtype=real_dtype)
+    b0 = np.asarray(
+        phantom.b0_offset_hz(field, effective_nucleus).ravel()[active],
+        dtype=np.float64,
+    )
+    pool_offsets = np.asarray(
+        [pool.get_frequency_offset(field, effective_nucleus) for pool in phantom.pools],
+        dtype=np.float64,
+    )
+    t2 = np.asarray([pool.t2 for pool in phantom.pools], dtype=np.float64)[:, None]
+    coefficient_r1 = np.asarray(
+        [1.0 / pool.t1 for pool in phantom.pools], dtype=np.float64
+    )
+    r1 = np.asarray(coefficient_r1, dtype=real_dtype)
+    inflow_delivery = None
+    if phantom.pyruvate_inflow is not None:
+        inflow_delivery = np.asarray(
+            phantom.pyruvate_inflow.delivery_map.ravel()[active], dtype=real_dtype
+        )
+    preroll_start_s = kinetic_preroll_start_s(
+        (
+            None
+            if phantom.pyruvate_inflow is None
+            else phantom.pyruvate_inflow.rate_curve_s_inv
+        ),
+        phantom.conversion_start_s,
+        phantom.kinetics_time_offset_s,
+    )
+    if preroll_start_s < 0.0:
+        _advance_longitudinal_kinetics(
+            state,
+            kpl,
+            r1,
+            preroll_start_s,
+            0.0,
+            inflow_curve=inflow_curve,
+            inflow_delivery=inflow_delivery,
+            conversion_start_s=conversion_start_s,
+        )
+        if status_callback is not None:
+            status_callback(
+                f"Applied free kinetic pre-roll from {preroll_start_s:.6g} s "
+                "to sequence time zero."
+            )
     transverse_state = (
-        state[:, :, 0] + 1j * state[:, :, 1]
+        np.asarray(state[:, :, 0] + 1j * state[:, :, 1], dtype=complex_dtype)
         if sequence_kernel in {"optimized", "native_serial", "native_parallel"}
         else None
     )
-    positions = phantom.positions[active]
-    kpl = phantom.kpl_map_s_inv.ravel()[active]
-    b0 = phantom.b0_offset_hz(field, effective_nucleus).ravel()[active]
-    pool_offsets = np.asarray(
-        [pool.get_frequency_offset(field, effective_nucleus) for pool in phantom.pools]
-    )
-    t2 = np.asarray([pool.t2 for pool in phantom.pools], dtype=float)[:, None]
-    r1 = np.asarray([1.0 / pool.t1 for pool in phantom.pools], dtype=float)
-    inflow_delivery = None
-    if phantom.pyruvate_inflow is not None:
-        inflow_delivery = phantom.pyruvate_inflow.delivery_map.ravel()[active]
     dynamic_b0_scale = None
     dynamic_b0_pool_scale = None
     if phantom.dynamic_b0 is not None:
-        dynamic_b0_scale = phantom.dynamic_b0.spatial_scale_map.ravel()[active]
-        dynamic_b0_pool_scale = np.asarray(phantom.dynamic_b0.pool_scale, dtype=float)[
-            :, None
-        ]
-    species_signal = np.zeros((2, compiled.adc_times_s.size), dtype=np.complex128)
+        dynamic_b0_scale = np.asarray(
+            phantom.dynamic_b0.spatial_scale_map.ravel()[active], dtype=np.float64
+        )
+        dynamic_b0_pool_scale = np.asarray(
+            phantom.dynamic_b0.pool_scale, dtype=np.float64
+        )[:, None]
+    species_signal = np.zeros((2, compiled.adc_times_s.size), dtype=complex_dtype)
     if signal_weighting not in {"voxel", "voxel_volume"}:
         raise ValueError("signal_weighting must be 'voxel' or 'voxel_volume'")
-    signal_scale = (
+    signal_scale = real_type(
         phantom.voxel_volume_m3 if signal_weighting == "voxel_volume" else 1.0
     )
     checkpoint_states = np.zeros(
-        (compiled.checkpoint_times_s.size, 2, active.size, 3), dtype=np.float64
+        (compiled.checkpoint_times_s.size, 2, active.size, 3), dtype=real_dtype
+    )
+    gradient_hz_per_m = compiled.gradient_hz_per_m
+    rf_hz = compiled.rf_hz
+    adc_demodulation = (
+        compiled.adc_demodulation
+        if complex_dtype == np.dtype(np.complex128)
+        else np.asarray(compiled.adc_demodulation, dtype=complex_dtype)
     )
     adc_cursor = 0
     checkpoint_cursor = 0
@@ -1456,7 +1719,7 @@ def simulate_dynamic_sequence(
             adc_cursor < compiled.adc_state_indices.size
             and compiled.adc_state_indices[adc_cursor] == state_index
         ):
-            demodulation = compiled.adc_demodulation[adc_cursor]
+            demodulation = adc_demodulation[adc_cursor]
             for pool in range(2):
                 transverse = (
                     state[pool, :, 0] + 1j * state[pool, :, 1]
@@ -1488,7 +1751,9 @@ def simulate_dynamic_sequence(
         if sequence_kernel in {"optimized", "native_serial", "native_parallel"}
         else None
     )
-    longitudinal_regular = np.abs(r1[0] + kpl - r1[1]) > 1e-12
+    longitudinal_regular = (
+        np.abs(coefficient_r1[0] + coefficient_kpl - coefficient_r1[1]) > 1e-12
+    )
     regular_mode = (
         1
         if np.all(longitudinal_regular)
@@ -1502,6 +1767,22 @@ def simulate_dynamic_sequence(
             regular_mode,
         )
         if sequence_kernel in {"optimized", "native_serial", "native_parallel"}
+        else None
+    )
+    coefficient_zero_kpl = np.zeros_like(coefficient_kpl)
+    zero_kpl = np.zeros_like(kpl)
+    inactive_longitudinal_regular = (
+        np.abs(coefficient_r1[0] - coefficient_r1[1]) > 1e-12
+    )
+    inactive_regular_mode = 1 if inactive_longitudinal_regular else -1
+    inactive_longitudinal_scratch = (
+        (
+            np.empty_like(kpl),
+            np.empty_like(kpl),
+            np.empty_like(kpl),
+            inactive_regular_mode,
+        )
+        if sequence_kernel == "optimized"
         else None
     )
     native_parallel_threshold = 1024
@@ -1542,7 +1823,7 @@ def simulate_dynamic_sequence(
         seen_durations = set()
         hard_end = min(interval_count, first_interval + native_block_interval_limit)
         while end < hard_end:
-            if compiled.rf_hz[end] != 0.0:
+            if rf_hz[end] != 0.0:
                 break
             half_duration = float(compiled.dt_s[end] / 2.0)
             if half_duration not in seen_durations:
@@ -1568,12 +1849,13 @@ def simulate_dynamic_sequence(
                 group_by_duration[half_duration] = group
                 prepared = coefficient_cache.get(half_duration)
                 if prepared is None:
-                    prepared = _prepare_longitudinal_step(
+                    prepared = _prepare_longitudinal_step_for_dtype(
                         kpl,
                         r1[0],
                         r1[1],
                         half_duration,
                         with_source=False,
+                        dtype=real_dtype,
                     )
                     coefficient_cache.put(half_duration, prepared)
                 prepared_by_group.append(prepared)
@@ -1607,18 +1889,26 @@ def simulate_dynamic_sequence(
         dt = compiled.dt_s[interval]
         interval_end = float(compiled.interval_end_s[interval])
         interval_mid = interval_start + dt / 2.0
-        gradient = compiled.gradient_hz_per_m[interval]
+        gradient = gradient_hz_per_m[interval]
+        conversion_active = interval_mid >= conversion_start_s
+        interval_kpl = kpl if conversion_active else zero_kpl
+        coefficient_interval_kpl = (
+            coefficient_kpl if conversion_active else coefficient_zero_kpl
+        )
+        interval_longitudinal_scratch = (
+            longitudinal_scratch if conversion_active else inactive_longitudinal_scratch
+        )
         if (
             sequence_kernel == "native_parallel"
             and native_block_enabled
             and interval >= native_preapplied_end
-            and compiled.rf_hz[interval] == 0.0
+            and rf_hz[interval] == 0.0
         ):
             preapply_native_longitudinal_block(interval)
         longitudinal_preapplied = (
             sequence_kernel == "native_parallel"
             and interval < native_preapplied_end
-            and compiled.rf_hz[interval] == 0.0
+            and rf_hz[interval] == 0.0
         )
         if sequence_kernel == "reference":
             gradient_frequency = positions @ gradient
@@ -1640,13 +1930,9 @@ def simulate_dynamic_sequence(
                 return phase
 
             def source_values(start_s, end_s):
-                if phantom.pyruvate_inflow is None:
+                if inflow_curve is None:
                     return None, None
-                start_value, end_value = (
-                    phantom.pyruvate_inflow.rate_curve_s_inv.interval_values(
-                        start_s, end_s
-                    )
-                )
+                start_value, end_value = inflow_curve.interval_values(start_s, end_s)
                 return inflow_delivery * start_value, inflow_delivery * end_value
 
             source_start, source_mid = source_values(interval_start, interval_mid)
@@ -1654,35 +1940,40 @@ def simulate_dynamic_sequence(
                 state,
                 phase_cycles(interval_start, interval_mid),
                 t2,
-                kpl,
+                interval_kpl,
                 r1,
                 dt / 2.0,
                 source_start,
                 source_mid,
             )
-            _rf_rotate(state, compiled.rf_hz[interval], dt)
+            _rf_rotate(state, rf_hz[interval], dt)
             source_mid, source_end = source_values(interval_mid, interval_end)
             _free_step(
                 state,
                 phase_cycles(interval_mid, interval_end),
                 t2,
-                kpl,
+                interval_kpl,
                 r1,
                 dt / 2.0,
                 source_mid,
                 source_end,
             )
         else:
-            half_duration = dt / 2.0
-            longitudinal_key = float(half_duration)
+            half_duration = real_type(dt / 2.0)
+            coefficient_half_duration = dt / 2.0
+            longitudinal_key = (
+                float(coefficient_half_duration),
+                conversion_active,
+            )
             longitudinal_prepared = coefficient_cache.get(longitudinal_key)
             if longitudinal_prepared is None:
-                longitudinal_prepared = _prepare_longitudinal_step(
-                    kpl,
-                    r1[0],
-                    r1[1],
-                    half_duration,
+                longitudinal_prepared = _prepare_longitudinal_step_for_dtype(
+                    coefficient_interval_kpl,
+                    coefficient_r1[0],
+                    coefficient_r1[1],
+                    coefficient_half_duration,
                     with_source=phantom.pyruvate_inflow is not None,
+                    dtype=real_dtype,
                 )
                 coefficient_cache.put(longitudinal_key, longitudinal_prepared)
             first_phase_duration = interval_mid - interval_start
@@ -1690,11 +1981,15 @@ def simulate_dynamic_sequence(
             if phantom.dynamic_b0 is None:
                 first_dynamic_integral = second_dynamic_integral = None
             else:
-                first_dynamic_integral = phantom.dynamic_b0.offset_curve_hz.integral(
-                    interval_start, interval_mid
+                first_dynamic_integral = real_type(
+                    phantom.dynamic_b0.offset_curve_hz.integral(
+                        interval_start, interval_mid
+                    )
                 )
-                second_dynamic_integral = phantom.dynamic_b0.offset_curve_hz.integral(
-                    interval_mid, interval_end
+                second_dynamic_integral = real_type(
+                    phantom.dynamic_b0.offset_curve_hz.integral(
+                        interval_mid, interval_end
+                    )
                 )
             gradient_key = tuple(float(value) for value in gradient)
             first_transverse_key = (
@@ -1725,8 +2020,8 @@ def simulate_dynamic_sequence(
                         * dynamic_b0_scale[None, :]
                         * first_dynamic_integral
                     )
-                first_transverse_factors = _prepare_transverse_factors(
-                    first_phase, t2, half_duration
+                first_transverse_factors = _prepare_transverse_factors_for_dtype(
+                    first_phase, t2, half_duration, real_dtype
                 )
                 transverse_cache.put(first_transverse_key, first_transverse_factors)
             if first_transverse_key == second_transverse_key:
@@ -1739,28 +2034,26 @@ def simulate_dynamic_sequence(
                         * dynamic_b0_scale[None, :]
                         * second_dynamic_integral
                     )
-                second_transverse_factors = _prepare_transverse_factors(
-                    second_phase, t2, half_duration
+                second_transverse_factors = _prepare_transverse_factors_for_dtype(
+                    second_phase, t2, half_duration, real_dtype
                 )
                 transverse_cache.put(second_transverse_key, second_transverse_factors)
             first_phase = second_phase = None
 
-            if phantom.pyruvate_inflow is None:
+            if inflow_curve is None:
                 source_start = source_mid = source_end = None
             else:
-                start_value, mid_value = (
-                    phantom.pyruvate_inflow.rate_curve_s_inv.interval_values(
-                        interval_start, interval_mid
-                    )
+                start_value, mid_value = inflow_curve.interval_values(
+                    interval_start, interval_mid
                 )
-                source_start = inflow_delivery * start_value
-                source_mid = inflow_delivery * mid_value
+                source_start = inflow_delivery * real_type(start_value)
+                source_mid = inflow_delivery * real_type(mid_value)
             if native_longitudinal_step is None:
                 _free_step(
                     state,
                     first_phase,
                     t2,
-                    kpl,
+                    interval_kpl,
                     r1,
                     half_duration,
                     source_start,
@@ -1768,7 +2061,7 @@ def simulate_dynamic_sequence(
                     transverse_factors=first_transverse_factors,
                     longitudinal_prepared=longitudinal_prepared,
                     transverse_state=transverse_state,
-                    longitudinal_scratch=longitudinal_scratch,
+                    longitudinal_scratch=interval_longitudinal_scratch,
                 )
             else:
                 for pool in range(2):
@@ -1784,13 +2077,21 @@ def simulate_dynamic_sequence(
                         half_duration,
                         regular_mode,
                     )
-            if compiled.rf_hz[interval] != 0.0:
+            if rf_hz[interval] != 0.0:
                 if native_rf_rotation_block is None:
                     sync_transverse_to_state()
-                    _rf_rotate(state, compiled.rf_hz[interval], dt)
+                    if real_dtype == np.dtype(np.float32):
+                        _rf_rotate_float32(
+                            state,
+                            _prepare_rf_rotation_for_dtype(
+                                rf_hz[interval], dt, real_dtype
+                            ),
+                        )
+                    else:
+                        _rf_rotate(state, rf_hz[interval], dt)
                     transverse_state[:] = state[:, :, 0] + 1j * state[:, :, 1]
                 else:
-                    rf_prepared = _prepare_rf_rotation(compiled.rf_hz[interval], dt)
+                    rf_prepared = _prepare_rf_rotation(rf_hz[interval], dt)
                     if rf_prepared is not None:
                         native_rf_rotation_block(
                             state,
@@ -1802,20 +2103,18 @@ def simulate_dynamic_sequence(
                             rf_prepared[4],
                             native_rf_threads,
                         )
-            if phantom.pyruvate_inflow is not None:
-                mid_value, end_value = (
-                    phantom.pyruvate_inflow.rate_curve_s_inv.interval_values(
-                        interval_mid, interval_end
-                    )
+            if inflow_curve is not None:
+                mid_value, end_value = inflow_curve.interval_values(
+                    interval_mid, interval_end
                 )
-                source_mid = inflow_delivery * mid_value
-                source_end = inflow_delivery * end_value
+                source_mid = inflow_delivery * real_type(mid_value)
+                source_end = inflow_delivery * real_type(end_value)
             if native_longitudinal_step is None:
                 _free_step(
                     state,
                     second_phase,
                     t2,
-                    kpl,
+                    interval_kpl,
                     r1,
                     half_duration,
                     source_mid,
@@ -1823,7 +2122,7 @@ def simulate_dynamic_sequence(
                     transverse_factors=second_transverse_factors,
                     longitudinal_prepared=longitudinal_prepared,
                     transverse_state=transverse_state,
-                    longitudinal_scratch=longitudinal_scratch,
+                    longitudinal_scratch=interval_longitudinal_scratch,
                 )
             else:
                 for pool in range(2):
@@ -1854,14 +2153,14 @@ def simulate_dynamic_sequence(
             )
 
     sync_transverse_to_state()
-    final_pool = np.zeros((2, phantom.nvoxels, 3), dtype=np.float64)
+    final_pool = np.zeros((2, phantom.nvoxels, 3), dtype=real_dtype)
     final_pool[:, active] = state
     final_pool = final_pool.reshape((2,) + phantom.shape + (3,))
     checkpoint_pool = None
     if checkpoint_states.size:
         checkpoint_pool = np.zeros(
             (compiled.checkpoint_times_s.size, 2, phantom.nvoxels, 3),
-            dtype=np.float64,
+            dtype=real_dtype,
         )
         checkpoint_pool[:, :, active] = checkpoint_states
         checkpoint_pool = checkpoint_pool.reshape(
@@ -1871,13 +2170,50 @@ def simulate_dynamic_sequence(
     spectroscopic_metadata = program.metadata.get("spectroscopic_acquisition")
     if spectroscopic_metadata is None:
         try:
-            from .sequence.acquisition import infer_spectroscopic_acquisition
-
             spectroscopic_metadata = infer_spectroscopic_acquisition(
                 program, compiled=compiled
             ).to_metadata()
         except ValueError:
             spectroscopic_metadata = None
+    cartesian_metadata = program.metadata.get("cartesian_acquisition")
+    if cartesian_metadata is None:
+        program_acquisition = program.metadata.get("acquisition")
+        if (
+            isinstance(program_acquisition, dict)
+            and program_acquisition.get("type") == "cartesian_2d"
+        ):
+            cartesian_metadata = program_acquisition
+    cartesian_frame_metadata = program.metadata.get("cartesian_acquisition_frames")
+    cartesian_volume_metadata = program.metadata.get("cartesian_acquisition_volumes")
+    if spectroscopic_metadata is None and cartesian_metadata is None:
+        try:
+            cartesian_metadata = infer_cartesian_acquisition(
+                program, compiled=compiled
+            ).to_metadata()
+        except ValueError:
+            if cartesian_frame_metadata is None:
+                try:
+                    cartesian_frame_metadata = infer_cartesian_acquisition_frames(
+                        program, compiled=compiled
+                    ).to_metadata()
+                except ValueError:
+                    cartesian_frame_metadata = None
+    if (
+        spectroscopic_metadata is None
+        and cartesian_metadata is None
+        and cartesian_frame_metadata is not None
+        and cartesian_volume_metadata is None
+    ):
+        try:
+            cartesian_volume_metadata = infer_cartesian_acquisition_volumes(
+                program,
+                compiled=compiled,
+                frames=CartesianAcquisitionFrames.from_metadata(
+                    cartesian_frame_metadata
+                ),
+            ).to_metadata()
+        except ValueError:
+            cartesian_volume_metadata = None
     return SequenceSimulationResult(
         signal=species_signal.sum(axis=0),
         adc_times_s=compiled.adc_times_s,
@@ -1892,12 +2228,20 @@ def simulate_dynamic_sequence(
             "pool_names": tuple(pool.name for pool in phantom.pools),
             "acquisition_dimensions": dimensions.to_metadata(),
             "spectroscopic_acquisition": spectroscopic_metadata,
+            "cartesian_acquisition": cartesian_metadata,
+            "cartesian_acquisition_frames": cartesian_frame_metadata,
+            "cartesian_acquisition_volumes": cartesian_volume_metadata,
+            "sequence_definitions": dict(program.metadata.get("definitions", {})),
             "field_strength_t": field,
             "nucleus": effective_nucleus,
             "spectral_reference_ppm": phantom.spectral_reference_ppm,
             "spectral_bandwidth_ppm": phantom.spectral_bandwidth_ppm,
             "spectral_points": phantom.spectral_points,
             "signal_weighting": signal_weighting,
+            "simulation_precision": simulation_precision,
+            "state_dtype": real_dtype.name,
+            "signal_dtype": complex_dtype.name,
+            "coefficient_precompute_dtype": "float64",
             "sequence_kernel": sequence_kernel,
             "requested_sequence_kernel": requested_sequence_kernel,
             "native_fallback_reason": native_fallback_reason,
@@ -1918,6 +2262,10 @@ def simulate_dynamic_sequence(
             ),
             "pyruvate_inflow": phantom.pyruvate_inflow is not None,
             "dynamic_b0": phantom.dynamic_b0 is not None,
+            "conversion_start_s": phantom.conversion_start_s,
+            "kinetics_time_offset_s": phantom.kinetics_time_offset_s,
+            "sequence_conversion_start_s": conversion_start_s,
+            "kinetic_preroll_start_s": preroll_start_s,
             "pyruvate_inflow_curve": (
                 None
                 if phantom.pyruvate_inflow is None

@@ -1492,7 +1492,7 @@ class SpectralPhantomFactory:
 
         # Single voxel phantom (1x1x1)
         shape = (1, 1, 1)
-        fov = (0.02, 0.02, 0.02)  # 2 cm voxel
+        fov = (0.02, 0.02, 0.02)  # 20 mm voxel
 
         # Create concentration maps
         concentration_maps = {}

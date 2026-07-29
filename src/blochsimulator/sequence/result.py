@@ -111,6 +111,21 @@ class SequenceSimulationResult:
             raise ValueError("Cartesian volume metadata does not match the ADC stream")
         return volumes
 
+    @property
+    def spiral_acquisition(self):
+        """Return explicit 2D spiral frame metadata when present."""
+        metadata = self.metadata.get("spiral_acquisition")
+        if metadata is None:
+            return None
+        from .acquisition import SpiralAcquisition
+
+        acquisition = SpiralAcquisition.from_metadata(metadata)
+        if acquisition.num_samples != self.adc_times_s.size:
+            raise ValueError(
+                "spiral acquisition metadata does not match the ADC stream"
+            )
+        return acquisition
+
     def to_dict(self) -> Dict[str, Any]:
         """Return a compatibility-friendly dictionary without copying arrays."""
         return {
@@ -197,6 +212,7 @@ class SequenceSimulationResult:
         cartesian = self.cartesian_acquisition
         cartesian_frames = self.cartesian_acquisition_frames
         cartesian_volumes = self.cartesian_acquisition_volumes
+        spiral = self.spiral_acquisition
         if cartesian is not None:
             kspace = self.to_cartesian_kspace(cartesian)
             image = self.reconstruct_cartesian(cartesian)
@@ -318,6 +334,44 @@ class SequenceSimulationResult:
                 volume_dims,
                 np.abs(image_3d),
             )
+        if spiral is not None:
+            spiral_kspace = np.stack(
+                [spiral.grid_kspace(self, frame) for frame in range(spiral.num_frames)],
+                axis=0,
+            )
+            spiral_image = np.stack(
+                [spiral.reconstruct(self, frame) for frame in range(spiral.num_frames)],
+                axis=0,
+            )
+            spiral_dims = ["spiral_frame", "phase_y", "read_x"]
+            if self.signal.ndim == 2:
+                spiral_dims.insert(1, "coil")
+            coords.update(
+                {
+                    "spiral_frame": np.arange(spiral.num_frames),
+                    "phase_y": np.arange(spiral.matrix[1]),
+                    "read_x": np.arange(spiral.matrix[0]),
+                    "spiral_grid_kx_cyc_per_m": (
+                        "read_x",
+                        spiral.kx_grid_cyc_per_m,
+                    ),
+                    "spiral_grid_ky_cyc_per_m": (
+                        "phase_y",
+                        spiral.ky_grid_cyc_per_m,
+                    ),
+                }
+            )
+            for axis_index, axis in enumerate(spiral.dimensions.AXIS_NAMES):
+                coords[f"spiral_frame_{axis}_index"] = (
+                    "spiral_frame",
+                    [frame[axis_index] for frame in spiral.frame_indices],
+                )
+            data_vars["spiral_gridded_kspace"] = (spiral_dims, spiral_kspace)
+            data_vars["spiral_image"] = (spiral_dims, spiral_image)
+            data_vars["spiral_image_magnitude"] = (
+                spiral_dims,
+                np.abs(spiral_image),
+            )
         if self.checkpoint_magnetization is not None:
             coords["checkpoint"] = self.checkpoint_times_s
             data_vars["checkpoint_magnetization"] = (
@@ -342,6 +396,8 @@ class SequenceSimulationResult:
         spectroscopy = self.spectroscopic_acquisition
         if spectroscopy is not None:
             csi_dims = ["phase_y", "phase_x", "spectral_point"]
+            if spectroscopy.num_repetitions > 1:
+                csi_dims.insert(0, "repetition")
             if self.signal.ndim == 2:
                 csi_dims.insert(0, "coil")
             coords.update(
@@ -367,6 +423,8 @@ class SequenceSimulationResult:
                     ),
                 }
             )
+            if spectroscopy.num_repetitions > 1:
+                coords["repetition"] = np.arange(spectroscopy.num_repetitions)
             data_vars["csi_kspace"] = (
                 csi_dims,
                 spectroscopy.reshape_signal(self.signal),
@@ -381,6 +439,8 @@ class SequenceSimulationResult:
             )
             if self.species_signal is not None:
                 pool_csi_dims = ["pool", "phase_y", "phase_x", "spectral_point"]
+                if spectroscopy.num_repetitions > 1:
+                    pool_csi_dims.insert(1, "repetition")
                 if self.species_signal.ndim == 3:
                     pool_csi_dims.insert(1, "coil")
                 data_vars["species_csi_kspace"] = (
@@ -420,6 +480,8 @@ class SequenceSimulationResult:
             "cartesian_kx_cyc_per_m",
             "cartesian_ky_cyc_per_m",
             "cartesian_kz_cyc_per_m",
+            "spiral_grid_kx_cyc_per_m",
+            "spiral_grid_ky_cyc_per_m",
         ):
             if axis in dataset.coords:
                 dataset[axis].attrs.update(units="cycles/m")
@@ -489,6 +551,7 @@ class SequenceSimulationResult:
         cartesian = self.cartesian_acquisition
         cartesian_frames = self.cartesian_acquisition_frames
         cartesian_volumes = self.cartesian_acquisition_volumes
+        spiral = self.spiral_acquisition
         if cartesian is not None:
             image = self.reconstruct_cartesian(cartesian)
             arrays.update(
@@ -561,6 +624,29 @@ class SequenceSimulationResult:
                 arrays[f"cartesian_3d_{axis}_index"] = np.asarray(
                     cartesian_volumes.axis_values(axis), dtype=np.int64
                 )
+        if spiral is not None:
+            spiral_image = np.stack(
+                [spiral.reconstruct(self, frame) for frame in range(spiral.num_frames)],
+                axis=0,
+            )
+            arrays.update(
+                {
+                    "spiral_gridded_kspace": np.stack(
+                        [
+                            spiral.grid_kspace(self, frame)
+                            for frame in range(spiral.num_frames)
+                        ],
+                        axis=0,
+                    ),
+                    "spiral_image": spiral_image,
+                    "spiral_image_magnitude": np.abs(spiral_image),
+                    "spiral_grid_kx_cyc_per_m": spiral.kx_grid_cyc_per_m,
+                    "spiral_grid_ky_cyc_per_m": spiral.ky_grid_cyc_per_m,
+                    "spiral_frame_indices": np.asarray(
+                        spiral.frame_indices, dtype=np.int64
+                    ),
+                }
+            )
         spectroscopy = self.spectroscopic_acquisition
         if spectroscopy is not None:
             arrays.update(

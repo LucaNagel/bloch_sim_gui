@@ -19,10 +19,11 @@ from typing import Optional
 from pathlib import Path
 
 from ..memory import MemoryPolicy, format_bytes, resolve_memory_budget
+from ..sequence.scanner import ScannerParameters
 
 
 class SettingsDialog(QDialog):
-    """Configure persistent application, memory and interface settings."""
+    """Configure persistent application, scanner and simulation settings."""
 
     MODES = (
         ("Automatic reserve (recommended)", "automatic"),
@@ -61,8 +62,10 @@ class SettingsDialog(QDialog):
         thread_mode: str = "automatic",
         manual_thread_count: int = 4,
         detected_thread_count: Optional[int] = None,
+        scanner_parameters: Optional[ScannerParameters] = None,
     ):
         super().__init__(parent)
+        scanner_parameters = ScannerParameters.from_mapping(scanner_parameters)
         self.setWindowTitle("Settings")
         self.setMinimumWidth(600)
 
@@ -179,6 +182,123 @@ class SettingsDialog(QDialog):
         )
         self.tabs.addTab(simulation_tab, "Simulation")
 
+        scanner_tab = QWidget()
+        scanner_layout = QVBoxLayout(scanner_tab)
+        scanner_form = QFormLayout()
+
+        self.scanner_max_grad_spin = QDoubleSpinBox()
+        self.scanner_max_grad_spin.setObjectName("scanner_max_grad_mtm")
+        self.scanner_max_grad_spin.setRange(0.1, 1000.0)
+        self.scanner_max_grad_spin.setDecimals(2)
+        self.scanner_max_grad_spin.setSingleStep(1.0)
+        self.scanner_max_grad_spin.setSuffix(" mT/m")
+        self.scanner_max_grad_spin.setValue(scanner_parameters.max_grad_mtm)
+        self.scanner_max_grad_spin.setToolTip(
+            "Maximum gradient amplitude used when generated Pulseq sequences are designed."
+        )
+        scanner_form.addRow("Maximum gradient:", self.scanner_max_grad_spin)
+
+        self.scanner_max_slew_spin = QDoubleSpinBox()
+        self.scanner_max_slew_spin.setObjectName("scanner_max_slew_tms")
+        self.scanner_max_slew_spin.setRange(0.1, 10000.0)
+        self.scanner_max_slew_spin.setDecimals(2)
+        self.scanner_max_slew_spin.setSingleStep(5.0)
+        self.scanner_max_slew_spin.setSuffix(" T/m/s")
+        self.scanner_max_slew_spin.setValue(scanner_parameters.max_slew_tms)
+        self.scanner_max_slew_spin.setToolTip(
+            "Maximum gradient slew rate used for generated Pulseq waveforms."
+        )
+        scanner_form.addRow("Maximum slew rate:", self.scanner_max_slew_spin)
+
+        def timing_spin(
+            object_name: str,
+            value_s: float,
+            *,
+            allow_zero: bool = False,
+        ) -> QDoubleSpinBox:
+            spin = QDoubleSpinBox()
+            spin.setObjectName(object_name)
+            spin.setRange(0.0 if allow_zero else 0.001, 1_000_000.0)
+            spin.setDecimals(3)
+            spin.setSingleStep(0.1)
+            spin.setSuffix(" µs")
+            spin.setValue(float(value_s) * 1e6)
+            return spin
+
+        self.scanner_grad_raster_spin = timing_spin(
+            "scanner_grad_raster_time_us", scanner_parameters.grad_raster_time_s
+        )
+        self.scanner_grad_raster_spin.setToolTip(
+            "Gradient waveform raster interval used by the scanner."
+        )
+        scanner_form.addRow("Gradient raster time:", self.scanner_grad_raster_spin)
+
+        self.scanner_rf_raster_spin = timing_spin(
+            "scanner_rf_raster_time_us", scanner_parameters.rf_raster_time_s
+        )
+        self.scanner_rf_raster_spin.setToolTip(
+            "RF waveform raster interval used by the scanner."
+        )
+        scanner_form.addRow("RF raster time:", self.scanner_rf_raster_spin)
+
+        self.scanner_adc_raster_spin = timing_spin(
+            "scanner_adc_raster_time_us", scanner_parameters.adc_raster_time_s
+        )
+        self.scanner_adc_raster_spin.setToolTip(
+            "ADC dwell-time raster used to quantize generated acquisitions."
+        )
+        scanner_form.addRow("ADC raster time:", self.scanner_adc_raster_spin)
+
+        self.scanner_block_raster_spin = timing_spin(
+            "scanner_block_duration_raster_us",
+            scanner_parameters.block_duration_raster_s,
+        )
+        self.scanner_block_raster_spin.setToolTip(
+            "Raster to which complete Pulseq block durations are aligned."
+        )
+        scanner_form.addRow("Block-duration raster:", self.scanner_block_raster_spin)
+
+        self.scanner_rf_ringdown_spin = timing_spin(
+            "scanner_rf_ringdown_time_us",
+            scanner_parameters.rf_ringdown_time_s,
+            allow_zero=True,
+        )
+        self.scanner_rf_ringdown_spin.setToolTip(
+            "Required RF ringdown interval after transmit events."
+        )
+        scanner_form.addRow("RF ringdown time:", self.scanner_rf_ringdown_spin)
+
+        self.scanner_rf_dead_time_spin = timing_spin(
+            "scanner_rf_dead_time_us",
+            scanner_parameters.rf_dead_time_s,
+            allow_zero=True,
+        )
+        self.scanner_rf_dead_time_spin.setToolTip(
+            "Required scanner dead time before RF events."
+        )
+        scanner_form.addRow("RF dead time:", self.scanner_rf_dead_time_spin)
+
+        self.scanner_adc_dead_time_spin = timing_spin(
+            "scanner_adc_dead_time_us",
+            scanner_parameters.adc_dead_time_s,
+            allow_zero=True,
+        )
+        self.scanner_adc_dead_time_spin.setToolTip(
+            "Required scanner dead time before ADC sampling."
+        )
+        scanner_form.addRow("ADC dead time:", self.scanner_adc_dead_time_spin)
+
+        scanner_layout.addLayout(scanner_form)
+        scanner_explanation = QLabel(
+            "These limits are applied to all EPI, spiral, CSI and bSSFP "
+            "sequences generated after the settings are saved. Imported "
+            "Pulseq files keep their own event timing."
+        )
+        scanner_explanation.setWordWrap(True)
+        scanner_layout.addWidget(scanner_explanation)
+        scanner_layout.addStretch()
+        self.tabs.addTab(scanner_tab, "Scanner")
+
         memory_tab = QWidget()
         memory_layout = QVBoxLayout(memory_tab)
         form = QFormLayout()
@@ -279,7 +399,13 @@ class SettingsDialog(QDialog):
         self._update_summary()
         self._update_simulation_controls()
 
-        tab_names = {"general": 0, "simulation": 1, "memory": 2, "interface": 3}
+        tab_names = {
+            "general": 0,
+            "simulation": 1,
+            "scanner": 2,
+            "memory": 3,
+            "interface": 4,
+        }
         self.tabs.setCurrentIndex(tab_names.get(initial_tab, 0))
 
     def get_policy(self) -> MemoryPolicy:
@@ -315,6 +441,22 @@ class SettingsDialog(QDialog):
 
     def manual_thread_count(self) -> int:
         return int(self.manual_thread_count_spin.value())
+
+    def scanner_parameters(self) -> ScannerParameters:
+        """Return the validated scanner hardware profile selected in the dialog."""
+        return ScannerParameters(
+            max_grad_mtm=float(self.scanner_max_grad_spin.value()),
+            max_slew_tms=float(self.scanner_max_slew_spin.value()),
+            grad_raster_time_s=float(self.scanner_grad_raster_spin.value()) * 1e-6,
+            rf_raster_time_s=float(self.scanner_rf_raster_spin.value()) * 1e-6,
+            adc_raster_time_s=float(self.scanner_adc_raster_spin.value()) * 1e-6,
+            block_duration_raster_s=(
+                float(self.scanner_block_raster_spin.value()) * 1e-6
+            ),
+            rf_ringdown_time_s=(float(self.scanner_rf_ringdown_spin.value()) * 1e-6),
+            rf_dead_time_s=float(self.scanner_rf_dead_time_spin.value()) * 1e-6,
+            adc_dead_time_s=float(self.scanner_adc_dead_time_spin.value()) * 1e-6,
+        )
 
     def _update_simulation_controls(self):
         preset = self.sequence_timestep_preset()

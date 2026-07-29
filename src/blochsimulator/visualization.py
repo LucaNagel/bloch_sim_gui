@@ -624,7 +624,10 @@ class ExportDataDialog(QDialog):
         data_layout.addWidget(self.chk_hdf5)
 
         self.chk_nb_analysis = QCheckBox("Jupyter Notebook: Analysis")
-        self.chk_nb_analysis.setChecked(False)
+        self.chk_nb_analysis.setChecked(True)
+        self.chk_nb_analysis.setToolTip(
+            "Loads the accompanying HDF5 data and provides analysis plots."
+        )
         data_layout.addWidget(self.chk_nb_analysis)
 
         self.chk_nb_repro = QCheckBox("Jupyter Notebook: Reproduce")

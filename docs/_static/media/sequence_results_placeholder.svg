@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" viewBox="0 0 1200 675" role="img" aria-labelledby="title description">
+  <title id="title">Sequence simulation results screenshot placeholder</title>
+  <desc id="description">Placeholder showing the planned position of the sequence simulation results screenshot.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#172033"/>
+      <stop offset="1" stop-color="#263650"/>
+    </linearGradient>
+    <linearGradient id="image" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#301860"/>
+      <stop offset="0.48" stop-color="#e2487f"/>
+      <stop offset="0.7" stop-color="#f3c969"/>
+      <stop offset="1" stop-color="#fff7cb"/>
+    </linearGradient>
+    <radialGradient id="kspace">
+      <stop offset="0" stop-color="#fff8bc"/>
+      <stop offset="0.18" stop-color="#4dd4d0"/>
+      <stop offset="0.55" stop-color="#28436f"/>
+      <stop offset="1" stop-color="#10182a"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="675" rx="24" fill="url(#background)"/>
+  <rect x="42" y="42" width="1116" height="591" rx="18" fill="#111827" stroke="#52627a" stroke-width="2"/>
+  <rect x="42" y="42" width="1116" height="52" rx="18" fill="#202c40"/>
+  <circle cx="74" cy="68" r="7" fill="#ff6b6b"/>
+  <circle cx="98" cy="68" r="7" fill="#ffd166"/>
+  <circle cx="122" cy="68" r="7" fill="#5dd39e"/>
+  <text x="600" y="75" fill="#dbeafe" font-family="Arial, sans-serif" font-size="18" text-anchor="middle">Sequence Simulation · Results</text>
+
+  <g font-family="Arial, sans-serif" font-size="14" text-anchor="middle">
+    <rect x="65" y="113" width="180" height="35" rx="7" fill="#25344c"/>
+    <text x="155" y="136" fill="#c7d6eb">Signal / CSI spectrum</text>
+    <rect x="255" y="113" width="120" height="35" rx="7" fill="#25344c"/>
+    <text x="315" y="136" fill="#c7d6eb">2D k-space</text>
+    <rect x="385" y="113" width="150" height="35" rx="7" fill="#2f80ed"/>
+    <text x="460" y="136" fill="white">Reconstruction</text>
+    <rect x="545" y="113" width="155" height="35" rx="7" fill="#25344c"/>
+    <text x="622" y="136" fill="#c7d6eb">Spatial M</text>
+  </g>
+
+  <rect x="65" y="170" width="500" height="405" rx="12" fill="#182235" stroke="#3c4a60"/>
+  <text x="90" y="205" fill="#f8fafc" font-family="Arial, sans-serif" font-size="18" font-weight="700">ADC signal and spectrum</text>
+  <g stroke="#31415a" stroke-width="1">
+    <line x1="100" y1="250" x2="530" y2="250"/>
+    <line x1="100" y1="320" x2="530" y2="320"/>
+    <line x1="100" y1="390" x2="530" y2="390"/>
+    <line x1="100" y1="460" x2="530" y2="460"/>
+    <line x1="100" y1="530" x2="530" y2="530"/>
+  </g>
+  <path d="M100 395 C130 170, 155 520, 190 350 S250 285, 285 390 S345 455, 380 335 S440 235, 530 410" fill="none" stroke="#55c2ff" stroke-width="4"/>
+  <path d="M100 405 C145 520, 175 260, 220 390 S300 455, 340 370 S415 300, 530 425" fill="none" stroke="#df70ff" stroke-width="3" opacity="0.9"/>
+
+  <rect x="590" y="170" width="545" height="405" rx="12" fill="#182235" stroke="#3c4a60"/>
+  <text x="615" y="205" fill="#f8fafc" font-family="Arial, sans-serif" font-size="18" font-weight="700">K-space and reconstruction</text>
+  <rect x="625" y="235" width="210" height="210" rx="8" fill="url(#kspace)"/>
+  <g stroke="#6a7890" stroke-width="1" opacity="0.35">
+    <line x1="695" y1="235" x2="695" y2="445"/>
+    <line x1="765" y1="235" x2="765" y2="445"/>
+    <line x1="625" y1="305" x2="835" y2="305"/>
+    <line x1="625" y1="375" x2="835" y2="375"/>
+  </g>
+  <rect x="890" y="235" width="210" height="210" rx="8" fill="#171d2d"/>
+  <ellipse cx="995" cy="340" rx="74" ry="88" fill="url(#image)" opacity="0.92"/>
+  <ellipse cx="974" cy="322" rx="23" ry="31" fill="#f9f5d0" opacity="0.78"/>
+  <ellipse cx="1024" cy="361" rx="30" ry="22" fill="#722d77" opacity="0.7"/>
+  <text x="730" y="477" fill="#a9bdd9" font-family="Arial, sans-serif" font-size="15" text-anchor="middle">k-space</text>
+  <text x="995" y="477" fill="#a9bdd9" font-family="Arial, sans-serif" font-size="15" text-anchor="middle">reconstruction</text>
+
+  <rect x="286" y="281" width="628" height="116" rx="16" fill="#0f1726" fill-opacity="0.94" stroke="#8a7dff" stroke-width="2"/>
+  <text x="600" y="326" fill="#f8fafc" font-family="Arial, sans-serif" font-size="27" font-weight="700" text-anchor="middle">Simulation results screenshot</text>
+  <text x="600" y="363" fill="#a9bdd9" font-family="Arial, sans-serif" font-size="18" text-anchor="middle">Replace this placeholder with the final result capture</text>
+</svg>

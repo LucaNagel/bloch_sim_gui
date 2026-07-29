@@ -61,6 +61,7 @@ class SequenceCompiler:
         checkpoints_s: Sequence[float] = (),
         extra_boundaries_s: Sequence[float] = (),
         simulation_timestep_s: float | None = None,
+        acquisition_only: bool = False,
         status_callback: Callable[[str], None] | None = None,
     ) -> CompiledSequence:
         def status(message: str) -> None:
@@ -71,6 +72,10 @@ class SequenceCompiler:
             not np.isfinite(simulation_timestep_s) or simulation_timestep_s <= 0
         ):
             raise ValueError("simulation_timestep_s must be finite and positive")
+        if acquisition_only and simulation_timestep_s is not None:
+            raise ValueError(
+                "acquisition-only compilation does not use an RF simulation time step"
+            )
 
         status(f"Validating {len(program.events):,} sequence events…")
         checkpoints = self._validate_checkpoints(checkpoints_s, program.duration_s)
@@ -81,11 +86,14 @@ class SequenceCompiler:
 
         status(f"Expanding {len(program.adc_events):,} ADC events…")
         adc_times, adc_demod = self._adc_samples(program.adc_events)
-        resolution = (
-            "native event rasters"
-            if simulation_timestep_s is None
-            else f"{simulation_timestep_s * 1e6:g} µs RF-active time step"
-        )
+        if acquisition_only:
+            resolution = "acquisition boundaries without RF raster expansion"
+        else:
+            resolution = (
+                "native event rasters"
+                if simulation_timestep_s is None
+                else f"{simulation_timestep_s * 1e6:g} µs RF-active time step"
+            )
         status(f"Building the sparse sequence timeline ({resolution})…")
         boundaries = self._build_boundaries(
             program,
@@ -93,6 +101,7 @@ class SequenceCompiler:
             checkpoints,
             extra_boundaries,
             simulation_timestep_s,
+            acquisition_only,
         )
         if boundaries.size == 1:
             dt = np.zeros(0, dtype=float)
@@ -109,15 +118,18 @@ class SequenceCompiler:
             # Accumulate each event only into intervals it overlaps. Iterating over
             # every event for every interval made full GRE/EPI programs quadratic
             # in practice, even though the event collection is sparse.
-            status(f"Rasterizing {len(program.rf_events):,} RF events…")
-            for event in program.rf_events:
-                first, last = self._overlapping_interval_range(
-                    interval_end, starts, event.start_s, event.end_s
-                )
-                for index in range(first, last):
-                    rf_integrals[index] += self._rf_event_integral(
-                        event, starts[index], interval_end[index]
+            if acquisition_only:
+                status("Skipping RF rasterization for acquisition inference…")
+            else:
+                status(f"Rasterizing {len(program.rf_events):,} RF events…")
+                for event in program.rf_events:
+                    first, last = self._overlapping_interval_range(
+                        interval_end, starts, event.start_s, event.end_s
                     )
+                    for index in range(first, last):
+                        rf_integrals[index] += self._rf_event_integral(
+                            event, starts[index], interval_end[index]
+                        )
             status(f"Rasterizing {len(program.gradient_events):,} gradient events…")
             for event in program.gradient_events:
                 axis_index = "xyz".index(event.axis)
@@ -161,7 +173,27 @@ class SequenceCompiler:
                 "version": program.version,
                 "program_metadata": dict(program.metadata),
                 "extra_boundary_count": int(extra_boundaries.size),
+                "acquisition_only": bool(acquisition_only),
             },
+        )
+
+    def compile_acquisition(
+        self,
+        program: SequenceProgram,
+        *,
+        status_callback: Callable[[str], None] | None = None,
+    ) -> CompiledSequence:
+        """Compile exact ADC times and gradient moments without expanding RF rasters.
+
+        The returned timeline retains every event boundary and ADC observation, so
+        Cartesian/CSI inference and plotting see the same gradient moments as a full
+        compilation. RF amplitudes are intentionally zero because no Bloch evolution
+        is performed with this lightweight representation.
+        """
+        return self.compile(
+            program,
+            acquisition_only=True,
+            status_callback=status_callback,
         )
 
     @staticmethod
@@ -216,6 +248,7 @@ class SequenceCompiler:
         checkpoints: np.ndarray,
         extra_boundaries: np.ndarray,
         simulation_timestep_s: float | None,
+        acquisition_only: bool,
     ) -> np.ndarray:
         values = [0.0, program.duration_s]
         values.extend(adc_times.tolist())
@@ -223,6 +256,8 @@ class SequenceCompiler:
         values.extend(extra_boundaries.tolist())
         for event in program.events:
             values.extend((event.start_s, event.end_s))
+        if acquisition_only:
+            return self._coalesce_boundaries(values, program.duration_s)
         rf_ranges = sorted(
             ((event.start_s, event.end_s) for event in program.rf_events),
             key=lambda value: value[0],

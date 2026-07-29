@@ -132,6 +132,17 @@ def test_time_curve_integrates_linear_step_and_outside_regions():
     assert step.integral(0.0, 4.0) == pytest.approx(4.0)
 
 
+def test_time_curve_shift_preserves_values_and_shape():
+    curve = TimeCurve((0.0, 2.0), (0.25, 1.0), "linear", "zero")
+
+    shifted = curve.shifted(-1.5)
+
+    assert shifted.times_s == (-1.5, 0.5)
+    assert shifted.values == curve.values
+    assert shifted.interpolation == curve.interpolation
+    assert shifted.outside == curve.outside
+
+
 def test_two_pool_kinetics_preview_uses_inflow_and_conversion_solver():
     times_s = np.linspace(0.0, 2.0, 101)
     inflow = TimeCurve((0.0, 2.0), (1.0, 1.0), "linear", "zero")
@@ -148,6 +159,137 @@ def test_two_pool_kinetics_preview_uses_inflow_and_conversion_solver():
     assert converted[0, -1] < unconverted[0, -1]
     assert converted[1, -1] > 0.0
     assert converted[:, -1].sum() == pytest.approx(2.0, rel=1e-12)
+
+
+def test_negative_inflow_and_conversion_start_set_sequence_start_distribution():
+    times_s = np.asarray([-2.0, -1.0, 0.0])
+    inflow = TimeCurve((-2.0, 0.0), (1.0, 1.0), "linear", "zero")
+    preview = simulate_two_pool_kinetics(
+        times_s,
+        (0.0, 0.0),
+        (1e15, 1e15),
+        0.2,
+        inflow,
+        conversion_start_s=-1.0,
+        initial_time_s=-2.0,
+    )
+    shape = (1, 1, 1)
+    phantom = DynamicSpectralPhantom(
+        shape=shape,
+        fov=(0.01, 0.01, 0.01),
+        pools=(
+            ChemicalSpecies("Pyruvate", 0.0, 1e15, 1.0),
+            ChemicalSpecies("Lactate", 12.0, 1e15, 1.0),
+        ),
+        initial_concentration_maps={
+            "Pyruvate": np.zeros(shape),
+            "Lactate": np.zeros(shape),
+        },
+        kpl_map_s_inv=np.full(shape, 0.2),
+        pyruvate_inflow=PyruvateInflow(inflow, np.ones(shape)),
+        conversion_start_s=-1.0,
+        nucleus="C13",
+    )
+
+    result = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        SequenceProgram((), duration_s=0.0),
+        phantom,
+        checkpoints_s=(0.0,),
+    )
+
+    expected_pyruvate = np.exp(-0.2) + (1.0 - np.exp(-0.2)) / 0.2
+    expected_lactate = 2.0 - expected_pyruvate
+    assert preview[:, -1] == pytest.approx(
+        [expected_pyruvate, expected_lactate],
+        rel=1e-12,
+    )
+    assert result.final_pool_magnetization[..., 2].reshape(2) == pytest.approx(
+        preview[:, -1],
+        rel=1e-12,
+    )
+    assert result.metadata["kinetic_preroll_start_s"] == -2.0
+    assert result.metadata["conversion_start_s"] == -1.0
+
+
+@pytest.mark.parametrize("sequence_kernel", ["reference", "optimized"])
+def test_global_kinetics_offset_shifts_inflow_and_conversion_together(
+    sequence_kernel,
+):
+    shape = (1, 1, 1)
+    phantom = DynamicSpectralPhantom(
+        shape=shape,
+        fov=(0.01, 0.01, 0.01),
+        pools=(
+            ChemicalSpecies("Pyruvate", 0.0, 1e15, 1.0),
+            ChemicalSpecies("Lactate", 12.0, 1e15, 1.0),
+        ),
+        initial_concentration_maps={
+            "Pyruvate": np.zeros(shape),
+            "Lactate": np.zeros(shape),
+        },
+        kpl_map_s_inv=np.ones(shape),
+        pyruvate_inflow=PyruvateInflow(
+            TimeCurve((0.0, 2.0), (1.0, 1.0), "linear", "zero"),
+            np.ones(shape),
+        ),
+        conversion_start_s=1.0,
+        kinetics_time_offset_s=1.0,
+        nucleus="C13",
+    )
+
+    assert phantom.inflow_curve_on_sequence_timeline.times_s == (-1.0, 1.0)
+    assert phantom.conversion_start_on_sequence_timeline_s == 0.0
+    assert phantom.dynamic_breakpoints_s(1.0) == (0.0, 1.0)
+
+    result = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        SequenceProgram((), duration_s=1.0),
+        phantom,
+        checkpoints_s=(0.0,),
+        sequence_kernel=sequence_kernel,
+    )
+
+    assert result.checkpoint_pool_magnetization[0, ..., 2].reshape(2) == pytest.approx(
+        [1.0, 0.0], rel=1e-12, abs=1e-12
+    )
+    assert result.final_pool_magnetization[..., 2].reshape(2) == pytest.approx(
+        [1.0, 1.0], rel=1e-12, abs=1e-12
+    )
+    assert result.metadata["kinetics_time_offset_s"] == 1.0
+    assert result.metadata["conversion_start_s"] == 1.0
+    assert result.metadata["sequence_conversion_start_s"] == 0.0
+    assert result.metadata["kinetic_preroll_start_s"] == -1.0
+
+
+@pytest.mark.parametrize("sequence_kernel", ["reference", "optimized"])
+def test_positive_conversion_start_delays_kpl_during_sequence(sequence_kernel):
+    shape = (1, 1, 1)
+    phantom = DynamicSpectralPhantom(
+        shape=shape,
+        fov=(0.01, 0.01, 0.01),
+        pools=(
+            ChemicalSpecies("Pyruvate", 0.0, 1e15, 1.0),
+            ChemicalSpecies("Lactate", 12.0, 1e15, 1.0),
+        ),
+        initial_concentration_maps={
+            "Pyruvate": np.ones(shape),
+            "Lactate": np.zeros(shape),
+        },
+        kpl_map_s_inv=np.full(shape, 0.2),
+        conversion_start_s=1.0,
+        nucleus="C13",
+    )
+
+    result = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        SequenceProgram((), duration_s=2.0),
+        phantom,
+        sequence_kernel=sequence_kernel,
+    )
+
+    expected_pyruvate = np.exp(-0.2)
+    assert result.final_pool_magnetization[..., 2].reshape(2) == pytest.approx(
+        [expected_pyruvate, 1.0 - expected_pyruvate],
+        rel=1e-12,
+    )
 
 
 def test_inflow_populates_initially_empty_voxel_with_analytic_t1_decay():
@@ -348,6 +490,96 @@ def test_optimized_dynamic_kernel_is_bitwise_equal_to_reference(with_drivers, kp
         "checkpoint_pool_magnetization",
     ):
         assert np.array_equal(getattr(optimized, name), getattr(reference, name))
+
+
+def test_float32_dynamic_shadow_path_reports_dtypes_and_tracks_float64():
+    phantom = _dynamic_phantom()
+    raster = 20e-6
+    phantom.pyruvate_inflow = PyruvateInflow(
+        TimeCurve(
+            (0.0, 6 * raster, 12 * raster),
+            (0.0, 0.2, 0.1),
+            "linear",
+            "hold",
+        ),
+        np.ones(phantom.shape),
+    )
+    phantom.dynamic_b0 = DynamicB0(
+        TimeCurve(
+            (0.0, 6 * raster, 12 * raster),
+            (-3.0, 5.0, 2.0),
+            "linear",
+            "hold",
+        ),
+        np.linspace(0.5, 1.0, phantom.nvoxels).reshape(phantom.shape),
+        (1.0, 0.8),
+    )
+    program = SequenceProgram(
+        (
+            RFEvent(
+                2 * raster,
+                np.asarray([80.0 + 20.0j, 120.0 - 10.0j, 60.0 + 5.0j, 0.0j]),
+                raster,
+            ),
+            GradientEvent("x", 0.0, np.linspace(-150.0, 200.0, 12), raster),
+            ADCEvent(0.0, 6, 2 * raster, phase_offset_rad=0.37),
+        ),
+        duration_s=12 * raster,
+    )
+    kwargs = {
+        "checkpoints_s": (0.0, 7 * raster, 12 * raster),
+        "simulation_timestep_s": 5e-6,
+    }
+    float64 = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        program, phantom, **kwargs
+    )
+    float32 = BlochSimulator(
+        use_parallel=False,
+        dynamic_sequence_precision="float32",
+    ).simulate_dynamic_sequence(program, phantom, **kwargs)
+
+    assert float32.metadata["simulation_precision"] == "float32"
+    assert float32.metadata["state_dtype"] == "float32"
+    assert float32.metadata["signal_dtype"] == "complex64"
+    assert float32.metadata["coefficient_precompute_dtype"] == "float64"
+    assert float32.signal.dtype == np.complex64
+    assert float32.species_signal.dtype == np.complex64
+    assert float32.final_magnetization.dtype == np.float32
+    assert float32.final_pool_magnetization.dtype == np.float32
+    assert float32.checkpoint_magnetization.dtype == np.float32
+    assert float32.checkpoint_pool_magnetization.dtype == np.float32
+    for name in (
+        "signal",
+        "species_signal",
+        "final_magnetization",
+        "final_pool_magnetization",
+        "checkpoint_magnetization",
+        "checkpoint_pool_magnetization",
+    ):
+        actual = getattr(float32, name)
+        expected = getattr(float64, name)
+        assert np.all(np.isfinite(actual))
+        np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-6)
+
+
+@pytest.mark.parametrize("kernel", ["reference", "native_serial", "native_parallel"])
+def test_float32_dynamic_shadow_path_rejects_nonoptimized_kernels(kernel):
+    with pytest.raises(ValueError, match="requires sequence_kernel='optimized'"):
+        BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+            SequenceProgram((), duration_s=1e-3),
+            _dynamic_phantom(),
+            sequence_kernel=kernel,
+            simulation_precision="float32",
+        )
+
+
+def test_bloch_simulator_rejects_native_kernel_with_float32_precision():
+    with pytest.raises(ValueError, match="requires the optimized kernel"):
+        BlochSimulator(
+            use_parallel=False,
+            dynamic_sequence_kernel="native_serial",
+            dynamic_sequence_precision="float32",
+        )
 
 
 @pytest.mark.parametrize(
@@ -581,8 +813,10 @@ def test_dynamic_phantom_round_trip(tmp_path, suffix):
 @pytest.mark.parametrize("suffix", [".npz", ".h5", ".nc"])
 def test_dynamic_driver_round_trip(tmp_path, suffix):
     phantom = _dynamic_phantom()
+    phantom.conversion_start_s = -1.5
+    phantom.kinetics_time_offset_s = 0.75
     phantom.pyruvate_inflow = PyruvateInflow(
-        TimeCurve((0.0, 2.0), (0.0, 0.4), "linear", "zero"),
+        TimeCurve((-2.0, 2.0), (0.0, 0.4), "linear", "zero"),
         np.ones(phantom.shape),
     )
     phantom.dynamic_b0 = DynamicB0(
@@ -600,6 +834,8 @@ def test_dynamic_driver_round_trip(tmp_path, suffix):
         loaded.pyruvate_inflow.delivery_map, phantom.pyruvate_inflow.delivery_map
     )
     assert loaded.dynamic_b0.offset_curve_hz == phantom.dynamic_b0.offset_curve_hz
+    assert loaded.conversion_start_s == phantom.conversion_start_s
+    assert loaded.kinetics_time_offset_s == phantom.kinetics_time_offset_s
     assert np.array_equal(
         loaded.dynamic_b0.spatial_scale_map, phantom.dynamic_b0.spatial_scale_map
     )
@@ -676,7 +912,9 @@ def test_phantom_design_builds_inflow_and_dynamic_b0_drivers():
         shape=(2, 2, 1),
         fov_m=(0.02, 0.02, 0.01),
         dynamic_enabled=True,
-        pyruvate_inflow_curve=TimeCurve((0.0, 2.0), (0.0, 0.2), "linear", "zero"),
+        pyruvate_inflow_curve=TimeCurve((-2.0, 2.0), (0.0, 0.2), "linear", "zero"),
+        conversion_start_s=-1.0,
+        kinetics_time_offset_s=0.5,
         dynamic_b0_curve=TimeCurve((0.0, 2.0), (0.0, 5.0), "linear", "hold"),
         shapes=[
             ShapeDefinition(
@@ -698,7 +936,11 @@ def test_phantom_design_builds_inflow_and_dynamic_b0_drivers():
     assert np.all(phantom.pyruvate_inflow.delivery_map == 1.0)
     assert phantom.n_active == phantom.nvoxels
     assert phantom.dynamic_b0 is not None
+    assert phantom.conversion_start_s == -1.0
+    assert phantom.kinetics_time_offset_s == 0.5
     assert restored.pyruvate_inflow_curve == design.pyruvate_inflow_curve
+    assert restored.conversion_start_s == design.conversion_start_s
+    assert restored.kinetics_time_offset_s == design.kinetics_time_offset_s
     assert restored.dynamic_b0_curve == design.dynamic_b0_curve
 
 
@@ -732,6 +974,147 @@ def test_phantom_designer_exposes_kinetic_regions_and_preview():
     assert dialog.phantom.kinetic_regions[0].kpl_s_inv == pytest.approx(0.05)
     assert dialog.phantom.pyruvate_inflow is not None
     assert dialog.phantom.dynamic_b0 is not None
+    dialog.close()
+    app.processEvents()
+
+
+def test_phantom_designer_sorts_new_inflow_point_by_edited_time():
+    app = QApplication.instance() or QApplication([])
+    dialog = SpectralPhantomDesignerDialog()
+    table = dialog.inflow_curve_table
+
+    dialog._add_curve_point(table)
+    table.item(3, 1).setText("0.25")
+    table.item(3, 0).setText("3.0")
+
+    assert [float(table.item(row, 0).text()) for row in range(4)] == [
+        0.0,
+        3.0,
+        5.0,
+        15.0,
+    ]
+    assert [float(table.item(row, 1).text()) for row in range(4)] == [
+        0.0,
+        0.25,
+        0.1,
+        0.0,
+    ]
+    assert table.currentRow() == 1
+    curve = dialog._read_time_curve(table, outside="zero")
+    assert curve.times_s == (0.0, 3.0, 5.0, 15.0)
+    assert curve.values == (0.0, 0.25, 0.1, 0.0)
+
+    dialog._add_curve_point(table)
+    table.item(4, 1).setText("0.5")
+    table.item(4, 0).setText("-2.0")
+    curve = dialog._read_time_curve(table, outside="zero")
+    assert curve.times_s == (-2.0, 0.0, 3.0, 5.0, 15.0)
+    assert curve.values[0] == 0.5
+    assert table.currentRow() == 0
+
+    dialog.close()
+    app.processEvents()
+
+
+def test_phantom_designer_previews_negative_kinetic_preroll():
+    app = QApplication.instance() or QApplication([])
+    design = PhantomDesign(
+        shape=(1, 1, 1),
+        fov_m=(0.01, 0.01, 0.01),
+        dynamic_enabled=True,
+        default_kpl_s_inv=0.2,
+        pyruvate_inflow_curve=TimeCurve(
+            (-2.0, 0.0),
+            (1.0, 1.0),
+            "linear",
+            "zero",
+        ),
+        conversion_start_s=-1.0,
+        shapes=[
+            ShapeDefinition(
+                "Object",
+                kind="box",
+                size=(1.0, 1.0, 1.0),
+                peaks=[
+                    SpectralPeakDefinition("Pyruvate", 0.0, 0.0, 1.0, t1_s=1e15),
+                    SpectralPeakDefinition("Lactate", 0.0, 12.0, 1.0, t1_s=1e15),
+                ],
+            )
+        ],
+    )
+
+    dialog = SpectralPhantomDesignerDialog(design=design)
+    times_s, pyruvate = dialog.pyruvate_preview_curve.getData()
+    _, lactate = dialog.lactate_preview_curve.getData()
+    zero_index = int(np.searchsorted(times_s, 0.0))
+
+    assert times_s[0] == -2.0
+    assert dialog.conversion_start_s.value() == -1.0
+    assert pyruvate[zero_index] + lactate[zero_index] == pytest.approx(2.0)
+    assert lactate[zero_index] > 0.0
+    assert "sequence-start HP Mz at t=0" in dialog.kinetics_preview_info.text()
+
+    dialog.close()
+    app.processEvents()
+
+
+def test_phantom_designer_shifts_entire_kinetics_timeline_with_offset():
+    app = QApplication.instance() or QApplication([])
+    design = PhantomDesign(
+        shape=(1, 1, 1),
+        fov_m=(0.01, 0.01, 0.01),
+        dynamic_enabled=True,
+        default_kpl_s_inv=1.0,
+        pyruvate_inflow_curve=TimeCurve(
+            (0.0, 2.0),
+            (1.0, 1.0),
+            "linear",
+            "zero",
+        ),
+        conversion_start_s=1.0,
+        kinetics_time_offset_s=1.0,
+        shapes=[
+            ShapeDefinition(
+                "Object",
+                kind="box",
+                size=(1.0, 1.0, 1.0),
+                peaks=[
+                    SpectralPeakDefinition("Pyruvate", 0.0, 0.0, 1.0, t1_s=1e15),
+                    SpectralPeakDefinition("Lactate", 0.0, 12.0, 1.0, t1_s=1e15),
+                ],
+            )
+        ],
+    )
+
+    dialog = SpectralPhantomDesignerDialog(design=design)
+    times_s, inflow = dialog.inflow_preview_curve.getData()
+    _, pyruvate = dialog.pyruvate_preview_curve.getData()
+    _, lactate = dialog.lactate_preview_curve.getData()
+    zero_index = int(np.searchsorted(times_s, 0.0))
+
+    assert times_s[0] == -1.0
+    assert inflow[zero_index] == pytest.approx(1.0)
+    assert pyruvate[zero_index] == pytest.approx(1.0)
+    assert lactate[zero_index] == pytest.approx(0.0)
+    assert dialog.conversion_start_line.value() == pytest.approx(0.0)
+    assert "kinetics t at sequence t=0: 1 s" in dialog.kinetics_preview_info.text()
+    assert [
+        float(dialog.inflow_curve_table.item(row, 0).text())
+        for row in range(dialog.inflow_curve_table.rowCount())
+    ] == [0.0, 2.0]
+
+    dialog.kinetics_time_offset_s.setValue(-1.0)
+    times_s, inflow = dialog.inflow_preview_curve.getData()
+    zero_index = int(np.searchsorted(times_s, 0.0))
+    first_knot_index = int(np.searchsorted(times_s, 1.0))
+
+    assert times_s[0] == 0.0
+    assert inflow[zero_index] == pytest.approx(0.0)
+    assert inflow[first_knot_index] == pytest.approx(1.0)
+    assert dialog.conversion_start_line.value() == pytest.approx(2.0)
+    dialog._sync_global()
+    assert dialog.design.kinetics_time_offset_s == -1.0
+
     dialog.close()
     app.processEvents()
 

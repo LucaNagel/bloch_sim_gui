@@ -63,10 +63,50 @@ The interface is divided into two main areas:
 1.  **Run a Simulation** (as above).
 2.  **Export:** Go to **File > Export Results** (top menu bar).
 3.  **Configure Export Dialog:**
-    *   Check **HDF5 (.h5)** to save the raw data.
-    *   Check **Notebook: Analysis** to generate a `.ipynb` file that loads the HDF5 data and plots it.
+    *   **HDF5 (.h5)** and **Notebook: Analysis** are enabled by default, so the
+        raw data and a `.ipynb` file that loads and plots them are exported
+        together.
     *   Check **Notebook: Reproducible** to generate a `.ipynb` file that contains all parameters to re-run the simulation from scratch.
 4.  **Finish:** Click **Export**. You can now open the generated `.ipynb` files in Jupyter Lab/Notebook.
+
+In the event-based **Sequence Simulation** workspace, **Export Pulseq…**
+offers three choices: Pulseq plus a generating notebook, Pulseq only, or
+notebook only. Pulseq plus notebook is the default. The notebook records the
+exact EPI, spiral, CSI, or 3D bSSFP builder function and all current GUI parameters,
+then writes the corresponding `.seq` file when executed.
+
+For 2D imaging, **Readout trajectory** selects either a Cartesian EPI echo
+train or a single-interleaf centre-out spiral. **Slice gap** is the empty
+edge-to-edge distance between adjacent slices; the centre spacing is slice
+thickness plus gap. Spiral readout duration is extended automatically if the
+requested sampling bandwidth would exceed the configured gradient or slew
+limits.
+
+All MRI geometry fields in the Sequence workspace, Phantom tools, and K-space
+trajectory controls use **millimeters (mm)** consistently. This includes FOV,
+slice thickness, slice gap, and spatial probe positions. Values are converted
+to SI meters internally for simulation and Pulseq export.
+
+The same 2D acquisition panel configures the slice-selective excitation.
+Choose **Sinc**, **SLR**, or **Block** and set RF duration, time-bandwidth
+product, Sinc apodization, and (for SLR) the bundled sharpness profile. Choose
+**RF Pulse Designer** to use the current complex baseband waveform from the
+**RF Design** tab. Its duration, complex phase modulation, and carrier offset
+are preserved, while its amplitude is rescaled from the designer's reference
+flip angle to the constant or variable flip angle selected for EPI/spiral. The
+Sequence-mode TBW still defines the slice-selection bandwidth.
+
+Scanner hardware limits are configured under **Tools → Settings → Scanner**.
+Maximum gradient, maximum slew rate, waveform rasters, RF ringdown/dead time,
+and ADC dead time are stored persistently and applied to newly generated EPI,
+spiral, CSI, and 3D bSSFP Pulseq sequences. Imported `.seq` files retain their
+own event timing.
+
+**Export results…** in the same workspace defaults to exporting both
+`sequence_result.nc` and `sequence_result.ipynb`. The notebook loads the
+adjacent NetCDF dataset and provides the signal, k-space, reconstruction, and
+interactive multidimensional analysis views. Data-only formats and Bruker raw
+export remain selectable alternatives.
 
 ### Use Case 3: Parameter Sweep
 **Goal:** Analyze how simulation metrics change when varying a parameter (e.g., Flip Angle, TE, TR, $T_1$, $T_2$).
@@ -86,7 +126,7 @@ The interface is divided into two main areas:
 2.  **Sequence:** In **Sequence Design**, select "Slice Select + Rephase".
 3.  **Simulation Grid:**
     *   Set **Positions** to 100 (or more for higher res).
-    *   Set **Range (cm)** to cover your slice (e.g., 2.0 cm).
+    *   Set **Range (mm)** to cover your slice (e.g., 20 mm).
 4.  **Run Simulation.**
 5.  **Visualize:**
     *   Go to the **Spatial** tab.
@@ -114,6 +154,11 @@ You can save the entire state of the GUI (tissue params, sequence settings, puls
     *   Switch **Mode** to "Endpoint" if you don't need animations.
     *   Reduce **Positions** or **Frequencies**.
     *   Ensure OpenMP is active (check terminal output during installation).
+*   **A large Pulseq file is loading**:
+    *   Import and Cartesian/CSI inference run in the background. The status bar
+        reports the current stage and the rest of the GUI remains responsive.
+    *   Full RF rasterization is deferred until a simulation or probe is started;
+        the initial load computes only exact ADC timing and gradient moments.
 *   **Exported Video is black/empty**:
     *   Ensure you have `ffmpeg` installed on your system if exporting MP4. GIF export usually works out-of-the-box.
 
@@ -147,9 +192,15 @@ sample. The views update continuously while a slider is being dragged. Sliders
 whose dimensions are not present in a particular result are disabled
 automatically.
 
+The notebook performs its own centered inverse FFT from the exported Cartesian
+k-space. For older NetCDF results that contain only the chronological ADC stream,
+it can rebuild the grid after validating and sorting `adc_event_index`, Pulseq
+outer labels, `partition_index`, `ky`, and `kx`. Dynamic two-pool exports also
+produce pool-resolved notebook reconstructions from `species_signal`.
+
 ### Dynamic pyruvate/lactate phantom
 
-Open **Spectral Shape Designer** and define peaks whose names match the
+Open **Phantom Designer** and define peaks whose names match the
 configured pyruvate and lactate pool names. Existing shapes can be moved and
 resized through their handles. To create geometry directly with the mouse,
 choose **Draw ellipsoid** or **Draw box**, then hold the left mouse button and
@@ -185,15 +236,30 @@ In the **Kinetics / kPL** tab:
 3. Optionally add box or ellipsoid kPL regions with center/size in percent of
    the phantom FOV. A region overrides the default `kPL` in its voxels; if
    regions overlap, the last table row wins.
-4. Optionally enable pyruvate inflow and enter time/source samples. Every point
-   is a `(time in s, relative Mz per s)` sample of the pyruvate source. The curve
-   is linearly interpolated, is zero outside its listed interval, and adds
-   longitudinal pyruvate magnetization to every shape containing the selected
-   pyruvate peak. Inflow supplies pyruvate; `kPL` independently determines how
-   much of it is converted to lactate.
-5. Optionally enable dynamic B0 and enter time/frequency samples in Hz. This is
+4. Set **Conversion starts at (kinetics time)** to the point on the shared
+   kinetics timeline at which `kPL` becomes active. Before that point `kPL=0`;
+   afterwards the default or regional `kPL` applies.
+5. Use **Kinetics time at sequence t=0** as a global offset for both inflow and
+   conversion. `+5 s` starts the Pulseq sequence five seconds into the defined
+   kinetics; `-5 s` starts it five seconds before kinetics time zero. The
+   inflow samples and conversion start keep their relative timing and do not
+   need to be edited when comparing different sequence start times.
+6. Optionally enable pyruvate inflow and enter time/source samples. Every point
+   is a `(kinetics time in s, relative Mz per s)` sample of the pyruvate source.
+   Rows are sorted numerically when their time is edited. The curve is linearly
+   interpolated, is zero outside its listed interval, and adds longitudinal
+   pyruvate magnetization to every shape containing the selected pyruvate peak.
+   Inflow supplies pyruvate; `kPL` independently determines how much of it is
+   converted to lactate.
+7. Any inflow or conversion interval shifted before sequence `t=0` defines a
+   free longitudinal kinetic pre-roll. Starting from the shape's initial pool
+   weights at the earliest pre-roll time, the simulator evolves inflow,
+   conversion, and T1 relaxation up to `t=0`. The resulting `Pz/Lz`
+   distribution becomes the initial state of the Pulseq simulation. RF,
+   gradients, ADC, and dynamic B0 are not executed during this pre-roll.
+8. Optionally enable dynamic B0 and enter time/frequency samples in Hz. This is
    an object-frequency offset, separate from Pulseq RF and ADC carrier offsets.
-6. Use **Update preview** to inspect the rasterized `kPL` map.
+9. Use **Update preview** to inspect the rasterized `kPL` map.
 
 Later kinetic-region rows overwrite earlier rows in overlaps. Run the complete
 dynamic sequence from **Sequence Simulation**. The signal plot shows total and
@@ -209,13 +275,16 @@ average. **Shape / object to preview** selects the shape whose initial pool
 weights and metabolite T1 values are used. **kPL source for this voxel** then
 selects either the default value or one region's override. Selecting a row in
 the kPL-region table selects that region automatically. The preview updates
-immediately when these values or the inflow points change. Its upper plot shows
-the pyruvate source, while the lower plot shows solid `Pz(t)` and dashed
-`Lz(t)`. An explanatory message identifies `kPL=0`, initially present lactate,
-and exactly overlapping pool curves. The preview uses the same free
-longitudinal two-pool integrator as the sequence simulation, but deliberately
-excludes RF depletion and gradients; those effects remain visible only in the
-complete Pulseq simulation.
+immediately when these values, the conversion start, the global kinetics
+offset, or the inflow points change. Its horizontal axis is sequence time. The
+upper plot shows the shifted pyruvate source, while the lower plot shows solid
+`Pz(t)` and dashed `Lz(t)`. If a pre-roll exists, both plots extend into negative
+sequence time and a vertical dashed line marks sequence time zero; an orange
+dotted line marks the shifted conversion start. The information line reports
+the selected kinetics time and pool distribution at sequence `t=0`. The
+preview uses the same free longitudinal two-pool integrator as the sequence
+simulation, but deliberately excludes RF depletion and gradients; those
+effects remain visible only in the complete Pulseq simulation.
 
 The command-line phantom builder is:
 

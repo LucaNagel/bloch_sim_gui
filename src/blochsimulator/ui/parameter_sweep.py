@@ -292,7 +292,7 @@ class ParameterSweepWidget(QWidget):
             if hasattr(self.parent_gui, "pos_spin"):
                 constant_params["num_positions"] = int(self.parent_gui.pos_spin.value())
                 constant_params["position_range_cm"] = float(
-                    self.parent_gui.pos_range.value()
+                    self.parent_gui.pos_range.value() / 10.0
                 )
             if hasattr(self.parent_gui, "freq_spin"):
                 constant_params["num_frequencies"] = int(

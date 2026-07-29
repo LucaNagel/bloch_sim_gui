@@ -298,6 +298,14 @@ correct RF history instead of resetting `Mz` at acquisition-frame boundaries.
 The active simulation support is the union of initially magnetized voxels and
 the delivery map.
 
+Inflow samples and the conversion start share a kinetics timeline independent
+of Pulseq sequence time. `kinetics_time_offset_s` specifies the kinetics time
+that coincides with sequence `t=0`; solver breakpoints are translated by
+`t_sequence = t_kinetics - kinetics_time_offset_s`. Any translated interval
+before sequence zero is integrated as RF-free longitudinal pre-roll, producing
+the pool distribution supplied to the Pulseq simulation. Dynamic B0 remains on
+the sequence timeline and is deliberately not shifted by this kinetics offset.
+
 A piecewise-linear dynamic B0 curve in Hz can be combined with a voxelwise
 scale map. RF-free transverse evolution uses the exact frequency integral over
 each compiled interval. The sequence compiler merges phantom curve knots with
@@ -319,6 +327,17 @@ The supported large-object path never stores `Ninterval x Nvoxel`
 magnetization. Peak storage scales with voxel state, requested checkpoint
 states, coil maps, and `Nthread x Ncoil x Nadc` thread-local ADC accumulators.
 Chunk boundaries are also the cancellation and progress-reporting boundaries.
+
+The coupled dynamic solver has reference, allocation-reusing NumPy, strict
+native serial, and strict native OpenMP execution paths.  The native extension
+uses separate non-fast-math compiler flags and consumes NumPy-prepared
+coefficients so the optimized CPU outputs remain bit-identical.  Its principal
+RF-intensive speed-up comes from applying one Rodrigues rotation directly to
+the complete contiguous two-pool voxel block, avoiding repeated NumPy state
+synchronization and temporary arrays.  ADC sums retain their original voxel
+order.  Detailed kernel behavior, limits, and representative measurements are
+recorded in
+[dynamic_simulation_performance.md](dynamic_simulation_performance.md).
 
 ## Compatibility
 

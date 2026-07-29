@@ -129,10 +129,11 @@ class SliceSelectionExplorer(QWidget):
 
         # Position Range
         row_range = QHBoxLayout()
-        row_range.addWidget(QLabel("Range (cm):"))
+        row_range.addWidget(QLabel("Range (mm):"))
         self.pos_range = QDoubleSpinBox()
-        self.pos_range.setRange(0.5, 20.0)
-        self.pos_range.setValue(4.0)
+        self.pos_range.setRange(5.0, 200.0)
+        self.pos_range.setValue(40.0)
+        self.pos_range.setSuffix(" mm")
         row_range.addWidget(self.pos_range)
         sim_layout.addLayout(row_range)
 
@@ -168,7 +169,7 @@ class SliceSelectionExplorer(QWidget):
         # Slice Profile Plot
         self.plot_profile = pg.PlotWidget(title="Excitation Profile (Mz vs Position)")
         self.plot_profile.setLabel("left", "Mz")
-        self.plot_profile.setLabel("bottom", "Position (cm)")
+        self.plot_profile.setLabel("bottom", "Position (mm)")
         self.plot_profile.setYRange(-1.1, 1.1)
         self.plot_profile.addLegend()
         viz_panel.addWidget(self.plot_profile)
@@ -199,7 +200,7 @@ class SliceSelectionExplorer(QWidget):
         thick_m = self.thickness.value() / 1000.0
         do_rephase = self.use_rephase.currentIndex() == 0
 
-        range_cm = self.pos_range.value()
+        range_mm = self.pos_range.value()
         n_points = self.num_points.value()
 
         # 2. Design RF Pulse (Sinc)
@@ -286,11 +287,11 @@ class SliceSelectionExplorer(QWidget):
             time = np.arange(n_total) * dt
 
         # 4. Define Spatial Grid
-        half_range = range_cm / 2.0
+        half_range = range_mm / 2.0
         positions = np.zeros((n_points, 3))
         # Z-axis varies (slice direction)
         positions[:, 2] = np.linspace(
-            -half_range / 100.0, half_range / 100.0, n_points
+            -half_range / 1000.0, half_range / 1000.0, n_points
         )  # meters
 
         # 5. Run Simulation
@@ -323,22 +324,22 @@ class SliceSelectionExplorer(QWidget):
             self.plot_rf.plot(t_ms, gz, pen="r", name="Gz (G/cm)")
 
         # Profile Plot
-        pos_cm = positions[:, 2] * 100.0
+        pos_mm = positions[:, 2] * 1000.0
         mz = np.squeeze(result["mz"])
         mx = np.squeeze(result["mx"])
         my = np.squeeze(result["my"])
         mxy = np.sqrt(mx**2 + my**2)
 
-        self.plot_profile.plot(pos_cm, mz.flatten(), pen="g", name="Mz")
-        self.plot_profile.plot(pos_cm, mxy.flatten(), pen="y", name="|Mxy|")
+        self.plot_profile.plot(pos_mm, mz.flatten(), pen="g", name="Mz")
+        self.plot_profile.plot(pos_mm, mxy.flatten(), pen="y", name="|Mxy|")
 
         # Add slice boundaries indicators
-        half_thick_cm = (self.thickness.value() / 2.0) / 10.0  # mm -> cm
+        half_thick_mm = self.thickness.value() / 2.0
         line_neg = pg.InfiniteLine(
-            pos=-half_thick_cm, angle=90, pen=pg.mkPen("w", style=Qt.DashLine)
+            pos=-half_thick_mm, angle=90, pen=pg.mkPen("w", style=Qt.DashLine)
         )
         line_pos = pg.InfiniteLine(
-            pos=half_thick_cm, angle=90, pen=pg.mkPen("w", style=Qt.DashLine)
+            pos=half_thick_mm, angle=90, pen=pg.mkPen("w", style=Qt.DashLine)
         )
         self.plot_profile.addItem(line_neg)
         self.plot_profile.addItem(line_pos)

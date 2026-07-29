@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import QApplication, QDialog, QHeaderView, QWidget
 from unittest.mock import MagicMock, patch
 
 from blochsimulator import BlochSimulator
+from blochsimulator.kspace_widget import TrajectoryWidget
 from blochsimulator.phantom_design import (
     PhantomDesign,
     ShapeDefinition,
@@ -18,7 +19,11 @@ from blochsimulator.spectral_phantom import SpectralPhantom
 from blochsimulator.ui.phantom_designer import SpectralPhantomDesignerDialog
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
 from blochsimulator.ui.volume_viewer import VolumeViewerWidget
-from blochsimulator.phantom_widget import PhantomCreatorWidget, PhantomViewerWidget
+from blochsimulator.phantom_widget import (
+    PhantomCreatorWidget,
+    PhantomViewerWidget,
+    PhantomWidget,
+)
 from blochsimulator.units import hz_to_ppm, ppm_to_hz
 
 
@@ -390,6 +395,10 @@ def test_designer_and_sequence_workspace_accept_spectral_phantom():
 def test_designer_supports_exact_numeric_xy_shape_placement():
     app = QApplication.instance() or QApplication([])
     dialog = SpectralPhantomDesignerDialog(design=_spectral_design())
+    assert [spin.suffix() for spin in dialog.fov_spins] == [" mm"] * 3
+    assert [spin.value() for spin in dialog.fov_spins] == pytest.approx(
+        [60.0, 60.0, 4.0]
+    )
     dialog.x_center.setValue(25.0)
     dialog.y_center.setValue(75.0)
     dialog.x_size.setValue(40.0)
@@ -529,10 +538,13 @@ def test_phantom_creator_retains_spectral_designer_dialog_lifetime():
     dialog = MagicMock()
     dialog.exec_.return_value = QDialog.Accepted
     dialog.get_phantom.return_value = phantom
-    creator.type_combo.setCurrentText("Spectral Shape Designer...")
-    assert not creator.resolution_spin.isEnabled()
-    assert not creator.fov_spin.isEnabled()
-    assert not creator.field_combo.isEnabled()
+    assert creator.type_combo.itemText(0) == "Phantom Designer..."
+    assert creator.type_combo.currentText() == "Phantom Designer..."
+    assert creator.create_btn.text() == "Create New..."
+    assert creator.resolution_spin.isHidden()
+    assert creator.fov_spin.isHidden()
+    assert creator.field_combo.isHidden()
+    assert creator.save_btn.isHidden()
 
     with patch(
         "blochsimulator.phantom_widget.SpectralPhantomDesignerDialog",
@@ -543,6 +555,7 @@ def test_phantom_creator_retains_spectral_designer_dialog_lifetime():
     assert creator.current_phantom is phantom
     assert creator._retained_spectral_designer_dialogs == [dialog]
     assert not creator.edit_btn.isHidden()
+    assert not creator.save_btn.isHidden()
 
     edited_design = _spectral_design()
     edited_design.name = "Edited in memory"
@@ -560,6 +573,82 @@ def test_phantom_creator_retains_spectral_designer_dialog_lifetime():
     assert reopened_design.to_dict() == _spectral_design().to_dict()
     assert creator.current_phantom.name == "Edited in memory"
     creator.close()
+    app.processEvents()
+
+
+def test_phantom_creator_shows_only_parameters_used_by_selected_mode():
+    app = QApplication.instance() or QApplication([])
+    creator = PhantomCreatorWidget()
+
+    creator.type_combo.setCurrentText("Load from File...")
+    assert creator.create_btn.text() == "Load Phantom..."
+    assert creator.resolution_spin.isHidden()
+    assert creator.fov_spin.isHidden()
+    assert creator.field_combo.isHidden()
+
+    creator.type_combo.setCurrentText("Cylindrical 2D")
+    assert creator.create_btn.text() == "Create Phantom"
+    assert not creator.resolution_spin.isHidden()
+    assert not creator.fov_spin.isHidden()
+    assert not creator.field_combo.isHidden()
+    assert not creator.tissue_combo.isHidden()
+    assert creator.fov_spin.suffix() == " mm"
+    creator.resolution_spin.setValue(8)
+    creator.fov_spin.setValue(240.0)
+    creator.create_phantom()
+    assert creator.current_phantom.fov == pytest.approx((0.24, 0.24))
+
+    creator.close()
+    app.processEvents()
+
+
+def test_legacy_kspace_fov_controls_use_mm_and_convert_to_si():
+    app = QApplication.instance() or QApplication([])
+    widget = TrajectoryWidget()
+
+    assert widget.fov_x_spin.suffix() == " mm"
+    assert widget.fov_y_spin.suffix() == " mm"
+    assert widget.get_fov() == pytest.approx((0.24, 0.24))
+
+    phantom = SimpleNamespace(shape=(32, 24), fov=(0.22, 0.18))
+    widget.set_from_phantom(phantom)
+    assert widget.fov_x_spin.value() == pytest.approx(220.0)
+    assert widget.fov_y_spin.value() == pytest.approx(180.0)
+    assert widget.get_fov() == pytest.approx((0.22, 0.18))
+
+    widget.close()
+    app.processEvents()
+
+
+def test_phantom_configuration_panel_is_wider():
+    app = QApplication.instance() or QApplication([])
+    widget = PhantomWidget()
+    widget.resize(1600, 900)
+    widget.show()
+    app.processEvents()
+
+    configuration_width, viewer_width = widget.configuration_splitter.sizes()
+    assert configuration_width == widget.CONFIGURATION_PANEL_WIDTH
+    assert viewer_width > configuration_width
+    assert widget.legacy_simulation_group.isHidden()
+    assert widget.legacy_run_group.isHidden()
+
+    widget.phantom_creator.type_combo.setCurrentText("Cylindrical 2D")
+    widget.phantom_creator.resolution_spin.setValue(8)
+    widget.phantom_creator.create_phantom()
+    app.processEvents()
+
+    assert not widget.legacy_simulation_group.isHidden()
+    assert not widget.legacy_run_group.isHidden()
+
+    widget._on_phantom_created(_spectral_design().build())
+    app.processEvents()
+
+    assert widget.legacy_simulation_group.isHidden()
+    assert widget.legacy_run_group.isHidden()
+
+    widget.close()
+    widget.deleteLater()
     app.processEvents()
 
 

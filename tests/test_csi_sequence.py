@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from blochsimulator.sequence import load_pulseq
+from blochsimulator.sequence import infer_spectroscopic_acquisition, load_pulseq
 
 
 pypulseq = pytest.importorskip("pypulseq")
@@ -14,6 +14,11 @@ CSI_SCRIPT = runpy.run_path(
 )
 main = CSI_SCRIPT["main"]
 phase_encoding_indices = CSI_SCRIPT["phase_encoding_indices"]
+MULTIREP_MAIN = runpy.run_path(
+    str(
+        Path(__file__).parents[1] / "sequences" / "scripts" / "generate_csi_mutlirep.py"
+    )
+)["main"]
 
 
 @pytest.mark.parametrize("ordering", ["linear", "spiral", "centric"])
@@ -75,6 +80,32 @@ def test_csi_resolution_can_determine_number_of_points():
     )
     assert sequence.definitions["SpectralPoints"] == 34
     assert sequence.definitions["SpectralResolution"] <= 30.0
+
+
+def test_csi_multirep_repeats_complete_grid_with_rep_labels(tmp_path):
+    sequence = MULTIREP_MAIN(
+        n_x=2,
+        n_y=3,
+        n_spectral_points=8,
+        spectral_bandwidth_hz=2000.0,
+        phase_encoding_order="centric",
+        te=6e-3,
+        tr=30e-3,
+        n_repetitions=3,
+    )
+    path = tmp_path / "csi_multirep.seq"
+    sequence.write(str(path), v141_compat=True)
+    program = load_pulseq(path)
+    acquisition = infer_spectroscopic_acquisition(program)
+
+    assert sequence.check_timing()[0]
+    assert sequence.definitions["Repetitions"] == 3
+    assert sequence.adc_times()[0].size == 2 * 3 * 8 * 3
+    assert acquisition.num_repetitions == 3
+    assert acquisition.num_samples == 2 * 3 * 8 * 3
+    assert program.metadata["adc_label_values"]["REP"] == (
+        (0,) * 6 + (1,) * 6 + (2,) * 6
+    )
 
 
 def test_csi_adds_configurable_readout_spoilers(tmp_path):

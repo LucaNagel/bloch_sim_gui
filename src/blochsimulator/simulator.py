@@ -1304,6 +1304,7 @@ class BlochSimulator:
         memory_policy: Optional[MemoryPolicy] = None,
         sequence_kernel: str = "optimized",
         dynamic_sequence_kernel: str = "optimized",
+        dynamic_sequence_precision: str = "float64",
     ):
         """
         Initialize the Bloch simulator.
@@ -1328,6 +1329,10 @@ class BlochSimulator:
             kernel remains available for numerical comparisons.
         dynamic_sequence_kernel : {"optimized", "native_parallel", "native_serial", "reference"}
             Kernel used specifically for dynamic two-pool sequence simulations.
+        dynamic_sequence_precision : {"float64", "float32"}
+            Arithmetic used by the optimized dynamic CPU path. ``float64`` is
+            the bit-exact default; ``float32`` is an experimental GPU-precision
+            validation path.
         """
         self.use_parallel = use_parallel
         self.num_threads = resolve_num_threads(num_threads)
@@ -1348,6 +1353,18 @@ class BlochSimulator:
                 "'native_serial', or 'reference'"
             )
         self.dynamic_sequence_kernel = dynamic_sequence_kernel
+        if dynamic_sequence_precision not in {"float64", "float32"}:
+            raise ValueError(
+                "dynamic_sequence_precision must be 'float64' or 'float32'"
+            )
+        if (
+            dynamic_sequence_precision == "float32"
+            and dynamic_sequence_kernel != "optimized"
+        ):
+            raise ValueError(
+                "float32 dynamic precision currently requires the optimized kernel"
+            )
+        self.dynamic_sequence_precision = dynamic_sequence_precision
         self.last_result = None
 
         # Validate settings immediately instead of waiting for the first run.
@@ -2017,6 +2034,7 @@ class BlochSimulator:
         from .dynamic_phantom import simulate_dynamic_sequence
 
         kwargs.setdefault("sequence_kernel", self.dynamic_sequence_kernel)
+        kwargs.setdefault("simulation_precision", self.dynamic_sequence_precision)
         kwargs.setdefault("use_parallel", self.use_parallel)
         kwargs.setdefault("num_threads", self.num_threads)
         kwargs.setdefault("memory_budget_bytes", self._memory_budget().limit_bytes)
@@ -2384,6 +2402,7 @@ class BlochSimulator:
             infer_cartesian_acquisition_frames,
             infer_cartesian_acquisition_volumes,
             infer_spectroscopic_acquisition,
+            infer_spiral_acquisition,
         )
 
         acquisition_dimensions = AcquisitionDimensions.from_program(program)
@@ -2396,6 +2415,14 @@ class BlochSimulator:
             except ValueError:
                 spectroscopic_metadata = None
         cartesian_metadata = program.metadata.get("cartesian_acquisition")
+        spiral_metadata = program.metadata.get("spiral_acquisition")
+        if spiral_metadata is None:
+            try:
+                spiral_metadata = infer_spiral_acquisition(
+                    program, compiled=compiled
+                ).to_metadata()
+            except ValueError:
+                spiral_metadata = None
         if cartesian_metadata is None:
             program_acquisition = program.metadata.get("acquisition")
             if (
@@ -2407,7 +2434,11 @@ class BlochSimulator:
         cartesian_volume_metadata = program.metadata.get(
             "cartesian_acquisition_volumes"
         )
-        if spectroscopic_metadata is None and cartesian_metadata is None:
+        if (
+            spectroscopic_metadata is None
+            and spiral_metadata is None
+            and cartesian_metadata is None
+        ):
             try:
                 cartesian_metadata = infer_cartesian_acquisition(
                     program, compiled=compiled
@@ -2467,6 +2498,7 @@ class BlochSimulator:
                 "cartesian_acquisition": cartesian_metadata,
                 "cartesian_acquisition_frames": cartesian_frame_metadata,
                 "cartesian_acquisition_volumes": cartesian_volume_metadata,
+                "spiral_acquisition": spiral_metadata,
                 "sequence_definitions": dict(program.metadata.get("definitions", {})),
                 "units": {
                     "time": "s",
