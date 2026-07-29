@@ -2,23 +2,21 @@
 
 [![Live Demo](https://img.shields.io/badge/Live-Demo-blue?style=for-the-badge&logo=github)](https://lucanagel.github.io/bloch_sim_gui/)
 
-A high-performance Python implementation of the Bloch equation solver originally developed by Brian Hargreaves at Stanford University. This package provides a fast C-based core with Python bindings, parallel processing support, and an interactive GUI with classic waveform simulation and an event-based Sequence mode for Pulseq workflows.
+A high-performance Python implementation of the Bloch equation solver originally developed by Brian Hargreaves at Stanford University. This package provides a fast C-based core with Python bindings, parallel processing support, and an interactive GUI with classic waveform simulation and an event-based Sequence mode for [Pulseq](https://github.com/pulseq/pypulseq) workflows.
 
 ## Demo
+
+### Sequence mode
+
+![Sequence workspace](docs/_static/media/sequence_mode_demo.gif)
+
+*Demonstration of different EPI sequence modes on a spherical object, including multi-repetition and multi-slice acquisitions with B0 inhomogeneities. Generated EPI, CSI, and bSSFP sequences can be exported as [Pulseq `.seq`](https://github.com/pulseq/pypulseq) files.*
 
 ### Classic simulation
 
 ![Spin Echo Animation](docs/_static/media/spin_echo.gif)
-*Demonstration of a Spin-Echo simulation*
 
-### Sequence mode
-
-| Sequence workspace | Simulation results |
-| --- | --- |
-| ![Placeholder for the Sequence mode screenshot](docs/_static/media/sequence_mode_placeholder.svg) | ![Placeholder for the sequence simulation results screenshot](docs/_static/media/sequence_results_placeholder.svg) |
-| *Screenshot placeholder: Pulseq sequence and phantom setup.* | *Screenshot placeholder: signal, k-space, reconstruction, and spatial results.* |
-
-<!-- Replace the two placeholder SVGs above with the final Sequence mode and result screenshots. -->
+*Demonstration of a spin-echo simulation.*
 
 ## Features
 
@@ -29,15 +27,15 @@ A high-performance Python implementation of the Bloch equation solver originally
   and off-resonance frequencies.
 - Configurable tissue properties including T1, T2, proton density, and initial
   magnetization.
-- RF pulse design for rectangular, sinc, Gaussian, adiabatic half/full passage,
+- **RF pulse design** for rectangular, sinc, Gaussian, adiabatic half/full passage,
   and BIR-4 pulses, including phase and carrier-frequency offsets.
 - Sequence support for FID, spin echo, gradient echo, inversion recovery,
   slice-selective excitation, EPI, and SSFP.
-- Dedicated event-based **Sequence mode** for loading and simulating Pulseq
-  `.seq` files.
-- Interactive generation of Pulseq EPI, centre-out 2D spiral, 2D CSI, and 3D
+- Dedicated event-based **Sequence mode** for **loading and simulating [Pulseq
+  `.seq`](https://github.com/pulseq/pypulseq) files**.
+- **Interactive generation of Pulseq** EPI, centre-out 2D spiral, 2D CSI, and 3D
   bSSFP sequences, with export to `.seq` files and reproducing Jupyter notebooks.
-- Spectral and dynamic phantom design with spatial peak distributions,
+- Spectral and dynamic **phantom design** with spatial peak distributions,
   pyruvate-to-lactate kinetics, spatial B0 inhomogeneity maps, and optional
   time-dependent B0 offsets.
 - Hardware-aware RAM protection for large simulation grids.
@@ -57,9 +55,9 @@ A high-performance Python implementation of the Bloch equation solver originally
 - Numerical results in Python-compatible NumPy and HDF5 formats.
 - Sequence results as `xarray.Dataset` objects or NetCDF (`.nc`) files with
   named acquisition, spatial, spectral, dynamic, and pool dimensions.
-- Experimental export of simulated acquisitions as Bruker raw datasets,
+- Experimental **export of simulated acquisitions as Bruker raw datasets**,
   including `fid` and/or `rawdata.job0` plus the associated parameter files.
-- Automatically generated Jupyter notebooks using the parameters selected in
+- **Automatically generated Jupyter notebooks** using the parameters selected in
   the GUI.
 - Parameter sweeps with final-state or full time-resolved result collection.
 
@@ -84,6 +82,50 @@ simulation per step. Sweeps can vary flip angle, TE, TR, TI, B1 scaling or
 amplitude, T1, T2, spin-offset center, and RF-carrier offset. Results can be
 compared directly, exported, and opened in an automatically generated
 sweep-analysis notebook.
+
+## Get started
+
+### Desktop application
+
+Download the standalone application for Windows or macOS from
+[GitHub Releases](https://github.com/LucaNagel/bloch_sim_gui/releases). This is
+the recommended option for interactive simulation and requires no Python
+installation.
+
+#### Activation on macOS
+
+After downloading the application, move `BlochSimulator.app` to your
+**Applications** folder and launch it. If macOS blocks the first launch:
+
+1. Dismiss the warning.
+2. Open **System Settings > Privacy & Security** and scroll to **Security**.
+3. Find the message that `BlochSimulator.app` was blocked and click
+   **Open Anyway**.
+4. Launch **BlochSimulator** again.
+
+Alternatively, after verifying that you trust the downloaded application,
+remove its quarantine flag in Terminal:
+
+```bash
+xattr -cr /Applications/BlochSimulator.app
+```
+
+### Python package
+
+Install [blochsimulator from PyPI](https://pypi.org/project/blochsimulator/):
+
+```bash
+pip install blochsimulator
+```
+
+The package exposes the full simulation API for Python scripts, Jupyter
+notebooks, and custom analysis pipelines.
+
+### Online GUI
+
+Use the [browser-based GUI](https://lucanagel.github.io/bloch_sim_gui/) without
+installation. It provides interactive RF-pulse and slice-selection simulations;
+the desktop application and Python package provide the complete feature set.
 
 ## Sequence mode
 
@@ -149,171 +191,45 @@ ADC data as `fid`, `rawdata.job0`, or both, together with Bruker-style `acqp`,
 reviewed before using these datasets in scanner-specific reconstruction
 pipelines.
 
-## Ways to use the simulator
-
-### Desktop application
-
-Download the standalone application for Windows or macOS from
-[GitHub Releases](https://github.com/LucaNagel/bloch_sim_gui/releases). This is
-the recommended option for interactive simulation and requires no Python
-installation.
-
-### Python package
-
-Install [blochsimulator from PyPI](https://pypi.org/project/blochsimulator/)
-with `pip install blochsimulator`. The package exposes the full simulation API
-for Python scripts, Jupyter notebooks, and custom analysis pipelines.
-
-### Online GUI
-
-Use the [browser-based GUI](https://lucanagel.github.io/bloch_sim_gui/) without
-installation. It provides interactive RF-pulse and slice-selection simulations;
-the desktop application and Python package provide the complete feature set.
-
-## Documentation
-
-For detailed instructions on installation, GUI features, and Python API usage, please refer to the **[User Guide](https://github.com/LucaNagel/bloch_sim_gui/blob/main/docs/USER_GUIDE.md)**.
-
-## License
-
-This project is licensed under the [GNU General Public License v3.0](LICENSE). You may copy, distribute, and modify the software under the terms of GPLv3. Modified versions distributed to others must also be licensed under GPLv3 and include the corresponding source code.
-
-## Installation
-
-### Method A: Direct Install (PyPI)
-*Recommended for most users.*  Package is availabe on [pypi.org](https://pypi.org/project/blochsimulator/).
-```bash
-pip install blochsimulator
-```
-
-### Method B: Python Package (From Source)
-*Recommended for researchers and developers.*
-
-To run from source, you need **Python** and a **C Compiler** installed.
-
-<details>
-<summary><strong>👇 Click here for detailed setup instructions (Windows, macOS, Linux)</strong></summary>
-
-#### 1. Install Python 3.9+
-
-*   **Windows:**
-    *   Download the installer from [python.org](https://www.python.org/downloads/windows/).
-    *   **Important:** During installation, check the box **"Add Python to PATH"**.
-*   **macOS:**
-    *   Download from [python.org](https://www.python.org/downloads/macos/) OR use Homebrew: `brew install python`.
-*   **Linux:**
-    *   Usually pre-installed. If not: `sudo apt install python3 python3-pip` (Ubuntu/Debian) or `sudo dnf install python3` (Fedora).
-
-#### 2. Install a C Compiler
-Required to build the fast simulation core.
-
-*   **Windows:**
-    *   Install **Visual Studio Build Tools** (free).
-    *   Download from [visualstudio.microsoft.com](https://visualstudio.microsoft.com/visual-cpp-build-tools/).
-    *   In the installer, select **"Desktop development with C++"**.
-*   **macOS:**
-    *   Open Terminal and run: `xcode-select --install`.
-    *   (Optional but recommended for speed) Install OpenMP: `brew install libomp`.
-*   **Linux:**
-    *   Install GCC: `sudo apt install build-essential` (Ubuntu/Debian) or `sudo dnf groupinstall "Development Tools"` (Fedora).
-
-</details>
-
-**Steps:**
-1.  **Navigate** to the directory where you want to install the GUI in your terminal.
-    ```bash
-    cd /path/to/the/directory/
-    ```
-2.  **Clone or download** the repository.
-    ```bash
-    git clone git@github.com:LucaNagel/bloch_sim_gui.git
-    ```
-2. **Or** if that fails:
-    ```bash
-    git clone https://github.com/LucaNagel/bloch_sim_gui.git
-    ```
-3. **Navigate** to the cloned repository.
-    ```bash
-    cd bloch_sim_gui/
-    ```
-4.  **Install** in editable mode:
-    ```bash
-    pip install -e .
-    ```
-
-### Verification (not necessary for the installation)
-
-Test the installation:
-
-```python
-from blochsimulator import BlochSimulator, TissueParameters
-
-sim = BlochSimulator()
-tissue = TissueParameters.gray_matter(3.0)
-print(f"T1: {tissue.t1:.3f}s, T2: {tissue.t2:.3f}s")
-```
-
-### Method C: Standalone App
-*No installation required. Recommended for non-technical users.*
-
-Download the most reason version for your OS in **[Releases](https://github.com/LucaNagel/bloch_sim_gui/releases)**
-
-#### Activation (MacOS):
-In case of the MacOS app, this requires you to manually remove the *quarantine* flag that macOS puts on the downloaded app. Only perform this step if you trust the distributor.
-
-1.  Unzip the file and move `BlochSimulator.app` to your **Applications** folder.
-2. Launch **BlochSimulator** from your Applications folder and dimiss the warning.
-3. Go to System Settings > Privacy & Security, scroll down to the Security section, here you should see a message "BlochSimulator.app was blocked...". Click "Open Anyway".
-4.  Launch **BlochSimulator** from your Applications folder.
-
-**Alternative Activation**:
-1.  Unzip the file and move `BlochSimulator.app` to your **Applications** folder.
-2.  **Crucial Step:** Open Terminal and run this command to fix the "App is damaged" error:
-    ```bash
-    xattr -cr /Applications/BlochSimulator.app
-    ```
-3.  Launch **BlochSimulator** from your Applications folder.
-
-
-
 ## Usage
 
-### 🚀 Jupyter Notebook (Recommended)
+### GUI application
 
-You can launch the interactive GUI directly from a cell in your Jupyter Notebook.
-
-You can also export the selected GUI simulation as a notebook. See the
-[spin-echo reproduction](examples/spin_echo_reproduction.ipynb) and
-[spin-echo analysis](examples/spin_echo_analysis.ipynb) examples.
-
-```python
-# 0. Install from PyPI (run once) if not done before
-!pip install blochsimulator
-
-# 1. Launch GUI
-!blochsimulator-gui
-```
-
-*Note: This works if Jupyter is running on your local machine. It will not work on headless remote servers or Google Colab.*
-
-### 1. GUI Application
-
-Once installed, you can launch the GUI from any terminal or shell or from the applications folder:
+Once installed, launch the GUI from a terminal or from the applications folder:
 
 ```bash
 blochsimulator-gui
 ```
 
 Features:
+
 - Design RF pulses (rectangular, sinc, Gaussian)
 - Configure tissue parameters (T1, T2)
 - Select pulse sequences (spin echo, gradient echo, etc.)
 - Real-time 3D magnetization visualization
 - Signal analysis and frequency spectra
 
-### 2. Python API
+### Jupyter Notebook
 
-#### Basic Simulation
+You can launch the interactive GUI directly from a cell in your local Jupyter
+Notebook. You can also export the selected GUI simulation as a notebook. See
+the [spin-echo reproduction](examples/spin_echo_reproduction.ipynb) and
+[spin-echo analysis](examples/spin_echo_analysis.ipynb) examples.
+
+```python
+# Install from PyPI once, if needed
+!pip install blochsimulator
+
+# Launch the GUI
+!blochsimulator-gui
+```
+
+This requires Jupyter to run on your local machine; it does not work on a
+headless remote server or Google Colab.
+
+### Python API
+
+#### Basic simulation
 
 ```python
 import numpy as np
@@ -350,7 +266,10 @@ result = sim.simulate(
 sim.plot_magnetization()
 ```
 
-#### Spin Echo Sequence
+<details>
+<summary><strong>More Python API examples</strong></summary>
+
+#### Spin echo sequence
 
 ```python
 from blochsimulator import BlochSimulator, SpinEcho, TissueParameters
@@ -372,7 +291,7 @@ mx, my, mz = result['mx'], result['my'], result['mz']
 signal = result['signal']
 ```
 
-#### Custom Pulse Design
+#### Custom pulse design
 
 ```python
 from blochsimulator import design_rf_pulse
@@ -391,7 +310,7 @@ phase = np.pi/4  # 45 degrees
 b1_phased = b1 * np.exp(1j * phase)
 ```
 
-#### Parallel Simulation
+#### Parallel simulation
 
 ```python
 # Simulate multiple positions and frequencies in parallel
@@ -410,9 +329,11 @@ result = sim.simulate(
 print(f"Signal shape: {result['signal'].shape}")
 ```
 
-#### Xarray Integration
+#### Xarray integration
 
-For advanced analysis, you can convert simulation results directly to an `xarray.Dataset`. This provides named dimensions, coordinates, and automatic metadata tracking.
+For advanced analysis, you can convert simulation results directly to an
+`xarray.Dataset`. This provides named dimensions, coordinates, and automatic
+metadata tracking.
 
 ```python
 # Convert last result to xarray
@@ -429,7 +350,7 @@ ds.signal.sel(frequency=0, method='nearest').plot()
 print(ds.attrs['t1'], ds.attrs['te'])
 ```
 
-### 3. Sequence Library
+#### Sequence library
 
 Pre-defined sequences are available:
 
@@ -446,7 +367,7 @@ gre = GradientEcho(te=5e-3, tr=10e-3, flip_angle=30)
 b1, gradients, time = se.compile(dt=1e-6)
 ```
 
-### 4. Tissue Parameter Library
+#### Tissue parameter library
 
 Common tissues at different field strengths:
 
@@ -471,44 +392,12 @@ liver = TissueParameters(
 )
 ```
 
-## Desktop app build (PyInstaller)
+</details>
 
-*For detailed packaging, release workflows, and CI/CD info, see the [Developer Guide](docs/DEVELOPER_GUIDE.md).*
+## Documentation
 
-**Note:** Standalone applications for macOS, Windows, and Linux are automatically built and attached to GitHub Releases whenever a new version tag is pushed. The instructions below are for manual/local builds.
-
-One build per OS is required (macOS build won’t run on Windows/Linux).
-
-### Prereqs
-- macOS: Xcode CLT; `brew install libomp`.
-- Windows: Python 3.8+ and MSVC Build Tools (for C extension).
-- Linux: gcc/g++; ensure `libgomp` available.
-
-### Quick build (any OS)
-```bash
-python -m pip install -r requirements.txt
-python -m pip install pyinstaller
-python setup.py build_ext --inplace
-PYINSTALLER_CONFIG_DIR=.pyinstaller pyinstaller bloch_gui.spec --noconfirm
-```
-Artifact: `dist/BlochSimulator` (single binary; `.exe` on Windows).
-
-### One-liner helper
-```bash
-./scripts/build_pyinstaller.sh   # creates a venv, installs deps, builds, packages
-```
-
-### Run the packaged app
-- macOS/Linux: `./dist/BlochSimulator`
-- Windows: `dist\\BlochSimulator.exe`
-
-### Runtime data/exports
-- `rfpulses/` is bundled automatically.
-- Exports default to per-user data dirs:
-  - macOS: `~/Library/Application Support/BlochSimulator/exports`
-  - Windows: `%APPDATA%\\BlochSimulator\\exports`
-  - Linux: `~/.local/share/BlochSimulator/exports`
-- Override with `BLOCH_APP_DIR` or `BLOCH_EXPORT_DIR` if you need a custom location.
+For detailed instructions on installation, GUI features, and Python API usage,
+see the **[User Guide](https://github.com/LucaNagel/bloch_sim_gui/blob/main/docs/USER_GUIDE.md)**.
 
 ## Theory
 
@@ -529,52 +418,94 @@ Using:
 - Exponential decay for relaxation
 - Cayley-Klein parameters for efficient rotation calculation
 
-## Troubleshooting
+## Development
 
-### Build Issues
+For detailed packaging, release workflows, and CI/CD information, see the
+[Developer Guide](docs/DEVELOPER_GUIDE.md).
 
-1. **Missing compiler**: Install gcc (Linux), Xcode (macOS), or Visual Studio (Windows)
-2. **OpenMP not found**: The code will still work but without parallelization
-3. **Import error**: Ensure the .so/.pyd file is in the same directory
+<details>
+<summary><strong>Developer setup and manual desktop build</strong></summary>
 
-## Contributing
+### Install from source
 
-Contributions are welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new features
-4. Submit a pull request
+To run from source, you need Python 3.9 or later and a C compiler.
 
-## Citation
+- **Windows:** Install Python from [python.org](https://www.python.org/downloads/windows/)
+  and select **Add Python to PATH**. Install
+  [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+  with **Desktop development with C++**.
+- **macOS:** Install Python from
+  [python.org](https://www.python.org/downloads/macos/) or with
+  `brew install python`. Install the compiler with `xcode-select --install`.
+  For optional OpenMP acceleration, install `libomp` with Homebrew.
+- **Linux:** Install Python and a compiler with `sudo apt install python3
+  python3-pip build-essential` on Ubuntu/Debian, or install the corresponding
+  Python and Development Tools packages on Fedora.
 
-If you use this simulator in your research, please cite:
+Clone the repository and install it in editable mode:
 
-```bibtex
-@software{blochsimulator_python,
-  title={Python Bloch Equation Simulator GUI and API},
-  author={Luca Nagel},
-  year={2026},
-  url={https://github.com/LucaNagel/bloch_sim_gui}
-}
+```bash
+git clone https://github.com/LucaNagel/bloch_sim_gui.git
+cd bloch_sim_gui
+pip install -e .
 ```
 
-## Acknowledgments
+Verify the installation:
 
-This project is based on [code](http://mrsrl.stanford.edu/~brian/blochsim/) originally developed by Brian Hargreaves at Stanford University. Currently (01/2026) it is unfortunately not available. A python adaption of this code can be found [here](https://github.com/ZhengguoTan/BlochSim).
+```python
+from blochsimulator import BlochSimulator, TissueParameters
 
-- Original Bloch simulator by Brian Hargreaves, Stanford University
-- NumPy and SciPy communities
-- PyQt/PySide developers
-- OpenMP project
-- Built partially with [codex](https://openai.com/codex/), [claude code](https://claude.ai/) and [gemini cli](https://github.com/google-gemini/gemini-cli)
-
-## Contact
-
-Luca Nagel
-
-## Appendix: File Structure
-
+sim = BlochSimulator()
+tissue = TissueParameters.gray_matter(3.0)
+print(f"T1: {tissue.t1:.3f}s, T2: {tissue.t2:.3f}s")
 ```
+
+### Build the desktop application
+
+Standalone applications for macOS, Windows, and Linux are automatically built
+and attached to GitHub Releases whenever a new version tag is pushed. The
+instructions below are for manual local builds. One build per operating system
+is required.
+
+Prerequisites:
+
+- macOS: Xcode CLT; `brew install libomp`
+- Windows: Python 3.9+ and MSVC Build Tools for the C extension
+- Linux: gcc/g++; ensure `libgomp` is available
+
+Quick build:
+
+```bash
+python -m pip install -r requirements.txt
+python -m pip install pyinstaller
+python setup.py build_ext --inplace
+PYINSTALLER_CONFIG_DIR=.pyinstaller pyinstaller bloch_gui.spec --noconfirm
+```
+
+The artifact is written to `dist/BlochSimulator` as a single binary, with an
+`.exe` suffix on Windows.
+
+Alternatively, use the build helper:
+
+```bash
+./scripts/build_pyinstaller.sh
+```
+
+Run the packaged application with `./dist/BlochSimulator` on macOS/Linux or
+`dist\\BlochSimulator.exe` on Windows.
+
+Runtime data and exports:
+
+- `rfpulses/` is bundled automatically.
+- Exports default to per-user data directories:
+  - macOS: `~/Library/Application Support/BlochSimulator/exports`
+  - Windows: `%APPDATA%\\BlochSimulator\\exports`
+  - Linux: `~/.local/share/BlochSimulator/exports`
+- Override the location with `BLOCH_APP_DIR` or `BLOCH_EXPORT_DIR`.
+
+### Project structure
+
+```text
 blochsimulator/
 ├── src/
 │   └── blochsimulator/
@@ -592,3 +523,61 @@ blochsimulator/
 ├── MANIFEST.in                     # Source dist manifest
 └── README.md
 ```
+
+</details>
+
+### Troubleshooting build issues
+
+1. **Missing compiler:** Install gcc (Linux), Xcode (macOS), or Visual Studio
+   (Windows).
+2. **OpenMP not found:** The code will still work, but without parallelization.
+3. **Import error:** Ensure that the `.so` or `.pyd` file is in the expected
+   package directory.
+
+### Contributing
+
+Contributions are welcome. Please:
+
+1. Fork the repository.
+2. Create a feature branch.
+3. Add tests for new features.
+4. Submit a pull request.
+
+## Citation
+
+If you use this simulator in your research, please cite:
+
+```bibtex
+@software{blochsimulator_python,
+  title={Python Bloch Equation Simulator GUI and API},
+  author={Luca Nagel},
+  year={2026},
+  url={https://github.com/LucaNagel/bloch_sim_gui}
+}
+```
+
+## Acknowledgments
+
+This project is based on [code](http://mrsrl.stanford.edu/~brian/blochsim/)
+originally developed by Brian Hargreaves at Stanford University. As of July
+2026, the original source is unfortunately unavailable. A Python adaptation of
+the code is available [here](https://github.com/ZhengguoTan/BlochSim).
+
+- Original Bloch simulator by Brian Hargreaves, Stanford University
+- NumPy and SciPy communities
+- PyQt/PySide developers
+- OpenMP project
+- Built partially with [Codex](https://openai.com/codex/),
+  [Claude Code](https://claude.ai/), and
+  [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+
+## License
+
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
+You may copy, distribute, and modify the software under the terms of GPLv3.
+Modified versions distributed to others must also be licensed under GPLv3 and
+include the corresponding source code.
+
+## Contact
+
+Luca Nagel
