@@ -17,7 +17,7 @@ from blochsimulator.sequence.pulseq_builders import _phase_encoding_indices
 
 
 pypulseq = pytest.importorskip("pypulseq")
-CSI_PATH = Path(__file__).parents[1] / "sequences" / "sequences" / "csi_2d_centric.seq"
+CSI_PATH = Path(__file__).parent / "data" / "csi_2d_centric.seq"
 
 
 def _jcamp_numeric_array(path: Path, name: str, dtype=float):
