@@ -60,6 +60,7 @@ blochsimulator-gui = "blochsimulator.gui:main"
 
 [tool.cibuildwheel]
 skip = "pp* *musllinux*"
+environment = { PIP_ONLY_BINARY = "numpy", PIP_PREFER_BINARY = "1" }
 
 [tool.black]
 line-length = 88
