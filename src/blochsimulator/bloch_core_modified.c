@@ -939,11 +939,12 @@ static int blochsim_sequence_streaming_impl(
         signal_imag[sample] = 0.0;
     }
 
+    int spin;
 #ifdef _OPENMP
     omp_set_num_threads(thread_count);
 #pragma omp parallel for schedule(static)
 #endif
-    for (int spin = 0; spin < nspins; spin++) {
+    for (spin = 0; spin < nspins; spin++) {
         int thread_id = 0;
 #ifdef _OPENMP
         thread_id = omp_get_thread_num();
