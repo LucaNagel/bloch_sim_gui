@@ -64,7 +64,9 @@ jobs:
             cibw_archs: "auto"
             deployment_target: ""
           - os: windows-latest
-            cibw_archs: "auto"
+            # The scientific Python stack no longer reliably ships win32
+            # wheels (notably h5py), so publish 64-bit Windows wheels only.
+            cibw_archs: "AMD64"
             deployment_target: ""
           # Pin Sonoma while the published wheel targets macOS 14. Homebrew's
           # libomp bottle must not require a newer deployment target.

@@ -15,7 +15,9 @@ jobs:
             cibw_archs: "auto"
             deployment_target: ""
           - os: windows-latest
-            cibw_archs: "auto"
+            # Match the supported release architecture. Building win32 makes
+            # pip fall back to compiling h5py and its native HDF5 dependency.
+            cibw_archs: "AMD64"
             deployment_target: ""
           # Match the release wheel's declared macOS 14 compatibility.
           - os: macos-14

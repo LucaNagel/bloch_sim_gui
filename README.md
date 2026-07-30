@@ -90,7 +90,7 @@ sweep-analysis notebook.
 Download the standalone application for Windows or macOS from
 [GitHub Releases](https://github.com/LucaNagel/bloch_sim_gui/releases). This is
 the recommended option for interactive simulation and requires no Python
-installation.
+installation. Windows downloads and Python wheels target 64-bit systems.
 
 #### Activation on macOS
 
