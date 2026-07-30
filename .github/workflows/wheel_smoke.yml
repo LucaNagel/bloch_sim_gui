@@ -1,0 +1,49 @@
+name: Wheel smoke test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build_wheel:
+    name: Smoke wheel on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cibw_archs: "auto"
+            deployment_target: ""
+          - os: windows-latest
+            cibw_archs: "auto"
+            deployment_target: ""
+          # Match the release wheel's declared macOS 14 compatibility.
+          - os: macos-14
+            cibw_archs: "arm64"
+            deployment_target: "14.0"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install OpenMP runtime (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libomp
+
+      - name: Verify OpenMP deployment target (macOS)
+        if: runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
+        run: bash scripts/check_macos_libomp_target.sh
+
+      - name: Build and test one representative wheel
+        uses: pypa/cibuildwheel@v3.4.1
+        env:
+          CIBW_BUILD: "cp39-*"
+          CIBW_ARCHS: ${{ matrix.cibw_archs }}
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
+
+      - name: Upload smoke wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-wheel-${{ matrix.os }}
+          path: ./wheelhouse/*.whl

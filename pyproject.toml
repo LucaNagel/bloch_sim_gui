@@ -59,8 +59,9 @@ Homepage = "https://github.com/LucaNagel/bloch_sim_gui"
 blochsimulator-gui = "blochsimulator.gui:main"
 
 [tool.cibuildwheel]
-skip = "pp* *musllinux*"
+skip = "*musllinux* cp*t-*"
 environment = { PIP_ONLY_BINARY = "numpy", PIP_PREFER_BINARY = "1" }
+test-command = "python -c \"import blochsimulator.blochsimulator_cy; import blochsimulator.dynamic_bloch_cy\""
 
 [tool.black]
 line-length = 88
