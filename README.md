@@ -428,7 +428,10 @@ For detailed packaging, release workflows, and CI/CD information, see the
 
 ### Install from source
 
-To run from source, you need Python 3.9 or later and a C compiler.
+The Python package supports Python 3.9 or later. Desktop GUI development and
+PyInstaller app builds use the shared Python 3.12 runtime declared in
+`.python-version`, so the source GUI and packaged app do not silently use
+different interpreters.
 
 - **Windows:** Install Python from [python.org](https://www.python.org/downloads/windows/)
   and select **Add Python to PATH**. Install
@@ -449,6 +452,19 @@ git clone https://github.com/LucaNagel/bloch_sim_gui.git
 cd bloch_sim_gui
 pip install -e .
 ```
+
+For desktop GUI development, use the shared launcher instead of invoking an
+arbitrary `python` or `python3` from `PATH`:
+
+```bash
+./scripts/run_gui.sh
+```
+
+Both this launcher and `scripts/build_pyinstaller.sh` use `.venv-packaging`.
+The current repository is installed there in editable mode, preventing an old
+installed BlochSimulator package from shadowing the working tree.
+Set `BLOCH_PYTHON=/path/to/python3.12` if Python 3.12 is not discoverable as
+`python3.12`.
 
 Verify the installation:
 
@@ -476,19 +492,17 @@ Prerequisites:
 Quick build:
 
 ```bash
-python -m pip install -r requirements.txt
-python -m pip install pyinstaller
-python setup.py build_ext --inplace
-PYINSTALLER_CONFIG_DIR=.pyinstaller pyinstaller bloch_gui.spec --noconfirm
+./scripts/build_pyinstaller.sh
 ```
 
 The artifact is written to `dist/BlochSimulator` as a single binary, with an
 `.exe` suffix on Windows.
 
-Alternatively, use the build helper:
+The equivalent explicit commands use the same environment:
 
 ```bash
-./scripts/build_pyinstaller.sh
+.venv-packaging/bin/python setup.py build_ext --inplace
+.venv-packaging/bin/python -m PyInstaller bloch_gui.spec --noconfirm
 ```
 
 Run the packaged application with `./dist/BlochSimulator` on macOS/Linux or

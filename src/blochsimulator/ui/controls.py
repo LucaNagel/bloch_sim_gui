@@ -15,46 +15,66 @@ class UniversalTimeControl(QGroupBox):
 
     time_changed = pyqtSignal(int)  # Emits time index
 
-    def __init__(self):
+    def __init__(self, compact=False):
         super().__init__("Playback Control")
+        self.compact = bool(compact)
         self._updating = False  # Prevent circular updates
         self.init_ui()
 
     def init_ui(self):
-        layout = QHBoxLayout()
-        layout.setContentsMargins(5, 5, 5, 5)
-        layout.setSpacing(8)
-
-        layout.addWidget(QLabel("Time:"))
+        time_label = QLabel("Time:")
         self.time_slider = QSlider(Qt.Horizontal)
         self.time_slider.setObjectName("playback_time_slider")
         self.time_slider.setMinimum(0)
         self.time_slider.setMaximum(0)
         self.time_slider.valueChanged.connect(self._on_slider_changed)
-        layout.addWidget(self.time_slider, 1)
 
         self.time_label = QLabel("0.0 ms")
         self.time_label.setFixedWidth(90)
-        layout.addWidget(self.time_label)
 
         self.play_pause_button = QPushButton("Play")
         self.play_pause_button.setObjectName("playback_play_btn")
         self.play_pause_button.setCheckable(True)
         self.play_pause_button.toggled.connect(self._update_play_pause_label)
-        layout.addWidget(self.play_pause_button)
 
         self.reset_button = QPushButton("Reset")
         self.reset_button.setObjectName("playback_reset_btn")
-        layout.addWidget(self.reset_button)
 
-        layout.addWidget(QLabel("Speed (ms/s):"))
+        speed_label = QLabel("Speed (ms/s):")
         self.speed_spin = QDoubleSpinBox()
         self.speed_spin.setObjectName("playback_speed_spin")
         self.speed_spin.setRange(0.001, 1000.0)
         self.speed_spin.setValue(1.0)  # Default to 50 ms of sim per real second
         self.speed_spin.setSuffix(" ms/s")
         self.speed_spin.setSingleStep(0.1)
-        layout.addWidget(self.speed_spin)
+
+        if self.compact:
+            layout = QVBoxLayout()
+            time_row = QHBoxLayout()
+            time_row.addWidget(time_label)
+            time_row.addWidget(self.time_slider, 1)
+            time_row.addWidget(self.time_label)
+            layout.addLayout(time_row)
+
+            playback_row = QHBoxLayout()
+            playback_row.addStretch()
+            playback_row.addWidget(self.play_pause_button)
+            playback_row.addWidget(self.reset_button)
+            playback_row.addWidget(speed_label)
+            playback_row.addWidget(self.speed_spin)
+            layout.addLayout(playback_row)
+        else:
+            layout = QHBoxLayout()
+            layout.addWidget(time_label)
+            layout.addWidget(self.time_slider, 1)
+            layout.addWidget(self.time_label)
+            layout.addWidget(self.play_pause_button)
+            layout.addWidget(self.reset_button)
+            layout.addWidget(speed_label)
+            layout.addWidget(self.speed_spin)
+
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(8)
 
         # Backwards compatibility for existing signal connections
         self.play_button = self.play_pause_button

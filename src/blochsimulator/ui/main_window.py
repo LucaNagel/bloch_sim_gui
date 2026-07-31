@@ -134,7 +134,18 @@ class BlochSimulatorGUI(QMainWindow):
     def init_ui(self):
         """Initialize the user interface."""
         self.setWindowTitle("Bloch Equation Simulator")
-        self.setGeometry(100, 100, 1400, 900)
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.setGeometry(100, 100, 1400, 900)
+        else:
+            available = screen.availableGeometry()
+            window_width = min(1400, available.width())
+            window_height = min(900, available.height())
+            window_x = available.x() + max(0, (available.width() - window_width) // 2)
+            window_y = available.y() + max(0, (available.height() - window_height) // 2)
+            self.setGeometry(
+                window_x, window_y, max(1, window_width), max(1, window_height)
+            )
         self.last_pulse_range = None
         self.mxy_region = None
         self.mz_region = None
@@ -477,7 +488,12 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Shared heatmap colormap selector for all tabs
         self.free_mode_playback_header = QWidget()
-        colormap_layout = QHBoxLayout(self.free_mode_playback_header)
+        playback_header_layout = QVBoxLayout(self.free_mode_playback_header)
+        playback_header_layout.setContentsMargins(0, 0, 0, 0)
+        playback_header_layout.setSpacing(4)
+
+        colormap_controls = QWidget()
+        colormap_layout = QHBoxLayout(colormap_controls)
         colormap_layout.setContentsMargins(0, 0, 0, 0)
         colormap_layout.addWidget(QLabel("Heatmap colormap:"))
         self.heatmap_colormap = QComboBox()
@@ -487,16 +503,21 @@ class BlochSimulatorGUI(QMainWindow):
         self.heatmap_colormap.setCurrentText("viridis")
         self.heatmap_colormap.currentTextChanged.connect(self._apply_heatmap_colormap)
         colormap_layout.addWidget(self.heatmap_colormap)
+        colormap_layout.addStretch()
+        playback_header_layout.addWidget(colormap_controls)
 
         # Universal time control - controls all time-resolved views
-        self.time_control = UniversalTimeControl()
+        self.time_control = UniversalTimeControl(compact=True)
         self.time_control.setEnabled(False)
-        colormap_layout.addWidget(self.time_control, 1)
+        playback_header_layout.addWidget(self.time_control)
         right_layout.addWidget(self.free_mode_playback_header)
 
         # Tab widget for different views
         self.tab_widget = QTabWidget()
         self.tab_widget.setObjectName("main_tabs")
+        self.tab_widget.tabBar().setUsesScrollButtons(True)
+        self.tab_widget.tabBar().setExpanding(False)
+        self.tab_widget.tabBar().setElideMode(Qt.ElideRight)
 
         # Magnetization plots
         mag_widget = QWidget()
@@ -3929,17 +3950,24 @@ class BlochSimulatorGUI(QMainWindow):
             if sequence_widget is not None:
                 sequence_widget.activate_focused_workspace_layout()
         else:
-            # Reveal Free Mode tabs first, then leave Sequence Simulation hidden.
-            # Selecting the restored tab before hiding the current sequence tab
-            # prevents Qt from temporarily activating the Phantom workspace.
+            # Reveal Free Mode tabs first, then leave the two focused Sequence
+            # Mode workspaces hidden. Selecting the restored tab before hiding
+            # either current tab prevents re-entrant workspace activation.
             for index in range(self.tab_widget.count()):
-                if index != self.sequence_simulation_tab_index:
+                if index not in {
+                    self.sequence_simulation_tab_index,
+                    self.phantom_tab_index,
+                }:
                     self._set_main_tab_visible(index, True)
             self.main_splitter.setSizes([420, max(1, self.width() - 420)])
             restore_index = getattr(self, "_free_mode_tab_index", 1)
             if not 0 <= restore_index < self.tab_widget.count():
                 restore_index = self.magnetization_tab_index
-            if previous_mode == "sequence" and restore_index == self.mag_3d_tab_index:
+            if (
+                sys.platform == "darwin"
+                and previous_mode == "sequence"
+                and restore_index == self.mag_3d_tab_index
+            ):
                 # Rebinding the QOpenGLWidget while Qt is still processing
                 # the workspace/tab visibility changes can stall the macOS
                 # window event queue. Display a non-OpenGL tab for one frame
@@ -3951,6 +3979,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self._deferred_free_mode_tab_index = None
                 self.tab_widget.setCurrentIndex(restore_index)
             self._set_main_tab_visible(self.sequence_simulation_tab_index, False)
+            self._set_main_tab_visible(self.phantom_tab_index, False)
 
         if hasattr(self, "workspace_mode_selector"):
             index = self.workspace_mode_selector.findData(mode)
@@ -7666,7 +7695,9 @@ class BlochSimulatorGUI(QMainWindow):
             "originally developed by Brian Hargreaves.\n\n"
             "This GUI provides interactive visualization and\n"
             "parameter control for MRI pulse sequence simulation.\n\n"
-            f"Version {__version__}",
+            f"Version {__version__}\n"
+            f"Python {sys.version_info.major}.{sys.version_info.minor}."
+            f"{sys.version_info.micro}",
         )
 
 

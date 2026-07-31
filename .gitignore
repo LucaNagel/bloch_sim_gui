@@ -5,6 +5,7 @@ build/
 dist/
 venv_test/
 .venv-packaging/
+.pyinstaller/
 *.egg-info/
 
 # Ignore all files in exports/ except .gitkeep
@@ -51,6 +52,7 @@ __pycache__/
 
 # Generated C files
 src/blochsimulator/bloch_wrapper.c
+src/blochsimulator/dynamic_bloch_wrapper.c
 
 # Generated test notebooks (can be generated from tests/test_notebook_export.py)
 test_mode_a.ipynb

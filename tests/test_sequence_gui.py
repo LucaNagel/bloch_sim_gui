@@ -54,6 +54,11 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     window.app_settings.setValue("simulation/manual_threads", 2)
     assert window.sequence_simulation_widget is None
     assert not window.tab_widget.isTabVisible(window.sequence_simulation_tab_index)
+    assert not window.tab_widget.isTabVisible(window.phantom_tab_index)
+    assert window.time_control.compact
+    assert window.tab_widget.tabBar().usesScrollButtons()
+    assert not window.tab_widget.tabBar().expanding()
+    assert window.tab_widget.tabBar().elideMode() == Qt.ElideRight
     window.tab_widget.setCurrentIndex(window.sequence_simulation_tab_index)
     app.processEvents()
 
@@ -125,9 +130,13 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert not window.free_mode_playback_header.isHidden()
     assert window.tab_widget.isTabVisible(0)
     assert not window.tab_widget.isTabVisible(window.sequence_simulation_tab_index)
-    assert window.tab_widget.currentIndex() == window.magnetization_tab_index
-    assert window._free_mode_tab_restore_timer.isActive()
-    QTest.qWait(window.OPENGL_TAB_RESTORE_DELAY_MS + 100)
+    assert not window.tab_widget.isTabVisible(window.phantom_tab_index)
+    if sys.platform == "darwin":
+        assert window.tab_widget.currentIndex() == window.magnetization_tab_index
+        assert window._free_mode_tab_restore_timer.isActive()
+        QTest.qWait(window.OPENGL_TAB_RESTORE_DELAY_MS + 100)
+    else:
+        assert not window._free_mode_tab_restore_timer.isActive()
     assert window.tab_widget.currentIndex() == window.mag_3d_tab_index
 
     tab_changes = []
@@ -147,12 +156,15 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
 
     assert window.workspace_mode == "sequence"
     assert window.tab_widget.currentIndex() == window.sequence_simulation_tab_index
-    assert tab_changes == [
-        window.sequence_simulation_tab_index,
-        window.magnetization_tab_index,
-        window.mag_3d_tab_index,
-        window.sequence_simulation_tab_index,
-    ]
+    expected_tab_changes = [window.sequence_simulation_tab_index]
+    if sys.platform == "darwin":
+        expected_tab_changes.extend(
+            [window.magnetization_tab_index, window.mag_3d_tab_index]
+        )
+    else:
+        expected_tab_changes.append(window.mag_3d_tab_index)
+    expected_tab_changes.append(window.sequence_simulation_tab_index)
+    assert tab_changes == expected_tab_changes
     window.close()
     window.deleteLater()
     app.processEvents()
@@ -169,6 +181,9 @@ def test_phantom_workspace_is_visible():
     assert "Parameter Sweep" in tab_names
     assert all(not name.startswith(("🔬", "📊")) for name in tab_names)
     assert window.phantom_widget is None
+    assert not window.tab_widget.isTabVisible(window.phantom_tab_index)
+    window.set_workspace_mode("sequence")
+    assert window.tab_widget.isTabVisible(window.phantom_tab_index)
     window.tab_widget.setCurrentIndex(window.phantom_tab_index)
     app.processEvents()
     assert window.phantom_widget is not None

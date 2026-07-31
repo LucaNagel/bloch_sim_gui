@@ -4,11 +4,18 @@ This guide explains how to build, package, and release the BlochSimulator applic
 
 ## 1. Environment Setup
 
-The build process uses a dedicated virtual environment (`.venv-packaging`) to ensure a clean build with specific versions of dependencies (like PyInstaller).
+The source GUI and PyInstaller build share the Python 3.12 runtime declared in
+`.python-version` and the dedicated `.venv-packaging` environment. This keeps
+their Python ABI and GUI dependencies aligned.
 
 To set up the environment (handled automatically by the build script, but good to know):
-1.  Ensure you have Python 3 installed.
-2.  The build script will create `.venv-packaging` and install dependencies from `requirements.txt`.
+1.  Ensure Python 3.12 is installed.
+2.  Run `./scripts/run_gui.sh` for source development or
+    `./scripts/build_pyinstaller.sh` for an app build. Both commands create or
+    reuse `.venv-packaging`, install the current repository in editable mode,
+    and reject an environment from another Python minor version.
+3.  If necessary, select the interpreter explicitly with
+    `BLOCH_PYTHON=/path/to/python3.12`.
 
 **Note:** The `.venv-packaging` directory contains many files but is configured to be ignored by `.gitignore`. You should **not** commit it to the repository.
 

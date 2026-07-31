@@ -30,6 +30,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
+          # Pyodide has its own toolchain constraints; desktop GUI builds use
+          # the version declared in .python-version instead.
           python-version: "3.11"
 
       - name: Set up Emscripten
