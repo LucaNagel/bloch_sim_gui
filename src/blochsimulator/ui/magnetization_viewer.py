@@ -110,6 +110,7 @@ class MagnetizationViewer(QWidget):
         controls_v = QVBoxLayout()
         controls_v.setContentsMargins(0, 0, 0, 0)
         view_layout = QHBoxLayout()
+        self.view_layout = view_layout
         view_layout.addWidget(QLabel("View mode:"))
         self.view_mode_combo = QComboBox()
         self.view_mode_combo.setObjectName("mag_3d_view_mode")
@@ -124,7 +125,7 @@ class MagnetizationViewer(QWidget):
         self.selector_slider.setObjectName("mag_3d_selector_slider")
         self.selector_slider.setRange(0, 0)
         self.selector_slider.valueChanged.connect(self._on_selector_changed)
-        view_layout.addWidget(self.selector_slider)
+        view_layout.addWidget(self.selector_slider, 1)
         controls_v.addLayout(view_layout)
 
         # Initialize tracking state and path storage BEFORE checkbox initialization
@@ -148,12 +149,12 @@ class MagnetizationViewer(QWidget):
         self.track_checkbox.toggled.connect(self._toggle_track_path)
         # Sync internal flag to the initial checkbox state so tracking is active on first playback
         self._toggle_track_path(self.track_checkbox.isChecked())
-        controls_v.addWidget(self.track_checkbox)
+        view_layout.addWidget(self.track_checkbox)
         self.mean_checkbox = QCheckBox("Show mean magnetization")
         self.mean_checkbox.setObjectName("mag_3d_mean_checkbox")
         self.mean_checkbox.setChecked(False)
         self.mean_checkbox.toggled.connect(self._toggle_mean_vector)
-        controls_v.addWidget(self.mean_checkbox)
+        view_layout.addWidget(self.mean_checkbox)
 
         control_container.setLayout(controls_v)
         self.control_container = control_container

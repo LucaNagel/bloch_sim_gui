@@ -6,7 +6,8 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 from PyQt5.QtCore import QSettings, Qt
-from PyQt5.QtWidgets import QApplication, QMessageBox
+from PyQt5.QtTest import QTest
+from PyQt5.QtWidgets import QApplication, QMenu, QMessageBox
 
 from blochsimulator.ui.main_window import BlochSimulatorGUI
 from blochsimulator.ui.sequence_simulation_widget import (
@@ -52,6 +53,7 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     window.app_settings.setValue("simulation/thread_mode", "manual")
     window.app_settings.setValue("simulation/manual_threads", 2)
     assert window.sequence_simulation_widget is None
+    assert not window.tab_widget.isTabVisible(window.sequence_simulation_tab_index)
     window.tab_widget.setCurrentIndex(window.sequence_simulation_tab_index)
     app.processEvents()
 
@@ -67,6 +69,27 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert window.sequence_simulation_widget._rf_designer is window.rf_designer
     assert window.sequence_simulation_widget._rf_designer_pulse_data is not None
     assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is window.workspace_switch
+    assert window.mag_3d.view_layout.indexOf(window.mag_3d.track_checkbox) >= 0
+    assert window.mag_3d.view_layout.indexOf(window.mag_3d.mean_checkbox) >= 0
+    window._set_tooltips_enabled(True)
+    assert all(
+        window.tab_widget.tabToolTip(index).strip()
+        for index in range(window.tab_widget.count())
+    )
+
+    file_menu = window.findChild(QMenu, "menu_file")
+    tools_menu = window.findChild(QMenu, "menu_tools")
+    assert file_menu is not None
+    assert tools_menu is not None
+    assert [
+        action.text()
+        for action in file_menu.actions()
+        if action.objectName() == "action_export_results"
+    ] == ["Export Results..."]
+    assert all(
+        action.objectName() != "action_export_results_tools"
+        for action in tools_menu.actions()
+    )
 
     sequence_widget = window.sequence_simulation_widget
     sequence_widget.sequence_source.setCurrentIndex(1)
@@ -92,6 +115,8 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert window.tab_widget.isTabVisible(window.sequence_simulation_tab_index)
     assert window.tab_widget.isTabVisible(window.phantom_tab_index)
     assert not window.tab_widget.isTabVisible(0)
+    assert window.tab_widget.tabToolTip(window.sequence_simulation_tab_index)
+    assert window.tab_widget.tabToolTip(window.phantom_tab_index)
     assert window.workspace_mode_selector.currentData() == "sequence"
 
     window.set_workspace_mode("free")
@@ -99,6 +124,11 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert not window.free_mode_left_container.isHidden()
     assert not window.free_mode_playback_header.isHidden()
     assert window.tab_widget.isTabVisible(0)
+    assert not window.tab_widget.isTabVisible(window.sequence_simulation_tab_index)
+    assert window.tab_widget.currentIndex() == window.magnetization_tab_index
+    assert window._free_mode_tab_restore_timer.isActive()
+    QTest.qWait(window.OPENGL_TAB_RESTORE_DELAY_MS + 100)
+    assert window.tab_widget.currentIndex() == window.mag_3d_tab_index
 
     tab_changes = []
     window.tab_widget.currentChanged.connect(tab_changes.append)
@@ -109,7 +139,7 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     window.workspace_mode_selector.setCurrentIndex(
         window.workspace_mode_selector.findData("free")
     )
-    app.processEvents()
+    QTest.qWait(window.OPENGL_TAB_RESTORE_DELAY_MS + 100)
     window.workspace_mode_selector.setCurrentIndex(
         window.workspace_mode_selector.findData("sequence")
     )
@@ -119,7 +149,8 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert window.tab_widget.currentIndex() == window.sequence_simulation_tab_index
     assert tab_changes == [
         window.sequence_simulation_tab_index,
-        window._free_mode_tab_index,
+        window.magnetization_tab_index,
+        window.mag_3d_tab_index,
         window.sequence_simulation_tab_index,
     ]
     window.close()
@@ -134,7 +165,9 @@ def test_phantom_workspace_is_visible():
         window.tab_widget.tabText(index) for index in range(window.tab_widget.count())
     ]
 
-    assert "🔬 Phantom" in tab_names
+    assert "Phantom" in tab_names
+    assert "Parameter Sweep" in tab_names
+    assert all(not name.startswith(("🔬", "📊")) for name in tab_names)
     assert window.phantom_widget is None
     window.tab_widget.setCurrentIndex(window.phantom_tab_index)
     app.processEvents()

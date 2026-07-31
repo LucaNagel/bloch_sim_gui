@@ -116,6 +116,8 @@ def get_app_data_dir() -> Path:
 class BlochSimulatorGUI(QMainWindow):
     """Main GUI window for the Bloch simulator."""
 
+    OPENGL_TAB_RESTORE_DELAY_MS = 50
+
     def __init__(self):
         super().__init__()
         self.app_settings = QSettings("BlochSimulator", "BlochSimulator")
@@ -609,7 +611,9 @@ class BlochSimulatorGUI(QMainWindow):
         for plt in (self.mxy_plot, self.mz_plot, self.mxy_heatmap, self.mz_heatmap):
             plt.getViewBox().disableAutoRange()
 
-        self.tab_widget.addTab(self._wrap_in_scroll_area(mag_widget), "Magnetization")
+        self.magnetization_tab_index = self.tab_widget.addTab(
+            self._wrap_in_scroll_area(mag_widget), "Magnetization"
+        )
 
         # 3D visualization
         self.mag_3d = MagnetizationViewer()
@@ -624,7 +628,9 @@ class BlochSimulatorGUI(QMainWindow):
         # Show controls so track/mean toggles are available
         if hasattr(self.mag_3d, "control_container"):
             self.mag_3d.control_container.setVisible(True)
-        self.tab_widget.addTab(self._wrap_in_scroll_area(self.mag_3d), "3D Vector")
+        self.mag_3d_tab_index = self.tab_widget.addTab(
+            self._wrap_in_scroll_area(self.mag_3d), "3D Vector"
+        )
 
         # Signal plot
         signal_widget = QWidget()
@@ -1057,7 +1063,7 @@ class BlochSimulatorGUI(QMainWindow):
             )
             phantom_layout.addStretch()
             self.phantom_tab_index = self.tab_widget.addTab(
-                self.phantom_placeholder, "🔬 Phantom"
+                self.phantom_placeholder, "Phantom"
             )
             self.tab_widget.currentChanged.connect(self._ensure_phantom_workspace)
         else:
@@ -1097,7 +1103,7 @@ class BlochSimulatorGUI(QMainWindow):
         # === PARAMETER SWEEP TAB ===
         self.param_sweep_widget = ParameterSweepWidget(self)
         self.tab_widget.addTab(
-            self._wrap_in_scroll_area(self.param_sweep_widget), "📊 Parameter Sweep"
+            self._wrap_in_scroll_area(self.param_sweep_widget), "Parameter Sweep"
         )
 
         # === RF PULSE DESIGN TAB ===
@@ -1106,7 +1112,7 @@ class BlochSimulatorGUI(QMainWindow):
         )
 
         # === SLICE EXPLORER TAB ===
-        self.slice_explorer = SliceSelectionExplorer(self)
+        self.slice_explorer = SliceSelectionExplorer(self, rf_designer=self.rf_designer)
         self.tab_widget.addTab(
             self._wrap_in_scroll_area(self.slice_explorer), "Slice Explorer"
         )
@@ -1249,9 +1255,62 @@ class BlochSimulatorGUI(QMainWindow):
         )
         sequence_widget.refresh_object_summary()
 
+    def _configure_main_tab_tooltips(self):
+        """Describe every main workspace tab, including focused-mode tabs."""
+        descriptions = {
+            "Magnetization": (
+                "View transverse and longitudinal magnetization over time as "
+                "curves or heatmaps."
+            ),
+            "3D Vector": (
+                "Inspect magnetization vectors, their mean, and tip trajectories "
+                "in three dimensions."
+            ),
+            "Signal": (
+                "View the simulated complex MR signal over time for the selected "
+                "spins."
+            ),
+            "Spectrum": (
+                "Inspect the frequency-domain spectrum and spectral evolution of "
+                "the simulated signal."
+            ),
+            "Spatial": (
+                "Inspect spatial magnetization profiles and position-dependent "
+                "heatmaps."
+            ),
+            "Sequence Simulation": (
+                "Build and run event-based MRI sequence simulations in the "
+                "focused Sequence Mode workspace."
+            ),
+            "Phantom": (
+                "Create, load, edit, and inspect spatial or spectroscopic phantoms."
+            ),
+            "📡 K-Space": "Simulate and inspect sampled k-space data.",
+            "Parameter Sweep": (
+                "Run the simulator across a parameter range and compare the results."
+            ),
+            "RF Design": "Design and inspect custom RF pulse waveforms.",
+            "Slice Explorer": (
+                "Explore RF slice profiles and slice-selection gradient settings."
+            ),
+            "Log": "Review simulator status messages, warnings, and export activity.",
+        }
+        self._tab_tooltip_registry = []
+        for index in range(self.tab_widget.count()):
+            text = self.tab_widget.tabText(index)
+            tooltip = descriptions.get(text, f"Open the {text} workspace.")
+            self.tab_widget.setTabToolTip(index, tooltip)
+            self._tab_tooltip_registry.append((index, tooltip))
+
     def _configure_control_tooltips(self):
         """Add domain-specific tooltips to controls that do not define their own."""
+        self._configure_main_tab_tooltips()
         entries = [
+            (
+                self.slice_explorer.pulse_source,
+                "Use the current RF Design waveform or generate a selected pulse "
+                "shape from the Slice Explorer controls.",
+            ),
             (
                 self.heatmap_colormap,
                 "Color map used by all heatmap views. This changes only the display, not the simulation data.",
@@ -1562,9 +1621,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         for i in range(self.tab_widget.count()):
             text = self.tab_widget.tabText(i)
-            if seq_type == "Free Induction Decay" and "Spectrum" in text:
-                bar.setTabTextColor(i, highlight_color)
-            elif seq_type == "Slice Select + Rephase" and "Spatial" in text:
+            if seq_type == "Slice Select + Rephase" and "Spatial" in text:
                 bar.setTabTextColor(i, highlight_color)
             elif seq_type == "SSFP (Loop)" and "Signal" in text:
                 bar.setTabTextColor(i, highlight_color)
@@ -3726,7 +3783,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         file_menu.addSeparator()
 
-        export_action = file_menu.addAction("Export Results")
+        export_action = file_menu.addAction("Export Results...")
         export_action.setObjectName("action_export_results")
         export_action.triggered.connect(self.export_results)
 
@@ -3736,15 +3793,10 @@ class BlochSimulatorGUI(QMainWindow):
         exit_action.setObjectName("action_exit")
         exit_action.triggered.connect(self.close)
 
-        # Tools/Export menu
+        # Tools menu
         tools_menu = menubar.addMenu("Tools")
         tools_menu.setObjectName("menu_tools")
 
-        export_results_action = tools_menu.addAction("Export Results...")
-        export_results_action.setObjectName("action_export_results_tools")
-        export_results_action.triggered.connect(self.export_results)
-
-        tools_menu.addSeparator()
         settings_action = tools_menu.addAction("Settings...")
         settings_action.setObjectName("action_settings")
         settings_action.triggered.connect(lambda: self.show_settings())
@@ -3783,6 +3835,13 @@ class BlochSimulatorGUI(QMainWindow):
         # macOS. The main tab bar is always rendered inside the application.
         self.tab_widget.setCornerWidget(workspace_switch, Qt.TopRightCorner)
         self.workspace_switch = workspace_switch
+        self._deferred_free_mode_tab_index = None
+        self._free_mode_tab_restore_timer = QTimer(self)
+        self._free_mode_tab_restore_timer.setSingleShot(True)
+        self._free_mode_tab_restore_timer.setInterval(self.OPENGL_TAB_RESTORE_DELAY_MS)
+        self._free_mode_tab_restore_timer.timeout.connect(
+            self._restore_deferred_free_mode_tab
+        )
 
         # Tutorials menu
         tut_menu = menubar.addMenu("Tutorials")
@@ -3811,6 +3870,15 @@ class BlochSimulatorGUI(QMainWindow):
         about_action.setObjectName("action_about")
         about_action.triggered.connect(self.show_about)
 
+    def _set_main_tab_visible(self, index: int, visible: bool):
+        """Set main-tab visibility across supported Qt 5 versions."""
+        if not 0 <= index < self.tab_widget.count():
+            return
+        if hasattr(self.tab_widget, "setTabVisible"):
+            self.tab_widget.setTabVisible(index, visible)
+        else:
+            self.tab_widget.tabBar().setTabVisible(index, visible)
+
     def set_workspace_mode(self, mode: str):
         """Switch between single-spin tools and the focused sequence workspace."""
         mode = str(mode).lower()
@@ -3822,7 +3890,12 @@ class BlochSimulatorGUI(QMainWindow):
         sequence_mode = mode == "sequence"
         previous_mode = getattr(self, "workspace_mode", None)
         if sequence_mode and previous_mode != "sequence":
-            current = self.tab_widget.currentIndex()
+            if self._free_mode_tab_restore_timer.isActive():
+                self._free_mode_tab_restore_timer.stop()
+                current = self._deferred_free_mode_tab_index
+            else:
+                current = self.tab_widget.currentIndex()
+            self._deferred_free_mode_tab_index = None
             if current not in {
                 self.sequence_simulation_tab_index,
                 self.phantom_tab_index,
@@ -3836,6 +3909,9 @@ class BlochSimulatorGUI(QMainWindow):
         self.status_run_bar.setVisible(not sequence_mode)
 
         if sequence_mode:
+            # Sequence Simulation is hidden in Free Mode. Reveal and select it
+            # before hiding the Free Mode tabs to avoid re-entrant tab changes.
+            self._set_main_tab_visible(self.sequence_simulation_tab_index, True)
             # Select the one tab that remains active before hiding the Free Mode
             # tabs. Otherwise Qt successively selects every next visible tab as
             # the current one disappears. Besides producing re-entrant tab
@@ -3843,27 +3919,38 @@ class BlochSimulatorGUI(QMainWindow):
             # and can make repeated workspace switches appear to freeze.
             self.main_splitter.setSizes([0, max(1, self.width())])
             self.tab_widget.setCurrentIndex(self.sequence_simulation_tab_index)
-
-        allowed_sequence_tabs = {
-            self.sequence_simulation_tab_index,
-            self.phantom_tab_index,
-        }
-        for index in range(self.tab_widget.count()):
-            visible = not sequence_mode or index in allowed_sequence_tabs
-            if hasattr(self.tab_widget, "setTabVisible"):
-                self.tab_widget.setTabVisible(index, visible)
-            else:
-                self.tab_widget.tabBar().setTabVisible(index, visible)
-
-        if sequence_mode:
+            allowed_sequence_tabs = {
+                self.sequence_simulation_tab_index,
+                self.phantom_tab_index,
+            }
+            for index in range(self.tab_widget.count()):
+                self._set_main_tab_visible(index, index in allowed_sequence_tabs)
             sequence_widget = getattr(self, "sequence_simulation_widget", None)
             if sequence_widget is not None:
                 sequence_widget.activate_focused_workspace_layout()
         else:
+            # Reveal Free Mode tabs first, then leave Sequence Simulation hidden.
+            # Selecting the restored tab before hiding the current sequence tab
+            # prevents Qt from temporarily activating the Phantom workspace.
+            for index in range(self.tab_widget.count()):
+                if index != self.sequence_simulation_tab_index:
+                    self._set_main_tab_visible(index, True)
             self.main_splitter.setSizes([420, max(1, self.width() - 420)])
             restore_index = getattr(self, "_free_mode_tab_index", 1)
-            if 0 <= restore_index < self.tab_widget.count():
+            if not 0 <= restore_index < self.tab_widget.count():
+                restore_index = self.magnetization_tab_index
+            if previous_mode == "sequence" and restore_index == self.mag_3d_tab_index:
+                # Rebinding the QOpenGLWidget while Qt is still processing
+                # the workspace/tab visibility changes can stall the macOS
+                # window event queue. Display a non-OpenGL tab for one frame
+                # and restore the 3D tab after the transition has settled.
+                self.tab_widget.setCurrentIndex(self.magnetization_tab_index)
+                self._deferred_free_mode_tab_index = restore_index
+                self._free_mode_tab_restore_timer.start()
+            else:
+                self._deferred_free_mode_tab_index = None
                 self.tab_widget.setCurrentIndex(restore_index)
+            self._set_main_tab_visible(self.sequence_simulation_tab_index, False)
 
         if hasattr(self, "workspace_mode_selector"):
             index = self.workspace_mode_selector.findData(mode)
@@ -3876,6 +3963,19 @@ class BlochSimulatorGUI(QMainWindow):
         self.statusBar().showMessage(
             "Sequence workspace" if sequence_mode else "Free simulation workspace"
         )
+
+    def _restore_deferred_free_mode_tab(self):
+        """Restore the Free Mode OpenGL tab after workspace layout has settled."""
+        restore_index = self._deferred_free_mode_tab_index
+        self._deferred_free_mode_tab_index = None
+        if (
+            getattr(self, "workspace_mode", None) != "free"
+            or restore_index is None
+            or self.tab_widget.currentIndex() != self.magnetization_tab_index
+        ):
+            return
+        if 0 <= restore_index < self.tab_widget.count():
+            self.tab_widget.setCurrentIndex(restore_index)
 
     def _load_memory_policy(self) -> MemoryPolicy:
         """Load the persistent simulation-memory policy."""
@@ -3957,6 +4057,9 @@ class BlochSimulatorGUI(QMainWindow):
         """Apply tooltip visibility without discarding their explanatory text."""
         for widget, tooltip in getattr(self, "_tooltip_registry", []):
             widget.setToolTip(tooltip if enabled else "")
+        for index, tooltip in getattr(self, "_tab_tooltip_registry", []):
+            if 0 <= index < self.tab_widget.count():
+                self.tab_widget.setTabToolTip(index, tooltip if enabled else "")
 
     def show_settings(self, initial_tab: str = "general"):
         """Show and persist application, simulation and scanner settings."""
@@ -7567,6 +7670,13 @@ class BlochSimulatorGUI(QMainWindow):
         )
 
 
+def _apply_platform_style(app, platform=None):
+    """Keep the native macOS controls while retaining Fusion elsewhere."""
+    platform = sys.platform if platform is None else str(platform)
+    if platform != "darwin":
+        app.setStyle("Fusion")
+
+
 def main():
     """Main entry point for the GUI application."""
     # pyqtgraph 0.14 caches shader programs at class level.  The application
@@ -7577,8 +7687,7 @@ def main():
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
 
-    # Set application style
-    app.setStyle("Fusion")
+    _apply_platform_style(app)
 
     # Create and show main window
     window = BlochSimulatorGUI()

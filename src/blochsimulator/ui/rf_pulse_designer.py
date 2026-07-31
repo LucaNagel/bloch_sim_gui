@@ -18,7 +18,7 @@ from PyQt5.QtCore import Qt, pyqtSignal
 import numpy as np
 import pyqtgraph as pg
 from pathlib import Path
-from ..simulator import design_rf_pulse
+from ..simulator import RF_PULSE_TYPE_OPTIONS, design_rf_pulse
 from .dialogs import PulseImportDialog
 
 
@@ -59,18 +59,7 @@ class RFPulseDesigner(QGroupBox):
         self.pulse_type = QComboBox()
         prefix = "rf_compact_" if self.compact else "rf_tab_"
         self.pulse_type.setObjectName(f"{prefix}pulse_type")
-        self.pulse_type.addItems(
-            [
-                "Rectangle",
-                "Sinc",
-                "Gaussian",
-                "Hermite",
-                "Adiabatic Half Passage",
-                "Adiabatic Full Passage",
-                "BIR-4",
-                "Custom",
-            ]
-        )
+        self.pulse_type.addItems(list(RF_PULSE_TYPE_OPTIONS))
         self.pulse_type.currentTextChanged.connect(self.update_pulse)
         type_layout.addWidget(self.pulse_type)
         control_layout.addLayout(type_layout)

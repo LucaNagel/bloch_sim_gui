@@ -19,7 +19,24 @@ from PyQt5.QtWidgets import (
 from blochsimulator.memory import GIB, MemoryPolicy
 from blochsimulator.sequence import ScannerParameters
 from blochsimulator.ui.dialogs import PulseImportDialog, SettingsDialog
-from blochsimulator.ui.main_window import BlochSimulatorGUI
+from blochsimulator.ui.main_window import BlochSimulatorGUI, _apply_platform_style
+
+
+def test_application_style_uses_native_macos_controls():
+    app = MagicMock()
+
+    _apply_platform_style(app, platform="darwin")
+
+    app.setStyle.assert_not_called()
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_application_style_retains_fusion_elsewhere(platform):
+    app = MagicMock()
+
+    _apply_platform_style(app, platform=platform)
+
+    app.setStyle.assert_called_once_with("Fusion")
 
 
 def test_log_messages_include_local_timestamp():
@@ -276,9 +293,17 @@ def test_tooltips_can_be_disabled_and_restored():
     window = BlochSimulatorGUI()
     window._set_tooltips_enabled(False)
     assert all(not widget.toolTip() for widget, _ in window._tooltip_registry)
+    assert all(
+        not window.tab_widget.tabToolTip(index)
+        for index, _ in window._tab_tooltip_registry
+    )
 
     window._set_tooltips_enabled(True)
     assert all(widget.toolTip() == text for widget, text in window._tooltip_registry)
+    assert all(
+        window.tab_widget.tabToolTip(index) == text
+        for index, text in window._tab_tooltip_registry
+    )
 
 
 def test_configured_export_directory_is_used(tmp_path, monkeypatch):

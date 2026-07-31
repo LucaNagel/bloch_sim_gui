@@ -26,7 +26,7 @@ INSTRUCTIONS FOR INTEGRATION:
         # === PHANTOM TAB (2D/3D Imaging) ===
         if PHANTOM_AVAILABLE:
             self.phantom_widget = PhantomWidget(self)
-            self.tab_widget.addTab(self.phantom_widget, "🔬 Phantom")
+            self.tab_widget.addTab(self.phantom_widget, "Phantom")
         else:
             self.phantom_widget = None
 
@@ -77,7 +77,7 @@ TAB_INTEGRATION_BLOCK = """
         # === PHANTOM TAB (2D/3D Imaging) ===
         if PHANTOM_AVAILABLE:
             self.phantom_widget = PhantomWidget(self)
-            self.tab_widget.addTab(self.phantom_widget, "🔬 Phantom")
+            self.tab_widget.addTab(self.phantom_widget, "Phantom")
         else:
             self.phantom_widget = None
 """

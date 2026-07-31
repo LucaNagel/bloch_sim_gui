@@ -24,6 +24,17 @@ from .memory import (
     resolve_memory_budget,
 )
 
+RF_PULSE_TYPE_OPTIONS = (
+    "Rectangle",
+    "Sinc",
+    "Gaussian",
+    "Hermite",
+    "Adiabatic Half Passage",
+    "Adiabatic Full Passage",
+    "BIR-4",
+    "Custom",
+)
+
 # Import the Cython extension (will be available after building)
 HAS_CYTHON = False
 try:
@@ -81,7 +92,8 @@ def design_rf_pulse(
     Parameters
     ----------
     pulse_type : str
-        Type of pulse ('rect', 'sinc', 'gaussian', 'adiabatic_half', 'adiabatic_full', 'bir4')
+        Type of pulse ('rect', 'sinc', 'gaussian', 'hermite',
+        'adiabatic_half', 'adiabatic_full', 'bir4')
     duration : float
         Pulse duration in seconds
     flip_angle : float
@@ -119,6 +131,15 @@ def design_rf_pulse(
         sigma = duration / (2 * np.sqrt(2 * np.log(2)) * time_bw_product)
         envelope = np.exp(-(t_centered**2) / (2 * sigma**2))
         area = np.trapezoid(envelope, time)
+        b1 = envelope * (target_area / area)
+    elif pulse_type == "hermite":
+        t_centered = time - duration / 2
+        sigma = duration / max(2.0 * time_bw_product, 1e-9)
+        normalized_time = t_centered / sigma
+        envelope = (1.0 - 0.5 * normalized_time**2) * np.exp(-0.5 * normalized_time**2)
+        area = np.trapezoid(envelope, time)
+        if abs(area) < 1e-12:
+            raise ValueError("Hermite pulse integral is too small for flip scaling")
         b1 = envelope * (target_area / area)
     elif pulse_type == "adiabatic_half":
         # Adiabatic Half Passage (AHP): 90° excitation pulse

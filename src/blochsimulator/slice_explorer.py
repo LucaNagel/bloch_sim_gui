@@ -24,8 +24,10 @@ import pyqtgraph as pg
 
 from .simulator import (
     BlochSimulator,
+    RF_PULSE_TYPE_OPTIONS,
     TissueParameters,
     SliceSelectRephase,
+    apply_rf_carrier,
     design_rf_pulse,
 )
 
@@ -37,10 +39,16 @@ class SliceSelectionExplorer(QWidget):
     the resulting magnetization profile across the slice.
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, rf_designer=None):
         super().__init__(parent)
         self.simulator = BlochSimulator()
+        self.rf_designer = rf_designer
+        self.last_b1 = None
+        self.last_gradients = None
+        self.last_time = None
         self.init_ui()
+        self._connect_rf_designer()
+        self._update_pulse_controls()
         # Trigger initial simulation
         self.run_simulation()
 
@@ -56,6 +64,23 @@ class SliceSelectionExplorer(QWidget):
         # Pulse Parameters Group
         pulse_group = QGroupBox("Pulse Parameters")
         pulse_layout = QVBoxLayout()
+
+        # Pulse source/type
+        row_type = QHBoxLayout()
+        row_type.addWidget(QLabel("Pulse:"))
+        self.pulse_source = QComboBox()
+        self.pulse_source.setObjectName("slice_explorer_pulse_source")
+        self.pulse_source.addItems(["Use RF Design", *RF_PULSE_TYPE_OPTIONS])
+        self.pulse_source.setToolTip(
+            "Use the current waveform from RF Design, or generate the selected "
+            "pulse shape from the Slice Explorer parameters."
+        )
+        row_type.addWidget(self.pulse_source)
+        pulse_layout.addLayout(row_type)
+        self.pulse_status = QLabel()
+        self.pulse_status.setWordWrap(True)
+        self.pulse_status.setStyleSheet("color: gray;")
+        pulse_layout.addWidget(self.pulse_status)
 
         # Flip Angle
         row_flip = QHBoxLayout()
@@ -180,6 +205,7 @@ class SliceSelectionExplorer(QWidget):
 
         # Connect changes to auto-update (optional, maybe just button is safer for performance)
         # For now, let's auto-update on changes for responsiveness, unless it's too slow
+        self.pulse_source.currentTextChanged.connect(self._pulse_source_changed)
         self.flip_angle.valueChanged.connect(self.run_simulation)
         self.duration.valueChanged.connect(self.run_simulation)
         self.tbw.valueChanged.connect(self.run_simulation)
@@ -189,76 +215,181 @@ class SliceSelectionExplorer(QWidget):
         self.pos_range.valueChanged.connect(self.run_simulation)
         # self.num_points.valueChanged.connect(self.run_simulation) # Don't auto-update on points change while typing
 
+    def _connect_rf_designer(self):
+        """Use the main-window RF Designer when one is available."""
+        if self.rf_designer is None:
+            blocked = self.pulse_source.blockSignals(True)
+            self.pulse_source.setCurrentText("Sinc")
+            self.pulse_source.blockSignals(blocked)
+            return
+        self.rf_designer.pulse_changed.connect(self._rf_designer_pulse_changed)
+
+    def _rf_designer_pulse_changed(self, *_):
+        """Refresh an active Slice Explorer when its shared waveform changes."""
+        if self.pulse_source.currentText() == "Use RF Design" and self.isVisible():
+            self.run_simulation()
+
+    def _pulse_source_changed(self, *_):
+        self._update_pulse_controls()
+        self.run_simulation()
+
+    def _update_pulse_controls(self):
+        """Enable local pulse controls only for locally generated waveforms."""
+        use_rf_design = self.pulse_source.currentText() == "Use RF Design"
+        for control in (
+            self.flip_angle,
+            self.duration,
+            self.tbw,
+            self.apodization,
+        ):
+            control.setEnabled(not use_rf_design)
+
+    @staticmethod
+    def _validate_pulse(pulse):
+        if pulse is None or len(pulse) != 2:
+            raise ValueError("Design a valid RF pulse in the RF Design tab first.")
+        b1, time_rf = pulse
+        b1 = np.asarray(b1, dtype=np.complex128).reshape(-1)
+        time_rf = np.asarray(time_rf, dtype=float).reshape(-1)
+        if (
+            b1.size == 0
+            or b1.size != time_rf.size
+            or not np.all(np.isfinite(b1))
+            or not np.all(np.isfinite(time_rf))
+        ):
+            raise ValueError("RF waveform and time axis must be finite and aligned.")
+        time_rf = time_rf - time_rf[0]
+        if time_rf.size > 1 and np.any(np.diff(time_rf) <= 0):
+            raise ValueError("RF waveform time points must be strictly increasing.")
+        return b1, time_rf
+
+    @staticmethod
+    def _apply_window_and_flip_scaling(b1, time_rf, window_type, flip_angle):
+        """Apply optional apodization and scale a waveform to a target flip."""
+        b1 = np.asarray(b1, dtype=np.complex128)
+        if window_type != "None" and b1.size > 1:
+            windows = {
+                "Hamming": np.hamming,
+                "Hanning": np.hanning,
+                "Blackman": np.blackman,
+            }
+            window = windows.get(window_type, lambda count: np.ones(count))(b1.size)
+            b1 = b1 * window
+
+        area = np.trapezoid(b1, x=time_rf)
+        if not np.isfinite(area) or abs(area) < 1e-12:
+            raise ValueError("RF waveform integral is too small for flip scaling.")
+        target_area = np.deg2rad(flip_angle) / (4258.0 * 2.0 * np.pi)
+        return b1 * (target_area / area)
+
+    def _custom_pulse_from_rf_design(self, duration_s, flip_angle, window_type):
+        """Build a local Custom pulse from the waveform loaded in RF Design."""
+        designer = self.rf_designer
+        loaded_b1 = getattr(designer, "loaded_pulse_b1", None)
+        loaded_time = getattr(designer, "loaded_pulse_time", None)
+        if designer is None or loaded_b1 is None or loaded_time is None:
+            raise ValueError(
+                "Load a Custom waveform in RF Design before selecting Custom here."
+            )
+        b1, time_rf = self._validate_pulse((loaded_b1, loaded_time))
+        source_duration = float(time_rf[-1]) if time_rf.size > 1 else 0.0
+        if source_duration <= 0:
+            raise ValueError("The loaded Custom waveform has no usable duration.")
+        time_rf = time_rf * (duration_s / source_duration)
+        b1 = self._apply_window_and_flip_scaling(b1, time_rf, window_type, flip_angle)
+        return b1, time_rf
+
+    def _resolve_pulse(self):
+        """Return waveform and slice-gradient parameters for the selected source."""
+        source = self.pulse_source.currentText()
+        if source == "Use RF Design":
+            if self.rf_designer is None:
+                raise ValueError("RF Design is unavailable in this window.")
+            b1, time_rf = self._validate_pulse(self.rf_designer.get_pulse())
+            state = self.rf_designer.get_state()
+            duration_s = float(state.get("duration", 0.0)) / 1000.0
+            if duration_s <= 0:
+                duration_s = (
+                    float(np.median(np.diff(time_rf))) * time_rf.size
+                    if time_rf.size > 1
+                    else 1e-5
+                )
+            tbw = max(float(self.rf_designer.tbw.value()), 1e-6)
+            flip_angle = float(state.get("flip_angle", 90.0))
+            frequency_offset_hz = float(state.get("freq_offset", 0.0))
+            b1 = apply_rf_carrier(b1, time_rf, frequency_offset_hz)
+            dt = float(np.median(np.diff(time_rf))) if time_rf.size > 1 else duration_s
+            label = f"RF Design ({state.get('pulse_type', 'Custom')})"
+            return b1, time_rf, flip_angle, duration_s, tbw, dt, label
+
+        flip_angle = self.flip_angle.value()
+        duration_s = self.duration.value() / 1000.0
+        tbw = self.tbw.value()
+        window_type = self.apodization.currentText()
+        dt = 1e-5
+
+        if source == "Custom":
+            b1, time_rf = self._custom_pulse_from_rf_design(
+                duration_s, flip_angle, window_type
+            )
+            if time_rf.size > 1:
+                dt = float(np.median(np.diff(time_rf)))
+        else:
+            pulse_types = {
+                "Rectangle": "rect",
+                "Sinc": "sinc",
+                "Gaussian": "gaussian",
+                "Hermite": "hermite",
+                "Adiabatic Half Passage": "adiabatic_half",
+                "Adiabatic Full Passage": "adiabatic_full",
+                "BIR-4": "bir4",
+            }
+            pulse_type = pulse_types[source]
+            n_rf_pts = max(8, int(np.ceil(duration_s / dt)))
+            if pulse_type == "bir4":
+                n_rf_pts = int(np.ceil(n_rf_pts / 4.0) * 4)
+            b1, time_rf = design_rf_pulse(
+                pulse_type=pulse_type,
+                duration=duration_s,
+                flip_angle=flip_angle,
+                time_bw_product=tbw,
+                npoints=n_rf_pts,
+            )
+            if window_type != "None":
+                b1 = self._apply_window_and_flip_scaling(
+                    b1, time_rf, window_type, flip_angle
+                )
+
+        return b1, time_rf, flip_angle, duration_s, tbw, dt, source
+
     def run_simulation(self):
         """Build sequence and run Bloch simulation."""
 
-        # 1. Gather Parameters
-        flip = self.flip_angle.value()
-        dur_s = self.duration.value() / 1000.0
-        tbw = self.tbw.value()
-        apod = self.apodization.currentText()
+        try:
+            (
+                b1_base,
+                time_rf,
+                flip,
+                dur_s,
+                tbw,
+                dt,
+                pulse_label,
+            ) = self._resolve_pulse()
+        except (KeyError, TypeError, ValueError) as exc:
+            self.last_b1 = None
+            self.last_gradients = None
+            self.last_time = None
+            self.plot_rf.clear()
+            self.plot_profile.clear()
+            self.pulse_status.setText(str(exc))
+            return
+
+        self.pulse_status.setText(f"Using {pulse_label}")
         thick_m = self.thickness.value() / 1000.0
         do_rephase = self.use_rephase.currentIndex() == 0
 
         range_mm = self.pos_range.value()
         n_points = self.num_points.value()
-
-        # 2. Design RF Pulse (Sinc)
-        # We use a custom design flow here to support apodization easily on the base shape
-        # Or we can use design_rf_pulse and modify it.
-        # design_rf_pulse in simulator.py doesn't support apodization args directly,
-        # but the GUI's RFPulseDesigner does it manually. Let's mimic that.
-
-        dt = 1e-5  # 10 us time step
-        n_rf_pts = int(np.ceil(dur_s / dt))
-
-        b1_base, time_rf = design_rf_pulse(
-            pulse_type="sinc",
-            duration=dur_s,
-            flip_angle=flip,
-            time_bw_product=tbw,
-            npoints=n_rf_pts,
-        )
-
-        # Apply Apodization
-        if apod != "None" and len(b1_base) > 1:
-            if apod == "Hamming":
-                win = np.hamming(len(b1_base))
-            elif apod == "Hanning":
-                win = np.hanning(len(b1_base))
-            elif apod == "Blackman":
-                win = np.blackman(len(b1_base))
-            else:
-                win = np.ones(len(b1_base))
-            b1_base = b1_base * win
-
-            # Re-scale to maintain flip angle after apodization
-            # (Simplified re-scaling)
-            # Ideally we'd integrate and re-scale.
-            gamma = (
-                4258.0 * 2 * np.pi
-            )  # rad/s/G - wait, gamma in simulator.py is Hz/G usually?
-            # simulator.py: gamma = 4258.0 Hz/G
-            # target area (G*s) = flip_rad / (gamma_Hz_per_G * 2 * pi)
-
-            target_area = np.deg2rad(flip) / (4258.0 * 2 * np.pi)
-            current_area = np.trapezoid(np.abs(b1_base), dx=dt)
-            if current_area > 0:
-                scale = target_area / current_area
-                b1_base *= scale
-
-        # 3. Create Sequence
-        # We can construct a SliceSelectRephase, passing our custom pulse
-        rephase_dur = 0.0
-        if do_rephase:
-            rephase_dur = dur_s / 2.0  # Simple default, usually sufficient
-            # But the class calculates rephase lobe based on slice gradient area.
-            # SliceSelectRephase handles the rephase lobe creation.
-
-        # We will manually construct the sequence tuple to have full control if needed,
-        # or rely on SliceSelectRephase logic.
-        # SliceSelectRephase logic for rephase_duration creates a lobe.
-        # If we want "No Rephase", we can pass rephase_duration very small or handle gradients manually.
 
         if do_rephase:
             seq_obj = SliceSelectRephase(
@@ -306,6 +437,9 @@ class SliceSelectionExplorer(QWidget):
         )
 
         # 6. Update Plots
+        self.last_b1 = np.asarray(b1).copy()
+        self.last_gradients = np.asarray(grads).copy()
+        self.last_time = np.asarray(time).copy()
         self._update_plots(time, b1, grads, positions, result)
 
     def _update_plots(self, time, b1, grads, positions, result):
