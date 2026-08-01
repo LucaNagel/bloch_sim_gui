@@ -1,60 +1,140 @@
-name: Publish to PyPI
+name: Release
 
 on:
   push:
-    branches:
-      - '**'
     tags:
       - 'v*'
-  workflow_dispatch: # Allows manual triggering
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  test:
-    # Packaging-only iterations on pre-release may request the representative
-    # three-platform wheel matrix. Manual runs, main, and tags always test.
-    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/pre-release' && contains(github.event.head_commit.message, '[wheel-smoke]')) }}
+  verify_release_commit:
+    name: Verify tested main commit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version-file: '.python-version'
 
-      - name: Install dependencies
+      - name: Verify tag matches the package version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
         run: |
-          python -m pip install --upgrade pip
-          pip install pytest numpy scipy matplotlib cython PyQt5 pyqtgraph PyOpenGL imageio imageio-ffmpeg h5py nbformat
-          # Install the package in editable mode to build C extension
-          pip install -e ".[pulseq]"
+          python - <<'PY'
+          import os
+          import re
+          import tomllib
 
-      - name: Run tests
-        run: |
-          # Install system libraries required for PyQt5/GUI tests
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            xvfb \
-            libxkbcommon-x11-0 \
-            libxcb-icccm4 \
-            libxcb-image0 \
-            libxcb-keysyms1 \
-            libxcb-randr0 \
-            libxcb-render-util0 \
-            libxcb-xinerama0 \
-            libxcb-xfixes0 \
-            libxcb-shape0 \
-            libxcb-cursor0 \
-            libgl1 \
-            libegl1
-          # Force software rendering for headless CI
-          export QT_QPA_PLATFORM=offscreen
-          xvfb-run pytest tests/
+          with open("pyproject.toml", "rb") as pyproject_file:
+              project_version = tomllib.load(pyproject_file)["project"]["version"]
+
+          tag_version = os.environ["TAG_NAME"].removeprefix("v")
+          is_matching_development_tag = re.fullmatch(
+              rf"{re.escape(project_version)}\.dev\d+", tag_version
+          )
+          if tag_version != project_version and not is_matching_development_tag:
+              raise SystemExit(
+                  f"Release tag version {tag_version!r} does not match package "
+                  f"version {project_version!r} (or its .devN form)."
+              )
+          PY
+
+      - name: Require a successful Tests run for this SHA on main
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const sha = context.sha;
+            const { owner, repo } = context.repo;
+            const mainBranch = await github.rest.repos.getBranch({
+              owner,
+              repo,
+              branch: 'main',
+            });
+            const mainSha = mainBranch.data.commit.sha;
+            if (mainSha !== sha) {
+              const comparison = await github.rest.repos.compareCommits({
+                owner,
+                repo,
+                base: sha,
+                head: mainSha,
+              });
+              if (comparison.data.merge_base_commit.sha !== sha) {
+                core.setFailed(
+                  `Release blocked: ${sha} is not reachable from current ` +
+                  `main (${mainSha}).`
+                );
+                return;
+              }
+            }
+
+            const response = await github.rest.actions.listWorkflowRuns({
+              owner,
+              repo,
+              workflow_id: 'tests.yml',
+              branch: 'main',
+              event: 'push',
+              head_sha: sha,
+              status: 'completed',
+              per_page: 100,
+            });
+
+            const successfulRun = response.data.workflow_runs.find((run) =>
+              run.head_sha === sha &&
+              run.head_branch === 'main' &&
+              run.event === 'push' &&
+              run.status === 'completed' &&
+              run.conclusion === 'success'
+            );
+
+            if (!successfulRun) {
+              core.setFailed(
+                `Release blocked: ${sha} has no successful completed ` +
+                '`Tests` workflow run triggered by a push to main. Push and ' +
+                'successfully test this exact commit on main before tagging it.'
+              );
+              return;
+            }
+
+            const jobs = await github.paginate(
+              github.rest.actions.listJobsForWorkflowRun,
+              {
+                owner,
+                repo,
+                run_id: successfulRun.id,
+                filter: 'latest',
+                per_page: 100,
+              }
+            );
+            const successfulTestJob = jobs.find((job) =>
+              job.name === 'Full test suite' &&
+              job.head_sha === sha &&
+              job.status === 'completed' &&
+              job.conclusion === 'success'
+            );
+            if (!successfulTestJob) {
+              core.setFailed(
+                `Release blocked: main workflow run ${successfulRun.html_url} ` +
+                'does not contain a successful completed `Full test suite` job.'
+              );
+              return;
+            }
+
+            core.info(`Using successful main test run: ${successfulRun.html_url}`);
 
   build_wheels:
     name: Build wheels on ${{ matrix.os }}
-    needs: test
-    if: ${{ always() && (needs.test.result == 'success' || (needs.test.result == 'skipped' && github.event_name == 'push' && github.ref == 'refs/heads/pre-release' && contains(github.event.head_commit.message, '[wheel-smoke]'))) }}
+    needs: verify_release_commit
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -76,6 +156,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set package version from development tag
+        if: contains(github.ref_name, '.dev')
+        shell: bash
+        run: python bump_version.py "${GITHUB_REF_NAME#v}"
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -87,23 +174,10 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
         run: bash scripts/check_macos_libomp_target.sh
 
-      - name: Bump version for dev build (Non-Main Branch)
-        if: github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        run: |
-          # Extract current version from pyproject.toml
-          CURRENT_VER=$(grep -m1 'version = ' pyproject.toml | cut -d '"' -f 2)
-          # Create dev version compliant with PEP 440
-          DEV_VER="${CURRENT_VER}.dev${{ github.run_number }}"
-          echo "Bumping version to $DEV_VER for development build..."
-          python bump_version.py "$DEV_VER"
-
       # Used to build wheels (binary packages)
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.4.1
         env:
-          # A wheel-smoke push builds only the oldest supported CPython ABI.
-          CIBW_BUILD: ${{ needs.test.result == 'skipped' && 'cp39-*' || '*' }}
           CIBW_ARCHS: ${{ matrix.cibw_archs }}
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
         # You can configure cibuildwheel in pyproject.toml if needed,
@@ -116,19 +190,17 @@ jobs:
 
   build_sdist:
     name: Build source distribution
-    needs: test
+    needs: verify_release_commit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
 
-      - name: Bump version for dev build (Non-Main Branch)
-        if: github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
+      - name: Set package version from development tag
+        if: contains(github.ref_name, '.dev')
         shell: bash
-        run: |
-          CURRENT_VER=$(grep -m1 'version = ' pyproject.toml | cut -d '"' -f 2)
-          DEV_VER="${CURRENT_VER}.dev${{ github.run_number }}"
-          echo "Bumping version to $DEV_VER for development build..."
-          python bump_version.py "$DEV_VER"
+        run: python bump_version.py "${GITHUB_REF_NAME#v}"
 
       - name: Build sdist
         run: pipx run build --sdist
@@ -140,7 +212,7 @@ jobs:
 
   build_apps:
     name: Build Apps on ${{ matrix.os }}
-    needs: test
+    needs: verify_release_commit
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -162,15 +234,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
 
-      - name: Bump version for dev build (Non-Main Branch)
-        if: github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
+      - name: Set package version from development tag
+        if: contains(github.ref_name, '.dev')
         shell: bash
-        run: |
-          CURRENT_VER=$(grep -m1 'version = ' pyproject.toml | cut -d '"' -f 2)
-          DEV_VER="${CURRENT_VER}.dev${{ github.run_number }}"
-          echo "Bumping version to $DEV_VER for development build..."
-          python bump_version.py "$DEV_VER"
+        run: python bump_version.py "${GITHUB_REF_NAME#v}"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -242,12 +312,11 @@ jobs:
     name: Create Pre-Release (GitHub)
     needs: [build_wheels, build_sdist, build_apps]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/pre-release'
+    if: contains(github.ref_name, '.dev')
     permissions:
-      contents: write  # Required to create releases
+      actions: read
+      contents: write
     steps:
-      - uses: actions/checkout@v6
-
       - uses: actions/download-artifact@v8
         with:
           pattern: cibw-*
@@ -260,19 +329,10 @@ jobs:
           path: apps
           merge-multiple: true
 
-      - name: Determine Version Tag
-        id: get_version
-        run: |
-          CURRENT_VER=$(grep -m1 'version = ' pyproject.toml | cut -d '"' -f 2)
-          DEV_VER="${CURRENT_VER}.dev${{ github.run_number }}"
-          echo "VERSION=$DEV_VER" >> $GITHUB_OUTPUT
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: v${{ steps.get_version.outputs.VERSION }}
-          target_commitish: ${{ github.sha }}
-          name: Development Build ${{ steps.get_version.outputs.VERSION }}
+          name: Development Build ${{ github.ref_name }}
           draft: false
           prerelease: true
           files: |
@@ -285,7 +345,7 @@ jobs:
     needs: [build_wheels, build_sdist]
     runs-on: ubuntu-latest
     # Development tags belong to GitHub pre-releases, not PyPI.
-    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '.dev')
+    if: ${{ !contains(github.ref_name, '.dev') }}
 
     steps:
       - uses: actions/download-artifact@v8
@@ -303,8 +363,9 @@ jobs:
     name: Release Apps (Stable)
     needs: [build_apps]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '.dev')
+    if: ${{ !contains(github.ref_name, '.dev') }}
     permissions:
+      actions: read
       contents: write
     steps:
       - uses: actions/download-artifact@v8

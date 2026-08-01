@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QMessageBox,
 )
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 import pyqtgraph.opengl as gl
 import pyqtgraph as pg
 import numpy as np
@@ -33,6 +33,8 @@ class MagnetizationViewer(QWidget):
 
     def init_ui(self):
         layout = QVBoxLayout()
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
         self.playhead_line = None
 
         # Add export header for 3D view
@@ -168,6 +170,19 @@ class MagnetizationViewer(QWidget):
         self._update_selector_range()
 
         self.setLayout(layout)
+
+    def showEvent(self, event):
+        """Refresh OpenGL after a hidden tab receives its final geometry."""
+        super().showEvent(event)
+        QTimer.singleShot(0, self.refresh_viewport)
+
+    def refresh_viewport(self):
+        """Repaint the 3D surface without changing the user's camera."""
+        if not self.isVisible() or not self.gl_widget.isVisible():
+            return
+        self.updateGeometry()
+        self.gl_widget.updateGeometry()
+        self.gl_widget.update()
 
     def _ensure_vectors(self, count: int, colors=None):
         """Cache colors for vector updates."""

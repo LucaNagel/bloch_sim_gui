@@ -32,9 +32,7 @@ from PyQt5.QtWidgets import (
     QMenu,
     QDialog,
     QProgressDialog,
-    QToolBar,
     QListWidget,
-    QToolButton,
     QFrame,
     QFileDialog,
 )
@@ -116,7 +114,7 @@ def get_app_data_dir() -> Path:
 class BlochSimulatorGUI(QMainWindow):
     """Main GUI window for the Bloch simulator."""
 
-    OPENGL_TAB_RESTORE_DELAY_MS = 50
+    WORKSPACE_SWITCH_DELAY_MS = 25 if sys.platform == "darwin" else 0
 
     def __init__(self):
         super().__init__()
@@ -220,8 +218,20 @@ class BlochSimulatorGUI(QMainWindow):
         self.setCentralWidget(central_widget)
 
         # Main layout
-        main_layout = QHBoxLayout()
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(6)
         central_widget.setLayout(main_layout)
+
+        # Stable application-level header. The workspace selector is added in
+        # create_menu() once the tab widget exists, but its position no longer
+        # depends on the number or height of visible tabs.
+        self.workspace_header = QWidget()
+        self.workspace_header_layout = QHBoxLayout(self.workspace_header)
+        self.workspace_header_layout.setContentsMargins(0, 0, 0, 0)
+        self.workspace_header_layout.setSpacing(6)
+        self.workspace_header_layout.addStretch()
+        main_layout.addWidget(self.workspace_header)
 
         # Left panel - Parameters
         left_panel = QWidget()
@@ -473,7 +483,6 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Build run bars early so references are available if needed
         self._build_status_run_bar()
-        self._build_toolbar_run_bar()
 
         # Alias the primary controls to the status bar versions for compatibility
         self.simulate_button = self.status_run_button
@@ -484,6 +493,8 @@ class BlochSimulatorGUI(QMainWindow):
         # Right panel - Visualization + log
         right_panel = QWidget()
         right_layout = QVBoxLayout()
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
         right_panel.setLayout(right_layout)
 
         # Shared heatmap colormap selector for all tabs
@@ -507,7 +518,7 @@ class BlochSimulatorGUI(QMainWindow):
         playback_header_layout.addWidget(colormap_controls)
 
         # Universal time control - controls all time-resolved views
-        self.time_control = UniversalTimeControl(compact=True)
+        self.time_control = UniversalTimeControl(compact=False)
         self.time_control.setEnabled(False)
         playback_header_layout.addWidget(self.time_control)
         right_layout.addWidget(self.free_mode_playback_header)
@@ -524,14 +535,10 @@ class BlochSimulatorGUI(QMainWindow):
         mag_layout = QVBoxLayout()
         mag_widget.setLayout(mag_layout)
 
-        # Add export header
+        # View header
         mag_header = QHBoxLayout()
         mag_header.addWidget(QLabel("Magnetization Evolution"))
         mag_header.addStretch()
-
-        mag_export_btn = QPushButton("Export Results")
-        mag_export_btn.clicked.connect(self.export_results)
-        mag_header.addWidget(mag_export_btn)
         mag_layout.addLayout(mag_header)
 
         # Magnetization view filter controls (align with 3D view options)
@@ -649,23 +656,22 @@ class BlochSimulatorGUI(QMainWindow):
         # Show controls so track/mean toggles are available
         if hasattr(self.mag_3d, "control_container"):
             self.mag_3d.control_container.setVisible(True)
-        self.mag_3d_tab_index = self.tab_widget.addTab(
-            self._wrap_in_scroll_area(self.mag_3d), "3D Vector"
-        )
+        self.mag_3d.export_3d_btn.setVisible(False)
+        # QOpenGLWidget does not need scrolling here. In particular, nesting it
+        # in QAbstractScrollArea can leave the native macOS surface at the old
+        # viewport size after a workspace switch, producing stale perspective,
+        # scroll bars, and a blocked repaint until the application is activated.
+        self.mag_3d_tab_index = self.tab_widget.addTab(self.mag_3d, "3D Vector")
 
         # Signal plot
         signal_widget = QWidget()
         signal_layout = QVBoxLayout()
         signal_widget.setLayout(signal_layout)
 
-        # Add export header
+        # View header
         signal_header = QHBoxLayout()
         signal_header.addWidget(QLabel("Signal Evolution"))
         signal_header.addStretch()
-
-        signal_export_btn = QPushButton("Export Results")
-        signal_export_btn.clicked.connect(self.export_results)
-        signal_header.addWidget(signal_export_btn)
         signal_layout.addLayout(signal_header)
 
         # Add signal view controls - default to Heatmap
@@ -737,7 +743,9 @@ class BlochSimulatorGUI(QMainWindow):
         signal_splitter.addWidget(self.signal_heatmap_layout)
         signal_layout.addWidget(signal_splitter)
 
-        self.tab_widget.addTab(self._wrap_in_scroll_area(signal_widget), "Signal")
+        self.signal_tab_index = self.tab_widget.addTab(
+            self._wrap_in_scroll_area(signal_widget), "Signal"
+        )
 
         # Time cursor lines removed for performance
 
@@ -756,14 +764,10 @@ class BlochSimulatorGUI(QMainWindow):
         spectrum_container = QWidget()
         spectrum_layout = QVBoxLayout()
 
-        # Add export header for spectrum
+        # View header
         spectrum_header = QHBoxLayout()
         spectrum_header.addWidget(QLabel("Frequency Spectrum"))
         spectrum_header.addStretch()
-
-        spectrum_export_btn = QPushButton("Export Results")
-        spectrum_export_btn.clicked.connect(self.export_results)
-        spectrum_header.addWidget(spectrum_export_btn)
         spectrum_layout.addLayout(spectrum_header)
 
         spectrum_controls = QHBoxLayout()
@@ -873,7 +877,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.spectrum_heatmap_colorbar.setImageItem(self.spectrum_heatmap_item)
         spectrum_layout.addWidget(self.spectrum_heatmap_layout)
         spectrum_container.setLayout(spectrum_layout)
-        self.tab_widget.addTab(
+        self.spectrum_tab_index = self.tab_widget.addTab(
             self._wrap_in_scroll_area(spectrum_container), "Spectrum"
         )
 
@@ -882,14 +886,10 @@ class BlochSimulatorGUI(QMainWindow):
         spatial_container = QWidget()
         spatial_layout = QVBoxLayout()
 
-        # Add export header for spatial
+        # View header
         spatial_header = QHBoxLayout()
         spatial_header.addWidget(QLabel("Spatial Profile"))
         spatial_header.addStretch()
-
-        spatial_export_btn = QPushButton("Export Results")
-        spatial_export_btn.clicked.connect(self.export_results)
-        spatial_header.addWidget(spatial_export_btn)
         spatial_layout.addLayout(spatial_header)
 
         # Display controls
@@ -1057,12 +1057,24 @@ class BlochSimulatorGUI(QMainWindow):
         spatial_layout.addWidget(self.spatial_heatmap_container)
 
         spatial_container.setLayout(spatial_layout)
-        self.tab_widget.addTab(self._wrap_in_scroll_area(spatial_container), "Spatial")
+        self.spatial_tab_index = self.tab_widget.addTab(
+            self._wrap_in_scroll_area(spatial_container), "Spatial"
+        )
 
         # === EVENT-BASED 3D SEQUENCE SIMULATION ===
         self.sequence_simulation_widget = None
         self.sequence_simulation_placeholder = QWidget()
+        # QTabWidget's internal stacked layout includes the minimum size of
+        # every page, even when its tab is hidden.  Once the large Sequence
+        # workspace has been initialized, that would otherwise enlarge the
+        # Free Mode window beyond the available screen on the next switch.
+        # The page still expands normally while active; it simply does not
+        # impose its content's minimum size on the other workspace.
+        self.sequence_simulation_placeholder.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Ignored
+        )
         placeholder_layout = QVBoxLayout(self.sequence_simulation_placeholder)
+        placeholder_layout.setContentsMargins(0, 0, 0, 0)
         placeholder_layout.addWidget(
             QLabel("Open this tab to initialize the 3D sequence simulation workspace.")
         )
@@ -1078,7 +1090,11 @@ class BlochSimulatorGUI(QMainWindow):
         if PHANTOM_AVAILABLE:
             self.phantom_widget = None
             self.phantom_placeholder = QWidget()
+            self.phantom_placeholder.setSizePolicy(
+                QSizePolicy.Ignored, QSizePolicy.Ignored
+            )
             phantom_layout = QVBoxLayout(self.phantom_placeholder)
+            phantom_layout.setContentsMargins(0, 0, 0, 0)
             phantom_layout.addWidget(
                 QLabel("Open this tab to initialize the Phantom workspace.")
             )
@@ -1199,7 +1215,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.main_splitter.setStretchFactor(0, 1)
         self.main_splitter.setStretchFactor(1, 3)
         self.main_splitter.setSizes([420, 1000])
-        main_layout.addWidget(self.main_splitter)
+        main_layout.addWidget(self.main_splitter, 1)
 
         # Push initial time-step into designers
         self._update_time_step(self.time_step_spin.value())
@@ -2157,23 +2173,14 @@ class BlochSimulatorGUI(QMainWindow):
         # Get current visible tab to optimize updates (define early for all code paths)
         current_tab_index = self.tab_widget.currentIndex()
 
-        # Check which plots are actually visible and need updates
-        # Tab indices: 0=Magnetization, 1=3D Vector, 2=Signal, 3=Spectrum, 4=Spatial, ...
-        mag_tab_visible = current_tab_index == 0
-        signal_tab_visible = current_tab_index == 2
-        spectrum_tab_visible = current_tab_index == 3
-        spatial_tab_visible = current_tab_index == 4
-
-        # Update time cursors on plots
-        # PyQt/pyqtgraph still processes updates even for hidden tabs, causing lag.
-        # Disable updates for plots that aren't visible to improve animation performance.
-        if self.last_time is not None and 0 <= actual_idx < len(self.last_time):
-            time_ms = self.last_time[actual_idx] * 1000
-
-            # Only update time cursors when NOT animating (during scrubbing/pause)
-            # During animation, skip time cursor updates for Magnetization and Signal plots
-            # to improve performance - only 3D vector animates
-            # Time lines removed for performance
+        # Pyqtgraph still processes updates for hidden tabs. Resolve visibility
+        # through the stored indices so focused workspaces never trigger a plot
+        # refresh merely because their index happens to match an old constant.
+        free_mode = getattr(self, "workspace_mode", "free") == "free"
+        spectrum_tab_visible = (
+            free_mode and current_tab_index == self.spectrum_tab_index
+        )
+        spatial_tab_visible = free_mode and current_tab_index == self.spatial_tab_index
 
         # Always update visible spectrum/spatial views, even during playback
         if spatial_tab_visible:
@@ -2193,40 +2200,44 @@ class BlochSimulatorGUI(QMainWindow):
 
         Disable updates on plots that aren't visible to speed up tab switching.
         """
-        # Enable updates on all plot widgets first
-        all_plot_widgets = [
+        free_mode = getattr(self, "workspace_mode", "free") == "free"
+        magnetization_active = free_mode and index == self.magnetization_tab_index
+        signal_active = free_mode and index == self.signal_tab_index
+        spectrum_active = free_mode and index == self.spectrum_tab_index
+        spatial_active = free_mode and index == self.spatial_tab_index
+
+        # Apply the final state directly. Briefly enabling every hidden plot on
+        # each tab change schedules costly pyqtgraph repaints and made the
+        # two-stage macOS OpenGL restore noticeably stall.
+        for widget in (
             self.mxy_plot,
             self.mz_plot,
             self.mxy_heatmap_layout,
             self.mz_heatmap_layout,
+        ):
+            widget.setUpdatesEnabled(magnetization_active)
+        for widget in (
             self.signal_plot,
             self.signal_heatmap_layout,
+        ):
+            widget.setUpdatesEnabled(signal_active)
+        for widget in (
             self.spectrum_plot,
             self.spectrum_heatmap_layout,
+        ):
+            if widget is not None:
+                widget.setUpdatesEnabled(spectrum_active)
+        for widget in (
             self.spatial_mxy_plot,
             self.spatial_mz_plot,
             self.spatial_heatmap_container,
-        ]
-        for widget in all_plot_widgets:
-            if widget is not None:
-                widget.setUpdatesEnabled(True)
+        ):
+            widget.setUpdatesEnabled(spatial_active)
 
-        # Now disable updates on plots not in the current tab
-        # Tab indices: 0=Magnetization, 1=3D Vector, 2=Signal, 3=Spectrum, 4=Spatial
-        if index != 0:  # Not Magnetization tab
-            self.mxy_plot.setUpdatesEnabled(False)
-            self.mz_plot.setUpdatesEnabled(False)
-        if index != 2:  # Not Signal tab
-            self.signal_plot.setUpdatesEnabled(False)
-            self.signal_heatmap_layout.setUpdatesEnabled(False)
-        if index != 3:  # Not Spectrum tab
-            self.spectrum_plot.setUpdatesEnabled(False)
-            if (
-                hasattr(self, "spectrum_heatmap_layout")
-                and self.spectrum_heatmap_layout is not None
-            ):
-                self.spectrum_heatmap_layout.setUpdatesEnabled(False)
-        else:  # Switching TO Spectrum tab
+        if index == self.mag_3d_tab_index and free_mode:
+            QTimer.singleShot(0, self._refresh_3d_viewport_after_layout)
+
+        if spectrum_active:
             # Update spectrum if it's dirty
             if (
                 self._spectrum_needs_update
@@ -2241,12 +2252,7 @@ class BlochSimulatorGUI(QMainWindow):
                 actual_idx = self._playback_to_full_index(current_idx)
                 self._refresh_spectrum(time_idx=actual_idx, skip_fft=False)
                 self._spectrum_needs_update = False
-        if index != 4:  # Not Spatial tab
-            self.spatial_mxy_plot.setUpdatesEnabled(False)
-            self.spatial_mz_plot.setUpdatesEnabled(False)
-            if hasattr(self, "spatial_heatmap_container"):
-                self.spatial_heatmap_container.setUpdatesEnabled(False)
-        else:  # Switching TO Spatial tab
+        if spatial_active:
             # Update spatial if it's dirty
             if (
                 self._spatial_needs_update
@@ -2261,6 +2267,14 @@ class BlochSimulatorGUI(QMainWindow):
                 actual_idx = self._playback_to_full_index(current_idx)
                 self.update_spatial_plot_from_last_result(time_idx=actual_idx)
                 self._spatial_needs_update = False
+
+    def _refresh_3d_viewport_after_layout(self):
+        """Refresh the Free Mode OpenGL surface after its tab has settled."""
+        if (
+            getattr(self, "workspace_mode", None) == "free"
+            and self.tab_widget.currentIndex() == self.mag_3d_tab_index
+        ):
+            self.mag_3d.refresh_viewport()
 
     def _start_vector_animation(self):
         """Start or restart the 3D vector animation if data exists."""
@@ -2278,11 +2292,6 @@ class BlochSimulatorGUI(QMainWindow):
         if self.anim_index >= len(self.anim_data):
             self.anim_index = 0
         self._reset_playback_anchor(self.anim_index)
-
-        # Disable updates on Magnetization and Signal plots during animation
-        self.mxy_plot.setUpdatesEnabled(False)
-        self.mz_plot.setUpdatesEnabled(False)
-        self.signal_plot.setUpdatesEnabled(False)
 
         # Always recompute interval using current speed control
         self._recompute_anim_interval(
@@ -2302,11 +2311,6 @@ class BlochSimulatorGUI(QMainWindow):
         self.anim_timer.stop()
         self._sync_play_toggle(False)
 
-        # Re-enable updates on Magnetization and Signal plots after animation stops
-        self.mxy_plot.setUpdatesEnabled(True)
-        self.mz_plot.setUpdatesEnabled(True)
-        self.signal_plot.setUpdatesEnabled(True)
-
         # When paused, refresh plots with current frame (full update)
         if hasattr(self, "anim_index"):
             self._on_universal_time_changed(
@@ -2317,11 +2321,6 @@ class BlochSimulatorGUI(QMainWindow):
         """Reset the 3D vector to the first available frame."""
         self.anim_timer.stop()
         self._sync_play_toggle(False)
-
-        # Re-enable updates on Magnetization and Signal plots after animation stops
-        self.mxy_plot.setUpdatesEnabled(True)
-        self.mz_plot.setUpdatesEnabled(True)
-        self.signal_plot.setUpdatesEnabled(True)
 
         self.anim_index = 0
         self.mag_3d._clear_path()
@@ -3827,12 +3826,12 @@ class BlochSimulatorGUI(QMainWindow):
         self.free_workspace_action = view_menu.addAction("Free Mode")
         self.free_workspace_action.setCheckable(True)
         self.free_workspace_action.triggered.connect(
-            lambda: self.set_workspace_mode("free")
+            lambda: self._request_workspace_mode("free")
         )
         self.sequence_workspace_action = view_menu.addAction("Sequence Mode")
         self.sequence_workspace_action.setCheckable(True)
         self.sequence_workspace_action.triggered.connect(
-            lambda: self.set_workspace_mode("sequence")
+            lambda: self._request_workspace_mode("sequence")
         )
 
         workspace_switch = QWidget()
@@ -3846,22 +3845,16 @@ class BlochSimulatorGUI(QMainWindow):
             "Free Mode shows the single-spin tools; Sequence Mode maximizes "
             "the sequence simulation and phantom workspaces."
         )
-        self.workspace_mode_selector.currentIndexChanged.connect(
-            lambda: self.set_workspace_mode(
-                str(self.workspace_mode_selector.currentData())
-            )
-        )
         workspace_switch_layout.addWidget(self.workspace_mode_selector)
-        # QMenuBar corner widgets disappear into the native global menu bar on
-        # macOS. The main tab bar is always rendered inside the application.
-        self.tab_widget.setCornerWidget(workspace_switch, Qt.TopRightCorner)
+        self.workspace_header_layout.addWidget(workspace_switch)
         self.workspace_switch = workspace_switch
-        self._deferred_free_mode_tab_index = None
-        self._free_mode_tab_restore_timer = QTimer(self)
-        self._free_mode_tab_restore_timer.setSingleShot(True)
-        self._free_mode_tab_restore_timer.setInterval(self.OPENGL_TAB_RESTORE_DELAY_MS)
-        self._free_mode_tab_restore_timer.timeout.connect(
-            self._restore_deferred_free_mode_tab
+        self._pending_workspace_mode = None
+        self._workspace_switch_timer = QTimer(self)
+        self._workspace_switch_timer.setSingleShot(True)
+        self._workspace_switch_timer.setInterval(self.WORKSPACE_SWITCH_DELAY_MS)
+        self._workspace_switch_timer.timeout.connect(self._apply_pending_workspace_mode)
+        self.workspace_mode_selector.currentIndexChanged.connect(
+            self._workspace_selector_changed
         )
 
         # Tutorials menu
@@ -3900,6 +3893,45 @@ class BlochSimulatorGUI(QMainWindow):
         else:
             self.tab_widget.tabBar().setTabVisible(index, visible)
 
+    def _workspace_selector_changed(self, _index: int):
+        """Queue a workspace change after the native combo popup has closed."""
+        self._request_workspace_mode(str(self.workspace_mode_selector.currentData()))
+
+    def _request_workspace_mode(self, mode: str):
+        """Coalesce workspace requests and execute them outside input handlers."""
+        mode = str(mode).lower()
+        if mode not in {"free", "sequence"}:
+            return
+        self._pending_workspace_mode = mode
+        self._workspace_switch_timer.start()
+
+    def _apply_pending_workspace_mode(self):
+        """Apply a queued workspace request after releasing transient input state."""
+        mode = self._pending_workspace_mode
+        self._pending_workspace_mode = None
+        if mode is None:
+            return
+        self._release_workspace_input_state()
+        self.set_workspace_mode(mode)
+
+    def _release_workspace_input_state(self):
+        """Release native popup/focus grabs before changing OpenGL ancestors."""
+        if hasattr(self, "workspace_mode_selector"):
+            self.workspace_mode_selector.hidePopup()
+            self.workspace_mode_selector.clearFocus()
+        mouse_grabber = QWidget.mouseGrabber()
+        if mouse_grabber is not None:
+            try:
+                mouse_grabber.releaseMouse()
+            except RuntimeError:
+                pass
+        keyboard_grabber = QWidget.keyboardGrabber()
+        if keyboard_grabber is not None:
+            try:
+                keyboard_grabber.releaseKeyboard()
+            except RuntimeError:
+                pass
+
     def set_workspace_mode(self, mode: str):
         """Switch between single-spin tools and the focused sequence workspace."""
         mode = str(mode).lower()
@@ -3910,23 +3942,35 @@ class BlochSimulatorGUI(QMainWindow):
 
         sequence_mode = mode == "sequence"
         previous_mode = getattr(self, "workspace_mode", None)
+        if previous_mode == mode:
+            if hasattr(self, "workspace_mode_selector"):
+                selector_index = self.workspace_mode_selector.findData(mode)
+                blocked = self.workspace_mode_selector.blockSignals(True)
+                self.workspace_mode_selector.setCurrentIndex(selector_index)
+                self.workspace_mode_selector.blockSignals(blocked)
+            if hasattr(self, "free_workspace_action"):
+                self.free_workspace_action.setChecked(not sequence_mode)
+                self.sequence_workspace_action.setChecked(sequence_mode)
+            return
         if sequence_mode and previous_mode != "sequence":
-            if self._free_mode_tab_restore_timer.isActive():
-                self._free_mode_tab_restore_timer.stop()
-                current = self._deferred_free_mode_tab_index
-            else:
-                current = self.tab_widget.currentIndex()
-            self._deferred_free_mode_tab_index = None
+            current = self.tab_widget.currentIndex()
             if current not in {
                 self.sequence_simulation_tab_index,
                 self.phantom_tab_index,
             }:
                 self._free_mode_tab_index = current
 
+            # A hidden animation would continue waking the event loop and
+            # updating the OpenGL buffers during the workspace transition.
+            # Pause it at the current frame; the user can resume after returning.
+            if self.anim_timer.isActive():
+                self.anim_timer.stop()
+                self._last_render_wall = None
+                self._sync_play_toggle(False)
+
         self.workspace_mode = mode
         self.free_mode_left_container.setVisible(not sequence_mode)
         self.free_mode_playback_header.setVisible(not sequence_mode)
-        self.toolbar_run_bar.setVisible(not sequence_mode)
         self.status_run_bar.setVisible(not sequence_mode)
 
         if sequence_mode:
@@ -3968,16 +4012,13 @@ class BlochSimulatorGUI(QMainWindow):
                 and previous_mode == "sequence"
                 and restore_index == self.mag_3d_tab_index
             ):
-                # Rebinding the QOpenGLWidget while Qt is still processing
-                # the workspace/tab visibility changes can stall the macOS
-                # window event queue. Display a non-OpenGL tab for one frame
-                # and restore the 3D tab after the transition has settled.
-                self.tab_widget.setCurrentIndex(self.magnetization_tab_index)
-                self._deferred_free_mode_tab_index = restore_index
-                self._free_mode_tab_restore_timer.start()
-            else:
-                self._deferred_free_mode_tab_index = None
-                self.tab_widget.setCurrentIndex(restore_index)
+                # Re-entering a QOpenGLWidget from the same combo-box event can
+                # block Cocoa's input queue until the application is reactivated.
+                # Return to the regular plot page; 3D remains one click away once
+                # the workspace transition is fully complete.
+                restore_index = self.magnetization_tab_index
+                self._free_mode_tab_index = restore_index
+            self.tab_widget.setCurrentIndex(restore_index)
             self._set_main_tab_visible(self.sequence_simulation_tab_index, False)
             self._set_main_tab_visible(self.phantom_tab_index, False)
 
@@ -3992,19 +4033,6 @@ class BlochSimulatorGUI(QMainWindow):
         self.statusBar().showMessage(
             "Sequence workspace" if sequence_mode else "Free simulation workspace"
         )
-
-    def _restore_deferred_free_mode_tab(self):
-        """Restore the Free Mode OpenGL tab after workspace layout has settled."""
-        restore_index = self._deferred_free_mode_tab_index
-        self._deferred_free_mode_tab_index = None
-        if (
-            getattr(self, "workspace_mode", None) != "free"
-            or restore_index is None
-            or self.tab_widget.currentIndex() != self.magnetization_tab_index
-        ):
-            return
-        if 0 <= restore_index < self.tab_widget.count():
-            self.tab_widget.setCurrentIndex(restore_index)
 
     def _load_memory_policy(self) -> MemoryPolicy:
         """Load the persistent simulation-memory policy."""
@@ -4238,59 +4266,15 @@ class BlochSimulatorGUI(QMainWindow):
         layout.addWidget(self.status_progress)
 
         layout.addStretch()
+        self.status_export_button = QPushButton("Export Results")
+        self.status_export_button.setObjectName("status_export_btn")
+        self.status_export_button.clicked.connect(self.export_results)
+        self.status_export_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        layout.addWidget(self.status_export_button)
+
         bar.setLayout(layout)
         self.statusBar().addPermanentWidget(bar, 1)
         self.status_run_bar = bar
-
-    def _build_toolbar_run_bar(self):
-        """Add a top toolbar with run controls to keep them visible."""
-        tb = QToolBar("Run Controls")
-        tb.setObjectName("main_toolbar")
-        tb.setMovable(False)
-        tb.setFloatable(False)
-
-        self.toolbar_run_action = tb.addAction("Run Single-Spin Simulation")
-        self.toolbar_run_action.setObjectName("action_toolbar_run")
-        self.toolbar_run_action.triggered.connect(self.run_simulation)
-
-        self.toolbar_cancel_action = tb.addAction("Cancel")
-        self.toolbar_cancel_action.setObjectName("action_toolbar_cancel")
-        self.toolbar_cancel_action.triggered.connect(self.cancel_simulation)
-        self.toolbar_cancel_action.setEnabled(False)
-
-        self.toolbar_preview_action = tb.addAction("Preview")
-        self.toolbar_preview_action.setObjectName("action_toolbar_preview")
-        self.toolbar_preview_action.setCheckable(True)
-        initial_preview = False
-        if hasattr(self, "preview_checkbox"):
-            initial_preview = self.preview_checkbox.isChecked()
-        self.toolbar_preview_action.setChecked(initial_preview)
-        self.toolbar_preview_action.toggled.connect(
-            lambda val: self._sync_preview_checkboxes(val)
-        )
-
-        tb.addSeparator()
-
-        self.toolbar_export_button = QToolButton()
-        self.toolbar_export_button.setObjectName("toolbar_export_btn")
-        self.toolbar_export_button.setText("Export Results")
-        self.toolbar_export_button.clicked.connect(self.export_results)
-        tb.addWidget(self.toolbar_export_button)
-
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        tb.addWidget(spacer)
-
-        self.toolbar_progress = QProgressBar()
-        self.toolbar_progress.setFixedWidth(160)
-        initial_progress = 0
-        if hasattr(self, "progress_bar"):
-            initial_progress = self.progress_bar.value()
-        self.toolbar_progress.setValue(initial_progress)
-        tb.addWidget(self.toolbar_progress)
-
-        self.addToolBar(tb)
-        self.toolbar_run_bar = tb
 
     def run_simulation(self):
         """Run the Bloch simulation."""

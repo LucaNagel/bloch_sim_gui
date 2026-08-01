@@ -1,11 +1,15 @@
 name: Wheel smoke test
 
 on:
+  push:
+    branches:
+      - pre-release
   workflow_dispatch:
 
 jobs:
   build_wheel:
     name: Smoke wheel on ${{ matrix.os }}
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[wheel-smoke]') }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -26,6 +30,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Set development version for smoke artifact
+        shell: bash
+        run: |
+          CURRENT_VER=$(grep -m1 'version = ' pyproject.toml | cut -d '"' -f 2)
+          python bump_version.py "${CURRENT_VER}.dev${{ github.run_number }}"
 
       - name: Install OpenMP runtime (macOS)
         if: runner.os == 'macOS'

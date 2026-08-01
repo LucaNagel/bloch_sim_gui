@@ -503,7 +503,8 @@ class SequenceProbeThread(QThread):
 class SequenceSimulationWidget(QWidget):
     """Load/build sequences, configure a 3D object, and inspect sparse output."""
 
-    FOCUSED_CONTROL_WIDTH = 580
+    FOCUSED_CONTROL_WIDTH = 520
+    MINIMUM_FOCUSED_CONTROL_WIDTH = 400
     MINIMUM_FOCUSED_VIEWER_WIDTH = 640
 
     def __init__(self, parent=None):
@@ -690,7 +691,11 @@ class SequenceSimulationWidget(QWidget):
 
     def _build_ui(self):
         root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
         splitter = QSplitter()
+        splitter.setHandleWidth(6)
+        splitter.setChildrenCollapsible(False)
         root.addWidget(splitter)
 
         control_column = QWidget()
@@ -1733,15 +1738,19 @@ class SequenceSimulationWidget(QWidget):
             )
 
     def apply_focused_workspace_layout(self):
-        """Give sequence controls more room when the focused workspace opens."""
+        """Use an adaptive control/viewer split in the focused workspace."""
         available = int(self.workspace_splitter.width())
         if available <= 0:
             available = sum(self.workspace_splitter.sizes())
         if available <= 0:
             self.workspace_splitter.setSizes([self.FOCUSED_CONTROL_WIDTH, 1000])
             return
-        control_width = min(
+        preferred_control_width = min(
             self.FOCUSED_CONTROL_WIDTH,
+            max(self.MINIMUM_FOCUSED_CONTROL_WIDTH, round(available * 0.30)),
+        )
+        control_width = min(
+            preferred_control_width,
             max(1, available - self.MINIMUM_FOCUSED_VIEWER_WIDTH),
         )
         self.workspace_splitter.setSizes(

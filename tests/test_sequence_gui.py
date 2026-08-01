@@ -1,5 +1,6 @@
 import sys
 import runpy
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -7,7 +8,7 @@ import numpy as np
 import pytest
 from PyQt5.QtCore import QSettings, Qt
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication, QMenu, QMessageBox
+from PyQt5.QtWidgets import QApplication, QMenu, QMessageBox, QScrollArea, QToolBar
 
 from blochsimulator.ui.main_window import BlochSimulatorGUI
 from blochsimulator.ui.sequence_simulation_widget import (
@@ -27,6 +28,19 @@ from blochsimulator.sequence import (
     load_pulseq,
 )
 from blochsimulator.units import rf_hz_to_gauss
+
+
+def _select_workspace(window, mode, timeout_ms=2_000):
+    """Select a workspace and wait until its deferred transition completes."""
+    index = window.workspace_mode_selector.findData(mode)
+    assert index >= 0
+    window.workspace_mode_selector.setCurrentIndex(index)
+
+    deadline = time.monotonic() + timeout_ms / 1_000
+    while window.workspace_mode != mode and time.monotonic() < deadline:
+        QTest.qWait(10)
+
+    assert window.workspace_mode == mode
 
 
 EXAMPLE_MAIN = runpy.run_path(
@@ -55,7 +69,7 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert window.sequence_simulation_widget is None
     assert not window.tab_widget.isTabVisible(window.sequence_simulation_tab_index)
     assert not window.tab_widget.isTabVisible(window.phantom_tab_index)
-    assert window.time_control.compact
+    assert not window.time_control.compact
     assert window.tab_widget.tabBar().usesScrollButtons()
     assert not window.tab_widget.tabBar().expanding()
     assert window.tab_widget.tabBar().elideMode() == Qt.ElideRight
@@ -73,9 +87,19 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert window.sequence_simulation_widget.program.source == "internal-fid"
     assert window.sequence_simulation_widget._rf_designer is window.rf_designer
     assert window.sequence_simulation_widget._rf_designer_pulse_data is not None
-    assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is window.workspace_switch
+    assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is None
+    assert window.workspace_switch.parentWidget() is window.workspace_header
+    assert window.statusBar().isAncestorOf(window.status_export_button)
+    assert window.findChild(QToolBar, "main_toolbar") is None
+    assert window.mag_3d.export_3d_btn.isHidden()
     assert window.mag_3d.view_layout.indexOf(window.mag_3d.track_checkbox) >= 0
     assert window.mag_3d.view_layout.indexOf(window.mag_3d.mean_checkbox) >= 0
+    ancestor = window.mag_3d.parentWidget()
+    while ancestor is not None:
+        assert not isinstance(ancestor, QScrollArea)
+        ancestor = ancestor.parentWidget()
+    assert window.centralWidget().layout().contentsMargins().left() == 6
+    assert window.sequence_simulation_placeholder.layout().contentsMargins().left() == 0
     window._set_tooltips_enabled(True)
     assert all(
         window.tab_widget.tabToolTip(index).strip()
@@ -111,11 +135,13 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
         pytest.approx(2e-3)
     )
 
+    window.mag_3d.refresh_viewport = MagicMock()
+    window.anim_timer.start(10_000)
     window.set_workspace_mode("sequence")
     assert window.workspace_mode == "sequence"
+    assert not window.anim_timer.isActive()
     assert window.free_mode_left_container.isHidden()
     assert window.free_mode_playback_header.isHidden()
-    assert window.toolbar_run_bar.isHidden()
     assert window.status_run_bar.isHidden()
     assert window.tab_widget.isTabVisible(window.sequence_simulation_tab_index)
     assert window.tab_widget.isTabVisible(window.phantom_tab_index)
@@ -131,39 +157,29 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert window.tab_widget.isTabVisible(0)
     assert not window.tab_widget.isTabVisible(window.sequence_simulation_tab_index)
     assert not window.tab_widget.isTabVisible(window.phantom_tab_index)
-    if sys.platform == "darwin":
-        assert window.tab_widget.currentIndex() == window.magnetization_tab_index
-        assert window._free_mode_tab_restore_timer.isActive()
-        QTest.qWait(window.OPENGL_TAB_RESTORE_DELAY_MS + 100)
-    else:
-        assert not window._free_mode_tab_restore_timer.isActive()
-    assert window.tab_widget.currentIndex() == window.mag_3d_tab_index
+    expected_free_tab = (
+        window.magnetization_tab_index
+        if sys.platform == "darwin"
+        else window.mag_3d_tab_index
+    )
+    assert window.tab_widget.currentIndex() == expected_free_tab
+    app.processEvents()
+    if sys.platform != "darwin":
+        window.mag_3d.refresh_viewport.assert_called()
 
     tab_changes = []
     window.tab_widget.currentChanged.connect(tab_changes.append)
-    window.workspace_mode_selector.setCurrentIndex(
-        window.workspace_mode_selector.findData("sequence")
-    )
-    app.processEvents()
-    window.workspace_mode_selector.setCurrentIndex(
-        window.workspace_mode_selector.findData("free")
-    )
-    QTest.qWait(window.OPENGL_TAB_RESTORE_DELAY_MS + 100)
-    window.workspace_mode_selector.setCurrentIndex(
-        window.workspace_mode_selector.findData("sequence")
-    )
-    app.processEvents()
+    _select_workspace(window, "sequence")
+    _select_workspace(window, "free")
+    _select_workspace(window, "sequence")
 
     assert window.workspace_mode == "sequence"
     assert window.tab_widget.currentIndex() == window.sequence_simulation_tab_index
-    expected_tab_changes = [window.sequence_simulation_tab_index]
-    if sys.platform == "darwin":
-        expected_tab_changes.extend(
-            [window.magnetization_tab_index, window.mag_3d_tab_index]
-        )
-    else:
-        expected_tab_changes.append(window.mag_3d_tab_index)
-    expected_tab_changes.append(window.sequence_simulation_tab_index)
+    expected_tab_changes = [
+        window.sequence_simulation_tab_index,
+        expected_free_tab,
+        window.sequence_simulation_tab_index,
+    ]
     assert tab_changes == expected_tab_changes
     window.close()
     window.deleteLater()
@@ -188,6 +204,57 @@ def test_phantom_workspace_is_visible():
     app.processEvents()
     assert window.phantom_widget is not None
 
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
+def test_workspace_roundtrip_remains_interactive():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.show()
+    app.processEvents()
+    workspace_x = window.workspace_switch.x()
+    initial_window_size = window.size()
+    initial_frame_geometry = window.frameGeometry()
+
+    _select_workspace(window, "sequence")
+    assert window.workspace_mode == "sequence"
+    assert window.workspace_header.isVisible()
+    assert window.workspace_switch.x() == workspace_x
+
+    _select_workspace(window, "free")
+    assert window.workspace_mode == "free"
+    assert window.workspace_header.isVisible()
+    assert window.workspace_switch.x() == workspace_x
+    assert window.size() == initial_window_size
+    assert window.frameGeometry() == initial_frame_geometry
+
+    preview_checked = window.status_preview_checkbox.isChecked()
+    QTest.mouseClick(window.status_preview_checkbox, Qt.LeftButton)
+    assert window.status_preview_checkbox.isChecked() is not preview_checked
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
+def test_playback_keeps_the_visible_heatmap_canvas_enabled():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.anim_timer.start(10_000)
+
+    window.tab_widget.setCurrentIndex(window.magnetization_tab_index)
+    app.processEvents()
+    assert window.mxy_heatmap_layout.updatesEnabled()
+    assert window.mz_heatmap_layout.updatesEnabled()
+
+    window.tab_widget.setCurrentIndex(window.signal_tab_index)
+    app.processEvents()
+    assert window.signal_heatmap_layout.updatesEnabled()
+    assert not window.mxy_heatmap_layout.updatesEnabled()
+
+    window.anim_timer.stop()
     window.close()
     window.deleteLater()
     app.processEvents()
@@ -779,8 +846,16 @@ def test_focused_sequence_workspace_uses_wider_control_panel():
     app.processEvents()
 
     control_width, viewer_width = widget.workspace_splitter.sizes()
-    assert control_width == widget.FOCUSED_CONTROL_WIDTH
+    expected_control_width = min(
+        widget.FOCUSED_CONTROL_WIDTH,
+        max(
+            widget.MINIMUM_FOCUSED_CONTROL_WIDTH,
+            round(widget.workspace_splitter.width() * 0.30),
+        ),
+    )
+    assert control_width == expected_control_width
     assert viewer_width >= widget.MINIMUM_FOCUSED_VIEWER_WIDTH
+    assert widget.layout().contentsMargins().left() == 0
 
     widget.close()
     widget.deleteLater()
