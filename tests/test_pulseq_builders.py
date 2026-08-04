@@ -97,6 +97,49 @@ def test_configurable_bssfp_builder_round_trips_as_dynamic_3d_pulseq(tmp_path):
     assert program.metadata["definitions"]["RFPhaseIncrementDeg"] == 180.0
 
 
+def test_cartesian_3d_builder_maps_read_phase_partition_to_scanner_axes(tmp_path):
+    sequence = make_pulseq_bssfp(
+        fov_m=(0.08, 0.06, 0.04),
+        matrix=(4, 2, 2),
+        repetitions=1,
+        dummy_repetitions=0,
+        use_alpha_half=False,
+        encoding_axes=("+z", "+y", "-x"),
+    )
+    program = _write_and_load(sequence, tmp_path / "bssfp_read_z.seq")
+    compiled = SequenceCompiler().compile(program)
+    frames = infer_cartesian_acquisition_frames(program, compiled=compiled)
+    volumes = infer_cartesian_acquisition_volumes(
+        program, compiled=compiled, frames=frames
+    )
+
+    assert volumes.encoding_frame.axis_codes == ("+z", "+y", "-x")
+    assert volumes.matrix == (4, 2, 2)
+    assert volumes.read_dimension == "read_z"
+    assert volumes.partition_dimension == "partition_x"
+    definitions = program.metadata["definitions"]
+    assert definitions["ReadoutAxis"] == "+z"
+    assert definitions["PhaseEncodingAxis"] == "+y"
+    assert definitions["PartitionEncodingAxis"] == "-x"
+
+    result = SequenceSimulationResult(
+        signal=np.zeros(compiled.adc_times_s.size, dtype=np.complex128),
+        adc_times_s=compiled.adc_times_s,
+        final_magnetization=np.zeros((1, 1, 1, 3)),
+        checkpoint_magnetization=None,
+        checkpoint_times_s=np.empty(0),
+        adc_gradient_moment_cyc_per_m=compiled.adc_gradient_moment_cyc_per_m,
+        metadata={"cartesian_acquisition_volumes": volumes.to_metadata()},
+    )
+    dataset = result.to_xarray()
+    assert dataset["cartesian_3d_kspace"].dims == (
+        "partition_x",
+        "phase_y",
+        "read_z",
+    )
+    assert dataset.attrs["cartesian_encoding_axes"] == "+z +y -x"
+
+
 def test_epi_builder_uses_configured_receiver_bandwidth(tmp_path):
     sequence = make_pulseq_epi(
         fov_m=(0.08, 0.06),
@@ -112,6 +155,11 @@ def test_epi_builder_uses_configured_receiver_bandwidth(tmp_path):
     assert program.metadata["definitions"]["SamplingBandwidth"] == pytest.approx(
         25_000.0
     )
+    spoiler_times = np.atleast_1d(
+        program.metadata["definitions"]["IdealSpoilerEndTimes"]
+    )
+    assert spoiler_times.size == 1
+    assert compiled.transverse_crush_times_s == pytest.approx(spoiler_times)
 
 
 def test_epi_builder_applies_edge_to_edge_slice_gap(tmp_path):
@@ -256,11 +304,17 @@ def test_spiral_builder_round_trips_and_reconstructs_frames(tmp_path):
 def test_sequence_workspace_builds_and_exports_configurable_fov(tmp_path):
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()
-    assert [widget.sequence_source.itemText(index) for index in range(5)] == [
+    assert [
+        widget.sequence_source.itemText(index)
+        for index in range(widget.sequence_source.count())
+    ] == [
         "Internal FID",
         "EPI",
         "CSI",
         "bSSFP (3D)",
+        "SS-bSSFP (3D)",
+        "Radial ME-bSSFP (3D)",
+        "ME-bSSFP (3D, Cartesian)",
         "Pulseq .seq file",
     ]
 
@@ -270,6 +324,7 @@ def test_sequence_workspace_builds_and_exports_configurable_fov(tmp_path):
     widget.phase_matrix.setValue(2)
     widget.epi_repetition_time_ms.setValue(50.0)
     widget.sequence_source.setCurrentIndex(1)
+    widget.generate_sequence_button.click()
     epi_path = widget._write_pulseq_path(tmp_path / "interactive_epi")
 
     assert widget.acquisition.fov_m == pytest.approx((0.08, 0.06))
@@ -285,6 +340,7 @@ def test_sequence_workspace_builds_and_exports_configurable_fov(tmp_path):
     widget.csi_repetition_time_ms.setValue(30.0)
     widget.csi_repetitions.setValue(2)
     widget.sequence_source.setCurrentIndex(2)
+    widget.generate_sequence_button.click()
     csi_path = widget._write_pulseq_path(tmp_path / "interactive_csi")
 
     assert not widget.csi_group.isHidden()
@@ -322,6 +378,9 @@ def test_sequence_workspace_builds_and_exports_configurable_fov(tmp_path):
     widget.bssfp_partition_matrix.setValue(2)
     widget.bssfp_repetitions.setValue(2)
     widget.sequence_source.setCurrentIndex(3)
+    widget.encoding_read_axis.setCurrentText("z")
+    widget.encoding_phase_axis.setCurrentText("y")
+    widget.generate_sequence_button.click()
     bssfp_path = widget._write_pulseq_path(tmp_path / "interactive_bssfp.seq")
 
     assert not widget.bssfp_group.isHidden()
@@ -330,9 +389,17 @@ def test_sequence_workspace_builds_and_exports_configurable_fov(tmp_path):
     assert widget.acquisition_volumes.fov_m == pytest.approx((0.1, 0.08, 0.05))
     assert widget.acquisition_volumes.fov_z_m == pytest.approx(0.05)
     assert widget.acquisition_volumes.num_volumes == 2
+    assert widget.acquisition_volumes.encoding_frame.axis_codes == (
+        "+z",
+        "+y",
+        "-x",
+    )
+    assert not widget.cartesian_orientation_group.isHidden()
+    assert "Read +z" in widget.encoding_orientation_summary.text()
     bssfp_definitions = load_pulseq(bssfp_path).metadata["definitions"]
     assert bssfp_definitions["Name"] == "bssfp_3d"
     assert bssfp_definitions["FOV"] == pytest.approx([0.1, 0.08, 0.05])
+    assert bssfp_definitions["ReadoutAxis"] == "+z"
 
     widget.close()
     widget.deleteLater()

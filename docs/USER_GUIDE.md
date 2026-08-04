@@ -72,8 +72,68 @@ The interface is divided into two main areas:
 In the event-based **Sequence Simulation** workspace, **Export Pulseq…**
 offers three choices: Pulseq plus a generating notebook, Pulseq only, or
 notebook only. Pulseq plus notebook is the default. The notebook records the
-exact EPI, spiral, CSI, or 3D bSSFP builder function and all current GUI parameters,
-then writes the corresponding `.seq` file when executed.
+exact EPI, spiral, CSI, Cartesian 3D bSSFP, spectrally selective 3D bSSFP,
+Cartesian multi-echo 3D bSSFP, or radial multi-echo 3D bSSFP builder function
+and all current GUI parameters, then writes the corresponding `.seq` file when
+executed.
+
+Sequence generation is explicit by default: finish editing the acquisition
+parameters and click **Generate sequence** to refresh the timeline. Enable
+**Live preview** beside the button only when the sequence should be regenerated
+after every parameter change. Starting a simulation or spin probe also ensures
+that a pending generated sequence is built first. If generation fails, the
+last valid timeline remains visible and the parameter error is shown above the
+controls.
+
+Generated sequences explicitly mark the end of every spoiler block. During
+simulation, these markers apply an ideal transverse crusher: `Mx` and `My` are
+set to zero for every pool at the spoiler end, while `Mz`, relaxation, inflow,
+and chemical exchange continue normally. This applies to all built-in
+generators that contain spoilers, including EPI, spiral, CSI, MPRAGE, UTE, and
+3D bSSFP. Imported Pulseq files receive the same treatment only when they
+contain an explicit `IdealSpoilerEndTimes` marker (or one of the legacy
+generated-sequence spoiler definitions); arbitrary gradients are not guessed
+to be spoilers.
+
+For Cartesian 3D generation, **Cartesian 3D orientation** separates the logical
+acquisition roles from the scanner coordinates. Select the physical **Read**
+and **Phase** axes; the right-handed **Partition** axis is derived and shown
+immediately. For example, Read `+z` and Phase `+y` produce Partition `-x`.
+FOV and matrix values remain ordered as `(read, phase, partition)`, while the
+generated Pulseq gradients, phantom coverage check, reconstruction, and export
+use the selected scanner axes consistently. The orientation is stored in the
+Pulseq definitions, so reloading a generated `.seq` file preserves it.
+
+**SS-bSSFP (3D)** alternates complete Cartesian volumes between the configured
+metabolite targets. Enter matching comma-separated target names, RF offsets,
+receiver offsets, and flip angles. The defaults follow Skinner et al.
+(doi:10.1002/mrm.29676), including the narrow-band SLR pulse, alpha/2
+preparation, and end-of-volume spoiler. With the default scanner limits, the
+encoding-lobe duration is calculated automatically from FOV, matrix, sampling
+bandwidth, and gradient limits. The published 32-point, 10 kHz readout lasts
+3.2 ms; that ADC duration is kept separate from the shorter pre-/rephasing
+lobes. The published 6.29 ms TR requires a scanner profile capable of producing
+the automatically calculated encoding moments within the remaining TR time.
+
+**ME-bSSFP (3D, Cartesian)** acquires an odd number of echo volumes inside each
+balanced TR. Choose **Flyback** for monopolar readouts with phase-rewinding
+gradients or **Symmetric bipolar** for alternating readout polarity. The
+publication controls follow Gaubatz (2023): five echoes centered between RF
+pulses, 180° RF phase increments, Gaussian excitation, and α/2 preparation.
+The short in-vivo preset uses TR 8.696 ms, echo spacing 1.32 ms, 39.6825 kHz
+requested sampling bandwidth, FOV 56 × 28 × 24.5 mm³, and matrix 32 × 16 × 14.
+The GUI begins with a smaller matrix for responsive setup. Individual echo
+volumes are reconstructed and selectable; IDEAL metabolite separation is not
+yet attached.
+
+**Radial ME-bSSFP (3D)** creates monopolar center-through echoes on a spherical
+spiral-phyllotaxis trajectory. Its publication preset follows Wang et al.
+(doi:10.1002/mrm.30614): TR 16 ms, five echoes at 2 ms spacing, 1000 Hz/px,
+and golden-angle rotation between dynamic measurements. The GUI starts with a
+small interactive spoke count; set 300 spokes and four measurements to match
+the in-vivo acquisition. Bloch signal simulation and Pulseq export are
+available, while radial gridding and IDEAL reconstruction are not yet attached
+to the result viewer.
 
 For 2D imaging, **Readout trajectory** selects either a Cartesian EPI echo
 train or a single-interleaf centre-out spiral. **Slice gap** is the empty
@@ -98,9 +158,9 @@ Sequence-mode TBW still defines the slice-selection bandwidth.
 
 Scanner hardware limits are configured under **Tools → Settings → Scanner**.
 Maximum gradient, maximum slew rate, waveform rasters, RF ringdown/dead time,
-and ADC dead time are stored persistently and applied to newly generated EPI,
-spiral, CSI, and 3D bSSFP Pulseq sequences. Imported `.seq` files retain their
-own event timing.
+and ADC dead time are stored persistently and applied to all newly generated
+EPI, spiral, CSI, and 3D bSSFP Pulseq sequences. Imported `.seq` files retain
+their own event timing.
 
 **Export results…** in the same workspace defaults to exporting both
 `sequence_result.nc` and `sequence_result.ipynb`. The notebook loads the
@@ -180,9 +240,14 @@ and physical coordinates are retained directly.
 
 Validated Cartesian 3D acquisitions additionally contain
 `cartesian_3d_kspace` and `cartesian_3d_image`, ordered with explicit outer
-dimensions followed by `(partition_z, phase_y, read_x)`. For example, a dynamic
-3D acquisition is exported as `(repetition, partition_z, phase_y, read_x)`;
-manual reshaping of the chronological ADC stream is not required.
+dimensions followed by `(partition_*, phase_*, read_*)`, where each suffix is
+the selected scanner axis. The default is
+`(partition_z, phase_y, read_x)`; a Read-z/Phase-y acquisition uses
+`(partition_x, phase_y, read_z)`. Generic coordinates
+`cartesian_k_read_cyc_per_m`, `cartesian_k_phase_cyc_per_m`, and
+`cartesian_k_partition_cyc_per_m` are independent of that orientation, while
+the physical `cartesian_kx/ky/kz` aliases are retained. Manual reshaping of the
+chronological ADC stream is not required.
 
 The analysis notebook generated with **Export results** includes an adaptive
 `ipywidgets` explorer. Its `x`, `y`, and `z` sliders move linked orthogonal
@@ -193,10 +258,11 @@ whose dimensions are not present in a particular result are disabled
 automatically.
 
 The notebook performs its own centered inverse FFT from the exported Cartesian
-k-space. For older NetCDF results that contain only the chronological ADC stream,
-it can rebuild the grid after validating and sorting `adc_event_index`, Pulseq
-outer labels, `partition_index`, `ky`, and `kx`. Dynamic two-pool exports also
-produce pool-resolved notebook reconstructions from `species_signal`.
+k-space. For older NetCDF results that contain only the chronological ADC
+stream, it can rebuild the grid after validating the acquisition indices and
+projecting physical `kx`, `ky`, and `kz` into the stored logical encoding
+frame. Dynamic two-pool exports also produce pool-resolved notebook
+reconstructions from `species_signal`.
 
 ### Dynamic pyruvate/lactate phantom
 

@@ -56,6 +56,8 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 
 import pyqtgraph as pg
 
+from .ui.widgets import compact_image_histogram
+
 from .kspace import (
     KSpaceSimulator,
     EddyCurrentModel,
@@ -634,6 +636,7 @@ class KSpaceViewer(QWidget):
         kspace_layout.addLayout(kspace_controls)
 
         self.kspace_image = pg.ImageView()
+        compact_image_histogram(self.kspace_image)
         kspace_layout.addWidget(self.kspace_image)
         kspace_widget.setLayout(kspace_layout)
         self.tabs.addTab(kspace_widget, "K-Space")
@@ -653,6 +656,7 @@ class KSpaceViewer(QWidget):
         image_layout.addLayout(image_controls)
 
         self.recon_image = pg.ImageView()
+        compact_image_histogram(self.recon_image)
         image_layout.addWidget(self.recon_image)
         image_widget.setLayout(image_layout)
         self.tabs.addTab(image_widget, "Image")
@@ -691,9 +695,11 @@ class KSpaceViewer(QWidget):
         compare_plots = QHBoxLayout()
 
         self.compare_clean = pg.ImageView()
+        compact_image_histogram(self.compare_clean)
         compare_plots.addWidget(self.compare_clean)
 
         self.compare_artifact = pg.ImageView()
+        compact_image_histogram(self.compare_artifact)
         compare_plots.addWidget(self.compare_artifact)
 
         compare_layout.addLayout(compare_plots)

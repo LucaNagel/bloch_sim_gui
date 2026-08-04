@@ -7,6 +7,13 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from .flip_angles import VFA_REFERENCE_DOI, variable_flip_angle_schedule
+from .encoding import (
+    EncodingFrame,
+    logical_gradient_area,
+    make_role_trapezoid,
+    resolve_encoding_frame,
+    set_pulseq_encoding_definitions,
+)
 from .rf_pulses import design_rf_envelope, scale_rf_envelope_to_flip
 from .scanner import ScannerParameters
 
@@ -425,6 +432,7 @@ def make_pulseq_csi(
         "SpoilerAxes", "".join(event.channel for event in spoiler_events) or "none"
     )
     sequence.set_definition("SpoilerEndTimes", spoiler_end_times)
+    sequence.set_definition("IdealSpoilerEndTimes", spoiler_end_times)
     return sequence
 
 
@@ -442,10 +450,12 @@ def make_pulseq_bssfp(
     dummy_repetitions: int = 1,
     repetitions: int = 1,
     use_alpha_half: bool = True,
+    encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
 ):
     """Build a fully balanced, non-selective Cartesian 3D bSSFP sequence."""
     pp = _pypulseq()
+    encoding_frame = resolve_encoding_frame(encoding_axes)
     fov_x, fov_y, fov_z = _positive_values(fov_m, "FOV")
     if len(tuple(fov_m)) != 3:
         raise ValueError("fov_m must contain three values")
@@ -507,8 +517,10 @@ def make_pulseq_bssfp(
         np.ceil(abs(readout_amplitude) / system.max_slew / system.grad_raster_time)
         * system.grad_raster_time,
     )
-    gx = pp.make_trapezoid(
-        "x",
+    gx = make_role_trapezoid(
+        pp,
+        encoding_frame,
+        "read",
         flat_area=n_read / fov_x,
         flat_time=readout_duration,
         rise_time=readout_rise_time,
@@ -520,8 +532,14 @@ def make_pulseq_bssfp(
         delay=gx.rise_time,
         system=system,
     )
-    gx_pre = pp.make_trapezoid(
-        "x", area=-gx.area / 2, duration=encoding_duration_s, system=system
+    readout_area = logical_gradient_area(gx, encoding_frame, "read")
+    gx_pre = make_role_trapezoid(
+        pp,
+        encoding_frame,
+        "read",
+        area=-readout_area / 2,
+        duration=encoding_duration_s,
+        system=system,
     )
 
     rf_center, _ = pp.calc_rf_center(rf)
@@ -584,17 +602,37 @@ def make_pulseq_bssfp(
         rf.phase_offset = np.deg2rad(rf_phase)
         adc.phase_offset = np.deg2rad(rf_phase)
         rf_phase = np.mod(rf_phase + rf_phase_increment_deg, 360.0)
-        gy_pre = pp.make_trapezoid(
-            "y", area=ky, duration=encoding_duration_s, system=system
+        gy_pre = make_role_trapezoid(
+            pp,
+            encoding_frame,
+            "phase",
+            area=ky,
+            duration=encoding_duration_s,
+            system=system,
         )
-        gy_rephase = pp.make_trapezoid(
-            "y", area=-ky, duration=encoding_duration_s, system=system
+        gy_rephase = make_role_trapezoid(
+            pp,
+            encoding_frame,
+            "phase",
+            area=-ky,
+            duration=encoding_duration_s,
+            system=system,
         )
-        gz_pre = pp.make_trapezoid(
-            "z", area=kz, duration=encoding_duration_s, system=system
+        gz_pre = make_role_trapezoid(
+            pp,
+            encoding_frame,
+            "partition",
+            area=kz,
+            duration=encoding_duration_s,
+            system=system,
         )
-        gz_rephase = pp.make_trapezoid(
-            "z", area=-kz, duration=encoding_duration_s, system=system
+        gz_rephase = make_role_trapezoid(
+            pp,
+            encoding_frame,
+            "partition",
+            area=-kz,
+            duration=encoding_duration_s,
+            system=system,
         )
         sequence.add_block(rf)
         if rf_balance_delay_value:
@@ -634,6 +672,12 @@ def make_pulseq_bssfp(
     sequence.set_definition("Name", "bssfp_3d")
     sequence.set_definition("FOV", [fov_x, fov_y, fov_z])
     sequence.set_definition("MatrixSize", [n_read, n_phase, n_partition])
+    set_pulseq_encoding_definitions(
+        sequence,
+        encoding_frame,
+        fov_m=(fov_x, fov_y, fov_z),
+        matrix=(n_read, n_phase, n_partition),
+    )
     sequence.set_definition("FlipAngleDeg", float(flip_angle_deg))
     sequence.set_definition("SamplingBandwidth", 1.0 / dwell)
     sequence.set_definition("TR", actual_tr)
@@ -907,6 +951,7 @@ def make_pulseq_epi(
         "SpoilerAxes", "".join(event.channel for event in spoilers) or "none"
     )
     sequence.set_definition("SpoilerEndTimes", spoiler_end_times)
+    sequence.set_definition("IdealSpoilerEndTimes", spoiler_end_times)
     return sequence
 
 
@@ -1240,6 +1285,7 @@ def make_pulseq_spiral(
         "SpoilerAxes", "".join(event.channel for event in spoilers) or "none"
     )
     sequence.set_definition("SpoilerEndTimes", spoiler_end_times)
+    sequence.set_definition("IdealSpoilerEndTimes", spoiler_end_times)
     return sequence
 
 

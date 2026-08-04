@@ -1382,6 +1382,53 @@ def _sequence_result_reconstruction_code() -> str:
             return cells * step, cells
 
 
+        def _cartesian_orientation(dataset):
+            basis_value = dataset.attrs.get('cartesian_encoding_basis_xyz')
+            if basis_value is None:
+                basis = np.eye(3)
+            elif isinstance(basis_value, str):
+                basis = np.fromstring(basis_value, sep=',', dtype=float)
+            else:
+                basis = np.asarray(basis_value, dtype=float).reshape(-1)
+            if basis.size != 9:
+                raise ValueError(
+                    'cartesian_encoding_basis_xyz must contain nine values'
+                )
+            basis = np.asarray(basis, dtype=float).reshape(3, 3)
+
+            axes = str(
+                dataset.attrs.get('cartesian_encoding_axes', '+x +y +z')
+            ).split()
+            if len(axes) != 3:
+                raise ValueError(
+                    'cartesian_encoding_axes must contain read, phase, and partition'
+                )
+            roles = ('read', 'phase', 'partition')
+            dimensions = tuple(
+                f'{role}_{axis[-1].lower()}'
+                for role, axis in zip(roles, axes)
+            )
+            return basis, tuple(axes), dimensions
+
+
+        def _cartesian_spatial_dims(kspace):
+            result = []
+            for role in ('partition', 'phase', 'read'):
+                matches = [
+                    dimension
+                    for dimension in kspace.dims
+                    if dimension.startswith(f'{role}_')
+                ]
+                if matches:
+                    result.append(matches[0])
+            if len(result) not in (2, 3):
+                raise ValueError(
+                    'Cartesian k-space needs read_*/phase_* dimensions and an '
+                    'optional partition_* dimension'
+                )
+            return tuple(result)
+
+
         def _cartesian_from_adc(dataset, signal_name='signal'):
             required = {
                 'adc_event_index', 'readout_sample_index', 'kx', 'ky', 'kz'
@@ -1480,6 +1527,10 @@ def _sequence_result_reconstruction_code() -> str:
             kx = np.asarray(dataset.kx.values, dtype=float)
             ky = np.asarray(dataset.ky.values, dtype=float)
             kz = np.asarray(dataset.kz.values, dtype=float)
+            basis, encoding_axes, encoding_dims = _cartesian_orientation(dataset)
+            logical_moments = np.column_stack((kx, ky, kz)) @ basis
+            k_read, k_phase, k_partition = logical_moments.T
+            read_dim, phase_dim, partition_dim = encoding_dims
             for event, samples in enumerate(event_samples):
                 outer_key = tuple(
                     event_labels[coordinate][event]
@@ -1490,8 +1541,8 @@ def _sequence_result_reconstruction_code() -> str:
                         'samples': samples,
                         'outer': outer_key,
                         'partition': partition_values_per_event[event],
-                        'ky': float(np.median(ky[samples])),
-                        'kz': float(np.median(kz[samples])),
+                        'k_phase': float(np.median(k_phase[samples])),
+                        'k_partition': float(np.median(k_partition[samples])),
                     }
                 )
 
@@ -1502,7 +1553,7 @@ def _sequence_result_reconstruction_code() -> str:
                     partition_values,
                     key=lambda value: np.median(
                         [
-                            record['kz']
+                            record['k_partition']
                             for record in records
                             if record['outer'] == first_outer
                             and record['partition'] == value
@@ -1533,9 +1584,9 @@ def _sequence_result_reconstruction_code() -> str:
             signal_values = np.asarray(signal.transpose(*leading_dims, 'adc').values)
             outer_dims = [dimension for _, dimension in outer_axes]
             spatial_dims = (
-                ['partition_z', 'phase_y', 'read_x']
+                [partition_dim, phase_dim, read_dim]
                 if is_3d
-                else ['phase_y', 'read_x']
+                else [phase_dim, read_dim]
             )
             output_shape = (
                 tuple(signal_values.shape[:-1])
@@ -1551,11 +1602,13 @@ def _sequence_result_reconstruction_code() -> str:
                 for partition_position, partition in enumerate(partitions):
                     phase_records = sorted(
                         groups[(outer, partition if is_3d else None)],
-                        key=lambda record: record['ky'],
+                        key=lambda record: record['k_phase'],
                     )
                     for phase_position, record in enumerate(phase_records):
                         samples = record['samples']
-                        samples = samples[np.argsort(kx[samples], kind='stable')]
+                        samples = samples[
+                            np.argsort(k_read[samples], kind='stable')
+                        ]
                         index = leading_index + outer_position
                         if is_3d:
                             index += (partition_position, phase_position, slice(None))
@@ -1566,28 +1619,35 @@ def _sequence_result_reconstruction_code() -> str:
             first_partition = partition_values[0] if is_3d else None
             first_phase_records = sorted(
                 groups[(first_outer, first_partition)],
-                key=lambda record: record['ky'],
+                key=lambda record: record['k_phase'],
             )
-            x_axes = [
-                np.sort(kx[record['samples']]) for record in first_phase_records
+            read_axes = [
+                np.sort(k_read[record['samples']])
+                for record in first_phase_records
             ]
-            x_axis, _ = _canonical_cartesian_axis(np.median(x_axes, axis=0))
-            y_axis, _ = _canonical_cartesian_axis(
-                [record['ky'] for record in first_phase_records]
+            read_axis, _ = _canonical_cartesian_axis(
+                np.median(read_axes, axis=0)
+            )
+            phase_axis, _ = _canonical_cartesian_axis(
+                [record['k_phase'] for record in first_phase_records]
             )
             coordinate_values = {
-                'read_x': np.arange(read_matrix),
-                'phase_y': np.arange(phase_matrix),
-                'cartesian_kx_cyc_per_m': ('read_x', x_axis),
-                'cartesian_ky_cyc_per_m': ('phase_y', y_axis),
+                read_dim: np.arange(read_matrix),
+                phase_dim: np.arange(phase_matrix),
+                'cartesian_k_read_cyc_per_m': (read_dim, read_axis),
+                'cartesian_k_phase_cyc_per_m': (phase_dim, phase_axis),
+            }
+            logical_axes = {
+                'read': (read_dim, read_axis),
+                'phase': (phase_dim, phase_axis),
             }
             if is_3d:
-                z_axis, _ = _canonical_cartesian_axis(
+                partition_axis, _ = _canonical_cartesian_axis(
                     [
                         float(
                             np.median(
                                 [
-                                    record['kz']
+                                    record['k_partition']
                                     for record in groups[(first_outer, partition)]
                                 ]
                             )
@@ -1597,9 +1657,21 @@ def _sequence_result_reconstruction_code() -> str:
                 )
                 coordinate_values.update(
                     {
-                        'partition_z': np.arange(partition_values.size),
-                        'cartesian_kz_cyc_per_m': ('partition_z', z_axis),
+                        partition_dim: np.arange(partition_values.size),
+                        'cartesian_k_partition_cyc_per_m': (
+                            partition_dim,
+                            partition_axis,
+                        ),
                     }
+                )
+                logical_axes['partition'] = (partition_dim, partition_axis)
+            for (role, values), axis_code in zip(
+                logical_axes.items(), encoding_axes
+            ):
+                sign = -1.0 if axis_code.startswith('-') else 1.0
+                coordinate_values[f'cartesian_k{axis_code[-1]}_cyc_per_m'] = (
+                    values[0],
+                    sign * values[1],
                 )
             for dimension in leading_dims:
                 if dimension in signal.coords:
@@ -1614,21 +1686,29 @@ def _sequence_result_reconstruction_code() -> str:
                 name=('cartesian_3d_kspace' if is_3d else 'cartesian_kspace'),
                 attrs={
                     'source': f'reconstructed from chronological {signal_name}',
-                    'adc_sorting': 'adc_event_index, outer labels, ky, and kx',
+                    'adc_sorting': (
+                        'adc_event_index, outer labels, logical phase, and '
+                        'logical read coordinates'
+                    ),
+                    'cartesian_encoding_axes': ' '.join(encoding_axes),
                 },
             )
 
 
         def _cartesian_ifft(kspace, spatial_dims):
             coordinate_names = {
-                'read_x': 'cartesian_kx_cyc_per_m',
-                'phase_y': 'cartesian_ky_cyc_per_m',
-                'partition_z': 'cartesian_kz_cyc_per_m',
+                'read': 'cartesian_k_read_cyc_per_m',
+                'phase': 'cartesian_k_phase_cyc_per_m',
+                'partition': 'cartesian_k_partition_cyc_per_m',
             }
             centre_phase = np.ones(kspace.shape, dtype=np.complex128)
             for dimension in spatial_dims:
                 size = kspace.sizes[dimension]
-                coordinate_name = coordinate_names[dimension]
+                role = dimension.split('_', 1)[0]
+                coordinate_name = coordinate_names[role]
+                if coordinate_name not in kspace.coords:
+                    physical_name = f'cartesian_k{dimension[-1]}_cyc_per_m'
+                    coordinate_name = physical_name
                 if coordinate_name in kspace.coords:
                     _, cells = _canonical_cartesian_axis(
                         np.asarray(kspace.coords[coordinate_name].values)
@@ -1670,16 +1750,18 @@ def _sequence_result_reconstruction_code() -> str:
                 )
 
         if 'cartesian_3d_kspace' in ds:
+            spatial_dims = _cartesian_spatial_dims(ds.cartesian_3d_kspace)
             notebook_image = _cartesian_ifft(
                 ds.cartesian_3d_kspace,
-                ('partition_z', 'phase_y', 'read_x'),
+                spatial_dims,
             )
             ds['notebook_cartesian_3d_image'] = notebook_image
             ds['notebook_cartesian_3d_image_magnitude'] = np.abs(notebook_image)
             print('Reconstructed notebook_cartesian_3d_image with a centred 3D IFFT.')
         elif 'cartesian_kspace' in ds:
+            spatial_dims = _cartesian_spatial_dims(ds.cartesian_kspace)
             notebook_image = _cartesian_ifft(
-                ds.cartesian_kspace, ('phase_y', 'read_x')
+                ds.cartesian_kspace, spatial_dims
             )
             ds['notebook_cartesian_image'] = notebook_image
             ds['notebook_cartesian_image_magnitude'] = np.abs(notebook_image)
@@ -1697,11 +1779,7 @@ def _sequence_result_reconstruction_code() -> str:
                 species_kspace = None
             if species_kspace is not None:
                 ds[species_name] = species_kspace
-                species_spatial_dims = (
-                    ('partition_z', 'phase_y', 'read_x')
-                    if 'partition_z' in species_kspace.dims
-                    else ('phase_y', 'read_x')
-                )
+                species_spatial_dims = _cartesian_spatial_dims(species_kspace)
                 species_image = _cartesian_ifft(
                     species_kspace, species_spatial_dims
                 )
@@ -1725,12 +1803,30 @@ def _sequence_result_explorer_code() -> str:
                 "Install it with `%pip install ipywidgets`."
             ) from exc
 
+        def _role_dimension(data, role, default):
+            matches = [
+                dimension
+                for dimension in data.dims
+                if dimension.startswith(f'{role}_')
+            ]
+            return matches[0] if matches else default
+
+
         if (
             'notebook_cartesian_3d_image_magnitude' in ds
             or 'cartesian_3d_image_magnitude' in ds
         ):
             explorer_kind = 'cartesian_3d'
-            x_dim, y_dim, z_dim = 'read_x', 'phase_y', 'partition_z'
+            orientation_source = (
+                ds.notebook_cartesian_3d_image_magnitude
+                if 'notebook_cartesian_3d_image_magnitude' in ds
+                else ds.cartesian_3d_image_magnitude
+            )
+            x_dim = _role_dimension(orientation_source, 'read', 'read_x')
+            y_dim = _role_dimension(orientation_source, 'phase', 'phase_y')
+            z_dim = _role_dimension(
+                orientation_source, 'partition', 'partition_z'
+            )
             repetition_dim = 'repetition' if 'repetition' in ds.dims else None
             spectral_dim = None
         elif 'csi_kspace' in ds:
@@ -1744,7 +1840,18 @@ def _sequence_result_explorer_code() -> str:
             or 'cartesian_image' in ds
         ):
             explorer_kind = 'cartesian_2d'
-            x_dim, y_dim, z_dim = 'read_x', 'phase_y', None
+            orientation_source = (
+                ds.notebook_cartesian_image_magnitude
+                if 'notebook_cartesian_image_magnitude' in ds
+                else (
+                    ds.cartesian_image_magnitude
+                    if 'cartesian_image_magnitude' in ds
+                    else ds.cartesian_image
+                )
+            )
+            x_dim = _role_dimension(orientation_source, 'read', 'read_x')
+            y_dim = _role_dimension(orientation_source, 'phase', 'phase_y')
+            z_dim = None
             repetition_dim = (
                 'cartesian_frame' if 'cartesian_frame' in ds.dims else None
             )
@@ -1763,7 +1870,12 @@ def _sequence_result_explorer_code() -> str:
             available = dim is not None and dim in ds.sizes
             size = int(ds.sizes[dim]) if available else 1
             if initial is None:
-                initial = size // 2 if label in {'x', 'y', 'z'} else 0
+                initial = (
+                    size // 2
+                    if dim is not None
+                    and dim.startswith(('read_', 'phase_', 'partition_'))
+                    else 0
+                )
             return widgets.IntSlider(
                 value=min(int(initial), size - 1),
                 min=0,
@@ -1894,8 +2006,8 @@ def _sequence_result_explorer_code() -> str:
             return str(index)
 
 
-        def _show_cartesian_3d(x, y, z, repetition, display_range):
-            spatial_dims = {'partition_z', 'phase_y', 'read_x'}
+        def _show_cartesian_3d(x, y, z, repetition, display_range, display_auto):
+            spatial_dims = {z_dim, y_dim, x_dim}
             image_name = (
                 'notebook_cartesian_3d_image_magnitude'
                 if 'notebook_cartesian_3d_image_magnitude' in ds
@@ -1908,13 +2020,15 @@ def _sequence_result_explorer_code() -> str:
                 ds['cartesian_3d_kspace'], spatial_dims, repetition
             )
             image = _rss_magnitude(image).transpose(
-                'partition_z', 'phase_y', 'read_x'
+                z_dim, y_dim, x_dim
             )
             kspace = _rss_magnitude(kspace).transpose(
-                'partition_z', 'phase_y', 'read_x'
+                z_dim, y_dim, x_dim
             )
             volume = np.asarray(image)
             kspace_volume = np.asarray(kspace)
+            if display_auto:
+                display_range = (float(volume[z].min()), float(volume[z].max()))
             display_min, display_max = _display_limits(display_range)
 
             fig, axes = plt.subplots(2, 2, figsize=(11, 8), constrained_layout=True)
@@ -1927,7 +2041,11 @@ def _sequence_result_explorer_code() -> str:
                 vmax=display_max,
             )
             _crosshair(axes[0, 0], y, x)
-            axes[0, 0].set(title=f'XY reconstruction at z={z}', xlabel='x', ylabel='y')
+            axes[0, 0].set(
+                title=f'{x_dim}/{y_dim} reconstruction at {z_dim}={z}',
+                xlabel=x_dim,
+                ylabel=y_dim,
+            )
 
             axes[0, 1].imshow(
                 volume[:, y, :],
@@ -1938,7 +2056,11 @@ def _sequence_result_explorer_code() -> str:
                 vmax=display_max,
             )
             _crosshair(axes[0, 1], z, x)
-            axes[0, 1].set(title=f'XZ reconstruction at y={y}', xlabel='x', ylabel='z')
+            axes[0, 1].set(
+                title=f'{x_dim}/{z_dim} reconstruction at {y_dim}={y}',
+                xlabel=x_dim,
+                ylabel=z_dim,
+            )
 
             axes[1, 0].imshow(
                 volume[:, :, x],
@@ -1949,7 +2071,11 @@ def _sequence_result_explorer_code() -> str:
                 vmax=display_max,
             )
             _crosshair(axes[1, 0], z, y)
-            axes[1, 0].set(title=f'YZ reconstruction at x={x}', xlabel='y', ylabel='z')
+            axes[1, 0].set(
+                title=f'{y_dim}/{z_dim} reconstruction at {x_dim}={x}',
+                xlabel=y_dim,
+                ylabel=z_dim,
+            )
 
             axes[1, 1].imshow(
                 np.log1p(kspace_volume[z]),
@@ -1959,23 +2085,25 @@ def _sequence_result_explorer_code() -> str:
             )
             _crosshair(axes[1, 1], y, x)
             axes[1, 1].set(
-                title=f'log(1 + |k-space|) at kz index {z}',
-                xlabel='kx',
-                ylabel='ky',
+                title=f'log(1 + |k-space|) at {z_dim} index {z}',
+                xlabel='k_read',
+                ylabel='k_phase',
             )
             fig.suptitle(
                 f'Repetition { _repetition_label(repetition) } · '
-                f'voxel (x={x}, y={y}, z={z}) · magnitude={volume[z, y, x]:.5g}'
+                f'voxel ({x_dim}={x}, {y_dim}={y}, {z_dim}={z}) · '
+                f'magnitude={volume[z, y, x]:.5g}'
             )
             _display_figure_once(fig)
 
 
-        def _show_cartesian_2d(x, y, repetition, display_range):
-            spatial_dims = {'phase_y', 'read_x'}
+        def _show_cartesian_2d(x, y, repetition, display_range, display_auto):
             if explorer_kind == 'spiral_2d':
+                display_x_dim, display_y_dim = 'read_x', 'phase_y'
                 image_name = 'spiral_image_magnitude'
                 kspace_name = 'spiral_gridded_kspace'
             else:
+                display_x_dim, display_y_dim = x_dim, y_dim
                 image_name = (
                     'notebook_cartesian_image_magnitude'
                     if 'notebook_cartesian_image_magnitude' in ds
@@ -1986,14 +2114,17 @@ def _sequence_result_explorer_code() -> str:
                     )
                 )
                 kspace_name = 'cartesian_kspace'
+            spatial_dims = {display_y_dim, display_x_dim}
             image = _rss_magnitude(
                 _select_outer(ds[image_name], spatial_dims, repetition)
-            ).transpose('phase_y', 'read_x')
+            ).transpose(display_y_dim, display_x_dim)
             kspace = _rss_magnitude(
                 _select_outer(ds[kspace_name], spatial_dims, repetition)
-            ).transpose('phase_y', 'read_x')
+            ).transpose(display_y_dim, display_x_dim)
             image_values = np.asarray(image)
             kspace_values = np.asarray(kspace)
+            if display_auto:
+                display_range = (float(image_values.min()), float(image_values.max()))
             display_min, display_max = _display_limits(display_range)
 
             fig, axes = plt.subplots(1, 2, figsize=(11, 4), constrained_layout=True)
@@ -2001,7 +2132,11 @@ def _sequence_result_explorer_code() -> str:
                 np.log1p(kspace_values), origin='lower', cmap='magma', aspect='auto'
             )
             _crosshair(axes[0], y, x)
-            axes[0].set(title='log(1 + |k-space|)', xlabel='kx', ylabel='ky')
+            axes[0].set(
+                title='log(1 + |k-space|)',
+                xlabel='k_read',
+                ylabel='k_phase',
+            )
             axes[1].imshow(
                 image_values,
                 origin='lower',
@@ -2011,10 +2146,15 @@ def _sequence_result_explorer_code() -> str:
                 vmax=display_max,
             )
             _crosshair(axes[1], y, x)
-            axes[1].set(title='Reconstruction', xlabel='x', ylabel='y')
+            axes[1].set(
+                title='Reconstruction',
+                xlabel=display_x_dim,
+                ylabel=display_y_dim,
+            )
             fig.suptitle(
                 f'Repetition/frame { _repetition_label(repetition) } · '
-                f'pixel (x={x}, y={y}) · magnitude={image_values[y, x]:.5g}'
+                f'pixel ({display_x_dim}={x}, {display_y_dim}={y}) · '
+                f'magnitude={image_values[y, x]:.5g}'
             )
             _display_figure_once(fig)
 
@@ -2074,12 +2214,12 @@ def _sequence_result_explorer_code() -> str:
 
 
         def _render_explorer(
-            x, y, z, repetition, spectral_point, display_range
+            x, y, z, repetition, spectral_point, display_range, display_auto
         ):
             if explorer_kind == 'cartesian_3d':
-                _show_cartesian_3d(x, y, z, repetition, display_range)
+                _show_cartesian_3d(x, y, z, repetition, display_range, display_auto )
             elif explorer_kind in {'cartesian_2d', 'spiral_2d'}:
-                _show_cartesian_2d(x, y, repetition, display_range)
+                _show_cartesian_2d(x, y, repetition, display_range, display_auto)
             elif explorer_kind == 'csi':
                 _show_csi(
                     x, y, spectral_point, repetition, display_range
@@ -2091,14 +2231,18 @@ def _sequence_result_explorer_code() -> str:
                 )
 
 
-        x_slider = _index_slider('x', x_dim)
-        y_slider = _index_slider('y', y_dim)
-        z_slider = _index_slider('z', z_dim)
+        x_slider = _index_slider(x_dim or 'x', x_dim)
+        y_slider = _index_slider(y_dim or 'y', y_dim)
+        z_slider = _index_slider(z_dim or 'z', z_dim)
         repetition_slider = _index_slider('Repetition', repetition_dim, initial=0)
         spectral_point_slider = _index_slider(
             'Spectral point', spectral_dim, initial=0
         )
         display_range_slider = _display_range_slider()
+        display_auto_checkbox = widgets.Checkbox(
+            value=True,
+            description='Auto display range',
+            disabled=False,)
         controls = {
             'x': x_slider,
             'y': y_slider,
@@ -2106,6 +2250,7 @@ def _sequence_result_explorer_code() -> str:
             'repetition': repetition_slider,
             'spectral_point': spectral_point_slider,
             'display_range': display_range_slider,
+            'display_auto': display_auto_checkbox,
         }
         output = widgets.interactive_output(_render_explorer, controls)
         control_row = widgets.Box(
@@ -2147,12 +2292,16 @@ def export_pulseq_generation_notebook(
         "spiral": "make_pulseq_spiral",
         "csi": "make_pulseq_csi",
         "bssfp_3d": "make_pulseq_bssfp",
+        "spectral_bssfp_3d": "make_pulseq_spectral_selective_bssfp",
+        "me_bssfp_3d": "make_pulseq_me_bssfp",
+        "radial_me_bssfp_3d": "make_pulseq_radial_me_bssfp",
     }
     try:
         builder_name = builders[str(sequence_kind)]
     except KeyError as exc:
         raise ValueError(
-            "sequence_kind must be 'epi', 'spiral', 'csi', or 'bssfp_3d'"
+            "sequence_kind must be 'epi', 'spiral', 'csi', 'bssfp_3d', "
+            "'spectral_bssfp_3d', 'me_bssfp_3d', or 'radial_me_bssfp_3d'"
         ) from exc
     notebook_path = Path(filename)
     if notebook_path.suffix.lower() != ".ipynb":
@@ -2257,9 +2406,9 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
                 "`repetition_index`, `segment_index`, and `partition_index`. "
                 "Use these coordinates for auditing and grouping; do not infer "
                 "spatial ordering from array length. Cartesian/EPI exports contain "
-                "the already sorted `cartesian_kspace(phase_y, read_x)` array and "
+                "the already sorted `cartesian_kspace(phase_*, read_*)` array and "
                 "`cartesian_image`. Cartesian 3D acquisitions additionally contain "
-                "`cartesian_3d_kspace(..., partition_z, phase_y, read_x)` and the "
+                "`cartesian_3d_kspace(..., partition_*, phase_*, read_*)` and the "
                 "corresponding 3D reconstruction. Spiral exports contain linearly "
                 "gridded `spiral_gridded_kspace` and `spiral_image` arrays. CSI "
                 "exports contain the already sorted "
@@ -2281,7 +2430,7 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
                 "This section performs the centered inverse FFT inside the notebook. "
                 "If an older result file has only chronological ADC data, the helper "
                 "first validates and sorts it with the exported event, outer-label, "
-                "partition, `ky`, and `kx` coordinates. It does not reshape based on "
+                "partition, and logical encoding coordinates. It does not reshape based on "
                 "the sample count alone. Pool-resolved `species_signal` data are "
                 "reconstructed as separate variables when available."
             ),
@@ -2290,27 +2439,32 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
                 "if 'cartesian_3d_kspace' in ds:\n"
                 "    kspace_3d = ds.cartesian_3d_kspace\n"
                 "    image_3d = ds.notebook_cartesian_3d_image_magnitude\n"
+                "    partition_dim, phase_dim, read_dim = _cartesian_spatial_dims(kspace_3d)\n"
+                "    spatial_dims = {partition_dim, phase_dim, read_dim}\n"
                 "    selectors = {dim: 0 for dim in kspace_3d.dims "
-                "if dim not in {'coil', 'partition_z', 'phase_y', 'read_x'}}\n"
+                "if dim not in spatial_dims | {'coil'}}\n"
                 "    kspace_volume = kspace_3d.isel(selectors)\n"
                 "    image_volume = image_3d.isel(selectors)\n"
                 "    if 'coil' in kspace_volume.dims:\n"
                 "        kspace_volume = np.sqrt((abs(kspace_volume) ** 2).sum('coil'))\n"
                 "        image_volume = np.sqrt((abs(image_volume) ** 2).sum('coil'))\n"
-                "    kz_mid = kspace_volume.sizes['partition_z'] // 2\n"
-                "    z_mid = image_volume.sizes['partition_z'] // 2\n"
+                "    partition_mid = kspace_volume.sizes[partition_dim] // 2\n"
+                "    image_partition_mid = image_volume.sizes[partition_dim] // 2\n"
                 "    print('Sorted Cartesian 3D k-space:', kspace_3d.dims, kspace_3d.shape)\n"
+                "    print('Encoding axes:', ds.attrs.get('cartesian_encoding_axes', '+x +y +z'))\n"
                 "    fig, axes = plt.subplots(1, 2, figsize=(10, 4))\n"
-                "    axes[0].imshow(np.log1p(abs(kspace_volume.isel(partition_z=kz_mid))), origin='lower', cmap='magma')\n"
-                "    axes[0].set_title('Central kz plane')\n"
-                "    axes[1].imshow(abs(image_volume.isel(partition_z=z_mid)), origin='lower', cmap='gray')\n"
-                "    axes[1].set_title('Central reconstructed z slice')\n"
+                "    axes[0].imshow(np.log1p(abs(kspace_volume.isel({partition_dim: partition_mid}))), origin='lower', cmap='magma')\n"
+                "    axes[0].set_title(f'Central k-partition plane ({partition_dim})')\n"
+                "    axes[1].imshow(abs(image_volume.isel({partition_dim: image_partition_mid})), origin='lower', cmap='gray')\n"
+                "    axes[1].set_title(f'Central reconstructed {partition_dim} slice')\n"
                 "    plt.tight_layout(); plt.show()\n"
                 "elif 'cartesian_kspace' in ds:\n"
                 "    kspace = ds.cartesian_kspace\n"
                 "    image = ds.notebook_cartesian_image_magnitude\n"
+                "    phase_dim, read_dim = _cartesian_spatial_dims(kspace)\n"
+                "    spatial_dims = {phase_dim, read_dim}\n"
                 "    selectors = {dim: 0 for dim in kspace.dims "
-                "if dim not in {'coil', 'phase_y', 'read_x'}}\n"
+                "if dim not in spatial_dims | {'coil'}}\n"
                 "    kspace = kspace.isel(selectors)\n"
                 "    image = image.isel(selectors)\n"
                 "    if 'coil' in kspace.dims:\n"
@@ -2320,15 +2474,17 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
                 "        kspace_display = abs(kspace)\n"
                 "        image_display = abs(image)\n"
                 "    print('Sorted Cartesian/EPI k-space:', kspace.dims, kspace.shape)\n"
-                "    print('kx axis:', ds.cartesian_kx_cyc_per_m.values[:4], '...')\n"
-                "    print('ky axis:', ds.cartesian_ky_cyc_per_m.values[:4], '...')\n"
+                "    read_coord = 'cartesian_k_read_cyc_per_m' if 'cartesian_k_read_cyc_per_m' in ds.coords else f'cartesian_k{read_dim[-1]}_cyc_per_m'\n"
+                "    phase_coord = 'cartesian_k_phase_cyc_per_m' if 'cartesian_k_phase_cyc_per_m' in ds.coords else f'cartesian_k{phase_dim[-1]}_cyc_per_m'\n"
+                "    print('k-read axis:', ds.coords[read_coord].values[:4], '...')\n"
+                "    print('k-phase axis:', ds.coords[phase_coord].values[:4], '...')\n"
                 "    fig, axes = plt.subplots(1, 2, figsize=(10, 4))\n"
                 "    axes[0].imshow(np.log1p(kspace_display.values), origin='lower', cmap='magma')\n"
                 "    axes[0].set_title('log(1 + |k-space|)')\n"
-                "    axes[0].set_xlabel('read_x / kx'); axes[0].set_ylabel('phase_y / ky')\n"
+                "    axes[0].set_xlabel(f'{read_dim} / k-read'); axes[0].set_ylabel(f'{phase_dim} / k-phase')\n"
                 "    axes[1].imshow(image_display.values, origin='lower', cmap='gray')\n"
                 "    axes[1].set_title('|IFFT2 image|')\n"
-                "    axes[1].set_xlabel('x'); axes[1].set_ylabel('y')\n"
+                "    axes[1].set_xlabel(read_dim); axes[1].set_ylabel(phase_dim)\n"
                 "    plt.tight_layout(); plt.show()\n"
                 "elif 'spiral_gridded_kspace' in ds:\n"
                 "    kspace = ds.spiral_gridded_kspace\n"

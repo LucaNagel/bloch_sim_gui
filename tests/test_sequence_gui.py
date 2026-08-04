@@ -12,9 +12,11 @@ from PyQt5.QtWidgets import QApplication, QMenu, QMessageBox, QScrollArea, QTool
 
 from blochsimulator.ui.main_window import BlochSimulatorGUI
 from blochsimulator.ui.sequence_simulation_widget import (
+    SequenceProbeThread,
     SequenceSimulationWidget,
     _event_step_plot_data,
 )
+from blochsimulator.ui.default_settings import WorkspaceDefaults
 from blochsimulator.sequence import (
     ADCEvent,
     AcquisitionDimensions,
@@ -66,6 +68,10 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     window.app_settings.setValue("sequence/timestep_us", 10.0)
     window.app_settings.setValue("simulation/thread_mode", "manual")
     window.app_settings.setValue("simulation/manual_threads", 2)
+    window.app_settings.setValue("defaults/sequence_fov_x_mm", 180.0)
+    window.app_settings.setValue("defaults/sequence_fov_y_mm", 170.0)
+    window.app_settings.setValue("defaults/sequence_fov_z_mm", 80.0)
+    window.app_settings.setValue("defaults/field_strength_t", 7.0)
     assert window.sequence_simulation_widget is None
     assert not window.tab_widget.isTabVisible(window.sequence_simulation_tab_index)
     assert not window.tab_widget.isTabVisible(window.phantom_tab_index)
@@ -83,12 +89,24 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
         == "native_parallel"
     )
     assert window.sequence_simulation_widget.simulator.num_threads == 2
+    assert window.sequence_simulation_widget.epi_read_fov_mm.value() == 180.0
+    assert window.sequence_simulation_widget.epi_phase_fov_mm.value() == 170.0
+    assert window.sequence_simulation_widget.bssfp_partition_fov_mm.value() == 80.0
+    assert window.sequence_simulation_widget.field_strength_t.value() == 7.0
+    updated_defaults = WorkspaceDefaults(
+        sequence_fov_mm=(90.0, 85.0, 40.0), field_strength_t=9.4
+    )
+    window.sequence_simulation_widget.set_workspace_defaults(updated_defaults)
+    assert window.sequence_simulation_widget.epi_read_fov_mm.value() == 90.0
+    assert window.sequence_simulation_widget.epi_phase_fov_mm.value() == 85.0
+    assert window.sequence_simulation_widget.bssfp_partition_fov_mm.value() == 40.0
+    assert window.sequence_simulation_widget.field_strength_t.value() == 9.4
     assert isinstance(window.sequence_simulation_widget, SequenceSimulationWidget)
     assert window.sequence_simulation_widget.program.source == "internal-fid"
     assert window.sequence_simulation_widget._rf_designer is window.rf_designer
     assert window.sequence_simulation_widget._rf_designer_pulse_data is not None
     assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is None
-    assert window.workspace_switch.parentWidget() is window.workspace_header
+    assert window.workspace_switch.parentWidget() is window.free_mode_colormap_controls
     assert window.statusBar().isAncestorOf(window.status_export_button)
     assert window.findChild(QToolBar, "main_toolbar") is None
     assert window.mag_3d.export_3d_btn.isHidden()
@@ -121,6 +139,7 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     )
 
     sequence_widget = window.sequence_simulation_widget
+    sequence_widget.sequence_live_preview.setChecked(True)
     sequence_widget.sequence_source.setCurrentIndex(1)
     sequence_widget.read_matrix.setValue(4)
     sequence_widget.phase_matrix.setValue(3)
@@ -214,19 +233,19 @@ def test_workspace_roundtrip_remains_interactive():
     window = BlochSimulatorGUI()
     window.show()
     app.processEvents()
-    workspace_x = window.workspace_switch.x()
     initial_window_size = window.size()
     initial_frame_geometry = window.frameGeometry()
 
     _select_workspace(window, "sequence")
     assert window.workspace_mode == "sequence"
-    assert window.workspace_header.isVisible()
-    assert window.workspace_switch.x() == workspace_x
+    assert not window.workspace_header.isVisible()
+    assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is window.workspace_switch
 
     _select_workspace(window, "free")
     assert window.workspace_mode == "free"
-    assert window.workspace_header.isVisible()
-    assert window.workspace_switch.x() == workspace_x
+    assert not window.workspace_header.isVisible()
+    assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is None
+    assert window.workspace_switch.parentWidget() is window.free_mode_colormap_controls
     assert window.size() == initial_window_size
     assert window.frameGeometry() == initial_frame_geometry
 
@@ -265,6 +284,7 @@ def test_sequence_workspace_builds_cartesian_epi_from_controls():
     widget = SequenceSimulationWidget()
     assert widget.sequence_source.itemText(1) == "EPI"
     assert widget.acquisition_group.isHidden()
+    widget.sequence_live_preview.setChecked(True)
     widget.sequence_source.setCurrentIndex(1)
     assert not widget.acquisition_group.isHidden()
     assert widget.acquisition_group.isEnabled()
@@ -311,6 +331,8 @@ def test_sequence_workspace_builds_cartesian_epi_from_controls():
     assert widget.spectral_point_slider.maximum() == 7
     assert widget.spectrum_x_slider.maximum() == 3
     assert widget.spectrum_y_slider.maximum() == 2
+    assert widget.spectrum_x_slider.isHidden()
+    assert widget.spectrum_y_slider.isHidden()
     widget.spectral_point_slider.setValue(5)
     widget.spectrum_x_slider.setValue(2)
     widget.spectrum_y_selector.setValue(1)
@@ -334,7 +356,7 @@ def test_sequence_workspace_builds_cartesian_epi_from_controls():
         metadata={"spectroscopic_acquisition": csi.to_metadata()},
     )
     widget._show_spectroscopic_result(widget.result)
-    widget.split_view_checkbox.setChecked(True)
+    assert widget.split_view_checkbox.isChecked()
     assert widget.view_stack.currentIndex() == 1
     assert widget.split_image_item.image.shape == (4, 3)
     widget.split_signal_source.setCurrentText("FID")
@@ -475,6 +497,7 @@ def test_sequence_workspace_scopes_object_controls_to_the_selected_source():
 def test_sequence_workspace_builds_multislice_repeated_epi_from_controls():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
+    widget.sequence_live_preview.setChecked(True)
     widget.sequence_source.setCurrentIndex(1)
     widget.read_matrix.setValue(4)
     widget.phase_matrix.setValue(4)
@@ -518,6 +541,7 @@ def test_sequence_workspace_builds_multislice_repeated_epi_from_controls():
 def test_sequence_workspace_configures_rf_pulse_for_epi_and_spiral(tmp_path):
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
+    widget.sequence_live_preview.setChecked(True)
     widget.sequence_source.setCurrentIndex(1)
     widget.read_matrix.setValue(4)
     widget.phase_matrix.setValue(3)
@@ -606,6 +630,7 @@ def test_sequence_workspace_configures_rf_pulse_for_epi_and_spiral(tmp_path):
 def test_sequence_workspace_builds_spiral_readout_from_controls(tmp_path):
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
+    widget.sequence_live_preview.setChecked(True)
     widget.sequence_source.setCurrentIndex(1)
     widget.read_matrix.setValue(8)
     widget.phase_matrix.setValue(8)
@@ -644,6 +669,7 @@ def test_sequence_workspace_displays_cartesian_kspace_and_reconstruction():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
     widget.object_source.setCurrentIndex(1)
+    widget.sequence_live_preview.setChecked(True)
     widget.sequence_source.setCurrentIndex(1)
     widget.read_matrix.setValue(4)
     widget.phase_matrix.setValue(3)
@@ -854,8 +880,20 @@ def test_focused_sequence_workspace_uses_wider_control_panel():
         ),
     )
     assert control_width == expected_control_width
+    assert widget.FOCUSED_CONTROL_WIDTH == 420
     assert viewer_width >= widget.MINIMUM_FOCUSED_VIEWER_WIDTH
     assert widget.layout().contentsMargins().left() == 0
+    assert widget.split_view_checkbox.parentWidget() is widget.signal_page
+    assert widget.views.tabBar().font().bold()
+    assert widget.sequence_title.font().bold()
+    assert widget.sequence_title.font().pointSize() >= 12
+    assert widget.object_form.labelAlignment() & Qt.AlignLeft
+    for image_view in (
+        widget.kspace_view,
+        widget.reconstruction_view,
+        widget.state_view,
+    ):
+        assert image_view.ui.histogram.width() == 48
 
     widget.close()
     widget.deleteLater()
@@ -875,7 +913,7 @@ def test_starting_sequence_opens_signal_tab(monkeypatch):
 
     widget._run()
 
-    assert widget.view_stack.currentWidget() is widget.views
+    assert widget.view_stack.currentWidget() is widget.normal_signal_page
     assert widget.views.currentIndex() == widget.signal_tab_index
     assert widget.views.tabText(widget.views.currentIndex()) == "Signal / CSI spectrum"
 
@@ -903,6 +941,16 @@ def test_sequence_workspace_builds_geometry_probe_positions():
     assert ppm_axis.shape == (1,)
     assert hz_axis.shape == (1,)
     assert widget.probe_frequency_units.currentText() == "Hz"
+    assert widget.probe_ppm_min.value() == pytest.approx(-2500.0)
+    assert widget.probe_ppm_max.value() == pytest.approx(2500.0)
+    cancel_position = widget.probe_button_layout.getItemPosition(
+        widget.probe_button_layout.indexOf(widget.cancel_probe_button)
+    )
+    spectral_position = widget.probe_button_layout.getItemPosition(
+        widget.probe_button_layout.indexOf(widget.run_probe_button)
+    )
+    assert cancel_position[:2] == (1, 0)
+    assert spectral_position[:2] == (0, 0)
     assert widget.probe_initial_mz.maximum() == pytest.approx(1e7)
     widget.probe_initial_mz.setValue(2.5e6)
     assert widget.probe_initial_mz.value() == pytest.approx(2.5e6)
@@ -1084,4 +1132,104 @@ def test_sequence_workspace_displays_geometry_probe_result(monkeypatch):
 
     widget.close()
     widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_probe_playback_modes_map_complete_timeline_and_adc_status():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    times_s = np.array([0.0, 0.01, 0.02, 0.021, 0.05, 0.08, 0.081, 0.1])
+    result = SequenceProbeResult(
+        time_s=times_s,
+        positions_m=np.array([[0.0, 0.0, 0.0]]),
+        frequency_offsets_hz=np.array([0.0]),
+        magnetization=np.ones((times_s.size, 1, 1, 3), dtype=float),
+        metadata={
+            "probe_type": "geometry",
+            "configured_playback_times_s": np.array([0.0, 0.01, 0.1]),
+            "adc_times_s": np.array([0.02, 0.021, 0.08, 0.081]),
+            "adc_event_indices": np.array([0, 0, 1, 1]),
+            "adc_sample_dwell_s": np.full(4, 0.001),
+            "adc_windows_s": np.array([[0.02, 0.022], [0.08, 0.082]]),
+        },
+    )
+
+    widget.probe_result = result
+    widget._show_probe_result()
+
+    assert widget.probe_playback_mode.currentText() == "Configured checkpoints"
+    assert np.array_equal(widget._probe_playback_indices, [0, 1, 7])
+    assert widget.probe_time_control.time_slider.maximum() == 2
+
+    widget.probe_playback_mode.setCurrentText("ADC only")
+    assert np.array_equal(widget._probe_playback_indices, [2, 3, 5, 6])
+    assert widget.probe_time_control.time_slider.maximum() == 3
+    assert widget._probe_playback_clock_ms == pytest.approx([0.0, 1.0, 2.0, 3.0])
+    widget.probe_time_control.time_slider.setValue(2)
+    assert widget.probe_spectrum_viewer.time_index == 5
+
+    widget.probe_playback_mode.setCurrentText("All simulation steps")
+    assert np.array_equal(widget._probe_playback_indices, np.arange(times_s.size))
+    assert widget.probe_time_control.time_slider.maximum() == times_s.size - 1
+    assert not widget.probe_adc_status.isHidden()
+    widget.probe_time_control.time_slider.setValue(4)
+    assert widget.probe_adc_status.text() == "ADC: off"
+    widget.probe_time_control.time_slider.setValue(5)
+    assert widget.probe_adc_status.text() == "ADC: on"
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_probe_thread_stores_every_compiled_simulation_state():
+    app = QApplication.instance() or QApplication(sys.argv)
+    program = SequenceProgram(
+        events=(
+            RFEvent(0.0, np.array([100.0, 100.0]), 0.001),
+            ADCEvent(0.005, 1, 0.001),
+        ),
+        duration_s=0.01,
+    )
+
+    class ProbeSimulator:
+        received_checkpoints = None
+
+        def simulate_sequence_probes(self, _program, positions, frequencies, **kwargs):
+            self.received_checkpoints = np.asarray(kwargs["checkpoints_s"])
+            return SequenceProbeResult(
+                time_s=self.received_checkpoints,
+                positions_m=np.asarray(positions),
+                frequency_offsets_hz=np.asarray(frequencies),
+                magnetization=np.ones(
+                    (self.received_checkpoints.size, 1, 1, 3), dtype=float
+                ),
+            )
+
+    simulator = ProbeSimulator()
+    worker = SequenceProbeThread(
+        simulator,
+        program,
+        np.array([[0.0, 0.0, 0.0]]),
+        np.array([0.0]),
+        np.array([0.0, 0.002, 0.01]),
+        1.0,
+        0.1,
+        simulation_timestep_s=0.001,
+    )
+    completed = []
+    worker.result_ready.connect(completed.append)
+
+    worker.run()
+
+    assert simulator.received_checkpoints == pytest.approx(
+        [0.0, 0.001, 0.002, 0.005, 0.01]
+    )
+    assert completed[0].metadata["stored_timeline"] == "all_simulation_steps"
+    assert completed[0].metadata["configured_playback_times_s"] == pytest.approx(
+        [0.0, 0.002, 0.01]
+    )
+    assert completed[0].metadata["adc_times_s"] == pytest.approx([0.005])
+
+    worker.deleteLater()
     app.processEvents()

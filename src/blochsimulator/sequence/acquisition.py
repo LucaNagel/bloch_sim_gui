@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import product
 from types import SimpleNamespace
 from typing import ClassVar, Mapping, Optional, Sequence, Tuple
@@ -10,6 +10,7 @@ from typing import ClassVar, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from .flip_angles import VFA_REFERENCE_DOI, variable_flip_angle_schedule
+from .encoding import EncodingFrame
 from .model import ADCEvent, GradientEvent, RFEvent, SequenceProgram
 from .rf_pulses import design_rf_envelope, scale_rf_envelope_to_flip
 
@@ -607,6 +608,7 @@ class CartesianAcquisitionVolumes:
             if (
                 acquisition.read_matrix != first.read_matrix
                 or acquisition.phase_matrix != first.phase_matrix
+                or acquisition.encoding_frame != first.encoding_frame
                 or not np.allclose(acquisition.fov_m, first.fov_m)
                 or not np.allclose(
                     acquisition.kx_cyc_per_m,
@@ -688,6 +690,10 @@ class CartesianAcquisitionVolumes:
         return (in_plane[0], in_plane[1], self.fov_z_m)
 
     @property
+    def encoding_frame(self) -> EncodingFrame:
+        return self.frames.acquisitions[0].encoding_frame
+
+    @property
     def matrix(self) -> Tuple[int, int, int]:
         return (self.read_matrix, self.phase_matrix, self.partition_matrix)
 
@@ -707,11 +713,36 @@ class CartesianAcquisitionVolumes:
 
     @property
     def kz_cyc_per_m(self) -> np.ndarray:
+        """Logical partition coordinates (legacy kz-compatible name)."""
         return (
             np.arange(self.partition_matrix, dtype=float)
             - self.partition_matrix // 2
             + self.kz_offset_cells
         ) / self.fov_z_m
+
+    @property
+    def k_read_cyc_per_m(self) -> np.ndarray:
+        return self.kx_cyc_per_m
+
+    @property
+    def k_phase_cyc_per_m(self) -> np.ndarray:
+        return self.ky_cyc_per_m
+
+    @property
+    def k_partition_cyc_per_m(self) -> np.ndarray:
+        return self.kz_cyc_per_m
+
+    @property
+    def read_dimension(self) -> str:
+        return self.encoding_frame.dimension_name("read")
+
+    @property
+    def phase_dimension(self) -> str:
+        return self.encoding_frame.dimension_name("phase")
+
+    @property
+    def partition_dimension(self) -> str:
+        return self.encoding_frame.dimension_name("partition")
 
     def volume_label(self, volume: int) -> str:
         values = self.volume_indices[int(volume)]
@@ -740,6 +771,7 @@ class CartesianAcquisitionVolumes:
         moments = moments - np.asarray(
             self.frames.moment_origins_cyc_per_m[int(frame)], dtype=float
         )
+        moments = self.encoding_frame.scanner_to_encoding(moments)
         tolerance = max(1e-9, 1e-3 / self.fov_z_m)
         if not np.allclose(
             moments[:, 2],
@@ -1144,6 +1176,7 @@ class CartesianAcquisition:
     readout_directions: Optional[Tuple[int, ...]] = None
     kx_offset_cells: float = 0.0
     ky_offset_cells: float = 0.0
+    encoding_frame: EncodingFrame = field(default_factory=EncodingFrame.identity)
 
     def __post_init__(self) -> None:
         read_matrix = _positive_integer(self.read_matrix, "read_matrix")
@@ -1158,6 +1191,8 @@ class CartesianAcquisition:
         ky_offset = float(self.ky_offset_cells)
         if not np.isfinite(kx_offset) or not np.isfinite(ky_offset):
             raise ValueError("Cartesian k-space offsets must be finite")
+        if not isinstance(self.encoding_frame, EncodingFrame):
+            raise TypeError("encoding_frame must be an EncodingFrame")
 
         phase_indices = (
             tuple(range(phase_matrix))
@@ -1231,6 +1266,7 @@ class CartesianAcquisition:
 
     @property
     def kx_cyc_per_m(self) -> np.ndarray:
+        """Logical read coordinates (legacy name for x-readout compatibility)."""
         return (
             np.arange(self.read_matrix, dtype=float)
             - self.read_matrix // 2
@@ -1239,11 +1275,28 @@ class CartesianAcquisition:
 
     @property
     def ky_cyc_per_m(self) -> np.ndarray:
+        """Logical phase coordinates (legacy name for y-phase compatibility)."""
         return (
             np.arange(self.phase_matrix, dtype=float)
             - self.phase_matrix // 2
             + self.ky_offset_cells
         ) / self.fov_m[1]
+
+    @property
+    def k_read_cyc_per_m(self) -> np.ndarray:
+        return self.kx_cyc_per_m
+
+    @property
+    def k_phase_cyc_per_m(self) -> np.ndarray:
+        return self.ky_cyc_per_m
+
+    @property
+    def read_dimension(self) -> str:
+        return self.encoding_frame.dimension_name("read")
+
+    @property
+    def phase_dimension(self) -> str:
+        return self.encoding_frame.dimension_name("phase")
 
     def reshape_signal(self, signal: np.ndarray) -> np.ndarray:
         """Map chronological ADC data to ``(..., phase, read)`` k-space."""
@@ -1314,7 +1367,9 @@ class CartesianAcquisition:
         moments = np.asarray(moments_cyc_per_m, dtype=float)
         if moments.shape != (self.num_samples, 3):
             raise ValueError("gradient moments must have shape (num_samples, 3)")
-        raw = moments.reshape(self.phase_matrix, self.read_matrix, 3)
+        raw = self.encoding_frame.scanner_to_encoding(moments).reshape(
+            self.phase_matrix, self.read_matrix, 3
+        )
         for acquired_line, phase_index in enumerate(self.phase_indices):
             expected_x = self.kx_cyc_per_m
             if self.readout_directions[acquired_line] < 0:
@@ -1344,6 +1399,7 @@ class CartesianAcquisition:
             "readout_directions": self.readout_directions,
             "kx_offset_cells": self.kx_offset_cells,
             "ky_offset_cells": self.ky_offset_cells,
+            "encoding_frame": self.encoding_frame.to_metadata(),
         }
 
     @classmethod
@@ -1359,6 +1415,9 @@ class CartesianAcquisition:
             readout_directions=tuple(metadata["readout_directions"]),
             kx_offset_cells=metadata.get("kx_offset_cells", 0.0),
             ky_offset_cells=metadata.get("ky_offset_cells", 0.0),
+            encoding_frame=EncodingFrame.from_metadata(
+                metadata.get("encoding_frame", {})
+            ),
         )
 
 
@@ -1467,10 +1526,12 @@ def infer_cartesian_acquisition(
 ) -> CartesianAcquisition:
     """Infer one regular 2D Cartesian acquisition from a sequence program.
 
-    The conservative inference currently accepts one chronological ADC event
-    per phase line, x readout, y phase encoding, and an explicit Pulseq FOV
-    definition. Multi-slice, repeated, segmented, or non-Cartesian streams are
-    rejected instead of being reshaped ambiguously.
+    The conservative inference accepts one chronological ADC event per phase
+    line and an explicit Pulseq FOV definition. Generated-sequence orientation
+    metadata projects physical scanner moments into logical read/phase/
+    partition coordinates before the regular grid is validated. Multi-slice,
+    repeated, segmented, or non-Cartesian streams are rejected instead of
+    being reshaped ambiguously.
     """
     from .compiler import SequenceCompiler
 
@@ -1502,10 +1563,20 @@ def infer_cartesian_acquisition(
         raise ValueError("ADC events are not strictly chronological")
 
     definitions = dict(program.metadata.get("definitions", {}))
+    encoding_frame = EncodingFrame.from_definitions(definitions)
     fov_value = next(
-        (value for key, value in definitions.items() if str(key).lower() == "fov"),
+        (
+            value
+            for key, value in definitions.items()
+            if str(key).lower() == "encodingfov"
+        ),
         None,
     )
+    if fov_value is None:
+        fov_value = next(
+            (value for key, value in definitions.items() if str(key).lower() == "fov"),
+            None,
+        )
     if fov_value is None:
         raise ValueError("Pulseq sequence has no FOV definition")
     fov = np.asarray(fov_value, dtype=float).reshape(-1)
@@ -1524,25 +1595,27 @@ def infer_cartesian_acquisition(
     moments = np.asarray(compiled.adc_gradient_moment_cyc_per_m, dtype=float)
     if moments.shape != (phase_matrix * read_matrix, 3):
         raise ValueError("compiled ADC gradient moments have an invalid shape")
-    raw = moments.reshape(phase_matrix, read_matrix, 3)
+    raw = encoding_frame.scanner_to_encoding(moments).reshape(
+        phase_matrix, read_matrix, 3
+    )
     tolerance_x = max(1e-9, 1e-3 / fov_x)
     tolerance_y = max(1e-9, 1e-3 / fov_y)
 
     delta_x = np.diff(raw[:, :, 0], axis=1)
     mean_delta_x = np.mean(delta_x, axis=1)
     if np.any(np.abs(mean_delta_x) <= tolerance_x):
-        raise ValueError("ADC events do not contain an x readout gradient")
+        raise ValueError("ADC events do not contain a readout gradient")
     directions = np.where(mean_delta_x > 0, 1, -1)
     expected_delta_x = directions[:, None] / fov_x
     if not np.allclose(delta_x, expected_delta_x, rtol=0.0, atol=tolerance_x):
-        raise ValueError("ADC readout samples are not on a regular x grid")
+        raise ValueError("ADC readout samples are not on a regular read grid")
     if not np.allclose(np.diff(raw[:, :, 1], axis=1), 0.0, rtol=0.0, atol=tolerance_y):
         raise ValueError("phase gradient changes during an ADC line")
     z_scale = max(1.0, float(np.max(np.abs(raw[:, :, 2]))))
     if not np.allclose(
         np.diff(raw[:, :, 2], axis=1), 0.0, rtol=0.0, atol=1e-9 * z_scale
     ):
-        raise ValueError("slice gradient changes during an ADC line")
+        raise ValueError("partition gradient changes during an ADC line")
 
     ordered_x = np.stack(
         [
@@ -1608,6 +1681,7 @@ def infer_cartesian_acquisition(
         readout_directions=tuple(int(value) for value in directions),
         kx_offset_cells=kx_offset,
         ky_offset_cells=ky_offset,
+        encoding_frame=encoding_frame,
     )
     acquisition.validate_adc_times(compiled.adc_times_s)
     acquisition.validate_gradient_moments(moments)
@@ -1824,8 +1898,8 @@ def infer_cartesian_acquisition_volumes(
         str(key).lower(): value
         for key, value in dict(program.metadata.get("definitions", {})).items()
     }
-    matrix_value = definitions.get("matrixsize")
-    fov_value = definitions.get("fov")
+    matrix_value = definitions.get("encodingmatrixsize", definitions.get("matrixsize"))
+    fov_value = definitions.get("encodingfov", definitions.get("fov"))
     if matrix_value is None or fov_value is None:
         raise ValueError(
             "3D Cartesian inference requires MatrixSize and FOV definitions"
@@ -1889,6 +1963,9 @@ def infer_cartesian_acquisition_volumes(
             relative = np.take(moments, frames.sample_indices[frame], axis=0)
             relative = relative - np.asarray(
                 frames.moment_origins_cyc_per_m[frame], dtype=float
+            )
+            relative = frames.acquisitions[frame].encoding_frame.scanner_to_encoding(
+                relative
             )
             kz = float(np.mean(relative[:, 2]))
             if not np.allclose(relative[:, 2], kz, rtol=0.0, atol=tolerance_z):
@@ -2448,6 +2525,7 @@ def make_cartesian_epi(
             else "none"
         ),
         "SpoilerEndTimes": tuple(float(value) for value in spoiler_end_times),
+        "IdealSpoilerEndTimes": tuple(float(value) for value in spoiler_end_times),
     }
     if rf_pulse_type == "sinc":
         definitions["RFApodization"] = float(rf_apodization)

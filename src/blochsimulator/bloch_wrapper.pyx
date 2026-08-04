@@ -67,6 +67,7 @@ cdef extern from "bloch_core.h":
         double *mx_init, double *my_init, double *mz_init, int nspins,
         int *adc_state_indices, double *adc_demod_real, double *adc_demod_imag,
         int nadc, int *checkpoint_state_indices, int ncheckpoints,
+        int *transverse_crush_state_indices, int ncrushes,
         double *signal_real, double *signal_imag,
         double *mx_final, double *my_final, double *mz_final,
         double *mx_checkpoints, double *my_checkpoints, double *mz_checkpoints,
@@ -83,6 +84,7 @@ cdef extern from "bloch_core.h":
         double *mx_init, double *my_init, double *mz_init, int nspins,
         int *adc_state_indices, double *adc_demod_real, double *adc_demod_imag,
         int nadc, int *checkpoint_state_indices, int ncheckpoints,
+        int *transverse_crush_state_indices, int ncrushes,
         double *signal_real, double *signal_imag,
         double *mx_final, double *my_final, double *mz_final,
         double *mx_checkpoints, double *my_checkpoints, double *mz_checkpoints,
@@ -757,6 +759,7 @@ def simulate_sequence_chunk(
         np.ndarray[np.int32_t, ndim=1] adc_state_indices,
         np.ndarray[CTYPE_t, ndim=1] adc_demodulation,
         np.ndarray[np.int32_t, ndim=1] checkpoint_state_indices,
+        np.ndarray[np.int32_t, ndim=1] transverse_crush_state_indices,
         int num_threads=1,
         str kernel="optimized"):
     """Propagate one voxel chunk and collect sparse sequence output.
@@ -769,6 +772,7 @@ def simulate_sequence_chunk(
     cdef int nspins = t1_s.shape[0]
     cdef int nadc = adc_state_indices.shape[0]
     cdef int ncheckpoints = checkpoint_state_indices.shape[0]
+    cdef int ncrushes = transverse_crush_state_indices.shape[0]
     cdef int ncoils = rx_sensitivities.shape[0]
     cdef bint use_optimized
     if kernel == "optimized":
@@ -795,6 +799,14 @@ def simulate_sequence_chunk(
         raise ValueError("m_init must have shape (nspins, 3)")
     if adc_demodulation.shape[0] != nadc:
         raise ValueError("adc_demodulation length must match ADC indices")
+    if ncrushes and (
+        np.any(transverse_crush_state_indices < 0)
+        or np.any(transverse_crush_state_indices > nintervals)
+        or np.any(np.diff(transverse_crush_state_indices) <= 0)
+    ):
+        raise ValueError(
+            "transverse crusher indices must be unique, increasing sequence states"
+        )
 
     cdef np.ndarray[CTYPE_t, ndim=1] rf_c = np.ascontiguousarray(rf_hz, dtype=np.complex128)
     cdef np.ndarray[DTYPE_t, ndim=1] rf_real = np.ascontiguousarray(rf_c.real)
@@ -827,6 +839,7 @@ def simulate_sequence_chunk(
     cdef np.ndarray[DTYPE_t, ndim=1] demod_real = np.ascontiguousarray(demod_c.real)
     cdef np.ndarray[DTYPE_t, ndim=1] demod_imag = np.ascontiguousarray(demod_c.imag)
     cdef np.ndarray[np.int32_t, ndim=1] checkpoint_indices_c = np.ascontiguousarray(checkpoint_state_indices, dtype=np.int32)
+    cdef np.ndarray[np.int32_t, ndim=1] crush_indices_c = np.ascontiguousarray(transverse_crush_state_indices, dtype=np.int32)
 
     cdef np.ndarray[DTYPE_t, ndim=1] signal_real = np.zeros(ncoils * nadc, dtype=np.float64)
     cdef np.ndarray[DTYPE_t, ndim=1] signal_imag = np.zeros(ncoils * nadc, dtype=np.float64)
@@ -851,6 +864,7 @@ def simulate_sequence_chunk(
                 <double*>mx_init.data, <double*>my_init.data, <double*>mz_init.data, nspins,
                 <int*>adc_indices_c.data, <double*>demod_real.data, <double*>demod_imag.data,
                 nadc, <int*>checkpoint_indices_c.data, ncheckpoints,
+                <int*>crush_indices_c.data, ncrushes,
                 <double*>signal_real.data, <double*>signal_imag.data,
                 <double*>mx_final.data, <double*>my_final.data, <double*>mz_final.data,
                 <double*>mx_check.data, <double*>my_check.data, <double*>mz_check.data,
@@ -868,6 +882,7 @@ def simulate_sequence_chunk(
                 <double*>mx_init.data, <double*>my_init.data, <double*>mz_init.data, nspins,
                 <int*>adc_indices_c.data, <double*>demod_real.data, <double*>demod_imag.data,
                 nadc, <int*>checkpoint_indices_c.data, ncheckpoints,
+                <int*>crush_indices_c.data, ncrushes,
                 <double*>signal_real.data, <double*>signal_imag.data,
                 <double*>mx_final.data, <double*>my_final.data, <double*>mz_final.data,
                 <double*>mx_check.data, <double*>my_check.data, <double*>mz_check.data,

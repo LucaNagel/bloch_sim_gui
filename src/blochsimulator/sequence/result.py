@@ -216,22 +216,34 @@ class SequenceSimulationResult:
         if cartesian is not None:
             kspace = self.to_cartesian_kspace(cartesian)
             image = self.reconstruct_cartesian(cartesian)
-            cartesian_dims = ["phase_y", "read_x"]
+            phase_dim = cartesian.phase_dimension
+            read_dim = cartesian.read_dimension
+            cartesian_dims = [phase_dim, read_dim]
             if self.signal.ndim == 2:
                 cartesian_dims.insert(0, "coil")
             coords.update(
                 {
-                    "phase_y": np.arange(cartesian.phase_matrix),
-                    "read_x": np.arange(cartesian.read_matrix),
-                    "cartesian_kx_cyc_per_m": (
-                        "read_x",
-                        cartesian.kx_cyc_per_m,
+                    phase_dim: np.arange(cartesian.phase_matrix),
+                    read_dim: np.arange(cartesian.read_matrix),
+                    "cartesian_k_read_cyc_per_m": (
+                        read_dim,
+                        cartesian.k_read_cyc_per_m,
                     ),
-                    "cartesian_ky_cyc_per_m": (
-                        "phase_y",
-                        cartesian.ky_cyc_per_m,
+                    "cartesian_k_phase_cyc_per_m": (
+                        phase_dim,
+                        cartesian.k_phase_cyc_per_m,
                     ),
                 }
+            )
+            read_axis, read_sign = cartesian.encoding_frame.axis_and_sign("read")
+            phase_axis, phase_sign = cartesian.encoding_frame.axis_and_sign("phase")
+            coords[f"cartesian_k{read_axis}_cyc_per_m"] = (
+                read_dim,
+                read_sign * cartesian.k_read_cyc_per_m,
+            )
+            coords[f"cartesian_k{phase_axis}_cyc_per_m"] = (
+                phase_dim,
+                phase_sign * cartesian.k_phase_cyc_per_m,
             )
             data_vars["cartesian_kspace"] = (cartesian_dims, kspace)
             data_vars["cartesian_image"] = (cartesian_dims, image)
@@ -244,6 +256,7 @@ class SequenceSimulationResult:
             same_grid = all(
                 acquisition.read_matrix == first.read_matrix
                 and acquisition.phase_matrix == first.phase_matrix
+                and acquisition.encoding_frame == first.encoding_frame
                 and np.allclose(acquisition.kx_cyc_per_m, first.kx_cyc_per_m)
                 and np.allclose(acquisition.ky_cyc_per_m, first.ky_cyc_per_m)
                 for acquisition in cartesian_frames.acquisitions
@@ -263,23 +276,35 @@ class SequenceSimulationResult:
                     ],
                     axis=0,
                 )
-                cartesian_dims = ["cartesian_frame", "phase_y", "read_x"]
+                phase_dim = first.phase_dimension
+                read_dim = first.read_dimension
+                cartesian_dims = ["cartesian_frame", phase_dim, read_dim]
                 if self.signal.ndim == 2:
                     cartesian_dims.insert(1, "coil")
                 coords.update(
                     {
                         "cartesian_frame": np.arange(cartesian_frames.num_frames),
-                        "phase_y": np.arange(first.phase_matrix),
-                        "read_x": np.arange(first.read_matrix),
-                        "cartesian_kx_cyc_per_m": (
-                            "read_x",
-                            first.kx_cyc_per_m,
+                        phase_dim: np.arange(first.phase_matrix),
+                        read_dim: np.arange(first.read_matrix),
+                        "cartesian_k_read_cyc_per_m": (
+                            read_dim,
+                            first.k_read_cyc_per_m,
                         ),
-                        "cartesian_ky_cyc_per_m": (
-                            "phase_y",
-                            first.ky_cyc_per_m,
+                        "cartesian_k_phase_cyc_per_m": (
+                            phase_dim,
+                            first.k_phase_cyc_per_m,
                         ),
                     }
+                )
+                read_axis, read_sign = first.encoding_frame.axis_and_sign("read")
+                phase_axis, phase_sign = first.encoding_frame.axis_and_sign("phase")
+                coords[f"cartesian_k{read_axis}_cyc_per_m"] = (
+                    read_dim,
+                    read_sign * first.k_read_cyc_per_m,
+                )
+                coords[f"cartesian_k{phase_axis}_cyc_per_m"] = (
+                    phase_dim,
+                    phase_sign * first.k_phase_cyc_per_m,
                 )
                 for axis_index, axis in enumerate(
                     cartesian_frames.dimensions.AXIS_NAMES
@@ -300,7 +325,10 @@ class SequenceSimulationResult:
             volume_dims = list(cartesian_volumes.varying_axes)
             if self.signal.ndim == 2:
                 volume_dims.append("coil")
-            volume_dims.extend(("partition_z", "phase_y", "read_x"))
+            partition_dim = cartesian_volumes.partition_dimension
+            phase_dim = cartesian_volumes.phase_dimension
+            read_dim = cartesian_volumes.read_dimension
+            volume_dims.extend((partition_dim, phase_dim, read_dim))
             coords.update(
                 {
                     axis: np.asarray(
@@ -311,23 +339,37 @@ class SequenceSimulationResult:
             )
             coords.update(
                 {
-                    "partition_z": np.arange(cartesian_volumes.partition_matrix),
-                    "phase_y": np.arange(cartesian_volumes.phase_matrix),
-                    "read_x": np.arange(cartesian_volumes.read_matrix),
-                    "cartesian_kx_cyc_per_m": (
-                        "read_x",
-                        cartesian_volumes.kx_cyc_per_m,
+                    partition_dim: np.arange(cartesian_volumes.partition_matrix),
+                    phase_dim: np.arange(cartesian_volumes.phase_matrix),
+                    read_dim: np.arange(cartesian_volumes.read_matrix),
+                    "cartesian_k_read_cyc_per_m": (
+                        read_dim,
+                        cartesian_volumes.k_read_cyc_per_m,
                     ),
-                    "cartesian_ky_cyc_per_m": (
-                        "phase_y",
-                        cartesian_volumes.ky_cyc_per_m,
+                    "cartesian_k_phase_cyc_per_m": (
+                        phase_dim,
+                        cartesian_volumes.k_phase_cyc_per_m,
                     ),
-                    "cartesian_kz_cyc_per_m": (
-                        "partition_z",
-                        cartesian_volumes.kz_cyc_per_m,
+                    "cartesian_k_partition_cyc_per_m": (
+                        partition_dim,
+                        cartesian_volumes.k_partition_cyc_per_m,
                     ),
                 }
             )
+            for role, dimension, values in (
+                ("read", read_dim, cartesian_volumes.k_read_cyc_per_m),
+                ("phase", phase_dim, cartesian_volumes.k_phase_cyc_per_m),
+                (
+                    "partition",
+                    partition_dim,
+                    cartesian_volumes.k_partition_cyc_per_m,
+                ),
+            ):
+                axis, sign = cartesian_volumes.encoding_frame.axis_and_sign(role)
+                coords[f"cartesian_k{axis}_cyc_per_m"] = (
+                    dimension,
+                    sign * values,
+                )
             data_vars["cartesian_3d_kspace"] = (volume_dims, kspace_3d)
             data_vars["cartesian_3d_image"] = (volume_dims, image_3d)
             data_vars["cartesian_3d_image_magnitude"] = (
@@ -464,6 +506,21 @@ class SequenceSimulationResult:
             "chronological; adc_event_index identifies each readout and "
             "readout_sample_index identifies the sample within that readout"
         )
+        cartesian_geometry = (
+            cartesian_volumes
+            if cartesian_volumes is not None
+            else (
+                cartesian_frames.acquisitions[0]
+                if cartesian_frames is not None
+                else cartesian
+            )
+        )
+        if cartesian_geometry is not None:
+            frame = cartesian_geometry.encoding_frame
+            attrs["cartesian_encoding_axes"] = " ".join(frame.axis_codes)
+            attrs["cartesian_encoding_basis_xyz"] = ",".join(
+                f"{value:.17g}" for value in frame.matrix.reshape(-1)
+            )
         dataset = xr.Dataset(data_vars, coords=coords, attrs=attrs)
         dataset["t"].attrs.update(long_name="ADC sample time", units="s")
         dataset["adc_time_s"].attrs.update(long_name="ADC sample time", units="s")
@@ -477,6 +534,9 @@ class SequenceSimulationResult:
             if axis in dataset.coords:
                 dataset[axis].attrs.update(units="cycles/m")
         for axis in (
+            "cartesian_k_read_cyc_per_m",
+            "cartesian_k_phase_cyc_per_m",
+            "cartesian_k_partition_cyc_per_m",
             "cartesian_kx_cyc_per_m",
             "cartesian_ky_cyc_per_m",
             "cartesian_kz_cyc_per_m",
@@ -552,6 +612,25 @@ class SequenceSimulationResult:
         cartesian_frames = self.cartesian_acquisition_frames
         cartesian_volumes = self.cartesian_acquisition_volumes
         spiral = self.spiral_acquisition
+
+        def add_encoding_arrays(geometry, *, include_partition=False):
+            frame = geometry.encoding_frame
+            arrays["cartesian_encoding_basis_xyz"] = frame.matrix
+            arrays["cartesian_encoding_axis_codes"] = np.asarray(
+                frame.axis_codes, dtype="S"
+            )
+            roles = [
+                ("read", geometry.k_read_cyc_per_m),
+                ("phase", geometry.k_phase_cyc_per_m),
+            ]
+            if include_partition:
+                roles.append(("partition", geometry.k_partition_cyc_per_m))
+            for role, values in roles:
+                values = np.asarray(values)
+                arrays[f"cartesian_k_{role}_cyc_per_m"] = values
+                axis, sign = frame.axis_and_sign(role)
+                arrays[f"cartesian_k{axis}_cyc_per_m"] = sign * values
+
         if cartesian is not None:
             image = self.reconstruct_cartesian(cartesian)
             arrays.update(
@@ -559,8 +638,6 @@ class SequenceSimulationResult:
                     "cartesian_kspace": self.to_cartesian_kspace(cartesian),
                     "cartesian_image": image,
                     "cartesian_image_magnitude": np.abs(image),
-                    "cartesian_kx_cyc_per_m": cartesian.kx_cyc_per_m,
-                    "cartesian_ky_cyc_per_m": cartesian.ky_cyc_per_m,
                     "cartesian_phase_indices": np.asarray(
                         cartesian.phase_indices, dtype=np.int64
                     ),
@@ -569,11 +646,13 @@ class SequenceSimulationResult:
                     ),
                 }
             )
+            add_encoding_arrays(cartesian)
         elif cartesian_frames is not None:
             first = cartesian_frames.acquisitions[0]
             same_grid = all(
                 acquisition.read_matrix == first.read_matrix
                 and acquisition.phase_matrix == first.phase_matrix
+                and acquisition.encoding_frame == first.encoding_frame
                 and np.allclose(acquisition.kx_cyc_per_m, first.kx_cyc_per_m)
                 and np.allclose(acquisition.ky_cyc_per_m, first.ky_cyc_per_m)
                 for acquisition in cartesian_frames.acquisitions
@@ -597,13 +676,12 @@ class SequenceSimulationResult:
                         ),
                         "cartesian_image": image,
                         "cartesian_image_magnitude": np.abs(image),
-                        "cartesian_kx_cyc_per_m": first.kx_cyc_per_m,
-                        "cartesian_ky_cyc_per_m": first.ky_cyc_per_m,
                         "cartesian_frame_indices": np.asarray(
                             cartesian_frames.frame_indices, dtype=np.int64
                         ),
                     }
                 )
+                add_encoding_arrays(first)
         if cartesian_volumes is not None:
             image_3d = cartesian_volumes.dimensioned_reconstruction(self)
             arrays.update(
@@ -611,7 +689,6 @@ class SequenceSimulationResult:
                     "cartesian_3d_kspace": cartesian_volumes.dimensioned_kspace(self),
                     "cartesian_3d_image": image_3d,
                     "cartesian_3d_image_magnitude": np.abs(image_3d),
-                    "cartesian_kz_cyc_per_m": cartesian_volumes.kz_cyc_per_m,
                     "cartesian_3d_volume_indices": np.asarray(
                         cartesian_volumes.volume_indices, dtype=np.int64
                     ),
@@ -620,6 +697,7 @@ class SequenceSimulationResult:
                     ),
                 }
             )
+            add_encoding_arrays(cartesian_volumes, include_partition=True)
             for axis in cartesian_volumes.varying_axes:
                 arrays[f"cartesian_3d_{axis}_index"] = np.asarray(
                     cartesian_volumes.axis_values(axis), dtype=np.int64

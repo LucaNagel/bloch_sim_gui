@@ -155,6 +155,7 @@ def main(
     tr_delay_val = np.round(tr_delay_val / bd_raster) * bd_raster
     tr_delay = pp.make_delay(tr_delay_val)
 
+    spoiler_end_times = []
     for i_slice in range(n_slices):
         freq_offset = gz.amplitude * z[i_slice]
         rf.freq_offset = freq_offset
@@ -162,6 +163,7 @@ def main(
         for i_phase in range(n_y):
             seq.add_block(rf_prep)
             seq.add_block(gx_spoil, gy_spoil, gz_spoil)
+            spoiler_end_times.append(float(seq.duration()[0]))
             seq.add_block(ti_delay)
             seq.add_block(rf, gz)
             gy_pre = pp.make_trapezoid(
@@ -174,6 +176,7 @@ def main(
                 channel="y", system=system, area=-phase_areas[i_phase], duration=2e-3
             )
             seq.add_block(gx_spoil, gy_pre)
+            spoiler_end_times.append(float(seq.duration()[0]))
             seq.add_block(tr_delay)
 
     if test_report:
@@ -184,6 +187,8 @@ def main(
 
     seq.set_definition(key="FOV", value=[fov_x, fov_y, slice_thickness * n_slices])
     seq.set_definition(key="Name", value="2D T1 MPRAGE")
+    seq.set_definition(key="SpoilerEndTimes", value=spoiler_end_times)
+    seq.set_definition(key="IdealSpoilerEndTimes", value=spoiler_end_times)
 
     if write_seq:
         seq.write(seq_filename)

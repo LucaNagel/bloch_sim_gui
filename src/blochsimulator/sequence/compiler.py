@@ -23,6 +23,8 @@ class CompiledSequence:
     adc_demodulation: np.ndarray
     checkpoint_times_s: np.ndarray
     checkpoint_state_indices: np.ndarray
+    transverse_crush_times_s: np.ndarray
+    transverse_crush_state_indices: np.ndarray
     duration_s: float
     metadata: dict
     adc_gradient_moment_cyc_per_m: np.ndarray = field(
@@ -41,6 +43,8 @@ class CompiledSequence:
             "adc_gradient_moment_cyc_per_m",
             "checkpoint_times_s",
             "checkpoint_state_indices",
+            "transverse_crush_times_s",
+            "transverse_crush_state_indices",
         ):
             value = np.ascontiguousarray(getattr(self, name))
             value.setflags(write=False)
@@ -53,6 +57,35 @@ class CompiledSequence:
 
 class SequenceCompiler:
     """Compile events while collapsing RF-free gradient evolution."""
+
+    def simulation_state_times(
+        self,
+        program: SequenceProgram,
+        *,
+        simulation_timestep_s: float | None = None,
+    ) -> np.ndarray:
+        """Return the initial time and every compiled interval end.
+
+        Event boundaries and ADC sample times are retained even when no RF or
+        ADC is active at neighbouring intervals.
+        """
+        if simulation_timestep_s is not None and (
+            not np.isfinite(simulation_timestep_s) or simulation_timestep_s <= 0
+        ):
+            raise ValueError("simulation_timestep_s must be finite and positive")
+        self._validate_gradient_overlaps(program.gradient_events)
+        adc_times, _ = self._adc_samples(program.adc_events)
+        boundaries = self._build_boundaries(
+            program,
+            adc_times,
+            np.zeros(0, dtype=float),
+            np.zeros(0, dtype=float),
+            simulation_timestep_s,
+            False,
+        )
+        boundaries = np.ascontiguousarray(boundaries, dtype=np.float64)
+        boundaries.setflags(write=False)
+        return boundaries
 
     def compile(
         self,
@@ -82,6 +115,10 @@ class SequenceCompiler:
         extra_boundaries = self._validate_extra_boundaries(
             extra_boundaries_s, program.duration_s
         )
+        transverse_crush_times = self._ideal_spoiler_times(program, program.duration_s)
+        timeline_boundaries = np.unique(
+            np.concatenate((extra_boundaries, transverse_crush_times))
+        )
         self._validate_gradient_overlaps(program.gradient_events)
 
         status(f"Expanding {len(program.adc_events):,} ADC events…")
@@ -99,7 +136,7 @@ class SequenceCompiler:
             program,
             adc_times,
             checkpoints,
-            extra_boundaries,
+            timeline_boundaries,
             simulation_timestep_s,
             acquisition_only,
         )
@@ -150,6 +187,9 @@ class SequenceCompiler:
         status(f"Finalizing {dt.size:,} compiled intervals…")
         adc_states = self._times_to_state_indices(boundaries, adc_times)
         checkpoint_states = self._times_to_state_indices(boundaries, checkpoints)
+        transverse_crush_states = self._times_to_state_indices(
+            boundaries, transverse_crush_times
+        )
         state_gradient_moments = np.vstack(
             (
                 np.zeros((1, 3), dtype=float),
@@ -167,12 +207,15 @@ class SequenceCompiler:
             adc_gradient_moment_cyc_per_m=state_gradient_moments[adc_states],
             checkpoint_times_s=checkpoints,
             checkpoint_state_indices=checkpoint_states,
+            transverse_crush_times_s=transverse_crush_times,
+            transverse_crush_state_indices=transverse_crush_states,
             duration_s=program.duration_s,
             metadata={
                 "source": program.source,
                 "version": program.version,
                 "program_metadata": dict(program.metadata),
                 "extra_boundary_count": int(extra_boundaries.size),
+                "transverse_crush_count": int(transverse_crush_times.size),
                 "acquisition_only": bool(acquisition_only),
             },
         )
@@ -221,6 +264,54 @@ class SequenceCompiler:
         if np.any(boundaries < 0) or np.any(boundaries > duration):
             raise ValueError("extra sequence boundaries must lie within the sequence")
         return np.unique(boundaries)
+
+    @classmethod
+    def _ideal_spoiler_times(
+        cls, program: SequenceProgram, duration: float
+    ) -> np.ndarray:
+        """Return explicitly declared ideal transverse-crusher times.
+
+        Generated sequences use ``IdealSpoilerEndTimes``.  The two older keys
+        remain accepted so previously exported generated Pulseq files acquire
+        the same semantics when they are loaded again.  No gradient waveform
+        is inspected or classified heuristically.
+        """
+        definitions = program.metadata.get("definitions", {})
+        if not isinstance(definitions, dict):
+            return np.zeros(0, dtype=float)
+
+        if "IdealSpoilerEndTimes" in definitions:
+            raw_values = definitions.get("IdealSpoilerEndTimes")
+        else:
+            legacy_values = []
+            for key in ("SpoilerEndTimes", "EndImageSpoilerEndTimes"):
+                value = definitions.get(key)
+                if value is None:
+                    continue
+                array = np.asarray(value, dtype=float)
+                if array.ndim == 0:
+                    array = array.reshape(1)
+                legacy_values.extend(array.reshape(-1).tolist())
+            raw_values = legacy_values
+
+        if raw_values is None:
+            return np.zeros(0, dtype=float)
+        values = np.asarray(raw_values, dtype=float)
+        if values.ndim == 0:
+            values = values.reshape(1)
+        if values.size == 0:
+            return np.zeros(0, dtype=float)
+        if values.ndim != 1 or not np.all(np.isfinite(values)):
+            raise ValueError(
+                "IdealSpoilerEndTimes must be a finite one-dimensional sequence"
+            )
+        tolerance = max(1e-15, abs(duration) * 1e-12)
+        if np.any(values < -tolerance) or np.any(values > duration + tolerance):
+            raise ValueError("ideal spoiler end times must lie within the sequence")
+        # Pulseq definitions are text while the reloaded event duration is a
+        # floating-point sum.  Snap sub-raster round-off at either endpoint so
+        # the crusher maps to an existing simulation state exactly.
+        return np.unique(np.clip(values, 0.0, duration))
 
     @staticmethod
     def _validate_gradient_overlaps(events: Iterable[GradientEvent]) -> None:

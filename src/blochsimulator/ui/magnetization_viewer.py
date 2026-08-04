@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QPalette
 import pyqtgraph.opengl as gl
 import pyqtgraph as pg
 import numpy as np
@@ -32,21 +33,35 @@ class MagnetizationViewer(QWidget):
         self.init_ui()
 
     def init_ui(self):
+        # Fill the page with the normal application window color so the raw
+        # OpenGL tab matches the scroll-backed result tabs around it.
+        self.setBackgroundRole(QPalette.Window)
+        self.setAutoFillBackground(True)
         layout = QVBoxLayout()
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
         self.playhead_line = None
 
         # Add export header for 3D view
-        header_3d = QHBoxLayout()
-        header_3d.addWidget(QLabel("3D Magnetization Vector"))
+        header_container = QWidget()
+        header_3d = QHBoxLayout(header_container)
+        header_3d.setContentsMargins(0, 0, 0, 0)
+        self.header_container = header_container
+        title = QLabel("3D Magnetization Vector")
+        title_font = title.font()
+        title_font.setBold(True)
+        title_font.setPointSize(max(title_font.pointSize() + 2, 12))
+        title.setFont(title_font)
+        title.setVisible(False)
+        self.page_title = title
+        header_3d.addWidget(title)
         header_3d.addStretch()
 
         self.export_3d_btn = QPushButton("Export Results")
         self.export_3d_btn.setObjectName("export_3d_btn")
         self.export_3d_btn.clicked.connect(self._trigger_parent_export)
         header_3d.addWidget(self.export_3d_btn)
-        layout.addLayout(header_3d)
+        layout.addWidget(header_container)
 
         # 3D view
         self.gl_widget = gl.GLViewWidget()
@@ -128,6 +143,19 @@ class MagnetizationViewer(QWidget):
         self.selector_slider.setRange(0, 0)
         self.selector_slider.valueChanged.connect(self._on_selector_changed)
         view_layout.addWidget(self.selector_slider, 1)
+        view_layout.addWidget(QLabel("Color palette:"))
+        self.vector_palette_combo = QComboBox()
+        self.vector_palette_combo.setObjectName("mag_3d_vector_palette")
+        self.vector_palette_combo.addItems(
+            ["Rainbow", "Viridis", "Plasma", "Magma", "Cividis", "Inferno", "Gray"]
+        )
+        self.vector_palette_combo.setToolTip(
+            "Choose the color palette used to distinguish displayed vectors."
+        )
+        self.vector_palette_combo.currentTextChanged.connect(
+            lambda _: self.view_filter_changed.emit()
+        )
+        view_layout.addWidget(self.vector_palette_combo)
         controls_v.addLayout(view_layout)
 
         # Initialize tracking state and path storage BEFORE checkbox initialization
@@ -160,7 +188,9 @@ class MagnetizationViewer(QWidget):
 
         control_container.setLayout(controls_v)
         self.control_container = control_container
-        layout.addWidget(control_container)
+        # Keep all view settings above the plots, consistent with the other
+        # result tabs and reachable without scrolling past the preview.
+        layout.insertWidget(1, control_container)
 
         self.last_positions = None
         self.last_frequencies = None
@@ -170,6 +200,20 @@ class MagnetizationViewer(QWidget):
         self._update_selector_range()
 
         self.setLayout(layout)
+
+    def color_for_index(self, index: int, total: int):
+        """Return the selected 3D palette color for one displayed vector."""
+        total = max(1, int(total))
+        index = max(0, min(int(index), total - 1))
+        palette = self.vector_palette_combo.currentText()
+        if palette == "Rainbow":
+            return pg.intColor(index, hues=total, values=1.0, maxValue=255)
+        try:
+            cmap = pg.colormap.get(palette.lower())
+            position = 0.5 if total == 1 else index / (total - 1)
+            return cmap.map(position, mode="qcolor")
+        except Exception:
+            return pg.intColor(index, hues=total, values=1.0, maxValue=255)
 
     def showEvent(self, event):
         """Refresh OpenGL after a hidden tab receives its final geometry."""

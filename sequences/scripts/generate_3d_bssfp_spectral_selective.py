@@ -20,6 +20,14 @@ from matplotlib import pyplot as plt
 
 import pypulseq as pp
 
+from blochsimulator.sequence.encoding import (
+    EncodingFrame,
+    logical_gradient_area,
+    make_role_trapezoid,
+    resolve_encoding_frame,
+    set_pulseq_encoding_definitions,
+)
+
 
 def _as_3d_fov(fov: float | tuple[float, float, float]) -> tuple[float, float, float]:
     if isinstance(fov, (int, float)):
@@ -291,6 +299,7 @@ def main(
     max_slew_tms: float = 1000.0,
     field_strength_t: float = 7.0,
     nucleus: str = "C13",
+    encoding_axes: tuple[str, str, str] | EncodingFrame = ("+x", "+y", "+z"),
 ):
     """Create a spectrally selective Cartesian 3D bSSFP sequence.
 
@@ -315,6 +324,7 @@ def main(
     each FOV dimension and is disabled by setting its cycles to zero.
     """
     fov_x, fov_y, fov_z = _as_3d_fov(fov)
+    encoding_frame = resolve_encoding_frame(encoding_axes)
     _encoding_areas(n_read, 1.0)  # Validate readout matrix size.
     ky_areas = _encoding_areas(n_phase, 1 / fov_y)
     kz_areas = _encoding_areas(n_partition, 1 / fov_z)
@@ -413,8 +423,10 @@ def main(
         np.ceil(abs(readout_amplitude) / system.max_slew / system.grad_raster_time)
         * system.grad_raster_time,
     )
-    gx = pp.make_trapezoid(
-        channel="x",
+    gx = make_role_trapezoid(
+        pp,
+        encoding_frame,
+        "read",
         flat_area=n_read / fov_x,
         flat_time=readout_duration,
         rise_time=readout_rise_time,
@@ -426,9 +438,12 @@ def main(
         delay=gx.rise_time,
         system=system,
     )
-    gx_pre = pp.make_trapezoid(
-        channel="x",
-        area=-gx.area / 2,
+    readout_area = logical_gradient_area(gx, encoding_frame, "read")
+    gx_pre = make_role_trapezoid(
+        pp,
+        encoding_frame,
+        "read",
+        area=-readout_area / 2,
         duration=encoding_duration,
         system=system,
     )
@@ -489,13 +504,17 @@ def main(
     end_image_spoilers = ()
     if end_image_spoiler_cycles_per_fov > 0:
         end_image_spoilers = tuple(
-            pp.make_trapezoid(
-                channel=axis,
+            make_role_trapezoid(
+                pp,
+                encoding_frame,
+                role,
                 area=end_image_spoiler_cycles_per_fov / axis_fov,
                 duration=end_image_spoiler_duration,
                 system=system,
             )
-            for axis, axis_fov in zip("xyz", (fov_x, fov_y, fov_z))
+            for role, axis_fov in zip(
+                ("read", "phase", "partition"), (fov_x, fov_y, fov_z)
+            )
         )
 
     spoiler_end_times = []
@@ -586,17 +605,37 @@ def main(
             )
             rf_phase = np.mod(rf_phase + rf_phase_increment, 360.0)
 
-            gy_pre = pp.make_trapezoid(
-                channel="y", area=ky, duration=encoding_duration, system=system
+            gy_pre = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "phase",
+                area=ky,
+                duration=encoding_duration,
+                system=system,
             )
-            gy_reph = pp.make_trapezoid(
-                channel="y", area=-ky, duration=encoding_duration, system=system
+            gy_reph = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "phase",
+                area=-ky,
+                duration=encoding_duration,
+                system=system,
             )
-            gz_pre = pp.make_trapezoid(
-                channel="z", area=kz, duration=encoding_duration, system=system
+            gz_pre = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "partition",
+                area=kz,
+                duration=encoding_duration,
+                system=system,
             )
-            gz_reph = pp.make_trapezoid(
-                channel="z", area=-kz, duration=encoding_duration, system=system
+            gz_reph = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "partition",
+                area=-kz,
+                duration=encoding_duration,
+                system=system,
             )
 
             seq.add_block(rf_frame)
@@ -676,6 +715,12 @@ def main(
 
     seq.set_definition(key="FOV", value=[fov_x, fov_y, fov_z])
     seq.set_definition(key="MatrixSize", value=[n_read, n_phase, n_partition])
+    set_pulseq_encoding_definitions(
+        seq,
+        encoding_frame,
+        fov_m=(fov_x, fov_y, fov_z),
+        matrix=(n_read, n_phase, n_partition),
+    )
     seq.set_definition(key="FieldStrengthT", value=field_strength_t)
     seq.set_definition(key="Nucleus", value=nucleus)
     seq.set_definition(key="DynamicFrames", value=int(n_repetition))
@@ -702,8 +747,12 @@ def main(
         key="EndImageSpoilerDuration",
         value=end_image_spoiler_duration,
     )
-    seq.set_definition(key="EndImageSpoilerAxes", value="xyz")
+    seq.set_definition(
+        key="EndImageSpoilerAxes",
+        value="".join(event.channel for event in end_image_spoilers) or "none",
+    )
     seq.set_definition(key="EndImageSpoilerEndTimes", value=spoiler_end_times)
+    seq.set_definition(key="IdealSpoilerEndTimes", value=spoiler_end_times)
     seq.set_definition(
         key="SingleMetaboliteAcquisitionTime",
         value=n_phase * n_partition * tr,
@@ -746,7 +795,7 @@ if __name__ == "__main__":
         spectral_slr_sharpness=1.0,
         plot=False,
         write_seq=True,
-        n_repetition=50,
+        n_repetition=20,
         rf_phase_increment=0.0,  # phase increment in degrees for bSSFP phase cycling
         seq_filename="bssfp_3d_spectral_selective_skinner.seq",
     )

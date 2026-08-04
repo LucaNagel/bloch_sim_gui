@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
 from blochsimulator.memory import GIB, MemoryPolicy
 from blochsimulator.sequence import ScannerParameters
 from blochsimulator.ui.dialogs import PulseImportDialog, SettingsDialog
+from blochsimulator.ui.default_settings import WorkspaceDefaults
 from blochsimulator.ui.main_window import BlochSimulatorGUI, _apply_platform_style
 
 
@@ -131,6 +132,7 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     assert scanner.max_slew_tms == pytest.approx(180.0)
     assert [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())] == [
         "General",
+        "Defaults",
         "Simulation",
         "Scanner",
         "Memory",
@@ -261,6 +263,43 @@ def test_all_main_window_fields_have_tooltips():
     assert not missing
 
 
+def test_free_mode_result_controls_use_consistent_headers_and_rows():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+
+    assert window.tab_widget.tabBar().font().bold()
+    assert window.workspace_header.isHidden()
+    assert window.workspace_switch.parentWidget() is window.free_mode_colormap_controls
+
+    vector_layout = window.mag_3d.layout()
+    assert vector_layout.indexOf(
+        window.mag_3d.control_container
+    ) < vector_layout.indexOf(window.mag_3d.gl_widget)
+    assert window.mag_3d.vector_palette_combo.findText("Viridis") >= 0
+    rainbow = window.mag_3d.color_for_index(0, 5).name()
+    window.mag_3d.vector_palette_combo.setCurrentText("Viridis")
+    assert window.mag_3d.color_for_index(0, 5).name() != rainbow
+
+    assert window.spectrum_controls_layout.indexOf(window.spectrum_component_combo) >= 0
+    for control in (
+        window.mean_only_checkbox,
+        window.spatial_markers_checkbox,
+        window.spatial_component_combo,
+    ):
+        assert window.spatial_options_layout.indexOf(control) >= 0
+
+    assert window.mag_3d.page_title.isHidden()
+    assert window.mag_3d.header_container.isHidden()
+    assert window.mag_component.width() == window.signal_component.width() == 220
+    assert window.rf_designer_tab.page_title.isHidden()
+    assert window.slice_explorer.page_title.isHidden()
+    assert window.param_sweep_widget.page_title.isHidden()
+    assert window.rf_designer_tab.control_panel.minimumWidth() == 400
+    assert window.slice_explorer.control_panel.minimumWidth() == 400
+    assert window.rf_designer_tab.control_panel.maximumWidth() == 400
+    assert window.slice_explorer.control_panel.maximumWidth() == 400
+
+
 def test_core_dialog_fields_have_tooltips(tmp_path):
     app = QApplication.instance()
     if app is None:
@@ -355,6 +394,13 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     dialog.manual_thread_count.return_value = 2
     scanner_parameters = ScannerParameters(max_grad_mtm=40.0, max_slew_tms=180.0)
     dialog.scanner_parameters.return_value = scanner_parameters
+    workspace_defaults = WorkspaceDefaults(
+        sequence_fov_mm=(180.0, 170.0, 80.0),
+        phantom_fov_mm=(60.0, 50.0, 40.0),
+        phantom_nucleus="C13",
+        field_strength_t=7.0,
+    )
+    dialog.workspace_defaults.return_value = workspace_defaults
 
     with patch("blochsimulator.ui.main_window.SettingsDialog", return_value=dialog):
         window.show_settings(initial_tab="simulation")
@@ -365,6 +411,9 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     assert int(window.app_settings.value("simulation/manual_threads")) == 2
     assert float(window.app_settings.value("scanner/max_grad_mtm")) == 40.0
     assert float(window.app_settings.value("scanner/max_slew_tms")) == 180.0
+    assert float(window.app_settings.value("defaults/sequence_fov_x_mm")) == 180.0
+    assert window.app_settings.value("defaults/phantom_nucleus") == "C13"
+    assert float(window.app_settings.value("defaults/field_strength_t")) == 7.0
     assert window.simulator.sequence_kernel == "reference"
     assert window.simulator.dynamic_sequence_kernel == "native_parallel"
     assert window.simulator.num_threads == 2
@@ -380,6 +429,23 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     window.sequence_simulation_widget.set_scanner_parameters.assert_called_once_with(
         scanner_parameters
     )
+    window.sequence_simulation_widget.set_workspace_defaults.assert_called_once_with(
+        workspace_defaults
+    )
+
+
+def test_workspace_defaults_round_trip_through_settings(tmp_path):
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    expected = WorkspaceDefaults(
+        sequence_fov_mm=(210.0, 190.0, 75.0),
+        phantom_fov_mm=(80.0, 70.0, 60.0),
+        phantom_nucleus="P31",
+        field_strength_t=9.4,
+    )
+    expected.save(settings)
+    settings.sync()
+
+    assert WorkspaceDefaults.from_settings(settings) == expected
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm, ppm_to_hz
+from .widgets import compact_image_histogram
 
 try:
     import pyqtgraph.opengl as gl
@@ -87,13 +88,16 @@ class VolumeViewerWidget(QWidget):
         for row, axis in enumerate("XYZ"):
             controls_layout.addWidget(QLabel(f"{axis} index"), row, 0)
             slider = QSlider(Qt.Horizontal)
+            slider.setMinimumWidth(220)
+            slider.setMaximumWidth(420)
             slider.valueChanged.connect(self._indices_updated)
             label = QLabel("0")
             controls_layout.addWidget(slider, row, 1)
             controls_layout.addWidget(label, row, 2)
             self.sliders.append(slider)
             self.index_labels.append(label)
-        slices_layout.addWidget(controls, 1, 0, 1, 3)
+        controls.setMaximumWidth(720)
+        slices_layout.addWidget(controls, 1, 0, 1, 3, Qt.AlignHCenter)
         self.tabs.addTab(slices, "Orthogonal slices")
 
         self.gl_view = None
@@ -132,6 +136,7 @@ class VolumeViewerWidget(QWidget):
         view = pg.ImageView()
         view.ui.roiBtn.hide()
         view.ui.menuBtn.hide()
+        compact_image_histogram(view)
         view.ui.histogram.axis.tickStrings = lambda values, scale, spacing: [
             f"{value * scale:.2f}" for value in values
         ]

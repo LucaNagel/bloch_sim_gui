@@ -33,8 +33,10 @@ A high-performance Python implementation of the Bloch equation solver originally
   slice-selective excitation, EPI, and SSFP.
 - Dedicated event-based **Sequence mode** for **loading and simulating [Pulseq
   `.seq`](https://github.com/pulseq/pypulseq) files**.
-- **Interactive generation of Pulseq** EPI, centre-out 2D spiral, 2D CSI, and 3D
-  bSSFP sequences, with export to `.seq` files and reproducing Jupyter notebooks.
+- **Interactive generation of Pulseq** EPI, centre-out 2D spiral, 2D CSI,
+  Cartesian 3D bSSFP, alternating-frequency spectrally selective 3D bSSFP, and
+  Cartesian or spiral-phyllotaxis radial 3D multi-echo bSSFP sequences, with
+  export to `.seq` files and reproducing Jupyter notebooks.
 - Spectral and dynamic **phantom design** with spatial peak distributions,
   pyruvate-to-lactate kinetics, spatial B0 inhomogeneity maps, and optional
   time-dependent B0 offsets.
@@ -142,9 +144,18 @@ waveform.
 - Simulate imported Pulseq sequences directly on 1D, 2D, or 3D phantoms.
 - Configure Cartesian EPI or spiral readouts, including multi-slice gap and
   spacing and configurable Sinc, SLR, block, or RF-Designer excitation pulses,
-  plus 2D CSI and 3D bSSFP acquisitions interactively. The generated sequence
-  is updated from the current acquisition parameters and can be exported as a
-  Pulseq `.seq` file, a reproducing Jupyter notebook, or both.
+  plus 2D CSI and four 3D bSSFP variants interactively. Spectrally selective
+  bSSFP cycles configurable RF/receiver offsets and target flip angles between
+  complete volumes. Cartesian multi-echo bSSFP provides flyback and symmetric
+  bipolar readout strategies with separately reconstructed echo volumes;
+  radial multi-echo bSSFP provides monopolar center-through echoes and a
+  golden-angle spiral-phyllotaxis trajectory. Cartesian 3D builders expose a
+  logical read/phase/partition frame, allowing the read gradient to run along
+  scanner x, y, or z without redesigning the phantom. The generated sequence
+  is updated from the current acquisition parameters and can be refreshed
+  explicitly with **Generate sequence** or continuously with the opt-in
+  **Live preview**, then
+  exported as a Pulseq `.seq` file, a reproducing Jupyter notebook, or both.
 - Use millimeters consistently for MRI geometry controls such as FOV, slice
   thickness, slice gap, and spatial probe positions; simulations and exports
   continue to use SI meters internally.

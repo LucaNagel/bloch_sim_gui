@@ -101,6 +101,29 @@ def test_no_rf_dynamic_sequence_matches_irreversible_analytic_solution():
         assert final[1, voxel, 0, 0] == pytest.approx(expected_lactate)
 
 
+def test_dynamic_sequence_applies_declared_ideal_spoiler_to_both_pools():
+    phantom = _dynamic_phantom(kpl=(0.0, 0.0))
+    program = SequenceProgram(
+        (RFEvent(0.0, np.array([250.0]), 1e-3),),
+        duration_s=2e-3,
+        metadata={"definitions": {"IdealSpoilerEndTimes": [1.5e-3]}},
+    )
+
+    result = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        program,
+        phantom,
+        checkpoints_s=(1.5e-3,),
+        sequence_kernel="optimized",
+    )
+
+    assert result.final_pool_magnetization[..., :2] == pytest.approx(0.0, abs=1e-12)
+    assert result.checkpoint_pool_magnetization[0, ..., :2] == pytest.approx(
+        0.0, abs=1e-12
+    )
+    assert result.metadata["ideal_spoiling_applied"] is True
+    assert result.metadata["ideal_spoiler_end_times_s"] == pytest.approx([1.5e-3])
+
+
 def test_dynamic_sequence_reports_intermediate_live_previews():
     phantom = _dynamic_phantom()
     program = SequenceProgram(
@@ -981,6 +1004,9 @@ def test_phantom_designer_exposes_kinetic_regions_and_preview():
 def test_phantom_designer_sorts_new_inflow_point_by_edited_time():
     app = QApplication.instance() or QApplication([])
     dialog = SpectralPhantomDesignerDialog()
+    assert dialog.kinetics_controls_scroll.widgetResizable()
+    assert dialog.kinetics_controls_scroll.minimumWidth() == 620
+    assert dialog.kinetics_splitter.childrenCollapsible() is False
     table = dialog.inflow_curve_table
 
     dialog._add_curve_point(table)

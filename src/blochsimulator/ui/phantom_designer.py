@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFrame,
     QFormLayout,
     QGridLayout,
     QHeaderView,
@@ -24,6 +25,7 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -50,6 +52,7 @@ from ..phantom_design import (
 from ..spectral_phantom import SpectralPhantom
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
 from .volume_viewer import PhantomInspectorWidget
+from .default_settings import WorkspaceDefaults
 
 
 class ShapeDrawingPlotWidget(pg.PlotWidget):
@@ -73,8 +76,8 @@ class ShapeDrawingPlotWidget(pg.PlotWidget):
         return self._drawing_kind
 
     def start_shape_drawing(self, kind):
-        if kind not in {"ellipsoid", "box"}:
-            raise ValueError("drawing kind must be 'ellipsoid' or 'box'")
+        if kind not in {"ellipsoid", "box", "cylinder"}:
+            raise ValueError("drawing kind must be 'ellipsoid', 'box', or 'cylinder'")
         self._drawing_kind = kind
         self._drawing_start = None
         self._drawing_guide.setData([], [])
@@ -174,15 +177,28 @@ def load_any_phantom(filename):
 
 
 class SpectralPhantomDesignerDialog(QDialog):
-    """Draw multiple extruded XY shapes and assign Lorentzian peak lists."""
+    """Compose rotatable 3D primitives and assign Lorentzian peak lists."""
 
-    def __init__(self, parent=None, design: Optional[PhantomDesign] = None):
+    def __init__(
+        self,
+        parent=None,
+        design: Optional[PhantomDesign] = None,
+        settings=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle(
             "Edit Spectral Phantom" if design is not None else "New Spectral Phantom"
         )
         self.resize(1250, 850)
-        self.design = design or PhantomDesign(shapes=[ShapeDefinition(name="Shape 1")])
+        if design is None:
+            defaults = WorkspaceDefaults.from_settings(settings)
+            design = PhantomDesign(
+                fov_m=tuple(value / 1000.0 for value in defaults.phantom_fov_mm),
+                nucleus=defaults.phantom_nucleus,
+                field_strength_t=defaults.field_strength_t,
+                shapes=[ShapeDefinition(name="Shape 1")],
+            )
+        self.design = design
         self.phantom = None
         self._updating = False
         self._rois = []
@@ -311,19 +327,29 @@ class SpectralPhantomDesignerDialog(QDialog):
         add_ellipse.clicked.connect(lambda: self._add_shape("ellipsoid"))
         add_box = QPushButton("Add box")
         add_box.clicked.connect(lambda: self._add_shape("box"))
+        add_cylinder = QPushButton("Add cylinder")
+        add_cylinder.setToolTip(
+            "Add a cylinder whose local axis initially points along Z"
+        )
+        add_cylinder.clicked.connect(lambda: self._add_shape("cylinder"))
         draw_ellipse = QPushButton("Draw ellipsoid")
         draw_ellipse.setToolTip("Drag a new ellipsoid directly in the XY canvas")
         draw_ellipse.clicked.connect(lambda: self._start_shape_drawing("ellipsoid"))
         draw_box = QPushButton("Draw box")
         draw_box.setToolTip("Drag a new box directly in the XY canvas")
         draw_box.clicked.connect(lambda: self._start_shape_drawing("box"))
+        draw_cylinder = QPushButton("Draw cylinder")
+        draw_cylinder.setToolTip("Drag the X/Y diameters of a new Z-aligned cylinder")
+        draw_cylinder.clicked.connect(lambda: self._start_shape_drawing("cylinder"))
         remove = QPushButton("Remove")
         remove.clicked.connect(self._remove_shape)
         shape_buttons.addWidget(add_ellipse, 0, 0)
         shape_buttons.addWidget(add_box, 1, 0)
-        shape_buttons.addWidget(draw_ellipse, 2, 0)
-        shape_buttons.addWidget(draw_box, 3, 0)
-        shape_buttons.addWidget(remove, 4, 0)
+        shape_buttons.addWidget(add_cylinder, 2, 0)
+        shape_buttons.addWidget(draw_ellipse, 3, 0)
+        shape_buttons.addWidget(draw_box, 4, 0)
+        shape_buttons.addWidget(draw_cylinder, 5, 0)
+        shape_buttons.addWidget(remove, 6, 0)
         shape_layout.addLayout(shape_buttons)
         splitter.addWidget(shape_panel)
 
@@ -331,7 +357,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         canvas_panel.setMinimumWidth(420)
         canvas_layout = QVBoxLayout(canvas_panel)
         self.canvas_instruction = QLabel(
-            "Move/resize existing shapes, or choose Draw and drag in the axial XY plane"
+            "Move/resize shapes in XY; set 3D angles on the right and use Update "
+            "preview to inspect the rotated volume"
         )
         canvas_layout.addWidget(self.canvas_instruction)
         self.canvas = ShapeDrawingPlotWidget()
@@ -362,7 +389,7 @@ class SpectralPhantomDesignerDialog(QDialog):
 
         self.canvas.getAxis("bottom").tickStrings = physical_ticks(0)
         self.canvas.getAxis("left").tickStrings = physical_ticks(1)
-        for spin in self.fov_spins[:2]:
+        for spin in self.fov_spins:
             spin.valueChanged.connect(self._update_canvas_axes)
         canvas_layout.addWidget(self.canvas)
         splitter.addWidget(canvas_panel)
@@ -381,6 +408,19 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.x_size = self._percent_spin(50.0)
         self.y_size = self._percent_spin(50.0)
         self.z_size = self._percent_spin(50.0)
+        self.z_size.setToolTip(
+            "Cylinder length along its local Z axis, as a percentage of FOV Z. "
+            "Cylinders may extend beyond the FOV and are clipped at its boundary."
+        )
+        self.rotation_spins = []
+        for axis in "XYZ":
+            rotation = self._number_spin(-360.0, 360.0, 0.0, "°")
+            rotation.setDecimals(1)
+            rotation.setToolTip(
+                f"Rotate the shape about the physical {axis} axis; rotations are "
+                "applied in X, Y, Z order and shown in the 3D preview"
+            )
+            self.rotation_spins.append(rotation)
         self.t1_ms = self._number_spin(0.1, 500000.0, 1000.0, " ms")
         self.initial_mz = self._number_spin(0.0, 1e9, 1.0, "")
         self.b0_ppm = self._number_spin(-1000.0, 1000.0, 0.0, " ppm")
@@ -399,6 +439,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             self.x_size,
             self.y_size,
             self.z_size,
+            *self.rotation_spins,
             self.t1_ms,
             self.initial_mz,
             self.b0_ppm,
@@ -409,7 +450,10 @@ class SpectralPhantomDesignerDialog(QDialog):
         form.addRow("Z centre", self.z_center)
         form.addRow("X size", self.x_size)
         form.addRow("Y size", self.y_size)
-        form.addRow("Z thickness", self.z_size)
+        self.z_size_label = QLabel("Z size")
+        form.addRow(self.z_size_label, self.z_size)
+        for axis, rotation in zip("XYZ", self.rotation_spins):
+            form.addRow(f"Rotation {axis}", rotation)
         form.addRow("Default T1", self.t1_ms)
         form.addRow("Initial HP Mz scale", self.initial_mz)
         form.addRow("B0 inhomogeneity", self.b0_ppm)
@@ -458,9 +502,12 @@ class SpectralPhantomDesignerDialog(QDialog):
         kinetics_page = QWidget()
         kinetics_page_layout = QHBoxLayout(kinetics_page)
         kinetics_splitter = QSplitter(Qt.Horizontal)
+        kinetics_splitter.setChildrenCollapsible(False)
         kinetics_controls = QWidget()
+        kinetics_controls.setMinimumWidth(600)
         kinetics_layout = QVBoxLayout(kinetics_controls)
         kinetics_form = QFormLayout()
+        kinetics_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.dynamic_enabled = QCheckBox("Enable pyruvate → lactate conversion")
         kinetics_form.addRow(self.dynamic_enabled)
         self.pyruvate_peak_name = QLineEdit("Pyruvate")
@@ -532,6 +579,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             1, QHeaderView.Stretch
         )
         self.inflow_curve_table.setMaximumHeight(150)
+        self.inflow_curve_table.setMinimumHeight(110)
         self.inflow_curve_table.cellChanged.connect(self._inflow_curve_table_changed)
         kinetics_layout.addWidget(self.inflow_curve_table)
         inflow_buttons = QHBoxLayout()
@@ -565,6 +613,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             1, QHeaderView.Stretch
         )
         self.dynamic_b0_curve_table.setMaximumHeight(130)
+        self.dynamic_b0_curve_table.setMinimumHeight(105)
         kinetics_layout.addWidget(self.dynamic_b0_curve_table)
         b0_curve_buttons = QHBoxLayout()
         add_b0_point = QPushButton("Add B0 point")
@@ -592,6 +641,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             ["Name", "Kind", "Cx %", "Cy %", "Cz %", "Sx %", "Sy %", "Sz %", "kPL s⁻¹"]
         )
         self.kinetic_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.kinetic_table.setMinimumHeight(130)
         self.kinetic_table.cellChanged.connect(self._kinetic_table_changed)
         self.kinetic_table.currentCellChanged.connect(
             self._kinetic_region_selected_for_preview
@@ -697,10 +747,23 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.kinetics_preview_info.setWordWrap(True)
         preview_layout.addWidget(self.kinetics_preview_info)
 
-        kinetics_splitter.addWidget(kinetics_controls)
+        # Keep explanatory text and fields at their natural height. On shorter
+        # displays the controls scroll instead of being compressed until labels
+        # and checkboxes overlap.
+        kinetics_controls.setMinimumHeight(kinetics_controls.sizeHint().height())
+        kinetics_scroll = QScrollArea()
+        kinetics_scroll.setWidgetResizable(True)
+        kinetics_scroll.setFrameShape(QFrame.NoFrame)
+        kinetics_scroll.setMinimumWidth(620)
+        kinetics_scroll.setWidget(kinetics_controls)
+        self.kinetics_controls_scroll = kinetics_scroll
+        self.kinetics_splitter = kinetics_splitter
+
+        kinetics_splitter.addWidget(kinetics_scroll)
         kinetics_splitter.addWidget(preview_panel)
         kinetics_splitter.setStretchFactor(0, 1)
         kinetics_splitter.setStretchFactor(1, 1)
+        kinetics_splitter.setSizes([650, 750])
         kinetics_page_layout.addWidget(kinetics_splitter)
         self.tabs.addTab(kinetics_page, "Kinetics / kPL")
 
@@ -709,6 +772,9 @@ class SpectralPhantomDesignerDialog(QDialog):
 
         action_row = QHBoxLayout()
         preview = QPushButton("Update preview")
+        preview.setToolTip(
+            "Rasterize the current design; use the 3D view to orbit around it"
+        )
         preview.clicked.connect(self._preview)
         save = QPushButton("Save design…")
         save.clicked.connect(self._save)
@@ -805,7 +871,9 @@ class SpectralPhantomDesignerDialog(QDialog):
             item.center[1] - item.size[1] / 2,
         )
         size = item.size[:2]
-        roi_class = pg.EllipseROI if item.kind == "ellipsoid" else pg.RectROI
+        roi_class = (
+            pg.EllipseROI if item.kind in {"ellipsoid", "cylinder"} else pg.RectROI
+        )
         roi = roi_class(position, size, pen=self._roi_pen(index, False))
         roi.sigRegionChangeFinished.connect(self._roi_changed)
         original_mouse_click = roi.mouseClickEvent
@@ -845,6 +913,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             return
         self._updating = True
         item = self.design.shapes[row]
+        self._configure_shape_geometry_controls(item)
         self.shape_name.setText(item.name)
         self.kind_label.setText(item.kind)
         self.x_center.setValue(item.center[0] * 100.0)
@@ -853,6 +922,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.x_size.setValue(item.size[0] * 100.0)
         self.y_size.setValue(item.size[1] * 100.0)
         self.z_size.setValue(item.size[2] * 100.0)
+        for widget, angle in zip(self.rotation_spins, item.rotation_deg):
+            widget.setValue(float(angle))
         self.t1_ms.setValue(item.t1_s * 1000.0)
         self.initial_mz.setValue(item.initial_mz)
         self.b0_ppm.setValue(item.b0_ppm)
@@ -862,6 +933,11 @@ class SpectralPhantomDesignerDialog(QDialog):
         self._set_kinetics_preview_shape(row)
         self._update_roi_highlights(row)
         self._update_kinetics_preview()
+
+    def _configure_shape_geometry_controls(self, item):
+        is_cylinder = item.kind == "cylinder"
+        self.z_size_label.setText("Cylinder length" if is_cylinder else "Z size")
+        self.z_size.setMaximum(1000.0 if is_cylinder else 100.0)
 
     def _roi_changed(self):
         if self._updating:
@@ -896,9 +972,12 @@ class SpectralPhantomDesignerDialog(QDialog):
         size_mm = tuple(
             item.size[index] * self.fov_spins[index].value() for index in range(2)
         )
+        z_size_mm = item.size[2] * self.fov_spins[2].value()
         self.xy_info.setText(
             f"centre=({center_mm[0]:.3g}, {center_mm[1]:.3g}) mm; "
-            f"size=({size_mm[0]:.3g}, {size_mm[1]:.3g}) mm"
+            f"size=({size_mm[0]:.3g}, {size_mm[1]:.3g}) mm; "
+            f"{'length' if item.kind == 'cylinder' else 'Z size'}="
+            f"{z_size_mm:.3g} mm"
         )
 
     def _update_canvas_axes(self, *_):
@@ -939,6 +1018,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         )
         item.center = center
         item.size = size
+        item.rotation_deg = tuple(widget.value() for widget in self.rotation_spins)
         item.t1_s = self.t1_ms.value() / 1000.0
         item.initial_mz = self.initial_mz.value()
         item.b0_ppm = self.b0_ppm.value()
@@ -1422,7 +1502,8 @@ class SpectralPhantomDesignerDialog(QDialog):
 
     def _shape_drawing_cancelled(self):
         self.canvas_instruction.setText(
-            "Move/resize existing shapes, or choose Draw and drag in the axial XY plane"
+            "Move/resize shapes in XY; set 3D angles on the right and use Update "
+            "preview to inspect the rotated volume"
         )
 
     def _shape_drawn(self, kind, left, bottom, width, height):

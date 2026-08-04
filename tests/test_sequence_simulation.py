@@ -84,6 +84,31 @@ def test_hard_90_degree_pulse_creates_transverse_magnetization():
     assert result.mz.item() == pytest.approx(0.0, abs=1e-8)
 
 
+def test_declared_ideal_spoiler_crushes_transverse_magnetization():
+    phantom = _phantom(t1=1e9, t2=1e9)
+    program = SequenceProgram(
+        (
+            RFEvent(0.0, np.array([250.0]), 1e-3),
+            ADCEvent(1e-3, 1, 1e-4),
+            ADCEvent(2e-3, 1, 1e-4),
+        ),
+        duration_s=2.1e-3,
+        metadata={"definitions": {"IdealSpoilerEndTimes": [2e-3]}},
+    )
+
+    result = BlochSimulator(use_parallel=False).simulate_sequence(
+        program, phantom, checkpoints_s=(2e-3,)
+    )
+
+    assert abs(result.signal[0]) == pytest.approx(1.0, abs=1e-8)
+    assert result.signal[1] == pytest.approx(0.0j, abs=1e-12)
+    assert result.mx.item() == pytest.approx(0.0, abs=1e-12)
+    assert result.my.item() == pytest.approx(0.0, abs=1e-12)
+    assert result.checkpoint_magnetization[0, 0, :2] == pytest.approx([0.0, 0.0])
+    assert result.metadata["ideal_spoiling_applied"] is True
+    assert result.metadata["ideal_spoiler_end_times_s"] == pytest.approx([2e-3])
+
+
 def test_adc_signal_b0_and_chemical_shift_phase():
     phantom = _phantom(
         t1=1e9,
@@ -635,9 +660,9 @@ def test_sequence_result_notebook_uses_xarray_dataset(tmp_path):
     assert "cartesian_kspace" in text
     assert "cartesian_image_magnitude" in text
     assert "import ipywidgets as widgets" in text
-    assert "x_slider = _index_slider('x', x_dim)" in text
-    assert "y_slider = _index_slider('y', y_dim)" in text
-    assert "z_slider = _index_slider('z', z_dim)" in text
+    assert "x_slider = _index_slider(x_dim or 'x', x_dim)" in text
+    assert "y_slider = _index_slider(y_dim or 'y', y_dim)" in text
+    assert "z_slider = _index_slider(z_dim or 'z', z_dim)" in text
     assert "repetition_slider = _index_slider('Repetition'" in text
     assert "spectral_point_slider = _index_slider(" in text
     assert "display_range_slider = _display_range_slider()" in text
@@ -739,6 +764,82 @@ def test_sequence_result_notebook_reconstructs_labelled_raw_3d_adc():
     np.testing.assert_allclose(reconstructed, expected, atol=1e-12)
     np.testing.assert_allclose(species[0], 0.25 * expected, atol=1e-12)
     np.testing.assert_allclose(species[1], 0.75 * expected, atol=1e-12)
+
+
+def test_sequence_result_notebook_reconstructs_read_z_cartesian_adc():
+    partitions, phases, reads = 2, 3, 4
+    shape = (partitions, phases, reads)
+    expected = np.zeros(shape, dtype=np.complex128)
+    expected[1, 0, 2] = 1.0 - 0.5j
+
+    read_cells = np.arange(reads) - reads // 2 + 0.5
+    phase_cells = np.arange(phases) - phases // 2
+    partition_cells = np.arange(partitions) - partitions // 2
+    centre_phase = np.exp(
+        1j
+        * np.pi
+        * (
+            partition_cells[:, None, None] / partitions
+            + phase_cells[None, :, None] / phases
+            + read_cells[None, None, :] / reads
+        )
+    )
+    spatial_axes = (-3, -2, -1)
+    corrected_kspace = np.fft.fftshift(
+        np.fft.fftn(np.fft.ifftshift(expected, axes=spatial_axes), axes=spatial_axes),
+        axes=spatial_axes,
+    )
+    kspace = corrected_kspace / centre_phase
+    signal = kspace.reshape(-1)
+    event_count = partitions * phases
+    logical_read = np.tile(read_cells * 10.0, event_count)
+    logical_phase = np.tile(np.repeat(phase_cells * 20.0, reads), partitions)
+    logical_partition = np.repeat(partition_cells * 30.0, phases * reads)
+    basis = np.asarray(
+        (
+            (0.0, 0.0, -1.0),
+            (0.0, 1.0, 0.0),
+            (1.0, 0.0, 0.0),
+        )
+    )
+    scanner_moments = (
+        np.column_stack((logical_read, logical_phase, logical_partition)) @ basis.T
+    )
+
+    dataset = xr.Dataset(
+        data_vars={"signal": ("adc", signal)},
+        coords={
+            "adc": np.arange(signal.size),
+            "adc_event_index": (
+                "adc",
+                np.repeat(np.arange(event_count), reads),
+            ),
+            "readout_sample_index": (
+                "adc",
+                np.tile(np.arange(reads), event_count),
+            ),
+            "partition_index": (
+                "adc",
+                np.repeat(np.arange(partitions), phases * reads),
+            ),
+            "kx": ("adc", scanner_moments[:, 0]),
+            "ky": ("adc", scanner_moments[:, 1]),
+            "kz": ("adc", scanner_moments[:, 2]),
+        },
+        attrs={
+            "cartesian_encoding_axes": "+z +y -x",
+            "cartesian_encoding_basis_xyz": ",".join(
+                str(value) for value in basis.reshape(-1)
+            ),
+        },
+    )
+    namespace = {"ds": dataset, "np": np, "xr": xr}
+
+    exec(_sequence_result_reconstruction_code(), namespace)
+
+    image = namespace["ds"].notebook_cartesian_3d_image
+    assert image.dims == ("partition_x", "phase_y", "read_z")
+    np.testing.assert_allclose(image.values, expected, atol=1e-12)
 
 
 @pytest.mark.parametrize("suffix", [".npz", ".h5", ".nc"])

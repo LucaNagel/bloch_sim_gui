@@ -2385,6 +2385,7 @@ class BlochSimulator:
                 compiled.adc_state_indices,
                 compiled.adc_demodulation,
                 compiled.checkpoint_state_indices,
+                compiled.transverse_crush_state_indices,
                 native_threads,
                 selected_kernel,
             )
@@ -2521,6 +2522,10 @@ class BlochSimulator:
                 "cartesian_acquisition_volumes": cartesian_volume_metadata,
                 "spiral_acquisition": spiral_metadata,
                 "sequence_definitions": dict(program.metadata.get("definitions", {})),
+                "ideal_spoiling_applied": bool(compiled.transverse_crush_times_s.size),
+                "ideal_spoiler_end_times_s": (
+                    compiled.transverse_crush_times_s.tolist()
+                ),
                 "units": {
                     "time": "s",
                     "position": "m",

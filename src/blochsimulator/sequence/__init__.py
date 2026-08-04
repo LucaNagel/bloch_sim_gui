@@ -39,6 +39,7 @@ from .convergence_suite import (
     run_sequence_convergence_suite,
 )
 from .model import ADCEvent, GradientEvent, RFEvent, SequenceProgram
+from .encoding import EncodingFrame, resolve_encoding_frame
 from .flip_angles import VFA_REFERENCE_DOI, variable_flip_angle_schedule
 from .probe import SequenceProbeResult
 from .reference import ReferenceSimulationResult, simulate_reference_sequence
@@ -61,6 +62,17 @@ from .pulseq_builders import (
     make_pulseq_epi,
     make_pulseq_spiral,
 )
+from .advanced_bssfp_builders import (
+    GAUBATZ_REFERENCE_TITLE,
+    GOLDEN_ANGLE_DEG,
+    PICCINI_REFERENCE_DOI,
+    SKINNER_REFERENCE_DOI,
+    WANG_REFERENCE_DOI,
+    make_pulseq_me_bssfp,
+    make_pulseq_radial_me_bssfp,
+    make_pulseq_spectral_selective_bssfp,
+    spiral_phyllotaxis_directions,
+)
 
 __all__ = [
     "ADCEvent",
@@ -74,6 +86,7 @@ __all__ = [
     "ConvergenceCriteria",
     "DEFAULT_TIMESTEPS_S",
     "GradientEvent",
+    "EncodingFrame",
     "RFEvent",
     "SequenceCompiler",
     "SequenceConvergenceCase",
@@ -116,6 +129,16 @@ __all__ = [
     "make_pulseq_bssfp",
     "make_pulseq_csi",
     "make_pulseq_epi",
+    "make_pulseq_me_bssfp",
+    "make_pulseq_radial_me_bssfp",
+    "make_pulseq_spectral_selective_bssfp",
     "make_pulseq_spiral",
+    "spiral_phyllotaxis_directions",
+    "GAUBATZ_REFERENCE_TITLE",
+    "GOLDEN_ANGLE_DEG",
+    "PICCINI_REFERENCE_DOI",
+    "SKINNER_REFERENCE_DOI",
+    "WANG_REFERENCE_DOI",
     "save_scanner_parameters",
+    "resolve_encoding_frame",
 ]

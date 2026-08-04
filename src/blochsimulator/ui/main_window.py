@@ -91,7 +91,19 @@ from .parameter_sweep import ParameterSweepWidget
 from .tutorial_manager import TutorialManager
 from .tutorial_overlay import TutorialOverlay
 from .dialogs import SettingsDialog
+from .default_settings import WorkspaceDefaults
 from .sequence_simulation_widget import SequenceSimulationWidget
+
+
+def _view_title(text: str) -> QLabel:
+    """Return a hidden legacy title; the tab label is the single page title."""
+    label = QLabel(text)
+    font = label.font()
+    font.setBold(False)
+    font.setPointSize(max(font.pointSize() + 2, 12))
+    label.setFont(font)
+    label.setVisible(False)
+    return label
 
 
 def get_app_data_dir() -> Path:
@@ -115,6 +127,7 @@ class BlochSimulatorGUI(QMainWindow):
     """Main GUI window for the Bloch simulator."""
 
     WORKSPACE_SWITCH_DELAY_MS = 25 if sys.platform == "darwin" else 0
+    FREE_MODE_COMPONENT_WIDTH = 220
 
     def __init__(self):
         super().__init__()
@@ -504,6 +517,7 @@ class BlochSimulatorGUI(QMainWindow):
         playback_header_layout.setSpacing(4)
 
         colormap_controls = QWidget()
+        self.free_mode_colormap_controls = colormap_controls
         colormap_layout = QHBoxLayout(colormap_controls)
         colormap_layout.setContentsMargins(0, 0, 0, 0)
         colormap_layout.addWidget(QLabel("Heatmap colormap:"))
@@ -515,6 +529,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.heatmap_colormap.currentTextChanged.connect(self._apply_heatmap_colormap)
         colormap_layout.addWidget(self.heatmap_colormap)
         colormap_layout.addStretch()
+        self.free_mode_colormap_layout = colormap_layout
         playback_header_layout.addWidget(colormap_controls)
 
         # Universal time control - controls all time-resolved views
@@ -529,15 +544,19 @@ class BlochSimulatorGUI(QMainWindow):
         self.tab_widget.tabBar().setUsesScrollButtons(True)
         self.tab_widget.tabBar().setExpanding(False)
         self.tab_widget.tabBar().setElideMode(Qt.ElideRight)
+        tab_font = self.tab_widget.tabBar().font()
+        tab_font.setBold(True)
+        self.tab_widget.tabBar().setFont(tab_font)
 
         # Magnetization plots
         mag_widget = QWidget()
         mag_layout = QVBoxLayout()
+        mag_layout.setContentsMargins(6, 6, 6, 6)
         mag_widget.setLayout(mag_layout)
 
         # View header
         mag_header = QHBoxLayout()
-        mag_header.addWidget(QLabel("Magnetization Evolution"))
+        mag_header.addWidget(_view_title("Magnetization Evolution"))
         mag_header.addStretch()
         mag_layout.addLayout(mag_header)
 
@@ -561,6 +580,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.mag_component.addItems(
             ["Magnitude", "Real (Mx/Re)", "Imaginary (My/Im)", "Phase", "Mz"]
         )
+        self.mag_component.setFixedWidth(self.FREE_MODE_COMPONENT_WIDTH)
         self.mag_component.currentTextChanged.connect(
             lambda _: self._refresh_mag_plots()
         )
@@ -657,6 +677,7 @@ class BlochSimulatorGUI(QMainWindow):
         if hasattr(self.mag_3d, "control_container"):
             self.mag_3d.control_container.setVisible(True)
         self.mag_3d.export_3d_btn.setVisible(False)
+        self.mag_3d.header_container.setVisible(False)
         # QOpenGLWidget does not need scrolling here. In particular, nesting it
         # in QAbstractScrollArea can leave the native macOS surface at the old
         # viewport size after a workspace switch, producing stale perspective,
@@ -666,11 +687,12 @@ class BlochSimulatorGUI(QMainWindow):
         # Signal plot
         signal_widget = QWidget()
         signal_layout = QVBoxLayout()
+        signal_layout.setContentsMargins(6, 6, 6, 6)
         signal_widget.setLayout(signal_layout)
 
         # View header
         signal_header = QHBoxLayout()
-        signal_header.addWidget(QLabel("Signal Evolution"))
+        signal_header.addWidget(_view_title("Signal Evolution"))
         signal_header.addStretch()
         signal_layout.addLayout(signal_header)
 
@@ -690,6 +712,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.signal_component = QComboBox()
         self.signal_component.setObjectName("signal_component")
         self.signal_component.addItems(["Magnitude", "Real", "Imaginary", "Phase"])
+        self.signal_component.setFixedWidth(self.FREE_MODE_COMPONENT_WIDTH)
         self.signal_component.currentTextChanged.connect(
             lambda _: self._refresh_signal_plots()
         )
@@ -763,14 +786,16 @@ class BlochSimulatorGUI(QMainWindow):
 
         spectrum_container = QWidget()
         spectrum_layout = QVBoxLayout()
+        spectrum_layout.setContentsMargins(6, 6, 6, 6)
 
         # View header
         spectrum_header = QHBoxLayout()
-        spectrum_header.addWidget(QLabel("Frequency Spectrum"))
+        spectrum_header.addWidget(_view_title("Frequency Spectrum"))
         spectrum_header.addStretch()
         spectrum_layout.addLayout(spectrum_header)
 
         spectrum_controls = QHBoxLayout()
+        self.spectrum_controls_layout = spectrum_controls
 
         # 3D View Toggle
         self.spectrum_3d_toggle = QCheckBox("3D View")
@@ -818,12 +843,10 @@ class BlochSimulatorGUI(QMainWindow):
         self.spectrum_pos_label = QLabel("Pos: 0.00 mm")
         spectrum_controls.addWidget(self.spectrum_pos_label)
         spectrum_controls.addWidget(self.spectrum_pos_slider)
-        spectrum_layout.addLayout(spectrum_controls)
 
-        # Component selector for spectrum
-        spectrum_comp_layout = QHBoxLayout()
+        # Component selector shares the primary control row.
         self.spectrum_component_label = QLabel("Component:")
-        spectrum_comp_layout.addWidget(self.spectrum_component_label)
+        spectrum_controls.addWidget(self.spectrum_component_label)
         self.spectrum_component_combo = CheckableComboBox()
         self.spectrum_component_combo.add_items(
             ["Magnitude", "Phase", "Phase (unwrapped)", "Real", "Imaginary", "Mz"]
@@ -836,7 +859,7 @@ class BlochSimulatorGUI(QMainWindow):
                 else None
             )
         )
-        spectrum_comp_layout.addWidget(self.spectrum_component_combo)
+        spectrum_controls.addWidget(self.spectrum_component_combo)
 
         # Heatmap specific mode selector
         self.spectrum_heatmap_mode_label = QLabel("Heatmap mode:")
@@ -854,10 +877,9 @@ class BlochSimulatorGUI(QMainWindow):
         )
         self.spectrum_heatmap_mode_label.setVisible(False)
         self.spectrum_heatmap_mode.setVisible(False)
-        spectrum_comp_layout.addWidget(self.spectrum_heatmap_mode_label)
-        spectrum_comp_layout.addWidget(self.spectrum_heatmap_mode)
-
-        spectrum_layout.addLayout(spectrum_comp_layout)
+        spectrum_controls.addWidget(self.spectrum_heatmap_mode_label)
+        spectrum_controls.addWidget(self.spectrum_heatmap_mode)
+        spectrum_layout.addLayout(spectrum_controls)
 
         spectrum_layout.addWidget(self.spectrum_plot)
         spectrum_layout.addWidget(self.spectrum_plot_3d)
@@ -885,10 +907,11 @@ class BlochSimulatorGUI(QMainWindow):
         # Note: Time control is now unified in the universal control below the tabs
         spatial_container = QWidget()
         spatial_layout = QVBoxLayout()
+        spatial_layout.setContentsMargins(6, 6, 6, 6)
 
         # View header
         spatial_header = QHBoxLayout()
-        spatial_header.addWidget(QLabel("Spatial Profile"))
+        spatial_header.addWidget(_view_title("Spatial Profile"))
         spatial_header.addStretch()
         spatial_layout.addLayout(spatial_header)
 
@@ -898,7 +921,39 @@ class BlochSimulatorGUI(QMainWindow):
         self.mean_only_checkbox.stateChanged.connect(
             lambda _: self.update_plots(self.last_result) if self.last_result else None
         )
-        spatial_layout.addWidget(self.mean_only_checkbox)
+        spatial_options = QHBoxLayout()
+        self.spatial_options_layout = spatial_options
+        spatial_options.addWidget(self.mean_only_checkbox)
+
+        # Toggle for colored position/frequency markers
+        self.spatial_markers_checkbox = QCheckBox(
+            "Show colored position/frequency markers"
+        )
+        self.spatial_markers_checkbox.setObjectName("spatial_markers_checkbox")
+        self.spatial_markers_checkbox.setChecked(False)
+        self.spatial_markers_checkbox.setToolTip(
+            "Display vertical lines at each position/frequency with 3D-view colors"
+        )
+        self.spatial_markers_checkbox.toggled.connect(
+            lambda _: self.update_spatial_plot_from_last_result()
+        )
+        spatial_options.addWidget(self.spatial_markers_checkbox)
+
+        # Component selector for spatial plot
+        self.spatial_component_label = QLabel("Component:")
+        spatial_options.addWidget(self.spatial_component_label)
+        self.spatial_component_combo = CheckableComboBox()
+        self.spatial_component_combo.add_items(
+            ["Magnitude", "Phase", "Phase (unwrapped)", "Real", "Imaginary"]
+        )
+        self.spatial_component_combo.set_selected_items(
+            ["Magnitude", "Real", "Imaginary"]
+        )
+        self.spatial_component_combo.selection_changed.connect(
+            lambda: self.update_spatial_plot_from_last_result()
+        )
+        spatial_options.addWidget(self.spatial_component_combo, 1)
+        spatial_layout.addLayout(spatial_options)
 
         spatial_controls = QHBoxLayout()
         spatial_controls.addWidget(QLabel("Plot type:"))
@@ -943,37 +998,6 @@ class BlochSimulatorGUI(QMainWindow):
         spatial_controls.addWidget(self.spatial_freq_label)
         spatial_controls.addWidget(self.spatial_freq_slider)
         spatial_layout.addLayout(spatial_controls)
-
-        # Toggle for colored position/frequency markers
-        self.spatial_markers_checkbox = QCheckBox(
-            "Show colored position/frequency markers"
-        )
-        self.spatial_markers_checkbox.setObjectName("spatial_markers_checkbox")
-        self.spatial_markers_checkbox.setChecked(False)
-        self.spatial_markers_checkbox.setToolTip(
-            "Display vertical lines at each position/frequency with 3D-view colors"
-        )
-        self.spatial_markers_checkbox.toggled.connect(
-            lambda _: self.update_spatial_plot_from_last_result()
-        )
-        spatial_layout.addWidget(self.spatial_markers_checkbox)
-
-        # Component selector for spatial plot
-        spatial_comp_layout = QHBoxLayout()
-        self.spatial_component_label = QLabel("Component:")
-        spatial_comp_layout.addWidget(self.spatial_component_label)
-        self.spatial_component_combo = CheckableComboBox()
-        self.spatial_component_combo.add_items(
-            ["Magnitude", "Phase", "Phase (unwrapped)", "Real", "Imaginary"]
-        )
-        self.spatial_component_combo.set_selected_items(
-            ["Magnitude", "Real", "Imaginary"]
-        )
-        self.spatial_component_combo.selection_changed.connect(
-            lambda: self.update_spatial_plot_from_last_result()
-        )
-        spatial_comp_layout.addWidget(self.spatial_component_combo)
-        spatial_layout.addLayout(spatial_comp_layout)
 
         # Mxy and Mz plots side by side
         spatial_plots_layout = QHBoxLayout()
@@ -1351,6 +1375,10 @@ class BlochSimulatorGUI(QMainWindow):
             (
                 self.heatmap_colormap,
                 "Color map used by all heatmap views. This changes only the display, not the simulation data.",
+            ),
+            (
+                self.mag_3d.vector_palette_combo,
+                "Color palette used for the magnetization vectors and matching spatial markers.",
             ),
             (
                 self.time_control.time_slider,
@@ -1747,6 +1775,12 @@ class BlochSimulatorGUI(QMainWindow):
         """Consistent color cycling for multiple frequencies."""
         return pg.intColor(idx, hues=max(total, 1), values=1.0, maxValue=255)
 
+    def _vector_color_for_index(self, idx: int, total: int):
+        """Use the palette selected on the 3D Vector page."""
+        if hasattr(self, "mag_3d") and hasattr(self.mag_3d, "color_for_index"):
+            return self.mag_3d.color_for_index(idx, total)
+        return self._color_for_index(idx, total)
+
     def _get_trace_indices_to_plot(self, total_traces: int) -> list:
         """
         Get indices of traces to plot, respecting max_traces limit.
@@ -2013,19 +2047,22 @@ class BlochSimulatorGUI(QMainWindow):
             fi = min(max(selector, 0), nfreq - 1)
             anim = base_vectors[:, :, fi, :]
             colors = [
-                self._color_tuple(self._color_for_index(i, npos)) for i in range(npos)
+                self._color_tuple(self._vector_color_for_index(i, npos))
+                for i in range(npos)
             ]
         elif mode == "Freqs @ position":
             pi = min(max(selector, 0), npos - 1)
             anim = base_vectors[:, pi, :, :]
             colors = [
-                self._color_tuple(self._color_for_index(i, nfreq)) for i in range(nfreq)
+                self._color_tuple(self._vector_color_for_index(i, nfreq))
+                for i in range(nfreq)
             ]
         else:
             anim = base_vectors.reshape(nframes, npos * nfreq, 3)
             total = npos * nfreq
             colors = [
-                self._color_tuple(self._color_for_index(i, total)) for i in range(total)
+                self._color_tuple(self._vector_color_for_index(i, total))
+                for i in range(total)
             ]
 
         self.anim_data = anim
@@ -2328,7 +2365,7 @@ class BlochSimulatorGUI(QMainWindow):
         if self.anim_data is not None and len(self.anim_data) > 0:
             vectors = self.anim_data[0]
             colors = [
-                self._color_tuple(self._color_for_index(i, vectors.shape[0]))
+                self._color_tuple(self._vector_color_for_index(i, vectors.shape[0]))
                 for i in range(vectors.shape[0])
             ]
             self.mag_3d.update_magnetization(vectors, colors=colors)
@@ -3475,7 +3512,9 @@ class BlochSimulatorGUI(QMainWindow):
                     # Mark selected frequencies with colored stem plots
                     for fi in freq_indices_to_mark:
                         # Ensure color is an RGBA tuple for consistent rendering
-                        color = self._color_tuple(self._color_for_index(fi, nfreq))
+                        color = self._color_tuple(
+                            self._vector_color_for_index(fi, nfreq)
+                        )
                         mxy_val = np.sqrt(
                             mx_display[:, fi] ** 2 + my_display[:, fi] ** 2
                         )
@@ -3897,6 +3936,23 @@ class BlochSimulatorGUI(QMainWindow):
         """Queue a workspace change after the native combo popup has closed."""
         self._request_workspace_mode(str(self.workspace_mode_selector.currentData()))
 
+    def _place_workspace_switch(self, *, sequence_mode: bool):
+        """Keep the selector beside the active workspace's primary controls."""
+        if not hasattr(self, "workspace_switch"):
+            return
+        if self.tab_widget.cornerWidget(Qt.TopRightCorner) is self.workspace_switch:
+            self.tab_widget.setCornerWidget(None, Qt.TopRightCorner)
+        self.workspace_header_layout.removeWidget(self.workspace_switch)
+        self.free_mode_colormap_layout.removeWidget(self.workspace_switch)
+        if sequence_mode:
+            # Share the main tab-bar row with Sequence Simulation / Phantom.
+            # This removes the otherwise empty application-header row and
+            # mirrors Free Mode, where the selector shares the colormap row.
+            self.tab_widget.setCornerWidget(self.workspace_switch, Qt.TopRightCorner)
+        else:
+            self.free_mode_colormap_layout.addWidget(self.workspace_switch)
+        self.workspace_header.setVisible(False)
+
     def _request_workspace_mode(self, mode: str):
         """Coalesce workspace requests and execute them outside input handlers."""
         mode = str(mode).lower()
@@ -3953,6 +4009,8 @@ class BlochSimulatorGUI(QMainWindow):
                 self.sequence_workspace_action.setChecked(sequence_mode)
             return
         if sequence_mode and previous_mode != "sequence":
+            if self.isVisible():
+                self._free_workspace_geometry = self.geometry()
             current = self.tab_widget.currentIndex()
             if current not in {
                 self.sequence_simulation_tab_index,
@@ -3969,6 +4027,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self._sync_play_toggle(False)
 
         self.workspace_mode = mode
+        self._place_workspace_switch(sequence_mode=sequence_mode)
         self.free_mode_left_container.setVisible(not sequence_mode)
         self.free_mode_playback_header.setVisible(not sequence_mode)
         self.status_run_bar.setVisible(not sequence_mode)
@@ -4021,6 +4080,11 @@ class BlochSimulatorGUI(QMainWindow):
             self.tab_widget.setCurrentIndex(restore_index)
             self._set_main_tab_visible(self.sequence_simulation_tab_index, False)
             self._set_main_tab_visible(self.phantom_tab_index, False)
+            free_geometry = getattr(self, "_free_workspace_geometry", None)
+            if previous_mode == "sequence" and free_geometry is not None:
+                # Opening the much larger focused workspace must not permanently
+                # resize the compact Free Mode window.
+                self.setGeometry(free_geometry)
 
         if hasattr(self, "workspace_mode_selector"):
             index = self.workspace_mode_selector.findData(mode)
@@ -4137,6 +4201,7 @@ class BlochSimulatorGUI(QMainWindow):
             manual_thread_count=self._load_manual_thread_count(),
             detected_thread_count=resolve_num_threads(None),
             scanner_parameters=self._load_scanner_parameters(),
+            workspace_defaults=WorkspaceDefaults.from_settings(self.app_settings),
         )
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -4179,6 +4244,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.app_settings.setValue("simulation/manual_threads", manual_thread_count)
         scanner_parameters = dialog.scanner_parameters()
         save_scanner_parameters(self.app_settings, scanner_parameters)
+        workspace_defaults = dialog.workspace_defaults()
+        workspace_defaults.save(self.app_settings)
         self.app_settings.sync()
         set_default_memory_policy(policy)
         self._set_tooltips_enabled(tooltips_enabled)
@@ -4190,6 +4257,10 @@ class BlochSimulatorGUI(QMainWindow):
             sequence_widget.set_sequence_timestep_us(timestep_us)
             sequence_widget.set_thread_configuration(thread_mode, manual_thread_count)
             sequence_widget.set_scanner_parameters(scanner_parameters)
+            sequence_widget.set_workspace_defaults(workspace_defaults)
+        phantom_widget = getattr(self, "phantom_widget", None)
+        if phantom_widget is not None:
+            phantom_widget.phantom_creator.set_workspace_defaults(workspace_defaults)
         self.simulator.sequence_kernel = sequence_kernel
         self.simulator.dynamic_sequence_kernel = dynamic_sequence_kernel
         self.simulator.num_threads = resolve_num_threads(

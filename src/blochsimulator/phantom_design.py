@@ -51,7 +51,12 @@ class SpectralPeakDefinition:
 
 @dataclass
 class ShapeDefinition:
-    """Ellipsoid or box in normalized phantom coordinates ``[0, 1]``."""
+    """Rotatable primitive in normalized phantom coordinates ``[0, 1]``.
+
+    ``rotation_deg`` contains Euler rotations about X, Y, and Z.  The rotations
+    are applied in that order in physical space.  A cylinder's unrotated local
+    axis is Z; ``size`` specifies its X/Y diameters and Z length.
+    """
 
     name: str
     kind: str = "ellipsoid"
@@ -64,10 +69,11 @@ class ShapeDefinition:
         default_factory=lambda: [SpectralPeakDefinition()]
     )
     b0_hz: float = None
+    rotation_deg: Tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def validate(self) -> None:
-        if self.kind not in {"ellipsoid", "box"}:
-            raise ValueError("shape kind must be 'ellipsoid' or 'box'")
+        if self.kind not in {"ellipsoid", "box", "cylinder"}:
+            raise ValueError("shape kind must be 'ellipsoid', 'box', or 'cylinder'")
         if not self.name.strip():
             raise ValueError("shape name must not be empty")
         if len(self.center) != 3 or not np.all(np.isfinite(self.center)):
@@ -76,6 +82,8 @@ class ShapeDefinition:
             raise ValueError("shape size must contain three finite values")
         if np.any(np.asarray(self.size) <= 0):
             raise ValueError("shape size must be positive")
+        if len(self.rotation_deg) != 3 or not np.all(np.isfinite(self.rotation_deg)):
+            raise ValueError("shape rotation must contain three finite angles")
         if not np.isfinite(self.t1_s) or self.t1_s <= 0:
             raise ValueError("shape T1 must be positive and finite")
         if not np.isfinite(self.initial_mz) or self.initial_mz < 0:
@@ -180,19 +188,33 @@ class PhantomDesign:
 
     def rasterize_mask(self, item: ShapeDefinition) -> np.ndarray:
         """Rasterize one normalized shape using voxel-centre coordinates."""
+        item.validate()
         coords = [(np.arange(count, dtype=float) + 0.5) / count for count in self.shape]
         x, y, z = np.meshgrid(*coords, indexing="ij")
         centre = np.asarray(item.center, dtype=float)
-        half_size = np.asarray(item.size, dtype=float) / 2.0
+        fov = np.asarray(self.fov_m, dtype=float)
+        relative = (
+            np.stack((x - centre[0], y - centre[1], z - centre[2]), axis=-1) * fov
+        )
+        angles = np.deg2rad(np.asarray(item.rotation_deg, dtype=float))
+        cx, cy, cz = np.cos(angles)
+        sx, sy, sz = np.sin(angles)
+        rotation_x = np.asarray(((1, 0, 0), (0, cx, -sx), (0, sx, cx)))
+        rotation_y = np.asarray(((cy, 0, sy), (0, 1, 0), (-sy, 0, cy)))
+        rotation_z = np.asarray(((cz, -sz, 0), (sz, cz, 0), (0, 0, 1)))
+        # R maps local coordinates to world coordinates.  Multiplication by R
+        # on row-vector world coordinates therefore applies the inverse R.T.
+        rotation = rotation_z @ rotation_y @ rotation_x
+        local = np.einsum("...i,ij->...j", relative, rotation)
+        half_size = np.asarray(item.size, dtype=float) * fov / 2.0
         if item.kind == "box":
-            return (
-                (np.abs(x - centre[0]) <= half_size[0])
-                & (np.abs(y - centre[1]) <= half_size[1])
-                & (np.abs(z - centre[2]) <= half_size[2])
-            )
-        return ((x - centre[0]) / half_size[0]) ** 2 + (
-            (y - centre[1]) / half_size[1]
-        ) ** 2 + ((z - centre[2]) / half_size[2]) ** 2 <= 1.0
+            return np.all(np.abs(local) <= half_size, axis=-1)
+        radial = (local[..., 0] / half_size[0]) ** 2 + (
+            local[..., 1] / half_size[1]
+        ) ** 2
+        if item.kind == "cylinder":
+            return (radial <= 1.0) & (np.abs(local[..., 2]) <= half_size[2])
+        return radial + (local[..., 2] / half_size[2]) ** 2 <= 1.0
 
     def rasterize_b0_inhomogeneity(self) -> np.ndarray:
         """Return an analytic 2D/3D B0 map with edge amplitude in ppm."""
@@ -422,6 +444,7 @@ class PhantomDesign:
                     initial_mz=float(item.get("initial_mz", 1.0)),
                     b0_ppm=float(b0_ppm),
                     peaks=peaks or [SpectralPeakDefinition()],
+                    rotation_deg=tuple(item.get("rotation_deg", (0.0, 0.0, 0.0))),
                 )
             )
         return cls(

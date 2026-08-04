@@ -20,6 +20,8 @@ from pathlib import Path
 
 from ..memory import MemoryPolicy, format_bytes, resolve_memory_budget
 from ..sequence.scanner import ScannerParameters
+from ..units import NUCLEUS_GAMMA_HZ_PER_T
+from .default_settings import WorkspaceDefaults
 
 
 class SettingsDialog(QDialog):
@@ -63,9 +65,11 @@ class SettingsDialog(QDialog):
         manual_thread_count: int = 4,
         detected_thread_count: Optional[int] = None,
         scanner_parameters: Optional[ScannerParameters] = None,
+        workspace_defaults: Optional[WorkspaceDefaults] = None,
     ):
         super().__init__(parent)
         scanner_parameters = ScannerParameters.from_mapping(scanner_parameters)
+        workspace_defaults = workspace_defaults or WorkspaceDefaults()
         self.setWindowTitle("Settings")
         self.setMinimumWidth(600)
 
@@ -91,6 +95,62 @@ class SettingsDialog(QDialog):
         export_layout.addWidget(self.export_browse_button)
         general_form.addRow("Default export directory:", export_layout)
         self.tabs.addTab(general_tab, "General")
+
+        defaults_tab = QWidget()
+        defaults_form = QFormLayout(defaults_tab)
+
+        self.sequence_fov_spins = []
+        for axis, value in zip("XYZ", workspace_defaults.sequence_fov_mm):
+            spin = QDoubleSpinBox()
+            spin.setObjectName(f"default_sequence_fov_{axis.lower()}_mm")
+            spin.setRange(0.1, 10000.0)
+            spin.setDecimals(3)
+            spin.setSuffix(" mm")
+            spin.setValue(float(value))
+            spin.setToolTip(
+                f"Default {axis}-axis FOV for generated sequences and the built-in quick object."
+            )
+            defaults_form.addRow(f"Sequence FOV {axis}:", spin)
+            self.sequence_fov_spins.append(spin)
+
+        self.phantom_fov_spins = []
+        for axis, value in zip("XYZ", workspace_defaults.phantom_fov_mm):
+            spin = QDoubleSpinBox()
+            spin.setObjectName(f"default_phantom_fov_{axis.lower()}_mm")
+            spin.setRange(0.01, 1000.0)
+            spin.setDecimals(3)
+            spin.setSuffix(" mm")
+            spin.setValue(float(value))
+            spin.setToolTip(f"Default {axis}-axis FOV for newly designed phantoms.")
+            defaults_form.addRow(f"Phantom FOV {axis}:", spin)
+            self.phantom_fov_spins.append(spin)
+
+        self.phantom_nucleus_combo = QComboBox()
+        self.phantom_nucleus_combo.setObjectName("default_phantom_nucleus")
+        self.phantom_nucleus_combo.addItem("Automatic (H1 static / C13 dynamic)", None)
+        for nucleus in sorted(NUCLEUS_GAMMA_HZ_PER_T):
+            self.phantom_nucleus_combo.addItem(nucleus, nucleus)
+        nucleus_index = self.phantom_nucleus_combo.findData(
+            workspace_defaults.phantom_nucleus
+        )
+        self.phantom_nucleus_combo.setCurrentIndex(max(0, nucleus_index))
+        self.phantom_nucleus_combo.setToolTip(
+            "Default nucleus for new Phantom Designer projects. Automatic keeps "
+            "the existing H1 static and C13 dynamic behavior."
+        )
+        defaults_form.addRow("Phantom nucleus:", self.phantom_nucleus_combo)
+
+        self.default_field_strength_spin = QDoubleSpinBox()
+        self.default_field_strength_spin.setObjectName("default_field_strength_t")
+        self.default_field_strength_spin.setRange(0.01, 30.0)
+        self.default_field_strength_spin.setDecimals(4)
+        self.default_field_strength_spin.setSuffix(" T")
+        self.default_field_strength_spin.setValue(workspace_defaults.field_strength_t)
+        self.default_field_strength_spin.setToolTip(
+            "Default B0 field strength for Sequence Simulation and newly created phantoms."
+        )
+        defaults_form.addRow("B0 field strength:", self.default_field_strength_spin)
+        self.tabs.addTab(defaults_tab, "Defaults")
 
         simulation_tab = QWidget()
         simulation_form = QFormLayout(simulation_tab)
@@ -401,10 +461,11 @@ class SettingsDialog(QDialog):
 
         tab_names = {
             "general": 0,
-            "simulation": 1,
-            "scanner": 2,
-            "memory": 3,
-            "interface": 4,
+            "defaults": 1,
+            "simulation": 2,
+            "scanner": 3,
+            "memory": 4,
+            "interface": 5,
         }
         self.tabs.setCurrentIndex(tab_names.get(initial_tab, 0))
 
@@ -456,6 +517,19 @@ class SettingsDialog(QDialog):
             rf_ringdown_time_s=(float(self.scanner_rf_ringdown_spin.value()) * 1e-6),
             rf_dead_time_s=float(self.scanner_rf_dead_time_spin.value()) * 1e-6,
             adc_dead_time_s=float(self.scanner_adc_dead_time_spin.value()) * 1e-6,
+        )
+
+    def workspace_defaults(self) -> WorkspaceDefaults:
+        """Return defaults used for newly created sequences and phantoms."""
+        return WorkspaceDefaults(
+            sequence_fov_mm=tuple(
+                float(spin.value()) for spin in self.sequence_fov_spins
+            ),
+            phantom_fov_mm=tuple(
+                float(spin.value()) for spin in self.phantom_fov_spins
+            ),
+            phantom_nucleus=self.phantom_nucleus_combo.currentData(),
+            field_strength_t=float(self.default_field_strength_spin.value()),
         )
 
     def _update_simulation_controls(self):

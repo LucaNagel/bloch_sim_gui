@@ -1707,6 +1707,16 @@ def simulate_dynamic_sequence(
     )
     adc_cursor = 0
     checkpoint_cursor = 0
+    transverse_crush_state_set = set(
+        int(value) for value in compiled.transverse_crush_state_indices
+    )
+
+    def crush_transverse_if_requested(state_index):
+        if state_index not in transverse_crush_state_set:
+            return
+        state[:, :, 0:2] = 0.0
+        if transverse_state is not None:
+            transverse_state[:] = 0.0
 
     def sync_transverse_to_state():
         if transverse_state is not None:
@@ -1738,6 +1748,7 @@ def simulate_dynamic_sequence(
             checkpoint_states[checkpoint_cursor] = state
             checkpoint_cursor += 1
 
+    crush_transverse_if_requested(0)
     observe(0)
     interval_count = compiled.n_intervals
     progress_stride = max(1, interval_count // 100)
@@ -2138,6 +2149,7 @@ def simulate_dynamic_sequence(
                         half_duration,
                         regular_mode,
                     )
+        crush_transverse_if_requested(interval + 1)
         observe(interval + 1)
         interval_start = interval_end
         if progress_callback is not None and (
@@ -2266,6 +2278,8 @@ def simulate_dynamic_sequence(
             "kinetics_time_offset_s": phantom.kinetics_time_offset_s,
             "sequence_conversion_start_s": conversion_start_s,
             "kinetic_preroll_start_s": preroll_start_s,
+            "ideal_spoiling_applied": bool(compiled.transverse_crush_times_s.size),
+            "ideal_spoiler_end_times_s": (compiled.transverse_crush_times_s.tolist()),
             "pyruvate_inflow_curve": (
                 None
                 if phantom.pyruvate_inflow is None

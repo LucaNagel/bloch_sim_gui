@@ -2,6 +2,21 @@ from PyQt5.QtWidgets import QComboBox
 from PyQt5.QtCore import Qt, pyqtSignal
 
 
+IMAGE_HISTOGRAM_WIDTH = 48
+
+
+def compact_image_histogram(view, width: int = IMAGE_HISTOGRAM_WIDTH):
+    """Keep an ImageView LUT as narrow as a regular plot colorbar."""
+    histogram = view.ui.histogram
+    histogram.setFixedWidth(int(width))
+    item = histogram.item
+    item.axis.setStyle(showValues=False, tickLength=3)
+    item.axis.setWidth(6)
+    item.gradient.setMaximumWidth(30)
+    item.vb.setMaximumWidth(12)
+    return histogram
+
+
 class CheckableComboBox(QComboBox):
     """A combo box with checkable items for multi-selection."""
 

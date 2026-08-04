@@ -177,6 +177,7 @@ def main(
     )
     tr_delay = np.round(tr_delay / bd_raster) * bd_raster
 
+    spoiler_end_times = []
     for i_phase in range(n_y):
         gy_pre = pp.make_trapezoid(
             channel="y", system=system, area=phase_areas[i_phase], duration=2e-3
@@ -184,6 +185,7 @@ def main(
 
         seq.add_block(rf_prep)
         seq.add_block(gx_spoil, gy_spoil, gz_spoil)
+        spoiler_end_times.append(float(seq.duration()[0]))
         seq.add_block(pp.make_delay(ti_delay))
 
         for i_partition in range(n_z):
@@ -203,6 +205,7 @@ def main(
             # seq.add_block(pp.make_delay(te_delay))
             seq.add_block(gx_extended, adc)
             seq.add_block(gx_spoil_extended, gz_reph)
+            spoiler_end_times.append(float(seq.duration()[0]))
             seq.add_block(pp.make_delay(tr_delay))
 
         seq.add_block(pp.make_delay(t_recovery))
@@ -215,6 +218,8 @@ def main(
 
     seq.set_definition(key="FOV", value=[fov_x, fov_y, fov_z])
     seq.set_definition(key="Name", value="3D T1 MPRAGE")
+    seq.set_definition(key="SpoilerEndTimes", value=spoiler_end_times)
+    seq.set_definition(key="IdealSpoilerEndTimes", value=spoiler_end_times)
 
     if write_seq:
         seq.write(seq_filename)

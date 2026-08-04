@@ -10,9 +10,12 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSplitter,
     QVBoxLayout,
@@ -77,12 +80,25 @@ class SequenceProbeSpectrumViewer(QWidget):
         super().__init__(parent)
         self.result = None
         self.time_index = 0
+        self.frequency_selections = []
+        self._selection_markers = []
         self._build_ui()
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setObjectName("sequence_probe_spectrum_scroll_area")
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_content = QWidget()
+        self.scroll_content.setMinimumHeight(920)
+        layout = QVBoxLayout(self.scroll_content)
+        self.scroll_area.setWidget(self.scroll_content)
+        outer_layout.addWidget(self.scroll_area)
         header = QHBoxLayout()
-        header.addWidget(QLabel("Frequency Spectrum"))
+        title = QLabel("Frequency Spectrum")
+        title.setVisible(False)
+        header.addWidget(title)
         header.addStretch()
         self.export_button = QPushButton("Export Results")
         self.export_button.setVisible(False)
@@ -147,7 +163,108 @@ class SequenceProbeSpectrumViewer(QWidget):
         self.plot.setLabel("bottom", "Spin offset", "Hz")
         self.plot.setDownsampling(mode="peak")
         self.plot.setClipToView(True)
-        layout.addWidget(self.plot, 1)
+        self.plot.scene().sigMouseClicked.connect(self._spectrum_clicked)
+
+        line_splitter = QSplitter(Qt.Vertical)
+        line_splitter.setObjectName("sequence_probe_frequency_trace_splitter")
+        line_splitter.addWidget(self.plot)
+
+        trace_panel = QWidget()
+        trace_layout = QVBoxLayout(trace_panel)
+        trace_layout.setContentsMargins(0, 0, 0, 0)
+
+        selection_row = QHBoxLayout()
+        selection_row.addWidget(QLabel("Track:"))
+        self.selection_mode = QComboBox()
+        self.selection_mode.setObjectName("sequence_probe_frequency_selection_mode")
+        self.selection_mode.addItems(
+            ["Single frequency", "Frequency range", "Lorentzian"]
+        )
+        self.selection_mode.currentTextChanged.connect(self._selection_mode_changed)
+        selection_row.addWidget(self.selection_mode)
+
+        self.selection_center = QDoubleSpinBox()
+        self.selection_center.setObjectName("sequence_probe_frequency_center_hz")
+        self.selection_center.setRange(-1.0e9, 1.0e9)
+        self.selection_center.setDecimals(4)
+        self.selection_center.setSuffix(" Hz")
+        self.selection_center.setToolTip(
+            "Centre frequency. You can also click the spectrum to set it."
+        )
+        selection_row.addWidget(QLabel("Centre:"))
+        selection_row.addWidget(self.selection_center)
+
+        self.width_kind_label = QLabel("Width:")
+        selection_row.addWidget(self.width_kind_label)
+        self.width_kind = QComboBox()
+        self.width_kind.setObjectName("sequence_probe_lorentzian_width_kind")
+        self.width_kind.addItems(["FWHM", "T2"])
+        self.width_kind.currentTextChanged.connect(self._width_kind_changed)
+        selection_row.addWidget(self.width_kind)
+        self.selection_width = QDoubleSpinBox()
+        self.selection_width.setObjectName("sequence_probe_frequency_width")
+        self.selection_width.setRange(0.0001, 1.0e9)
+        self.selection_width.setDecimals(4)
+        self.selection_width.setValue(100.0)
+        selection_row.addWidget(self.selection_width)
+
+        self.add_selection_button = QPushButton("Add")
+        self.add_selection_button.setObjectName(
+            "sequence_probe_add_frequency_selection"
+        )
+        self.add_selection_button.clicked.connect(self.add_frequency_selection)
+        selection_row.addWidget(self.add_selection_button)
+        self.update_selection_button = QPushButton("Update")
+        self.update_selection_button.setObjectName(
+            "sequence_probe_update_frequency_selection"
+        )
+        self.update_selection_button.setToolTip(
+            "Apply the edited centre frequency, range, FWHM, or T2 to the "
+            "selected entry"
+        )
+        self.update_selection_button.setEnabled(False)
+        self.update_selection_button.clicked.connect(self.update_frequency_selection)
+        selection_row.addWidget(self.update_selection_button)
+        trace_layout.addLayout(selection_row)
+
+        trace_controls = QHBoxLayout()
+        self.selection_list = QListWidget()
+        self.selection_list.setObjectName("sequence_probe_frequency_selection_list")
+        self.selection_list.setMaximumHeight(58)
+        self.selection_list.currentRowChanged.connect(self._selected_frequency_changed)
+        trace_controls.addWidget(self.selection_list, 1)
+        self.remove_selection_button = QPushButton("Remove")
+        self.remove_selection_button.clicked.connect(self.remove_frequency_selection)
+        trace_controls.addWidget(self.remove_selection_button)
+        self.clear_selections_button = QPushButton("Clear")
+        self.clear_selections_button.clicked.connect(self.clear_frequency_selections)
+        trace_controls.addWidget(self.clear_selections_button)
+        trace_controls.addWidget(QLabel("Curve:"))
+        self.trace_component = QComboBox()
+        self.trace_component.setObjectName("sequence_probe_frequency_trace_component")
+        self.trace_component.addItems(
+            ["Magnitude", "Phase", "Phase (unwrapped)", "Real", "Imaginary", "Mz"]
+        )
+        self.trace_component.currentTextChanged.connect(self._render_frequency_traces)
+        trace_controls.addWidget(self.trace_component)
+        trace_layout.addLayout(trace_controls)
+
+        self.trace_plot = pg.PlotWidget(title="Selected frequency evolution")
+        self.trace_plot.setObjectName("sequence_probe_frequency_trace_plot")
+        self.trace_plot.setLabel("left", "Magnitude")
+        self.trace_plot.setLabel("bottom", "Sequence time", "ms")
+        self.trace_plot.setDownsampling(mode="peak")
+        self.trace_plot.setClipToView(True)
+        self.trace_plot.addLegend()
+        self.trace_plot.setMinimumHeight(400)
+        trace_layout.addWidget(self.trace_plot, 1)
+        self.plot.setMinimumHeight(280)
+        trace_panel.setMinimumHeight(500)
+        line_splitter.addWidget(trace_panel)
+        line_splitter.setStretchFactor(0, 1)
+        line_splitter.setStretchFactor(1, 2)
+        line_splitter.setMinimumHeight(790)
+        layout.addWidget(line_splitter, 2)
 
         self.heatmap_layout = pg.GraphicsLayoutWidget()
         self.heatmap_plot = self.heatmap_layout.addPlot(row=0, col=0)
@@ -168,6 +285,8 @@ class SequenceProbeSpectrumViewer(QWidget):
             self.plot_3d.setVisible(False)
             layout.addWidget(self.plot_3d, 1)
 
+        self._selection_mode_changed()
+
     def set_result(self, result):
         self.result = result
         self.time_index = max(0, result.time_s.size - 1)
@@ -176,6 +295,15 @@ class SequenceProbeSpectrumViewer(QWidget):
         self.position_slider.setRange(0, max(0, npos - 1))
         self.position_slider.setValue(0)
         self.position_slider.blockSignals(False)
+        frequency = self._frequency_axis_hz()
+        if frequency.size:
+            lo, hi = _safe_range(frequency, fallback=(-1.0, 1.0), pad_fraction=0.0)
+            self.selection_center.setRange(float(lo), float(hi))
+            self.selection_center.setValue(float(frequency[frequency.size // 2]))
+            span = max(abs(float(hi - lo)), 1.0)
+            self.selection_width.setMaximum(span * 2.0)
+            self.selection_width.setValue(min(100.0, span))
+        self.clear_frequency_selections()
         self.refresh()
 
     def set_time_index(self, index: int):
@@ -213,6 +341,243 @@ class SequenceProbeSpectrumViewer(QWidget):
             return mz
         return np.abs(signal)
 
+    def _selection_mode_changed(self, *_):
+        mode = self.selection_mode.currentText()
+        is_single = mode == "Single frequency"
+        is_lorentzian = mode == "Lorentzian"
+        self.width_kind_label.setVisible(not is_single)
+        self.width_kind.setVisible(is_lorentzian)
+        self.selection_width.setVisible(not is_single)
+        self._width_kind_changed()
+
+    def _width_kind_changed(self, *_):
+        if (
+            self.selection_mode.currentText() == "Lorentzian"
+            and self.width_kind.currentText() == "T2"
+        ):
+            self.width_kind_label.setText("Width:")
+            self.selection_width.setSuffix(" ms")
+            self.selection_width.setToolTip("T2; converted to FWHM using 1 / (pi T2)")
+            if self.selection_width.value() > 10000.0:
+                self.selection_width.setValue(100.0)
+        else:
+            self.width_kind_label.setText("Width:")
+            self.selection_width.setSuffix(" Hz")
+            if self.selection_mode.currentText() == "Frequency range":
+                self.selection_width.setToolTip(
+                    "Full width of the uniformly averaged range"
+                )
+            else:
+                self.selection_width.setToolTip("Lorentzian full width at half maximum")
+
+    def _selection_fwhm_hz(self, selection):
+        if selection["mode"] != "Lorentzian":
+            return float(selection.get("width", 0.0))
+        if selection.get("width_kind") == "T2":
+            t2_s = max(float(selection["width"]) * 1e-3, np.finfo(float).eps)
+            return 1.0 / (np.pi * t2_s)
+        return float(selection["width"])
+
+    def _selection_label(self, selection):
+        centre = selection["center_hz"]
+        mode = selection["mode"]
+        if mode == "Single frequency":
+            return f"{centre:.5g} Hz"
+        if mode == "Frequency range":
+            return f"{centre:.5g} Hz ± {selection['width'] / 2.0:.5g} Hz (mean)"
+        if selection.get("width_kind") == "T2":
+            return (
+                f"{centre:.5g} Hz, Lorentzian T2 {selection['width']:.5g} ms "
+                f"(FWHM {self._selection_fwhm_hz(selection):.5g} Hz)"
+            )
+        return f"{centre:.5g} Hz, Lorentzian FWHM {selection['width']:.5g} Hz"
+
+    def _selection_from_controls(self):
+        if self.result is None:
+            return None
+        centre_hz = float(self.selection_center.value())
+        if self.selection_mode.currentText() == "Single frequency":
+            frequency = self._frequency_axis_hz()
+            if frequency.size:
+                centre_hz = float(frequency[np.argmin(np.abs(frequency - centre_hz))])
+                self.selection_center.setValue(centre_hz)
+        return {
+            "mode": self.selection_mode.currentText(),
+            "center_hz": centre_hz,
+            "width": float(self.selection_width.value()),
+            "width_kind": self.width_kind.currentText(),
+        }
+
+    def add_frequency_selection(self, *_):
+        selection = self._selection_from_controls()
+        if selection is None:
+            return
+        self.frequency_selections.append(selection)
+        self.selection_list.addItem(self._selection_label(selection))
+        self.selection_list.setCurrentRow(len(self.frequency_selections) - 1)
+        self.refresh()
+
+    def update_frequency_selection(self, *_):
+        row = self.selection_list.currentRow()
+        if row < 0 or row >= len(self.frequency_selections):
+            return
+        selection = self._selection_from_controls()
+        if selection is None:
+            return
+        self.frequency_selections[row] = selection
+        self.selection_list.item(row).setText(self._selection_label(selection))
+        self.refresh()
+
+    def remove_frequency_selection(self, *_):
+        row = self.selection_list.currentRow()
+        if row < 0 or row >= len(self.frequency_selections):
+            return
+        self.frequency_selections.pop(row)
+        self.selection_list.takeItem(row)
+        self.update_selection_button.setEnabled(
+            0 <= self.selection_list.currentRow() < len(self.frequency_selections)
+        )
+        self.refresh()
+
+    def clear_frequency_selections(self, *_):
+        self.frequency_selections.clear()
+        self.selection_list.clear()
+        self.update_selection_button.setEnabled(False)
+        self.refresh()
+
+    def _selected_frequency_changed(self, row):
+        self.update_selection_button.setEnabled(
+            0 <= row < len(self.frequency_selections)
+        )
+        if row < 0 or row >= len(self.frequency_selections):
+            return
+        selection = self.frequency_selections[row]
+        self.selection_mode.setCurrentText(selection["mode"])
+        self.selection_center.setValue(selection["center_hz"])
+        self.width_kind.setCurrentText(selection.get("width_kind", "FWHM"))
+        self.selection_width.setValue(selection.get("width", 100.0))
+
+    def _spectrum_clicked(self, event):
+        if self.result is None or not self.plot.isVisible():
+            return
+        if event.button() != Qt.LeftButton:
+            return
+        scene_pos = event.scenePos()
+        if not self.plot.plotItem.vb.sceneBoundingRect().contains(scene_pos):
+            return
+        frequency = self.plot.plotItem.vb.mapSceneToView(scene_pos).x()
+        self.selection_center.setValue(float(frequency))
+
+    def _frequency_weights(self, selection):
+        frequency = self._frequency_axis_hz()
+        if frequency.size == 0:
+            return np.zeros(0, dtype=float)
+        centre = float(selection["center_hz"])
+        mode = selection["mode"]
+        if mode == "Single frequency":
+            weights = np.zeros(frequency.size, dtype=float)
+            weights[int(np.argmin(np.abs(frequency - centre)))] = 1.0
+            return weights
+        if mode == "Frequency range":
+            half_width = max(float(selection["width"]) / 2.0, 0.0)
+            weights = (np.abs(frequency - centre) <= half_width).astype(float)
+            if not np.any(weights):
+                weights[int(np.argmin(np.abs(frequency - centre)))] = 1.0
+            return weights / np.sum(weights)
+        half_width = max(self._selection_fwhm_hz(selection) / 2.0, np.finfo(float).eps)
+        weights = 1.0 / (1.0 + ((frequency - centre) / half_width) ** 2)
+        total = float(np.sum(weights))
+        if not np.isfinite(total) or total <= 0:
+            weights = np.zeros(frequency.size, dtype=float)
+            weights[int(np.argmin(np.abs(frequency - centre)))] = 1.0
+            return weights
+        return weights / total
+
+    def _signal_for_current_position(self):
+        result = self.result
+        pos_count = result.positions_m.shape[0]
+        pos_index = min(self.position_slider.value(), max(0, pos_count - 1))
+        if self.view_mode.currentText() == "Individual position" and pos_count > 0:
+            return result.mxy[:, pos_index, :], result.mz[:, pos_index, :]
+        return np.mean(result.mxy, axis=1), np.mean(result.mz, axis=1)
+
+    def _render_selection_markers(self):
+        for marker in self._selection_markers:
+            self.plot.removeItem(marker)
+        self._selection_markers.clear()
+        colors = ["#ffcc00", "#ff6699", "#66ff66", "#66aaff", "#ff8844", "#cc88ff"]
+        for index, selection in enumerate(self.frequency_selections):
+            color = colors[index % len(colors)]
+            centre = selection["center_hz"]
+            if selection["mode"] == "Single frequency":
+                marker = pg.InfiniteLine(
+                    pos=centre, angle=90, movable=False, pen=pg.mkPen(color, width=2)
+                )
+            else:
+                width = (
+                    selection["width"]
+                    if selection["mode"] == "Frequency range"
+                    else self._selection_fwhm_hz(selection)
+                )
+                shade = pg.mkColor(color)
+                shade.setAlpha(48)
+                marker = pg.LinearRegionItem(
+                    values=(centre - width / 2.0, centre + width / 2.0),
+                    movable=False,
+                    pen=pg.mkPen(color, width=2),
+                    brush=pg.mkBrush(shade),
+                )
+            marker.setZValue(10)
+            self.plot.addItem(marker)
+            self._selection_markers.append(marker)
+
+    def _render_frequency_traces(self, *_):
+        self.trace_plot.clear()
+        if self.result is None:
+            return
+        signal, mz = self._signal_for_current_position()
+        component = self.trace_component.currentText()
+        colors = ["#ffcc00", "#ff6699", "#66ff66", "#66aaff", "#ff8844", "#cc88ff"]
+        visible = []
+        for index, selection in enumerate(self.frequency_selections):
+            weights = self._frequency_weights(selection)
+            weighted_signal = np.sum(signal * weights[None, :], axis=1)
+            weighted_mz = np.sum(mz * weights[None, :], axis=1)
+            values = self._component(weighted_signal, weighted_mz, component)
+            visible.append(values)
+            self.trace_plot.plot(
+                self.result.time_s * 1000.0,
+                values,
+                pen=pg.mkPen(colors[index % len(colors)], width=2),
+                name=self._selection_label(selection),
+            )
+        ylabel = "Phase (units of pi)" if component.startswith("Phase") else component
+        self.trace_plot.setLabel("left", ylabel)
+        self.trace_plot.setLabel("bottom", "Sequence time", "ms")
+        if self.result.time_s.size:
+            self.trace_plot.setXRange(
+                *_safe_range(
+                    self.result.time_s * 1000.0,
+                    fallback=(0.0, 1.0),
+                    pad_fraction=0.0,
+                ),
+                padding=0,
+            )
+            cursor_time_ms = float(self.result.time_s[self.time_index] * 1000.0)
+            self.trace_plot.addItem(
+                pg.InfiniteLine(
+                    pos=cursor_time_ms,
+                    angle=90,
+                    movable=False,
+                    pen=pg.mkPen("y", width=1),
+                )
+            )
+        if visible:
+            self.trace_plot.setYRange(
+                *_safe_range(np.concatenate([np.ravel(values) for values in visible])),
+                padding=0,
+            )
+
     def refresh(self, *_):
         if self.result is None:
             return
@@ -236,6 +601,8 @@ class SequenceProbeSpectrumViewer(QWidget):
             self._render_heatmap()
         else:
             self._render_line()
+            self._render_selection_markers()
+            self._render_frequency_traces()
 
     def _render_line(self):
         result = self.result
@@ -356,7 +723,9 @@ class SequenceProbeSpatialViewer(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
-        header.addWidget(QLabel("Spatial Profile"))
+        title = QLabel("Spatial Profile")
+        title.setVisible(False)
+        header.addWidget(title)
         header.addStretch()
         self.export_button = QPushButton("Export Results")
         self.export_button.setVisible(False)

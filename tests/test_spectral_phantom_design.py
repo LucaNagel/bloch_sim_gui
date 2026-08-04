@@ -1,8 +1,9 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pyqtgraph as pg
 import pytest
-from PyQt5.QtCore import QPointF, Qt
+from PyQt5.QtCore import QPointF, QSettings, Qt
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QDialog, QHeaderView, QWidget
 from unittest.mock import MagicMock, patch
@@ -17,14 +18,36 @@ from blochsimulator.phantom_design import (
 from blochsimulator.sequence import ADCEvent, RFEvent, SequenceProgram
 from blochsimulator.spectral_phantom import SpectralPhantom
 from blochsimulator.ui.phantom_designer import SpectralPhantomDesignerDialog
+from blochsimulator.ui.default_settings import WorkspaceDefaults
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
 from blochsimulator.ui.volume_viewer import VolumeViewerWidget
+from blochsimulator.ui.widgets import IMAGE_HISTOGRAM_WIDTH
 from blochsimulator.phantom_widget import (
     PhantomCreatorWidget,
     PhantomViewerWidget,
     PhantomWidget,
 )
 from blochsimulator.units import hz_to_ppm, ppm_to_hz
+
+
+def test_new_phantom_designer_uses_saved_fov_and_nucleus_defaults(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    settings.setValue("defaults/phantom_fov_x_mm", 80.0)
+    settings.setValue("defaults/phantom_fov_y_mm", 70.0)
+    settings.setValue("defaults/phantom_fov_z_mm", 60.0)
+    settings.setValue("defaults/phantom_nucleus", "C13")
+    settings.setValue("defaults/field_strength_t", 7.0)
+
+    dialog = SpectralPhantomDesignerDialog(settings=settings)
+
+    assert [spin.value() for spin in dialog.fov_spins] == pytest.approx(
+        [80.0, 70.0, 60.0]
+    )
+    assert dialog.nucleus.currentData() == "C13"
+    assert dialog.field_strength_t.value() == 7.0
+    dialog.close()
+    app.processEvents()
 
 
 def _spectral_design():
@@ -83,6 +106,47 @@ def test_peak_specific_t1_overrides_shape_default_and_round_trips():
     assert [species.t1 for species in phantom.species] == pytest.approx([0.7, 1.2])
     assert restored.shapes[0].peaks[0].t1_s == pytest.approx(0.7)
     assert restored.shapes[0].peaks[1].t1_s is None
+
+
+def test_cylinder_can_be_rotated_about_all_three_axes_and_round_trips():
+    design = PhantomDesign(
+        shape=(31, 31, 31),
+        fov_m=(0.031, 0.031, 0.031),
+        shapes=[
+            ShapeDefinition(
+                name="Rotated cylinder",
+                kind="cylinder",
+                size=(0.3, 0.3, 0.8),
+                rotation_deg=(15.0, 90.0, -20.0),
+            )
+        ],
+    )
+
+    mask = design.rasterize_mask(design.shapes[0])
+    occupied = np.argwhere(mask)
+    extents = np.ptp(occupied, axis=0)
+    restored = PhantomDesign.from_dict(design.to_dict())
+
+    assert extents[0] > extents[2]
+    assert mask[15, 15, 15]
+    assert restored.shapes[0].kind == "cylinder"
+    assert restored.shapes[0].rotation_deg == pytest.approx((15.0, 90.0, -20.0))
+
+
+def test_unrotated_cylinder_uses_xy_diameters_and_z_length():
+    design = PhantomDesign(
+        shape=(21, 21, 21),
+        fov_m=(0.021, 0.021, 0.021),
+        shapes=[
+            ShapeDefinition(name="Cylinder", kind="cylinder", size=(0.5, 0.5, 0.9))
+        ],
+    )
+
+    mask = design.rasterize_mask(design.shapes[0])
+
+    assert mask[10, 10, 1]
+    assert mask[10, 10, 19]
+    assert not mask[5, 5, 10]
 
 
 def test_design_preserves_field_nucleus_and_b0_conversion():
@@ -419,7 +483,7 @@ def test_designer_uses_compact_shape_controls_and_wide_peak_columns():
     shape_button_grid = shape_panel.layout().itemAt(2).layout()
 
     assert shape_panel.maximumWidth() == 300
-    assert shape_button_grid.rowCount() == 5
+    assert shape_button_grid.rowCount() == 7
     assert shape_button_grid.columnCount() == 1
     assert (
         dialog.peak_table.horizontalHeader().sectionResizeMode(0) == QHeaderView.Stretch
@@ -479,6 +543,43 @@ def test_designer_creates_shape_from_mouse_drawn_bounds():
     assert shape.size == pytest.approx((0.3, 0.4, 0.5), abs=0.01)
     assert dialog._rois[-1].pos().x() == pytest.approx(0.1, abs=0.01)
     assert dialog._rois[-1].pos().y() == pytest.approx(0.2, abs=0.01)
+    dialog.close()
+    app.processEvents()
+
+
+def test_designer_adds_and_rotates_cylinder_in_xyz():
+    app = QApplication.instance() or QApplication([])
+    dialog = SpectralPhantomDesignerDialog(design=_spectral_design())
+
+    dialog._add_shape("cylinder")
+    dialog.rotation_spins[0].setValue(25.0)
+    dialog.rotation_spins[1].setValue(-40.0)
+    dialog.rotation_spins[2].setValue(70.0)
+
+    shape = dialog.design.shapes[-1]
+    assert shape.kind == "cylinder"
+    assert shape.rotation_deg == pytest.approx((25.0, -40.0, 70.0))
+    assert isinstance(dialog._rois[-1], pg.EllipseROI)
+    dialog.close()
+    app.processEvents()
+
+
+def test_designer_allows_cylinder_length_beyond_the_fov():
+    app = QApplication.instance() or QApplication([])
+    dialog = SpectralPhantomDesignerDialog(design=_spectral_design())
+
+    dialog._add_shape("cylinder")
+    dialog.z_size.setValue(250.0)
+
+    shape = dialog.design.shapes[-1]
+    assert dialog.z_size_label.text() == "Cylinder length"
+    assert dialog.z_size.maximum() == pytest.approx(1000.0)
+    assert shape.size[2] == pytest.approx(2.5)
+    assert "length=10 mm" in dialog.xy_info.text()
+
+    dialog.shape_list.setCurrentRow(0)
+    assert dialog.z_size_label.text() == "Z size"
+    assert dialog.z_size.maximum() == pytest.approx(100.0)
     dialog.close()
     app.processEvents()
 
@@ -593,6 +694,11 @@ def test_phantom_creator_shows_only_parameters_used_by_selected_mode():
     assert not creator.field_combo.isHidden()
     assert not creator.tissue_combo.isHidden()
     assert creator.fov_spin.suffix() == " mm"
+    creator.set_workspace_defaults(
+        WorkspaceDefaults(phantom_fov_mm=(80.0, 70.0, 60.0), field_strength_t=9.4)
+    )
+    assert creator.fov_spin.value() == 80.0
+    assert creator.get_field_strength() == 9.4
     creator.resolution_spin.setValue(8)
     creator.fov_spin.setValue(240.0)
     creator.create_phantom()
@@ -666,7 +772,7 @@ def test_spectral_phantom_property_image_is_finite_and_fills_xy_view():
     assert transform.m11() == pytest.approx(10.0)
     assert transform.m22() == pytest.approx(10.0)
     assert "Range: 1200.00 - 1200.00 ms" in viewer.prop_info.text()
-    assert viewer.prop_image.ui.histogram.maximumWidth() == 88
+    assert viewer.prop_image.ui.histogram.width() == IMAGE_HISTOGRAM_WIDTH
     assert set(viewer.property_overview_views) == {
         "T1 Map",
         "T2 Map",
@@ -676,7 +782,7 @@ def test_spectral_phantom_property_image_is_finite_and_fills_xy_view():
     }
     for image_view in viewer.property_overview_views.values():
         assert image_view.image.shape == phantom.shape[:2]
-        assert image_view.ui.histogram.maximumWidth() == 34
+        assert image_view.ui.histogram.width() == IMAGE_HISTOGRAM_WIDTH
     viewer.close()
     app.processEvents()
 
@@ -684,6 +790,12 @@ def test_spectral_phantom_property_image_is_finite_and_fills_xy_view():
 def test_volume_viewer_normalizes_2d_mask_and_resets_stale_indices():
     app = QApplication.instance() or QApplication([])
     viewer = VolumeViewerWidget()
+
+    assert all(slider.maximumWidth() == 420 for slider in viewer.sliders)
+    assert all(
+        image_view.ui.histogram.width() == IMAGE_HISTOGRAM_WIDTH
+        for image_view in (viewer.xy_view, viewer.xz_view, viewer.yz_view)
+    )
 
     viewer.set_volume(
         np.ones((64, 8, 4)),

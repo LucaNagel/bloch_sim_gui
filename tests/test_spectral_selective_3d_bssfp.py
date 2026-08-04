@@ -118,6 +118,29 @@ def test_spectral_selective_3d_bssfp_defaults_match_skinner_paper():
     assert definitions["EndImageSpoilerAxes"] == "xyz"
 
 
+def test_spectral_selective_3d_bssfp_can_encode_readout_on_scanner_z(tmp_path):
+    sequence = SPECTRAL_BSSFP_MAIN(
+        n_read=4,
+        n_phase=2,
+        n_partition=2,
+        n_repetition=1,
+        dummy_repetitions=0,
+        use_alpha_half=False,
+        encoding_axes=("+z", "+x", "+y"),
+    )
+    path = tmp_path / "spectral_selective_read_z.seq"
+    sequence.write(str(path), v141_compat=True)
+    program = load_pulseq(path)
+    compiled = SequenceCompiler().compile_acquisition(program)
+    frames = infer_cartesian_acquisition_frames(program, compiled=compiled)
+    volumes = infer_cartesian_acquisition_volumes(
+        program, compiled=compiled, frames=frames
+    )
+
+    assert volumes.encoding_frame.axis_codes == ("+z", "+x", "+y")
+    assert program.metadata["definitions"]["ReadoutAxis"] == "+z"
+
+
 def test_spectral_selective_3d_bssfp_adds_published_starter_and_volume_spoiler(
     tmp_path,
 ):
@@ -141,7 +164,14 @@ def test_spectral_selective_3d_bssfp_adds_published_starter_and_volume_spoiler(
     spoiler_end_times = np.asarray(
         program.metadata["definitions"]["EndImageSpoilerEndTimes"], dtype=float
     ).reshape(-1)
+    ideal_spoiler_end_times = np.asarray(
+        program.metadata["definitions"]["IdealSpoilerEndTimes"], dtype=float
+    ).reshape(-1)
     assert spoiler_end_times.size == 2
+    assert ideal_spoiler_end_times == pytest.approx(spoiler_end_times)
+    assert SequenceCompiler().compile(
+        program
+    ).transverse_crush_times_s == pytest.approx(spoiler_end_times)
     for spoiler_end in spoiler_end_times:
         ending_events = [
             event
