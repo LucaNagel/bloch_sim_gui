@@ -791,7 +791,15 @@ def test_volume_viewer_normalizes_2d_mask_and_resets_stale_indices():
     app = QApplication.instance() or QApplication([])
     viewer = VolumeViewerWidget()
 
-    assert all(slider.maximumWidth() == 420 for slider in viewer.sliders)
+    expected_slider_positions = ((1, 2), (1, 1), (1, 0))
+    for control, expected_position in zip(
+        viewer.slider_controls, expected_slider_positions
+    ):
+        index = viewer.slices_layout.indexOf(control)
+        row, column, _row_span, _column_span = viewer.slices_layout.getItemPosition(
+            index
+        )
+        assert (row, column) == expected_position
     assert all(
         image_view.ui.histogram.width() == IMAGE_HISTOGRAM_WIDTH
         for image_view in (viewer.xy_view, viewer.xz_view, viewer.yz_view)
@@ -806,6 +814,28 @@ def test_volume_viewer_normalizes_2d_mask_and_resets_stale_indices():
     assert transform.m11() == pytest.approx(1.0)
     assert transform.m22() == pytest.approx(1.0)
     assert "mm" in viewer.index_labels[0].text()
+
+    class WheelEvent:
+        def __init__(self):
+            self.accepted = False
+
+        @staticmethod
+        def modifiers():
+            return Qt.NoModifier
+
+        @staticmethod
+        def delta():
+            return 120
+
+        def accept(self):
+            self.accepted = True
+
+    before = viewer.indices
+    wheel_event = WheelEvent()
+    viewer.xy_view.getView().wheelEvent(wheel_event)
+    assert viewer.indices == (before[0], before[1], before[2] + 1)
+    assert wheel_event.accepted
+    viewer.sliders[2].setValue(before[2])
 
     viewer._select_plane_coordinates("xy", -31.5, 2.5)
     assert viewer.indices == (0, 6, 2)

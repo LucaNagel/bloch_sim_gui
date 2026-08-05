@@ -79,7 +79,13 @@ from ..sequence import (
     variable_flip_angle_schedule,
 )
 from ..simulator import BlochSimulator, resolve_num_threads
-from ..units import NUCLEUS_GAMMA_HZ_PER_T, ppm_to_hz, rf_gauss_to_hz
+from ..units import (
+    NUCLEUS_GAMMA_HZ_PER_T,
+    gradient_hz_per_m_to_t_per_m,
+    ppm_to_hz,
+    rf_gauss_to_hz,
+    rf_hz_to_gauss_for_nucleus,
+)
 from .controls import UniversalTimeControl
 from .magnetization_viewer import MagnetizationViewer
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
@@ -1284,13 +1290,13 @@ class SequenceSimulationWidget(QWidget):
         ss_hint.setWordWrap(True)
         self.ss_bssfp_read_matrix = QSpinBox()
         self.ss_bssfp_read_matrix.setRange(2, 256)
-        self.ss_bssfp_read_matrix.setValue(8)
+        self.ss_bssfp_read_matrix.setValue(32)
         self.ss_bssfp_phase_matrix = QSpinBox()
         self.ss_bssfp_phase_matrix.setRange(1, 256)
-        self.ss_bssfp_phase_matrix.setValue(8)
+        self.ss_bssfp_phase_matrix.setValue(16)
         self.ss_bssfp_partition_matrix = QSpinBox()
         self.ss_bssfp_partition_matrix.setRange(1, 256)
-        self.ss_bssfp_partition_matrix.setValue(4)
+        self.ss_bssfp_partition_matrix.setValue(12)
         self.ss_bssfp_read_fov_mm = self._parameter_spin(0.1, 10000.0, 56.0, " mm")
         self.ss_bssfp_phase_fov_mm = self._parameter_spin(0.1, 10000.0, 28.0, " mm")
         self.ss_bssfp_partition_fov_mm = self._parameter_spin(0.1, 10000.0, 21.0, " mm")
@@ -2119,11 +2125,30 @@ class SequenceSimulationWidget(QWidget):
 
         timeline = QWidget()
         timeline_layout = QVBoxLayout(timeline)
+        waveform_controls = QHBoxLayout()
+        waveform_controls.addWidget(QLabel("Waveform units"))
+        self.waveform_units = QComboBox()
+        self.waveform_units.addItem("Physical (G, T/m)", "physical")
+        self.waveform_units.addItem("Simulation (Hz, kHz/m)", "simulation")
+        self.waveform_units.setToolTip(
+            "Display RF as physical B1 in gauss and gradients in T/m, or show "
+            "the canonical simulation frequency units"
+        )
+        self.waveform_units.currentIndexChanged.connect(self._waveform_units_changed)
+        self.nucleus.currentTextChanged.connect(self._waveform_units_changed)
+        waveform_controls.addWidget(self.waveform_units)
+        self.waveform_nucleus_label = QLabel("Conversion: H1")
+        waveform_controls.addWidget(self.waveform_nucleus_label)
+        waveform_controls.addStretch()
+        timeline_layout.addLayout(waveform_controls)
+        self.waveform_value_summary = QLabel("No sequence waveforms")
+        self.waveform_value_summary.setWordWrap(True)
+        timeline_layout.addWidget(self.waveform_value_summary)
         self.rf_plot = pg.PlotWidget(title="RF magnitude")
-        self.rf_plot.setLabel("left", "RF", "Hz")
+        self.rf_plot.setLabel("left", "B1", "G")
         self.rf_plot.setLabel("bottom", "Time", "ms")
         self.gradient_plot = pg.PlotWidget(title="Gradients and ADC")
-        self.gradient_plot.setLabel("left", "Gradient", "kHz/m")
+        self.gradient_plot.setLabel("left", "Gradient", "T/m")
         self.gradient_plot.setLabel("bottom", "Time", "ms")
         self.gradient_plot.addLegend()
         self.gradient_plot.setXLink(self.rf_plot)
@@ -2494,13 +2519,25 @@ class SequenceSimulationWidget(QWidget):
                     f"\nB0 {phantom.field_strength:g} T {phantom.nucleus}; "
                     f"offset {active_b0.min():.4g}–{active_b0.max():.4g} Hz"
                 )
+        tx_map = getattr(phantom, "tx_sensitivity_map", None)
+        rx_maps = getattr(phantom, "rx_sensitivity_maps", None)
+        b1_text = ""
+        if tx_map is not None:
+            active_tx = np.abs(np.asarray(tx_map))[active]
+            if active_tx.size:
+                b1_text += f"\nB1+ |scale| {active_tx.min():.4g}–{active_tx.max():.4g}"
+        if rx_maps is not None:
+            rx_array = np.asarray(rx_maps)
+            b1_text += f"; B1− {rx_array.shape[0]} receive channel(s)"
         self.phantom_summary.setText(
             f"{phantom.name}\n"
             f"{phantom.ndim}D, matrix {tuple(phantom.shape)}, "
             f"FOV {fov_mm} mm, {phantom.n_active} active voxels\n"
-            f"{relaxation_text}{b0_text}"
+            f"{relaxation_text}{b0_text}{b1_text}"
         )
         self._update_frequency_reference_info()
+        if hasattr(self, "waveform_value_summary"):
+            self._update_waveform_value_summary()
 
     def _mark_sequence_generation_pending(self):
         source_index = self.sequence_source.currentIndex()
@@ -3647,6 +3684,115 @@ class SequenceSimulationWidget(QWidget):
             if nucleus_index >= 0:
                 self.nucleus.setCurrentIndex(nucleus_index)
 
+    def _waveform_nucleus(self) -> str:
+        nucleus = str(self.nucleus.currentText()).strip()
+        return nucleus if nucleus in NUCLEUS_GAMMA_HZ_PER_T else "H1"
+
+    def _waveform_scales(self):
+        nucleus = self._waveform_nucleus()
+        if self.waveform_units.currentData() == "physical":
+            rf_scale = float(rf_hz_to_gauss_for_nucleus(1.0, nucleus))
+            gradient_scale = float(gradient_hz_per_m_to_t_per_m(1.0, nucleus))
+            return rf_scale, gradient_scale, "B1", "G", "Gradient", "T/m"
+        return 1.0, 1e-3, "RF", "Hz", "Gradient", "kHz/m"
+
+    def _waveform_units_changed(self, *_):
+        rf_scale, gradient_scale, rf_name, rf_unit, grad_name, grad_unit = (
+            self._waveform_scales()
+        )
+        del rf_scale, gradient_scale
+        self.rf_plot.setLabel("left", rf_name, rf_unit)
+        self.gradient_plot.setLabel("left", grad_name, grad_unit)
+        self.waveform_nucleus_label.setText(f"Conversion: {self._waveform_nucleus()}")
+        self._sequence_plot_window_s = None
+        if self.program is not None:
+            x_range = self.rf_plot.getViewBox().viewRange()[0]
+            start_s = max(0.0, float(x_range[0]) / 1000.0)
+            end_s = min(float(self.program.duration_s), float(x_range[1]) / 1000.0)
+            if end_s <= start_s:
+                start_s, end_s = 0.0, float(self.program.duration_s)
+            self._refresh_sequence_waveforms(start_s, end_s)
+            self._update_waveform_y_ranges()
+            self._update_waveform_value_summary()
+
+    def _update_waveform_y_ranges(self):
+        if self.program is None:
+            return
+        rf_scale, gradient_scale, *_labels = self._waveform_scales()
+        if self.program.rf_events:
+            rf_peak = max(
+                float(np.max(np.abs(event.samples_hz)))
+                for event in self.program.rf_events
+            )
+            self.rf_plot.setYRange(
+                0.0, max(rf_peak * rf_scale * 1.05, 1e-12), padding=0
+            )
+        gradient_values = [
+            np.asarray(event.samples_hz_per_m, dtype=float) * gradient_scale
+            for event in self.program.gradient_events
+        ]
+        if gradient_values:
+            gradient_limit = max(
+                float(np.max(np.abs(values))) for values in gradient_values
+            )
+            self.gradient_plot.setYRange(
+                -max(gradient_limit * 1.05, 1e-12),
+                max(gradient_limit * 1.05, 1e-12),
+                padding=0,
+            )
+
+    def _update_waveform_value_summary(self):
+        if self.program is None:
+            self.waveform_value_summary.setText("No sequence waveforms")
+            return
+        nucleus = self._waveform_nucleus()
+        rf_peak_hz = max(
+            (
+                float(np.max(np.abs(event.samples_hz)))
+                for event in self.program.rf_events
+            ),
+            default=0.0,
+        )
+        rf_peak_gauss = float(rf_hz_to_gauss_for_nucleus(rf_peak_hz, nucleus))
+        gradient_peaks = {}
+        for axis in "xyz":
+            peak_hz_per_m = max(
+                (
+                    float(np.max(np.abs(event.samples_hz_per_m)))
+                    for event in self.program.gradient_events
+                    if event.axis == axis
+                ),
+                default=0.0,
+            )
+            gradient_peaks[axis] = float(
+                gradient_hz_per_m_to_t_per_m(peak_hz_per_m, nucleus)
+            )
+        effective_text = ""
+        phantom = getattr(self, "phantom", None)
+        if phantom is None and self.object_source.currentIndex() == 0:
+            phantom = self._selected_designed_phantom()
+        if phantom is not None:
+            tx_source = getattr(phantom, "tx_sensitivity_map", None)
+            if tx_source is None:
+                tx_source = np.ones(phantom.shape)
+            tx = np.asarray(tx_source)
+            mask = np.asarray(phantom.mask, dtype=bool)
+            active_tx = np.abs(tx)[mask]
+            if active_tx.size:
+                effective = rf_peak_gauss * active_tx
+                effective_text = (
+                    f"; effective B1+ {effective.min():.5g}–"
+                    f"{effective.max():.5g} G in active voxels"
+                )
+        self.waveform_nucleus_label.setText(f"Conversion: {nucleus}")
+        self.waveform_value_summary.setText(
+            f"Used physical values ({nucleus}): nominal peak B1 "
+            f"{rf_peak_gauss:.5g} G{effective_text}; peak gradients "
+            f"Gx {gradient_peaks['x']:.5g}, Gy {gradient_peaks['y']:.5g}, "
+            f"Gz {gradient_peaks['z']:.5g} T/m. These arrays and the B1 maps "
+            "are included in result exports."
+        )
+
     def _show_program(self, compiled=None):
         if self.program is None:
             return
@@ -3748,6 +3894,7 @@ class SequenceSimulationWidget(QWidget):
             f"{compiled.n_intervals}, "
             f"ADC samples: {compiled.adc_times_s.size}{acquisition_text}{spoiler_text}"
         )
+        self._update_waveform_value_summary()
         self.rf_plot.clear()
         self.gradient_plot.clear()
         self._rf_waveform_item = self.rf_plot.plot(
@@ -3795,25 +3942,7 @@ class SequenceSimulationWidget(QWidget):
         duration = max(float(self.program.duration_s), 1e-9)
         self.rf_plot.setXRange(0.0, duration * 1000.0, padding=0)
         self._refresh_sequence_waveforms(0.0, duration)
-        if self.program.rf_events:
-            rf_peak = max(
-                float(np.max(np.abs(event.samples_hz)))
-                for event in self.program.rf_events
-            )
-            self.rf_plot.setYRange(0.0, max(rf_peak * 1.05, 1e-9), padding=0)
-        gradient_values = [
-            np.asarray(event.samples_hz_per_m, dtype=float) * 1e-3
-            for event in self.program.gradient_events
-        ]
-        if gradient_values:
-            gradient_limit = max(
-                float(np.max(np.abs(values))) for values in gradient_values
-            )
-            self.gradient_plot.setYRange(
-                -max(gradient_limit * 1.05, 1e-9),
-                max(gradient_limit * 1.05, 1e-9),
-                padding=0,
-            )
+        self._update_waveform_y_ranges()
         self._set_sequence_cursor(0.0)
 
     def _sequence_plot_range_changed(self, _view_box, x_range):
@@ -3842,11 +3971,13 @@ class SequenceSimulationWidget(QWidget):
         ):
             return
         self._sequence_plot_window_s = window
+        rf_scale, gradient_scale, *_labels = self._waveform_scales()
         rf_x, rf_y = _event_step_plot_data(
             self.program.rf_events,
             samples_attribute="samples_hz",
             start_s=window[0],
             end_s=window[1],
+            scale=rf_scale,
             magnitude=True,
         )
         self._rf_waveform_item.setData(rf_x, rf_y, connect="finite")
@@ -3858,7 +3989,7 @@ class SequenceSimulationWidget(QWidget):
                 samples_attribute="samples_hz_per_m",
                 start_s=window[0],
                 end_s=window[1],
-                scale=1e-3,
+                scale=gradient_scale,
             )
             self._gradient_waveform_items[axis].setData(
                 grad_x, grad_y, connect="finite"

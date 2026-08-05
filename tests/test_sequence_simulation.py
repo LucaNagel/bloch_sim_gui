@@ -18,6 +18,7 @@ from blochsimulator.sequence import (
     export_bruker_raw,
 )
 from blochsimulator.simulator import resolve_num_threads
+from blochsimulator.units import NUCLEUS_GAMMA_HZ_PER_T
 
 
 def _phantom(
@@ -517,20 +518,46 @@ def test_outer_acquisition_indices_are_exposed_per_adc_sample():
 
 @pytest.mark.parametrize("suffix", [".npz", ".h5", ".nc"])
 def test_sequence_result_export_formats(tmp_path, suffix):
-    phantom = _phantom(t1=1e9, t2=1e9, m0=(1.0, 0.0, 0.0))
-    program = SequenceProgram((ADCEvent(0.0, 2, 1e-3),), duration_s=2e-3)
+    phantom = _phantom(
+        t1=1e9,
+        t2=1e9,
+        m0=(1.0, 0.0, 0.0),
+        tx_sensitivity=np.asarray([0.5 + 0.0j]),
+        rx_sensitivities=np.asarray([[1.0 + 0.0j]]),
+    )
+    phantom.metadata["nucleus"] = "C13"
+    gamma = NUCLEUS_GAMMA_HZ_PER_T["C13"]
+    program = SequenceProgram(
+        (
+            RFEvent(0.0, np.asarray([gamma / 1e4]), 1e-3),
+            GradientEvent("x", 0.0, np.asarray([gamma * 0.02]), 1e-3),
+            ADCEvent(1e-3, 2, 1e-3),
+        ),
+        duration_s=3e-3,
+    )
     result = BlochSimulator(use_parallel=False).simulate_sequence(program, phantom)
     path = result.save(tmp_path / f"result{suffix}")
 
     assert path.is_file()
+    assert result.sequence_waveforms["rf_b1_gauss"][0] == pytest.approx(1.0)
+    assert result.sequence_waveforms["gradient_t_per_m"][0] == pytest.approx(0.02)
+    assert result.physical_field_maps["effective_peak_b1_gauss"][0] == pytest.approx(
+        0.5
+    )
     if suffix == ".npz":
         with np.load(path, allow_pickle=False) as data:
             assert np.array_equal(data["signal"], result.signal)
+            assert data["rf_b1_gauss"][0] == pytest.approx(1.0)
+            assert data["gradient_t_per_m"][0] == pytest.approx(0.02)
+            assert data["effective_peak_b1_gauss"][0] == pytest.approx(0.5)
     elif suffix == ".h5":
         import h5py
 
         with h5py.File(path, "r") as handle:
             assert np.array_equal(handle["signal"][...], result.signal)
+            assert handle["rf_b1_gauss"][0] == pytest.approx(1.0)
+            assert handle["gradient_t_per_m"][0] == pytest.approx(0.02)
+            assert handle["effective_peak_b1_gauss"][0] == pytest.approx(0.5)
     else:
         import xarray as xr
 
@@ -539,6 +566,10 @@ def test_sequence_result_export_formats(tmp_path, suffix):
             assert np.array_equal(signal, result.signal)
             assert np.array_equal(dataset.t, result.adc_times_s)
             assert all(axis in dataset.coords for axis in ("kx", "ky", "kz"))
+            assert dataset.rf_b1_gauss_real[0] == pytest.approx(1.0)
+            assert dataset.gradient_t_per_m[0] == pytest.approx(0.02)
+            assert dataset.effective_peak_b1_gauss[0] == pytest.approx(0.5)
+            assert dataset.gradient_t_per_m.attrs["units"] == "T/m"
 
 
 def test_sequence_result_bruker_raw_export_writes_interleaved_fid(tmp_path):

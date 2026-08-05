@@ -41,6 +41,7 @@ __pycache__/
 # Ignore all markdown files except README.md
 *.md
 !README.md
+!CHANGELOG.md
 !self_testing.md
 !USER_GUIDE.md
 !DEVELOPER_GUIDE.md

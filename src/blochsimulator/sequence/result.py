@@ -29,6 +29,8 @@ class SequenceSimulationResult:
     species_signal: Optional[np.ndarray] = None
     final_pool_magnetization: Optional[np.ndarray] = None
     checkpoint_pool_magnetization: Optional[np.ndarray] = None
+    sequence_waveforms: Dict[str, np.ndarray] = field(default_factory=dict)
+    physical_field_maps: Dict[str, np.ndarray] = field(default_factory=dict)
 
     @property
     def mx(self) -> np.ndarray:
@@ -142,6 +144,8 @@ class SequenceSimulationResult:
             "species_signal": self.species_signal,
             "final_pool_magnetization": self.final_pool_magnetization,
             "checkpoint_pool_magnetization": self.checkpoint_pool_magnetization,
+            "sequence_waveforms": self.sequence_waveforms,
+            "physical_field_maps": self.physical_field_maps,
             "metadata": self.metadata,
         }
 
@@ -170,6 +174,54 @@ class SequenceSimulationResult:
         }
         if self.signal.ndim == 2:
             coords["coil"] = np.arange(self.signal.shape[0])
+        waveform_dimensions = {
+            "rf_sample_time_s": "rf_sample",
+            "rf_sample_duration_s": "rf_sample",
+            "rf_event_index": "rf_sample",
+            "rf_nutation_hz": "rf_sample",
+            "rf_b1_gauss": "rf_sample",
+            "rf_b1_magnitude_gauss": "rf_sample",
+            "gradient_sample_time_s": "gradient_sample",
+            "gradient_sample_duration_s": "gradient_sample",
+            "gradient_event_index": "gradient_sample",
+            "gradient_axis_index": "gradient_sample",
+            "gradient_hz_per_m": "gradient_sample",
+            "gradient_t_per_m": "gradient_sample",
+        }
+        for name, dimension in waveform_dimensions.items():
+            if name not in self.sequence_waveforms:
+                continue
+            values = np.asarray(self.sequence_waveforms[name])
+            if values.ndim != 1:
+                raise ValueError(f"{name} must be one-dimensional")
+            data_vars[name] = (dimension, values)
+        tx_map = self.physical_field_maps.get("tx_sensitivity_map")
+        if tx_map is not None:
+            tx_map = np.asarray(tx_map)
+            if tx_map.shape != self.final_magnetization.shape[:-1]:
+                raise ValueError(
+                    "tx_sensitivity_map must match the result spatial shape"
+                )
+            data_vars["tx_sensitivity_map"] = (spatial_dims, tx_map)
+        rx_maps = self.physical_field_maps.get("rx_sensitivity_maps")
+        if rx_maps is not None:
+            rx_maps = np.asarray(rx_maps)
+            if rx_maps.shape[1:] != self.final_magnetization.shape[:-1]:
+                raise ValueError(
+                    "rx_sensitivity_maps must match the result spatial shape"
+                )
+            if "coil" in coords and len(coords["coil"]) != rx_maps.shape[0]:
+                raise ValueError("receive maps and result signal coil counts differ")
+            coords.setdefault("coil", np.arange(rx_maps.shape[0]))
+            data_vars["rx_sensitivity_maps"] = (("coil", *spatial_dims), rx_maps)
+        effective_b1 = self.physical_field_maps.get("effective_peak_b1_gauss")
+        if effective_b1 is not None:
+            effective_b1 = np.asarray(effective_b1, dtype=float)
+            if effective_b1.shape != self.final_magnetization.shape[:-1]:
+                raise ValueError(
+                    "effective_peak_b1_gauss must match the result spatial shape"
+                )
+            data_vars["effective_peak_b1_gauss"] = (spatial_dims, effective_b1)
         dimensions = self.acquisition_dimensions
         if dimensions is not None:
             event_counts = np.asarray(
@@ -524,6 +576,27 @@ class SequenceSimulationResult:
         dataset = xr.Dataset(data_vars, coords=coords, attrs=attrs)
         dataset["t"].attrs.update(long_name="ADC sample time", units="s")
         dataset["adc_time_s"].attrs.update(long_name="ADC sample time", units="s")
+        waveform_units = {
+            "rf_sample_time_s": "s",
+            "rf_sample_duration_s": "s",
+            "rf_nutation_hz": "Hz",
+            "rf_b1_gauss": "G",
+            "rf_b1_magnitude_gauss": "G",
+            "gradient_sample_time_s": "s",
+            "gradient_sample_duration_s": "s",
+            "gradient_hz_per_m": "Hz/m",
+            "gradient_t_per_m": "T/m",
+            "tx_sensitivity_map": "relative",
+            "rx_sensitivity_maps": "relative",
+            "effective_peak_b1_gauss": "G",
+        }
+        for name, unit in waveform_units.items():
+            if name in dataset:
+                dataset[name].attrs["units"] = unit
+        if "gradient_axis_index" in dataset:
+            dataset["gradient_axis_index"].attrs.update(
+                long_name="physical gradient axis", axis_codes="0=x, 1=y, 2=z"
+            )
         for axis in ("kx", "ky", "kz"):
             if axis in dataset.coords:
                 dataset[axis].attrs.update(
@@ -579,6 +652,18 @@ class SequenceSimulationResult:
             "final_magnetization": self.final_magnetization,
             "checkpoint_times_s": self.checkpoint_times_s,
         }
+        arrays.update(
+            {
+                name: np.asarray(values)
+                for name, values in self.sequence_waveforms.items()
+            }
+        )
+        arrays.update(
+            {
+                name: np.asarray(values)
+                for name, values in self.physical_field_maps.items()
+            }
+        )
         if self.checkpoint_magnetization is not None:
             arrays["checkpoint_magnetization"] = self.checkpoint_magnetization
         if self.adc_gradient_moment_cyc_per_m is not None:

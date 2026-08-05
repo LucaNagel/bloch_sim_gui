@@ -62,6 +62,7 @@ from ..visualization import (
     imageio as vz_imageio,
 )
 from ..slice_explorer import SliceSelectionExplorer
+from ..project_io import load_project, save_project
 
 # Import phantom/kspace if available
 try:
@@ -93,6 +94,7 @@ from .tutorial_overlay import TutorialOverlay
 from .dialogs import SettingsDialog
 from .default_settings import WorkspaceDefaults
 from .sequence_simulation_widget import SequenceSimulationWidget
+from .b1_widgets import B1PhantomCombinationWidget, B1WorkspaceWidget
 
 
 def _view_title(text: str) -> QLabel:
@@ -104,6 +106,40 @@ def _view_title(text: str) -> QLabel:
     label.setFont(font)
     label.setVisible(False)
     return label
+
+
+def _capture_widget_state(owner):
+    """Capture direct, user-editable Qt attributes without serializing Qt itself."""
+    state = {}
+    for name, widget in vars(owner).items():
+        if isinstance(widget, QComboBox):
+            state[name] = {
+                "type": "combo",
+                "index": widget.currentIndex(),
+                "text": widget.currentText(),
+            }
+        elif isinstance(widget, (QSpinBox, QDoubleSpinBox, QSlider)):
+            state[name] = {"type": "value", "value": widget.value()}
+        elif isinstance(widget, QCheckBox):
+            state[name] = {"type": "checked", "value": widget.isChecked()}
+    return state
+
+
+def _restore_widget_state(owner, state):
+    for name, saved in state.items():
+        widget = getattr(owner, name, None)
+        if widget is None:
+            continue
+        kind = saved.get("type")
+        if kind == "combo" and isinstance(widget, QComboBox):
+            index = widget.findText(saved.get("text", ""))
+            widget.setCurrentIndex(index if index >= 0 else int(saved.get("index", 0)))
+        elif kind == "value" and isinstance(
+            widget, (QSpinBox, QDoubleSpinBox, QSlider)
+        ):
+            widget.setValue(saved["value"])
+        elif kind == "checked" and isinstance(widget, QCheckBox):
+            widget.setChecked(bool(saved["value"]))
 
 
 def get_app_data_dir() -> Path:
@@ -1131,6 +1167,36 @@ class BlochSimulatorGUI(QMainWindow):
             self.phantom_widget = None
             self.phantom_tab_index = -1
 
+        # === SPATIAL B1 FIELD TAB ===
+        self.b1_widget = None
+        self.b1_placeholder = QWidget()
+        self.b1_placeholder.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        b1_layout = QVBoxLayout(self.b1_placeholder)
+        b1_layout.setContentsMargins(0, 0, 0, 0)
+        b1_layout.addWidget(
+            QLabel("Open this tab to initialize the transmit/receive B1 workspace.")
+        )
+        b1_layout.addStretch()
+        self.b1_tab_index = self.tab_widget.addTab(self.b1_placeholder, "B1 Fields")
+        self.tab_widget.currentChanged.connect(self._ensure_b1_workspace)
+
+        # === PHANTOM + B1 COMBINATION TAB ===
+        self.b1_combo_widget = None
+        self.b1_combo_placeholder = QWidget()
+        self.b1_combo_placeholder.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Ignored
+        )
+        combo_layout = QVBoxLayout(self.b1_combo_placeholder)
+        combo_layout.setContentsMargins(0, 0, 0, 0)
+        combo_layout.addWidget(
+            QLabel("Open this tab to initialize the 3D Phantom/B1 alignment view.")
+        )
+        combo_layout.addStretch()
+        self.b1_combo_tab_index = self.tab_widget.addTab(
+            self.b1_combo_placeholder, "Phantom + B1"
+        )
+        self.tab_widget.currentChanged.connect(self._ensure_b1_combo_workspace)
+
         # === K-SPACE TAB (Signal-based simulation) ===
         if KSPACE_AVAILABLE:
 
@@ -1305,16 +1371,90 @@ class BlochSimulatorGUI(QMainWindow):
         layout.addWidget(self.phantom_widget)
         self._connect_phantom_sequence_workspaces()
 
-    def _connect_phantom_sequence_workspaces(self):
-        """Keep the Sequence Simulation phantom summary synchronized."""
-        sequence_widget = getattr(self, "sequence_simulation_widget", None)
-        phantom_widget = getattr(self, "phantom_widget", None)
-        if sequence_widget is None or phantom_widget is None:
+    def _ensure_b1_workspace(self, index: int):
+        """Create the B1 editors only when their focused tab is opened."""
+        if index != getattr(self, "b1_tab_index", -1) or self.b1_widget is not None:
             return
-        phantom_widget.phantom_creator.phantom_created.connect(
-            sequence_widget.refresh_object_summary
+        layout = self.b1_placeholder.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+        self.b1_widget = B1WorkspaceWidget(self)
+        layout.addWidget(self.b1_widget)
+        self.b1_widget.fields_changed.connect(self._on_b1_fields_changed)
+        self.b1_widget.phantom_updated.connect(self._on_b1_phantom_updated)
+        phantom_widget = getattr(self, "phantom_widget", None)
+        self.b1_widget.set_phantom(
+            None if phantom_widget is None else phantom_widget.current_phantom
         )
-        sequence_widget.refresh_object_summary()
+        self._on_b1_fields_changed(
+            self.b1_widget.tx_field,
+            self.b1_widget.rx_field,
+        )
+
+    def _ensure_b1_combo_workspace(self, index: int):
+        """Create the combined OpenGL view only when its tab is opened."""
+        if (
+            index != getattr(self, "b1_combo_tab_index", -1)
+            or self.b1_combo_widget is not None
+        ):
+            return
+        layout = self.b1_combo_placeholder.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+        self.b1_combo_widget = B1PhantomCombinationWidget(self)
+        layout.addWidget(self.b1_combo_widget)
+        phantom_widget = getattr(self, "phantom_widget", None)
+        self.b1_combo_widget.set_phantom(
+            None if phantom_widget is None else phantom_widget.current_phantom
+        )
+        b1_widget = getattr(self, "b1_widget", None)
+        self.b1_combo_widget.set_fields(
+            None if b1_widget is None else b1_widget.tx_field,
+            None if b1_widget is None else b1_widget.rx_field,
+        )
+
+    def _connect_phantom_sequence_workspaces(self):
+        """Keep all focused workspaces synchronized to the shared phantom."""
+        phantom_widget = getattr(self, "phantom_widget", None)
+        if phantom_widget is None:
+            return
+        try:
+            phantom_widget.phantom_creator.phantom_created.connect(
+                self._on_shared_phantom_changed,
+                type=Qt.UniqueConnection,
+            )
+        except TypeError:
+            pass
+        self._on_shared_phantom_changed(phantom_widget.current_phantom)
+
+    def _on_shared_phantom_changed(self, phantom):
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        if sequence_widget is not None:
+            sequence_widget.refresh_object_summary()
+        b1_widget = getattr(self, "b1_widget", None)
+        if b1_widget is not None:
+            b1_widget.set_phantom(phantom)
+        combo_widget = getattr(self, "b1_combo_widget", None)
+        if combo_widget is not None:
+            combo_widget.set_phantom(phantom)
+
+    def _on_b1_fields_changed(self, tx_field, rx_field):
+        combo_widget = getattr(self, "b1_combo_widget", None)
+        if combo_widget is not None:
+            combo_widget.set_fields(tx_field, rx_field)
+
+    def _on_b1_phantom_updated(self, _phantom):
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        if sequence_widget is not None:
+            sequence_widget.refresh_object_summary()
 
     def _configure_main_tab_tooltips(self):
         """Describe every main workspace tab, including focused-mode tabs."""
@@ -1345,6 +1485,13 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             "Phantom": (
                 "Create, load, edit, and inspect spatial or spectroscopic phantoms."
+            ),
+            "B1 Fields": (
+                "Define, load, stretch, rotate, preview, and apply transmit B1+ "
+                "and receive B1− fields."
+            ),
+            "Phantom + B1": (
+                "Inspect the phantom and the transformed B1 field together in 3D."
             ),
             "📡 K-Space": "Simulate and inspect sampled k-space data.",
             "Parameter Sweep": (
@@ -3832,6 +3979,18 @@ class BlochSimulatorGUI(QMainWindow):
         file_menu = menubar.addMenu("File")
         file_menu.setObjectName("menu_file")
 
+        open_project_action = file_menu.addAction("Open Project…")
+        open_project_action.setObjectName("action_open_project")
+        open_project_action.setShortcut("Ctrl+O")
+        open_project_action.triggered.connect(self.open_project)
+
+        save_project_action = file_menu.addAction("Save Project…")
+        save_project_action.setObjectName("action_save_project")
+        save_project_action.setShortcut("Ctrl+S")
+        save_project_action.triggered.connect(self.save_project)
+
+        file_menu.addSeparator()
+
         load_action = file_menu.addAction("Load Parameters")
         load_action.setObjectName("action_load_params")
         load_action.triggered.connect(self.load_parameters)
@@ -4015,6 +4174,8 @@ class BlochSimulatorGUI(QMainWindow):
             if current not in {
                 self.sequence_simulation_tab_index,
                 self.phantom_tab_index,
+                self.b1_tab_index,
+                self.b1_combo_tab_index,
             }:
                 self._free_mode_tab_index = current
 
@@ -4046,6 +4207,8 @@ class BlochSimulatorGUI(QMainWindow):
             allowed_sequence_tabs = {
                 self.sequence_simulation_tab_index,
                 self.phantom_tab_index,
+                self.b1_tab_index,
+                self.b1_combo_tab_index,
             }
             for index in range(self.tab_widget.count()):
                 self._set_main_tab_visible(index, index in allowed_sequence_tabs)
@@ -4053,13 +4216,15 @@ class BlochSimulatorGUI(QMainWindow):
             if sequence_widget is not None:
                 sequence_widget.activate_focused_workspace_layout()
         else:
-            # Reveal Free Mode tabs first, then leave the two focused Sequence
+            # Reveal Free Mode tabs first, then leave the focused Sequence
             # Mode workspaces hidden. Selecting the restored tab before hiding
             # either current tab prevents re-entrant workspace activation.
             for index in range(self.tab_widget.count()):
                 if index not in {
                     self.sequence_simulation_tab_index,
                     self.phantom_tab_index,
+                    self.b1_tab_index,
+                    self.b1_combo_tab_index,
                 }:
                     self._set_main_tab_visible(index, True)
             self.main_splitter.setSizes([420, max(1, self.width() - 420)])
@@ -4080,6 +4245,8 @@ class BlochSimulatorGUI(QMainWindow):
             self.tab_widget.setCurrentIndex(restore_index)
             self._set_main_tab_visible(self.sequence_simulation_tab_index, False)
             self._set_main_tab_visible(self.phantom_tab_index, False)
+            self._set_main_tab_visible(self.b1_tab_index, False)
+            self._set_main_tab_visible(self.b1_combo_tab_index, False)
             free_geometry = getattr(self, "_free_workspace_geometry", None)
             if previous_mode == "sequence" and free_geometry is not None:
                 # Opening the much larger focused workspace must not permanently
@@ -4783,6 +4950,177 @@ class BlochSimulatorGUI(QMainWindow):
                 min(mz_min, -initial_mag),
                 max(mz_max, initial_mag),
             )
+
+    def _complete_project_state(self):
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        phantom_widget = getattr(self, "phantom_widget", None)
+        b1_widget = getattr(self, "b1_widget", None)
+        return {
+            "application_version": __version__,
+            "workspace_mode": getattr(self, "workspace_mode", "free"),
+            "active_tab": self.tab_widget.currentIndex(),
+            "tissue": self.tissue_widget.get_state(),
+            "rf": self.rf_designer.get_state(),
+            "sequence": self.sequence_designer.get_state(),
+            "simulation": self._collect_simulation_parameters(internal_format=True),
+            "main_controls": _capture_widget_state(self),
+            "sequence_controls": (
+                _capture_widget_state(sequence_widget)
+                if sequence_widget is not None
+                else {}
+            ),
+            "phantom_controls": (
+                _capture_widget_state(phantom_widget.phantom_creator)
+                if phantom_widget is not None
+                else {}
+            ),
+            "b1_controls": (
+                _capture_widget_state(b1_widget) if b1_widget is not None else {}
+            ),
+            "b1_tx_controls": (
+                _capture_widget_state(b1_widget.tx_editor)
+                if b1_widget is not None
+                else {}
+            ),
+            "b1_rx_controls": (
+                _capture_widget_state(b1_widget.rx_editor)
+                if b1_widget is not None
+                else {}
+            ),
+        }
+
+    def save_project(self):
+        """Save all settings, loaded assets, programs, and results in one file."""
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        default_path = (
+            self._get_export_directory() / f"bloch_project_{timestamp}.blochproj"
+        )
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Save Project", str(default_path), "Bloch projects (*.blochproj)"
+        )
+        if not filename:
+            return
+        if not filename.lower().endswith(".blochproj"):
+            filename += ".blochproj"
+        try:
+            phantom_widget = getattr(self, "phantom_widget", None)
+            phantom = None if phantom_widget is None else phantom_widget.current_phantom
+            b1_widget = getattr(self, "b1_widget", None)
+            sequence_widget = getattr(self, "sequence_simulation_widget", None)
+            legacy_result = None
+            if self.last_result is not None:
+                legacy_result = dict(self.last_result)
+                legacy_result["_project_positions"] = self.last_positions
+                legacy_result["_project_frequencies"] = self.last_frequencies
+                legacy_result["_project_effective_frequencies"] = (
+                    self.last_effective_frequencies
+                )
+            save_project(
+                filename,
+                self._complete_project_state(),
+                phantom,
+                None if b1_widget is None else b1_widget.tx_field,
+                None if b1_widget is None else b1_widget.rx_field,
+                None if sequence_widget is None else sequence_widget.program,
+                legacy_result,
+                None if sequence_widget is None else sequence_widget.result,
+            )
+            self.statusBar().showMessage(f"Project saved: {Path(filename).name}", 7000)
+            self.log_message(f"Project saved to {filename}")
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Save Project Error", f"The project could not be saved:\n{exc}"
+            )
+
+    def open_project(self):
+        """Restore a complete project and refresh all affected workspaces."""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Project",
+            str(self._get_export_directory()),
+            "Bloch projects (*.blochproj);;All files (*)",
+        )
+        if not filename:
+            return
+        try:
+            project = load_project(filename)
+            state = project["state"]
+            self.tissue_widget.set_state(state.get("tissue", {}))
+            self.rf_designer.set_state(state.get("rf", {}))
+            self.sequence_designer.set_state(state.get("sequence", {}))
+            _restore_widget_state(self, state.get("main_controls", {}))
+
+            # Instantiate lazy workspaces before assigning their stored objects.
+            if getattr(self, "phantom_widget", None) is None:
+                self._ensure_phantom_workspace(self.phantom_tab_index)
+            if getattr(self, "b1_widget", None) is None:
+                self._ensure_b1_workspace(self.b1_tab_index)
+            if getattr(self, "sequence_simulation_widget", None) is None:
+                self._ensure_sequence_simulation_workspace(
+                    self.sequence_simulation_tab_index
+                )
+
+            _restore_widget_state(
+                self.phantom_widget.phantom_creator, state.get("phantom_controls", {})
+            )
+            _restore_widget_state(self.b1_widget, state.get("b1_controls", {}))
+            _restore_widget_state(
+                self.b1_widget.tx_editor, state.get("b1_tx_controls", {})
+            )
+            _restore_widget_state(
+                self.b1_widget.rx_editor, state.get("b1_rx_controls", {})
+            )
+
+            phantom = project["phantom"]
+            if phantom is not None:
+                self.phantom_widget.phantom_creator.current_phantom = phantom
+                self.phantom_widget.phantom_creator._update_info()
+                self.phantom_widget.phantom_creator.save_btn.setEnabled(True)
+                self.phantom_widget.phantom_creator._update_edit_button()
+                self.phantom_widget._on_phantom_created(phantom)
+                self.phantom_widget.phantom_creator.phantom_created.emit(phantom)
+
+            if project["tx_field"] is not None:
+                self.b1_widget.tx_editor.set_field(project["tx_field"])
+            if project["rx_field"] is not None:
+                self.b1_widget.rx_editor.set_field(project["rx_field"])
+
+            sequence_widget = self.sequence_simulation_widget
+            _restore_widget_state(sequence_widget, state.get("sequence_controls", {}))
+            if project["program"] is not None:
+                sequence_widget.program = project["program"]
+                sequence_widget._generated_pulseq_sequence = None
+                sequence_widget._infer_current_acquisition()
+                sequence_widget._apply_probe_defaults_from_program()
+                sequence_widget._configure_frame_selector()
+                sequence_widget._configure_spectroscopy_selectors()
+                sequence_widget._show_program()
+            if project["sequence_result"] is not None:
+                sequence_widget.phantom = phantom
+                sequence_widget._finished(project["sequence_result"])
+
+            legacy_result = project["legacy_result"]
+            if legacy_result is not None:
+                self.last_positions = legacy_result.pop("_project_positions", None)
+                self.last_frequencies = legacy_result.pop("_project_frequencies", None)
+                self.last_effective_frequencies = legacy_result.pop(
+                    "_project_effective_frequencies", None
+                )
+                self.update_plots(legacy_result)
+
+            mode = state.get("workspace_mode", "free")
+            self.set_workspace_mode(mode if mode in {"free", "sequence"} else "free")
+            tab = int(state.get("active_tab", 0))
+            self.tab_widget.setCurrentIndex(
+                max(0, min(tab, self.tab_widget.count() - 1))
+            )
+            self.statusBar().showMessage(f"Project loaded: {Path(filename).name}", 7000)
+            self.log_message(f"Project loaded from {filename}")
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Open Project Error", f"The project could not be loaded:\n{exc}"
+            )
+            self.log_message(f"Error loading project: {exc}")
 
     def load_parameters(self):
         """Load simulation parameters from file."""

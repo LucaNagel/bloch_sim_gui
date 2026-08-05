@@ -1520,6 +1520,31 @@ def _rf_rotate(state, rf_hz, duration):
         )
 
 
+def _rf_rotate_spatial(state, rf_hz, tx_sensitivity, duration):
+    """Apply one RF rotation with a complex per-voxel transmit profile."""
+    effective_rf = complex(rf_hz) * np.asarray(tx_sensitivity)
+    nx = -2.0 * np.pi * effective_rf.real * float(duration)
+    ny = 2.0 * np.pi * effective_rf.imag * float(duration)
+    angle = np.hypot(nx, ny)
+    nonzero = angle > 0.0
+    safe_angle = np.where(nonzero, angle, 1.0)
+    axis_x = np.where(nonzero, nx / safe_angle, 1.0).astype(state.dtype, copy=False)
+    axis_y = np.where(nonzero, ny / safe_angle, 0.0).astype(state.dtype, copy=False)
+    cosine = np.cos(angle).astype(state.dtype, copy=False)
+    sine = np.sin(angle).astype(state.dtype, copy=False)
+    for pool in range(2):
+        vectors = state[pool]
+        value_x = vectors[:, 0].copy()
+        value_y = vectors[:, 1].copy()
+        value_z = vectors[:, 2].copy()
+        parallel = value_x * axis_x + value_y * axis_y
+        perpendicular = -value_x * axis_y + value_y * axis_x
+        rotated_perpendicular = perpendicular * cosine - value_z * sine
+        vectors[:, 0] = parallel * axis_x - rotated_perpendicular * axis_y
+        vectors[:, 1] = parallel * axis_y + rotated_perpendicular * axis_x
+        vectors[:, 2] = perpendicular * sine + value_z * cosine
+
+
 def simulate_dynamic_sequence(
     program,
     phantom: DynamicSpectralPhantom,
@@ -1545,6 +1570,8 @@ def simulate_dynamic_sequence(
         AcquisitionDimensions,
         SequenceCompiler,
         SequenceSimulationResult,
+        physical_b1_field_arrays,
+        physical_sequence_waveforms,
     )
     from .sequence.acquisition import (
         CartesianAcquisitionFrames,
@@ -1628,6 +1655,35 @@ def simulate_dynamic_sequence(
         .copy()
     )
     positions = np.asarray(phantom.positions[active], dtype=np.float64)
+    tx_map = getattr(phantom, "tx_sensitivity_map", None)
+    if tx_map is None:
+        tx_sensitivity = np.ones(active.size, dtype=np.complex128)
+    else:
+        tx_map = np.asarray(tx_map, dtype=np.complex128)
+        if tx_map.shape != phantom.shape or not np.all(np.isfinite(tx_map)):
+            raise ValueError(
+                "dynamic phantom Tx sensitivity must be finite and match its shape"
+            )
+        tx_sensitivity = tx_map.ravel()[active]
+    spatial_tx_active = not np.all(tx_sensitivity == (1.0 + 0.0j))
+    rx_maps = getattr(phantom, "rx_sensitivity_maps", None)
+    if rx_maps is None:
+        rx_sensitivities = np.ones((1, active.size), dtype=np.complex128)
+    else:
+        rx_maps = np.asarray(rx_maps, dtype=np.complex128)
+        if (
+            rx_maps.ndim != 4
+            or rx_maps.shape[0] < 1
+            or rx_maps.shape[1:] != phantom.shape
+            or not np.all(np.isfinite(rx_maps))
+        ):
+            raise ValueError(
+                "dynamic phantom Rx sensitivities must have finite shape "
+                "(coil, *phantom.shape)"
+            )
+        rx_sensitivities = rx_maps.reshape(rx_maps.shape[0], -1)[:, active]
+    n_rx_coils = int(rx_sensitivities.shape[0])
+    unity_single_rx = n_rx_coils == 1 and np.all(rx_sensitivities == (1.0 + 0.0j))
     coefficient_kpl = np.asarray(
         phantom.kpl_map_s_inv.ravel()[active], dtype=np.float64
     )
@@ -1689,7 +1745,12 @@ def simulate_dynamic_sequence(
         dynamic_b0_pool_scale = np.asarray(
             phantom.dynamic_b0.pool_scale, dtype=np.float64
         )[:, None]
-    species_signal = np.zeros((2, compiled.adc_times_s.size), dtype=complex_dtype)
+    species_signal_shape = (
+        (2, compiled.adc_times_s.size)
+        if n_rx_coils == 1
+        else (2, n_rx_coils, compiled.adc_times_s.size)
+    )
+    species_signal = np.zeros(species_signal_shape, dtype=complex_dtype)
     if signal_weighting not in {"voxel", "voxel_volume"}:
         raise ValueError("signal_weighting must be 'voxel' or 'voxel_volume'")
     signal_scale = real_type(
@@ -1736,9 +1797,21 @@ def simulate_dynamic_sequence(
                     if transverse_state is None
                     else transverse_state[pool]
                 )
-                species_signal[pool, adc_cursor] = (
-                    np.sum(transverse) * signal_scale * demodulation
-                )
+                if n_rx_coils == 1:
+                    received = (
+                        np.sum(transverse)
+                        if unity_single_rx
+                        else np.sum(transverse * rx_sensitivities[0])
+                    )
+                    species_signal[pool, adc_cursor] = (
+                        received * signal_scale * demodulation
+                    )
+                else:
+                    species_signal[pool, :, adc_cursor] = (
+                        np.sum(rx_sensitivities * transverse[None, :], axis=1)
+                        * signal_scale
+                        * demodulation
+                    )
             adc_cursor += 1
         while (
             checkpoint_cursor < compiled.checkpoint_state_indices.size
@@ -1812,7 +1885,11 @@ def simulate_dynamic_sequence(
     native_block_enabled = native_block_table_limit_bytes >= active.size * 8
     if not native_block_enabled:
         native_threads = 1
-    if status_callback is not None and native_rf_rotation_block is not None:
+    if (
+        status_callback is not None
+        and native_rf_rotation_block is not None
+        and not spatial_tx_active
+    ):
         status_callback(
             f"Using the strict native RF voxel-block kernel with "
             f"{native_rf_threads} thread(s) for {active.size:,} active voxels."
@@ -1957,7 +2034,10 @@ def simulate_dynamic_sequence(
                 source_start,
                 source_mid,
             )
-            _rf_rotate(state, rf_hz[interval], dt)
+            if spatial_tx_active and rf_hz[interval] != 0.0:
+                _rf_rotate_spatial(state, rf_hz[interval], tx_sensitivity, dt)
+            else:
+                _rf_rotate(state, rf_hz[interval], dt)
             source_mid, source_end = source_values(interval_mid, interval_end)
             _free_step(
                 state,
@@ -2089,7 +2169,16 @@ def simulate_dynamic_sequence(
                         regular_mode,
                     )
             if rf_hz[interval] != 0.0:
-                if native_rf_rotation_block is None:
+                if spatial_tx_active:
+                    sync_transverse_to_state()
+                    _rf_rotate_spatial(
+                        state,
+                        rf_hz[interval],
+                        tx_sensitivity,
+                        dt,
+                    )
+                    transverse_state[:] = state[:, :, 0] + 1j * state[:, :, 1]
+                elif native_rf_rotation_block is None:
                     sync_transverse_to_state()
                     if real_dtype == np.dtype(np.float32):
                         _rf_rotate_float32(
@@ -2226,6 +2315,8 @@ def simulate_dynamic_sequence(
             ).to_metadata()
         except ValueError:
             cartesian_volume_metadata = None
+    sequence_waveforms = physical_sequence_waveforms(program, effective_nucleus)
+    physical_field_maps = physical_b1_field_arrays(phantom, sequence_waveforms)
     return SequenceSimulationResult(
         signal=species_signal.sum(axis=0),
         adc_times_s=compiled.adc_times_s,
@@ -2246,10 +2337,15 @@ def simulate_dynamic_sequence(
             "sequence_definitions": dict(program.metadata.get("definitions", {})),
             "field_strength_t": field,
             "nucleus": effective_nucleus,
+            "physical_waveform_nucleus": effective_nucleus,
+            "physical_rf_unit": "G",
+            "physical_gradient_unit": "T/m",
             "spectral_reference_ppm": phantom.spectral_reference_ppm,
             "spectral_bandwidth_ppm": phantom.spectral_bandwidth_ppm,
             "spectral_points": phantom.spectral_points,
             "signal_weighting": signal_weighting,
+            "tx_sensitivity": "spatial" if spatial_tx_active else "uniform",
+            "n_rx_coils": n_rx_coils,
             "simulation_precision": simulation_precision,
             "state_dtype": real_dtype.name,
             "signal_dtype": complex_dtype.name,
@@ -2263,9 +2359,12 @@ def simulate_dynamic_sequence(
             "native_rf_threads": (
                 native_rf_threads
                 if sequence_kernel in {"native_serial", "native_parallel"}
+                and not spatial_tx_active
                 else 1
             ),
-            "native_rf_block_enabled": native_rf_rotation_block is not None,
+            "native_rf_block_enabled": (
+                native_rf_rotation_block is not None and not spatial_tx_active
+            ),
             "native_parallel_threshold": native_parallel_threshold,
             "native_block_interval_limit": native_block_interval_limit,
             "native_block_table_limit_bytes": native_block_table_limit_bytes,
@@ -2295,4 +2394,6 @@ def simulate_dynamic_sequence(
         species_signal=species_signal,
         final_pool_magnetization=final_pool,
         checkpoint_pool_magnetization=checkpoint_pool,
+        sequence_waveforms=sequence_waveforms,
+        physical_field_maps=physical_field_maps,
     )

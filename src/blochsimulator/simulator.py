@@ -2048,6 +2048,8 @@ class BlochSimulator:
             checkpoint_times_s=first_result.checkpoint_times_s,
             metadata=metadata,
             adc_gradient_moment_cyc_per_m=(first_result.adc_gradient_moment_cyc_per_m),
+            sequence_waveforms=first_result.sequence_waveforms,
+            physical_field_maps=first_result.physical_field_maps,
         )
 
     def simulate_dynamic_sequence(self, program, phantom, **kwargs):
@@ -2417,7 +2419,11 @@ class BlochSimulator:
             )
 
         signal = coil_signal[0] if n_rx_coils == 1 else coil_signal
-        from .sequence import AcquisitionDimensions
+        from .sequence import (
+            AcquisitionDimensions,
+            physical_b1_field_arrays,
+            physical_sequence_waveforms,
+        )
         from .sequence.acquisition import (
             CartesianAcquisitionFrames,
             infer_cartesian_acquisition,
@@ -2489,6 +2495,16 @@ class BlochSimulator:
                 ).to_metadata()
             except ValueError:
                 cartesian_volume_metadata = None
+        definitions = dict(program.metadata.get("definitions", {}))
+        physical_nucleus = str(
+            phantom.metadata.get("nucleus") or definitions.get("nucleus") or "H1"
+        )
+        from .units import NUCLEUS_GAMMA_HZ_PER_T
+
+        if physical_nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
+            physical_nucleus = "H1"
+        sequence_waveforms = physical_sequence_waveforms(program, physical_nucleus)
+        physical_field_maps = physical_b1_field_arrays(phantom, sequence_waveforms)
         result = SequenceSimulationResult(
             signal=signal,
             adc_times_s=compiled.adc_times_s,
@@ -2521,7 +2537,10 @@ class BlochSimulator:
                 "cartesian_acquisition_frames": cartesian_frame_metadata,
                 "cartesian_acquisition_volumes": cartesian_volume_metadata,
                 "spiral_acquisition": spiral_metadata,
-                "sequence_definitions": dict(program.metadata.get("definitions", {})),
+                "sequence_definitions": definitions,
+                "physical_waveform_nucleus": physical_nucleus,
+                "physical_rf_unit": "G",
+                "physical_gradient_unit": "T/m",
                 "ideal_spoiling_applied": bool(compiled.transverse_crush_times_s.size),
                 "ideal_spoiler_end_times_s": (
                     compiled.transverse_crush_times_s.tolist()
@@ -2536,6 +2555,8 @@ class BlochSimulator:
                     "rx_sensitivity": "dimensionless complex receive scale",
                 },
             },
+            sequence_waveforms=sequence_waveforms,
+            physical_field_maps=physical_field_maps,
         )
         self.last_result = result.to_dict()
         self.last_result["phantom"] = phantom

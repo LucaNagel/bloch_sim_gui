@@ -445,15 +445,30 @@ class SpectralPhantomDesignerDialog(QDialog):
             self.b0_ppm,
         ):
             widget.valueChanged.connect(self._properties_changed)
-        form.addRow("X centre", self.x_center)
-        form.addRow("Y centre", self.y_center)
-        form.addRow("Z centre", self.z_center)
-        form.addRow("X size", self.x_size)
-        form.addRow("Y size", self.y_size)
+        geometry_grid = QGridLayout()
+        geometry_grid.setHorizontalSpacing(10)
+        geometry_grid.setVerticalSpacing(6)
+        geometry_grid.setContentsMargins(0, 4, 0, 4)
+        for column, heading in enumerate(("Centre", "Size", "Rotation"), start=1):
+            label = QLabel(heading)
+            label.setAlignment(Qt.AlignCenter)
+            geometry_grid.addWidget(label, 0, column)
+        center_spins = (self.x_center, self.y_center, self.z_center)
+        size_spins = (self.x_size, self.y_size, self.z_size)
+        for row, (axis, center, size, rotation) in enumerate(
+            zip("XYZ", center_spins, size_spins, self.rotation_spins), start=1
+        ):
+            axis_label = QLabel(axis)
+            axis_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            geometry_grid.addWidget(axis_label, row, 0)
+            geometry_grid.addWidget(center, row, 1)
+            geometry_grid.addWidget(size, row, 2)
+            geometry_grid.addWidget(rotation, row, 3)
+        form.addRow(geometry_grid)
+
+        # Retained as a semantic label for code inspecting the cylinder control;
+        # the visible grid row stays consistently labelled "Z".
         self.z_size_label = QLabel("Z size")
-        form.addRow(self.z_size_label, self.z_size)
-        for axis, rotation in zip("XYZ", self.rotation_spins):
-            form.addRow(f"Rotation {axis}", rotation)
         form.addRow("Default T1", self.t1_ms)
         form.addRow("Initial HP Mz scale", self.initial_mz)
         form.addRow("B0 inhomogeneity", self.b0_ppm)

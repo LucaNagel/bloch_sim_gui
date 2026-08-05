@@ -38,7 +38,14 @@ from .convergence_suite import (
     make_spin_echo_case,
     run_sequence_convergence_suite,
 )
-from .model import ADCEvent, GradientEvent, RFEvent, SequenceProgram
+from .model import (
+    ADCEvent,
+    GradientEvent,
+    RFEvent,
+    SequenceProgram,
+    physical_b1_field_arrays,
+    physical_sequence_waveforms,
+)
 from .encoding import EncodingFrame, resolve_encoding_frame
 from .flip_angles import VFA_REFERENCE_DOI, variable_flip_angle_schedule
 from .probe import SequenceProbeResult
@@ -94,6 +101,8 @@ __all__ = [
     "SequenceConvergenceSuiteResult",
     "SequenceProbeResult",
     "SequenceProgram",
+    "physical_b1_field_arrays",
+    "physical_sequence_waveforms",
     "ScannerParameters",
     "ReferenceSimulationResult",
     "SequenceSimulationResult",

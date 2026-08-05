@@ -10,6 +10,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
+    QApplication,
     QComboBox,
     QDoubleSpinBox,
     QGridLayout,
@@ -33,6 +34,34 @@ except Exception:
     HAS_OPENGL = False
 
 
+class _SliceScrollViewBox(pg.ViewBox):
+    """Use an unmodified wheel/trackpad gesture to step through slices."""
+
+    def __init__(self, scroll_callback):
+        super().__init__(enableMenu=False)
+        self._scroll_callback = scroll_callback
+
+    def wheelEvent(self, event, axis=None):
+        modifier_getter = getattr(event, "modifiers", None)
+        modifiers = (
+            modifier_getter()
+            if callable(modifier_getter)
+            else QApplication.keyboardModifiers()
+        )
+        if modifiers == Qt.NoModifier:
+            delta_getter = getattr(event, "delta", None)
+            if callable(delta_getter):
+                delta = float(delta_getter())
+            else:
+                angle_delta = getattr(event, "angleDelta", lambda: None)()
+                delta = 0.0 if angle_delta is None else float(angle_delta.y())
+            if delta:
+                self._scroll_callback(1 if delta > 0 else -1)
+                event.accept()
+                return
+        super().wheelEvent(event, axis=axis)
+
+
 class VolumeViewerWidget(QWidget):
     """Show a scalar 3D volume as linked orthogonal planes and a point cloud."""
 
@@ -52,9 +81,13 @@ class VolumeViewerWidget(QWidget):
 
         slices = QWidget()
         slices_layout = QGridLayout(slices)
-        self.xy_view = self._image_view("Axial (XY)", "x", "y")
-        self.xz_view = self._image_view("Coronal (XZ)", "x", "z")
-        self.yz_view = self._image_view("Sagittal (YZ)", "y", "z")
+        self.slices_layout = slices_layout
+        slices_layout.setColumnStretch(0, 1)
+        slices_layout.setColumnStretch(1, 1)
+        slices_layout.setColumnStretch(2, 1)
+        self.xy_view = self._image_view("xy", "Axial (XY)", "x", "y")
+        self.xz_view = self._image_view("xz", "Coronal (XZ)", "x", "z")
+        self.yz_view = self._image_view("yz", "Sagittal (YZ)", "y", "z")
         self.slice_markers = {}
         viewer_ref = weakref.ref(self)
         for plane, view in (
@@ -81,23 +114,32 @@ class VolumeViewerWidget(QWidget):
         slices_layout.addWidget(self.xy_view, 0, 0)
         slices_layout.addWidget(self.xz_view, 0, 1)
         slices_layout.addWidget(self.yz_view, 0, 2)
-        controls = QWidget()
-        controls_layout = QGridLayout(controls)
         self.index_labels = []
         self.sliders = []
-        for row, axis in enumerate("XYZ"):
-            controls_layout.addWidget(QLabel(f"{axis} index"), row, 0)
+        self.slider_controls = []
+        for axis in "XYZ":
+            controls = QWidget()
+            controls_layout = QHBoxLayout(controls)
+            controls_layout.setContentsMargins(4, 0, 4, 0)
+            controls_layout.setSpacing(6)
+            controls_layout.addWidget(QLabel(f"{axis} index"))
             slider = QSlider(Qt.Horizontal)
-            slider.setMinimumWidth(220)
-            slider.setMaximumWidth(420)
+            slider.setMinimumWidth(80)
+            slider.setToolTip(
+                f"Select the {axis} slice. You can also scroll on the matching image."
+            )
             slider.valueChanged.connect(self._indices_updated)
             label = QLabel("0")
-            controls_layout.addWidget(slider, row, 1)
-            controls_layout.addWidget(label, row, 2)
+            label.setMinimumWidth(82)
+            controls_layout.addWidget(slider, 1)
+            controls_layout.addWidget(label)
             self.sliders.append(slider)
             self.index_labels.append(label)
-        controls.setMaximumWidth(720)
-        slices_layout.addWidget(controls, 1, 0, 1, 3, Qt.AlignHCenter)
+            self.slider_controls.append(controls)
+        # Each plane is moved along its orthogonal axis.
+        slices_layout.addWidget(self.slider_controls[2], 1, 0)
+        slices_layout.addWidget(self.slider_controls[1], 1, 1)
+        slices_layout.addWidget(self.slider_controls[0], 1, 2)
         self.tabs.addTab(slices, "Orthogonal slices")
 
         self.gl_view = None
@@ -118,7 +160,7 @@ class VolumeViewerWidget(QWidget):
             )
             self.gl_view.addItem(self.bounds)
             self.scatter = gl.GLScatterPlotItem(
-                pos=np.zeros((0, 3)), color=(1, 1, 1, 1), size=3
+                pos=np.zeros((0, 3)), color=(1, 1, 1, 1), size=5
             )
             self.gl_view.addItem(self.scatter)
             self.tabs.addTab(self.gl_view, "3D")
@@ -129,11 +171,21 @@ class VolumeViewerWidget(QWidget):
         self.info.setWordWrap(True)
         layout.addWidget(self.info)
 
-    @staticmethod
     def _image_view(
-        title: str, horizontal_axis: str, vertical_axis: str
+        self,
+        plane: str,
+        title: str,
+        horizontal_axis: str,
+        vertical_axis: str,
     ) -> pg.ImageView:
-        view = pg.ImageView()
+        viewer_ref = weakref.ref(self)
+
+        def scroll_slice(step, selected_plane=plane, ref=viewer_ref):
+            viewer = ref()
+            if viewer is not None:
+                viewer._slice_scrolled(selected_plane, step)
+
+        view = pg.ImageView(view=_SliceScrollViewBox(scroll_slice))
         view.ui.roiBtn.hide()
         view.ui.menuBtn.hide()
         compact_image_histogram(view)
@@ -143,7 +195,8 @@ class VolumeViewerWidget(QWidget):
         view.setObjectName(title)
         view.setToolTip(
             f"{title}; horizontal {horizontal_axis} [mm], "
-            f"vertical {vertical_axis} [mm]. Click to select a voxel."
+            f"vertical {vertical_axis} [mm]. Click to select a voxel; scroll or "
+            "swipe vertically to change the slice."
         )
         return view
 
@@ -276,6 +329,15 @@ class VolumeViewerWidget(QWidget):
         point = view_box.mapSceneToView(event.scenePos())
         self._select_plane_coordinates(plane, point.x(), point.y())
 
+    def _slice_scrolled(self, plane: str, step: int) -> None:
+        axis = {"xy": 2, "xz": 1, "yz": 0}.get(plane)
+        if axis is None:
+            raise ValueError("plane must be 'xy', 'xz', or 'yz'")
+        slider = self.sliders[axis]
+        slider.setValue(
+            int(np.clip(slider.value() + int(np.sign(step)), 0, slider.maximum()))
+        )
+
     def _select_plane_coordinates(
         self, plane: str, horizontal_mm: float, vertical_mm: float
     ) -> None:
@@ -351,7 +413,7 @@ class VolumeViewerWidget(QWidget):
         low, high = self._levels()
         normalized = np.clip((values - low) / max(high - low, 1e-15), 0, 1)
         colors = pg.colormap.get("viridis").map(normalized, mode="float")
-        size = max(2.0, 12.0 / np.cbrt(max(1, len(indices))))
+        size = max(4.5, 18.0 / np.cbrt(max(1, len(indices))))
         self.scatter.setData(
             pos=np.asarray(positions, dtype=np.float32),
             color=np.asarray(colors, dtype=np.float32),

@@ -29,7 +29,7 @@ from blochsimulator.sequence import (
     SpectroscopicAcquisition,
     load_pulseq,
 )
-from blochsimulator.units import rf_hz_to_gauss
+from blochsimulator.units import NUCLEUS_GAMMA_HZ_PER_T, rf_hz_to_gauss
 
 
 def _select_workspace(window, mode, timeout_ms=2_000):
@@ -1071,6 +1071,38 @@ def test_sequence_workspace_caps_overview_adc_markers():
     ]
     assert len(adc_items) == 1
     assert adc_items[0].xData.size <= 5000
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_workspace_can_display_physical_b1_and_gradient_units():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    gamma = NUCLEUS_GAMMA_HZ_PER_T["H1"]
+    widget.nucleus.setCurrentText("H1")
+    widget.program = SequenceProgram(
+        (
+            RFEvent(0.0, np.asarray([gamma / 1e4]), 1e-3),
+            GradientEvent("x", 0.0, np.asarray([gamma * 0.02]), 1e-3),
+        ),
+        duration_s=1e-3,
+    )
+    widget._acquisition_compiled = None
+
+    widget._show_program()
+
+    assert widget.waveform_units.currentData() == "physical"
+    assert "nominal peak B1 1 G" in widget.waveform_value_summary.text()
+    assert "Gx 0.02" in widget.waveform_value_summary.text()
+    assert np.nanmax(widget._rf_waveform_item.yData) == pytest.approx(1.0)
+    assert np.nanmax(widget._gradient_waveform_items["x"].yData) == pytest.approx(0.02)
+
+    widget.waveform_units.setCurrentIndex(widget.waveform_units.findData("simulation"))
+    assert np.nanmax(widget._rf_waveform_item.yData) == pytest.approx(gamma / 1e4)
+    assert np.nanmax(widget._gradient_waveform_items["x"].yData) == pytest.approx(
+        gamma * 0.02 * 1e-3
+    )
     widget.close()
     widget.deleteLater()
     app.processEvents()
