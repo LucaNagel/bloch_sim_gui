@@ -23,16 +23,20 @@ pool-resolved signal, final states, and checkpoint states.
   pyruvate inflow.
 - `native_serial` uses the optimized Python driver together with strictly
   compiled Cython primitives for longitudinal two-pool evolution and RF
-  rotation.  It currently supports static B0 without inflow and otherwise
-  falls back explicitly to `optimized`.
+  rotation.  With pyruvate inflow, delayed conversion, or explicit
+  concentration tracking it keeps RF rotation native and uses the optimized
+  NumPy longitudinal solver as a bit-identical hybrid path.  Dynamic B0 does
+  not require a longitudinal fallback.
 - `native_parallel` adds OpenMP voxel parallelism to the native block
   primitives.  ADC summation remains in NumPy and retains the original active
   voxel order.  Small objects use one thread because OpenMP startup and
   synchronization cost more than the available parallel work.
 
-The requested and actually used paths, the fallback reason, effective thread
-counts, and memory-limit decisions are stored in the simulation result
-metadata.  The GUI exposes the dynamic kernel in the performance settings.
+The requested and actually used paths, complete and longitudinal-only fallback
+reasons, enabled native capabilities, effective thread counts, and memory-limit
+decisions are stored in the simulation result metadata.  The GUI exposes the
+dynamic kernel in the performance settings and reports hybrid execution while
+the simulation is running.
 
 ## NumPy driver optimizations
 
@@ -82,11 +86,12 @@ synchronizations, `numpy.cross`, the matrix projection, and several temporary
 arrays for every RF interval.
 
 `native_parallel` additionally groups up to 256 adjacent RF-free intervals for
-longitudinal evolution.  Only unique half-step coefficient tables are passed
-to the block.  The table is capped at 8 MiB and reduced further by the global
+longitudinal evolution when the longitudinal native primitive supports the
+active model.  Only unique half-step coefficient tables are passed to the
+block.  The table is capped at 8 MiB and reduced further by the global
 simulation memory budget.  Parallel execution is enabled only from 1,024
-active voxels; unsupported or memory-limited cases remain serial or use the
-optimized fallback.
+active voxels.  Unsupported longitudinal cases retain native RF rotation and
+use the optimized NumPy kinetics solver.
 
 For four representative TRs of the spectral-selective 3D bSSFP simulation
 with 19,086 active voxels, measured median runtimes were approximately:
@@ -120,11 +125,15 @@ does not run once per interval.
 
 ## Current limits and next performance phase
 
-The strict native pilot intentionally falls back for dynamic B0 and inflow.
-The existing `optimized` path remains the complete CPU implementation for
-those cases.  The native block pilot also does not yet fuse the complete
-sequence driver or ADC observation into a persistent native region, which is
-why additional OpenMP threads provide limited benefit for RF-intensive bSSFP.
+The strict native longitudinal pilot still uses the optimized NumPy solver for
+pyruvate inflow, delayed conversion, and explicit concentration tracking.  RF
+rotation remains native in those cases and is bit-identical to the complete
+optimized path.  Spatially varying transmit sensitivity still requires the
+NumPy RF implementation; if it is combined with an unsupported longitudinal
+driver, the complete solver falls back to `optimized`.  The native block pilot
+also does not yet fuse the complete sequence driver or ADC observation into a
+persistent native region, which is why additional OpenMP threads provide
+limited benefit for RF-intensive bSSFP.
 
 The next experimental path is `float32`/`complex64` GPU execution.  Unlike the
 CPU optimizations, it cannot be bit-identical to the `float64` reference and

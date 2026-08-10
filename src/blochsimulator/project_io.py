@@ -72,6 +72,27 @@ def _decode(value, arrays):
     return value
 
 
+def _decode_legacy_array_strings(value):
+    """Convert NumPy array repr strings from older project files."""
+    if isinstance(value, dict):
+        return {key: _decode_legacy_array_strings(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_decode_legacy_array_strings(item) for item in value]
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("[") and text.endswith("]"):
+            body = text[1:-1].replace(",", " ")
+            if not body.strip():
+                return np.empty(0, dtype=float)
+            try:
+                parsed = np.fromstring(body, sep=" ")
+            except ValueError:
+                parsed = np.empty(0, dtype=float)
+            if parsed.size:
+                return parsed
+    return value
+
+
 def _program_to_data(program, arrays):
     if program is None:
         return None
@@ -114,7 +135,7 @@ def _program_to_data(program, arrays):
         "duration_s": program.duration_s,
         "source": program.source,
         "version": program.version,
-        "metadata": _json_value(program.metadata),
+        "metadata": _encode(program.metadata, arrays, "metadata"),
         "events": events,
     }
 
@@ -153,12 +174,14 @@ def _program_from_data(data, arrays):
                     item.get("phase_offset_rad", 0.0),
                 )
             )
+    metadata = _decode(data.get("metadata", {}), arrays)
+    metadata = _decode_legacy_array_strings(metadata)
     return SequenceProgram(
         tuple(events),
         data["duration_s"],
         data.get("source", "project"),
         data.get("version", "1.0"),
-        data.get("metadata", {}),
+        metadata,
     )
 
 

@@ -843,26 +843,98 @@ def test_native_rf_voxel_block_is_bitwise_equal_to_numpy(num_threads, rf_hz):
 
 
 @pytest.mark.parametrize("kernel", ["native_serial", "native_parallel"])
-@pytest.mark.parametrize("driver", ["inflow", "dynamic_b0"])
-def test_native_dynamic_kernel_reports_driver_fallback(driver, kernel):
+@pytest.mark.parametrize(
+    "driver",
+    ["inflow", "dynamic_b0", "delayed_conversion", "concentration_tracking"],
+)
+def test_native_dynamic_kernel_keeps_rf_fast_path_with_driver(driver, kernel):
     phantom = _dynamic_phantom()
     curve = TimeCurve((0.0, 1e-3), (0.0, 1.0), "linear", "hold")
     if driver == "inflow":
         phantom.pyruvate_inflow = PyruvateInflow(curve, np.ones(phantom.shape))
-    else:
+    elif driver == "dynamic_b0":
         phantom.dynamic_b0 = DynamicB0(curve, np.ones(phantom.shape))
-    program = SequenceProgram((), duration_s=1e-3)
+    elif driver == "delayed_conversion":
+        phantom.conversion_start_s = 0.5e-3
+    else:
+        phantom.initial_spin_density_maps = {
+            "Pyruvate": np.ones(phantom.shape),
+            "Lactate": np.full(phantom.shape, 0.1),
+        }
+        phantom.equilibrium_polarization = 0.02
+    program = SequenceProgram(
+        (RFEvent(0.0, np.asarray([80.0 + 20.0j, 0.0j]), 20e-6),),
+        duration_s=1e-3,
+    )
+    status_messages = []
 
     native = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
-        program, phantom, sequence_kernel=kernel
+        program,
+        phantom,
+        sequence_kernel=kernel,
+        status_callback=status_messages.append,
+        checkpoints_s=(0.5e-3,),
+    )
+    optimized = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        program,
+        phantom,
+        sequence_kernel="optimized",
+        checkpoints_s=(0.5e-3,),
+    )
+
+    assert native.metadata["requested_sequence_kernel"] == kernel
+    assert native.metadata["sequence_kernel"] == kernel
+    assert native.metadata["native_fallback_reason"] is None
+    assert native.metadata["native_rf_block_enabled"] is True
+    if driver != "dynamic_b0":
+        assert native.metadata["native_hybrid"] is True
+        assert native.metadata["native_longitudinal_step_enabled"] is False
+        reason_fragment = {
+            "inflow": "pyruvate inflow",
+            "delayed_conversion": "delayed conversion",
+            "concentration_tracking": "concentration tracking",
+        }[driver]
+        assert reason_fragment in native.metadata["native_longitudinal_fallback_reason"]
+        assert any("hybrid dynamic kernel" in message for message in status_messages)
+    else:
+        assert native.metadata["native_hybrid"] is False
+        assert native.metadata["native_longitudinal_step_enabled"] is True
+        assert native.metadata["native_longitudinal_fallback_reason"] is None
+    for name in (
+        "signal",
+        "species_signal",
+        "final_magnetization",
+        "final_pool_magnetization",
+        "checkpoint_magnetization",
+        "checkpoint_pool_magnetization",
+    ):
+        assert np.array_equal(getattr(native, name), getattr(optimized, name))
+
+
+def test_native_inflow_with_spatial_tx_reports_complete_optimized_fallback():
+    phantom = _dynamic_phantom()
+    phantom.pyruvate_inflow = PyruvateInflow(
+        TimeCurve((0.0, 1e-3), (0.0, 1.0), "linear", "hold"),
+        np.ones(phantom.shape),
+    )
+    phantom.tx_sensitivity_map = np.asarray([1.0, 0.8]).reshape(phantom.shape)
+    program = SequenceProgram(
+        (RFEvent(0.0, np.asarray([80.0 + 20.0j, 0.0j]), 20e-6),),
+        duration_s=1e-3,
+    )
+
+    native = BlochSimulator(use_parallel=True, num_threads=2).simulate_dynamic_sequence(
+        program, phantom, sequence_kernel="native_parallel"
     )
     optimized = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
         program, phantom, sequence_kernel="optimized"
     )
 
-    assert native.metadata["requested_sequence_kernel"] == kernel
+    assert native.metadata["requested_sequence_kernel"] == "native_parallel"
     assert native.metadata["sequence_kernel"] == "optimized"
-    assert native.metadata["native_fallback_reason"]
+    assert native.metadata["native_hybrid"] is False
+    assert native.metadata["native_rf_block_enabled"] is False
+    assert "spatial transmit sensitivity" in native.metadata["native_fallback_reason"]
     for name in (
         "signal",
         "species_signal",

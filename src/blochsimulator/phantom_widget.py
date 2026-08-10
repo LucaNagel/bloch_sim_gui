@@ -279,7 +279,14 @@ class PhantomCreatorWidget(QGroupBox):
         self._update_edit_button()
 
     def get_field_strength(self) -> float:
-        return float(self.field_combo.currentText().replace("T", ""))
+        text = self.field_combo.currentText().replace("T", "").strip()
+        try:
+            value = float(text)
+        except ValueError:
+            # QComboBox can briefly have no current item while project state
+            # is being restored. Keep shared-workspace synchronization safe.
+            value = float(self.workspace_defaults.field_strength_t)
+        return value
 
     def _set_field_strength(self, value_t: float) -> None:
         text = f"{float(value_t):g}T"

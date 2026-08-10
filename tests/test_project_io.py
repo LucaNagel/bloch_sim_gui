@@ -22,7 +22,7 @@ def test_complete_project_round_trip(tmp_path):
             ADCEvent(2e-4, 2, 1e-4, 5.0, 0.1),
         ),
         duration_s=4e-4,
-        metadata={"label": "test"},
+        metadata={"label": "test", "definitions": {"FOV": np.array([0.1, 0.2])}},
     )
     result = SequenceSimulationResult(
         signal=np.array([1 + 2j, 3 + 4j]),
@@ -50,5 +50,17 @@ def test_complete_project_round_trip(tmp_path):
     np.testing.assert_allclose(loaded["tx_field"].data, tx.data)
     np.testing.assert_allclose(loaded["program"].rf_events[0].samples_hz, [100 + 20j])
     assert loaded["program"].rf_events[0].frequency_offset_hz == 12.0
+    np.testing.assert_allclose(
+        loaded["program"].metadata["definitions"]["FOV"], [0.1, 0.2]
+    )
     np.testing.assert_allclose(loaded["legacy_result"]["time"], np.arange(3))
     np.testing.assert_allclose(loaded["sequence_result"].signal, result.signal)
+
+
+def test_project_io_reads_legacy_numpy_array_metadata_strings():
+    from blochsimulator.project_io import _decode_legacy_array_strings
+
+    decoded = _decode_legacy_array_strings(
+        {"definitions": {"Times": "[ 1.2  2.4\n 3.6 ]"}}
+    )
+    np.testing.assert_allclose(decoded["definitions"]["Times"], [1.2, 2.4, 3.6])

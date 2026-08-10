@@ -1873,32 +1873,40 @@ def simulate_dynamic_sequence(
     real_type = real_dtype.type
     requested_sequence_kernel = sequence_kernel
     native_fallback_reason = None
+    native_longitudinal_fallback_reason = None
     native_longitudinal_step = None
     native_longitudinal_block = None
     native_rf_rotation_block = None
     if sequence_kernel in {"native_serial", "native_parallel"}:
-        if (
-            inflow_curve is not None
-            or phantom.dynamic_b0 is not None
-            or conversion_start_s > 0.0
-            or phantom.initial_spin_density_maps is not None
-        ):
-            native_fallback_reason = "dynamic drivers are not supported by the pilot"
-            sequence_kernel = "optimized"
-        else:
-            try:
-                from .dynamic_bloch_cy import (
-                    apply_longitudinal_block_no_inflow,
-                    apply_longitudinal_step_no_inflow,
-                    apply_rf_rotation_transverse_block,
-                )
+        try:
+            from .dynamic_bloch_cy import (
+                apply_longitudinal_block_no_inflow,
+                apply_longitudinal_step_no_inflow,
+                apply_rf_rotation_transverse_block,
+            )
 
+            # RF rotation is independent of inflow, concentration tracking,
+            # conversion timing, and dynamic B0. Keep that native fast path
+            # available even when longitudinal evolution must stay in NumPy.
+            native_rf_rotation_block = apply_rf_rotation_transverse_block
+            unsupported_longitudinal_drivers = []
+            if inflow_curve is not None:
+                unsupported_longitudinal_drivers.append("pyruvate inflow")
+            if conversion_start_s > 0.0:
+                unsupported_longitudinal_drivers.append("delayed conversion")
+            if phantom.initial_spin_density_maps is not None:
+                unsupported_longitudinal_drivers.append("concentration tracking")
+            if unsupported_longitudinal_drivers:
+                native_longitudinal_fallback_reason = (
+                    "native longitudinal evolution does not support "
+                    + ", ".join(unsupported_longitudinal_drivers)
+                )
+            else:
                 native_longitudinal_step = apply_longitudinal_step_no_inflow
                 native_longitudinal_block = apply_longitudinal_block_no_inflow
-                native_rf_rotation_block = apply_rf_rotation_transverse_block
-            except ImportError:
-                native_fallback_reason = "strict native extension is unavailable"
-                sequence_kernel = "optimized"
+        except ImportError:
+            native_fallback_reason = "strict native extension is unavailable"
+            sequence_kernel = "optimized"
     compiled = SequenceCompiler().compile(
         program,
         checkpoints_s=checkpoints_s,
@@ -1973,6 +1981,20 @@ def simulate_dynamic_sequence(
     if sampling.enabled:
         tx_sensitivity = np.repeat(tx_sensitivity, spins_per_voxel)
     spatial_tx_active = not np.all(tx_sensitivity == (1.0 + 0.0j))
+    if (
+        sequence_kernel in {"native_serial", "native_parallel"}
+        and native_longitudinal_step is None
+        and spatial_tx_active
+    ):
+        # Spatial Tx currently needs the NumPy RF implementation. If dynamic
+        # longitudinal drivers also rule out the native Mz primitives, no
+        # native work remains and the actual kernel is the optimized fallback.
+        native_fallback_reason = (
+            "spatial transmit sensitivity and dynamic longitudinal drivers "
+            "require the optimized kernel"
+        )
+        sequence_kernel = "optimized"
+        native_rf_rotation_block = None
     rx_maps = getattr(phantom, "rx_sensitivity_maps", None)
     if rx_maps is None:
         rx_sensitivities = np.ones((1, parent_active_count), dtype=np.complex128)
@@ -2197,7 +2219,7 @@ def simulate_dynamic_sequence(
             np.empty_like(kpl),
             inactive_regular_mode,
         )
-        if sequence_kernel == "optimized"
+        if sequence_kernel == "optimized" or native_longitudinal_step is None
         else None
     )
     native_parallel_threshold = 1024
@@ -2223,6 +2245,12 @@ def simulate_dynamic_sequence(
         and native_rf_rotation_block is not None
         and not spatial_tx_active
     ):
+        if native_longitudinal_fallback_reason is not None:
+            status_callback(
+                "Using the hybrid dynamic kernel: strict native RF rotation "
+                "with optimized longitudinal kinetics ("
+                f"{native_longitudinal_fallback_reason})."
+            )
         status_callback(
             f"Using the strict native RF voxel-block kernel with "
             f"{native_rf_threads} thread(s) for {n_simulated_spins:,} spins "
@@ -2322,6 +2350,7 @@ def simulate_dynamic_sequence(
         )
         if (
             sequence_kernel == "native_parallel"
+            and native_longitudinal_block is not None
             and native_block_enabled
             and interval >= native_preapplied_end
             and rf_hz[interval] == 0.0
@@ -2329,6 +2358,7 @@ def simulate_dynamic_sequence(
             preapply_native_longitudinal_block(interval)
         longitudinal_preapplied = (
             sequence_kernel == "native_parallel"
+            and native_longitudinal_block is not None
             and interval < native_preapplied_end
             and rf_hz[interval] == 0.0
         )
@@ -2788,6 +2818,21 @@ def simulate_dynamic_sequence(
             "sequence_kernel": sequence_kernel,
             "requested_sequence_kernel": requested_sequence_kernel,
             "native_fallback_reason": native_fallback_reason,
+            "native_longitudinal_fallback_reason": (
+                native_longitudinal_fallback_reason
+            ),
+            "native_hybrid": bool(
+                sequence_kernel in {"native_serial", "native_parallel"}
+                and native_rf_rotation_block is not None
+                and not spatial_tx_active
+                and native_longitudinal_step is None
+            ),
+            "native_longitudinal_step_enabled": (native_longitudinal_step is not None),
+            "native_longitudinal_block_enabled": bool(
+                sequence_kernel == "native_parallel"
+                and native_longitudinal_block is not None
+                and native_block_enabled
+            ),
             "native_parallel_threads": (
                 native_threads if sequence_kernel == "native_parallel" else 1
             ),
@@ -2804,7 +2849,9 @@ def simulate_dynamic_sequence(
             "native_block_interval_limit": native_block_interval_limit,
             "native_block_table_limit_bytes": native_block_table_limit_bytes,
             "native_parallel_memory_limited": (
-                sequence_kernel == "native_parallel" and not native_block_enabled
+                sequence_kernel == "native_parallel"
+                and native_longitudinal_block is not None
+                and not native_block_enabled
             ),
             "pyruvate_inflow": phantom.pyruvate_inflow is not None,
             "dynamic_b0": phantom.dynamic_b0 is not None,

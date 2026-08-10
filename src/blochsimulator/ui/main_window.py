@@ -134,8 +134,36 @@ def _restore_widget_state(owner, state):
             continue
         kind = saved.get("type")
         if kind == "combo" and isinstance(widget, QComboBox):
-            index = widget.findText(saved.get("text", ""))
-            widget.setCurrentIndex(index if index >= 0 else int(saved.get("index", 0)))
+            text = str(saved.get("text", ""))
+            index = widget.findText(text)
+            if index < 0 and text:
+                # Older project files may use equivalent numeric formatting,
+                # e.g. "7T" while the current item is "7.0T".
+                try:
+                    saved_number = float(text.removesuffix("T").strip())
+                except ValueError:
+                    saved_number = None
+                if saved_number is not None:
+                    for candidate in range(widget.count()):
+                        candidate_text = widget.itemText(candidate)
+                        try:
+                            if np.isclose(
+                                float(candidate_text.removesuffix("T").strip()),
+                                saved_number,
+                            ):
+                                index = candidate
+                                break
+                        except ValueError:
+                            continue
+            if index < 0:
+                saved_index = int(saved.get("index", -1))
+                index = (
+                    saved_index
+                    if 0 <= saved_index < widget.count()
+                    else widget.currentIndex()
+                )
+            if index >= 0:
+                widget.setCurrentIndex(index)
         elif kind == "value" and isinstance(
             widget, (QSpinBox, QDoubleSpinBox, QSlider)
         ):
