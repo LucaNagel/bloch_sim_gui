@@ -151,7 +151,9 @@ def test_load_pulseq_defaults_missing_optional_ppm_fields_to_zero(
         0.1 + 2 * np.pi * 25.0 * program.rf_events[0].raster_s / 2
     )
     assert program.adc_events[0].frequency_offset_hz == pytest.approx(10.0)
-    assert program.adc_events[0].phase_offset_rad == pytest.approx(0.2)
+    assert program.adc_events[0].phase_offset_rad == pytest.approx(
+        0.2 + 2 * np.pi * 10.0 * (100e-6 + 50e-6 / 2)
+    )
 
 
 def test_pulseq_to_adc_signal_end_to_end(tmp_path):
@@ -183,6 +185,24 @@ def test_pulseq_trigger_is_retained_as_metadata(tmp_path):
     with pytest.warns(RuntimeWarning, match="trigger retained"):
         program = load_pulseq(path)
     assert len(program.metadata["triggers"]) == 1
+
+
+def test_pulseq_numeric_array_string_definitions_are_normalized(tmp_path):
+    sequence = pypulseq.Sequence()
+    sequence.set_definition("MatrixSize", "[32. 32.  6.]")
+    sequence.set_definition("EncodingBasisXYZ", "[1. 0. 0. 0. 1. 0. 0. 0. 1.]")
+    sequence.add_block(pypulseq.make_delay(1e-3))
+    path = tmp_path / "string_definitions.seq"
+    sequence.write(str(path))
+
+    program = load_pulseq(path)
+
+    assert program.metadata["definitions"]["MatrixSize"] == pytest.approx(
+        [32.0, 32.0, 6.0]
+    )
+    assert program.metadata["definitions"]["EncodingBasisXYZ"] == pytest.approx(
+        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    )
 
 
 def test_pulseq_labels_define_outer_indices_at_each_adc_event(tmp_path):

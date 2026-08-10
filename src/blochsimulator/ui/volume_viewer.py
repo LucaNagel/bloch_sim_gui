@@ -72,6 +72,7 @@ class VolumeViewerWidget(QWidget):
         self.data = np.zeros((1, 1, 1), dtype=float)
         self.mask = np.ones((1, 1, 1), dtype=bool)
         self.fov_m = (1.0, 1.0, 1.0)
+        self.display_levels = None
         self._build_ui()
 
     def _build_ui(self):
@@ -212,6 +213,7 @@ class VolumeViewerWidget(QWidget):
         fov_m=None,
         name: str = "Volume",
         unit: str = "",
+        levels=None,
     ) -> None:
         native_values = np.asarray(data, dtype=float)
         values = self._promote_to_volume(native_values)
@@ -247,6 +249,15 @@ class VolumeViewerWidget(QWidget):
 
         self.data = values
         self.mask = volume_mask
+        if levels is None:
+            self.display_levels = None
+        else:
+            low, high = (float(value) for value in levels)
+            if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+                raise ValueError(
+                    "display levels must be finite and strictly increasing"
+                )
+            self.display_levels = (low, high)
         if fov_m is not None:
             fov = tuple(float(value) for value in fov_m)
             if len(fov) < 3:
@@ -387,6 +398,8 @@ class VolumeViewerWidget(QWidget):
         view.ui.histogram.setHistogramRange(low, high)
 
     def _levels(self):
+        if self.display_levels is not None:
+            return self.display_levels
         valid = self.data[self.mask & np.isfinite(self.data)]
         if valid.size == 0:
             return (0.0, 1.0)

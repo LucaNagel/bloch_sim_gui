@@ -72,7 +72,7 @@ The interface is divided into two main areas:
 In the event-based **Sequence Simulation** workspace, **Export Pulseq…**
 offers three choices: Pulseq plus a generating notebook, Pulseq only, or
 notebook only. Pulseq plus notebook is the default. The notebook records the
-exact EPI, spiral, CSI, Cartesian 3D bSSFP, spectrally selective 3D bSSFP,
+exact EPI, spiral, CSI, FLASH, Cartesian 3D bSSFP, spectrally selective 3D bSSFP,
 Cartesian multi-echo 3D bSSFP, or radial multi-echo 3D bSSFP builder function
 and all current GUI parameters, then writes the corresponding `.seq` file when
 executed.
@@ -85,30 +85,57 @@ that a pending generated sequence is built first. If generation fails, the
 last valid timeline remains visible and the parameter error is shown above the
 controls.
 
-Generated sequences explicitly mark the end of every spoiler block. During
-simulation, these markers apply an ideal transverse crusher: `Mx` and `My` are
-set to zero for every pool at the spoiler end, while `Mz`, relaxation, inflow,
-and chemical exchange continue normally. This applies to all built-in
-generators that contain spoilers, including EPI, spiral, CSI, MPRAGE, UTE, and
-3D bSSFP. Imported Pulseq files receive the same treatment only when they
-contain an explicit `IdealSpoilerEndTimes` marker (or one of the legacy
-generated-sequence spoiler definitions); arbitrary gradients are not guessed
-to be spoilers.
+Use **Run Python script…** to execute an existing sequence-generation script
+with the same Python interpreter as the application. Standard output and
+errors stay visible in a GUI log window. When the script creates or updates a
+Pulseq `.seq` file in the script directory or Sequence workspace, the newest
+output is imported automatically. **Stop script** first requests a normal
+termination and force-stops an unresponsive process after a short grace period.
 
-For Cartesian 3D generation, **Cartesian 3D orientation** separates the logical
-acquisition roles from the scanner coordinates. Select the physical **Read**
-and **Phase** axes; the right-handed **Partition** axis is derived and shown
-immediately. For example, Read `+z` and Phase `+y` produce Partition `-x`.
-FOV and matrix values remain ordered as `(read, phase, partition)`, while the
-generated Pulseq gradients, phantom coverage check, reconstruction, and export
-use the selected scanner axes consistently. The orientation is stored in the
-Pulseq definitions, so reloading a generated `.seq` file preserves it.
+Generated sequences explicitly mark the end of every spoiler block. **Settings
+→ Simulation → Spoiler simulation** selects one of two models:
+
+- **Ideal crusher** preserves the fast historical behavior. At every declared
+  spoiler end, `Mx` and `My` are set to zero for every pool while `Mz`,
+  relaxation, inflow, and chemical exchange continue normally.
+- **Gradient waveform** ignores the artificial transverse reset. Every voxel
+  is represented by the configured X/Y/Z midpoint spins, and spoiling follows
+  from their positions and the actual gradient waveform. Subspins remain
+  separate for the complete sequence, so later gradients may refocus them.
+
+Ideal-crusher markers are used by all built-in generators that contain
+spoilers, including EPI, spiral, CSI, MPRAGE, UTE, and 3D bSSFP. Imported
+Pulseq files receive ideal treatment only when they contain an explicit
+`IdealSpoilerEndTimes` marker (or one of the legacy generated-sequence spoiler
+definitions); arbitrary gradients are never classified heuristically. In
+gradient-waveform mode all gradients act physically whether or not a spoiler
+marker is present.
+
+Subvoxel counts are axis-specific because their product controls runtime. For
+a spoiler only along Z, start with `1 × 1 × 9` spins and increase Z until the
+ADC signal and voxel magnetization converge. Through-slice subvoxel sampling
+requires a 3D phantom with explicit Z extent; a single Z voxel is sufficient.
+
+Every 3D sequence panel has independent signed **Read gradient direction** and
+**Phase gradient direction** controls in its spatial-encoding section. The
+right-handed **Partition gradient direction** is derived as Read × Phase and
+shown immediately. For example, Read `+z` and Phase `+y` produce Partition
+`-x`. FOV and matrix values remain ordered as `(read, phase, partition)`, while
+the generated Pulseq gradients, phantom coverage check, reconstruction, and
+export use the selected scanner axes consistently. Each sequence stores its
+orientation in the Pulseq definitions, so reloading a generated `.seq` file
+preserves it.
 
 **SS-bSSFP (3D)** alternates complete Cartesian volumes between the configured
 metabolite targets. Enter matching comma-separated target names, RF offsets,
 receiver offsets, and flip angles. The defaults follow Skinner et al.
 (doi:10.1002/mrm.29676), including the narrow-band SLR pulse, alpha/2
-preparation, and end-of-volume spoiler. With the default scanner limits, the
+preparation, and end-of-volume spoiler. RF bandwidth is calculated from pulse
+duration and pulse shape instead of being entered independently. For Sinc
+pulses, the selectable lobe count sets
+the time-bandwidth product. Field strength and nucleus use the shared
+Simulation object reference, including in Spin probe mode. With the default
+scanner limits, the
 encoding-lobe duration is calculated automatically from FOV, matrix, sampling
 bandwidth, and gradient limits. The published 32-point, 10 kHz readout lasts
 3.2 ms; that ADC duration is kept separate from the shorter pre-/rephasing
@@ -123,24 +150,60 @@ pulses, 180° RF phase increments, Gaussian excitation, and α/2 preparation.
 The short in-vivo preset uses TR 8.696 ms, echo spacing 1.32 ms, 39.6825 kHz
 requested sampling bandwidth, FOV 56 × 28 × 24.5 mm³, and matrix 32 × 16 × 14.
 The GUI begins with a smaller matrix for responsive setup. Individual echo
-volumes are reconstructed and selectable; IDEAL metabolite separation is not
-yet attached.
+volumes are reconstructed and selectable. If echo times and simulated pool
+frequency offsets are available, the Reconstruction Explorer also offers a
+linear known-frequency IDEAL estimate. This initial estimator does not fit a B0
+field map and is labelled accordingly; use a field-map-aware iterative method
+for quantitative scanner reconstruction.
 
 **Radial ME-bSSFP (3D)** creates monopolar center-through echoes on a spherical
 spiral-phyllotaxis trajectory. Its publication preset follows Wang et al.
 (doi:10.1002/mrm.30614): TR 16 ms, five echoes at 2 ms spacing, 1000 Hz/px,
 and golden-angle rotation between dynamic measurements. The GUI starts with a
 small interactive spoke count; set 300 spokes and four measurements to match
-the in-vivo acquisition. Bloch signal simulation and Pulseq export are
-available, while radial gridding and IDEAL reconstruction are not yet attached
-to the result viewer.
+the in-vivo acquisition. Its trajectory read, phase, and derived partition
+axes orient the complete phyllotaxis coordinate system; they do not imply a
+fixed phase-encoding gradient, because every radial spoke has its own readout
+direction. Simulated ADC data are density-compensated and
+trilinearly gridded onto an isotropic 3D reference matrix, then shown as linked
+orthogonal slices in the Reconstruction Explorer. This dependency-free gridding
+is intended for interactive validation; a scanner reconstruction should still
+use a validated NUFFT and trajectory/density-correction pipeline. Multi-echo
+results retain separate echo and measurement dimensions and can use the same
+linear IDEAL estimate described above.
 
 For 2D imaging, **Readout trajectory** selects either a Cartesian EPI echo
-train or a single-interleaf centre-out spiral. **Slice gap** is the empty
-edge-to-edge distance between adjacent slices; the centre spacing is slice
-thickness plus gap. Spiral readout duration is extended automatically if the
+train or a single-interleaf centre-out spiral. EPI, spiral, CSI, and FLASH
+provide axial, coronal, and sagittal plane presets plus explicit signed
+**Read gradient direction** and **Phase gradient direction** controls. The
+slice-selection gradient is displayed separately and derived as Read × Phase,
+so swapping read and phase within the same plane is unambiguous. Custom axis
+combinations and the signed slice or slice-package offset are applied to the
+physical Pulseq gradient axes and stored in the encoding definitions. **Slice
+gap** is the empty edge-to-edge distance between adjacent slices; the centre
+spacing is slice thickness plus gap. EPI/spiral expose an explicit echo time;
+for EPI it targets the centre of k-space and for centre-out spiral it targets
+the first ADC sample. Spiral readout duration is extended automatically if the
 requested sampling bandwidth would exceed the configured gradient or slew
 limits.
+
+**FLASH (2D)** generates a slice-selective Cartesian spoiled gradient-echo
+acquisition. Matrix, FOV, RF pulse shape, slice package, TE, TR, RF-spoiling
+increment, and through-slice/in-plane gradient spoiling are configurable. The
+Sequence parameter forms are separated into spatial encoding, RF, slice
+selection, timing, spoiling, and derived-sampling sections.
+
+For repeated complete acquisitions, **Acquisition interval
+(start-to-start)** controls the time from the beginning of one complete image,
+volume, or radial measurement to the beginning of the next. It is separate
+from the TR between individual excitations or k-space lines. **Back-to-back**
+uses the shortest possible interval; a numerical value inserts an idle delay
+after each complete acquisition. The requested interval must be at least as
+long as one complete acquisition. This control applies to CSI, FLASH, all 3D
+bSSFP variants, and radial measurements. EPI and spiral already use their
+acquisition-interval field with the same start-to-start definition. Generated
+Pulseq files store the requested and actual interval together with all
+acquisition start times.
 
 All MRI geometry fields in the Sequence workspace, Phantom tools, and K-space
 trajectory controls use **millimeters (mm)** consistently. This includes FOV,
@@ -148,8 +211,10 @@ slice thickness, slice gap, and spatial probe positions. Values are converted
 to SI meters internally for simulation and Pulseq export.
 
 The same 2D acquisition panel configures the slice-selective excitation.
-Choose **Sinc**, **SLR**, or **Block** and set RF duration, time-bandwidth
-product, Sinc apodization, and (for SLR) the bundled sharpness profile. Choose
+Choose **Sinc**, **SLR**, **Gaussian**, or **Block** and set RF duration and
+time-bandwidth product. SLR pulses are designed dynamically from these values
+and the selected transition sharpness; Gaussian pulses use the time-bandwidth
+product as their spectral FWHM-bandwidth product. Choose
 **RF Pulse Designer** to use the current complex baseband waveform from the
 **RF Design** tab. Its duration, complex phase modulation, and carrier offset
 are preserved, while its amplitude is rescaled from the designer's reference
@@ -159,7 +224,7 @@ Sequence-mode TBW still defines the slice-selection bandwidth.
 Scanner hardware limits are configured under **Tools → Settings → Scanner**.
 Maximum gradient, maximum slew rate, waveform rasters, RF ringdown/dead time,
 and ADC dead time are stored persistently and applied to all newly generated
-EPI, spiral, CSI, and 3D bSSFP Pulseq sequences. Imported `.seq` files retain
+EPI, spiral, CSI, FLASH, and 3D bSSFP Pulseq sequences. Imported `.seq` files retain
 their own event timing.
 
 **Export results…** in the same workspace defaults to exporting both
@@ -167,6 +232,19 @@ their own event timing.
 adjacent NetCDF dataset and provides the signal, k-space, reconstruction, and
 interactive multidimensional analysis views. Data-only formats and Bruker raw
 export remain selectable alternatives.
+
+The **Reconstruction Explorer** tab is populated after a simulation. Its
+controls select each available outer dimension independently (for example echo,
+repetition, slice, or segment), the total or a simulated pool-resolved signal,
+receive-coil combination, and magnitude/phase/real/imaginary display. Ordered
+dimensions such as echo, repetition, slice, segment, frame, and the CSI spectral
+sample use labelled sliders and appear only when present in the result. 3D image
+and gridded-k-space volumes occupy separate full-size tabs, and each tab keeps
+its own scanner-coordinate slice positions. In CSI, clicking a reconstructed
+voxel updates its spectrum. **Open result…** loads an existing sequence-result
+`.nc` file into this explorer without repeating the simulation; **Export current
+view…** writes the selected scalar view. Complete project files retain the
+explorer selection and both independent 3D cursor positions.
 
 ### Use Case 3: Parameter Sweep
 **Goal:** Analyze how simulation metrics change when varying a parameter (e.g., Flip Angle, TE, TR, $T_1$, $T_2$).
@@ -249,13 +327,22 @@ the selected scanner axis. The default is
 the physical `cartesian_kx/ky/kz` aliases are retained. Manual reshaping of the
 chronological ADC stream is not required.
 
+Supported spiral-phyllotaxis radial 3D results contain
+`radial_3d_gridded_kspace` and `radial_3d_image`, with explicit outer dimensions
+followed by `(radial_z, radial_y, radial_x)`. Pool-resolved simulations add the
+corresponding `species_radial_3d_*` arrays. The reference gridder uses radial
+density compensation and trilinear interpolation; these arrays are suitable for
+interactive inspection but are not a substitute for a scanner-validated NUFFT
+pipeline.
+
 The analysis notebook generated with **Export results** includes an adaptive
 `ipywidgets` explorer. Its `x`, `y`, and `z` sliders move linked orthogonal
 reconstruction slices and the k-space crosshair. `Repetition` selects a dynamic
-3D volume (or a 2D frame), while `Spectral point` selects the CSI time/frequency
-sample. The views update continuously while a slider is being dragged. Sliders
-whose dimensions are not present in a particular result are disabled
-automatically.
+3D volume (or a 2D frame), additional sliders expose explicit outer dimensions
+such as echo or slice, and `Spectral point` selects the CSI time/frequency
+sample. Cartesian, spiral, radial 3D, and CSI displays update continuously while
+a slider is being dragged. Sliders whose dimensions are not present in a
+particular result are disabled automatically.
 
 The notebook performs its own centered inverse FFT from the exported Cartesian
 k-space. For older NetCDF results that contain only the chronological ADC
@@ -272,29 +359,34 @@ resized through their handles. To create geometry directly with the mouse,
 choose **Draw ellipsoid** or **Draw box**, then hold the left mouse button and
 drag across the axial XY canvas. Right-click or press Escape to cancel drawing.
 
-For each shape, the initial hyperpolarized longitudinal magnetization of a
-metabolite is `Initial HP Mz scale × initial pool weight`. For example, a scale
-of 100 with pyruvate weight 1 and lactate weight 0 starts with `Pz=100` and
-`Lz=0`. A zero weight keeps the pool and its peak definition present; positive
-`kPL` can therefore create lactate from an initially empty lactate pool. The
-**Set selected shape to initial Lz = 0** button applies this setup directly.
-Each peak can have its own T1; an empty metabolite T1 cell uses the shape's
-**Default T1** for compatibility with older designs.
+Peak **Spin density / concentration** and **Initial polarization** are separate.
+Spin density describes how much signal-producing material is present. Initial
+polarization describes its longitudinal start state, and the initial signal is
+their product. For example, pyruvate and lactate can both have spin density 1,
+while their initial polarizations are 1 and 0, respectively; this starts with
+`Pz=1` and `Lz=0` without removing the lactate pool. Positive `kPL` can then
+create lactate from pyruvate. The **Set selected shape to initial Lz = 0** button
+applies this setup by setting only lactate polarization to zero. An empty peak
+polarization cell uses the shape's **Default initial polarization**; an empty
+metabolite T1 cell similarly uses **Default T1**. In older dynamic designs, the
+former initial pool weight is migrated to peak polarization while spin density
+defaults to 1, preserving the same initial HP magnetization.
 
-In the hyperpolarized model, `HP Mz=1` means 100% of the initial normalized
-hyperpolarized excess magnetization. It is not the thermal equilibrium target.
-Because the thermal carbon-13 signal is negligible relative to the
-hyperpolarized signal, T1 relaxation drives this state approximately toward
-zero. This differs from a conventional normalized Bloch model that recovers
-toward equilibrium `Mz=1`.
+Turn on **Enable hyperpolarized pyruvate/lactate model (polarization → 1)** to
+select concentration-resolved hyperpolarized dynamics. This is separate from
+conversion: `kPL=0` still gives T1 relaxation but no pyruvate-to-lactate
+conversion. Polarization 1 is thermal equilibrium. T1 therefore evolves any
+larger or smaller polarization toward 1. The longitudinal magnetization is
+`Mz = concentration × polarization`, so a concentration of 10 at thermal
+equilibrium approaches `Mz=10`, while its polarization approaches 1.
 For a pyruvate-injection experiment, lactate will therefore normally start with
-initial pool weight 0. If both weights and both T1 values are equal while
-`kPL=0`, `Pz(t)` and `Lz(t)` are identical; the preview draws lactate dashed so
-the overlapping curves remain visible.
+initial polarization 0. If both spin densities, polarizations, and T1 values are
+equal while `kPL=0`, `Pz(t)` and `Lz(t)` are identical; the preview draws lactate
+dashed so the overlapping curves remain visible.
 
 In the **Kinetics / kPL** tab:
 
-1. Enable pyruvate-to-lactate conversion.
+1. Enable the hyperpolarized pyruvate/lactate model.
 2. Set the default `kPL` in `s⁻¹`. It applies everywhere unless an optional
    spatial region overrides it. Zero means no conversion except in regions with
    a positive override; without any positive default or regional `kPL`, no new
@@ -310,16 +402,17 @@ In the **Kinetics / kPL** tab:
    kinetics; `-5 s` starts it five seconds before kinetics time zero. The
    inflow samples and conversion start keep their relative timing and do not
    need to be edited when comparing different sequence start times.
-6. Optionally enable pyruvate inflow and enter time/source samples. Every point
-   is a `(kinetics time in s, relative Mz per s)` sample of the pyruvate source.
-   Rows are sorted numerically when their time is edited. The curve is linearly
-   interpolated, is zero outside its listed interval, and adds longitudinal
-   pyruvate magnetization to every shape containing the selected pyruvate peak.
-   Inflow supplies pyruvate; `kPL` independently determines how much of it is
-   converted to lactate.
+6. Optionally enable pyruvate inflow and enter kinetics time, concentration
+   rate, and inflow polarization. Each row is held until the next time and the
+   concentration rate is zero outside the listed interval. Thus rows `(5 s,
+   10 /s, 10000)` and `(6 s, 0 /s, 1)` add total concentration 10 during one
+   second, with incoming polarization 10000. Set the initial Pyruvate spin
+   density to 0 if the region should contain no Pyruvate before delivery. Inflow
+   supplies Pyruvate; `kPL` independently determines how much is converted to
+   Lactate.
 7. Any inflow or conversion interval shifted before sequence `t=0` defines a
-   free longitudinal kinetic pre-roll. Starting from the shape's initial pool
-   weights at the earliest pre-roll time, the simulator evolves inflow,
+   free longitudinal kinetic pre-roll. Starting from the shape's initial spin
+   densities and polarizations at the earliest pre-roll time, the simulator evolves inflow,
    conversion, and T1 relaxation up to `t=0`. The resulting `Pz/Lz`
    distribution becomes the initial state of the Pulseq simulation. RF,
    gradients, ADC, and dynamic B0 are not executed during this pre-roll.
@@ -338,13 +431,14 @@ reset the phantom state.
 
 The right-hand **Live conversion preview** represents one voxel, not a spatial
 average. **Shape / object to preview** selects the shape whose initial pool
-weights and metabolite T1 values are used. **kPL source for this voxel** then
+concentrations, polarizations, and metabolite T1 values are used. **kPL source for this voxel** then
 selects either the default value or one region's override. Selecting a row in
 the kPL-region table selects that region automatically. The preview updates
 immediately when these values, the conversion start, the global kinetics
 offset, or the inflow points change. Its horizontal axis is sequence time. The
-upper plot shows the shifted pyruvate source, while the lower plot shows solid
-`Pz(t)` and dashed `Lz(t)`. If a pre-roll exists, both plots extend into negative
+upper plot shows concentration inflow, the middle plot shows pool polarization
+with thermal equilibrium marked at 1, and the lower plot shows `Mz=C×P` for
+solid Pyruvate and dashed Lactate. If a pre-roll exists, the plots extend into negative
 sequence time and a vertical dashed line marks sequence time zero; an orange
 dotted line marks the shifted conversion start. The information line reports
 the selected kinetics time and pool distribution at sequence `t=0`. The

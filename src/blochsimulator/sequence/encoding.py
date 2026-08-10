@@ -24,6 +24,26 @@ _AXIS_VECTORS = {
 }
 
 
+def numeric_definition_array(value, name: str) -> np.ndarray:
+    """Normalize numeric Pulseq definitions stored as arrays or array strings."""
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lower().startswith("array(") and text.endswith(")"):
+            text = text[6:-1].strip()
+        text = text.strip("[]()")
+        tokens = text.replace(",", " ").replace(";", " ").split()
+        try:
+            result = np.asarray([float(token) for token in tokens], dtype=float)
+        except ValueError as exc:
+            raise ValueError(f"{name} must contain numeric values") from exc
+    else:
+        try:
+            result = np.asarray(value, dtype=float).reshape(-1)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must contain numeric values") from exc
+    return result.reshape(-1)
+
+
 def _axis_vector(code: str, name: str) -> np.ndarray:
     normalized = str(code).strip().lower()
     sign = 1.0
@@ -130,7 +150,7 @@ class EncodingFrame:
         }
         basis_value = normalized.get("encodingbasisxyz")
         if basis_value is not None:
-            basis = np.asarray(basis_value, dtype=float).reshape(-1)
+            basis = numeric_definition_array(basis_value, "EncodingBasisXYZ")
             if basis.size != 9:
                 raise ValueError("EncodingBasisXYZ must contain nine values")
             return cls(tuple(tuple(row) for row in basis.reshape(3, 3)))
@@ -143,7 +163,7 @@ class EncodingFrame:
         if all(key in normalized for key in vector_keys):
             directions = []
             for key in vector_keys:
-                vector = np.asarray(normalized[key], dtype=float).reshape(-1)
+                vector = numeric_definition_array(normalized[key], key)
                 if vector.size != 3:
                     raise ValueError(f"{key} must contain three values")
                 directions.append(vector)

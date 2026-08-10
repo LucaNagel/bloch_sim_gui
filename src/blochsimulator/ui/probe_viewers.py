@@ -264,6 +264,7 @@ class SequenceProbeSpectrumViewer(QWidget):
         line_splitter.setStretchFactor(0, 1)
         line_splitter.setStretchFactor(1, 2)
         line_splitter.setMinimumHeight(790)
+        self.line_container = line_splitter
         layout.addWidget(line_splitter, 2)
 
         self.heatmap_layout = pg.GraphicsLayoutWidget()
@@ -288,22 +289,29 @@ class SequenceProbeSpectrumViewer(QWidget):
         self._selection_mode_changed()
 
     def set_result(self, result):
+        had_result = self.result is not None
+        position_index = int(self.position_slider.value())
+        selection_center = float(self.selection_center.value())
+        selection_width = float(self.selection_width.value())
         self.result = result
         self.time_index = max(0, result.time_s.size - 1)
         npos = int(result.positions_m.shape[0])
         self.position_slider.blockSignals(True)
         self.position_slider.setRange(0, max(0, npos - 1))
-        self.position_slider.setValue(0)
+        self.position_slider.setValue(min(position_index, max(0, npos - 1)))
         self.position_slider.blockSignals(False)
         frequency = self._frequency_axis_hz()
         if frequency.size:
             lo, hi = _safe_range(frequency, fallback=(-1.0, 1.0), pad_fraction=0.0)
             self.selection_center.setRange(float(lo), float(hi))
-            self.selection_center.setValue(float(frequency[frequency.size // 2]))
             span = max(abs(float(hi - lo)), 1.0)
             self.selection_width.setMaximum(span * 2.0)
-            self.selection_width.setValue(min(100.0, span))
-        self.clear_frequency_selections()
+            if had_result:
+                self.selection_center.setValue(selection_center)
+                self.selection_width.setValue(selection_width)
+            else:
+                self.selection_center.setValue(float(frequency[frequency.size // 2]))
+                self.selection_width.setValue(min(100.0, span))
         self.refresh()
 
     def set_time_index(self, index: int):
@@ -582,7 +590,7 @@ class SequenceProbeSpectrumViewer(QWidget):
         if self.result is None:
             return
         if self.plot_3d is not None and self.spectrum_3d_toggle.isChecked():
-            self.plot.setVisible(False)
+            self.line_container.setVisible(False)
             self.heatmap_layout.setVisible(False)
             self.plot_3d.setVisible(True)
             self._render_3d()
@@ -591,7 +599,7 @@ class SequenceProbeSpectrumViewer(QWidget):
             self.plot_3d.setVisible(False)
 
         is_heatmap = self.plot_type.currentText() == "Heatmap"
-        self.plot.setVisible(not is_heatmap)
+        self.line_container.setVisible(not is_heatmap)
         self.heatmap_layout.setVisible(is_heatmap)
         self.component_label.setVisible(not is_heatmap)
         self.component_combo.setVisible(not is_heatmap)
@@ -830,12 +838,13 @@ class SequenceProbeSpatialViewer(QWidget):
         layout.addWidget(self.heatmap_container, 1)
 
     def set_result(self, result):
+        frequency_index = int(self.freq_slider.value())
         self.result = result
         self.time_index = max(0, result.time_s.size - 1)
         nfreq = int(result.frequency_offsets_hz.size)
         self.freq_slider.blockSignals(True)
         self.freq_slider.setRange(0, max(0, nfreq - 1))
-        self.freq_slider.setValue(0)
+        self.freq_slider.setValue(min(frequency_index, max(0, nfreq - 1)))
         self.freq_slider.blockSignals(False)
         self.refresh()
 

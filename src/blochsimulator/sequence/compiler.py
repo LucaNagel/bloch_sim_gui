@@ -500,7 +500,13 @@ class SequenceCompiler:
                     event.phase_offset_rad
                     + 2 * np.pi * event.frequency_offset_hz * relative_time
                 )
-                samples.append((float(time_value), order, np.exp(-1j * receiver_phase)))
+                # The simulator reports transverse magnetization as Mx+iMy.
+                # With its Bloch sign convention a positive off-resonance
+                # evolves with negative complex phase, so a positive receiver
+                # frequency/phase is removed by multiplication with +i*phase.
+                # Using the opposite sign doubles the phase ramp and turns RF
+                # phase cycling or receiver offsets into Cartesian shifts.
+                samples.append((float(time_value), order, np.exp(1j * receiver_phase)))
                 order += 1
         samples.sort(key=lambda item: (item[0], item[1]))
         return (

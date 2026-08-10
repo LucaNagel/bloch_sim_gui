@@ -17,9 +17,13 @@ from blochsimulator.phantom_design import (
 )
 from blochsimulator.sequence import ADCEvent, RFEvent, SequenceProgram
 from blochsimulator.spectral_phantom import SpectralPhantom
-from blochsimulator.ui.phantom_designer import SpectralPhantomDesignerDialog
+from blochsimulator.ui.phantom_designer import (
+    SpectralPhantomDesignerDialog,
+    load_any_phantom,
+)
 from blochsimulator.ui.default_settings import WorkspaceDefaults
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
+from blochsimulator.ui.main_window import BlochSimulatorGUI
 from blochsimulator.ui.volume_viewer import VolumeViewerWidget
 from blochsimulator.ui.widgets import IMAGE_HISTOGRAM_WIDTH
 from blochsimulator.phantom_widget import (
@@ -46,6 +50,9 @@ def test_new_phantom_designer_uses_saved_fov_and_nucleus_defaults(tmp_path):
     )
     assert dialog.nucleus.currentData() == "C13"
     assert dialog.field_strength_t.value() == 7.0
+    assert dialog.supersampling_enabled.isChecked()
+    assert dialog.supersampling_factor.isEnabled()
+    assert dialog.design.shapes[0].kind == "cylinder"
     dialog.close()
     app.processEvents()
 
@@ -108,6 +115,46 @@ def test_peak_specific_t1_overrides_shape_default_and_round_trips():
     assert restored.shapes[0].peaks[1].t1_s is None
 
 
+def test_peak_spin_density_and_initial_polarization_are_independent():
+    design = PhantomDesign(
+        shape=(1, 1, 1),
+        fov_m=(0.01, 0.01, 0.01),
+        shapes=[
+            ShapeDefinition(
+                name="Pools",
+                kind="box",
+                size=(1.0, 1.0, 1.0),
+                initial_mz=3.0,
+                peaks=[
+                    SpectralPeakDefinition(
+                        "Pyruvate",
+                        amplitude=2.0,
+                        initial_polarization=4.0,
+                    ),
+                    SpectralPeakDefinition(
+                        "Lactate",
+                        amplitude=5.0,
+                        initial_polarization=0.0,
+                    ),
+                ],
+            )
+        ],
+    )
+
+    phantom = design.build()
+    pyruvate = "Pools: Pyruvate"
+    lactate = "Pools: Lactate"
+
+    assert phantom.concentration_maps[pyruvate][0, 0, 0] == pytest.approx(2.0)
+    assert phantom.initial_mz_maps[pyruvate][0, 0, 0] == pytest.approx(4.0)
+    assert phantom.concentration_maps[lactate][0, 0, 0] == pytest.approx(5.0)
+    assert phantom.initial_mz_maps[lactate][0, 0, 0] == pytest.approx(0.0)
+
+    restored = PhantomDesign.from_dict(design.to_dict())
+    assert restored.shapes[0].peaks[0].initial_polarization == pytest.approx(4.0)
+    assert restored.shapes[0].peaks[1].initial_polarization == pytest.approx(0.0)
+
+
 def test_cylinder_can_be_rotated_about_all_three_axes_and_round_trips():
     design = PhantomDesign(
         shape=(31, 31, 31),
@@ -147,6 +194,98 @@ def test_unrotated_cylinder_uses_xy_diameters_and_z_length():
     assert mask[10, 10, 1]
     assert mask[10, 10, 19]
     assert not mask[5, 5, 10]
+
+
+@pytest.mark.parametrize("kind", ["ellipsoid", "box", "cylinder"])
+def test_supersampling_produces_fractional_edges_for_every_shape(kind):
+    design = PhantomDesign(
+        shape=(9, 9, 9),
+        fov_m=(0.09, 0.09, 0.09),
+        supersampling_enabled=True,
+        supersampling_factor=4,
+        shapes=[
+            ShapeDefinition(
+                name=kind.title(),
+                kind=kind,
+                center=(0.47, 0.52, 0.49),
+                size=(0.53, 0.47, 0.61),
+                rotation_deg=(11.0, 17.0, 23.0),
+            )
+        ],
+    )
+
+    coverage = design.rasterize_mask(design.shapes[0])
+
+    assert coverage.dtype == float
+    assert np.all((0.0 <= coverage) & (coverage <= 1.0))
+    assert np.any((coverage > 0.0) & (coverage < 1.0))
+
+
+def test_supersampling_is_enabled_by_default_and_round_trips():
+    design = _spectral_design()
+    assert design.supersampling_enabled is True
+    assert design.rasterize_mask(design.shapes[0]).dtype == float
+
+    design.supersampling_enabled = False
+    design.supersampling_factor = 3
+    restored = PhantomDesign.from_dict(design.to_dict())
+
+    assert restored.supersampling_enabled is False
+    assert restored.supersampling_factor == 3
+
+    legacy_defaults = PhantomDesign.from_dict({"shapes": [{"name": "Default"}]})
+    assert legacy_defaults.supersampling_enabled is False
+    assert ShapeDefinition(name="Default").kind == "cylinder"
+
+
+def test_designer_loads_and_syncs_supersampling_settings():
+    app = QApplication.instance() or QApplication([])
+    design = _spectral_design()
+    design.supersampling_enabled = True
+    design.supersampling_factor = 3
+    dialog = SpectralPhantomDesignerDialog(design=design)
+
+    assert dialog.supersampling_enabled.isChecked()
+    assert dialog.supersampling_factor.isEnabled()
+    assert dialog.supersampling_factor.value() == 3
+
+    dialog.supersampling_enabled.setChecked(False)
+    dialog.supersampling_factor.setValue(5)
+    dialog._sync_global()
+
+    assert design.supersampling_enabled is False
+    assert design.supersampling_factor == 5
+    dialog.close()
+    app.processEvents()
+
+
+def test_build_uses_fractional_coverage_for_maps():
+    design = PhantomDesign(
+        shape=(7, 7, 7),
+        fov_m=(0.07, 0.07, 0.07),
+        supersampling_enabled=True,
+        supersampling_factor=4,
+        shapes=[
+            ShapeDefinition(
+                name="Object",
+                kind="ellipsoid",
+                size=(0.55, 0.55, 0.55),
+                initial_mz=5.0,
+                b0_ppm=2.0,
+            )
+        ],
+    )
+
+    phantom = design.build()
+    concentration = phantom.concentration_maps["Object: Water"]
+    fractional = (concentration > 0.0) & (concentration < 1.0)
+
+    assert np.any(fractional)
+    assert np.allclose(
+        phantom.initial_mz_maps["Object: Water"][fractional],
+        1.0 + 4.0 * concentration[fractional],
+    )
+    assert np.allclose(phantom.b0_map_ppm[fractional], 2.0 * concentration[fractional])
 
 
 def test_design_preserves_field_nucleus_and_b0_conversion():
@@ -363,6 +502,37 @@ def test_legacy_hz_design_metadata_is_migrated_using_saved_field_strength():
     assert phantom.b0_map_ppm is not None
 
 
+def test_legacy_dynamic_pool_weights_migrate_to_peak_polarization():
+    design = PhantomDesign.from_dict(
+        {
+            "dynamic_enabled": True,
+            "shape": (1, 1, 1),
+            "fov_m": (0.01, 0.01, 0.01),
+            "shapes": [
+                {
+                    "name": "Legacy HP",
+                    "initial_mz": 10.0,
+                    "peaks": [
+                        {"name": "Pyruvate", "amplitude": 0.75},
+                        {"name": "Lactate", "amplitude": 0.0},
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert [peak.amplitude for peak in design.shapes[0].peaks] == pytest.approx(
+        [1.0, 1.0]
+    )
+    assert [
+        peak.initial_polarization for peak in design.shapes[0].peaks
+    ] == pytest.approx([7.5, 0.0])
+
+    phantom = design.build()
+    assert phantom.initial_concentration_maps["Pyruvate"][0, 0, 0] == pytest.approx(7.5)
+    assert phantom.initial_concentration_maps["Lactate"][0, 0, 0] == pytest.approx(0.0)
+
+
 @pytest.mark.parametrize("suffix", [".npz", ".h5", ".nc"])
 def test_spectral_phantom_round_trip_preserves_design(tmp_path, suffix):
     design = _spectral_design()
@@ -387,6 +557,15 @@ def test_spectral_phantom_round_trip_preserves_design(tmp_path, suffix):
         )
     assert loaded.coordinate_system == "object_xyz"
     assert np.array_equal(loaded.affine_ijk_to_xyz_m, phantom.affine_ijk_to_xyz_m)
+
+
+def test_loaded_phantom_uses_filename_as_display_name(tmp_path):
+    path = tmp_path / "renal_reference.npz"
+    _spectral_design().build().save(path)
+
+    loaded = load_any_phantom(path)
+
+    assert loaded.name == "renal_reference"
 
 
 def test_spectral_phantom_xarray_dataset_labels_species_and_coordinates():
@@ -453,6 +632,36 @@ def test_designer_and_sequence_workspace_accept_spectral_phantom():
     assert "B0 7 T C13" in widget.phantom_summary.text()
     dialog.close()
     host.close()
+    app.processEvents()
+
+
+def test_shared_b0_stays_synchronized_between_phantom_and_spin_probe():
+    app = QApplication.instance() or QApplication([])
+    phantom = _spectral_design().build()
+    creator = PhantomCreatorWidget()
+    creator.current_phantom = phantom
+    host_widget = QWidget()
+    host_widget.phantom_widget = SimpleNamespace(
+        current_phantom=phantom,
+        phantom_creator=creator,
+    )
+    sequence = SequenceSimulationWidget(host_widget)
+    host = SimpleNamespace(
+        sequence_simulation_widget=sequence,
+        phantom_widget=host_widget.phantom_widget,
+    )
+
+    BlochSimulatorGUI._synchronize_workspace_field_strength(host, 7.0)
+    sequence.object_source.setCurrentIndex(2)
+    sequence.object_source.setCurrentIndex(0)
+
+    assert sequence.field_strength_t.value() == pytest.approx(7.0)
+    assert creator.get_field_strength() == pytest.approx(7.0)
+    assert phantom.field_strength == pytest.approx(7.0)
+
+    sequence.close()
+    creator.close()
+    host_widget.close()
     app.processEvents()
 
 
@@ -602,8 +811,8 @@ def test_designer_displays_absolute_peak_ppm_but_stores_relative_offsets():
     )
     dialog = SpectralPhantomDesignerDialog(design=design)
 
-    assert float(dialog.peak_table.item(0, 2).text()) == pytest.approx(170.0)
-    assert float(dialog.peak_table.item(1, 2).text()) == pytest.approx(180.0)
+    assert float(dialog.peak_table.item(0, 3).text()) == pytest.approx(170.0)
+    assert float(dialog.peak_table.item(1, 3).text()) == pytest.approx(180.0)
     assert [peak.frequency_ppm for peak in dialog._read_peak_table()] == pytest.approx(
         [-5.0, 5.0]
     )
@@ -618,14 +827,15 @@ def test_designer_edits_optional_metabolite_t1_and_preserves_default_fallback():
     design.shapes[0].peaks[1].t1_s = None
     dialog = SpectralPhantomDesignerDialog(design=design)
 
-    assert float(dialog.peak_table.item(0, 3).text()) == pytest.approx(700.0)
-    assert dialog.peak_table.item(1, 3).text() == ""
+    assert float(dialog.peak_table.item(0, 4).text()) == pytest.approx(700.0)
+    assert dialog.peak_table.item(1, 4).text() == ""
     peaks = dialog._read_peak_table()
     assert peaks[0].t1_s == pytest.approx(0.7)
     assert peaks[1].t1_s is None
+    assert "spin density" in dialog.peak_table.horizontalHeaderItem(1).text().lower()
     assert (
-        "initial pool weight"
-        in dialog.peak_table.horizontalHeaderItem(1).text().lower()
+        "initial polarization"
+        in dialog.peak_table.horizontalHeaderItem(2).text().lower()
     )
 
     dialog.close()

@@ -51,6 +51,12 @@ from .flip_angles import VFA_REFERENCE_DOI, variable_flip_angle_schedule
 from .probe import SequenceProbeResult
 from .reference import ReferenceSimulationResult, simulate_reference_sequence
 from .result import SequenceSimulationResult
+from .spin_sampling import SpinSampling
+from .reconstruction import (
+    SequenceReconstructionModel,
+    ideal_separate,
+    load_reconstruction_dataset,
+)
 from .scanner import (
     ScannerParameters,
     load_scanner_parameters,
@@ -67,6 +73,7 @@ from .pulseq_builders import (
     make_pulseq_bssfp,
     make_pulseq_csi,
     make_pulseq_epi,
+    make_pulseq_flash,
     make_pulseq_spiral,
 )
 from .advanced_bssfp_builders import (
@@ -106,7 +113,9 @@ __all__ = [
     "ScannerParameters",
     "ReferenceSimulationResult",
     "SequenceSimulationResult",
+    "SequenceReconstructionModel",
     "SpinProbeEnsemble",
+    "SpinSampling",
     "TimestepConvergencePoint",
     "TimestepConvergenceResult",
     "VFA_REFERENCE_DOI",
@@ -132,12 +141,15 @@ __all__ = [
     "infer_cartesian_acquisition_volumes",
     "infer_spectroscopic_acquisition",
     "infer_spiral_acquisition",
+    "ideal_separate",
+    "load_reconstruction_dataset",
     "load_pulseq",
     "load_scanner_parameters",
     "make_cartesian_epi",
     "make_pulseq_bssfp",
     "make_pulseq_csi",
     "make_pulseq_epi",
+    "make_pulseq_flash",
     "make_pulseq_me_bssfp",
     "make_pulseq_radial_me_bssfp",
     "make_pulseq_spectral_selective_bssfp",

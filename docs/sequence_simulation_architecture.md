@@ -131,6 +131,33 @@ The compiler accumulates each sparse RF/gradient event only into the intervals
 it overlaps. This preserves the timing representation while avoiding an
 `Ninterval x Nevent` traversal for full imaging sequences.
 
+## Intravoxel spin integration and spoiler models
+
+`SpinSampling` defines a deterministic midpoint grid in physical object X/Y/Z
+order. `(1, 1, 1)` is the historical voxel-centre approximation. For larger
+grids, each active parent voxel is expanded only inside its current streaming
+chunk. T1, T2, off-resonance, Tx/Rx sensitivity, and initial state are repeated;
+positions receive physical subvoxel offsets and proton density receives
+normalized quadrature weights. The native kernel propagates every subspin for
+the complete sequence. Final and checkpoint magnetization are coherently
+averaged back onto the parent voxel, so persistent result dimensions do not
+change.
+
+`spoiler_mode="ideal"` passes declared crusher state indices to the kernel and
+retains the explicit `Mx=My=0` operation. `spoiler_mode="gradient"` passes no
+crusher indices; dephasing then follows exclusively from gradient waveforms and
+subspin positions. Declared marker times remain in result metadata for audit.
+The desktop's ideal mode deliberately uses one spin per voxel for exact
+backward compatibility and speed. Static, independent spectral-component, and
+dynamic two-pool sequence paths all implement the same two modes.
+
+For a uniform rectangular voxel with initial transverse magnetization and a
+gradient moment `k` in cycles/m, the no-relaxation validation oracle is
+`exp(-i*2*pi*dot(k, r_center)) * product(sinc(dot(k, voxel_basis_axis)))`,
+where `sinc` uses the normalized `sin(pi*x)/(pi*x)` definition. A reversed
+gradient must restore the coherent subspin mean; this distinguishes physical
+integration from irreversible ideal crushing.
+
 ## ADC acquisition and reconstruction
 
 Each ADC value is an instantaneous observation at its sample centre. The

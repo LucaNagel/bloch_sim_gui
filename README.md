@@ -34,6 +34,7 @@ A high-performance Python implementation of the Bloch equation solver originally
 - Dedicated event-based **Sequence mode** for **loading and simulating [Pulseq
   `.seq`](https://github.com/pulseq/pypulseq) files**.
 - **Interactive generation of Pulseq** EPI, centre-out 2D spiral, 2D CSI,
+  spoiled 2D FLASH,
   Cartesian 3D bSSFP, alternating-frequency spectrally selective 3D bSSFP, and
   Cartesian or spiral-phyllotaxis radial 3D multi-echo bSSFP sequences, with
   export to `.seq` files and reproducing Jupyter notebooks.
@@ -49,6 +50,10 @@ A high-performance Python implementation of the Bloch equation solver originally
 - Synchronized time controls and animation for time-resolved results.
 - Sequence timeline, ADC signal, CSI spectrum, k-space, reconstruction, final
   state, spatial magnetization, and spin-probe views.
+- A dimension-aware **Reconstruction Explorer** for interactive 2D/3D k-space
+  and image views, echo/repetition/slice selection, CSI voxel spectra, receive-coil
+  combination, simulated pool comparison, and known-frequency linear IDEAL
+  estimates.
 - Named dimensions and metadata through direct `xarray.Dataset` conversion.
 - Static figures (`.png`, `.svg`) and animations (`.mp4`, `.gif`).
 
@@ -141,18 +146,25 @@ waveform.
 
 - Load Pulseq `.seq` files and inspect their RF, gradient, and ADC timeline
   before simulation.
+- Run Python sequence-generation scripts from the GUI, inspect their combined
+  output, and automatically load a newly generated `.seq` file.
 - Simulate imported Pulseq sequences directly on 1D, 2D, or 3D phantoms.
-- Configure Cartesian EPI or spiral readouts, including multi-slice gap and
-  spacing and configurable Sinc, SLR, block, or RF-Designer excitation pulses,
-  plus 2D CSI and four 3D bSSFP variants interactively. Spectrally selective
+- Configure Cartesian EPI or spiral readouts, including multi-slice gap,
+  explicit signed read/phase gradient directions, derived slice orientation,
+  package offset, echo time, and configurable Sinc,
+  dynamically designed SLR, Gaussian, block, or RF-Designer excitation pulses,
+  plus oriented 2D CSI, spoiled 2D FLASH, and four 3D bSSFP variants
+  interactively. Repeated images, volumes, and radial measurements support an
+  explicit start-to-start acquisition interval. Spectrally selective
   bSSFP cycles configurable RF/receiver offsets and target flip angles between
   complete volumes. Cartesian multi-echo bSSFP provides flyback and symmetric
   bipolar readout strategies with separately reconstructed echo volumes;
   radial multi-echo bSSFP provides monopolar center-through echoes and a
-  golden-angle spiral-phyllotaxis trajectory. Cartesian 3D builders expose a
-  logical read/phase/partition frame, allowing the read gradient to run along
-  scanner x, y, or z without redesigning the phantom. The generated sequence
-  is updated from the current acquisition parameters and can be refreshed
+  golden-angle spiral-phyllotaxis trajectory. Every 3D mode has its own signed
+  logical read/phase selectors and a right-handed derived partition direction;
+  for radial acquisition these controls orient the complete phyllotaxis
+  coordinate system. The generated sequence is updated from the current
+  acquisition parameters and can be refreshed
   explicitly with **Generate sequence** or continuously with the opt-in
   **Live preview**, then
   exported as a Pulseq `.seq` file, a reproducing Jupyter notebook, or both.
@@ -187,9 +199,19 @@ and magnetization remain available after simulation.
 ### Results and export
 
 Sequence simulations retain the chronological ADC signal, k-space coordinates,
-acquisition labels, final magnetization, and optional checkpoints. Cartesian
-and spectroscopic acquisitions additionally provide ready-to-use k-space,
-reconstruction, FID, and spectrum arrays where applicable.
+acquisition labels, final magnetization, and optional checkpoints. Cartesian,
+spiral, supported radial 3D, and spectroscopic acquisitions additionally provide
+ready-to-use gridded k-space, reconstruction, FID, and spectrum arrays where
+applicable.
+
+The **Reconstruction Explorer** keeps outer acquisition dimensions separate and
+uses labelled sliders for ordered dimensions such as echo, repetition, slice,
+segment, and CSI spectral sample. It can display magnitude, phase, real, or
+imaginary components. Its full-size 3D image and k-space tabs keep independent
+orthogonal slice positions. Use **Open result…** to reopen an exported
+NetCDF result without re-running the simulation. Explorer selections are stored
+with complete `.blochproj` projects, and the current scalar view can be exported
+as NumPy data or PNG.
 
 Use `SequenceSimulationResult.to_xarray()` for an in-memory `xarray.Dataset`,
 or export from **Export results…**. The default export writes both a NetCDF

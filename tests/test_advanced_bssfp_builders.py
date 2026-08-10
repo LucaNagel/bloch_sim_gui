@@ -8,6 +8,8 @@ from PyQt5.QtWidgets import QApplication
 
 pypulseq = pytest.importorskip("pypulseq")
 
+from blochsimulator import BlochSimulator
+from blochsimulator.phantom import Phantom
 from blochsimulator.sequence import (
     AcquisitionDimensions,
     SequenceCompiler,
@@ -38,6 +40,153 @@ ME_BSSFP_SCRIPT_MAIN = runpy.run_path(
 def _round_trip(sequence, path):
     sequence.write(str(path), v141_compat=True)
     return load_pulseq(path)
+
+
+def _pulseq_event_center_phase_deg(event, center_s):
+    return float(
+        np.mod(
+            np.rad2deg(event.phase_offset + 2 * np.pi * event.freq_offset * center_s),
+            360.0,
+        )
+    )
+
+
+def test_spectral_bssfp_uses_one_rf_target_locked_phase_across_trs():
+    target_offset = -245.0
+    receiver_offset = 125.0
+    start_phase = 10.0
+    user_increment = 20.0
+    sequence = make_pulseq_spectral_selective_bssfp(
+        matrix=(2, 1, 3),
+        target_frequency_offsets_hz=(target_offset,),
+        receiver_frequency_offsets_hz=(receiver_offset,),
+        target_metabolite_names=("Py",),
+        flip_angle_deg=(4.0,),
+        spectral_rf_pulse_type="sinc",
+        spectral_rf_sinc_lobes=1,
+        rf_phase_start_deg=start_phase,
+        rf_phase_increment_deg=user_increment,
+        repetitions=1,
+        use_alpha_half=False,
+        end_image_spoiler_cycles_per_fov=0.0,
+    )
+    tr = float(sequence.definitions["TR"])
+    rf_phases = []
+    adc_phases = []
+    for block_index in sequence.block_events:
+        block = sequence.get_block(block_index)
+        if block.rf is not None:
+            rf_center = pypulseq.calc_rf_center(block.rf)[0]
+            rf_phases.append(_pulseq_event_center_phase_deg(block.rf, rf_center))
+        if block.adc is not None:
+            adc_center = block.adc.delay + block.adc.num_samples * block.adc.dwell / 2
+            adc_phases.append(_pulseq_event_center_phase_deg(block.adc, adc_center))
+
+    common_step = user_increment + 360.0 * target_offset * tr
+    expected_rf = [
+        np.mod(start_phase + index * common_step, 360.0) for index in range(3)
+    ]
+    first_adc_phase = start_phase + 360.0 * receiver_offset * tr / 2
+    expected_adc = [
+        np.mod(first_adc_phase + index * common_step, 360.0) for index in range(3)
+    ]
+
+    assert rf_phases == pytest.approx(expected_rf)
+    assert adc_phases == pytest.approx(expected_adc)
+    assert sequence.definitions["FrequencyOffsetPhaseCoherent"] is True
+    assert sequence.definitions["PhaseReference"] == "rf-target-locked"
+
+
+def test_spectral_bssfp_target_locked_phase_avoids_cartesian_ghost(tmp_path):
+    phase_matrix = 8
+    sequence = make_pulseq_spectral_selective_bssfp(
+        fov_m=(20e-3, 20e-3, 20e-3),
+        matrix=(2, phase_matrix, 1),
+        target_frequency_offsets_hz=(-245.0,),
+        receiver_frequency_offsets_hz=(0.0,),
+        target_metabolite_names=("Py",),
+        flip_angle_deg=(4.0,),
+        spectral_rf_pulse_type="sinc",
+        spectral_rf_sinc_lobes=1,
+        spectral_rf_duration_s=0.2e-3,
+        spectral_rf_bandwidth_hz=5_000.0,
+        sampling_bandwidth_hz=10_000.0,
+        repetition_time_s=1.2e-3,
+        rf_phase_increment_deg=0.0,
+        dummy_repetitions=192,
+        repetitions=1,
+        use_alpha_half=False,
+        end_image_spoiler_cycles_per_fov=0.0,
+    )
+    program = _round_trip(sequence, tmp_path / "target_locked_ss_bssfp.seq")
+    shape = (1, 1, 1)
+    phantom = Phantom(
+        shape=shape,
+        fov=(20e-3, 20e-3, 20e-3),
+        t1_map=np.full(shape, 50e-3),
+        t2_map=np.full(shape, 20e-3),
+    )
+
+    result = BlochSimulator(use_parallel=False).simulate_sequence(
+        program,
+        phantom,
+        simulation_timestep_s=20e-6,
+    )
+    phase_lines = result.signal.reshape(phase_matrix, 2)[:, 0]
+    adjacent_phase_deg = np.angle(phase_lines[1:] * np.conj(phase_lines[:-1]), deg=True)
+    phase_image = np.abs(np.fft.fftshift(np.fft.ifft(np.fft.ifftshift(phase_lines))))
+    two_largest = np.sort(phase_image)[-2:]
+
+    assert adjacent_phase_deg == pytest.approx(0.0, abs=0.01)
+    assert int(np.argmax(phase_image)) == phase_matrix // 2
+    assert two_largest[0] / two_largest[1] < 0.01
+
+
+def test_spectral_bssfp_published_same_phase_alpha_half_is_centered(tmp_path):
+    phase_matrix = 16
+    partition_matrix = 12
+    sequence = make_pulseq_spectral_selective_bssfp(
+        fov_m=(56e-3, 28e-3, 21e-3),
+        matrix=(2, phase_matrix, partition_matrix),
+        target_frequency_offsets_hz=(-245.0,),
+        receiver_frequency_offsets_hz=(0.0,),
+        target_metabolite_names=("Py",),
+        flip_angle_deg=(4.0,),
+        spectral_rf_pulse_type="slr",
+        spectral_rf_duration_s=2.33e-3,
+        sampling_bandwidth_hz=10_000.0,
+        repetition_time_s=6.29e-3,
+        dummy_repetitions=0,
+        repetitions=1,
+        use_alpha_half=True,
+        alpha_half_center_spacing_s=4.31e-3,
+        end_image_spoiler_cycles_per_fov=0.0,
+    )
+    program = _round_trip(sequence, tmp_path / "prepared_ss_bssfp.seq")
+    shape = (1, 1, 1)
+    phantom = Phantom(
+        shape=shape,
+        fov=(56e-3, 28e-3, 21e-3),
+        t1_map=np.full(shape, 25.0),
+        t2_map=np.full(shape, 0.3),
+    )
+
+    result = BlochSimulator(use_parallel=False).simulate_sequence(
+        program,
+        phantom,
+        simulation_timestep_s=10e-6,
+    )
+    encoded = result.signal.reshape(partition_matrix, phase_matrix, 2)[..., 0]
+    image = np.abs(np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(encoded))))
+    two_largest = np.sort(image.ravel())[-2:]
+
+    assert sequence.definitions["RFPhaseIncrementDeg"] == pytest.approx(0.0)
+    assert sequence.definitions["AlphaHalfPhaseDeg"] == pytest.approx(0.0)
+    assert np.unravel_index(np.argmax(image), image.shape) == (
+        partition_matrix // 2,
+        phase_matrix // 2,
+    )
+    assert two_largest[0] / two_largest[1] < 0.5
 
 
 def test_spectral_selective_builder_cycles_targets_by_dynamic_volume(tmp_path):
@@ -109,6 +258,25 @@ def test_spectral_selective_builder_matches_paper_readout_and_auto_encoding():
         6.29e-3 / 2,
         abs=5e-6,
     )
+
+
+def test_spectral_selective_sinc_bandwidth_is_derived_from_duration_and_lobes():
+    sequence = make_pulseq_spectral_selective_bssfp(
+        matrix=(4, 2, 2),
+        spectral_rf_pulse_type="sinc",
+        spectral_rf_duration_s=2e-3,
+        spectral_rf_sinc_lobes=5,
+        encoding_duration_s=0.5e-3,
+        repetition_time_s=8e-3,
+        repetitions=1,
+        use_alpha_half=False,
+    )
+
+    definitions = sequence.definitions
+    assert definitions["SpectralRFSincLobes"] == 5
+    assert definitions["SpectralRFBandwidthHz"] == pytest.approx(3000.0)
+    assert definitions["SpectralRFBandwidthFactorHzMs"] == pytest.approx(6000.0)
+    assert definitions["SpectralRFTimeBandwidthProduct"] == pytest.approx(6.0)
 
 
 @pytest.mark.parametrize(
@@ -247,6 +415,28 @@ def test_radial_me_bssfp_matches_published_timing_and_balances_gradients(tmp_pat
     assert total_moment == pytest.approx(np.zeros(3), abs=5e-3)
 
 
+def test_radial_me_bssfp_orients_the_complete_phyllotaxis_frame(tmp_path):
+    sequence = make_pulseq_radial_me_bssfp(
+        base_resolution=4,
+        spokes_per_measurement=1,
+        measurements=1,
+        echoes=1,
+        encoding_axes=("+z", "+x", "+y"),
+        use_alpha_half=False,
+        use_tip_back=False,
+    )
+    program = _round_trip(sequence, tmp_path / "radial_oriented.seq")
+    definitions = program.metadata["definitions"]
+
+    assert definitions["ReadoutAxis"] == "+z"
+    assert definitions["PhaseEncodingAxis"] == "+x"
+    assert definitions["PartitionEncodingAxis"] == "+y"
+    assert definitions["InterMeasurementRotationAxis"] == "+y"
+    # The first phyllotaxis spoke points along logical partition. Rotating the
+    # coordinate frame therefore moves every gradient of this one-spoke test to y.
+    assert {event.axis for event in program.gradient_events} == {"y"}
+
+
 def test_radial_me_bssfp_labels_echoes_spokes_and_dynamic_measurements(tmp_path):
     sequence = RADIAL_SCRIPT_MAIN(
         base_resolution=4,
@@ -266,6 +456,66 @@ def test_radial_me_bssfp_labels_echoes_spokes_and_dynamic_measurements(tmp_path)
     assert line_indices[5:10] == (1,) * 5
 
 
+def test_advanced_dynamic_acquisitions_use_start_to_start_intervals(tmp_path):
+    cases = (
+        (
+            "spectral",
+            make_pulseq_spectral_selective_bssfp(
+                matrix=(4, 1, 1),
+                target_frequency_offsets_hz=(0.0,),
+                receiver_frequency_offsets_hz=(0.0,),
+                target_metabolite_names=("X",),
+                flip_angle_deg=(10.0,),
+                repetition_time_s=8e-3,
+                repetitions=2,
+                use_alpha_half=False,
+                end_image_spoiler_cycles_per_fov=0.0,
+                acquisition_interval_s=30e-3,
+            ),
+            30e-3,
+        ),
+        (
+            "cartesian_me",
+            make_pulseq_me_bssfp(
+                matrix=(4, 1, 1),
+                repetitions=2,
+                use_alpha_half=False,
+                acquisition_interval_s=30e-3,
+            ),
+            30e-3,
+        ),
+        (
+            "radial_me",
+            make_pulseq_radial_me_bssfp(
+                base_resolution=4,
+                readout_oversampling=2,
+                spokes_per_measurement=1,
+                measurements=2,
+                use_alpha_half=False,
+                use_tip_back=False,
+                acquisition_interval_s=40e-3,
+            ),
+            40e-3,
+        ),
+    )
+
+    for name, sequence, expected_interval in cases:
+        program = _round_trip(sequence, tmp_path / f"{name}_interval.seq")
+        definitions = program.metadata["definitions"]
+        starts = np.asarray(definitions["AcquisitionStartTimes"], dtype=float).reshape(
+            -1
+        )
+        assert definitions["AcquisitionIntervalReference"] == "start-to-start"
+        assert definitions["RequestedAcquisitionInterval"] == pytest.approx(
+            expected_interval
+        )
+        assert definitions["AcquisitionInterval"] == pytest.approx(expected_interval)
+        assert starts == pytest.approx((0.0, expected_interval))
+        assert program.rf_events[1].start_s - program.rf_events[0].start_s == (
+            pytest.approx(expected_interval)
+        )
+
+
 def test_spiral_phyllotaxis_rotates_each_measurement_about_z():
     directions = spiral_phyllotaxis_directions(
         7, measurements=2, inter_measurement_rotation_deg=90.0
@@ -282,11 +532,14 @@ def test_spiral_phyllotaxis_rotates_each_measurement_about_z():
 def test_sequence_workspace_builds_all_advanced_bssfp_modes(tmp_path):
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()
+    widget.field_strength_t.setValue(7.0)
+    widget.nucleus.setCurrentText("C13")
 
     widget.ss_bssfp_read_matrix.setValue(4)
     widget.ss_bssfp_phase_matrix.setValue(2)
     widget.ss_bssfp_partition_matrix.setValue(2)
     widget.ss_bssfp_repetition_time_ms.setValue(8.0)
+    widget.ss_bssfp_phase_start_deg.setValue(73.0)
     widget.sequence_source.setCurrentIndex(4)
     widget.generate_sequence_button.click()
     ss_path = widget._write_pulseq_path(tmp_path / "interactive_ss_bssfp.seq")
@@ -299,6 +552,10 @@ def test_sequence_workspace_builds_all_advanced_bssfp_modes(tmp_path):
     assert ss_definitions["ReferenceDOI"] == "10.1002/mrm.29676"
     assert ss_definitions["FieldStrengthT"] == pytest.approx(7.0)
     assert ss_definitions["Nucleus"] == "C13"
+    assert ss_definitions["RFPhaseStartDeg"] == pytest.approx(73.0)
+    assert widget.program.metadata["definitions"]["RFPhaseStartDeg"] == pytest.approx(
+        73.0
+    )
 
     widget.radial_me_base_resolution.setValue(4)
     widget.radial_me_spokes.setValue(3)
@@ -313,7 +570,7 @@ def test_sequence_workspace_builds_all_advanced_bssfp_modes(tmp_path):
     radial_definitions = load_pulseq(radial_path).metadata["definitions"]
     assert radial_definitions["Measurements"] == 2
     assert radial_definitions["SpokesPerMeasurement"] == 3
-    assert radial_definitions["FieldStrengthT"] == pytest.approx(3.0)
+    assert radial_definitions["FieldStrengthT"] == pytest.approx(7.0)
     assert radial_definitions["Nucleus"] == "C13"
 
     widget.me_bssfp_read_matrix.setValue(4)

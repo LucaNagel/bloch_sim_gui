@@ -303,6 +303,25 @@ class SequenceSimulationResult:
                 cartesian_dims,
                 np.abs(image),
             )
+            if self.species_signal is not None:
+                species_dims = ["pool"]
+                if self.species_signal.ndim == 3:
+                    species_dims.append("coil")
+                species_dims.extend((phase_dim, read_dim))
+                species_kspace = cartesian.reshape_signal(self.species_signal)
+                species_image = cartesian.reconstruct(self.species_signal)
+                data_vars["species_cartesian_kspace"] = (
+                    species_dims,
+                    species_kspace,
+                )
+                data_vars["species_cartesian_image"] = (
+                    species_dims,
+                    species_image,
+                )
+                data_vars["species_cartesian_image_magnitude"] = (
+                    species_dims,
+                    np.abs(species_image),
+                )
         elif cartesian_frames is not None:
             first = cartesian_frames.acquisitions[0]
             same_grid = all(
@@ -371,6 +390,46 @@ class SequenceSimulationResult:
                     cartesian_dims,
                     np.abs(image),
                 )
+                if self.species_signal is not None:
+                    from types import SimpleNamespace
+
+                    species_result = SimpleNamespace(
+                        signal=self.species_signal,
+                        adc_times_s=self.adc_times_s,
+                        adc_gradient_moment_cyc_per_m=(
+                            self.adc_gradient_moment_cyc_per_m
+                        ),
+                    )
+                    species_kspace = np.stack(
+                        [
+                            cartesian_frames.to_cartesian_kspace(species_result, frame)
+                            for frame in range(cartesian_frames.num_frames)
+                        ],
+                        axis=0,
+                    )
+                    species_image = np.stack(
+                        [
+                            cartesian_frames.reconstruct(species_result, frame)
+                            for frame in range(cartesian_frames.num_frames)
+                        ],
+                        axis=0,
+                    )
+                    species_dims = ["cartesian_frame", "pool"]
+                    if self.species_signal.ndim == 3:
+                        species_dims.append("coil")
+                    species_dims.extend((phase_dim, read_dim))
+                    data_vars["species_cartesian_kspace"] = (
+                        species_dims,
+                        species_kspace,
+                    )
+                    data_vars["species_cartesian_image"] = (
+                        species_dims,
+                        species_image,
+                    )
+                    data_vars["species_cartesian_image_magnitude"] = (
+                        species_dims,
+                        np.abs(species_image),
+                    )
         if cartesian_volumes is not None:
             kspace_3d = cartesian_volumes.dimensioned_kspace(self)
             image_3d = cartesian_volumes.dimensioned_reconstruction(self)
@@ -428,6 +487,34 @@ class SequenceSimulationResult:
                 volume_dims,
                 np.abs(image_3d),
             )
+            if self.species_signal is not None:
+                from types import SimpleNamespace
+
+                species_result = SimpleNamespace(
+                    signal=self.species_signal,
+                    adc_times_s=self.adc_times_s,
+                    adc_gradient_moment_cyc_per_m=(self.adc_gradient_moment_cyc_per_m),
+                )
+                species_kspace_3d = cartesian_volumes.dimensioned_kspace(species_result)
+                species_image_3d = cartesian_volumes.dimensioned_reconstruction(
+                    species_result
+                )
+                species_volume_dims = list(cartesian_volumes.varying_axes) + ["pool"]
+                if self.species_signal.ndim == 3:
+                    species_volume_dims.append("coil")
+                species_volume_dims.extend((partition_dim, phase_dim, read_dim))
+                data_vars["species_cartesian_3d_kspace"] = (
+                    species_volume_dims,
+                    species_kspace_3d,
+                )
+                data_vars["species_cartesian_3d_image"] = (
+                    species_volume_dims,
+                    species_image_3d,
+                )
+                data_vars["species_cartesian_3d_image_magnitude"] = (
+                    species_volume_dims,
+                    np.abs(species_image_3d),
+                )
         if spiral is not None:
             spiral_kspace = np.stack(
                 [spiral.grid_kspace(self, frame) for frame in range(spiral.num_frames)],
@@ -466,6 +553,120 @@ class SequenceSimulationResult:
                 spiral_dims,
                 np.abs(spiral_image),
             )
+            if self.species_signal is not None:
+                from types import SimpleNamespace
+
+                species_result = SimpleNamespace(
+                    signal=self.species_signal,
+                    adc_gradient_moment_cyc_per_m=self.adc_gradient_moment_cyc_per_m,
+                )
+                species_spiral_kspace = np.stack(
+                    [
+                        spiral.grid_kspace(species_result, frame)
+                        for frame in range(spiral.num_frames)
+                    ],
+                    axis=0,
+                )
+                species_spiral_image = np.stack(
+                    [
+                        spiral.reconstruct(species_result, frame)
+                        for frame in range(spiral.num_frames)
+                    ],
+                    axis=0,
+                )
+                species_spiral_dims = ["spiral_frame", "pool", "phase_y", "read_x"]
+                if self.species_signal.ndim == 3:
+                    species_spiral_dims.insert(2, "coil")
+                data_vars["species_spiral_gridded_kspace"] = (
+                    species_spiral_dims,
+                    species_spiral_kspace,
+                )
+                data_vars["species_spiral_image"] = (
+                    species_spiral_dims,
+                    species_spiral_image,
+                )
+                data_vars["species_spiral_image_magnitude"] = (
+                    species_spiral_dims,
+                    np.abs(species_spiral_image),
+                )
+        from .reconstruction import (
+            _numeric_definition,
+            is_radial_3d_result,
+            radial_3d_reconstruction_arrays,
+        )
+
+        if is_radial_3d_result(self):
+            (
+                radial_outer_axes,
+                radial_outer_values,
+                radial_kspace,
+                radial_image,
+                radial_matrix,
+                radial_fov_m,
+            ) = radial_3d_reconstruction_arrays(self)
+            radial_dims = list(radial_outer_axes)
+            if self.signal.ndim == 2:
+                radial_dims.append("coil")
+            radial_dims.extend(("radial_z", "radial_y", "radial_x"))
+            coords.update(
+                {
+                    axis: np.asarray(radial_outer_values[axis], dtype=np.int64)
+                    for axis in radial_outer_axes
+                }
+            )
+            coords.update(
+                {
+                    "radial_x": np.arange(radial_matrix),
+                    "radial_y": np.arange(radial_matrix),
+                    "radial_z": np.arange(radial_matrix),
+                    "radial_position_x_m": (
+                        "radial_x",
+                        ((np.arange(radial_matrix) + 0.5) / radial_matrix - 0.5)
+                        * radial_fov_m,
+                    ),
+                    "radial_position_y_m": (
+                        "radial_y",
+                        ((np.arange(radial_matrix) + 0.5) / radial_matrix - 0.5)
+                        * radial_fov_m,
+                    ),
+                    "radial_position_z_m": (
+                        "radial_z",
+                        ((np.arange(radial_matrix) + 0.5) / radial_matrix - 0.5)
+                        * radial_fov_m,
+                    ),
+                }
+            )
+            data_vars["radial_3d_gridded_kspace"] = (radial_dims, radial_kspace)
+            data_vars["radial_3d_image"] = (radial_dims, radial_image)
+            data_vars["radial_3d_image_magnitude"] = (
+                radial_dims,
+                np.abs(radial_image),
+            )
+            if self.species_signal is not None:
+                (
+                    _,
+                    _,
+                    species_radial_kspace,
+                    species_radial_image,
+                    _,
+                    _,
+                ) = radial_3d_reconstruction_arrays(self, self.species_signal)
+                species_radial_dims = list(radial_outer_axes) + ["pool"]
+                if self.species_signal.ndim == 3:
+                    species_radial_dims.append("coil")
+                species_radial_dims.extend(("radial_z", "radial_y", "radial_x"))
+                data_vars["species_radial_3d_gridded_kspace"] = (
+                    species_radial_dims,
+                    species_radial_kspace,
+                )
+                data_vars["species_radial_3d_image"] = (
+                    species_radial_dims,
+                    species_radial_image,
+                )
+                data_vars["species_radial_3d_image_magnitude"] = (
+                    species_radial_dims,
+                    np.abs(species_radial_image),
+                )
         if self.checkpoint_magnetization is not None:
             coords["checkpoint"] = self.checkpoint_times_s
             data_vars["checkpoint_magnetization"] = (
@@ -572,6 +773,18 @@ class SequenceSimulationResult:
             attrs["cartesian_encoding_axes"] = " ".join(frame.axis_codes)
             attrs["cartesian_encoding_basis_xyz"] = ",".join(
                 f"{value:.17g}" for value in frame.matrix.reshape(-1)
+            )
+        if is_radial_3d_result(self):
+            attrs["radial_fov_m"] = ",".join(f"{radial_fov_m:.17g}" for _ in range(3))
+        pool_offsets = self.metadata.get("pool_frequency_offsets_hz")
+        if pool_offsets is not None:
+            attrs["pool_frequency_offsets_hz"] = ",".join(
+                f"{float(value):.17g}" for value in pool_offsets
+            )
+        echo_times = self.metadata.get("sequence_definitions", {}).get("EchoTimes")
+        if echo_times is not None:
+            attrs["echo_times_s"] = ",".join(
+                f"{float(value):.17g}" for value in _numeric_definition(echo_times)
             )
         dataset = xr.Dataset(data_vars, coords=coords, attrs=attrs)
         dataset["t"].attrs.update(long_name="ADC sample time", units="s")
@@ -810,6 +1023,141 @@ class SequenceSimulationResult:
                     ),
                 }
             )
+        if self.species_signal is not None:
+            from types import SimpleNamespace
+
+            species_result = SimpleNamespace(
+                signal=self.species_signal,
+                adc_times_s=self.adc_times_s,
+                adc_gradient_moment_cyc_per_m=(self.adc_gradient_moment_cyc_per_m),
+            )
+            if cartesian is not None:
+                species_image = cartesian.reconstruct(self.species_signal)
+                arrays.update(
+                    {
+                        "species_cartesian_kspace": cartesian.reshape_signal(
+                            self.species_signal
+                        ),
+                        "species_cartesian_image": species_image,
+                        "species_cartesian_image_magnitude": np.abs(species_image),
+                    }
+                )
+            elif cartesian_frames is not None:
+                first = cartesian_frames.acquisitions[0]
+                same_grid = all(
+                    acquisition.read_matrix == first.read_matrix
+                    and acquisition.phase_matrix == first.phase_matrix
+                    and acquisition.encoding_frame == first.encoding_frame
+                    and np.allclose(acquisition.kx_cyc_per_m, first.kx_cyc_per_m)
+                    and np.allclose(acquisition.ky_cyc_per_m, first.ky_cyc_per_m)
+                    for acquisition in cartesian_frames.acquisitions
+                )
+                if same_grid:
+                    species_image = np.stack(
+                        [
+                            cartesian_frames.reconstruct(species_result, frame)
+                            for frame in range(cartesian_frames.num_frames)
+                        ],
+                        axis=0,
+                    )
+                    arrays.update(
+                        {
+                            "species_cartesian_kspace": np.stack(
+                                [
+                                    cartesian_frames.to_cartesian_kspace(
+                                        species_result, frame
+                                    )
+                                    for frame in range(cartesian_frames.num_frames)
+                                ],
+                                axis=0,
+                            ),
+                            "species_cartesian_image": species_image,
+                            "species_cartesian_image_magnitude": np.abs(species_image),
+                        }
+                    )
+            if cartesian_volumes is not None:
+                species_image_3d = cartesian_volumes.dimensioned_reconstruction(
+                    species_result
+                )
+                arrays.update(
+                    {
+                        "species_cartesian_3d_kspace": (
+                            cartesian_volumes.dimensioned_kspace(species_result)
+                        ),
+                        "species_cartesian_3d_image": species_image_3d,
+                        "species_cartesian_3d_image_magnitude": np.abs(
+                            species_image_3d
+                        ),
+                    }
+                )
+            if spiral is not None:
+                species_spiral_image = np.stack(
+                    [
+                        spiral.reconstruct(species_result, frame)
+                        for frame in range(spiral.num_frames)
+                    ],
+                    axis=0,
+                )
+                arrays.update(
+                    {
+                        "species_spiral_gridded_kspace": np.stack(
+                            [
+                                spiral.grid_kspace(species_result, frame)
+                                for frame in range(spiral.num_frames)
+                            ],
+                            axis=0,
+                        ),
+                        "species_spiral_image": species_spiral_image,
+                        "species_spiral_image_magnitude": np.abs(species_spiral_image),
+                    }
+                )
+        from .reconstruction import (
+            is_radial_3d_result,
+            radial_3d_reconstruction_arrays,
+        )
+
+        if is_radial_3d_result(self):
+            (
+                radial_outer_axes,
+                radial_outer_values,
+                radial_kspace,
+                radial_image,
+                _,
+                radial_fov_m,
+            ) = radial_3d_reconstruction_arrays(self)
+            arrays.update(
+                {
+                    "radial_3d_gridded_kspace": radial_kspace,
+                    "radial_3d_image": radial_image,
+                    "radial_3d_image_magnitude": np.abs(radial_image),
+                    "radial_3d_outer_axis_names": np.asarray(
+                        radial_outer_axes, dtype="S"
+                    ),
+                    "radial_3d_fov_m": np.asarray((radial_fov_m,) * 3),
+                }
+            )
+            for axis in radial_outer_axes:
+                arrays[f"radial_3d_{axis}_index"] = np.asarray(
+                    radial_outer_values[axis], dtype=np.int64
+                )
+            if self.species_signal is not None:
+                (
+                    _,
+                    _,
+                    species_radial_kspace,
+                    species_radial_image,
+                    _,
+                    _,
+                ) = radial_3d_reconstruction_arrays(self, self.species_signal)
+                arrays.update(
+                    {
+                        "species_radial_3d_gridded_kspace": species_radial_kspace,
+                        "species_radial_3d_image": species_radial_image,
+                        "species_radial_3d_image_magnitude": np.abs(
+                            species_radial_image
+                        ),
+                    }
+                )
         spectroscopy = self.spectroscopic_acquisition
         if spectroscopy is not None:
             arrays.update(

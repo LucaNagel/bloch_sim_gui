@@ -10,9 +10,19 @@ from typing import ClassVar, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from .flip_angles import VFA_REFERENCE_DOI, variable_flip_angle_schedule
-from .encoding import EncodingFrame
+from .encoding import EncodingFrame, numeric_definition_array
 from .model import ADCEvent, GradientEvent, RFEvent, SequenceProgram
 from .rf_pulses import design_rf_envelope, scale_rf_envelope_to_flip
+
+
+# Pulseq's text serialization rounds gradient amplitudes. In long balanced
+# trains the resulting sub-microcycle residual can accumulate across lines,
+# even though it remains far below one percent of a Cartesian grid cell.
+_CARTESIAN_GRID_TOLERANCE_CELLS = 1e-2
+
+
+def _cartesian_grid_tolerance(fov_m: float) -> float:
+    return max(1e-9, _CARTESIAN_GRID_TOLERANCE_CELLS / float(fov_m))
 
 
 @dataclass(frozen=True)
@@ -602,8 +612,8 @@ class CartesianAcquisitionVolumes:
             raise ValueError("Cartesian volumes must use every 2D frame exactly once")
 
         first = self.frames.acquisitions[0]
-        tolerance_x = max(1e-9, 1e-3 / first.fov_m[0])
-        tolerance_y = max(1e-9, 1e-3 / first.fov_m[1])
+        tolerance_x = _cartesian_grid_tolerance(first.fov_m[0])
+        tolerance_y = _cartesian_grid_tolerance(first.fov_m[1])
         for acquisition in self.frames.acquisitions[1:]:
             if (
                 acquisition.read_matrix != first.read_matrix
@@ -772,7 +782,7 @@ class CartesianAcquisitionVolumes:
             self.frames.moment_origins_cyc_per_m[int(frame)], dtype=float
         )
         moments = self.encoding_frame.scanner_to_encoding(moments)
-        tolerance = max(1e-9, 1e-3 / self.fov_z_m)
+        tolerance = _cartesian_grid_tolerance(self.fov_z_m)
         if not np.allclose(
             moments[:, 2],
             self.kz_cyc_per_m[int(z_index)],
@@ -1177,6 +1187,7 @@ class CartesianAcquisition:
     kx_offset_cells: float = 0.0
     ky_offset_cells: float = 0.0
     encoding_frame: EncodingFrame = field(default_factory=EncodingFrame.identity)
+    moment_origins_cyc_per_m: Tuple[Tuple[float, float, float], ...] = ()
 
     def __post_init__(self) -> None:
         read_matrix = _positive_integer(self.read_matrix, "read_matrix")
@@ -1193,6 +1204,19 @@ class CartesianAcquisition:
             raise ValueError("Cartesian k-space offsets must be finite")
         if not isinstance(self.encoding_frame, EncodingFrame):
             raise TypeError("encoding_frame must be an EncodingFrame")
+        moment_origins = tuple(
+            tuple(float(value) for value in origin)
+            for origin in self.moment_origins_cyc_per_m
+        )
+        if not moment_origins:
+            moment_origins = tuple((0.0, 0.0, 0.0) for _ in range(phase_matrix))
+        if len(moment_origins) != phase_matrix or any(
+            len(origin) != 3 or not np.all(np.isfinite(origin))
+            for origin in moment_origins
+        ):
+            raise ValueError(
+                "Cartesian acquisition requires one finite 3D moment origin per line"
+            )
 
         phase_indices = (
             tuple(range(phase_matrix))
@@ -1222,6 +1246,7 @@ class CartesianAcquisition:
         object.__setattr__(self, "readout_directions", directions)
         object.__setattr__(self, "kx_offset_cells", kx_offset)
         object.__setattr__(self, "ky_offset_cells", ky_offset)
+        object.__setattr__(self, "moment_origins_cyc_per_m", moment_origins)
 
     @classmethod
     def epi(
@@ -1301,7 +1326,7 @@ class CartesianAcquisition:
     def reshape_signal(self, signal: np.ndarray) -> np.ndarray:
         """Map chronological ADC data to ``(..., phase, read)`` k-space."""
         values = np.asarray(signal)
-        if values.ndim not in (1, 2) or values.shape[-1] != self.num_samples:
+        if values.ndim < 1 or values.shape[-1] != self.num_samples:
             raise ValueError(
                 f"signal must end with {self.num_samples} chronological samples"
             )
@@ -1367,7 +1392,9 @@ class CartesianAcquisition:
         moments = np.asarray(moments_cyc_per_m, dtype=float)
         if moments.shape != (self.num_samples, 3):
             raise ValueError("gradient moments must have shape (num_samples, 3)")
-        raw = self.encoding_frame.scanner_to_encoding(moments).reshape(
+        raw = moments.reshape(self.phase_matrix, self.read_matrix, 3)
+        raw = raw - np.asarray(self.moment_origins_cyc_per_m)[:, None, :]
+        raw = self.encoding_frame.scanner_to_encoding(raw).reshape(
             self.phase_matrix, self.read_matrix, 3
         )
         for acquired_line, phase_index in enumerate(self.phase_indices):
@@ -1375,8 +1402,8 @@ class CartesianAcquisition:
             if self.readout_directions[acquired_line] < 0:
                 expected_x = expected_x[::-1]
             expected_y = self.ky_cyc_per_m[phase_index]
-            x_tolerance = max(1e-9, 1e-3 / self.fov_m[0])
-            y_tolerance = max(1e-9, 1e-3 / self.fov_m[1])
+            x_tolerance = _cartesian_grid_tolerance(self.fov_m[0])
+            y_tolerance = _cartesian_grid_tolerance(self.fov_m[1])
             if not np.allclose(
                 raw[acquired_line, :, 0], expected_x, rtol=0.0, atol=x_tolerance
             ):
@@ -1400,6 +1427,7 @@ class CartesianAcquisition:
             "kx_offset_cells": self.kx_offset_cells,
             "ky_offset_cells": self.ky_offset_cells,
             "encoding_frame": self.encoding_frame.to_metadata(),
+            "moment_origins_cyc_per_m": self.moment_origins_cyc_per_m,
         }
 
     @classmethod
@@ -1417,6 +1445,9 @@ class CartesianAcquisition:
             ky_offset_cells=metadata.get("ky_offset_cells", 0.0),
             encoding_frame=EncodingFrame.from_metadata(
                 metadata.get("encoding_frame", {})
+            ),
+            moment_origins_cyc_per_m=tuple(
+                tuple(value) for value in metadata.get("moment_origins_cyc_per_m", ())
             ),
         )
 
@@ -1437,10 +1468,10 @@ def infer_spiral_acquisition(
     sequence_name = str(definitions.get("name", "")).strip().lower()
     if trajectory_name != "spiral" and "spiral" not in sequence_name:
         raise ValueError("sequence is not declared as a spiral acquisition")
-    matrix_value = np.asarray(definitions.get("matrixsize", ()), dtype=float).reshape(
-        -1
+    matrix_value = numeric_definition_array(
+        definitions.get("matrixsize", ()), "spiral MatrixSize"
     )
-    fov_value = np.asarray(definitions.get("fov", ()), dtype=float).reshape(-1)
+    fov_value = numeric_definition_array(definitions.get("fov", ()), "spiral FOV")
     if matrix_value.size < 2:
         raise ValueError("spiral acquisition requires a 2D MatrixSize definition")
     if fov_value.size < 2:
@@ -1523,6 +1554,7 @@ def infer_cartesian_acquisition(
     program: SequenceProgram,
     *,
     compiled=None,
+    moment_origins_cyc_per_m=None,
 ) -> CartesianAcquisition:
     """Infer one regular 2D Cartesian acquisition from a sequence program.
 
@@ -1579,7 +1611,7 @@ def infer_cartesian_acquisition(
         )
     if fov_value is None:
         raise ValueError("Pulseq sequence has no FOV definition")
-    fov = np.asarray(fov_value, dtype=float).reshape(-1)
+    fov = numeric_definition_array(fov_value, "Cartesian FOV")
     if fov.size < 2 or not np.all(np.isfinite(fov[:2])) or np.any(fov[:2] <= 0):
         raise ValueError("Pulseq FOV definition does not contain valid x/y values")
     fov_x, fov_y = (float(fov[0]), float(fov[1]))
@@ -1595,11 +1627,24 @@ def infer_cartesian_acquisition(
     moments = np.asarray(compiled.adc_gradient_moment_cyc_per_m, dtype=float)
     if moments.shape != (phase_matrix * read_matrix, 3):
         raise ValueError("compiled ADC gradient moments have an invalid shape")
-    raw = encoding_frame.scanner_to_encoding(moments).reshape(
+    if moment_origins_cyc_per_m is None:
+        moment_origins_cyc_per_m = _adc_gradient_moment_origins(
+            program, compiled, adc_events
+        )
+    moment_origins = np.asarray(moment_origins_cyc_per_m, dtype=float)
+    if moment_origins.shape != (phase_matrix, 3) or not np.all(
+        np.isfinite(moment_origins)
+    ):
+        raise ValueError(
+            "Cartesian inference requires one finite 3D moment origin per ADC line"
+        )
+    relative_moments = moments.reshape(phase_matrix, read_matrix, 3)
+    relative_moments = relative_moments - moment_origins[:, None, :]
+    raw = encoding_frame.scanner_to_encoding(relative_moments).reshape(
         phase_matrix, read_matrix, 3
     )
-    tolerance_x = max(1e-9, 1e-3 / fov_x)
-    tolerance_y = max(1e-9, 1e-3 / fov_y)
+    tolerance_x = _cartesian_grid_tolerance(fov_x)
+    tolerance_y = _cartesian_grid_tolerance(fov_y)
 
     delta_x = np.diff(raw[:, :, 0], axis=1)
     mean_delta_x = np.mean(delta_x, axis=1)
@@ -1682,6 +1727,9 @@ def infer_cartesian_acquisition(
         kx_offset_cells=kx_offset,
         ky_offset_cells=ky_offset,
         encoding_frame=encoding_frame,
+        moment_origins_cyc_per_m=tuple(
+            tuple(float(value) for value in origin) for origin in moment_origins
+        ),
     )
     acquisition.validate_adc_times(compiled.adc_times_s)
     acquisition.validate_gradient_moments(moments)
@@ -1714,7 +1762,7 @@ def infer_spectroscopic_acquisition(
     fov_value = definitions.get("fov")
     if matrix_value is None or fov_value is None:
         raise ValueError("CSI inference requires MatrixSize and FOV definitions")
-    matrix_values = np.asarray(matrix_value, dtype=float).reshape(-1)
+    matrix_values = numeric_definition_array(matrix_value, "CSI MatrixSize")
     if matrix_values.size < 3:
         raise ValueError("CSI MatrixSize must contain x, y, and spectral sizes")
     nx, ny, matrix_spectral = (
@@ -1742,7 +1790,7 @@ def infer_spectroscopic_acquisition(
     ):
         raise ValueError("CSI ADC events do not have a common spectral dwell")
 
-    fov = np.asarray(fov_value, dtype=float).reshape(-1)
+    fov = numeric_definition_array(fov_value, "CSI FOV")
     if fov.size < 2 or not np.all(np.isfinite(fov[:2])) or np.any(fov[:2] <= 0):
         raise ValueError("CSI FOV definition does not contain valid x/y values")
     labels = program.metadata.get("adc_label_values", {})
@@ -1760,11 +1808,8 @@ def infer_spectroscopic_acquisition(
 
     compiled = SequenceCompiler().compile(program) if compiled is None else compiled
     origins = tuple(
-        tuple(
-            float(value)
-            for value in _frame_gradient_moment_origin(program, compiled, event.start_s)
-        )
-        for event in adc_events
+        tuple(float(value) for value in origin)
+        for origin in _adc_gradient_moment_origins(program, compiled, adc_events)
     )
     acquisition = SpectroscopicAcquisition(
         matrix=(nx, ny),
@@ -1825,6 +1870,7 @@ def infer_cartesian_acquisition_frames(
     frame_samples = []
     frame_indices = []
     moment_origins = []
+    adc_moment_origins = _adc_gradient_moment_origins(program, compiled, adc_events)
     for frame_index, event_indices in grouped_events.items():
         sample_indices = tuple(
             value
@@ -1853,8 +1899,13 @@ def infer_cartesian_acquisition_frames(
             version=program.version,
             metadata=subset_metadata,
         )
-        moment_origin = _frame_gradient_moment_origin(
-            program, compiled, adc_events[event_indices[0]].start_s
+        moment_origin = adc_moment_origins[event_indices[0]]
+        line_moment_origins = tuple(
+            tuple(
+                float(value)
+                for value in (adc_moment_origins[event_index] - moment_origin)
+            )
+            for event_index in event_indices
         )
         subset_compiled = SimpleNamespace(
             adc_times_s=np.take(compiled.adc_times_s, sample_indices),
@@ -1864,7 +1915,11 @@ def infer_cartesian_acquisition_frames(
             ),
         )
         acquisitions.append(
-            infer_cartesian_acquisition(subset_program, compiled=subset_compiled)
+            infer_cartesian_acquisition(
+                subset_program,
+                compiled=subset_compiled,
+                moment_origins_cyc_per_m=line_moment_origins,
+            )
         )
         frame_samples.append(sample_indices)
         frame_indices.append(frame_index)
@@ -1904,8 +1959,8 @@ def infer_cartesian_acquisition_volumes(
         raise ValueError(
             "3D Cartesian inference requires MatrixSize and FOV definitions"
         )
-    matrix = np.asarray(matrix_value, dtype=float).reshape(-1)
-    fov = np.asarray(fov_value, dtype=float).reshape(-1)
+    matrix = numeric_definition_array(matrix_value, "3D Cartesian MatrixSize")
+    fov = numeric_definition_array(fov_value, "3D Cartesian FOV")
     if matrix.size < 3:
         raise ValueError("3D Cartesian MatrixSize must contain x, y, and z sizes")
     if fov.size < 3 or not np.all(np.isfinite(fov[:3])) or np.any(fov[:3] <= 0):
@@ -1952,7 +2007,7 @@ def infer_cartesian_acquisition_volumes(
             "each Cartesian volume must contain the declared number of kz partitions"
         )
 
-    tolerance_z = max(1e-9, 1e-3 / float(fov[2]))
+    tolerance_z = _cartesian_grid_tolerance(float(fov[2]))
     volume_frame_indices = []
     volume_indices = []
     volume_kz = []
@@ -1964,9 +2019,14 @@ def infer_cartesian_acquisition_volumes(
             relative = relative - np.asarray(
                 frames.moment_origins_cyc_per_m[frame], dtype=float
             )
-            relative = frames.acquisitions[frame].encoding_frame.scanner_to_encoding(
-                relative
+            acquisition = frames.acquisitions[frame]
+            line_origins = np.repeat(
+                np.asarray(acquisition.moment_origins_cyc_per_m, dtype=float),
+                acquisition.read_matrix,
+                axis=0,
             )
+            relative = relative - line_origins
+            relative = acquisition.encoding_frame.scanner_to_encoding(relative)
             kz = float(np.mean(relative[:, 2]))
             if not np.allclose(relative[:, 2], kz, rtol=0.0, atol=tolerance_z):
                 raise ValueError("kz changes within one Cartesian partition frame")
@@ -2034,15 +2094,16 @@ def infer_cartesian_acquisition_volumes(
     return volumes
 
 
-def _frame_gradient_moment_origin(
-    program: SequenceProgram, compiled, first_adc_start_s: float
+def _adc_gradient_moment_origins(
+    program: SequenceProgram, compiled, adc_events=None
 ) -> np.ndarray:
-    preceding_rf = [
-        rf for rf in program.rf_events if rf.end_s <= first_adc_start_s + 1e-15
-    ]
-    if not preceding_rf:
-        return np.zeros(3, dtype=float)
-    reference_time = preceding_rf[-1].start_s
+    """Return cumulative scanner moments at the RF preceding each ADC event."""
+    adc_events = tuple(program.adc_events if adc_events is None else adc_events)
+    origins = np.zeros((len(adc_events), 3), dtype=float)
+    rf_events = tuple(program.rf_events)
+    if not adc_events or not rf_events:
+        return origins
+
     boundaries = np.concatenate(([0.0], np.asarray(compiled.interval_end_s)))
     moments = np.vstack(
         (
@@ -2054,11 +2115,28 @@ def _frame_gradient_moment_origin(
             ),
         )
     )
-    index = int(np.argmin(np.abs(boundaries - reference_time)))
-    tolerance = max(1e-12, abs(reference_time) * 1e-10)
-    if abs(boundaries[index] - reference_time) > tolerance:
-        raise ValueError("RF reference time is not a compiled sequence boundary")
-    return moments[index]
+    rf_index = -1
+    boundary_indices = {}
+    for adc_index, adc in enumerate(adc_events):
+        while (
+            rf_index + 1 < len(rf_events)
+            and rf_events[rf_index + 1].end_s <= adc.start_s + 1e-15
+        ):
+            rf_index += 1
+        if rf_index < 0:
+            continue
+        reference_time = rf_events[rf_index].start_s
+        boundary_index = boundary_indices.get(reference_time)
+        if boundary_index is None:
+            boundary_index = int(np.argmin(np.abs(boundaries - reference_time)))
+            tolerance = max(1e-12, abs(reference_time) * 1e-10)
+            if abs(boundaries[boundary_index] - reference_time) > tolerance:
+                raise ValueError(
+                    "RF reference time is not a compiled sequence boundary"
+                )
+            boundary_indices[reference_time] = boundary_index
+        origins[adc_index] = moments[boundary_index]
+    return origins
 
 
 def _derive_rf_delimited_dimensions(

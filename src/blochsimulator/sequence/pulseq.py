@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
 import warnings
 
 import numpy as np
 
+from .encoding import numeric_definition_array
 from .model import ADCEvent, GradientEvent, RFEvent, SequenceProgram
 
 
@@ -17,6 +18,22 @@ class PulseqImportError(ValueError):
 
 class UnsupportedPulseqVersionError(PulseqImportError):
     """Raised for Pulseq formats newer than the supported 1.5.0 format."""
+
+
+def _normalize_definition_value(value):
+    """Canonicalize numeric arrays that PyPulseq leaves as bracketed strings."""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    is_array_text = (text.startswith("[") and text.endswith("]")) or (
+        text.lower().startswith("array(") and text.endswith(")")
+    )
+    if not is_array_text:
+        return value
+    try:
+        return numeric_definition_array(value, "Pulseq definition")
+    except ValueError:
+        return value
 
 
 def load_pulseq(path, strict: bool = True) -> SequenceProgram:
@@ -215,14 +232,20 @@ def load_pulseq(path, strict: bool = True) -> SequenceProgram:
                 + getattr(adc, "phase_ppm", 0.0) * 1e-6 * gamma_b0
             )
             # PyPulseq defines ADC samples at dwell centres.
-            first_sample = block_start + float(adc.delay) + float(adc.dwell) / 2
+            first_sample_local = float(adc.delay) + float(adc.dwell) / 2
+            first_sample = block_start + first_sample_local
             events.append(
                 ADCEvent(
                     start_s=first_sample,
                     num_samples=int(adc.num_samples),
                     dwell_s=float(adc.dwell),
                     frequency_offset_hz=full_frequency,
-                    phase_offset_rad=full_phase,
+                    # Pulseq applies the ADC carrier using time local to its
+                    # block.  Store the phase at the first sample so the event
+                    # compiler can continue it from relative time zero.
+                    phase_offset_rad=(
+                        full_phase + 2 * np.pi * full_frequency * first_sample_local
+                    ),
                 )
             )
 
@@ -241,7 +264,10 @@ def load_pulseq(path, strict: bool = True) -> SequenceProgram:
         version=".".join(str(value) for value in version),
         metadata={
             "format": "pulseq",
-            "definitions": dict(sequence.definitions),
+            "definitions": {
+                key: _normalize_definition_value(value)
+                for key, value in sequence.definitions.items()
+            },
             "labels": labels,
             "adc_label_values": adc_label_values,
             "triggers": triggers,

@@ -11,12 +11,12 @@ from PyQt5.QtWidgets import (
     QCheckBox,
 )
 import numpy as np
-import math
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt
 from typing import Optional
 
 from ..memory import enforce_sequence_memory
+from ..sequence.bssfp_phase import advance_bssfp_phase_deg, wrap_phase_deg
 from ..simulator import (
     PulseSequence,
     SpinEcho,
@@ -936,7 +936,7 @@ class SequenceDesigner(QGroupBox):
             start_flip = self.ssfp_start_flip.value()
             start_delay = self.ssfp_start_tr.value() / 1000.0
 
-        start_phase = np.deg2rad(self.ssfp_start_phase.value())
+        start_phase_deg = wrap_phase_deg(self.ssfp_start_phase.value())
         alternate = self.ssfp_alternate_phase.isChecked()
 
         # If a custom pulse is provided, resample it onto dt and override the pulse shape.
@@ -998,15 +998,22 @@ class SequenceDesigner(QGroupBox):
         # Calculate start amplitude from start flip angle
         start_scale = start_flip / main_flip if main_flip > 0 else 0.5
         start_amp = base_peak * start_scale if base_peak is not None else 0.025
-        _place_pulse(start_delay, start_amp, start_phase)
+        _place_pulse(start_delay, start_amp, np.deg2rad(start_phase_deg))
 
         # Remaining pulses evenly spaced by TR
+        phase_deg = start_phase_deg
         for k in range(1, n_reps):
             t0 = start_delay + k * tr
-            # Main pulses use base_peak (the flip angle from designer)
-            # and additional phase rotation for alternating bSSFP if needed.
-            extra_phase = math.pi if (k % 2 == 1 and alternate) else 0.0
-            _place_pulse(t0, base_peak if base_peak is not None else 0.05, extra_phase)
+            phase_deg = advance_bssfp_phase_deg(
+                phase_deg,
+                elapsed_s=tr,
+                phase_increment_deg=180.0 if alternate else 0.0,
+            )
+            _place_pulse(
+                t0,
+                base_peak if base_peak is not None else 0.05,
+                np.deg2rad(phase_deg),
+            )
 
         return b1, gradients, time
 

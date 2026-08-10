@@ -73,7 +73,7 @@ def test_epi_vfa_changes_per_repetition_for_internal_and_pulseq_sequences(tmp_pa
         n_slices=2,
         slice_thickness_m=3e-3,
         repetitions=4,
-        repetition_time_s=50e-3,
+        repetition_time_s=60e-3,
         variable_flip_angle=True,
     )
     pulseq = make_pulseq_epi(
@@ -83,7 +83,7 @@ def test_epi_vfa_changes_per_repetition_for_internal_and_pulseq_sequences(tmp_pa
         n_slices=2,
         slice_thickness_m=3e-3,
         repetitions=4,
-        repetition_time_s=50e-3,
+        repetition_time_s=60e-3,
         variable_flip_angle=True,
     )
     imported = _write_and_load(pulseq, tmp_path / "epi_vfa.seq")

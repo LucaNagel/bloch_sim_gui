@@ -32,6 +32,62 @@ SPECTRAL_BSSFP_MAIN = runpy.run_path(
 )["main"]
 
 
+def _pulseq_event_center_phase_deg(event, center_s):
+    return float(
+        np.mod(
+            np.rad2deg(event.phase_offset + 2 * np.pi * event.freq_offset * center_s),
+            360.0,
+        )
+    )
+
+
+def test_spectral_selective_script_uses_rf_target_locked_phase():
+    target_offset = -245.0
+    receiver_offset = 125.0
+    start_phase = 10.0
+    user_increment = 20.0
+    sequence = SPECTRAL_BSSFP_MAIN(
+        n_read=2,
+        n_phase=1,
+        n_partition=3,
+        n_repetition=1,
+        target_frequency_offsets_hz=(target_offset,),
+        receiver_frequency_offsets_hz=(receiver_offset,),
+        target_metabolite_names=("Py",),
+        flip_angle_deg=(4.0,),
+        rf_phase_start=start_phase,
+        rf_phase_increment=user_increment,
+        dummy_repetitions=0,
+        use_alpha_half=False,
+        end_image_spoiler_cycles_per_fov=0.0,
+    )
+    tr = float(sequence.definitions["TR"])
+    rf_phases = []
+    adc_phases = []
+    for block_index in sequence.block_events:
+        block = sequence.get_block(block_index)
+        if block.rf is not None:
+            rf_center = pypulseq.calc_rf_center(block.rf)[0]
+            rf_phases.append(_pulseq_event_center_phase_deg(block.rf, rf_center))
+        if block.adc is not None:
+            adc_center = block.adc.delay + block.adc.num_samples * block.adc.dwell / 2
+            adc_phases.append(_pulseq_event_center_phase_deg(block.adc, adc_center))
+
+    common_step = user_increment + 360.0 * target_offset * tr
+    expected_rf = [
+        np.mod(start_phase + index * common_step, 360.0) for index in range(3)
+    ]
+    first_adc_phase = start_phase + 360.0 * receiver_offset * tr / 2
+    expected_adc = [
+        np.mod(first_adc_phase + index * common_step, 360.0) for index in range(3)
+    ]
+
+    assert rf_phases == pytest.approx(expected_rf)
+    assert adc_phases == pytest.approx(expected_adc)
+    assert sequence.definitions["FrequencyOffsetPhaseCoherent"] is True
+    assert sequence.definitions["PhaseReference"] == "rf-target-locked"
+
+
 def test_spectral_selective_3d_bssfp_cycles_rf_and_receiver_offsets(tmp_path):
     sequence = SPECTRAL_BSSFP_MAIN(
         n_read=4,
@@ -113,6 +169,8 @@ def test_spectral_selective_3d_bssfp_defaults_match_skinner_paper():
     assert definitions["SpectralRFFWHM"] == pytest.approx(900.0)
     assert definitions["ReadoutBandwidthHz"] == pytest.approx(10_000.0)
     assert definitions["AlphaHalfCenterSpacing"] == pytest.approx(4.31e-3)
+    assert definitions["RFPhaseIncrementDeg"] == pytest.approx(0.0)
+    assert definitions["AlphaHalfPhaseDeg"] == pytest.approx(0.0)
     assert definitions["EndImageSpoilerCyclesPerFOV"] == pytest.approx(4.0)
     assert definitions["EndImageSpoilerDuration"] == pytest.approx(1e-3)
     assert definitions["EndImageSpoilerAxes"] == "xyz"
@@ -230,9 +288,9 @@ def test_spectral_selective_bssfp_cartesian_inference_keeps_serialization_residu
 
     assert acquisition.phase_matrix == 16
     assert acquisition.read_matrix == 32
-    # Text serialization leaves a tiny line-to-line residual.  It is retained
-    # instead of being rounded to a half-cell that no longer validates.
-    assert acquisition.kx_offset_cells == pytest.approx(0.49902336, abs=2e-6)
+    # Each line is referenced to its preceding RF event, so accumulated Pulseq
+    # text-serialization residuals do not shift the inferred Cartesian grid.
+    assert acquisition.kx_offset_cells == pytest.approx(0.5)
 
 
 def test_spectral_selective_bssfp_builds_position_sorted_3d_volumes(tmp_path):

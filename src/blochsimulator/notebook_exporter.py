@@ -1382,6 +1382,23 @@ def _sequence_result_reconstruction_code() -> str:
             return cells * step, cells
 
 
+        def _cartesian_coordinate_levels(values):
+            values = np.sort(np.asarray(values, dtype=float).reshape(-1))
+            if not values.size or not np.all(np.isfinite(values)):
+                raise ValueError('Cartesian coordinates must be finite and non-empty')
+            tolerance = max(
+                1e-12,
+                64.0 * np.finfo(float).eps * max(1.0, np.max(np.abs(values))),
+            )
+            clusters = [[values[0]]]
+            for value in values[1:]:
+                if abs(value - np.mean(clusters[-1])) <= tolerance:
+                    clusters[-1].append(value)
+                else:
+                    clusters.append([value])
+            return np.asarray([np.mean(cluster) for cluster in clusters])
+
+
         def _cartesian_orientation(dataset):
             basis_value = dataset.attrs.get('cartesian_encoding_basis_xyz')
             if basis_value is None:
@@ -1547,24 +1564,58 @@ def _sequence_result_reconstruction_code() -> str:
                 )
 
             first_outer = outer_keys[0]
-            partition_values = np.unique(partition_values_per_event)
-            partition_values = np.asarray(
-                sorted(
-                    partition_values,
-                    key=lambda value: np.median(
+            labelled_partitions = np.unique(partition_values_per_event)
+            if labelled_partitions.size > 1:
+                partition_values = np.asarray(
+                    sorted(
+                        labelled_partitions,
+                        key=lambda value: np.median(
+                            [
+                                record['k_partition']
+                                for record in records
+                                if record['outer'] == first_outer
+                                and record['partition'] == value
+                            ]
+                        ),
+                    )
+                )
+                for record in records:
+                    record['partition_group'] = record['partition']
+            else:
+                # Older and third-party result files may not carry Pulseq PAR
+                # labels. Recover the partition grouping from the trajectory
+                # within each outer frame instead of folding every kz plane into
+                # the phase axis. This is especially visible when ny == nz.
+                levels_by_outer = {
+                    outer: _cartesian_coordinate_levels(
                         [
                             record['k_partition']
                             for record in records
-                            if record['outer'] == first_outer
-                            and record['partition'] == value
+                            if record['outer'] == outer
                         ]
-                    ),
-                )
-            )
+                    )
+                    for outer in outer_keys
+                }
+                partition_counts = {
+                    levels.size for levels in levels_by_outer.values()
+                }
+                if len(partition_counts) != 1:
+                    raise ValueError(
+                        'Cartesian outer frames contain unequal kz level counts'
+                    )
+                partition_values = np.arange(partition_counts.pop())
+                for record in records:
+                    levels = levels_by_outer[record['outer']]
+                    record['partition_group'] = int(
+                        np.argmin(np.abs(levels - record['k_partition']))
+                    )
             is_3d = partition_values.size > 1
             groups = {}
             for record in records:
-                key = (record['outer'], record['partition'] if is_3d else None)
+                key = (
+                    record['outer'],
+                    record['partition_group'] if is_3d else None,
+                )
                 groups.setdefault(key, []).append(record)
 
             expected_group_keys = [
@@ -1813,6 +1864,19 @@ def _sequence_result_explorer_code() -> str:
 
 
         if (
+            'radial_3d_image_magnitude' in ds
+            or 'radial_3d_image' in ds
+        ):
+            explorer_kind = 'radial_3d'
+            orientation_source = (
+                ds.radial_3d_image_magnitude
+                if 'radial_3d_image_magnitude' in ds
+                else ds.radial_3d_image
+            )
+            x_dim, y_dim, z_dim = 'radial_x', 'radial_y', 'radial_z'
+            repetition_dim = 'repetition' if 'repetition' in ds.dims else None
+            spectral_dim = None
+        elif (
             'notebook_cartesian_3d_image_magnitude' in ds
             or 'cartesian_3d_image_magnitude' in ds
         ):
@@ -1831,6 +1895,7 @@ def _sequence_result_explorer_code() -> str:
             spectral_dim = None
         elif 'csi_kspace' in ds:
             explorer_kind = 'csi'
+            orientation_source = ds.csi_spatial_fid
             x_dim, y_dim, z_dim = 'phase_x', 'phase_y', None
             repetition_dim = 'repetition' if 'repetition' in ds.dims else None
             spectral_dim = 'spectral_point'
@@ -1858,12 +1923,24 @@ def _sequence_result_explorer_code() -> str:
             spectral_dim = None
         elif 'spiral_image_magnitude' in ds:
             explorer_kind = 'spiral_2d'
+            orientation_source = ds.spiral_image_magnitude
             x_dim, y_dim, z_dim = 'read_x', 'phase_y', None
             repetition_dim = 'spiral_frame' if 'spiral_frame' in ds.dims else None
             spectral_dim = None
         else:
             explorer_kind = 'raw_signal'
+            orientation_source = None
             x_dim = y_dim = z_dim = repetition_dim = spectral_dim = None
+
+        outer_dims = []
+        if orientation_source is not None:
+            excluded_dims = {
+                x_dim, y_dim, z_dim, spectral_dim, repetition_dim, 'coil', 'pool', None
+            }
+            outer_dims = [
+                dim for dim in orientation_source.dims
+                if dim not in excluded_dims and ds.sizes[dim] > 1
+            ]
 
 
         def _index_slider(label, dim, initial=None):
@@ -1895,12 +1972,16 @@ def _sequence_result_explorer_code() -> str:
             return np.abs(data)
 
 
-        def _select_outer(data, keep_dims, repetition):
+        def _select_outer(data, keep_dims, repetition, outer_indices=None):
+            outer_indices = {} if outer_indices is None else dict(outer_indices)
             selectors = {}
             for dim in data.dims:
                 if dim in keep_dims or dim == 'coil':
                     continue
-                selectors[dim] = repetition if dim == repetition_dim else 0
+                if dim == repetition_dim:
+                    selectors[dim] = repetition
+                else:
+                    selectors[dim] = int(outer_indices.get(dim, 0))
             return data.isel(selectors)
 
 
@@ -1918,7 +1999,13 @@ def _sequence_result_explorer_code() -> str:
 
 
         def _display_range_source():
-            if explorer_kind == 'cartesian_3d':
+            if explorer_kind == 'radial_3d':
+                name = (
+                    'radial_3d_image_magnitude'
+                    if 'radial_3d_image_magnitude' in ds
+                    else 'radial_3d_image'
+                )
+            elif explorer_kind == 'cartesian_3d':
                 name = (
                     'notebook_cartesian_3d_image_magnitude'
                     if 'notebook_cartesian_3d_image_magnitude' in ds
@@ -2006,18 +2093,44 @@ def _sequence_result_explorer_code() -> str:
             return str(index)
 
 
-        def _show_cartesian_3d(x, y, z, repetition, display_range, display_auto):
+        def _outer_label(repetition, outer_indices):
+            labels = []
+            if repetition_dim is not None:
+                labels.append(f'repetition={_repetition_label(repetition)}')
+            for dim in outer_dims:
+                index = int(outer_indices.get(dim, 0))
+                if dim in ds.coords:
+                    value = np.asarray(ds.coords[dim].values)[index]
+                    value = value.item() if hasattr(value, 'item') else value
+                else:
+                    value = index
+                labels.append(f'{dim}={value}')
+            return ', '.join(labels) if labels else 'single acquisition'
+
+
+        def _show_cartesian_3d(
+            x, y, z, repetition, display_range, display_auto, outer_indices
+        ):
             spatial_dims = {z_dim, y_dim, x_dim}
-            image_name = (
-                'notebook_cartesian_3d_image_magnitude'
-                if 'notebook_cartesian_3d_image_magnitude' in ds
-                else 'cartesian_3d_image_magnitude'
-            )
+            if explorer_kind == 'radial_3d':
+                image_name = (
+                    'radial_3d_image_magnitude'
+                    if 'radial_3d_image_magnitude' in ds
+                    else 'radial_3d_image'
+                )
+                kspace_name = 'radial_3d_gridded_kspace'
+            else:
+                image_name = (
+                    'notebook_cartesian_3d_image_magnitude'
+                    if 'notebook_cartesian_3d_image_magnitude' in ds
+                    else 'cartesian_3d_image_magnitude'
+                )
+                kspace_name = 'cartesian_3d_kspace'
             image = _select_outer(
-                ds[image_name], spatial_dims, repetition
+                ds[image_name], spatial_dims, repetition, outer_indices
             )
             kspace = _select_outer(
-                ds['cartesian_3d_kspace'], spatial_dims, repetition
+                ds[kspace_name], spatial_dims, repetition, outer_indices
             )
             image = _rss_magnitude(image).transpose(
                 z_dim, y_dim, x_dim
@@ -2090,14 +2203,16 @@ def _sequence_result_explorer_code() -> str:
                 ylabel='k_phase',
             )
             fig.suptitle(
-                f'Repetition { _repetition_label(repetition) } · '
+                f'{_outer_label(repetition, outer_indices)} · '
                 f'voxel ({x_dim}={x}, {y_dim}={y}, {z_dim}={z}) · '
                 f'magnitude={volume[z, y, x]:.5g}'
             )
             _display_figure_once(fig)
 
 
-        def _show_cartesian_2d(x, y, repetition, display_range, display_auto):
+        def _show_cartesian_2d(
+            x, y, repetition, display_range, display_auto, outer_indices
+        ):
             if explorer_kind == 'spiral_2d':
                 display_x_dim, display_y_dim = 'read_x', 'phase_y'
                 image_name = 'spiral_image_magnitude'
@@ -2116,10 +2231,10 @@ def _sequence_result_explorer_code() -> str:
                 kspace_name = 'cartesian_kspace'
             spatial_dims = {display_y_dim, display_x_dim}
             image = _rss_magnitude(
-                _select_outer(ds[image_name], spatial_dims, repetition)
+                _select_outer(ds[image_name], spatial_dims, repetition, outer_indices)
             ).transpose(display_y_dim, display_x_dim)
             kspace = _rss_magnitude(
-                _select_outer(ds[kspace_name], spatial_dims, repetition)
+                _select_outer(ds[kspace_name], spatial_dims, repetition, outer_indices)
             ).transpose(display_y_dim, display_x_dim)
             image_values = np.asarray(image)
             kspace_values = np.asarray(kspace)
@@ -2152,23 +2267,27 @@ def _sequence_result_explorer_code() -> str:
                 ylabel=display_y_dim,
             )
             fig.suptitle(
-                f'Repetition/frame { _repetition_label(repetition) } · '
+                f'{_outer_label(repetition, outer_indices)} · '
                 f'pixel ({display_x_dim}={x}, {display_y_dim}={y}) · '
                 f'magnitude={image_values[y, x]:.5g}'
             )
             _display_figure_once(fig)
 
 
-        def _show_csi(x, y, spectral_point, repetition, display_range):
+        def _show_csi(
+            x, y, spectral_point, repetition, display_range, outer_indices
+        ):
             cube_dims = {'phase_y', 'phase_x', 'spectral_point'}
             kspace = _rss_magnitude(
-                _select_outer(ds['csi_kspace'], cube_dims, repetition)
+                _select_outer(ds['csi_kspace'], cube_dims, repetition, outer_indices)
             ).transpose('phase_y', 'phase_x', 'spectral_point')
             spatial_fid = _rss_magnitude(
-                _select_outer(ds['csi_spatial_fid'], cube_dims, repetition)
+                _select_outer(
+                    ds['csi_spatial_fid'], cube_dims, repetition, outer_indices
+                )
             ).transpose('phase_y', 'phase_x', 'spectral_point')
             spectrum = _rss_magnitude(
-                _select_outer(ds['csi_spectrum'], cube_dims, repetition)
+                _select_outer(ds['csi_spectrum'], cube_dims, repetition, outer_indices)
             ).transpose('phase_y', 'phase_x', 'spectral_point')
 
             kspace_map = np.asarray(kspace.isel(spectral_point=spectral_point))
@@ -2214,15 +2333,25 @@ def _sequence_result_explorer_code() -> str:
 
 
         def _render_explorer(
-            x, y, z, repetition, spectral_point, display_range, display_auto
+            x, y, z, repetition, spectral_point, display_range, display_auto,
+            **outer_values,
         ):
-            if explorer_kind == 'cartesian_3d':
-                _show_cartesian_3d(x, y, z, repetition, display_range, display_auto )
+            outer_indices = {
+                key[len('outer__'):]: value
+                for key, value in outer_values.items()
+                if key.startswith('outer__')
+            }
+            if explorer_kind in {'cartesian_3d', 'radial_3d'}:
+                _show_cartesian_3d(
+                    x, y, z, repetition, display_range, display_auto, outer_indices
+                )
             elif explorer_kind in {'cartesian_2d', 'spiral_2d'}:
-                _show_cartesian_2d(x, y, repetition, display_range, display_auto)
+                _show_cartesian_2d(
+                    x, y, repetition, display_range, display_auto, outer_indices
+                )
             elif explorer_kind == 'csi':
                 _show_csi(
-                    x, y, spectral_point, repetition, display_range
+                    x, y, spectral_point, repetition, display_range, outer_indices
                 )
             else:
                 print(
@@ -2252,6 +2381,12 @@ def _sequence_result_explorer_code() -> str:
             'display_range': display_range_slider,
             'display_auto': display_auto_checkbox,
         }
+        controls.update(
+            {
+                f'outer__{dim}': _index_slider(dim.replace('_', ' ').title(), dim, 0)
+                for dim in outer_dims
+            }
+        )
         output = widgets.interactive_output(_render_explorer, controls)
         control_row = widgets.Box(
             list(controls.values()),
@@ -2291,6 +2426,7 @@ def export_pulseq_generation_notebook(
         "epi": "make_pulseq_epi",
         "spiral": "make_pulseq_spiral",
         "csi": "make_pulseq_csi",
+        "flash": "make_pulseq_flash",
         "bssfp_3d": "make_pulseq_bssfp",
         "spectral_bssfp_3d": "make_pulseq_spectral_selective_bssfp",
         "me_bssfp_3d": "make_pulseq_me_bssfp",
@@ -2300,7 +2436,7 @@ def export_pulseq_generation_notebook(
         builder_name = builders[str(sequence_kind)]
     except KeyError as exc:
         raise ValueError(
-            "sequence_kind must be 'epi', 'spiral', 'csi', 'bssfp_3d', "
+            "sequence_kind must be 'epi', 'spiral', 'csi', 'flash', 'bssfp_3d', "
             "'spectral_bssfp_3d', 'me_bssfp_3d', or 'radial_me_bssfp_3d'"
         ) from exc
     notebook_path = Path(filename)
@@ -2410,7 +2546,9 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
                 "`cartesian_image`. Cartesian 3D acquisitions additionally contain "
                 "`cartesian_3d_kspace(..., partition_*, phase_*, read_*)` and the "
                 "corresponding 3D reconstruction. Spiral exports contain linearly "
-                "gridded `spiral_gridded_kspace` and `spiral_image` arrays. CSI "
+                "gridded `spiral_gridded_kspace` and `spiral_image` arrays. "
+                "Supported radial 3D exports contain density-compensated "
+                "`radial_3d_gridded_kspace` and `radial_3d_image` arrays. CSI "
                 "exports contain the already sorted "
                 "`csi_kspace(phase_y, phase_x, spectral_point)` array."
             ),
@@ -2426,7 +2564,7 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
                 "adc_table.head()"
             ),
             new_markdown_cell(
-                "## Cartesian reconstruction\n\n"
+                "## Reconstruction preparation\n\n"
                 "This section performs the centered inverse FFT inside the notebook. "
                 "If an older result file has only chronological ADC data, the helper "
                 "first validates and sorts it with the exported event, outer-label, "
@@ -2436,7 +2574,24 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
             ),
             new_code_cell(_sequence_result_reconstruction_code()),
             new_code_cell(
-                "if 'cartesian_3d_kspace' in ds:\n"
+                "if 'radial_3d_gridded_kspace' in ds:\n"
+                "    kspace_3d = ds.radial_3d_gridded_kspace\n"
+                "    image_3d = ds.radial_3d_image_magnitude\n"
+                "    spatial_dims = {'radial_z', 'radial_y', 'radial_x'}\n"
+                "    selectors = {dim: 0 for dim in kspace_3d.dims if dim not in spatial_dims | {'coil'}}\n"
+                "    kspace_volume = kspace_3d.isel(selectors)\n"
+                "    image_volume = image_3d.isel(selectors)\n"
+                "    if 'coil' in kspace_volume.dims:\n"
+                "        kspace_volume = np.sqrt((abs(kspace_volume) ** 2).sum('coil'))\n"
+                "        image_volume = np.sqrt((abs(image_volume) ** 2).sum('coil'))\n"
+                "    z_mid = kspace_volume.sizes['radial_z'] // 2\n"
+                "    fig, axes = plt.subplots(1, 2, figsize=(10, 4))\n"
+                "    axes[0].imshow(np.log1p(abs(kspace_volume.isel(radial_z=z_mid))), origin='lower', cmap='magma')\n"
+                "    axes[0].set_title('Central radial gridded k-space plane')\n"
+                "    axes[1].imshow(abs(image_volume.isel(radial_z=z_mid)), origin='lower', cmap='gray')\n"
+                "    axes[1].set_title('Central radial reconstruction slice')\n"
+                "    plt.tight_layout(); plt.show()\n"
+                "elif 'cartesian_3d_kspace' in ds:\n"
                 "    kspace_3d = ds.cartesian_3d_kspace\n"
                 "    image_3d = ds.notebook_cartesian_3d_image_magnitude\n"
                 "    partition_dim, phase_dim, read_dim = _cartesian_spatial_dims(kspace_3d)\n"

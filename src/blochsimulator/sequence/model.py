@@ -81,7 +81,7 @@ class GradientEvent:
 
 @dataclass(frozen=True)
 class ADCEvent:
-    """Uniform ADC sampling event with receiver frequency and phase."""
+    """Uniform ADC event; positive receiver phase multiplies ``Mx+iMy``."""
 
     start_s: float
     num_samples: int

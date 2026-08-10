@@ -48,6 +48,10 @@ class SettingsDialog(QDialog):
         ("Fast — 10 µs", "fast", 10.0),
         ("Custom", "custom", None),
     )
+    SPOILER_MODES = (
+        ("Ideal crusher (fast, current behavior)", "ideal"),
+        ("Gradient waveform (subvoxel spins)", "gradient"),
+    )
 
     def __init__(
         self,
@@ -61,6 +65,8 @@ class SettingsDialog(QDialog):
         dynamic_sequence_kernel: str = "optimized",
         sequence_timestep_preset: str = "balanced",
         sequence_timestep_us: float = 5.0,
+        sequence_spoiler_mode: str = "ideal",
+        subvoxel_spin_counts=(1, 1, 9),
         thread_mode: str = "automatic",
         manual_thread_count: int = 4,
         detected_thread_count: Optional[int] = None,
@@ -240,6 +246,36 @@ class SettingsDialog(QDialog):
         simulation_form.addRow(
             "Dynamic two-pool kernel:", self.dynamic_sequence_kernel_combo
         )
+
+        self.sequence_spoiler_mode_combo = QComboBox()
+        self.sequence_spoiler_mode_combo.setObjectName("sequence_spoiler_mode")
+        for label, mode in self.SPOILER_MODES:
+            self.sequence_spoiler_mode_combo.addItem(label, mode)
+        spoiler_index = self.sequence_spoiler_mode_combo.findData(sequence_spoiler_mode)
+        self.sequence_spoiler_mode_combo.setCurrentIndex(max(0, spoiler_index))
+        self.sequence_spoiler_mode_combo.setToolTip(
+            "Ideal crusher applies explicit sequence spoiler markers by setting "
+            "transverse magnetization to zero. Gradient waveform keeps every "
+            "subvoxel spin coherent and derives spoiling from the actual gradients."
+        )
+        simulation_form.addRow("Spoiler simulation:", self.sequence_spoiler_mode_combo)
+
+        counts = tuple(subvoxel_spin_counts)
+        if len(counts) != 3:
+            counts = (1, 1, 9)
+        self.subvoxel_spin_count_spins = []
+        for axis, value in zip("XYZ", counts):
+            spin = QSpinBox()
+            spin.setObjectName(f"subvoxel_spin_count_{axis.lower()}")
+            spin.setRange(1, 128)
+            spin.setValue(max(1, int(value)))
+            spin.setSuffix(" spins/voxel")
+            spin.setToolTip(
+                f"Number of deterministic midpoint spins along voxel {axis}. "
+                "Runtime grows with the product of all three counts."
+            )
+            simulation_form.addRow(f"Subvoxel spins {axis}:", spin)
+            self.subvoxel_spin_count_spins.append(spin)
         self.tabs.addTab(simulation_tab, "Simulation")
 
         scanner_tab = QWidget()
@@ -456,6 +492,9 @@ class SettingsDialog(QDialog):
         self.thread_mode_combo.currentIndexChanged.connect(
             self._update_simulation_controls
         )
+        self.sequence_spoiler_mode_combo.currentIndexChanged.connect(
+            self._update_simulation_controls
+        )
         self._update_summary()
         self._update_simulation_controls()
 
@@ -496,6 +535,12 @@ class SettingsDialog(QDialog):
 
     def sequence_timestep_us(self) -> float:
         return float(self.sequence_timestep_us_spin.value())
+
+    def sequence_spoiler_mode(self) -> str:
+        return str(self.sequence_spoiler_mode_combo.currentData())
+
+    def subvoxel_spin_counts(self) -> tuple[int, int, int]:
+        return tuple(int(spin.value()) for spin in self.subvoxel_spin_count_spins)
 
     def thread_mode(self) -> str:
         return str(self.thread_mode_combo.currentData())
@@ -539,6 +584,9 @@ class SettingsDialog(QDialog):
             self.sequence_timestep_us_spin.setValue(preset_values[preset])
         self.sequence_timestep_us_spin.setEnabled(preset == "custom")
         self.manual_thread_count_spin.setEnabled(self.thread_mode() == "manual")
+        enabled = self.sequence_spoiler_mode() == "gradient"
+        for spin in self.subvoxel_spin_count_spins:
+            spin.setEnabled(enabled)
 
     def _browse_export_directory(self):
         current = str(self.get_export_directory())

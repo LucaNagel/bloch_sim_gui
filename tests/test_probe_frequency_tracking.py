@@ -84,6 +84,24 @@ def test_frequency_evolution_panel_is_large_and_scrollable():
     app.processEvents()
 
 
+def test_spectrum_heatmap_replaces_the_complete_line_and_trace_panel():
+    app = QApplication.instance() or QApplication(sys.argv)
+    viewer = SequenceProbeSpectrumViewer()
+    viewer.set_result(_probe_result())
+
+    viewer.plot_type.setCurrentText("Heatmap")
+    app.processEvents()
+
+    assert viewer.line_container.isHidden()
+    assert not viewer.heatmap_layout.isHidden()
+    assert viewer.heatmap_item.image is not None
+    assert viewer.heatmap_item.image.shape == (3, 3)
+
+    viewer.close()
+    viewer.deleteLater()
+    app.processEvents()
+
+
 def test_lorentzian_t2_is_converted_to_fwhm():
     app = QApplication.instance() or QApplication(sys.argv)
     viewer = SequenceProbeSpectrumViewer()

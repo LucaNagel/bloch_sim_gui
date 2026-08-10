@@ -27,6 +27,11 @@ from blochsimulator.sequence.encoding import (
     resolve_encoding_frame,
     set_pulseq_encoding_definitions,
 )
+from blochsimulator.sequence.bssfp_phase import (
+    advance_bssfp_phase_deg,
+    pulseq_phase_offset_rad,
+    wrap_phase_deg,
+)
 
 
 def _as_3d_fov(fov: float | tuple[float, float, float]) -> tuple[float, float, float]:
@@ -522,17 +527,27 @@ def main(
     def set_rf_and_adc_offsets(
         rf_event,
         rf_center_value: float,
-        base_phase_deg: float,
+        common_phase_deg: float,
         target_frequency_hz: float,
         receiver_frequency_hz: float,
     ):
-        base_phase_rad = np.deg2rad(base_phase_deg)
         rf_event.freq_offset = target_frequency_hz
-        rf_event.phase_offset = (
-            base_phase_rad - 2 * np.pi * target_frequency_hz * rf_center_value
+        rf_event.phase_offset = pulseq_phase_offset_rad(
+            common_phase_deg,
+            frequency_offset_hz=target_frequency_hz,
+            event_center_s=rf_center_value,
         )
         adc.freq_offset = receiver_frequency_hz
-        adc.phase_offset = base_phase_rad
+        adc_phase = advance_bssfp_phase_deg(
+            common_phase_deg,
+            elapsed_s=tr / 2,
+            frequency_offset_hz=receiver_frequency_hz,
+        )
+        adc.phase_offset = pulseq_phase_offset_rad(
+            adc_phase,
+            frequency_offset_hz=receiver_frequency_hz,
+            event_center_s=adc_center_from_block_start,
+        )
 
     for rep in range(n_repetition):
         target_index = rep % len(target_offsets)
@@ -565,10 +580,11 @@ def main(
                 rf_alpha_half.delay + rf_alpha_half_center
             )
             rf_frame_center_from_block_start = rf_frame.delay + rf_frame_center
-            alpha_phase_rad = np.deg2rad(rf_phase_start)
             rf_alpha_half.freq_offset = target_frequency_hz
-            rf_alpha_half.phase_offset = (
-                alpha_phase_rad - 2 * np.pi * target_frequency_hz * rf_alpha_half_center
+            rf_alpha_half.phase_offset = pulseq_phase_offset_rad(
+                wrap_phase_deg(rf_phase_start + rf_phase_increment),
+                frequency_offset_hz=target_frequency_hz,
+                event_center_s=rf_alpha_half_center,
             )
             alpha_half_delay_value = (
                 alpha_half_center_spacing
@@ -586,7 +602,17 @@ def main(
             if alpha_half_delay_value > 0:
                 seq.add_block(pp.make_delay(alpha_half_delay_value))
 
-        rf_phase = float(rf_phase_start)
+        # Pulseq frequency offsets are local to each event. Continue the target
+        # RF oscillator explicitly and use that phase to lock the receiver, so
+        # the off-resonant pulse train is physical without writing the RF/RX
+        # carrier difference into successive Cartesian lines.
+        common_phase = wrap_phase_deg(rf_phase_start)
+        if use_alpha_half:
+            common_phase = advance_bssfp_phase_deg(
+                common_phase,
+                elapsed_s=alpha_half_center_spacing,
+                frequency_offset_hz=target_frequency_hz,
+            )
 
         def add_repetition(
             ky: float,
@@ -594,16 +620,21 @@ def main(
             acquire: bool,
             partition_index: int | None = None,
         ) -> None:
-            nonlocal rf_phase
+            nonlocal common_phase
 
             set_rf_and_adc_offsets(
                 rf_frame,
                 rf_frame_center,
-                rf_phase,
+                common_phase,
                 target_frequency_hz,
                 receiver_frequency_hz,
             )
-            rf_phase = np.mod(rf_phase + rf_phase_increment, 360.0)
+            common_phase = advance_bssfp_phase_deg(
+                common_phase,
+                elapsed_s=tr,
+                frequency_offset_hz=target_frequency_hz,
+                phase_increment_deg=rf_phase_increment,
+            )
 
             gy_pre = make_role_trapezoid(
                 pp,
@@ -740,6 +771,14 @@ def main(
         value=alpha_half_center_spacing if use_alpha_half else 0.0,
     )
     seq.set_definition(
+        key="AlphaHalfPhaseDeg",
+        value=(
+            wrap_phase_deg(rf_phase_start + rf_phase_increment)
+            if use_alpha_half
+            else 0.0
+        ),
+    )
+    seq.set_definition(
         key="EndImageSpoilerCyclesPerFOV",
         value=end_image_spoiler_cycles_per_fov,
     )
@@ -777,6 +816,10 @@ def main(
         )
     seq.set_definition(key="TR", value=tr)
     seq.set_definition(key="TE", value=te)
+    seq.set_definition(key="RFPhaseStartDeg", value=rf_phase_start)
+    seq.set_definition(key="RFPhaseIncrementDeg", value=rf_phase_increment)
+    seq.set_definition(key="FrequencyOffsetPhaseCoherent", value=True)
+    seq.set_definition(key="PhaseReference", value="rf-target-locked")
 
     if write_seq:
         script_dir = Path(__file__).resolve().parent
@@ -796,6 +839,6 @@ if __name__ == "__main__":
         plot=False,
         write_seq=True,
         n_repetition=20,
-        rf_phase_increment=0.0,  # phase increment in degrees for bSSFP phase cycling
+        rf_phase_increment=0.0,  # same-phase RF train used by Skinner et al.
         seq_filename="bssfp_3d_spectral_selective_skinner.seq",
     )

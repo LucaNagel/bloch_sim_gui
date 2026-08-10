@@ -36,6 +36,26 @@ def test_acquisition_dimensions_expand_event_indices_and_round_trip_metadata():
     assert AcquisitionDimensions.from_metadata(dimensions.to_metadata()) == dimensions
 
 
+def test_cartesian_validation_accepts_sub_percent_pulseq_serialization_drift():
+    acquisition = CartesianAcquisition(
+        read_matrix=4,
+        phase_matrix=32,
+        fov_m=(0.12, 0.12),
+        dwell_s=50e-6,
+    )
+    moments = np.zeros((acquisition.phase_matrix, acquisition.read_matrix, 3))
+    moments[:, :, 0] = acquisition.kx_cyc_per_m
+    moments[:, :, 1] = acquisition.ky_cyc_per_m[:, None]
+    line_drift_cells = np.linspace(-0.003, 0.003, acquisition.phase_matrix)
+    moments[:, :, 0] += line_drift_cells[:, None] / acquisition.fov_m[0]
+
+    acquisition.validate_gradient_moments(moments.reshape(-1, 3))
+
+    moments[-1, :, 0] += 0.02 / acquisition.fov_m[0]
+    with pytest.raises(ValueError, match="readout gradient moments"):
+        acquisition.validate_gradient_moments(moments.reshape(-1, 3))
+
+
 def test_3d_volume_inference_sorts_kz_positions_not_chronological_frames():
     acquisition = CartesianAcquisition(
         read_matrix=2,
@@ -90,7 +110,12 @@ def test_3d_volume_inference_sorts_kz_positions_not_chronological_frames():
     program = SequenceProgram(
         events=(),
         duration_s=0.0,
-        metadata={"definitions": {"FOV": (0.02, 0.02, 0.02), "MatrixSize": (2, 2, 2)}},
+        metadata={
+            "definitions": {
+                "FOV": "[0.02 0.02 0.02]",
+                "MatrixSize": "[2. 2. 2.]",
+            }
+        },
     )
     compiled = SimpleNamespace(
         adc_times_s=np.arange(16, dtype=float),

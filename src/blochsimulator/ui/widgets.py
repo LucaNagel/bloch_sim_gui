@@ -1,12 +1,29 @@
 from PyQt5.QtWidgets import QComboBox
 from PyQt5.QtCore import Qt, pyqtSignal
+import pyqtgraph as pg
 
 
 IMAGE_HISTOGRAM_WIDTH = 48
+IMAGE_CANVAS_BACKGROUND = (18, 18, 20)
+IMAGE_FOV_BORDER = (62, 62, 68)
+
+
+def style_image_item(image_item):
+    """Draw a subtle frame around the rectangular image/FOV extent."""
+    image_item.setBorder(pg.mkPen(IMAGE_FOV_BORDER, width=1))
+    return image_item
+
+
+def style_image_view(view):
+    """Distinguish a black image/FOV from its slightly lighter canvas."""
+    view.ui.graphicsView.setBackground(IMAGE_CANVAS_BACKGROUND)
+    style_image_item(view.getImageItem())
+    return view
 
 
 def compact_image_histogram(view, width: int = IMAGE_HISTOGRAM_WIDTH):
-    """Keep an ImageView LUT as narrow as a regular plot colorbar."""
+    """Keep an ImageView LUT compact and make its image/FOV extent visible."""
+    style_image_view(view)
     histogram = view.ui.histogram
     histogram.setFixedWidth(int(width))
     item = histogram.item

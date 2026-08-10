@@ -29,6 +29,11 @@ from blochsimulator.sequence.encoding import (
     resolve_encoding_frame,
     set_pulseq_encoding_definitions,
 )
+from blochsimulator.sequence.bssfp_phase import (
+    advance_bssfp_phase_deg,
+    pulseq_phase_offset_rad,
+    wrap_phase_deg,
+)
 
 
 def _as_3d_fov(fov: float | tuple[float, float, float]) -> tuple[float, float, float]:
@@ -300,12 +305,28 @@ def main(
         )
     spoiler_end_times = []
 
-    def set_rf_and_adc_offsets(base_phase_deg: float, frame_frequency_hz: float):
-        base_phase_rad = np.deg2rad(base_phase_deg)
+    def set_rf_and_adc_offsets(
+        rf_phase_deg: float,
+        receiver_phase_deg: float,
+        frame_frequency_hz: float,
+    ):
         rf.freq_offset = frame_frequency_hz
-        rf.phase_offset = base_phase_rad - 2 * np.pi * frame_frequency_hz * rf_center
+        rf.phase_offset = pulseq_phase_offset_rad(
+            rf_phase_deg,
+            frequency_offset_hz=frame_frequency_hz,
+            event_center_s=rf_center,
+        )
         adc.freq_offset = frame_frequency_hz
-        adc.phase_offset = base_phase_rad
+        adc_phase = advance_bssfp_phase_deg(
+            receiver_phase_deg,
+            elapsed_s=tr / 2,
+            frequency_offset_hz=frame_frequency_hz,
+        )
+        adc.phase_offset = pulseq_phase_offset_rad(
+            adc_phase,
+            frequency_offset_hz=frame_frequency_hz,
+            event_center_s=adc_center_from_block_start,
+        )
 
     for rep in range(n_repetition):
         print(f"Repetition {rep + 1} of {n_repetition}")
@@ -315,8 +336,10 @@ def main(
         # standard catalyzation used by the Pulseq TrueFISP reference sequence.
         if use_alpha_half:
             rf_alpha_half.freq_offset = frame_frequency_hz
-            rf_alpha_half.phase_offset = (
-                -2 * np.pi * frame_frequency_hz * rf_alpha_half_center
+            rf_alpha_half.phase_offset = pulseq_phase_offset_rad(
+                rf_phase_start,
+                frequency_offset_hz=frame_frequency_hz,
+                event_center_s=rf_alpha_half_center,
             )
             alpha_half_delay_value = tr / 2 - pp.calc_duration(rf_alpha_half)
             alpha_half_delay_value = np.round(alpha_half_delay_value / raster) * raster
@@ -326,7 +349,19 @@ def main(
             if alpha_half_delay_value > 0:
                 seq.add_block(pp.make_delay(alpha_half_delay_value))
 
-        rf_phase = float(rf_phase_start)
+        rf_phase = wrap_phase_deg(rf_phase_start)
+        receiver_phase = wrap_phase_deg(rf_phase_start)
+        if use_alpha_half:
+            rf_phase = advance_bssfp_phase_deg(
+                rf_phase,
+                elapsed_s=tr / 2,
+                frequency_offset_hz=frame_frequency_hz,
+            )
+            receiver_phase = advance_bssfp_phase_deg(
+                receiver_phase,
+                elapsed_s=tr / 2,
+                frequency_offset_hz=frame_frequency_hz,
+            )
 
         def add_repetition(
             ky: float,
@@ -334,10 +369,21 @@ def main(
             acquire: bool,
             partition_index: int | None = None,
         ) -> None:
-            nonlocal rf_phase
+            nonlocal receiver_phase, rf_phase
 
-            set_rf_and_adc_offsets(rf_phase, frame_frequency_hz)
-            rf_phase = np.mod(rf_phase + rf_phase_increment, 360.0)
+            set_rf_and_adc_offsets(rf_phase, receiver_phase, frame_frequency_hz)
+            rf_phase = advance_bssfp_phase_deg(
+                rf_phase,
+                elapsed_s=tr,
+                frequency_offset_hz=frame_frequency_hz,
+                phase_increment_deg=rf_phase_increment,
+            )
+            receiver_phase = advance_bssfp_phase_deg(
+                receiver_phase,
+                elapsed_s=tr,
+                frequency_offset_hz=frame_frequency_hz,
+                phase_increment_deg=rf_phase_increment,
+            )
 
             gy_pre = make_role_trapezoid(
                 pp,

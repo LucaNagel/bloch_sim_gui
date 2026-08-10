@@ -51,6 +51,8 @@ from ..memory import (
     set_default_memory_policy,
 )
 from ..simulator import BlochSimulator, TissueParameters, resolve_num_threads
+from ..spectral_phantom import SpectralPhantom
+from ..dynamic_phantom import DynamicSpectralPhantom
 from ..sequence import load_scanner_parameters, save_scanner_parameters
 from ..visualization import (
     ImageExporter,
@@ -1426,6 +1428,7 @@ class BlochSimulatorGUI(QMainWindow):
         phantom_widget = getattr(self, "phantom_widget", None)
         if phantom_widget is None:
             return
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
         try:
             phantom_widget.phantom_creator.phantom_created.connect(
                 self._on_shared_phantom_changed,
@@ -1433,9 +1436,62 @@ class BlochSimulatorGUI(QMainWindow):
             )
         except TypeError:
             pass
+        try:
+            phantom_widget.phantom_creator.field_strength_changed.connect(
+                self._synchronize_workspace_field_strength,
+                type=Qt.UniqueConnection,
+            )
+        except TypeError:
+            pass
+        if sequence_widget is not None:
+            try:
+                sequence_widget.field_strength_t.valueChanged.connect(
+                    self._synchronize_workspace_field_strength,
+                    type=Qt.UniqueConnection,
+                )
+            except TypeError:
+                pass
         self._on_shared_phantom_changed(phantom_widget.current_phantom)
+        if phantom_widget.current_phantom is None and sequence_widget is not None:
+            self._synchronize_workspace_field_strength(
+                sequence_widget.field_strength_t.value()
+            )
+
+    def _synchronize_workspace_field_strength(self, value_t):
+        """Use one B0 value for sequence, probe, and phantom design controls."""
+        if getattr(self, "_synchronizing_workspace_field_strength", False):
+            return
+        value_t = float(value_t)
+        self._synchronizing_workspace_field_strength = True
+        try:
+            sequence_widget = getattr(self, "sequence_simulation_widget", None)
+            if sequence_widget is not None and not np.isclose(
+                sequence_widget.field_strength_t.value(), value_t
+            ):
+                sequence_widget.field_strength_t.setValue(value_t)
+            phantom_widget = getattr(self, "phantom_widget", None)
+            if phantom_widget is not None:
+                creator = phantom_widget.phantom_creator
+                if not np.isclose(creator.get_field_strength(), value_t):
+                    creator.set_field_strength(value_t)
+                phantom = phantom_widget.current_phantom
+                if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+                    phantom.field_strength = value_t
+                    creator.current_phantom = phantom
+            if sequence_widget is not None:
+                sequence_widget.refresh_object_summary()
+        finally:
+            self._synchronizing_workspace_field_strength = False
 
     def _on_shared_phantom_changed(self, phantom):
+        if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+            self._synchronize_workspace_field_strength(phantom.field_strength)
+        elif phantom is not None:
+            field_strength = phantom.metadata.get(
+                "field_strength_t", phantom.metadata.get("field_strength")
+            )
+            if field_strength is not None:
+                self._synchronize_workspace_field_strength(field_strength)
         sequence_widget = getattr(self, "sequence_simulation_widget", None)
         if sequence_widget is not None:
             sequence_widget.refresh_object_summary()
@@ -4303,6 +4359,25 @@ class BlochSimulatorGUI(QMainWindow):
             else "optimized"
         )
 
+    def _load_sequence_spoiler_mode(self) -> str:
+        """Load ideal-crusher or physical gradient-waveform spoiling."""
+        mode = str(self.app_settings.value("sequence/spoiler_mode", "ideal"))
+        return mode if mode in {"ideal", "gradient"} else "ideal"
+
+    def _load_subvoxel_spin_counts(self):
+        """Load persistent X/Y/Z intravoxel spin counts."""
+        defaults = (1, 1, 9)
+        counts = []
+        for axis, default in zip("xyz", defaults):
+            try:
+                value = int(
+                    self.app_settings.value(f"sequence/subvoxel_spins_{axis}", default)
+                )
+            except (TypeError, ValueError):
+                value = default
+            counts.append(value if 1 <= value <= 128 else default)
+        return tuple(counts)
+
     def _load_sequence_timestep_preset(self) -> str:
         """Load the persistent RF-active sequence time-step preset."""
         preset = str(self.app_settings.value("sequence/timestep_preset", "balanced"))
@@ -4351,6 +4426,8 @@ class BlochSimulatorGUI(QMainWindow):
 
     def show_settings(self, initial_tab: str = "general"):
         """Show and persist application, simulation and scanner settings."""
+        previous_scanner_parameters = self._load_scanner_parameters()
+        previous_workspace_defaults = WorkspaceDefaults.from_settings(self.app_settings)
         dialog = SettingsDialog(
             policy=self._load_memory_policy(),
             export_directory=self._get_export_directory(),
@@ -4364,11 +4441,13 @@ class BlochSimulatorGUI(QMainWindow):
             dynamic_sequence_kernel=self._load_dynamic_sequence_kernel(),
             sequence_timestep_preset=self._load_sequence_timestep_preset(),
             sequence_timestep_us=self._load_sequence_timestep_us(),
+            sequence_spoiler_mode=self._load_sequence_spoiler_mode(),
+            subvoxel_spin_counts=self._load_subvoxel_spin_counts(),
             thread_mode=self._load_thread_mode(),
             manual_thread_count=self._load_manual_thread_count(),
             detected_thread_count=resolve_num_threads(None),
-            scanner_parameters=self._load_scanner_parameters(),
-            workspace_defaults=WorkspaceDefaults.from_settings(self.app_settings),
+            scanner_parameters=previous_scanner_parameters,
+            workspace_defaults=previous_workspace_defaults,
         )
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -4405,13 +4484,20 @@ class BlochSimulatorGUI(QMainWindow):
         timestep_us = dialog.sequence_timestep_us()
         self.app_settings.setValue("sequence/timestep_preset", timestep_preset)
         self.app_settings.setValue("sequence/timestep_us", timestep_us)
+        spoiler_mode = dialog.sequence_spoiler_mode()
+        subvoxel_spin_counts = dialog.subvoxel_spin_counts()
+        self.app_settings.setValue("sequence/spoiler_mode", spoiler_mode)
+        for axis, count in zip("xyz", subvoxel_spin_counts):
+            self.app_settings.setValue(f"sequence/subvoxel_spins_{axis}", int(count))
         thread_mode = dialog.thread_mode()
         manual_thread_count = dialog.manual_thread_count()
         self.app_settings.setValue("simulation/thread_mode", thread_mode)
         self.app_settings.setValue("simulation/manual_threads", manual_thread_count)
         scanner_parameters = dialog.scanner_parameters()
+        scanner_parameters_changed = scanner_parameters != previous_scanner_parameters
         save_scanner_parameters(self.app_settings, scanner_parameters)
         workspace_defaults = dialog.workspace_defaults()
+        workspace_defaults_changed = workspace_defaults != previous_workspace_defaults
         workspace_defaults.save(self.app_settings)
         self.app_settings.sync()
         set_default_memory_policy(policy)
@@ -4422,11 +4508,16 @@ class BlochSimulatorGUI(QMainWindow):
             sequence_widget.set_sequence_kernel(sequence_kernel)
             sequence_widget.set_dynamic_sequence_kernel(dynamic_sequence_kernel)
             sequence_widget.set_sequence_timestep_us(timestep_us)
+            sequence_widget.set_spoiler_configuration(
+                spoiler_mode, subvoxel_spin_counts
+            )
             sequence_widget.set_thread_configuration(thread_mode, manual_thread_count)
-            sequence_widget.set_scanner_parameters(scanner_parameters)
-            sequence_widget.set_workspace_defaults(workspace_defaults)
+            if scanner_parameters_changed:
+                sequence_widget.set_scanner_parameters(scanner_parameters)
+            if workspace_defaults_changed:
+                sequence_widget.set_workspace_defaults(workspace_defaults)
         phantom_widget = getattr(self, "phantom_widget", None)
-        if phantom_widget is not None:
+        if phantom_widget is not None and workspace_defaults_changed:
             phantom_widget.phantom_creator.set_workspace_defaults(workspace_defaults)
         self.simulator.sequence_kernel = sequence_kernel
         self.simulator.dynamic_sequence_kernel = dynamic_sequence_kernel
@@ -4717,9 +4808,7 @@ class BlochSimulatorGUI(QMainWindow):
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Warning)
         dialog.setWindowTitle("Simulation exceeds RAM budget")
-        dialog.setText(
-            "The selected number of simulation points would use too much RAM."
-        )
+        dialog.setText("The selected simulation would use too much RAM.")
         dialog.setInformativeText(details)
 
         endpoint_button = None
@@ -4727,7 +4816,9 @@ class BlochSimulatorGUI(QMainWindow):
             endpoint_button = dialog.addButton(
                 "Use Endpoint Mode", QMessageBox.AcceptRole
             )
-        settings_button = dialog.addButton("Memory Settings...", QMessageBox.ActionRole)
+        settings_button = dialog.addButton(
+            "Open Memory Settings...", QMessageBox.ActionRole
+        )
         dialog.addButton(QMessageBox.Cancel)
         dialog.exec_()
 
@@ -4969,6 +5060,16 @@ class BlochSimulatorGUI(QMainWindow):
                 if sequence_widget is not None
                 else {}
             ),
+            "reconstruction_view": (
+                sequence_widget.reconstruction_explorer.get_state()
+                if sequence_widget is not None
+                else {}
+            ),
+            "sequence_view_tab": (
+                sequence_widget.views.currentIndex()
+                if sequence_widget is not None
+                else 0
+            ),
             "phantom_controls": (
                 _capture_widget_state(phantom_widget.phantom_creator)
                 if phantom_widget is not None
@@ -5098,6 +5199,18 @@ class BlochSimulatorGUI(QMainWindow):
             if project["sequence_result"] is not None:
                 sequence_widget.phantom = phantom
                 sequence_widget._finished(project["sequence_result"])
+                sequence_widget.reconstruction_explorer.restore_state(
+                    state.get("reconstruction_view", {})
+                )
+                sequence_widget.views.setCurrentIndex(
+                    max(
+                        0,
+                        min(
+                            int(state.get("sequence_view_tab", 0)),
+                            sequence_widget.views.count() - 1,
+                        ),
+                    )
+                )
 
             legacy_result = project["legacy_result"]
             if legacy_result is not None:

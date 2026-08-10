@@ -216,8 +216,14 @@ def _result_from_data(data, arrays):
         "species_signal",
         "final_pool_magnetization",
         "checkpoint_pool_magnetization",
+        "sequence_waveforms",
+        "physical_field_maps",
     )
-    return SequenceSimulationResult(**{key: value.get(key) for key in keys})
+    arguments = {key: value.get(key) for key in keys}
+    arguments["pool_names"] = tuple(arguments.get("pool_names") or ())
+    arguments["sequence_waveforms"] = arguments.get("sequence_waveforms") or {}
+    arguments["physical_field_maps"] = arguments.get("physical_field_maps") or {}
+    return SequenceSimulationResult(**arguments)
 
 
 def save_project(
@@ -245,6 +251,7 @@ def save_project(
         "legacy_result": _result_to_data(legacy_result, arrays),
         "sequence_result": _result_to_data(sequence_result, arrays),
         "phantom_entry": None,
+        "phantom_name": None if phantom is None else str(phantom.name),
     }
     with zipfile.ZipFile(filename, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         if phantom is not None:
@@ -277,6 +284,8 @@ def load_project(filename):
                 path = Path(directory) / "phantom.npz"
                 path.write_bytes(archive.read(manifest["phantom_entry"]))
                 phantom = load_any_phantom(path)
+                if manifest.get("phantom_name") is not None:
+                    phantom.name = str(manifest["phantom_name"])
     return {
         "state": manifest.get("state", {}),
         "phantom": phantom,

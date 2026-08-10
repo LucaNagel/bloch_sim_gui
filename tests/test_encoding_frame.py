@@ -23,6 +23,14 @@ def test_encoding_frame_round_trips_vectors_and_metadata():
     assert EncodingFrame.from_definitions(frame.pulseq_definitions()) == frame
 
 
+def test_encoding_frame_accepts_numpy_style_string_definition():
+    frame = EncodingFrame.from_definitions(
+        {"EncodingBasisXYZ": "[1. 0. 0. 0. 1. 0. 0. 0. 1.]"}
+    )
+
+    assert frame == EncodingFrame.identity()
+
+
 def test_encoding_frame_rejects_reflections_and_reused_axes():
     with pytest.raises(ValueError, match="right-handed"):
         EncodingFrame.from_axis_codes(("x", "y", "-z"))

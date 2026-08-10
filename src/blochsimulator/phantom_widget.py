@@ -113,6 +113,7 @@ class PhantomCreatorWidget(QGroupBox):
     """Widget for creating and configuring phantoms."""
 
     phantom_created = pyqtSignal(object)  # Emits Phantom object
+    field_strength_changed = pyqtSignal(float)
     PHANTOM_DESIGNER_TYPE = "Phantom Designer..."
     LOAD_FROM_FILE_TYPE = "Load from File..."
 
@@ -188,6 +189,9 @@ class PhantomCreatorWidget(QGroupBox):
         self._set_field_strength(self.workspace_defaults.field_strength_t)
         self.field_combo.setToolTip(
             "Main magnetic field strength (affects T1/T2 values)"
+        )
+        self.field_combo.currentTextChanged.connect(
+            lambda *_: self.field_strength_changed.emit(self.get_field_strength())
         )
         field_layout.addWidget(self.field_combo)
         layout.addLayout(field_layout)
@@ -285,6 +289,10 @@ class PhantomCreatorWidget(QGroupBox):
             index = self.field_combo.count() - 1
         self.field_combo.setCurrentIndex(index)
 
+    def set_field_strength(self, value_t: float) -> None:
+        """Apply the shared B0 value used across the focused workspaces."""
+        self._set_field_strength(value_t)
+
     def create_phantom(self):
         """Create phantom based on current settings."""
         phantom_type = self.type_combo.currentText()
@@ -339,7 +347,14 @@ class PhantomCreatorWidget(QGroupBox):
                 phantom = load_any_phantom(filename)
                 self.current_phantom = phantom
                 if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+                    self._set_field_strength(phantom.field_strength)
                     self.type_combo.setCurrentText(self.PHANTOM_DESIGNER_TYPE)
+                else:
+                    field_strength = phantom.metadata.get(
+                        "field_strength_t", phantom.metadata.get("field_strength")
+                    )
+                    if field_strength is not None:
+                        self._set_field_strength(field_strength)
                 self._update_info()
                 self.save_btn.setEnabled(True)
                 self.save_btn.setVisible(True)
@@ -370,11 +385,15 @@ class PhantomCreatorWidget(QGroupBox):
         dialog = SpectralPhantomDesignerDialog(
             self, design=design, settings=self.settings
         )
+        if design is None:
+            dialog.design.field_strength_t = self.get_field_strength()
+            dialog.field_strength_t.setValue(self.get_field_strength())
         self._retained_spectral_designer_dialogs.append(dialog)
         if dialog.exec_() != QDialog.Accepted:
             return
         phantom = dialog.get_phantom()
         self.current_phantom = phantom
+        self._set_field_strength(phantom.field_strength)
         self._update_info()
         self.save_btn.setEnabled(True)
         self.save_btn.setVisible(True)

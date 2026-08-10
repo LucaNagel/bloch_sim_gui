@@ -57,6 +57,7 @@ from .sequence import (  # noqa: F401
     SequenceCompiler,
     SequenceProgram,
     SequenceSimulationResult,
+    SpinSampling,
     UnsupportedPulseqVersionError,
     infer_cartesian_acquisition,
     infer_cartesian_acquisition_frames,

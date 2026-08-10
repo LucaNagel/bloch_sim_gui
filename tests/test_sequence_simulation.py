@@ -15,6 +15,7 @@ from blochsimulator.sequence import (
     RFEvent,
     SequenceProgram,
     SequenceSimulationResult,
+    SpinSampling,
     export_bruker_raw,
 )
 from blochsimulator.simulator import resolve_num_threads
@@ -110,6 +111,147 @@ def test_declared_ideal_spoiler_crushes_transverse_magnetization():
     assert result.metadata["ideal_spoiler_end_times_s"] == pytest.approx([2e-3])
 
 
+def test_subvoxel_gradient_waveform_converges_to_rectangular_voxel_sinc():
+    voxel_width_m = 0.02
+    duration_s = 0.01
+    cycles_across_voxel = 0.75
+    gradient_hz_per_m = cycles_across_voxel / voxel_width_m / duration_s
+    phantom = _phantom(t1=1e12, t2=1e12, m0=(1.0, 0.0, 0.0))
+    program = SequenceProgram(
+        (
+            GradientEvent("x", 0.0, np.array([gradient_hz_per_m]), duration_s),
+            ADCEvent(duration_s, 1, 1e-3),
+        ),
+        duration_s=duration_s + 1e-3,
+    )
+
+    result = BlochSimulator(use_parallel=False).simulate_sequence(
+        program,
+        phantom,
+        spin_sampling=SpinSampling((101, 1, 1)),
+        spoiler_mode="gradient",
+    )
+
+    expected = np.sinc(cycles_across_voxel)
+    assert result.signal[0] == pytest.approx(expected, abs=5e-5)
+    assert result.mx.item() == pytest.approx(expected, abs=5e-5)
+    assert result.metadata["subvoxel_spin_counts_xyz"] == (101, 1, 1)
+    assert result.metadata["n_simulated_spins"] == 101
+
+
+def test_gradient_waveform_and_ideal_crusher_produce_matching_full_spoiling():
+    voxel_width_m = 0.02
+    duration_s = 0.01
+    gradient_hz_per_m = 1.0 / voxel_width_m / duration_s
+    phantom = _phantom(t1=1e12, t2=1e12, m0=(1.0, 0.0, 0.0))
+    program = SequenceProgram(
+        (
+            GradientEvent("x", 0.0, np.array([gradient_hz_per_m]), duration_s),
+            ADCEvent(duration_s, 1, 1e-3),
+        ),
+        duration_s=duration_s + 1e-3,
+        metadata={"definitions": {"IdealSpoilerEndTimes": [duration_s]}},
+    )
+    simulator = BlochSimulator(use_parallel=False)
+
+    ideal = simulator.simulate_sequence(program, phantom, spoiler_mode="ideal")
+    physical = simulator.simulate_sequence(
+        program,
+        phantom,
+        spin_sampling=SpinSampling((9, 1, 1)),
+        spoiler_mode="gradient",
+    )
+    unresolved = simulator.simulate_sequence(
+        program,
+        phantom,
+        spin_sampling=SpinSampling(),
+        spoiler_mode="gradient",
+    )
+
+    assert ideal.signal[0] == pytest.approx(0.0j, abs=1e-12)
+    assert physical.signal[0] == pytest.approx(ideal.signal[0], abs=1e-12)
+    assert abs(unresolved.signal[0]) == pytest.approx(1.0, abs=1e-10)
+    assert physical.metadata["spoiler_mode"] == "gradient"
+    assert physical.metadata["ideal_spoiling_applied"] is False
+    assert physical.metadata["ideal_spoiler_end_times_s"] == []
+    assert physical.metadata["declared_ideal_spoiler_end_times_s"] == pytest.approx(
+        [duration_s]
+    )
+
+
+def test_gradient_waveform_keeps_subspins_for_later_refocusing():
+    duration_s = 0.01
+    gradient_hz_per_m = 5000.0
+    phantom = _phantom(t1=1e12, t2=1e12, m0=(1.0, 0.0, 0.0))
+    program = SequenceProgram(
+        (
+            GradientEvent("x", 0.0, np.array([gradient_hz_per_m]), duration_s),
+            GradientEvent(
+                "x",
+                duration_s,
+                np.array([-gradient_hz_per_m]),
+                duration_s,
+            ),
+            ADCEvent(2 * duration_s, 1, 1e-3),
+        ),
+        duration_s=2 * duration_s + 1e-3,
+    )
+
+    result = BlochSimulator(use_parallel=False).simulate_sequence(
+        program,
+        phantom,
+        spin_sampling=SpinSampling((9, 1, 1)),
+        spoiler_mode="gradient",
+    )
+
+    assert result.signal[0] == pytest.approx(1.0 + 0.0j, abs=1e-10)
+    assert result.mx.item() == pytest.approx(1.0, abs=1e-10)
+
+
+def test_subvoxel_signal_weight_is_independent_of_spin_count_and_chunk_size():
+    phantom = _phantom(shape=(2,), t1=1e12, t2=1e12, m0=(1.0, 0.0, 0.0))
+    program = SequenceProgram(
+        (ADCEvent(0.0, 1, 1e-3),),
+        duration_s=1e-3,
+    )
+    simulator = BlochSimulator(use_parallel=False)
+
+    baseline = simulator.simulate_sequence(program, phantom)
+    one_parent = simulator.simulate_sequence(
+        program,
+        phantom,
+        chunk_voxels=1,
+        spin_sampling=SpinSampling((7, 1, 1)),
+        spoiler_mode="gradient",
+    )
+    all_parents = simulator.simulate_sequence(
+        program,
+        phantom,
+        chunk_voxels=2,
+        spin_sampling=SpinSampling((7, 1, 1)),
+        spoiler_mode="gradient",
+    )
+
+    assert one_parent.signal == pytest.approx(baseline.signal, abs=1e-12)
+    assert all_parents.signal == pytest.approx(baseline.signal, abs=1e-12)
+    assert one_parent.final_magnetization == pytest.approx(
+        all_parents.final_magnetization, abs=1e-12
+    )
+
+
+def test_subvoxel_sampling_rejects_missing_phantom_axis_extent():
+    phantom = _phantom(shape=(2, 2))
+    program = SequenceProgram((), duration_s=1e-3)
+
+    with pytest.raises(ValueError, match="Z-axis phantom extent"):
+        BlochSimulator(use_parallel=False).simulate_sequence(
+            program,
+            phantom,
+            spin_sampling=SpinSampling((1, 1, 3)),
+            spoiler_mode="gradient",
+        )
+
+
 def test_adc_signal_b0_and_chemical_shift_phase():
     phantom = _phantom(
         t1=1e9,
@@ -136,7 +278,22 @@ def test_receiver_demodulation_phase():
         duration_s=1e-3,
     )
     result = BlochSimulator(use_parallel=False).simulate_sequence(program, phantom)
-    assert result.signal[0] == pytest.approx(-1j, abs=1e-10)
+    assert result.signal[0] == pytest.approx(1j, abs=1e-10)
+
+
+def test_receiver_frequency_demodulates_matching_positive_off_resonance():
+    phantom = _phantom(
+        t1=1e9,
+        t2=1e9,
+        chemical_shift=100.0,
+        m0=(1.0, 0.0, 0.0),
+    )
+    program = SequenceProgram(
+        (ADCEvent(0.0, 2, 2.5e-3, frequency_offset_hz=100.0),),
+        duration_s=5e-3,
+    )
+    result = BlochSimulator(use_parallel=False).simulate_sequence(program, phantom)
+    assert result.signal == pytest.approx([1.0 + 0.0j, 1.0 + 0.0j], abs=1e-8)
 
 
 def test_sequence_preview_reports_cumulative_signal_and_finishes_at_one():
@@ -795,6 +952,66 @@ def test_sequence_result_notebook_reconstructs_labelled_raw_3d_adc():
     np.testing.assert_allclose(reconstructed, expected, atol=1e-12)
     np.testing.assert_allclose(species[0], 0.25 * expected, atol=1e-12)
     np.testing.assert_allclose(species[1], 0.75 * expected, atol=1e-12)
+
+
+def test_sequence_result_notebook_recovers_unlabelled_square_phase_partition_grid():
+    partitions = phases = 3
+    reads = 4
+    shape = (partitions, phases, reads)
+    expected = np.zeros(shape, dtype=np.complex128)
+    expected[2, 1, 0] = 1.0 - 0.5j
+
+    x_cells = np.arange(reads) - reads // 2 + 0.5
+    y_cells = np.arange(phases) - phases // 2
+    z_cells = np.arange(partitions) - partitions // 2
+    centre_phase = np.exp(
+        1j
+        * np.pi
+        * (
+            z_cells[:, None, None] / partitions
+            + y_cells[None, :, None] / phases
+            + x_cells[None, None, :] / reads
+        )
+    )
+    spatial_axes = (-3, -2, -1)
+    corrected_kspace = np.fft.fftshift(
+        np.fft.fftn(np.fft.ifftshift(expected, axes=spatial_axes), axes=spatial_axes),
+        axes=spatial_axes,
+    )
+    signal = (corrected_kspace / centre_phase).reshape(-1)
+    event_count = partitions * phases
+
+    dataset = xr.Dataset(
+        data_vars={"signal": ("adc", signal)},
+        coords={
+            "adc": np.arange(signal.size),
+            "adc_event_index": (
+                "adc",
+                np.repeat(np.arange(event_count), reads),
+            ),
+            "readout_sample_index": (
+                "adc",
+                np.tile(np.arange(reads), event_count),
+            ),
+            "kx": ("adc", np.tile(x_cells * 10.0, event_count)),
+            "ky": (
+                "adc",
+                np.tile(np.repeat(y_cells * 20.0, reads), partitions),
+            ),
+            "kz": (
+                "adc",
+                np.repeat(z_cells * 30.0, phases * reads),
+            ),
+        },
+    )
+    namespace = {"ds": dataset, "np": np, "xr": xr}
+
+    exec(_sequence_result_reconstruction_code(), namespace)
+
+    reconstructed = namespace["ds"].notebook_cartesian_3d_image
+    assert reconstructed.dims == ("partition_z", "phase_y", "read_x")
+    assert reconstructed.shape == shape
+    np.testing.assert_allclose(reconstructed.values, expected, atol=1e-12)
 
 
 def test_sequence_result_notebook_reconstructs_read_z_cartesian_adc():

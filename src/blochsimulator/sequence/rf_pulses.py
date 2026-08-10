@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from functools import lru_cache
 
 import numpy as np
+from scipy.signal import remez
+from scipy.signal.windows import tukey
 
 
-RF_PULSE_TYPES = ("sinc", "slr", "block", "designer")
-SLR_SHARPNESS_VALUES = (1, 5)
+RF_PULSE_TYPES = ("sinc", "slr", "gaussian", "block", "designer")
 
 
 def normalize_rf_pulse_type(value: str) -> str:
@@ -17,6 +18,9 @@ def normalize_rf_pulse_type(value: str) -> str:
     aliases = {
         "sinc": "sinc",
         "slr": "slr",
+        "gauss": "gaussian",
+        "gaussian": "gaussian",
+        "gaussian pulse": "gaussian",
         "block": "block",
         "block pulse": "block",
         "hard": "block",
@@ -35,40 +39,61 @@ def normalize_rf_pulse_type(value: str) -> str:
         raise ValueError(f"rf_pulse_type must be one of: {choices}") from exc
 
 
-def _slr_waveform_path(sharpness: float) -> Path:
+def _validate_slr_sharpness(sharpness: float) -> float:
     if not np.isfinite(sharpness) or sharpness <= 0:
         raise ValueError("rf_slr_sharpness must be positive and finite")
-    rounded = int(round(float(sharpness)))
-    if not np.isclose(sharpness, rounded) or rounded not in SLR_SHARPNESS_VALUES:
-        choices = " or ".join(str(value) for value in SLR_SHARPNESS_VALUES)
-        raise ValueError(f"rf_slr_sharpness must be {choices}")
-
-    filename = f"SLR_sharpness_{rounded}.txt"
-    module_path = Path(__file__).resolve()
-    candidates = (
-        # PyInstaller places RF assets below the package directory.
-        module_path.parents[1] / "rfpulses" / filename,
-        # Editable/source checkout.
-        module_path.parents[3] / "rfpulses" / filename,
-    )
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    raise FileNotFoundError(
-        f"bundled SLR waveform {filename!r} was not found; checked: "
-        + ", ".join(str(path) for path in candidates)
-    )
+    return float(sharpness)
 
 
-def _load_slr_waveform(sharpness: float) -> np.ndarray:
-    data = np.loadtxt(_slr_waveform_path(sharpness), delimiter=",")
-    flat = np.asarray(data, dtype=float).reshape(-1)
-    if flat.size < 2 or flat.size % 2:
-        raise ValueError("SLR pulse file must contain amplitude/phase pairs")
-    signal = flat[0::2] * np.exp(1j * np.deg2rad(flat[1::2]))
-    if not np.any(np.abs(signal) > 0):
-        raise ValueError("SLR pulse waveform is empty")
-    return signal.astype(np.complex128)
+@lru_cache(maxsize=64)
+def _design_slr_waveform(
+    sample_count: int, time_bandwidth_product: float, sharpness: float
+) -> np.ndarray:
+    """Design a linear-phase, small-tip SLR beta polynomial.
+
+    ``sharpness`` continuously controls the relative transition width and the
+    stop-band weighting.  The result is cached because sequence previews often
+    request the same RF shape for several flip angles and slices.
+    """
+    sharpness = _validate_slr_sharpness(sharpness)
+    if sample_count < 8:
+        raise ValueError("an SLR pulse requires at least 8 RF samples")
+    tbw = float(time_bandwidth_product)
+    if tbw >= sample_count:
+        raise ValueError(
+            "rf_time_bandwidth_product must be smaller than the SLR sample count"
+        )
+
+    band_center = tbw / (2.0 * sample_count)
+    transition_fraction = 1.0 / (sharpness + 1.0)
+    passband_edge = band_center * (1.0 - transition_fraction)
+    stopband_edge = band_center * (1.0 + transition_fraction)
+    if passband_edge <= 0 or stopband_edge >= 0.5:
+        raise ValueError("SLR pulse parameters leave no valid transition band")
+
+    try:
+        beta = remez(
+            sample_count,
+            (0.0, passband_edge, stopband_edge, 0.5),
+            (1.0, 0.0),
+            weight=(1.0, sharpness),
+            fs=1.0,
+            maxiter=100,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "SLR filter design did not converge; use a longer duration, lower "
+            "time-bandwidth product, or lower sharpness"
+        ) from exc
+    # Very narrow equiripple designs can develop numerically amplified first
+    # and last coefficients when evaluated directly at a fine scanner raster.
+    # RF hardware also benefits from a waveform that starts and ends at zero,
+    # so apply a symmetric cosine edge taper before flip-angle normalization.
+    signal = np.asarray(beta * tukey(sample_count, alpha=0.2), dtype=np.complex128)
+    if not np.all(np.isfinite(signal)) or not np.any(np.abs(signal) > 0):
+        raise ValueError("SLR filter design produced an invalid waveform")
+    signal.setflags(write=False)
+    return signal
 
 
 def _resample_complex(signal: np.ndarray, sample_count: int) -> np.ndarray:
@@ -130,7 +155,14 @@ def design_rf_envelope(
         signal = window * np.sinc(effective_tbw * centered_s / actual_duration_s)
         signal = signal.astype(np.complex128)
     elif pulse_type == "slr":
-        signal = _resample_complex(_load_slr_waveform(slr_sharpness), sample_count)
+        signal = _design_slr_waveform(sample_count, effective_tbw, slr_sharpness).copy()
+    elif pulse_type == "gaussian":
+        time_s = (np.arange(sample_count, dtype=float) + 0.5) * float(raster_s)
+        centered_s = time_s - actual_duration_s / 2.0
+        # Choose sigma so effective_tbw / duration is the spectral FWHM.
+        spectral_fwhm_hz = effective_tbw / actual_duration_s
+        sigma_s = np.sqrt(2.0 * np.log(2.0)) / (np.pi * spectral_fwhm_hz)
+        signal = np.exp(-0.5 * (centered_s / sigma_s) ** 2).astype(np.complex128)
     else:
         if custom_waveform is None:
             raise ValueError(
