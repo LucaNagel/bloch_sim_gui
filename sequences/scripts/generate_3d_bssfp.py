@@ -14,6 +14,12 @@ from matplotlib import pyplot as plt
 
 import pypulseq as pp
 
+from blochsimulator.sequence.bssfp_phase import (
+    advance_bssfp_phase_deg,
+    pulseq_phase_offset_rad,
+    wrap_phase_deg,
+)
+
 
 def _as_3d_fov(fov: float | tuple[float, float, float]) -> tuple[float, float, float]:
     if isinstance(fov, (int, float)):
@@ -160,6 +166,11 @@ def main(
     # An alpha/2 pulse one half-TR before the first full pulse provides the
     # standard catalyzation used by the Pulseq TrueFISP reference sequence.
     if use_alpha_half:
+        rf_alpha_half.phase_offset = pulseq_phase_offset_rad(
+            rf_phase_start,
+            frequency_offset_hz=0.0,
+            event_center_s=pp.calc_rf_center(rf_alpha_half)[0],
+        )
         alpha_half_delay_value = tr / 2 - pp.calc_duration(rf_alpha_half)
         alpha_half_delay_value = np.round(alpha_half_delay_value / raster) * raster
         if alpha_half_delay_value < 0:
@@ -168,7 +179,7 @@ def main(
         if alpha_half_delay_value > 0:
             seq.add_block(pp.make_delay(alpha_half_delay_value))
 
-    rf_phase = float(rf_phase_start)
+    rf_phase = wrap_phase_deg(rf_phase_start)
 
     def add_repetition(
         ky: float,
@@ -178,9 +189,21 @@ def main(
     ) -> None:
         nonlocal rf_phase
 
-        rf.phase_offset = np.deg2rad(rf_phase)
-        adc.phase_offset = np.deg2rad(rf_phase)
-        rf_phase = np.mod(rf_phase + rf_phase_increment, 360.0)
+        rf.phase_offset = pulseq_phase_offset_rad(
+            rf_phase,
+            frequency_offset_hz=0.0,
+            event_center_s=rf_center,
+        )
+        adc.phase_offset = pulseq_phase_offset_rad(
+            rf_phase,
+            frequency_offset_hz=0.0,
+            event_center_s=adc_center_from_block_start,
+        )
+        rf_phase = advance_bssfp_phase_deg(
+            rf_phase,
+            elapsed_s=tr,
+            phase_increment_deg=rf_phase_increment,
+        )
 
         gy_pre = pp.make_trapezoid(
             channel="y", area=ky, duration=encoding_duration, system=system

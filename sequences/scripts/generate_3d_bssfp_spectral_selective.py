@@ -20,6 +20,19 @@ from matplotlib import pyplot as plt
 
 import pypulseq as pp
 
+from blochsimulator.sequence.encoding import (
+    EncodingFrame,
+    logical_gradient_area,
+    make_role_trapezoid,
+    resolve_encoding_frame,
+    set_pulseq_encoding_definitions,
+)
+from blochsimulator.sequence.bssfp_phase import (
+    advance_bssfp_phase_deg,
+    pulseq_phase_offset_rad,
+    wrap_phase_deg,
+)
+
 
 def _as_3d_fov(fov: float | tuple[float, float, float]) -> tuple[float, float, float]:
     if isinstance(fov, (int, float)):
@@ -291,6 +304,7 @@ def main(
     max_slew_tms: float = 1000.0,
     field_strength_t: float = 7.0,
     nucleus: str = "C13",
+    encoding_axes: tuple[str, str, str] | EncodingFrame = ("+x", "+y", "+z"),
 ):
     """Create a spectrally selective Cartesian 3D bSSFP sequence.
 
@@ -315,6 +329,7 @@ def main(
     each FOV dimension and is disabled by setting its cycles to zero.
     """
     fov_x, fov_y, fov_z = _as_3d_fov(fov)
+    encoding_frame = resolve_encoding_frame(encoding_axes)
     _encoding_areas(n_read, 1.0)  # Validate readout matrix size.
     ky_areas = _encoding_areas(n_phase, 1 / fov_y)
     kz_areas = _encoding_areas(n_partition, 1 / fov_z)
@@ -413,8 +428,10 @@ def main(
         np.ceil(abs(readout_amplitude) / system.max_slew / system.grad_raster_time)
         * system.grad_raster_time,
     )
-    gx = pp.make_trapezoid(
-        channel="x",
+    gx = make_role_trapezoid(
+        pp,
+        encoding_frame,
+        "read",
         flat_area=n_read / fov_x,
         flat_time=readout_duration,
         rise_time=readout_rise_time,
@@ -426,9 +443,12 @@ def main(
         delay=gx.rise_time,
         system=system,
     )
-    gx_pre = pp.make_trapezoid(
-        channel="x",
-        area=-gx.area / 2,
+    readout_area = logical_gradient_area(gx, encoding_frame, "read")
+    gx_pre = make_role_trapezoid(
+        pp,
+        encoding_frame,
+        "read",
+        area=-readout_area / 2,
         duration=encoding_duration,
         system=system,
     )
@@ -489,13 +509,17 @@ def main(
     end_image_spoilers = ()
     if end_image_spoiler_cycles_per_fov > 0:
         end_image_spoilers = tuple(
-            pp.make_trapezoid(
-                channel=axis,
+            make_role_trapezoid(
+                pp,
+                encoding_frame,
+                role,
                 area=end_image_spoiler_cycles_per_fov / axis_fov,
                 duration=end_image_spoiler_duration,
                 system=system,
             )
-            for axis, axis_fov in zip("xyz", (fov_x, fov_y, fov_z))
+            for role, axis_fov in zip(
+                ("read", "phase", "partition"), (fov_x, fov_y, fov_z)
+            )
         )
 
     spoiler_end_times = []
@@ -503,17 +527,27 @@ def main(
     def set_rf_and_adc_offsets(
         rf_event,
         rf_center_value: float,
-        base_phase_deg: float,
+        common_phase_deg: float,
         target_frequency_hz: float,
         receiver_frequency_hz: float,
     ):
-        base_phase_rad = np.deg2rad(base_phase_deg)
         rf_event.freq_offset = target_frequency_hz
-        rf_event.phase_offset = (
-            base_phase_rad - 2 * np.pi * target_frequency_hz * rf_center_value
+        rf_event.phase_offset = pulseq_phase_offset_rad(
+            common_phase_deg,
+            frequency_offset_hz=target_frequency_hz,
+            event_center_s=rf_center_value,
         )
         adc.freq_offset = receiver_frequency_hz
-        adc.phase_offset = base_phase_rad
+        adc_phase = advance_bssfp_phase_deg(
+            common_phase_deg,
+            elapsed_s=tr / 2,
+            frequency_offset_hz=receiver_frequency_hz,
+        )
+        adc.phase_offset = pulseq_phase_offset_rad(
+            adc_phase,
+            frequency_offset_hz=receiver_frequency_hz,
+            event_center_s=adc_center_from_block_start,
+        )
 
     for rep in range(n_repetition):
         target_index = rep % len(target_offsets)
@@ -546,10 +580,11 @@ def main(
                 rf_alpha_half.delay + rf_alpha_half_center
             )
             rf_frame_center_from_block_start = rf_frame.delay + rf_frame_center
-            alpha_phase_rad = np.deg2rad(rf_phase_start)
             rf_alpha_half.freq_offset = target_frequency_hz
-            rf_alpha_half.phase_offset = (
-                alpha_phase_rad - 2 * np.pi * target_frequency_hz * rf_alpha_half_center
+            rf_alpha_half.phase_offset = pulseq_phase_offset_rad(
+                wrap_phase_deg(rf_phase_start + rf_phase_increment),
+                frequency_offset_hz=target_frequency_hz,
+                event_center_s=rf_alpha_half_center,
             )
             alpha_half_delay_value = (
                 alpha_half_center_spacing
@@ -567,7 +602,17 @@ def main(
             if alpha_half_delay_value > 0:
                 seq.add_block(pp.make_delay(alpha_half_delay_value))
 
-        rf_phase = float(rf_phase_start)
+        # Pulseq frequency offsets are local to each event. Continue the target
+        # RF oscillator explicitly and use that phase to lock the receiver, so
+        # the off-resonant pulse train is physical without writing the RF/RX
+        # carrier difference into successive Cartesian lines.
+        common_phase = wrap_phase_deg(rf_phase_start)
+        if use_alpha_half:
+            common_phase = advance_bssfp_phase_deg(
+                common_phase,
+                elapsed_s=alpha_half_center_spacing,
+                frequency_offset_hz=target_frequency_hz,
+            )
 
         def add_repetition(
             ky: float,
@@ -575,28 +620,53 @@ def main(
             acquire: bool,
             partition_index: int | None = None,
         ) -> None:
-            nonlocal rf_phase
+            nonlocal common_phase
 
             set_rf_and_adc_offsets(
                 rf_frame,
                 rf_frame_center,
-                rf_phase,
+                common_phase,
                 target_frequency_hz,
                 receiver_frequency_hz,
             )
-            rf_phase = np.mod(rf_phase + rf_phase_increment, 360.0)
+            common_phase = advance_bssfp_phase_deg(
+                common_phase,
+                elapsed_s=tr,
+                frequency_offset_hz=target_frequency_hz,
+                phase_increment_deg=rf_phase_increment,
+            )
 
-            gy_pre = pp.make_trapezoid(
-                channel="y", area=ky, duration=encoding_duration, system=system
+            gy_pre = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "phase",
+                area=ky,
+                duration=encoding_duration,
+                system=system,
             )
-            gy_reph = pp.make_trapezoid(
-                channel="y", area=-ky, duration=encoding_duration, system=system
+            gy_reph = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "phase",
+                area=-ky,
+                duration=encoding_duration,
+                system=system,
             )
-            gz_pre = pp.make_trapezoid(
-                channel="z", area=kz, duration=encoding_duration, system=system
+            gz_pre = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "partition",
+                area=kz,
+                duration=encoding_duration,
+                system=system,
             )
-            gz_reph = pp.make_trapezoid(
-                channel="z", area=-kz, duration=encoding_duration, system=system
+            gz_reph = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "partition",
+                area=-kz,
+                duration=encoding_duration,
+                system=system,
             )
 
             seq.add_block(rf_frame)
@@ -676,6 +746,12 @@ def main(
 
     seq.set_definition(key="FOV", value=[fov_x, fov_y, fov_z])
     seq.set_definition(key="MatrixSize", value=[n_read, n_phase, n_partition])
+    set_pulseq_encoding_definitions(
+        seq,
+        encoding_frame,
+        fov_m=(fov_x, fov_y, fov_z),
+        matrix=(n_read, n_phase, n_partition),
+    )
     seq.set_definition(key="FieldStrengthT", value=field_strength_t)
     seq.set_definition(key="Nucleus", value=nucleus)
     seq.set_definition(key="DynamicFrames", value=int(n_repetition))
@@ -695,6 +771,14 @@ def main(
         value=alpha_half_center_spacing if use_alpha_half else 0.0,
     )
     seq.set_definition(
+        key="AlphaHalfPhaseDeg",
+        value=(
+            wrap_phase_deg(rf_phase_start + rf_phase_increment)
+            if use_alpha_half
+            else 0.0
+        ),
+    )
+    seq.set_definition(
         key="EndImageSpoilerCyclesPerFOV",
         value=end_image_spoiler_cycles_per_fov,
     )
@@ -702,8 +786,12 @@ def main(
         key="EndImageSpoilerDuration",
         value=end_image_spoiler_duration,
     )
-    seq.set_definition(key="EndImageSpoilerAxes", value="xyz")
+    seq.set_definition(
+        key="EndImageSpoilerAxes",
+        value="".join(event.channel for event in end_image_spoilers) or "none",
+    )
     seq.set_definition(key="EndImageSpoilerEndTimes", value=spoiler_end_times)
+    seq.set_definition(key="IdealSpoilerEndTimes", value=spoiler_end_times)
     seq.set_definition(
         key="SingleMetaboliteAcquisitionTime",
         value=n_phase * n_partition * tr,
@@ -728,6 +816,10 @@ def main(
         )
     seq.set_definition(key="TR", value=tr)
     seq.set_definition(key="TE", value=te)
+    seq.set_definition(key="RFPhaseStartDeg", value=rf_phase_start)
+    seq.set_definition(key="RFPhaseIncrementDeg", value=rf_phase_increment)
+    seq.set_definition(key="FrequencyOffsetPhaseCoherent", value=True)
+    seq.set_definition(key="PhaseReference", value="rf-target-locked")
 
     if write_seq:
         script_dir = Path(__file__).resolve().parent
@@ -746,7 +838,7 @@ if __name__ == "__main__":
         spectral_slr_sharpness=1.0,
         plot=False,
         write_seq=True,
-        n_repetition=50,
-        rf_phase_increment=0.0,  # phase increment in degrees for bSSFP phase cycling
+        n_repetition=20,
+        rf_phase_increment=0.0,  # same-phase RF train used by Skinner et al.
         seq_filename="bssfp_3d_spectral_selective_skinner.seq",
     )

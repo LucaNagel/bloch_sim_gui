@@ -53,13 +53,26 @@ class SliceSelectionExplorer(QWidget):
         self.run_simulation()
 
     def init_ui(self):
-        layout = QHBoxLayout()
+        layout = QVBoxLayout()
+        title = QLabel("Slice Explorer")
+        title_font = title.font()
+        title_font.setBold(True)
+        title_font.setPointSize(max(title_font.pointSize() + 2, 12))
+        title.setFont(title_font)
+        title.setVisible(False)
+        self.page_title = title
+        layout.addWidget(title)
+
+        content_layout = QHBoxLayout()
+        layout.addLayout(content_layout, 1)
 
         # Left Panel: Controls
         control_panel = QWidget()
         control_layout = QVBoxLayout()
         control_panel.setLayout(control_layout)
-        control_panel.setMaximumWidth(350)
+        control_panel.setMinimumWidth(400)
+        control_panel.setMaximumWidth(400)
+        self.control_panel = control_panel
 
         # Pulse Parameters Group
         pulse_group = QGroupBox("Pulse Parameters")
@@ -171,6 +184,19 @@ class SliceSelectionExplorer(QWidget):
         row_points.addWidget(self.num_points)
         sim_layout.addLayout(row_points)
 
+        for field in (
+            self.pulse_source,
+            self.flip_angle,
+            self.duration,
+            self.tbw,
+            self.apodization,
+            self.thickness,
+            self.use_rephase,
+            self.pos_range,
+            self.num_points,
+        ):
+            field.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
         sim_group.setLayout(sim_layout)
         control_layout.addWidget(sim_group)
 
@@ -199,8 +225,8 @@ class SliceSelectionExplorer(QWidget):
         self.plot_profile.addLegend()
         viz_panel.addWidget(self.plot_profile)
 
-        layout.addWidget(control_panel)
-        layout.addWidget(viz_panel)
+        content_layout.addWidget(control_panel)
+        content_layout.addWidget(viz_panel, 1)
         self.setLayout(layout)
 
         # Connect changes to auto-update (optional, maybe just button is safer for performance)

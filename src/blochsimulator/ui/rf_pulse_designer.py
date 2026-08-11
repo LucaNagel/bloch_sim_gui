@@ -42,16 +42,31 @@ class RFPulseDesigner(QGroupBox):
         if self.compact:
             # Vertical layout for side panel
             main_layout = QVBoxLayout()
+            content_layout = main_layout
             control_layout = main_layout
             control_panel = None  # No separate panel container
         else:
-            # Horizontal split for main tab
-            main_layout = QHBoxLayout()
+            # Full-page title followed by the same control/plot split used by
+            # the Slice Explorer. Avoid the small native group-box caption.
+            self.setTitle("")
+            main_layout = QVBoxLayout()
+            title = QLabel("RF Pulse Design")
+            title_font = title.font()
+            title_font.setBold(True)
+            title_font.setPointSize(max(title_font.pointSize() + 2, 12))
+            title.setFont(title_font)
+            title.setVisible(False)
+            self.page_title = title
+            main_layout.addWidget(title)
+            content_layout = QHBoxLayout()
+            main_layout.addLayout(content_layout, 1)
             control_panel = QWidget()
             control_layout = QVBoxLayout()
             control_panel.setLayout(control_layout)
+            control_panel.setMinimumWidth(400)
             control_panel.setMaximumWidth(400)
-            main_layout.addWidget(control_panel)
+            self.control_panel = control_panel
+            content_layout.addWidget(control_panel)
 
         # Pulse type selector
         type_layout = QHBoxLayout()
@@ -212,7 +227,7 @@ class RFPulseDesigner(QGroupBox):
             plot_layout = QVBoxLayout()
             self.plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             plot_layout.addWidget(self.plot_widget)
-            main_layout.addLayout(plot_layout, stretch=1)
+            content_layout.addLayout(plot_layout, stretch=1)
 
         self.setLayout(main_layout)
 

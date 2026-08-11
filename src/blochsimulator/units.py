@@ -50,6 +50,25 @@ def gradient_t_per_m_to_g_per_cm(values):
     return np.asarray(values) * (GAUSS_PER_TESLA / CM_PER_M)
 
 
+def _nucleus_gamma_hz_per_t(nucleus: str) -> float:
+    name = str(nucleus).strip()
+    try:
+        return float(NUCLEUS_GAMMA_HZ_PER_T[name])
+    except KeyError:
+        raise ValueError(f"unsupported nucleus {name!r}") from None
+
+
+def rf_hz_to_gauss_for_nucleus(values, nucleus: str = "H1"):
+    """Convert RF nutation frequency in Hz to physical B1 in gauss."""
+    gamma_hz_per_t = _nucleus_gamma_hz_per_t(nucleus)
+    return np.asarray(values) * GAUSS_PER_TESLA / gamma_hz_per_t
+
+
+def gradient_hz_per_m_to_t_per_m(values, nucleus: str = "H1"):
+    """Convert frequency-encoded gradient amplitude in Hz/m to T/m."""
+    return np.asarray(values) / _nucleus_gamma_hz_per_t(nucleus)
+
+
 def ppm_to_hz(values, field_strength_t: float, nucleus: str = "H1"):
     """Convert a relative frequency offset from ppm to Hz."""
     field = float(field_strength_t)

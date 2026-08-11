@@ -6,7 +6,13 @@ import pytest
 
 pypulseq = pytest.importorskip("pypulseq")
 
-from blochsimulator.sequence import AcquisitionDimensions, load_pulseq
+from blochsimulator.sequence import (
+    AcquisitionDimensions,
+    SequenceCompiler,
+    infer_cartesian_acquisition_frames,
+    infer_cartesian_acquisition_volumes,
+    load_pulseq,
+)
 
 
 DYNAMIC_BSSFP_MAIN = runpy.run_path(
@@ -84,7 +90,14 @@ def test_dynamic_3d_bssfp_adds_configurable_spoiler_after_each_volume(tmp_path):
     spoiler_end_times = np.asarray(
         definitions["EndImageSpoilerEndTimes"], dtype=float
     ).reshape(-1)
+    ideal_spoiler_end_times = np.asarray(
+        definitions["IdealSpoilerEndTimes"], dtype=float
+    ).reshape(-1)
     assert spoiler_end_times.size == 2
+    assert ideal_spoiler_end_times == pytest.approx(spoiler_end_times)
+    assert SequenceCompiler().compile(
+        program
+    ).transverse_crush_times_s == pytest.approx(spoiler_end_times)
     for spoiler_end in spoiler_end_times:
         events = [
             event
@@ -110,6 +123,30 @@ def test_dynamic_3d_bssfp_spoiler_can_be_disabled():
     )
 
     assert sequence.definitions["EndImageSpoilerEndTimes"] == []
+    assert sequence.definitions["IdealSpoilerEndTimes"] == []
+
+
+def test_dynamic_3d_bssfp_can_encode_readout_on_scanner_z(tmp_path):
+    sequence = DYNAMIC_BSSFP_MAIN(
+        n_read=4,
+        n_phase=2,
+        n_partition=2,
+        n_repetition=1,
+        dummy_repetitions=0,
+        use_alpha_half=False,
+        encoding_axes=("+z", "+y", "-x"),
+    )
+    path = tmp_path / "dynamic_3d_bssfp_read_z.seq"
+    sequence.write(str(path), v141_compat=True)
+    program = load_pulseq(path)
+    compiled = SequenceCompiler().compile_acquisition(program)
+    frames = infer_cartesian_acquisition_frames(program, compiled=compiled)
+    volumes = infer_cartesian_acquisition_volumes(
+        program, compiled=compiled, frames=frames
+    )
+
+    assert volumes.encoding_frame.axis_codes == ("+z", "+y", "-x")
+    assert program.metadata["definitions"]["ReadoutAxis"] == "+z"
 
 
 @pytest.mark.parametrize("value", [0, -1, 1.5])

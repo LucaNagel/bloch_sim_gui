@@ -359,6 +359,7 @@ def main(
         "".join(event.channel for event in spoiler_events) or "none",
     )
     seq.set_definition("SpoilerEndTimes", spoiler_end_times)
+    seq.set_definition("IdealSpoilerEndTimes", spoiler_end_times)
 
     if test_report:
         print(seq.test_report())

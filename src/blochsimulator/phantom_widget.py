@@ -59,6 +59,8 @@ from .ui.phantom_designer import (
     load_any_phantom,
 )
 from .ui.volume_viewer import PhantomInspectorWidget
+from .ui.widgets import compact_image_histogram
+from .ui.default_settings import WorkspaceDefaults
 
 # Import simulator
 from .simulator import BlochSimulator
@@ -111,11 +113,14 @@ class PhantomCreatorWidget(QGroupBox):
     """Widget for creating and configuring phantoms."""
 
     phantom_created = pyqtSignal(object)  # Emits Phantom object
+    field_strength_changed = pyqtSignal(float)
     PHANTOM_DESIGNER_TYPE = "Phantom Designer..."
     LOAD_FROM_FILE_TYPE = "Load from File..."
 
-    def __init__(self):
-        super().__init__("Phantom Configuration")
+    def __init__(self, parent=None, settings=None):
+        super().__init__("Phantom Configuration", parent)
+        self.settings = settings
+        self.workspace_defaults = WorkspaceDefaults.from_settings(settings)
         self.current_phantom = None
         # Spectral designer dialogs contain nested PyQtGraph scenes and signal
         # cycles. Letting the last Python reference disappear after exec_() can
@@ -167,7 +172,7 @@ class PhantomCreatorWidget(QGroupBox):
         fov_layout.addWidget(self.fov_label)
         self.fov_spin = QDoubleSpinBox()
         self.fov_spin.setRange(10, 1000)
-        self.fov_spin.setValue(240)
+        self.fov_spin.setValue(self.workspace_defaults.phantom_fov_mm[0])
         self.fov_spin.setSingleStep(10)
         self.fov_spin.setSuffix(" mm")
         self.fov_spin.setDecimals(1)
@@ -181,9 +186,12 @@ class PhantomCreatorWidget(QGroupBox):
         field_layout.addWidget(self.field_label)
         self.field_combo = QComboBox()
         self.field_combo.addItems(["1.5T", "3.0T", "7.0T"])
-        self.field_combo.setCurrentText("3.0T")
+        self._set_field_strength(self.workspace_defaults.field_strength_t)
         self.field_combo.setToolTip(
             "Main magnetic field strength (affects T1/T2 values)"
+        )
+        self.field_combo.currentTextChanged.connect(
+            lambda *_: self.field_strength_changed.emit(self.get_field_strength())
         )
         field_layout.addWidget(self.field_combo)
         layout.addLayout(field_layout)
@@ -271,7 +279,26 @@ class PhantomCreatorWidget(QGroupBox):
         self._update_edit_button()
 
     def get_field_strength(self) -> float:
-        return float(self.field_combo.currentText().replace("T", ""))
+        text = self.field_combo.currentText().replace("T", "").strip()
+        try:
+            value = float(text)
+        except ValueError:
+            # QComboBox can briefly have no current item while project state
+            # is being restored. Keep shared-workspace synchronization safe.
+            value = float(self.workspace_defaults.field_strength_t)
+        return value
+
+    def _set_field_strength(self, value_t: float) -> None:
+        text = f"{float(value_t):g}T"
+        index = self.field_combo.findText(text)
+        if index < 0:
+            self.field_combo.addItem(text)
+            index = self.field_combo.count() - 1
+        self.field_combo.setCurrentIndex(index)
+
+    def set_field_strength(self, value_t: float) -> None:
+        """Apply the shared B0 value used across the focused workspaces."""
+        self._set_field_strength(value_t)
 
     def create_phantom(self):
         """Create phantom based on current settings."""
@@ -327,7 +354,14 @@ class PhantomCreatorWidget(QGroupBox):
                 phantom = load_any_phantom(filename)
                 self.current_phantom = phantom
                 if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+                    self._set_field_strength(phantom.field_strength)
                     self.type_combo.setCurrentText(self.PHANTOM_DESIGNER_TYPE)
+                else:
+                    field_strength = phantom.metadata.get(
+                        "field_strength_t", phantom.metadata.get("field_strength")
+                    )
+                    if field_strength is not None:
+                        self._set_field_strength(field_strength)
                 self._update_info()
                 self.save_btn.setEnabled(True)
                 self.save_btn.setVisible(True)
@@ -355,17 +389,29 @@ class PhantomCreatorWidget(QGroupBox):
                 QMessageBox.critical(self, "Error", f"Failed to save phantom:\n{e}")
 
     def _open_spectral_designer(self, design=None):
-        dialog = SpectralPhantomDesignerDialog(self, design=design)
+        dialog = SpectralPhantomDesignerDialog(
+            self, design=design, settings=self.settings
+        )
+        if design is None:
+            dialog.design.field_strength_t = self.get_field_strength()
+            dialog.field_strength_t.setValue(self.get_field_strength())
         self._retained_spectral_designer_dialogs.append(dialog)
         if dialog.exec_() != QDialog.Accepted:
             return
         phantom = dialog.get_phantom()
         self.current_phantom = phantom
+        self._set_field_strength(phantom.field_strength)
         self._update_info()
         self.save_btn.setEnabled(True)
         self.save_btn.setVisible(True)
         self._update_edit_button()
         self.phantom_created.emit(phantom)
+
+    def set_workspace_defaults(self, defaults: WorkspaceDefaults) -> None:
+        """Use newly saved defaults for subsequent phantom creation."""
+        self.workspace_defaults = defaults
+        self.fov_spin.setValue(defaults.phantom_fov_mm[0])
+        self._set_field_strength(defaults.field_strength_t)
 
     def edit_current_phantom(self):
         """Reopen editable in-memory shape metadata without requiring a save."""
@@ -435,6 +481,9 @@ class PhantomViewerWidget(QWidget):
 
         # Tab widget for different views
         self.tabs = QTabWidget()
+        tabs_font = self.tabs.tabBar().font()
+        tabs_font.setBold(True)
+        self.tabs.tabBar().setFont(tabs_font)
 
         # === PHANTOM PROPERTIES TAB ===
         prop_widget = QWidget()
@@ -533,6 +582,7 @@ class PhantomViewerWidget(QWidget):
         self.result_image = pg.ImageView()
         self.result_image.ui.roiBtn.hide()
         self.result_image.ui.menuBtn.hide()
+        compact_image_histogram(self.result_image)
         result_layout.addWidget(self.result_image)
 
         self.result_info = QLabel("")
@@ -591,16 +641,7 @@ class PhantomViewerWidget(QWidget):
         view.ui.roiBtn.hide()
         view.ui.menuBtn.hide()
         view.getView().setAspectLocked(True)
-        histogram = view.ui.histogram
-        axis = histogram.axis
-        if compact:
-            histogram.setFixedWidth(34)
-            axis.setStyle(showValues=False, tickLength=3)
-            axis.setWidth(6)
-        else:
-            histogram.setMaximumWidth(88)
-            axis.setWidth(46)
-            axis.setStyle(tickLength=4)
+        compact_image_histogram(view)
 
     def set_phantom(self, phantom: Optional[Phantom]):
         """Set phantom to display."""
@@ -947,7 +988,8 @@ class PhantomWidget(QWidget):
         left_panel.setLayout(left_layout)
 
         # Phantom creator
-        self.phantom_creator = PhantomCreatorWidget()
+        settings = getattr(self.parent_gui, "app_settings", None)
+        self.phantom_creator = PhantomCreatorWidget(self, settings=settings)
         self.phantom_creator.phantom_created.connect(self._on_phantom_created)
         left_layout.addWidget(self.phantom_creator)
 

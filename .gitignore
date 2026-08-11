@@ -41,6 +41,7 @@ __pycache__/
 # Ignore all markdown files except README.md
 *.md
 !README.md
+!CHANGELOG.md
 !self_testing.md
 !USER_GUIDE.md
 !DEVELOPER_GUIDE.md
@@ -76,3 +77,4 @@ test_sweep_data.npz
 
 # Export files
 *.nc
+sequences/scripts/SS_bSSFP_sequence.py

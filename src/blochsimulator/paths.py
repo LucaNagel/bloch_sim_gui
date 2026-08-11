@@ -19,7 +19,7 @@ def workspace_root() -> Path:
 
 def workspace_directory(name: str) -> Path:
     """Return and create a named persistent workspace directory."""
-    if name not in {"sequences", "phantoms", "exports"}:
+    if name not in {"sequences", "phantoms", "b1_fields", "exports"}:
         raise ValueError(f"unsupported workspace directory {name!r}")
     path = workspace_root() / name
     path.mkdir(parents=True, exist_ok=True)

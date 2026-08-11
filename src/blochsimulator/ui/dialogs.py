@@ -20,6 +20,8 @@ from pathlib import Path
 
 from ..memory import MemoryPolicy, format_bytes, resolve_memory_budget
 from ..sequence.scanner import ScannerParameters
+from ..units import NUCLEUS_GAMMA_HZ_PER_T
+from .default_settings import WorkspaceDefaults
 
 
 class SettingsDialog(QDialog):
@@ -46,6 +48,10 @@ class SettingsDialog(QDialog):
         ("Fast — 10 µs", "fast", 10.0),
         ("Custom", "custom", None),
     )
+    SPOILER_MODES = (
+        ("Ideal crusher (fast, current behavior)", "ideal"),
+        ("Gradient waveform (subvoxel spins)", "gradient"),
+    )
 
     def __init__(
         self,
@@ -59,13 +65,17 @@ class SettingsDialog(QDialog):
         dynamic_sequence_kernel: str = "optimized",
         sequence_timestep_preset: str = "balanced",
         sequence_timestep_us: float = 5.0,
+        sequence_spoiler_mode: str = "ideal",
+        subvoxel_spin_counts=(1, 1, 9),
         thread_mode: str = "automatic",
         manual_thread_count: int = 4,
         detected_thread_count: Optional[int] = None,
         scanner_parameters: Optional[ScannerParameters] = None,
+        workspace_defaults: Optional[WorkspaceDefaults] = None,
     ):
         super().__init__(parent)
         scanner_parameters = ScannerParameters.from_mapping(scanner_parameters)
+        workspace_defaults = workspace_defaults or WorkspaceDefaults()
         self.setWindowTitle("Settings")
         self.setMinimumWidth(600)
 
@@ -91,6 +101,62 @@ class SettingsDialog(QDialog):
         export_layout.addWidget(self.export_browse_button)
         general_form.addRow("Default export directory:", export_layout)
         self.tabs.addTab(general_tab, "General")
+
+        defaults_tab = QWidget()
+        defaults_form = QFormLayout(defaults_tab)
+
+        self.sequence_fov_spins = []
+        for axis, value in zip("XYZ", workspace_defaults.sequence_fov_mm):
+            spin = QDoubleSpinBox()
+            spin.setObjectName(f"default_sequence_fov_{axis.lower()}_mm")
+            spin.setRange(0.1, 10000.0)
+            spin.setDecimals(3)
+            spin.setSuffix(" mm")
+            spin.setValue(float(value))
+            spin.setToolTip(
+                f"Default {axis}-axis FOV for generated sequences and the built-in quick object."
+            )
+            defaults_form.addRow(f"Sequence FOV {axis}:", spin)
+            self.sequence_fov_spins.append(spin)
+
+        self.phantom_fov_spins = []
+        for axis, value in zip("XYZ", workspace_defaults.phantom_fov_mm):
+            spin = QDoubleSpinBox()
+            spin.setObjectName(f"default_phantom_fov_{axis.lower()}_mm")
+            spin.setRange(0.01, 1000.0)
+            spin.setDecimals(3)
+            spin.setSuffix(" mm")
+            spin.setValue(float(value))
+            spin.setToolTip(f"Default {axis}-axis FOV for newly designed phantoms.")
+            defaults_form.addRow(f"Phantom FOV {axis}:", spin)
+            self.phantom_fov_spins.append(spin)
+
+        self.phantom_nucleus_combo = QComboBox()
+        self.phantom_nucleus_combo.setObjectName("default_phantom_nucleus")
+        self.phantom_nucleus_combo.addItem("Automatic (H1 static / C13 dynamic)", None)
+        for nucleus in sorted(NUCLEUS_GAMMA_HZ_PER_T):
+            self.phantom_nucleus_combo.addItem(nucleus, nucleus)
+        nucleus_index = self.phantom_nucleus_combo.findData(
+            workspace_defaults.phantom_nucleus
+        )
+        self.phantom_nucleus_combo.setCurrentIndex(max(0, nucleus_index))
+        self.phantom_nucleus_combo.setToolTip(
+            "Default nucleus for new Phantom Designer projects. Automatic keeps "
+            "the existing H1 static and C13 dynamic behavior."
+        )
+        defaults_form.addRow("Phantom nucleus:", self.phantom_nucleus_combo)
+
+        self.default_field_strength_spin = QDoubleSpinBox()
+        self.default_field_strength_spin.setObjectName("default_field_strength_t")
+        self.default_field_strength_spin.setRange(0.01, 30.0)
+        self.default_field_strength_spin.setDecimals(4)
+        self.default_field_strength_spin.setSuffix(" T")
+        self.default_field_strength_spin.setValue(workspace_defaults.field_strength_t)
+        self.default_field_strength_spin.setToolTip(
+            "Default B0 field strength for Sequence Simulation and newly created phantoms."
+        )
+        defaults_form.addRow("B0 field strength:", self.default_field_strength_spin)
+        self.tabs.addTab(defaults_tab, "Defaults")
 
         simulation_tab = QWidget()
         simulation_form = QFormLayout(simulation_tab)
@@ -173,13 +239,47 @@ class SettingsDialog(QDialog):
         self.dynamic_sequence_kernel_combo.setCurrentIndex(max(0, dynamic_kernel_index))
         self.dynamic_sequence_kernel_combo.setToolTip(
             "Kernel for dynamic two-pool pyruvate/lactate phantoms. Native "
-            "RF-block kernels remove temporary RF rotation arrays; the parallel "
-            "variant also uses multiple CPU cores for supported static-B0 cases. "
-            "Inflow and dynamic B0 currently fall back safely to optimized NumPy."
+            "RF-block kernels accelerate uniform-transmit RF intervals; the "
+            "parallel variant also groups complete RF waveforms across CPU "
+            "cores. Coupled inflow, polarization, and concentration tracking "
+            "use fused native kinetics; less common unsupported combinations "
+            "fall back explicitly. "
+            "Spatial transmit maps may require a complete optimized fallback; "
+            "dynamic B0 is supported."
         )
         simulation_form.addRow(
             "Dynamic two-pool kernel:", self.dynamic_sequence_kernel_combo
         )
+
+        self.sequence_spoiler_mode_combo = QComboBox()
+        self.sequence_spoiler_mode_combo.setObjectName("sequence_spoiler_mode")
+        for label, mode in self.SPOILER_MODES:
+            self.sequence_spoiler_mode_combo.addItem(label, mode)
+        spoiler_index = self.sequence_spoiler_mode_combo.findData(sequence_spoiler_mode)
+        self.sequence_spoiler_mode_combo.setCurrentIndex(max(0, spoiler_index))
+        self.sequence_spoiler_mode_combo.setToolTip(
+            "Ideal crusher applies explicit sequence spoiler markers by setting "
+            "transverse magnetization to zero. Gradient waveform keeps every "
+            "subvoxel spin coherent and derives spoiling from the actual gradients."
+        )
+        simulation_form.addRow("Spoiler simulation:", self.sequence_spoiler_mode_combo)
+
+        counts = tuple(subvoxel_spin_counts)
+        if len(counts) != 3:
+            counts = (1, 1, 9)
+        self.subvoxel_spin_count_spins = []
+        for axis, value in zip("XYZ", counts):
+            spin = QSpinBox()
+            spin.setObjectName(f"subvoxel_spin_count_{axis.lower()}")
+            spin.setRange(1, 128)
+            spin.setValue(max(1, int(value)))
+            spin.setSuffix(" spins/voxel")
+            spin.setToolTip(
+                f"Number of deterministic midpoint spins along voxel {axis}. "
+                "Runtime grows with the product of all three counts."
+            )
+            simulation_form.addRow(f"Subvoxel spins {axis}:", spin)
+            self.subvoxel_spin_count_spins.append(spin)
         self.tabs.addTab(simulation_tab, "Simulation")
 
         scanner_tab = QWidget()
@@ -396,15 +496,19 @@ class SettingsDialog(QDialog):
         self.thread_mode_combo.currentIndexChanged.connect(
             self._update_simulation_controls
         )
+        self.sequence_spoiler_mode_combo.currentIndexChanged.connect(
+            self._update_simulation_controls
+        )
         self._update_summary()
         self._update_simulation_controls()
 
         tab_names = {
             "general": 0,
-            "simulation": 1,
-            "scanner": 2,
-            "memory": 3,
-            "interface": 4,
+            "defaults": 1,
+            "simulation": 2,
+            "scanner": 3,
+            "memory": 4,
+            "interface": 5,
         }
         self.tabs.setCurrentIndex(tab_names.get(initial_tab, 0))
 
@@ -436,6 +540,12 @@ class SettingsDialog(QDialog):
     def sequence_timestep_us(self) -> float:
         return float(self.sequence_timestep_us_spin.value())
 
+    def sequence_spoiler_mode(self) -> str:
+        return str(self.sequence_spoiler_mode_combo.currentData())
+
+    def subvoxel_spin_counts(self) -> tuple[int, int, int]:
+        return tuple(int(spin.value()) for spin in self.subvoxel_spin_count_spins)
+
     def thread_mode(self) -> str:
         return str(self.thread_mode_combo.currentData())
 
@@ -458,6 +568,19 @@ class SettingsDialog(QDialog):
             adc_dead_time_s=float(self.scanner_adc_dead_time_spin.value()) * 1e-6,
         )
 
+    def workspace_defaults(self) -> WorkspaceDefaults:
+        """Return defaults used for newly created sequences and phantoms."""
+        return WorkspaceDefaults(
+            sequence_fov_mm=tuple(
+                float(spin.value()) for spin in self.sequence_fov_spins
+            ),
+            phantom_fov_mm=tuple(
+                float(spin.value()) for spin in self.phantom_fov_spins
+            ),
+            phantom_nucleus=self.phantom_nucleus_combo.currentData(),
+            field_strength_t=float(self.default_field_strength_spin.value()),
+        )
+
     def _update_simulation_controls(self):
         preset = self.sequence_timestep_preset()
         preset_values = {key: value for _, key, value in self.SEQUENCE_TIMESTEP_PRESETS}
@@ -465,6 +588,9 @@ class SettingsDialog(QDialog):
             self.sequence_timestep_us_spin.setValue(preset_values[preset])
         self.sequence_timestep_us_spin.setEnabled(preset == "custom")
         self.manual_thread_count_spin.setEnabled(self.thread_mode() == "manual")
+        enabled = self.sequence_spoiler_mode() == "gradient"
+        for spin in self.subvoxel_spin_count_spins:
+            spin.setEnabled(enabled)
 
     def _browse_export_directory(self):
         current = str(self.get_export_directory())

@@ -1,8 +1,10 @@
 from pathlib import Path
+import time
 from unittest.mock import patch
 
 import numpy as np
 import pytest
+from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
 from blochsimulator import BlochSimulator
@@ -11,6 +13,14 @@ from blochsimulator.phantom_design import PhantomDesign
 from blochsimulator.sequence import BrukerExportOptions
 from blochsimulator.ui.phantom_designer import SpectralPhantomDesignerDialog
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
+from blochsimulator.ui.widgets import IMAGE_CANVAS_BACKGROUND, IMAGE_FOV_BORDER
+
+
+def _wait_until(predicate, timeout_ms=10_000):
+    deadline = time.monotonic() + timeout_ms / 1_000
+    while not predicate() and time.monotonic() < deadline:
+        QTest.qWait(10)
+    return predicate()
 
 
 def test_workspace_directories_follow_configured_data_root(tmp_path, monkeypatch):
@@ -25,6 +35,28 @@ def test_phantom_designer_defaults_to_isotropic_128_cube():
     design = PhantomDesign()
     assert design.shape == (128, 128, 128)
     assert design.fov_m == (0.22, 0.22, 0.22)
+
+
+def test_sequence_2d_image_views_show_the_fov_against_a_dark_gray_canvas():
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+
+    for view in (
+        widget.kspace_view,
+        widget.reconstruction_view,
+        widget.state_view,
+    ):
+        canvas_rgb = view.ui.graphicsView.backgroundBrush().color().getRgb()[:3]
+        border_rgb = view.getImageItem().border.color().getRgb()[:3]
+        assert canvas_rgb == IMAGE_CANVAS_BACKGROUND
+        assert border_rgb == IMAGE_FOV_BORDER
+
+    split_canvas_rgb = widget.split_image_plot.backgroundBrush().color().getRgb()[:3]
+    split_border_rgb = widget.split_image_item.border.color().getRgb()[:3]
+    assert split_canvas_rgb == IMAGE_CANVAS_BACKGROUND
+    assert split_border_rgb == IMAGE_FOV_BORDER
+    widget.close()
+    app.processEvents()
 
 
 def test_file_dialogs_start_in_sequence_and_phantom_directories(tmp_path, monkeypatch):
@@ -83,6 +115,53 @@ def test_pulseq_file_dialog_loads_in_background(tmp_path):
     app.processEvents()
 
 
+def test_python_sequence_script_runs_in_gui_and_loads_generated_pulseq(
+    tmp_path, monkeypatch
+):
+    pytest.importorskip("pypulseq")
+    monkeypatch.setenv("BLOCHSIMULATOR_DATA_DIR", str(tmp_path))
+    scripts = workspace_directory("sequences") / "scripts"
+    scripts.mkdir(parents=True)
+    script = scripts / "generate_test_sequence.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        "import pypulseq as pp\n"
+        "sequence = pp.Sequence()\n"
+        "sequence.add_block(pp.make_adc(num_samples=4, dwell=10e-6))\n"
+        "output = Path(__file__).with_suffix('.seq')\n"
+        "sequence.write(str(output), v141_compat=True)\n"
+        "print(f'generated {output.name}')\n",
+        encoding="utf-8",
+    )
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+
+    with patch(
+        "blochsimulator.ui.sequence_simulation_widget.QFileDialog.getOpenFileName",
+        return_value=(str(script), "Python script (*.py)"),
+    ):
+        widget._run_python_script()
+
+    process = widget.script_process
+    assert process is not None
+    generated = script.with_suffix(".seq")
+    assert _wait_until(
+        lambda: widget.program is not None
+        and widget.program.source == str(generated)
+        and widget.script_process is None
+        and widget.pulseq_load_worker is None
+    )
+
+    assert generated.is_file()
+    assert widget.program.source == str(generated)
+    assert "generated generate_test_sequence.seq" in widget.script_output.toPlainText()
+    assert widget.sequence_source.currentIndex() == widget.PULSEQ_SOURCE
+    assert widget.run_script_button.isEnabled()
+
+    widget.close()
+    app.processEvents()
+
+
 def test_sequence_progress_is_determinate_from_simulation_start():
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()
@@ -94,27 +173,32 @@ def test_sequence_progress_is_determinate_from_simulation_start():
     work_units = widget._estimated_work_units()
     widget.progress.setRange(0, work_units)
     widget.progress.setValue(0)
-    assert work_units == 1
+    assert work_units == 32
     assert widget.progress.minimum() == 0
-    assert widget.progress.maximum() == 1
+    assert widget.progress.maximum() == work_units
     widget.close()
     app.processEvents()
 
 
-def test_sequence_progress_shows_percentage_and_estimated_time(monkeypatch):
+def test_sequence_progress_estimate_excludes_compile_time_and_uses_run_rate(
+    monkeypatch,
+):
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()
     widget._simulation_started_at = 100.0
+    timestamps = iter((110.0, 120.0))
     monkeypatch.setattr(
         "blochsimulator.ui.sequence_simulation_widget.time.monotonic",
-        lambda: 110.0,
+        lambda: next(timestamps),
     )
 
     widget._progress(25, 100)
+    assert widget.progress.format() == "25% · Estimating remaining time…"
+    widget._progress(50, 100)
 
-    assert widget.progress.value() == 25
-    assert widget.progress.format() == "25% · ETA 30s"
-    assert widget.status.text() == "Chunk 25/100 · 25% · approximately 30s remaining"
+    assert widget.progress.value() == 50
+    assert widget.progress.format() == "50% · ETA 20s"
+    assert widget.status.text() == "Chunk 50/100 · 50% · approximately 20s remaining"
     widget.close()
     app.processEvents()
 

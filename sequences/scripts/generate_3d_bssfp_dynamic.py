@@ -22,6 +22,19 @@ from matplotlib import pyplot as plt
 
 import pypulseq as pp
 
+from blochsimulator.sequence.encoding import (
+    EncodingFrame,
+    logical_gradient_area,
+    make_role_trapezoid,
+    resolve_encoding_frame,
+    set_pulseq_encoding_definitions,
+)
+from blochsimulator.sequence.bssfp_phase import (
+    advance_bssfp_phase_deg,
+    pulseq_phase_offset_rad,
+    wrap_phase_deg,
+)
+
 
 def _as_3d_fov(fov: float | tuple[float, float, float]) -> tuple[float, float, float]:
     if isinstance(fov, (int, float)):
@@ -143,12 +156,14 @@ def main(
     use_alpha_half: bool = True,
     end_image_spoiler_cycles_per_fov: float = 4.0,
     end_image_spoiler_duration: float = 1e-3,
+    encoding_axes: tuple[str, str, str] | EncodingFrame = ("+x", "+y", "+z"),
 ):
     """Create a Cartesian 3D bSSFP sequence.
 
     Parameters are expressed in SI units. ``fov`` is ordered as
-    ``(fov_x, fov_y, fov_z)`` and the acquired data are ordered as partition,
-    phase-encode, readout. RF phase cycling is continuous through dummy and
+    ``(read, phase, partition)`` and the acquired data are ordered as partition,
+    phase-encode, readout. ``encoding_axes`` maps those roles to physical scanner
+    axes. RF phase cycling is continuous through dummy and
     acquired repetitions. ``rf_frequency_offsets_hz`` contains absolute RF
     carrier offsets relative to the sequence centre frequency and is cycled
     over dynamic frames. ``rf_pulse_type`` defaults to ``"slr"``; ``"block"``
@@ -158,6 +173,7 @@ def main(
     FOV and it can be disabled by setting its cycles to zero.
     """
     fov_x, fov_y, fov_z = _as_3d_fov(fov)
+    encoding_frame = resolve_encoding_frame(encoding_axes)
     _encoding_areas(n_read, 1.0)  # Validate the readout matrix size as well.
     ky_areas = _encoding_areas(n_phase, 1 / fov_y)
     kz_areas = _encoding_areas(n_partition, 1 / fov_z)
@@ -215,8 +231,10 @@ def main(
         np.ceil(abs(readout_amplitude) / system.max_slew / system.grad_raster_time)
         * system.grad_raster_time,
     )
-    gx = pp.make_trapezoid(
-        channel="x",
+    gx = make_role_trapezoid(
+        pp,
+        encoding_frame,
+        "read",
         flat_area=n_read / fov_x,
         flat_time=readout_duration,
         rise_time=readout_rise_time,
@@ -228,9 +246,12 @@ def main(
         delay=gx.rise_time,
         system=system,
     )
-    gx_pre = pp.make_trapezoid(
-        channel="x",
-        area=-gx.area / 2,
+    readout_area = logical_gradient_area(gx, encoding_frame, "read")
+    gx_pre = make_role_trapezoid(
+        pp,
+        encoding_frame,
+        "read",
+        area=-readout_area / 2,
         duration=encoding_duration,
         system=system,
     )
@@ -270,22 +291,42 @@ def main(
     end_image_spoilers = ()
     if end_image_spoiler_cycles_per_fov > 0:
         end_image_spoilers = tuple(
-            pp.make_trapezoid(
-                channel=axis,
+            make_role_trapezoid(
+                pp,
+                encoding_frame,
+                role,
                 area=end_image_spoiler_cycles_per_fov / axis_fov,
                 duration=end_image_spoiler_duration,
                 system=system,
             )
-            for axis, axis_fov in zip("xyz", (fov_x, fov_y, fov_z))
+            for role, axis_fov in zip(
+                ("read", "phase", "partition"), (fov_x, fov_y, fov_z)
+            )
         )
     spoiler_end_times = []
 
-    def set_rf_and_adc_offsets(base_phase_deg: float, frame_frequency_hz: float):
-        base_phase_rad = np.deg2rad(base_phase_deg)
+    def set_rf_and_adc_offsets(
+        rf_phase_deg: float,
+        receiver_phase_deg: float,
+        frame_frequency_hz: float,
+    ):
         rf.freq_offset = frame_frequency_hz
-        rf.phase_offset = base_phase_rad - 2 * np.pi * frame_frequency_hz * rf_center
+        rf.phase_offset = pulseq_phase_offset_rad(
+            rf_phase_deg,
+            frequency_offset_hz=frame_frequency_hz,
+            event_center_s=rf_center,
+        )
         adc.freq_offset = frame_frequency_hz
-        adc.phase_offset = base_phase_rad
+        adc_phase = advance_bssfp_phase_deg(
+            receiver_phase_deg,
+            elapsed_s=tr / 2,
+            frequency_offset_hz=frame_frequency_hz,
+        )
+        adc.phase_offset = pulseq_phase_offset_rad(
+            adc_phase,
+            frequency_offset_hz=frame_frequency_hz,
+            event_center_s=adc_center_from_block_start,
+        )
 
     for rep in range(n_repetition):
         print(f"Repetition {rep + 1} of {n_repetition}")
@@ -295,8 +336,10 @@ def main(
         # standard catalyzation used by the Pulseq TrueFISP reference sequence.
         if use_alpha_half:
             rf_alpha_half.freq_offset = frame_frequency_hz
-            rf_alpha_half.phase_offset = (
-                -2 * np.pi * frame_frequency_hz * rf_alpha_half_center
+            rf_alpha_half.phase_offset = pulseq_phase_offset_rad(
+                rf_phase_start,
+                frequency_offset_hz=frame_frequency_hz,
+                event_center_s=rf_alpha_half_center,
             )
             alpha_half_delay_value = tr / 2 - pp.calc_duration(rf_alpha_half)
             alpha_half_delay_value = np.round(alpha_half_delay_value / raster) * raster
@@ -306,7 +349,19 @@ def main(
             if alpha_half_delay_value > 0:
                 seq.add_block(pp.make_delay(alpha_half_delay_value))
 
-        rf_phase = float(rf_phase_start)
+        rf_phase = wrap_phase_deg(rf_phase_start)
+        receiver_phase = wrap_phase_deg(rf_phase_start)
+        if use_alpha_half:
+            rf_phase = advance_bssfp_phase_deg(
+                rf_phase,
+                elapsed_s=tr / 2,
+                frequency_offset_hz=frame_frequency_hz,
+            )
+            receiver_phase = advance_bssfp_phase_deg(
+                receiver_phase,
+                elapsed_s=tr / 2,
+                frequency_offset_hz=frame_frequency_hz,
+            )
 
         def add_repetition(
             ky: float,
@@ -314,22 +369,53 @@ def main(
             acquire: bool,
             partition_index: int | None = None,
         ) -> None:
-            nonlocal rf_phase
+            nonlocal receiver_phase, rf_phase
 
-            set_rf_and_adc_offsets(rf_phase, frame_frequency_hz)
-            rf_phase = np.mod(rf_phase + rf_phase_increment, 360.0)
+            set_rf_and_adc_offsets(rf_phase, receiver_phase, frame_frequency_hz)
+            rf_phase = advance_bssfp_phase_deg(
+                rf_phase,
+                elapsed_s=tr,
+                frequency_offset_hz=frame_frequency_hz,
+                phase_increment_deg=rf_phase_increment,
+            )
+            receiver_phase = advance_bssfp_phase_deg(
+                receiver_phase,
+                elapsed_s=tr,
+                frequency_offset_hz=frame_frequency_hz,
+                phase_increment_deg=rf_phase_increment,
+            )
 
-            gy_pre = pp.make_trapezoid(
-                channel="y", area=ky, duration=encoding_duration, system=system
+            gy_pre = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "phase",
+                area=ky,
+                duration=encoding_duration,
+                system=system,
             )
-            gy_reph = pp.make_trapezoid(
-                channel="y", area=-ky, duration=encoding_duration, system=system
+            gy_reph = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "phase",
+                area=-ky,
+                duration=encoding_duration,
+                system=system,
             )
-            gz_pre = pp.make_trapezoid(
-                channel="z", area=kz, duration=encoding_duration, system=system
+            gz_pre = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "partition",
+                area=kz,
+                duration=encoding_duration,
+                system=system,
             )
-            gz_reph = pp.make_trapezoid(
-                channel="z", area=-kz, duration=encoding_duration, system=system
+            gz_reph = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "partition",
+                area=-kz,
+                duration=encoding_duration,
+                system=system,
             )
 
             seq.add_block(rf)
@@ -410,6 +496,12 @@ def main(
     seq.set_definition(key="FOV", value=[fov_x, fov_y, fov_z])
     seq.set_definition(key="Name", value="bssfp_3d_dynamic")
     seq.set_definition(key="MatrixSize", value=[n_read, n_phase, n_partition])
+    set_pulseq_encoding_definitions(
+        seq,
+        encoding_frame,
+        fov_m=(fov_x, fov_y, fov_z),
+        matrix=(n_read, n_phase, n_partition),
+    )
     seq.set_definition(key="DynamicFrames", value=int(n_repetition))
     seq.set_definition(key="RFFrequencyOffsetsHz", value=list(rf_frequency_offsets_hz))
     seq.set_definition(key="RFPulseType", value=str(rf_pulse_type).lower())
@@ -432,6 +524,7 @@ def main(
     )
     seq.set_definition(key="EndImageSpoilerAxes", value="xyz")
     seq.set_definition(key="EndImageSpoilerEndTimes", value=spoiler_end_times)
+    seq.set_definition(key="IdealSpoilerEndTimes", value=spoiler_end_times)
 
     if write_seq:
         script_dir = Path(__file__).resolve().parent

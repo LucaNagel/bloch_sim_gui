@@ -1930,6 +1930,8 @@ class BlochSimulator:
         status_callback=None,
         simulation_timestep_s=None,
         sequence_kernel=None,
+        spin_sampling=None,
+        spoiler_mode: str = "ideal",
     ):
         """Simulate independent Lorentzian spectral components and sum signals.
 
@@ -1992,6 +1994,8 @@ class BlochSimulator:
                 status_callback=component_status,
                 simulation_timestep_s=simulation_timestep_s,
                 sequence_kernel=sequence_kernel,
+                spin_sampling=spin_sampling,
+                spoiler_mode=spoiler_mode,
             )
             if first_result is None:
                 first_result = result
@@ -2048,6 +2052,8 @@ class BlochSimulator:
             checkpoint_times_s=first_result.checkpoint_times_s,
             metadata=metadata,
             adc_gradient_moment_cyc_per_m=(first_result.adc_gradient_moment_cyc_per_m),
+            sequence_waveforms=first_result.sequence_waveforms,
+            physical_field_maps=first_result.physical_field_maps,
         )
 
     def simulate_dynamic_sequence(self, program, phantom, **kwargs):
@@ -2219,6 +2225,8 @@ class BlochSimulator:
         status_callback=None,
         simulation_timestep_s=None,
         sequence_kernel=None,
+        spin_sampling=None,
+        spoiler_mode: str = "ideal",
     ):
         """Simulate an event-based sequence on a heterogeneous 1D/2D/3D object.
 
@@ -2232,7 +2240,10 @@ class BlochSimulator:
         the maximum compiler interval while RF is active; event boundaries and
         ADC observation times are always retained exactly. ``sequence_kernel``
         overrides the simulator's ``"optimized"`` or ``"reference"`` kernel
-        selection for this call.
+        selection for this call. ``spin_sampling`` controls deterministic
+        intravoxel position sampling. ``spoiler_mode='ideal'`` applies declared
+        transverse crushers while ``'gradient'`` derives spoiling only from the
+        simulated gradient waveform and spin positions.
         """
         from .phantom import Phantom
         from .sequence import (
@@ -2240,11 +2251,21 @@ class BlochSimulator:
             SequenceProgram,
             SequenceSimulationResult,
         )
+        from .sequence.spin_sampling import (
+            coerce_spin_sampling,
+            phantom_voxel_basis_m,
+        )
 
         if not isinstance(program, SequenceProgram):
             raise TypeError(f"program must be SequenceProgram, got {type(program)}")
         if not isinstance(phantom, Phantom):
             raise TypeError(f"phantom must be Phantom, got {type(phantom)}")
+
+        sampling = coerce_spin_sampling(spin_sampling)
+        sampling.validate_phantom_dimensions(phantom.ndim)
+        spoiler_mode = str(spoiler_mode).strip().lower()
+        if spoiler_mode not in {"ideal", "gradient"}:
+            raise ValueError("spoiler_mode must be 'ideal' or 'gradient'")
 
         compiled = SequenceCompiler().compile(
             program,
@@ -2262,6 +2283,8 @@ class BlochSimulator:
         n_checkpoints = int(compiled.checkpoint_times_s.size)
         n_adc = int(compiled.adc_times_s.size)
         n_rx_coils = int(props["rx_sensitivities"].shape[0])
+        spins_per_voxel = sampling.spins_per_voxel
+        n_simulated_spins = n_active * spins_per_voxel
         native_threads = self.num_threads if self.use_parallel else 1
         selected_kernel = (
             self.sequence_kernel if sequence_kernel is None else sequence_kernel
@@ -2294,10 +2317,15 @@ class BlochSimulator:
             raise ValueError("active phantom proton density must not be negative")
 
         if chunk_voxels is None:
-            chunk_voxels = min(n_active, 65536)
+            chunk_voxels = min(n_active, max(1, 65536 // spins_per_voxel))
         if int(chunk_voxels) != chunk_voxels or chunk_voxels <= 0:
             raise ValueError("chunk_voxels must be a positive integer")
         chunk_voxels = min(int(chunk_voxels), n_active)
+        chunk_spins = chunk_voxels * spins_per_voxel
+        if chunk_spins > np.iinfo(np.int32).max:
+            raise ValueError(
+                "one voxel chunk contains too many subvoxel spins for the native kernel"
+            )
 
         # Final/checkpoint reconstructions dominate persistent output. Thread-local
         # ADC accumulators and one native chunk are the main working allocations.
@@ -2308,19 +2336,33 @@ class BlochSimulator:
             + n_active * (3 * 8 + 7 * 8 + 16)
             + n_rx_coils * n_active * 16
         )
-        working_bytes = (
-            native_threads * n_rx_coils * max(1, n_adc) * 2 * 8
-            + chunk_voxels * (3 * 8 + n_checkpoints * 3 * 8)
-            + compiled.n_intervals * 6 * 8
-            + chunk_voxels * 4
-            + min(chunk_voxels, 64) * compiled.n_intervals * 2 * 8
-        )
+        if sampling.enabled:
+            # Expanded inputs, Cython contiguous component copies, native final
+            # states, and sparse checkpoint output exist only for one parent-
+            # voxel chunk. This intentionally overestimates small temporaries.
+            expanded_bytes_per_spin = 184 + 48 * n_rx_coils
+            working_bytes = (
+                native_threads * n_rx_coils * max(1, n_adc) * 2 * 8
+                + chunk_spins * (expanded_bytes_per_spin + n_checkpoints * 3 * 8)
+                + compiled.n_intervals * 6 * 8
+                + chunk_spins * 4
+                + min(chunk_spins, 64) * compiled.n_intervals * 2 * 8
+            )
+        else:
+            working_bytes = (
+                native_threads * n_rx_coils * max(1, n_adc) * 2 * 8
+                + chunk_voxels * (3 * 8 + n_checkpoints * 3 * 8)
+                + compiled.n_intervals * 6 * 8
+                + chunk_voxels * 4
+                + min(chunk_voxels, 64) * compiled.n_intervals * 2 * 8
+            )
         enforce_memory_budget(
             persistent_bytes + working_bytes,
             self._memory_budget(),
             description=(
                 f"Streaming sequence with {compiled.n_intervals:,} intervals, "
-                f"{n_active:,} active voxels, {n_adc:,} ADC samples, and "
+                f"{n_active:,} active voxels, {n_simulated_spins:,} spins, "
+                f"{n_adc:,} ADC samples, and "
                 f"{n_checkpoints:,} checkpoints"
             ),
             suggestions=(
@@ -2354,11 +2396,20 @@ class BlochSimulator:
             props["rx_sensitivities"], dtype=np.complex128
         )
         m0 = np.ascontiguousarray(props["m0"], dtype=np.float64)
+        subvoxel_offsets_m, subvoxel_weights = sampling.offsets_m(
+            phantom_voxel_basis_m(phantom)
+        )
+        crush_state_indices = (
+            compiled.transverse_crush_state_indices
+            if spoiler_mode == "ideal"
+            else np.zeros(0, dtype=np.int32)
+        )
 
         chunks = (n_active + chunk_voxels - 1) // chunk_voxels
         if status_callback is not None:
             status_callback(
-                f"Starting {compiled.n_intervals * n_active:,} spin-interval "
+                f"Starting {compiled.n_intervals * n_simulated_spins:,} "
+                f"spin-interval "
                 f"updates in {chunks:,} chunk(s) on {native_threads} thread(s)."
             )
         for chunk_index, start in enumerate(range(0, n_active, chunk_voxels)):
@@ -2370,28 +2421,72 @@ class BlochSimulator:
                     f"Simulating chunk {chunk_index + 1}/{chunks} "
                     f"({end - start:,} active voxels)…"
                 )
+            parent_count = end - start
+            if sampling.enabled:
+                chunk_positions = np.repeat(
+                    positions[start:end], spins_per_voxel, axis=0
+                ) + np.tile(subvoxel_offsets_m, (parent_count, 1))
+                chunk_t1 = np.repeat(t1[start:end], spins_per_voxel)
+                chunk_t2 = np.repeat(t2[start:end], spins_per_voxel)
+                chunk_df = np.repeat(df[start:end], spins_per_voxel)
+                chunk_pd = np.repeat(pd[start:end], spins_per_voxel) * np.tile(
+                    subvoxel_weights, parent_count
+                )
+                chunk_tx = np.repeat(tx_sensitivity[start:end], spins_per_voxel)
+                chunk_rx = np.repeat(
+                    rx_sensitivities[:, start:end], spins_per_voxel, axis=1
+                )
+                chunk_m0 = np.repeat(m0[start:end], spins_per_voxel, axis=0)
+            else:
+                chunk_positions = positions[start:end]
+                chunk_t1 = t1[start:end]
+                chunk_t2 = t2[start:end]
+                chunk_df = df[start:end]
+                chunk_pd = pd[start:end]
+                chunk_tx = tx_sensitivity[start:end]
+                chunk_rx = rx_sensitivities[:, start:end]
+                chunk_m0 = m0[start:end]
+
             chunk_signal, chunk_final, chunk_checkpoints = simulate_sequence_chunk(
                 compiled.rf_hz,
                 compiled.gradient_hz_per_m,
                 compiled.dt_s,
-                t1[start:end],
-                t2[start:end],
-                df[start:end],
-                positions[start:end],
-                pd[start:end],
-                tx_sensitivity[start:end],
-                rx_sensitivities[:, start:end],
-                m0[start:end],
+                chunk_t1,
+                chunk_t2,
+                chunk_df,
+                chunk_positions,
+                chunk_pd,
+                chunk_tx,
+                chunk_rx,
+                chunk_m0,
                 compiled.adc_state_indices,
                 compiled.adc_demodulation,
                 compiled.checkpoint_state_indices,
+                crush_state_indices,
                 native_threads,
                 selected_kernel,
             )
             coil_signal += chunk_signal
-            final_active[start:end] = chunk_final
-            if n_checkpoints:
-                checkpoints_active[:, start:end] = chunk_checkpoints
+            if sampling.enabled:
+                final_active[start:end] = np.einsum(
+                    "s,vsd->vd",
+                    subvoxel_weights,
+                    chunk_final.reshape(parent_count, spins_per_voxel, 3),
+                    optimize=True,
+                )
+                if n_checkpoints:
+                    checkpoints_active[:, start:end] = np.einsum(
+                        "s,cvsd->cvd",
+                        subvoxel_weights,
+                        chunk_checkpoints.reshape(
+                            n_checkpoints, parent_count, spins_per_voxel, 3
+                        ),
+                        optimize=True,
+                    )
+            else:
+                final_active[start:end] = chunk_final
+                if n_checkpoints:
+                    checkpoints_active[:, start:end] = chunk_checkpoints
             if progress_callback is not None:
                 progress_callback(chunk_index + 1, chunks)
             if preview_callback is not None:
@@ -2416,7 +2511,11 @@ class BlochSimulator:
             )
 
         signal = coil_signal[0] if n_rx_coils == 1 else coil_signal
-        from .sequence import AcquisitionDimensions
+        from .sequence import (
+            AcquisitionDimensions,
+            physical_b1_field_arrays,
+            physical_sequence_waveforms,
+        )
         from .sequence.acquisition import (
             CartesianAcquisitionFrames,
             infer_cartesian_acquisition,
@@ -2488,6 +2587,16 @@ class BlochSimulator:
                 ).to_metadata()
             except ValueError:
                 cartesian_volume_metadata = None
+        definitions = dict(program.metadata.get("definitions", {}))
+        physical_nucleus = str(
+            phantom.metadata.get("nucleus") or definitions.get("nucleus") or "H1"
+        )
+        from .units import NUCLEUS_GAMMA_HZ_PER_T
+
+        if physical_nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
+            physical_nucleus = "H1"
+        sequence_waveforms = physical_sequence_waveforms(program, physical_nucleus)
+        physical_field_maps = physical_b1_field_arrays(phantom, sequence_waveforms)
         result = SequenceSimulationResult(
             signal=signal,
             adc_times_s=compiled.adc_times_s,
@@ -2501,8 +2610,13 @@ class BlochSimulator:
                 "duration_s": program.duration_s,
                 "n_intervals": compiled.n_intervals,
                 "n_active_voxels": n_active,
+                "n_simulated_spins": n_simulated_spins,
+                "spin_sampling": sampling.to_metadata(),
+                "subvoxel_spin_counts_xyz": sampling.counts_xyz,
+                "subvoxel_spins_per_voxel": spins_per_voxel,
                 "n_rx_coils": n_rx_coils,
                 "chunk_voxels": chunk_voxels,
+                "chunk_spins": chunk_voxels * spins_per_voxel,
                 "simulation_timestep_s": simulation_timestep_s,
                 "signal_weighting": signal_weighting,
                 "sequence_kernel": selected_kernel,
@@ -2520,7 +2634,22 @@ class BlochSimulator:
                 "cartesian_acquisition_frames": cartesian_frame_metadata,
                 "cartesian_acquisition_volumes": cartesian_volume_metadata,
                 "spiral_acquisition": spiral_metadata,
-                "sequence_definitions": dict(program.metadata.get("definitions", {})),
+                "sequence_definitions": definitions,
+                "physical_waveform_nucleus": physical_nucleus,
+                "physical_rf_unit": "G",
+                "physical_gradient_unit": "T/m",
+                "spoiler_mode": spoiler_mode,
+                "ideal_spoiling_applied": bool(
+                    spoiler_mode == "ideal" and compiled.transverse_crush_times_s.size
+                ),
+                "ideal_spoiler_end_times_s": (
+                    compiled.transverse_crush_times_s.tolist()
+                    if spoiler_mode == "ideal"
+                    else []
+                ),
+                "declared_ideal_spoiler_end_times_s": (
+                    compiled.transverse_crush_times_s.tolist()
+                ),
                 "units": {
                     "time": "s",
                     "position": "m",
@@ -2531,6 +2660,8 @@ class BlochSimulator:
                     "rx_sensitivity": "dimensionless complex receive scale",
                 },
             },
+            sequence_waveforms=sequence_waveforms,
+            physical_field_maps=physical_field_maps,
         )
         self.last_result = result.to_dict()
         self.last_result["phantom"] = phantom

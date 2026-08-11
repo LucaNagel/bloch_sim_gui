@@ -29,6 +29,7 @@ class SpectralPeakDefinition:
     t2_star_s: float = 0.050
     frequency_hz: float = None
     t1_s: Optional[float] = None
+    initial_polarization: Optional[float] = None
 
     def validate(self) -> None:
         if not self.name.strip():
@@ -43,18 +44,35 @@ class SpectralPeakDefinition:
             raise ValueError("peak T2* must be positive and finite")
         if self.t1_s is not None and (not np.isfinite(self.t1_s) or self.t1_s <= 0):
             raise ValueError("peak T1 must be positive and finite")
+        if self.initial_polarization is not None and (
+            not np.isfinite(self.initial_polarization) or self.initial_polarization < 0
+        ):
+            raise ValueError(
+                "peak initial polarization must be finite and non-negative"
+            )
 
     def effective_t1_s(self, fallback_t1_s: float) -> float:
         """Return this metabolite's T1 or the enclosing shape default."""
         return float(fallback_t1_s if self.t1_s is None else self.t1_s)
 
+    def effective_initial_polarization(self, fallback: float) -> float:
+        """Return this metabolite's polarization or the enclosing shape default."""
+        return float(
+            fallback if self.initial_polarization is None else self.initial_polarization
+        )
+
 
 @dataclass
 class ShapeDefinition:
-    """Ellipsoid or box in normalized phantom coordinates ``[0, 1]``."""
+    """Rotatable primitive in normalized phantom coordinates ``[0, 1]``.
+
+    ``rotation_deg`` contains Euler rotations about X, Y, and Z.  The rotations
+    are applied in that order in physical space.  A cylinder's unrotated local
+    axis is Z; ``size`` specifies its X/Y diameters and Z length.
+    """
 
     name: str
-    kind: str = "ellipsoid"
+    kind: str = "cylinder"
     center: Tuple[float, float, float] = (0.5, 0.5, 0.5)
     size: Tuple[float, float, float] = (0.5, 0.5, 0.5)
     t1_s: float = 1.0
@@ -64,10 +82,11 @@ class ShapeDefinition:
         default_factory=lambda: [SpectralPeakDefinition()]
     )
     b0_hz: float = None
+    rotation_deg: Tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def validate(self) -> None:
-        if self.kind not in {"ellipsoid", "box"}:
-            raise ValueError("shape kind must be 'ellipsoid' or 'box'")
+        if self.kind not in {"ellipsoid", "box", "cylinder"}:
+            raise ValueError("shape kind must be 'ellipsoid', 'box', or 'cylinder'")
         if not self.name.strip():
             raise ValueError("shape name must not be empty")
         if len(self.center) != 3 or not np.all(np.isfinite(self.center)):
@@ -76,6 +95,8 @@ class ShapeDefinition:
             raise ValueError("shape size must contain three finite values")
         if np.any(np.asarray(self.size) <= 0):
             raise ValueError("shape size must be positive")
+        if len(self.rotation_deg) != 3 or not np.all(np.isfinite(self.rotation_deg)):
+            raise ValueError("shape rotation must contain three finite angles")
         if not np.isfinite(self.t1_s) or self.t1_s <= 0:
             raise ValueError("shape T1 must be positive and finite")
         if not np.isfinite(self.initial_mz) or self.initial_mz < 0:
@@ -102,6 +123,8 @@ class PhantomDesign:
     spectral_reference_ppm: float = 0.0
     spectral_bandwidth_ppm: float = 20.0
     spectral_points: int = 1024
+    supersampling_enabled: bool = True
+    supersampling_factor: int = 4
     shapes: List[ShapeDefinition] = field(default_factory=list)
     b0_inhomogeneity_mode: str = "none"
     b0_inhomogeneity_ppm: float = 0.0
@@ -111,6 +134,7 @@ class PhantomDesign:
     default_kpl_s_inv: float = 0.0
     kinetic_regions: List[KineticRegionDefinition] = field(default_factory=list)
     pyruvate_inflow_curve: Optional[TimeCurve] = None
+    pyruvate_inflow_polarization_curve: Optional[TimeCurve] = None
     conversion_start_s: float = 0.0
     kinetics_time_offset_s: float = 0.0
     dynamic_b0_curve: Optional[TimeCurve] = None
@@ -140,6 +164,11 @@ class PhantomDesign:
             or self.spectral_points < 2
         ):
             raise ValueError("spectral points must be an integer >= 2")
+        if (
+            int(self.supersampling_factor) != self.supersampling_factor
+            or self.supersampling_factor < 2
+        ):
+            raise ValueError("supersampling factor must be an integer >= 2")
         if self.b0_inhomogeneity_mode not in {
             "none",
             "linear_x",
@@ -161,6 +190,15 @@ class PhantomDesign:
             np.asarray(self.pyruvate_inflow_curve.values) < 0
         ):
             raise ValueError("pyruvate inflow rates must be non-negative")
+        if self.pyruvate_inflow_polarization_curve is not None and np.any(
+            np.asarray(self.pyruvate_inflow_polarization_curve.values) < 0
+        ):
+            raise ValueError("pyruvate inflow polarization must be non-negative")
+        if (
+            self.pyruvate_inflow_polarization_curve is not None
+            and self.pyruvate_inflow_curve is None
+        ):
+            raise ValueError("pyruvate inflow polarization requires an inflow rate")
         if not self.pyruvate_peak_name.strip() or not self.lactate_peak_name.strip():
             raise ValueError("dynamic pool peak names must not be empty")
         if self.pyruvate_peak_name == self.lactate_peak_name:
@@ -179,20 +217,72 @@ class PhantomDesign:
             item.validate()
 
     def rasterize_mask(self, item: ShapeDefinition) -> np.ndarray:
-        """Rasterize one normalized shape using voxel-centre coordinates."""
-        coords = [(np.arange(count, dtype=float) + 0.5) / count for count in self.shape]
-        x, y, z = np.meshgrid(*coords, indexing="ij")
-        centre = np.asarray(item.center, dtype=float)
-        half_size = np.asarray(item.size, dtype=float) / 2.0
-        if item.kind == "box":
-            return (
-                (np.abs(x - centre[0]) <= half_size[0])
-                & (np.abs(y - centre[1]) <= half_size[1])
-                & (np.abs(z - centre[2]) <= half_size[2])
+        """Rasterize a shape, optionally returning subvoxel volume fractions.
+
+        With supersampling disabled this preserves the original boolean
+        voxel-centre rasterization.  When enabled, every output voxel is sampled
+        on a regular ``factor ** 3`` subvoxel grid and the samples are averaged.
+        The high-resolution grid is evaluated one offset at a time so a large
+        temporary volume is never allocated.
+        """
+        item.validate()
+        if not self.supersampling_enabled:
+            offsets = ((0.5, 0.5, 0.5),)
+        else:
+            factor = int(self.supersampling_factor)
+            subvoxel_centres = (np.arange(factor, dtype=float) + 0.5) / factor
+            offsets = (
+                (offset_x, offset_y, offset_z)
+                for offset_x in subvoxel_centres
+                for offset_y in subvoxel_centres
+                for offset_z in subvoxel_centres
             )
-        return ((x - centre[0]) / half_size[0]) ** 2 + (
-            (y - centre[1]) / half_size[1]
-        ) ** 2 + ((z - centre[2]) / half_size[2]) ** 2 <= 1.0
+
+        centre = np.asarray(item.center, dtype=float)
+        fov = np.asarray(self.fov_m, dtype=float)
+        angles = np.deg2rad(np.asarray(item.rotation_deg, dtype=float))
+        cx, cy, cz = np.cos(angles)
+        sx, sy, sz = np.sin(angles)
+        rotation_x = np.asarray(((1, 0, 0), (0, cx, -sx), (0, sx, cx)))
+        rotation_y = np.asarray(((cy, 0, sy), (0, 1, 0), (-sy, 0, cy)))
+        rotation_z = np.asarray(((cz, -sz, 0), (sz, cz, 0), (0, 0, 1)))
+        # R maps local coordinates to world coordinates.  Multiplication by R
+        # on row-vector world coordinates therefore applies the inverse R.T.
+        rotation = rotation_z @ rotation_y @ rotation_x
+        half_size = np.asarray(item.size, dtype=float) * fov / 2.0
+        coverage = np.zeros(self.shape, dtype=float)
+        for offset in offsets:
+            axes = [
+                ((np.arange(count, dtype=float) + offset[axis]) / count - centre[axis])
+                * fov[axis]
+                for axis, count in enumerate(self.shape)
+            ]
+            world_x = axes[0][:, None, None]
+            world_y = axes[1][None, :, None]
+            world_z = axes[2][None, None, :]
+            local = [
+                world_x * rotation[0, axis]
+                + world_y * rotation[1, axis]
+                + world_z * rotation[2, axis]
+                for axis in range(3)
+            ]
+            if item.kind == "box":
+                inside = (
+                    (np.abs(local[0]) <= half_size[0])
+                    & (np.abs(local[1]) <= half_size[1])
+                    & (np.abs(local[2]) <= half_size[2])
+                )
+            else:
+                radial = (local[0] / half_size[0]) ** 2 + (local[1] / half_size[1]) ** 2
+                if item.kind == "cylinder":
+                    inside = (radial <= 1.0) & (np.abs(local[2]) <= half_size[2])
+                else:
+                    inside = radial + (local[2] / half_size[2]) ** 2 <= 1.0
+            coverage += inside
+
+        if not self.supersampling_enabled:
+            return coverage.astype(bool)
+        return coverage / float(int(self.supersampling_factor) ** 3)
 
     def rasterize_b0_inhomogeneity(self) -> np.ndarray:
         """Return an analytic 2D/3D B0 map with edge amplitude in ppm."""
@@ -232,7 +322,13 @@ class PhantomDesign:
         b0_map = np.zeros(self.shape, dtype=float)
         for item in self.shapes:
             region = self.rasterize_mask(item)
-            b0_map[region] = item.b0_hz if uses_legacy_b0 else item.b0_ppm
+            b0_value = item.b0_hz if uses_legacy_b0 else item.b0_ppm
+            if region.dtype == np.bool_:
+                b0_map[region] = b0_value
+            else:
+                # Preserve the documented later-shape overwrite order while
+                # blending partially occupied boundary voxels by volume.
+                b0_map = b0_map * (1.0 - region) + float(b0_value) * region
             for peak in item.peaks:
                 component_name = f"{item.name}: {peak.name}"
                 species.append(
@@ -248,9 +344,13 @@ class PhantomDesign:
                 concentration_maps[component_name] = (
                     region.astype(float) * peak.amplitude
                 )
-                initial_mz_maps[component_name] = region.astype(
-                    float
-                ) * item.initial_mz + (~region).astype(float)
+                region_float = region.astype(float)
+                initial_polarization = peak.effective_initial_polarization(
+                    item.initial_mz
+                )
+                initial_mz_maps[component_name] = 1.0 + region_float * (
+                    initial_polarization - 1.0
+                )
         if not uses_legacy_b0:
             b0_map += self.rasterize_b0_inhomogeneity()
         if self.dynamic_enabled:
@@ -258,13 +358,21 @@ class PhantomDesign:
                 raise ValueError("dynamic designs require ppm-based B0 maps")
             target_names = (self.pyruvate_peak_name, self.lactate_peak_name)
             maps = {name: np.zeros(self.shape, dtype=float) for name in target_names}
+            spin_density_maps = {
+                name: np.zeros(self.shape, dtype=float) for name in target_names
+            }
             definitions = {name: [] for name in target_names}
             for item in self.shapes:
                 region = self.rasterize_mask(item)
                 for peak in item.peaks:
                     if peak.name in maps:
+                        spin_density_maps[peak.name] += (
+                            region.astype(float) * peak.amplitude
+                        )
                         maps[peak.name] += (
-                            region.astype(float) * peak.amplitude * item.initial_mz
+                            region.astype(float)
+                            * peak.amplitude
+                            * peak.effective_initial_polarization(item.initial_mz)
                         )
                         definitions[peak.name].append((item, peak))
             missing = [name for name in target_names if not definitions[name]]
@@ -304,6 +412,8 @@ class PhantomDesign:
                 fov=tuple(float(value) for value in self.fov_m),
                 pools=tuple(pools),
                 initial_concentration_maps=maps,
+                initial_spin_density_maps=spin_density_maps,
+                equilibrium_polarization=1.0,
                 kpl_map_s_inv=rasterize_kpl_regions(
                     self.shape,
                     tuple(self.kinetic_regions),
@@ -323,6 +433,7 @@ class PhantomDesign:
                     else PyruvateInflow(
                         rate_curve_s_inv=self.pyruvate_inflow_curve,
                         delivery_map=delivery_map,
+                        polarization_curve=self.pyruvate_inflow_polarization_curve,
                     )
                 ),
                 conversion_start_s=float(self.conversion_start_s),
@@ -369,6 +480,19 @@ class PhantomDesign:
         for item in data.get("shapes", []):
             peaks = []
             for peak in item.get("peaks", []):
+                amplitude = float(peak.get("amplitude", 1.0))
+                initial_polarization = peak.get("initial_polarization")
+                if (
+                    bool(data.get("dynamic_enabled", False))
+                    and "initial_polarization" not in peak
+                ):
+                    # Older dynamic designs called amplitude an initial pool
+                    # weight and multiplied it by the shape-wide HP Mz scale.
+                    # Re-express the same product using the now-separate terms.
+                    initial_polarization = (
+                        float(item.get("initial_mz", 1.0)) * amplitude
+                    )
+                    amplitude = 1.0
                 frequency_ppm = peak.get("frequency_ppm")
                 legacy_frequency_hz = peak.get("frequency_hz")
                 if legacy_frequency_hz is not None:
@@ -388,11 +512,16 @@ class PhantomDesign:
                 peaks.append(
                     SpectralPeakDefinition(
                         name=str(peak.get("name", "Water")),
-                        amplitude=float(peak.get("amplitude", 1.0)),
+                        amplitude=amplitude,
                         frequency_ppm=float(frequency_ppm),
                         t2_star_s=float(peak.get("t2_star_s", 0.050)),
                         t1_s=(
                             None if peak.get("t1_s") is None else float(peak["t1_s"])
+                        ),
+                        initial_polarization=(
+                            None
+                            if initial_polarization is None
+                            else float(initial_polarization)
                         ),
                     )
                 )
@@ -422,6 +551,7 @@ class PhantomDesign:
                     initial_mz=float(item.get("initial_mz", 1.0)),
                     b0_ppm=float(b0_ppm),
                     peaks=peaks or [SpectralPeakDefinition()],
+                    rotation_deg=tuple(item.get("rotation_deg", (0.0, 0.0, 0.0))),
                 )
             )
         return cls(
@@ -441,6 +571,11 @@ class PhantomDesign:
             spectral_reference_ppm=float(data.get("spectral_reference_ppm", 0.0)),
             spectral_bandwidth_ppm=float(data.get("spectral_bandwidth_ppm", 20.0)),
             spectral_points=int(data.get("spectral_points", 1024)),
+            # Preserve the voxel-centre rasterization used by designs saved
+            # before supersampling metadata existed. New designs use the
+            # dataclass default above and therefore start with it enabled.
+            supersampling_enabled=bool(data.get("supersampling_enabled", False)),
+            supersampling_factor=int(data.get("supersampling_factor", 4)),
             shapes=shapes,
             b0_inhomogeneity_mode=str(data.get("b0_inhomogeneity_mode", "none")),
             b0_inhomogeneity_ppm=float(data.get("b0_inhomogeneity_ppm", 0.0)),
@@ -462,6 +597,11 @@ class PhantomDesign:
                 None
                 if data.get("pyruvate_inflow_curve") is None
                 else TimeCurve.from_dict(data["pyruvate_inflow_curve"])
+            ),
+            pyruvate_inflow_polarization_curve=(
+                None
+                if data.get("pyruvate_inflow_polarization_curve") is None
+                else TimeCurve.from_dict(data["pyruvate_inflow_polarization_curve"])
             ),
             conversion_start_s=float(data.get("conversion_start_s", 0.0)),
             kinetics_time_offset_s=float(data.get("kinetics_time_offset_s", 0.0)),

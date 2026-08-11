@@ -150,6 +150,7 @@ def main(
     rf_phase = 0
     rf_inc = 0
 
+    spoiler_end_times = []
     for i_spoke in range(n_spokes):
         for _c in range(2):
             rf.phase_offset = rf_phase / 180 * np.pi
@@ -184,6 +185,7 @@ def main(
             seq.add_block(gpc, gps, gz_reph)
             seq.add_block(grc, grs, adc)
             seq.add_block(gsc, gss, pp.make_delay(tr_delay))
+            spoiler_end_times.append(float(seq.duration()[0]))
 
     ok, error_report = seq.check_timing()
     if ok:
@@ -206,6 +208,8 @@ def main(
 
     seq.set_definition(key="FOV", value=[fov_x, fov_y, slice_thickness])
     seq.set_definition(key="Name", value="ute")
+    seq.set_definition(key="SpoilerEndTimes", value=spoiler_end_times)
+    seq.set_definition(key="IdealSpoilerEndTimes", value=spoiler_end_times)
 
     if write_seq:
         seq.write(seq_filename)

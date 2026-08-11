@@ -47,6 +47,8 @@ class ParameterSweepWidget(QWidget):
         # Title
         title_label = QLabel("Parameter Sweep")
         title_label.setFont(QFont("Arial", 14, QFont.Bold))
+        title_label.setVisible(False)
+        self.page_title = title_label
         layout.addWidget(title_label)
 
         # Info label

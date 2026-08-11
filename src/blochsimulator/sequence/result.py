@@ -29,6 +29,8 @@ class SequenceSimulationResult:
     species_signal: Optional[np.ndarray] = None
     final_pool_magnetization: Optional[np.ndarray] = None
     checkpoint_pool_magnetization: Optional[np.ndarray] = None
+    sequence_waveforms: Dict[str, np.ndarray] = field(default_factory=dict)
+    physical_field_maps: Dict[str, np.ndarray] = field(default_factory=dict)
 
     @property
     def mx(self) -> np.ndarray:
@@ -142,6 +144,8 @@ class SequenceSimulationResult:
             "species_signal": self.species_signal,
             "final_pool_magnetization": self.final_pool_magnetization,
             "checkpoint_pool_magnetization": self.checkpoint_pool_magnetization,
+            "sequence_waveforms": self.sequence_waveforms,
+            "physical_field_maps": self.physical_field_maps,
             "metadata": self.metadata,
         }
 
@@ -170,6 +174,54 @@ class SequenceSimulationResult:
         }
         if self.signal.ndim == 2:
             coords["coil"] = np.arange(self.signal.shape[0])
+        waveform_dimensions = {
+            "rf_sample_time_s": "rf_sample",
+            "rf_sample_duration_s": "rf_sample",
+            "rf_event_index": "rf_sample",
+            "rf_nutation_hz": "rf_sample",
+            "rf_b1_gauss": "rf_sample",
+            "rf_b1_magnitude_gauss": "rf_sample",
+            "gradient_sample_time_s": "gradient_sample",
+            "gradient_sample_duration_s": "gradient_sample",
+            "gradient_event_index": "gradient_sample",
+            "gradient_axis_index": "gradient_sample",
+            "gradient_hz_per_m": "gradient_sample",
+            "gradient_t_per_m": "gradient_sample",
+        }
+        for name, dimension in waveform_dimensions.items():
+            if name not in self.sequence_waveforms:
+                continue
+            values = np.asarray(self.sequence_waveforms[name])
+            if values.ndim != 1:
+                raise ValueError(f"{name} must be one-dimensional")
+            data_vars[name] = (dimension, values)
+        tx_map = self.physical_field_maps.get("tx_sensitivity_map")
+        if tx_map is not None:
+            tx_map = np.asarray(tx_map)
+            if tx_map.shape != self.final_magnetization.shape[:-1]:
+                raise ValueError(
+                    "tx_sensitivity_map must match the result spatial shape"
+                )
+            data_vars["tx_sensitivity_map"] = (spatial_dims, tx_map)
+        rx_maps = self.physical_field_maps.get("rx_sensitivity_maps")
+        if rx_maps is not None:
+            rx_maps = np.asarray(rx_maps)
+            if rx_maps.shape[1:] != self.final_magnetization.shape[:-1]:
+                raise ValueError(
+                    "rx_sensitivity_maps must match the result spatial shape"
+                )
+            if "coil" in coords and len(coords["coil"]) != rx_maps.shape[0]:
+                raise ValueError("receive maps and result signal coil counts differ")
+            coords.setdefault("coil", np.arange(rx_maps.shape[0]))
+            data_vars["rx_sensitivity_maps"] = (("coil", *spatial_dims), rx_maps)
+        effective_b1 = self.physical_field_maps.get("effective_peak_b1_gauss")
+        if effective_b1 is not None:
+            effective_b1 = np.asarray(effective_b1, dtype=float)
+            if effective_b1.shape != self.final_magnetization.shape[:-1]:
+                raise ValueError(
+                    "effective_peak_b1_gauss must match the result spatial shape"
+                )
+            data_vars["effective_peak_b1_gauss"] = (spatial_dims, effective_b1)
         dimensions = self.acquisition_dimensions
         if dimensions is not None:
             event_counts = np.asarray(
@@ -216,22 +268,34 @@ class SequenceSimulationResult:
         if cartesian is not None:
             kspace = self.to_cartesian_kspace(cartesian)
             image = self.reconstruct_cartesian(cartesian)
-            cartesian_dims = ["phase_y", "read_x"]
+            phase_dim = cartesian.phase_dimension
+            read_dim = cartesian.read_dimension
+            cartesian_dims = [phase_dim, read_dim]
             if self.signal.ndim == 2:
                 cartesian_dims.insert(0, "coil")
             coords.update(
                 {
-                    "phase_y": np.arange(cartesian.phase_matrix),
-                    "read_x": np.arange(cartesian.read_matrix),
-                    "cartesian_kx_cyc_per_m": (
-                        "read_x",
-                        cartesian.kx_cyc_per_m,
+                    phase_dim: np.arange(cartesian.phase_matrix),
+                    read_dim: np.arange(cartesian.read_matrix),
+                    "cartesian_k_read_cyc_per_m": (
+                        read_dim,
+                        cartesian.k_read_cyc_per_m,
                     ),
-                    "cartesian_ky_cyc_per_m": (
-                        "phase_y",
-                        cartesian.ky_cyc_per_m,
+                    "cartesian_k_phase_cyc_per_m": (
+                        phase_dim,
+                        cartesian.k_phase_cyc_per_m,
                     ),
                 }
+            )
+            read_axis, read_sign = cartesian.encoding_frame.axis_and_sign("read")
+            phase_axis, phase_sign = cartesian.encoding_frame.axis_and_sign("phase")
+            coords[f"cartesian_k{read_axis}_cyc_per_m"] = (
+                read_dim,
+                read_sign * cartesian.k_read_cyc_per_m,
+            )
+            coords[f"cartesian_k{phase_axis}_cyc_per_m"] = (
+                phase_dim,
+                phase_sign * cartesian.k_phase_cyc_per_m,
             )
             data_vars["cartesian_kspace"] = (cartesian_dims, kspace)
             data_vars["cartesian_image"] = (cartesian_dims, image)
@@ -239,11 +303,31 @@ class SequenceSimulationResult:
                 cartesian_dims,
                 np.abs(image),
             )
+            if self.species_signal is not None:
+                species_dims = ["pool"]
+                if self.species_signal.ndim == 3:
+                    species_dims.append("coil")
+                species_dims.extend((phase_dim, read_dim))
+                species_kspace = cartesian.reshape_signal(self.species_signal)
+                species_image = cartesian.reconstruct(self.species_signal)
+                data_vars["species_cartesian_kspace"] = (
+                    species_dims,
+                    species_kspace,
+                )
+                data_vars["species_cartesian_image"] = (
+                    species_dims,
+                    species_image,
+                )
+                data_vars["species_cartesian_image_magnitude"] = (
+                    species_dims,
+                    np.abs(species_image),
+                )
         elif cartesian_frames is not None:
             first = cartesian_frames.acquisitions[0]
             same_grid = all(
                 acquisition.read_matrix == first.read_matrix
                 and acquisition.phase_matrix == first.phase_matrix
+                and acquisition.encoding_frame == first.encoding_frame
                 and np.allclose(acquisition.kx_cyc_per_m, first.kx_cyc_per_m)
                 and np.allclose(acquisition.ky_cyc_per_m, first.ky_cyc_per_m)
                 for acquisition in cartesian_frames.acquisitions
@@ -263,23 +347,35 @@ class SequenceSimulationResult:
                     ],
                     axis=0,
                 )
-                cartesian_dims = ["cartesian_frame", "phase_y", "read_x"]
+                phase_dim = first.phase_dimension
+                read_dim = first.read_dimension
+                cartesian_dims = ["cartesian_frame", phase_dim, read_dim]
                 if self.signal.ndim == 2:
                     cartesian_dims.insert(1, "coil")
                 coords.update(
                     {
                         "cartesian_frame": np.arange(cartesian_frames.num_frames),
-                        "phase_y": np.arange(first.phase_matrix),
-                        "read_x": np.arange(first.read_matrix),
-                        "cartesian_kx_cyc_per_m": (
-                            "read_x",
-                            first.kx_cyc_per_m,
+                        phase_dim: np.arange(first.phase_matrix),
+                        read_dim: np.arange(first.read_matrix),
+                        "cartesian_k_read_cyc_per_m": (
+                            read_dim,
+                            first.k_read_cyc_per_m,
                         ),
-                        "cartesian_ky_cyc_per_m": (
-                            "phase_y",
-                            first.ky_cyc_per_m,
+                        "cartesian_k_phase_cyc_per_m": (
+                            phase_dim,
+                            first.k_phase_cyc_per_m,
                         ),
                     }
+                )
+                read_axis, read_sign = first.encoding_frame.axis_and_sign("read")
+                phase_axis, phase_sign = first.encoding_frame.axis_and_sign("phase")
+                coords[f"cartesian_k{read_axis}_cyc_per_m"] = (
+                    read_dim,
+                    read_sign * first.k_read_cyc_per_m,
+                )
+                coords[f"cartesian_k{phase_axis}_cyc_per_m"] = (
+                    phase_dim,
+                    phase_sign * first.k_phase_cyc_per_m,
                 )
                 for axis_index, axis in enumerate(
                     cartesian_frames.dimensions.AXIS_NAMES
@@ -294,13 +390,56 @@ class SequenceSimulationResult:
                     cartesian_dims,
                     np.abs(image),
                 )
+                if self.species_signal is not None:
+                    from types import SimpleNamespace
+
+                    species_result = SimpleNamespace(
+                        signal=self.species_signal,
+                        adc_times_s=self.adc_times_s,
+                        adc_gradient_moment_cyc_per_m=(
+                            self.adc_gradient_moment_cyc_per_m
+                        ),
+                    )
+                    species_kspace = np.stack(
+                        [
+                            cartesian_frames.to_cartesian_kspace(species_result, frame)
+                            for frame in range(cartesian_frames.num_frames)
+                        ],
+                        axis=0,
+                    )
+                    species_image = np.stack(
+                        [
+                            cartesian_frames.reconstruct(species_result, frame)
+                            for frame in range(cartesian_frames.num_frames)
+                        ],
+                        axis=0,
+                    )
+                    species_dims = ["cartesian_frame", "pool"]
+                    if self.species_signal.ndim == 3:
+                        species_dims.append("coil")
+                    species_dims.extend((phase_dim, read_dim))
+                    data_vars["species_cartesian_kspace"] = (
+                        species_dims,
+                        species_kspace,
+                    )
+                    data_vars["species_cartesian_image"] = (
+                        species_dims,
+                        species_image,
+                    )
+                    data_vars["species_cartesian_image_magnitude"] = (
+                        species_dims,
+                        np.abs(species_image),
+                    )
         if cartesian_volumes is not None:
             kspace_3d = cartesian_volumes.dimensioned_kspace(self)
             image_3d = cartesian_volumes.dimensioned_reconstruction(self)
             volume_dims = list(cartesian_volumes.varying_axes)
             if self.signal.ndim == 2:
                 volume_dims.append("coil")
-            volume_dims.extend(("partition_z", "phase_y", "read_x"))
+            partition_dim = cartesian_volumes.partition_dimension
+            phase_dim = cartesian_volumes.phase_dimension
+            read_dim = cartesian_volumes.read_dimension
+            volume_dims.extend((partition_dim, phase_dim, read_dim))
             coords.update(
                 {
                     axis: np.asarray(
@@ -311,29 +450,71 @@ class SequenceSimulationResult:
             )
             coords.update(
                 {
-                    "partition_z": np.arange(cartesian_volumes.partition_matrix),
-                    "phase_y": np.arange(cartesian_volumes.phase_matrix),
-                    "read_x": np.arange(cartesian_volumes.read_matrix),
-                    "cartesian_kx_cyc_per_m": (
-                        "read_x",
-                        cartesian_volumes.kx_cyc_per_m,
+                    partition_dim: np.arange(cartesian_volumes.partition_matrix),
+                    phase_dim: np.arange(cartesian_volumes.phase_matrix),
+                    read_dim: np.arange(cartesian_volumes.read_matrix),
+                    "cartesian_k_read_cyc_per_m": (
+                        read_dim,
+                        cartesian_volumes.k_read_cyc_per_m,
                     ),
-                    "cartesian_ky_cyc_per_m": (
-                        "phase_y",
-                        cartesian_volumes.ky_cyc_per_m,
+                    "cartesian_k_phase_cyc_per_m": (
+                        phase_dim,
+                        cartesian_volumes.k_phase_cyc_per_m,
                     ),
-                    "cartesian_kz_cyc_per_m": (
-                        "partition_z",
-                        cartesian_volumes.kz_cyc_per_m,
+                    "cartesian_k_partition_cyc_per_m": (
+                        partition_dim,
+                        cartesian_volumes.k_partition_cyc_per_m,
                     ),
                 }
             )
+            for role, dimension, values in (
+                ("read", read_dim, cartesian_volumes.k_read_cyc_per_m),
+                ("phase", phase_dim, cartesian_volumes.k_phase_cyc_per_m),
+                (
+                    "partition",
+                    partition_dim,
+                    cartesian_volumes.k_partition_cyc_per_m,
+                ),
+            ):
+                axis, sign = cartesian_volumes.encoding_frame.axis_and_sign(role)
+                coords[f"cartesian_k{axis}_cyc_per_m"] = (
+                    dimension,
+                    sign * values,
+                )
             data_vars["cartesian_3d_kspace"] = (volume_dims, kspace_3d)
             data_vars["cartesian_3d_image"] = (volume_dims, image_3d)
             data_vars["cartesian_3d_image_magnitude"] = (
                 volume_dims,
                 np.abs(image_3d),
             )
+            if self.species_signal is not None:
+                from types import SimpleNamespace
+
+                species_result = SimpleNamespace(
+                    signal=self.species_signal,
+                    adc_times_s=self.adc_times_s,
+                    adc_gradient_moment_cyc_per_m=(self.adc_gradient_moment_cyc_per_m),
+                )
+                species_kspace_3d = cartesian_volumes.dimensioned_kspace(species_result)
+                species_image_3d = cartesian_volumes.dimensioned_reconstruction(
+                    species_result
+                )
+                species_volume_dims = list(cartesian_volumes.varying_axes) + ["pool"]
+                if self.species_signal.ndim == 3:
+                    species_volume_dims.append("coil")
+                species_volume_dims.extend((partition_dim, phase_dim, read_dim))
+                data_vars["species_cartesian_3d_kspace"] = (
+                    species_volume_dims,
+                    species_kspace_3d,
+                )
+                data_vars["species_cartesian_3d_image"] = (
+                    species_volume_dims,
+                    species_image_3d,
+                )
+                data_vars["species_cartesian_3d_image_magnitude"] = (
+                    species_volume_dims,
+                    np.abs(species_image_3d),
+                )
         if spiral is not None:
             spiral_kspace = np.stack(
                 [spiral.grid_kspace(self, frame) for frame in range(spiral.num_frames)],
@@ -372,6 +553,120 @@ class SequenceSimulationResult:
                 spiral_dims,
                 np.abs(spiral_image),
             )
+            if self.species_signal is not None:
+                from types import SimpleNamespace
+
+                species_result = SimpleNamespace(
+                    signal=self.species_signal,
+                    adc_gradient_moment_cyc_per_m=self.adc_gradient_moment_cyc_per_m,
+                )
+                species_spiral_kspace = np.stack(
+                    [
+                        spiral.grid_kspace(species_result, frame)
+                        for frame in range(spiral.num_frames)
+                    ],
+                    axis=0,
+                )
+                species_spiral_image = np.stack(
+                    [
+                        spiral.reconstruct(species_result, frame)
+                        for frame in range(spiral.num_frames)
+                    ],
+                    axis=0,
+                )
+                species_spiral_dims = ["spiral_frame", "pool", "phase_y", "read_x"]
+                if self.species_signal.ndim == 3:
+                    species_spiral_dims.insert(2, "coil")
+                data_vars["species_spiral_gridded_kspace"] = (
+                    species_spiral_dims,
+                    species_spiral_kspace,
+                )
+                data_vars["species_spiral_image"] = (
+                    species_spiral_dims,
+                    species_spiral_image,
+                )
+                data_vars["species_spiral_image_magnitude"] = (
+                    species_spiral_dims,
+                    np.abs(species_spiral_image),
+                )
+        from .reconstruction import (
+            _numeric_definition,
+            is_radial_3d_result,
+            radial_3d_reconstruction_arrays,
+        )
+
+        if is_radial_3d_result(self):
+            (
+                radial_outer_axes,
+                radial_outer_values,
+                radial_kspace,
+                radial_image,
+                radial_matrix,
+                radial_fov_m,
+            ) = radial_3d_reconstruction_arrays(self)
+            radial_dims = list(radial_outer_axes)
+            if self.signal.ndim == 2:
+                radial_dims.append("coil")
+            radial_dims.extend(("radial_z", "radial_y", "radial_x"))
+            coords.update(
+                {
+                    axis: np.asarray(radial_outer_values[axis], dtype=np.int64)
+                    for axis in radial_outer_axes
+                }
+            )
+            coords.update(
+                {
+                    "radial_x": np.arange(radial_matrix),
+                    "radial_y": np.arange(radial_matrix),
+                    "radial_z": np.arange(radial_matrix),
+                    "radial_position_x_m": (
+                        "radial_x",
+                        ((np.arange(radial_matrix) + 0.5) / radial_matrix - 0.5)
+                        * radial_fov_m,
+                    ),
+                    "radial_position_y_m": (
+                        "radial_y",
+                        ((np.arange(radial_matrix) + 0.5) / radial_matrix - 0.5)
+                        * radial_fov_m,
+                    ),
+                    "radial_position_z_m": (
+                        "radial_z",
+                        ((np.arange(radial_matrix) + 0.5) / radial_matrix - 0.5)
+                        * radial_fov_m,
+                    ),
+                }
+            )
+            data_vars["radial_3d_gridded_kspace"] = (radial_dims, radial_kspace)
+            data_vars["radial_3d_image"] = (radial_dims, radial_image)
+            data_vars["radial_3d_image_magnitude"] = (
+                radial_dims,
+                np.abs(radial_image),
+            )
+            if self.species_signal is not None:
+                (
+                    _,
+                    _,
+                    species_radial_kspace,
+                    species_radial_image,
+                    _,
+                    _,
+                ) = radial_3d_reconstruction_arrays(self, self.species_signal)
+                species_radial_dims = list(radial_outer_axes) + ["pool"]
+                if self.species_signal.ndim == 3:
+                    species_radial_dims.append("coil")
+                species_radial_dims.extend(("radial_z", "radial_y", "radial_x"))
+                data_vars["species_radial_3d_gridded_kspace"] = (
+                    species_radial_dims,
+                    species_radial_kspace,
+                )
+                data_vars["species_radial_3d_image"] = (
+                    species_radial_dims,
+                    species_radial_image,
+                )
+                data_vars["species_radial_3d_image_magnitude"] = (
+                    species_radial_dims,
+                    np.abs(species_radial_image),
+                )
         if self.checkpoint_magnetization is not None:
             coords["checkpoint"] = self.checkpoint_times_s
             data_vars["checkpoint_magnetization"] = (
@@ -464,9 +759,57 @@ class SequenceSimulationResult:
             "chronological; adc_event_index identifies each readout and "
             "readout_sample_index identifies the sample within that readout"
         )
+        cartesian_geometry = (
+            cartesian_volumes
+            if cartesian_volumes is not None
+            else (
+                cartesian_frames.acquisitions[0]
+                if cartesian_frames is not None
+                else cartesian
+            )
+        )
+        if cartesian_geometry is not None:
+            frame = cartesian_geometry.encoding_frame
+            attrs["cartesian_encoding_axes"] = " ".join(frame.axis_codes)
+            attrs["cartesian_encoding_basis_xyz"] = ",".join(
+                f"{value:.17g}" for value in frame.matrix.reshape(-1)
+            )
+        if is_radial_3d_result(self):
+            attrs["radial_fov_m"] = ",".join(f"{radial_fov_m:.17g}" for _ in range(3))
+        pool_offsets = self.metadata.get("pool_frequency_offsets_hz")
+        if pool_offsets is not None:
+            attrs["pool_frequency_offsets_hz"] = ",".join(
+                f"{float(value):.17g}" for value in pool_offsets
+            )
+        echo_times = self.metadata.get("sequence_definitions", {}).get("EchoTimes")
+        if echo_times is not None:
+            attrs["echo_times_s"] = ",".join(
+                f"{float(value):.17g}" for value in _numeric_definition(echo_times)
+            )
         dataset = xr.Dataset(data_vars, coords=coords, attrs=attrs)
         dataset["t"].attrs.update(long_name="ADC sample time", units="s")
         dataset["adc_time_s"].attrs.update(long_name="ADC sample time", units="s")
+        waveform_units = {
+            "rf_sample_time_s": "s",
+            "rf_sample_duration_s": "s",
+            "rf_nutation_hz": "Hz",
+            "rf_b1_gauss": "G",
+            "rf_b1_magnitude_gauss": "G",
+            "gradient_sample_time_s": "s",
+            "gradient_sample_duration_s": "s",
+            "gradient_hz_per_m": "Hz/m",
+            "gradient_t_per_m": "T/m",
+            "tx_sensitivity_map": "relative",
+            "rx_sensitivity_maps": "relative",
+            "effective_peak_b1_gauss": "G",
+        }
+        for name, unit in waveform_units.items():
+            if name in dataset:
+                dataset[name].attrs["units"] = unit
+        if "gradient_axis_index" in dataset:
+            dataset["gradient_axis_index"].attrs.update(
+                long_name="physical gradient axis", axis_codes="0=x, 1=y, 2=z"
+            )
         for axis in ("kx", "ky", "kz"):
             if axis in dataset.coords:
                 dataset[axis].attrs.update(
@@ -477,6 +820,9 @@ class SequenceSimulationResult:
             if axis in dataset.coords:
                 dataset[axis].attrs.update(units="cycles/m")
         for axis in (
+            "cartesian_k_read_cyc_per_m",
+            "cartesian_k_phase_cyc_per_m",
+            "cartesian_k_partition_cyc_per_m",
             "cartesian_kx_cyc_per_m",
             "cartesian_ky_cyc_per_m",
             "cartesian_kz_cyc_per_m",
@@ -519,6 +865,18 @@ class SequenceSimulationResult:
             "final_magnetization": self.final_magnetization,
             "checkpoint_times_s": self.checkpoint_times_s,
         }
+        arrays.update(
+            {
+                name: np.asarray(values)
+                for name, values in self.sequence_waveforms.items()
+            }
+        )
+        arrays.update(
+            {
+                name: np.asarray(values)
+                for name, values in self.physical_field_maps.items()
+            }
+        )
         if self.checkpoint_magnetization is not None:
             arrays["checkpoint_magnetization"] = self.checkpoint_magnetization
         if self.adc_gradient_moment_cyc_per_m is not None:
@@ -552,6 +910,25 @@ class SequenceSimulationResult:
         cartesian_frames = self.cartesian_acquisition_frames
         cartesian_volumes = self.cartesian_acquisition_volumes
         spiral = self.spiral_acquisition
+
+        def add_encoding_arrays(geometry, *, include_partition=False):
+            frame = geometry.encoding_frame
+            arrays["cartesian_encoding_basis_xyz"] = frame.matrix
+            arrays["cartesian_encoding_axis_codes"] = np.asarray(
+                frame.axis_codes, dtype="S"
+            )
+            roles = [
+                ("read", geometry.k_read_cyc_per_m),
+                ("phase", geometry.k_phase_cyc_per_m),
+            ]
+            if include_partition:
+                roles.append(("partition", geometry.k_partition_cyc_per_m))
+            for role, values in roles:
+                values = np.asarray(values)
+                arrays[f"cartesian_k_{role}_cyc_per_m"] = values
+                axis, sign = frame.axis_and_sign(role)
+                arrays[f"cartesian_k{axis}_cyc_per_m"] = sign * values
+
         if cartesian is not None:
             image = self.reconstruct_cartesian(cartesian)
             arrays.update(
@@ -559,8 +936,6 @@ class SequenceSimulationResult:
                     "cartesian_kspace": self.to_cartesian_kspace(cartesian),
                     "cartesian_image": image,
                     "cartesian_image_magnitude": np.abs(image),
-                    "cartesian_kx_cyc_per_m": cartesian.kx_cyc_per_m,
-                    "cartesian_ky_cyc_per_m": cartesian.ky_cyc_per_m,
                     "cartesian_phase_indices": np.asarray(
                         cartesian.phase_indices, dtype=np.int64
                     ),
@@ -569,11 +944,13 @@ class SequenceSimulationResult:
                     ),
                 }
             )
+            add_encoding_arrays(cartesian)
         elif cartesian_frames is not None:
             first = cartesian_frames.acquisitions[0]
             same_grid = all(
                 acquisition.read_matrix == first.read_matrix
                 and acquisition.phase_matrix == first.phase_matrix
+                and acquisition.encoding_frame == first.encoding_frame
                 and np.allclose(acquisition.kx_cyc_per_m, first.kx_cyc_per_m)
                 and np.allclose(acquisition.ky_cyc_per_m, first.ky_cyc_per_m)
                 for acquisition in cartesian_frames.acquisitions
@@ -597,13 +974,12 @@ class SequenceSimulationResult:
                         ),
                         "cartesian_image": image,
                         "cartesian_image_magnitude": np.abs(image),
-                        "cartesian_kx_cyc_per_m": first.kx_cyc_per_m,
-                        "cartesian_ky_cyc_per_m": first.ky_cyc_per_m,
                         "cartesian_frame_indices": np.asarray(
                             cartesian_frames.frame_indices, dtype=np.int64
                         ),
                     }
                 )
+                add_encoding_arrays(first)
         if cartesian_volumes is not None:
             image_3d = cartesian_volumes.dimensioned_reconstruction(self)
             arrays.update(
@@ -611,7 +987,6 @@ class SequenceSimulationResult:
                     "cartesian_3d_kspace": cartesian_volumes.dimensioned_kspace(self),
                     "cartesian_3d_image": image_3d,
                     "cartesian_3d_image_magnitude": np.abs(image_3d),
-                    "cartesian_kz_cyc_per_m": cartesian_volumes.kz_cyc_per_m,
                     "cartesian_3d_volume_indices": np.asarray(
                         cartesian_volumes.volume_indices, dtype=np.int64
                     ),
@@ -620,6 +995,7 @@ class SequenceSimulationResult:
                     ),
                 }
             )
+            add_encoding_arrays(cartesian_volumes, include_partition=True)
             for axis in cartesian_volumes.varying_axes:
                 arrays[f"cartesian_3d_{axis}_index"] = np.asarray(
                     cartesian_volumes.axis_values(axis), dtype=np.int64
@@ -647,6 +1023,141 @@ class SequenceSimulationResult:
                     ),
                 }
             )
+        if self.species_signal is not None:
+            from types import SimpleNamespace
+
+            species_result = SimpleNamespace(
+                signal=self.species_signal,
+                adc_times_s=self.adc_times_s,
+                adc_gradient_moment_cyc_per_m=(self.adc_gradient_moment_cyc_per_m),
+            )
+            if cartesian is not None:
+                species_image = cartesian.reconstruct(self.species_signal)
+                arrays.update(
+                    {
+                        "species_cartesian_kspace": cartesian.reshape_signal(
+                            self.species_signal
+                        ),
+                        "species_cartesian_image": species_image,
+                        "species_cartesian_image_magnitude": np.abs(species_image),
+                    }
+                )
+            elif cartesian_frames is not None:
+                first = cartesian_frames.acquisitions[0]
+                same_grid = all(
+                    acquisition.read_matrix == first.read_matrix
+                    and acquisition.phase_matrix == first.phase_matrix
+                    and acquisition.encoding_frame == first.encoding_frame
+                    and np.allclose(acquisition.kx_cyc_per_m, first.kx_cyc_per_m)
+                    and np.allclose(acquisition.ky_cyc_per_m, first.ky_cyc_per_m)
+                    for acquisition in cartesian_frames.acquisitions
+                )
+                if same_grid:
+                    species_image = np.stack(
+                        [
+                            cartesian_frames.reconstruct(species_result, frame)
+                            for frame in range(cartesian_frames.num_frames)
+                        ],
+                        axis=0,
+                    )
+                    arrays.update(
+                        {
+                            "species_cartesian_kspace": np.stack(
+                                [
+                                    cartesian_frames.to_cartesian_kspace(
+                                        species_result, frame
+                                    )
+                                    for frame in range(cartesian_frames.num_frames)
+                                ],
+                                axis=0,
+                            ),
+                            "species_cartesian_image": species_image,
+                            "species_cartesian_image_magnitude": np.abs(species_image),
+                        }
+                    )
+            if cartesian_volumes is not None:
+                species_image_3d = cartesian_volumes.dimensioned_reconstruction(
+                    species_result
+                )
+                arrays.update(
+                    {
+                        "species_cartesian_3d_kspace": (
+                            cartesian_volumes.dimensioned_kspace(species_result)
+                        ),
+                        "species_cartesian_3d_image": species_image_3d,
+                        "species_cartesian_3d_image_magnitude": np.abs(
+                            species_image_3d
+                        ),
+                    }
+                )
+            if spiral is not None:
+                species_spiral_image = np.stack(
+                    [
+                        spiral.reconstruct(species_result, frame)
+                        for frame in range(spiral.num_frames)
+                    ],
+                    axis=0,
+                )
+                arrays.update(
+                    {
+                        "species_spiral_gridded_kspace": np.stack(
+                            [
+                                spiral.grid_kspace(species_result, frame)
+                                for frame in range(spiral.num_frames)
+                            ],
+                            axis=0,
+                        ),
+                        "species_spiral_image": species_spiral_image,
+                        "species_spiral_image_magnitude": np.abs(species_spiral_image),
+                    }
+                )
+        from .reconstruction import (
+            is_radial_3d_result,
+            radial_3d_reconstruction_arrays,
+        )
+
+        if is_radial_3d_result(self):
+            (
+                radial_outer_axes,
+                radial_outer_values,
+                radial_kspace,
+                radial_image,
+                _,
+                radial_fov_m,
+            ) = radial_3d_reconstruction_arrays(self)
+            arrays.update(
+                {
+                    "radial_3d_gridded_kspace": radial_kspace,
+                    "radial_3d_image": radial_image,
+                    "radial_3d_image_magnitude": np.abs(radial_image),
+                    "radial_3d_outer_axis_names": np.asarray(
+                        radial_outer_axes, dtype="S"
+                    ),
+                    "radial_3d_fov_m": np.asarray((radial_fov_m,) * 3),
+                }
+            )
+            for axis in radial_outer_axes:
+                arrays[f"radial_3d_{axis}_index"] = np.asarray(
+                    radial_outer_values[axis], dtype=np.int64
+                )
+            if self.species_signal is not None:
+                (
+                    _,
+                    _,
+                    species_radial_kspace,
+                    species_radial_image,
+                    _,
+                    _,
+                ) = radial_3d_reconstruction_arrays(self, self.species_signal)
+                arrays.update(
+                    {
+                        "species_radial_3d_gridded_kspace": species_radial_kspace,
+                        "species_radial_3d_image": species_radial_image,
+                        "species_radial_3d_image_magnitude": np.abs(
+                            species_radial_image
+                        ),
+                    }
+                )
         spectroscopy = self.spectroscopic_acquisition
         if spectroscopy is not None:
             arrays.update(

@@ -1,4 +1,4 @@
-__version__ = "2.1.2"
+__version__ = "2.3.0"
 
 from .simulator import (
     BlochSimulator,
@@ -23,6 +23,12 @@ except ImportError:
 # from . import visualization
 from . import kspace  # noqa: F401
 from . import phantom  # noqa: F401
+from .b1_fields import (  # noqa: F401
+    B1Field,
+    b1_preset_options,
+    create_b1_preset,
+    load_b1_field,
+)
 from .phantom_design import (  # noqa: F401
     PhantomDesign,
     ShapeDefinition,
@@ -51,6 +57,7 @@ from .sequence import (  # noqa: F401
     SequenceCompiler,
     SequenceProgram,
     SequenceSimulationResult,
+    SpinSampling,
     UnsupportedPulseqVersionError,
     infer_cartesian_acquisition,
     infer_cartesian_acquisition_frames,

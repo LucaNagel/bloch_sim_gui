@@ -8,7 +8,13 @@ from typing import Any, Mapping, Sequence, Tuple, Union
 
 import numpy as np
 
-from ..units import gradient_g_per_cm_to_hz_per_m, rf_gauss_to_hz
+from ..units import (
+    NUCLEUS_GAMMA_HZ_PER_T,
+    gradient_g_per_cm_to_hz_per_m,
+    gradient_hz_per_m_to_t_per_m,
+    rf_gauss_to_hz,
+    rf_hz_to_gauss_for_nucleus,
+)
 
 
 def _readonly_1d(values, dtype, name: str) -> np.ndarray:
@@ -75,7 +81,7 @@ class GradientEvent:
 
 @dataclass(frozen=True)
 class ADCEvent:
-    """Uniform ADC sampling event with receiver frequency and phase."""
+    """Uniform ADC event; positive receiver phase multiplies ``Mx+iMy``."""
 
     start_s: float
     num_samples: int
@@ -212,6 +218,111 @@ class SequenceProgram:
             source=source,
             metadata={"legacy_time_origin_s": start},
         )
+
+
+def physical_sequence_waveforms(
+    program: SequenceProgram, nucleus: str = "H1"
+) -> Mapping[str, np.ndarray]:
+    """Return native and physical-unit samples for result display/export."""
+    nucleus = str(nucleus).strip()
+    if nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
+        nucleus = "H1"
+
+    rf_times = []
+    rf_durations = []
+    rf_indices = []
+    rf_hz = []
+    for event_index, event in enumerate(program.rf_events):
+        count = event.samples_hz.size
+        rf_times.append(
+            event.start_s + (np.arange(count, dtype=float) + 0.5) * event.raster_s
+        )
+        rf_durations.append(np.full(count, event.raster_s, dtype=float))
+        rf_indices.append(np.full(count, event_index, dtype=np.int64))
+        rf_hz.append(np.asarray(event.samples_hz, dtype=np.complex128))
+    rf_nutation_hz = (
+        np.concatenate(rf_hz) if rf_hz else np.zeros(0, dtype=np.complex128)
+    )
+
+    gradient_times = []
+    gradient_durations = []
+    gradient_indices = []
+    gradient_axes = []
+    gradient_hz = []
+    for event_index, event in enumerate(program.gradient_events):
+        count = event.samples_hz_per_m.size
+        gradient_times.append(
+            event.start_s + (np.arange(count, dtype=float) + 0.5) * event.raster_s
+        )
+        gradient_durations.append(np.full(count, event.raster_s, dtype=float))
+        gradient_indices.append(np.full(count, event_index, dtype=np.int64))
+        gradient_axes.append(np.full(count, "xyz".index(event.axis), dtype=np.int8))
+        gradient_hz.append(np.asarray(event.samples_hz_per_m, dtype=float))
+    gradient_hz_per_m = (
+        np.concatenate(gradient_hz) if gradient_hz else np.zeros(0, dtype=float)
+    )
+
+    return {
+        "rf_sample_time_s": (
+            np.concatenate(rf_times) if rf_times else np.zeros(0, dtype=float)
+        ),
+        "rf_sample_duration_s": (
+            np.concatenate(rf_durations) if rf_durations else np.zeros(0, dtype=float)
+        ),
+        "rf_event_index": (
+            np.concatenate(rf_indices) if rf_indices else np.zeros(0, dtype=np.int64)
+        ),
+        "rf_nutation_hz": rf_nutation_hz,
+        "rf_b1_gauss": rf_hz_to_gauss_for_nucleus(rf_nutation_hz, nucleus),
+        "rf_b1_magnitude_gauss": np.abs(
+            rf_hz_to_gauss_for_nucleus(rf_nutation_hz, nucleus)
+        ),
+        "gradient_sample_time_s": (
+            np.concatenate(gradient_times)
+            if gradient_times
+            else np.zeros(0, dtype=float)
+        ),
+        "gradient_sample_duration_s": (
+            np.concatenate(gradient_durations)
+            if gradient_durations
+            else np.zeros(0, dtype=float)
+        ),
+        "gradient_event_index": (
+            np.concatenate(gradient_indices)
+            if gradient_indices
+            else np.zeros(0, dtype=np.int64)
+        ),
+        "gradient_axis_index": (
+            np.concatenate(gradient_axes)
+            if gradient_axes
+            else np.zeros(0, dtype=np.int8)
+        ),
+        "gradient_hz_per_m": gradient_hz_per_m,
+        "gradient_t_per_m": gradient_hz_per_m_to_t_per_m(gradient_hz_per_m, nucleus),
+    }
+
+
+def physical_b1_field_arrays(
+    phantom, waveforms: Mapping[str, np.ndarray]
+) -> Mapping[str, np.ndarray]:
+    """Return spatial B1 maps used by a simulation and their peak B1 in gauss."""
+    tx_source = getattr(phantom, "tx_sensitivity_map", None)
+    if tx_source is None:
+        tx_source = np.ones(tuple(phantom.shape))
+    rx_source = getattr(phantom, "rx_sensitivity_maps", None)
+    if rx_source is None:
+        rx_source = np.ones((1, *tuple(phantom.shape)))
+    tx = np.asarray(tx_source, dtype=np.complex128)
+    rx = np.asarray(rx_source, dtype=np.complex128)
+    if rx.ndim == tx.ndim:
+        rx = rx[None, ...]
+    nominal = np.asarray(waveforms.get("rf_b1_magnitude_gauss", ()), dtype=float)
+    peak = float(nominal.max()) if nominal.size else 0.0
+    return {
+        "tx_sensitivity_map": tx,
+        "rx_sensitivity_maps": rx,
+        "effective_peak_b1_gauss": peak * np.abs(tx),
+    }
 
 
 def _validate_time(value: float, name: str, allow_zero: bool = False) -> None:

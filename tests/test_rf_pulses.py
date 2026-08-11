@@ -1,6 +1,80 @@
 import numpy as np
 import pytest
 from blochsimulator.simulator import design_rf_pulse
+from blochsimulator.sequence.rf_pulses import design_rf_envelope
+
+
+def test_sequence_slr_is_designed_from_parameters_without_loading_a_file(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        np,
+        "loadtxt",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("SLR design must not load a waveform file")
+        ),
+    )
+
+    broad, duration_s, tbw, pulse_type = design_rf_envelope(
+        pulse_type="slr",
+        duration_s=2.5e-3,
+        raster_s=10e-6,
+        time_bandwidth_product=3.5,
+        slr_sharpness=1.0,
+    )
+    sharp, *_ = design_rf_envelope(
+        pulse_type="slr",
+        duration_s=2.5e-3,
+        raster_s=10e-6,
+        time_bandwidth_product=3.5,
+        slr_sharpness=5.0,
+    )
+
+    assert pulse_type == "slr"
+    assert duration_s == pytest.approx(2.5e-3)
+    assert tbw == pytest.approx(3.5)
+    assert broad.size == sharp.size == 250
+    assert np.allclose(broad, broad[::-1])
+    assert np.allclose(sharp, sharp[::-1])
+    assert not np.allclose(broad, sharp)
+
+
+@pytest.mark.parametrize("sharpness", [1.0, 5.0])
+def test_sequence_slr_has_zero_edges_and_centered_main_lobe(sharpness):
+    envelope, *_ = design_rf_envelope(
+        pulse_type="slr",
+        duration_s=2.33e-3,
+        raster_s=1e-6,
+        time_bandwidth_product=2.1,
+        slr_sharpness=sharpness,
+    )
+    magnitude = np.abs(envelope)
+    center = envelope.size // 2
+
+    assert magnitude[0] == pytest.approx(0.0, abs=1e-15)
+    assert magnitude[-1] == pytest.approx(0.0, abs=1e-15)
+    assert abs(int(np.argmax(magnitude)) - center) <= 2
+    assert magnitude[center] == pytest.approx(np.max(magnitude), rel=1e-4)
+    assert np.max(magnitude[: envelope.size // 10]) < 0.35 * magnitude[center]
+    assert np.max(magnitude[-envelope.size // 10 :]) < 0.35 * magnitude[center]
+
+
+def test_sequence_gaussian_envelope_is_symmetric_and_uses_requested_tbw():
+    envelope, duration_s, tbw, pulse_type = design_rf_envelope(
+        pulse_type="gauss",
+        duration_s=3e-3,
+        raster_s=10e-6,
+        time_bandwidth_product=4.0,
+    )
+
+    assert pulse_type == "gaussian"
+    assert duration_s == pytest.approx(3e-3)
+    assert tbw == pytest.approx(4.0)
+    assert envelope.size == 300
+    assert np.all(envelope.real > 0)
+    assert np.allclose(envelope.imag, 0.0)
+    assert np.allclose(envelope, envelope[::-1])
+    assert abs(envelope[0]) < abs(envelope[envelope.size // 2])
 
 
 def test_adiabatic_half_passage():

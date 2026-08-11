@@ -314,6 +314,7 @@ def main(
         or "none",
     )
     seq.set_definition(key="SpoilerEndTimes", value=spoiler_end_times)
+    seq.set_definition(key="IdealSpoilerEndTimes", value=spoiler_end_times)
 
     if write_seq:
         from pathlib import Path

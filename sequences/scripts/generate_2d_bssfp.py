@@ -9,6 +9,12 @@ from matplotlib import pyplot as plt
 
 import pypulseq as pp
 
+from blochsimulator.sequence.bssfp_phase import (
+    advance_bssfp_phase_deg,
+    pulseq_phase_offset_rad,
+    wrap_phase_deg,
+)
+
 
 def main(
     plot: bool = False,
@@ -85,16 +91,37 @@ def main(
         system=system,
     )
 
-    rf_phase = rf_phase_start
+    rf_phase = wrap_phase_deg(rf_phase_start)
 
+    rf_alpha_half.phase_offset = pulseq_phase_offset_rad(
+        rf_phase_start,
+        frequency_offset_hz=0.0,
+        event_center_s=pp.calc_rf_center(rf_alpha_half)[0],
+    )
     seq.add_block(rf_alpha_half)
     seq.add_block(pp.make_delay(pp.calc_duration(gx_pre) + pp.calc_duration(gx) / 2))
 
     for phase_idx in range(-n_phase // 2, n_phase // 2):
-        rf.phase_offset = np.deg2rad(rf_phase)
-        adc.phase_offset = np.deg2rad(rf_phase)
+        rf.phase_offset = pulseq_phase_offset_rad(
+            rf_phase,
+            frequency_offset_hz=0.0,
+            event_center_s=pp.calc_rf_center(rf)[0],
+        )
+        adc.phase_offset = pulseq_phase_offset_rad(
+            rf_phase,
+            frequency_offset_hz=0.0,
+            event_center_s=adc.delay + adc.num_samples * adc.dwell / 2,
+        )
 
-        rf_phase = np.mod(rf_phase + rf_phase_increment, 360.0)
+        rf_phase = advance_bssfp_phase_deg(
+            rf_phase,
+            elapsed_s=(
+                pp.calc_duration(rf)
+                + 2 * pp.calc_duration(gx_pre)
+                + pp.calc_duration(gx)
+            ),
+            phase_increment_deg=rf_phase_increment,
+        )
 
         gy_pre = pp.make_trapezoid(
             channel="y",

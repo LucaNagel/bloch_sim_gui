@@ -18,7 +18,13 @@ from blochsimulator.phantom_design import (
     ShapeDefinition,
     SpectralPeakDefinition,
 )
-from blochsimulator.sequence import ADCEvent, GradientEvent, RFEvent, SequenceProgram
+from blochsimulator.sequence import (
+    ADCEvent,
+    GradientEvent,
+    RFEvent,
+    SequenceProgram,
+    SpinSampling,
+)
 from blochsimulator.spectral_phantom import ChemicalSpecies
 from blochsimulator.ui.phantom_designer import SpectralPhantomDesignerDialog
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationThread
@@ -101,6 +107,66 @@ def test_no_rf_dynamic_sequence_matches_irreversible_analytic_solution():
         assert final[1, voxel, 0, 0] == pytest.approx(expected_lactate)
 
 
+def test_dynamic_sequence_applies_declared_ideal_spoiler_to_both_pools():
+    phantom = _dynamic_phantom(kpl=(0.0, 0.0))
+    program = SequenceProgram(
+        (RFEvent(0.0, np.array([250.0]), 1e-3),),
+        duration_s=2e-3,
+        metadata={"definitions": {"IdealSpoilerEndTimes": [1.5e-3]}},
+    )
+
+    result = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        program,
+        phantom,
+        checkpoints_s=(1.5e-3,),
+        sequence_kernel="optimized",
+    )
+
+    assert result.final_pool_magnetization[..., :2] == pytest.approx(0.0, abs=1e-12)
+    assert result.checkpoint_pool_magnetization[0, ..., :2] == pytest.approx(
+        0.0, abs=1e-12
+    )
+    assert result.metadata["ideal_spoiling_applied"] is True
+    assert result.metadata["ideal_spoiler_end_times_s"] == pytest.approx([1.5e-3])
+
+
+def test_dynamic_gradient_waveform_matches_ideal_crusher_spoiling():
+    phantom = _dynamic_phantom(kpl=(0.0, 0.0))
+    rf_duration_s = 1e-3
+    spoiler_duration_s = 10e-3
+    spoiler_end_s = rf_duration_s + spoiler_duration_s
+    voxel_width_m = phantom.fov[0] / phantom.shape[0]
+    gradient_hz_per_m = 1.0 / voxel_width_m / spoiler_duration_s
+    program = SequenceProgram(
+        (
+            RFEvent(0.0, np.array([250.0]), rf_duration_s),
+            GradientEvent(
+                "x",
+                rf_duration_s,
+                np.array([gradient_hz_per_m]),
+                spoiler_duration_s,
+            ),
+            ADCEvent(spoiler_end_s, 1, 1e-3),
+        ),
+        duration_s=spoiler_end_s + 1e-3,
+        metadata={"definitions": {"IdealSpoilerEndTimes": [spoiler_end_s]}},
+    )
+    simulator = BlochSimulator(use_parallel=False)
+
+    ideal = simulator.simulate_dynamic_sequence(program, phantom, spoiler_mode="ideal")
+    physical = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        spin_sampling=SpinSampling((9, 1, 1)),
+        spoiler_mode="gradient",
+    )
+
+    assert ideal.signal[0] == pytest.approx(0.0j, abs=1e-12)
+    assert physical.signal[0] == pytest.approx(ideal.signal[0], abs=1e-11)
+    assert physical.metadata["subvoxel_spins_per_voxel"] == 9
+    assert physical.metadata["ideal_spoiling_applied"] is False
+
+
 def test_dynamic_sequence_reports_intermediate_live_previews():
     phantom = _dynamic_phantom()
     program = SequenceProgram(
@@ -159,6 +225,97 @@ def test_two_pool_kinetics_preview_uses_inflow_and_conversion_solver():
     assert converted[0, -1] < unconverted[0, -1]
     assert converted[1, -1] > 0.0
     assert converted[:, -1].sum() == pytest.approx(2.0, rel=1e-12)
+
+
+def test_concentration_inflow_has_independent_polarization_and_relaxes_to_one():
+    times = np.asarray((0.0, 5.0, 6.0, 11.0, 31.0))
+    concentration_rate = TimeCurve(
+        (0.0, 5.0, 6.0),
+        (0.0, 10.0, 0.0),
+        interpolation="step",
+        outside="zero",
+    )
+    inflow_polarization = TimeCurve(
+        (0.0, 5.0, 6.0),
+        (1.0, 10000.0, 1.0),
+        interpolation="step",
+        outside="hold",
+    )
+
+    magnetization, concentration = simulate_two_pool_kinetics(
+        times,
+        initial_mz=(0.0, 0.0),
+        initial_concentration=(0.0, 0.0),
+        t1_s=(5.0, 5.0),
+        kpl_s_inv=0.0,
+        inflow_curve=concentration_rate,
+        inflow_polarization_curve=inflow_polarization,
+        equilibrium_polarization=1.0,
+        return_concentration=True,
+    )
+    pyruvate_polarization = np.divide(
+        magnetization[0],
+        concentration[0],
+        out=np.zeros_like(magnetization[0]),
+        where=concentration[0] > 0,
+    )
+
+    assert concentration[0, 1] == pytest.approx(0.0)
+    assert concentration[0, 2] == pytest.approx(10.0)
+    assert pyruvate_polarization[2] > 8000.0
+    assert pyruvate_polarization[3] > 1.0
+    assert pyruvate_polarization[4] > 1.0
+    assert pyruvate_polarization[4] < pyruvate_polarization[3]
+    expected_late = 1.0 + (pyruvate_polarization[2] - 1.0) * np.exp(-25.0 / 5.0)
+    assert pyruvate_polarization[4] == pytest.approx(expected_late, rel=1e-10)
+
+
+def test_designed_empty_pool_receives_highly_polarized_concentration_bolus():
+    design = PhantomDesign(
+        shape=(1, 1, 1),
+        fov_m=(0.01, 0.01, 0.01),
+        dynamic_enabled=True,
+        pyruvate_inflow_curve=TimeCurve(
+            (0.0, 5.0, 6.0), (0.0, 10.0, 0.0), "step", "zero"
+        ),
+        pyruvate_inflow_polarization_curve=TimeCurve(
+            (0.0, 5.0, 6.0), (1.0, 10000.0, 1.0), "step", "hold"
+        ),
+        shapes=[
+            ShapeDefinition(
+                "Injection region",
+                kind="box",
+                size=(1.0, 1.0, 1.0),
+                peaks=[
+                    SpectralPeakDefinition(
+                        "Pyruvate",
+                        amplitude=0.0,
+                        t1_s=5.0,
+                        initial_polarization=1.0,
+                    ),
+                    SpectralPeakDefinition(
+                        "Lactate",
+                        amplitude=0.0,
+                        t1_s=5.0,
+                        initial_polarization=1.0,
+                    ),
+                ],
+            )
+        ],
+    )
+    phantom = design.build()
+    result = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        SequenceProgram((), duration_s=11.0),
+        phantom,
+        checkpoints_s=(5.0, 6.0, 11.0),
+    )
+    pyruvate_mz = result.checkpoint_pool_magnetization[:, 0, 0, 0, 0, 2]
+
+    assert phantom.equilibrium_polarization == pytest.approx(1.0)
+    assert phantom.initial_spin_density_maps["Pyruvate"][0, 0, 0] == 0.0
+    assert pyruvate_mz[0] == pytest.approx(0.0)
+    assert pyruvate_mz[1] > 80000.0
+    assert 10.0 < pyruvate_mz[2] < pyruvate_mz[1]
 
 
 def test_negative_inflow_and_conversion_start_set_sequence_start_distribution():
@@ -686,26 +843,98 @@ def test_native_rf_voxel_block_is_bitwise_equal_to_numpy(num_threads, rf_hz):
 
 
 @pytest.mark.parametrize("kernel", ["native_serial", "native_parallel"])
-@pytest.mark.parametrize("driver", ["inflow", "dynamic_b0"])
-def test_native_dynamic_kernel_reports_driver_fallback(driver, kernel):
+@pytest.mark.parametrize(
+    "driver",
+    ["inflow", "dynamic_b0", "delayed_conversion", "concentration_tracking"],
+)
+def test_native_dynamic_kernel_keeps_rf_fast_path_with_driver(driver, kernel):
     phantom = _dynamic_phantom()
     curve = TimeCurve((0.0, 1e-3), (0.0, 1.0), "linear", "hold")
     if driver == "inflow":
         phantom.pyruvate_inflow = PyruvateInflow(curve, np.ones(phantom.shape))
-    else:
+    elif driver == "dynamic_b0":
         phantom.dynamic_b0 = DynamicB0(curve, np.ones(phantom.shape))
-    program = SequenceProgram((), duration_s=1e-3)
+    elif driver == "delayed_conversion":
+        phantom.conversion_start_s = 0.5e-3
+    else:
+        phantom.initial_spin_density_maps = {
+            "Pyruvate": np.ones(phantom.shape),
+            "Lactate": np.full(phantom.shape, 0.1),
+        }
+        phantom.equilibrium_polarization = 0.02
+    program = SequenceProgram(
+        (RFEvent(0.0, np.asarray([80.0 + 20.0j, 0.0j]), 20e-6),),
+        duration_s=1e-3,
+    )
+    status_messages = []
 
     native = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
-        program, phantom, sequence_kernel=kernel
+        program,
+        phantom,
+        sequence_kernel=kernel,
+        status_callback=status_messages.append,
+        checkpoints_s=(0.5e-3,),
+    )
+    optimized = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        program,
+        phantom,
+        sequence_kernel="optimized",
+        checkpoints_s=(0.5e-3,),
+    )
+
+    assert native.metadata["requested_sequence_kernel"] == kernel
+    assert native.metadata["sequence_kernel"] == kernel
+    assert native.metadata["native_fallback_reason"] is None
+    assert native.metadata["native_rf_block_enabled"] is True
+    if driver != "dynamic_b0":
+        assert native.metadata["native_hybrid"] is True
+        assert native.metadata["native_longitudinal_step_enabled"] is False
+        reason_fragment = {
+            "inflow": "pyruvate inflow",
+            "delayed_conversion": "delayed conversion",
+            "concentration_tracking": "concentration tracking",
+        }[driver]
+        assert reason_fragment in native.metadata["native_longitudinal_fallback_reason"]
+        assert any("hybrid dynamic kernel" in message for message in status_messages)
+    else:
+        assert native.metadata["native_hybrid"] is False
+        assert native.metadata["native_longitudinal_step_enabled"] is True
+        assert native.metadata["native_longitudinal_fallback_reason"] is None
+    for name in (
+        "signal",
+        "species_signal",
+        "final_magnetization",
+        "final_pool_magnetization",
+        "checkpoint_magnetization",
+        "checkpoint_pool_magnetization",
+    ):
+        assert np.array_equal(getattr(native, name), getattr(optimized, name))
+
+
+def test_native_inflow_with_spatial_tx_reports_complete_optimized_fallback():
+    phantom = _dynamic_phantom()
+    phantom.pyruvate_inflow = PyruvateInflow(
+        TimeCurve((0.0, 1e-3), (0.0, 1.0), "linear", "hold"),
+        np.ones(phantom.shape),
+    )
+    phantom.tx_sensitivity_map = np.asarray([1.0, 0.8]).reshape(phantom.shape)
+    program = SequenceProgram(
+        (RFEvent(0.0, np.asarray([80.0 + 20.0j, 0.0j]), 20e-6),),
+        duration_s=1e-3,
+    )
+
+    native = BlochSimulator(use_parallel=True, num_threads=2).simulate_dynamic_sequence(
+        program, phantom, sequence_kernel="native_parallel"
     )
     optimized = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
         program, phantom, sequence_kernel="optimized"
     )
 
-    assert native.metadata["requested_sequence_kernel"] == kernel
+    assert native.metadata["requested_sequence_kernel"] == "native_parallel"
     assert native.metadata["sequence_kernel"] == "optimized"
-    assert native.metadata["native_fallback_reason"]
+    assert native.metadata["native_hybrid"] is False
+    assert native.metadata["native_rf_block_enabled"] is False
+    assert "spatial transmit sensitivity" in native.metadata["native_fallback_reason"]
     for name in (
         "signal",
         "species_signal",
@@ -769,6 +998,122 @@ def test_native_parallel_dynamic_kernel_is_bitwise_equal(num_threads):
         assert np.array_equal(getattr(native, name), getattr(reference, name))
 
 
+@pytest.mark.parametrize("num_threads", [1, 4])
+def test_native_fused_rf_block_tracks_coupled_concentration_inflow(num_threads):
+    phantom = _dynamic_phantom(kpl=(0.03, 0.1))
+    phantom.initial_spin_density_maps = {
+        "Pyruvate": np.ones(phantom.shape),
+        "Lactate": np.full(phantom.shape, 0.05),
+    }
+    phantom.equilibrium_polarization = 0.7
+    phantom.pyruvate_inflow = PyruvateInflow(
+        TimeCurve((0.0, 1e-3), (0.2, 0.5), "linear", "hold"),
+        np.asarray([0.8, 1.1]).reshape(phantom.shape),
+        TimeCurve((0.0, 1e-3), (0.4, 0.25), "linear", "hold"),
+    )
+    raster = 20e-6
+    program = SequenceProgram(
+        (
+            RFEvent(
+                0.0,
+                np.linspace(40.0 + 15.0j, 110.0 - 10.0j, 12),
+                raster,
+            ),
+            GradientEvent("z", 0.0, np.full(12, 120.0), raster),
+            ADCEvent(12 * raster, 1, raster),
+        ),
+        duration_s=13 * raster,
+    )
+    simulator = BlochSimulator(use_parallel=True, num_threads=num_threads)
+    optimized = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        sequence_kernel="optimized",
+        simulation_timestep_s=5e-6,
+    )
+    native = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        sequence_kernel="native_parallel",
+        simulation_timestep_s=5e-6,
+    )
+
+    assert native.metadata["native_concentration_inflow_step_enabled"] is True
+    assert native.metadata["native_rf_fused_block_enabled"] is True
+    assert native.metadata["native_rf_fused_blocks"] == 1
+    assert native.metadata["native_rf_fused_intervals"] >= 8
+    for name in (
+        "signal",
+        "species_signal",
+        "final_magnetization",
+        "final_pool_magnetization",
+    ):
+        np.testing.assert_allclose(
+            getattr(native, name),
+            getattr(optimized, name),
+            rtol=2e-13,
+            atol=2e-13,
+        )
+
+
+def test_native_serial_fused_rf_block_keeps_one_worker(monkeypatch):
+    import blochsimulator.dynamic_bloch_cy as dynamic_bloch_cy
+
+    base = _dynamic_phantom()
+    shape = (1024, 1, 1)
+    phantom = DynamicSpectralPhantom(
+        shape=shape,
+        fov=(0.02, 0.01, 0.01),
+        pools=base.pools,
+        initial_concentration_maps={
+            "Pyruvate": np.ones(shape),
+            "Lactate": np.zeros(shape),
+        },
+        kpl_map_s_inv=np.full(shape, 0.1),
+        initial_spin_density_maps={
+            "Pyruvate": np.ones(shape),
+            "Lactate": np.full(shape, 0.05),
+        },
+        equilibrium_polarization=0.7,
+        pyruvate_inflow=PyruvateInflow(
+            TimeCurve((0.0, 1e-3), (0.2, 0.5), "linear", "hold"),
+            np.ones(shape),
+            TimeCurve((0.0, 1e-3), (0.4, 0.25), "linear", "hold"),
+        ),
+    )
+    raster = 20e-6
+    program = SequenceProgram(
+        (
+            RFEvent(0.0, np.full(12, 80.0 + 10.0j), raster),
+            ADCEvent(12 * raster, 1, raster),
+        ),
+        duration_s=13 * raster,
+    )
+    native_block = dynamic_bloch_cy.apply_dynamic_rf_block_with_concentration_inflow
+    worker_counts = []
+
+    def record_worker_count(*args):
+        worker_counts.append(args[-1])
+        return native_block(*args)
+
+    monkeypatch.setattr(
+        dynamic_bloch_cy,
+        "apply_dynamic_rf_block_with_concentration_inflow",
+        record_worker_count,
+    )
+    result = BlochSimulator(use_parallel=True, num_threads=4).simulate_dynamic_sequence(
+        program,
+        phantom,
+        sequence_kernel="native_serial",
+        simulation_timestep_s=5e-6,
+    )
+
+    assert worker_counts
+    assert set(worker_counts) == {1}
+    assert result.metadata["native_rf_threads"] == 1
+    assert result.metadata["native_longitudinal_threads"] == 1
+
+
 def test_native_parallel_dynamic_kernel_respects_tiny_block_budget():
     phantom = _dynamic_phantom()
     program = SequenceProgram((), duration_s=1e-3)
@@ -815,9 +1160,15 @@ def test_dynamic_driver_round_trip(tmp_path, suffix):
     phantom = _dynamic_phantom()
     phantom.conversion_start_s = -1.5
     phantom.kinetics_time_offset_s = 0.75
+    phantom.initial_spin_density_maps = {
+        pool.name: np.full(phantom.shape, index + 1.0)
+        for index, pool in enumerate(phantom.pools)
+    }
+    phantom.equilibrium_polarization = 1.0
     phantom.pyruvate_inflow = PyruvateInflow(
         TimeCurve((-2.0, 2.0), (0.0, 0.4), "linear", "zero"),
         np.ones(phantom.shape),
+        polarization_curve=TimeCurve((-2.0, 2.0), (10000.0, 5000.0), "linear", "hold"),
     )
     phantom.dynamic_b0 = DynamicB0(
         TimeCurve((0.0, 2.0), (-3.0, 4.0), "linear", "hold"),
@@ -830,6 +1181,16 @@ def test_dynamic_driver_round_trip(tmp_path, suffix):
         loaded.pyruvate_inflow.rate_curve_s_inv
         == phantom.pyruvate_inflow.rate_curve_s_inv
     )
+    assert (
+        loaded.pyruvate_inflow.polarization_curve
+        == phantom.pyruvate_inflow.polarization_curve
+    )
+    assert loaded.equilibrium_polarization == pytest.approx(1.0)
+    for pool in phantom.pools:
+        assert np.array_equal(
+            loaded.initial_spin_density_maps[pool.name],
+            phantom.initial_spin_density_maps[pool.name],
+        )
     assert np.array_equal(
         loaded.pyruvate_inflow.delivery_map, phantom.pyruvate_inflow.delivery_map
     )
@@ -981,6 +1342,9 @@ def test_phantom_designer_exposes_kinetic_regions_and_preview():
 def test_phantom_designer_sorts_new_inflow_point_by_edited_time():
     app = QApplication.instance() or QApplication([])
     dialog = SpectralPhantomDesignerDialog()
+    assert dialog.kinetics_controls_scroll.widgetResizable()
+    assert dialog.kinetics_controls_scroll.minimumWidth() == 620
+    assert dialog.kinetics_splitter.childrenCollapsible() is False
     table = dialog.inflow_curve_table
 
     dialog._add_curve_point(table)
@@ -991,25 +1355,27 @@ def test_phantom_designer_sorts_new_inflow_point_by_edited_time():
         0.0,
         3.0,
         5.0,
-        15.0,
+        6.0,
     ]
     assert [float(table.item(row, 1).text()) for row in range(4)] == [
         0.0,
         0.25,
-        0.1,
+        10.0,
         0.0,
     ]
     assert table.currentRow() == 1
-    curve = dialog._read_time_curve(table, outside="zero")
-    assert curve.times_s == (0.0, 3.0, 5.0, 15.0)
-    assert curve.values == (0.0, 0.25, 0.1, 0.0)
+    curve, polarization_curve = dialog._read_inflow_curves()
+    assert curve.times_s == (0.0, 3.0, 5.0, 6.0)
+    assert curve.values == (0.0, 0.25, 10.0, 0.0)
+    assert polarization_curve.values == (1.0, 1.0, 10000.0, 1.0)
 
     dialog._add_curve_point(table)
     table.item(4, 1).setText("0.5")
     table.item(4, 0).setText("-2.0")
-    curve = dialog._read_time_curve(table, outside="zero")
-    assert curve.times_s == (-2.0, 0.0, 3.0, 5.0, 15.0)
+    curve, polarization_curve = dialog._read_inflow_curves()
+    assert curve.times_s == (-2.0, 0.0, 3.0, 5.0, 6.0)
     assert curve.values[0] == 0.5
+    assert polarization_curve.values[0] == pytest.approx(1.0)
     assert table.currentRow() == 0
 
     dialog.close()
@@ -1052,7 +1418,7 @@ def test_phantom_designer_previews_negative_kinetic_preroll():
     assert dialog.conversion_start_s.value() == -1.0
     assert pyruvate[zero_index] + lactate[zero_index] == pytest.approx(2.0)
     assert lactate[zero_index] > 0.0
-    assert "sequence-start HP Mz at t=0" in dialog.kinetics_preview_info.text()
+    assert "sequence-start Mz at t=0" in dialog.kinetics_preview_info.text()
 
     dialog.close()
     app.processEvents()
@@ -1191,21 +1557,56 @@ def test_phantom_designer_explains_overlapping_pool_curves_and_shape_context():
     assert dialog.kinetics_preview_shape.currentText() == "Identical pools"
     assert dialog.kinetics_preview_region.currentText() == "Default kPL"
     assert "kPL=0: no P→L conversion" in info
-    assert "HP Mz=1 is an initial normalization" in info
+    assert "T1 relaxation toward polarization 1" in info
     assert "identical and overlap" in info
     assert "initialized, not created by conversion" in info
 
     dialog.zero_lactate_button.click()
     _, lactate_zero = dialog.lactate_preview_curve.getData()
-    assert design.shapes[0].peaks[1].amplitude == 0.0
-    assert np.all(lactate_zero == 0.0)
-    assert "Lz starts at zero and remains zero" in dialog.kinetics_preview_info.text()
+    assert design.shapes[0].peaks[1].amplitude == 1.0
+    assert design.shapes[0].peaks[1].initial_polarization == 0.0
+    assert lactate_zero[0] == pytest.approx(0.0)
+    assert lactate_zero[-1] == pytest.approx(1.0)
+    assert "recovers thermally" in dialog.kinetics_preview_info.text()
 
     dialog.default_kpl.setValue(0.2)
     _, lactate_converted = dialog.lactate_preview_curve.getData()
     assert lactate_converted[0] == 0.0
     assert lactate_converted[-1] > 0.0
-    assert "all subsequent Lactate is created" in dialog.kinetics_preview_info.text()
+    assert "alongside thermal recovery" in dialog.kinetics_preview_info.text()
+    dialog.close()
+    app.processEvents()
+
+
+def test_phantom_designer_does_not_show_hp_decay_when_hp_model_is_disabled():
+    app = QApplication.instance() or QApplication([])
+    design = PhantomDesign(
+        shape=(1, 1, 1),
+        fov_m=(0.01, 0.01, 0.01),
+        dynamic_enabled=False,
+        shapes=[
+            ShapeDefinition(
+                "Conventional pools",
+                peaks=[
+                    SpectralPeakDefinition("Pyruvate", 1.0, 0.0, 1.0),
+                    SpectralPeakDefinition("Lactate", 1.0, 12.0, 1.0),
+                ],
+            )
+        ],
+    )
+
+    dialog = SpectralPhantomDesignerDialog(design=design)
+    _, pyruvate = dialog.pyruvate_preview_curve.getData()
+    _, lactate = dialog.lactate_preview_curve.getData()
+
+    assert pyruvate is None
+    assert lactate is None
+    assert "Hyperpolarized preview inactive" in dialog.kinetics_preview_info.text()
+
+    dialog.dynamic_enabled.setChecked(True)
+    _, pyruvate = dialog.pyruvate_preview_curve.getData()
+    assert pyruvate[0] == pytest.approx(1.0)
+    assert pyruvate[-1] == pytest.approx(1.0)
     dialog.close()
     app.processEvents()
 

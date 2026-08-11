@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 import weakref
 
@@ -15,6 +16,7 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFrame,
     QFormLayout,
     QGridLayout,
     QHeaderView,
@@ -24,6 +26,7 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -50,6 +53,7 @@ from ..phantom_design import (
 from ..spectral_phantom import SpectralPhantom
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
 from .volume_viewer import PhantomInspectorWidget
+from .default_settings import WorkspaceDefaults
 
 
 class ShapeDrawingPlotWidget(pg.PlotWidget):
@@ -73,8 +77,8 @@ class ShapeDrawingPlotWidget(pg.PlotWidget):
         return self._drawing_kind
 
     def start_shape_drawing(self, kind):
-        if kind not in {"ellipsoid", "box"}:
-            raise ValueError("drawing kind must be 'ellipsoid' or 'box'")
+        if kind not in {"ellipsoid", "box", "cylinder"}:
+            raise ValueError("drawing kind must be 'ellipsoid', 'box', or 'cylinder'")
         self._drawing_kind = kind
         self._drawing_start = None
         self._drawing_guide.setData([], [])
@@ -162,27 +166,42 @@ class ShapeDrawingPlotWidget(pg.PlotWidget):
 def load_any_phantom(filename):
     """Load either a conventional or spectral phantom file."""
     try:
-        return DynamicSpectralPhantom.load(filename)
+        phantom = DynamicSpectralPhantom.load(filename)
     except ValueError:
         try:
-            return SpectralPhantom.load(filename)
+            phantom = SpectralPhantom.load(filename)
         except ValueError as spectral_error:
             try:
-                return Phantom.load(filename)
+                phantom = Phantom.load(filename)
             except Exception:
                 raise spectral_error
+    phantom.name = Path(filename).stem
+    return phantom
 
 
 class SpectralPhantomDesignerDialog(QDialog):
-    """Draw multiple extruded XY shapes and assign Lorentzian peak lists."""
+    """Compose rotatable 3D primitives and assign Lorentzian peak lists."""
 
-    def __init__(self, parent=None, design: Optional[PhantomDesign] = None):
+    def __init__(
+        self,
+        parent=None,
+        design: Optional[PhantomDesign] = None,
+        settings=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle(
             "Edit Spectral Phantom" if design is not None else "New Spectral Phantom"
         )
         self.resize(1250, 850)
-        self.design = design or PhantomDesign(shapes=[ShapeDefinition(name="Shape 1")])
+        if design is None:
+            defaults = WorkspaceDefaults.from_settings(settings)
+            design = PhantomDesign(
+                fov_m=tuple(value / 1000.0 for value in defaults.phantom_fov_mm),
+                nucleus=defaults.phantom_nucleus,
+                field_strength_t=defaults.field_strength_t,
+                shapes=[ShapeDefinition(name="Shape 1", kind="cylinder")],
+            )
+        self.design = design
         self.phantom = None
         self._updating = False
         self._rois = []
@@ -217,6 +236,27 @@ class SpectralPhantomDesignerDialog(QDialog):
             global_row.addWidget(fov)
             self.fov_spins.append(fov)
         draw_layout.addLayout(global_row)
+
+        sampling_row = QHBoxLayout()
+        self.supersampling_enabled = QCheckBox("Supersampling")
+        self.supersampling_enabled.setToolTip(
+            "Rasterize every object on a finer subvoxel grid and average it "
+            "back to the selected matrix, producing fractional edge voxels"
+        )
+        sampling_row.addWidget(self.supersampling_enabled)
+        sampling_row.addWidget(QLabel("Factor"))
+        self.supersampling_factor = QSpinBox()
+        self.supersampling_factor.setRange(2, 8)
+        self.supersampling_factor.setValue(4)
+        self.supersampling_factor.setSuffix("× per axis")
+        self.supersampling_factor.setToolTip(
+            "Samples per voxel axis; the work grows with the cube of this value"
+        )
+        self.supersampling_factor.setEnabled(False)
+        self.supersampling_enabled.toggled.connect(self.supersampling_factor.setEnabled)
+        sampling_row.addWidget(self.supersampling_factor)
+        sampling_row.addStretch()
+        draw_layout.addLayout(sampling_row)
 
         spectral_row = QHBoxLayout()
         spectral_row.addWidget(QLabel("B0"))
@@ -311,19 +351,29 @@ class SpectralPhantomDesignerDialog(QDialog):
         add_ellipse.clicked.connect(lambda: self._add_shape("ellipsoid"))
         add_box = QPushButton("Add box")
         add_box.clicked.connect(lambda: self._add_shape("box"))
+        add_cylinder = QPushButton("Add cylinder")
+        add_cylinder.setToolTip(
+            "Add a cylinder whose local axis initially points along Z"
+        )
+        add_cylinder.clicked.connect(lambda: self._add_shape("cylinder"))
         draw_ellipse = QPushButton("Draw ellipsoid")
         draw_ellipse.setToolTip("Drag a new ellipsoid directly in the XY canvas")
         draw_ellipse.clicked.connect(lambda: self._start_shape_drawing("ellipsoid"))
         draw_box = QPushButton("Draw box")
         draw_box.setToolTip("Drag a new box directly in the XY canvas")
         draw_box.clicked.connect(lambda: self._start_shape_drawing("box"))
+        draw_cylinder = QPushButton("Draw cylinder")
+        draw_cylinder.setToolTip("Drag the X/Y diameters of a new Z-aligned cylinder")
+        draw_cylinder.clicked.connect(lambda: self._start_shape_drawing("cylinder"))
         remove = QPushButton("Remove")
         remove.clicked.connect(self._remove_shape)
         shape_buttons.addWidget(add_ellipse, 0, 0)
         shape_buttons.addWidget(add_box, 1, 0)
-        shape_buttons.addWidget(draw_ellipse, 2, 0)
-        shape_buttons.addWidget(draw_box, 3, 0)
-        shape_buttons.addWidget(remove, 4, 0)
+        shape_buttons.addWidget(add_cylinder, 2, 0)
+        shape_buttons.addWidget(draw_ellipse, 3, 0)
+        shape_buttons.addWidget(draw_box, 4, 0)
+        shape_buttons.addWidget(draw_cylinder, 5, 0)
+        shape_buttons.addWidget(remove, 6, 0)
         shape_layout.addLayout(shape_buttons)
         splitter.addWidget(shape_panel)
 
@@ -331,7 +381,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         canvas_panel.setMinimumWidth(420)
         canvas_layout = QVBoxLayout(canvas_panel)
         self.canvas_instruction = QLabel(
-            "Move/resize existing shapes, or choose Draw and drag in the axial XY plane"
+            "Move/resize shapes in XY; set 3D angles on the right and use Update "
+            "preview to inspect the rotated volume"
         )
         canvas_layout.addWidget(self.canvas_instruction)
         self.canvas = ShapeDrawingPlotWidget()
@@ -362,7 +413,7 @@ class SpectralPhantomDesignerDialog(QDialog):
 
         self.canvas.getAxis("bottom").tickStrings = physical_ticks(0)
         self.canvas.getAxis("left").tickStrings = physical_ticks(1)
-        for spin in self.fov_spins[:2]:
+        for spin in self.fov_spins:
             spin.valueChanged.connect(self._update_canvas_axes)
         canvas_layout.addWidget(self.canvas)
         splitter.addWidget(canvas_panel)
@@ -381,6 +432,19 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.x_size = self._percent_spin(50.0)
         self.y_size = self._percent_spin(50.0)
         self.z_size = self._percent_spin(50.0)
+        self.z_size.setToolTip(
+            "Cylinder length along its local Z axis, as a percentage of FOV Z. "
+            "Cylinders may extend beyond the FOV and are clipped at its boundary."
+        )
+        self.rotation_spins = []
+        for axis in "XYZ":
+            rotation = self._number_spin(-360.0, 360.0, 0.0, "°")
+            rotation.setDecimals(1)
+            rotation.setToolTip(
+                f"Rotate the shape about the physical {axis} axis; rotations are "
+                "applied in X, Y, Z order and shown in the 3D preview"
+            )
+            self.rotation_spins.append(rotation)
         self.t1_ms = self._number_spin(0.1, 500000.0, 1000.0, " ms")
         self.initial_mz = self._number_spin(0.0, 1e9, 1.0, "")
         self.b0_ppm = self._number_spin(-1000.0, 1000.0, 0.0, " ppm")
@@ -388,9 +452,10 @@ class SpectralPhantomDesignerDialog(QDialog):
             "Fallback T1 for peaks whose metabolite-specific T1 cell is empty."
         )
         self.initial_mz.setToolTip(
-            "Common initial scale for all hyperpolarized pools in this shape. "
-            "In the dynamic model this is excess magnetization above thermal "
-            "equilibrium and relaxes toward zero."
+            "Fallback initial longitudinal polarization for peaks whose own "
+            "polarization cell is empty. This is independent of spin density. "
+            "In both models, polarization 1 is thermal equilibrium; T1 drives "
+            "larger or smaller values toward 1."
         )
         for widget in (
             self.x_center,
@@ -399,36 +464,59 @@ class SpectralPhantomDesignerDialog(QDialog):
             self.x_size,
             self.y_size,
             self.z_size,
+            *self.rotation_spins,
             self.t1_ms,
             self.initial_mz,
             self.b0_ppm,
         ):
             widget.valueChanged.connect(self._properties_changed)
-        form.addRow("X centre", self.x_center)
-        form.addRow("Y centre", self.y_center)
-        form.addRow("Z centre", self.z_center)
-        form.addRow("X size", self.x_size)
-        form.addRow("Y size", self.y_size)
-        form.addRow("Z thickness", self.z_size)
+        geometry_grid = QGridLayout()
+        geometry_grid.setHorizontalSpacing(10)
+        geometry_grid.setVerticalSpacing(6)
+        geometry_grid.setContentsMargins(0, 4, 0, 4)
+        for column, heading in enumerate(("Centre", "Size", "Rotation"), start=1):
+            label = QLabel(heading)
+            label.setAlignment(Qt.AlignCenter)
+            geometry_grid.addWidget(label, 0, column)
+        center_spins = (self.x_center, self.y_center, self.z_center)
+        size_spins = (self.x_size, self.y_size, self.z_size)
+        for row, (axis, center, size, rotation) in enumerate(
+            zip("XYZ", center_spins, size_spins, self.rotation_spins), start=1
+        ):
+            axis_label = QLabel(axis)
+            axis_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            geometry_grid.addWidget(axis_label, row, 0)
+            geometry_grid.addWidget(center, row, 1)
+            geometry_grid.addWidget(size, row, 2)
+            geometry_grid.addWidget(rotation, row, 3)
+        form.addRow(geometry_grid)
+
+        # Retained as a semantic label for code inspecting the cylinder control;
+        # the visible grid row stays consistently labelled "Z".
+        self.z_size_label = QLabel("Z size")
         form.addRow("Default T1", self.t1_ms)
-        form.addRow("Initial HP Mz scale", self.initial_mz)
+        form.addRow("Default initial polarization", self.initial_mz)
         form.addRow("B0 inhomogeneity", self.b0_ppm)
         self.xy_info = QLabel()
         form.addRow("XY geometry", self.xy_info)
         property_layout.addLayout(form)
 
         peak_explanation = QLabel(
-            "Dynamic phantoms: initial HP pool Mz = Initial HP Mz scale × Initial "
-            "pool weight. A weight of 0 keeps the pool defined, so conversion can "
-            "populate it. Leave T1 empty to use Default T1."
+            "Spin density / concentration sets how much signal-producing material "
+            "is present. Initial polarization sets its longitudinal start state; "
+            "the initial signal is their product. Polarization 1 is thermal "
+            "equilibrium; hyperpolarized values can be much larger. Set spin "
+            "density to 0 for a region with no initial material. Leave "
+            "polarization or T1 empty to use the shape default."
         )
         peak_explanation.setWordWrap(True)
         property_layout.addWidget(peak_explanation)
-        self.peak_table = QTableWidget(0, 5)
+        self.peak_table = QTableWidget(0, 6)
         self.peak_table.setHorizontalHeaderLabels(
             [
                 "Name",
-                "Initial pool weight (0=empty)",
+                "Spin density / concentration",
+                "Initial polarization (blank=default)",
                 "Peak position (ppm)",
                 "T1 (ms; blank=default)",
                 "T2* (ms)",
@@ -436,7 +524,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         )
         peak_header = self.peak_table.horizontalHeader()
         peak_header.setSectionResizeMode(0, QHeaderView.Stretch)
-        for column in range(1, 5):
+        for column in range(1, 6):
             peak_header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
         self.peak_table.cellChanged.connect(self._peaks_changed)
         property_layout.addWidget(self.peak_table)
@@ -458,10 +546,21 @@ class SpectralPhantomDesignerDialog(QDialog):
         kinetics_page = QWidget()
         kinetics_page_layout = QHBoxLayout(kinetics_page)
         kinetics_splitter = QSplitter(Qt.Horizontal)
+        kinetics_splitter.setChildrenCollapsible(False)
         kinetics_controls = QWidget()
+        kinetics_controls.setMinimumWidth(600)
         kinetics_layout = QVBoxLayout(kinetics_controls)
         kinetics_form = QFormLayout()
-        self.dynamic_enabled = QCheckBox("Enable pyruvate → lactate conversion")
+        kinetics_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.dynamic_enabled = QCheckBox(
+            "Enable hyperpolarized pyruvate/lactate model (polarization → 1)"
+        )
+        self.dynamic_enabled.setToolTip(
+            "Select the hyperpolarized two-pool solver. Conversion itself is "
+            "controlled separately by kPL; kPL=0 means T1 relaxation of "
+            "polarization toward thermal equilibrium 1 without P→L."
+        )
+        self.dynamic_enabled.toggled.connect(self._update_kinetics_preview)
         kinetics_form.addRow(self.dynamic_enabled)
         self.pyruvate_peak_name = QLineEdit("Pyruvate")
         self.lactate_peak_name = QLineEdit("Lactate")
@@ -512,18 +611,24 @@ class SpectralPhantomDesignerDialog(QDialog):
         kinetics_layout.addWidget(background_kpl_help)
 
         inflow_help = QLabel(
-            "Pyruvate inflow points define a longitudinal source added to Pz "
-            "inside pyruvate shapes. Values are linearly interpolated and zero "
-            "outside the listed kinetics-time interval. The global kinetics-time "
+            "Pyruvate inflow points separately define concentration rate and "
+            "polarization. Each row is held until the next time; outside the "
+            "listed interval the rate is zero. For example, rate 10 from 5–6 s "
+            "adds concentration 10, and polarization 10000 gives the incoming "
+            "material that polarization. The global kinetics-time "
             "setting shifts inflow and conversion together relative to sequence "
             "time zero. Any part before sequence t=0 forms a free kinetic pre-roll "
             "that sets the initial Pz/Lz distribution."
         )
         inflow_help.setWordWrap(True)
         kinetics_layout.addWidget(inflow_help)
-        self.inflow_curve_table = QTableWidget(0, 2)
+        self.inflow_curve_table = QTableWidget(0, 3)
         self.inflow_curve_table.setHorizontalHeaderLabels(
-            ["Kinetics time (s)", "Source (relative Mz/s)"]
+            [
+                "Kinetics time (s)",
+                "Concentration rate (relative/s)",
+                "Inflow polarization",
+            ]
         )
         self.inflow_curve_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeToContents
@@ -531,7 +636,11 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.inflow_curve_table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.Stretch
         )
+        self.inflow_curve_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeToContents
+        )
         self.inflow_curve_table.setMaximumHeight(150)
+        self.inflow_curve_table.setMinimumHeight(110)
         self.inflow_curve_table.cellChanged.connect(self._inflow_curve_table_changed)
         kinetics_layout.addWidget(self.inflow_curve_table)
         inflow_buttons = QHBoxLayout()
@@ -565,6 +674,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             1, QHeaderView.Stretch
         )
         self.dynamic_b0_curve_table.setMaximumHeight(130)
+        self.dynamic_b0_curve_table.setMinimumHeight(105)
         kinetics_layout.addWidget(self.dynamic_b0_curve_table)
         b0_curve_buttons = QHBoxLayout()
         add_b0_point = QPushButton("Add B0 point")
@@ -592,6 +702,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             ["Name", "Kind", "Cx %", "Cy %", "Cz %", "Sx %", "Sy %", "Sz %", "kPL s⁻¹"]
         )
         self.kinetic_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.kinetic_table.setMinimumHeight(130)
         self.kinetic_table.cellChanged.connect(self._kinetic_table_changed)
         self.kinetic_table.currentCellChanged.connect(
             self._kinetic_region_selected_for_preview
@@ -621,9 +732,10 @@ class SpectralPhantomDesignerDialog(QDialog):
         preview_title.setWordWrap(True)
         preview_layout.addWidget(preview_title)
         hp_mz_help = QLabel(
-            "HP Mz is normalized hyperpolarized excess magnetization: HP Mz=1 is "
-            "the initial hyperpolarized level, not the thermal equilibrium value. "
-            "T1 relaxation therefore drives it toward approximately 0."
+            "This preview is active only for the hyperpolarized model. HP Mz is "
+            "spin density × initial polarization (plus inflow/conversion). "
+            "Polarization=1 is thermal equilibrium; T1 drives any larger or "
+            "smaller polarization toward 1."
         )
         hp_mz_help.setWordWrap(True)
         preview_layout.addWidget(hp_mz_help)
@@ -640,8 +752,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         preview_form.addRow("kPL source for this voxel", self.kinetics_preview_region)
         self.zero_lactate_button = QPushButton("Set selected shape to initial Lz = 0")
         self.zero_lactate_button.setToolTip(
-            "Sets the Lactate initial pool weight to zero without removing the "
-            "Lactate pool; positive kPL can then create Lactate from Pyruvate."
+            "Sets Lactate initial polarization to zero without changing its spin "
+            "density; positive kPL can then create Lactate from Pyruvate."
         )
         self.zero_lactate_button.clicked.connect(self._set_selected_shape_lactate_zero)
         preview_form.addRow("Pyruvate-only start", self.zero_lactate_button)
@@ -655,7 +767,9 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.kinetics_preview_graphics = pg.GraphicsLayoutWidget()
         self.kinetics_preview_graphics.setMinimumWidth(420)
         self.inflow_preview_plot = self.kinetics_preview_graphics.addPlot(row=0, col=0)
-        self.inflow_preview_plot.setLabel("left", "Inflow", units="rel. Mz/s")
+        self.inflow_preview_plot.setLabel(
+            "left", "Concentration inflow", units="relative/s"
+        )
         self.inflow_preview_plot.showGrid(x=True, y=True, alpha=0.25)
         self.inflow_preview_curve = self.inflow_preview_plot.plot(
             pen=pg.mkPen("y", width=2),
@@ -668,8 +782,26 @@ class SpectralPhantomDesignerDialog(QDialog):
             pen=pg.mkPen((180, 180, 180), width=1, style=Qt.DashLine),
         )
         self.inflow_preview_plot.addItem(self.inflow_sequence_start_line)
-        self.pool_preview_plot = self.kinetics_preview_graphics.addPlot(row=1, col=0)
-        self.pool_preview_plot.setLabel("left", "Hyperpolarized Mz")
+        self.polarization_preview_plot = self.kinetics_preview_graphics.addPlot(
+            row=1, col=0
+        )
+        self.polarization_preview_plot.setLabel("left", "Polarization")
+        self.polarization_preview_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.polarization_preview_plot.addLegend(offset=(8, 8))
+        self.pyruvate_polarization_curve = self.polarization_preview_plot.plot(
+            pen=pg.mkPen("c", width=2), name="Pyruvate P"
+        )
+        self.lactate_polarization_curve = self.polarization_preview_plot.plot(
+            pen=pg.mkPen("m", width=2, style=Qt.DashLine), name="Lactate P"
+        )
+        self.equilibrium_polarization_line = pg.InfiniteLine(
+            pos=1.0,
+            angle=0,
+            pen=pg.mkPen((180, 180, 180), width=1, style=Qt.DotLine),
+        )
+        self.polarization_preview_plot.addItem(self.equilibrium_polarization_line)
+        self.pool_preview_plot = self.kinetics_preview_graphics.addPlot(row=2, col=0)
+        self.pool_preview_plot.setLabel("left", "Mz = concentration × P")
         self.pool_preview_plot.setLabel("bottom", "Time", units="s")
         self.pool_preview_plot.showGrid(x=True, y=True, alpha=0.25)
         self.pool_preview_plot.addLegend(offset=(8, 8))
@@ -692,15 +824,29 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.pool_preview_plot.addItem(self.pool_sequence_start_line)
         self.pool_preview_plot.addItem(self.conversion_start_line)
         self.pool_preview_plot.setXLink(self.inflow_preview_plot)
+        self.polarization_preview_plot.setXLink(self.inflow_preview_plot)
         preview_layout.addWidget(self.kinetics_preview_graphics)
         self.kinetics_preview_info = QLabel()
         self.kinetics_preview_info.setWordWrap(True)
         preview_layout.addWidget(self.kinetics_preview_info)
 
-        kinetics_splitter.addWidget(kinetics_controls)
+        # Keep explanatory text and fields at their natural height. On shorter
+        # displays the controls scroll instead of being compressed until labels
+        # and checkboxes overlap.
+        kinetics_controls.setMinimumHeight(kinetics_controls.sizeHint().height())
+        kinetics_scroll = QScrollArea()
+        kinetics_scroll.setWidgetResizable(True)
+        kinetics_scroll.setFrameShape(QFrame.NoFrame)
+        kinetics_scroll.setMinimumWidth(620)
+        kinetics_scroll.setWidget(kinetics_controls)
+        self.kinetics_controls_scroll = kinetics_scroll
+        self.kinetics_splitter = kinetics_splitter
+
+        kinetics_splitter.addWidget(kinetics_scroll)
         kinetics_splitter.addWidget(preview_panel)
         kinetics_splitter.setStretchFactor(0, 1)
         kinetics_splitter.setStretchFactor(1, 1)
+        kinetics_splitter.setSizes([650, 750])
         kinetics_page_layout.addWidget(kinetics_splitter)
         self.tabs.addTab(kinetics_page, "Kinetics / kPL")
 
@@ -709,6 +855,9 @@ class SpectralPhantomDesignerDialog(QDialog):
 
         action_row = QHBoxLayout()
         preview = QPushButton("Update preview")
+        preview.setToolTip(
+            "Rasterize the current design; use the 3D view to orbit around it"
+        )
         preview.clicked.connect(self._preview)
         save = QPushButton("Save design…")
         save.clicked.connect(self._save)
@@ -761,6 +910,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.spectral_reference_ppm.setValue(self.design.spectral_reference_ppm)
         self.spectral_bandwidth_ppm.setValue(self.design.spectral_bandwidth_ppm)
         self.spectral_points.setValue(int(self.design.spectral_points))
+        self.supersampling_enabled.setChecked(self.design.supersampling_enabled)
+        self.supersampling_factor.setValue(int(self.design.supersampling_factor))
         self._update_spectral_resolution_info()
         mode_index = self.b0_mode_combo.findData(self.design.b0_inhomogeneity_mode)
         self.b0_mode_combo.setCurrentIndex(max(0, mode_index))
@@ -773,10 +924,10 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.kinetics_time_offset_s.setValue(self.design.kinetics_time_offset_s)
         self.inflow_enabled.setChecked(self.design.pyruvate_inflow_curve is not None)
         self.dynamic_b0_enabled.setChecked(self.design.dynamic_b0_curve is not None)
-        self._populate_time_curve(
-            self.inflow_curve_table,
+        self._populate_inflow_curve(
             self.design.pyruvate_inflow_curve,
-            default=((0.0, 0.0), (5.0, 0.1), (15.0, 0.0)),
+            self.design.pyruvate_inflow_polarization_curve,
+            default=((0.0, 0.0, 1.0), (5.0, 10.0, 10000.0), (6.0, 0.0, 1.0)),
         )
         self._populate_time_curve(
             self.dynamic_b0_curve_table,
@@ -805,7 +956,9 @@ class SpectralPhantomDesignerDialog(QDialog):
             item.center[1] - item.size[1] / 2,
         )
         size = item.size[:2]
-        roi_class = pg.EllipseROI if item.kind == "ellipsoid" else pg.RectROI
+        roi_class = (
+            pg.EllipseROI if item.kind in {"ellipsoid", "cylinder"} else pg.RectROI
+        )
         roi = roi_class(position, size, pen=self._roi_pen(index, False))
         roi.sigRegionChangeFinished.connect(self._roi_changed)
         original_mouse_click = roi.mouseClickEvent
@@ -845,6 +998,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             return
         self._updating = True
         item = self.design.shapes[row]
+        self._configure_shape_geometry_controls(item)
         self.shape_name.setText(item.name)
         self.kind_label.setText(item.kind)
         self.x_center.setValue(item.center[0] * 100.0)
@@ -853,6 +1007,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.x_size.setValue(item.size[0] * 100.0)
         self.y_size.setValue(item.size[1] * 100.0)
         self.z_size.setValue(item.size[2] * 100.0)
+        for widget, angle in zip(self.rotation_spins, item.rotation_deg):
+            widget.setValue(float(angle))
         self.t1_ms.setValue(item.t1_s * 1000.0)
         self.initial_mz.setValue(item.initial_mz)
         self.b0_ppm.setValue(item.b0_ppm)
@@ -862,6 +1018,11 @@ class SpectralPhantomDesignerDialog(QDialog):
         self._set_kinetics_preview_shape(row)
         self._update_roi_highlights(row)
         self._update_kinetics_preview()
+
+    def _configure_shape_geometry_controls(self, item):
+        is_cylinder = item.kind == "cylinder"
+        self.z_size_label.setText("Cylinder length" if is_cylinder else "Z size")
+        self.z_size.setMaximum(1000.0 if is_cylinder else 100.0)
 
     def _roi_changed(self):
         if self._updating:
@@ -896,9 +1057,12 @@ class SpectralPhantomDesignerDialog(QDialog):
         size_mm = tuple(
             item.size[index] * self.fov_spins[index].value() for index in range(2)
         )
+        z_size_mm = item.size[2] * self.fov_spins[2].value()
         self.xy_info.setText(
             f"centre=({center_mm[0]:.3g}, {center_mm[1]:.3g}) mm; "
-            f"size=({size_mm[0]:.3g}, {size_mm[1]:.3g}) mm"
+            f"size=({size_mm[0]:.3g}, {size_mm[1]:.3g}) mm; "
+            f"{'length' if item.kind == 'cylinder' else 'Z size'}="
+            f"{z_size_mm:.3g} mm"
         )
 
     def _update_canvas_axes(self, *_):
@@ -939,6 +1103,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         )
         item.center = center
         item.size = size
+        item.rotation_deg = tuple(widget.value() for widget in self.rotation_spins)
         item.t1_s = self.t1_ms.value() / 1000.0
         item.initial_mz = self.initial_mz.value()
         item.b0_ppm = self.b0_ppm.value()
@@ -965,6 +1130,11 @@ class SpectralPhantomDesignerDialog(QDialog):
                 (
                     peak.name,
                     peak.amplitude,
+                    (
+                        ""
+                        if peak.initial_polarization is None
+                        else peak.initial_polarization
+                    ),
                     peak.frequency_ppm + self.spectral_reference_ppm.value(),
                     "" if peak.t1_s is None else peak.t1_s * 1000,
                     peak.t2_star_s * 1000,
@@ -988,15 +1158,19 @@ class SpectralPhantomDesignerDialog(QDialog):
         peaks = []
         reference_ppm = self.spectral_reference_ppm.value()
         for peak_row in range(self.peak_table.rowCount()):
-            t1_text = self.peak_table.item(peak_row, 3).text().strip()
+            polarization_text = self.peak_table.item(peak_row, 2).text().strip()
+            t1_text = self.peak_table.item(peak_row, 4).text().strip()
             peak = SpectralPeakDefinition(
                 name=self.peak_table.item(peak_row, 0).text(),
                 amplitude=float(self.peak_table.item(peak_row, 1).text()),
                 frequency_ppm=(
-                    float(self.peak_table.item(peak_row, 2).text()) - reference_ppm
+                    float(self.peak_table.item(peak_row, 3).text()) - reference_ppm
                 ),
-                t2_star_s=float(self.peak_table.item(peak_row, 4).text()) / 1000.0,
+                t2_star_s=float(self.peak_table.item(peak_row, 5).text()) / 1000.0,
                 t1_s=None if not t1_text else float(t1_text) / 1000.0,
+                initial_polarization=(
+                    None if not polarization_text else float(polarization_text)
+                ),
             )
             peak.validate()
             peaks.append(peak)
@@ -1026,6 +1200,55 @@ class SpectralPhantomDesignerDialog(QDialog):
             table.setItem(row, 0, QTableWidgetItem(str(time_s)))
             table.setItem(row, 1, QTableWidgetItem(str(value)))
 
+    def _populate_inflow_curve(self, rate_curve, polarization_curve, default):
+        if rate_curve is None:
+            samples = tuple(default)
+        else:
+            samples = tuple(
+                (
+                    time_s,
+                    rate,
+                    (
+                        1.0
+                        if polarization_curve is None
+                        else polarization_curve.value_at(time_s)
+                    ),
+                )
+                for time_s, rate in zip(rate_curve.times_s, rate_curve.values)
+            )
+        self.inflow_curve_table.setRowCount(len(samples))
+        for row, values in enumerate(samples):
+            for column, value in enumerate(values):
+                self.inflow_curve_table.setItem(
+                    row, column, QTableWidgetItem(str(value))
+                )
+
+    def _read_inflow_curves(self):
+        samples = []
+        for row in range(self.inflow_curve_table.rowCount()):
+            values = tuple(
+                float(self.inflow_curve_table.item(row, column).text())
+                for column in range(3)
+            )
+            samples.append(values)
+        if not samples:
+            raise ValueError("enabled inflow requires at least one sample")
+        times = tuple(item[0] for item in samples)
+        return (
+            TimeCurve(
+                times_s=times,
+                values=tuple(item[1] for item in samples),
+                interpolation="step",
+                outside="zero",
+            ),
+            TimeCurve(
+                times_s=times,
+                values=tuple(item[2] for item in samples),
+                interpolation="step",
+                outside="hold",
+            ),
+        )
+
     @staticmethod
     def _read_time_curve(table, *, outside):
         samples = []
@@ -1048,10 +1271,15 @@ class SpectralPhantomDesignerDialog(QDialog):
         row = table.rowCount()
         if row:
             previous_time = float(table.item(row - 1, 0).text())
-            previous_value = float(table.item(row - 1, 1).text())
-            values = (previous_time + 1.0, previous_value)
+            values = (
+                previous_time + 1.0,
+                *(
+                    float(table.item(row - 1, column).text())
+                    for column in range(1, table.columnCount())
+                ),
+            )
         else:
-            values = (0.0, 0.0)
+            values = (0.0,) + tuple(0.0 for _ in range(table.columnCount() - 1))
         table.insertRow(row)
         for column, value in enumerate(values):
             table.setItem(row, column, QTableWidgetItem(str(value)))
@@ -1069,14 +1297,16 @@ class SpectralPhantomDesignerDialog(QDialog):
         rows = []
         for row in range(table.rowCount()):
             time_item = table.item(row, 0)
-            value_item = table.item(row, 1)
-            if time_item is None or value_item is None:
+            value_items = tuple(
+                table.item(row, column) for column in range(1, table.columnCount())
+            )
+            if time_item is None or any(item is None for item in value_items):
                 return
             try:
                 time_s = float(time_item.text())
             except ValueError:
                 return
-            rows.append((time_s, row, time_item, value_item))
+            rows.append((time_s, row, time_item, value_items))
 
         sorted_rows = sorted(rows, key=lambda item: item[0])
         if all(
@@ -1087,12 +1317,15 @@ class SpectralPhantomDesignerDialog(QDialog):
 
         previous = table.blockSignals(True)
         for row in range(table.rowCount()):
-            table.takeItem(row, 0)
-            table.takeItem(row, 1)
+            for column in range(table.columnCount()):
+                table.takeItem(row, column)
         new_edited_row = edited_row
-        for new_row, (_, original_row, time_item, value_item) in enumerate(sorted_rows):
+        for new_row, (_, original_row, time_item, value_items) in enumerate(
+            sorted_rows
+        ):
             table.setItem(new_row, 0, time_item)
-            table.setItem(new_row, 1, value_item)
+            for column, value_item in enumerate(value_items, start=1):
+                table.setItem(new_row, column, value_item)
             if original_row == edited_row:
                 new_edited_row = new_row
         table.setCurrentCell(new_edited_row, edited_column)
@@ -1203,13 +1436,30 @@ class SpectralPhantomDesignerDialog(QDialog):
                 f"Preview unavailable: {shape.name} has no {lactate_name!r} pool"
             )
             return
-        lactate_peak.amplitude = 0.0
+        lactate_peak.initial_polarization = 0.0
         if self._current_row() == shape_row:
             self._populate_peaks(shape)
         self._update_kinetics_preview()
 
     def _update_kinetics_preview(self, *_):
         if self._updating or not hasattr(self, "pyruvate_preview_curve"):
+            return
+        if not self.dynamic_enabled.isChecked():
+            self.inflow_preview_curve.setData([], [])
+            self.pyruvate_preview_curve.setData([], [])
+            self.lactate_preview_curve.setData([], [])
+            self.pyruvate_polarization_curve.setData([], [])
+            self.lactate_polarization_curve.setData([], [])
+            self.inflow_sequence_start_line.setVisible(False)
+            self.pool_sequence_start_line.setVisible(False)
+            self.conversion_start_line.setVisible(False)
+            self.kinetics_preview_info.setText(
+                "Hyperpolarized preview inactive. Enable the hyperpolarized "
+                "pyruvate/lactate model above to use concentration-resolved "
+                "kinetics. With "
+                "the model off, the conventional spectral phantom uses "
+                "polarization=1 as thermal equilibrium."
+            )
             return
         try:
             shape_row = self.kinetics_preview_shape.currentData()
@@ -1231,20 +1481,27 @@ class SpectralPhantomDesignerDialog(QDialog):
                 )
             pyruvate_peak = peaks[pyruvate_name]
             lactate_peak = peaks[lactate_name]
+            spin_density = (
+                pyruvate_peak.amplitude,
+                lactate_peak.amplitude,
+            )
+            initial_polarization = (
+                pyruvate_peak.effective_initial_polarization(shape.initial_mz),
+                lactate_peak.effective_initial_polarization(shape.initial_mz),
+            )
             initial_mz = (
-                shape.initial_mz * pyruvate_peak.amplitude,
-                shape.initial_mz * lactate_peak.amplitude,
+                spin_density[0] * initial_polarization[0],
+                spin_density[1] * initial_polarization[1],
             )
             t1_s = (
                 pyruvate_peak.effective_t1_s(shape.t1_s),
                 lactate_peak.effective_t1_s(shape.t1_s),
             )
             kpl_s_inv, kpl_label = self._preview_kpl()
-            inflow_curve = (
-                self._read_time_curve(self.inflow_curve_table, outside="zero")
-                if self.inflow_enabled.isChecked()
-                else None
-            )
+            if self.inflow_enabled.isChecked():
+                inflow_curve, inflow_polarization_curve = self._read_inflow_curves()
+            else:
+                inflow_curve = inflow_polarization_curve = None
             conversion_start_s = self.conversion_start_s.value()
             kinetics_time_offset_s = self.kinetics_time_offset_s.value()
             sequence_inflow_curve = (
@@ -1270,7 +1527,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             if preview_start_s <= sequence_conversion_start_s <= duration_s:
                 visible_knots.append(sequence_conversion_start_s)
             times_s = np.unique(np.concatenate((times_s, visible_knots)))
-            pools = simulate_two_pool_kinetics(
+            pools, concentrations = simulate_two_pool_kinetics(
                 times_s,
                 initial_mz,
                 t1_s,
@@ -1279,6 +1536,10 @@ class SpectralPhantomDesignerDialog(QDialog):
                 conversion_start_s=conversion_start_s,
                 initial_time_s=preview_start_s,
                 kinetics_time_offset_s=kinetics_time_offset_s,
+                initial_concentration=spin_density,
+                inflow_polarization_curve=inflow_polarization_curve,
+                equilibrium_polarization=1.0,
+                return_concentration=True,
             )
             inflow = (
                 np.zeros_like(times_s)
@@ -1290,8 +1551,19 @@ class SpectralPhantomDesignerDialog(QDialog):
             self.inflow_preview_curve.setData(times_s, inflow)
             self.pyruvate_preview_curve.setData(times_s, pools[0])
             self.lactate_preview_curve.setData(times_s, pools[1])
+            polarization = np.divide(
+                pools,
+                concentrations,
+                out=np.zeros_like(pools),
+                where=concentrations > 1e-15,
+            )
+            self.pyruvate_polarization_curve.setData(times_s, polarization[0])
+            self.lactate_polarization_curve.setData(times_s, polarization[1])
             self.inflow_preview_plot.setXRange(preview_start_s, duration_s, padding=0.0)
             self.pool_preview_plot.setXRange(preview_start_s, duration_s, padding=0.0)
+            self.polarization_preview_plot.setXRange(
+                preview_start_s, duration_s, padding=0.0
+            )
             has_preroll = preview_start_s < 0.0
             self.inflow_sequence_start_line.setVisible(has_preroll)
             self.pool_sequence_start_line.setVisible(has_preroll)
@@ -1305,6 +1577,7 @@ class SpectralPhantomDesignerDialog(QDialog):
                 self.inflow_preview_plot.disableAutoRange(axis=pg.ViewBox.YAxis)
                 self.inflow_preview_plot.setYRange(0.0, 1.0, padding=0.05)
             self.pool_preview_plot.enableAutoRange(axis=pg.ViewBox.YAxis)
+            self.polarization_preview_plot.enableAutoRange(axis=pg.ViewBox.YAxis)
             zero_index = int(np.searchsorted(times_s, 0.0))
             details = (
                 f"Representative voxel in {shape.name} · kPL source: {kpl_label}. "
@@ -1313,36 +1586,40 @@ class SpectralPhantomDesignerDialog(QDialog):
                 f"t={sequence_conversion_start_s:.4g} s "
                 f"(kinetics t={conversion_start_s:.4g} s), "
                 f"T1(P/L)=({t1_s[0]:.4g}/{t1_s[1]:.4g}) s, "
-                f"initial HP Mz at sequence t={preview_start_s:.4g} s="
+                f"spin density(P/L)=({spin_density[0]:.4g}/{spin_density[1]:.4g}), "
+                f"initial polarization(P/L)=({initial_polarization[0]:.4g}/"
+                f"{initial_polarization[1]:.4g}), "
+                f"initial Mz=C×P at sequence t={preview_start_s:.4g} s="
                 f"({initial_mz[0]:.4g}/{initial_mz[1]:.4g}), "
-                f"sequence-start HP Mz at t=0="
+                f"sequence-start Mz at t=0="
                 f"({pools[0, zero_index]:.4g}/{pools[1, zero_index]:.4g}), "
-                f"HP Mz({duration_s:.4g} s)=({pools[0, -1]:.4g}/"
-                f"{pools[1, -1]:.4g})."
+                f"Mz({duration_s:.4g} s)=({pools[0, -1]:.4g}/"
+                f"{pools[1, -1]:.4g}), polarization="
+                f"({polarization[0, -1]:.4g}/{polarization[1, -1]:.4g})."
             )
             explanations = []
             if kpl_s_inv == 0.0:
                 explanations.append(
                     "kPL=0: no P→L conversion; each existing pool only follows its "
-                    "own T1 decay toward zero, while enabled inflow is added only "
-                    "to Pz. HP Mz=1 is an initial normalization, not an equilibrium "
-                    "target."
+                    "own T1 relaxation toward polarization 1, while enabled inflow "
+                    "is added only to Pyruvate."
                 )
                 if initial_mz[1] > 0:
                     explanations.append(
-                        "Lz starts above zero because the Lactate initial pool "
-                        "weight is non-zero; this lactate was initialized, not "
-                        "created by conversion."
+                        "Lz starts above zero because both Lactate spin density and "
+                        "initial polarization are non-zero; this lactate was "
+                        "initialized, not created by conversion."
                     )
                 else:
                     explanations.append(
-                        "Lz starts at zero and remains zero until kPL is set above "
-                        "zero for this voxel."
+                        "Lz starts at zero and recovers thermally toward "
+                        "Mz=concentration (polarization 1), even when kPL=0."
                     )
             elif initial_mz[1] == 0.0:
                 explanations.append(
-                    "Lz starts at zero; all subsequent Lactate is created from "
-                    "Pyruvate by kPL conversion."
+                    "Lz starts at zero; kPL conversion adds Pyruvate-derived "
+                    "Lactate magnetization alongside thermal recovery toward "
+                    "polarization 1."
                 )
             if np.allclose(pools[0], pools[1], rtol=1e-7, atol=1e-10):
                 explanations.append(
@@ -1354,6 +1631,8 @@ class SpectralPhantomDesignerDialog(QDialog):
             self.inflow_preview_curve.setData([], [])
             self.pyruvate_preview_curve.setData([], [])
             self.lactate_preview_curve.setData([], [])
+            self.pyruvate_polarization_curve.setData([], [])
+            self.lactate_polarization_curve.setData([], [])
             self.kinetics_preview_info.setText(f"Preview unavailable: {exc}")
 
     def _read_kinetic_regions(self):
@@ -1422,7 +1701,8 @@ class SpectralPhantomDesignerDialog(QDialog):
 
     def _shape_drawing_cancelled(self):
         self.canvas_instruction.setText(
-            "Move/resize existing shapes, or choose Draw and drag in the axial XY plane"
+            "Move/resize shapes in XY; set 3D angles on the right and use Update "
+            "preview to inspect the rotated volume"
         )
 
     def _shape_drawn(self, kind, left, bottom, width, height):
@@ -1487,6 +1767,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.design.spectral_reference_ppm = self.spectral_reference_ppm.value()
         self.design.spectral_bandwidth_ppm = self.spectral_bandwidth_ppm.value()
         self.design.spectral_points = self.spectral_points.value()
+        self.design.supersampling_enabled = self.supersampling_enabled.isChecked()
+        self.design.supersampling_factor = self.supersampling_factor.value()
         self.design.b0_inhomogeneity_mode = str(self.b0_mode_combo.currentData())
         self.design.b0_inhomogeneity_ppm = self.b0_inhomogeneity_ppm.value()
         dynamic_requested = (
@@ -1502,11 +1784,14 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.design.conversion_start_s = self.conversion_start_s.value()
         self.design.kinetics_time_offset_s = self.kinetics_time_offset_s.value()
         self.design.kinetic_regions = self._read_kinetic_regions()
-        self.design.pyruvate_inflow_curve = (
-            self._read_time_curve(self.inflow_curve_table, outside="zero")
-            if self.inflow_enabled.isChecked()
-            else None
-        )
+        if self.inflow_enabled.isChecked():
+            (
+                self.design.pyruvate_inflow_curve,
+                self.design.pyruvate_inflow_polarization_curve,
+            ) = self._read_inflow_curves()
+        else:
+            self.design.pyruvate_inflow_curve = None
+            self.design.pyruvate_inflow_polarization_curve = None
         self.design.dynamic_b0_curve = (
             self._read_time_curve(self.dynamic_b0_curve_table, outside="hold")
             if self.dynamic_b0_enabled.isChecked()

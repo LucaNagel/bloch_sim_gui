@@ -8,13 +8,17 @@ from blochsimulator.sequence import (
     RFEvent,
     SequenceCompiler,
     SequenceProgram,
+    physical_sequence_waveforms,
 )
 from blochsimulator.units import (
+    NUCLEUS_GAMMA_HZ_PER_T,
     gradient_g_per_cm_to_hz_per_m,
     gradient_hz_per_m_to_g_per_cm,
+    gradient_hz_per_m_to_t_per_m,
     gradient_t_per_m_to_g_per_cm,
     rf_gauss_to_hz,
     rf_hz_to_gauss,
+    rf_hz_to_gauss_for_nucleus,
 )
 
 
@@ -27,6 +31,26 @@ def test_unit_conversions_round_trip():
         gradient,
     )
     assert gradient_t_per_m_to_g_per_cm(1.0) == pytest.approx(100.0)
+
+
+def test_nucleus_specific_physical_units_and_sequence_waveforms():
+    gamma = NUCLEUS_GAMMA_HZ_PER_T["C13"]
+    assert rf_hz_to_gauss_for_nucleus(gamma / 1e4, "C13") == pytest.approx(1.0)
+    assert gradient_hz_per_m_to_t_per_m(gamma * 0.02, "C13") == pytest.approx(0.02)
+    program = SequenceProgram(
+        (
+            RFEvent(0.0, np.asarray([gamma / 1e4 * (1 + 1j)]), 1e-3),
+            GradientEvent("y", 0.0, np.asarray([gamma * 0.02]), 1e-3),
+        ),
+        duration_s=1e-3,
+    )
+
+    waveforms = physical_sequence_waveforms(program, "C13")
+
+    assert waveforms["rf_b1_gauss"][0] == pytest.approx(1 + 1j)
+    assert waveforms["rf_b1_magnitude_gauss"][0] == pytest.approx(np.sqrt(2))
+    assert waveforms["gradient_t_per_m"][0] == pytest.approx(0.02)
+    assert waveforms["gradient_axis_index"][0] == 1
 
 
 def test_phantom_coordinates_are_voxel_centres():

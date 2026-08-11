@@ -51,6 +51,8 @@ from ..memory import (
     set_default_memory_policy,
 )
 from ..simulator import BlochSimulator, TissueParameters, resolve_num_threads
+from ..spectral_phantom import SpectralPhantom
+from ..dynamic_phantom import DynamicSpectralPhantom
 from ..sequence import load_scanner_parameters, save_scanner_parameters
 from ..visualization import (
     ImageExporter,
@@ -62,6 +64,7 @@ from ..visualization import (
     imageio as vz_imageio,
 )
 from ..slice_explorer import SliceSelectionExplorer
+from ..project_io import load_project, save_project
 
 # Import phantom/kspace if available
 try:
@@ -91,7 +94,82 @@ from .parameter_sweep import ParameterSweepWidget
 from .tutorial_manager import TutorialManager
 from .tutorial_overlay import TutorialOverlay
 from .dialogs import SettingsDialog
+from .default_settings import WorkspaceDefaults
 from .sequence_simulation_widget import SequenceSimulationWidget
+from .b1_widgets import B1PhantomCombinationWidget, B1WorkspaceWidget
+
+
+def _view_title(text: str) -> QLabel:
+    """Return a hidden legacy title; the tab label is the single page title."""
+    label = QLabel(text)
+    font = label.font()
+    font.setBold(False)
+    font.setPointSize(max(font.pointSize() + 2, 12))
+    label.setFont(font)
+    label.setVisible(False)
+    return label
+
+
+def _capture_widget_state(owner):
+    """Capture direct, user-editable Qt attributes without serializing Qt itself."""
+    state = {}
+    for name, widget in vars(owner).items():
+        if isinstance(widget, QComboBox):
+            state[name] = {
+                "type": "combo",
+                "index": widget.currentIndex(),
+                "text": widget.currentText(),
+            }
+        elif isinstance(widget, (QSpinBox, QDoubleSpinBox, QSlider)):
+            state[name] = {"type": "value", "value": widget.value()}
+        elif isinstance(widget, QCheckBox):
+            state[name] = {"type": "checked", "value": widget.isChecked()}
+    return state
+
+
+def _restore_widget_state(owner, state):
+    for name, saved in state.items():
+        widget = getattr(owner, name, None)
+        if widget is None:
+            continue
+        kind = saved.get("type")
+        if kind == "combo" and isinstance(widget, QComboBox):
+            text = str(saved.get("text", ""))
+            index = widget.findText(text)
+            if index < 0 and text:
+                # Older project files may use equivalent numeric formatting,
+                # e.g. "7T" while the current item is "7.0T".
+                try:
+                    saved_number = float(text.removesuffix("T").strip())
+                except ValueError:
+                    saved_number = None
+                if saved_number is not None:
+                    for candidate in range(widget.count()):
+                        candidate_text = widget.itemText(candidate)
+                        try:
+                            if np.isclose(
+                                float(candidate_text.removesuffix("T").strip()),
+                                saved_number,
+                            ):
+                                index = candidate
+                                break
+                        except ValueError:
+                            continue
+            if index < 0:
+                saved_index = int(saved.get("index", -1))
+                index = (
+                    saved_index
+                    if 0 <= saved_index < widget.count()
+                    else widget.currentIndex()
+                )
+            if index >= 0:
+                widget.setCurrentIndex(index)
+        elif kind == "value" and isinstance(
+            widget, (QSpinBox, QDoubleSpinBox, QSlider)
+        ):
+            widget.setValue(saved["value"])
+        elif kind == "checked" and isinstance(widget, QCheckBox):
+            widget.setChecked(bool(saved["value"]))
 
 
 def get_app_data_dir() -> Path:
@@ -115,6 +193,7 @@ class BlochSimulatorGUI(QMainWindow):
     """Main GUI window for the Bloch simulator."""
 
     WORKSPACE_SWITCH_DELAY_MS = 25 if sys.platform == "darwin" else 0
+    FREE_MODE_COMPONENT_WIDTH = 220
 
     def __init__(self):
         super().__init__()
@@ -504,6 +583,7 @@ class BlochSimulatorGUI(QMainWindow):
         playback_header_layout.setSpacing(4)
 
         colormap_controls = QWidget()
+        self.free_mode_colormap_controls = colormap_controls
         colormap_layout = QHBoxLayout(colormap_controls)
         colormap_layout.setContentsMargins(0, 0, 0, 0)
         colormap_layout.addWidget(QLabel("Heatmap colormap:"))
@@ -515,6 +595,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.heatmap_colormap.currentTextChanged.connect(self._apply_heatmap_colormap)
         colormap_layout.addWidget(self.heatmap_colormap)
         colormap_layout.addStretch()
+        self.free_mode_colormap_layout = colormap_layout
         playback_header_layout.addWidget(colormap_controls)
 
         # Universal time control - controls all time-resolved views
@@ -529,15 +610,19 @@ class BlochSimulatorGUI(QMainWindow):
         self.tab_widget.tabBar().setUsesScrollButtons(True)
         self.tab_widget.tabBar().setExpanding(False)
         self.tab_widget.tabBar().setElideMode(Qt.ElideRight)
+        tab_font = self.tab_widget.tabBar().font()
+        tab_font.setBold(True)
+        self.tab_widget.tabBar().setFont(tab_font)
 
         # Magnetization plots
         mag_widget = QWidget()
         mag_layout = QVBoxLayout()
+        mag_layout.setContentsMargins(6, 6, 6, 6)
         mag_widget.setLayout(mag_layout)
 
         # View header
         mag_header = QHBoxLayout()
-        mag_header.addWidget(QLabel("Magnetization Evolution"))
+        mag_header.addWidget(_view_title("Magnetization Evolution"))
         mag_header.addStretch()
         mag_layout.addLayout(mag_header)
 
@@ -561,6 +646,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.mag_component.addItems(
             ["Magnitude", "Real (Mx/Re)", "Imaginary (My/Im)", "Phase", "Mz"]
         )
+        self.mag_component.setFixedWidth(self.FREE_MODE_COMPONENT_WIDTH)
         self.mag_component.currentTextChanged.connect(
             lambda _: self._refresh_mag_plots()
         )
@@ -657,6 +743,7 @@ class BlochSimulatorGUI(QMainWindow):
         if hasattr(self.mag_3d, "control_container"):
             self.mag_3d.control_container.setVisible(True)
         self.mag_3d.export_3d_btn.setVisible(False)
+        self.mag_3d.header_container.setVisible(False)
         # QOpenGLWidget does not need scrolling here. In particular, nesting it
         # in QAbstractScrollArea can leave the native macOS surface at the old
         # viewport size after a workspace switch, producing stale perspective,
@@ -666,11 +753,12 @@ class BlochSimulatorGUI(QMainWindow):
         # Signal plot
         signal_widget = QWidget()
         signal_layout = QVBoxLayout()
+        signal_layout.setContentsMargins(6, 6, 6, 6)
         signal_widget.setLayout(signal_layout)
 
         # View header
         signal_header = QHBoxLayout()
-        signal_header.addWidget(QLabel("Signal Evolution"))
+        signal_header.addWidget(_view_title("Signal Evolution"))
         signal_header.addStretch()
         signal_layout.addLayout(signal_header)
 
@@ -690,6 +778,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.signal_component = QComboBox()
         self.signal_component.setObjectName("signal_component")
         self.signal_component.addItems(["Magnitude", "Real", "Imaginary", "Phase"])
+        self.signal_component.setFixedWidth(self.FREE_MODE_COMPONENT_WIDTH)
         self.signal_component.currentTextChanged.connect(
             lambda _: self._refresh_signal_plots()
         )
@@ -763,14 +852,16 @@ class BlochSimulatorGUI(QMainWindow):
 
         spectrum_container = QWidget()
         spectrum_layout = QVBoxLayout()
+        spectrum_layout.setContentsMargins(6, 6, 6, 6)
 
         # View header
         spectrum_header = QHBoxLayout()
-        spectrum_header.addWidget(QLabel("Frequency Spectrum"))
+        spectrum_header.addWidget(_view_title("Frequency Spectrum"))
         spectrum_header.addStretch()
         spectrum_layout.addLayout(spectrum_header)
 
         spectrum_controls = QHBoxLayout()
+        self.spectrum_controls_layout = spectrum_controls
 
         # 3D View Toggle
         self.spectrum_3d_toggle = QCheckBox("3D View")
@@ -818,12 +909,10 @@ class BlochSimulatorGUI(QMainWindow):
         self.spectrum_pos_label = QLabel("Pos: 0.00 mm")
         spectrum_controls.addWidget(self.spectrum_pos_label)
         spectrum_controls.addWidget(self.spectrum_pos_slider)
-        spectrum_layout.addLayout(spectrum_controls)
 
-        # Component selector for spectrum
-        spectrum_comp_layout = QHBoxLayout()
+        # Component selector shares the primary control row.
         self.spectrum_component_label = QLabel("Component:")
-        spectrum_comp_layout.addWidget(self.spectrum_component_label)
+        spectrum_controls.addWidget(self.spectrum_component_label)
         self.spectrum_component_combo = CheckableComboBox()
         self.spectrum_component_combo.add_items(
             ["Magnitude", "Phase", "Phase (unwrapped)", "Real", "Imaginary", "Mz"]
@@ -836,7 +925,7 @@ class BlochSimulatorGUI(QMainWindow):
                 else None
             )
         )
-        spectrum_comp_layout.addWidget(self.spectrum_component_combo)
+        spectrum_controls.addWidget(self.spectrum_component_combo)
 
         # Heatmap specific mode selector
         self.spectrum_heatmap_mode_label = QLabel("Heatmap mode:")
@@ -854,10 +943,9 @@ class BlochSimulatorGUI(QMainWindow):
         )
         self.spectrum_heatmap_mode_label.setVisible(False)
         self.spectrum_heatmap_mode.setVisible(False)
-        spectrum_comp_layout.addWidget(self.spectrum_heatmap_mode_label)
-        spectrum_comp_layout.addWidget(self.spectrum_heatmap_mode)
-
-        spectrum_layout.addLayout(spectrum_comp_layout)
+        spectrum_controls.addWidget(self.spectrum_heatmap_mode_label)
+        spectrum_controls.addWidget(self.spectrum_heatmap_mode)
+        spectrum_layout.addLayout(spectrum_controls)
 
         spectrum_layout.addWidget(self.spectrum_plot)
         spectrum_layout.addWidget(self.spectrum_plot_3d)
@@ -885,10 +973,11 @@ class BlochSimulatorGUI(QMainWindow):
         # Note: Time control is now unified in the universal control below the tabs
         spatial_container = QWidget()
         spatial_layout = QVBoxLayout()
+        spatial_layout.setContentsMargins(6, 6, 6, 6)
 
         # View header
         spatial_header = QHBoxLayout()
-        spatial_header.addWidget(QLabel("Spatial Profile"))
+        spatial_header.addWidget(_view_title("Spatial Profile"))
         spatial_header.addStretch()
         spatial_layout.addLayout(spatial_header)
 
@@ -898,7 +987,39 @@ class BlochSimulatorGUI(QMainWindow):
         self.mean_only_checkbox.stateChanged.connect(
             lambda _: self.update_plots(self.last_result) if self.last_result else None
         )
-        spatial_layout.addWidget(self.mean_only_checkbox)
+        spatial_options = QHBoxLayout()
+        self.spatial_options_layout = spatial_options
+        spatial_options.addWidget(self.mean_only_checkbox)
+
+        # Toggle for colored position/frequency markers
+        self.spatial_markers_checkbox = QCheckBox(
+            "Show colored position/frequency markers"
+        )
+        self.spatial_markers_checkbox.setObjectName("spatial_markers_checkbox")
+        self.spatial_markers_checkbox.setChecked(False)
+        self.spatial_markers_checkbox.setToolTip(
+            "Display vertical lines at each position/frequency with 3D-view colors"
+        )
+        self.spatial_markers_checkbox.toggled.connect(
+            lambda _: self.update_spatial_plot_from_last_result()
+        )
+        spatial_options.addWidget(self.spatial_markers_checkbox)
+
+        # Component selector for spatial plot
+        self.spatial_component_label = QLabel("Component:")
+        spatial_options.addWidget(self.spatial_component_label)
+        self.spatial_component_combo = CheckableComboBox()
+        self.spatial_component_combo.add_items(
+            ["Magnitude", "Phase", "Phase (unwrapped)", "Real", "Imaginary"]
+        )
+        self.spatial_component_combo.set_selected_items(
+            ["Magnitude", "Real", "Imaginary"]
+        )
+        self.spatial_component_combo.selection_changed.connect(
+            lambda: self.update_spatial_plot_from_last_result()
+        )
+        spatial_options.addWidget(self.spatial_component_combo, 1)
+        spatial_layout.addLayout(spatial_options)
 
         spatial_controls = QHBoxLayout()
         spatial_controls.addWidget(QLabel("Plot type:"))
@@ -943,37 +1064,6 @@ class BlochSimulatorGUI(QMainWindow):
         spatial_controls.addWidget(self.spatial_freq_label)
         spatial_controls.addWidget(self.spatial_freq_slider)
         spatial_layout.addLayout(spatial_controls)
-
-        # Toggle for colored position/frequency markers
-        self.spatial_markers_checkbox = QCheckBox(
-            "Show colored position/frequency markers"
-        )
-        self.spatial_markers_checkbox.setObjectName("spatial_markers_checkbox")
-        self.spatial_markers_checkbox.setChecked(False)
-        self.spatial_markers_checkbox.setToolTip(
-            "Display vertical lines at each position/frequency with 3D-view colors"
-        )
-        self.spatial_markers_checkbox.toggled.connect(
-            lambda _: self.update_spatial_plot_from_last_result()
-        )
-        spatial_layout.addWidget(self.spatial_markers_checkbox)
-
-        # Component selector for spatial plot
-        spatial_comp_layout = QHBoxLayout()
-        self.spatial_component_label = QLabel("Component:")
-        spatial_comp_layout.addWidget(self.spatial_component_label)
-        self.spatial_component_combo = CheckableComboBox()
-        self.spatial_component_combo.add_items(
-            ["Magnitude", "Phase", "Phase (unwrapped)", "Real", "Imaginary"]
-        )
-        self.spatial_component_combo.set_selected_items(
-            ["Magnitude", "Real", "Imaginary"]
-        )
-        self.spatial_component_combo.selection_changed.connect(
-            lambda: self.update_spatial_plot_from_last_result()
-        )
-        spatial_comp_layout.addWidget(self.spatial_component_combo)
-        spatial_layout.addLayout(spatial_comp_layout)
 
         # Mxy and Mz plots side by side
         spatial_plots_layout = QHBoxLayout()
@@ -1106,6 +1196,36 @@ class BlochSimulatorGUI(QMainWindow):
         else:
             self.phantom_widget = None
             self.phantom_tab_index = -1
+
+        # === SPATIAL B1 FIELD TAB ===
+        self.b1_widget = None
+        self.b1_placeholder = QWidget()
+        self.b1_placeholder.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        b1_layout = QVBoxLayout(self.b1_placeholder)
+        b1_layout.setContentsMargins(0, 0, 0, 0)
+        b1_layout.addWidget(
+            QLabel("Open this tab to initialize the transmit/receive B1 workspace.")
+        )
+        b1_layout.addStretch()
+        self.b1_tab_index = self.tab_widget.addTab(self.b1_placeholder, "B1 Fields")
+        self.tab_widget.currentChanged.connect(self._ensure_b1_workspace)
+
+        # === PHANTOM + B1 COMBINATION TAB ===
+        self.b1_combo_widget = None
+        self.b1_combo_placeholder = QWidget()
+        self.b1_combo_placeholder.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Ignored
+        )
+        combo_layout = QVBoxLayout(self.b1_combo_placeholder)
+        combo_layout.setContentsMargins(0, 0, 0, 0)
+        combo_layout.addWidget(
+            QLabel("Open this tab to initialize the 3D Phantom/B1 alignment view.")
+        )
+        combo_layout.addStretch()
+        self.b1_combo_tab_index = self.tab_widget.addTab(
+            self.b1_combo_placeholder, "Phantom + B1"
+        )
+        self.tab_widget.currentChanged.connect(self._ensure_b1_combo_workspace)
 
         # === K-SPACE TAB (Signal-based simulation) ===
         if KSPACE_AVAILABLE:
@@ -1281,16 +1401,144 @@ class BlochSimulatorGUI(QMainWindow):
         layout.addWidget(self.phantom_widget)
         self._connect_phantom_sequence_workspaces()
 
-    def _connect_phantom_sequence_workspaces(self):
-        """Keep the Sequence Simulation phantom summary synchronized."""
-        sequence_widget = getattr(self, "sequence_simulation_widget", None)
-        phantom_widget = getattr(self, "phantom_widget", None)
-        if sequence_widget is None or phantom_widget is None:
+    def _ensure_b1_workspace(self, index: int):
+        """Create the B1 editors only when their focused tab is opened."""
+        if index != getattr(self, "b1_tab_index", -1) or self.b1_widget is not None:
             return
-        phantom_widget.phantom_creator.phantom_created.connect(
-            sequence_widget.refresh_object_summary
+        layout = self.b1_placeholder.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+        self.b1_widget = B1WorkspaceWidget(self)
+        layout.addWidget(self.b1_widget)
+        self.b1_widget.fields_changed.connect(self._on_b1_fields_changed)
+        self.b1_widget.phantom_updated.connect(self._on_b1_phantom_updated)
+        phantom_widget = getattr(self, "phantom_widget", None)
+        self.b1_widget.set_phantom(
+            None if phantom_widget is None else phantom_widget.current_phantom
         )
-        sequence_widget.refresh_object_summary()
+        self._on_b1_fields_changed(
+            self.b1_widget.tx_field,
+            self.b1_widget.rx_field,
+        )
+
+    def _ensure_b1_combo_workspace(self, index: int):
+        """Create the combined OpenGL view only when its tab is opened."""
+        if (
+            index != getattr(self, "b1_combo_tab_index", -1)
+            or self.b1_combo_widget is not None
+        ):
+            return
+        layout = self.b1_combo_placeholder.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+        self.b1_combo_widget = B1PhantomCombinationWidget(self)
+        layout.addWidget(self.b1_combo_widget)
+        phantom_widget = getattr(self, "phantom_widget", None)
+        self.b1_combo_widget.set_phantom(
+            None if phantom_widget is None else phantom_widget.current_phantom
+        )
+        b1_widget = getattr(self, "b1_widget", None)
+        self.b1_combo_widget.set_fields(
+            None if b1_widget is None else b1_widget.tx_field,
+            None if b1_widget is None else b1_widget.rx_field,
+        )
+
+    def _connect_phantom_sequence_workspaces(self):
+        """Keep all focused workspaces synchronized to the shared phantom."""
+        phantom_widget = getattr(self, "phantom_widget", None)
+        if phantom_widget is None:
+            return
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        try:
+            phantom_widget.phantom_creator.phantom_created.connect(
+                self._on_shared_phantom_changed,
+                type=Qt.UniqueConnection,
+            )
+        except TypeError:
+            pass
+        try:
+            phantom_widget.phantom_creator.field_strength_changed.connect(
+                self._synchronize_workspace_field_strength,
+                type=Qt.UniqueConnection,
+            )
+        except TypeError:
+            pass
+        if sequence_widget is not None:
+            try:
+                sequence_widget.field_strength_t.valueChanged.connect(
+                    self._synchronize_workspace_field_strength,
+                    type=Qt.UniqueConnection,
+                )
+            except TypeError:
+                pass
+        self._on_shared_phantom_changed(phantom_widget.current_phantom)
+        if phantom_widget.current_phantom is None and sequence_widget is not None:
+            self._synchronize_workspace_field_strength(
+                sequence_widget.field_strength_t.value()
+            )
+
+    def _synchronize_workspace_field_strength(self, value_t):
+        """Use one B0 value for sequence, probe, and phantom design controls."""
+        if getattr(self, "_synchronizing_workspace_field_strength", False):
+            return
+        value_t = float(value_t)
+        self._synchronizing_workspace_field_strength = True
+        try:
+            sequence_widget = getattr(self, "sequence_simulation_widget", None)
+            if sequence_widget is not None and not np.isclose(
+                sequence_widget.field_strength_t.value(), value_t
+            ):
+                sequence_widget.field_strength_t.setValue(value_t)
+            phantom_widget = getattr(self, "phantom_widget", None)
+            if phantom_widget is not None:
+                creator = phantom_widget.phantom_creator
+                if not np.isclose(creator.get_field_strength(), value_t):
+                    creator.set_field_strength(value_t)
+                phantom = phantom_widget.current_phantom
+                if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+                    phantom.field_strength = value_t
+                    creator.current_phantom = phantom
+            if sequence_widget is not None:
+                sequence_widget.refresh_object_summary()
+        finally:
+            self._synchronizing_workspace_field_strength = False
+
+    def _on_shared_phantom_changed(self, phantom):
+        if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+            self._synchronize_workspace_field_strength(phantom.field_strength)
+        elif phantom is not None:
+            field_strength = phantom.metadata.get(
+                "field_strength_t", phantom.metadata.get("field_strength")
+            )
+            if field_strength is not None:
+                self._synchronize_workspace_field_strength(field_strength)
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        if sequence_widget is not None:
+            sequence_widget.refresh_object_summary()
+        b1_widget = getattr(self, "b1_widget", None)
+        if b1_widget is not None:
+            b1_widget.set_phantom(phantom)
+        combo_widget = getattr(self, "b1_combo_widget", None)
+        if combo_widget is not None:
+            combo_widget.set_phantom(phantom)
+
+    def _on_b1_fields_changed(self, tx_field, rx_field):
+        combo_widget = getattr(self, "b1_combo_widget", None)
+        if combo_widget is not None:
+            combo_widget.set_fields(tx_field, rx_field)
+
+    def _on_b1_phantom_updated(self, _phantom):
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        if sequence_widget is not None:
+            sequence_widget.refresh_object_summary()
 
     def _configure_main_tab_tooltips(self):
         """Describe every main workspace tab, including focused-mode tabs."""
@@ -1322,6 +1570,13 @@ class BlochSimulatorGUI(QMainWindow):
             "Phantom": (
                 "Create, load, edit, and inspect spatial or spectroscopic phantoms."
             ),
+            "B1 Fields": (
+                "Define, load, stretch, rotate, preview, and apply transmit B1+ "
+                "and receive B1− fields."
+            ),
+            "Phantom + B1": (
+                "Inspect the phantom and the transformed B1 field together in 3D."
+            ),
             "📡 K-Space": "Simulate and inspect sampled k-space data.",
             "Parameter Sweep": (
                 "Run the simulator across a parameter range and compare the results."
@@ -1351,6 +1606,10 @@ class BlochSimulatorGUI(QMainWindow):
             (
                 self.heatmap_colormap,
                 "Color map used by all heatmap views. This changes only the display, not the simulation data.",
+            ),
+            (
+                self.mag_3d.vector_palette_combo,
+                "Color palette used for the magnetization vectors and matching spatial markers.",
             ),
             (
                 self.time_control.time_slider,
@@ -1747,6 +2006,12 @@ class BlochSimulatorGUI(QMainWindow):
         """Consistent color cycling for multiple frequencies."""
         return pg.intColor(idx, hues=max(total, 1), values=1.0, maxValue=255)
 
+    def _vector_color_for_index(self, idx: int, total: int):
+        """Use the palette selected on the 3D Vector page."""
+        if hasattr(self, "mag_3d") and hasattr(self.mag_3d, "color_for_index"):
+            return self.mag_3d.color_for_index(idx, total)
+        return self._color_for_index(idx, total)
+
     def _get_trace_indices_to_plot(self, total_traces: int) -> list:
         """
         Get indices of traces to plot, respecting max_traces limit.
@@ -2013,19 +2278,22 @@ class BlochSimulatorGUI(QMainWindow):
             fi = min(max(selector, 0), nfreq - 1)
             anim = base_vectors[:, :, fi, :]
             colors = [
-                self._color_tuple(self._color_for_index(i, npos)) for i in range(npos)
+                self._color_tuple(self._vector_color_for_index(i, npos))
+                for i in range(npos)
             ]
         elif mode == "Freqs @ position":
             pi = min(max(selector, 0), npos - 1)
             anim = base_vectors[:, pi, :, :]
             colors = [
-                self._color_tuple(self._color_for_index(i, nfreq)) for i in range(nfreq)
+                self._color_tuple(self._vector_color_for_index(i, nfreq))
+                for i in range(nfreq)
             ]
         else:
             anim = base_vectors.reshape(nframes, npos * nfreq, 3)
             total = npos * nfreq
             colors = [
-                self._color_tuple(self._color_for_index(i, total)) for i in range(total)
+                self._color_tuple(self._vector_color_for_index(i, total))
+                for i in range(total)
             ]
 
         self.anim_data = anim
@@ -2328,7 +2596,7 @@ class BlochSimulatorGUI(QMainWindow):
         if self.anim_data is not None and len(self.anim_data) > 0:
             vectors = self.anim_data[0]
             colors = [
-                self._color_tuple(self._color_for_index(i, vectors.shape[0]))
+                self._color_tuple(self._vector_color_for_index(i, vectors.shape[0]))
                 for i in range(vectors.shape[0])
             ]
             self.mag_3d.update_magnetization(vectors, colors=colors)
@@ -3475,7 +3743,9 @@ class BlochSimulatorGUI(QMainWindow):
                     # Mark selected frequencies with colored stem plots
                     for fi in freq_indices_to_mark:
                         # Ensure color is an RGBA tuple for consistent rendering
-                        color = self._color_tuple(self._color_for_index(fi, nfreq))
+                        color = self._color_tuple(
+                            self._vector_color_for_index(fi, nfreq)
+                        )
                         mxy_val = np.sqrt(
                             mx_display[:, fi] ** 2 + my_display[:, fi] ** 2
                         )
@@ -3793,6 +4063,18 @@ class BlochSimulatorGUI(QMainWindow):
         file_menu = menubar.addMenu("File")
         file_menu.setObjectName("menu_file")
 
+        open_project_action = file_menu.addAction("Open Project…")
+        open_project_action.setObjectName("action_open_project")
+        open_project_action.setShortcut("Ctrl+O")
+        open_project_action.triggered.connect(self.open_project)
+
+        save_project_action = file_menu.addAction("Save Project…")
+        save_project_action.setObjectName("action_save_project")
+        save_project_action.setShortcut("Ctrl+S")
+        save_project_action.triggered.connect(self.save_project)
+
+        file_menu.addSeparator()
+
         load_action = file_menu.addAction("Load Parameters")
         load_action.setObjectName("action_load_params")
         load_action.triggered.connect(self.load_parameters)
@@ -3897,6 +4179,23 @@ class BlochSimulatorGUI(QMainWindow):
         """Queue a workspace change after the native combo popup has closed."""
         self._request_workspace_mode(str(self.workspace_mode_selector.currentData()))
 
+    def _place_workspace_switch(self, *, sequence_mode: bool):
+        """Keep the selector beside the active workspace's primary controls."""
+        if not hasattr(self, "workspace_switch"):
+            return
+        if self.tab_widget.cornerWidget(Qt.TopRightCorner) is self.workspace_switch:
+            self.tab_widget.setCornerWidget(None, Qt.TopRightCorner)
+        self.workspace_header_layout.removeWidget(self.workspace_switch)
+        self.free_mode_colormap_layout.removeWidget(self.workspace_switch)
+        if sequence_mode:
+            # Share the main tab-bar row with Sequence Simulation / Phantom.
+            # This removes the otherwise empty application-header row and
+            # mirrors Free Mode, where the selector shares the colormap row.
+            self.tab_widget.setCornerWidget(self.workspace_switch, Qt.TopRightCorner)
+        else:
+            self.free_mode_colormap_layout.addWidget(self.workspace_switch)
+        self.workspace_header.setVisible(False)
+
     def _request_workspace_mode(self, mode: str):
         """Coalesce workspace requests and execute them outside input handlers."""
         mode = str(mode).lower()
@@ -3953,10 +4252,14 @@ class BlochSimulatorGUI(QMainWindow):
                 self.sequence_workspace_action.setChecked(sequence_mode)
             return
         if sequence_mode and previous_mode != "sequence":
+            if self.isVisible():
+                self._free_workspace_geometry = self.geometry()
             current = self.tab_widget.currentIndex()
             if current not in {
                 self.sequence_simulation_tab_index,
                 self.phantom_tab_index,
+                self.b1_tab_index,
+                self.b1_combo_tab_index,
             }:
                 self._free_mode_tab_index = current
 
@@ -3969,6 +4272,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self._sync_play_toggle(False)
 
         self.workspace_mode = mode
+        self._place_workspace_switch(sequence_mode=sequence_mode)
         self.free_mode_left_container.setVisible(not sequence_mode)
         self.free_mode_playback_header.setVisible(not sequence_mode)
         self.status_run_bar.setVisible(not sequence_mode)
@@ -3987,6 +4291,8 @@ class BlochSimulatorGUI(QMainWindow):
             allowed_sequence_tabs = {
                 self.sequence_simulation_tab_index,
                 self.phantom_tab_index,
+                self.b1_tab_index,
+                self.b1_combo_tab_index,
             }
             for index in range(self.tab_widget.count()):
                 self._set_main_tab_visible(index, index in allowed_sequence_tabs)
@@ -3994,13 +4300,15 @@ class BlochSimulatorGUI(QMainWindow):
             if sequence_widget is not None:
                 sequence_widget.activate_focused_workspace_layout()
         else:
-            # Reveal Free Mode tabs first, then leave the two focused Sequence
+            # Reveal Free Mode tabs first, then leave the focused Sequence
             # Mode workspaces hidden. Selecting the restored tab before hiding
             # either current tab prevents re-entrant workspace activation.
             for index in range(self.tab_widget.count()):
                 if index not in {
                     self.sequence_simulation_tab_index,
                     self.phantom_tab_index,
+                    self.b1_tab_index,
+                    self.b1_combo_tab_index,
                 }:
                     self._set_main_tab_visible(index, True)
             self.main_splitter.setSizes([420, max(1, self.width() - 420)])
@@ -4021,6 +4329,13 @@ class BlochSimulatorGUI(QMainWindow):
             self.tab_widget.setCurrentIndex(restore_index)
             self._set_main_tab_visible(self.sequence_simulation_tab_index, False)
             self._set_main_tab_visible(self.phantom_tab_index, False)
+            self._set_main_tab_visible(self.b1_tab_index, False)
+            self._set_main_tab_visible(self.b1_combo_tab_index, False)
+            free_geometry = getattr(self, "_free_workspace_geometry", None)
+            if previous_mode == "sequence" and free_geometry is not None:
+                # Opening the much larger focused workspace must not permanently
+                # resize the compact Free Mode window.
+                self.setGeometry(free_geometry)
 
         if hasattr(self, "workspace_mode_selector"):
             index = self.workspace_mode_selector.findData(mode)
@@ -4072,6 +4387,25 @@ class BlochSimulatorGUI(QMainWindow):
             else "optimized"
         )
 
+    def _load_sequence_spoiler_mode(self) -> str:
+        """Load ideal-crusher or physical gradient-waveform spoiling."""
+        mode = str(self.app_settings.value("sequence/spoiler_mode", "ideal"))
+        return mode if mode in {"ideal", "gradient"} else "ideal"
+
+    def _load_subvoxel_spin_counts(self):
+        """Load persistent X/Y/Z intravoxel spin counts."""
+        defaults = (1, 1, 9)
+        counts = []
+        for axis, default in zip("xyz", defaults):
+            try:
+                value = int(
+                    self.app_settings.value(f"sequence/subvoxel_spins_{axis}", default)
+                )
+            except (TypeError, ValueError):
+                value = default
+            counts.append(value if 1 <= value <= 128 else default)
+        return tuple(counts)
+
     def _load_sequence_timestep_preset(self) -> str:
         """Load the persistent RF-active sequence time-step preset."""
         preset = str(self.app_settings.value("sequence/timestep_preset", "balanced"))
@@ -4120,6 +4454,8 @@ class BlochSimulatorGUI(QMainWindow):
 
     def show_settings(self, initial_tab: str = "general"):
         """Show and persist application, simulation and scanner settings."""
+        previous_scanner_parameters = self._load_scanner_parameters()
+        previous_workspace_defaults = WorkspaceDefaults.from_settings(self.app_settings)
         dialog = SettingsDialog(
             policy=self._load_memory_policy(),
             export_directory=self._get_export_directory(),
@@ -4133,10 +4469,13 @@ class BlochSimulatorGUI(QMainWindow):
             dynamic_sequence_kernel=self._load_dynamic_sequence_kernel(),
             sequence_timestep_preset=self._load_sequence_timestep_preset(),
             sequence_timestep_us=self._load_sequence_timestep_us(),
+            sequence_spoiler_mode=self._load_sequence_spoiler_mode(),
+            subvoxel_spin_counts=self._load_subvoxel_spin_counts(),
             thread_mode=self._load_thread_mode(),
             manual_thread_count=self._load_manual_thread_count(),
             detected_thread_count=resolve_num_threads(None),
-            scanner_parameters=self._load_scanner_parameters(),
+            scanner_parameters=previous_scanner_parameters,
+            workspace_defaults=previous_workspace_defaults,
         )
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -4173,12 +4512,21 @@ class BlochSimulatorGUI(QMainWindow):
         timestep_us = dialog.sequence_timestep_us()
         self.app_settings.setValue("sequence/timestep_preset", timestep_preset)
         self.app_settings.setValue("sequence/timestep_us", timestep_us)
+        spoiler_mode = dialog.sequence_spoiler_mode()
+        subvoxel_spin_counts = dialog.subvoxel_spin_counts()
+        self.app_settings.setValue("sequence/spoiler_mode", spoiler_mode)
+        for axis, count in zip("xyz", subvoxel_spin_counts):
+            self.app_settings.setValue(f"sequence/subvoxel_spins_{axis}", int(count))
         thread_mode = dialog.thread_mode()
         manual_thread_count = dialog.manual_thread_count()
         self.app_settings.setValue("simulation/thread_mode", thread_mode)
         self.app_settings.setValue("simulation/manual_threads", manual_thread_count)
         scanner_parameters = dialog.scanner_parameters()
+        scanner_parameters_changed = scanner_parameters != previous_scanner_parameters
         save_scanner_parameters(self.app_settings, scanner_parameters)
+        workspace_defaults = dialog.workspace_defaults()
+        workspace_defaults_changed = workspace_defaults != previous_workspace_defaults
+        workspace_defaults.save(self.app_settings)
         self.app_settings.sync()
         set_default_memory_policy(policy)
         self._set_tooltips_enabled(tooltips_enabled)
@@ -4188,8 +4536,17 @@ class BlochSimulatorGUI(QMainWindow):
             sequence_widget.set_sequence_kernel(sequence_kernel)
             sequence_widget.set_dynamic_sequence_kernel(dynamic_sequence_kernel)
             sequence_widget.set_sequence_timestep_us(timestep_us)
+            sequence_widget.set_spoiler_configuration(
+                spoiler_mode, subvoxel_spin_counts
+            )
             sequence_widget.set_thread_configuration(thread_mode, manual_thread_count)
-            sequence_widget.set_scanner_parameters(scanner_parameters)
+            if scanner_parameters_changed:
+                sequence_widget.set_scanner_parameters(scanner_parameters)
+            if workspace_defaults_changed:
+                sequence_widget.set_workspace_defaults(workspace_defaults)
+        phantom_widget = getattr(self, "phantom_widget", None)
+        if phantom_widget is not None and workspace_defaults_changed:
+            phantom_widget.phantom_creator.set_workspace_defaults(workspace_defaults)
         self.simulator.sequence_kernel = sequence_kernel
         self.simulator.dynamic_sequence_kernel = dynamic_sequence_kernel
         self.simulator.num_threads = resolve_num_threads(
@@ -4479,9 +4836,7 @@ class BlochSimulatorGUI(QMainWindow):
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Warning)
         dialog.setWindowTitle("Simulation exceeds RAM budget")
-        dialog.setText(
-            "The selected number of simulation points would use too much RAM."
-        )
+        dialog.setText("The selected simulation would use too much RAM.")
         dialog.setInformativeText(details)
 
         endpoint_button = None
@@ -4489,7 +4844,9 @@ class BlochSimulatorGUI(QMainWindow):
             endpoint_button = dialog.addButton(
                 "Use Endpoint Mode", QMessageBox.AcceptRole
             )
-        settings_button = dialog.addButton("Memory Settings...", QMessageBox.ActionRole)
+        settings_button = dialog.addButton(
+            "Open Memory Settings...", QMessageBox.ActionRole
+        )
         dialog.addButton(QMessageBox.Cancel)
         dialog.exec_()
 
@@ -4712,6 +5069,199 @@ class BlochSimulatorGUI(QMainWindow):
                 min(mz_min, -initial_mag),
                 max(mz_max, initial_mag),
             )
+
+    def _complete_project_state(self):
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        phantom_widget = getattr(self, "phantom_widget", None)
+        b1_widget = getattr(self, "b1_widget", None)
+        return {
+            "application_version": __version__,
+            "workspace_mode": getattr(self, "workspace_mode", "free"),
+            "active_tab": self.tab_widget.currentIndex(),
+            "tissue": self.tissue_widget.get_state(),
+            "rf": self.rf_designer.get_state(),
+            "sequence": self.sequence_designer.get_state(),
+            "simulation": self._collect_simulation_parameters(internal_format=True),
+            "main_controls": _capture_widget_state(self),
+            "sequence_controls": (
+                _capture_widget_state(sequence_widget)
+                if sequence_widget is not None
+                else {}
+            ),
+            "reconstruction_view": (
+                sequence_widget.reconstruction_explorer.get_state()
+                if sequence_widget is not None
+                else {}
+            ),
+            "sequence_view_tab": (
+                sequence_widget.views.currentIndex()
+                if sequence_widget is not None
+                else 0
+            ),
+            "phantom_controls": (
+                _capture_widget_state(phantom_widget.phantom_creator)
+                if phantom_widget is not None
+                else {}
+            ),
+            "b1_controls": (
+                _capture_widget_state(b1_widget) if b1_widget is not None else {}
+            ),
+            "b1_tx_controls": (
+                _capture_widget_state(b1_widget.tx_editor)
+                if b1_widget is not None
+                else {}
+            ),
+            "b1_rx_controls": (
+                _capture_widget_state(b1_widget.rx_editor)
+                if b1_widget is not None
+                else {}
+            ),
+        }
+
+    def save_project(self):
+        """Save all settings, loaded assets, programs, and results in one file."""
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        default_path = (
+            self._get_export_directory() / f"bloch_project_{timestamp}.blochproj"
+        )
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Save Project", str(default_path), "Bloch projects (*.blochproj)"
+        )
+        if not filename:
+            return
+        if not filename.lower().endswith(".blochproj"):
+            filename += ".blochproj"
+        try:
+            phantom_widget = getattr(self, "phantom_widget", None)
+            phantom = None if phantom_widget is None else phantom_widget.current_phantom
+            b1_widget = getattr(self, "b1_widget", None)
+            sequence_widget = getattr(self, "sequence_simulation_widget", None)
+            legacy_result = None
+            if self.last_result is not None:
+                legacy_result = dict(self.last_result)
+                legacy_result["_project_positions"] = self.last_positions
+                legacy_result["_project_frequencies"] = self.last_frequencies
+                legacy_result["_project_effective_frequencies"] = (
+                    self.last_effective_frequencies
+                )
+            save_project(
+                filename,
+                self._complete_project_state(),
+                phantom,
+                None if b1_widget is None else b1_widget.tx_field,
+                None if b1_widget is None else b1_widget.rx_field,
+                None if sequence_widget is None else sequence_widget.program,
+                legacy_result,
+                None if sequence_widget is None else sequence_widget.result,
+            )
+            self.statusBar().showMessage(f"Project saved: {Path(filename).name}", 7000)
+            self.log_message(f"Project saved to {filename}")
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Save Project Error", f"The project could not be saved:\n{exc}"
+            )
+
+    def open_project(self):
+        """Restore a complete project and refresh all affected workspaces."""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Project",
+            str(self._get_export_directory()),
+            "Bloch projects (*.blochproj);;All files (*)",
+        )
+        if not filename:
+            return
+        try:
+            project = load_project(filename)
+            state = project["state"]
+            self.tissue_widget.set_state(state.get("tissue", {}))
+            self.rf_designer.set_state(state.get("rf", {}))
+            self.sequence_designer.set_state(state.get("sequence", {}))
+            _restore_widget_state(self, state.get("main_controls", {}))
+
+            # Instantiate lazy workspaces before assigning their stored objects.
+            if getattr(self, "phantom_widget", None) is None:
+                self._ensure_phantom_workspace(self.phantom_tab_index)
+            if getattr(self, "b1_widget", None) is None:
+                self._ensure_b1_workspace(self.b1_tab_index)
+            if getattr(self, "sequence_simulation_widget", None) is None:
+                self._ensure_sequence_simulation_workspace(
+                    self.sequence_simulation_tab_index
+                )
+
+            _restore_widget_state(
+                self.phantom_widget.phantom_creator, state.get("phantom_controls", {})
+            )
+            _restore_widget_state(self.b1_widget, state.get("b1_controls", {}))
+            _restore_widget_state(
+                self.b1_widget.tx_editor, state.get("b1_tx_controls", {})
+            )
+            _restore_widget_state(
+                self.b1_widget.rx_editor, state.get("b1_rx_controls", {})
+            )
+
+            phantom = project["phantom"]
+            if phantom is not None:
+                self.phantom_widget.phantom_creator.current_phantom = phantom
+                self.phantom_widget.phantom_creator._update_info()
+                self.phantom_widget.phantom_creator.save_btn.setEnabled(True)
+                self.phantom_widget.phantom_creator._update_edit_button()
+                self.phantom_widget._on_phantom_created(phantom)
+                self.phantom_widget.phantom_creator.phantom_created.emit(phantom)
+
+            if project["tx_field"] is not None:
+                self.b1_widget.tx_editor.set_field(project["tx_field"])
+            if project["rx_field"] is not None:
+                self.b1_widget.rx_editor.set_field(project["rx_field"])
+
+            sequence_widget = self.sequence_simulation_widget
+            _restore_widget_state(sequence_widget, state.get("sequence_controls", {}))
+            if project["program"] is not None:
+                sequence_widget.program = project["program"]
+                sequence_widget._generated_pulseq_sequence = None
+                sequence_widget._infer_current_acquisition()
+                sequence_widget._apply_probe_defaults_from_program()
+                sequence_widget._configure_frame_selector()
+                sequence_widget._configure_spectroscopy_selectors()
+                sequence_widget._show_program()
+            if project["sequence_result"] is not None:
+                sequence_widget.phantom = phantom
+                sequence_widget._finished(project["sequence_result"])
+                sequence_widget.reconstruction_explorer.restore_state(
+                    state.get("reconstruction_view", {})
+                )
+                sequence_widget.views.setCurrentIndex(
+                    max(
+                        0,
+                        min(
+                            int(state.get("sequence_view_tab", 0)),
+                            sequence_widget.views.count() - 1,
+                        ),
+                    )
+                )
+
+            legacy_result = project["legacy_result"]
+            if legacy_result is not None:
+                self.last_positions = legacy_result.pop("_project_positions", None)
+                self.last_frequencies = legacy_result.pop("_project_frequencies", None)
+                self.last_effective_frequencies = legacy_result.pop(
+                    "_project_effective_frequencies", None
+                )
+                self.update_plots(legacy_result)
+
+            mode = state.get("workspace_mode", "free")
+            self.set_workspace_mode(mode if mode in {"free", "sequence"} else "free")
+            tab = int(state.get("active_tab", 0))
+            self.tab_widget.setCurrentIndex(
+                max(0, min(tab, self.tab_widget.count() - 1))
+            )
+            self.statusBar().showMessage(f"Project loaded: {Path(filename).name}", 7000)
+            self.log_message(f"Project loaded from {filename}")
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Open Project Error", f"The project could not be loaded:\n{exc}"
+            )
+            self.log_message(f"Error loading project: {exc}")
 
     def load_parameters(self):
         """Load simulation parameters from file."""

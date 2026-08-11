@@ -844,6 +844,7 @@ static int blochsim_sequence_streaming_impl(
     double *mx_init, double *my_init, double *mz_init, int nspins,
     int *adc_state_indices, double *adc_demod_real, double *adc_demod_imag,
     int nadc, int *checkpoint_state_indices, int ncheckpoints,
+    int *transverse_crush_state_indices, int ncrushes,
     double *signal_real, double *signal_imag,
     double *mx_final, double *my_final, double *mz_final,
     double *mx_checkpoints, double *my_checkpoints, double *mz_checkpoints,
@@ -954,6 +955,14 @@ static int blochsim_sequence_streaming_impl(
         double magnetization[3] = {mx_init[spin], my_init[spin], mz_init[spin]};
         int adc_cursor = 0;
         int checkpoint_cursor = 0;
+        int crush_cursor = 0;
+
+        while (crush_cursor < ncrushes
+               && transverse_crush_state_indices[crush_cursor] == 0) {
+            magnetization[0] = 0.0;
+            magnetization[1] = 0.0;
+            crush_cursor++;
+        }
 
         while (adc_cursor < nadc && adc_state_indices[adc_cursor] == 0) {
             double demod_real = adc_demod_real[adc_cursor];
@@ -1041,6 +1050,12 @@ static int blochsim_sequence_streaming_impl(
             magnetization[2] = rotated[2] * e1 + (1.0 - e1);
 
             int state_index = interval + 1;
+            while (crush_cursor < ncrushes
+                   && transverse_crush_state_indices[crush_cursor] == state_index) {
+                magnetization[0] = 0.0;
+                magnetization[1] = 0.0;
+                crush_cursor++;
+            }
             while (adc_cursor < nadc && adc_state_indices[adc_cursor] == state_index) {
                 double demod_real = adc_demod_real[adc_cursor];
                 double demod_imag = adc_demod_imag[adc_cursor];
@@ -1094,7 +1109,8 @@ static int blochsim_sequence_streaming_impl(
     t1_s, t2_s, df_hz, x_m, y_m, z_m, pd, tx_real, tx_imag, rx_real, \
     rx_imag, ncoils, mx_init, my_init, mz_init, nspins, adc_state_indices, \
     adc_demod_real, adc_demod_imag, nadc, checkpoint_state_indices, \
-    ncheckpoints, signal_real, signal_imag, mx_final, my_final, mz_final, \
+    ncheckpoints, transverse_crush_state_indices, ncrushes, signal_real, \
+    signal_imag, mx_final, my_final, mz_final, \
     mx_checkpoints, my_checkpoints, mz_checkpoints, num_threads
 
 #define DEFINE_STREAMING_KERNEL(name, optimized_flag) \
@@ -1109,6 +1125,7 @@ int name( \
     double *mx_init, double *my_init, double *mz_init, int nspins, \
     int *adc_state_indices, double *adc_demod_real, double *adc_demod_imag, \
     int nadc, int *checkpoint_state_indices, int ncheckpoints, \
+    int *transverse_crush_state_indices, int ncrushes, \
     double *signal_real, double *signal_imag, \
     double *mx_final, double *my_final, double *mz_final, \
     double *mx_checkpoints, double *my_checkpoints, double *mz_checkpoints, \
