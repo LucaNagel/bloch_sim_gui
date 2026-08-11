@@ -56,12 +56,14 @@ jobs:
           script: |
             const sha = context.sha;
             const { owner, repo } = context.repo;
-            const mainBranch = await github.rest.repos.getBranch({
+            const isDevelopmentTag = /\.dev\d+$/.test(context.ref);
+            const requiredBranch = isDevelopmentTag ? 'pre-release' : 'main';
+            const requiredBranchData = await github.rest.repos.getBranch({
               owner,
               repo,
-              branch: 'main',
+              branch: requiredBranch,
             });
-            const mainSha = mainBranch.data.commit.sha;
+            const mainSha = requiredBranchData.data.commit.sha;
             if (mainSha !== sha) {
               const comparison = await github.rest.repos.compareCommits({
                 owner,
@@ -72,7 +74,7 @@ jobs:
               if (comparison.data.merge_base_commit.sha !== sha) {
                 core.setFailed(
                   `Release blocked: ${sha} is not reachable from current ` +
-                  `main (${mainSha}).`
+                  `${requiredBranch} (${mainSha}).`
                 );
                 return;
               }
@@ -82,7 +84,7 @@ jobs:
               owner,
               repo,
               workflow_id: 'tests.yml',
-              branch: 'main',
+              branch: requiredBranch,
               event: 'push',
               head_sha: sha,
               status: 'completed',
@@ -91,7 +93,7 @@ jobs:
 
             const successfulRun = response.data.workflow_runs.find((run) =>
               run.head_sha === sha &&
-              run.head_branch === 'main' &&
+              run.head_branch === requiredBranch &&
               run.event === 'push' &&
               run.status === 'completed' &&
               run.conclusion === 'success'
@@ -100,8 +102,9 @@ jobs:
             if (!successfulRun) {
               core.setFailed(
                 `Release blocked: ${sha} has no successful completed ` +
-                '`Tests` workflow run triggered by a push to main. Push and ' +
-                'successfully test this exact commit on main before tagging it.'
+                '`Tests` workflow run triggered by a push to ' +
+                `${requiredBranch}. Push and successfully test this exact ` +
+                `commit on ${requiredBranch} before tagging it.`
               );
               return;
             }
@@ -130,7 +133,10 @@ jobs:
               return;
             }
 
-            core.info(`Using successful main test run: ${successfulRun.html_url}`);
+            core.info(
+              `Using successful ${requiredBranch} test run: ` +
+              successfulRun.html_url
+            );
 
   build_wheels:
     name: Build wheels on ${{ matrix.os }}

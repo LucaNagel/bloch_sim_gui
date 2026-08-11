@@ -35,32 +35,56 @@ This script will:
 *   Update version strings in `pyproject.toml`, `setup.py`, `src/blochsimulator/simulator.py`, `src/blochsimulator/gui.py`, `docs/conf.py`, and `src/blochsimulator/__init__.py`.
 *   Print the exact git commands you need to run to commit and tag the release.
 
-### Step 2: Commit and Tag
-Run the commands suggested by the `bump_version.py` script.
+### Release Paths
 
-```bash
-git add .
-git commit -m "Bump version to 1.0.6"
-git tag v1.0.6
-```
+#### Pre-release validation path
 
-### Step 3: Push and Automate
-Pushing the tag triggers the CI/CD pipelines to automatically build the PyPI package and the standalone applications for macOS, Windows, and Linux.
+Use this path to exercise the complete GitHub Actions release workflow before
+merging to `main`. Development tags create a GitHub pre-release with the built
+wheel and application artifacts, but are never uploaded to PyPI.
 
-```bash
-git push origin main v1.0.6
-```
+1. Start from the `pre-release` branch and update the project to the intended
+   final version (for example, `2.3.0`).
+   ```bash
+   git switch pre-release
+   git pull --ff-only origin pre-release
+   python bump_version.py 2.3.0
+   git add pyproject.toml setup.py src/blochsimulator docs/conf.py web index.html
+   git commit -m "Bump version to 2.3.0"
+   git push origin pre-release
+   ```
+2. Wait for the `Tests` workflow triggered by this push to finish successfully.
+   The successful `Full test suite` job must belong to this exact commit.
+3. Create and push a development tag such as `v2.3.0.dev1`.
+   ```bash
+   git tag v2.3.0.dev1
+   git push origin v2.3.0.dev1
+   ```
+   The release workflow requires this tagged commit to be reachable from
+   `pre-release` and to have a successful push-triggered `Tests` run on that
+   branch. It temporarily sets the package version to `2.3.0.dev1` while
+   building, creates a GitHub pre-release, and does not publish to PyPI.
+4. Inspect the GitHub Actions run and the generated GitHub pre-release assets.
+   If another validation build is needed, push a later commit, wait for its
+   tests to pass, and use the next development tag (for example,
+   `v2.3.0.dev2`). Do not reuse a published tag.
 
-**What happens automatically:**
-1.  **PyPI:** Binary wheels and source distributions are built and uploaded to PyPI.
-2.  **GitHub Release:** Standalone executables for all platforms are built.
-3.  **Draft Release:** A new "Draft" release is created on GitHub with all binaries attached.
+#### Final stable-release path
 
-### Step 4: Finalize Release on GitHub
-1.  Go to your GitHub Repository page and click on **Releases**.
-2.  Find the new **Draft** release.
-3.  Edit the release: Add a title (e.g., "v1.0.6") and describe the changes.
-4.  Click **Publish release** to make it public.
+1. Merge the tested `pre-release` commit into `main`, then wait for the
+   `Tests` workflow triggered by the push to `main` to finish successfully.
+2. Tag that exact tested `main` commit with the final version and push the tag.
+   ```bash
+   git switch main
+   git pull --ff-only origin main
+   git tag v2.3.0
+   git push origin v2.3.0
+   ```
+   A stable tag is accepted only when its commit is reachable from `main` and
+   has a successful push-triggered `Tests` workflow on `main`.
+3. The workflow builds the PyPI distributions and application artifacts,
+   uploads the Python distributions to PyPI, and creates the stable GitHub
+   Release with the application artifacts.
 
 ---
 

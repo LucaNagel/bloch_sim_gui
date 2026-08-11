@@ -39,24 +39,32 @@ def main():
     # 1. pyproject.toml
     # pattern: version = "1.0.1"
     update_file(
-        Path("pyproject.toml"), r'version = "[0-9.]+"', f'version = "{new_version}"'
+        Path("pyproject.toml"),
+        r'version = "[0-9.]+(?:\.dev[0-9]+)?"',
+        f'version = "{new_version}"',
     )
 
     # 2. setup.py
     # pattern: version="1.0.1",
-    update_file(Path("setup.py"), r'version="[0-9.]+"', f'version="{new_version}"')
+    update_file(
+        Path("setup.py"),
+        r'version="[0-9.]+(?:\.dev[0-9]+)?"',
+        f'version="{new_version}"',
+    )
 
     # 3. gui.py (About dialog)
     # pattern: "Version 1.0.1"
     update_file(
-        Path("src/blochsimulator/gui.py"), r"Version [0-9.]+", f"Version {new_version}"
+        Path("src/blochsimulator/gui.py"),
+        r"Version [0-9.]+(?:\.dev[0-9]+)?",
+        f"Version {new_version}",
     )
 
     # 4. docs/conf.py
     # pattern: release = "1.0.1" or release = '1.0.1'
     update_file(
         Path("docs/conf.py"),
-        r"release = ['\"][0-9.]+['\"]",
+        r"release = ['\"][0-9.]+(?:\.dev[0-9]+)?['\"]",
         f'release = "{new_version}"',
     )
 
@@ -64,7 +72,7 @@ def main():
     # pattern: __version__ = "1.0.1"
     update_file(
         Path("src/blochsimulator/__init__.py"),
-        r'__version__ = "[0-9.]+"',
+        r'__version__ = "[0-9.]+(?:\.dev[0-9]+)?"',
         f'__version__ = "{new_version}"',
     )
 
@@ -73,12 +81,12 @@ def main():
     # pattern: tag/v1.0.1"
     update_file(
         Path("web/partials/home.html"),
-        r">v[0-9.]+</a>",
+        r">v[0-9.]+(?:\.dev[0-9]+)?</a>",
         f">v{new_version}</a>",
     )
     update_file(
         Path("web/partials/home.html"),
-        r"tag/v[0-9.]+\"",
+        r"tag/v[0-9.]+(?:\.dev[0-9]+)?\"",
         f'tag/v{new_version}"',
     )
 
@@ -86,7 +94,7 @@ def main():
     # pattern: v1.0.1
     update_file(
         Path("web/partials/footer.html"),
-        r'<span id="version-info">v[0-9.]+</span>',
+        r'<span id="version-info">v[0-9.]+(?:\.dev[0-9]+)?</span>',
         f'<span id="version-info">v{new_version}</span>',
     )
 
@@ -94,7 +102,7 @@ def main():
     # pattern: v1.0.1
     update_file(
         Path("index.html"),
-        r'<span id="version-info">v[0-9.]+</span>',
+        r'<span id="version-info">v[0-9.]+(?:\.dev[0-9]+)?</span>',
         f'<span id="version-info">v{new_version}</span>',
     )
 
