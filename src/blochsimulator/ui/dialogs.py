@@ -239,9 +239,13 @@ class SettingsDialog(QDialog):
         self.dynamic_sequence_kernel_combo.setCurrentIndex(max(0, dynamic_kernel_index))
         self.dynamic_sequence_kernel_combo.setToolTip(
             "Kernel for dynamic two-pool pyruvate/lactate phantoms. Native "
-            "RF-block kernels remove temporary RF rotation arrays; the parallel "
-            "variant also uses multiple CPU cores for supported static-B0 cases. "
-            "Inflow and dynamic B0 currently fall back safely to optimized NumPy."
+            "RF-block kernels accelerate uniform-transmit RF intervals; the "
+            "parallel variant also groups complete RF waveforms across CPU "
+            "cores. Coupled inflow, polarization, and concentration tracking "
+            "use fused native kinetics; less common unsupported combinations "
+            "fall back explicitly. "
+            "Spatial transmit maps may require a complete optimized fallback; "
+            "dynamic B0 is supported."
         )
         simulation_form.addRow(
             "Dynamic two-pool kernel:", self.dynamic_sequence_kernel_combo

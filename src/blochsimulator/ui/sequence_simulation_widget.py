@@ -732,6 +732,10 @@ class SequenceSimulationWidget(QWidget):
         self._script_sequence_snapshot = {}
         self._acquisition_compiled = None
         self._simulation_started_at = None
+        self._simulation_progress_started_at = None
+        self._simulation_last_progress_at = None
+        self._simulation_last_progress_done = 0
+        self._simulation_progress_rate = None
         self._probe_playback_anchor_wall = None
         self._probe_playback_anchor_time_ms = None
         self._probe_playback_indices = np.zeros(0, dtype=np.int64)
@@ -5905,6 +5909,10 @@ class SequenceSimulationWidget(QWidget):
         self.progress.setValue(0)
         self.progress.setFormat("0% · Estimating remaining time…")
         self._simulation_started_at = time.monotonic()
+        self._simulation_progress_started_at = None
+        self._simulation_last_progress_at = None
+        self._simulation_last_progress_done = 0
+        self._simulation_progress_rate = None
         self._status_update("Preparing and compiling sequence…")
         chunk_voxels = self._preview_chunk_voxels()
         self.worker = SequenceSimulationThread(
@@ -5945,12 +5953,29 @@ class SequenceSimulationWidget(QWidget):
         now = time.monotonic()
         if self._simulation_started_at is None:
             self._simulation_started_at = now
-        elapsed_s = max(0.0, now - self._simulation_started_at)
+        if self._simulation_progress_started_at is None:
+            self._simulation_progress_started_at = now
+            self._simulation_last_progress_at = now
+            self._simulation_last_progress_done = done
+        else:
+            delta_done = done - self._simulation_last_progress_done
+            delta_s = now - self._simulation_last_progress_at
+            if delta_done > 0 and delta_s > 0.0:
+                instantaneous_rate = delta_done / delta_s
+                if self._simulation_progress_rate is None:
+                    self._simulation_progress_rate = instantaneous_rate
+                else:
+                    self._simulation_progress_rate = (
+                        0.25 * instantaneous_rate
+                        + 0.75 * self._simulation_progress_rate
+                    )
+                self._simulation_last_progress_at = now
+                self._simulation_last_progress_done = done
         if done >= total:
             progress_text = "100% · Finishing…"
             eta_text = None
-        elif done > 0 and elapsed_s > 0.0:
-            remaining_s = elapsed_s * (total - done) / done
+        elif self._simulation_progress_rate is not None:
+            remaining_s = (total - done) / self._simulation_progress_rate
             eta_text = _format_duration(remaining_s)
             progress_text = f"{percent}% · ETA {eta_text}"
         else:
@@ -6965,6 +6990,10 @@ class SequenceSimulationWidget(QWidget):
             self.progress.setValue(0)
             self.progress.setFormat("Stopped")
         self._simulation_started_at = None
+        self._simulation_progress_started_at = None
+        self._simulation_last_progress_at = None
+        self._simulation_last_progress_done = 0
+        self._simulation_progress_rate = None
 
     def _export_results(self):
         if self.result is None:

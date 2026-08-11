@@ -53,4 +53,4 @@ jobs:
             libegl1
           # Force software rendering for headless CI
           export QT_QPA_PLATFORM=offscreen
-          xvfb-run pytest tests/
+          xvfb-run python scripts/run_test_suite.py

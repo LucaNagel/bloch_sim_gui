@@ -1,8 +1,10 @@
 from pathlib import Path
+import time
 from unittest.mock import patch
 
 import numpy as np
 import pytest
+from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
 from blochsimulator import BlochSimulator
@@ -12,6 +14,13 @@ from blochsimulator.sequence import BrukerExportOptions
 from blochsimulator.ui.phantom_designer import SpectralPhantomDesignerDialog
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
 from blochsimulator.ui.widgets import IMAGE_CANVAS_BACKGROUND, IMAGE_FOV_BORDER
+
+
+def _wait_until(predicate, timeout_ms=10_000):
+    deadline = time.monotonic() + timeout_ms / 1_000
+    while not predicate() and time.monotonic() < deadline:
+        QTest.qWait(10)
+    return predicate()
 
 
 def test_workspace_directories_follow_configured_data_root(tmp_path, monkeypatch):
@@ -135,14 +144,14 @@ def test_python_sequence_script_runs_in_gui_and_loads_generated_pulseq(
 
     process = widget.script_process
     assert process is not None
-    assert process.waitForFinished(10_000)
-    app.processEvents()
-    worker = widget.pulseq_load_worker
-    assert worker is not None
-    assert worker.wait(10_000)
-    app.processEvents()
-
     generated = script.with_suffix(".seq")
+    assert _wait_until(
+        lambda: widget.program is not None
+        and widget.program.source == str(generated)
+        and widget.script_process is None
+        and widget.pulseq_load_worker is None
+    )
+
     assert generated.is_file()
     assert widget.program.source == str(generated)
     assert "generated generate_test_sequence.seq" in widget.script_output.toPlainText()
@@ -171,20 +180,25 @@ def test_sequence_progress_is_determinate_from_simulation_start():
     app.processEvents()
 
 
-def test_sequence_progress_shows_percentage_and_estimated_time(monkeypatch):
+def test_sequence_progress_estimate_excludes_compile_time_and_uses_run_rate(
+    monkeypatch,
+):
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()
     widget._simulation_started_at = 100.0
+    timestamps = iter((110.0, 120.0))
     monkeypatch.setattr(
         "blochsimulator.ui.sequence_simulation_widget.time.monotonic",
-        lambda: 110.0,
+        lambda: next(timestamps),
     )
 
     widget._progress(25, 100)
+    assert widget.progress.format() == "25% · Estimating remaining time…"
+    widget._progress(50, 100)
 
-    assert widget.progress.value() == 25
-    assert widget.progress.format() == "25% · ETA 30s"
-    assert widget.status.text() == "Chunk 25/100 · 25% · approximately 30s remaining"
+    assert widget.progress.value() == 50
+    assert widget.progress.format() == "50% · ETA 20s"
+    assert widget.status.text() == "Chunk 50/100 · 50% · approximately 20s remaining"
     widget.close()
     app.processEvents()
 

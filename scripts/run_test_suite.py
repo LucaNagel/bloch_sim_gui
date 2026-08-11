@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,17 @@ CHUNKED_GUI_MODULES = (
 )
 GUI_BATCH_SIZE = 2
 GUI_NODE_BATCH_SIZE = 10
+BATCHED_PYTEST_ENV = "BLOCHSIMULATOR_BATCHED_PYTEST"
+
+
+def _test_environment():
+    env = os.environ.copy()
+    env[BATCHED_PYTEST_ENV] = "1"
+    if "MPLCONFIGDIR" not in env:
+        cache_directory = Path(tempfile.gettempdir()) / "blochsimulator-matplotlib"
+        cache_directory.mkdir(parents=True, exist_ok=True)
+        env["MPLCONFIGDIR"] = str(cache_directory)
+    return env
 
 
 def _chunks(values, size):
@@ -37,7 +49,7 @@ def _run_pytest(targets) -> int:
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", *relative_targets],
         cwd=ROOT,
-        env=os.environ.copy(),
+        env=_test_environment(),
     )
     return int(completed.returncode)
 
@@ -47,7 +59,7 @@ def _collect_node_ids(module: Path):
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q", relative_module],
         cwd=ROOT,
-        env=os.environ.copy(),
+        env=_test_environment(),
         capture_output=True,
         text=True,
     )

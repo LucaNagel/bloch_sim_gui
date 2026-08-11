@@ -24,11 +24,18 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Dynamic pyruvate/lactate simulations now cache concentration coefficients,
+  fuse coupled inflow/concentration kinetics in a native voxel kernel, and
+  execute repeated RF raster intervals in persistent OpenMP waveform blocks.
+  Single-coil ADC observation also avoids an all-ones weighting temporary.
+- Sequence ETA calculation now excludes import/compilation time and uses a
+  smoothed measured solver throughput after the first progress sample.
 - Generated spoilers are now treated as ideal transverse crushers: at the
   explicitly marked spoiler end, transverse magnetization (`Mx` and `My`) is
   set to zero while longitudinal magnetization (`Mz`) and the remaining
   simulation dynamics are preserved. This avoids implying unresolved
-  intravoxel dephasing before subvoxel simulation is available.
+  intravoxel dephasing when gradient-waveform subvoxel simulation is not
+  selected.
 - Expanded sequence result export with physical units and improved Cartesian,
   spiral, and multi-receive-channel acquisition handling.
 - Refined the sequence simulation workspace, phantom tools, volume viewer, and

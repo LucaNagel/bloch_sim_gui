@@ -998,6 +998,122 @@ def test_native_parallel_dynamic_kernel_is_bitwise_equal(num_threads):
         assert np.array_equal(getattr(native, name), getattr(reference, name))
 
 
+@pytest.mark.parametrize("num_threads", [1, 4])
+def test_native_fused_rf_block_tracks_coupled_concentration_inflow(num_threads):
+    phantom = _dynamic_phantom(kpl=(0.03, 0.1))
+    phantom.initial_spin_density_maps = {
+        "Pyruvate": np.ones(phantom.shape),
+        "Lactate": np.full(phantom.shape, 0.05),
+    }
+    phantom.equilibrium_polarization = 0.7
+    phantom.pyruvate_inflow = PyruvateInflow(
+        TimeCurve((0.0, 1e-3), (0.2, 0.5), "linear", "hold"),
+        np.asarray([0.8, 1.1]).reshape(phantom.shape),
+        TimeCurve((0.0, 1e-3), (0.4, 0.25), "linear", "hold"),
+    )
+    raster = 20e-6
+    program = SequenceProgram(
+        (
+            RFEvent(
+                0.0,
+                np.linspace(40.0 + 15.0j, 110.0 - 10.0j, 12),
+                raster,
+            ),
+            GradientEvent("z", 0.0, np.full(12, 120.0), raster),
+            ADCEvent(12 * raster, 1, raster),
+        ),
+        duration_s=13 * raster,
+    )
+    simulator = BlochSimulator(use_parallel=True, num_threads=num_threads)
+    optimized = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        sequence_kernel="optimized",
+        simulation_timestep_s=5e-6,
+    )
+    native = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        sequence_kernel="native_parallel",
+        simulation_timestep_s=5e-6,
+    )
+
+    assert native.metadata["native_concentration_inflow_step_enabled"] is True
+    assert native.metadata["native_rf_fused_block_enabled"] is True
+    assert native.metadata["native_rf_fused_blocks"] == 1
+    assert native.metadata["native_rf_fused_intervals"] >= 8
+    for name in (
+        "signal",
+        "species_signal",
+        "final_magnetization",
+        "final_pool_magnetization",
+    ):
+        np.testing.assert_allclose(
+            getattr(native, name),
+            getattr(optimized, name),
+            rtol=2e-13,
+            atol=2e-13,
+        )
+
+
+def test_native_serial_fused_rf_block_keeps_one_worker(monkeypatch):
+    import blochsimulator.dynamic_bloch_cy as dynamic_bloch_cy
+
+    base = _dynamic_phantom()
+    shape = (1024, 1, 1)
+    phantom = DynamicSpectralPhantom(
+        shape=shape,
+        fov=(0.02, 0.01, 0.01),
+        pools=base.pools,
+        initial_concentration_maps={
+            "Pyruvate": np.ones(shape),
+            "Lactate": np.zeros(shape),
+        },
+        kpl_map_s_inv=np.full(shape, 0.1),
+        initial_spin_density_maps={
+            "Pyruvate": np.ones(shape),
+            "Lactate": np.full(shape, 0.05),
+        },
+        equilibrium_polarization=0.7,
+        pyruvate_inflow=PyruvateInflow(
+            TimeCurve((0.0, 1e-3), (0.2, 0.5), "linear", "hold"),
+            np.ones(shape),
+            TimeCurve((0.0, 1e-3), (0.4, 0.25), "linear", "hold"),
+        ),
+    )
+    raster = 20e-6
+    program = SequenceProgram(
+        (
+            RFEvent(0.0, np.full(12, 80.0 + 10.0j), raster),
+            ADCEvent(12 * raster, 1, raster),
+        ),
+        duration_s=13 * raster,
+    )
+    native_block = dynamic_bloch_cy.apply_dynamic_rf_block_with_concentration_inflow
+    worker_counts = []
+
+    def record_worker_count(*args):
+        worker_counts.append(args[-1])
+        return native_block(*args)
+
+    monkeypatch.setattr(
+        dynamic_bloch_cy,
+        "apply_dynamic_rf_block_with_concentration_inflow",
+        record_worker_count,
+    )
+    result = BlochSimulator(use_parallel=True, num_threads=4).simulate_dynamic_sequence(
+        program,
+        phantom,
+        sequence_kernel="native_serial",
+        simulation_timestep_s=5e-6,
+    )
+
+    assert worker_counts
+    assert set(worker_counts) == {1}
+    assert result.metadata["native_rf_threads"] == 1
+    assert result.metadata["native_longitudinal_threads"] == 1
+
+
 def test_native_parallel_dynamic_kernel_respects_tiny_block_budget():
     phantom = _dynamic_phantom()
     program = SequenceProgram((), duration_s=1e-3)

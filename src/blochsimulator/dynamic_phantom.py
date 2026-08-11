@@ -1297,6 +1297,8 @@ def _longitudinal_step(
     concentration_state=None,
     concentration_source_start=None,
     concentration_source_end=None,
+    concentration_prepared=None,
+    concentration_scratch=None,
     equilibrium_polarization=0.0,
 ):
     """Advance total Mz, optionally relaxing polarization toward equilibrium.
@@ -1320,7 +1322,8 @@ def _longitudinal_step(
         )
         return
     equilibrium = float(equilibrium_polarization)
-    state[:, :, 2] -= equilibrium * concentration_state[:, :, 2]
+    if equilibrium != 0.0:
+        state[:, :, 2] -= equilibrium * concentration_state[:, :, 2]
     concentration_source_start = (
         0.0 if concentration_source_start is None else concentration_source_start
     )
@@ -1356,8 +1359,11 @@ def _longitudinal_step(
         duration,
         concentration_source_start,
         concentration_source_end,
+        concentration_prepared,
+        concentration_scratch,
     )
-    state[:, :, 2] += equilibrium * concentration_state[:, :, 2]
+    if equilibrium != 0.0:
+        state[:, :, 2] += equilibrium * concentration_state[:, :, 2]
 
 
 def _prepare_longitudinal_step(
@@ -1646,6 +1652,8 @@ def _free_step(
     concentration_state=None,
     concentration_source_start=None,
     concentration_source_end=None,
+    concentration_longitudinal_prepared=None,
+    concentration_longitudinal_scratch=None,
     equilibrium_polarization=0.0,
 ):
     if duration == 0:
@@ -1678,6 +1686,8 @@ def _free_step(
         concentration_state=concentration_state,
         concentration_source_start=concentration_source_start,
         concentration_source_end=concentration_source_end,
+        concentration_prepared=concentration_longitudinal_prepared,
+        concentration_scratch=concentration_longitudinal_scratch,
         equilibrium_polarization=equilibrium_polarization,
     )
 
@@ -1876,12 +1886,16 @@ def simulate_dynamic_sequence(
     native_longitudinal_fallback_reason = None
     native_longitudinal_step = None
     native_longitudinal_block = None
+    native_concentration_inflow_step = None
+    native_rf_concentration_block = None
     native_rf_rotation_block = None
     if sequence_kernel in {"native_serial", "native_parallel"}:
         try:
             from .dynamic_bloch_cy import (
                 apply_longitudinal_block_no_inflow,
                 apply_longitudinal_step_no_inflow,
+                apply_longitudinal_step_with_concentration_inflow,
+                apply_dynamic_rf_block_with_concentration_inflow,
                 apply_rf_rotation_transverse_block,
             )
 
@@ -1889,19 +1903,34 @@ def simulate_dynamic_sequence(
             # conversion timing, and dynamic B0. Keep that native fast path
             # available even when longitudinal evolution must stay in NumPy.
             native_rf_rotation_block = apply_rf_rotation_transverse_block
+            coupled_concentration_inflow = bool(
+                phantom.initial_spin_density_maps is not None
+                and inflow_curve is not None
+                and inflow_polarization_curve is not None
+            )
+            if coupled_concentration_inflow:
+                native_concentration_inflow_step = (
+                    apply_longitudinal_step_with_concentration_inflow
+                )
+                native_rf_concentration_block = (
+                    apply_dynamic_rf_block_with_concentration_inflow
+                )
             unsupported_longitudinal_drivers = []
-            if inflow_curve is not None:
+            if inflow_curve is not None and not coupled_concentration_inflow:
                 unsupported_longitudinal_drivers.append("pyruvate inflow")
-            if conversion_start_s > 0.0:
+            if conversion_start_s > 0.0 and not coupled_concentration_inflow:
                 unsupported_longitudinal_drivers.append("delayed conversion")
-            if phantom.initial_spin_density_maps is not None:
+            if (
+                phantom.initial_spin_density_maps is not None
+                and not coupled_concentration_inflow
+            ):
                 unsupported_longitudinal_drivers.append("concentration tracking")
             if unsupported_longitudinal_drivers:
                 native_longitudinal_fallback_reason = (
                     "native longitudinal evolution does not support "
                     + ", ".join(unsupported_longitudinal_drivers)
                 )
-            else:
+            elif not coupled_concentration_inflow:
                 native_longitudinal_step = apply_longitudinal_step_no_inflow
                 native_longitudinal_block = apply_longitudinal_block_no_inflow
         except ImportError:
@@ -1984,6 +2013,7 @@ def simulate_dynamic_sequence(
     if (
         sequence_kernel in {"native_serial", "native_parallel"}
         and native_longitudinal_step is None
+        and native_concentration_inflow_step is None
         and spatial_tx_active
     ):
         # Spatial Tx currently needs the NumPy RF implementation. If dynamic
@@ -2145,10 +2175,14 @@ def simulate_dynamic_sequence(
                 )
                 if n_rx_coils == 1:
                     received = (
-                        np.sum(transverse * spin_signal_weights)
-                        if unity_single_rx
-                        else np.sum(
-                            transverse * rx_sensitivities[0] * spin_signal_weights
+                        np.sum(transverse)
+                        if unity_single_rx and spins_per_voxel == 1
+                        else (
+                            np.sum(transverse * spin_signal_weights)
+                            if unity_single_rx
+                            else np.sum(
+                                transverse * rx_sensitivities[0] * spin_signal_weights
+                            )
                         )
                     )
                     species_signal[pool, adc_cursor] = (
@@ -2222,6 +2256,31 @@ def simulate_dynamic_sequence(
         if sequence_kernel == "optimized" or native_longitudinal_step is None
         else None
     )
+    concentration_longitudinal_scratch = None
+    inactive_concentration_longitudinal_scratch = None
+    if concentration_state is not None and sequence_kernel in {
+        "optimized",
+        "native_serial",
+        "native_parallel",
+    }:
+        concentration_regular = np.abs(coefficient_kpl) > 1e-12
+        concentration_regular_mode = (
+            1
+            if np.all(concentration_regular)
+            else -1 if not np.any(concentration_regular) else 0
+        )
+        concentration_longitudinal_scratch = (
+            np.empty_like(kpl),
+            np.empty_like(kpl),
+            np.empty_like(kpl),
+            concentration_regular_mode,
+        )
+        inactive_concentration_longitudinal_scratch = (
+            np.empty_like(kpl),
+            np.empty_like(kpl),
+            np.empty_like(kpl),
+            -1,
+        )
     native_parallel_threshold = 1024
     requested_native_threads = max(1, int(num_threads)) if use_parallel else 1
     native_threads = (
@@ -2230,6 +2289,9 @@ def simulate_dynamic_sequence(
         else 1
     )
     native_rf_threads = native_threads if sequence_kernel == "native_parallel" else 1
+    native_longitudinal_threads = (
+        native_threads if sequence_kernel == "native_parallel" else 1
+    )
     native_block_interval_limit = 256
     native_block_table_limit_bytes = 8 * 1024**2
     if memory_budget_bytes is not None:
@@ -2256,10 +2318,349 @@ def simulate_dynamic_sequence(
             f"{native_rf_threads} thread(s) for {n_simulated_spins:,} spins "
             f"in {parent_active_count:,} active voxels."
         )
+    if status_callback is not None and native_concentration_inflow_step is not None:
+        status_callback(
+            "Using fused native pyruvate/lactate concentration and inflow "
+            f"kinetics with {native_longitudinal_threads} thread(s)."
+        )
     native_preapplied_end = 0
     checkpoint_state_set = set(
         int(value) for value in compiled.checkpoint_state_indices
     )
+    native_rf_fused_spin_limit = 131072
+    native_rf_fused_interval_limit = 512
+    native_rf_fused_min_intervals = 8
+    native_rf_fused_cache_limit_bytes = 192 * 1024**2
+    if memory_budget_bytes is not None:
+        native_rf_fused_cache_limit_bytes = min(
+            native_rf_fused_cache_limit_bytes,
+            max(0, int(memory_budget_bytes) // 8),
+        )
+    native_rf_fused_fallback_reason = None
+    if native_rf_concentration_block is None:
+        native_rf_fused_fallback_reason = (
+            "persistent RF blocks require coupled concentration/polarized inflow"
+        )
+    elif phantom.dynamic_b0 is not None:
+        native_rf_fused_fallback_reason = (
+            "persistent RF blocks do not yet support dynamic B0"
+        )
+    elif spatial_tx_active:
+        native_rf_fused_fallback_reason = (
+            "persistent RF blocks require uniform transmit sensitivity"
+        )
+    elif n_simulated_spins > native_rf_fused_spin_limit:
+        native_rf_fused_fallback_reason = (
+            f"{n_simulated_spins:,} spins exceed the persistent RF block limit "
+            f"of {native_rf_fused_spin_limit:,}; full-sequence voxel chunking "
+            "is required"
+        )
+    elif native_rf_fused_cache_limit_bytes < n_simulated_spins * 64:
+        native_rf_fused_fallback_reason = (
+            "the simulation memory budget is too small for a persistent RF plan"
+        )
+    native_rf_fused_enabled = native_rf_fused_fallback_reason is None
+    native_rf_fused_plan_cache = (
+        _BoundedArrayCache(native_rf_fused_cache_limit_bytes)
+        if native_rf_fused_enabled
+        else None
+    )
+    native_rf_fused_preapplied_end = 0
+    native_rf_fused_blocks = 0
+    native_rf_fused_intervals = 0
+    protected_state_set = set(checkpoint_state_set)
+    protected_state_set.update(int(value) for value in compiled.adc_state_indices)
+    protected_state_set.update(transverse_crush_state_set)
+
+    def _native_rf_fused_block_end(first_interval):
+        if not native_rf_fused_enabled or rf_hz[first_interval] == 0.0:
+            return first_interval
+        end = first_interval
+        hard_end = min(interval_count, first_interval + native_rf_fused_interval_limit)
+        while end < hard_end and rf_hz[end] != 0.0:
+            if end > first_interval and end in protected_state_set:
+                break
+            interval_left = 0.0 if end == 0 else float(compiled.interval_end_s[end - 1])
+            interval_right = float(compiled.interval_end_s[end])
+            if (interval_left + interval_right) / 2.0 < conversion_start_s:
+                break
+            end += 1
+            if end in protected_state_set:
+                break
+        if end - first_interval < native_rf_fused_min_intervals:
+            return first_interval
+        return end
+
+    def _native_rf_fused_plan(first_interval, end_interval):
+        factor_keys = []
+        longitudinal_keys = []
+        rf_values = []
+        interval_left = (
+            0.0
+            if first_interval == 0
+            else float(compiled.interval_end_s[first_interval - 1])
+        )
+        for block_interval in range(first_interval, end_interval):
+            dt_value = float(compiled.dt_s[block_interval])
+            interval_right = float(compiled.interval_end_s[block_interval])
+            interval_middle = interval_left + dt_value / 2.0
+            half_duration = dt_value / 2.0
+            gradient_key = tuple(
+                float(value) for value in gradient_hz_per_m[block_interval]
+            )
+            first_key = (
+                half_duration,
+                float(interval_middle - interval_left),
+                gradient_key,
+                None,
+            )
+            second_key = (
+                half_duration,
+                float(interval_right - interval_middle),
+                gradient_key,
+                None,
+            )
+            factor_keys.append((first_key, second_key))
+            longitudinal_keys.append((half_duration, True))
+            rf_values.append(complex(rf_hz[block_interval]))
+            interval_left = interval_right
+        plan_key = (
+            tuple(factor_keys),
+            tuple(longitudinal_keys),
+            tuple(rf_values),
+        )
+        cached = native_rf_fused_plan_cache.get(plan_key)
+        if cached is not None:
+            return cached
+
+        static_frequency_by_gradient = {}
+        factor_group_by_key = {}
+        factor_values = []
+
+        def factor_group(key):
+            group = factor_group_by_key.get(key)
+            if group is not None:
+                return group
+            factors = transverse_cache.get(key)
+            if factors is None:
+                half_duration, phase_duration, gradient_key, _ = key
+                static_frequencies = static_frequency_by_gradient.get(gradient_key)
+                if static_frequencies is None:
+                    gradient = np.asarray(gradient_key, dtype=np.float64)
+                    gradient_frequency = positions @ gradient
+                    static_frequencies = (
+                        b0[None, :]
+                        + pool_offsets[:, None]
+                        + gradient_frequency[None, :]
+                    )
+                    static_frequency_by_gradient[gradient_key] = static_frequencies
+                phase = static_frequencies * phase_duration
+                factors = _prepare_transverse_factors_for_dtype(
+                    phase, t2, half_duration, real_dtype
+                )
+                transverse_cache.put(key, factors)
+            group = len(factor_values)
+            factor_group_by_key[key] = group
+            factor_values.append(factors)
+            return group
+
+        first_factor_groups = []
+        second_factor_groups = []
+        for first_key, second_key in factor_keys:
+            first_factor_groups.append(factor_group(first_key))
+            second_factor_groups.append(factor_group(second_key))
+        transverse_factor_table = np.ascontiguousarray(
+            np.stack(
+                [np.stack(factors, axis=0) for factors in factor_values],
+                axis=0,
+            ),
+            dtype=np.complex128,
+        )
+
+        longitudinal_group_by_key = {}
+        longitudinal_values = []
+        concentration_values = []
+        duration_by_group = []
+        regular_mode_by_group = []
+        concentration_regular_mode_by_group = []
+        longitudinal_groups = []
+        for longitudinal_key in longitudinal_keys:
+            group = longitudinal_group_by_key.get(longitudinal_key)
+            if group is None:
+                group = len(longitudinal_values)
+                longitudinal_group_by_key[longitudinal_key] = group
+                half_duration, _ = longitudinal_key
+                prepared = coefficient_cache.get(longitudinal_key)
+                if prepared is None:
+                    prepared = _prepare_longitudinal_step_for_dtype(
+                        coefficient_kpl,
+                        coefficient_r1[0],
+                        coefficient_r1[1],
+                        half_duration,
+                        with_source=True,
+                        dtype=real_dtype,
+                    )
+                    coefficient_cache.put(longitudinal_key, prepared)
+                concentration_key = (
+                    "concentration",
+                    half_duration,
+                    True,
+                )
+                concentration_prepared = coefficient_cache.get(concentration_key)
+                if concentration_prepared is None:
+                    concentration_prepared = _prepare_longitudinal_step_for_dtype(
+                        coefficient_kpl,
+                        0.0,
+                        0.0,
+                        half_duration,
+                        with_source=True,
+                        dtype=real_dtype,
+                    )
+                    coefficient_cache.put(concentration_key, concentration_prepared)
+                longitudinal_values.append(prepared)
+                concentration_values.append(concentration_prepared)
+                duration_by_group.append(half_duration)
+                regular_mode_by_group.append(regular_mode)
+                concentration_regular_mode_by_group.append(
+                    concentration_longitudinal_scratch[3]
+                )
+            longitudinal_groups.append(group)
+
+        def stacked(values, index, dtype=np.float64):
+            return np.ascontiguousarray(
+                np.stack([value[index] for value in values], axis=0),
+                dtype=dtype,
+            )
+
+        def stacked_source(values, index):
+            return np.ascontiguousarray(
+                np.stack([value[4][index] for value in values], axis=0),
+                dtype=np.float64,
+            )
+
+        rf_prepared = [
+            _prepare_rf_rotation(value, float(compiled.dt_s[index]))
+            for index, value in zip(range(first_interval, end_interval), rf_values)
+        ]
+        plan = (
+            transverse_factor_table,
+            stacked(longitudinal_values, 0),
+            np.ascontiguousarray(
+                [value[1] for value in longitudinal_values], dtype=np.float64
+            ),
+            stacked(longitudinal_values, 2),
+            stacked(longitudinal_values, 3, dtype=np.bool_),
+            stacked_source(longitudinal_values, 0),
+            stacked_source(longitudinal_values, 1),
+            stacked_source(longitudinal_values, 2),
+            stacked_source(longitudinal_values, 3),
+            stacked(concentration_values, 0),
+            np.ascontiguousarray(
+                [value[1] for value in concentration_values], dtype=np.float64
+            ),
+            stacked(concentration_values, 2),
+            stacked(concentration_values, 3, dtype=np.bool_),
+            stacked_source(concentration_values, 0),
+            stacked_source(concentration_values, 1),
+            stacked_source(concentration_values, 2),
+            stacked_source(concentration_values, 3),
+            np.ascontiguousarray(duration_by_group, dtype=np.float64),
+            np.ascontiguousarray(regular_mode_by_group, dtype=np.int32),
+            np.ascontiguousarray(concentration_regular_mode_by_group, dtype=np.int32),
+            np.ascontiguousarray(longitudinal_groups, dtype=np.int32),
+            np.ascontiguousarray(first_factor_groups, dtype=np.int32),
+            np.ascontiguousarray(second_factor_groups, dtype=np.int32),
+            np.ascontiguousarray([value[0] for value in rf_prepared], dtype=np.float64),
+            np.ascontiguousarray([value[1] for value in rf_prepared], dtype=np.float64),
+            np.ascontiguousarray([value[2] for value in rf_prepared], dtype=np.float64),
+            np.ascontiguousarray([value[3] for value in rf_prepared], dtype=np.float64),
+            np.ascontiguousarray([value[4] for value in rf_prepared], dtype=np.float64),
+        )
+        return native_rf_fused_plan_cache.put(plan_key, plan)
+
+    def preapply_native_rf_fused_block(first_interval):
+        nonlocal native_rf_fused_preapplied_end
+        nonlocal native_rf_fused_blocks, native_rf_fused_intervals
+        end_interval = _native_rf_fused_block_end(first_interval)
+        if end_interval == first_interval:
+            native_rf_fused_preapplied_end = first_interval
+            return
+        plan = _native_rf_fused_plan(first_interval, end_interval)
+        inflow_values = [[] for _ in range(4)]
+        polarization_values = [[] for _ in range(4)]
+        interval_left = (
+            0.0
+            if first_interval == 0
+            else float(compiled.interval_end_s[first_interval - 1])
+        )
+        for block_interval in range(first_interval, end_interval):
+            dt_value = float(compiled.dt_s[block_interval])
+            interval_middle = interval_left + dt_value / 2.0
+            interval_right = float(compiled.interval_end_s[block_interval])
+            first_start, first_end = inflow_curve.interval_values(
+                interval_left, interval_middle
+            )
+            second_start, second_end = inflow_curve.interval_values(
+                interval_middle, interval_right
+            )
+            polarization_first_start, polarization_first_end = (
+                inflow_polarization_curve.interval_values(
+                    interval_left, interval_middle
+                )
+            )
+            polarization_second_start, polarization_second_end = (
+                inflow_polarization_curve.interval_values(
+                    interval_middle, interval_right
+                )
+            )
+            for target, value in zip(
+                inflow_values,
+                (first_start, first_end, second_start, second_end),
+            ):
+                target.append(value)
+            for target, value in zip(
+                polarization_values,
+                (
+                    polarization_first_start,
+                    polarization_first_end,
+                    polarization_second_start,
+                    polarization_second_end,
+                ),
+            ):
+                target.append(value)
+            interval_left = interval_right
+        native_rf_concentration_block(
+            state,
+            transverse_state,
+            concentration_state,
+            kpl,
+            inflow_delivery,
+            *plan,
+            *[
+                np.ascontiguousarray(values, dtype=np.float64)
+                for values in (*inflow_values, *polarization_values)
+            ],
+            phantom.equilibrium_polarization,
+            native_longitudinal_threads,
+        )
+        native_rf_fused_preapplied_end = end_interval
+        native_rf_fused_blocks += 1
+        native_rf_fused_intervals += end_interval - first_interval
+
+    if status_callback is not None and native_rf_fused_enabled:
+        status_callback(
+            "Using persistent native RF waveform blocks for coupled dynamic "
+            "evolution."
+        )
+    elif (
+        status_callback is not None
+        and native_rf_concentration_block is not None
+        and native_rf_fused_fallback_reason is not None
+    ):
+        status_callback(
+            "Persistent native RF waveform blocks are unavailable: "
+            f"{native_rf_fused_fallback_reason}."
+        )
 
     def preapply_native_longitudinal_block(first_interval):
         """Advance Mz through one RF-free, checkpoint-free bounded block."""
@@ -2336,6 +2737,29 @@ def simulate_dynamic_sequence(
     for interval in range(interval_count):
         if cancel_callback is not None and cancel_callback():
             raise RuntimeError("sequence simulation cancelled")
+        if (
+            native_rf_fused_enabled
+            and interval >= native_rf_fused_preapplied_end
+            and rf_hz[interval] != 0.0
+        ):
+            preapply_native_rf_fused_block(interval)
+        if interval < native_rf_fused_preapplied_end:
+            interval_end = float(compiled.interval_end_s[interval])
+            crush_transverse_if_requested(interval + 1)
+            observe(interval + 1)
+            interval_start = interval_end
+            if progress_callback is not None and (
+                interval % progress_stride == 0 or interval + 1 == interval_count
+            ):
+                progress_callback(interval + 1, interval_count)
+            if preview_callback is not None and (
+                interval % progress_stride == 0 or interval + 1 == interval_count
+            ):
+                preview_callback(
+                    (interval + 1) / interval_count,
+                    species_signal.sum(axis=0),
+                )
+            continue
         dt = compiled.dt_s[interval]
         interval_end = float(compiled.interval_end_s[interval])
         interval_mid = interval_start + dt / 2.0
@@ -2460,6 +2884,36 @@ def simulate_dynamic_sequence(
                     dtype=real_dtype,
                 )
                 coefficient_cache.put(longitudinal_key, longitudinal_prepared)
+            concentration_longitudinal_prepared = None
+            concentration_interval_scratch = None
+            if concentration_state is not None:
+                concentration_key = (
+                    "concentration",
+                    float(coefficient_half_duration),
+                    conversion_active,
+                )
+                concentration_longitudinal_prepared = coefficient_cache.get(
+                    concentration_key
+                )
+                if concentration_longitudinal_prepared is None:
+                    concentration_longitudinal_prepared = (
+                        _prepare_longitudinal_step_for_dtype(
+                            coefficient_interval_kpl,
+                            0.0,
+                            0.0,
+                            coefficient_half_duration,
+                            with_source=True,
+                            dtype=real_dtype,
+                        )
+                    )
+                    coefficient_cache.put(
+                        concentration_key, concentration_longitudinal_prepared
+                    )
+                concentration_interval_scratch = (
+                    concentration_longitudinal_scratch
+                    if conversion_active
+                    else inactive_concentration_longitudinal_scratch
+                )
             first_phase_duration = interval_mid - interval_start
             second_phase_duration = interval_end - interval_mid
             if phantom.dynamic_b0 is None:
@@ -2545,7 +2999,40 @@ def simulate_dynamic_sequence(
                     concentration_mid = inflow_delivery * real_type(mid_value)
                     source_start = concentration_start * real_type(polarization_start)
                     source_mid = concentration_mid * real_type(polarization_mid)
-            if native_longitudinal_step is None:
+            if native_concentration_inflow_step is not None:
+                for pool in range(2):
+                    transverse_state[pool] *= first_transverse_factors[pool]
+                native_concentration_inflow_step(
+                    state,
+                    concentration_state,
+                    interval_kpl,
+                    longitudinal_prepared[0],
+                    longitudinal_prepared[1],
+                    longitudinal_prepared[2],
+                    longitudinal_prepared[3],
+                    longitudinal_prepared[4][0],
+                    longitudinal_prepared[4][1],
+                    longitudinal_prepared[4][2],
+                    longitudinal_prepared[4][3],
+                    concentration_longitudinal_prepared[0],
+                    concentration_longitudinal_prepared[1],
+                    concentration_longitudinal_prepared[2],
+                    concentration_longitudinal_prepared[3],
+                    concentration_longitudinal_prepared[4][0],
+                    concentration_longitudinal_prepared[4][1],
+                    concentration_longitudinal_prepared[4][2],
+                    concentration_longitudinal_prepared[4][3],
+                    source_start,
+                    source_mid,
+                    concentration_start,
+                    concentration_mid,
+                    half_duration,
+                    phantom.equilibrium_polarization,
+                    interval_longitudinal_scratch[3],
+                    concentration_interval_scratch[3],
+                    native_longitudinal_threads,
+                )
+            elif native_longitudinal_step is None:
                 _free_step(
                     state,
                     first_phase,
@@ -2562,6 +3049,10 @@ def simulate_dynamic_sequence(
                     concentration_state=concentration_state,
                     concentration_source_start=concentration_start,
                     concentration_source_end=concentration_mid,
+                    concentration_longitudinal_prepared=(
+                        concentration_longitudinal_prepared
+                    ),
+                    concentration_longitudinal_scratch=(concentration_interval_scratch),
                     equilibrium_polarization=phantom.equilibrium_polarization,
                 )
             else:
@@ -2631,7 +3122,40 @@ def simulate_dynamic_sequence(
                     concentration_end = inflow_delivery * real_type(end_value)
                     source_mid = concentration_mid * real_type(polarization_mid)
                     source_end = concentration_end * real_type(polarization_end)
-            if native_longitudinal_step is None:
+            if native_concentration_inflow_step is not None:
+                for pool in range(2):
+                    transverse_state[pool] *= second_transverse_factors[pool]
+                native_concentration_inflow_step(
+                    state,
+                    concentration_state,
+                    interval_kpl,
+                    longitudinal_prepared[0],
+                    longitudinal_prepared[1],
+                    longitudinal_prepared[2],
+                    longitudinal_prepared[3],
+                    longitudinal_prepared[4][0],
+                    longitudinal_prepared[4][1],
+                    longitudinal_prepared[4][2],
+                    longitudinal_prepared[4][3],
+                    concentration_longitudinal_prepared[0],
+                    concentration_longitudinal_prepared[1],
+                    concentration_longitudinal_prepared[2],
+                    concentration_longitudinal_prepared[3],
+                    concentration_longitudinal_prepared[4][0],
+                    concentration_longitudinal_prepared[4][1],
+                    concentration_longitudinal_prepared[4][2],
+                    concentration_longitudinal_prepared[4][3],
+                    source_mid,
+                    source_end,
+                    concentration_mid,
+                    concentration_end,
+                    half_duration,
+                    phantom.equilibrium_polarization,
+                    interval_longitudinal_scratch[3],
+                    concentration_interval_scratch[3],
+                    native_longitudinal_threads,
+                )
+            elif native_longitudinal_step is None:
                 _free_step(
                     state,
                     second_phase,
@@ -2648,6 +3172,10 @@ def simulate_dynamic_sequence(
                     concentration_state=concentration_state,
                     concentration_source_start=concentration_mid,
                     concentration_source_end=concentration_end,
+                    concentration_longitudinal_prepared=(
+                        concentration_longitudinal_prepared
+                    ),
+                    concentration_longitudinal_scratch=(concentration_interval_scratch),
                     equilibrium_polarization=phantom.equilibrium_polarization,
                 )
             else:
@@ -2812,6 +3340,8 @@ def simulate_dynamic_sequence(
             "tx_sensitivity": "spatial" if spatial_tx_active else "uniform",
             "n_rx_coils": n_rx_coils,
             "simulation_precision": simulation_precision,
+            "simulation_timestep_s": float(simulation_timestep_s),
+            "compiled_interval_count": interval_count,
             "state_dtype": real_dtype.name,
             "signal_dtype": complex_dtype.name,
             "coefficient_precompute_dtype": "float64",
@@ -2826,8 +3356,15 @@ def simulate_dynamic_sequence(
                 and native_rf_rotation_block is not None
                 and not spatial_tx_active
                 and native_longitudinal_step is None
+                and native_concentration_inflow_step is None
             ),
-            "native_longitudinal_step_enabled": (native_longitudinal_step is not None),
+            "native_longitudinal_step_enabled": bool(
+                native_longitudinal_step is not None
+                or native_concentration_inflow_step is not None
+            ),
+            "native_concentration_inflow_step_enabled": (
+                native_concentration_inflow_step is not None
+            ),
             "native_longitudinal_block_enabled": bool(
                 sequence_kernel == "native_parallel"
                 and native_longitudinal_block is not None
@@ -2842,8 +3379,29 @@ def simulate_dynamic_sequence(
                 and not spatial_tx_active
                 else 1
             ),
+            "native_longitudinal_threads": (
+                native_longitudinal_threads
+                if sequence_kernel in {"native_serial", "native_parallel"}
+                and native_concentration_inflow_step is not None
+                else 1
+            ),
             "native_rf_block_enabled": (
                 native_rf_rotation_block is not None and not spatial_tx_active
+            ),
+            "native_rf_fused_block_enabled": native_rf_fused_enabled,
+            "native_rf_fused_fallback_reason": native_rf_fused_fallback_reason,
+            "native_rf_fused_blocks": native_rf_fused_blocks,
+            "native_rf_fused_intervals": native_rf_fused_intervals,
+            "native_rf_fused_spin_limit": native_rf_fused_spin_limit,
+            "native_rf_fused_interval_limit": native_rf_fused_interval_limit,
+            "native_rf_fused_cache_limit_bytes": (native_rf_fused_cache_limit_bytes),
+            "native_rf_fused_cache_bytes": (
+                native_rf_fused_plan_cache.current_bytes
+                if native_rf_fused_plan_cache is not None
+                else 0
+            ),
+            "native_rf_fused_numerical_contract": (
+                "float64-close" if native_rf_fused_enabled else None
             ),
             "native_parallel_threshold": native_parallel_threshold,
             "native_block_interval_limit": native_block_interval_limit,
