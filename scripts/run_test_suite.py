@@ -15,6 +15,8 @@ CHUNKED_GUI_MODULES = (
     TESTS / "test_sequence_gui.py",
     TESTS / "test_sequence_workspace_features.py",
 )
+# Benchmarks require local phantom assets and are not part of quality validation.
+EXCLUDED_MODULES = (TESTS / "test_benchmarks.py",)
 GUI_BATCH_SIZE = 2
 GUI_NODE_BATCH_SIZE = 10
 BATCHED_PYTEST_ENV = "BLOCHSIMULATOR_BATCHED_PYTEST"
@@ -78,7 +80,10 @@ def _collect_node_ids(module: Path):
 
 
 def main() -> int:
-    modules = tuple(sorted(TESTS.glob("test_*.py")))
+    excluded = set(EXCLUDED_MODULES)
+    modules = tuple(
+        module for module in sorted(TESTS.glob("test_*.py")) if module not in excluded
+    )
     chunked = set(CHUNKED_GUI_MODULES)
     gui_modules = tuple(
         module for module in modules if module not in chunked and _is_gui_module(module)
