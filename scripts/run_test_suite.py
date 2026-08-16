@@ -12,6 +12,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT / "tests"
 CHUNKED_GUI_MODULES = (
+    TESTS / "test_reconstruction_explorer.py",
     TESTS / "test_sequence_gui.py",
     TESTS / "test_sequence_workspace_features.py",
 )
@@ -19,6 +20,9 @@ CHUNKED_GUI_MODULES = (
 EXCLUDED_MODULES = (TESTS / "test_benchmarks.py",)
 GUI_BATCH_SIZE = 2
 GUI_NODE_BATCH_SIZE = 10
+GUI_NODE_BATCH_SIZE_OVERRIDES = {
+    TESTS / "test_reconstruction_explorer.py": 1,
+}
 BATCHED_PYTEST_ENV = "BLOCHSIMULATOR_BATCHED_PYTEST"
 
 
@@ -97,7 +101,8 @@ def main() -> int:
     batches = [regular_modules]
     batches.extend(_chunks(gui_modules, GUI_BATCH_SIZE))
     for module in CHUNKED_GUI_MODULES:
-        batches.extend(_chunks(_collect_node_ids(module), GUI_NODE_BATCH_SIZE))
+        batch_size = GUI_NODE_BATCH_SIZE_OVERRIDES.get(module, GUI_NODE_BATCH_SIZE)
+        batches.extend(_chunks(_collect_node_ids(module), batch_size))
 
     for batch in batches:
         return_code = _run_pytest(batch)
