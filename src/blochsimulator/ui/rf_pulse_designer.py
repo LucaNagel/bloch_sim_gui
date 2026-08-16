@@ -25,6 +25,12 @@ from .dialogs import PulseImportDialog
 class RFPulseDesigner(QGroupBox):
     """Widget for designing RF pulses."""
 
+    ADIABATIC_PASSAGE_TYPES = frozenset(
+        {"Adiabatic Half Passage", "Adiabatic Full Passage"}
+    )
+    ADIABATIC_DEFAULT_DURATION_MS = 10.0
+    MAX_DESIGN_POINTS = 1_000_000
+
     pulse_changed = pyqtSignal(object)
     parameters_changed = pyqtSignal(dict)
 
@@ -75,17 +81,21 @@ class RFPulseDesigner(QGroupBox):
         prefix = "rf_compact_" if self.compact else "rf_tab_"
         self.pulse_type.setObjectName(f"{prefix}pulse_type")
         self.pulse_type.addItems(list(RF_PULSE_TYPE_OPTIONS))
-        self.pulse_type.currentTextChanged.connect(self.update_pulse)
+        self.pulse_type.currentTextChanged.connect(self._on_pulse_type_changed)
         type_layout.addWidget(self.pulse_type)
         control_layout.addLayout(type_layout)
 
         # Flip angle
         flip_layout = QHBoxLayout()
-        flip_layout.addWidget(QLabel("Flip Angle (°):"))
+        self.flip_angle_label = QLabel("Flip Angle (°):")
+        flip_layout.addWidget(self.flip_angle_label)
         self.flip_angle = QDoubleSpinBox()
         self.flip_angle.setObjectName(f"{prefix}flip_angle")
         self.flip_angle.setRange(0, 1e4)
         self.flip_angle.setValue(90)
+        self.flip_angle.setToolTip(
+            "Nominal RF flip angle in degrees. Not used for AHP or AFP."
+        )
         self.flip_angle.valueChanged.connect(self.update_pulse)
         flip_layout.addWidget(self.flip_angle)
         control_layout.addLayout(flip_layout)
@@ -114,15 +124,26 @@ class RFPulseDesigner(QGroupBox):
         self.b1_amplitude.setDecimals(4)
         self.b1_amplitude.setSpecialValueText("Auto")
         self.b1_amplitude.setToolTip(
-            "Set > 0 to override B1 amplitude. 0 = Auto (derive from Flip Angle)."
+            "Set the peak B1 amplitude directly in Gauss. A value above 0 is "
+            "required for AHP/AFP; for other pulses, 0 = Auto from Flip Angle."
         )
         self.b1_amplitude.valueChanged.connect(self.update_pulse)
         b1_layout.addWidget(self.b1_amplitude)
         control_layout.addLayout(b1_layout)
 
+        self.adiabatic_parameter_hint = QLabel(
+            "AHP/AFP do not use a nominal flip angle. Set B1 Amplitude "
+            "directly to a value above 0 G."
+        )
+        self.adiabatic_parameter_hint.setObjectName(f"{prefix}adiabatic_parameter_hint")
+        self.adiabatic_parameter_hint.setWordWrap(True)
+        self.adiabatic_parameter_hint.setStyleSheet("color: #b06a00;")
+        self.adiabatic_parameter_hint.setVisible(False)
+        control_layout.addWidget(self.adiabatic_parameter_hint)
+
         # Time-bandwidth product (computed from pulse shape; not user-set)
-        tbw_layout = QHBoxLayout()
-        tbw_layout.addWidget(QLabel("Time-BW Product (auto):"))
+        # tbw_layout = QHBoxLayout()
+        # tbw_layout.addWidget(QLabel("Time-BW Product (auto, kHz*ms):"))
         self.tbw = QDoubleSpinBox()
         self.tbw.setObjectName(f"{prefix}tbw")
         self.tbw.setRange(0.001, 1000)
@@ -130,11 +151,29 @@ class RFPulseDesigner(QGroupBox):
         self.tbw.setSingleStep(0.5)
         self.tbw.setReadOnly(True)
         self.tbw.setButtonSymbols(QDoubleSpinBox.NoButtons)
-        tbw_layout.addWidget(self.tbw)
-        control_layout.addLayout(tbw_layout)
+        self.tbw.hide()
+        # tbw_layout.addWidget(self.tbw)
+        # control_layout.addLayout(tbw_layout)
         self.tbw_auto_label = QLabel("Auto TBW (≈1/integfac): —")
         self.tbw_auto_label.setStyleSheet("color: gray;")
         control_layout.addWidget(self.tbw_auto_label)
+
+        # RF Pulse bandwidth (computed from pulse shape; not user-set)
+        # rf_bandwidth_layout = QHBoxLayout()
+        # rf_bandwidth_layout.addWidget(QLabel("RF Bandwidth (auto, kHz):"))
+        self.rf_bandwidth = QDoubleSpinBox()
+        self.rf_bandwidth.setObjectName(f"{prefix}rf_bandwidth")
+        self.rf_bandwidth.setRange(0.001, 100000)
+        self.rf_bandwidth.setValue(1)
+        self.rf_bandwidth.setSingleStep(0.1)
+        self.rf_bandwidth.setReadOnly(True)
+        self.rf_bandwidth.setButtonSymbols(QDoubleSpinBox.NoButtons)
+        self.rf_bandwidth.hide()
+        # rf_bandwidth_layout.addWidget(self.rf_bandwidth)
+        # control_layout.addLayout(rf_bandwidth_layout)
+        self.rf_bandwidth_auto_label = QLabel("Auto RF Bandwidth (integfac / duration)")
+        self.rf_bandwidth_auto_label.setStyleSheet("color: gray;")
+        control_layout.addWidget(self.rf_bandwidth_auto_label)
 
         # Lobes control for Sinc pulses
         lobes_layout = QHBoxLayout()
@@ -164,7 +203,7 @@ class RFPulseDesigner(QGroupBox):
         phase_layout.addWidget(QLabel("Phase (°):"))
         self.phase = QDoubleSpinBox()
         self.phase.setObjectName(f"{prefix}phase")
-        self.phase.setRange(0, 360)
+        self.phase.setRange(-360, 360)
         self.phase.setValue(0)
         self.phase.valueChanged.connect(self.update_pulse)
         phase_layout.addWidget(self.phase)
@@ -239,6 +278,30 @@ class RFPulseDesigner(QGroupBox):
         # Initial pulse
         self.update_pulse()
 
+    def is_adiabatic_passage(self) -> bool:
+        """Return whether AHP or AFP is selected."""
+        return self.pulse_type.currentText() in self.ADIABATIC_PASSAGE_TYPES
+
+    def _update_parameter_availability(self):
+        """Expose the physically meaningful controls for the pulse family."""
+        adiabatic_passage = self.is_adiabatic_passage()
+        self.flip_angle.setEnabled(not adiabatic_passage)
+        self.flip_angle_label.setText(
+            "Flip Angle (not applicable):" if adiabatic_passage else "Flip Angle (°):"
+        )
+        self.adiabatic_parameter_hint.setVisible(adiabatic_passage)
+        self.b1_amplitude.setSpecialValueText(
+            "Required" if adiabatic_passage else "Auto"
+        )
+
+    def _on_pulse_type_changed(self, _pulse_type: str):
+        """Apply pulse-family defaults once when the user changes the type."""
+        if self.is_adiabatic_passage():
+            was_blocked = self.duration.blockSignals(True)
+            self.duration.setValue(self.ADIABATIC_DEFAULT_DURATION_MS)
+            self.duration.blockSignals(was_blocked)
+        self.update_pulse()
+
     def _update_tbw_auto(self, integration_factor: float):
         """Set TBW readout from an integration factor (heuristic: TBW ≈ 1/integfac)."""
         if not hasattr(self, "tbw") or not hasattr(self, "tbw_auto_label"):
@@ -258,6 +321,31 @@ class RFPulseDesigner(QGroupBox):
         self.tbw.blockSignals(True)
         self.tbw.setValue(tbw_auto)
         self.tbw.blockSignals(False)
+
+    def _update_rf_bandwidth_auto(self, integration_factor: float, duration: float):
+        """Set RF Bandwidth readout from an integration factor (heuristic: RF Bandwidth ≈ integfac / duration)."""
+        if not hasattr(self, "rf_bandwidth") or not hasattr(
+            self, "rf_bandwidth_auto_label"
+        ):
+            return
+        if (
+            integration_factor is None
+            or not np.isfinite(integration_factor)
+            or integration_factor <= 0
+        ):
+            self.rf_bandwidth_auto_label.setText("Auto RF Bandwidth (tbw/duration): —")
+            self.last_integration_factor = 1.0
+            return
+        tbw_auto = 1.0 / integration_factor if integration_factor != 0 else 1.0
+        rf_bandwidth_auto = tbw_auto / duration if duration != 0 else 1.0
+        self.rf_bandwidth_auto_label.setText(
+            f"Auto RF Bandwidth (tbw/duration): {rf_bandwidth_auto:.3f}"
+        )
+        self.last_integration_factor = float(integration_factor)
+        # Keep the control in sync without retriggering pulse design
+        self.rf_bandwidth.blockSignals(True)
+        self.rf_bandwidth.setValue(rf_bandwidth_auto)
+        self.rf_bandwidth.blockSignals(False)
 
     def _design_tbw_for_type(self, pulse_type: str) -> float:
         """Return a canonical TBW parameter for the designer (not user-controlled)."""
@@ -335,6 +423,7 @@ class RFPulseDesigner(QGroupBox):
     def update_pulse(self):
         """Update the RF pulse based on current parameters."""
         pulse_type_text = self.pulse_type.currentText().lower()
+        self._update_parameter_availability()
 
         # Update explanation
         desc_map = {
@@ -451,14 +540,14 @@ class RFPulseDesigner(QGroupBox):
         # Handle Standard Pulses
         # Calculate TBW based on pulse type
         if pulse_type == "sinc":
-            design_tbw = float(self.sinc_lobes.value()) + 1.0
+            design_tbw = 2.0 * max(int(self.sinc_lobes.value()), 1)
         else:
             design_tbw = self._design_tbw_for_type(pulse_type)
 
         # Target point count
         if self.target_dt and self.target_dt > 0:
             npoints = max(32, int(np.ceil(duration / self.target_dt)))
-            npoints = min(npoints, 50000)
+            npoints = min(npoints, self.MAX_DESIGN_POINTS)
         else:
             npoints = 100
 
@@ -495,8 +584,17 @@ class RFPulseDesigner(QGroupBox):
         self._update_tbw_auto(integration_factor)
         self.last_integration_factor = float(integration_factor)
 
+        self._update_rf_bandwidth_auto(
+            integration_factor=integration_factor, duration=duration
+        )
+
         # Amplitude scaling
-        if b1_override > 0:
+        if self.is_adiabatic_passage():
+            # AHP/AFP rotations follow the effective field and therefore do not
+            # have a meaningful pulse-area flip angle. A value of zero remains
+            # visibly invalid until the user supplies the peak B1 directly.
+            pulse_amp_G = b1_override
+        elif b1_override > 0:
             # Manual B1 override
             pulse_amp_G = b1_override
         else:

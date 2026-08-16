@@ -54,6 +54,52 @@ class MockSequenceDesigner:
         self.ssfp_alternate_phase.isChecked.return_value = True
 
 
+class MockRasterSequenceDesigner:
+    """Minimal controls needed by the Free Mode EPI and slice-select builders."""
+
+    def __init__(self):
+        self.te_spin = MagicMock()
+        self.te_spin.value.return_value = 10.0
+        self.tr_spin = MagicMock()
+        self.tr_spin.value.return_value = 20.0
+        self.rephase_percentage = MagicMock()
+        self.rephase_percentage.value.return_value = 50.0
+
+    def _resample_custom_pulse(self, custom_pulse, target_dt):
+        return SequenceDesigner._resample_custom_pulse(custom_pulse, target_dt)
+
+    def _slice_thickness_m(self):
+        return 5e-3
+
+    def _effective_tbw(self):
+        return 4.0
+
+    def _slice_gradient_override(self):
+        return None
+
+
+@pytest.mark.parametrize("builder_name", ["_build_epi", "_build_slice_select_rephase"])
+def test_free_mode_builders_preserve_custom_pulse_duration_when_dt_is_clamped(
+    builder_name,
+):
+    source_dt = 0.5e-6
+    source_points = 2000
+    custom_pulse = (
+        np.ones(source_points, dtype=complex),
+        np.arange(source_points, dtype=float) * source_dt,
+    )
+    designer = MockRasterSequenceDesigner()
+
+    builder = getattr(SequenceDesigner, builder_name)
+    b1, _, time = builder(designer, custom_pulse, source_dt)
+
+    effective_dt = np.median(np.diff(time))
+    active_points = np.count_nonzero(np.abs(b1) > 0.0)
+    assert effective_dt == pytest.approx(1e-6)
+    assert active_points == 1000
+    assert active_points * effective_dt == pytest.approx(1e-3)
+
+
 def test_ssfp_custom_pulse_duration():
     """
     Test that custom pulse duration is calculated correctly in SSFP sequence.

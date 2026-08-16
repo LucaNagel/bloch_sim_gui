@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import h5py
+import json
 import numpy as np
 import pytest
 
@@ -216,6 +217,22 @@ def test_cartesian_epi_xarray_export_contains_sorted_grid_and_image(tmp_path):
         assert saved["cartesian_kspace_real"].shape == shape
         assert saved["cartesian_kspace_imag"].shape == shape
         assert saved["cartesian_image_magnitude"].shape == shape
+        metadata = json.loads(saved.attrs["metadata_json"])
+        assert metadata["simulation_timestep_s"] == pytest.approx(
+            result.metadata["simulation_timestep_s"]
+        )
+        assert metadata["spin_sampling"]["spins_per_voxel"] == (
+            result.metadata["spin_sampling"]["spins_per_voxel"]
+        )
+        assert tuple(metadata["spin_sampling"]["counts_xyz"]) == (
+            result.metadata["spin_sampling"]["counts_xyz"]
+        )
+        assert tuple(metadata["sequence_definitions"]["MatrixSize"]) == (
+            result.metadata["sequence_definitions"]["MatrixSize"]
+        )
+        assert tuple(metadata["sequence_definitions"]["FOV"]) == pytest.approx(
+            result.metadata["sequence_definitions"]["FOV"]
+        )
 
 
 def test_single_2d_inference_rejects_varying_outer_dimensions_explicitly():

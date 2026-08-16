@@ -663,6 +663,8 @@ def test_sequence_workspace_exports_pulseq_and_reproduction_notebook_by_default(
 ):
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()
+    widget.field_strength_t.setValue(9.4)
+    widget.nucleus.setCurrentText("C13")
     widget.sequence_source.setCurrentIndex(1)
     widget.epi_read_fov_mm.setValue(80.0)
     widget.epi_phase_fov_mm.setValue(60.0)
@@ -694,6 +696,8 @@ def test_sequence_workspace_exports_pulseq_and_reproduction_notebook_by_default(
     assert "'matrix': (4, 3)" in code_cells[0]
     assert "'sampling_bandwidth_hz': 25000.0" in code_cells[0]
     assert "'flip_angle_deg': 33.0" in code_cells[0]
+    assert "'FieldStrengthT': 9.4" in code_cells[1]
+    assert "'Nucleus': 'C13'" in code_cells[1]
 
     output.unlink()
     monkeypatch.chdir(tmp_path)

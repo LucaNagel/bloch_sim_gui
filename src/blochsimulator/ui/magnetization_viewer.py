@@ -171,6 +171,8 @@ class MagnetizationViewer(QWidget):
             pos=np.zeros((2, 3)), color=(1, 1, 0, 1), width=5, mode="lines"
         )
         self.gl_widget.addItem(self.mean_vector)
+        self._has_vector_data = False
+        self._has_mean_vector = False
 
         # Now create checkboxes that depend on these variables
         self.track_checkbox = QCheckBox("Track tip path")
@@ -180,11 +182,18 @@ class MagnetizationViewer(QWidget):
         # Sync internal flag to the initial checkbox state so tracking is active on first playback
         self._toggle_track_path(self.track_checkbox.isChecked())
         view_layout.addWidget(self.track_checkbox)
-        self.mean_checkbox = QCheckBox("Show mean magnetization")
-        self.mean_checkbox.setObjectName("mag_3d_mean_checkbox")
-        self.mean_checkbox.setChecked(False)
-        self.mean_checkbox.toggled.connect(self._toggle_mean_vector)
-        view_layout.addWidget(self.mean_checkbox)
+        self.spin_display_combo = QComboBox()
+        self.spin_display_combo.setObjectName("mag_3d_spin_display_mode")
+        self.spin_display_combo.addItems(
+            ["Show all spins", "Show all spins + mean", "Show only mean"]
+        )
+        self.spin_display_combo.setToolTip(
+            "Choose whether to display individual spins, their mean, or both."
+        )
+        self.spin_display_combo.currentTextChanged.connect(
+            self._on_spin_display_mode_changed
+        )
+        view_layout.addWidget(self.spin_display_combo)
 
         control_container.setLayout(controls_v)
         self.control_container = control_container
@@ -266,6 +275,7 @@ class MagnetizationViewer(QWidget):
 
         count = vecs.shape[0]
         self._ensure_vectors(count, colors=colors)
+        self._has_vector_data = count > 0
 
         norm = 1.0 / max(self.length_scale, 1e-9)
         vecs_scaled = vecs * norm
@@ -290,16 +300,22 @@ class MagnetizationViewer(QWidget):
                 self.vector_plot.setData(pos=pos, color=c_expanded, mode="lines")
         else:
             self.vector_plot.setData(pos=pos, color=(1, 0, 0, 1), mode="lines")
+        self.vector_plot.setVisible(
+            self._has_vector_data and self.get_spin_display_mode() != "Show only mean"
+        )
 
         mean_vec = np.mean(vecs_scaled, axis=0) if vecs.size else None
+        self._has_mean_vector = mean_vec is not None
         if self.track_path and mean_vec is not None:
             self._append_path_point(mean_vec)
         # Mean vector (over all components)
-        if mean_vec is not None and (self.mean_checkbox.isChecked() or self.track_path):
+        if mean_vec is not None:
             self.mean_vector.setData(pos=np.array([[0, 0, 0], mean_vec]))
-            self.mean_vector.setVisible(True)
-        else:
-            self.mean_vector.setVisible(False)
+        self.mean_vector.setVisible(
+            self._has_mean_vector
+            and self.get_spin_display_mode()
+            in {"Show all spins + mean", "Show only mean"}
+        )
 
     def set_preview_data(self, time_ms, mx, my, mz):
         """Update preview plot and slider for scrubbing."""
@@ -438,14 +454,28 @@ class MagnetizationViewer(QWidget):
             int(self.selector_slider.value()) if hasattr(self, "selector_slider") else 0
         )
 
+    def get_spin_display_mode(self) -> str:
+        """Return which individual and mean vectors should be visible."""
+        return (
+            self.spin_display_combo.currentText()
+            if hasattr(self, "spin_display_combo")
+            else "Show all spins"
+        )
+
+    def _on_spin_display_mode_changed(self, _mode: str):
+        show_spins = self.get_spin_display_mode() != "Show only mean"
+        show_mean = self.get_spin_display_mode() in {
+            "Show all spins + mean",
+            "Show only mean",
+        }
+        self.vector_plot.setVisible(self._has_vector_data and show_spins)
+        self.mean_vector.setVisible(self._has_mean_vector and show_mean)
+        self.view_filter_changed.emit()
+
     def _toggle_track_path(self, enabled: bool):
         self.track_path = enabled
         if not enabled:
             self._clear_path()
-
-    def _toggle_mean_vector(self, enabled: bool):
-        if not enabled:
-            self.mean_vector.setVisible(False)
 
     def _clear_path(self):
         self.path_points = []

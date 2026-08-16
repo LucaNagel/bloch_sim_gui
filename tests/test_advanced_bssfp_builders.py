@@ -97,6 +97,74 @@ def test_spectral_bssfp_uses_one_rf_target_locked_phase_across_trs():
     assert sequence.definitions["PhaseReference"] == "rf-target-locked"
 
 
+def test_spectral_bssfp_supports_zero_flip_and_phantom_voxel_spoiling(tmp_path):
+    voxel_size_m = (0.5e-3, 0.5e-3, 0.5e-3)
+    sequence = make_pulseq_spectral_selective_bssfp(
+        fov_m=(56e-3, 28e-3, 21e-3),
+        matrix=(4, 2, 2),
+        target_frequency_offsets_hz=(925.44725, 0.0),
+        receiver_frequency_offsets_hz=(925.44725, 0.0),
+        target_metabolite_names=("Lac", "Py"),
+        flip_angle_deg=(90.0, 0.0),
+        repetition_time_s=8e-3,
+        repetitions=2,
+        use_alpha_half=True,
+        end_image_spoiler_cycles_per_fov=0.0,
+        end_image_spoiler_cycles_per_voxel=1.0,
+        end_image_spoiler_voxel_size_m=voxel_size_m,
+    )
+    program = _round_trip(sequence, tmp_path / "zero_flip_voxel_spoiler.seq")
+    definitions = program.metadata["definitions"]
+    compiled = SequenceCompiler().compile_acquisition(program)
+    frames = infer_cartesian_acquisition_frames(program, compiled=compiled)
+    volumes = infer_cartesian_acquisition_volumes(
+        program, compiled=compiled, frames=frames
+    )
+
+    assert volumes.num_volumes == 2
+    assert definitions["FlipAngleDeg"] == pytest.approx((90.0, 0.0))
+    assert definitions["EndImageSpoilerCyclesPerFOV"] == pytest.approx(0.0)
+    assert definitions["EndImageSpoilerCyclesPerVoxel"] == pytest.approx(1.0)
+    assert definitions["EndImageSpoilerVoxelSizeM"] == pytest.approx(voxel_size_m)
+    active_rf_events = [
+        event for event in program.rf_events if np.any(np.abs(event.samples_hz) > 0)
+    ]
+    zero_rf_events = [
+        event for event in program.rf_events if not np.any(np.abs(event.samples_hz) > 0)
+    ]
+    assert active_rf_events
+    assert zero_rf_events
+    assert all(
+        event.frequency_offset_hz == pytest.approx(925.44725, abs=1e-3)
+        for event in active_rf_events
+    )
+    assert all(
+        event.frequency_offset_hz == pytest.approx(0.0) for event in zero_rf_events
+    )
+
+    spoiler_end_times = np.asarray(
+        definitions["EndImageSpoilerEndTimes"], dtype=float
+    ).reshape(-1)
+    assert spoiler_end_times.size == 2
+    for spoiler_end in spoiler_end_times:
+        ending_events = [
+            event
+            for event in program.gradient_events
+            if np.isclose(event.end_s, spoiler_end, rtol=0.0, atol=1e-9)
+        ]
+        moments = {
+            event.axis: np.sum(event.samples_hz_per_m) * event.raster_s
+            for event in ending_events
+        }
+        cycles_per_voxel = {
+            axis: abs(moment) * voxel_size_m["xyz".index(axis)]
+            for axis, moment in moments.items()
+        }
+        assert cycles_per_voxel == pytest.approx(
+            {"x": 1.0, "y": 1.0, "z": 1.0}, abs=2e-5
+        )
+
+
 def test_spectral_bssfp_target_locked_phase_avoids_cartesian_ghost(tmp_path):
     phase_matrix = 8
     sequence = make_pulseq_spectral_selective_bssfp(
@@ -553,6 +621,9 @@ def test_sequence_workspace_builds_all_advanced_bssfp_modes(tmp_path):
     assert ss_definitions["FieldStrengthT"] == pytest.approx(7.0)
     assert ss_definitions["Nucleus"] == "C13"
     assert ss_definitions["RFPhaseStartDeg"] == pytest.approx(73.0)
+    assert ss_definitions["ReadoutAxis"] == "+z"
+    assert ss_definitions["PhaseEncodingAxis"] == "+y"
+    assert ss_definitions["PartitionEncodingAxis"] == "-x"
     assert widget.program.metadata["definitions"]["RFPhaseStartDeg"] == pytest.approx(
         73.0
     )
@@ -592,6 +663,9 @@ def test_sequence_workspace_builds_all_advanced_bssfp_modes(tmp_path):
     assert me_definitions["Repetitions"] == 2
     assert me_definitions["FieldStrengthT"] == pytest.approx(7.0)
     assert me_definitions["Nucleus"] == "C13"
+    assert me_definitions["ReadoutAxis"] == "+z"
+    assert me_definitions["PhaseEncodingAxis"] == "+y"
+    assert me_definitions["PartitionEncodingAxis"] == "-x"
     assert widget._pulseq_export_spec()[0] == "me_bssfp_3d"
 
     widget.close()

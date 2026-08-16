@@ -6,6 +6,7 @@ import io
 import json
 import tempfile
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,118 @@ from .sequence.result import SequenceSimulationResult
 
 FORMAT = "bloch-simulator-project"
 VERSION = 1
+
+
+def _shape(value):
+    """Return a JSON-safe array shape without retaining any array data."""
+    if value is None:
+        return None
+    try:
+        return [int(size) for size in np.shape(value)]
+    except Exception:
+        return None
+
+
+def _field_summary(field):
+    if field is None:
+        return None
+    return {
+        "name": str(field.name),
+        "kind": str(field.kind),
+        "shape": _shape(field.data),
+        "fov_m": [float(value) for value in field.fov_m],
+    }
+
+
+def _program_summary(program):
+    if program is None:
+        return None
+    event_types = {
+        "rf": sum(isinstance(event, RFEvent) for event in program.events),
+        "gradient": sum(isinstance(event, GradientEvent) for event in program.events),
+        "adc": sum(isinstance(event, ADCEvent) for event in program.events),
+    }
+    metadata = program.metadata if isinstance(program.metadata, dict) else {}
+    definitions = metadata.get("definitions", {})
+    return {
+        "source": str(program.source),
+        "duration_s": float(program.duration_s),
+        "event_count": int(len(program.events)),
+        "event_types": event_types,
+        "definition_keys": sorted(str(key) for key in definitions),
+    }
+
+
+def _result_summary(result):
+    if result is None:
+        return None
+    if isinstance(result, SequenceSimulationResult):
+        return {
+            "kind": "sequence",
+            "signal_shape": _shape(result.signal),
+            "adc_samples": int(np.size(result.adc_times_s)),
+            "final_magnetization_shape": _shape(result.final_magnetization),
+            "checkpoint_count": int(np.size(result.checkpoint_times_s)),
+            "pool_names": [str(name) for name in result.pool_names],
+            "metadata_keys": sorted(str(key) for key in result.metadata),
+        }
+    if isinstance(result, dict):
+        arrays = {
+            str(key): _shape(value)
+            for key, value in result.items()
+            if isinstance(value, np.ndarray)
+        }
+        return {
+            "kind": "free-mode",
+            "keys": sorted(str(key) for key in result if not str(key).startswith("_")),
+            "array_shapes": arrays,
+        }
+    return {"kind": type(result).__name__}
+
+
+def _project_metadata(
+    filename,
+    state,
+    phantom,
+    tx_field,
+    rx_field,
+    program,
+    legacy_result,
+    sequence_result,
+):
+    phantom_summary = None
+    if phantom is not None:
+        phantom_summary = {
+            "name": str(phantom.name),
+            "type": type(phantom).__name__,
+            "shape": [int(size) for size in phantom.shape],
+            "fov_m": [float(value) for value in phantom.fov],
+        }
+        components = getattr(phantom, "species", None) or getattr(
+            phantom, "pools", None
+        )
+        if components:
+            phantom_summary["components"] = [
+                str(getattr(component, "name", component)) for component in components
+            ]
+        if getattr(phantom, "nucleus", None):
+            phantom_summary["nucleus"] = str(phantom.nucleus)
+        if getattr(phantom, "field_strength", None) is not None:
+            phantom_summary["field_strength_t"] = float(phantom.field_strength)
+    return {
+        "name": Path(filename).stem,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "application_version": str(state.get("application_version", "")),
+        "workspace_mode": str(state.get("workspace_mode", "")),
+        "contents": {
+            "phantom": phantom_summary,
+            "tx_field": _field_summary(tx_field),
+            "rx_field": _field_summary(rx_field),
+            "sequence": _program_summary(program),
+            "free_mode_result": _result_summary(legacy_result),
+            "sequence_result": _result_summary(sequence_result),
+        },
+    }
 
 
 def _json_value(value):
@@ -265,6 +378,16 @@ def save_project(
     manifest = {
         "format": FORMAT,
         "version": VERSION,
+        "project_metadata": _project_metadata(
+            filename,
+            state,
+            phantom,
+            tx_field,
+            rx_field,
+            program,
+            legacy_result,
+            sequence_result,
+        ),
         "state": _json_value(state),
         "b1": {
             "tx": _field_to_data(tx_field, arrays),
@@ -287,6 +410,139 @@ def save_project(
         np.savez_compressed(buffer, **arrays.values)
         archive.writestr("arrays.npz", buffer.getvalue())
         archive.writestr("manifest.json", json.dumps(manifest, indent=2))
+
+
+def _legacy_project_metadata(manifest):
+    """Build an explorer summary for projects saved before metadata was added."""
+    state = manifest.get("state", {})
+    b1 = manifest.get("b1", {})
+    program = manifest.get("program")
+    event_types = {"rf": 0, "gradient": 0, "adc": 0}
+    if program:
+        for event in program.get("events", []):
+            kind = str(event.get("type", ""))
+            if kind in event_types:
+                event_types[kind] += 1
+    sequence = None
+    if program:
+        sequence = {
+            "source": str(program.get("source", "project")),
+            "duration_s": float(program.get("duration_s", 0.0)),
+            "event_count": len(program.get("events", [])),
+            "event_types": event_types,
+            "definition_keys": [],
+        }
+    return {
+        "name": "",
+        "saved_at": "",
+        "application_version": str(state.get("application_version", "")),
+        "workspace_mode": str(state.get("workspace_mode", "")),
+        "contents": {
+            "phantom": (
+                {"name": str(manifest.get("phantom_name") or "Phantom")}
+                if manifest.get("phantom_entry")
+                else None
+            ),
+            "tx_field": {"kind": "transmit"} if b1.get("tx") else None,
+            "rx_field": {"kind": "receive"} if b1.get("rx") else None,
+            "sequence": sequence,
+            "free_mode_result": (
+                {"kind": "free-mode"} if manifest.get("legacy_result") else None
+            ),
+            "sequence_result": (
+                {"kind": "sequence"} if manifest.get("sequence_result") else None
+            ),
+        },
+    }
+
+
+def read_project_metadata(filename):
+    """Read only a project's small JSON manifest for explorer display.
+
+    Unlike :func:`load_project`, this never opens ``arrays.npz`` or the embedded
+    phantom, so scanning folders does not preload simulation data into memory.
+    """
+    path = Path(filename)
+    with zipfile.ZipFile(path, "r") as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+    if manifest.get("format") != FORMAT:
+        raise ValueError("This is not a Bloch Simulator project file")
+
+    metadata = manifest.get("project_metadata")
+    if not isinstance(metadata, dict):
+        metadata = _legacy_project_metadata(manifest)
+    else:
+        # Work on an independent JSON-compatible object and tolerate metadata
+        # written by intermediate development versions.
+        metadata = json.loads(json.dumps(metadata))
+        metadata.setdefault("contents", {})
+        metadata.setdefault("application_version", "")
+        metadata.setdefault("workspace_mode", "")
+        metadata.setdefault("saved_at", "")
+
+    stat = path.stat()
+    metadata.update(
+        {
+            "name": str(metadata.get("name") or path.stem),
+            "path": str(path.resolve()),
+            "folder": str(path.resolve().parent),
+            "file_size": int(stat.st_size),
+            "modified_at": datetime.fromtimestamp(
+                stat.st_mtime, timezone.utc
+            ).isoformat(),
+            "format_version": int(manifest.get("version", 0)),
+        }
+    )
+    return metadata
+
+
+def scan_project_folders(folders, *, recursive=True):
+    """Return metadata records for every ``.blochproj`` in the given folders."""
+    projects = []
+    seen = set()
+    for folder in folders:
+        root = Path(folder).expanduser()
+        if not root.is_dir():
+            continue
+        candidates = (
+            root.rglob("*.blochproj") if recursive else root.glob("*.blochproj")
+        )
+        for path in candidates:
+            try:
+                resolved = path.resolve()
+            except OSError:
+                resolved = path.absolute()
+            if resolved in seen or not path.is_file():
+                continue
+            seen.add(resolved)
+            try:
+                projects.append(read_project_metadata(path))
+            except Exception as exc:
+                try:
+                    stat = path.stat()
+                    file_size = int(stat.st_size)
+                    modified_at = datetime.fromtimestamp(
+                        stat.st_mtime, timezone.utc
+                    ).isoformat()
+                except OSError:
+                    file_size = 0
+                    modified_at = ""
+                projects.append(
+                    {
+                        "name": path.stem,
+                        "path": str(resolved),
+                        "folder": str(resolved.parent),
+                        "file_size": file_size,
+                        "modified_at": modified_at,
+                        "contents": {},
+                        "error": str(exc),
+                    }
+                )
+    projects.sort(
+        key=lambda item: (str(item.get("modified_at", "")), item["name"].lower()),
+        reverse=True,
+    )
+    return projects
 
 
 def load_project(filename):

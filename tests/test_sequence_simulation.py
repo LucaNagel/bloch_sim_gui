@@ -75,6 +75,32 @@ def test_free_relaxation_final_and_checkpoints():
     assert checkpoint[2] == pytest.approx(1 - np.exp(-0.05), rel=1e-10)
 
 
+def test_checkpoint_storage_dtype_does_not_change_final_state():
+    phantom = _phantom(shape=(2,), m0=(1.0, 0.0, 0.0))
+    program = SequenceProgram((), duration_s=0.1)
+    simulator = BlochSimulator(use_parallel=False)
+
+    baseline = simulator.simulate_sequence(program, phantom, checkpoints_s=(0.05, 0.1))
+    reduced = simulator.simulate_sequence(
+        program,
+        phantom,
+        checkpoints_s=(0.05, 0.1),
+        checkpoint_dtype="float32",
+    )
+
+    assert baseline.checkpoint_magnetization.dtype == np.float64
+    assert reduced.checkpoint_magnetization.dtype == np.float32
+    np.testing.assert_array_equal(
+        reduced.final_magnetization, baseline.final_magnetization
+    )
+    np.testing.assert_allclose(
+        reduced.checkpoint_magnetization,
+        baseline.checkpoint_magnetization,
+        rtol=1e-6,
+        atol=1e-7,
+    )
+
+
 def test_hard_90_degree_pulse_creates_transverse_magnetization():
     phantom = _phantom(t1=1e9, t2=1e9)
     program = SequenceProgram(

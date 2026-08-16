@@ -175,6 +175,60 @@ def test_explorer_restores_multidimensional_selection(qt_application):
     assert explorer._current_display.shape == (3, 5)
 
 
+def test_explorer_applies_and_restores_image_display_options(qt_application):
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(_framed_cartesian_dataset())
+
+    explorer.colormap_combo.setCurrentText("magma")
+    explorer.display_strength.setValue(1.8)
+    explorer._set_combo_data(explorer.interpolation_combo, "cubic")
+
+    state = explorer.get_state()
+    assert state["colormap"] == "magma"
+    assert state["display_strength"] == 1.8
+    assert state["interpolation"] == "cubic"
+    # Cubic interpolation changes display pixels, not the reconstruction array.
+    assert explorer.image_panel.image.image.shape == (40, 24)
+    assert explorer._current_display.shape == (3, 5)
+
+    restored = SequenceReconstructionExplorer()
+    restored.set_dataset(_framed_cartesian_dataset())
+    restored.restore_state(state)
+
+    assert restored.colormap_combo.currentText() == "magma"
+    assert restored.display_strength.value() == 1.8
+    assert restored.interpolation_combo.currentData() == "cubic"
+    np.testing.assert_array_equal(
+        restored.image_panel.image.lut, explorer.image_panel.image.lut
+    )
+
+
+def test_explorer_uses_two_handle_contrast_slider(qt_application):
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(_framed_cartesian_dataset())
+
+    full_low, full_high = explorer.contrast_slider.values()
+    selected = (
+        full_low + 0.2 * (full_high - full_low),
+        full_low + 0.8 * (full_high - full_low),
+    )
+    explorer.auto_contrast.setChecked(False)
+    explorer.contrast_slider.set_values(*selected)
+
+    assert explorer.contrast_slider.isEnabled()
+    assert explorer.get_state()["contrast_range"] == list(selected)
+    assert explorer.contrast_min_label.text().startswith("Minimum ")
+    assert explorer.contrast_max_label.text().startswith("Maximum ")
+    np.testing.assert_allclose(explorer.image_panel.image.levels, selected)
+
+    restored = SequenceReconstructionExplorer()
+    restored.set_dataset(_framed_cartesian_dataset())
+    restored.restore_state(explorer.get_state())
+
+    assert not restored.auto_contrast.isChecked()
+    np.testing.assert_allclose(restored.contrast_slider.values(), selected)
+
+
 def test_explorer_uses_labelled_slider_for_2d_slice_series(qt_application):
     dataset = _sliced_cartesian_dataset()
     explorer = SequenceReconstructionExplorer()
@@ -193,6 +247,26 @@ def test_explorer_uses_labelled_slider_for_2d_slice_series(qt_application):
         explorer._current_display,
         np.abs(dataset.cartesian_image.isel(cartesian_frame=2)),
     )
+
+
+def test_manual_contrast_domain_covers_all_slices_and_survives_navigation(
+    qt_application,
+):
+    dataset = _sliced_cartesian_dataset()
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(dataset)
+    slice_control = explorer.outer_controls["slice"]
+
+    assert explorer.contrast_slider.values() == (0.0, 59.0)
+    explorer.auto_contrast.setChecked(False)
+    explorer.contrast_slider.set_values(5.0, 55.0)
+
+    slice_control.setValue(0)
+    assert explorer.contrast_slider._domain == (0.0, 59.0)
+    assert explorer.contrast_slider.values() == (5.0, 55.0)
+    slice_control.setValue(2)
+    assert explorer.contrast_slider._domain == (0.0, 59.0)
+    assert explorer.contrast_slider.values() == (5.0, 55.0)
 
 
 def test_explorer_keeps_3d_image_and_kspace_slice_positions_independent(

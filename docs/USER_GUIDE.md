@@ -69,6 +69,10 @@ The interface is divided into two main areas:
     *   Check **Notebook: Reproducible** to generate a `.ipynb` file that contains all parameters to re-run the simulation from scratch.
 4.  **Finish:** Click **Export**. You can now open the generated `.ipynb` files in Jupyter Lab/Notebook.
 
+Set the folder initially offered by project, result, Pulseq, image, animation,
+data, and notebook dialogs under **Tools → Settings → General → Default export
+directory**.
+
 In the event-based **Sequence Simulation** workspace, **Export Pulseq…**
 offers three choices: Pulseq plus a generating notebook, Pulseq only, or
 notebook only. Pulseq plus notebook is the default. The notebook records the
@@ -115,6 +119,13 @@ Subvoxel counts are axis-specific because their product controls runtime. For
 a spoiler only along Z, start with `1 × 1 × 9` spins and increase Z until the
 ADC signal and voxel magnetization converge. Through-slice subvoxel sampling
 requires a 3D phantom with explicit Z extent; a single Z voxel is sufficient.
+The relevant spoiler strength is the phase spread **inside one phantom
+voxel**, not merely the number of cycles across the complete imaging FOV. A
+regular midpoint grid can alias when the requested cycles/voxel are a multiple
+of the point count on that axis; the FLASH and SS-bSSFP panels report both the
+continuous voxel estimate and the configured-grid estimate and warn about this
+case. For example, 4 cycles across a 3 mm FLASH slice are only 2/3 cycle across
+a 0.5 mm phantom voxel; 6 cycles/slice produce one full cycle per voxel.
 
 Every 3D sequence panel has independent signed **Read gradient direction** and
 **Phase gradient direction** controls in its spatial-encoding section. The
@@ -128,9 +139,17 @@ preserves it.
 
 **SS-bSSFP (3D)** alternates complete Cartesian volumes between the configured
 metabolite targets. Enter matching comma-separated target names, RF offsets,
-receiver offsets, and flip angles. The defaults follow Skinner et al.
+receiver offsets, and flip angles. A flip angle of exactly 0° disables that
+target's RF pulse while preserving the acquisition timing. **Use selected
+phantom peak frequencies** matches both RF and receiver offsets to named peaks
+such as Lac/Lactate and Py/Pyruvate, preventing an accidental carrier/phantom
+frequency mismatch. The defaults follow Skinner et al.
 (doi:10.1002/mrm.29676), including the narrow-band SLR pulse, alpha/2
-preparation, and end-of-volume spoiler. RF bandwidth is calculated from pulse
+preparation, and end-of-volume spoiler. The recommended voxel-referenced
+spoiler defaults to one cycle across each actual simulation-phantom voxel; the
+legacy cycles/FOV value remains available as an optional additional moment.
+The panel reports the effective XYZ cycles/voxel and predicted retained
+coherence for the selected subvoxel grid. RF bandwidth is calculated from pulse
 duration and pulse shape instead of being entered independently. For Sinc
 pulses, the selectable lobe count sets
 the time-bandwidth product. Field strength and nucleus use the shared
@@ -141,6 +160,12 @@ bandwidth, and gradient limits. The published 32-point, 10 kHz readout lasts
 3.2 ms; that ADC duration is kept separate from the shorter pre-/rephasing
 lobes. The published 6.29 ms TR requires a scanner profile capable of producing
 the automatically calculated encoding moments within the remaining TR time.
+
+Run `examples/validate_ss_bssfp_spoiling.py <project.blochproj>` for a quick
+saved-project check. Add `--flash-example` to reproduce the 4 cycles/3 mm/
+0.5 mm FLASH calculation, or `--run-species` for the slower metabolite-resolved
+physical-gradient versus Ideal Crusher comparison. The interactive equivalent
+is `tutorials/ss_bssfp_spoiling_validation.ipynb`.
 
 **ME-bSSFP (3D, Cartesian)** acquires an odd number of echo volumes inside each
 balanced TR. Choose **Flyback** for monopolar readouts with phase-rewinding
@@ -245,6 +270,31 @@ ADC, kinetic-breakpoint, and checkpoint boundaries remain exact. The configured
 active; making it coarser reduces work but also changes RF integration accuracy.
 It is therefore a separate accuracy/performance choice, not another kernel.
 
+### Post-run 3D magnetization animation
+
+Enable **Create post-run animation** in the **3D Magnetization Animation** tab
+to keep a bounded set of spatial magnetization states for the next run. The
+**Time resolution** setting specifies the desired interval between frames in
+milliseconds. The scientific simulation first runs normally, with only the
+manually requested checkpoints. A separate replay then captures the animation:
+targets in RF-free sequence intervals are retained at the chosen spacing, while
+targets inside an RF pulse are snapped to an existing RF-integration boundary.
+Consequently, animation capture cannot change the scientific signal, final
+magnetization, checkpoints, or RF integration accuracy. The additional replay
+does increase total run time when animation capture is enabled.
+
+The animation is available only after the run has completed. Its map selector
+shows `Mz`, coherent `|Mxy|`, `Mx = real(Mxy)`, `My = imag(Mxy)`, or transverse
+phase; spectral and dynamic objects additionally expose their individual
+pools. Frames are held separately from the scientific result and are not added
+to result exports or to manually requested checkpoints. Choose `float32` for
+the default display storage or `float16` for smaller animations. Very long
+sequences or large objects automatically receive a coarser effective time
+resolution to bound the temporary float64 checkpoint memory used during the
+replay. The experimental Metal backend does not expose intermediate states;
+the scientific run can still use Metal, while its separate animation replay
+uses the checkpoint-capable CPU path.
+
 #### Sequence Bloch kernel
 
 This kernel is used for the ordinary Bloch equation without coupled
@@ -255,7 +305,7 @@ received signals are then summed.
 | Selection | Implementation and intended use |
 | --- | --- |
 | **Optimized (recommended)** | Native streaming C kernel. It propagates one spin through the complete sequence without storing a spin-by-time history, processes active spins in bounded chunks, and distributes spins over the configured CPU threads. RF-free intervals avoid the general 3×3 rotation, RF-active intervals use a quaternion rotation, and phantoms with at most 64 distinct exact T1/T2 pairs reuse precomputed relaxation factors. Continuous T1/T2 maps automatically use per-spin factors instead. Use this for normal simulations. |
-| **Reference** | Native streaming C kernel with the original general rotation-matrix path and per-spin/per-interval relaxation evaluation. It has the same event, ADC, checkpoint, receive-coil, transmit-field, subvoxel, and spoiler semantics as the optimized kernel, but deliberately omits its fast paths. Use it for numerical comparisons or when diagnosing a suspected optimized-kernel problem, not as a speed setting. |
+| **Reference (advanced validation)** | Native streaming C kernel with the original general rotation-matrix path and per-spin/per-interval relaxation evaluation. It has the same event, ADC, checkpoint, receive-coil, transmit-field, subvoxel, and spoiler semantics as the optimized kernel, but deliberately omits its fast paths. Use it for numerical comparisons or when diagnosing a suspected optimized-kernel problem, not as a speed setting. |
 
 The optimized and reference paths implement the same Bloch propagation, but
 their floating-point operation order is not identical. Very small rounding-level
@@ -296,12 +346,18 @@ quantity.
 
 #### Dynamic two-pool kernels
 
+The GUI lists the routine production choices first. Less commonly needed
+benchmark, validation, and experimental kernels remain available below a
+separator as clearly labelled extras. Hovering over any choice shows an English
+summary of its purpose and fallback behavior.
+
 | Selection | Implementation and intended use |
 | --- | --- |
 | **Optimized NumPy (recommended)** | Complete production-capability CPU path. It keeps the transverse state in a persistent complex array, reuses scratch buffers, caches exact longitudinal coefficients by half-step duration, and caches T2/phase factors by duration, gradient, and dynamic-B0 integral. It supports inflow, delayed conversion, concentration tracking, dynamic B0, spatial transmit sensitivity, multiple receive coils, checkpoints, and both spoiler modes. It is also the safe fallback for unsupported native combinations. |
-| **Native RF-block serial (experimental)** | Uses compiled uniform-transmit RF and longitudinal primitives with one worker thread. The common Phantom Designer model with pyruvate inflow, a polarization curve, and concentration tracking advances both states in one fused pass. Consecutive RF raster points are executed as a persistent waveform block when the object fits the bounded plan cache. |
-| **Native RF-block parallel (experimental)** | Adds OpenMP across spins to the native primitives and persistent RF waveform blocks. Parallel work starts at 1,024 simulated spins; smaller jobs use one thread. For the coupled inflow/concentration model this avoids starting new parallel regions at every 20 µs interval. The current persistent block supports uniform transmit, static B0, and up to 131,072 simulated spins; other cases retain the safe interval or NumPy fallback. This is the first kernel to try for a large dynamic phantom with uniform transmit sensitivity. |
-| **Reference** | Direct, allocation-heavy Python/NumPy formulation. It recomputes intermediate phase, relaxation, exchange, inflow, and RF arrays at each interval and is the correctness oracle for the optimized CPU paths. It supports the complete model but is intended for small validation and diagnostic runs. |
+| **Native automatic (recommended for large objects)** | Adds OpenMP across spins to the native primitives and persistent RF waveform blocks. Parallel work starts at 1,024 simulated spins; smaller jobs automatically use one thread. For the coupled inflow/concentration model this avoids starting new parallel regions at every 20 µs interval. The current persistent block supports uniform transmit, static B0, and up to 131,072 simulated spins; other cases retain the safe interval or NumPy fallback. This is the first native kernel to try for a large dynamic phantom with uniform transmit sensitivity. |
+| **Native serial (advanced benchmark)** | Uses the same compiled uniform-transmit RF and longitudinal primitives with one worker thread. The common Phantom Designer model with pyruvate inflow, a polarization curve, and concentration tracking advances both states in one fused pass. This option is useful for separating gains from compiled blocks from gains due to multithreading; it is not normally needed for production simulations. |
+| **Reference (advanced validation)** | Direct, allocation-heavy Python/NumPy formulation. It recomputes intermediate phase, relaxation, exchange, inflow, and RF arrays at each interval and is the correctness oracle for the optimized CPU paths. It supports the complete model but is intended for small validation and diagnostic runs. |
+| **CPU + Apple GPU (experimental)** | Apple-Silicon-only hybrid for multiple subvoxel spins. It performs the subvoxel work on the GPU, checks separate samples on the CPU, and uses the CPU result automatically if the accuracy check fails. |
 
 The native extension receives coefficients already evaluated and rounded by
 NumPy and is built without fast math or floating-point contraction. Individual
@@ -334,9 +390,9 @@ For routine use:
   spectral phantoms.
 - Keep **Dynamic two-pool kernel → Optimized NumPy** when bit-identical reference
   behavior is required. For a large uniform-transmit inflow/concentration
-  phantom, use **Native RF-block parallel**; unsupported parts fall back
+  phantom, use **Native automatic**; unsupported parts fall back
   explicitly and the persistent block reports its close-float64 contract. Try
-  **Native RF-block serial** if the parallel path is no faster.
+  **Native serial** as an advanced benchmark if the automatic path is no faster.
 - Use **Reference** only for a controlled comparison. It is expected to be
   slower and low CPU utilization is not evidence that it is more accurate for
   routine work.
@@ -351,7 +407,11 @@ For routine use:
 `sequence_result.nc` and `sequence_result.ipynb`. The notebook loads the
 adjacent NetCDF dataset and provides the signal, k-space, reconstruction, and
 interactive multidimensional analysis views. Data-only formats and Bruker raw
-export remain selectable alternatives.
+export remain selectable alternatives. During a run, the line below the
+progress bar shows elapsed and estimated remaining wall time. After completion
+it keeps the total runtime visible. The xarray/NetCDF result stores this value
+as `simulation_wall_time_s`, together with UTC start and finish timestamps in
+the dataset attributes and full metadata JSON.
 
 The **Reconstruction Explorer** tab is populated after a simulation. Its
 controls select each available outer dimension independently (for example echo,
@@ -363,8 +423,14 @@ and gridded-k-space volumes occupy separate full-size tabs, and each tab keeps
 its own scanner-coordinate slice positions. In CSI, clicking a reconstructed
 voxel updates its spectrum. **Open result…** loads an existing sequence-result
 `.nc` file into this explorer without repeating the simulation; **Export current
-view…** writes the selected scalar view. Complete project files retain the
-explorer selection and both independent 3D cursor positions.
+view…** writes the selected scalar view. The adjacent image-display controls
+select a colormap, gamma intensity, and nearest, linear, or cubic image-space
+interpolation. They affect the reconstruction preview and PNG export without
+changing the underlying reconstructed array; NumPy exports therefore remain
+quantitative. With **Auto contrast** disabled, a two-handle range slider sets
+the displayed minimum and maximum; the exact endpoint values are shown beside
+the slider. Complete project files retain these display settings, the explorer
+selection, and both independent 3D cursor positions.
 
 ### Use Case 3: Parameter Sweep
 **Goal:** Analyze how simulation metrics change when varying a parameter (e.g., Flip Angle, TE, TR, $T_1$, $T_2$).
@@ -399,10 +465,25 @@ explorer selection and both independent 3D cursor positions.
     *   For text files, a dialog will ask for the data layout (Amplitude/Phase columns vs. Interleaved).
 3.  **Run:** The loaded pulse is now used in any sequence set to use the "Custom" pulse role (or standard sequences if compatible).
 
-## 5. Saving & Loading Configurations
-You can save the entire state of the GUI (tissue params, sequence settings, pulse design) to a JSON file.
-*   **Save:** **File > Save Parameters**.
-*   **Load:** **File > Load Parameters**.
+## 5. Saving & Loading Projects
+Save the complete workspace—including Free Mode controls, tissue and RF settings,
+phantoms, B1 fields, sequence programs, reconstruction state, and available
+results—as one `.blochproj` file.
+
+*   **Save:** **File > Save Project…**.
+*   **Load:** **File > Open Project…**.
+*   **Browse:** **File > Project Explorer…** indexes one or more folders. It
+    reads only the compact project metadata and shows which phantom, B1 fields,
+    sequence, and results each project contains. Add or remove folders in the
+    explorer; the selection is remembered between application sessions. Use the
+    search field to filter the overview and double-click a project to open it.
+
+In Sequence Mode, **2D k-space / Reconstruction** shows both result images side
+by side in one tab so their sampling and reconstructed image can be compared
+directly.
+
+The former standalone parameter JSON import/export is no longer needed because
+the project file preserves the full simulation context.
 
 ## 6. Troubleshooting
 

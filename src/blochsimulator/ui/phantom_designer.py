@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 import weakref
@@ -19,6 +20,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QFormLayout,
     QGridLayout,
+    QGroupBox,
     QHeaderView,
     QHBoxLayout,
     QLabel,
@@ -54,6 +56,14 @@ from ..spectral_phantom import SpectralPhantom
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
 from .volume_viewer import PhantomInspectorWidget
 from .default_settings import WorkspaceDefaults
+
+try:
+    import pyqtgraph.opengl as gl
+
+    HAS_OPENGL = True
+except Exception:
+    gl = None
+    HAS_OPENGL = False
 
 
 class ShapeDrawingPlotWidget(pg.PlotWidget):
@@ -163,6 +173,265 @@ class ShapeDrawingPlotWidget(pg.PlotWidget):
         super().keyPressEvent(event)
 
 
+def _shape_preview_mesh(item, fov_mm):
+    """Return vertices and triangular faces for a physical-aspect 3D preview."""
+    fov = np.asarray(fov_mm, dtype=float)
+    scale = max(float(np.max(fov)), 1e-12)
+    half_size = np.asarray(item.size, dtype=float) * fov / scale
+    center = (np.asarray(item.center, dtype=float) - 0.5) * 2.0 * fov / scale
+
+    if item.kind == "box":
+        vertices = np.asarray(
+            [
+                (-1, -1, -1),
+                (1, -1, -1),
+                (1, 1, -1),
+                (-1, 1, -1),
+                (-1, -1, 1),
+                (1, -1, 1),
+                (1, 1, 1),
+                (-1, 1, 1),
+            ],
+            dtype=float,
+        )
+        faces = np.asarray(
+            [
+                (0, 2, 1),
+                (0, 3, 2),
+                (4, 5, 6),
+                (4, 6, 7),
+                (0, 1, 5),
+                (0, 5, 4),
+                (1, 2, 6),
+                (1, 6, 5),
+                (2, 3, 7),
+                (2, 7, 6),
+                (3, 0, 4),
+                (3, 4, 7),
+            ],
+            dtype=np.uint32,
+        )
+    elif item.kind == "cylinder":
+        segments = 36
+        angle = np.linspace(0.0, 2.0 * np.pi, segments, endpoint=False)
+        ring = np.column_stack((np.cos(angle), np.sin(angle)))
+        vertices = np.vstack(
+            (
+                np.column_stack((ring, -np.ones(segments))),
+                np.column_stack((ring, np.ones(segments))),
+                (0.0, 0.0, -1.0),
+                (0.0, 0.0, 1.0),
+            )
+        )
+        faces = []
+        for index in range(segments):
+            nxt = (index + 1) % segments
+            faces.extend(
+                (
+                    (index, nxt, segments + nxt),
+                    (index, segments + nxt, segments + index),
+                    (2 * segments, nxt, index),
+                    (2 * segments + 1, segments + index, segments + nxt),
+                )
+            )
+        faces = np.asarray(faces, dtype=np.uint32)
+    else:
+        latitude_count, longitude_count = 14, 28
+        latitude = np.linspace(0.0, np.pi, latitude_count + 1)
+        longitude = np.linspace(0.0, 2.0 * np.pi, longitude_count, endpoint=False)
+        vertices = np.asarray(
+            [
+                (
+                    np.sin(phi) * np.cos(theta),
+                    np.sin(phi) * np.sin(theta),
+                    np.cos(phi),
+                )
+                for phi in latitude
+                for theta in longitude
+            ],
+            dtype=float,
+        )
+        faces = []
+        for row in range(latitude_count):
+            for column in range(longitude_count):
+                nxt = (column + 1) % longitude_count
+                lower = row * longitude_count + column
+                lower_next = row * longitude_count + nxt
+                upper = (row + 1) * longitude_count + column
+                upper_next = (row + 1) * longitude_count + nxt
+                faces.extend(
+                    ((lower, lower_next, upper_next), (lower, upper_next, upper))
+                )
+        faces = np.asarray(faces, dtype=np.uint32)
+
+    vertices = vertices * half_size
+    angles = np.deg2rad(
+        np.asarray(getattr(item, "rotation_deg", (0.0, 0.0, 0.0)), dtype=float)
+    )
+    cx, cy, cz = np.cos(angles)
+    sx, sy, sz = np.sin(angles)
+    rotation_x = np.asarray(((1, 0, 0), (0, cx, -sx), (0, sx, cx)))
+    rotation_y = np.asarray(((cy, 0, sy), (0, 1, 0), (-sy, 0, cy)))
+    rotation_z = np.asarray(((cz, -sz, 0), (sz, cz, 0), (0, 0, 1)))
+    rotation = rotation_z @ rotation_y @ rotation_x
+    return vertices @ rotation.T + center, faces
+
+
+def _convex_hull_2d(points):
+    """Return counter-clockwise indices of the 2D convex hull."""
+    points = np.asarray(points, dtype=float)
+    if len(points) <= 1:
+        return np.arange(len(points), dtype=int)
+    order = np.lexsort((points[:, 1], points[:, 0]))
+    unique = []
+    for index in order:
+        if not unique or not np.allclose(points[index], points[unique[-1]]):
+            unique.append(int(index))
+    if len(unique) <= 2:
+        return np.asarray(unique, dtype=int)
+
+    def cross(origin, first, second):
+        a = points[first] - points[origin]
+        b = points[second] - points[origin]
+        return a[0] * b[1] - a[1] * b[0]
+
+    lower = []
+    for index in unique:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], index) <= 0.0:
+            lower.pop()
+        lower.append(index)
+    upper = []
+    for index in reversed(unique):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], index) <= 0.0:
+            upper.pop()
+        upper.append(index)
+    return np.asarray(lower[:-1] + upper[:-1], dtype=int)
+
+
+def _shape_xy_projection(item, fov_mm):
+    """Return the rotated primitive's orthographic XY silhouette in [0, 1]."""
+    fov = np.asarray(fov_mm, dtype=float)
+    vertices, _faces = _shape_preview_mesh(item, fov)
+    scale = max(float(np.max(fov)), 1e-12)
+    projected = np.column_stack(
+        (
+            0.5 + vertices[:, 0] * scale / (2.0 * fov[0]),
+            0.5 + vertices[:, 1] * scale / (2.0 * fov[1]),
+        )
+    )
+    hull = _convex_hull_2d(projected)
+    if hull.size:
+        hull = np.append(hull, hull[0])
+    return projected[hull, 0], projected[hull, 1]
+
+
+class ShapePreview3DWidget(QWidget):
+    """Small orbitable preview of all design primitives without rasterization."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.view = None
+        self._shape_items = []
+        if HAS_OPENGL and os.environ.get("QT_QPA_PLATFORM", "").lower() != "offscreen":
+            self.view = gl.GLViewWidget()
+            # Match VolumeViewerWidget's default camera so switching to the
+            # full 3D/frequency preview does not rotate the phantom.
+            self.view.setCameraPosition(distance=4.2, elevation=25, azimuth=35)
+            self.view.setBackgroundColor((18, 22, 30))
+            self.bounds = gl.GLLinePlotItem(
+                pos=np.zeros((0, 3)),
+                color=(0.75, 0.8, 0.9, 0.8),
+                width=1.2,
+                mode="lines",
+                antialias=True,
+            )
+            self.view.addItem(self.bounds)
+            layout.addWidget(self.view)
+        else:
+            unavailable = QLabel("3D preview unavailable (OpenGL)")
+            unavailable.setAlignment(Qt.AlignCenter)
+            unavailable.setStyleSheet("background: #12161e; color: #c8d0df;")
+            layout.addWidget(unavailable)
+
+    @staticmethod
+    def _bounds_vertices(fov_mm):
+        extent = np.asarray(fov_mm, dtype=float)
+        extent = extent / max(float(np.max(extent)), 1e-12)
+        corners = np.asarray(
+            [
+                (x, y, z)
+                for x in (-extent[0], extent[0])
+                for y in (-extent[1], extent[1])
+                for z in (-extent[2], extent[2])
+            ]
+        )
+        edges = (
+            (0, 1),
+            (0, 2),
+            (0, 4),
+            (1, 3),
+            (1, 5),
+            (2, 3),
+            (2, 6),
+            (3, 7),
+            (4, 5),
+            (4, 6),
+            (5, 7),
+            (6, 7),
+        )
+        return np.asarray([corners[index] for edge in edges for index in edge])
+
+    def _add_mesh(self, item, fov_mm, color, *, selected=False):
+        vertices, faces = _shape_preview_mesh(item, fov_mm)
+        red, green, blue, alpha = color
+        mesh_data = gl.MeshData(vertexes=vertices, faces=faces)
+        mesh = gl.GLMeshItem(
+            meshdata=mesh_data,
+            color=(red, green, blue, alpha),
+            drawEdges=True,
+            edgeColor=(red, green, blue, 1.0 if selected else 0.6),
+            smooth=item.kind != "box",
+            shader="shaded",
+            glOptions="translucent",
+        )
+        self.view.addItem(mesh)
+        self._shape_items.append(mesh)
+
+    def set_shapes(
+        self,
+        shapes,
+        fov_mm,
+        selected_row=None,
+        highlighted_region=None,
+    ):
+        if self.view is None:
+            return
+        for mesh in self._shape_items:
+            self.view.removeItem(mesh)
+        self._shape_items.clear()
+        self.bounds.setData(pos=self._bounds_vertices(fov_mm))
+        hue_count = max(1, len(shapes))
+        for index, item in enumerate(shapes):
+            color = pg.intColor(index, hues=hue_count)
+            red, green, blue, _ = color.getRgbF()
+            selected = index == selected_row
+            self._add_mesh(
+                item,
+                fov_mm,
+                (red, green, blue, 0.82 if selected else 0.28),
+                selected=selected,
+            )
+        if highlighted_region is not None:
+            self._add_mesh(
+                highlighted_region,
+                fov_mm,
+                (1.0, 0.78, 0.08, 0.38),
+                selected=True,
+            )
+
+
 def load_any_phantom(filename):
     """Load either a conventional or spectral phantom file."""
     try:
@@ -192,7 +461,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.setWindowTitle(
             "Edit Spectral Phantom" if design is not None else "New Spectral Phantom"
         )
-        self.resize(1250, 850)
+        self.resize(1450, 900)
         if design is None:
             defaults = WorkspaceDefaults.from_settings(settings)
             design = PhantomDesign(
@@ -204,7 +473,11 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.design = design
         self.phantom = None
         self._updating = False
+        self._last_spectral_reference_ppm = float(design.spectral_reference_ppm)
+        self._inspector_preview_dirty = True
+        self._building_inspector_preview = False
         self._rois = []
+        self._projection_items = []
         self._build_ui()
         self._load_design_into_ui()
 
@@ -337,8 +610,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         draw_layout.addWidget(splitter)
 
         shape_panel = QWidget()
-        shape_panel.setMinimumWidth(170)
-        shape_panel.setMaximumWidth(300)
+        shape_panel.setMinimumWidth(280)
+        shape_panel.setMaximumWidth(360)
         shape_layout = QVBoxLayout(shape_panel)
         shape_heading = QLabel("Shapes")
         shape_heading.setToolTip("Later shapes overwrite B0 values in overlaps")
@@ -381,8 +654,11 @@ class SpectralPhantomDesignerDialog(QDialog):
         canvas_panel.setMinimumWidth(420)
         canvas_layout = QVBoxLayout(canvas_panel)
         self.canvas_instruction = QLabel(
-            "Move/resize shapes in XY; set 3D angles on the right and use Update "
-            "preview to inspect the rotated volume"
+            "XY drag/resize · values left · live 3D preview"
+        )
+        self.canvas_instruction.setToolTip(
+            "Solid outlines are the rotated 3D shapes projected onto XY. "
+            "The faint dashed outline is the selected shape's editable XY frame."
         )
         canvas_layout.addWidget(self.canvas_instruction)
         self.canvas = ShapeDrawingPlotWidget()
@@ -420,12 +696,22 @@ class SpectralPhantomDesignerDialog(QDialog):
 
         property_panel = QWidget()
         property_layout = QVBoxLayout(property_panel)
-        form = QFormLayout()
+        property_layout.addWidget(QLabel("Live 3D preview · drag to orbit"))
+        self.shape_preview_3d = ShapePreview3DWidget()
+        self.shape_preview_3d.setMinimumHeight(180)
+        self.shape_preview_3d.setMaximumHeight(220)
+        property_layout.addWidget(self.shape_preview_3d)
+
+        geometry_group = QGroupBox("Selected shape geometry")
+        geometry_layout = QVBoxLayout(geometry_group)
+        identity_form = QFormLayout()
+        identity_form.setContentsMargins(0, 0, 0, 0)
         self.shape_name = QLineEdit()
         self.shape_name.editingFinished.connect(self._properties_changed)
-        form.addRow("Shape name", self.shape_name)
+        identity_form.addRow("Name", self.shape_name)
         self.kind_label = QLabel()
-        form.addRow("Kind", self.kind_label)
+        identity_form.addRow("Kind", self.kind_label)
+        geometry_layout.addLayout(identity_form)
         self.x_center = self._position_percent_spin(50.0)
         self.y_center = self._position_percent_spin(50.0)
         self.z_center = self._position_percent_spin(50.0)
@@ -448,6 +734,9 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.t1_ms = self._number_spin(0.1, 500000.0, 1000.0, " ms")
         self.initial_mz = self._number_spin(0.0, 1e9, 1.0, "")
         self.b0_ppm = self._number_spin(-1000.0, 1000.0, 0.0, " ppm")
+        self.t1_ms.setMaximumWidth(140)
+        self.initial_mz.setMaximumWidth(105)
+        self.b0_ppm.setMaximumWidth(120)
         self.t1_ms.setToolTip(
             "Fallback T1 for peaks whose metabolite-specific T1 cell is empty."
         )
@@ -470,6 +759,17 @@ class SpectralPhantomDesignerDialog(QDialog):
             self.b0_ppm,
         ):
             widget.valueChanged.connect(self._properties_changed)
+        for widget in (
+            self.x_center,
+            self.y_center,
+            self.z_center,
+            self.x_size,
+            self.y_size,
+            self.z_size,
+            *self.rotation_spins,
+        ):
+            widget.setMinimumWidth(70)
+            widget.setMaximumWidth(90)
         geometry_grid = QGridLayout()
         geometry_grid.setHorizontalSpacing(10)
         geometry_grid.setVerticalSpacing(6)
@@ -489,17 +789,25 @@ class SpectralPhantomDesignerDialog(QDialog):
             geometry_grid.addWidget(center, row, 1)
             geometry_grid.addWidget(size, row, 2)
             geometry_grid.addWidget(rotation, row, 3)
-        form.addRow(geometry_grid)
+        geometry_layout.addLayout(geometry_grid)
 
         # Retained as a semantic label for code inspecting the cylinder control;
         # the visible grid row stays consistently labelled "Z".
         self.z_size_label = QLabel("Z size")
-        form.addRow("Default T1", self.t1_ms)
-        form.addRow("Default initial polarization", self.initial_mz)
-        form.addRow("B0 inhomogeneity", self.b0_ppm)
         self.xy_info = QLabel()
-        form.addRow("XY geometry", self.xy_info)
-        property_layout.addLayout(form)
+        self.xy_info.setWordWrap(True)
+        geometry_layout.addWidget(self.xy_info)
+        shape_layout.addWidget(geometry_group)
+
+        defaults_row = QHBoxLayout()
+        defaults_row.setSpacing(6)
+        defaults_row.addWidget(QLabel("Default T1"))
+        defaults_row.addWidget(self.t1_ms)
+        defaults_row.addWidget(QLabel("Initial polarization"))
+        defaults_row.addWidget(self.initial_mz)
+        defaults_row.addWidget(QLabel("B0 offset"))
+        defaults_row.addWidget(self.b0_ppm)
+        property_layout.addLayout(defaults_row)
 
         peak_explanation = QLabel(
             "Spin density / concentration sets how much signal-producing material "
@@ -515,17 +823,24 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.peak_table.setHorizontalHeaderLabels(
             [
                 "Name",
-                "Spin density / concentration",
-                "Initial polarization (blank=default)",
-                "Peak position (ppm)",
-                "T1 (ms; blank=default)",
+                "Spin density",
+                "Initial polarization",
+                "Peak (ppm)",
+                "T1 (ms)",
                 "T2* (ms)",
             ]
         )
         peak_header = self.peak_table.horizontalHeader()
-        peak_header.setSectionResizeMode(0, QHeaderView.Stretch)
-        for column in range(1, 6):
-            peak_header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        peak_header.setSectionResizeMode(0, QHeaderView.Fixed)
+        peak_header.resizeSection(0, 90)
+        for column in range(1, 4):
+            peak_header.setSectionResizeMode(column, QHeaderView.Stretch)
+        for column in (4, 5):
+            peak_header.setSectionResizeMode(column, QHeaderView.Fixed)
+            peak_header.resizeSection(column, 75)
+        peak_header.setMinimumSectionSize(62)
+        self.peak_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.peak_table.setWordWrap(False)
         self.peak_table.cellChanged.connect(self._peaks_changed)
         property_layout.addWidget(self.peak_table)
         peak_row = QHBoxLayout()
@@ -537,10 +852,10 @@ class SpectralPhantomDesignerDialog(QDialog):
         peak_row.addWidget(remove_peak)
         property_layout.addLayout(peak_row)
         splitter.addWidget(property_panel)
-        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 2)
-        splitter.setSizes([210, 450, 590])
+        splitter.setStretchFactor(2, 1)
+        splitter.setSizes([330, 470, 600])
         self.tabs.addTab(draw_page, "Draw and edit")
 
         kinetics_page = QWidget()
@@ -762,7 +1077,19 @@ class SpectralPhantomDesignerDialog(QDialog):
             self._update_kinetics_preview
         )
         preview_form.addRow("Duration", self.kinetics_preview_duration)
-        preview_layout.addLayout(preview_form)
+        preview_controls = QHBoxLayout()
+        preview_controls.addLayout(preview_form, 1)
+        spatial_preview_group = QGroupBox("Spatial selection · drag to orbit")
+        spatial_preview_layout = QVBoxLayout(spatial_preview_group)
+        self.kinetics_shape_preview_3d = ShapePreview3DWidget()
+        self.kinetics_shape_preview_3d.setMinimumSize(300, 155)
+        self.kinetics_shape_preview_3d.setMaximumHeight(190)
+        spatial_preview_layout.addWidget(self.kinetics_shape_preview_3d)
+        self.kinetics_spatial_preview_info = QLabel()
+        self.kinetics_spatial_preview_info.setWordWrap(True)
+        spatial_preview_layout.addWidget(self.kinetics_spatial_preview_info)
+        preview_controls.addWidget(spatial_preview_group, 1)
+        preview_layout.addLayout(preview_controls)
 
         self.kinetics_preview_graphics = pg.GraphicsLayoutWidget()
         self.kinetics_preview_graphics.setMinimumWidth(420)
@@ -852,6 +1179,7 @@ class SpectralPhantomDesignerDialog(QDialog):
 
         self.inspector = PhantomInspectorWidget()
         self.tabs.addTab(self.inspector, "3D / frequency preview")
+        self.tabs.currentChanged.connect(self._tab_changed)
 
         action_row = QHBoxLayout()
         preview = QPushButton("Update preview")
@@ -940,6 +1268,9 @@ class SpectralPhantomDesignerDialog(QDialog):
         for roi in self._rois:
             self.canvas.removeItem(roi)
         self._rois.clear()
+        for projection in self._projection_items:
+            self.canvas.removeItem(projection)
+        self._projection_items.clear()
         for index, item in enumerate(self.design.shapes):
             self.shape_list.addItem(item.name)
             self._create_roi(item, index)
@@ -948,6 +1279,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         if self.design.shapes:
             self.shape_list.setCurrentRow(0)
         else:
+            self._update_shape_preview()
             self._update_kinetics_preview()
 
     def _create_roi(self, item, index):
@@ -970,11 +1302,38 @@ class SpectralPhantomDesignerDialog(QDialog):
         roi.mouseClickEvent = select_on_click
         self.canvas.addItem(roi)
         self._rois.append(roi)
+        projection = pg.PlotDataItem(pen=self._projection_pen(index, False))
+        projection.setZValue(500)
+        self.canvas.addItem(projection)
+        self._projection_items.append(projection)
+        self._update_shape_projection(index)
         self._update_roi_highlights()
 
     def _roi_pen(self, index, selected):
+        color = pg.intColor(index, hues=max(1, len(self.design.shapes)))
+        color.setAlpha(145 if selected else 30)
+        return pg.mkPen(
+            color,
+            width=1.5 if selected else 1,
+            style=Qt.DashLine,
+        )
+
+    def _projection_pen(self, index, selected):
         color = pg.intColor(index, hues=max(1, len(self.design.shapes)), alpha=245)
-        return pg.mkPen(color, width=5 if selected else 2)
+        return pg.mkPen(color, width=4 if selected else 2)
+
+    def _update_shape_projection(self, row):
+        if not (0 <= row < len(self.design.shapes)) or not (
+            0 <= row < len(self._projection_items)
+        ):
+            return
+        fov_mm = tuple(widget.value() for widget in self.fov_spins)
+        x, y = _shape_xy_projection(self.design.shapes[row], fov_mm)
+        self._projection_items[row].setData(x, y)
+
+    def _update_shape_projections(self):
+        for row in range(len(self.design.shapes)):
+            self._update_shape_projection(row)
 
     def _select_roi(self, roi):
         try:
@@ -988,6 +1347,8 @@ class SpectralPhantomDesignerDialog(QDialog):
             selected_row = self._current_row()
         for index, roi in enumerate(self._rois):
             roi.setPen(self._roi_pen(index, index == selected_row))
+        for index, projection in enumerate(self._projection_items):
+            projection.setPen(self._projection_pen(index, index == selected_row))
 
     def _current_row(self):
         row = self.shape_list.currentRow()
@@ -1017,6 +1378,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         self._updating = False
         self._set_kinetics_preview_shape(row)
         self._update_roi_highlights(row)
+        self._update_shape_preview()
         self._update_kinetics_preview()
 
     def _configure_shape_geometry_controls(self, item):
@@ -1046,6 +1408,8 @@ class SpectralPhantomDesignerDialog(QDialog):
                 self.y_size.setValue(item.size[1] * 100.0)
                 self._updating = False
                 self._update_xy_info(row)
+                self._update_shape_projection(row)
+                self._update_shape_preview()
                 break
 
     def _update_xy_info(self, row):
@@ -1073,10 +1437,36 @@ class SpectralPhantomDesignerDialog(QDialog):
         row = self._current_row()
         if row is not None:
             self._update_xy_info(row)
+        self._update_shape_projections()
+        self._update_shape_preview()
+
+    def _update_shape_preview(self):
+        if not hasattr(self, "shape_preview_3d"):
+            return
+        fov_mm = tuple(widget.value() for widget in self.fov_spins)
+        self.shape_preview_3d.set_shapes(
+            self.design.shapes,
+            fov_mm,
+            selected_row=self._current_row(),
+        )
+        self._update_kinetics_spatial_preview()
 
     def _spectral_settings_changed(self, *_):
         if self._updating:
             return
+        reference_ppm = self.spectral_reference_ppm.value()
+        reference_delta_ppm = reference_ppm - self._last_spectral_reference_ppm
+        if reference_delta_ppm:
+            # Peak positions shown in the designer are absolute ppm values, while
+            # the model stores offsets from the spectral reference. Rebase every
+            # stored offset so changing the reference does not move any peak.
+            for shape in self.design.shapes:
+                for peak in shape.peaks:
+                    peak.frequency_ppm -= reference_delta_ppm
+            self.design.spectral_reference_ppm = reference_ppm
+            self._last_spectral_reference_ppm = reference_ppm
+            self._inspector_preview_dirty = True
+            self._update_kinetics_preview()
         self._update_spectral_resolution_info()
 
     def _update_spectral_resolution_info(self):
@@ -1118,8 +1508,10 @@ class SpectralPhantomDesignerDialog(QDialog):
         roi.setSize(item.size[:2])
         roi.blockSignals(previous)
         self._update_xy_info(row)
+        self._update_shape_projection(row)
         if item.name != previous_name:
             self._refresh_kinetics_preview_shapes()
+        self._update_shape_preview()
         self._update_kinetics_preview()
 
     def _populate_peaks(self, item):
@@ -1418,6 +1810,41 @@ class SpectralPhantomDesignerDialog(QDialog):
         name = "" if name_item is None else name_item.text().strip()
         return float(kpl_item.text()), f"region {name or region_row + 1}"
 
+    def _update_kinetics_spatial_preview(self):
+        if not hasattr(self, "kinetics_shape_preview_3d"):
+            return
+        shape_row = self.kinetics_preview_shape.currentData()
+        selected_shape_row = None if shape_row is None else int(shape_row)
+        region_row = self.kinetics_preview_region.currentData()
+        highlighted_region = None
+        region_name = "default kPL"
+        try:
+            if region_row is not None and int(region_row) >= 0:
+                region_row = int(region_row)
+                regions = self._read_kinetic_regions()
+                highlighted_region = regions[region_row]
+                region_name = highlighted_region.name or f"region {region_row + 1}"
+        except (AttributeError, IndexError, TypeError, ValueError):
+            highlighted_region = None
+            region_name = "invalid kPL region"
+
+        fov_mm = tuple(widget.value() for widget in self.fov_spins)
+        self.kinetics_shape_preview_3d.set_shapes(
+            self.design.shapes,
+            fov_mm,
+            selected_row=selected_shape_row,
+            highlighted_region=highlighted_region,
+        )
+        if selected_shape_row is None or not (
+            0 <= selected_shape_row < len(self.design.shapes)
+        ):
+            shape_name = "no shape selected"
+        else:
+            shape_name = self.design.shapes[selected_shape_row].name
+        self.kinetics_spatial_preview_info.setText(
+            f"Shape: {shape_name} · kPL source: {region_name}"
+        )
+
     def _set_selected_shape_lactate_zero(self):
         shape_row = self.kinetics_preview_shape.currentData()
         if shape_row is None:
@@ -1444,6 +1871,7 @@ class SpectralPhantomDesignerDialog(QDialog):
     def _update_kinetics_preview(self, *_):
         if self._updating or not hasattr(self, "pyruvate_preview_curve"):
             return
+        self._update_kinetics_spatial_preview()
         if not self.dynamic_enabled.isChecked():
             self.inflow_preview_curve.setData([], [])
             self.pyruvate_preview_curve.setData([], [])
@@ -1701,8 +2129,7 @@ class SpectralPhantomDesignerDialog(QDialog):
 
     def _shape_drawing_cancelled(self):
         self.canvas_instruction.setText(
-            "Move/resize shapes in XY; set 3D angles on the right and use Update "
-            "preview to inspect the rotated volume"
+            "XY drag/resize · values left · live 3D preview"
         )
 
     def _shape_drawn(self, kind, left, bottom, width, height):
@@ -1722,12 +2149,14 @@ class SpectralPhantomDesignerDialog(QDialog):
         if row is None:
             return
         self.canvas.removeItem(self._rois.pop(row))
+        self.canvas.removeItem(self._projection_items.pop(row))
         self.design.shapes.pop(row)
         self.shape_list.takeItem(row)
         self._refresh_kinetics_preview_shapes()
         if self.design.shapes:
             self.shape_list.setCurrentRow(min(row, len(self.design.shapes) - 1))
         self._update_roi_highlights()
+        self._update_shape_preview()
         self._update_kinetics_preview()
 
     def _add_peak(self):
@@ -1798,7 +2227,20 @@ class SpectralPhantomDesignerDialog(QDialog):
             else None
         )
 
-    def _preview(self):
+    def _tab_changed(self, index):
+        if self.tabs.widget(index) is self.inspector:
+            if self.phantom is None or self._inspector_preview_dirty:
+                self._refresh_inspector_preview()
+        else:
+            # Any edit is made outside the inspector. Rebuilding on the next
+            # visit keeps the large preview current without rasterizing on
+            # every spin-box step or ROI drag.
+            self._inspector_preview_dirty = True
+
+    def _refresh_inspector_preview(self):
+        if self._building_inspector_preview:
+            return False
+        self._building_inspector_preview = True
         try:
             self._sync_global()
             self.phantom = self.design.build()
@@ -1809,9 +2251,17 @@ class SpectralPhantomDesignerDialog(QDialog):
                 shape.b0_ppm != 0.0 for shape in self.design.shapes
             ):
                 self.inspector.map_combo.setCurrentText("B0")
-            self.tabs.setCurrentWidget(self.inspector)
+            self._inspector_preview_dirty = False
+            return True
         except Exception as exc:
             QMessageBox.critical(self, "Invalid phantom", str(exc))
+            return False
+        finally:
+            self._building_inspector_preview = False
+
+    def _preview(self):
+        if self._refresh_inspector_preview():
+            self.tabs.setCurrentWidget(self.inspector)
 
     def _save(self):
         default_path = workspace_directory("phantoms") / (

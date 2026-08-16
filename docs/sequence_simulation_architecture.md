@@ -238,10 +238,22 @@ IFFT views; rejected streams continue to show ADC/final state with the concrete
 inference error. Pulseq FOV definitions synchronize square in-plane and
 through-plane object FOV controls so a thin slice is not accidentally sampled
 by a coarse full-volume z grid. In-plane and through-plane matrix sizes remain
-independent. Final-Mz levels are based on the complete volume, preventing a
-numerically constant displayed slice from being stretched to full contrast.
-The complete left control column lives in a vertical scroll area so Run/Cancel
-and sparse-output controls remain reachable at reduced window heights.
+independent. The complete left control column lives in a vertical scroll area
+so Run/Cancel and sparse-output controls remain reachable at reduced window
+heights.
+
+The separate post-run 3D magnetization animation never adds checkpoints to the
+scientific simulation. After that simulation completes, the GUI worker performs
+a separate replay with sparse checkpoints at the configured temporal
+resolution. RF-free targets can add observation boundaries because free
+evolution is exact over split intervals; targets inside an RF-active interval
+are snapped to an existing integration boundary. Only reduced-precision replay
+arrays are retained in memory, so manual checkpoints, final magnetization,
+signals, and exports keep their original semantics. This strict separation adds
+replay time when animation is enabled. Frame counts are bounded from the object
+size before the run, which can coarsen the effective temporal resolution; the
+viewer reuses the same spatial geometry while updating scalar values so camera
+and slice selection remain stable during playback.
 
 ## Object model
 

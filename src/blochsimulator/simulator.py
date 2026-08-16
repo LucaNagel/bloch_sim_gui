@@ -1348,7 +1348,7 @@ class BlochSimulator:
         sequence_kernel : {"optimized", "reference"}
             Native kernel used by event-based sequence simulations. The reference
             kernel remains available for numerical comparisons.
-        dynamic_sequence_kernel : {"optimized", "native_parallel", "native_serial", "reference"}
+        dynamic_sequence_kernel : {"optimized", "native_parallel", "native_serial", "metal_hybrid", "reference"}
             Kernel used specifically for dynamic two-pool sequence simulations.
         dynamic_sequence_precision : {"float64", "float32"}
             Arithmetic used by the optimized dynamic CPU path. ``float64`` is
@@ -1367,11 +1367,12 @@ class BlochSimulator:
             "optimized",
             "native_parallel",
             "native_serial",
+            "metal_hybrid",
             "reference",
         }:
             raise ValueError(
                 "dynamic_sequence_kernel must be 'optimized', 'native_parallel', "
-                "'native_serial', or 'reference'"
+                "'native_serial', 'metal_hybrid', or 'reference'"
             )
         self.dynamic_sequence_kernel = dynamic_sequence_kernel
         if dynamic_sequence_precision not in {"float64", "float32"}:
@@ -1932,6 +1933,7 @@ class BlochSimulator:
         sequence_kernel=None,
         spin_sampling=None,
         spoiler_mode: str = "ideal",
+        checkpoint_dtype=None,
     ):
         """Simulate independent Lorentzian spectral components and sum signals.
 
@@ -1956,6 +1958,11 @@ class BlochSimulator:
             raise ValueError("spectral phantom has no active components")
 
         combined_signal = None
+        component_signals = []
+        component_final_magnetizations = []
+        component_checkpoint_magnetizations = []
+        component_active_voxels = {}
+        component_simulated_spins = {}
         final_numerator = np.zeros(phantom.shape + (3,), dtype=np.float64)
         checkpoint_numerator = None
         total_concentration = phantom.get_total_concentration()
@@ -1996,6 +2003,7 @@ class BlochSimulator:
                 sequence_kernel=sequence_kernel,
                 spin_sampling=spin_sampling,
                 spoiler_mode=spoiler_mode,
+                checkpoint_dtype=checkpoint_dtype,
             )
             if first_result is None:
                 first_result = result
@@ -2004,7 +2012,22 @@ class BlochSimulator:
                     checkpoint_numerator = np.zeros_like(
                         result.checkpoint_magnetization
                     )
-            combined_signal += result.signal
+            component_signal = np.asarray(result.signal)
+            component_signals.append(component_signal)
+            component_active_voxels[name] = int(
+                result.metadata.get("n_active_voxels", component.n_active)
+            )
+            component_simulated_spins[name] = int(
+                result.metadata.get("n_simulated_spins", component.n_active)
+            )
+            component_final_magnetizations.append(
+                np.asarray(result.final_magnetization)
+            )
+            if result.checkpoint_magnetization is not None:
+                component_checkpoint_magnetizations.append(
+                    np.asarray(result.checkpoint_magnetization)
+                )
+            combined_signal += component_signal
             concentration = component.pd_map
             final_numerator += result.final_magnetization * concentration[..., None]
             if checkpoint_numerator is not None:
@@ -2035,6 +2058,10 @@ class BlochSimulator:
                 "spectral_phantom": True,
                 "spectral_components": [name for name, _ in components],
                 "spectral_component_count": len(components),
+                "spectral_component_active_voxels": component_active_voxels,
+                "spectral_component_simulated_spins": component_simulated_spins,
+                "n_active_voxels": int(phantom.n_active),
+                "n_simulated_spins": int(sum(component_simulated_spins.values())),
                 "spectral_model": "independent Lorentzian T2* components",
                 "field_strength_t": effective_field,
                 "nucleus": effective_nucleus,
@@ -2052,12 +2079,26 @@ class BlochSimulator:
             checkpoint_times_s=first_result.checkpoint_times_s,
             metadata=metadata,
             adc_gradient_moment_cyc_per_m=(first_result.adc_gradient_moment_cyc_per_m),
+            pool_names=tuple(name for name, _ in components),
+            species_signal=np.stack(component_signals, axis=0),
+            final_pool_magnetization=np.stack(component_final_magnetizations, axis=0),
+            checkpoint_pool_magnetization=(
+                np.stack(component_checkpoint_magnetizations, axis=1)
+                if component_checkpoint_magnetizations
+                else None
+            ),
             sequence_waveforms=first_result.sequence_waveforms,
             physical_field_maps=first_result.physical_field_maps,
         )
 
     def simulate_dynamic_sequence(self, program, phantom, **kwargs):
         """Simulate a regional two-pool hyperpolarized dynamic phantom."""
+        if self.dynamic_sequence_kernel == "metal_hybrid":
+            from .dynamic_metal_backend import run_metal_hybrid_sequence
+
+            kwargs.setdefault("memory_budget_bytes", self._memory_budget().limit_bytes)
+            return run_metal_hybrid_sequence(program, phantom, **kwargs)
+
         from .dynamic_phantom import simulate_dynamic_sequence
 
         kwargs.setdefault("sequence_kernel", self.dynamic_sequence_kernel)
@@ -2227,6 +2268,7 @@ class BlochSimulator:
         sequence_kernel=None,
         spin_sampling=None,
         spoiler_mode: str = "ideal",
+        checkpoint_dtype=None,
     ):
         """Simulate an event-based sequence on a heterogeneous 1D/2D/3D object.
 
@@ -2295,6 +2337,15 @@ class BlochSimulator:
             raise ValueError("phantom has no active voxels")
         if signal_weighting not in {"voxel", "voxel_volume"}:
             raise ValueError("signal_weighting must be 'voxel' or 'voxel_volume'")
+        checkpoint_dtype = np.dtype(
+            np.float64 if checkpoint_dtype is None else checkpoint_dtype
+        )
+        if checkpoint_dtype not in {
+            np.dtype(np.float16),
+            np.dtype(np.float32),
+            np.dtype(np.float64),
+        }:
+            raise ValueError("checkpoint_dtype must be float16, float32, or float64")
 
         arrays_to_validate = {
             "T1": props["t1"],
@@ -2331,7 +2382,7 @@ class BlochSimulator:
         # ADC accumulators and one native chunk are the main working allocations.
         persistent_bytes = (
             phantom.nvoxels * 3 * 8
-            + n_checkpoints * phantom.nvoxels * 3 * 8
+            + n_checkpoints * phantom.nvoxels * 3 * checkpoint_dtype.itemsize
             + n_rx_coils * n_adc * 16
             + n_active * (3 * 8 + 7 * 8 + 16)
             + n_rx_coils * n_active * 16
@@ -2381,7 +2432,9 @@ class BlochSimulator:
 
         coil_signal = np.zeros((n_rx_coils, n_adc), dtype=np.complex128)
         final_active = np.empty((n_active, 3), dtype=np.float64)
-        checkpoints_active = np.empty((n_checkpoints, n_active, 3), dtype=np.float64)
+        checkpoints_active = np.empty(
+            (n_checkpoints, n_active, 3), dtype=checkpoint_dtype
+        )
         positions = np.ascontiguousarray(props["positions"], dtype=np.float64)
         t1 = np.ascontiguousarray(props["t1"], dtype=np.float64)
         t2 = np.ascontiguousarray(props["t2"], dtype=np.float64)
@@ -2503,7 +2556,7 @@ class BlochSimulator:
         checkpoint_magnetization = None
         if n_checkpoints:
             checkpoint_flat = np.zeros(
-                (n_checkpoints, phantom.nvoxels, 3), dtype=np.float64
+                (n_checkpoints, phantom.nvoxels, 3), dtype=checkpoint_dtype
             )
             checkpoint_flat[:, active_indices] = checkpoints_active
             checkpoint_magnetization = checkpoint_flat.reshape(

@@ -61,6 +61,7 @@ from .ui.phantom_designer import (
 from .ui.volume_viewer import PhantomInspectorWidget
 from .ui.widgets import compact_image_histogram
 from .ui.default_settings import WorkspaceDefaults
+from .units import NUCLEUS_GAMMA_HZ_PER_T
 
 # Import simulator
 from .simulator import BlochSimulator
@@ -114,6 +115,7 @@ class PhantomCreatorWidget(QGroupBox):
 
     phantom_created = pyqtSignal(object)  # Emits Phantom object
     field_strength_changed = pyqtSignal(float)
+    nucleus_changed = pyqtSignal(str)
     PHANTOM_DESIGNER_TYPE = "Phantom Designer..."
     LOAD_FROM_FILE_TYPE = "Load from File..."
 
@@ -196,6 +198,19 @@ class PhantomCreatorWidget(QGroupBox):
         field_layout.addWidget(self.field_combo)
         layout.addLayout(field_layout)
 
+        nucleus_layout = QHBoxLayout()
+        self.nucleus_label = QLabel("Nucleus:")
+        nucleus_layout.addWidget(self.nucleus_label)
+        self.nucleus_combo = QComboBox()
+        self.nucleus_combo.addItems(sorted(NUCLEUS_GAMMA_HZ_PER_T))
+        self.set_nucleus(self.workspace_defaults.phantom_nucleus)
+        self.nucleus_combo.setToolTip(
+            "Shared reference nucleus used by Free Mode, Phantom and Sequence Mode"
+        )
+        self.nucleus_combo.currentTextChanged.connect(self.nucleus_changed)
+        nucleus_layout.addWidget(self.nucleus_combo)
+        layout.addLayout(nucleus_layout)
+
         # Tissue type (for single-tissue phantoms)
         self.tissue_layout = QHBoxLayout()
         self.tissue_label = QLabel("Tissue:")
@@ -252,6 +267,8 @@ class PhantomCreatorWidget(QGroupBox):
             self.fov_spin,
             self.field_label,
             self.field_combo,
+            self.nucleus_label,
+            self.nucleus_combo,
         ):
             widget.setVisible(not external_editor)
         # Show/hide tissue selector
@@ -300,6 +317,17 @@ class PhantomCreatorWidget(QGroupBox):
         """Apply the shared B0 value used across the focused workspaces."""
         self._set_field_strength(value_t)
 
+    def get_nucleus(self) -> str:
+        """Return the shared reference nucleus."""
+        nucleus = self.nucleus_combo.currentText().strip()
+        return nucleus if nucleus in NUCLEUS_GAMMA_HZ_PER_T else "H1"
+
+    def set_nucleus(self, nucleus: str) -> None:
+        """Apply the shared reference nucleus."""
+        index = self.nucleus_combo.findText(str(nucleus).strip())
+        if index >= 0:
+            self.nucleus_combo.setCurrentIndex(index)
+
     def create_phantom(self):
         """Create phantom based on current settings."""
         phantom_type = self.type_combo.currentText()
@@ -331,6 +359,8 @@ class PhantomCreatorWidget(QGroupBox):
             else:
                 return
 
+            phantom.metadata["nucleus"] = self.get_nucleus()
+
             self.current_phantom = phantom
             self._update_info()
             self.save_btn.setEnabled(True)
@@ -355,6 +385,7 @@ class PhantomCreatorWidget(QGroupBox):
                 self.current_phantom = phantom
                 if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
                     self._set_field_strength(phantom.field_strength)
+                    self.set_nucleus(phantom.nucleus)
                     self.type_combo.setCurrentText(self.PHANTOM_DESIGNER_TYPE)
                 else:
                     field_strength = phantom.metadata.get(
@@ -362,6 +393,9 @@ class PhantomCreatorWidget(QGroupBox):
                     )
                     if field_strength is not None:
                         self._set_field_strength(field_strength)
+                    self.set_nucleus(
+                        phantom.metadata.get("nucleus", self.get_nucleus())
+                    )
                 self._update_info()
                 self.save_btn.setEnabled(True)
                 self.save_btn.setVisible(True)
@@ -395,12 +429,15 @@ class PhantomCreatorWidget(QGroupBox):
         if design is None:
             dialog.design.field_strength_t = self.get_field_strength()
             dialog.field_strength_t.setValue(self.get_field_strength())
+            dialog.design.nucleus = self.get_nucleus()
+            dialog.nucleus.setCurrentText(self.get_nucleus())
         self._retained_spectral_designer_dialogs.append(dialog)
         if dialog.exec_() != QDialog.Accepted:
             return
         phantom = dialog.get_phantom()
         self.current_phantom = phantom
         self._set_field_strength(phantom.field_strength)
+        self.set_nucleus(phantom.nucleus)
         self._update_info()
         self.save_btn.setEnabled(True)
         self.save_btn.setVisible(True)
@@ -412,6 +449,7 @@ class PhantomCreatorWidget(QGroupBox):
         self.workspace_defaults = defaults
         self.fov_spin.setValue(defaults.phantom_fov_mm[0])
         self._set_field_strength(defaults.field_strength_t)
+        self.set_nucleus(defaults.phantom_nucleus)
 
     def edit_current_phantom(self):
         """Reopen editable in-memory shape metadata without requiring a save."""

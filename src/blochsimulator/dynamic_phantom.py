@@ -1822,6 +1822,7 @@ def simulate_dynamic_sequence(
     memory_budget_bytes=None,
     spin_sampling=None,
     spoiler_mode="ideal",
+    checkpoint_dtype=None,
     **_ignored,
 ):
     """Run the complete sequence on a regional two-pool dynamic phantom."""
@@ -1877,6 +1878,15 @@ def simulate_dynamic_sequence(
             "float32 precision currently requires sequence_kernel='optimized'"
         )
     real_dtype = np.dtype(simulation_precision)
+    checkpoint_dtype = np.dtype(
+        real_dtype if checkpoint_dtype is None else checkpoint_dtype
+    )
+    if checkpoint_dtype not in {
+        np.dtype(np.float16),
+        np.dtype(np.float32),
+        np.dtype(np.float64),
+    }:
+        raise ValueError("checkpoint_dtype must be float16, float32, or float64")
     complex_dtype = np.dtype(
         np.complex64 if real_dtype == np.dtype(np.float32) else np.complex128
     )
@@ -1963,7 +1973,7 @@ def simulate_dynamic_sequence(
         # the principal coefficient/position arrays in a conservative estimate.
         checkpoint_count = int(compiled.checkpoint_times_s.size)
         estimated_bytes = n_simulated_spins * (
-            160 + checkpoint_count * 2 * 3 * real_dtype.itemsize
+            160 + checkpoint_count * 2 * 3 * checkpoint_dtype.itemsize
         )
         if phantom.initial_spin_density_maps is not None:
             estimated_bytes += n_simulated_spins * 2 * 3 * real_dtype.itemsize
@@ -2130,7 +2140,7 @@ def simulate_dynamic_sequence(
     )
     checkpoint_states = np.zeros(
         (compiled.checkpoint_times_s.size, 2, n_simulated_spins, 3),
-        dtype=real_dtype,
+        dtype=checkpoint_dtype,
     )
     gradient_hz_per_m = compiled.gradient_hz_per_m
     rf_hz = compiled.rf_hz
@@ -2176,7 +2186,7 @@ def simulate_dynamic_sequence(
                 if n_rx_coils == 1:
                     received = (
                         np.sum(transverse)
-                        if unity_single_rx and spins_per_voxel == 1
+                        if unity_single_rx and not sampling.enabled
                         else (
                             np.sum(transverse * spin_signal_weights)
                             if unity_single_rx
@@ -3235,7 +3245,7 @@ def simulate_dynamic_sequence(
             )
         checkpoint_pool = np.zeros(
             (compiled.checkpoint_times_s.size, 2, phantom.nvoxels, 3),
-            dtype=real_dtype,
+            dtype=checkpoint_dtype,
         )
         checkpoint_pool[:, :, active] = checkpoint_states
         checkpoint_pool = checkpoint_pool.reshape(

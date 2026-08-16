@@ -6,8 +6,9 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QImage
+from scipy.ndimage import zoom
+from PyQt5.QtCore import QPointF, QSize, Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QImage, QPainter, QPen
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -30,6 +31,177 @@ from PyQt5.QtWidgets import (
 from ..sequence.reconstruction import SequenceReconstructionModel
 from .volume_viewer import VolumeViewerWidget
 from .widgets import IMAGE_CANVAS_BACKGROUND, style_image_item
+
+
+_IMAGE_INTERPOLATION_FACTOR = 8
+
+
+def _colormap(name: str):
+    """Return a pyqtgraph colormap, including a dependency-free gray map."""
+    if name == "gray":
+        return pg.ColorMap(
+            np.asarray([0.0, 1.0]),
+            np.asarray([[0, 0, 0, 255], [255, 255, 255, 255]], dtype=np.ubyte),
+        )
+    return pg.colormap.get(name)
+
+
+def _display_lut(name: str, strength: float, size: int = 256):
+    """Build the lookup table used by both the preview and PNG export."""
+    strength = max(float(strength), 1e-6)
+    positions = np.linspace(0.0, 1.0, int(size)) ** (1.0 / strength)
+    return np.asarray(_colormap(name).map(positions, mode="byte"), dtype=np.ubyte)
+
+
+def _interpolate_image(values, interpolation: str):
+    """Upsample only the displayed pixels while retaining the source extent."""
+    data = np.asarray(values, dtype=float)
+    order = {"nearest": 0, "linear": 1, "cubic": 3}.get(interpolation, 0)
+    if order == 0 or min(data.shape) == 0:
+        return data
+    return zoom(
+        data,
+        _IMAGE_INTERPOLATION_FACTOR,
+        order=order,
+        mode="nearest",
+        prefilter=order > 1,
+    )
+
+
+class _DoubleRangeSlider(QWidget):
+    """A compact horizontal float slider with independently draggable ends."""
+
+    valuesChanged = pyqtSignal(float, float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._domain = (0.0, 1.0)
+        self._values = (0.0, 1.0)
+        self._active_handle = 0
+        self._dragging = False
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setMinimumWidth(220)
+        self.setToolTip(
+            "Drag the left handle for the minimum and the right handle for the maximum"
+        )
+
+    def sizeHint(self):
+        return QSize(320, 28)
+
+    def values(self):
+        return self._values
+
+    def set_domain(self, low: float, high: float, *, preserve=True):
+        low, high = float(low), float(high)
+        if not np.isfinite(low) or not np.isfinite(high):
+            low, high = 0.0, 1.0
+        if high <= low:
+            high = np.nextafter(low, np.inf)
+        previous = self._values
+        self._domain = (low, high)
+        self.set_values(*(previous if preserve else (low, high)), emit=False)
+
+    def set_values(self, low: float, high: float, *, emit=True):
+        domain_low, domain_high = self._domain
+        low = float(np.clip(low, domain_low, domain_high))
+        high = float(np.clip(high, domain_low, domain_high))
+        if high < low:
+            low, high = high, low
+        changed = (low, high) != self._values
+        self._values = (low, high)
+        self.update()
+        if changed and emit:
+            self.valuesChanged.emit(low, high)
+
+    def _handle_x(self, value):
+        low, high = self._domain
+        span = max(high - low, np.finfo(float).eps)
+        fraction = np.clip((value - low) / span, 0.0, 1.0)
+        return 10.0 + fraction * max(1.0, self.width() - 20.0)
+
+    def _value_at(self, x):
+        fraction = np.clip((float(x) - 10.0) / max(1.0, self.width() - 20.0), 0, 1)
+        low, high = self._domain
+        return low + fraction * (high - low)
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        center = self.height() / 2.0
+        left, right = 10.0, max(10.0, self.width() - 10.0)
+        enabled = self.isEnabled()
+        groove = QColor(120, 120, 125, 115 if enabled else 65)
+        selected = self.palette().highlight().color()
+        if not enabled:
+            selected.setAlpha(80)
+        painter.setPen(QPen(groove, 4.0, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(QPointF(left, center), QPointF(right, center))
+        lower_x, upper_x = (self._handle_x(value) for value in self._values)
+        painter.setPen(QPen(selected, 5.0, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(QPointF(lower_x, center), QPointF(upper_x, center))
+        for index, position in enumerate((lower_x, upper_x)):
+            fill = (
+                selected
+                if index == self._active_handle and enabled
+                else QColor(245, 245, 245)
+            )
+            outline = selected if enabled else groove
+            painter.setBrush(fill)
+            painter.setPen(QPen(outline, 2.0))
+            painter.drawEllipse(QPointF(position, center), 7.0, 7.0)
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return super().mousePressEvent(event)
+        positions = [self._handle_x(value) for value in self._values]
+        self._active_handle = int(
+            abs(event.x() - positions[1]) < abs(event.x() - positions[0])
+        )
+        self._dragging = True
+        self.setFocus(Qt.MouseFocusReason)
+        self._move_active_handle(event.x())
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            self._move_active_handle(event.x())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._dragging:
+            self._dragging = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        step = (self._domain[1] - self._domain[0]) / 1000.0
+        direction = {
+            Qt.Key_Left: -1,
+            Qt.Key_Down: -1,
+            Qt.Key_Right: 1,
+            Qt.Key_Up: 1,
+        }.get(event.key())
+        if direction is not None:
+            value = self._values[self._active_handle] + direction * step
+            self._set_active_value(value)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _move_active_handle(self, x):
+        self._set_active_value(self._value_at(x))
+
+    def _set_active_value(self, value):
+        low, high = self._values
+        if self._active_handle == 0:
+            low = min(float(value), high)
+        else:
+            high = max(float(value), low)
+        self.set_values(low, high)
 
 
 class _SelectableImagePanel(QWidget):
@@ -67,26 +239,30 @@ class _SelectableImagePanel(QWidget):
         self.marker.clear()
         self.info.setText("No data")
 
-    def set_data(self, values, description: str, levels=None):
+    def set_data(
+        self,
+        values,
+        description: str,
+        levels=None,
+        *,
+        lut=None,
+        interpolation="nearest",
+    ):
         data = np.asarray(values, dtype=float)
         if data.ndim != 2:
             raise ValueError("image panel data must be two-dimensional")
-        finite = data[np.isfinite(data)]
         display = np.nan_to_num(data, copy=True)
+        display = _interpolate_image(display, interpolation)
         self._shape = data.shape
+        self.image.setLookupTable(lut)
         self.image.setImage(
             display.T,
             autoLevels=levels is None,
             levels=levels,
         )
+        self.image.setRect(0.0, 0.0, float(data.shape[1]), float(data.shape[0]))
         self.plot.autoRange()
-        if finite.size:
-            self.info.setText(
-                f"{description}; shape={data.shape}; "
-                f"range={finite.min():.5g}…{finite.max():.5g}"
-            )
-        else:
-            self.info.setText(f"{description}; no finite data")
+        self.info.setText(f"{description}; shape={data.shape}")
 
     def set_selected_pixel(self, x: int, y: int):
         if self._shape == (0, 0):
@@ -186,24 +362,57 @@ class SequenceReconstructionExplorer(QWidget):
         self.auto_contrast = QCheckBox("Auto contrast")
         self.auto_contrast.setChecked(True)
         self.auto_contrast.toggled.connect(self._contrast_mode_changed)
-        controls_layout.addWidget(self.auto_contrast, 2, 0, 1, 2)
-        controls_layout.addWidget(QLabel("Minimum"), 2, 2)
-        self.contrast_min = QDoubleSpinBox()
-        controls_layout.addWidget(self.contrast_min, 2, 3)
-        controls_layout.addWidget(QLabel("Maximum"), 2, 4)
-        self.contrast_max = QDoubleSpinBox()
-        controls_layout.addWidget(self.contrast_max, 2, 5)
-        for spin in (self.contrast_min, self.contrast_max):
-            spin.setRange(-1e300, 1e300)
-            spin.setDecimals(7)
-            spin.setEnabled(False)
-            spin.editingFinished.connect(self._refresh)
+        controls_layout.addWidget(self.auto_contrast, 2, 0)
+        self.contrast_min_label = QLabel("Minimum 0")
+        self.contrast_min_label.setMinimumWidth(125)
+        self.contrast_min_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        controls_layout.addWidget(self.contrast_min_label, 2, 1)
+        self.contrast_slider = _DoubleRangeSlider()
+        self.contrast_slider.setEnabled(False)
+        self.contrast_slider.valuesChanged.connect(self._contrast_range_changed)
+        controls_layout.addWidget(self.contrast_slider, 2, 2, 1, 4)
+        self.contrast_max_label = QLabel("Maximum 1")
+        self.contrast_max_label.setMinimumWidth(125)
+        controls_layout.addWidget(self.contrast_max_label, 2, 6, 1, 2)
 
         action_row = QHBoxLayout()
         self.export_button = QPushButton("Export current view…")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self._export_current_view)
         action_row.addWidget(self.export_button)
+        action_row.addSpacing(12)
+        action_row.addWidget(QLabel("Colormap"))
+        self.colormap_combo = QComboBox()
+        self.colormap_combo.addItems(
+            ["gray", "viridis", "plasma", "magma", "cividis", "inferno", "turbo"]
+        )
+        self.colormap_combo.setToolTip("Color palette for the reconstructed image")
+        self.colormap_combo.currentTextChanged.connect(self._refresh)
+        action_row.addWidget(self.colormap_combo)
+        action_row.addWidget(QLabel("Intensity γ"))
+        self.display_strength = QDoubleSpinBox()
+        self.display_strength.setRange(0.1, 5.0)
+        self.display_strength.setSingleStep(0.1)
+        self.display_strength.setDecimals(2)
+        self.display_strength.setValue(1.0)
+        self.display_strength.setToolTip(
+            "Colormap intensity (gamma): values above 1 brighten mid-tones"
+        )
+        self.display_strength.valueChanged.connect(self._refresh)
+        action_row.addWidget(self.display_strength)
+        action_row.addWidget(QLabel("Interpolation"))
+        self.interpolation_combo = QComboBox()
+        for label, value in (
+            ("Nearest", "nearest"),
+            ("Linear", "linear"),
+            ("Cubic", "cubic"),
+        ):
+            self.interpolation_combo.addItem(label, value)
+        self.interpolation_combo.setToolTip(
+            "Image-space interpolation; the reconstructed source data remain unchanged"
+        )
+        self.interpolation_combo.currentIndexChanged.connect(self._refresh)
+        action_row.addWidget(self.interpolation_combo)
         action_row.addStretch()
         controls_layout.addLayout(action_row, 3, 0, 1, 8)
         layout.addWidget(controls)
@@ -401,9 +610,9 @@ class SequenceReconstructionExplorer(QWidget):
             return "total", -1
         return str(value[0]), int(value[1])
 
-    def _selected_image(self):
+    def _selected_image(self, selections=None):
         model = self.model
-        selections = self._selections()
+        selections = self._selections() if selections is None else dict(selections)
         mode, index = self._selected_data_mode()
         coil_mode = str(self.coil_combo.currentData() or "rss")
         if mode == "ideal":
@@ -444,7 +653,12 @@ class SequenceReconstructionExplorer(QWidget):
             image_data, mode, pool_index, effective_coil_mode = self._selected_image()
             component = str(self.component_combo.currentData() or "magnitude")
             display = model.display_values(image_data, component)
-            display_levels = self._display_levels(display)
+            display_levels = self._display_levels(
+                display,
+                domain=self._slice_series_contrast_domain(display, component),
+            )
+            image_lut = self._image_lut()
+            interpolation = self._image_interpolation()
             if model.kind in {"cartesian_3d", "radial_3d"}:
                 image_scalar = image_data.copy(data=display)
                 image_volume, fov = model.scanner_volume(image_scalar)
@@ -468,6 +682,9 @@ class SequenceReconstructionExplorer(QWidget):
                     fov_m=fov,
                     name=f"{component.title()} reconstruction",
                     levels=display_levels,
+                    color_map=_colormap(self.colormap_combo.currentText()),
+                    lookup_table=image_lut,
+                    interpolation=interpolation,
                 )
                 self.kspace_volume.set_volume(
                     kspace_volume,
@@ -554,6 +771,8 @@ class SequenceReconstructionExplorer(QWidget):
             image_values,
             f"{self.component_combo.currentText()} reconstruction",
             levels=display_levels,
+            lut=self._image_lut(),
+            interpolation=self._image_interpolation(),
         )
         self.kspace_panel.set_data(
             np.log1p(np.abs(kspace_values)), "log(1 + |gridded k-space|)"
@@ -571,27 +790,71 @@ class SequenceReconstructionExplorer(QWidget):
             self.spectrum_plot.clear()
 
     def _contrast_mode_changed(self, automatic):
-        for spin in (self.contrast_min, self.contrast_max):
-            spin.setEnabled(not automatic)
+        self.contrast_slider.setEnabled(not automatic)
         self._refresh()
 
-    def _display_levels(self, values):
-        finite = np.asarray(values)[np.isfinite(values)]
+    def _contrast_range_changed(self, low, high):
+        self._update_contrast_labels(low, high)
+        if not self._updating and not self.auto_contrast.isChecked():
+            self._refresh()
+
+    def _update_contrast_labels(self, low, high):
+        self.contrast_min_label.setText(f"Minimum {low:.7g}")
+        self.contrast_max_label.setText(f"Maximum {high:.7g}")
+
+    def _image_lut(self):
+        return _display_lut(
+            self.colormap_combo.currentText(), self.display_strength.value()
+        )
+
+    def _image_interpolation(self):
+        return str(self.interpolation_combo.currentData() or "nearest")
+
+    @staticmethod
+    def _finite_range(values):
+        values = np.asarray(values)
+        finite = values[np.isfinite(values)]
         if finite.size:
-            low, high = float(finite.min()), float(finite.max())
-        else:
-            low, high = 0.0, 1.0
+            return float(finite.min()), float(finite.max())
+        return None
+
+    def _slice_series_contrast_domain(self, current_display, component):
+        """Return one contrast domain for every slice in the selected series."""
+        slice_dimension = next(
+            (item for item in self.model.outer_dimensions if item.name == "slice"),
+            None,
+        )
+        if slice_dimension is None:
+            return self._finite_range(current_display)
+
+        selections = self._selections()
+        low = high = None
+        for value in slice_dimension.values:
+            slice_selections = dict(selections)
+            slice_selections["slice"] = value
+            image_data, *_ = self._selected_image(slice_selections)
+            display = self.model.display_values(image_data, component)
+            finite_range = self._finite_range(display)
+            if finite_range is None:
+                continue
+            slice_low, slice_high = finite_range
+            low = slice_low if low is None else min(low, slice_low)
+            high = slice_high if high is None else max(high, slice_high)
+        return None if low is None else (low, high)
+
+    def _display_levels(self, values, *, domain=None):
+        finite_range = self._finite_range(values) if domain is None else domain
+        low, high = (0.0, 1.0) if finite_range is None else finite_range
         if np.isclose(low, high):
             delta = max(1e-6, abs(low) * 1e-6)
             low, high = low - delta, high + delta
         if self.auto_contrast.isChecked():
-            for spin, value in ((self.contrast_min, low), (self.contrast_max, high)):
-                previous = spin.blockSignals(True)
-                spin.setValue(value)
-                spin.blockSignals(previous)
+            self.contrast_slider.set_domain(low, high, preserve=False)
+            self._update_contrast_labels(low, high)
             return None
-        selected_low = float(self.contrast_min.value())
-        selected_high = float(self.contrast_max.value())
+        self.contrast_slider.set_domain(low, high, preserve=True)
+        selected_low, selected_high = self.contrast_slider.values()
+        self._update_contrast_labels(selected_low, selected_high)
         if selected_high <= selected_low:
             selected_high = np.nextafter(selected_low, np.inf)
         return selected_low, selected_high
@@ -667,10 +930,10 @@ class SequenceReconstructionExplorer(QWidget):
             "coil": self.coil_combo.currentData(),
             "component": self.component_combo.currentData(),
             "auto_contrast": self.auto_contrast.isChecked(),
-            "contrast_range": [
-                self.contrast_min.value(),
-                self.contrast_max.value(),
-            ],
+            "contrast_range": list(self.contrast_slider.values()),
+            "colormap": self.colormap_combo.currentText(),
+            "display_strength": self.display_strength.value(),
+            "interpolation": self._image_interpolation(),
             "spectral_point": self.spectral_point.value(),
             "voxel": list(self._voxel),
             "image_volume_indices": list(self.image_volume.indices),
@@ -699,12 +962,18 @@ class SequenceReconstructionExplorer(QWidget):
             self._set_combo_data(self.component_combo, state.get("component"))
             contrast_range = state.get("contrast_range", ())
             if isinstance(contrast_range, (list, tuple)) and len(contrast_range) == 2:
-                self.contrast_min.setValue(float(contrast_range[0]))
-                self.contrast_max.setValue(float(contrast_range[1]))
+                self.contrast_slider.set_values(
+                    float(contrast_range[0]), float(contrast_range[1]), emit=False
+                )
+                self._update_contrast_labels(*self.contrast_slider.values())
             automatic = bool(state.get("auto_contrast", True))
             self.auto_contrast.setChecked(automatic)
-            self.contrast_min.setEnabled(not automatic)
-            self.contrast_max.setEnabled(not automatic)
+            self.contrast_slider.setEnabled(not automatic)
+            self.colormap_combo.setCurrentText(str(state.get("colormap", "gray")))
+            self.display_strength.setValue(float(state.get("display_strength", 1.0)))
+            self._set_combo_data(
+                self.interpolation_combo, state.get("interpolation", "nearest")
+            )
             self.spectral_point.setValue(int(state.get("spectral_point", 0)))
             voxel = state.get("voxel", (0, 0))
             if isinstance(voxel, (list, tuple)) and len(voxel) == 2:
@@ -734,10 +1003,21 @@ class SequenceReconstructionExplorer(QWidget):
     def _export_current_view(self):
         if self._current_display is None:
             return
+        export_directory = None
+        window = self.window()
+        for provider_name in ("_get_export_directory", "_export_directory"):
+            provider = getattr(window, provider_name, None)
+            if callable(provider):
+                try:
+                    export_directory = Path(provider())
+                    break
+                except Exception:
+                    pass
+        default_path = (export_directory or Path.cwd()) / "reconstruction_view.npy"
         filename, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Export current reconstruction view",
-            "reconstruction_view.npy",
+            str(default_path),
             "NumPy array (*.npy);;NumPy archive (*.npz);;PNG image (*.png)",
         )
         if not filename:
@@ -760,19 +1040,31 @@ class SequenceReconstructionExplorer(QWidget):
                 if values.ndim == 3:
                     values = values[:, :, values.shape[2] // 2].T
                 finite = values[np.isfinite(values)]
-                low = float(finite.min()) if finite.size else 0.0
-                high = float(finite.max()) if finite.size else 1.0
+                if self.auto_contrast.isChecked():
+                    low = float(finite.min()) if finite.size else 0.0
+                    high = float(finite.max()) if finite.size else 1.0
+                else:
+                    low, high = self.contrast_slider.values()
                 scale = high - low if high > low else 1.0
-                pixels = np.ascontiguousarray(
-                    np.clip((values - low) / scale * 255.0, 0, 255).astype(np.uint8)
+                normalized = np.nan_to_num(
+                    np.clip((values - low) / scale, 0.0, 1.0),
+                    nan=0.0,
+                    posinf=1.0,
+                    neginf=0.0,
                 )
-                height, width = pixels.shape
+                normalized = _interpolate_image(normalized, self._image_interpolation())
+                lut = self._image_lut()
+                indices = np.clip(
+                    np.rint(normalized * (len(lut) - 1)), 0, len(lut) - 1
+                ).astype(np.intp)
+                pixels = np.ascontiguousarray(lut[indices])
+                height, width = pixels.shape[:2]
                 image = QImage(
                     pixels.data,
                     width,
                     height,
                     int(pixels.strides[0]),
-                    QImage.Format_Grayscale8,
+                    QImage.Format_RGBA8888,
                 ).copy()
                 if not image.save(str(path)):
                     raise ValueError("Qt could not encode the PNG image")
