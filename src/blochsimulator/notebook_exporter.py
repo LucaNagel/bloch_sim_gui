@@ -2418,6 +2418,7 @@ def export_pulseq_generation_notebook(
     parameters: Dict[str, Any],
     *,
     seq_filename: Optional[str] = None,
+    pulseq_definitions: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Create a notebook that regenerates one GUI-built Pulseq sequence."""
     if not HAS_NBFORMAT:
@@ -2449,6 +2450,9 @@ def export_pulseq_generation_notebook(
         else f"{notebook_path.stem}.seq"
     )
     parameter_literal = pformat(dict(parameters), sort_dicts=False, width=88)
+    definitions_literal = pformat(
+        dict(pulseq_definitions or {}), sort_dicts=False, width=88
+    )
     notebook = new_notebook(
         cells=[
             new_markdown_cell(
@@ -2465,6 +2469,9 @@ def export_pulseq_generation_notebook(
             ),
             new_code_cell(
                 f"sequence = {builder_name}(**parameters)\n"
+                f"pulseq_definitions = {definitions_literal}\n"
+                "for name, value in pulseq_definitions.items():\n"
+                "    sequence.set_definition(name, value)\n"
                 f"output_path = Path({output_name!r})\n"
                 "sequence.write(str(output_path), v141_compat=True)\n"
                 "print(f'Wrote {output_path.resolve()}')\n"

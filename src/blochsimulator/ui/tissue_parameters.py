@@ -8,12 +8,16 @@ from PyQt5.QtWidgets import (
     QSlider,
     QCheckBox,
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from ..simulator import TissueParameters
+from ..units import NUCLEUS_GAMMA_HZ_PER_T
 
 
 class TissueParameterWidget(QGroupBox):
     """Widget for setting tissue parameters."""
+
+    field_strength_changed = pyqtSignal(float)
+    nucleus_changed = pyqtSignal(str)
 
     def __init__(self):
         super().__init__("Single-Spin / Ensemble Tissue")
@@ -47,16 +51,31 @@ class TissueParameterWidget(QGroupBox):
         )
         self.preset_combo.currentTextChanged.connect(self.load_preset)
         preset_layout.addWidget(self.preset_combo)
+        layout.addLayout(preset_layout)
 
-        # Field strength
-        preset_layout.addWidget(QLabel("Field:"))
+        # Shared scanner frequency reference
+        reference_layout = QHBoxLayout()
+        reference_layout.addWidget(QLabel("Field:"))
         self.field_combo = QComboBox()
         self.field_combo.setObjectName("field_strength_combo")
         self.field_combo.addItems(["1.5T", "3.0T", "7.0T"])
         self.field_combo.setCurrentText("3.0T")
-        self.field_combo.currentTextChanged.connect(self.load_preset)
-        preset_layout.addWidget(self.field_combo)
-        layout.addLayout(preset_layout)
+        self.field_combo.currentTextChanged.connect(self._field_strength_changed)
+        reference_layout.addWidget(self.field_combo)
+
+        reference_layout.addWidget(QLabel("Nucleus:"))
+        self.nucleus_combo = QComboBox()
+        self.nucleus_combo.setObjectName("nucleus_combo")
+        self.nucleus_combo.addItems(sorted(NUCLEUS_GAMMA_HZ_PER_T))
+        self.nucleus_combo.setCurrentText("H1")
+        self.nucleus_combo.setToolTip(
+            "Shared reference nucleus used by Phantom and Sequence Mode and "
+            "recorded in Free Mode exports."
+        )
+        self.nucleus_combo.currentTextChanged.connect(self.nucleus_changed)
+        reference_layout.addWidget(self.nucleus_combo)
+        reference_layout.addStretch()
+        layout.addLayout(reference_layout)
 
         # Sequence-specific presets toggle
         seq_preset_layout = QHBoxLayout()
@@ -121,18 +140,67 @@ class TissueParameterWidget(QGroupBox):
 
         self.setLayout(layout)
 
+    def get_field_strength(self) -> float:
+        """Return the numeric main-field value shown by the widget."""
+        text = self.field_combo.currentText().removesuffix("T").strip()
+        try:
+            return float(text)
+        except ValueError:
+            return 3.0
+
+    def set_field_strength(self, value_t: float) -> None:
+        """Apply a shared B0 value, including non-preset scanner fields."""
+        value_t = float(value_t)
+        matching_index = -1
+        for index in range(self.field_combo.count()):
+            try:
+                candidate = float(
+                    self.field_combo.itemText(index).removesuffix("T").strip()
+                )
+            except ValueError:
+                continue
+            if abs(candidate - value_t) <= 1e-9 * max(1.0, abs(value_t)):
+                matching_index = index
+                break
+        if matching_index < 0:
+            self.field_combo.addItem(f"{value_t:g}T")
+            matching_index = self.field_combo.count() - 1
+        self.field_combo.setCurrentIndex(matching_index)
+
+    def get_nucleus(self) -> str:
+        """Return the shared reference nucleus shown by the widget."""
+        nucleus = self.nucleus_combo.currentText().strip()
+        return nucleus if nucleus in NUCLEUS_GAMMA_HZ_PER_T else "H1"
+
+    def set_nucleus(self, nucleus: str) -> None:
+        """Apply the shared reference nucleus without inventing new entries."""
+        nucleus = str(nucleus).strip()
+        index = self.nucleus_combo.findText(nucleus)
+        if index >= 0:
+            self.nucleus_combo.setCurrentIndex(index)
+
+    def _field_strength_changed(self, *_):
+        self.load_preset()
+        self.field_strength_changed.emit(self.get_field_strength())
+
     def load_preset(self):
         """Load tissue parameter preset."""
         preset = self.preset_combo.currentText()
-        field_str = self.field_combo.currentText()
-        field = float(field_str[:-1])  # Remove 'T'
+        field = self.get_field_strength()
 
-        if preset == "Gray Matter":
-            tissue = TissueParameters.gray_matter(field)
-        elif preset == "White Matter":
-            tissue = TissueParameters.white_matter(field)
-        elif preset == "CSF":
-            tissue = TissueParameters.csf(field)
+        preset_factories = {
+            "Gray Matter": TissueParameters.gray_matter,
+            "White Matter": TissueParameters.white_matter,
+            "CSF": TissueParameters.csf,
+        }
+        if preset in preset_factories:
+            try:
+                tissue = preset_factories[preset](field)
+            except ValueError:
+                # Arbitrary scanner fields (for example 9.4 T) are valid for
+                # ppm/Hz conversion even when no relaxation preset exists.
+                # Preserve the explicitly configured T1/T2 values in that case.
+                return
         elif preset == "Hyperpolarized 13C Pyruvate":
             # Typical HP 13C pyruvate values (approx.): long T1, slower decay
             self.t1_spin.setValue(25000)  # 25 s
@@ -167,6 +235,8 @@ class TissueParameterWidget(QGroupBox):
         return {
             "preset": self.preset_combo.currentText(),
             "field": self.field_combo.currentText(),
+            "field_strength_t": self.get_field_strength(),
+            "nucleus": self.get_nucleus(),
             "t1_ms": self.t1_spin.value(),
             "t2_ms": self.t2_spin.value(),
             "m0": self.m0_spin.value(),
@@ -181,13 +251,22 @@ class TissueParameterWidget(QGroupBox):
         # Block signals to avoid triggering multiple preset loads
         self.preset_combo.blockSignals(True)
         self.field_combo.blockSignals(True)
+        self.nucleus_combo.blockSignals(True)
         self.seq_preset_checkbox.blockSignals(True)
 
         try:
             if "preset" in state:
                 self.preset_combo.setCurrentText(state["preset"])
-            if "field" in state:
-                self.field_combo.setCurrentText(state["field"])
+            if "field_strength_t" in state:
+                self.set_field_strength(state["field_strength_t"])
+            elif "field" in state:
+                field = str(state["field"])
+                try:
+                    self.set_field_strength(float(field.removesuffix("T").strip()))
+                except ValueError:
+                    self.field_combo.setCurrentText(field)
+            if "nucleus" in state:
+                self.set_nucleus(state["nucleus"])
             if "t1_ms" in state:
                 self.t1_spin.setValue(state["t1_ms"])
             if "t2_ms" in state:
@@ -200,4 +279,5 @@ class TissueParameterWidget(QGroupBox):
         finally:
             self.preset_combo.blockSignals(False)
             self.field_combo.blockSignals(False)
+            self.nucleus_combo.blockSignals(False)
             self.seq_preset_checkbox.blockSignals(False)

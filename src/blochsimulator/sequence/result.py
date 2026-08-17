@@ -679,10 +679,11 @@ class SequenceSimulationResult:
             if self.signal.ndim == 2:
                 pool_signal_dims = ("pool", "coil", "adc")
             data_vars["species_signal"] = (pool_signal_dims, self.species_signal)
-            data_vars["final_pool_magnetization"] = (
-                ["pool"] + spatial_dims + ["component"],
-                self.final_pool_magnetization,
-            )
+            if self.final_pool_magnetization is not None:
+                data_vars["final_pool_magnetization"] = (
+                    ["pool"] + spatial_dims + ["component"],
+                    self.final_pool_magnetization,
+                )
             if self.checkpoint_pool_magnetization is not None:
                 data_vars["checkpoint_pool_magnetization"] = (
                     ["checkpoint", "pool"] + spatial_dims + ["component"],
@@ -755,6 +756,11 @@ class SequenceSimulationResult:
             for key, value in self.metadata.items()
             if isinstance(value, (str, int, float, bool))
         }
+        # NetCDF attributes previously kept only scalar metadata, silently
+        # dropping nested sequence definitions, phantom settings, spin
+        # sampling, and acquisition descriptions. Preserve the same complete
+        # run metadata already written by the NPZ and HDF5 exporters.
+        attrs["metadata_json"] = json.dumps(self.metadata, default=str)
         attrs["adc_order"] = (
             "chronological; adc_event_index identifies each readout and "
             "readout_sample_index identifies the sample within that readout"

@@ -19,6 +19,7 @@ class SpinSampling:
 
     counts_xyz: tuple[int, int, int] = (1, 1, 1)
     method: str = "midpoint"
+    selected_indices: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         counts = tuple(self.counts_xyz)
@@ -41,15 +42,52 @@ class SpinSampling:
             raise ValueError("spin sampling method must be 'midpoint'")
         object.__setattr__(self, "counts_xyz", tuple(validated))
         object.__setattr__(self, "method", method)
+        if self.selected_indices is not None:
+            selected = tuple(self.selected_indices)
+            if not selected:
+                raise ValueError("selected subvoxel spin indices must not be empty")
+            grid_count = int(np.prod(validated))
+            normalized = []
+            for value in selected:
+                if isinstance(value, (bool, np.bool_)) or int(value) != value:
+                    raise ValueError("selected subvoxel spin indices must be integers")
+                value = int(value)
+                if value < 0 or value >= grid_count:
+                    raise ValueError(
+                        "selected subvoxel spin index is outside the full grid"
+                    )
+                normalized.append(value)
+            if len(set(normalized)) != len(normalized):
+                raise ValueError("selected subvoxel spin indices must be unique")
+            object.__setattr__(self, "selected_indices", tuple(normalized))
 
     @property
-    def spins_per_voxel(self) -> int:
+    def grid_spins_per_voxel(self) -> int:
+        """Number of points in the complete midpoint grid."""
         count_x, count_y, count_z = self.counts_xyz
         return count_x * count_y * count_z
 
     @property
+    def spins_per_voxel(self) -> int:
+        if self.selected_indices is not None:
+            return len(self.selected_indices)
+        return self.grid_spins_per_voxel
+
+    @property
     def enabled(self) -> bool:
-        return self.spins_per_voxel > 1
+        # A one-point subset of a larger grid still needs its non-central
+        # physical offset and its original quadrature weight.
+        return self.grid_spins_per_voxel > 1
+
+    def select(self, indices) -> "SpinSampling":
+        """Return a partial grid that preserves the complete grid's weights."""
+        if self.selected_indices is not None:
+            raise ValueError("cannot select again from a partial spin grid")
+        return SpinSampling(
+            counts_xyz=self.counts_xyz,
+            method=self.method,
+            selected_indices=tuple(indices),
+        )
 
     def validate_phantom_dimensions(self, ndim: int) -> None:
         """Reject sampling along axes for which a phantom has no cell extent."""
@@ -73,10 +111,14 @@ class SpinSampling:
         x, y, z = np.meshgrid(*axes, indexing="ij")
         offsets = np.column_stack((x.ravel(), y.ravel(), z.ravel()))
         weights = np.full(
-            self.spins_per_voxel,
-            1.0 / self.spins_per_voxel,
+            self.grid_spins_per_voxel,
+            1.0 / self.grid_spins_per_voxel,
             dtype=np.float64,
         )
+        if self.selected_indices is not None:
+            selected = np.asarray(self.selected_indices, dtype=np.intp)
+            offsets = offsets[selected]
+            weights = weights[selected]
         return offsets, weights
 
     def offsets_m(self, voxel_basis_m) -> tuple[np.ndarray, np.ndarray]:
@@ -91,7 +133,10 @@ class SpinSampling:
         return {
             "counts_xyz": tuple(int(value) for value in self.counts_xyz),
             "spins_per_voxel": self.spins_per_voxel,
+            "grid_spins_per_voxel": self.grid_spins_per_voxel,
             "method": self.method,
+            "selected_indices": self.selected_indices,
+            "quadrature_weight_sum": (self.spins_per_voxel / self.grid_spins_per_voxel),
         }
 
 

@@ -8,16 +8,31 @@ import numpy as np
 import pytest
 from PyQt5.QtCore import QSettings, Qt
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication, QMenu, QMessageBox, QScrollArea, QToolBar
+from PyQt5.QtWidgets import (
+    QAction,
+    QApplication,
+    QMenu,
+    QMessageBox,
+    QScrollArea,
+    QToolBar,
+)
 
 from blochsimulator.ui.main_window import BlochSimulatorGUI
 from blochsimulator.ui.sequence_simulation_widget import (
     SequenceProbeThread,
+    SequenceSimulationThread,
     SequenceSimulationWidget,
+    _SequenceSimulationPayload,
+    _animation_checkpoint_times,
     _event_step_plot_data,
     _rf_phase_plot_data,
+    _split_animation_result,
 )
+from blochsimulator.ui.volume_viewer import SequenceMagnetizationAnimationViewer
 from blochsimulator.ui.default_settings import WorkspaceDefaults
+from blochsimulator.phantom import Phantom
+from blochsimulator.simulator import BlochSimulator
+from blochsimulator.spectral_phantom import ChemicalSpecies, SpectralPhantom
 from blochsimulator.sequence import (
     ADCEvent,
     AcquisitionDimensions,
@@ -62,6 +77,228 @@ def test_rf_phase_plot_includes_programmed_phase_and_carrier_evolution():
     assert phase_deg[finite] == pytest.approx((30.0, 120.0, -150.0))
 
 
+def test_post_run_animation_uses_time_resolution_and_preserves_result():
+    app = QApplication.instance() or QApplication(sys.argv)
+    program = SequenceProgram(
+        events=(RFEvent(0.0, np.full(1, 50.0 + 0.0j), 1e-3),),
+        duration_s=6e-3,
+    )
+    phantom = Phantom(
+        shape=(2, 1, 1),
+        fov=(0.02, 0.01, 0.01),
+        t1_map=np.ones((2, 1, 1)),
+        t2_map=np.ones((2, 1, 1)),
+        pd_map=np.ones((2, 1, 1)),
+    )
+    simulator = BlochSimulator(use_parallel=False)
+    baseline = simulator.simulate_sequence(
+        program,
+        phantom,
+        checkpoints_s=(2e-3,),
+        simulation_timestep_s=1e-3,
+    )
+    animation_times = _animation_checkpoint_times(
+        program,
+        time_resolution_s=1e-3,
+        maximum_frames=100,
+        checkpoints_s=(2e-3,),
+        simulation_timestep_s=1e-3,
+    )
+    assert animation_times == pytest.approx(np.arange(7) * 1e-3)
+
+    worker = SequenceSimulationThread(
+        simulator,
+        program,
+        phantom,
+        (2e-3,),
+        live_preview=False,
+        simulation_timestep_s=1e-3,
+        animation_time_resolution_s=1e-3,
+        animation_maximum_frames=100,
+        animation_storage_dtype="float16",
+    )
+    completed = []
+    progress_updates = []
+    worker.result_ready.connect(completed.append)
+    worker.progress.connect(lambda done, total: progress_updates.append((done, total)))
+    worker.run()
+
+    assert len(completed) == 1
+    payload = completed[0]
+    assert isinstance(payload, _SequenceSimulationPayload)
+    assert np.array_equal(
+        payload.result.final_magnetization, baseline.final_magnetization
+    )
+    assert np.array_equal(payload.result.signal, baseline.signal)
+    assert payload.result.checkpoint_times_s == pytest.approx([2e-3])
+    assert payload.result.checkpoint_magnetization.dtype == np.float64
+    assert payload.animation.magnetization.dtype == np.float16
+    assert payload.animation.time_s == pytest.approx(animation_times)
+    assert payload.animation.magnetization[-1].astype(np.float64) == pytest.approx(
+        baseline.final_magnetization, abs=5e-4
+    )
+    assert progress_updates[-1][0] == progress_updates[-1][1]
+    assert [done for done, _ in progress_updates] == sorted(
+        done for done, _ in progress_updates
+    )
+
+    worker.deleteLater()
+    app.processEvents()
+
+
+def test_post_run_animation_snaps_rf_active_targets_to_existing_boundaries():
+    program = SequenceProgram(
+        events=(RFEvent(0.0, np.full(4, 50.0 + 0.0j), 1e-3),),
+        duration_s=4e-3,
+    )
+    compiled = SequenceCompiler().compile(
+        program,
+        simulation_timestep_s=1e-3,
+    )
+    animation_times = _animation_checkpoint_times(
+        program,
+        time_resolution_s=1.3e-3,
+        maximum_frames=100,
+        simulation_timestep_s=1e-3,
+    )
+    state_boundaries = np.concatenate(([0.0], compiled.interval_end_s))
+    assert all(np.any(state_boundaries == value) for value in animation_times)
+
+
+def test_post_run_animation_viewer_selects_time_map_and_pool():
+    app = QApplication.instance() or QApplication(sys.argv)
+    phantom = Phantom(
+        shape=(2, 1, 1),
+        fov=(0.02, 0.01, 0.01),
+        t1_map=np.ones((2, 1, 1)),
+        t2_map=np.ones((2, 1, 1)),
+        pd_map=np.ones((2, 1, 1)),
+    )
+    states = np.zeros((3, 2, 1, 1, 3), dtype=np.float16)
+    states[:, ..., 2] = np.asarray([1.0, 0.5, 0.0])[:, None, None, None]
+    pools = np.zeros((3, 2, 2, 1, 1, 3), dtype=np.float16)
+    pools[:, 1, ..., 0] = np.asarray([0.0, 0.25, 0.75])[:, None, None, None]
+    viewer = SequenceMagnetizationAnimationViewer()
+    assert not viewer.capture_enabled.isChecked()
+    assert viewer.time_resolution_ms.value() == pytest.approx(1.0)
+    assert viewer.storage_dtype_combo.currentText() == "float32"
+    viewer.set_animation(
+        np.asarray([0.0, 0.001, 0.002]),
+        states,
+        phantom=phantom,
+        pool_magnetization=pools,
+        pool_names=("Pyruvate", "Lactate"),
+        storage_dtype="float16",
+    )
+
+    assert viewer.time_slider.maximum() == 2
+    assert viewer.pool_combo.count() == 3
+    assert "float16" in viewer.storage_info.text()
+    viewer.pool_combo.setCurrentText("Lactate")
+    viewer.map_combo.setCurrentText("Mx / real(Mxy)")
+    viewer.time_slider.setValue(2)
+    assert viewer.volume.data[:, 0, 0] == pytest.approx([0.75, 0.75])
+    assert "2.000 ms" in viewer.time_label.text()
+    viewer.play_button.setChecked(True)
+    assert viewer.playback_timer.isActive()
+    viewer.play_button.setChecked(False)
+    assert not viewer.playback_timer.isActive()
+
+    viewer.close()
+    viewer.deleteLater()
+    app.processEvents()
+
+
+def test_animation_frame_limit_uses_time_resolution_and_storage_dtype():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.program = SequenceProgram(events=(), duration_s=1.0)
+    widget.animation_enabled.setChecked(True)
+
+    class LargeAnimationObject:
+        nvoxels = 1_000_000
+
+    widget.phantom = LargeAnimationObject()
+    widget.animation_time_resolution_ms.setValue(1.0)
+    widget.animation_storage_dtype.setCurrentText("float32")
+    _, float32_frames, float32_note = widget._animation_request()
+    widget.animation_storage_dtype.setCurrentText("float16")
+    _, float16_frames, float16_note = widget._animation_request()
+
+    assert float16_frames > float32_frames
+    assert "requested" in float32_note
+    assert "requested" in float16_note
+
+    widget.animation_time_resolution_ms.setValue(100.0)
+    _, coarse_frames, coarse_note = widget._animation_request()
+    assert coarse_frames == 11
+    assert coarse_note == ""
+
+    widget.animation_time_resolution_ms.setValue(1.0)
+    widget.set_animation_memory_budget_bytes(1024 * 1024**2)
+    _, larger_budget_frames, larger_budget_note = widget._animation_request()
+    assert larger_budget_frames > float16_frames
+    assert "1024 MiB limit" in larger_budget_note
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_animation_float16_fallback_reports_storage_reason():
+    times = np.asarray([0.0, 0.001])
+    checkpoints = np.zeros((2, 1, 1, 1, 3), dtype=np.float32)
+    checkpoints[1, ..., 2] = 70_000.0
+    result = SequenceSimulationResult(
+        signal=np.zeros(0, dtype=np.complex128),
+        adc_times_s=np.zeros(0),
+        final_magnetization=checkpoints[-1],
+        checkpoint_magnetization=checkpoints,
+        checkpoint_times_s=times,
+    )
+
+    _, animation = _split_animation_result(
+        result,
+        user_checkpoints_s=(),
+        animation_times_s=times,
+        dtype="float16",
+    )
+
+    assert animation.storage_dtype == "float32"
+    assert "float16 was requested" in animation.storage_note
+    assert "7e+04" in animation.storage_note
+
+
+def test_post_run_animation_separates_pool_frames_from_manual_checkpoints():
+    times = np.asarray([0.0, 0.001, 0.002])
+    checkpoints = np.arange(3 * 2 * 1 * 1 * 3, dtype=np.float64).reshape(3, 2, 1, 1, 3)
+    pool_checkpoints = np.stack((checkpoints, checkpoints + 100.0), axis=1)
+    result = SequenceSimulationResult(
+        signal=np.zeros(0, dtype=np.complex128),
+        adc_times_s=np.zeros(0),
+        final_magnetization=checkpoints[-1],
+        checkpoint_magnetization=checkpoints,
+        checkpoint_times_s=times,
+        pool_names=("Pyruvate", "Lactate"),
+        checkpoint_pool_magnetization=pool_checkpoints,
+    )
+
+    clean, animation = _split_animation_result(
+        result,
+        user_checkpoints_s=(0.001,),
+        animation_times_s=(0.0, 0.002),
+        dtype="float32",
+    )
+
+    assert clean.checkpoint_times_s == pytest.approx([0.001])
+    assert np.array_equal(clean.checkpoint_magnetization, checkpoints[1:2])
+    assert np.array_equal(clean.checkpoint_pool_magnetization, pool_checkpoints[1:2])
+    assert animation.pool_names == ("Pyruvate", "Lactate")
+    assert animation.magnetization.dtype == np.float32
+    assert animation.pool_magnetization.dtype == np.float32
+    assert np.array_equal(animation.pool_magnetization, pool_checkpoints[[0, 2]])
+
+
 EXAMPLE_MAIN = runpy.run_path(
     str(Path(__file__).parents[1] / "sequences" / "scripts" / "generate_epi.py")
 )["main"]
@@ -93,6 +330,7 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     window.app_settings.setValue("defaults/sequence_fov_y_mm", 170.0)
     window.app_settings.setValue("defaults/sequence_fov_z_mm", 80.0)
     window.app_settings.setValue("defaults/field_strength_t", 7.0)
+    window.app_settings.setValue("defaults/phantom_nucleus", "C13")
     assert window.sequence_simulation_widget is None
     assert not window.tab_widget.isTabVisible(window.sequence_simulation_tab_index)
     assert not window.tab_widget.isTabVisible(window.phantom_tab_index)
@@ -121,14 +359,18 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert window.sequence_simulation_widget.epi_phase_fov_mm.value() == 170.0
     assert window.sequence_simulation_widget.bssfp_partition_fov_mm.value() == 80.0
     assert window.sequence_simulation_widget.field_strength_t.value() == 7.0
+    assert window.sequence_simulation_widget.nucleus.currentText() == "C13"
     updated_defaults = WorkspaceDefaults(
-        sequence_fov_mm=(90.0, 85.0, 40.0), field_strength_t=9.4
+        sequence_fov_mm=(90.0, 85.0, 40.0),
+        phantom_nucleus="P31",
+        field_strength_t=9.4,
     )
     window.sequence_simulation_widget.set_workspace_defaults(updated_defaults)
     assert window.sequence_simulation_widget.epi_read_fov_mm.value() == 90.0
     assert window.sequence_simulation_widget.epi_phase_fov_mm.value() == 85.0
     assert window.sequence_simulation_widget.bssfp_partition_fov_mm.value() == 40.0
     assert window.sequence_simulation_widget.field_strength_t.value() == 9.4
+    assert window.sequence_simulation_widget.nucleus.currentText() == "P31"
     assert isinstance(window.sequence_simulation_widget, SequenceSimulationWidget)
     assert window.sequence_simulation_widget.program.source == "internal-fid"
     assert window.sequence_simulation_widget._rf_designer is window.rf_designer
@@ -139,7 +381,7 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert window.findChild(QToolBar, "main_toolbar") is None
     assert window.mag_3d.export_3d_btn.isHidden()
     assert window.mag_3d.view_layout.indexOf(window.mag_3d.track_checkbox) >= 0
-    assert window.mag_3d.view_layout.indexOf(window.mag_3d.mean_checkbox) >= 0
+    assert window.mag_3d.view_layout.indexOf(window.mag_3d.spin_display_combo) >= 0
     ancestor = window.mag_3d.parentWidget()
     while ancestor is not None:
         assert not isinstance(ancestor, QScrollArea)
@@ -161,6 +403,8 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
         for action in file_menu.actions()
         if action.objectName() == "action_export_results"
     ] == ["Export Results..."]
+    assert window.findChild(QAction, "action_load_params") is None
+    assert window.findChild(QAction, "action_save_params") is None
     assert all(
         action.objectName() != "action_export_results_tools"
         for action in tools_menu.actions()
@@ -437,6 +681,25 @@ def test_sequence_workspace_generates_oriented_flash_from_controls():
     assert np.asarray(definitions["AcquisitionStartTimes"]) == pytest.approx(
         (0.0, 100e-3)
     )
+    widget.phantom = Phantom(
+        shape=(1, 1, 1),
+        fov=(0.01, 0.01, 0.01),
+        t1_map=np.ones((1, 1, 1)),
+        t2_map=np.ones((1, 1, 1)),
+        pd_map=np.ones((1, 1, 1)),
+    )
+    widget.animation_enabled.setChecked(True)
+    widget.animation_time_resolution_ms.setValue(2.0)
+    time_resolution_s, maximum_frames, animation_note = widget._animation_request()
+    assert time_resolution_s == pytest.approx(2e-3)
+    assert animation_note == ""
+    animation_times = _animation_checkpoint_times(
+        widget.program,
+        time_resolution_s=time_resolution_s,
+        maximum_frames=maximum_frames,
+        simulation_timestep_s=widget.simulation_timestep_us.value() * 1e-6,
+    )
+    assert animation_times.size > 6
 
     widget.close()
     widget.deleteLater()
@@ -479,6 +742,29 @@ def test_three_dimensional_sequences_expose_independent_signed_encoding_axes():
             getattr(widget, f"{prefix}_partition_gradient_axis").text().startswith("-Y")
         )
         assert parameters()["encoding_axes"] == ("-z", "+x", "-y")
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_ss_and_me_bssfp_default_to_scanner_z_readout():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+
+    for prefix, parameters in (
+        ("ss_bssfp", widget._ss_bssfp_pulseq_parameters),
+        ("me_bssfp", widget._me_bssfp_pulseq_parameters),
+    ):
+        assert getattr(widget, f"{prefix}_read_gradient_axis").currentText() == "+Z"
+        assert getattr(widget, f"{prefix}_phase_gradient_axis").currentText() == "+Y"
+        assert (
+            getattr(widget, f"{prefix}_partition_gradient_axis").text().startswith("-X")
+        )
+        assert parameters()["encoding_axes"] == ("+z", "+y", "-x")
+
+    assert widget.bssfp_read_gradient_axis.currentText() == "+X"
+    assert widget.radial_me_read_gradient_axis.currentText() == "+X"
 
     widget.close()
     widget.deleteLater()
@@ -653,6 +939,9 @@ def test_sequence_workspace_derives_shaped_rf_bandwidth_and_shares_reference():
     widget = SequenceSimulationWidget()
 
     assert not widget.ss_bssfp_rf_bandwidth_hz.isEnabled()
+    assert widget.ss_bssfp_spoiler_cycles.value() == pytest.approx(0.0)
+    assert widget.ss_bssfp_spoiler_cycles_per_voxel.value() == pytest.approx(1.0)
+    assert "Remaining coherent signal" in widget.ss_bssfp_spoiler_info.text()
     assert widget.ss_bssfp_rf_bandwidth_hz.value() == pytest.approx(2100.0 / 2.33)
     widget.ss_bssfp_rf_pulse_type.setCurrentText("SLR")
     assert not widget.ss_bssfp_rf_sinc_lobes.isEnabled()
@@ -700,6 +989,59 @@ def test_sequence_workspace_derives_shaped_rf_bandwidth_and_shares_reference():
     ):
         assert advanced_parameters["field_strength_t"] == pytest.approx(9.4)
         assert advanced_parameters["nucleus"] == "C13"
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_ss_bssfp_matches_named_phantom_peaks_and_uses_phantom_voxel_size(
+    monkeypatch,
+):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    shape = (2, 4, 8)
+    species = [
+        ChemicalSpecies("Shape 1: Pyruvate", 0.0, 25.0, 0.3, frequency_offset_hz=0.0),
+        ChemicalSpecies(
+            "Shape 2: Lactate", 0.0, 25.0, 0.3, frequency_offset_hz=925.44725
+        ),
+    ]
+    phantom = SpectralPhantom(
+        shape=shape,
+        fov=(1e-3, 2e-3, 4e-3),
+        species=species,
+        concentration_maps={item.name: np.ones(shape) for item in species},
+        field_strength=7.0,
+        nucleus="C13",
+    )
+    monkeypatch.setattr(widget, "_selected_designed_phantom", lambda: phantom)
+
+    widget.ss_bssfp_target_names.setText("Lac, Py")
+    widget.refresh_object_summary()
+    parameters = widget._ss_bssfp_pulseq_parameters()
+
+    assert parameters["target_frequency_offsets_hz"] == pytest.approx((1655, -245))
+    assert parameters["receiver_frequency_offsets_hz"] == pytest.approx(
+        (925.44725, 0.0)
+    )
+    assert parameters["end_image_spoiler_voxel_size_m"] == pytest.approx(
+        (0.5e-3, 0.5e-3, 0.5e-3)
+    )
+    assert "Receiver offsets match" in widget.ss_bssfp_spoiler_info.text()
+
+    widget.set_spoiler_configuration("gradient", (4, 4, 4))
+    assert "0, 0, 0.6667" in widget.flash_spoiler_info.text()
+    assert "grid 43.3%" in widget.flash_spoiler_info.text()
+    widget.flash_spoiler_cycles_per_slice.setValue(6.0)
+    assert "0, 0, 1" in widget.flash_spoiler_info.text()
+    assert "#15803d" in widget.flash_spoiler_info.styleSheet()
+
+    widget.ss_bssfp_spoiler_cycles_per_voxel.setValue(4.0)
+    assert "aliases" in widget.ss_bssfp_spoiler_info.text()
+
+    assert widget.ss_bssfp_target_offsets_hz.isEnabled()
+    assert widget.ss_bssfp_receiver_offsets_hz.isEnabled()
 
     widget.close()
     widget.deleteLater()
@@ -857,6 +1199,8 @@ def test_sequence_workspace_configures_rf_pulse_for_epi_and_spiral(tmp_path):
 def test_sequence_workspace_builds_spiral_readout_from_controls(tmp_path):
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
+    widget.field_strength_t.setValue(9.4)
+    widget.nucleus.setCurrentText("C13")
     widget.sequence_live_preview.setChecked(True)
     widget.sequence_source.setCurrentIndex(1)
     widget.read_matrix.setValue(8)
@@ -882,10 +1226,17 @@ def test_sequence_workspace_builds_spiral_readout_from_controls(tmp_path):
     assert definitions["SpiralTurns"] == pytest.approx(4.0)
     assert definitions["SliceGap"] == pytest.approx(2e-3)
     assert definitions["FOV"] == pytest.approx((0.22, 0.22, 10e-3))
+    assert definitions["FieldStrengthT"] == pytest.approx(9.4)
+    assert definitions["Nucleus"] == "C13"
     assert "Spiral:" in widget.sequence_info.text()
     output = widget._write_pulseq_path(tmp_path / "interactive_spiral.seq")
-    exported = SequenceCompiler().compile(load_pulseq(output))
+    exported_program = load_pulseq(output)
+    exported = SequenceCompiler().compile(exported_program)
     assert exported.adc_times_s.size == 8 * 8 * 2 * 2
+    assert exported_program.metadata["definitions"]["FieldStrengthT"] == pytest.approx(
+        9.4
+    )
+    assert exported_program.metadata["definitions"]["Nucleus"] == "C13"
 
     widget.close()
     widget.deleteLater()
@@ -912,6 +1263,14 @@ def test_sequence_workspace_displays_cartesian_kspace_and_reconstruction():
     assert np.all(np.isfinite(widget.reconstruction_view.image))
     assert "grid=3×4" in widget.kspace_info.text()
     assert "|IFFT2|" in widget.reconstruction_info.text()
+    tab_labels = [widget.views.tabText(index) for index in range(widget.views.count())]
+    assert "2D k-space / Reconstruction" in tab_labels
+    assert "2D k-space" not in tab_labels
+    assert "2D Reconstruction" not in tab_labels
+    assert (
+        widget.kspace_view.parentWidget().parentWidget()
+        is widget.reconstruction_view.parentWidget().parentWidget()
+    )
 
     widget.close()
     widget.deleteLater()
@@ -962,7 +1321,11 @@ def test_sequence_workspace_infers_imported_epi_and_syncs_fov(tmp_path, monkeypa
     app.processEvents()
     assert widget.kspace_view.image.shape == (4, 4)
     assert widget.reconstruction_view.image.shape == (4, 4)
-    assert np.ptp(widget.state_view.image) < 1e-10
+    assert widget.result_volume_viewer.result is result
+    assert all(
+        widget.views.tabText(index) != "Final Mz"
+        for index in range(widget.views.count())
+    )
 
     widget.close()
     widget.deleteLater()
@@ -1098,6 +1461,7 @@ def test_focused_sequence_workspace_uses_wider_control_panel():
     widget.show()
     app.processEvents()
 
+    widget.sequence_source.setCurrentText("EPI")
     widget.activate_focused_workspace_layout()
     app.processEvents()
 
@@ -1113,8 +1477,9 @@ def test_focused_sequence_workspace_uses_wider_control_panel():
     # the viewer may reduce the requested control width (notably under Xvfb).
     assert widget.MINIMUM_FOCUSED_CONTROL_WIDTH <= control_width
     assert control_width <= expected_control_width
-    assert widget.FOCUSED_CONTROL_WIDTH == 560
+    assert widget.FOCUSED_CONTROL_WIDTH == 600
     assert viewer_width >= widget.MINIMUM_FOCUSED_VIEWER_WIDTH
+    assert widget.controls_scroll.horizontalScrollBar().maximum() == 0
     assert widget.layout().contentsMargins().left() == 0
     assert widget.split_view_checkbox.parentWidget() is widget.signal_page
     assert widget.views.tabBar().font().bold()
@@ -1124,7 +1489,6 @@ def test_focused_sequence_workspace_uses_wider_control_panel():
     for image_view in (
         widget.kspace_view,
         widget.reconstruction_view,
-        widget.state_view,
     ):
         assert image_view.ui.histogram.width() == 48
 

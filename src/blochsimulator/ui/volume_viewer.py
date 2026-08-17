@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import os
+import time
 import weakref
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import Qt, pyqtSignal
+from scipy.ndimage import zoom
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QSlider,
     QTabWidget,
     QVBoxLayout,
@@ -73,6 +77,11 @@ class VolumeViewerWidget(QWidget):
         self.mask = np.ones((1, 1, 1), dtype=bool)
         self.fov_m = (1.0, 1.0, 1.0)
         self.display_levels = None
+        self.color_map = None
+        self.lookup_table = None
+        self.interpolation = "nearest"
+        self._gl_sample_indices = None
+        self._gl_sample_positions = None
         self._build_ui()
 
     def _build_ui(self):
@@ -147,6 +156,9 @@ class VolumeViewerWidget(QWidget):
         self.scatter = None
         self.bounds = None
         self.gl_grid = None
+        three_d_page = QWidget()
+        three_d_layout = QVBoxLayout(three_d_page)
+        three_d_layout.setContentsMargins(0, 0, 0, 0)
         if HAS_OPENGL and os.environ.get("QT_QPA_PLATFORM", "").lower() != "offscreen":
             self.gl_view = gl.GLViewWidget()
             self.gl_view.setCameraPosition(distance=300, elevation=25, azimuth=35)
@@ -164,9 +176,32 @@ class VolumeViewerWidget(QWidget):
                 pos=np.zeros((0, 3)), color=(1, 1, 1, 1), size=5
             )
             self.gl_view.addItem(self.scatter)
-            self.tabs.addTab(self.gl_view, "3D")
+            three_d_layout.addWidget(self.gl_view, 1)
         else:
-            self.tabs.addTab(QLabel("OpenGL volume view unavailable"), "3D")
+            unavailable = QLabel("OpenGL volume view unavailable")
+            unavailable.setAlignment(Qt.AlignCenter)
+            three_d_layout.addWidget(unavailable, 1)
+
+        point_size_row = QHBoxLayout()
+        point_size_row.setContentsMargins(8, 2, 8, 4)
+        point_size_row.addWidget(QLabel("Point size"))
+        self.point_size_slider = QSlider(Qt.Horizontal)
+        self.point_size_slider.setRange(1, 30)
+        self.point_size_slider.setValue(5)
+        self.point_size_slider.setSingleStep(1)
+        self.point_size_slider.setPageStep(5)
+        self.point_size_slider.setMinimumWidth(140)
+        self.point_size_slider.setToolTip(
+            "Change the rendered point diameter in the 3D point cloud"
+        )
+        self.point_size_slider.setEnabled(self.scatter is not None)
+        self.point_size_slider.valueChanged.connect(self._point_size_changed)
+        point_size_row.addWidget(self.point_size_slider, 1)
+        self.point_size_label = QLabel("5 px")
+        self.point_size_label.setMinimumWidth(42)
+        point_size_row.addWidget(self.point_size_label)
+        three_d_layout.addLayout(point_size_row)
+        self.tabs.addTab(three_d_page, "3D")
 
         self.info = QLabel("No volume")
         self.info.setWordWrap(True)
@@ -187,6 +222,10 @@ class VolumeViewerWidget(QWidget):
                 viewer._slice_scrolled(selected_plane, step)
 
         view = pg.ImageView(view=_SliceScrollViewBox(scroll_slice))
+        # ImageView defaults to image-style coordinates with Y increasing
+        # downwards. Phantom geometry and the designer canvas use Cartesian
+        # coordinates, so keep +X right and +Y/+Z up in every slice view.
+        view.getView().invertY(False)
         view.ui.roiBtn.hide()
         view.ui.menuBtn.hide()
         compact_image_histogram(view)
@@ -214,6 +253,9 @@ class VolumeViewerWidget(QWidget):
         name: str = "Volume",
         unit: str = "",
         levels=None,
+        color_map=None,
+        lookup_table=None,
+        interpolation: str = "nearest",
     ) -> None:
         native_values = np.asarray(data, dtype=float)
         values = self._promote_to_volume(native_values)
@@ -249,6 +291,9 @@ class VolumeViewerWidget(QWidget):
 
         self.data = values
         self.mask = volume_mask
+        self.color_map = color_map
+        self.lookup_table = lookup_table
+        self.interpolation = str(interpolation)
         if levels is None:
             self.display_levels = None
         else:
@@ -275,11 +320,48 @@ class VolumeViewerWidget(QWidget):
             for slider, was_blocked in zip(self.sliders, previous_signal_states):
                 slider.blockSignals(was_blocked)
         self._indices_updated()
-        self._update_3d()
-        active = values[self.mask & np.isfinite(values)]
+        self._update_3d(reset_camera=True)
+        self._update_info(name, unit)
+
+    def update_volume_data(
+        self,
+        data,
+        *,
+        name: str = "Volume",
+        unit: str = "",
+        levels=None,
+        color_map=None,
+        lookup_table=None,
+    ) -> None:
+        """Replace scalar values while preserving slices and the 3D camera."""
+        native_values = np.asarray(data, dtype=float)
+        values = self._promote_to_volume(native_values)
+        if values is None or values.shape != self.data.shape:
+            raise ValueError(
+                f"updated volume shape must remain {self.data.shape}, got "
+                f"{None if values is None else values.shape}"
+            )
+        self.data = values
+        self.color_map = color_map
+        self.lookup_table = lookup_table
+        if levels is None:
+            self.display_levels = None
+        else:
+            low, high = (float(value) for value in levels)
+            if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+                raise ValueError(
+                    "display levels must be finite and strictly increasing"
+                )
+            self.display_levels = (low, high)
+        self._indices_updated()
+        self._update_3d(reset_camera=False)
+        self._update_info(name, unit)
+
+    def _update_info(self, name: str, unit: str) -> None:
+        active = self.data[self.mask & np.isfinite(self.data)]
         if active.size:
             self.info.setText(
-                f"{name}: shape={values.shape}; range={active.min():.5g}…"
+                f"{name}: shape={self.data.shape}; range={active.min():.5g}…"
                 f"{active.max():.5g} {unit}"
             )
         else:
@@ -373,8 +455,7 @@ class VolumeViewerWidget(QWidget):
                 slider.blockSignals(was_blocked)
         self._indices_updated()
 
-    @staticmethod
-    def _set_slice_image(view: pg.ImageView, values, levels, fov_m) -> None:
+    def _set_slice_image(self, view: pg.ImageView, values, levels, fov_m) -> None:
         """Display a slice without passing NaN/Inf histogram ranges to Qt."""
         low, high = levels
         display = np.nan_to_num(
@@ -384,6 +465,17 @@ class VolumeViewerWidget(QWidget):
             posinf=high,
             neginf=low,
         )
+        order = {"nearest": 0, "linear": 1, "cubic": 3}.get(self.interpolation, 0)
+        if order and min(display.shape) > 0:
+            display = zoom(
+                display,
+                8,
+                order=order,
+                mode="nearest",
+                prefilter=order > 1,
+            )
+        if self.color_map is not None:
+            view.setColorMap(self.color_map)
         view.setImage(
             display,
             autoLevels=False,
@@ -395,6 +487,8 @@ class VolumeViewerWidget(QWidget):
                 fov_m[1] * 1000.0 / display.shape[1],
             ),
         )
+        if self.lookup_table is not None:
+            view.getImageItem().setLookupTable(self.lookup_table)
         view.ui.histogram.setHistogramRange(low, high)
 
     def _levels(self):
@@ -409,28 +503,59 @@ class VolumeViewerWidget(QWidget):
             return low - delta, high + delta
         return low, high
 
-    def _update_3d(self):
+    def _update_3d(self, *, reset_camera=True):
         if self.scatter is None:
             return
-        indices = np.argwhere(self.mask & np.isfinite(self.data))
-        if indices.size == 0:
-            self.scatter.setData(pos=np.zeros((0, 3)))
-            return
-        maximum_points = 20000
-        stride = max(1, int(np.ceil(len(indices) / maximum_points)))
-        indices = indices[::stride]
-        shape = np.asarray(self.data.shape, dtype=float)
         fov_mm = np.asarray(self.fov_m, dtype=float) * 1000.0
-        positions = ((indices + 0.5) / shape - 0.5) * fov_mm
+        if (
+            reset_camera
+            or self._gl_sample_indices is None
+            or self._gl_sample_positions is None
+        ):
+            indices = np.argwhere(self.mask)
+            if indices.size == 0:
+                self._gl_sample_indices = None
+                self._gl_sample_positions = None
+                self.scatter.setData(pos=np.zeros((0, 3)))
+                return
+            maximum_points = 20000
+            stride = max(1, int(np.ceil(len(indices) / maximum_points)))
+            indices = indices[::stride]
+            shape = np.asarray(self.data.shape, dtype=float)
+            positions = ((indices + 0.5) / shape - 0.5) * fov_mm
+            self._gl_sample_indices = indices
+            self._gl_sample_positions = np.asarray(positions, dtype=np.float32)
+        else:
+            indices = self._gl_sample_indices
+            positions = self._gl_sample_positions
         values = self.data[tuple(indices.T)]
+        finite = np.isfinite(values)
         low, high = self._levels()
-        normalized = np.clip((values - low) / max(high - low, 1e-15), 0, 1)
-        colors = pg.colormap.get("viridis").map(normalized, mode="float")
-        size = max(4.5, 18.0 / np.cbrt(max(1, len(indices))))
+        normalized = np.zeros(values.shape, dtype=float)
+        normalized[finite] = np.clip(
+            (values[finite] - low) / max(high - low, 1e-15), 0, 1
+        )
+        if self.lookup_table is not None:
+            indices_lut = np.clip(
+                np.rint(normalized * (len(self.lookup_table) - 1)),
+                0,
+                len(self.lookup_table) - 1,
+            ).astype(np.intp)
+            colors = np.asarray(self.lookup_table[indices_lut], dtype=float) / 255.0
+        elif self.color_map is not None:
+            colors = self.color_map.map(normalized, mode="float")
+        else:
+            colors = pg.colormap.get("viridis").map(normalized, mode="float")
+        colors = np.asarray(colors, dtype=np.float32)
+        if colors.shape[-1] == 3:
+            colors = np.concatenate(
+                (colors, np.ones(colors.shape[:-1] + (1,), dtype=np.float32)), axis=-1
+            )
+        colors[~finite, 3] = 0.0
         self.scatter.setData(
-            pos=np.asarray(positions, dtype=np.float32),
-            color=np.asarray(colors, dtype=np.float32),
-            size=size,
+            pos=positions,
+            color=colors,
+            size=float(self.point_size_slider.value()),
         )
         half = fov_mm / 2.0
         corners = np.asarray(
@@ -467,7 +592,14 @@ class VolumeViewerWidget(QWidget):
         )
         self.gl_grid.resetTransform()
         self.gl_grid.translate(0, 0, -half[2])
-        self.gl_view.setCameraPosition(distance=float(max(fov_mm) * 1.8))
+        if reset_camera:
+            self.gl_view.setCameraPosition(distance=float(max(fov_mm) * 1.8))
+
+    def _point_size_changed(self, value):
+        size = int(value)
+        self.point_size_label.setText(f"{size} px")
+        if self.scatter is not None:
+            self.scatter.setData(size=float(size))
 
 
 class PhantomInspectorWidget(QWidget):
@@ -772,3 +904,355 @@ class SequenceResultVolumeViewer(QWidget):
             name=choice,
             unit=unit,
         )
+
+
+class SequenceMagnetizationAnimationViewer(QWidget):
+    """Play sparse post-run magnetization states on the phantom volume."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.time_s = np.zeros(0, dtype=np.float64)
+        self.magnetization = None
+        self.pool_magnetization = None
+        self.phantom = None
+        self._levels_cache = {}
+        self._playback_anchor_wall = None
+        self._playback_anchor_frame = 0.0
+
+        layout = QVBoxLayout(self)
+        description = QLabel(
+            "Post-run playback of sparse magnetization states in object "
+            "coordinates. Frames are stored at reduced precision and do not "
+            "change the Bloch evolution."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        capture_row = QHBoxLayout()
+        next_run_label = QLabel("Next run")
+        next_run_font = next_run_label.font()
+        next_run_font.setBold(True)
+        next_run_label.setFont(next_run_font)
+        capture_row.addWidget(next_run_label)
+        self.capture_enabled = QCheckBox("Create post-run animation")
+        self.capture_enabled.setChecked(False)
+        self.capture_enabled.setToolTip(
+            "Store sparse magnetization states for playback after the next "
+            "simulation. Scientific result exports remain unchanged."
+        )
+        capture_row.addWidget(self.capture_enabled)
+        capture_row.addWidget(QLabel("Time resolution"))
+        self.time_resolution_ms = QDoubleSpinBox()
+        self.time_resolution_ms.setDecimals(3)
+        self.time_resolution_ms.setRange(0.001, 1_000_000.0)
+        self.time_resolution_ms.setValue(1.0)
+        self.time_resolution_ms.setSingleStep(0.01)
+        self.time_resolution_ms.setSuffix(" ms")
+        self.time_resolution_ms.setKeyboardTracking(False)
+        self.time_resolution_ms.setToolTip(
+            "Target time between stored animation frames. RF-free intervals "
+            "are sampled at this spacing; points during RF pulses use the "
+            "nearest existing integration boundary. Large objects are "
+            "automatically limited to keep temporary memory bounded."
+        )
+        capture_row.addWidget(self.time_resolution_ms)
+        capture_row.addWidget(QLabel("Storage"))
+        self.storage_dtype_combo = QComboBox()
+        self.storage_dtype_combo.addItems(["float32", "float16"])
+        self.storage_dtype_combo.setToolTip(
+            "Reduced precision used only for post-run animation frames."
+        )
+        capture_row.addWidget(self.storage_dtype_combo)
+        capture_row.addStretch()
+        layout.addLayout(capture_row)
+        self.capture_enabled.toggled.connect(self.time_resolution_ms.setEnabled)
+        self.capture_enabled.toggled.connect(self.storage_dtype_combo.setEnabled)
+
+        map_row = QHBoxLayout()
+        map_row.addWidget(QLabel("Map"))
+        self.map_combo = QComboBox()
+        self.map_combo.addItems(
+            ["Mz", "|Mxy|", "Mx / real(Mxy)", "My / imag(Mxy)", "Mxy phase"]
+        )
+        self.map_combo.currentIndexChanged.connect(self._selection_changed)
+        map_row.addWidget(self.map_combo)
+        map_row.addWidget(QLabel("Pool"))
+        self.pool_combo = QComboBox()
+        self.pool_combo.addItem("Combined")
+        self.pool_combo.currentIndexChanged.connect(self._selection_changed)
+        map_row.addWidget(self.pool_combo)
+        self.storage_info = QLabel("No animation data")
+        self.storage_info.setWordWrap(True)
+        map_row.addWidget(self.storage_info)
+        map_row.addStretch()
+        layout.addLayout(map_row)
+
+        playback_row = QHBoxLayout()
+        self.play_button = QPushButton("Play")
+        self.play_button.setCheckable(True)
+        self.play_button.toggled.connect(self._play_toggled)
+        playback_row.addWidget(self.play_button)
+        self.time_slider = QSlider(Qt.Horizontal)
+        self.time_slider.setRange(0, 0)
+        self.time_slider.valueChanged.connect(self._frame_changed)
+        playback_row.addWidget(self.time_slider, 1)
+        self.time_label = QLabel("0.000 ms")
+        self.time_label.setMinimumWidth(120)
+        playback_row.addWidget(self.time_label)
+        playback_row.addWidget(QLabel("Speed"))
+        self.speed_spin = QDoubleSpinBox()
+        self.speed_spin.setRange(0.01, 30.0)
+        self.speed_spin.setDecimals(2)
+        self.speed_spin.setValue(1.0)
+        self.speed_spin.setSuffix(" frames/s")
+        self.speed_spin.valueChanged.connect(self._speed_changed)
+        playback_row.addWidget(self.speed_spin)
+        self.loop_checkbox = QCheckBox("Loop")
+        self.loop_checkbox.setChecked(True)
+        playback_row.addWidget(self.loop_checkbox)
+        layout.addLayout(playback_row)
+
+        self.volume = VolumeViewerWidget()
+        layout.addWidget(self.volume)
+        self.playback_timer = QTimer(self)
+        self.playback_timer.setInterval(16)
+        self.playback_timer.timeout.connect(self._advance_playback)
+        self._set_controls_enabled(False)
+
+    def clear(self, message="No animation data") -> None:
+        self._stop_playback()
+        self.time_s = np.zeros(0, dtype=np.float64)
+        self.magnetization = None
+        self.pool_magnetization = None
+        self.phantom = None
+        self._levels_cache.clear()
+        self.time_slider.setRange(0, 0)
+        self.time_label.setText("0.000 ms")
+        self.storage_info.setText(str(message))
+        self._set_controls_enabled(False)
+
+    def set_animation(
+        self,
+        time_s,
+        magnetization,
+        *,
+        phantom,
+        pool_magnetization=None,
+        pool_names=(),
+        storage_dtype="float32",
+        capture_note="",
+    ) -> None:
+        times = np.asarray(time_s, dtype=np.float64)
+        states = np.asarray(magnetization)
+        expected = (times.size,) + tuple(phantom.shape) + (3,)
+        if times.ndim != 1 or times.size < 2 or states.shape != expected:
+            raise ValueError(
+                "animation magnetization must have shape "
+                f"(time, *phantom.shape, 3); expected {expected}, got {states.shape}"
+            )
+        pools = None if pool_magnetization is None else np.asarray(pool_magnetization)
+        if pools is not None:
+            expected_pool = (
+                (times.size, len(tuple(pool_names))) + tuple(phantom.shape) + (3,)
+            )
+            if pools.shape != expected_pool:
+                raise ValueError(
+                    f"animation pool magnetization must have shape {expected_pool}, "
+                    f"got {pools.shape}"
+                )
+        self._stop_playback()
+        self.time_s = times
+        self.magnetization = states
+        self.pool_magnetization = pools
+        self.phantom = phantom
+        self._levels_cache.clear()
+        self.pool_combo.blockSignals(True)
+        self.pool_combo.clear()
+        self.pool_combo.addItem("Combined")
+        for name in pool_names:
+            self.pool_combo.addItem(str(name))
+        self.pool_combo.setCurrentIndex(0)
+        self.pool_combo.blockSignals(False)
+        self.time_slider.blockSignals(True)
+        self.time_slider.setRange(0, times.size - 1)
+        self.time_slider.setValue(0)
+        self.time_slider.blockSignals(False)
+        mebibytes = (states.nbytes + (0 if pools is None else pools.nbytes)) / 1024**2
+        storage_text = f"{times.size} frames · {storage_dtype} · {mebibytes:.1f} MiB"
+        if capture_note:
+            storage_text += f" · {capture_note}"
+        self.storage_info.setText(storage_text)
+        self._set_controls_enabled(True)
+        self.pool_combo.setEnabled(pools is not None and len(tuple(pool_names)) > 0)
+        data, unit, levels, color_map = self._display_data(0)
+        self.volume.set_volume(
+            data,
+            mask=phantom.mask,
+            fov_m=phantom.fov,
+            name=self.map_combo.currentText(),
+            unit=unit,
+            levels=levels,
+            color_map=color_map,
+        )
+        self._update_time_label(0)
+
+    def _set_controls_enabled(self, enabled):
+        for control in (
+            self.map_combo,
+            self.pool_combo,
+            self.play_button,
+            self.time_slider,
+            self.speed_spin,
+            self.loop_checkbox,
+        ):
+            control.setEnabled(bool(enabled))
+
+    def _selected_states(self):
+        pool_index = self.pool_combo.currentIndex() - 1
+        if pool_index >= 0 and self.pool_magnetization is not None:
+            return self.pool_magnetization[:, pool_index]
+        return self.magnetization
+
+    def _map_key(self):
+        return self.pool_combo.currentIndex(), self.map_combo.currentIndex()
+
+    def _display_levels(self, states):
+        key = self._map_key()
+        cached = self._levels_cache.get(key)
+        if cached is not None:
+            return cached
+        component = self.map_combo.currentIndex()
+        if component == 0:
+            low = float(np.nanmin(states[..., 2]))
+            high = float(np.nanmax(states[..., 2]))
+        elif component in (2, 3):
+            axis = 0 if component == 2 else 1
+            limit = float(np.nanmax(np.abs(states[..., axis])))
+            low, high = -limit, limit
+        elif component == 1:
+            high = 0.0
+            for frame in states:
+                high = max(
+                    high,
+                    float(np.nanmax(np.hypot(frame[..., 0], frame[..., 1]))),
+                )
+            low = 0.0
+        else:
+            low, high = -np.pi, np.pi
+        if not np.isfinite(low) or not np.isfinite(high) or np.isclose(low, high):
+            centre = 0.0 if not np.isfinite(low + high) else 0.5 * (low + high)
+            delta = max(1e-6, abs(centre) * 1e-6)
+            low, high = centre - delta, centre + delta
+        levels = (low, high)
+        self._levels_cache[key] = levels
+        return levels
+
+    def _phase_colormap(self):
+        for name in ("CET-C7", "CET-C6", "hsv"):
+            try:
+                return pg.colormap.get(name)
+            except Exception:
+                continue
+        return None
+
+    def _display_data(self, frame_index):
+        states = self._selected_states()
+        frame = np.asarray(states[int(frame_index)], dtype=np.float32)
+        mx, my, mz = (frame[..., axis] for axis in range(3))
+        choice = self.map_combo.currentIndex()
+        unit = ""
+        try:
+            color_map = pg.colormap.get("viridis")
+        except Exception:
+            color_map = None
+        if choice == 0:
+            data = mz
+        elif choice == 1:
+            data = np.hypot(mx, my)
+        elif choice == 2:
+            data = mx
+        elif choice == 3:
+            data = my
+        else:
+            magnitude = np.hypot(mx, my)
+            threshold = max(float(np.nanmax(magnitude)) * 1e-6, 1e-12)
+            data = np.where(magnitude > threshold, np.arctan2(my, mx), np.nan)
+            unit = "rad"
+            color_map = self._phase_colormap()
+        return data, unit, self._display_levels(states), color_map
+
+    def _selection_changed(self, *_):
+        if self.magnetization is None:
+            return
+        self._show_frame(self.time_slider.value())
+
+    def _frame_changed(self, frame_index):
+        if self.magnetization is None:
+            return
+        self._show_frame(frame_index)
+
+    def _show_frame(self, frame_index):
+        frame_index = int(np.clip(frame_index, 0, self.time_s.size - 1))
+        data, unit, levels, color_map = self._display_data(frame_index)
+        self.volume.update_volume_data(
+            data,
+            name=self.map_combo.currentText(),
+            unit=unit,
+            levels=levels,
+            color_map=color_map,
+        )
+        self._update_time_label(frame_index)
+
+    def _update_time_label(self, frame_index):
+        if self.time_s.size == 0:
+            self.time_label.setText("0.000 ms")
+            return
+        frame_index = int(np.clip(frame_index, 0, self.time_s.size - 1))
+        self.time_label.setText(
+            f"{self.time_s[frame_index] * 1000.0:.3f} ms "
+            f"({frame_index + 1}/{self.time_s.size})"
+        )
+
+    def _play_toggled(self, playing):
+        if not playing or self.time_s.size < 2:
+            self._stop_playback()
+            return
+        if self.time_slider.value() >= self.time_slider.maximum():
+            self.time_slider.setValue(0)
+        self.play_button.setText("Pause")
+        self._playback_anchor_wall = time.monotonic()
+        self._playback_anchor_frame = float(self.time_slider.value())
+        self.playback_timer.start()
+
+    def _speed_changed(self, *_):
+        if self.playback_timer.isActive():
+            self._playback_anchor_wall = time.monotonic()
+            self._playback_anchor_frame = float(self.time_slider.value())
+
+    def _advance_playback(self):
+        if self._playback_anchor_wall is None or self.time_s.size < 2:
+            return
+        elapsed = max(0.0, time.monotonic() - self._playback_anchor_wall)
+        target = int(
+            np.floor(self._playback_anchor_frame + elapsed * self.speed_spin.value())
+        )
+        maximum = self.time_slider.maximum()
+        if target <= maximum:
+            self.time_slider.setValue(target)
+            return
+        if self.loop_checkbox.isChecked():
+            target %= maximum + 1
+            self.time_slider.setValue(target)
+            self._playback_anchor_wall = time.monotonic()
+            self._playback_anchor_frame = float(target)
+        else:
+            self.time_slider.setValue(maximum)
+            self._stop_playback()
+
+    def _stop_playback(self):
+        self.playback_timer.stop()
+        self._playback_anchor_wall = None
+        previous = self.play_button.blockSignals(True)
+        self.play_button.setChecked(False)
+        self.play_button.setText("Play")
+        self.play_button.blockSignals(previous)

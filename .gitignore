@@ -22,6 +22,9 @@ phantoms/*
 
 # Examples
 examples/
+!examples/
+examples/*
+!examples/validate_ss_bssfp_spoiling.py
 
 *.npz
 *.png
@@ -29,6 +32,7 @@ examples/
 *.svg
 *.gif
 *.ipynb
+!tutorials/ss_bssfp_spoiling_validation.ipynb
 
 !docs/_static/media/*.gif
 !docs/_static/media/*.png
@@ -49,6 +53,7 @@ __pycache__/
 !docs/sequence_simulation_plan.md
 !docs/sequence_simulation_architecture.md
 !docs/dynamic_simulation_performance.md
+!docs/dynamic_metal_feasibility.md
 !docs/sequence_simulation_roadmap.md
 
 # Generated C files
@@ -78,3 +83,5 @@ test_sweep_data.npz
 # Export files
 *.nc
 sequences/scripts/SS_bSSFP_sequence.py
+docs/_static/media/input.mov
+docs/dynamic_metal_precision_results_apple_m3.json

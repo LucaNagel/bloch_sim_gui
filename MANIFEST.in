@@ -1,6 +1,10 @@
 include src/blochsimulator/bloch_core_modified.c
 include src/blochsimulator/bloch_core.h
 include src/blochsimulator/bloch_wrapper.pyx
+include src/blochsimulator/dynamic_metal_probe_wrapper.pyx
+include src/blochsimulator/metal/dynamic_metal_probe.h
+include src/blochsimulator/metal/dynamic_metal_probe.mm
+include src/blochsimulator/metal/dynamic_bloch_precision.metal
 include requirements.txt
 include README.md
 include LICENSE

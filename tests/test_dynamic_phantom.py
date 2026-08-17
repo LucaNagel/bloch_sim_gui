@@ -4,6 +4,7 @@ from PyQt5.QtWidgets import QApplication
 from unittest.mock import MagicMock
 
 from blochsimulator import BlochSimulator
+from blochsimulator import dynamic_metal_backend as metal_backend_module
 from blochsimulator.dynamic_phantom import (
     DynamicB0,
     DynamicSpectralPhantom,
@@ -12,6 +13,17 @@ from blochsimulator.dynamic_phantom import (
     TimeCurve,
     rasterize_kpl_regions,
     simulate_two_pool_kinetics,
+)
+from blochsimulator.dynamic_metal_backend import (
+    _PairwiseComplexAccumulator,
+    _build_interval_plan,
+    _hybrid_signal_correction,
+    _hybrid_subvoxel_partition,
+    _pairwise_sum_complex128,
+    metal_capability,
+    run_metal_hybrid_probe,
+    run_metal_hybrid_sequence,
+    run_metal_precision_probe,
 )
 from blochsimulator.phantom_design import (
     PhantomDesign,
@@ -22,6 +34,7 @@ from blochsimulator.sequence import (
     ADCEvent,
     GradientEvent,
     RFEvent,
+    SequenceCompiler,
     SequenceProgram,
     SpinSampling,
 )
@@ -47,6 +60,511 @@ def _dynamic_phantom(kpl=(0.0, 0.1)):
         kpl_map_s_inv=np.asarray(kpl, dtype=float).reshape(shape),
         nucleus="C13",
     )
+
+
+def test_private_metal_probe_capability_is_safe_and_machine_readable():
+    capability = metal_capability()
+
+    assert {
+        "available",
+        "supported_platform",
+        "device_name",
+        "apple_gpu_family",
+        "recommended_max_working_set_bytes",
+        "reason",
+        "probe_extension_available",
+    } <= set(capability)
+    assert isinstance(capability["available"], bool)
+    assert isinstance(capability["supported_platform"], bool)
+    if capability["available"]:
+        assert capability["device_name"]
+        assert capability["recommended_max_working_set_bytes"] > 0
+        assert capability["reason"] is None
+    else:
+        assert capability["reason"]
+
+
+def test_metal_probe_plan_preserves_compiled_boundaries_and_adc_indices():
+    phantom = _dynamic_phantom()
+    phantom.pyruvate_inflow = PyruvateInflow(
+        TimeCurve((0.0, 7.5e-4, 2e-3), (0.0, 1.0, 0.0)),
+        np.ones(phantom.shape),
+        TimeCurve((0.0, 2e-3), (0.2, 0.3), outside="hold"),
+    )
+    program = SequenceProgram(
+        (
+            RFEvent(0.0, np.asarray([100.0, 200.0]), 5e-4),
+            ADCEvent(1e-3, 3, 2.5e-4),
+        ),
+        duration_s=2e-3,
+    )
+    compiled = SequenceCompiler().compile(
+        program,
+        extra_boundaries_s=phantom.dynamic_breakpoints_s(program.duration_s),
+        simulation_timestep_s=2e-4,
+    )
+
+    plan = _build_interval_plan(compiled, phantom)
+
+    assert plan.dtype == np.float32
+    assert plan.shape == (compiled.n_intervals, 16)
+    assert plan[:, 3] == pytest.approx(compiled.dt_s.astype(np.float32))
+    assert np.cumsum(plan[:, 3], dtype=np.float64) == pytest.approx(
+        compiled.interval_end_s, abs=5e-10
+    )
+    assert np.array_equal(
+        compiled.adc_state_indices,
+        np.searchsorted(compiled.interval_end_s, compiled.adc_times_s) + 1,
+    )
+    compiled_boundaries = np.concatenate(([0.0], compiled.interval_end_s))
+    assert all(
+        np.any(np.isclose(compiled_boundaries, breakpoint))
+        for breakpoint in phantom.dynamic_breakpoints_s(program.duration_s)
+    )
+
+
+def test_metal_probe_pairwise_reduction_has_fixed_float64_tree():
+    values = np.asarray(
+        [
+            [1.0e16 + 0.0j, 1.0 + 2.0j],
+            [-1.0e16 + 0.0j, 3.0 + 4.0j],
+            [3.0 + 0.0j, 5.0 + 6.0j],
+        ],
+        dtype=np.complex128,
+    )
+
+    first = _pairwise_sum_complex128(values)
+    second = _pairwise_sum_complex128(values.copy())
+
+    assert np.array_equal(first, second)
+    assert first == pytest.approx([3.0 + 0.0j, 9.0 + 12.0j])
+
+    accumulator = _PairwiseComplexAccumulator()
+    for value in values:
+        accumulator.add(value)
+    assert np.array_equal(accumulator.finish(), first)
+
+
+def test_partial_subvoxel_grids_preserve_full_grid_quadrature_weights():
+    sampling = SpinSampling((3, 1, 1))
+    offsets, weights = sampling.normalized_offsets_and_weights()
+    left = sampling.select((0,))
+    middle_and_right = sampling.select((1, 2))
+
+    left_offsets, left_weights = left.normalized_offsets_and_weights()
+    remainder_offsets, remainder_weights = (
+        middle_and_right.normalized_offsets_and_weights()
+    )
+
+    assert left.enabled is True
+    assert left.spins_per_voxel == 1
+    assert left.grid_spins_per_voxel == 3
+    assert np.array_equal(left_offsets, offsets[[0]])
+    assert np.array_equal(remainder_offsets, offsets[[1, 2]])
+    assert np.sum(left_weights) == pytest.approx(1.0 / 3.0)
+    assert np.sum(remainder_weights) == pytest.approx(2.0 / 3.0)
+    assert np.sum(left_weights) + np.sum(remainder_weights) == pytest.approx(
+        np.sum(weights)
+    )
+
+
+def test_partial_float64_subvoxel_results_add_to_the_complete_grid():
+    phantom = _dynamic_phantom(kpl=(0.02, 0.1))
+    program = SequenceProgram(
+        (
+            RFEvent(0.0, np.asarray([180.0]), 5e-4),
+            GradientEvent(
+                axis="x",
+                start_s=5e-4,
+                samples_hz_per_m=np.asarray([300.0]),
+                raster_s=1e-3,
+            ),
+            ADCEvent(7.5e-4, 3, 2.5e-4),
+        ),
+        duration_s=1.5e-3,
+    )
+    sampling = SpinSampling((3, 1, 1))
+    simulator = BlochSimulator(use_parallel=False)
+    full = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        simulation_timestep_s=1e-4,
+        spin_sampling=sampling,
+        spoiler_mode="gradient",
+    )
+    partial = [
+        simulator.simulate_dynamic_sequence(
+            program,
+            phantom,
+            simulation_timestep_s=1e-4,
+            spin_sampling=sampling.select((index,)),
+            spoiler_mode="gradient",
+        )
+        for index in range(3)
+    ]
+
+    assert np.sum(
+        [result.species_signal for result in partial], axis=0
+    ) == pytest.approx(full.species_signal, abs=2e-15)
+    assert np.sum(
+        [result.final_pool_magnetization for result in partial], axis=0
+    ) == pytest.approx(full.final_pool_magnetization, abs=2e-15)
+
+
+def test_hybrid_partition_is_deterministic_disjoint_and_leaves_gpu_only_spins():
+    sampling = SpinSampling((3, 3, 1))
+
+    first = _hybrid_subvoxel_partition(sampling, 0.2, 0.2)
+    second = _hybrid_subvoxel_partition(sampling, 0.2, 0.2)
+
+    assert np.array_equal(first[0], second[0])
+    assert np.array_equal(first[1], second[1])
+    assert first[0].size >= 2
+    assert first[1].size >= 2
+    assert np.intersect1d(*first).size == 0
+    assert first[0].size + first[1].size < sampling.grid_spins_per_voxel
+
+
+def test_hybrid_correction_recovers_shared_gpu_gain_and_checks_held_out_spins():
+    true_signal = np.asarray([[1.0 + 0.5j, 2.0 - 0.25j], [0.2 + 0.1j, 0.4 - 0.05j]])
+    gain = np.asarray(
+        [[1.002 + 0.01j, 0.998 - 0.02j], [1.001 + 0.005j, 1.003 - 0.004j]]
+    )
+    gpu_signal = true_signal / gain
+    calibration_fraction = 0.25
+    validation_fraction = 0.125
+
+    corrected, metrics = _hybrid_signal_correction(
+        gpu_signal,
+        calibration_fraction * gpu_signal,
+        calibration_fraction * true_signal,
+        validation_fraction * gpu_signal,
+        validation_fraction * true_signal,
+        calibration_weight_fraction=calibration_fraction,
+        validation_weight_fraction=validation_fraction,
+    )
+
+    assert corrected == pytest.approx(true_signal)
+    assert metrics["estimated_full_total_signal_nrmse"] < 1e-15
+    assert max(metrics["estimated_full_species_signal_nrmse"]) < 1e-15
+
+
+def test_hybrid_correction_detects_a_nonrepresentative_calibration_sample():
+    full = np.ones((2, 4), dtype=np.complex128)
+    calibration_fraction = 0.25
+    validation_fraction = 0.25
+
+    _, metrics = _hybrid_signal_correction(
+        full,
+        calibration_fraction * full,
+        calibration_fraction * full + 0.01,
+        validation_fraction * full,
+        validation_fraction * full,
+        calibration_weight_fraction=calibration_fraction,
+        validation_weight_fraction=validation_fraction,
+    )
+
+    assert metrics["estimated_full_total_signal_nrmse"] > 1e-3
+
+
+def test_private_metal_probe_matches_small_float64_oracle_when_available():
+    capability = metal_capability()
+    if not capability["available"]:
+        pytest.skip(capability["reason"])
+    phantom = _dynamic_phantom(kpl=(0.0, 0.1))
+    program = SequenceProgram(
+        (
+            RFEvent(0.0, np.asarray([250.0]), 1e-3),
+            ADCEvent(1e-3, 2, 5e-4),
+        ),
+        duration_s=2e-3,
+    )
+    reference = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        program, phantom, simulation_timestep_s=1e-4
+    )
+
+    candidate = run_metal_precision_probe(program, phantom, simulation_timestep_s=1e-4)
+
+    signal_error = np.linalg.norm(candidate["signal"] - reference.signal)
+    assert signal_error / np.linalg.norm(reference.signal) < 1e-3
+    assert candidate["adc_times_s"] == pytest.approx(reference.adc_times_s)
+    assert candidate["metadata"]["probe_only"] is True
+
+
+def test_private_metal_probe_enforces_its_memory_budget_before_gpu_allocation(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        metal_backend_module,
+        "metal_capability",
+        lambda: {
+            "available": True,
+            "supported_platform": True,
+            "device_name": "test device",
+            "apple_gpu_family": 9,
+            "recommended_max_working_set_bytes": 1024**3,
+            "reason": None,
+            "probe_extension_available": True,
+        },
+    )
+    phantom = _dynamic_phantom()
+    program = SequenceProgram(
+        (ADCEvent(0.0, 2, 5e-4),),
+        duration_s=1e-3,
+    )
+
+    with pytest.raises(MemoryError, match="memory limit exceeded"):
+        run_metal_precision_probe(
+            program,
+            phantom,
+            simulation_timestep_s=1e-4,
+            memory_budget_bytes=1,
+        )
+
+
+def test_private_metal_probe_chunks_outputs_and_retains_only_requested_spins(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        metal_backend_module,
+        "metal_capability",
+        lambda: {
+            "available": True,
+            "supported_platform": True,
+            "device_name": "test device",
+            "apple_gpu_family": 9,
+            "recommended_max_working_set_bytes": 1024**3,
+            "reason": None,
+            "probe_extension_available": True,
+        },
+    )
+    calls = []
+
+    def fake_run_probe(
+        _source,
+        _plan,
+        adc_states,
+        _demodulation,
+        _crushers,
+        initial,
+        _spatial,
+        _kinetic,
+        _constants,
+        _precision_mode,
+    ):
+        calls.append(initial.shape[0])
+        return {
+            "final_pool_state": np.array(initial, copy=True),
+            "per_spin_species_signal": np.zeros(
+                (initial.shape[0], 2, adc_states.size, 2), dtype=np.float32
+            ),
+            "pipeline_compile_seconds": 0.0,
+            "simulation_seconds": 0.001,
+        }
+
+    import blochsimulator
+
+    monkeypatch.setattr(
+        blochsimulator,
+        "_dynamic_metal_probe",
+        MagicMock(run_probe=fake_run_probe),
+        raising=False,
+    )
+    phantom = _dynamic_phantom()
+    program = SequenceProgram(
+        (ADCEvent(0.0, 2, 5e-4),),
+        duration_s=1e-3,
+    )
+
+    result = run_metal_precision_probe(
+        program,
+        phantom,
+        simulation_timestep_s=1e-4,
+        spin_sampling=SpinSampling((2, 1, 1)),
+        spin_chunk_size=2,
+        capture_spin_indices=(0, 3),
+        capture_spin_groups=((0, 2), (1, 3)),
+    )
+
+    assert calls == [2, 2]
+    assert result["metadata"]["spin_chunk_count"] == 2
+    assert result["metadata"]["effective_spin_chunk_size"] == 2
+    assert np.array_equal(result["captured_spin_indices"], [0, 3])
+    assert result["captured_spin_species_signal"].shape == (2, 2, 2)
+    assert result["captured_group_species_signal"].shape == (2, 2, 2)
+    assert result["captured_group_final_pool_magnetization"].shape == (
+        2,
+        2,
+    ) + phantom.shape + (3,)
+
+
+def test_hybrid_probe_returns_float64_fallback_when_held_out_sample_fails(
+    monkeypatch,
+):
+    phantom = _dynamic_phantom()
+    program = SequenceProgram(
+        (ADCEvent(0.0, 2, 5e-4),),
+        duration_s=1e-3,
+    )
+    sampling = SpinSampling((2, 2, 2))
+    calibration, validation = _hybrid_subvoxel_partition(sampling, 0.1, 0.05)
+    true_species = np.asarray([[1.0 + 0.1j, 0.8 - 0.2j], [0.2 + 0.05j, 0.3 - 0.04j]])
+    true_final = np.zeros((2,) + phantom.shape + (3,), dtype=np.float64)
+    true_final[..., 2] = 1.0
+    monkeypatch.setattr(
+        metal_backend_module,
+        "metal_capability",
+        lambda: {
+            "available": True,
+            "supported_platform": True,
+            "device_name": "test device",
+            "apple_gpu_family": 9,
+            "recommended_max_working_set_bytes": 1024**3,
+            "reason": None,
+            "probe_extension_available": True,
+        },
+    )
+
+    def fake_cpu_sample(*_args, sampling, **_kwargs):
+        fraction = sampling.spins_per_voxel / sampling.grid_spins_per_voxel
+        species = true_species * fraction
+        if tuple(sampling.selected_indices or ()) == tuple(validation):
+            species = species + 0.02
+        result = MagicMock()
+        result.species_signal = species
+        result.signal = species.sum(axis=0)
+        result.final_pool_magnetization = true_final * fraction
+        result.final_magnetization = result.final_pool_magnetization.sum(axis=0)
+        result.adc_times_s = np.asarray([0.0, 5e-4])
+        return result, 0.01
+
+    def fake_metal(*_args, capture_spin_groups, **_kwargs):
+        group_fractions = np.asarray(
+            [
+                len(group) / (phantom.n_active * sampling.grid_spins_per_voxel)
+                for group in capture_spin_groups
+            ]
+        )
+        return {
+            "signal": true_species.sum(axis=0),
+            "species_signal": true_species,
+            "final_pool_magnetization": true_final,
+            "final_magnetization": true_final.sum(axis=0),
+            "adc_times_s": np.asarray([0.0, 5e-4]),
+            "captured_group_species_signal": (
+                group_fractions[:, None, None] * true_species[None]
+            ),
+            "captured_group_final_pool_magnetization": (
+                group_fractions[:, None, None, None, None, None] * true_final[None]
+            ),
+            "metadata": {"probe_only": True},
+        }
+
+    monkeypatch.setattr(
+        metal_backend_module, "_run_cpu_float64_sample", fake_cpu_sample
+    )
+    monkeypatch.setattr(metal_backend_module, "run_metal_precision_probe", fake_metal)
+
+    result = run_metal_hybrid_probe(
+        program,
+        phantom,
+        simulation_timestep_s=1e-4,
+        spin_sampling=sampling,
+        run_concurrently=False,
+    )
+
+    assert tuple(calibration) != tuple(validation)
+    assert result["metadata"]["hybrid_validation_passed"] is False
+    assert result["metadata"]["hybrid_fallback_used"] is True
+    assert result["metadata"]["actual_backend"] == "cpu_float64_fallback"
+    assert result["species_signal"] == pytest.approx(true_species)
+
+
+def test_hybrid_sequence_wraps_checked_arrays_as_a_regular_result(monkeypatch):
+    phantom = _dynamic_phantom()
+    program = SequenceProgram(
+        (ADCEvent(0.0, 2, 5e-4),),
+        duration_s=1e-3,
+    )
+    sampling = SpinSampling((2, 2, 2))
+    template = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        program,
+        phantom,
+        simulation_timestep_s=1e-4,
+        spin_sampling=sampling.select((0, 7)),
+    )
+    checked_species = np.asarray(template.species_signal) * 4.0
+    checked_final_pool = np.asarray(template.final_pool_magnetization) * 4.0
+
+    monkeypatch.setattr(
+        metal_backend_module,
+        "run_metal_hybrid_probe",
+        lambda *_args, **_kwargs: {
+            "signal": checked_species.sum(axis=0),
+            "species_signal": checked_species,
+            "final_pool_magnetization": checked_final_pool,
+            "final_magnetization": checked_final_pool.sum(axis=0),
+            "adc_times_s": template.adc_times_s,
+            "metadata": {
+                "actual_backend": "metal_cpu_subvoxel_hybrid_probe",
+                "hybrid_validation_passed": True,
+                "hybrid_fallback_used": False,
+            },
+            "_sequence_result": template,
+        },
+    )
+
+    result = run_metal_hybrid_sequence(
+        program,
+        phantom,
+        simulation_timestep_s=1e-4,
+        spin_sampling=sampling,
+    )
+
+    assert result.signal == pytest.approx(checked_species.sum(axis=0))
+    assert result.species_signal == pytest.approx(checked_species)
+    assert result.final_pool_magnetization == pytest.approx(checked_final_pool)
+    assert result.metadata["requested_sequence_kernel"] == "metal_hybrid"
+    assert result.metadata["sequence_kernel"] == "metal_hybrid"
+    assert result.metadata["probe_only"] is False
+    assert result.metadata["subvoxel_spin_counts_xyz"] == (2, 2, 2)
+
+
+def test_hybrid_sequence_uses_exact_cpu_when_gpu_is_unavailable(monkeypatch):
+    phantom = _dynamic_phantom()
+    program = SequenceProgram(
+        (ADCEvent(0.0, 2, 5e-4),),
+        duration_s=1e-3,
+    )
+    sampling = SpinSampling((2, 2, 2))
+    monkeypatch.setattr(
+        metal_backend_module,
+        "run_metal_hybrid_probe",
+        MagicMock(side_effect=RuntimeError("Metal unavailable for test")),
+    )
+
+    result = BlochSimulator(
+        use_parallel=False,
+        dynamic_sequence_kernel="metal_hybrid",
+    ).simulate_dynamic_sequence(
+        program,
+        phantom,
+        simulation_timestep_s=1e-4,
+        spin_sampling=sampling,
+    )
+    reference = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        program,
+        phantom,
+        simulation_timestep_s=1e-4,
+        spin_sampling=sampling,
+    )
+
+    assert np.array_equal(result.signal, reference.signal)
+    assert np.array_equal(result.species_signal, reference.species_signal)
+    assert result.metadata["requested_sequence_kernel"] == "metal_hybrid"
+    assert result.metadata["actual_backend"] == "cpu_float64_fallback"
+    assert result.metadata["hybrid_fallback_used"] is True
+    assert "Metal unavailable for test" in result.metadata["hybrid_fallback_reason"]
 
 
 def test_kinetic_regions_rasterize_with_later_region_priority():
@@ -719,6 +1237,35 @@ def test_float32_dynamic_shadow_path_reports_dtypes_and_tracks_float64():
         np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-6)
 
 
+def test_dynamic_animation_can_reduce_only_checkpoint_storage_precision():
+    phantom = _dynamic_phantom()
+    program = SequenceProgram((), duration_s=1e-3)
+    simulator = BlochSimulator(use_parallel=False)
+
+    baseline = simulator.simulate_dynamic_sequence(
+        program, phantom, checkpoints_s=(0.0, 1e-3)
+    )
+    reduced = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        checkpoints_s=(0.0, 1e-3),
+        checkpoint_dtype="float32",
+    )
+
+    assert reduced.final_magnetization.dtype == np.float64
+    assert reduced.checkpoint_magnetization.dtype == np.float32
+    assert reduced.checkpoint_pool_magnetization.dtype == np.float32
+    np.testing.assert_array_equal(
+        reduced.final_magnetization, baseline.final_magnetization
+    )
+    np.testing.assert_allclose(
+        reduced.checkpoint_pool_magnetization,
+        baseline.checkpoint_pool_magnetization,
+        rtol=1e-6,
+        atol=1e-7,
+    )
+
+
 @pytest.mark.parametrize("kernel", ["reference", "native_serial", "native_parallel"])
 def test_float32_dynamic_shadow_path_rejects_nonoptimized_kernels(kernel):
     with pytest.raises(ValueError, match="requires sequence_kernel='optimized'"):
@@ -1326,6 +1873,12 @@ def test_phantom_designer_exposes_kinetic_regions_and_preview():
     )
     dialog = SpectralPhantomDesignerDialog(design=design)
     dialog._add_kinetic_region("ellipsoid")
+    dialog.kinetics_shape_preview_3d.set_shapes = MagicMock()
+    dialog._update_kinetics_spatial_preview()
+    spatial_call = dialog.kinetics_shape_preview_3d.set_shapes.call_args
+    assert spatial_call.kwargs["selected_row"] == 0
+    assert spatial_call.kwargs["highlighted_region"].kind == "ellipsoid"
+    assert "kPL region 1" in dialog.kinetics_spatial_preview_info.text()
     dialog.inflow_enabled.setChecked(True)
     dialog.dynamic_b0_enabled.setChecked(True)
     dialog._preview()

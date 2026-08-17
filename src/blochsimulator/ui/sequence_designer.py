@@ -577,6 +577,41 @@ class SequenceDesigner(QGroupBox):
             np.asarray(time, dtype=float),
         )
 
+    @staticmethod
+    def _resample_custom_pulse(custom_pulse, target_dt):
+        """Resample a complex pulse onto ``target_dt`` without changing its duration."""
+        if not np.isfinite(target_dt) or target_dt <= 0.0:
+            raise ValueError("target pulse time step must be positive and finite")
+
+        b1_wave, time_wave = custom_pulse
+        b1_wave = np.asarray(b1_wave, dtype=complex)
+        time_wave = np.asarray(time_wave, dtype=float)
+        if b1_wave.ndim != 1 or time_wave.ndim != 1:
+            raise ValueError("Custom pulse B1 and time arrays must be one-dimensional.")
+        if b1_wave.shape != time_wave.shape:
+            raise ValueError(
+                "Custom pulse B1 and time arrays must have the same length."
+            )
+        if b1_wave.size == 0:
+            return b1_wave.copy()
+        if b1_wave.size == 1:
+            return b1_wave.copy()
+        if not np.all(np.isfinite(time_wave)):
+            raise ValueError("Custom pulse time values must be finite.")
+
+        time_relative = time_wave - time_wave[0]
+        source_steps = np.diff(time_relative)
+        if np.any(source_steps <= 0.0):
+            raise ValueError("Custom pulse time values must be strictly increasing.")
+
+        source_dt = float(np.median(source_steps))
+        pulse_duration = float(time_relative[-1] + source_dt)
+        target_points = max(1, int(np.rint(pulse_duration / target_dt)))
+        target_time = np.arange(target_points, dtype=float) * target_dt
+        real_part = np.interp(target_time, time_relative, np.real(b1_wave))
+        imag_part = np.interp(target_time, time_relative, np.imag(b1_wave))
+        return real_part + 1j * imag_part
+
     def get_sequence(self, custom_pulse=None):
         """
         Get the current sequence parameters.
@@ -774,8 +809,7 @@ class SequenceDesigner(QGroupBox):
 
         # Excitation (use provided custom pulse if available)
         if custom_pulse is not None:
-            exc_b1, _ = custom_pulse
-            exc_b1 = np.asarray(exc_b1, dtype=complex)
+            exc_b1 = self._resample_custom_pulse(custom_pulse, dt)
         else:
             exc_duration = 1e-3
             n_exc = max(int(np.ceil(exc_duration / dt)), 16)
@@ -1023,8 +1057,7 @@ class SequenceDesigner(QGroupBox):
 
         # Excitation (use provided custom pulse if available)
         if custom_pulse is not None:
-            exc_b1, _ = custom_pulse
-            exc_b1 = np.asarray(exc_b1, dtype=complex)
+            exc_b1 = self._resample_custom_pulse(custom_pulse, dt)
         else:
             exc_duration = 3e-3
             n_exc = max(int(np.ceil(exc_duration / dt)), 16)

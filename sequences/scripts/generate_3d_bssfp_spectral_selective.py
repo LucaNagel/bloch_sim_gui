@@ -13,7 +13,9 @@ example, pass two offsets for pyruvate and lactate and set ``n_repetition=2``
 to acquire one 3D volume for each target.
 """
 
+import copy
 from pathlib import Path
+import warnings
 
 import numpy as np
 from matplotlib import pyplot as plt
@@ -91,8 +93,8 @@ def _target_flip_angles(
             "flip_angle_deg must be a scalar, a single-element tuple, or match "
             "target_frequency_offsets_hz"
         )
-    if any(value <= 0 or not np.isfinite(value) for value in angles):
-        raise ValueError("flip_angle_deg values must be positive and finite")
+    if any(value < 0 or not np.isfinite(value) for value in angles):
+        raise ValueError("flip_angle_deg values must be non-negative and finite")
     return angles
 
 
@@ -264,6 +266,21 @@ def _make_spectral_rf(
     raise ValueError("spectral_pulse_type must be 'slr', 'gauss', 'sinc', or 'block'")
 
 
+def _zero_amplitude_rf(reference_rf):
+    event = copy.deepcopy(reference_rf)
+    event.signal = np.zeros_like(event.signal)
+    return event
+
+
+def _add_rf_block(sequence, rf_event, *events):
+    if np.any(np.abs(rf_event.signal) > 0):
+        sequence.add_block(rf_event, *events)
+        return
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        sequence.add_block(rf_event, *events)
+
+
 def main(
     plot: bool = False,
     test_report: bool = False,
@@ -297,6 +314,8 @@ def main(
     use_alpha_half: bool = True,
     alpha_half_center_spacing: float = 4.31e-3,
     end_image_spoiler_cycles_per_fov: float = 4.0,
+    end_image_spoiler_cycles_per_voxel: float = 0.0,
+    end_image_spoiler_voxel_size_m: tuple[float, float, float] | None = None,
     end_image_spoiler_duration: float = 1.0e-3,
     use_labels: bool = True,
     v141_compat: bool = True,
@@ -325,8 +344,10 @@ def main(
     an explicit ``spectral_slr_pulse_path`` is provided.  The default
     ``alpha_half_center_spacing`` reproduces the reported 4.31 ms separation
     between the preparation-pulse and first readout-pulse centres.  The
-    end-of-image spoiler dephases by the requested number of cycles across
-    each FOV dimension and is disabled by setting its cycles to zero.
+    end-of-image spoiler can combine cycles across each FOV with cycles across
+    each actual simulation voxel. ``end_image_spoiler_voxel_size_m`` is in
+    physical scanner X/Y/Z order; reconstructed image voxel sizes are used
+    when it is omitted.
     """
     fov_x, fov_y, fov_z = _as_3d_fov(fov)
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -374,6 +395,36 @@ def main(
         raise ValueError(
             "end_image_spoiler_cycles_per_fov must be non-negative and finite"
         )
+    if end_image_spoiler_cycles_per_voxel < 0 or not np.isfinite(
+        end_image_spoiler_cycles_per_voxel
+    ):
+        raise ValueError(
+            "end_image_spoiler_cycles_per_voxel must be non-negative and finite"
+        )
+    if end_image_spoiler_voxel_size_m is None:
+        logical_voxel_sizes = np.asarray(
+            (fov_x / n_read, fov_y / n_phase, fov_z / n_partition), dtype=float
+        )
+        physical_voxel_sizes = np.zeros(3, dtype=float)
+        for role, voxel_size in zip(
+            ("read", "phase", "partition"), logical_voxel_sizes
+        ):
+            axis, _ = encoding_frame.axis_and_sign(role)
+            physical_voxel_sizes["xyz".index(axis)] = voxel_size
+    else:
+        physical_voxel_sizes = np.asarray(
+            tuple(float(value) for value in end_image_spoiler_voxel_size_m),
+            dtype=float,
+        )
+        if (
+            physical_voxel_sizes.shape != (3,)
+            or not np.all(np.isfinite(physical_voxel_sizes))
+            or np.any(physical_voxel_sizes <= 0)
+        ):
+            raise ValueError(
+                "end_image_spoiler_voxel_size_m must contain positive finite "
+                "X, Y, and Z sizes"
+            )
     if end_image_spoiler_duration <= 0 or not np.isfinite(end_image_spoiler_duration):
         raise ValueError("end_image_spoiler_duration must be positive and finite")
     if max_grad_mtm <= 0 or max_slew_tms <= 0:
@@ -395,20 +446,34 @@ def main(
     )
     seq = pp.Sequence(system)
 
+    timing_rf = _make_spectral_rf(
+        pulse_type=spectral_pulse_type,
+        flip_angle_rad=np.deg2rad(1.0),
+        duration=spectral_rf_duration,
+        bandwidth_hz=spectral_rf_bandwidth_hz,
+        apodization=spectral_rf_apodization,
+        system=system,
+        slr_pulse_path=spectral_slr_pulse_path,
+        slr_sharpness=spectral_slr_sharpness,
+    )
     rfs = tuple(
-        _make_spectral_rf(
-            pulse_type=spectral_pulse_type,
-            flip_angle_rad=np.deg2rad(flip_angle),
-            duration=spectral_rf_duration,
-            bandwidth_hz=spectral_rf_bandwidth_hz,
-            apodization=spectral_rf_apodization,
-            system=system,
-            slr_pulse_path=spectral_slr_pulse_path,
-            slr_sharpness=spectral_slr_sharpness,
+        (
+            _make_spectral_rf(
+                pulse_type=spectral_pulse_type,
+                flip_angle_rad=np.deg2rad(flip_angle),
+                duration=spectral_rf_duration,
+                bandwidth_hz=spectral_rf_bandwidth_hz,
+                apodization=spectral_rf_apodization,
+                system=system,
+                slr_pulse_path=spectral_slr_pulse_path,
+                slr_sharpness=spectral_slr_sharpness,
+            )
+            if flip_angle > 0
+            else _zero_amplitude_rf(timing_rf)
         )
         for flip_angle in target_flip_angles
     )
-    rf = rfs[0]
+    rf = next((event for event in rfs if event is not None), timing_rf)
     if plot:
         fig, ax = plt.subplots(1, 1, figsize=(6, 3))
         ax.plot(np.real(rf.signal))
@@ -506,20 +571,26 @@ def main(
     )
     te = tr / 2
 
+    spoiler_role_areas = []
+    for role, axis_fov in zip(("read", "phase", "partition"), (fov_x, fov_y, fov_z)):
+        axis, _ = encoding_frame.axis_and_sign(role)
+        voxel_size = physical_voxel_sizes["xyz".index(axis)]
+        spoiler_role_areas.append(
+            end_image_spoiler_cycles_per_fov / axis_fov
+            + end_image_spoiler_cycles_per_voxel / voxel_size
+        )
     end_image_spoilers = ()
-    if end_image_spoiler_cycles_per_fov > 0:
+    if any(area > 0 for area in spoiler_role_areas):
         end_image_spoilers = tuple(
             make_role_trapezoid(
                 pp,
                 encoding_frame,
                 role,
-                area=end_image_spoiler_cycles_per_fov / axis_fov,
+                area=area,
                 duration=end_image_spoiler_duration,
                 system=system,
             )
-            for role, axis_fov in zip(
-                ("read", "phase", "partition"), (fov_x, fov_y, fov_z)
-            )
+            for role, area in zip(("read", "phase", "partition"), spoiler_role_areas)
         )
 
     spoiler_end_times = []
@@ -531,12 +602,13 @@ def main(
         target_frequency_hz: float,
         receiver_frequency_hz: float,
     ):
-        rf_event.freq_offset = target_frequency_hz
-        rf_event.phase_offset = pulseq_phase_offset_rad(
-            common_phase_deg,
-            frequency_offset_hz=target_frequency_hz,
-            event_center_s=rf_center_value,
-        )
+        if rf_event is not None:
+            rf_event.freq_offset = target_frequency_hz
+            rf_event.phase_offset = pulseq_phase_offset_rad(
+                common_phase_deg,
+                frequency_offset_hz=target_frequency_hz,
+                event_center_s=rf_center_value,
+            )
         adc.freq_offset = receiver_frequency_hz
         adc_phase = advance_bssfp_phase_deg(
             common_phase_deg,
@@ -556,7 +628,8 @@ def main(
         target_name = target_names[target_index]
         target_flip_angle = target_flip_angles[target_index]
         rf_frame = rfs[target_index]
-        rf_frame_center, _ = pp.calc_rf_center(rf_frame)
+        rf_frame_timing = rf_frame
+        rf_frame_center, _ = pp.calc_rf_center(rf_frame_timing)
         print(
             f"Spectral frame {rep + 1}/{n_repetition}: "
             f"{target_name}, RF offset {target_frequency_hz:.3f} Hz, "
@@ -565,21 +638,26 @@ def main(
         )
 
         if use_alpha_half:
-            rf_alpha_half = _make_spectral_rf(
-                pulse_type=spectral_pulse_type,
-                flip_angle_rad=np.deg2rad(target_flip_angle / 2),
-                duration=spectral_rf_duration,
-                bandwidth_hz=spectral_rf_bandwidth_hz,
-                apodization=spectral_rf_apodization,
-                system=system,
-                slr_pulse_path=spectral_slr_pulse_path,
-                slr_sharpness=spectral_slr_sharpness,
+            rf_alpha_half = (
+                _make_spectral_rf(
+                    pulse_type=spectral_pulse_type,
+                    flip_angle_rad=np.deg2rad(target_flip_angle / 2),
+                    duration=spectral_rf_duration,
+                    bandwidth_hz=spectral_rf_bandwidth_hz,
+                    apodization=spectral_rf_apodization,
+                    system=system,
+                    slr_pulse_path=spectral_slr_pulse_path,
+                    slr_sharpness=spectral_slr_sharpness,
+                )
+                if target_flip_angle > 0
+                else _zero_amplitude_rf(rf)
             )
-            rf_alpha_half_center, _ = pp.calc_rf_center(rf_alpha_half)
+            rf_alpha_timing = rf_alpha_half
+            rf_alpha_half_center, _ = pp.calc_rf_center(rf_alpha_timing)
             rf_alpha_half_center_from_block_start = (
-                rf_alpha_half.delay + rf_alpha_half_center
+                rf_alpha_timing.delay + rf_alpha_half_center
             )
-            rf_frame_center_from_block_start = rf_frame.delay + rf_frame_center
+            rf_frame_center_from_block_start = rf_frame_timing.delay + rf_frame_center
             rf_alpha_half.freq_offset = target_frequency_hz
             rf_alpha_half.phase_offset = pulseq_phase_offset_rad(
                 wrap_phase_deg(rf_phase_start + rf_phase_increment),
@@ -588,7 +666,7 @@ def main(
             )
             alpha_half_delay_value = (
                 alpha_half_center_spacing
-                - pp.calc_duration(rf_alpha_half)
+                - pp.calc_duration(rf_alpha_timing)
                 + rf_alpha_half_center_from_block_start
                 - rf_frame_center_from_block_start
             )
@@ -598,7 +676,7 @@ def main(
                     "alpha_half_center_spacing is shorter than the minimum "
                     "non-overlapping RF-pulse center spacing"
                 )
-            seq.add_block(rf_alpha_half)
+            _add_rf_block(seq, rf_alpha_half)
             if alpha_half_delay_value > 0:
                 seq.add_block(pp.make_delay(alpha_half_delay_value))
 
@@ -669,7 +747,7 @@ def main(
                 system=system,
             )
 
-            seq.add_block(rf_frame)
+            _add_rf_block(seq, rf_frame)
             if rf_balance_delay is not None:
                 seq.add_block(rf_balance_delay)
             seq.add_block(gx_pre, gy_pre, gz_pre)
@@ -781,6 +859,14 @@ def main(
     seq.set_definition(
         key="EndImageSpoilerCyclesPerFOV",
         value=end_image_spoiler_cycles_per_fov,
+    )
+    seq.set_definition(
+        key="EndImageSpoilerCyclesPerVoxel",
+        value=end_image_spoiler_cycles_per_voxel,
+    )
+    seq.set_definition(
+        key="EndImageSpoilerVoxelSizeM",
+        value=physical_voxel_sizes.tolist(),
     )
     seq.set_definition(
         key="EndImageSpoilerDuration",

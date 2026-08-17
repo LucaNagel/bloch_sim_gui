@@ -1,5 +1,7 @@
+import json
 from pathlib import Path
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -44,7 +46,6 @@ def test_sequence_2d_image_views_show_the_fov_against_a_dark_gray_canvas():
     for view in (
         widget.kspace_view,
         widget.reconstruction_view,
-        widget.state_view,
     ):
         canvas_rgb = view.ui.graphicsView.backgroundBrush().color().getRgb()[:3]
         border_rgb = view.getImageItem().border.color().getRgb()[:3]
@@ -218,7 +219,50 @@ def test_completed_sequence_progress_shows_percentage_and_elapsed_time(monkeypat
 
     assert widget.progress.value() == 100
     assert widget.progress.format() == "100% · Complete in 13s"
+    assert widget.simulation_time_label.text() == ("Total runtime: 13s · Remaining: 0s")
     assert widget._simulation_started_at is None
+    widget.close()
+    app.processEvents()
+
+
+def test_sequence_time_label_updates_between_progress_events():
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+    widget._simulation_started_at = 100.0
+    widget._simulation_last_progress_at = 110.0
+    widget._simulation_last_progress_done = 20
+    widget._simulation_last_progress_total = 100
+    widget._simulation_progress_rate = 2.0
+
+    widget._update_simulation_time_label(now=115.0)
+
+    assert widget.simulation_time_label.text() == (
+        "Elapsed: 15s · Remaining: approximately 35s"
+    )
+    widget.close()
+    app.processEvents()
+
+
+def test_completed_sequence_records_wall_time_in_result_metadata():
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+    widget._simulation_started_at = 100.0
+    widget._simulation_started_at_utc = "2026-08-14T10:00:00+00:00"
+    result = SimpleNamespace(metadata={})
+
+    elapsed_s = widget._record_simulation_timing(
+        result,
+        now=112.5,
+        finished_at_utc="2026-08-14T10:00:12.500000+00:00",
+    )
+
+    assert elapsed_s == pytest.approx(12.5)
+    assert result.metadata == {
+        "simulation_wall_time_s": 12.5,
+        "simulation_started_at_utc": "2026-08-14T10:00:00+00:00",
+        "simulation_finished_at_utc": "2026-08-14T10:00:12.500000+00:00",
+        "simulation_time_measurement": "wall_clock",
+    }
     widget.close()
     app.processEvents()
 
@@ -275,11 +319,19 @@ def test_sequence_workspace_exports_xarray_result(tmp_path):
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()
     widget.object_source.setCurrentIndex(1)
+    widget.field_strength_t.setValue(9.4)
+    widget.nucleus.setCurrentText("C13")
     widget.matrix_size.setValue(2)
     widget.z_matrix_size.setValue(1)
     widget._build_phantom()
     widget.result = BlochSimulator(use_parallel=False).simulate_sequence(
         widget.program, widget.phantom
+    )
+    widget.result.metadata.update(
+        simulation_wall_time_s=12.5,
+        simulation_started_at_utc="2026-08-14T10:00:00+00:00",
+        simulation_finished_at_utc="2026-08-14T10:00:12.500000+00:00",
+        simulation_time_measurement="wall_clock",
     )
     output = tmp_path / "sequence_result.nc"
 
@@ -293,6 +345,20 @@ def test_sequence_workspace_exports_xarray_result(tmp_path):
         widget._export_results()
 
     assert output.is_file()
+    import xarray as xr
+
+    with xr.open_dataset(output) as exported:
+        assert exported.attrs["field_strength_t"] == pytest.approx(9.4)
+        assert exported.attrs["nucleus"] == "C13"
+        assert exported.attrs["simulation_wall_time_s"] == pytest.approx(12.5)
+        assert exported.attrs["simulation_time_measurement"] == "wall_clock"
+        metadata = json.loads(exported.attrs["metadata_json"])
+        assert metadata["field_strength_t"] == pytest.approx(9.4)
+        assert metadata["nucleus"] == "C13"
+        assert metadata["phantom_metadata"]["field_strength_t"] == pytest.approx(9.4)
+        assert metadata["phantom_metadata"]["nucleus"] == "C13"
+        assert metadata["simulation_wall_time_s"] == pytest.approx(12.5)
+        assert metadata["simulation_started_at_utc"].startswith("2026-08-14T10:00")
     widget.close()
     app.processEvents()
 

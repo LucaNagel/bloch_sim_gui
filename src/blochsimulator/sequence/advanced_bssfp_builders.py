@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import warnings
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -60,6 +62,13 @@ def _finite_values(values: Sequence[float], name: str) -> tuple[float, ...]:
     result = tuple(float(value) for value in values)
     if not result or not np.all(np.isfinite(result)):
         raise ValueError(f"{name} must contain finite values")
+    return result
+
+
+def _nonnegative_values(values: Sequence[float], name: str) -> tuple[float, ...]:
+    result = _finite_values(values, name)
+    if min(result) < 0:
+        raise ValueError(f"{name} values must be non-negative and finite")
     return result
 
 
@@ -209,6 +218,23 @@ def _rf_event(
     )
 
 
+def _zero_amplitude_rf(reference_rf):
+    """Keep an exact zero-flip RF timing marker in Pulseq output."""
+    event = copy.deepcopy(reference_rf)
+    event.signal = np.zeros_like(event.signal)
+    return event
+
+
+def _add_rf_block(sequence, rf_event, *events):
+    """Add RF blocks while suppressing Pulseq's harmless 0/0 shape warning."""
+    if np.any(np.abs(rf_event.signal) > 0):
+        sequence.add_block(rf_event, *events)
+        return
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        sequence.add_block(rf_event, *events)
+
+
 def make_pulseq_spectral_selective_bssfp(
     *,
     fov_m: Sequence[float] = (56e-3, 28e-3, 21e-3),
@@ -236,6 +262,8 @@ def make_pulseq_spectral_selective_bssfp(
     use_alpha_half: bool = True,
     alpha_half_center_spacing_s: float = 4.31e-3,
     end_image_spoiler_cycles_per_fov: float = 4.0,
+    end_image_spoiler_cycles_per_voxel: float = 0.0,
+    end_image_spoiler_voxel_size_m: Sequence[float] | None = None,
     end_image_spoiler_duration_s: float = 1e-3,
     field_strength_t: float = 7.0,
     nucleus: str = "C13",
@@ -247,6 +275,11 @@ def make_pulseq_spectral_selective_bssfp(
     The published Skinner et al. acquisition is represented by the defaults.
     Each complete 3D volume uses one RF/receiver frequency pair; target pairs
     repeat cyclically when ``repetitions`` exceeds their count.
+
+    ``end_image_spoiler_cycles_per_voxel`` adds a crusher moment referenced to
+    physical scanner X/Y/Z voxel sizes.  Supply the actual simulation-phantom
+    cell sizes through ``end_image_spoiler_voxel_size_m``.  When they are
+    omitted, the reconstructed image voxel sizes are used.
 
     ``encoding_duration_s=None`` selects the shortest common pre-/rephasing
     lobe duration that can produce the required read, phase, and partition
@@ -278,15 +311,17 @@ def make_pulseq_spectral_selective_bssfp(
     if len(names) != len(target_offsets) or any(not name for name in names):
         raise ValueError("target metabolite names must match target offsets")
     if isinstance(flip_angle_deg, (int, float, np.integer, np.floating)):
-        flip_angles = (float(flip_angle_deg),) * len(target_offsets)
+        flip_angles = _nonnegative_values(
+            (float(flip_angle_deg),), "flip_angle_deg"
+        ) * len(target_offsets)
     else:
-        flip_angles = _positive_values(flip_angle_deg, "flip_angle_deg")
+        flip_angles = _nonnegative_values(flip_angle_deg, "flip_angle_deg")
         if len(flip_angles) == 1:
             flip_angles *= len(target_offsets)
     if len(flip_angles) != len(target_offsets):
         raise ValueError("flip angles must be scalar or match target offsets")
-    if min(flip_angles) <= 0:
-        raise ValueError("flip angles must be positive")
+    if min(flip_angles) < 0:
+        raise ValueError("flip angles must be non-negative")
     repetitions = _positive_integer(repetitions, "repetitions")
     dummy_repetitions = int(dummy_repetitions)
     if dummy_repetitions < 0:
@@ -317,6 +352,32 @@ def make_pulseq_spectral_selective_bssfp(
         end_image_spoiler_cycles_per_fov < 0
     ):
         raise ValueError("end-image spoiler cycles must be non-negative and finite")
+    if not np.isfinite(end_image_spoiler_cycles_per_voxel) or (
+        end_image_spoiler_cycles_per_voxel < 0
+    ):
+        raise ValueError(
+            "end-image spoiler cycles per voxel must be non-negative and finite"
+        )
+    if end_image_spoiler_voxel_size_m is None:
+        logical_voxel_sizes = np.asarray(fov) / np.asarray(matrix_values)
+        physical_voxel_sizes = np.zeros(3, dtype=float)
+        for role, voxel_size in zip(
+            ("read", "phase", "partition"), logical_voxel_sizes
+        ):
+            axis, _ = encoding_frame.axis_and_sign(role)
+            physical_voxel_sizes["xyz".index(axis)] = voxel_size
+    else:
+        physical_voxel_sizes = np.asarray(
+            _positive_values(
+                end_image_spoiler_voxel_size_m,
+                "end_image_spoiler_voxel_size_m",
+            ),
+            dtype=float,
+        )
+        if physical_voxel_sizes.size != 3:
+            raise ValueError(
+                "end_image_spoiler_voxel_size_m must contain X, Y, and Z sizes"
+            )
     nucleus = str(nucleus).strip()
     if not nucleus:
         raise ValueError("nucleus must not be empty")
@@ -356,14 +417,26 @@ def make_pulseq_spectral_selective_bssfp(
     if bandwidth_is_derived:
         spectral_rf_bandwidth_hz = rf_tbw / actual_rf_duration
         spectral_rf_bandwidth_factor_hz_ms = rf_tbw * 1000.0
+    timing_rf = _rf_event(
+        pp,
+        system,
+        envelope,
+        flip_angle_deg=1.0,
+        duration_s=actual_rf_duration,
+        bandwidth_hz=spectral_rf_bandwidth_hz,
+    )
     rfs = tuple(
-        _rf_event(
-            pp,
-            system,
-            envelope,
-            flip_angle_deg=angle,
-            duration_s=actual_rf_duration,
-            bandwidth_hz=spectral_rf_bandwidth_hz,
+        (
+            _rf_event(
+                pp,
+                system,
+                envelope,
+                flip_angle_deg=angle,
+                duration_s=actual_rf_duration,
+                bandwidth_hz=spectral_rf_bandwidth_hz,
+            )
+            if angle > 0
+            else _zero_amplitude_rf(timing_rf)
         )
         for angle in flip_angles
     )
@@ -444,7 +517,7 @@ def make_pulseq_spectral_selective_bssfp(
         duration=encoding_duration_s,
         system=system,
     )
-    reference_rf = rfs[0]
+    reference_rf = next((rf for rf in rfs if np.any(np.abs(rf.signal) > 0)), timing_rf)
     rf_center, _ = pp.calc_rf_center(reference_rf)
     rf_center_from_start = reference_rf.delay + rf_center
     rf_block_duration = np.ceil(pp.calc_duration(reference_rf) / raster) * raster
@@ -518,18 +591,26 @@ def make_pulseq_spectral_selective_bssfp(
             )
         tr_fill = max(0.0, tr_fill)
 
+    spoiler_role_areas = []
+    for role, axis_fov in zip(("read", "phase", "partition"), fov):
+        axis, _ = encoding_frame.axis_and_sign(role)
+        voxel_size = physical_voxel_sizes["xyz".index(axis)]
+        spoiler_role_areas.append(
+            end_image_spoiler_cycles_per_fov / axis_fov
+            + end_image_spoiler_cycles_per_voxel / voxel_size
+        )
     spoilers = ()
-    if end_image_spoiler_cycles_per_fov > 0:
+    if any(area > 0 for area in spoiler_role_areas):
         spoilers = tuple(
             make_role_trapezoid(
                 pp,
                 encoding_frame,
                 role,
-                area=end_image_spoiler_cycles_per_fov / axis_fov,
+                area=area,
                 duration=end_image_spoiler_duration_s,
                 system=system,
             )
-            for role, axis_fov in zip(("read", "phase", "partition"), fov)
+            for role, area in zip(("read", "phase", "partition"), spoiler_role_areas)
         )
     spoiler_end_times: list[float] = []
     acquisition_start_times = []
@@ -541,19 +622,25 @@ def make_pulseq_spectral_selective_bssfp(
         acquisition_start_times.append(acquisition_start)
         target_index = repetition % len(target_offsets)
         rf = rfs[target_index]
+        rf_timing = rf
         target_offset = target_offsets[target_index]
         receiver_offset = receiver_offsets[target_index]
-        frame_rf_center, _ = pp.calc_rf_center(rf)
+        frame_rf_center, _ = pp.calc_rf_center(rf_timing)
         if use_alpha_half:
-            alpha_half = _rf_event(
-                pp,
-                system,
-                envelope,
-                flip_angle_deg=flip_angles[target_index] / 2,
-                duration_s=actual_rf_duration,
-                bandwidth_hz=spectral_rf_bandwidth_hz,
+            alpha_half = (
+                _rf_event(
+                    pp,
+                    system,
+                    envelope,
+                    flip_angle_deg=flip_angles[target_index] / 2,
+                    duration_s=actual_rf_duration,
+                    bandwidth_hz=spectral_rf_bandwidth_hz,
+                )
+                if flip_angles[target_index] > 0
+                else _zero_amplitude_rf(reference_rf)
             )
-            alpha_center, _ = pp.calc_rf_center(alpha_half)
+            alpha_timing = alpha_half
+            alpha_center, _ = pp.calc_rf_center(alpha_timing)
             alpha_half.freq_offset = target_offset
             # Treat the starter as the preceding member of the RF phase-cycle
             # train. With the published same-phase SS-bSSFP default both the
@@ -565,20 +652,20 @@ def make_pulseq_spectral_selective_bssfp(
                 event_center_s=alpha_center,
             )
             alpha_block_duration = (
-                np.ceil(pp.calc_duration(alpha_half) / raster) * raster
+                np.ceil(pp.calc_duration(alpha_timing) / raster) * raster
             )
             spacing_delay = (
                 alpha_half_center_spacing_s
                 - alpha_block_duration
-                + alpha_half.delay
+                + alpha_timing.delay
                 + alpha_center
-                - rf.delay
+                - rf_timing.delay
                 - frame_rf_center
             )
             spacing_delay = round(spacing_delay / raster) * raster
             if spacing_delay < 0:
                 raise ValueError("alpha/2 center spacing is too short")
-            sequence.add_block(alpha_half, pp.make_delay(alpha_block_duration))
+            _add_rf_block(sequence, alpha_half, pp.make_delay(alpha_block_duration))
             if spacing_delay:
                 sequence.add_block(pp.make_delay(spacing_delay))
 
@@ -610,7 +697,7 @@ def make_pulseq_spectral_selective_bssfp(
                 frequency_offset_hz=target_offset,
                 phase_increment_deg=rf_phase_increment_deg,
             )
-            sequence.add_block(rf, rf_block_padding)
+            _add_rf_block(sequence, rf, rf_block_padding)
             if rf_balance_delay_value:
                 sequence.add_block(pp.make_delay(rf_balance_delay_value))
             sequence.add_block(gx_pre)
@@ -676,7 +763,7 @@ def make_pulseq_spectral_selective_bssfp(
                     duration=encoding_duration_s,
                     system=system,
                 )
-                sequence.add_block(rf, rf_block_padding)
+                _add_rf_block(sequence, rf, rf_block_padding)
                 if rf_balance_delay_value:
                     sequence.add_block(pp.make_delay(rf_balance_delay_value))
                 sequence.add_block(gx_pre, gy_pre, gz_pre)
@@ -784,6 +871,10 @@ def make_pulseq_spectral_selective_bssfp(
     sequence.set_definition(
         "EndImageSpoilerCyclesPerFOV", end_image_spoiler_cycles_per_fov
     )
+    sequence.set_definition(
+        "EndImageSpoilerCyclesPerVoxel", end_image_spoiler_cycles_per_voxel
+    )
+    sequence.set_definition("EndImageSpoilerVoxelSizeM", physical_voxel_sizes.tolist())
     sequence.set_definition("EndImageSpoilerDuration", end_image_spoiler_duration_s)
     sequence.set_definition("EndImageSpoilerAxes", "xyz" if spoilers else "none")
     sequence.set_definition("EndImageSpoilerEndTimes", spoiler_end_times)

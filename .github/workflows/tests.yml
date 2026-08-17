@@ -51,6 +51,7 @@ jobs:
             libxcb-cursor0 \
             libgl1 \
             libegl1
-          # Force software rendering for headless CI
-          export QT_QPA_PLATFORM=offscreen
-          xvfb-run python scripts/run_test_suite.py
+          # Use Xvfb's X11 backend while keeping OpenGL rendering in software.
+          export QT_QPA_PLATFORM=xcb
+          export LIBGL_ALWAYS_SOFTWARE=1
+          xvfb-run -a python scripts/run_test_suite.py

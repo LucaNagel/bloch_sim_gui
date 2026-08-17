@@ -3,7 +3,6 @@ import os
 import time
 import math
 import numpy as np
-import json
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -65,6 +64,7 @@ from ..visualization import (
 )
 from ..slice_explorer import SliceSelectionExplorer
 from ..project_io import load_project, save_project
+from ..units import NUCLEUS_GAMMA_HZ_PER_T
 
 # Import phantom/kspace if available
 try:
@@ -97,6 +97,7 @@ from .dialogs import SettingsDialog
 from .default_settings import WorkspaceDefaults
 from .sequence_simulation_widget import SequenceSimulationWidget
 from .b1_widgets import B1PhantomCombinationWidget, B1WorkspaceWidget
+from .project_explorer import ProjectExplorerDialog
 
 
 def _view_title(text: str) -> QLabel:
@@ -198,6 +199,10 @@ class BlochSimulatorGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.app_settings = QSettings("BlochSimulator", "BlochSimulator")
+        workspace_defaults = WorkspaceDefaults.from_settings(self.app_settings)
+        self._workspace_field_strength_t = workspace_defaults.field_strength_t
+        self._workspace_nucleus = workspace_defaults.phantom_nucleus
+        self._adiabatic_timestep_warning_shown = False
         set_default_memory_policy(self._load_memory_policy())
         self.simulator = BlochSimulator(
             use_parallel=True,
@@ -206,6 +211,7 @@ class BlochSimulatorGUI(QMainWindow):
             dynamic_sequence_kernel=self._load_dynamic_sequence_kernel(),
         )
         self.simulation_thread = None
+        self.project_explorer_dialog = None
         self.init_ui()
 
     def init_ui(self):
@@ -232,6 +238,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.last_positions = None
         self.last_frequencies = None
         self.last_effective_frequencies = None
+        self._pending_export_parameters = None
+        self._last_export_parameters = None
         self.anim_timer = QTimer()
         self.anim_timer.timeout.connect(self._animate_vector)
         self.anim_interval_ms = 30
@@ -324,6 +332,12 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Tissue parameters
         self.tissue_widget = TissueParameterWidget()
+        self.tissue_widget.set_field_strength(self._workspace_field_strength_t)
+        self.tissue_widget.set_nucleus(self._workspace_nucleus)
+        self.tissue_widget.field_strength_changed.connect(
+            self._synchronize_workspace_field_strength
+        )
+        self.tissue_widget.nucleus_changed.connect(self._synchronize_workspace_nucleus)
         left_layout.addWidget(self.tissue_widget)
 
         # RF Pulse designers
@@ -480,10 +494,10 @@ class BlochSimulatorGUI(QMainWindow):
         control_layout.addWidget(QLabel("Time step (us):"), 8, 0)
         self.time_step_spin = QDoubleSpinBox()
         self.time_step_spin.setObjectName("time_step_spin")
-        self.time_step_spin.setRange(0.1, 5000)
+        self.time_step_spin.setRange(0.01, 5000)
         self.time_step_spin.setValue(10.0)
         self.time_step_spin.setDecimals(2)
-        self.time_step_spin.setSingleStep(0.1)
+        self.time_step_spin.setSingleStep(0.01)
         self.time_step_spin.setToolTip(
             "Simulation time step in microseconds. Smaller values improve time "
             "resolution but create more points and can strongly increase runtime "
@@ -1379,6 +1393,12 @@ class BlochSimulatorGUI(QMainWindow):
             if widget is not None:
                 widget.hide()
                 widget.deleteLater()
+        # The settings object can be replaced by tests or project hosts before
+        # this lazy workspace is created. Re-read the persisted shared B0 so a
+        # newly constructed sequence page cannot reintroduce its 3 T fallback.
+        workspace_defaults = WorkspaceDefaults.from_settings(self.app_settings)
+        self._workspace_field_strength_t = workspace_defaults.field_strength_t
+        self._workspace_nucleus = workspace_defaults.phantom_nucleus
         self.sequence_simulation_widget = SequenceSimulationWidget(self)
         layout.addWidget(self.sequence_simulation_widget)
         self._connect_phantom_sequence_workspaces()
@@ -1397,6 +1417,9 @@ class BlochSimulatorGUI(QMainWindow):
             if widget is not None:
                 widget.hide()
                 widget.deleteLater()
+        workspace_defaults = WorkspaceDefaults.from_settings(self.app_settings)
+        self._workspace_field_strength_t = workspace_defaults.field_strength_t
+        self._workspace_nucleus = workspace_defaults.phantom_nucleus
         self.phantom_widget = PhantomWidget(self)
         layout.addWidget(self.phantom_widget)
         self._connect_phantom_sequence_workspaces()
@@ -1454,23 +1477,29 @@ class BlochSimulatorGUI(QMainWindow):
     def _connect_phantom_sequence_workspaces(self):
         """Keep all focused workspaces synchronized to the shared phantom."""
         phantom_widget = getattr(self, "phantom_widget", None)
-        if phantom_widget is None:
-            return
         sequence_widget = getattr(self, "sequence_simulation_widget", None)
-        try:
-            phantom_widget.phantom_creator.phantom_created.connect(
-                self._on_shared_phantom_changed,
-                type=Qt.UniqueConnection,
-            )
-        except TypeError:
-            pass
-        try:
-            phantom_widget.phantom_creator.field_strength_changed.connect(
-                self._synchronize_workspace_field_strength,
-                type=Qt.UniqueConnection,
-            )
-        except TypeError:
-            pass
+        if phantom_widget is not None:
+            try:
+                phantom_widget.phantom_creator.phantom_created.connect(
+                    self._on_shared_phantom_changed,
+                    type=Qt.UniqueConnection,
+                )
+            except TypeError:
+                pass
+            try:
+                phantom_widget.phantom_creator.field_strength_changed.connect(
+                    self._synchronize_workspace_field_strength,
+                    type=Qt.UniqueConnection,
+                )
+            except TypeError:
+                pass
+            try:
+                phantom_widget.phantom_creator.nucleus_changed.connect(
+                    self._synchronize_workspace_nucleus,
+                    type=Qt.UniqueConnection,
+                )
+            except TypeError:
+                pass
         if sequence_widget is not None:
             try:
                 sequence_widget.field_strength_t.valueChanged.connect(
@@ -1479,24 +1508,50 @@ class BlochSimulatorGUI(QMainWindow):
                 )
             except TypeError:
                 pass
-        self._on_shared_phantom_changed(phantom_widget.current_phantom)
-        if phantom_widget.current_phantom is None and sequence_widget is not None:
-            self._synchronize_workspace_field_strength(
-                sequence_widget.field_strength_t.value()
-            )
+            try:
+                sequence_widget.nucleus.currentTextChanged.connect(
+                    self._synchronize_workspace_nucleus,
+                    type=Qt.UniqueConnection,
+                )
+            except TypeError:
+                pass
+        phantom = None if phantom_widget is None else phantom_widget.current_phantom
+        if phantom is not None:
+            self._on_shared_phantom_changed(phantom)
+        else:
+            self._synchronize_workspace_field_strength(self._workspace_field_strength_t)
+            self._synchronize_workspace_nucleus(self._workspace_nucleus)
 
     def _synchronize_workspace_field_strength(self, value_t):
         """Use one B0 value for sequence, probe, and phantom design controls."""
         if getattr(self, "_synchronizing_workspace_field_strength", False):
             return
         value_t = float(value_t)
+        if not np.isfinite(value_t) or value_t <= 0.0:
+            return
         self._synchronizing_workspace_field_strength = True
         try:
-            sequence_widget = getattr(self, "sequence_simulation_widget", None)
-            if sequence_widget is not None and not np.isclose(
-                sequence_widget.field_strength_t.value(), value_t
+            self._workspace_field_strength_t = value_t
+            settings = getattr(self, "app_settings", None)
+            if settings is not None:
+                settings.setValue("defaults/field_strength_t", value_t)
+            tissue_widget = getattr(self, "tissue_widget", None)
+            if tissue_widget is not None and not np.isclose(
+                tissue_widget.get_field_strength(), value_t
             ):
-                sequence_widget.field_strength_t.setValue(value_t)
+                tissue_widget.set_field_strength(value_t)
+            sequence_widget = getattr(self, "sequence_simulation_widget", None)
+            sequence_field_control = (
+                None
+                if sequence_widget is None
+                else getattr(sequence_widget, "field_strength_t", None)
+            )
+            try:
+                sequence_value = float(sequence_field_control.value())
+            except (AttributeError, TypeError, ValueError):
+                sequence_value = None
+            if sequence_value is not None and not np.isclose(sequence_value, value_t):
+                sequence_field_control.setValue(value_t)
             phantom_widget = getattr(self, "phantom_widget", None)
             if phantom_widget is not None:
                 creator = phantom_widget.phantom_creator
@@ -1505,21 +1560,80 @@ class BlochSimulatorGUI(QMainWindow):
                 phantom = phantom_widget.current_phantom
                 if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
                     phantom.field_strength = value_t
+                    design_metadata = phantom.metadata.get("phantom_design")
+                    if isinstance(design_metadata, dict):
+                        design_metadata["field_strength_t"] = value_t
                     creator.current_phantom = phantom
+                elif phantom is not None:
+                    phantom.metadata["field_strength_t"] = value_t
+                    phantom.metadata["field_strength"] = value_t
             if sequence_widget is not None:
                 sequence_widget.refresh_object_summary()
         finally:
             self._synchronizing_workspace_field_strength = False
 
+    def _synchronize_workspace_nucleus(self, nucleus):
+        """Use one concrete reference nucleus in every simulation workspace."""
+        if getattr(self, "_synchronizing_workspace_nucleus", False):
+            return
+        nucleus = str(nucleus).strip()
+        if nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
+            return
+        self._synchronizing_workspace_nucleus = True
+        try:
+            self._workspace_nucleus = nucleus
+            settings = getattr(self, "app_settings", None)
+            if settings is not None:
+                settings.setValue("defaults/phantom_nucleus", nucleus)
+
+            tissue_widget = getattr(self, "tissue_widget", None)
+            if tissue_widget is not None and tissue_widget.get_nucleus() != nucleus:
+                tissue_widget.set_nucleus(nucleus)
+
+            sequence_widget = getattr(self, "sequence_simulation_widget", None)
+            sequence_nucleus = (
+                None
+                if sequence_widget is None
+                else getattr(sequence_widget, "nucleus", None)
+            )
+            if (
+                sequence_nucleus is not None
+                and sequence_nucleus.currentText() != nucleus
+            ):
+                sequence_nucleus.setCurrentText(nucleus)
+
+            phantom_widget = getattr(self, "phantom_widget", None)
+            if phantom_widget is not None:
+                creator = phantom_widget.phantom_creator
+                if creator.get_nucleus() != nucleus:
+                    creator.set_nucleus(nucleus)
+                phantom = phantom_widget.current_phantom
+                if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+                    phantom.nucleus = nucleus
+                    design_metadata = phantom.metadata.get("phantom_design")
+                    if isinstance(design_metadata, dict):
+                        design_metadata["nucleus"] = nucleus
+                    creator.current_phantom = phantom
+                elif phantom is not None:
+                    phantom.metadata["nucleus"] = nucleus
+            if sequence_widget is not None:
+                sequence_widget.refresh_object_summary()
+        finally:
+            self._synchronizing_workspace_nucleus = False
+
     def _on_shared_phantom_changed(self, phantom):
         if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
             self._synchronize_workspace_field_strength(phantom.field_strength)
+            self._synchronize_workspace_nucleus(phantom.nucleus)
         elif phantom is not None:
             field_strength = phantom.metadata.get(
                 "field_strength_t", phantom.metadata.get("field_strength")
             )
             if field_strength is not None:
                 self._synchronize_workspace_field_strength(field_strength)
+            self._synchronize_workspace_nucleus(
+                phantom.metadata.get("nucleus", self._workspace_nucleus)
+            )
         sequence_widget = getattr(self, "sequence_simulation_widget", None)
         if sequence_widget is not None:
             sequence_widget.refresh_object_summary()
@@ -1764,8 +1878,8 @@ class BlochSimulatorGUI(QMainWindow):
                 "Keep previous vector positions visible to show the magnetization trajectory.",
             ),
             (
-                self.mag_3d.mean_checkbox,
-                "Display the mean magnetization vector in addition to individual vectors.",
+                self.mag_3d.spin_display_combo,
+                "Choose whether the 3D view shows individual spins, their mean, or both.",
             ),
             (
                 self.tissue_widget.preset_combo,
@@ -2371,7 +2485,7 @@ class BlochSimulatorGUI(QMainWindow):
 
     def _update_time_step(self, us_value: float):
         """Propagate desired time resolution (microseconds) to designers."""
-        dt_s = max(us_value, 0.1) * 1e-6
+        dt_s = max(us_value, 0.01) * 1e-6
         self.rf_designer.set_time_step(dt_s)
         self.sequence_designer.set_time_step(dt_s)
         self.sequence_designer.update_diagram(self.rf_designer.get_pulse())
@@ -2873,25 +2987,34 @@ class BlochSimulatorGUI(QMainWindow):
         if time_arr is None:
             return
         time_ms = time_arr * 1000
+        component = (
+            self.signal_component.currentText()
+            if hasattr(self, "signal_component")
+            else "Magnitude"
+        )
+
+        component_functions = {
+            "Magnitude": np.abs,
+            "Real": np.real,
+            "Imaginary": np.imag,
+            "Phase": np.angle,
+        }
+        component_function = component_functions.get(component, np.abs)
+        component_label = (
+            "Phase (rad)" if component == "Phase" else f"{component} signal"
+        )
 
         self._safe_clear_plot(self.signal_plot)
+        self.signal_plot.setLabel("left", component_label)
+        self.signal_plot.setTitle(f"{component} Signal")
 
         if signal_all.ndim == 1:
             # Simple 1D signal
             self.signal_plot.plot(
                 time_ms,
-                np.abs(signal_all),
+                component_function(signal_all),
                 pen=pg.mkPen("w", width=2),
-                name="Magnitude",
-            )
-            self.signal_plot.plot(
-                time_ms, np.real(signal_all), pen=pg.mkPen("r", width=1), name="Real"
-            )
-            self.signal_plot.plot(
-                time_ms,
-                np.imag(signal_all),
-                pen=pg.mkPen("g", width=1),
-                name="Imaginary",
+                name=component,
             )
         elif signal_all.ndim == 3:
             # Time-resolved 3D data (ntime, npos, nfreq)
@@ -2902,9 +3025,9 @@ class BlochSimulatorGUI(QMainWindow):
                 mean_sig = np.mean(signal_all, axis=(1, 2))
                 self.signal_plot.plot(
                     time_ms,
-                    np.abs(mean_sig),
+                    component_function(mean_sig),
                     pen=pg.mkPen("w", width=3),
-                    name="Mean Mag",
+                    name=f"Mean {component}",
                 )
             else:
                 total_series = npos * nfreq
@@ -2915,7 +3038,9 @@ class BlochSimulatorGUI(QMainWindow):
                     color = self._color_for_index(linear_idx, total_series)
                     sig_trace = signal_all[:, pi, fi]
                     self.signal_plot.plot(
-                        time_ms, np.abs(sig_trace), pen=pg.mkPen(color, width=1.5)
+                        time_ms,
+                        component_function(sig_trace),
+                        pen=pg.mkPen(color, width=1.5),
                     )
 
     def _calc_symmetric_limits(self, *arrays, base=1.0, pad=1.1):
@@ -4063,6 +4188,10 @@ class BlochSimulatorGUI(QMainWindow):
         file_menu = menubar.addMenu("File")
         file_menu.setObjectName("menu_file")
 
+        project_explorer_action = file_menu.addAction("Project Explorer…")
+        project_explorer_action.setObjectName("action_project_explorer")
+        project_explorer_action.triggered.connect(self.show_project_explorer)
+
         open_project_action = file_menu.addAction("Open Project…")
         open_project_action.setObjectName("action_open_project")
         open_project_action.setShortcut("Ctrl+O")
@@ -4072,16 +4201,6 @@ class BlochSimulatorGUI(QMainWindow):
         save_project_action.setObjectName("action_save_project")
         save_project_action.setShortcut("Ctrl+S")
         save_project_action.triggered.connect(self.save_project)
-
-        file_menu.addSeparator()
-
-        load_action = file_menu.addAction("Load Parameters")
-        load_action.setObjectName("action_load_params")
-        load_action.triggered.connect(self.load_parameters)
-
-        save_action = file_menu.addAction("Save Parameters")
-        save_action.setObjectName("action_save_params")
-        save_action.triggered.connect(self.save_parameters)
 
         file_menu.addSeparator()
 
@@ -4165,6 +4284,27 @@ class BlochSimulatorGUI(QMainWindow):
         about_action = help_menu.addAction("About")
         about_action.setObjectName("action_about")
         about_action.triggered.connect(self.show_about)
+
+    def show_project_explorer(self):
+        """Show the persistent metadata-only project browser."""
+        if self.project_explorer_dialog is None:
+            self.project_explorer_dialog = ProjectExplorerDialog(
+                self,
+                settings=self.app_settings,
+                default_folders=(self._get_export_directory(),),
+            )
+            self.project_explorer_dialog.project_open_requested.connect(
+                self._open_project_from_explorer
+            )
+        else:
+            self.project_explorer_dialog.refresh()
+        self.project_explorer_dialog.show()
+        self.project_explorer_dialog.raise_()
+        self.project_explorer_dialog.activateWindow()
+
+    def _open_project_from_explorer(self, filename):
+        self.project_explorer_dialog.hide()
+        self.open_project(filename)
 
     def _set_main_tab_visible(self, index: int, visible: bool):
         """Set main-tab visibility across supported Qt 5 versions."""
@@ -4363,6 +4503,14 @@ class BlochSimulatorGUI(QMainWindow):
         except (TypeError, ValueError):
             return MemoryPolicy()
 
+    def _load_animation_memory_budget_mib(self) -> float:
+        """Load the configurable temporary RAM cap for animation replay."""
+        try:
+            value = float(self.app_settings.value("memory/animation_replay_mib", 512.0))
+        except (TypeError, ValueError):
+            return 512.0
+        return value if 16.0 <= value <= 1024.0 * 1024.0 else 512.0
+
     def _load_tooltips_enabled(self) -> bool:
         """Return whether explanatory tooltips are enabled."""
         return bool(
@@ -4383,7 +4531,14 @@ class BlochSimulatorGUI(QMainWindow):
         kernel = str(self.app_settings.value("sequence/dynamic_kernel", "optimized"))
         return (
             kernel
-            if kernel in {"optimized", "native_parallel", "native_serial", "reference"}
+            if kernel
+            in {
+                "optimized",
+                "native_parallel",
+                "native_serial",
+                "metal_hybrid",
+                "reference",
+            }
             else "optimized"
         )
 
@@ -4473,6 +4628,7 @@ class BlochSimulatorGUI(QMainWindow):
             subvoxel_spin_counts=self._load_subvoxel_spin_counts(),
             thread_mode=self._load_thread_mode(),
             manual_thread_count=self._load_manual_thread_count(),
+            animation_memory_budget_mib=self._load_animation_memory_budget_mib(),
             detected_thread_count=resolve_num_threads(None),
             scanner_parameters=previous_scanner_parameters,
             workspace_defaults=previous_workspace_defaults,
@@ -4495,6 +4651,11 @@ class BlochSimulatorGUI(QMainWindow):
         self.app_settings.setValue("memory/mode", policy.mode)
         self.app_settings.setValue("memory/reserve_gib", policy.reserve_bytes / 1024**3)
         self.app_settings.setValue("memory/limit_gib", policy.limit_bytes / 1024**3)
+        animation_memory_budget_bytes = dialog.animation_memory_budget_bytes()
+        self.app_settings.setValue(
+            "memory/animation_replay_mib",
+            animation_memory_budget_bytes / 1024**2,
+        )
         self.app_settings.setValue(
             "general/export_directory", str(export_directory.resolve())
         )
@@ -4527,6 +4688,11 @@ class BlochSimulatorGUI(QMainWindow):
         workspace_defaults = dialog.workspace_defaults()
         workspace_defaults_changed = workspace_defaults != previous_workspace_defaults
         workspace_defaults.save(self.app_settings)
+        if workspace_defaults_changed:
+            self._synchronize_workspace_field_strength(
+                workspace_defaults.field_strength_t
+            )
+            self._synchronize_workspace_nucleus(workspace_defaults.phantom_nucleus)
         self.app_settings.sync()
         set_default_memory_policy(policy)
         self._set_tooltips_enabled(tooltips_enabled)
@@ -4540,6 +4706,9 @@ class BlochSimulatorGUI(QMainWindow):
                 spoiler_mode, subvoxel_spin_counts
             )
             sequence_widget.set_thread_configuration(thread_mode, manual_thread_count)
+            sequence_widget.set_animation_memory_budget_bytes(
+                animation_memory_budget_bytes
+            )
             if scanner_parameters_changed:
                 sequence_widget.set_scanner_parameters(scanner_parameters)
             if workspace_defaults_changed:
@@ -4633,8 +4802,60 @@ class BlochSimulatorGUI(QMainWindow):
         self.statusBar().addPermanentWidget(bar, 1)
         self.status_run_bar = bar
 
+    def _confirm_adiabatic_free_mode_run(self) -> bool:
+        """Validate AHP/AFP inputs and offer the Free Mode raster once."""
+        if getattr(self, "workspace_mode", "free") != "free":
+            return True
+        if not self.rf_designer.is_adiabatic_passage():
+            return True
+
+        pulse_name = self.rf_designer.pulse_type.currentText()
+        b1_amplitude_g = self.rf_designer.b1_amplitude.value()
+        if b1_amplitude_g <= 0.0:
+            QMessageBox.warning(
+                self,
+                "Adiabatic pulse needs a B1 amplitude",
+                f"{pulse_name} does not use the Flip Angle setting. Set "
+                "B1 Amplitude directly to a value above 0 G before running.\n\n"
+                "A Time step of 0.01 us is recommended for this Free Mode "
+                "simulation. The pulse duration was set to 10 ms when the pulse "
+                "type was selected.",
+            )
+            self.rf_designer.b1_amplitude.setFocus()
+            return False
+
+        if np.isclose(self.time_step_spin.value(), 0.01, rtol=0.0, atol=1e-12):
+            return True
+        if self._adiabatic_timestep_warning_shown:
+            return True
+
+        self._adiabatic_timestep_warning_shown = True
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setWindowTitle("Recommended adiabatic time step")
+        dialog.setText(
+            f"{pulse_name} uses the directly specified B1 amplitude "
+            f"({b1_amplitude_g:.4g} G); Flip Angle does not apply."
+        )
+        dialog.setInformativeText(
+            "The recommended Free Mode Time step is 0.01 us. Confirm to apply "
+            "this value automatically and start the simulation."
+        )
+        confirm_button = dialog.addButton(
+            "Confirm and use 0.01 us", QMessageBox.AcceptRole
+        )
+        dialog.addButton(QMessageBox.Cancel)
+        dialog.exec_()
+        if dialog.clickedButton() is confirm_button:
+            self.time_step_spin.setValue(0.01)
+            return True
+        return False
+
     def run_simulation(self):
         """Run the Bloch simulation."""
+        if not self._confirm_adiabatic_free_mode_run():
+            return
+
         self.statusBar().showMessage("Running simulation...")
         self.simulate_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
@@ -4658,7 +4879,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         tissue = self.tissue_widget.get_parameters()
         pulse = self.rf_designer.get_pulse()
-        dt_s = max(self.time_step_spin.value(), 0.1) * 1e-6
+        dt_s = max(self.time_step_spin.value(), 0.01) * 1e-6
         try:
             sequence_tuple = self.sequence_designer.compile_sequence(
                 custom_pulse=pulse, dt=dt_s, log_info=True
@@ -4733,6 +4954,31 @@ class BlochSimulatorGUI(QMainWindow):
         rf_carrier_offset = float(self.rf_designer.freq_offset.value())
         self.last_effective_frequencies = frequencies - rf_carrier_offset
 
+        # Freeze export metadata at run start. Exporting must describe the
+        # completed simulation, even if controls are edited afterwards. The
+        # overrides record preview-mode reductions and its coarser effective
+        # time step rather than the pre-preview UI requests.
+        run_metadata = self._collect_all_parameters()
+        run_simulation = run_metadata["simulation"]
+        run_simulation.update(
+            {
+                "mode": "time-resolved" if mode == 2 else "endpoint",
+                "time_step_us": dt_s * 1e6,
+                "num_positions": int(positions.shape[0]),
+                "num_frequencies": int(frequencies.size),
+                "position_axis": np.array(positions, copy=True),
+                "frequency_axis": np.array(frequencies, copy=True),
+                "effective_frequency_axis": np.array(
+                    self.last_effective_frequencies, copy=True
+                ),
+                "rf_carrier_offset_hz": rf_carrier_offset,
+                "preview_mode": bool(preview_on),
+                "field_strength_t": self._workspace_field_strength_t,
+                "nucleus": self._workspace_nucleus,
+            }
+        )
+        self._pending_export_parameters = run_metadata
+
         self.simulation_thread = SimulationThread(
             self.simulator,
             sequence_tuple,
@@ -4762,6 +5008,9 @@ class BlochSimulatorGUI(QMainWindow):
 
     def on_simulation_finished(self, result):
         """Handle simulation completion."""
+        if self._pending_export_parameters is not None:
+            self._last_export_parameters = self._pending_export_parameters
+        self._pending_export_parameters = None
         self.statusBar().showMessage("Simulation complete")
         self.simulate_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
@@ -4808,6 +5057,7 @@ class BlochSimulatorGUI(QMainWindow):
 
     def on_simulation_error(self, error_msg):
         """Handle simulation error."""
+        self._pending_export_parameters = None
         self.statusBar().showMessage("Simulation failed")
         self.simulate_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
@@ -4861,6 +5111,7 @@ class BlochSimulatorGUI(QMainWindow):
 
     def on_simulation_cancelled(self):
         """Handle user cancellation."""
+        self._pending_export_parameters = None
         self.statusBar().showMessage("Simulation cancelled")
         self.simulate_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
@@ -5098,6 +5349,11 @@ class BlochSimulatorGUI(QMainWindow):
                 if sequence_widget is not None
                 else 0
             ),
+            "sequence_view_name": (
+                sequence_widget.views.tabText(sequence_widget.views.currentIndex())
+                if sequence_widget is not None
+                else "Sequence"
+            ),
             "phantom_controls": (
                 _capture_widget_state(phantom_widget.phantom_creator)
                 if phantom_widget is not None
@@ -5156,25 +5412,35 @@ class BlochSimulatorGUI(QMainWindow):
             )
             self.statusBar().showMessage(f"Project saved: {Path(filename).name}", 7000)
             self.log_message(f"Project saved to {filename}")
+            if self.project_explorer_dialog is not None:
+                self.project_explorer_dialog.refresh()
         except Exception as exc:
             QMessageBox.critical(
                 self, "Save Project Error", f"The project could not be saved:\n{exc}"
             )
 
-    def open_project(self):
+    def open_project(self, filename=None):
         """Restore a complete project and refresh all affected workspaces."""
-        filename, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open Project",
-            str(self._get_export_directory()),
-            "Bloch projects (*.blochproj);;All files (*)",
-        )
+        # QAction.triggered may provide its checked state as a boolean.
+        if not filename or isinstance(filename, bool):
+            filename, _ = QFileDialog.getOpenFileName(
+                self,
+                "Open Project",
+                str(self._get_export_directory()),
+                "Bloch projects (*.blochproj);;All files (*)",
+            )
         if not filename:
             return
         try:
             project = load_project(filename)
             state = project["state"]
             self.tissue_widget.set_state(state.get("tissue", {}))
+            self._synchronize_workspace_field_strength(
+                self.tissue_widget.get_field_strength()
+            )
+            self._synchronize_workspace_nucleus(self.tissue_widget.get_nucleus())
+            project_field_strength_t = self.tissue_widget.get_field_strength()
+            project_nucleus = self.tissue_widget.get_nucleus()
             self.rf_designer.set_state(state.get("rf", {}))
             self.sequence_designer.set_state(state.get("sequence", {}))
             _restore_widget_state(self, state.get("main_controls", {}))
@@ -5230,14 +5496,26 @@ class BlochSimulatorGUI(QMainWindow):
                 sequence_widget.reconstruction_explorer.restore_state(
                     state.get("reconstruction_view", {})
                 )
+                saved_view_name = str(state.get("sequence_view_name", ""))
+                saved_view_index = -1
+                if saved_view_name:
+                    for index in range(sequence_widget.views.count()):
+                        if sequence_widget.views.tabText(index) == saved_view_name:
+                            saved_view_index = index
+                            break
+                if saved_view_index < 0:
+                    # Before the combined 2D tab, k-space and reconstruction
+                    # occupied indices 2 and 3 and shifted every later page by
+                    # one. Both old 2D pages now restore to the combined page.
+                    legacy_index = int(state.get("sequence_view_tab", 0))
+                    if legacy_index == 3:
+                        saved_view_index = sequence_widget.two_d_result_tab_index
+                    elif legacy_index >= 4:
+                        saved_view_index = legacy_index - 1
+                    else:
+                        saved_view_index = legacy_index
                 sequence_widget.views.setCurrentIndex(
-                    max(
-                        0,
-                        min(
-                            int(state.get("sequence_view_tab", 0)),
-                            sequence_widget.views.count() - 1,
-                        ),
-                    )
+                    max(0, min(saved_view_index, sequence_widget.views.count() - 1))
                 )
 
             legacy_result = project["legacy_result"]
@@ -5248,6 +5526,16 @@ class BlochSimulatorGUI(QMainWindow):
                     "_project_effective_frequencies", None
                 )
                 self.update_plots(legacy_result)
+
+            # Sequence-control restoration can replay old defaults after the
+            # phantom has already been loaded. Resolve the final project state
+            # from the phantom, or from the saved Free Mode controls when no
+            # phantom is part of the project.
+            if phantom is not None:
+                self._on_shared_phantom_changed(phantom)
+            else:
+                self._synchronize_workspace_field_strength(project_field_strength_t)
+                self._synchronize_workspace_nucleus(project_nucleus)
 
             mode = state.get("workspace_mode", "free")
             self.set_workspace_mode(mode if mode in {"free", "sequence"} else "free")
@@ -5262,104 +5550,6 @@ class BlochSimulatorGUI(QMainWindow):
                 self, "Open Project Error", f"The project could not be loaded:\n{exc}"
             )
             self.log_message(f"Error loading project: {exc}")
-
-    def load_parameters(self):
-        """Load simulation parameters from file."""
-        filename, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load Parameters",
-            str(self._get_export_directory()),
-            "JSON Files (*.json)",
-        )
-        if not filename:
-            return
-
-        try:
-            with open(filename, "r") as f:
-                state = json.load(f)
-
-            if "tissue" in state:
-                if hasattr(self.tissue_widget, "set_state"):
-                    self.tissue_widget.set_state(state["tissue"])
-                else:
-                    # Fallback for old version or missing method
-                    tw = self.tissue_widget
-                    t_state = state["tissue"]
-                    if "preset" in t_state:
-                        tw.preset_combo.setCurrentText(t_state["preset"])
-                    if "field" in t_state:
-                        tw.field_combo.setCurrentText(t_state["field"])
-                    if "t1_ms" in t_state:
-                        tw.t1_spin.setValue(t_state["t1_ms"])
-                    if "t2_ms" in t_state:
-                        tw.t2_spin.setValue(t_state["t2_ms"])
-                    if "m0" in t_state:
-                        tw.m0_spin.setValue(t_state["m0"])
-
-            if "rf" in state:
-                self.rf_designer.set_state(state["rf"])
-
-            if "sequence" in state:
-                if hasattr(self.sequence_designer, "set_state"):
-                    self.sequence_designer.set_state(state["sequence"])
-                else:
-                    # Fallback
-                    sd = self.sequence_designer
-                    s_state = state["sequence"]
-                    if "type" in s_state:
-                        sd.sequence_type.setCurrentText(s_state["type"])
-                    if "te" in s_state:
-                        sd.te_spin.setValue(s_state["te"])
-                    if "tr" in s_state:
-                        sd.tr_spin.setValue(s_state["tr"])
-                    if "ti" in s_state:
-                        sd.ti_spin.setValue(s_state["ti"])
-                    if "echo_count" in s_state:
-                        sd.spin_echo_echoes.setValue(s_state["echo_count"])
-                    if "slice_thickness" in s_state:
-                        sd.slice_thickness_spin.setValue(s_state["slice_thickness"])
-                    if "slice_gradient" in s_state:
-                        sd.slice_gradient_spin.setValue(s_state["slice_gradient"])
-
-            if "simulation" in state:
-                sim = state["simulation"]
-                if "mode" in sim:
-                    self.mode_combo.setCurrentText(sim["mode"])
-                if "num_pos" in sim:
-                    self.pos_spin.setValue(sim["num_pos"])
-                if "pos_range_mm" in sim:
-                    self.pos_range.setValue(sim["pos_range_mm"])
-                elif "pos_range" in sim:
-                    # Parameter files through v1.1 stored this value in cm.
-                    self.pos_range.setValue(float(sim["pos_range"]) * 10.0)
-                if "num_freq" in sim:
-                    self.freq_spin.setValue(sim["num_freq"])
-                if "freq_center" in sim:
-                    self.freq_center.setValue(sim["freq_center"])
-                if "freq_range" in sim:
-                    self.freq_range.setValue(sim["freq_range"])
-                if "freq_axis_mode" in sim:
-                    self.freq_axis_mode.setCurrentText(sim["freq_axis_mode"])
-                if "time_step" in sim:
-                    self.time_step_spin.setValue(sim["time_step"])
-                if "extra_tail" in sim:
-                    self.extra_tail_spin.setValue(sim["extra_tail"])
-                if "max_traces" in sim:
-                    self.max_traces_spin.setValue(sim["max_traces"])
-
-            self.log_message(f"Parameters loaded from {Path(filename).name}")
-            self.statusBar().showMessage(
-                f"Parameters loaded from {Path(filename).name}"
-            )
-
-            # Trigger diagram update
-            self.sequence_designer.update_diagram()
-
-        except Exception as e:
-            QMessageBox.critical(
-                self, "Load Error", f"Failed to load parameters:\n{str(e)}"
-            )
-            self.log_message(f"Error loading parameters: {e}")
 
     def _animate_vector(self):
         """Advance the 3D vector animation if data is available."""
@@ -5430,7 +5620,9 @@ class BlochSimulatorGUI(QMainWindow):
         if not np.isfinite(mag) or mag < 1e-9:
             self.mag_3d.b1_arrow.setVisible(False)
             return
-        phase = np.angle(b1_val)
+        # Keep the established phase progression, but show the B1 vector on
+        # the opposite side of the transverse plane.
+        phase = np.pi - np.angle(b1_val)
         tip = np.array(
             [
                 self.anim_b1_scale * mag * np.cos(phase),
@@ -5441,54 +5633,6 @@ class BlochSimulatorGUI(QMainWindow):
         pos = np.array([[0.0, 0.0, 0.0], tip])
         self.mag_3d.b1_arrow.setData(pos=pos)
         self.mag_3d.b1_arrow.setVisible(True)
-
-    def save_parameters(self):
-        """Save simulation parameters to file."""
-        export_dir = self._get_export_directory()
-        seq_type = (
-            self.sequence_designer.sequence_type.currentText()
-            .replace(" ", "_")
-            .replace("(", "")
-            .replace(")", "")
-            .replace("+", "")
-            .lower()
-        )
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        default_filename = f"bloch_params_{seq_type}_{timestamp}.json"
-        default_path = export_dir / default_filename
-
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Save Parameters", str(default_path), "JSON Files (*.json)"
-        )
-        if not filename:
-            return
-
-        try:
-            state = {
-                "version": "1.2",
-                "timestamp": timestamp,
-                "tissue": self.tissue_widget.get_state(),
-                "rf": self.rf_designer.get_state(),
-                "sequence": self.sequence_designer.get_state(),
-                "simulation": self._collect_simulation_parameters(internal_format=True),
-            }
-
-            with open(filename, "w") as f:
-                json.dump(state, f, indent=2)
-
-            self.log_message(f"Parameters saved to {Path(filename).name}")
-            self.statusBar().showMessage(f"Parameters saved to {Path(filename).name}")
-            QMessageBox.information(
-                self,
-                "Save Successful",
-                f"Parameters saved successfully:\n{Path(filename)}",
-            )
-
-        except Exception as e:
-            QMessageBox.critical(
-                self, "Save Error", f"Failed to save parameters:\n{str(e)}"
-            )
-            self.log_message(f"Error saving parameters: {e}")
 
     def export_results(self):
         """Export simulation results and parameters using the new multi-format dialog."""
@@ -5511,8 +5655,14 @@ class BlochSimulatorGUI(QMainWindow):
         base_path = options["base_path"]
         exported_files = []
 
-        # Collect complete metadata
-        all_metadata = self._collect_all_parameters()
+        # Use the parameters captured for the completed run. Reading live
+        # controls here can attach settings from a not-yet-run configuration to
+        # older result arrays.
+        all_metadata = (
+            self._last_export_parameters
+            if self._last_export_parameters is not None
+            else self._collect_all_parameters()
+        )
         sequence_params = all_metadata["sequence"]
         simulation_params = all_metadata["simulation"]
 
@@ -5718,7 +5868,10 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Prompt for file
         filename, selected_filter = QFileDialog.getSaveFileName(
-            self, "Export Final State", "", "CSV Files (*.csv);;NumPy Archive (*.npz)"
+            self,
+            "Export Final State",
+            str(self._get_export_directory() / "final_state.csv"),
+            "CSV Files (*.csv);;NumPy Archive (*.npz)",
         )
         if not filename:
             return
@@ -5825,7 +5978,10 @@ class BlochSimulatorGUI(QMainWindow):
             return
 
         filename, _ = QFileDialog.getSaveFileName(
-            self, "Export Full Simulation Data", "", "NumPy Archive (*.npz)"
+            self,
+            "Export Full Simulation Data",
+            str(self._get_export_directory() / "full_simulation_data.npz"),
+            "NumPy Archive (*.npz)",
         )
         if not filename:
             return
@@ -5912,6 +6068,8 @@ class BlochSimulatorGUI(QMainWindow):
                 "time_step": self.time_step_spin.value(),
                 "extra_tail": self.extra_tail_spin.value(),
                 "max_traces": self.max_traces_spin.value(),
+                "field_strength_t": self._workspace_field_strength_t,
+                "nucleus": self._workspace_nucleus,
             }
 
         params = {
@@ -5930,6 +6088,8 @@ class BlochSimulatorGUI(QMainWindow):
             "extra_tail_ms": self.extra_tail_spin.value(),
             "use_parallel": self.simulator.use_parallel,
             "num_threads": self.simulator.num_threads,
+            "field_strength_t": self._workspace_field_strength_t,
+            "nucleus": self._workspace_nucleus,
             "preview_mode": (
                 self.preview_checkbox.isChecked()
                 if hasattr(self, "preview_checkbox")

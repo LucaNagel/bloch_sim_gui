@@ -225,6 +225,21 @@ Omit `--phantom` to use a small heterogeneous synthetic two-pool object.  The
 `--max-adc-events` option provides a shorter accumulation test while retaining
 the original RF/gradient events through the selected acquisition.
 
+The optional CPU/Metal subvoxel experiment is selected only in this validator:
+
+```bash
+python scripts/validate_dynamic_precision.py \
+  sequences/sequences/bssfp_3d_spectral_selective_skinner.seq \
+  --synthetic --max-adc-events 4 --timestep-us 10 \
+  --candidate metal_hybrid --subvoxel-spins 2 2 2
+```
+
+It runs centre-symmetric CPU calibration and held-out validation subsets while
+the GPU predicts the complete grid. A conservative validation failure returns
+the normal Float64 CPU answer by default. The unchecked Metal mode remains a
+private feasibility probe; the separately checked CPU/Metal hybrid is also
+available as an experimental GUI kernel with automatic exact-CPU fallback.
+
 ### Initial float32 gate result
 
 The first accumulation test used the checked-in 50-frame Skinner-style
@@ -239,12 +254,18 @@ waveforms rather than replacing them with ideal flip matrices:
 | 5 volumes / 960 TR / 30,720 samples | 3.06e-3 | 1.18e-2 |
 
 This rejects a naive interval-by-interval `float32` port under the provisional
-signal-NRMSE target of `1e-3`: storage rounding accumulates across the hundreds
-of RF raster points in every spectral pulse.  Preparing factors in `float64`
-and using a more stable RF plane rotation improved runtime but did not
-materially change the one-volume error.  The next precision experiment should
-therefore compose each repeated RF waveform into a per-voxel block propagator
-in `float64`, round that propagator once, and apply it once per RF event.  This
-matches the required GPU kernel fusion and removes most intermediate state
-rounding.  If that still misses the gate, selected state components require a
-two-`float32` representation rather than silently accepting the drift.
+signal-NRMSE target of `1e-3`.  A subsequent private Apple M3 Metal probe kept
+the complete prefix state inside one GPU thread, disabled fast math, used
+Float64-prepared RF coefficients rounded once, and reduced per-spin ADC output
+in a deterministic CPU Float64 tree.  Ordinary Float32 and a two-Float32
+double-single state both failed by one volume (about `1.344e-3`) and reached
+about `7.00e-3` and `6.80e-3`, respectively, by five volumes.  Lactate error
+was substantially larger.  All repeated GPU runs were bitwise identical.
+
+The unchecked probe therefore remains private and no direct Metal kernel is
+exposed. The GUI exposes only the checked hybrid, which returns an exact
+Float64 CPU result whenever its held-out test fails or Metal cannot be used.
+Detailed metrics, timings, memory estimates, error growth, and the next bounded
+experiment are in
+[dynamic_metal_feasibility.md](dynamic_metal_feasibility.md) and the
+machine-readable `dynamic_metal_precision_results_apple_m3.json` artifact.

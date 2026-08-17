@@ -19,6 +19,7 @@ from blochsimulator.sequence import ADCEvent, RFEvent, SequenceProgram
 from blochsimulator.spectral_phantom import SpectralPhantom
 from blochsimulator.ui.phantom_designer import (
     SpectralPhantomDesignerDialog,
+    _shape_xy_projection,
     load_any_phantom,
 )
 from blochsimulator.ui.default_settings import WorkspaceDefaults
@@ -602,8 +603,29 @@ def test_spectral_sequence_signal_is_sum_of_independent_components():
     ]
 
     assert np.allclose(result.signal, sum(item.signal for item in component_results))
+    assert result.pool_names == tuple(
+        name for name, _ in phantom.to_component_phantoms()
+    )
+    assert result.species_signal.shape == (2, result.adc_times_s.size)
+    assert result.final_pool_magnetization.shape == (2,) + phantom.shape + (3,)
+    assert np.allclose(
+        result.species_signal,
+        np.stack([item.signal for item in component_results], axis=0),
+    )
+    dataset = result.to_xarray()
+    assert dataset["species_signal"].dims == ("pool", "adc")
+    assert tuple(str(value) for value in dataset.coords["pool"].values) == (
+        result.pool_names
+    )
     assert result.final_magnetization.shape == phantom.shape + (3,)
     assert result.metadata["spectral_component_count"] == 2
+    assert result.metadata["n_active_voxels"] == phantom.n_active
+    assert result.metadata["n_simulated_spins"] == sum(
+        item.metadata["n_simulated_spins"] for item in component_results
+    )
+    assert result.metadata["spectral_component_active_voxels"] == {
+        name: component.n_active for name, component in phantom.to_component_phantoms()
+    }
 
 
 def test_designer_and_sequence_workspace_accept_spectral_phantom():
@@ -632,6 +654,27 @@ def test_designer_and_sequence_workspace_accept_spectral_phantom():
     assert "B0 7 T C13" in widget.phantom_summary.text()
     dialog.close()
     host.close()
+    app.processEvents()
+
+
+def test_designer_builds_inspector_automatically_when_tab_is_opened():
+    app = QApplication.instance() or QApplication([])
+    dialog = SpectralPhantomDesignerDialog(design=_spectral_design())
+
+    assert dialog.phantom is None
+    dialog.tabs.setCurrentWidget(dialog.inspector)
+
+    assert dialog.phantom is not None
+    assert dialog.inspector.volume.data.shape == dialog.design.shape
+    first_phantom = dialog.phantom
+
+    dialog.tabs.setCurrentIndex(0)
+    dialog.x_center.setValue(75.0)
+    dialog.tabs.setCurrentWidget(dialog.inspector)
+
+    assert dialog.phantom is not first_phantom
+    assert dialog.design.shapes[0].center[0] == pytest.approx(0.75)
+    dialog.close()
     app.processEvents()
 
 
@@ -665,6 +708,77 @@ def test_shared_b0_stays_synchronized_between_phantom_and_spin_probe():
     app.processEvents()
 
 
+def test_shared_b0_and_nucleus_update_all_workspace_controls(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = BlochSimulatorGUI()
+    window.app_settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    window._workspace_field_strength_t = 3.0
+    window._workspace_nucleus = "H1"
+    window._ensure_phantom_workspace(window.phantom_tab_index)
+    window._ensure_sequence_simulation_workspace(window.sequence_simulation_tab_index)
+
+    phantom = _spectral_design().build()
+    window.phantom_widget.current_phantom = phantom
+    window.phantom_widget.phantom_creator.current_phantom = phantom
+    window._on_shared_phantom_changed(phantom)
+
+    window.phantom_widget.phantom_creator.set_field_strength(9.4)
+    app.processEvents()
+
+    assert window._workspace_field_strength_t == pytest.approx(9.4)
+    assert window.tissue_widget.get_field_strength() == pytest.approx(9.4)
+    assert window.sequence_simulation_widget.field_strength_t.value() == pytest.approx(
+        9.4
+    )
+    assert phantom.field_strength == pytest.approx(9.4)
+    assert PhantomDesign.from_phantom(phantom).field_strength_t == pytest.approx(9.4)
+    assert float(
+        window.app_settings.value("defaults/field_strength_t")
+    ) == pytest.approx(9.4)
+
+    window.phantom_widget.phantom_creator.set_nucleus("C13")
+    app.processEvents()
+    assert window._workspace_nucleus == "C13"
+    assert window.tissue_widget.get_nucleus() == "C13"
+    assert window.sequence_simulation_widget.nucleus.currentText() == "C13"
+    assert phantom.nucleus == "C13"
+    assert PhantomDesign.from_phantom(phantom).nucleus == "C13"
+    assert window.app_settings.value("defaults/phantom_nucleus") == "C13"
+
+    window.sequence_simulation_widget.field_strength_t.setValue(7.0)
+    app.processEvents()
+    assert window.tissue_widget.get_field_strength() == pytest.approx(7.0)
+    assert window.phantom_widget.phantom_creator.get_field_strength() == pytest.approx(
+        7.0
+    )
+    assert phantom.field_strength == pytest.approx(7.0)
+    assert PhantomDesign.from_phantom(phantom).field_strength_t == pytest.approx(7.0)
+    window.close()
+    app.processEvents()
+
+
+def test_pulseq_defaults_do_not_override_shared_workspace_reference():
+    app = QApplication.instance() or QApplication([])
+    host = QWidget()
+    host._workspace_field_strength_t = 7.0
+    host._workspace_nucleus = "C13"
+    widget = SequenceSimulationWidget(host)
+    widget.field_strength_t.setValue(7.0)
+    widget.program = SequenceProgram(
+        (),
+        duration_s=0.0,
+        metadata={"definitions": {"FieldStrengthT": 3.0, "Nucleus": "H1"}},
+    )
+
+    widget._apply_pulseq_frequency_reference()
+
+    assert widget.field_strength_t.value() == pytest.approx(7.0)
+    assert widget.nucleus.currentText() == "C13"
+    widget.close()
+    host.close()
+    app.processEvents()
+
+
 def test_designer_supports_exact_numeric_xy_shape_placement():
     app = QApplication.instance() or QApplication([])
     dialog = SpectralPhantomDesignerDialog(design=_spectral_design())
@@ -685,22 +799,32 @@ def test_designer_supports_exact_numeric_xy_shape_placement():
     app.processEvents()
 
 
-def test_designer_uses_compact_shape_controls_and_wide_peak_columns():
+def test_designer_uses_left_geometry_controls_and_fitted_peak_columns():
     app = QApplication.instance() or QApplication([])
     dialog = SpectralPhantomDesignerDialog(design=_spectral_design())
     shape_panel = dialog.shape_splitter.widget(0)
     shape_button_grid = shape_panel.layout().itemAt(2).layout()
 
-    assert shape_panel.maximumWidth() == 300
+    assert shape_panel.maximumWidth() == 360
     assert shape_button_grid.rowCount() == 7
     assert shape_button_grid.columnCount() == 1
     assert (
-        dialog.peak_table.horizontalHeader().sectionResizeMode(0) == QHeaderView.Stretch
+        dialog.peak_table.horizontalHeader().sectionResizeMode(0) == QHeaderView.Fixed
     )
-    assert (
-        dialog.peak_table.horizontalHeader().sectionResizeMode(1)
-        == QHeaderView.ResizeToContents
+    assert all(
+        dialog.peak_table.horizontalHeader().sectionResizeMode(column)
+        == QHeaderView.Stretch
+        for column in range(1, 4)
     )
+    assert all(
+        dialog.peak_table.horizontalHeader().sectionResizeMode(column)
+        == QHeaderView.Fixed
+        for column in (4, 5)
+    )
+    assert dialog.peak_table.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+    geometry_group = shape_panel.layout().itemAt(3).widget()
+    assert geometry_group.title() == "Selected shape geometry"
+    assert dialog.shape_preview_3d.parent() is dialog.shape_splitter.widget(2)
     dialog.close()
     app.processEvents()
 
@@ -773,6 +897,27 @@ def test_designer_adds_and_rotates_cylinder_in_xyz():
     app.processEvents()
 
 
+@pytest.mark.parametrize("kind", ["box", "cylinder", "ellipsoid"])
+@pytest.mark.parametrize("axis", range(3))
+def test_designer_xy_projection_displays_each_xyz_rotation(kind, axis):
+    item = ShapeDefinition(
+        name="Rotated",
+        kind=kind,
+        size=(0.25, 0.45, 0.75),
+    )
+
+    def bounds(rotation):
+        item.rotation_deg = rotation
+        x, y = _shape_xy_projection(item, (40.0, 40.0, 40.0))
+        return np.asarray((x.min(), x.max(), y.min(), y.max()))
+
+    baseline = bounds((0.0, 0.0, 0.0))
+    rotation = [0.0, 0.0, 0.0]
+    rotation[axis] = 31.0
+
+    assert not np.allclose(bounds(tuple(rotation)), baseline)
+
+
 def test_designer_allows_cylinder_length_beyond_the_fov():
     app = QApplication.instance() or QApplication([])
     dialog = SpectralPhantomDesignerDialog(design=_spectral_design())
@@ -815,6 +960,43 @@ def test_designer_displays_absolute_peak_ppm_but_stores_relative_offsets():
     assert float(dialog.peak_table.item(1, 3).text()) == pytest.approx(180.0)
     assert [peak.frequency_ppm for peak in dialog._read_peak_table()] == pytest.approx(
         [-5.0, 5.0]
+    )
+    dialog.close()
+    app.processEvents()
+
+
+def test_designer_keeps_peak_ppm_fixed_when_spectral_reference_changes():
+    app = QApplication.instance() or QApplication([])
+    design = PhantomDesign(
+        spectral_reference_ppm=175.0,
+        shape=(2, 2, 2),
+        fov_m=(0.02, 0.02, 0.02),
+        shapes=[
+            ShapeDefinition(
+                name="First",
+                peaks=[SpectralPeakDefinition("P170", 1.0, -5.0, 0.02)],
+            ),
+            ShapeDefinition(
+                name="Second",
+                peaks=[SpectralPeakDefinition("P180", 1.0, 5.0, 0.02)],
+            ),
+        ],
+    )
+    dialog = SpectralPhantomDesignerDialog(design=design)
+
+    dialog.spectral_reference_ppm.setValue(172.0)
+
+    assert float(dialog.peak_table.item(0, 3).text()) == pytest.approx(170.0)
+    assert design.shapes[0].peaks[0].frequency_ppm == pytest.approx(-2.0)
+    assert design.shapes[1].peaks[0].frequency_ppm == pytest.approx(8.0)
+    dialog.shape_list.setCurrentRow(1)
+    assert float(dialog.peak_table.item(0, 3).text()) == pytest.approx(180.0)
+
+    dialog._sync_global()
+    phantom = design.build()
+    assert phantom.spectral_reference_ppm == pytest.approx(172.0)
+    assert [species.chemical_shift_ppm for species in phantom.species] == pytest.approx(
+        [-2.0, 8.0]
     )
     dialog.close()
     app.processEvents()
@@ -1014,6 +1196,10 @@ def test_volume_viewer_normalizes_2d_mask_and_resets_stale_indices():
         image_view.ui.histogram.width() == IMAGE_HISTOGRAM_WIDTH
         for image_view in (viewer.xy_view, viewer.xz_view, viewer.yz_view)
     )
+    assert all(
+        not image_view.getView().yInverted()
+        for image_view in (viewer.xy_view, viewer.xz_view, viewer.yz_view)
+    )
 
     viewer.set_volume(
         np.ones((64, 8, 4)),
@@ -1066,6 +1252,13 @@ def test_volume_viewer_normalizes_2d_mask_and_resets_stale_indices():
     assert viewer.mask.shape == viewer.data.shape
     assert viewer.indices == (0, 32, 0)
     viewer._indices_updated()
+    assert viewer.point_size_slider.minimum() == 1
+    assert viewer.point_size_slider.maximum() == 30
+    viewer.scatter = MagicMock()
+    viewer.point_size_slider.setEnabled(True)
+    viewer.point_size_slider.setValue(12)
+    viewer.scatter.setData.assert_called_with(size=12.0)
+    assert viewer.point_size_label.text() == "12 px"
     viewer.close()
     app.processEvents()
 

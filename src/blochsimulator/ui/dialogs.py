@@ -1,3 +1,4 @@
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -32,16 +33,58 @@ class SettingsDialog(QDialog):
         ("Custom free-memory reserve", "custom_reserve"),
         ("Fixed simulation limit", "fixed_limit"),
     )
-    SEQUENCE_KERNELS = (
-        ("Optimized (recommended)", "optimized"),
-        ("Reference", "reference"),
-    )
+    SEQUENCE_KERNELS = (("Optimized (recommended)", "optimized"),)
+    SEQUENCE_KERNEL_EXTRAS = (("Reference (advanced validation)", "reference"),)
     DYNAMIC_SEQUENCE_KERNELS = (
         ("Optimized NumPy (recommended)", "optimized"),
-        ("Native RF-block parallel (experimental)", "native_parallel"),
-        ("Native RF-block serial (experimental)", "native_serial"),
-        ("Reference", "reference"),
+        ("Native automatic (recommended for large objects)", "native_parallel"),
     )
+    DYNAMIC_SEQUENCE_KERNEL_EXTRAS = (
+        ("Native serial (advanced benchmark)", "native_serial"),
+        ("Reference (advanced validation)", "reference"),
+        ("CPU + Apple GPU (experimental)", "metal_hybrid"),
+    )
+    SEQUENCE_KERNEL_TOOLTIPS = {
+        "optimized": (
+            "Recommended for ordinary Bloch simulations. Uses native streaming "
+            "propagation and mathematically equivalent fast paths for RF-free "
+            "intervals and uniform relaxation."
+        ),
+        "reference": (
+            "Advanced validation option. Uses the original general native propagation "
+            "path without the optimized fast paths. It is intended for numerical "
+            "comparisons and diagnostics, not as a speed setting."
+        ),
+    }
+    DYNAMIC_SEQUENCE_KERNEL_TOOLTIPS = {
+        "optimized": (
+            "Recommended and most compatible dynamic two-pool implementation. Uses "
+            "optimized NumPy, supports the complete model, and is the safe fallback "
+            "for combinations unsupported by a native kernel."
+        ),
+        "native_parallel": (
+            "Recommended for large dynamic two-pool phantoms with uniform transmit "
+            "sensitivity. Uses compiled RF blocks and automatically enables multiple "
+            "CPU workers for sufficiently large workloads. Unsupported cases fall "
+            "back safely to Optimized NumPy."
+        ),
+        "native_serial": (
+            "Advanced benchmark option. Runs the compiled dynamic RF-block kernel "
+            "with one CPU worker, which separates native-kernel gains from "
+            "multithreading gains. It is usually unnecessary for normal simulations."
+        ),
+        "reference": (
+            "Advanced validation option. Uses the direct NumPy formulation as a "
+            "correctness reference. It is expected to be slower and is intended for "
+            "small comparison runs or diagnostics."
+        ),
+        "metal_hybrid": (
+            "Experimental extra for Apple Silicon and multiple subvoxel spins. It "
+            "calculates the subvoxel work on the Apple GPU, validates separate CPU "
+            "samples, and uses the CPU result automatically if the accuracy check "
+            "fails."
+        ),
+    }
     SEQUENCE_TIMESTEP_PRESETS = (
         ("Accurate — 1 µs", "accurate", 1.0),
         ("Balanced — 5 µs", "balanced", 5.0),
@@ -52,6 +95,18 @@ class SettingsDialog(QDialog):
         ("Ideal crusher (fast, current behavior)", "ideal"),
         ("Gradient waveform (subvoxel spins)", "gradient"),
     )
+
+    @classmethod
+    def _add_kernel_choices(cls, combo, primary, extras, tooltips):
+        """Populate a kernel selector with recommended and extra choices."""
+        for label, kernel in primary:
+            combo.addItem(label, kernel)
+            combo.setItemData(combo.count() - 1, tooltips[kernel], Qt.ToolTipRole)
+        if extras:
+            combo.insertSeparator(combo.count())
+        for label, kernel in extras:
+            combo.addItem(label, kernel)
+            combo.setItemData(combo.count() - 1, tooltips[kernel], Qt.ToolTipRole)
 
     def __init__(
         self,
@@ -69,6 +124,7 @@ class SettingsDialog(QDialog):
         subvoxel_spin_counts=(1, 1, 9),
         thread_mode: str = "automatic",
         manual_thread_count: int = 4,
+        animation_memory_budget_mib: float = 512.0,
         detected_thread_count: Optional[int] = None,
         scanner_parameters: Optional[ScannerParameters] = None,
         workspace_defaults: Optional[WorkspaceDefaults] = None,
@@ -90,7 +146,8 @@ class SettingsDialog(QDialog):
         self.export_directory_edit = QLineEdit(str(export_directory))
         self.export_directory_edit.setObjectName("default_export_directory")
         self.export_directory_edit.setToolTip(
-            "Default folder offered by image, data, animation and notebook export dialogs."
+            "Default folder offered for projects, results, generated Pulseq files, "
+            "images, animations, data and notebooks."
         )
         export_layout.addWidget(self.export_directory_edit, 1)
         self.export_browse_button = QPushButton("Browse...")
@@ -133,7 +190,6 @@ class SettingsDialog(QDialog):
 
         self.phantom_nucleus_combo = QComboBox()
         self.phantom_nucleus_combo.setObjectName("default_phantom_nucleus")
-        self.phantom_nucleus_combo.addItem("Automatic (H1 static / C13 dynamic)", None)
         for nucleus in sorted(NUCLEUS_GAMMA_HZ_PER_T):
             self.phantom_nucleus_combo.addItem(nucleus, nucleus)
         nucleus_index = self.phantom_nucleus_combo.findData(
@@ -141,10 +197,9 @@ class SettingsDialog(QDialog):
         )
         self.phantom_nucleus_combo.setCurrentIndex(max(0, nucleus_index))
         self.phantom_nucleus_combo.setToolTip(
-            "Default nucleus for new Phantom Designer projects. Automatic keeps "
-            "the existing H1 static and C13 dynamic behavior."
+            "Shared default nucleus for Free Mode, Phantom and Sequence Mode."
         )
-        defaults_form.addRow("Phantom nucleus:", self.phantom_nucleus_combo)
+        defaults_form.addRow("Nucleus:", self.phantom_nucleus_combo)
 
         self.default_field_strength_spin = QDoubleSpinBox()
         self.default_field_strength_spin.setObjectName("default_field_strength_t")
@@ -153,7 +208,7 @@ class SettingsDialog(QDialog):
         self.default_field_strength_spin.setSuffix(" T")
         self.default_field_strength_spin.setValue(workspace_defaults.field_strength_t)
         self.default_field_strength_spin.setToolTip(
-            "Default B0 field strength for Sequence Simulation and newly created phantoms."
+            "Shared default B0 field strength for Free Mode, Phantom and Sequence Mode."
         )
         defaults_form.addRow("B0 field strength:", self.default_field_strength_spin)
         self.tabs.addTab(defaults_tab, "Defaults")
@@ -216,14 +271,18 @@ class SettingsDialog(QDialog):
 
         self.sequence_kernel_combo = QComboBox()
         self.sequence_kernel_combo.setObjectName("sequence_simulation_kernel")
-        for label, kernel in self.SEQUENCE_KERNELS:
-            self.sequence_kernel_combo.addItem(label, kernel)
+        self._add_kernel_choices(
+            self.sequence_kernel_combo,
+            self.SEQUENCE_KERNELS,
+            self.SEQUENCE_KERNEL_EXTRAS,
+            self.SEQUENCE_KERNEL_TOOLTIPS,
+        )
         kernel_index = self.sequence_kernel_combo.findData(sequence_kernel)
         self.sequence_kernel_combo.setCurrentIndex(max(0, kernel_index))
         self.sequence_kernel_combo.setToolTip(
-            "The optimized Bloch kernel uses equivalent RF-free and uniform-"
-            "relaxation fast paths. Reference keeps the original propagation "
-            "path for numerical comparisons."
+            "Choose the implementation for ordinary Bloch propagation. Optimized "
+            "is recommended for simulations; the advanced Reference option is for "
+            "numerical validation and diagnostics. Hover over an option for details."
         )
         simulation_form.addRow("Sequence Bloch kernel:", self.sequence_kernel_combo)
 
@@ -231,21 +290,22 @@ class SettingsDialog(QDialog):
         self.dynamic_sequence_kernel_combo.setObjectName(
             "dynamic_sequence_simulation_kernel"
         )
-        for label, kernel in self.DYNAMIC_SEQUENCE_KERNELS:
-            self.dynamic_sequence_kernel_combo.addItem(label, kernel)
+        self._add_kernel_choices(
+            self.dynamic_sequence_kernel_combo,
+            self.DYNAMIC_SEQUENCE_KERNELS,
+            self.DYNAMIC_SEQUENCE_KERNEL_EXTRAS,
+            self.DYNAMIC_SEQUENCE_KERNEL_TOOLTIPS,
+        )
         dynamic_kernel_index = self.dynamic_sequence_kernel_combo.findData(
             dynamic_sequence_kernel
         )
         self.dynamic_sequence_kernel_combo.setCurrentIndex(max(0, dynamic_kernel_index))
         self.dynamic_sequence_kernel_combo.setToolTip(
-            "Kernel for dynamic two-pool pyruvate/lactate phantoms. Native "
-            "RF-block kernels accelerate uniform-transmit RF intervals; the "
-            "parallel variant also groups complete RF waveforms across CPU "
-            "cores. Coupled inflow, polarization, and concentration tracking "
-            "use fused native kinetics; less common unsupported combinations "
-            "fall back explicitly. "
-            "Spatial transmit maps may require a complete optimized fallback; "
-            "dynamic B0 is supported."
+            "Choose the implementation for coupled dynamic pyruvate/lactate "
+            "simulation. Optimized NumPy is the most compatible default; Native "
+            "automatic can accelerate large supported objects. Diagnostic and "
+            "experimental kernels are listed as extras. Hover over an option for "
+            "details."
         )
         simulation_form.addRow(
             "Dynamic two-pool kernel:", self.dynamic_sequence_kernel_combo
@@ -439,6 +499,21 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Maximum per simulation:", self.limit_spin)
 
+        self.animation_memory_budget_spin = QDoubleSpinBox()
+        self.animation_memory_budget_spin.setObjectName("animation_memory_budget_mib")
+        self.animation_memory_budget_spin.setRange(16.0, 1024.0 * 1024.0)
+        self.animation_memory_budget_spin.setDecimals(0)
+        self.animation_memory_budget_spin.setSingleStep(256.0)
+        self.animation_memory_budget_spin.setSuffix(" MiB")
+        self.animation_memory_budget_spin.setValue(float(animation_memory_budget_mib))
+        self.animation_memory_budget_spin.setToolTip(
+            "Maximum temporary RAM used by the separate 3D magnetization "
+            "animation replay. A higher limit permits more frames but may make "
+            "the computer less responsive. Animation frames are kept in RAM; "
+            "they are not streamed to disk."
+        )
+        form.addRow("3D animation replay RAM cap:", self.animation_memory_budget_spin)
+
         memory_layout.addLayout(form)
 
         explanation = QLabel(
@@ -499,6 +574,9 @@ class SettingsDialog(QDialog):
         self.sequence_spoiler_mode_combo.currentIndexChanged.connect(
             self._update_simulation_controls
         )
+        self.dynamic_sequence_kernel_combo.currentIndexChanged.connect(
+            self._update_simulation_controls
+        )
         self._update_summary()
         self._update_simulation_controls()
 
@@ -518,6 +596,10 @@ class SettingsDialog(QDialog):
             reserve_bytes=int(self.reserve_spin.value() * 1024**3),
             limit_bytes=int(self.limit_spin.value() * 1024**3),
         )
+
+    def animation_memory_budget_bytes(self) -> int:
+        """Return the configured temporary RAM cap for 3D animation replay."""
+        return int(self.animation_memory_budget_spin.value() * 1024**2)
 
     def get_export_directory(self) -> Path:
         return Path(self.export_directory_edit.text()).expanduser()
@@ -588,7 +670,10 @@ class SettingsDialog(QDialog):
             self.sequence_timestep_us_spin.setValue(preset_values[preset])
         self.sequence_timestep_us_spin.setEnabled(preset == "custom")
         self.manual_thread_count_spin.setEnabled(self.thread_mode() == "manual")
-        enabled = self.sequence_spoiler_mode() == "gradient"
+        enabled = (
+            self.sequence_spoiler_mode() == "gradient"
+            or self.dynamic_sequence_kernel() == "metal_hybrid"
+        )
         for spin in self.subvoxel_spin_count_spins:
             spin.setEnabled(enabled)
 

@@ -119,6 +119,27 @@ extensions = [
     ),
 ]
 
+if is_mac:
+    extensions.append(
+        Extension(
+            "blochsimulator._dynamic_metal_probe",
+            sources=[
+                "src/blochsimulator/dynamic_metal_probe_wrapper.pyx",
+                "src/blochsimulator/metal/dynamic_metal_probe.mm",
+            ],
+            include_dirs=["src/blochsimulator"],
+            extra_compile_args=[
+                "-O3",
+                "-std=c++17",
+                "-fobjc-arc",
+                "-fno-fast-math",
+                "-ffp-contract=off",
+            ],
+            extra_link_args=["-framework", "Foundation", "-framework", "Metal"],
+            language="c++",
+        )
+    )
+
 
 # Custom build command to lazy-import numpy
 class CustomBuildExt(build_ext):
@@ -127,6 +148,11 @@ class CustomBuildExt(build_ext):
         import numpy
 
         numpy_include = numpy.get_include()
+
+        # setuptools' Unix compiler does not list Objective-C++ by default,
+        # even though Apple clang selects the correct frontend from ``.mm``.
+        if is_mac and ".mm" not in self.compiler.src_extensions:
+            self.compiler.src_extensions.append(".mm")
 
         for ext in self.extensions:
             if numpy_include not in ext.include_dirs:
