@@ -11,6 +11,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT / "tests"
+PYTEST_BATCH_RUNNER = ROOT / "scripts" / "run_pytest_batch.py"
 CHUNKED_GUI_MODULES = (
     TESTS / "test_reconstruction_explorer.py",
     TESTS / "test_sequence_gui.py",
@@ -53,7 +54,7 @@ def _run_pytest(targets) -> int:
     ]
     print(f"\npytest batch: {' '.join(relative_targets)}", flush=True)
     completed = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", *relative_targets],
+        [sys.executable, str(PYTEST_BATCH_RUNNER), "-q", *relative_targets],
         cwd=ROOT,
         env=_test_environment(),
     )
