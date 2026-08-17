@@ -1,4 +1,4 @@
-"""Run one pytest batch without unsafe interpreter-level Qt finalization."""
+"""Run one pytest batch without unsafe native Qt finalization."""
 
 from __future__ import annotations
 
@@ -9,16 +9,20 @@ import pytest
 
 
 def main() -> None:
-    """Finish pytest normally, then return its status without re-finalizing Qt.
+    """Return pytest's status without entering unsafe native Qt cleanup.
 
-    Pytest has completed fixture and plugin teardown when ``pytest.main``
-    returns.  Some PyQtGraph object graphs can nevertheless segfault during
-    the subsequent Python interpreter shutdown, after pytest has already
-    reported that every test passed.  Each batch already runs in a disposable
-    subprocess, so a direct exit safely avoids that second native teardown
-    while preserving pytest's actual exit status.
+    Pytest's final garbage collection and Python's interpreter shutdown can
+    both destroy PyQtGraph object graphs after every test has passed.  Each
+    batch already runs in a disposable subprocess, so the worker skips those
+    native teardown paths while preserving pytest's actual exit status.
     """
-    exit_code = int(pytest.main(sys.argv[1:]))
+    # Pytest's built-in unraisableexception plugin forces cyclic garbage
+    # collection while pytest is unconfiguring.  PyQtGraph ViewBox cycles can
+    # segfault in that collection after every test has already passed.  These
+    # disposable workers intentionally leave native Qt cleanup to os._exit,
+    # so disable only that teardown hook here.
+    pytest_arguments = ["-p", "no:unraisableexception", *sys.argv[1:]]
+    exit_code = int(pytest.main(pytest_arguments))
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(exit_code)
