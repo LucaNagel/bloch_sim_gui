@@ -40,7 +40,18 @@ examples/*
 !docs/_static/media/*.mp4
 !web/static/favicon.svg
 
+# Python and tool caches
 __pycache__/
+*.py[codz]
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Generated Sphinx documentation
+docs/_build/
+
+# Local editor preferences
+.vscode/settings.json
 
 # Ignore all markdown files except README.md
 *.md

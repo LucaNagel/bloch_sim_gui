@@ -1,6 +1,5 @@
 # Bloch Equation Simulator for Python
 
-[![Live Demo](https://img.shields.io/badge/Live-Demo-blue?style=for-the-badge&logo=github)](https://lucanagel.github.io/bloch_sim_gui/)
 
 A high-performance Python implementation of the Bloch equation solver originally developed by Brian Hargreaves at Stanford University. This package provides a fast C-based core with Python bindings, parallel processing support, and an interactive GUI with classic waveform simulation and an event-based Sequence mode for [Pulseq](https://github.com/pulseq/pypulseq) workflows.
 
@@ -335,25 +334,6 @@ liver = TissueParameters(
 
 For detailed instructions on installation, GUI features, and Python API usage,
 see the **[User Guide](https://github.com/LucaNagel/bloch_sim_gui/blob/main/docs/USER_GUIDE.md)**.
-
-## Theory
-
-The simulator solves the Bloch equations:
-
-$$
-\frac{d\mathbf{M}}{dt}
-=
-\gamma\left(\mathbf{M}\times\mathbf{B}\right)
--\frac{M_x}{T_2}\,\hat{\mathbf{x}}
--\frac{M_y}{T_2}\,\hat{\mathbf{y}}
--\frac{M_z-M_0}{T_1}\,\hat{\mathbf{z}}
-$$
-
-Using:
-
-- Rotation matrices for RF and gradient effects
-- Exponential decay for relaxation
-- Cayley-Klein parameters for efficient rotation calculation
 
 ## Development
 
