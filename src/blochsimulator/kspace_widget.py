@@ -182,21 +182,21 @@ class TrajectoryWidget(QGroupBox):
 
         spatial_layout.addWidget(QLabel("Matrix X:"), 0, 0)
         self.matrix_x_spin = QSpinBox()
-        self.matrix_x_spin.setRange(8, 256)
+        self.matrix_x_spin.setRange(8, 1025)
         self.matrix_x_spin.setValue(32)
         self.matrix_x_spin.valueChanged.connect(self.settings_changed.emit)
         spatial_layout.addWidget(self.matrix_x_spin, 0, 1)
 
         spatial_layout.addWidget(QLabel("Matrix Y:"), 0, 2)
         self.matrix_y_spin = QSpinBox()
-        self.matrix_y_spin.setRange(8, 256)
+        self.matrix_y_spin.setRange(8, 1025)
         self.matrix_y_spin.setValue(32)
         self.matrix_y_spin.valueChanged.connect(self.settings_changed.emit)
         spatial_layout.addWidget(self.matrix_y_spin, 0, 3)
 
         spatial_layout.addWidget(QLabel("FOV X (mm):"), 1, 0)
         self.fov_x_spin = QDoubleSpinBox()
-        self.fov_x_spin.setRange(10, 500)
+        self.fov_x_spin.setRange(10, 1000)
         self.fov_x_spin.setValue(240)
         self.fov_x_spin.setDecimals(1)
         self.fov_x_spin.setSuffix(" mm")
@@ -205,7 +205,7 @@ class TrajectoryWidget(QGroupBox):
 
         spatial_layout.addWidget(QLabel("FOV Y (mm):"), 1, 2)
         self.fov_y_spin = QDoubleSpinBox()
-        self.fov_y_spin.setRange(10, 500)
+        self.fov_y_spin.setRange(10, 1000)
         self.fov_y_spin.setValue(240)
         self.fov_y_spin.setDecimals(1)
         self.fov_y_spin.setSuffix(" mm")

@@ -45,6 +45,9 @@ from blochsimulator.sequence import (
     SpectroscopicAcquisition,
     load_pulseq,
 )
+from blochsimulator.sequence.rf_pulses import (
+    rf_time_bandwidth_product_from_envelope,
+)
 from blochsimulator.units import NUCLEUS_GAMMA_HZ_PER_T, rf_hz_to_gauss
 
 
@@ -324,6 +327,7 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     window.app_settings.setValue("sequence/subvoxel_spins_x", 3)
     window.app_settings.setValue("sequence/subvoxel_spins_y", 5)
     window.app_settings.setValue("sequence/subvoxel_spins_z", 11)
+    window.app_settings.setValue("sequence/subvoxel_sampling_method", "stratified")
     window.app_settings.setValue("simulation/thread_mode", "manual")
     window.app_settings.setValue("simulation/manual_threads", 2)
     window.app_settings.setValue("defaults/sequence_fov_x_mm", 180.0)
@@ -350,6 +354,7 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert window.sequence_simulation_widget.simulator.num_threads == 2
     assert window.sequence_simulation_widget.spoiler_mode == "gradient"
     assert window.sequence_simulation_widget.subvoxel_spin_counts == (3, 5, 11)
+    assert window.sequence_simulation_widget.subvoxel_sampling_method == "stratified"
     assert window.sequence_simulation_widget._configured_spin_sampling().counts_xyz == (
         3,
         5,
@@ -934,6 +939,49 @@ def test_sequence_workspace_scopes_object_controls_to_the_selected_source():
     app.processEvents()
 
 
+def test_flash_auto_spoiler_tracks_phantom_geometry_and_subvoxel_grid(monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    phantom = Phantom(
+        shape=(2, 2, 2),
+        fov=(1e-3, 2e-3, 4e-3),
+        t1_map=np.ones((2, 2, 2)),
+        t2_map=np.ones((2, 2, 2)),
+        pd_map=np.ones((2, 2, 2)),
+    )
+    monkeypatch.setattr(widget, "_selected_designed_phantom", lambda: phantom)
+
+    assert widget.flash_auto_spoiler.isChecked()
+    assert not widget.flash_spoiler_cycles_per_slice.isEnabled()
+    assert not widget.flash_spoiler_cycles_per_voxel.isEnabled()
+
+    widget.set_spoiler_configuration("gradient", (1, 4, 1))
+    widget.refresh_object_summary()
+
+    # Default FLASH orientation maps read/phase/slice to X/Y/Z. The phase axis
+    # is preferred because it is the sampled in-plane axis.
+    assert widget.flash_spoiler_cycles_per_slice.value() == pytest.approx(1.5)
+    assert widget.flash_spoiler_cycles_per_voxel.value() == pytest.approx(3.4375)
+    assert "Effective cycles/phantom voxel XYZ: 0.5, 1, 1." in (
+        widget.flash_spoiler_info.text()
+    )
+    assert "#b45309" in widget.flash_spoiler_info.styleSheet()
+    assert "artificial subvoxel rephasing" in widget.flash_spoiler_info.text()
+    assert "Recommended:" in widget.flash_spoiler_info.text()
+    assert widget.flash_apply_recommended_grid.isEnabled()
+
+    widget.flash_auto_spoiler.setChecked(False)
+    assert widget.flash_spoiler_cycles_per_slice.isEnabled()
+    assert widget.flash_spoiler_cycles_per_voxel.isEnabled()
+    widget.flash_spoiler_cycles_per_slice.setValue(2.25)
+    widget.flash_slice_thickness_mm.setValue(4.0)
+    assert widget.flash_spoiler_cycles_per_slice.value() == pytest.approx(2.25)
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
 def test_sequence_workspace_derives_shaped_rf_bandwidth_and_shares_reference():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
@@ -942,15 +990,21 @@ def test_sequence_workspace_derives_shaped_rf_bandwidth_and_shares_reference():
     assert widget.ss_bssfp_spoiler_cycles.value() == pytest.approx(0.0)
     assert widget.ss_bssfp_spoiler_cycles_per_voxel.value() == pytest.approx(1.0)
     assert "Remaining coherent signal" in widget.ss_bssfp_spoiler_info.text()
-    assert widget.ss_bssfp_rf_bandwidth_hz.value() == pytest.approx(2100.0 / 2.33)
+    assert widget.ss_bssfp_rf_bandwidth_hz.value() == pytest.approx(
+        widget.ss_bssfp_rf_time_bandwidth_product.value() / 2.33 * 1000.0,
+        rel=2e-5,
+    )
     widget.ss_bssfp_rf_pulse_type.setCurrentText("SLR")
     assert not widget.ss_bssfp_rf_sinc_lobes.isEnabled()
-    assert widget.ss_bssfp_rf_time_bandwidth_product.isEnabled()
+    assert not widget.ss_bssfp_rf_time_bandwidth_product.isEnabled()
     assert widget.ss_bssfp_rf_slr_sharpness.isEnabled()
     widget.ss_bssfp_rf_time_bandwidth_product.setValue(4.0)
     widget.ss_bssfp_rf_slr_sharpness.setValue(5.0)
     parameters = widget._ss_bssfp_pulseq_parameters()
-    assert widget.ss_bssfp_rf_bandwidth_hz.value() == pytest.approx(4000.0 / 2.33)
+    assert widget.ss_bssfp_rf_bandwidth_hz.value() == pytest.approx(
+        widget.ss_bssfp_rf_time_bandwidth_product.value() / 2.33 * 1000.0,
+        rel=2e-5,
+    )
     assert parameters["spectral_rf_bandwidth_factor_hz_ms"] == pytest.approx(4000.0)
     assert parameters["spectral_rf_slr_sharpness"] == pytest.approx(5.0)
 
@@ -960,7 +1014,10 @@ def test_sequence_workspace_derives_shaped_rf_bandwidth_and_shares_reference():
     assert not widget.ss_bssfp_rf_slr_sharpness.isEnabled()
     widget.ss_bssfp_rf_duration_ms.setValue(2.0)
     widget.ss_bssfp_rf_sinc_lobes.setValue(5)
-    assert widget.ss_bssfp_rf_bandwidth_hz.value() == pytest.approx(3000.0)
+    assert widget.ss_bssfp_rf_bandwidth_hz.value() == pytest.approx(
+        widget.ss_bssfp_rf_time_bandwidth_product.value() / 2.0 * 1000.0,
+        rel=2e-5,
+    )
     parameters = widget._ss_bssfp_pulseq_parameters()
     assert parameters["spectral_rf_bandwidth_hz"] is None
     assert parameters["spectral_rf_bandwidth_factor_hz_ms"] == pytest.approx(6000.0)
@@ -968,17 +1025,24 @@ def test_sequence_workspace_derives_shaped_rf_bandwidth_and_shares_reference():
 
     widget.ss_bssfp_rf_pulse_type.setCurrentText("Gaussian")
     assert not widget.ss_bssfp_rf_sinc_lobes.isEnabled()
-    assert widget.ss_bssfp_rf_time_bandwidth_product.isEnabled()
+    assert not widget.ss_bssfp_rf_time_bandwidth_product.isEnabled()
     assert not widget.ss_bssfp_rf_slr_sharpness.isEnabled()
 
     widget.epi_rf_sinc_lobes.setValue(6)
-    assert widget.epi_rf_time_bandwidth_product.value() == pytest.approx(7.0)
     assert not widget.epi_rf_time_bandwidth_product.isEnabled()
+    assert widget.epi_rf_bandwidth_hz.value() == pytest.approx(
+        widget.epi_rf_time_bandwidth_product.value()
+        / widget.epi_rf_duration_ms.value()
+        * 1000.0,
+        rel=2e-5,
+    )
 
     widget.me_bssfp_rf_duration_ms.setValue(1.0)
-    widget.me_bssfp_rf_time_bandwidth_product.setValue(3.0)
     assert not widget.me_bssfp_rf_bandwidth_hz.isEnabled()
-    assert widget.me_bssfp_rf_bandwidth_hz.value() == pytest.approx(3000.0)
+    assert widget.me_bssfp_rf_bandwidth_hz.value() == pytest.approx(
+        widget.me_bssfp_rf_time_bandwidth_product.value() * 1000.0,
+        rel=2e-5,
+    )
 
     widget.field_strength_t.setValue(9.4)
     widget.nucleus.setCurrentText("C13")
@@ -989,6 +1053,88 @@ def test_sequence_workspace_derives_shaped_rf_bandwidth_and_shares_reference():
     ):
         assert advanced_parameters["field_strength_t"] == pytest.approx(9.4)
         assert advanced_parameters["nucleus"] == "C13"
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_all_generated_sequences_share_rf_controls_and_loaded_pulse_parameters():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    prefixes = (
+        "epi",
+        "csi",
+        "flash",
+        "bssfp",
+        "ss_bssfp",
+        "radial_me",
+        "me_bssfp",
+    )
+
+    for prefix in prefixes:
+        pulse_type = getattr(widget, f"{prefix}_rf_pulse_type")
+        assert [pulse_type.itemText(index) for index in range(pulse_type.count())] == [
+            "Sinc",
+            "SLR",
+            "Gaussian",
+            "Block",
+            "RF Pulse Designer",
+        ]
+        pulse_type.setCurrentText("SLR")
+        getattr(widget, f"{prefix}_rf_time_bandwidth_product").setValue(3.5)
+        getattr(widget, f"{prefix}_rf_slr_sharpness").setValue(5.0)
+        getattr(widget, f"{prefix}_rf_offset_hz").setValue(125.0)
+        parameters = widget._shared_rf_parameters(prefix)
+        assert parameters["rf_pulse_type"] == "slr"
+        assert parameters["rf_time_bandwidth_product"] == pytest.approx(4.0)
+        assert parameters["rf_slr_sharpness"] == pytest.approx(5.0)
+        assert parameters["rf_frequency_offset_hz"] == pytest.approx(125.0)
+        assert getattr(widget, f"{prefix}_rf_slr_sharpness").isEnabled()
+        assert hasattr(widget, f"{prefix}_rf_load_button")
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_mode_loads_a_free_mode_rf_pulse_file(monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    pulse_path = (
+        Path(__file__).parents[1]
+        / "rfpulses"
+        / "bruker"
+        / "13C_Ultimate_SPSP_Pulse_QuEMRT.exc"
+    )
+    monkeypatch.setattr(
+        "blochsimulator.ui.sequence_simulation_widget.QFileDialog.getOpenFileName",
+        lambda *args, **kwargs: (str(pulse_path), ""),
+    )
+
+    widget._load_sequence_rf_pulse("bssfp")
+    parameter_factories = {
+        "epi": widget._epi_pulseq_parameters,
+        "csi": widget._csi_pulseq_parameters,
+        "flash": widget._flash_pulseq_parameters,
+        "bssfp": widget._bssfp_pulseq_parameters,
+        "ss_bssfp": widget._ss_bssfp_pulseq_parameters,
+        "radial_me": widget._radial_me_bssfp_pulseq_parameters,
+        "me_bssfp": widget._me_bssfp_pulseq_parameters,
+    }
+    for prefix, parameter_factory in parameter_factories.items():
+        getattr(widget, f"{prefix}_rf_pulse_type").setCurrentText("RF Pulse Designer")
+        parameters = parameter_factory()
+        key_prefix = "spectral_" if prefix == "ss_bssfp" else ""
+
+        assert not getattr(widget, f"{prefix}_rf_duration_ms").isEnabled()
+        assert not getattr(widget, f"{prefix}_rf_offset_hz").isEnabled()
+        assert parameters[f"{key_prefix}rf_pulse_type"] == "designer"
+        assert parameters[f"{key_prefix}rf_custom_name"] == pulse_path.name
+        assert parameters[f"{key_prefix}rf_custom_waveform_hz"]
+        assert parameters[f"{key_prefix}rf_custom_flip_angle_deg"] == pytest.approx(
+            90.0
+        )
 
     widget.close()
     widget.deleteLater()
@@ -1017,6 +1163,10 @@ def test_ss_bssfp_matches_named_phantom_peaks_and_uses_phantom_voxel_size(
     )
     monkeypatch.setattr(widget, "_selected_designed_phantom", lambda: phantom)
 
+    widget.flash_auto_spoiler.setChecked(False)
+    widget.flash_spoiler_cycles_per_slice.setValue(4.0)
+    widget.flash_spoiler_cycles_per_voxel.setValue(0.0)
+
     widget.ss_bssfp_target_names.setText("Lac, Py")
     widget.refresh_object_summary()
     parameters = widget._ss_bssfp_pulseq_parameters()
@@ -1035,7 +1185,8 @@ def test_ss_bssfp_matches_named_phantom_peaks_and_uses_phantom_voxel_size(
     assert "grid 43.3%" in widget.flash_spoiler_info.text()
     widget.flash_spoiler_cycles_per_slice.setValue(6.0)
     assert "0, 0, 1" in widget.flash_spoiler_info.text()
-    assert "#15803d" in widget.flash_spoiler_info.styleSheet()
+    assert "#b45309" in widget.flash_spoiler_info.styleSheet()
+    assert "artificial subvoxel rephasing" in widget.flash_spoiler_info.text()
 
     widget.ss_bssfp_spoiler_cycles_per_voxel.setValue(4.0)
     assert "aliases" in widget.ss_bssfp_spoiler_info.text()
@@ -1109,21 +1260,25 @@ def test_sequence_workspace_configures_rf_pulse_for_epi_and_spiral(tmp_path):
     widget.epi_flip_angle_deg.setValue(35.0)
     widget.epi_rf_pulse_type.setCurrentText("SLR")
     widget.epi_rf_duration_ms.setValue(2.5)
+    widget.epi_slice_thickness_mm.setValue(20.0)
     widget.epi_rf_time_bandwidth_product.setValue(3.5)
-    widget.epi_rf_slr_sharpness.setCurrentText("5")
+    widget.epi_rf_slr_sharpness.setValue(5.0)
     app.processEvents()
 
     definitions = widget.program.metadata["definitions"]
     rf = widget.program.rf_events[0]
     assert definitions["RFPulseType"] == "slr"
     assert definitions["RFDuration"] == pytest.approx(2.5e-3)
-    assert definitions["RFTimeBandwidthProduct"] == pytest.approx(3.5)
+    expected_tbw = rf_time_bandwidth_product_from_envelope(rf.samples_hz)
+    assert definitions["RFTimeBandwidthProduct"] == pytest.approx(
+        expected_tbw, rel=1e-6
+    )
     assert definitions["RFSLRSharpness"] == pytest.approx(5.0)
     assert rf.samples_hz.size * rf.raster_s == pytest.approx(2.5e-3)
     assert 360.0 * abs(np.sum(rf.samples_hz) * rf.raster_s) == pytest.approx(
         35.0, abs=2e-3
     )
-    assert widget.epi_rf_time_bandwidth_product.isEnabled()
+    assert not widget.epi_rf_time_bandwidth_product.isEnabled()
     assert not widget.epi_rf_apodization.isEnabled()
     assert widget.epi_rf_slr_sharpness.isEnabled()
 
@@ -1139,7 +1294,7 @@ def test_sequence_workspace_configures_rf_pulse_for_epi_and_spiral(tmp_path):
     widget.epi_rf_pulse_type.setCurrentText("Gaussian")
     app.processEvents()
     assert widget.program.metadata["definitions"]["RFPulseType"] == "gaussian"
-    assert widget.epi_rf_time_bandwidth_product.isEnabled()
+    assert not widget.epi_rf_time_bandwidth_product.isEnabled()
     assert not widget.epi_rf_apodization.isEnabled()
     assert not widget.epi_rf_slr_sharpness.isEnabled()
 

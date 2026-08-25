@@ -496,7 +496,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.fov_spins = []
         for axis in "XYZ":
             matrix = QSpinBox()
-            matrix.setRange(1, 256)
+            matrix.setRange(1, 1025)
             global_row.addWidget(QLabel(f"N{axis.lower()}"))
             global_row.addWidget(matrix)
             self.matrix_spins.append(matrix)

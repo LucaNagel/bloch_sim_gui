@@ -19,6 +19,10 @@ import numpy as np
 import pyqtgraph as pg
 from pathlib import Path
 from ..simulator import RF_PULSE_TYPE_OPTIONS, design_rf_pulse
+from ..sequence.rf_pulses import (
+    analytic_rf_shape_parameter,
+    rf_envelope_integration_factor,
+)
 from .dialogs import PulseImportDialog
 
 
@@ -154,9 +158,28 @@ class RFPulseDesigner(QGroupBox):
         self.tbw.hide()
         # tbw_layout.addWidget(self.tbw)
         # control_layout.addLayout(tbw_layout)
-        self.tbw_auto_label = QLabel("Auto TBW (≈1/integfac): —")
+        self.tbw_auto_label = QLabel("Time-bandwidth product (auto): —")
         self.tbw_auto_label.setStyleSheet("color: gray;")
         control_layout.addWidget(self.tbw_auto_label)
+
+        design_tbw_layout = QHBoxLayout()
+        design_tbw_layout.addWidget(QLabel("Legacy shape parameter:"))
+        self.design_tbw = QDoubleSpinBox()
+        self.design_tbw.setObjectName(f"{prefix}design_tbw")
+        self.design_tbw.setRange(0.1, 100.0)
+        self.design_tbw.setDecimals(2)
+        self.design_tbw.setSingleStep(0.5)
+        self.design_tbw.setValue(4.0)
+        self.design_tbw.setReadOnly(True)
+        self.design_tbw.setButtonSymbols(QDoubleSpinBox.NoButtons)
+        self.design_tbw.setToolTip(
+            "Compatibility value; TBW is calculated automatically"
+        )
+        design_tbw_layout.addWidget(self.design_tbw)
+        self.design_tbw_container = QWidget()
+        self.design_tbw_container.setLayout(design_tbw_layout)
+        self.design_tbw_container.setVisible(False)
+        control_layout.addWidget(self.design_tbw_container)
 
         # RF Pulse bandwidth (computed from pulse shape; not user-set)
         # rf_bandwidth_layout = QHBoxLayout()
@@ -171,7 +194,9 @@ class RFPulseDesigner(QGroupBox):
         self.rf_bandwidth.hide()
         # rf_bandwidth_layout.addWidget(self.rf_bandwidth)
         # control_layout.addLayout(rf_bandwidth_layout)
-        self.rf_bandwidth_auto_label = QLabel("Auto RF Bandwidth (integfac / duration)")
+        self.rf_bandwidth_auto_label = QLabel(
+            "RF bandwidth (auto = TBW / duration): — Hz"
+        )
         self.rf_bandwidth_auto_label.setStyleSheet("color: gray;")
         control_layout.addWidget(self.rf_bandwidth_auto_label)
 
@@ -187,6 +212,24 @@ class RFPulseDesigner(QGroupBox):
         self.lobes_container = QWidget()
         self.lobes_container.setLayout(lobes_layout)
         control_layout.addWidget(self.lobes_container)
+
+        slr_layout = QHBoxLayout()
+        slr_layout.addWidget(QLabel("SLR sharpness:"))
+        self.slr_sharpness = QDoubleSpinBox()
+        self.slr_sharpness.setObjectName(f"{prefix}slr_sharpness")
+        self.slr_sharpness.setRange(0.1, 20.0)
+        self.slr_sharpness.setDecimals(2)
+        self.slr_sharpness.setSingleStep(0.5)
+        self.slr_sharpness.setValue(1.0)
+        self.slr_sharpness.setToolTip(
+            "Higher sharpness produces a narrower SLR transition and more "
+            "temporal lobes"
+        )
+        self.slr_sharpness.valueChanged.connect(self.update_pulse)
+        slr_layout.addWidget(self.slr_sharpness)
+        self.slr_sharpness_container = QWidget()
+        self.slr_sharpness_container.setLayout(slr_layout)
+        control_layout.addWidget(self.slr_sharpness_container)
 
         # Apodization
         apod_layout = QHBoxLayout()
@@ -302,76 +345,93 @@ class RFPulseDesigner(QGroupBox):
             self.duration.blockSignals(was_blocked)
         self.update_pulse()
 
-    def _update_tbw_auto(self, integration_factor: float):
-        """Set TBW readout from an integration factor (heuristic: TBW ≈ 1/integfac)."""
+    def _update_tbw_auto(
+        self, integration_factor: float, time_bandwidth_product: float = None
+    ):
+        """Set the readout from an explicit bandwidth factor or integration factor."""
         if not hasattr(self, "tbw") or not hasattr(self, "tbw_auto_label"):
             return
-        if (
-            integration_factor is None
-            or not np.isfinite(integration_factor)
-            or integration_factor <= 0
-        ):
-            self.tbw_auto_label.setText("Auto TBW (≈1/integfac): —")
+        explicit_tbw = (
+            time_bandwidth_product is not None
+            and np.isfinite(time_bandwidth_product)
+            and time_bandwidth_product > 0
+        )
+        valid_integration_factor = (
+            integration_factor is not None
+            and np.isfinite(integration_factor)
+            and integration_factor > 0
+        )
+        if not explicit_tbw and not valid_integration_factor:
+            self.tbw_auto_label.setText("Time-bandwidth product (auto): —")
             self.last_integration_factor = 1.0
             return
-        tbw_auto = 1.0 / integration_factor
-        self.tbw_auto_label.setText(f"Auto TBW (≈1/integfac): {tbw_auto:.3f}")
-        self.last_integration_factor = float(integration_factor)
+        tbw_auto = (
+            float(time_bandwidth_product)
+            if explicit_tbw
+            else 1.0 / float(integration_factor)
+        )
+        self.tbw_auto_label.setText(f"Time-bandwidth product (auto): {tbw_auto:.3f}")
+        if valid_integration_factor:
+            self.last_integration_factor = float(integration_factor)
         # Keep the control in sync without retriggering pulse design
         self.tbw.blockSignals(True)
         self.tbw.setValue(tbw_auto)
         self.tbw.blockSignals(False)
 
-    def _update_rf_bandwidth_auto(self, integration_factor: float, duration: float):
-        """Set RF Bandwidth readout from an integration factor (heuristic: RF Bandwidth ≈ integfac / duration)."""
+    def _update_rf_bandwidth_auto(
+        self,
+        integration_factor: float,
+        duration: float,
+        time_bandwidth_product: float = None,
+    ):
+        """Set RF bandwidth in Hz from the shape-intrinsic TBW and duration."""
         if not hasattr(self, "rf_bandwidth") or not hasattr(
             self, "rf_bandwidth_auto_label"
         ):
             return
-        if (
-            integration_factor is None
-            or not np.isfinite(integration_factor)
-            or integration_factor <= 0
-        ):
-            self.rf_bandwidth_auto_label.setText("Auto RF Bandwidth (tbw/duration): —")
+        explicit_tbw = (
+            time_bandwidth_product is not None
+            and np.isfinite(time_bandwidth_product)
+            and time_bandwidth_product > 0
+        )
+        valid_integration_factor = (
+            integration_factor is not None
+            and np.isfinite(integration_factor)
+            and integration_factor > 0
+        )
+        if (not explicit_tbw and not valid_integration_factor) or duration <= 0:
+            self.rf_bandwidth_auto_label.setText(
+                "RF bandwidth (auto = TBW / duration): — Hz"
+            )
             self.last_integration_factor = 1.0
             return
-        tbw_auto = 1.0 / integration_factor if integration_factor != 0 else 1.0
-        rf_bandwidth_auto = tbw_auto / duration if duration != 0 else 1.0
-        self.rf_bandwidth_auto_label.setText(
-            f"Auto RF Bandwidth (tbw/duration): {rf_bandwidth_auto:.3f}"
+        tbw_auto = (
+            float(time_bandwidth_product)
+            if explicit_tbw
+            else 1.0 / float(integration_factor)
         )
-        self.last_integration_factor = float(integration_factor)
+        rf_bandwidth_auto = tbw_auto / duration
+        self.rf_bandwidth_auto_label.setText(
+            f"RF bandwidth (auto = TBW / duration): {rf_bandwidth_auto:.3f} Hz"
+        )
+        if valid_integration_factor:
+            self.last_integration_factor = float(integration_factor)
         # Keep the control in sync without retriggering pulse design
         self.rf_bandwidth.blockSignals(True)
         self.rf_bandwidth.setValue(rf_bandwidth_auto)
         self.rf_bandwidth.blockSignals(False)
 
     def _design_tbw_for_type(self, pulse_type: str) -> float:
-        """Return a canonical TBW parameter for the designer (not user-controlled)."""
+        """Return the fixed construction parameter for an analytic pulse family."""
         pt = pulse_type.lower()
-        if pt in ("sinc", "gaussian"):
-            return 4.0  # typical shaping parameter
         if pt.startswith("adiabatic") or pt in ("bir-4", "bir4"):
             return 4.0  # modulation parameter for adiabatic-style pulses
-        return 1.0  # rectangular and default
+        return analytic_rf_shape_parameter(pt, self.sinc_lobes.value())
 
     def _compute_integration_factor_from_wave(self, b1_wave, t_wave):
-        """Compute integration factor |∫shape dt| / duration for a given complex waveform."""
+        """Compute the shape-only integration factor of a complex waveform."""
         try:
-            b1_wave = np.asarray(b1_wave, dtype=complex)
-            t_wave = np.asarray(t_wave, dtype=float)
-            if b1_wave.size < 2 or t_wave.size < 2:
-                return 1.0
-            duration = float(t_wave[-1] - t_wave[0])
-            dt = float(np.median(np.diff(t_wave)))
-            peak = np.max(np.abs(b1_wave)) if np.any(np.abs(b1_wave)) else 1.0
-            shape = b1_wave / peak if peak != 0 else b1_wave
-            area = np.trapezoid(shape, dx=dt)
-            aligned = np.real(area * np.exp(-1j * np.angle(area)))
-            if not np.isfinite(aligned) or abs(aligned) < 1e-12:
-                return 1.0
-            return abs(aligned) / max(duration, 1e-12)
+            return rf_envelope_integration_factor(b1_wave)
         except Exception:
             return 1.0
 
@@ -429,6 +489,7 @@ class RFPulseDesigner(QGroupBox):
         desc_map = {
             "rectangle": "<b>Rectangular Pulse</b><br>Constant amplitude hard pulse. Broad excitation bandwidth.",
             "sinc": "<b>Sinc Pulse</b><br>Selective excitation. Fourier transform of a rectangular slice profile. Use 'Lobes' to control bandwidth/sharpness.",
+            "slr": "<b>SLR Pulse</b><br>Small-tip linear-phase beta-polynomial design shared with Sequence Mode. Sharpness changes the pulse shape; the time-bandwidth product is calculated from the resulting waveform.",
             "gaussian": "<b>Gaussian Pulse</b><br>Selective pulse with no side lobes in time domain. Smooth excitation profile.",
             "hermite": "<b>Hermite Pulse</b><br>Short selective pulse derived from Hermite polynomials. Good for short TR sequences.",
             "adiabatic half passage": "<b>Adiabatic Half Passage (AHP)</b><br>Frequency sweep from off-resonance to resonance (or vice versa). Generates robust 90° excitation insensitive to B1 inhomogeneity (above a threshold).",
@@ -450,6 +511,8 @@ class RFPulseDesigner(QGroupBox):
 
         # Show/hide controls based on type
         self.lobes_container.setVisible(pulse_type == "sinc")
+        self.design_tbw_container.setVisible(False)
+        self.slr_sharpness_container.setVisible(pulse_type == "slr")
         self.custom_info_label.setVisible(pulse_type == "custom")
 
         duration = self.duration.value() / 1000  # Convert to seconds
@@ -500,19 +563,30 @@ class RFPulseDesigner(QGroupBox):
             peak = np.max(np.abs(b1)) if np.any(np.abs(b1)) else 1.0
             shape = b1 / peak if peak != 0 else b1
 
-            # Get integration factor for TBW display
+            # Prefer metadata for the unmodified source pulse. Apodization
+            # creates a new shape, so its factors must be recomputed.
             integfac = 1.0
+            explicit_tbw = None
             if (
-                self.loaded_pulse_metadata
+                window_type == "None"
+                and self.loaded_pulse_metadata
+                and hasattr(self.loaded_pulse_metadata, "bwfac")
+                and np.isfinite(self.loaded_pulse_metadata.bwfac)
+                and self.loaded_pulse_metadata.bwfac > 0
+            ):
+                explicit_tbw = float(self.loaded_pulse_metadata.bwfac)
+            if (
+                window_type == "None"
+                and self.loaded_pulse_metadata
                 and hasattr(self.loaded_pulse_metadata, "integfac")
                 and self.loaded_pulse_metadata.integfac > 0
             ):
                 integfac = float(self.loaded_pulse_metadata.integfac)
             else:
-                # Recompute
                 integfac = self._compute_integration_factor_from_wave(b1, time)
 
-            self._update_tbw_auto(integfac)
+            self._update_tbw_auto(integfac, explicit_tbw)
+            self._update_rf_bandwidth_auto(integfac, duration, explicit_tbw)
             self.last_integration_factor = float(integfac)
 
             # Amplitude scaling: B1 override vs Flip Angle
@@ -538,11 +612,7 @@ class RFPulseDesigner(QGroupBox):
             return
 
         # Handle Standard Pulses
-        # Calculate TBW based on pulse type
-        if pulse_type == "sinc":
-            design_tbw = 2.0 * max(int(self.sinc_lobes.value()), 1)
-        else:
-            design_tbw = self._design_tbw_for_type(pulse_type)
+        design_tbw = self._design_tbw_for_type(pulse_type)
 
         # Target point count
         if self.target_dt and self.target_dt > 0:
@@ -553,7 +623,13 @@ class RFPulseDesigner(QGroupBox):
 
         # 1. Generate base pulse
         b1_base, time = design_rf_pulse(
-            pulse_type, duration, flip, design_tbw, npoints, freq_offset=0.0
+            pulse_type,
+            duration,
+            flip,
+            design_tbw,
+            npoints,
+            freq_offset=0.0,
+            slr_sharpness=self.slr_sharpness.value(),
         )
 
         dt = duration / len(b1_base) if len(b1_base) > 0 else 1e-6
@@ -579,7 +655,7 @@ class RFPulseDesigner(QGroupBox):
         aligned_area = np.real(area * np.exp(1j * opt_phase))
         if not np.isfinite(aligned_area) or abs(aligned_area) < 1e-12:
             aligned_area = 1e-12
-        integration_factor = abs(aligned_area) / max(duration, 1e-12)
+        integration_factor = self._compute_integration_factor_from_wave(shape, time)
 
         self._update_tbw_auto(integration_factor)
         self.last_integration_factor = float(integration_factor)
@@ -697,7 +773,14 @@ class RFPulseDesigner(QGroupBox):
                 # Update info label
                 tbw_hint = None
                 try:
-                    if hasattr(metadata, "integfac") and metadata.integfac not in (
+                    if (
+                        hasattr(metadata, "bwfac")
+                        and metadata.bwfac is not None
+                        and np.isfinite(metadata.bwfac)
+                        and metadata.bwfac > 0
+                    ):
+                        tbw_hint = float(metadata.bwfac)
+                    elif hasattr(metadata, "integfac") and metadata.integfac not in (
                         None,
                         0,
                     ):
@@ -742,6 +825,8 @@ class RFPulseDesigner(QGroupBox):
             "phase": self.phase.value(),
             "freq_offset": self.freq_offset.value(),
             "sinc_lobes": self.sinc_lobes.value(),
+            "time_bandwidth_product": self.tbw.value(),
+            "slr_sharpness": self.slr_sharpness.value(),
             "apodization": self.apodization_combo.currentText(),
         }
         # Include loaded pulse data
@@ -765,6 +850,8 @@ class RFPulseDesigner(QGroupBox):
             self.phase.blockSignals(True)
             self.freq_offset.blockSignals(True)
             self.sinc_lobes.blockSignals(True)
+            self.design_tbw.blockSignals(True)
+            self.slr_sharpness.blockSignals(True)
             self.apodization_combo.blockSignals(True)
 
             try:
@@ -782,6 +869,8 @@ class RFPulseDesigner(QGroupBox):
                     self.freq_offset.setValue(state["freq_offset"])
                 if "sinc_lobes" in state:
                     self.sinc_lobes.setValue(state["sinc_lobes"])
+                if "slr_sharpness" in state:
+                    self.slr_sharpness.setValue(state["slr_sharpness"])
                 if "apodization" in state:
                     self.apodization_combo.setCurrentText(state["apodization"])
 
@@ -800,6 +889,8 @@ class RFPulseDesigner(QGroupBox):
                 self.phase.blockSignals(False)
                 self.freq_offset.blockSignals(False)
                 self.sinc_lobes.blockSignals(False)
+                self.design_tbw.blockSignals(False)
+                self.slr_sharpness.blockSignals(False)
                 self.apodization_combo.blockSignals(False)
 
             # Trigger update once

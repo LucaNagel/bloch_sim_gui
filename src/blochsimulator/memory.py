@@ -7,6 +7,7 @@ from typing import Optional, Tuple
 GIB = 1024**3
 DEFAULT_MINIMUM_RESERVE_BYTES = 2 * GIB
 DEFAULT_RESERVE_FRACTION = 0.10
+LOW_MEMORY_BUDGET_FRACTION = 0.25
 EMERGENCY_RESERVE_BYTES = 512 * 1024**2
 FALLBACK_MEMORY_BUDGET_BYTES = 512 * 1024**2
 MEMORY_ERROR_PREFIX = "Memory limit exceeded:"
@@ -78,10 +79,13 @@ def resolve_memory_budget(
 ) -> MemoryBudget:
     """Resolve the safe allocation budget for one simulation.
 
-    Automatic mode keeps the larger of 2 GiB and 10% of physical RAM free.
-    Custom-reserve mode uses the user's reserve. Fixed-limit mode still keeps
-    a small emergency reserve so a stale setting cannot consume all currently
-    available memory.
+    Automatic mode normally keeps the larger of 2 GiB and 10% of physical RAM
+    free. If enforcing that target would leave less than the low-memory
+    allowance, a quarter of the currently available RAM (capped at 512 MiB)
+    remains usable so small simulations are not rejected by a zero-byte
+    budget. Custom-reserve mode uses the user's reserve. Fixed-limit mode still
+    keeps a small emergency reserve so a stale setting cannot consume all
+    currently available memory.
     """
     if explicit_limit_bytes is not None:
         if explicit_limit_bytes <= 0:
@@ -112,8 +116,14 @@ def resolve_memory_budget(
             if total_bytes is not None
             else 0
         )
-        reserve_bytes = max(DEFAULT_MINIMUM_RESERVE_BYTES, proportional_reserve)
-        limit_bytes = max(0, available_bytes - reserve_bytes)
+        target_reserve_bytes = max(DEFAULT_MINIMUM_RESERVE_BYTES, proportional_reserve)
+        target_reserve_budget = max(0, available_bytes - target_reserve_bytes)
+        low_memory_budget = min(
+            FALLBACK_MEMORY_BUDGET_BYTES,
+            int(available_bytes * LOW_MEMORY_BUDGET_FRACTION),
+        )
+        limit_bytes = max(target_reserve_budget, low_memory_budget)
+        reserve_bytes = available_bytes - limit_bytes
     elif policy.mode == "custom_reserve":
         reserve_bytes = policy.reserve_bytes
         limit_bytes = max(0, available_bytes - reserve_bytes)

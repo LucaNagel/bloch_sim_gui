@@ -10,11 +10,18 @@ import numpy as np
 
 @dataclass(frozen=True)
 class SpinSampling:
-    """Midpoint spin grid used to integrate magnetization inside each voxel.
+    """Spin points used to integrate magnetization inside each voxel.
 
     ``counts_xyz`` is always expressed in physical object X/Y/Z order. Missing
     phantom dimensions must retain their singleton count. The default therefore
     reproduces the historical one-spin-per-voxel simulation exactly.
+
+    ``method='midpoint'`` is the regular tensor-product midpoint rule. It is
+    symmetric and converges predictably, but repeated integer-cycle spoilers can
+    rephase it exactly. ``method='stratified'`` places one deterministic,
+    independently jittered point in every tensor-product stratum. It retains
+    equal weights and spatial coverage without the short exact recurrence of a
+    regular grid.
     """
 
     counts_xyz: tuple[int, int, int] = (1, 1, 1)
@@ -38,8 +45,8 @@ class SpinSampling:
                 )
             validated.append(value)
         method = str(self.method).strip().lower()
-        if method != "midpoint":
-            raise ValueError("spin sampling method must be 'midpoint'")
+        if method not in {"midpoint", "stratified"}:
+            raise ValueError("spin sampling method must be 'midpoint' or 'stratified'")
         object.__setattr__(self, "counts_xyz", tuple(validated))
         object.__setattr__(self, "method", method)
         if self.selected_indices is not None:
@@ -104,12 +111,27 @@ class SpinSampling:
 
     def normalized_offsets_and_weights(self) -> tuple[np.ndarray, np.ndarray]:
         """Return fractional voxel offsets and normalized quadrature weights."""
-        axes = [
-            (np.arange(count, dtype=np.float64) + 0.5) / count - 0.5
-            for count in self.counts_xyz
-        ]
-        x, y, z = np.meshgrid(*axes, indexing="ij")
-        offsets = np.column_stack((x.ravel(), y.ravel(), z.ravel()))
+        cell_axes = [np.arange(count, dtype=np.int64) for count in self.counts_xyz]
+        cell_x, cell_y, cell_z = np.meshgrid(*cell_axes, indexing="ij")
+        cells = np.column_stack((cell_x.ravel(), cell_y.ravel(), cell_z.ravel()))
+        if self.method == "midpoint":
+            within_cell = np.full(cells.shape, 0.5, dtype=np.float64)
+        else:
+            point_indices = np.arange(cells.shape[0], dtype=np.uint64)
+            within_cell = np.column_stack(
+                (
+                    _deterministic_unit_interval(point_indices, 0),
+                    _deterministic_unit_interval(point_indices, 1),
+                    _deterministic_unit_interval(point_indices, 2),
+                )
+            )
+            # A singleton axis has no resolved intravoxel extent. Keeping its
+            # point centered avoids a deterministic positional bias.
+            for axis_index, count in enumerate(self.counts_xyz):
+                if count == 1:
+                    within_cell[:, axis_index] = 0.5
+        counts = np.asarray(self.counts_xyz, dtype=np.float64)
+        offsets = (cells + within_cell) / counts - 0.5
         weights = np.full(
             self.grid_spins_per_voxel,
             1.0 / self.grid_spins_per_voxel,
@@ -154,6 +176,23 @@ def coerce_spin_sampling(value=None) -> SpinSampling:
     raise TypeError(
         "spin_sampling must be SpinSampling, three XYZ counts, one integer, or None"
     )
+
+
+def _deterministic_unit_interval(indices: np.ndarray, axis_index: int) -> np.ndarray:
+    """Map integer point IDs to reproducible, decorrelated values in ``(0, 1)``.
+
+    This is a vectorized SplitMix64 finalizer with a distinct stream per axis.
+    It is deliberately local and stateless: simulation results never depend on
+    NumPy's process-wide random-number generator.
+    """
+    values = np.asarray(indices, dtype=np.uint64) + np.uint64(
+        0x9E3779B97F4A7C15 * (int(axis_index) + 1) & ((1 << 64) - 1)
+    )
+    values = (values ^ (values >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+    values = (values ^ (values >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    values ^= values >> np.uint64(31)
+    mantissa = values >> np.uint64(11)
+    return (mantissa.astype(np.float64) + 0.5) * (1.0 / float(1 << 53))
 
 
 def phantom_voxel_basis_m(phantom) -> np.ndarray:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import warnings
 from typing import Mapping, Sequence
 
@@ -15,7 +14,7 @@ from .encoding import (
     resolve_encoding_frame,
     set_pulseq_encoding_definitions,
 )
-from .rf_pulses import design_rf_envelope
+from .rf_pulses import make_pulseq_rf_events, set_rf_definitions
 from .scanner import ScannerParameters
 from .bssfp_phase import (
     advance_bssfp_phase_deg,
@@ -197,34 +196,6 @@ def _adc_dwell_for_bandwidth(
     return float(best_steps * adc_raster_s)
 
 
-def _rf_event(
-    pp,
-    system,
-    envelope: np.ndarray,
-    *,
-    flip_angle_deg: float,
-    duration_s: float,
-    bandwidth_hz: float,
-):
-    return pp.make_arbitrary_rf(
-        signal=envelope,
-        flip_angle=np.deg2rad(flip_angle_deg),
-        dwell=system.rf_raster_time,
-        bandwidth=bandwidth_hz,
-        time_bw_product=bandwidth_hz * duration_s,
-        delay=system.rf_dead_time,
-        system=system,
-        use="excitation",
-    )
-
-
-def _zero_amplitude_rf(reference_rf):
-    """Keep an exact zero-flip RF timing marker in Pulseq output."""
-    event = copy.deepcopy(reference_rf)
-    event.signal = np.zeros_like(event.signal)
-    return event
-
-
 def _add_rf_block(sequence, rf_event, *events):
     """Add RF blocks while suppressing Pulseq's harmless 0/0 shape warning."""
     if np.any(np.abs(rf_event.signal) > 0):
@@ -251,6 +222,11 @@ def make_pulseq_spectral_selective_bssfp(
     spectral_rf_pulse_type: str = "gaussian",
     spectral_rf_apodization: float = 0.0,
     spectral_rf_slr_sharpness: float = 1.0,
+    spectral_rf_custom_waveform_hz: Sequence[complex] | None = None,
+    spectral_rf_custom_raster_s: float | None = None,
+    spectral_rf_custom_flip_angle_deg: float | None = None,
+    spectral_rf_custom_name: str | None = None,
+    spectral_rf_frequency_offset_hz: float = 0.0,
     sampling_bandwidth_hz: float = 10_000.0,
     encoding_duration_s: float | None = None,
     repetition_time_s: float | None = 6.29e-3,
@@ -396,6 +372,8 @@ def make_pulseq_spectral_selective_bssfp(
         spectral_rf_bandwidth_factor_hz_ms = rf_tbw * 1000.0
     if not np.isfinite(spectral_rf_bandwidth_hz) or spectral_rf_bandwidth_hz <= 0:
         raise ValueError("spectral_rf_bandwidth_hz must be positive and finite")
+    if not np.isfinite(spectral_rf_frequency_offset_hz):
+        raise ValueError("spectral_rf_frequency_offset_hz must be finite")
 
     system = _make_system(
         pp,
@@ -406,40 +384,30 @@ def make_pulseq_spectral_selective_bssfp(
     sequence = pp.Sequence(system)
     raster = system.block_duration_raster
     rf_tbw = float(spectral_rf_bandwidth_hz) * float(spectral_rf_duration_s)
-    envelope, actual_rf_duration, _, pulse_type = design_rf_envelope(
+    rf_events, actual_rf_duration, effective_rf_tbw, pulse_type = make_pulseq_rf_events(
+        pp,
+        system,
+        flip_angles_deg=(
+            1.0,
+            *flip_angles,
+            *(angle / 2.0 for angle in flip_angles),
+        ),
         pulse_type=spectral_rf_pulse_type,
         duration_s=spectral_rf_duration_s,
-        raster_s=system.rf_raster_time,
         time_bandwidth_product=rf_tbw,
         apodization=spectral_rf_apodization,
         slr_sharpness=spectral_rf_slr_sharpness,
+        custom_waveform_hz=spectral_rf_custom_waveform_hz,
+        custom_raster_s=spectral_rf_custom_raster_s,
+        custom_flip_angle_deg=spectral_rf_custom_flip_angle_deg,
+        frequency_offset_hz=spectral_rf_frequency_offset_hz,
     )
-    if bandwidth_is_derived:
-        spectral_rf_bandwidth_hz = rf_tbw / actual_rf_duration
-        spectral_rf_bandwidth_factor_hz_ms = rf_tbw * 1000.0
-    timing_rf = _rf_event(
-        pp,
-        system,
-        envelope,
-        flip_angle_deg=1.0,
-        duration_s=actual_rf_duration,
-        bandwidth_hz=spectral_rf_bandwidth_hz,
-    )
-    rfs = tuple(
-        (
-            _rf_event(
-                pp,
-                system,
-                envelope,
-                flip_angle_deg=angle,
-                duration_s=actual_rf_duration,
-                bandwidth_hz=spectral_rf_bandwidth_hz,
-            )
-            if angle > 0
-            else _zero_amplitude_rf(timing_rf)
-        )
-        for angle in flip_angles
-    )
+    spectral_rf_bandwidth_hz = effective_rf_tbw / actual_rf_duration
+    spectral_rf_bandwidth_factor_hz_ms = effective_rf_tbw * 1000.0
+    timing_rf = rf_events[0]
+    target_count = len(flip_angles)
+    rfs = tuple(rf_events[1 : 1 + target_count])
+    alpha_halves = tuple(rf_events[1 + target_count :])
 
     dwell = _adc_dwell_for_bandwidth(
         sample_count=n_read,
@@ -624,31 +592,21 @@ def make_pulseq_spectral_selective_bssfp(
         rf = rfs[target_index]
         rf_timing = rf
         target_offset = target_offsets[target_index]
+        rf_offset = target_offset + spectral_rf_frequency_offset_hz
         receiver_offset = receiver_offsets[target_index]
         frame_rf_center, _ = pp.calc_rf_center(rf_timing)
         if use_alpha_half:
-            alpha_half = (
-                _rf_event(
-                    pp,
-                    system,
-                    envelope,
-                    flip_angle_deg=flip_angles[target_index] / 2,
-                    duration_s=actual_rf_duration,
-                    bandwidth_hz=spectral_rf_bandwidth_hz,
-                )
-                if flip_angles[target_index] > 0
-                else _zero_amplitude_rf(reference_rf)
-            )
+            alpha_half = alpha_halves[target_index]
             alpha_timing = alpha_half
             alpha_center, _ = pp.calc_rf_center(alpha_timing)
-            alpha_half.freq_offset = target_offset
+            alpha_half.freq_offset = rf_offset
             # Treat the starter as the preceding member of the RF phase-cycle
             # train. With the published same-phase SS-bSSFP default both the
             # alpha/2 starter and acquired pulses therefore have the same
             # programmed phase.
             alpha_half.phase_offset = pulseq_phase_offset_rad(
                 wrap_phase_deg(rf_phase_start_deg + rf_phase_increment_deg),
-                frequency_offset_hz=target_offset,
+                frequency_offset_hz=rf_offset,
                 event_center_s=alpha_center,
             )
             alpha_block_duration = (
@@ -682,19 +640,19 @@ def make_pulseq_spectral_selective_bssfp(
             common_phase = advance_bssfp_phase_deg(
                 common_phase,
                 elapsed_s=alpha_half_center_spacing_s,
-                frequency_offset_hz=target_offset,
+                frequency_offset_hz=rf_offset,
             )
         for _ in range(dummy_repetitions):
-            rf.freq_offset = target_offset
+            rf.freq_offset = rf_offset
             rf.phase_offset = pulseq_phase_offset_rad(
                 common_phase,
-                frequency_offset_hz=target_offset,
+                frequency_offset_hz=rf_offset,
                 event_center_s=frame_rf_center,
             )
             common_phase = advance_bssfp_phase_deg(
                 common_phase,
                 elapsed_s=actual_tr,
-                frequency_offset_hz=target_offset,
+                frequency_offset_hz=rf_offset,
                 phase_increment_deg=rf_phase_increment_deg,
             )
             _add_rf_block(sequence, rf, rf_block_padding)
@@ -708,10 +666,10 @@ def make_pulseq_spectral_selective_bssfp(
 
         for partition, kz in enumerate(kz_areas):
             for line, ky in enumerate(ky_areas):
-                rf.freq_offset = target_offset
+                rf.freq_offset = rf_offset
                 rf.phase_offset = pulseq_phase_offset_rad(
                     common_phase,
-                    frequency_offset_hz=target_offset,
+                    frequency_offset_hz=rf_offset,
                     event_center_s=frame_rf_center,
                 )
                 adc.freq_offset = receiver_offset
@@ -728,7 +686,7 @@ def make_pulseq_spectral_selective_bssfp(
                 common_phase = advance_bssfp_phase_deg(
                     common_phase,
                     elapsed_s=actual_tr,
-                    frequency_offset_hz=target_offset,
+                    frequency_offset_hz=rf_offset,
                     phase_increment_deg=rf_phase_increment_deg,
                 )
                 gy_pre = make_role_trapezoid(
@@ -833,6 +791,19 @@ def make_pulseq_spectral_selective_bssfp(
     sequence.set_definition("SpectralRFFWHM", spectral_rf_fwhm_hz)
     if pulse_type == "slr":
         sequence.set_definition("SpectralSLRSharpness", spectral_rf_slr_sharpness)
+    set_rf_definitions(
+        sequence,
+        prefix="Spectral",
+        pulse_type=pulse_type,
+        requested_duration_s=spectral_rf_duration_s,
+        actual_duration_s=actual_rf_duration,
+        time_bandwidth_product=effective_rf_tbw,
+        apodization=spectral_rf_apodization,
+        slr_sharpness=spectral_rf_slr_sharpness,
+        custom_name=spectral_rf_custom_name,
+        custom_flip_angle_deg=spectral_rf_custom_flip_angle_deg,
+        frequency_offset_hz=spectral_rf_frequency_offset_hz,
+    )
     sequence.set_definition("SamplingBandwidth", 1.0 / dwell)
     sequence.set_definition("ReadoutBandwidthHz", 1.0 / dwell)
     sequence.set_definition("ADCDwell", dwell)
@@ -883,43 +854,6 @@ def make_pulseq_spectral_selective_bssfp(
     return sequence
 
 
-def _make_me_bssfp_rf(
-    pp,
-    system,
-    *,
-    pulse_type: str,
-    flip_angle_deg: float,
-    duration_s: float,
-    bandwidth_hz: float,
-):
-    normalized = str(pulse_type).strip().lower().replace("-", "_")
-    if normalized in {"gauss", "gaussian"}:
-        return (
-            pp.make_gauss_pulse(
-                flip_angle=np.deg2rad(flip_angle_deg),
-                duration=duration_s,
-                bandwidth=bandwidth_hz,
-                apodization=0.0,
-                delay=system.rf_dead_time,
-                system=system,
-                use="excitation",
-            ),
-            "gaussian",
-        )
-    if normalized in {"block", "hard", "rectangular"}:
-        return (
-            pp.make_block_pulse(
-                flip_angle=np.deg2rad(flip_angle_deg),
-                duration=duration_s,
-                delay=system.rf_dead_time,
-                system=system,
-                use="excitation",
-            ),
-            "block",
-        )
-    raise ValueError("rf_pulse_type must be 'gaussian' or 'block'")
-
-
 def make_pulseq_me_bssfp(
     *,
     fov_m: Sequence[float] = (56e-3, 28e-3, 24.5e-3),
@@ -932,6 +866,13 @@ def make_pulseq_me_bssfp(
     rf_pulse_type: str = "gaussian",
     rf_duration_s: float = 0.5e-3,
     rf_bandwidth_hz: float = 5480.0,
+    rf_time_bandwidth_product: float | None = None,
+    rf_apodization: float = 0.5,
+    rf_slr_sharpness: float = 1.0,
+    rf_custom_waveform_hz: Sequence[complex] | None = None,
+    rf_custom_raster_s: float | None = None,
+    rf_custom_flip_angle_deg: float | None = None,
+    rf_custom_name: str | None = None,
     rf_frequency_offset_hz: float = 0.0,
     receiver_frequency_offset_hz: float = -460.0,
     encoding_duration_s: float = 0.5e-3,
@@ -1011,6 +952,8 @@ def make_pulseq_me_bssfp(
         legacy_max_slew_tms=1000.0,
     )
     sequence = pp.Sequence(system)
+    if rf_time_bandwidth_product is None:
+        rf_time_bandwidth_product = float(rf_bandwidth_hz) * float(rf_duration_s)
     raster = system.block_duration_raster
     dwell = _adc_dwell_for_bandwidth(
         sample_count=n_read,
@@ -1074,22 +1017,23 @@ def make_pulseq_me_bssfp(
             pp.make_delay(between_echo_duration) if between_echo_duration else None
         )
 
-    rf, normalized_rf_type = _make_me_bssfp_rf(
-        pp,
-        system,
-        pulse_type=rf_pulse_type,
-        flip_angle_deg=flip_angle_deg,
-        duration_s=rf_duration_s,
-        bandwidth_hz=rf_bandwidth_hz,
+    rf_events, actual_rf_duration_s, effective_rf_tbw, normalized_rf_type = (
+        make_pulseq_rf_events(
+            pp,
+            system,
+            flip_angles_deg=(flip_angle_deg, flip_angle_deg / 2),
+            pulse_type=rf_pulse_type,
+            duration_s=rf_duration_s,
+            time_bandwidth_product=rf_time_bandwidth_product,
+            apodization=rf_apodization,
+            slr_sharpness=rf_slr_sharpness,
+            custom_waveform_hz=rf_custom_waveform_hz,
+            custom_raster_s=rf_custom_raster_s,
+            custom_flip_angle_deg=rf_custom_flip_angle_deg,
+            frequency_offset_hz=rf_frequency_offset_hz,
+        )
     )
-    alpha_half, _ = _make_me_bssfp_rf(
-        pp,
-        system,
-        pulse_type=rf_pulse_type,
-        flip_angle_deg=flip_angle_deg / 2,
-        duration_s=rf_duration_s,
-        bandwidth_hz=rf_bandwidth_hz,
-    )
+    rf, alpha_half = rf_events
     rf_center, _ = pp.calc_rf_center(rf)
     rf_center_from_start = rf.delay + rf_center
     rf_block_duration = np.ceil(pp.calc_duration(rf) / raster - 1e-9) * raster
@@ -1362,9 +1306,19 @@ def make_pulseq_me_bssfp(
     sequence.set_definition("RequestedSamplingBandwidth", sampling_bandwidth_hz)
     sequence.set_definition("ADCDwell", dwell)
     sequence.set_definition("FlipAngleDeg", float(flip_angle_deg))
-    sequence.set_definition("RFPulseType", normalized_rf_type)
-    sequence.set_definition("RFDuration", float(rf_duration_s))
-    sequence.set_definition("RFBandwidthHz", float(rf_bandwidth_hz))
+    set_rf_definitions(
+        sequence,
+        pulse_type=normalized_rf_type,
+        requested_duration_s=rf_duration_s,
+        actual_duration_s=actual_rf_duration_s,
+        time_bandwidth_product=effective_rf_tbw,
+        apodization=rf_apodization,
+        slr_sharpness=rf_slr_sharpness,
+        custom_name=rf_custom_name,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        frequency_offset_hz=rf_frequency_offset_hz,
+    )
+    sequence.set_definition("RFBandwidthHz", effective_rf_tbw / actual_rf_duration_s)
     sequence.set_definition("RFFrequencyOffsetHz", float(rf_frequency_offset_hz))
     sequence.set_definition(
         "ReceiverFrequencyOffsetHz", float(receiver_frequency_offset_hz)
@@ -1472,7 +1426,16 @@ def make_pulseq_radial_me_bssfp(
     echo_spacing_s: float = 2e-3,
     pixel_bandwidth_hz: float = 1000.0,
     flip_angle_deg: float = 10.0,
+    rf_pulse_type: str = "block",
     rf_duration_s: float = 0.5e-3,
+    rf_time_bandwidth_product: float = 4.0,
+    rf_apodization: float = 0.5,
+    rf_slr_sharpness: float = 1.0,
+    rf_custom_waveform_hz: Sequence[complex] | None = None,
+    rf_custom_raster_s: float | None = None,
+    rf_custom_flip_angle_deg: float | None = None,
+    rf_custom_name: str | None = None,
+    rf_frequency_offset_hz: float = 0.0,
     repetition_time_s: float = 16e-3,
     rf_phase_start_deg: float = 0.0,
     rf_phase_increment_deg: float = 180.0,
@@ -1520,6 +1483,8 @@ def make_pulseq_radial_me_bssfp(
     for name, value in positive_parameters.items():
         if not np.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be positive and finite")
+    if not np.isfinite(rf_frequency_offset_hz):
+        raise ValueError("rf_frequency_offset_hz must be finite")
     nucleus = str(nucleus).strip()
     if not nucleus:
         raise ValueError("nucleus must not be empty")
@@ -1561,27 +1526,27 @@ def make_pulseq_radial_me_bssfp(
             "echo_spacing_s is too short for the requested readout bandwidth"
         )
 
-    rf = pp.make_block_pulse(
-        flip_angle=np.deg2rad(flip_angle_deg),
-        duration=rf_duration_s,
-        delay=system.rf_dead_time,
-        system=system,
-        use="excitation",
+    rf_events, actual_rf_duration_s, effective_rf_tbw, rf_pulse_type = (
+        make_pulseq_rf_events(
+            pp,
+            system,
+            flip_angles_deg=(
+                flip_angle_deg,
+                flip_angle_deg / 2,
+                flip_angle_deg / 2,
+            ),
+            pulse_type=rf_pulse_type,
+            duration_s=rf_duration_s,
+            time_bandwidth_product=rf_time_bandwidth_product,
+            apodization=rf_apodization,
+            slr_sharpness=rf_slr_sharpness,
+            custom_waveform_hz=rf_custom_waveform_hz,
+            custom_raster_s=rf_custom_raster_s,
+            custom_flip_angle_deg=rf_custom_flip_angle_deg,
+            frequency_offset_hz=rf_frequency_offset_hz,
+        )
     )
-    alpha_half = pp.make_block_pulse(
-        flip_angle=np.deg2rad(flip_angle_deg / 2),
-        duration=rf_duration_s,
-        delay=system.rf_dead_time,
-        system=system,
-        use="excitation",
-    )
-    tip_back = pp.make_block_pulse(
-        flip_angle=np.deg2rad(flip_angle_deg / 2),
-        duration=rf_duration_s,
-        delay=system.rf_dead_time,
-        system=system,
-        use="excitation",
-    )
+    rf, alpha_half, tip_back = rf_events
     rf_center, _ = pp.calc_rf_center(rf)
     rf_center_from_start = rf.delay + rf_center
     rf_block_duration = pp.calc_duration(rf)
@@ -1621,7 +1586,7 @@ def make_pulseq_radial_me_bssfp(
     if use_alpha_half:
         alpha_half.phase_offset = pulseq_phase_offset_rad(
             rf_phase_start_deg,
-            frequency_offset_hz=0.0,
+            frequency_offset_hz=rf_frequency_offset_hz,
             event_center_s=alpha_center,
         )
         sequence.add_block(alpha_half)
@@ -1656,7 +1621,7 @@ def make_pulseq_radial_me_bssfp(
             current_phase = rf_phase
             rf.phase_offset = pulseq_phase_offset_rad(
                 current_phase,
-                frequency_offset_hz=0.0,
+                frequency_offset_hz=rf_frequency_offset_hz,
                 event_center_s=rf_center,
             )
             rf_phase = advance_bssfp_phase_deg(
@@ -1734,7 +1699,7 @@ def make_pulseq_radial_me_bssfp(
     if use_tip_back:
         tip_back.phase_offset = pulseq_phase_offset_rad(
             wrap_phase_deg(rf_phase + 180.0),
-            frequency_offset_hz=0.0,
+            frequency_offset_hz=rf_frequency_offset_hz,
             event_center_s=pp.calc_rf_center(tip_back)[0],
         )
         sequence.add_block(tip_back)
@@ -1790,6 +1755,18 @@ def make_pulseq_radial_me_bssfp(
     sequence.set_definition("FrequencyOffsetPhaseCoherent", True)
     sequence.set_definition("UseAlphaHalf", bool(use_alpha_half))
     sequence.set_definition("UseTipBack", bool(use_tip_back))
+    set_rf_definitions(
+        sequence,
+        pulse_type=rf_pulse_type,
+        requested_duration_s=rf_duration_s,
+        actual_duration_s=actual_rf_duration_s,
+        time_bandwidth_product=effective_rf_tbw,
+        apodization=rf_apodization,
+        slr_sharpness=rf_slr_sharpness,
+        custom_name=rf_custom_name,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        frequency_offset_hz=rf_frequency_offset_hz,
+    )
     sequence.set_definition("GradientBalancing", "per_tr_xyz")
     sequence.set_definition("ReadoutPolarity", "monopolar")
     sequence.set_definition("CenterThroughReadout", True)

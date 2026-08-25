@@ -15,7 +15,7 @@ from .encoding import (
     resolve_encoding_frame,
     set_pulseq_encoding_definitions,
 )
-from .rf_pulses import design_rf_envelope, scale_rf_envelope_to_flip
+from .rf_pulses import make_pulseq_rf_events, set_rf_definitions
 from .scanner import ScannerParameters
 from .bssfp_phase import (
     advance_bssfp_phase_deg,
@@ -140,47 +140,24 @@ def _make_slice_selective_rf_events(
     rf_custom_waveform_hz: Sequence[complex] | None,
     rf_custom_raster_s: float | None,
     rf_custom_flip_angle_deg: float | None,
+    rf_frequency_offset_hz: float,
 ):
     """Return slice-selective RF/gradient pairs built from one shared shape."""
-    envelope, actual_duration_s, effective_tbw, pulse_type = design_rf_envelope(
+    return make_pulseq_rf_events(
+        pp,
+        system,
+        flip_angles_deg=flip_angle_schedule_deg,
         pulse_type=rf_pulse_type,
         duration_s=rf_duration_s,
-        raster_s=system.rf_raster_time,
         time_bandwidth_product=rf_time_bandwidth_product,
         apodization=rf_apodization,
         slr_sharpness=rf_slr_sharpness,
-        custom_waveform=rf_custom_waveform_hz,
+        custom_waveform_hz=rf_custom_waveform_hz,
         custom_raster_s=rf_custom_raster_s,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        slice_thickness_m=slice_thickness_m,
+        frequency_offset_hz=rf_frequency_offset_hz,
     )
-    designer_pulse = pulse_type == "designer"
-    rf_events = []
-    for angle_deg in flip_angle_schedule_deg:
-        signal = (
-            scale_rf_envelope_to_flip(
-                envelope,
-                flip_angle_deg=angle_deg,
-                raster_s=system.rf_raster_time,
-                reference_flip_angle_deg=rf_custom_flip_angle_deg,
-            )
-            if designer_pulse
-            else envelope
-        )
-        rf_events.append(
-            pp.make_arbitrary_rf(
-                signal=signal,
-                flip_angle=np.deg2rad(angle_deg),
-                dwell=system.rf_raster_time,
-                bandwidth=effective_tbw / actual_duration_s,
-                time_bw_product=effective_tbw,
-                slice_thickness=slice_thickness_m,
-                return_gz=True,
-                no_signal_scaling=designer_pulse,
-                delay=system.rf_dead_time,
-                system=system,
-                use="excitation",
-            )
-        )
-    return rf_events, actual_duration_s, effective_tbw, pulse_type
 
 
 def _remap_gradient_event(event, frame: EncodingFrame, role: str):
@@ -212,19 +189,18 @@ def _set_rf_definitions(
     frequency_offset_hz: float,
 ) -> None:
     """Persist the RF design inputs needed to reproduce a sequence."""
-    sequence.set_definition("RFPulseType", pulse_type)
-    sequence.set_definition("RFDuration", actual_duration_s)
-    sequence.set_definition("RequestedRFDuration", requested_duration_s)
-    sequence.set_definition("RFTimeBandwidthProduct", time_bandwidth_product)
-    sequence.set_definition("RFBandwidth", time_bandwidth_product / actual_duration_s)
-    sequence.set_definition("RFFrequencyOffset", frequency_offset_hz)
-    if pulse_type == "sinc":
-        sequence.set_definition("RFApodization", apodization)
-    if pulse_type == "slr":
-        sequence.set_definition("RFSLRSharpness", slr_sharpness)
-    if pulse_type == "designer":
-        sequence.set_definition("RFDesignerPulseName", custom_name or "custom")
-        sequence.set_definition("RFDesignerFlipAngleDeg", custom_flip_angle_deg)
+    set_rf_definitions(
+        sequence,
+        pulse_type=pulse_type,
+        requested_duration_s=requested_duration_s,
+        actual_duration_s=actual_duration_s,
+        time_bandwidth_product=time_bandwidth_product,
+        apodization=apodization,
+        slr_sharpness=slr_sharpness,
+        custom_name=custom_name,
+        custom_flip_angle_deg=custom_flip_angle_deg,
+        frequency_offset_hz=frequency_offset_hz,
+    )
 
 
 def _phase_encoding_indices(
@@ -290,6 +266,11 @@ def make_pulseq_csi(
     rf_time_bandwidth_product: float = 4.0,
     rf_apodization: float = 0.5,
     rf_slr_sharpness: float = 1.0,
+    rf_custom_waveform_hz: Sequence[complex] | None = None,
+    rf_custom_raster_s: float | None = None,
+    rf_custom_flip_angle_deg: float | None = None,
+    rf_custom_name: str | None = None,
+    rf_frequency_offset_hz: float = 0.0,
     encoding_duration_s: float = 2e-3,
     echo_time_s: float = 6e-3,
     repetition_time_s: float = 0.1,
@@ -339,6 +320,8 @@ def make_pulseq_csi(
             raise ValueError(f"{name} must be non-negative and finite")
     if not np.isfinite(slice_offset_m):
         raise ValueError("slice_offset_m must be finite")
+    if not np.isfinite(rf_frequency_offset_hz):
+        raise ValueError("rf_frequency_offset_hz must be finite")
 
     order = _phase_encoding_indices(n_x, n_y, phase_encoding_order, (fov_x, fov_y))
     if variable_flip_angle:
@@ -380,9 +363,10 @@ def make_pulseq_csi(
             rf_time_bandwidth_product=rf_time_bandwidth_product,
             rf_apodization=rf_apodization,
             rf_slr_sharpness=rf_slr_sharpness,
-            rf_custom_waveform_hz=None,
-            rf_custom_raster_s=None,
-            rf_custom_flip_angle_deg=None,
+            rf_custom_waveform_hz=rf_custom_waveform_hz,
+            rf_custom_raster_s=rf_custom_raster_s,
+            rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
+            rf_frequency_offset_hz=rf_frequency_offset_hz,
         )
     )
     rf_events = [
@@ -426,7 +410,9 @@ def make_pulseq_csi(
     _, slice_sign = encoding_frame.axis_and_sign("partition")
     for rf_event, slice_gradient in rf_events:
         logical_slice_amplitude = float(slice_gradient.amplitude) * slice_sign
-        frequency_offset_hz = logical_slice_amplitude * float(slice_offset_m)
+        frequency_offset_hz = rf_frequency_offset_hz + logical_slice_amplitude * float(
+            slice_offset_m
+        )
         rf_event.freq_offset = frequency_offset_hz
         rf_event.phase_offset = -2.0 * np.pi * frequency_offset_hz * rf_center
     rf_block_duration = pp.calc_duration(rf, gz)
@@ -580,9 +566,9 @@ def make_pulseq_csi(
         time_bandwidth_product=effective_rf_tbw,
         apodization=rf_apodization,
         slr_sharpness=rf_slr_sharpness,
-        custom_name=None,
-        custom_flip_angle_deg=None,
-        frequency_offset_hz=0.0,
+        custom_name=rf_custom_name,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        frequency_offset_hz=rf_frequency_offset_hz,
     )
     sequence.set_definition("SpoilAfterReadout", bool(spoil_after_readout))
     sequence.set_definition("SpoilerCyclesPerSlice", spoiler_cycles_per_slice)
@@ -601,7 +587,16 @@ def make_pulseq_bssfp(
     fov_m: Sequence[float] = (0.22, 0.22, 0.16),
     matrix: Sequence[int] = (8, 8, 4),
     flip_angle_deg: float = 15.0,
+    rf_pulse_type: str = "block",
     rf_duration_s: float = 1e-3,
+    rf_time_bandwidth_product: float = 4.0,
+    rf_apodization: float = 0.5,
+    rf_slr_sharpness: float = 1.0,
+    rf_custom_waveform_hz: Sequence[complex] | None = None,
+    rf_custom_raster_s: float | None = None,
+    rf_custom_flip_angle_deg: float | None = None,
+    rf_custom_name: str | None = None,
+    rf_frequency_offset_hz: float = 0.0,
     sampling_bandwidth_hz: float = 10_000.0,
     encoding_duration_s: float = 1e-3,
     repetition_time_s: float | None = 10e-3,
@@ -637,6 +632,8 @@ def make_pulseq_bssfp(
     }.items():
         if not np.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be positive and finite")
+    if not np.isfinite(rf_frequency_offset_hz):
+        raise ValueError("rf_frequency_offset_hz must be finite")
 
     system = _make_scanner_system(
         pp,
@@ -657,20 +654,23 @@ def make_pulseq_bssfp(
     if dwell <= 0:
         raise ValueError("sampling bandwidth exceeds the ADC raster capability")
 
-    rf = pp.make_block_pulse(
-        flip_angle=np.deg2rad(flip_angle_deg),
-        duration=rf_duration_s,
-        delay=system.rf_dead_time,
-        system=system,
-        use="excitation",
+    rf_events, actual_rf_duration_s, effective_rf_tbw, rf_pulse_type = (
+        make_pulseq_rf_events(
+            pp,
+            system,
+            flip_angles_deg=(flip_angle_deg, flip_angle_deg / 2),
+            pulse_type=rf_pulse_type,
+            duration_s=rf_duration_s,
+            time_bandwidth_product=rf_time_bandwidth_product,
+            apodization=rf_apodization,
+            slr_sharpness=rf_slr_sharpness,
+            custom_waveform_hz=rf_custom_waveform_hz,
+            custom_raster_s=rf_custom_raster_s,
+            custom_flip_angle_deg=rf_custom_flip_angle_deg,
+            frequency_offset_hz=rf_frequency_offset_hz,
+        )
     )
-    rf_alpha_half = pp.make_block_pulse(
-        flip_angle=np.deg2rad(flip_angle_deg / 2),
-        duration=rf_duration_s,
-        delay=system.rf_dead_time,
-        system=system,
-        use="excitation",
-    )
+    rf, rf_alpha_half = rf_events
     readout_duration = n_read * dwell
     readout_amplitude = 1.0 / (fov_x * dwell)
     readout_rise_time = max(
@@ -740,7 +740,7 @@ def make_pulseq_bssfp(
     if use_alpha_half:
         rf_alpha_half.phase_offset = pulseq_phase_offset_rad(
             rf_phase_start_deg,
-            frequency_offset_hz=0.0,
+            frequency_offset_hz=rf_frequency_offset_hz,
             event_center_s=pp.calc_rf_center(rf_alpha_half)[0],
         )
         preparation_delay = actual_tr / 2 - pp.calc_duration(rf_alpha_half)
@@ -767,7 +767,7 @@ def make_pulseq_bssfp(
         nonlocal rf_phase
         rf.phase_offset = pulseq_phase_offset_rad(
             rf_phase,
-            frequency_offset_hz=0.0,
+            frequency_offset_hz=rf_frequency_offset_hz,
             event_center_s=rf_center,
         )
         adc.phase_offset = pulseq_phase_offset_rad(
@@ -890,6 +890,18 @@ def make_pulseq_bssfp(
         start_times_s=acquisition_start_times,
     )
     sequence.set_definition("UseAlphaHalf", bool(use_alpha_half))
+    _set_rf_definitions(
+        sequence,
+        pulse_type=rf_pulse_type,
+        requested_duration_s=rf_duration_s,
+        actual_duration_s=actual_rf_duration_s,
+        time_bandwidth_product=effective_rf_tbw,
+        apodization=rf_apodization,
+        slr_sharpness=rf_slr_sharpness,
+        custom_name=rf_custom_name,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        frequency_offset_hz=rf_frequency_offset_hz,
+    )
     return sequence
 
 
@@ -1003,6 +1015,7 @@ def make_pulseq_epi(
             rf_custom_waveform_hz=rf_custom_waveform_hz,
             rf_custom_raster_s=rf_custom_raster_s,
             rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
+            rf_frequency_offset_hz=rf_frequency_offset_hz,
         )
     )
     rf_events = [
@@ -1265,6 +1278,11 @@ def make_pulseq_flash(
     rf_time_bandwidth_product: float = 4.0,
     rf_apodization: float = 0.5,
     rf_slr_sharpness: float = 1.0,
+    rf_custom_waveform_hz: Sequence[complex] | None = None,
+    rf_custom_raster_s: float | None = None,
+    rf_custom_flip_angle_deg: float | None = None,
+    rf_custom_name: str | None = None,
+    rf_frequency_offset_hz: float = 0.0,
     slice_thickness_m: float = 3e-3,
     slice_gap_m: float = 0.0,
     n_slices: int = 1,
@@ -1316,6 +1334,8 @@ def make_pulseq_flash(
         raise ValueError("slice_offset_m must be finite")
     if not np.isfinite(rf_spoiling_increment_deg):
         raise ValueError("rf_spoiling_increment_deg must be finite")
+    if not np.isfinite(rf_frequency_offset_hz):
+        raise ValueError("rf_frequency_offset_hz must be finite")
 
     system = _make_scanner_system(
         pp,
@@ -1350,9 +1370,10 @@ def make_pulseq_flash(
             rf_time_bandwidth_product=rf_time_bandwidth_product,
             rf_apodization=rf_apodization,
             rf_slr_sharpness=rf_slr_sharpness,
-            rf_custom_waveform_hz=None,
-            rf_custom_raster_s=None,
-            rf_custom_flip_angle_deg=None,
+            rf_custom_waveform_hz=rf_custom_waveform_hz,
+            rf_custom_raster_s=rf_custom_raster_s,
+            rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
+            rf_frequency_offset_hz=rf_frequency_offset_hz,
         )
     )
     rf, gz = raw_rf_events[0]
@@ -1453,10 +1474,13 @@ def make_pulseq_flash(
                     * (excitation_index + 1)
                     / 2.0
                 ) % 360.0
-                rf.freq_offset = slice_frequency_offset_hz
+                total_rf_frequency_offset_hz = (
+                    rf_frequency_offset_hz + slice_frequency_offset_hz
+                )
+                rf.freq_offset = total_rf_frequency_offset_hz
                 rf.phase_offset = (
                     np.deg2rad(rf_phase_deg)
-                    - 2.0 * np.pi * slice_frequency_offset_hz * rf_center
+                    - 2.0 * np.pi * total_rf_frequency_offset_hz * rf_center
                 )
                 adc.phase_offset = np.deg2rad(rf_phase_deg)
                 gy_phase = make_role_trapezoid(
@@ -1572,9 +1596,9 @@ def make_pulseq_flash(
         time_bandwidth_product=effective_rf_tbw,
         apodization=rf_apodization,
         slr_sharpness=rf_slr_sharpness,
-        custom_name=None,
-        custom_flip_angle_deg=None,
-        frequency_offset_hz=0.0,
+        custom_name=rf_custom_name,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        frequency_offset_hz=rf_frequency_offset_hz,
     )
     return sequence
 
@@ -1791,6 +1815,7 @@ def make_pulseq_spiral(
             rf_custom_waveform_hz=rf_custom_waveform_hz,
             rf_custom_raster_s=rf_custom_raster_s,
             rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
+            rf_frequency_offset_hz=rf_frequency_offset_hz,
         )
     )
     rf_events = [

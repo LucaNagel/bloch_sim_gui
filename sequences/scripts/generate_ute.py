@@ -8,6 +8,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 
 import pypulseq as pp
+from blochsimulator.sequence.rf_pulses import make_pulseq_rf_events
 
 
 def main(
@@ -19,6 +20,14 @@ def main(
     fov: float | tuple[float, float] = 250e-3,
     n_x: int = 64,
     flip_angle_deg: float = 10,
+    rf_pulse_type: str = "sinc",
+    rf_duration: float = 1e-3,
+    rf_time_bandwidth_product: float = 2.0,
+    rf_apodization: float = 0.5,
+    rf_slr_sharpness: float = 1.0,
+    rf_custom_waveform_hz=None,
+    rf_custom_raster_s: float | None = None,
+    rf_custom_flip_angle_deg: float | None = None,
     slice_thickness: float = 3e-3,
     tr: float = 10e-3,
     n_spokes: int = 32,
@@ -84,18 +93,23 @@ def main(
     seq = pp.Sequence(system)
 
     # Create slice selection pulse and gradient
-    rf, gz, gz_reph = pp.make_sinc_pulse(
-        flip_angle=np.deg2rad(flip_angle_deg),
-        duration=1e-3,
-        slice_thickness=slice_thickness,
-        apodization=0.5,
-        time_bw_product=2,
-        center_pos=1,
-        system=system,
-        return_gz=True,
-        delay=system.rf_dead_time,
-        use="excitation",
+    rf_events, _, _, _ = make_pulseq_rf_events(
+        pp,
+        system,
+        flip_angles_deg=(flip_angle_deg,),
+        pulse_type=rf_pulse_type,
+        duration_s=rf_duration,
+        time_bandwidth_product=rf_time_bandwidth_product,
+        apodization=rf_apodization,
+        slr_sharpness=rf_slr_sharpness,
+        custom_waveform_hz=rf_custom_waveform_hz,
+        custom_raster_s=rf_custom_raster_s,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        slice_thickness_m=slice_thickness,
+        center_s=rf_duration,
     )
+    rf, gz = rf_events[0]
+    gz_reph = pp.make_trapezoid(channel="z", area=-gz.area / 2, system=system)
 
     # Align RO asymmetry to ADC samples
     n_x_oversampled = np.round(readout_oversampling * n_x)

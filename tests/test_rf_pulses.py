@@ -1,7 +1,27 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 from blochsimulator.simulator import design_rf_pulse
-from blochsimulator.sequence.rf_pulses import design_rf_envelope
+from blochsimulator.sequence.rf_pulses import (
+    design_rf_envelope,
+    rf_time_bandwidth_product_from_envelope,
+)
+
+
+def test_standalone_sequence_scripts_do_not_bypass_the_global_rf_factory():
+    scripts = Path(__file__).parents[1] / "sequences" / "scripts"
+    forbidden = (
+        "pp.make_sinc_pulse",
+        "pp.make_gauss_pulse",
+        "pp.make_block_pulse",
+        "pp.make_arbitrary_rf",
+        "pp.sigpy_n_seq",
+    )
+
+    for path in scripts.glob("generate_*.py"):
+        source = path.read_text(encoding="utf-8")
+        assert not any(name in source for name in forbidden), path.name
 
 
 def test_sequence_slr_is_designed_from_parameters_without_loading_a_file(
@@ -32,11 +52,65 @@ def test_sequence_slr_is_designed_from_parameters_without_loading_a_file(
 
     assert pulse_type == "slr"
     assert duration_s == pytest.approx(2.5e-3)
-    assert tbw == pytest.approx(3.5)
+    assert tbw == pytest.approx(rf_time_bandwidth_product_from_envelope(broad))
     assert broad.size == sharp.size == 250
     assert np.allclose(broad, broad[::-1])
     assert np.allclose(sharp, sharp[::-1])
     assert not np.allclose(broad, sharp)
+    broad_zero_crossings = np.count_nonzero(
+        np.signbit(broad.real[:-1]) != np.signbit(broad.real[1:])
+    )
+    sharp_zero_crossings = np.count_nonzero(
+        np.signbit(sharp.real[:-1]) != np.signbit(sharp.real[1:])
+    )
+    assert sharp_zero_crossings > broad_zero_crossings
+
+
+def test_free_mode_slr_uses_the_global_sequence_envelope():
+    duration_s = 2.5e-3
+    sample_count = 250
+    time_bandwidth_product = 3.5
+    sharpness = 4.0
+    free_b1, _ = design_rf_pulse(
+        "slr",
+        duration=duration_s,
+        flip_angle=30.0,
+        time_bw_product=time_bandwidth_product,
+        npoints=sample_count,
+        slr_sharpness=sharpness,
+    )
+    shared, *_ = design_rf_envelope(
+        pulse_type="slr",
+        duration_s=duration_s,
+        raster_s=duration_s / sample_count,
+        time_bandwidth_product=time_bandwidth_product,
+        slr_sharpness=sharpness,
+    )
+    assert np.allclose(
+        free_b1 / np.max(np.abs(free_b1)), shared / np.max(np.abs(shared))
+    )
+
+
+def test_slr_sharpness_adds_temporal_lobes_monotonically():
+    zero_crossings = []
+    for sharpness in range(1, 6):
+        envelope, *_ = design_rf_envelope(
+            pulse_type="slr",
+            duration_s=2.5e-3,
+            raster_s=10e-6,
+            time_bandwidth_product=3.5,
+            slr_sharpness=float(sharpness),
+        )
+        zero_crossings.append(
+            np.count_nonzero(
+                np.signbit(envelope.real[:-1]) != np.signbit(envelope.real[1:])
+            )
+        )
+
+    assert all(
+        current > previous
+        for previous, current in zip(zero_crossings, zero_crossings[1:])
+    )
 
 
 @pytest.mark.parametrize("sharpness", [1.0, 5.0])
@@ -59,7 +133,7 @@ def test_sequence_slr_has_zero_edges_and_centered_main_lobe(sharpness):
     assert np.max(magnitude[-envelope.size // 10 :]) < 0.35 * magnitude[center]
 
 
-def test_sequence_gaussian_envelope_is_symmetric_and_uses_requested_tbw():
+def test_sequence_gaussian_envelope_is_symmetric_and_reports_shape_tbw():
     envelope, duration_s, tbw, pulse_type = design_rf_envelope(
         pulse_type="gauss",
         duration_s=3e-3,
@@ -69,7 +143,7 @@ def test_sequence_gaussian_envelope_is_symmetric_and_uses_requested_tbw():
 
     assert pulse_type == "gaussian"
     assert duration_s == pytest.approx(3e-3)
-    assert tbw == pytest.approx(4.0)
+    assert tbw == pytest.approx(rf_time_bandwidth_product_from_envelope(envelope))
     assert envelope.size == 300
     assert np.all(envelope.real > 0)
     assert np.allclose(envelope.imag, 0.0)

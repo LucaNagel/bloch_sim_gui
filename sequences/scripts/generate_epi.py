@@ -1,5 +1,9 @@
 import numpy as np
 import pypulseq as pp
+from blochsimulator.sequence.rf_pulses import (
+    make_pulseq_rf_events,
+    set_rf_definitions,
+)
 
 
 def main(
@@ -10,6 +14,14 @@ def main(
     *,
     v141_compat: bool = True,
     flip_angle_deg: float = 90.0,
+    rf_pulse_type: str = "sinc",
+    rf_duration: float = 3e-3,
+    rf_time_bandwidth_product: float = 4.0,
+    rf_apodization: float = 0.5,
+    rf_slr_sharpness: float = 1.0,
+    rf_custom_waveform_hz=None,
+    rf_custom_raster_s: float | None = None,
+    rf_custom_flip_angle_deg: float | None = None,
     fov: float | tuple[float, float] = 220e-3,
     n_x: int = 64,
     n_y: int = 64,
@@ -132,17 +144,23 @@ def main(
     seq = pp.Sequence(system)
 
     # Create the slice-selection pulse and gradient
-    rf, gz, _ = pp.make_sinc_pulse(
-        flip_angle=np.deg2rad(flip_angle_deg),
-        system=system,
-        duration=3e-3,
-        slice_thickness=slice_thickness,
-        apodization=0.5,
-        time_bw_product=4,
-        return_gz=True,
-        delay=system.rf_dead_time,
-        use="excitation",
+    rf_events, actual_rf_duration, effective_rf_tbw, rf_pulse_type = (
+        make_pulseq_rf_events(
+            pp,
+            system,
+            flip_angles_deg=(flip_angle_deg,),
+            pulse_type=rf_pulse_type,
+            duration_s=rf_duration,
+            time_bandwidth_product=rf_time_bandwidth_product,
+            apodization=rf_apodization,
+            slr_sharpness=rf_slr_sharpness,
+            custom_waveform_hz=rf_custom_waveform_hz,
+            custom_raster_s=rf_custom_raster_s,
+            custom_flip_angle_deg=rf_custom_flip_angle_deg,
+            slice_thickness_m=slice_thickness,
+        )
     )
+    rf, gz = rf_events[0]
 
     # Define other gradients and ADC events
     delta_kx = 1 / fov_x
@@ -315,6 +333,18 @@ def main(
     )
     seq.set_definition(key="SpoilerEndTimes", value=spoiler_end_times)
     seq.set_definition(key="IdealSpoilerEndTimes", value=spoiler_end_times)
+    set_rf_definitions(
+        seq,
+        pulse_type=rf_pulse_type,
+        requested_duration_s=rf_duration,
+        actual_duration_s=actual_rf_duration,
+        time_bandwidth_product=effective_rf_tbw,
+        apodization=rf_apodization,
+        slr_sharpness=rf_slr_sharpness,
+        custom_name=None,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        frequency_offset_hz=0.0,
+    )
 
     if write_seq:
         from pathlib import Path

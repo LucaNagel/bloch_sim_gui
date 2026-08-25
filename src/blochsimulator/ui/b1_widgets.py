@@ -361,17 +361,35 @@ class B1FieldEditor(QGroupBox):
 
 
 class B1FieldPreview(QWidget):
-    """Magnitude/phase/real/imaginary preview of a native B1 grid."""
+    """Preview native relative B1 or sequence-scaled transmit B1 on a phantom."""
 
     def __init__(self, kind: str, parent=None):
         super().__init__(parent)
         self.kind = "receive" if str(kind).lower() == "receive" else "transmit"
         self.field: Optional[B1Field] = None
+        self.phantom = None
+        self.sequence_context = {}
+        self._physical_display_data = None
+        self._physical_display_mask = None
         layout = QVBoxLayout(self)
         controls = QHBoxLayout()
         controls.addWidget(QLabel("Display"))
         self.component_combo = QComboBox()
-        self.component_combo.addItems(["Magnitude", "Phase", "Real", "Imaginary"])
+        for label, identifier in (
+            ("Magnitude", "magnitude"),
+            ("Phase", "phase"),
+            ("Real", "real"),
+            ("Imaginary", "imaginary"),
+        ):
+            self.component_combo.addItem(label, identifier)
+        if self.kind == "transmit":
+            self.component_combo.addItem(
+                "Max B1 on phantom (selected sequence)", "max_b1_gauss"
+            )
+            self.component_combo.setToolTip(
+                "Max B1 resamples the transformed transmit field onto the phantom "
+                "and multiplies |B1+| by the loaded sequence's nominal RF peak."
+            )
         self.component_combo.currentTextChanged.connect(self._update)
         controls.addWidget(self.component_combo)
         self.channel_label = QLabel("Receive channel")
@@ -385,11 +403,20 @@ class B1FieldPreview(QWidget):
         controls.addStretch()
         layout.addLayout(controls)
         self.volume = VolumeViewerWidget()
+        self.volume.indices_changed.connect(self._update_selected_physical_value)
         layout.addWidget(self.volume, 1)
         self.info = QLabel("No explicit field")
         self.info.setWordWrap(True)
         self.info.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         layout.addWidget(self.info)
+        self._update()
+
+    def set_phantom(self, phantom) -> None:
+        self.phantom = phantom
+        self._update()
+
+    def set_sequence_context(self, context) -> None:
+        self.sequence_context = dict(context or {})
         self._update()
 
     def set_field(self, field: Optional[B1Field]) -> None:
@@ -404,6 +431,12 @@ class B1FieldPreview(QWidget):
         self._update()
 
     def _update(self, *_):
+        component = self.component_combo.currentData()
+        if component == "max_b1_gauss":
+            self._update_physical_transmit_b1()
+            return
+        self._physical_display_data = None
+        self._physical_display_mask = None
         if self.field is None:
             self.volume.set_volume(
                 np.ones((1, 1), dtype=float),
@@ -417,12 +450,12 @@ class B1FieldPreview(QWidget):
             return
         channel = max(0, self.channel_combo.currentIndex())
         values = self.field.data[channel]
-        component = self.component_combo.currentText()
-        if component == "Magnitude":
+        component_label = self.component_combo.currentText()
+        if component == "magnitude":
             data, unit = np.abs(values), "relative"
-        elif component == "Phase":
+        elif component == "phase":
             data, unit = np.angle(values, deg=True), "°"
-        elif component == "Real":
+        elif component == "real":
             data, unit = values.real, "relative"
         else:
             data, unit = values.imag, "relative"
@@ -433,13 +466,98 @@ class B1FieldPreview(QWidget):
         self.volume.set_volume(
             data,
             fov_m=effective_fov,
-            name=f"{self.field.name} · {component}",
+            name=f"{self.field.name} · {component_label}",
             unit=unit,
         )
         rotation = " / ".join(f"{value:g}°" for value in self.field.rotation_deg_xyz)
         self.info.setText(
             "Native field values; stretching is reflected in the axes. The full "
             f"rotation X/Y/Z ({rotation}) is shown in the Combination tab."
+        )
+
+    def _update_physical_transmit_b1(self) -> None:
+        peak = self.sequence_context.get("nominal_peak_b1_gauss")
+        try:
+            peak = float(peak)
+        except (TypeError, ValueError):
+            peak = None
+        if peak is not None and (not np.isfinite(peak) or peak < 0.0):
+            peak = None
+
+        phantom = self.phantom
+        if phantom is not None:
+            tx_source = getattr(phantom, "tx_sensitivity_map", None)
+            if tx_source is None:
+                tx_source = np.ones(tuple(phantom.shape), dtype=float)
+            relative = np.abs(np.asarray(tx_source))
+            mask = np.asarray(phantom.mask, dtype=bool)
+            fov_m = tuple(phantom.fov)
+            grid_name = f"{phantom.name} phantom voxels"
+        else:
+            if self.field is None:
+                relative = np.ones((1, 1), dtype=float)
+                fov_m = (0.24, 0.24)
+                grid_name = "unity fallback"
+            else:
+                relative = np.abs(self.field.data[0])
+                fov_m = tuple(
+                    self.field.fov_m[axis] * self.field.scale_xyz[axis]
+                    for axis in range(self.field.spatial_ndim)
+                )
+                grid_name = f"{self.field.name} native grid"
+            mask = np.ones(relative.shape, dtype=bool)
+
+        data = np.asarray(relative, dtype=float)
+        if peak is None:
+            data.fill(0.0)
+        else:
+            data *= peak
+        self._physical_display_data = data
+        self._physical_display_mask = mask
+        self.volume.set_volume(
+            data,
+            mask=mask,
+            fov_m=fov_m,
+            name=f"Maximum transmit B1 · {grid_name}",
+            unit="G",
+        )
+        self._update_selected_physical_value()
+
+    def _update_selected_physical_value(self, _indices=None) -> None:
+        data = self._physical_display_data
+        if data is None:
+            return
+        index = tuple(self.volume.indices[: data.ndim])
+        mask = self._physical_display_mask
+        peak = self.sequence_context.get("nominal_peak_b1_gauss")
+        try:
+            peak = float(peak)
+        except (TypeError, ValueError):
+            peak = None
+        source = str(
+            self.sequence_context.get("sequence_source") or "selected sequence"
+        )
+        nucleus = str(self.sequence_context.get("nucleus") or "")
+        if peak is None or not np.isfinite(peak):
+            self.info.setText(
+                "No valid sequence RF waveform is selected, so physical B1 in "
+                "gauss is not available yet."
+            )
+            return
+        active = mask is None or bool(mask[index])
+        selected = float(data[index])
+        pending = bool(self.sequence_context.get("parameters_pending"))
+        pending_text = (
+            " Parameters have changed; this uses the currently loaded sequence "
+            "until you generate the updated one."
+            if pending
+            else ""
+        )
+        active_text = "active" if active else "inactive"
+        self.info.setText(
+            f"Voxel {index} ({active_text}): max B1 {selected:.5g} G. "
+            f"Nominal peak {peak:.5g} G from {source} ({nucleus}); the displayed "
+            f"map is the applied phantom |B1+ scale| × nominal peak.{pending_text}"
         )
 
 
@@ -452,6 +570,7 @@ class B1WorkspaceWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.phantom = None
+        self.sequence_context = {}
         self._apply_timer = QTimer(self)
         self._apply_timer.setSingleShot(True)
         self._apply_timer.setInterval(120)
@@ -532,6 +651,7 @@ class B1WorkspaceWidget(QWidget):
     def set_phantom(self, phantom) -> None:
         previous_phantom = self.phantom
         self.phantom = phantom
+        self.tx_preview.set_phantom(phantom)
         self.tx_editor.set_reference_phantom(phantom)
         self.rx_editor.set_reference_phantom(phantom)
         self.apply_button.setEnabled(phantom is not None)
@@ -574,6 +694,10 @@ class B1WorkspaceWidget(QWidget):
                 f"Ready to apply fields to {phantom.name} ({phantom.shape})."
             )
 
+    def set_sequence_context(self, context) -> None:
+        self.sequence_context = dict(context or {})
+        self.tx_preview.set_sequence_context(self.sequence_context)
+
     def _field_changed(self, _field=None) -> None:
         self.tx_preview.set_field(self.tx_field)
         self.rx_preview.set_field(self.rx_field)
@@ -610,6 +734,8 @@ class B1WorkspaceWidget(QWidget):
         except Exception as exc:
             self.apply_status.setText(f"B1 application failed: {exc}")
             return
+
+        self.tx_preview.set_phantom(phantom)
 
         active = np.asarray(phantom.mask, dtype=bool)
         covered = active & (np.abs(tx) > np.finfo(float).eps)
@@ -651,6 +777,7 @@ class B1PhantomCombinationWidget(QWidget):
         self.phantom = None
         self.tx_field: Optional[B1Field] = None
         self.rx_field: Optional[B1Field] = None
+        self.sequence_context = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -664,6 +791,18 @@ class B1PhantomCombinationWidget(QWidget):
         self.show_field.setChecked(True)
         self.show_field.toggled.connect(self._refresh)
         controls.addWidget(self.show_field)
+        controls.addWidget(QLabel("Transmit values"))
+        self.transmit_display_combo = QComboBox()
+        self.transmit_display_combo.addItem("Relative |B1+|", "relative")
+        self.transmit_display_combo.addItem(
+            "Max B1 (selected sequence)", "max_b1_gauss"
+        )
+        self.transmit_display_combo.setToolTip(
+            "Scale transmit-field samples by the loaded sequence's nominal RF "
+            "peak and report the resulting B1 amplitude in gauss."
+        )
+        self.transmit_display_combo.currentIndexChanged.connect(self._refresh)
+        controls.addWidget(self.transmit_display_combo)
         controls.addStretch()
         layout.addLayout(controls)
 
@@ -767,6 +906,10 @@ class B1PhantomCombinationWidget(QWidget):
         self.rx_field = rx_field
         self._update_receive_channels()
 
+    def set_sequence_context(self, context) -> None:
+        self.sequence_context = dict(context or {})
+        self._refresh()
+
     def _update_receive_channels(self) -> None:
         previous = self.channel_combo.blockSignals(True)
         current = self.channel_combo.currentIndex()
@@ -796,8 +939,20 @@ class B1PhantomCombinationWidget(QWidget):
             if field is None and phantom is None:
                 info.setText("Create a phantom and define this B1 field.")
             elif field is None:
+                fallback_text = ""
+                if (
+                    kind == "transmit"
+                    and self.transmit_display_combo.currentData() == "max_b1_gauss"
+                ):
+                    try:
+                        peak = float(self.sequence_context.get("nominal_peak_b1_gauss"))
+                    except (TypeError, ValueError):
+                        peak = np.nan
+                    if np.isfinite(peak) and peak >= 0.0:
+                        fallback_text = f" Max B1 is uniformly {peak:.5g} G."
                 info.setText(
                     f"{phantom.name} is shown with the uniform fallback field."
+                    f"{fallback_text}"
                 )
             elif phantom is None:
                 info.setText(
@@ -810,10 +965,52 @@ class B1PhantomCombinationWidget(QWidget):
                 channel_text = (
                     f" Channel {channel + 1}." if field.n_channels > 1 else ""
                 )
+                value_text = self._field_value_text(kind, field, phantom, channel)
                 info.setText(
                     f"Orange: {phantom.name}. Blue: {field.name}.{channel_text} "
                     f"Stretch X/Y/Z {scale}; rotation X/Y/Z {rotation}."
+                    f"{value_text}"
                 )
+
+    def _field_value_text(self, kind, field, phantom, channel) -> str:
+        if kind != "transmit":
+            values = np.abs(field.data[channel])
+            return f" Relative |B1−| {values.min():.5g}–{values.max():.5g}."
+        if self.transmit_display_combo.currentData() != "max_b1_gauss":
+            values = np.abs(field.data[0])
+            return f" Relative |B1+| {values.min():.5g}–{values.max():.5g}."
+
+        peak = self.sequence_context.get("nominal_peak_b1_gauss")
+        try:
+            peak = float(peak)
+        except (TypeError, ValueError):
+            peak = None
+        if peak is None or not np.isfinite(peak):
+            return " Select a valid sequence RF waveform to calculate max B1 in G."
+        if phantom is None:
+            relative = np.abs(field.data[0])
+            location = "native field"
+        else:
+            tx_source = getattr(phantom, "tx_sensitivity_map", None)
+            if tx_source is None:
+                tx_source = np.ones(tuple(phantom.shape), dtype=float)
+            relative = np.abs(np.asarray(tx_source))
+            active = np.asarray(phantom.mask, dtype=bool)
+            relative = relative[active]
+            location = "active phantom voxels"
+        if relative.size == 0:
+            return f" No {location} are available for max-B1 display."
+        values = peak * relative
+        pending_text = (
+            " Parameters are pending regeneration; values use the currently "
+            "loaded sequence."
+            if self.sequence_context.get("parameters_pending")
+            else ""
+        )
+        return (
+            f" Max B1 in {location}: {values.min():.5g}–{values.max():.5g} G "
+            f"(nominal {peak:.5g} G).{pending_text}"
+        )
 
     def _refresh_gl(self, kind, field, phantom, channel) -> None:
         gl_view = self.gl_views[kind]
@@ -831,6 +1028,16 @@ class B1PhantomCombinationWidget(QWidget):
             positions_mm = positions * 1000.0
             channel = min(max(0, channel), field.n_channels - 1)
             values = np.abs(field.data[channel].ravel()[indices])
+            if (
+                kind == "transmit"
+                and self.transmit_display_combo.currentData() == "max_b1_gauss"
+            ):
+                try:
+                    peak = float(self.sequence_context.get("nominal_peak_b1_gauss"))
+                except (TypeError, ValueError):
+                    peak = np.nan
+                if np.isfinite(peak) and peak >= 0.0:
+                    values = peak * values
             low, high = float(values.min()), float(values.max())
             normalized = (
                 np.ones_like(values)

@@ -19,6 +19,9 @@ from blochsimulator.sequence import (
     infer_cartesian_acquisition_volumes,
     load_pulseq,
 )
+from blochsimulator.sequence.rf_pulses import (
+    rf_time_bandwidth_product_from_envelope,
+)
 from blochsimulator.spectral_phantom import ChemicalSpecies
 
 
@@ -131,18 +134,29 @@ def test_spectral_selective_3d_bssfp_cycles_rf_and_receiver_offsets(tmp_path):
     assert definitions["SpectralTargetOffsetsHz"] == pytest.approx([-245.0, 735.0])
     assert definitions["SpectralReceiverOffsetsHz"] == pytest.approx([0.0, 980.0])
     assert definitions["FlipAngleDeg"] == pytest.approx([30.0, 30.0])
-    assert definitions["SpectralRFBandwidthHz"] == pytest.approx(150.0)
     assert definitions["SpectralRFDuration"] == pytest.approx(4e-3)
     assert definitions["SpectralRFPulseType"] == "slr"
     assert definitions["SpectralSLRSharpness"] == pytest.approx(1.0)
-    assert definitions["SpectralRFPulseFile"].endswith("rfpulses/SLR_sharpness_1.txt")
+    assert "SpectralRFPulseFile" not in definitions
+    effective_tbw = rf_time_bandwidth_product_from_envelope(
+        program.rf_events[0].samples_hz
+    )
+    assert definitions["SpectralRFTimeBandwidthProduct"] == pytest.approx(
+        effective_tbw, rel=1e-6
+    )
+    assert definitions["SpectralRFBandwidthHz"] == pytest.approx(
+        effective_tbw / definitions["SpectralRFDuration"], rel=1e-6
+    )
+    assert definitions["SpectralRFBandwidthFactorHzMs"] == pytest.approx(
+        effective_tbw * 1000.0, rel=1e-6
+    )
 
     rf_magnitudes = np.abs(program.rf_events[0].samples_hz)
     assert rf_magnitudes.size > 100
     assert not np.allclose(rf_magnitudes, rf_magnitudes[0])
 
 
-def test_spectral_selective_3d_bssfp_defaults_match_skinner_paper():
+def test_spectral_selective_3d_bssfp_defaults_match_skinner_timing():
     sequence = SPECTRAL_BSSFP_MAIN(
         n_phase=2,
         n_partition=2,
@@ -164,8 +178,13 @@ def test_spectral_selective_3d_bssfp_defaults_match_skinner_paper():
     assert definitions["SpectralTargetNames"] == ["Lac", "Py"]
     assert definitions["FlipAngleDeg"] == pytest.approx([90.0, 4.0])
     assert definitions["SpectralRFDuration"] == pytest.approx(2.33e-3)
-    assert definitions["SpectralRFBandwidthFactorHzMs"] == pytest.approx(2100.0)
-    assert definitions["SpectralRFBandwidthHz"] == pytest.approx(2100.0 / 2.33)
+    effective_tbw = definitions["SpectralRFTimeBandwidthProduct"]
+    assert definitions["SpectralRFBandwidthFactorHzMs"] == pytest.approx(
+        effective_tbw * 1000.0
+    )
+    assert definitions["SpectralRFBandwidthHz"] == pytest.approx(
+        effective_tbw / definitions["SpectralRFDuration"]
+    )
     assert definitions["SpectralRFFWHM"] == pytest.approx(900.0)
     assert definitions["ReadoutBandwidthHz"] == pytest.approx(10_000.0)
     assert definitions["AlphaHalfCenterSpacing"] == pytest.approx(4.31e-3)

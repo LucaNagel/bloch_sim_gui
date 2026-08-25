@@ -235,7 +235,9 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     assert dialog.sequence_timestep_us_spin.isEnabled()
     assert dialog.sequence_spoiler_mode() == "ideal"
     assert dialog.subvoxel_spin_counts() == (1, 1, 9)
+    assert dialog.subvoxel_sampling_method() == "midpoint"
     assert not any(spin.isEnabled() for spin in dialog.subvoxel_spin_count_spins)
+    assert not dialog.subvoxel_sampling_method_combo.isEnabled()
     dialog.sequence_spoiler_mode_combo.setCurrentIndex(
         dialog.sequence_spoiler_mode_combo.findData("gradient")
     )
@@ -243,7 +245,12 @@ def test_settings_dialog_returns_selected_values(tmp_path):
         spin.setValue(value)
     assert dialog.sequence_spoiler_mode() == "gradient"
     assert dialog.subvoxel_spin_counts() == (3, 5, 11)
+    dialog.subvoxel_sampling_method_combo.setCurrentIndex(
+        dialog.subvoxel_sampling_method_combo.findData("stratified")
+    )
+    assert dialog.subvoxel_sampling_method() == "stratified"
     assert all(spin.isEnabled() for spin in dialog.subvoxel_spin_count_spins)
+    assert dialog.subvoxel_sampling_method_combo.isEnabled()
     assert dialog.thread_mode() == "automatic"
     assert not dialog.manual_thread_count_spin.isEnabled()
     dialog.thread_mode_combo.setCurrentIndex(
@@ -661,6 +668,7 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     dialog.sequence_timestep_us.return_value = 10.0
     dialog.sequence_spoiler_mode.return_value = "gradient"
     dialog.subvoxel_spin_counts.return_value = (3, 5, 11)
+    dialog.subvoxel_sampling_method.return_value = "stratified"
     dialog.thread_mode.return_value = "manual"
     dialog.manual_thread_count.return_value = 2
     dialog.animation_memory_budget_bytes.return_value = 2048 * 1024**2
@@ -683,6 +691,9 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     assert int(window.app_settings.value("sequence/subvoxel_spins_x")) == 3
     assert int(window.app_settings.value("sequence/subvoxel_spins_y")) == 5
     assert int(window.app_settings.value("sequence/subvoxel_spins_z")) == 11
+    assert (
+        window.app_settings.value("sequence/subvoxel_sampling_method") == "stratified"
+    )
     assert window.app_settings.value("simulation/thread_mode") == "manual"
     assert int(window.app_settings.value("simulation/manual_threads")) == 2
     assert int(window.app_settings.value("memory/animation_replay_mib")) == 2048
@@ -701,7 +712,7 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
         "native_parallel"
     )
     window.sequence_simulation_widget.set_spoiler_configuration.assert_called_once_with(
-        "gradient", (3, 5, 11)
+        "gradient", (3, 5, 11), "stratified"
     )
     window.sequence_simulation_widget.set_thread_configuration.assert_called_once_with(
         "manual", 2
@@ -737,6 +748,7 @@ def test_changing_only_spoiler_settings_preserves_active_sequence_parameters(
     dialog.sequence_timestep_us.return_value = 5.0
     dialog.sequence_spoiler_mode.return_value = "gradient"
     dialog.subvoxel_spin_counts.return_value = (1, 1, 17)
+    dialog.subvoxel_sampling_method.return_value = "midpoint"
     dialog.thread_mode.return_value = "automatic"
     dialog.manual_thread_count.return_value = 4
     dialog.animation_memory_budget_bytes.return_value = 512 * 1024**2
@@ -747,7 +759,7 @@ def test_changing_only_spoiler_settings_preserves_active_sequence_parameters(
         window.show_settings(initial_tab="simulation")
 
     window.sequence_simulation_widget.set_spoiler_configuration.assert_called_once_with(
-        "gradient", (1, 1, 17)
+        "gradient", (1, 1, 17), "midpoint"
     )
     window.sequence_simulation_widget.set_scanner_parameters.assert_not_called()
     window.sequence_simulation_widget.set_workspace_defaults.assert_not_called()

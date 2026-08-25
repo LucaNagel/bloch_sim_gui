@@ -103,7 +103,7 @@ Generated sequences explicitly mark the end of every spoiler block. **Settings
   spoiler end, `Mx` and `My` are set to zero for every pool while `Mz`,
   relaxation, inflow, and chemical exchange continue normally.
 - **Gradient waveform** ignores the artificial transverse reset. Every voxel
-  is represented by the configured X/Y/Z midpoint spins, and spoiling follows
+  is represented by the configured X/Y/Z subvoxel spins, and spoiling follows
   from their positions and the actual gradient waveform. Subspins remain
   separate for the complete sequence, so later gradients may refocus them.
 
@@ -115,17 +115,26 @@ definitions); arbitrary gradients are never classified heuristically. In
 gradient-waveform mode all gradients act physically whether or not a spoiler
 marker is present.
 
-Subvoxel counts are axis-specific because their product controls runtime. For
-a spoiler only along Z, start with `1 × 1 × 9` spins and increase Z until the
-ADC signal and voxel magnetization converge. Through-slice subvoxel sampling
-requires a 3D phantom with explicit Z extent; a single Z voxel is sufficient.
+Subvoxel counts are axis-specific because their product controls runtime.
+**Regular midpoint grid** is the efficient symmetric quadrature rule. The
+optional **Deterministic stratified points** place one reproducible point in
+each stratum and avoid short exact grid recurrences, but generally need more
+spins for the same quadrature error. Through-slice subvoxel sampling requires a
+3D phantom with explicit Z extent; a single Z voxel is sufficient.
 The relevant spoiler strength is the phase spread **inside one phantom
 voxel**, not merely the number of cycles across the complete imaging FOV. A
-regular midpoint grid can alias when the requested cycles/voxel are a multiple
-of the point count on that axis; the FLASH and SS-bSSFP panels report both the
-continuous voxel estimate and the configured-grid estimate and warn about this
-case. For example, 4 cycles across a 3 mm FLASH slice are only 2/3 cycle across
-a 0.5 mm phantom voxel; 6 cycles/slice produce one full cycle per voxel.
+regular midpoint grid can appear perfectly spoiled after one crusher and then
+rephase exactly after several repetitions. The FLASH panel therefore evaluates
+every accumulated crusher order in the RF train, reports the first artificial
+rephasing and maximum error relative to a continuous voxel, and offers the
+smallest tested train-safe midpoint grid. The recommendation also enforces the
+spatial sampling required when a phantom voxel is coarser than an imaging
+voxel and at least two points along every axis with a crusher moment; a centered
+singleton cannot represent gradient phase or slice-selective RF evolution on
+that axis. For example, a `3 × 3 × 3` grid at one cycle/voxel has zero coherence
+after one crusher but returns to 100% at crusher order 3. For a 64-line FLASH
+train, mutually non-recurrent axis counts totaling roughly 65 spins can be much
+safer than an isotropic grid with a larger apparent single-crusher accuracy.
 
 Every 3D sequence panel has independent signed **Read gradient direction** and
 **Phase gradient direction** controls in its spatial-encoding section. The
@@ -218,6 +227,17 @@ increment, and through-slice/in-plane gradient spoiling are configurable. The
 Sequence parameter forms are separated into spatial encoding, RF, slice
 selection, timing, spoiling, and derived-sampling sections.
 
+**Auto spoiler** is enabled by default. It updates the through-slice and shared
+in-plane spoiler strengths whenever the phantom voxel size, FLASH geometry,
+orientation, or subvoxel sampling changes. The selected moments reach the first
+continuous-voxel coherence null; for the shared in-plane control an axis with
+more than one subvoxel spin is preferred so the simulated midpoint grid also
+reaches that null. Auto spoiler controls the physical gradient moment; it does
+not by itself guarantee that a finite regular spin grid remains dephased across
+the complete train. Check the train-wide warning and use **Apply train-safe
+subvoxel grid** when needed. Disable the checkbox to enter both strengths
+manually.
+
 For repeated complete acquisitions, **Acquisition interval
 (start-to-start)** controls the time from the beginning of one complete image,
 volume, or radial measurement to the beginning of the next. It is separate
@@ -235,16 +255,26 @@ trajectory controls use **millimeters (mm)** consistently. This includes FOV,
 slice thickness, slice gap, and spatial probe positions. Values are converted
 to SI meters internally for simulation and Pulseq export.
 
-The same 2D acquisition panel configures the slice-selective excitation.
-Choose **Sinc**, **SLR**, **Gaussian**, or **Block** and set RF duration and
-time-bandwidth product. SLR pulses are designed dynamically from these values
-and the selected transition sharpness; Gaussian pulses use the time-bandwidth
-product as their spectral FWHM-bandwidth product. Choose
-**RF Pulse Designer** to use the current complex baseband waveform from the
-**RF Design** tab. Its duration, complex phase modulation, and carrier offset
-are preserved, while its amplitude is rescaled from the designer's reference
-flip angle to the constant or variable flip angle selected for EPI/spiral. The
-Sequence-mode TBW still defines the slice-selection bandwidth.
+Every generated sequence now uses the same RF field set and global envelope
+designer. Choose **Sinc**, **SLR**, **Gaussian**, **Block**, or **RF Pulse
+Designer**, then set duration, time-bandwidth product, Sinc lobe count,
+apodization, SLR sharpness, and RF carrier offset as applicable. Increasing
+SLR sharpness narrows the designed transition and visibly adds temporal lobes.
+This is the same SLR function used by Free Mode; standalone scripts call it as
+well.
+
+**RF Pulse Designer** uses the current complex baseband waveform from the
+**RF Design** tab. **Load RF pulse…** is also available inside every Sequence
+Mode RF section for `.exc`, `.dat`, `.txt`, and `.csv` waveforms. Duration,
+complex phase modulation, and carrier offset are preserved, while amplitude is
+rescaled from the loaded pulse's reference flip angle to the sequence flip
+angle. Loaded pulses work for EPI, spiral, CSI, FLASH, Cartesian and radial
+bSSFP, SS-bSSFP, and Cartesian multi-echo bSSFP.
+
+Total imaging readout bandwidth fields share one definition and control:
+ADC dwell is `1 / bandwidth`, rounded to the scanner ADC raster. CSI spectral
+bandwidth and radial pixel bandwidth remain separate because they describe
+different physical quantities.
 
 Scanner hardware limits are configured under **Tools → Settings → Scanner**.
 Maximum gradient, maximum slew rate, waveform rasters, RF ringdown/dead time,
