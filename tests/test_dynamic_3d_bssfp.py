@@ -59,7 +59,8 @@ def test_dynamic_3d_bssfp_uses_pulseq_frame_and_partition_labels(tmp_path):
     definitions = program.metadata["definitions"]
     assert definitions["DynamicFrames"] == 2
     assert definitions["RFPulseType"] == "slr"
-    assert definitions["RFPulseFile"].endswith("rfpulses/SLR_sharpness_5.txt")
+    assert "RFPulseFile" not in definitions
+    assert definitions["RFSLRSharpness"] == pytest.approx(5.0)
     assert definitions["EndImageSpoilerCyclesPerFOV"] == pytest.approx(4.0)
     assert definitions["EndImageSpoilerDuration"] == pytest.approx(1e-3)
     assert definitions["EndImageSpoilerAxes"] == "xyz"

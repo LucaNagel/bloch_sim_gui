@@ -1,4 +1,10 @@
-"""Shared RF waveform design for generated 2D imaging sequences."""
+"""Shared RF waveform design used by Free Mode and every sequence builder.
+
+This module is deliberately independent of the desktop UI.  It is the single
+place where analytic RF envelopes, including SLR beta polynomials, are
+generated.  Pulseq builders and the Free Mode designer only scale or package
+the resulting baseband waveform.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +16,14 @@ from scipy.signal.windows import tukey
 
 
 RF_PULSE_TYPES = ("sinc", "slr", "gaussian", "block", "designer")
+RF_PULSE_TYPE_LABELS = (
+    "Sinc",
+    "SLR",
+    "Gaussian",
+    "Block",
+    "RF Pulse Designer",
+)
+DEFAULT_ANALYTIC_RF_SHAPE_PARAMETER = 4.0
 
 
 def normalize_rf_pulse_type(value: str) -> str:
@@ -30,6 +44,8 @@ def normalize_rf_pulse_type(value: str) -> str:
         "rectangular": "block",
         "designer": "designer",
         "rf pulse designer": "designer",
+        "rf pulse designer / loaded file": "designer",
+        "loaded file": "designer",
         "custom": "designer",
     }
     try:
@@ -37,6 +53,39 @@ def normalize_rf_pulse_type(value: str) -> str:
     except KeyError as exc:
         choices = ", ".join(RF_PULSE_TYPES)
         raise ValueError(f"rf_pulse_type must be one of: {choices}") from exc
+
+
+def rf_envelope_integration_factor(envelope: np.ndarray) -> float:
+    """Return the coherent normalized area of an RF envelope.
+
+    The result is invariant to pulse amplitude, constant phase, duration, and
+    RF raster. A block pulse therefore has an integration factor of one.
+    """
+    signal = np.asarray(envelope, dtype=np.complex128).reshape(-1)
+    if signal.size == 0 or not np.all(np.isfinite(signal)):
+        raise ValueError("RF envelope must be non-empty and finite")
+    peak = float(np.max(np.abs(signal)))
+    if not np.isfinite(peak) or peak <= 0.0:
+        raise ValueError("RF envelope must have a positive finite peak")
+    factor = float(abs(np.sum(signal / peak)) / signal.size)
+    if not np.isfinite(factor) or factor <= np.finfo(float).eps:
+        raise ValueError("RF envelope has no finite coherent integral")
+    return factor
+
+
+def rf_time_bandwidth_product_from_envelope(envelope: np.ndarray) -> float:
+    """Estimate the shape-intrinsic TBW as inverse integration factor."""
+    return 1.0 / rf_envelope_integration_factor(envelope)
+
+
+def analytic_rf_shape_parameter(pulse_type: str, sinc_lobes: int = 3) -> float:
+    """Return the non-editable construction parameter for an analytic shape."""
+    normalized = normalize_rf_pulse_type(pulse_type)
+    if normalized == "sinc":
+        return float(max(1, int(sinc_lobes)) + 1)
+    if normalized in {"slr", "gaussian"}:
+        return DEFAULT_ANALYTIC_RF_SHAPE_PARAMETER
+    return 1.0
 
 
 def _validate_slr_sharpness(sharpness: float) -> float:
@@ -64,7 +113,20 @@ def _design_slr_waveform(
             "rf_time_bandwidth_product must be smaller than the SLR sample count"
         )
 
-    band_center = tbw / (2.0 * sample_count)
+    # ``sharpness`` historically selected bundled SLR waveforms whose number
+    # of temporal lobes increased with the setting.  The first dynamic design
+    # accidentally omitted that factor from the beta-polynomial bandwidth, so
+    # only the ripple weighting changed and every setting looked nearly the
+    # same.  Scaling the beta pass band restores the intended lobe progression
+    # while the progressively narrower transition retains the sharper slice
+    # profile expected from the control.
+    designed_tbw = tbw * sharpness
+    if designed_tbw >= sample_count:
+        raise ValueError(
+            "rf_time_bandwidth_product * rf_slr_sharpness must be smaller "
+            "than the SLR sample count"
+        )
+    band_center = designed_tbw / (2.0 * sample_count)
     transition_fraction = 1.0 / (sharpness + 1.0)
     passband_edge = band_center * (1.0 - transition_fraction)
     stopband_edge = band_center * (1.0 + transition_fraction)
@@ -121,8 +183,10 @@ def design_rf_envelope(
     """Design a baseband envelope on an RF raster.
 
     The returned waveform has an arbitrary amplitude but a positive real
-    integral. Consumers scale it to the requested flip angle. The third return
-    value is the effective time-bandwidth product used for slice selection.
+    integral. Consumers scale it to the requested flip angle. For analytic
+    pulses, the input ``time_bandwidth_product`` is retained as a construction
+    parameter for backward compatibility; the third return value is calculated
+    from the completed normalized pulse shape and is used for slice selection.
     """
     pulse_type = normalize_rf_pulse_type(pulse_type)
     for name, value in {
@@ -140,7 +204,7 @@ def design_rf_envelope(
     if sample_count <= 0:
         raise ValueError("rf_duration_s must span at least one RF raster interval")
     actual_duration_s = sample_count * float(raster_s)
-    effective_tbw = 1.0 if pulse_type == "block" else float(time_bandwidth_product)
+    shape_parameter = 1.0 if pulse_type == "block" else float(time_bandwidth_product)
 
     if pulse_type == "block":
         signal = np.ones(sample_count, dtype=np.complex128)
@@ -152,15 +216,18 @@ def design_rf_envelope(
             - float(apodization)
             + float(apodization) * np.cos(2.0 * np.pi * centered_s / actual_duration_s)
         )
-        signal = window * np.sinc(effective_tbw * centered_s / actual_duration_s)
+        signal = window * np.sinc(shape_parameter * centered_s / actual_duration_s)
         signal = signal.astype(np.complex128)
     elif pulse_type == "slr":
-        signal = _design_slr_waveform(sample_count, effective_tbw, slr_sharpness).copy()
+        signal = _design_slr_waveform(
+            sample_count, shape_parameter, slr_sharpness
+        ).copy()
     elif pulse_type == "gaussian":
         time_s = (np.arange(sample_count, dtype=float) + 0.5) * float(raster_s)
         centered_s = time_s - actual_duration_s / 2.0
-        # Choose sigma so effective_tbw / duration is the spectral FWHM.
-        spectral_fwhm_hz = effective_tbw / actual_duration_s
+        # The fixed construction parameter defines the normalized Gaussian
+        # shape. Stretching it in time changes bandwidth without changing TBW.
+        spectral_fwhm_hz = shape_parameter / actual_duration_s
         sigma_s = np.sqrt(2.0 * np.log(2.0)) / (np.pi * spectral_fwhm_hz)
         signal = np.exp(-0.5 * (centered_s / sigma_s) ** 2).astype(np.complex128)
     else:
@@ -198,6 +265,11 @@ def design_rf_envelope(
         raise ValueError("RF waveform has zero or non-finite integral")
     if pulse_type != "designer":
         signal *= np.exp(-1j * np.angle(integral))
+        effective_tbw = rf_time_bandwidth_product_from_envelope(signal)
+    else:
+        # Loaded formats may provide an independently measured bandwidth
+        # factor. Callers pass that value through this compatibility parameter.
+        effective_tbw = float(time_bandwidth_product)
     signal.setflags(write=False)
     return signal, actual_duration_s, effective_tbw, pulse_type
 
@@ -225,3 +297,127 @@ def scale_rf_envelope_to_flip(
         samples_hz = signal * (target_cycles / abs(integral_s))
     samples_hz.setflags(write=False)
     return samples_hz
+
+
+def make_pulseq_rf_events(
+    pp,
+    system,
+    *,
+    flip_angles_deg,
+    pulse_type: str,
+    duration_s: float,
+    time_bandwidth_product: float = 4.0,
+    apodization: float = 0.5,
+    slr_sharpness: float = 1.0,
+    custom_waveform_hz=None,
+    custom_raster_s: float | None = None,
+    custom_flip_angle_deg: float | None = None,
+    slice_thickness_m: float | None = None,
+    frequency_offset_hz: float = 0.0,
+    use: str = "excitation",
+    center_s: float | None = None,
+):
+    """Create Pulseq RF events from the shared envelope designer.
+
+    When ``slice_thickness_m`` is supplied, each result is the
+    ``(rf, slice_gradient)`` tuple returned by Pulseq.  Otherwise
+    each result is a non-selective RF event.  Loaded/designer waveforms retain
+    their complex phase and are rescaled from their reference flip angle.
+    """
+    angles = tuple(float(value) for value in flip_angles_deg)
+    if not angles or not np.all(np.isfinite(angles)):
+        raise ValueError("flip_angles_deg must contain finite values")
+    if not np.isfinite(frequency_offset_hz):
+        raise ValueError("rf_frequency_offset_hz must be finite")
+    if slice_thickness_m is not None and (
+        not np.isfinite(slice_thickness_m) or slice_thickness_m <= 0
+    ):
+        raise ValueError("slice_thickness_m must be positive and finite")
+
+    envelope, actual_duration_s, effective_tbw, normalized_type = design_rf_envelope(
+        pulse_type=pulse_type,
+        duration_s=duration_s,
+        raster_s=system.rf_raster_time,
+        time_bandwidth_product=time_bandwidth_product,
+        apodization=apodization,
+        slr_sharpness=slr_sharpness,
+        custom_waveform=custom_waveform_hz,
+        custom_raster_s=custom_raster_s,
+    )
+    loaded = normalized_type == "designer"
+    results = []
+    for angle_deg in angles:
+        signal = (
+            scale_rf_envelope_to_flip(
+                envelope,
+                flip_angle_deg=angle_deg,
+                raster_s=system.rf_raster_time,
+                reference_flip_angle_deg=custom_flip_angle_deg,
+            )
+            if loaded
+            else envelope
+        )
+        kwargs = {
+            "signal": signal,
+            "flip_angle": np.deg2rad(angle_deg),
+            "dwell": system.rf_raster_time,
+            "bandwidth": effective_tbw / actual_duration_s,
+            "time_bw_product": effective_tbw,
+            "no_signal_scaling": loaded,
+            "delay": system.rf_dead_time,
+            "system": system,
+            "use": use,
+        }
+        if center_s is not None:
+            if not np.isfinite(center_s) or center_s < 0:
+                raise ValueError("rf center_s must be non-negative and finite")
+            kwargs["center"] = float(center_s)
+        if slice_thickness_m is not None:
+            kwargs.update(
+                slice_thickness=slice_thickness_m,
+                return_gz=True,
+            )
+        event = pp.make_arbitrary_rf(**kwargs)
+        rf_event = event[0] if slice_thickness_m is not None else event
+        rf_event.freq_offset = float(frequency_offset_hz)
+        results.append(event)
+    return tuple(results), actual_duration_s, effective_tbw, normalized_type
+
+
+def set_rf_definitions(
+    sequence,
+    *,
+    pulse_type: str,
+    requested_duration_s: float,
+    actual_duration_s: float,
+    time_bandwidth_product: float,
+    apodization: float,
+    slr_sharpness: float,
+    custom_name: str | None,
+    custom_flip_angle_deg: float | None,
+    frequency_offset_hz: float,
+    prefix: str = "",
+) -> None:
+    """Persist one consistent set of reproducible RF definitions."""
+    key = str(prefix)
+    sequence.set_definition(f"{key}RFPulseType", pulse_type)
+    sequence.set_definition(f"{key}RFDuration", actual_duration_s)
+    sequence.set_definition(f"{key}RequestedRFDuration", requested_duration_s)
+    sequence.set_definition(f"{key}RFTimeBandwidthProduct", time_bandwidth_product)
+    sequence.set_definition(
+        f"{key}RFBandwidth", time_bandwidth_product / actual_duration_s
+    )
+    sequence.set_definition(f"{key}RFFrequencyOffset", frequency_offset_hz)
+    if pulse_type == "sinc":
+        sequence.set_definition(f"{key}RFApodization", apodization)
+    if pulse_type == "slr":
+        sequence.set_definition(f"{key}RFSLRSharpness", slr_sharpness)
+        # Retain the historical spelling used by spectral sequence readers.
+        if key == "Spectral":
+            sequence.set_definition("SpectralSLRSharpness", slr_sharpness)
+    if pulse_type == "designer":
+        sequence.set_definition(f"{key}RFDesignerPulseName", custom_name or "custom")
+        if custom_flip_angle_deg is not None:
+            sequence.set_definition(
+                f"{key}RFDesignerFlipAngleDeg", custom_flip_angle_deg
+            )

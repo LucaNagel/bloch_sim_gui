@@ -4,7 +4,6 @@ Basic 2D Cartesian bSSFP-like sequence.
 
 from pathlib import Path
 
-import numpy as np
 from matplotlib import pyplot as plt
 
 import pypulseq as pp
@@ -13,6 +12,10 @@ from blochsimulator.sequence.bssfp_phase import (
     advance_bssfp_phase_deg,
     pulseq_phase_offset_rad,
     wrap_phase_deg,
+)
+from blochsimulator.sequence.rf_pulses import (
+    make_pulseq_rf_events,
+    set_rf_definitions,
 )
 
 
@@ -27,7 +30,14 @@ def main(
     n_read: int = 64,
     n_phase: int = 64,
     flip_angle_deg: float = 15,
+    rf_pulse_type: str = "sinc",
     rf_duration: float = 1e-3,
+    rf_time_bandwidth_product: float = 4.0,
+    rf_apodization: float = 0.5,
+    rf_slr_sharpness: float = 1.0,
+    rf_custom_waveform_hz=None,
+    rf_custom_raster_s: float | None = None,
+    rf_custom_flip_angle_deg: float | None = None,
     rf_phase_start: float = 180,
     rf_phase_increment: float = 180,
 ):
@@ -49,25 +59,22 @@ def main(
 
     dwell = 10 * system.grad_raster_time
 
-    rf, _, _ = pp.make_sinc_pulse(
-        flip_angle=np.deg2rad(flip_angle_deg),
-        duration=rf_duration,
-        slice_thickness=slice_thickness,
-        apodization=0.5,
-        time_bw_product=4,
-        system=system,
-        return_gz=True,
+    rf_events, actual_rf_duration, effective_rf_tbw, rf_pulse_type = (
+        make_pulseq_rf_events(
+            pp,
+            system,
+            flip_angles_deg=(flip_angle_deg, flip_angle_deg / 2),
+            pulse_type=rf_pulse_type,
+            duration_s=rf_duration,
+            time_bandwidth_product=rf_time_bandwidth_product,
+            apodization=rf_apodization,
+            slr_sharpness=rf_slr_sharpness,
+            custom_waveform_hz=rf_custom_waveform_hz,
+            custom_raster_s=rf_custom_raster_s,
+            custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        )
     )
-
-    rf_alpha_half, _, _ = pp.make_sinc_pulse(
-        flip_angle=np.deg2rad(flip_angle_deg / 2),
-        duration=rf_duration,
-        slice_thickness=slice_thickness,
-        apodization=0.5,
-        time_bw_product=4,
-        system=system,
-        return_gz=True,
-    )
+    rf, rf_alpha_half = rf_events
 
     gx = pp.make_trapezoid(
         channel="x",
@@ -169,6 +176,18 @@ def main(
 
     seq.set_definition(key="FOV", value=[fov_x, fov_y, slice_thickness])
     seq.set_definition(key="Name", value="bssfp_2d")
+    set_rf_definitions(
+        seq,
+        pulse_type=rf_pulse_type,
+        requested_duration_s=rf_duration,
+        actual_duration_s=actual_rf_duration,
+        time_bandwidth_product=effective_rf_tbw,
+        apodization=rf_apodization,
+        slr_sharpness=rf_slr_sharpness,
+        custom_name=None,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        frequency_offset_hz=0.0,
+    )
 
     if write_seq:
         script_dir = Path(__file__).resolve().parent

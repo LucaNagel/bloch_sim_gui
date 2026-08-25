@@ -44,9 +44,9 @@ class PulseMetadata:
     slice_offset: float = 0.0  # mm
 
     # Integration/rephasing factors
-    integfac: float = 1.0
+    integfac: float = 0.0
     rephfac: float = 1.0
-    bwfac: float = 1.0
+    bwfac: float = 0.0
 
     # Raw JCAMP metadata
     minx: float = 0.0
@@ -72,6 +72,9 @@ class PulseMetadata:
             "max_slew": self.max_slew,
             "slice_width": self.slice_width,
             "slice_offset": self.slice_offset,
+            "integfac": self.integfac,
+            "rephfac": self.rephfac,
+            "bwfac": self.bwfac,
         }
 
 

@@ -849,10 +849,10 @@ class SequenceReconstructionExplorer(QWidget):
             delta = max(1e-6, abs(low) * 1e-6)
             low, high = low - delta, high + delta
         if self.auto_contrast.isChecked():
-            self.contrast_slider.set_domain(low, high, preserve=False)
-            self._update_contrast_labels(low, high)
+            self.contrast_slider.set_domain(low, 1.1 * high, preserve=False)
+            self._update_contrast_labels(low, 1.1 * high)
             return None
-        self.contrast_slider.set_domain(low, high, preserve=True)
+        self.contrast_slider.set_domain(low, 1.1 * high, preserve=True)
         selected_low, selected_high = self.contrast_slider.values()
         self._update_contrast_labels(selected_low, selected_high)
         if selected_high <= selected_low:

@@ -52,6 +52,15 @@ from .probe import SequenceProbeResult
 from .reference import ReferenceSimulationResult, simulate_reference_sequence
 from .result import SequenceSimulationResult
 from .spin_sampling import SpinSampling
+from .spoiling import (
+    SpinGridRecommendation,
+    SpoilerTrainAnalysis,
+    analyze_adc_moment_train,
+    analyze_phase_cycle_train,
+    analyze_repeated_spoiler_train,
+    recommend_spin_grid,
+    recommend_spin_grid_for_phase_train,
+)
 from .reconstruction import (
     SequenceReconstructionModel,
     ideal_separate,
@@ -116,6 +125,13 @@ __all__ = [
     "SequenceReconstructionModel",
     "SpinProbeEnsemble",
     "SpinSampling",
+    "SpinGridRecommendation",
+    "SpoilerTrainAnalysis",
+    "analyze_adc_moment_train",
+    "analyze_phase_cycle_train",
+    "analyze_repeated_spoiler_train",
+    "recommend_spin_grid",
+    "recommend_spin_grid_for_phase_train",
     "TimestepConvergencePoint",
     "TimestepConvergenceResult",
     "VFA_REFERENCE_DOI",

@@ -67,6 +67,8 @@ from ..sequence import (
     SequenceProgram,
     ScannerParameters,
     SpinSampling,
+    analyze_adc_moment_train,
+    analyze_repeated_spoiler_train,
     export_bruker_raw,
     infer_cartesian_acquisition,
     infer_cartesian_acquisition_frames,
@@ -83,7 +85,16 @@ from ..sequence import (
     make_pulseq_radial_me_bssfp,
     make_pulseq_spectral_selective_bssfp,
     make_pulseq_spiral,
+    recommend_spin_grid,
+    recommend_spin_grid_for_phase_train,
     variable_flip_angle_schedule,
+)
+from ..sequence.spin_sampling import phantom_voxel_basis_m
+from ..sequence.rf_pulses import (
+    RF_PULSE_TYPE_LABELS,
+    analytic_rf_shape_parameter,
+    design_rf_envelope,
+    rf_time_bandwidth_product_from_envelope,
 )
 from ..simulator import BlochSimulator, resolve_num_threads
 from ..units import (
@@ -94,6 +105,7 @@ from ..units import (
     rf_hz_to_gauss_for_nucleus,
 )
 from .controls import UniversalTimeControl
+from .dialogs import PulseImportDialog
 from .magnetization_viewer import MagnetizationViewer
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
 from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumViewer
@@ -983,6 +995,8 @@ class SequenceProbeThread(QThread):
 class SequenceSimulationWidget(QWidget):
     """Load/build sequences, configure a 3D object, and inspect sparse output."""
 
+    physical_b1_changed = pyqtSignal(object)
+
     # Generated-sequence forms (notably EPI, CSI, and FLASH) need enough
     # room for a label and its editor alongside the vertical scroll bar.
     # Keeping the focused panel at this width avoids a horizontal scroll bar
@@ -1065,6 +1079,7 @@ class SequenceSimulationWidget(QWidget):
         self.simulation_time_timer.setInterval(1000)
         self.simulation_time_timer.timeout.connect(self._update_simulation_time_label)
         settings = getattr(parent, "app_settings", None)
+        self.app_settings = settings
         self.workspace_defaults = WorkspaceDefaults.from_settings(settings)
         self.scanner_parameters = load_scanner_parameters(settings)
         try:
@@ -1124,6 +1139,13 @@ class SequenceSimulationWidget(QWidget):
             except (TypeError, ValueError):
                 count = default
             subvoxel_counts.append(count if 1 <= count <= 128 else default)
+        subvoxel_sampling_method = (
+            str(settings.value("sequence/subvoxel_sampling_method", "midpoint"))
+            if settings is not None
+            else "midpoint"
+        )
+        if subvoxel_sampling_method not in {"midpoint", "stratified"}:
+            subvoxel_sampling_method = "midpoint"
         try:
             sequence_timestep_us = float(
                 settings.value("sequence/timestep_us", 5.0)
@@ -1165,6 +1187,7 @@ class SequenceSimulationWidget(QWidget):
         self._initial_sequence_timestep_us = sequence_timestep_us
         self.spoiler_mode = spoiler_mode
         self.subvoxel_spin_counts = tuple(subvoxel_counts)
+        self.subvoxel_sampling_method = subvoxel_sampling_method
         self._build_ui()
         self._connect_rf_designer(parent)
         self._load_internal_sequence()
@@ -1248,6 +1271,16 @@ class SequenceSimulationWidget(QWidget):
                 )
             raster_s = duration_s / b1_gauss.size
             waveform_hz = np.asarray(rf_gauss_to_hz(b1_gauss), np.complex128)
+            time_bandwidth_product = state.get("time_bandwidth_product", 0.0)
+            time_bandwidth_product = (
+                float(time_bandwidth_product)
+                if time_bandwidth_product is not None
+                else 0.0
+            )
+            if not np.isfinite(time_bandwidth_product) or time_bandwidth_product <= 0:
+                time_bandwidth_product = rf_time_bandwidth_product_from_envelope(
+                    waveform_hz
+                )
             reference_flip_angle_deg = float(state.get("flip_angle", 0.0))
             if (
                 not np.isfinite(reference_flip_angle_deg)
@@ -1266,22 +1299,106 @@ class SequenceSimulationWidget(QWidget):
                 "flip_angle_deg": reference_flip_angle_deg,
                 "name": str(state.get("pulse_type", "custom")),
                 "frequency_offset_hz": float(state.get("freq_offset", 0.0)),
+                "time_bandwidth_product": time_bandwidth_product,
             }
             self._rf_designer_pulse_error = ""
-            if hasattr(self, "epi_rf_duration_ms"):
-                self.epi_rf_duration_ms.blockSignals(True)
-                self.epi_rf_duration_ms.setValue(duration_s * 1000.0)
-                self.epi_rf_duration_ms.blockSignals(False)
+            for prefix in (
+                "epi",
+                "csi",
+                "flash",
+                "bssfp",
+                "ss_bssfp",
+                "radial_me",
+                "me_bssfp",
+            ):
+                duration_control = getattr(self, f"{prefix}_rf_duration_ms", None)
+                if duration_control is None:
+                    continue
+                previous = duration_control.blockSignals(True)
+                if self._selected_shared_rf_pulse_type(prefix) == "designer":
+                    duration_control.setValue(duration_s * 1000.0)
+                duration_control.blockSignals(previous)
+                if self._selected_shared_rf_pulse_type(prefix) == "designer":
+                    self._update_shared_rf_controls(prefix)
         except Exception as exc:
             self._rf_designer_pulse_data = None
             self._rf_designer_pulse_error = str(exc)
 
-        if (
-            reload_sequence
-            and hasattr(self, "epi_rf_pulse_type")
-            and self.epi_rf_pulse_type.currentText() == "RF Pulse Designer"
+        if reload_sequence and any(
+            hasattr(self, f"{prefix}_rf_pulse_type")
+            and self._selected_shared_rf_pulse_type(prefix) == "designer"
+            for prefix in (
+                "epi",
+                "csi",
+                "flash",
+                "bssfp",
+                "ss_bssfp",
+                "radial_me",
+                "me_bssfp",
+            )
         ):
-            self._acquisition_changed()
+            self._request_generated_sequence_refresh()
+
+    def _load_sequence_rf_pulse(self, prefix):
+        """Load a Free-Mode-compatible RF file directly from Sequence Mode."""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load RF Pulse",
+            "",
+            "Pulse Files (*.exc *.dat *.txt *.csv);;All Files (*)",
+        )
+        if not filename:
+            return
+        try:
+            path = Path(filename)
+            if path.suffix.lower() == ".exc":
+                from ..pulse_loader import load_pulse_from_file
+
+                b1_gauss, time_s, metadata = load_pulse_from_file(path)
+            else:
+                dialog = PulseImportDialog(self, str(path))
+                if dialog.exec_() != QDialog.Accepted:
+                    return
+                options = dialog.get_options()
+                from ..pulse_loader import load_amp_phase_dat
+
+                b1_gauss, time_s, metadata = load_amp_phase_dat(
+                    path,
+                    duration_s=options["duration_s"],
+                    amplitude_unit=options["amp_unit"],
+                    phase_unit=options["phase_unit"],
+                    layout=options["layout"],
+                )
+            duration_s = float(getattr(metadata, "duration", 0.0))
+            if duration_s <= 0:
+                time_values = np.asarray(time_s, dtype=float)
+                duration_s = (
+                    float(np.median(np.diff(time_values))) * time_values.size
+                    if time_values.size > 1
+                    else self.scanner_parameters.rf_raster_time_s
+                )
+            flip_angle = float(getattr(metadata, "flip_angle", 0.0))
+            bandwidth_factor = getattr(metadata, "bwfac", 0.0)
+            bandwidth_factor = (
+                float(bandwidth_factor) if bandwidth_factor is not None else 0.0
+            )
+            self.set_rf_designer_pulse(
+                (b1_gauss, time_s),
+                {
+                    "duration": duration_s * 1000.0,
+                    "flip_angle": flip_angle,
+                    "pulse_type": path.name,
+                    "freq_offset": 0.0,
+                    "time_bandwidth_product": bandwidth_factor,
+                },
+                reload_sequence=False,
+            )
+            if self._rf_designer_pulse_data is None:
+                raise ValueError(self._rf_designer_pulse_error)
+            getattr(self, f"{prefix}_rf_pulse_type").setCurrentText("RF Pulse Designer")
+            self._update_shared_rf_controls(prefix)
+        except Exception as exc:
+            QMessageBox.critical(self, "RF pulse load failed", str(exc))
 
     def _build_ui(self):
         root = QHBoxLayout(self)
@@ -1432,11 +1549,7 @@ class SequenceSimulationWidget(QWidget):
         )
         self.epi_read_fov_mm = self._parameter_spin(0.1, 10000.0, default_fov_x, " mm")
         self.epi_phase_fov_mm = self._parameter_spin(0.1, 10000.0, default_fov_y, " mm")
-        self.sampling_bandwidth_khz = QDoubleSpinBox()
-        self.sampling_bandwidth_khz.setRange(0.1, 2000.0)
-        self.sampling_bandwidth_khz.setDecimals(3)
-        self.sampling_bandwidth_khz.setValue(50.0)
-        self.sampling_bandwidth_khz.setSuffix(" kHz")
+        self.sampling_bandwidth_khz = self._sampling_bandwidth_spin(50.0)
         self.epi_flip_angle_deg = QDoubleSpinBox()
         self.epi_flip_angle_deg.setRange(0.1, 360.0)
         self.epi_flip_angle_deg.setDecimals(2)
@@ -1457,64 +1570,6 @@ class SequenceSimulationWidget(QWidget):
         self.epi_vfa_info.setToolTip(
             "Nagashima VFA schedule without T1-decay compensation "
             "(doi:10.1016/j.jmr.2007.10.011)"
-        )
-        self.epi_rf_pulse_type = QComboBox()
-        self.epi_rf_pulse_type.setObjectName("epi_rf_pulse_type")
-        self.epi_rf_pulse_type.addItems(
-            ["Sinc", "SLR", "Gaussian", "Block", "RF Pulse Designer"]
-        )
-        self.epi_rf_pulse_type.setToolTip(
-            "Slice-selective excitation envelope used by both Cartesian EPI "
-            "and spiral acquisitions. SLR and Gaussian shapes are generated "
-            "from the current duration and time-bandwidth product. RF Pulse "
-            "Designer imports the current complex baseband shape and rescales "
-            "it to the sequence flip angle."
-        )
-        self.epi_rf_duration_ms = QDoubleSpinBox()
-        self.epi_rf_duration_ms.setObjectName("epi_rf_duration_ms")
-        self.epi_rf_duration_ms.setRange(0.001, 100.0)
-        self.epi_rf_duration_ms.setDecimals(3)
-        self.epi_rf_duration_ms.setSingleStep(0.1)
-        self.epi_rf_duration_ms.setValue(3.0)
-        self.epi_rf_duration_ms.setSuffix(" ms")
-        self.epi_rf_duration_ms.setToolTip(
-            "RF envelope duration, rounded to the configured scanner RF raster"
-        )
-        self.epi_rf_time_bandwidth_product = QDoubleSpinBox()
-        self.epi_rf_time_bandwidth_product.setObjectName(
-            "epi_rf_time_bandwidth_product"
-        )
-        self.epi_rf_time_bandwidth_product.setRange(0.1, 100.0)
-        self.epi_rf_time_bandwidth_product.setDecimals(2)
-        self.epi_rf_time_bandwidth_product.setSingleStep(0.5)
-        self.epi_rf_time_bandwidth_product.setValue(4.0)
-        self.epi_rf_time_bandwidth_product.setEnabled(False)
-        self.epi_rf_time_bandwidth_product.setToolTip(
-            "RF time-bandwidth product; together with duration it determines "
-            "the slice-selection bandwidth"
-        )
-        self.epi_rf_sinc_lobes = QSpinBox()
-        self.epi_rf_sinc_lobes.setObjectName("epi_rf_sinc_lobes")
-        self.epi_rf_sinc_lobes.setRange(1, 100)
-        self.epi_rf_sinc_lobes.setValue(3)
-        self.epi_rf_sinc_lobes.setToolTip(
-            "Number of Sinc lobes; determines the time-bandwidth product"
-        )
-        self.epi_rf_apodization = QDoubleSpinBox()
-        self.epi_rf_apodization.setObjectName("epi_rf_apodization")
-        self.epi_rf_apodization.setRange(0.0, 1.0)
-        self.epi_rf_apodization.setDecimals(2)
-        self.epi_rf_apodization.setSingleStep(0.05)
-        self.epi_rf_apodization.setValue(0.5)
-        self.epi_rf_apodization.setToolTip(
-            "Cosine apodization of the Sinc envelope (0 = none, 1 = full)"
-        )
-        self.epi_rf_slr_sharpness = QComboBox()
-        self.epi_rf_slr_sharpness.setObjectName("epi_rf_slr_sharpness")
-        self.epi_rf_slr_sharpness.addItems(["1", "2", "3", "4", "5"])
-        self.epi_rf_slr_sharpness.setEnabled(False)
-        self.epi_rf_slr_sharpness.setToolTip(
-            "Transition sharpness of the dynamically designed SLR filter"
         )
         self.epi_slice_count = QSpinBox()
         self.epi_slice_count.setRange(1, 128)
@@ -1619,14 +1674,13 @@ class SequenceSimulationWidget(QWidget):
             "VFA final flip angle", self.epi_vfa_final_flip_angle_deg
         )
         acquisition_form.addRow("VFA schedule", self.epi_vfa_info)
-        acquisition_form.addRow("RF pulse type", self.epi_rf_pulse_type)
-        acquisition_form.addRow("RF duration", self.epi_rf_duration_ms)
-        acquisition_form.addRow(
-            "RF time-bandwidth product", self.epi_rf_time_bandwidth_product
+        self._add_shared_rf_controls(
+            acquisition_form,
+            "epi",
+            pulse_type="Sinc",
+            duration_ms=3.0,
+            sinc_lobes=3,
         )
-        acquisition_form.addRow("Sinc lobes", self.epi_rf_sinc_lobes)
-        acquisition_form.addRow("Sinc apodization", self.epi_rf_apodization)
-        acquisition_form.addRow("SLR sharpness", self.epi_rf_slr_sharpness)
         _add_form_section(acquisition_form, "Slice selection")
         acquisition_form.addRow("Plane preset", self.epi_slice_orientation)
         acquisition_form.addRow("Read gradient direction", self.epi_read_gradient_axis)
@@ -1686,12 +1740,6 @@ class SequenceSimulationWidget(QWidget):
         self.csi_encoding_order = QComboBox()
         self.csi_encoding_order.addItems(["linear", "centric", "spiral"])
         self.csi_flip_angle_deg = self._parameter_spin(0.1, 360.0, 15.0, "°")
-        self.csi_rf_pulse_type = QComboBox()
-        self.csi_rf_pulse_type.addItems(["Sinc", "Gaussian", "SLR", "Block"])
-        self.csi_rf_duration_ms = self._parameter_spin(0.01, 100.0, 3.0, " ms")
-        self.csi_rf_time_bandwidth_product = self._parameter_spin(0.1, 100.0, 4.0, "")
-        self.csi_rf_apodization = self._parameter_spin(0.0, 1.0, 0.5, "")
-        self.csi_rf_slr_sharpness = self._parameter_spin(0.1, 20.0, 1.0, "")
         self.csi_variable_flip_angle = QCheckBox("Enable across phase encodes")
         self.csi_variable_flip_angle.setToolTip(
             "Change the excitation angle at every CSI phase-encoding step and "
@@ -1749,11 +1797,13 @@ class SequenceSimulationWidget(QWidget):
         csi_form.addRow("Variable flip angle", self.csi_variable_flip_angle)
         csi_form.addRow("VFA final flip angle", self.csi_vfa_final_flip_angle_deg)
         csi_form.addRow("VFA schedule", self.csi_vfa_info)
-        csi_form.addRow("RF pulse type", self.csi_rf_pulse_type)
-        csi_form.addRow("RF duration", self.csi_rf_duration_ms)
-        csi_form.addRow("RF time-bandwidth product", self.csi_rf_time_bandwidth_product)
-        csi_form.addRow("Sinc apodization", self.csi_rf_apodization)
-        csi_form.addRow("SLR sharpness", self.csi_rf_slr_sharpness)
+        self._add_shared_rf_controls(
+            csi_form,
+            "csi",
+            pulse_type="Sinc",
+            duration_ms=3.0,
+            sinc_lobes=3,
+        )
         _add_form_section(csi_form, "Slice selection")
         csi_form.addRow("Plane preset", self.csi_slice_orientation)
         csi_form.addRow("Read gradient direction", self.csi_read_gradient_axis)
@@ -1799,16 +1849,8 @@ class SequenceSimulationWidget(QWidget):
         self.flash_phase_fov_mm = self._parameter_spin(
             0.1, 10000.0, default_fov_y, " mm"
         )
-        self.flash_sampling_bandwidth_khz = self._parameter_spin(
-            0.1, 2000.0, 100.0, " kHz"
-        )
+        self.flash_sampling_bandwidth_khz = self._sampling_bandwidth_spin(100.0)
         self.flash_flip_angle_deg = self._parameter_spin(0.1, 360.0, 15.0, "°")
-        self.flash_rf_pulse_type = QComboBox()
-        self.flash_rf_pulse_type.addItems(["Sinc", "Gaussian", "SLR", "Block"])
-        self.flash_rf_duration_ms = self._parameter_spin(0.01, 100.0, 1.0, " ms")
-        self.flash_rf_time_bandwidth_product = self._parameter_spin(0.1, 100.0, 4.0, "")
-        self.flash_rf_apodization = self._parameter_spin(0.0, 1.0, 0.5, "")
-        self.flash_rf_slr_sharpness = self._parameter_spin(0.1, 20.0, 1.0, "")
         (
             self.flash_slice_orientation,
             self.flash_read_gradient_axis,
@@ -1830,16 +1872,32 @@ class SequenceSimulationWidget(QWidget):
         self.flash_rf_spoiling_increment_deg = self._parameter_spin(
             -360.0, 360.0, 117.0, "°"
         )
+        self.flash_auto_spoiler = QCheckBox("Minimize coherent signal automatically")
+        self.flash_auto_spoiler.setChecked(True)
+        self.flash_auto_spoiler.setToolTip(
+            "Choose the smallest through-slice and in-plane spoiler moments that "
+            "reach a first coherence null across the current phantom voxel. "
+            "Disable this option to edit both spoiler strengths manually."
+        )
         self.flash_spoiler_cycles_per_slice = self._parameter_spin(
             0.0, 1000.0, 4.0, " cycles/slice"
         )
         self.flash_spoiler_cycles_per_voxel = self._parameter_spin(
             0.0, 1000.0, 0.0, " cycles/voxel"
         )
+        self.flash_spoiler_cycles_per_slice.setDisabled(True)
+        self.flash_spoiler_cycles_per_voxel.setDisabled(True)
         self.flash_spoiler_duration_ms = self._parameter_spin(0.001, 1000.0, 2.0, " ms")
         self.flash_dwell_info = QLabel()
         self.flash_spoiler_info = QLabel()
         self.flash_spoiler_info.setWordWrap(True)
+        self.flash_apply_recommended_grid = QPushButton(
+            "Apply train-safe subvoxel grid"
+        )
+        self.flash_apply_recommended_grid.setToolTip(
+            "Apply the smallest tested regular midpoint grid whose retained "
+            "coherence follows the continuous voxel throughout this FLASH train."
+        )
         flash_form.addRow(flash_hint)
         _add_form_section(flash_form, "Spatial encoding")
         flash_form.addRow("Read matrix", self.flash_read_matrix)
@@ -1849,13 +1907,13 @@ class SequenceSimulationWidget(QWidget):
         flash_form.addRow("Sampling bandwidth", self.flash_sampling_bandwidth_khz)
         _add_form_section(flash_form, "RF pulse")
         flash_form.addRow("Flip angle", self.flash_flip_angle_deg)
-        flash_form.addRow("RF pulse type", self.flash_rf_pulse_type)
-        flash_form.addRow("RF duration", self.flash_rf_duration_ms)
-        flash_form.addRow(
-            "RF time-bandwidth product", self.flash_rf_time_bandwidth_product
+        self._add_shared_rf_controls(
+            flash_form,
+            "flash",
+            pulse_type="Sinc",
+            duration_ms=1.0,
+            sinc_lobes=3,
         )
-        flash_form.addRow("Sinc apodization", self.flash_rf_apodization)
-        flash_form.addRow("SLR sharpness", self.flash_rf_slr_sharpness)
         _add_form_section(flash_form, "Slice selection")
         flash_form.addRow("Plane preset", self.flash_slice_orientation)
         flash_form.addRow("Read gradient direction", self.flash_read_gradient_axis)
@@ -1875,10 +1933,12 @@ class SequenceSimulationWidget(QWidget):
         )
         _add_form_section(flash_form, "Spoiling")
         flash_form.addRow("RF spoiling increment", self.flash_rf_spoiling_increment_deg)
+        flash_form.addRow("Auto spoiler", self.flash_auto_spoiler)
         flash_form.addRow("Through-slice spoiler", self.flash_spoiler_cycles_per_slice)
         flash_form.addRow("In-plane spoiler", self.flash_spoiler_cycles_per_voxel)
         flash_form.addRow("Spoiler duration", self.flash_spoiler_duration_ms)
         flash_form.addRow("Spoiler check", self.flash_spoiler_info)
+        flash_form.addRow("Subvoxel recommendation", self.flash_apply_recommended_grid)
         _add_form_section(flash_form, "Derived sampling")
         flash_form.addRow("ADC dwell", self.flash_dwell_info)
         self.flash_group.setVisible(False)
@@ -1914,13 +1974,8 @@ class SequenceSimulationWidget(QWidget):
         self.bssfp_partition_fov_mm = self._parameter_spin(
             0.1, 10000.0, default_fov_z, " mm"
         )
-        self.bssfp_bandwidth_khz = QDoubleSpinBox()
-        self.bssfp_bandwidth_khz.setRange(0.1, 2000.0)
-        self.bssfp_bandwidth_khz.setDecimals(3)
-        self.bssfp_bandwidth_khz.setValue(10.0)
-        self.bssfp_bandwidth_khz.setSuffix(" kHz")
+        self.bssfp_bandwidth_khz = self._sampling_bandwidth_spin(10.0)
         self.bssfp_flip_angle_deg = self._parameter_spin(0.1, 360.0, 15.0, "°")
-        self.bssfp_rf_duration_ms = self._parameter_spin(0.01, 100.0, 1.0, " ms")
         self.bssfp_repetition_time_ms = self._parameter_spin(0.1, 10000.0, 10.0, " ms")
         self.bssfp_phase_start_deg = self._parameter_spin(-360.0, 360.0, 180.0, "°")
         self.bssfp_phase_increment_deg = self._parameter_spin(-360.0, 360.0, 180.0, "°")
@@ -1950,7 +2005,13 @@ class SequenceSimulationWidget(QWidget):
         bssfp_form.addRow("Sampling bandwidth", self.bssfp_bandwidth_khz)
         _add_form_section(bssfp_form, "RF pulse and timing")
         bssfp_form.addRow("Flip angle", self.bssfp_flip_angle_deg)
-        bssfp_form.addRow("RF duration", self.bssfp_rf_duration_ms)
+        self._add_shared_rf_controls(
+            bssfp_form,
+            "bssfp",
+            pulse_type="Block",
+            duration_ms=1.0,
+            sinc_lobes=3,
+        )
         bssfp_form.addRow("Repetition time (TR)", self.bssfp_repetition_time_ms)
         bssfp_form.addRow("RF phase start", self.bssfp_phase_start_deg)
         bssfp_form.addRow("RF phase increment", self.bssfp_phase_increment_deg)
@@ -2009,42 +2070,7 @@ class SequenceSimulationWidget(QWidget):
         self.ss_bssfp_flip_angles_deg.setToolTip(
             "Comma-separated nominal flip angles matching the target list"
         )
-        self.ss_bssfp_rf_pulse_type = QComboBox()
-        self.ss_bssfp_rf_pulse_type.addItems(["Gaussian", "Sinc", "SLR", "Block"])
-        self.ss_bssfp_rf_duration_ms = self._parameter_spin(0.01, 100.0, 2.33, " ms")
-        self.ss_bssfp_rf_bandwidth_hz = self._parameter_spin(
-            0.1, 1_000_000.0, 2100.0 / 2.33, " Hz"
-        )
-        self.ss_bssfp_rf_bandwidth_hz.setEnabled(False)
-        self.ss_bssfp_rf_bandwidth_hz.setToolTip(
-            "Calculated from RF duration and pulse shape"
-        )
-        self.ss_bssfp_rf_sinc_lobes = QSpinBox()
-        self.ss_bssfp_rf_sinc_lobes.setRange(1, 100)
-        self.ss_bssfp_rf_sinc_lobes.setValue(3)
-        self.ss_bssfp_rf_sinc_lobes.setToolTip(
-            "Number of Sinc lobes; determines the pulse bandwidth"
-        )
-        self.ss_bssfp_rf_slr_sharpness = self._parameter_spin(0.1, 20.0, 1.0, "")
-        self.ss_bssfp_rf_slr_sharpness.setObjectName("ss_bssfp_rf_slr_sharpness")
-        self.ss_bssfp_rf_slr_sharpness.setSingleStep(0.5)
-        self.ss_bssfp_rf_slr_sharpness.setToolTip(
-            "Controls the SLR transition width and stop-band weighting; "
-            "higher values produce a sharper transition"
-        )
-        self.ss_bssfp_rf_time_bandwidth_product = self._parameter_spin(
-            0.1, 100.0, 2.1, ""
-        )
-        self.ss_bssfp_rf_time_bandwidth_product.setObjectName(
-            "ss_bssfp_rf_time_bandwidth_product"
-        )
-        self.ss_bssfp_rf_time_bandwidth_product.setSingleStep(0.5)
-        self.ss_bssfp_rf_time_bandwidth_product.setToolTip(
-            "Time-bandwidth product for SLR and Gaussian pulses. For SLR it "
-            "controls the filter bandwidth and oscillatory lobe structure; "
-            "sharpness separately controls the transition width."
-        )
-        self.ss_bssfp_bandwidth_khz = self._parameter_spin(0.1, 2000.0, 10.0, " kHz")
+        self.ss_bssfp_bandwidth_khz = self._sampling_bandwidth_spin(10.0)
         self.ss_bssfp_encoding_duration_ms = self._parameter_spin(
             0.01, 100.0, 0.2, " ms"
         )
@@ -2114,15 +2140,15 @@ class SequenceSimulationWidget(QWidget):
         ss_form.addRow("RF target offsets", self.ss_bssfp_target_offsets_hz)
         ss_form.addRow("Receiver offsets", self.ss_bssfp_receiver_offsets_hz)
         ss_form.addRow("Target flip angles", self.ss_bssfp_flip_angles_deg)
-        ss_form.addRow("Spectral RF type", self.ss_bssfp_rf_pulse_type)
-        ss_form.addRow("Spectral RF duration", self.ss_bssfp_rf_duration_ms)
-        ss_form.addRow("Sinc lobes", self.ss_bssfp_rf_sinc_lobes)
-        ss_form.addRow(
-            "RF time-bandwidth product",
-            self.ss_bssfp_rf_time_bandwidth_product,
+        self._add_shared_rf_controls(
+            ss_form,
+            "ss_bssfp",
+            pulse_type="Gaussian",
+            duration_ms=2.33,
+            sinc_lobes=3,
+            apodization=0.0,
+            label_prefix="Spectral RF",
         )
-        ss_form.addRow("SLR sharpness", self.ss_bssfp_rf_slr_sharpness)
-        ss_form.addRow("Spectral RF bandwidth (auto)", self.ss_bssfp_rf_bandwidth_hz)
         _add_form_section(ss_form, "Readout and timing")
         ss_form.addRow("Sampling bandwidth", self.ss_bssfp_bandwidth_khz)
         ss_form.addRow(
@@ -2189,7 +2215,6 @@ class SequenceSimulationWidget(QWidget):
             0.1, 1_000_000.0, 1000.0, " Hz/px"
         )
         self.radial_me_flip_angle_deg = self._parameter_spin(0.1, 360.0, 10.0, "°")
-        self.radial_me_rf_duration_ms = self._parameter_spin(0.01, 100.0, 0.5, " ms")
         self.radial_me_repetition_time_ms = self._parameter_spin(
             0.1, 10000.0, 16.0, " ms"
         )
@@ -2225,7 +2250,13 @@ class SequenceSimulationWidget(QWidget):
         radial_form.addRow("Pixel bandwidth", self.radial_me_pixel_bandwidth_hz)
         _add_form_section(radial_form, "RF pulse and timing")
         radial_form.addRow("Flip angle", self.radial_me_flip_angle_deg)
-        radial_form.addRow("RF duration", self.radial_me_rf_duration_ms)
+        self._add_shared_rf_controls(
+            radial_form,
+            "radial_me",
+            pulse_type="Block",
+            duration_ms=0.5,
+            sinc_lobes=3,
+        )
         radial_form.addRow("Repetition time (TR)", self.radial_me_repetition_time_ms)
         radial_form.addRow(
             "Measurement interval (start-to-start)",
@@ -2278,27 +2309,8 @@ class SequenceSimulationWidget(QWidget):
         self.me_bssfp_echo_spacing_ms = self._parameter_spin(0.01, 1000.0, 1.32, " ms")
         self.me_bssfp_readout_strategy = QComboBox()
         self.me_bssfp_readout_strategy.addItems(["Flyback", "Symmetric bipolar"])
-        self.me_bssfp_bandwidth_khz = self._parameter_spin(0.1, 2000.0, 39.6825, " kHz")
+        self.me_bssfp_bandwidth_khz = self._sampling_bandwidth_spin(39.6825)
         self.me_bssfp_flip_angle_deg = self._parameter_spin(0.1, 360.0, 3.5, "°")
-        self.me_bssfp_rf_pulse_type = QComboBox()
-        self.me_bssfp_rf_pulse_type.addItems(["Gaussian", "Block"])
-        self.me_bssfp_rf_duration_ms = self._parameter_spin(0.01, 100.0, 0.5, " ms")
-        self.me_bssfp_rf_bandwidth_hz = self._parameter_spin(
-            0.1, 1_000_000.0, 5480.0, " Hz"
-        )
-        self.me_bssfp_rf_bandwidth_hz.setEnabled(False)
-        self.me_bssfp_rf_bandwidth_hz.setToolTip(
-            "Calculated from RF duration and time-bandwidth product"
-        )
-        self.me_bssfp_rf_time_bandwidth_product = self._parameter_spin(
-            0.1, 100.0, 2.74, ""
-        )
-        self.me_bssfp_rf_time_bandwidth_product.setToolTip(
-            "Together with RF duration, determines the Gaussian bandwidth"
-        )
-        self.me_bssfp_rf_offset_hz = self._parameter_spin(
-            -1_000_000.0, 1_000_000.0, 0.0, " Hz"
-        )
         self.me_bssfp_receiver_offset_hz = self._parameter_spin(
             -1_000_000.0, 1_000_000.0, -460.0, " Hz"
         )
@@ -2341,13 +2353,13 @@ class SequenceSimulationWidget(QWidget):
         me_form.addRow("Sampling bandwidth", self.me_bssfp_bandwidth_khz)
         _add_form_section(me_form, "RF pulse and frequency")
         me_form.addRow("Flip angle", self.me_bssfp_flip_angle_deg)
-        me_form.addRow("RF pulse", self.me_bssfp_rf_pulse_type)
-        me_form.addRow("RF duration", self.me_bssfp_rf_duration_ms)
-        me_form.addRow(
-            "RF time-bandwidth product", self.me_bssfp_rf_time_bandwidth_product
+        self._add_shared_rf_controls(
+            me_form,
+            "me_bssfp",
+            pulse_type="Gaussian",
+            duration_ms=0.5,
+            sinc_lobes=3,
         )
-        me_form.addRow("RF bandwidth (auto)", self.me_bssfp_rf_bandwidth_hz)
-        me_form.addRow("RF frequency offset", self.me_bssfp_rf_offset_hz)
         me_form.addRow("Receiver offset", self.me_bssfp_receiver_offset_hz)
         _add_form_section(me_form, "Timing")
         me_form.addRow("Encoding lobe duration", self.me_bssfp_encoding_duration_ms)
@@ -2735,14 +2747,6 @@ class SequenceSimulationWidget(QWidget):
         self.epi_variable_flip_angle.toggled.connect(
             self.epi_vfa_final_flip_angle_deg.setEnabled
         )
-        self.epi_rf_pulse_type.currentTextChanged.connect(self._rf_pulse_type_changed)
-        self.epi_rf_duration_ms.valueChanged.connect(self._acquisition_changed)
-        self.epi_rf_time_bandwidth_product.valueChanged.connect(
-            self._acquisition_changed
-        )
-        self.epi_rf_sinc_lobes.valueChanged.connect(self._epi_sinc_lobes_changed)
-        self.epi_rf_apodization.valueChanged.connect(self._acquisition_changed)
-        self.epi_rf_slr_sharpness.currentIndexChanged.connect(self._acquisition_changed)
         self.epi_slice_count.valueChanged.connect(self._acquisition_changed)
         self.epi_repetitions.valueChanged.connect(self._acquisition_changed)
         self.epi_repetition_time_ms.valueChanged.connect(self._acquisition_changed)
@@ -2785,7 +2789,6 @@ class SequenceSimulationWidget(QWidget):
             self.csi_flip_angle_deg,
             self.csi_vfa_final_flip_angle_deg,
             self.csi_rf_duration_ms,
-            self.csi_rf_time_bandwidth_product,
             self.csi_rf_apodization,
             self.csi_rf_slr_sharpness,
             self.csi_slice_thickness_mm,
@@ -2833,7 +2836,6 @@ class SequenceSimulationWidget(QWidget):
             self.flash_sampling_bandwidth_khz,
             self.flash_flip_angle_deg,
             self.flash_rf_duration_ms,
-            self.flash_rf_time_bandwidth_product,
             self.flash_rf_apodization,
             self.flash_rf_slr_sharpness,
             self.flash_slice_count,
@@ -2850,6 +2852,10 @@ class SequenceSimulationWidget(QWidget):
             self.flash_spoiler_duration_ms,
         ):
             widget.valueChanged.connect(self._flash_changed)
+        self.flash_auto_spoiler.toggled.connect(self._flash_auto_spoiler_toggled)
+        self.flash_apply_recommended_grid.clicked.connect(
+            self._apply_flash_recommended_spin_grid
+        )
         self.flash_rf_pulse_type.currentIndexChanged.connect(self._flash_changed)
         self._connect_two_dimensional_orientation_controls(
             self.flash_slice_orientation,
@@ -2886,7 +2892,6 @@ class SequenceSimulationWidget(QWidget):
             self.ss_bssfp_partition_fov_mm,
             self.ss_bssfp_rf_duration_ms,
             self.ss_bssfp_rf_sinc_lobes,
-            self.ss_bssfp_rf_time_bandwidth_product,
             self.ss_bssfp_rf_slr_sharpness,
             self.ss_bssfp_bandwidth_khz,
             self.ss_bssfp_repetition_time_ms,
@@ -2943,7 +2948,6 @@ class SequenceSimulationWidget(QWidget):
             self.me_bssfp_bandwidth_khz,
             self.me_bssfp_flip_angle_deg,
             self.me_bssfp_rf_duration_ms,
-            self.me_bssfp_rf_time_bandwidth_product,
             self.me_bssfp_rf_offset_hz,
             self.me_bssfp_receiver_offset_hz,
             self.me_bssfp_encoding_duration_ms,
@@ -2984,6 +2988,16 @@ class SequenceSimulationWidget(QWidget):
             self.me_bssfp_partition_gradient_axis,
             self._me_bssfp_changed,
         )
+        for prefix, callback in (
+            ("epi", self._acquisition_changed),
+            ("csi", self._csi_changed),
+            ("flash", self._flash_changed),
+            ("bssfp", self._bssfp_changed),
+            ("ss_bssfp", self._ss_bssfp_changed),
+            ("radial_me", self._radial_me_bssfp_changed),
+            ("me_bssfp", self._me_bssfp_changed),
+        ):
+            self._connect_shared_rf_controls(prefix, callback)
         self.fov_mm.valueChanged.connect(self._acquisition_changed)
         self.fov_z_mm.valueChanged.connect(self._acquisition_changed)
         self._update_bandwidth_labels()
@@ -3379,6 +3393,224 @@ class SequenceSimulationWidget(QWidget):
         return widget
 
     @staticmethod
+    def _sampling_bandwidth_spin(default_khz):
+        """Create the common total ADC-bandwidth field for imaging readouts."""
+        widget = QDoubleSpinBox()
+        widget.setRange(0.1, 2000.0)
+        widget.setDecimals(3)
+        widget.setSingleStep(1.0)
+        widget.setValue(default_khz)
+        widget.setSuffix(" kHz")
+        widget.setToolTip(
+            "Total ADC sampling bandwidth; dwell is derived as 1 / bandwidth "
+            "and rounded to the scanner ADC raster"
+        )
+        return widget
+
+    def _add_shared_rf_controls(
+        self,
+        form,
+        prefix,
+        *,
+        pulse_type="Sinc",
+        duration_ms=1.0,
+        sinc_lobes=3,
+        apodization=0.5,
+        slr_sharpness=1.0,
+        frequency_offset_hz=0.0,
+        label_prefix="RF",
+    ):
+        """Create the common RF field set used by every generated sequence."""
+        pulse_type_control = QComboBox()
+        pulse_type_control.setObjectName(f"{prefix}_rf_pulse_type")
+        pulse_type_control.addItems(RF_PULSE_TYPE_LABELS)
+        pulse_type_control.setCurrentText(pulse_type)
+        pulse_type_control.setToolTip(
+            "All generated sequences use the same global RF envelope designer. "
+            "RF Pulse Designer uses the waveform designed or loaded in Free Mode."
+        )
+        duration = self._parameter_spin(0.001, 100.0, duration_ms, " ms")
+        duration.setObjectName(f"{prefix}_rf_duration_ms")
+        duration.setDecimals(3)
+        tbw = self._parameter_spin(0.001, 1000.0, 1.0, "")
+        tbw.setObjectName(f"{prefix}_rf_time_bandwidth_product")
+        tbw.setReadOnly(True)
+        tbw.setButtonSymbols(QDoubleSpinBox.NoButtons)
+        tbw.setEnabled(False)
+        tbw.setToolTip("Calculated automatically from the completed RF pulse shape")
+        lobes = QSpinBox()
+        lobes.setObjectName(f"{prefix}_rf_sinc_lobes")
+        lobes.setRange(1, 100)
+        lobes.setValue(max(1, int(sinc_lobes)))
+        lobes.setToolTip(
+            "Displayed Sinc lobe count; changing it changes the pulse shape and "
+            "therefore its automatically calculated TBW"
+        )
+        apod = self._parameter_spin(0.0, 1.0, apodization, "")
+        apod.setObjectName(f"{prefix}_rf_apodization")
+        apod.setSingleStep(0.05)
+        apod.setToolTip("Cosine apodization of the shared Sinc envelope")
+        sharpness = self._parameter_spin(0.1, 20.0, slr_sharpness, "")
+        sharpness.setObjectName(f"{prefix}_rf_slr_sharpness")
+        sharpness.setSingleStep(0.5)
+        sharpness.setToolTip(
+            "Higher sharpness narrows the SLR transition and produces more "
+            "temporal lobes"
+        )
+        bandwidth = self._parameter_spin(0.1, 1_000_000.0, 1.0, " Hz")
+        bandwidth.setObjectName(f"{prefix}_rf_bandwidth_hz")
+        bandwidth.setEnabled(False)
+        bandwidth.setToolTip("Calculated as automatic TBW divided by RF duration")
+        frequency_offset = self._parameter_spin(
+            -1_000_000.0, 1_000_000.0, frequency_offset_hz, " Hz"
+        )
+        frequency_offset.setObjectName(f"{prefix}_rf_offset_hz")
+        frequency_offset.setToolTip(
+            "RF carrier offset relative to the sequence centre frequency"
+        )
+        load_button = QPushButton("Load RF pulse…")
+        load_button.setObjectName(f"{prefix}_rf_load_button")
+        load_button.setToolTip(
+            "Load an RF waveform directly into Sequence Mode and select it "
+            "for this sequence"
+        )
+
+        for suffix, control in {
+            "pulse_type": pulse_type_control,
+            "duration_ms": duration,
+            "time_bandwidth_product": tbw,
+            "sinc_lobes": lobes,
+            "apodization": apod,
+            "slr_sharpness": sharpness,
+            "bandwidth_hz": bandwidth,
+            "offset_hz": frequency_offset,
+            "load_button": load_button,
+        }.items():
+            setattr(self, f"{prefix}_rf_{suffix}", control)
+
+        form.addRow(f"{label_prefix} pulse type", pulse_type_control)
+        form.addRow(f"{label_prefix} duration", duration)
+        form.addRow(f"{label_prefix} time-bandwidth product", tbw)
+        form.addRow("Sinc lobes", lobes)
+        form.addRow("Sinc apodization", apod)
+        form.addRow("SLR sharpness", sharpness)
+        form.addRow(f"{label_prefix} bandwidth (auto)", bandwidth)
+        form.addRow(f"{label_prefix} frequency offset", frequency_offset)
+        form.addRow("Loaded waveform", load_button)
+        return pulse_type_control
+
+    def _connect_shared_rf_controls(self, prefix, callback):
+        pulse_type = getattr(self, f"{prefix}_rf_pulse_type")
+        pulse_type.currentTextChanged.connect(
+            lambda *_: self._shared_rf_control_changed(prefix, callback)
+        )
+        for suffix in (
+            "duration_ms",
+            "sinc_lobes",
+            "apodization",
+            "slr_sharpness",
+            "offset_hz",
+        ):
+            control = getattr(self, f"{prefix}_rf_{suffix}")
+            control.valueChanged.connect(
+                lambda *_, p=prefix, cb=callback: self._shared_rf_control_changed(p, cb)
+            )
+        getattr(self, f"{prefix}_rf_load_button").clicked.connect(
+            lambda *_: self._load_sequence_rf_pulse(prefix)
+        )
+        self._update_shared_rf_controls(prefix)
+
+    def _shared_rf_control_changed(self, prefix, callback):
+        self._update_shared_rf_controls(prefix)
+        callback()
+
+    def _selected_shared_rf_pulse_type(self, prefix):
+        text = getattr(self, f"{prefix}_rf_pulse_type").currentText()
+        return "designer" if text == "RF Pulse Designer" else text.lower()
+
+    def _shared_rf_shape_parameter(self, prefix):
+        """Return the fixed construction input, distinct from calculated TBW."""
+        pulse_type = self._selected_shared_rf_pulse_type(prefix)
+        if pulse_type == "designer":
+            if self._rf_designer_pulse_data is not None:
+                return self._rf_designer_pulse_data["time_bandwidth_product"]
+            return 1.0
+        return analytic_rf_shape_parameter(
+            pulse_type, getattr(self, f"{prefix}_rf_sinc_lobes").value()
+        )
+
+    def _update_shared_rf_controls(self, prefix):
+        pulse_type = self._selected_shared_rf_pulse_type(prefix)
+        loaded = pulse_type == "designer"
+        getattr(self, f"{prefix}_rf_duration_ms").setEnabled(not loaded)
+        getattr(self, f"{prefix}_rf_time_bandwidth_product").setEnabled(False)
+        getattr(self, f"{prefix}_rf_sinc_lobes").setEnabled(pulse_type == "sinc")
+        getattr(self, f"{prefix}_rf_apodization").setEnabled(pulse_type == "sinc")
+        getattr(self, f"{prefix}_rf_slr_sharpness").setEnabled(pulse_type == "slr")
+        offset = getattr(self, f"{prefix}_rf_offset_hz")
+        offset.setEnabled(not loaded)
+        if loaded and self._rf_designer_pulse_data is not None:
+            duration = getattr(self, f"{prefix}_rf_duration_ms")
+            previous = duration.blockSignals(True)
+            duration.setValue(self._rf_designer_pulse_data["duration_s"] * 1000.0)
+            duration.blockSignals(previous)
+            previous = offset.blockSignals(True)
+            offset.setValue(self._rf_designer_pulse_data["frequency_offset_hz"])
+            offset.blockSignals(previous)
+        duration_s = getattr(self, f"{prefix}_rf_duration_ms").value() / 1000.0
+        if loaded and self._rf_designer_pulse_data is not None:
+            tbw = self._rf_designer_pulse_data["time_bandwidth_product"]
+        else:
+            shape_parameter = self._shared_rf_shape_parameter(prefix)
+            try:
+                _, _, tbw, _ = design_rf_envelope(
+                    pulse_type=pulse_type,
+                    duration_s=duration_s,
+                    raster_s=self.scanner_parameters.rf_raster_time_s,
+                    time_bandwidth_product=shape_parameter,
+                    apodization=getattr(self, f"{prefix}_rf_apodization").value(),
+                    slr_sharpness=getattr(self, f"{prefix}_rf_slr_sharpness").value(),
+                )
+            except (TypeError, ValueError):
+                # Keep the UI responsive while another invalid RF parameter is
+                # still being edited; sequence generation will report details.
+                tbw = shape_parameter
+        tbw_control = getattr(self, f"{prefix}_rf_time_bandwidth_product")
+        previous = tbw_control.blockSignals(True)
+        tbw_control.setValue(tbw)
+        tbw_control.blockSignals(previous)
+        bandwidth = getattr(self, f"{prefix}_rf_bandwidth_hz")
+        previous = bandwidth.blockSignals(True)
+        bandwidth.setValue(tbw / duration_s)
+        bandwidth.blockSignals(previous)
+
+    def _shared_rf_parameters(self, prefix):
+        pulse_type = self._selected_shared_rf_pulse_type(prefix)
+        parameters = {
+            "rf_pulse_type": pulse_type,
+            "rf_duration_s": getattr(self, f"{prefix}_rf_duration_ms").value() / 1000.0,
+            "rf_time_bandwidth_product": self._shared_rf_shape_parameter(prefix),
+            "rf_apodization": getattr(self, f"{prefix}_rf_apodization").value(),
+            "rf_slr_sharpness": getattr(self, f"{prefix}_rf_slr_sharpness").value(),
+            "rf_frequency_offset_hz": getattr(self, f"{prefix}_rf_offset_hz").value(),
+        }
+        if pulse_type == "designer":
+            if self._rf_designer_pulse_data is None:
+                raise ValueError(self._rf_designer_pulse_error)
+            data = self._rf_designer_pulse_data
+            parameters.update(
+                rf_duration_s=data["duration_s"],
+                rf_custom_waveform_hz=tuple(
+                    complex(value) for value in data["waveform_hz"]
+                ),
+                rf_custom_raster_s=data["raster_s"],
+                rf_custom_flip_angle_deg=data["flip_angle_deg"],
+                rf_custom_name=data["name"],
+                rf_frequency_offset_hz=data["frequency_offset_hz"],
+            )
+        return parameters
+
+    @staticmethod
     def _acquisition_interval_spin():
         widget = QDoubleSpinBox()
         widget.setRange(0.0, 100_000_000.0)
@@ -3642,6 +3874,13 @@ class SequenceSimulationWidget(QWidget):
             self.phantom_summary.setText(
                 "No phantom selected. Create or load one in the Phantom tab."
             )
+            auto_changed = self._apply_flash_auto_spoilers()
+            self._update_flash_spoiler_info()
+            if (
+                auto_changed
+                and self.sequence_source.currentIndex() == self.FLASH_SOURCE
+            ):
+                self._request_generated_sequence_refresh()
             return
         active = np.asarray(phantom.mask, dtype=bool)
         if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
@@ -3691,6 +3930,10 @@ class SequenceSimulationWidget(QWidget):
             f"FOV {fov_mm} mm, {phantom.n_active} active voxels\n"
             f"{relaxation_text}{b0_text}{b1_text}"
         )
+        auto_changed = self._apply_flash_auto_spoilers()
+        self._update_flash_spoiler_info()
+        if auto_changed and self.sequence_source.currentIndex() == self.FLASH_SOURCE:
+            self._request_generated_sequence_refresh()
         self._update_ss_bssfp_spoiler_info()
         self._update_frequency_reference_info()
         if hasattr(self, "waveform_value_summary"):
@@ -3710,6 +3953,7 @@ class SequenceSimulationWidget(QWidget):
             "Sequence parameters changed. Click Generate sequence to refresh.\n"
             f"{preview_text}"
         )
+        self._emit_physical_b1_changed()
 
     def _request_generated_sequence_refresh(self):
         if self.sequence_source.currentIndex() not in self.GENERATED_SOURCES:
@@ -3777,6 +4021,9 @@ class SequenceSimulationWidget(QWidget):
             self._sequence_generation_pending = False
             self._generated_sequence_source_index = source_index
             self._generation_error = ""
+            if source_index == self.FLASH_SOURCE:
+                self._update_flash_spoiler_info()
+            self._emit_physical_b1_changed()
             return True
         for name, value in previous_state.items():
             setattr(self, name, value)
@@ -3787,6 +4034,7 @@ class SequenceSimulationWidget(QWidget):
         else:
             message += "\nThe timeline still shows the last valid sequence preview."
         self.sequence_info.setText(message)
+        self._emit_physical_b1_changed()
         return False
 
     def _update_frequency_reference_info(self):
@@ -3928,69 +4176,17 @@ class SequenceSimulationWidget(QWidget):
         self._acquisition_changed()
 
     def _rf_pulse_type_changed(self, *_):
-        pulse_type = self._selected_rf_pulse_type()
-        designer_pulse = pulse_type == "designer"
-        self.epi_rf_duration_ms.setEnabled(not designer_pulse)
-        self.epi_rf_time_bandwidth_product.setEnabled(
-            pulse_type not in {"block", "sinc"}
-        )
-        self.epi_rf_sinc_lobes.setEnabled(pulse_type == "sinc")
-        self.epi_rf_apodization.setEnabled(pulse_type == "sinc")
-        self.epi_rf_slr_sharpness.setEnabled(pulse_type == "slr")
-        if designer_pulse and self._rf_designer_pulse_data is not None:
-            self.epi_rf_duration_ms.blockSignals(True)
-            self.epi_rf_duration_ms.setValue(
-                self._rf_designer_pulse_data["duration_s"] * 1000.0
-            )
-            self.epi_rf_duration_ms.blockSignals(False)
-        if pulse_type == "sinc":
-            previous = self.epi_rf_time_bandwidth_product.blockSignals(True)
-            self.epi_rf_time_bandwidth_product.setValue(
-                self.epi_rf_sinc_lobes.value() + 1.0
-            )
-            self.epi_rf_time_bandwidth_product.blockSignals(previous)
+        self._update_shared_rf_controls("epi")
         self._acquisition_changed()
 
     def _epi_sinc_lobes_changed(self, *_):
-        if self._selected_rf_pulse_type() == "sinc":
-            previous = self.epi_rf_time_bandwidth_product.blockSignals(True)
-            self.epi_rf_time_bandwidth_product.setValue(
-                self.epi_rf_sinc_lobes.value() + 1.0
-            )
-            self.epi_rf_time_bandwidth_product.blockSignals(previous)
-        self._acquisition_changed()
+        self._shared_rf_control_changed("epi", self._acquisition_changed)
 
     def _selected_rf_pulse_type(self) -> str:
-        if self.epi_rf_pulse_type.currentText() == "RF Pulse Designer":
-            return "designer"
-        return self.epi_rf_pulse_type.currentText().lower()
+        return self._selected_shared_rf_pulse_type("epi")
 
     def _epi_rf_parameters(self) -> dict:
-        pulse_type = self._selected_rf_pulse_type()
-        parameters = {
-            "rf_pulse_type": pulse_type,
-            "rf_duration_s": self.epi_rf_duration_ms.value() / 1000.0,
-            "rf_time_bandwidth_product": (self.epi_rf_time_bandwidth_product.value()),
-            "rf_apodization": self.epi_rf_apodization.value(),
-            "rf_slr_sharpness": float(self.epi_rf_slr_sharpness.currentText()),
-        }
-        if pulse_type == "designer":
-            if self._rf_designer_pulse_data is None:
-                raise ValueError(self._rf_designer_pulse_error)
-            data = self._rf_designer_pulse_data
-            parameters.update(
-                {
-                    "rf_duration_s": data["duration_s"],
-                    "rf_custom_waveform_hz": tuple(
-                        complex(value) for value in data["waveform_hz"]
-                    ),
-                    "rf_custom_raster_s": data["raster_s"],
-                    "rf_custom_flip_angle_deg": data["flip_angle_deg"],
-                    "rf_custom_name": data["name"],
-                    "rf_frequency_offset_hz": data["frequency_offset_hz"],
-                }
-            )
-        return parameters
+        return self._shared_rf_parameters("epi")
 
     def _csi_changed(self, *_):
         self._update_csi_labels()
@@ -4001,6 +4197,11 @@ class SequenceSimulationWidget(QWidget):
         self._update_flash_labels()
         if self.sequence_source.currentIndex() == self.FLASH_SOURCE:
             self._request_generated_sequence_refresh()
+
+    def _flash_auto_spoiler_toggled(self, enabled):
+        self.flash_spoiler_cycles_per_slice.setDisabled(enabled)
+        self.flash_spoiler_cycles_per_voxel.setDisabled(enabled)
+        self._flash_changed()
 
     def _bssfp_changed(self, *_):
         self._update_bssfp_labels()
@@ -4131,6 +4332,60 @@ class SequenceSimulationWidget(QWidget):
             physical_sizes["xyz".index(axis)] = size
         return tuple(float(value) for value in physical_sizes)
 
+    def _flash_auto_spoiler_values(self):
+        """Return first-null FLASH spoiler strengths for the current geometry."""
+        voxel_sizes = np.asarray(self._flash_reference_voxel_sizes_m(), dtype=float)
+        frame = self._two_dimensional_encoding_frame(self.FLASH_SOURCE)
+        role_reference_sizes = {
+            "read": self.flash_read_fov_mm.value()
+            / (1000.0 * self.flash_read_matrix.value()),
+            "phase": self.flash_phase_fov_mm.value()
+            / (1000.0 * self.flash_phase_matrix.value()),
+            "partition": self.flash_slice_thickness_mm.value() / 1000.0,
+        }
+
+        targets = {}
+        axis_indices = {}
+        for role, reference_size in role_reference_sizes.items():
+            axis, _ = frame.axis_and_sign(role)
+            axis_index = "xyz".index(axis)
+            axis_indices[role] = axis_index
+            targets[role] = reference_size / voxel_sizes[axis_index]
+
+        # FLASH exposes one shared in-plane value. Prefer an axis represented by
+        # multiple subvoxel spins so its first null is also present on the
+        # simulated midpoint grid, then choose the smaller required moment.
+        in_plane_role = min(
+            ("read", "phase"),
+            key=lambda role: (
+                self.subvoxel_spin_counts[axis_indices[role]] <= 1,
+                targets[role],
+            ),
+        )
+        return targets["partition"], targets[in_plane_role]
+
+    def _apply_flash_auto_spoilers(self):
+        if not self.flash_auto_spoiler.isChecked():
+            return False
+        slice_cycles, in_plane_cycles = self._flash_auto_spoiler_values()
+        changed = False
+        clipped = False
+        for control, value in (
+            (self.flash_spoiler_cycles_per_slice, slice_cycles),
+            (self.flash_spoiler_cycles_per_voxel, in_plane_cycles),
+        ):
+            bounded = min(control.maximum(), max(control.minimum(), float(value)))
+            clipped = clipped or not np.isclose(
+                float(value), bounded, rtol=0.0, atol=5e-5
+            )
+            if not np.isclose(control.value(), bounded, rtol=0.0, atol=5e-5):
+                previous = control.blockSignals(True)
+                control.setValue(bounded)
+                control.blockSignals(previous)
+                changed = True
+        self._flash_auto_spoiler_clipped = clipped
+        return changed
+
     def _update_flash_spoiler_info(self):
         voxel_sizes = np.asarray(self._flash_reference_voxel_sizes_m())
         frame = self._two_dimensional_encoding_frame(self.FLASH_SOURCE)
@@ -4152,24 +4407,156 @@ class SequenceSimulationWidget(QWidget):
             axis, _ = frame.axis_and_sign(role)
             axis_index = "xyz".index(axis)
             cycles_xyz[axis_index] = cycles * voxel_sizes[axis_index] / reference_size
-        continuous = float(np.prod(np.abs(np.sinc(cycles_xyz))))
         counts = tuple(int(value) for value in self.subvoxel_spin_counts)
-        discrete = 1.0
-        for cycles, count in zip(cycles_xyz, counts):
-            offsets = (np.arange(count, dtype=float) + 0.5) / count - 0.5
-            discrete *= abs(np.mean(np.exp(2j * np.pi * cycles * offsets)))
+        excitation_count = (
+            self.flash_phase_matrix.value()
+            * self.flash_slice_count.value()
+            * self.flash_repetitions.value()
+        )
+        analyzed_excitation_count = min(excitation_count, 1024)
+        sampling = SpinSampling(counts, method=self.subvoxel_sampling_method)
+        report = analyze_repeated_spoiler_train(
+            tuple(float(value) for value in cycles_xyz),
+            sampling,
+            analyzed_excitation_count,
+        )
+        report_source = "configured repeated crusher"
+        phase_train_for_recommendation = None
+        if (
+            not self._sequence_generation_pending
+            and self._generated_sequence_source_index == self.FLASH_SOURCE
+            and self.acquisition is not None
+        ):
+            selected_phantom = self._selected_designed_phantom()
+            moment_origins = np.asarray(
+                self.acquisition.moment_origins_cyc_per_m, dtype=float
+            )
+            if selected_phantom is not None and moment_origins.shape[0] >= 2:
+                limited_moments = moment_origins[: min(moment_origins.shape[0], 1025)]
+                report = analyze_adc_moment_train(
+                    limited_moments,
+                    phantom_voxel_basis_m(selected_phantom),
+                    sampling,
+                )
+                phase_train_for_recommendation = np.asarray(
+                    report.phase_cycles_per_voxel, dtype=float
+                )
+                report_source = "actual ADC moment origins"
+
+        minimum_counts = [1, 1, 1]
+        for role, reference_size in zip(
+            ("read", "phase", "partition"), role_reference_sizes
+        ):
+            axis, _ = frame.axis_and_sign(role)
+            axis_index = "xyz".index(axis)
+            minimum_counts[axis_index] = max(
+                1, int(np.ceil(voxel_sizes[axis_index] / reference_size - 1e-12))
+            )
+        # A centered singleton cannot resolve gradient phase or slice-selective
+        # RF evolution along that axis, even when another axis happens to keep
+        # the product coherence near zero. Require at least two points on every
+        # axis that carries a crusher moment before optimizing train recurrence.
+        for axis_index, cycles in enumerate(cycles_xyz):
+            if abs(cycles) > 1e-12:
+                minimum_counts[axis_index] = max(2, minimum_counts[axis_index])
+        maximum_spins = max(512, int(np.prod(minimum_counts)))
+        if phase_train_for_recommendation is None:
+            recommendation = recommend_spin_grid(
+                tuple(float(np.round(value, 12)) for value in cycles_xyz),
+                analyzed_excitation_count,
+                tuple(minimum_counts),
+                "midpoint",
+                0.01,
+                maximum_spins,
+                max(32, max(minimum_counts)),
+            )
+        else:
+            recommendation = recommend_spin_grid_for_phase_train(
+                phase_train_for_recommendation,
+                tuple(minimum_counts),
+                "midpoint",
+                0.01,
+                maximum_spins,
+                max(32, max(minimum_counts)),
+            )
+        self._flash_spin_grid_recommendation = recommendation
+        recommendation_counts = recommendation.counts_xyz
+        recommended_text = (
+            f"{recommendation_counts[0]}×{recommendation_counts[1]}"
+            f"×{recommendation_counts[2]} regular midpoint spins "
+            f"({recommendation.spins_per_voxel} total; train error "
+            f"{100 * recommendation.maximum_sampling_error:.3g}%)"
+        )
         message = (
             "Effective cycles/phantom voxel XYZ: "
             + ", ".join(f"{value:.4g}" for value in cycles_xyz)
-            + f". Remaining coherent signal: ideal {100 * continuous:.3g}%, "
-            + f"{counts[0]}×{counts[1]}×{counts[2]} grid {100 * discrete:.3g}%."
+            + ". Remaining coherent signal after one crusher: "
+            + f"ideal {100 * report.single_continuous_coherence:.3g}%, "
+            + f"{counts[0]}×{counts[1]}×{counts[2]} "
+            + f"{self.subvoxel_sampling_method} grid "
+            + f"{100 * report.single_sampled_coherence:.3g}%. "
+            + f"Across {max(1, report.n_observations)} accumulated "
+            + f"orders ({report_source}), maximum sampling error is "
+            + f"{100 * report.maximum_sampling_error:.3g}%"
         )
-        warning = continuous > 0.05 or discrete > 0.05
-        if continuous < 0.01 and discrete > 0.05:
-            message += " Warning: this regular subvoxel grid aliases the spoiler."
+        if report.worst_error_observation is not None:
+            message += f" at order {report.worst_error_observation}."
+        else:
+            message += "."
+        warning = (
+            report.single_continuous_coherence > 0.05
+            or report.maximum_sampling_error > 0.05
+        )
+        if report.first_alias_observation is not None:
+            message += (
+                " Warning: artificial subvoxel rephasing starts at crusher "
+                f"order {report.first_alias_observation}."
+            )
+        if report.n_observations < excitation_count - 1:
+            message += (
+                f" The GUI check is limited to the first "
+                f"{report.n_observations} orders of {excitation_count - 1}."
+            )
+        message += f" Recommended: {recommended_text}."
+        if not recommendation.meets_target:
+            message += " No tested grid reached the 1% train-error target."
+        if self.flash_auto_spoiler.isChecked() and getattr(
+            self, "_flash_auto_spoiler_clipped", False
+        ):
+            message += " Auto spoiler reached the control limit before its target."
+        elif self.flash_auto_spoiler.isChecked():
+            message += " Auto spoiler targets the first coherence null."
         self.flash_spoiler_info.setText(message)
         self.flash_spoiler_info.setStyleSheet(
             "color: #b45309;" if warning else "color: #15803d;"
+        )
+        recommendation_is_current = (
+            self.subvoxel_sampling_method == recommendation.method
+            and counts == recommendation.counts_xyz
+        )
+        self.flash_apply_recommended_grid.setEnabled(not recommendation_is_current)
+        self.flash_apply_recommended_grid.setText(
+            "Grid already train-safe"
+            if recommendation_is_current
+            else f"Apply {recommendation_counts[0]}×{recommendation_counts[1]}"
+            f"×{recommendation_counts[2]} midpoint grid"
+        )
+
+    def _apply_flash_recommended_spin_grid(self):
+        recommendation = getattr(self, "_flash_spin_grid_recommendation", None)
+        if recommendation is None:
+            return
+        if self.app_settings is not None:
+            self.app_settings.setValue(
+                "sequence/subvoxel_sampling_method", recommendation.method
+            )
+            for axis, count in zip("xyz", recommendation.counts_xyz):
+                self.app_settings.setValue(
+                    f"sequence/subvoxel_spins_{axis}", int(count)
+                )
+            self.app_settings.sync()
+        self.set_spoiler_configuration(
+            self.spoiler_mode, recommendation.counts_xyz, recommendation.method
         )
 
     def _ss_bssfp_effective_spoiler_cycles_xyz(self):
@@ -4259,6 +4646,7 @@ class SequenceSimulationWidget(QWidget):
             self._request_generated_sequence_refresh()
 
     def _update_bandwidth_labels(self):
+        self._update_shared_rf_controls("epi")
         bandwidth_hz = self.sampling_bandwidth_khz.value() * 1000.0
         dwell_us = 1e6 / bandwidth_hz
         pixel_bandwidth_hz = bandwidth_hz / self.read_matrix.value()
@@ -4277,6 +4665,7 @@ class SequenceSimulationWidget(QWidget):
             self.epi_vfa_info.setText("Off")
 
     def _update_csi_labels(self):
+        self._update_shared_rf_controls("csi")
         bandwidth_hz = self.csi_bandwidth_hz.value()
         points = self.csi_spectral_points.value()
         self.csi_dwell_info.setText(f"{1e6 / bandwidth_hz:.3f} µs")
@@ -4295,38 +4684,25 @@ class SequenceSimulationWidget(QWidget):
             self.csi_vfa_info.setText("Off")
 
     def _update_flash_labels(self):
+        self._update_shared_rf_controls("flash")
+        self._apply_flash_auto_spoilers()
         bandwidth_hz = self.flash_sampling_bandwidth_khz.value() * 1000.0
         self.flash_dwell_info.setText(f"{1e6 / bandwidth_hz:.3f} µs")
         self._update_flash_spoiler_info()
 
     def _update_bssfp_labels(self):
+        self._update_shared_rf_controls("bssfp")
         bandwidth_hz = self.bssfp_bandwidth_khz.value() * 1000.0
         self.bssfp_dwell_info.setText(f"{1e6 / bandwidth_hz:.3f} µs")
 
     def _update_ss_bssfp_labels(self):
+        self._update_shared_rf_controls("ss_bssfp")
         bandwidth_hz = self.ss_bssfp_bandwidth_khz.value() * 1000.0
         self.ss_bssfp_dwell_info.setText(f"{1e6 / bandwidth_hz:.3f} µs")
-        pulse_type = self.ss_bssfp_rf_pulse_type.currentText().lower()
-        self.ss_bssfp_rf_sinc_lobes.setEnabled(pulse_type == "sinc")
-        self.ss_bssfp_rf_time_bandwidth_product.setEnabled(
-            pulse_type in {"slr", "gaussian"}
-        )
-        self.ss_bssfp_rf_slr_sharpness.setEnabled(pulse_type == "slr")
-        if pulse_type == "sinc":
-            time_bandwidth_product = self.ss_bssfp_rf_sinc_lobes.value() + 1.0
-        elif pulse_type == "block":
-            time_bandwidth_product = 1.0
-        else:
-            time_bandwidth_product = self.ss_bssfp_rf_time_bandwidth_product.value()
-        derived_bandwidth_hz = time_bandwidth_product / (
-            self.ss_bssfp_rf_duration_ms.value() / 1000.0
-        )
-        previous = self.ss_bssfp_rf_bandwidth_hz.blockSignals(True)
-        self.ss_bssfp_rf_bandwidth_hz.setValue(derived_bandwidth_hz)
-        self.ss_bssfp_rf_bandwidth_hz.blockSignals(previous)
         self._update_ss_bssfp_spoiler_info()
 
     def _update_radial_me_bssfp_labels(self):
+        self._update_shared_rf_controls("radial_me")
         samples = (
             self.radial_me_base_resolution.value()
             * self.radial_me_readout_oversampling.value()
@@ -4337,21 +4713,11 @@ class SequenceSimulationWidget(QWidget):
         )
 
     def _update_me_bssfp_labels(self):
+        self._update_shared_rf_controls("me_bssfp")
         bandwidth_hz = self.me_bssfp_bandwidth_khz.value() * 1000.0
         self.me_bssfp_sampling_info.setText(
             f"requested dwell {1e6 / bandwidth_hz:.3f} µs"
         )
-        gaussian = self.me_bssfp_rf_pulse_type.currentText().lower() == "gaussian"
-        self.me_bssfp_rf_time_bandwidth_product.setEnabled(gaussian)
-        time_bandwidth_product = (
-            self.me_bssfp_rf_time_bandwidth_product.value() if gaussian else 1.0
-        )
-        derived_bandwidth_hz = time_bandwidth_product / (
-            self.me_bssfp_rf_duration_ms.value() / 1000.0
-        )
-        previous = self.me_bssfp_rf_bandwidth_hz.blockSignals(True)
-        self.me_bssfp_rf_bandwidth_hz.setValue(derived_bandwidth_hz)
-        self.me_bssfp_rf_bandwidth_hz.blockSignals(previous)
 
     def _epi_fov_m(self):
         return (
@@ -4556,7 +4922,7 @@ class SequenceSimulationWidget(QWidget):
         return parameters
 
     def _csi_pulseq_parameters(self):
-        return {
+        parameters = {
             "fov_m": self._csi_fov_m(),
             "matrix": (
                 self.csi_read_matrix.value(),
@@ -4569,11 +4935,6 @@ class SequenceSimulationWidget(QWidget):
             "flip_angle_deg": self.csi_flip_angle_deg.value(),
             "variable_flip_angle": self.csi_variable_flip_angle.isChecked(),
             "vfa_final_flip_angle_deg": self.csi_vfa_final_flip_angle_deg.value(),
-            "rf_pulse_type": self.csi_rf_pulse_type.currentText().lower(),
-            "rf_duration_s": self.csi_rf_duration_ms.value() / 1000.0,
-            "rf_time_bandwidth_product": (self.csi_rf_time_bandwidth_product.value()),
-            "rf_apodization": self.csi_rf_apodization.value(),
-            "rf_slr_sharpness": self.csi_rf_slr_sharpness.value(),
             "echo_time_s": self.csi_echo_time_ms.value() / 1000.0,
             "repetition_time_s": self.csi_repetition_time_ms.value() / 1000.0,
             "repetitions": self.csi_repetitions.value(),
@@ -4590,9 +4951,11 @@ class SequenceSimulationWidget(QWidget):
             "spoiler_duration_s": self.csi_spoiler_duration_ms.value() / 1000.0,
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
+        parameters.update(self._shared_rf_parameters("csi"))
+        return parameters
 
     def _flash_pulseq_parameters(self):
-        return {
+        parameters = {
             "fov_m": self._flash_fov_m(),
             "matrix": (
                 self.flash_read_matrix.value(),
@@ -4602,11 +4965,6 @@ class SequenceSimulationWidget(QWidget):
                 self.flash_sampling_bandwidth_khz.value() * 1000.0
             ),
             "flip_angle_deg": self.flash_flip_angle_deg.value(),
-            "rf_pulse_type": self.flash_rf_pulse_type.currentText().lower(),
-            "rf_duration_s": self.flash_rf_duration_ms.value() / 1000.0,
-            "rf_time_bandwidth_product": (self.flash_rf_time_bandwidth_product.value()),
-            "rf_apodization": self.flash_rf_apodization.value(),
-            "rf_slr_sharpness": self.flash_rf_slr_sharpness.value(),
             "slice_thickness_m": self.flash_slice_thickness_mm.value() / 1000.0,
             "slice_gap_m": self.flash_slice_gap_mm.value() / 1000.0,
             "n_slices": self.flash_slice_count.value(),
@@ -4626,9 +4984,11 @@ class SequenceSimulationWidget(QWidget):
             ).axis_codes,
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
+        parameters.update(self._shared_rf_parameters("flash"))
+        return parameters
 
     def _bssfp_pulseq_parameters(self):
-        return {
+        parameters = {
             "fov_m": self._bssfp_fov_m(),
             "matrix": (
                 self.bssfp_read_matrix.value(),
@@ -4637,7 +4997,6 @@ class SequenceSimulationWidget(QWidget):
             ),
             "sampling_bandwidth_hz": self.bssfp_bandwidth_khz.value() * 1000.0,
             "flip_angle_deg": self.bssfp_flip_angle_deg.value(),
-            "rf_duration_s": self.bssfp_rf_duration_ms.value() / 1000.0,
             "repetition_time_s": self.bssfp_repetition_time_ms.value() / 1000.0,
             "rf_phase_start_deg": self.bssfp_phase_start_deg.value(),
             "rf_phase_increment_deg": self.bssfp_phase_increment_deg.value(),
@@ -4652,6 +5011,8 @@ class SequenceSimulationWidget(QWidget):
             ).axis_codes,
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
+        parameters.update(self._shared_rf_parameters("bssfp"))
+        return parameters
 
     @staticmethod
     def _comma_separated_floats(text, name):
@@ -4673,7 +5034,7 @@ class SequenceSimulationWidget(QWidget):
         )
         if not target_names:
             raise ValueError("Target names must not be empty")
-        return {
+        parameters = {
             "fov_m": self._ss_bssfp_fov_m(),
             "matrix": (
                 self.ss_bssfp_read_matrix.value(),
@@ -4690,15 +5051,10 @@ class SequenceSimulationWidget(QWidget):
             "flip_angle_deg": self._comma_separated_floats(
                 self.ss_bssfp_flip_angles_deg.text(), "Target flip angles"
             ),
-            "spectral_rf_duration_s": self.ss_bssfp_rf_duration_ms.value() / 1000.0,
             "spectral_rf_bandwidth_hz": None,
             "spectral_rf_bandwidth_factor_hz_ms": (
-                self.ss_bssfp_rf_bandwidth_hz.value()
-                * self.ss_bssfp_rf_duration_ms.value()
+                self._shared_rf_shape_parameter("ss_bssfp") * 1000.0
             ),
-            "spectral_rf_sinc_lobes": self.ss_bssfp_rf_sinc_lobes.value(),
-            "spectral_rf_slr_sharpness": (self.ss_bssfp_rf_slr_sharpness.value()),
-            "spectral_rf_pulse_type": self.ss_bssfp_rf_pulse_type.currentText().lower(),
             "sampling_bandwidth_hz": self.ss_bssfp_bandwidth_khz.value() * 1000.0,
             "encoding_duration_s": None,
             "repetition_time_s": self.ss_bssfp_repetition_time_ms.value() / 1000.0,
@@ -4730,9 +5086,23 @@ class SequenceSimulationWidget(QWidget):
             ).axis_codes,
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
+        shared_rf = self._shared_rf_parameters("ss_bssfp")
+        parameters.update(
+            {
+                "spectral_rf_pulse_type": shared_rf.pop("rf_pulse_type"),
+                "spectral_rf_duration_s": shared_rf.pop("rf_duration_s"),
+                "spectral_rf_sinc_lobes": self.ss_bssfp_rf_sinc_lobes.value(),
+                "spectral_rf_apodization": shared_rf.pop("rf_apodization"),
+                "spectral_rf_slr_sharpness": shared_rf.pop("rf_slr_sharpness"),
+            }
+        )
+        shared_rf.pop("rf_time_bandwidth_product", None)
+        for name, value in shared_rf.items():
+            parameters[f"spectral_{name}"] = value
+        return parameters
 
     def _radial_me_bssfp_pulseq_parameters(self):
-        return {
+        parameters = {
             "fov_m": self.radial_me_fov_mm.value() / 1000.0,
             "base_resolution": self.radial_me_base_resolution.value(),
             "readout_oversampling": self.radial_me_readout_oversampling.value(),
@@ -4745,7 +5115,6 @@ class SequenceSimulationWidget(QWidget):
             "echo_spacing_s": self.radial_me_echo_spacing_ms.value() / 1000.0,
             "pixel_bandwidth_hz": self.radial_me_pixel_bandwidth_hz.value(),
             "flip_angle_deg": self.radial_me_flip_angle_deg.value(),
-            "rf_duration_s": self.radial_me_rf_duration_ms.value() / 1000.0,
             "repetition_time_s": self.radial_me_repetition_time_ms.value() / 1000.0,
             "rf_phase_start_deg": self.radial_me_phase_start_deg.value(),
             "rf_phase_increment_deg": self.radial_me_phase_increment_deg.value(),
@@ -4761,9 +5130,11 @@ class SequenceSimulationWidget(QWidget):
             ).axis_codes,
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
+        parameters.update(self._shared_rf_parameters("radial_me"))
+        return parameters
 
     def _me_bssfp_pulseq_parameters(self):
-        return {
+        parameters = {
             "fov_m": self._me_bssfp_fov_m(),
             "matrix": (
                 self.me_bssfp_read_matrix.value(),
@@ -4779,10 +5150,7 @@ class SequenceSimulationWidget(QWidget):
             ),
             "sampling_bandwidth_hz": self.me_bssfp_bandwidth_khz.value() * 1000.0,
             "flip_angle_deg": self.me_bssfp_flip_angle_deg.value(),
-            "rf_pulse_type": self.me_bssfp_rf_pulse_type.currentText().lower(),
-            "rf_duration_s": self.me_bssfp_rf_duration_ms.value() / 1000.0,
             "rf_bandwidth_hz": self.me_bssfp_rf_bandwidth_hz.value(),
-            "rf_frequency_offset_hz": self.me_bssfp_rf_offset_hz.value(),
             "receiver_frequency_offset_hz": (self.me_bssfp_receiver_offset_hz.value()),
             "encoding_duration_s": (
                 self.me_bssfp_encoding_duration_ms.value() / 1000.0
@@ -4803,6 +5171,10 @@ class SequenceSimulationWidget(QWidget):
             ).axis_codes,
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
+        parameters.update(self._shared_rf_parameters("me_bssfp"))
+        # ME-bSSFP retains the legacy explicit bandwidth argument for scripts;
+        # the builder prefers the shared TBW when both are supplied.
+        return parameters
 
     def _pulseq_export_spec(self):
         source_index = self.sequence_source.currentIndex()
@@ -5533,6 +5905,32 @@ class SequenceSimulationWidget(QWidget):
             self._refresh_sequence_waveforms(start_s, end_s)
             self._update_waveform_y_ranges()
             self._update_waveform_value_summary()
+        self._emit_physical_b1_changed()
+
+    def physical_b1_display_context(self):
+        """Describe the nominal peak B1 represented by the loaded sequence."""
+        nucleus = self._waveform_nucleus()
+        peak_b1_gauss = None
+        source = ""
+        if self.program is not None:
+            source = str(self.program.source)
+            peak_hz = max(
+                (
+                    float(np.max(np.abs(event.samples_hz)))
+                    for event in self.program.rf_events
+                ),
+                default=0.0,
+            )
+            peak_b1_gauss = float(rf_hz_to_gauss_for_nucleus(peak_hz, nucleus))
+        return {
+            "nominal_peak_b1_gauss": peak_b1_gauss,
+            "nucleus": nucleus,
+            "sequence_source": source,
+            "parameters_pending": bool(self._sequence_generation_pending),
+        }
+
+    def _emit_physical_b1_changed(self):
+        self.physical_b1_changed.emit(self.physical_b1_display_context())
 
     def _update_waveform_y_ranges(self):
         if self.program is None:
@@ -5608,8 +6006,8 @@ class SequenceSimulationWidget(QWidget):
             f"Used physical values ({nucleus}): nominal peak B1 "
             f"{rf_peak_gauss:.5g} G{effective_text}; peak gradients "
             f"Gx {gradient_peaks['x']:.5g}, Gy {gradient_peaks['y']:.5g}, "
-            f"Gz {gradient_peaks['z']:.5g} T/m. These arrays and the B1 maps "
-            "are included in result exports."
+            f"Gz {gradient_peaks['z']:.5g} T/m. These waveform arrays and the "
+            "per-voxel max-B1 map are included in result exports."
         )
 
     def _show_program(self, compiled=None):
@@ -5796,6 +6194,7 @@ class SequenceSimulationWidget(QWidget):
         self._update_waveform_y_ranges()
         self._set_sequence_cursor(0.0)
         self._update_run_action_availability()
+        self._emit_physical_b1_changed()
 
     def _sequence_plot_range_changed(self, _view_box, x_range):
         if self.program is None or x_range is None or len(x_range) != 2:
@@ -6881,7 +7280,7 @@ class SequenceSimulationWidget(QWidget):
             or self.simulator.dynamic_sequence_kernel == "metal_hybrid"
             else (1, 1, 1)
         )
-        return SpinSampling(counts)
+        return SpinSampling(counts, method=self.subvoxel_sampling_method)
 
     def set_live_preview_enabled(self, enabled):
         """Apply the persisted live sequence visualization preference."""
@@ -6914,15 +7313,24 @@ class SequenceSimulationWidget(QWidget):
             raise ValueError("sequence time step must be between 0.1 and 1000 µs")
         self.simulation_timestep_us.setValue(value)
 
-    def set_spoiler_configuration(self, mode, counts_xyz):
+    def set_spoiler_configuration(self, mode, counts_xyz, sampling_method=None):
         """Apply persistent ideal or physical-gradient spoiler settings."""
         mode = str(mode).strip().lower()
         if mode not in {"ideal", "gradient"}:
             raise ValueError("spoiler mode must be 'ideal' or 'gradient'")
-        sampling = SpinSampling(tuple(counts_xyz))
+        method = (
+            self.subvoxel_sampling_method
+            if sampling_method is None
+            else str(sampling_method).strip().lower()
+        )
+        sampling = SpinSampling(tuple(counts_xyz), method=method)
         self.spoiler_mode = mode
         self.subvoxel_spin_counts = sampling.counts_xyz
+        self.subvoxel_sampling_method = sampling.method
+        auto_changed = self._apply_flash_auto_spoilers()
         self._update_flash_spoiler_info()
+        if auto_changed and self.sequence_source.currentIndex() == self.FLASH_SOURCE:
+            self._request_generated_sequence_refresh()
         self._update_ss_bssfp_spoiler_info()
 
     def set_thread_configuration(self, mode, manual_thread_count):
@@ -6944,6 +7352,17 @@ class SequenceSimulationWidget(QWidget):
     def set_scanner_parameters(self, parameters):
         """Apply scanner hardware limits to generated sequences and exports."""
         self.scanner_parameters = ScannerParameters.from_mapping(parameters)
+        for prefix in (
+            "epi",
+            "csi",
+            "flash",
+            "bssfp",
+            "ss_bssfp",
+            "radial_me",
+            "me_bssfp",
+        ):
+            if hasattr(self, f"{prefix}_rf_pulse_type"):
+                self._update_shared_rf_controls(prefix)
         if hasattr(self, "sequence_source"):
             self._request_generated_sequence_refresh()
 

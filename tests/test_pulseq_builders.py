@@ -23,6 +23,9 @@ from blochsimulator.sequence import (
     make_pulseq_flash,
     make_pulseq_spiral,
 )
+from blochsimulator.sequence.rf_pulses import (
+    rf_time_bandwidth_product_from_envelope,
+)
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
 
 
@@ -423,13 +426,8 @@ def test_flash_rejects_an_interval_shorter_than_one_complete_image():
         )
 
 
-@pytest.mark.parametrize(
-    ("pulse_type", "expected_tbw"),
-    [("sinc", 3.5), ("slr", 3.5), ("gaussian", 3.5), ("block", 1.0)],
-)
-def test_epi_builder_exports_configurable_rf_pulse_properties(
-    tmp_path, pulse_type, expected_tbw
-):
+@pytest.mark.parametrize("pulse_type", ["sinc", "slr", "gaussian", "block"])
+def test_epi_builder_exports_configurable_rf_pulse_properties(tmp_path, pulse_type):
     sequence = make_pulseq_epi(
         matrix=(4, 3),
         flip_angle_deg=35.0,
@@ -438,6 +436,7 @@ def test_epi_builder_exports_configurable_rf_pulse_properties(
         rf_time_bandwidth_product=3.5,
         rf_apodization=0.25,
         rf_slr_sharpness=5.0,
+        slice_thickness_m=20e-3,
         repetition_time_s=50e-3,
     )
     program = _write_and_load(sequence, tmp_path / f"epi_{pulse_type}.seq")
@@ -447,7 +446,10 @@ def test_epi_builder_exports_configurable_rf_pulse_properties(
     assert sequence.check_timing()[0]
     assert definitions["RFPulseType"] == pulse_type
     assert definitions["RFDuration"] == pytest.approx(2.5e-3)
-    assert definitions["RFTimeBandwidthProduct"] == pytest.approx(expected_tbw)
+    expected_tbw = rf_time_bandwidth_product_from_envelope(rf.samples_hz)
+    assert definitions["RFTimeBandwidthProduct"] == pytest.approx(
+        expected_tbw, rel=1e-6
+    )
     assert rf.samples_hz.size * rf.raster_s == pytest.approx(2.5e-3)
     assert 360.0 * abs(np.sum(rf.samples_hz) * rf.raster_s) == pytest.approx(
         35.0, abs=2e-3
@@ -497,6 +499,49 @@ def test_epi_builder_preserves_rf_designer_complex_shape_and_rescales_flip(tmp_p
     assert rf.frequency_offset_hz == pytest.approx(125.0)
     assert 360.0 * abs(integral) == pytest.approx(60.0, abs=2e-3)
     assert np.angle(integral) == pytest.approx(phase_rad, abs=2e-6)
+
+
+@pytest.mark.parametrize("builder_name", ["csi", "flash"])
+def test_other_2d_builders_accept_the_same_loaded_rf_pulse(builder_name):
+    raster_s = 10e-6
+    sample_count = 100
+    reference_flip_angle_deg = 30.0
+    waveform_hz = np.full(
+        sample_count,
+        reference_flip_angle_deg / (360.0 * sample_count * raster_s),
+        dtype=np.complex128,
+    )
+    common = {
+        "matrix": (2, 2),
+        "flip_angle_deg": 30.0,
+        "rf_pulse_type": "designer",
+        "rf_duration_s": sample_count * raster_s,
+        "rf_custom_waveform_hz": waveform_hz,
+        "rf_custom_raster_s": raster_s,
+        "rf_custom_flip_angle_deg": reference_flip_angle_deg,
+        "rf_custom_name": "loaded.exc",
+        "rf_frequency_offset_hz": 125.0,
+    }
+    if builder_name == "csi":
+        sequence = make_pulseq_csi(
+            spectral_points=8,
+            echo_time_s=10e-3,
+            repetition_time_s=100e-3,
+            **common,
+        )
+    else:
+        sequence = make_pulseq_flash(
+            sampling_bandwidth_hz=10_000.0,
+            echo_time_s=6e-3,
+            repetition_time_s=20e-3,
+            **common,
+        )
+
+    assert sequence.check_timing()[0]
+    assert sequence.definitions["RFPulseType"] == "designer"
+    assert sequence.definitions["RFDesignerPulseName"] == "loaded.exc"
+    assert sequence.definitions["RFDesignerFlipAngleDeg"] == pytest.approx(30.0)
+    assert sequence.definitions["RFFrequencyOffset"] == pytest.approx(125.0)
 
 
 def test_spiral_builder_round_trips_and_reconstructs_frames(tmp_path):

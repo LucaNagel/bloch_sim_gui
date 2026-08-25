@@ -19,6 +19,10 @@ from blochsimulator.sequence.bssfp_phase import (
     pulseq_phase_offset_rad,
     wrap_phase_deg,
 )
+from blochsimulator.sequence.rf_pulses import (
+    make_pulseq_rf_events,
+    set_rf_definitions,
+)
 
 
 def _as_3d_fov(fov: float | tuple[float, float, float]) -> tuple[float, float, float]:
@@ -52,7 +56,14 @@ def main(
     n_phase: int = 64,
     n_partition: int = 32,
     flip_angle_deg: float = 15,
+    rf_pulse_type: str = "block",
     rf_duration: float = 1e-3,
+    rf_time_bandwidth_product: float = 4.0,
+    rf_apodization: float = 0.5,
+    rf_slr_sharpness: float = 1.0,
+    rf_custom_waveform_hz=None,
+    rf_custom_raster_s: float | None = None,
+    rf_custom_flip_angle_deg: float | None = None,
     adc_dwell: float = 100e-6,
     encoding_duration: float = 1e-3,
     rf_phase_start: float = 180,
@@ -90,21 +101,22 @@ def main(
     )
     seq = pp.Sequence(system)
 
-    rf = pp.make_block_pulse(
-        flip_angle=np.deg2rad(flip_angle_deg),
-        duration=rf_duration,
-        delay=system.rf_dead_time,
-        system=system,
-        use="excitation",
+    rf_events, actual_rf_duration, effective_rf_tbw, rf_pulse_type = (
+        make_pulseq_rf_events(
+            pp,
+            system,
+            flip_angles_deg=(flip_angle_deg, flip_angle_deg / 2),
+            pulse_type=rf_pulse_type,
+            duration_s=rf_duration,
+            time_bandwidth_product=rf_time_bandwidth_product,
+            apodization=rf_apodization,
+            slr_sharpness=rf_slr_sharpness,
+            custom_waveform_hz=rf_custom_waveform_hz,
+            custom_raster_s=rf_custom_raster_s,
+            custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        )
     )
-    rf_alpha_half = pp.make_block_pulse(
-        flip_angle=np.deg2rad(flip_angle_deg / 2),
-        duration=rf_duration,
-        delay=system.rf_dead_time,
-        phase_offset=0,
-        system=system,
-        use="excitation",
-    )
+    rf, rf_alpha_half = rf_events
 
     readout_duration = n_read * adc_dwell
     readout_amplitude = 1 / (fov_x * adc_dwell)
@@ -289,6 +301,18 @@ def main(
     seq.set_definition(key="MatrixSize", value=[n_read, n_phase, n_partition])
     seq.set_definition(key="TR", value=tr)
     seq.set_definition(key="TE", value=te)
+    set_rf_definitions(
+        seq,
+        pulse_type=rf_pulse_type,
+        requested_duration_s=rf_duration,
+        actual_duration_s=actual_rf_duration,
+        time_bandwidth_product=effective_rf_tbw,
+        apodization=rf_apodization,
+        slr_sharpness=rf_slr_sharpness,
+        custom_name=None,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        frequency_offset_hz=0.0,
+    )
 
     if write_seq:
         script_dir = Path(__file__).resolve().parent

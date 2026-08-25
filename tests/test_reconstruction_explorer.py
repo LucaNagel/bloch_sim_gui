@@ -249,7 +249,7 @@ def test_explorer_uses_labelled_slider_for_2d_slice_series(qt_application):
     )
 
 
-def test_manual_contrast_domain_covers_all_slices_and_survives_navigation(
+def test_manual_contrast_domain_covers_all_slices_with_headroom_and_survives_navigation(
     qt_application,
 ):
     dataset = _sliced_cartesian_dataset()
@@ -257,15 +257,15 @@ def test_manual_contrast_domain_covers_all_slices_and_survives_navigation(
     explorer.set_dataset(dataset)
     slice_control = explorer.outer_controls["slice"]
 
-    assert explorer.contrast_slider.values() == (0.0, 59.0)
+    assert explorer.contrast_slider.values() == (0.0, 64.9)
     explorer.auto_contrast.setChecked(False)
     explorer.contrast_slider.set_values(5.0, 55.0)
 
     slice_control.setValue(0)
-    assert explorer.contrast_slider._domain == (0.0, 59.0)
+    assert explorer.contrast_slider._domain == (0.0, 64.9)
     assert explorer.contrast_slider.values() == (5.0, 55.0)
     slice_control.setValue(2)
-    assert explorer.contrast_slider._domain == (0.0, 59.0)
+    assert explorer.contrast_slider._domain == (0.0, 64.9)
     assert explorer.contrast_slider.values() == (5.0, 55.0)
 
 

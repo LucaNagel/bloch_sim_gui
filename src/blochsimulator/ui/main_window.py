@@ -1447,6 +1447,7 @@ class BlochSimulatorGUI(QMainWindow):
             self.b1_widget.tx_field,
             self.b1_widget.rx_field,
         )
+        self._connect_sequence_b1_display()
 
     def _ensure_b1_combo_workspace(self, index: int):
         """Create the combined OpenGL view only when its tab is opened."""
@@ -1473,6 +1474,7 @@ class BlochSimulatorGUI(QMainWindow):
             None if b1_widget is None else b1_widget.tx_field,
             None if b1_widget is None else b1_widget.rx_field,
         )
+        self._connect_sequence_b1_display()
 
     def _connect_phantom_sequence_workspaces(self):
         """Keep all focused workspaces synchronized to the shared phantom."""
@@ -1515,6 +1517,7 @@ class BlochSimulatorGUI(QMainWindow):
                 )
             except TypeError:
                 pass
+        self._connect_sequence_b1_display()
         phantom = None if phantom_widget is None else phantom_widget.current_phantom
         if phantom is not None:
             self._on_shared_phantom_changed(phantom)
@@ -1649,10 +1652,36 @@ class BlochSimulatorGUI(QMainWindow):
         if combo_widget is not None:
             combo_widget.set_fields(tx_field, rx_field)
 
-    def _on_b1_phantom_updated(self, _phantom):
+    def _on_b1_phantom_updated(self, phantom):
         sequence_widget = getattr(self, "sequence_simulation_widget", None)
         if sequence_widget is not None:
             sequence_widget.refresh_object_summary()
+        combo_widget = getattr(self, "b1_combo_widget", None)
+        if combo_widget is not None:
+            combo_widget.set_phantom(phantom)
+
+    def _connect_sequence_b1_display(self):
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        if sequence_widget is None:
+            return
+        try:
+            sequence_widget.physical_b1_changed.connect(
+                self._on_sequence_physical_b1_changed,
+                type=Qt.UniqueConnection,
+            )
+        except TypeError:
+            pass
+        self._on_sequence_physical_b1_changed(
+            sequence_widget.physical_b1_display_context()
+        )
+
+    def _on_sequence_physical_b1_changed(self, context):
+        b1_widget = getattr(self, "b1_widget", None)
+        if b1_widget is not None:
+            b1_widget.set_sequence_context(context)
+        combo_widget = getattr(self, "b1_combo_widget", None)
+        if combo_widget is not None:
+            combo_widget.set_sequence_context(context)
 
     def _configure_main_tab_tooltips(self):
         """Describe every main workspace tab, including focused-mode tabs."""
@@ -1743,7 +1772,7 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             (
                 self.slice_explorer.tbw,
-                "Time-bandwidth product controlling pulse bandwidth and slice-profile sharpness.",
+                "Time-bandwidth product calculated automatically from the RF pulse shape.",
             ),
             (
                 self.slice_explorer.apodization,
@@ -1981,7 +2010,7 @@ class BlochSimulatorGUI(QMainWindow):
             ("duration", "RF pulse duration in milliseconds."),
             (
                 "tbw",
-                "Time-bandwidth product controlling RF bandwidth and profile sharpness.",
+                "Time-bandwidth product calculated automatically from the RF pulse shape.",
             ),
             (
                 "sinc_lobes",
@@ -4561,6 +4590,13 @@ class BlochSimulatorGUI(QMainWindow):
             counts.append(value if 1 <= value <= 128 else default)
         return tuple(counts)
 
+    def _load_subvoxel_sampling_method(self) -> str:
+        """Load the deterministic intravoxel sampling rule."""
+        method = str(
+            self.app_settings.value("sequence/subvoxel_sampling_method", "midpoint")
+        )
+        return method if method in {"midpoint", "stratified"} else "midpoint"
+
     def _load_sequence_timestep_preset(self) -> str:
         """Load the persistent RF-active sequence time-step preset."""
         preset = str(self.app_settings.value("sequence/timestep_preset", "balanced"))
@@ -4626,6 +4662,7 @@ class BlochSimulatorGUI(QMainWindow):
             sequence_timestep_us=self._load_sequence_timestep_us(),
             sequence_spoiler_mode=self._load_sequence_spoiler_mode(),
             subvoxel_spin_counts=self._load_subvoxel_spin_counts(),
+            subvoxel_sampling_method=self._load_subvoxel_sampling_method(),
             thread_mode=self._load_thread_mode(),
             manual_thread_count=self._load_manual_thread_count(),
             animation_memory_budget_mib=self._load_animation_memory_budget_mib(),
@@ -4675,7 +4712,11 @@ class BlochSimulatorGUI(QMainWindow):
         self.app_settings.setValue("sequence/timestep_us", timestep_us)
         spoiler_mode = dialog.sequence_spoiler_mode()
         subvoxel_spin_counts = dialog.subvoxel_spin_counts()
+        subvoxel_sampling_method = dialog.subvoxel_sampling_method()
         self.app_settings.setValue("sequence/spoiler_mode", spoiler_mode)
+        self.app_settings.setValue(
+            "sequence/subvoxel_sampling_method", subvoxel_sampling_method
+        )
         for axis, count in zip("xyz", subvoxel_spin_counts):
             self.app_settings.setValue(f"sequence/subvoxel_spins_{axis}", int(count))
         thread_mode = dialog.thread_mode()
@@ -4703,7 +4744,7 @@ class BlochSimulatorGUI(QMainWindow):
             sequence_widget.set_dynamic_sequence_kernel(dynamic_sequence_kernel)
             sequence_widget.set_sequence_timestep_us(timestep_us)
             sequence_widget.set_spoiler_configuration(
-                spoiler_mode, subvoxel_spin_counts
+                spoiler_mode, subvoxel_spin_counts, subvoxel_sampling_method
             )
             sequence_widget.set_thread_configuration(thread_mode, manual_thread_count)
             sequence_widget.set_animation_memory_budget_bytes(
@@ -5339,6 +5380,15 @@ class BlochSimulatorGUI(QMainWindow):
                 if sequence_widget is not None
                 else {}
             ),
+            "spoiler_configuration": (
+                {
+                    "mode": sequence_widget.spoiler_mode,
+                    "counts_xyz": sequence_widget.subvoxel_spin_counts,
+                    "sampling_method": sequence_widget.subvoxel_sampling_method,
+                }
+                if sequence_widget is not None
+                else {}
+            ),
             "reconstruction_view": (
                 sequence_widget.reconstruction_explorer.get_state()
                 if sequence_widget is not None
@@ -5482,6 +5532,17 @@ class BlochSimulatorGUI(QMainWindow):
 
             sequence_widget = self.sequence_simulation_widget
             _restore_widget_state(sequence_widget, state.get("sequence_controls", {}))
+            spoiler_configuration = state.get("spoiler_configuration", {})
+            if spoiler_configuration:
+                sequence_widget.set_spoiler_configuration(
+                    spoiler_configuration.get("mode", sequence_widget.spoiler_mode),
+                    spoiler_configuration.get(
+                        "counts_xyz", sequence_widget.subvoxel_spin_counts
+                    ),
+                    spoiler_configuration.get(
+                        "sampling_method", sequence_widget.subvoxel_sampling_method
+                    ),
+                )
             if project["program"] is not None:
                 sequence_widget.program = project["program"]
                 sequence_widget._generated_pulseq_sequence = None

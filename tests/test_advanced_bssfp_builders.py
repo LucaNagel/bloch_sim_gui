@@ -51,6 +51,43 @@ def _pulseq_event_center_phase_deg(event, center_s):
     )
 
 
+def test_spectral_bssfp_accepts_the_shared_loaded_rf_pulse():
+    raster_s = 10e-6
+    sample_count = 100
+    reference_flip_angle_deg = 30.0
+    waveform_hz = np.full(
+        sample_count,
+        reference_flip_angle_deg / (360.0 * sample_count * raster_s),
+        dtype=np.complex128,
+    )
+    sequence = make_pulseq_spectral_selective_bssfp(
+        matrix=(2, 1, 1),
+        target_frequency_offsets_hz=(100.0,),
+        receiver_frequency_offsets_hz=(0.0,),
+        target_metabolite_names=("test",),
+        flip_angle_deg=(30.0,),
+        spectral_rf_pulse_type="designer",
+        spectral_rf_duration_s=sample_count * raster_s,
+        spectral_rf_bandwidth_factor_hz_ms=2000.0,
+        spectral_rf_custom_waveform_hz=waveform_hz,
+        spectral_rf_custom_raster_s=raster_s,
+        spectral_rf_custom_flip_angle_deg=reference_flip_angle_deg,
+        spectral_rf_custom_name="loaded.exc",
+        spectral_rf_frequency_offset_hz=125.0,
+        sampling_bandwidth_hz=10_000.0,
+        repetition_time_s=10e-3,
+        repetitions=1,
+        use_alpha_half=False,
+        end_image_spoiler_cycles_per_fov=0.0,
+    )
+
+    assert sequence.check_timing()[0]
+    assert sequence.definitions["SpectralRFPulseType"] == "designer"
+    assert sequence.definitions["SpectralRFDesignerPulseName"] == "loaded.exc"
+    assert sequence.definitions["SpectralRFDesignerFlipAngleDeg"] == pytest.approx(30.0)
+    assert sequence.definitions["SpectralRFFrequencyOffset"] == pytest.approx(125.0)
+
+
 def test_spectral_bssfp_uses_one_rf_target_locked_phase_across_trs():
     target_offset = -245.0
     receiver_offset = 125.0
@@ -328,7 +365,7 @@ def test_spectral_selective_builder_matches_paper_readout_and_auto_encoding():
     )
 
 
-def test_spectral_selective_sinc_bandwidth_is_derived_from_duration_and_lobes():
+def test_spectral_selective_sinc_bandwidth_is_derived_from_pulse_shape():
     sequence = make_pulseq_spectral_selective_bssfp(
         matrix=(4, 2, 2),
         spectral_rf_pulse_type="sinc",
@@ -342,9 +379,13 @@ def test_spectral_selective_sinc_bandwidth_is_derived_from_duration_and_lobes():
 
     definitions = sequence.definitions
     assert definitions["SpectralRFSincLobes"] == 5
-    assert definitions["SpectralRFBandwidthHz"] == pytest.approx(3000.0)
-    assert definitions["SpectralRFBandwidthFactorHzMs"] == pytest.approx(6000.0)
-    assert definitions["SpectralRFTimeBandwidthProduct"] == pytest.approx(6.0)
+    effective_tbw = definitions["SpectralRFTimeBandwidthProduct"]
+    assert definitions["SpectralRFBandwidthHz"] == pytest.approx(
+        effective_tbw / definitions["SpectralRFDuration"]
+    )
+    assert definitions["SpectralRFBandwidthFactorHzMs"] == pytest.approx(
+        effective_tbw * 1000.0
+    )
 
 
 @pytest.mark.parametrize(

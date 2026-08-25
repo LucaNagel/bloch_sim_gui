@@ -27,6 +27,7 @@ from .memory import (
 RF_PULSE_TYPE_OPTIONS = (
     "Rectangle",
     "Sinc",
+    "SLR",
     "Gaussian",
     "Hermite",
     "Adiabatic Half Passage",
@@ -85,6 +86,7 @@ def design_rf_pulse(
     time_bw_product=4,
     npoints=100,
     freq_offset=0.0,
+    slr_sharpness=1.0,
 ):
     """
     Pure-Python fallback for RF design so imports work even without the extension.
@@ -92,7 +94,7 @@ def design_rf_pulse(
     Parameters
     ----------
     pulse_type : str
-        Type of pulse ('rect', 'sinc', 'gaussian', 'hermite',
+        Type of pulse ('rect', 'sinc', 'slr', 'gaussian', 'hermite',
         'adiabatic_half', 'adiabatic_full', 'bir4')
     duration : float
         Pulse duration in seconds
@@ -105,6 +107,9 @@ def design_rf_pulse(
     freq_offset : float
         Frequency offset in Hz (default 0). Applies phase modulation: B1 * exp(2πi*f*t)
         Positive offset shifts the pulse frequency higher.
+    slr_sharpness : float
+        SLR transition sharpness. Higher values generate progressively more
+        temporal lobes through the shared RF envelope designer.
 
     Returns
     -------
@@ -126,6 +131,23 @@ def design_rf_pulse(
         envelope = np.sinc(bw * t_centered)
         area = np.trapezoid(envelope, time)
         b1 = envelope * (target_area / area)
+    elif pulse_type == "slr":
+        # Free Mode and generated sequences intentionally share this exact SLR
+        # implementation.  Use a virtual raster so the requested point count
+        # maps one-to-one onto the global baseband envelope.
+        from .sequence.rf_pulses import design_rf_envelope
+
+        envelope, _, _, _ = design_rf_envelope(
+            pulse_type="slr",
+            duration_s=duration,
+            raster_s=dt,
+            time_bandwidth_product=time_bw_product,
+            slr_sharpness=slr_sharpness,
+        )
+        area = np.sum(envelope) * dt
+        if abs(area) < 1e-15:
+            raise ValueError("SLR pulse integral is too small for flip scaling")
+        b1 = envelope * (target_area / abs(area))
     elif pulse_type == "gaussian":
         t_centered = time - duration / 2
         sigma = duration / (2 * np.sqrt(2 * np.log(2)) * time_bw_product)
@@ -1410,6 +1432,16 @@ class BlochSimulator:
         # temporaries. Sequence working arrays and initial magnetization are
         # included separately. This is intentionally conservative.
         estimated_bytes = output_samples * 64 + ntime * 64 + spin_count * 56
+        if mode & 2:
+            suggestions = (
+                "Use Endpoint mode, increase the time step, reduce positions or "
+                "frequencies, or enable Preview"
+            )
+        else:
+            suggestions = (
+                "Increase the time step, reduce positions or frequencies, or "
+                "enable Preview"
+            )
         enforce_memory_budget(
             estimated_bytes,
             self._memory_budget(),
@@ -1417,10 +1449,7 @@ class BlochSimulator:
                 f"Requested {ntime:,} time points × {npos:,} positions × "
                 f"{nfreq:,} frequencies ({output_samples:,} output samples)"
             ),
-            suggestions=(
-                "Use Endpoint mode, increase the time step, reduce positions or "
-                "frequencies, or enable Preview"
-            ),
+            suggestions=suggestions,
         )
 
     def _check_phantom_simulation_memory(

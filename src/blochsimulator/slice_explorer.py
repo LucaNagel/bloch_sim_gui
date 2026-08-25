@@ -22,6 +22,8 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 import pyqtgraph as pg
 
+from .memory import SimulationMemoryError
+from .sequence.rf_pulses import rf_time_bandwidth_product_from_envelope
 from .simulator import (
     BlochSimulator,
     RF_PULSE_TYPE_OPTIONS,
@@ -116,11 +118,14 @@ class SliceSelectionExplorer(QWidget):
 
         # Time-Bandwidth Product
         row_tbw = QHBoxLayout()
-        row_tbw.addWidget(QLabel("Time-BW Product:"))
+        row_tbw.addWidget(QLabel("Time-BW Product (auto):"))
         self.tbw = QDoubleSpinBox()
-        self.tbw.setRange(1.0, 16.0)
+        self.tbw.setRange(0.001, 1000.0)
         self.tbw.setValue(4.0)
-        self.tbw.setSingleStep(0.5)
+        self.tbw.setReadOnly(True)
+        self.tbw.setButtonSymbols(QDoubleSpinBox.NoButtons)
+        self.tbw.setEnabled(False)
+        self.tbw.setToolTip("Calculated automatically from the RF pulse shape")
         row_tbw.addWidget(self.tbw)
         pulse_layout.addLayout(row_tbw)
 
@@ -234,7 +239,6 @@ class SliceSelectionExplorer(QWidget):
         self.pulse_source.currentTextChanged.connect(self._pulse_source_changed)
         self.flip_angle.valueChanged.connect(self.run_simulation)
         self.duration.valueChanged.connect(self.run_simulation)
-        self.tbw.valueChanged.connect(self.run_simulation)
         self.apodization.currentTextChanged.connect(self.run_simulation)
         self.thickness.valueChanged.connect(self.run_simulation)
         self.use_rephase.currentIndexChanged.connect(self.run_simulation)
@@ -265,10 +269,10 @@ class SliceSelectionExplorer(QWidget):
         for control in (
             self.flip_angle,
             self.duration,
-            self.tbw,
             self.apodization,
         ):
             control.setEnabled(not use_rf_design)
+        self.tbw.setEnabled(False)
 
     @staticmethod
     def _validate_pulse(pulse):
@@ -341,6 +345,9 @@ class SliceSelectionExplorer(QWidget):
                     else 1e-5
                 )
             tbw = max(float(self.rf_designer.tbw.value()), 1e-6)
+            previous = self.tbw.blockSignals(True)
+            self.tbw.setValue(tbw)
+            self.tbw.blockSignals(previous)
             flip_angle = float(state.get("flip_angle", 90.0))
             frequency_offset_hz = float(state.get("freq_offset", 0.0))
             b1 = apply_rf_carrier(b1, time_rf, frequency_offset_hz)
@@ -350,7 +357,7 @@ class SliceSelectionExplorer(QWidget):
 
         flip_angle = self.flip_angle.value()
         duration_s = self.duration.value() / 1000.0
-        tbw = self.tbw.value()
+        construction_parameter = 4.0
         window_type = self.apodization.currentText()
         dt = 1e-5
 
@@ -378,7 +385,7 @@ class SliceSelectionExplorer(QWidget):
                 pulse_type=pulse_type,
                 duration=duration_s,
                 flip_angle=flip_angle,
-                time_bw_product=tbw,
+                time_bw_product=construction_parameter,
                 npoints=n_rf_pts,
             )
             if window_type != "None":
@@ -386,6 +393,21 @@ class SliceSelectionExplorer(QWidget):
                     b1, time_rf, window_type, flip_angle
                 )
 
+        try:
+            tbw = rf_time_bandwidth_product_from_envelope(b1)
+        except ValueError:
+            tbw = construction_parameter
+        if source == "Custom" and window_type == "None":
+            metadata = getattr(self.rf_designer, "loaded_pulse_metadata", None)
+            bandwidth_factor = getattr(metadata, "bwfac", 0.0)
+            bandwidth_factor = (
+                float(bandwidth_factor) if bandwidth_factor is not None else 0.0
+            )
+            if np.isfinite(bandwidth_factor) and bandwidth_factor > 0:
+                tbw = bandwidth_factor
+        previous = self.tbw.blockSignals(True)
+        self.tbw.setValue(tbw)
+        self.tbw.blockSignals(previous)
         return b1, time_rf, flip_angle, duration_s, tbw, dt, source
 
     def run_simulation(self):
@@ -402,15 +424,42 @@ class SliceSelectionExplorer(QWidget):
                 pulse_label,
             ) = self._resolve_pulse()
         except (KeyError, TypeError, ValueError) as exc:
-            self.last_b1 = None
-            self.last_gradients = None
-            self.last_time = None
-            self.plot_rf.clear()
-            self.plot_profile.clear()
-            self.pulse_status.setText(str(exc))
+            self._show_simulation_error(exc)
             return
 
+        self.pulse_status.setStyleSheet("color: gray;")
         self.pulse_status.setText(f"Using {pulse_label}")
+
+        try:
+            b1, grads, time, positions, result = self._simulate_profile(
+                b1_base=b1_base,
+                time_rf=time_rf,
+                flip=flip,
+                dur_s=dur_s,
+                tbw=tbw,
+                dt=dt,
+            )
+        except SimulationMemoryError as exc:
+            self._show_simulation_error(exc)
+            return
+
+        self.last_b1 = np.asarray(b1).copy()
+        self.last_gradients = np.asarray(grads).copy()
+        self.last_time = np.asarray(time).copy()
+        self._update_plots(time, b1, grads, positions, result)
+
+    def _show_simulation_error(self, error):
+        """Clear stale plots and report a rejected profile without leaving the GUI."""
+        self.last_b1 = None
+        self.last_gradients = None
+        self.last_time = None
+        self.plot_rf.clear()
+        self.plot_profile.clear()
+        self.pulse_status.setStyleSheet("color: #b00020;")
+        self.pulse_status.setText(str(error))
+
+    def _simulate_profile(self, *, b1_base, time_rf, flip, dur_s, tbw, dt):
+        """Build and simulate the currently selected slice profile."""
         thick_m = self.thickness.value() / 1000.0
         do_rephase = self.use_rephase.currentIndex() == 0
 
@@ -462,11 +511,7 @@ class SliceSelectionExplorer(QWidget):
             mode=0,  # Endpoint only
         )
 
-        # 6. Update Plots
-        self.last_b1 = np.asarray(b1).copy()
-        self.last_gradients = np.asarray(grads).copy()
-        self.last_time = np.asarray(time).copy()
-        self._update_plots(time, b1, grads, positions, result)
+        return b1, grads, time, positions, result
 
     def _update_plots(self, time, b1, grads, positions, result):
         self.plot_rf.clear()

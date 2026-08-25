@@ -34,6 +34,10 @@ from blochsimulator.sequence.bssfp_phase import (
     pulseq_phase_offset_rad,
     wrap_phase_deg,
 )
+from blochsimulator.sequence.rf_pulses import (
+    make_pulseq_rf_events,
+    set_rf_definitions,
+)
 
 
 def _as_3d_fov(fov: float | tuple[float, float, float]) -> tuple[float, float, float]:
@@ -156,19 +160,6 @@ def _readout_dwell(
     return float(best_dwell)
 
 
-def _default_slr_pulse_path(sharpness: float = 1.0) -> Path:
-    if not np.isfinite(sharpness) or sharpness <= 0:
-        raise ValueError("spectral_slr_sharpness must be positive and finite")
-    rounded = round(float(sharpness))
-    if not np.isclose(sharpness, rounded):
-        raise ValueError("bundled SLR pulses require integer sharpness values")
-    return (
-        Path(__file__).resolve().parents[2]
-        / "rfpulses"
-        / f"SLR_sharpness_{int(rounded)}.txt"
-    )
-
-
 def _load_amp_phase_waveform(path: str | Path) -> np.ndarray:
     data = np.loadtxt(Path(path), delimiter=",")
     flat = np.asarray(data, dtype=float).reshape(-1)
@@ -183,27 +174,6 @@ def _load_amp_phase_waveform(path: str | Path) -> np.ndarray:
     return signal.astype(np.complex128)
 
 
-def _resample_waveform_to_raster(
-    signal: np.ndarray,
-    *,
-    duration: float,
-    raster: float,
-) -> tuple[np.ndarray, float]:
-    n_samples = int(np.round(duration / raster))
-    if n_samples <= 0:
-        raise ValueError("spectral_rf_duration must be at least one RF raster interval")
-    actual_duration = n_samples * raster
-    if signal.size == n_samples:
-        return signal, actual_duration
-
-    source = np.linspace(0.0, 1.0, signal.size, endpoint=True)
-    target = np.linspace(0.0, 1.0, n_samples, endpoint=True)
-    resampled = np.interp(target, source, signal.real) + 1j * np.interp(
-        target, source, signal.imag
-    )
-    return resampled.astype(np.complex128), actual_duration
-
-
 def _make_spectral_rf(
     *,
     pulse_type: str,
@@ -214,56 +184,36 @@ def _make_spectral_rf(
     system,
     slr_pulse_path: str | Path | None,
     slr_sharpness: float,
+    custom_waveform_hz,
+    custom_raster_s: float | None,
+    custom_flip_angle_deg: float | None,
 ):
-    pulse_type = pulse_type.lower()
-    if pulse_type == "gauss":
-        return pp.make_gauss_pulse(
-            flip_angle=flip_angle_rad,
-            duration=duration,
-            bandwidth=bandwidth_hz,
-            apodization=apodization,
-            delay=system.rf_dead_time,
-            system=system,
-            use="excitation",
-        )
-    if pulse_type == "sinc":
-        return pp.make_sinc_pulse(
-            flip_angle=flip_angle_rad,
-            duration=duration,
-            time_bw_product=duration * bandwidth_hz,
-            apodization=apodization,
-            delay=system.rf_dead_time,
-            system=system,
-            use="excitation",
-        )
-    if pulse_type == "block":
-        return pp.make_block_pulse(
-            flip_angle=flip_angle_rad,
-            duration=duration,
-            delay=system.rf_dead_time,
-            system=system,
-            use="excitation",
-        )
-    if pulse_type == "slr":
-        signal = _load_amp_phase_waveform(
-            _default_slr_pulse_path(slr_sharpness)
-            if slr_pulse_path is None
-            else slr_pulse_path
-        )
-        signal, _ = _resample_waveform_to_raster(
-            signal,
-            duration=duration,
-            raster=system.rf_raster_time,
-        )
-        return pp.make_arbitrary_rf(
-            signal=signal,
-            flip_angle=flip_angle_rad,
-            dwell=system.rf_raster_time,
-            delay=system.rf_dead_time,
-            system=system,
-            use="excitation",
-        )
-    raise ValueError("spectral_pulse_type must be 'slr', 'gauss', 'sinc', or 'block'")
+    custom_waveform = custom_waveform_hz
+    custom_raster = custom_raster_s
+    if slr_pulse_path is not None:
+        if custom_waveform is not None:
+            raise ValueError(
+                "use either spectral_slr_pulse_path or "
+                "spectral_rf_custom_waveform_hz, not both"
+            )
+        custom_waveform = _load_amp_phase_waveform(slr_pulse_path)
+        custom_raster = duration / custom_waveform.size
+    if custom_waveform is not None:
+        pulse_type = "designer"
+    events, actual_duration, effective_tbw, normalized_type = make_pulseq_rf_events(
+        pp,
+        system,
+        flip_angles_deg=(np.rad2deg(flip_angle_rad),),
+        pulse_type=pulse_type,
+        duration_s=duration,
+        time_bandwidth_product=duration * bandwidth_hz,
+        apodization=apodization,
+        slr_sharpness=slr_sharpness,
+        custom_waveform_hz=custom_waveform,
+        custom_raster_s=custom_raster,
+        custom_flip_angle_deg=custom_flip_angle_deg,
+    )
+    return events[0], actual_duration, effective_tbw, normalized_type
 
 
 def _zero_amplitude_rf(reference_rf):
@@ -304,6 +254,9 @@ def main(
     spectral_rf_apodization: float = 0.0,
     spectral_slr_pulse_path: str | Path | None = None,
     spectral_slr_sharpness: float = 1.0,
+    spectral_rf_custom_waveform_hz=None,
+    spectral_rf_custom_raster_s: float | None = None,
+    spectral_rf_custom_flip_angle_deg: float | None = None,
     target_tr: float | None = 6.29e-3,
     readout_bandwidth_hz: float | None = 10e3,
     adc_dwell: float | None = None,
@@ -339,9 +292,9 @@ def main(
     matrix 32 x 16 x 12, 10 kHz readout bandwidth, 2.33 ms SLR RF with
     bandwidth factor 2100 Hz ms, FWHM 900 Hz, and nominal flip angles
     alpha_Lac=90 degrees and alpha_Py=4 degrees. The default receiver offsets
-    demodulate lactate/pyruvate at 183.35/171.0 ppm for 7 T 13C. The bundled
-    default SLR waveform is loaded from ``rfpulses/SLR_sharpness_1.txt`` unless
-    an explicit ``spectral_slr_pulse_path`` is provided.  The default
+    demodulate lactate/pyruvate at 183.35/171.0 ppm for 7 T 13C. The default
+    SLR waveform is generated by the global RF designer unless an
+    explicit ``spectral_slr_pulse_path`` is provided.  The default
     ``alpha_half_center_spacing`` reproduces the reported 4.31 ms separation
     between the preparation-pulse and first readout-pulse centres.  The
     end-of-image spoiler can combine cycles across each FOV with cycles across
@@ -446,15 +399,23 @@ def main(
     )
     seq = pp.Sequence(system)
 
-    timing_rf = _make_spectral_rf(
-        pulse_type=spectral_pulse_type,
-        flip_angle_rad=np.deg2rad(1.0),
-        duration=spectral_rf_duration,
-        bandwidth_hz=spectral_rf_bandwidth_hz,
-        apodization=spectral_rf_apodization,
-        system=system,
-        slr_pulse_path=spectral_slr_pulse_path,
-        slr_sharpness=spectral_slr_sharpness,
+    timing_rf, actual_spectral_rf_duration, effective_spectral_rf_tbw, rf_type = (
+        _make_spectral_rf(
+            pulse_type=spectral_pulse_type,
+            flip_angle_rad=np.deg2rad(1.0),
+            duration=spectral_rf_duration,
+            bandwidth_hz=spectral_rf_bandwidth_hz,
+            apodization=spectral_rf_apodization,
+            system=system,
+            slr_pulse_path=spectral_slr_pulse_path,
+            slr_sharpness=spectral_slr_sharpness,
+            custom_waveform_hz=spectral_rf_custom_waveform_hz,
+            custom_raster_s=spectral_rf_custom_raster_s,
+            custom_flip_angle_deg=spectral_rf_custom_flip_angle_deg,
+        )
+    )
+    actual_spectral_rf_bandwidth_hz = (
+        effective_spectral_rf_tbw / actual_spectral_rf_duration
     )
     rfs = tuple(
         (
@@ -467,7 +428,10 @@ def main(
                 system=system,
                 slr_pulse_path=spectral_slr_pulse_path,
                 slr_sharpness=spectral_slr_sharpness,
-            )
+                custom_waveform_hz=spectral_rf_custom_waveform_hz,
+                custom_raster_s=spectral_rf_custom_raster_s,
+                custom_flip_angle_deg=spectral_rf_custom_flip_angle_deg,
+            )[0]
             if flip_angle > 0
             else _zero_amplitude_rf(timing_rf)
         )
@@ -648,7 +612,10 @@ def main(
                     system=system,
                     slr_pulse_path=spectral_slr_pulse_path,
                     slr_sharpness=spectral_slr_sharpness,
-                )
+                    custom_waveform_hz=spectral_rf_custom_waveform_hz,
+                    custom_raster_s=spectral_rf_custom_raster_s,
+                    custom_flip_angle_deg=spectral_rf_custom_flip_angle_deg,
+                )[0]
                 if target_flip_angle > 0
                 else _zero_amplitude_rf(rf)
             )
@@ -794,8 +761,8 @@ def main(
     print("Single-metabolite acquisition time = " f"{n_phase * n_partition * tr:.3f} s")
     print(
         f"Spectral RF: {spectral_pulse_type}, duration "
-        f"{spectral_rf_duration * 1e3:.3f} ms, bandwidth "
-        f"{spectral_rf_bandwidth_hz:.3f} Hz"
+        f"{actual_spectral_rf_duration * 1e3:.3f} ms, bandwidth "
+        f"{actual_spectral_rf_bandwidth_hz:.3f} Hz"
     )
     print(f"Readout bandwidth = {1 / adc_dwell:.3f} Hz")
 
@@ -837,13 +804,15 @@ def main(
     seq.set_definition(key="SpectralReceiverOffsetsHz", value=list(receiver_offsets))
     seq.set_definition(key="SpectralTargetNames", value=list(target_names))
     seq.set_definition(key="FlipAngleDeg", value=list(target_flip_angles))
-    seq.set_definition(key="SpectralRFBandwidthHz", value=spectral_rf_bandwidth_hz)
+    seq.set_definition(
+        key="SpectralRFBandwidthHz", value=actual_spectral_rf_bandwidth_hz
+    )
     seq.set_definition(
         key="SpectralRFBandwidthFactorHzMs",
-        value=spectral_rf_bandwidth_factor_hz_ms,
+        value=effective_spectral_rf_tbw * 1000.0,
     )
     seq.set_definition(key="SpectralRFFWHM", value=spectral_rf_fwhm_hz)
-    seq.set_definition(key="SpectralRFDuration", value=spectral_rf_duration)
+    seq.set_definition(key="SpectralRFDuration", value=actual_spectral_rf_duration)
     seq.set_definition(
         key="AlphaHalfCenterSpacing",
         value=alpha_half_center_spacing if use_alpha_half else 0.0,
@@ -892,14 +861,36 @@ def main(
     )
     if str(spectral_pulse_type).lower() == "slr":
         seq.set_definition(key="SpectralSLRSharpness", value=spectral_slr_sharpness)
+    if spectral_slr_pulse_path is not None:
         seq.set_definition(
             key="SpectralRFPulseFile",
-            value=str(
-                _default_slr_pulse_path(spectral_slr_sharpness)
-                if spectral_slr_pulse_path is None
-                else spectral_slr_pulse_path
-            ),
+            value=str(spectral_slr_pulse_path),
         )
+    normalized_rf_type = (
+        "designer"
+        if (
+            spectral_slr_pulse_path is not None
+            or spectral_rf_custom_waveform_hz is not None
+        )
+        else rf_type
+    )
+    set_rf_definitions(
+        seq,
+        prefix="Spectral",
+        pulse_type=normalized_rf_type,
+        requested_duration_s=spectral_rf_duration,
+        actual_duration_s=actual_spectral_rf_duration,
+        time_bandwidth_product=effective_spectral_rf_tbw,
+        apodization=spectral_rf_apodization,
+        slr_sharpness=spectral_slr_sharpness,
+        custom_name=(
+            Path(spectral_slr_pulse_path).name
+            if spectral_slr_pulse_path is not None
+            else None
+        ),
+        custom_flip_angle_deg=spectral_rf_custom_flip_angle_deg,
+        frequency_offset_hz=0.0,
+    )
     seq.set_definition(key="TR", value=tr)
     seq.set_definition(key="TE", value=te)
     seq.set_definition(key="RFPhaseStartDeg", value=rf_phase_start)

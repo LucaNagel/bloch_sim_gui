@@ -1,6 +1,7 @@
 import numpy as np
 
 import pypulseq as pp
+from blochsimulator.sequence.rf_pulses import make_pulseq_rf_events
 
 
 def main(
@@ -17,6 +18,14 @@ def main(
     ti: float = 140e-3,
     tr: float = 10e-3,
     t_recovery: float = 1e-3,
+    rf_pulse_type: str = "block",
+    rf_duration: float = 250e-6,
+    rf_time_bandwidth_product: float = 4.0,
+    rf_apodization: float = 0.5,
+    rf_slr_sharpness: float = 1.0,
+    rf_custom_waveform_hz=None,
+    rf_custom_raster_s: float | None = None,
+    rf_custom_flip_angle_deg: float | None = None,
 ):
     """Create a 3D T1-weighted MPRAGE sequence.
 
@@ -68,21 +77,29 @@ def main(
     seq = pp.Sequence(system)
 
     # Create excitation and preparation pulses
-    rf = pp.make_block_pulse(
-        flip_angle=np.deg2rad(12),
-        system=system,
-        duration=250e-6,
-        time_bw_product=4,
-        use="excitation",
+    rf_events, _, _, _ = make_pulseq_rf_events(
+        pp,
+        system,
+        flip_angles_deg=(12.0,),
+        pulse_type=rf_pulse_type,
+        duration_s=rf_duration,
+        time_bandwidth_product=rf_time_bandwidth_product,
+        apodization=rf_apodization,
+        slr_sharpness=rf_slr_sharpness,
+        custom_waveform_hz=rf_custom_waveform_hz,
+        custom_raster_s=rf_custom_raster_s,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
     )
-
-    rf_prep = pp.make_block_pulse(
-        flip_angle=np.deg2rad(90),
-        system=system,
-        duration=500e-6,
-        time_bw_product=4,
+    rf = rf_events[0]
+    prep_events, _, _, _ = make_pulseq_rf_events(
+        pp,
+        system,
+        flip_angles_deg=(90.0,),
+        pulse_type="block",
+        duration_s=500e-6,
         use="preparation",
     )
+    rf_prep = prep_events[0]
 
     # Readout
     delta_kx = 1 / fov_x

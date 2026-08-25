@@ -311,12 +311,12 @@ class SequenceDesigner(QGroupBox):
         return val if val > 0 else None
 
     def _effective_tbw(self) -> float:
-        """Return best-effort time-bandwidth product from RF designer integration factor."""
+        """Return the RF Designer's automatically determined TBW."""
         try:
             if hasattr(self, "parent_gui") and hasattr(self.parent_gui, "rf_designer"):
-                integ = float(self.parent_gui.rf_designer.get_integration_factor())
-                if np.isfinite(integ) and integ > 0:
-                    return 1.0 / integ
+                tbw = float(self.parent_gui.rf_designer.tbw.value())
+                if np.isfinite(tbw) and tbw > 0:
+                    return tbw
         except Exception:
             pass
         return 4.0

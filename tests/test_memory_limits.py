@@ -32,6 +32,40 @@ def test_automatic_budget_scales_reserve_on_large_systems():
     assert budget.limit_bytes == 56 * GIB - int(6.4 * GIB)
 
 
+def test_automatic_budget_allows_small_simulations_below_target_reserve():
+    available_bytes = 900 * 1024**2
+
+    budget = resolve_memory_budget(
+        available_bytes=available_bytes,
+        total_bytes=8 * GIB,
+    )
+
+    assert budget.limit_bytes == 225 * 1024**2
+    assert budget.reserve_bytes == 675 * 1024**2
+
+
+def test_automatic_budget_remains_zero_when_no_memory_is_available():
+    budget = resolve_memory_budget(
+        available_bytes=0,
+        total_bytes=8 * GIB,
+    )
+
+    assert budget.limit_bytes == 0
+    assert budget.reserve_bytes == 0
+
+
+def test_automatic_budget_has_no_cliff_above_target_reserve():
+    available_bytes = 2 * GIB + 1
+
+    budget = resolve_memory_budget(
+        available_bytes=available_bytes,
+        total_bytes=8 * GIB,
+    )
+
+    assert budget.limit_bytes == 512 * 1024**2
+    assert budget.reserve_bytes == available_bytes - 512 * 1024**2
+
+
 def test_custom_reserve_is_subtracted_from_available_memory():
     policy = MemoryPolicy(mode="custom_reserve", reserve_bytes=4 * GIB)
     budget = resolve_memory_budget(
@@ -100,6 +134,35 @@ def test_endpoint_simulation_stays_within_same_budget():
         nfreq=10,
         mode=0,
     )
+
+
+def test_tiny_endpoint_simulation_runs_below_automatic_target_reserve(monkeypatch):
+    monkeypatch.setattr(
+        "blochsimulator.memory.system_memory_bytes",
+        lambda: (900 * 1024**2, 8 * GIB),
+    )
+    simulator = BlochSimulator(memory_policy=MemoryPolicy())
+
+    simulator._check_standard_simulation_memory(
+        ntime=340,
+        npos=201,
+        nfreq=1,
+        mode=0,
+    )
+
+
+def test_endpoint_memory_error_does_not_suggest_endpoint_mode():
+    simulator = BlochSimulator(memory_limit_bytes=1)
+
+    with pytest.raises(SimulationMemoryError) as exc_info:
+        simulator._check_standard_simulation_memory(
+            ntime=340,
+            npos=201,
+            nfreq=1,
+            mode=0,
+        )
+
+    assert "endpoint mode" not in str(exc_info.value).lower()
 
 
 def test_sequence_guard_runs_before_array_creation(monkeypatch):

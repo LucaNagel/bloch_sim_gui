@@ -4,6 +4,44 @@ All notable changes to BlochSimulator are documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/).
 
+## [2.5.0] - 2026-08-25
+
+### Added
+
+- Added train-wide gradient-spoiler coherence analysis, automatic FLASH spoiler
+  moments, and train-safe subvoxel-grid recommendations based on the actual ADC
+  moment history.
+- Added deterministic stratified subvoxel sampling as an alternative to the
+  regular midpoint grid, together with memory-limit checks and convergence
+  tests for large subvoxel simulations.
+- Added a FLASH spoiler-train benchmark, flip-angle sweep tooling, and an
+  expanded SS-bSSFP spoiling-validation tutorial.
+- Added direct RF Pulse Designer and waveform-file input to all generated
+  sequence families, including retained complex phase, carrier offset, and
+  reference-flip-angle scaling.
+
+### Changed
+
+- Unified analytic RF generation across Free Mode, the GUI sequence builders,
+  and standalone scripts. Sinc, SLR, Gaussian, and block pulses now report TBW
+  and bandwidth from the completed pulse shape; SLR sharpness also controls the
+  temporal lobe structure.
+- Standardized generated-sequence RF fields, sampling-bandwidth handling, and
+  scanner-raster rounding across Cartesian, radial, spectral, and multi-echo
+  builders.
+- Improved sequence-workspace memory guidance, B1 controls, slice exploration,
+  and reconstruction contrast controls, including a series-wide contrast range
+  with display headroom.
+
+### Compatibility notes
+
+- RF time-bandwidth product and bandwidth metadata for analytic pulses now
+  describe the generated waveform rather than echoing a legacy construction
+  parameter. Code that compares these fields to user input should use the
+  reported values from the generated sequence.
+- Existing midpoint subvoxel sampling remains the default; deterministic
+  stratified sampling is opt-in.
+
 ## [2.4.0] - 2026-08-16
 
 ### Added
@@ -72,4 +110,5 @@ The project follows [Semantic Versioning](https://semver.org/).
 - Existing projects and simulations without spatial B1 fields continue to use
   uniform transmit and receive sensitivity.
 
+[2.5.0]: https://github.com/LucaNagel/bloch_sim_gui/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/LucaNagel/bloch_sim_gui/compare/v2.3.0...v2.4.0

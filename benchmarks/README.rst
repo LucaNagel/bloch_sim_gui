@@ -77,6 +77,17 @@ The sub-benchmarks are also directly executable::
     python -m benchmarks.benchmark_crushers --gradient-z-spins 1 5 9
     python -m benchmarks.benchmark_resolution --resolution-scales 0.25 0.5 1 2
     python -m benchmarks.benchmark_kernels
+    python -m benchmarks.benchmark_flash_spoiler_train --quick
+
+``benchmark_flash_spoiler_train`` is a separate, deliberately long diagnostic
+suite modeled on the 32x32x64, 32 mm FOV FLASH debug project. Its full default
+sweeps 32/64/128 acquisition matrices, 0.5/1/2 effective crusher cycles per
+phantom voxel, and several regular and deterministic-stratified subvoxel grids.
+It compares each physical-gradient result with an ideal-crusher reference and
+records signal/image NRMSE, runtime, final transverse magnetization, and the
+train-wide coherence error calculated from the actual ADC moment origins. Run
+without ``--quick`` when making convergence decisions; the default may take
+tens of minutes.
 
 The default ``quick`` profile is intended to complete without editing the
 scripts. ``--profile full`` increases the generated acquisition matrices. Use

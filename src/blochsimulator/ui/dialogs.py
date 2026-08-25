@@ -95,6 +95,10 @@ class SettingsDialog(QDialog):
         ("Ideal crusher (fast, current behavior)", "ideal"),
         ("Gradient waveform (subvoxel spins)", "gradient"),
     )
+    SPIN_SAMPLING_METHODS = (
+        ("Regular midpoint grid", "midpoint"),
+        ("Deterministic stratified points", "stratified"),
+    )
 
     @classmethod
     def _add_kernel_choices(cls, combo, primary, extras, tooltips):
@@ -122,6 +126,7 @@ class SettingsDialog(QDialog):
         sequence_timestep_us: float = 5.0,
         sequence_spoiler_mode: str = "ideal",
         subvoxel_spin_counts=(1, 1, 9),
+        subvoxel_sampling_method: str = "midpoint",
         thread_mode: str = "automatic",
         manual_thread_count: int = 4,
         animation_memory_budget_mib: float = 512.0,
@@ -324,6 +329,24 @@ class SettingsDialog(QDialog):
         )
         simulation_form.addRow("Spoiler simulation:", self.sequence_spoiler_mode_combo)
 
+        self.subvoxel_sampling_method_combo = QComboBox()
+        self.subvoxel_sampling_method_combo.setObjectName("subvoxel_sampling_method")
+        for label, method in self.SPIN_SAMPLING_METHODS:
+            self.subvoxel_sampling_method_combo.addItem(label, method)
+        sampling_index = self.subvoxel_sampling_method_combo.findData(
+            subvoxel_sampling_method
+        )
+        self.subvoxel_sampling_method_combo.setCurrentIndex(max(0, sampling_index))
+        self.subvoxel_sampling_method_combo.setToolTip(
+            "The regular midpoint grid is efficient but must be checked across "
+            "the complete spoiler train. Deterministic stratified points avoid "
+            "short exact rephasing, but usually need more spins for the same "
+            "quadrature accuracy."
+        )
+        simulation_form.addRow(
+            "Subvoxel sampling:", self.subvoxel_sampling_method_combo
+        )
+
         counts = tuple(subvoxel_spin_counts)
         if len(counts) != 3:
             counts = (1, 1, 9)
@@ -335,7 +358,7 @@ class SettingsDialog(QDialog):
             spin.setValue(max(1, int(value)))
             spin.setSuffix(" spins/voxel")
             spin.setToolTip(
-                f"Number of deterministic midpoint spins along voxel {axis}. "
+                f"Number of deterministic sampling strata along voxel {axis}. "
                 "Runtime grows with the product of all three counts."
             )
             simulation_form.addRow(f"Subvoxel spins {axis}:", spin)
@@ -628,6 +651,9 @@ class SettingsDialog(QDialog):
     def subvoxel_spin_counts(self) -> tuple[int, int, int]:
         return tuple(int(spin.value()) for spin in self.subvoxel_spin_count_spins)
 
+    def subvoxel_sampling_method(self) -> str:
+        return str(self.subvoxel_sampling_method_combo.currentData())
+
     def thread_mode(self) -> str:
         return str(self.thread_mode_combo.currentData())
 
@@ -676,6 +702,7 @@ class SettingsDialog(QDialog):
         )
         for spin in self.subvoxel_spin_count_spins:
             spin.setEnabled(enabled)
+        self.subvoxel_sampling_method_combo.setEnabled(enabled)
 
     def _browse_export_directory(self):
         current = str(self.get_export_directory())
