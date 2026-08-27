@@ -88,6 +88,7 @@ def test_configurable_bssfp_builder_round_trips_as_dynamic_3d_pulseq(tmp_path):
         repetitions=2,
         dummy_repetitions=1,
         repetition_time_s=10e-3,
+        alpha_half_phase_deg=73.0,
     )
     program = _write_and_load(sequence, tmp_path / "bssfp.seq")
     compiled = SequenceCompiler().compile(program)
@@ -102,6 +103,79 @@ def test_configurable_bssfp_builder_round_trips_as_dynamic_3d_pulseq(tmp_path):
     assert volumes.num_volumes == 2
     assert volumes.varying_axes == ("repetition",)
     assert program.metadata["definitions"]["RFPhaseIncrementDeg"] == 180.0
+    assert program.metadata["definitions"]["AlphaHalfPhaseDeg"] == 73.0
+    assert np.mod(np.rad2deg(program.rf_events[0].phase_offset_rad), 360.0) == (
+        pytest.approx(73.0)
+    )
+
+
+def test_bssfp_alpha_half_phase_defaults_to_preceding_phase_cycle_member():
+    sequence = make_pulseq_bssfp(
+        matrix=(2, 1, 1),
+        dummy_repetitions=0,
+        rf_phase_start_deg=180.0,
+        rf_phase_increment_deg=180.0,
+    )
+
+    assert sequence.definitions["AlphaHalfPhaseDeg"] == pytest.approx(0.0)
+    assert sequence.definitions["AlphaHalfFlipAngleDeg"] == pytest.approx(7.5)
+    assert sequence.definitions["AlphaHalfCenterSpacing"] == pytest.approx(5e-3)
+
+
+@pytest.mark.parametrize(
+    ("startup_parameters", "expected_flip_deg", "expected_spacing_s"),
+    (
+        (
+            {
+                "alpha_half_use_ratios": True,
+                "alpha_half_flip_ratio": 0.25,
+                "alpha_half_tr_ratio": 0.4,
+            },
+            20.0,
+            4e-3,
+        ),
+        (
+            {
+                "alpha_half_use_ratios": False,
+                "alpha_half_flip_angle_deg": 37.0,
+                "alpha_half_center_spacing_s": 3e-3,
+            },
+            37.0,
+            3e-3,
+        ),
+    ),
+)
+def test_bssfp_startup_flip_and_first_tr_support_ratio_and_absolute_modes(
+    tmp_path,
+    startup_parameters,
+    expected_flip_deg,
+    expected_spacing_s,
+):
+    main_flip_deg = 80.0
+    sequence = make_pulseq_bssfp(
+        matrix=(2, 1, 1),
+        flip_angle_deg=main_flip_deg,
+        repetition_time_s=10e-3,
+        dummy_repetitions=0,
+        **startup_parameters,
+    )
+    program = _write_and_load(sequence, tmp_path / "bssfp_startup.seq")
+    startup_rf, first_regular_rf = program.rf_events[:2]
+    startup_integral = abs(np.sum(startup_rf.samples_hz) * startup_rf.raster_s)
+    regular_integral = abs(
+        np.sum(first_regular_rf.samples_hz) * first_regular_rf.raster_s
+    )
+    definitions = program.metadata["definitions"]
+
+    assert definitions["AlphaHalfFlipAngleDeg"] == pytest.approx(expected_flip_deg)
+    assert definitions["AlphaHalfCenterSpacing"] == pytest.approx(expected_spacing_s)
+    assert first_regular_rf.start_s - startup_rf.start_s == pytest.approx(
+        expected_spacing_s
+    )
+    assert startup_integral / regular_integral == pytest.approx(
+        expected_flip_deg / main_flip_deg,
+        rel=1e-5,
+    )
 
 
 def test_3d_bssfp_inference_accepts_bracketed_numeric_definitions(tmp_path):
@@ -672,6 +746,10 @@ def test_sequence_workspace_builds_and_exports_configurable_fov(tmp_path):
     widget.bssfp_phase_matrix.setValue(2)
     widget.bssfp_partition_matrix.setValue(2)
     widget.bssfp_repetitions.setValue(2)
+    widget.bssfp_alpha_half_phase_deg.setValue(73.0)
+    widget.bssfp_alpha_half_use_ratios.setChecked(False)
+    widget.bssfp_alpha_half_center_spacing_ms.setValue(3.0)
+    widget.bssfp_alpha_half_flip_angle_deg.setValue(11.0)
     widget.sequence_source.setCurrentIndex(3)
     widget.bssfp_read_gradient_axis.setCurrentText("+Z")
     widget.bssfp_phase_gradient_axis.setCurrentText("+Y")
@@ -696,6 +774,10 @@ def test_sequence_workspace_builds_and_exports_configurable_fov(tmp_path):
     assert bssfp_definitions["ReadoutAxis"] == "+z"
     assert bssfp_definitions["PhaseEncodingAxis"] == "+y"
     assert bssfp_definitions["PartitionEncodingAxis"] == "-x"
+    assert bssfp_definitions["AlphaHalfPhaseDeg"] == pytest.approx(73.0)
+    assert bssfp_definitions["AlphaHalfUsesRatios"] == 0
+    assert bssfp_definitions["AlphaHalfCenterSpacing"] == pytest.approx(3e-3)
+    assert bssfp_definitions["AlphaHalfFlipAngleDeg"] == pytest.approx(11.0)
 
     widget.close()
     widget.deleteLater()

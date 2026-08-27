@@ -1024,6 +1024,7 @@ class SequenceSimulationWidget(QWidget):
         self._generated_sequence_source_index = None
         self._selected_sequence_source_index = 0
         self._generation_error = ""
+        self._probe_frequency_defaults_initialized = False
         self.acquisition: Optional[CartesianAcquisition] = None
         self.acquisition_frames: Optional[CartesianAcquisitionFrames] = None
         self.acquisition_volumes: Optional[CartesianAcquisitionVolumes] = None
@@ -1979,6 +1980,61 @@ class SequenceSimulationWidget(QWidget):
         self.bssfp_repetition_time_ms = self._parameter_spin(0.1, 10000.0, 10.0, " ms")
         self.bssfp_phase_start_deg = self._parameter_spin(-360.0, 360.0, 180.0, "°")
         self.bssfp_phase_increment_deg = self._parameter_spin(-360.0, 360.0, 180.0, "°")
+        self.bssfp_alpha_half_phase_deg = self._parameter_spin(-360.0, 360.0, 0.0, "°")
+        self.bssfp_alpha_half_phase_deg.setToolTip(
+            "Absolute phase of the α/2 preparation RF pulse. For constant "
+            "0° full pulses at the 180° passband center, use +90°."
+        )
+        self.bssfp_alpha_half_use_ratios = QCheckBox("Use ratios for startup pulse")
+        self.bssfp_alpha_half_use_ratios.setChecked(True)
+        self.bssfp_alpha_half_tr_ratio = self._parameter_spin(0.0, 2.0, 0.5, " × TR")
+        self.bssfp_alpha_half_tr_ratio.setSingleStep(0.1)
+        self.bssfp_alpha_half_tr_ratio.setToolTip(
+            "Center-to-center spacing from the startup pulse to the first "
+            "regular RF pulse, relative to the regular TR."
+        )
+        self.bssfp_alpha_half_flip_ratio = self._parameter_spin(0.0, 2.0, 0.5, " × FA")
+        self.bssfp_alpha_half_flip_ratio.setSingleStep(0.1)
+        self.bssfp_alpha_half_flip_ratio.setToolTip(
+            "Startup flip angle relative to the regular bSSFP flip angle."
+        )
+        self.bssfp_alpha_half_center_spacing_ms = self._parameter_spin(
+            0.0, 10000.0, 5.0, " ms"
+        )
+        self.bssfp_alpha_half_center_spacing_ms.setToolTip(
+            "Explicit center-to-center spacing from the startup pulse to the "
+            "first regular RF pulse."
+        )
+        self.bssfp_alpha_half_flip_angle_deg = self._parameter_spin(
+            0.0, 720.0, 7.5, "°"
+        )
+        self.bssfp_alpha_half_flip_angle_deg.setToolTip(
+            "Explicit flip angle of the startup preparation pulse."
+        )
+
+        self.bssfp_alpha_half_ratio_container = QWidget()
+        bssfp_alpha_half_ratio_form = _left_aligned_form(
+            self.bssfp_alpha_half_ratio_container
+        )
+        bssfp_alpha_half_ratio_form.setContentsMargins(0, 0, 0, 0)
+        bssfp_alpha_half_ratio_form.addRow(
+            "First TR ratio", self.bssfp_alpha_half_tr_ratio
+        )
+        bssfp_alpha_half_ratio_form.addRow(
+            "First flip ratio", self.bssfp_alpha_half_flip_ratio
+        )
+
+        self.bssfp_alpha_half_absolute_container = QWidget()
+        bssfp_alpha_half_absolute_form = _left_aligned_form(
+            self.bssfp_alpha_half_absolute_container
+        )
+        bssfp_alpha_half_absolute_form.setContentsMargins(0, 0, 0, 0)
+        bssfp_alpha_half_absolute_form.addRow(
+            "First TR", self.bssfp_alpha_half_center_spacing_ms
+        )
+        bssfp_alpha_half_absolute_form.addRow(
+            "First flip angle", self.bssfp_alpha_half_flip_angle_deg
+        )
         self.bssfp_dummy_repetitions = QSpinBox()
         self.bssfp_dummy_repetitions.setRange(0, 10000)
         self.bssfp_dummy_repetitions.setValue(1)
@@ -1986,7 +2042,7 @@ class SequenceSimulationWidget(QWidget):
         self.bssfp_repetitions.setRange(1, 10000)
         self.bssfp_repetitions.setValue(1)
         self.bssfp_acquisition_interval_ms = self._acquisition_interval_spin()
-        self.bssfp_alpha_half = QCheckBox("Enable α/2 preparation")
+        self.bssfp_alpha_half = QCheckBox("Enable startup pulse (α/2 default)")
         self.bssfp_alpha_half.setChecked(True)
         self.bssfp_dwell_info = QLabel()
         bssfp_form.addRow(bssfp_hint)
@@ -2023,6 +2079,10 @@ class SequenceSimulationWidget(QWidget):
             self.bssfp_acquisition_interval_ms,
         )
         bssfp_form.addRow("Preparation", self.bssfp_alpha_half)
+        bssfp_form.addRow("Startup value mode", self.bssfp_alpha_half_use_ratios)
+        bssfp_form.addRow(self.bssfp_alpha_half_ratio_container)
+        bssfp_form.addRow(self.bssfp_alpha_half_absolute_container)
+        bssfp_form.addRow("Startup pulse phase", self.bssfp_alpha_half_phase_deg)
         _add_form_section(bssfp_form, "Derived sampling")
         bssfp_form.addRow("ADC dwell", self.bssfp_dwell_info)
         self.bssfp_group.setVisible(False)
@@ -2098,10 +2158,48 @@ class SequenceSimulationWidget(QWidget):
         self.ss_bssfp_repetitions.setRange(1, 10000)
         self.ss_bssfp_repetitions.setValue(2)
         self.ss_bssfp_acquisition_interval_ms = self._acquisition_interval_spin()
-        self.ss_bssfp_alpha_half = QCheckBox("Enable α/2 before each target volume")
+        self.ss_bssfp_alpha_half = QCheckBox(
+            "Enable startup pulse before each target volume"
+        )
         self.ss_bssfp_alpha_half.setChecked(True)
+        self.ss_bssfp_alpha_half_use_ratios = QCheckBox("Use ratios for startup pulse")
+        self.ss_bssfp_alpha_half_use_ratios.setChecked(False)
+        self.ss_bssfp_alpha_half_tr_ratio = self._parameter_spin(
+            0.0, 2.0, 4.31 / 6.29, " × TR"
+        )
+        self.ss_bssfp_alpha_half_tr_ratio.setSingleStep(0.1)
+        self.ss_bssfp_alpha_half_flip_ratio = self._parameter_spin(
+            0.0, 2.0, 0.5, " × FA"
+        )
+        self.ss_bssfp_alpha_half_flip_ratio.setSingleStep(0.1)
         self.ss_bssfp_alpha_half_spacing_ms = self._parameter_spin(
-            0.01, 10000.0, 6.29, " ms"
+            0.01, 10000.0, 4.31, " ms"
+        )
+        self.ss_bssfp_alpha_half_flip_angles_deg = QLineEdit("45, 2")
+        self.ss_bssfp_alpha_half_flip_angles_deg.setToolTip(
+            "Explicit startup flip angles matching the spectral target list"
+        )
+        self.ss_bssfp_alpha_half_ratio_container = QWidget()
+        ss_alpha_half_ratio_form = _left_aligned_form(
+            self.ss_bssfp_alpha_half_ratio_container
+        )
+        ss_alpha_half_ratio_form.setContentsMargins(0, 0, 0, 0)
+        ss_alpha_half_ratio_form.addRow(
+            "First TR ratio", self.ss_bssfp_alpha_half_tr_ratio
+        )
+        ss_alpha_half_ratio_form.addRow(
+            "First flip ratio", self.ss_bssfp_alpha_half_flip_ratio
+        )
+        self.ss_bssfp_alpha_half_absolute_container = QWidget()
+        ss_alpha_half_absolute_form = _left_aligned_form(
+            self.ss_bssfp_alpha_half_absolute_container
+        )
+        ss_alpha_half_absolute_form.setContentsMargins(0, 0, 0, 0)
+        ss_alpha_half_absolute_form.addRow(
+            "First TR", self.ss_bssfp_alpha_half_spacing_ms
+        )
+        ss_alpha_half_absolute_form.addRow(
+            "First flip angles", self.ss_bssfp_alpha_half_flip_angles_deg
         )
         self.ss_bssfp_spoiler_cycles = self._parameter_spin(
             0.0, 1000.0, 0.0, " cycles/FOV"
@@ -2166,7 +2264,9 @@ class SequenceSimulationWidget(QWidget):
             self.ss_bssfp_acquisition_interval_ms,
         )
         ss_form.addRow("Preparation", self.ss_bssfp_alpha_half)
-        ss_form.addRow("α/2 centre spacing", self.ss_bssfp_alpha_half_spacing_ms)
+        ss_form.addRow("Startup value mode", self.ss_bssfp_alpha_half_use_ratios)
+        ss_form.addRow(self.ss_bssfp_alpha_half_ratio_container)
+        ss_form.addRow(self.ss_bssfp_alpha_half_absolute_container)
         ss_form.addRow(
             "Voxel-referenced spoiler", self.ss_bssfp_spoiler_cycles_per_voxel
         )
@@ -2222,8 +2322,46 @@ class SequenceSimulationWidget(QWidget):
         self.radial_me_phase_increment_deg = self._parameter_spin(
             -360.0, 360.0, 180.0, "°"
         )
-        self.radial_me_alpha_half = QCheckBox("Enable α/2 preparation")
+        self.radial_me_alpha_half = QCheckBox("Enable startup pulse (α/2 default)")
         self.radial_me_alpha_half.setChecked(True)
+        self.radial_me_alpha_half_use_ratios = QCheckBox("Use ratios for startup pulse")
+        self.radial_me_alpha_half_use_ratios.setChecked(True)
+        self.radial_me_alpha_half_tr_ratio = self._parameter_spin(
+            0.0, 2.0, 0.5, " × TR"
+        )
+        self.radial_me_alpha_half_tr_ratio.setSingleStep(0.1)
+        self.radial_me_alpha_half_flip_ratio = self._parameter_spin(
+            0.0, 2.0, 0.5, " × FA"
+        )
+        self.radial_me_alpha_half_flip_ratio.setSingleStep(0.1)
+        self.radial_me_alpha_half_center_spacing_ms = self._parameter_spin(
+            0.0, 10000.0, 8.0, " ms"
+        )
+        self.radial_me_alpha_half_flip_angle_deg = self._parameter_spin(
+            0.0, 720.0, 5.0, "°"
+        )
+        self.radial_me_alpha_half_ratio_container = QWidget()
+        radial_alpha_half_ratio_form = _left_aligned_form(
+            self.radial_me_alpha_half_ratio_container
+        )
+        radial_alpha_half_ratio_form.setContentsMargins(0, 0, 0, 0)
+        radial_alpha_half_ratio_form.addRow(
+            "First TR ratio", self.radial_me_alpha_half_tr_ratio
+        )
+        radial_alpha_half_ratio_form.addRow(
+            "First flip ratio", self.radial_me_alpha_half_flip_ratio
+        )
+        self.radial_me_alpha_half_absolute_container = QWidget()
+        radial_alpha_half_absolute_form = _left_aligned_form(
+            self.radial_me_alpha_half_absolute_container
+        )
+        radial_alpha_half_absolute_form.setContentsMargins(0, 0, 0, 0)
+        radial_alpha_half_absolute_form.addRow(
+            "First TR", self.radial_me_alpha_half_center_spacing_ms
+        )
+        radial_alpha_half_absolute_form.addRow(
+            "First flip angle", self.radial_me_alpha_half_flip_angle_deg
+        )
         self.radial_me_tip_back = QCheckBox("Enable −α/2 tip-back")
         self.radial_me_tip_back.setChecked(True)
         self.radial_me_prephaser_duration_ms = self._parameter_spin(
@@ -2266,6 +2404,9 @@ class SequenceSimulationWidget(QWidget):
         radial_form.addRow("RF phase increment", self.radial_me_phase_increment_deg)
         _add_form_section(radial_form, "Preparation and trajectory")
         radial_form.addRow("Preparation", self.radial_me_alpha_half)
+        radial_form.addRow("Startup value mode", self.radial_me_alpha_half_use_ratios)
+        radial_form.addRow(self.radial_me_alpha_half_ratio_container)
+        radial_form.addRow(self.radial_me_alpha_half_absolute_container)
         radial_form.addRow("Tip-back", self.radial_me_tip_back)
         radial_form.addRow(
             "Pre-/postphaser duration", self.radial_me_prephaser_duration_ms
@@ -2331,8 +2472,44 @@ class SequenceSimulationWidget(QWidget):
         self.me_bssfp_repetitions.setRange(1, 10000)
         self.me_bssfp_repetitions.setValue(1)
         self.me_bssfp_acquisition_interval_ms = self._acquisition_interval_spin()
-        self.me_bssfp_alpha_half = QCheckBox("Enable α/2 preparation")
+        self.me_bssfp_alpha_half = QCheckBox("Enable startup pulse (α/2 default)")
         self.me_bssfp_alpha_half.setChecked(True)
+        self.me_bssfp_alpha_half_use_ratios = QCheckBox("Use ratios for startup pulse")
+        self.me_bssfp_alpha_half_use_ratios.setChecked(True)
+        self.me_bssfp_alpha_half_tr_ratio = self._parameter_spin(0.0, 2.0, 0.5, " × TR")
+        self.me_bssfp_alpha_half_tr_ratio.setSingleStep(0.1)
+        self.me_bssfp_alpha_half_flip_ratio = self._parameter_spin(
+            0.0, 2.0, 0.5, " × FA"
+        )
+        self.me_bssfp_alpha_half_flip_ratio.setSingleStep(0.1)
+        self.me_bssfp_alpha_half_center_spacing_ms = self._parameter_spin(
+            0.0, 10000.0, 4.348, " ms"
+        )
+        self.me_bssfp_alpha_half_flip_angle_deg = self._parameter_spin(
+            0.0, 720.0, 1.75, "°"
+        )
+        self.me_bssfp_alpha_half_ratio_container = QWidget()
+        me_alpha_half_ratio_form = _left_aligned_form(
+            self.me_bssfp_alpha_half_ratio_container
+        )
+        me_alpha_half_ratio_form.setContentsMargins(0, 0, 0, 0)
+        me_alpha_half_ratio_form.addRow(
+            "First TR ratio", self.me_bssfp_alpha_half_tr_ratio
+        )
+        me_alpha_half_ratio_form.addRow(
+            "First flip ratio", self.me_bssfp_alpha_half_flip_ratio
+        )
+        self.me_bssfp_alpha_half_absolute_container = QWidget()
+        me_alpha_half_absolute_form = _left_aligned_form(
+            self.me_bssfp_alpha_half_absolute_container
+        )
+        me_alpha_half_absolute_form.setContentsMargins(0, 0, 0, 0)
+        me_alpha_half_absolute_form.addRow(
+            "First TR", self.me_bssfp_alpha_half_center_spacing_ms
+        )
+        me_alpha_half_absolute_form.addRow(
+            "First flip angle", self.me_bssfp_alpha_half_flip_angle_deg
+        )
         self.me_bssfp_sampling_info = QLabel()
         me_form.addRow(me_hint)
         _add_form_section(me_form, "Spatial encoding")
@@ -2374,6 +2551,9 @@ class SequenceSimulationWidget(QWidget):
             self.me_bssfp_acquisition_interval_ms,
         )
         me_form.addRow("Preparation", self.me_bssfp_alpha_half)
+        me_form.addRow("Startup value mode", self.me_bssfp_alpha_half_use_ratios)
+        me_form.addRow(self.me_bssfp_alpha_half_ratio_container)
+        me_form.addRow(self.me_bssfp_alpha_half_absolute_container)
         _add_form_section(me_form, "Derived sampling")
         me_form.addRow("ADC dwell", self.me_bssfp_sampling_info)
         self.me_bssfp_group.setVisible(False)
@@ -2877,12 +3057,18 @@ class SequenceSimulationWidget(QWidget):
             self.bssfp_repetition_time_ms,
             self.bssfp_phase_start_deg,
             self.bssfp_phase_increment_deg,
+            self.bssfp_alpha_half_phase_deg,
+            self.bssfp_alpha_half_tr_ratio,
+            self.bssfp_alpha_half_flip_ratio,
+            self.bssfp_alpha_half_center_spacing_ms,
+            self.bssfp_alpha_half_flip_angle_deg,
             self.bssfp_dummy_repetitions,
             self.bssfp_repetitions,
             self.bssfp_acquisition_interval_ms,
         ):
             widget.valueChanged.connect(self._bssfp_changed)
         self.bssfp_alpha_half.toggled.connect(self._bssfp_changed)
+        self.bssfp_alpha_half_use_ratios.toggled.connect(self._bssfp_changed)
         for widget in (
             self.ss_bssfp_read_matrix,
             self.ss_bssfp_phase_matrix,
@@ -2900,6 +3086,8 @@ class SequenceSimulationWidget(QWidget):
             self.ss_bssfp_dummy_repetitions,
             self.ss_bssfp_repetitions,
             self.ss_bssfp_acquisition_interval_ms,
+            self.ss_bssfp_alpha_half_tr_ratio,
+            self.ss_bssfp_alpha_half_flip_ratio,
             self.ss_bssfp_alpha_half_spacing_ms,
             self.ss_bssfp_spoiler_cycles,
             self.ss_bssfp_spoiler_cycles_per_voxel,
@@ -2911,10 +3099,12 @@ class SequenceSimulationWidget(QWidget):
             self.ss_bssfp_target_offsets_hz,
             self.ss_bssfp_receiver_offsets_hz,
             self.ss_bssfp_flip_angles_deg,
+            self.ss_bssfp_alpha_half_flip_angles_deg,
         ):
             widget.editingFinished.connect(self._ss_bssfp_changed)
         self.ss_bssfp_rf_pulse_type.currentIndexChanged.connect(self._ss_bssfp_changed)
         self.ss_bssfp_alpha_half.toggled.connect(self._ss_bssfp_changed)
+        self.ss_bssfp_alpha_half_use_ratios.toggled.connect(self._ss_bssfp_changed)
         for widget in (
             self.radial_me_fov_mm,
             self.radial_me_base_resolution,
@@ -2930,11 +3120,18 @@ class SequenceSimulationWidget(QWidget):
             self.radial_me_repetition_time_ms,
             self.radial_me_phase_start_deg,
             self.radial_me_phase_increment_deg,
+            self.radial_me_alpha_half_tr_ratio,
+            self.radial_me_alpha_half_flip_ratio,
+            self.radial_me_alpha_half_center_spacing_ms,
+            self.radial_me_alpha_half_flip_angle_deg,
             self.radial_me_prephaser_duration_ms,
             self.radial_me_rotation_deg,
         ):
             widget.valueChanged.connect(self._radial_me_bssfp_changed)
         self.radial_me_alpha_half.toggled.connect(self._radial_me_bssfp_changed)
+        self.radial_me_alpha_half_use_ratios.toggled.connect(
+            self._radial_me_bssfp_changed
+        )
         self.radial_me_tip_back.toggled.connect(self._radial_me_bssfp_changed)
         for widget in (
             self.me_bssfp_read_matrix,
@@ -2954,6 +3151,10 @@ class SequenceSimulationWidget(QWidget):
             self.me_bssfp_repetition_time_ms,
             self.me_bssfp_phase_start_deg,
             self.me_bssfp_phase_increment_deg,
+            self.me_bssfp_alpha_half_tr_ratio,
+            self.me_bssfp_alpha_half_flip_ratio,
+            self.me_bssfp_alpha_half_center_spacing_ms,
+            self.me_bssfp_alpha_half_flip_angle_deg,
             self.me_bssfp_dummy_repetitions,
             self.me_bssfp_repetitions,
             self.me_bssfp_acquisition_interval_ms,
@@ -2964,6 +3165,7 @@ class SequenceSimulationWidget(QWidget):
         )
         self.me_bssfp_rf_pulse_type.currentIndexChanged.connect(self._me_bssfp_changed)
         self.me_bssfp_alpha_half.toggled.connect(self._me_bssfp_changed)
+        self.me_bssfp_alpha_half_use_ratios.toggled.connect(self._me_bssfp_changed)
         self._connect_three_dimensional_orientation_controls(
             self.bssfp_read_gradient_axis,
             self.bssfp_phase_gradient_axis,
@@ -4210,9 +4412,6 @@ class SequenceSimulationWidget(QWidget):
 
     def _ss_bssfp_changed(self, *_):
         self._update_ss_bssfp_labels()
-        self.ss_bssfp_alpha_half_spacing_ms.setEnabled(
-            self.ss_bssfp_alpha_half.isChecked()
-        )
         if self.sequence_source.currentIndex() == 4:
             self._request_generated_sequence_refresh()
 
@@ -4694,11 +4893,30 @@ class SequenceSimulationWidget(QWidget):
         self._update_shared_rf_controls("bssfp")
         bandwidth_hz = self.bssfp_bandwidth_khz.value() * 1000.0
         self.bssfp_dwell_info.setText(f"{1e6 / bandwidth_hz:.3f} µs")
+        self._update_bssfp_preparation_controls()
+
+    def _update_bssfp_preparation_controls(self):
+        enabled = self.bssfp_alpha_half.isChecked()
+        self._update_bssfp_startup_value_controls("bssfp")
+        self.bssfp_alpha_half_phase_deg.setEnabled(enabled)
+
+    def _update_bssfp_startup_value_controls(self, prefix):
+        enabled = getattr(self, f"{prefix}_alpha_half").isChecked()
+        use_ratios_control = getattr(self, f"{prefix}_alpha_half_use_ratios")
+        use_ratios = use_ratios_control.isChecked()
+        ratio_container = getattr(self, f"{prefix}_alpha_half_ratio_container")
+        absolute_container = getattr(self, f"{prefix}_alpha_half_absolute_container")
+        use_ratios_control.setEnabled(enabled)
+        ratio_container.setVisible(use_ratios)
+        ratio_container.setEnabled(enabled)
+        absolute_container.setVisible(not use_ratios)
+        absolute_container.setEnabled(enabled)
 
     def _update_ss_bssfp_labels(self):
         self._update_shared_rf_controls("ss_bssfp")
         bandwidth_hz = self.ss_bssfp_bandwidth_khz.value() * 1000.0
         self.ss_bssfp_dwell_info.setText(f"{1e6 / bandwidth_hz:.3f} µs")
+        self._update_bssfp_startup_value_controls("ss_bssfp")
         self._update_ss_bssfp_spoiler_info()
 
     def _update_radial_me_bssfp_labels(self):
@@ -4711,6 +4929,7 @@ class SequenceSimulationWidget(QWidget):
         self.radial_me_sampling_info.setText(
             f"{samples} samples; requested dwell {dwell_us:.3f} µs"
         )
+        self._update_bssfp_startup_value_controls("radial_me")
 
     def _update_me_bssfp_labels(self):
         self._update_shared_rf_controls("me_bssfp")
@@ -4718,6 +4937,7 @@ class SequenceSimulationWidget(QWidget):
         self.me_bssfp_sampling_info.setText(
             f"requested dwell {1e6 / bandwidth_hz:.3f} µs"
         )
+        self._update_bssfp_startup_value_controls("me_bssfp")
 
     def _epi_fov_m(self):
         return (
@@ -5000,6 +5220,14 @@ class SequenceSimulationWidget(QWidget):
             "repetition_time_s": self.bssfp_repetition_time_ms.value() / 1000.0,
             "rf_phase_start_deg": self.bssfp_phase_start_deg.value(),
             "rf_phase_increment_deg": self.bssfp_phase_increment_deg.value(),
+            "alpha_half_phase_deg": self.bssfp_alpha_half_phase_deg.value(),
+            "alpha_half_use_ratios": self.bssfp_alpha_half_use_ratios.isChecked(),
+            "alpha_half_tr_ratio": self.bssfp_alpha_half_tr_ratio.value(),
+            "alpha_half_flip_ratio": self.bssfp_alpha_half_flip_ratio.value(),
+            "alpha_half_center_spacing_s": (
+                self.bssfp_alpha_half_center_spacing_ms.value() / 1000.0
+            ),
+            "alpha_half_flip_angle_deg": (self.bssfp_alpha_half_flip_angle_deg.value()),
             "dummy_repetitions": self.bssfp_dummy_repetitions.value(),
             "repetitions": self.bssfp_repetitions.value(),
             "acquisition_interval_s": self._optional_acquisition_interval_s(
@@ -5066,8 +5294,19 @@ class SequenceSimulationWidget(QWidget):
                 self.ss_bssfp_acquisition_interval_ms
             ),
             "use_alpha_half": self.ss_bssfp_alpha_half.isChecked(),
+            "alpha_half_use_ratios": (self.ss_bssfp_alpha_half_use_ratios.isChecked()),
+            "alpha_half_tr_ratio": self.ss_bssfp_alpha_half_tr_ratio.value(),
+            "alpha_half_flip_ratio": self.ss_bssfp_alpha_half_flip_ratio.value(),
             "alpha_half_center_spacing_s": (
                 self.ss_bssfp_alpha_half_spacing_ms.value() / 1000.0
+            ),
+            "alpha_half_flip_angle_deg": (
+                None
+                if self.ss_bssfp_alpha_half_use_ratios.isChecked()
+                else self._comma_separated_floats(
+                    self.ss_bssfp_alpha_half_flip_angles_deg.text(),
+                    "Startup flip angles",
+                )
             ),
             "end_image_spoiler_cycles_per_fov": self.ss_bssfp_spoiler_cycles.value(),
             "end_image_spoiler_cycles_per_voxel": (
@@ -5119,6 +5358,15 @@ class SequenceSimulationWidget(QWidget):
             "rf_phase_start_deg": self.radial_me_phase_start_deg.value(),
             "rf_phase_increment_deg": self.radial_me_phase_increment_deg.value(),
             "use_alpha_half": self.radial_me_alpha_half.isChecked(),
+            "alpha_half_use_ratios": (self.radial_me_alpha_half_use_ratios.isChecked()),
+            "alpha_half_tr_ratio": self.radial_me_alpha_half_tr_ratio.value(),
+            "alpha_half_flip_ratio": self.radial_me_alpha_half_flip_ratio.value(),
+            "alpha_half_center_spacing_s": (
+                self.radial_me_alpha_half_center_spacing_ms.value() / 1000.0
+            ),
+            "alpha_half_flip_angle_deg": (
+                self.radial_me_alpha_half_flip_angle_deg.value()
+            ),
             "use_tip_back": self.radial_me_tip_back.isChecked(),
             "prephaser_duration_s": self.radial_me_prephaser_duration_ms.value()
             / 1000.0,
@@ -5164,6 +5412,15 @@ class SequenceSimulationWidget(QWidget):
                 self.me_bssfp_acquisition_interval_ms
             ),
             "use_alpha_half": self.me_bssfp_alpha_half.isChecked(),
+            "alpha_half_use_ratios": (self.me_bssfp_alpha_half_use_ratios.isChecked()),
+            "alpha_half_tr_ratio": self.me_bssfp_alpha_half_tr_ratio.value(),
+            "alpha_half_flip_ratio": self.me_bssfp_alpha_half_flip_ratio.value(),
+            "alpha_half_center_spacing_s": (
+                self.me_bssfp_alpha_half_center_spacing_ms.value() / 1000.0
+            ),
+            "alpha_half_flip_angle_deg": (
+                self.me_bssfp_alpha_half_flip_angle_deg.value()
+            ),
             "field_strength_t": self.field_strength_t.value(),
             "nucleus": self.nucleus.currentText(),
             "encoding_axes": self._three_dimensional_encoding_frame(
@@ -6425,13 +6682,18 @@ class SequenceSimulationWidget(QWidget):
         self._probe_frequency_unit = unit
 
     def _apply_probe_defaults_from_program(self):
-        if self.program is None or not self.program.rf_events:
+        if (
+            self._probe_frequency_defaults_initialized
+            or self.program is None
+            or not self.program.rf_events
+        ):
             return
         # Use a stable, symmetric default that is immediately comparable
         # across sequences. Users can still narrow or expand it afterwards.
         self.probe_frequency_units.setCurrentText("Hz")
         self.probe_ppm_min.setValue(-2500.0)
         self.probe_ppm_max.setValue(2500.0)
+        self._probe_frequency_defaults_initialized = True
 
     def _probe_frequency_axis_hz(self):
         points = int(self.probe_points.value())

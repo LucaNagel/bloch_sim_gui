@@ -1723,6 +1723,29 @@ def test_sequence_workspace_builds_geometry_probe_positions():
     app.processEvents()
 
 
+def test_bssfp_parameter_refresh_preserves_probe_frequency_limits():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.probe_ppm_min.setValue(-250.0)
+    widget.probe_ppm_max.setValue(250.0)
+    widget.bssfp_read_matrix.setValue(2)
+    widget.bssfp_phase_matrix.setValue(1)
+    widget.bssfp_partition_matrix.setValue(1)
+    widget.sequence_source.setCurrentIndex(widget.BSSFP_SOURCE)
+
+    widget.generate_sequence_button.click()
+    widget.bssfp_flip_angle_deg.setValue(30.0)
+    widget.generate_sequence_button.click()
+
+    assert widget.probe_frequency_units.currentText() == "Hz"
+    assert widget.probe_ppm_min.value() == pytest.approx(-250.0)
+    assert widget.probe_ppm_max.value() == pytest.approx(250.0)
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
 def test_sequence_workspace_passes_large_initial_mz_to_probe_worker(monkeypatch):
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
