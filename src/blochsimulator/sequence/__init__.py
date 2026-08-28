@@ -47,7 +47,11 @@ from .model import (
     physical_sequence_waveforms,
 )
 from .encoding import EncodingFrame, resolve_encoding_frame
-from .flip_angles import VFA_REFERENCE_DOI, variable_flip_angle_schedule
+from .flip_angles import (
+    VFA_REFERENCE_DOI,
+    ernst_angle_deg,
+    variable_flip_angle_schedule,
+)
 from .probe import SequenceProbeResult
 from .reference import ReferenceSimulationResult, simulate_reference_sequence
 from .result import SequenceSimulationResult
@@ -148,6 +152,7 @@ __all__ = [
     "run_timestep_convergence",
     "simulate_reference_sequence",
     "variable_flip_angle_schedule",
+    "ernst_angle_deg",
     "BrukerExportOptions",
     "export_bruker_raw",
     "PulseqImportError",

@@ -51,6 +51,17 @@ def _pulseq_event_center_phase_deg(event, center_s):
     )
 
 
+def _assert_startup_rf(program, *, spacing_s, flip_ratio):
+    startup_rf, first_regular_rf = program.rf_events[:2]
+    startup_integral = abs(np.sum(startup_rf.samples_hz) * startup_rf.raster_s)
+    regular_integral = abs(
+        np.sum(first_regular_rf.samples_hz) * first_regular_rf.raster_s
+    )
+
+    assert first_regular_rf.start_s - startup_rf.start_s == pytest.approx(spacing_s)
+    assert startup_integral / regular_integral == pytest.approx(flip_ratio, rel=1e-5)
+
+
 def test_spectral_bssfp_accepts_the_shared_loaded_rf_pulse():
     raster_s = 10e-6
     sample_count = 100
@@ -649,6 +660,9 @@ def test_sequence_workspace_builds_all_advanced_bssfp_modes(tmp_path):
     widget.ss_bssfp_partition_matrix.setValue(2)
     widget.ss_bssfp_repetition_time_ms.setValue(8.0)
     widget.ss_bssfp_phase_start_deg.setValue(73.0)
+    widget.ss_bssfp_alpha_half_use_ratios.setChecked(False)
+    widget.ss_bssfp_alpha_half_spacing_ms.setValue(4.0)
+    widget.ss_bssfp_alpha_half_flip_angles_deg.setText("12, 3")
     widget.sequence_source.setCurrentIndex(4)
     widget.generate_sequence_button.click()
     ss_path = widget._write_pulseq_path(tmp_path / "interactive_ss_bssfp.seq")
@@ -657,7 +671,8 @@ def test_sequence_workspace_builds_all_advanced_bssfp_modes(tmp_path):
     assert widget.program.source == "internal-spectral-selective-bssfp-3d"
     assert widget.acquisition_volumes.matrix == (4, 2, 2)
     assert widget.acquisition_volumes.num_volumes == 2
-    ss_definitions = load_pulseq(ss_path).metadata["definitions"]
+    ss_program = load_pulseq(ss_path)
+    ss_definitions = ss_program.metadata["definitions"]
     assert ss_definitions["ReferenceDOI"] == "10.1002/mrm.29676"
     assert ss_definitions["FieldStrengthT"] == pytest.approx(7.0)
     assert ss_definitions["Nucleus"] == "C13"
@@ -665,6 +680,10 @@ def test_sequence_workspace_builds_all_advanced_bssfp_modes(tmp_path):
     assert ss_definitions["ReadoutAxis"] == "+z"
     assert ss_definitions["PhaseEncodingAxis"] == "+y"
     assert ss_definitions["PartitionEncodingAxis"] == "-x"
+    assert ss_definitions["AlphaHalfUsesRatios"] == 0
+    assert ss_definitions["AlphaHalfCenterSpacing"] == pytest.approx(4e-3)
+    assert ss_definitions["AlphaHalfFlipAngleDeg"] == pytest.approx((12.0, 3.0))
+    _assert_startup_rf(ss_program, spacing_s=4e-3, flip_ratio=12.0 / 90.0)
     assert widget.program.metadata["definitions"]["RFPhaseStartDeg"] == pytest.approx(
         73.0
     )
@@ -672,6 +691,8 @@ def test_sequence_workspace_builds_all_advanced_bssfp_modes(tmp_path):
     widget.radial_me_base_resolution.setValue(4)
     widget.radial_me_spokes.setValue(3)
     widget.radial_me_measurements.setValue(2)
+    widget.radial_me_alpha_half_tr_ratio.setValue(0.4)
+    widget.radial_me_alpha_half_flip_ratio.setValue(0.3)
     widget.sequence_source.setCurrentIndex(5)
     widget.generate_sequence_button.click()
     radial_path = widget._write_pulseq_path(tmp_path / "interactive_radial.seq")
@@ -679,16 +700,24 @@ def test_sequence_workspace_builds_all_advanced_bssfp_modes(tmp_path):
     assert not widget.radial_me_bssfp_group.isHidden()
     assert widget.program.source == "internal-radial-me-bssfp-3d"
     assert "radial ME-bSSFP" in widget.acquisition_note
-    radial_definitions = load_pulseq(radial_path).metadata["definitions"]
+    radial_program = load_pulseq(radial_path)
+    radial_definitions = radial_program.metadata["definitions"]
     assert radial_definitions["Measurements"] == 2
     assert radial_definitions["SpokesPerMeasurement"] == 3
     assert radial_definitions["FieldStrengthT"] == pytest.approx(7.0)
     assert radial_definitions["Nucleus"] == "C13"
+    assert radial_definitions["AlphaHalfUsesRatios"] == 1
+    assert radial_definitions["AlphaHalfCenterSpacing"] == pytest.approx(6.4e-3)
+    assert radial_definitions["AlphaHalfFlipAngleDeg"] == pytest.approx(3.0)
+    _assert_startup_rf(radial_program, spacing_s=6.4e-3, flip_ratio=0.3)
 
     widget.me_bssfp_read_matrix.setValue(4)
     widget.me_bssfp_phase_matrix.setValue(2)
     widget.me_bssfp_partition_matrix.setValue(2)
     widget.me_bssfp_repetitions.setValue(2)
+    widget.me_bssfp_alpha_half_use_ratios.setChecked(False)
+    widget.me_bssfp_alpha_half_center_spacing_ms.setValue(3.0)
+    widget.me_bssfp_alpha_half_flip_angle_deg.setValue(2.25)
     widget.sequence_source.setCurrentIndex(6)
     widget.generate_sequence_button.click()
     me_path = widget._write_pulseq_path(tmp_path / "interactive_me_bssfp.seq")
@@ -698,7 +727,8 @@ def test_sequence_workspace_builds_all_advanced_bssfp_modes(tmp_path):
     assert "Cartesian 3D ME-bSSFP" in widget.acquisition_note
     assert widget.acquisition_volumes.matrix == (4, 2, 2)
     assert widget.acquisition_volumes.num_volumes == 10
-    me_definitions = load_pulseq(me_path).metadata["definitions"]
+    me_program = load_pulseq(me_path)
+    me_definitions = me_program.metadata["definitions"]
     assert me_definitions["ReadoutStrategy"] == "flyback"
     assert me_definitions["Echoes"] == 5
     assert me_definitions["Repetitions"] == 2
@@ -707,6 +737,10 @@ def test_sequence_workspace_builds_all_advanced_bssfp_modes(tmp_path):
     assert me_definitions["ReadoutAxis"] == "+z"
     assert me_definitions["PhaseEncodingAxis"] == "+y"
     assert me_definitions["PartitionEncodingAxis"] == "-x"
+    assert me_definitions["AlphaHalfUsesRatios"] == 0
+    assert me_definitions["AlphaHalfCenterSpacing"] == pytest.approx(3e-3)
+    assert me_definitions["AlphaHalfFlipAngleDeg"] == pytest.approx(2.25)
+    _assert_startup_rf(me_program, spacing_s=3e-3, flip_ratio=2.25 / 3.5)
     assert widget._pulseq_export_spec()[0] == "me_bssfp_3d"
 
     widget.close()

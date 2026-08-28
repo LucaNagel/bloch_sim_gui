@@ -40,7 +40,6 @@ from PyQt5.QtWidgets import (
     QSizePolicy,
     QProgressDialog,
     QApplication,
-    QDialog,
     QRadioButton,
     QButtonGroup,
 )
@@ -432,9 +431,23 @@ class PhantomCreatorWidget(QGroupBox):
             dialog.design.nucleus = self.get_nucleus()
             dialog.nucleus.setCurrentText(self.get_nucleus())
         self._retained_spectral_designer_dialogs.append(dialog)
-        if dialog.exec_() != QDialog.Accepted:
-            return
+
+        # Do not use QDialog.exec_() here. The nested modal event loop can leave
+        # this OpenGL-heavy dialog as an unpainted native window on macOS when
+        # the application shares OpenGL contexts. QDialog.open() keeps normal
+        # application event processing active while remaining window-modal.
+        dialog.accepted.connect(
+            lambda selected_dialog=dialog: self._spectral_designer_accepted(
+                selected_dialog
+            )
+        )
+        dialog.open()
+
+    def _spectral_designer_accepted(self, dialog):
+        """Install the phantom produced by an asynchronously opened designer."""
         phantom = dialog.get_phantom()
+        if phantom is None:
+            return
         self.current_phantom = phantom
         self._set_field_strength(phantom.field_strength)
         self.set_nucleus(phantom.nucleus)

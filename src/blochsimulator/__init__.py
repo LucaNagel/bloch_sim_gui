@@ -1,4 +1,4 @@
-__version__ = "2.5.0"
+__version__ = "2.6.0.dev1"
 
 from .simulator import (
     BlochSimulator,

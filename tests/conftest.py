@@ -3,6 +3,11 @@
 import gc
 import os
 
+# GUI tests must not attempt to connect to the native window server in headless
+# environments. Keep an explicitly selected platform intact for local/Xvfb
+# runs, but provide a safe default before importing Qt or pyqtgraph.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import pyqtgraph as pg
 import pytest
 from PyQt5.QtCore import Qt

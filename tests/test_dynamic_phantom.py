@@ -583,6 +583,8 @@ def test_dynamic_phantom_exposes_initial_spectrum_to_inspector():
     app = QApplication.instance() or QApplication([])
     phantom = _dynamic_phantom()
     phantom.initial_concentration_maps["Lactate"][:] = 0.5
+    phantom.spectral_reference_ppm = 175.0
+    phantom.spectral_window_center_ppm = 177.5
     phantom.spectral_bandwidth_ppm = 30.0
 
     frequency_ppm, spectrum = phantom.spectrum_at_ppm(
@@ -592,6 +594,9 @@ def test_dynamic_phantom_exposes_initial_spectrum_to_inspector():
     assert frequency_ppm == pytest.approx([0.0, 12.0])
     assert spectrum[0] == pytest.approx(1.0, rel=2e-3)
     assert spectrum[1] == pytest.approx(0.5, rel=2e-3)
+
+    default_axis, _ = phantom.spectrum_at_ppm((0, 0, 0))
+    assert default_axis[[0, -1]] == pytest.approx([162.5, 192.5])
 
     inspector = PhantomInspectorWidget()
     inspector.set_phantom(phantom)
@@ -1692,12 +1697,15 @@ def test_native_parallel_dynamic_kernel_respects_tiny_block_budget():
 @pytest.mark.parametrize("suffix", [".npz", ".h5", ".nc"])
 def test_dynamic_phantom_round_trip(tmp_path, suffix):
     phantom = _dynamic_phantom()
+    phantom.spectral_reference_ppm = 175.0
+    phantom.spectral_window_center_ppm = 177.5
     path = phantom.save(tmp_path / f"dynamic{suffix}")
     loaded = DynamicSpectralPhantom.load(path)
 
     assert loaded.shape == phantom.shape
     assert [pool.name for pool in loaded.pools] == ["Pyruvate", "Lactate"]
     assert np.array_equal(loaded.kpl_map_s_inv, phantom.kpl_map_s_inv)
+    assert loaded.spectral_window_center_ppm == pytest.approx(177.5)
     assert loaded.coordinate_system == "object_xyz"
     assert np.array_equal(loaded.affine_ijk_to_xyz_m, phantom.affine_ijk_to_xyz_m)
 

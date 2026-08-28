@@ -53,7 +53,7 @@ from ..phantom_design import (
     SpectralPeakDefinition,
 )
 from ..spectral_phantom import SpectralPhantom
-from ..units import NUCLEUS_GAMMA_HZ_PER_T
+from ..units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm
 from .volume_viewer import PhantomInspectorWidget
 from .default_settings import WorkspaceDefaults
 
@@ -171,6 +171,18 @@ class ShapeDrawingPlotWidget(pg.PlotWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+
+
+class ScaleOnlyEllipseROI(pg.EllipseROI):
+    """Ellipse ROI whose handle edits size without an independent 2D rotation."""
+
+    def _addHandles(self):
+        # EllipseROI normally adds both a scale handle and a rotation handle.
+        # Shape rotation belongs to the explicit X/Y/Z controls in the designer;
+        # an extra ROI-only angle would desynchronise the editable outline from
+        # the model geometry.
+        diagonal = 0.5 * 2.0**-0.5 + 0.5
+        self.addScaleHandle([diagonal, diagonal], [0.5, 0.5])
 
 
 def _shape_preview_mesh(item, fov_mm):
@@ -465,10 +477,23 @@ class SpectralPhantomDesignerDialog(QDialog):
         if design is None:
             defaults = WorkspaceDefaults.from_settings(settings)
             design = PhantomDesign(
-                fov_m=tuple(value / 1000.0 for value in defaults.phantom_fov_mm),
+                shape=(64, 64, 64),
+                fov_m=(
+                    defaults.phantom_fov_mm[0] / 1000.0,
+                    defaults.phantom_fov_mm[1] / 1000.0,
+                    0.032,
+                ),
                 nucleus=defaults.phantom_nucleus,
                 field_strength_t=defaults.field_strength_t,
-                shapes=[ShapeDefinition(name="Shape 1", kind="cylinder")],
+                spectral_bandwidth_ppm=10.0,
+                spectral_points=257,
+                shapes=[
+                    ShapeDefinition(
+                        name="Shape 1",
+                        kind="cylinder",
+                        peaks=[SpectralPeakDefinition(t2_star_s=0.020)],
+                    )
+                ],
             )
         self.design = design
         self.phantom = None
@@ -488,27 +513,46 @@ class SpectralPhantomDesignerDialog(QDialog):
 
         draw_page = QWidget()
         draw_layout = QVBoxLayout(draw_page)
-        global_row = QHBoxLayout()
+        name_row = QHBoxLayout()
         self.name_edit = QLineEdit()
-        global_row.addWidget(QLabel("Name"))
-        global_row.addWidget(self.name_edit)
+        name_row.addWidget(QLabel("Name"))
+        name_row.addWidget(self.name_edit)
+        draw_layout.addLayout(name_row)
+
+        configuration_row = QHBoxLayout()
+        configuration_row.setSpacing(10)
+
+        geometry_group = QGroupBox("Phantom geometry")
+        geometry_group.setMinimumWidth(350)
+        geometry_layout = QVBoxLayout(geometry_group)
+        geometry_grid = QGridLayout()
+        geometry_grid.setHorizontalSpacing(10)
+        geometry_grid.setVerticalSpacing(6)
         self.matrix_spins = []
         self.fov_spins = []
-        for axis in "XYZ":
+        matrix_heading = QLabel("Matrix")
+        matrix_heading.setAlignment(Qt.AlignCenter)
+        geometry_grid.addWidget(matrix_heading, 0, 1)
+        fov_heading = QLabel("FOV")
+        fov_heading.setAlignment(Qt.AlignCenter)
+        geometry_grid.addWidget(fov_heading, 0, 2)
+        for row, axis in enumerate("XYZ", start=1):
             matrix = QSpinBox()
             matrix.setRange(1, 1025)
-            global_row.addWidget(QLabel(f"N{axis.lower()}"))
-            global_row.addWidget(matrix)
+            matrix.setMinimumWidth(70)
             self.matrix_spins.append(matrix)
-        for axis in "XYZ":
             fov = QDoubleSpinBox()
             fov.setRange(0.01, 1000.0)
             fov.setDecimals(3)
             fov.setSuffix(" mm")
-            global_row.addWidget(QLabel(f"FOV {axis}"))
-            global_row.addWidget(fov)
+            fov.setMinimumWidth(115)
             self.fov_spins.append(fov)
-        draw_layout.addLayout(global_row)
+            axis_label = QLabel(axis)
+            axis_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            geometry_grid.addWidget(axis_label, row, 0)
+            geometry_grid.addWidget(matrix, row, 1)
+            geometry_grid.addWidget(fov, row, 2)
+        geometry_layout.addLayout(geometry_grid)
 
         sampling_row = QHBoxLayout()
         self.supersampling_enabled = QCheckBox("Supersampling")
@@ -529,16 +573,18 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.supersampling_enabled.toggled.connect(self.supersampling_factor.setEnabled)
         sampling_row.addWidget(self.supersampling_factor)
         sampling_row.addStretch()
-        draw_layout.addLayout(sampling_row)
+        geometry_layout.addLayout(sampling_row)
+        configuration_row.addWidget(geometry_group, 0)
 
-        spectral_row = QHBoxLayout()
-        spectral_row.addWidget(QLabel("B0"))
+        spectral_group = QGroupBox("Spectral settings and preview")
+        spectral_group_layout = QHBoxLayout(spectral_group)
+        spectral_fields = QGridLayout()
+        spectral_fields.setHorizontalSpacing(8)
+        spectral_fields.setVerticalSpacing(6)
         self.field_strength_t = self._number_spin(0.001, 1000.0, 3.0, " T")
         self.field_strength_t.setToolTip(
             "Main field used to convert ppm peak and B0 offsets to Hz"
         )
-        spectral_row.addWidget(self.field_strength_t)
-        spectral_row.addWidget(QLabel("Nucleus"))
         self.nucleus = QComboBox()
         self.nucleus.addItem("Auto (H1 static / C13 dynamic)", None)
         for nucleus in sorted(NUCLEUS_GAMMA_HZ_PER_T):
@@ -547,44 +593,43 @@ class SpectralPhantomDesignerDialog(QDialog):
             "Nucleus used together with B0 for ppm-to-Hz conversion; Auto "
             "preserves the H1 static and C13 dynamic defaults"
         )
-        spectral_row.addWidget(self.nucleus)
-        spectral_row.addWidget(QLabel("Spectral reference"))
         self.spectral_reference_ppm = self._number_spin(-10000.0, 10000.0, 0.0, " ppm")
         self.spectral_reference_ppm.setToolTip(
             "Scanner carrier/reference in absolute ppm. Internally the sequence "
             "is simulated at 0 ppm and peaks are stored as offsets from this value."
         )
-        spectral_row.addWidget(self.spectral_reference_ppm)
-        spectral_row.addWidget(QLabel("Bandwidth"))
-        self.spectral_bandwidth_ppm = self._number_spin(0.0001, 10000.0, 20.0, " ppm")
-        self.spectral_bandwidth_ppm.setToolTip(
-            "Default frequency span for per-voxel spectral previews, centered on 0 ppm."
+        self.spectral_window_center_ppm = self._number_spin(
+            -10000.0, 10000.0, 0.0, " ppm"
         )
-        spectral_row.addWidget(self.spectral_bandwidth_ppm)
-        spectral_row.addWidget(QLabel("Points"))
+        self.spectral_window_center_ppm.setToolTip(
+            "Absolute ppm center of the sampled spectral window. This is independent "
+            "of the sequence reference/carrier."
+        )
+        self.spectral_bandwidth_ppm = self._number_spin(0.0001, 10000.0, 10.0, " ppm")
+        self.spectral_bandwidth_ppm.setToolTip(
+            "Full width of the sampled spectral window around Spectrum centre."
+        )
         self.spectral_points = QSpinBox()
         self.spectral_points.setRange(2, 65536)
-        self.spectral_points.setValue(1024)
+        self.spectral_points.setValue(257)
         self.spectral_points.setToolTip(
             "Default number of samples in spectral previews"
         )
-        spectral_row.addWidget(self.spectral_points)
         self.spectral_resolution_info = QLabel()
-        spectral_row.addWidget(self.spectral_resolution_info)
-        spectral_row.addStretch()
-        self.spectral_reference_ppm.valueChanged.connect(
-            self._spectral_settings_changed
-        )
-        self.field_strength_t.valueChanged.connect(self._spectral_settings_changed)
-        self.nucleus.currentIndexChanged.connect(self._spectral_settings_changed)
-        self.spectral_bandwidth_ppm.valueChanged.connect(
-            self._spectral_settings_changed
-        )
-        self.spectral_points.valueChanged.connect(self._spectral_settings_changed)
-        draw_layout.addLayout(spectral_row)
 
-        b0_row = QHBoxLayout()
-        b0_row.addWidget(QLabel("Global B0 inhomogeneity"))
+        spectral_fields.addWidget(QLabel("B0"), 0, 0)
+        spectral_fields.addWidget(self.field_strength_t, 0, 1)
+        spectral_fields.addWidget(QLabel("Nucleus"), 0, 2)
+        spectral_fields.addWidget(self.nucleus, 0, 3)
+        spectral_fields.addWidget(QLabel("Sequence reference"), 1, 0)
+        spectral_fields.addWidget(self.spectral_reference_ppm, 1, 1)
+        spectral_fields.addWidget(QLabel("Spectrum centre"), 1, 2)
+        spectral_fields.addWidget(self.spectral_window_center_ppm, 1, 3)
+        spectral_fields.addWidget(QLabel("Bandwidth"), 2, 0)
+        spectral_fields.addWidget(self.spectral_bandwidth_ppm, 2, 1)
+        spectral_fields.addWidget(QLabel("Points"), 2, 2)
+        spectral_fields.addWidget(self.spectral_points, 2, 3)
+
         self.b0_mode_combo = QComboBox()
         self.b0_mode_combo.addItem("None", "none")
         self.b0_mode_combo.addItem("Linear X (2D)", "linear_x")
@@ -595,15 +640,54 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.b0_mode_combo.setToolTip(
             "Analytic spatial B0 variation added to each shape's constant offset"
         )
-        b0_row.addWidget(self.b0_mode_combo)
         self.b0_inhomogeneity_ppm = self._number_spin(-1000.0, 1000.0, 0.0, " ppm")
         self.b0_inhomogeneity_ppm.setToolTip(
             "Signed maximum deviation at the edge/corners of the FOV"
         )
-        b0_row.addWidget(QLabel("Edge amplitude"))
-        b0_row.addWidget(self.b0_inhomogeneity_ppm)
-        b0_row.addStretch()
-        draw_layout.addLayout(b0_row)
+        spectral_fields.addWidget(QLabel("Global B0"), 3, 0)
+        spectral_fields.addWidget(self.b0_mode_combo, 3, 1)
+        spectral_fields.addWidget(QLabel("Edge amplitude"), 3, 2)
+        spectral_fields.addWidget(self.b0_inhomogeneity_ppm, 3, 3)
+        spectral_fields.addWidget(self.spectral_resolution_info, 4, 0, 1, 4)
+        spectral_group_layout.addLayout(spectral_fields, 0)
+
+        spectral_preview_layout = QVBoxLayout()
+        self.spectral_preview_plot = pg.PlotWidget(title="Selected shape spectrum")
+        self.spectral_preview_plot.setMinimumSize(340, 105)
+        self.spectral_preview_plot.setMaximumHeight(135)
+        self.spectral_preview_plot.setLabel("bottom", "Frequency", units="ppm")
+        self.spectral_preview_plot.setLabel("left", "Amplitude", units="a.u.")
+        self.spectral_preview_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.spectral_preview_curve = self.spectral_preview_plot.plot(
+            pen=pg.mkPen("c", width=2)
+        )
+        self.spectral_reference_line = pg.InfiniteLine(
+            pos=0.0,
+            angle=90,
+            pen=pg.mkPen((255, 150, 60), width=2, style=Qt.DashLine),
+        )
+        self.spectral_reference_line.setZValue(100)
+        self.spectral_preview_plot.addItem(self.spectral_reference_line)
+        spectral_preview_layout.addWidget(self.spectral_preview_plot)
+        self.spectral_preview_info = QLabel("Orange dashed line: sequence reference")
+        self.spectral_preview_info.setWordWrap(True)
+        spectral_preview_layout.addWidget(self.spectral_preview_info)
+        spectral_group_layout.addLayout(spectral_preview_layout, 1)
+
+        self.spectral_reference_ppm.valueChanged.connect(
+            self._spectral_settings_changed
+        )
+        self.spectral_window_center_ppm.valueChanged.connect(
+            self._spectral_settings_changed
+        )
+        self.field_strength_t.valueChanged.connect(self._spectral_settings_changed)
+        self.nucleus.currentIndexChanged.connect(self._spectral_settings_changed)
+        self.spectral_bandwidth_ppm.valueChanged.connect(
+            self._spectral_settings_changed
+        )
+        self.spectral_points.valueChanged.connect(self._spectral_settings_changed)
+        configuration_row.addWidget(spectral_group, 1)
+        draw_layout.addLayout(configuration_row)
 
         self.shape_splitter = QSplitter(Qt.Horizontal)
         splitter = self.shape_splitter
@@ -641,12 +725,12 @@ class SpectralPhantomDesignerDialog(QDialog):
         remove = QPushButton("Remove")
         remove.clicked.connect(self._remove_shape)
         shape_buttons.addWidget(add_ellipse, 0, 0)
+        shape_buttons.addWidget(draw_ellipse, 0, 1)
         shape_buttons.addWidget(add_box, 1, 0)
+        shape_buttons.addWidget(draw_box, 1, 1)
         shape_buttons.addWidget(add_cylinder, 2, 0)
-        shape_buttons.addWidget(draw_ellipse, 3, 0)
-        shape_buttons.addWidget(draw_box, 4, 0)
-        shape_buttons.addWidget(draw_cylinder, 5, 0)
-        shape_buttons.addWidget(remove, 6, 0)
+        shape_buttons.addWidget(draw_cylinder, 2, 1)
+        shape_buttons.addWidget(remove, 3, 0, 1, 2)
         shape_layout.addLayout(shape_buttons)
         splitter.addWidget(shape_panel)
 
@@ -876,6 +960,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             "polarization toward thermal equilibrium 1 without P→L."
         )
         self.dynamic_enabled.toggled.connect(self._update_kinetics_preview)
+        self.dynamic_enabled.toggled.connect(self._update_spectral_preview)
         kinetics_form.addRow(self.dynamic_enabled)
         self.pyruvate_peak_name = QLineEdit("Pyruvate")
         self.lactate_peak_name = QLineEdit("Lactate")
@@ -1236,6 +1321,9 @@ class SpectralPhantomDesignerDialog(QDialog):
         nucleus_index = self.nucleus.findData(self.design.nucleus)
         self.nucleus.setCurrentIndex(max(0, nucleus_index))
         self.spectral_reference_ppm.setValue(self.design.spectral_reference_ppm)
+        self.spectral_window_center_ppm.setValue(
+            self.design.effective_spectral_window_center_ppm
+        )
         self.spectral_bandwidth_ppm.setValue(self.design.spectral_bandwidth_ppm)
         self.spectral_points.setValue(int(self.design.spectral_points))
         self.supersampling_enabled.setChecked(self.design.supersampling_enabled)
@@ -1281,6 +1369,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         else:
             self._update_shape_preview()
             self._update_kinetics_preview()
+            self._update_spectral_preview()
 
     def _create_roi(self, item, index):
         position = (
@@ -1289,9 +1378,16 @@ class SpectralPhantomDesignerDialog(QDialog):
         )
         size = item.size[:2]
         roi_class = (
-            pg.EllipseROI if item.kind in {"ellipsoid", "cylinder"} else pg.RectROI
+            ScaleOnlyEllipseROI
+            if item.kind in {"ellipsoid", "cylinder"}
+            else pg.RectROI
         )
-        roi = roi_class(position, size, pen=self._roi_pen(index, False))
+        roi = roi_class(
+            position,
+            size,
+            pen=self._roi_pen(index, False),
+            rotatable=False,
+        )
         roi.sigRegionChangeFinished.connect(self._roi_changed)
         original_mouse_click = roi.mouseClickEvent
 
@@ -1380,6 +1476,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         self._update_roi_highlights(row)
         self._update_shape_preview()
         self._update_kinetics_preview()
+        self._update_spectral_preview()
 
     def _configure_shape_geometry_controls(self, item):
         is_cylinder = item.kind == "cylinder"
@@ -1467,12 +1564,79 @@ class SpectralPhantomDesignerDialog(QDialog):
             self._last_spectral_reference_ppm = reference_ppm
             self._inspector_preview_dirty = True
             self._update_kinetics_preview()
+        self.design.spectral_window_center_ppm = self.spectral_window_center_ppm.value()
+        self._inspector_preview_dirty = True
         self._update_spectral_resolution_info()
+        self._update_spectral_preview()
 
     def _update_spectral_resolution_info(self):
         points = max(2, int(self.spectral_points.value()))
         resolution = self.spectral_bandwidth_ppm.value() / (points - 1)
         self.spectral_resolution_info.setText(f"Resolution {resolution:.5g} ppm/pt")
+
+    def _update_spectral_preview(self):
+        if not hasattr(self, "spectral_preview_curve"):
+            return
+        row = self._current_row()
+        if row is None or not (0 <= row < len(self.design.shapes)):
+            self.spectral_preview_curve.setData([], [])
+            self.spectral_preview_info.setText(
+                "No selected shape · orange dashed line: sequence reference"
+            )
+            return
+
+        item = self.design.shapes[row]
+        reference_ppm = float(self.spectral_reference_ppm.value())
+        window_center_ppm = float(self.spectral_window_center_ppm.value())
+        bandwidth_ppm = float(self.spectral_bandwidth_ppm.value())
+        points = max(2, int(self.spectral_points.value()))
+        half_bandwidth_ppm = bandwidth_ppm / 2.0
+        frequency_ppm = np.linspace(
+            window_center_ppm - half_bandwidth_ppm,
+            window_center_ppm + half_bandwidth_ppm,
+            points,
+        )
+        spectrum = np.zeros(points, dtype=float)
+        nucleus = self.nucleus.currentData()
+        if nucleus is None:
+            nucleus = (
+                "C13"
+                if hasattr(self, "dynamic_enabled") and self.dynamic_enabled.isChecked()
+                else "H1"
+            )
+        field_strength_t = float(self.field_strength_t.value())
+        for peak in item.peaks:
+            fwhm_ppm = abs(
+                float(
+                    hz_to_ppm(
+                        1.0 / (np.pi * peak.t2_star_s),
+                        field_strength_t,
+                        nucleus,
+                    )
+                )
+            )
+            half_width_ppm = max(fwhm_ppm / 2.0, np.finfo(float).eps)
+            peak_ppm = reference_ppm + peak.frequency_ppm + item.b0_ppm
+            amplitude = peak.amplitude * peak.effective_initial_polarization(
+                item.initial_mz
+            )
+            spectrum += amplitude / (
+                1.0 + ((frequency_ppm - peak_ppm) / half_width_ppm) ** 2
+            )
+
+        self.spectral_preview_curve.setData(frequency_ppm, spectrum)
+        self.spectral_reference_line.setValue(reference_ppm)
+        display_min = min(float(frequency_ppm[0]), reference_ppm)
+        display_max = max(float(frequency_ppm[-1]), reference_ppm)
+        if np.isclose(display_min, display_max):
+            display_min -= 0.5
+            display_max += 0.5
+        self.spectral_preview_plot.setXRange(display_min, display_max, padding=0.04)
+        self.spectral_preview_plot.enableAutoRange(axis=pg.ViewBox.YAxis)
+        self.spectral_preview_info.setText(
+            f"{item.name}: {frequency_ppm[0]:g}–{frequency_ppm[-1]:g} ppm · "
+            f"orange dashed line: reference {reference_ppm:g} ppm"
+        )
 
     def _properties_changed(self):
         row = self._current_row()
@@ -1513,6 +1677,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             self._refresh_kinetics_preview_shapes()
         self._update_shape_preview()
         self._update_kinetics_preview()
+        self._update_spectral_preview()
 
     def _populate_peaks(self, item):
         self.peak_table.blockSignals(True)
@@ -1545,6 +1710,8 @@ class SpectralPhantomDesignerDialog(QDialog):
             return
         self.design.shapes[row].peaks = peaks
         self._update_kinetics_preview()
+        self._inspector_preview_dirty = True
+        self._update_spectral_preview()
 
     def _read_peak_table(self):
         peaks = []
@@ -2117,7 +2284,11 @@ class SpectralPhantomDesignerDialog(QDialog):
 
     def _add_shape(self, kind):
         self._sync_global()
-        item = ShapeDefinition(name=self._next_shape_name(), kind=kind)
+        item = ShapeDefinition(
+            name=self._next_shape_name(),
+            kind=kind,
+            peaks=[SpectralPeakDefinition(t2_star_s=0.020)],
+        )
         self._append_shape(item)
 
     def _start_shape_drawing(self, kind):
@@ -2140,6 +2311,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             kind=kind,
             center=(left + width / 2.0, bottom + height / 2.0, 0.5),
             size=(width, height, 0.5),
+            peaks=[SpectralPeakDefinition(t2_star_s=0.020)],
         )
         self._append_shape(item)
         self._shape_drawing_cancelled()
@@ -2155,6 +2327,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         self._refresh_kinetics_preview_shapes()
         if self.design.shapes:
             self.shape_list.setCurrentRow(min(row, len(self.design.shapes) - 1))
+        else:
+            self._update_spectral_preview()
         self._update_roi_highlights()
         self._update_shape_preview()
         self._update_kinetics_preview()
@@ -2165,11 +2339,14 @@ class SpectralPhantomDesignerDialog(QDialog):
             return
         self.design.shapes[row].peaks.append(
             SpectralPeakDefinition(
-                name=f"Peak {len(self.design.shapes[row].peaks) + 1}"
+                name=f"Peak {len(self.design.shapes[row].peaks) + 1}",
+                t2_star_s=0.020,
             )
         )
         self._populate_peaks(self.design.shapes[row])
         self._update_kinetics_preview()
+        self._inspector_preview_dirty = True
+        self._update_spectral_preview()
 
     def _remove_peak(self):
         shape_row = self._current_row()
@@ -2182,6 +2359,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         peaks.pop(peak_row)
         self._populate_peaks(self.design.shapes[shape_row])
         self._update_kinetics_preview()
+        self._inspector_preview_dirty = True
+        self._update_spectral_preview()
 
     def _sync_global(self):
         self._properties_changed()
@@ -2194,6 +2373,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.design.field_strength_t = self.field_strength_t.value()
         self.design.nucleus = self.nucleus.currentData()
         self.design.spectral_reference_ppm = self.spectral_reference_ppm.value()
+        self.design.spectral_window_center_ppm = self.spectral_window_center_ppm.value()
         self.design.spectral_bandwidth_ppm = self.spectral_bandwidth_ppm.value()
         self.design.spectral_points = self.spectral_points.value()
         self.design.supersampling_enabled = self.supersampling_enabled.isChecked()

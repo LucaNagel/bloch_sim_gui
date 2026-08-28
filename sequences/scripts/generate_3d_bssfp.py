@@ -68,6 +68,12 @@ def main(
     encoding_duration: float = 1e-3,
     rf_phase_start: float = 180,
     rf_phase_increment: float = 180,
+    alpha_half_phase_deg: float | None = None,
+    alpha_half_use_ratios: bool = True,
+    alpha_half_tr_ratio: float = 0.5,
+    alpha_half_flip_ratio: float = 0.5,
+    alpha_half_center_spacing: float | None = None,
+    alpha_half_flip_angle_deg: float | None = None,
     dummy_repetitions: int = 1,
     use_alpha_half: bool = True,
 ):
@@ -76,7 +82,9 @@ def main(
     Parameters are expressed in SI units. ``fov`` is ordered as
     ``(fov_x, fov_y, fov_z)`` and the acquired data are ordered as partition,
     phase-encode, readout. RF phase cycling is continuous through dummy and
-    acquired repetitions.
+    acquired repetitions. If ``alpha_half_phase_deg`` is omitted, the
+    preparation uses the phase-cycle member preceding ``rf_phase_start``.
+    Startup spacing is measured between preparation and first RF centers.
     """
     fov_x, fov_y, fov_z = _as_3d_fov(fov)
     _encoding_areas(n_read, 1.0)  # Validate the readout matrix size as well.
@@ -89,6 +97,37 @@ def main(
         raise ValueError("event durations must be positive")
     if not isinstance(dummy_repetitions, (int, np.integer)) or dummy_repetitions < 0:
         raise ValueError("dummy_repetitions must be a non-negative integer")
+    if alpha_half_phase_deg is None:
+        resolved_alpha_half_phase_deg = wrap_phase_deg(
+            rf_phase_start + rf_phase_increment
+        )
+    else:
+        resolved_alpha_half_phase_deg = wrap_phase_deg(alpha_half_phase_deg)
+    if alpha_half_use_ratios:
+        for name, value in {
+            "alpha_half_tr_ratio": alpha_half_tr_ratio,
+            "alpha_half_flip_ratio": alpha_half_flip_ratio,
+        }.items():
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be positive and finite")
+        resolved_alpha_half_flip_angle_deg = float(flip_angle_deg) * float(
+            alpha_half_flip_ratio
+        )
+    else:
+        resolved_alpha_half_flip_angle_deg = (
+            float(flip_angle_deg) / 2
+            if alpha_half_flip_angle_deg is None
+            else float(alpha_half_flip_angle_deg)
+        )
+        if (
+            not np.isfinite(resolved_alpha_half_flip_angle_deg)
+            or resolved_alpha_half_flip_angle_deg <= 0
+        ):
+            raise ValueError("alpha_half_flip_angle_deg must be positive and finite")
+        if alpha_half_center_spacing is not None and (
+            not np.isfinite(alpha_half_center_spacing) or alpha_half_center_spacing <= 0
+        ):
+            raise ValueError("alpha_half_center_spacing must be positive and finite")
 
     system = pp.Opts(
         max_grad=28,
@@ -105,7 +144,7 @@ def main(
         make_pulseq_rf_events(
             pp,
             system,
-            flip_angles_deg=(flip_angle_deg, flip_angle_deg / 2),
+            flip_angles_deg=(flip_angle_deg, resolved_alpha_half_flip_angle_deg),
             pulse_type=rf_pulse_type,
             duration_s=rf_duration,
             time_bandwidth_product=rf_time_bandwidth_product,
@@ -175,18 +214,36 @@ def main(
     )
     te = tr / 2
 
+    if alpha_half_use_ratios:
+        resolved_alpha_half_center_spacing = tr * float(alpha_half_tr_ratio)
+    else:
+        resolved_alpha_half_center_spacing = (
+            tr / 2
+            if alpha_half_center_spacing is None
+            else float(alpha_half_center_spacing)
+        )
+
     # An alpha/2 pulse one half-TR before the first full pulse provides the
     # standard catalyzation used by the Pulseq TrueFISP reference sequence.
     if use_alpha_half:
+        rf_alpha_half_center, _ = pp.calc_rf_center(rf_alpha_half)
         rf_alpha_half.phase_offset = pulseq_phase_offset_rad(
-            rf_phase_start,
+            resolved_alpha_half_phase_deg,
             frequency_offset_hz=0.0,
-            event_center_s=pp.calc_rf_center(rf_alpha_half)[0],
+            event_center_s=rf_alpha_half_center,
         )
-        alpha_half_delay_value = tr / 2 - pp.calc_duration(rf_alpha_half)
+        rf_alpha_half_center_from_start = rf_alpha_half.delay + rf_alpha_half_center
+        alpha_half_delay_value = (
+            resolved_alpha_half_center_spacing
+            - pp.calc_duration(rf_alpha_half)
+            - rf_center_from_block_start
+            + rf_alpha_half_center_from_start
+        )
         alpha_half_delay_value = np.round(alpha_half_delay_value / raster) * raster
         if alpha_half_delay_value < 0:
-            raise ValueError("TR is too short for alpha/2 preparation")
+            raise ValueError(
+                "First TR is too short for the configured preparation pulse"
+            )
         seq.add_block(rf_alpha_half)
         if alpha_half_delay_value > 0:
             seq.add_block(pp.make_delay(alpha_half_delay_value))
@@ -301,6 +358,28 @@ def main(
     seq.set_definition(key="MatrixSize", value=[n_read, n_phase, n_partition])
     seq.set_definition(key="TR", value=tr)
     seq.set_definition(key="TE", value=te)
+    seq.set_definition(key="RFPhaseStartDeg", value=float(rf_phase_start))
+    seq.set_definition(key="RFPhaseIncrementDeg", value=float(rf_phase_increment))
+    seq.set_definition(
+        key="AlphaHalfPhaseDeg", value=float(resolved_alpha_half_phase_deg)
+    )
+    seq.set_definition(
+        key="AlphaHalfFlipAngleDeg",
+        value=float(resolved_alpha_half_flip_angle_deg),
+    )
+    seq.set_definition(
+        key="AlphaHalfCenterSpacing",
+        value=float(resolved_alpha_half_center_spacing),
+    )
+    seq.set_definition(key="AlphaHalfUsesRatios", value=bool(alpha_half_use_ratios))
+    seq.set_definition(
+        key="AlphaHalfTRRatio", value=float(resolved_alpha_half_center_spacing / tr)
+    )
+    seq.set_definition(
+        key="AlphaHalfFlipRatio",
+        value=float(resolved_alpha_half_flip_angle_deg / float(flip_angle_deg)),
+    )
+    seq.set_definition(key="UseAlphaHalf", value=bool(use_alpha_half))
     set_rf_definitions(
         seq,
         pulse_type=rf_pulse_type,

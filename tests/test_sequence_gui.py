@@ -2,6 +2,7 @@ import sys
 import runpy
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -11,6 +12,8 @@ from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
+    QFileDialog,
+    QLabel,
     QMenu,
     QMessageBox,
     QScrollArea,
@@ -31,6 +34,7 @@ from blochsimulator.ui.sequence_simulation_widget import (
 from blochsimulator.ui.volume_viewer import SequenceMagnetizationAnimationViewer
 from blochsimulator.ui.default_settings import WorkspaceDefaults
 from blochsimulator.phantom import Phantom
+from blochsimulator.project_io import load_project
 from blochsimulator.simulator import BlochSimulator
 from blochsimulator.spectral_phantom import ChemicalSpecies, SpectralPhantom
 from blochsimulator.sequence import (
@@ -505,6 +509,173 @@ def test_phantom_workspace_is_visible():
     app.processEvents()
 
 
+def test_session_simulations_tab_is_next_to_phantom_b1_and_accepts_runs():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+
+    assert window.simulation_explorer_tab_index == window.b1_combo_tab_index + 1
+    assert window.tab_widget.tabText(window.simulation_explorer_tab_index) == (
+        "Simulations"
+    )
+    assert not window.tab_widget.isTabVisible(window.simulation_explorer_tab_index)
+
+    window.set_workspace_mode("sequence")
+    assert window.tab_widget.isTabVisible(window.simulation_explorer_tab_index)
+    sequence_widget = window.sequence_simulation_widget
+    sequence_widget.object_source.setCurrentIndex(1)
+    sequence_widget.sequence_live_preview.setChecked(False)
+    sequence_widget.sequence_source.setCurrentIndex(sequence_widget.EPI_SOURCE)
+    sequence_widget.read_matrix.setValue(4)
+    sequence_widget.phase_matrix.setValue(3)
+    sequence_widget.matrix_size.setValue(5)
+    sequence_widget._build_phantom()
+    result = SimpleNamespace(
+        metadata={
+            "simulation_finished_at_utc": "2026-08-28T10:20:30+00:00",
+            "simulation_wall_time_s": 0.5,
+            "sequence_kernel": "optimized",
+        },
+        adc_times_s=np.arange(4, dtype=float),
+        signal=np.zeros(4, dtype=np.complex128),
+    )
+    run = sequence_widget._register_session_simulation_run(result)
+
+    assert run.display_name == "Run 1"
+    assert window.simulation_explorer.run_tree.topLevelItemCount() == 1
+    assert window.simulation_explorer.run_tree.topLevelItem(0).text(1) == (
+        sequence_widget.program.source
+    )
+
+    sequence_widget.read_matrix.setValue(9)
+    sequence_widget.phase_matrix.setValue(8)
+    sequence_widget.matrix_size.setValue(7)
+    restored = []
+
+    def restore_run(loaded_run):
+        restored.append(loaded_run)
+        assert sequence_widget.sequence_source.currentIndex() == (
+            sequence_widget.EPI_SOURCE
+        )
+        assert sequence_widget.read_matrix.value() == 4
+        assert sequence_widget.phase_matrix.value() == 3
+        assert sequence_widget.matrix_size.value() == 5
+        return True
+
+    sequence_widget.restore_session_simulation_run = restore_run
+    window._open_session_simulation_run(run)
+    assert restored == [run]
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
+def test_session_simulations_export_single_and_multiple_projects(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.set_workspace_mode("sequence")
+    widget = window.sequence_simulation_widget
+    widget.object_source.setCurrentIndex(1)
+    widget.matrix_size.setValue(2)
+    widget.z_matrix_size.setValue(2)
+    widget._build_phantom()
+
+    def make_result(value):
+        return SequenceSimulationResult(
+            signal=np.full(4, value, dtype=np.complex128),
+            adc_times_s=np.arange(4, dtype=float) * 1e-4,
+            final_magnetization=np.zeros(widget.phantom.shape + (3,)),
+            checkpoint_magnetization=None,
+            checkpoint_times_s=np.empty(0),
+            metadata={"sequence_kernel": "optimized"},
+        )
+
+    widget.matrix_size.setValue(2)
+    first = widget._register_session_simulation_run(make_result(1.0))
+    first.created_at_utc = "2026-08-28T10:20:30"
+    widget.matrix_size.setValue(3)
+    widget._build_phantom()
+    second = widget._register_session_simulation_run(make_result(2.0))
+    second.created_at_utc = "2026-08-28T10:20:31"
+
+    requested_defaults = []
+
+    def save_filename(_parent, _title, default, _filter):
+        requested_defaults.append(Path(default).name)
+        return str(tmp_path / Path(default).name), "Bloch projects (*.blochproj)"
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", save_filename)
+    window._export_session_simulation_runs((first,))
+    assert requested_defaults[0] == "bloch_project_20260828_102030.blochproj"
+    single = load_project(tmp_path / requested_defaults[0])
+    assert single["state"]["sequence_controls"]["matrix_size"]["value"] == 2
+    np.testing.assert_allclose(single["sequence_result"].signal, 1.0)
+
+    batch_dir = tmp_path / "batch"
+    batch_dir.mkdir()
+    monkeypatch.setattr(
+        QFileDialog,
+        "getExistingDirectory",
+        lambda *args, **kwargs: str(batch_dir),
+    )
+    second.display_name = "Renal baseline"
+    second.custom_name = True
+    window._export_session_simulation_runs((first, second))
+    batch_paths = sorted(batch_dir.glob("*.blochproj"))
+    assert {path.name for path in batch_paths} == {
+        "bloch_project_20260828_102030.blochproj",
+        "Renal baseline.blochproj",
+    }
+    loaded_sizes = sorted(
+        load_project(path)["state"]["sequence_controls"]["matrix_size"]["value"]
+        for path in batch_paths
+    )
+    assert loaded_sizes == [2, 3]
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
+def test_completed_spin_probe_is_retained_and_can_be_reopened():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.set_workspace_mode("sequence")
+    widget = window.sequence_simulation_widget
+    widget.object_source.setCurrentIndex(2)
+    result = SequenceProbeResult(
+        time_s=np.array([0.0, 0.01]),
+        positions_m=np.array([[0.0, 0.0, 0.0]]),
+        frequency_offsets_hz=np.array([-100.0, 100.0]),
+        magnetization=np.ones((2, 1, 2, 3)),
+        metadata={
+            "probe_type": "spectral",
+            "simulation_finished_at_utc": "2026-08-28T10:20:30+00:00",
+            "simulation_wall_time_s": 0.25,
+        },
+    )
+
+    widget._probe_finished(result, np.array([-100.0, 100.0]), "Hz", "spectral")
+
+    retained = window.simulation_explorer.runs
+    assert len(retained) == 1
+    run = retained[0]
+    assert run.run_type == "spin_probe"
+    assert run.result is result
+    assert run.runtime_s == pytest.approx(0.25)
+    widget.probe_result = None
+
+    window._open_session_simulation_run(run)
+
+    assert widget.probe_result is result
+    assert widget.views.tabText(widget.views.currentIndex()) == "Spin Probe"
+    assert "Showing Run 1" in widget.probe_status.text()
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
 def test_workspace_roundtrip_remains_interactive():
     app = QApplication.instance() or QApplication(sys.argv)
     window = BlochSimulatorGUI()
@@ -934,6 +1105,137 @@ def test_sequence_workspace_scopes_object_controls_to_the_selected_source():
     assert not widget.run_probe_button.isEnabled()
     assert not widget.run_geometry_probe_button.isEnabled()
 
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_simulation_object_summary_uses_structured_table(monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    phantom = Phantom(
+        shape=(2, 3, 4),
+        fov=(2e-3, 6e-3, 8e-3),
+        t1_map=np.full((2, 3, 4), 0.8),
+        t2_map=np.full((2, 3, 4), 0.09),
+        pd_map=np.ones((2, 3, 4)),
+    )
+    monkeypatch.setattr(widget, "_selected_designed_phantom", lambda: phantom)
+
+    widget.refresh_object_summary()
+    rows = {
+        widget.simulation_object_table.item(row, 0)
+        .text(): widget.simulation_object_table.item(row, 1)
+        .text()
+        for row in range(widget.simulation_object_table.rowCount())
+    }
+
+    assert "Frequency model" in rows
+    assert rows["Selected phantom"] == phantom.name
+    assert "matrix (2, 3, 4)" in rows["Geometry"]
+    assert "T1 800–800 ms" in rows["Relaxation"]
+    assert widget.frequency_reference_info.isHidden()
+    assert widget.phantom_summary.isHidden()
+
+    widget.object_source.setCurrentIndex(1)
+    rows = {
+        widget.simulation_object_table.item(row, 0)
+        .text(): widget.simulation_object_table.item(row, 1)
+        .text()
+        for row in range(widget.simulation_object_table.rowCount())
+    }
+    assert rows["Simulation object"] == "Uniform cube"
+    assert "density" in rows["Relaxation / density"]
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_shared_spoiling_quality_unit_covers_every_sequence_source():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.sequence_live_preview.setChecked(False)
+
+    expected_text = {
+        widget.INTERNAL_SOURCE: "Internal FID has no gradient spoiler",
+        widget.EPI_SOURCE: "EPI / spiral end-of-slice spoiler",
+        widget.CSI_SOURCE: "CSI end-of-FID spoiler",
+        widget.BSSFP_SOURCE: "fully balanced",
+        widget.SS_BSSFP_SOURCE: "Spectral-spatial bSSFP end-of-volume spoiler",
+        widget.RADIAL_ME_BSSFP_SOURCE: "fully balanced",
+        widget.ME_BSSFP_SOURCE: "fully balanced",
+        widget.FLASH_SOURCE: "FLASH (2D)",
+        widget.PULSEQ_SOURCE: "Imported Pulseq sequence",
+    }
+    for source_index, text in expected_text.items():
+        widget.sequence_source.setCurrentIndex(source_index)
+        assert text in widget.spoiling_quality_info.text()
+
+    phantom = Phantom(
+        shape=(2, 2, 2),
+        fov=(2e-3, 2e-3, 2e-3),
+        t1_map=np.ones((2, 2, 2)),
+        t2_map=np.ones((2, 2, 2)),
+        pd_map=np.ones((2, 2, 2)),
+    )
+    widget._selected_designed_phantom = lambda: phantom
+    widget.acquisition = MagicMock(
+        moment_origins_cyc_per_m=((0.0, 0.0, 0.0), (1000.0, 0.0, 0.0))
+    )
+    widget._update_spoiling_quality()
+    assert "Imported Pulseq ADC moment train" in widget.spoiling_quality_info.text()
+    assert "maximum sampling error" in widget.spoiling_quality_info.text()
+
+    widget.sequence_source.setCurrentIndex(widget.EPI_SOURCE)
+    assert "Remaining coherent signal" in widget.spoiling_quality_info.text()
+    assert not widget.spoiling_apply_recommended_grid.isHidden()
+    widget.epi_spoil_after_slice.setChecked(False)
+    assert "remaining coherent signal is 100%" in (widget.spoiling_quality_info.text())
+    assert widget.spoiling_apply_recommended_grid.isHidden()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_spoiling_quality_is_a_hover_table_instead_of_a_visible_text_block():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(widget.EPI_SOURCE)
+
+    tooltip = widget.spoiling_quality_button.toolTip()
+    assert widget.spoiling_quality_info.isHidden()
+    assert "<table" in tooltip
+    assert "Cycles / phantom voxel XYZ" in tooltip
+    assert "Recommended grid" in tooltip
+    assert widget.spoiling_quality_button.text() == "ⓘ"
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_missing_phantom_dialog_links_to_the_phantom_tab(monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    opened = []
+    monkeypatch.setattr(widget, "_open_phantom_tab", lambda: opened.append(True))
+
+    def inspect_dialog(dialog):
+        assert "href='open-phantom'" in dialog.text()
+        link_label = next(
+            label
+            for label in dialog.findChildren(QLabel)
+            if "Open the Phantom tab" in label.text()
+        )
+        link_label.linkActivated.emit("open-phantom")
+        return QMessageBox.Ok
+
+    monkeypatch.setattr(QMessageBox, "exec_", inspect_dialog)
+    widget._show_no_phantom_dialog()
+
+    assert opened == [True]
     widget.close()
     widget.deleteLater()
     app.processEvents()
@@ -1717,6 +2019,57 @@ def test_sequence_workspace_builds_geometry_probe_positions():
     assert widget.probe_initial_mz.maximum() == pytest.approx(1e7)
     widget.probe_initial_mz.setValue(2.5e6)
     assert widget.probe_initial_mz.value() == pytest.approx(2.5e6)
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_spectral_phantom_probe_defaults_follow_window_relative_to_reference():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    shape = (1, 1, 1)
+    phantom = SpectralPhantom(
+        shape=shape,
+        fov=(0.01, 0.01, 0.01),
+        species=[ChemicalSpecies("Peak", 5.0, 1.0, 0.02)],
+        concentration_maps={"Peak": np.ones(shape)},
+        nucleus="C13",
+        spectral_reference_ppm=175.0,
+        spectral_window_center_ppm=177.5,
+        spectral_bandwidth_ppm=15.0,
+        spectral_points=257,
+    )
+    widget.probe_frequency_units.setCurrentText("ppm")
+
+    widget._apply_probe_defaults_from_phantom(phantom)
+
+    assert widget.probe_ppm_min.value() == pytest.approx(-5.0)
+    assert widget.probe_ppm_max.value() == pytest.approx(10.0)
+    assert widget.probe_points.value() == 257
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_bssfp_parameter_refresh_preserves_probe_frequency_limits():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.probe_ppm_min.setValue(-250.0)
+    widget.probe_ppm_max.setValue(250.0)
+    widget.bssfp_read_matrix.setValue(2)
+    widget.bssfp_phase_matrix.setValue(1)
+    widget.bssfp_partition_matrix.setValue(1)
+    widget.sequence_source.setCurrentIndex(widget.BSSFP_SOURCE)
+
+    widget.generate_sequence_button.click()
+    widget.bssfp_flip_angle_deg.setValue(30.0)
+    widget.generate_sequence_button.click()
+
+    assert widget.probe_frequency_units.currentText() == "Hz"
+    assert widget.probe_ppm_min.value() == pytest.approx(-250.0)
+    assert widget.probe_ppm_max.value() == pytest.approx(250.0)
 
     widget.close()
     widget.deleteLater()

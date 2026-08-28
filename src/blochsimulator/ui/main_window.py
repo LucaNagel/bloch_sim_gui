@@ -2,7 +2,10 @@ import sys
 import os
 import time
 import math
+import copy
+import re
 import numpy as np
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -34,6 +37,7 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QFrame,
     QFileDialog,
+    QLineEdit,
 )
 from PyQt5.QtCore import Qt, QSettings, QTimer
 from PyQt5.QtGui import QFont, QIcon, QImage, QPalette, QColor
@@ -52,7 +56,11 @@ from ..memory import (
 from ..simulator import BlochSimulator, TissueParameters, resolve_num_threads
 from ..spectral_phantom import SpectralPhantom
 from ..dynamic_phantom import DynamicSpectralPhantom
-from ..sequence import load_scanner_parameters, save_scanner_parameters
+from ..sequence import (
+    SequenceProbeResult,
+    load_scanner_parameters,
+    save_scanner_parameters,
+)
 from ..visualization import (
     ImageExporter,
     ExportImageDialog,
@@ -98,6 +106,7 @@ from .default_settings import WorkspaceDefaults
 from .sequence_simulation_widget import SequenceSimulationWidget
 from .b1_widgets import B1PhantomCombinationWidget, B1WorkspaceWidget
 from .project_explorer import ProjectExplorerDialog
+from .simulation_explorer import SessionSimulationExplorer
 
 
 def _view_title(text: str) -> QLabel:
@@ -125,52 +134,61 @@ def _capture_widget_state(owner):
             state[name] = {"type": "value", "value": widget.value()}
         elif isinstance(widget, QCheckBox):
             state[name] = {"type": "checked", "value": widget.isChecked()}
+        elif isinstance(widget, QLineEdit):
+            state[name] = {"type": "text", "value": widget.text()}
     return state
 
 
-def _restore_widget_state(owner, state):
+def _restore_widget_state(owner, state, *, block_signals=False):
     for name, saved in state.items():
         widget = getattr(owner, name, None)
         if widget is None:
             continue
-        kind = saved.get("type")
-        if kind == "combo" and isinstance(widget, QComboBox):
-            text = str(saved.get("text", ""))
-            index = widget.findText(text)
-            if index < 0 and text:
-                # Older project files may use equivalent numeric formatting,
-                # e.g. "7T" while the current item is "7.0T".
-                try:
-                    saved_number = float(text.removesuffix("T").strip())
-                except ValueError:
-                    saved_number = None
-                if saved_number is not None:
-                    for candidate in range(widget.count()):
-                        candidate_text = widget.itemText(candidate)
-                        try:
-                            if np.isclose(
-                                float(candidate_text.removesuffix("T").strip()),
-                                saved_number,
-                            ):
-                                index = candidate
-                                break
-                        except ValueError:
-                            continue
-            if index < 0:
-                saved_index = int(saved.get("index", -1))
-                index = (
-                    saved_index
-                    if 0 <= saved_index < widget.count()
-                    else widget.currentIndex()
-                )
-            if index >= 0:
-                widget.setCurrentIndex(index)
-        elif kind == "value" and isinstance(
-            widget, (QSpinBox, QDoubleSpinBox, QSlider)
-        ):
-            widget.setValue(saved["value"])
-        elif kind == "checked" and isinstance(widget, QCheckBox):
-            widget.setChecked(bool(saved["value"]))
+        previous_blocked = widget.blockSignals(True) if block_signals else None
+        try:
+            kind = saved.get("type")
+            if kind == "combo" and isinstance(widget, QComboBox):
+                text = str(saved.get("text", ""))
+                index = widget.findText(text)
+                if index < 0 and text:
+                    # Older project files may use equivalent numeric formatting,
+                    # e.g. "7T" while the current item is "7.0T".
+                    try:
+                        saved_number = float(text.removesuffix("T").strip())
+                    except ValueError:
+                        saved_number = None
+                    if saved_number is not None:
+                        for candidate in range(widget.count()):
+                            candidate_text = widget.itemText(candidate)
+                            try:
+                                if np.isclose(
+                                    float(candidate_text.removesuffix("T").strip()),
+                                    saved_number,
+                                ):
+                                    index = candidate
+                                    break
+                            except ValueError:
+                                continue
+                if index < 0:
+                    saved_index = int(saved.get("index", -1))
+                    index = (
+                        saved_index
+                        if 0 <= saved_index < widget.count()
+                        else widget.currentIndex()
+                    )
+                if index >= 0:
+                    widget.setCurrentIndex(index)
+            elif kind == "value" and isinstance(
+                widget, (QSpinBox, QDoubleSpinBox, QSlider)
+            ):
+                widget.setValue(saved["value"])
+            elif kind == "checked" and isinstance(widget, QCheckBox):
+                widget.setChecked(bool(saved["value"]))
+            elif kind == "text" and isinstance(widget, QLineEdit):
+                widget.setText(str(saved.get("value", "")))
+        finally:
+            if block_signals:
+                widget.blockSignals(previous_blocked)
 
 
 def get_app_data_dir() -> Path:
@@ -1241,6 +1259,28 @@ class BlochSimulatorGUI(QMainWindow):
         )
         self.tab_widget.currentChanged.connect(self._ensure_b1_combo_workspace)
 
+        # === TEMPORARY SESSION SIMULATIONS ===
+        # This intentionally lives next to Phantom + B1 and is separate from
+        # the persistent, file-based Project Explorer in the File menu.
+        self.simulation_explorer = SessionSimulationExplorer(self)
+        self.simulation_explorer.run_open_requested.connect(
+            self._open_session_simulation_run
+        )
+        self.simulation_explorer.run_deleted.connect(
+            self._delete_session_simulation_run
+        )
+        self.simulation_explorer.runs_export_requested.connect(
+            self._export_session_simulation_runs
+        )
+        self.simulation_explorer.run_renamed.connect(
+            lambda run: self.statusBar().showMessage(
+                f"Simulation renamed to {run.display_name}", 5000
+            )
+        )
+        self.simulation_explorer_tab_index = self.tab_widget.addTab(
+            self.simulation_explorer, "Simulations"
+        )
+
         # === K-SPACE TAB (Signal-based simulation) ===
         if KSPACE_AVAILABLE:
 
@@ -1719,6 +1759,10 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             "Phantom + B1": (
                 "Inspect the phantom and the transformed B1 field together in 3D."
+            ),
+            "Simulations": (
+                "Switch between completed sequence simulations retained for this "
+                "application session, inspect their metadata, or delete runs."
             ),
             "📡 K-Space": "Simulate and inspect sampled k-space data.",
             "Parameter Sweep": (
@@ -4335,6 +4379,221 @@ class BlochSimulatorGUI(QMainWindow):
         self.project_explorer_dialog.hide()
         self.open_project(filename)
 
+    def register_sequence_simulation_run(self, run):
+        """Retain a completed sequence simulation for the current app session."""
+        project_state = self._complete_project_state()
+        run.state["project_state"] = project_state
+        run.state["sequence_controls"] = copy.deepcopy(
+            project_state.get("sequence_controls", {})
+        )
+        run.state["spoiler_configuration"] = copy.deepcopy(
+            project_state.get("spoiler_configuration", {})
+        )
+        run.state["reconstruction_view"] = copy.deepcopy(
+            project_state.get("reconstruction_view", {})
+        )
+        run.state["sequence_view_name"] = project_state.get(
+            "sequence_view_name", "Signal"
+        )
+        if run.run_type == "spin_probe":
+            run.state["sequence_view_name"] = "Spin Probe"
+        b1_widget = getattr(self, "b1_widget", None)
+        run.state["tx_field"] = None if b1_widget is None else b1_widget.tx_field
+        run.state["rx_field"] = None if b1_widget is None else b1_widget.rx_field
+        self.simulation_explorer.add_run(run)
+        self.statusBar().showMessage(
+            f"{run.display_name} retained temporarily in Simulations", 5000
+        )
+        return run
+
+    def _open_session_simulation_run(self, run):
+        if self.sequence_simulation_widget is None:
+            self._ensure_sequence_simulation_workspace(
+                self.sequence_simulation_tab_index
+            )
+        sequence_widget = self.sequence_simulation_widget
+        sequence_widget._restoring_session_run = True
+        try:
+            self._restore_session_run_phantom(run)
+            _restore_widget_state(
+                sequence_widget,
+                run.state.get("sequence_controls", {}),
+                block_signals=True,
+            )
+            spoiler_configuration = run.state.get("spoiler_configuration", {})
+            if spoiler_configuration:
+                sequence_widget.set_spoiler_configuration(
+                    spoiler_configuration.get("mode", sequence_widget.spoiler_mode),
+                    spoiler_configuration.get(
+                        "counts_xyz", sequence_widget.subvoxel_spin_counts
+                    ),
+                    spoiler_configuration.get(
+                        "sampling_method", sequence_widget.subvoxel_sampling_method
+                    ),
+                )
+            sequence_widget.refresh_after_session_control_restore()
+            restored = sequence_widget.restore_session_simulation_run(run)
+        finally:
+            sequence_widget._restoring_session_run = False
+        if restored:
+            sequence_widget.reconstruction_explorer.restore_state(
+                run.state.get("reconstruction_view", {})
+            )
+            view_name = str(run.state.get("sequence_view_name", ""))
+            for index in range(sequence_widget.views.count()):
+                if sequence_widget.views.tabText(index) == view_name:
+                    sequence_widget.views.setCurrentIndex(index)
+                    break
+            self.tab_widget.setCurrentIndex(self.sequence_simulation_tab_index)
+
+    def _restore_session_run_phantom(self, run):
+        phantom = run.state.get("phantom")
+        object_source = run.state.get("sequence_controls", {}).get("object_source", {})
+        uses_phantom_tab = int(object_source.get("index", -1)) == 0
+        if phantom is not None and uses_phantom_tab:
+            if self.phantom_widget is None:
+                self._ensure_phantom_workspace(self.phantom_tab_index)
+            creator = self.phantom_widget.phantom_creator
+            creator.current_phantom = phantom
+            creator._update_info()
+            creator.save_btn.setEnabled(True)
+            creator._update_edit_button()
+            self.phantom_widget._on_phantom_created(phantom)
+            creator.phantom_created.emit(phantom)
+
+        if self.b1_widget is None and (
+            run.state.get("tx_field") is not None
+            or run.state.get("rx_field") is not None
+        ):
+            self._ensure_b1_workspace(self.b1_tab_index)
+        if self.b1_widget is not None:
+            if run.state.get("tx_field") is not None:
+                self.b1_widget.tx_editor.set_field(run.state["tx_field"])
+            if run.state.get("rx_field") is not None:
+                self.b1_widget.rx_editor.set_field(run.state["rx_field"])
+
+    def _delete_session_simulation_run(self, run):
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        if sequence_widget is not None:
+            sequence_widget.forget_session_simulation_run(run)
+        self.statusBar().showMessage(
+            f"{run.display_name} deleted from this session", 5000
+        )
+
+    @staticmethod
+    def _available_project_path(path):
+        path = Path(path)
+        if not path.exists():
+            return path
+        for suffix in range(2, 10000):
+            candidate = path.with_name(f"{path.stem}_{suffix}{path.suffix}")
+            if not candidate.exists():
+                return candidate
+        raise RuntimeError(f"No available export filename near {path.name}")
+
+    @staticmethod
+    def _session_run_timestamp(run):
+        """Return the run completion time in the standard local filename format."""
+        try:
+            completed = datetime.fromisoformat(str(run.created_at_utc))
+            if completed.tzinfo is not None:
+                completed = completed.astimezone()
+            return completed.strftime("%Y%m%d_%H%M%S")
+        except (TypeError, ValueError):
+            return time.strftime("%Y%m%d_%H%M%S")
+
+    @classmethod
+    def _session_run_export_stem(cls, run):
+        if not run.custom_name:
+            return f"bloch_project_{cls._session_run_timestamp(run)}"
+        name = str(run.display_name).strip()
+        if name.lower().endswith(".blochproj"):
+            name = name[: -len(".blochproj")]
+        # Keep user-facing names intact where possible while removing characters
+        # that are unsafe in common filesystems or could create nested paths.
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip().strip(".")
+        return name or f"bloch_project_{cls._session_run_timestamp(run)}"
+
+    def _save_session_run_project(self, run, filename):
+        state = copy.deepcopy(run.state.get("project_state", {}))
+        state["workspace_mode"] = "sequence"
+        state["active_tab"] = self.sequence_simulation_tab_index
+        state["sequence_controls"] = copy.deepcopy(
+            run.state.get("sequence_controls", {})
+        )
+        state["spoiler_configuration"] = copy.deepcopy(
+            run.state.get("spoiler_configuration", {})
+        )
+        state["reconstruction_view"] = copy.deepcopy(
+            run.state.get("reconstruction_view", {})
+        )
+        state["sequence_view_name"] = run.state.get("sequence_view_name", "Signal")
+        save_project(
+            filename,
+            state,
+            phantom=run.state.get("phantom"),
+            tx_field=run.state.get("tx_field"),
+            rx_field=run.state.get("rx_field"),
+            program=run.state.get("program"),
+            sequence_result=run.result,
+        )
+
+    def _export_session_simulation_runs(self, runs):
+        runs = tuple(runs)
+        if not runs:
+            return
+        export_directory = self._get_export_directory()
+        paths = []
+        if len(runs) == 1:
+            default_path = export_directory / (
+                f"{self._session_run_export_stem(runs[0])}.blochproj"
+            )
+            filename, _ = QFileDialog.getSaveFileName(
+                self,
+                "Export simulation as project",
+                str(default_path),
+                "Bloch projects (*.blochproj)",
+            )
+            if not filename:
+                return
+            if not filename.lower().endswith(".blochproj"):
+                filename += ".blochproj"
+            paths.append((runs[0], Path(filename)))
+        else:
+            directory = QFileDialog.getExistingDirectory(
+                self,
+                f"Export {len(runs)} simulations as projects",
+                str(export_directory),
+            )
+            if not directory:
+                return
+            for run in runs:
+                candidate = Path(directory) / (
+                    f"{self._session_run_export_stem(run)}.blochproj"
+                )
+                paths.append((run, self._available_project_path(candidate)))
+
+        exported = []
+        try:
+            for run, path in paths:
+                self._save_session_run_project(run, path)
+                exported.append(path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Export simulation projects",
+                f"The selected simulations could not all be exported:\n{exc}",
+            )
+            return
+        if self.project_explorer_dialog is not None:
+            self.project_explorer_dialog.refresh()
+        message = (
+            f"Project saved: {exported[0].name}"
+            if len(exported) == 1
+            else f"{len(exported)} simulation projects saved to {exported[0].parent}"
+        )
+        self.statusBar().showMessage(message, 7000)
+
     def _set_main_tab_visible(self, index: int, visible: bool):
         """Set main-tab visibility across supported Qt 5 versions."""
         if not 0 <= index < self.tab_widget.count():
@@ -4429,6 +4688,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self.phantom_tab_index,
                 self.b1_tab_index,
                 self.b1_combo_tab_index,
+                self.simulation_explorer_tab_index,
             }:
                 self._free_mode_tab_index = current
 
@@ -4462,6 +4722,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self.phantom_tab_index,
                 self.b1_tab_index,
                 self.b1_combo_tab_index,
+                self.simulation_explorer_tab_index,
             }
             for index in range(self.tab_widget.count()):
                 self._set_main_tab_visible(index, index in allowed_sequence_tabs)
@@ -4478,6 +4739,7 @@ class BlochSimulatorGUI(QMainWindow):
                     self.phantom_tab_index,
                     self.b1_tab_index,
                     self.b1_combo_tab_index,
+                    self.simulation_explorer_tab_index,
                 }:
                     self._set_main_tab_visible(index, True)
             self.main_splitter.setSizes([420, max(1, self.width() - 420)])
@@ -4500,6 +4762,7 @@ class BlochSimulatorGUI(QMainWindow):
             self._set_main_tab_visible(self.phantom_tab_index, False)
             self._set_main_tab_visible(self.b1_tab_index, False)
             self._set_main_tab_visible(self.b1_combo_tab_index, False)
+            self._set_main_tab_visible(self.simulation_explorer_tab_index, False)
             free_geometry = getattr(self, "_free_workspace_geometry", None)
             if previous_mode == "sequence" and free_geometry is not None:
                 # Opening the much larger focused workspace must not permanently
@@ -5458,7 +5721,18 @@ class BlochSimulatorGUI(QMainWindow):
                 None if b1_widget is None else b1_widget.rx_field,
                 None if sequence_widget is None else sequence_widget.program,
                 legacy_result,
-                None if sequence_widget is None else sequence_widget.result,
+                (
+                    None
+                    if sequence_widget is None
+                    else (
+                        sequence_widget.probe_result
+                        if sequence_widget.views.tabText(
+                            sequence_widget.views.currentIndex()
+                        )
+                        == "Spin Probe"
+                        else sequence_widget.result
+                    )
+                ),
             )
             self.statusBar().showMessage(f"Project saved: {Path(filename).name}", 7000)
             self.log_message(f"Project saved to {filename}")
@@ -5553,10 +5827,19 @@ class BlochSimulatorGUI(QMainWindow):
                 sequence_widget._show_program()
             if project["sequence_result"] is not None:
                 sequence_widget.phantom = phantom
-                sequence_widget._finished(project["sequence_result"])
-                sequence_widget.reconstruction_explorer.restore_state(
-                    state.get("reconstruction_view", {})
-                )
+                if isinstance(project["sequence_result"], SequenceProbeResult):
+                    sequence_widget.probe_result = project["sequence_result"]
+                    sequence_widget._show_probe_result()
+                    sequence_widget.probe_status.setText(
+                        "Spin probe loaded from project"
+                    )
+                else:
+                    sequence_widget._finished(
+                        project["sequence_result"], record_run=False
+                    )
+                    sequence_widget.reconstruction_explorer.restore_state(
+                        state.get("reconstruction_view", {})
+                    )
                 saved_view_name = str(state.get("sequence_view_name", ""))
                 saved_view_index = -1
                 if saved_view_name:

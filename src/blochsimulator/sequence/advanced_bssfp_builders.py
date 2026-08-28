@@ -236,7 +236,11 @@ def make_pulseq_spectral_selective_bssfp(
     repetitions: int = 2,
     acquisition_interval_s: float | None = None,
     use_alpha_half: bool = True,
+    alpha_half_use_ratios: bool = False,
+    alpha_half_tr_ratio: float = 0.5,
+    alpha_half_flip_ratio: float = 0.5,
     alpha_half_center_spacing_s: float = 4.31e-3,
+    alpha_half_flip_angle_deg: float | Sequence[float] | None = None,
     end_image_spoiler_cycles_per_fov: float = 4.0,
     end_image_spoiler_cycles_per_voxel: float = 0.0,
     end_image_spoiler_voxel_size_m: Sequence[float] | None = None,
@@ -298,6 +302,37 @@ def make_pulseq_spectral_selective_bssfp(
         raise ValueError("flip angles must be scalar or match target offsets")
     if min(flip_angles) < 0:
         raise ValueError("flip angles must be non-negative")
+    if alpha_half_use_ratios:
+        for name, value in {
+            "alpha_half_tr_ratio": alpha_half_tr_ratio,
+            "alpha_half_flip_ratio": alpha_half_flip_ratio,
+        }.items():
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be positive and finite")
+        resolved_alpha_half_flip_angles = tuple(
+            angle * float(alpha_half_flip_ratio) for angle in flip_angles
+        )
+    elif alpha_half_flip_angle_deg is None:
+        resolved_alpha_half_flip_angles = tuple(angle / 2 for angle in flip_angles)
+    elif isinstance(alpha_half_flip_angle_deg, (int, float, np.integer, np.floating)):
+        resolved_alpha_half_flip_angles = (float(alpha_half_flip_angle_deg),) * len(
+            flip_angles
+        )
+    else:
+        resolved_alpha_half_flip_angles = _nonnegative_values(
+            alpha_half_flip_angle_deg, "alpha_half_flip_angle_deg"
+        )
+        if len(resolved_alpha_half_flip_angles) == 1:
+            resolved_alpha_half_flip_angles *= len(flip_angles)
+    if len(resolved_alpha_half_flip_angles) != len(flip_angles):
+        raise ValueError(
+            "alpha-half flip angles must be scalar or match target offsets"
+        )
+    if (
+        not np.all(np.isfinite(resolved_alpha_half_flip_angles))
+        or min(resolved_alpha_half_flip_angles) < 0
+    ):
+        raise ValueError("alpha-half flip angles must be non-negative and finite")
     repetitions = _positive_integer(repetitions, "repetitions")
     dummy_repetitions = int(dummy_repetitions)
     if dummy_repetitions < 0:
@@ -313,13 +348,16 @@ def make_pulseq_spectral_selective_bssfp(
         "spectral_rf_bandwidth_factor_hz_ms": spectral_rf_bandwidth_factor_hz_ms,
         "spectral_rf_fwhm_hz": spectral_rf_fwhm_hz,
         "sampling_bandwidth_hz": sampling_bandwidth_hz,
-        "alpha_half_center_spacing_s": alpha_half_center_spacing_s,
         "end_image_spoiler_duration_s": end_image_spoiler_duration_s,
         "field_strength_t": field_strength_t,
     }
     for name, value in positive_parameters.items():
         if not np.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be positive and finite")
+    if not alpha_half_use_ratios and (
+        not np.isfinite(alpha_half_center_spacing_s) or alpha_half_center_spacing_s <= 0
+    ):
+        raise ValueError("alpha_half_center_spacing_s must be positive and finite")
     if encoding_duration_s is not None and (
         not np.isfinite(encoding_duration_s) or encoding_duration_s <= 0
     ):
@@ -390,7 +428,7 @@ def make_pulseq_spectral_selective_bssfp(
         flip_angles_deg=(
             1.0,
             *flip_angles,
-            *(angle / 2.0 for angle in flip_angles),
+            *resolved_alpha_half_flip_angles,
         ),
         pulse_type=spectral_rf_pulse_type,
         duration_s=spectral_rf_duration_s,
@@ -559,6 +597,12 @@ def make_pulseq_spectral_selective_bssfp(
             )
         tr_fill = max(0.0, tr_fill)
 
+    resolved_alpha_half_center_spacing_s = (
+        actual_tr * float(alpha_half_tr_ratio)
+        if alpha_half_use_ratios
+        else float(alpha_half_center_spacing_s)
+    )
+
     spoiler_role_areas = []
     for role, axis_fov in zip(("read", "phase", "partition"), fov):
         axis, _ = encoding_frame.axis_and_sign(role)
@@ -613,7 +657,7 @@ def make_pulseq_spectral_selective_bssfp(
                 np.ceil(pp.calc_duration(alpha_timing) / raster) * raster
             )
             spacing_delay = (
-                alpha_half_center_spacing_s
+                resolved_alpha_half_center_spacing_s
                 - alpha_block_duration
                 + alpha_timing.delay
                 + alpha_center
@@ -639,7 +683,7 @@ def make_pulseq_spectral_selective_bssfp(
         if use_alpha_half:
             common_phase = advance_bssfp_phase_deg(
                 common_phase,
-                elapsed_s=alpha_half_center_spacing_s,
+                elapsed_s=resolved_alpha_half_center_spacing_s,
                 frequency_offset_hz=rf_offset,
             )
         for _ in range(dummy_repetitions):
@@ -837,7 +881,22 @@ def make_pulseq_spectral_selective_bssfp(
     )
     sequence.set_definition(
         "AlphaHalfCenterSpacing",
-        alpha_half_center_spacing_s if use_alpha_half else 0.0,
+        resolved_alpha_half_center_spacing_s if use_alpha_half else 0.0,
+    )
+    sequence.set_definition(
+        "AlphaHalfFlipAngleDeg", list(resolved_alpha_half_flip_angles)
+    )
+    sequence.set_definition("AlphaHalfUsesRatios", bool(alpha_half_use_ratios))
+    sequence.set_definition(
+        "AlphaHalfTRRatio",
+        float(resolved_alpha_half_center_spacing_s / actual_tr),
+    )
+    sequence.set_definition(
+        "AlphaHalfFlipRatio",
+        [
+            float(start / regular) if regular else 0.0
+            for start, regular in zip(resolved_alpha_half_flip_angles, flip_angles)
+        ],
     )
     sequence.set_definition(
         "EndImageSpoilerCyclesPerFOV", end_image_spoiler_cycles_per_fov
@@ -883,6 +942,11 @@ def make_pulseq_me_bssfp(
     repetitions: int = 1,
     acquisition_interval_s: float | None = None,
     use_alpha_half: bool = True,
+    alpha_half_use_ratios: bool = True,
+    alpha_half_tr_ratio: float = 0.5,
+    alpha_half_flip_ratio: float = 0.5,
+    alpha_half_center_spacing_s: float | None = None,
+    alpha_half_flip_angle_deg: float | None = None,
     field_strength_t: float = 7.0,
     nucleus: str = "C13",
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
@@ -944,6 +1008,32 @@ def make_pulseq_me_bssfp(
     nucleus = str(nucleus).strip()
     if not nucleus:
         raise ValueError("nucleus must not be empty")
+    if alpha_half_use_ratios:
+        for name, value in {
+            "alpha_half_tr_ratio": alpha_half_tr_ratio,
+            "alpha_half_flip_ratio": alpha_half_flip_ratio,
+        }.items():
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be positive and finite")
+        resolved_alpha_half_flip_angle_deg = float(flip_angle_deg) * float(
+            alpha_half_flip_ratio
+        )
+    else:
+        resolved_alpha_half_flip_angle_deg = (
+            float(flip_angle_deg) / 2
+            if alpha_half_flip_angle_deg is None
+            else float(alpha_half_flip_angle_deg)
+        )
+        if (
+            not np.isfinite(resolved_alpha_half_flip_angle_deg)
+            or resolved_alpha_half_flip_angle_deg <= 0
+        ):
+            raise ValueError("alpha_half_flip_angle_deg must be positive and finite")
+        if alpha_half_center_spacing_s is not None and (
+            not np.isfinite(alpha_half_center_spacing_s)
+            or alpha_half_center_spacing_s <= 0
+        ):
+            raise ValueError("alpha_half_center_spacing_s must be positive and finite")
 
     system = _make_system(
         pp,
@@ -1021,7 +1111,7 @@ def make_pulseq_me_bssfp(
         make_pulseq_rf_events(
             pp,
             system,
-            flip_angles_deg=(flip_angle_deg, flip_angle_deg / 2),
+            flip_angles_deg=(flip_angle_deg, resolved_alpha_half_flip_angle_deg),
             pulse_type=rf_pulse_type,
             duration_s=rf_duration_s,
             time_bandwidth_product=rf_time_bandwidth_product,
@@ -1084,6 +1174,16 @@ def make_pulseq_me_bssfp(
             f"use at least {minimum_tr:.9g} s"
         )
 
+    resolved_alpha_half_center_spacing_s = (
+        actual_tr * float(alpha_half_tr_ratio)
+        if alpha_half_use_ratios
+        else (
+            actual_tr / 2
+            if alpha_half_center_spacing_s is None
+            else float(alpha_half_center_spacing_s)
+        )
+    )
+
     if use_alpha_half:
         alpha_center, _ = pp.calc_rf_center(alpha_half)
         alpha_center_from_start = alpha_half.delay + alpha_center
@@ -1091,14 +1191,16 @@ def make_pulseq_me_bssfp(
             np.ceil(pp.calc_duration(alpha_half) / raster - 1e-9) * raster
         )
         preparation_delay = (
-            actual_tr / 2
+            resolved_alpha_half_center_spacing_s
             - alpha_block_duration
             + alpha_center_from_start
             - rf_center_from_start
         )
         preparation_delay = round(preparation_delay / raster) * raster
         if preparation_delay < 0:
-            raise ValueError("TR/2 is too short for alpha/2 preparation")
+            raise ValueError(
+                "First TR is too short for the configured preparation pulse"
+            )
         alpha_half.freq_offset = float(rf_frequency_offset_hz)
         alpha_half.phase_offset = pulseq_phase_offset_rad(
             rf_phase_start_deg,
@@ -1124,12 +1226,12 @@ def make_pulseq_me_bssfp(
     if use_alpha_half:
         rf_phase = advance_bssfp_phase_deg(
             rf_phase,
-            elapsed_s=actual_tr / 2,
+            elapsed_s=resolved_alpha_half_center_spacing_s,
             frequency_offset_hz=rf_frequency_offset_hz,
         )
         receiver_phase = advance_bssfp_phase_deg(
             receiver_phase,
-            elapsed_s=actual_tr / 2,
+            elapsed_s=resolved_alpha_half_center_spacing_s,
             frequency_offset_hz=receiver_frequency_offset_hz,
         )
 
@@ -1340,12 +1442,28 @@ def make_pulseq_me_bssfp(
         start_times_s=acquisition_start_times,
     )
     sequence.set_definition("UseAlphaHalf", bool(use_alpha_half))
+    sequence.set_definition("AlphaHalfPhaseDeg", float(rf_phase_start_deg))
+    sequence.set_definition(
+        "AlphaHalfFlipAngleDeg", float(resolved_alpha_half_flip_angle_deg)
+    )
+    sequence.set_definition(
+        "AlphaHalfCenterSpacing", float(resolved_alpha_half_center_spacing_s)
+    )
+    sequence.set_definition("AlphaHalfUsesRatios", bool(alpha_half_use_ratios))
+    sequence.set_definition(
+        "AlphaHalfTRRatio", float(resolved_alpha_half_center_spacing_s / actual_tr)
+    )
+    sequence.set_definition(
+        "AlphaHalfFlipRatio",
+        float(resolved_alpha_half_flip_angle_deg / float(flip_angle_deg)),
+    )
     sequence.set_definition(
         "AcquisitionTimePerVolume", n_phase * n_partition * actual_tr
     )
     sequence.set_definition(
         "PreparedFirstVolumeAcquisitionTime",
-        n_phase * n_partition * actual_tr + (actual_tr / 2 if use_alpha_half else 0.0),
+        n_phase * n_partition * actual_tr
+        + (resolved_alpha_half_center_spacing_s if use_alpha_half else 0.0),
     )
     sequence.set_definition("FieldStrengthT", float(field_strength_t))
     sequence.set_definition("Nucleus", nucleus)
@@ -1440,6 +1558,11 @@ def make_pulseq_radial_me_bssfp(
     rf_phase_start_deg: float = 0.0,
     rf_phase_increment_deg: float = 180.0,
     use_alpha_half: bool = True,
+    alpha_half_use_ratios: bool = True,
+    alpha_half_tr_ratio: float = 0.5,
+    alpha_half_flip_ratio: float = 0.5,
+    alpha_half_center_spacing_s: float | None = None,
+    alpha_half_flip_angle_deg: float | None = None,
     use_tip_back: bool = True,
     prephaser_duration_s: float = 0.5e-3,
     inter_measurement_rotation_deg: float = GOLDEN_ANGLE_DEG,
@@ -1488,6 +1611,32 @@ def make_pulseq_radial_me_bssfp(
     nucleus = str(nucleus).strip()
     if not nucleus:
         raise ValueError("nucleus must not be empty")
+    if alpha_half_use_ratios:
+        for name, value in {
+            "alpha_half_tr_ratio": alpha_half_tr_ratio,
+            "alpha_half_flip_ratio": alpha_half_flip_ratio,
+        }.items():
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be positive and finite")
+        resolved_alpha_half_flip_angle_deg = float(flip_angle_deg) * float(
+            alpha_half_flip_ratio
+        )
+    else:
+        resolved_alpha_half_flip_angle_deg = (
+            float(flip_angle_deg) / 2
+            if alpha_half_flip_angle_deg is None
+            else float(alpha_half_flip_angle_deg)
+        )
+        if (
+            not np.isfinite(resolved_alpha_half_flip_angle_deg)
+            or resolved_alpha_half_flip_angle_deg <= 0
+        ):
+            raise ValueError("alpha_half_flip_angle_deg must be positive and finite")
+        if alpha_half_center_spacing_s is not None and (
+            not np.isfinite(alpha_half_center_spacing_s)
+            or alpha_half_center_spacing_s <= 0
+        ):
+            raise ValueError("alpha_half_center_spacing_s must be positive and finite")
 
     system = _make_system(
         pp,
@@ -1532,7 +1681,7 @@ def make_pulseq_radial_me_bssfp(
             system,
             flip_angles_deg=(
                 flip_angle_deg,
-                flip_angle_deg / 2,
+                resolved_alpha_half_flip_angle_deg,
                 flip_angle_deg / 2,
             ),
             pulse_type=rf_pulse_type,
@@ -1582,6 +1731,15 @@ def make_pulseq_radial_me_bssfp(
         )
     actual_tr = occupied_tr + trailing_delay
     actual_echo_spacing = readout_block_duration + flyback_duration
+    resolved_alpha_half_center_spacing_s = (
+        actual_tr * float(alpha_half_tr_ratio)
+        if alpha_half_use_ratios
+        else (
+            actual_tr / 2
+            if alpha_half_center_spacing_s is None
+            else float(alpha_half_center_spacing_s)
+        )
+    )
 
     if use_alpha_half:
         alpha_half.phase_offset = pulseq_phase_offset_rad(
@@ -1591,14 +1749,16 @@ def make_pulseq_radial_me_bssfp(
         )
         sequence.add_block(alpha_half)
         preparation_delay = (
-            actual_tr / 2
+            resolved_alpha_half_center_spacing_s
             - pp.calc_duration(alpha_half)
             + alpha_center_from_start
             - rf_center_from_start
         )
         preparation_delay = round(preparation_delay / raster) * raster
         if preparation_delay < 0:
-            raise ValueError("TR/2 is too short for alpha/2 preparation")
+            raise ValueError(
+                "First TR is too short for the configured preparation pulse"
+            )
         if preparation_delay:
             sequence.add_block(pp.make_delay(preparation_delay))
 
@@ -1754,6 +1914,21 @@ def make_pulseq_radial_me_bssfp(
     sequence.set_definition("RFPhaseIncrementDeg", float(rf_phase_increment_deg))
     sequence.set_definition("FrequencyOffsetPhaseCoherent", True)
     sequence.set_definition("UseAlphaHalf", bool(use_alpha_half))
+    sequence.set_definition("AlphaHalfPhaseDeg", float(rf_phase_start_deg))
+    sequence.set_definition(
+        "AlphaHalfFlipAngleDeg", float(resolved_alpha_half_flip_angle_deg)
+    )
+    sequence.set_definition(
+        "AlphaHalfCenterSpacing", float(resolved_alpha_half_center_spacing_s)
+    )
+    sequence.set_definition("AlphaHalfUsesRatios", bool(alpha_half_use_ratios))
+    sequence.set_definition(
+        "AlphaHalfTRRatio", float(resolved_alpha_half_center_spacing_s / actual_tr)
+    )
+    sequence.set_definition(
+        "AlphaHalfFlipRatio",
+        float(resolved_alpha_half_flip_angle_deg / float(flip_angle_deg)),
+    )
     sequence.set_definition("UseTipBack", bool(use_tip_back))
     set_rf_definitions(
         sequence,
