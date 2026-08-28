@@ -52,6 +52,7 @@ jobs:
 
       - name: Require a successful Tests run for this SHA on main
         uses: actions/github-script@v8
+        timeout-minutes: 15
         with:
           script: |
             const sha = context.sha;
@@ -80,31 +81,57 @@ jobs:
               }
             }
 
-            const response = await github.rest.actions.listWorkflowRuns({
-              owner,
-              repo,
-              workflow_id: 'tests.yml',
-              branch: requiredBranch,
-              event: 'push',
-              head_sha: sha,
-              status: 'completed',
-              per_page: 100,
-            });
+            let successfulRun;
+            for (let attempt = 1; attempt <= 40; attempt += 1) {
+              const response = await github.rest.actions.listWorkflowRuns({
+                owner,
+                repo,
+                workflow_id: 'tests.yml',
+                branch: requiredBranch,
+                event: 'push',
+                head_sha: sha,
+                per_page: 100,
+              });
 
-            const successfulRun = response.data.workflow_runs.find((run) =>
-              run.head_sha === sha &&
-              run.head_branch === requiredBranch &&
-              run.event === 'push' &&
-              run.status === 'completed' &&
-              run.conclusion === 'success'
-            );
+              const matchingRuns = response.data.workflow_runs.filter((run) =>
+                run.head_sha === sha &&
+                run.head_branch === requiredBranch &&
+                run.event === 'push'
+              );
+              successfulRun = matchingRuns.find((run) =>
+                run.status === 'completed' && run.conclusion === 'success'
+              );
+              if (successfulRun) {
+                break;
+              }
+
+              const runningTest = matchingRuns.find((run) =>
+                run.status === 'queued' || run.status === 'in_progress'
+              );
+              const completedTest = matchingRuns.find((run) =>
+                run.status === 'completed'
+              );
+              if (completedTest && !runningTest) {
+                core.setFailed(
+                  `Release blocked: Tests run ${completedTest.html_url} ` +
+                  `completed with conclusion ${completedTest.conclusion}.`
+                );
+                return;
+              }
+
+              core.info(
+                `Waiting for push-triggered Tests run for ${sha} on ` +
+                `${requiredBranch} (attempt ${attempt}/40).`
+              );
+              await new Promise((resolve) => setTimeout(resolve, 15000));
+            }
 
             if (!successfulRun) {
               core.setFailed(
-                `Release blocked: ${sha} has no successful completed ` +
+                `Release blocked: ${sha} did not get a successful completed ` +
                 '`Tests` workflow run triggered by a push to ' +
-                `${requiredBranch}. Push and successfully test this exact ` +
-                `commit on ${requiredBranch} before tagging it.`
+                `${requiredBranch} within 10 minutes. Push and successfully ` +
+                `test this exact commit on ${requiredBranch} before tagging it.`
               );
               return;
             }

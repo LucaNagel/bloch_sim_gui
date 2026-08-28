@@ -110,8 +110,10 @@ def main():
     print("Next steps:")
     print(f"  git add .")
     print(f'  git commit -m "Bump version to {new_version}"')
+    print("  git push origin main")
+    print("  # Wait for the Tests workflow on main to succeed, then:")
     print(f"  git tag v{new_version}")
-    print(f"  git push origin main v{new_version}")
+    print(f"  git push origin v{new_version}")
 
 
 if __name__ == "__main__":
