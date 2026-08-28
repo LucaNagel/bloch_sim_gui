@@ -5,7 +5,7 @@ import pyqtgraph as pg
 import pytest
 from PyQt5.QtCore import QPointF, QSettings, Qt
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication, QDialog, QHeaderView, QWidget
+from PyQt5.QtWidgets import QApplication, QGroupBox, QHeaderView, QWidget
 from unittest.mock import MagicMock, patch
 
 from blochsimulator import BlochSimulator
@@ -35,7 +35,7 @@ from blochsimulator.phantom_widget import (
 from blochsimulator.units import hz_to_ppm, ppm_to_hz
 
 
-def test_new_phantom_designer_uses_saved_fov_and_nucleus_defaults(tmp_path):
+def test_new_phantom_designer_uses_new_spectral_defaults(tmp_path):
     app = QApplication.instance() or QApplication([])
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
     settings.setValue("defaults/phantom_fov_x_mm", 80.0)
@@ -46,14 +46,32 @@ def test_new_phantom_designer_uses_saved_fov_and_nucleus_defaults(tmp_path):
 
     dialog = SpectralPhantomDesignerDialog(settings=settings)
 
+    assert [spin.value() for spin in dialog.matrix_spins] == [64, 64, 64]
     assert [spin.value() for spin in dialog.fov_spins] == pytest.approx(
-        [80.0, 70.0, 60.0]
+        [80.0, 70.0, 32.0]
     )
     assert dialog.nucleus.currentData() == "C13"
     assert dialog.field_strength_t.value() == 7.0
+    assert dialog.spectral_bandwidth_ppm.value() == pytest.approx(10.0)
+    assert dialog.spectral_points.value() == 257
+    assert dialog.spectral_window_center_ppm.value() == pytest.approx(0.0)
+    assert float(dialog.peak_table.item(0, 5).text()) == pytest.approx(20.0)
     assert dialog.supersampling_enabled.isChecked()
     assert dialog.supersampling_factor.isEnabled()
     assert dialog.design.shapes[0].kind == "cylinder"
+    assert {group.title() for group in dialog.findChildren(QGroupBox)} >= {
+        "Phantom geometry",
+        "Spectral settings and preview",
+    }
+    preview_frequency, preview_spectrum = dialog.spectral_preview_curve.getData()
+    assert preview_frequency[[0, -1]] == pytest.approx([-5.0, 5.0])
+    assert preview_spectrum.max() > 0.0
+    assert dialog.spectral_reference_line.value() == pytest.approx(0.0)
+
+    dialog._add_shape("box")
+    assert dialog.design.shapes[-1].peaks[0].t2_star_s == pytest.approx(0.020)
+    dialog._add_peak()
+    assert dialog.design.shapes[-1].peaks[-1].t2_star_s == pytest.approx(0.020)
     dialog.close()
     app.processEvents()
 
@@ -427,6 +445,39 @@ def test_spectral_preview_uses_absolute_ppm_by_default_and_optional_hz_conversio
     assert hz_spectrum.max() > 0
 
 
+def test_spectral_window_center_is_independent_of_sequence_reference():
+    design = PhantomDesign(
+        name="Asymmetric C13 window",
+        shape=(1, 1, 1),
+        fov_m=(0.01, 0.01, 0.01),
+        field_strength_t=7.0,
+        nucleus="C13",
+        spectral_reference_ppm=175.0,
+        spectral_window_center_ppm=177.5,
+        spectral_bandwidth_ppm=15.0,
+        spectral_points=257,
+        shapes=[
+            ShapeDefinition(
+                name="Voxel",
+                kind="box",
+                size=(1.0, 1.0, 1.0),
+                peaks=[SpectralPeakDefinition("Peak", 1.0, 5.0, 0.02)],
+            )
+        ],
+    )
+
+    phantom = design.build()
+    ppm_axis, _ = phantom.spectrum_at_ppm((0, 0, 0))
+    relative_ppm_axis, _ = phantom.spectrum_at_ppm((0, 0, 0), absolute=False)
+    hz_axis, _ = phantom.spectrum_at((0, 0, 0))
+
+    assert ppm_axis[[0, -1]] == pytest.approx([170.0, 185.0])
+    assert relative_ppm_axis[[0, -1]] == pytest.approx([-5.0, 10.0])
+    assert hz_axis[[0, -1]] == pytest.approx(
+        [ppm_to_hz(-5.0, 7.0, "C13"), ppm_to_hz(10.0, 7.0, "C13")]
+    )
+
+
 @pytest.mark.parametrize(
     "mode,constant_axis",
     [("linear_x", 0), ("linear_y", 1), ("linear_z", 2), ("radial_xy", 2)],
@@ -537,6 +588,7 @@ def test_legacy_dynamic_pool_weights_migrate_to_peak_polarization():
 @pytest.mark.parametrize("suffix", [".npz", ".h5", ".nc"])
 def test_spectral_phantom_round_trip_preserves_design(tmp_path, suffix):
     design = _spectral_design()
+    design.spectral_window_center_ppm = 3.5
     design.shapes[0].initial_mz = 25.0
     phantom = design.build()
     path = tmp_path / f"spectral{suffix}"
@@ -545,6 +597,7 @@ def test_spectral_phantom_round_trip_preserves_design(tmp_path, suffix):
 
     assert loaded.shape == phantom.shape
     assert loaded.fov == phantom.fov
+    assert loaded.spectral_window_center_ppm == pytest.approx(3.5)
     assert [item.name for item in loaded.species] == [
         item.name for item in phantom.species
     ]
@@ -799,15 +852,15 @@ def test_designer_supports_exact_numeric_xy_shape_placement():
     app.processEvents()
 
 
-def test_designer_uses_left_geometry_controls_and_fitted_peak_columns():
+def test_designer_uses_compact_geometry_controls_and_fitted_peak_columns():
     app = QApplication.instance() or QApplication([])
     dialog = SpectralPhantomDesignerDialog(design=_spectral_design())
     shape_panel = dialog.shape_splitter.widget(0)
     shape_button_grid = shape_panel.layout().itemAt(2).layout()
 
     assert shape_panel.maximumWidth() == 360
-    assert shape_button_grid.rowCount() == 7
-    assert shape_button_grid.columnCount() == 1
+    assert shape_button_grid.rowCount() == 4
+    assert shape_button_grid.columnCount() == 2
     assert (
         dialog.peak_table.horizontalHeader().sectionResizeMode(0) == QHeaderView.Fixed
     )
@@ -918,6 +971,22 @@ def test_designer_xy_projection_displays_each_xyz_rotation(kind, axis):
     assert not np.allclose(bounds(tuple(rotation)), baseline)
 
 
+@pytest.mark.parametrize("kind", ["cylinder", "ellipsoid"])
+def test_designer_ellipse_roi_cannot_rotate_independently_from_xyz(kind):
+    app = QApplication.instance() or QApplication([])
+    dialog = SpectralPhantomDesignerDialog(design=_spectral_design())
+
+    dialog._add_shape(kind)
+    roi = dialog._rois[-1]
+
+    assert roi.rotatable is False
+    assert [handle["type"] for handle in roi.handles] == ["s"]
+    assert roi.angle() == pytest.approx(0.0)
+    assert dialog.design.shapes[-1].rotation_deg == pytest.approx((0.0, 0.0, 0.0))
+    dialog.close()
+    app.processEvents()
+
+
 def test_designer_allows_cylinder_length_beyond_the_fov():
     app = QApplication.instance() or QApplication([])
     dialog = SpectralPhantomDesignerDialog(design=_spectral_design())
@@ -942,6 +1011,9 @@ def test_designer_displays_absolute_peak_ppm_but_stores_relative_offsets():
     app = QApplication.instance() or QApplication([])
     design = PhantomDesign(
         spectral_reference_ppm=175.0,
+        spectral_window_center_ppm=177.5,
+        spectral_bandwidth_ppm=15.0,
+        spectral_points=257,
         shape=(2, 2, 2),
         fov_m=(0.02, 0.02, 0.02),
         shapes=[
@@ -969,6 +1041,9 @@ def test_designer_keeps_peak_ppm_fixed_when_spectral_reference_changes():
     app = QApplication.instance() or QApplication([])
     design = PhantomDesign(
         spectral_reference_ppm=175.0,
+        spectral_window_center_ppm=177.5,
+        spectral_bandwidth_ppm=15.0,
+        spectral_points=257,
         shape=(2, 2, 2),
         fov_m=(0.02, 0.02, 0.02),
         shapes=[
@@ -989,12 +1064,17 @@ def test_designer_keeps_peak_ppm_fixed_when_spectral_reference_changes():
     assert float(dialog.peak_table.item(0, 3).text()) == pytest.approx(170.0)
     assert design.shapes[0].peaks[0].frequency_ppm == pytest.approx(-2.0)
     assert design.shapes[1].peaks[0].frequency_ppm == pytest.approx(8.0)
+    assert dialog.spectral_window_center_ppm.value() == pytest.approx(177.5)
+    preview_frequency, _ = dialog.spectral_preview_curve.getData()
+    assert preview_frequency[[0, -1]] == pytest.approx([170.0, 185.0])
+    assert dialog.spectral_reference_line.value() == pytest.approx(172.0)
     dialog.shape_list.setCurrentRow(1)
     assert float(dialog.peak_table.item(0, 3).text()) == pytest.approx(180.0)
 
     dialog._sync_global()
     phantom = design.build()
     assert phantom.spectral_reference_ppm == pytest.approx(172.0)
+    assert phantom.spectral_window_center_ppm == pytest.approx(177.5)
     assert [species.chemical_shift_ppm for species in phantom.species] == pytest.approx(
         [-2.0, 8.0]
     )
@@ -1029,7 +1109,6 @@ def test_phantom_creator_retains_spectral_designer_dialog_lifetime():
     creator = PhantomCreatorWidget()
     phantom = _spectral_design().build()
     dialog = MagicMock()
-    dialog.exec_.return_value = QDialog.Accepted
     dialog.get_phantom.return_value = phantom
     assert creator.type_combo.itemText(0) == "Phantom Designer..."
     assert creator.type_combo.currentText() == "Phantom Designer..."
@@ -1045,8 +1124,13 @@ def test_phantom_creator_retains_spectral_designer_dialog_lifetime():
     ):
         creator.create_phantom()
 
-    assert creator.current_phantom is phantom
+    assert creator.current_phantom is None
     assert creator._retained_spectral_designer_dialogs == [dialog]
+    dialog.open.assert_called_once_with()
+    accepted_callback = dialog.accepted.connect.call_args.args[0]
+    accepted_callback()
+
+    assert creator.current_phantom is phantom
     assert not creator.edit_btn.isHidden()
     assert not creator.save_btn.isHidden()
 
@@ -1054,7 +1138,6 @@ def test_phantom_creator_retains_spectral_designer_dialog_lifetime():
     edited_design.name = "Edited in memory"
     edited_phantom = edited_design.build()
     edit_dialog = MagicMock()
-    edit_dialog.exec_.return_value = QDialog.Accepted
     edit_dialog.get_phantom.return_value = edited_phantom
     with patch(
         "blochsimulator.phantom_widget.SpectralPhantomDesignerDialog",
@@ -1064,7 +1147,30 @@ def test_phantom_creator_retains_spectral_designer_dialog_lifetime():
 
     reopened_design = designer_class.call_args.kwargs["design"]
     assert reopened_design.to_dict() == _spectral_design().to_dict()
+    edit_dialog.open.assert_called_once_with()
+    edit_dialog.accepted.connect.call_args.args[0]()
     assert creator.current_phantom.name == "Edited in memory"
+    creator.close()
+    app.processEvents()
+
+
+def test_phantom_creator_create_new_opens_visible_nonblocking_designer():
+    app = QApplication.instance() or QApplication([])
+    creator = PhantomCreatorWidget()
+    creator.show()
+
+    creator.create_btn.click()
+    app.processEvents()
+
+    assert len(creator._retained_spectral_designer_dialogs) == 1
+    dialog = creator._retained_spectral_designer_dialogs[0]
+    assert dialog.isVisible()
+    assert dialog.isModal()
+    assert dialog.tabs.isVisible()
+    assert dialog.spectral_preview_plot.isVisible()
+    assert dialog.layout().count() > 0
+
+    dialog.reject()
     creator.close()
     app.processEvents()
 

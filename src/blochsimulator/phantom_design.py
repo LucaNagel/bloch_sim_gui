@@ -121,6 +121,7 @@ class PhantomDesign:
     field_strength_t: float = 3.0
     nucleus: Optional[str] = None
     spectral_reference_ppm: float = 0.0
+    spectral_window_center_ppm: Optional[float] = None
     spectral_bandwidth_ppm: float = 20.0
     spectral_points: int = 1024
     supersampling_enabled: bool = True
@@ -154,6 +155,10 @@ class PhantomDesign:
             raise ValueError(f"unsupported nucleus {self.nucleus!r}")
         if not np.isfinite(self.spectral_reference_ppm):
             raise ValueError("spectral reference must be finite")
+        if self.spectral_window_center_ppm is not None and not np.isfinite(
+            self.spectral_window_center_ppm
+        ):
+            raise ValueError("spectral window center must be finite")
         if (
             not np.isfinite(self.spectral_bandwidth_ppm)
             or self.spectral_bandwidth_ppm <= 0
@@ -178,6 +183,7 @@ class PhantomDesign:
             "radial_xyz",
         }:
             raise ValueError("unsupported B0 inhomogeneity mode")
+
         if not np.isfinite(self.b0_inhomogeneity_ppm):
             raise ValueError("B0 inhomogeneity amplitude must be finite")
         if not np.isfinite(self.default_kpl_s_inv) or self.default_kpl_s_inv < 0:
@@ -215,6 +221,13 @@ class PhantomDesign:
             raise ValueError("shape names must be unique")
         for item in self.shapes:
             item.validate()
+
+    @property
+    def effective_spectral_window_center_ppm(self) -> float:
+        """Absolute center of the spectral sampling/preview window."""
+        if self.spectral_window_center_ppm is None:
+            return float(self.spectral_reference_ppm)
+        return float(self.spectral_window_center_ppm)
 
     def rasterize_mask(self, item: ShapeDefinition) -> np.ndarray:
         """Rasterize a shape, optionally returning subvoxel volume fractions.
@@ -423,6 +436,7 @@ class PhantomDesign:
                 field_strength=float(self.field_strength_t),
                 nucleus=effective_nucleus,
                 spectral_reference_ppm=float(self.spectral_reference_ppm),
+                spectral_window_center_ppm=(self.effective_spectral_window_center_ppm),
                 spectral_bandwidth_ppm=float(self.spectral_bandwidth_ppm),
                 spectral_points=int(self.spectral_points),
                 name=self.name,
@@ -459,6 +473,7 @@ class PhantomDesign:
             field_strength=float(self.field_strength_t),
             nucleus=effective_nucleus,
             spectral_reference_ppm=float(self.spectral_reference_ppm),
+            spectral_window_center_ppm=self.effective_spectral_window_center_ppm,
             spectral_bandwidth_ppm=float(self.spectral_bandwidth_ppm),
             spectral_points=int(self.spectral_points),
             name=self.name,
@@ -569,6 +584,11 @@ class PhantomDesign:
                 else str(data.get("nucleus", legacy_nucleus))
             ),
             spectral_reference_ppm=float(data.get("spectral_reference_ppm", 0.0)),
+            spectral_window_center_ppm=(
+                None
+                if data.get("spectral_window_center_ppm") is None
+                else float(data["spectral_window_center_ppm"])
+            ),
             spectral_bandwidth_ppm=float(data.get("spectral_bandwidth_ppm", 20.0)),
             spectral_points=int(data.get("spectral_points", 1024)),
             # Preserve the voxel-centre rasterization used by designs saved

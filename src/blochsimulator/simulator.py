@@ -2096,6 +2096,7 @@ class BlochSimulator:
                 "nucleus": effective_nucleus,
                 "frequency_input_unit": "ppm",
                 "spectral_reference_ppm": phantom.spectral_reference_ppm,
+                "spectral_window_center_ppm": phantom.spectral_window_center_ppm,
                 "spectral_bandwidth_ppm": phantom.spectral_bandwidth_ppm,
                 "spectral_points": phantom.spectral_points,
             }

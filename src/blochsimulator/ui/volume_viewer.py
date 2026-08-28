@@ -792,6 +792,14 @@ class PhantomInspectorWidget(QWidget):
             reference_suffix = (
                 f"; reference {reference:g} ppm" if reference is not None else ""
             )
+            if reference is not None:
+                reference_line = pg.InfiniteLine(
+                    pos=float(reference),
+                    angle=90,
+                    pen=pg.mkPen((255, 150, 60), width=2, style=Qt.DashLine),
+                )
+                reference_line.setZValue(100)
+                self.spectrum_plot.addItem(reference_line)
         else:
             frequency, spectrum = self.phantom.spectrum_at(
                 native_index,
@@ -805,11 +813,19 @@ class PhantomInspectorWidget(QWidget):
         self.spectrum_plot.setLabel("bottom", axis_label, axis_unit)
         self.spectrum_plot.plot(frequency, spectrum, pen=pg.mkPen("c", width=2))
         bandwidth = getattr(self.phantom, "spectral_bandwidth_ppm", None)
+        window_center = getattr(self.phantom, "spectral_window_center_ppm", None)
         points = getattr(self.phantom, "spectral_points", None)
         spectral_suffix = (
-            f"; BW {bandwidth:g} ppm, {points} points"
-            if bandwidth is not None and points is not None
-            else ""
+            f"; window center {window_center:g} ppm, BW {bandwidth:g} ppm, "
+            f"{points} points"
+            if window_center is not None
+            and bandwidth is not None
+            and points is not None
+            else (
+                f"; BW {bandwidth:g} ppm, {points} points"
+                if bandwidth is not None and points is not None
+                else ""
+            )
         )
         self.spectrum_info.setText(
             f"Voxel {native_index}; {self.phantom.n_species} Lorentzian components"

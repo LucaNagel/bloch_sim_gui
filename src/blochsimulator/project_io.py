@@ -13,7 +13,13 @@ import numpy as np
 
 from .b1_fields import B1Field
 from .ui.phantom_designer import load_any_phantom
-from .sequence import ADCEvent, GradientEvent, RFEvent, SequenceProgram
+from .sequence import (
+    ADCEvent,
+    GradientEvent,
+    RFEvent,
+    SequenceProbeResult,
+    SequenceProgram,
+)
 from .sequence.result import SequenceSimulationResult
 
 
@@ -72,6 +78,15 @@ def _result_summary(result):
             "final_magnetization_shape": _shape(result.final_magnetization),
             "checkpoint_count": int(np.size(result.checkpoint_times_s)),
             "pool_names": [str(name) for name in result.pool_names],
+            "metadata_keys": sorted(str(key) for key in result.metadata),
+        }
+    if isinstance(result, SequenceProbeResult):
+        return {
+            "kind": "spin-probe",
+            "time_samples": int(np.size(result.time_s)),
+            "positions": int(result.positions_m.shape[0]),
+            "frequencies": int(result.frequency_offsets_hz.size),
+            "magnetization_shape": _shape(result.magnetization),
             "metadata_keys": sorted(str(key) for key in result.metadata),
         }
     if isinstance(result, dict):
@@ -329,6 +344,21 @@ def _result_to_data(result, arrays):
             "kind": "sequence",
             "value": _encode(result.to_dict(), arrays, "result"),
         }
+    if isinstance(result, SequenceProbeResult):
+        return {
+            "kind": "spin-probe",
+            "value": _encode(
+                {
+                    "time_s": result.time_s,
+                    "positions_m": result.positions_m,
+                    "frequency_offsets_hz": result.frequency_offsets_hz,
+                    "magnetization": result.magnetization,
+                    "metadata": result.metadata,
+                },
+                arrays,
+                "probe_result",
+            ),
+        }
     if isinstance(result, dict):
         return {"kind": "legacy", "value": _encode(result, arrays, "result")}
     return None
@@ -340,6 +370,14 @@ def _result_from_data(data, arrays):
     value = _decode(data["value"], arrays)
     if data["kind"] == "legacy":
         return value
+    if data["kind"] == "spin-probe":
+        return SequenceProbeResult(
+            time_s=np.asarray(value["time_s"]),
+            positions_m=np.asarray(value["positions_m"]),
+            frequency_offsets_hz=np.asarray(value["frequency_offsets_hz"]),
+            magnetization=np.asarray(value["magnetization"]),
+            metadata=dict(value.get("metadata", {})),
+        )
     keys = (
         "signal",
         "adc_times_s",

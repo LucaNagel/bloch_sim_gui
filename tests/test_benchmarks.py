@@ -190,6 +190,7 @@ def test_resolution_volume_retains_every_z_plane(alias, expected_type):
         source.fov[2] / source.shape[2]
     )
     assert phantom.spectral_reference_ppm == source.spectral_reference_ppm
+    assert phantom.spectral_window_center_ppm == source.spectral_window_center_ppm
     assert phantom.spectral_bandwidth_ppm == source.spectral_bandwidth_ppm
     assert phantom.spectral_points == source.spectral_points
     assert phantom.metadata["resolution_benchmark_volume_mode"] == "full"

@@ -57,6 +57,18 @@ def _sequence_duration_s(sequence) -> float:
     return 0.0 if not sequence.block_events else float(sequence.duration()[0])
 
 
+def _rf_spoiling_phase_deg(excitation_index: int, increment_deg: float) -> float:
+    """Return the quadratic RF-spoiling phase for one excitation."""
+    return (
+        float(increment_deg * excitation_index * (excitation_index + 1) / 2.0) % 360.0
+    )
+
+
+def _uses_rf_spoiling(enabled: bool, increment_deg: float) -> bool:
+    """Return whether the configured phase increment produces RF spoiling."""
+    return bool(enabled) and not np.isclose(float(increment_deg) % 360.0, 0.0)
+
+
 def _finish_acquisition_interval(
     pp,
     sequence,
@@ -276,6 +288,8 @@ def make_pulseq_csi(
     repetition_time_s: float = 0.1,
     repetitions: int = 1,
     acquisition_interval_s: float | None = None,
+    rf_spoiling: bool = False,
+    rf_spoiling_increment_deg: float = 117.0,
     slice_offset_m: float = 0.0,
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     spoil_after_readout: bool = True,
@@ -322,6 +336,9 @@ def make_pulseq_csi(
         raise ValueError("slice_offset_m must be finite")
     if not np.isfinite(rf_frequency_offset_hz):
         raise ValueError("rf_frequency_offset_hz must be finite")
+    if not np.isfinite(rf_spoiling_increment_deg):
+        raise ValueError("rf_spoiling_increment_deg must be finite")
+    rf_spoiling = _uses_rf_spoiling(rf_spoiling, rf_spoiling_increment_deg)
 
     order = _phase_encoding_indices(n_x, n_y, phase_encoding_order, (fov_x, fov_y))
     if variable_flip_angle:
@@ -460,11 +477,23 @@ def make_pulseq_csi(
     acquisition_start_times = []
     acquisition_intervals = []
     minimum_acquisition_intervals = []
+    excitation_index = 0
     for repetition in range(repetitions):
         acquisition_start = _sequence_duration_s(sequence)
         acquisition_start_times.append(acquisition_start)
         for encoding_index, (x_index, y_index) in enumerate(order):
             rf, gz = rf_events[encoding_index if variable_flip_angle else 0]
+            rf_phase_deg = (
+                _rf_spoiling_phase_deg(excitation_index, rf_spoiling_increment_deg)
+                if rf_spoiling
+                else 0.0
+            )
+            total_frequency_offset_hz = float(rf.freq_offset)
+            rf.phase_offset = (
+                np.deg2rad(rf_phase_deg)
+                - 2.0 * np.pi * total_frequency_offset_hz * rf_center
+            )
+            adc.phase_offset = np.deg2rad(rf_phase_deg)
             gx_phase = make_role_trapezoid(
                 pp,
                 encoding_frame,
@@ -504,6 +533,7 @@ def make_pulseq_csi(
                 spoiler_end_times.append(float(sequence.duration()[0]))
             if tr_delay_value:
                 sequence.add_block(pp.make_delay(tr_delay_value))
+            excitation_index += 1
         minimum_interval = _sequence_duration_s(sequence) - acquisition_start
         actual_interval, _ = _finish_acquisition_interval(
             pp,
@@ -558,6 +588,8 @@ def make_pulseq_csi(
     )
     sequence.set_definition("SliceThickness", slice_thickness_m)
     sequence.set_definition("SliceOffset", float(slice_offset_m))
+    sequence.set_definition("RFSpoiling", bool(rf_spoiling))
+    sequence.set_definition("RFSpoilingIncrementDeg", rf_spoiling_increment_deg)
     _set_rf_definitions(
         sequence,
         pulse_type=rf_pulse_type,
@@ -1006,6 +1038,8 @@ def make_pulseq_epi(
     repetitions: int = 1,
     echo_time_s: float = 20e-3,
     repetition_time_s: float | None = 1.0,
+    rf_spoiling: bool = False,
+    rf_spoiling_increment_deg: float = 117.0,
     slice_offset_m: float = 0.0,
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     spoil_after_slice: bool = True,
@@ -1051,6 +1085,9 @@ def make_pulseq_epi(
         raise ValueError("rf_frequency_offset_hz must be finite")
     if not np.isfinite(slice_offset_m):
         raise ValueError("slice_offset_m must be finite")
+    if not np.isfinite(rf_spoiling_increment_deg):
+        raise ValueError("rf_spoiling_increment_deg must be finite")
+    rf_spoiling = _uses_rf_spoiling(rf_spoiling, rf_spoiling_increment_deg)
     for name, value in {
         "spoiler_cycles_per_slice": spoiler_cycles_per_slice,
         "spoiler_cycles_per_voxel": spoiler_cycles_per_voxel,
@@ -1230,6 +1267,7 @@ def make_pulseq_epi(
     acquisition_start_times = []
     acquisition_intervals = []
     minimum_acquisition_intervals = []
+    excitation_index = 0
     for repetition in range(repetitions):
         rf, gz = rf_events[repetition if variable_flip_angle else 0]
         repetition_start = (
@@ -1239,8 +1277,17 @@ def make_pulseq_epi(
         for slice_index, position in enumerate(slice_positions):
             logical_slice_amplitude = float(gz.amplitude) * slice_sign
             slice_frequency_offset_hz = logical_slice_amplitude * position
+            rf_phase_deg = (
+                _rf_spoiling_phase_deg(excitation_index, rf_spoiling_increment_deg)
+                if rf_spoiling
+                else 0.0
+            )
             rf.freq_offset = rf_frequency_offset_hz + slice_frequency_offset_hz
-            rf.phase_offset = -2 * np.pi * slice_frequency_offset_hz * rf_center
+            rf.phase_offset = (
+                np.deg2rad(rf_phase_deg)
+                - 2 * np.pi * slice_frequency_offset_hz * rf_center
+            )
+            adc.phase_offset = np.deg2rad(rf_phase_deg)
             sequence.add_block(
                 rf,
                 gz,
@@ -1258,6 +1305,7 @@ def make_pulseq_epi(
             if spoilers:
                 sequence.add_block(*spoilers)
                 spoiler_end_times.append(float(sequence.duration()[0]))
+            excitation_index += 1
         acquired = float(sequence.duration()[0]) - repetition_start
         if package_duration is None:
             package_duration = acquired
@@ -1324,6 +1372,8 @@ def make_pulseq_epi(
     sequence.set_definition("Repetitions", repetitions)
     sequence.set_definition("RepetitionTime", actual_repetition_time)
     sequence.set_definition("MinimumRepetitionTime", package_duration)
+    sequence.set_definition("RFSpoiling", bool(rf_spoiling))
+    sequence.set_definition("RFSpoilingIncrementDeg", rf_spoiling_increment_deg)
     sequence.set_definition("VolumeInterval", max(acquisition_intervals))
     _set_acquisition_interval_definitions(
         sequence,
@@ -1368,6 +1418,7 @@ def make_pulseq_flash(
     repetition_time_s: float = 15e-3,
     repetitions: int = 1,
     acquisition_interval_s: float | None = None,
+    rf_spoiling: bool = True,
     rf_spoiling_increment_deg: float = 117.0,
     spoiler_cycles_per_slice: float = 4.0,
     spoiler_cycles_per_voxel: float = 0.0,
@@ -1411,6 +1462,7 @@ def make_pulseq_flash(
         raise ValueError("slice_offset_m must be finite")
     if not np.isfinite(rf_spoiling_increment_deg):
         raise ValueError("rf_spoiling_increment_deg must be finite")
+    rf_spoiling = _uses_rf_spoiling(rf_spoiling, rf_spoiling_increment_deg)
     if not np.isfinite(rf_frequency_offset_hz):
         raise ValueError("rf_frequency_offset_hz must be finite")
 
@@ -1520,8 +1572,7 @@ def make_pulseq_flash(
     requested_tr_delay = repetition_time_s - line_without_tr_delay
     if requested_tr_delay < -1e-12:
         raise ValueError(
-            "repetition_time_s is too short; minimum is "
-            f"{line_without_tr_delay:.9g} s"
+            f"repetition_time_s is too short; minimum is {line_without_tr_delay:.9g} s"
         )
     tr_delay_value = _ceil_to_raster(
         max(0.0, requested_tr_delay), system.block_duration_raster
@@ -1546,11 +1597,10 @@ def make_pulseq_flash(
             slice_frequency_offset_hz = logical_slice_amplitude * position
             for line, phase_area in enumerate(phase_areas):
                 rf_phase_deg = (
-                    rf_spoiling_increment_deg
-                    * excitation_index
-                    * (excitation_index + 1)
-                    / 2.0
-                ) % 360.0
+                    _rf_spoiling_phase_deg(excitation_index, rf_spoiling_increment_deg)
+                    if rf_spoiling
+                    else 0.0
+                )
                 total_rf_frequency_offset_hz = (
                     rf_frequency_offset_hz + slice_frequency_offset_hz
                 )
@@ -1659,10 +1709,14 @@ def make_pulseq_flash(
     sequence.set_definition(
         "SlicePositions", [float(value) for value in slice_positions]
     )
+    sequence.set_definition("RFSpoiling", bool(rf_spoiling))
     sequence.set_definition("RFSpoilingIncrementDeg", rf_spoiling_increment_deg)
     sequence.set_definition("SpoilerCyclesPerSlice", spoiler_cycles_per_slice)
     sequence.set_definition("SpoilerCyclesPerVoxel", spoiler_cycles_per_voxel)
     sequence.set_definition("SpoilerDuration", spoiler_duration_s)
+    sequence.set_definition(
+        "SpoilerAxes", "".join(code[-1] for code in encoding_frame.axis_codes)
+    )
     sequence.set_definition("SpoilerEndTimes", spoiler_end_times)
     sequence.set_definition("IdealSpoilerEndTimes", spoiler_end_times)
     _set_rf_definitions(
@@ -1767,6 +1821,8 @@ def make_pulseq_spiral(
     repetitions: int = 1,
     echo_time_s: float = 20e-3,
     repetition_time_s: float | None = 1.0,
+    rf_spoiling: bool = False,
+    rf_spoiling_increment_deg: float = 117.0,
     slice_offset_m: float = 0.0,
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     spoil_after_slice: bool = True,
@@ -1821,6 +1877,9 @@ def make_pulseq_spiral(
         raise ValueError("rf_frequency_offset_hz must be finite")
     if not np.isfinite(slice_offset_m):
         raise ValueError("slice_offset_m must be finite")
+    if not np.isfinite(rf_spoiling_increment_deg):
+        raise ValueError("rf_spoiling_increment_deg must be finite")
+    rf_spoiling = _uses_rf_spoiling(rf_spoiling, rf_spoiling_increment_deg)
 
     if variable_flip_angle:
         flip_angle_schedule_deg = variable_flip_angle_schedule(
@@ -1997,6 +2056,7 @@ def make_pulseq_spiral(
     acquisition_start_times = []
     acquisition_intervals = []
     minimum_acquisition_intervals = []
+    excitation_index = 0
     for repetition in range(repetitions):
         rf, gz = rf_events[repetition if variable_flip_angle else 0]
         repetition_start = (
@@ -2006,8 +2066,17 @@ def make_pulseq_spiral(
         for slice_index, position in enumerate(slice_positions):
             logical_slice_amplitude = float(gz.amplitude) * slice_sign
             slice_frequency_offset_hz = logical_slice_amplitude * position
+            rf_phase_deg = (
+                _rf_spoiling_phase_deg(excitation_index, rf_spoiling_increment_deg)
+                if rf_spoiling
+                else 0.0
+            )
             rf.freq_offset = rf_frequency_offset_hz + slice_frequency_offset_hz
-            rf.phase_offset = -2.0 * np.pi * slice_frequency_offset_hz * rf_center
+            rf.phase_offset = (
+                np.deg2rad(rf_phase_deg)
+                - 2.0 * np.pi * slice_frequency_offset_hz * rf_center
+            )
+            adc.phase_offset = np.deg2rad(rf_phase_deg)
             sequence.add_block(
                 rf,
                 gz,
@@ -2022,6 +2091,7 @@ def make_pulseq_spiral(
             if spoilers:
                 sequence.add_block(*spoilers)
                 spoiler_end_times.append(float(sequence.duration()[0]))
+            excitation_index += 1
         acquired = float(sequence.duration()[0]) - repetition_start
         if minimum_repetition_time is None:
             minimum_repetition_time = acquired
@@ -2093,6 +2163,8 @@ def make_pulseq_spiral(
     sequence.set_definition("Repetitions", repetitions)
     sequence.set_definition("RepetitionTime", actual_repetition_time)
     sequence.set_definition("MinimumRepetitionTime", minimum_repetition_time)
+    sequence.set_definition("RFSpoiling", bool(rf_spoiling))
+    sequence.set_definition("RFSpoilingIncrementDeg", rf_spoiling_increment_deg)
     sequence.set_definition("VolumeInterval", max(acquisition_intervals))
     _set_acquisition_interval_definitions(
         sequence,

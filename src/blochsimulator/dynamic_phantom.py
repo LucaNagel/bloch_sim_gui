@@ -304,6 +304,7 @@ class DynamicSpectralPhantom:
     field_strength: float = 3.0
     nucleus: str = "C13"
     spectral_reference_ppm: float = 0.0
+    spectral_window_center_ppm: Optional[float] = None
     spectral_bandwidth_ppm: float = 20.0
     spectral_points: int = 1024
     name: str = "Dynamic pyruvate/lactate phantom"
@@ -322,6 +323,8 @@ class DynamicSpectralPhantom:
         self.fov = tuple(float(value) for value in self.fov)
         self.pools = tuple(self.pools)
         self.kinetic_regions = tuple(self.kinetic_regions)
+        if self.spectral_window_center_ppm is None:
+            self.spectral_window_center_ppm = float(self.spectral_reference_ppm)
         if len(self.shape) != 3 or any(value <= 0 for value in self.shape):
             raise ValueError("dynamic phantom shape requires three positive values")
         if (
@@ -340,6 +343,8 @@ class DynamicSpectralPhantom:
             raise ValueError("field strength must be positive and finite")
         if not np.isfinite(self.spectral_reference_ppm):
             raise ValueError("spectral reference must be finite")
+        if not np.isfinite(self.spectral_window_center_ppm):
+            raise ValueError("spectral window center must be finite")
         if (
             not np.isfinite(self.spectral_bandwidth_ppm)
             or self.spectral_bandwidth_ppm <= 0
@@ -640,9 +645,16 @@ class DynamicSpectralPhantom:
                     effective_nucleus,
                 )
             )
+            window_center_hz = float(
+                ppm_to_hz(
+                    self.spectral_window_center_ppm - self.spectral_reference_ppm,
+                    effective_field,
+                    effective_nucleus,
+                )
+            )
             frequency_hz = np.linspace(
-                -half_bandwidth_hz,
-                half_bandwidth_hz,
+                window_center_hz - half_bandwidth_hz,
+                window_center_hz + half_bandwidth_hz,
                 int(points),
             )
         frequency_hz = np.asarray(frequency_hz, dtype=float)
@@ -675,7 +687,11 @@ class DynamicSpectralPhantom:
         if points is None:
             points = self.spectral_points
         if frequency_ppm is None:
-            centre_ppm = self.spectral_reference_ppm if absolute else 0.0
+            centre_ppm = (
+                self.spectral_window_center_ppm
+                if absolute
+                else self.spectral_window_center_ppm - self.spectral_reference_ppm
+            )
             half_bandwidth_ppm = self.spectral_bandwidth_ppm / 2.0
             frequency_ppm = np.linspace(
                 centre_ppm - half_bandwidth_ppm,
@@ -863,12 +879,13 @@ class DynamicSpectralPhantom:
             coords=coords,
             attrs={
                 "format": "blochsimulator-dynamic-spectral-phantom-xarray",
-                "version": 2,
+                "version": 3,
                 "name": self.name,
                 "fov_m": np.asarray(self.fov, dtype=np.float64),
                 "field_strength": self.field_strength,
                 "nucleus": self.nucleus,
                 "spectral_reference_ppm": self.spectral_reference_ppm,
+                "spectral_window_center_ppm": self.spectral_window_center_ppm,
                 "spectral_bandwidth_ppm": self.spectral_bandwidth_ppm,
                 "spectral_points": self.spectral_points,
                 "has_b0_map": self.b0_map is not None,
@@ -974,6 +991,12 @@ class DynamicSpectralPhantom:
             field_strength=float(ds.attrs["field_strength"]),
             nucleus=str(ds.attrs["nucleus"]),
             spectral_reference_ppm=float(ds.attrs.get("spectral_reference_ppm", 0.0)),
+            spectral_window_center_ppm=float(
+                ds.attrs.get(
+                    "spectral_window_center_ppm",
+                    ds.attrs.get("spectral_reference_ppm", 0.0),
+                )
+            ),
             spectral_bandwidth_ppm=float(ds.attrs.get("spectral_bandwidth_ppm", 20.0)),
             spectral_points=int(ds.attrs.get("spectral_points", 1024)),
             name=str(ds.attrs.get("name", "Dynamic pyruvate/lactate phantom")),
@@ -991,12 +1014,13 @@ class DynamicSpectralPhantom:
         path = Path(filename)
         header = {
             "format": "blochsimulator-dynamic-spectral-phantom",
-            "version": 2,
+            "version": 3,
             "shape": self.shape,
             "fov": self.fov,
             "field_strength": self.field_strength,
             "nucleus": self.nucleus,
             "spectral_reference_ppm": self.spectral_reference_ppm,
+            "spectral_window_center_ppm": self.spectral_window_center_ppm,
             "spectral_bandwidth_ppm": self.spectral_bandwidth_ppm,
             "spectral_points": self.spectral_points,
             "name": self.name,
@@ -1145,6 +1169,12 @@ class DynamicSpectralPhantom:
             field_strength=header["field_strength"],
             nucleus=header["nucleus"],
             spectral_reference_ppm=float(header.get("spectral_reference_ppm", 0.0)),
+            spectral_window_center_ppm=float(
+                header.get(
+                    "spectral_window_center_ppm",
+                    header.get("spectral_reference_ppm", 0.0),
+                )
+            ),
             spectral_bandwidth_ppm=float(header.get("spectral_bandwidth_ppm", 20.0)),
             spectral_points=int(header.get("spectral_points", 1024)),
             name=header["name"],
@@ -3339,6 +3369,7 @@ def simulate_dynamic_sequence(
             "physical_rf_unit": "G",
             "physical_gradient_unit": "T/m",
             "spectral_reference_ppm": phantom.spectral_reference_ppm,
+            "spectral_window_center_ppm": phantom.spectral_window_center_ppm,
             "spectral_bandwidth_ppm": phantom.spectral_bandwidth_ppm,
             "spectral_points": phantom.spectral_points,
             "signal_weighting": signal_weighting,

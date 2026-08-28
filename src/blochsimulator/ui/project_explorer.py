@@ -157,6 +157,14 @@ def _detail_html(metadata):
     sequence_result = contents.get("sequence_result")
     if sequence_result:
         parts = []
+        if sequence_result.get("kind") == "spin-probe":
+            parts.extend(
+                [
+                    f"{int(sequence_result.get('positions', 0))} positions",
+                    f"{int(sequence_result.get('frequencies', 0))} frequencies",
+                    f"{int(sequence_result.get('time_samples', 0))} time samples",
+                ]
+            )
         signal_shape = _shape_text(sequence_result.get("signal_shape"))
         magnetization_shape = _shape_text(
             sequence_result.get("final_magnetization_shape")
@@ -170,7 +178,14 @@ def _detail_html(metadata):
         if sequence_result.get("checkpoint_count"):
             parts.append(f"{int(sequence_result['checkpoint_count'])} checkpoints")
         entries.append(
-            ("Sequence result", escape(" · ".join(parts) or "Stored result"))
+            (
+                (
+                    "Spin-probe result"
+                    if sequence_result.get("kind") == "spin-probe"
+                    else "Sequence result"
+                ),
+                escape(" · ".join(parts) or "Stored result"),
+            )
         )
 
     if entries:

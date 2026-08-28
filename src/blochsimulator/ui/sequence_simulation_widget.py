@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import math
 import sys
 import tempfile
@@ -11,11 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
+from uuid import uuid4
 
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import QProcess, QRectF, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -26,6 +29,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QGridLayout,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -39,7 +43,10 @@ from PyQt5.QtWidgets import (
     QStackedWidget,
     QSplitter,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -69,6 +76,7 @@ from ..sequence import (
     SpinSampling,
     analyze_adc_moment_train,
     analyze_repeated_spoiler_train,
+    ernst_angle_deg,
     export_bruker_raw,
     infer_cartesian_acquisition,
     infer_cartesian_acquisition_frames,
@@ -110,6 +118,7 @@ from .magnetization_viewer import MagnetizationViewer
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
 from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumViewer
 from .reconstruction_explorer import SequenceReconstructionExplorer
+from .simulation_explorer import SessionSimulationRun
 from .volume_viewer import (
     SequenceMagnetizationAnimationViewer,
     SequenceResultVolumeViewer,
@@ -314,6 +323,16 @@ class _SequenceLoadPayload:
     spectroscopic_acquisition: Optional[SpectroscopicAcquisition]
     spiral_acquisition: Optional[SpiralAcquisition]
     acquisition_note: str
+
+
+@dataclass(frozen=True)
+class _ErnstAngleContext:
+    angle_deg: float
+    angle_range_deg: tuple[float, float]
+    repetition_time_s: float
+    effective_t1_s: float
+    t1_range_s: tuple[float, float]
+    source: str
 
 
 @dataclass(frozen=True)
@@ -660,8 +679,7 @@ def _infer_sequence_acquisition(program, compiled):
         else:
             axes = ", ".join(acquisition_frames.varying_axes)
             note = (
-                f"{acquisition_frames.num_frames} Cartesian 2D frames "
-                f"inferred ({axes})"
+                f"{acquisition_frames.num_frames} Cartesian 2D frames inferred ({axes})"
             )
     except ValueError as frame_error:
         acquisition = None
@@ -810,8 +828,8 @@ class SequenceSimulationThread(QThread):
                 "spoiler_mode": self.spoiler_mode,
             }
             if self.live_preview:
-                kwargs["preview_callback"] = lambda fraction, signal: (
-                    self.preview.emit(fraction, signal)
+                kwargs["preview_callback"] = lambda fraction, signal: self.preview.emit(
+                    fraction, signal
                 )
             if isinstance(self.phantom, (SpectralPhantom, DynamicSpectralPhantom)):
                 kwargs.update(
@@ -831,8 +849,8 @@ class SequenceSimulationThread(QThread):
                     # Animation replay is UI-only. A float32 staging buffer keeps
                     # its peak memory well below the scientific float64 result.
                     replay_kwargs["checkpoint_dtype"] = "float32"
-                    replay_kwargs["progress_callback"] = (
-                        lambda done, total: self.progress.emit(total + done, 2 * total)
+                    replay_kwargs["progress_callback"] = lambda done, total: (
+                        self.progress.emit(total + done, 2 * total)
                     )
                     replay_kwargs.pop("preview_callback", None)
                     try:
@@ -1002,7 +1020,10 @@ class SequenceSimulationWidget(QWidget):
     # Keeping the focused panel at this width avoids a horizontal scroll bar
     # when switching away from the compact internal FID controls.
     FOCUSED_CONTROL_WIDTH = 600
-    MINIMUM_FOCUSED_CONTROL_WIDTH = 560
+    # Includes the vertical scrollbar and frame around the controls viewport.
+    # At 560 px the viewport is narrower than the controls' minimum size hint,
+    # which causes an unnecessary horizontal scrollbar on headless Qt.
+    MINIMUM_FOCUSED_CONTROL_WIDTH = 576
     MINIMUM_FOCUSED_VIEWER_WIDTH = 540
     INTERNAL_SOURCE = 0
     EPI_SOURCE = 1
@@ -1015,6 +1036,9 @@ class SequenceSimulationWidget(QWidget):
     PULSEQ_SOURCE = 8
     GENERATED_SOURCES = frozenset(range(EPI_SOURCE, FLASH_SOURCE + 1))
     CARTESIAN_3D_SOURCES = frozenset((BSSFP_SOURCE, SS_BSSFP_SOURCE, ME_BSSFP_SOURCE))
+    NO_PHANTOM_MESSAGE = (
+        "No phantom is loaded in the Phantom tab. Create or load one first."
+    )
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1033,6 +1057,8 @@ class SequenceSimulationWidget(QWidget):
         self.phantom: Optional[Phantom] = None
         self.result = None
         self.magnetization_animation = None
+        self._active_session_run_id = None
+        self._restoring_session_run = False
         self.probe_result = None
         self._split_csi_data = None
         self._csi_click_view_initialized = False
@@ -1048,6 +1074,8 @@ class SequenceSimulationWidget(QWidget):
         self._acquisition_compiled = None
         self._simulation_started_at = None
         self._simulation_started_at_utc = None
+        self._probe_started_at = None
+        self._probe_started_at_utc = None
         self._simulation_progress_started_at = None
         self._simulation_last_progress_at = None
         self._simulation_last_progress_done = 0
@@ -1474,8 +1502,7 @@ class SequenceSimulationWidget(QWidget):
         self.generate_sequence_button = QPushButton("Generate sequence")
         self.generate_sequence_button.setEnabled(False)
         self.generate_sequence_button.setToolTip(
-            "Generate the sequence from the current parameters and refresh "
-            "the timeline"
+            "Generate the sequence from the current parameters and refresh the timeline"
         )
         self.generate_sequence_button.clicked.connect(self._generate_sequence_clicked)
 
@@ -1527,6 +1554,25 @@ class SequenceSimulationWidget(QWidget):
         self.sequence_info = QLabel()
         self.sequence_info.setWordWrap(True)
         sequence_layout.addWidget(self.sequence_info)
+        self.sequence_summary_table = QTableWidget(0, 2)
+        self.sequence_summary_table.setHorizontalHeaderLabels(["Parameter", "Value"])
+        self.sequence_summary_table.verticalHeader().setVisible(False)
+        self.sequence_summary_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        self.sequence_summary_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.Stretch
+        )
+        self.sequence_summary_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.sequence_summary_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.sequence_summary_table.setAlternatingRowColors(True)
+        self.sequence_summary_table.setWordWrap(True)
+        self.sequence_summary_table.setShowGrid(False)
+        self.sequence_summary_table.setVisible(False)
+        self.sequence_summary_table.horizontalHeader().sectionResized.connect(
+            self._schedule_sequence_summary_table_fit
+        )
+        sequence_layout.addWidget(self.sequence_summary_table)
         controls_layout.addWidget(sequence_group)
 
         self.acquisition_group = QGroupBox("2D acquisition (EPI / spiral)")
@@ -1556,6 +1602,14 @@ class SequenceSimulationWidget(QWidget):
         self.epi_flip_angle_deg.setDecimals(2)
         self.epi_flip_angle_deg.setValue(90.0)
         self.epi_flip_angle_deg.setSuffix("°")
+        self.epi_use_ernst_angle = QCheckBox("Use phantom-derived angle")
+        self.epi_use_ernst_angle.setToolTip(
+            "Set the constant flip angle to acos(exp(-TR/T1)). This ideal "
+            "spoiled steady-state model assumes transverse spoiling, but does "
+            "not specifically require RF spoiling and does not depend on T2."
+        )
+        self.epi_ernst_info = QLabel()
+        self.epi_ernst_info.setWordWrap(True)
         self.epi_variable_flip_angle = QCheckBox("Enable across repetitions")
         self.epi_variable_flip_angle.setToolTip(
             "Use a hyperpolarized variable-flip-angle schedule that changes "
@@ -1635,6 +1689,11 @@ class SequenceSimulationWidget(QWidget):
         self.epi_spoil_after_slice.setToolTip(
             "Apply the configured gradient spoiler after every EPI slice readout"
         )
+        self.epi_rf_spoiling = QCheckBox("Enable RF spoiling")
+        self.epi_rf_spoiling.setChecked(False)
+        self.epi_rf_spoiling_increment_deg = self._parameter_spin(
+            -360.0, 360.0, 117.0, "°"
+        )
         self.epi_spoiler_cycles_per_slice = QDoubleSpinBox()
         self.epi_spoiler_cycles_per_slice.setRange(0.0, 1000.0)
         self.epi_spoiler_cycles_per_slice.setDecimals(3)
@@ -1670,6 +1729,8 @@ class SequenceSimulationWidget(QWidget):
         acquisition_form.addRow("Spiral revolutions", self.epi_spiral_turns)
         _add_form_section(acquisition_form, "RF pulse")
         acquisition_form.addRow("Flip angle (constant)", self.epi_flip_angle_deg)
+        acquisition_form.addRow("Ernst angle", self.epi_use_ernst_angle)
+        acquisition_form.addRow("Ernst calculation", self.epi_ernst_info)
         acquisition_form.addRow("Variable flip angle", self.epi_variable_flip_angle)
         acquisition_form.addRow(
             "VFA final flip angle", self.epi_vfa_final_flip_angle_deg
@@ -1703,6 +1764,10 @@ class SequenceSimulationWidget(QWidget):
         )
         acquisition_form.addRow("Repetitions", self.epi_repetitions)
         _add_form_section(acquisition_form, "Spoiling")
+        acquisition_form.addRow("RF spoiling", self.epi_rf_spoiling)
+        acquisition_form.addRow(
+            "RF spoiling increment", self.epi_rf_spoiling_increment_deg
+        )
         acquisition_form.addRow("Gradient spoiler", self.epi_spoil_after_slice)
         acquisition_form.addRow(
             "Through-slice spoiler", self.epi_spoiler_cycles_per_slice
@@ -1741,6 +1806,14 @@ class SequenceSimulationWidget(QWidget):
         self.csi_encoding_order = QComboBox()
         self.csi_encoding_order.addItems(["linear", "centric", "spiral"])
         self.csi_flip_angle_deg = self._parameter_spin(0.1, 360.0, 15.0, "°")
+        self.csi_use_ernst_angle = QCheckBox("Use phantom-derived angle")
+        self.csi_use_ernst_angle.setToolTip(
+            "Set the constant flip angle to acos(exp(-TR/T1)). This ideal "
+            "spoiled steady-state model assumes transverse spoiling, but does "
+            "not specifically require RF spoiling and does not depend on T2."
+        )
+        self.csi_ernst_info = QLabel()
+        self.csi_ernst_info.setWordWrap(True)
         self.csi_variable_flip_angle = QCheckBox("Enable across phase encodes")
         self.csi_variable_flip_angle.setToolTip(
             "Change the excitation angle at every CSI phase-encoding step and "
@@ -1772,6 +1845,11 @@ class SequenceSimulationWidget(QWidget):
         self.csi_repetitions.setRange(1, 10000)
         self.csi_repetitions.setValue(1)
         self.csi_acquisition_interval_ms = self._acquisition_interval_spin()
+        self.csi_rf_spoiling = QCheckBox("Enable RF spoiling")
+        self.csi_rf_spoiling.setChecked(False)
+        self.csi_rf_spoiling_increment_deg = self._parameter_spin(
+            -360.0, 360.0, 117.0, "°"
+        )
         self.csi_spoil_after_readout = QCheckBox("Enable after each FID")
         self.csi_spoil_after_readout.setChecked(True)
         self.csi_spoiler_cycles_per_slice = self._parameter_spin(
@@ -1795,6 +1873,8 @@ class SequenceSimulationWidget(QWidget):
         csi_form.addRow("Spectral bandwidth", self.csi_bandwidth_hz)
         _add_form_section(csi_form, "RF pulse")
         csi_form.addRow("Flip angle (constant)", self.csi_flip_angle_deg)
+        csi_form.addRow("Ernst angle", self.csi_use_ernst_angle)
+        csi_form.addRow("Ernst calculation", self.csi_ernst_info)
         csi_form.addRow("Variable flip angle", self.csi_variable_flip_angle)
         csi_form.addRow("VFA final flip angle", self.csi_vfa_final_flip_angle_deg)
         csi_form.addRow("VFA schedule", self.csi_vfa_info)
@@ -1821,6 +1901,8 @@ class SequenceSimulationWidget(QWidget):
             self.csi_acquisition_interval_ms,
         )
         _add_form_section(csi_form, "Spoiling")
+        csi_form.addRow("RF spoiling", self.csi_rf_spoiling)
+        csi_form.addRow("RF spoiling increment", self.csi_rf_spoiling_increment_deg)
         csi_form.addRow("Gradient spoiler", self.csi_spoil_after_readout)
         csi_form.addRow("Through-slice spoiler", self.csi_spoiler_cycles_per_slice)
         csi_form.addRow("In-plane spoiler", self.csi_spoiler_cycles_per_voxel)
@@ -1852,6 +1934,14 @@ class SequenceSimulationWidget(QWidget):
         )
         self.flash_sampling_bandwidth_khz = self._sampling_bandwidth_spin(100.0)
         self.flash_flip_angle_deg = self._parameter_spin(0.1, 360.0, 15.0, "°")
+        self.flash_use_ernst_angle = QCheckBox("Use phantom-derived angle")
+        self.flash_use_ernst_angle.setToolTip(
+            "Set the flip angle to acos(exp(-TR/T1)). This ideal spoiled "
+            "steady-state model assumes transverse spoiling, but does not "
+            "specifically require RF spoiling and does not depend on T2."
+        )
+        self.flash_ernst_info = QLabel()
+        self.flash_ernst_info.setWordWrap(True)
         (
             self.flash_slice_orientation,
             self.flash_read_gradient_axis,
@@ -1870,6 +1960,8 @@ class SequenceSimulationWidget(QWidget):
         self.flash_repetitions.setRange(1, 10000)
         self.flash_repetitions.setValue(1)
         self.flash_acquisition_interval_ms = self._acquisition_interval_spin()
+        self.flash_rf_spoiling = QCheckBox("Enable RF spoiling")
+        self.flash_rf_spoiling.setChecked(True)
         self.flash_rf_spoiling_increment_deg = self._parameter_spin(
             -360.0, 360.0, 117.0, "°"
         )
@@ -1890,6 +1982,9 @@ class SequenceSimulationWidget(QWidget):
         self.flash_spoiler_cycles_per_voxel.setDisabled(True)
         self.flash_spoiler_duration_ms = self._parameter_spin(0.001, 1000.0, 2.0, " ms")
         self.flash_dwell_info = QLabel()
+        # Retain the original FLASH-specific objects as a compatibility surface
+        # for callers that inspect the per-sequence check directly.  The visible
+        # UI uses the shared Spoiling quality unit created below.
         self.flash_spoiler_info = QLabel()
         self.flash_spoiler_info.setWordWrap(True)
         self.flash_apply_recommended_grid = QPushButton(
@@ -1908,6 +2003,8 @@ class SequenceSimulationWidget(QWidget):
         flash_form.addRow("Sampling bandwidth", self.flash_sampling_bandwidth_khz)
         _add_form_section(flash_form, "RF pulse")
         flash_form.addRow("Flip angle", self.flash_flip_angle_deg)
+        flash_form.addRow("Ernst angle", self.flash_use_ernst_angle)
+        flash_form.addRow("Ernst calculation", self.flash_ernst_info)
         self._add_shared_rf_controls(
             flash_form,
             "flash",
@@ -1933,13 +2030,12 @@ class SequenceSimulationWidget(QWidget):
             self.flash_acquisition_interval_ms,
         )
         _add_form_section(flash_form, "Spoiling")
+        flash_form.addRow("RF spoiling", self.flash_rf_spoiling)
         flash_form.addRow("RF spoiling increment", self.flash_rf_spoiling_increment_deg)
         flash_form.addRow("Auto spoiler", self.flash_auto_spoiler)
         flash_form.addRow("Through-slice spoiler", self.flash_spoiler_cycles_per_slice)
         flash_form.addRow("In-plane spoiler", self.flash_spoiler_cycles_per_voxel)
         flash_form.addRow("Spoiler duration", self.flash_spoiler_duration_ms)
-        flash_form.addRow("Spoiler check", self.flash_spoiler_info)
-        flash_form.addRow("Subvoxel recommendation", self.flash_apply_recommended_grid)
         _add_form_section(flash_form, "Derived sampling")
         flash_form.addRow("ADC dwell", self.flash_dwell_info)
         self.flash_group.setVisible(False)
@@ -2559,6 +2655,37 @@ class SequenceSimulationWidget(QWidget):
         self.me_bssfp_group.setVisible(False)
         controls_layout.addWidget(self.me_bssfp_group)
 
+        self.spoiling_quality_group = QGroupBox("Spoiling")
+        spoiling_quality_layout = QHBoxLayout(self.spoiling_quality_group)
+        spoiling_quality_layout.addWidget(QLabel("Quality"))
+        self.spoiling_quality_button = QToolButton()
+        self.spoiling_quality_button.setObjectName("spoiling_quality_info_button")
+        self.spoiling_quality_button.setText("ⓘ")
+        self.spoiling_quality_button.setAutoRaise(True)
+        self.spoiling_quality_button.setCursor(Qt.WhatsThisCursor)
+        self.spoiling_quality_button.setToolTipDuration(30000)
+        self.spoiling_quality_button.setAccessibleName("Spoiling quality details")
+        spoiling_quality_layout.addWidget(self.spoiling_quality_button)
+        self.spoiling_quality_status = QLabel("Details on hover")
+        self.spoiling_quality_status.setStyleSheet("color: #475569;")
+        spoiling_quality_layout.addWidget(self.spoiling_quality_status)
+        spoiling_quality_layout.addStretch()
+        # Retain the plain-text value for programmatic access and backwards
+        # compatibility; the user-facing presentation is the hover table.
+        self.spoiling_quality_info = QLabel()
+        self.spoiling_quality_info.setWordWrap(True)
+        self.spoiling_quality_info.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.spoiling_quality_info.hide()
+        self.spoiling_apply_recommended_grid = QPushButton(
+            "Apply recommended subvoxel grid"
+        )
+        self.spoiling_apply_recommended_grid.setToolTip(
+            "Apply the smallest tested regular midpoint grid whose retained "
+            "coherence follows the continuous voxel throughout this spoiler train."
+        )
+        spoiling_quality_layout.addWidget(self.spoiling_apply_recommended_grid)
+        controls_layout.addWidget(self.spoiling_quality_group)
+
         object_group = QGroupBox("Simulation object")
         object_form = _left_aligned_form(object_group)
         self.object_form = object_form
@@ -2645,6 +2772,30 @@ class SequenceSimulationWidget(QWidget):
         )
         object_form.addRow("Selected phantom", self.phantom_summary)
         self.phantom_summary_label = object_form.labelForField(self.phantom_summary)
+        self.simulation_object_table = QTableWidget(0, 2)
+        self.simulation_object_table.setHorizontalHeaderLabels(["Parameter", "Value"])
+        self.simulation_object_table.verticalHeader().setVisible(False)
+        self.simulation_object_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        self.simulation_object_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.Stretch
+        )
+        self.simulation_object_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.simulation_object_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.simulation_object_table.setAlternatingRowColors(True)
+        self.simulation_object_table.setWordWrap(True)
+        self.simulation_object_table.setShowGrid(False)
+        self.simulation_object_table.horizontalHeader().sectionResized.connect(
+            self._schedule_simulation_object_table_fit
+        )
+        object_form.addRow(self.simulation_object_table)
+        # Keep the old labels populated for API/test compatibility, but replace
+        # their multiline presentation with the structured table above.
+        self.frequency_reference_info.hide()
+        self.frequency_reference_label.hide()
+        self.phantom_summary.hide()
+        self.phantom_summary_label.hide()
         self.open_phantom_button = QPushButton("Open Phantom tab…")
         self.open_phantom_button.clicked.connect(self._open_phantom_tab)
         object_form.addRow(self.open_phantom_button)
@@ -2921,11 +3072,10 @@ class SequenceSimulationWidget(QWidget):
             self._acquisition_changed
         )
         self.epi_variable_flip_angle.toggled.connect(self._acquisition_changed)
-        self.epi_variable_flip_angle.toggled.connect(
-            self.epi_flip_angle_deg.setDisabled
-        )
-        self.epi_variable_flip_angle.toggled.connect(
-            self.epi_vfa_final_flip_angle_deg.setEnabled
+        self.epi_use_ernst_angle.toggled.connect(self._acquisition_changed)
+        self.epi_rf_spoiling.toggled.connect(self._acquisition_changed)
+        self.epi_rf_spoiling_increment_deg.valueChanged.connect(
+            self._acquisition_changed
         )
         self.epi_slice_count.valueChanged.connect(self._acquisition_changed)
         self.epi_repetitions.valueChanged.connect(self._acquisition_changed)
@@ -2977,6 +3127,7 @@ class SequenceSimulationWidget(QWidget):
             self.csi_repetition_time_ms,
             self.csi_repetitions,
             self.csi_acquisition_interval_ms,
+            self.csi_rf_spoiling_increment_deg,
             self.csi_spoiler_cycles_per_slice,
             self.csi_spoiler_cycles_per_voxel,
             self.csi_spoiler_duration_ms,
@@ -2992,12 +3143,8 @@ class SequenceSimulationWidget(QWidget):
             self._csi_changed,
         )
         self.csi_variable_flip_angle.toggled.connect(self._csi_changed)
-        self.csi_variable_flip_angle.toggled.connect(
-            self.csi_flip_angle_deg.setDisabled
-        )
-        self.csi_variable_flip_angle.toggled.connect(
-            self.csi_vfa_final_flip_angle_deg.setEnabled
-        )
+        self.csi_use_ernst_angle.toggled.connect(self._csi_changed)
+        self.csi_rf_spoiling.toggled.connect(self._csi_changed)
         self.csi_spoil_after_readout.toggled.connect(self._csi_changed)
         self.csi_spoil_after_readout.toggled.connect(
             self.csi_spoiler_cycles_per_slice.setEnabled
@@ -3032,9 +3179,14 @@ class SequenceSimulationWidget(QWidget):
             self.flash_spoiler_duration_ms,
         ):
             widget.valueChanged.connect(self._flash_changed)
+        self.flash_use_ernst_angle.toggled.connect(self._flash_changed)
+        self.flash_rf_spoiling.toggled.connect(self._flash_changed)
         self.flash_auto_spoiler.toggled.connect(self._flash_auto_spoiler_toggled)
         self.flash_apply_recommended_grid.clicked.connect(
             self._apply_flash_recommended_spin_grid
+        )
+        self.spoiling_apply_recommended_grid.clicked.connect(
+            self._apply_current_recommended_spin_grid
         )
         self.flash_rf_pulse_type.currentIndexChanged.connect(self._flash_changed)
         self._connect_two_dimensional_orientation_controls(
@@ -3202,6 +3354,36 @@ class SequenceSimulationWidget(QWidget):
             self._connect_shared_rf_controls(prefix, callback)
         self.fov_mm.valueChanged.connect(self._acquisition_changed)
         self.fov_z_mm.valueChanged.connect(self._acquisition_changed)
+        self.t1_ms.valueChanged.connect(self._phantom_relaxation_changed)
+        self.probe_t1_ms.valueChanged.connect(self._phantom_relaxation_changed)
+        self.object_type.currentIndexChanged.connect(self._phantom_relaxation_changed)
+        self.object_type.currentIndexChanged.connect(
+            self._update_simulation_object_table
+        )
+        for widget in self._built_in_object_widgets[1:]:
+            widget.valueChanged.connect(self._update_simulation_object_table)
+        for widget in (
+            self.matrix_size,
+            self.z_matrix_size,
+            self.fov_mm,
+            self.fov_z_mm,
+        ):
+            widget.valueChanged.connect(self._update_spoiling_quality)
+        for widget in (
+            self.probe_points,
+            self.probe_ppm_min,
+            self.probe_ppm_max,
+            self.probe_frequency_ppm,
+            self.probe_position_x_mm,
+            self.probe_position_y_mm,
+            self.probe_position_z_mm,
+            self.probe_t1_ms,
+            self.probe_t2_ms,
+        ):
+            widget.valueChanged.connect(self._update_simulation_object_table)
+        self.probe_frequency_units.currentIndexChanged.connect(
+            self._update_simulation_object_table
+        )
         self._update_bandwidth_labels()
         self._update_csi_labels()
         self._update_flash_labels()
@@ -4030,13 +4212,17 @@ class SequenceSimulationWidget(QWidget):
             widget.setEnabled(built_in_selected)
         self.built_in_properties_group.setVisible(built_in_selected)
         self.built_in_properties_group.setEnabled(built_in_selected)
-        self.phantom_summary.setVisible(phantom_selected)
-        self.phantom_summary_label.setVisible(phantom_selected)
+        self.phantom_summary.hide()
+        self.phantom_summary_label.hide()
+        self.frequency_reference_info.hide()
+        self.frequency_reference_label.hide()
         self.open_phantom_button.setVisible(phantom_selected)
         self.probe_group.setVisible(probe_selected)
         self._update_run_action_availability()
         self.refresh_object_summary()
+        self._update_all_ernst_controls()
         self._update_frequency_reference_info()
+        self._update_spoiling_quality()
         if probe_selected:
             phantom = self._selected_designed_phantom()
             if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
@@ -4070,19 +4256,24 @@ class SequenceSimulationWidget(QWidget):
     def refresh_object_summary(self, *_):
         """Refresh the read-only summary of the shared Phantom-tab object."""
         if self.object_source.currentIndex() != 0:
+            self._update_simulation_object_table()
+            self._update_spoiling_quality()
             return
         phantom = self._selected_designed_phantom()
         if phantom is None:
             self.phantom_summary.setText(
                 "No phantom selected. Create or load one in the Phantom tab."
             )
+            self._update_simulation_object_table()
             auto_changed = self._apply_flash_auto_spoilers()
             self._update_flash_spoiler_info()
+            self._update_spoiling_quality()
             if (
                 auto_changed
                 and self.sequence_source.currentIndex() == self.FLASH_SOURCE
             ):
                 self._request_generated_sequence_refresh()
+            self._phantom_relaxation_changed()
             return
         active = np.asarray(phantom.mask, dtype=bool)
         if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
@@ -4138,8 +4329,10 @@ class SequenceSimulationWidget(QWidget):
             self._request_generated_sequence_refresh()
         self._update_ss_bssfp_spoiler_info()
         self._update_frequency_reference_info()
+        self._update_spoiling_quality()
         if hasattr(self, "waveform_value_summary"):
             self._update_waveform_value_summary()
+        self._phantom_relaxation_changed()
 
     def _mark_sequence_generation_pending(self):
         source_index = self.sequence_source.currentIndex()
@@ -4151,13 +4344,15 @@ class SequenceSimulationWidget(QWidget):
             preview_text = "No generated sequence is loaded yet."
         else:
             preview_text = "The timeline still shows the previously loaded sequence."
-        self.sequence_info.setText(
+        self._show_sequence_message(
             "Sequence parameters changed. Click Generate sequence to refresh.\n"
             f"{preview_text}"
         )
         self._emit_physical_b1_changed()
 
     def _request_generated_sequence_refresh(self):
+        if self._restoring_session_run:
+            return False
         if self.sequence_source.currentIndex() not in self.GENERATED_SOURCES:
             return False
         self._mark_sequence_generation_pending()
@@ -4225,6 +4420,7 @@ class SequenceSimulationWidget(QWidget):
             self._generation_error = ""
             if source_index == self.FLASH_SOURCE:
                 self._update_flash_spoiler_info()
+            self._update_spoiling_quality()
             self._emit_physical_b1_changed()
             return True
         for name, value in previous_state.items():
@@ -4235,7 +4431,7 @@ class SequenceSimulationWidget(QWidget):
             message += "\nNo usable sequence is currently loaded."
         else:
             message += "\nThe timeline still shows the last valid sequence preview."
-        self.sequence_info.setText(message)
+        self._show_sequence_message(message)
         self._emit_physical_b1_changed()
         return False
 
@@ -4275,6 +4471,172 @@ class SequenceSimulationWidget(QWidget):
         self.nucleus.setVisible(conversion_enabled)
         self.nucleus_label.setVisible(conversion_enabled)
         self.frequency_reference_info.setText(text)
+        self.frequency_reference_info.hide()
+        self.frequency_reference_label.hide()
+        self._update_simulation_object_table()
+
+    def _simulation_object_summary_rows(self):
+        rows = [("Frequency model", self.frequency_reference_info.text())]
+        if self.field_strength_t.isEnabled():
+            rows.append(
+                (
+                    "Frequency reference",
+                    f"B0 {self.field_strength_t.value():g} T; "
+                    f"nucleus {self.nucleus.currentText()}",
+                )
+            )
+
+        source_index = self.object_source.currentIndex()
+        if source_index == 1:
+            rows.extend(
+                (
+                    ("Simulation object", self.object_type.currentText()),
+                    (
+                        "Geometry",
+                        f"matrix ({self.matrix_size.value()}, "
+                        f"{self.matrix_size.value()}, {self.z_matrix_size.value()}); "
+                        f"FOV {self.fov_mm.value():g} × {self.fov_mm.value():g} × "
+                        f"{self.fov_z_mm.value():g} mm",
+                    ),
+                    (
+                        "Relaxation / density",
+                        f"T1 {self.t1_ms.value():g} ms; T2/T2* "
+                        f"{self.t2_ms.value():g} ms; density {self.pd.value():g}",
+                    ),
+                    (
+                        "Frequency offsets",
+                        f"B0 {self.b0_ppm.value():g} ppm; chemical shift "
+                        f"{self.chemical_ppm.value():g} ppm",
+                    ),
+                )
+            )
+            return rows
+
+        if source_index == 2:
+            unit = self.probe_frequency_units.currentText()
+            rows.extend(
+                (
+                    ("Simulation object", "Spin probe"),
+                    (
+                        "Frequency samples",
+                        f"{self.probe_points.value()} points from "
+                        f"{self.probe_ppm_min.value():g} to "
+                        f"{self.probe_ppm_max.value():g} {unit}",
+                    ),
+                    (
+                        "Position",
+                        f"({self.probe_position_x_mm.value():g}, "
+                        f"{self.probe_position_y_mm.value():g}, "
+                        f"{self.probe_position_z_mm.value():g}) mm",
+                    ),
+                    (
+                        "Relaxation",
+                        f"T1 {self.probe_t1_ms.value():g} ms; T2/T2* "
+                        f"{self.probe_t2_ms.value():g} ms",
+                    ),
+                )
+            )
+            return rows
+
+        phantom = self._selected_designed_phantom()
+        if phantom is None:
+            rows.append(
+                (
+                    "Selected phantom",
+                    "No phantom selected. Create or load one in the Phantom tab.",
+                )
+            )
+            return rows
+
+        active = np.asarray(phantom.mask, dtype=bool)
+        t1 = np.asarray(phantom.t1_map)[active] * 1000.0
+        t2 = np.asarray(phantom.t2_map)[active] * 1000.0
+        fov_mm = " × ".join(f"{value * 1000:.4g}" for value in phantom.fov)
+        rows.extend(
+            (
+                ("Selected phantom", phantom.name),
+                (
+                    "Geometry",
+                    f"{phantom.ndim}D; matrix {tuple(phantom.shape)}; "
+                    f"FOV {fov_mm} mm; {phantom.n_active} active voxels",
+                ),
+                (
+                    "Relaxation",
+                    (
+                        f"T1 {t1.min():.4g}–{t1.max():.4g} ms; "
+                        f"T2/T2* {t2.min():.4g}–{t2.max():.4g} ms"
+                        if t1.size and t2.size
+                        else "No active tissue voxels"
+                    ),
+                ),
+            )
+        )
+        if isinstance(phantom, SpectralPhantom):
+            b0_hz = phantom.get_b0_offset_map_hz(
+                phantom.field_strength, phantom.nucleus
+            )
+        elif isinstance(phantom, DynamicSpectralPhantom):
+            b0_hz = phantom.b0_offset_hz(phantom.field_strength, phantom.nucleus)
+        else:
+            b0_hz = None
+        if b0_hz is not None:
+            active_b0 = np.asarray(b0_hz, dtype=float)[active]
+            if active_b0.size:
+                rows.append(
+                    (
+                        "B0",
+                        f"{phantom.field_strength:g} T {phantom.nucleus}; offset "
+                        f"{active_b0.min():.4g}–{active_b0.max():.4g} Hz",
+                    )
+                )
+        tx_map = getattr(phantom, "tx_sensitivity_map", None)
+        rx_maps = getattr(phantom, "rx_sensitivity_maps", None)
+        sensitivity_parts = []
+        if tx_map is not None:
+            active_tx = np.abs(np.asarray(tx_map))[active]
+            if active_tx.size:
+                sensitivity_parts.append(
+                    f"B1+ |scale| {active_tx.min():.4g}–{active_tx.max():.4g}"
+                )
+        if rx_maps is not None:
+            sensitivity_parts.append(
+                f"B1− {np.asarray(rx_maps).shape[0]} receive channel(s)"
+            )
+        if sensitivity_parts:
+            rows.append(("RF sensitivity", "; ".join(sensitivity_parts)))
+        return rows
+
+    def _update_simulation_object_table(self, *_):
+        if not hasattr(self, "simulation_object_table"):
+            return
+        table = self.simulation_object_table
+        rows = self._simulation_object_summary_rows()
+        table.setRowCount(len(rows))
+        for row, (parameter, value) in enumerate(rows):
+            parameter_item = QTableWidgetItem(str(parameter))
+            value_item = QTableWidgetItem(str(value))
+            parameter_item.setTextAlignment(Qt.AlignLeft | Qt.AlignTop)
+            value_item.setTextAlignment(Qt.AlignLeft | Qt.AlignTop)
+            table.setItem(row, 0, parameter_item)
+            table.setItem(row, 1, value_item)
+        self._fit_summary_table(table, 360)
+
+    @staticmethod
+    def _fit_summary_table(table, maximum_height):
+        table.resizeRowsToContents()
+        content_height = table.horizontalHeader().height() + 2 * table.frameWidth()
+        content_height += sum(table.rowHeight(row) for row in range(table.rowCount()))
+        table.setFixedHeight(min(maximum_height, max(80, content_height)))
+
+    def _schedule_simulation_object_table_fit(self, *_):
+        QTimer.singleShot(
+            0, lambda: self._fit_summary_table(self.simulation_object_table, 360)
+        )
+
+    def _schedule_sequence_summary_table_fit(self, *_):
+        QTimer.singleShot(
+            0, lambda: self._fit_summary_table(self.sequence_summary_table, 340)
+        )
 
     def _open_phantom_tab(self):
         main_window = self.window()
@@ -4288,6 +4650,27 @@ class SequenceSimulationWidget(QWidget):
                 "Phantom workspace unavailable",
                 "Open this widget inside the main application to use the Phantom tab.",
             )
+
+    def _show_no_phantom_dialog(self):
+        """Show the missing-phantom error with an in-app navigation link."""
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Critical)
+        dialog.setWindowTitle("Invalid simulation")
+        dialog.setTextFormat(Qt.RichText)
+        dialog.setText(
+            "No phantom is loaded in the Phantom tab. Create or load one first."
+            "<br><br><a href='open-phantom'>Open the Phantom tab</a>"
+        )
+        dialog.setStandardButtons(QMessageBox.Ok)
+
+        def open_phantom(_link):
+            dialog.accept()
+            self._open_phantom_tab()
+
+        for label in dialog.findChildren(QLabel):
+            label.setOpenExternalLinks(False)
+            label.linkActivated.connect(open_phantom)
+        dialog.exec_()
 
     def _source_changed(self, *_):
         source_index = self.sequence_source.currentIndex()
@@ -4325,6 +4708,9 @@ class SequenceSimulationWidget(QWidget):
             if epi_selected
             else "Select EPI under Source / mode to enable these settings."
         )
+        if self._restoring_session_run:
+            self._update_spoiling_quality()
+            return
         if source_index == self.INTERNAL_SOURCE:
             self._sequence_generation_pending = False
             self._generated_sequence_source_index = None
@@ -4334,6 +4720,7 @@ class SequenceSimulationWidget(QWidget):
                 self._mark_sequence_generation_pending()
             if self.sequence_live_preview.isChecked():
                 self._reload_selected_generated_sequence()
+        self._update_spoiling_quality()
 
     def _three_dimensional_encoding_frame(self, source_index=None):
         if source_index is None:
@@ -4366,6 +4753,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _acquisition_changed(self, *_):
         self._update_bandwidth_labels()
+        self._update_spoiling_quality()
         self._request_generated_sequence_refresh()
 
     def _readout_trajectory_changed(self, *_):
@@ -4392,11 +4780,13 @@ class SequenceSimulationWidget(QWidget):
 
     def _csi_changed(self, *_):
         self._update_csi_labels()
+        self._update_spoiling_quality()
         if self.sequence_source.currentIndex() == 2:
             self._request_generated_sequence_refresh()
 
     def _flash_changed(self, *_):
         self._update_flash_labels()
+        self._update_spoiling_quality()
         if self.sequence_source.currentIndex() == self.FLASH_SOURCE:
             self._request_generated_sequence_refresh()
 
@@ -4407,11 +4797,13 @@ class SequenceSimulationWidget(QWidget):
 
     def _bssfp_changed(self, *_):
         self._update_bssfp_labels()
+        self._update_spoiling_quality()
         if self.sequence_source.currentIndex() == 3:
             self._request_generated_sequence_refresh()
 
     def _ss_bssfp_changed(self, *_):
         self._update_ss_bssfp_labels()
+        self._update_spoiling_quality()
         if self.sequence_source.currentIndex() == 4:
             self._request_generated_sequence_refresh()
 
@@ -4467,6 +4859,15 @@ class SequenceSimulationWidget(QWidget):
         return tuple(offsets)
 
     def _phantom_voxel_sizes_xyz_m(self):
+        source_index = self.object_source.currentIndex()
+        if source_index == 1:
+            return (
+                self.fov_mm.value() / (1000.0 * self.matrix_size.value()),
+                self.fov_mm.value() / (1000.0 * self.matrix_size.value()),
+                self.fov_z_mm.value() / (1000.0 * self.z_matrix_size.value()),
+            )
+        if source_index == 2:
+            return None
         phantom = self._selected_designed_phantom()
         if phantom is None:
             phantom = self.phantom
@@ -4725,6 +5126,45 @@ class SequenceSimulationWidget(QWidget):
             message += " Auto spoiler reached the control limit before its target."
         elif self.flash_auto_spoiler.isChecked():
             message += " Auto spoiler targets the first coherence null."
+        self._flash_spoiling_quality_rows = [
+            ("Sequence", "FLASH (2D)"),
+            (
+                "Cycles / phantom voxel XYZ",
+                ", ".join(f"{value:.4g}" for value in cycles_xyz),
+            ),
+            (
+                "Current subvoxel grid",
+                f"{counts[0]}×{counts[1]}×{counts[2]} "
+                f"{self.subvoxel_sampling_method}",
+            ),
+            (
+                "Ideal coherence after one crusher",
+                f"{100 * report.single_continuous_coherence:.3g}%",
+            ),
+            (
+                "Sampled coherence after one crusher",
+                f"{100 * report.single_sampled_coherence:.3g}%",
+            ),
+            (
+                "Maximum train sampling error",
+                f"{100 * report.maximum_sampling_error:.3g}%",
+            ),
+            ("Evaluation source", report_source),
+            (
+                "Recommended grid",
+                f"{recommendation_counts[0]}×{recommendation_counts[1]}×"
+                f"{recommendation_counts[2]} midpoint "
+                f"({recommendation.spins_per_voxel} spins; "
+                f"{100 * recommendation.maximum_sampling_error:.3g}% error)",
+            ),
+        ]
+        if report.first_alias_observation is not None:
+            self._flash_spoiling_quality_rows.append(
+                (
+                    "First artificial rephasing",
+                    f"Order {report.first_alias_observation}",
+                )
+            )
         self.flash_spoiler_info.setText(message)
         self.flash_spoiler_info.setStyleSheet(
             "color: #b45309;" if warning else "color: #15803d;"
@@ -4740,6 +5180,11 @@ class SequenceSimulationWidget(QWidget):
             else f"Apply {recommendation_counts[0]}×{recommendation_counts[1]}"
             f"×{recommendation_counts[2]} midpoint grid"
         )
+        if (
+            hasattr(self, "spoiling_quality_info")
+            and self.sequence_source.currentIndex() == self.FLASH_SOURCE
+        ):
+            self._sync_flash_spoiling_quality()
 
     def _apply_flash_recommended_spin_grid(self):
         recommendation = getattr(self, "_flash_spin_grid_recommendation", None)
@@ -4757,6 +5202,483 @@ class SequenceSimulationWidget(QWidget):
         self.set_spoiler_configuration(
             self.spoiler_mode, recommendation.counts_xyz, recommendation.method
         )
+
+    def _apply_current_recommended_spin_grid(self):
+        recommendation = getattr(self, "_spoiling_spin_grid_recommendation", None)
+        if recommendation is None:
+            return
+        if self.app_settings is not None:
+            self.app_settings.setValue(
+                "sequence/subvoxel_sampling_method", recommendation.method
+            )
+            for axis, count in zip("xyz", recommendation.counts_xyz):
+                self.app_settings.setValue(
+                    f"sequence/subvoxel_spins_{axis}", int(count)
+                )
+            self.app_settings.sync()
+        self.set_spoiler_configuration(
+            self.spoiler_mode, recommendation.counts_xyz, recommendation.method
+        )
+
+    def _two_dimensional_spoiler_spec(self, source_index):
+        if source_index == self.EPI_SOURCE:
+            enabled = self.epi_spoil_after_slice.isChecked()
+            role_reference_sizes = (
+                self.epi_read_fov_mm.value() / (1000.0 * self.read_matrix.value()),
+                self.epi_phase_fov_mm.value() / (1000.0 * self.phase_matrix.value()),
+                self.epi_slice_thickness_mm.value() / 1000.0,
+            )
+            role_cycles = (
+                self.epi_spoiler_cycles_per_voxel.value(),
+                self.epi_spoiler_cycles_per_voxel.value(),
+                self.epi_spoiler_cycles_per_slice.value(),
+            )
+            excitation_count = (
+                self.epi_slice_count.value() * self.epi_repetitions.value()
+            )
+            name = "EPI / spiral end-of-slice spoiler"
+        elif source_index == self.CSI_SOURCE:
+            enabled = self.csi_spoil_after_readout.isChecked()
+            role_reference_sizes = (
+                self.csi_read_fov_mm.value() / (1000.0 * self.csi_read_matrix.value()),
+                self.csi_phase_fov_mm.value()
+                / (1000.0 * self.csi_phase_matrix.value()),
+                self.csi_slice_thickness_mm.value() / 1000.0,
+            )
+            role_cycles = (
+                self.csi_spoiler_cycles_per_voxel.value(),
+                self.csi_spoiler_cycles_per_voxel.value(),
+                self.csi_spoiler_cycles_per_slice.value(),
+            )
+            excitation_count = (
+                self.csi_read_matrix.value()
+                * self.csi_phase_matrix.value()
+                * self.csi_repetitions.value()
+            )
+            name = "CSI end-of-FID spoiler"
+        else:
+            raise ValueError("Source has no two-dimensional spoiler configuration")
+
+        frame = self._two_dimensional_encoding_frame(source_index)
+        phantom_voxel_sizes = self._phantom_voxel_sizes_xyz_m()
+        if phantom_voxel_sizes is None:
+            voxel_sizes = np.zeros(3, dtype=float)
+            for role, size in zip(("read", "phase", "partition"), role_reference_sizes):
+                axis, _ = frame.axis_and_sign(role)
+                voxel_sizes["xyz".index(axis)] = size
+        else:
+            voxel_sizes = np.asarray(phantom_voxel_sizes, dtype=float)
+
+        cycles_xyz = np.zeros(3, dtype=float)
+        minimum_counts = [1, 1, 1]
+        for role, cycles, reference_size in zip(
+            ("read", "phase", "partition"), role_cycles, role_reference_sizes
+        ):
+            axis, _ = frame.axis_and_sign(role)
+            axis_index = "xyz".index(axis)
+            cycles_xyz[axis_index] = (
+                cycles * voxel_sizes[axis_index] / reference_size if enabled else 0.0
+            )
+            minimum_counts[axis_index] = max(
+                1,
+                int(np.ceil(voxel_sizes[axis_index] / reference_size - 1e-12)),
+            )
+        return {
+            "name": name,
+            "enabled": enabled,
+            "cycles_xyz": cycles_xyz,
+            "minimum_counts": minimum_counts,
+            "excitation_count": excitation_count,
+        }
+
+    def _ss_bssfp_spoiler_spec(self):
+        voxel_sizes = np.asarray(self._ss_bssfp_reference_voxel_sizes_m())
+        frame = self._three_dimensional_encoding_frame(self.SS_BSSFP_SOURCE)
+        minimum_counts = [1, 1, 1]
+        for role, role_fov, matrix_size in zip(
+            ("read", "phase", "partition"),
+            self._ss_bssfp_fov_m(),
+            (
+                self.ss_bssfp_read_matrix.value(),
+                self.ss_bssfp_phase_matrix.value(),
+                self.ss_bssfp_partition_matrix.value(),
+            ),
+        ):
+            axis, _ = frame.axis_and_sign(role)
+            axis_index = "xyz".index(axis)
+            reference_size = role_fov / matrix_size
+            minimum_counts[axis_index] = max(
+                1,
+                int(np.ceil(voxel_sizes[axis_index] / reference_size - 1e-12)),
+            )
+        cycles_xyz = self._ss_bssfp_effective_spoiler_cycles_xyz()
+        return {
+            "name": "Spectral-spatial bSSFP end-of-volume spoiler",
+            "enabled": bool(np.any(np.abs(cycles_xyz) > 1e-12)),
+            "cycles_xyz": cycles_xyz,
+            "minimum_counts": minimum_counts,
+            "excitation_count": self.ss_bssfp_repetitions.value(),
+        }
+
+    def _set_spoiling_quality_table(self, rows, *, warning=False):
+        """Render spoiling quality as a rich table in the info-button tooltip."""
+        if not hasattr(self, "spoiling_quality_button"):
+            return
+        color = "#b45309" if warning else "#15803d"
+        status = "Review recommended" if warning else "Quality available"
+        body = "".join(
+            "<tr>"
+            f"<th align='left' valign='top'>{html.escape(str(parameter))}</th>"
+            f"<td>{html.escape(str(value))}</td>"
+            "</tr>"
+            for parameter, value in rows
+        )
+        self.spoiling_quality_button.setToolTip(
+            "<div style='white-space:normal'>"
+            "<b>Spoiling quality</b><br><br>"
+            "<table cellspacing='0' cellpadding='4'>"
+            f"{body}"
+            "</table></div>"
+        )
+        self.spoiling_quality_button.setStyleSheet(f"color: {color};")
+        self.spoiling_quality_status.setText(status)
+        self.spoiling_quality_status.setStyleSheet(f"color: {color};")
+
+    def _set_spoiling_quality_unavailable(self, message, warning=False):
+        if not hasattr(self, "spoiling_quality_info"):
+            return
+        self._spoiling_spin_grid_recommendation = None
+        self.spoiling_quality_info.setText(message)
+        self.spoiling_quality_info.setStyleSheet(
+            "color: #b45309;" if warning else "color: #475569;"
+        )
+        self._set_spoiling_quality_table(
+            (("Status", "Warning" if warning else "Information"), ("Details", message)),
+            warning=warning,
+        )
+        self.spoiling_apply_recommended_grid.setEnabled(False)
+        self.spoiling_apply_recommended_grid.setVisible(False)
+
+    def _set_configured_spoiling_quality(self, spec):
+        cycles_xyz = np.asarray(spec["cycles_xyz"], dtype=float)
+        counts = tuple(int(value) for value in self.subvoxel_spin_counts)
+        if not spec["enabled"] or not np.any(np.abs(cycles_xyz) > 1e-12):
+            self._set_spoiling_quality_unavailable(
+                f"{spec['name']}: no gradient spoiler is active. Expected "
+                "remaining coherent signal is 100% for this spoiler unit.",
+                warning=True,
+            )
+            return
+
+        minimum_counts = [int(value) for value in spec["minimum_counts"]]
+        for axis_index, cycles in enumerate(cycles_xyz):
+            if abs(cycles) > 1e-12:
+                minimum_counts[axis_index] = max(2, minimum_counts[axis_index])
+        excitation_count = max(1, int(spec["excitation_count"]))
+        analyzed_excitation_count = min(excitation_count, 1024)
+        sampling = SpinSampling(counts, method=self.subvoxel_sampling_method)
+        report = analyze_repeated_spoiler_train(
+            tuple(float(value) for value in cycles_xyz),
+            sampling,
+            analyzed_excitation_count,
+        )
+        maximum_spins = max(512, int(np.prod(minimum_counts)))
+        recommendation = recommend_spin_grid(
+            tuple(float(np.round(value, 12)) for value in cycles_xyz),
+            analyzed_excitation_count,
+            tuple(minimum_counts),
+            "midpoint",
+            0.01,
+            maximum_spins,
+            max(32, max(minimum_counts)),
+        )
+        self._spoiling_spin_grid_recommendation = recommendation
+        recommendation_counts = recommendation.counts_xyz
+        message = (
+            f"{spec['name']}. Effective cycles/phantom voxel XYZ: "
+            + ", ".join(f"{value:.4g}" for value in cycles_xyz)
+            + ". Remaining coherent signal after one spoiler: "
+            + f"ideal {100 * report.single_continuous_coherence:.3g}%, "
+            + f"{counts[0]}×{counts[1]}×{counts[2]} "
+            + f"{self.subvoxel_sampling_method} grid "
+            + f"{100 * report.single_sampled_coherence:.3g}%. "
+            + f"Across {max(1, report.n_observations)} accumulated spoiler "
+            + "orders, maximum sampling error is "
+            + f"{100 * report.maximum_sampling_error:.3g}%."
+        )
+        if report.first_alias_observation is not None:
+            message += (
+                " Warning: artificial subvoxel rephasing starts at spoiler "
+                f"order {report.first_alias_observation}."
+            )
+        if report.n_observations < excitation_count - 1:
+            message += (
+                f" The check is limited to the first {report.n_observations} "
+                f"orders of {excitation_count - 1}."
+            )
+        message += (
+            f" Recommended: {recommendation_counts[0]}×"
+            f"{recommendation_counts[1]}×{recommendation_counts[2]} regular "
+            f"midpoint spins ({recommendation.spins_per_voxel} total; train "
+            f"error {100 * recommendation.maximum_sampling_error:.3g}%)."
+        )
+        if not recommendation.meets_target:
+            message += " No tested grid reached the 1% train-error target."
+        warning = (
+            report.single_continuous_coherence > 0.05
+            or report.maximum_sampling_error > 0.05
+        )
+        self.spoiling_quality_info.setText(message)
+        self.spoiling_quality_info.setStyleSheet(
+            "color: #b45309;" if warning else "color: #15803d;"
+        )
+        quality_rows = [
+            ("Sequence", spec["name"]),
+            (
+                "Cycles / phantom voxel XYZ",
+                ", ".join(f"{value:.4g}" for value in cycles_xyz),
+            ),
+            (
+                "Current subvoxel grid",
+                f"{counts[0]}×{counts[1]}×{counts[2]} {self.subvoxel_sampling_method}",
+            ),
+            (
+                "Ideal coherence after one spoiler",
+                f"{100 * report.single_continuous_coherence:.3g}%",
+            ),
+            (
+                "Sampled coherence after one spoiler",
+                f"{100 * report.single_sampled_coherence:.3g}%",
+            ),
+            (
+                "Maximum train sampling error",
+                f"{100 * report.maximum_sampling_error:.3g}%",
+            ),
+            ("Evaluated spoiler orders", str(max(1, report.n_observations))),
+            (
+                "Recommended grid",
+                f"{recommendation_counts[0]}×{recommendation_counts[1]}×"
+                f"{recommendation_counts[2]} midpoint "
+                f"({recommendation.spins_per_voxel} spins; "
+                f"{100 * recommendation.maximum_sampling_error:.3g}% error)",
+            ),
+        ]
+        if report.first_alias_observation is not None:
+            quality_rows.append(
+                (
+                    "First artificial rephasing",
+                    f"Order {report.first_alias_observation}",
+                )
+            )
+        if not recommendation.meets_target:
+            quality_rows.append(("1% target", "No tested grid reached the target"))
+        self._set_spoiling_quality_table(quality_rows, warning=warning)
+        recommendation_is_current = (
+            self.subvoxel_sampling_method == recommendation.method
+            and counts == recommendation.counts_xyz
+        )
+        self.spoiling_apply_recommended_grid.setVisible(True)
+        self.spoiling_apply_recommended_grid.setEnabled(not recommendation_is_current)
+        self.spoiling_apply_recommended_grid.setText(
+            "Grid already train-safe"
+            if recommendation_is_current
+            else f"Apply {recommendation_counts[0]}×{recommendation_counts[1]}"
+            f"×{recommendation_counts[2]} midpoint grid"
+        )
+
+    def _sync_flash_spoiling_quality(self):
+        if not hasattr(self, "spoiling_quality_info"):
+            return
+        self._spoiling_spin_grid_recommendation = getattr(
+            self, "_flash_spin_grid_recommendation", None
+        )
+        self.spoiling_quality_info.setText(
+            "FLASH (2D). " + self.flash_spoiler_info.text()
+        )
+        self.spoiling_quality_info.setStyleSheet(self.flash_spoiler_info.styleSheet())
+        flash_rows = getattr(
+            self,
+            "_flash_spoiling_quality_rows",
+            (("Sequence", "FLASH (2D)"), ("Details", self.flash_spoiler_info.text())),
+        )
+        self._set_spoiling_quality_table(
+            flash_rows,
+            warning="#b45309" in self.flash_spoiler_info.styleSheet(),
+        )
+        self.spoiling_apply_recommended_grid.setVisible(True)
+        self.spoiling_apply_recommended_grid.setEnabled(
+            self.flash_apply_recommended_grid.isEnabled()
+        )
+        self.spoiling_apply_recommended_grid.setText(
+            self.flash_apply_recommended_grid.text()
+        )
+
+    def _set_imported_pulseq_spoiling_quality(self):
+        acquisition = next(
+            (
+                candidate
+                for candidate in (
+                    self.acquisition,
+                    self.spectroscopic_acquisition,
+                    self.spiral_acquisition,
+                )
+                if candidate is not None
+                and hasattr(candidate, "moment_origins_cyc_per_m")
+            ),
+            None,
+        )
+        phantom = None
+        voxel_basis = None
+        if self.object_source.currentIndex() == 0:
+            phantom = self._selected_designed_phantom()
+            if phantom is None:
+                phantom = self.phantom
+        elif self.object_source.currentIndex() == 1:
+            voxel_sizes = self._phantom_voxel_sizes_xyz_m()
+            if voxel_sizes is not None:
+                voxel_basis = np.diag(np.asarray(voxel_sizes, dtype=float))
+        if phantom is not None:
+            voxel_basis = phantom_voxel_basis_m(phantom)
+        if acquisition is None or voxel_basis is None:
+            self._set_spoiling_quality_unavailable(
+                "Imported Pulseq sequence: select a 3D phantom and load a "
+                "sequence with inferable ADC positions to estimate spoiling quality."
+            )
+            return
+        moment_origins = np.asarray(acquisition.moment_origins_cyc_per_m, dtype=float)
+        if moment_origins.ndim != 2 or moment_origins.shape[0] < 2:
+            self._set_spoiling_quality_unavailable(
+                "Imported Pulseq sequence: at least two inferable ADC moment "
+                "origins are required to estimate spoiling quality."
+            )
+            return
+        limited_moments = moment_origins[: min(moment_origins.shape[0], 1025)]
+        sampling = SpinSampling(
+            tuple(int(value) for value in self.subvoxel_spin_counts),
+            method=self.subvoxel_sampling_method,
+        )
+        report = analyze_adc_moment_train(
+            limited_moments,
+            voxel_basis,
+            sampling,
+        )
+        phase_train = np.asarray(report.phase_cycles_per_voxel, dtype=float)
+        minimum_counts = tuple(
+            2 if np.any(np.abs(phase_train[:, axis]) > 1e-12) else 1
+            for axis in range(3)
+        )
+        recommendation = recommend_spin_grid_for_phase_train(
+            phase_train,
+            minimum_counts,
+            "midpoint",
+            0.01,
+            max(512, int(np.prod(minimum_counts))),
+            max(32, max(minimum_counts)),
+        )
+        self._spoiling_spin_grid_recommendation = recommendation
+        counts = sampling.counts_xyz
+        ideal_maximum = max(report.continuous_coherence, default=1.0)
+        sampled_maximum = max(report.sampled_coherence, default=1.0)
+        message = (
+            f"Imported Pulseq ADC moment train: {report.n_observations} moment "
+            f"offsets were evaluated on the selected phantom. Maximum remaining "
+            f"coherent signal is ideal {100 * ideal_maximum:.3g}% and "
+            f"{counts[0]}×{counts[1]}×{counts[2]} "
+            f"{self.subvoxel_sampling_method} grid "
+            f"{100 * sampled_maximum:.3g}%; maximum sampling error is "
+            f"{100 * report.maximum_sampling_error:.3g}%. Recommended: "
+            f"{recommendation.counts_xyz[0]}×{recommendation.counts_xyz[1]}×"
+            f"{recommendation.counts_xyz[2]} regular midpoint spins "
+            f"({recommendation.spins_per_voxel} total; train error "
+            f"{100 * recommendation.maximum_sampling_error:.3g}%)."
+        )
+        if moment_origins.shape[0] > limited_moments.shape[0]:
+            message += (
+                f" The check is limited to the first {limited_moments.shape[0]} "
+                f"ADC origins of {moment_origins.shape[0]}."
+            )
+        if report.first_alias_observation is not None:
+            message += (
+                " Warning: artificial subvoxel rephasing occurs at ADC moment "
+                f"offset {report.first_alias_observation}."
+            )
+        warning = ideal_maximum > 0.05 or report.maximum_sampling_error > 0.05
+        self.spoiling_quality_info.setText(message)
+        self.spoiling_quality_info.setStyleSheet(
+            "color: #b45309;" if warning else "color: #15803d;"
+        )
+        quality_rows = [
+            ("Sequence", "Imported Pulseq ADC moment train"),
+            ("Evaluated ADC moment offsets", str(report.n_observations)),
+            (
+                "Current subvoxel grid",
+                f"{counts[0]}×{counts[1]}×{counts[2]} {self.subvoxel_sampling_method}",
+            ),
+            ("Maximum ideal coherence", f"{100 * ideal_maximum:.3g}%"),
+            ("Maximum sampled coherence", f"{100 * sampled_maximum:.3g}%"),
+            (
+                "Maximum train sampling error",
+                f"{100 * report.maximum_sampling_error:.3g}%",
+            ),
+            (
+                "Recommended grid",
+                f"{recommendation.counts_xyz[0]}×{recommendation.counts_xyz[1]}×"
+                f"{recommendation.counts_xyz[2]} midpoint "
+                f"({recommendation.spins_per_voxel} spins; "
+                f"{100 * recommendation.maximum_sampling_error:.3g}% error)",
+            ),
+        ]
+        if report.first_alias_observation is not None:
+            quality_rows.append(
+                (
+                    "First artificial rephasing",
+                    f"ADC offset {report.first_alias_observation}",
+                )
+            )
+        self._set_spoiling_quality_table(quality_rows, warning=warning)
+        recommendation_is_current = (
+            self.subvoxel_sampling_method == recommendation.method
+            and sampling.counts_xyz == recommendation.counts_xyz
+        )
+        self.spoiling_apply_recommended_grid.setVisible(True)
+        self.spoiling_apply_recommended_grid.setEnabled(not recommendation_is_current)
+        self.spoiling_apply_recommended_grid.setText(
+            "Grid already train-safe"
+            if recommendation_is_current
+            else f"Apply {recommendation.counts_xyz[0]}×"
+            f"{recommendation.counts_xyz[1]}×{recommendation.counts_xyz[2]} "
+            "midpoint grid"
+        )
+
+    def _update_spoiling_quality(self, *_):
+        if not hasattr(self, "spoiling_quality_info"):
+            return
+        source_index = self.sequence_source.currentIndex()
+        if source_index in {self.EPI_SOURCE, self.CSI_SOURCE}:
+            self._set_configured_spoiling_quality(
+                self._two_dimensional_spoiler_spec(source_index)
+            )
+        elif source_index == self.FLASH_SOURCE:
+            self._sync_flash_spoiling_quality()
+        elif source_index == self.SS_BSSFP_SOURCE:
+            self._set_configured_spoiling_quality(self._ss_bssfp_spoiler_spec())
+        elif source_index in {
+            self.BSSFP_SOURCE,
+            self.RADIAL_ME_BSSFP_SOURCE,
+            self.ME_BSSFP_SOURCE,
+        }:
+            self._set_spoiling_quality_unavailable(
+                "Effective net spoiler: 0 cycles/voxel. Expected remaining "
+                "coherent signal is 100% because this sequence is fully balanced "
+                "during acquisition and intentionally retains transverse coherence."
+            )
+        elif source_index == self.INTERNAL_SOURCE:
+            self._set_spoiling_quality_unavailable(
+                "Internal FID has no gradient spoiler (0 cycles/voxel). Expected "
+                "remaining coherent signal from gradient spoiling is 100%."
+            )
+        else:
+            self._set_imported_pulseq_spoiling_quality()
 
     def _ss_bssfp_effective_spoiler_cycles_xyz(self):
         voxel_sizes = np.asarray(self._ss_bssfp_reference_voxel_sizes_m())
@@ -4821,14 +5743,21 @@ class SequenceSimulationWidget(QWidget):
         self.ss_bssfp_spoiler_info.setStyleSheet(
             "color: #b45309;" if warning else "color: #15803d;"
         )
+        if (
+            hasattr(self, "spoiling_quality_info")
+            and self.sequence_source.currentIndex() == self.SS_BSSFP_SOURCE
+        ):
+            self._update_spoiling_quality()
 
     def _radial_me_bssfp_changed(self, *_):
         self._update_radial_me_bssfp_labels()
+        self._update_spoiling_quality()
         if self.sequence_source.currentIndex() == 5:
             self._request_generated_sequence_refresh()
 
     def _me_bssfp_changed(self, *_):
         self._update_me_bssfp_labels()
+        self._update_spoiling_quality()
         if self.sequence_source.currentIndex() == 6:
             self._request_generated_sequence_refresh()
 
@@ -4844,8 +5773,137 @@ class SequenceSimulationWidget(QWidget):
         if self.sequence_source.currentIndex() in {4, 5, 6}:
             self._request_generated_sequence_refresh()
 
+    def _ernst_angle_context(self, repetition_time_s):
+        """Resolve the representative phantom T1 used by one global RF pulse."""
+        source_index = self.object_source.currentIndex()
+        if source_index == 1:
+            t1_values = np.asarray([self.t1_ms.value() / 1000.0], dtype=float)
+            weights = np.ones(1, dtype=float)
+            source = "built-in phantom"
+        elif source_index == 2:
+            t1_values = np.asarray([self.probe_t1_ms.value() / 1000.0], dtype=float)
+            weights = np.ones(1, dtype=float)
+            source = "spin probe"
+        else:
+            phantom = self._selected_designed_phantom()
+            if phantom is None:
+                return None
+            mask = np.asarray(phantom.mask, dtype=bool)
+            t1_map = np.asarray(phantom.t1_map, dtype=float)
+            if t1_map.shape != mask.shape:
+                return None
+            t1_values = t1_map[mask]
+            pd_map = getattr(phantom, "pd_map", None)
+            if pd_map is None or np.asarray(pd_map).shape != mask.shape:
+                weights = np.ones(t1_values.shape, dtype=float)
+            else:
+                weights = np.maximum(np.asarray(pd_map, dtype=float)[mask], 0.0)
+            source = str(getattr(phantom, "name", "selected phantom"))
+        valid = np.isfinite(t1_values) & (t1_values > 0.0)
+        t1_values = t1_values[valid]
+        weights = np.asarray(weights, dtype=float)[valid]
+        if t1_values.size == 0:
+            return None
+        if not np.any(np.isfinite(weights) & (weights > 0.0)):
+            weights = np.ones(t1_values.shape, dtype=float)
+        else:
+            weights = np.where(np.isfinite(weights) & (weights > 0.0), weights, 0.0)
+        effective_t1_s = float(np.average(t1_values, weights=weights))
+        angles = np.asarray(ernst_angle_deg(repetition_time_s, t1_values), dtype=float)
+        return _ErnstAngleContext(
+            angle_deg=float(ernst_angle_deg(repetition_time_s, effective_t1_s)),
+            angle_range_deg=(float(np.min(angles)), float(np.max(angles))),
+            repetition_time_s=float(repetition_time_s),
+            effective_t1_s=effective_t1_s,
+            t1_range_s=(float(np.min(t1_values)), float(np.max(t1_values))),
+            source=source,
+        )
+
+    def _update_ernst_controls(self, prefix, repetition_time_ms, *, has_vfa=False):
+        use_control = getattr(self, f"{prefix}_use_ernst_angle")
+        rf_spoiling = getattr(self, f"{prefix}_rf_spoiling")
+        increment = getattr(self, f"{prefix}_rf_spoiling_increment_deg")
+        flip_control = getattr(self, f"{prefix}_flip_angle_deg")
+        info = getattr(self, f"{prefix}_ernst_info")
+        variable_control = (
+            getattr(self, f"{prefix}_variable_flip_angle") if has_vfa else None
+        )
+        variable_enabled = bool(
+            variable_control is not None and variable_control.isChecked()
+        )
+        context = self._ernst_angle_context(float(repetition_time_ms) / 1000.0)
+        rf_requested = rf_spoiling.isChecked()
+        can_use = not variable_enabled and context is not None
+        if use_control.isChecked() and not can_use:
+            previous = use_control.blockSignals(True)
+            use_control.setChecked(False)
+            use_control.blockSignals(previous)
+        use_control.setEnabled(can_use)
+        increment.setEnabled(rf_requested)
+        use_ernst = can_use and use_control.isChecked()
+        flip_control.setEnabled(not variable_enabled and not use_ernst)
+        if variable_control is not None:
+            variable_control.setEnabled(not use_ernst)
+            getattr(self, f"{prefix}_vfa_final_flip_angle_deg").setEnabled(
+                variable_enabled
+            )
+        if variable_enabled:
+            info.setText("Unavailable while variable flip angle is enabled.")
+        elif context is None:
+            info.setText("Unavailable — the selected simulation object has no T1.")
+        else:
+            t1_min, t1_max = (1000.0 * value for value in context.t1_range_s)
+            angle_min, angle_max = context.angle_range_deg
+            range_text = ""
+            if not np.isclose(t1_min, t1_max):
+                range_text = (
+                    f"; T1 range {t1_min:.4g}–{t1_max:.4g} ms gives "
+                    f"{angle_min:.4g}–{angle_max:.4g}°"
+                )
+            info.setText(
+                f"{context.angle_deg:.4g}° from TR "
+                f"{1000.0 * context.repetition_time_s:.4g} ms and "
+                f"effective T1 {1000.0 * context.effective_t1_s:.4g} ms "
+                f"({context.source}){range_text}. T2 is not used."
+            )
+            if use_ernst:
+                previous = flip_control.blockSignals(True)
+                flip_control.setValue(context.angle_deg)
+                flip_control.blockSignals(previous)
+        return context if use_ernst else None
+
+    def _rf_spoiling_is_effective(self, prefix):
+        enabled = getattr(self, f"{prefix}_rf_spoiling").isChecked()
+        increment = getattr(self, f"{prefix}_rf_spoiling_increment_deg").value()
+        return enabled and not np.isclose(increment % 360.0, 0.0)
+
+    def _update_all_ernst_controls(self):
+        return (
+            self._update_ernst_controls(
+                "epi", self.epi_repetition_time_ms.value(), has_vfa=True
+            ),
+            self._update_ernst_controls(
+                "csi", self.csi_repetition_time_ms.value(), has_vfa=True
+            ),
+            self._update_ernst_controls("flash", self.flash_repetition_time_ms.value()),
+        )
+
+    def _phantom_relaxation_changed(self, *_):
+        self._update_all_ernst_controls()
+        source = self.sequence_source.currentIndex()
+        active = {
+            self.EPI_SOURCE: self.epi_use_ernst_angle.isChecked(),
+            self.CSI_SOURCE: self.csi_use_ernst_angle.isChecked(),
+            self.FLASH_SOURCE: self.flash_use_ernst_angle.isChecked(),
+        }
+        if active.get(source, False):
+            self._request_generated_sequence_refresh()
+
     def _update_bandwidth_labels(self):
         self._update_shared_rf_controls("epi")
+        self._update_ernst_controls(
+            "epi", self.epi_repetition_time_ms.value(), has_vfa=True
+        )
         bandwidth_hz = self.sampling_bandwidth_khz.value() * 1000.0
         dwell_us = 1e6 / bandwidth_hz
         pixel_bandwidth_hz = bandwidth_hz / self.read_matrix.value()
@@ -4865,6 +5923,9 @@ class SequenceSimulationWidget(QWidget):
 
     def _update_csi_labels(self):
         self._update_shared_rf_controls("csi")
+        self._update_ernst_controls(
+            "csi", self.csi_repetition_time_ms.value(), has_vfa=True
+        )
         bandwidth_hz = self.csi_bandwidth_hz.value()
         points = self.csi_spectral_points.value()
         self.csi_dwell_info.setText(f"{1e6 / bandwidth_hz:.3f} µs")
@@ -4884,6 +5945,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _update_flash_labels(self):
         self._update_shared_rf_controls("flash")
+        self._update_ernst_controls("flash", self.flash_repetition_time_ms.value())
         self._apply_flash_auto_spoilers()
         bandwidth_hz = self.flash_sampling_bandwidth_khz.value() * 1000.0
         self.flash_dwell_info.setText(f"{1e6 / bandwidth_hz:.3f} µs")
@@ -5110,11 +6172,18 @@ class SequenceSimulationWidget(QWidget):
         return answer == QMessageBox.Yes
 
     def _epi_pulseq_parameters(self):
+        ernst = self._update_ernst_controls(
+            "epi", self.epi_repetition_time_ms.value(), has_vfa=True
+        )
         parameters = {
             "fov_m": self._epi_fov_m(),
             "matrix": (self.read_matrix.value(), self.phase_matrix.value()),
             "sampling_bandwidth_hz": self.sampling_bandwidth_khz.value() * 1000.0,
-            "flip_angle_deg": self.epi_flip_angle_deg.value(),
+            "flip_angle_deg": (
+                ernst.angle_deg
+                if ernst is not None
+                else self.epi_flip_angle_deg.value()
+            ),
             "variable_flip_angle": self.epi_variable_flip_angle.isChecked(),
             "vfa_final_flip_angle_deg": self.epi_vfa_final_flip_angle_deg.value(),
             "slice_thickness_m": self.epi_slice_thickness_mm.value() / 1000.0,
@@ -5123,6 +6192,8 @@ class SequenceSimulationWidget(QWidget):
             "repetitions": self.epi_repetitions.value(),
             "echo_time_s": self.epi_echo_time_ms.value() / 1000.0,
             "repetition_time_s": self.epi_repetition_time_ms.value() / 1000.0,
+            "rf_spoiling": self._rf_spoiling_is_effective("epi"),
+            "rf_spoiling_increment_deg": (self.epi_rf_spoiling_increment_deg.value()),
             "slice_offset_m": self.epi_slice_offset_mm.value() / 1000.0,
             "encoding_axes": self._two_dimensional_encoding_frame(
                 self.EPI_SOURCE
@@ -5142,6 +6213,9 @@ class SequenceSimulationWidget(QWidget):
         return parameters
 
     def _csi_pulseq_parameters(self):
+        ernst = self._update_ernst_controls(
+            "csi", self.csi_repetition_time_ms.value(), has_vfa=True
+        )
         parameters = {
             "fov_m": self._csi_fov_m(),
             "matrix": (
@@ -5152,12 +6226,18 @@ class SequenceSimulationWidget(QWidget):
             "spectral_bandwidth_hz": self.csi_bandwidth_hz.value(),
             "spectral_points": self.csi_spectral_points.value(),
             "phase_encoding_order": self.csi_encoding_order.currentText(),
-            "flip_angle_deg": self.csi_flip_angle_deg.value(),
+            "flip_angle_deg": (
+                ernst.angle_deg
+                if ernst is not None
+                else self.csi_flip_angle_deg.value()
+            ),
             "variable_flip_angle": self.csi_variable_flip_angle.isChecked(),
             "vfa_final_flip_angle_deg": self.csi_vfa_final_flip_angle_deg.value(),
             "echo_time_s": self.csi_echo_time_ms.value() / 1000.0,
             "repetition_time_s": self.csi_repetition_time_ms.value() / 1000.0,
             "repetitions": self.csi_repetitions.value(),
+            "rf_spoiling": self._rf_spoiling_is_effective("csi"),
+            "rf_spoiling_increment_deg": (self.csi_rf_spoiling_increment_deg.value()),
             "acquisition_interval_s": self._optional_acquisition_interval_s(
                 self.csi_acquisition_interval_ms
             ),
@@ -5175,6 +6255,9 @@ class SequenceSimulationWidget(QWidget):
         return parameters
 
     def _flash_pulseq_parameters(self):
+        ernst = self._update_ernst_controls(
+            "flash", self.flash_repetition_time_ms.value()
+        )
         parameters = {
             "fov_m": self._flash_fov_m(),
             "matrix": (
@@ -5184,7 +6267,11 @@ class SequenceSimulationWidget(QWidget):
             "sampling_bandwidth_hz": (
                 self.flash_sampling_bandwidth_khz.value() * 1000.0
             ),
-            "flip_angle_deg": self.flash_flip_angle_deg.value(),
+            "flip_angle_deg": (
+                ernst.angle_deg
+                if ernst is not None
+                else self.flash_flip_angle_deg.value()
+            ),
             "slice_thickness_m": self.flash_slice_thickness_mm.value() / 1000.0,
             "slice_gap_m": self.flash_slice_gap_mm.value() / 1000.0,
             "n_slices": self.flash_slice_count.value(),
@@ -5195,6 +6282,7 @@ class SequenceSimulationWidget(QWidget):
             "acquisition_interval_s": self._optional_acquisition_interval_s(
                 self.flash_acquisition_interval_ms
             ),
+            "rf_spoiling": self._rf_spoiling_is_effective("flash"),
             "rf_spoiling_increment_deg": (self.flash_rf_spoiling_increment_deg.value()),
             "spoiler_cycles_per_slice": (self.flash_spoiler_cycles_per_slice.value()),
             "spoiler_cycles_per_voxel": (self.flash_spoiler_cycles_per_voxel.value()),
@@ -5953,10 +7041,49 @@ class SequenceSimulationWidget(QWidget):
             sequence = make_pulseq_epi(**self._epi_pulseq_parameters())
         return self._apply_workspace_frequency_reference(sequence)
 
+    def _ernst_pulseq_definitions(self):
+        source_index = self.sequence_source.currentIndex()
+        ernst_specs = {
+            self.EPI_SOURCE: (
+                "epi",
+                self.epi_repetition_time_ms.value(),
+                True,
+            ),
+            self.CSI_SOURCE: (
+                "csi",
+                self.csi_repetition_time_ms.value(),
+                True,
+            ),
+            self.FLASH_SOURCE: (
+                "flash",
+                self.flash_repetition_time_ms.value(),
+                False,
+            ),
+        }
+        if source_index not in ernst_specs:
+            return {}
+        prefix, repetition_time_ms, has_vfa = ernst_specs[source_index]
+        context = self._update_ernst_controls(
+            prefix, repetition_time_ms, has_vfa=has_vfa
+        )
+        if context is None:
+            return {}
+        return {
+            "UseErnstAngle": True,
+            "ErnstUsesT2": False,
+            "ErnstAngleDeg": context.angle_deg,
+            "ErnstRepetitionTime": context.repetition_time_s,
+            "ErnstEffectiveT1": context.effective_t1_s,
+            "ErnstT1Range": list(context.t1_range_s),
+            "ErnstT1Source": context.source,
+        }
+
     def _apply_workspace_frequency_reference(self, sequence):
         """Attach the active B0/nucleus reference to every generated Pulseq file."""
         sequence.set_definition("FieldStrengthT", self.field_strength_t.value())
         sequence.set_definition("Nucleus", self.nucleus.currentText())
+        for name, value in self._ernst_pulseq_definitions().items():
+            sequence.set_definition(name, value)
         return sequence
 
     def _write_pulseq_path(self, filename, *, export_spec=None):
@@ -6023,6 +7150,7 @@ class SequenceSimulationWidget(QWidget):
                     pulseq_definitions={
                         "FieldStrengthT": self.field_strength_t.value(),
                         "Nucleus": self.nucleus.currentText(),
+                        **self._ernst_pulseq_definitions(),
                     },
                 )
                 exported_paths.append(notebook_path)
@@ -6267,6 +7395,34 @@ class SequenceSimulationWidget(QWidget):
             "per-voxel max-B1 map are included in result exports."
         )
 
+    def _show_sequence_message(self, message):
+        self.sequence_summary_table.setVisible(False)
+        self.sequence_info.setVisible(True)
+        self.sequence_info.setText(str(message))
+
+    def _set_sequence_summary(self, rows, plain_text):
+        """Show only the sequence name while retaining the full text for APIs."""
+        sequence_rows = [
+            ("Sequence name", value)
+            for parameter, value in rows
+            if str(parameter).strip().lower() in {"sequence", "sequence name"}
+        ]
+        if not sequence_rows and self.program is not None:
+            sequence_rows = [("Sequence name", self.program.source)]
+        table = self.sequence_summary_table
+        table.setRowCount(len(sequence_rows))
+        for row, (parameter, value) in enumerate(sequence_rows):
+            parameter_item = QTableWidgetItem(str(parameter))
+            value_item = QTableWidgetItem(str(value))
+            parameter_item.setTextAlignment(Qt.AlignLeft | Qt.AlignTop)
+            value_item.setTextAlignment(Qt.AlignLeft | Qt.AlignTop)
+            table.setItem(row, 0, parameter_item)
+            table.setItem(row, 1, value_item)
+        self._fit_summary_table(table, 340)
+        self.sequence_info.setText(str(plain_text))
+        self.sequence_info.setVisible(False)
+        table.setVisible(True)
+
     def _show_program(self, compiled=None):
         if self.program is None:
             return
@@ -6282,8 +7438,9 @@ class SequenceSimulationWidget(QWidget):
                 compiled = SequenceCompiler().compile_acquisition(self.program)
             self._acquisition_compiled = compiled
         except Exception as exc:
-            self.sequence_info.setText(f"Invalid sequence: {exc}")
+            self._show_sequence_message(f"Invalid sequence: {exc}")
             return
+        summary_rows = []
         acquisition_text = ""
         if self.acquisition is not None:
             offsets = ""
@@ -6295,13 +7452,41 @@ class SequenceSimulationWidget(QWidget):
             acquisition_text = (
                 f"\nGrid: {self.acquisition.phase_matrix}×"
                 f"{self.acquisition.read_matrix}; "
-                f"BW: {self.acquisition.sampling_bandwidth_hz/1000:.3f} kHz"
+                f"BW: {self.acquisition.sampling_bandwidth_hz / 1000:.3f} kHz"
                 f"{offsets}"
             )
+            summary_rows.extend(
+                (
+                    (
+                        "Cartesian grid",
+                        f"{self.acquisition.phase_matrix} × "
+                        f"{self.acquisition.read_matrix}",
+                    ),
+                    (
+                        "Sampling bandwidth",
+                        f"{self.acquisition.sampling_bandwidth_hz / 1000:.3f} kHz",
+                    ),
+                )
+            )
+            if offsets:
+                summary_rows.append(
+                    (
+                        "k-space offset",
+                        f"({self.acquisition.kx_offset_cells:.3g}, "
+                        f"{self.acquisition.ky_offset_cells:.3g}) cells",
+                    )
+                )
             if self.acquisition_frames is not None:
                 acquisition_text += (
                     f"; frames={self.acquisition_frames.num_frames} "
                     f"({', '.join(self.acquisition_frames.varying_axes)})"
+                )
+                summary_rows.append(
+                    (
+                        "2D frames",
+                        f"{self.acquisition_frames.num_frames} "
+                        f"({', '.join(self.acquisition_frames.varying_axes)})",
+                    )
                 )
             if self.acquisition_volumes is not None:
                 read_axis, phase_axis, partition_axis = (
@@ -6314,6 +7499,16 @@ class SequenceSimulationWidget(QWidget):
                     f"{self.acquisition_volumes.matrix[2]}; encoding="
                     f"read {read_axis}, phase {phase_axis}, partition {partition_axis}"
                 )
+                summary_rows.append(
+                    (
+                        "3D volumes",
+                        f"{self.acquisition_volumes.num_volumes}; matrix "
+                        f"{self.acquisition_volumes.matrix[0]} × "
+                        f"{self.acquisition_volumes.matrix[1]} × "
+                        f"{self.acquisition_volumes.matrix[2]}; read {read_axis}, "
+                        f"phase {phase_axis}, partition {partition_axis}",
+                    )
+                )
         elif self.spectroscopic_acquisition is not None:
             csi = self.spectroscopic_acquisition
             acquisition_text = (
@@ -6323,17 +7518,47 @@ class SequenceSimulationWidget(QWidget):
                 f"BW={csi.spectral_bandwidth_hz:.6g} Hz; "
                 f"resolution={csi.spectral_resolution_hz:.6g} Hz"
             )
+            summary_rows.extend(
+                (
+                    (
+                        "CSI grid",
+                        f"{csi.matrix[1]} × {csi.matrix[0]}; "
+                        f"{csi.num_repetitions} repetition(s)",
+                    ),
+                    (
+                        "Spectral sampling",
+                        f"{csi.spectral_points} points; "
+                        f"{csi.spectral_bandwidth_hz:.6g} Hz bandwidth; "
+                        f"{csi.spectral_resolution_hz:.6g} Hz resolution",
+                    ),
+                )
+            )
         elif self.spiral_acquisition is not None:
             spiral = self.spiral_acquisition
             self.dwell_info.setText(f"{spiral.dwell_s * 1e6:.3f} µs (actual)")
             acquisition_text = (
                 f"\nSpiral: {spiral.matrix[1]}×{spiral.matrix[0]} target grid; "
                 f"samples/frame={spiral.samples_per_frame}; "
-                f"BW={spiral.sampling_bandwidth_hz/1000:.3f} kHz; "
+                f"BW={spiral.sampling_bandwidth_hz / 1000:.3f} kHz; "
                 f"frames={spiral.num_frames}"
+            )
+            summary_rows.extend(
+                (
+                    (
+                        "Spiral target grid",
+                        f"{spiral.matrix[1]} × {spiral.matrix[0]}; "
+                        f"{spiral.num_frames} frame(s)",
+                    ),
+                    (
+                        "Spiral sampling",
+                        f"{spiral.samples_per_frame} samples/frame; "
+                        f"{spiral.sampling_bandwidth_hz / 1000:.3f} kHz",
+                    ),
+                )
             )
         elif self.acquisition_note:
             acquisition_text = f"\n{self.acquisition_note}"
+            summary_rows.append(("Acquisition", self.acquisition_note))
         definitions = dict(self.program.metadata.get("definitions", {}))
         end_image_spoilers = "EndImageSpoilerEndTimes" in definitions
         spoiler_end_times = np.asarray(
@@ -6355,6 +7580,13 @@ class SequenceSimulationWidget(QWidget):
                     f"{voxel_cycles} cycles/voxel + {fov_cycles} cycles/FOV "
                     f"on {axes}"
                 )
+                summary_rows.append(
+                    (
+                        "End-image spoilers",
+                        f"{spoiler_end_times.size}; {voxel_cycles} cycles/voxel + "
+                        f"{fov_cycles} cycles/FOV on {axes}",
+                    )
+                )
             else:
                 slice_cycles = definitions.get("SpoilerCyclesPerSlice", "?")
                 voxel_cycles = definitions.get("SpoilerCyclesPerVoxel", "?")
@@ -6363,6 +7595,13 @@ class SequenceSimulationWidget(QWidget):
                     f"\nSpoilers: {spoiler_end_times.size}; "
                     f"{slice_cycles} cycles/slice, {voxel_cycles} cycles/voxel "
                     f"on {axes}"
+                )
+                summary_rows.append(
+                    (
+                        "Gradient spoilers",
+                        f"{spoiler_end_times.size}; {slice_cycles} cycles/slice, "
+                        f"{voxel_cycles} cycles/voxel on {axes}",
+                    )
                 )
         acquisition_interval_text = ""
         if "AcquisitionInterval" in definitions:
@@ -6374,18 +7613,60 @@ class SequenceSimulationWidget(QWidget):
                 f"\nAcquisition interval: {actual_interval_ms:.4g} ms "
                 f"start-to-start; minimum {minimum_interval_ms:.4g} ms"
             )
+            summary_rows.append(
+                (
+                    "Acquisition interval",
+                    f"{actual_interval_ms:.4g} ms start-to-start; "
+                    f"minimum {minimum_interval_ms:.4g} ms",
+                )
+            )
         interval_label = (
             "acquisition intervals"
             if compiled.metadata.get("acquisition_only")
             else "intervals"
         )
-        self.sequence_info.setText(
-            f"{self.program.source}\nDuration: {self.program.duration_s*1000:.3f} ms\n"
+        plain_text = (
+            f"{self.program.source}\nDuration: {self.program.duration_s * 1000:.3f} ms\n"
             f"Events: {len(self.program.events)}, {interval_label}: "
             f"{compiled.n_intervals}, "
             f"ADC samples: {compiled.adc_times_s.size}{acquisition_text}"
             f"{acquisition_interval_text}{spoiler_text}"
         )
+        base_rows = [
+            ("Sequence", self.program.source),
+            ("Duration", f"{self.program.duration_s * 1000:.3f} ms"),
+            (
+                "Timeline",
+                f"{len(self.program.events)} events; {compiled.n_intervals} "
+                f"{interval_label}; {compiled.adc_times_s.size} ADC samples",
+            ),
+        ]
+        if "FlipAngleDeg" in definitions:
+            flip_angles = np.asarray(definitions["FlipAngleDeg"], dtype=float).reshape(
+                -1
+            )
+            flip_text = ", ".join(f"{value:.4g}°" for value in flip_angles)
+            if bool(definitions.get("UseErnstAngle", False)):
+                flip_text += " (Ernst angle)"
+            summary_rows.append(("Flip angle", flip_text))
+        if "RFSpoiling" in definitions:
+            rf_spoiling_text = "Off"
+            if bool(definitions["RFSpoiling"]):
+                rf_spoiling_text = (
+                    f"On; {float(definitions.get('RFSpoilingIncrementDeg', 0.0)):.4g}° "
+                    "increment"
+                )
+            summary_rows.append(("RF spoiling", rf_spoiling_text))
+        if bool(definitions.get("UseErnstAngle", False)):
+            summary_rows.append(
+                (
+                    "Ernst model",
+                    f"effective T1 "
+                    f"{1000.0 * float(definitions['ErnstEffectiveT1']):.4g} ms; "
+                    "T2 not used",
+                )
+            )
+        self._set_sequence_summary(base_rows + summary_rows, plain_text)
         self._update_waveform_value_summary()
         self.rf_plot.clear()
         self._rf_phase_view.clear()
@@ -6514,9 +7795,7 @@ class SequenceSimulationWidget(QWidget):
         if source_index == 0:
             designed = self._selected_designed_phantom()
             if designed is None:
-                raise ValueError(
-                    "No phantom is loaded in the Phantom tab. Create or load one first."
-                )
+                raise ValueError(self.NO_PHANTOM_MESSAGE)
             self.phantom = designed
             if isinstance(self.phantom, (SpectralPhantom, DynamicSpectralPhantom)):
                 self.phantom.field_strength = self.field_strength_t.value()
@@ -6792,10 +8071,22 @@ class SequenceSimulationWidget(QWidget):
             return
         half_bandwidth = float(phantom.spectral_bandwidth_ppm) / 2.0
         if np.isfinite(half_bandwidth) and half_bandwidth > 0:
+            window_center = float(
+                getattr(
+                    phantom,
+                    "spectral_window_center_ppm",
+                    phantom.spectral_reference_ppm,
+                )
+            )
+            relative_center = window_center - float(phantom.spectral_reference_ppm)
+            frequency_min = relative_center - half_bandwidth
+            frequency_max = relative_center + half_bandwidth
             if self.probe_frequency_units.currentText() == "Hz":
-                half_bandwidth *= self._probe_hz_per_ppm()
-            self.probe_ppm_min.setValue(-half_bandwidth)
-            self.probe_ppm_max.setValue(half_bandwidth)
+                factor = self._probe_hz_per_ppm()
+                frequency_min *= factor
+                frequency_max *= factor
+            self.probe_ppm_min.setValue(frequency_min)
+            self.probe_ppm_max.setValue(frequency_max)
         points = int(getattr(phantom, "spectral_points", self.probe_points.value()))
         if self.probe_points.minimum() <= points <= self.probe_points.maximum():
             self.probe_points.setValue(points)
@@ -6872,6 +8163,8 @@ class SequenceSimulationWidget(QWidget):
         self.cancel_probe_button.setEnabled(True)
         self.probe_status.setText(f"Preparing {label} probe…")
         self.probe_result = None
+        self._probe_started_at = time.monotonic()
+        self._probe_started_at_utc = datetime.now(timezone.utc)
         self.probe_worker = SequenceProbeThread(
             self.simulator,
             self.program,
@@ -6886,8 +8179,8 @@ class SequenceSimulationWidget(QWidget):
         self.probe_worker.stage.connect(self._probe_status_update)
         self.probe_worker.progress.connect(self._probe_progress)
         self.probe_worker.result_ready.connect(
-            lambda result, axis=display_axis, unit=self.probe_frequency_units.currentText(), mode=label: self._probe_finished(
-                result, axis, unit, mode
+            lambda result, axis=display_axis, unit=self.probe_frequency_units.currentText(), mode=label: (
+                self._probe_finished(result, axis, unit, mode)
             )
         )
         self.probe_worker.failed.connect(self._probe_failed)
@@ -6929,6 +8222,15 @@ class SequenceSimulationWidget(QWidget):
     def _probe_finished(self, result, frequency_axis, frequency_unit, mode=None):
         self._stop_probe_playback()
         self.probe_result = result
+        finished_at = datetime.now(timezone.utc)
+        if self._probe_started_at is not None:
+            result.metadata.setdefault(
+                "simulation_wall_time_s",
+                max(0.0, time.monotonic() - self._probe_started_at),
+            )
+        result.metadata.setdefault(
+            "simulation_finished_at_utc", finished_at.isoformat()
+        )
         frequency_axis = np.asarray(frequency_axis, dtype=float)
         result.metadata["frequency_axis_unit"] = str(frequency_unit)
         result.metadata[f"frequency_offsets_{str(frequency_unit).lower()}"] = (
@@ -6942,6 +8244,7 @@ class SequenceSimulationWidget(QWidget):
         self.cancel_probe_button.setEnabled(False)
         self.probe_status.setText("Spin probe complete")
         self._show_probe_result()
+        self._register_session_probe_run(result, mode=mode)
 
     def _show_probe_result(self):
         result = self.probe_result
@@ -7362,7 +8665,10 @@ class SequenceSimulationWidget(QWidget):
                 animation_note,
             ) = self._animation_request()
         except Exception as exc:
-            QMessageBox.critical(self, "Invalid simulation", str(exc))
+            if str(exc) == self.NO_PHANTOM_MESSAGE:
+                self._show_no_phantom_dialog()
+            else:
+                QMessageBox.critical(self, "Invalid simulation", str(exc))
             return
         if not self._confirm_generated_sequence_fov():
             return
@@ -7594,6 +8900,7 @@ class SequenceSimulationWidget(QWidget):
         if auto_changed and self.sequence_source.currentIndex() == self.FLASH_SOURCE:
             self._request_generated_sequence_refresh()
         self._update_ss_bssfp_spoiler_info()
+        self._update_spoiling_quality()
 
     def set_thread_configuration(self, mode, manual_thread_count):
         """Apply automatic or manual native worker selection."""
@@ -7636,6 +8943,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _clear_previous_simulation_views(self):
         """Remove stale result data before the next simulation starts."""
+        self._active_session_run_id = None
         self.result = None
         self.magnetization_animation = None
         self._split_csi_data = None
@@ -7828,14 +9136,17 @@ class SequenceSimulationWidget(QWidget):
             process.waitForFinished(1000)
         super().closeEvent(event)
 
-    def _finished(self, result):
+    def _finished(self, result, *, record_run=True):
         animation = None
         animation_message = ""
         if isinstance(result, _SequenceSimulationPayload):
             animation = result.animation
             animation_message = result.animation_message
             result = result.result
-        elapsed_s = self._record_simulation_timing(result)
+        if record_run:
+            elapsed_s = self._record_simulation_timing(result)
+        else:
+            elapsed_s = result.metadata.get("simulation_wall_time_s")
         self.result = result
         self.magnetization_animation = animation
         self._reset_run_controls(completed=True, elapsed_s=elapsed_s)
@@ -7930,6 +9241,204 @@ class SequenceSimulationWidget(QWidget):
             self._show_spiral_result(result)
         else:
             self._show_cartesian_result(result)
+        if record_run:
+            self._register_session_simulation_run(
+                result,
+                animation=animation,
+                animation_message=animation_message,
+            )
+
+    @staticmethod
+    def _session_sequence_name(program):
+        source = str(getattr(program, "source", "Sequence") or "Sequence")
+        if "/" in source or "\\" in source:
+            return Path(source).name
+        return source
+
+    def _register_session_simulation_run(
+        self, result, *, animation=None, animation_message=""
+    ):
+        """Hand one completed run to the main window's session explorer."""
+        if self.program is None or self.phantom is None:
+            return None
+        metadata = dict(getattr(result, "metadata", {}))
+        run = SessionSimulationRun(
+            run_id=uuid4().hex,
+            created_at_utc=str(
+                metadata.get("simulation_finished_at_utc")
+                or datetime.now(timezone.utc).isoformat()
+            ),
+            sequence_name=self._session_sequence_name(self.program),
+            phantom_name=str(getattr(self.phantom, "name", "Phantom")),
+            phantom_shape=tuple(getattr(self.phantom, "shape", ())),
+            sequence_duration_s=float(self.program.duration_s),
+            adc_samples=int(np.asarray(getattr(result, "adc_times_s", ())).size),
+            runtime_s=metadata.get("simulation_wall_time_s"),
+            kernel=str(
+                metadata.get("sequence_kernel")
+                or metadata.get("requested_sequence_kernel")
+                or ""
+            ),
+            result=result,
+            state=self._session_run_state(
+                phantom=self.phantom,
+                animation=animation,
+                animation_message=animation_message,
+            ),
+        )
+        register = getattr(self.window(), "register_sequence_simulation_run", None)
+        if callable(register):
+            register(run)
+            self._active_session_run_id = run.run_id
+        return run
+
+    def _session_run_state(self, *, phantom, **extra):
+        state = {
+            "program": self.program,
+            "phantom": phantom,
+            "generated_pulseq_sequence": self._generated_pulseq_sequence,
+            "generated_sequence_source_index": self._generated_sequence_source_index,
+            "sequence_generation_pending": self._sequence_generation_pending,
+            "sequence_source_index": self.sequence_source.currentIndex(),
+            "acquisition": self.acquisition,
+            "acquisition_frames": self.acquisition_frames,
+            "acquisition_volumes": self.acquisition_volumes,
+            "spectroscopic_acquisition": self.spectroscopic_acquisition,
+            "spiral_acquisition": self.spiral_acquisition,
+            "acquisition_note": self.acquisition_note,
+            "acquisition_compiled": self._acquisition_compiled,
+        }
+        state.update(extra)
+        return state
+
+    def _register_session_probe_run(self, result, *, mode=None):
+        """Hand one completed spin-probe run to the session explorer."""
+        if self.program is None:
+            return None
+        metadata = dict(getattr(result, "metadata", {}))
+        probe_mode = str(mode or metadata.get("probe_type") or "spin")
+        probe_phantom = self.phantom if probe_mode == "geometry" else None
+        if probe_phantom is not None:
+            context_name = str(getattr(probe_phantom, "name", "Geometry phantom"))
+        else:
+            context_name = f"{probe_mode.title()} spin probe"
+        run = SessionSimulationRun(
+            run_id=uuid4().hex,
+            created_at_utc=str(
+                metadata.get("simulation_finished_at_utc")
+                or datetime.now(timezone.utc).isoformat()
+            ),
+            sequence_name=self._session_sequence_name(self.program),
+            phantom_name=context_name,
+            phantom_shape=(
+                int(result.positions_m.shape[0]),
+                int(result.frequency_offsets_hz.size),
+            ),
+            sequence_duration_s=float(self.program.duration_s),
+            adc_samples=int(np.asarray(metadata.get("adc_times_s", ())).size),
+            runtime_s=metadata.get("simulation_wall_time_s"),
+            kernel=str(metadata.get("sequence_kernel") or ""),
+            result=result,
+            state=self._session_run_state(
+                phantom=probe_phantom,
+                probe_mode=probe_mode,
+            ),
+            run_type="spin_probe",
+        )
+        register = getattr(self.window(), "register_sequence_simulation_run", None)
+        if callable(register):
+            register(run)
+            self._active_session_run_id = run.run_id
+        return run
+
+    def restore_session_simulation_run(self, run):
+        """Restore the scientific objects and result views for a retained run."""
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.warning(
+                self,
+                "Simulation running",
+                "Cancel or finish the current simulation before switching runs.",
+            )
+            return False
+        state = dict(run.state)
+        self.program = state["program"]
+        self.phantom = state["phantom"]
+        self._generated_pulseq_sequence = state.get("generated_pulseq_sequence")
+        self._generated_sequence_source_index = state.get(
+            "generated_sequence_source_index"
+        )
+        self._sequence_generation_pending = bool(
+            state.get("sequence_generation_pending", False)
+        )
+        self.acquisition = state.get("acquisition")
+        self.acquisition_frames = state.get("acquisition_frames")
+        self.acquisition_volumes = state.get("acquisition_volumes")
+        self.spectroscopic_acquisition = state.get("spectroscopic_acquisition")
+        self.spiral_acquisition = state.get("spiral_acquisition")
+        self.acquisition_note = state.get("acquisition_note", "")
+        self._acquisition_compiled = state.get("acquisition_compiled")
+        self._active_session_run_id = run.run_id
+        self._show_program(compiled=self._acquisition_compiled)
+        if run.run_type == "spin_probe":
+            self.result = None
+            self.probe_result = run.result
+            self._show_probe_result()
+            self.probe_status.setText(f"Showing {run.display_name} from this session")
+            for index in range(self.views.count()):
+                if self.views.tabText(index) == "Spin Probe":
+                    self.views.setCurrentIndex(index)
+                    break
+            self._status_update(f"Showing {run.display_name} from this session")
+            return True
+        self._finished(
+            _SequenceSimulationPayload(
+                run.result,
+                state.get("animation"),
+                animation_message=state.get("animation_message", ""),
+            ),
+            record_run=False,
+        )
+        self._active_session_run_id = run.run_id
+        self._status_update(f"Showing {run.display_name} from this session")
+        return True
+
+    def refresh_after_session_control_restore(self):
+        """Refresh dependent labels and panel visibility without regenerating."""
+        self._source_changed()
+        self._object_source_changed()
+        for update in (
+            self._update_bandwidth_labels,
+            self._update_csi_labels,
+            self._update_flash_labels,
+            self._update_bssfp_labels,
+            self._update_ss_bssfp_labels,
+            self._update_radial_me_bssfp_labels,
+            self._update_me_bssfp_labels,
+        ):
+            update()
+        self._update_simulation_object_table()
+        self._update_spoiling_quality()
+
+    def forget_session_simulation_run(self, run):
+        """Clear result views when the run currently being shown is deleted."""
+        if self._active_session_run_id != run.run_id:
+            return
+        if run.run_type == "spin_probe":
+            self._stop_probe_playback()
+            self.probe_result = None
+            self.probe_spectrum_viewer.result = None
+            self.probe_spatial_viewer.result = None
+            self.probe_info.setText("The displayed spin-probe run was deleted")
+            self.probe_status.setText("Spin-probe run deleted")
+            self._active_session_run_id = None
+            return
+        self._clear_previous_simulation_views()
+        self.export_button.setEnabled(False)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setFormat("Run deleted")
+        self.simulation_time_label.setText("Elapsed: — · Remaining: —")
+        self.status.setText("The displayed session simulation was deleted")
 
     def _record_simulation_timing(self, result, *, now=None, finished_at_utc=None):
         """Attach the UI-observed wall-clock timing to a completed result."""
@@ -8176,7 +9685,7 @@ class SequenceSimulationWidget(QWidget):
         x_mm = ((x_index + 0.5) / csi.matrix[0] - 0.5) * csi.fov_m[0] * 1000
         y_mm = ((y_index + 0.5) / csi.matrix[1] - 0.5) * csi.fov_m[1] * 1000
         self.split_signal_info.setText(
-            f"Voxel (x={x_index}, y={y_index}) at " f"({x_mm:.4g}, {y_mm:.4g}) mm"
+            f"Voxel (x={x_index}, y={y_index}) at ({x_mm:.4g}, {y_mm:.4g}) mm"
         )
 
     def _show_spectroscopic_result(self, result):

@@ -8,6 +8,22 @@ import numpy as np
 VFA_REFERENCE_DOI = "10.1016/j.jmr.2007.10.011"
 
 
+def ernst_angle_deg(repetition_time_s: float, t1_s: float | np.ndarray) -> np.ndarray:
+    """Return the spoiled steady-state Ernst angle in degrees.
+
+    The classical Ernst-angle model assumes complete transverse spoiling and
+    depends on TR and T1 only: ``cos(alpha_E) = exp(-TR / T1)``. T2 does not
+    enter this ideal spoiled-gradient-echo optimum.
+    """
+    repetition_time = float(repetition_time_s)
+    if not np.isfinite(repetition_time) or repetition_time <= 0.0:
+        raise ValueError("repetition_time_s must be positive and finite")
+    t1 = np.asarray(t1_s, dtype=float)
+    if t1.size == 0 or not np.all(np.isfinite(t1)) or np.any(t1 <= 0.0):
+        raise ValueError("t1_s must contain positive finite values")
+    return np.rad2deg(np.arccos(np.exp(-repetition_time / t1)))
+
+
 def variable_flip_angle_schedule(
     num_excitations: int,
     *,

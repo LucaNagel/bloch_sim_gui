@@ -330,8 +330,11 @@ class SpectralPhantom:
         Absolute ppm value of the scanner reference. Peak shifts stored in
         species are relative to this reference, so the simulated carrier is
         always 0 ppm.
+    spectral_window_center_ppm : float, optional
+        Absolute ppm center of the default spectral sampling/preview window.
+        Defaults to ``spectral_reference_ppm`` for backwards compatibility.
     spectral_bandwidth_ppm : float
-        Default spectral display bandwidth centered on the scanner reference.
+        Default spectral sampling/preview bandwidth.
     spectral_points : int
         Default number of frequency samples for spectral display.
     name : str
@@ -349,6 +352,7 @@ class SpectralPhantom:
     field_strength: float = 3.0
     nucleus: str = "H1"
     spectral_reference_ppm: float = 0.0
+    spectral_window_center_ppm: Optional[float] = None
     spectral_bandwidth_ppm: float = 20.0
     spectral_points: int = 1024
     name: str = "Spectral Phantom"
@@ -362,6 +366,8 @@ class SpectralPhantom:
 
     def __post_init__(self):
         """Validate and compute derived quantities."""
+        if self.spectral_window_center_ppm is None:
+            self.spectral_window_center_ppm = float(self.spectral_reference_ppm)
         self._validate()
         self._compute_coordinates()
         self._compute_frequencies()
@@ -442,6 +448,8 @@ class SpectralPhantom:
             raise ValueError(f"unsupported nucleus {self.nucleus!r}")
         if not np.isfinite(self.spectral_reference_ppm):
             raise ValueError("spectral_reference_ppm must be finite")
+        if not np.isfinite(self.spectral_window_center_ppm):
+            raise ValueError("spectral_window_center_ppm must be finite")
         if (
             not np.isfinite(self.spectral_bandwidth_ppm)
             or self.spectral_bandwidth_ppm <= 0
@@ -723,9 +731,16 @@ class SpectralPhantom:
                     effective_nucleus,
                 )
             )
+            window_center_hz = float(
+                ppm_to_hz(
+                    self.spectral_window_center_ppm - self.spectral_reference_ppm,
+                    effective_field,
+                    effective_nucleus,
+                )
+            )
             frequency_hz = np.linspace(
-                -half_bandwidth_hz,
-                half_bandwidth_hz,
+                window_center_hz - half_bandwidth_hz,
+                window_center_hz + half_bandwidth_hz,
                 int(points),
             )
         frequency_hz = np.asarray(frequency_hz, dtype=float)
@@ -761,7 +776,11 @@ class SpectralPhantom:
         if points is None:
             points = self.spectral_points
         if frequency_ppm is None:
-            centre = self.spectral_reference_ppm if absolute else 0.0
+            centre = (
+                self.spectral_window_center_ppm
+                if absolute
+                else self.spectral_window_center_ppm - self.spectral_reference_ppm
+            )
             half_bandwidth_ppm = self.spectral_bandwidth_ppm / 2.0
             frequency_ppm = np.linspace(
                 centre - half_bandwidth_ppm,
@@ -984,12 +1003,13 @@ class SpectralPhantom:
             coords=coords,
             attrs={
                 "format": "blochsimulator-spectral-phantom-xarray",
-                "version": 1,
+                "version": 2,
                 "name": self.name,
                 "fov_m": np.asarray(self.fov, dtype=np.float64),
                 "field_strength": self.field_strength,
                 "nucleus": self.nucleus,
                 "spectral_reference_ppm": self.spectral_reference_ppm,
+                "spectral_window_center_ppm": self.spectral_window_center_ppm,
                 "spectral_bandwidth_ppm": self.spectral_bandwidth_ppm,
                 "spectral_points": self.spectral_points,
                 "has_b0_map": self.b0_map is not None,
@@ -1068,6 +1088,12 @@ class SpectralPhantom:
             field_strength=float(ds.attrs["field_strength"]),
             nucleus=str(ds.attrs["nucleus"]),
             spectral_reference_ppm=float(ds.attrs.get("spectral_reference_ppm", 0.0)),
+            spectral_window_center_ppm=float(
+                ds.attrs.get(
+                    "spectral_window_center_ppm",
+                    ds.attrs.get("spectral_reference_ppm", 0.0),
+                )
+            ),
             spectral_bandwidth_ppm=float(ds.attrs.get("spectral_bandwidth_ppm", 20.0)),
             spectral_points=int(ds.attrs.get("spectral_points", 1024)),
             name=str(ds.attrs.get("name", "Spectral Phantom")),
@@ -1095,11 +1121,12 @@ class SpectralPhantom:
         ]
         header = {
             "format": "blochsimulator-spectral-phantom",
-            "version": 3,
+            "version": 4,
             "name": self.name,
             "field_strength": self.field_strength,
             "nucleus": self.nucleus,
             "spectral_reference_ppm": self.spectral_reference_ppm,
+            "spectral_window_center_ppm": self.spectral_window_center_ppm,
             "spectral_bandwidth_ppm": self.spectral_bandwidth_ppm,
             "spectral_points": self.spectral_points,
             "coordinate_system": self.coordinate_system,
@@ -1253,6 +1280,12 @@ class SpectralPhantom:
             field_strength=float(header["field_strength"]),
             nucleus=str(header["nucleus"]),
             spectral_reference_ppm=float(header.get("spectral_reference_ppm", 0.0)),
+            spectral_window_center_ppm=float(
+                header.get(
+                    "spectral_window_center_ppm",
+                    header.get("spectral_reference_ppm", 0.0),
+                )
+            ),
             spectral_bandwidth_ppm=float(header.get("spectral_bandwidth_ppm", 20.0)),
             spectral_points=int(header.get("spectral_points", 1024)),
             name=str(header["name"]),

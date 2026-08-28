@@ -8,7 +8,12 @@ from blochsimulator.project_io import (
     save_project,
     scan_project_folders,
 )
-from blochsimulator.sequence import ADCEvent, RFEvent, SequenceProgram
+from blochsimulator.sequence import (
+    ADCEvent,
+    RFEvent,
+    SequenceProbeResult,
+    SequenceProgram,
+)
 from blochsimulator.sequence.result import SequenceSimulationResult
 
 
@@ -60,6 +65,40 @@ def test_complete_project_round_trip(tmp_path):
     )
     np.testing.assert_allclose(loaded["legacy_result"]["time"], np.arange(3))
     np.testing.assert_allclose(loaded["sequence_result"].signal, result.signal)
+
+
+def test_spin_probe_project_round_trip(tmp_path):
+    result = SequenceProbeResult(
+        time_s=np.array([0.0, 0.01]),
+        positions_m=np.array([[0.0, 0.0, 0.0], [0.01, 0.0, 0.0]]),
+        frequency_offsets_hz=np.array([-100.0, 100.0]),
+        magnetization=np.arange(24, dtype=float).reshape(2, 2, 2, 3),
+        metadata={"probe_type": "spectral", "axis": np.array([-1.0, 1.0])},
+    )
+    path = tmp_path / "spin_probe.blochproj"
+
+    save_project(
+        path,
+        {"workspace_mode": "sequence", "sequence_view_name": "Spin Probe"},
+        sequence_result=result,
+    )
+    loaded = load_project(path)
+
+    assert isinstance(loaded["sequence_result"], SequenceProbeResult)
+    np.testing.assert_allclose(loaded["sequence_result"].time_s, result.time_s)
+    np.testing.assert_allclose(
+        loaded["sequence_result"].magnetization, result.magnetization
+    )
+    np.testing.assert_allclose(loaded["sequence_result"].metadata["axis"], [-1.0, 1.0])
+    metadata = read_project_metadata(path)
+    assert metadata["contents"]["sequence_result"] == {
+        "kind": "spin-probe",
+        "time_samples": 2,
+        "positions": 2,
+        "frequencies": 2,
+        "magnetization_shape": [2, 2, 2, 3],
+        "metadata_keys": ["axis", "probe_type"],
+    }
 
 
 def test_project_io_reads_legacy_numpy_array_metadata_strings():
