@@ -327,7 +327,12 @@ class _ExportContext:
 
     @property
     def spectral_reference_ppm(self) -> float:
-        value = self.result.metadata.get("spectral_reference_ppm")
+        value = self.result.metadata.get("sequence_reference_ppm")
+        if value is None:
+            value = self.result.metadata.get("spectral_reference_ppm")
+        if value is None and self.phantom is not None:
+            metadata = getattr(self.phantom, "metadata", {})
+            value = metadata.get("sequence_reference_ppm")
         if value is None and self.phantom is not None:
             value = getattr(self.phantom, "spectral_reference_ppm", None)
         try:

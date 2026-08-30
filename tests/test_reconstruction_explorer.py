@@ -229,6 +229,29 @@ def test_explorer_uses_two_handle_contrast_slider(qt_application):
     np.testing.assert_allclose(restored.contrast_slider.values(), selected)
 
 
+def test_auto_contrast_uses_one_zero_based_range_across_repetitions(qt_application):
+    dataset = _framed_cartesian_dataset()
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(dataset)
+
+    # Echo 0 contains frames 0 and 2. The later repetition supplies the global
+    # maximum, which must also be used while repetition 0 is displayed.
+    expected_maximum = (
+        1.1 * np.abs(dataset.cartesian_image.isel(cartesian_frame=[0, 2])).max().item()
+    )
+    assert explorer.contrast_slider.values() == (0.0, expected_maximum)
+    np.testing.assert_allclose(
+        explorer.image_panel.image.levels, (0.0, expected_maximum)
+    )
+
+    explorer.outer_controls["repetition"].setValue(1)
+
+    assert explorer.contrast_slider.values() == (0.0, expected_maximum)
+    np.testing.assert_allclose(
+        explorer.image_panel.image.levels, (0.0, expected_maximum)
+    )
+
+
 def test_explorer_uses_labelled_slider_for_2d_slice_series(qt_application):
     dataset = _sliced_cartesian_dataset()
     explorer = SequenceReconstructionExplorer()

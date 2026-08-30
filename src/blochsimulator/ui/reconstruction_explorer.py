@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from itertools import product
 from pathlib import Path
 
 import numpy as np
@@ -655,7 +656,7 @@ class SequenceReconstructionExplorer(QWidget):
             display = model.display_values(image_data, component)
             display_levels = self._display_levels(
                 display,
-                domain=self._slice_series_contrast_domain(display, component),
+                domain=self._signal_series_contrast_domain(display, component),
             )
             image_lut = self._image_lut()
             interpolation = self._image_interpolation()
@@ -818,41 +819,43 @@ class SequenceReconstructionExplorer(QWidget):
             return float(finite.min()), float(finite.max())
         return None
 
-    def _slice_series_contrast_domain(self, current_display, component):
-        """Return one contrast domain for every slice in the selected series."""
-        slice_dimension = next(
-            (item for item in self.model.outer_dimensions if item.name == "slice"),
-            None,
+    def _signal_series_contrast_domain(self, current_display, component):
+        """Return one contrast domain across all slices and repetitions."""
+        series_dimensions = tuple(
+            item
+            for item in self.model.outer_dimensions
+            if item.name in {"slice", "repetition"}
         )
-        if slice_dimension is None:
-            return self._finite_range(current_display)
+        if not series_dimensions:
+            finite_range = self._finite_range(current_display)
+            return None if finite_range is None else (0.0, max(0.0, finite_range[1]))
 
         selections = self._selections()
-        low = high = None
-        for value in slice_dimension.values:
-            slice_selections = dict(selections)
-            slice_selections["slice"] = value
-            image_data, *_ = self._selected_image(slice_selections)
+        high = None
+        for values in product(*(item.values for item in series_dimensions)):
+            series_selections = dict(selections)
+            series_selections.update(
+                (item.name, value) for item, value in zip(series_dimensions, values)
+            )
+            image_data, *_ = self._selected_image(series_selections)
             display = self.model.display_values(image_data, component)
             finite_range = self._finite_range(display)
             if finite_range is None:
                 continue
-            slice_low, slice_high = finite_range
-            low = slice_low if low is None else min(low, slice_low)
-            high = slice_high if high is None else max(high, slice_high)
-        return None if low is None else (low, high)
+            high = finite_range[1] if high is None else max(high, finite_range[1])
+        return None if high is None else (0.0, max(0.0, high))
 
     def _display_levels(self, values, *, domain=None):
         finite_range = self._finite_range(values) if domain is None else domain
-        low, high = (0.0, 1.0) if finite_range is None else finite_range
-        if np.isclose(low, high):
-            delta = max(1e-6, abs(low) * 1e-6)
-            low, high = low - delta, high + delta
+        high = 1.0 if finite_range is None else max(0.0, float(finite_range[1]))
+        display_high = 1.1 * high
+        if display_high <= 0.0:
+            display_high = 1e-6
         if self.auto_contrast.isChecked():
-            self.contrast_slider.set_domain(low, 1.1 * high, preserve=False)
-            self._update_contrast_labels(low, 1.1 * high)
-            return None
-        self.contrast_slider.set_domain(low, 1.1 * high, preserve=True)
+            self.contrast_slider.set_domain(0.0, display_high, preserve=False)
+            self._update_contrast_labels(0.0, display_high)
+            return 0.0, display_high
+        self.contrast_slider.set_domain(0.0, display_high, preserve=True)
         selected_low, selected_high = self.contrast_slider.values()
         self._update_contrast_labels(selected_low, selected_high)
         if selected_high <= selected_low:

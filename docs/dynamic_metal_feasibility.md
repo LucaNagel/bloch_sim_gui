@@ -118,11 +118,12 @@ complex amplitude/phase correction. The other set is held out and cannot
 influence that correction. Signals are combined in Float64 on the CPU.
 
 In the GUI the extra option is named **CPU + Apple GPU (experimental)**.
-Subvoxel counts remain configurable even with ideal spoiling. Checkpoints,
-unavailable Metal hardware, unsupported field maps, invalid sampling grids,
-memory limits in the GPU path, and failed accuracy checks all select the exact
-CPU path automatically. The result metadata and completion message report
-whether the checked hybrid result or the CPU fallback was used.
+Subvoxel counts are configurable only with gradient-waveform spoiling; ideal
+spoiling always uses one spin per voxel. Checkpoints, unavailable Metal
+hardware, unsupported field maps, invalid sampling grids, memory limits in the
+GPU path, and failed accuracy checks all select the exact CPU path
+automatically. The result metadata and completion message report whether the
+checked hybrid result or the CPU fallback was used.
 
 The held-out error is scaled conservatively against the complete corrected
 signal before the `1e-3` gate is applied.  This matters when large individual

@@ -1839,6 +1839,7 @@ def simulate_dynamic_sequence(
     checkpoints_s=(),
     field_strength_t=None,
     nucleus=None,
+    sequence_reference_ppm=None,
     progress_callback=None,
     preview_callback=None,
     cancel_callback=None,
@@ -1855,7 +1856,11 @@ def simulate_dynamic_sequence(
     checkpoint_dtype=None,
     **_ignored,
 ):
-    """Run the complete sequence on a regional two-pool dynamic phantom."""
+    """Run the complete sequence on a regional two-pool dynamic phantom.
+
+    Ideal spoiling always uses one spin per voxel; subvoxel sampling is active
+    only for gradient-waveform spoiling.
+    """
     from .sequence import (
         AcquisitionDimensions,
         SequenceCompiler,
@@ -1876,16 +1881,25 @@ def simulate_dynamic_sequence(
         phantom_voxel_basis_m,
     )
 
-    sampling = coerce_spin_sampling(spin_sampling)
-    sampling.validate_phantom_dimensions(phantom.ndim)
     spoiler_mode = str(spoiler_mode).strip().lower()
     if spoiler_mode not in {"ideal", "gradient"}:
         raise ValueError("spoiler_mode must be 'ideal' or 'gradient'")
+    sampling = coerce_spin_sampling(
+        spin_sampling if spoiler_mode == "gradient" else None
+    )
+    sampling.validate_phantom_dimensions(phantom.ndim)
 
     field = (
         phantom.field_strength if field_strength_t is None else float(field_strength_t)
     )
     effective_nucleus = phantom.nucleus if nucleus is None else str(nucleus)
+    effective_reference_ppm = (
+        phantom.spectral_reference_ppm
+        if sequence_reference_ppm is None
+        else float(sequence_reference_ppm)
+    )
+    if not np.isfinite(effective_reference_ppm):
+        raise ValueError("sequence_reference_ppm must be finite")
     inflow_curve = phantom.inflow_curve_on_sequence_timeline
     inflow_polarization_curve = phantom.inflow_polarization_curve_on_sequence_timeline
     conversion_start_s = phantom.conversion_start_on_sequence_timeline_s
@@ -2100,6 +2114,13 @@ def simulate_dynamic_sequence(
     pool_offsets = np.asarray(
         [pool.get_frequency_offset(field, effective_nucleus) for pool in phantom.pools],
         dtype=np.float64,
+    )
+    pool_offsets += float(
+        ppm_to_hz(
+            phantom.spectral_reference_ppm - effective_reference_ppm,
+            field,
+            effective_nucleus,
+        )
     )
     t2 = np.asarray([pool.t2 for pool in phantom.pools], dtype=np.float64)[:, None]
     coefficient_r1 = np.asarray(
@@ -3369,6 +3390,7 @@ def simulate_dynamic_sequence(
             "physical_rf_unit": "G",
             "physical_gradient_unit": "T/m",
             "spectral_reference_ppm": phantom.spectral_reference_ppm,
+            "sequence_reference_ppm": effective_reference_ppm,
             "spectral_window_center_ppm": phantom.spectral_window_center_ppm,
             "spectral_bandwidth_ppm": phantom.spectral_bandwidth_ppm,
             "spectral_points": phantom.spectral_points,

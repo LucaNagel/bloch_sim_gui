@@ -7,12 +7,13 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from PyQt5.QtCore import QSettings, Qt
+from PyQt5.QtCore import QSettings, Qt, QTimer
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
     QFileDialog,
+    QGroupBox,
     QLabel,
     QMenu,
     QMessageBox,
@@ -732,6 +733,7 @@ def test_sequence_workspace_builds_cartesian_epi_from_controls():
     widget = SequenceSimulationWidget()
     assert widget.sequence_source.itemText(1) == "EPI"
     assert widget.acquisition_group.isHidden()
+    widget.sequence_reference_ppm.setValue(183.35)
     widget.sequence_live_preview.setChecked(True)
     widget.sequence_source.setCurrentIndex(1)
     assert not widget.acquisition_group.isHidden()
@@ -750,6 +752,7 @@ def test_sequence_workspace_builds_cartesian_epi_from_controls():
     assert widget.acquisition.phase_matrix == 4
     assert widget.acquisition.dwell_s == 40e-6
     definitions = widget.program.metadata["definitions"]
+    assert definitions["SequenceReferencePpm"] == pytest.approx(183.35)
     assert definitions["SpoilAfterSlice"]
     assert definitions["SpoilerCyclesPerSlice"] == pytest.approx(6.0)
     assert definitions["SpoilerCyclesPerVoxel"] == pytest.approx(0.25)
@@ -1113,6 +1116,7 @@ def test_sequence_workspace_scopes_object_controls_to_the_selected_source():
 def test_simulation_object_summary_uses_structured_table(monkeypatch):
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
+    assert "QGroupBox { font-weight: bold; }" in widget.styleSheet()
     phantom = Phantom(
         shape=(2, 3, 4),
         fov=(2e-3, 6e-3, 8e-3),
@@ -1156,6 +1160,10 @@ def test_shared_spoiling_quality_unit_covers_every_sequence_source():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
     widget.sequence_live_preview.setChecked(False)
+    assert widget.spoiler_mode == "ideal"
+    assert widget.spoiling_quality_group.isHidden()
+    widget.set_spoiler_configuration("gradient", (1, 1, 9))
+    assert not widget.spoiling_quality_group.isHidden()
 
     expected_text = {
         widget.INTERNAL_SOURCE: "Internal FID has no gradient spoiler",
@@ -1193,6 +1201,26 @@ def test_shared_spoiling_quality_unit_covers_every_sequence_source():
     widget.epi_spoil_after_slice.setChecked(False)
     assert "remaining coherent signal is 100%" in (widget.spoiling_quality_info.text())
     assert widget.spoiling_apply_recommended_grid.isHidden()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_ideal_spoiling_always_uses_one_spin_and_hides_quality_group():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.set_dynamic_sequence_kernel("metal_hybrid")
+    widget.set_spoiler_configuration("gradient", (3, 5, 11), "stratified")
+
+    assert widget._configured_spin_sampling().counts_xyz == (3, 5, 11)
+    assert not widget.spoiling_quality_group.isHidden()
+
+    widget.set_spoiler_configuration("ideal", (3, 5, 11), "stratified")
+
+    assert widget.subvoxel_spin_counts == (1, 1, 1)
+    assert widget._configured_spin_sampling().counts_xyz == (1, 1, 1)
+    assert widget.spoiling_quality_group.isHidden()
 
     widget.close()
     widget.deleteLater()
@@ -1940,8 +1968,19 @@ def test_focused_sequence_workspace_uses_wider_control_panel():
     assert widget.layout().contentsMargins().left() == 0
     assert widget.split_view_checkbox.parentWidget() is widget.signal_page
     assert widget.views.tabBar().font().bold()
+    assert widget.sequence_reference_ppm.toolTip()
+    assert all(
+        widget.views.tabToolTip(index).strip() for index in range(widget.views.count())
+    )
     assert widget.sequence_title.font().bold()
     assert widget.sequence_title.font().pointSize() >= 12
+    titled_groups = {
+        group.title(): group
+        for group in widget.findChildren(QGroupBox)
+        if group.title()
+    }
+    assert titled_groups["Spoiling"].fontInfo().bold()
+    assert titled_groups["Simulation object"].fontInfo().bold()
     assert widget.object_form.labelAlignment() & Qt.AlignLeft
     for image_view in (
         widget.kspace_view,
@@ -1954,11 +1993,11 @@ def test_focused_sequence_workspace_uses_wider_control_panel():
     app.processEvents()
 
 
-def test_starting_sequence_opens_signal_tab(monkeypatch):
+def test_starting_sequence_preserves_selected_result_tab(monkeypatch):
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
     widget.object_source.setCurrentIndex(1)
-    widget.views.setCurrentIndex(0)
+    widget.views.setCurrentIndex(widget.sequence_tab_index)
     widget.view_stack.setCurrentIndex(1)
     monkeypatch.setattr(
         "blochsimulator.ui.sequence_simulation_widget.SequenceSimulationThread.start",
@@ -1967,9 +2006,10 @@ def test_starting_sequence_opens_signal_tab(monkeypatch):
 
     widget._run()
 
-    assert widget.view_stack.currentWidget() is widget.normal_signal_page
-    assert widget.views.currentIndex() == widget.signal_tab_index
-    assert widget.views.tabText(widget.views.currentIndex()) == "Signal / CSI spectrum"
+    assert widget.view_stack.currentIndex() == 1
+    assert widget.views.currentIndex() == widget.sequence_tab_index
+    assert widget.views.tabText(widget.signal_tab_index) == "Signal"
+    assert "ADC signal" in widget.views.tabToolTip(widget.signal_tab_index)
 
     widget.worker.deleteLater()
     widget.worker = None
@@ -2041,12 +2081,69 @@ def test_spectral_phantom_probe_defaults_follow_window_relative_to_reference():
         spectral_points=257,
     )
     widget.probe_frequency_units.setCurrentText("ppm")
+    widget.sequence_reference_ppm.setValue(175.0)
 
     widget._apply_probe_defaults_from_phantom(phantom)
 
     assert widget.probe_ppm_min.value() == pytest.approx(-5.0)
     assert widget.probe_ppm_max.value() == pytest.approx(10.0)
     assert widget.probe_points.value() == 257
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_reference_confirmation_can_continue_or_cancel(monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    shape = (1, 1, 1)
+    widget.phantom = SpectralPhantom(
+        shape=shape,
+        fov=(0.01, 0.01, 0.01),
+        species=[ChemicalSpecies("Peak", 0.0, 1.0, 0.02)],
+        concentration_maps={"Peak": np.ones(shape)},
+        spectral_reference_ppm=175.0,
+        spectral_window_center_ppm=180.0,
+        spectral_bandwidth_ppm=10.0,
+    )
+    widget.sequence_reference_ppm.setValue(185.0)
+    assert widget._confirm_sequence_reference_for_run()
+
+    widget.sequence_reference_ppm.setValue(185.1)
+    observed = []
+
+    def choose(result):
+        def close_dialog():
+            dialog = QApplication.activeModalWidget()
+            assert isinstance(dialog, QMessageBox)
+            observed.append(
+                {
+                    "text": dialog.text(),
+                    "continue": dialog.button(QMessageBox.Yes).text(),
+                    "cancel": dialog.button(QMessageBox.Cancel).text(),
+                    "default": dialog.defaultButton().text(),
+                }
+            )
+            dialog.done(result)
+
+        QTimer.singleShot(0, close_dialog)
+
+    choose(QMessageBox.Yes)
+    assert widget._confirm_sequence_reference_for_run()
+    assert observed[-1]["continue"] == "Continue"
+    assert observed[-1]["cancel"] == "Cancel"
+    assert observed[-1]["default"] == "Cancel"
+    assert "outside the simulated spectral window" in observed[-1]["text"]
+
+    fov_confirmation = MagicMock(return_value=True)
+    monkeypatch.setattr(widget, "_build_phantom", lambda: None)
+    monkeypatch.setattr(widget, "_confirm_generated_sequence_fov", fov_confirmation)
+    choose(QMessageBox.Cancel)
+    widget._run()
+
+    assert widget.worker is None
+    fov_confirmation.assert_not_called()
 
     widget.close()
     widget.deleteLater()

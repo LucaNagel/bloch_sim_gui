@@ -219,7 +219,7 @@ def test_settings_dialog_returns_selected_values(tmp_path):
         dialog.dynamic_sequence_kernel_combo.findData("metal_hybrid")
     )
     assert dialog.dynamic_sequence_kernel() == "metal_hybrid"
-    assert all(spin.isEnabled() for spin in dialog.subvoxel_spin_count_spins)
+    assert not any(spin.isEnabled() for spin in dialog.subvoxel_spin_count_spins)
     dialog.dynamic_sequence_kernel_combo.setCurrentIndex(
         dialog.dynamic_sequence_kernel_combo.findData("native_parallel")
     )
@@ -234,10 +234,11 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     assert dialog.sequence_timestep_us() == pytest.approx(7.5)
     assert dialog.sequence_timestep_us_spin.isEnabled()
     assert dialog.sequence_spoiler_mode() == "ideal"
-    assert dialog.subvoxel_spin_counts() == (1, 1, 9)
+    assert dialog.subvoxel_spin_counts() == (1, 1, 1)
     assert dialog.subvoxel_sampling_method() == "midpoint"
     assert not any(spin.isEnabled() for spin in dialog.subvoxel_spin_count_spins)
     assert not dialog.subvoxel_sampling_method_combo.isEnabled()
+    assert not any(label.isEnabled() for label in dialog.subvoxel_control_labels)
     dialog.sequence_spoiler_mode_combo.setCurrentIndex(
         dialog.sequence_spoiler_mode_combo.findData("gradient")
     )
@@ -251,6 +252,7 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     assert dialog.subvoxel_sampling_method() == "stratified"
     assert all(spin.isEnabled() for spin in dialog.subvoxel_spin_count_spins)
     assert dialog.subvoxel_sampling_method_combo.isEnabled()
+    assert all(label.isEnabled() for label in dialog.subvoxel_control_labels)
     assert dialog.thread_mode() == "automatic"
     assert not dialog.manual_thread_count_spin.isEnabled()
     dialog.thread_mode_combo.setCurrentIndex(

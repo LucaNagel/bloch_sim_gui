@@ -833,15 +833,32 @@ class SpectralPhantom:
         return frequency_ppm, spectrum
 
     def to_component_phantoms(
-        self, field_strength: Optional[float] = None, nucleus: str = None
+        self,
+        field_strength: Optional[float] = None,
+        nucleus: str = None,
+        sequence_reference_ppm: Optional[float] = None,
     ) -> List[Tuple[str, "Phantom"]]:
-        """Expand spectral components into independently simulated phantoms."""
+        """Expand components relative to the selected sequence reference."""
         if Phantom is None:
             raise ImportError("phantom module not available")
         effective_field = (
             self.field_strength if field_strength is None else float(field_strength)
         )
         effective_nucleus = self.nucleus if nucleus is None else str(nucleus)
+        effective_reference_ppm = (
+            self.spectral_reference_ppm
+            if sequence_reference_ppm is None
+            else float(sequence_reference_ppm)
+        )
+        if not np.isfinite(effective_reference_ppm):
+            raise ValueError("sequence_reference_ppm must be finite")
+        reference_shift_hz = float(
+            ppm_to_hz(
+                self.spectral_reference_ppm - effective_reference_ppm,
+                effective_field,
+                effective_nucleus,
+            )
+        )
         b0 = self.get_b0_offset_map_hz(effective_field, effective_nucleus)
         components = []
         for species in self.species:
@@ -870,7 +887,8 @@ class SpectralPhantom:
                             self.shape,
                             self.get_frequency_offset(
                                 species.name, effective_field, effective_nucleus
-                            ),
+                            )
+                            + reference_shift_hz,
                         ),
                         m0_map=self._component_m0_map(species.name),
                         mask=active,

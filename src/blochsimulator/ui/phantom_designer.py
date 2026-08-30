@@ -56,6 +56,7 @@ from ..spectral_phantom import SpectralPhantom
 from ..units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm
 from .volume_viewer import PhantomInspectorWidget
 from .default_settings import WorkspaceDefaults
+from .styles import BOLD_GROUP_TITLES_STYLE
 
 try:
     import pyqtgraph.opengl as gl
@@ -468,6 +469,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         parent=None,
         design: Optional[PhantomDesign] = None,
         settings=None,
+        sequence_reference_ppm: Optional[float] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle(
@@ -495,7 +497,14 @@ class SpectralPhantomDesignerDialog(QDialog):
                     )
                 ],
             )
+            if sequence_reference_ppm is not None:
+                design.spectral_reference_ppm = float(sequence_reference_ppm)
         self.design = design
+        self.sequence_reference_ppm = float(
+            design.spectral_reference_ppm
+            if sequence_reference_ppm is None
+            else sequence_reference_ppm
+        )
         self.phantom = None
         self._updating = False
         self._last_spectral_reference_ppm = float(design.spectral_reference_ppm)
@@ -507,6 +516,16 @@ class SpectralPhantomDesignerDialog(QDialog):
         self._load_design_into_ui()
 
     def _build_ui(self):
+        self.setStyleSheet(
+            BOLD_GROUP_TITLES_STYLE
+            + "QListWidget#phantomShapeList::item { padding: 5px 7px; }"
+            "QListWidget#phantomShapeList::item:selected {"
+            " background-color: palette(highlight);"
+            " color: palette(highlighted-text);"
+            " font-weight: bold;"
+            " border: 2px solid palette(highlight);"
+            "}"
+        )
         root = QVBoxLayout(self)
         self.tabs = QTabWidget()
         root.addWidget(self.tabs)
@@ -526,15 +545,17 @@ class SpectralPhantomDesignerDialog(QDialog):
         geometry_group.setMinimumWidth(350)
         geometry_layout = QVBoxLayout(geometry_group)
         geometry_grid = QGridLayout()
+        self.phantom_geometry_grid = geometry_grid
+        geometry_grid.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         geometry_grid.setHorizontalSpacing(10)
         geometry_grid.setVerticalSpacing(6)
         self.matrix_spins = []
         self.fov_spins = []
         matrix_heading = QLabel("Matrix")
-        matrix_heading.setAlignment(Qt.AlignCenter)
+        matrix_heading.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         geometry_grid.addWidget(matrix_heading, 0, 1)
         fov_heading = QLabel("FOV")
-        fov_heading.setAlignment(Qt.AlignCenter)
+        fov_heading.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         geometry_grid.addWidget(fov_heading, 0, 2)
         for row, axis in enumerate("XYZ", start=1):
             matrix = QSpinBox()
@@ -595,8 +616,17 @@ class SpectralPhantomDesignerDialog(QDialog):
         )
         self.spectral_reference_ppm = self._number_spin(-10000.0, 10000.0, 0.0, " ppm")
         self.spectral_reference_ppm.setToolTip(
-            "Scanner carrier/reference in absolute ppm. Internally the sequence "
-            "is simulated at 0 ppm and peaks are stored as offsets from this value."
+            "Internal storage origin retained for backwards-compatible phantom files."
+        )
+        self.spectral_reference_ppm.hide()
+        self.sequence_reference_display = self._number_spin(
+            -10000.0, 10000.0, self.sequence_reference_ppm, " ppm"
+        )
+        self.sequence_reference_display.setReadOnly(True)
+        self.sequence_reference_display.setButtonSymbols(QDoubleSpinBox.NoButtons)
+        self.sequence_reference_display.setToolTip(
+            "Read-only sequence zero frequency from Sequence Simulation. "
+            "The orange spectrum marker uses this value."
         )
         self.spectral_window_center_ppm = self._number_spin(
             -10000.0, 10000.0, 0.0, " ppm"
@@ -622,7 +652,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         spectral_fields.addWidget(QLabel("Nucleus"), 0, 2)
         spectral_fields.addWidget(self.nucleus, 0, 3)
         spectral_fields.addWidget(QLabel("Sequence reference"), 1, 0)
-        spectral_fields.addWidget(self.spectral_reference_ppm, 1, 1)
+        spectral_fields.addWidget(self.sequence_reference_display, 1, 1)
         spectral_fields.addWidget(QLabel("Spectrum centre"), 1, 2)
         spectral_fields.addWidget(self.spectral_window_center_ppm, 1, 3)
         spectral_fields.addWidget(QLabel("Bandwidth"), 2, 0)
@@ -674,9 +704,6 @@ class SpectralPhantomDesignerDialog(QDialog):
         spectral_preview_layout.addWidget(self.spectral_preview_info)
         spectral_group_layout.addLayout(spectral_preview_layout, 1)
 
-        self.spectral_reference_ppm.valueChanged.connect(
-            self._spectral_settings_changed
-        )
         self.spectral_window_center_ppm.valueChanged.connect(
             self._spectral_settings_changed
         )
@@ -694,13 +721,14 @@ class SpectralPhantomDesignerDialog(QDialog):
         draw_layout.addWidget(splitter)
 
         shape_panel = QWidget()
-        shape_panel.setMinimumWidth(280)
-        shape_panel.setMaximumWidth(360)
+        shape_panel.setMinimumWidth(360)
+        shape_panel.setMaximumWidth(440)
         shape_layout = QVBoxLayout(shape_panel)
         shape_heading = QLabel("Shapes")
         shape_heading.setToolTip("Later shapes overwrite B0 values in overlaps")
         shape_layout.addWidget(shape_heading)
         self.shape_list = QListWidget()
+        self.shape_list.setObjectName("phantomShapeList")
         self.shape_list.currentRowChanged.connect(self._shape_selected)
         shape_layout.addWidget(self.shape_list)
         shape_buttons = QGridLayout()
@@ -713,23 +741,11 @@ class SpectralPhantomDesignerDialog(QDialog):
             "Add a cylinder whose local axis initially points along Z"
         )
         add_cylinder.clicked.connect(lambda: self._add_shape("cylinder"))
-        draw_ellipse = QPushButton("Draw ellipsoid")
-        draw_ellipse.setToolTip("Drag a new ellipsoid directly in the XY canvas")
-        draw_ellipse.clicked.connect(lambda: self._start_shape_drawing("ellipsoid"))
-        draw_box = QPushButton("Draw box")
-        draw_box.setToolTip("Drag a new box directly in the XY canvas")
-        draw_box.clicked.connect(lambda: self._start_shape_drawing("box"))
-        draw_cylinder = QPushButton("Draw cylinder")
-        draw_cylinder.setToolTip("Drag the X/Y diameters of a new Z-aligned cylinder")
-        draw_cylinder.clicked.connect(lambda: self._start_shape_drawing("cylinder"))
         remove = QPushButton("Remove")
         remove.clicked.connect(self._remove_shape)
-        shape_buttons.addWidget(add_ellipse, 0, 0)
-        shape_buttons.addWidget(draw_ellipse, 0, 1)
-        shape_buttons.addWidget(add_box, 1, 0)
-        shape_buttons.addWidget(draw_box, 1, 1)
-        shape_buttons.addWidget(add_cylinder, 2, 0)
-        shape_buttons.addWidget(draw_cylinder, 2, 1)
+        shape_buttons.addWidget(add_ellipse, 0, 0, 1, 2)
+        shape_buttons.addWidget(add_box, 1, 0, 1, 2)
+        shape_buttons.addWidget(add_cylinder, 2, 0, 1, 2)
         shape_buttons.addWidget(remove, 3, 0, 1, 2)
         shape_layout.addLayout(shape_buttons)
         splitter.addWidget(shape_panel)
@@ -787,6 +803,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         property_layout.addWidget(self.shape_preview_3d)
 
         geometry_group = QGroupBox("Selected shape geometry")
+        geometry_group.setMinimumHeight(275)
         geometry_layout = QVBoxLayout(geometry_group)
         identity_form = QFormLayout()
         identity_form.setContentsMargins(0, 0, 0, 0)
@@ -852,8 +869,8 @@ class SpectralPhantomDesignerDialog(QDialog):
             self.z_size,
             *self.rotation_spins,
         ):
-            widget.setMinimumWidth(70)
-            widget.setMaximumWidth(90)
+            widget.setMinimumWidth(88)
+            widget.setMaximumWidth(110)
         geometry_grid = QGridLayout()
         geometry_grid.setHorizontalSpacing(10)
         geometry_grid.setVerticalSpacing(6)
@@ -1407,16 +1424,23 @@ class SpectralPhantomDesignerDialog(QDialog):
 
     def _roi_pen(self, index, selected):
         color = pg.intColor(index, hues=max(1, len(self.design.shapes)))
-        color.setAlpha(145 if selected else 30)
+        if selected:
+            color = pg.mkColor(255, 220, 80, 235)
+        else:
+            color.setAlpha(30)
         return pg.mkPen(
             color,
-            width=1.5 if selected else 1,
+            width=2.5 if selected else 1,
             style=Qt.DashLine,
         )
 
     def _projection_pen(self, index, selected):
-        color = pg.intColor(index, hues=max(1, len(self.design.shapes)), alpha=245)
-        return pg.mkPen(color, width=4 if selected else 2)
+        color = (
+            pg.mkColor(255, 220, 80, 255)
+            if selected
+            else pg.intColor(index, hues=max(1, len(self.design.shapes)), alpha=130)
+        )
+        return pg.mkPen(color, width=5 if selected else 2)
 
     def _update_shape_projection(self, row):
         if not (0 <= row < len(self.design.shapes)) or not (
@@ -1444,7 +1468,9 @@ class SpectralPhantomDesignerDialog(QDialog):
         for index, roi in enumerate(self._rois):
             roi.setPen(self._roi_pen(index, index == selected_row))
         for index, projection in enumerate(self._projection_items):
-            projection.setPen(self._projection_pen(index, index == selected_row))
+            selected = index == selected_row
+            projection.setPen(self._projection_pen(index, selected))
+            projection.setZValue(900 if selected else 500)
 
     def _current_row(self):
         row = self.shape_list.currentRow()
@@ -1586,7 +1612,8 @@ class SpectralPhantomDesignerDialog(QDialog):
             return
 
         item = self.design.shapes[row]
-        reference_ppm = float(self.spectral_reference_ppm.value())
+        phantom_reference_ppm = float(self.spectral_reference_ppm.value())
+        sequence_reference_ppm = float(self.sequence_reference_ppm)
         window_center_ppm = float(self.spectral_window_center_ppm.value())
         bandwidth_ppm = float(self.spectral_bandwidth_ppm.value())
         points = max(2, int(self.spectral_points.value()))
@@ -1616,7 +1643,7 @@ class SpectralPhantomDesignerDialog(QDialog):
                 )
             )
             half_width_ppm = max(fwhm_ppm / 2.0, np.finfo(float).eps)
-            peak_ppm = reference_ppm + peak.frequency_ppm + item.b0_ppm
+            peak_ppm = phantom_reference_ppm + peak.frequency_ppm + item.b0_ppm
             amplitude = peak.amplitude * peak.effective_initial_polarization(
                 item.initial_mz
             )
@@ -1625,9 +1652,9 @@ class SpectralPhantomDesignerDialog(QDialog):
             )
 
         self.spectral_preview_curve.setData(frequency_ppm, spectrum)
-        self.spectral_reference_line.setValue(reference_ppm)
-        display_min = min(float(frequency_ppm[0]), reference_ppm)
-        display_max = max(float(frequency_ppm[-1]), reference_ppm)
+        self.spectral_reference_line.setValue(sequence_reference_ppm)
+        display_min = min(float(frequency_ppm[0]), sequence_reference_ppm)
+        display_max = max(float(frequency_ppm[-1]), sequence_reference_ppm)
         if np.isclose(display_min, display_max):
             display_min -= 0.5
             display_max += 0.5
@@ -1635,7 +1662,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.spectral_preview_plot.enableAutoRange(axis=pg.ViewBox.YAxis)
         self.spectral_preview_info.setText(
             f"{item.name}: {frequency_ppm[0]:g}–{frequency_ppm[-1]:g} ppm · "
-            f"orange dashed line: reference {reference_ppm:g} ppm"
+            f"orange dashed line: sequence reference {sequence_reference_ppm:g} ppm"
         )
 
     def _properties_changed(self):

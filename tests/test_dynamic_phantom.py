@@ -42,6 +42,7 @@ from blochsimulator.spectral_phantom import ChemicalSpecies
 from blochsimulator.ui.phantom_designer import SpectralPhantomDesignerDialog
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationThread
 from blochsimulator.ui.volume_viewer import PhantomInspectorWidget
+from blochsimulator.units import ppm_to_hz
 
 
 def _dynamic_phantom(kpl=(0.0, 0.1)):
@@ -59,6 +60,30 @@ def _dynamic_phantom(kpl=(0.0, 0.1)):
         },
         kpl_map_s_inv=np.asarray(kpl, dtype=float).reshape(shape),
         nucleus="C13",
+    )
+
+
+def test_dynamic_pool_offsets_follow_sequence_reference_not_spectrum_window():
+    phantom = _dynamic_phantom()
+    phantom.field_strength = 7.0
+    phantom.spectral_reference_ppm = 175.0
+    phantom.spectral_window_center_ppm = 180.0
+    phantom.spectral_bandwidth_ppm = 30.0
+
+    result = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        SequenceProgram((), duration_s=1e-5),
+        phantom,
+        sequence_reference_ppm=183.35,
+        simulation_timestep_s=1e-5,
+    )
+
+    assert result.metadata["sequence_reference_ppm"] == pytest.approx(183.35)
+    assert result.metadata["spectral_window_center_ppm"] == pytest.approx(180.0)
+    assert result.metadata["pool_frequency_offsets_hz"] == pytest.approx(
+        (
+            ppm_to_hz(175.0 - 183.35, 7.0, "C13"),
+            ppm_to_hz(187.0 - 183.35, 7.0, "C13"),
+        )
     )
 
 
@@ -381,6 +406,7 @@ def test_private_metal_probe_chunks_outputs_and_retains_only_requested_spins(
         phantom,
         simulation_timestep_s=1e-4,
         spin_sampling=SpinSampling((2, 1, 1)),
+        spoiler_mode="gradient",
         spin_chunk_size=2,
         capture_spin_indices=(0, 3),
         capture_spin_groups=((0, 2), (1, 3)),
@@ -470,6 +496,7 @@ def test_hybrid_probe_returns_float64_fallback_when_held_out_sample_fails(
         phantom,
         simulation_timestep_s=1e-4,
         spin_sampling=sampling,
+        spoiler_mode="gradient",
         run_concurrently=False,
     )
 
@@ -492,6 +519,7 @@ def test_hybrid_sequence_wraps_checked_arrays_as_a_regular_result(monkeypatch):
         phantom,
         simulation_timestep_s=1e-4,
         spin_sampling=sampling.select((0, 7)),
+        spoiler_mode="gradient",
     )
     checked_species = np.asarray(template.species_signal) * 4.0
     checked_final_pool = np.asarray(template.final_pool_magnetization) * 4.0
@@ -519,6 +547,7 @@ def test_hybrid_sequence_wraps_checked_arrays_as_a_regular_result(monkeypatch):
         phantom,
         simulation_timestep_s=1e-4,
         spin_sampling=sampling,
+        spoiler_mode="gradient",
     )
 
     assert result.signal == pytest.approx(checked_species.sum(axis=0))
@@ -551,12 +580,14 @@ def test_hybrid_sequence_uses_exact_cpu_when_gpu_is_unavailable(monkeypatch):
         phantom,
         simulation_timestep_s=1e-4,
         spin_sampling=sampling,
+        spoiler_mode="gradient",
     )
     reference = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
         program,
         phantom,
         simulation_timestep_s=1e-4,
         spin_sampling=sampling,
+        spoiler_mode="gradient",
     )
 
     assert np.array_equal(result.signal, reference.signal)
@@ -676,7 +707,12 @@ def test_dynamic_gradient_waveform_matches_ideal_crusher_spoiling():
     )
     simulator = BlochSimulator(use_parallel=False)
 
-    ideal = simulator.simulate_dynamic_sequence(program, phantom, spoiler_mode="ideal")
+    ideal = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        spin_sampling=SpinSampling((9, 1, 1)),
+        spoiler_mode="ideal",
+    )
     physical = simulator.simulate_dynamic_sequence(
         program,
         phantom,
@@ -685,6 +721,7 @@ def test_dynamic_gradient_waveform_matches_ideal_crusher_spoiling():
     )
 
     assert ideal.signal[0] == pytest.approx(0.0j, abs=1e-12)
+    assert ideal.metadata["subvoxel_spins_per_voxel"] == 1
     assert physical.signal[0] == pytest.approx(ideal.signal[0], abs=1e-11)
     assert physical.metadata["subvoxel_spins_per_voxel"] == 9
     assert physical.metadata["ideal_spoiling_applied"] is False

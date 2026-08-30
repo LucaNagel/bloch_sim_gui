@@ -35,6 +35,7 @@ from ..b1_fields import (
 )
 from ..paths import workspace_directory
 from .volume_viewer import VolumeViewerWidget
+from .styles import BOLD_GROUP_TITLES_STYLE
 
 try:
     import pyqtgraph.opengl as gl
@@ -586,6 +587,8 @@ class B1WorkspaceWidget(QWidget):
         return self.rx_editor.field
 
     def _build_ui(self) -> None:
+        # Style only the frame titles; child controls keep their normal font.
+        self.setStyleSheet(BOLD_GROUP_TITLES_STYLE)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 12)
         layout.setSpacing(8)
@@ -639,6 +642,9 @@ class B1WorkspaceWidget(QWidget):
         self.rx_preview = B1FieldPreview("receive")
         self.preview_tabs.addTab(self.tx_preview, "Transmit preview")
         self.preview_tabs.addTab(self.rx_preview, "Receive preview")
+        # Editing a field opens its matching preview. Preview selection itself
+        # stays independent so users can still compare either field manually.
+        self.editor_tabs.currentChanged.connect(self._show_matching_preview)
         splitter.addWidget(self.preview_tabs)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -648,10 +654,15 @@ class B1WorkspaceWidget(QWidget):
         self.tx_editor.field_changed.connect(self._field_changed)
         self.rx_editor.field_changed.connect(self._field_changed)
 
+    def _show_matching_preview(self, index: int) -> None:
+        if 0 <= index < self.preview_tabs.count():
+            self.preview_tabs.setCurrentIndex(index)
+
     def set_phantom(self, phantom) -> None:
         previous_phantom = self.phantom
         self.phantom = phantom
         self.tx_preview.set_phantom(phantom)
+        self.rx_preview.set_phantom(phantom)
         self.tx_editor.set_reference_phantom(phantom)
         self.rx_editor.set_reference_phantom(phantom)
         self.apply_button.setEnabled(phantom is not None)

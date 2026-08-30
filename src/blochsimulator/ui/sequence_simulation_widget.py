@@ -119,6 +119,7 @@ from .plot_interaction import AXIS_ZOOM_TOOLTIP
 from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumViewer
 from .reconstruction_explorer import SequenceReconstructionExplorer
 from .simulation_explorer import SessionSimulationRun
+from .styles import BOLD_GROUP_TITLES_STYLE
 from .volume_viewer import (
     SequenceMagnetizationAnimationViewer,
     SequenceResultVolumeViewer,
@@ -758,6 +759,7 @@ class SequenceSimulationThread(QThread):
         animation_maximum_frames=0,
         animation_storage_dtype="float32",
         animation_note="",
+        sequence_reference_ppm=0.0,
     ):
         super().__init__()
         self.simulator = simulator
@@ -767,6 +769,7 @@ class SequenceSimulationThread(QThread):
         self.signal_weighting = signal_weighting
         self.field_strength_t = field_strength_t
         self.nucleus = nucleus
+        self.sequence_reference_ppm = float(sequence_reference_ppm)
         self.live_preview = bool(live_preview)
         self.chunk_voxels = chunk_voxels
         self.simulation_timestep_s = simulation_timestep_s
@@ -835,6 +838,7 @@ class SequenceSimulationThread(QThread):
                 kwargs.update(
                     field_strength_t=self.field_strength_t,
                     nucleus=self.nucleus,
+                    sequence_reference_ppm=self.sequence_reference_ppm,
                 )
             result = simulate(self.program, self.phantom, **kwargs)
             if not self._cancel_requested:
@@ -1215,7 +1219,9 @@ class SequenceSimulationWidget(QWidget):
         )
         self._initial_sequence_timestep_us = sequence_timestep_us
         self.spoiler_mode = spoiler_mode
-        self.subvoxel_spin_counts = tuple(subvoxel_counts)
+        self.subvoxel_spin_counts = (
+            tuple(subvoxel_counts) if spoiler_mode == "gradient" else (1, 1, 1)
+        )
         self.subvoxel_sampling_method = subvoxel_sampling_method
         self._build_ui()
         self._connect_rf_designer(parent)
@@ -1430,6 +1436,7 @@ class SequenceSimulationWidget(QWidget):
             QMessageBox.critical(self, "RF pulse load failed", str(exc))
 
     def _build_ui(self):
+        self.setStyleSheet(BOLD_GROUP_TITLES_STYLE)
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -1460,6 +1467,9 @@ class SequenceSimulationWidget(QWidget):
         sequence_title_font.setBold(True)
         sequence_title_font.setPointSize(max(sequence_title_font.pointSize() + 2, 12))
         sequence_title.setFont(sequence_title_font)
+        # The cross-platform group-title stylesheet resets contained widgets
+        # to normal weight, so explicitly retain this custom section heading.
+        sequence_title.setStyleSheet("font-weight: bold;")
         self.sequence_title = sequence_title
         sequence_layout.addWidget(sequence_title)
         sequence_layout.addWidget(QLabel("Source / mode"))
@@ -1484,6 +1494,22 @@ class SequenceSimulationWidget(QWidget):
             "load a Pulseq file"
         )
         sequence_layout.addWidget(self.sequence_source)
+
+        reference_row = QHBoxLayout()
+        reference_row.addWidget(QLabel("Sequence reference"))
+        self.sequence_reference_ppm = QDoubleSpinBox()
+        self.sequence_reference_ppm.setObjectName("sequence_reference_ppm")
+        self.sequence_reference_ppm.setRange(-10000.0, 10000.0)
+        self.sequence_reference_ppm.setDecimals(4)
+        self.sequence_reference_ppm.setSingleStep(0.1)
+        self.sequence_reference_ppm.setSuffix(" ppm")
+        self.sequence_reference_ppm.setToolTip(
+            "Absolute sequence frequency taken as 0 Hz. RF and receiver carrier "
+            "offsets are applied relative to this reference; the phantom's "
+            "spectrum centre and bandwidth remain independent."
+        )
+        reference_row.addWidget(self.sequence_reference_ppm, 1)
+        sequence_layout.addLayout(reference_row)
 
         generation_grid = QGridLayout()
         generation_grid.setHorizontalSpacing(10)
@@ -2684,6 +2710,7 @@ class SequenceSimulationWidget(QWidget):
             "coherence follows the continuous voxel throughout this spoiler train."
         )
         spoiling_quality_layout.addWidget(self.spoiling_apply_recommended_grid)
+        self.spoiling_quality_group.setVisible(self.spoiler_mode == "gradient")
         controls_layout.addWidget(self.spoiling_quality_group)
 
         object_group = QGroupBox("Simulation object")
@@ -3442,6 +3469,9 @@ class SequenceSimulationWidget(QWidget):
         self.nucleus.currentTextChanged.connect(self._waveform_units_changed)
         self.field_strength_t.valueChanged.connect(self._frequency_reference_changed)
         self.nucleus.currentTextChanged.connect(self._frequency_reference_changed)
+        self.sequence_reference_ppm.valueChanged.connect(
+            self._frequency_reference_changed
+        )
         waveform_controls.addWidget(self.waveform_units)
         self.waveform_nucleus_label = QLabel("Conversion: H1")
         waveform_controls.addWidget(self.waveform_nucleus_label)
@@ -3480,12 +3510,16 @@ class SequenceSimulationWidget(QWidget):
         self.gradient_progress_cursor.setVisible(self.live_preview_enabled)
         timeline_layout.addWidget(self.rf_plot)
         timeline_layout.addWidget(self.gradient_plot)
-        views.addTab(timeline, "Sequence")
+        self.sequence_tab_index = views.addTab(timeline, "Sequence")
+        views.setTabToolTip(
+            self.sequence_tab_index,
+            "Inspect the generated RF, gradient, and ADC sequence waveforms.",
+        )
 
         signal_page = QWidget()
         self.signal_page = signal_page
         signal_layout = QVBoxLayout(signal_page)
-        # Split View is a Signal/CSI-specific inspection mode. Keeping these
+        # Split View is a Signal-tab inspection mode. Keeping these
         # controls inside this page leaves the result tabs aligned with the
         # Phantom workspace tabs.
         signal_layout.addLayout(view_mode_row)
@@ -3528,7 +3562,11 @@ class SequenceSimulationWidget(QWidget):
         normal_signal_layout.addWidget(self.signal_plot)
         self.spectrum_info = QLabel("No spectroscopic result")
         normal_signal_layout.addWidget(self.spectrum_info)
-        self.signal_tab_index = views.addTab(signal_page, "Signal / CSI spectrum")
+        self.signal_tab_index = views.addTab(signal_page, "Signal")
+        views.setTabToolTip(
+            self.signal_tab_index,
+            "Inspect the received ADC signal, FID, or CSI voxel spectrum.",
+        )
 
         two_d_page = QWidget()
         two_d_layout = QVBoxLayout(two_d_page)
@@ -3574,14 +3612,28 @@ class SequenceSimulationWidget(QWidget):
         self.two_d_result_tab_index = views.addTab(
             two_d_page, "2D k-space / Reconstruction"
         )
+        views.setTabToolTip(
+            self.two_d_result_tab_index,
+            "Inspect Cartesian 2D k-space and its reconstructed image.",
+        )
 
         self.reconstruction_explorer = SequenceReconstructionExplorer()
         self.reconstruction_explorer_tab_index = views.addTab(
             self.reconstruction_explorer, "Reconstruction Explorer"
         )
+        views.setTabToolTip(
+            self.reconstruction_explorer_tab_index,
+            "Browse reconstructed 2D, 3D, dynamic, and spectroscopic results.",
+        )
 
         self.result_volume_viewer = SequenceResultVolumeViewer()
-        views.addTab(self.result_volume_viewer, "Spatial Magnetization")
+        spatial_magnetization_index = views.addTab(
+            self.result_volume_viewer, "Spatial Magnetization"
+        )
+        views.setTabToolTip(
+            spatial_magnetization_index,
+            "Inspect the final or checkpoint magnetization throughout the phantom.",
+        )
 
         self.magnetization_animation_viewer = SequenceMagnetizationAnimationViewer()
         # Aliases keep these user-editable next-run settings in the normal
@@ -3595,6 +3647,10 @@ class SequenceSimulationWidget(QWidget):
         )
         self.animation_tab_index = views.addTab(
             self.magnetization_animation_viewer, "3D Magnetization Animation"
+        )
+        views.setTabToolTip(
+            self.animation_tab_index,
+            "Configure and play a sparse 3D magnetization animation.",
         )
 
         probe_page = QWidget()
@@ -3655,12 +3711,31 @@ class SequenceSimulationWidget(QWidget):
         self.probe_magnetization_viewer.view_filter_changed.connect(
             self._update_probe_vector
         )
-        self.probe_views.addTab(self.probe_spectrum_viewer, "Spectrum")
-        self.probe_views.addTab(self.probe_spatial_viewer, "Spatial")
-        self.probe_views.addTab(self.probe_magnetization_viewer, "3D Vector")
+        probe_spectrum_index = self.probe_views.addTab(
+            self.probe_spectrum_viewer, "Spectrum"
+        )
+        self.probe_views.setTabToolTip(
+            probe_spectrum_index, "Inspect the spectral spin-probe response."
+        )
+        probe_spatial_index = self.probe_views.addTab(
+            self.probe_spatial_viewer, "Spatial"
+        )
+        self.probe_views.setTabToolTip(
+            probe_spatial_index, "Inspect the spatial spin-probe response."
+        )
+        probe_vector_index = self.probe_views.addTab(
+            self.probe_magnetization_viewer, "3D Vector"
+        )
+        self.probe_views.setTabToolTip(
+            probe_vector_index, "Inspect the selected probe magnetization in 3D."
+        )
         self.probe_views.currentChanged.connect(self._probe_view_changed)
         probe_layout.addWidget(self.probe_views, 1)
-        views.addTab(probe_page, "Spin Probe")
+        spin_probe_index = views.addTab(probe_page, "Spin Probe")
+        views.setTabToolTip(
+            spin_probe_index,
+            "Run and inspect spectral or geometry spin probes.",
+        )
 
         split_page = QWidget()
         split_page_layout = QVBoxLayout(split_page)
@@ -3850,7 +3925,7 @@ class SequenceSimulationWidget(QWidget):
         )
         frequency_offset.setObjectName(f"{prefix}_rf_offset_hz")
         frequency_offset.setToolTip(
-            "RF carrier offset relative to the sequence centre frequency"
+            "RF carrier offset relative to the sequence reference frequency"
         )
         load_button = QPushButton("Load RF pulse…")
         load_button.setObjectName(f"{prefix}_rf_load_button")
@@ -4450,9 +4525,9 @@ class SequenceSimulationWidget(QWidget):
             phantom = self._selected_designed_phantom()
             if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
                 text = (
-                    "Spectral B0 and peak offsets are converted from ppm at run time; "
-                    "the sequence carrier is 0 ppm and phantom peaks are offsets "
-                    "from the phantom spectral reference."
+                    "Spectral B0 and absolute peak positions are converted from ppm "
+                    "at run time. The sequence reference defines 0 Hz; spectrum "
+                    "centre and bandwidth remain independent."
                 )
                 conversion_enabled = True
             elif phantom is not None:
@@ -4476,7 +4551,13 @@ class SequenceSimulationWidget(QWidget):
         self._update_simulation_object_table()
 
     def _simulation_object_summary_rows(self):
-        rows = [("Frequency model", self.frequency_reference_info.text())]
+        rows = [
+            (
+                "Sequence reference",
+                f"{self.sequence_reference_ppm.value():g} ppm (sequence 0 Hz)",
+            ),
+            ("Frequency model", self.frequency_reference_info.text()),
+        ]
         if self.field_strength_t.isEnabled():
             rows.append(
                 (
@@ -4830,11 +4911,22 @@ class SequenceSimulationWidget(QWidget):
             components = phantom.pools
         else:
             return None
-        by_key = {
-            self._metabolite_key(component.name): phantom.get_frequency_offset(
-                component.name,
+        reference_shift_hz = float(
+            ppm_to_hz(
+                float(phantom.spectral_reference_ppm)
+                - self.sequence_reference_ppm.value(),
                 self.field_strength_t.value(),
                 self.nucleus.currentText(),
+            )
+        )
+        by_key = {
+            self._metabolite_key(component.name): (
+                phantom.get_frequency_offset(
+                    component.name,
+                    self.field_strength_t.value(),
+                    self.nucleus.currentText(),
+                )
+                + reference_shift_hz
             )
             for component in components
         }
@@ -5763,6 +5855,15 @@ class SequenceSimulationWidget(QWidget):
 
     def _frequency_reference_changed(self, *_):
         self._update_frequency_reference_info()
+        phantom = self._selected_designed_phantom()
+        if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+            phantom.metadata["sequence_reference_ppm"] = (
+                self.sequence_reference_ppm.value()
+            )
+            phantom_widget = getattr(self.window(), "phantom_widget", None)
+            viewer = getattr(phantom_widget, "viewer", None)
+            if viewer is not None and viewer.volume_inspector.phantom is phantom:
+                viewer.refresh_spectrum()
         generated_sequence = self._generated_pulseq_sequence
         if generated_sequence is not None:
             self._apply_workspace_frequency_reference(generated_sequence)
@@ -5770,6 +5871,9 @@ class SequenceSimulationWidget(QWidget):
                 definitions = self.program.metadata.setdefault("definitions", {})
                 definitions["FieldStrengthT"] = self.field_strength_t.value()
                 definitions["Nucleus"] = self.nucleus.currentText()
+                definitions["SequenceReferencePpm"] = (
+                    self.sequence_reference_ppm.value()
+                )
         if self.sequence_source.currentIndex() in {4, 5, 6}:
             self._request_generated_sequence_refresh()
 
@@ -7079,9 +7183,12 @@ class SequenceSimulationWidget(QWidget):
         }
 
     def _apply_workspace_frequency_reference(self, sequence):
-        """Attach the active B0/nucleus reference to every generated Pulseq file."""
+        """Attach the active scanner and sequence reference definitions."""
         sequence.set_definition("FieldStrengthT", self.field_strength_t.value())
         sequence.set_definition("Nucleus", self.nucleus.currentText())
+        sequence.set_definition(
+            "SequenceReferencePpm", self.sequence_reference_ppm.value()
+        )
         for name, value in self._ernst_pulseq_definitions().items():
             sequence.set_definition(name, value)
         return sequence
@@ -7150,6 +7257,7 @@ class SequenceSimulationWidget(QWidget):
                     pulseq_definitions={
                         "FieldStrengthT": self.field_strength_t.value(),
                         "Nucleus": self.nucleus.currentText(),
+                        "SequenceReferencePpm": (self.sequence_reference_ppm.value()),
                         **self._ernst_pulseq_definitions(),
                     },
                 )
@@ -7252,6 +7360,13 @@ class SequenceSimulationWidget(QWidget):
                 nucleus_index = self.nucleus.findText(nucleus)
                 if nucleus_index >= 0:
                     self.nucleus.setCurrentIndex(nucleus_index)
+        reference_value = definitions.get("sequencereferenceppm")
+        try:
+            reference_ppm = float(np.asarray(reference_value).reshape(-1)[0])
+        except (TypeError, ValueError, IndexError):
+            reference_ppm = np.nan
+        if np.isfinite(reference_ppm):
+            self.sequence_reference_ppm.setValue(reference_ppm)
 
     def _waveform_nucleus(self) -> str:
         nucleus = str(self.nucleus.currentText()).strip()
@@ -7800,6 +7915,9 @@ class SequenceSimulationWidget(QWidget):
             if isinstance(self.phantom, (SpectralPhantom, DynamicSpectralPhantom)):
                 self.phantom.field_strength = self.field_strength_t.value()
                 self.phantom.nucleus = self.nucleus.currentText()
+                self.phantom.metadata["sequence_reference_ppm"] = (
+                    self.sequence_reference_ppm.value()
+                )
                 design_metadata = self.phantom.metadata.get("phantom_design")
                 if isinstance(design_metadata, dict):
                     design_metadata["field_strength_t"] = self.field_strength_t.value()
@@ -8078,7 +8196,7 @@ class SequenceSimulationWidget(QWidget):
                     phantom.spectral_reference_ppm,
                 )
             )
-            relative_center = window_center - float(phantom.spectral_reference_ppm)
+            relative_center = window_center - self.sequence_reference_ppm.value()
             frequency_min = relative_center - half_bandwidth
             frequency_max = relative_center + half_bandwidth
             if self.probe_frequency_units.currentText() == "Hz":
@@ -8624,6 +8742,34 @@ class SequenceSimulationWidget(QWidget):
     def _signal_weighting_mode(self):
         return "voxel_volume" if self.signal_weighting.currentIndex() == 1 else "voxel"
 
+    def _confirm_sequence_reference_for_run(self) -> bool:
+        """Require confirmation when sequence zero is outside the spectrum."""
+        phantom = self.phantom
+        if not isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+            return True
+        centre_ppm = float(phantom.spectral_window_center_ppm)
+        half_bandwidth_ppm = float(phantom.spectral_bandwidth_ppm) / 2.0
+        lower_ppm = centre_ppm - half_bandwidth_ppm
+        upper_ppm = centre_ppm + half_bandwidth_ppm
+        reference_ppm = float(self.sequence_reference_ppm.value())
+        tolerance = max(1e-12, abs(upper_ppm - lower_ppm) * 1e-12)
+        if lower_ppm - tolerance <= reference_ppm <= upper_ppm + tolerance:
+            return True
+        dialog = QMessageBox(
+            QMessageBox.Warning,
+            "Sequence reference outside spectrum",
+            f"The sequence reference ({reference_ppm:g} ppm) is outside the "
+            f"simulated spectral window ({lower_ppm:g} to {upper_ppm:g} ppm).\n\n"
+            "The sequence zero-frequency point is not included in the configured "
+            "spectrum. Continue with the simulation anyway?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            self,
+        )
+        dialog.button(QMessageBox.Yes).setText("Continue")
+        dialog.setDefaultButton(QMessageBox.Cancel)
+        dialog.setEscapeButton(QMessageBox.Cancel)
+        return dialog.exec_() == QMessageBox.Yes
+
     def _run(self):
         if self.probe_worker is not None and self.probe_worker.isRunning():
             QMessageBox.warning(
@@ -8670,6 +8816,8 @@ class SequenceSimulationWidget(QWidget):
             else:
                 QMessageBox.critical(self, "Invalid simulation", str(exc))
             return
+        if not self._confirm_sequence_reference_for_run():
+            return
         if not self._confirm_generated_sequence_fov():
             return
         self.run_button.setEnabled(False)
@@ -8677,8 +8825,6 @@ class SequenceSimulationWidget(QWidget):
         self.export_button.setEnabled(False)
         work_units = self._estimated_work_units()
         self._clear_previous_simulation_views()
-        self.view_stack.setCurrentWidget(self.normal_signal_page)
-        self.views.setCurrentIndex(self.signal_tab_index)
         self.progress.setRange(0, work_units)
         self.progress.setValue(0)
         self.progress.setFormat("0% · Estimating remaining time…")
@@ -8710,6 +8856,7 @@ class SequenceSimulationWidget(QWidget):
             animation_maximum_frames=animation_maximum_frames,
             animation_storage_dtype=self.animation_storage_dtype.currentText(),
             animation_note=animation_note,
+            sequence_reference_ppm=self.sequence_reference_ppm.value(),
         )
         self.worker.progress.connect(self._progress)
         self.worker.stage.connect(self._status_update)
@@ -8843,10 +8990,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _configured_spin_sampling(self):
         counts = (
-            self.subvoxel_spin_counts
-            if self.spoiler_mode == "gradient"
-            or self.simulator.dynamic_sequence_kernel == "metal_hybrid"
-            else (1, 1, 1)
+            self.subvoxel_spin_counts if self.spoiler_mode == "gradient" else (1, 1, 1)
         )
         return SpinSampling(counts, method=self.subvoxel_sampling_method)
 
@@ -8893,8 +9037,12 @@ class SequenceSimulationWidget(QWidget):
         )
         sampling = SpinSampling(tuple(counts_xyz), method=method)
         self.spoiler_mode = mode
-        self.subvoxel_spin_counts = sampling.counts_xyz
+        self.subvoxel_spin_counts = (
+            sampling.counts_xyz if mode == "gradient" else (1, 1, 1)
+        )
         self.subvoxel_sampling_method = sampling.method
+        if hasattr(self, "spoiling_quality_group"):
+            self.spoiling_quality_group.setVisible(mode == "gradient")
         auto_changed = self._apply_flash_auto_spoilers()
         self._update_flash_spoiler_info()
         if auto_changed and self.sequence_source.currentIndex() == self.FLASH_SOURCE:
