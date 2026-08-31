@@ -4,6 +4,37 @@ All notable changes to BlochSimulator are documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/).
 
+## [2.6.3] - 2026-08-31
+
+### Added
+
+- Added an explicit sequence reference frequency for spectral and dynamic
+  simulations, including Pulseq metadata, frequency validation, visualization,
+  and Bruker export propagation.
+- Added per-shape pyruvate-to-lactate conversion rates with optional spatial
+  overrides, linearly interpolated inflow controls, and selectable set-value or
+  simulated-value kinetics previews.
+- Added the `T1_multiphantom.npz` spectral phantom as a downloadable GitHub
+  Release asset.
+
+### Changed
+
+- Unified analytic RF pulse sampling between Free Mode and Sequence Mode and
+  made pulse samples symmetric on the RF raster.
+- Improved GUI layout, group-title styling, B1 preview synchronization,
+  reconstruction contrast handling across slices and repetitions, and result
+  tab guidance.
+- Limited subvoxel sampling and physical spoiler diagnostics to
+  gradient-waveform spoiling; ideal spoilers consistently use one spin per
+  voxel.
+
+### Fixed
+
+- Corrected spectral reference offsets across static and dynamic phantoms and
+  exports.
+- Fixed spoiler-control visibility and consistency across generated and loaded
+  sequence sources.
+
 ## [2.5.0] - 2026-08-25
 
 ### Added
@@ -110,5 +141,6 @@ The project follows [Semantic Versioning](https://semver.org/).
 - Existing projects and simulations without spatial B1 fields continue to use
   uniform transmit and receive sensitivity.
 
+[2.6.3]: https://github.com/LucaNagel/bloch_sim_gui/compare/v2.6.2...v2.6.3
 [2.5.0]: https://github.com/LucaNagel/bloch_sim_gui/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/LucaNagel/bloch_sim_gui/compare/v2.3.0...v2.4.0

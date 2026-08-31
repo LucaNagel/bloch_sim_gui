@@ -1,0 +1,20 @@
+
+
+# Local sequence and phantom libraries
+phantoms/phantoms/T1_multiphantom.npz # 9 phantoms with T1 from 100 to 900 ms
+
+# Examples
+
+# Python and tool caches
+
+# Generated Sphinx documentation
+
+# Local editor preferences
+
+# Ignore all markdown files except README.md
+
+# Generated C files
+
+# Generated test notebooks (can be generated from tests/test_notebook_export.py)
+
+# Export files

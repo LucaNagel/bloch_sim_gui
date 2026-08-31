@@ -422,8 +422,17 @@ class PhantomCreatorWidget(QGroupBox):
                 QMessageBox.critical(self, "Error", f"Failed to save phantom:\n{e}")
 
     def _open_spectral_designer(self, design=None):
+        sequence_widget = getattr(self.window(), "sequence_simulation_widget", None)
+        sequence_reference_ppm = (
+            None
+            if sequence_widget is None
+            else sequence_widget.sequence_reference_ppm.value()
+        )
         dialog = SpectralPhantomDesignerDialog(
-            self, design=design, settings=self.settings
+            self,
+            design=design,
+            settings=self.settings,
+            sequence_reference_ppm=sequence_reference_ppm,
         )
         if design is None:
             dialog.design.field_strength_t = self.get_field_strength()
@@ -448,6 +457,7 @@ class PhantomCreatorWidget(QGroupBox):
         phantom = dialog.get_phantom()
         if phantom is None:
             return
+        phantom.metadata["sequence_reference_ppm"] = dialog.sequence_reference_ppm
         self.current_phantom = phantom
         self._set_field_strength(phantom.field_strength)
         self.set_nucleus(phantom.nucleus)
@@ -686,6 +696,10 @@ class PhantomViewerWidget(QWidget):
 
         layout.addWidget(self.tabs)
         self.setLayout(layout)
+
+    def refresh_spectrum(self):
+        """Refresh the selected-voxel spectrum and its sequence-reference line."""
+        self.volume_inspector._update_spectrum()
 
     @staticmethod
     def _configure_property_image_view(view, *, compact: bool):

@@ -91,6 +91,33 @@ def test_free_mode_slr_uses_the_global_sequence_envelope():
     )
 
 
+def test_free_mode_sinc_uses_symmetric_global_sequence_envelope():
+    duration_s = 1e-3
+    sample_count = 200
+    shape_parameter = 4.0
+    free_b1, free_time = design_rf_pulse(
+        "sinc",
+        duration=duration_s,
+        flip_angle=30.0,
+        time_bw_product=shape_parameter,
+        npoints=sample_count,
+    )
+    shared, *_ = design_rf_envelope(
+        pulse_type="sinc",
+        duration_s=duration_s,
+        raster_s=duration_s / sample_count,
+        time_bandwidth_product=shape_parameter,
+        apodization=0.0,
+    )
+
+    normalized_free = free_b1 / np.max(np.abs(free_b1))
+    normalized_shared = shared / np.max(np.abs(shared))
+    assert np.allclose(normalized_free, normalized_shared)
+    assert np.allclose(normalized_free, normalized_free[::-1])
+    assert abs(normalized_free[0]) == pytest.approx(abs(normalized_free[-1]), abs=1e-15)
+    assert free_time + free_time[::-1] == pytest.approx(duration_s)
+
+
 def test_slr_sharpness_does_not_reduce_temporal_lobes():
     zero_crossings = []
     for sharpness in range(1, 6):

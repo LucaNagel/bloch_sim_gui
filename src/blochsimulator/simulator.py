@@ -43,7 +43,6 @@ try:
         simulate_bloch,
         simulate_bloch_parallel,
         calculate_signal,
-        design_rf_pulse,
     )
 
     HAS_CYTHON = True
@@ -118,42 +117,47 @@ def design_rf_pulse(
     time : ndarray
         Time points in seconds
     """
-    time = np.linspace(0, duration, npoints, endpoint=False)
+    npoints = int(npoints)
+    if npoints <= 0:
+        raise ValueError("npoints must be positive")
+    if not np.isfinite(duration) or duration <= 0:
+        raise ValueError("duration must be positive and finite")
     dt = duration / npoints
+    # RF amplitudes represent raster intervals, so report their sample centres.
+    # This also keeps every analytic pulse exactly symmetric for even and odd
+    # point counts instead of giving one Sinc edge an unmatched half sample.
+    time = (np.arange(npoints, dtype=float) + 0.5) * dt
     gamma = 4258.0  # Hz/Gauss for protons
     flip_rad = np.deg2rad(flip_angle)
     target_area = flip_rad / (gamma * 2 * np.pi)  # integral of B1 over time (Gauss * s)
-    if pulse_type == "rect":
-        b1 = np.ones(npoints) * (target_area / duration)
-    elif pulse_type == "sinc":
-        t_centered = time - duration / 2
-        bw = time_bw_product / duration
-        envelope = np.sinc(bw * t_centered)
-        area = np.trapezoid(envelope, time)
-        b1 = envelope * (target_area / area)
-    elif pulse_type == "slr":
-        # Free Mode and generated sequences intentionally share this exact SLR
-        # implementation.  Use a virtual raster so the requested point count
-        # maps one-to-one onto the global baseband envelope.
+    shared_type = {
+        "rect": "block",
+        "rectangle": "block",
+        "block": "block",
+        "sinc": "sinc",
+        "slr": "slr",
+        "gaussian": "gaussian",
+    }.get(str(pulse_type).lower())
+    if shared_type is not None:
+        # Free Mode and generated Sequence Mode pulses use the same baseband
+        # envelope factory. Free Mode may still apply its selected display/design
+        # apodization afterwards; the underlying analytic sampling is identical.
         from .sequence.rf_pulses import design_rf_envelope
 
         envelope, _, _, _ = design_rf_envelope(
-            pulse_type="slr",
+            pulse_type=shared_type,
             duration_s=duration,
             raster_s=dt,
             time_bandwidth_product=time_bw_product,
+            apodization=0.0,
             slr_sharpness=slr_sharpness,
         )
         area = np.sum(envelope) * dt
         if abs(area) < 1e-15:
-            raise ValueError("SLR pulse integral is too small for flip scaling")
+            raise ValueError(
+                f"{shared_type} pulse integral is too small for flip scaling"
+            )
         b1 = envelope * (target_area / abs(area))
-    elif pulse_type == "gaussian":
-        t_centered = time - duration / 2
-        sigma = duration / (2 * np.sqrt(2 * np.log(2)) * time_bw_product)
-        envelope = np.exp(-(t_centered**2) / (2 * sigma**2))
-        area = np.trapezoid(envelope, time)
-        b1 = envelope * (target_area / area)
     elif pulse_type == "hermite":
         t_centered = time - duration / 2
         sigma = duration / max(2.0 * time_bw_product, 1e-9)
@@ -1954,6 +1958,7 @@ class BlochSimulator:
         signal_weighting: str = "voxel",
         field_strength_t: Optional[float] = None,
         nucleus: Optional[str] = None,
+        sequence_reference_ppm: Optional[float] = None,
         progress_callback=None,
         preview_callback=None,
         cancel_callback=None,
@@ -1982,7 +1987,16 @@ class BlochSimulator:
             else float(field_strength_t)
         )
         effective_nucleus = phantom.nucleus if nucleus is None else str(nucleus)
-        components = phantom.to_component_phantoms(effective_field, effective_nucleus)
+        effective_reference_ppm = (
+            phantom.spectral_reference_ppm
+            if sequence_reference_ppm is None
+            else float(sequence_reference_ppm)
+        )
+        components = phantom.to_component_phantoms(
+            effective_field,
+            effective_nucleus,
+            sequence_reference_ppm=effective_reference_ppm,
+        )
         if not components:
             raise ValueError("spectral phantom has no active components")
 
@@ -2096,6 +2110,7 @@ class BlochSimulator:
                 "nucleus": effective_nucleus,
                 "frequency_input_unit": "ppm",
                 "spectral_reference_ppm": phantom.spectral_reference_ppm,
+                "sequence_reference_ppm": effective_reference_ppm,
                 "spectral_window_center_ppm": phantom.spectral_window_center_ppm,
                 "spectral_bandwidth_ppm": phantom.spectral_bandwidth_ppm,
                 "spectral_points": phantom.spectral_points,
@@ -2313,9 +2328,10 @@ class BlochSimulator:
         ADC observation times are always retained exactly. ``sequence_kernel``
         overrides the simulator's ``"optimized"`` or ``"reference"`` kernel
         selection for this call. ``spin_sampling`` controls deterministic
-        intravoxel position sampling. ``spoiler_mode='ideal'`` applies declared
-        transverse crushers while ``'gradient'`` derives spoiling only from the
-        simulated gradient waveform and spin positions.
+        intravoxel position sampling in gradient-waveform mode.
+        ``spoiler_mode='ideal'`` always uses one spin per voxel and applies
+        declared transverse crushers, while ``'gradient'`` derives spoiling
+        only from the simulated gradient waveform and spin positions.
         """
         from .phantom import Phantom
         from .sequence import (
@@ -2333,11 +2349,13 @@ class BlochSimulator:
         if not isinstance(phantom, Phantom):
             raise TypeError(f"phantom must be Phantom, got {type(phantom)}")
 
-        sampling = coerce_spin_sampling(spin_sampling)
-        sampling.validate_phantom_dimensions(phantom.ndim)
         spoiler_mode = str(spoiler_mode).strip().lower()
         if spoiler_mode not in {"ideal", "gradient"}:
             raise ValueError("spoiler_mode must be 'ideal' or 'gradient'")
+        sampling = coerce_spin_sampling(
+            spin_sampling if spoiler_mode == "gradient" else None
+        )
+        sampling.validate_phantom_dimensions(phantom.ndim)
 
         compiled = SequenceCompiler().compile(
             program,

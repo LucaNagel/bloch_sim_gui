@@ -27,6 +27,9 @@ examples/*
 !examples/validate_ss_bssfp_spoiling.py
 
 *.npz
+!phantoms/phantoms/
+phantoms/phantoms/*
+!phantoms/phantoms/T1_multiphantom.npz
 *.png
 *.mp4
 *.svg

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication, QSizePolicy
+from PyQt5.QtWidgets import QApplication, QGroupBox, QSizePolicy
 
 from blochsimulator.b1_fields import (
     B1Field,
@@ -272,6 +272,21 @@ def test_b1_workspace_layout_is_compact_and_field_specific():
     assert not workspace.rx_preview.channel_label.isHidden()
     assert workspace.tx_editor.fov_spins[0].minimumWidth() >= 125
     assert workspace.tx_editor.scale_spins[0].minimumWidth() >= 90
+    assert "QGroupBox { font-weight: bold; }" in workspace.styleSheet()
+    titled_groups = {
+        group.title(): group
+        for group in workspace.findChildren(QGroupBox)
+        if group.title()
+    }
+    assert titled_groups["Field source"].fontInfo().bold()
+    assert titled_groups["Spatial geometry"].fontInfo().bold()
+
+    workspace.editor_tabs.setCurrentIndex(1)
+    assert workspace.preview_tabs.currentIndex() == 1
+    workspace.preview_tabs.setCurrentIndex(0)
+    assert workspace.editor_tabs.currentIndex() == 1
+    workspace.editor_tabs.setCurrentIndex(0)
+    assert workspace.preview_tabs.currentIndex() == 0
     workspace.close()
     app.processEvents()
 

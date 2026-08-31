@@ -89,6 +89,18 @@ that a pending generated sequence is built first. If generation fails, the
 last valid timeline remains visible and the parameter error is shown above the
 controls.
 
+**Sequence reference** is the absolute ppm frequency that the sequence treats
+as 0 Hz. Every RF and receiver carrier offset is relative to that value. It is
+a sequence parameter and is stored in generated Pulseq definitions. The
+phantom's simulated spectral window remains independent: **Spectrum centre**,
+**Bandwidth**, and the absolute peak positions determine which frequencies are
+simulated. Phantom spectrum previews show the sequence reference as an orange
+dashed line. Starting a sequence simulation displays a confirmation when that
+line falls outside the configured spectral window. Choose **Continue** to run
+anyway or **Cancel** to return without starting; Cancel is selected by default.
+Starting a run also preserves the currently selected result tab; use the
+**Signal** tab when the ADC signal, FID, or CSI spectrum is wanted.
+
 Use **Run Python script…** to execute an existing sequence-generation script
 with the same Python interpreter as the application. Standard output and
 errors stay visible in a GUI log window. When the script creates or updates a
@@ -101,7 +113,9 @@ Generated sequences explicitly mark the end of every spoiler block. **Settings
 
 - **Ideal crusher** preserves the fast historical behavior. At every declared
   spoiler end, `Mx` and `My` are set to zero for every pool while `Mz`,
-  relaxation, inflow, and chemical exchange continue normally.
+  relaxation, inflow, and chemical exchange continue normally. It always uses
+  one spin per voxel; the subvoxel controls and the Spoiling quality panel are
+  disabled because no intravoxel gradient sampling is needed.
 - **Gradient waveform** ignores the artificial transverse reset. Every voxel
   is represented by the configured X/Y/Z subvoxel spins, and spoiling follows
   from their positions and the actual gradient waveform. Subspins remain
@@ -115,7 +129,8 @@ definitions); arbitrary gradients are never classified heuristically. In
 gradient-waveform mode all gradients act physically whether or not a spoiler
 marker is present.
 
-Subvoxel counts are axis-specific because their product controls runtime.
+In gradient-waveform mode, subvoxel counts are axis-specific because their
+product controls runtime.
 **Regular midpoint grid** is the efficient symmetric quadrature rule. The
 optional **Deterministic stratified points** place one reproducible point in
 each stratum and avoid short exact grid recurrences, but generally need more
@@ -260,8 +275,11 @@ designer. Choose **Sinc**, **SLR**, **Gaussian**, **Block**, or **RF Pulse
 Designer**, then set duration, time-bandwidth product, Sinc lobe count,
 apodization, SLR sharpness, and RF carrier offset as applicable. Increasing
 SLR sharpness narrows the designed transition and visibly adds temporal lobes.
-This is the same SLR function used by Free Mode; standalone scripts call it as
-well.
+Free Mode and Sequence Mode now call the same analytic envelope factory for
+Sinc, SLR, Gaussian, and Block pulses. Sinc samples are centred on the RF
+raster, producing a symmetric waveform with complete matching edge lobes;
+mode-specific apodization choices are applied after that common base shape.
+Standalone scripts call the same public design path as well.
 
 **RF Pulse Designer** uses the current complex baseband waveform from the
 **RF Design** tab. **Load RF pulse…** is also available inside every Sequence
@@ -585,10 +603,9 @@ reconstructions from `species_signal`.
 ### Dynamic pyruvate/lactate phantom
 
 Open **Phantom Designer** and define peaks whose names match the
-configured pyruvate and lactate pool names. Existing shapes can be moved and
-resized through their handles. To create geometry directly with the mouse,
-choose **Draw ellipsoid** or **Draw box**, then hold the left mouse button and
-drag across the axial XY canvas. Right-click or press Escape to cancel drawing.
+configured pyruvate and lactate pool names. Add ellipsoid, box, or cylinder
+objects with the buttons below the shape list; existing shapes can be moved and
+resized through their handles in the axial XY canvas.
 
 Peak **Spin density / concentration** and **Initial polarization** are separate.
 Spin density describes how much signal-producing material is present. Initial
@@ -618,26 +635,25 @@ dashed so the overlapping curves remain visible.
 In the **Kinetics / kPL** tab:
 
 1. Enable the hyperpolarized pyruvate/lactate model.
-2. Set the default `kPL` in `s⁻¹`. It applies everywhere unless an optional
-   spatial region overrides it. Zero means no conversion except in regions with
-   a positive override; without any positive default or regional `kPL`, no new
-   lactate is produced.
+2. Select each shape and set **kPL of this shape** in `s⁻¹`. Zero means no
+   conversion in that shape unless a positive spatial override applies.
 3. Optionally add box or ellipsoid kPL regions with center/size in percent of
-   the phantom FOV. A region overrides the default `kPL` in its voxels; if
+   the phantom FOV. A region overrides the shape `kPL` in its voxels; if
    regions overlap, the last table row wins.
 4. Set **Conversion starts at (kinetics time)** to the point on the shared
    kinetics timeline at which `kPL` becomes active. Before that point `kPL=0`;
-   afterwards the default or regional `kPL` applies.
+   afterwards the shape or regional `kPL` applies.
 5. Use **Kinetics time at sequence t=0** as a global offset for both inflow and
    conversion. `+5 s` starts the Pulseq sequence five seconds into the defined
    kinetics; `-5 s` starts it five seconds before kinetics time zero. The
    inflow samples and conversion start keep their relative timing and do not
    need to be edited when comparing different sequence start times.
 6. Optionally enable pyruvate inflow and enter kinetics time, concentration
-   rate, and inflow polarization. Each row is held until the next time and the
-   concentration rate is zero outside the listed interval. Thus rows `(5 s,
-   10 /s, 10000)` and `(6 s, 0 /s, 1)` add total concentration 10 during one
-   second, with incoming polarization 10000. Set the initial Pyruvate spin
+   rate, and inflow polarization. Values are linearly interpolated between
+   rows, and the concentration rate is zero outside the listed interval. Use
+   **Time curves → Simulated values** (the default) to see the densely sampled
+   values passed to the simulator, or **Set values** to show only the entered
+   table points. Set the initial Pyruvate spin
    density to 0 if the region should contain no Pyruvate before delivery. Inflow
    supplies Pyruvate; `kPL` independently determines how much is converted to
    Lactate.
@@ -662,9 +678,9 @@ reset the phantom state.
 
 The right-hand **Live conversion preview** represents one voxel, not a spatial
 average. **Shape / object to preview** selects the shape whose initial pool
-concentrations, polarizations, and metabolite T1 values are used. **kPL source for this voxel** then
-selects either the default value or one region's override. Selecting a row in
-the kPL-region table selects that region automatically. The preview updates
+concentrations, polarizations, metabolite T1 values, and shape-specific `kPL`
+are used. Selecting a row in the optional kPL-region table previews that
+region's override. The preview updates
 immediately when these values, the conversion start, the global kinetics
 offset, or the inflow points change. Its horizontal axis is sequence time. The
 upper plot shows concentration inflow, the middle plot shows pool polarization

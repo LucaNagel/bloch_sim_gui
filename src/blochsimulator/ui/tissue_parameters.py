@@ -11,6 +11,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, pyqtSignal
 from ..simulator import TissueParameters
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
+from .styles import BOLD_GROUP_TITLES_STYLE
 
 
 class TissueParameterWidget(QGroupBox):
@@ -21,6 +22,7 @@ class TissueParameterWidget(QGroupBox):
 
     def __init__(self):
         super().__init__("Single-Spin / Ensemble Tissue")
+        self.setStyleSheet(BOLD_GROUP_TITLES_STYLE)
         self.setToolTip(
             "Parameters for the classic single-spin/ensemble simulation. "
             "Sequence Simulation uses the selected phantom maps instead."

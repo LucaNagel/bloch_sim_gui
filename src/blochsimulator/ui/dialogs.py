@@ -346,6 +346,9 @@ class SettingsDialog(QDialog):
         simulation_form.addRow(
             "Subvoxel sampling:", self.subvoxel_sampling_method_combo
         )
+        self.subvoxel_control_labels = [
+            simulation_form.labelForField(self.subvoxel_sampling_method_combo)
+        ]
 
         counts = tuple(subvoxel_spin_counts)
         if len(counts) != 3:
@@ -363,6 +366,7 @@ class SettingsDialog(QDialog):
             )
             simulation_form.addRow(f"Subvoxel spins {axis}:", spin)
             self.subvoxel_spin_count_spins.append(spin)
+            self.subvoxel_control_labels.append(simulation_form.labelForField(spin))
         self.tabs.addTab(simulation_tab, "Simulation")
 
         scanner_tab = QWidget()
@@ -696,13 +700,15 @@ class SettingsDialog(QDialog):
             self.sequence_timestep_us_spin.setValue(preset_values[preset])
         self.sequence_timestep_us_spin.setEnabled(preset == "custom")
         self.manual_thread_count_spin.setEnabled(self.thread_mode() == "manual")
-        enabled = (
-            self.sequence_spoiler_mode() == "gradient"
-            or self.dynamic_sequence_kernel() == "metal_hybrid"
-        )
+        enabled = self.sequence_spoiler_mode() == "gradient"
+        if not enabled:
+            for spin in self.subvoxel_spin_count_spins:
+                spin.setValue(1)
         for spin in self.subvoxel_spin_count_spins:
             spin.setEnabled(enabled)
         self.subvoxel_sampling_method_combo.setEnabled(enabled)
+        for label in self.subvoxel_control_labels:
+            label.setEnabled(enabled)
 
     def _browse_export_directory(self):
         current = str(self.get_export_directory())

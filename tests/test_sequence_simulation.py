@@ -180,7 +180,12 @@ def test_gradient_waveform_and_ideal_crusher_produce_matching_full_spoiling():
     )
     simulator = BlochSimulator(use_parallel=False)
 
-    ideal = simulator.simulate_sequence(program, phantom, spoiler_mode="ideal")
+    ideal = simulator.simulate_sequence(
+        program,
+        phantom,
+        spin_sampling=SpinSampling((9, 1, 1)),
+        spoiler_mode="ideal",
+    )
     physical = simulator.simulate_sequence(
         program,
         phantom,
@@ -195,6 +200,7 @@ def test_gradient_waveform_and_ideal_crusher_produce_matching_full_spoiling():
     )
 
     assert ideal.signal[0] == pytest.approx(0.0j, abs=1e-12)
+    assert ideal.metadata["subvoxel_spins_per_voxel"] == 1
     assert physical.signal[0] == pytest.approx(ideal.signal[0], abs=1e-12)
     assert abs(unresolved.signal[0]) == pytest.approx(1.0, abs=1e-10)
     assert physical.metadata["spoiler_mode"] == "gradient"
@@ -762,7 +768,12 @@ def test_sequence_result_bruker_raw_export_writes_interleaved_fid(tmp_path):
         final_magnetization=np.zeros((1, 3), dtype=float),
         checkpoint_magnetization=None,
         checkpoint_times_s=np.asarray([], dtype=float),
-        metadata={"field_strength_t": 7.0, "nucleus": "H1"},
+        metadata={
+            "field_strength_t": 7.0,
+            "nucleus": "C13",
+            "spectral_reference_ppm": 175.0,
+            "sequence_reference_ppm": 183.35,
+        },
     )
     program = SequenceProgram((ADCEvent(0.0, 2, 1e-3),), duration_s=2e-3)
 
@@ -788,6 +799,7 @@ def test_sequence_result_bruker_raw_export_writes_interleaved_fid(tmp_path):
     assert "##$PVM_EncNReceivers=1" in method
     assert "##$PVM_EncSpectroscopy=No" in method
     assert "##$Method=<Bruker:RARE>" in method
+    assert "##$PVM_FrqWorkOffsetPpm=( 8 )\n183.35 " in method
 
 
 def test_bruker_export_accepts_method_and_spatial_metadata_overrides(tmp_path):

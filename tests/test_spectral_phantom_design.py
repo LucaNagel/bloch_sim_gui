@@ -5,7 +5,7 @@ import pyqtgraph as pg
 import pytest
 from PyQt5.QtCore import QPointF, QSettings, Qt
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication, QGroupBox, QHeaderView, QWidget
+from PyQt5.QtWidgets import QApplication, QGroupBox, QHeaderView, QLabel, QWidget
 from unittest.mock import MagicMock, patch
 
 from blochsimulator import BlochSimulator
@@ -59,10 +59,23 @@ def test_new_phantom_designer_uses_new_spectral_defaults(tmp_path):
     assert dialog.supersampling_enabled.isChecked()
     assert dialog.supersampling_factor.isEnabled()
     assert dialog.design.shapes[0].kind == "cylinder"
-    assert {group.title() for group in dialog.findChildren(QGroupBox)} >= {
+    titled_groups = {
+        group.title(): group
+        for group in dialog.findChildren(QGroupBox)
+        if group.title()
+    }
+    assert set(titled_groups) >= {
         "Phantom geometry",
         "Spectral settings and preview",
     }
+    assert titled_groups["Phantom geometry"].fontInfo().bold()
+    assert titled_groups["Spectral settings and preview"].fontInfo().bold()
+    labels = {label.text(): label for label in dialog.findChildren(QLabel)}
+    assert "Sequence reference" in labels
+    assert "Spectral reference" not in labels
+    assert labels["Matrix"].alignment() & Qt.AlignLeft
+    assert labels["FOV"].alignment() & Qt.AlignLeft
+    assert dialog.phantom_geometry_grid.alignment() & Qt.AlignLeft
     preview_frequency, preview_spectrum = dialog.spectral_preview_curve.getData()
     assert preview_frequency[[0, -1]] == pytest.approx([-5.0, 5.0])
     assert preview_spectrum.max() > 0.0
@@ -402,6 +415,35 @@ def test_spectral_reference_keeps_simulation_offsets_centered_on_zero_ppm():
     assert frequency.size == 129
     assert frequency[0] == pytest.approx(ppm_to_hz(-6.0, 3.0))
     assert frequency[-1] == pytest.approx(ppm_to_hz(6.0, 3.0))
+
+
+def test_sequence_reference_shifts_simulation_without_moving_absolute_peaks():
+    design = PhantomDesign(
+        name="Independent sequence reference",
+        shape=(1, 1, 1),
+        fov_m=(0.01, 0.01, 0.01),
+        spectral_reference_ppm=175.0,
+        shapes=[
+            ShapeDefinition(
+                name="Voxel",
+                kind="box",
+                size=(1.0, 1.0, 1.0),
+                peaks=[SpectralPeakDefinition("Lactate", 1.0, 8.35, 0.02)],
+            )
+        ],
+    )
+    phantom = design.build()
+
+    _, on_resonance = phantom.to_component_phantoms(
+        field_strength=7.0,
+        nucleus="C13",
+        sequence_reference_ppm=183.35,
+    )[0]
+
+    assert on_resonance.chemical_shift_map[0, 0, 0] == pytest.approx(0.0, abs=1e-9)
+    assert phantom.spectral_reference_ppm + phantom.species[0].chemical_shift_ppm == (
+        pytest.approx(183.35)
+    )
 
 
 def test_spectral_preview_uses_absolute_ppm_by_default_and_optional_hz_conversion():
@@ -773,6 +815,7 @@ def test_shared_b0_and_nucleus_update_all_workspace_controls(tmp_path):
     phantom = _spectral_design().build()
     window.phantom_widget.current_phantom = phantom
     window.phantom_widget.phantom_creator.current_phantom = phantom
+    window.phantom_widget.viewer.set_phantom(phantom)
     window._on_shared_phantom_changed(phantom)
 
     window.phantom_widget.phantom_creator.set_field_strength(9.4)
@@ -780,6 +823,7 @@ def test_shared_b0_and_nucleus_update_all_workspace_controls(tmp_path):
 
     assert window._workspace_field_strength_t == pytest.approx(9.4)
     assert window.tissue_widget.get_field_strength() == pytest.approx(9.4)
+    assert window.tissue_widget.fontInfo().bold()
     assert window.sequence_simulation_widget.field_strength_t.value() == pytest.approx(
         9.4
     )
@@ -806,6 +850,14 @@ def test_shared_b0_and_nucleus_update_all_workspace_controls(tmp_path):
     )
     assert phantom.field_strength == pytest.approx(7.0)
     assert PhantomDesign.from_phantom(phantom).field_strength_t == pytest.approx(7.0)
+
+    window.sequence_simulation_widget.sequence_reference_ppm.setValue(183.35)
+    app.processEvents()
+    assert phantom.metadata["sequence_reference_ppm"] == pytest.approx(183.35)
+    assert (
+        "reference 183.35 ppm"
+        in window.phantom_widget.viewer.volume_inspector.spectrum_info.text()
+    )
     window.close()
     app.processEvents()
 
@@ -858,9 +910,14 @@ def test_designer_uses_compact_geometry_controls_and_fitted_peak_columns():
     shape_panel = dialog.shape_splitter.widget(0)
     shape_button_grid = shape_panel.layout().itemAt(2).layout()
 
-    assert shape_panel.maximumWidth() == 360
+    assert shape_panel.minimumWidth() == 360
+    assert shape_panel.maximumWidth() == 440
     assert shape_button_grid.rowCount() == 4
     assert shape_button_grid.columnCount() == 2
+    assert {
+        shape_button_grid.itemAt(index).widget().text()
+        for index in range(shape_button_grid.count())
+    } == {"Add ellipsoid", "Add box", "Add cylinder", "Remove"}
     assert (
         dialog.peak_table.horizontalHeader().sectionResizeMode(0) == QHeaderView.Fixed
     )
@@ -877,6 +934,9 @@ def test_designer_uses_compact_geometry_controls_and_fitted_peak_columns():
     assert dialog.peak_table.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
     geometry_group = shape_panel.layout().itemAt(3).widget()
     assert geometry_group.title() == "Selected shape geometry"
+    assert geometry_group.minimumHeight() >= 275
+    assert dialog.x_center.minimumWidth() >= 88
+    assert "QGroupBox { font-weight: bold; }" in dialog.styleSheet()
     assert dialog.shape_preview_3d.parent() is dialog.shape_splitter.widget(2)
     dialog.close()
     app.processEvents()
@@ -1037,7 +1097,7 @@ def test_designer_displays_absolute_peak_ppm_but_stores_relative_offsets():
     app.processEvents()
 
 
-def test_designer_keeps_peak_ppm_fixed_when_spectral_reference_changes():
+def test_designer_shows_sequence_reference_without_moving_absolute_peaks():
     app = QApplication.instance() or QApplication([])
     design = PhantomDesign(
         spectral_reference_ppm=175.0,
@@ -1057,26 +1117,26 @@ def test_designer_keeps_peak_ppm_fixed_when_spectral_reference_changes():
             ),
         ],
     )
-    dialog = SpectralPhantomDesignerDialog(design=design)
-
-    dialog.spectral_reference_ppm.setValue(172.0)
+    dialog = SpectralPhantomDesignerDialog(design=design, sequence_reference_ppm=183.35)
 
     assert float(dialog.peak_table.item(0, 3).text()) == pytest.approx(170.0)
-    assert design.shapes[0].peaks[0].frequency_ppm == pytest.approx(-2.0)
-    assert design.shapes[1].peaks[0].frequency_ppm == pytest.approx(8.0)
+    assert design.shapes[0].peaks[0].frequency_ppm == pytest.approx(-5.0)
+    assert design.shapes[1].peaks[0].frequency_ppm == pytest.approx(5.0)
     assert dialog.spectral_window_center_ppm.value() == pytest.approx(177.5)
+    assert dialog.sequence_reference_display.value() == pytest.approx(183.35)
+    assert dialog.sequence_reference_display.isReadOnly()
     preview_frequency, _ = dialog.spectral_preview_curve.getData()
     assert preview_frequency[[0, -1]] == pytest.approx([170.0, 185.0])
-    assert dialog.spectral_reference_line.value() == pytest.approx(172.0)
+    assert dialog.spectral_reference_line.value() == pytest.approx(183.35)
     dialog.shape_list.setCurrentRow(1)
     assert float(dialog.peak_table.item(0, 3).text()) == pytest.approx(180.0)
 
     dialog._sync_global()
     phantom = design.build()
-    assert phantom.spectral_reference_ppm == pytest.approx(172.0)
+    assert phantom.spectral_reference_ppm == pytest.approx(175.0)
     assert phantom.spectral_window_center_ppm == pytest.approx(177.5)
     assert [species.chemical_shift_ppm for species in phantom.species] == pytest.approx(
-        [-2.0, 8.0]
+        [-5.0, 5.0]
     )
     dialog.close()
     app.processEvents()

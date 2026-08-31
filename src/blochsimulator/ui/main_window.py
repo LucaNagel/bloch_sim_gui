@@ -107,6 +107,7 @@ from .sequence_simulation_widget import SequenceSimulationWidget
 from .b1_widgets import B1PhantomCombinationWidget, B1WorkspaceWidget
 from .project_explorer import ProjectExplorerDialog
 from .simulation_explorer import SessionSimulationExplorer
+from .styles import BOLD_GROUP_TITLES_STYLE
 
 
 def _view_title(text: str) -> QLabel:
@@ -216,6 +217,7 @@ class BlochSimulatorGUI(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self.setStyleSheet(BOLD_GROUP_TITLES_STYLE)
         self.app_settings = QSettings("BlochSimulator", "BlochSimulator")
         workspace_defaults = WorkspaceDefaults.from_settings(self.app_settings)
         self._workspace_field_strength_t = workspace_defaults.field_strength_t

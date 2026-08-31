@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QLabel
 from unittest.mock import MagicMock
 
 from blochsimulator import BlochSimulator
@@ -42,6 +42,7 @@ from blochsimulator.spectral_phantom import ChemicalSpecies
 from blochsimulator.ui.phantom_designer import SpectralPhantomDesignerDialog
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationThread
 from blochsimulator.ui.volume_viewer import PhantomInspectorWidget
+from blochsimulator.units import ppm_to_hz
 
 
 def _dynamic_phantom(kpl=(0.0, 0.1)):
@@ -59,6 +60,30 @@ def _dynamic_phantom(kpl=(0.0, 0.1)):
         },
         kpl_map_s_inv=np.asarray(kpl, dtype=float).reshape(shape),
         nucleus="C13",
+    )
+
+
+def test_dynamic_pool_offsets_follow_sequence_reference_not_spectrum_window():
+    phantom = _dynamic_phantom()
+    phantom.field_strength = 7.0
+    phantom.spectral_reference_ppm = 175.0
+    phantom.spectral_window_center_ppm = 180.0
+    phantom.spectral_bandwidth_ppm = 30.0
+
+    result = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        SequenceProgram((), duration_s=1e-5),
+        phantom,
+        sequence_reference_ppm=183.35,
+        simulation_timestep_s=1e-5,
+    )
+
+    assert result.metadata["sequence_reference_ppm"] == pytest.approx(183.35)
+    assert result.metadata["spectral_window_center_ppm"] == pytest.approx(180.0)
+    assert result.metadata["pool_frequency_offsets_hz"] == pytest.approx(
+        (
+            ppm_to_hz(175.0 - 183.35, 7.0, "C13"),
+            ppm_to_hz(187.0 - 183.35, 7.0, "C13"),
+        )
     )
 
 
@@ -381,6 +406,7 @@ def test_private_metal_probe_chunks_outputs_and_retains_only_requested_spins(
         phantom,
         simulation_timestep_s=1e-4,
         spin_sampling=SpinSampling((2, 1, 1)),
+        spoiler_mode="gradient",
         spin_chunk_size=2,
         capture_spin_indices=(0, 3),
         capture_spin_groups=((0, 2), (1, 3)),
@@ -470,6 +496,7 @@ def test_hybrid_probe_returns_float64_fallback_when_held_out_sample_fails(
         phantom,
         simulation_timestep_s=1e-4,
         spin_sampling=sampling,
+        spoiler_mode="gradient",
         run_concurrently=False,
     )
 
@@ -492,6 +519,7 @@ def test_hybrid_sequence_wraps_checked_arrays_as_a_regular_result(monkeypatch):
         phantom,
         simulation_timestep_s=1e-4,
         spin_sampling=sampling.select((0, 7)),
+        spoiler_mode="gradient",
     )
     checked_species = np.asarray(template.species_signal) * 4.0
     checked_final_pool = np.asarray(template.final_pool_magnetization) * 4.0
@@ -519,6 +547,7 @@ def test_hybrid_sequence_wraps_checked_arrays_as_a_regular_result(monkeypatch):
         phantom,
         simulation_timestep_s=1e-4,
         spin_sampling=sampling,
+        spoiler_mode="gradient",
     )
 
     assert result.signal == pytest.approx(checked_species.sum(axis=0))
@@ -551,12 +580,14 @@ def test_hybrid_sequence_uses_exact_cpu_when_gpu_is_unavailable(monkeypatch):
         phantom,
         simulation_timestep_s=1e-4,
         spin_sampling=sampling,
+        spoiler_mode="gradient",
     )
     reference = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
         program,
         phantom,
         simulation_timestep_s=1e-4,
         spin_sampling=sampling,
+        spoiler_mode="gradient",
     )
 
     assert np.array_equal(result.signal, reference.signal)
@@ -676,7 +707,12 @@ def test_dynamic_gradient_waveform_matches_ideal_crusher_spoiling():
     )
     simulator = BlochSimulator(use_parallel=False)
 
-    ideal = simulator.simulate_dynamic_sequence(program, phantom, spoiler_mode="ideal")
+    ideal = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        spin_sampling=SpinSampling((9, 1, 1)),
+        spoiler_mode="ideal",
+    )
     physical = simulator.simulate_dynamic_sequence(
         program,
         phantom,
@@ -685,6 +721,7 @@ def test_dynamic_gradient_waveform_matches_ideal_crusher_spoiling():
     )
 
     assert ideal.signal[0] == pytest.approx(0.0j, abs=1e-12)
+    assert ideal.metadata["subvoxel_spins_per_voxel"] == 1
     assert physical.signal[0] == pytest.approx(ideal.signal[0], abs=1e-11)
     assert physical.metadata["subvoxel_spins_per_voxel"] == 9
     assert physical.metadata["ideal_spoiling_applied"] is False
@@ -1799,6 +1836,49 @@ def test_phantom_design_builds_dynamic_pool_maps_and_kpl_regions():
     assert PhantomDesign.from_phantom(phantom).dynamic_enabled
 
 
+def test_phantom_design_rasterizes_kpl_per_shape_before_spatial_overrides():
+    peaks = [
+        SpectralPeakDefinition("Pyruvate", 1.0, 0.0, 1.0),
+        SpectralPeakDefinition("Lactate", 0.0, 12.0, 1.0),
+    ]
+    design = PhantomDesign(
+        shape=(4, 1, 1),
+        fov_m=(0.04, 0.01, 0.01),
+        supersampling_enabled=False,
+        dynamic_enabled=True,
+        default_kpl_s_inv=0.03,
+        shapes=[
+            ShapeDefinition(
+                "Left",
+                kind="box",
+                center=(0.25, 0.5, 0.5),
+                size=(0.5, 1.0, 1.0),
+                peaks=list(peaks),
+                kpl_s_inv=0.1,
+            ),
+            ShapeDefinition(
+                "Right",
+                kind="box",
+                center=(0.75, 0.5, 0.5),
+                size=(0.5, 1.0, 1.0),
+                peaks=list(peaks),
+                kpl_s_inv=0.2,
+            ),
+        ],
+        kinetic_regions=[
+            KineticRegionDefinition(
+                "Override", "box", (0.875, 0.5, 0.5), (0.25, 1.0, 1.0), 0.4
+            )
+        ],
+    )
+
+    phantom = design.build()
+    restored = PhantomDesign.from_phantom(phantom)
+
+    assert phantom.kpl_map_s_inv[:, 0, 0] == pytest.approx([0.1, 0.1, 0.2, 0.4])
+    assert [shape.kpl_s_inv for shape in restored.shapes] == pytest.approx([0.1, 0.2])
+
+
 def test_phantom_design_uses_metabolite_specific_t1_for_dynamic_pools():
     design = PhantomDesign(
         shape=(1, 1, 1),
@@ -1896,6 +1976,80 @@ def test_phantom_designer_exposes_kinetic_regions_and_preview():
     assert dialog.phantom.kinetic_regions[0].kpl_s_inv == pytest.approx(0.05)
     assert dialog.phantom.pyruvate_inflow is not None
     assert dialog.phantom.dynamic_b0 is not None
+    dialog.close()
+    app.processEvents()
+
+
+def test_phantom_designer_uses_per_shape_kpl_and_interpolated_curve_display():
+    app = QApplication.instance() or QApplication([])
+    peaks = [
+        SpectralPeakDefinition("Pyruvate", 1.0, 0.0, 1.0, t1_s=30.0),
+        SpectralPeakDefinition("Lactate", 0.0, 12.0, 1.0, t1_s=25.0),
+    ]
+    design = PhantomDesign(
+        shape=(2, 1, 1),
+        fov_m=(0.02, 0.01, 0.01),
+        supersampling_enabled=False,
+        dynamic_enabled=True,
+        shapes=[
+            ShapeDefinition(
+                "Left",
+                kind="box",
+                center=(0.25, 0.5, 0.5),
+                size=(0.5, 1.0, 1.0),
+                peaks=list(peaks),
+            ),
+            ShapeDefinition(
+                "Right",
+                kind="box",
+                center=(0.75, 0.5, 0.5),
+                size=(0.5, 1.0, 1.0),
+                peaks=list(peaks),
+            ),
+        ],
+    )
+    dialog = SpectralPhantomDesignerDialog(design=design)
+
+    assert dialog.time_curve_display.currentData() == "simulated"
+    assert not dialog.inflow_curve_table.isEnabled()
+    assert not dialog.dynamic_b0_curve_table.isEnabled()
+    labels = {label.text() for label in dialog.findChildren(QLabel)}
+    assert "kPL of this shape" in labels
+    assert "kPL source for this voxel" not in labels
+
+    dialog.shape_kpl.setValue(0.1)
+    dialog.kinetics_preview_shape.setCurrentIndex(
+        dialog.kinetics_preview_shape.findData(1)
+    )
+    dialog.shape_kpl.setValue(0.2)
+    dialog.kinetics_preview_shape.setCurrentIndex(
+        dialog.kinetics_preview_shape.findData(0)
+    )
+    assert dialog.shape_kpl.value() == pytest.approx(0.1)
+
+    dialog.inflow_enabled.setChecked(True)
+    assert dialog.inflow_curve_table.isEnabled()
+    dialog.dynamic_b0_enabled.setChecked(True)
+    assert dialog.dynamic_b0_curve_table.isEnabled()
+    rate_curve, polarization_curve = dialog._read_inflow_curves()
+    assert rate_curve.interpolation == "linear"
+    assert polarization_curve.interpolation == "linear"
+    times_s, simulated_values = dialog.inflow_preview_curve.getData()
+    midpoint = int(np.argmin(np.abs(times_s - 2.5)))
+    assert times_s[midpoint] == pytest.approx(2.5)
+    assert simulated_values[midpoint] == pytest.approx(5.0)
+    assert len(times_s) > dialog.inflow_curve_table.rowCount()
+
+    dialog.time_curve_display.setCurrentIndex(dialog.time_curve_display.findData("set"))
+    set_times, set_values = dialog.inflow_preview_curve.getData()
+    assert set_times == pytest.approx([0.0, 5.0, 6.0])
+    assert set_values == pytest.approx([0.0, 10.0, 0.0])
+
+    dialog._sync_global()
+    phantom = dialog.design.build()
+    assert phantom.kpl_map_s_inv[:, 0, 0] == pytest.approx([0.1, 0.2])
+    assert phantom.pyruvate_inflow.rate_curve_s_inv.interpolation == "linear"
+    assert phantom.pyruvate_inflow.rate_curve_s_inv.value_at(2.5) == pytest.approx(5.0)
     dialog.close()
     app.processEvents()
 

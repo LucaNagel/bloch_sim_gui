@@ -482,7 +482,9 @@ def run_metal_precision_probe(
     if spoiler_mode not in {"ideal", "gradient"}:
         raise ValueError("spoiler_mode must be 'ideal' or 'gradient'")
 
-    sampling = coerce_spin_sampling(spin_sampling)
+    sampling = coerce_spin_sampling(
+        spin_sampling if spoiler_mode == "gradient" else None
+    )
     sampling.validate_phantom_dimensions(phantom.ndim)
     compiled = SequenceCompiler().compile(
         program,
@@ -905,7 +907,12 @@ def run_metal_hybrid_probe(
     capability = metal_capability()
     if not capability["available"]:
         raise RuntimeError(capability["reason"] or "Metal is unavailable")
-    sampling = coerce_spin_sampling(spin_sampling)
+    spoiler_mode = str(spoiler_mode).strip().lower()
+    if spoiler_mode not in {"ideal", "gradient"}:
+        raise ValueError("spoiler_mode must be 'ideal' or 'gradient'")
+    sampling = coerce_spin_sampling(
+        spin_sampling if spoiler_mode == "gradient" else None
+    )
     sampling.validate_phantom_dimensions(phantom.ndim)
     calibration_subvoxels, validation_subvoxels = _hybrid_subvoxel_partition(
         sampling, calibration_fraction, validation_fraction
@@ -1176,7 +1183,12 @@ def run_metal_hybrid_sequence(
     """
     from .sequence.spin_sampling import coerce_spin_sampling
 
-    sampling = coerce_spin_sampling(spin_sampling)
+    spoiler_mode = str(spoiler_mode).strip().lower()
+    if spoiler_mode not in {"ideal", "gradient"}:
+        raise ValueError("spoiler_mode must be 'ideal' or 'gradient'")
+    sampling = coerce_spin_sampling(
+        spin_sampling if spoiler_mode == "gradient" else None
+    )
     checkpoints_s = tuple(checkpoints_s)
     status = status_callback if status_callback is not None else lambda _message: None
 

@@ -788,7 +788,10 @@ class PhantomInspectorWidget(QWidget):
             )
             axis_label = "Frequency"
             axis_unit = "ppm"
-            reference = getattr(self.phantom, "spectral_reference_ppm", None)
+            reference = getattr(self.phantom, "metadata", {}).get(
+                "sequence_reference_ppm",
+                getattr(self.phantom, "spectral_reference_ppm", None),
+            )
             reference_suffix = (
                 f"; reference {reference:g} ppm" if reference is not None else ""
             )

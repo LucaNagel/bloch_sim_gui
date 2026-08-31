@@ -14,7 +14,6 @@ from .dynamic_phantom import (
     KineticRegionDefinition,
     PyruvateInflow,
     TimeCurve,
-    rasterize_kpl_regions,
 )
 from .units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm
 
@@ -83,6 +82,7 @@ class ShapeDefinition:
     )
     b0_hz: float = None
     rotation_deg: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    kpl_s_inv: Optional[float] = None
 
     def validate(self) -> None:
         if self.kind not in {"ellipsoid", "box", "cylinder"}:
@@ -105,10 +105,18 @@ class ShapeDefinition:
             raise ValueError("shape B0 offset must be finite")
         if self.b0_hz is not None and not np.isfinite(self.b0_hz):
             raise ValueError("legacy shape B0 offset must be finite")
+        if self.kpl_s_inv is not None and (
+            not np.isfinite(self.kpl_s_inv) or self.kpl_s_inv < 0
+        ):
+            raise ValueError("shape kPL must be finite and non-negative")
         if not self.peaks:
             raise ValueError("each shape requires at least one spectral peak")
         for peak in self.peaks:
             peak.validate()
+
+    def effective_kpl_s_inv(self, fallback: float) -> float:
+        """Return this shape's kPL or a legacy design-wide fallback."""
+        return float(fallback if self.kpl_s_inv is None else self.kpl_s_inv)
 
 
 @dataclass
@@ -320,6 +328,24 @@ class PhantomDesign:
             normalized = 2.0 * np.sqrt((x * x + y * y + z * z) / 3.0) - 1.0
         return amplitude * normalized
 
+    def rasterize_kpl(self) -> np.ndarray:
+        """Rasterize per-shape kPL values, followed by optional overrides.
+
+        Designs written before shapes carried kPL retain their design-wide
+        fallback. Later shapes win in overlaps, matching the other shape
+        properties in the designer, and explicit kinetic regions remain the
+        final, highest-priority override.
+        """
+        result = np.full(self.shape, float(self.default_kpl_s_inv), dtype=float)
+        for item in self.shapes:
+            if item.kpl_s_inv is None:
+                continue
+            support = np.asarray(self.rasterize_mask(item)) > 0.0
+            result[support] = float(item.kpl_s_inv)
+        for region in self.kinetic_regions:
+            result[region.rasterize(self.shape)] = region.kpl_s_inv
+        return result
+
     def build(self):
         """Build independent spectral components from all shapes and peaks."""
         self.validate()
@@ -427,11 +453,7 @@ class PhantomDesign:
                 initial_concentration_maps=maps,
                 initial_spin_density_maps=spin_density_maps,
                 equilibrium_polarization=1.0,
-                kpl_map_s_inv=rasterize_kpl_regions(
-                    self.shape,
-                    tuple(self.kinetic_regions),
-                    self.default_kpl_s_inv,
-                ),
+                kpl_map_s_inv=self.rasterize_kpl(),
                 b0_map_ppm=b0_map,
                 field_strength=float(self.field_strength_t),
                 nucleus=effective_nucleus,
@@ -567,6 +589,11 @@ class PhantomDesign:
                     b0_ppm=float(b0_ppm),
                     peaks=peaks or [SpectralPeakDefinition()],
                     rotation_deg=tuple(item.get("rotation_deg", (0.0, 0.0, 0.0))),
+                    kpl_s_inv=(
+                        None
+                        if item.get("kpl_s_inv") is None
+                        else float(item["kpl_s_inv"])
+                    ),
                 )
             )
         return cls(
