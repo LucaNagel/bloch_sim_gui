@@ -2340,6 +2340,10 @@ class SequenceSimulationWidget(QWidget):
             0.001, 1000.0, 1.0, " ms"
         )
         self.ss_bssfp_dwell_info = QLabel()
+        # Keep the sequence-specific report as a programmatic compatibility
+        # surface.  All user-facing spoiler diagnostics are presented by the
+        # shared Spoiling quality unit below, so every sequence follows the
+        # same ideal/gradient visibility rule.
         self.ss_bssfp_spoiler_info = QLabel()
         self.ss_bssfp_spoiler_info.setWordWrap(True)
         ss_form.addRow(ss_hint)
@@ -2394,7 +2398,6 @@ class SequenceSimulationWidget(QWidget):
         )
         ss_form.addRow("Additional FOV spoiler", self.ss_bssfp_spoiler_cycles)
         ss_form.addRow("Spoiler duration", self.ss_bssfp_spoiler_duration_ms)
-        ss_form.addRow("Spoiler check", self.ss_bssfp_spoiler_info)
         _add_form_section(ss_form, "Derived sampling")
         ss_form.addRow("ADC dwell", self.ss_bssfp_dwell_info)
         self.ss_bssfp_group.setVisible(False)
@@ -2710,7 +2713,7 @@ class SequenceSimulationWidget(QWidget):
             "coherence follows the continuous voxel throughout this spoiler train."
         )
         spoiling_quality_layout.addWidget(self.spoiling_apply_recommended_grid)
-        self.spoiling_quality_group.setVisible(self.spoiler_mode == "gradient")
+        self._update_spoiling_quality_visibility()
         controls_layout.addWidget(self.spoiling_quality_group)
 
         object_group = QGroupBox("Simulation object")
@@ -5771,6 +5774,11 @@ class SequenceSimulationWidget(QWidget):
             )
         else:
             self._set_imported_pulseq_spoiling_quality()
+
+    def _update_spoiling_quality_visibility(self):
+        """Show physical spoiler diagnostics only for gradient simulation."""
+        if hasattr(self, "spoiling_quality_group"):
+            self.spoiling_quality_group.setVisible(self.spoiler_mode == "gradient")
 
     def _ss_bssfp_effective_spoiler_cycles_xyz(self):
         voxel_sizes = np.asarray(self._ss_bssfp_reference_voxel_sizes_m())
@@ -9041,8 +9049,7 @@ class SequenceSimulationWidget(QWidget):
             sampling.counts_xyz if mode == "gradient" else (1, 1, 1)
         )
         self.subvoxel_sampling_method = sampling.method
-        if hasattr(self, "spoiling_quality_group"):
-            self.spoiling_quality_group.setVisible(mode == "gradient")
+        self._update_spoiling_quality_visibility()
         auto_changed = self._apply_flash_auto_spoilers()
         self._update_flash_spoiler_info()
         if auto_changed and self.sequence_source.currentIndex() == self.FLASH_SOURCE:

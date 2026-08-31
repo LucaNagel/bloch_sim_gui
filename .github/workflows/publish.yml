@@ -350,6 +350,10 @@ jobs:
       actions: read
       contents: write
     steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
       - uses: actions/download-artifact@v8
         with:
           pattern: cibw-*
@@ -371,6 +375,8 @@ jobs:
           files: |
             dist/*
             apps/*
+            phantoms/phantoms/T1_multiphantom.npz
+          fail_on_unmatched_files: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
   publish:
@@ -401,6 +407,10 @@ jobs:
       actions: read
       contents: write
     steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
       - uses: actions/download-artifact@v8
         with:
           pattern: app-*
@@ -410,6 +420,9 @@ jobs:
       - name: Update Release with Apps
         uses: softprops/action-gh-release@v3
         with:
-          files: apps/*
+          files: |
+            apps/*
+            phantoms/phantoms/T1_multiphantom.npz
+          fail_on_unmatched_files: true
           draft: false
           prerelease: false

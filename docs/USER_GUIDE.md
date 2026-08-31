@@ -635,26 +635,25 @@ dashed so the overlapping curves remain visible.
 In the **Kinetics / kPL** tab:
 
 1. Enable the hyperpolarized pyruvate/lactate model.
-2. Set the default `kPL` in `s⁻¹`. It applies everywhere unless an optional
-   spatial region overrides it. Zero means no conversion except in regions with
-   a positive override; without any positive default or regional `kPL`, no new
-   lactate is produced.
+2. Select each shape and set **kPL of this shape** in `s⁻¹`. Zero means no
+   conversion in that shape unless a positive spatial override applies.
 3. Optionally add box or ellipsoid kPL regions with center/size in percent of
-   the phantom FOV. A region overrides the default `kPL` in its voxels; if
+   the phantom FOV. A region overrides the shape `kPL` in its voxels; if
    regions overlap, the last table row wins.
 4. Set **Conversion starts at (kinetics time)** to the point on the shared
    kinetics timeline at which `kPL` becomes active. Before that point `kPL=0`;
-   afterwards the default or regional `kPL` applies.
+   afterwards the shape or regional `kPL` applies.
 5. Use **Kinetics time at sequence t=0** as a global offset for both inflow and
    conversion. `+5 s` starts the Pulseq sequence five seconds into the defined
    kinetics; `-5 s` starts it five seconds before kinetics time zero. The
    inflow samples and conversion start keep their relative timing and do not
    need to be edited when comparing different sequence start times.
 6. Optionally enable pyruvate inflow and enter kinetics time, concentration
-   rate, and inflow polarization. Each row is held until the next time and the
-   concentration rate is zero outside the listed interval. Thus rows `(5 s,
-   10 /s, 10000)` and `(6 s, 0 /s, 1)` add total concentration 10 during one
-   second, with incoming polarization 10000. Set the initial Pyruvate spin
+   rate, and inflow polarization. Values are linearly interpolated between
+   rows, and the concentration rate is zero outside the listed interval. Use
+   **Time curves → Simulated values** (the default) to see the densely sampled
+   values passed to the simulator, or **Set values** to show only the entered
+   table points. Set the initial Pyruvate spin
    density to 0 if the region should contain no Pyruvate before delivery. Inflow
    supplies Pyruvate; `kPL` independently determines how much is converted to
    Lactate.
@@ -679,9 +678,9 @@ reset the phantom state.
 
 The right-hand **Live conversion preview** represents one voxel, not a spatial
 average. **Shape / object to preview** selects the shape whose initial pool
-concentrations, polarizations, and metabolite T1 values are used. **kPL source for this voxel** then
-selects either the default value or one region's override. Selecting a row in
-the kPL-region table selects that region automatically. The preview updates
+concentrations, polarizations, metabolite T1 values, and shape-specific `kPL`
+are used. Selecting a row in the optional kPL-region table previews that
+region's override. The preview updates
 immediately when these values, the conversion start, the global kinetics
 offset, or the inflow points change. Its horizontal axis is sequence time. The
 upper plot shows concentration inflow, the middle plot shows pool polarization

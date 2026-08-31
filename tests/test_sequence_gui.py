@@ -1207,6 +1207,30 @@ def test_shared_spoiling_quality_unit_covers_every_sequence_source():
     app.processEvents()
 
 
+def test_ideal_spoiler_diagnostics_are_hidden_for_every_sequence_source():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+
+    assert widget.ss_bssfp_spoiler_info.parent() is None
+    for source_index in range(widget.sequence_source.count()):
+        widget.sequence_source.setCurrentIndex(source_index)
+        assert widget.spoiling_quality_group.isHidden()
+
+    widget.set_spoiler_configuration("gradient", (1, 1, 9))
+    for source_index in range(widget.sequence_source.count()):
+        widget.sequence_source.setCurrentIndex(source_index)
+        assert not widget.spoiling_quality_group.isHidden()
+
+    widget.set_spoiler_configuration("ideal", (1, 1, 9))
+    for source_index in range(widget.sequence_source.count()):
+        widget.sequence_source.setCurrentIndex(source_index)
+        assert widget.spoiling_quality_group.isHidden()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
 def test_ideal_spoiling_always_uses_one_spin_and_hides_quality_group():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
