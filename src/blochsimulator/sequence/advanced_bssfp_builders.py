@@ -221,7 +221,7 @@ def make_pulseq_spectral_selective_bssfp(
     spectral_rf_fwhm_hz: float = 900.0,
     spectral_rf_pulse_type: str = "gaussian",
     spectral_rf_apodization: float = 0.0,
-    spectral_rf_slr_sharpness: float = 1.0,
+    spectral_rf_slr_sharpness: int = 1,
     spectral_rf_custom_waveform_hz: Sequence[complex] | None = None,
     spectral_rf_custom_raster_s: float | None = None,
     spectral_rf_custom_flip_angle_deg: float | None = None,
@@ -649,7 +649,7 @@ def make_pulseq_spectral_selective_bssfp(
             # alpha/2 starter and acquired pulses therefore have the same
             # programmed phase.
             alpha_half.phase_offset = pulseq_phase_offset_rad(
-                wrap_phase_deg(rf_phase_start_deg + rf_phase_increment_deg),
+                wrap_phase_deg(rf_phase_start_deg - rf_phase_increment_deg),
                 frequency_offset_hz=rf_offset,
                 event_center_s=alpha_center,
             )
@@ -874,7 +874,7 @@ def make_pulseq_spectral_selective_bssfp(
     sequence.set_definition(
         "AlphaHalfPhaseDeg",
         (
-            wrap_phase_deg(rf_phase_start_deg + rf_phase_increment_deg)
+            wrap_phase_deg(rf_phase_start_deg - rf_phase_increment_deg)
             if use_alpha_half
             else 0.0
         ),
@@ -927,7 +927,7 @@ def make_pulseq_me_bssfp(
     rf_bandwidth_hz: float = 5480.0,
     rf_time_bandwidth_product: float | None = None,
     rf_apodization: float = 0.5,
-    rf_slr_sharpness: float = 1.0,
+    rf_slr_sharpness: int = 1,
     rf_custom_waveform_hz: Sequence[complex] | None = None,
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
@@ -1203,7 +1203,7 @@ def make_pulseq_me_bssfp(
             )
         alpha_half.freq_offset = float(rf_frequency_offset_hz)
         alpha_half.phase_offset = pulseq_phase_offset_rad(
-            rf_phase_start_deg,
+            wrap_phase_deg(rf_phase_start_deg - rf_phase_increment_deg),
             frequency_offset_hz=rf_frequency_offset_hz,
             event_center_s=alpha_center,
         )
@@ -1442,7 +1442,10 @@ def make_pulseq_me_bssfp(
         start_times_s=acquisition_start_times,
     )
     sequence.set_definition("UseAlphaHalf", bool(use_alpha_half))
-    sequence.set_definition("AlphaHalfPhaseDeg", float(rf_phase_start_deg))
+    sequence.set_definition(
+        "AlphaHalfPhaseDeg",
+        wrap_phase_deg(rf_phase_start_deg - rf_phase_increment_deg),
+    )
     sequence.set_definition(
         "AlphaHalfFlipAngleDeg", float(resolved_alpha_half_flip_angle_deg)
     )
@@ -1548,7 +1551,7 @@ def make_pulseq_radial_me_bssfp(
     rf_duration_s: float = 0.5e-3,
     rf_time_bandwidth_product: float = 4.0,
     rf_apodization: float = 0.5,
-    rf_slr_sharpness: float = 1.0,
+    rf_slr_sharpness: int = 1,
     rf_custom_waveform_hz: Sequence[complex] | None = None,
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
@@ -1743,7 +1746,7 @@ def make_pulseq_radial_me_bssfp(
 
     if use_alpha_half:
         alpha_half.phase_offset = pulseq_phase_offset_rad(
-            rf_phase_start_deg,
+            wrap_phase_deg(rf_phase_start_deg - rf_phase_increment_deg),
             frequency_offset_hz=rf_frequency_offset_hz,
             event_center_s=alpha_center,
         )
@@ -1770,6 +1773,12 @@ def make_pulseq_radial_me_bssfp(
         )
     )
     rf_phase = wrap_phase_deg(rf_phase_start_deg)
+    if use_alpha_half:
+        rf_phase = advance_bssfp_phase_deg(
+            rf_phase,
+            elapsed_s=resolved_alpha_half_center_spacing_s,
+            frequency_offset_hz=rf_frequency_offset_hz,
+        )
     acquisition_start_times = []
     acquisition_intervals = []
     minimum_acquisition_intervals = []
@@ -1787,6 +1796,7 @@ def make_pulseq_radial_me_bssfp(
             rf_phase = advance_bssfp_phase_deg(
                 rf_phase,
                 elapsed_s=actual_tr,
+                frequency_offset_hz=rf_frequency_offset_hz,
                 phase_increment_deg=rf_phase_increment_deg,
             )
             sequence.add_block(rf)
@@ -1914,7 +1924,10 @@ def make_pulseq_radial_me_bssfp(
     sequence.set_definition("RFPhaseIncrementDeg", float(rf_phase_increment_deg))
     sequence.set_definition("FrequencyOffsetPhaseCoherent", True)
     sequence.set_definition("UseAlphaHalf", bool(use_alpha_half))
-    sequence.set_definition("AlphaHalfPhaseDeg", float(rf_phase_start_deg))
+    sequence.set_definition(
+        "AlphaHalfPhaseDeg",
+        wrap_phase_deg(rf_phase_start_deg - rf_phase_increment_deg),
+    )
     sequence.set_definition(
         "AlphaHalfFlipAngleDeg", float(resolved_alpha_half_flip_angle_deg)
     )

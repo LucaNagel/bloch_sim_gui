@@ -126,7 +126,7 @@ def test_slr_sharpness_does_not_reduce_temporal_lobes():
             duration_s=2.5e-3,
             raster_s=10e-6,
             time_bandwidth_product=3.5,
-            slr_sharpness=float(sharpness),
+            slr_sharpness=sharpness,
         )
         zero_crossings.append(
             np.count_nonzero(
@@ -144,6 +144,55 @@ def test_slr_sharpness_does_not_reduce_temporal_lobes():
         for previous, current in zip(zero_crossings, zero_crossings[1:])
     ), zero_crossings
     assert zero_crossings[-1] > zero_crossings[0], zero_crossings
+
+
+def test_slr_sharpness_one_is_one_positive_central_lobe():
+    envelope, *_ = design_rf_envelope(
+        pulse_type="slr",
+        duration_s=2.5e-3,
+        raster_s=10e-6,
+        time_bandwidth_product=4.0,
+        slr_sharpness=1,
+    )
+
+    assert np.all(envelope.real >= -1e-15)
+    assert np.allclose(envelope.imag, 0.0)
+    assert (
+        np.count_nonzero(
+            np.signbit(envelope.real[:-1]) != np.signbit(envelope.real[1:])
+        )
+        == 0
+    )
+    assert abs(int(np.argmax(np.abs(envelope))) - envelope.size // 2) <= 2
+
+
+@pytest.mark.parametrize("sharpness", (0, 1.5, np.nan, True))
+def test_slr_sharpness_requires_a_positive_integer(sharpness):
+    with pytest.raises(ValueError, match="positive integer"):
+        design_rf_envelope(
+            pulse_type="slr",
+            duration_s=2.5e-3,
+            raster_s=10e-6,
+            time_bandwidth_product=4.0,
+            slr_sharpness=sharpness,
+        )
+
+
+def test_full_sinc_apodization_suppresses_outer_lobes():
+    envelope, *_ = design_rf_envelope(
+        pulse_type="sinc",
+        duration_s=3e-3,
+        raster_s=1e-6,
+        time_bandwidth_product=6.0,
+        apodization=1.0,
+    )
+    normalized_time = (np.arange(envelope.size) + 0.5) / envelope.size * 6.0 - 3.0
+    inner = np.max(np.abs(envelope[(normalized_time >= 1.0) & (normalized_time < 2.0)]))
+    outer = np.max(np.abs(envelope[(normalized_time >= 2.0) & (normalized_time < 3.0)]))
+
+    assert outer < inner
+    assert abs(envelope[0]) < 1e-6 * np.max(np.abs(envelope))
+    assert abs(envelope[-1]) < 1e-6 * np.max(np.abs(envelope))
 
 
 @pytest.mark.parametrize("sharpness", [1.0, 5.0])

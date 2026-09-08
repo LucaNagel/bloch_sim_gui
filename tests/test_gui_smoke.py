@@ -16,14 +16,18 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QRadioButton,
     QSlider,
+    QSpinBox,
 )
 from blochsimulator.memory import GIB, MemoryPolicy
+from blochsimulator.pulse_loader import load_amp_phase_dat, load_pulse_from_file
 from blochsimulator.sequence import ScannerParameters
 from blochsimulator.ui.dialogs import PulseImportDialog, SettingsDialog
 from blochsimulator.ui.default_settings import WorkspaceDefaults
 from blochsimulator.ui.magnetization_viewer import MagnetizationViewer
 from blochsimulator.ui.main_window import BlochSimulatorGUI, _apply_platform_style
 from blochsimulator.ui.rf_pulse_designer import RFPulseDesigner
+from blochsimulator.ui.sequence_designer import SequenceDesigner
+from blochsimulator.units import LEGACY_GAMMA_RAD_PER_S_PER_GAUSS
 
 
 def test_application_style_uses_native_macos_controls():
@@ -32,6 +36,27 @@ def test_application_style_uses_native_macos_controls():
     _apply_platform_style(app, platform="darwin")
 
     app.setStyle.assert_not_called()
+
+
+def test_application_style_can_force_fusion_on_macos():
+    app = MagicMock()
+
+    _apply_platform_style(app, platform="darwin", style_mode="fusion")
+
+    app.setStyle.assert_called_once_with("Fusion")
+
+
+def test_application_style_can_restore_remembered_system_style():
+    app = MagicMock()
+
+    _apply_platform_style(
+        app,
+        platform="darwin",
+        style_mode="system",
+        system_style_name="macintosh",
+    )
+
+    app.setStyle.assert_called_once_with("macintosh")
 
 
 @pytest.mark.parametrize("platform", ["linux", "win32"])
@@ -131,6 +156,86 @@ def test_adiabatic_passage_uses_direct_b1_and_ten_ms_default(pulse_type):
     assert np.allclose(designer.get_pulse()[0], pulse_before)
 
 
+def test_rf_designer_only_shows_shape_specific_controls():
+    app = QApplication.instance() or QApplication(sys.argv)
+    designer = RFPulseDesigner(compact=True)
+
+    designer.pulse_type.setCurrentText("SLR")
+    assert isinstance(designer.slr_sharpness, QSpinBox)
+    assert designer.slr_sharpness.minimum() == 1
+    assert not designer.slr_sharpness_container.isHidden()
+    assert designer.apodization_container.isHidden()
+    assert designer.lobes_container.isHidden()
+    designer.set_state({"slr_sharpness": 5.0})
+    assert designer.slr_sharpness.value() == 5
+
+    designer.pulse_type.setCurrentText("Sinc")
+    assert designer.slr_sharpness_container.isHidden()
+    assert not designer.apodization_container.isHidden()
+    assert not designer.lobes_container.isHidden()
+
+    designer.close()
+    designer.deleteLater()
+    app.processEvents()
+
+
+def test_loaded_slr_auto_b1_matches_flip_angle_after_free_mode_resampling():
+    app = QApplication.instance() or QApplication(sys.argv)
+    pulse_path = Path(__file__).parents[1] / "rfpulses" / "SLR_sharpness_1.txt"
+    b1, time, metadata = load_amp_phase_dat(
+        pulse_path,
+        duration_s=2.333e-3,
+        amplitude_unit="percent",
+        phase_unit="deg",
+        layout="amp_phase_interleaved",
+    )
+    designer = RFPulseDesigner(compact=True)
+    designer.loaded_pulse_b1 = b1
+    designer.loaded_pulse_time = time
+    designer.loaded_pulse_metadata = metadata
+    designer.pulse_type.setCurrentText("Custom")
+    designer.duration.setValue(2.333)
+    designer.flip_angle.setValue(90.0)
+    designer.b1_amplitude.setValue(0.0)
+    designer.update_pulse()
+
+    designed_b1, designed_time = designer.get_pulse()
+    designed_dt = float(np.median(np.diff(designed_time)))
+
+    def rotation_deg(waveform, raster_s):
+        area_gauss_s = abs(np.sum(waveform) * raster_s)
+        return np.rad2deg(LEGACY_GAMMA_RAD_PER_S_PER_GAUSS * area_gauss_s)
+
+    assert designed_b1.size * designed_dt == pytest.approx(2.333e-3)
+    assert rotation_deg(designed_b1, designed_dt) == pytest.approx(90.0, abs=0.05)
+
+    resampled_b1 = SequenceDesigner._resample_custom_pulse(designer.get_pulse(), 10e-6)
+    assert rotation_deg(resampled_b1, 10e-6) == pytest.approx(90.0, abs=0.05)
+
+    designer.close()
+    designer.deleteLater()
+    app.processEvents()
+
+
+def test_shared_pulse_loader_dispatches_headerless_txt_import_options():
+    pulse_path = Path(__file__).parents[1] / "rfpulses" / "SLR_sharpness_1.txt"
+    options = {
+        "duration_s": 2.333e-3,
+        "amplitude_unit": "percent",
+        "phase_unit": "deg",
+        "layout": "amp_phase_interleaved",
+    }
+
+    shared_b1, shared_time, shared_metadata = load_pulse_from_file(
+        pulse_path, **options
+    )
+    direct_b1, direct_time, direct_metadata = load_amp_phase_dat(pulse_path, **options)
+
+    assert shared_b1 == pytest.approx(direct_b1)
+    assert shared_time == pytest.approx(direct_time)
+    assert shared_metadata.duration == pytest.approx(direct_metadata.duration)
+
+
 def test_adiabatic_free_mode_prompt_confirms_time_step_only_once():
     window = MagicMock()
     window.workspace_mode = "free"
@@ -207,6 +312,11 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     assert dialog.animation_memory_budget_bytes() == 2048 * 1024**2
     assert dialog.get_export_directory() == tmp_path
     assert dialog.tooltips_enabled()
+    assert dialog.interface_style() == "automatic"
+    dialog.interface_style_combo.setCurrentIndex(
+        dialog.interface_style_combo.findData("fusion")
+    )
+    assert dialog.interface_style() == "fusion"
     assert dialog.sequence_live_progress_enabled()
     assert dialog.sequence_kernel() == "optimized"
     dialog.sequence_kernel_combo.setCurrentIndex(
@@ -663,6 +773,7 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     dialog.get_export_directory.return_value = tmp_path
     dialog.get_policy.return_value = MemoryPolicy()
     dialog.tooltips_enabled.return_value = True
+    dialog.interface_style.return_value = "fusion"
     dialog.sequence_live_progress_enabled.return_value = False
     dialog.sequence_kernel.return_value = "reference"
     dialog.dynamic_sequence_kernel.return_value = "native_parallel"
@@ -699,6 +810,7 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     assert window.app_settings.value("simulation/thread_mode") == "manual"
     assert int(window.app_settings.value("simulation/manual_threads")) == 2
     assert int(window.app_settings.value("memory/animation_replay_mib")) == 2048
+    assert window.app_settings.value("interface/style") == "fusion"
     assert float(window.app_settings.value("scanner/max_grad_mtm")) == 40.0
     assert float(window.app_settings.value("scanner/max_slew_tms")) == 180.0
     assert float(window.app_settings.value("defaults/sequence_fov_x_mm")) == 180.0
@@ -743,6 +855,7 @@ def test_changing_only_spoiler_settings_preserves_active_sequence_parameters(
     dialog.get_export_directory.return_value = tmp_path
     dialog.get_policy.return_value = MemoryPolicy()
     dialog.tooltips_enabled.return_value = True
+    dialog.interface_style.return_value = "automatic"
     dialog.sequence_live_progress_enabled.return_value = True
     dialog.sequence_kernel.return_value = "optimized"
     dialog.dynamic_sequence_kernel.return_value = "optimized"

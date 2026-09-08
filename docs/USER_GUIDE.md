@@ -73,6 +73,12 @@ Set the folder initially offered by project, result, Pulseq, image, animation,
 data, and notebook dialogs under **Tools → Settings → General → Default export
 directory**.
 
+The Qt control style can be changed under **Tools → Settings → Interface →
+Application style**. **Automatic** keeps native controls on macOS and uses the
+cross-platform Fusion style elsewhere; **System / native** and **Fusion** can
+also be selected explicitly. The change is applied immediately and saved for
+future launches.
+
 In the event-based **Sequence Simulation** workspace, **Export Pulseq…**
 offers three choices: Pulseq plus a generating notebook, Pulseq only, or
 notebook only. Pulseq plus notebook is the default. The notebook records the
@@ -100,6 +106,15 @@ line falls outside the configured spectral window. Choose **Continue** to run
 anyway or **Cancel** to return without starting; Cancel is selected by default.
 Starting a run also preserves the currently selected result tab; use the
 **Signal** tab when the ADC signal, FID, or CSI spectrum is wanted.
+
+In **Spin probe → Spectrum**, **Y scale** controls how magnetization is
+reported. **Per-spin response (90° = 1)** divides by the configured initial
+magnetization magnitude `M0`, so an ideal on-resonance 90° excitation produces
+`|Mxy| = 1`. **Normalize displayed maximum to 1** rescales each displayed
+non-phase curve or image independently, while **Raw magnetization** preserves
+the unscaled simulated values. Phase curves are never amplitude-normalized.
+Set **Y max** to a positive value to keep one fixed vertical scale across all
+spin-probe time points; leave it at **Auto** for data-dependent axis limits.
 
 Use **Run Python script…** to execute an existing sequence-generation script
 with the same Python interpreter as the application. Standard output and
@@ -273,8 +288,11 @@ to SI meters internally for simulation and Pulseq export.
 Every generated sequence now uses the same RF field set and global envelope
 designer. Choose **Sinc**, **SLR**, **Gaussian**, **Block**, or **RF Pulse
 Designer**, then set duration, time-bandwidth product, Sinc lobe count,
-apodization, SLR sharpness, and RF carrier offset as applicable. Increasing
-SLR sharpness narrows the designed transition and visibly adds temporal lobes.
+apodization, SLR sharpness, and RF carrier offset as applicable. Shape-specific
+controls are only shown for the selected pulse type. SLR sharpness is a positive
+integer: order 1 is one central lobe, while higher orders narrow the designed
+transition and visibly add temporal side lobes. Sinc apodization remains
+non-negative from 0 to 1; 0.5 is Hann and 1.0 is Hann squared.
 Free Mode and Sequence Mode now call the same analytic envelope factory for
 Sinc, SLR, Gaussian, and Block pulses. Sinc samples are centred on the RF
 raster, producing a symmetric waveform with complete matching edge lobes;

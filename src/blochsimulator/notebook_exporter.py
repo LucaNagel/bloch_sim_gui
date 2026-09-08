@@ -592,33 +592,41 @@ else:
         cells.append(new_markdown_cell("## Define Pulse Sequence"))
         cells.append(
             new_code_cell(
-                self._generate_sequence_definition_code(sequence_params, rf_waveform)
+                self._generate_sequence_definition_code(
+                    sequence_params,
+                    rf_waveform,
+                    simulation_params=simulation_params,
+                )
             )
         )
 
-        # Cell 5: Define positions and frequencies
+        # Cell 5: Visualize the sequence that will actually be simulated
+        cells.append(new_markdown_cell("## Sequence Visualization"))
+        cells.append(new_code_cell(self._generate_sequence_visualization_code()))
+
+        # Cell 6: Define positions and frequencies
         cells.append(new_markdown_cell("## Spatial and Frequency Sampling"))
         cells.append(new_code_cell(self._generate_sampling_code(simulation_params)))
 
-        # Cell 6: Run simulation
+        # Cell 7: Run simulation
         cells.append(new_markdown_cell("## Run Simulation"))
         cells.append(
             new_code_cell(self._generate_simulation_run_code(simulation_params))
         )
 
-        # Cell 6b: Xarray Dataset
+        # Cell 7b: Xarray Dataset
         cells.append(new_markdown_cell("## Xarray Dataset"))
         cells.append(new_code_cell(self._generate_xarray_code()))
 
-        # Cell 7: Visualize results
+        # Cell 8: Visualize results
         cells.append(new_markdown_cell("## Visualization"))
         cells.append(new_code_cell(self._generate_magnetization_plot_code()))
 
-        # Cell 8: Signal analysis
+        # Cell 9: Signal analysis
         cells.append(new_markdown_cell("## Signal Analysis"))
         cells.append(new_code_cell(self._generate_signal_plot_code()))
 
-        # Cell 9: Save results (optional)
+        # Cell 10: Save results (optional)
         cells.append(new_markdown_cell("## Save Results (Optional)"))
         cells.append(
             new_code_cell(
@@ -972,27 +980,98 @@ plt.show()
         simulation_params: Dict,
         waveform_filename: Optional[str] = None,
     ) -> str:
-        """Generate parameter definition code."""
-        code = "# Define simulation parameters\n\n"
+        """Generate editable parameters plus an annotated export record."""
+        seq_type = str(sequence_params.get("sequence_type", "Custom"))
+        te_s = sequence_params.get("te_s", sequence_params.get("te", 0.01))
+        tr_s = sequence_params.get("tr_s", sequence_params.get("tr", 0.01))
+        ti_s = sequence_params.get("ti_s", sequence_params.get("ti", 0.0))
+        flip_angle = sequence_params.get(
+            "rf_flip_angle", sequence_params.get("flip_angle", 90.0)
+        )
+        rf_duration_s = sequence_params.get(
+            "rf_duration_s", sequence_params.get("rf_duration", 1e-3)
+        )
+        rf_b1_amplitude = sequence_params.get("rf_b1_amplitude", 0.0)
+        parameter_note = lambda key: self._sequence_parameter_note(  # noqa: E731
+            seq_type, key, sequence_params
+        )
+
+        code = (
+            "# Define simulation parameters\n"
+            "# Edit values in this section, then run the notebook from here.\n"
+            "# They are the single source of truth; the export record below "
+            "references them.\n\n"
+        )
 
         # Tissue parameters
         code += "# Tissue parameters\n"
-        code += f"tissue_name = '{tissue_params.get('name', 'Custom')}'\n"
+        code += f"tissue_name = {tissue_params.get('name', 'Custom')!r}\n"
         code += f"t1 = {tissue_params.get('t1', 1.0):.6f}  # seconds\n"
         code += f"t2 = {tissue_params.get('t2', 0.1):.6f}  # seconds\n"
         code += f"density = {tissue_params.get('density', 1.0):.3f}\n\n"
 
         # Sequence parameters
         code += "# Sequence parameters\n"
-        code += f"sequence_type = '{sequence_params.get('sequence_type', 'Custom')}'\n"
-        if "te" in sequence_params:
-            code += f"te = {sequence_params['te']:.6f}  # seconds\n"
-        if "tr" in sequence_params:
-            code += f"tr = {sequence_params['tr']:.6f}  # seconds\n"
-        if "flip_angle" in sequence_params:
+        code += f"sequence_type = {seq_type!r}\n"
+        code += f"te = {float(te_s):.6f}  # seconds{parameter_note('te')}\n"
+        code += f"tr = {float(tr_s):.6f}  # seconds{parameter_note('tr')}\n"
+        code += f"ti = {float(ti_s):.6f}  # seconds{parameter_note('ti')}\n"
+        code += (
+            f"flip_angle = {float(flip_angle):.6g}  # degrees (legacy alias)"
+            f"{parameter_note('flip_angle')}\n"
+        )
+        code += (
+            f"rf_pulse_type = {sequence_params.get('rf_pulse_type', 'Gaussian')!r}"
+            f"{parameter_note('rf_pulse_type')}\n"
+        )
+        if str(sequence_params.get("rf_pulse_type", "")).lower() == "custom":
             code += (
-                f"flip_angle = {sequence_params.get('flip_angle', 90):.1f}  # degrees\n"
+                f"exported_rf_flip_angle = {float(flip_angle):.6g}"
+                "  # reference for rescaling the imported custom waveform\n"
             )
+        flip_note = ""
+        if rf_b1_amplitude > 0 or str(
+            sequence_params.get("rf_pulse_type", "")
+        ).lower() in {"adiabatic half passage", "adiabatic full passage"}:
+            flip_note = "; not used because RF B1 amplitude controls this pulse"
+        code += (
+            f"rf_flip_angle = {float(flip_angle):.6g}  # degrees{flip_note}"
+            f"{parameter_note('rf_flip_angle')}\n"
+        )
+        code += (
+            f"rf_duration_s = {float(rf_duration_s):.9g}  # seconds"
+            f"{parameter_note('rf_duration_s')}\n"
+        )
+        code += (
+            "rf_time_bw_product = "
+            f"{float(sequence_params.get('rf_time_bw_product', 4.0)):.9g}"
+            f"{parameter_note('rf_time_bw_product')}\n"
+        )
+        code += (
+            f"rf_sinc_lobes = {int(sequence_params.get('rf_sinc_lobes', 3))}"
+            f"{parameter_note('rf_sinc_lobes')}\n"
+        )
+        code += (
+            f"rf_phase_deg = {float(sequence_params.get('rf_phase', 0.0)):.9g}"
+            f"{parameter_note('rf_phase')}\n"
+        )
+        code += (
+            "rf_frequency_offset_hz = "
+            f"{float(sequence_params.get('rf_freq_offset', 0.0)):.9g}"
+            f"{parameter_note('rf_freq_offset')}\n"
+        )
+        code += (
+            f"rf_b1_amplitude_g = {float(rf_b1_amplitude):.9g}"
+            f"{parameter_note('rf_b1_amplitude')}\n"
+        )
+        code += (
+            f"rf_slr_sharpness = {int(sequence_params.get('rf_slr_sharpness', 1))}"
+            f"{parameter_note('rf_slr_sharpness')}\n"
+        )
+        code += (
+            f"rf_apodization = {sequence_params.get('rf_apodization', 'None')!r}"
+            f"{parameter_note('rf_apodization')}\n"
+        )
         code += "\n"
 
         # Simulation parameters
@@ -1000,11 +1079,46 @@ plt.show()
         code += f"num_positions = {simulation_params.get('num_positions', 1)}\n"
         code += f"num_frequencies = {simulation_params.get('num_frequencies', 1)}\n"
         code += f"time_step_us = {simulation_params.get('time_step_us', 1.0):.3f}\n"
+        tail_note = (
+            ""
+            if "Free Induction Decay" in seq_type
+            else (
+                f"  # not used for {seq_type}; already present in an exported waveform"
+            )
+        )
+        code += (
+            f"extra_tail_ms = {simulation_params.get('extra_tail_ms', 0.0):.6g}"
+            f"{tail_note}\n"
+        )
         mode_str = simulation_params.get("mode", "endpoint")
-        code += f"mode = 2 if '{mode_str}' == 'time-resolved' else 0\n"
+        code += f"mode = 2 if {mode_str!r} == 'time-resolved' else 0\n"
 
         # Create dictionary for compatibility
-        code += "\n# Parameter dictionary (used for some sequence types)\n"
+        code += (
+            "\n# Complete exported parameter record. This keeps the GUI state for "
+            "reference.\n"
+            "# It references the editable values above instead of duplicating them.\n"
+            "# Entries marked '# not used' do not affect the sequence built above.\n"
+        )
+
+        editable_references = {
+            "type": "sequence_type",
+            "te_s": "te",
+            "tr_s": "tr",
+            "ti_s": "ti",
+            "flip_angle": "flip_angle",
+            "rf_pulse_type": "rf_pulse_type",
+            "rf_flip_angle": "rf_flip_angle",
+            "rf_duration": "rf_duration_s",
+            "rf_duration_s": "rf_duration_s",
+            "rf_time_bw_product": "rf_time_bw_product",
+            "rf_sinc_lobes": "rf_sinc_lobes",
+            "rf_phase": "rf_phase_deg",
+            "rf_freq_offset": "rf_frequency_offset_hz",
+            "rf_b1_amplitude": "rf_b1_amplitude_g",
+            "rf_slr_sharpness": "rf_slr_sharpness",
+            "rf_apodization": "rf_apodization",
+        }
 
         # Check if we have waveforms to save
         waveforms_to_save = {}
@@ -1016,47 +1130,119 @@ plt.show()
             # Save to file
             np.savez(waveform_filename, **waveforms_to_save)
             rel_path = Path(waveform_filename).name
-            code += f"# Load large waveforms from external file\n"
-            code += f"loaded_waveforms = {{}}\n"
+            code += "# Load large waveforms from external file\n"
+            code += "loaded_waveforms = {}\n"
             code += f"wf_file = Path('{rel_path}')\n"
-            code += f"if wf_file.exists():\n"
-            code += f"    with np.load(wf_file) as wf_data:\n"
+            code += "if wf_file.exists():\n"
+            code += "    with np.load(wf_file) as wf_data:\n"
             code += (
-                f"        loaded_waveforms = {{k: wf_data[k] for k in wf_data.files}}\n"
+                "        loaded_waveforms = {k: wf_data[k] for k in wf_data.files}\n"
             )
-            code += f"else:\n"
-            code += f"    print(f'Warning: Waveform file {{wf_file}} not found!')\n\n"
+            code += "else:\n"
+            code += "    print(f'Warning: Waveform file {wf_file} not found!')\n\n"
 
             code += "sequence_params = {\n"
-            code += f"    'sequence_type': '{sequence_params.get('sequence_type', 'Custom')}',\n"
+            code += "    'sequence_type': sequence_type,\n"
             for k, v in sequence_params.items():
                 if k == "sequence_type":
                     continue
-                if k in waveforms_to_save:
-                    code += f"    '{k}': loaded_waveforms.get('{k}'),\n"
-                elif isinstance(v, str):
-                    code += f"    '{k}': '{v}',\n"
-                elif v is None:
-                    code += f"    '{k}': None,\n"
+                note = self._sequence_parameter_note(seq_type, k, sequence_params)
+                if k in editable_references:
+                    value_code = editable_references[k]
+                elif k in waveforms_to_save:
+                    value_code = f"loaded_waveforms.get({k!r})"
                 else:
-                    code += f"    '{k}': {v},\n"
+                    value_code = self._python_value_code(v)
+                code += f"    {k!r}: {value_code},{note}\n"
             code += "}\n"
         else:
             code += "sequence_params = {\n"
-            code += f"    'sequence_type': '{sequence_params.get('sequence_type', 'Custom')}',\n"
+            code += "    'sequence_type': sequence_type,\n"
             for k, v in sequence_params.items():
                 if k == "sequence_type":
                     continue
-                if isinstance(v, str):
-                    code += f"    '{k}': '{v}',\n"
-                elif v is None:
-                    code += f"    '{k}': None,\n"
-                else:
-                    # Note: numpy arrays will be truncated here if not saved to file
-                    code += f"    '{k}': {v},\n"
+                note = self._sequence_parameter_note(seq_type, k, sequence_params)
+                value_code = editable_references.get(k, self._python_value_code(v))
+                code += f"    {k!r}: {value_code},{note}\n"
             code += "}\n"
 
         return code
+
+    @staticmethod
+    def _python_value_code(value: Any) -> str:
+        """Return executable, compact Python for notebook metadata values."""
+
+        def clean(item):
+            if isinstance(item, np.generic):
+                return item.item()
+            if isinstance(item, np.ndarray):
+                return item.tolist()
+            if isinstance(item, dict):
+                return {str(key): clean(child) for key, child in item.items()}
+            if isinstance(item, list):
+                return [clean(child) for child in item]
+            if isinstance(item, tuple):
+                return tuple(clean(child) for child in item)
+            if isinstance(item, (str, int, float, bool, type(None))):
+                return item
+            return str(item)
+
+        cleaned = clean(value)
+        if isinstance(cleaned, (dict, list, tuple)):
+            return pformat(cleaned, sort_dicts=False, compact=True)
+        return repr(cleaned)
+
+    @staticmethod
+    def _sequence_parameter_note(seq_type: str, key: str, sequence_params: Dict) -> str:
+        """Annotate parameters that the generated notebook does not consume."""
+        fid_used = {
+            "type",
+            "sequence_type",
+            "tr",
+            "tr_s",
+            "rf_pulse_type",
+            "rf_flip_angle",
+            "rf_duration_s",
+            "rf_duration",
+            "rf_sinc_lobes",
+            "rf_phase",
+            "rf_freq_offset",
+            "rf_b1_amplitude",
+            "rf_slr_sharpness",
+            "rf_apodization",
+        }
+        exact_waveform_used = {
+            "b1_waveform",
+            "time_waveform",
+            "gradients_waveform",
+        }
+        if "Free Induction Decay" in seq_type:
+            used = set(fid_used)
+            if str(sequence_params.get("rf_pulse_type", "")).lower() == "custom":
+                used.update(exact_waveform_used)
+            if sequence_params.get("rf_b1_amplitude", 0.0) > 0 or str(
+                sequence_params.get("rf_pulse_type", "")
+            ).lower() in {"adiabatic half passage", "adiabatic full passage"}:
+                used.discard("rf_flip_angle")
+        elif "b1_waveform" in sequence_params and "time_waveform" in sequence_params:
+            used = exact_waveform_used
+        elif "Spin Echo" in seq_type:
+            used = {"te", "te_s", "tr", "tr_s"}
+        elif "Gradient Echo" in seq_type:
+            used = {"te", "te_s", "tr", "tr_s", "flip_angle", "rf_flip_angle"}
+        elif "Slice Select" in seq_type:
+            used = {"flip_angle", "rf_flip_angle", "rf_duration", "rf_duration_s"}
+        elif "SSFP" in seq_type:
+            used = {
+                "tr",
+                "tr_s",
+                "flip_angle",
+                "rf_flip_angle",
+                "ssfp_repeats",
+            }
+        else:
+            used = set()
+        return "" if key in used else f"  # not used for {seq_type}"
 
     def _generate_simulator_init_code(
         self, tissue_params: Dict, simulation_params: Dict
@@ -1082,10 +1268,124 @@ print(f"  T1: {{tissue.t1*1000:.1f}} ms, T2: {{tissue.t2*1000:.1f}} ms")
 """
 
     def _generate_sequence_definition_code(
-        self, sequence_params: Dict, rf_waveform: Optional[Tuple] = None
+        self,
+        sequence_params: Dict,
+        rf_waveform: Optional[Tuple] = None,
+        simulation_params: Optional[Dict] = None,
     ) -> str:
         """Generate pulse sequence definition code."""
         seq_type = sequence_params.get("sequence_type", "Spin Echo")
+        simulation_params = simulation_params or {}
+
+        # FID notebooks intentionally rebuild the RF pulse from the editable
+        # parameters. Loading the frozen GUI waveform here made changes such as
+        # rf_flip_angle = 45 appear to work while silently simulating the old pulse.
+        if "Free Induction Decay" in seq_type:
+            return """# Create Free Induction Decay (FID) sequence
+# This cell consumes the editable rf_* values from the parameter cell above.
+dt = time_step_us * 1e-6
+rf_type_aliases = {
+    'rectangle': 'rect',
+    'adiabatic half passage': 'adiabatic_half',
+    'adiabatic full passage': 'adiabatic_full',
+    'bir-4': 'bir4',
+}
+rf_design_type = rf_type_aliases.get(rf_pulse_type.lower(), rf_pulse_type.lower())
+
+if rf_design_type == 'custom':
+    # A custom imported shape cannot be recreated analytically. Keep its exported
+    # samples, but let the editable flip angle rescale the pulse when amplitude is Auto.
+    b1 = np.array(sequence_params.get('b1_waveform'), dtype=complex, copy=True)
+    time = np.array(sequence_params.get('time_waveform'), dtype=float, copy=True)
+    if b1.ndim != 1 or time.ndim != 1 or b1.shape != time.shape:
+        raise ValueError('The exported custom RF waveform is missing or invalid.')
+    gradients_value = sequence_params.get('gradients_waveform')
+    gradients = (
+        np.zeros((len(b1), 3), dtype=float)
+        if gradients_value is None
+        else np.array(gradients_value, dtype=float, copy=True)
+    )
+    if rf_b1_amplitude_g <= 0:
+        if exported_rf_flip_angle == 0:
+            raise ValueError('Cannot rescale a custom pulse exported with a 0° flip angle.')
+        b1 *= rf_flip_angle / exported_rf_flip_angle
+else:
+    # Match Free Mode's RF sampling: at least 32 points across the RF pulse.
+    rf_points = max(32, int(np.ceil(rf_duration_s / dt)))
+    if rf_design_type == 'sinc':
+        rf_shape_parameter = float(max(1, rf_sinc_lobes) + 1)
+    elif rf_design_type in {'slr', 'gaussian', 'adiabatic_half', 'adiabatic_full', 'bir4'}:
+        rf_shape_parameter = 4.0
+    else:
+        rf_shape_parameter = 1.0
+    if rf_design_type in {'adiabatic_half', 'adiabatic_full'} and rf_b1_amplitude_g <= 0:
+        raise ValueError('AHP/AFP require rf_b1_amplitude_g > 0; flip angle is not used.')
+    design_flip_angle = (
+        180.0 if rf_design_type == 'adiabatic_full' else 90.0
+        if rf_design_type == 'adiabatic_half' else rf_flip_angle
+    )
+    pulse, pulse_time = design_rf_pulse(
+        rf_design_type,
+        duration=rf_duration_s,
+        flip_angle=design_flip_angle,
+        time_bw_product=rf_shape_parameter,
+        npoints=rf_points,
+        freq_offset=0.0,
+        slr_sharpness=rf_slr_sharpness,
+    )
+    pulse_dt = rf_duration_s / len(pulse)
+
+    windows = {
+        'Hamming': np.hamming,
+        'Hanning': np.hanning,
+        'Blackman': np.blackman,
+    }
+    if rf_design_type == 'sinc' and rf_apodization in windows and len(pulse) > 1:
+        pulse = pulse * windows[rf_apodization](len(pulse))
+
+    if rf_b1_amplitude_g > 0:
+        peak = np.max(np.abs(pulse))
+        if peak == 0:
+            raise ValueError('RF pulse has zero amplitude and cannot be rescaled.')
+        pulse = pulse * (rf_b1_amplitude_g / peak)
+    elif rf_design_type not in {'adiabatic_half', 'adiabatic_full'}:
+        # Apodization changes the integral, so recalibrate to the requested flip.
+        target_area = np.deg2rad(rf_flip_angle) / (2 * np.pi * 4258.0)
+        area = np.sum(pulse) * pulse_dt
+        if abs(area) < 1e-15:
+            raise ValueError('RF pulse integral is too small for flip-angle scaling.')
+        pulse = pulse * target_area / area
+
+    pulse = pulse * np.exp(1j * np.deg2rad(rf_phase_deg))
+
+    # Free Mode acquires through TR and then appends the selected zero-field tail.
+    current_duration = float(pulse_time[-1])
+    extra_points = max(0, int(np.ceil((tr - current_duration) / pulse_dt)))
+    b1 = np.pad(pulse, (0, extra_points))
+    if extra_points:
+        extra_time = current_duration + np.arange(1, extra_points + 1) * pulse_dt
+        time = np.concatenate([pulse_time, extra_time])
+    else:
+        time = pulse_time.copy()
+    gradients = np.zeros((len(b1), 3), dtype=float)
+
+    tail_points = max(0, int(np.ceil(extra_tail_ms * 1e-3 / pulse_dt)))
+    if tail_points:
+        b1 = np.pad(b1, (0, tail_points))
+        gradients = np.pad(gradients, ((0, tail_points), (0, 0)))
+        tail_time = time[-1] + np.arange(1, tail_points + 1) * pulse_dt
+        time = np.concatenate([time, tail_time])
+
+    # Apply the carrier once, on the complete sequence time axis.
+    if rf_frequency_offset_hz != 0:
+        b1 *= np.exp(2j * np.pi * rf_frequency_offset_hz * time)
+
+sequence = (b1, gradients, time)
+print(
+    f'FID sequence created: {len(time)} points, '
+    f'{time[-1] * 1e3:.3f} ms, requested flip={rf_flip_angle:g}°'
+)
+"""
 
         # Use full waveforms if available (preferred for accuracy and complex sequences)
         if "b1_waveform" in sequence_params and "time_waveform" in sequence_params:
@@ -1132,25 +1432,6 @@ sequence = SliceSelectRephase(
 )
 print(f"Slice Select + Rephase: FA={{flip_angle:.1f}}°")
 """
-        elif "Free Induction Decay" in seq_type:
-            return f"""# Create Free Induction Decay (FID) sequence
-# Using a simple pulse followed by readout
-dt = time_step_us * 1e-6
-duration = {sequence_params.get('duration', 0.01)}
-npoints = int(duration / dt)
-time = np.arange(npoints) * dt
-b1 = np.zeros(npoints, dtype=complex)
-gradients = np.zeros((npoints, 3))
-
-# RF Pulse
-flip = {sequence_params.get('flip_angle', 90.0)}
-pulse, _ = design_rf_pulse('gaussian', duration=1e-3, flip_angle=flip, npoints=int(1e-3/dt))
-n_pulse = min(len(pulse), npoints)
-b1[:n_pulse] = pulse[:n_pulse]
-
-sequence = (b1, gradients, time)
-print(f"FID sequence created: duration={{duration:.3f}}s, flip={{flip}}°")
-"""
         elif "SSFP" in seq_type:
             return f"""# Create SSFP sequence
 # Simplified implementation for notebook
@@ -1195,6 +1476,50 @@ print("Custom/Complex sequence selected. Arrays must be defined manually.")
 # sequence = (b1, gradients, time)
 
 raise NotImplementedError("This sequence type requires manual definition of waveforms in this notebook.")
+"""
+
+    def _generate_sequence_visualization_code(self) -> str:
+        """Generate a compact RF/gradient plot of the simulated sequence."""
+        return """# Plot the exact arrays that will be passed to the simulator
+if isinstance(sequence, tuple):
+    sequence_b1, sequence_gradients, sequence_time = sequence
+else:
+    sequence_b1, sequence_gradients, sequence_time = sequence.compile(
+        dt=time_step_us * 1e-6
+    )
+
+sequence_b1 = np.asarray(sequence_b1, dtype=complex)
+sequence_gradients = np.asarray(sequence_gradients, dtype=float)
+sequence_time_ms = np.asarray(sequence_time, dtype=float) * 1e3
+if sequence_gradients.ndim == 1:
+    sequence_gradients = sequence_gradients[:, None]
+if sequence_gradients.shape[1] < 3:
+    sequence_gradients = np.pad(
+        sequence_gradients,
+        ((0, 0), (0, 3 - sequence_gradients.shape[1])),
+    )
+
+fig, axes = plt.subplots(4, 1, figsize=(12, 8), sharex=True)
+axes[0].plot(sequence_time_ms, np.abs(sequence_b1), label='|B1|', linewidth=1.5)
+axes[0].plot(sequence_time_ms, np.real(sequence_b1), label='Re(B1)', alpha=0.8)
+axes[0].plot(sequence_time_ms, np.imag(sequence_b1), label='Im(B1)', alpha=0.8)
+axes[0].set_ylabel('RF (G)')
+axes[0].legend(loc='upper right', ncol=3)
+
+gradient_labels = ('Gx', 'Gy', 'Gz')
+gradient_colors = ('tab:red', 'tab:green', 'tab:blue')
+for axis, values, label, color in zip(
+    axes[1:], sequence_gradients.T[:3], gradient_labels, gradient_colors
+):
+    axis.plot(sequence_time_ms, values, color=color, linewidth=1.2)
+    axis.set_ylabel(f'{label}\\n(G/cm)')
+
+axes[-1].set_xlabel('Time (ms)')
+for axis in axes:
+    axis.grid(True, alpha=0.3)
+fig.suptitle(f'Simulated sequence: {sequence_type}')
+fig.tight_layout()
+plt.show()
 """
 
     def _generate_sampling_code(self, simulation_params: Dict) -> str:
@@ -1837,6 +2162,176 @@ def _sequence_result_reconstruction_code() -> str:
                 image_name = species_name.replace('kspace', 'image')
                 ds[image_name] = species_image
                 ds[f'{image_name}_magnitude'] = np.abs(species_image)
+        """
+    ).strip()
+
+
+def _sequence_result_access_code() -> str:
+    """Return clear, stable aliases for data used in result notebooks."""
+    return dedent(
+        """
+        # Stable, descriptive entry points for subsequent analysis.
+        raw_adc_signal = result_dataset['signal']
+        build_cartesian_kspace_from_raw = _cartesian_from_adc
+        reconstruct_cartesian_image = _cartesian_ifft
+        reconstructed_kspace = None
+        reconstructed_image = None
+        reconstructed_image_magnitude = None
+        reconstructed_spectrum = None
+        reconstruction_kind = 'raw_adc_only'
+        reconstruction_source_names = {}
+
+        if 'radial_3d_image' in result_dataset:
+            reconstruction_kind = 'radial_3d'
+            reconstruction_source_names = {
+                'kspace': 'radial_3d_gridded_kspace',
+                'image': 'radial_3d_image',
+                'magnitude': 'radial_3d_image_magnitude',
+            }
+        elif (
+            'notebook_cartesian_3d_image' in result_dataset
+            or 'cartesian_3d_image' in result_dataset
+        ):
+            reconstruction_kind = 'cartesian_3d'
+            reconstruction_source_names = {
+                'kspace': 'cartesian_3d_kspace',
+                'image': (
+                    'notebook_cartesian_3d_image'
+                    if 'notebook_cartesian_3d_image' in result_dataset
+                    else 'cartesian_3d_image'
+                ),
+                'magnitude': (
+                    'notebook_cartesian_3d_image_magnitude'
+                    if 'notebook_cartesian_3d_image_magnitude' in result_dataset
+                    else 'cartesian_3d_image_magnitude'
+                ),
+            }
+        elif (
+            'notebook_cartesian_image' in result_dataset
+            or 'cartesian_image' in result_dataset
+        ):
+            reconstruction_kind = 'cartesian_2d'
+            reconstruction_source_names = {
+                'kspace': 'cartesian_kspace',
+                'image': (
+                    'notebook_cartesian_image'
+                    if 'notebook_cartesian_image' in result_dataset
+                    else 'cartesian_image'
+                ),
+                'magnitude': (
+                    'notebook_cartesian_image_magnitude'
+                    if 'notebook_cartesian_image_magnitude' in result_dataset
+                    else 'cartesian_image_magnitude'
+                ),
+            }
+        elif 'spiral_image' in result_dataset:
+            reconstruction_kind = 'spiral_2d'
+            reconstruction_source_names = {
+                'kspace': 'spiral_gridded_kspace',
+                'image': 'spiral_image',
+                'magnitude': 'spiral_image_magnitude',
+            }
+        elif 'csi_spectrum' in result_dataset:
+            reconstruction_kind = 'csi'
+            reconstruction_source_names = {
+                'kspace': 'csi_kspace',
+                'image': 'csi_spatial_fid',
+                'spectrum': 'csi_spectrum',
+            }
+
+        kspace_name = reconstruction_source_names.get('kspace')
+        image_name = reconstruction_source_names.get('image')
+        magnitude_name = reconstruction_source_names.get('magnitude')
+        spectrum_name = reconstruction_source_names.get('spectrum')
+        if kspace_name in result_dataset:
+            reconstructed_kspace = result_dataset[kspace_name]
+        if image_name in result_dataset:
+            reconstructed_image = result_dataset[image_name]
+        if magnitude_name in result_dataset:
+            reconstructed_image_magnitude = result_dataset[magnitude_name]
+        elif reconstructed_image is not None:
+            reconstructed_image_magnitude = np.abs(reconstructed_image)
+        if spectrum_name in result_dataset:
+            reconstructed_spectrum = result_dataset[spectrum_name]
+
+        # One obvious default for users who simply want to work with the result.
+        # Images use magnitude data; CSI uses the complex spatially reconstructed spectrum.
+        reconstructed_data = (
+            reconstructed_spectrum
+            if reconstructed_spectrum is not None
+            else reconstructed_image_magnitude
+        )
+        reconstruction = {
+            'kind': reconstruction_kind,
+            'raw_adc_signal': raw_adc_signal,
+            'kspace': reconstructed_kspace,
+            'image': reconstructed_image,
+            'image_magnitude': reconstructed_image_magnitude,
+            'spectrum': reconstructed_spectrum,
+            'data': reconstructed_data,
+            'dataset_variable_names': reconstruction_source_names,
+        }
+
+        print(f'Reconstruction type: {reconstruction_kind}')
+        print("Use `reconstructed_data` for the primary reconstructed result.")
+        print("Use `raw_adc_signal` for chronological raw ADC samples.")
+        print("All data and metadata remain available in `result_dataset` (`ds` is an alias).")
+        if reconstructed_data is not None:
+            print(
+                'reconstructed_data:',
+                reconstructed_data.dims,
+                reconstructed_data.shape,
+                reconstructed_data.dtype,
+            )
+        else:
+            print('No image or spectrum reconstruction is available for this result.')
+        """
+    ).strip()
+
+
+def _sequence_result_raw_reconstruction_example_code() -> str:
+    """Return a compact raw-ADC Cartesian reconstruction example."""
+    return dedent(
+        """
+        # Complete Cartesian example: chronological raw ADC -> sorted k-space -> image.
+        # The helper groups samples by ADC event and labels, sorts the logical
+        # partition/phase/read coordinates, and validates that the grid is complete.
+        if reconstruction_kind.startswith('cartesian'):
+            try:
+                example_kspace_from_raw = build_cartesian_kspace_from_raw(
+                    result_dataset,
+                    signal_name='signal',
+                )
+            except ValueError as exc:
+                print(f'Raw Cartesian example unavailable: {exc}')
+            else:
+                example_spatial_dims = _cartesian_spatial_dims(
+                    example_kspace_from_raw
+                )
+                example_image_from_raw = reconstruct_cartesian_image(
+                    example_kspace_from_raw,
+                    example_spatial_dims,
+                )
+                example_image_magnitude_from_raw = np.abs(
+                    example_image_from_raw
+                )
+                print('Raw ADC samples:', raw_adc_signal.shape)
+                print(
+                    'Sorted k-space:',
+                    example_kspace_from_raw.dims,
+                    example_kspace_from_raw.shape,
+                )
+                print(
+                    'Reconstructed image:',
+                    example_image_from_raw.dims,
+                    example_image_from_raw.shape,
+                )
+        else:
+            print(
+                'This explicit raw-data example applies to Cartesian acquisitions. '
+                'For this result, use `reconstruction` to inspect the exported '
+                'gridded k-space and reconstructed data.'
+            )
         """
     ).strip()
 
@@ -2499,7 +2994,12 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
             new_markdown_cell(
                 "# Sequence simulation result\n\n"
                 f"BlochSimulator {__version__} sparse event-based result. "
-                f"The xarray dataset is stored in `{relative_data}`."
+                f"The xarray dataset is stored in `{relative_data}`.\n\n"
+                "**Start here:** after running the reconstruction cells, use "
+                "`reconstructed_data` for the primary reconstructed result and "
+                "`raw_adc_signal` for the chronological ADC samples. The complete "
+                "xarray dataset is named `result_dataset`; `ds` is only a short alias "
+                "used by the plotting code."
             ),
             new_code_cell(
                 "from pathlib import Path\n"
@@ -2517,25 +3017,35 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
                 "            f'{original_data_path}. Move the .nc file next to '\n"
                 "            'the notebook or update data_path.'\n"
                 "        )\n"
-                "ds = xr.open_dataset(data_path)\n"
-                "for name in list(ds.data_vars):\n"
+                "result_dataset = xr.open_dataset(data_path)\n"
+                "ds = result_dataset  # Short backwards-compatible alias used below\n"
+                "for name in list(result_dataset.data_vars):\n"
                 "    if not name.endswith('_real'):\n"
                 "        continue\n"
                 "    base = name[:-5]\n"
                 "    imag = f'{base}_imag'\n"
-                "    if imag in ds:\n"
-                "        ds[base] = ds[name] + 1j * ds[imag]\n"
-                "ds"
+                "    if imag in result_dataset:\n"
+                "        result_dataset[base] = (\n"
+                "            result_dataset[name] + 1j * result_dataset[imag]\n"
+                "        )\n"
+                "print('Loaded complete dataset as `result_dataset` (alias: `ds`).')\n"
+                "result_dataset"
             ),
-            new_markdown_cell("## ADC signal"),
+            new_markdown_cell(
+                "## Raw ADC signal\n\n"
+                "`raw_adc_signal` is an xarray DataArray in chronological acquisition "
+                "order. Keeping it as a DataArray preserves dimensions and coordinates; "
+                "append `.values` only when a NumPy array is required."
+            ),
             new_code_cell(
-                "signal = ds.signal.values\n"
-                "time_ms = ds.adc_time_s.values * 1e3\n"
+                "raw_adc_signal = result_dataset['signal']\n"
+                "signal_values = raw_adc_signal.values\n"
+                "time_ms = result_dataset.adc_time_s.values * 1e3\n"
                 "fig, ax = plt.subplots(figsize=(9, 4))\n"
-                "if signal.ndim == 1:\n"
-                "    ax.plot(time_ms, np.abs(signal), label='Magnitude')\n"
+                "if signal_values.ndim == 1:\n"
+                "    ax.plot(time_ms, np.abs(signal_values), label='Magnitude')\n"
                 "else:\n"
-                "    for coil, values in enumerate(signal):\n"
+                "    for coil, values in enumerate(signal_values):\n"
                 "        ax.plot(time_ms, np.abs(values), label=f'Coil {coil + 1}')\n"
                 "ax.set(xlabel='Time (ms)', ylabel='Signal (a.u.)')\n"
                 "ax.legend(); ax.grid(True); plt.show()"
@@ -2567,7 +3077,7 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
                 "    'segment_index', 'partition_index'\n"
                 ") if name in ds.coords]\n"
                 "adc_table = ds[coordinate_names].to_dataframe()\n"
-                "adc_table['signal'] = ds.signal.values if ds.signal.ndim == 1 else list(ds.signal.values.T)\n"
+                "adc_table['signal'] = raw_adc_signal.values if raw_adc_signal.ndim == 1 else list(raw_adc_signal.values.T)\n"
                 "adc_table.head()"
             ),
             new_markdown_cell(
@@ -2580,6 +3090,72 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
                 "reconstructed as separate variables when available."
             ),
             new_code_cell(_sequence_result_reconstruction_code()),
+            new_markdown_cell(
+                "## Reconstructed data: named entry points\n\n"
+                "Run this cell before doing your own analysis. It gives every export "
+                "the same descriptive names:\n\n"
+                "- `reconstructed_data`: primary result (image magnitude or CSI spectrum)\n"
+                "- `reconstructed_kspace`: sorted or gridded k-space\n"
+                "- `reconstructed_image`: complex image/FID after spatial reconstruction\n"
+                "- `reconstructed_image_magnitude`: magnitude image\n"
+                "- `raw_adc_signal`: chronological complex ADC samples\n"
+                "- `reconstruction`: dictionary containing all of the above plus the "
+                "detected reconstruction type and original dataset variable names\n"
+                "- `build_cartesian_kspace_from_raw(...)` and "
+                "`reconstruct_cartesian_image(...)`: reusable Cartesian "
+                "reconstruction helpers"
+            ),
+            new_code_cell(_sequence_result_access_code()),
+            new_markdown_cell(
+                "## Work with the reconstructed data\n\n"
+                "xarray keeps dimension names attached to the array. Use `.isel(...)` "
+                "to select by integer index, `.sel(...)` to select by coordinate value, "
+                "and `.values` only when a library specifically needs NumPy. The cell "
+                "below selects the first non-spatial frame/coil/pool, while leaving all "
+                "image or spectral dimensions intact. Adjust `analysis_selection` for "
+                "your experiment."
+            ),
+            new_code_cell(
+                "if reconstructed_data is not None:\n"
+                "    spatial_dims_by_kind = {\n"
+                "        'cartesian_2d': tuple(dim for dim in reconstructed_data.dims if dim.startswith(('phase_', 'read_'))),\n"
+                "        'cartesian_3d': tuple(dim for dim in reconstructed_data.dims if dim.startswith(('partition_', 'phase_', 'read_'))),\n"
+                "        'spiral_2d': ('phase_y', 'read_x'),\n"
+                "        'radial_3d': ('radial_z', 'radial_y', 'radial_x'),\n"
+                "        'csi': ('phase_y', 'phase_x', 'spectral_point'),\n"
+                "    }\n"
+                "    spatial_dims = spatial_dims_by_kind.get(reconstruction_kind, ())\n"
+                "    analysis_selection = {\n"
+                "        dim: 0 for dim in reconstructed_data.dims if dim not in spatial_dims\n"
+                "    }\n"
+                "    analysis_data = reconstructed_data.isel(analysis_selection)\n"
+                "    reconstructed_numpy = analysis_data.values\n"
+                "    print('Selection:', analysis_selection or 'none')\n"
+                "    print('analysis_data:', analysis_data.dims, analysis_data.shape)\n"
+                "    print('reconstructed_numpy:', reconstructed_numpy.shape)\n"
+                "    analysis_data\n"
+                "else:\n"
+                "    print('No reconstructed_data is available; work with raw_adc_signal.')"
+            ),
+            new_markdown_cell(
+                "## Example: reconstruct Cartesian data from raw ADC samples\n\n"
+                "This compact example repeats the essential reconstruction explicitly: "
+                "it groups and validates the chronological ADC samples using their "
+                "event/encoding coordinates, builds dimensioned k-space, and applies a "
+                "centered inverse FFT. The resulting example objects are named "
+                "`example_kspace_from_raw`, `example_image_from_raw`, and "
+                "`example_image_magnitude_from_raw`. Non-Cartesian acquisitions require "
+                "trajectory-dependent gridding, so their exported gridded data remain "
+                "available through `reconstructed_kspace`."
+            ),
+            new_code_cell(_sequence_result_raw_reconstruction_example_code()),
+            new_markdown_cell(
+                "## Reconstruction preview\n\n"
+                "This plotting cell uses the prepared reconstruction and selects "
+                "the first available outer frame for a quick visual check. The "
+                "interactive explorer in the next section exposes the remaining "
+                "dimensions."
+            ),
             new_code_cell(
                 "if 'radial_3d_gridded_kspace' in ds:\n"
                 "    kspace_3d = ds.radial_3d_gridded_kspace\n"

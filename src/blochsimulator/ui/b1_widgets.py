@@ -97,7 +97,10 @@ class B1FieldEditor(QGroupBox):
         self.uniform_magnitude.setDecimals(4)
         self.uniform_magnitude.setValue(1.0)
         self.uniform_magnitude.setMinimumWidth(105)
-        source_layout.addWidget(QLabel("Reference |B1|"), 2, 0)
+        magnitude_label = (
+            "Maximum |B1+|" if self.kind == "transmit" else "Maximum RSS |B1−|"
+        )
+        source_layout.addWidget(QLabel(magnitude_label), 2, 0)
         source_layout.addWidget(self.uniform_magnitude, 2, 1)
         self.uniform_phase = QDoubleSpinBox()
         self.uniform_phase.setRange(-360.0, 360.0)

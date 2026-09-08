@@ -426,7 +426,10 @@ def save_project(
             legacy_result,
             sequence_result,
         ),
-        "state": _json_value(state),
+        # GUI state can contain imported RF waveforms.  Store those arrays in
+        # arrays.npz just like program and result arrays instead of converting
+        # them to an unrecoverable string representation.
+        "state": _encode(state, arrays, "state"),
         "b1": {
             "tx": _field_to_data(tx_field, arrays),
             "rx": _field_to_data(rx_field, arrays),
@@ -604,7 +607,7 @@ def load_project(filename):
                 if manifest.get("phantom_name") is not None:
                     phantom.name = str(manifest["phantom_name"])
     return {
-        "state": manifest.get("state", {}),
+        "state": _decode(manifest.get("state", {}), arrays),
         "phantom": phantom,
         "tx_field": _field_from_data(manifest.get("b1", {}).get("tx"), arrays),
         "rx_field": _field_from_data(manifest.get("b1", {}).get("rx"), arrays),

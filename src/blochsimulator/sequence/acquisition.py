@@ -2237,7 +2237,7 @@ def make_cartesian_epi(
     rf_duration_s: float = 1e-3,
     rf_time_bandwidth_product: float = 4.0,
     rf_apodization: float = 0.5,
-    rf_slr_sharpness: float = 1.0,
+    rf_slr_sharpness: int = 1,
     rf_raster_s: float = 1e-6,
     rf_custom_waveform_hz: Optional[Sequence[complex]] = None,
     rf_custom_raster_s: Optional[float] = None,

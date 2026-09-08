@@ -113,13 +113,62 @@ def test_bssfp_alpha_half_phase_defaults_to_preceding_phase_cycle_member():
     sequence = make_pulseq_bssfp(
         matrix=(2, 1, 1),
         dummy_repetitions=0,
-        rf_phase_start_deg=180.0,
-        rf_phase_increment_deg=180.0,
+        rf_phase_start_deg=70.0,
+        rf_phase_increment_deg=30.0,
     )
 
-    assert sequence.definitions["AlphaHalfPhaseDeg"] == pytest.approx(0.0)
+    assert sequence.definitions["AlphaHalfPhaseDeg"] == pytest.approx(40.0)
     assert sequence.definitions["AlphaHalfFlipAngleDeg"] == pytest.approx(7.5)
     assert sequence.definitions["AlphaHalfCenterSpacing"] == pytest.approx(5e-3)
+
+
+def test_bssfp_configured_start_phase_tr_and_flip_reach_rf_events(tmp_path):
+    start_phase = 70.0
+    phase_increment = 30.0
+    flip_angle = 42.0
+    requested_tr = 12e-3
+    sequence = make_pulseq_bssfp(
+        matrix=(2, 2, 1),
+        dummy_repetitions=0,
+        flip_angle_deg=flip_angle,
+        repetition_time_s=requested_tr,
+        rf_phase_start_deg=start_phase,
+        rf_phase_increment_deg=phase_increment,
+        alpha_half_use_ratios=True,
+        alpha_half_tr_ratio=0.4,
+        alpha_half_flip_ratio=0.25,
+    )
+    program = _write_and_load(sequence, tmp_path / "bssfp_rf_audit.seq")
+    starter, first_rf, second_rf = program.rf_events[:3]
+
+    def center_phase(event):
+        return np.mod(
+            np.rad2deg(
+                event.phase_offset_rad
+                + 2
+                * np.pi
+                * event.frequency_offset_hz
+                * event.raster_s
+                * event.samples_hz.size
+                / 2
+            ),
+            360.0,
+        )
+
+    def rf_flip(event):
+        return 360.0 * abs(np.sum(event.samples_hz) * event.raster_s)
+
+    definitions = program.metadata["definitions"]
+
+    assert definitions["TR"] == pytest.approx(requested_tr)
+    assert definitions["FlipAngleDeg"] == pytest.approx(flip_angle)
+    assert center_phase(starter) == pytest.approx(start_phase - phase_increment)
+    assert center_phase(first_rf) == pytest.approx(start_phase)
+    assert center_phase(second_rf) == pytest.approx(start_phase + phase_increment)
+    assert first_rf.start_s - starter.start_s == pytest.approx(0.4 * requested_tr)
+    assert second_rf.start_s - first_rf.start_s == pytest.approx(requested_tr)
+    assert rf_flip(starter) == pytest.approx(0.25 * flip_angle, rel=1e-5)
+    assert rf_flip(first_rf) == pytest.approx(flip_angle, rel=1e-5)
 
 
 @pytest.mark.parametrize(
@@ -272,6 +321,22 @@ def test_epi_builder_uses_configured_receiver_bandwidth(tmp_path):
     )
     assert spoiler_times.size == 1
     assert compiled.transverse_crush_times_s == pytest.approx(spoiler_times)
+
+
+@pytest.mark.parametrize("builder", (make_pulseq_epi, make_pulseq_flash))
+def test_centered_cartesian_adc_accepts_non_rf_raster_bandwidth(builder):
+    sequence = builder(
+        matrix=(8, 4),
+        sampling_bandwidth_hz=150_000.0,
+    )
+
+    assert sequence.check_timing()[0]
+    assert sequence.definitions["RequestedSamplingBandwidth"] == pytest.approx(
+        150_000.0
+    )
+    assert sequence.definitions["SamplingBandwidth"] == pytest.approx(
+        142_857.14285714287
+    )
 
 
 def test_epi_builder_applies_edge_to_edge_slice_gap(tmp_path):

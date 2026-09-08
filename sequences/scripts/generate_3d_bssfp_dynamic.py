@@ -83,7 +83,7 @@ def _make_rf_pulse(
     slr_pulse_path: str | Path | None,
     time_bandwidth_product: float,
     apodization: float,
-    slr_sharpness: float,
+    slr_sharpness: int,
     custom_waveform_hz,
     custom_raster_s: float | None,
     custom_flip_angle_deg: float | None,
@@ -133,7 +133,7 @@ def main(
     slr_pulse_path: str | Path | None = None,
     rf_time_bandwidth_product: float = 4.0,
     rf_apodization: float = 0.5,
-    rf_slr_sharpness: float = 5.0,
+    rf_slr_sharpness: int = 5,
     rf_custom_waveform_hz=None,
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
@@ -338,7 +338,7 @@ def main(
         if use_alpha_half:
             rf_alpha_half.freq_offset = frame_frequency_hz
             rf_alpha_half.phase_offset = pulseq_phase_offset_rad(
-                rf_phase_start,
+                wrap_phase_deg(rf_phase_start - rf_phase_increment),
                 frequency_offset_hz=frame_frequency_hz,
                 event_center_s=rf_alpha_half_center,
             )

@@ -107,7 +107,15 @@ from .sequence_simulation_widget import SequenceSimulationWidget
 from .b1_widgets import B1PhantomCombinationWidget, B1WorkspaceWidget
 from .project_explorer import ProjectExplorerDialog
 from .simulation_explorer import SessionSimulationExplorer
-from .styles import BOLD_GROUP_TITLES_STYLE
+from .styles import (
+    BOLD_GROUP_TITLES_STYLE,
+    INTERFACE_STYLE_FUSION,
+    normalize_interface_style,
+    resolve_interface_style,
+)
+
+
+_SYSTEM_STYLE_PROPERTY = "blochSimulatorSystemStyle"
 
 
 def _view_title(text: str) -> QLabel:
@@ -182,7 +190,10 @@ def _restore_widget_state(owner, state, *, block_signals=False):
             elif kind == "value" and isinstance(
                 widget, (QSpinBox, QDoubleSpinBox, QSlider)
             ):
-                widget.setValue(saved["value"])
+                value = saved["value"]
+                if isinstance(widget, (QSpinBox, QSlider)):
+                    value = int(round(float(value)))
+                widget.setValue(value)
             elif kind == "checked" and isinstance(widget, QCheckBox):
                 widget.setChecked(bool(saved["value"]))
             elif kind == "text" and isinstance(widget, QLineEdit):
@@ -219,6 +230,8 @@ class BlochSimulatorGUI(QMainWindow):
         super().__init__()
         self.setStyleSheet(BOLD_GROUP_TITLES_STYLE)
         self.app_settings = QSettings("BlochSimulator", "BlochSimulator")
+        app = QApplication.instance()
+        self._system_style_name = _remember_system_style(app) if app is not None else ""
         workspace_defaults = WorkspaceDefaults.from_settings(self.app_settings)
         self._workspace_field_strength_t = workspace_defaults.field_strength_t
         self._workspace_nucleus = workspace_defaults.phantom_nucleus
@@ -4908,10 +4921,17 @@ class BlochSimulatorGUI(QMainWindow):
             if 0 <= index < self.tab_widget.count():
                 self.tab_widget.setTabToolTip(index, tooltip if enabled else "")
 
+    def _load_interface_style(self) -> str:
+        """Load the persistent application-wide Qt control style."""
+        return normalize_interface_style(
+            self.app_settings.value("interface/style", "automatic")
+        )
+
     def show_settings(self, initial_tab: str = "general"):
         """Show and persist application, simulation and scanner settings."""
         previous_scanner_parameters = self._load_scanner_parameters()
         previous_workspace_defaults = WorkspaceDefaults.from_settings(self.app_settings)
+        previous_interface_style = self._load_interface_style()
         dialog = SettingsDialog(
             policy=self._load_memory_policy(),
             export_directory=self._get_export_directory(),
@@ -4934,6 +4954,7 @@ class BlochSimulatorGUI(QMainWindow):
             detected_thread_count=resolve_num_threads(None),
             scanner_parameters=previous_scanner_parameters,
             workspace_defaults=previous_workspace_defaults,
+            interface_style=previous_interface_style,
         )
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -4963,6 +4984,8 @@ class BlochSimulatorGUI(QMainWindow):
         )
         tooltips_enabled = dialog.tooltips_enabled()
         self.app_settings.setValue("interface/tooltips_enabled", tooltips_enabled)
+        interface_style = normalize_interface_style(dialog.interface_style())
+        self.app_settings.setValue("interface/style", interface_style)
         live_progress_enabled = dialog.sequence_live_progress_enabled()
         self.app_settings.setValue(
             "sequence/live_progress_enabled", live_progress_enabled
@@ -5000,6 +5023,12 @@ class BlochSimulatorGUI(QMainWindow):
             )
             self._synchronize_workspace_nucleus(workspace_defaults.phantom_nucleus)
         self.app_settings.sync()
+        if interface_style != previous_interface_style:
+            _apply_platform_style(
+                QApplication.instance(),
+                style_mode=interface_style,
+                system_style_name=self._system_style_name,
+            )
         set_default_memory_policy(policy)
         self._set_tooltips_enabled(tooltips_enabled)
         sequence_widget = getattr(self, "sequence_simulation_widget", None)
@@ -5645,6 +5674,11 @@ class BlochSimulatorGUI(QMainWindow):
                 if sequence_widget is not None
                 else {}
             ),
+            "sequence_rf_pulse": (
+                sequence_widget.rf_designer_pulse_state()
+                if sequence_widget is not None
+                else None
+            ),
             "spoiler_configuration": (
                 {
                     "mode": sequence_widget.spoiler_mode,
@@ -5807,6 +5841,9 @@ class BlochSimulatorGUI(QMainWindow):
                 self.b1_widget.rx_editor.set_field(project["rx_field"])
 
             sequence_widget = self.sequence_simulation_widget
+            sequence_widget.restore_rf_designer_pulse_state(
+                state.get("sequence_rf_pulse"), program=project["program"]
+            )
             _restore_widget_state(sequence_widget, state.get("sequence_controls", {}))
             spoiler_configuration = state.get("spoiler_configuration", {})
             if spoiler_configuration:
@@ -6390,6 +6427,10 @@ class BlochSimulatorGUI(QMainWindow):
         params["rf_time_bw_product"] = rf_state.get("time_bw_product", 4.0)
         params["rf_phase"] = rf_state.get("phase", 0.0)
         params["rf_freq_offset"] = rf_state.get("freq_offset", 0.0)
+        params["rf_b1_amplitude"] = rf_state.get("b1_amplitude", 0.0)
+        params["rf_sinc_lobes"] = rf_state.get("sinc_lobes", 3)
+        params["rf_slr_sharpness"] = rf_state.get("slr_sharpness", 1)
+        params["rf_apodization"] = rf_state.get("apodization", "None")
 
         # Store RF waveform if available
         if hasattr(self, "last_b1") and self.last_b1 is not None:
@@ -8741,11 +8782,31 @@ class BlochSimulatorGUI(QMainWindow):
         )
 
 
-def _apply_platform_style(app, platform=None):
-    """Keep the native macOS controls while retaining Fusion elsewhere."""
-    platform = sys.platform if platform is None else str(platform)
-    if platform != "darwin":
+def _remember_system_style(app) -> str:
+    """Remember the style Qt selected before the application overrides it."""
+    remembered = app.property(_SYSTEM_STYLE_PROPERTY)
+    if remembered:
+        return str(remembered)
+    style_name = str(app.style().objectName())
+    app.setProperty(_SYSTEM_STYLE_PROPERTY, style_name)
+    return style_name
+
+
+def _apply_platform_style(
+    app,
+    platform=None,
+    *,
+    style_mode="automatic",
+    system_style_name=None,
+):
+    """Apply the selected Qt style while preserving the historical default."""
+    if app is None:
+        return
+    concrete_style = resolve_interface_style(style_mode, platform=platform)
+    if concrete_style == INTERFACE_STYLE_FUSION:
         app.setStyle("Fusion")
+    elif system_style_name:
+        app.setStyle(str(system_style_name))
 
 
 def main():
@@ -8758,7 +8819,13 @@ def main():
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
 
-    _apply_platform_style(app)
+    system_style_name = _remember_system_style(app)
+    settings = QSettings("BlochSimulator", "BlochSimulator")
+    _apply_platform_style(
+        app,
+        style_mode=settings.value("interface/style", "automatic"),
+        system_style_name=system_style_name,
+    )
 
     # Create and show main window
     window = BlochSimulatorGUI()

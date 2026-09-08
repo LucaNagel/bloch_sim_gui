@@ -84,18 +84,52 @@ def test_physical_3d_presets_have_expected_spatial_and_channel_profiles():
     loop = create_b1_preset("surface_loop", shape, fov, kind="transmit")
     loop_magnitude = np.abs(loop.values)
     assert loop_magnitude[:3].mean() > loop_magnitude[-3:].mean()
+    assert loop_magnitude.max() == pytest.approx(1.0)
 
     birdcage = create_b1_preset(
         "birdcage_cp", shape, fov, kind="transmit", phase_deg=35.0
     )
     center = tuple(count // 2 for count in shape)
-    assert abs(birdcage.values[center]) == pytest.approx(1.0)
+    assert np.abs(birdcage.values).max() == pytest.approx(1.0)
     assert np.angle(birdcage.values[center], deg=True) == pytest.approx(35.0)
 
     receive = create_b1_preset("circular_array", shape, fov, kind="receive")
-    center_rss = np.sqrt(np.sum(np.abs(receive.data[(slice(None), *center)]) ** 2))
+    receive_rss = np.sqrt(np.sum(np.abs(receive.data) ** 2, axis=0))
     assert receive.n_channels == 8
-    assert center_rss == pytest.approx(1.0)
+    assert receive_rss.max() == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("preset", ["birdcage_cp", "surface_loop", "linear_ramp"])
+def test_nonuniform_transmit_presets_use_requested_magnitude_as_global_maximum(preset):
+    field = create_b1_preset(
+        preset,
+        (17, 13, 9),
+        (0.17, 0.13, 0.09),
+        kind="transmit",
+        magnitude=0.65,
+        ramp_mode="magnitude",
+    )
+
+    assert np.max(np.abs(field.values)) == pytest.approx(0.65)
+
+
+@pytest.mark.parametrize(
+    "preset", ["birdcage_cp", "surface_loop", "linear_ramp", "circular_array"]
+)
+def test_nonuniform_receive_presets_use_requested_magnitude_as_global_rss_maximum(
+    preset,
+):
+    field = create_b1_preset(
+        preset,
+        (17, 13, 9),
+        (0.17, 0.13, 0.09),
+        kind="receive",
+        magnitude=0.65,
+        ramp_mode="magnitude",
+    )
+    rss = np.sqrt(np.sum(np.abs(field.data) ** 2, axis=0))
+
+    assert np.max(rss) == pytest.approx(0.65)
 
 
 def test_linear_ramp_presets_control_magnitude_and_phase_axis():

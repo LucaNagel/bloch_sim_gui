@@ -76,6 +76,10 @@ def _position_axis_mm(positions_m: np.ndarray):
 class SequenceProbeSpectrumViewer(QWidget):
     """Spectrum viewer mirroring the Free Mode spectrum controls."""
 
+    SCALE_RAW = "Raw magnetization"
+    SCALE_PER_SPIN = "Per-spin response (90° = 1)"
+    SCALE_DISPLAY_MAX = "Normalize displayed maximum to 1"
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.result = None
@@ -136,6 +140,33 @@ class SequenceProbeSpectrumViewer(QWidget):
         layout.addLayout(controls)
 
         component_row = QHBoxLayout()
+        component_row.addWidget(QLabel("Y scale:"))
+        self.y_scale = QComboBox()
+        self.y_scale.setObjectName("sequence_probe_spectrum_y_scale")
+        self.y_scale.addItems(
+            [self.SCALE_PER_SPIN, self.SCALE_DISPLAY_MAX, self.SCALE_RAW]
+        )
+        self.y_scale.setToolTip(
+            "Per-spin response divides magnetization by the configured initial "
+            "magnetization M0, so an on-resonance ideal 90° excitation has "
+            "|Mxy| = 1. Display normalization instead divides each visible "
+            "non-phase curve or image by its own absolute maximum."
+        )
+        self.y_scale.currentTextChanged.connect(self.refresh)
+        component_row.addWidget(self.y_scale)
+        component_row.addWidget(QLabel("Y max:"))
+        self.global_y_max = QDoubleSpinBox()
+        self.global_y_max.setObjectName("sequence_probe_spectrum_global_y_max")
+        self.global_y_max.setRange(0.0, 1.0e15)
+        self.global_y_max.setDecimals(6)
+        self.global_y_max.setSpecialValueText("Auto")
+        self.global_y_max.setToolTip(
+            "Set a fixed Y-axis maximum for all spectrum time points. "
+            "Zero (Auto) keeps automatic scaling. Magnitude uses 0 to Y max; "
+            "signed components use -Y max to +Y max."
+        )
+        self.global_y_max.valueChanged.connect(self.refresh)
+        component_row.addWidget(self.global_y_max)
         self.component_label = QLabel("Component:")
         component_row.addWidget(self.component_label)
         self.component_combo = CheckableComboBox()
@@ -349,6 +380,71 @@ class SequenceProbeSpectrumViewer(QWidget):
             return mz
         return np.abs(signal)
 
+    def _initial_magnetization_magnitude(self):
+        """Return the scalar initial spin magnitude used by the probe run."""
+        if self.result is None:
+            return 1.0
+        initial = self.result.metadata.get("initial_magnetization")
+        try:
+            vector = np.asarray(initial, dtype=float)
+        except (TypeError, ValueError):
+            return 1.0
+        if vector.shape != (3,) or not np.all(np.isfinite(vector)):
+            return 1.0
+        magnitude = float(np.linalg.norm(vector))
+        if magnitude <= np.finfo(float).eps:
+            return 1.0
+        return magnitude
+
+    def _scale_component(self, values, component):
+        values = np.asarray(values)
+        if component.startswith("Phase"):
+            return values
+        mode = self.y_scale.currentText()
+        if mode == self.SCALE_PER_SPIN:
+            return values / self._initial_magnetization_magnitude()
+        if mode == self.SCALE_DISPLAY_MAX:
+            finite = np.abs(values[np.isfinite(values)])
+            maximum = float(np.max(finite)) if finite.size else 0.0
+            if maximum > np.finfo(float).eps:
+                return values / maximum
+        return values
+
+    def _scale_complex_signal(self, signal):
+        signal = np.asarray(signal)
+        mode = self.y_scale.currentText()
+        if mode == self.SCALE_PER_SPIN:
+            return signal / self._initial_magnetization_magnitude()
+        if mode == self.SCALE_DISPLAY_MAX:
+            finite = np.abs(signal[np.isfinite(signal)])
+            maximum = float(np.max(finite)) if finite.size else 0.0
+            if maximum > np.finfo(float).eps:
+                return signal / maximum
+        return signal
+
+    def _component_axis_label(self, component):
+        if component.startswith("Phase"):
+            return "Phase (units of pi)"
+        mode = self.y_scale.currentText()
+        if mode == self.SCALE_PER_SPIN:
+            return f"{component} / M0"
+        if mode == self.SCALE_DISPLAY_MAX:
+            return f"{component} (max = 1)"
+        return component
+
+    def _set_y_range(self, plot, visible, components):
+        maximum = float(self.global_y_max.value())
+        if maximum > 0:
+            nonnegative = all(component == "Magnitude" for component in components)
+            lower = 0.0 if nonnegative else -maximum
+            plot.setYRange(lower, maximum, padding=0)
+            return
+        if visible:
+            plot.setYRange(
+                *_safe_range(np.concatenate([np.ravel(values) for values in visible])),
+                padding=0,
+            )
+
     def _selection_mode_changed(self, *_):
         mode = self.selection_mode.currentText()
         is_single = mode == "Single frequency"
@@ -551,7 +647,9 @@ class SequenceProbeSpectrumViewer(QWidget):
             weights = self._frequency_weights(selection)
             weighted_signal = np.sum(signal * weights[None, :], axis=1)
             weighted_mz = np.sum(mz * weights[None, :], axis=1)
-            values = self._component(weighted_signal, weighted_mz, component)
+            values = self._scale_component(
+                self._component(weighted_signal, weighted_mz, component), component
+            )
             visible.append(values)
             self.trace_plot.plot(
                 self.result.time_s * 1000.0,
@@ -559,8 +657,7 @@ class SequenceProbeSpectrumViewer(QWidget):
                 pen=pg.mkPen(colors[index % len(colors)], width=2),
                 name=self._selection_label(selection),
             )
-        ylabel = "Phase (units of pi)" if component.startswith("Phase") else component
-        self.trace_plot.setLabel("left", ylabel)
+        self.trace_plot.setLabel("left", self._component_axis_label(component))
         self.trace_plot.setLabel("bottom", "Sequence time", "ms")
         if self.result.time_s.size:
             self.trace_plot.setXRange(
@@ -580,11 +677,7 @@ class SequenceProbeSpectrumViewer(QWidget):
                     pen=pg.mkPen("y", width=1),
                 )
             )
-        if visible:
-            self.trace_plot.setYRange(
-                *_safe_range(np.concatenate([np.ravel(values) for values in visible])),
-                padding=0,
-            )
+        self._set_y_range(self.trace_plot, visible, [component])
 
     def refresh(self, *_):
         if self.result is None:
@@ -642,7 +735,9 @@ class SequenceProbeSpectrumViewer(QWidget):
             "Mz": "m",
         }
         for component in selected:
-            values = self._component(signal, mz, component)
+            values = self._scale_component(
+                self._component(signal, mz, component), component
+            )
             visible.append(values)
             pen = pg.mkPen(colors.get(component, "w"), width=2)
             if component == "Real":
@@ -652,15 +747,12 @@ class SequenceProbeSpectrumViewer(QWidget):
             self.plot.plot(freq, values, pen=pen, name=component)
 
         self.plot.setLabel("bottom", "Spin offset", "Hz")
-        ylabel = selected[0] if len(selected) == 1 else "Signal"
-        if selected == ["Phase"]:
-            ylabel = "Phase (units of pi)"
+        ylabel = (
+            self._component_axis_label(selected[0]) if len(selected) == 1 else "Signal"
+        )
         self.plot.setLabel("left", ylabel)
         self.plot.setXRange(*_safe_range(freq, fallback=(-1.0, 1.0)), padding=0)
-        if visible:
-            self.plot.setYRange(
-                *_safe_range(np.concatenate([np.ravel(v) for v in visible])), padding=0
-            )
+        self._set_y_range(self.plot, visible, selected)
 
     def _render_heatmap(self):
         result = self.result
@@ -687,6 +779,8 @@ class SequenceProbeSpectrumViewer(QWidget):
             x_label = ("Frequency from signal FFT", "Hz")
             title = "Spectra Stack (FFT of signal per spin)"
 
+        data = self._scale_component(data, "Magnitude")
+
         x_min, x_max = _safe_range(x_axis, fallback=(0.0, 1.0), pad_fraction=0.0)
         x_span = max(float(x_max - x_min), 1e-9)
         self.heatmap_item.setImage(data, autoLevels=True, axisOrder="row-major")
@@ -696,7 +790,11 @@ class SequenceProbeSpectrumViewer(QWidget):
         self.heatmap_plot.setTitle(title)
         self.heatmap_plot.setXRange(float(x_min), float(x_max), padding=0)
         self.heatmap_plot.setYRange(0, data.shape[0], padding=0)
-        _set_colorbar_levels(self.heatmap_colorbar, data)
+        maximum = float(self.global_y_max.value())
+        if maximum > 0:
+            self.heatmap_colorbar.setLevels((0.0, maximum))
+        else:
+            _set_colorbar_levels(self.heatmap_colorbar, data)
 
     def _render_3d(self):
         if self.plot_3d is None or self.result is None:
@@ -711,10 +809,19 @@ class SequenceProbeSpectrumViewer(QWidget):
         data = snapshot[pos_index] if pos_count else snapshot.reshape(-1)
         if data.size != freq.size:
             data = np.ravel(data)[: freq.size]
+        data = self._scale_complex_signal(data)
         freq_min, freq_max = float(np.nanmin(freq)), float(np.nanmax(freq))
         span = freq_max - freq_min if not np.isclose(freq_min, freq_max) else 1.0
         freq_norm = (freq - freq_min) / span * 20.0 - 10.0
-        pts = np.vstack([freq_norm, np.real(data) * 5.0, np.imag(data) * 5.0]).T
+        maximum = float(self.global_y_max.value())
+        display_scale = maximum if maximum > 0 else 1.0
+        pts = np.vstack(
+            [
+                freq_norm,
+                np.real(data) / display_scale * 5.0,
+                np.imag(data) / display_scale * 5.0,
+            ]
+        ).T
         line = gl.GLLinePlotItem(pos=pts, color=(0, 1, 1, 1), width=2, antialias=True)
         self.plot_3d.addItem(line)
 

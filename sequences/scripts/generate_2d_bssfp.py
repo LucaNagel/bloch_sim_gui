@@ -34,7 +34,7 @@ def main(
     rf_duration: float = 1e-3,
     rf_time_bandwidth_product: float = 4.0,
     rf_apodization: float = 0.5,
-    rf_slr_sharpness: float = 1.0,
+    rf_slr_sharpness: int = 1,
     rf_custom_waveform_hz=None,
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
@@ -101,7 +101,7 @@ def main(
     rf_phase = wrap_phase_deg(rf_phase_start)
 
     rf_alpha_half.phase_offset = pulseq_phase_offset_rad(
-        rf_phase_start,
+        wrap_phase_deg(rf_phase_start - rf_phase_increment),
         frequency_offset_hz=0.0,
         event_center_s=pp.calc_rf_center(rf_alpha_half)[0],
     )

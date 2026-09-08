@@ -205,6 +205,16 @@ sim.plot_magnetization()
 <details>
 <summary><strong>More Python API examples</strong></summary>
 
+#### Load a saved project
+
+```python
+from blochsimulator.project_io import load_project
+
+project = load_project("simulation.blochproj")
+phantom = project["phantom"]
+result = project["sequence_result"]
+```
+
 #### Spin echo sequence
 
 ```python

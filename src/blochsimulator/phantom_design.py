@@ -61,6 +61,182 @@ class SpectralPeakDefinition:
         )
 
 
+@dataclass(frozen=True)
+class CompoundPeakPreset:
+    """Editable starting values for one resonance of a compound preset."""
+
+    name: str
+    amplitude: float
+    absolute_ppm: float
+    t1_s: float
+    t2_s: float
+
+
+@dataclass(frozen=True)
+class CompoundPreset:
+    """Nucleus-specific compound preset for the spectral phantom designer."""
+
+    identifier: str
+    label: str
+    nucleus: str
+    peaks: Tuple[CompoundPeakPreset, ...]
+    window_center_ppm: float
+    bandwidth_ppm: float
+
+    def peak_definitions(self, reference_ppm: float) -> List[SpectralPeakDefinition]:
+        """Create independent, subsequently editable peak definitions."""
+        return [
+            SpectralPeakDefinition(
+                name=peak.name,
+                amplitude=peak.amplitude,
+                frequency_ppm=peak.absolute_ppm - float(reference_ppm),
+                t1_s=peak.t1_s,
+                t2_star_s=peak.t2_s,
+            )
+            for peak in self.peaks
+        ]
+
+
+METABOLITE_CS_PPM = {
+    "pyruvate": 171.076,
+    "lactate": 183.35,
+    "alanine": 176.5,
+    "pyruvatehydrate": 179.5,
+    "fumarate": 175.4,
+    "malate1": 181.7,
+    "malate4": 180.5,
+    "bicarbonate": 161.0,
+    "urea": 163.5,
+    "co2": 124.5,
+    "aspartate1": 176.92,
+    "aspartate4": 180.20,
+}
+
+_C13_METABOLITE_NAMES = {
+    "pyruvate": "Pyruvate",
+    "lactate": "Lactate",
+    "alanine": "Alanine",
+    "pyruvatehydrate": "Pyruvate hydrate",
+    "fumarate": "Fumarate",
+    "malate1": "Malate C1",
+    "malate4": "Malate C4",
+    "bicarbonate": "Bicarbonate",
+    "urea": "Urea",
+    "co2": "CO2",
+    "aspartate1": "Aspartate C1",
+    "aspartate4": "Aspartate C4",
+}
+
+
+def _c13_metabolite_presets() -> Tuple[CompoundPreset, ...]:
+    """Build editable single-resonance presets from the shared ppm table."""
+    return tuple(
+        CompoundPreset(
+            f"{identifier}_c13",
+            f"{_C13_METABOLITE_NAMES[identifier]} (13C)",
+            "C13",
+            (
+                CompoundPeakPreset(
+                    _C13_METABOLITE_NAMES[identifier],
+                    1.0,
+                    chemical_shift_ppm,
+                    25.0,
+                    0.300,
+                ),
+            ),
+            chemical_shift_ppm,
+            10.0,
+        )
+        for identifier, chemical_shift_ppm in METABOLITE_CS_PPM.items()
+    )
+
+
+COMPOUND_PRESETS: Tuple[CompoundPreset, ...] = (
+    (
+        CompoundPreset(
+            "water_h1",
+            "Water (1H)",
+            "H1",
+            (CompoundPeakPreset("Water", 1.0, 4.70, 1.5, 0.080),),
+            4.70,
+            10.0,
+        ),
+        CompoundPreset(
+            "ethanol_h1",
+            "Ethanol (1H)",
+            "H1",
+            (
+                CompoundPeakPreset("Ethanol CH3", 1.0, 1.18, 1.5, 0.300),
+                CompoundPeakPreset("Ethanol CH2", 2.0 / 3.0, 3.65, 1.5, 0.300),
+            ),
+            2.4,
+            6.0,
+        ),
+        CompoundPreset(
+            "naa_h1",
+            "N-acetylaspartate (1H)",
+            "H1",
+            (CompoundPeakPreset("NAA", 1.0, 2.01, 1.4, 0.250),),
+            2.5,
+            5.0,
+        ),
+        CompoundPreset(
+            "creatine_h1",
+            "Creatine (1H)",
+            "H1",
+            (CompoundPeakPreset("Creatine", 1.0, 3.03, 1.3, 0.150),),
+            3.0,
+            5.0,
+        ),
+        CompoundPreset(
+            "choline_h1",
+            "Choline (1H)",
+            "H1",
+            (CompoundPeakPreset("Choline", 1.0, 3.22, 1.1, 0.200),),
+            3.0,
+            5.0,
+        ),
+        CompoundPreset(
+            "ethanol_c13",
+            "Ethanol (13C)",
+            "C13",
+            (
+                CompoundPeakPreset("Ethanol C1", 1.0, 58.3, 10.0, 0.300),
+                CompoundPeakPreset("Ethanol C2", 1.0, 18.3, 10.0, 0.300),
+            ),
+            38.3,
+            50.0,
+        ),
+    )
+    + _c13_metabolite_presets()
+    + (
+        CompoundPreset(
+            "pyruvate_lactate_c13",
+            "[1-13C] Pyruvate + Lactate",
+            "C13",
+            (
+                CompoundPeakPreset(
+                    "Pyruvate", 1.0, METABOLITE_CS_PPM["pyruvate"], 25.0, 0.300
+                ),
+                CompoundPeakPreset(
+                    "Lactate", 1.0, METABOLITE_CS_PPM["lactate"], 25.0, 0.300
+                ),
+            ),
+            (METABOLITE_CS_PPM["pyruvate"] + METABOLITE_CS_PPM["lactate"]) / 2.0,
+            18.0,
+        ),
+    )
+)
+
+
+def compound_preset(identifier: str) -> CompoundPreset:
+    """Return one compound preset by its stable identifier."""
+    for preset in COMPOUND_PRESETS:
+        if preset.identifier == identifier:
+            return preset
+    raise KeyError(f"unknown compound preset {identifier!r}")
+
+
 @dataclass
 class ShapeDefinition:
     """Rotatable primitive in normalized phantom coordinates ``[0, 1]``.

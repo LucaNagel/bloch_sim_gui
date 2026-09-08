@@ -88,21 +88,28 @@ def analytic_rf_shape_parameter(pulse_type: str, sinc_lobes: int = 3) -> float:
     return 1.0
 
 
-def _validate_slr_sharpness(sharpness: float) -> float:
-    if not np.isfinite(sharpness) or sharpness <= 0:
-        raise ValueError("rf_slr_sharpness must be positive and finite")
-    return float(sharpness)
+def _validate_slr_sharpness(sharpness: int) -> int:
+    if (
+        isinstance(sharpness, (bool, np.bool_))
+        or not np.isfinite(sharpness)
+        or float(sharpness) <= 0
+        or not float(sharpness).is_integer()
+    ):
+        raise ValueError("rf_slr_sharpness must be a positive integer")
+    return int(sharpness)
 
 
 @lru_cache(maxsize=64)
 def _design_slr_waveform(
-    sample_count: int, time_bandwidth_product: float, sharpness: float
+    sample_count: int, time_bandwidth_product: float, sharpness: int
 ) -> np.ndarray:
     """Design a linear-phase, small-tip SLR beta polynomial.
 
-    ``sharpness`` continuously controls the relative transition width and the
-    stop-band weighting.  The result is cached because sequence previews often
-    request the same RF shape for several flip angles and slices.
+    ``sharpness`` is the integer order of the design. Order one is a single
+    positive central lobe; increasing the order progressively adds temporal
+    side lobes and narrows the transition. The result is cached because
+    sequence previews often request the same RF shape for several flip angles
+    and slices.
     """
     sharpness = _validate_slr_sharpness(sharpness)
     if sample_count < 8:
@@ -113,19 +120,23 @@ def _design_slr_waveform(
             "rf_time_bandwidth_product must be smaller than the SLR sample count"
         )
 
-    # ``sharpness`` historically selected bundled SLR waveforms whose number
-    # of temporal lobes increased with the setting.  The first dynamic design
-    # accidentally omitted that factor from the beta-polynomial bandwidth, so
-    # only the ripple weighting changed and every setting looked nearly the
-    # same.  Scaling the beta pass band restores the intended lobe progression
-    # while the progressively narrower transition retains the sharper slice
-    # profile expected from the control.
-    designed_tbw = tbw * sharpness
+    if sharpness == 1:
+        # The first member of the historical SLR family is deliberately a
+        # single, positive cosine lobe. Construct it analytically so numerical
+        # equiripple noise cannot introduce tiny false side lobes.
+        positions = np.linspace(-0.5, 0.5, sample_count, dtype=float)
+        signal = np.cos(np.pi * positions).astype(np.complex128)
+        signal.setflags(write=False)
+        return signal
+
+    # Sharpness historically selected an integer SLR family: order one had a
+    # single temporal lobe, while higher orders added side lobes. Do not
+    # multiply by the construction TBW here: doing so makes order one inherit
+    # several lobes from the hidden TBW input. The completed waveform still
+    # reports its measured TBW to consumers below.
+    designed_tbw = float(sharpness)
     if designed_tbw >= sample_count:
-        raise ValueError(
-            "rf_time_bandwidth_product * rf_slr_sharpness must be smaller "
-            "than the SLR sample count"
-        )
+        raise ValueError("rf_slr_sharpness must be smaller than the SLR sample count")
     band_center = designed_tbw / (2.0 * sample_count)
     transition_fraction = 1.0 / (sharpness + 1.0)
     passband_edge = band_center * (1.0 - transition_fraction)
@@ -176,7 +187,7 @@ def design_rf_envelope(
     raster_s: float,
     time_bandwidth_product: float = 4.0,
     apodization: float = 0.5,
-    slr_sharpness: float = 1.0,
+    slr_sharpness: int = 1,
     custom_waveform: np.ndarray | None = None,
     custom_raster_s: float | None = None,
 ) -> tuple[np.ndarray, float, float, str]:
@@ -211,14 +222,26 @@ def design_rf_envelope(
     elif pulse_type == "sinc":
         time_s = (np.arange(sample_count, dtype=float) + 0.5) * float(raster_s)
         centered_s = time_s - actual_duration_s / 2.0
-        window = (
-            1.0
-            - float(apodization)
-            + float(apodization) * np.cos(2.0 * np.pi * centered_s / actual_duration_s)
-        )
+        # Progress from an unapodized Sinc through the historical Hann default
+        # at 0.5 to a Hann-squared window at 1.0. This keeps the window
+        # non-negative throughout the documented range. The previous raw
+        # cosine became negative above 0.5 and could therefore amplify or
+        # invert the outer side lobes.
+        hann = 0.5 * (1.0 + np.cos(2.0 * np.pi * centered_s / actual_duration_s))
+        apodization = float(apodization)
+        if apodization <= 0.5:
+            # Preserve the historical 0.5 default exactly (a Hann window),
+            # while interpolating from a rectangular window below it.
+            window = 1.0 - 2.0 * apodization + 2.0 * apodization * hann
+        else:
+            # Continue from Hann to Hann squared. Unlike the former raw
+            # cosine, this stronger half of the range remains non-negative.
+            strength = 2.0 * apodization - 1.0
+            window = hann * (1.0 - strength + strength * hann)
         signal = window * np.sinc(shape_parameter * centered_s / actual_duration_s)
         signal = signal.astype(np.complex128)
     elif pulse_type == "slr":
+        slr_sharpness = _validate_slr_sharpness(slr_sharpness)
         signal = _design_slr_waveform(
             sample_count, shape_parameter, slr_sharpness
         ).copy()
@@ -308,7 +331,7 @@ def make_pulseq_rf_events(
     duration_s: float,
     time_bandwidth_product: float = 4.0,
     apodization: float = 0.5,
-    slr_sharpness: float = 1.0,
+    slr_sharpness: int = 1,
     custom_waveform_hz=None,
     custom_raster_s: float | None = None,
     custom_flip_angle_deg: float | None = None,
@@ -392,7 +415,7 @@ def set_rf_definitions(
     actual_duration_s: float,
     time_bandwidth_product: float,
     apodization: float,
-    slr_sharpness: float,
+    slr_sharpness: int,
     custom_name: str | None,
     custom_flip_angle_deg: float | None,
     frequency_offset_hz: float,
@@ -411,6 +434,7 @@ def set_rf_definitions(
     if pulse_type == "sinc":
         sequence.set_definition(f"{key}RFApodization", apodization)
     if pulse_type == "slr":
+        slr_sharpness = _validate_slr_sharpness(slr_sharpness)
         sequence.set_definition(f"{key}RFSLRSharpness", slr_sharpness)
         # Retain the historical spelling used by spectral sequence readers.
         if key == "Spectral":

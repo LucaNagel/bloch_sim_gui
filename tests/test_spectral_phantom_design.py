@@ -11,9 +11,12 @@ from unittest.mock import MagicMock, patch
 from blochsimulator import BlochSimulator
 from blochsimulator.kspace_widget import TrajectoryWidget
 from blochsimulator.phantom_design import (
+    COMPOUND_PRESETS,
+    METABOLITE_CS_PPM,
     PhantomDesign,
     ShapeDefinition,
     SpectralPeakDefinition,
+    compound_preset,
 )
 from blochsimulator.sequence import ADCEvent, RFEvent, SequenceProgram
 from blochsimulator.spectral_phantom import SpectralPhantom
@@ -85,6 +88,126 @@ def test_new_phantom_designer_uses_new_spectral_defaults(tmp_path):
     assert dialog.design.shapes[-1].peaks[0].t2_star_s == pytest.approx(0.020)
     dialog._add_peak()
     assert dialog.design.shapes[-1].peaks[-1].t2_star_s == pytest.approx(0.020)
+    dialog.close()
+    app.processEvents()
+
+
+def test_compound_catalog_has_requested_c13_relaxation_defaults():
+    identifiers = {preset.identifier for preset in COMPOUND_PRESETS}
+    assert {"ethanol_h1", "ethanol_c13", "pyruvate_c13", "lactate_c13"} <= identifiers
+
+    for identifier in ("pyruvate_c13", "lactate_c13"):
+        peak = compound_preset(identifier).peaks[0]
+        assert peak.t1_s == pytest.approx(25.0)
+        assert peak.t2_s == pytest.approx(0.300)
+
+    assert METABOLITE_CS_PPM == {
+        "pyruvate": 171.076,
+        "lactate": 183.35,
+        "alanine": 176.5,
+        "pyruvatehydrate": 179.5,
+        "fumarate": 175.4,
+        "malate1": 181.7,
+        "malate4": 180.5,
+        "bicarbonate": 161.0,
+        "urea": 163.5,
+        "co2": 124.5,
+        "aspartate1": 176.92,
+        "aspartate4": 180.20,
+    }
+    assert {f"{identifier}_c13" for identifier in METABOLITE_CS_PPM} <= identifiers
+
+
+def test_designer_applies_compound_preset_and_keeps_peak_cells_editable():
+    app = QApplication.instance() or QApplication([])
+    dialog = SpectralPhantomDesignerDialog()
+    index = dialog.compound_preset_combo.findData("pyruvate_lactate_c13")
+
+    dialog.compound_preset_combo.setCurrentIndex(index)
+
+    assert dialog.nucleus.currentData() == "C13"
+    assert dialog.peak_table.rowCount() == 2
+    assert [dialog.peak_table.item(row, 0).text() for row in range(2)] == [
+        "Pyruvate",
+        "Lactate",
+    ]
+    assert [float(dialog.peak_table.item(row, 3).text()) for row in range(2)] == (
+        pytest.approx([171.076, 183.35])
+    )
+    assert [float(dialog.peak_table.item(row, 4).text()) for row in range(2)] == (
+        pytest.approx([25000.0, 25000.0])
+    )
+    assert [float(dialog.peak_table.item(row, 5).text()) for row in range(2)] == (
+        pytest.approx([300.0, 300.0])
+    )
+
+    dialog.peak_table.item(0, 4).setText("1234")
+    dialog.peak_table.item(0, 5).setText("456")
+    assert dialog.design.shapes[0].peaks[0].t1_s == pytest.approx(1.234)
+    assert dialog.design.shapes[0].peaks[0].t2_star_s == pytest.approx(0.456)
+    assert dialog.compound_preset_combo.currentData() is None
+
+    dialog.close()
+    app.processEvents()
+
+
+def test_designer_converts_only_selected_peak_to_compound():
+    app = QApplication.instance() or QApplication([])
+    dialog = SpectralPhantomDesignerDialog()
+    pyruvate_index = dialog.compound_preset_combo.findData("pyruvate_c13")
+    lactate_index = dialog.compound_preset_combo.findData("lactate_c13")
+
+    dialog.compound_preset_combo.setCurrentIndex(pyruvate_index)
+    dialog._add_peak()
+    assert dialog.peak_table.currentRow() == 1
+    dialog.compound_preset_combo.setCurrentIndex(lactate_index)
+
+    assert [peak.name for peak in dialog.design.shapes[0].peaks] == [
+        "Pyruvate",
+        "Lactate",
+    ]
+    assert [peak.frequency_ppm for peak in dialog.design.shapes[0].peaks] == (
+        pytest.approx([171.076, 183.35])
+    )
+    assert dialog.spectral_window_center_ppm.value() == pytest.approx(177.213)
+    assert dialog.spectral_bandwidth_ppm.value() >= 16.274
+
+    dialog.peak_table.setCurrentCell(0, 0)
+    alanine_index = dialog.compound_preset_combo.findData("alanine_c13")
+    dialog.compound_preset_combo.setCurrentIndex(alanine_index)
+    assert [peak.name for peak in dialog.design.shapes[0].peaks] == [
+        "Alanine",
+        "Lactate",
+    ]
+    dialog.close()
+    app.processEvents()
+
+
+def test_ethanol_preview_preserves_requested_relative_peak_amplitudes():
+    app = QApplication.instance() or QApplication([])
+    dialog = SpectralPhantomDesignerDialog()
+
+    h1_index = dialog.compound_preset_combo.findData("ethanol_h1")
+    dialog.compound_preset_combo.setCurrentIndex(h1_index)
+    assert dialog.nucleus.currentData() == "H1"
+    assert [float(dialog.peak_table.item(row, 3).text()) for row in range(2)] == (
+        pytest.approx([1.18, 3.65])
+    )
+
+    frequency_ppm, spectrum = dialog.spectral_preview_curve.getData()
+    ch3_height = spectrum[np.argmin(np.abs(frequency_ppm - 1.18))]
+    ch2_height = spectrum[np.argmin(np.abs(frequency_ppm - 3.65))]
+    assert frequency_ppm[np.argmin(np.abs(frequency_ppm - 1.18))] == pytest.approx(1.18)
+    assert frequency_ppm[np.argmin(np.abs(frequency_ppm - 3.65))] == pytest.approx(3.65)
+    assert ch2_height / ch3_height == pytest.approx(2.0 / 3.0, rel=1e-3)
+
+    dialog.peak_table.setCurrentCell(0, 0)
+    c13_index = dialog.compound_preset_combo.findData("ethanol_c13")
+    dialog.compound_preset_combo.setCurrentIndex(c13_index)
+    assert dialog.nucleus.currentData() == "C13"
+    assert [float(dialog.peak_table.item(row, 3).text()) for row in range(2)] == (
+        pytest.approx([58.3, 18.3])
+    )
     dialog.close()
     app.processEvents()
 

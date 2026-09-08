@@ -60,7 +60,7 @@ def main(
     rf_duration: float = 1e-3,
     rf_time_bandwidth_product: float = 4.0,
     rf_apodization: float = 0.5,
-    rf_slr_sharpness: float = 1.0,
+    rf_slr_sharpness: int = 1,
     rf_custom_waveform_hz=None,
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
@@ -99,7 +99,7 @@ def main(
         raise ValueError("dummy_repetitions must be a non-negative integer")
     if alpha_half_phase_deg is None:
         resolved_alpha_half_phase_deg = wrap_phase_deg(
-            rf_phase_start + rf_phase_increment
+            rf_phase_start - rf_phase_increment
         )
     else:
         resolved_alpha_half_phase_deg = wrap_phase_deg(alpha_half_phase_deg)

@@ -43,9 +43,15 @@ def _round_trip(sequence, path):
 
 
 def _pulseq_event_center_phase_deg(event, center_s):
+    phase_offset = getattr(event, "phase_offset", None)
+    if phase_offset is None:
+        phase_offset = event.phase_offset_rad
+    frequency_offset = getattr(event, "freq_offset", None)
+    if frequency_offset is None:
+        frequency_offset = event.frequency_offset_hz
     return float(
         np.mod(
-            np.rad2deg(event.phase_offset + 2 * np.pi * event.freq_offset * center_s),
+            np.rad2deg(phase_offset + 2 * np.pi * frequency_offset * center_s),
             360.0,
         )
     )
@@ -60,6 +66,85 @@ def _assert_startup_rf(program, *, spacing_s, flip_ratio):
 
     assert first_regular_rf.start_s - startup_rf.start_s == pytest.approx(spacing_s)
     assert startup_integral / regular_integral == pytest.approx(flip_ratio, rel=1e-5)
+
+
+@pytest.mark.parametrize("builder_name", ("spectral", "cartesian_me", "radial_me"))
+def test_advanced_bssfp_starter_and_regular_rf_use_configured_phase_tr_and_flip(
+    tmp_path, builder_name
+):
+    start_phase = 70.0
+    phase_increment = 30.0
+    flip_angle = 40.0
+    requested_tr = 16e-3
+    shared = {
+        "rf_phase_start_deg": start_phase,
+        "rf_phase_increment_deg": phase_increment,
+        "alpha_half_use_ratios": True,
+        "alpha_half_tr_ratio": 0.4,
+        "alpha_half_flip_ratio": 0.25,
+        "use_alpha_half": True,
+    }
+    if builder_name == "spectral":
+        sequence = make_pulseq_spectral_selective_bssfp(
+            matrix=(2, 2, 1),
+            target_frequency_offsets_hz=(0.0,),
+            receiver_frequency_offsets_hz=(0.0,),
+            target_metabolite_names=("test",),
+            flip_angle_deg=(flip_angle,),
+            repetition_time_s=requested_tr,
+            repetitions=1,
+            end_image_spoiler_cycles_per_fov=0.0,
+            end_image_spoiler_cycles_per_voxel=0.0,
+            **shared,
+        )
+    elif builder_name == "cartesian_me":
+        sequence = make_pulseq_me_bssfp(
+            matrix=(2, 2, 1),
+            echoes=1,
+            flip_angle_deg=flip_angle,
+            repetition_time_s=requested_tr,
+            receiver_frequency_offset_hz=0.0,
+            repetitions=1,
+            **shared,
+        )
+    else:
+        sequence = make_pulseq_radial_me_bssfp(
+            base_resolution=2,
+            readout_oversampling=1,
+            spokes_per_measurement=2,
+            measurements=1,
+            echoes=1,
+            flip_angle_deg=flip_angle,
+            repetition_time_s=requested_tr,
+            use_tip_back=False,
+            **shared,
+        )
+
+    program = _round_trip(sequence, tmp_path / f"{builder_name}_rf_audit.seq")
+    starter, first_rf, second_rf = program.rf_events[:3]
+    starter_center = starter.raster_s * starter.samples_hz.size / 2
+    first_center = first_rf.raster_s * first_rf.samples_hz.size / 2
+    second_center = second_rf.raster_s * second_rf.samples_hz.size / 2
+    definitions = program.metadata["definitions"]
+
+    assert definitions["TR"] == pytest.approx(requested_tr)
+    assert definitions["RFPhaseStartDeg"] == pytest.approx(start_phase)
+    assert definitions["RFPhaseIncrementDeg"] == pytest.approx(phase_increment)
+    assert definitions["AlphaHalfPhaseDeg"] == pytest.approx(
+        start_phase - phase_increment
+    )
+    assert _pulseq_event_center_phase_deg(starter, starter_center) == pytest.approx(
+        start_phase - phase_increment
+    )
+    assert _pulseq_event_center_phase_deg(first_rf, first_center) == pytest.approx(
+        start_phase
+    )
+    assert _pulseq_event_center_phase_deg(second_rf, second_center) == pytest.approx(
+        start_phase + phase_increment
+    )
+    assert first_rf.start_s - starter.start_s == pytest.approx(0.4 * requested_tr)
+    assert second_rf.start_s - first_rf.start_s == pytest.approx(requested_tr)
+    _assert_startup_rf(program, spacing_s=0.4 * requested_tr, flip_ratio=0.25)
 
 
 def test_spectral_bssfp_accepts_the_shared_loaded_rf_pulse():

@@ -423,12 +423,31 @@ def load_pulse(pulse_name: str) -> Tuple[np.ndarray, np.ndarray, PulseMetadata]:
 
 
 def load_pulse_from_file(
-    filepath: Union[str, Path]
+    filepath: Union[str, Path],
+    *,
+    duration_s: Optional[float] = None,
+    max_b1_gauss: Optional[float] = None,
+    amplitude_unit: str = "relative",
+    phase_unit: str = "deg",
+    layout: str = "columns",
 ) -> Tuple[np.ndarray, np.ndarray, PulseMetadata]:
-    """Load a pulse directly from a file path."""
+    """Load a pulse directly from a file path.
+
+    Headerless amp/phase text files share this entry point with JCAMP-DX
+    ``.exc`` files.  The optional import settings are ignored for JCAMP-DX
+    files and forwarded to :func:`load_amp_phase_dat` for ``.dat``, ``.txt``,
+    and ``.csv`` files.
+    """
     filepath = Path(filepath)
-    if filepath.suffix.lower() == ".dat":
-        return load_amp_phase_dat(filepath)
+    if filepath.suffix.lower() in {".dat", ".txt", ".csv"}:
+        return load_amp_phase_dat(
+            filepath,
+            duration_s=duration_s,
+            max_b1_gauss=max_b1_gauss,
+            amplitude_unit=amplitude_unit,
+            phase_unit=phase_unit,
+            layout=layout,
+        )
     return JCAMPPulseLoader.load(filepath)
 
 
@@ -577,6 +596,11 @@ def load_amp_phase_dat(
         name=path.stem,
         title=path.stem,
         origin=str(path),
+        # Headerless amplitude/phase files do not state a reference flip
+        # angle.  Leave it unknown so sequence consumers infer the rotation
+        # from the waveform integral instead of treating every file as an
+        # already calibrated 90-degree pulse.
+        flip_angle=0.0,
         duration=pulse_duration if pulse_duration is not None else 0.0,
         npoints=len(b1),
         max_b1=max_b1_used,

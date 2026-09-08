@@ -85,7 +85,7 @@ def design_rf_pulse(
     time_bw_product=4,
     npoints=100,
     freq_offset=0.0,
-    slr_sharpness=1.0,
+    slr_sharpness=1,
 ):
     """
     Pure-Python fallback for RF design so imports work even without the extension.
@@ -106,9 +106,9 @@ def design_rf_pulse(
     freq_offset : float
         Frequency offset in Hz (default 0). Applies phase modulation: B1 * exp(2πi*f*t)
         Positive offset shifts the pulse frequency higher.
-    slr_sharpness : float
-        SLR transition sharpness. Higher values generate progressively more
-        temporal lobes through the shared RF envelope designer.
+    slr_sharpness : int
+        SLR design order. One produces a single central lobe; higher integer
+        values generate progressively more temporal side lobes.
 
     Returns
     -------

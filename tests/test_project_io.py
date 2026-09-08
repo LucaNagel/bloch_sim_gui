@@ -67,6 +67,18 @@ def test_complete_project_round_trip(tmp_path):
     np.testing.assert_allclose(loaded["sequence_result"].signal, result.signal)
 
 
+def test_project_state_round_trips_complex_rf_waveform_arrays(tmp_path):
+    waveform = np.asarray([1.0 + 2.0j, 3.0 - 4.0j])
+    path = tmp_path / "rf_state.blochproj"
+
+    save_project(path, {"sequence_rf_pulse": {"waveform_hz": waveform}})
+
+    loaded = load_project(path)
+    np.testing.assert_array_equal(
+        loaded["state"]["sequence_rf_pulse"]["waveform_hz"], waveform
+    )
+
+
 def test_spin_probe_project_round_trip(tmp_path):
     result = SequenceProbeResult(
         time_s=np.array([0.0, 0.01]),

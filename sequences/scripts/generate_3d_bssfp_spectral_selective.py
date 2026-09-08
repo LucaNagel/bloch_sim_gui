@@ -183,7 +183,7 @@ def _make_spectral_rf(
     apodization: float,
     system,
     slr_pulse_path: str | Path | None,
-    slr_sharpness: float,
+    slr_sharpness: int,
     custom_waveform_hz,
     custom_raster_s: float | None,
     custom_flip_angle_deg: float | None,
@@ -253,7 +253,7 @@ def main(
     spectral_pulse_type: str = "slr",
     spectral_rf_apodization: float = 0.0,
     spectral_slr_pulse_path: str | Path | None = None,
-    spectral_slr_sharpness: float = 1.0,
+    spectral_slr_sharpness: int = 1,
     spectral_rf_custom_waveform_hz=None,
     spectral_rf_custom_raster_s: float | None = None,
     spectral_rf_custom_flip_angle_deg: float | None = None,
@@ -627,7 +627,7 @@ def main(
             rf_frame_center_from_block_start = rf_frame_timing.delay + rf_frame_center
             rf_alpha_half.freq_offset = target_frequency_hz
             rf_alpha_half.phase_offset = pulseq_phase_offset_rad(
-                wrap_phase_deg(rf_phase_start + rf_phase_increment),
+                wrap_phase_deg(rf_phase_start - rf_phase_increment),
                 frequency_offset_hz=target_frequency_hz,
                 event_center_s=rf_alpha_half_center,
             )
@@ -820,7 +820,7 @@ def main(
     seq.set_definition(
         key="AlphaHalfPhaseDeg",
         value=(
-            wrap_phase_deg(rf_phase_start + rf_phase_increment)
+            wrap_phase_deg(rf_phase_start - rf_phase_increment)
             if use_alpha_half
             else 0.0
         ),
@@ -912,7 +912,7 @@ if __name__ == "__main__":
     main(
         spectral_pulse_type="slr",
         alpha_half_center_spacing=6.29e-3,
-        spectral_slr_sharpness=1.0,
+        spectral_slr_sharpness=1,
         plot=False,
         write_seq=True,
         n_repetition=20,

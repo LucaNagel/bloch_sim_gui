@@ -51,6 +51,9 @@ def test_gui_ernst_angle_state_and_summary_table():
     widget.t1_ms.setValue(1000.0)
 
     assert widget.epi_use_ernst_angle.isEnabled()
+    assert widget.epi_ernst_info.isHidden()
+    assert widget.epi_vfa_final_flip_angle_deg.isHidden()
+    assert widget.epi_vfa_info.isHidden()
     assert not widget.epi_rf_spoiling_increment_deg.isEnabled()
     widget.epi_rf_spoiling.setChecked(True)
     assert widget.epi_use_ernst_angle.isEnabled()
@@ -61,6 +64,7 @@ def test_gui_ernst_angle_state_and_summary_table():
     assert widget.epi_flip_angle_deg.value() == pytest.approx(expected, abs=0.01)
     assert not widget.epi_flip_angle_deg.isEnabled()
     assert "T2 is not used" in widget.epi_ernst_info.text()
+    assert not widget.epi_ernst_info.isHidden()
     t2_independent_angle = widget.epi_flip_angle_deg.value()
     widget.t2_ms.setValue(750.0)
     assert widget.epi_flip_angle_deg.value() == t2_independent_angle
@@ -77,6 +81,15 @@ def test_gui_ernst_angle_state_and_summary_table():
     unspoiled_parameters = widget._epi_pulseq_parameters()
     assert not unspoiled_parameters["rf_spoiling"]
     assert unspoiled_parameters["flip_angle_deg"] == pytest.approx(expected)
+
+    widget.epi_use_ernst_angle.setChecked(False)
+    widget.epi_variable_flip_angle.setChecked(True)
+    assert widget.epi_ernst_info.isHidden()
+    assert not widget.epi_vfa_final_flip_angle_deg.isHidden()
+    assert not widget.epi_vfa_info.isHidden()
+    widget.epi_variable_flip_angle.setChecked(False)
+    assert widget.epi_vfa_final_flip_angle_deg.isHidden()
+    assert widget.epi_vfa_info.isHidden()
 
     assert widget.flash_use_ernst_angle.isEnabled()
     widget.flash_rf_spoiling.setChecked(False)

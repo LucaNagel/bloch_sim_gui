@@ -23,6 +23,7 @@ from ..memory import MemoryPolicy, format_bytes, resolve_memory_budget
 from ..sequence.scanner import ScannerParameters
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
 from .default_settings import WorkspaceDefaults
+from .styles import INTERFACE_STYLE_CHOICES, normalize_interface_style
 
 
 class SettingsDialog(QDialog):
@@ -133,6 +134,7 @@ class SettingsDialog(QDialog):
         detected_thread_count: Optional[int] = None,
         scanner_parameters: Optional[ScannerParameters] = None,
         workspace_defaults: Optional[WorkspaceDefaults] = None,
+        interface_style: str = "automatic",
     ):
         super().__init__(parent)
         scanner_parameters = ScannerParameters.from_mapping(scanner_parameters)
@@ -560,6 +562,21 @@ class SettingsDialog(QDialog):
 
         interface_tab = QWidget()
         interface_layout = QVBoxLayout(interface_tab)
+        interface_form = QFormLayout()
+        self.interface_style_combo = QComboBox()
+        self.interface_style_combo.setObjectName("interface_style")
+        for label, style in INTERFACE_STYLE_CHOICES:
+            self.interface_style_combo.addItem(label, style)
+        style_index = self.interface_style_combo.findData(
+            normalize_interface_style(interface_style)
+        )
+        self.interface_style_combo.setCurrentIndex(max(0, style_index))
+        self.interface_style_combo.setToolTip(
+            "Choose the Qt control style for the whole application. The change "
+            "takes effect immediately after the settings are accepted."
+        )
+        interface_form.addRow("Application style:", self.interface_style_combo)
+        interface_layout.addLayout(interface_form)
         self.tooltips_checkbox = QCheckBox("Show explanatory tooltips")
         self.tooltips_checkbox.setObjectName("tooltips_enabled")
         self.tooltips_checkbox.setChecked(bool(tooltips_enabled))
@@ -633,6 +650,9 @@ class SettingsDialog(QDialog):
 
     def tooltips_enabled(self) -> bool:
         return self.tooltips_checkbox.isChecked()
+
+    def interface_style(self) -> str:
+        return normalize_interface_style(self.interface_style_combo.currentData())
 
     def sequence_live_progress_enabled(self) -> bool:
         return self.sequence_live_progress_checkbox.isChecked()

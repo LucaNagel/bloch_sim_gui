@@ -53,6 +53,32 @@ def _ceil_to_raster(value: float, raster: float) -> float:
     return float(np.ceil((float(value) - 1e-12) / raster) * raster)
 
 
+def _centered_adc_dwell(requested_dwell: float, sample_count: int, system) -> float:
+    """Choose the closest no-faster dwell that permits an exactly centred ADC.
+
+    ADC dwell uses the fine ADC raster, while the ADC start uses the RF raster.
+    For bipolar Cartesian readouts the complete sample window must also remain
+    centred on the gradient plateau so forward and reverse lines share one
+    k-space grid.  Increasing dwell in ADC-raster steps lowers bandwidth and is
+    therefore the conservative direction when selecting a compatible value.
+    """
+    first_step = max(
+        1,
+        int(np.ceil((float(requested_dwell) - 1e-15) / system.adc_raster_time)),
+    )
+    for dwell_steps in range(first_step, first_step + 100_000):
+        dwell = dwell_steps * system.adc_raster_time
+        adc_duration = int(sample_count) * dwell
+        flat_time = _ceil_to_raster(adc_duration, system.grad_raster_time)
+        centered_offset = (flat_time - adc_duration) / 2.0
+        raster_steps = centered_offset / system.rf_raster_time
+        if abs(raster_steps - round(raster_steps)) < 1e-6:
+            return float(dwell)
+    raise ValueError(
+        "sampling bandwidth cannot be aligned to the ADC and RF timing rasters"
+    )
+
+
 def _sequence_duration_s(sequence) -> float:
     return 0.0 if not sequence.block_events else float(sequence.duration()[0])
 
@@ -148,7 +174,7 @@ def _make_slice_selective_rf_events(
     rf_duration_s: float,
     rf_time_bandwidth_product: float,
     rf_apodization: float,
-    rf_slr_sharpness: float,
+    rf_slr_sharpness: int,
     rf_custom_waveform_hz: Sequence[complex] | None,
     rf_custom_raster_s: float | None,
     rf_custom_flip_angle_deg: float | None,
@@ -195,7 +221,7 @@ def _set_rf_definitions(
     actual_duration_s: float,
     time_bandwidth_product: float,
     apodization: float,
-    slr_sharpness: float,
+    slr_sharpness: int,
     custom_name: str | None,
     custom_flip_angle_deg: float | None,
     frequency_offset_hz: float,
@@ -277,7 +303,7 @@ def make_pulseq_csi(
     rf_duration_s: float = 3e-3,
     rf_time_bandwidth_product: float = 4.0,
     rf_apodization: float = 0.5,
-    rf_slr_sharpness: float = 1.0,
+    rf_slr_sharpness: int = 1,
     rf_custom_waveform_hz: Sequence[complex] | None = None,
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
@@ -623,7 +649,7 @@ def make_pulseq_bssfp(
     rf_duration_s: float = 1e-3,
     rf_time_bandwidth_product: float = 4.0,
     rf_apodization: float = 0.5,
-    rf_slr_sharpness: float = 1.0,
+    rf_slr_sharpness: int = 1,
     rf_custom_waveform_hz: Sequence[complex] | None = None,
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
@@ -680,7 +706,7 @@ def make_pulseq_bssfp(
         raise ValueError("rf_frequency_offset_hz must be finite")
     if alpha_half_phase_deg is None:
         resolved_alpha_half_phase_deg = wrap_phase_deg(
-            rf_phase_start_deg + rf_phase_increment_deg
+            rf_phase_start_deg - rf_phase_increment_deg
         )
     else:
         resolved_alpha_half_phase_deg = wrap_phase_deg(alpha_half_phase_deg)
@@ -872,6 +898,7 @@ def make_pulseq_bssfp(
         rf_phase = advance_bssfp_phase_deg(
             rf_phase,
             elapsed_s=actual_tr,
+            frequency_offset_hz=rf_frequency_offset_hz,
             phase_increment_deg=rf_phase_increment_deg,
         )
         gy_pre = make_role_trapezoid(
@@ -1026,7 +1053,7 @@ def make_pulseq_epi(
     rf_duration_s: float = 3e-3,
     rf_time_bandwidth_product: float = 4.0,
     rf_apodization: float = 0.5,
-    rf_slr_sharpness: float = 1.0,
+    rf_slr_sharpness: int = 1,
     rf_custom_waveform_hz: Sequence[complex] | None = None,
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
@@ -1109,12 +1136,11 @@ def make_pulseq_epi(
         },
     )
     sequence = pp.Sequence(system)
-    dwell = (
-        round((1.0 / sampling_bandwidth_hz) / system.adc_raster_time)
-        * system.adc_raster_time
+    dwell = _centered_adc_dwell(
+        1.0 / sampling_bandwidth_hz,
+        n_x,
+        system,
     )
-    if dwell <= 0:
-        raise ValueError("sampling bandwidth exceeds the ADC raster capability")
     rf_events, actual_rf_duration_s, effective_rf_tbw, rf_pulse_type = (
         _make_slice_selective_rf_events(
             pp,
@@ -1334,6 +1360,7 @@ def make_pulseq_epi(
         matrix=(n_x, n_y, n_slices),
     )
     sequence.set_definition("SamplingBandwidth", 1.0 / dwell)
+    sequence.set_definition("RequestedSamplingBandwidth", sampling_bandwidth_hz)
     sequence.set_definition("TE", actual_te)
     sequence.set_definition(
         "FlipAngleDeg",
@@ -1404,7 +1431,7 @@ def make_pulseq_flash(
     rf_duration_s: float = 1e-3,
     rf_time_bandwidth_product: float = 4.0,
     rf_apodization: float = 0.5,
-    rf_slr_sharpness: float = 1.0,
+    rf_slr_sharpness: int = 1,
     rf_custom_waveform_hz: Sequence[complex] | None = None,
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
@@ -1481,12 +1508,11 @@ def make_pulseq_flash(
         },
     )
     sequence = pp.Sequence(system)
-    dwell = (
-        round((1.0 / sampling_bandwidth_hz) / system.adc_raster_time)
-        * system.adc_raster_time
+    dwell = _centered_adc_dwell(
+        1.0 / sampling_bandwidth_hz,
+        n_read,
+        system,
     )
-    if dwell <= 0:
-        raise ValueError("sampling bandwidth exceeds the ADC raster capability")
 
     raw_rf_events, actual_rf_duration_s, effective_rf_tbw, rf_pulse_type = (
         _make_slice_selective_rf_events(
@@ -1691,6 +1717,7 @@ def make_pulseq_flash(
         matrix=(n_read, n_phase, n_slices),
     )
     sequence.set_definition("SamplingBandwidth", 1.0 / dwell)
+    sequence.set_definition("RequestedSamplingBandwidth", sampling_bandwidth_hz)
     sequence.set_definition("FlipAngleDeg", float(flip_angle_deg))
     sequence.set_definition("TE", actual_te)
     sequence.set_definition("TR", actual_tr)
@@ -1809,7 +1836,7 @@ def make_pulseq_spiral(
     rf_duration_s: float = 3e-3,
     rf_time_bandwidth_product: float = 4.0,
     rf_apodization: float = 0.5,
-    rf_slr_sharpness: float = 1.0,
+    rf_slr_sharpness: int = 1,
     rf_custom_waveform_hz: Sequence[complex] | None = None,
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,

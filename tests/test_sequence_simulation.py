@@ -4,6 +4,8 @@ import xarray as xr
 
 from blochsimulator import BlochSimulator, TissueParameters
 from blochsimulator.notebook_exporter import (
+    _sequence_result_access_code,
+    _sequence_result_raw_reconstruction_example_code,
     _sequence_result_reconstruction_code,
     export_sequence_result_notebook,
 )
@@ -881,7 +883,14 @@ def test_sequence_result_notebook_uses_xarray_dataset(tmp_path):
 
     text = notebook_path.read_text(encoding="utf-8")
     assert "xr.open_dataset" in text
+    assert "result_dataset = xr.open_dataset" in text
     assert "result.nc" in text
+    assert "raw_adc_signal = result_dataset['signal']" in text
+    assert "reconstructed_data" in text
+    assert "reconstructed_kspace" in text
+    assert "reconstructed_image_magnitude" in text
+    assert "build_cartesian_kspace_from_raw = _cartesian_from_adc" in text
+    assert "example_kspace_from_raw = build_cartesian_kspace_from_raw" in text
     assert "adc_event_index" in text
     assert "cartesian_kspace" in text
     assert "cartesian_image_magnitude" in text
@@ -983,6 +992,9 @@ def test_sequence_result_notebook_reconstructs_labelled_raw_3d_adc():
     namespace = {"ds": dataset, "np": np, "xr": xr}
 
     exec(_sequence_result_reconstruction_code(), namespace)
+    namespace["result_dataset"] = namespace["ds"]
+    exec(_sequence_result_access_code(), namespace)
+    exec(_sequence_result_raw_reconstruction_example_code(), namespace)
 
     reconstructed = namespace["ds"].notebook_cartesian_3d_image.values
     species = namespace["ds"].species_cartesian_3d_image.values
@@ -990,6 +1002,16 @@ def test_sequence_result_notebook_reconstructs_labelled_raw_3d_adc():
     np.testing.assert_allclose(reconstructed, expected, atol=1e-12)
     np.testing.assert_allclose(species[0], 0.25 * expected, atol=1e-12)
     np.testing.assert_allclose(species[1], 0.75 * expected, atol=1e-12)
+    assert namespace["reconstruction_kind"] == "cartesian_3d"
+    assert namespace["raw_adc_signal"].identical(namespace["ds"].signal)
+    assert namespace["reconstructed_data"].identical(
+        namespace["ds"].notebook_cartesian_3d_image_magnitude
+    )
+    np.testing.assert_allclose(
+        namespace["example_image_from_raw"].values,
+        expected,
+        atol=1e-12,
+    )
 
 
 def test_sequence_result_notebook_recovers_unlabelled_square_phase_partition_grid():

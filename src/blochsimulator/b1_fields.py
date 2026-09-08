@@ -461,8 +461,9 @@ def create_b1_preset(
     """Generate a normalized complex 2D/3D B1 preset.
 
     Coil fields use a finite-rung quadrature birdcage or circular-loop
-    Biot-Savart model. Their central sensitivity is normalized to ``magnitude``;
-    multi-channel receive arrays use their central root-sum-of-squares value.
+    Biot-Savart model. Transmit presets are normalized so their global maximum
+    magnitude equals ``magnitude``. Receive presets use the global maximum of
+    their root-sum-of-squares magnitude, preserving relative channel gains.
     """
     preset = str(preset).strip().lower()
     kind = "receive" if str(kind).lower() in {"rx", "receive"} else "transmit"
@@ -516,27 +517,26 @@ def create_b1_preset(
         normalized = 2.0 * xyz[axis] / fov_m[axis]
         mode = str(ramp_mode).strip().lower()
         if mode == "magnitude":
-            values = magnitude * (1.0 + 0.5 * normalized) * global_phase
+            values = 1.0 + 0.5 * normalized
             name = f"Linear magnitude ramp {axis_name.upper()}"
         elif mode == "phase":
-            values = magnitude * np.exp(
-                1j * (np.deg2rad(phase_deg) + np.pi * normalized)
-            )
+            values = np.exp(1j * np.pi * normalized)
             name = f"Linear phase ramp {axis_name.upper()}"
         else:
             raise ValueError("ramp mode must be 'magnitude' or 'phase'")
-        if kind == "receive":
-            values = values[None, ...]
-        return B1Field(
-            data=values,
-            fov_m=fov_m,
-            kind=kind,
-            spatial_ndim=len(shape),
-            name=name,
-        )
 
     values = np.asarray(values, dtype=np.complex128)
-    values = values / _center_reference(values, axes)
+    center_reference = _center_reference(values, axes)
+    if kind == "receive" and values.ndim == len(shape) + 1:
+        reference_magnitude = np.sqrt(np.sum(np.abs(values) ** 2, axis=0))
+    else:
+        reference_magnitude = np.abs(values)
+    peak = float(np.max(reference_magnitude))
+    if not np.isfinite(peak) or peak <= np.finfo(float).eps:
+        raise ValueError(f"{kind} B1 preset has no positive finite magnitude")
+    # Retain the established convention that ``phase_deg`` is the phase at the
+    # field centre while making the amplitude reference unambiguous.
+    values = values * np.exp(-1j * np.angle(center_reference)) / peak
     values *= magnitude * global_phase
     return B1Field(
         data=values,

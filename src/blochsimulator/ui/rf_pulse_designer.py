@@ -215,15 +215,13 @@ class RFPulseDesigner(QGroupBox):
 
         slr_layout = QHBoxLayout()
         slr_layout.addWidget(QLabel("SLR sharpness:"))
-        self.slr_sharpness = QDoubleSpinBox()
+        self.slr_sharpness = QSpinBox()
         self.slr_sharpness.setObjectName(f"{prefix}slr_sharpness")
-        self.slr_sharpness.setRange(0.1, 20.0)
-        self.slr_sharpness.setDecimals(2)
-        self.slr_sharpness.setSingleStep(0.5)
-        self.slr_sharpness.setValue(1.0)
+        self.slr_sharpness.setRange(1, 20)
+        self.slr_sharpness.setValue(1)
         self.slr_sharpness.setToolTip(
-            "Higher sharpness produces a narrower SLR transition and more "
-            "temporal lobes"
+            "Integer SLR order. Order 1 is a single central lobe; higher "
+            "orders narrow the transition and add temporal side lobes"
         )
         self.slr_sharpness.valueChanged.connect(self.update_pulse)
         slr_layout.addWidget(self.slr_sharpness)
@@ -239,7 +237,9 @@ class RFPulseDesigner(QGroupBox):
         self.apodization_combo.addItems(["None", "Hamming", "Hanning", "Blackman"])
         self.apodization_combo.currentTextChanged.connect(self.update_pulse)
         apod_layout.addWidget(self.apodization_combo)
-        control_layout.addLayout(apod_layout)
+        self.apodization_container = QWidget()
+        self.apodization_container.setLayout(apod_layout)
+        control_layout.addWidget(self.apodization_container)
 
         # Phase
         phase_layout = QHBoxLayout()
@@ -435,9 +435,7 @@ class RFPulseDesigner(QGroupBox):
         except Exception:
             return 1.0
 
-    def _scale_pulse_to_flip(
-        self, b1_wave, t_wave, flip_deg: float, integfac: float = 1.0
-    ):
+    def _scale_pulse_to_flip(self, b1_wave, t_wave, flip_deg: float):
         """Scale a complex waveform to achieve a target flip angle (degrees)."""
         b1_wave = np.asarray(b1_wave, dtype=complex)
         t_wave = np.asarray(t_wave, dtype=float)
@@ -447,12 +445,15 @@ class RFPulseDesigner(QGroupBox):
         peak = np.max(np.abs(b1_wave)) if np.any(np.abs(b1_wave)) else 1.0
         shape = b1_wave / peak if peak != 0 else b1_wave
         dt = float(np.median(np.diff(t_wave))) if len(t_wave) > 1 else 1e-6
-        area = np.trapezoid(shape, dx=dt)
+        # RF samples are piecewise constant raster cells in the simulator, so
+        # use the same rectangular integral here.  The shape integration
+        # factor is already represented by this coherent area and must not be
+        # applied a second time.
+        area = np.sum(shape) * dt
         opt_phase = -np.angle(area) if np.isfinite(area) and area != 0 else 0.0
         aligned_area = np.real(area * np.exp(1j * opt_phase))
         if not np.isfinite(aligned_area) or abs(aligned_area) < 1e-12:
             aligned_area = 1e-12
-        aligned_area *= max(integfac, 1e-9)
         gmr_1h_rad_Ts = 267522187.43999997
         pulse_amp_T = flip_rad / (gmr_1h_rad_Ts * aligned_area)
         pulse_amp_G = pulse_amp_T * 1e4
@@ -511,6 +512,7 @@ class RFPulseDesigner(QGroupBox):
 
         # Show/hide controls based on type
         self.lobes_container.setVisible(pulse_type == "sinc")
+        self.apodization_container.setVisible(pulse_type == "sinc")
         self.design_tbw_container.setVisible(False)
         self.slr_sharpness_container.setVisible(pulse_type == "slr")
         self.custom_info_label.setVisible(pulse_type == "custom")
@@ -530,14 +532,18 @@ class RFPulseDesigner(QGroupBox):
 
             original_b1 = self.loaded_pulse_b1
             original_time = self.loaded_pulse_time
-            original_duration = (
-                original_time[-1] - original_time[0] if len(original_time) > 1 else 1e-6
-            )
+            if len(original_time) > 1:
+                original_relative_time = original_time - original_time[0]
+                original_dt = float(np.median(np.diff(original_relative_time)))
+                original_duration = float(original_relative_time[-1] + original_dt)
+            else:
+                original_relative_time = np.zeros_like(original_time)
+                original_duration = 1e-6
 
             # Resample to new duration
             if duration > 0 and original_duration > 0:
                 time_scale = duration / original_duration
-                new_time = original_time * time_scale
+                new_time = original_relative_time * time_scale
                 # Simple resampling (linear interp) if points are sparse, or just use scaled time
                 # Ideally we want to preserve shape. Just scaling time vector is enough if we don't change point count.
                 b1 = original_b1.copy()
@@ -596,7 +602,7 @@ class RFPulseDesigner(QGroupBox):
                 b1 = shape * b1_override
             else:
                 # Auto (Flip Angle)
-                b1 = self._scale_pulse_to_flip(b1, time, flip, integfac=integfac)
+                b1 = self._scale_pulse_to_flip(b1, time, flip)
 
             # Store a baseband waveform. The sequence rasterizer applies the
             # RF carrier later using absolute sequence time.
@@ -638,7 +644,7 @@ class RFPulseDesigner(QGroupBox):
 
         # Apodization
         window_type = self.apodization_combo.currentText()
-        if window_type != "None" and len(shape) > 1:
+        if pulse_type == "sinc" and window_type != "None" and len(shape) > 1:
             if window_type == "Hamming":
                 win = np.hamming(len(shape))
             elif window_type == "Hanning":
@@ -726,18 +732,18 @@ class RFPulseDesigner(QGroupBox):
             try:
                 suffix = Path(filename).suffix.lower()
                 if suffix == ".exc":
-                    from ..pulse_loader import load_pulse_from_file as load_exc_file
+                    from ..pulse_loader import load_pulse_from_file
 
-                    b1, time, metadata = load_exc_file(filename)
+                    b1, time, metadata = load_pulse_from_file(filename)
                 else:
                     # Let user describe how to interpret amp/phase text files
                     dlg = PulseImportDialog(self, filename)
                     if dlg.exec_() != QDialog.Accepted:
                         return
                     opts = dlg.get_options()
-                    from ..pulse_loader import load_amp_phase_dat
+                    from ..pulse_loader import load_pulse_from_file
 
-                    b1, time, metadata = load_amp_phase_dat(
+                    b1, time, metadata = load_pulse_from_file(
                         filename,
                         duration_s=opts["duration_s"],
                         amplitude_unit=opts["amp_unit"],
@@ -870,7 +876,9 @@ class RFPulseDesigner(QGroupBox):
                 if "sinc_lobes" in state:
                     self.sinc_lobes.setValue(state["sinc_lobes"])
                 if "slr_sharpness" in state:
-                    self.slr_sharpness.setValue(state["slr_sharpness"])
+                    self.slr_sharpness.setValue(
+                        int(round(float(state["slr_sharpness"])))
+                    )
                 if "apodization" in state:
                     self.apodization_combo.setCurrentText(state["apodization"])
 

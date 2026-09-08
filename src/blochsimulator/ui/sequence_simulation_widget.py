@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import math
+import re
 import sys
 import tempfile
 import time
@@ -165,6 +166,14 @@ def _add_form_section(form: QFormLayout, title: str) -> None:
     label.setFont(font)
     form.addRow(separator)
     form.addRow(label)
+
+
+def _set_form_row_visible(form: QFormLayout, field: QWidget, visible: bool) -> None:
+    """Show or collapse a labelled form row as one UI unit."""
+    label = form.labelForField(field)
+    if label is not None:
+        label.setVisible(bool(visible))
+    field.setVisible(bool(visible))
 
 
 def _representative_sample_indices(values, max_samples):
@@ -1052,6 +1061,7 @@ class SequenceSimulationWidget(QWidget):
         self._generated_sequence_source_index = None
         self._selected_sequence_source_index = 0
         self._generation_error = ""
+        self._generation_recovery_note = ""
         self._probe_frequency_defaults_initialized = False
         self.acquisition: Optional[CartesianAcquisition] = None
         self.acquisition_frames: Optional[CartesianAcquisitionFrames] = None
@@ -1224,6 +1234,8 @@ class SequenceSimulationWidget(QWidget):
         )
         self.subvoxel_sampling_method = subvoxel_sampling_method
         self._build_ui()
+        self._last_valid_epi_bandwidth_khz = self.sampling_bandwidth_khz.value()
+        self._last_valid_flash_bandwidth_khz = self.flash_sampling_bandwidth_khz.value()
         self._connect_rf_designer(parent)
         self._load_internal_sequence()
 
@@ -1374,6 +1386,122 @@ class SequenceSimulationWidget(QWidget):
         ):
             self._request_generated_sequence_refresh()
 
+    def rf_designer_pulse_state(self):
+        """Return the Sequence Mode RF waveform in project-safe form."""
+        if self._rf_designer_pulse_data is None:
+            return None
+        state = dict(self._rf_designer_pulse_data)
+        state["waveform_hz"] = np.array(state["waveform_hz"], copy=True)
+        return state
+
+    @staticmethod
+    def _rf_designer_pulse_state_from_program(program):
+        """Recover a missing legacy designer waveform from a saved program."""
+        if program is None or not program.rf_events:
+            return None
+        definitions = dict(program.metadata.get("definitions", {}))
+        if str(definitions.get("RFPulseType", "")).lower() != "designer":
+            return None
+
+        try:
+            target_flip_angle_deg = float(definitions.get("FlipAngleDeg"))
+        except (TypeError, ValueError):
+            target_flip_angle_deg = float("nan")
+
+        # Preparation pulses can precede the main excitation.  Prefer the RF
+        # event whose coherent flip is closest to the sequence's nominal flip.
+        candidates = []
+        for event in program.rf_events:
+            waveform_hz = np.asarray(event.samples_hz, dtype=np.complex128)
+            flip_angle_deg = 360.0 * abs(np.sum(waveform_hz) * event.raster_s)
+            distance = (
+                abs(flip_angle_deg - target_flip_angle_deg)
+                if np.isfinite(target_flip_angle_deg)
+                else -flip_angle_deg
+            )
+            candidates.append((distance, -flip_angle_deg, event, waveform_hz))
+        _, _, event, waveform_hz = min(candidates, key=lambda item: item[:2])
+        actual_flip_angle_deg = 360.0 * abs(np.sum(waveform_hz) * event.raster_s)
+        reference_flip_angle_deg = (
+            target_flip_angle_deg
+            if np.isfinite(target_flip_angle_deg) and target_flip_angle_deg > 0.0
+            else actual_flip_angle_deg
+        )
+        time_bandwidth_product = definitions.get("RFTimeBandwidthProduct", 0.0)
+        try:
+            time_bandwidth_product = float(time_bandwidth_product)
+        except (TypeError, ValueError):
+            time_bandwidth_product = 0.0
+        if not np.isfinite(time_bandwidth_product) or time_bandwidth_product <= 0.0:
+            time_bandwidth_product = rf_time_bandwidth_product_from_envelope(
+                waveform_hz
+            )
+        return {
+            "waveform_hz": np.array(waveform_hz, copy=True),
+            "raster_s": float(event.raster_s),
+            "duration_s": float(waveform_hz.size * event.raster_s),
+            "flip_angle_deg": float(reference_flip_angle_deg),
+            "name": str(definitions.get("RFDesignerPulseName", "designer")),
+            "frequency_offset_hz": float(
+                definitions.get("RFFrequencyOffset", event.frequency_offset_hz)
+            ),
+            "time_bandwidth_product": float(time_bandwidth_product),
+        }
+
+    def restore_rf_designer_pulse_state(self, state, *, program=None):
+        """Restore a persisted waveform, with migration for legacy projects."""
+        if not state:
+            state = self._rf_designer_pulse_state_from_program(program)
+        if not state:
+            return False
+
+        waveform_hz = np.asarray(
+            state.get("waveform_hz", ()), dtype=np.complex128
+        ).reshape(-1)
+        raster_s = float(state.get("raster_s", 0.0))
+        if (
+            waveform_hz.size == 0
+            or not np.all(np.isfinite(waveform_hz))
+            or not np.isfinite(raster_s)
+            or raster_s <= 0.0
+        ):
+            raise ValueError("Saved RF Designer waveform is invalid")
+        flip_angle_deg = float(state.get("flip_angle_deg", 0.0))
+        if not np.isfinite(flip_angle_deg) or flip_angle_deg <= 0.0:
+            raise ValueError("Saved RF Designer flip angle is invalid")
+        time_bandwidth_product = float(state.get("time_bandwidth_product", 0.0))
+        if not np.isfinite(time_bandwidth_product) or time_bandwidth_product <= 0.0:
+            time_bandwidth_product = rf_time_bandwidth_product_from_envelope(
+                waveform_hz
+            )
+        frequency_offset_hz = float(state.get("frequency_offset_hz", 0.0))
+        if not np.isfinite(frequency_offset_hz):
+            raise ValueError("Saved RF Designer frequency offset is invalid")
+        waveform_hz = np.array(waveform_hz, copy=True)
+        waveform_hz.setflags(write=False)
+        self._rf_designer_pulse_data = {
+            "waveform_hz": waveform_hz,
+            "raster_s": raster_s,
+            "duration_s": float(waveform_hz.size * raster_s),
+            "flip_angle_deg": flip_angle_deg,
+            "name": str(state.get("name", "designer")),
+            "frequency_offset_hz": frequency_offset_hz,
+            "time_bandwidth_product": time_bandwidth_product,
+        }
+        self._rf_designer_pulse_error = ""
+        for prefix in (
+            "epi",
+            "csi",
+            "flash",
+            "bssfp",
+            "ss_bssfp",
+            "radial_me",
+            "me_bssfp",
+        ):
+            if self._selected_shared_rf_pulse_type(prefix) == "designer":
+                self._update_shared_rf_controls(prefix)
+        return True
+
     def _load_sequence_rf_pulse(self, prefix):
         """Load a Free-Mode-compatible RF file directly from Sequence Mode."""
         filename, _ = QFileDialog.getOpenFileName(
@@ -1395,9 +1523,9 @@ class SequenceSimulationWidget(QWidget):
                 if dialog.exec_() != QDialog.Accepted:
                     return
                 options = dialog.get_options()
-                from ..pulse_loader import load_amp_phase_dat
+                from ..pulse_loader import load_pulse_from_file
 
-                b1_gauss, time_s, metadata = load_amp_phase_dat(
+                b1_gauss, time_s, metadata = load_pulse_from_file(
                     path,
                     duration_s=options["duration_s"],
                     amplitude_unit=options["amp_unit"],
@@ -1430,8 +1558,15 @@ class SequenceSimulationWidget(QWidget):
             )
             if self._rf_designer_pulse_data is None:
                 raise ValueError(self._rf_designer_pulse_error)
-            getattr(self, f"{prefix}_rf_pulse_type").setCurrentText("RF Pulse Designer")
+            pulse_type = getattr(self, f"{prefix}_rf_pulse_type")
+            designer_was_selected = pulse_type.currentText() == "RF Pulse Designer"
+            pulse_type.setCurrentText("RF Pulse Designer")
             self._update_shared_rf_controls(prefix)
+            # The first loaded waveform normally triggers regeneration through
+            # the combo-box change. Replacing it does not change the selection,
+            # so explicitly invalidate the generated program in that case.
+            if designer_was_selected:
+                self._request_generated_sequence_refresh()
         except Exception as exc:
             QMessageBox.critical(self, "RF pulse load failed", str(exc))
 
@@ -1603,6 +1738,7 @@ class SequenceSimulationWidget(QWidget):
 
         self.acquisition_group = QGroupBox("2D acquisition (EPI / spiral)")
         acquisition_form = _left_aligned_form(self.acquisition_group)
+        self.epi_form = acquisition_form
         self.acquisition_hint = QLabel(
             "Choose a Cartesian EPI echo train or a continuous centre-out "
             "spiral readout."
@@ -1808,6 +1944,7 @@ class SequenceSimulationWidget(QWidget):
 
         self.csi_group = QGroupBox("CSI acquisition")
         csi_form = _left_aligned_form(self.csi_group)
+        self.csi_form = csi_form
         csi_hint = QLabel(
             "2D phase-encoded chemical-shift imaging with one FID per k-space "
             "location. Spectral bandwidth and points define the FID."
@@ -1941,6 +2078,7 @@ class SequenceSimulationWidget(QWidget):
 
         self.flash_group = QGroupBox("FLASH acquisition (2D)")
         flash_form = _left_aligned_form(self.flash_group)
+        self.flash_form = flash_form
         flash_hint = QLabel(
             "Slice-selective Cartesian spoiled gradient echo with configurable "
             "RF and gradient spoiling. One readout line is acquired per TR."
@@ -2069,6 +2207,7 @@ class SequenceSimulationWidget(QWidget):
 
         self.bssfp_group = QGroupBox("bSSFP acquisition (3D)")
         bssfp_form = _left_aligned_form(self.bssfp_group)
+        self.bssfp_form = bssfp_form
         bssfp_hint = QLabel(
             "Fully balanced non-selective 3D Cartesian bSSFP. Phase and "
             "partition gradients are rewound in every TR."
@@ -2212,6 +2351,7 @@ class SequenceSimulationWidget(QWidget):
 
         self.ss_bssfp_group = QGroupBox("Spectrally selective bSSFP (3D)")
         ss_form = _left_aligned_form(self.ss_bssfp_group)
+        self.ss_bssfp_form = ss_form
         ss_hint = QLabel(
             "Alternating-frequency Cartesian 3D SS-bSSFP following Skinner "
             "et al. (doi:10.1002/mrm.29676). One target is acquired per volume."
@@ -2405,6 +2545,7 @@ class SequenceSimulationWidget(QWidget):
 
         self.radial_me_bssfp_group = QGroupBox("Radial multi-echo bSSFP (3D)")
         radial_form = _left_aligned_form(self.radial_me_bssfp_group)
+        self.radial_me_form = radial_form
         radial_hint = QLabel(
             "Center-through 3D radial ME-bSSFP with spiral phyllotaxis and "
             "monopolar echoes following Wang et al. (doi:10.1002/mrm.30614). "
@@ -2544,6 +2685,7 @@ class SequenceSimulationWidget(QWidget):
 
         self.me_bssfp_group = QGroupBox("Cartesian multi-echo bSSFP (3D)")
         me_form = _left_aligned_form(self.me_bssfp_group)
+        self.me_bssfp_form = me_form
         me_hint = QLabel(
             "Balanced Cartesian 3D ME-bSSFP following Gaubatz (2023), with "
             "selectable monopolar flyback or symmetric bipolar readout."
@@ -3865,7 +4007,8 @@ class SequenceSimulationWidget(QWidget):
         widget.setSuffix(" kHz")
         widget.setToolTip(
             "Total ADC sampling bandwidth; dwell is derived as 1 / bandwidth "
-            "and rounded to the scanner ADC raster"
+            "and rounded to the scanner ADC raster. After generation, this field "
+            "shows the nearest hardware-compatible bandwidth actually used."
         )
         return widget
 
@@ -3878,7 +4021,7 @@ class SequenceSimulationWidget(QWidget):
         duration_ms=1.0,
         sinc_lobes=3,
         apodization=0.5,
-        slr_sharpness=1.0,
+        slr_sharpness=1,
         frequency_offset_hz=0.0,
         label_prefix="RF",
     ):
@@ -3911,13 +4054,17 @@ class SequenceSimulationWidget(QWidget):
         apod = self._parameter_spin(0.0, 1.0, apodization, "")
         apod.setObjectName(f"{prefix}_rf_apodization")
         apod.setSingleStep(0.05)
-        apod.setToolTip("Cosine apodization of the shared Sinc envelope")
-        sharpness = self._parameter_spin(0.1, 20.0, slr_sharpness, "")
+        apod.setToolTip(
+            "Non-negative Sinc apodization: 0 is rectangular, 0.5 is Hann, "
+            "and 1 is Hann squared"
+        )
+        sharpness = QSpinBox()
+        sharpness.setRange(1, 20)
+        sharpness.setValue(max(1, int(slr_sharpness)))
         sharpness.setObjectName(f"{prefix}_rf_slr_sharpness")
-        sharpness.setSingleStep(0.5)
         sharpness.setToolTip(
-            "Higher sharpness narrows the SLR transition and produces more "
-            "temporal lobes"
+            "Integer SLR order. Order 1 is a single central lobe; higher "
+            "orders narrow the transition and add temporal side lobes"
         )
         bandwidth = self._parameter_spin(0.1, 1_000_000.0, 1.0, " Hz")
         bandwidth.setObjectName(f"{prefix}_rf_bandwidth_hz")
@@ -3953,9 +4100,19 @@ class SequenceSimulationWidget(QWidget):
         form.addRow(f"{label_prefix} pulse type", pulse_type_control)
         form.addRow(f"{label_prefix} duration", duration)
         form.addRow(f"{label_prefix} time-bandwidth product", tbw)
-        form.addRow("Sinc lobes", lobes)
-        form.addRow("Sinc apodization", apod)
-        form.addRow("SLR sharpness", sharpness)
+        sinc_lobes_label = QLabel("Sinc lobes")
+        sinc_apodization_label = QLabel("Sinc apodization")
+        slr_sharpness_label = QLabel("SLR sharpness")
+        form.addRow(sinc_lobes_label, lobes)
+        form.addRow(sinc_apodization_label, apod)
+        form.addRow(slr_sharpness_label, sharpness)
+        setattr(self, f"{prefix}_rf_sinc_lobes_label", sinc_lobes_label)
+        setattr(
+            self,
+            f"{prefix}_rf_apodization_label",
+            sinc_apodization_label,
+        )
+        setattr(self, f"{prefix}_rf_slr_sharpness_label", slr_sharpness_label)
         form.addRow(f"{label_prefix} bandwidth (auto)", bandwidth)
         form.addRow(f"{label_prefix} frequency offset", frequency_offset)
         form.addRow("Loaded waveform", load_button)
@@ -4006,9 +4163,15 @@ class SequenceSimulationWidget(QWidget):
         loaded = pulse_type == "designer"
         getattr(self, f"{prefix}_rf_duration_ms").setEnabled(not loaded)
         getattr(self, f"{prefix}_rf_time_bandwidth_product").setEnabled(False)
-        getattr(self, f"{prefix}_rf_sinc_lobes").setEnabled(pulse_type == "sinc")
-        getattr(self, f"{prefix}_rf_apodization").setEnabled(pulse_type == "sinc")
-        getattr(self, f"{prefix}_rf_slr_sharpness").setEnabled(pulse_type == "slr")
+        for suffix, visible in (
+            ("sinc_lobes", pulse_type == "sinc"),
+            ("apodization", pulse_type == "sinc"),
+            ("slr_sharpness", pulse_type == "slr"),
+        ):
+            control = getattr(self, f"{prefix}_rf_{suffix}")
+            control.setVisible(visible)
+            control.setEnabled(visible)
+            getattr(self, f"{prefix}_rf_{suffix}_label").setVisible(visible)
         offset = getattr(self, f"{prefix}_rf_offset_hz")
         offset.setEnabled(not loaded)
         if loaded and self._rf_designer_pulse_data is not None:
@@ -4443,7 +4606,8 @@ class SequenceSimulationWidget(QWidget):
             self._reload_selected_generated_sequence()
 
     def _generate_sequence_clicked(self):
-        self._reload_selected_generated_sequence()
+        if not self._reload_selected_generated_sequence():
+            self._show_generation_error_dialog()
 
     def _ensure_current_generated_sequence(self):
         source_index = self.sequence_source.currentIndex()
@@ -4484,6 +4648,7 @@ class SequenceSimulationWidget(QWidget):
         )
         previous_state = {name: getattr(self, name) for name in state_names}
         self._generation_error = ""
+        self._generation_recovery_note = ""
         self._preserve_sequence_plot_range_on_next_show = bool(
             self.program is not None
             and self._generated_sequence_source_index == source_index
@@ -4505,6 +4670,8 @@ class SequenceSimulationWidget(QWidget):
             setattr(self, name, value)
         self._sequence_generation_pending = True
         message = self._generation_error or "Sequence generation failed."
+        if self._generation_recovery_note:
+            message += f"\n{self._generation_recovery_note}"
         if self.program is None:
             message += "\nNo usable sequence is currently loaded."
         else:
@@ -5954,11 +6121,15 @@ class SequenceSimulationWidget(QWidget):
         increment.setEnabled(rf_requested)
         use_ernst = can_use and use_control.isChecked()
         flip_control.setEnabled(not variable_enabled and not use_ernst)
+        form = getattr(self, f"{prefix}_form")
+        _set_form_row_visible(form, info, use_ernst)
         if variable_control is not None:
             variable_control.setEnabled(not use_ernst)
-            getattr(self, f"{prefix}_vfa_final_flip_angle_deg").setEnabled(
-                variable_enabled
-            )
+            final_flip = getattr(self, f"{prefix}_vfa_final_flip_angle_deg")
+            schedule_info = getattr(self, f"{prefix}_vfa_info")
+            final_flip.setEnabled(variable_enabled)
+            _set_form_row_visible(form, final_flip, variable_enabled)
+            _set_form_row_visible(form, schedule_info, variable_enabled)
         if variable_enabled:
             info.setText("Unavailable while variable flip angle is enabled.")
         elif context is None:
@@ -6070,9 +6241,7 @@ class SequenceSimulationWidget(QWidget):
         self._update_bssfp_preparation_controls()
 
     def _update_bssfp_preparation_controls(self):
-        enabled = self.bssfp_alpha_half.isChecked()
         self._update_bssfp_startup_value_controls("bssfp")
-        self.bssfp_alpha_half_phase_deg.setEnabled(enabled)
 
     def _update_bssfp_startup_value_controls(self, prefix):
         enabled = getattr(self, f"{prefix}_alpha_half").isChecked()
@@ -6080,11 +6249,17 @@ class SequenceSimulationWidget(QWidget):
         use_ratios = use_ratios_control.isChecked()
         ratio_container = getattr(self, f"{prefix}_alpha_half_ratio_container")
         absolute_container = getattr(self, f"{prefix}_alpha_half_absolute_container")
+        form = getattr(self, f"{prefix}_form")
         use_ratios_control.setEnabled(enabled)
-        ratio_container.setVisible(use_ratios)
+        _set_form_row_visible(form, use_ratios_control, enabled)
+        ratio_container.setVisible(enabled and use_ratios)
         ratio_container.setEnabled(enabled)
-        absolute_container.setVisible(not use_ratios)
+        absolute_container.setVisible(enabled and not use_ratios)
         absolute_container.setEnabled(enabled)
+        phase_control = getattr(self, f"{prefix}_alpha_half_phase_deg", None)
+        if phase_control is not None:
+            phase_control.setEnabled(enabled)
+            _set_form_row_visible(form, phase_control, enabled)
 
     def _update_ss_bssfp_labels(self):
         self._update_shared_rf_controls("ss_bssfp")
@@ -6703,6 +6878,9 @@ class SequenceSimulationWidget(QWidget):
         try:
             sequence = make_pulseq_epi(**self._epi_pulseq_parameters())
             self._set_generated_pulseq_sequence(sequence, "internal-cartesian-epi")
+            self._sync_sampling_bandwidth_control(self.sampling_bandwidth_khz, sequence)
+            self._last_valid_epi_bandwidth_khz = self.sampling_bandwidth_khz.value()
+            self._update_bandwidth_labels()
             return True
         except Exception as exc:
             self._generated_pulseq_sequence = None
@@ -6710,6 +6888,11 @@ class SequenceSimulationWidget(QWidget):
             self.program = None
             self._acquisition_compiled = None
             self._generation_error = f"Invalid Cartesian acquisition: {exc}"
+            self._restore_sampling_bandwidth_after_failure(
+                self.sampling_bandwidth_khz,
+                self._last_valid_epi_bandwidth_khz,
+                exc,
+            )
             return False
 
     def _load_spiral(self):
@@ -6750,6 +6933,13 @@ class SequenceSimulationWidget(QWidget):
         try:
             sequence = make_pulseq_flash(**self._flash_pulseq_parameters())
             self._set_generated_pulseq_sequence(sequence, "internal-flash-2d")
+            self._sync_sampling_bandwidth_control(
+                self.flash_sampling_bandwidth_khz, sequence
+            )
+            self._last_valid_flash_bandwidth_khz = (
+                self.flash_sampling_bandwidth_khz.value()
+            )
+            self._update_flash_labels()
             return True
         except Exception as exc:
             self._generated_pulseq_sequence = None
@@ -6761,6 +6951,11 @@ class SequenceSimulationWidget(QWidget):
             self.spiral_acquisition = None
             self.spectroscopic_acquisition = None
             self._generation_error = f"Invalid FLASH sequence: {exc}"
+            self._restore_sampling_bandwidth_after_failure(
+                self.flash_sampling_bandwidth_khz,
+                self._last_valid_flash_bandwidth_khz,
+                exc,
+            )
             return False
 
     def _load_bssfp(self):
@@ -6858,6 +7053,45 @@ class SequenceSimulationWidget(QWidget):
         self._configure_frame_selector()
         self._configure_spectroscopy_selectors()
         self._show_program()
+
+    @staticmethod
+    def _sync_sampling_bandwidth_control(control, sequence):
+        """Show the hardware-compatible bandwidth selected by the builder."""
+        try:
+            actual_khz = float(sequence.definitions["SamplingBandwidth"]) / 1000.0
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return
+        if not np.isfinite(actual_khz) or actual_khz <= 0:
+            return
+        previous = control.blockSignals(True)
+        control.setValue(actual_khz)
+        control.blockSignals(previous)
+
+    def _restore_sampling_bandwidth_after_failure(self, control, last_valid_khz, error):
+        """Restore a changed bandwidth when the failure points to readout limits."""
+        error_text = str(error).lower()
+        bandwidth_related = any(
+            phrase in error_text
+            for phrase in (
+                "bandwidth",
+                "adc",
+                "raster",
+                "amplitude",
+                "gradient",
+                "slew",
+                "larger than max",
+                "system limits",
+            )
+        )
+        if not bandwidth_related or np.isclose(control.value(), last_valid_khz):
+            return
+        previous = control.blockSignals(True)
+        control.setValue(last_valid_khz)
+        control.blockSignals(previous)
+        self._generation_recovery_note = (
+            f"Sampling bandwidth was restored to the last valid value, "
+            f"{control.value():.3f} kHz."
+        )
 
     def _infer_current_acquisition(self, compiled=None):
         """Attach CSI, 2D-frame, or 3D-volume layout to the current program."""
@@ -7522,6 +7756,81 @@ class SequenceSimulationWidget(QWidget):
         self.sequence_summary_table.setVisible(False)
         self.sequence_info.setVisible(True)
         self.sequence_info.setText(str(message))
+
+    def _generation_error_guidance(self, error):
+        """Translate low-level sequence errors into a useful next action."""
+        error = str(error or "Sequence generation failed.")
+        minimum_match = re.search(
+            r"(echo_time_s|repetition_time_s|acquisition_interval_s) is too short; "
+            r"minimum is ([0-9.eE+-]+) s",
+            error,
+        )
+        if minimum_match:
+            field, minimum_s = minimum_match.groups()
+            label = {
+                "echo_time_s": "echo time (TE)",
+                "repetition_time_s": "repetition time (TR)",
+                "acquisition_interval_s": "acquisition interval",
+            }[field]
+            return (
+                f"Increase the {label} to at least "
+                f"{float(minimum_s) * 1000.0:.6g} ms."
+            )
+        if "error_type='RASTER'" in error or "does not align" in error.lower():
+            return (
+                "An event falls between the scanner's supported timing-raster "
+                "points. Try a nearby sampling bandwidth or timing value."
+            )
+        if "sampling bandwidth exceeds the ADC raster capability" in error.lower():
+            maximum_khz = 1.0 / self.scanner_parameters.adc_raster_time_s / 1000.0
+            return (
+                "Reduce the sampling bandwidth to no more than "
+                f"{maximum_khz:.6g} kHz for the current ADC raster."
+            )
+        if any(
+            phrase in error.lower()
+            for phrase in (
+                "max_grad",
+                "maximum gradient",
+                "larger than max",
+                "amplitude",
+                "slew",
+                "system limits",
+            )
+        ):
+            return (
+                "The requested readout exceeds the scanner gradient or slew-rate "
+                "limits. Reduce bandwidth or matrix size, or increase the FOV or "
+                "available readout time."
+            )
+        return (
+            "Adjust the sequence parameters indicated by the technical details, "
+            "then generate the sequence again."
+        )
+
+    def _show_generation_error_dialog(self):
+        """Show concise recovery guidance with the complete error log attached."""
+        error = self._generation_error or "Sequence generation failed."
+        retained = (
+            "The last valid sequence remains loaded."
+            if self.program is not None
+            else "No valid generated sequence is currently loaded."
+        )
+        recovery = (
+            f"{self._generation_recovery_note}\n"
+            if self._generation_recovery_note
+            else ""
+        )
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Critical)
+        dialog.setWindowTitle("Sequence settings not valid")
+        dialog.setText("The current settings cannot produce a valid sequence.")
+        dialog.setInformativeText(
+            f"{self._generation_error_guidance(error)}\n\n{recovery}{retained}"
+        )
+        dialog.setDetailedText(error)
+        dialog.setStandardButtons(QMessageBox.Ok)
+        dialog.exec_()
 
     def _set_sequence_summary(self, rows, plain_text):
         """Show only the sequence name while retaining the full text for APIs."""
@@ -8796,12 +9105,7 @@ class SequenceSimulationWidget(QWidget):
             return
         if self.sequence_source.currentIndex() in self.GENERATED_SOURCES:
             if not self._ensure_current_generated_sequence():
-                QMessageBox.warning(
-                    self,
-                    "Sequence generation failed",
-                    self._generation_error
-                    or "Generate a valid sequence before running the simulation.",
-                )
+                self._show_generation_error_dialog()
                 return
         if self.program is None:
             QMessageBox.warning(
