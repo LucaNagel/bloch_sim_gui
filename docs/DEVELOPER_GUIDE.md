@@ -27,13 +27,40 @@ Follow these steps to publish a new version of BlochSimulator. This process is h
 Use the included helper script to update version numbers across all files (`pyproject.toml`, `setup.py`, etc.).
 
 ```bash
-# Replace 1.0.6 with your new version number
-python bump_version.py 1.0.6
+# Replace 2.6.4 with your new version number
+python bump_version.py 2.6.4
 ```
 
 This script will:
 *   Update version strings in `pyproject.toml`, `setup.py`, `src/blochsimulator/simulator.py`, `src/blochsimulator/gui.py`, `docs/conf.py`, and `src/blochsimulator/__init__.py`.
 *   Print the exact git commands you need to run to commit and tag the release.
+
+### Step 2: Commit and Push the Version Bump
+
+Commit the updated version files and push the commit to the appropriate release
+branch. For a stable release, use `main`:
+
+```bash
+git add .
+git commit -m "Bump version to 2.6.4"
+git push origin main
+```
+
+### Step 3: Create and Push the Release Tag
+
+Wait for the push-triggered `Tests` workflow to succeed on the exact release
+commit. Only then create the tag on that commit and push it explicitly:
+
+```bash
+git tag v2.6.4
+git push origin v2.6.4
+```
+
+Pushing the branch does **not** push a newly created tag automatically. Verify
+that `git status` shows the intended branch and that `git show v2.6.4` points to
+the version-bump commit before pushing the tag. If you are preparing a
+pre-release, use the corresponding development tag (for example,
+`v2.6.4.dev1`) and the `pre-release` branch instead.
 
 ### Release Paths
 
