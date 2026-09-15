@@ -10,6 +10,51 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 
+def _centered_voxel_positions(size: int, fov_m: float) -> np.ndarray:
+    """Return voxel-centre positions for one Cartesian image dimension."""
+    size = int(size)
+    return ((np.arange(size, dtype=float) + 0.5) / size - 0.5) * float(fov_m)
+
+
+def _numeric_metadata_values(value) -> np.ndarray:
+    """Parse a scalar, sequence, or Pulseq-style numeric metadata string."""
+    if value is None:
+        return np.empty(0, dtype=float)
+    if isinstance(value, str):
+        cleaned = value.strip().strip("[](){}").replace(",", " ")
+        return np.fromstring(cleaned, sep=" ", dtype=float)
+    return np.asarray(value, dtype=float).reshape(-1)
+
+
+def _add_cartesian_position_coordinates(
+    coords: dict,
+    acquisition,
+    dimensions: tuple[str, ...],
+    roles: tuple[str, ...],
+) -> None:
+    """Attach logical and scanner-axis voxel-centre coordinates in metres."""
+    fov_by_role = {
+        "read": float(acquisition.fov_m[0]),
+        "phase": float(acquisition.fov_m[1]),
+    }
+    if "partition" in roles:
+        fov_by_role["partition"] = float(acquisition.fov_m[2])
+    matrix_by_role = {
+        "read": int(acquisition.read_matrix),
+        "phase": int(acquisition.phase_matrix),
+    }
+    if "partition" in roles:
+        matrix_by_role["partition"] = int(acquisition.partition_matrix)
+    for role, dimension in zip(roles, dimensions):
+        positions = _centered_voxel_positions(matrix_by_role[role], fov_by_role[role])
+        coords[f"cartesian_{role}_position_m"] = (dimension, positions)
+        axis, sign = acquisition.encoding_frame.axis_and_sign(role)
+        coords[f"cartesian_{axis}_position_m"] = (
+            dimension,
+            float(sign) * positions,
+        )
+
+
 @dataclass(frozen=True)
 class SequenceSimulationResult:
     """ADC, final-state, and optional checkpoint output from one simulation.
@@ -297,6 +342,12 @@ class SequenceSimulationResult:
                 phase_dim,
                 phase_sign * cartesian.k_phase_cyc_per_m,
             )
+            _add_cartesian_position_coordinates(
+                coords,
+                cartesian,
+                (read_dim, phase_dim),
+                ("read", "phase"),
+            )
             data_vars["cartesian_kspace"] = (cartesian_dims, kspace)
             data_vars["cartesian_image"] = (cartesian_dims, image)
             data_vars["cartesian_image_magnitude"] = (
@@ -377,6 +428,12 @@ class SequenceSimulationResult:
                     phase_dim,
                     phase_sign * first.k_phase_cyc_per_m,
                 )
+                _add_cartesian_position_coordinates(
+                    coords,
+                    first,
+                    (read_dim, phase_dim),
+                    ("read", "phase"),
+                )
                 for axis_index, axis in enumerate(
                     cartesian_frames.dimensions.AXIS_NAMES
                 ):
@@ -384,6 +441,35 @@ class SequenceSimulationResult:
                         "cartesian_frame",
                         [frame[axis_index] for frame in cartesian_frames.frame_indices],
                     )
+                coords["cartesian_frame_first_adc_time_s"] = (
+                    "cartesian_frame",
+                    [
+                        float(np.min(np.take(self.adc_times_s, sample_indices)))
+                        for sample_indices in cartesian_frames.sample_indices
+                    ],
+                )
+                echo_times = _numeric_metadata_values(
+                    self.metadata.get("sequence_definitions", {}).get("EchoTimes")
+                )
+                if echo_times.size:
+                    echo_axis_index = cartesian_frames.dimensions.AXIS_NAMES.index(
+                        "echo"
+                    )
+                    frame_echo_indices = np.asarray(
+                        [
+                            frame[echo_axis_index]
+                            for frame in cartesian_frames.frame_indices
+                        ],
+                        dtype=np.int64,
+                    )
+                    if (
+                        np.all(frame_echo_indices >= 0)
+                        and np.max(frame_echo_indices, initial=0) < echo_times.size
+                    ):
+                        coords["cartesian_frame_echo_time_s"] = (
+                            "cartesian_frame",
+                            echo_times[frame_echo_indices],
+                        )
                 data_vars["cartesian_kspace"] = (cartesian_dims, kspace)
                 data_vars["cartesian_image"] = (cartesian_dims, image)
                 data_vars["cartesian_image_magnitude"] = (
@@ -481,6 +567,12 @@ class SequenceSimulationResult:
                     dimension,
                     sign * values,
                 )
+            _add_cartesian_position_coordinates(
+                coords,
+                cartesian_volumes,
+                (read_dim, phase_dim, partition_dim),
+                ("read", "phase", "partition"),
+            )
             data_vars["cartesian_3d_kspace"] = (volume_dims, kspace_3d)
             data_vars["cartesian_3d_image"] = (volume_dims, image_3d)
             data_vars["cartesian_3d_image_magnitude"] = (
@@ -793,6 +885,71 @@ class SequenceSimulationResult:
                 f"{float(value):.17g}" for value in _numeric_definition(echo_times)
             )
         dataset = xr.Dataset(data_vars, coords=coords, attrs=attrs)
+        dataset["signal"].attrs.update(
+            long_name="complex received ADC signal",
+            description=(
+                "Receiver-weighted coherent sum of Mx+iMy over the simulated "
+                "spins, stored in chronological ADC order. This is not a "
+                "voxel-resolved magnetization time series."
+            ),
+            units="a.u.",
+        )
+        dataset["final_magnetization"].attrs.update(
+            long_name="final voxel magnetization",
+            description="Mx, My, and Mz after the final sequence event.",
+            units="simulation magnetization units",
+        )
+        if "checkpoint_magnetization" in dataset:
+            dataset["checkpoint_magnetization"].attrs.update(
+                long_name="voxel magnetization at configured checkpoints",
+                description=(
+                    "Mx, My, and Mz at the explicitly requested checkpoint times."
+                ),
+                units="simulation magnetization units",
+            )
+        reconstructed_descriptions = {
+            "cartesian_kspace": "sorted complex Cartesian k-space",
+            "cartesian_image": (
+                "complex Cartesian image reconstructed from the measured ADC signal"
+            ),
+            "cartesian_image_magnitude": "magnitude of the Cartesian reconstruction",
+            "cartesian_3d_kspace": "sorted complex Cartesian 3D k-space",
+            "cartesian_3d_image": (
+                "complex Cartesian 3D image reconstructed from the measured ADC signal"
+            ),
+            "cartesian_3d_image_magnitude": (
+                "magnitude of the Cartesian 3D reconstruction"
+            ),
+            "spiral_gridded_kspace": "linearly gridded complex spiral k-space",
+            "spiral_image": "complex image reconstructed from the spiral ADC signal",
+            "spiral_image_magnitude": "magnitude of the spiral reconstruction",
+            "csi_kspace": "sorted complex spatial CSI k-space and spectral samples",
+            "csi_spatial_fid": "complex spatially reconstructed CSI free induction decay",
+            "csi_spectrum": "complex spatially resolved CSI spectrum",
+        }
+        for name, description in reconstructed_descriptions.items():
+            if name in dataset:
+                dataset[name].attrs.update(
+                    long_name=description,
+                    description=(
+                        description[0].upper()
+                        + description[1:]
+                        + ". Values are proportional to the measured transverse "
+                        "magnetization and include receive weighting and reconstruction "
+                        "scaling."
+                    ),
+                    units="a.u.",
+                )
+            species_name = f"species_{name}"
+            if species_name in dataset:
+                dataset[species_name].attrs.update(
+                    long_name=f"pool-resolved {description}",
+                    description=(
+                        f"Pool-resolved {description}; select the pool coordinate "
+                        "before analysis."
+                    ),
+                    units="a.u.",
+                )
         dataset["t"].attrs.update(long_name="ADC sample time", units="s")
         dataset["adc_time_s"].attrs.update(long_name="ADC sample time", units="s")
         waveform_units = {
@@ -840,6 +997,14 @@ class SequenceSimulationResult:
         if "spectral_time_s" in dataset.coords:
             dataset["spectral_time_s"].attrs.update(units="s")
             dataset["spectral_frequency_hz"].attrs.update(units="Hz")
+        for name in dataset.coords:
+            if name.endswith("_position_m"):
+                dataset[name].attrs.update(
+                    long_name="Cartesian image voxel-centre position",
+                    units="m",
+                )
+            elif name.endswith("_time_s"):
+                dataset[name].attrs.setdefault("units", "s")
         return dataset
 
     def save(self, filename) -> Path:

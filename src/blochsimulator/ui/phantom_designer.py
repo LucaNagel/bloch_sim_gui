@@ -47,12 +47,11 @@ from ..dynamic_phantom import (
     simulate_two_pool_kinetics,
 )
 from ..paths import workspace_directory
+from ..metabolite_presets import MetabolitePreset, metabolite_presets
 from ..phantom_design import (
-    COMPOUND_PRESETS,
     PhantomDesign,
     ShapeDefinition,
     SpectralPeakDefinition,
-    compound_preset,
 )
 from ..spectral_phantom import SpectralPhantom
 from ..units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm
@@ -597,6 +596,10 @@ class SpectralPhantomDesignerDialog(QDialog):
         sampling_row.addWidget(self.supersampling_factor)
         sampling_row.addStretch()
         geometry_layout.addLayout(sampling_row)
+        # Keep the compact controls together at the top of the group.  Without
+        # an explicit trailing stretch, the configuration row's height is
+        # distributed between the matrix and supersampling layouts.
+        geometry_layout.addStretch(1)
         configuration_row.addWidget(geometry_group, 0)
 
         spectral_group = QGroupBox("Spectral settings and preview")
@@ -681,6 +684,9 @@ class SpectralPhantomDesignerDialog(QDialog):
         spectral_fields.addWidget(QLabel("Edge amplitude"), 3, 2)
         spectral_fields.addWidget(self.b0_inhomogeneity_ppm, 3, 3)
         spectral_fields.addWidget(self.spectral_resolution_info, 4, 0, 1, 4)
+        # Absorb spare vertical space below the resolution instead of between
+        # the field rows, so the resolution reads as part of the settings.
+        spectral_fields.setRowStretch(5, 1)
         spectral_group_layout.addLayout(spectral_fields, 0)
 
         spectral_preview_layout = QVBoxLayout()
@@ -701,9 +707,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.spectral_reference_line.setZValue(100)
         self.spectral_preview_plot.addItem(self.spectral_reference_line)
         spectral_preview_layout.addWidget(self.spectral_preview_plot)
-        self.spectral_preview_info = QLabel("Orange dashed line: sequence reference")
-        self.spectral_preview_info.setWordWrap(True)
-        spectral_preview_layout.addWidget(self.spectral_preview_info)
+        spectral_preview_layout.addStretch(1)
         spectral_group_layout.addLayout(spectral_preview_layout, 1)
 
         self.spectral_window_center_ppm.valueChanged.connect(
@@ -711,6 +715,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         )
         self.field_strength_t.valueChanged.connect(self._spectral_settings_changed)
         self.nucleus.currentIndexChanged.connect(self._spectral_settings_changed)
+        self.nucleus.currentIndexChanged.connect(self._refresh_metabolite_presets)
         self.spectral_bandwidth_ppm.valueChanged.connect(
             self._spectral_settings_changed
         )
@@ -912,30 +917,15 @@ class SpectralPhantomDesignerDialog(QDialog):
         defaults_row.addWidget(self.b0_ppm)
         property_layout.addLayout(defaults_row)
 
-        compound_row = QHBoxLayout()
-        compound_row.addWidget(QLabel("Compound preset"))
-        self.compound_preset_combo = QComboBox()
-        self.compound_preset_combo.setObjectName("compoundPreset")
-        self.compound_preset_combo.addItem("Choose a preset…", None)
-        for preset in COMPOUND_PRESETS:
-            self.compound_preset_combo.addItem(preset.label, preset.identifier)
-        self.compound_preset_combo.setToolTip(
-            "Replace the selected shape's peak list with editable starting "
-            "values and select the matching nucleus."
-        )
-        self.compound_preset_combo.currentIndexChanged.connect(
-            self._apply_compound_preset
-        )
-        compound_row.addWidget(self.compound_preset_combo, 1)
-        property_layout.addLayout(compound_row)
-
         peak_explanation = QLabel(
             "Spin density / concentration sets how much signal-producing material "
             "is present. Initial polarization sets its longitudinal start state; "
             "the initial signal is their product. Polarization 1 is thermal "
             "equilibrium; hyperpolarized values can be much larger. Set spin "
             "density to 0 for a region with no initial material. Leave "
-            "polarization or T1 empty to use the shape default."
+            "polarization or T1 empty to use the shape default. Common-metabolite "
+            "presets add one Lorentzian peak; edit or add peaks to represent "
+            "multiplets and J-coupling."
         )
         peak_explanation.setWordWrap(True)
         property_layout.addWidget(peak_explanation)
@@ -963,6 +953,19 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.peak_table.setWordWrap(False)
         self.peak_table.cellChanged.connect(self._peaks_changed)
         property_layout.addWidget(self.peak_table)
+        metabolite_row = QHBoxLayout()
+        metabolite_row.addWidget(QLabel("Common metabolite"))
+        self.metabolite_preset_combo = QComboBox()
+        self.metabolite_preset_combo.setObjectName("metabolitePresetCombo")
+        self.metabolite_preset_combo.currentIndexChanged.connect(
+            self._update_metabolite_preset_info
+        )
+        metabolite_row.addWidget(self.metabolite_preset_combo, 1)
+        self.add_metabolite_preset_button = QPushButton("Add selected")
+        self.add_metabolite_preset_button.setObjectName("addMetabolitePresetButton")
+        self.add_metabolite_preset_button.clicked.connect(self._add_metabolite_preset)
+        metabolite_row.addWidget(self.add_metabolite_preset_button)
+        property_layout.addLayout(metabolite_row)
         peak_row = QHBoxLayout()
         add_peak = QPushButton("Add peak")
         add_peak.clicked.connect(self._add_peak)
@@ -997,6 +1000,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         )
         self.dynamic_enabled.toggled.connect(self._update_kinetics_preview)
         self.dynamic_enabled.toggled.connect(self._update_spectral_preview)
+        self.dynamic_enabled.toggled.connect(self._refresh_metabolite_presets)
         kinetics_form.addRow(self.dynamic_enabled)
         self.pyruvate_peak_name = QLineEdit("Pyruvate")
         self.lactate_peak_name = QLineEdit("Lactate")
@@ -1366,6 +1370,62 @@ class SpectralPhantomDesignerDialog(QDialog):
         widget.setSuffix(suffix)
         return widget
 
+    def _effective_nucleus(self):
+        nucleus = self.nucleus.currentData()
+        if nucleus is None:
+            dynamic = (
+                hasattr(self, "dynamic_enabled") and self.dynamic_enabled.isChecked()
+            )
+            nucleus = "C13" if dynamic else "H1"
+        return nucleus
+
+    def _refresh_metabolite_presets(self, *_):
+        if not hasattr(self, "metabolite_preset_combo") or not hasattr(
+            self, "dynamic_enabled"
+        ):
+            return
+        nucleus = self._effective_nucleus()
+        previous = self.metabolite_preset_combo.currentData()
+        previous_key = previous.key if isinstance(previous, MetabolitePreset) else None
+        presets = metabolite_presets(nucleus)
+        blocked = self.metabolite_preset_combo.blockSignals(True)
+        self.metabolite_preset_combo.clear()
+        if presets:
+            for preset in presets:
+                self.metabolite_preset_combo.addItem(preset.label, preset)
+            matching_index = next(
+                (
+                    index
+                    for index, preset in enumerate(presets)
+                    if preset.key == previous_key
+                ),
+                0,
+            )
+            self.metabolite_preset_combo.setCurrentIndex(matching_index)
+        else:
+            self.metabolite_preset_combo.addItem(f"No curated {nucleus} presets", None)
+        self.metabolite_preset_combo.blockSignals(blocked)
+        self._update_metabolite_preset_info()
+
+    def _update_metabolite_preset_info(self, *_):
+        preset = self.metabolite_preset_combo.currentData()
+        available = isinstance(preset, MetabolitePreset)
+        self.add_metabolite_preset_button.setEnabled(available)
+        if available:
+            text = preset.relaxation_summary
+            tooltip = (
+                f"{text}\nRelaxation is context-dependent; edit the table values "
+                "for the intended field, tissue, and acquisition."
+            )
+        else:
+            text = (
+                "No curated presets for this nucleus. Peaks can still be added "
+                "manually."
+            )
+            tooltip = text
+        self.metabolite_preset_combo.setToolTip(tooltip)
+        self.add_metabolite_preset_button.setToolTip(tooltip)
+
     def _load_design_into_ui(self):
         self._updating = True
         self.name_edit.setText(self.design.name)
@@ -1421,6 +1481,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             self._create_roi(item, index)
         self._refresh_kinetics_preview_shapes()
         self._updating = False
+        self._refresh_metabolite_presets()
         if self.design.shapes:
             self.shape_list.setCurrentRow(0)
         else:
@@ -1537,59 +1598,11 @@ class SpectralPhantomDesignerDialog(QDialog):
         self.b0_ppm.setValue(item.b0_ppm)
         self.shape_kpl.setValue(item.effective_kpl_s_inv(self.design.default_kpl_s_inv))
         self._populate_peaks(item)
-        previous = self.compound_preset_combo.blockSignals(True)
-        self.compound_preset_combo.setCurrentIndex(0)
-        self.compound_preset_combo.blockSignals(previous)
         self._update_xy_info(row)
         self._updating = False
         self._set_kinetics_preview_shape(row)
         self._update_roi_highlights(row)
         self._update_shape_preview()
-        self._update_kinetics_preview()
-        self._update_spectral_preview()
-
-    def _apply_compound_preset(self, _index=None):
-        identifier = self.compound_preset_combo.currentData()
-        shape_row = self._current_row()
-        peak_row = self.peak_table.currentRow()
-        if self._updating or identifier is None or shape_row is None or peak_row < 0:
-            return
-        preset = compound_preset(str(identifier))
-        item = self.design.shapes[shape_row]
-        reference_ppm = float(self.spectral_reference_ppm.value())
-        item.peaks[peak_row : peak_row + 1] = preset.peak_definitions(reference_ppm)
-        self.design.nucleus = preset.nucleus
-
-        absolute_peak_ppm = [
-            reference_ppm + peak.frequency_ppm + shape.b0_ppm
-            for shape in self.design.shapes
-            for peak in shape.peaks
-        ]
-        low_ppm = min(absolute_peak_ppm)
-        high_ppm = max(absolute_peak_ppm)
-        window_center_ppm = (low_ppm + high_ppm) / 2.0
-        bandwidth_ppm = max(
-            preset.bandwidth_ppm,
-            high_ppm - low_ppm + 4.0,
-        )
-        self.design.spectral_window_center_ppm = window_center_ppm
-        self.design.spectral_bandwidth_ppm = bandwidth_ppm
-
-        self._updating = True
-        try:
-            nucleus_index = self.nucleus.findData(preset.nucleus)
-            self.nucleus.setCurrentIndex(max(0, nucleus_index))
-            self.spectral_window_center_ppm.setValue(window_center_ppm)
-            self.spectral_bandwidth_ppm.setValue(bandwidth_ppm)
-            self._populate_peaks(item, selected_row=peak_row)
-            previous = self.compound_preset_combo.blockSignals(True)
-            self.compound_preset_combo.setCurrentIndex(0)
-            self.compound_preset_combo.blockSignals(previous)
-        finally:
-            self._updating = False
-
-        self._update_spectral_resolution_info()
-        self._inspector_preview_dirty = True
         self._update_kinetics_preview()
         self._update_spectral_preview()
 
@@ -1695,9 +1708,6 @@ class SpectralPhantomDesignerDialog(QDialog):
         row = self._current_row()
         if row is None or not (0 <= row < len(self.design.shapes)):
             self.spectral_preview_curve.setData([], [])
-            self.spectral_preview_info.setText(
-                "No selected shape · orange dashed line: sequence reference"
-            )
             return
 
         item = self.design.shapes[row]
@@ -1712,15 +1722,9 @@ class SpectralPhantomDesignerDialog(QDialog):
             window_center_ppm + half_bandwidth_ppm,
             points,
         )
-        nucleus = self.nucleus.currentData()
-        if nucleus is None:
-            nucleus = (
-                "C13"
-                if hasattr(self, "dynamic_enabled") and self.dynamic_enabled.isChecked()
-                else "H1"
-            )
+        spectrum = np.zeros(points, dtype=float)
+        nucleus = self._effective_nucleus()
         field_strength_t = float(self.field_strength_t.value())
-        components = []
         for peak in item.peaks:
             fwhm_ppm = abs(
                 float(
@@ -1736,25 +1740,6 @@ class SpectralPhantomDesignerDialog(QDialog):
             amplitude = peak.amplitude * peak.effective_initial_polarization(
                 item.initial_mz
             )
-            components.append((peak_ppm, half_width_ppm, amplitude))
-
-        # The phantom's configured spectrum may be much coarser than a long-T2
-        # Lorentzian linewidth. Add local support points for display so an
-        # arbitrary bin alignment cannot make otherwise identical peaks appear
-        # to have different amplitudes in the preview.
-        local_offsets = np.asarray((-4, -2, -1, -0.5, 0, 0.5, 1, 2, 4), dtype=float)
-        local_support = [
-            peak_ppm + half_width_ppm * local_offsets
-            for peak_ppm, half_width_ppm, _amplitude in components
-        ]
-        if local_support:
-            lower, upper = float(frequency_ppm[0]), float(frequency_ppm[-1])
-            support = np.concatenate(local_support)
-            support = support[(support >= lower) & (support <= upper)]
-            frequency_ppm = np.unique(np.concatenate((frequency_ppm, support)))
-
-        spectrum = np.zeros(frequency_ppm.size, dtype=float)
-        for peak_ppm, half_width_ppm, amplitude in components:
             spectrum += amplitude / (
                 1.0 + ((frequency_ppm - peak_ppm) / half_width_ppm) ** 2
             )
@@ -1768,7 +1753,7 @@ class SpectralPhantomDesignerDialog(QDialog):
             display_max += 0.5
         self.spectral_preview_plot.setXRange(display_min, display_max, padding=0.04)
         self.spectral_preview_plot.enableAutoRange(axis=pg.ViewBox.YAxis)
-        self.spectral_preview_info.setText(
+        self.spectral_preview_plot.setToolTip(
             f"{item.name}: {frequency_ppm[0]:g}–{frequency_ppm[-1]:g} ppm · "
             f"orange dashed line: sequence reference {sequence_reference_ppm:g} ppm"
         )
@@ -1815,8 +1800,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         self._update_kinetics_preview()
         self._update_spectral_preview()
 
-    def _populate_peaks(self, item, selected_row=None):
-        previous_row = self.peak_table.currentRow()
+    def _populate_peaks(self, item):
         self.peak_table.blockSignals(True)
         self.peak_table.setRowCount(len(item.peaks))
         for row, peak in enumerate(item.peaks):
@@ -1835,10 +1819,6 @@ class SpectralPhantomDesignerDialog(QDialog):
                 )
             ):
                 self.peak_table.setItem(row, column, QTableWidgetItem(str(value)))
-        if item.peaks:
-            target_row = previous_row if selected_row is None else selected_row
-            target_row = min(max(0, target_row), len(item.peaks) - 1)
-            self.peak_table.setCurrentCell(target_row, 0)
         self.peak_table.blockSignals(False)
 
     def _peaks_changed(self):
@@ -2558,10 +2538,51 @@ class SpectralPhantomDesignerDialog(QDialog):
                 t2_star_s=0.020,
             )
         )
-        self._populate_peaks(
-            self.design.shapes[row],
-            selected_row=len(self.design.shapes[row].peaks) - 1,
+        self._populate_peaks(self.design.shapes[row])
+        self._update_kinetics_preview()
+        self._inspector_preview_dirty = True
+        self._update_spectral_preview()
+
+    def _add_metabolite_preset(self):
+        shape_row = self._current_row()
+        preset = self.metabolite_preset_combo.currentData()
+        if shape_row is None or not isinstance(preset, MetabolitePreset):
+            return
+        try:
+            peaks = self._read_peak_table()
+        except (AttributeError, ValueError) as exc:
+            QMessageBox.warning(
+                self,
+                "Invalid peak table",
+                f"Correct the current peak values before adding a preset:\n{exc}",
+            )
+            return
+        existing_row = next(
+            (index for index, peak in enumerate(peaks) if peak.name == preset.name),
+            None,
         )
+        if existing_row is not None:
+            self.peak_table.setCurrentCell(existing_row, 0)
+            QMessageBox.information(
+                self,
+                "Metabolite already present",
+                f"{preset.name} is already defined for this shape.",
+            )
+            return
+        peaks.append(
+            SpectralPeakDefinition(
+                name=preset.name,
+                amplitude=1.0,
+                frequency_ppm=(
+                    preset.chemical_shift_ppm - self.spectral_reference_ppm.value()
+                ),
+                t2_star_s=preset.t2_star_s,
+                t1_s=preset.t1_s,
+            )
+        )
+        self.design.shapes[shape_row].peaks = peaks
+        self._populate_peaks(self.design.shapes[shape_row])
+        self.peak_table.setCurrentCell(len(peaks) - 1, 0)
         self._update_kinetics_preview()
         self._inspector_preview_dirty = True
         self._update_spectral_preview()
@@ -2575,10 +2596,7 @@ class SpectralPhantomDesignerDialog(QDialog):
         if len(peaks) <= 1:
             return
         peaks.pop(peak_row)
-        self._populate_peaks(
-            self.design.shapes[shape_row],
-            selected_row=min(peak_row, len(peaks) - 1),
-        )
+        self._populate_peaks(self.design.shapes[shape_row])
         self._update_kinetics_preview()
         self._inspector_preview_dirty = True
         self._update_spectral_preview()
@@ -2696,7 +2714,12 @@ class SpectralPhantomDesignerDialog(QDialog):
             self.phantom = phantom
             self._load_design_into_ui()
             self.inspector.set_phantom(phantom)
-            self.tabs.setCurrentWidget(self.inspector)
+            # The file already contains the rasterized phantom represented by
+            # the loaded design. Mark that preview as current so opening the
+            # inspector later does not rebuild it (which is especially costly
+            # for highly supersampled designs), and leave the user's current
+            # editor tab unchanged.
+            self._inspector_preview_dirty = False
         except Exception as exc:
             QMessageBox.critical(self, "Load failed", str(exc))
 

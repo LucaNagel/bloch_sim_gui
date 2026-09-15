@@ -172,12 +172,13 @@ def _circular_loop_vector_field(
 def _surface_loop_field(
     xyz: Sequence[np.ndarray], fov_m: Sequence[float], kind: str
 ) -> np.ndarray:
+    """Return the field of a loop above the FOV at +y, facing inward."""
     virtual_z = fov_m[2] if len(fov_m) == 3 else min(fov_m[:2])
-    radius = 0.30 * min(fov_m[1], virtual_z)
+    radius = 0.30 * min(fov_m[0], virtual_z)
     field = _circular_loop_vector_field(
         xyz,
-        center=(-0.56 * fov_m[0], 0.0, 0.0),
-        normal=(1.0, 0.0, 0.0),
+        center=(0.0, 0.56 * fov_m[1], 0.0),
+        normal=(0.0, -1.0, 0.0),
         radius=radius,
     )
     return field[0] + 1j * field[1] if kind == "transmit" else field[0] - 1j * field[1]

@@ -88,6 +88,7 @@ from ..sequence import (
     load_scanner_parameters,
     make_pulseq_bssfp,
     make_pulseq_csi,
+    make_pulseq_epsi_mge,
     make_pulseq_epi,
     make_pulseq_flash,
     make_pulseq_me_bssfp,
@@ -688,9 +689,23 @@ def _infer_sequence_acquisition(program, compiled):
                 )
         else:
             axes = ", ".join(acquisition_frames.varying_axes)
-            note = (
-                f"{acquisition_frames.num_frames} Cartesian 2D frames inferred ({axes})"
-            )
+            if definitions.get("TrajectoryType") == "cartesian_2d_multi_echo":
+                echoes = int(definitions.get("Echoes", 0))
+                repetitions = int(definitions.get("Repetitions", 0))
+                strategy = str(definitions.get("ReadoutStrategy", "unknown"))
+                echo_spacing_ms = 1000.0 * float(definitions.get("EchoSpacing", 0.0))
+                note = (
+                    f"EPSI / MGE: {repetitions} measurement(s) × {echoes} "
+                    f"echoes, {acquisition.read_matrix}×{acquisition.phase_matrix}, "
+                    f"{strategy} readout, echo spacing {echo_spacing_ms:.6g} ms. "
+                    "Echoes are available as Cartesian MGE frames and as "
+                    "uniform EPSI spectral-time samples."
+                )
+            else:
+                note = (
+                    f"{acquisition_frames.num_frames} Cartesian 2D frames "
+                    f"inferred ({axes})"
+                )
     except ValueError as frame_error:
         acquisition = None
         note = (
@@ -1046,8 +1061,9 @@ class SequenceSimulationWidget(QWidget):
     RADIAL_ME_BSSFP_SOURCE = 5
     ME_BSSFP_SOURCE = 6
     FLASH_SOURCE = 7
-    PULSEQ_SOURCE = 8
-    GENERATED_SOURCES = frozenset(range(EPI_SOURCE, FLASH_SOURCE + 1))
+    EPSI_MGE_SOURCE = 8
+    PULSEQ_SOURCE = 9
+    GENERATED_SOURCES = frozenset(range(EPI_SOURCE, EPSI_MGE_SOURCE + 1))
     CARTESIAN_3D_SOURCES = frozenset((BSSFP_SOURCE, SS_BSSFP_SOURCE, ME_BSSFP_SOURCE))
     NO_PHANTOM_MESSAGE = (
         "No phantom is loaded in the Phantom tab. Create or load one first."
@@ -1254,6 +1270,8 @@ class SequenceSimulationWidget(QWidget):
         controls = (
             (self.epi_read_fov_mm, x),
             (self.epi_phase_fov_mm, y),
+            (self.epsi_read_fov_mm, x),
+            (self.epsi_phase_fov_mm, y),
             (self.csi_read_fov_mm, x),
             (self.csi_phase_fov_mm, y),
             (self.flash_read_fov_mm, x),
@@ -1351,6 +1369,7 @@ class SequenceSimulationWidget(QWidget):
             self._rf_designer_pulse_error = ""
             for prefix in (
                 "epi",
+                "epsi",
                 "csi",
                 "flash",
                 "bssfp",
@@ -1376,6 +1395,7 @@ class SequenceSimulationWidget(QWidget):
             and self._selected_shared_rf_pulse_type(prefix) == "designer"
             for prefix in (
                 "epi",
+                "epsi",
                 "csi",
                 "flash",
                 "bssfp",
@@ -1619,14 +1639,15 @@ class SequenceSimulationWidget(QWidget):
                 "Radial ME-bSSFP (3D)",
                 "ME-bSSFP (3D, Cartesian)",
                 "FLASH (2D)",
+                "EPSI / MGE (2D)",
                 "Pulseq .seq file",
             ]
         )
         self.sequence_source.currentIndexChanged.connect(self._source_changed)
         self.sequence_source.setToolTip(
-            "Build EPI, CSI, FLASH, Cartesian bSSFP, spectrally selective "
-            "bSSFP, Cartesian or radial multi-echo bSSFP interactively, or "
-            "load a Pulseq file"
+            "Build EPI, EPSI/MGE, CSI, FLASH, Cartesian bSSFP, spectrally "
+            "selective bSSFP, Cartesian or radial multi-echo bSSFP "
+            "interactively, or load a Pulseq file"
         )
         sequence_layout.addWidget(self.sequence_source)
 
@@ -1740,13 +1761,17 @@ class SequenceSimulationWidget(QWidget):
         acquisition_form = _left_aligned_form(self.acquisition_group)
         self.epi_form = acquisition_form
         self.acquisition_hint = QLabel(
-            "Choose a Cartesian EPI echo train or a continuous centre-out "
-            "spiral readout."
+            "Choose a bipolar Cartesian EPI echo train, a monopolar Flyback "
+            "train, or a continuous centre-out spiral readout."
         )
         self.acquisition_hint.setWordWrap(True)
         self.epi_readout_trajectory = QComboBox()
         self.epi_readout_trajectory.setObjectName("epi_readout_trajectory")
-        self.epi_readout_trajectory.addItems(["Cartesian EPI", "Spiral"])
+        self.epi_readout_trajectory.addItems(["Cartesian EPI", "Flyback", "Spiral"])
+        self.epi_readout_trajectory.setToolTip(
+            "Cartesian EPI alternates readout polarity; Flyback acquires every "
+            "line in the same direction; Spiral uses one centre-out interleaf"
+        )
         self.read_matrix = QSpinBox()
         self.read_matrix.setRange(2, 512)
         self.read_matrix.setValue(16)
@@ -1941,6 +1966,133 @@ class SequenceSimulationWidget(QWidget):
         acquisition_form.addRow("Pixel bandwidth", self.pixel_bandwidth_info)
         self.acquisition_group.setVisible(False)
         controls_layout.addWidget(self.acquisition_group)
+
+        self.epsi_mge_group = QGroupBox("EPSI / MGE acquisition (2D)")
+        epsi_form = _left_aligned_form(self.epsi_mge_group)
+        epsi_hint = QLabel(
+            "Phase-encoded multi-gradient-echo imaging. Echo images can be "
+            "inspected directly as MGE frames; the uniformly spaced echo "
+            "dimension also provides EPSI spectral-time samples."
+        )
+        epsi_hint.setWordWrap(True)
+        self.epsi_readout_strategy = QComboBox()
+        self.epsi_readout_strategy.setObjectName("epsi_readout_strategy")
+        self.epsi_readout_strategy.addItems(["Bipolar", "Flyback"])
+        self.epsi_readout_strategy.setToolTip(
+            "Bipolar alternates echo polarity; Flyback rewinds kx so every "
+            "echo is acquired in the same direction"
+        )
+        self.epsi_read_matrix = QSpinBox()
+        self.epsi_read_matrix.setRange(2, 512)
+        self.epsi_read_matrix.setValue(16)
+        self.epsi_phase_matrix = QSpinBox()
+        self.epsi_phase_matrix.setRange(2, 512)
+        self.epsi_phase_matrix.setValue(16)
+        self.epsi_read_fov_mm = self._parameter_spin(0.1, 10000.0, default_fov_x, " mm")
+        self.epsi_phase_fov_mm = self._parameter_spin(
+            0.1, 10000.0, default_fov_y, " mm"
+        )
+        self.epsi_sampling_bandwidth_khz = self._sampling_bandwidth_spin(50.0)
+        self.epsi_echoes = QSpinBox()
+        self.epsi_echoes.setRange(1, 1024)
+        self.epsi_echoes.setValue(8)
+        self.epsi_echo_spacing_ms = self._parameter_spin(0.001, 1000.0, 2.0, " ms")
+        self.epsi_echo_spacing_ms.setToolTip(
+            "Centre-to-centre spacing of consecutive gradient echoes; its "
+            "inverse is the EPSI spectral bandwidth"
+        )
+        self.epsi_echo_time_ms = self._parameter_spin(0.1, 10000.0, 6.0, " ms")
+        self.epsi_echo_time_ms.setToolTip(
+            "Time from the excitation centre to the centre of the first echo"
+        )
+        self.epsi_flip_angle_deg = self._parameter_spin(0.1, 360.0, 15.0, "°")
+        (
+            self.epsi_slice_orientation,
+            self.epsi_read_gradient_axis,
+            self.epsi_phase_gradient_axis,
+            self.epsi_slice_gradient_axis,
+        ) = self._two_dimensional_orientation_controls("epsi")
+        self.epsi_slice_count = QSpinBox()
+        self.epsi_slice_count.setRange(1, 128)
+        self.epsi_slice_count.setValue(1)
+        self.epsi_slice_thickness_mm = self._parameter_spin(0.05, 100.0, 3.0, " mm")
+        self.epsi_slice_gap_mm = self._parameter_spin(0.0, 100.0, 0.0, " mm")
+        self.epsi_slice_offset_mm = self._parameter_spin(-10000.0, 10000.0, 0.0, " mm")
+        self.epsi_repetition_time_ms = self._parameter_spin(0.1, 100000.0, 50.0, " ms")
+        self.epsi_repetition_time_ms.setToolTip(
+            "RF-to-RF repetition time for each phase-encoding line"
+        )
+        self.epsi_repetitions = QSpinBox()
+        self.epsi_repetitions.setRange(1, 10000)
+        self.epsi_repetitions.setValue(1)
+        self.epsi_acquisition_interval_ms = self._acquisition_interval_spin()
+        self.epsi_rf_spoiling = QCheckBox("Enable RF spoiling")
+        self.epsi_rf_spoiling.setChecked(True)
+        self.epsi_rf_spoiling_increment_deg = self._parameter_spin(
+            -360.0, 360.0, 117.0, "°"
+        )
+        self.epsi_spoil_after_readout = QCheckBox("Enable after each echo train")
+        self.epsi_spoil_after_readout.setChecked(True)
+        self.epsi_spoiler_cycles_per_slice = self._parameter_spin(
+            0.0, 1000.0, 4.0, " cycles/slice"
+        )
+        self.epsi_spoiler_cycles_per_voxel = self._parameter_spin(
+            0.0, 1000.0, 0.0, " cycles/voxel"
+        )
+        self.epsi_spoiler_duration_ms = self._parameter_spin(0.001, 1000.0, 2.0, " ms")
+        self.epsi_dwell_info = QLabel()
+        self.epsi_pixel_bandwidth_info = QLabel()
+        self.epsi_spectral_info = QLabel()
+
+        epsi_form.addRow(epsi_hint)
+        _add_form_section(epsi_form, "Spatial and echo encoding")
+        epsi_form.addRow("Readout strategy", self.epsi_readout_strategy)
+        epsi_form.addRow("Read matrix", self.epsi_read_matrix)
+        epsi_form.addRow("Phase matrix", self.epsi_phase_matrix)
+        epsi_form.addRow("Read FOV", self.epsi_read_fov_mm)
+        epsi_form.addRow("Phase FOV", self.epsi_phase_fov_mm)
+        epsi_form.addRow("Sampling bandwidth", self.epsi_sampling_bandwidth_khz)
+        epsi_form.addRow("Echoes / spectral points", self.epsi_echoes)
+        epsi_form.addRow("Echo spacing", self.epsi_echo_spacing_ms)
+        epsi_form.addRow("First echo time (TE1)", self.epsi_echo_time_ms)
+        _add_form_section(epsi_form, "RF pulse")
+        epsi_form.addRow("Flip angle", self.epsi_flip_angle_deg)
+        self._add_shared_rf_controls(
+            epsi_form,
+            "epsi",
+            pulse_type="Sinc",
+            duration_ms=3.0,
+            sinc_lobes=3,
+        )
+        _add_form_section(epsi_form, "Slice selection")
+        epsi_form.addRow("Plane preset", self.epsi_slice_orientation)
+        epsi_form.addRow("Read gradient direction", self.epsi_read_gradient_axis)
+        epsi_form.addRow("Phase gradient direction", self.epsi_phase_gradient_axis)
+        epsi_form.addRow("Slice gradient direction", self.epsi_slice_gradient_axis)
+        epsi_form.addRow("Slices", self.epsi_slice_count)
+        epsi_form.addRow("Slice thickness", self.epsi_slice_thickness_mm)
+        epsi_form.addRow("Slice gap", self.epsi_slice_gap_mm)
+        epsi_form.addRow("Slice package offset", self.epsi_slice_offset_mm)
+        _add_form_section(epsi_form, "Timing")
+        epsi_form.addRow("TR (per phase line)", self.epsi_repetition_time_ms)
+        epsi_form.addRow("Measurements", self.epsi_repetitions)
+        epsi_form.addRow(
+            "Measurement interval (start-to-start)",
+            self.epsi_acquisition_interval_ms,
+        )
+        _add_form_section(epsi_form, "Spoiling")
+        epsi_form.addRow("RF spoiling", self.epsi_rf_spoiling)
+        epsi_form.addRow("RF spoiling increment", self.epsi_rf_spoiling_increment_deg)
+        epsi_form.addRow("Gradient spoiler", self.epsi_spoil_after_readout)
+        epsi_form.addRow("Through-slice spoiler", self.epsi_spoiler_cycles_per_slice)
+        epsi_form.addRow("In-plane spoiler", self.epsi_spoiler_cycles_per_voxel)
+        epsi_form.addRow("Spoiler duration", self.epsi_spoiler_duration_ms)
+        _add_form_section(epsi_form, "Derived sampling")
+        epsi_form.addRow("ADC dwell", self.epsi_dwell_info)
+        epsi_form.addRow("Pixel bandwidth", self.epsi_pixel_bandwidth_info)
+        epsi_form.addRow("EPSI spectrum", self.epsi_spectral_info)
+        self.epsi_mge_group.setVisible(False)
+        controls_layout.addWidget(self.epsi_mge_group)
 
         self.csi_group = QGroupBox("CSI acquisition")
         csi_form = _left_aligned_form(self.csi_group)
@@ -2240,11 +2392,16 @@ class SequenceSimulationWidget(QWidget):
         self.bssfp_flip_angle_deg = self._parameter_spin(0.1, 360.0, 15.0, "°")
         self.bssfp_repetition_time_ms = self._parameter_spin(0.1, 10000.0, 10.0, " ms")
         self.bssfp_phase_start_deg = self._parameter_spin(-360.0, 360.0, 180.0, "°")
+        self.bssfp_phase_start_deg.setToolTip(
+            "Phase of the first regular RF pulse. Later regular pulses advance "
+            "by RF phase increment; the separate startup pulse is unaffected."
+        )
         self.bssfp_phase_increment_deg = self._parameter_spin(-360.0, 360.0, 180.0, "°")
         self.bssfp_alpha_half_phase_deg = self._parameter_spin(-360.0, 360.0, 0.0, "°")
         self.bssfp_alpha_half_phase_deg.setToolTip(
-            "Absolute phase of the α/2 preparation RF pulse. For constant "
-            "0° full pulses at the 180° passband center, use +90°."
+            "Absolute phase of only the α/2 preparation RF pulse. Regular "
+            "pulses use RF phase start/increment. For constant 0° full pulses "
+            "at the 180° passband center, use +90°."
         )
         self.bssfp_alpha_half_use_ratios = QCheckBox("Use ratios for startup pulse")
         self.bssfp_alpha_half_use_ratios.setChecked(True)
@@ -3282,6 +3439,48 @@ class SequenceSimulationWidget(QWidget):
             self.epi_spoiler_duration_ms.setEnabled
         )
         for widget in (
+            self.epsi_read_matrix,
+            self.epsi_phase_matrix,
+            self.epsi_read_fov_mm,
+            self.epsi_phase_fov_mm,
+            self.epsi_sampling_bandwidth_khz,
+            self.epsi_echoes,
+            self.epsi_echo_spacing_ms,
+            self.epsi_echo_time_ms,
+            self.epsi_flip_angle_deg,
+            self.epsi_slice_count,
+            self.epsi_slice_thickness_mm,
+            self.epsi_slice_gap_mm,
+            self.epsi_slice_offset_mm,
+            self.epsi_repetition_time_ms,
+            self.epsi_repetitions,
+            self.epsi_acquisition_interval_ms,
+            self.epsi_rf_spoiling_increment_deg,
+            self.epsi_spoiler_cycles_per_slice,
+            self.epsi_spoiler_cycles_per_voxel,
+            self.epsi_spoiler_duration_ms,
+        ):
+            widget.valueChanged.connect(self._epsi_mge_changed)
+        self.epsi_readout_strategy.currentIndexChanged.connect(self._epsi_mge_changed)
+        self.epsi_rf_spoiling.toggled.connect(self._epsi_mge_changed)
+        self.epsi_spoil_after_readout.toggled.connect(self._epsi_mge_changed)
+        self.epsi_spoil_after_readout.toggled.connect(
+            self.epsi_spoiler_cycles_per_slice.setEnabled
+        )
+        self.epsi_spoil_after_readout.toggled.connect(
+            self.epsi_spoiler_cycles_per_voxel.setEnabled
+        )
+        self.epsi_spoil_after_readout.toggled.connect(
+            self.epsi_spoiler_duration_ms.setEnabled
+        )
+        self._connect_two_dimensional_orientation_controls(
+            self.epsi_slice_orientation,
+            self.epsi_read_gradient_axis,
+            self.epsi_phase_gradient_axis,
+            self.epsi_slice_gradient_axis,
+            self._epsi_mge_changed,
+        )
+        for widget in (
             self.csi_read_matrix,
             self.csi_phase_matrix,
             self.csi_read_fov_mm,
@@ -3516,6 +3715,7 @@ class SequenceSimulationWidget(QWidget):
         )
         for prefix, callback in (
             ("epi", self._acquisition_changed),
+            ("epsi", self._epsi_mge_changed),
             ("csi", self._csi_changed),
             ("flash", self._flash_changed),
             ("bssfp", self._bssfp_changed),
@@ -3557,6 +3757,7 @@ class SequenceSimulationWidget(QWidget):
             self._update_simulation_object_table
         )
         self._update_bandwidth_labels()
+        self._update_epsi_mge_labels()
         self._update_csi_labels()
         self._update_flash_labels()
         self._update_bssfp_labels()
@@ -4631,6 +4832,7 @@ class SequenceSimulationWidget(QWidget):
             5: self._load_radial_me_bssfp,
             6: self._load_me_bssfp,
             self.FLASH_SOURCE: self._load_flash,
+            self.EPSI_MGE_SOURCE: self._load_epsi_mge,
         }
         loader = loaders.get(source_index)
         if loader is None:
@@ -4927,15 +5129,18 @@ class SequenceSimulationWidget(QWidget):
         source_index = self.sequence_source.currentIndex()
         source_changed = source_index != self._selected_sequence_source_index
         self._selected_sequence_source_index = source_index
-        epi_selected = source_index == 1
-        csi_selected = source_index == 2
-        bssfp_selected = source_index == 3
-        ss_bssfp_selected = source_index == 4
-        radial_me_selected = source_index == 5
-        me_bssfp_selected = source_index == 6
+        epi_selected = source_index == self.EPI_SOURCE
+        csi_selected = source_index == self.CSI_SOURCE
+        bssfp_selected = source_index == self.BSSFP_SOURCE
+        ss_bssfp_selected = source_index == self.SS_BSSFP_SOURCE
+        radial_me_selected = source_index == self.RADIAL_ME_BSSFP_SOURCE
+        me_bssfp_selected = source_index == self.ME_BSSFP_SOURCE
         flash_selected = source_index == self.FLASH_SOURCE
+        epsi_mge_selected = source_index == self.EPSI_MGE_SOURCE
         self.acquisition_group.setVisible(epi_selected)
         self.acquisition_group.setEnabled(epi_selected)
+        self.epsi_mge_group.setVisible(epsi_mge_selected)
+        self.epsi_mge_group.setEnabled(epsi_mge_selected)
         self.csi_group.setVisible(csi_selected)
         self.csi_group.setEnabled(csi_selected)
         self.bssfp_group.setVisible(bssfp_selected)
@@ -4954,8 +5159,9 @@ class SequenceSimulationWidget(QWidget):
         self.export_pulseq_button.setEnabled(generated_selected)
         self.acquisition_hint.setText(
             "Read/phase matrix and sampling bandwidth define each 2D frame. "
-            "Choose Cartesian EPI or a single-interleaf centre-out spiral; "
-            "slices are acquired sequentially without kz encoding."
+            "Choose bipolar Cartesian EPI, monopolar Flyback, or a "
+            "single-interleaf centre-out spiral; slices are acquired "
+            "sequentially without kz encoding."
             if epi_selected
             else "Select EPI under Source / mode to enable these settings."
         )
@@ -5028,6 +5234,12 @@ class SequenceSimulationWidget(QWidget):
 
     def _epi_rf_parameters(self) -> dict:
         return self._shared_rf_parameters("epi")
+
+    def _epsi_mge_changed(self, *_):
+        self._update_epsi_mge_labels()
+        self._update_spoiling_quality()
+        if self.sequence_source.currentIndex() == self.EPSI_MGE_SOURCE:
+            self._request_generated_sequence_refresh()
 
     def _csi_changed(self, *_):
         self._update_csi_labels()
@@ -5518,6 +5730,26 @@ class SequenceSimulationWidget(QWidget):
                 * self.csi_repetitions.value()
             )
             name = "CSI end-of-FID spoiler"
+        elif source_index == self.EPSI_MGE_SOURCE:
+            enabled = self.epsi_spoil_after_readout.isChecked()
+            role_reference_sizes = (
+                self.epsi_read_fov_mm.value()
+                / (1000.0 * self.epsi_read_matrix.value()),
+                self.epsi_phase_fov_mm.value()
+                / (1000.0 * self.epsi_phase_matrix.value()),
+                self.epsi_slice_thickness_mm.value() / 1000.0,
+            )
+            role_cycles = (
+                self.epsi_spoiler_cycles_per_voxel.value(),
+                self.epsi_spoiler_cycles_per_voxel.value(),
+                self.epsi_spoiler_cycles_per_slice.value(),
+            )
+            excitation_count = (
+                self.epsi_phase_matrix.value()
+                * self.epsi_slice_count.value()
+                * self.epsi_repetitions.value()
+            )
+            name = "EPSI / MGE end-of-echo-train spoiler"
         else:
             raise ValueError("Source has no two-dimensional spoiler configuration")
 
@@ -5916,7 +6148,11 @@ class SequenceSimulationWidget(QWidget):
         if not hasattr(self, "spoiling_quality_info"):
             return
         source_index = self.sequence_source.currentIndex()
-        if source_index in {self.EPI_SOURCE, self.CSI_SOURCE}:
+        if source_index in {
+            self.EPI_SOURCE,
+            self.CSI_SOURCE,
+            self.EPSI_MGE_SOURCE,
+        }:
             self._set_configured_spoiling_quality(
                 self._two_dimensional_spoiler_spec(source_index)
             )
@@ -6204,6 +6440,21 @@ class SequenceSimulationWidget(QWidget):
         else:
             self.epi_vfa_info.setText("Off")
 
+    def _update_epsi_mge_labels(self):
+        self._update_shared_rf_controls("epsi")
+        bandwidth_hz = self.epsi_sampling_bandwidth_khz.value() * 1000.0
+        dwell_us = 1e6 / bandwidth_hz
+        pixel_bandwidth_hz = bandwidth_hz / self.epsi_read_matrix.value()
+        echo_spacing_s = self.epsi_echo_spacing_ms.value() / 1000.0
+        spectral_bandwidth_hz = 1.0 / echo_spacing_s
+        spectral_resolution_hz = spectral_bandwidth_hz / self.epsi_echoes.value()
+        self.epsi_dwell_info.setText(f"{dwell_us:.3f} µs")
+        self.epsi_pixel_bandwidth_info.setText(f"{pixel_bandwidth_hz:.3f} Hz/px")
+        self.epsi_spectral_info.setText(
+            f"BW {spectral_bandwidth_hz:.6g} Hz; "
+            f"resolution {spectral_resolution_hz:.6g} Hz"
+        )
+
     def _update_csi_labels(self):
         self._update_shared_rf_controls("csi")
         self._update_ernst_controls(
@@ -6325,6 +6576,10 @@ class SequenceSimulationWidget(QWidget):
                 self.flash_read_gradient_axis,
                 self.flash_phase_gradient_axis,
             ),
+            self.EPSI_MGE_SOURCE: (
+                self.epsi_read_gradient_axis,
+                self.epsi_phase_gradient_axis,
+            ),
         }
         read_phase = controls.get(source_index)
         if read_phase is None:
@@ -6393,6 +6648,17 @@ class SequenceSimulationWidget(QWidget):
                 )
                 / 1000.0,
             )
+        if source_index == self.EPSI_MGE_SOURCE:
+            return (
+                self.epsi_read_fov_mm.value() / 1000.0,
+                self.epsi_phase_fov_mm.value() / 1000.0,
+                (
+                    self.epsi_slice_thickness_mm.value() * self.epsi_slice_count.value()
+                    + self.epsi_slice_gap_mm.value()
+                    * max(0, self.epsi_slice_count.value() - 1)
+                )
+                / 1000.0,
+            )
         return None
 
     def _confirm_generated_sequence_fov(self):
@@ -6420,6 +6686,7 @@ class SequenceSimulationWidget(QWidget):
             self.EPI_SOURCE,
             self.CSI_SOURCE,
             self.FLASH_SOURCE,
+            self.EPSI_MGE_SOURCE,
         }:
             frame = self._two_dimensional_encoding_frame(source_index)
             scanner_extents = np.zeros(3, dtype=float)
@@ -6466,6 +6733,11 @@ class SequenceSimulationWidget(QWidget):
             "fov_m": self._epi_fov_m(),
             "matrix": (self.read_matrix.value(), self.phase_matrix.value()),
             "sampling_bandwidth_hz": self.sampling_bandwidth_khz.value() * 1000.0,
+            "readout_strategy": (
+                "flyback"
+                if self.epi_readout_trajectory.currentText() == "Flyback"
+                else "bipolar"
+            ),
             "flip_angle_deg": (
                 ernst.angle_deg
                 if ernst is not None
@@ -6496,7 +6768,53 @@ class SequenceSimulationWidget(QWidget):
 
     def _spiral_pulseq_parameters(self):
         parameters = self._epi_pulseq_parameters()
+        parameters.pop("readout_strategy", None)
         parameters["spiral_turns"] = self.epi_spiral_turns.value()
+        return parameters
+
+    def _epsi_mge_pulseq_parameters(self):
+        parameters = {
+            "fov_m": (
+                self.epsi_read_fov_mm.value() / 1000.0,
+                self.epsi_phase_fov_mm.value() / 1000.0,
+            ),
+            "matrix": (
+                self.epsi_read_matrix.value(),
+                self.epsi_phase_matrix.value(),
+            ),
+            "echoes": self.epsi_echoes.value(),
+            "echo_spacing_s": self.epsi_echo_spacing_ms.value() / 1000.0,
+            "readout_strategy": (
+                "flyback"
+                if self.epsi_readout_strategy.currentText() == "Flyback"
+                else "bipolar"
+            ),
+            "sampling_bandwidth_hz": (
+                self.epsi_sampling_bandwidth_khz.value() * 1000.0
+            ),
+            "flip_angle_deg": self.epsi_flip_angle_deg.value(),
+            "slice_thickness_m": self.epsi_slice_thickness_mm.value() / 1000.0,
+            "slice_gap_m": self.epsi_slice_gap_mm.value() / 1000.0,
+            "n_slices": self.epsi_slice_count.value(),
+            "slice_offset_m": self.epsi_slice_offset_mm.value() / 1000.0,
+            "echo_time_s": self.epsi_echo_time_ms.value() / 1000.0,
+            "repetition_time_s": self.epsi_repetition_time_ms.value() / 1000.0,
+            "repetitions": self.epsi_repetitions.value(),
+            "acquisition_interval_s": self._optional_acquisition_interval_s(
+                self.epsi_acquisition_interval_ms
+            ),
+            "rf_spoiling": self._rf_spoiling_is_effective("epsi"),
+            "rf_spoiling_increment_deg": (self.epsi_rf_spoiling_increment_deg.value()),
+            "spoil_after_readout": self.epsi_spoil_after_readout.isChecked(),
+            "spoiler_cycles_per_slice": (self.epsi_spoiler_cycles_per_slice.value()),
+            "spoiler_cycles_per_voxel": (self.epsi_spoiler_cycles_per_voxel.value()),
+            "spoiler_duration_s": self.epsi_spoiler_duration_ms.value() / 1000.0,
+            "encoding_axes": self._two_dimensional_encoding_frame(
+                self.EPSI_MGE_SOURCE
+            ).axis_codes,
+            "scanner_parameters": self.scanner_parameters.to_dict(),
+        }
+        parameters.update(self._shared_rf_parameters("epsi"))
         return parameters
 
     def _csi_pulseq_parameters(self):
@@ -6838,6 +7156,12 @@ class SequenceSimulationWidget(QWidget):
             )
         if source_index == self.FLASH_SOURCE:
             return "flash", self._flash_pulseq_parameters(), "flash_2d.seq"
+        if source_index == self.EPSI_MGE_SOURCE:
+            return (
+                "epsi_mge",
+                self._epsi_mge_pulseq_parameters(),
+                "epsi_mge_2d.seq",
+            )
         raise ValueError("Select a generated sequence")
 
     def _load_internal_sequence(self):
@@ -6927,6 +7251,23 @@ class SequenceSimulationWidget(QWidget):
             self.spiral_acquisition = None
             self.spectroscopic_acquisition = None
             self._generation_error = f"Invalid CSI sequence: {exc}"
+            return False
+
+    def _load_epsi_mge(self):
+        try:
+            sequence = make_pulseq_epsi_mge(**self._epsi_mge_pulseq_parameters())
+            self._set_generated_pulseq_sequence(sequence, "internal-epsi-mge-2d")
+            return True
+        except Exception as exc:
+            self._generated_pulseq_sequence = None
+            self.program = None
+            self._acquisition_compiled = None
+            self.acquisition = None
+            self.acquisition_frames = None
+            self.acquisition_volumes = None
+            self.spiral_acquisition = None
+            self.spectroscopic_acquisition = None
+            self._generation_error = f"Invalid EPSI / MGE sequence: {exc}"
             return False
 
     def _load_flash(self):
@@ -7440,6 +7781,7 @@ class SequenceSimulationWidget(QWidget):
         sequence_kind, parameters, _ = export_spec or self._pulseq_export_spec()
         builders = {
             "epi": make_pulseq_epi,
+            "epsi_mge": make_pulseq_epsi_mge,
             "spiral": make_pulseq_spiral,
             "csi": make_pulseq_csi,
             "flash": make_pulseq_flash,
@@ -8081,6 +8423,23 @@ class SequenceSimulationWidget(QWidget):
             if bool(definitions.get("UseErnstAngle", False)):
                 flip_text += " (Ernst angle)"
             summary_rows.append(("Flip angle", flip_text))
+        if "ReadoutStrategy" in definitions:
+            summary_rows.append(
+                ("Readout strategy", str(definitions["ReadoutStrategy"]))
+            )
+        if "Echoes" in definitions:
+            echoes = int(definitions["Echoes"])
+            echo_text = f"{echoes}"
+            if "EchoSpacing" in definitions:
+                echo_text += (
+                    f"; spacing {1000.0 * float(definitions['EchoSpacing']):.6g} ms"
+                )
+            if "EchoSpectralBandwidth" in definitions:
+                echo_text += (
+                    f"; spectral BW "
+                    f"{float(definitions['EchoSpectralBandwidth']):.6g} Hz"
+                )
+            summary_rows.append(("Echo train", echo_text))
         if "RFSpoiling" in definitions:
             rf_spoiling_text = "Off"
             if bool(definitions["RFSpoiling"]):
@@ -9382,6 +9741,7 @@ class SequenceSimulationWidget(QWidget):
         self.scanner_parameters = ScannerParameters.from_mapping(parameters)
         for prefix in (
             "epi",
+            "epsi",
             "csi",
             "flash",
             "bssfp",

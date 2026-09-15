@@ -9,7 +9,7 @@ This script tests:
 
 import numpy as np
 from blochsimulator import BlochSimulator, TissueParameters, SpinEcho
-from blochsimulator.notebook_exporter import export_notebook
+from blochsimulator.notebook_exporter import NotebookExporter, export_notebook
 from pathlib import Path
 import subprocess
 
@@ -154,17 +154,173 @@ def test_mode_b_notebook():
     nb_text = nbformat.writes(nb)
     assert "BlochSimulator" in nb_text, "Missing BlochSimulator import"
     assert "SpinEcho" in nb_text, "Missing sequence import"
-    assert "t1 =" in nb_text, "Missing parameter definitions"
+    assert "'t1_s': 0.83" in nb_text, "Missing unit-explicit tissue parameters"
     assert "sim.simulate" in nb_text, "Missing simulation call"
-    assert "dt=time_step_us * 1e-6" in nb_text, "Selected time step is not reproduced"
+    assert (
+        "time_step_s = simulation_params.get('time_step_us', 1.0) * 1e-6" in nb_text
+    ), "Selected time step is not reproduced"
     print(f"   ✓ Notebook contains simulation code")
 
     # 5. Check parameter values are correct
-    assert f"t1 = {tissue_params['t1']:.6f}" in nb_text, "T1 parameter mismatch"
-    assert f"te = {sequence_params['te']:.6f}" in nb_text, "TE parameter mismatch"
+    assert f"'t1_s': {tissue_params['t1']}" in nb_text, "T1 parameter mismatch"
+    assert f"'te_s': {sequence_params['te']}" in nb_text, "TE parameter mismatch"
+    assert "'te':" not in nb_text, "Ambiguous TE alias was exported"
+    assert "'tr':" not in nb_text, "Ambiguous TR alias was exported"
     assert "xarray" in nb_text, "Missing xarray import"
     assert "n_pos =" in nb_text, "Missing improved xarray construction code"
     print(f"   ✓ Parameters correctly embedded in notebook")
+
+
+def test_ssfp_gui_parameters_are_canonical_and_pulse_context_is_clear(
+    tmp_path, monkeypatch
+):
+    """GUI millisecond aliases and stale pulse roles must not leak into notebooks."""
+
+    sequence_params = {
+        "sequence_type": "SSFP (Loop)",
+        "type": "SSFP (Loop)",
+        "te": 2.0,
+        "tr": 5.0,
+        "ti": 400.0,
+        "te_s": 0.002,
+        "tr_s": 0.005,
+        "ti_s": 0.4,
+        "echo_count": 1,
+        "ssfp_repeats": 100,
+        "ssfp_use_ratios": True,
+        "ssfp_start_tr": 0.0,
+        "ssfp_start_flip": 15.0,
+        "ssfp_tr_ratio": 0.5,
+        "ssfp_flip_ratio": 0.5,
+        "ssfp_start_phase": 0.0,
+        "ssfp_alternate": True,
+        "rephase_pct": 50.0,
+        "slice_thickness": 5.0,
+        "slice_gradient": 0.0,
+        "pulse_states": {
+            "Excitation": {
+                "pulse_type": "SLR",
+                "flip_angle": 90.0,
+                "duration": 3.0,
+            },
+            "Refocusing": {
+                "pulse_type": "Sinc",
+                "flip_angle": 180.0,
+                "duration": 1.0,
+            },
+        },
+        "rf_pulse_type": "Gaussian",
+        "rf_flip_angle": 30.0,
+        "rf_duration_s": 0.001,
+        "rf_time_bw_product": 4.0,
+        "rf_phase": 0.0,
+        "rf_freq_offset": 0.0,
+        "b1_waveform": np.array([0.0, 0.01, 0.0], dtype=complex),
+        "time_waveform": np.array([0.0, 1e-5, 2e-5]),
+        "gradients_waveform": np.zeros((3, 3)),
+    }
+    simulation_params = {
+        "mode": "time-resolved",
+        "num_positions": 1,
+        "num_frequencies": 2,
+        "time_step_us": 10.0,
+        "position_axis": np.zeros((1, 3)),
+        "frequency_axis": np.array([-10.0, 10.0]),
+        "effective_frequency_axis": np.array([-15.0, 5.0]),
+        "rf_carrier_offset_hz": 5.0,
+        "initial_mz": 0.75,
+    }
+    tissue_params = {
+        "preset": "Custom",
+        "t1_ms": 1000.0,
+        "t2_ms": 100.0,
+        "m0": 0.75,
+    }
+    notebook_path = tmp_path / "ssfp_repro.ipynb"
+    array_path = tmp_path / "ssfp_repro_arrays.npz"
+
+    export_notebook(
+        mode="resimulate",
+        filename=str(notebook_path),
+        sequence_params=sequence_params,
+        simulation_params=simulation_params,
+        tissue_params=tissue_params,
+        waveform_filename=str(array_path),
+    )
+
+    import nbformat
+
+    notebook = nbformat.read(notebook_path, as_version=4)
+    parameter_cell = next(
+        cell.source
+        for cell in notebook.cells
+        if cell.cell_type == "code" and "Canonical simulation parameters" in cell.source
+    )
+    notebook_text = nbformat.writes(notebook)
+
+    assert "'tr_s': 0.005" in parameter_cell
+    assert "'te_s'" not in parameter_cell
+    assert "'ti_s'" not in parameter_cell
+    assert "'te':" not in parameter_cell
+    assert "'tr':" not in parameter_cell
+    assert "'type':" not in parameter_cell
+    assert "sequence_role_pulses" not in parameter_cell
+    assert "'sequence_definition_source': 'exact_exported_waveforms'" in parameter_cell
+    assert "'rf_designer_snapshot': {'pulse_type': 'Gaussian'" in parameter_cell
+    assert "'flip_angle_deg': 30.0" in parameter_cell
+    assert "ssfp_start_delay_s" not in parameter_cell
+    assert "ssfp_start_flip_angle_deg" not in parameter_cell
+    assert "'position_axis_m': loaded_arrays" in parameter_cell
+    assert "'frequency_axis_hz': loaded_arrays" in parameter_cell
+    assert "initial_magnetization=simulation_params.get('initial_mz')" in notebook_text
+    assert (
+        "rf_carrier_offset=simulation_params.get('rf_carrier_offset_hz'"
+        in notebook_text
+    )
+
+    monkeypatch.chdir(tmp_path)
+    namespace = {"np": np, "Path": Path}
+    exec(compile(parameter_cell, str(notebook_path), "exec"), namespace)
+    assert namespace["sequence_params"]["tr_s"] == 0.005
+    assert namespace["simulation_params"]["initial_mz"] == 0.75
+
+    with np.load(array_path) as arrays:
+        assert "sequence__b1_waveform_g" in arrays
+        assert "sequence__time_waveform_s" in arrays
+        assert "simulation__position_axis_m" in arrays
+        assert "simulation__frequency_axis_hz" in arrays
+
+
+def test_analysis_notebook_replaces_legacy_metadata_with_canonical_summary():
+    exporter = NotebookExporter()
+    notebook = exporter.create_notebook_mode_a(
+        "result.h5",
+        sequence_params={
+            "sequence_type": "Spin Echo",
+            "te": 20.0,
+            "tr": 100.0,
+            "te_s": 0.02,
+            "tr_s": 0.1,
+        },
+        simulation_params={
+            "mode": "time-resolved",
+            "position_range_mm": 10.0,
+            "position_range_cm": 1.0,
+        },
+        tissue_params={"preset": "Custom", "t1_ms": 900.0, "t2_ms": 80.0},
+    )
+    metadata_cell = next(
+        cell.source
+        for cell in notebook.cells
+        if cell.cell_type == "code" and "sequence_params_file" in cell.source
+    )
+
+    assert "'te_s': 0.02" in metadata_cell
+    assert "'tr_s': 0.1" in metadata_cell
+    assert "'te':" not in metadata_cell
+    assert "'tr':" not in metadata_cell
+    assert "position_range_cm" not in metadata_cell
+    assert "data['sequence_params_file']" in metadata_cell
 
 
 def test_sweep_notebook():

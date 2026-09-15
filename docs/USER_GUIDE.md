@@ -82,10 +82,10 @@ future launches.
 In the event-based **Sequence Simulation** workspace, **Export Pulseq…**
 offers three choices: Pulseq plus a generating notebook, Pulseq only, or
 notebook only. Pulseq plus notebook is the default. The notebook records the
-exact EPI, spiral, CSI, FLASH, Cartesian 3D bSSFP, spectrally selective 3D bSSFP,
-Cartesian multi-echo 3D bSSFP, or radial multi-echo 3D bSSFP builder function
-and all current GUI parameters, then writes the corresponding `.seq` file when
-executed.
+exact EPI, spiral, EPSI/MGE, CSI, FLASH, Cartesian 3D bSSFP, spectrally
+selective 3D bSSFP, Cartesian multi-echo 3D bSSFP, or radial multi-echo 3D
+bSSFP builder function and all current GUI parameters, then writes the
+corresponding `.seq` file when executed.
 
 Sequence generation is explicit by default: finish editing the acquisition
 parameters and click **Generate sequence** to refresh the timeline. Enable
@@ -137,8 +137,8 @@ Generated sequences explicitly mark the end of every spoiler block. **Settings
   separate for the complete sequence, so later gradients may refocus them.
 
 Ideal-crusher markers are used by all built-in generators that contain
-spoilers, including EPI, spiral, CSI, MPRAGE, UTE, and 3D bSSFP. Imported
-Pulseq files receive ideal treatment only when they contain an explicit
+spoilers, including EPI, spiral, EPSI/MGE, CSI, MPRAGE, UTE, and 3D bSSFP.
+Imported Pulseq files receive ideal treatment only when they contain an explicit
 `IdealSpoilerEndTimes` marker (or one of the legacy generated-sequence spoiler
 definitions); arbitrary gradients are never classified heuristically. In
 gradient-waveform mode all gradients act physically whether or not a spoiler
@@ -236,9 +236,13 @@ use a validated NUFFT and trajectory/density-correction pipeline. Multi-echo
 results retain separate echo and measurement dimensions and can use the same
 linear IDEAL estimate described above.
 
-For 2D imaging, **Readout trajectory** selects either a Cartesian EPI echo
-train or a single-interleaf centre-out spiral. EPI, spiral, CSI, and FLASH
-provide axial, coronal, and sagittal plane presets plus explicit signed
+For EPI, **Readout trajectory** selects a conventional bipolar Cartesian echo
+train, a monopolar **Flyback** echo train, or a single-interleaf centre-out
+spiral. Flyback acquires every k-space line in the same read direction and
+combines the kx rewinder with the phase-encoding blip between lines. This costs
+more readout time but avoids alternating readout polarity. EPI, spiral,
+EPSI/MGE, CSI, and FLASH provide axial, coronal, and sagittal plane presets plus
+explicit signed
 **Read gradient direction** and **Phase gradient direction** controls. The
 slice-selection gradient is displayed separately and derived as Read × Phase,
 so swapping read and phase within the same plane is unambiguous. Custom axis
@@ -250,6 +254,17 @@ for EPI it targets the centre of k-space and for centre-out spiral it targets
 the first ADC sample. Spiral readout duration is extended automatically if the
 requested sampling bandwidth would exceed the configured gradient or slew
 limits.
+
+**EPSI / MGE (2D)** acquires one complete multi-gradient-echo train for every
+phase-encoding line. **Bipolar** alternates the read direction between echoes;
+**Flyback** keeps all echoes in the same direction. The labelled ADC stream is
+reconstructed directly as selectable Cartesian MGE echo frames. Because the
+echoes are uniformly spaced, the same echo dimension can also be treated as
+EPSI spectral time: the spectral bandwidth is $1 / \Delta \mathrm{TE}$ and the
+nominal spectral resolution is
+$1 / (N_{\mathrm{echo}} \Delta \mathrm{TE})$. The panel reports
+both values and exposes TE1, echo spacing, echo count, per-line TR, slice
+geometry, RF spoiling, and end-of-train gradient spoiling.
 
 **FLASH (2D)** generates a slice-selective Cartesian spoiled gradient-echo
 acquisition. Matrix, FOV, RF pulse shape, slice package, TE, TR, RF-spoiling
@@ -304,8 +319,8 @@ Standalone scripts call the same public design path as well.
 Mode RF section for `.exc`, `.dat`, `.txt`, and `.csv` waveforms. Duration,
 complex phase modulation, and carrier offset are preserved, while amplitude is
 rescaled from the loaded pulse's reference flip angle to the sequence flip
-angle. Loaded pulses work for EPI, spiral, CSI, FLASH, Cartesian and radial
-bSSFP, SS-bSSFP, and Cartesian multi-echo bSSFP.
+angle. Loaded pulses work for EPI, spiral, EPSI/MGE, CSI, FLASH, Cartesian and
+radial bSSFP, SS-bSSFP, and Cartesian multi-echo bSSFP.
 
 Total imaging readout bandwidth fields share one definition and control:
 ADC dwell is `1 / bandwidth`, rounded to the scanner ADC raster. CSI spectral
@@ -315,8 +330,8 @@ different physical quantities.
 Scanner hardware limits are configured under **Tools → Settings → Scanner**.
 Maximum gradient, maximum slew rate, waveform rasters, RF ringdown/dead time,
 and ADC dead time are stored persistently and applied to all newly generated
-EPI, spiral, CSI, FLASH, and 3D bSSFP Pulseq sequences. Imported `.seq` files retain
-their own event timing.
+EPI, spiral, EPSI/MGE, CSI, FLASH, and 3D bSSFP Pulseq sequences. Imported
+`.seq` files retain their own event timing.
 
 ### Sequence-simulation kernels
 
@@ -624,6 +639,13 @@ Open **Phantom Designer** and define peaks whose names match the
 configured pyruvate and lactate pool names. Add ellipsoid, box, or cylinder
 objects with the buttons below the shape list; existing shapes can be moved and
 resized through their handles in the axial XY canvas.
+
+The **Common metabolite** menu below the peak table adds a nucleus-specific
+peak with chemical shift, $T_1$, and $T_2^*$ filled in. It follows the selected
+nucleus; **Auto** switches from $^1$H to $^{13}$C when the dynamic model is
+enabled. The values remain editable and are representative starting points,
+not universal constants. The complete preset table and literature basis are in
+the [metabolite preset reference](METABOLITE_PRESETS.md).
 
 Peak **Spin density / concentration** and **Initial polarization** are separate.
 Spin density describes how much signal-producing material is present. Initial

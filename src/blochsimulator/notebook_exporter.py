@@ -12,6 +12,7 @@ Date: 2024
 """
 
 from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import asdict, is_dataclass
 import json
 import os
 from pprint import pformat
@@ -35,6 +36,354 @@ class NotebookExporter:
 
     def __init__(self):
         self.nb_version = 4
+
+    @staticmethod
+    def _normalise_tissue_params(tissue_params: Dict) -> Dict:
+        """Return one unit-explicit tissue parameter representation.
+
+        The GUI state uses ``t1_ms``/``t2_ms`` while older callers of the
+        notebook API pass ``t1``/``t2`` in seconds.  Notebook code should not
+        expose both schemas or silently fall back to the default tissue.
+        """
+
+        raw = dict(tissue_params or {})
+
+        def seconds(name: str, default: float) -> float:
+            if f"{name}_s" in raw:
+                return float(raw[f"{name}_s"])
+            if name in raw:
+                return float(raw[name])
+            if f"{name}_ms" in raw:
+                return float(raw[f"{name}_ms"]) / 1000.0
+            return default
+
+        result = {
+            "name": raw.get("name", raw.get("preset", "Custom")),
+            "t1_s": seconds("t1", 1.0),
+            "t2_s": seconds("t2", 0.1),
+            "density": float(raw.get("density", 1.0)),
+        }
+        t2_star = raw.get("t2_star_s", raw.get("t2_star"))
+        if t2_star is None and raw.get("t2_star_ms") is not None:
+            t2_star = float(raw["t2_star_ms"]) / 1000.0
+        if t2_star is not None:
+            result["t2_star_s"] = float(t2_star)
+        return result
+
+    @staticmethod
+    def _normalise_pulse_params(pulse_params: Dict) -> Dict:
+        """Make RF pulse units explicit without changing their values."""
+
+        raw = dict(pulse_params or {})
+        renamed = {
+            "flip_angle": "flip_angle_deg",
+            "b1_amplitude": "b1_amplitude_g",
+            "phase": "phase_deg",
+            "freq_offset": "frequency_offset_hz",
+            "loaded_pulse_b1": "loaded_b1_waveform_g",
+            "loaded_pulse_time": "loaded_time_waveform_s",
+        }
+        result = {}
+        for key, value in raw.items():
+            if key == "duration":
+                result["duration_s"] = float(value) / 1000.0
+            else:
+                result[renamed.get(key, key)] = value
+        return result
+
+    @classmethod
+    def _normalise_sequence_params(cls, sequence_params: Dict) -> Dict:
+        """Canonicalise legacy/GUI sequence metadata for notebook use.
+
+        GUI timing controls are stored in milliseconds as ``te``, ``tr`` and
+        ``ti`` and accompanied by computed ``*_s`` aliases.  Older public API
+        callers use the unsuffixed names for seconds.  Explicit ``*_s`` values
+        therefore take precedence and the ambiguous aliases are never emitted.
+        """
+
+        raw = dict(sequence_params or {})
+        sequence_type = raw.pop("sequence_type", raw.get("type", "Custom"))
+        raw.pop("type", None)
+
+        timings = {}
+        for name in ("te", "tr", "ti"):
+            value_s = raw.pop(f"{name}_s", None)
+            value_ms = raw.pop(f"{name}_ms", None)
+            legacy_value = raw.pop(name, None)
+            if value_s is not None:
+                timings[f"{name}_s"] = float(value_s)
+            elif value_ms is not None:
+                timings[f"{name}_s"] = float(value_ms) / 1000.0
+            elif legacy_value is not None:
+                # Backward-compatible NotebookExporter API: unsuffixed timing
+                # values were documented and tested as seconds.
+                timings[f"{name}_s"] = float(legacy_value)
+
+        type_lower = str(sequence_type).lower()
+        if "ssfp" in type_lower:
+            active_timings = {"tr_s"}
+        elif "inversion recovery" in type_lower:
+            active_timings = {"te_s", "tr_s", "ti_s"}
+        elif "spin echo" in type_lower or "gradient echo" in type_lower:
+            active_timings = {"te_s", "tr_s"}
+        elif "slice select" in type_lower:
+            active_timings = {"te_s"}
+        elif "free induction" in type_lower:
+            active_timings = {"tr_s"}
+        else:
+            active_timings = set(timings)
+
+        result = {"sequence_type": sequence_type}
+        result.update(
+            (key, value) for key, value in timings.items() if key in active_timings
+        )
+
+        # An analytic Free Induction Decay export is intentionally regenerated
+        # from its editable RF settings. Keeping the GUI's frozen waveform in
+        # that case would silently ignore edits made in the notebook. A custom
+        # pulse cannot be regenerated, so it keeps the exact exported arrays.
+        configured_pulse_type = raw.get("rf_pulse_type")
+        excitation_state = (raw.get("pulse_states") or {}).get("Excitation", {})
+        if isinstance(excitation_state, dict):
+            configured_pulse_type = excitation_state.get(
+                "pulse_type", configured_pulse_type
+            )
+        regenerate_fid = (
+            "free induction" in type_lower
+            and str(configured_pulse_type or "gaussian").lower() != "custom"
+        )
+        if regenerate_fid:
+            for key in (
+                "b1_waveform",
+                "time_waveform",
+                "gradients_waveform",
+                "b1_waveform_g",
+                "time_waveform_s",
+                "gradients_waveform_g_per_cm",
+            ):
+                raw.pop(key, None)
+
+        has_exact_waveforms = (
+            raw.get("b1_waveform") is not None and raw.get("time_waveform") is not None
+        ) or (
+            raw.get("b1_waveform_g") is not None
+            and raw.get("time_waveform_s") is not None
+        )
+        result["sequence_definition_source"] = (
+            "exact_exported_waveforms"
+            if has_exact_waveforms
+            else "regenerated_from_parameters"
+        )
+
+        # Unit-explicit top-level sequence fields.
+        rename = {
+            "flip_angle": "flip_angle_deg",
+            "duration": "duration_s",
+            "rephase_pct": "rephase_percent",
+            "slice_thickness": "slice_thickness_mm",
+            "slice_gradient": "slice_gradient_g_per_cm",
+            "ssfp_start_phase": "ssfp_start_phase_deg",
+            "b1_waveform": "b1_waveform_g",
+            "time_waveform": "time_waveform_s",
+            "gradients_waveform": "gradients_waveform_g_per_cm",
+        }
+
+        # Separate the currently visible RF designer state from pulse-role
+        # states.  They are different concepts and used to appear as competing
+        # pulse definitions in exported notebooks.
+        rf_field_map = {
+            "rf_pulse_type": "pulse_type",
+            "rf_flip_angle": "flip_angle_deg",
+            "rf_duration_s": "duration_s",
+            "rf_time_bw_product": "time_bandwidth_product",
+            "rf_phase": "phase_deg",
+            "rf_freq_offset": "frequency_offset_hz",
+            "rf_b1_amplitude": "b1_amplitude_g",
+            "rf_sinc_lobes": "sinc_lobes",
+            "rf_slr_sharpness": "slr_sharpness",
+            "rf_apodization": "apodization",
+        }
+        rf_snapshot = {}
+        for source, target in rf_field_map.items():
+            if source in raw:
+                rf_snapshot[target] = raw.pop(source)
+
+        pulse_states = raw.pop("pulse_states", {}) or {}
+        roles_by_type = {
+            "spin echo": {"Excitation", "Refocusing"},
+            "spin echo (tip-axis 180)": {"Excitation", "Refocusing"},
+            "inversion recovery": {"Inversion", "Excitation"},
+            "gradient echo": {"Excitation"},
+            "free induction decay": {"Excitation"},
+            "flash": {"Excitation"},
+            "epi": {"Excitation"},
+            "custom": {"Custom Pulse"},
+        }
+        active_roles = roles_by_type.get(type_lower, set())
+        active_pulses = {
+            role: cls._normalise_pulse_params(state)
+            for role, state in pulse_states.items()
+            if role in active_roles and isinstance(state, dict)
+        }
+        if active_pulses:
+            result["sequence_role_pulses"] = active_pulses
+        elif rf_snapshot:
+            # Sequences without named pulse roles (for example the SSFP loop)
+            # use the currently active RF designer configuration.  For named
+            # roles the role-specific settings above are the clearer source.
+            result["rf_designer_snapshot"] = rf_snapshot
+
+        use_ratios = bool(raw.get("ssfp_use_ratios", False))
+        if "ssfp" in type_lower:
+            start_delay_ms = raw.pop("ssfp_start_tr", None)
+            start_flip_deg = raw.pop("ssfp_start_flip", None)
+            if not use_ratios:
+                if start_delay_ms is not None:
+                    result["ssfp_start_delay_s"] = float(start_delay_ms) / 1000.0
+                if start_flip_deg is not None:
+                    result["ssfp_start_flip_angle_deg"] = float(start_flip_deg)
+            else:
+                # In ratio mode the absolute controls are inactive.
+                raw.pop("ssfp_start_tr", None)
+                raw.pop("ssfp_start_flip", None)
+        else:
+            # SSFP-only controls are inactive for every other sequence type.
+            for key in tuple(raw):
+                if key.startswith("ssfp_"):
+                    raw.pop(key)
+
+        # Other sequence-specific controls that are visibly inactive should not
+        # masquerade as parameters of the selected sequence.
+        if "spin echo" not in type_lower:
+            raw.pop("echo_count", None)
+        if not any(
+            name in type_lower
+            for name in (
+                "spin echo",
+                "gradient echo",
+                "slice select",
+                "epi",
+                "inversion recovery",
+            )
+        ):
+            raw.pop("slice_thickness", None)
+            raw.pop("slice_gradient", None)
+        if "slice select" not in type_lower:
+            raw.pop("rephase_pct", None)
+
+        for key, value in raw.items():
+            result[rename.get(key, key)] = value
+        return result
+
+    @staticmethod
+    def _normalise_simulation_params(simulation_params: Dict) -> Dict:
+        """Remove duplicate ranges and label coordinate-array units."""
+
+        raw = dict(simulation_params or {})
+        result = {}
+        rename = {
+            "position_axis": "position_axis_m",
+            "frequency_axis": "frequency_axis_hz",
+            "effective_frequency_axis": "effective_frequency_axis_hz",
+        }
+        for key, value in raw.items():
+            # ``position_range_cm`` is a duplicate compatibility alias whenever
+            # the GUI's explicitly labelled millimetre value is present.
+            if key == "position_range_cm" and "position_range_mm" in raw:
+                continue
+            result[rename.get(key, key)] = value
+        return result
+
+    @staticmethod
+    def _plain_parameter_value(value):
+        """Convert parameter objects to executable, portable Python values."""
+
+        if isinstance(value, np.ndarray):
+            return value
+        if isinstance(value, np.generic):
+            return value.item()
+        if is_dataclass(value):
+            return NotebookExporter._plain_parameter_value(asdict(value))
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, dict):
+            return {
+                str(key): NotebookExporter._plain_parameter_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [NotebookExporter._plain_parameter_value(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(
+                NotebookExporter._plain_parameter_value(item) for item in value
+            )
+        if value is None or isinstance(value, (str, int, float, complex, bool)):
+            return value
+        return str(value)
+
+    @classmethod
+    def _parameter_source(cls, value, arrays: Dict[str, np.ndarray], path=()) -> str:
+        """Format parameters as Python and replace arrays with NPZ lookups."""
+
+        references = {}
+
+        def replace_arrays(item, item_path):
+            item = cls._plain_parameter_value(item)
+            if isinstance(item, np.ndarray):
+                key = "__".join(str(part) for part in item_path) or "array"
+                candidate = key
+                suffix = 2
+                while candidate in arrays:
+                    candidate = f"{key}_{suffix}"
+                    suffix += 1
+                arrays[candidate] = item
+                token = f"__BLOCH_ARRAY_REFERENCE_{len(references)}__"
+                references[token] = candidate
+                return token
+            if isinstance(item, dict):
+                return {
+                    key: replace_arrays(child, (*item_path, key))
+                    for key, child in item.items()
+                }
+            if isinstance(item, list):
+                return [
+                    replace_arrays(child, (*item_path, index))
+                    for index, child in enumerate(item)
+                ]
+            if isinstance(item, tuple):
+                return tuple(
+                    replace_arrays(child, (*item_path, index))
+                    for index, child in enumerate(item)
+                )
+            return item
+
+        prepared = replace_arrays(value, path)
+        source = pformat(prepared, sort_dicts=False, width=88)
+        for token, key in references.items():
+            source = source.replace(repr(token), f"loaded_arrays[{key!r}]")
+        return source
+
+    @classmethod
+    def _summarise_arrays(cls, value):
+        """Replace arrays by readable summaries for analysis notebook metadata."""
+
+        value = cls._plain_parameter_value(value)
+        if isinstance(value, np.ndarray):
+            return f"<array shape={value.shape}, dtype={value.dtype}>"
+        if isinstance(value, dict):
+            return {key: cls._summarise_arrays(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [cls._summarise_arrays(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(cls._summarise_arrays(item) for item in value)
+        return value
+
+    @staticmethod
+    def _assignment_source(target: str, value_source: str) -> str:
+        """Align multiline literals underneath their assignment target."""
+
+        continuation = " " * (len(target) + 3)
+        return f"{target} = {value_source.replace(chr(10), chr(10) + continuation)}"
 
     def create_notebook_mode_a(
         self,
@@ -65,6 +414,10 @@ class NotebookExporter:
         nbformat.NotebookNode
             Jupyter notebook object
         """
+        tissue_params = self._normalise_tissue_params(tissue_params)
+        sequence_params = self._normalise_sequence_params(sequence_params)
+        simulation_params = self._normalise_simulation_params(simulation_params)
+
         nb = new_notebook()
         cells = []
 
@@ -113,6 +466,13 @@ class NotebookExporter:
         # Cell 2: Load data
         cells.append(new_markdown_cell("## Load Simulation Data"))
         cells.append(new_code_cell(self._generate_load_data_code_mode_a(h5_filename)))
+        cells.append(
+            new_code_cell(
+                self._generate_canonical_metadata_code(
+                    sequence_params, simulation_params
+                )
+            )
+        )
 
         # Cell 3: Xarray Integration
         cells.append(new_markdown_cell("## Xarray Dataset"))
@@ -523,6 +883,10 @@ else:
         nbformat.NotebookNode
             Jupyter notebook object
         """
+        tissue_params = self._normalise_tissue_params(tissue_params)
+        sequence_params = self._normalise_sequence_params(sequence_params)
+        simulation_params = self._normalise_simulation_params(simulation_params)
+
         nb = new_notebook()
         cells = []
 
@@ -592,41 +956,37 @@ else:
         cells.append(new_markdown_cell("## Define Pulse Sequence"))
         cells.append(
             new_code_cell(
-                self._generate_sequence_definition_code(
-                    sequence_params,
-                    rf_waveform,
-                    simulation_params=simulation_params,
-                )
+                self._generate_sequence_definition_code(sequence_params, rf_waveform)
             )
         )
 
-        # Cell 5: Visualize the sequence that will actually be simulated
-        cells.append(new_markdown_cell("## Sequence Visualization"))
+        # Cell 4b: Verify the exact RF and gradient arrays used downstream.
+        cells.append(new_markdown_cell("## Sequence Waveforms"))
         cells.append(new_code_cell(self._generate_sequence_visualization_code()))
 
-        # Cell 6: Define positions and frequencies
+        # Cell 5: Define positions and frequencies
         cells.append(new_markdown_cell("## Spatial and Frequency Sampling"))
         cells.append(new_code_cell(self._generate_sampling_code(simulation_params)))
 
-        # Cell 7: Run simulation
+        # Cell 6: Run simulation
         cells.append(new_markdown_cell("## Run Simulation"))
         cells.append(
             new_code_cell(self._generate_simulation_run_code(simulation_params))
         )
 
-        # Cell 7b: Xarray Dataset
+        # Cell 6b: Xarray Dataset
         cells.append(new_markdown_cell("## Xarray Dataset"))
         cells.append(new_code_cell(self._generate_xarray_code()))
 
-        # Cell 8: Visualize results
+        # Cell 7: Visualize results
         cells.append(new_markdown_cell("## Visualization"))
         cells.append(new_code_cell(self._generate_magnetization_plot_code()))
 
-        # Cell 9: Signal analysis
+        # Cell 8: Signal analysis
         cells.append(new_markdown_cell("## Signal Analysis"))
         cells.append(new_code_cell(self._generate_signal_plot_code()))
 
-        # Cell 10: Save results (optional)
+        # Cell 9: Save results (optional)
         cells.append(new_markdown_cell("## Save Results (Optional)"))
         cells.append(
             new_code_cell(
@@ -691,6 +1051,31 @@ if 'mx' in data:
 if 'time' in data:
     print(f"  Duration: {{data['time'][-1]*1000:.3f}} ms")
 """
+
+    def _generate_canonical_metadata_code(
+        self, sequence_params: Dict, simulation_params: Dict
+    ) -> str:
+        """Use clear metadata in analysis cells while retaining the file values."""
+
+        sequence_summary = self._summarise_arrays(sequence_params)
+        simulation_summary = self._summarise_arrays(simulation_params)
+        sequence_assignment = self._assignment_source(
+            "data['sequence_params']",
+            pformat(sequence_summary, sort_dicts=False, width=88),
+        )
+        simulation_assignment = self._assignment_source(
+            "data['simulation_params']",
+            pformat(simulation_summary, sort_dicts=False, width=88),
+        )
+        return (
+            "# Use one canonical, unit-explicit parameter schema in this notebook.\n"
+            "# The values read verbatim from the HDF5 file remain available under\n"
+            "# *_params_file for auditing or compatibility with older exports.\n"
+            "data['sequence_params_file'] = data.get('sequence_params', {})\n"
+            "data['simulation_params_file'] = data.get('simulation_params', {})\n"
+            f"{sequence_assignment}\n"
+            f"{simulation_assignment}\n"
+        )
 
     def _generate_xarray_code(self) -> str:
         """Generate code to convert simulation data to an xarray Dataset."""
@@ -791,7 +1176,9 @@ with h5py.File(data_file, 'r') as f:
         self, tissue_params: Dict, sequence_params: Dict, simulation_params: Dict
     ) -> str:
         """Generate code to display parameters."""
-        return """# Display simulation parameters
+        return """# Display the canonical, unit-explicit simulation parameters
+from pprint import pprint
+
 print("="*60)
 print("SIMULATION PARAMETERS")
 print("="*60)
@@ -799,19 +1186,15 @@ print("="*60)
 print("\\nTissue:")
 for key, value in data['tissue'].items():
     if key in ['t1', 't2', 't2_star'] and value is not None:
-        print(f"  {key}: {value*1000:.1f} ms")
+        print(f"  {key}_s: {value:.9g}")
     elif value is not None:
         print(f"  {key}: {value}")
 
-print("\\nSequence:")
-for key, value in data['sequence_params'].items():
-    if not isinstance(value, np.ndarray):
-        print(f"  {key}: {value}")
+print("\\nSequence (unit suffixes are authoritative):")
+pprint(data['sequence_params'], sort_dicts=False)
 
-print("\\nSimulation:")
-for key, value in data['simulation_params'].items():
-    if not isinstance(value, np.ndarray):
-        print(f"  {key}: {value}")
+print("\\nSimulation (unit suffixes are authoritative):")
+pprint(data['simulation_params'], sort_dicts=False)
 
 print("="*60)
 """
@@ -980,361 +1363,140 @@ plt.show()
         simulation_params: Dict,
         waveform_filename: Optional[str] = None,
     ) -> str:
-        """Generate editable parameters plus an annotated export record."""
-        seq_type = str(sequence_params.get("sequence_type", "Custom"))
-        te_s = sequence_params.get("te_s", sequence_params.get("te", 0.01))
-        tr_s = sequence_params.get("tr_s", sequence_params.get("tr", 0.01))
-        ti_s = sequence_params.get("ti_s", sequence_params.get("ti", 0.0))
-        flip_angle = sequence_params.get(
-            "rf_flip_angle", sequence_params.get("flip_angle", 90.0)
-        )
-        rf_duration_s = sequence_params.get(
-            "rf_duration_s", sequence_params.get("rf_duration", 1e-3)
-        )
-        rf_b1_amplitude = sequence_params.get("rf_b1_amplitude", 0.0)
-        parameter_note = lambda key: self._sequence_parameter_note(  # noqa: E731
-            seq_type, key, sequence_params
+        """Generate one canonical parameter cell with explicit units."""
+
+        arrays = {}
+        tissue_source = self._parameter_source(tissue_params, arrays, ("tissue",))
+        sequence_source = self._parameter_source(sequence_params, arrays, ("sequence",))
+        simulation_source = self._parameter_source(
+            simulation_params, arrays, ("simulation",)
         )
 
         code = (
-            "# Define simulation parameters\n"
-            "# Edit values in this section, then run the notebook from here.\n"
-            "# They are the single source of truth; the export record below "
-            "references them.\n\n"
+            "# Canonical simulation parameters\n"
+            "# Unit suffixes (_s, _ms, _us, _hz, _deg, _g, _m) are authoritative.\n"
+            "# When sequence_definition_source is exact_exported_waveforms, the stored\n"
+            "# B1/gradient/time arrays are authoritative; otherwise the editable pulse\n"
+            "# and timing parameters below regenerate the sequence.\n\n"
         )
 
-        # Tissue parameters
-        code += "# Tissue parameters\n"
-        code += f"tissue_name = {tissue_params.get('name', 'Custom')!r}\n"
-        code += f"t1 = {tissue_params.get('t1', 1.0):.6f}  # seconds\n"
-        code += f"t2 = {tissue_params.get('t2', 0.1):.6f}  # seconds\n"
-        code += f"density = {tissue_params.get('density', 1.0):.3f}\n\n"
-
-        # Sequence parameters
-        code += "# Sequence parameters\n"
-        code += f"sequence_type = {seq_type!r}\n"
-        code += f"te = {float(te_s):.6f}  # seconds{parameter_note('te')}\n"
-        code += f"tr = {float(tr_s):.6f}  # seconds{parameter_note('tr')}\n"
-        code += f"ti = {float(ti_s):.6f}  # seconds{parameter_note('ti')}\n"
-        code += (
-            f"flip_angle = {float(flip_angle):.6g}  # degrees (legacy alias)"
-            f"{parameter_note('flip_angle')}\n"
-        )
-        code += (
-            f"rf_pulse_type = {sequence_params.get('rf_pulse_type', 'Gaussian')!r}"
-            f"{parameter_note('rf_pulse_type')}\n"
-        )
-        if str(sequence_params.get("rf_pulse_type", "")).lower() == "custom":
-            code += (
-                f"exported_rf_flip_angle = {float(flip_angle):.6g}"
-                "  # reference for rescaling the imported custom waveform\n"
-            )
-        flip_note = ""
-        if rf_b1_amplitude > 0 or str(
-            sequence_params.get("rf_pulse_type", "")
-        ).lower() in {"adiabatic half passage", "adiabatic full passage"}:
-            flip_note = "; not used because RF B1 amplitude controls this pulse"
-        code += (
-            f"rf_flip_angle = {float(flip_angle):.6g}  # degrees{flip_note}"
-            f"{parameter_note('rf_flip_angle')}\n"
-        )
-        code += (
-            f"rf_duration_s = {float(rf_duration_s):.9g}  # seconds"
-            f"{parameter_note('rf_duration_s')}\n"
-        )
-        code += (
-            "rf_time_bw_product = "
-            f"{float(sequence_params.get('rf_time_bw_product', 4.0)):.9g}"
-            f"{parameter_note('rf_time_bw_product')}\n"
-        )
-        code += (
-            f"rf_sinc_lobes = {int(sequence_params.get('rf_sinc_lobes', 3))}"
-            f"{parameter_note('rf_sinc_lobes')}\n"
-        )
-        code += (
-            f"rf_phase_deg = {float(sequence_params.get('rf_phase', 0.0)):.9g}"
-            f"{parameter_note('rf_phase')}\n"
-        )
-        code += (
-            "rf_frequency_offset_hz = "
-            f"{float(sequence_params.get('rf_freq_offset', 0.0)):.9g}"
-            f"{parameter_note('rf_freq_offset')}\n"
-        )
-        code += (
-            f"rf_b1_amplitude_g = {float(rf_b1_amplitude):.9g}"
-            f"{parameter_note('rf_b1_amplitude')}\n"
-        )
-        code += (
-            f"rf_slr_sharpness = {int(sequence_params.get('rf_slr_sharpness', 1))}"
-            f"{parameter_note('rf_slr_sharpness')}\n"
-        )
-        code += (
-            f"rf_apodization = {sequence_params.get('rf_apodization', 'None')!r}"
-            f"{parameter_note('rf_apodization')}\n"
-        )
-        code += "\n"
-
-        # Simulation parameters
-        code += "# Simulation parameters\n"
-        code += f"num_positions = {simulation_params.get('num_positions', 1)}\n"
-        code += f"num_frequencies = {simulation_params.get('num_frequencies', 1)}\n"
-        code += f"time_step_us = {simulation_params.get('time_step_us', 1.0):.3f}\n"
-        tail_note = (
-            ""
-            if "Free Induction Decay" in seq_type
-            else (
-                f"  # not used for {seq_type}; already present in an exported waveform"
-            )
-        )
-        code += (
-            f"extra_tail_ms = {simulation_params.get('extra_tail_ms', 0.0):.6g}"
-            f"{tail_note}\n"
-        )
-        mode_str = simulation_params.get("mode", "endpoint")
-        code += f"mode = 2 if {mode_str!r} == 'time-resolved' else 0\n"
-
-        # Create dictionary for compatibility
-        code += (
-            "\n# Complete exported parameter record. This keeps the GUI state for "
-            "reference.\n"
-            "# It references the editable values above instead of duplicating them.\n"
-            "# Entries marked '# not used' do not affect the sequence built above.\n"
-        )
-
-        editable_references = {
-            "type": "sequence_type",
-            "te_s": "te",
-            "tr_s": "tr",
-            "ti_s": "ti",
-            "flip_angle": "flip_angle",
-            "rf_pulse_type": "rf_pulse_type",
-            "rf_flip_angle": "rf_flip_angle",
-            "rf_duration": "rf_duration_s",
-            "rf_duration_s": "rf_duration_s",
-            "rf_time_bw_product": "rf_time_bw_product",
-            "rf_sinc_lobes": "rf_sinc_lobes",
-            "rf_phase": "rf_phase_deg",
-            "rf_freq_offset": "rf_frequency_offset_hz",
-            "rf_b1_amplitude": "rf_b1_amplitude_g",
-            "rf_slr_sharpness": "rf_slr_sharpness",
-            "rf_apodization": "rf_apodization",
-        }
-
-        # Check if we have waveforms to save
-        waveforms_to_save = {}
-        for k, v in sequence_params.items():
-            if isinstance(v, np.ndarray):
-                waveforms_to_save[k] = v
-
-        if waveforms_to_save and waveform_filename:
-            # Save to file
-            np.savez(waveform_filename, **waveforms_to_save)
+        if arrays:
+            if not waveform_filename:
+                raise ValueError(
+                    "Array-valued parameters require a waveform_filename for a "
+                    "reproducible notebook export."
+                )
+            np.savez(waveform_filename, **arrays)
             rel_path = Path(waveform_filename).name
-            code += "# Load large waveforms from external file\n"
-            code += "loaded_waveforms = {}\n"
-            code += f"wf_file = Path('{rel_path}')\n"
-            code += "if wf_file.exists():\n"
-            code += "    with np.load(wf_file) as wf_data:\n"
             code += (
-                "        loaded_waveforms = {k: wf_data[k] for k in wf_data.files}\n"
+                "# Load array-valued inputs from the companion archive.\n"
+                f"array_file = Path({rel_path!r})\n"
+                "if not array_file.exists():\n"
+                "    raise FileNotFoundError(\n"
+                "        f'Missing companion array file: {array_file}'\n"
+                "    )\n"
+                "with np.load(array_file, allow_pickle=False) as array_data:\n"
+                "    loaded_arrays = {key: array_data[key] for key in array_data.files}\n\n"
             )
-            code += "else:\n"
-            code += "    print(f'Warning: Waveform file {wf_file} not found!')\n\n"
-
-            code += "sequence_params = {\n"
-            code += "    'sequence_type': sequence_type,\n"
-            for k, v in sequence_params.items():
-                if k == "sequence_type":
-                    continue
-                note = self._sequence_parameter_note(seq_type, k, sequence_params)
-                if k in editable_references:
-                    value_code = editable_references[k]
-                elif k in waveforms_to_save:
-                    value_code = f"loaded_waveforms.get({k!r})"
-                else:
-                    value_code = self._python_value_code(v)
-                code += f"    {k!r}: {value_code},{note}\n"
-            code += "}\n"
         else:
-            code += "sequence_params = {\n"
-            code += "    'sequence_type': sequence_type,\n"
-            for k, v in sequence_params.items():
-                if k == "sequence_type":
-                    continue
-                note = self._sequence_parameter_note(seq_type, k, sequence_params)
-                value_code = editable_references.get(k, self._python_value_code(v))
-                code += f"    {k!r}: {value_code},{note}\n"
-            code += "}\n"
+            code += "loaded_arrays = {}\n\n"
 
+        code += f"{self._assignment_source('tissue_params', tissue_source)}\n\n"
+        code += f"{self._assignment_source('sequence_params', sequence_source)}\n\n"
+        code += f"{self._assignment_source('simulation_params', simulation_source)}\n"
         return code
-
-    @staticmethod
-    def _python_value_code(value: Any) -> str:
-        """Return executable, compact Python for notebook metadata values."""
-
-        def clean(item):
-            if isinstance(item, np.generic):
-                return item.item()
-            if isinstance(item, np.ndarray):
-                return item.tolist()
-            if isinstance(item, dict):
-                return {str(key): clean(child) for key, child in item.items()}
-            if isinstance(item, list):
-                return [clean(child) for child in item]
-            if isinstance(item, tuple):
-                return tuple(clean(child) for child in item)
-            if isinstance(item, (str, int, float, bool, type(None))):
-                return item
-            return str(item)
-
-        cleaned = clean(value)
-        if isinstance(cleaned, (dict, list, tuple)):
-            return pformat(cleaned, sort_dicts=False, compact=True)
-        return repr(cleaned)
-
-    @staticmethod
-    def _sequence_parameter_note(seq_type: str, key: str, sequence_params: Dict) -> str:
-        """Annotate parameters that the generated notebook does not consume."""
-        fid_used = {
-            "type",
-            "sequence_type",
-            "tr",
-            "tr_s",
-            "rf_pulse_type",
-            "rf_flip_angle",
-            "rf_duration_s",
-            "rf_duration",
-            "rf_sinc_lobes",
-            "rf_phase",
-            "rf_freq_offset",
-            "rf_b1_amplitude",
-            "rf_slr_sharpness",
-            "rf_apodization",
-        }
-        exact_waveform_used = {
-            "b1_waveform",
-            "time_waveform",
-            "gradients_waveform",
-        }
-        if "Free Induction Decay" in seq_type:
-            used = set(fid_used)
-            if str(sequence_params.get("rf_pulse_type", "")).lower() == "custom":
-                used.update(exact_waveform_used)
-            if sequence_params.get("rf_b1_amplitude", 0.0) > 0 or str(
-                sequence_params.get("rf_pulse_type", "")
-            ).lower() in {"adiabatic half passage", "adiabatic full passage"}:
-                used.discard("rf_flip_angle")
-        elif "b1_waveform" in sequence_params and "time_waveform" in sequence_params:
-            used = exact_waveform_used
-        elif "Spin Echo" in seq_type:
-            used = {"te", "te_s", "tr", "tr_s"}
-        elif "Gradient Echo" in seq_type:
-            used = {"te", "te_s", "tr", "tr_s", "flip_angle", "rf_flip_angle"}
-        elif "Slice Select" in seq_type:
-            used = {"flip_angle", "rf_flip_angle", "rf_duration", "rf_duration_s"}
-        elif "SSFP" in seq_type:
-            used = {
-                "tr",
-                "tr_s",
-                "flip_angle",
-                "rf_flip_angle",
-                "ssfp_repeats",
-            }
-        else:
-            used = set()
-        return "" if key in used else f"  # not used for {seq_type}"
 
     def _generate_simulator_init_code(
         self, tissue_params: Dict, simulation_params: Dict
     ) -> str:
         """Generate simulator initialization code."""
-        return f"""# Create simulator
-use_parallel = {simulation_params.get('use_parallel', False)}
-num_threads = {simulation_params.get('num_threads', 4)}
+        return """# Create simulator
+use_parallel = bool(simulation_params.get('use_parallel', False))
+num_threads = int(simulation_params.get('num_threads', 4))
 
 sim = BlochSimulator(use_parallel=use_parallel, num_threads=num_threads)
 
 # Create tissue
 tissue = TissueParameters(
-    name=tissue_name,
-    t1=t1,
-    t2=t2,
-    density=density
+    name=tissue_params['name'],
+    t1=tissue_params['t1_s'],
+    t2=tissue_params['t2_s'],
+    t2_star=tissue_params.get('t2_star_s'),
+    density=tissue_params['density'],
 )
 
 print(f"Simulator initialized")
-print(f"  Tissue: {{tissue.name}}")
-print(f"  T1: {{tissue.t1*1000:.1f}} ms, T2: {{tissue.t2*1000:.1f}} ms")
+print(f"  Tissue: {tissue.name}")
+print(f"  T1: {tissue.t1*1000:.1f} ms, T2: {tissue.t2*1000:.1f} ms")
 """
 
     def _generate_sequence_definition_code(
-        self,
-        sequence_params: Dict,
-        rf_waveform: Optional[Tuple] = None,
-        simulation_params: Optional[Dict] = None,
+        self, sequence_params: Dict, rf_waveform: Optional[Tuple] = None
     ) -> str:
         """Generate pulse sequence definition code."""
         seq_type = sequence_params.get("sequence_type", "Spin Echo")
-        simulation_params = simulation_params or {}
 
-        # FID notebooks intentionally rebuild the RF pulse from the editable
-        # parameters. Loading the frozen GUI waveform here made changes such as
-        # rf_flip_angle = 45 appear to work while silently simulating the old pulse.
         if "Free Induction Decay" in seq_type:
             return """# Create Free Induction Decay (FID) sequence
-# This cell consumes the editable rf_* values from the parameter cell above.
-dt = time_step_us * 1e-6
+# Analytic pulses are regenerated from the editable canonical RF parameters.
+rf_params = sequence_params.get('sequence_role_pulses', {}).get('Excitation')
+if rf_params is None:
+    rf_params = sequence_params.get('rf_designer_snapshot', {})
+
 rf_type_aliases = {
     'rectangle': 'rect',
     'adiabatic half passage': 'adiabatic_half',
     'adiabatic full passage': 'adiabatic_full',
     'bir-4': 'bir4',
 }
-rf_design_type = rf_type_aliases.get(rf_pulse_type.lower(), rf_pulse_type.lower())
+rf_type = str(rf_params.get('pulse_type', 'gaussian')).lower()
+rf_design_type = rf_type_aliases.get(rf_type, rf_type)
+rf_duration_s = float(rf_params.get('duration_s', 1e-3))
+rf_flip_angle_deg = float(rf_params.get('flip_angle_deg', 90.0))
+rf_b1_amplitude_g = float(rf_params.get('b1_amplitude_g', 0.0))
+rf_phase_deg = float(rf_params.get('phase_deg', 0.0))
+rf_frequency_offset_hz = float(rf_params.get('frequency_offset_hz', 0.0))
+rf_sinc_lobes = int(rf_params.get('sinc_lobes', 3))
+rf_slr_sharpness = int(rf_params.get('slr_sharpness', 1))
+rf_apodization = rf_params.get('apodization', 'None')
 
+dt = float(simulation_params.get('time_step_us', 1.0)) * 1e-6
 if rf_design_type == 'custom':
-    # A custom imported shape cannot be recreated analytically. Keep its exported
-    # samples, but let the editable flip angle rescale the pulse when amplitude is Auto.
-    b1 = np.array(sequence_params.get('b1_waveform'), dtype=complex, copy=True)
-    time = np.array(sequence_params.get('time_waveform'), dtype=float, copy=True)
-    if b1.ndim != 1 or time.ndim != 1 or b1.shape != time.shape:
-        raise ValueError('The exported custom RF waveform is missing or invalid.')
-    gradients_value = sequence_params.get('gradients_waveform')
+    b1 = np.asarray(sequence_params.get('b1_waveform_g'), dtype=complex).copy()
+    time = np.asarray(sequence_params.get('time_waveform_s'), dtype=float).copy()
+    gradients_value = sequence_params.get('gradients_waveform_g_per_cm')
     gradients = (
         np.zeros((len(b1), 3), dtype=float)
         if gradients_value is None
-        else np.array(gradients_value, dtype=float, copy=True)
+        else np.asarray(gradients_value, dtype=float).copy()
     )
-    if rf_b1_amplitude_g <= 0:
-        if exported_rf_flip_angle == 0:
-            raise ValueError('Cannot rescale a custom pulse exported with a 0° flip angle.')
-        b1 *= rf_flip_angle / exported_rf_flip_angle
+    if b1.ndim != 1 or time.ndim != 1 or b1.shape != time.shape:
+        raise ValueError('The exported custom RF waveform is missing or invalid.')
 else:
-    # Match Free Mode's RF sampling: at least 32 points across the RF pulse.
     rf_points = max(32, int(np.ceil(rf_duration_s / dt)))
     if rf_design_type == 'sinc':
-        rf_shape_parameter = float(max(1, rf_sinc_lobes) + 1)
-    elif rf_design_type in {'slr', 'gaussian', 'adiabatic_half', 'adiabatic_full', 'bir4'}:
-        rf_shape_parameter = 4.0
+        shape_parameter = float(max(1, rf_sinc_lobes) + 1)
+    elif rf_design_type in {'adiabatic_half', 'adiabatic_full', 'bir4'}:
+        shape_parameter = 4.0
     else:
-        rf_shape_parameter = 1.0
+        shape_parameter = float(rf_params.get('time_bandwidth_product', 4.0))
     if rf_design_type in {'adiabatic_half', 'adiabatic_full'} and rf_b1_amplitude_g <= 0:
-        raise ValueError('AHP/AFP require rf_b1_amplitude_g > 0; flip angle is not used.')
+        raise ValueError('AHP/AFP require b1_amplitude_g > 0; flip angle is not used.')
     design_flip_angle = (
-        180.0 if rf_design_type == 'adiabatic_full' else 90.0
-        if rf_design_type == 'adiabatic_half' else rf_flip_angle
+        180.0 if rf_design_type == 'adiabatic_full' else
+        90.0 if rf_design_type == 'adiabatic_half' else
+        rf_flip_angle_deg
     )
-    pulse, pulse_time = design_rf_pulse(
+    pulse, _ = design_rf_pulse(
         rf_design_type,
         duration=rf_duration_s,
         flip_angle=design_flip_angle,
-        time_bw_product=rf_shape_parameter,
+        time_bw_product=shape_parameter,
         npoints=rf_points,
         freq_offset=0.0,
         slr_sharpness=rf_slr_sharpness,
     )
     pulse_dt = rf_duration_s / len(pulse)
-
     windows = {
         'Hamming': np.hamming,
         'Hanning': np.hanning,
@@ -1349,98 +1511,108 @@ else:
             raise ValueError('RF pulse has zero amplitude and cannot be rescaled.')
         pulse = pulse * (rf_b1_amplitude_g / peak)
     elif rf_design_type not in {'adiabatic_half', 'adiabatic_full'}:
-        # Apodization changes the integral, so recalibrate to the requested flip.
-        target_area = np.deg2rad(rf_flip_angle) / (2 * np.pi * 4258.0)
+        target_area = np.deg2rad(rf_flip_angle_deg) / (2 * np.pi * 4258.0)
         area = np.sum(pulse) * pulse_dt
         if abs(area) < 1e-15:
             raise ValueError('RF pulse integral is too small for flip-angle scaling.')
         pulse = pulse * target_area / area
 
-    pulse = pulse * np.exp(1j * np.deg2rad(rf_phase_deg))
+    total_duration_s = max(rf_duration_s, float(sequence_params.get('tr_s', 0.01)))
+    total_duration_s += max(
+        0.0, float(simulation_params.get('extra_tail_ms', 0.0))
+    ) * 1e-3
+    total_points = max(len(pulse), int(np.ceil(total_duration_s / pulse_dt)))
+    b1 = np.pad(pulse, (0, total_points - len(pulse)))
+    time = (np.arange(total_points, dtype=float) + 0.5) * pulse_dt
+    gradients = np.zeros((total_points, 3), dtype=float)
 
-    # Free Mode acquires through TR and then appends the selected zero-field tail.
-    current_duration = float(pulse_time[-1])
-    extra_points = max(0, int(np.ceil((tr - current_duration) / pulse_dt)))
-    b1 = np.pad(pulse, (0, extra_points))
-    if extra_points:
-        extra_time = current_duration + np.arange(1, extra_points + 1) * pulse_dt
-        time = np.concatenate([pulse_time, extra_time])
-    else:
-        time = pulse_time.copy()
-    gradients = np.zeros((len(b1), 3), dtype=float)
-
-    tail_points = max(0, int(np.ceil(extra_tail_ms * 1e-3 / pulse_dt)))
-    if tail_points:
-        b1 = np.pad(b1, (0, tail_points))
-        gradients = np.pad(gradients, ((0, tail_points), (0, 0)))
-        tail_time = time[-1] + np.arange(1, tail_points + 1) * pulse_dt
-        time = np.concatenate([time, tail_time])
-
-    # Apply the carrier once, on the complete sequence time axis.
+    b1 *= np.exp(1j * np.deg2rad(rf_phase_deg))
     if rf_frequency_offset_hz != 0:
         b1 *= np.exp(2j * np.pi * rf_frequency_offset_hz * time)
 
 sequence = (b1, gradients, time)
 print(
-    f'FID sequence created: {len(time)} points, '
-    f'{time[-1] * 1e3:.3f} ms, requested flip={rf_flip_angle:g}°'
+    f'FID sequence created: {len(time)} points, {time[-1] * 1e3:.3f} ms, '
+    f'requested flip={rf_flip_angle_deg:g}°'
 )
 """
 
         # Use full waveforms if available (preferred for accuracy and complex sequences)
-        if "b1_waveform" in sequence_params and "time_waveform" in sequence_params:
+        if "b1_waveform_g" in sequence_params and "time_waveform_s" in sequence_params:
             return """# Use the full simulated waveforms exported from the GUI
-b1 = sequence_params.get('b1_waveform')
-time = sequence_params.get('time_waveform')
-gradients = sequence_params.get('gradients_waveform')
+b1 = sequence_params.get('b1_waveform_g')
+time = sequence_params.get('time_waveform_s')
+gradients = sequence_params.get('gradients_waveform_g_per_cm')
 
 if b1 is None or time is None:
-    print("Warning: Waveforms missing from sequence_params dictionary!")
-    # Fallback or error
-    raise ValueError("B1 or time waveform missing. Ensure the .npz file was exported and loaded correctly.")
+    raise ValueError(
+        "B1 or time waveform missing. Ensure the companion NPZ file is present."
+    )
 
 if gradients is None:
     gradients = np.zeros((len(b1), 3))
 
 sequence = (b1, gradients, time)
-print(f"Sequence created from full exported waveforms ({len(b1)} points)")
+print(f"Sequence created from exact exported waveforms ({len(b1)} points)")
 """
 
         if "Spin Echo" in seq_type and "Tip" not in seq_type:
-            return f"""# Create Spin Echo sequence
+            return """# Create Spin Echo sequence from canonical SI parameters
 sequence = SpinEcho(
-    te=te,
-    tr=tr
+    te=sequence_params['te_s'],
+    tr=sequence_params['tr_s'],
 )
-print(f"Spin Echo sequence: TE={{te*1000:.1f}} ms, TR={{tr*1000:.1f}} ms")
+print(
+    f"Spin Echo sequence: TE={sequence_params['te_s']*1000:.1f} ms, "
+    f"TR={sequence_params['tr_s']*1000:.1f} ms"
+)
+"""
+        elif "Spin Echo" in seq_type and "Tip" in seq_type:
+            return """# Create tip-axis Spin Echo sequence from canonical SI parameters
+sequence = SpinEchoTipAxis(
+    te=sequence_params['te_s'],
+    tr=sequence_params['tr_s'],
+)
+print(
+    f"Tip-axis Spin Echo: TE={sequence_params['te_s']*1000:.1f} ms, "
+    f"TR={sequence_params['tr_s']*1000:.1f} ms"
+)
 """
         elif "Gradient Echo" in seq_type:
-            return f"""# Create Gradient Echo sequence
+            return """# Create Gradient Echo sequence from canonical SI parameters
 sequence = GradientEcho(
-    te=te,
-    tr=tr,
-    flip_angle=flip_angle
+    te=sequence_params['te_s'],
+    tr=sequence_params['tr_s'],
+    flip_angle=sequence_params.get('flip_angle_deg', 90.0),
 )
-print(f"Gradient Echo: TE={{te*1000:.1f}} ms, TR={{tr*1000:.1f}} ms, FA={{flip_angle:.1f}}°")
+print(
+    f"Gradient Echo: TE={sequence_params['te_s']*1000:.1f} ms, "
+    f"TR={sequence_params['tr_s']*1000:.1f} ms, "
+    f"FA={sequence_params.get('flip_angle_deg', 90.0):.1f}°"
+)
 """
         elif "Slice Select" in seq_type:
-            dur = sequence_params.get("rf_duration", 3e-3)
+            snapshot = sequence_params.get("rf_designer_snapshot", {})
+            dur = snapshot.get("duration_s", sequence_params.get("rf_duration_s", 3e-3))
             return f"""# Create Slice Select + Rephase sequence
 sequence = SliceSelectRephase(
-    flip_angle=flip_angle,
+    flip_angle=sequence_params.get('flip_angle_deg', 90.0),
     pulse_duration={dur:.6f}
 )
-print(f"Slice Select + Rephase: FA={{flip_angle:.1f}}°")
+print(
+    f"Slice Select + Rephase: "
+    f"FA={{sequence_params.get('flip_angle_deg', 90.0):.1f}}°"
+)
 """
         elif "SSFP" in seq_type:
-            return f"""# Create SSFP sequence
+            return """# Create SSFP sequence
 # Simplified implementation for notebook
 # Note: For full SSFP features, consider exporting HDF5 data instead
-dt = time_step_us * 1e-6
-tr = {sequence_params.get('tr', 0.01)}
-n_reps = {int(sequence_params.get('ssfp_repeats', 10))}
-flip = {sequence_params.get('flip_angle', 30.0)}
-alpha_rad = np.deg2rad(flip)
+dt = simulation_params['time_step_us'] * 1e-6
+tr = sequence_params.get('tr_s', 0.01)
+n_reps = int(sequence_params.get('ssfp_repeats', 10))
+rf_snapshot = sequence_params.get('rf_designer_snapshot', {})
+flip = rf_snapshot.get('flip_angle_deg', sequence_params.get('flip_angle_deg', 30.0))
 
 # Create a single TR block
 n_tr = int(tr / dt)
@@ -1460,7 +1632,7 @@ for i in range(1, n_reps, 2):
 gradients = np.zeros((len(b1), 3))
 time = np.arange(len(b1)) * dt
 sequence = (b1, gradients, time)
-print(f"SSFP sequence: TR={{tr*1000:.1f}}ms, FA={{flip}}°, {{n_reps}} reps")
+print(f"SSFP sequence: TR={tr*1000:.1f}ms, FA={flip}°, {n_reps} reps")
 """
         else:
             # Custom sequence with RF pulse
@@ -1485,7 +1657,7 @@ if isinstance(sequence, tuple):
     sequence_b1, sequence_gradients, sequence_time = sequence
 else:
     sequence_b1, sequence_gradients, sequence_time = sequence.compile(
-        dt=time_step_us * 1e-6
+        dt=simulation_params.get('time_step_us', 1.0) * 1e-6
     )
 
 sequence_b1 = np.asarray(sequence_b1, dtype=complex)
@@ -1517,34 +1689,48 @@ for axis, values, label, color in zip(
 axes[-1].set_xlabel('Time (ms)')
 for axis in axes:
     axis.grid(True, alpha=0.3)
-fig.suptitle(f'Simulated sequence: {sequence_type}')
+fig.suptitle(f"Simulated sequence: {sequence_params['sequence_type']}")
 fig.tight_layout()
 plt.show()
 """
 
     def _generate_sampling_code(self, simulation_params: Dict) -> str:
         """Generate position/frequency sampling code."""
-        if "position_range_mm" in simulation_params:
-            pos_range = simulation_params["position_range_mm"] / 1000.0
-        else:
-            pos_range = simulation_params.get("position_range_cm", 0.0) / 100.0
-        freq_range = simulation_params.get("frequency_range_hz", 0.0)
-        freq_center = simulation_params.get("frequency_center_hz", 0.0)
-
-        return f"""# Define spatial positions
-positions = np.zeros((num_positions, 3))
-if num_positions > 1:
-    positions[:, 2] = np.linspace(-{pos_range/2:.6f}, {pos_range/2:.6f}, num_positions)
-
-# Define off-resonance frequencies
-if num_frequencies > 1:
-    frequencies = np.linspace({freq_center-freq_range/2:.1f}, {freq_center+freq_range/2:.1f}, num_frequencies)
+        return """# Use the exact sampled axes when they were captured with the run.
+if 'position_axis_m' in simulation_params:
+    positions = np.asarray(simulation_params['position_axis_m'], dtype=float)
 else:
-    frequencies = np.array([{freq_center:.1f}])
+    num_positions = int(simulation_params.get('num_positions', 1))
+    if 'position_range_mm' in simulation_params:
+        position_range_m = simulation_params['position_range_mm'] / 1000.0
+    else:
+        position_range_m = simulation_params.get('position_range_cm', 0.0) / 100.0
+    positions = np.zeros((num_positions, 3))
+    if num_positions > 1:
+        positions[:, 2] = np.linspace(
+            -position_range_m / 2.0,
+            position_range_m / 2.0,
+            num_positions,
+        )
+
+if 'frequency_axis_hz' in simulation_params:
+    frequencies = np.asarray(simulation_params['frequency_axis_hz'], dtype=float)
+else:
+    num_frequencies = int(simulation_params.get('num_frequencies', 1))
+    frequency_center_hz = simulation_params.get('frequency_center_hz', 0.0)
+    frequency_range_hz = simulation_params.get('frequency_range_hz', 0.0)
+    if num_frequencies > 1:
+        frequencies = np.linspace(
+            frequency_center_hz - frequency_range_hz / 2.0,
+            frequency_center_hz + frequency_range_hz / 2.0,
+            num_frequencies,
+        )
+    else:
+        frequencies = np.array([frequency_center_hz])
 
 print(f"Sampling:")
-print(f"  Positions: {{num_positions}}")
-print(f"  Frequencies: {{num_frequencies}}")
+print(f"  Positions: {len(positions)}")
+print(f"  Frequencies: {len(frequencies)}")
 """
 
     def _generate_simulation_run_code(self, simulation_params: Dict) -> str:
@@ -1552,13 +1738,18 @@ print(f"  Frequencies: {{num_frequencies}}")
         return """# Run simulation
 print("\\nRunning simulation...")
 
+mode = 2 if simulation_params.get('mode') == 'time-resolved' else 0
+time_step_s = simulation_params.get('time_step_us', 1.0) * 1e-6
+
 result = sim.simulate(
     sequence,
     tissue,
     positions=positions,
     frequencies=frequencies,
+    initial_magnetization=simulation_params.get('initial_mz'),
     mode=mode,
-    dt=time_step_us * 1e-6
+    dt=time_step_s,
+    rf_carrier_offset=simulation_params.get('rf_carrier_offset_hz', 0.0),
 )
 
 # Extract results for easier access
@@ -1573,13 +1764,7 @@ data = {
     'frequencies': result['frequencies'],
     'tissue': asdict(tissue),
     'sequence_params': sequence_params,
-    'simulation_params': {
-        'num_positions': len(positions),
-        'num_frequencies': len(frequencies),
-        'mode': 'time-resolved' if mode == 2 else 'endpoint',
-        'use_parallel': use_parallel,
-        'num_threads': num_threads
-    }
+    'simulation_params': simulation_params,
 }
 
 print(f"Simulation complete!")
@@ -1655,6 +1840,11 @@ def export_notebook(
     elif mode.lower() in ["resimulate", "b", "mode_b"]:
         if not all([sequence_params, simulation_params, tissue_params]):
             raise ValueError("Mode B requires sequence, simulation, and tissue params")
+        if waveform_filename is None:
+            notebook_path = Path(filename)
+            waveform_filename = str(
+                notebook_path.with_name(f"{notebook_path.stem}_arrays.npz")
+            )
         nb = exporter.create_notebook_mode_b(
             sequence_params,
             simulation_params,
@@ -2172,8 +2362,12 @@ def _sequence_result_access_code() -> str:
         """
         # Stable, descriptive entry points for subsequent analysis.
         raw_adc_signal = result_dataset['signal']
-        build_cartesian_kspace_from_raw = _cartesian_from_adc
-        reconstruct_cartesian_image = _cartesian_ifft
+        try:
+            build_cartesian_kspace_from_raw = _cartesian_from_adc
+            reconstruct_cartesian_image = _cartesian_ifft
+        except NameError:
+            build_cartesian_kspace_from_raw = None
+            reconstruct_cartesian_image = None
         reconstructed_kspace = None
         reconstructed_image = None
         reconstructed_image_magnitude = None
@@ -2255,7 +2449,7 @@ def _sequence_result_access_code() -> str:
             reconstructed_spectrum = result_dataset[spectrum_name]
 
         # One obvious default for users who simply want to work with the result.
-        # Images use magnitude data; CSI uses the complex spatially reconstructed spectrum.
+        # Images use magnitude data; CSI uses the complex reconstructed spectrum.
         reconstructed_data = (
             reconstructed_spectrum
             if reconstructed_spectrum is not None
@@ -2907,6 +3101,606 @@ def _sequence_result_explorer_code() -> str:
     ).strip()
 
 
+def _sequence_result_cartesian_point_trace_code() -> str:
+    """Return reusable Cartesian frame and pixel-trace helpers."""
+    return dedent(
+        r'''
+        def dimension_cartesian_frames(dataset, variable='cartesian_image'):
+            """Expose flat Cartesian frames as named xarray dimensions."""
+            data = dataset[variable]
+            if 'cartesian_frame' not in data.dims:
+                return data
+
+            frame_axes = []
+            frame_values = {}
+            for axis in ('slice', 'echo', 'repetition', 'segment', 'partition'):
+                coordinate = f'cartesian_frame_{axis}_index'
+                if coordinate not in dataset.coords:
+                    continue
+                values = np.asarray(dataset.coords[coordinate])
+                if np.unique(values).size > 1:
+                    frame_axes.append(axis)
+                    frame_values[axis] = values
+            if not frame_axes:
+                frame_axes = ['frame']
+                frame_values['frame'] = np.arange(data.sizes['cartesian_frame'])
+
+            storage_coordinates = [
+                name
+                for name in data.coords
+                if name.startswith('cartesian_frame_')
+            ]
+            compact = data.reset_coords(storage_coordinates, drop=True)
+            compact = compact.assign_coords(
+                {
+                    axis: ('cartesian_frame', frame_values[axis])
+                    for axis in frame_axes
+                }
+            )
+            if len(frame_axes) == 1:
+                result = compact.swap_dims({'cartesian_frame': frame_axes[0]})
+                result = result.reset_coords('cartesian_frame', drop=True)
+            else:
+                result = compact.set_index(
+                    cartesian_frame=frame_axes
+                ).unstack('cartesian_frame')
+            remaining = [dim for dim in result.dims if dim not in frame_axes]
+            result = result.transpose(*frame_axes, *remaining)
+
+            echo_times_by_index = _echo_times_by_index(dataset)
+            if 'echo' in frame_axes and echo_times_by_index:
+                echo_times = [echo_times_by_index[value] for value in result.echo.values]
+                result = result.assign_coords(
+                    echo_time_s=('echo', np.asarray(echo_times))
+                )
+                result.echo_time_s.attrs['units'] = 's'
+            return result
+
+
+        def _echo_times_by_index(dataset):
+            """Read echo times from new coordinates or older result attributes."""
+            coordinate = 'cartesian_frame_echo_index'
+            time_coordinate = 'cartesian_frame_echo_time_s'
+            if coordinate in dataset.coords and time_coordinate in dataset.coords:
+                labels = np.asarray(dataset.coords[coordinate])
+                times = np.asarray(dataset.coords[time_coordinate], dtype=float)
+                return {
+                    value.item() if hasattr(value, 'item') else value: float(
+                        times[np.flatnonzero(labels == value)[0]]
+                    )
+                    for value in np.unique(labels)
+                }
+
+            stored = dataset.attrs.get('echo_times_s')
+            if stored is None:
+                return {}
+            if isinstance(stored, str):
+                times = np.fromstring(stored, sep=',')
+            else:
+                times = np.asarray(stored, dtype=float).reshape(-1)
+            return {index: float(value) for index, value in enumerate(times)}
+
+
+        def cartesian_echo_spectrum(signal, echo_times_s):
+            """FFT an echo signal and return its physical frequency axis in Hz."""
+            values = np.asarray(signal)
+            times = np.asarray(echo_times_s, dtype=float)
+            if values.ndim != 1 or times.ndim != 1 or values.size != times.size:
+                raise ValueError('signal and echo_times_s must be matching 1D arrays')
+            if values.size < 2:
+                raise ValueError('at least two echoes are required for an FFT')
+            intervals = np.diff(times)
+            spacing_s = float(np.median(intervals))
+            if spacing_s <= 0 or not np.allclose(
+                intervals, spacing_s, rtol=1e-4, atol=1e-12
+            ):
+                raise ValueError(
+                    'echo times must be increasing and uniformly spaced for an FFT'
+                )
+            frequency_hz = np.fft.fftshift(
+                np.fft.fftfreq(values.size, d=spacing_s)
+            )
+            spectrum = np.fft.fftshift(np.fft.fft(values))
+            return frequency_hz, spectrum
+
+
+        def cartesian_point_trace(dataset, x, y, *, over='echo', **fixed):
+            """Return one reconstructed image pixel over echo/repetition/etc.
+
+            ``x`` and ``y`` are reconstruction pixel indices, not indices on
+            the generally finer phantom simulation grid. ``fixed`` selects
+            the other frame labels, for example ``repetition=0``.
+            """
+            image = dimension_cartesian_frames(dataset, 'cartesian_image')
+            read_dim = next(
+                dim for dim in image.dims if dim.startswith('read_')
+            )
+            phase_dim = next(
+                dim for dim in image.dims if dim.startswith('phase_')
+            )
+            if over not in image.dims:
+                raise ValueError(
+                    f'{over!r} is not an available image dimension; '
+                    f'choose from {image.dims!r}'
+                )
+            point = image.isel({read_dim: int(x), phase_dim: int(y)})
+            selectors = {
+                dim: fixed.get(dim, point.coords[dim].values[0])
+                for dim in point.dims
+                if dim != over and dim in point.coords
+            }
+            if selectors:
+                point = point.sel(selectors)
+            if over == 'echo' and 'echo_time_s' in point.coords:
+                axis = 1e3 * np.asarray(point.echo_time_s)
+                axis_label = 'Echo time (ms)'
+            else:
+                axis = np.asarray(point.coords[over])
+                axis_label = over.replace('_', ' ').title()
+            return point, axis, axis_label
+        '''
+    ).strip()
+
+
+def _sequence_result_cartesian_point_example_code() -> str:
+    """Return the short, editable Cartesian pixel-trace example."""
+    return dedent(
+        r"""
+        # User settings: reconstruction pixel and dimension to plot.
+        mxy_image = dimension_cartesian_frames(ds, 'cartesian_image')
+        read_dim = next(dim for dim in mxy_image.dims if dim.startswith('read_'))
+        phase_dim = next(dim for dim in mxy_image.dims if dim.startswith('phase_'))
+        x = mxy_image.sizes[read_dim] // 2
+        y = mxy_image.sizes[phase_dim] // 2
+
+        # EPSI normally varies over echo; repeated scans also expose repetition.
+        available_trace_axes = [
+            dim
+            for dim in mxy_image.dims
+            if dim not in {read_dim, phase_dim, 'coil'}
+            and mxy_image.sizes[dim] > 1
+        ]
+
+        if available_trace_axes:
+            trace_axis = (
+                'echo' if 'echo' in available_trace_axes
+                else 'repetition' if 'repetition' in available_trace_axes
+                else available_trace_axes[0]
+            )
+            point_signal, trace_values, trace_label = cartesian_point_trace(
+                ds, x, y, over=trace_axis
+            )
+            # Repetition example at a fixed echo:
+            # point_signal, trace_values, trace_label = cartesian_point_trace(
+            #     ds, x, y, over='repetition', echo=0
+            # )
+            # EPSI spectrum of this pixel (trace_values is in ms for echo):
+            # frequency_hz, point_spectrum = cartesian_echo_spectrum(
+            #     point_signal, 1e-3 * trace_values
+            # )
+
+            first_image = mxy_image
+            for dim in first_image.dims:
+                if dim not in {read_dim, phase_dim, 'coil'}:
+                    first_image = first_image.isel({dim: 0})
+            if 'coil' in first_image.dims:
+                first_image = np.sqrt((np.abs(first_image) ** 2).sum('coil'))
+
+            fig, axes = plt.subplots(1, 2, figsize=(11, 4), constrained_layout=True)
+            axes[0].imshow(np.abs(first_image), origin='lower', cmap='gray')
+            axes[0].axvline(x, color='cyan', linewidth=0.8)
+            axes[0].axhline(y, color='cyan', linewidth=0.8)
+            axes[0].set(
+                title='Reconstruction and selected image pixel',
+                xlabel=read_dim,
+                ylabel=phase_dim,
+            )
+            axes[1].plot(trace_values, np.abs(point_signal), 'o-', label='Magnitude')
+            if np.iscomplexobj(point_signal):
+                axes[1].plot(trace_values, point_signal.real, alpha=0.65, label='Real')
+                axes[1].plot(trace_values, point_signal.imag, alpha=0.65, label='Imaginary')
+            axes[1].set(
+                title=f'Pixel ({read_dim}={x}, {phase_dim}={y})',
+                xlabel=trace_label,
+                ylabel='Reconstructed signal (a.u.)',
+            )
+            axes[1].grid(True)
+            axes[1].legend()
+            plt.show()
+        else:
+            point_signal = mxy_image.isel({read_dim: x, phase_dim: y})
+            print('This result contains one reconstructed Cartesian image.')
+        """
+    ).strip()
+
+
+def _sequence_result_checkpoint_code() -> str:
+    """Return the optional true phantom-grid Mxy checkpoint example."""
+    return dedent(
+        r"""
+        if 'checkpoint_magnetization' not in ds:
+            print(
+                'No voxel-resolved magnetization checkpoints were stored for '
+                'this run. The reconstructed image above is the spatially '
+                'resolved measured signal. Configure checkpoint times when you '
+                'need the true Mx+iMy evolution on the phantom simulation grid.'
+            )
+        else:
+            checkpoint_mxy = (
+                ds.checkpoint_magnetization.sel(component='mx')
+                + 1j * ds.checkpoint_magnetization.sel(component='my')
+            )
+            spatial_dims = [
+                dim for dim in checkpoint_mxy.dims if dim != 'checkpoint'
+            ]
+            centre = {
+                dim: checkpoint_mxy.sizes[dim] // 2 for dim in spatial_dims
+            }
+            phantom_point_mxy = checkpoint_mxy.isel(centre)
+            plt.figure(figsize=(8, 4))
+            plt.plot(
+                1e3 * ds.checkpoint,
+                np.abs(phantom_point_mxy),
+                'o-',
+                label=r'$|M_{xy}|$',
+            )
+            plt.xlabel('Checkpoint time (ms)')
+            plt.ylabel('Magnetization (simulation units)')
+            plt.grid(True)
+            plt.legend()
+            plt.show()
+        """
+    ).strip()
+
+
+def _sequence_result_cartesian_2d_explorer_code() -> str:
+    """Return a compact frame-aware explorer for Cartesian 2D/EPSI data."""
+    return dedent(
+        r"""
+        try:
+            import ipywidgets as widgets
+            from IPython.display import clear_output, display
+        except ImportError as exc:
+            raise ImportError(
+                'The interactive result explorer requires ipywidgets. '
+                'Install it with `%pip install ipywidgets`.'
+            ) from exc
+
+        image_data = ds['cartesian_image']
+        kspace_data = ds['cartesian_kspace']
+        echo_times_by_index = _echo_times_by_index(ds)
+        x_dim = next(dim for dim in image_data.dims if dim.startswith('read_'))
+        y_dim = next(dim for dim in image_data.dims if dim.startswith('phase_'))
+        frame_prefix = 'cartesian_frame_'
+
+        outer_axes = {}
+        if 'cartesian_frame' in image_data.dims:
+            for axis in ('slice', 'echo', 'repetition', 'segment', 'partition'):
+                coordinate = f'{frame_prefix}{axis}_index'
+                if coordinate not in ds.coords:
+                    continue
+                values = np.unique(np.asarray(ds.coords[coordinate]))
+                if values.size > 1:
+                    outer_axes[axis] = {
+                        'coordinate': coordinate,
+                        'values': values,
+                    }
+            if not outer_axes and image_data.sizes['cartesian_frame'] > 1:
+                outer_axes['frame'] = {
+                    'coordinate': None,
+                    'values': np.arange(image_data.sizes['cartesian_frame']),
+                }
+        else:
+            for dim in image_data.dims:
+                if dim in {x_dim, y_dim, 'coil'} or image_data.sizes[dim] <= 1:
+                    continue
+                values = (
+                    np.asarray(image_data.coords[dim])
+                    if dim in image_data.coords
+                    else np.arange(image_data.sizes[dim])
+                )
+                outer_axes[dim] = {'coordinate': dim, 'values': values}
+
+
+        def _plain(value):
+            return value.item() if hasattr(value, 'item') else value
+
+
+        def _axis_title(axis):
+            return {
+                'echo': 'Echo',
+                'repetition': 'Acquisition repetition',
+                'slice': 'Slice',
+                'segment': 'Segment',
+                'partition': 'Partition',
+                'frame': 'Frame',
+            }.get(axis, axis.replace('_', ' ').title())
+
+
+        def _option_label(axis, value):
+            if axis == 'echo' and _plain(value) in echo_times_by_index:
+                time_ms = 1e3 * echo_times_by_index[_plain(value)]
+                return f'{_plain(value)} ({time_ms:.4g} ms)'
+            return str(_plain(value))
+
+
+        def _select_outer(data, selections):
+            if 'cartesian_frame' in data.dims:
+                candidates = np.arange(data.sizes['cartesian_frame'])
+                for axis, details in outer_axes.items():
+                    value = selections.get(axis, details['values'][0])
+                    if axis == 'frame':
+                        candidates = candidates[candidates == int(value)]
+                    else:
+                        coordinate = np.asarray(ds.coords[details['coordinate']])
+                        candidates = candidates[coordinate[candidates] == value]
+                if candidates.size != 1:
+                    raise ValueError(
+                        'Outer selections do not identify exactly one image frame'
+                    )
+                return data.isel(cartesian_frame=int(candidates[0]))
+            selectors = {
+                axis: selections.get(axis, details['values'][0])
+                for axis, details in outer_axes.items()
+                if axis in data.dims
+            }
+            return data.sel(selectors) if selectors else data
+
+
+        def _rss_magnitude(data):
+            if 'coil' in data.dims:
+                return np.sqrt((np.abs(data) ** 2).sum('coil'))
+            return np.abs(data)
+
+
+        def _trace(data, x, y, over, selections):
+            if not over:
+                selected = _select_outer(data, selections)
+                return np.asarray([_plain(selected.isel({x_dim: x, y_dim: y}))]), [0]
+            values = outer_axes[over]['values']
+            signal = []
+            horizontal = []
+            for value in values:
+                current = dict(selections)
+                current[over] = value
+                selected = _select_outer(data, current)
+                if 'coil' in selected.dims:
+                    selected = np.sqrt((np.abs(selected) ** 2).sum('coil'))
+                signal.append(_plain(selected.isel({x_dim: x, y_dim: y})))
+                if over == 'echo' and _plain(value) in echo_times_by_index:
+                    horizontal.append(1e3 * echo_times_by_index[_plain(value)])
+                else:
+                    horizontal.append(_plain(value))
+            return np.asarray(signal), np.asarray(horizontal)
+
+
+        def _render(
+            x,
+            y,
+            display_range,
+            display_auto,
+            kspace_scale,
+            trace_axis,
+            trace_view,
+            **values,
+        ):
+            # Some notebook frontends do not honour interactive_output's deferred
+            # clear reliably during rapid slider updates. Clear immediately so one
+            # widget instance always owns exactly one figure.
+            clear_output(wait=False)
+            selections = {
+                name[len('outer__'):]: value
+                for name, value in values.items()
+                if name.startswith('outer__')
+            }
+            image = _rss_magnitude(
+                _select_outer(image_data, selections)
+            ).transpose(y_dim, x_dim)
+            kspace = _rss_magnitude(
+                _select_outer(kspace_data, selections)
+            ).transpose(y_dim, x_dim)
+            image_values = np.asarray(image)
+            kspace_values = np.asarray(kspace)
+            if kspace_scale == 'log':
+                kspace_values = np.log1p(kspace_values)
+                kspace_title = 'log(1 + |k-space|)'
+            else:
+                kspace_title = '|k-space|'
+            if display_auto:
+                low, high = float(image_values.min()), float(image_values.max())
+            else:
+                low, high = map(float, display_range)
+            if high <= low:
+                high = np.nextafter(low, np.inf)
+
+            signal, horizontal = _trace(
+                image_data, x, y, trace_axis, selections
+            )
+            fig, axes = plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
+            axes[0].imshow(kspace_values, origin='lower', cmap='magma')
+            axes[0].set(title=kspace_title, xlabel='k-read', ylabel='k-phase')
+            axes[1].imshow(
+                image_values,
+                origin='lower',
+                cmap='gray',
+                vmin=low,
+                vmax=high,
+            )
+            axes[1].axvline(x, color='cyan', linewidth=0.8)
+            axes[1].axhline(y, color='cyan', linewidth=0.8)
+            axes[1].set(title='Reconstruction', xlabel=x_dim, ylabel=y_dim)
+            if trace_view == 'spectrum':
+                if trace_axis != 'echo' or not echo_times_by_index:
+                    axes[2].text(
+                        0.5,
+                        0.5,
+                        'A frequency spectrum requires the echo axis\n'
+                        'and physical echo times.',
+                        ha='center',
+                        va='center',
+                        transform=axes[2].transAxes,
+                    )
+                    axes[2].set_axis_off()
+                else:
+                    try:
+                        frequency_hz, spectrum = cartesian_echo_spectrum(
+                            signal, 1e-3 * horizontal
+                        )
+                    except ValueError as exc:
+                        axes[2].text(
+                            0.5,
+                            0.5,
+                            str(exc),
+                            ha='center',
+                            va='center',
+                            wrap=True,
+                            transform=axes[2].transAxes,
+                        )
+                        axes[2].set_axis_off()
+                    else:
+                        spacing_ms = float(np.median(np.diff(horizontal)))
+                        axes[2].plot(frequency_hz, np.abs(spectrum))
+                        axes[2].axvline(0.0, color='0.6', linewidth=0.8)
+                        axes[2].set(
+                            title=f'Pixel spectrum (echo spacing {spacing_ms:.4g} ms)',
+                            xlabel='Frequency offset (Hz)',
+                            ylabel='FFT magnitude (a.u.)',
+                        )
+                        axes[2].grid(True)
+            else:
+                trace_label = (
+                    'Echo time (ms)'
+                    if trace_axis == 'echo' and echo_times_by_index
+                    else _axis_title(trace_axis) if trace_axis else 'Image'
+                )
+                axes[2].plot(horizontal, np.abs(signal), 'o-', label='Magnitude')
+                if np.iscomplexobj(signal):
+                    axes[2].plot(horizontal, signal.real, alpha=0.65, label='Real')
+                    axes[2].plot(
+                        horizontal, signal.imag, alpha=0.65, label='Imaginary'
+                    )
+                axes[2].set(
+                    title=f'Image pixel ({x}, {y})',
+                    xlabel=trace_label,
+                    ylabel='Reconstructed signal (a.u.)',
+                )
+                axes[2].grid(True)
+                axes[2].legend()
+            selected_text = ', '.join(
+                f'{_axis_title(axis)}={_plain(value)}'
+                for axis, value in selections.items()
+            )
+            fig.suptitle(selected_text or 'Single acquisition')
+            display(fig)
+            plt.close(fig)
+
+
+        x_slider = widgets.IntSlider(
+            value=image_data.sizes[x_dim] // 2,
+            min=0,
+            max=image_data.sizes[x_dim] - 1,
+            description=x_dim,
+            continuous_update=False,
+        )
+        y_slider = widgets.IntSlider(
+            value=image_data.sizes[y_dim] // 2,
+            min=0,
+            max=image_data.sizes[y_dim] - 1,
+            description=y_dim,
+            continuous_update=False,
+        )
+        outer_controls = {
+            f'outer__{axis}': widgets.SelectionSlider(
+                options=[
+                    (_option_label(axis, value), _plain(value))
+                    for value in details['values']
+                ],
+                description=_axis_title(axis),
+                continuous_update=False,
+                style={'description_width': 'initial'},
+                layout=widgets.Layout(width='320px'),
+            )
+            for axis, details in outer_axes.items()
+        }
+        trace_options = [
+            (_axis_title(axis), axis) for axis in outer_axes
+        ] or [('Single image', '')]
+        trace_axis_dropdown = widgets.Dropdown(
+            options=trace_options,
+            value=(
+                'echo' if 'echo' in outer_axes
+                else 'repetition' if 'repetition' in outer_axes
+                else trace_options[0][1]
+            ),
+            description='Plot pixel over',
+            style={'description_width': 'initial'},
+        )
+        trace_view_dropdown = widgets.Dropdown(
+            options=[('Signal', 'signal'), ('Spectrum (FFT)', 'spectrum')],
+            value='signal',
+            description='Pixel view',
+            style={'description_width': 'initial'},
+        )
+        kspace_scale_dropdown = widgets.Dropdown(
+            options=[('Magnitude', 'magnitude'), ('Log magnitude', 'log')],
+            value='log',
+            description='K-space view',
+            style={'description_width': 'initial'},
+        )
+        data_max = float(_rss_magnitude(image_data).max(skipna=True))
+        slider_max = data_max if np.isfinite(data_max) and data_max > 0 else 1.0
+        display_range_slider = widgets.FloatRangeSlider(
+            value=(0.0, slider_max),
+            min=0.0,
+            max=slider_max,
+            step=slider_max / 1000.0,
+            description='Image range',
+            continuous_update=False,
+            readout_format='.4g',
+            style={'description_width': 'initial'},
+            layout=widgets.Layout(width='520px'),
+        )
+        display_auto_checkbox = widgets.Checkbox(
+            value=True,
+            description='Auto image range',
+        )
+        controls = {
+            'x': x_slider,
+            'y': y_slider,
+            'display_range': display_range_slider,
+            'display_auto': display_auto_checkbox,
+            'kspace_scale': kspace_scale_dropdown,
+            'trace_axis': trace_axis_dropdown,
+            'trace_view': trace_view_dropdown,
+            **outer_controls,
+        }
+        output = widgets.interactive_output(_render, controls)
+        control_row = widgets.Box(
+            list(controls.values()),
+            layout=widgets.Layout(
+                display='flex', flex_flow='row wrap', align_items='center'
+            ),
+        )
+        display(
+            widgets.VBox(
+                [
+                    widgets.HTML(
+                        '<b>Cartesian 2D / EPSI:</b> frame controls use their '
+                        'actual sequence meaning. The right plot follows the '
+                        'selected image pixel over echo or acquisition repetition. '
+                        'Spectrum (FFT) uses the physical echo spacing and shows '
+                        'frequency offset in Hz. K-space view switches between '
+                        'linear magnitude and log magnitude.'
+                    ),
+                    control_row,
+                    output,
+                ]
+            )
+        )
+        """
+    ).strip()
+
+
 def export_pulseq_generation_notebook(
     filename: str,
     sequence_kind: str,
@@ -2920,6 +3714,7 @@ def export_pulseq_generation_notebook(
         raise ImportError("Jupyter notebook export requires nbformat")
     builders = {
         "epi": "make_pulseq_epi",
+        "epsi_mge": "make_pulseq_epsi_mge",
         "spiral": "make_pulseq_spiral",
         "csi": "make_pulseq_csi",
         "flash": "make_pulseq_flash",
@@ -2932,8 +3727,9 @@ def export_pulseq_generation_notebook(
         builder_name = builders[str(sequence_kind)]
     except KeyError as exc:
         raise ValueError(
-            "sequence_kind must be 'epi', 'spiral', 'csi', 'flash', 'bssfp_3d', "
-            "'spectral_bssfp_3d', 'me_bssfp_3d', or 'radial_me_bssfp_3d'"
+            "sequence_kind must be 'epi', 'epsi_mge', 'spiral', 'csi', 'flash', "
+            "'bssfp_3d', 'spectral_bssfp_3d', 'me_bssfp_3d', or "
+            "'radial_me_bssfp_3d'"
         ) from exc
     notebook_path = Path(filename)
     if notebook_path.suffix.lower() != ".ipynb":
@@ -2979,8 +3775,34 @@ def export_pulseq_generation_notebook(
     return notebook_path
 
 
+def _sequence_result_dataset_kind(data_path: Path) -> tuple[str, bool]:
+    """Inspect a result file without loading its arrays into memory."""
+    try:
+        import xarray as xr
+
+        with xr.open_dataset(data_path) as dataset:
+            names = set(dataset.data_vars)
+    except Exception:
+        return "generic", False
+
+    def present(name: str) -> bool:
+        return name in names or f"{name}_real" in names
+
+    if present("radial_3d_image"):
+        return "radial_3d", True
+    if present("cartesian_3d_image"):
+        return "cartesian_3d", True
+    if present("csi_spatial_fid"):
+        return "csi", True
+    if present("spiral_image"):
+        return "spiral_2d", True
+    if present("cartesian_image"):
+        return "cartesian_2d", True
+    return "raw_signal", False
+
+
 def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
-    """Create an xarray-based analysis notebook for sparse sequence output."""
+    """Create a concise, result-aware xarray analysis notebook."""
     if not HAS_NBFORMAT:
         raise ImportError("Jupyter notebook export requires nbformat")
     notebook_path = Path(filename)
@@ -2989,279 +3811,166 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
         data_path.resolve(), start=notebook_path.parent.resolve()
     )
     absolute_data = str(data_path.resolve())
-    notebook = new_notebook(
-        cells=[
+    result_kind, has_reconstruction = _sequence_result_dataset_kind(data_path)
+
+    cells = [
+        new_markdown_cell(
+            "# Sequence simulation result\n\n"
+            f"Generated by BlochSimulator {__version__}. This notebook detected "
+            f"`{result_kind}` data in `{relative_data}`. Start with the short "
+            "examples below; storage details and raw ADC inspection are in the "
+            "advanced section at the end."
+        ),
+        new_code_cell(
+            "from pathlib import Path\n"
+            "import numpy as np\n"
+            "import xarray as xr\n"
+            "import matplotlib.pyplot as plt\n\n"
+            f"data_path = Path({relative_data!r})\n"
+            "if not data_path.exists():\n"
+            f"    original_data_path = Path({absolute_data!r})\n"
+            "    if original_data_path.exists():\n"
+            "        data_path = original_data_path\n"
+            "    else:\n"
+            "        raise FileNotFoundError(\n"
+            "            f'Could not find result data at {data_path} or '\n"
+            "            f'{original_data_path}. Move the .nc file next to '\n"
+            "            'the notebook or update data_path.'\n"
+            "        )\n"
+            "result_dataset = xr.open_dataset(data_path)\n"
+            "stored_ds = result_dataset\n"
+            "ds = stored_ds.copy()\n"
+            "storage_components = []\n"
+            "for name in list(ds.data_vars):\n"
+            "    if not name.endswith('_real'):\n"
+            "        continue\n"
+            "    base = name[:-5]\n"
+            "    imag = f'{base}_imag'\n"
+            "    if imag in ds:\n"
+            "        complex_values = ds[name] + 1j * ds[imag]\n"
+            "        complex_values.attrs = dict(ds[name].attrs)\n"
+            "        ds[base] = complex_values\n"
+            "        storage_components.extend((name, imag))\n"
+            "# Keep the analysis view compact. The on-disk components remain in stored_ds.\n"
+            "ds = ds.drop_vars(storage_components)\n"
+            "print(f'Loaded {data_path}')\n"
+            'print(f\'Sequence: {ds.attrs.get("sequence_source", "unknown")}\')\n'
+            "for name in (\n"
+            "    'signal', 'cartesian_image', 'cartesian_3d_image',\n"
+            "    'spiral_image', 'radial_3d_image', 'csi_spatial_fid',\n"
+            "    'checkpoint_magnetization', 'final_magnetization',\n"
+            "):\n"
+            "    if name in ds:\n"
+            "        print(f'{name:28s} dims={ds[name].dims} shape={ds[name].shape}')"
+        ),
+        new_markdown_cell(
+            "## Start here: what the important variables mean\n\n"
+            "- `signal` is the complex receiver signal in chronological ADC order. "
+            "It is summed over the phantom and is not voxel-resolved.\n"
+            "- `cartesian_image` is the complex spatial reconstruction and is the "
+            "usual starting point for a measured pixel signal.\n"
+            "- `species_cartesian_image` contains the same reconstruction separated "
+            "by the `pool` coordinate when pool-resolved simulation was enabled.\n"
+            "- `checkpoint_magnetization`, when present, contains true voxel-grid "
+            "$M_x$, $M_y$, and $M_z$ at explicitly configured times.\n"
+            "- `final_magnetization` contains the voxel-grid state after the sequence.\n\n"
+            "A reconstruction pixel and a phantom simulation voxel need not have the "
+            "same size. Cartesian image-position coordinates ending in `_position_m` "
+            "refer to reconstruction pixel centres."
+        ),
+    ]
+
+    if not has_reconstruction:
+        cells.extend(
+            [
+                new_markdown_cell(
+                    "## Reconstruction preparation\n\n"
+                    "This cell validates and sorts chronological Cartesian ADC data "
+                    "when gridded reconstruction arrays are not already available."
+                ),
+                new_code_cell(
+                    _sequence_result_reconstruction_code(),
+                    metadata={"jupyter": {"source_hidden": True}, "collapsed": True},
+                ),
+            ]
+        )
+
+    if not has_reconstruction:
+        cells.extend(
+            [
+                new_markdown_cell(
+                    "## Named analysis entry points\n\n"
+                    "Use `reconstructed_data` for the primary reconstructed result, "
+                    "`raw_adc_signal` for chronological samples, and `reconstruction` "
+                    "for all named representations."
+                ),
+                new_code_cell("result_dataset = ds\n" + _sequence_result_access_code()),
+                new_markdown_cell(
+                    "## Reconstruct Cartesian data from raw ADC samples\n\n"
+                    "This explicit example repeats the validated raw-data path and "
+                    "keeps the resulting dimensioned k-space and image available."
+                ),
+                new_code_cell(_sequence_result_raw_reconstruction_example_code()),
+            ]
+        )
+
+    if result_kind == "cartesian_2d":
+        cells.extend(
+            [
+                new_markdown_cell(
+                    "## Reconstructed signal of one image pixel\n\n"
+                    "`mxy_image` is the complex measured and reconstructed signal, "
+                    "with flat storage frames replaced by meaningful dimensions. "
+                    "Change `x`, `y`, and `trace_axis` in the short example below. "
+                    "For EPSI, `echo` plots the pixel across echo times. With "
+                    "repeated complete acquisitions, the commented example shows "
+                    "how to use `over='repetition'` at a fixed echo."
+                ),
+                new_code_cell(
+                    _sequence_result_cartesian_point_trace_code(),
+                    metadata={"jupyter": {"source_hidden": True}, "collapsed": True},
+                ),
+                new_code_cell(_sequence_result_cartesian_point_example_code()),
+                new_markdown_cell(
+                    "## Interactive Cartesian 2D / EPSI explorer\n\n"
+                    "Frame controls are named from their actual Pulseq labels. "
+                    "Echo and acquisition repetition therefore have separate controls. "
+                    "Use `Pixel view` to switch between the complex echo signal "
+                    "and its centred FFT spectrum. The frequency-offset axis in Hz "
+                    "is calculated from the physical echo spacing. "
+                    "The implementation cell is collapsed; execute it to show the "
+                    "controls."
+                ),
+                new_code_cell(
+                    _sequence_result_cartesian_2d_explorer_code(),
+                    metadata={"jupyter": {"source_hidden": True}, "collapsed": True},
+                ),
+            ]
+        )
+    elif result_kind != "raw_signal":
+        cells.extend(
+            [
+                new_markdown_cell("## Interactive multidimensional explorer"),
+                new_code_cell(
+                    _sequence_result_explorer_code(),
+                    metadata={"jupyter": {"source_hidden": True}, "collapsed": True},
+                ),
+            ]
+        )
+
+    cells.extend(
+        [
             new_markdown_cell(
-                "# Sequence simulation result\n\n"
-                f"BlochSimulator {__version__} sparse event-based result. "
-                f"The xarray dataset is stored in `{relative_data}`.\n\n"
-                "**Start here:** after running the reconstruction cells, use "
-                "`reconstructed_data` for the primary reconstructed result and "
-                "`raw_adc_signal` for the chronological ADC samples. The complete "
-                "xarray dataset is named `result_dataset`; `ds` is only a short alias "
-                "used by the plotting code."
+                "## True phantom-grid transverse magnetization at checkpoints\n\n"
+                "This is distinct from the reconstructed receive image. It is only "
+                "available when checkpoint times were requested before simulation."
             ),
-            new_code_cell(
-                "from pathlib import Path\n"
-                "import numpy as np\n"
-                "import xarray as xr\n"
-                "import matplotlib.pyplot as plt\n\n"
-                f"data_path = Path({relative_data!r})\n"
-                "if not data_path.exists():\n"
-                f"    original_data_path = Path({absolute_data!r})\n"
-                "    if original_data_path.exists():\n"
-                "        data_path = original_data_path\n"
-                "    else:\n"
-                "        raise FileNotFoundError(\n"
-                "            f'Could not find result data at {data_path} or '\n"
-                "            f'{original_data_path}. Move the .nc file next to '\n"
-                "            'the notebook or update data_path.'\n"
-                "        )\n"
-                "result_dataset = xr.open_dataset(data_path)\n"
-                "ds = result_dataset  # Short backwards-compatible alias used below\n"
-                "for name in list(result_dataset.data_vars):\n"
-                "    if not name.endswith('_real'):\n"
-                "        continue\n"
-                "    base = name[:-5]\n"
-                "    imag = f'{base}_imag'\n"
-                "    if imag in result_dataset:\n"
-                "        result_dataset[base] = (\n"
-                "            result_dataset[name] + 1j * result_dataset[imag]\n"
-                "        )\n"
-                "print('Loaded complete dataset as `result_dataset` (alias: `ds`).')\n"
-                "result_dataset"
-            ),
-            new_markdown_cell(
-                "## Raw ADC signal\n\n"
-                "`raw_adc_signal` is an xarray DataArray in chronological acquisition "
-                "order. Keeping it as a DataArray preserves dimensions and coordinates; "
-                "append `.values` only when a NumPy array is required."
-            ),
-            new_code_cell(
-                "raw_adc_signal = result_dataset['signal']\n"
-                "signal_values = raw_adc_signal.values\n"
-                "time_ms = result_dataset.adc_time_s.values * 1e3\n"
-                "fig, ax = plt.subplots(figsize=(9, 4))\n"
-                "if signal_values.ndim == 1:\n"
-                "    ax.plot(time_ms, np.abs(signal_values), label='Magnitude')\n"
-                "else:\n"
-                "    for coil, values in enumerate(signal_values):\n"
-                "        ax.plot(time_ms, np.abs(values), label=f'Coil {coil + 1}')\n"
-                "ax.set(xlabel='Time (ms)', ylabel='Signal (a.u.)')\n"
-                "ax.legend(); ax.grid(True); plt.show()"
-            ),
-            new_markdown_cell(
-                "## ADC order and k-space coordinates\n\n"
-                "`signal` is stored in chronological ADC order. Every sample has "
-                "the same `adc` coordinate as `kx`, `ky`, `kz`, "
-                "`adc_event_index`, and `readout_sample_index`. Pulseq outer "
-                "labels are available as `slice_index`, `echo_index`, "
-                "`repetition_index`, `segment_index`, and `partition_index`. "
-                "Use these coordinates for auditing and grouping; do not infer "
-                "spatial ordering from array length. Cartesian/EPI exports contain "
-                "the already sorted `cartesian_kspace(phase_*, read_*)` array and "
-                "`cartesian_image`. Cartesian 3D acquisitions additionally contain "
-                "`cartesian_3d_kspace(..., partition_*, phase_*, read_*)` and the "
-                "corresponding 3D reconstruction. Spiral exports contain linearly "
-                "gridded `spiral_gridded_kspace` and `spiral_image` arrays. "
-                "Supported radial 3D exports contain density-compensated "
-                "`radial_3d_gridded_kspace` and `radial_3d_image` arrays. CSI "
-                "exports contain the already sorted "
-                "`csi_kspace(phase_y, phase_x, spectral_point)` array."
-            ),
-            new_code_cell(
-                "coordinate_names = [name for name in (\n"
-                "    'kx', 'ky', 'kz', 'adc_event_index', "
-                "'readout_sample_index',\n"
-                "    'slice_index', 'echo_index', 'repetition_index',\n"
-                "    'segment_index', 'partition_index'\n"
-                ") if name in ds.coords]\n"
-                "adc_table = ds[coordinate_names].to_dataframe()\n"
-                "adc_table['signal'] = raw_adc_signal.values if raw_adc_signal.ndim == 1 else list(raw_adc_signal.values.T)\n"
-                "adc_table.head()"
-            ),
-            new_markdown_cell(
-                "## Reconstruction preparation\n\n"
-                "This section performs the centered inverse FFT inside the notebook. "
-                "If an older result file has only chronological ADC data, the helper "
-                "first validates and sorts it with the exported event, outer-label, "
-                "partition, and logical encoding coordinates. It does not reshape based on "
-                "the sample count alone. Pool-resolved `species_signal` data are "
-                "reconstructed as separate variables when available."
-            ),
-            new_code_cell(_sequence_result_reconstruction_code()),
-            new_markdown_cell(
-                "## Reconstructed data: named entry points\n\n"
-                "Run this cell before doing your own analysis. It gives every export "
-                "the same descriptive names:\n\n"
-                "- `reconstructed_data`: primary result (image magnitude or CSI spectrum)\n"
-                "- `reconstructed_kspace`: sorted or gridded k-space\n"
-                "- `reconstructed_image`: complex image/FID after spatial reconstruction\n"
-                "- `reconstructed_image_magnitude`: magnitude image\n"
-                "- `raw_adc_signal`: chronological complex ADC samples\n"
-                "- `reconstruction`: dictionary containing all of the above plus the "
-                "detected reconstruction type and original dataset variable names\n"
-                "- `build_cartesian_kspace_from_raw(...)` and "
-                "`reconstruct_cartesian_image(...)`: reusable Cartesian "
-                "reconstruction helpers"
-            ),
-            new_code_cell(_sequence_result_access_code()),
-            new_markdown_cell(
-                "## Work with the reconstructed data\n\n"
-                "xarray keeps dimension names attached to the array. Use `.isel(...)` "
-                "to select by integer index, `.sel(...)` to select by coordinate value, "
-                "and `.values` only when a library specifically needs NumPy. The cell "
-                "below selects the first non-spatial frame/coil/pool, while leaving all "
-                "image or spectral dimensions intact. Adjust `analysis_selection` for "
-                "your experiment."
-            ),
-            new_code_cell(
-                "if reconstructed_data is not None:\n"
-                "    spatial_dims_by_kind = {\n"
-                "        'cartesian_2d': tuple(dim for dim in reconstructed_data.dims if dim.startswith(('phase_', 'read_'))),\n"
-                "        'cartesian_3d': tuple(dim for dim in reconstructed_data.dims if dim.startswith(('partition_', 'phase_', 'read_'))),\n"
-                "        'spiral_2d': ('phase_y', 'read_x'),\n"
-                "        'radial_3d': ('radial_z', 'radial_y', 'radial_x'),\n"
-                "        'csi': ('phase_y', 'phase_x', 'spectral_point'),\n"
-                "    }\n"
-                "    spatial_dims = spatial_dims_by_kind.get(reconstruction_kind, ())\n"
-                "    analysis_selection = {\n"
-                "        dim: 0 for dim in reconstructed_data.dims if dim not in spatial_dims\n"
-                "    }\n"
-                "    analysis_data = reconstructed_data.isel(analysis_selection)\n"
-                "    reconstructed_numpy = analysis_data.values\n"
-                "    print('Selection:', analysis_selection or 'none')\n"
-                "    print('analysis_data:', analysis_data.dims, analysis_data.shape)\n"
-                "    print('reconstructed_numpy:', reconstructed_numpy.shape)\n"
-                "    analysis_data\n"
-                "else:\n"
-                "    print('No reconstructed_data is available; work with raw_adc_signal.')"
-            ),
-            new_markdown_cell(
-                "## Example: reconstruct Cartesian data from raw ADC samples\n\n"
-                "This compact example repeats the essential reconstruction explicitly: "
-                "it groups and validates the chronological ADC samples using their "
-                "event/encoding coordinates, builds dimensioned k-space, and applies a "
-                "centered inverse FFT. The resulting example objects are named "
-                "`example_kspace_from_raw`, `example_image_from_raw`, and "
-                "`example_image_magnitude_from_raw`. Non-Cartesian acquisitions require "
-                "trajectory-dependent gridding, so their exported gridded data remain "
-                "available through `reconstructed_kspace`."
-            ),
-            new_code_cell(_sequence_result_raw_reconstruction_example_code()),
-            new_markdown_cell(
-                "## Reconstruction preview\n\n"
-                "This plotting cell uses the prepared reconstruction and selects "
-                "the first available outer frame for a quick visual check. The "
-                "interactive explorer in the next section exposes the remaining "
-                "dimensions."
-            ),
-            new_code_cell(
-                "if 'radial_3d_gridded_kspace' in ds:\n"
-                "    kspace_3d = ds.radial_3d_gridded_kspace\n"
-                "    image_3d = ds.radial_3d_image_magnitude\n"
-                "    spatial_dims = {'radial_z', 'radial_y', 'radial_x'}\n"
-                "    selectors = {dim: 0 for dim in kspace_3d.dims if dim not in spatial_dims | {'coil'}}\n"
-                "    kspace_volume = kspace_3d.isel(selectors)\n"
-                "    image_volume = image_3d.isel(selectors)\n"
-                "    if 'coil' in kspace_volume.dims:\n"
-                "        kspace_volume = np.sqrt((abs(kspace_volume) ** 2).sum('coil'))\n"
-                "        image_volume = np.sqrt((abs(image_volume) ** 2).sum('coil'))\n"
-                "    z_mid = kspace_volume.sizes['radial_z'] // 2\n"
-                "    fig, axes = plt.subplots(1, 2, figsize=(10, 4))\n"
-                "    axes[0].imshow(np.log1p(abs(kspace_volume.isel(radial_z=z_mid))), origin='lower', cmap='magma')\n"
-                "    axes[0].set_title('Central radial gridded k-space plane')\n"
-                "    axes[1].imshow(abs(image_volume.isel(radial_z=z_mid)), origin='lower', cmap='gray')\n"
-                "    axes[1].set_title('Central radial reconstruction slice')\n"
-                "    plt.tight_layout(); plt.show()\n"
-                "elif 'cartesian_3d_kspace' in ds:\n"
-                "    kspace_3d = ds.cartesian_3d_kspace\n"
-                "    image_3d = ds.notebook_cartesian_3d_image_magnitude\n"
-                "    partition_dim, phase_dim, read_dim = _cartesian_spatial_dims(kspace_3d)\n"
-                "    spatial_dims = {partition_dim, phase_dim, read_dim}\n"
-                "    selectors = {dim: 0 for dim in kspace_3d.dims "
-                "if dim not in spatial_dims | {'coil'}}\n"
-                "    kspace_volume = kspace_3d.isel(selectors)\n"
-                "    image_volume = image_3d.isel(selectors)\n"
-                "    if 'coil' in kspace_volume.dims:\n"
-                "        kspace_volume = np.sqrt((abs(kspace_volume) ** 2).sum('coil'))\n"
-                "        image_volume = np.sqrt((abs(image_volume) ** 2).sum('coil'))\n"
-                "    partition_mid = kspace_volume.sizes[partition_dim] // 2\n"
-                "    image_partition_mid = image_volume.sizes[partition_dim] // 2\n"
-                "    print('Sorted Cartesian 3D k-space:', kspace_3d.dims, kspace_3d.shape)\n"
-                "    print('Encoding axes:', ds.attrs.get('cartesian_encoding_axes', '+x +y +z'))\n"
-                "    fig, axes = plt.subplots(1, 2, figsize=(10, 4))\n"
-                "    axes[0].imshow(np.log1p(abs(kspace_volume.isel({partition_dim: partition_mid}))), origin='lower', cmap='magma')\n"
-                "    axes[0].set_title(f'Central k-partition plane ({partition_dim})')\n"
-                "    axes[1].imshow(abs(image_volume.isel({partition_dim: image_partition_mid})), origin='lower', cmap='gray')\n"
-                "    axes[1].set_title(f'Central reconstructed {partition_dim} slice')\n"
-                "    plt.tight_layout(); plt.show()\n"
-                "elif 'cartesian_kspace' in ds:\n"
-                "    kspace = ds.cartesian_kspace\n"
-                "    image = ds.notebook_cartesian_image_magnitude\n"
-                "    phase_dim, read_dim = _cartesian_spatial_dims(kspace)\n"
-                "    spatial_dims = {phase_dim, read_dim}\n"
-                "    selectors = {dim: 0 for dim in kspace.dims "
-                "if dim not in spatial_dims | {'coil'}}\n"
-                "    kspace = kspace.isel(selectors)\n"
-                "    image = image.isel(selectors)\n"
-                "    if 'coil' in kspace.dims:\n"
-                "        kspace_display = np.sqrt((abs(kspace) ** 2).sum('coil'))\n"
-                "        image_display = np.sqrt((abs(image) ** 2).sum('coil'))\n"
-                "    else:\n"
-                "        kspace_display = abs(kspace)\n"
-                "        image_display = abs(image)\n"
-                "    print('Sorted Cartesian/EPI k-space:', kspace.dims, kspace.shape)\n"
-                "    read_coord = 'cartesian_k_read_cyc_per_m' if 'cartesian_k_read_cyc_per_m' in ds.coords else f'cartesian_k{read_dim[-1]}_cyc_per_m'\n"
-                "    phase_coord = 'cartesian_k_phase_cyc_per_m' if 'cartesian_k_phase_cyc_per_m' in ds.coords else f'cartesian_k{phase_dim[-1]}_cyc_per_m'\n"
-                "    print('k-read axis:', ds.coords[read_coord].values[:4], '...')\n"
-                "    print('k-phase axis:', ds.coords[phase_coord].values[:4], '...')\n"
-                "    fig, axes = plt.subplots(1, 2, figsize=(10, 4))\n"
-                "    axes[0].imshow(np.log1p(kspace_display.values), origin='lower', cmap='magma')\n"
-                "    axes[0].set_title('log(1 + |k-space|)')\n"
-                "    axes[0].set_xlabel(f'{read_dim} / k-read'); axes[0].set_ylabel(f'{phase_dim} / k-phase')\n"
-                "    axes[1].imshow(image_display.values, origin='lower', cmap='gray')\n"
-                "    axes[1].set_title('|IFFT2 image|')\n"
-                "    axes[1].set_xlabel(read_dim); axes[1].set_ylabel(phase_dim)\n"
-                "    plt.tight_layout(); plt.show()\n"
-                "elif 'spiral_gridded_kspace' in ds:\n"
-                "    kspace = ds.spiral_gridded_kspace\n"
-                "    image = ds.spiral_image_magnitude\n"
-                "    selectors = {dim: 0 for dim in kspace.dims "
-                "if dim not in {'coil', 'phase_y', 'read_x'}}\n"
-                "    kspace = kspace.isel(selectors); image = image.isel(selectors)\n"
-                "    if 'coil' in kspace.dims:\n"
-                "        kspace = np.sqrt((abs(kspace) ** 2).sum('coil'))\n"
-                "        image = np.sqrt((abs(image) ** 2).sum('coil'))\n"
-                "    fig, axes = plt.subplots(1, 2, figsize=(10, 4))\n"
-                "    axes[0].imshow(np.log1p(abs(kspace)), origin='lower', cmap='magma')\n"
-                "    axes[0].set_title('Linearly gridded spiral k-space')\n"
-                "    axes[1].imshow(abs(image), origin='lower', cmap='gray')\n"
-                "    axes[1].set_title('Spiral reconstruction')\n"
-                "    plt.tight_layout(); plt.show()\n"
-                "elif 'csi_kspace' in ds:\n"
-                "    kspace = ds.csi_kspace\n"
-                "    print('Sorted CSI k-space:', kspace.dims, kspace.shape)\n"
-                "elif {'kx', 'ky'}.issubset(ds.coords):\n"
-                "    print('Chronological kx/ky samples are present, but the validated "
-                "Cartesian reconstruction above was unavailable.')"
-            ),
-            new_markdown_cell(
-                "## Interactive multidimensional explorer\n\n"
-                "The controls below are connected to the gridded xarray data. "
-                "Use the `x`, `y`, and `z` sliders to move the crosshair and "
-                "orthogonal slices, `Repetition` to select a dynamic volume or "
-                "2D frame, and `Spectral point` to inspect CSI data. Controls "
-                "without a matching dataset dimension are disabled automatically. "
-                "The two-handle range control adjusts reconstruction `vmin`/`vmax` "
-                "or the spectrum y-axis limits."
-            ),
-            new_code_cell(_sequence_result_explorer_code()),
+            new_code_cell(_sequence_result_checkpoint_code()),
             new_markdown_cell("## Final longitudinal magnetization"),
             new_code_cell(
-                "mz = ds.final_magnetization.sel(component='mz').values\n"
+                "mz = ds.final_magnetization.sel(component='mz')\n"
                 "while mz.ndim > 2:\n"
-                "    mz = np.take(mz, mz.shape[-1] // 2, axis=-1)\n"
+                "    mz = mz.isel({mz.dims[-1]: mz.sizes[mz.dims[-1]] // 2})\n"
                 "fig, ax = plt.subplots(figsize=(6, 5))\n"
                 "if mz.ndim == 1:\n"
                 "    ax.plot(mz)\n"
@@ -3270,8 +3979,45 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
                 "    fig.colorbar(image, ax=ax, label='Mz')\n"
                 "ax.set_title('Final Mz (central slice)'); plt.show()"
             ),
+            new_markdown_cell(
+                "## Advanced: chronological ADC samples\n\n"
+                "Each `signal` sample shares the `adc` dimension with its time, "
+                "k-space coordinate, event index, readout-sample index, and Pulseq "
+                "labels. Keep these xarray labels when grouping the data."
+            ),
+            new_code_cell(
+                "signal = ds['signal']\n"
+                "time_ms = ds['adc_time_s'] * 1e3\n"
+                "fig, ax = plt.subplots(figsize=(9, 4))\n"
+                "if 'coil' not in signal.dims:\n"
+                "    ax.plot(time_ms, np.abs(signal), label='Magnitude')\n"
+                "else:\n"
+                "    for coil in signal.coil.values:\n"
+                "        ax.plot(\n"
+                "            time_ms, np.abs(signal.sel(coil=coil)),\n"
+                "            label=f'Coil {coil}',\n"
+                "        )\n"
+                "ax.set(xlabel='ADC time (ms)', ylabel='Received signal (a.u.)')\n"
+                "ax.legend(); ax.grid(True); plt.show()"
+            ),
+            new_code_cell(
+                "coordinate_names = [name for name in (\n"
+                "    'adc_time_s', 'kx', 'ky', 'kz', 'adc_event_index',\n"
+                "    'readout_sample_index', 'slice_index', 'echo_index',\n"
+                "    'repetition_index', 'segment_index', 'partition_index',\n"
+                ") if name in ds.coords]\n"
+                "adc_table = ds[coordinate_names].to_dataframe()\n"
+                "adc_table['signal'] = (\n"
+                "    ds.signal.values if ds.signal.ndim == 1\n"
+                "    else list(ds.signal.transpose('adc', 'coil').values)\n"
+                ")\n"
+                "adc_table.head()",
+                metadata={"jupyter": {"source_hidden": True}, "collapsed": True},
+            ),
         ]
     )
+
+    notebook = new_notebook(cells=cells)
     with notebook_path.open("w", encoding="utf-8") as handle:
         nbformat.write(notebook, handle)
     return notebook_path

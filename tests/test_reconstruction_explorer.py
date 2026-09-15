@@ -177,16 +177,31 @@ def test_explorer_restores_multidimensional_selection(qt_application):
 
 def test_explorer_applies_and_restores_image_display_options(qt_application):
     explorer = SequenceReconstructionExplorer()
-    explorer.set_dataset(_framed_cartesian_dataset())
+    dataset = _framed_cartesian_dataset()
+    explorer.set_dataset(dataset)
+
+    selected_kspace = dataset.cartesian_kspace.isel(cartesian_frame=0)
+    assert explorer.kspace_scale_combo.currentData() == "log"
+    np.testing.assert_allclose(
+        explorer.kspace_panel.image.image,
+        np.log1p(np.abs(selected_kspace)).T,
+    )
 
     explorer.colormap_combo.setCurrentText("magma")
     explorer.display_strength.setValue(1.8)
     explorer._set_combo_data(explorer.interpolation_combo, "cubic")
+    explorer._set_combo_data(explorer.kspace_scale_combo, "magnitude")
 
     state = explorer.get_state()
     assert state["colormap"] == "magma"
     assert state["display_strength"] == 1.8
     assert state["interpolation"] == "cubic"
+    assert state["kspace_scale"] == "magnitude"
+    np.testing.assert_allclose(
+        explorer.kspace_panel.image.image,
+        np.abs(selected_kspace).T,
+    )
+    assert explorer.kspace_panel.info.text().startswith("|gridded k-space|")
     # Cubic interpolation changes display pixels, not the reconstruction array.
     assert explorer.image_panel.image.image.shape == (40, 24)
     assert explorer._current_display.shape == (3, 5)
@@ -198,6 +213,7 @@ def test_explorer_applies_and_restores_image_display_options(qt_application):
     assert restored.colormap_combo.currentText() == "magma"
     assert restored.display_strength.value() == 1.8
     assert restored.interpolation_combo.currentData() == "cubic"
+    assert restored.kspace_scale_combo.currentData() == "magnitude"
     np.testing.assert_array_equal(
         restored.image_panel.image.lut, explorer.image_panel.image.lut
     )

@@ -217,8 +217,12 @@ only Sequence Simulation and Phantom tabs. The workspace selector remains in
 the menu-bar corner so the full interface can be restored without reopening
 the application.
 
-Sequence-side EPI controls are shown only for the internal EPI source, and the
-built-in object property group is shown only when the built-in quick object
+Sequence-side EPI controls are shown only for the internal EPI source. The EPI
+builder supports alternating bipolar lines and monopolar flyback lines with a
+combined read rewinder/phase blip. The separate EPSI/MGE source labels echo,
+slice, and repetition dimensions explicitly, so the generic Cartesian-frame
+pipeline reconstructs each echo without changing the chronological ADC stream.
+The built-in object property group is shown only when the built-in quick object
 owns those values. Shape-designed spectral phantoms retain their editable
 `phantom_design` metadata in memory, so the Phantom workspace can reopen and
 replace the current design without first saving it to disk.

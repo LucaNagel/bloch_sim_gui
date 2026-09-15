@@ -169,12 +169,16 @@ class SequenceDesigner(QGroupBox):
 
         # Phase setting (always visible in SSFP)
         row_phase = QHBoxLayout()
-        row_phase.addWidget(QLabel("Start phase (deg):"))
+        row_phase.addWidget(QLabel("Startup pulse phase (deg):"))
         self.ssfp_start_phase = QDoubleSpinBox()
         self.ssfp_start_phase.setObjectName("ssfp_start_phase")
         self.ssfp_start_phase.setRange(-3600, 3600)
         self.ssfp_start_phase.setDecimals(2)
         self.ssfp_start_phase.setValue(180.0)
+        self.ssfp_start_phase.setToolTip(
+            "Sets only the phase of the distinct startup pulse. Regular pulses "
+            "use the 0/180° phase cycle below."
+        )
         self.ssfp_start_phase.valueChanged.connect(lambda _: self.update_diagram())
         row_phase.addWidget(self.ssfp_start_phase)
         ssfp_layout.addLayout(row_phase)
@@ -1034,19 +1038,21 @@ class SequenceDesigner(QGroupBox):
         start_amp = base_peak * start_scale if base_peak is not None else 0.025
         _place_pulse(start_delay, start_amp, np.deg2rad(start_phase_deg))
 
-        # Remaining pulses evenly spaced by TR
-        phase_deg = start_phase_deg
+        # Remaining pulses are a regular phase cycle independent of the distinct
+        # startup pulse.  In particular, a 90° startup followed by alternating
+        # regular pulses must read 90/180/0/180/0, not 90/270/90/270/90.
+        regular_phase_deg = 0.0
         for k in range(1, n_reps):
             t0 = start_delay + k * tr
-            phase_deg = advance_bssfp_phase_deg(
-                phase_deg,
+            regular_phase_deg = advance_bssfp_phase_deg(
+                regular_phase_deg,
                 elapsed_s=tr,
                 phase_increment_deg=180.0 if alternate else 0.0,
             )
             _place_pulse(
                 t0,
                 base_peak if base_peak is not None else 0.05,
-                np.deg2rad(phase_deg),
+                np.deg2rad(regular_phase_deg),
             )
 
         return b1, gradients, time

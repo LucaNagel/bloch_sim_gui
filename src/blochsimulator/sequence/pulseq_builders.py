@@ -1046,6 +1046,7 @@ def make_pulseq_epi(
     fov_m: Sequence[float] = (0.22, 0.22),
     matrix: Sequence[int] = (16, 16),
     sampling_bandwidth_hz: float = 50_000.0,
+    readout_strategy: str = "bipolar",
     flip_angle_deg: float = 90.0,
     variable_flip_angle: bool = False,
     vfa_final_flip_angle_deg: float = 90.0,
@@ -1078,7 +1079,9 @@ def make_pulseq_epi(
     """Build a Cartesian single-shot EPI Pulseq sequence for export.
 
     Variable flip angles advance once per repetition and are shared by every
-    slice acquired within that repetition.
+    slice acquired within that repetition. ``readout_strategy="bipolar"``
+    alternates the read gradient direction, while ``"flyback"`` acquires every
+    line in the positive direction and rewinds kx between lines.
     """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -1090,6 +1093,19 @@ def make_pulseq_epi(
         raise ValueError("matrix must contain two values")
     n_slices = _positive_integer(n_slices, "n_slices")
     repetitions = _positive_integer(repetitions, "repetitions")
+    strategy = str(readout_strategy).strip().lower().replace("-", "_")
+    strategy_aliases = {
+        "bipolar": "bipolar",
+        "alternating": "bipolar",
+        "standard": "bipolar",
+        "flyback": "flyback",
+        "monopolar": "flyback",
+        "unipolar": "flyback",
+    }
+    try:
+        strategy = strategy_aliases[strategy]
+    except KeyError as exc:
+        raise ValueError("readout_strategy must be 'bipolar' or 'flyback'") from exc
     if variable_flip_angle:
         flip_angle_schedule_deg = variable_flip_angle_schedule(
             repetitions,
@@ -1214,7 +1230,11 @@ def make_pulseq_epi(
         system=system,
     )
     logical_read_area = logical_gradient_area(gx, encoding_frame, "read")
-    relative_x_end = -logical_read_area / 2 + (logical_read_area if n_y % 2 else 0.0)
+    relative_x_end = (
+        logical_read_area / 2
+        if strategy == "flyback"
+        else -logical_read_area / 2 + (logical_read_area if n_y % 2 else 0.0)
+    )
     relative_y_end = (-n_y / 2 + max(n_y - 1, 0)) * delta_ky
     gx_post = make_role_trapezoid(
         pp,
@@ -1235,6 +1255,38 @@ def make_pulseq_epi(
     gy_blip = make_role_trapezoid(
         pp, encoding_frame, "phase", area=delta_ky, system=system
     )
+    gx_flyback = None
+    if strategy == "flyback" and n_y > 1:
+        # Use one shared duration so the read rewinder and phase blip can be
+        # played simultaneously without changing the intended gradient areas.
+        minimum_connector_duration = max(
+            pp.calc_duration(gy_blip),
+            pp.calc_duration(
+                make_role_trapezoid(
+                    pp,
+                    encoding_frame,
+                    "read",
+                    area=-logical_read_area,
+                    system=system,
+                )
+            ),
+        )
+        gx_flyback = make_role_trapezoid(
+            pp,
+            encoding_frame,
+            "read",
+            area=-logical_read_area,
+            duration=minimum_connector_duration,
+            system=system,
+        )
+        gy_blip = make_role_trapezoid(
+            pp,
+            encoding_frame,
+            "phase",
+            area=delta_ky,
+            duration=minimum_connector_duration,
+            system=system,
+        )
     spoilers = []
     if spoil_after_slice:
         if spoiler_cycles_per_voxel > 0:
@@ -1267,7 +1319,11 @@ def make_pulseq_epi(
     rf_center, _ = pp.calc_rf_center(rf)
     rf_block_duration = pp.calc_duration(rf, gz)
     readout_block_duration = pp.calc_duration(gx, adc)
-    blip_duration = pp.calc_duration(gy_blip)
+    blip_duration = (
+        pp.calc_duration(gx_flyback, gy_blip)
+        if gx_flyback is not None
+        else pp.calc_duration(gy_blip)
+    )
     center_line = n_y // 2
     echo_without_delay = (
         rf_block_duration
@@ -1324,9 +1380,13 @@ def make_pulseq_epi(
             if te_delay_value:
                 sequence.add_block(pp.make_delay(te_delay_value))
             for line in range(n_y):
-                sequence.add_block(gx if line % 2 == 0 else gx_reverse, adc)
+                readout = gx if strategy == "flyback" or line % 2 == 0 else gx_reverse
+                sequence.add_block(readout, adc)
                 if line < n_y - 1:
-                    sequence.add_block(gy_blip)
+                    if gx_flyback is None:
+                        sequence.add_block(gy_blip)
+                    else:
+                        sequence.add_block(gx_flyback, gy_blip)
             sequence.add_block(gx_post, gy_post)
             if spoilers:
                 sequence.add_block(*spoilers)
@@ -1350,6 +1410,8 @@ def make_pulseq_epi(
 
     _raise_for_timing_errors(sequence, "EPI")
     sequence.set_definition("Name", "epi_2d")
+    sequence.set_definition("TrajectoryType", "cartesian_epi")
+    sequence.set_definition("ReadoutStrategy", strategy)
     slice_extent = n_slices * slice_thickness_m + (n_slices - 1) * slice_gap_m
     sequence.set_definition("FOV", [fov_x, fov_y, slice_extent])
     sequence.set_definition("MatrixSize", [n_x, n_y])
@@ -1410,6 +1472,451 @@ def make_pulseq_epi(
         start_times_s=acquisition_start_times,
     )
     sequence.set_definition("SpoilAfterSlice", bool(spoil_after_slice))
+    sequence.set_definition("SpoilerCyclesPerSlice", spoiler_cycles_per_slice)
+    sequence.set_definition("SpoilerCyclesPerVoxel", spoiler_cycles_per_voxel)
+    sequence.set_definition("SpoilerDuration", spoiler_duration_s)
+    sequence.set_definition(
+        "SpoilerAxes", "".join(event.channel for event in spoilers) or "none"
+    )
+    sequence.set_definition("SpoilerEndTimes", spoiler_end_times)
+    sequence.set_definition("IdealSpoilerEndTimes", spoiler_end_times)
+    return sequence
+
+
+def make_pulseq_epsi_mge(
+    *,
+    fov_m: Sequence[float] = (0.22, 0.22),
+    matrix: Sequence[int] = (16, 16),
+    echoes: int = 8,
+    echo_spacing_s: float = 2e-3,
+    readout_strategy: str = "bipolar",
+    sampling_bandwidth_hz: float = 50_000.0,
+    flip_angle_deg: float = 15.0,
+    rf_pulse_type: str = "sinc",
+    rf_duration_s: float = 3e-3,
+    rf_time_bandwidth_product: float = 4.0,
+    rf_apodization: float = 0.5,
+    rf_slr_sharpness: float = 1.0,
+    rf_custom_waveform_hz: Sequence[complex] | None = None,
+    rf_custom_raster_s: float | None = None,
+    rf_custom_flip_angle_deg: float | None = None,
+    rf_custom_name: str | None = None,
+    rf_frequency_offset_hz: float = 0.0,
+    slice_thickness_m: float = 3e-3,
+    slice_gap_m: float = 0.0,
+    n_slices: int = 1,
+    slice_offset_m: float = 0.0,
+    echo_time_s: float = 6e-3,
+    repetition_time_s: float = 50e-3,
+    repetitions: int = 1,
+    acquisition_interval_s: float | None = None,
+    rf_spoiling: bool = True,
+    rf_spoiling_increment_deg: float = 117.0,
+    spoil_after_readout: bool = True,
+    spoiler_cycles_per_slice: float = 4.0,
+    spoiler_cycles_per_voxel: float = 0.0,
+    spoiler_duration_s: float = 2e-3,
+    encoding_duration_s: float = 0.8e-3,
+    encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
+    scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
+):
+    """Build a phase-encoded 2D EPSI / multi-gradient-echo sequence.
+
+    Each RF excitation acquires one phase-encoding line at every echo time.
+    The resulting labelled ADC stream can be reconstructed as an MGE echo
+    series, or Fourier transformed along the uniformly spaced echo dimension
+    for EPSI processing. Bipolar readout alternates the spatial traversal;
+    flyback readout acquires every echo in the same direction.
+    """
+    pp = _pypulseq()
+    encoding_frame = resolve_encoding_frame(encoding_axes)
+    fov_x, fov_y = _positive_values(fov_m, "FOV")
+    if len(tuple(fov_m)) != 2:
+        raise ValueError("fov_m must contain two values")
+    n_x, n_y = (_positive_integer(value, "matrix size") for value in matrix)
+    if len(tuple(matrix)) != 2:
+        raise ValueError("matrix must contain two values")
+    echoes = _positive_integer(echoes, "echoes")
+    n_slices = _positive_integer(n_slices, "n_slices")
+    repetitions = _positive_integer(repetitions, "repetitions")
+    strategy = str(readout_strategy).strip().lower().replace("-", "_")
+    strategy_aliases = {
+        "bipolar": "bipolar",
+        "alternating": "bipolar",
+        "symmetric": "bipolar",
+        "flyback": "flyback",
+        "monopolar": "flyback",
+        "unipolar": "flyback",
+    }
+    try:
+        strategy = strategy_aliases[strategy]
+    except KeyError as exc:
+        raise ValueError("readout_strategy must be 'bipolar' or 'flyback'") from exc
+    for name, value in {
+        "echo_spacing_s": echo_spacing_s,
+        "sampling_bandwidth_hz": sampling_bandwidth_hz,
+        "flip_angle_deg": flip_angle_deg,
+        "slice_thickness_m": slice_thickness_m,
+        "echo_time_s": echo_time_s,
+        "repetition_time_s": repetition_time_s,
+        "spoiler_duration_s": spoiler_duration_s,
+        "encoding_duration_s": encoding_duration_s,
+    }.items():
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be positive and finite")
+    for name, value in {
+        "slice_gap_m": slice_gap_m,
+        "spoiler_cycles_per_slice": spoiler_cycles_per_slice,
+        "spoiler_cycles_per_voxel": spoiler_cycles_per_voxel,
+    }.items():
+        if not np.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be non-negative and finite")
+    for name, value in {
+        "rf_frequency_offset_hz": rf_frequency_offset_hz,
+        "slice_offset_m": slice_offset_m,
+        "rf_spoiling_increment_deg": rf_spoiling_increment_deg,
+    }.items():
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+    if acquisition_interval_s is not None and (
+        not np.isfinite(acquisition_interval_s) or acquisition_interval_s <= 0
+    ):
+        raise ValueError("acquisition_interval_s must be positive and finite or None")
+    rf_spoiling = _uses_rf_spoiling(rf_spoiling, rf_spoiling_increment_deg)
+
+    system = _make_scanner_system(
+        pp,
+        scanner_parameters,
+        legacy_kwargs={
+            "max_grad": 32,
+            "grad_unit": "mT/m",
+            "max_slew": 130,
+            "slew_unit": "T/m/s",
+            "rf_ringdown_time": 30e-6,
+            "rf_dead_time": 100e-6,
+            "adc_dead_time": 20e-6,
+        },
+    )
+    sequence = pp.Sequence(system)
+    dwell = (
+        round((1.0 / sampling_bandwidth_hz) / system.adc_raster_time)
+        * system.adc_raster_time
+    )
+    if dwell <= 0:
+        raise ValueError("sampling bandwidth exceeds the ADC raster capability")
+
+    rf_events, actual_rf_duration_s, effective_rf_tbw, rf_pulse_type = (
+        _make_slice_selective_rf_events(
+            pp,
+            system,
+            flip_angle_schedule_deg=(flip_angle_deg,),
+            slice_thickness_m=slice_thickness_m,
+            rf_pulse_type=rf_pulse_type,
+            rf_duration_s=rf_duration_s,
+            rf_time_bandwidth_product=rf_time_bandwidth_product,
+            rf_apodization=rf_apodization,
+            rf_slr_sharpness=rf_slr_sharpness,
+            rf_custom_waveform_hz=rf_custom_waveform_hz,
+            rf_custom_raster_s=rf_custom_raster_s,
+            rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
+            rf_frequency_offset_hz=rf_frequency_offset_hz,
+        )
+    )
+    rf, gz = rf_events[0]
+    gz = _remap_gradient_event(gz, encoding_frame, "partition")
+    rf_center, _ = pp.calc_rf_center(rf)
+    rf_block_duration = pp.calc_duration(rf, gz)
+
+    delta_kx, delta_ky = 1.0 / fov_x, 1.0 / fov_y
+    adc_duration = n_x * dwell
+    flat_time = _ceil_to_raster(adc_duration, system.grad_raster_time)
+    gx_positive = make_role_trapezoid(
+        pp,
+        encoding_frame,
+        "read",
+        amplitude=(n_x * delta_kx) / adc_duration,
+        flat_time=flat_time,
+        system=system,
+    )
+    gx_negative = make_role_trapezoid(
+        pp,
+        encoding_frame,
+        "read",
+        amplitude=-(n_x * delta_kx) / adc_duration,
+        flat_time=flat_time,
+        system=system,
+    )
+    adc = pp.make_adc(
+        num_samples=n_x,
+        dwell=dwell,
+        delay=gx_positive.rise_time + flat_time / 2 - adc_duration / 2,
+        system=system,
+    )
+    readout_area = logical_gradient_area(gx_positive, encoding_frame, "read")
+    readout_block_duration = pp.calc_duration(gx_positive, adc)
+    actual_echo_spacing = _ceil_to_raster(echo_spacing_s, system.block_duration_raster)
+    connector_duration = actual_echo_spacing - readout_block_duration
+    if connector_duration < -system.block_duration_raster / 2:
+        raise ValueError(
+            "echo_spacing_s is shorter than the readout gradient duration; "
+            f"use at least {readout_block_duration:.9g} s"
+        )
+    connector_duration = max(0.0, connector_duration)
+    between_echo_event = None
+    if strategy == "flyback" and echoes > 1:
+        try:
+            between_echo_event = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "read",
+                area=-readout_area,
+                duration=connector_duration,
+                system=system,
+            )
+        except Exception as exc:
+            raise ValueError(
+                "echo_spacing_s leaves too little time for the flyback gradient; "
+                "increase echo spacing or scanner gradient performance"
+            ) from exc
+    elif connector_duration:
+        between_echo_event = pp.make_delay(connector_duration)
+
+    gx_pre = make_role_trapezoid(
+        pp,
+        encoding_frame,
+        "read",
+        area=-readout_area / 2.0,
+        duration=encoding_duration_s,
+        system=system,
+    )
+    gz_rephase = make_role_trapezoid(
+        pp,
+        encoding_frame,
+        "partition",
+        area=-logical_gradient_area(gz, encoding_frame, "partition") / 2.0,
+        duration=encoding_duration_s,
+        system=system,
+    )
+    final_read_position = (
+        readout_area / 2.0
+        if strategy == "flyback" or echoes % 2
+        else -readout_area / 2.0
+    )
+    gx_post = make_role_trapezoid(
+        pp,
+        encoding_frame,
+        "read",
+        area=-final_read_position,
+        duration=encoding_duration_s,
+        system=system,
+    )
+
+    spoilers = []
+    if spoil_after_readout:
+        if spoiler_cycles_per_voxel > 0:
+            for role, voxel_size in zip(("read", "phase"), (fov_x / n_x, fov_y / n_y)):
+                spoilers.append(
+                    make_role_trapezoid(
+                        pp,
+                        encoding_frame,
+                        role,
+                        area=spoiler_cycles_per_voxel / voxel_size,
+                        duration=spoiler_duration_s,
+                        system=system,
+                    )
+                )
+        if spoiler_cycles_per_slice > 0:
+            spoilers.append(
+                make_role_trapezoid(
+                    pp,
+                    encoding_frame,
+                    "partition",
+                    area=spoiler_cycles_per_slice / slice_thickness_m,
+                    duration=spoiler_duration_s,
+                    system=system,
+                )
+            )
+
+    adc_center_from_readout_start = adc.delay + adc_duration / 2.0
+    echo_without_delay = (
+        rf_block_duration
+        - (rf.delay + rf_center)
+        + encoding_duration_s
+        + adc_center_from_readout_start
+    )
+    requested_te_delay = float(echo_time_s) - echo_without_delay
+    if requested_te_delay < -1e-12:
+        raise ValueError(
+            f"echo_time_s is too short; minimum is {echo_without_delay:.9g} s"
+        )
+    te_delay = _ceil_to_raster(
+        max(0.0, requested_te_delay), system.block_duration_raster
+    )
+    actual_first_te = echo_without_delay + te_delay
+    train_duration = echoes * readout_block_duration + max(echoes - 1, 0) * (
+        actual_echo_spacing - readout_block_duration
+    )
+    minimum_tr = (
+        rf_block_duration
+        + encoding_duration_s
+        + te_delay
+        + train_duration
+        + encoding_duration_s
+        + (spoiler_duration_s if spoilers else 0.0)
+    )
+    actual_tr = _ceil_to_raster(repetition_time_s, system.block_duration_raster)
+    if actual_tr < minimum_tr - 1e-12:
+        raise ValueError(
+            f"repetition_time_s is too short; minimum is {minimum_tr:.9g} s"
+        )
+    trailing_delay = max(0.0, actual_tr - minimum_tr)
+
+    slice_spacing = slice_thickness_m + slice_gap_m
+    slice_positions = (
+        float(slice_offset_m)
+        + (np.arange(n_slices, dtype=float) - (n_slices - 1) / 2.0) * slice_spacing
+    )
+    ky_areas = (np.arange(n_y, dtype=float) - n_y // 2) * delta_ky
+    _, slice_sign = encoding_frame.axis_and_sign("partition")
+    excitation_index = 0
+    spoiler_end_times = []
+    acquisition_start_times = []
+    acquisition_intervals = []
+    minimum_acquisition_intervals = []
+
+    for repetition in range(repetitions):
+        acquisition_start = _sequence_duration_s(sequence)
+        acquisition_start_times.append(acquisition_start)
+        for slice_index, position in enumerate(slice_positions):
+            logical_slice_amplitude = float(gz.amplitude) * slice_sign
+            slice_frequency_offset_hz = logical_slice_amplitude * position
+            for line_index, ky_area in enumerate(ky_areas):
+                rf_phase_deg = (
+                    _rf_spoiling_phase_deg(excitation_index, rf_spoiling_increment_deg)
+                    if rf_spoiling
+                    else 0.0
+                )
+                rf.freq_offset = rf_frequency_offset_hz + slice_frequency_offset_hz
+                rf.phase_offset = (
+                    np.deg2rad(rf_phase_deg)
+                    - 2.0 * np.pi * slice_frequency_offset_hz * rf_center
+                )
+                adc.phase_offset = np.deg2rad(rf_phase_deg)
+                sequence.add_block(rf, gz)
+                gy_pre = make_role_trapezoid(
+                    pp,
+                    encoding_frame,
+                    "phase",
+                    area=float(ky_area),
+                    duration=encoding_duration_s,
+                    system=system,
+                )
+                sequence.add_block(gx_pre, gy_pre, gz_rephase)
+                if te_delay:
+                    sequence.add_block(pp.make_delay(te_delay))
+                for echo in range(echoes):
+                    readout = (
+                        gx_positive
+                        if strategy == "flyback" or echo % 2 == 0
+                        else gx_negative
+                    )
+                    sequence.add_block(
+                        readout,
+                        adc,
+                        pp.make_label("LIN", "SET", line_index),
+                        pp.make_label("SLC", "SET", slice_index),
+                        pp.make_label("ECO", "SET", echo),
+                        pp.make_label("REP", "SET", repetition),
+                    )
+                    if echo < echoes - 1 and between_echo_event is not None:
+                        sequence.add_block(between_echo_event)
+                gy_post = make_role_trapezoid(
+                    pp,
+                    encoding_frame,
+                    "phase",
+                    area=-float(ky_area),
+                    duration=encoding_duration_s,
+                    system=system,
+                )
+                sequence.add_block(gx_post, gy_post)
+                if spoilers:
+                    sequence.add_block(*spoilers)
+                    spoiler_end_times.append(_sequence_duration_s(sequence))
+                if trailing_delay:
+                    sequence.add_block(pp.make_delay(trailing_delay))
+                excitation_index += 1
+        minimum_interval = _sequence_duration_s(sequence) - acquisition_start
+        actual_interval, _ = _finish_acquisition_interval(
+            pp,
+            sequence,
+            acquisition_start_s=acquisition_start,
+            requested_interval_s=acquisition_interval_s,
+            raster_s=system.block_duration_raster,
+            acquisition_name="EPSI / MGE measurement",
+        )
+        minimum_acquisition_intervals.append(minimum_interval)
+        acquisition_intervals.append(actual_interval)
+
+    _raise_for_timing_errors(sequence, "EPSI / MGE")
+    echo_times = [
+        actual_first_te + echo * actual_echo_spacing for echo in range(echoes)
+    ]
+    slice_extent = n_slices * slice_thickness_m + (n_slices - 1) * slice_gap_m
+    sequence.set_definition("Name", "epsi_mge_2d")
+    sequence.set_definition("TrajectoryType", "cartesian_2d_multi_echo")
+    sequence.set_definition("FOV", [fov_x, fov_y, slice_extent])
+    sequence.set_definition("MatrixSize", [n_x, n_y])
+    set_pulseq_encoding_definitions(
+        sequence,
+        encoding_frame,
+        fov_m=(fov_x, fov_y, slice_extent),
+        matrix=(n_x, n_y, n_slices),
+    )
+    sequence.set_definition("SamplingBandwidth", 1.0 / dwell)
+    sequence.set_definition("Echoes", echoes)
+    sequence.set_definition("EchoTimes", echo_times)
+    sequence.set_definition("TE", actual_first_te)
+    sequence.set_definition("EchoSpacing", actual_echo_spacing)
+    sequence.set_definition("RequestedEchoSpacing", float(echo_spacing_s))
+    sequence.set_definition("EchoSpectralBandwidth", 1.0 / actual_echo_spacing)
+    sequence.set_definition(
+        "EchoSpectralResolution", 1.0 / (echoes * actual_echo_spacing)
+    )
+    sequence.set_definition("ReadoutStrategy", strategy)
+    sequence.set_definition("FlipAngleDeg", float(flip_angle_deg))
+    _set_rf_definitions(
+        sequence,
+        pulse_type=rf_pulse_type,
+        requested_duration_s=rf_duration_s,
+        actual_duration_s=actual_rf_duration_s,
+        time_bandwidth_product=effective_rf_tbw,
+        apodization=rf_apodization,
+        slr_sharpness=rf_slr_sharpness,
+        custom_name=rf_custom_name,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        frequency_offset_hz=rf_frequency_offset_hz,
+    )
+    sequence.set_definition("SliceThickness", slice_thickness_m)
+    sequence.set_definition("SliceGap", slice_gap_m)
+    sequence.set_definition("SliceSpacing", slice_spacing)
+    sequence.set_definition("SliceOffset", float(slice_offset_m))
+    sequence.set_definition(
+        "SlicePositions", [float(value) for value in slice_positions]
+    )
+    sequence.set_definition("Repetitions", repetitions)
+    sequence.set_definition("RepetitionTime", actual_tr)
+    sequence.set_definition("MinimumRepetitionTime", minimum_tr)
+    sequence.set_definition("RFSpoiling", bool(rf_spoiling))
+    sequence.set_definition("RFSpoilingIncrementDeg", rf_spoiling_increment_deg)
+    sequence.set_definition("VolumeInterval", max(acquisition_intervals))
+    _set_acquisition_interval_definitions(
+        sequence,
+        requested_interval_s=acquisition_interval_s,
+        actual_intervals_s=acquisition_intervals,
+        minimum_intervals_s=minimum_acquisition_intervals,
+        start_times_s=acquisition_start_times,
+    )
+    sequence.set_definition("SpoilAfterReadout", bool(spoil_after_readout))
     sequence.set_definition("SpoilerCyclesPerSlice", spoiler_cycles_per_slice)
     sequence.set_definition("SpoilerCyclesPerVoxel", spoiler_cycles_per_voxel)
     sequence.set_definition("SpoilerDuration", spoiler_duration_s)

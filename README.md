@@ -47,7 +47,8 @@ A mode that lets you load, generate and simulate [Pulseq
 
 *Features:*
 
-- **Interactive generation of Pulseq** EPI, centre-out 2D spiral, 2D CSI,
+- **Interactive generation of Pulseq** bipolar or flyback EPI, centre-out 2D
+  spiral, 2D EPSI/MGE, 2D CSI,
   spoiled 2D FLASH,
   Cartesian 3D bSSFP, alternating-frequency [spectrally selective 3D bSSFP](https://doi.org/10.1002/mrm.29676), and
   Cartesian or [spiral-phyllotaxis radial 3D multi-echo bSSFP sequences](https://doi.org/10.1002/mrm.30614), with

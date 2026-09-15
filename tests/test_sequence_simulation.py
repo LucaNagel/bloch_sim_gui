@@ -894,33 +894,139 @@ def test_sequence_result_notebook_uses_xarray_dataset(tmp_path):
     assert "adc_event_index" in text
     assert "cartesian_kspace" in text
     assert "cartesian_image_magnitude" in text
-    assert "import ipywidgets as widgets" in text
-    assert "x_slider = _index_slider(x_dim or 'x', x_dim)" in text
-    assert "y_slider = _index_slider(y_dim or 'y', y_dim)" in text
-    assert "z_slider = _index_slider(z_dim or 'z', z_dim)" in text
-    assert "repetition_slider = _index_slider('Repetition'" in text
-    assert "spectral_point_slider = _index_slider(" in text
-    assert "display_range_slider = _display_range_slider()" in text
-    assert "widgets.FloatRangeSlider" in text
-    assert "widgets.interactive_output" in text
-    assert "continuous_update=True" in text
+    assert "Start here: what the important variables mean" in text
+    assert "True phantom-grid transverse magnetization" in text
+    assert "Advanced: chronological ADC samples" in text
+    assert "not voxel-resolved" in text
     import nbformat
 
-    explorer_code = next(
-        cell.source
-        for cell in nbformat.read(notebook_path, as_version=4).cells
-        if cell.cell_type == "code" and "widgets.interactive_output" in cell.source
+    notebook = nbformat.read(notebook_path, as_version=4)
+    fallback = next(
+        cell
+        for cell in notebook.cells
+        if cell.cell_type == "code" and "def _canonical_cartesian_axis" in cell.source
     )
-    assert "def _display_figure_once(fig):" in explorer_code
-    assert explorer_code.count("\n    _display_figure_once(fig)") == 3
-    assert "display(fig)" in explorer_code
-    assert "plt.close(fig)" in explorer_code
-    assert "plt.show()" not in explorer_code
-    assert "vmin=display_min" in explorer_code
-    assert "vmax=display_max" in explorer_code
-    assert "axes[2].set_ylim(*_display_limits(display_range))" in explorer_code
+    assert fallback.metadata["jupyter"]["source_hidden"]
+    assert fallback.metadata["collapsed"]
+    for cell in notebook.cells:
+        if cell.cell_type == "code":
+            compile(cell.source, str(notebook_path), "exec")
+
+
+def test_cartesian_result_notebook_starts_with_point_trace_and_semantic_controls(
+    tmp_path,
+):
+    frames, ny, nx = 4, 3, 5
+    image = np.arange(frames * ny * nx, dtype=float).reshape(frames, ny, nx)
+    image = image + 1j * (0.5 * image)
+    kspace = np.fft.fft2(image, axes=(-2, -1))
+    dataset = xr.Dataset(
+        data_vars={
+            "signal_real": ("adc", np.ones(2)),
+            "signal_imag": ("adc", np.zeros(2)),
+            "cartesian_image_real": (
+                ("cartesian_frame", "phase_y", "read_x"),
+                image.real,
+            ),
+            "cartesian_image_imag": (
+                ("cartesian_frame", "phase_y", "read_x"),
+                image.imag,
+            ),
+            "cartesian_kspace_real": (
+                ("cartesian_frame", "phase_y", "read_x"),
+                kspace.real,
+            ),
+            "cartesian_kspace_imag": (
+                ("cartesian_frame", "phase_y", "read_x"),
+                kspace.imag,
+            ),
+            "final_magnetization": (
+                ("spatial_0", "spatial_1", "component"),
+                np.zeros((ny, nx, 3)),
+            ),
+        },
+        coords={
+            "adc": [0, 1],
+            "adc_time_s": ("adc", [0.0, 1e-3]),
+            "cartesian_frame": np.arange(frames),
+            "phase_y": np.arange(ny),
+            "read_x": np.arange(nx),
+            "component": ["mx", "my", "mz"],
+            "cartesian_frame_echo_index": (
+                "cartesian_frame",
+                [0, 1, 0, 1],
+            ),
+            "cartesian_frame_repetition_index": (
+                "cartesian_frame",
+                [0, 0, 1, 1],
+            ),
+            "cartesian_frame_echo_time_s": (
+                "cartesian_frame",
+                [1e-3, 2e-3, 1e-3, 2e-3],
+            ),
+        },
+    )
+    data_path = tmp_path / "cartesian_result.nc"
+    dataset.to_netcdf(data_path)
+    notebook_path = export_sequence_result_notebook(
+        str(tmp_path / "cartesian_analysis.ipynb"), str(data_path)
+    )
+
+    import nbformat
 
     notebook = nbformat.read(notebook_path, as_version=4)
+    text = nbformat.writes(notebook)
+    point_helpers = next(
+        cell
+        for cell in notebook.cells
+        if cell.cell_type == "code" and "def cartesian_point_trace" in cell.source
+    )
+    point_example = next(
+        cell
+        for cell in notebook.cells
+        if cell.cell_type == "code"
+        and "mxy_image = dimension_cartesian_frames" in cell.source
+    )
+    explorer = next(
+        cell
+        for cell in notebook.cells
+        if cell.cell_type == "code" and "widgets.interactive_output" in cell.source
+    )
+
+    assert "over='echo'" in point_helpers.source
+    assert "cartesian_frame_echo_time_s" in point_helpers.source
+    assert "def cartesian_echo_spectrum" in point_helpers.source
+    assert point_helpers.metadata["jupyter"]["source_hidden"]
+    assert point_helpers.metadata["collapsed"]
+    assert "x = mxy_image.sizes[read_dim] // 2" in point_example.source
+    assert "over='repetition', echo=0" in point_example.source
+    assert not point_example.metadata.get("collapsed", False)
+    assert "Acquisition repetition" in explorer.source
+    assert "widgets.SelectionSlider" in explorer.source
+    assert "description='Plot pixel over'" in explorer.source
+    assert "description='Pixel view'" in explorer.source
+    assert "Frequency offset (Hz)" in explorer.source
+    assert "description='K-space view'" in explorer.source
+    assert "('Magnitude', 'magnitude')" in explorer.source
+    assert "('Log magnitude', 'log')" in explorer.source
+    assert "clear_output(wait=False)" in explorer.source
+    assert explorer.metadata["jupyter"]["source_hidden"]
+    assert explorer.metadata["collapsed"]
+    assert "repetition_slider = _index_slider('Repetition'" not in text
+    assert "def _canonical_cartesian_axis" not in text
+    assert sum(len(cell.source.splitlines()) for cell in notebook.cells) < 700
+
+    namespace = {"np": np}
+    exec(point_helpers.source, namespace)
+    echo_times_s = 1e-3 * np.arange(8)
+    expected_frequency_hz = 125.0
+    echo_signal = np.exp(2j * np.pi * expected_frequency_hz * echo_times_s)
+    frequency_hz, spectrum = namespace["cartesian_echo_spectrum"](
+        echo_signal, echo_times_s
+    )
+    peak_frequency_hz = frequency_hz[np.argmax(np.abs(spectrum))]
+    assert peak_frequency_hz == pytest.approx(expected_frequency_hz)
+
     for cell in notebook.cells:
         if cell.cell_type == "code":
             compile(cell.source, str(notebook_path), "exec")

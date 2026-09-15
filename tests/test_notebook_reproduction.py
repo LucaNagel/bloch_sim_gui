@@ -96,7 +96,7 @@ def _run_fid_notebook(notebook, parameter_code: str):
         parameter_code,
         _code_cell(notebook, "# Create simulator"),
         _code_cell(notebook, "# Create Free Induction Decay"),
-        _code_cell(notebook, "# Define spatial positions"),
+        _code_cell(notebook, "# Use the exact sampled axes"),
         _code_cell(notebook, "# Run simulation"),
     )
     for source in sources:
@@ -112,23 +112,25 @@ def test_exported_fid_flip_angle_changes_waveform_and_simulation(tmp_path, monke
     """Editing rf_flip_angle must alter downstream notebook behavior."""
     notebook = _export_fid_reproduction_notebook(tmp_path)
     monkeypatch.chdir(tmp_path)
-    parameter_code = _code_cell(notebook, "# Define simulation parameters")
+    parameter_code = _code_cell(notebook, "# Canonical simulation parameters")
     edited_parameter_code = parameter_code.replace(
-        "rf_flip_angle = 90  # degrees",
-        "rf_flip_angle = 45  # degrees",
+        "'flip_angle_deg': 90.0",
+        "'flip_angle_deg': 45.0",
         1,
     )
     assert edited_parameter_code != parameter_code
-    assert parameter_code.count("rf_flip_angle = 90") == 1
-    assert "'rf_flip_angle': rf_flip_angle," in parameter_code
+    assert parameter_code.count("'flip_angle_deg': 90.0") == 1
+    assert "'sequence_definition_source': 'regenerated_from_parameters'" in (
+        parameter_code
+    )
 
     waveform_90, signal_90, params_90 = _run_fid_notebook(notebook, parameter_code)
     waveform_45, signal_45, params_45 = _run_fid_notebook(
         notebook, edited_parameter_code
     )
 
-    assert params_90["rf_flip_angle"] == 90.0
-    assert params_45["rf_flip_angle"] == 45.0
+    assert params_90["rf_designer_snapshot"]["flip_angle_deg"] == 90.0
+    assert params_45["rf_designer_snapshot"]["flip_angle_deg"] == 45.0
     assert not np.allclose(waveform_90, waveform_45)
     assert abs(np.sum(waveform_45)) / abs(np.sum(waveform_90)) == pytest.approx(0.5)
     assert not np.allclose(signal_90, signal_45)
@@ -139,21 +141,16 @@ def test_fid_notebook_marks_irrelevant_parameters_and_plots_sequence(
     tmp_path, monkeypatch
 ):
     notebook = _export_fid_reproduction_notebook(tmp_path)
-    parameter_code = _code_cell(notebook, "# Define simulation parameters")
-    assert "'ssfp_flip_ratio': 0.5,  # not used for Free Induction Decay" in (
-        parameter_code
-    )
-    assert "'ssfp_tr_ratio': 0.5,  # not used for Free Induction Decay" in (
-        parameter_code
-    )
-    assert "te = 0.003000  # seconds  # not used for Free Induction Decay" in (
-        parameter_code
-    )
+    parameter_code = _code_cell(notebook, "# Canonical simulation parameters")
+    assert "'ssfp_flip_ratio'" not in parameter_code
+    assert "'ssfp_tr_ratio'" not in parameter_code
+    assert "'te_s'" not in parameter_code
+    assert "'tr_s': 0.01" in parameter_code
 
     monkeypatch.chdir(tmp_path)
     namespace = _fid_namespace()
     for marker in (
-        "# Define simulation parameters",
+        "# Canonical simulation parameters",
         "# Create Free Induction Decay",
     ):
         source = _code_cell(notebook, marker)

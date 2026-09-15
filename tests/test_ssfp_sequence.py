@@ -167,6 +167,30 @@ def test_ssfp_block_pulse_duration():
     ), f"Expected {n_expected} points for block pulse, got {non_zero_count}."
 
 
+@pytest.mark.parametrize(
+    ("alternate", "expected_phases_deg"),
+    (
+        (True, [90.0, 180.0, 0.0, 180.0, 0.0]),
+        (False, [90.0, 0.0, 0.0, 0.0, 0.0]),
+    ),
+)
+def test_ssfp_startup_phase_does_not_offset_regular_pulse_cycle(
+    alternate, expected_phases_deg
+):
+    """The Free Mode startup phase applies only to the distinct first pulse."""
+    mock_self = MockSequenceDesigner()
+    mock_self.ssfp_start_flip.value.return_value = 90.0
+    mock_self.ssfp_start_phase.value.return_value = 90.0
+    mock_self.ssfp_alternate_phase.isChecked.return_value = alternate
+
+    dt = 1e-5
+    b1, _, _ = SequenceDesigner._build_ssfp(mock_self, None, dt)
+    starts = np.rint(np.arange(5) * 10e-3 / dt).astype(int)
+    measured_phases_deg = np.mod(np.rad2deg(np.angle(b1[starts])), 360.0)
+
+    assert measured_phases_deg == pytest.approx(expected_phases_deg)
+
+
 def test_set_custom_pulse_does_not_reset_ssfp_prep_settings():
     """RF waveform updates must not overwrite the configured first SSFP pulse."""
 

@@ -19,6 +19,7 @@ from blochsimulator.sequence import (
     load_pulseq,
     make_pulseq_bssfp,
     make_pulseq_csi,
+    make_pulseq_epsi_mge,
     make_pulseq_epi,
     make_pulseq_flash,
     make_pulseq_spiral,
@@ -169,6 +170,28 @@ def test_bssfp_configured_start_phase_tr_and_flip_reach_rf_events(tmp_path):
     assert second_rf.start_s - first_rf.start_s == pytest.approx(requested_tr)
     assert rf_flip(starter) == pytest.approx(0.25 * flip_angle, rel=1e-5)
     assert rf_flip(first_rf) == pytest.approx(flip_angle, rel=1e-5)
+
+
+def test_bssfp_startup_phase_is_independent_of_regular_phase_cycle(tmp_path):
+    """Sequence Mode keeps its startup phase separate from regular RF cycling."""
+    sequence = make_pulseq_bssfp(
+        matrix=(2, 2, 2),
+        dummy_repetitions=0,
+        repetitions=1,
+        repetition_time_s=10e-3,
+        alpha_half_phase_deg=90.0,
+        rf_phase_start_deg=180.0,
+        rf_phase_increment_deg=180.0,
+    )
+    program = _write_and_load(sequence, tmp_path / "bssfp_independent_startup.seq")
+    measured_phases_deg = np.mod(
+        np.rad2deg([event.phase_offset_rad for event in program.rf_events[:5]]),
+        360.0,
+    )
+
+    assert measured_phases_deg == pytest.approx(
+        [90.0, 180.0, 0.0, 180.0, 0.0], abs=1e-3
+    )
 
 
 @pytest.mark.parametrize(
@@ -337,6 +360,96 @@ def test_centered_cartesian_adc_accepts_non_rf_raster_bandwidth(builder):
     assert sequence.definitions["SamplingBandwidth"] == pytest.approx(
         142_857.14285714287
     )
+
+
+@pytest.mark.parametrize(
+    ("strategy", "expected_directions"),
+    [
+        ("bipolar", (1, -1, 1, -1)),
+        ("flyback", (1, 1, 1, 1)),
+    ],
+)
+def test_epi_builder_supports_bipolar_and_flyback_readouts(
+    tmp_path, strategy, expected_directions
+):
+    sequence = make_pulseq_epi(
+        fov_m=(0.08, 0.06),
+        matrix=(4, 4),
+        readout_strategy=strategy,
+        repetition_time_s=50e-3,
+    )
+    program = _write_and_load(sequence, tmp_path / f"epi_{strategy}.seq")
+    acquisition = infer_cartesian_acquisition(program)
+
+    assert sequence.check_timing()[0]
+    assert acquisition.readout_directions == expected_directions
+    assert program.metadata["definitions"]["ReadoutStrategy"] == strategy
+
+
+@pytest.mark.parametrize("strategy", ["bipolar", "flyback"])
+def test_epsi_mge_builder_round_trips_as_echo_frames(tmp_path, strategy):
+    sequence = make_pulseq_epsi_mge(
+        fov_m=(0.08, 0.06),
+        matrix=(4, 3),
+        echoes=4,
+        echo_time_s=6e-3,
+        echo_spacing_s=2e-3,
+        readout_strategy=strategy,
+        repetition_time_s=50e-3,
+    )
+    program = _write_and_load(sequence, tmp_path / f"epsi_mge_{strategy}.seq")
+    compiled = SequenceCompiler().compile(program)
+    frames = infer_cartesian_acquisition_frames(program, compiled=compiled)
+    definitions = program.metadata["definitions"]
+
+    assert sequence.check_timing()[0]
+    assert compiled.adc_times_s.size == 4 * 3 * 4
+    assert frames.num_frames == 4
+    assert frames.varying_axes == ("echo",)
+    assert all(frame.read_matrix == 4 for frame in frames.acquisitions)
+    assert all(frame.phase_matrix == 3 for frame in frames.acquisitions)
+    expected_signs = (1, -1, 1, -1) if strategy == "bipolar" else (1, 1, 1, 1)
+    assert tuple(frame.readout_directions[0] for frame in frames.acquisitions) == (
+        expected_signs
+    )
+    assert definitions["Name"] == "epsi_mge_2d"
+    assert definitions["TrajectoryType"] == "cartesian_2d_multi_echo"
+    assert definitions["EchoTimes"] == pytest.approx([6e-3, 8e-3, 10e-3, 12e-3])
+    assert definitions["EchoSpectralBandwidth"] == pytest.approx(500.0)
+    assert definitions["EchoSpectralResolution"] == pytest.approx(125.0)
+    assert definitions["ReadoutStrategy"] == strategy
+
+    result = SequenceSimulationResult(
+        signal=np.zeros(compiled.adc_times_s.size, dtype=np.complex128),
+        adc_times_s=compiled.adc_times_s,
+        final_magnetization=np.zeros((1, 1, 1, 3)),
+        checkpoint_magnetization=None,
+        checkpoint_times_s=np.empty(0),
+        adc_gradient_moment_cyc_per_m=compiled.adc_gradient_moment_cyc_per_m,
+        metadata={
+            "cartesian_acquisition_frames": frames.to_metadata(),
+            "sequence_definitions": definitions,
+        },
+    )
+    dataset = result.to_xarray()
+
+    assert dataset.cartesian_image.dims == (
+        "cartesian_frame",
+        "phase_y",
+        "read_x",
+    )
+    assert dataset.cartesian_frame_echo_time_s.values == pytest.approx(
+        [6e-3, 8e-3, 10e-3, 12e-3]
+    )
+    assert np.all(np.diff(dataset.cartesian_frame_first_adc_time_s) > 0)
+    assert dataset.cartesian_read_position_m.values == pytest.approx(
+        [-0.03, -0.01, 0.01, 0.03]
+    )
+    assert dataset.cartesian_phase_position_m.values == pytest.approx(
+        [-0.02, 0.0, 0.02]
+    )
+    assert "measured ADC signal" in dataset.cartesian_image.attrs["description"]
+    assert "not a voxel-resolved" in dataset.signal.attrs["description"]
 
 
 def test_epi_builder_applies_edge_to_edge_slice_gap(tmp_path):
@@ -749,6 +862,7 @@ def test_sequence_workspace_builds_and_exports_configurable_fov(tmp_path):
         "Radial ME-bSSFP (3D)",
         "ME-bSSFP (3D, Cartesian)",
         "FLASH (2D)",
+        "EPSI / MGE (2D)",
         "Pulseq .seq file",
     ]
 
@@ -843,6 +957,45 @@ def test_sequence_workspace_builds_and_exports_configurable_fov(tmp_path):
     assert bssfp_definitions["AlphaHalfUsesRatios"] == 0
     assert bssfp_definitions["AlphaHalfCenterSpacing"] == pytest.approx(3e-3)
     assert bssfp_definitions["AlphaHalfFlipAngleDeg"] == pytest.approx(11.0)
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_workspace_builds_flyback_epi_and_epsi_mge(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+    widget.sequence_live_preview.setChecked(False)
+
+    assert [
+        widget.epi_readout_trajectory.itemText(index)
+        for index in range(widget.epi_readout_trajectory.count())
+    ] == ["Cartesian EPI", "Flyback", "Spiral"]
+    widget.sequence_source.setCurrentIndex(widget.EPI_SOURCE)
+    widget.epi_readout_trajectory.setCurrentText("Flyback")
+    widget.read_matrix.setValue(4)
+    widget.phase_matrix.setValue(4)
+    widget.epi_repetition_time_ms.setValue(50.0)
+    assert widget._reload_selected_generated_sequence()
+    assert widget.acquisition.readout_directions == (1, 1, 1, 1)
+
+    widget.sequence_source.setCurrentIndex(widget.EPSI_MGE_SOURCE)
+    widget.epsi_read_matrix.setValue(4)
+    widget.epsi_phase_matrix.setValue(3)
+    widget.epsi_echoes.setValue(4)
+    widget.epsi_readout_strategy.setCurrentText("Flyback")
+    assert not widget.epsi_mge_group.isHidden()
+    assert widget._reload_selected_generated_sequence()
+    assert widget.program.source == "internal-epsi-mge-2d"
+    assert widget.acquisition_frames.num_frames == 4
+    assert widget.acquisition_frames.varying_axes == ("echo",)
+    assert all(
+        acquisition.readout_directions == (1, 1, 1)
+        for acquisition in widget.acquisition_frames.acquisitions
+    )
+    output = widget._write_pulseq_path(tmp_path / "interactive_epsi_mge")
+    assert load_pulseq(output).metadata["definitions"]["Name"] == "epsi_mge_2d"
 
     widget.close()
     widget.deleteLater()

@@ -1259,6 +1259,7 @@ def test_shared_spoiling_quality_unit_covers_every_sequence_source():
         widget.RADIAL_ME_BSSFP_SOURCE: "fully balanced",
         widget.ME_BSSFP_SOURCE: "fully balanced",
         widget.FLASH_SOURCE: "FLASH (2D)",
+        widget.EPSI_MGE_SOURCE: "EPSI / MGE end-of-echo-train spoiler",
         widget.PULSEQ_SOURCE: "Imported Pulseq sequence",
     }
     for source_index, text in expected_text.items():

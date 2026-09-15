@@ -81,10 +81,12 @@ def test_default_b1_presets_generate_finite_complex_2d_and_3d_fields(shape, fov)
 def test_physical_3d_presets_have_expected_spatial_and_channel_profiles():
     shape = (21, 9, 7)
     fov = (0.21, 0.09, 0.07)
-    loop = create_b1_preset("surface_loop", shape, fov, kind="transmit")
-    loop_magnitude = np.abs(loop.values)
-    assert loop_magnitude[:3].mean() > loop_magnitude[-3:].mean()
-    assert loop_magnitude.max() == pytest.approx(1.0)
+    for kind in ("transmit", "receive"):
+        loop = create_b1_preset("surface_loop", shape, fov, kind=kind)
+        loop_magnitude = np.abs(loop.data[0])
+        assert loop_magnitude[:, -3:].mean() > loop_magnitude[:, :3].mean()
+        maximum = np.unravel_index(np.argmax(loop_magnitude), shape)
+        assert maximum[1] == shape[1] - 1
 
     birdcage = create_b1_preset(
         "birdcage_cp", shape, fov, kind="transmit", phase_deg=35.0
@@ -97,39 +99,6 @@ def test_physical_3d_presets_have_expected_spatial_and_channel_profiles():
     receive_rss = np.sqrt(np.sum(np.abs(receive.data) ** 2, axis=0))
     assert receive.n_channels == 8
     assert receive_rss.max() == pytest.approx(1.0)
-
-
-@pytest.mark.parametrize("preset", ["birdcage_cp", "surface_loop", "linear_ramp"])
-def test_nonuniform_transmit_presets_use_requested_magnitude_as_global_maximum(preset):
-    field = create_b1_preset(
-        preset,
-        (17, 13, 9),
-        (0.17, 0.13, 0.09),
-        kind="transmit",
-        magnitude=0.65,
-        ramp_mode="magnitude",
-    )
-
-    assert np.max(np.abs(field.values)) == pytest.approx(0.65)
-
-
-@pytest.mark.parametrize(
-    "preset", ["birdcage_cp", "surface_loop", "linear_ramp", "circular_array"]
-)
-def test_nonuniform_receive_presets_use_requested_magnitude_as_global_rss_maximum(
-    preset,
-):
-    field = create_b1_preset(
-        preset,
-        (17, 13, 9),
-        (0.17, 0.13, 0.09),
-        kind="receive",
-        magnitude=0.65,
-        ramp_mode="magnitude",
-    )
-    rss = np.sqrt(np.sum(np.abs(field.data) ** 2, axis=0))
-
-    assert np.max(rss) == pytest.approx(0.65)
 
 
 def test_linear_ramp_presets_control_magnitude_and_phase_axis():

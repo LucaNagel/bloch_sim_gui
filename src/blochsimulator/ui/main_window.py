@@ -2031,7 +2031,7 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             (
                 self.sequence_designer.ssfp_start_phase,
-                "Phase of the SSFP startup pulse, in degrees.",
+                "Phase of only the SSFP startup pulse, in degrees. Regular pulses use the independent 0/180-degree cycle.",
             ),
             (
                 self.sequence_designer.ssfp_alternate_phase,

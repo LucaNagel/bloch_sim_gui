@@ -382,6 +382,16 @@ class SequenceReconstructionExplorer(QWidget):
         self.export_button.clicked.connect(self._export_current_view)
         action_row.addWidget(self.export_button)
         action_row.addSpacing(12)
+        action_row.addWidget(QLabel("K-space view"))
+        self.kspace_scale_combo = QComboBox()
+        self.kspace_scale_combo.addItem("Magnitude", "magnitude")
+        self.kspace_scale_combo.addItem("Log magnitude", "log")
+        self.kspace_scale_combo.setCurrentIndex(1)
+        self.kspace_scale_combo.setToolTip(
+            "Show gridded k-space as linear magnitude or log(1 + magnitude)"
+        )
+        self.kspace_scale_combo.currentIndexChanged.connect(self._refresh)
+        action_row.addWidget(self.kspace_scale_combo)
         action_row.addWidget(QLabel("Colormap"))
         self.colormap_combo = QComboBox()
         self.colormap_combo.addItems(
@@ -670,7 +680,8 @@ class SequenceReconstructionExplorer(QWidget):
                     pool_index=pool_index if mode == "pool" else None,
                     coil_mode=effective_coil_mode,
                 )
-                kspace_scalar = kspace.copy(data=np.log1p(np.abs(kspace)))
+                kspace_display, kspace_title = self._kspace_display(kspace)
+                kspace_scalar = kspace.copy(data=kspace_display)
                 kspace_volume, _ = model.scanner_volume(kspace_scalar)
                 image_indices = (
                     self.image_volume.indices if self._volume_initialized else None
@@ -690,7 +701,7 @@ class SequenceReconstructionExplorer(QWidget):
                 self.kspace_volume.set_volume(
                     kspace_volume,
                     fov_m=fov,
-                    name="log(1 + |gridded k-space|)",
+                    name=kspace_title,
                 )
                 if image_indices is not None:
                     self._set_volume_indices(self.image_volume, image_indices)
@@ -775,9 +786,8 @@ class SequenceReconstructionExplorer(QWidget):
             lut=self._image_lut(),
             interpolation=self._image_interpolation(),
         )
-        self.kspace_panel.set_data(
-            np.log1p(np.abs(kspace_values)), "log(1 + |gridded k-space|)"
-        )
+        kspace_display, kspace_title = self._kspace_display(kspace_values)
+        self.kspace_panel.set_data(kspace_display, kspace_title)
         self._voxel = (
             int(np.clip(self._voxel[0], 0, image_values.shape[1] - 1)),
             int(np.clip(self._voxel[1], 0, image_values.shape[0] - 1)),
@@ -807,6 +817,12 @@ class SequenceReconstructionExplorer(QWidget):
         return _display_lut(
             self.colormap_combo.currentText(), self.display_strength.value()
         )
+
+    def _kspace_display(self, values):
+        magnitude = np.abs(np.asarray(values))
+        if self.kspace_scale_combo.currentData() == "log":
+            return np.log1p(magnitude), "log(1 + |gridded k-space|)"
+        return magnitude, "|gridded k-space|"
 
     def _image_interpolation(self):
         return str(self.interpolation_combo.currentData() or "nearest")
@@ -932,6 +948,7 @@ class SequenceReconstructionExplorer(QWidget):
             "pool": list(self._selected_data_mode()),
             "coil": self.coil_combo.currentData(),
             "component": self.component_combo.currentData(),
+            "kspace_scale": self.kspace_scale_combo.currentData(),
             "auto_contrast": self.auto_contrast.isChecked(),
             "contrast_range": list(self.contrast_slider.values()),
             "colormap": self.colormap_combo.currentText(),
@@ -963,6 +980,9 @@ class SequenceReconstructionExplorer(QWidget):
                 self._set_combo_data(self.pool_combo, (str(pool[0]), int(pool[1])))
             self._set_combo_data(self.coil_combo, state.get("coil"))
             self._set_combo_data(self.component_combo, state.get("component"))
+            self._set_combo_data(
+                self.kspace_scale_combo, state.get("kspace_scale", "log")
+            )
             contrast_range = state.get("contrast_range", ())
             if isinstance(contrast_range, (list, tuple)) and len(contrast_range) == 2:
                 self.contrast_slider.set_values(

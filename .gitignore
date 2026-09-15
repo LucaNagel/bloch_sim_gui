@@ -63,6 +63,7 @@ docs/_build/
 !self_testing.md
 !USER_GUIDE.md
 !DEVELOPER_GUIDE.md
+!docs/METABOLITE_PRESETS.md
 !docs/TUTORIAL_MODE.md
 !docs/sequence_simulation_plan.md
 !docs/sequence_simulation_architecture.md
