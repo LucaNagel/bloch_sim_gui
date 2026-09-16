@@ -386,11 +386,79 @@ def test_sweep_notebook():
 
     # Check for Xarray improvements
     assert "time_vector is not None" in nb_text, "Missing time vector check"
-    assert "dims.append('time')" in nb_text, "Missing time dimension naming"
+    assert (
+        "dimension_lengths.append(('time', n_time))" in nb_text
+    ), "Missing time dimension naming"
     assert ".sel(" in nb_text, "Missing coordinate selection code"
     assert "categories['Sequence']" in nb_text, "Missing parameter categorization"
+    assert "coords['frequency'] = frequency_vector" in nb_text
+    assert "effective_frequency_vector" in nb_text
+    assert "constant_params.pop('time_step')" in nb_text
 
     print(f"   ✓ Notebook contains improved Xarray and plotting code")
+
+
+def test_sweep_notebook_exposes_saved_axes_as_xarray_coordinates(tmp_path, monkeypatch):
+    """Endpoint sweep notebooks should use the exact exported sampling axes."""
+    import json
+    import nbformat
+
+    data_path = tmp_path / "sweep_axes.npz"
+    notebook_path = tmp_path / "sweep_axes.ipynb"
+    parameter_values = np.array([8.0, 9.0, 10.0])
+    frequencies = np.linspace(-100.0, 100.0, 5)
+    effective_frequencies = frequencies - 20.0
+    positions = np.array([[0.0, 0.0, 0.0]])
+    signal = np.zeros((3, 1, 5), dtype=complex)
+    np.savez(
+        data_path,
+        parameter_name="TR (ms)",
+        parameter_values=parameter_values,
+        constant_params=json.dumps(
+            {
+                "num_positions": 1,
+                "num_frequencies": 5,
+                "frequency_range_hz": 200.0,
+                "frequency_center_hz": 0.0,
+                "time_step_us": 20.0,
+            }
+        ),
+        positions=positions,
+        frequencies=frequencies,
+        effective_frequencies=effective_frequencies,
+        Signal=signal,
+    )
+    export_notebook(
+        mode="sweep",
+        filename=str(notebook_path),
+        data_filename=data_path.name,
+        param_name="TR (ms)",
+        metrics=["Signal"],
+        is_dynamic=False,
+    )
+
+    notebook = nbformat.read(notebook_path, as_version=4)
+    load_cell = next(
+        cell.source
+        for cell in notebook.cells
+        if cell.cell_type == "code" and "coordinate_keys" in cell.source
+    )
+    xarray_cell = next(
+        cell.source
+        for cell in notebook.cells
+        if cell.cell_type == "code" and "dimension_lengths" in cell.source
+    )
+
+    monkeypatch.chdir(tmp_path)
+    namespace = {"np": np, "json": json, "xr": __import__("xarray"), "Path": Path}
+    exec(compile(load_cell, str(notebook_path), "exec"), namespace)
+    exec(compile(xarray_cell, str(notebook_path), "exec"), namespace)
+    dataset = namespace["ds"]
+
+    assert dataset["Signal"].dims == ("TR (ms)", "position", "frequency")
+    assert np.array_equal(dataset.frequency.values, frequencies)
+    assert np.array_equal(dataset.effective_frequency.values, effective_frequencies)
+    assert dataset.attrs["time_step_us"] == 20.0
 
 
 def helper_notebook_execution(nb_file):

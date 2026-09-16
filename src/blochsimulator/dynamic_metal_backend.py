@@ -23,6 +23,7 @@ from .dynamic_phantom import (
 )
 from .sequence import SequenceCompiler
 from .sequence.spin_sampling import coerce_spin_sampling, phantom_voxel_basis_m
+from .units import ppm_to_hz
 
 
 FLOAT32_PRECISION_STRATEGY = (
@@ -443,6 +444,7 @@ def run_metal_precision_probe(
     precision_strategy: str = "float32",
     field_strength_t=None,
     nucleus=None,
+    sequence_reference_ppm=None,
     memory_budget_bytes: int | None = None,
     spin_chunk_size: int | str | None = None,
     capture_spin_indices=(),
@@ -462,6 +464,8 @@ def run_metal_precision_probe(
         raise RuntimeError(capability["reason"] or "Metal is unavailable")
     if not isinstance(phantom, DynamicSpectralPhantom):
         raise TypeError("the Metal precision probe requires a dynamic phantom")
+    if phantom.n_species != 2:
+        raise ValueError("the Metal precision probe currently requires two pools")
     if phantom.dynamic_b0 is not None:
         raise ValueError("the Metal precision probe does not support dynamic B0")
     tx_map = getattr(phantom, "tx_sensitivity_map", None)
@@ -538,6 +542,21 @@ def run_metal_precision_probe(
     pool_offsets = [
         pool.get_frequency_offset(field, effective_nucleus) for pool in phantom.pools
     ]
+    effective_reference_ppm = (
+        phantom.spectral_reference_ppm
+        if sequence_reference_ppm is None
+        else float(sequence_reference_ppm)
+    )
+    if not np.isfinite(effective_reference_ppm):
+        raise ValueError("sequence_reference_ppm must be finite")
+    reference_offset_hz = float(
+        ppm_to_hz(
+            phantom.spectral_reference_ppm - effective_reference_ppm,
+            field,
+            effective_nucleus,
+        )
+    )
+    pool_offsets = [value + reference_offset_hz for value in pool_offsets]
     signal_scale = (
         phantom.voxel_volume_m3 if signal_weighting == "voxel_volume" else 1.0
     )
@@ -772,6 +791,9 @@ def run_metal_precision_probe(
             "kinetic_preroll_start_s": preroll_start,
             "field_strength_t": field,
             "nucleus": effective_nucleus,
+            "spectral_reference_ppm": phantom.spectral_reference_ppm,
+            "sequence_reference_ppm": effective_reference_ppm,
+            "pool_frequency_offsets_hz": tuple(float(value) for value in pool_offsets),
             "probe_only": True,
         },
     }
@@ -823,6 +845,7 @@ def _run_cpu_float64_sample(
     checkpoints_s=(),
     field_strength_t=None,
     nucleus=None,
+    sequence_reference_ppm=None,
     memory_budget_bytes=None,
     progress_callback=None,
     preview_callback=None,
@@ -844,6 +867,7 @@ def _run_cpu_float64_sample(
         checkpoints_s=checkpoints_s,
         field_strength_t=field_strength_t,
         nucleus=nucleus,
+        sequence_reference_ppm=sequence_reference_ppm,
         progress_callback=progress_callback,
         preview_callback=preview_callback,
         cancel_callback=cancel_callback,
@@ -881,6 +905,7 @@ def run_metal_hybrid_probe(
     precision_strategy: str = "float32",
     field_strength_t=None,
     nucleus=None,
+    sequence_reference_ppm=None,
     calibration_fraction: float = 0.10,
     validation_fraction: float = 0.05,
     signal_nrmse_gate: float = 1.0e-3,
@@ -948,6 +973,7 @@ def run_metal_hybrid_probe(
             precision_strategy=precision_strategy,
             field_strength_t=field_strength_t,
             nucleus=nucleus,
+            sequence_reference_ppm=sequence_reference_ppm,
             memory_budget_bytes=memory_budget_bytes,
             spin_chunk_size=spin_chunk_size,
             capture_spin_groups=(calibration_indices, validation_indices),
@@ -964,6 +990,7 @@ def run_metal_hybrid_probe(
             spoiler_mode=spoiler_mode,
             field_strength_t=field_strength_t,
             nucleus=nucleus,
+            sequence_reference_ppm=sequence_reference_ppm,
             memory_budget_bytes=memory_budget_bytes,
             progress_callback=progress_callback if report_progress else None,
             preview_callback=preview_callback if report_preview else None,
@@ -1114,6 +1141,7 @@ def _run_exact_cpu_fallback(
     checkpoints_s,
     field_strength_t,
     nucleus,
+    sequence_reference_ppm,
     memory_budget_bytes,
     progress_callback,
     preview_callback,
@@ -1133,6 +1161,7 @@ def _run_exact_cpu_fallback(
         checkpoints_s=checkpoints_s,
         field_strength_t=field_strength_t,
         nucleus=nucleus,
+        sequence_reference_ppm=sequence_reference_ppm,
         memory_budget_bytes=memory_budget_bytes,
         progress_callback=progress_callback,
         preview_callback=preview_callback,
@@ -1163,6 +1192,7 @@ def run_metal_hybrid_sequence(
     checkpoints_s=(),
     field_strength_t=None,
     nucleus=None,
+    sequence_reference_ppm=None,
     progress_callback=None,
     preview_callback=None,
     cancel_callback=None,
@@ -1197,6 +1227,28 @@ def run_metal_hybrid_sequence(
 
     if cancelled():
         raise RuntimeError("Simulation cancelled")
+    if phantom.n_species != 2:
+        reason = "the Metal hybrid currently supports exactly two pools"
+        status("Additional spectral pools require the exact CPU path.")
+        return _run_exact_cpu_fallback(
+            program,
+            phantom,
+            sampling=sampling,
+            simulation_timestep_s=simulation_timestep_s,
+            signal_weighting=signal_weighting,
+            spoiler_mode=spoiler_mode,
+            checkpoints_s=checkpoints_s,
+            field_strength_t=field_strength_t,
+            nucleus=nucleus,
+            sequence_reference_ppm=sequence_reference_ppm,
+            memory_budget_bytes=memory_budget_bytes,
+            progress_callback=progress_callback,
+            preview_callback=preview_callback,
+            cancel_callback=cancel_callback,
+            status_callback=status_callback,
+            reason=reason,
+            checkpoint_dtype=checkpoint_dtype,
+        )
     if checkpoints_s:
         reason = "stored checkpoints currently require the exact CPU path"
         status("Hybrid GPU mode cannot store checkpoints; using the exact CPU path.")
@@ -1210,6 +1262,7 @@ def run_metal_hybrid_sequence(
             checkpoints_s=checkpoints_s,
             field_strength_t=field_strength_t,
             nucleus=nucleus,
+            sequence_reference_ppm=sequence_reference_ppm,
             memory_budget_bytes=memory_budget_bytes,
             progress_callback=progress_callback,
             preview_callback=preview_callback,
@@ -1233,6 +1286,7 @@ def run_metal_hybrid_sequence(
             spoiler_mode=spoiler_mode,
             field_strength_t=field_strength_t,
             nucleus=nucleus,
+            sequence_reference_ppm=sequence_reference_ppm,
             memory_budget_bytes=memory_budget_bytes,
             progress_callback=progress_callback,
             preview_callback=preview_callback,
@@ -1253,6 +1307,7 @@ def run_metal_hybrid_sequence(
             checkpoints_s=(),
             field_strength_t=field_strength_t,
             nucleus=nucleus,
+            sequence_reference_ppm=sequence_reference_ppm,
             memory_budget_bytes=memory_budget_bytes,
             progress_callback=progress_callback,
             preview_callback=preview_callback,

@@ -571,7 +571,16 @@ class PhantomDesign:
         if self.dynamic_enabled:
             if uses_legacy_b0:
                 raise ValueError("dynamic designs require ppm-based B0 maps")
-            target_names = (self.pyruvate_peak_name, self.lactate_peak_name)
+            kinetic_names = (self.pyruvate_peak_name, self.lactate_peak_name)
+            additional_names = []
+            for item in self.shapes:
+                for peak in item.peaks:
+                    if (
+                        peak.name not in kinetic_names
+                        and peak.name not in additional_names
+                    ):
+                        additional_names.append(peak.name)
+            target_names = kinetic_names + tuple(additional_names)
             maps = {name: np.zeros(self.shape, dtype=float) for name in target_names}
             spin_density_maps = {
                 name: np.zeros(self.shape, dtype=float) for name in target_names

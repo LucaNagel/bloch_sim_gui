@@ -106,6 +106,26 @@ def test_signal_line_plot_uses_selected_component(component, expected):
     assert window.signal_plot.plot.call_args.kwargs["name"] == component
 
 
+@pytest.mark.parametrize("time_axis", [None, np.array([]), np.array([0.0])])
+def test_spectrum_data_handles_missing_or_single_sample_time_axis(time_axis):
+    window = MagicMock()
+    window.last_result = {"signal": np.array([3.0 + 4.0j]), "time": time_axis}
+    window.last_time = None
+    window.last_positions = None
+    window.spectrum_view_mode.currentText.return_value = "Mean over positions"
+    window.spectrum_pos_slider.value.return_value = 0
+    window._spectrum_fft_len.side_effect = (
+        lambda n: BlochSimulatorGUI._spectrum_fft_len(window, n)
+    )
+
+    spectrum_data = BlochSimulatorGUI._calculate_spectrum_data(window, time_idx=0)
+
+    assert spectrum_data is not None
+    assert np.array_equal(spectrum_data["time_slice"], np.array([0.0]))
+    assert spectrum_data["freq"].shape == (512,)
+    assert np.all(np.isfinite(spectrum_data["freq"]))
+
+
 def test_gui_instantiation():
     """Smoke test to ensure the main window can be instantiated without crashing."""
     # Ensure a QApplication exists

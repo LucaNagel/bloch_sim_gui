@@ -307,8 +307,12 @@ class ParameterSweepWidget(QWidget):
                     self.parent_gui.freq_center.value()
                 )
             if hasattr(self.parent_gui, "time_step_spin"):
-                constant_params["time_step"] = float(
-                    self.parent_gui.time_step_spin.value() * 1e-6
+                # Keep the exported value in the same explicit unit used by
+                # the rest of the application.  Exporting seconds under the
+                # ambiguous key ``time_step`` also exposed normal binary-float
+                # noise such as 1.9999999999999998e-05 for 20 us.
+                constant_params["time_step_us"] = float(
+                    self.parent_gui.time_step_spin.value()
                 )
 
         except Exception as e:
@@ -418,6 +422,32 @@ class ParameterSweepWidget(QWidget):
                     # Extract metrics from results
                     if step_result_container:
                         result = step_result_container[0]
+                        # Axes are part of the result's meaning in both
+                        # endpoint and time-resolved sweeps.  Persist them so
+                        # analysis notebooks can expose real xarray
+                        # coordinates instead of asking users to reconstruct
+                        # them from range metadata.
+                        if "positions" not in results:
+                            results["positions"] = np.array(
+                                self.parent_gui.last_positions, copy=True
+                            )
+                        if "frequencies" not in results:
+                            results["frequencies"] = np.array(
+                                self.parent_gui.last_frequencies, copy=True
+                            )
+                        if (
+                            "effective_frequencies" not in results
+                            and getattr(
+                                self.parent_gui,
+                                "last_effective_frequencies",
+                                None,
+                            )
+                            is not None
+                        ):
+                            results["effective_frequencies"] = np.array(
+                                self.parent_gui.last_effective_frequencies,
+                                copy=True,
+                            )
                         # Capture time vector if available and relevant
                         if (
                             save_full
@@ -425,18 +455,6 @@ class ParameterSweepWidget(QWidget):
                             and result.get("time") is not None
                         ):
                             results["time"] = result["time"]
-                            # Also capture positions and frequencies for full data exports
-                            if (
-                                "positions" not in results
-                                and result.get("mx") is not None
-                            ):
-                                # result is from SimulationThread, which might have them
-                                # or we get them from main_window
-                                results["positions"] = self.parent_gui.last_positions
-                                results["frequencies"] = (
-                                    self.parent_gui.last_frequencies
-                                )
-
                         for metric in selected_metrics:
                             value = self._extract_metric(metric, result, save_full)
                             results["metrics"][metric].append(value)
@@ -783,6 +801,8 @@ class ParameterSweepWidget(QWidget):
             stacked_arrays["positions"] = results["positions"]
         if "frequencies" in results:
             stacked_arrays["frequencies"] = results["frequencies"]
+        if "effective_frequencies" in results:
+            stacked_arrays["effective_frequencies"] = results["effective_frequencies"]
 
         if stacked_arrays:
             array_path = path.with_name(path.stem + "_arrays.npz")
@@ -810,6 +830,8 @@ class ParameterSweepWidget(QWidget):
             payload["positions"] = results["positions"]
         if "frequencies" in results:
             payload["frequencies"] = results["frequencies"]
+        if "effective_frequencies" in results:
+            payload["effective_frequencies"] = results["effective_frequencies"]
 
         for metric, values in results["metrics"].items():
             payload[metric] = self._stack_metric_values(values)

@@ -1,4 +1,4 @@
-"""Dynamic two-pool hyperpolarized pyruvate/lactate phantoms."""
+"""Dynamic hyperpolarized phantoms with pyruvate/lactate kinetics."""
 
 from __future__ import annotations
 
@@ -259,7 +259,7 @@ class DynamicB0:
 
     offset_curve_hz: TimeCurve
     spatial_scale_map: np.ndarray
-    pool_scale: Tuple[float, float] = (1.0, 1.0)
+    pool_scale: Tuple[float, ...] = (1.0, 1.0)
 
     def validate(self, shape: Tuple[int, int, int]) -> None:
         values = np.asarray(self.spatial_scale_map, dtype=np.float64)
@@ -268,8 +268,8 @@ class DynamicB0:
                 "dynamic B0 scale map must be finite and match phantom shape"
             )
         scales = tuple(float(value) for value in self.pool_scale)
-        if len(scales) != 2 or not np.all(np.isfinite(scales)):
-            raise ValueError("dynamic B0 pool scale requires two finite values")
+        if not scales or not np.all(np.isfinite(scales)):
+            raise ValueError("dynamic B0 pool scale requires finite values")
         self.spatial_scale_map = values
         self.pool_scale = scales
 
@@ -290,11 +290,16 @@ def rasterize_kpl_regions(
 
 @dataclass
 class DynamicSpectralPhantom:
-    """Two-pool hyperpolarized phantom with a voxelwise irreversible kPL map."""
+    """Multipool phantom with irreversible kinetics between the first two pools.
+
+    Pools zero and one are the pyruvate/lactate kinetic pair. Any additional
+    pools are independent spectral components that undergo RF excitation,
+    off-resonance evolution, and T1/T2 relaxation without chemical exchange.
+    """
 
     shape: Tuple[int, int, int]
     fov: Tuple[float, float, float]
-    pools: Tuple[ChemicalSpecies, ChemicalSpecies]
+    pools: Tuple[ChemicalSpecies, ...]
     initial_concentration_maps: Dict[str, np.ndarray]
     kpl_map_s_inv: np.ndarray
     initial_spin_density_maps: Optional[Dict[str, np.ndarray]] = None
@@ -333,9 +338,9 @@ class DynamicSpectralPhantom:
             or min(self.fov) <= 0
         ):
             raise ValueError("dynamic phantom FOV requires three positive values")
-        if len(self.pools) != 2:
-            raise ValueError("the initial dynamic model requires exactly two pools")
-        if len({pool.name for pool in self.pools}) != 2:
+        if len(self.pools) < 2:
+            raise ValueError("the dynamic model requires at least two pools")
+        if len({pool.name for pool in self.pools}) != len(self.pools):
             raise ValueError("dynamic pool names must be unique")
         if self.nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
             raise ValueError(f"unsupported nucleus {self.nucleus!r}")
@@ -417,6 +422,14 @@ class DynamicSpectralPhantom:
             self.pyruvate_inflow.validate(self.shape)
         if self.dynamic_b0 is not None:
             self.dynamic_b0.validate(self.shape)
+            scales = tuple(self.dynamic_b0.pool_scale)
+            if len(scales) == 2 and len(self.pools) > 2:
+                scales += (1.0,) * (len(self.pools) - 2)
+            if len(scales) != len(self.pools):
+                raise ValueError(
+                    "dynamic B0 pool scale must contain one value per pool"
+                )
+            self.dynamic_b0.pool_scale = scales
         self.conversion_start_s = float(self.conversion_start_s)
         if not np.isfinite(self.conversion_start_s):
             raise ValueError("conversion start time must be finite")
@@ -441,7 +454,7 @@ class DynamicSpectralPhantom:
 
     @property
     def n_species(self) -> int:
-        return 2
+        return len(self.pools)
 
     @property
     def species(self):
@@ -471,7 +484,7 @@ class DynamicSpectralPhantom:
     def initial_spin_density(self) -> np.ndarray:
         """Return pool-resolved spin density, or zeros for legacy excess-Mz data."""
         if self.initial_spin_density_maps is None:
-            return np.zeros((2,) + self.shape, dtype=np.float64)
+            return np.zeros((self.n_species,) + self.shape, dtype=np.float64)
         return np.stack(
             [self.initial_spin_density_maps[pool.name] for pool in self.pools]
         )
@@ -628,7 +641,7 @@ class DynamicSpectralPhantom:
         field_strength=None,
         nucleus=None,
     ):
-        """Return the initial two-pool Lorentzian spectrum at one voxel."""
+        """Return the initial multipool Lorentzian spectrum at one voxel."""
         if len(index) != self.ndim:
             raise ValueError("index dimensionality must match dynamic phantom")
         effective_field = (
@@ -747,10 +760,44 @@ class DynamicSpectralPhantom:
 
     @property
     def initial_magnetization(self) -> np.ndarray:
-        result = np.zeros((2,) + self.shape + (3,), dtype=np.float64)
+        result = np.zeros((self.n_species,) + self.shape + (3,), dtype=np.float64)
         for index, pool in enumerate(self.pools):
             result[index, ..., 2] = self.initial_concentration_maps[pool.name]
         return result
+
+    def restore_missing_designed_pools(self) -> "DynamicSpectralPhantom":
+        """Rebuild legacy dynamic phantoms that silently dropped extra peaks."""
+        design_data = self.metadata.get("phantom_design")
+        if not isinstance(design_data, dict) or not design_data.get("dynamic_enabled"):
+            return self
+        designed_names = []
+        for shape in design_data.get("shapes", ()):
+            for peak in shape.get("peaks", ()):
+                name = str(peak.get("name", "")).strip()
+                if name and name not in designed_names:
+                    designed_names.append(name)
+        existing_names = {pool.name for pool in self.pools}
+        missing_names = [name for name in designed_names if name not in existing_names]
+        if not missing_names:
+            return self
+
+        # Import lazily to avoid the module cycle: phantom_design builds this
+        # class, while legacy dynamic files retain their original design there.
+        from .phantom_design import PhantomDesign
+
+        design = PhantomDesign.from_dict(
+            design_data,
+            legacy_field_strength_t=self.field_strength,
+            legacy_nucleus=self.nucleus,
+        )
+        rebuilt = design.build()
+        if not isinstance(rebuilt, DynamicSpectralPhantom):
+            raise ValueError(
+                "stored dynamic phantom design did not rebuild dynamically"
+            )
+        rebuilt.name = self.name
+        rebuilt.metadata["restored_missing_dynamic_pools"] = tuple(missing_names)
+        return rebuilt
 
     def to_xarray(self):
         """Return this dynamic phantom as a coordinate-aware xarray Dataset."""
@@ -879,7 +926,7 @@ class DynamicSpectralPhantom:
             coords=coords,
             attrs={
                 "format": "blochsimulator-dynamic-spectral-phantom-xarray",
-                "version": 3,
+                "version": 4,
                 "name": self.name,
                 "fov_m": np.asarray(self.fov, dtype=np.float64),
                 "field_strength": self.field_strength,
@@ -960,7 +1007,7 @@ class DynamicSpectralPhantom:
                 spatial_scale_map=np.asarray(ds["dynamic_b0_scale_map"]),
                 pool_scale=tuple(dynamic_b0_metadata.get("pool_scale", (1.0, 1.0))),
             )
-        return cls(
+        phantom = cls(
             shape=shape,
             fov=fov,
             pools=tuple(pools),
@@ -1009,12 +1056,13 @@ class DynamicSpectralPhantom:
             coordinate_system=str(ds.attrs.get("coordinate_system", "object_xyz")),
             affine_ijk_to_xyz_m=affine,
         )
+        return phantom.restore_missing_designed_pools()
 
     def save(self, filename) -> Path:
         path = Path(filename)
         header = {
             "format": "blochsimulator-dynamic-spectral-phantom",
-            "version": 3,
+            "version": 4,
             "shape": self.shape,
             "fov": self.fov,
             "field_strength": self.field_strength,
@@ -1055,18 +1103,14 @@ class DynamicSpectralPhantom:
             "coordinate_system": self.coordinate_system,
             "affine_ijk_to_xyz_m": self.affine_ijk_to_xyz_m.tolist(),
         }
-        arrays = {
-            "kpl_map_s_inv": self.kpl_map_s_inv,
-            "initial_0": self.initial_concentration_maps[self.pools[0].name],
-            "initial_1": self.initial_concentration_maps[self.pools[1].name],
-        }
+        arrays = {"kpl_map_s_inv": self.kpl_map_s_inv}
+        for index, pool in enumerate(self.pools):
+            arrays[f"initial_{index}"] = self.initial_concentration_maps[pool.name]
         if self.initial_spin_density_maps is not None:
-            arrays["spin_density_0"] = self.initial_spin_density_maps[
-                self.pools[0].name
-            ]
-            arrays["spin_density_1"] = self.initial_spin_density_maps[
-                self.pools[1].name
-            ]
+            for index, pool in enumerate(self.pools):
+                arrays[f"spin_density_{index}"] = self.initial_spin_density_maps[
+                    pool.name
+                ]
         if self.b0_map is not None:
             arrays["b0_map"] = self.b0_map
         if self.b0_map_ppm is not None:
@@ -1146,20 +1190,20 @@ class DynamicSpectralPhantom:
                 spatial_scale_map=arrays["dynamic_b0_scale_map"],
                 pool_scale=tuple(dynamic_b0_metadata.get("pool_scale", (1.0, 1.0))),
             )
-        return cls(
+        phantom = cls(
             shape=tuple(header["shape"]),
             fov=tuple(header["fov"]),
             pools=pools,
             initial_concentration_maps={
-                pools[0].name: arrays["initial_0"],
-                pools[1].name: arrays["initial_1"],
+                pool.name: arrays[f"initial_{index}"]
+                for index, pool in enumerate(pools)
             },
             initial_spin_density_maps=(
                 None
                 if "spin_density_0" not in arrays
                 else {
-                    pools[0].name: arrays["spin_density_0"],
-                    pools[1].name: arrays["spin_density_1"],
+                    pool.name: arrays[f"spin_density_{index}"]
+                    for index, pool in enumerate(pools)
                 }
             ),
             equilibrium_polarization=float(header.get("equilibrium_polarization", 0.0)),
@@ -1187,6 +1231,7 @@ class DynamicSpectralPhantom:
             coordinate_system=header.get("coordinate_system", "object_xyz"),
             affine_ijk_to_xyz_m=header.get("affine_ijk_to_xyz_m"),
         )
+        return phantom.restore_missing_designed_pools()
 
 
 def _decay_convolution(rate, duration):
@@ -1330,6 +1375,7 @@ def _longitudinal_step(
     concentration_prepared=None,
     concentration_scratch=None,
     equilibrium_polarization=0.0,
+    passive_r1=None,
 ):
     """Advance total Mz, optionally relaxing polarization toward equilibrium.
 
@@ -1350,6 +1396,9 @@ def _longitudinal_step(
             prepared,
             scratch,
         )
+        if state.shape[0] > 2:
+            rates = np.asarray(passive_r1, dtype=state.dtype).reshape(-1, 1)
+            state[2:, :, 2] *= np.exp(-rates * duration)
         return
     equilibrium = float(equilibrium_polarization)
     if equilibrium != 0.0:
@@ -1381,6 +1430,9 @@ def _longitudinal_step(
         prepared,
         scratch,
     )
+    if state.shape[0] > 2:
+        rates = np.asarray(passive_r1, dtype=state.dtype).reshape(-1, 1)
+        state[2:, :, 2] *= np.exp(-rates * duration)
     _zero_target_longitudinal_step(
         concentration_state,
         kpl,
@@ -1554,6 +1606,7 @@ def _advance_longitudinal_kinetics(
             concentration_source_start=concentration_source_start,
             concentration_source_end=concentration_source_end,
             equilibrium_polarization=equilibrium_polarization,
+            passive_r1=r1[2:],
         )
 
 
@@ -1688,7 +1741,7 @@ def _free_step(
 ):
     if duration == 0:
         return
-    for pool in range(2):
+    for pool in range(state.shape[0]):
         transverse = (
             state[pool, :, 0] + 1j * state[pool, :, 1]
             if transverse_state is None
@@ -1719,14 +1772,15 @@ def _free_step(
         concentration_prepared=concentration_longitudinal_prepared,
         concentration_scratch=concentration_longitudinal_scratch,
         equilibrium_polarization=equilibrium_polarization,
+        passive_r1=r1[2:],
     )
 
 
 def _prepare_transverse_factors(phase_cycles, t2, duration):
-    """Evaluate the two state-independent transverse factors once."""
+    """Evaluate the state-independent transverse factors once."""
     return tuple(
         np.exp(-duration / t2[pool] - 2j * np.pi * phase_cycles[pool])
-        for pool in range(2)
+        for pool in range(len(t2))
     )
 
 
@@ -1776,7 +1830,7 @@ def _rf_rotate_float32(state, prepared):
     if prepared is None:
         return
     axis_x, axis_y, cosine, sine, one_minus_cosine = prepared
-    for pool in range(2):
+    for pool in range(state.shape[0]):
         vectors = state[pool]
         value_x = vectors[:, 0]
         value_y = vectors[:, 1]
@@ -1796,7 +1850,7 @@ def _rf_rotate(state, rf_hz, duration):
         return
     axis_x, axis_y, cosine, sine, one_minus_cosine = prepared
     axis = np.asarray([axis_x, axis_y, 0.0])
-    for pool in range(2):
+    for pool in range(state.shape[0]):
         vectors = state[pool]
         cross = np.cross(np.broadcast_to(axis, vectors.shape), vectors)
         projection = vectors @ axis
@@ -1819,7 +1873,7 @@ def _rf_rotate_spatial(state, rf_hz, tx_sensitivity, duration):
     axis_y = np.where(nonzero, ny / safe_angle, 0.0).astype(state.dtype, copy=False)
     cosine = np.cos(angle).astype(state.dtype, copy=False)
     sine = np.sin(angle).astype(state.dtype, copy=False)
-    for pool in range(2):
+    for pool in range(state.shape[0]):
         vectors = state[pool]
         value_x = vectors[:, 0].copy()
         value_y = vectors[:, 1].copy()
@@ -1856,7 +1910,7 @@ def simulate_dynamic_sequence(
     checkpoint_dtype=None,
     **_ignored,
 ):
-    """Run the complete sequence on a regional two-pool dynamic phantom.
+    """Run the complete sequence on a regional dynamic spectral phantom.
 
     Ideal spoiling always uses one spin per voxel; subvoxel sampling is active
     only for gradient-waveform spoiling.
@@ -1943,6 +1997,14 @@ def simulate_dynamic_sequence(
     native_concentration_inflow_step = None
     native_rf_concentration_block = None
     native_rf_rotation_block = None
+    if phantom.n_species != 2 and sequence_kernel in {
+        "native_serial",
+        "native_parallel",
+    }:
+        native_fallback_reason = (
+            "native dynamic kernels currently support only the pyruvate/lactate pair"
+        )
+        sequence_kernel = "optimized"
     if sequence_kernel in {"native_serial", "native_parallel"}:
         try:
             from .dynamic_bloch_cy import (
@@ -2013,14 +2075,16 @@ def simulate_dynamic_sequence(
     )
     if sampling.enabled and memory_budget_bytes is not None:
         # Dynamic state is retained for the complete active object rather than
-        # streamed in voxel chunks. Include both pools, sparse checkpoints and
+        # streamed in voxel chunks. Include all pools, sparse checkpoints and
         # the principal coefficient/position arrays in a conservative estimate.
         checkpoint_count = int(compiled.checkpoint_times_s.size)
         estimated_bytes = n_simulated_spins * (
-            160 + checkpoint_count * 2 * 3 * checkpoint_dtype.itemsize
+            160 + checkpoint_count * phantom.n_species * 3 * checkpoint_dtype.itemsize
         )
         if phantom.initial_spin_density_maps is not None:
-            estimated_bytes += n_simulated_spins * 2 * 3 * real_dtype.itemsize
+            estimated_bytes += (
+                n_simulated_spins * phantom.n_species * 3 * real_dtype.itemsize
+            )
         if estimated_bytes > int(memory_budget_bytes):
             raise MemoryError(
                 "Memory limit exceeded: dynamic subvoxel simulation needs "
@@ -2030,7 +2094,7 @@ def simulate_dynamic_sequence(
             )
     state = (
         np.asarray(phantom.initial_magnetization, dtype=real_dtype)
-        .reshape(2, phantom.nvoxels, 3)[:, active]
+        .reshape(phantom.n_species, phantom.nvoxels, 3)[:, active]
         .copy()
     )
     if sampling.enabled:
@@ -2039,7 +2103,7 @@ def simulate_dynamic_sequence(
     if phantom.initial_spin_density_maps is not None:
         initial_spin_density = np.asarray(
             phantom.initial_spin_density, dtype=real_dtype
-        ).reshape(2, phantom.nvoxels)[:, active]
+        ).reshape(phantom.n_species, phantom.nvoxels)[:, active]
         if sampling.enabled:
             initial_spin_density = np.repeat(
                 initial_spin_density, spins_per_voxel, axis=1
@@ -2179,9 +2243,9 @@ def simulate_dynamic_sequence(
             phantom.dynamic_b0.pool_scale, dtype=np.float64
         )[:, None]
     species_signal_shape = (
-        (2, compiled.adc_times_s.size)
+        (phantom.n_species, compiled.adc_times_s.size)
         if n_rx_coils == 1
-        else (2, n_rx_coils, compiled.adc_times_s.size)
+        else (phantom.n_species, n_rx_coils, compiled.adc_times_s.size)
     )
     species_signal = np.zeros(species_signal_shape, dtype=complex_dtype)
     if signal_weighting not in {"voxel", "voxel_volume"}:
@@ -2190,7 +2254,12 @@ def simulate_dynamic_sequence(
         phantom.voxel_volume_m3 if signal_weighting == "voxel_volume" else 1.0
     )
     checkpoint_states = np.zeros(
-        (compiled.checkpoint_times_s.size, 2, n_simulated_spins, 3),
+        (
+            compiled.checkpoint_times_s.size,
+            phantom.n_species,
+            n_simulated_spins,
+            3,
+        ),
         dtype=checkpoint_dtype,
     )
     gradient_hz_per_m = compiled.gradient_hz_per_m
@@ -2228,7 +2297,7 @@ def simulate_dynamic_sequence(
             and compiled.adc_state_indices[adc_cursor] == state_index
         ):
             demodulation = adc_demodulation[adc_cursor]
-            for pool in range(2):
+            for pool in range(phantom.n_species):
                 transverse = (
                     state[pool, :, 0] + 1j * state[pool, :, 1]
                     if transverse_state is None
@@ -3061,7 +3130,7 @@ def simulate_dynamic_sequence(
                     source_start = concentration_start * real_type(polarization_start)
                     source_mid = concentration_mid * real_type(polarization_mid)
             if native_concentration_inflow_step is not None:
-                for pool in range(2):
+                for pool in range(phantom.n_species):
                     transverse_state[pool] *= first_transverse_factors[pool]
                 native_concentration_inflow_step(
                     state,
@@ -3117,7 +3186,7 @@ def simulate_dynamic_sequence(
                     equilibrium_polarization=phantom.equilibrium_polarization,
                 )
             else:
-                for pool in range(2):
+                for pool in range(phantom.n_species):
                     transverse_state[pool] *= first_transverse_factors[pool]
                 if not longitudinal_preapplied:
                     native_longitudinal_step(
@@ -3184,7 +3253,7 @@ def simulate_dynamic_sequence(
                     source_mid = concentration_mid * real_type(polarization_mid)
                     source_end = concentration_end * real_type(polarization_end)
             if native_concentration_inflow_step is not None:
-                for pool in range(2):
+                for pool in range(phantom.n_species):
                     transverse_state[pool] *= second_transverse_factors[pool]
                 native_concentration_inflow_step(
                     state,
@@ -3240,7 +3309,7 @@ def simulate_dynamic_sequence(
                     equilibrium_polarization=phantom.equilibrium_polarization,
                 )
             else:
-                for pool in range(2):
+                for pool in range(phantom.n_species):
                     transverse_state[pool] *= second_transverse_factors[pool]
                 if not longitudinal_preapplied:
                     native_longitudinal_step(
@@ -3273,12 +3342,12 @@ def simulate_dynamic_sequence(
         state = np.einsum(
             "s,uvsd->uvd",
             subvoxel_weights,
-            state.reshape(2, parent_active_count, spins_per_voxel, 3),
+            state.reshape(phantom.n_species, parent_active_count, spins_per_voxel, 3),
             optimize=True,
         )
-    final_pool = np.zeros((2, phantom.nvoxels, 3), dtype=real_dtype)
+    final_pool = np.zeros((phantom.n_species, phantom.nvoxels, 3), dtype=real_dtype)
     final_pool[:, active] = state
-    final_pool = final_pool.reshape((2,) + phantom.shape + (3,))
+    final_pool = final_pool.reshape((phantom.n_species,) + phantom.shape + (3,))
     checkpoint_pool = None
     if checkpoint_states.size:
         if sampling.enabled:
@@ -3287,7 +3356,7 @@ def simulate_dynamic_sequence(
                 subvoxel_weights,
                 checkpoint_states.reshape(
                     compiled.checkpoint_times_s.size,
-                    2,
+                    phantom.n_species,
                     parent_active_count,
                     spins_per_voxel,
                     3,
@@ -3295,12 +3364,17 @@ def simulate_dynamic_sequence(
                 optimize=True,
             )
         checkpoint_pool = np.zeros(
-            (compiled.checkpoint_times_s.size, 2, phantom.nvoxels, 3),
+            (
+                compiled.checkpoint_times_s.size,
+                phantom.n_species,
+                phantom.nvoxels,
+                3,
+            ),
             dtype=checkpoint_dtype,
         )
         checkpoint_pool[:, :, active] = checkpoint_states
         checkpoint_pool = checkpoint_pool.reshape(
-            (compiled.checkpoint_times_s.size, 2) + phantom.shape + (3,)
+            (compiled.checkpoint_times_s.size, phantom.n_species) + phantom.shape + (3,)
         )
     dimensions = AcquisitionDimensions.from_program(program)
     spectroscopic_metadata = program.metadata.get("spectroscopic_acquisition")

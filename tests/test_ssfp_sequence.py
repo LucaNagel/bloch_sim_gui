@@ -167,6 +167,38 @@ def test_ssfp_block_pulse_duration():
     ), f"Expected {n_expected} points for block pulse, got {non_zero_count}."
 
 
+@pytest.mark.parametrize("tr_ms", [8.7, 10.45])
+def test_ssfp_loop_uses_one_constant_rasterized_tr(tr_ms):
+    """Fractional start/TR samples must not create timing jitter in the loop."""
+    mock_self = MockSequenceDesigner()
+    mock_self.tr_spin.value.return_value = tr_ms
+    mock_self.ssfp_repeats.value.return_value = 300
+    mock_self.parent_gui.rf_designer.duration.value.return_value = 0.1
+    mock_self.ssfp_use_ratios.isChecked.return_value = True
+    mock_self.ssfp_tr_ratio.value.return_value = 0.5
+
+    dt = 20e-6
+    b1, _, _ = SequenceDesigner._build_ssfp(mock_self, None, dt)
+    active = np.abs(b1) > 0.0
+    pulse_starts = np.flatnonzero(active & np.r_[True, ~active[:-1]])
+
+    expected_tr_points = max(1, int(np.rint(tr_ms * 1e-3 / dt)))
+    assert pulse_starts.size == 300
+    assert np.all(np.diff(pulse_starts) == expected_tr_points)
+
+
+def test_ssfp_loop_reports_effective_tr_when_rasterized():
+    mock_self = MockSequenceDesigner()
+    mock_self.tr_spin.value.return_value = 10.45
+    mock_self.parent_gui.rf_designer.duration.value.return_value = 0.1
+
+    SequenceDesigner._build_ssfp(mock_self, None, 20e-6, log_info=True)
+
+    mock_self.parent_gui.log_message.assert_called_once_with(
+        "SSFP TR rasterized from 10.45 ms to 10.44 ms at a 20 us time step."
+    )
+
+
 @pytest.mark.parametrize(
     ("alternate", "expected_phases_deg"),
     (

@@ -782,7 +782,9 @@ class SequenceDesigner(QGroupBox):
         if seq_type == "Inversion Recovery":
             return self._apply_current_rf_carrier(self._build_ir(custom_pulse, dt))
         if seq_type == "SSFP (Loop)":
-            return self._apply_current_rf_carrier(self._build_ssfp(custom_pulse, dt))
+            return self._apply_current_rf_carrier(
+                self._build_ssfp(custom_pulse, dt, log_info=log_info)
+            )
         if seq_type == "Slice Select + Rephase":
             return self._apply_current_rf_carrier(
                 self._build_slice_select_rephase(custom_pulse, dt, log_info=log_info)
@@ -951,7 +953,7 @@ class SequenceDesigner(QGroupBox):
 
         return seq.compile(dt)
 
-    def _build_ssfp(self, custom_pulse, dt):
+    def _build_ssfp(self, custom_pulse, dt, log_info=False):
         """
         Build a simple balanced-SSFP-style pulse train: identical RF pulses every TR,
         with an optional distinct first pulse (amplitude/phase/delay).
@@ -977,6 +979,26 @@ class SequenceDesigner(QGroupBox):
         start_phase_deg = wrap_phase_deg(self.ssfp_start_phase.value())
         alternate = self.ssfp_alternate_phase.isChecked()
 
+        # Quantize the requested timing once.  Rounding every absolute pulse
+        # time independently can turn an otherwise constant TR into a mix of
+        # (N - 1), N and (N + 1) raster intervals because of floating-point
+        # round-off (notably when the start delay lies on a half sample).
+        # A looped steady-state sequence must use one reproducible interval.
+        tr_points = max(1, int(np.rint(tr / dt)))
+        effective_tr = tr_points * dt
+        start_index = max(0, int(np.rint(start_delay / dt)))
+        if (
+            log_info
+            and not np.isclose(effective_tr, tr, rtol=0.0, atol=1e-15)
+            and hasattr(self, "parent_gui")
+            and self.parent_gui
+        ):
+            self.parent_gui.log_message(
+                "SSFP TR rasterized from "
+                f"{tr * 1e3:.6g} ms to {effective_tr * 1e3:.6g} ms "
+                f"at a {dt * 1e6:.6g} us time step."
+            )
+
         # If a custom pulse is provided, resample it onto dt and override the pulse shape.
         custom_b1 = None
         if custom_pulse is not None:
@@ -1001,9 +1023,13 @@ class SequenceDesigner(QGroupBox):
             custom_b1 = real_part + 1j * imag_part
             pulse_dur = wave_duration
 
-        # Determine timeline length
-        total_duration = start_delay + pulse_dur + tr * (n_reps - 1) + 0.5 * tr
-        npoints = int(np.ceil(total_duration / dt)) + 1
+        pulse_points = max(1, int(np.rint(pulse_dur / dt)))
+
+        # Determine timeline length from integer raster indices.  The trailing
+        # half-TR keeps the endpoint sampling convention used by Free Mode.
+        final_pulse_start = start_index + (n_reps - 1) * tr_points
+        tail_points = max(1, int(np.ceil(0.5 * effective_tr / dt)))
+        npoints = final_pulse_start + pulse_points + tail_points + 1
         enforce_sequence_memory(npoints)
         b1 = np.zeros(npoints, dtype=complex)
         gradients = np.zeros((npoints, 3), dtype=float)
@@ -1015,10 +1041,8 @@ class SequenceDesigner(QGroupBox):
                 float(np.max(np.abs(custom_b1))) if np.any(np.abs(custom_b1)) else 1.0
             )
 
-        def _place_pulse(start_s, amp, phase):
-            start_idx = int(np.round(start_s / dt))
-            n_dur = max(1, int(np.round(pulse_dur / dt)))
-            end_idx = min(start_idx + n_dur, npoints)
+        def _place_pulse(start_idx, amp, phase):
+            end_idx = min(start_idx + pulse_points, npoints)
             if custom_b1 is not None:
                 seg = custom_b1
                 seg_len = min(end_idx - start_idx, len(seg))
@@ -1036,21 +1060,20 @@ class SequenceDesigner(QGroupBox):
         # Calculate start amplitude from start flip angle
         start_scale = start_flip / main_flip if main_flip > 0 else 0.5
         start_amp = base_peak * start_scale if base_peak is not None else 0.025
-        _place_pulse(start_delay, start_amp, np.deg2rad(start_phase_deg))
+        _place_pulse(start_index, start_amp, np.deg2rad(start_phase_deg))
 
         # Remaining pulses are a regular phase cycle independent of the distinct
         # startup pulse.  In particular, a 90° startup followed by alternating
         # regular pulses must read 90/180/0/180/0, not 90/270/90/270/90.
         regular_phase_deg = 0.0
         for k in range(1, n_reps):
-            t0 = start_delay + k * tr
             regular_phase_deg = advance_bssfp_phase_deg(
                 regular_phase_deg,
-                elapsed_s=tr,
+                elapsed_s=effective_tr,
                 phase_increment_deg=180.0 if alternate else 0.0,
             )
             _place_pulse(
-                t0,
+                start_index + k * tr_points,
                 base_peak if base_peak is not None else 0.05,
                 np.deg2rad(regular_phase_deg),
             )

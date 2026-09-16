@@ -91,7 +91,7 @@ try:
 except ImportError:
     KSPACE_AVAILABLE = False
 
-from .widgets import CheckableComboBox
+from .widgets import CheckableComboBox, install_spin_box_wheel_guard
 from .threads import SimulationThread
 from .tissue_parameters import TissueParameterWidget
 from .rf_pulse_designer import RFPulseDesigner
@@ -6602,7 +6602,8 @@ class BlochSimulatorGUI(QMainWindow):
             else self.last_result.get("time", None)
         )
 
-        time_arr = np.asarray(time_arr)
+        if time_arr is not None:
+            time_arr = np.asarray(time_arr).reshape(-1)
         sig_arr = np.asarray(signal)
         if sig_arr.ndim == 1:
             sig_arr = sig_arr[:, None, None]
@@ -6613,14 +6614,18 @@ class BlochSimulatorGUI(QMainWindow):
         time_idx = int(max(0, min(time_idx, sig_arr.shape[0] - 1)))
         sig_slice = sig_arr[: time_idx + 1]
 
-        if time_arr is None or len(time_arr) < 2:
-            time_slice = np.arange(sig_slice.shape[0])
+        if time_arr is None or time_arr.size < 2:
+            # A single-point result has no measurable sampling interval.  Use
+            # a neutral fallback so its (DC-only) spectrum can still render.
+            time_slice = np.arange(sig_slice.shape[0], dtype=float)
             dt = 1.0
         else:
             time_slice = time_arr[: time_idx + 1]
-            if len(time_slice) < 2:
+            if time_slice.size < 2:
                 return None
-        dt = time_slice[1] - time_slice[0]  # seconds per sample
+            dt = float(time_slice[1] - time_slice[0])  # seconds per sample
+            if not np.isfinite(dt) or dt == 0.0:
+                return None
 
         spectrum_mode = (
             self.spectrum_view_mode.currentText()
@@ -8818,6 +8823,7 @@ def main():
     # Qt requires this attribute to be enabled before QApplication is created.
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
+    install_spin_box_wheel_guard(app)
 
     system_style_name = _remember_system_style(app)
     settings = QSettings("BlochSimulator", "BlochSimulator")

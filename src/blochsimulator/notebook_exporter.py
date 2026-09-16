@@ -596,6 +596,9 @@ class NotebookExporter:
         load_code += "file_path = Path(filename)\n\n"
         load_code += "constant_params = {}\n"
         load_code += "time_vector = None\n\n"
+        load_code += "position_vector = None\n"
+        load_code += "frequency_vector = None\n"
+        load_code += "effective_frequency_vector = None\n\n"
 
         load_code += "if file_path.suffix == '.npz':\n"
         load_code += "    data = np.load(file_path, allow_pickle=True)\n"
@@ -611,8 +614,17 @@ class NotebookExporter:
         load_code += "            pass\n"
         load_code += "    if 'time' in data:\n"
         load_code += "        time_vector = data['time']\n"
+        load_code += "    if 'positions' in data:\n"
+        load_code += "        position_vector = data['positions']\n"
+        load_code += "    if 'frequencies' in data:\n"
+        load_code += "        frequency_vector = data['frequencies']\n"
+        load_code += "    if 'effective_frequencies' in data:\n"
+        load_code += (
+            "        effective_frequency_vector = data['effective_frequencies']\n"
+        )
         load_code += "    # Load metrics into a dictionary\n"
-        load_code += "    results = {k: data[k] for k in data.files if k not in ['parameter_values', 'parameter_name', 'constant_params', 'time']}\n"
+        load_code += "    coordinate_keys = ['parameter_values', 'parameter_name', 'constant_params', 'time', 'positions', 'frequencies', 'effective_frequencies']\n"
+        load_code += "    results = {k: data[k] for k in data.files if k not in coordinate_keys}\n"
         load_code += "elif file_path.suffix == '.csv':\n"
         load_code += "    # Load CSV using numpy (ignoring header row)\n"
         load_code += "    with open(file_path, 'r') as f:\n"
@@ -656,6 +668,12 @@ class NotebookExporter:
         load_code += "        arrays = np.load(array_path, allow_pickle=True)\n"
         load_code += "        if 'time' in arrays:\n"
         load_code += "             time_vector = arrays['time']\n"
+        load_code += "        if 'positions' in arrays:\n"
+        load_code += "             position_vector = arrays['positions']\n"
+        load_code += "        if 'frequencies' in arrays:\n"
+        load_code += "             frequency_vector = arrays['frequencies']\n"
+        load_code += "        if 'effective_frequencies' in arrays:\n"
+        load_code += "             effective_frequency_vector = arrays['effective_frequencies']\n"
         load_code += (
             "        # Load constant params from sidecar if not in CSV header\n"
         )
@@ -666,10 +684,15 @@ class NotebookExporter:
         load_code += "                constant_params = json.loads(str(val))\n"
         load_code += "            except: pass\n"
         load_code += "        for k in arrays.files:\n"
-        load_code += "            if k not in ['parameter_name', 'parameter_values', 'constant_params', 'time']:\n"
+        load_code += "            if k not in ['parameter_name', 'parameter_values', 'constant_params', 'time', 'positions', 'frequencies', 'effective_frequencies']:\n"
         load_code += "                results[k] = arrays[k]\n"
         load_code += "else:\n"
         load_code += "    raise ValueError('Unsupported file format')\n\n"
+        load_code += (
+            "# Normalize legacy sweep metadata to an explicit, readable unit.\n"
+        )
+        load_code += "if 'time_step_us' not in constant_params and 'time_step' in constant_params:\n"
+        load_code += "    constant_params['time_step_us'] = round(float(constant_params.pop('time_step')) * 1e6, 12)\n\n"
         load_code += "print(f'Loaded sweep data for parameter: {param_name}')\n"
         load_code += "print(f'Steps: {len(param_values)}')\n"
         load_code += "print(f'Metrics: {list(results.keys())}')"
@@ -684,10 +707,47 @@ coords = {{param_name: param_values}}
 if time_vector is not None:
     coords['time'] = time_vector
 
-# Extract spatial/frequency info from constant params
-n_pos = constant_params.get('num_positions', 1)
-n_freq = constant_params.get('num_frequencies', 1)
+# Prefer the exact sampled axes saved with the sweep.  Legacy sweep files can
+# still reconstruct the frequency axis from their metadata.
+n_pos = int(constant_params.get('num_positions', 1))
+n_freq = int(constant_params.get('num_frequencies', 1))
 n_time = len(time_vector) if time_vector is not None else 0
+if frequency_vector is None and n_freq > 0:
+    frequency_center_hz = float(constant_params.get('frequency_center_hz', 0.0))
+    frequency_range_hz = float(constant_params.get('frequency_range_hz', 0.0))
+    if n_freq == 1:
+        frequency_vector = np.array([frequency_center_hz])
+    else:
+        frequency_vector = np.linspace(
+            frequency_center_hz - frequency_range_hz / 2.0,
+            frequency_center_hz + frequency_range_hz / 2.0,
+            n_freq,
+        )
+
+if position_vector is not None:
+    position_vector = np.asarray(position_vector)
+    n_pos = len(position_vector)
+    coords['position'] = np.arange(n_pos)
+    if position_vector.ndim == 2 and position_vector.shape[1] == 3:
+        coords['position_x'] = ('position', position_vector[:, 0])
+        coords['position_y'] = ('position', position_vector[:, 1])
+        coords['position_z'] = ('position', position_vector[:, 2])
+    elif position_vector.ndim == 1:
+        coords['position_value'] = ('position', position_vector)
+
+if frequency_vector is not None:
+    frequency_vector = np.asarray(frequency_vector).reshape(-1)
+    n_freq = len(frequency_vector)
+    coords['frequency'] = frequency_vector
+if effective_frequency_vector is not None:
+    effective_frequency_vector = np.asarray(effective_frequency_vector).reshape(-1)
+    if len(effective_frequency_vector) == n_freq:
+        coords['effective_frequency'] = ('frequency', effective_frequency_vector)
+
+dimension_lengths = []
+if n_time > 0:
+    dimension_lengths.append(('time', n_time))
+dimension_lengths.extend([('position', n_pos), ('frequency', n_freq)])
 
 for k, v in results.items():
     if np.ndim(v) == 1 and len(v) == len(param_values):
@@ -697,26 +757,23 @@ for k, v in results.items():
         # Dynamic/Multi-dim metric: (param_steps, ...)
         dims = [param_name]
         remaining_shape = v.shape[1:]
+        used_dimensions = set()
 
-        # Try to intelligently name dimensions
+        # Match each result axis once, preserving the simulator's standard
+        # time -> position -> frequency order even when lengths coincide.
         for i, dim_len in enumerate(remaining_shape):
-            if n_time > 0 and dim_len == n_time:
-                dims.append('time')
-            elif n_pos > 1 and dim_len == n_pos:
-                dims.append('position')
-            elif n_freq > 1 and dim_len == n_freq:
-                dims.append('frequency')
-            else:
+            matched = next(
+                (
+                    name for name, length in dimension_lengths
+                    if name not in used_dimensions and dim_len == length
+                ),
+                None,
+            )
+            if matched is None:
                 dims.append(f'dim_{{i+1}}')
-
-        # Handle duplicate dimension names (if any)
-        seen = {{}}
-        for i, d in enumerate(dims):
-            if d in seen:
-                seen[d] += 1
-                dims[i] = f"{{d}}_{{seen[d]}}"
             else:
-                seen[d] = 0
+                dims.append(matched)
+                used_dimensions.add(matched)
 
         data_vars[k] = (dims, v)
 

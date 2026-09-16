@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from dataclasses import replace
 from PyQt5.QtWidgets import QApplication, QLabel
 from unittest.mock import MagicMock
 
@@ -364,6 +365,7 @@ def test_private_metal_probe_chunks_outputs_and_retains_only_requested_spins(
         },
     )
     calls = []
+    physical_constants = []
 
     def fake_run_probe(
         _source,
@@ -374,10 +376,11 @@ def test_private_metal_probe_chunks_outputs_and_retains_only_requested_spins(
         initial,
         _spatial,
         _kinetic,
-        _constants,
+        constants,
         _precision_mode,
     ):
         calls.append(initial.shape[0])
+        physical_constants.append(np.array(constants, copy=True))
         return {
             "final_pool_state": np.array(initial, copy=True),
             "per_spin_species_signal": np.zeros(
@@ -396,6 +399,7 @@ def test_private_metal_probe_chunks_outputs_and_retains_only_requested_spins(
         raising=False,
     )
     phantom = _dynamic_phantom()
+    phantom.spectral_reference_ppm = 171.0
     program = SequenceProgram(
         (ADCEvent(0.0, 2, 5e-4),),
         duration_s=1e-3,
@@ -410,6 +414,7 @@ def test_private_metal_probe_chunks_outputs_and_retains_only_requested_spins(
         spin_chunk_size=2,
         capture_spin_indices=(0, 3),
         capture_spin_groups=((0, 2), (1, 3)),
+        sequence_reference_ppm=183.35,
     )
 
     assert calls == [2, 2]
@@ -422,6 +427,11 @@ def test_private_metal_probe_chunks_outputs_and_retains_only_requested_spins(
         2,
         2,
     ) + phantom.shape + (3,)
+    for constants in physical_constants:
+        assert constants[:2] == pytest.approx(
+            ppm_to_hz(np.asarray([-12.35, -0.35]), 3.0, "C13")
+        )
+    assert result["metadata"]["sequence_reference_ppm"] == pytest.approx(183.35)
 
 
 def test_hybrid_probe_returns_float64_fallback_when_held_out_sample_fails(
@@ -596,6 +606,31 @@ def test_hybrid_sequence_uses_exact_cpu_when_gpu_is_unavailable(monkeypatch):
     assert result.metadata["actual_backend"] == "cpu_float64_fallback"
     assert result.metadata["hybrid_fallback_used"] is True
     assert "Metal unavailable for test" in result.metadata["hybrid_fallback_reason"]
+
+
+def test_hybrid_cpu_fallback_preserves_sequence_reference(monkeypatch):
+    phantom = _dynamic_phantom()
+    phantom.field_strength = 7.0
+    phantom.spectral_reference_ppm = 171.0
+    program = SequenceProgram((ADCEvent(0.0, 1, 1e-4),), duration_s=1e-4)
+    monkeypatch.setattr(
+        metal_backend_module,
+        "run_metal_hybrid_probe",
+        MagicMock(side_effect=RuntimeError("force exact fallback")),
+    )
+
+    result = run_metal_hybrid_sequence(
+        program,
+        phantom,
+        simulation_timestep_s=1e-4,
+        sequence_reference_ppm=171.0,
+    )
+
+    assert result.metadata["actual_backend"] == "cpu_float64_fallback"
+    assert result.metadata["sequence_reference_ppm"] == pytest.approx(171.0)
+    assert result.metadata["pool_frequency_offsets_hz"] == pytest.approx(
+        (0.0, ppm_to_hz(12.0, 7.0, "C13"))
+    )
 
 
 def test_kinetic_regions_rasterize_with_later_region_priority():
@@ -1834,6 +1869,143 @@ def test_phantom_design_builds_dynamic_pool_maps_and_kpl_regions():
     assert phantom.nucleus == "C13"
     assert np.array_equal(phantom.kpl_map_s_inv[:, 0, 0], [0.0, 0.0, 0.08, 0.08])
     assert PhantomDesign.from_phantom(phantom).dynamic_enabled
+
+
+def test_dynamic_design_includes_and_simulates_additional_alanine_pool(tmp_path):
+    shape = (2, 1, 1)
+    design = PhantomDesign(
+        shape=shape,
+        fov_m=(0.02, 0.01, 0.01),
+        dynamic_enabled=True,
+        supersampling_enabled=False,
+        shapes=[
+            ShapeDefinition(
+                "Kinetic pools",
+                kind="box",
+                center=(0.25, 0.5, 0.5),
+                size=(0.5, 1.0, 1.0),
+                peaks=[
+                    SpectralPeakDefinition("Pyruvate", 1.0, 0.0, 1.0, t1_s=30.0),
+                    SpectralPeakDefinition("Lactate", 0.0, 12.0, 1.0, t1_s=25.0),
+                ],
+            ),
+            ShapeDefinition(
+                "Alanine shape",
+                kind="box",
+                center=(0.75, 0.5, 0.5),
+                size=(0.5, 1.0, 1.0),
+                peaks=[
+                    SpectralPeakDefinition(
+                        "Alanine",
+                        2.0,
+                        5.0,
+                        1.0,
+                        t1_s=10.0,
+                        initial_polarization=3.0,
+                    )
+                ],
+            ),
+        ],
+    )
+
+    phantom = design.build()
+    assert [pool.name for pool in phantom.pools] == [
+        "Pyruvate",
+        "Lactate",
+        "Alanine",
+    ]
+    assert phantom.n_species == 3
+    assert phantom.initial_concentration_maps["Alanine"][:, 0, 0] == pytest.approx(
+        [0.0, 6.0]
+    )
+    assert phantom.initial_spin_density_maps["Alanine"][:, 0, 0] == pytest.approx(
+        [0.0, 2.0]
+    )
+
+    duration_s = 0.2
+    result = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        SequenceProgram((), duration_s=duration_s),
+        phantom,
+        simulation_timestep_s=duration_s,
+    )
+    assert result.final_pool_magnetization.shape == (3,) + shape + (3,)
+    assert result.final_pool_magnetization[2, 1, 0, 0, 2] == pytest.approx(
+        2.0 + 4.0 * np.exp(-duration_s / 10.0)
+    )
+
+    loaded = DynamicSpectralPhantom.load(phantom.save(tmp_path / "alanine.npz"))
+    assert [pool.name for pool in loaded.pools] == [
+        "Pyruvate",
+        "Lactate",
+        "Alanine",
+    ]
+    assert np.array_equal(
+        loaded.initial_concentration_maps["Alanine"],
+        phantom.initial_concentration_maps["Alanine"],
+    )
+
+    legacy = replace(
+        phantom,
+        pools=phantom.pools[:2],
+        initial_concentration_maps={
+            pool.name: phantom.initial_concentration_maps[pool.name]
+            for pool in phantom.pools[:2]
+        },
+        initial_spin_density_maps={
+            pool.name: phantom.initial_spin_density_maps[pool.name]
+            for pool in phantom.pools[:2]
+        },
+    )
+    restored_legacy = DynamicSpectralPhantom.load(
+        legacy.save(tmp_path / "legacy_without_alanine.npz")
+    )
+    assert [pool.name for pool in restored_legacy.pools] == [
+        "Pyruvate",
+        "Lactate",
+        "Alanine",
+    ]
+    assert restored_legacy.metadata["restored_missing_dynamic_pools"] == ("Alanine",)
+
+
+def test_multipool_dynamic_rf_sequence_returns_alanine_signal():
+    phantom = DynamicSpectralPhantom(
+        shape=(1, 1, 1),
+        fov=(0.01, 0.01, 0.01),
+        pools=(
+            ChemicalSpecies("Pyruvate", 0.0, 30.0, 1.0),
+            ChemicalSpecies("Lactate", 12.0, 25.0, 1.0),
+            ChemicalSpecies("Alanine", 0.0, 10.0, 1.0),
+        ),
+        initial_concentration_maps={
+            "Pyruvate": np.ones((1, 1, 1)),
+            "Lactate": np.zeros((1, 1, 1)),
+            "Alanine": np.full((1, 1, 1), 2.0),
+        },
+        kpl_map_s_inv=np.zeros((1, 1, 1)),
+        nucleus="C13",
+    )
+    program = SequenceProgram(
+        (
+            RFEvent(0.0, np.asarray([250.0]), 1e-3),
+            ADCEvent(1e-3, 1, 1e-4),
+        ),
+        duration_s=1.1e-3,
+    )
+
+    result = BlochSimulator(
+        use_parallel=False,
+        dynamic_sequence_kernel="metal_hybrid",
+    ).simulate_dynamic_sequence(
+        program,
+        phantom,
+        simulation_timestep_s=1e-4,
+    )
+
+    assert result.species_signal.shape == (3, 1)
+    assert abs(result.species_signal[2, 0]) > 1.9
+    assert result.signal == pytest.approx(result.species_signal.sum(axis=0))
+    assert result.metadata["actual_backend"] == "cpu_float64_fallback"
+    assert "exactly two pools" in result.metadata["hybrid_fallback_reason"]
 
 
 def test_phantom_design_rasterizes_kpl_per_shape_before_spatial_overrides():
