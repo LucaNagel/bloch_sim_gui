@@ -17,7 +17,7 @@ copyright = "2025, Luca Nagel"
 author = "Luca Nagel"
 
 # The full version, including alpha/beta/rc tags
-release = "2.6.4"
+release = "2.6.5"
 
 
 # -- General configuration ---------------------------------------------------
