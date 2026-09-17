@@ -1379,6 +1379,70 @@ def test_missing_phantom_dialog_links_to_the_phantom_tab(monkeypatch):
     app.processEvents()
 
 
+def test_loaded_pulseq_warning_links_to_prefilled_simulation_settings(monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    opened = []
+    monkeypatch.setattr(
+        widget,
+        "loaded_pulseq_spoiler_recommendation",
+        lambda: {
+            "sampling_method": "midpoint",
+            "counts_xyz": (2, 3, 11),
+        },
+    )
+    monkeypatch.setattr(
+        widget, "_show_simulation_settings", lambda: opened.append(True)
+    )
+    monkeypatch.setattr(QMessageBox, "open", lambda _dialog: None)
+
+    widget._display_pulseq_spoiler_warning()
+
+    dialog = widget._pulseq_spoiler_warning_dialog
+    assert "Gradient waveform" in dialog.text()
+    assert "2&times;3&times;11" in dialog.text()
+    link_label = next(
+        label
+        for label in dialog.findChildren(QLabel)
+        if "Open Simulation Settings" in label.text()
+    )
+    link_label.linkActivated.emit("open-settings")
+    assert opened == [True]
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_loaded_pulseq_settings_use_multispin_fallback_without_train_analysis():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(widget.PULSEQ_SOURCE)
+    widget.program = SequenceProgram(events=(), duration_s=0.0, source="custom.seq")
+
+    recommendation = widget.loaded_pulseq_spoiler_recommendation()
+
+    assert recommendation["spoiler_mode"] == "gradient"
+    assert recommendation["sampling_method"] == "stratified"
+    assert recommendation["counts_xyz"] == (2, 2, 2)
+    assert recommendation["counts_are_fallback"]
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_successful_background_pulseq_load_displays_spoiler_warning():
+    widget = MagicMock()
+    payload = object()
+
+    SequenceSimulationWidget._pulseq_load_finished(widget, payload, "custom.seq")
+
+    widget._apply_loaded_pulseq.assert_called_once_with(payload, "custom.seq")
+    widget._reset_pulseq_load_controls.assert_called_once_with("Pulseq loaded")
+    widget._display_pulseq_spoiler_warning.assert_called_once_with()
+
+
 def test_flash_auto_spoiler_tracks_phantom_geometry_and_subvoxel_grid(monkeypatch):
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
@@ -2070,6 +2134,10 @@ def test_sequence_workspace_infers_imported_epi_and_syncs_fov(tmp_path, monkeypa
     assert widget.fov_z_mm.suffix() == " mm"
     assert widget.fov_mm.value() == pytest.approx(220.0)
     assert widget.fov_z_mm.value() == pytest.approx(4.0)
+    spoiler_recommendation = widget.loaded_pulseq_spoiler_recommendation()
+    assert spoiler_recommendation["spoiler_mode"] == "gradient"
+    assert spoiler_recommendation["sampling_method"] == "midpoint"
+    assert spoiler_recommendation["counts_xyz"] == (2, 2, 2)
 
     widget._build_phantom()
     result = widget.simulator.simulate_sequence(widget.program, widget.phantom)

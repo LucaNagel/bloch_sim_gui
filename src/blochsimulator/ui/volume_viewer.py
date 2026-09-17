@@ -672,6 +672,22 @@ class PhantomInspectorWidget(QWidget):
             )
         if hasattr(phantom, "kpl_map_s_inv"):
             self.map_combo.addItem("kPL")
+        if hasattr(phantom, "kpa_map_s_inv"):
+            self.map_combo.addItem("kPA")
+        if hasattr(phantom, "anatomy_labels"):
+            self.map_combo.addItem("Anatomy labels")
+        if hasattr(phantom, "ph_map"):
+            self.map_combo.addItem("pH")
+        if hasattr(phantom, "perfusion_arrival_time_s"):
+            self.map_combo.addItem("Perfusion arrival")
+        if hasattr(phantom, "bolus_rate_map"):
+            self.map_combo.addItem("Bolus source")
+        if hasattr(phantom, "injected_concentration_map"):
+            self.map_combo.addItem("Injected concentration")
+        if hasattr(phantom, "displacement_map_m") and getattr(
+            getattr(phantom, "config", None), "breathing_enabled", False
+        ):
+            self.map_combo.addItem("Breathing amplitude")
         self.map_combo.blockSignals(False)
         self._map_changed()
         # Updating the volume normally emits an index change, but an already
@@ -758,6 +774,36 @@ class PhantomInspectorWidget(QWidget):
         elif choice == "kPL":
             data = self.phantom.kpl_map_s_inv
             unit = "s⁻¹"
+        elif choice == "kPA":
+            data = self.phantom.kpa_map_s_inv
+            unit = "s⁻¹"
+        elif choice == "Anatomy labels":
+            data = self.phantom.anatomy_labels
+            unit = "label"
+        elif choice == "pH":
+            data = self.phantom.ph_map
+            unit = "pH"
+        elif choice == "Perfusion arrival":
+            data = np.nan_to_num(
+                self.phantom.perfusion_arrival_time_s,
+                nan=0.0,
+            )
+            unit = "s"
+        elif choice == "Bolus source":
+            data = self.phantom.bolus_rate_map(self.phantom.preview_bolus_time_s)
+            unit = "mol/m³/s"
+        elif choice == "Injected concentration":
+            data = self.phantom.injected_concentration_map(
+                self.phantom.preview_bolus_time_s
+            )
+            unit = "mM"
+        elif choice == "Breathing amplitude":
+            quarter_period = 0.25 / self.phantom.config.breathing_rate_hz
+            data = (
+                np.linalg.norm(self.phantom.displacement_map_m(quarter_period), axis=-1)
+                * 1000.0
+            )
+            unit = "mm"
         elif choice.startswith("Peak: "):
             name = choice[len("Peak: ") :]
             data = self.phantom.concentration_maps[name]

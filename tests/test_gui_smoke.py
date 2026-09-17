@@ -407,6 +407,51 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     ]
 
 
+def test_settings_dialog_prefills_and_labels_loaded_pulseq_recommendations(tmp_path):
+    app = QApplication.instance() or QApplication(sys.argv)
+    recommendation = {
+        "sequence_name": "custom.seq",
+        "spoiler_mode": "gradient",
+        "sampling_method": "midpoint",
+        "counts_xyz": (2, 3, 11),
+        "detail": "Train-wide recommendation for custom.seq.",
+    }
+
+    dialog = SettingsDialog(
+        MemoryPolicy(),
+        tmp_path,
+        tooltips_enabled=True,
+        sequence_spoiler_mode="ideal",
+        subvoxel_spin_counts=(1, 1, 1),
+        subvoxel_sampling_method="stratified",
+        loaded_pulseq_recommendation=recommendation,
+    )
+
+    assert dialog.sequence_spoiler_mode() == "gradient"
+    assert dialog.subvoxel_sampling_method() == "midpoint"
+    assert dialog.subvoxel_spin_counts() == (2, 3, 11)
+    assert dialog.sequence_spoiler_recommendation_label.text() == (
+        "Loaded .seq: Gradient waveform"
+    )
+    assert dialog.subvoxel_sampling_recommendation_label.text() == (
+        "Loaded .seq: Regular midpoint grid"
+    )
+    assert [label.text() for label in dialog.subvoxel_spin_recommendation_labels] == [
+        "Loaded .seq: 2 spins/voxel",
+        "Loaded .seq: 3 spins/voxel",
+        "Loaded .seq: 11 spins/voxel",
+    ]
+    assert all(
+        label.toolTip() == recommendation["detail"]
+        for label in dialog.subvoxel_spin_recommendation_labels
+    )
+    assert all(spin.isEnabled() for spin in dialog.subvoxel_spin_count_spins)
+
+    dialog.close()
+    dialog.deleteLater()
+    app.processEvents()
+
+
 def test_settings_dialog_groups_kernel_extras_and_has_english_tooltips(tmp_path):
     app = QApplication.instance()
     if app is None:

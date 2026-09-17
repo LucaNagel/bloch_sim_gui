@@ -44,6 +44,17 @@ from .dynamic_phantom import (  # noqa: F401
     rasterize_kpl_regions,
     simulate_two_pool_kinetics,
 )
+from .mouse_phantom import (  # noqa: F401
+    INJECTION_COMPOUNDS,
+    MOUSE_TISSUE_LABELS,
+    MousePerfusionConfig,
+    MousePerfusionPhantom,
+    VascularEdge,
+    VascularGraph,
+    VascularNode,
+    build_reference_mouse_anatomy,
+    reference_mouse_vascular_graph,
+)
 from . import pulse_loader  # noqa: F401
 from .sequence import (  # noqa: F401
     ADCEvent,

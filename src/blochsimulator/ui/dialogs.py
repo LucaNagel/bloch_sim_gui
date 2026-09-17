@@ -113,6 +113,22 @@ class SettingsDialog(QDialog):
             combo.addItem(label, kernel)
             combo.setItemData(combo.count() - 1, tooltips[kernel], Qt.ToolTipRole)
 
+    @staticmethod
+    def _recommended_sequence_field(control, hint, object_name):
+        """Place a loaded-sequence recommendation beside one settings control."""
+        container = QWidget()
+        field_layout = QHBoxLayout(container)
+        field_layout.setContentsMargins(0, 0, 0, 0)
+        field_layout.setSpacing(10)
+        field_layout.addWidget(control, 1)
+        recommendation = QLabel(str(hint))
+        recommendation.setObjectName(object_name)
+        recommendation.setWordWrap(True)
+        recommendation.setStyleSheet("color: #0f766e; font-size: 11px;")
+        recommendation.setVisible(bool(hint))
+        field_layout.addWidget(recommendation, 1)
+        return container, recommendation
+
     def __init__(
         self,
         policy: MemoryPolicy,
@@ -128,6 +144,7 @@ class SettingsDialog(QDialog):
         sequence_spoiler_mode: str = "ideal",
         subvoxel_spin_counts=(1, 1, 9),
         subvoxel_sampling_method: str = "midpoint",
+        loaded_pulseq_recommendation: Optional[dict] = None,
         thread_mode: str = "automatic",
         manual_thread_count: int = 4,
         animation_memory_budget_mib: float = 512.0,
@@ -139,6 +156,35 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         scanner_parameters = ScannerParameters.from_mapping(scanner_parameters)
         workspace_defaults = workspace_defaults or WorkspaceDefaults()
+        loaded_pulseq_recommendation = (
+            dict(loaded_pulseq_recommendation)
+            if isinstance(loaded_pulseq_recommendation, dict)
+            else None
+        )
+        if loaded_pulseq_recommendation is not None:
+            sequence_spoiler_mode = "gradient"
+            recommended_method = loaded_pulseq_recommendation.get("sampling_method")
+            if recommended_method in {"midpoint", "stratified"}:
+                subvoxel_sampling_method = recommended_method
+            recommended_counts = loaded_pulseq_recommendation.get("counts_xyz")
+            if (
+                isinstance(recommended_counts, (tuple, list))
+                and len(recommended_counts) == 3
+            ):
+                try:
+                    validated_counts = tuple(int(value) for value in recommended_counts)
+                except (TypeError, ValueError):
+                    validated_counts = ()
+                if len(validated_counts) == 3 and all(
+                    1 <= value <= 128 for value in validated_counts
+                ):
+                    subvoxel_spin_counts = validated_counts
+                    loaded_pulseq_recommendation["counts_xyz"] = validated_counts
+                else:
+                    loaded_pulseq_recommendation["counts_xyz"] = None
+            else:
+                loaded_pulseq_recommendation["counts_xyz"] = None
+        self.loaded_pulseq_recommendation = loaded_pulseq_recommendation
         self.setWindowTitle("Settings")
         self.setMinimumWidth(600)
 
@@ -329,7 +375,18 @@ class SettingsDialog(QDialog):
             "transverse magnetization to zero. Gradient waveform keeps every "
             "subvoxel spin coherent and derives spoiling from the actual gradients."
         )
-        simulation_form.addRow("Spoiler simulation:", self.sequence_spoiler_mode_combo)
+        spoiler_field, self.sequence_spoiler_recommendation_label = (
+            self._recommended_sequence_field(
+                self.sequence_spoiler_mode_combo,
+                (
+                    "Loaded .seq: Gradient waveform"
+                    if loaded_pulseq_recommendation is not None
+                    else ""
+                ),
+                "sequence_spoiler_recommendation",
+            )
+        )
+        simulation_form.addRow("Spoiler simulation:", spoiler_field)
 
         self.subvoxel_sampling_method_combo = QComboBox()
         self.subvoxel_sampling_method_combo.setObjectName("subvoxel_sampling_method")
@@ -345,17 +402,34 @@ class SettingsDialog(QDialog):
             "short exact rephasing, but usually need more spins for the same "
             "quadrature accuracy."
         )
-        simulation_form.addRow(
-            "Subvoxel sampling:", self.subvoxel_sampling_method_combo
+        if loaded_pulseq_recommendation is None:
+            sampling_hint = ""
+        elif loaded_pulseq_recommendation.get("counts_are_fallback", False):
+            sampling_hint = "Loaded .seq fallback: Deterministic stratified points"
+        elif subvoxel_sampling_method == "midpoint":
+            sampling_hint = "Loaded .seq: Regular midpoint grid"
+        else:
+            sampling_hint = "Loaded .seq: Deterministic stratified points"
+        sampling_field, self.subvoxel_sampling_recommendation_label = (
+            self._recommended_sequence_field(
+                self.subvoxel_sampling_method_combo,
+                sampling_hint,
+                "subvoxel_sampling_recommendation",
+            )
         )
-        self.subvoxel_control_labels = [
-            simulation_form.labelForField(self.subvoxel_sampling_method_combo)
-        ]
+        simulation_form.addRow("Subvoxel sampling:", sampling_field)
+        self.subvoxel_control_labels = [simulation_form.labelForField(sampling_field)]
 
         counts = tuple(subvoxel_spin_counts)
         if len(counts) != 3:
             counts = (1, 1, 9)
         self.subvoxel_spin_count_spins = []
+        self.subvoxel_spin_recommendation_labels = []
+        recommendation_counts = (
+            loaded_pulseq_recommendation.get("counts_xyz")
+            if loaded_pulseq_recommendation is not None
+            else None
+        )
         for axis, value in zip("XYZ", counts):
             spin = QSpinBox()
             spin.setObjectName(f"subvoxel_spin_count_{axis.lower()}")
@@ -366,9 +440,42 @@ class SettingsDialog(QDialog):
                 f"Number of deterministic sampling strata along voxel {axis}. "
                 "Runtime grows with the product of all three counts."
             )
-            simulation_form.addRow(f"Subvoxel spins {axis}:", spin)
+            axis_index = "XYZ".index(axis)
+            if recommendation_counts is None:
+                count_hint = (
+                    "Loaded .seq: convergence analysis needed"
+                    if loaded_pulseq_recommendation is not None
+                    else ""
+                )
+            else:
+                recommended_count = int(recommendation_counts[axis_index])
+                if loaded_pulseq_recommendation.get("counts_are_fallback", False):
+                    count_hint = (
+                        f"Loaded .seq start: {recommended_count}; verify convergence"
+                    )
+                else:
+                    count_hint = f"Loaded .seq: {recommended_count} spins/voxel"
+            spin_field, recommendation_label = self._recommended_sequence_field(
+                spin,
+                count_hint,
+                f"subvoxel_spin_{axis.lower()}_recommendation",
+            )
+            simulation_form.addRow(f"Subvoxel spins {axis}:", spin_field)
             self.subvoxel_spin_count_spins.append(spin)
-            self.subvoxel_control_labels.append(simulation_form.labelForField(spin))
+            self.subvoxel_spin_recommendation_labels.append(recommendation_label)
+            self.subvoxel_control_labels.append(
+                simulation_form.labelForField(spin_field)
+            )
+        if loaded_pulseq_recommendation is not None:
+            recommendation_note = str(
+                loaded_pulseq_recommendation.get("detail", "")
+            ).strip()
+            for label in (
+                self.sequence_spoiler_recommendation_label,
+                self.subvoxel_sampling_recommendation_label,
+                *self.subvoxel_spin_recommendation_labels,
+            ):
+                label.setToolTip(recommendation_note)
         self.tabs.addTab(simulation_tab, "Simulation")
 
         scanner_tab = QWidget()
@@ -728,7 +835,8 @@ class SettingsDialog(QDialog):
             spin.setEnabled(enabled)
         self.subvoxel_sampling_method_combo.setEnabled(enabled)
         for label in self.subvoxel_control_labels:
-            label.setEnabled(enabled)
+            if label is not None:
+                label.setEnabled(enabled)
 
     def _browse_export_directory(self):
         current = str(self.get_export_directory())

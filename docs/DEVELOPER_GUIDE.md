@@ -181,6 +181,159 @@ Ensure any new asset directories are added here to be bundled with the library.
 
 ## 7. Extending the Simulator
 
+### Choosing Subvoxel Sampling for Imported Pulseq Sequences
+
+Imported `.seq` files must use gradient-waveform spoiling because they do not
+contain the simulator's explicit ideal-crusher markers. Choose the subvoxel
+counts with a convergence study over the complete RF/ADC gradient-moment train:
+increase the X, Y, and Z counts only on axes with intravoxel phase dispersion
+until the signal change or the sampled-versus-continuous coherence error is
+below the chosen tolerance (the GUI recommendation uses 1%). The cost scales
+with the product $N_x N_y N_z$, so the optimal grid is the smallest converged
+one, not the largest affordable grid. Prefer the regular midpoint grid when its
+complete train has been checked, because it is symmetric and usually reaches a
+given quadrature accuracy with fewer spins. Use deterministic stratified points
+when the full train cannot be checked or a regular grid shows artificial exact
+rephasing; they reproducibly break short grid recurrences, but generally need
+more spins and still require a convergence check.
+
+### Mouse Perfusion: Current Transport Semantics
+
+The mouse perfusion phantom currently implements a spatially delayed source,
+not advection of existing spins. Its concentration source is
+
+$$
+u(t,\mathbf r)=D(\mathbf r)q\left(t-\tau(\mathbf r)\right),
+$$
+
+where $q(t)$ is the dose-normalized injection curve, $D(\mathbf r)$ is the
+delivery map, and $\tau(\mathbf r)$ is the voxelwise arrival delay. The arrival
+map follows the directed route from the tail vein through the right heart,
+lungs, left heart, arteries, and organ beds. This makes the displayed bolus and
+the simulated source appear at different positions at different times.
+
+The source is more than a post-hoc signal-amplitude scaling: it adds local
+concentration and longitudinal magnetization during sequence simulation. The
+inflow concentration and its polarization are tracked separately. Once added,
+however, a spin state remains assigned to that voxel. It experiences the local
+RF field, gradient phase, off-resonance, $T_1/T_2$ relaxation, and configured
+chemical conversion, but it is not transferred to a downstream voxel.
+
+For example, consider a slice-selective RF pulse through the center of the
+mouse:
+
+1. Pyruvate already present in that slice is rotated or saturated by the pulse.
+2. Its resulting $(M_x,M_y,M_z)$ state remains in the same simulation voxel.
+3. Later inflow can add fresh polarized Pyruvate to that voxel and partially
+   replenish its signal.
+4. A downstream organ receives its own delayed source. It does not receive the
+   RF history of the Pyruvate that was excited in the central slice.
+
+The renal $k_{PL}$ and hepatic $k_{PA}$ maps are active reaction terms. They
+convert local Pyruvate into Lactate and Alanine, respectively, and precursor
+loss includes both product channels where both are present. These are local
+reactions and do not imply spatial transport.
+
+Keep the animation model separate from sequence physics. The animated
+**Injected perfusion** concentration convolves the delayed source with a local
+mono-exponential clearance to make accumulation and wash-out visible. This
+clearance is currently preview-only. The Bloch sequence solver has no
+perfusion-dependent outflow, vascular exchange, recirculation, or transport of
+previously excited magnetization. Breathing is likewise stored as a preview
+displacement field and is not yet coupled to gradient phase.
+
+The relevant implementation boundaries are:
+
+- `src/blochsimulator/mouse_phantom.py` builds the anatomy, vascular transit
+  map, delayed delivery, preview concentration, and organ curves.
+- `src/blochsimulator/dynamic_phantom.py` integrates the local inflow, Bloch
+  evolution, relaxation, and reaction terms.
+- `arrival_delay_map_s` changes when source material is created in a voxel; it
+  does not move a previously created magnetization state.
+
+### Mouse Perfusion: Recommended Transport Roadmap
+
+The next solver should transport concentration and the complete magnetization
+state rather than only scheduling independent local sources. A staged
+implementation keeps validation and computational cost manageable.
+
+#### Stage 1: Directed vascular-graph transport
+
+Start with the existing directed vessel graph instead of immediately solving a
+full 3D flow field.
+
+1. Divide every vessel edge into one-dimensional transport cells with explicit
+   volume, velocity, flow rate, and transit-time dispersion.
+2. Store concentration and $(M_x,M_y,M_z)$ for every compound in every
+   transport cell.
+3. Make downstream inflow equal upstream outflow, including the transported RF
+   and relaxation history. Do not recreate downstream spins from the original
+   injection curve.
+4. Add blood and tissue compartments at organ nodes. Exchange should conserve
+   compound amount, while $k_{PL}$ and $k_{PA}$ remain reaction terms within
+   the selected compartments.
+5. Add explicit clearance and venous return before introducing recirculation.
+6. Apply RF and gradient evolution according to the current spatial position
+   of each transport cell. A saturated bolus passing through a selected slice
+   must therefore remain saturated downstream, subject to relaxation and new
+   mixing.
+
+This stage can use operator splitting: perform local Bloch/reaction evolution,
+then a conservative transport/exchange step. It should expose a transport-model
+interface while retaining the existing delayed-source model for backwards
+compatibility and fast previews.
+
+#### Stage 2: Spatial advection-reaction Bloch model
+
+For capillary or tissue-scale transport, evolve each pool according to an
+advection-reaction Bloch equation such as
+
+$$
+\frac{\partial \mathbf M_p}{\partial t}
++\nabla\cdot\left(\mathbf v_p\mathbf M_p\right)
+=
+\mathcal B_p(\mathbf M)
++\mathcal R_p(\mathbf M,C)
++\mathbf S_p
+-\mathbf W_p,
+$$
+
+where $\mathcal B_p$ contains RF, gradient phase, off-resonance, and
+relaxation; $\mathcal R_p$ contains metabolic exchange; $\mathbf S_p$ is true
+external injection; and $\mathbf W_p$ represents clearance or compartment
+exchange. Concentration must obey the corresponding conservative transport and
+reaction equation.
+
+A finite-volume method is preferable when strict mass conservation is the
+priority. A semi-Lagrangian method is easier to stabilize for large time steps
+but needs an explicit conservation correction. A Lagrangian moving-spin model
+is another useful option for resolved vessels and naturally carries RF and
+phase history, but it requires careful particle-to-voxel interpolation and
+noise control. Whichever representation is selected, the transport time step
+must be validated independently of the Bloch integration time step.
+
+#### Stage 3: Motion and higher-order physiology
+
+After transport is validated, add respiratory deformation of anatomy,
+velocity, and magnetization together. Gradient phase must use the time-varying
+physical spin position. Later extensions can add pulsatility, portal-hepatic
+circulation, renal filtration, recirculation, heterogeneous capillary transit,
+and compound-specific permeability or relaxivity.
+
+#### Required validation tests
+
+At minimum, the transport implementation should include:
+
+- dose and concentration conservation with relaxation and reactions disabled;
+- a known plug-flow or one-dimensional advection solution;
+- a transit-time test on every vascular branch;
+- an RF-tagging test in which a saturated slice produces a delayed downstream
+  signal reduction;
+- recovery of the current local model when velocity and exchange are disabled;
+- non-negative concentrations under the supported time-step limits;
+- precursor/product balance for $k_{PL}$ and $k_{PA}$;
+- agreement between reference and optimized kernels.
+
 ### How to Add a New Pulse Sequence
 
 Adding a new sequence involves updates to both the core simulator logic and the GUI.

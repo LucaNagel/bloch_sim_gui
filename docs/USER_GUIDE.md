@@ -635,6 +635,39 @@ reconstructions from `species_signal`.
 
 ### Dynamic pyruvate/lactate phantom
 
+For the atlas-based mouse workflow, choose **Mouse Perfusion Phantom...** in
+**Phantom Configuration → Type**. It provides brain, liver, lungs, heart,
+bilateral renal cortex/medulla, and an explicitly voxelized major-vessel
+scaffold. Select `[1-13C]Pyruvate`, `[1-13C]Lactate`, `[1,5-13C2]Z-OMPD`, or a
+generic contrast tracer as the injected compound. Delivery remains normalized
+to the entered dose for every preset.
+
+The **Anatomy** tab switches between the actual simulation matrix and an 8× HD
+orthogonal-slice render. **Injected perfusion** updates live while injection,
+delivery, metabolism, and pH controls are edited. It provides its own
+Play/Pause and time controls, perfusion-only slices, the configured source-rate
+curve, and mean concentration curves for brain, liver, and kidneys. **Anatomy +
+perfusion** overlays the locally present compound on the anatomical slices.
+The animation starts before injection and follows the directed route from the
+tail vein through the cardiopulmonary circulation to the arterial organ beds.
+Its time controls select local compound concentration after arrival and
+clearance; this replaces the older, ambiguous **Bolus source time** control,
+which showed only an instantaneous source-rate map.
+
+The sequence source is
+$u(t,\mathbf r)=D(\mathbf r)q(t-\tau(\mathbf r))$: it conserves the entered dose
+and applies voxelwise arrival delays during simulation. The animated
+concentration additionally convolves this source with the configured
+mono-exponential tissue clearance. This clearance visualization is not yet a
+wash-out or recirculation compartment in the Bloch solver. Pyruvate uses the
+existing renal $k_{PL}$ conversion. The liver Alanine pool is actively coupled
+through its regional $k_{PA}$ map; Pyruvate precursor loss includes both
+product channels. Z-OMPD creates C5 and C1 spectral pools while the current
+inflow source drives C5;
+multi-resonance co-inflow and pH-dependent chemical-shift calibration remain a
+later solver step. Breathing is still a saved displacement preview and is not
+yet applied to gradient phase.
+
 Open **Phantom Designer** and define peaks whose names match the
 configured pyruvate and lactate pool names. Add ellipsoid, box, or cylinder
 objects with the buttons below the shape list; existing shapes can be moved and

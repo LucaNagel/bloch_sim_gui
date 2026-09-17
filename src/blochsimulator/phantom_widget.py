@@ -53,10 +53,12 @@ from .phantom_design import PhantomDesign
 from .paths import workspace_directory
 from .spectral_phantom import SpectralPhantom
 from .dynamic_phantom import DynamicSpectralPhantom
+from .mouse_phantom import MousePerfusionConfig, MousePerfusionPhantom
 from .ui.phantom_designer import (
     SpectralPhantomDesignerDialog,
     load_any_phantom,
 )
+from .ui.mouse_phantom_designer import MousePhantomDesignerDialog
 from .ui.volume_viewer import PhantomInspectorWidget
 from .ui.widgets import compact_image_histogram
 from .ui.default_settings import WorkspaceDefaults
@@ -116,6 +118,7 @@ class PhantomCreatorWidget(QGroupBox):
     field_strength_changed = pyqtSignal(float)
     nucleus_changed = pyqtSignal(str)
     PHANTOM_DESIGNER_TYPE = "Phantom Designer..."
+    MOUSE_PERFUSION_TYPE = "Mouse Perfusion Phantom..."
     LOAD_FROM_FILE_TYPE = "Load from File..."
 
     def __init__(self, parent=None, settings=None):
@@ -129,6 +132,7 @@ class PhantomCreatorWidget(QGroupBox):
         # while another Qt worker is active on macOS. Retain them for the
         # lifetime of their parent and let Qt tear down the full tree in order.
         self._retained_spectral_designer_dialogs = []
+        self._retained_mouse_designer_dialogs = []
         self.init_ui()
 
     def init_ui(self):
@@ -141,6 +145,7 @@ class PhantomCreatorWidget(QGroupBox):
         self.type_combo.addItems(
             [
                 self.PHANTOM_DESIGNER_TYPE,
+                self.MOUSE_PERFUSION_TYPE,
                 "Shepp-Logan 2D",
                 "Cylindrical 2D",
                 "Multi-Tissue 2D",
@@ -257,6 +262,7 @@ class PhantomCreatorWidget(QGroupBox):
         """Update UI based on selected phantom type."""
         external_editor = type_name in {
             self.PHANTOM_DESIGNER_TYPE,
+            self.MOUSE_PERFUSION_TYPE,
             self.LOAD_FROM_FILE_TYPE,
         }
         for widget in (
@@ -283,7 +289,7 @@ class PhantomCreatorWidget(QGroupBox):
                 self.resolution_spin.setValue(32)
         else:
             self.resolution_spin.setMaximum(256)
-        if type_name == self.PHANTOM_DESIGNER_TYPE:
+        if type_name in {self.PHANTOM_DESIGNER_TYPE, self.MOUSE_PERFUSION_TYPE}:
             action_text = "Create New..."
         elif type_name == self.LOAD_FROM_FILE_TYPE:
             action_text = "Load Phantom..."
@@ -337,6 +343,9 @@ class PhantomCreatorWidget(QGroupBox):
         if phantom_type == self.PHANTOM_DESIGNER_TYPE:
             self._open_spectral_designer()
             return
+        if phantom_type == self.MOUSE_PERFUSION_TYPE:
+            self._open_mouse_designer()
+            return
 
         try:
             n = self.resolution_spin.value()
@@ -382,7 +391,11 @@ class PhantomCreatorWidget(QGroupBox):
             try:
                 phantom = load_any_phantom(filename)
                 self.current_phantom = phantom
-                if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+                if isinstance(phantom, MousePerfusionPhantom):
+                    self._set_field_strength(phantom.field_strength)
+                    self.set_nucleus(phantom.nucleus)
+                    self.type_combo.setCurrentText(self.MOUSE_PERFUSION_TYPE)
+                elif isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
                     self._set_field_strength(phantom.field_strength)
                     self.set_nucleus(phantom.nucleus)
                     self.type_combo.setCurrentText(self.PHANTOM_DESIGNER_TYPE)
@@ -467,6 +480,37 @@ class PhantomCreatorWidget(QGroupBox):
         self._update_edit_button()
         self.phantom_created.emit(phantom)
 
+    def _open_mouse_designer(self, config=None):
+        dialog = MousePhantomDesignerDialog(
+            self,
+            config=config,
+            settings=self.settings,
+        )
+        if config is None:
+            dialog.field_strength.setValue(self.get_field_strength())
+        self._retained_mouse_designer_dialogs.append(dialog)
+        dialog.accepted.connect(
+            lambda selected_dialog=dialog: self._mouse_designer_accepted(
+                selected_dialog
+            )
+        )
+        dialog.open()
+
+    def _mouse_designer_accepted(self, dialog):
+        """Install a mouse phantom produced by the non-blocking editor."""
+        phantom = dialog.get_phantom()
+        if phantom is None:
+            return
+        self.current_phantom = phantom
+        self._set_field_strength(phantom.field_strength)
+        self.set_nucleus(phantom.nucleus)
+        self.type_combo.setCurrentText(self.MOUSE_PERFUSION_TYPE)
+        self._update_info()
+        self.save_btn.setEnabled(True)
+        self.save_btn.setVisible(True)
+        self._update_edit_button()
+        self.phantom_created.emit(phantom)
+
     def set_workspace_defaults(self, defaults: WorkspaceDefaults) -> None:
         """Use newly saved defaults for subsequent phantom creation."""
         self.workspace_defaults = defaults
@@ -476,6 +520,13 @@ class PhantomCreatorWidget(QGroupBox):
 
     def edit_current_phantom(self):
         """Reopen editable in-memory shape metadata without requiring a save."""
+        if isinstance(self.current_phantom, MousePerfusionPhantom):
+            self._open_mouse_designer(
+                config=MousePerfusionConfig.from_dict(
+                    self.current_phantom.config.to_dict()
+                )
+            )
+            return
         if not isinstance(
             self.current_phantom, (SpectralPhantom, DynamicSpectralPhantom)
         ):
@@ -494,14 +545,20 @@ class PhantomCreatorWidget(QGroupBox):
 
     def _update_edit_button(self):
         editable = False
-        if isinstance(self.current_phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+        expected_type = self.PHANTOM_DESIGNER_TYPE
+        if isinstance(self.current_phantom, MousePerfusionPhantom):
+            editable = True
+            expected_type = self.MOUSE_PERFUSION_TYPE
+        elif isinstance(
+            self.current_phantom, (SpectralPhantom, DynamicSpectralPhantom)
+        ):
             try:
                 PhantomDesign.from_phantom(self.current_phantom)
                 editable = True
             except ValueError:
                 pass
         self.edit_btn.setVisible(
-            editable and self.type_combo.currentText() == self.PHANTOM_DESIGNER_TYPE
+            editable and self.type_combo.currentText() == expected_type
         )
         self.edit_btn.setEnabled(editable)
 

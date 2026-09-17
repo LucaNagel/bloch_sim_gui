@@ -6057,8 +6057,23 @@ class SequenceSimulationWidget(QWidget):
             sampling,
         )
         phase_train = np.asarray(report.phase_cycles_per_voxel, dtype=float)
+        gradient_axes = np.zeros(3, dtype=bool)
+        for event in self.program.gradient_events:
+            if np.any(np.abs(np.asarray(event.samples_hz_per_m, dtype=float)) > 1e-12):
+                gradient_axes["xyz".index(event.axis)] = True
+        gradient_resolved_voxel_axes = np.any(
+            np.abs(np.asarray(voxel_basis, dtype=float)[gradient_axes, :]) > 1e-15,
+            axis=0,
+        )
         minimum_counts = tuple(
-            2 if np.any(np.abs(phase_train[:, axis]) > 1e-12) else 1
+            (
+                2
+                if (
+                    gradient_resolved_voxel_axes[axis]
+                    or np.any(np.abs(phase_train[:, axis]) > 1e-12)
+                )
+                else 1
+            )
             for axis in range(3)
         )
         recommendation = recommend_spin_grid_for_phase_train(
@@ -7627,7 +7642,6 @@ class SequenceSimulationWidget(QWidget):
             return
 
         self._start_pulseq_load(filename)
-        self._display_pulseq_spoiler_warning()
 
     def _show_simulation_settings(self):
         """Open the simulation tab."""
@@ -7644,29 +7658,114 @@ class SequenceSimulationWidget(QWidget):
         main_window.show_settings(initial_tab="simulation")
 
     def _display_pulseq_spoiler_warning(self):
-        """Warn about imported spoilers without blocking the background import."""
+        """Warn after a Pulseq file was loaded and link to simulation settings."""
         existing = self._pulseq_spoiler_warning_dialog
         if existing is not None and existing.isVisible():
             existing.raise_()
             existing.activateWindow()
             return
+        recommendation = self.loaded_pulseq_spoiler_recommendation() or {}
+        recommended_counts = recommendation.get("counts_xyz")
+        if recommended_counts is None:
+            grid_text = (
+                "A sequence-specific X/Y/Z grid is not available yet. Select the "
+                "simulation phantom and verify the subvoxel counts by convergence."
+            )
+        elif recommendation.get("counts_are_fallback", False):
+            grid_text = (
+                "A sequence-specific grid could not be derived yet. The settings "
+                f"therefore use a conservative <b>{int(recommended_counts[0])}"
+                f"&times;{int(recommended_counts[1])}&times;"
+                f"{int(recommended_counts[2])}</b> deterministic-stratified "
+                "starting grid that must be verified by convergence."
+            )
+        else:
+            grid_text = (
+                "For the current sequence and phantom, the train-wide analysis "
+                f"recommends <b>{int(recommended_counts[0])}&times;"
+                f"{int(recommended_counts[1])}&times;"
+                f"{int(recommended_counts[2])}</b> subvoxel spins."
+            )
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Warning)
         dialog.setWindowTitle("Pulseq import spoiler settings")
+        dialog.setTextFormat(Qt.RichText)
         dialog.setText(
-            "For imported Pulseq sequences, please ensure that spoilers are set and subvoxel spins are activated in the settings.\n\n"
-            "Set `Spoiler Simulation` to Gradient waveform (subvoxel spins) in the Simulation Settings to avoid incorrect simulation results.\n"
-            "Make sure to set `Subvoxel spins` to > 1."
+            "A custom <code>.seq</code> file does not provide explicit ideal-crusher "
+            "markers. <b>Set Spoiler simulation from Ideal crusher to Gradient "
+            "waveform (subvoxel spins)</b>; otherwise crusher dephasing can be "
+            "missed because only one spin per voxel is simulated.<br><br>"
+            f"{grid_text}<br><br>"
+            "<a href='open-settings'>Open Simulation Settings</a>"
         )
+        dialog.setStandardButtons(QMessageBox.Ok)
 
-        settings_button = dialog.addButton(
-            "Open Simulation Settings...", QMessageBox.ActionRole
-        )
-        dialog.addButton(QMessageBox.Cancel)
-        settings_button.clicked.connect(self._show_simulation_settings)
+        def open_settings(_link):
+            dialog.accept()
+            self._show_simulation_settings()
+
+        for label in dialog.findChildren(QLabel):
+            label.setOpenExternalLinks(False)
+            label.linkActivated.connect(open_settings)
         dialog.finished.connect(self._pulseq_spoiler_warning_finished)
         self._pulseq_spoiler_warning_dialog = dialog
         dialog.open()
+
+    def loaded_pulseq_spoiler_recommendation(self):
+        """Return settings hints for the currently loaded custom Pulseq file."""
+        if (
+            self.program is None
+            or self.sequence_source.currentIndex() != self.PULSEQ_SOURCE
+            or not str(getattr(self.program, "source", "")).lower().endswith(".seq")
+        ):
+            return None
+        self._update_spoiling_quality()
+        recommendation = getattr(self, "_spoiling_spin_grid_recommendation", None)
+        sequence_name = self._session_sequence_name(self.program)
+        if recommendation is None:
+            selected_phantom = self._selected_designed_phantom()
+            if selected_phantom is None:
+                selected_phantom = self.phantom
+            phantom_ndim = int(getattr(selected_phantom, "ndim", 3))
+            fallback_counts = tuple(
+                2 if axis < min(3, max(1, phantom_ndim)) else 1 for axis in range(3)
+            )
+            detail = (
+                f"{sequence_name}: no sequence-specific grid could be derived yet. "
+                "Select the simulation phantom and ensure that at least two ADC "
+                "gradient-moment origins can be inferred. Until then, deterministic "
+                f"stratified sampling on a {fallback_counts[0]}×"
+                f"{fallback_counts[1]}×{fallback_counts[2]} starting grid is the "
+                "robust fallback; determine the final X/Y/Z counts with a convergence "
+                "study."
+            )
+            return {
+                "sequence_name": sequence_name,
+                "spoiler_mode": "gradient",
+                "sampling_method": "stratified",
+                "counts_xyz": fallback_counts,
+                "counts_are_fallback": True,
+                "detail": detail,
+            }
+        target_status = (
+            "meets the 1% train-error target"
+            if recommendation.meets_target
+            else "is the best tested grid but does not meet the 1% train-error target"
+        )
+        return {
+            "sequence_name": sequence_name,
+            "spoiler_mode": "gradient",
+            "sampling_method": recommendation.method,
+            "counts_xyz": recommendation.counts_xyz,
+            "counts_are_fallback": False,
+            "detail": (
+                f"{sequence_name}: {recommendation.counts_xyz[0]}×"
+                f"{recommendation.counts_xyz[1]}×"
+                f"{recommendation.counts_xyz[2]} {recommendation.method} sampling "
+                f"{target_status} (maximum error "
+                f"{100 * recommendation.maximum_sampling_error:.3g}%)."
+            ),
+        }
 
     def _pulseq_spoiler_warning_finished(self, _result):
         self._pulseq_spoiler_warning_dialog = None
@@ -7701,6 +7800,7 @@ class SequenceSimulationWidget(QWidget):
     def _pulseq_load_finished(self, payload, filename):
         self._apply_loaded_pulseq(payload, filename)
         self._reset_pulseq_load_controls("Pulseq loaded")
+        self._display_pulseq_spoiler_warning()
 
     def _pulseq_load_failed(self, message):
         self._reset_pulseq_load_controls("Pulseq import failed")

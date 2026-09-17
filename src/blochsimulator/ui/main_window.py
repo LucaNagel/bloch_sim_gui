@@ -4932,6 +4932,15 @@ class BlochSimulatorGUI(QMainWindow):
         previous_scanner_parameters = self._load_scanner_parameters()
         previous_workspace_defaults = WorkspaceDefaults.from_settings(self.app_settings)
         previous_interface_style = self._load_interface_style()
+        loaded_pulseq_recommendation = None
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        recommendation_provider = getattr(
+            sequence_widget, "loaded_pulseq_spoiler_recommendation", None
+        )
+        if callable(recommendation_provider):
+            candidate = recommendation_provider()
+            if isinstance(candidate, dict):
+                loaded_pulseq_recommendation = candidate
         dialog = SettingsDialog(
             policy=self._load_memory_policy(),
             export_directory=self._get_export_directory(),
@@ -4948,6 +4957,7 @@ class BlochSimulatorGUI(QMainWindow):
             sequence_spoiler_mode=self._load_sequence_spoiler_mode(),
             subvoxel_spin_counts=self._load_subvoxel_spin_counts(),
             subvoxel_sampling_method=self._load_subvoxel_sampling_method(),
+            loaded_pulseq_recommendation=loaded_pulseq_recommendation,
             thread_mode=self._load_thread_mode(),
             manual_thread_count=self._load_manual_thread_count(),
             animation_memory_budget_mib=self._load_animation_memory_budget_mib(),
@@ -5031,7 +5041,6 @@ class BlochSimulatorGUI(QMainWindow):
             )
         set_default_memory_policy(policy)
         self._set_tooltips_enabled(tooltips_enabled)
-        sequence_widget = getattr(self, "sequence_simulation_widget", None)
         if sequence_widget is not None:
             sequence_widget.set_live_preview_enabled(live_progress_enabled)
             sequence_widget.set_sequence_kernel(sequence_kernel)

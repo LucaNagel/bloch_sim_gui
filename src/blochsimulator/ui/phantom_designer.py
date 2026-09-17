@@ -450,6 +450,10 @@ def load_any_phantom(filename):
     """Load either a conventional or spectral phantom file."""
     try:
         phantom = DynamicSpectralPhantom.load(filename)
+        if phantom.metadata.get("phantom_family") == "mouse_perfusion":
+            from ..mouse_phantom import MousePerfusionPhantom
+
+            phantom = MousePerfusionPhantom.from_dynamic_phantom(phantom)
     except ValueError:
         try:
             phantom = SpectralPhantom.load(filename)
