@@ -53,6 +53,11 @@ from PyQt5.QtWidgets import (
 )
 
 from ..memory import MEMORY_ERROR_PREFIX
+from ..kernel_capabilities import (
+    DYNAMIC_KERNEL_NAMES,
+    SEQUENCE_KERNEL_NAMES,
+    resolve_kernel_request,
+)
 from ..phantom import Phantom, PhantomFactory
 from ..notebook_exporter import (
     export_pulseq_generation_notebook,
@@ -74,6 +79,9 @@ from ..sequence import (
     SequenceCompiler,
     SequenceProgram,
     ScannerParameters,
+    SpectralSpatialPulseLibrary,
+    SpectralSpatialSchedule,
+    SpectralSpatialScheduleEntry,
     SpinSampling,
     analyze_adc_moment_train,
     analyze_repeated_spoiler_train,
@@ -95,10 +103,12 @@ from ..sequence import (
     make_pulseq_radial_me_bssfp,
     make_pulseq_spectral_selective_bssfp,
     make_pulseq_spiral,
+    migrate_spectral_spatial_state,
     recommend_spin_grid,
     recommend_spin_grid_for_phase_train,
     variable_flip_angle_schedule,
 )
+from ..sequence.encoding import numeric_definition_array
 from ..sequence.spin_sampling import phantom_voxel_basis_m
 from ..sequence.rf_pulses import (
     RF_PULSE_TYPE_LABELS,
@@ -116,6 +126,10 @@ from ..units import (
 )
 from .controls import UniversalTimeControl
 from .dialogs import PulseImportDialog
+from .spectral_spatial_designer import (
+    SpectralSpatialPulseDesignerDialog,
+    SpectralSpatialScheduleDialog,
+)
 from .magnetization_viewer import MagnetizationViewer
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
 from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumViewer
@@ -162,6 +176,7 @@ def _add_form_section(form: QFormLayout, title: str) -> None:
     separator.setFrameShape(QFrame.HLine)
     separator.setFrameShadow(QFrame.Sunken)
     label = QLabel(str(title))
+    label.setObjectName("sequence_section_title")
     font = label.font()
     font.setBold(True)
     label.setFont(font)
@@ -365,6 +380,25 @@ class _SequenceSimulationPayload:
     result: object
     animation: Optional[_MagnetizationAnimationData]
     animation_message: str = ""
+
+
+@dataclass(frozen=True)
+class _SequenceLoopParameter:
+    """One scalar parameter exposed by the generic sequence loop runner."""
+
+    key: str
+    label: str
+    unit: str
+    minimum: float
+    maximum: float
+    decimals: int
+    integer: bool = False
+    widget: object = None
+
+    def current_value(self):
+        if self.widget is None:
+            return 1.0
+        return self.widget.value()
 
 
 def _animation_checkpoint_times(
@@ -1042,6 +1076,7 @@ class SequenceSimulationWidget(QWidget):
     """Load/build sequences, configure a 3D object, and inspect sparse output."""
 
     physical_b1_changed = pyqtSignal(object)
+    parameter_loop_requested = pyqtSignal()
 
     # Generated-sequence forms (notably EPI, CSI, and FLASH) need enough
     # room for a label and its editor alongside the vertical scroll bar.
@@ -1125,6 +1160,14 @@ class SequenceSimulationWidget(QWidget):
         self._rf_designer = None
         self._rf_designer_pulse_data = None
         self._rf_designer_pulse_error = "No RF Pulse Designer waveform is available"
+        self._spectral_spatial_pulse_data = None
+        self._spectral_spatial_pulse_library = SpectralSpatialPulseLibrary()
+        self._spectral_spatial_schedule = SpectralSpatialSchedule()
+        self._spectral_spatial_selected_pulse_id = None
+        self._spectral_spatial_pulse_error = (
+            "No spectral-spatial pulse has been designed"
+        )
+        self._parameter_loop_state = None
         self.probe_playback_timer = QTimer(self)
         self.probe_playback_timer.setInterval(16)
         self.probe_playback_timer.timeout.connect(self._advance_probe_playback)
@@ -1164,21 +1207,15 @@ class SequenceSimulationWidget(QWidget):
             if settings is not None
             else "optimized"
         )
-        if sequence_kernel not in {"optimized", "reference"}:
-            sequence_kernel = "optimized"
+        sequence_kernel = resolve_kernel_request("sequence", sequence_kernel)
         dynamic_sequence_kernel = (
             str(settings.value("sequence/dynamic_kernel", "optimized"))
             if settings is not None
             else "optimized"
         )
-        if dynamic_sequence_kernel not in {
-            "optimized",
-            "native_parallel",
-            "native_serial",
-            "metal_hybrid",
-            "reference",
-        }:
-            dynamic_sequence_kernel = "optimized"
+        dynamic_sequence_kernel = resolve_kernel_request(
+            "dynamic", dynamic_sequence_kernel
+        )
         spoiler_mode = (
             str(settings.value("sequence/spoiler_mode", "ideal"))
             if settings is not None
@@ -1244,12 +1281,22 @@ class SequenceSimulationWidget(QWidget):
             dynamic_sequence_kernel=dynamic_sequence_kernel,
         )
         self._initial_sequence_timestep_us = sequence_timestep_us
+        self._sequence_section_titles_bold = (
+            bool(
+                settings.value(
+                    "interface/bold_sequence_section_titles", True, type=bool
+                )
+            )
+            if settings is not None
+            else True
+        )
         self.spoiler_mode = spoiler_mode
         self.subvoxel_spin_counts = (
             tuple(subvoxel_counts) if spoiler_mode == "gradient" else (1, 1, 1)
         )
         self.subvoxel_sampling_method = subvoxel_sampling_method
         self._build_ui()
+        self.set_sequence_section_titles_bold(self._sequence_section_titles_bold)
         self._last_valid_epi_bandwidth_khz = self.sampling_bandwidth_khz.value()
         self._last_valid_flash_bandwidth_khz = self.flash_sampling_bandwidth_khz.value()
         self._connect_rf_designer(parent)
@@ -1263,6 +1310,18 @@ class SequenceSimulationWidget(QWidget):
         self._rf_designer = designer
         self.set_rf_designer_pulse(designer.get_pulse(), reload_sequence=False)
         designer.pulse_changed.connect(self.set_rf_designer_pulse)
+
+    def set_sequence_section_titles_bold(self, enabled: bool) -> None:
+        """Set the shared weight of section headings across every sequence form."""
+        self._sequence_section_titles_bold = bool(enabled)
+        weight = "bold" if self._sequence_section_titles_bold else "normal"
+        for label in self.findChildren(QLabel, "sequence_section_title"):
+            font = label.font()
+            font.setBold(self._sequence_section_titles_bold)
+            label.setFont(font)
+            # The enclosing QGroupBox stylesheet normalizes child widgets on
+            # some Qt styles, so make this preference explicit on each title.
+            label.setStyleSheet(f"font-weight: {weight};")
 
     def set_default_fov_mm(self, fov_mm) -> None:
         """Apply newly saved FOV defaults to editable generated-sequence controls."""
@@ -1414,6 +1473,67 @@ class SequenceSimulationWidget(QWidget):
         state["waveform_hz"] = np.array(state["waveform_hz"], copy=True)
         return state
 
+    def spectral_spatial_pulse_state(self):
+        """Return the selected pulse in the historical singleton format."""
+        if self._spectral_spatial_pulse_data is None:
+            return None
+        return self._spectral_spatial_pulse_data.to_dict()
+
+    def spectral_spatial_pulse_library_state(self):
+        """Return the complete reusable SPSP pulse library."""
+        return self._spectral_spatial_pulse_library.to_dict()
+
+    def spectral_spatial_schedule_state(self):
+        """Return the ordered cyclic SPSP schedule."""
+        return self._spectral_spatial_schedule.to_dict()
+
+    def restore_spectral_spatial_schedule_state(
+        self, library_state, schedule_state, *, legacy_pulse_state=None
+    ):
+        """Restore new SPSP state or migrate an old singleton project."""
+        library, schedule, _ = migrate_spectral_spatial_state(
+            library=library_state,
+            schedule=schedule_state,
+            legacy_pulse=legacy_pulse_state,
+        )
+        self._spectral_spatial_pulse_library = library
+        self._spectral_spatial_schedule = schedule
+        selected_id = None
+        if schedule.entries:
+            selected_id = schedule.entries[0].pulse_id
+        elif library.pulses:
+            selected_id = next(iter(library.pulses))
+        self._spectral_spatial_selected_pulse_id = selected_id
+        self._spectral_spatial_pulse_data = (
+            None if selected_id is None else library.get(selected_id)
+        )
+        self._spectral_spatial_pulse_error = (
+            "No spectral-spatial pulse has been designed"
+            if self._spectral_spatial_pulse_data is None
+            else ""
+        )
+        for prefix in (
+            "epi",
+            "epsi",
+            "csi",
+            "flash",
+            "bssfp",
+            "ss_bssfp",
+            "radial_me",
+            "me_bssfp",
+        ):
+            if hasattr(self, f"{prefix}_rf_pulse_type"):
+                self._update_shared_rf_controls(prefix)
+        return self._spectral_spatial_pulse_data is not None
+
+    def restore_spectral_spatial_pulse_state(self, state):
+        """Restore the historical singleton SPSP project representation."""
+        if not state:
+            return False
+        return self.restore_spectral_spatial_schedule_state(
+            None, None, legacy_pulse_state=state
+        )
+
     @staticmethod
     def _rf_designer_pulse_state_from_program(program):
         """Recover a missing legacy designer waveform from a saved program."""
@@ -1511,6 +1631,7 @@ class SequenceSimulationWidget(QWidget):
         self._rf_designer_pulse_error = ""
         for prefix in (
             "epi",
+            "epsi",
             "csi",
             "flash",
             "bssfp",
@@ -1590,6 +1711,140 @@ class SequenceSimulationWidget(QWidget):
         except Exception as exc:
             QMessageBox.critical(self, "RF pulse load failed", str(exc))
 
+    def _shared_rf_target_thickness_m(self, prefix):
+        """Return the current slice or slab thickness for an RF form."""
+        controls = {
+            "epi": self.epi_slice_thickness_mm,
+            "epsi": self.epsi_slice_thickness_mm,
+            "csi": self.csi_slice_thickness_mm,
+            "flash": self.flash_slice_thickness_mm,
+            "bssfp": self.bssfp_partition_fov_mm,
+            "ss_bssfp": self.ss_bssfp_partition_fov_mm,
+            "radial_me": self.radial_me_fov_mm,
+            "me_bssfp": self.me_bssfp_partition_fov_mm,
+        }
+        return float(controls[prefix].value()) / 1000.0
+
+    def _design_spectral_spatial_pulse(self, prefix):
+        """Open the coupled RF/gradient designer for one Sequence Mode form."""
+        nucleus = self.nucleus.currentText()
+        initial_pulse = self._spectral_spatial_pulse_data
+        if initial_pulse is not None and initial_pulse.nucleus != nucleus:
+            initial_pulse = None
+        dialog = SpectralSpatialPulseDesignerDialog(
+            self,
+            scanner_parameters=self.scanner_parameters,
+            nucleus=nucleus,
+            field_strength_t=self.field_strength_t.value(),
+            sequence_reference_ppm=self.sequence_reference_ppm.value(),
+            carrier_offset_hz=getattr(self, f"{prefix}_rf_offset_hz").value(),
+            target_thickness_m=self._shared_rf_target_thickness_m(prefix),
+            initial_pulse=initial_pulse,
+            phantom=self._selected_designed_phantom(),
+        )
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        pulse = dialog.pulse()
+        if pulse is None:
+            return
+        pulse_id = self._spectral_spatial_selected_pulse_id
+        if (
+            pulse_id is not None
+            and pulse_id in self._spectral_spatial_pulse_library.pulses
+        ):
+            self._spectral_spatial_pulse_library.replace(pulse_id, pulse)
+        else:
+            pulse_id = self._spectral_spatial_pulse_library.add(pulse)
+            self._spectral_spatial_selected_pulse_id = pulse_id
+            if not self._spectral_spatial_schedule.entries:
+                self._spectral_spatial_schedule.add(
+                    SpectralSpatialScheduleEntry(
+                        pulse_id=pulse_id,
+                        display_name=pulse.name,
+                        target_metabolite=(pulse.bands[0].name if pulse.bands else ""),
+                    )
+                )
+        self._spectral_spatial_pulse_data = pulse
+        self._spectral_spatial_pulse_error = ""
+        pulse_type = getattr(self, f"{prefix}_rf_pulse_type")
+        already_selected = pulse_type.currentText() == "Spectral-spatial Designer"
+        pulse_type.setCurrentText("Spectral-spatial Designer")
+        for control_prefix in (
+            "epi",
+            "epsi",
+            "csi",
+            "flash",
+            "bssfp",
+            "ss_bssfp",
+            "radial_me",
+            "me_bssfp",
+        ):
+            if hasattr(self, f"{control_prefix}_rf_pulse_type"):
+                self._update_shared_rf_controls(control_prefix)
+        if already_selected:
+            self._request_generated_sequence_refresh()
+
+    def _manage_spectral_spatial_schedule(self, prefix):
+        """Open the reusable library/schedule editor and adopt its state."""
+        if (
+            not self._spectral_spatial_pulse_library.pulses
+            and self._spectral_spatial_pulse_data is not None
+        ):
+            self.restore_spectral_spatial_pulse_state(
+                self._spectral_spatial_pulse_data.to_dict()
+            )
+        pulse_spacing_s = 0.0
+        if prefix == "flash":
+            pulse_spacing_s = float(self.flash_repetition_time_ms.value()) / 1000.0
+        dialog = SpectralSpatialScheduleDialog(
+            self,
+            library=self._spectral_spatial_pulse_library,
+            schedule=self._spectral_spatial_schedule,
+            scanner_parameters=self.scanner_parameters,
+            nucleus=self.nucleus.currentText(),
+            field_strength_t=self.field_strength_t.value(),
+            sequence_reference_ppm=self.sequence_reference_ppm.value(),
+            carrier_offset_hz=getattr(self, f"{prefix}_rf_offset_hz").value(),
+            target_thickness_m=self._shared_rf_target_thickness_m(prefix),
+            phantom=self._selected_designed_phantom(),
+            pulse_spacing_s=pulse_spacing_s,
+            spoiling="ideal" if self.spoiler_mode == "ideal" else "none",
+        )
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        self._spectral_spatial_pulse_library = dialog.pulse_library()
+        self._spectral_spatial_schedule = dialog.pulse_schedule()
+        if self._spectral_spatial_schedule.entries:
+            selected_id = self._spectral_spatial_schedule.entries[0].pulse_id
+        elif self._spectral_spatial_pulse_library.pulses:
+            selected_id = next(iter(self._spectral_spatial_pulse_library.pulses))
+        else:
+            selected_id = None
+        self._spectral_spatial_selected_pulse_id = selected_id
+        self._spectral_spatial_pulse_data = (
+            None
+            if selected_id is None
+            else self._spectral_spatial_pulse_library.get(selected_id)
+        )
+        self._spectral_spatial_pulse_error = (
+            "No spectral-spatial pulse has been designed"
+            if self._spectral_spatial_pulse_data is None
+            else ""
+        )
+        for control_prefix in (
+            "epi",
+            "epsi",
+            "csi",
+            "flash",
+            "bssfp",
+            "ss_bssfp",
+            "radial_me",
+            "me_bssfp",
+        ):
+            if hasattr(self, f"{control_prefix}_rf_pulse_type"):
+                self._update_shared_rf_controls(control_prefix)
+        self._request_generated_sequence_refresh()
+
     def _build_ui(self):
         self.setStyleSheet(BOLD_GROUP_TITLES_STYLE)
         root = QHBoxLayout(self)
@@ -1650,6 +1905,20 @@ class SequenceSimulationWidget(QWidget):
             "interactively, or load a Pulseq file"
         )
         sequence_layout.addWidget(self.sequence_source)
+
+        nucleus_row = QHBoxLayout()
+        self.nucleus_label = QLabel("Nucleus")
+        nucleus_row.addWidget(self.nucleus_label)
+        self.nucleus = QComboBox()
+        self.nucleus.setObjectName("sequence_nucleus")
+        self.nucleus.addItems(list(NUCLEUS_GAMMA_HZ_PER_T))
+        self.nucleus.setCurrentText(self.workspace_defaults.phantom_nucleus)
+        self.nucleus.setToolTip(
+            "Reference nucleus for this sequence, ppm-to-Hz conversion and "
+            "physical RF/gradient units"
+        )
+        nucleus_row.addWidget(self.nucleus, 1)
+        sequence_layout.addLayout(nucleus_row)
 
         reference_row = QHBoxLayout()
         reference_row.addWidget(QLabel("Sequence reference"))
@@ -3033,12 +3302,6 @@ class SequenceSimulationWidget(QWidget):
         )
         object_form.addRow("Field strength B0", self.field_strength_t)
         self.field_strength_label = object_form.labelForField(self.field_strength_t)
-        self.nucleus = QComboBox()
-        self.nucleus.addItems(list(NUCLEUS_GAMMA_HZ_PER_T))
-        self.nucleus.setCurrentText(self.workspace_defaults.phantom_nucleus)
-        self.nucleus.setToolTip("Reference nucleus used for ppm-to-Hz conversion")
-        object_form.addRow("Nucleus", self.nucleus)
-        self.nucleus_label = object_form.labelForField(self.nucleus)
         self.frequency_reference_info = QLabel()
         self.frequency_reference_info.setWordWrap(True)
         self.frequency_reference_info.setMinimumWidth(0)
@@ -3314,7 +3577,7 @@ class SequenceSimulationWidget(QWidget):
         probe_buttons = QWidget()
         probe_button_layout = QGridLayout(probe_buttons)
         probe_button_layout.setContentsMargins(0, 0, 0, 0)
-        for column in range(3):
+        for column in range(2):
             probe_button_layout.setColumnStretch(column, 1)
         self.probe_button_layout = probe_button_layout
         self.run_probe_button = QPushButton("Spectral Probe")
@@ -3335,9 +3598,18 @@ class SequenceSimulationWidget(QWidget):
 
         run_panel = QGroupBox("Run")
         run_panel_layout = QVBoxLayout(run_panel)
+        self.open_parameter_loop_button = QPushButton("Param. Loop")
+        self.open_parameter_loop_button.setObjectName("open_sequence_parameter_loop")
+        self.open_parameter_loop_button.setToolTip(
+            "Open the Parameter Loop tab to configure and run a sequence parameter loop"
+        )
+        self.open_parameter_loop_button.clicked.connect(
+            self.parameter_loop_requested.emit
+        )
         self.run_button = QPushButton("Seq. Simulation")
         self.run_button.clicked.connect(self._run)
-        probe_button_layout.addWidget(self.run_button, 0, 2)
+        probe_button_layout.addWidget(self.open_parameter_loop_button, 1, 0)
+        probe_button_layout.addWidget(self.run_button, 1, 1)
         run_panel_layout.addWidget(probe_buttons)
         inactive_button_style = (
             "QPushButton:disabled { color: rgba(70, 70, 70, 145); "
@@ -3346,9 +3618,58 @@ class SequenceSimulationWidget(QWidget):
         for button in (
             self.run_probe_button,
             self.run_geometry_probe_button,
+            self.open_parameter_loop_button,
             self.run_button,
         ):
             button.setStyleSheet(inactive_button_style)
+
+        # The loop editor is hosted by the main window in a dedicated tab. It
+        # remains owned here so the loop logic and discovered controls stay
+        # sequence-agnostic and can also be exercised without the main window.
+        self.parameter_loop_group = QGroupBox("Parameter loop", self)
+        self.parameter_loop_group.setMaximumWidth(680)
+        parameter_loop_form = _left_aligned_form(self.parameter_loop_group)
+        self.parameter_loop_parameter = QComboBox()
+        self.parameter_loop_parameter.setObjectName("sequence_parameter_loop_parameter")
+        self.parameter_loop_parameter.setToolTip(
+            "Numerical controls are discovered from the active sequence form. "
+            "The RF/flip-angle scale is available for every sequence, including "
+            "loaded Pulseq files."
+        )
+        self.parameter_loop_parameter.currentIndexChanged.connect(
+            self._parameter_loop_parameter_changed
+        )
+        parameter_loop_form.addRow("Parameter", self.parameter_loop_parameter)
+
+        parameter_range = QWidget()
+        parameter_range_layout = QHBoxLayout(parameter_range)
+        parameter_range_layout.setContentsMargins(0, 0, 0, 0)
+        self.parameter_loop_start = QDoubleSpinBox()
+        self.parameter_loop_start.setObjectName("sequence_parameter_loop_start")
+        self.parameter_loop_stop = QDoubleSpinBox()
+        self.parameter_loop_stop.setObjectName("sequence_parameter_loop_stop")
+        parameter_range_layout.addWidget(QLabel("From"))
+        parameter_range_layout.addWidget(self.parameter_loop_start, 1)
+        parameter_range_layout.addWidget(QLabel("to"))
+        parameter_range_layout.addWidget(self.parameter_loop_stop, 1)
+        parameter_loop_form.addRow("Range", parameter_range)
+
+        self.parameter_loop_steps = QSpinBox()
+        self.parameter_loop_steps.setObjectName("sequence_parameter_loop_steps")
+        self.parameter_loop_steps.setRange(2, 500)
+        self.parameter_loop_steps.setValue(5)
+        self.parameter_loop_steps.setToolTip(
+            "Number of simulations, including both range endpoints"
+        )
+        parameter_loop_form.addRow("Simulations", self.parameter_loop_steps)
+
+        self.parameter_loop_button = QPushButton("Run parameter loop")
+        self.parameter_loop_button.setObjectName("run_sequence_parameter_loop")
+        self.parameter_loop_button.setStyleSheet(inactive_button_style)
+        self.parameter_loop_button.clicked.connect(self._start_parameter_loop)
+        parameter_loop_form.addRow(self.parameter_loop_button)
+        self.parameter_loop_group.hide()
+
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self._cancel_active_run)
@@ -3381,6 +3702,7 @@ class SequenceSimulationWidget(QWidget):
         run_panel_layout.addWidget(self.status)
         self._sequence_run_widgets = (
             self.run_button,
+            self.open_parameter_loop_button,
             self.progress,
             self.simulation_time_label,
             self.export_button,
@@ -3765,6 +4087,7 @@ class SequenceSimulationWidget(QWidget):
         self._update_radial_me_bssfp_labels()
         self._update_me_bssfp_labels()
         self._object_source_changed()
+        self._refresh_parameter_loop_parameters()
 
         viewer_column = QWidget()
         viewer_column_layout = QVBoxLayout(viewer_column)
@@ -4284,6 +4607,22 @@ class SequenceSimulationWidget(QWidget):
             "Load an RF waveform directly into Sequence Mode and select it "
             "for this sequence"
         )
+        spsp_button = QPushButton("Design spectral-spatial pulse…")
+        spsp_button.setObjectName(f"{prefix}_rf_spsp_design_button")
+        spsp_button.setToolTip(
+            "Define spatial and spectral target ranges, design a coupled RF and "
+            "slice/slab-gradient waveform, and validate its position-frequency "
+            "response on a configurable Bloch simulation grid"
+        )
+        spsp_schedule_button = QPushButton("Manage pulse library and schedule…")
+        spsp_schedule_button.setObjectName(f"{prefix}_rf_spsp_schedule_button")
+        spsp_schedule_button.setToolTip(
+            "Create, duplicate, edit, delete, and order several SPSP pulses. "
+            "FLASH applies one schedule step to a complete image frame by default."
+        )
+        spsp_summary = QLabel("No spectral-spatial pulse designed")
+        spsp_summary.setObjectName(f"{prefix}_rf_spsp_summary")
+        spsp_summary.setWordWrap(True)
 
         for suffix, control in {
             "pulse_type": pulse_type_control,
@@ -4295,6 +4634,9 @@ class SequenceSimulationWidget(QWidget):
             "bandwidth_hz": bandwidth,
             "offset_hz": frequency_offset,
             "load_button": load_button,
+            "spsp_design_button": spsp_button,
+            "spsp_schedule_button": spsp_schedule_button,
+            "spsp_summary": spsp_summary,
         }.items():
             setattr(self, f"{prefix}_rf_{suffix}", control)
 
@@ -4314,9 +4656,29 @@ class SequenceSimulationWidget(QWidget):
             sinc_apodization_label,
         )
         setattr(self, f"{prefix}_rf_slr_sharpness_label", slr_sharpness_label)
-        form.addRow(f"{label_prefix} bandwidth (auto)", bandwidth)
+        bandwidth_label = QLabel(f"{label_prefix} bandwidth (auto)")
+        form.addRow(bandwidth_label, bandwidth)
+        setattr(self, f"{prefix}_rf_bandwidth_hz_label", bandwidth_label)
+        setattr(
+            self,
+            f"{prefix}_rf_bandwidth_default_label",
+            f"{label_prefix} bandwidth (auto)",
+        )
         form.addRow(f"{label_prefix} frequency offset", frequency_offset)
         form.addRow("Loaded waveform", load_button)
+        spsp_button_label = QLabel("SPSP designer")
+        spsp_summary_label = QLabel("SPSP design")
+        form.addRow(spsp_button_label, spsp_button)
+        spsp_schedule_button_label = QLabel("SPSP schedule")
+        form.addRow(spsp_schedule_button_label, spsp_schedule_button)
+        form.addRow(spsp_summary_label, spsp_summary)
+        setattr(self, f"{prefix}_rf_spsp_design_button_label", spsp_button_label)
+        setattr(
+            self,
+            f"{prefix}_rf_spsp_schedule_button_label",
+            spsp_schedule_button_label,
+        )
+        setattr(self, f"{prefix}_rf_spsp_summary_label", spsp_summary_label)
         return pulse_type_control
 
     def _connect_shared_rf_controls(self, prefix, callback):
@@ -4338,6 +4700,12 @@ class SequenceSimulationWidget(QWidget):
         getattr(self, f"{prefix}_rf_load_button").clicked.connect(
             lambda *_: self._load_sequence_rf_pulse(prefix)
         )
+        getattr(self, f"{prefix}_rf_spsp_design_button").clicked.connect(
+            lambda *_: self._design_spectral_spatial_pulse(prefix)
+        )
+        getattr(self, f"{prefix}_rf_spsp_schedule_button").clicked.connect(
+            lambda *_: self._manage_spectral_spatial_schedule(prefix)
+        )
         self._update_shared_rf_controls(prefix)
 
     def _shared_rf_control_changed(self, prefix, callback):
@@ -4346,7 +4714,11 @@ class SequenceSimulationWidget(QWidget):
 
     def _selected_shared_rf_pulse_type(self, prefix):
         text = getattr(self, f"{prefix}_rf_pulse_type").currentText()
-        return "designer" if text == "RF Pulse Designer" else text.lower()
+        if text == "RF Pulse Designer":
+            return "designer"
+        if text == "Spectral-spatial Designer":
+            return "spectral_spatial"
+        return text.lower()
 
     def _shared_rf_shape_parameter(self, prefix):
         """Return the fixed construction input, distinct from calculated TBW."""
@@ -4355,14 +4727,56 @@ class SequenceSimulationWidget(QWidget):
             if self._rf_designer_pulse_data is not None:
                 return self._rf_designer_pulse_data["time_bandwidth_product"]
             return 1.0
+        if pulse_type == "spectral_spatial":
+            if self._spectral_spatial_pulse_data is not None:
+                return self._spectral_spatial_pulse_data.spatial_time_bandwidth_product
+            return 1.0
         return analytic_rf_shape_parameter(
             pulse_type, getattr(self, f"{prefix}_rf_sinc_lobes").value()
         )
 
+    def _spectral_spatial_reference_mismatch(self, pulse, prefix):
+        """Return whether a peak-linked SPSP prescription needs retargeting."""
+        prescription = pulse.design_metadata.get("frequency_prescription", {})
+        if not isinstance(prescription, dict) or not prescription.get(
+            "bands_linked_to_peak_table", False
+        ):
+            return False
+        reference = prescription.get("reference", {})
+        if not isinstance(reference, dict):
+            return False
+        try:
+            return bool(
+                str(reference["nucleus"]) != self.nucleus.currentText()
+                or not np.isclose(
+                    float(reference["field_strength_t"]),
+                    self.field_strength_t.value(),
+                    atol=1e-12,
+                    rtol=0.0,
+                )
+                or not np.isclose(
+                    float(reference["sequence_reference_ppm"]),
+                    self.sequence_reference_ppm.value(),
+                    atol=1e-12,
+                    rtol=0.0,
+                )
+                or not np.isclose(
+                    float(reference["rf_carrier_offset_hz"]),
+                    getattr(self, f"{prefix}_rf_offset_hz").value(),
+                    atol=1e-9,
+                    rtol=0.0,
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
     def _update_shared_rf_controls(self, prefix):
         pulse_type = self._selected_shared_rf_pulse_type(prefix)
         loaded = pulse_type == "designer"
-        getattr(self, f"{prefix}_rf_duration_ms").setEnabled(not loaded)
+        spectral_spatial = pulse_type == "spectral_spatial"
+        getattr(self, f"{prefix}_rf_duration_ms").setEnabled(
+            not (loaded or spectral_spatial)
+        )
         getattr(self, f"{prefix}_rf_time_bandwidth_product").setEnabled(False)
         for suffix, visible in (
             ("sinc_lobes", pulse_type == "sinc"),
@@ -4375,6 +4789,12 @@ class SequenceSimulationWidget(QWidget):
             getattr(self, f"{prefix}_rf_{suffix}_label").setVisible(visible)
         offset = getattr(self, f"{prefix}_rf_offset_hz")
         offset.setEnabled(not loaded)
+        bandwidth_label = getattr(self, f"{prefix}_rf_bandwidth_hz_label")
+        bandwidth_label.setText(
+            "SPSP alias spacing"
+            if spectral_spatial
+            else getattr(self, f"{prefix}_rf_bandwidth_default_label")
+        )
         if loaded and self._rf_designer_pulse_data is not None:
             duration = getattr(self, f"{prefix}_rf_duration_ms")
             previous = duration.blockSignals(True)
@@ -4383,9 +4803,56 @@ class SequenceSimulationWidget(QWidget):
             previous = offset.blockSignals(True)
             offset.setValue(self._rf_designer_pulse_data["frequency_offset_hz"])
             offset.blockSignals(previous)
+        if spectral_spatial and self._spectral_spatial_pulse_data is not None:
+            duration = getattr(self, f"{prefix}_rf_duration_ms")
+            previous = duration.blockSignals(True)
+            duration.setValue(self._spectral_spatial_pulse_data.duration_s * 1000.0)
+            duration.blockSignals(previous)
+
+        for suffix in (
+            "spsp_design_button",
+            "spsp_schedule_button",
+            "spsp_summary",
+        ):
+            getattr(self, f"{prefix}_rf_{suffix}").setVisible(spectral_spatial)
+            getattr(self, f"{prefix}_rf_{suffix}_label").setVisible(spectral_spatial)
+        summary = getattr(self, f"{prefix}_rf_spsp_summary")
+        if self._spectral_spatial_pulse_data is None:
+            summary.setText("No spectral-spatial pulse designed")
+        else:
+            pulse = self._spectral_spatial_pulse_data
+            mismatch = (
+                " · nucleus mismatch"
+                if pulse.nucleus != self.nucleus.currentText()
+                else ""
+            )
+            if self._spectral_spatial_reference_mismatch(pulse, prefix):
+                mismatch += " · frequency reference changed: redesign required"
+            spatial_low_mm = (
+                pulse.reference_spatial_center_m - pulse.reference_thickness_m / 2.0
+            ) * 1000.0
+            spatial_high_mm = (
+                pulse.reference_spatial_center_m + pulse.reference_thickness_m / 2.0
+            ) * 1000.0
+            spectral_targets = ", ".join(
+                f"{band.center_hz - band.width_hz / 2.0:g}…"
+                f"{band.center_hz + band.width_hz / 2.0:g} Hz"
+                for band in pulse.bands
+            )
+            summary.setText(
+                f"{pulse.name} · {pulse.duration_s * 1000:.3f} ms · "
+                f"alias spacing {pulse.spectral_alias_bandwidth_hz:.1f} Hz · "
+                f"target z {spatial_low_mm:g}…{spatial_high_mm:g} mm · "
+                f"target f {spectral_targets} · {pulse.nucleus}{mismatch} · "
+                f"library {len(self._spectral_spatial_pulse_library)} pulse(s), "
+                f"schedule {len(self._spectral_spatial_schedule.expanded_entries())} "
+                f"enabled step(s), {self._spectral_spatial_schedule.selection_level} level"
+            )
         duration_s = getattr(self, f"{prefix}_rf_duration_ms").value() / 1000.0
         if loaded and self._rf_designer_pulse_data is not None:
             tbw = self._rf_designer_pulse_data["time_bandwidth_product"]
+        elif spectral_spatial and self._spectral_spatial_pulse_data is not None:
+            tbw = self._spectral_spatial_pulse_data.spatial_time_bandwidth_product
         else:
             shape_parameter = self._shared_rf_shape_parameter(prefix)
             try:
@@ -4407,7 +4874,12 @@ class SequenceSimulationWidget(QWidget):
         tbw_control.blockSignals(previous)
         bandwidth = getattr(self, f"{prefix}_rf_bandwidth_hz")
         previous = bandwidth.blockSignals(True)
-        bandwidth.setValue(tbw / duration_s)
+        if spectral_spatial and self._spectral_spatial_pulse_data is not None:
+            bandwidth.setValue(
+                self._spectral_spatial_pulse_data.spectral_alias_bandwidth_hz
+            )
+        else:
+            bandwidth.setValue(tbw / duration_s)
         bandwidth.blockSignals(previous)
 
     def _shared_rf_parameters(self, prefix):
@@ -4434,6 +4906,37 @@ class SequenceSimulationWidget(QWidget):
                 rf_custom_name=data["name"],
                 rf_frequency_offset_hz=data["frequency_offset_hz"],
             )
+        elif pulse_type == "spectral_spatial":
+            if self._spectral_spatial_pulse_data is None:
+                raise ValueError(self._spectral_spatial_pulse_error)
+            pulse = self._spectral_spatial_pulse_data
+            if pulse.nucleus != self.nucleus.currentText():
+                raise ValueError(
+                    f"The spectral-spatial pulse was designed for {pulse.nucleus}, "
+                    f"but Sequence Mode currently uses {self.nucleus.currentText()}. "
+                    "Open the SPSP designer and redesign the pulse."
+                )
+            if self._spectral_spatial_reference_mismatch(pulse, prefix):
+                raise ValueError(
+                    "The sequence reference, B0 or RF carrier changed after this "
+                    "metabolite-targeted spectral-spatial pulse was designed. "
+                    "Open the SPSP designer once to recalculate the peak offsets "
+                    "and redesign the pulse."
+                )
+            parameters.update(
+                rf_duration_s=pulse.duration_s,
+                rf_time_bandwidth_product=(pulse.spatial_time_bandwidth_product),
+                rf_spectral_spatial_pulse=pulse.to_dict(),
+            )
+            if prefix == "flash" and self._spectral_spatial_schedule.entries:
+                parameters.update(
+                    rf_spectral_spatial_library=(
+                        self._spectral_spatial_pulse_library.to_dict()
+                    ),
+                    rf_spectral_spatial_schedule=(
+                        self._spectral_spatial_schedule.to_dict()
+                    ),
+                )
         return parameters
 
     @staticmethod
@@ -4638,6 +5141,360 @@ class SequenceSimulationWidget(QWidget):
         phase.currentIndexChanged.connect(lambda *_: axes_changed(phase))
         self._update_two_dimensional_orientation_state(preset, read, phase, slice_axis)
 
+    def _active_sequence_parameter_group(self):
+        """Return the visible generated-sequence form without naming a sequence."""
+        controls = self.controls_scroll.widget()
+        if controls is None:
+            return None
+        for group in controls.findChildren(
+            QGroupBox, options=Qt.FindDirectChildrenOnly
+        ):
+            if group.isHidden() or not isinstance(group.layout(), QFormLayout):
+                continue
+            if group.isAncestorOf(self.object_source):
+                continue
+            return group
+        return None
+
+    @staticmethod
+    def _plain_parameter_label(text):
+        text = html.unescape(re.sub(r"<[^>]+>", "", str(text or "")))
+        return " ".join(text.replace("&", "").split())
+
+    def _form_label_for_parameter(self, group, widget):
+        forms = []
+        if isinstance(group.layout(), QFormLayout):
+            forms.append(group.layout())
+        forms.extend(group.findChildren(QFormLayout))
+        for form in forms:
+            label = form.labelForField(widget)
+            if isinstance(label, QLabel):
+                text = self._plain_parameter_label(label.text())
+                if text:
+                    return text
+        return ""
+
+    def _sequence_loop_parameters(self):
+        """Discover loopable controls without knowing the active sequence type."""
+        parameters = [
+            _SequenceLoopParameter(
+                key="__rf_scale__",
+                label="RF / flip-angle scale (all pulses)",
+                unit="×",
+                minimum=0.0,
+                maximum=10.0,
+                decimals=4,
+            ),
+            _SequenceLoopParameter(
+                key="sequence_reference_ppm",
+                label="Sequence reference",
+                unit="ppm",
+                minimum=float(self.sequence_reference_ppm.minimum()),
+                maximum=float(self.sequence_reference_ppm.maximum()),
+                decimals=int(self.sequence_reference_ppm.decimals()),
+                widget=self.sequence_reference_ppm,
+            ),
+            _SequenceLoopParameter(
+                key="simulation_timestep_us",
+                label="Simulation time resolution",
+                unit="µs",
+                minimum=float(self.simulation_timestep_us.minimum()),
+                maximum=float(self.simulation_timestep_us.maximum()),
+                decimals=int(self.simulation_timestep_us.decimals()),
+                widget=self.simulation_timestep_us,
+            ),
+        ]
+        group = self._active_sequence_parameter_group()
+        if group is None:
+            return parameters
+
+        discovered = []
+        seen_widgets = set()
+        for key, widget in vars(self).items():
+            if not isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+                continue
+            if widget in seen_widgets or not group.isAncestorOf(widget):
+                continue
+            if not widget.isEnabled() or not widget.isVisibleTo(group):
+                continue
+            seen_widgets.add(widget)
+            label = self._form_label_for_parameter(group, widget)
+            if not label:
+                label = " ".join(part.capitalize() for part in key.split("_"))
+            suffix = self._plain_parameter_label(widget.suffix())
+            discovered.append(
+                _SequenceLoopParameter(
+                    key=key,
+                    label=label,
+                    unit=suffix,
+                    minimum=float(widget.minimum()),
+                    maximum=float(widget.maximum()),
+                    decimals=(
+                        int(widget.decimals())
+                        if isinstance(widget, QDoubleSpinBox)
+                        else 0
+                    ),
+                    integer=isinstance(widget, QSpinBox),
+                    widget=widget,
+                )
+            )
+
+        # Flip-angle controls are the most common loop target. The remaining
+        # controls retain construction order, which follows their form order.
+        discovered.sort(
+            key=lambda parameter: (0 if "flip angle" in parameter.label.lower() else 1,)
+        )
+        labels = {}
+        for parameter in discovered:
+            labels[parameter.label] = labels.get(parameter.label, 0) + 1
+        for parameter in discovered:
+            if labels[parameter.label] > 1:
+                parameter = replace(
+                    parameter,
+                    label=f"{parameter.label} ({parameter.key})",
+                )
+            parameters.append(parameter)
+        return parameters
+
+    def _refresh_parameter_loop_parameters(self):
+        if not hasattr(self, "parameter_loop_parameter"):
+            return
+        if self._parameter_loop_state is not None:
+            return
+        selected = self.parameter_loop_parameter.currentData()
+        selected_key = getattr(selected, "key", None)
+        previous = self.parameter_loop_parameter.blockSignals(True)
+        self.parameter_loop_parameter.clear()
+        selected_index = -1
+        for index, parameter in enumerate(self._sequence_loop_parameters()):
+            self.parameter_loop_parameter.addItem(parameter.label, parameter)
+            if parameter.key == selected_key:
+                selected_index = index
+        if selected_index >= 0:
+            self.parameter_loop_parameter.setCurrentIndex(selected_index)
+        self.parameter_loop_parameter.blockSignals(previous)
+        self._parameter_loop_parameter_changed()
+        self._update_run_action_availability()
+
+    def prepare_parameter_loop_workspace(self):
+        """Synchronize the on-demand loop editor with the active sequence."""
+        self._refresh_parameter_loop_parameters()
+        self._update_run_action_availability()
+
+    def _parameter_loop_parameter_changed(self, *_):
+        parameter = self.parameter_loop_parameter.currentData()
+        if not isinstance(parameter, _SequenceLoopParameter):
+            self.parameter_loop_button.setEnabled(False)
+            return
+        decimals = max(0, int(parameter.decimals))
+        for control in (self.parameter_loop_start, self.parameter_loop_stop):
+            previous = control.blockSignals(True)
+            control.setDecimals(decimals)
+            control.setRange(parameter.minimum, parameter.maximum)
+            control.setSuffix(f" {parameter.unit}" if parameter.unit else "")
+            control.blockSignals(previous)
+        current = float(parameter.current_value())
+        if np.isclose(current, 0.0):
+            delta = max(
+                10.0 ** (-decimals),
+                (
+                    float(parameter.widget.singleStep())
+                    if parameter.widget is not None
+                    else 0.25
+                ),
+            )
+            start = max(parameter.minimum, current - 2.0 * delta)
+            stop = min(parameter.maximum, current + 2.0 * delta)
+        else:
+            start = max(parameter.minimum, min(parameter.maximum, 0.5 * current))
+            stop = max(parameter.minimum, min(parameter.maximum, 1.5 * current))
+        self.parameter_loop_start.setValue(start)
+        self.parameter_loop_stop.setValue(stop)
+        self._update_run_action_availability()
+
+    @staticmethod
+    def _program_with_rf_scale(program, scale):
+        """Scale every RF event while preserving all timing and acquisition data."""
+        scale = float(scale)
+        events = tuple(
+            (
+                replace(event, samples_hz=np.asarray(event.samples_hz) * scale)
+                if isinstance(event, RFEvent)
+                else event
+            )
+            for event in program.events
+        )
+        metadata = dict(program.metadata)
+        metadata["ParameterLoopRFScale"] = scale
+        return replace(program, events=events, metadata=metadata)
+
+    def _parameter_loop_values(self, parameter):
+        values = np.linspace(
+            self.parameter_loop_start.value(),
+            self.parameter_loop_stop.value(),
+            self.parameter_loop_steps.value(),
+            dtype=float,
+        )
+        if parameter.integer:
+            values = np.rint(values).astype(np.int64)
+        return values
+
+    def _set_parameter_loop_controls_locked(self, locked):
+        for control in (
+            self.sequence_source,
+            self.parameter_loop_parameter,
+            self.parameter_loop_start,
+            self.parameter_loop_stop,
+            self.parameter_loop_steps,
+        ):
+            control.setEnabled(not locked)
+        group = self._active_sequence_parameter_group()
+        if group is not None:
+            group.setEnabled(not locked)
+        self.parameter_loop_button.setEnabled(False if locked else True)
+
+    def _start_parameter_loop(self):
+        if self._parameter_loop_state is not None:
+            return
+        parameter = self.parameter_loop_parameter.currentData()
+        if not isinstance(parameter, _SequenceLoopParameter):
+            QMessageBox.warning(self, "Parameter loop", "Select a loop parameter.")
+            return
+        if self.object_source.currentIndex() == 2:
+            QMessageBox.information(
+                self,
+                "Spin probe mode",
+                "Parameter loops run sequence simulations. Select a phantom or "
+                "the built-in quick object first.",
+            )
+            return
+        if self.sequence_source.currentIndex() in self.GENERATED_SOURCES:
+            if not self._ensure_current_generated_sequence():
+                self._show_generation_error_dialog()
+                return
+        if self.program is None:
+            QMessageBox.warning(
+                self, "No sequence", "Load or generate a sequence first."
+            )
+            return
+
+        values = self._parameter_loop_values(parameter)
+        self._parameter_loop_state = {
+            "parameter": parameter,
+            "values": values,
+            "index": 0,
+            "completed": 0,
+            "cancel_requested": False,
+            "base_program": self.program,
+            "current_value": None,
+        }
+        self._set_parameter_loop_controls_locked(True)
+        self.run_button.setEnabled(False)
+        self.export_button.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self._run_parameter_loop_iteration()
+
+    def _run_parameter_loop_iteration(self):
+        state = self._parameter_loop_state
+        if state is None:
+            return
+        if state["cancel_requested"] or state["index"] >= len(state["values"]):
+            self._finish_parameter_loop(cancelled=state["cancel_requested"])
+            return
+        parameter = state["parameter"]
+        requested_value = state["values"][state["index"]]
+        if parameter.widget is None:
+            actual_value = float(requested_value)
+            self.program = self._program_with_rf_scale(
+                state["base_program"], actual_value
+            )
+            self._show_program(compiled=self._acquisition_compiled)
+        else:
+            parameter.widget.setValue(
+                int(requested_value) if parameter.integer else float(requested_value)
+            )
+            actual_value = parameter.widget.value()
+        state["current_value"] = float(actual_value)
+        self._status_update(
+            f"Preparing {parameter.label} = "
+            f"{self._format_parameter_loop_value(parameter, actual_value)}"
+        )
+        if not self._run():
+            self._finish_parameter_loop(
+                error="The next loop simulation could not start."
+            )
+
+    @staticmethod
+    def _format_parameter_loop_value(parameter, value):
+        if parameter.integer:
+            number = str(int(round(float(value))))
+        else:
+            number = f"{float(value):.{max(1, parameter.decimals)}g}"
+        if not parameter.unit:
+            return number
+        separator = "" if parameter.unit in {"°", "×"} else " "
+        return f"{number}{separator}{parameter.unit}"
+
+    def _parameter_loop_metadata(self):
+        state = self._parameter_loop_state
+        if state is None or state["current_value"] is None:
+            return None
+        parameter = state["parameter"]
+        return {
+            "parameter_key": parameter.key,
+            "parameter_label": parameter.label,
+            "value": float(state["current_value"]),
+            "unit": parameter.unit,
+            "decimals": int(parameter.decimals),
+            "integer": bool(parameter.integer),
+            "index": int(state["index"]),
+            "count": int(len(state["values"])),
+        }
+
+    def _parameter_loop_iteration_finished(self):
+        state = self._parameter_loop_state
+        if state is None:
+            return
+        state["completed"] += 1
+        state["index"] += 1
+        if state["cancel_requested"] or state["index"] >= len(state["values"]):
+            self._finish_parameter_loop(cancelled=state["cancel_requested"])
+        else:
+            QTimer.singleShot(0, self._run_parameter_loop_iteration)
+
+    def _finish_parameter_loop(self, *, cancelled=False, error=""):
+        state = self._parameter_loop_state
+        if state is None:
+            return
+        completed = int(state["completed"])
+        total = int(len(state["values"]))
+        self._parameter_loop_state = None
+        self._set_parameter_loop_controls_locked(False)
+        self._update_run_action_availability()
+        QTimer.singleShot(0, self._update_run_action_availability)
+        self.cancel_button.setEnabled(False)
+        if error:
+            self.status.setText(
+                f"Parameter loop stopped after {completed}/{total}: {error}"
+            )
+        elif cancelled:
+            self.status.setText(
+                f"Parameter loop cancelled after {completed}/{total} runs"
+            )
+        else:
+            self.progress.setValue(self.progress.maximum())
+            self.progress.setFormat(f"Loop complete · {completed}/{total} runs")
+            self.status.setText(
+                f"Parameter loop complete — {completed} simulations retained in "
+                "Session simulations"
+            )
+
+    def _parameter_loop_prefix(self):
+        state = self._parameter_loop_state
+        if state is None:
+            return ""
+        return f"Loop {state['index'] + 1}/{len(state['values'])} · "
+
     def _object_source_changed(self, *_):
         """Expose controls only for the object source that actually owns them."""
         source_index = self.object_source.currentIndex()
@@ -4679,7 +5536,8 @@ class SequenceSimulationWidget(QWidget):
         probe_selected = self.object_source.currentIndex() == 2
         probe_running = self.probe_worker is not None and self.probe_worker.isRunning()
         sequence_running = self.worker is not None and self.worker.isRunning()
-        idle = not probe_running and not sequence_running
+        loop_running = self._parameter_loop_state is not None
+        idle = not probe_running and not sequence_running and not loop_running
         self.run_probe_button.setEnabled(
             probe_selected and self.program is not None and idle
         )
@@ -4688,6 +5546,13 @@ class SequenceSimulationWidget(QWidget):
         )
         self.run_button.setEnabled(
             not probe_selected and self.program is not None and idle
+        )
+        self.parameter_loop_button.setEnabled(
+            isinstance(
+                self.parameter_loop_parameter.currentData(),
+                _SequenceLoopParameter,
+            )
+            and idle
         )
 
     def _selected_designed_phantom(self):
@@ -4793,6 +5658,7 @@ class SequenceSimulationWidget(QWidget):
         self._emit_physical_b1_changed()
 
     def _request_generated_sequence_refresh(self):
+        self._refresh_parameter_loop_parameters()
         if self._restoring_session_run:
             return False
         if self.sequence_source.currentIndex() not in self.GENERATED_SOURCES:
@@ -4912,11 +5778,13 @@ class SequenceSimulationWidget(QWidget):
                 text = "ppm conversion applies after a spectral phantom is selected."
                 conversion_enabled = False
         self.field_strength_t.setEnabled(conversion_enabled)
-        self.nucleus.setEnabled(conversion_enabled)
         self.field_strength_t.setVisible(conversion_enabled)
         self.field_strength_label.setVisible(conversion_enabled)
-        self.nucleus.setVisible(conversion_enabled)
-        self.nucleus_label.setVisible(conversion_enabled)
+        # Nucleus is sequence state as well as a ppm conversion setting. Keep
+        # it available even for conventional fixed-Hz phantoms.
+        self.nucleus.setEnabled(True)
+        self.nucleus.setVisible(True)
+        self.nucleus_label.setVisible(True)
         self.frequency_reference_info.setText(text)
         self.frequency_reference_info.hide()
         self.frequency_reference_label.hide()
@@ -4924,6 +5792,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _simulation_object_summary_rows(self):
         rows = [
+            ("Sequence nucleus", self.nucleus.currentText()),
             (
                 "Sequence reference",
                 f"{self.sequence_reference_ppm.value():g} ppm (sequence 0 Hz)",
@@ -5167,6 +6036,7 @@ class SequenceSimulationWidget(QWidget):
         )
         if self._restoring_session_run:
             self._update_spoiling_quality()
+            self._refresh_parameter_loop_parameters()
             return
         if source_index == self.INTERNAL_SOURCE:
             self._sequence_generation_pending = False
@@ -5178,6 +6048,7 @@ class SequenceSimulationWidget(QWidget):
             if self.sequence_live_preview.isChecked():
                 self._reload_selected_generated_sequence()
         self._update_spoiling_quality()
+        self._refresh_parameter_loop_parameters()
 
     def _three_dimensional_encoding_frame(self, source_index=None):
         if source_index is None:
@@ -6281,6 +7152,23 @@ class SequenceSimulationWidget(QWidget):
 
     def _frequency_reference_changed(self, *_):
         self._update_frequency_reference_info()
+        active_spsp = False
+        for prefix in (
+            "epi",
+            "epsi",
+            "csi",
+            "flash",
+            "bssfp",
+            "ss_bssfp",
+            "radial_me",
+            "me_bssfp",
+        ):
+            if not hasattr(self, f"{prefix}_rf_pulse_type"):
+                continue
+            self._update_shared_rf_controls(prefix)
+            active_spsp = active_spsp or (
+                self._selected_shared_rf_pulse_type(prefix) == "spectral_spatial"
+            )
         phantom = self._selected_designed_phantom()
         if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
             phantom.metadata["sequence_reference_ppm"] = (
@@ -6300,7 +7188,7 @@ class SequenceSimulationWidget(QWidget):
                 definitions["SequenceReferencePpm"] = (
                     self.sequence_reference_ppm.value()
                 )
-        if self.sequence_source.currentIndex() in {4, 5, 6}:
+        if self.sequence_source.currentIndex() in {4, 5, 6} or active_spsp:
             self._request_generated_sequence_refresh()
 
     def _ernst_angle_context(self, repetition_time_s):
@@ -6776,6 +7664,7 @@ class SequenceSimulationWidget(QWidget):
             "spoiler_cycles_per_slice": self.epi_spoiler_cycles_per_slice.value(),
             "spoiler_cycles_per_voxel": self.epi_spoiler_cycles_per_voxel.value(),
             "spoiler_duration_s": self.epi_spoiler_duration_ms.value() / 1000.0,
+            "nucleus": self.nucleus.currentText(),
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
         parameters.update(self._epi_rf_parameters())
@@ -6827,6 +7716,7 @@ class SequenceSimulationWidget(QWidget):
             "encoding_axes": self._two_dimensional_encoding_frame(
                 self.EPSI_MGE_SOURCE
             ).axis_codes,
+            "nucleus": self.nucleus.currentText(),
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
         parameters.update(self._shared_rf_parameters("epsi"))
@@ -6869,6 +7759,7 @@ class SequenceSimulationWidget(QWidget):
             "spoiler_cycles_per_slice": self.csi_spoiler_cycles_per_slice.value(),
             "spoiler_cycles_per_voxel": self.csi_spoiler_cycles_per_voxel.value(),
             "spoiler_duration_s": self.csi_spoiler_duration_ms.value() / 1000.0,
+            "nucleus": self.nucleus.currentText(),
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
         parameters.update(self._shared_rf_parameters("csi"))
@@ -6910,6 +7801,7 @@ class SequenceSimulationWidget(QWidget):
             "encoding_axes": self._two_dimensional_encoding_frame(
                 self.FLASH_SOURCE
             ).axis_codes,
+            "nucleus": self.nucleus.currentText(),
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
         parameters.update(self._shared_rf_parameters("flash"))
@@ -6945,6 +7837,7 @@ class SequenceSimulationWidget(QWidget):
             "encoding_axes": self._three_dimensional_encoding_frame(
                 self.BSSFP_SOURCE
             ).axis_codes,
+            "nucleus": self.nucleus.currentText(),
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
         parameters.update(self._shared_rf_parameters("bssfp"))
@@ -9087,6 +9980,8 @@ class SequenceSimulationWidget(QWidget):
 
     def _cancel_active_run(self):
         """Cancel whichever sequence or probe worker currently owns the run area."""
+        if self._parameter_loop_state is not None:
+            self._parameter_loop_state["cancel_requested"] = True
         probe_running = self.probe_worker is not None and self.probe_worker.isRunning()
         sequence_running = self.worker is not None and self.worker.isRunning()
         if probe_running:
@@ -9546,6 +10441,120 @@ class SequenceSimulationWidget(QWidget):
         dialog.setEscapeButton(QMessageBox.Cancel)
         return dialog.exec_() == QMessageBox.Yes
 
+    def _sequence_spatial_grid_for_resolution_warning(self):
+        """Return the reconstructed spatial grid in read/phase/partition order."""
+        if self.program is None:
+            return None
+        definitions = dict(self.program.metadata.get("definitions", {}))
+        if self.acquisition_volumes is not None:
+            acquisition = self.acquisition_volumes
+            return acquisition.matrix, acquisition.fov_m, acquisition.encoding_frame
+        if self.acquisition is not None:
+            acquisition = self.acquisition
+            return (
+                (acquisition.read_matrix, acquisition.phase_matrix),
+                acquisition.fov_m,
+                acquisition.encoding_frame,
+            )
+        try:
+            frame = EncodingFrame.from_definitions(definitions)
+        except (TypeError, ValueError):
+            return None
+        if self.spectroscopic_acquisition is not None:
+            acquisition = self.spectroscopic_acquisition
+            return acquisition.matrix, acquisition.fov_m, frame
+        if self.spiral_acquisition is not None:
+            acquisition = self.spiral_acquisition
+            return acquisition.matrix, acquisition.fov_m, frame
+
+        # Radial and some imported Pulseq acquisitions have no Cartesian
+        # layout, but may still declare a reconstructable spatial grid.
+        normalized = {str(key).lower(): value for key, value in definitions.items()}
+        matrix_value = normalized.get(
+            "encodingmatrixsize", normalized.get("matrixsize")
+        )
+        fov_value = normalized.get("encodingfov", normalized.get("fov"))
+        if matrix_value is None or fov_value is None:
+            return None
+        try:
+            matrix = numeric_definition_array(matrix_value, "spatial matrix")
+            fov = numeric_definition_array(fov_value, "spatial FOV")
+        except ValueError:
+            return None
+        dimensions = min(matrix.size, fov.size, 3)
+        if dimensions < 2:
+            return None
+        if dimensions == 3 and (
+            matrix[2] <= 1
+            or (
+                "spectralpoints" in normalized
+                and "encodingmatrixsize" not in normalized
+            )
+        ):
+            dimensions = 2
+        matrix = matrix[:dimensions]
+        fov = fov[:dimensions]
+        if (
+            not np.all(np.isfinite(matrix))
+            or not np.all(np.isfinite(fov))
+            or np.any(matrix <= 0)
+            or np.any(fov <= 0)
+            or not np.allclose(matrix, np.rint(matrix))
+        ):
+            return None
+        return tuple(int(value) for value in matrix), tuple(fov), frame
+
+    def _confirm_phantom_resolution_for_run(self) -> bool:
+        """Warn when the phantom cells are wider than sequence image pixels."""
+        if self.phantom is None:
+            return True
+        grid = self._sequence_spatial_grid_for_resolution_warning()
+        if grid is None:
+            return True
+        matrix, fov_m, frame = grid
+        voxel_basis = phantom_voxel_basis_m(self.phantom)
+        phantom_widths = np.sum(np.abs(frame.matrix.T @ voxel_basis), axis=1)
+        sequence_widths = np.asarray(fov_m, dtype=float) / np.asarray(
+            matrix, dtype=float
+        )
+        roles = ("Read", "Phase", "Partition")
+        axis_names = (
+            tuple(code[-1] for code in frame.axis_codes)
+            if frame.is_axis_aligned
+            else ("oblique", "oblique", "oblique")
+        )
+        undersampled = [
+            (
+                f"{roles[index]} / {axis_names[index]}",
+                phantom_width,
+                sequence_width,
+            )
+            for index, (phantom_width, sequence_width) in enumerate(
+                zip(phantom_widths, sequence_widths)
+            )
+            if phantom_width > sequence_width
+            and not np.isclose(phantom_width, sequence_width, rtol=1e-9, atol=1e-12)
+        ]
+        if not undersampled:
+            return True
+        details = "\n".join(
+            f"• {axis}: phantom voxel {phantom_width * 1000:.4g} mm > "
+            f"sequence pixel {sequence_width * 1000:.4g} mm"
+            for axis, phantom_width, sequence_width in undersampled
+        )
+        answer = QMessageBox.warning(
+            self,
+            "Phantom resolution is lower than sequence resolution",
+            "The phantom grid is coarser than the sequence's spatial sampling "
+            f"in the following direction(s):\n\n{details}\n\n"
+            "This can cause artificial stripes or ringing, especially with "
+            "one spin per phantom voxel. Increase the phantom resolution or "
+            "reduce the sequence matrix. Continue the simulation anyway?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
+
     def _run(self):
         if self.probe_worker is not None and self.probe_worker.isRunning():
             QMessageBox.warning(
@@ -9553,7 +10562,7 @@ class SequenceSimulationWidget(QWidget):
                 "Probe running",
                 "Cancel the spin probe before running a sequence simulation.",
             )
-            return
+            return False
         if self.object_source.currentIndex() == 2:
             QMessageBox.information(
                 self,
@@ -9561,18 +10570,23 @@ class SequenceSimulationWidget(QWidget):
                 "Use Run spectral probe or Run geometry probe in the spin-probe "
                 "configuration panel.",
             )
-            return
+            return False
         if self.sequence_source.currentIndex() in self.GENERATED_SOURCES:
             if not self._ensure_current_generated_sequence():
                 self._show_generation_error_dialog()
-                return
+                return False
+        loop_state = self._parameter_loop_state
+        if loop_state is not None:
+            loop_parameter = loop_state["parameter"]
+            if loop_parameter.widget is not None:
+                loop_state["current_value"] = float(loop_parameter.widget.value())
         if self.program is None:
             QMessageBox.warning(
                 self,
                 "No sequence",
                 "Choose or load a sequence, or click Generate sequence first.",
             )
-            return
+            return False
         try:
             self._build_phantom()
             checkpoints = self._checkpoint_seconds()
@@ -9586,11 +10600,13 @@ class SequenceSimulationWidget(QWidget):
                 self._show_no_phantom_dialog()
             else:
                 QMessageBox.critical(self, "Invalid simulation", str(exc))
-            return
+            return False
         if not self._confirm_sequence_reference_for_run():
-            return
+            return False
         if not self._confirm_generated_sequence_fov():
-            return
+            return False
+        if not self._confirm_phantom_resolution_for_run():
+            return False
         self.run_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.export_button.setEnabled(False)
@@ -9635,14 +10651,16 @@ class SequenceSimulationWidget(QWidget):
         self.worker.result_ready.connect(self._finished)
         self.worker.failed.connect(self._failed)
         self.worker.start()
+        return True
 
     def _status_update(self, message):
         """Show worker stages in both the workspace and the main log."""
         message = str(message)
-        self.status.setText(message)
+        display_message = f"{self._parameter_loop_prefix()}{message}"
+        self.status.setText(display_message)
         logger = getattr(self.window(), "log_message", None)
         if callable(logger):
-            logger(f"Sequence simulation: {message}")
+            logger(f"Sequence simulation: {display_message}")
 
     def _progress(self, done, total):
         total = max(1, int(total))
@@ -9689,7 +10707,9 @@ class SequenceSimulationWidget(QWidget):
             unit = "Component"
         else:
             unit = "Chunk"
-        status_text = f"{unit} {done}/{total} · {percent}%"
+        status_text = (
+            f"{self._parameter_loop_prefix()}{unit} {done}/{total} · {percent}%"
+        )
         if eta_text is not None:
             status_text += f" · approximately {eta_text} remaining"
         self.status.setText(status_text)
@@ -9773,19 +10793,16 @@ class SequenceSimulationWidget(QWidget):
 
     def set_sequence_kernel(self, kernel):
         """Apply the persistent sequence-kernel setting to future runs."""
-        if kernel not in {"optimized", "reference"}:
-            raise ValueError("sequence kernel must be 'optimized' or 'reference'")
+        if kernel not in SEQUENCE_KERNEL_NAMES:
+            raise ValueError(
+                "sequence kernel must be 'optimized', 'reference', or "
+                "'strict_reference'"
+            )
         self.simulator.sequence_kernel = kernel
 
     def set_dynamic_sequence_kernel(self, kernel):
         """Apply the dynamic two-pool kernel setting to future runs."""
-        if kernel not in {
-            "optimized",
-            "native_parallel",
-            "native_serial",
-            "metal_hybrid",
-            "reference",
-        }:
+        if kernel not in DYNAMIC_KERNEL_NAMES:
             raise ValueError("unsupported dynamic sequence kernel")
         self.simulator.dynamic_sequence_kernel = kernel
 
@@ -10062,6 +11079,9 @@ class SequenceSimulationWidget(QWidget):
             animation = result.animation
             animation_message = result.animation_message
             result = result.result
+        loop_metadata = self._parameter_loop_metadata() if record_run else None
+        if loop_metadata is not None:
+            result.metadata["parameter_loop"] = loop_metadata
         if record_run:
             elapsed_s = self._record_simulation_timing(result)
         else:
@@ -10070,18 +11090,7 @@ class SequenceSimulationWidget(QWidget):
         self.magnetization_animation = animation
         self._reset_run_controls(completed=True, elapsed_s=elapsed_s)
         self.export_button.setEnabled(True)
-        if result.metadata.get("requested_sequence_kernel") == "metal_hybrid":
-            if result.metadata.get("hybrid_fallback_used"):
-                completion_message = (
-                    "Simulation complete — GPU check not used; exact CPU result shown"
-                )
-            else:
-                completion_message = (
-                    "Simulation complete — checked CPU + GPU result shown"
-                )
-        else:
-            completion_message = "Simulation complete"
-        self._status_update(completion_message)
+        self._status_update(self._execution_completion_message(result.metadata))
         self._set_sequence_cursor(1.0)
         self._configure_frame_selector()
         self._configure_spectroscopy_selectors()
@@ -10166,6 +11175,89 @@ class SequenceSimulationWidget(QWidget):
                 animation=animation,
                 animation_message=animation_message,
             )
+            if loop_metadata is not None:
+                self._parameter_loop_iteration_finished()
+
+    @staticmethod
+    def _execution_completion_message(metadata):
+        """Return a readable summary of the requested and actual backend."""
+        metadata = dict(metadata or {})
+        kernel_labels = {
+            "optimized": "Optimized CPU",
+            "native_parallel": "Native automatic",
+            "native_serial": "Native serial",
+            "reference": "Reference",
+            "strict_reference": "Strict reference",
+            "metal_hybrid": "CPU + Apple GPU (experimental)",
+        }
+        contract_labels = {
+            "bitwise": "bitwise contract",
+            "float64-close": "tight Float64 contract",
+            "strict-float64": "strict Float64 contract",
+            "legacy-fast-math": "legacy Float64 contract",
+            "experimental-mixed": "experimental mixed-precision contract",
+        }
+
+        actual = str(metadata.get("sequence_kernel") or "").strip()
+        requested = str(metadata.get("requested_sequence_kernel") or actual).strip()
+        actual_label = kernel_labels.get(actual, actual or "unknown CPU path")
+        requested_label = kernel_labels.get(requested, requested or "unknown path")
+        if requested and actual and requested != actual:
+            message = (
+                f"Simulation complete — requested {requested_label}; "
+                f"used {actual_label}"
+            )
+        else:
+            message = f"Simulation complete — used {actual_label}"
+
+        details = []
+        effective_threads = metadata.get("effective_threads")
+        if effective_threads is None:
+            effective_threads = metadata.get("native_parallel_threads")
+        try:
+            effective_threads = int(effective_threads)
+        except (TypeError, ValueError):
+            effective_threads = 0
+        if effective_threads > 0:
+            suffix = "thread" if effective_threads == 1 else "threads"
+            details.append(f"{effective_threads} CPU {suffix}")
+
+        contract = str(metadata.get("numerical_contract") or "").strip()
+        if contract:
+            details.append(contract_labels.get(contract, contract))
+
+        if metadata.get("native_full_plan_enabled"):
+            model = str(metadata.get("native_full_plan_model") or "").replace("-", " ")
+            details.append(f"complete native plan{f' ({model})' if model else ''}")
+
+        fallback_reason = (
+            metadata.get("hybrid_fallback_reason")
+            or metadata.get("native_fallback_reason")
+            or metadata.get("fallback_reason")
+        )
+        fallback_used = bool(
+            metadata.get("hybrid_fallback_used")
+            or (requested and actual and requested != actual)
+        )
+        if fallback_used:
+            details.append(
+                f"fallback: {fallback_reason}" if fallback_reason else "fallback used"
+            )
+        elif metadata.get("native_hybrid"):
+            partial_reason = metadata.get(
+                "native_longitudinal_fallback_reason"
+            ) or metadata.get("native_rf_fused_fallback_reason")
+            details.append(
+                f"mixed native/NumPy execution: {partial_reason}"
+                if partial_reason
+                else "mixed native/NumPy execution"
+            )
+        elif requested == "metal_hybrid":
+            details.append("GPU accuracy check passed")
+
+        if details:
+            message += "; " + "; ".join(details)
+        return message
 
     @staticmethod
     def _session_sequence_name(program):
@@ -10205,6 +11297,23 @@ class SequenceSimulationWidget(QWidget):
                 animation_message=animation_message,
             ),
         )
+        loop_metadata = metadata.get("parameter_loop")
+        if isinstance(loop_metadata, dict):
+            parameter = _SequenceLoopParameter(
+                key=str(loop_metadata.get("parameter_key", "")),
+                label=str(loop_metadata.get("parameter_label", "Parameter")),
+                unit=str(loop_metadata.get("unit", "")),
+                minimum=-np.inf,
+                maximum=np.inf,
+                decimals=int(loop_metadata.get("decimals", 6)),
+                integer=bool(loop_metadata.get("integer", False)),
+            )
+            index = int(loop_metadata.get("index", 0)) + 1
+            count = int(loop_metadata.get("count", 1))
+            value = self._format_parameter_loop_value(
+                parameter, loop_metadata.get("value", 0.0)
+            )
+            run.display_name = f"Loop {index}/{count} · {parameter.label} = {value}"
         register = getattr(self.window(), "register_sequence_simulation_run", None)
         if callable(register):
             register(run)
@@ -10962,7 +12071,14 @@ class SequenceSimulationWidget(QWidget):
 
     def _failed(self, message):
         self._reset_run_controls()
-        self.status.setText(message)
+        loop_running = self._parameter_loop_state is not None
+        if loop_running:
+            self._finish_parameter_loop(
+                cancelled=message == "Simulation cancelled",
+                error="" if message == "Simulation cancelled" else str(message),
+            )
+        else:
+            self.status.setText(message)
         if message != "Simulation cancelled":
             self._show_simulation_failure("Sequence simulation failed", message)
 
@@ -10978,7 +12094,16 @@ class SequenceSimulationWidget(QWidget):
 
     def _reset_run_controls(self, *, completed=False, elapsed_s=None):
         self.run_button.setEnabled(
-            self.program is not None and self.object_source.currentIndex() != 2
+            self._parameter_loop_state is None
+            and self.program is not None
+            and self.object_source.currentIndex() != 2
+        )
+        self.parameter_loop_button.setEnabled(
+            self._parameter_loop_state is None
+            and isinstance(
+                self.parameter_loop_parameter.currentData(),
+                _SequenceLoopParameter,
+            )
         )
         self.cancel_button.setEnabled(False)
         self.simulation_time_timer.stop()

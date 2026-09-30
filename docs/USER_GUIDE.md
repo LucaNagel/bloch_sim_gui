@@ -301,13 +301,14 @@ slice thickness, slice gap, and spatial probe positions. Values are converted
 to SI meters internally for simulation and Pulseq export.
 
 Every generated sequence now uses the same RF field set and global envelope
-designer. Choose **Sinc**, **SLR**, **Gaussian**, **Block**, or **RF Pulse
-Designer**, then set duration, time-bandwidth product, Sinc lobe count,
-apodization, SLR sharpness, and RF carrier offset as applicable. Shape-specific
-controls are only shown for the selected pulse type. SLR sharpness is a positive
-integer: order 1 is one central lobe, while higher orders narrow the designed
-transition and visibly add temporal side lobes. Sinc apodization remains
-non-negative from 0 to 1; 0.5 is Hann and 1.0 is Hann squared.
+designer. Choose **Sinc**, **SLR**, **Gaussian**, **Block**, **RF Pulse
+Designer**, or **Spectral-spatial Designer**, then set duration,
+time-bandwidth product, Sinc lobe count, apodization, SLR sharpness, and RF
+carrier offset as applicable. Shape-specific controls are only shown for the
+selected pulse type. SLR sharpness is a positive integer: order 1 is one
+central lobe, while higher orders narrow the designed transition and visibly
+add temporal side lobes. Sinc apodization remains non-negative from 0 to 1;
+0.5 is Hann and 1.0 is Hann squared.
 Free Mode and Sequence Mode now call the same analytic envelope factory for
 Sinc, SLR, Gaussian, and Block pulses. Sinc samples are centred on the RF
 raster, producing a symmetric waveform with complete matching edge lobes;
@@ -321,6 +322,95 @@ complex phase modulation, and carrier offset are preserved, while amplitude is
 rescaled from the loaded pulse's reference flip angle to the sequence flip
 angle. Loaded pulses work for EPI, spiral, EPSI/MGE, CSI, FLASH, Cartesian and
 radial bSSFP, SS-bSSFP, and Cartesian multi-echo bSSFP.
+
+**Spectral-spatial Designer** creates a coupled RF and balanced flyback
+slice/slab-gradient waveform. Its primary inputs describe the desired
+excitation directly: a spatial center, width, and transition width plus one or
+more spectral pass bands entered by lower and upper frequency edge. Each
+spectral band also has an explicit transition width, relative flip angle, and
+phase. Frequencies are offsets from the RF carrier and the designed response
+repeats at the reported alias spacing.
+The designer shows the absolute sequence reference in ppm and the current RF
+carrier offset. Metabolite profiles use the selected spectral phantom when one
+is available. Every peak is displayed as absolute ppm, offset from the
+sequence reference, offset from the RF carrier, and folded position in the
+SPSP alias period. The UI explicitly says when it is using presets instead.
+
+The **Simulation and validation range** can either follow the spatial target
+and one alias period automatically or use independently entered position and
+frequency limits and sample counts. **Excitation map** runs a relaxation-free
+Bloch simulation on that complete two-dimensional grid. Its color scale shows
+flip angle in degrees, dashed lines show the requested target edges, and the
+two plots below it show a spatial profile at the selected frequency and a
+spectrum at the selected position. The reported sampled-grid metrics include
+pass-band RMS and maximum error, maximum stop-band flip angle, duration, peak
+RF field, and peak gradient.
+
+Metabolite presets are optional conveniences rather than separate simulation
+objects. A preset can replace the target table with bands around
+nucleus-specific metabolite frequencies. **Plot metabolite spatial profiles**
+uses actual current-phantom peaks when possible and otherwise uses clearly
+identified presets. The full continuous-frequency response remains visible in
+**Excitation map**. Missing schedule targets, reference mismatches, and unmet
+sampled filter specifications produce visible warnings.
+
+**Manage pulse library and schedule…** separates reusable pulse designs from
+their ordered use. The upper table creates, duplicates, edits, and deletes
+pulses. The lower table chooses a pulse, display and target-metabolite names,
+an enabled state, flip-angle or relative-amplitude scaling, and an immediate
+repeat count for each row. Entries can be duplicated, deleted, and moved up or
+down. The enabled rows, including their repeat counts, form a cyclic schedule.
+
+For **Flip angle**, the entered value is the requested strongest-pass-band
+flip angle. For **RF amplitude scale**, the stored complex RF waveform is
+multiplied directly, so
+
+$$
+\alpha = s_{\mathrm{RF}}\alpha_{\mathrm{ref}}.
+$$
+
+The gradient waveform is not multiplied by this RF scale. Every entry is
+revalidated for nucleus, B1, gradient, slew, duration, and target thickness.
+
+**Preview pulse schedule** provides previous/next navigation, automatic
+playback, per-step waveforms and excitation maps, actual phantom-metabolite
+profiles, a schedule-step by metabolite $|M_{xy}|$ table, and cumulative
+$M_z$/$|M_{xy}|$ plots. Common fixed scales are enabled by default so small
+residual excitation is shown quantitatively rather than enlarged by automatic
+contrast. The preview uses complete complex RF and gradient waveforms on a
+reduced spatial grid and includes coherent state propagation, inter-pulse
+off-resonance, optional T1/T2* relaxation, and ideal/no spoiling. It omits
+readout encoding, B0 distributions, motion, exchange, and reconstruction.
+
+FLASH advances the schedule once per complete image frame by default. All
+phase-encoding lines and slices of that frame use one schedule step. Set the
+FLASH repetition count to the desired number of frames; selection cycles
+deterministically through the enabled expanded schedule. The explicit
+**Every TR/RF event** mode mixes contrasts across k-space and is intended only
+for advanced experiments. Pulseq export records its schedule index in the
+`SET` ADC label. Different pulse durations receive individual TE/TR delays;
+an impossible timing combination is rejected with the affected entry name.
+
+Advanced controls contain spatial time-bandwidth product, subpulse duration
+and count, linear- or minimum-phase spectral FIR selection, spatial and
+spectral pass-/stop-band ripple, and scanner gradient, slew, B1, and pulse
+duration limits. The flyback rewinder is designed independently from the
+positive excitation lobe, and the designer searches raster-compatible alias
+periods before constructing the spectral FIR. Accepting the design makes it
+available to every generated sequence. Two-dimensional sequences override the
+reference center with each actual slice position; three-dimensional sequences
+apply it along the partition/slab axis. The complete RF waveform, gradient
+waveform, spatial reference, spectral bands and transition widths, nucleus,
+and reference thickness are saved in project files. A design must be recreated
+after changing the nucleus because its gradient frequency units are
+nucleus-specific.
+
+The visible **Method and attribution** section identifies the Larson/Kerr
+design basis and opens the LarsonLab reference toolbox. This native Python
+implementation does not claim numerical equivalence to the MATLAB toolbox or
+endorsement by LarsonLab, Stanford, or UCSF. See
+[Spectral-spatial RF pulse design](SPECTRAL_SPATIAL_RF.md) for the comparison,
+unsupported modes, validation scope, and citation recommendation.
 
 Total imaging readout bandwidth fields share one definition and control:
 ADC dwell is `1 / bandwidth`, rounded to the scanner ADC raster. CSI spectral
@@ -343,7 +433,7 @@ checkpoints.
 | Simulated object | Setting used |
 | --- | --- |
 | `Phantom`, sequence probes, and each independent component of a `SpectralPhantom` | **Sequence Bloch kernel** |
-| Coupled pyruvate/lactate `DynamicSpectralPhantom` | **Dynamic two-pool kernel** |
+| Coupled `DynamicSpectralPhantom`, including additional product pools | **Dynamic spectral kernel** |
 
 Both routes first compile the Pulseq events into propagation intervals. Event,
 ADC, kinetic-breakpoint, and checkpoint boundaries remain exact. The configured
@@ -386,7 +476,8 @@ received signals are then summed.
 | Selection | Implementation and intended use |
 | --- | --- |
 | **Optimized (recommended)** | Native streaming C kernel. It propagates one spin through the complete sequence without storing a spin-by-time history, processes active spins in bounded chunks, and distributes spins over the configured CPU threads. RF-free intervals avoid the general 3×3 rotation, RF-active intervals use a quaternion rotation, and phantoms with at most 64 distinct exact T1/T2 pairs reuse precomputed relaxation factors. Continuous T1/T2 maps automatically use per-spin factors instead. Use this for normal simulations. |
-| **Reference (advanced validation)** | Native streaming C kernel with the original general rotation-matrix path and per-spin/per-interval relaxation evaluation. It has the same event, ADC, checkpoint, receive-coil, transmit-field, subvoxel, and spoiler semantics as the optimized kernel, but deliberately omits its fast paths. Use it for numerical comparisons or when diagnosing a suspected optimized-kernel problem, not as a speed setting. |
+| **Strict reference (advanced validation)** | Separately compiled Float64 reference extension selected in the GUI or with `sequence_kernel="strict_reference"`. It disables fast math and floating-point contraction and reports the `strict-float64` numerical contract. It is the preferred reproducible validation baseline, not a performance choice. |
+| **Reference (advanced validation)** | Native streaming C kernel with the original general rotation-matrix path and per-spin/per-interval relaxation evaluation. It has the same event, ADC, checkpoint, receive-coil, transmit-field, subvoxel, and spoiler semantics as the optimized kernel, but deliberately omits its fast paths. Its historical build retains the `legacy-fast-math` contract. Use it for comparisons with earlier results or when diagnosing a suspected optimized-kernel problem, not as a speed setting. |
 
 The optimized and reference paths implement the same Bloch propagation, but
 their floating-point operation order is not identical. Very small rounding-level
@@ -394,11 +485,13 @@ differences are therefore possible. OpenMP parallelism is across spins, and
 thread-local ADC sums are combined after propagation. This makes the standard
 kernel much easier to parallelize than the dynamic solver.
 
-#### Dynamic two-pool model
+#### Dynamic spectral model
 
-The dynamic kernel keeps separate magnetization vectors for pyruvate and
-lactate in every simulated spin. During each compiled interval it applies a
-symmetric free-evolution/RF/free-evolution split:
+The dynamic kernel keeps a separate magnetization vector for every spectral
+pool in each simulated spin. The common two-pool model contains pyruvate and
+lactate; supported additional product pools use the same timeline and receive
+their established precursor-to-product conversion. During each compiled
+interval the solver applies a symmetric free-evolution/RF/free-evolution split:
 
 1. half an interval of T2 decay, gradient/static/dynamic-B0 phase, T1
    relaxation, longitudinal pyruvate-to-lactate conversion, and optional
@@ -417,7 +510,7 @@ polarization. Dynamic B0 changes transverse phase; it does not alter the
 longitudinal conversion equations.
 
 Unlike the ordinary streaming kernel, the dynamic solver retains the complete
-two-pool state of the active object because its state must persist across the
+pool state of the active object because its state must persist across the
 continuous kinetic timeline. Runtime is therefore driven mainly by
 `active spins × compiled intervals`, plus ADC reduction and any requested
 checkpoints. The phantom's **spectral points** value defines the spectral output
@@ -425,17 +518,19 @@ grid; by itself it does not create that many Bloch states. Solver work instead
 increases with the number of ADC samples in the sequence, which is a separate
 quantity.
 
-#### Dynamic two-pool kernels
+#### Dynamic spectral kernels
 
 The GUI lists the routine production choices first. Less commonly needed
 benchmark, validation, and experimental kernels remain available below a
 separator as clearly labelled extras. Hovering over any choice shows an English
-summary of its purpose and fallback behavior.
+summary of its purpose, current runtime availability, and fallback behavior.
+The same capability registry is available from Python through
+`detect_kernel_capabilities()` and is used by the kernel benchmark.
 
 | Selection | Implementation and intended use |
 | --- | --- |
 | **Optimized NumPy (recommended)** | Complete production-capability CPU path. It keeps the transverse state in a persistent complex array, reuses scratch buffers, caches exact longitudinal coefficients by half-step duration, and caches T2/phase factors by duration, gradient, and dynamic-B0 integral. It supports inflow, delayed conversion, concentration tracking, dynamic B0, spatial transmit sensitivity, multiple receive coils, checkpoints, and both spoiler modes. It is also the safe fallback for unsupported native combinations. |
-| **Native automatic (recommended for large objects)** | Adds OpenMP across spins to the native primitives and persistent RF waveform blocks. Parallel work starts at 1,024 simulated spins; smaller jobs automatically use one thread. For the coupled inflow/concentration model this avoids starting new parallel regions at every 20 µs interval. The current persistent block supports uniform transmit, static B0, and up to 131,072 simulated spins; other cases retain the safe interval or NumPy fallback. This is the first native kernel to try for a large dynamic phantom with uniform transmit sensitivity. |
+| **Native automatic (recommended for large objects)** | Adds OpenMP across spins to strict native primitives and bounded plan blocks. Parallel work starts at 1,024 simulated spins; smaller jobs automatically use one thread. The complete bounded driver supports unity, constant complex, or spatial transmit sensitivity, static or dynamic B0, delayed conversion, ADC, crushers, receive coils, subvoxel sampling, and checkpoints. It covers direct or polarized pyruvate inflow, with or without concentration tracking, as well as concentration tracking without inflow. A separate multi-pool worker supports the existing precursor-to-product conversions, including pyruvate-to-alanine. Voxelwise arrival delays use bounded local source tables. This is the first native kernel to try for a large dynamic phantom. |
 | **Native serial (advanced benchmark)** | Uses the same compiled uniform-transmit RF and longitudinal primitives with one worker thread. The common Phantom Designer model with pyruvate inflow, a polarization curve, and concentration tracking advances both states in one fused pass. This option is useful for separating gains from compiled blocks from gains due to multithreading; it is not normally needed for production simulations. |
 | **Reference (advanced validation)** | Direct, allocation-heavy Python/NumPy formulation. It recomputes intermediate phase, relaxation, exchange, inflow, and RF arrays at each interval and is the correctness oracle for the optimized CPU paths. It supports the complete model but is intended for small validation and diagnostic runs. |
 | **CPU + Apple GPU (experimental)** | Apple-Silicon-only hybrid for multiple subvoxel spins. It performs the subvoxel work on the GPU, checks separate samples on the CPU, and uses the CPU result automatically if the accuracy check fails. |
@@ -452,24 +547,38 @@ Native selection is capability-based rather than all-or-nothing:
 
 | Active feature combination | Native RF | Native longitudinal evolution | Actual behavior |
 | --- | --- | --- | --- |
-| Uniform transmit field; no inflow, no concentration tracking, and conversion active no later than sequence time zero | Yes | Yes | Native serial or native parallel, as selected |
-| Uniform transmit field with coupled inflow, polarization curve, and concentration tracking | Yes | Yes | Fused native concentration/inflow step; static-B0 objects within the spin limit also use persistent RF waveform blocks |
-| Other inflow, delayed-conversion, or concentration combinations | Yes | No | Hybrid: native RF plus optimized NumPy longitudinal kinetics |
-| Spatial transmit field with otherwise supported longitudinal kinetics | No | Yes | NumPy spatial RF plus native longitudinal evolution |
-| Spatial transmit field combined with unsupported native longitudinal kinetics | No | No | Complete fallback to **Optimized NumPy** |
+| Two pools; no inflow or concentration tracking; unity, constant, or spatial transmit | Yes | Yes | Complete bounded native plan, including delayed conversion and static or dynamic B0 |
+| Coupled inflow, polarization curve, and concentration tracking, with or without spatial arrival delays | Yes | Yes | Complete bounded native plan; delayed sources are prepared only for the current time/voxel block |
+| Direct or polarized inflow without concentration delivery; concentration tracking with or without inflow | Yes | Yes | Complete bounded native plan with an explicit source mode matching the established model |
+| Additional product pools and passive precursor-to-product conversion | Yes | Yes | Separate complete multi-pool plan worker; the specialized two-pool loop remains unchanged |
+| Spatial transmit field with otherwise supported kinetics | Yes | Yes | Spatial native RF coefficient planes plus the applicable native longitudinal path |
+| Unsupported precision or insufficient memory | Capability-dependent | Capability-dependent | Explicit hybrid or complete fallback to **Optimized NumPy** |
 | Strict native extension unavailable | No | No | Complete fallback to **Optimized NumPy** |
 
 Dynamic B0 is supported in all rows and does not by itself cause a native
-fallback. The running status message reports a hybrid or fallback, and result
-metadata records the requested and actual kernel, fallback reason, enabled
-native RF/longitudinal blocks, effective thread counts, and memory-limit
-decision.
+fallback. It is part of the complete native plan both without inflow and with
+all existing two-pool source modes, including spatial arrival delays. To retain the established
+bitwise result for sequences that sample the unadvanced initial state, an ADC
+event exactly at time zero also stays on that interval path. Later ADC events
+remain part of the complete native plan. The completion status reports the
+requested and actually used path, effective CPU thread count, numerical
+contract, complete-plan model, and any fallback reason. Experimental CPU/GPU
+results remain explicitly labelled. The same machine-readable fields are
+retained in result metadata and exports, together with enabled native
+RF/longitudinal blocks and the memory-limit decision.
+
+Large expanded objects are divided only at parent-voxel boundaries. All
+subvoxel spins belonging to one parent remain together for the entire sequence,
+and signal leaves are reduced in one fixed global parent order. Automatic
+chunking starts above the local 131,072-spin limit or when the memory plan
+requires it. Python callers can request a smaller deterministic block with
+`parent_voxel_chunk_size`; this changes memory use, not the result ordering.
 
 For routine use:
 
 - Keep **Sequence Bloch kernel → Optimized** for ordinary and independent
   spectral phantoms.
-- Keep **Dynamic two-pool kernel → Optimized NumPy** when bit-identical reference
+- Keep **Dynamic spectral kernel → Optimized NumPy** when bit-identical reference
   behavior is required. For a large uniform-transmit inflow/concentration
   phantom, use **Native automatic**; unsupported parts fall back
   explicitly and the persistent block reports its close-float64 contract. Try
@@ -510,8 +619,10 @@ interpolation. They affect the reconstruction preview and PNG export without
 changing the underlying reconstructed array; NumPy exports therefore remain
 quantitative. With **Auto contrast** disabled, a two-handle range slider sets
 the displayed minimum and maximum; the exact endpoint values are shown beside
-the slider. Complete project files retain these display settings, the explorer
-selection, and both independent 3D cursor positions.
+the slider. With **Auto contrast** enabled, these endpoints follow the minimum
+and maximum of the currently displayed image. Complete project files retain
+these display settings, the explorer selection, and both independent 3D cursor
+positions.
 
 ### Use Case 3: Parameter Sweep
 **Goal:** Analyze how simulation metrics change when varying a parameter (e.g., Flip Angle, TE, TR, $T_1$, $T_2$).
@@ -642,12 +753,28 @@ scaffold. Select `[1-13C]Pyruvate`, `[1-13C]Lactate`, `[1,5-13C2]Z-OMPD`, or a
 generic contrast tracer as the injected compound. Delivery remains normalized
 to the entered dose for every preset.
 
-The **Anatomy** tab switches between the actual simulation matrix and an 8× HD
-orthogonal-slice render. **Injected perfusion** updates live while injection,
-delivery, metabolism, and pH controls are edited. It provides its own
-Play/Pause and time controls, perfusion-only slices, the configured source-rate
-curve, and mean concentration curves for brain, liver, and kidneys. **Anatomy +
-perfusion** overlays the locally present compound on the anatomical slices.
+The **Anatomy** tab separates the physical FOV from the visible physical mouse
+bounding box. Mouse size can be changed independently in $x$, $y$, and $z$; if
+mouse size and FOV match along an axis, the body reaches both FOV boundaries.
+**Mouse position** translates the complete anatomy and vascular scaffold in
+$x$, $y$, and $z$ relative to the FOV center. Size, position, and displayed
+aspect ratio use physical millimeters; changing the matrix changes only the
+sampling resolution.
+The preview always shows the complete mouse and draws the simulated FOV as a
+white box, so a smaller FOV does not crop the authoring view. The non-phantom
+part of the preview is shown in dark gray. The anatomy view defaults to an 8×
+HD orthogonal-slice render; the actual simulation matrix remains selectable.
+**Injected perfusion** uses a two-column layout and updates live
+while injection, delivery, metabolism, and pH controls are edited. It provides
+its own Play/Pause, time, and speed controls, perfusion-only slices, the
+configured source-rate curve, and mean concentration curves for brain, liver,
+and kidneys. The playback controls are directly below the three perfusion
+slices. **Anatomy + perfusion** overlays the locally present compound on
+the anatomical slices and has the same speed control, with a default of
+$0.5\,\mathrm{s}/\mathrm{s}$. It also defaults to HD anatomy. Clicking a slice
+selects a voxel and displays its time-varying local perfusion/conversion
+spectrum below the anatomy; a renal voxel is selected initially so the
+spectrum and conversion are visible immediately.
 The animation starts before injection and follows the directed route from the
 tail vein through the cardiopulmonary circulation to the arterial organ beds.
 Its time controls select local compound concentration after arrival and

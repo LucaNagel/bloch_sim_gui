@@ -4,6 +4,44 @@ All notable changes to BlochSimulator are documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/).
 
+## [2.8.0] - 2026-09-30
+
+### Added
+
+- Added spectral-spatial RF pulse design with two-dimensional excitation-map
+  validation, metabolite-target presets, Pulseq export, and reusable pulse
+  libraries with deterministic cyclic schedules for generated sequences.
+- Added a strict Float64 sequence-simulation reference kernel, explicit
+  numerical-contract metadata, and a shared capability registry for selecting
+  and reporting available simulation backends.
+- Added a bounded native execution plan for dynamic spectral simulations,
+  supporting reproducible parent-voxel chunking, receive coils, spatial
+  transmit fields, dynamic $B_0$, delayed kinetics, multi-pool conversion, and
+  controlled fallback to the established NumPy path.
+- Added expanded mouse-perfusion authoring and preview controls, including
+  independent physical anatomy size and position, live perfusion views, and
+  voxel-specific spectra.
+
+### Changed
+
+- Improved dynamic-simulation throughput with persistent native RF blocks,
+  bounded coefficient tables, deterministic signal reduction, and automatic
+  OpenMP parallelization for suitably large simulations.
+- Improved sequence-simulation and reconstruction interfaces with clearer
+  backend status, kernel availability, and retained project display state.
+- Extended benchmarks, validation utilities, and developer documentation for
+  native kernels, numerical contracts, and acceleration evidence.
+
+### Compatibility notes
+
+- The optimized dynamic native paths have a `float64-close` numerical
+  contract; use the strict reference kernel when reproducible validation is
+  required. Unsupported capabilities, constrained memory, and unavailable
+  experimental hardware continue to fall back to the compatible CPU path.
+- Spectral-spatial schedules are stored separately from pulse definitions.
+  Existing projects containing the former single pulse setting are migrated to
+  a deterministic legacy schedule.
+
 ## [2.6.3] - 2026-08-31
 
 ### Added
@@ -142,5 +180,6 @@ The project follows [Semantic Versioning](https://semver.org/).
   uniform transmit and receive sensitivity.
 
 [2.6.3]: https://github.com/LucaNagel/bloch_sim_gui/compare/v2.6.2...v2.6.3
+[2.8.0]: https://github.com/LucaNagel/bloch_sim_gui/compare/v2.7.0...v2.8.0
 [2.5.0]: https://github.com/LucaNagel/bloch_sim_gui/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/LucaNagel/bloch_sim_gui/compare/v2.3.0...v2.4.0

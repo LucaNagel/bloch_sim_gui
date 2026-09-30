@@ -609,8 +609,23 @@ def test_optimized_sequence_kernel_matches_reference(relaxation_model):
         chunk_voxels=np.prod(shape),
         sequence_kernel="optimized",
     )
+    strict = simulator.simulate_sequence(
+        program,
+        phantom,
+        checkpoints_s=(0.0, 6 * raster, 13 * raster, interval_count * raster),
+        chunk_voxels=np.prod(shape),
+        sequence_kernel="strict_reference",
+    )
 
     assert optimized.metadata["sequence_kernel"] == "optimized"
+    assert optimized.metadata["requested_sequence_kernel"] == "optimized"
+    assert optimized.metadata["effective_threads"] == 2
+    assert optimized.metadata["numerical_contract"] == "legacy-fast-math"
+    assert strict.metadata["sequence_kernel"] == "strict_reference"
+    assert strict.metadata["requested_sequence_kernel"] == "strict_reference"
+    assert strict.metadata["native_sequence_kernel"] == "reference"
+    assert strict.metadata["effective_threads"] == 2
+    assert strict.metadata["numerical_contract"] == "strict-float64"
     assert np.allclose(optimized.signal, reference.signal, rtol=5e-13, atol=5e-13)
     assert np.allclose(
         optimized.final_magnetization,
@@ -624,6 +639,10 @@ def test_optimized_sequence_kernel_matches_reference(relaxation_model):
         rtol=5e-13,
         atol=5e-13,
     )
+    for name in ("signal", "final_magnetization", "checkpoint_magnetization"):
+        np.testing.assert_allclose(
+            getattr(strict, name), getattr(reference, name), rtol=5e-13, atol=5e-13
+        )
 
 
 def test_invalid_sequence_kernel_is_rejected():

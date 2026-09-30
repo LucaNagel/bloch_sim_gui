@@ -68,12 +68,19 @@ docs/_build/
 !docs/sequence_simulation_plan.md
 !docs/sequence_simulation_architecture.md
 !docs/dynamic_simulation_performance.md
+!docs/simulation_acceleration_review.md
+!docs/simulation_acceleration_implementation_prompt.md
+!docs/simulation_acceleration_progress.md
+!docs/SPECTRAL_SPATIAL_RF.md
+!THIRD_PARTY_NOTICES.md
 !docs/dynamic_metal_feasibility.md
 !docs/sequence_simulation_roadmap.md
 
 # Generated C files
 src/blochsimulator/bloch_wrapper.c
+src/blochsimulator/bloch_wrapper_strict.c
 src/blochsimulator/dynamic_bloch_wrapper.c
+src/blochsimulator/dynamic_metal_probe_wrapper.cpp
 
 # Generated test notebooks (can be generated from tests/test_notebook_export.py)
 test_mode_a.ipynb

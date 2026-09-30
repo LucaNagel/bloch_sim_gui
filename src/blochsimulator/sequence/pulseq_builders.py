@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import copy
+import json
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -15,8 +16,19 @@ from .encoding import (
     resolve_encoding_frame,
     set_pulseq_encoding_definitions,
 )
-from .rf_pulses import make_pulseq_rf_events, set_rf_definitions
+from .rf_pulses import (
+    make_pulseq_rf_events,
+    normalize_rf_pulse_type,
+    set_rf_definitions,
+    shifted_spectral_spatial_rf_event,
+)
 from .scanner import ScannerParameters
+from .spectral_spatial import (
+    SpectralSpatialPulseLibrary,
+    SpectralSpatialSchedule,
+    migrate_spectral_spatial_state,
+    validate_spectral_spatial_schedule,
+)
 from .bssfp_phase import (
     advance_bssfp_phase_deg,
     pulseq_phase_offset_rad,
@@ -179,6 +191,9 @@ def _make_slice_selective_rf_events(
     rf_custom_raster_s: float | None,
     rf_custom_flip_angle_deg: float | None,
     rf_frequency_offset_hz: float,
+    rf_spectral_spatial_pulse=None,
+    spatial_offset_m: float = 0.0,
+    nucleus: str | None = None,
 ):
     """Return slice-selective RF/gradient pairs built from one shared shape."""
     return make_pulseq_rf_events(
@@ -195,6 +210,9 @@ def _make_slice_selective_rf_events(
         custom_flip_angle_deg=rf_custom_flip_angle_deg,
         slice_thickness_m=slice_thickness_m,
         frequency_offset_hz=rf_frequency_offset_hz,
+        spectral_spatial_pulse=rf_spectral_spatial_pulse,
+        spatial_offset_m=spatial_offset_m,
+        nucleus=nucleus,
     )
 
 
@@ -225,6 +243,7 @@ def _set_rf_definitions(
     custom_name: str | None,
     custom_flip_angle_deg: float | None,
     frequency_offset_hz: float,
+    spectral_spatial_pulse=None,
 ) -> None:
     """Persist the RF design inputs needed to reproduce a sequence."""
     set_rf_definitions(
@@ -238,6 +257,7 @@ def _set_rf_definitions(
         custom_name=custom_name,
         custom_flip_angle_deg=custom_flip_angle_deg,
         frequency_offset_hz=frequency_offset_hz,
+        spectral_spatial_pulse=spectral_spatial_pulse,
     )
 
 
@@ -308,6 +328,7 @@ def make_pulseq_csi(
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
     rf_custom_name: str | None = None,
+    rf_spectral_spatial_pulse=None,
     rf_frequency_offset_hz: float = 0.0,
     encoding_duration_s: float = 2e-3,
     echo_time_s: float = 6e-3,
@@ -323,6 +344,7 @@ def make_pulseq_csi(
     spoiler_cycles_per_voxel: float = 0.0,
     spoiler_duration_s: float = 2e-3,
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
+    nucleus: str = "H1",
 ):
     """Build a repeated slice-selective Cartesian 2D CSI Pulseq sequence.
 
@@ -410,6 +432,9 @@ def make_pulseq_csi(
             rf_custom_raster_s=rf_custom_raster_s,
             rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
             rf_frequency_offset_hz=rf_frequency_offset_hz,
+            rf_spectral_spatial_pulse=rf_spectral_spatial_pulse,
+            spatial_offset_m=slice_offset_m,
+            nucleus=nucleus,
         )
     )
     rf_events = [
@@ -452,10 +477,13 @@ def make_pulseq_csi(
     rf_center, _ = pp.calc_rf_center(rf)
     _, slice_sign = encoding_frame.axis_and_sign("partition")
     for rf_event, slice_gradient in rf_events:
-        logical_slice_amplitude = float(slice_gradient.amplitude) * slice_sign
-        frequency_offset_hz = rf_frequency_offset_hz + logical_slice_amplitude * float(
-            slice_offset_m
-        )
+        if rf_pulse_type == "spectral_spatial":
+            frequency_offset_hz = rf_frequency_offset_hz
+        else:
+            logical_slice_amplitude = float(slice_gradient.amplitude) * slice_sign
+            frequency_offset_hz = (
+                rf_frequency_offset_hz + logical_slice_amplitude * float(slice_offset_m)
+            )
         rf_event.freq_offset = frequency_offset_hz
         rf_event.phase_offset = -2.0 * np.pi * frequency_offset_hz * rf_center
     rf_block_duration = pp.calc_duration(rf, gz)
@@ -627,6 +655,7 @@ def make_pulseq_csi(
         custom_name=rf_custom_name,
         custom_flip_angle_deg=rf_custom_flip_angle_deg,
         frequency_offset_hz=rf_frequency_offset_hz,
+        spectral_spatial_pulse=rf_spectral_spatial_pulse,
     )
     sequence.set_definition("SpoilAfterReadout", bool(spoil_after_readout))
     sequence.set_definition("SpoilerCyclesPerSlice", spoiler_cycles_per_slice)
@@ -654,6 +683,7 @@ def make_pulseq_bssfp(
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
     rf_custom_name: str | None = None,
+    rf_spectral_spatial_pulse=None,
     rf_frequency_offset_hz: float = 0.0,
     sampling_bandwidth_hz: float = 10_000.0,
     encoding_duration_s: float = 1e-3,
@@ -672,6 +702,7 @@ def make_pulseq_bssfp(
     use_alpha_half: bool = True,
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
+    nucleus: str = "H1",
 ):
     """Build a fully balanced, non-selective Cartesian 3D bSSFP sequence.
 
@@ -770,9 +801,25 @@ def make_pulseq_bssfp(
             custom_raster_s=rf_custom_raster_s,
             custom_flip_angle_deg=rf_custom_flip_angle_deg,
             frequency_offset_hz=rf_frequency_offset_hz,
+            spectral_spatial_pulse=rf_spectral_spatial_pulse,
+            slice_thickness_m=(
+                fov_z
+                if normalize_rf_pulse_type(rf_pulse_type) == "spectral_spatial"
+                else None
+            ),
+            nucleus=nucleus,
         )
     )
-    rf, rf_alpha_half = rf_events
+    if rf_pulse_type == "spectral_spatial":
+        (rf, rf_select), (rf_alpha_half, rf_alpha_half_select) = rf_events
+        rf_select = _remap_gradient_event(rf_select, encoding_frame, "partition")
+        rf_alpha_half_select = _remap_gradient_event(
+            rf_alpha_half_select, encoding_frame, "partition"
+        )
+    else:
+        rf, rf_alpha_half = rf_events
+        rf_select = None
+        rf_alpha_half_select = None
     readout_duration = n_read * dwell
     readout_amplitude = 1.0 / (fov_x * dwell)
     readout_rise_time = max(
@@ -807,7 +854,9 @@ def make_pulseq_bssfp(
 
     rf_center, _ = pp.calc_rf_center(rf)
     rf_center_from_start = rf.delay + rf_center
-    rf_block_duration = pp.calc_duration(rf)
+    rf_block_duration = pp.calc_duration(
+        *([rf, rf_select] if rf_select is not None else [rf])
+    )
     read_block_duration = max(pp.calc_duration(gx), pp.calc_duration(adc))
     adc_center_from_start = adc.delay + adc.num_samples * adc.dwell / 2
     rf_balance_delay_value = (
@@ -858,7 +907,13 @@ def make_pulseq_bssfp(
         rf_alpha_half_center_from_start = rf_alpha_half.delay + rf_alpha_half_center
         preparation_delay = (
             resolved_alpha_half_center_spacing_s
-            - pp.calc_duration(rf_alpha_half)
+            - pp.calc_duration(
+                *(
+                    [rf_alpha_half, rf_alpha_half_select]
+                    if rf_alpha_half_select is not None
+                    else [rf_alpha_half]
+                )
+            )
             - rf_center_from_start
             + rf_alpha_half_center_from_start
         )
@@ -867,7 +922,13 @@ def make_pulseq_bssfp(
             raise ValueError(
                 "First TR is too short for the configured preparation pulse"
             )
-        sequence.add_block(rf_alpha_half)
+        sequence.add_block(
+            *(
+                [rf_alpha_half, rf_alpha_half_select]
+                if rf_alpha_half_select is not None
+                else [rf_alpha_half]
+            )
+        )
         if preparation_delay:
             sequence.add_block(pp.make_delay(preparation_delay))
 
@@ -933,7 +994,7 @@ def make_pulseq_bssfp(
             duration=encoding_duration_s,
             system=system,
         )
-        sequence.add_block(rf)
+        sequence.add_block(*([rf, rf_select] if rf_select is not None else [rf]))
         if rf_balance_delay_value:
             sequence.add_block(pp.make_delay(rf_balance_delay_value))
         if extra_half:
@@ -1037,6 +1098,7 @@ def make_pulseq_bssfp(
         custom_name=rf_custom_name,
         custom_flip_angle_deg=rf_custom_flip_angle_deg,
         frequency_offset_hz=rf_frequency_offset_hz,
+        spectral_spatial_pulse=rf_spectral_spatial_pulse,
     )
     return sequence
 
@@ -1059,6 +1121,7 @@ def make_pulseq_epi(
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
     rf_custom_name: str | None = None,
+    rf_spectral_spatial_pulse=None,
     rf_frequency_offset_hz: float = 0.0,
     slice_thickness_m: float = 3e-3,
     slice_gap_m: float = 0.0,
@@ -1075,6 +1138,7 @@ def make_pulseq_epi(
     spoiler_cycles_per_voxel: float = 0.0,
     spoiler_duration_s: float = 4e-3,
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
+    nucleus: str = "H1",
 ):
     """Build a Cartesian single-shot EPI Pulseq sequence for export.
 
@@ -1172,8 +1236,12 @@ def make_pulseq_epi(
             rf_custom_raster_s=rf_custom_raster_s,
             rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
             rf_frequency_offset_hz=rf_frequency_offset_hz,
+            rf_spectral_spatial_pulse=rf_spectral_spatial_pulse,
+            spatial_offset_m=0.0,
+            nucleus=nucleus,
         )
     )
+    spsp_logical_gz = rf_events[0][1]
     rf_events = [
         (rf, _remap_gradient_event(gz, encoding_frame, "partition"))
         for rf, gz in rf_events
@@ -1357,21 +1425,38 @@ def make_pulseq_epi(
         )
         acquisition_start_times.append(repetition_start)
         for slice_index, position in enumerate(slice_positions):
-            logical_slice_amplitude = float(gz.amplitude) * slice_sign
-            slice_frequency_offset_hz = logical_slice_amplitude * position
             rf_phase_deg = (
                 _rf_spoiling_phase_deg(excitation_index, rf_spoiling_increment_deg)
                 if rf_spoiling
                 else 0.0
             )
-            rf.freq_offset = rf_frequency_offset_hz + slice_frequency_offset_hz
-            rf.phase_offset = (
-                np.deg2rad(rf_phase_deg)
-                - 2 * np.pi * slice_frequency_offset_hz * rf_center
-            )
+            if rf_pulse_type == "spectral_spatial":
+                rf_for_slice = shifted_spectral_spatial_rf_event(
+                    rf,
+                    spsp_logical_gz,
+                    spatial_offset_m=position,
+                    rf_raster_s=system.rf_raster_time,
+                    gradient_raster_s=system.grad_raster_time,
+                )
+                rf_for_slice.freq_offset = rf_frequency_offset_hz
+                rf_for_slice.phase_offset = (
+                    np.deg2rad(rf_phase_deg)
+                    - 2 * np.pi * rf_frequency_offset_hz * rf_center
+                )
+            else:
+                logical_slice_amplitude = float(gz.amplitude) * slice_sign
+                slice_frequency_offset_hz = logical_slice_amplitude * position
+                rf_for_slice = rf
+                rf_for_slice.freq_offset = (
+                    rf_frequency_offset_hz + slice_frequency_offset_hz
+                )
+                rf_for_slice.phase_offset = (
+                    np.deg2rad(rf_phase_deg)
+                    - 2 * np.pi * slice_frequency_offset_hz * rf_center
+                )
             adc.phase_offset = np.deg2rad(rf_phase_deg)
             sequence.add_block(
-                rf,
+                rf_for_slice,
                 gz,
                 pp.make_label("SLC", "SET", slice_index),
                 pp.make_label("REP", "SET", repetition),
@@ -1439,6 +1524,7 @@ def make_pulseq_epi(
         custom_name=rf_custom_name,
         custom_flip_angle_deg=rf_custom_flip_angle_deg,
         frequency_offset_hz=rf_frequency_offset_hz,
+        spectral_spatial_pulse=rf_spectral_spatial_pulse,
     )
     sequence.set_definition("VariableFlipAngle", bool(variable_flip_angle))
     if variable_flip_angle:
@@ -1501,6 +1587,7 @@ def make_pulseq_epsi_mge(
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
     rf_custom_name: str | None = None,
+    rf_spectral_spatial_pulse=None,
     rf_frequency_offset_hz: float = 0.0,
     slice_thickness_m: float = 3e-3,
     slice_gap_m: float = 0.0,
@@ -1519,6 +1606,7 @@ def make_pulseq_epsi_mge(
     encoding_duration_s: float = 0.8e-3,
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
+    nucleus: str = "H1",
 ):
     """Build a phase-encoded 2D EPSI / multi-gradient-echo sequence.
 
@@ -1620,9 +1708,13 @@ def make_pulseq_epsi_mge(
             rf_custom_raster_s=rf_custom_raster_s,
             rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
             rf_frequency_offset_hz=rf_frequency_offset_hz,
+            rf_spectral_spatial_pulse=rf_spectral_spatial_pulse,
+            spatial_offset_m=0.0,
+            nucleus=nucleus,
         )
     )
     rf, gz = rf_events[0]
+    spsp_logical_gz = gz
     gz = _remap_gradient_event(gz, encoding_frame, "partition")
     rf_center, _ = pp.calc_rf_center(rf)
     rf_block_duration = pp.calc_duration(rf, gz)
@@ -1788,21 +1880,38 @@ def make_pulseq_epsi_mge(
         acquisition_start = _sequence_duration_s(sequence)
         acquisition_start_times.append(acquisition_start)
         for slice_index, position in enumerate(slice_positions):
-            logical_slice_amplitude = float(gz.amplitude) * slice_sign
-            slice_frequency_offset_hz = logical_slice_amplitude * position
             for line_index, ky_area in enumerate(ky_areas):
                 rf_phase_deg = (
                     _rf_spoiling_phase_deg(excitation_index, rf_spoiling_increment_deg)
                     if rf_spoiling
                     else 0.0
                 )
-                rf.freq_offset = rf_frequency_offset_hz + slice_frequency_offset_hz
-                rf.phase_offset = (
-                    np.deg2rad(rf_phase_deg)
-                    - 2.0 * np.pi * slice_frequency_offset_hz * rf_center
-                )
+                if rf_pulse_type == "spectral_spatial":
+                    rf_for_slice = shifted_spectral_spatial_rf_event(
+                        rf,
+                        spsp_logical_gz,
+                        spatial_offset_m=position,
+                        rf_raster_s=system.rf_raster_time,
+                        gradient_raster_s=system.grad_raster_time,
+                    )
+                    rf_for_slice.freq_offset = rf_frequency_offset_hz
+                    rf_for_slice.phase_offset = (
+                        np.deg2rad(rf_phase_deg)
+                        - 2.0 * np.pi * rf_frequency_offset_hz * rf_center
+                    )
+                else:
+                    logical_slice_amplitude = float(gz.amplitude) * slice_sign
+                    slice_frequency_offset_hz = logical_slice_amplitude * position
+                    rf_for_slice = rf
+                    rf_for_slice.freq_offset = (
+                        rf_frequency_offset_hz + slice_frequency_offset_hz
+                    )
+                    rf_for_slice.phase_offset = (
+                        np.deg2rad(rf_phase_deg)
+                        - 2.0 * np.pi * slice_frequency_offset_hz * rf_center
+                    )
                 adc.phase_offset = np.deg2rad(rf_phase_deg)
-                sequence.add_block(rf, gz)
+                sequence.add_block(rf_for_slice, gz)
                 gy_pre = make_role_trapezoid(
                     pp,
                     encoding_frame,
@@ -1895,6 +2004,7 @@ def make_pulseq_epsi_mge(
         custom_name=rf_custom_name,
         custom_flip_angle_deg=rf_custom_flip_angle_deg,
         frequency_offset_hz=rf_frequency_offset_hz,
+        spectral_spatial_pulse=rf_spectral_spatial_pulse,
     )
     sequence.set_definition("SliceThickness", slice_thickness_m)
     sequence.set_definition("SliceGap", slice_gap_m)
@@ -1943,6 +2053,9 @@ def make_pulseq_flash(
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
     rf_custom_name: str | None = None,
+    rf_spectral_spatial_pulse=None,
+    rf_spectral_spatial_library=None,
+    rf_spectral_spatial_schedule=None,
     rf_frequency_offset_hz: float = 0.0,
     slice_thickness_m: float = 3e-3,
     slice_gap_m: float = 0.0,
@@ -1960,8 +2073,16 @@ def make_pulseq_flash(
     encoding_duration_s: float = 1e-3,
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
+    nucleus: str = "H1",
 ):
-    """Build a slice-selective 2D spoiled gradient-echo (FLASH) sequence."""
+    """Build a slice-selective 2D spoiled gradient-echo (FLASH) sequence.
+
+    A spectral-spatial schedule advances once per complete image by default.
+    Consequently every phase-encoding line and slice in one image uses the
+    same pulse. ``selection_level='tr'`` is supported explicitly for advanced
+    experiments and is labelled with Pulseq ``SET`` values, but it mixes
+    spectral contrasts within k-space and does not imply separated images.
+    """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
     fov_read, fov_phase = _positive_values(fov_m, "FOV")
@@ -2021,27 +2142,116 @@ def make_pulseq_flash(
         system,
     )
 
-    raw_rf_events, actual_rf_duration_s, effective_rf_tbw, rf_pulse_type = (
-        _make_slice_selective_rf_events(
-            pp,
-            system,
-            flip_angle_schedule_deg=(flip_angle_deg,),
-            slice_thickness_m=slice_thickness_m,
-            rf_pulse_type=rf_pulse_type,
-            rf_duration_s=rf_duration_s,
-            rf_time_bandwidth_product=rf_time_bandwidth_product,
-            rf_apodization=rf_apodization,
-            rf_slr_sharpness=rf_slr_sharpness,
-            rf_custom_waveform_hz=rf_custom_waveform_hz,
-            rf_custom_raster_s=rf_custom_raster_s,
-            rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
-            rf_frequency_offset_hz=rf_frequency_offset_hz,
-        )
+    schedule_active = (
+        rf_spectral_spatial_library is not None
+        or rf_spectral_spatial_schedule is not None
     )
-    rf, gz = raw_rf_events[0]
-    gz = _remap_gradient_event(gz, encoding_frame, "partition")
-    rf_center, _ = pp.calc_rf_center(rf)
-    rf_block_duration = pp.calc_duration(rf, gz)
+    pulse_library = SpectralSpatialPulseLibrary()
+    pulse_schedule = SpectralSpatialSchedule()
+    schedule_warnings = ()
+    rf_variants = []
+    if schedule_active:
+        if normalize_rf_pulse_type(rf_pulse_type) != "spectral_spatial":
+            raise ValueError(
+                "an SPSP pulse library/schedule requires rf_pulse_type='spectral_spatial'"
+            )
+        pulse_library, pulse_schedule, _ = migrate_spectral_spatial_state(
+            library=rf_spectral_spatial_library,
+            schedule=rf_spectral_spatial_schedule,
+            legacy_pulse=rf_spectral_spatial_pulse,
+        )
+        schedule_warnings = validate_spectral_spatial_schedule(
+            pulse_library,
+            pulse_schedule,
+            nucleus=nucleus,
+            thickness_m=slice_thickness_m,
+            scanner_parameters=(
+                scanner_parameters
+                if scanner_parameters is not None
+                else ScannerParameters()
+            ),
+        )
+        expanded_schedule = pulse_schedule.expanded_entries()
+        for schedule_index, entry in enumerate(expanded_schedule):
+            pulse = pulse_library.get(entry.pulse_id)
+            entry_flip_angle_deg = entry.effective_flip_angle_deg(pulse)
+            events, duration_s, effective_tbw, normalized_type = (
+                _make_slice_selective_rf_events(
+                    pp,
+                    system,
+                    flip_angle_schedule_deg=(entry_flip_angle_deg,),
+                    slice_thickness_m=slice_thickness_m,
+                    rf_pulse_type="spectral_spatial",
+                    rf_duration_s=pulse.duration_s,
+                    rf_time_bandwidth_product=pulse.spatial_time_bandwidth_product,
+                    rf_apodization=rf_apodization,
+                    rf_slr_sharpness=rf_slr_sharpness,
+                    rf_custom_waveform_hz=None,
+                    rf_custom_raster_s=None,
+                    rf_custom_flip_angle_deg=None,
+                    rf_frequency_offset_hz=rf_frequency_offset_hz,
+                    rf_spectral_spatial_pulse=pulse,
+                    spatial_offset_m=0.0,
+                    nucleus=nucleus,
+                )
+            )
+            rf_event, logical_gz = events[0]
+            rf_variants.append(
+                {
+                    "schedule_index": schedule_index,
+                    "entry": entry,
+                    "pulse": pulse,
+                    "pulse_id": entry.pulse_id,
+                    "rf": rf_event,
+                    "logical_gz": logical_gz,
+                    "gz": _remap_gradient_event(
+                        logical_gz, encoding_frame, "partition"
+                    ),
+                    "duration_s": duration_s,
+                    "tbw": effective_tbw,
+                    "flip_angle_deg": entry_flip_angle_deg,
+                }
+            )
+        rf_pulse_type = "spectral_spatial"
+        actual_rf_duration_s = max(item["duration_s"] for item in rf_variants)
+        effective_rf_tbw = rf_variants[0]["tbw"]
+        rf_spectral_spatial_pulse = rf_variants[0]["pulse"]
+    else:
+        raw_rf_events, actual_rf_duration_s, effective_rf_tbw, rf_pulse_type = (
+            _make_slice_selective_rf_events(
+                pp,
+                system,
+                flip_angle_schedule_deg=(flip_angle_deg,),
+                slice_thickness_m=slice_thickness_m,
+                rf_pulse_type=rf_pulse_type,
+                rf_duration_s=rf_duration_s,
+                rf_time_bandwidth_product=rf_time_bandwidth_product,
+                rf_apodization=rf_apodization,
+                rf_slr_sharpness=rf_slr_sharpness,
+                rf_custom_waveform_hz=rf_custom_waveform_hz,
+                rf_custom_raster_s=rf_custom_raster_s,
+                rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
+                rf_frequency_offset_hz=rf_frequency_offset_hz,
+                rf_spectral_spatial_pulse=rf_spectral_spatial_pulse,
+                spatial_offset_m=0.0,
+                nucleus=nucleus,
+            )
+        )
+        rf_event, logical_gz = raw_rf_events[0]
+        rf_variants.append(
+            {
+                "schedule_index": 0,
+                "entry": None,
+                "pulse": None,
+                "pulse_id": "",
+                "rf": rf_event,
+                "logical_gz": logical_gz,
+                "gz": _remap_gradient_event(logical_gz, encoding_frame, "partition"),
+                "duration_s": actual_rf_duration_s,
+                "tbw": effective_rf_tbw,
+                "flip_angle_deg": float(flip_angle_deg),
+            }
+        )
 
     adc_duration = n_read * dwell
     flat_time = _ceil_to_raster(adc_duration, system.grad_raster_time)
@@ -2068,77 +2278,138 @@ def make_pulseq_flash(
         duration=encoding_duration_s,
         system=system,
     )
-    logical_slice_area = logical_gradient_area(gz, encoding_frame, "partition")
-    gz_rephase = make_role_trapezoid(
-        pp,
-        encoding_frame,
-        "partition",
-        area=-logical_slice_area / 2.0,
-        duration=encoding_duration_s,
-        system=system,
-    )
-
     readout_duration = pp.calc_duration(gx_read, adc)
-    echo_without_delay = (
-        rf_block_duration
-        - (rf.delay + rf_center)
-        + encoding_duration_s
-        + adc.delay
-        + adc_duration / 2.0
-    )
-    requested_te_delay = echo_time_s - echo_without_delay
-    if requested_te_delay < -1e-12:
-        raise ValueError(
-            f"echo_time_s is too short; minimum is {echo_without_delay:.9g} s"
+    for variant in rf_variants:
+        rf = variant["rf"]
+        gz = variant["gz"]
+        rf_center, _ = pp.calc_rf_center(rf)
+        rf_block_duration = pp.calc_duration(rf, gz)
+        logical_slice_area = logical_gradient_area(gz, encoding_frame, "partition")
+        gz_rephase = make_role_trapezoid(
+            pp,
+            encoding_frame,
+            "partition",
+            area=-logical_slice_area / 2.0,
+            duration=encoding_duration_s,
+            system=system,
         )
-    te_delay_value = _ceil_to_raster(
-        max(0.0, requested_te_delay), system.block_duration_raster
-    )
-    actual_te = echo_without_delay + te_delay_value
-    line_without_tr_delay = (
-        rf_block_duration
-        + encoding_duration_s
-        + te_delay_value
-        + readout_duration
-        + spoiler_duration_s
-    )
-    requested_tr_delay = repetition_time_s - line_without_tr_delay
-    if requested_tr_delay < -1e-12:
-        raise ValueError(
-            f"repetition_time_s is too short; minimum is {line_without_tr_delay:.9g} s"
+        echo_without_delay = (
+            rf_block_duration
+            - (rf.delay + rf_center)
+            + encoding_duration_s
+            + adc.delay
+            + adc_duration / 2.0
         )
-    tr_delay_value = _ceil_to_raster(
-        max(0.0, requested_tr_delay), system.block_duration_raster
-    )
-    actual_tr = line_without_tr_delay + tr_delay_value
+        requested_te_delay = echo_time_s - echo_without_delay
+        if requested_te_delay < -1e-12:
+            label = (
+                variant["entry"].display_name or variant["pulse"].name
+                if variant["entry"] is not None
+                else "RF pulse"
+            )
+            raise ValueError(
+                f"echo_time_s is too short for {label}; minimum is "
+                f"{echo_without_delay:.9g} s"
+            )
+        te_delay_value = _ceil_to_raster(
+            max(0.0, requested_te_delay), system.block_duration_raster
+        )
+        actual_te_variant = echo_without_delay + te_delay_value
+        line_without_tr_delay = (
+            rf_block_duration
+            + encoding_duration_s
+            + te_delay_value
+            + readout_duration
+            + spoiler_duration_s
+        )
+        requested_tr_delay = repetition_time_s - line_without_tr_delay
+        if requested_tr_delay < -1e-12:
+            label = (
+                variant["entry"].display_name or variant["pulse"].name
+                if variant["entry"] is not None
+                else "RF pulse"
+            )
+            raise ValueError(
+                f"repetition_time_s is too short for {label}; minimum is "
+                f"{line_without_tr_delay:.9g} s"
+            )
+        tr_delay_value = _ceil_to_raster(
+            max(0.0, requested_tr_delay), system.block_duration_raster
+        )
+        variant.update(
+            rf_center=rf_center,
+            rf_block_duration=rf_block_duration,
+            logical_slice_area=logical_slice_area,
+            gz_rephase=gz_rephase,
+            te_delay=te_delay_value,
+            actual_te=actual_te_variant,
+            minimum_tr=line_without_tr_delay,
+            tr_delay=tr_delay_value,
+            actual_tr=line_without_tr_delay + tr_delay_value,
+        )
+    actual_te = max(variant["actual_te"] for variant in rf_variants)
+    actual_tr = max(variant["actual_tr"] for variant in rf_variants)
 
     phase_areas = (np.arange(n_phase) - n_phase // 2) / fov_phase
     slice_positions = float(slice_offset_m) + (
         np.arange(n_slices, dtype=float) - (n_slices - 1) / 2.0
     ) * (slice_thickness_m + slice_gap_m)
     _, slice_sign = encoding_frame.axis_and_sign("partition")
-    logical_slice_amplitude = float(gz.amplitude) * slice_sign
     excitation_index = 0
     spoiler_end_times = []
     acquisition_start_times = []
     acquisition_intervals = []
     minimum_acquisition_intervals = []
+    used_frame_schedule_indices = []
+    used_frame_pulse_ids = []
     for repetition in range(repetitions):
         acquisition_start = _sequence_duration_s(sequence)
         acquisition_start_times.append(acquisition_start)
+        if schedule_active and pulse_schedule.selection_level == "frame":
+            frame_schedule_index, _ = pulse_schedule.entry_for_index(repetition)
+        else:
+            frame_schedule_index = 0
+        frame_variant = rf_variants[frame_schedule_index]
+        used_frame_schedule_indices.append(int(frame_schedule_index))
+        used_frame_pulse_ids.append(str(frame_variant["pulse_id"]))
         for slice_index, position in enumerate(slice_positions):
-            slice_frequency_offset_hz = logical_slice_amplitude * position
             for line, phase_area in enumerate(phase_areas):
+                if schedule_active and pulse_schedule.selection_level == "tr":
+                    schedule_index, _ = pulse_schedule.entry_for_index(excitation_index)
+                    variant = rf_variants[schedule_index]
+                else:
+                    schedule_index = frame_schedule_index
+                    variant = frame_variant
+                rf = variant["rf"]
+                gz = variant["gz"]
+                spsp_logical_gz = variant["logical_gz"]
+                rf_center = variant["rf_center"]
+                logical_slice_area = variant["logical_slice_area"]
+                gz_rephase = variant["gz_rephase"]
+                te_delay_value = variant["te_delay"]
+                tr_delay_value = variant["tr_delay"]
                 rf_phase_deg = (
                     _rf_spoiling_phase_deg(excitation_index, rf_spoiling_increment_deg)
                     if rf_spoiling
                     else 0.0
                 )
-                total_rf_frequency_offset_hz = (
-                    rf_frequency_offset_hz + slice_frequency_offset_hz
-                )
-                rf.freq_offset = total_rf_frequency_offset_hz
-                rf.phase_offset = (
+                if rf_pulse_type == "spectral_spatial":
+                    rf_for_slice = shifted_spectral_spatial_rf_event(
+                        rf,
+                        spsp_logical_gz,
+                        spatial_offset_m=position,
+                        rf_raster_s=system.rf_raster_time,
+                        gradient_raster_s=system.grad_raster_time,
+                    )
+                    total_rf_frequency_offset_hz = rf_frequency_offset_hz
+                else:
+                    rf_for_slice = rf
+                    logical_slice_amplitude = float(gz.amplitude) * slice_sign
+                    total_rf_frequency_offset_hz = (
+                        rf_frequency_offset_hz + logical_slice_amplitude * position
+                    )
+                rf_for_slice.freq_offset = total_rf_frequency_offset_hz
+                rf_for_slice.phase_offset = (
                     np.deg2rad(rf_phase_deg)
                     - 2.0 * np.pi * total_rf_frequency_offset_hz * rf_center
                 )
@@ -2184,13 +2455,18 @@ def make_pulseq_flash(
                     duration=spoiler_duration_s,
                     system=system,
                 )
-                sequence.add_block(
-                    rf,
+                rf_block_events = [
+                    rf_for_slice,
                     gz,
                     pp.make_label("LIN", "SET", line),
                     pp.make_label("SLC", "SET", slice_index),
                     pp.make_label("REP", "SET", repetition),
-                )
+                ]
+                if schedule_active:
+                    rf_block_events.append(
+                        pp.make_label("SET", "SET", int(schedule_index))
+                    )
+                sequence.add_block(*rf_block_events)
                 sequence.add_block(gx_pre, gy_phase, gz_rephase)
                 if te_delay_value:
                     sequence.add_block(pp.make_delay(te_delay_value))
@@ -2264,7 +2540,70 @@ def make_pulseq_flash(
         custom_name=rf_custom_name,
         custom_flip_angle_deg=rf_custom_flip_angle_deg,
         frequency_offset_hz=rf_frequency_offset_hz,
+        spectral_spatial_pulse=rf_spectral_spatial_pulse,
     )
+    if schedule_active:
+        expanded = pulse_schedule.expanded_entries()
+        sequence.set_definition("SPSPScheduleVersion", 1)
+        sequence.set_definition(
+            "SPSPScheduleSelectionLevel", pulse_schedule.selection_level
+        )
+        sequence.set_definition("SPSPScheduleCyclic", bool(pulse_schedule.cyclic))
+        sequence.set_definition("SPSPScheduleStepCount", len(expanded))
+        for definition_name, values in (
+            ("SPSPScheduleEntryIDs", [entry.entry_id for entry in expanded]),
+            ("SPSPSchedulePulseIDs", [entry.pulse_id for entry in expanded]),
+            (
+                "SPSPScheduleDisplayNames",
+                [
+                    entry.display_name or pulse_library.get(entry.pulse_id).name
+                    for entry in expanded
+                ],
+            ),
+            (
+                "SPSPScheduleTargetNames",
+                [entry.target_metabolite for entry in expanded],
+            ),
+            ("SPSPScheduleScaleModes", [entry.scale_mode for entry in expanded]),
+        ):
+            sequence.set_definition(
+                definition_name, json.dumps(values, separators=(",", ":"))
+            )
+        sequence.set_definition(
+            "SPSPScheduleAmplitudeScales",
+            [
+                entry.effective_amplitude_scale(pulse_library.get(entry.pulse_id))
+                for entry in expanded
+            ],
+        )
+        sequence.set_definition(
+            "SPSPScheduleFlipAnglesDeg",
+            [
+                entry.effective_flip_angle_deg(pulse_library.get(entry.pulse_id))
+                for entry in expanded
+            ],
+        )
+        sequence.set_definition(
+            "SPSPSchedulePulseDurations",
+            [pulse_library.get(entry.pulse_id).duration_s for entry in expanded],
+        )
+        sequence.set_definition("SPSPScheduleFrameIndices", used_frame_schedule_indices)
+        sequence.set_definition(
+            "SPSPScheduleFramePulseIDs",
+            json.dumps(used_frame_pulse_ids, separators=(",", ":")),
+        )
+        sequence.set_definition(
+            "SPSPScheduleWarnings",
+            json.dumps(list(schedule_warnings), separators=(",", ":")),
+        )
+        sequence.set_definition(
+            "SPSPScheduleContrastWarning",
+            (
+                "Schedule changes within phase-encoding lines; SET ADC labels are required for interpretation."
+                if pulse_schedule.selection_level == "tr"
+                else "Each schedule step applies to one complete logical FLASH frame."
+            ),
+        )
     return sequence
 
 
@@ -2348,6 +2687,7 @@ def make_pulseq_spiral(
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
     rf_custom_name: str | None = None,
+    rf_spectral_spatial_pulse=None,
     rf_frequency_offset_hz: float = 0.0,
     slice_thickness_m: float = 3e-3,
     slice_gap_m: float = 0.0,
@@ -2364,6 +2704,7 @@ def make_pulseq_spiral(
     spoiler_cycles_per_voxel: float = 0.0,
     spoiler_duration_s: float = 4e-3,
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
+    nucleus: str = "H1",
 ):
     """Build a single-shot, centre-out 2D spiral Pulseq acquisition.
 
@@ -2486,8 +2827,12 @@ def make_pulseq_spiral(
             rf_custom_raster_s=rf_custom_raster_s,
             rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
             rf_frequency_offset_hz=rf_frequency_offset_hz,
+            rf_spectral_spatial_pulse=rf_spectral_spatial_pulse,
+            spatial_offset_m=0.0,
+            nucleus=nucleus,
         )
     )
+    spsp_logical_gz = rf_events[0][1]
     rf_events = [
         (rf, _remap_gradient_event(gz, encoding_frame, "partition"))
         for rf, gz in rf_events
@@ -2598,21 +2943,38 @@ def make_pulseq_spiral(
         )
         acquisition_start_times.append(repetition_start)
         for slice_index, position in enumerate(slice_positions):
-            logical_slice_amplitude = float(gz.amplitude) * slice_sign
-            slice_frequency_offset_hz = logical_slice_amplitude * position
             rf_phase_deg = (
                 _rf_spoiling_phase_deg(excitation_index, rf_spoiling_increment_deg)
                 if rf_spoiling
                 else 0.0
             )
-            rf.freq_offset = rf_frequency_offset_hz + slice_frequency_offset_hz
-            rf.phase_offset = (
-                np.deg2rad(rf_phase_deg)
-                - 2.0 * np.pi * slice_frequency_offset_hz * rf_center
-            )
+            if rf_pulse_type == "spectral_spatial":
+                rf_for_slice = shifted_spectral_spatial_rf_event(
+                    rf,
+                    spsp_logical_gz,
+                    spatial_offset_m=position,
+                    rf_raster_s=system.rf_raster_time,
+                    gradient_raster_s=system.grad_raster_time,
+                )
+                rf_for_slice.freq_offset = rf_frequency_offset_hz
+                rf_for_slice.phase_offset = (
+                    np.deg2rad(rf_phase_deg)
+                    - 2.0 * np.pi * rf_frequency_offset_hz * rf_center
+                )
+            else:
+                logical_slice_amplitude = float(gz.amplitude) * slice_sign
+                slice_frequency_offset_hz = logical_slice_amplitude * position
+                rf_for_slice = rf
+                rf_for_slice.freq_offset = (
+                    rf_frequency_offset_hz + slice_frequency_offset_hz
+                )
+                rf_for_slice.phase_offset = (
+                    np.deg2rad(rf_phase_deg)
+                    - 2.0 * np.pi * slice_frequency_offset_hz * rf_center
+                )
             adc.phase_offset = np.deg2rad(rf_phase_deg)
             sequence.add_block(
-                rf,
+                rf_for_slice,
                 gz,
                 pp.make_label("SLC", "SET", slice_index),
                 pp.make_label("REP", "SET", repetition),
@@ -2675,6 +3037,7 @@ def make_pulseq_spiral(
         custom_name=rf_custom_name,
         custom_flip_angle_deg=rf_custom_flip_angle_deg,
         frequency_offset_hz=rf_frequency_offset_hz,
+        spectral_spatial_pulse=rf_spectral_spatial_pulse,
     )
     sequence.set_definition("VariableFlipAngle", bool(variable_flip_angle))
     if variable_flip_angle:

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
+from time import perf_counter
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -13,6 +14,13 @@ import numpy as np
 from .phantom import Phantom
 from .spectral_phantom import ChemicalSpecies
 from .units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm, ppm_to_hz
+from .dynamic_execution import (
+    ACTION_ADC,
+    ACTION_CHECKPOINT,
+    ACTION_CRUSH,
+    build_dynamic_execution_plan,
+)
+from .kernel_capabilities import DYNAMIC_CPU_KERNEL_NAMES
 
 
 class _BoundedArrayCache:
@@ -52,6 +60,57 @@ class _BoundedArrayCache:
         self.values[key] = (value, byte_count)
         self.current_bytes += byte_count
         return value
+
+
+class _PairwiseArrayAccumulator:
+    """Streaming fixed binary tree for deterministic parent-voxel sums."""
+
+    def __init__(self):
+        self._levels = []
+        self._shape = None
+        self._dtype = None
+
+    def add(self, value):
+        value = np.asarray(value)
+        if self._shape is None:
+            self._shape = value.shape
+            self._dtype = value.dtype
+        elif value.shape != self._shape:
+            raise ValueError("pairwise accumulator values must have one shape")
+        current = np.array(value, dtype=self._dtype, copy=True, order="C")
+        level = 0
+        while level < len(self._levels) and self._levels[level] is not None:
+            current = self._levels[level] + current
+            self._levels[level] = None
+            level += 1
+        if level == len(self._levels):
+            self._levels.append(current)
+        else:
+            self._levels[level] = current
+
+    def total(self):
+        result = None
+        for value in reversed(self._levels):
+            if value is None:
+                continue
+            result = np.array(value, copy=True) if result is None else result + value
+        if result is None:
+            if self._shape is None:
+                raise ValueError("cannot finish an empty pairwise accumulator")
+            return np.zeros(self._shape, dtype=self._dtype)
+        return result
+
+
+@dataclass
+class _DynamicBlockResult:
+    """Sparse private result returned by one parent-voxel memory block."""
+
+    active_indices: np.ndarray
+    parent_species_signal: np.ndarray
+    final_pool_active: np.ndarray
+    checkpoint_pool_active: Optional[np.ndarray]
+    runtime_stats: Dict
+    template_result: object = None
 
 
 @dataclass(frozen=True)
@@ -1707,6 +1766,64 @@ def _prepare_longitudinal_step(
     return exp_a, exp_b, difference, regular, source_coefficients
 
 
+def _prepare_multi_pool_longitudinal_step(
+    conversion_rates,
+    r1,
+    duration,
+    *,
+    with_source,
+):
+    """Prepare exact precursor-to-products coefficients for one half-step."""
+    conversion_rates = np.asarray(conversion_rates, dtype=np.float64)
+    r1 = np.asarray(r1, dtype=np.float64)
+    if conversion_rates.ndim != 2 or conversion_rates.shape[0] != r1.size - 1:
+        raise ValueError("conversion rates must contain one row per product pool")
+    precursor_rate = r1[0] + np.sum(conversion_rates, axis=0)
+    product_rates = r1[1:]
+    exp_precursor = np.exp(-precursor_rate * duration)
+    exp_products = np.exp(-product_rates * duration)
+    difference = precursor_rate[None, :] - product_rates[:, None]
+    regular = np.abs(difference) > 1e-12
+    transfer_factor = np.empty_like(difference)
+    for product in range(product_rates.size):
+        transfer_factor[product, regular[product]] = (
+            exp_products[product] - exp_precursor[regular[product]]
+        ) / difference[product, regular[product]]
+        transfer_factor[product, ~regular[product]] = duration * exp_products[product]
+    source_coefficients = None
+    if with_source:
+        f0_precursor, f1_precursor = _decay_convolution(precursor_rate, duration)
+        j0 = np.empty_like(difference)
+        j1 = np.empty_like(difference)
+        for product, product_rate in enumerate(product_rates):
+            product_rate_values = np.full_like(
+                precursor_rate, product_rate, dtype=np.float64
+            )
+            f0_product, f1_product = _decay_convolution(product_rate_values, duration)
+            separated = np.abs(difference[product] * duration) > 1e-7
+            j0[product, separated] = (
+                f0_product[separated] - f0_precursor[separated]
+            ) / difference[product, separated]
+            j1[product, separated] = (
+                f1_product[separated] - f1_precursor[separated]
+            ) / difference[product, separated]
+            if np.any(~separated):
+                equal_j0, equal_j1 = _equal_rate_exchange_convolution(
+                    0.5
+                    * (precursor_rate[~separated] + product_rate_values[~separated]),
+                    duration,
+                )
+                j0[product, ~separated] = equal_j0
+                j1[product, ~separated] = equal_j1
+        source_coefficients = (f0_precursor, f1_precursor, j0, j1)
+    return (
+        exp_precursor,
+        exp_products,
+        transfer_factor,
+        source_coefficients,
+    )
+
+
 def _prepare_longitudinal_step_for_dtype(
     kpl,
     r1_p,
@@ -2082,6 +2199,38 @@ def _prepare_rf_rotation_for_dtype(rf_hz, duration, dtype):
     return tuple(dtype.type(value) for value in prepared)
 
 
+def _classify_tx_sensitivity(tx_sensitivity):
+    """Classify an already validated Tx vector using exact equality."""
+    tx_sensitivity = np.asarray(tx_sensitivity, dtype=np.complex128)
+    if tx_sensitivity.ndim != 1 or tx_sensitivity.size == 0:
+        raise ValueError("Tx sensitivity must be a non-empty 1D array")
+    first = complex(tx_sensitivity[0])
+    if first == (1.0 + 0.0j) and np.all(tx_sensitivity == (1.0 + 0.0j)):
+        return "unity", 1.0 + 0.0j
+    if np.all(tx_sensitivity == first):
+        return "constant", first
+    return "spatial", None
+
+
+def _prepare_spatial_rf_rotation(rf_hz, tx_sensitivity, duration):
+    """Prepare the established spatial-B1 plane-basis coefficients in Float64."""
+    effective_rf = complex(rf_hz) * np.asarray(tx_sensitivity, dtype=np.complex128)
+    nx = -2.0 * np.pi * effective_rf.real * float(duration)
+    ny = 2.0 * np.pi * effective_rf.imag * float(duration)
+    angle = np.hypot(nx, ny)
+    nonzero = angle > 0.0
+    safe_angle = np.where(nonzero, angle, 1.0)
+    return tuple(
+        np.ascontiguousarray(value, dtype=np.float64)
+        for value in (
+            np.where(nonzero, nx / safe_angle, 1.0),
+            np.where(nonzero, ny / safe_angle, 0.0),
+            np.cos(angle),
+            np.sin(angle),
+        )
+    )
+
+
 def _rf_rotate_float32(state, prepared):
     """Apply one xy-axis RF rotation in a stable float32 plane basis."""
     if prepared is None:
@@ -2120,16 +2269,14 @@ def _rf_rotate(state, rf_hz, duration):
 
 def _rf_rotate_spatial(state, rf_hz, tx_sensitivity, duration):
     """Apply one RF rotation with a complex per-voxel transmit profile."""
-    effective_rf = complex(rf_hz) * np.asarray(tx_sensitivity)
-    nx = -2.0 * np.pi * effective_rf.real * float(duration)
-    ny = 2.0 * np.pi * effective_rf.imag * float(duration)
-    angle = np.hypot(nx, ny)
-    nonzero = angle > 0.0
-    safe_angle = np.where(nonzero, angle, 1.0)
-    axis_x = np.where(nonzero, nx / safe_angle, 1.0).astype(state.dtype, copy=False)
-    axis_y = np.where(nonzero, ny / safe_angle, 0.0).astype(state.dtype, copy=False)
-    cosine = np.cos(angle).astype(state.dtype, copy=False)
-    sine = np.sin(angle).astype(state.dtype, copy=False)
+    axis_x, axis_y, cosine, sine = _prepare_spatial_rf_rotation(
+        rf_hz, tx_sensitivity, duration
+    )
+    if state.dtype != np.dtype(np.float64):
+        axis_x = axis_x.astype(state.dtype)
+        axis_y = axis_y.astype(state.dtype)
+        cosine = cosine.astype(state.dtype)
+        sine = sine.astype(state.dtype)
     for pool in range(state.shape[0]):
         vectors = state[pool]
         value_x = vectors[:, 0].copy()
@@ -2143,7 +2290,15 @@ def _rf_rotate_spatial(state, rf_hz, tx_sensitivity, duration):
         vectors[:, 2] = perpendicular * sine + value_z * cosine
 
 
-def simulate_dynamic_sequence(
+def _gradient_frequency_hz(positions_m, gradient_hz_per_m):
+    """Evaluate rowwise position/gradient products in a chunk-stable order."""
+    values = positions_m[:, 0] * gradient_hz_per_m[0]
+    values = values + positions_m[:, 1] * gradient_hz_per_m[1]
+    values = values + positions_m[:, 2] * gradient_hz_per_m[2]
+    return values
+
+
+def _simulate_dynamic_sequence_block(
     program,
     phantom: DynamicSpectralPhantom,
     *,
@@ -2165,6 +2320,15 @@ def simulate_dynamic_sequence(
     spin_sampling=None,
     spoiler_mode="ideal",
     checkpoint_dtype=None,
+    _compiled=None,
+    _execution_plan=None,
+    _active_indices=None,
+    _parent_resolved_signal=False,
+    _block_result_mode=None,
+    _sequence_compile_s=0.0,
+    _execution_plan_build_s=0.0,
+    _tx_classification=None,
+    _constant_tx_sensitivity=None,
     **_ignored,
 ):
     """Run the complete sequence on a regional dynamic spectral phantom.
@@ -2220,12 +2384,7 @@ def simulate_dynamic_sequence(
     conversion_start_s = phantom.conversion_start_on_sequence_timeline_s
     if sequence_kernel is None:
         sequence_kernel = "optimized"
-    if sequence_kernel not in {
-        "optimized",
-        "reference",
-        "native_serial",
-        "native_parallel",
-    }:
+    if sequence_kernel not in DYNAMIC_CPU_KERNEL_NAMES:
         raise ValueError(
             "sequence_kernel must be 'optimized', 'reference', 'native_serial', "
             "or 'native_parallel'"
@@ -2258,14 +2417,12 @@ def simulate_dynamic_sequence(
     native_concentration_inflow_step = None
     native_rf_concentration_block = None
     native_rf_rotation_block = None
-    if phantom.n_species != 2 and sequence_kernel in {
-        "native_serial",
-        "native_parallel",
-    }:
-        native_fallback_reason = (
-            "native dynamic kernels currently support only the pyruvate/lactate pair"
-        )
-        sequence_kernel = "optimized"
+    native_spatial_rf_rotation_block = None
+    native_spatial_rf_prepare = None
+    native_transverse_prepare = None
+    native_plan_driver = None
+    native_plan_inflow_driver = None
+    native_plan_multi_pool_driver = None
     if sequence_kernel in {"native_serial", "native_parallel"}:
         try:
             from .dynamic_bloch_cy import (
@@ -2274,18 +2431,31 @@ def simulate_dynamic_sequence(
                 apply_longitudinal_step_with_concentration_inflow,
                 apply_dynamic_rf_block_with_concentration_inflow,
                 apply_rf_rotation_transverse_block,
+                apply_spatial_rf_rotation_transverse_block,
+                prepare_spatial_rf_rotation_coefficients,
+                prepare_transverse_factors_coefficients,
+                run_dynamic_plan_block_no_inflow,
+                run_dynamic_plan_block_multi_pool,
             )
 
             # RF rotation is independent of inflow, concentration tracking,
             # conversion timing, and dynamic B0. Keep that native fast path
             # available even when longitudinal evolution must stay in NumPy.
             native_rf_rotation_block = apply_rf_rotation_transverse_block
+            native_spatial_rf_rotation_block = (
+                apply_spatial_rf_rotation_transverse_block
+            )
+            native_spatial_rf_prepare = prepare_spatial_rf_rotation_coefficients
+            native_transverse_prepare = prepare_transverse_factors_coefficients
+            native_plan_driver = run_dynamic_plan_block_no_inflow
+            native_plan_multi_pool_driver = run_dynamic_plan_block_multi_pool
+            native_plan_inflow_driver = apply_dynamic_rf_block_with_concentration_inflow
             coupled_concentration_inflow = bool(
                 phantom.initial_spin_density_maps is not None
                 and inflow_curve is not None
                 and inflow_polarization_curve is not None
             )
-            if coupled_concentration_inflow:
+            if coupled_concentration_inflow and phantom.n_species == 2:
                 native_concentration_inflow_step = (
                     apply_longitudinal_step_with_concentration_inflow
                 )
@@ -2314,14 +2484,37 @@ def simulate_dynamic_sequence(
         except ImportError:
             native_fallback_reason = "strict native extension is unavailable"
             sequence_kernel = "optimized"
-    compiled = SequenceCompiler().compile(
-        program,
-        checkpoints_s=checkpoints_s,
-        extra_boundaries_s=phantom.dynamic_breakpoints_s(program.duration_s),
-        simulation_timestep_s=simulation_timestep_s,
-        status_callback=status_callback,
-    )
-    active = np.flatnonzero(phantom.mask.ravel())
+    if _compiled is None:
+        compile_started = perf_counter()
+        compiled = SequenceCompiler().compile(
+            program,
+            checkpoints_s=checkpoints_s,
+            extra_boundaries_s=phantom.dynamic_breakpoints_s(program.duration_s),
+            simulation_timestep_s=simulation_timestep_s,
+            status_callback=status_callback,
+        )
+        sequence_compile_s = perf_counter() - compile_started
+    else:
+        compiled = _compiled
+        sequence_compile_s = float(_sequence_compile_s)
+    if _execution_plan is None:
+        plan_started = perf_counter()
+        execution_plan = build_dynamic_execution_plan(compiled, phantom)
+        execution_plan_build_s = perf_counter() - plan_started
+    else:
+        execution_plan = _execution_plan
+        execution_plan_build_s = float(_execution_plan_build_s)
+    if _active_indices is None:
+        active = np.flatnonzero(phantom.mask.ravel())
+    else:
+        active = np.ascontiguousarray(_active_indices, dtype=np.int64)
+        if (
+            active.ndim != 1
+            or np.any(active < 0)
+            or np.any(active >= phantom.nvoxels)
+            or np.any(np.diff(active) <= 0)
+        ):
+            raise ValueError("active block indices must be strictly increasing")
     if active.size == 0:
         raise ValueError(
             "dynamic phantom has neither initial magnetization nor inflow support"
@@ -2389,22 +2582,29 @@ def simulate_dynamic_sequence(
         tx_sensitivity = tx_map.ravel()[active]
     if sampling.enabled:
         tx_sensitivity = np.repeat(tx_sensitivity, spins_per_voxel)
-    spatial_tx_active = not np.all(tx_sensitivity == (1.0 + 0.0j))
+    if _tx_classification is None:
+        tx_classification, constant_tx_sensitivity = _classify_tx_sensitivity(
+            tx_sensitivity
+        )
+    else:
+        tx_classification = str(_tx_classification)
+        constant_tx_sensitivity = _constant_tx_sensitivity
+    spatial_tx_active = tx_classification == "spatial"
+    nonunity_tx_active = tx_classification != "unity"
     if (
         sequence_kernel in {"native_serial", "native_parallel"}
         and native_longitudinal_step is None
         and native_concentration_inflow_step is None
         and spatial_tx_active
+        and native_spatial_rf_rotation_block is None
     ):
-        # Spatial Tx currently needs the NumPy RF implementation. If dynamic
-        # longitudinal drivers also rule out the native Mz primitives, no
-        # native work remains and the actual kernel is the optimized fallback.
         native_fallback_reason = (
             "spatial transmit sensitivity and dynamic longitudinal drivers "
             "require the optimized kernel"
         )
         sequence_kernel = "optimized"
         native_rf_rotation_block = None
+        native_spatial_rf_rotation_block = None
     rx_maps = getattr(phantom, "rx_sensitivity_maps", None)
     if rx_maps is None:
         rx_sensitivities = np.ones((1, parent_active_count), dtype=np.complex128)
@@ -2449,6 +2649,14 @@ def simulate_dynamic_sequence(
         passive_conversion = np.asarray(
             coefficient_passive_conversion, dtype=real_dtype
         )
+    multi_pool_conversion = None
+    if phantom.n_species > 2:
+        multi_pool_conversion = np.zeros(
+            (phantom.n_species - 1, n_simulated_spins), dtype=real_dtype
+        )
+        multi_pool_conversion[0] = kpl
+        if passive_conversion is not None:
+            multi_pool_conversion[1:] = passive_conversion
     b0 = np.asarray(
         phantom.b0_offset_hz(field, effective_nucleus).ravel()[active],
         dtype=np.float64,
@@ -2467,6 +2675,25 @@ def simulate_dynamic_sequence(
         )
     )
     t2 = np.asarray([pool.t2 for pool in phantom.pools], dtype=np.float64)[:, None]
+
+    def prepare_transverse_factors(phase_cycles, duration_s):
+        if not _parent_resolved_signal or native_transverse_prepare is None:
+            return _prepare_transverse_factors_for_dtype(
+                phase_cycles, t2, duration_s, real_dtype
+            )
+        table = native_transverse_prepare(
+            np.ascontiguousarray(phase_cycles, dtype=np.float64),
+            np.ascontiguousarray(t2[:, 0], dtype=np.float64),
+            float(duration_s),
+        )
+        target_dtype = (
+            np.complex64 if real_dtype == np.dtype(np.float32) else np.complex128
+        )
+        return tuple(
+            np.ascontiguousarray(table[pool], dtype=target_dtype)
+            for pool in range(table.shape[0])
+        )
+
     coefficient_r1 = np.asarray(
         [1.0 / pool.t1 for pool in phantom.pools], dtype=np.float64
     )
@@ -2538,17 +2765,36 @@ def simulate_dynamic_sequence(
         dynamic_b0_pool_scale = np.asarray(
             phantom.dynamic_b0.pool_scale, dtype=np.float64
         )[:, None]
-    species_signal_shape = (
-        (phantom.n_species, compiled.adc_times_s.size)
-        if n_rx_coils == 1
-        else (phantom.n_species, n_rx_coils, compiled.adc_times_s.size)
-    )
+    if _parent_resolved_signal:
+        species_signal_shape = (
+            (parent_active_count, phantom.n_species, compiled.adc_times_s.size)
+            if n_rx_coils == 1
+            else (
+                parent_active_count,
+                phantom.n_species,
+                n_rx_coils,
+                compiled.adc_times_s.size,
+            )
+        )
+    else:
+        species_signal_shape = (
+            (phantom.n_species, compiled.adc_times_s.size)
+            if n_rx_coils == 1
+            else (phantom.n_species, n_rx_coils, compiled.adc_times_s.size)
+        )
     species_signal = np.zeros(species_signal_shape, dtype=complex_dtype)
     if signal_weighting not in {"voxel", "voxel_volume"}:
         raise ValueError("signal_weighting must be 'voxel' or 'voxel_volume'")
     signal_scale = real_type(
         phantom.voxel_volume_m3 if signal_weighting == "voxel_volume" else 1.0
     )
+    if _parent_resolved_signal:
+        parent_signal_weights = spin_signal_weights.reshape(
+            parent_active_count, spins_per_voxel
+        )
+        parent_rx_sensitivities = rx_sensitivities.reshape(
+            n_rx_coils, parent_active_count, spins_per_voxel
+        )
     checkpoint_states = np.zeros(
         (
             compiled.checkpoint_times_s.size,
@@ -2558,15 +2804,17 @@ def simulate_dynamic_sequence(
         ),
         dtype=checkpoint_dtype,
     )
-    gradient_hz_per_m = compiled.gradient_hz_per_m
-    rf_hz = compiled.rf_hz
+    gradient_hz_per_m = execution_plan.gradient_hz_per_m
+    rf_hz = execution_plan.rf_hz
+    native_rf_hz = (
+        rf_hz * constant_tx_sensitivity if tx_classification == "constant" else rf_hz
+    )
     adc_demodulation = (
         compiled.adc_demodulation
         if complex_dtype == np.dtype(np.complex128)
         else np.asarray(compiled.adc_demodulation, dtype=complex_dtype)
     )
-    adc_cursor = 0
-    checkpoint_cursor = 0
+    action_cursor = 0
     transverse_crush_state_set = set(
         int(value)
         for value in (
@@ -2574,69 +2822,114 @@ def simulate_dynamic_sequence(
         )
     )
 
-    def crush_transverse_if_requested(state_index):
-        if state_index not in transverse_crush_state_set:
-            return
-        state[:, :, 0:2] = 0.0
-        if transverse_state is not None:
-            transverse_state[:] = 0.0
-
     def sync_transverse_to_state():
         if transverse_state is not None:
             state[:, :, 0] = transverse_state.real
             state[:, :, 1] = transverse_state.imag
 
-    def observe(state_index):
-        nonlocal adc_cursor, checkpoint_cursor
+    def combined_signal_snapshot():
+        return (
+            species_signal.sum(axis=(0, 1))
+            if _parent_resolved_signal
+            else species_signal.sum(axis=0)
+        )
+
+    def process_boundary_actions(state_index):
+        """Apply one plan boundary in crusher, ADC, checkpoint order."""
+        nonlocal action_cursor
         while (
-            adc_cursor < compiled.adc_state_indices.size
-            and compiled.adc_state_indices[adc_cursor] == state_index
+            action_cursor < execution_plan.n_actions
+            and execution_plan.action_state_indices[action_cursor] == state_index
         ):
-            demodulation = adc_demodulation[adc_cursor]
-            for pool in range(phantom.n_species):
-                transverse = (
-                    state[pool, :, 0] + 1j * state[pool, :, 1]
-                    if transverse_state is None
-                    else transverse_state[pool]
-                )
-                if n_rx_coils == 1:
-                    received = (
-                        np.sum(transverse)
-                        if unity_single_rx and not sampling.enabled
-                        else (
-                            np.sum(transverse * spin_signal_weights)
-                            if unity_single_rx
-                            else np.sum(
-                                transverse * rx_sensitivities[0] * spin_signal_weights
+            action_kind = int(execution_plan.action_kinds[action_cursor])
+            payload = int(execution_plan.action_payload_indices[action_cursor])
+            if action_kind == ACTION_CRUSH:
+                if spoiler_mode == "ideal":
+                    state[:, :, 0:2] = 0.0
+                    if transverse_state is not None:
+                        transverse_state[:] = 0.0
+                action_cursor += 1
+                continue
+            if action_kind == ACTION_ADC:
+                demodulation = adc_demodulation[payload]
+                for pool in range(phantom.n_species):
+                    transverse = (
+                        state[pool, :, 0] + 1j * state[pool, :, 1]
+                        if transverse_state is None
+                        else transverse_state[pool]
+                    )
+                    if _parent_resolved_signal:
+                        parent_transverse = transverse.reshape(
+                            parent_active_count, spins_per_voxel
+                        )
+                        if n_rx_coils == 1:
+                            if unity_single_rx and not sampling.enabled:
+                                received = parent_transverse[:, 0]
+                            elif unity_single_rx:
+                                received = np.sum(
+                                    parent_transverse * parent_signal_weights,
+                                    axis=1,
+                                )
+                            else:
+                                received = np.sum(
+                                    parent_transverse
+                                    * parent_rx_sensitivities[0]
+                                    * parent_signal_weights,
+                                    axis=1,
+                                )
+                            species_signal[:, pool, payload] = (
+                                received * signal_scale * demodulation
+                            )
+                        else:
+                            received = np.sum(
+                                parent_rx_sensitivities
+                                * parent_transverse[None, :, :]
+                                * parent_signal_weights[None, :, :],
+                                axis=2,
+                            )
+                            species_signal[:, pool, :, payload] = (
+                                received.T * signal_scale * demodulation
+                            )
+                        continue
+                    if n_rx_coils == 1:
+                        received = (
+                            np.sum(transverse)
+                            if unity_single_rx and not sampling.enabled
+                            else (
+                                np.sum(transverse * spin_signal_weights)
+                                if unity_single_rx
+                                else np.sum(
+                                    transverse
+                                    * rx_sensitivities[0]
+                                    * spin_signal_weights
+                                )
                             )
                         )
-                    )
-                    species_signal[pool, adc_cursor] = (
-                        received * signal_scale * demodulation
-                    )
-                else:
-                    species_signal[pool, :, adc_cursor] = (
-                        np.sum(
-                            rx_sensitivities
-                            * transverse[None, :]
-                            * spin_signal_weights[None, :],
-                            axis=1,
+                        species_signal[pool, payload] = (
+                            received * signal_scale * demodulation
                         )
-                        * signal_scale
-                        * demodulation
-                    )
-            adc_cursor += 1
-        while (
-            checkpoint_cursor < compiled.checkpoint_state_indices.size
-            and compiled.checkpoint_state_indices[checkpoint_cursor] == state_index
-        ):
-            sync_transverse_to_state()
-            checkpoint_states[checkpoint_cursor] = state
-            checkpoint_cursor += 1
+                    else:
+                        species_signal[pool, :, payload] = (
+                            np.sum(
+                                rx_sensitivities
+                                * transverse[None, :]
+                                * spin_signal_weights[None, :],
+                                axis=1,
+                            )
+                            * signal_scale
+                            * demodulation
+                        )
+                action_cursor += 1
+                continue
+            if action_kind == ACTION_CHECKPOINT:
+                sync_transverse_to_state()
+                checkpoint_states[payload] = state
+                action_cursor += 1
+                continue
+            raise RuntimeError(f"unknown dynamic plan action kind {action_kind}")
 
-    crush_transverse_if_requested(0)
-    observe(0)
-    interval_count = compiled.n_intervals
+    process_boundary_actions(0)
+    interval_count = execution_plan.n_intervals
     progress_stride = max(1, interval_count // 100)
     coefficient_cache = (
         _BoundedArrayCache(16 * 1024**2)
@@ -2723,27 +3016,117 @@ def simulate_dynamic_sequence(
     )
     native_block_interval_limit = 256
     native_block_table_limit_bytes = 8 * 1024**2
+    native_full_plan_table_limit_bytes = 64 * 1024**2
     if memory_budget_bytes is not None:
         native_block_table_limit_bytes = min(
             native_block_table_limit_bytes,
             max(0, int(memory_budget_bytes) // 16),
         )
+        native_full_plan_table_limit_bytes = min(
+            native_full_plan_table_limit_bytes,
+            max(0, int(memory_budget_bytes) // 8),
+        )
     native_block_enabled = native_block_table_limit_bytes >= n_simulated_spins * 8
     if not native_block_enabled:
         native_threads = 1
+    native_rf_available = bool(
+        native_spatial_rf_rotation_block is not None
+        if spatial_tx_active
+        else native_rf_rotation_block is not None
+    )
+    native_full_plan_source_model = bool(
+        native_plan_inflow_driver is not None
+        and (concentration_state is not None or inflow_curve is not None)
+    )
+    native_full_plan_multi_pool = bool(
+        phantom.n_species > 2 and native_plan_multi_pool_driver is not None
+    )
+    if inflow_curve is None:
+        native_full_plan_source_mode = 2
+        native_full_plan_model = "tracked-concentration"
+    elif inflow_polarization_curve is None:
+        native_full_plan_source_mode = 1
+        native_full_plan_model = "direct-magnetization-inflow"
+    elif concentration_state is None:
+        native_full_plan_source_mode = 3
+        native_full_plan_model = "polarized-magnetization-inflow"
+    else:
+        native_full_plan_source_mode = 0
+        native_full_plan_model = "coupled-concentration-inflow"
+    native_full_plan_no_inflow = bool(
+        phantom.n_species == 2
+        and native_plan_driver is not None
+        and inflow_curve is None
+        and concentration_state is None
+    )
+    if native_full_plan_multi_pool:
+        native_full_plan_bytes_per_spin = (
+            96
+            + 64 * phantom.n_species
+            + (64 if native_full_plan_source_model else 0)
+            + (64 if spatial_inflow_active else 0)
+            + (40 if spatial_tx_active else 0)
+        )
+    else:
+        native_full_plan_bytes_per_spin = (
+            (248 if spatial_tx_active else 208) + (64 if spatial_inflow_active else 0)
+            if native_full_plan_source_model
+            else (136 if spatial_tx_active else 96)
+        )
+    native_full_plan_enabled = bool(
+        sequence_kernel in {"native_serial", "native_parallel"}
+        and (
+            native_full_plan_multi_pool
+            or native_full_plan_no_inflow
+            or (
+                phantom.n_species == 2
+                and native_full_plan_source_model
+                and passive_conversion is None
+            )
+        )
+        and real_dtype == np.dtype(np.float64)
+        and checkpoint_dtype == np.dtype(np.float64)
+        and native_full_plan_table_limit_bytes
+        >= n_simulated_spins * native_full_plan_bytes_per_spin
+        and not np.any(
+            execution_plan.action_state_indices[
+                execution_plan.action_kinds == ACTION_ADC
+            ]
+            == 0
+        )
+    )
     if (
-        status_callback is not None
-        and native_rf_rotation_block is not None
-        and not spatial_tx_active
+        phantom.n_species > 2
+        and sequence_kernel in {"native_serial", "native_parallel"}
+        and not native_full_plan_enabled
     ):
-        if native_longitudinal_fallback_reason is not None:
+        native_fallback_reason = (
+            "the multi-pool native plan is unavailable for this precision, "
+            "memory budget, or initial-time ADC contract"
+        )
+        sequence_kernel = "optimized"
+        native_rf_available = False
+        native_rf_rotation_block = None
+        native_spatial_rf_rotation_block = None
+        native_spatial_rf_prepare = None
+        native_transverse_prepare = None
+        native_longitudinal_step = None
+        native_longitudinal_block = None
+        native_concentration_inflow_step = None
+        native_rf_concentration_block = None
+    if status_callback is not None and native_rf_available:
+        if (
+            native_longitudinal_fallback_reason is not None
+            and not native_full_plan_enabled
+        ):
             status_callback(
                 "Using the hybrid dynamic kernel: strict native RF rotation "
                 "with optimized longitudinal kinetics ("
                 f"{native_longitudinal_fallback_reason})."
             )
         status_callback(
-            f"Using the strict native RF voxel-block kernel with "
+            f"Using the strict native {tx_classification} Tx RF voxel-block "
+            f"kernel with "
             f"{native_rf_threads} thread(s) for {n_simulated_spins:,} spins "
             f"in {parent_active_count:,} active voxels."
         )
@@ -2765,6 +3148,18 @@ def simulate_dynamic_sequence(
             native_rf_fused_cache_limit_bytes,
             max(0, int(memory_budget_bytes) // 8),
         )
+    native_spatial_rf_table_limit_bytes = 64 * 1024**2
+    if memory_budget_bytes is not None:
+        native_spatial_rf_table_limit_bytes = min(
+            native_spatial_rf_table_limit_bytes,
+            max(0, int(memory_budget_bytes) // 16),
+        )
+    native_spatial_rf_max_groups = (
+        native_spatial_rf_table_limit_bytes
+        // max(1, n_simulated_spins * 5 * np.dtype(np.float64).itemsize)
+        if spatial_tx_active
+        else native_rf_fused_interval_limit
+    )
     native_rf_fused_fallback_reason = None
     if spatial_inflow_active:
         native_rf_fused_fallback_reason = (
@@ -2778,9 +3173,9 @@ def simulate_dynamic_sequence(
         native_rf_fused_fallback_reason = (
             "persistent RF blocks do not yet support dynamic B0"
         )
-    elif spatial_tx_active:
+    elif tx_classification == "constant" and constant_tx_sensitivity == (0.0 + 0.0j):
         native_rf_fused_fallback_reason = (
-            "persistent RF blocks require uniform transmit sensitivity"
+            "zero transmit sensitivity does not need persistent RF rotation"
         )
     elif n_simulated_spins > native_rf_fused_spin_limit:
         native_rf_fused_fallback_reason = (
@@ -2792,12 +3187,52 @@ def simulate_dynamic_sequence(
         native_rf_fused_fallback_reason = (
             "the simulation memory budget is too small for a persistent RF plan"
         )
+    elif spatial_tx_active and native_spatial_rf_max_groups < 1:
+        native_rf_fused_fallback_reason = (
+            "the simulation memory budget is too small for one spatial RF "
+            "coefficient group"
+        )
     native_rf_fused_enabled = native_rf_fused_fallback_reason is None
     native_rf_fused_plan_cache = (
         _BoundedArrayCache(native_rf_fused_cache_limit_bytes)
         if native_rf_fused_enabled
         else None
     )
+    spatial_rf_cache_limit_bytes = 64 * 1024**2
+    if memory_budget_bytes is not None:
+        spatial_rf_cache_limit_bytes = min(
+            spatial_rf_cache_limit_bytes,
+            max(0, int(memory_budget_bytes) // 16),
+        )
+    spatial_rf_cache = (
+        _BoundedArrayCache(spatial_rf_cache_limit_bytes)
+        if spatial_tx_active and native_spatial_rf_rotation_block is not None
+        else None
+    )
+    spatial_rf_cache_hits = 0
+    spatial_rf_cache_misses = 0
+
+    def spatial_rf_coefficients(rf_value, duration_s):
+        nonlocal spatial_rf_cache_hits, spatial_rf_cache_misses
+        key = (complex(rf_value), float(duration_s))
+        cached = spatial_rf_cache.get(key)
+        if cached is not None:
+            spatial_rf_cache_hits += 1
+            return cached
+        spatial_rf_cache_misses += 1
+        if native_spatial_rf_prepare is None:
+            prepared = _prepare_spatial_rf_rotation(
+                rf_value, tx_sensitivity, duration_s
+            )
+        else:
+            prepared = native_spatial_rf_prepare(
+                float(complex(rf_value).real),
+                float(complex(rf_value).imag),
+                np.ascontiguousarray(tx_sensitivity, dtype=np.complex128),
+                float(duration_s),
+            )
+        return spatial_rf_cache.put(key, prepared)
+
     native_rf_fused_preapplied_end = 0
     native_rf_fused_blocks = 0
     native_rf_fused_intervals = 0
@@ -2806,17 +3241,29 @@ def simulate_dynamic_sequence(
     protected_state_set.update(transverse_crush_state_set)
 
     def _native_rf_fused_block_end(first_interval):
-        if not native_rf_fused_enabled or rf_hz[first_interval] == 0.0:
+        if not native_rf_fused_enabled or native_rf_hz[first_interval] == 0.0:
             return first_interval
         end = first_interval
+        spatial_rf_group_keys = set()
         hard_end = min(interval_count, first_interval + native_rf_fused_interval_limit)
-        while end < hard_end and rf_hz[end] != 0.0:
+        while end < hard_end and native_rf_hz[end] != 0.0:
             if end > first_interval and end in protected_state_set:
                 break
             interval_left = 0.0 if end == 0 else float(compiled.interval_end_s[end - 1])
             interval_right = float(compiled.interval_end_s[end])
             if (interval_left + interval_right) / 2.0 < conversion_start_s:
                 break
+            if spatial_tx_active:
+                rf_group_key = (
+                    complex(native_rf_hz[end]),
+                    float(compiled.dt_s[end]),
+                )
+                if (
+                    rf_group_key not in spatial_rf_group_keys
+                    and len(spatial_rf_group_keys) >= native_spatial_rf_max_groups
+                ):
+                    break
+                spatial_rf_group_keys.add(rf_group_key)
             end += 1
             if end in protected_state_set:
                 break
@@ -2855,12 +3302,13 @@ def simulate_dynamic_sequence(
             )
             factor_keys.append((first_key, second_key))
             longitudinal_keys.append((half_duration, True))
-            rf_values.append(complex(rf_hz[block_interval]))
+            rf_values.append(complex(native_rf_hz[block_interval]))
             interval_left = interval_right
         plan_key = (
             tuple(factor_keys),
             tuple(longitudinal_keys),
             tuple(rf_values),
+            tx_classification,
         )
         cached = native_rf_fused_plan_cache.get(plan_key)
         if cached is not None:
@@ -2880,7 +3328,7 @@ def simulate_dynamic_sequence(
                 static_frequencies = static_frequency_by_gradient.get(gradient_key)
                 if static_frequencies is None:
                     gradient = np.asarray(gradient_key, dtype=np.float64)
-                    gradient_frequency = positions @ gradient
+                    gradient_frequency = _gradient_frequency_hz(positions, gradient)
                     static_frequencies = (
                         b0[None, :]
                         + pool_offsets[:, None]
@@ -2888,9 +3336,7 @@ def simulate_dynamic_sequence(
                     )
                     static_frequency_by_gradient[gradient_key] = static_frequencies
                 phase = static_frequencies * phase_duration
-                factors = _prepare_transverse_factors_for_dtype(
-                    phase, t2, half_duration, real_dtype
-                )
+                factors = prepare_transverse_factors(phase, half_duration)
                 transverse_cache.put(key, factors)
             group = len(factor_values)
             factor_group_by_key[key] = group
@@ -2971,10 +3417,35 @@ def simulate_dynamic_sequence(
                 dtype=np.float64,
             )
 
-        rf_prepared = [
-            _prepare_rf_rotation(value, float(compiled.dt_s[index]))
-            for index, value in zip(range(first_interval, end_interval), rf_values)
+        rf_group_by_key = {}
+        rf_groups = []
+        rf_prepared = []
+        for index, value in zip(range(first_interval, end_interval), rf_values):
+            rf_key = (value, float(compiled.dt_s[index]))
+            group = rf_group_by_key.get(rf_key)
+            if group is None:
+                group = len(rf_prepared)
+                rf_group_by_key[rf_key] = group
+                if spatial_tx_active:
+                    prepared = spatial_rf_coefficients(value, rf_key[1])
+                else:
+                    scalar = _prepare_rf_rotation(value, rf_key[1])
+                    prepared = tuple(
+                        np.asarray([coefficient], dtype=np.float64)
+                        for coefficient in scalar
+                    )
+                rf_prepared.append(prepared)
+            rf_groups.append(group)
+        rf_coefficient_count = 4 if spatial_tx_active else 5
+        rf_tables = [
+            np.ascontiguousarray(
+                np.stack([prepared[coefficient] for prepared in rf_prepared], axis=0),
+                dtype=np.float64,
+            )
+            for coefficient in range(rf_coefficient_count)
         ]
+        if spatial_tx_active:
+            rf_tables.append(np.zeros_like(rf_tables[0]))
         plan = (
             transverse_factor_table,
             stacked(longitudinal_values, 0),
@@ -3003,11 +3474,8 @@ def simulate_dynamic_sequence(
             np.ascontiguousarray(longitudinal_groups, dtype=np.int32),
             np.ascontiguousarray(first_factor_groups, dtype=np.int32),
             np.ascontiguousarray(second_factor_groups, dtype=np.int32),
-            np.ascontiguousarray([value[0] for value in rf_prepared], dtype=np.float64),
-            np.ascontiguousarray([value[1] for value in rf_prepared], dtype=np.float64),
-            np.ascontiguousarray([value[2] for value in rf_prepared], dtype=np.float64),
-            np.ascontiguousarray([value[3] for value in rf_prepared], dtype=np.float64),
-            np.ascontiguousarray([value[4] for value in rf_prepared], dtype=np.float64),
+            np.ascontiguousarray(rf_groups, dtype=np.int32),
+            *rf_tables,
         )
         return native_rf_fused_plan_cache.put(plan_key, plan)
 
@@ -3030,22 +3498,15 @@ def simulate_dynamic_sequence(
             dt_value = float(compiled.dt_s[block_interval])
             interval_middle = interval_left + dt_value / 2.0
             interval_right = float(compiled.interval_end_s[block_interval])
-            first_start, first_end = inflow_curve.interval_values(
-                interval_left, interval_middle
+            first_start, first_end, second_start, second_end = (
+                execution_plan.source_rate_samples[block_interval]
             )
-            second_start, second_end = inflow_curve.interval_values(
-                interval_middle, interval_right
-            )
-            polarization_first_start, polarization_first_end = (
-                inflow_polarization_curve.interval_values(
-                    interval_left, interval_middle
-                )
-            )
-            polarization_second_start, polarization_second_end = (
-                inflow_polarization_curve.interval_values(
-                    interval_middle, interval_right
-                )
-            )
+            (
+                polarization_first_start,
+                polarization_first_end,
+                polarization_second_start,
+                polarization_second_end,
+            ) = execution_plan.source_polarization_samples[block_interval]
             for target, value in zip(
                 inflow_values,
                 (first_start, first_end, second_start, second_end),
@@ -3082,8 +3543,8 @@ def simulate_dynamic_sequence(
 
     if status_callback is not None and native_rf_fused_enabled:
         status_callback(
-            "Using persistent native RF waveform blocks for coupled dynamic "
-            "evolution."
+            "Persistent native RF waveform blocks are available as a coupled "
+            "dynamic fallback."
         )
     elif (
         status_callback is not None
@@ -3166,21 +3627,648 @@ def simulate_dynamic_sequence(
         )
         native_preapplied_end = end
 
+    native_full_plan_blocks = 0
+    native_full_plan_intervals = 0
+
+    def execute_native_full_plan():
+        nonlocal action_cursor
+        nonlocal native_rf_fused_preapplied_end
+        nonlocal native_full_plan_blocks, native_full_plan_intervals
+        if not native_full_plan_enabled or interval_count == 0:
+            return False
+
+        if _parent_resolved_signal:
+            parent_signal = (
+                species_signal[:, :, None, :] if n_rx_coils == 1 else species_signal
+            )
+        else:
+            parent_signal = np.zeros(
+                (
+                    parent_active_count,
+                    phantom.n_species,
+                    n_rx_coils,
+                    compiled.adc_times_s.size,
+                ),
+                dtype=np.complex128,
+            )
+        plan_concentration_state = concentration_state
+        if (
+            native_full_plan_source_model or native_full_plan_multi_pool
+        ) and plan_concentration_state is None:
+            plan_concentration_state = np.zeros_like(state)
+        plan_inflow_delivery = inflow_delivery
+        if (
+            native_full_plan_source_model or native_full_plan_multi_pool
+        ) and plan_inflow_delivery is None:
+            plan_inflow_delivery = np.zeros(n_simulated_spins, dtype=np.float64)
+        plan_equilibrium = (
+            float(phantom.equilibrium_polarization)
+            if concentration_state is not None
+            else 0.0
+        )
+        worst_group_bytes = n_simulated_spins * native_full_plan_bytes_per_spin
+        time_block_intervals = max(
+            1,
+            min(
+                128,
+                native_full_plan_table_limit_bytes // max(1, worst_group_bytes),
+            ),
+        )
+
+        for first_interval in range(0, interval_count, time_block_intervals):
+            if cancel_callback is not None and cancel_callback():
+                raise RuntimeError("sequence simulation cancelled")
+            end_interval = min(interval_count, first_interval + time_block_intervals)
+            factor_group_by_key = {}
+            factor_values = []
+            longitudinal_group_by_key = {}
+            longitudinal_values = []
+            concentration_values = []
+            longitudinal_kpl_values = []
+            multi_longitudinal_values = []
+            multi_concentration_values = []
+            multi_conversion_values = []
+            longitudinal_durations = []
+            longitudinal_modes = []
+            concentration_modes = []
+            rf_group_by_key = {}
+            rf_values = []
+            first_factor_groups = []
+            second_factor_groups = []
+            longitudinal_groups = []
+            rf_groups = []
+            static_frequency_by_gradient = {}
+
+            def transverse_factor_group(
+                half_duration,
+                phase_duration,
+                gradient_key,
+                dynamic_integral,
+            ):
+                factor_key = (
+                    half_duration,
+                    phase_duration,
+                    gradient_key,
+                    dynamic_integral,
+                )
+                factor_group = factor_group_by_key.get(factor_key)
+                if factor_group is not None:
+                    return factor_group
+                factor_group = len(factor_values)
+                factor_group_by_key[factor_key] = factor_group
+                prepared_factors = transverse_cache.get(factor_key)
+                if prepared_factors is None:
+                    static_frequencies = static_frequency_by_gradient.get(gradient_key)
+                    if static_frequencies is None:
+                        gradient = np.asarray(gradient_key, dtype=np.float64)
+                        gradient_frequency = _gradient_frequency_hz(positions, gradient)
+                        static_frequencies = (
+                            b0[None, :]
+                            + pool_offsets[:, None]
+                            + gradient_frequency[None, :]
+                        )
+                        static_frequency_by_gradient[gradient_key] = static_frequencies
+                    phase = static_frequencies * phase_duration
+                    if dynamic_integral is not None:
+                        phase = phase + (
+                            dynamic_b0_pool_scale
+                            * dynamic_b0_scale[None, :]
+                            * dynamic_integral
+                        )
+                    prepared_factors = prepare_transverse_factors(phase, half_duration)
+                    transverse_cache.put(factor_key, prepared_factors)
+                factor_values.append(prepared_factors)
+                return factor_group
+
+            for block_interval in range(first_interval, end_interval):
+                half_duration = float(execution_plan.dt_s[block_interval]) / 2.0
+                first_phase_duration = float(
+                    execution_plan.interval_mid_s[block_interval]
+                    - execution_plan.interval_start_s[block_interval]
+                )
+                second_phase_duration = float(
+                    execution_plan.interval_end_s[block_interval]
+                    - execution_plan.interval_mid_s[block_interval]
+                )
+                gradient_key = tuple(
+                    float(value) for value in gradient_hz_per_m[block_interval]
+                )
+                if phantom.dynamic_b0 is None:
+                    first_dynamic_integral = second_dynamic_integral = None
+                else:
+                    first_dynamic_integral = float(
+                        execution_plan.dynamic_b0_first_half_integral_hz_s[
+                            block_interval
+                        ]
+                    )
+                    second_dynamic_integral = float(
+                        execution_plan.dynamic_b0_second_half_integral_hz_s[
+                            block_interval
+                        ]
+                    )
+                first_factor_groups.append(
+                    transverse_factor_group(
+                        half_duration,
+                        first_phase_duration,
+                        gradient_key,
+                        first_dynamic_integral,
+                    )
+                )
+                second_factor_groups.append(
+                    transverse_factor_group(
+                        half_duration,
+                        second_phase_duration,
+                        gradient_key,
+                        second_dynamic_integral,
+                    )
+                )
+
+                conversion_active = bool(
+                    execution_plan.conversion_active[block_interval]
+                )
+                longitudinal_key = (half_duration, conversion_active)
+                longitudinal_group = longitudinal_group_by_key.get(longitudinal_key)
+                if longitudinal_group is None:
+                    longitudinal_group = (
+                        len(multi_longitudinal_values)
+                        if native_full_plan_multi_pool
+                        else len(longitudinal_values)
+                    )
+                    longitudinal_group_by_key[longitudinal_key] = longitudinal_group
+                    longitudinal_durations.append(half_duration)
+                    if native_full_plan_multi_pool:
+                        interval_conversion = (
+                            multi_pool_conversion
+                            if conversion_active
+                            else np.zeros_like(multi_pool_conversion)
+                        )
+                        prepared_key = (
+                            "full-plan-multi-magnetization",
+                            half_duration,
+                            conversion_active,
+                        )
+                        prepared = coefficient_cache.get(prepared_key)
+                        if prepared is None:
+                            prepared = _prepare_multi_pool_longitudinal_step(
+                                interval_conversion,
+                                r1,
+                                half_duration,
+                                with_source=True,
+                            )
+                            coefficient_cache.put(prepared_key, prepared)
+                        concentration_key = (
+                            "full-plan-multi-concentration",
+                            half_duration,
+                            conversion_active,
+                        )
+                        concentration_prepared = coefficient_cache.get(
+                            concentration_key
+                        )
+                        if concentration_prepared is None:
+                            concentration_prepared = (
+                                _prepare_multi_pool_longitudinal_step(
+                                    interval_conversion,
+                                    np.zeros_like(r1),
+                                    half_duration,
+                                    with_source=True,
+                                )
+                            )
+                            coefficient_cache.put(
+                                concentration_key, concentration_prepared
+                            )
+                        multi_conversion_values.append(interval_conversion)
+                        multi_longitudinal_values.append(prepared)
+                        multi_concentration_values.append(concentration_prepared)
+                    else:
+                        interval_kpl = kpl if conversion_active else zero_kpl
+                        prepared_key = (
+                            "full-plan-magnetization",
+                            half_duration,
+                            conversion_active,
+                            native_full_plan_source_model,
+                        )
+                        prepared = coefficient_cache.get(prepared_key)
+                        if prepared is None:
+                            prepared = _prepare_longitudinal_step_for_dtype(
+                                interval_kpl,
+                                r1[0],
+                                r1[1],
+                                half_duration,
+                                with_source=native_full_plan_source_model,
+                                dtype=real_dtype,
+                            )
+                            coefficient_cache.put(prepared_key, prepared)
+                        regular_values = prepared[3]
+                        longitudinal_values.append(prepared)
+                        if native_full_plan_source_model:
+                            concentration_key = (
+                                "full-plan-concentration",
+                                half_duration,
+                                conversion_active,
+                            )
+                            concentration_prepared = coefficient_cache.get(
+                                concentration_key
+                            )
+                            if concentration_prepared is None:
+                                concentration_prepared = (
+                                    _prepare_longitudinal_step_for_dtype(
+                                        interval_kpl,
+                                        0.0,
+                                        0.0,
+                                        half_duration,
+                                        with_source=True,
+                                        dtype=real_dtype,
+                                    )
+                                )
+                                coefficient_cache.put(
+                                    concentration_key, concentration_prepared
+                                )
+                            concentration_values.append(concentration_prepared)
+                            concentration_regular_values = concentration_prepared[3]
+                            concentration_modes.append(
+                                1
+                                if np.all(concentration_regular_values)
+                                else (
+                                    -1
+                                    if not np.any(concentration_regular_values)
+                                    else 0
+                                )
+                            )
+                        longitudinal_kpl_values.append(interval_kpl)
+                        longitudinal_modes.append(
+                            1
+                            if np.all(regular_values)
+                            else -1 if not np.any(regular_values) else 0
+                        )
+                longitudinal_groups.append(longitudinal_group)
+
+                rf_value = native_rf_hz[block_interval]
+                if rf_value == 0.0:
+                    rf_groups.append(-1)
+                else:
+                    rf_key_value = (
+                        complex(
+                            rf_hz[block_interval] if spatial_tx_active else rf_value
+                        ),
+                        float(execution_plan.dt_s[block_interval]),
+                    )
+                    rf_group = rf_group_by_key.get(rf_key_value)
+                    if rf_group is None:
+                        rf_group = len(rf_values)
+                        rf_group_by_key[rf_key_value] = rf_group
+                        if spatial_tx_active:
+                            prepared_rf = spatial_rf_coefficients(*rf_key_value)
+                        else:
+                            scalar_rf = _prepare_rf_rotation(*rf_key_value)
+                            prepared_rf = tuple(
+                                np.asarray([coefficient], dtype=np.float64)
+                                for coefficient in scalar_rf
+                            )
+                        rf_values.append(prepared_rf)
+                    rf_groups.append(rf_group)
+
+            transverse_factor_table = np.ascontiguousarray(
+                np.stack(
+                    [np.stack(value, axis=0) for value in factor_values],
+                    axis=0,
+                ),
+                dtype=np.complex128,
+            )
+
+            def stack_longitudinal(index, dtype=np.float64):
+                return np.ascontiguousarray(
+                    np.stack([value[index] for value in longitudinal_values]),
+                    dtype=dtype,
+                )
+
+            def stack_prepared(values, index, dtype=np.float64):
+                return np.ascontiguousarray(
+                    np.stack([value[index] for value in values]),
+                    dtype=dtype,
+                )
+
+            def stack_source(values, index):
+                return np.ascontiguousarray(
+                    np.stack([value[4][index] for value in values]),
+                    dtype=np.float64,
+                )
+
+            def stack_multi(values, index):
+                return np.ascontiguousarray(
+                    np.stack([value[index] for value in values]),
+                    dtype=np.float64,
+                )
+
+            def stack_multi_source(values, index):
+                return np.ascontiguousarray(
+                    np.stack([value[3][index] for value in values]),
+                    dtype=np.float64,
+                )
+
+            if rf_values:
+                coefficient_count = 4 if spatial_tx_active else 5
+                rf_tables = [
+                    np.ascontiguousarray(
+                        np.stack([value[index] for value in rf_values], axis=0),
+                        dtype=np.float64,
+                    )
+                    for index in range(coefficient_count)
+                ]
+                if spatial_tx_active:
+                    rf_tables.append(np.zeros_like(rf_tables[0]))
+            else:
+                rf_tables = [np.zeros((1, 1), dtype=np.float64) for _ in range(5)]
+
+            action_offsets = [0]
+            action_kinds = []
+            action_payloads = []
+            for block_interval in range(first_interval, end_interval):
+                state_index = block_interval + 1
+                first_action = int(
+                    np.searchsorted(
+                        execution_plan.action_state_indices,
+                        state_index,
+                        side="left",
+                    )
+                )
+                last_action = int(
+                    np.searchsorted(
+                        execution_plan.action_state_indices,
+                        state_index,
+                        side="right",
+                    )
+                )
+                action_kinds.extend(
+                    execution_plan.action_kinds[first_action:last_action]
+                )
+                action_payloads.extend(
+                    execution_plan.action_payload_indices[first_action:last_action]
+                )
+                action_offsets.append(len(action_kinds))
+
+            kpl_table = (
+                None
+                if native_full_plan_multi_pool
+                else np.ascontiguousarray(
+                    np.stack(longitudinal_kpl_values), dtype=np.float64
+                )
+            )
+            action_arrays = (
+                np.ascontiguousarray(action_offsets, dtype=np.int32),
+                np.ascontiguousarray(action_kinds, dtype=np.int8),
+                np.ascontiguousarray(action_payloads, dtype=np.int64),
+                np.ascontiguousarray(adc_demodulation, dtype=np.complex128),
+                np.ascontiguousarray(rx_sensitivities, dtype=np.complex128),
+                np.ascontiguousarray(spin_signal_weights, dtype=np.float64),
+                parent_signal,
+                checkpoint_states,
+                spins_per_voxel,
+                float(signal_scale),
+                spoiler_mode == "ideal",
+            )
+            worker_threads = (
+                native_threads if sequence_kernel == "native_parallel" else 1
+            )
+            if native_full_plan_source_model or native_full_plan_multi_pool:
+                spatial_source_table = None
+                if spatial_inflow_active:
+                    spatial_source_table = np.empty(
+                        (
+                            8,
+                            end_interval - first_interval,
+                            n_simulated_spins,
+                        ),
+                        dtype=np.float64,
+                    )
+                    for local_interval, block_interval in enumerate(
+                        range(first_interval, end_interval)
+                    ):
+                        start_time = float(
+                            execution_plan.interval_start_s[block_interval]
+                        )
+                        middle_time = float(
+                            execution_plan.interval_mid_s[block_interval]
+                        )
+                        end_time = float(execution_plan.interval_end_s[block_interval])
+                        spatial_source_table[0:2, local_interval] = (
+                            _time_curve_interval_values(
+                                inflow_curve,
+                                start_time,
+                                middle_time,
+                                inflow_arrival_delay,
+                            )
+                        )
+                        spatial_source_table[2:4, local_interval] = (
+                            _time_curve_interval_values(
+                                inflow_curve,
+                                middle_time,
+                                end_time,
+                                inflow_arrival_delay,
+                            )
+                        )
+                        if inflow_polarization_curve is None:
+                            spatial_source_table[4:8, local_interval] = 1.0
+                        else:
+                            spatial_source_table[4:6, local_interval] = (
+                                _time_curve_interval_values(
+                                    inflow_polarization_curve,
+                                    start_time,
+                                    middle_time,
+                                    inflow_arrival_delay,
+                                )
+                            )
+                            spatial_source_table[6:8, local_interval] = (
+                                _time_curve_interval_values(
+                                    inflow_polarization_curve,
+                                    middle_time,
+                                    end_time,
+                                    inflow_arrival_delay,
+                                )
+                            )
+                    empty_source = np.zeros(
+                        end_interval - first_interval, dtype=np.float64
+                    )
+                    source_tables = (empty_source,) * 8
+                else:
+                    block_interval_count = end_interval - first_interval
+                    if execution_plan.source_rate_samples is None:
+                        source_samples = np.zeros(
+                            (block_interval_count, 4), dtype=np.float64
+                        )
+                    else:
+                        source_samples = execution_plan.source_rate_samples[
+                            first_interval:end_interval
+                        ]
+                    if execution_plan.source_polarization_samples is None:
+                        polarization_samples = np.ones(
+                            (block_interval_count, 4), dtype=np.float64
+                        )
+                    else:
+                        polarization_samples = (
+                            execution_plan.source_polarization_samples[
+                                first_interval:end_interval
+                            ]
+                        )
+                    source_tables = tuple(
+                        np.ascontiguousarray(samples[:, index], dtype=np.float64)
+                        for samples in (source_samples, polarization_samples)
+                        for index in range(4)
+                    )
+                if native_full_plan_multi_pool:
+                    native_plan_multi_pool_driver(
+                        state,
+                        transverse_state,
+                        plan_concentration_state,
+                        transverse_factor_table,
+                        np.ascontiguousarray(
+                            np.stack(multi_conversion_values), dtype=np.float64
+                        ),
+                        stack_multi(multi_longitudinal_values, 0),
+                        stack_multi(multi_longitudinal_values, 1),
+                        stack_multi(multi_longitudinal_values, 2),
+                        stack_multi_source(multi_longitudinal_values, 0),
+                        stack_multi_source(multi_longitudinal_values, 1),
+                        stack_multi_source(multi_longitudinal_values, 2),
+                        stack_multi_source(multi_longitudinal_values, 3),
+                        stack_multi(multi_concentration_values, 0),
+                        stack_multi(multi_concentration_values, 1),
+                        stack_multi(multi_concentration_values, 2),
+                        stack_multi_source(multi_concentration_values, 0),
+                        stack_multi_source(multi_concentration_values, 1),
+                        stack_multi_source(multi_concentration_values, 2),
+                        stack_multi_source(multi_concentration_values, 3),
+                        np.ascontiguousarray(longitudinal_durations, dtype=np.float64),
+                        np.ascontiguousarray(longitudinal_groups, dtype=np.int32),
+                        np.ascontiguousarray(first_factor_groups, dtype=np.int32),
+                        np.ascontiguousarray(second_factor_groups, dtype=np.int32),
+                        np.ascontiguousarray(rf_groups, dtype=np.int32),
+                        *rf_tables,
+                        *source_tables,
+                        plan_inflow_delivery,
+                        plan_equilibrium,
+                        native_full_plan_source_mode,
+                        *action_arrays,
+                        worker_threads,
+                        spatial_source_table,
+                    )
+                else:
+                    native_plan_inflow_driver(
+                        state,
+                        transverse_state,
+                        plan_concentration_state,
+                        kpl,
+                        plan_inflow_delivery,
+                        transverse_factor_table,
+                        stack_longitudinal(0),
+                        np.ascontiguousarray(
+                            [value[1] for value in longitudinal_values],
+                            dtype=np.float64,
+                        ),
+                        stack_longitudinal(2),
+                        stack_longitudinal(3, dtype=np.bool_),
+                        stack_source(longitudinal_values, 0),
+                        stack_source(longitudinal_values, 1),
+                        stack_source(longitudinal_values, 2),
+                        stack_source(longitudinal_values, 3),
+                        stack_prepared(concentration_values, 0),
+                        np.ascontiguousarray(
+                            [value[1] for value in concentration_values],
+                            dtype=np.float64,
+                        ),
+                        stack_prepared(concentration_values, 2),
+                        stack_prepared(concentration_values, 3, dtype=np.bool_),
+                        stack_source(concentration_values, 0),
+                        stack_source(concentration_values, 1),
+                        stack_source(concentration_values, 2),
+                        stack_source(concentration_values, 3),
+                        np.ascontiguousarray(longitudinal_durations, dtype=np.float64),
+                        np.ascontiguousarray(longitudinal_modes, dtype=np.int32),
+                        np.ascontiguousarray(concentration_modes, dtype=np.int32),
+                        np.ascontiguousarray(longitudinal_groups, dtype=np.int32),
+                        np.ascontiguousarray(first_factor_groups, dtype=np.int32),
+                        np.ascontiguousarray(second_factor_groups, dtype=np.int32),
+                        np.ascontiguousarray(rf_groups, dtype=np.int32),
+                        *rf_tables,
+                        *source_tables,
+                        plan_equilibrium,
+                        worker_threads,
+                        *action_arrays,
+                        kpl_table,
+                        spatial_source_table,
+                        native_full_plan_source_mode,
+                    )
+            else:
+                native_plan_driver(
+                    state,
+                    transverse_state,
+                    transverse_factor_table,
+                    kpl_table,
+                    stack_longitudinal(0),
+                    np.ascontiguousarray(
+                        [value[1] for value in longitudinal_values],
+                        dtype=np.float64,
+                    ),
+                    stack_longitudinal(2),
+                    stack_longitudinal(3, dtype=np.bool_),
+                    np.ascontiguousarray(longitudinal_durations, dtype=np.float64),
+                    np.ascontiguousarray(longitudinal_modes, dtype=np.int32),
+                    np.ascontiguousarray(longitudinal_groups, dtype=np.int32),
+                    np.ascontiguousarray(first_factor_groups, dtype=np.int32),
+                    np.ascontiguousarray(second_factor_groups, dtype=np.int32),
+                    np.ascontiguousarray(rf_groups, dtype=np.int32),
+                    *rf_tables,
+                    *action_arrays,
+                    worker_threads,
+                )
+            native_full_plan_blocks += 1
+            native_full_plan_intervals += end_interval - first_interval
+            if progress_callback is not None:
+                progress_callback(end_interval, interval_count)
+            if preview_callback is not None:
+                preview_signal = parent_signal.sum(axis=(0, 1))
+                preview_callback(
+                    end_interval / interval_count,
+                    preview_signal[0] if n_rx_coils == 1 else preview_signal,
+                )
+
+        if not _parent_resolved_signal:
+            reduced = parent_signal.sum(axis=0)
+            if n_rx_coils == 1:
+                species_signal[:] += reduced[:, 0, :]
+            else:
+                species_signal[:] += reduced
+        action_cursor = execution_plan.n_actions
+        native_rf_fused_preapplied_end = interval_count
+        return True
+
+    native_full_plan_executed = execute_native_full_plan()
+    if status_callback is not None and native_full_plan_executed:
+        status_callback(
+            "Executed dynamic free evolution, RF, ADC, crushers, and "
+            f"checkpoints in {native_full_plan_blocks:,} bounded native plan "
+            "block(s)."
+        )
+
     interval_start = 0.0
     for interval in range(interval_count):
-        if cancel_callback is not None and cancel_callback():
+        if (
+            not native_full_plan_executed
+            and cancel_callback is not None
+            and cancel_callback()
+        ):
             raise RuntimeError("sequence simulation cancelled")
         if (
             native_rf_fused_enabled
             and interval >= native_rf_fused_preapplied_end
-            and rf_hz[interval] != 0.0
+            and native_rf_hz[interval] != 0.0
         ):
             preapply_native_rf_fused_block(interval)
         if interval < native_rf_fused_preapplied_end:
             interval_end = float(compiled.interval_end_s[interval])
-            crush_transverse_if_requested(interval + 1)
-            observe(interval + 1)
+            process_boundary_actions(interval + 1)
             interval_start = interval_end
+            if native_full_plan_executed:
+                continue
             if progress_callback is not None and (
                 interval % progress_stride == 0 or interval + 1 == interval_count
             ):
@@ -3190,14 +4278,14 @@ def simulate_dynamic_sequence(
             ):
                 preview_callback(
                     (interval + 1) / interval_count,
-                    species_signal.sum(axis=0),
+                    combined_signal_snapshot(),
                 )
             continue
-        dt = compiled.dt_s[interval]
-        interval_end = float(compiled.interval_end_s[interval])
-        interval_mid = interval_start + dt / 2.0
+        dt = execution_plan.dt_s[interval]
+        interval_end = float(execution_plan.interval_end_s[interval])
+        interval_mid = float(execution_plan.interval_mid_s[interval])
         gradient = gradient_hz_per_m[interval]
-        conversion_active = interval_mid >= conversion_start_s
+        conversion_active = bool(execution_plan.conversion_active[interval])
         interval_kpl = kpl if conversion_active else zero_kpl
         interval_passive_conversion = (
             passive_conversion if conversion_active else zero_passive_conversion
@@ -3223,7 +4311,7 @@ def simulate_dynamic_sequence(
             and rf_hz[interval] == 0.0
         )
         if sequence_kernel == "reference":
-            gradient_frequency = positions @ gradient
+            gradient_frequency = _gradient_frequency_hz(positions, gradient)
             static_frequencies = (
                 b0[None, :] + pool_offsets[:, None] + gradient_frequency[None, :]
             )
@@ -3290,7 +4378,7 @@ def simulate_dynamic_sequence(
                 equilibrium_polarization=phantom.equilibrium_polarization,
                 passive_conversion=interval_passive_conversion,
             )
-            if spatial_tx_active and rf_hz[interval] != 0.0:
+            if nonunity_tx_active and rf_hz[interval] != 0.0:
                 _rf_rotate_spatial(state, rf_hz[interval], tx_sensitivity, dt)
             else:
                 _rf_rotate(state, rf_hz[interval], dt)
@@ -3366,14 +4454,10 @@ def simulate_dynamic_sequence(
                 first_dynamic_integral = second_dynamic_integral = None
             else:
                 first_dynamic_integral = real_type(
-                    phantom.dynamic_b0.offset_curve_hz.integral(
-                        interval_start, interval_mid
-                    )
+                    execution_plan.dynamic_b0_first_half_integral_hz_s[interval]
                 )
                 second_dynamic_integral = real_type(
-                    phantom.dynamic_b0.offset_curve_hz.integral(
-                        interval_mid, interval_end
-                    )
+                    execution_plan.dynamic_b0_second_half_integral_hz_s[interval]
                 )
             gradient_key = tuple(float(value) for value in gradient)
             first_transverse_key = (
@@ -3392,7 +4476,7 @@ def simulate_dynamic_sequence(
             second_transverse_factors = transverse_cache.get(second_transverse_key)
             static_frequencies = None
             if first_transverse_factors is None or second_transverse_factors is None:
-                gradient_frequency = positions @ gradient
+                gradient_frequency = _gradient_frequency_hz(positions, gradient)
                 static_frequencies = (
                     b0[None, :] + pool_offsets[:, None] + gradient_frequency[None, :]
                 )
@@ -3404,8 +4488,8 @@ def simulate_dynamic_sequence(
                         * dynamic_b0_scale[None, :]
                         * first_dynamic_integral
                     )
-                first_transverse_factors = _prepare_transverse_factors_for_dtype(
-                    first_phase, t2, half_duration, real_dtype
+                first_transverse_factors = prepare_transverse_factors(
+                    first_phase, half_duration
                 )
                 transverse_cache.put(first_transverse_key, first_transverse_factors)
             if first_transverse_key == second_transverse_key:
@@ -3418,8 +4502,8 @@ def simulate_dynamic_sequence(
                         * dynamic_b0_scale[None, :]
                         * second_dynamic_integral
                     )
-                second_transverse_factors = _prepare_transverse_factors_for_dtype(
-                    second_phase, t2, half_duration, real_dtype
+                second_transverse_factors = prepare_transverse_factors(
+                    second_phase, half_duration
                 )
                 transverse_cache.put(second_transverse_key, second_transverse_factors)
             first_phase = second_phase = None
@@ -3428,12 +4512,17 @@ def simulate_dynamic_sequence(
                 source_start = source_mid = source_end = None
                 concentration_start = concentration_mid = concentration_end = None
             else:
-                start_value, mid_value = _time_curve_interval_values(
-                    inflow_curve,
-                    interval_start,
-                    interval_mid,
-                    inflow_arrival_delay,
-                )
+                if execution_plan.source_rate_samples is None:
+                    start_value, mid_value = _time_curve_interval_values(
+                        inflow_curve,
+                        interval_start,
+                        interval_mid,
+                        inflow_arrival_delay,
+                    )
+                else:
+                    start_value, mid_value = execution_plan.source_rate_samples[
+                        interval, 0:2
+                    ]
                 start_value = np.asarray(start_value, dtype=real_dtype)
                 mid_value = np.asarray(mid_value, dtype=real_dtype)
                 if inflow_polarization_curve is None:
@@ -3441,12 +4530,19 @@ def simulate_dynamic_sequence(
                     source_mid = inflow_delivery * mid_value
                     concentration_start = concentration_mid = None
                 else:
-                    polarization_start, polarization_mid = _time_curve_interval_values(
-                        inflow_polarization_curve,
-                        interval_start,
-                        interval_mid,
-                        inflow_arrival_delay,
-                    )
+                    if execution_plan.source_polarization_samples is None:
+                        polarization_start, polarization_mid = (
+                            _time_curve_interval_values(
+                                inflow_polarization_curve,
+                                interval_start,
+                                interval_mid,
+                                inflow_arrival_delay,
+                            )
+                        )
+                    else:
+                        polarization_start, polarization_mid = (
+                            execution_plan.source_polarization_samples[interval, 0:2]
+                        )
                     polarization_start = np.asarray(
                         polarization_start, dtype=real_dtype
                     )
@@ -3527,7 +4623,20 @@ def simulate_dynamic_sequence(
                         regular_mode,
                     )
             if rf_hz[interval] != 0.0:
-                if spatial_tx_active:
+                if spatial_tx_active and native_spatial_rf_rotation_block is not None:
+                    spatial_prepared = spatial_rf_coefficients(rf_hz[interval], dt)
+                    native_spatial_rf_rotation_block(
+                        state,
+                        transverse_state,
+                        spatial_prepared[0],
+                        spatial_prepared[1],
+                        spatial_prepared[2],
+                        spatial_prepared[3],
+                        native_rf_threads,
+                    )
+                elif nonunity_tx_active and (
+                    sequence_kernel == "optimized" or spatial_tx_active
+                ):
                     sync_transverse_to_state()
                     _rf_rotate_spatial(
                         state,
@@ -3542,14 +4651,14 @@ def simulate_dynamic_sequence(
                         _rf_rotate_float32(
                             state,
                             _prepare_rf_rotation_for_dtype(
-                                rf_hz[interval], dt, real_dtype
+                                native_rf_hz[interval], dt, real_dtype
                             ),
                         )
                     else:
-                        _rf_rotate(state, rf_hz[interval], dt)
+                        _rf_rotate(state, native_rf_hz[interval], dt)
                     transverse_state[:] = state[:, :, 0] + 1j * state[:, :, 1]
                 else:
-                    rf_prepared = _prepare_rf_rotation(rf_hz[interval], dt)
+                    rf_prepared = _prepare_rf_rotation(native_rf_hz[interval], dt)
                     if rf_prepared is not None:
                         native_rf_rotation_block(
                             state,
@@ -3562,12 +4671,17 @@ def simulate_dynamic_sequence(
                             native_rf_threads,
                         )
             if inflow_curve is not None:
-                mid_value, end_value = _time_curve_interval_values(
-                    inflow_curve,
-                    interval_mid,
-                    interval_end,
-                    inflow_arrival_delay,
-                )
+                if execution_plan.source_rate_samples is None:
+                    mid_value, end_value = _time_curve_interval_values(
+                        inflow_curve,
+                        interval_mid,
+                        interval_end,
+                        inflow_arrival_delay,
+                    )
+                else:
+                    mid_value, end_value = execution_plan.source_rate_samples[
+                        interval, 2:4
+                    ]
                 mid_value = np.asarray(mid_value, dtype=real_dtype)
                 end_value = np.asarray(end_value, dtype=real_dtype)
                 if inflow_polarization_curve is None:
@@ -3575,12 +4689,19 @@ def simulate_dynamic_sequence(
                     source_end = inflow_delivery * end_value
                     concentration_mid = concentration_end = None
                 else:
-                    polarization_mid, polarization_end = _time_curve_interval_values(
-                        inflow_polarization_curve,
-                        interval_mid,
-                        interval_end,
-                        inflow_arrival_delay,
-                    )
+                    if execution_plan.source_polarization_samples is None:
+                        polarization_mid, polarization_end = (
+                            _time_curve_interval_values(
+                                inflow_polarization_curve,
+                                interval_mid,
+                                interval_end,
+                                inflow_arrival_delay,
+                            )
+                        )
+                    else:
+                        polarization_mid, polarization_end = (
+                            execution_plan.source_polarization_samples[interval, 2:4]
+                        )
                     polarization_mid = np.asarray(polarization_mid, dtype=real_dtype)
                     polarization_end = np.asarray(polarization_end, dtype=real_dtype)
                     concentration_mid = inflow_delivery * mid_value
@@ -3658,8 +4779,7 @@ def simulate_dynamic_sequence(
                         half_duration,
                         regular_mode,
                     )
-        crush_transverse_if_requested(interval + 1)
-        observe(interval + 1)
+        process_boundary_actions(interval + 1)
         interval_start = interval_end
         if progress_callback is not None and (
             interval % progress_stride == 0 or interval + 1 == interval_count
@@ -3670,35 +4790,62 @@ def simulate_dynamic_sequence(
         ):
             preview_callback(
                 (interval + 1) / interval_count,
-                species_signal.sum(axis=0),
+                combined_signal_snapshot(),
             )
 
     sync_transverse_to_state()
     if sampling.enabled:
-        state = np.einsum(
-            "s,uvsd->uvd",
-            subvoxel_weights,
-            state.reshape(phantom.n_species, parent_active_count, spins_per_voxel, 3),
-            optimize=True,
+        state = np.sum(
+            state.reshape(phantom.n_species, parent_active_count, spins_per_voxel, 3)
+            * subvoxel_weights[None, None, :, None],
+            axis=2,
         )
-    final_pool = np.zeros((phantom.n_species, phantom.nvoxels, 3), dtype=real_dtype)
-    final_pool[:, active] = state
-    final_pool = final_pool.reshape((phantom.n_species,) + phantom.shape + (3,))
-    checkpoint_pool = None
-    if checkpoint_states.size:
-        if sampling.enabled:
-            checkpoint_states = np.einsum(
-                "s,cuvsd->cuvd",
-                subvoxel_weights,
+        if checkpoint_states.size:
+            checkpoint_states = np.sum(
                 checkpoint_states.reshape(
                     compiled.checkpoint_times_s.size,
                     phantom.n_species,
                     parent_active_count,
                     spins_per_voxel,
                     3,
-                ),
-                optimize=True,
+                )
+                * subvoxel_weights[None, None, None, :, None],
+                axis=3,
             )
+    block_runtime_stats = {
+        "native_full_plan_blocks": native_full_plan_blocks,
+        "native_full_plan_intervals": native_full_plan_intervals,
+        "native_rf_fused_blocks": native_rf_fused_blocks,
+        "native_rf_fused_intervals": native_rf_fused_intervals,
+        "native_spatial_rf_cache_hits": spatial_rf_cache_hits,
+        "native_spatial_rf_cache_misses": spatial_rf_cache_misses,
+        "native_spatial_rf_cache_bytes": (
+            spatial_rf_cache.current_bytes if spatial_rf_cache is not None else 0
+        ),
+        "native_rf_fused_cache_bytes": (
+            native_rf_fused_plan_cache.current_bytes
+            if native_rf_fused_plan_cache is not None
+            else 0
+        ),
+    }
+    if _block_result_mode == "minimal":
+        return _DynamicBlockResult(
+            active_indices=active,
+            parent_species_signal=species_signal,
+            final_pool_active=state,
+            checkpoint_pool_active=(
+                checkpoint_states if checkpoint_states.size else None
+            ),
+            runtime_stats=block_runtime_stats,
+        )
+    result_species_signal = (
+        species_signal.sum(axis=0) if _parent_resolved_signal else species_signal
+    )
+    final_pool = np.zeros((phantom.n_species, phantom.nvoxels, 3), dtype=real_dtype)
+    final_pool[:, active] = state
+    final_pool = final_pool.reshape((phantom.n_species,) + phantom.shape + (3,))
+    checkpoint_pool = None
+    if checkpoint_states.size:
         checkpoint_pool = np.zeros(
             (
                 compiled.checkpoint_times_s.size,
@@ -3774,8 +4921,8 @@ def simulate_dynamic_sequence(
             cartesian_volume_metadata = None
     sequence_waveforms = physical_sequence_waveforms(program, effective_nucleus)
     physical_field_maps = physical_b1_field_arrays(phantom, sequence_waveforms)
-    return SequenceSimulationResult(
-        signal=species_signal.sum(axis=0),
+    result = SequenceSimulationResult(
+        signal=result_species_signal.sum(axis=0),
         adc_times_s=compiled.adc_times_s,
         final_magnetization=final_pool.sum(axis=0),
         checkpoint_magnetization=(
@@ -3819,24 +4966,50 @@ def simulate_dynamic_sequence(
             "spin_sampling": sampling.to_metadata(),
             "subvoxel_spin_counts_xyz": sampling.counts_xyz,
             "subvoxel_spins_per_voxel": spins_per_voxel,
-            "tx_sensitivity": "spatial" if spatial_tx_active else "uniform",
+            "tx_sensitivity": tx_classification,
+            "constant_tx_sensitivity": (
+                {
+                    "real": float(constant_tx_sensitivity.real),
+                    "imag": float(constant_tx_sensitivity.imag),
+                }
+                if tx_classification in {"unity", "constant"}
+                else None
+            ),
             "n_rx_coils": n_rx_coils,
             "simulation_precision": simulation_precision,
             "simulation_timestep_s": float(simulation_timestep_s),
             "compiled_interval_count": interval_count,
+            "execution_plan_segment_count": execution_plan.n_segments,
+            "execution_plan_action_count": execution_plan.n_actions,
+            "execution_plan_bytes": execution_plan.nbytes,
+            "execution_plan_fingerprint": execution_plan.fingerprint,
+            "sequence_compile_s": sequence_compile_s,
+            "execution_plan_build_s": execution_plan_build_s,
             "state_dtype": real_dtype.name,
             "signal_dtype": complex_dtype.name,
             "coefficient_precompute_dtype": "float64",
             "sequence_kernel": sequence_kernel,
             "requested_sequence_kernel": requested_sequence_kernel,
+            "numerical_contract": (
+                "float64-close"
+                if sequence_kernel in {"native_serial", "native_parallel"}
+                and (
+                    native_full_plan_executed
+                    or native_rf_fused_enabled
+                    or nonunity_tx_active
+                )
+                else "bitwise"
+            ),
             "native_fallback_reason": native_fallback_reason,
             "native_longitudinal_fallback_reason": (
-                native_longitudinal_fallback_reason
+                None
+                if native_full_plan_executed
+                else native_longitudinal_fallback_reason
             ),
             "native_hybrid": bool(
                 sequence_kernel in {"native_serial", "native_parallel"}
-                and native_rf_rotation_block is not None
-                and not spatial_tx_active
+                and not native_full_plan_executed
+                and native_rf_available
                 and native_longitudinal_step is None
                 and native_concentration_inflow_step is None
             ),
@@ -3855,10 +5028,13 @@ def simulate_dynamic_sequence(
             "native_parallel_threads": (
                 native_threads if sequence_kernel == "native_parallel" else 1
             ),
+            "effective_threads": (
+                native_threads if sequence_kernel == "native_parallel" else 1
+            ),
             "native_rf_threads": (
                 native_rf_threads
                 if sequence_kernel in {"native_serial", "native_parallel"}
-                and not spatial_tx_active
+                and native_rf_available
                 else 1
             ),
             "native_longitudinal_threads": (
@@ -3867,13 +5043,32 @@ def simulate_dynamic_sequence(
                 and native_concentration_inflow_step is not None
                 else 1
             ),
-            "native_rf_block_enabled": (
-                native_rf_rotation_block is not None and not spatial_tx_active
+            "native_rf_block_enabled": (native_rf_available),
+            "native_spatial_rf_block_enabled": bool(
+                spatial_tx_active
+                and native_spatial_rf_rotation_block is not None
+                and sequence_kernel in {"native_serial", "native_parallel"}
             ),
             "native_rf_fused_block_enabled": native_rf_fused_enabled,
             "native_rf_fused_fallback_reason": native_rf_fused_fallback_reason,
             "native_rf_fused_blocks": native_rf_fused_blocks,
             "native_rf_fused_intervals": native_rf_fused_intervals,
+            "native_full_plan_enabled": native_full_plan_executed,
+            "native_full_plan_model": (
+                (
+                    "multi-pool-" + native_full_plan_model
+                    if native_full_plan_source_model
+                    else "multi-pool-no-inflow"
+                )
+                if native_full_plan_executed and native_full_plan_multi_pool
+                else (
+                    native_full_plan_model
+                    if native_full_plan_executed and native_full_plan_source_model
+                    else "no-inflow" if native_full_plan_executed else None
+                )
+            ),
+            "native_full_plan_blocks": native_full_plan_blocks,
+            "native_full_plan_intervals": native_full_plan_intervals,
             "native_rf_fused_spin_limit": native_rf_fused_spin_limit,
             "native_rf_fused_interval_limit": native_rf_fused_interval_limit,
             "native_rf_fused_cache_limit_bytes": (native_rf_fused_cache_limit_bytes),
@@ -3882,12 +5077,23 @@ def simulate_dynamic_sequence(
                 if native_rf_fused_plan_cache is not None
                 else 0
             ),
+            "native_spatial_rf_table_limit_bytes": (
+                native_spatial_rf_table_limit_bytes
+            ),
+            "native_spatial_rf_max_groups_per_block": int(native_spatial_rf_max_groups),
+            "native_spatial_rf_cache_limit_bytes": spatial_rf_cache_limit_bytes,
+            "native_spatial_rf_cache_bytes": (
+                spatial_rf_cache.current_bytes if spatial_rf_cache is not None else 0
+            ),
+            "native_spatial_rf_cache_hits": spatial_rf_cache_hits,
+            "native_spatial_rf_cache_misses": spatial_rf_cache_misses,
             "native_rf_fused_numerical_contract": (
                 "float64-close" if native_rf_fused_enabled else None
             ),
             "native_parallel_threshold": native_parallel_threshold,
             "native_block_interval_limit": native_block_interval_limit,
             "native_block_table_limit_bytes": native_block_table_limit_bytes,
+            "native_full_plan_table_limit_bytes": (native_full_plan_table_limit_bytes),
             "native_parallel_memory_limited": (
                 sequence_kernel == "native_parallel"
                 and native_longitudinal_block is not None
@@ -3935,9 +5141,349 @@ def simulate_dynamic_sequence(
             ),
         },
         pool_names=tuple(pool.name for pool in phantom.pools),
-        species_signal=species_signal,
+        species_signal=result_species_signal,
         final_pool_magnetization=final_pool,
         checkpoint_pool_magnetization=checkpoint_pool,
         sequence_waveforms=sequence_waveforms,
         physical_field_maps=physical_field_maps,
+    )
+    if _block_result_mode == "template":
+        return _DynamicBlockResult(
+            active_indices=active,
+            parent_species_signal=species_signal,
+            final_pool_active=state,
+            checkpoint_pool_active=(
+                checkpoint_states if checkpoint_states.size else None
+            ),
+            runtime_stats=block_runtime_stats,
+            template_result=result,
+        )
+    return result
+
+
+def simulate_dynamic_sequence(
+    program,
+    phantom: DynamicSpectralPhantom,
+    *,
+    checkpoints_s=(),
+    field_strength_t=None,
+    nucleus=None,
+    sequence_reference_ppm=None,
+    progress_callback=None,
+    preview_callback=None,
+    cancel_callback=None,
+    status_callback=None,
+    simulation_timestep_s=1e-6,
+    signal_weighting="voxel",
+    sequence_kernel="optimized",
+    simulation_precision="float64",
+    use_parallel=True,
+    num_threads=1,
+    memory_budget_bytes=None,
+    spin_sampling=None,
+    spoiler_mode="ideal",
+    checkpoint_dtype=None,
+    parent_voxel_chunk_size=None,
+    **_ignored,
+):
+    """Run a dynamic sequence, streaming large objects by parent voxel.
+
+    Small objects retain the established single-block path. Large objects and
+    explicitly requested chunks use one shared execution plan, keep all
+    subspins of a parent voxel together, and reduce parent-voxel signals with a
+    fixed streaming binary tree.
+    """
+    from .sequence import SequenceCompiler
+    from .sequence.spin_sampling import coerce_spin_sampling
+
+    spoiler_mode = str(spoiler_mode).strip().lower()
+    if spoiler_mode not in {"ideal", "gradient"}:
+        raise ValueError("spoiler_mode must be 'ideal' or 'gradient'")
+    sampling = coerce_spin_sampling(
+        spin_sampling if spoiler_mode == "gradient" else None
+    )
+    sampling.validate_phantom_dimensions(phantom.ndim)
+    active = np.flatnonzero(phantom.mask.ravel())
+    if active.size == 0:
+        raise ValueError(
+            "dynamic phantom has neither initial magnetization nor inflow support"
+        )
+    if parent_voxel_chunk_size is not None:
+        if (
+            isinstance(parent_voxel_chunk_size, bool)
+            or int(parent_voxel_chunk_size) != parent_voxel_chunk_size
+            or int(parent_voxel_chunk_size) < 1
+        ):
+            raise ValueError("parent_voxel_chunk_size must be a positive integer")
+        parent_voxel_chunk_size = int(parent_voxel_chunk_size)
+
+    compile_started = perf_counter()
+    compiled = SequenceCompiler().compile(
+        program,
+        checkpoints_s=checkpoints_s,
+        extra_boundaries_s=phantom.dynamic_breakpoints_s(program.duration_s),
+        simulation_timestep_s=simulation_timestep_s,
+        status_callback=status_callback,
+    )
+    sequence_compile_s = perf_counter() - compile_started
+    plan_started = perf_counter()
+    execution_plan = build_dynamic_execution_plan(compiled, phantom)
+    execution_plan_build_s = perf_counter() - plan_started
+
+    real_dtype = np.dtype(simulation_precision)
+    if real_dtype not in {np.dtype(np.float32), np.dtype(np.float64)}:
+        raise ValueError("simulation_precision must be 'float64' or 'float32'")
+    complex_dtype = np.dtype(
+        np.complex64 if real_dtype == np.dtype(np.float32) else np.complex128
+    )
+    effective_checkpoint_dtype = np.dtype(
+        real_dtype if checkpoint_dtype is None else checkpoint_dtype
+    )
+    if effective_checkpoint_dtype not in {
+        np.dtype(np.float16),
+        np.dtype(np.float32),
+        np.dtype(np.float64),
+    }:
+        raise ValueError("checkpoint_dtype must be float16, float32, or float64")
+
+    parent_count = int(active.size)
+    spins_per_parent = sampling.spins_per_voxel
+    total_spins = parent_count * spins_per_parent
+    rx_maps = getattr(phantom, "rx_sensitivity_maps", None)
+    n_rx_coils = 1 if rx_maps is None else int(np.asarray(rx_maps).shape[0])
+    checkpoint_count = int(compiled.checkpoint_times_s.size)
+    adc_count = int(compiled.adc_times_s.size)
+    tx_map = getattr(phantom, "tx_sensitivity_map", None)
+    if tx_map is None:
+        full_tx_sensitivity = np.ones(parent_count, dtype=np.complex128)
+    else:
+        tx_map = np.asarray(tx_map, dtype=np.complex128)
+        if tx_map.shape != phantom.shape or not np.all(np.isfinite(tx_map)):
+            raise ValueError(
+                "dynamic phantom Tx sensitivity must be finite and match its shape"
+            )
+        full_tx_sensitivity = tx_map.ravel()[active]
+    global_tx_classification, global_constant_tx = _classify_tx_sensitivity(
+        full_tx_sensitivity
+    )
+
+    # Public outputs remain global. Everything proportional to the expanded
+    # subspin count belongs to the current parent-voxel memory block.
+    global_output_bytes = (
+        phantom.n_species * phantom.nvoxels * 3 * real_dtype.itemsize
+        + phantom.nvoxels * 3 * real_dtype.itemsize
+        + checkpoint_count
+        * (phantom.n_species + 1)
+        * phantom.nvoxels
+        * 3
+        * effective_checkpoint_dtype.itemsize
+        + (phantom.n_species + 1) * n_rx_coils * adc_count * complex_dtype.itemsize
+    )
+    per_spin_work_bytes = (
+        phantom.n_species * 3 * real_dtype.itemsize
+        + phantom.n_species * complex_dtype.itemsize
+        + 3 * np.dtype(np.float64).itemsize
+        + 16 * np.dtype(np.float64).itemsize
+    )
+    if phantom.initial_spin_density_maps is not None:
+        per_spin_work_bytes += phantom.n_species * 3 * real_dtype.itemsize
+    per_parent_work_bytes = (
+        spins_per_parent * per_spin_work_bytes
+        + checkpoint_count
+        * phantom.n_species
+        * spins_per_parent
+        * 3
+        * effective_checkpoint_dtype.itemsize
+        + phantom.n_species * n_rx_coils * adc_count * complex_dtype.itemsize
+    )
+    # The reserve covers bounded coefficient/RF caches and allocator overhead.
+    reserve_bytes = 64 * 1024**2
+    memory_parent_limit = parent_count
+    enforce_memory_plan = bool(
+        sampling.enabled or parent_voxel_chunk_size is not None or total_spins > 131072
+    )
+    if memory_budget_bytes is not None and enforce_memory_plan:
+        memory_budget_bytes = int(memory_budget_bytes)
+        if memory_budget_bytes <= 0:
+            raise MemoryError("Memory limit must leave room for simulation outputs")
+        reserve_bytes = min(reserve_bytes, max(1024**2, memory_budget_bytes // 10))
+        available_work_bytes = memory_budget_bytes - global_output_bytes - reserve_bytes
+        memory_parent_limit = available_work_bytes // max(1, per_parent_work_bytes)
+        if memory_parent_limit < 1:
+            required = global_output_bytes + reserve_bytes + per_parent_work_bytes
+            raise MemoryError(
+                "Memory limit exceeded before dynamic state allocation: one "
+                "parent voxel plus requested outputs needs approximately "
+                f"{required / 1024**2:.2f} MiB, above the current budget of "
+                f"{memory_budget_bytes / 1024**2:.2f} MiB. Reduce checkpoints, "
+                "ADC samples, receive coils, or subvoxel spin counts."
+            )
+
+    requested_chunk = (
+        parent_count
+        if parent_voxel_chunk_size is None
+        else min(parent_count, parent_voxel_chunk_size)
+    )
+    native_expanded_spin_limit = 131072
+    native_parent_limit = max(1, native_expanded_spin_limit // max(1, spins_per_parent))
+    chunk_parent_count = max(
+        1,
+        min(
+            parent_count,
+            requested_chunk,
+            int(memory_parent_limit),
+            native_parent_limit,
+        ),
+    )
+    use_chunking = bool(
+        parent_voxel_chunk_size is not None
+        or total_spins > native_expanded_spin_limit
+        or chunk_parent_count < parent_count
+    )
+    common_arguments = dict(
+        checkpoints_s=checkpoints_s,
+        field_strength_t=field_strength_t,
+        nucleus=nucleus,
+        sequence_reference_ppm=sequence_reference_ppm,
+        cancel_callback=cancel_callback,
+        simulation_timestep_s=simulation_timestep_s,
+        signal_weighting=signal_weighting,
+        sequence_kernel=sequence_kernel,
+        simulation_precision=simulation_precision,
+        use_parallel=use_parallel,
+        num_threads=num_threads,
+        memory_budget_bytes=memory_budget_bytes,
+        spin_sampling=spin_sampling,
+        spoiler_mode=spoiler_mode,
+        checkpoint_dtype=checkpoint_dtype,
+        _compiled=compiled,
+        _execution_plan=execution_plan,
+        _sequence_compile_s=sequence_compile_s,
+        _execution_plan_build_s=execution_plan_build_s,
+        _tx_classification=global_tx_classification,
+        _constant_tx_sensitivity=global_constant_tx,
+        **_ignored,
+    )
+    if not use_chunking:
+        return _simulate_dynamic_sequence_block(
+            program,
+            phantom,
+            progress_callback=progress_callback,
+            preview_callback=preview_callback,
+            status_callback=status_callback,
+            **common_arguments,
+        )
+
+    block_count = (parent_count + chunk_parent_count - 1) // chunk_parent_count
+    if status_callback is not None:
+        status_callback(
+            "Streaming the dynamic object in "
+            f"{block_count:,} parent-voxel block(s) of at most "
+            f"{chunk_parent_count:,}; preview signals contain only completed "
+            "object blocks."
+        )
+
+    accumulator = _PairwiseArrayAccumulator()
+    final_pool_flat = np.zeros(
+        (phantom.n_species, phantom.nvoxels, 3), dtype=real_dtype
+    )
+    checkpoint_pool_flat = (
+        np.zeros(
+            (checkpoint_count, phantom.n_species, phantom.nvoxels, 3),
+            dtype=effective_checkpoint_dtype,
+        )
+        if checkpoint_count
+        else None
+    )
+    template_result = None
+    aggregate_stats = {
+        "native_full_plan_blocks": 0,
+        "native_full_plan_intervals": 0,
+        "native_rf_fused_blocks": 0,
+        "native_rf_fused_intervals": 0,
+        "native_spatial_rf_cache_hits": 0,
+        "native_spatial_rf_cache_misses": 0,
+        "native_spatial_rf_cache_bytes": 0,
+        "native_rf_fused_cache_bytes": 0,
+    }
+    completed_parents = 0
+    for block_index, first_parent in enumerate(
+        range(0, parent_count, chunk_parent_count)
+    ):
+        block_active = active[first_parent : first_parent + chunk_parent_count]
+        block = _simulate_dynamic_sequence_block(
+            program,
+            phantom,
+            progress_callback=None,
+            preview_callback=None,
+            status_callback=status_callback if block_index == 0 else None,
+            _active_indices=block_active,
+            _parent_resolved_signal=True,
+            _block_result_mode="template" if block_index == 0 else "minimal",
+            **common_arguments,
+        )
+        if block.template_result is not None:
+            template_result = block.template_result
+        for parent_signal in block.parent_species_signal:
+            accumulator.add(parent_signal)
+        final_pool_flat[:, block.active_indices] = block.final_pool_active
+        if checkpoint_pool_flat is not None:
+            checkpoint_pool_flat[:, :, block.active_indices] = (
+                block.checkpoint_pool_active
+            )
+        for key, value in block.runtime_stats.items():
+            if key.endswith("_bytes"):
+                aggregate_stats[key] = max(aggregate_stats[key], int(value))
+            else:
+                aggregate_stats[key] += int(value)
+        completed_parents += int(block.active_indices.size)
+        if progress_callback is not None:
+            progress_callback(completed_parents, parent_count)
+        if preview_callback is not None:
+            preview_callback(
+                completed_parents / parent_count,
+                accumulator.total().sum(axis=0),
+            )
+
+    if template_result is None:
+        raise RuntimeError("dynamic parent-voxel execution produced no result")
+    species_signal = accumulator.total()
+    final_pool = final_pool_flat.reshape((phantom.n_species,) + phantom.shape + (3,))
+    checkpoint_pool = (
+        None
+        if checkpoint_pool_flat is None
+        else checkpoint_pool_flat.reshape(
+            (checkpoint_count, phantom.n_species) + phantom.shape + (3,)
+        )
+    )
+    metadata = dict(template_result.metadata)
+    metadata.update(aggregate_stats)
+    metadata.update(
+        {
+            "n_simulated_spins": total_spins,
+            "sequence_compile_s": sequence_compile_s,
+            "execution_plan_build_s": execution_plan_build_s,
+            "dynamic_parent_chunking": True,
+            "dynamic_parent_chunk_count": block_count,
+            "dynamic_parent_chunk_size": chunk_parent_count,
+            "dynamic_requested_parent_chunk_size": parent_voxel_chunk_size,
+            "dynamic_reduction_group_parent_voxels": 1,
+            "dynamic_signal_reduction": "fixed-parent-streaming-pairwise",
+            "dynamic_global_output_bytes_estimate": int(global_output_bytes),
+            "dynamic_parent_work_bytes_estimate": int(per_parent_work_bytes),
+            "dynamic_memory_reserve_bytes": int(reserve_bytes),
+            "numerical_contract": "float64-close",
+        }
+    )
+    return replace(
+        template_result,
+        signal=species_signal.sum(axis=0),
+        final_magnetization=final_pool.sum(axis=0),
+        checkpoint_magnetization=(
+            None if checkpoint_pool is None else checkpoint_pool.sum(axis=1)
+        ),
+        metadata=metadata,
+        species_signal=species_signal,
+        final_pool_magnetization=final_pool,
+        checkpoint_pool_magnetization=checkpoint_pool,
     )

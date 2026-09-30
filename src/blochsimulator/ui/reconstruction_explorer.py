@@ -301,6 +301,7 @@ class SequenceReconstructionExplorer(QWidget):
         self._current_display = None
         self._pending_state = None
         self._volume_initialized = False
+        self._contrast_domain_cache = {}
         self._build_ui()
 
     def _build_ui(self):
@@ -475,6 +476,7 @@ class SequenceReconstructionExplorer(QWidget):
         self.source = None
         self._current_display = None
         self._volume_initialized = False
+        self._contrast_domain_cache.clear()
         self.kspace_panel.clear()
         self.image_panel.clear()
         self.spectrum_plot.clear()
@@ -496,6 +498,7 @@ class SequenceReconstructionExplorer(QWidget):
     def set_model(self, model: SequenceReconstructionModel, *, source=None):
         self.model = model
         self.source = None if source is None else str(source)
+        self._contrast_domain_cache.clear()
         self._populate_controls()
         self._refresh()
         if self._pending_state is not None:
@@ -664,13 +667,18 @@ class SequenceReconstructionExplorer(QWidget):
             image_data, mode, pool_index, effective_coil_mode = self._selected_image()
             component = str(self.component_combo.currentData() or "magnitude")
             display = model.display_values(image_data, component)
-            display_levels = self._display_levels(
-                display,
-                domain=self._signal_series_contrast_domain(display, component),
+            contrast_domain = (
+                None
+                if self.auto_contrast.isChecked()
+                else self._dataset_contrast_domain(display, component)
             )
             image_lut = self._image_lut()
             interpolation = self._image_interpolation()
             if model.kind in {"cartesian_3d", "radial_3d"}:
+                display_levels = self._display_levels(
+                    display,
+                    domain=contrast_domain,
+                )
                 image_scalar = image_data.copy(data=display)
                 image_volume, fov = model.scanner_volume(image_scalar)
                 kspace_name = model.kspace_name(pool=mode == "pool")
@@ -717,7 +725,7 @@ class SequenceReconstructionExplorer(QWidget):
                     mode,
                     pool_index,
                     effective_coil_mode,
-                    display_levels,
+                    contrast_domain,
                 )
             source = f" · {Path(self.source).name}" if self.source else ""
             ideal_note = (
@@ -744,7 +752,7 @@ class SequenceReconstructionExplorer(QWidget):
         mode,
         pool_index,
         effective_coil_mode,
-        display_levels,
+        contrast_domain,
     ):
         model = self.model
         if model.kind == "csi":
@@ -753,6 +761,7 @@ class SequenceReconstructionExplorer(QWidget):
             display = model.display_values(
                 image_data, self.component_combo.currentData()
             )
+        display_levels = self._display_levels(display, domain=contrast_domain)
         image_dims = [
             dimension
             for dimension in image_data.dims
@@ -835,42 +844,60 @@ class SequenceReconstructionExplorer(QWidget):
             return float(finite.min()), float(finite.max())
         return None
 
-    def _signal_series_contrast_domain(self, current_display, component):
-        """Return one contrast domain across all slices and repetitions."""
-        series_dimensions = tuple(
-            item
-            for item in self.model.outer_dimensions
-            if item.name in {"slice", "repetition"}
-        )
-        if not series_dimensions:
+    def _dataset_contrast_domain(self, current_display, component):
+        """Return one contrast domain across every selectable image frame."""
+        mode, pool_index = self._selected_data_mode()
+        coil_mode = str(self.coil_combo.currentData() or "rss")
+        cache_key = (mode, pool_index, coil_mode, component)
+        if cache_key in self._contrast_domain_cache:
+            return self._contrast_domain_cache[cache_key]
+
+        outer_dimensions = tuple(self.model.outer_dimensions)
+        if not outer_dimensions:
             finite_range = self._finite_range(current_display)
-            return None if finite_range is None else (0.0, max(0.0, finite_range[1]))
+            domain = None if finite_range is None else (0.0, max(0.0, finite_range[1]))
+            self._contrast_domain_cache[cache_key] = domain
+            return domain
 
         selections = self._selections()
         high = None
-        for values in product(*(item.values for item in series_dimensions)):
-            series_selections = dict(selections)
-            series_selections.update(
-                (item.name, value) for item, value in zip(series_dimensions, values)
+        for values in product(*(item.values for item in outer_dimensions)):
+            frame_selections = dict(selections)
+            frame_selections.update(
+                (item.name, value) for item, value in zip(outer_dimensions, values)
             )
-            image_data, *_ = self._selected_image(series_selections)
+            try:
+                image_data, *_ = self._selected_image(frame_selections)
+            except ValueError:
+                # Some imported datasets contain sparse combinations of labelled
+                # frame coordinates. Those absent combinations are not images.
+                continue
             display = self.model.display_values(image_data, component)
             finite_range = self._finite_range(display)
             if finite_range is None:
                 continue
             high = finite_range[1] if high is None else max(high, finite_range[1])
-        return None if high is None else (0.0, max(0.0, high))
+        domain = None if high is None else (0.0, max(0.0, high))
+        self._contrast_domain_cache[cache_key] = domain
+        return domain
 
     def _display_levels(self, values, *, domain=None):
+        if self.auto_contrast.isChecked():
+            finite_range = self._finite_range(values)
+            display_low, display_high = (
+                (0.0, 1.0) if finite_range is None else finite_range
+            )
+            if display_high <= display_low:
+                display_high = np.nextafter(display_low, np.inf)
+            self.contrast_slider.set_domain(display_low, display_high, preserve=False)
+            self._update_contrast_labels(display_low, display_high)
+            return display_low, display_high
+
         finite_range = self._finite_range(values) if domain is None else domain
         high = 1.0 if finite_range is None else max(0.0, float(finite_range[1]))
         display_high = 1.1 * high
         if display_high <= 0.0:
             display_high = 1e-6
-        if self.auto_contrast.isChecked():
-            self.contrast_slider.set_domain(0.0, display_high, preserve=False)
-            self._update_contrast_labels(0.0, display_high)
-            return 0.0, display_high
         self.contrast_slider.set_domain(0.0, display_high, preserve=True)
         selected_low, selected_high = self.contrast_slider.values()
         self._update_contrast_labels(selected_low, selected_high)

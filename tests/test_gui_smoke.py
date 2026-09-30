@@ -343,6 +343,10 @@ def test_settings_dialog_returns_selected_values(tmp_path):
         dialog.sequence_kernel_combo.findData("reference")
     )
     assert dialog.sequence_kernel() == "reference"
+    dialog.sequence_kernel_combo.setCurrentIndex(
+        dialog.sequence_kernel_combo.findData("strict_reference")
+    )
+    assert dialog.sequence_kernel() == "strict_reference"
     assert dialog.dynamic_sequence_kernel() == "optimized"
     assert dialog.dynamic_sequence_kernel_combo.findData("metal_hybrid") >= 0
     dialog.dynamic_sequence_kernel_combo.setCurrentIndex(
@@ -461,15 +465,24 @@ def test_settings_dialog_groups_kernel_extras_and_has_english_tooltips(tmp_path)
 
     sequence = dialog.sequence_kernel_combo
     sequence_optimized = sequence.findData("optimized")
+    sequence_strict_reference = sequence.findData("strict_reference")
     sequence_reference = sequence.findData("reference")
     assert sequence.itemText(sequence_optimized) == "Optimized (recommended)"
+    assert (
+        sequence.itemText(sequence_strict_reference)
+        == "Strict reference (advanced validation)"
+    )
     assert sequence.itemText(sequence_reference) == "Reference (advanced validation)"
-    assert sequence_reference > sequence_optimized + 1
+    assert sequence_strict_reference > sequence_optimized + 1
+    assert sequence_reference > sequence_strict_reference
     assert "ordinary Bloch simulations" in sequence.itemData(
         sequence_optimized, Qt.ToolTipRole
     )
     assert "numerical comparisons" in sequence.itemData(
         sequence_reference, Qt.ToolTipRole
+    )
+    assert "strict numerical baseline" in sequence.itemData(
+        sequence_strict_reference, Qt.ToolTipRole
     )
 
     dynamic = dialog.dynamic_sequence_kernel_combo
@@ -821,6 +834,8 @@ def test_configured_export_directory_is_used(tmp_path, monkeypatch):
 
     window.app_settings.setValue("sequence/kernel", "invalid")
     assert window._load_sequence_kernel() == "optimized"
+    window.app_settings.setValue("sequence/kernel", "strict_reference")
+    assert window._load_sequence_kernel() == "strict_reference"
     window.app_settings.setValue("sequence/dynamic_kernel", "invalid")
     assert window._load_dynamic_sequence_kernel() == "optimized"
     window.app_settings.setValue("sequence/dynamic_kernel", "metal_hybrid")

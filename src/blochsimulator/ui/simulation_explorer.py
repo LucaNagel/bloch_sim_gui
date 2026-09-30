@@ -256,6 +256,19 @@ class SessionSimulationExplorer(QWidget):
             ("Kernel", run.kernel or "—"),
             ("Completed", _date_text(run.created_at_utc)),
         ]
+        loop = getattr(result, "metadata", {}).get("parameter_loop")
+        if isinstance(loop, dict):
+            unit = str(loop.get("unit", "")).strip()
+            value = float(loop.get("value", 0.0))
+            value_text = f"{value:g}{'' if unit in {'°', '×'} else ' '}{unit}"
+            rows[2:2] = [
+                ("Loop parameter", str(loop.get("parameter_label", "Parameter"))),
+                ("Loop value", value_text),
+                (
+                    "Loop iteration",
+                    f"{int(loop.get('index', 0)) + 1}/{int(loop.get('count', 1))}",
+                ),
+            ]
         self.details_table.setRowCount(len(rows))
         for row, (name, value) in enumerate(rows):
             self.details_table.setItem(row, 0, QTableWidgetItem(name))

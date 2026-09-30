@@ -600,6 +600,23 @@ def test_designer_builds_spatial_b0_inhomogeneity(mode, constant_axis):
     assert PhantomDesign.from_phantom(phantom).b0_inhomogeneity_mode == mode
 
 
+@pytest.mark.parametrize(
+    "mode,edge_index",
+    [("radial_xy", (0, 0, 2)), ("radial_xyz", (0, 0, 0))],
+)
+def test_radial_b0_inhomogeneity_is_centred_on_the_reference(mode, edge_index):
+    design = _spectral_design()
+    design.shape = (5, 5, 5)
+    design.b0_inhomogeneity_mode = mode
+    design.b0_inhomogeneity_ppm = 1.0
+
+    added = design.rasterize_b0_inhomogeneity()
+
+    assert added[2, 2, 2] == pytest.approx(-0.5)
+    assert added[edge_index] == pytest.approx(0.5)
+    assert (float(np.min(added)), float(np.max(added))) == pytest.approx((-0.5, 0.5))
+
+
 def test_spatial_b0_inhomogeneity_changes_the_simulated_adc_signal():
     reference_design = _spectral_design()
     inhomogeneous_design = _spectral_design()

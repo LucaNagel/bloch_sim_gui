@@ -69,13 +69,31 @@ def test_complete_project_round_trip(tmp_path):
 
 def test_project_state_round_trips_complex_rf_waveform_arrays(tmp_path):
     waveform = np.asarray([1.0 + 2.0j, 3.0 - 4.0j])
+    gradient = np.asarray([0.0, 120.0, -120.0, 0.0])
     path = tmp_path / "rf_state.blochproj"
 
-    save_project(path, {"sequence_rf_pulse": {"waveform_hz": waveform}})
+    save_project(
+        path,
+        {
+            "sequence_rf_pulse": {"waveform_hz": waveform},
+            "sequence_spectral_spatial_pulse": {
+                "rf_hz": waveform,
+                "gradient_hz_per_m": gradient,
+                "bands": [{"center_hz": 0.0, "width_hz": 80.0}],
+            },
+        },
+    )
 
     loaded = load_project(path)
     np.testing.assert_array_equal(
         loaded["state"]["sequence_rf_pulse"]["waveform_hz"], waveform
+    )
+    np.testing.assert_array_equal(
+        loaded["state"]["sequence_spectral_spatial_pulse"]["rf_hz"], waveform
+    )
+    np.testing.assert_array_equal(
+        loaded["state"]["sequence_spectral_spatial_pulse"]["gradient_hz_per_m"],
+        gradient,
     )
 
 

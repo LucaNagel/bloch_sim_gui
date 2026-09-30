@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import copy
 import warnings
 from typing import Mapping, Sequence
 
@@ -14,8 +15,13 @@ from .encoding import (
     resolve_encoding_frame,
     set_pulseq_encoding_definitions,
 )
-from .rf_pulses import make_pulseq_rf_events, set_rf_definitions
+from .rf_pulses import (
+    make_pulseq_rf_events,
+    normalize_rf_pulse_type,
+    set_rf_definitions,
+)
 from .scanner import ScannerParameters
+from .spectral_spatial import SpectralSpatialPulse
 from .bssfp_phase import (
     advance_bssfp_phase_deg,
     pulseq_phase_offset_rad,
@@ -206,6 +212,21 @@ def _add_rf_block(sequence, rf_event, *events):
         sequence.add_block(rf_event, *events)
 
 
+def _remap_select_gradient(event, frame: EncodingFrame):
+    """Map the SPSP design gradient onto the partition encoding axis."""
+    mapped = copy(event)
+    axis, sign = frame.axis_and_sign("partition")
+    mapped.channel = axis
+    for attribute in ("amplitude", "area", "flat_area", "first", "last"):
+        if hasattr(mapped, attribute):
+            value = getattr(mapped, attribute)
+            if value is not None:
+                setattr(mapped, attribute, sign * value)
+    if hasattr(mapped, "waveform"):
+        mapped.waveform = sign * np.asarray(mapped.waveform)
+    return mapped
+
+
 def make_pulseq_spectral_selective_bssfp(
     *,
     fov_m: Sequence[float] = (56e-3, 28e-3, 21e-3),
@@ -226,6 +247,7 @@ def make_pulseq_spectral_selective_bssfp(
     spectral_rf_custom_raster_s: float | None = None,
     spectral_rf_custom_flip_angle_deg: float | None = None,
     spectral_rf_custom_name: str | None = None,
+    spectral_rf_spectral_spatial_pulse=None,
     spectral_rf_frequency_offset_hz: float = 0.0,
     sampling_bandwidth_hz: float = 10_000.0,
     encoding_duration_s: float | None = None,
@@ -439,13 +461,42 @@ def make_pulseq_spectral_selective_bssfp(
         custom_raster_s=spectral_rf_custom_raster_s,
         custom_flip_angle_deg=spectral_rf_custom_flip_angle_deg,
         frequency_offset_hz=spectral_rf_frequency_offset_hz,
+        spectral_spatial_pulse=spectral_rf_spectral_spatial_pulse,
+        slice_thickness_m=(
+            fov[2]
+            if normalize_rf_pulse_type(spectral_rf_pulse_type) == "spectral_spatial"
+            else None
+        ),
+        nucleus=nucleus,
     )
-    spectral_rf_bandwidth_hz = effective_rf_tbw / actual_rf_duration
-    spectral_rf_bandwidth_factor_hz_ms = effective_rf_tbw * 1000.0
-    timing_rf = rf_events[0]
+    if pulse_type == "spectral_spatial":
+        spectral_spatial = SpectralSpatialPulse.from_mapping(
+            spectral_rf_spectral_spatial_pulse
+        )
+        spectral_rf_bandwidth_hz = spectral_spatial.spectral_alias_bandwidth_hz
+        spectral_rf_bandwidth_factor_hz_ms = (
+            spectral_rf_bandwidth_hz * actual_rf_duration * 1000.0
+        )
+    else:
+        spectral_rf_bandwidth_hz = effective_rf_tbw / actual_rf_duration
+        spectral_rf_bandwidth_factor_hz_ms = effective_rf_tbw * 1000.0
     target_count = len(flip_angles)
-    rfs = tuple(rf_events[1 : 1 + target_count])
-    alpha_halves = tuple(rf_events[1 + target_count :])
+    if pulse_type == "spectral_spatial":
+        paired_events = tuple(
+            (rf, _remap_select_gradient(gz, encoding_frame)) for rf, gz in rf_events
+        )
+        timing_rf, timing_select = paired_events[0]
+        rfs = tuple(rf for rf, _ in paired_events[1 : 1 + target_count])
+        rf_selects = tuple(gz for _, gz in paired_events[1 : 1 + target_count])
+        alpha_halves = tuple(rf for rf, _ in paired_events[1 + target_count :])
+        alpha_selects = tuple(gz for _, gz in paired_events[1 + target_count :])
+    else:
+        timing_rf = rf_events[0]
+        timing_select = None
+        rfs = tuple(rf_events[1 : 1 + target_count])
+        rf_selects = (None,) * len(rfs)
+        alpha_halves = tuple(rf_events[1 + target_count :])
+        alpha_selects = (None,) * len(alpha_halves)
 
     dwell = _adc_dwell_for_bandwidth(
         sample_count=n_read,
@@ -526,7 +577,23 @@ def make_pulseq_spectral_selective_bssfp(
     reference_rf = next((rf for rf in rfs if np.any(np.abs(rf.signal) > 0)), timing_rf)
     rf_center, _ = pp.calc_rf_center(reference_rf)
     rf_center_from_start = reference_rf.delay + rf_center
-    rf_block_duration = np.ceil(pp.calc_duration(reference_rf) / raster) * raster
+    reference_select = next(
+        (select for rf, select in zip(rfs, rf_selects) if rf is reference_rf),
+        timing_select,
+    )
+    rf_block_duration = (
+        np.ceil(
+            pp.calc_duration(
+                *(
+                    [reference_rf, reference_select]
+                    if reference_select is not None
+                    else [reference_rf]
+                )
+            )
+            / raster
+        )
+        * raster
+    )
     rf_block_padding = pp.make_delay(rf_block_duration)
     read_block_duration = max(pp.calc_duration(gx), pp.calc_duration(adc))
     adc_center_from_start = adc.delay + adc.num_samples * adc.dwell / 2
@@ -634,6 +701,7 @@ def make_pulseq_spectral_selective_bssfp(
         acquisition_start_times.append(acquisition_start)
         target_index = repetition % len(target_offsets)
         rf = rfs[target_index]
+        rf_select = rf_selects[target_index]
         rf_timing = rf
         target_offset = target_offsets[target_index]
         rf_offset = target_offset + spectral_rf_frequency_offset_hz
@@ -641,6 +709,7 @@ def make_pulseq_spectral_selective_bssfp(
         frame_rf_center, _ = pp.calc_rf_center(rf_timing)
         if use_alpha_half:
             alpha_half = alpha_halves[target_index]
+            alpha_select = alpha_selects[target_index]
             alpha_timing = alpha_half
             alpha_center, _ = pp.calc_rf_center(alpha_timing)
             alpha_half.freq_offset = rf_offset
@@ -667,7 +736,15 @@ def make_pulseq_spectral_selective_bssfp(
             spacing_delay = round(spacing_delay / raster) * raster
             if spacing_delay < 0:
                 raise ValueError("alpha/2 center spacing is too short")
-            _add_rf_block(sequence, alpha_half, pp.make_delay(alpha_block_duration))
+            _add_rf_block(
+                sequence,
+                alpha_half,
+                *(
+                    [alpha_select, pp.make_delay(alpha_block_duration)]
+                    if alpha_select is not None
+                    else [pp.make_delay(alpha_block_duration)]
+                ),
+            )
             if spacing_delay:
                 sequence.add_block(pp.make_delay(spacing_delay))
 
@@ -699,7 +776,15 @@ def make_pulseq_spectral_selective_bssfp(
                 frequency_offset_hz=rf_offset,
                 phase_increment_deg=rf_phase_increment_deg,
             )
-            _add_rf_block(sequence, rf, rf_block_padding)
+            _add_rf_block(
+                sequence,
+                rf,
+                *(
+                    [rf_select, rf_block_padding]
+                    if rf_select is not None
+                    else [rf_block_padding]
+                ),
+            )
             if rf_balance_delay_value:
                 sequence.add_block(pp.make_delay(rf_balance_delay_value))
             sequence.add_block(gx_pre)
@@ -765,7 +850,15 @@ def make_pulseq_spectral_selective_bssfp(
                     duration=encoding_duration_s,
                     system=system,
                 )
-                _add_rf_block(sequence, rf, rf_block_padding)
+                _add_rf_block(
+                    sequence,
+                    rf,
+                    *(
+                        [rf_select, rf_block_padding]
+                        if rf_select is not None
+                        else [rf_block_padding]
+                    ),
+                )
                 if rf_balance_delay_value:
                     sequence.add_block(pp.make_delay(rf_balance_delay_value))
                 sequence.add_block(gx_pre, gy_pre, gz_pre)
@@ -847,6 +940,7 @@ def make_pulseq_spectral_selective_bssfp(
         custom_name=spectral_rf_custom_name,
         custom_flip_angle_deg=spectral_rf_custom_flip_angle_deg,
         frequency_offset_hz=spectral_rf_frequency_offset_hz,
+        spectral_spatial_pulse=spectral_rf_spectral_spatial_pulse,
     )
     sequence.set_definition("SamplingBandwidth", 1.0 / dwell)
     sequence.set_definition("ReadoutBandwidthHz", 1.0 / dwell)
@@ -932,6 +1026,7 @@ def make_pulseq_me_bssfp(
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
     rf_custom_name: str | None = None,
+    rf_spectral_spatial_pulse=None,
     rf_frequency_offset_hz: float = 0.0,
     receiver_frequency_offset_hz: float = -460.0,
     encoding_duration_s: float = 0.5e-3,
@@ -1121,12 +1216,33 @@ def make_pulseq_me_bssfp(
             custom_raster_s=rf_custom_raster_s,
             custom_flip_angle_deg=rf_custom_flip_angle_deg,
             frequency_offset_hz=rf_frequency_offset_hz,
+            spectral_spatial_pulse=rf_spectral_spatial_pulse,
+            slice_thickness_m=(
+                fov[2]
+                if normalize_rf_pulse_type(rf_pulse_type) == "spectral_spatial"
+                else None
+            ),
+            nucleus=nucleus,
         )
     )
-    rf, alpha_half = rf_events
+    if normalized_rf_type == "spectral_spatial":
+        (rf, rf_select), (alpha_half, alpha_select) = rf_events
+        rf_select = _remap_select_gradient(rf_select, encoding_frame)
+        alpha_select = _remap_select_gradient(alpha_select, encoding_frame)
+    else:
+        rf, alpha_half = rf_events
+        rf_select = None
+        alpha_select = None
     rf_center, _ = pp.calc_rf_center(rf)
     rf_center_from_start = rf.delay + rf_center
-    rf_block_duration = np.ceil(pp.calc_duration(rf) / raster - 1e-9) * raster
+    rf_block_duration = (
+        np.ceil(
+            pp.calc_duration(*([rf, rf_select] if rf_select is not None else [rf]))
+            / raster
+            - 1e-9
+        )
+        * raster
+    )
     rf_block_padding = pp.make_delay(rf_block_duration)
     actual_tr = round(repetition_time_s / raster) * raster
     first_echo_time = (actual_tr - (echoes - 1) * actual_echo_spacing) / 2
@@ -1188,7 +1304,18 @@ def make_pulseq_me_bssfp(
         alpha_center, _ = pp.calc_rf_center(alpha_half)
         alpha_center_from_start = alpha_half.delay + alpha_center
         alpha_block_duration = (
-            np.ceil(pp.calc_duration(alpha_half) / raster - 1e-9) * raster
+            np.ceil(
+                pp.calc_duration(
+                    *(
+                        [alpha_half, alpha_select]
+                        if alpha_select is not None
+                        else [alpha_half]
+                    )
+                )
+                / raster
+                - 1e-9
+            )
+            * raster
         )
         preparation_delay = (
             resolved_alpha_half_center_spacing_s
@@ -1207,7 +1334,14 @@ def make_pulseq_me_bssfp(
             frequency_offset_hz=rf_frequency_offset_hz,
             event_center_s=alpha_center,
         )
-        sequence.add_block(alpha_half, pp.make_delay(alpha_block_duration))
+        sequence.add_block(
+            alpha_half,
+            *(
+                [alpha_select, pp.make_delay(alpha_block_duration)]
+                if alpha_select is not None
+                else [pp.make_delay(alpha_block_duration)]
+            ),
+        )
         if preparation_delay:
             sequence.add_block(pp.make_delay(preparation_delay))
 
@@ -1297,7 +1431,14 @@ def make_pulseq_me_bssfp(
             duration=encoding_duration_s,
             system=system,
         )
-        sequence.add_block(rf, rf_block_padding)
+        sequence.add_block(
+            rf,
+            *(
+                [rf_select, rf_block_padding]
+                if rf_select is not None
+                else [rf_block_padding]
+            ),
+        )
         if delay_before_encoding:
             sequence.add_block(pp.make_delay(delay_before_encoding))
         sequence.add_block(gx_pre, gy_pre, gz_pre)
@@ -1419,8 +1560,14 @@ def make_pulseq_me_bssfp(
         custom_name=rf_custom_name,
         custom_flip_angle_deg=rf_custom_flip_angle_deg,
         frequency_offset_hz=rf_frequency_offset_hz,
+        spectral_spatial_pulse=rf_spectral_spatial_pulse,
     )
-    sequence.set_definition("RFBandwidthHz", effective_rf_tbw / actual_rf_duration_s)
+    rf_bandwidth_hz = effective_rf_tbw / actual_rf_duration_s
+    if normalized_rf_type == "spectral_spatial":
+        rf_bandwidth_hz = SpectralSpatialPulse.from_mapping(
+            rf_spectral_spatial_pulse
+        ).spectral_alias_bandwidth_hz
+    sequence.set_definition("RFBandwidthHz", rf_bandwidth_hz)
     sequence.set_definition("RFFrequencyOffsetHz", float(rf_frequency_offset_hz))
     sequence.set_definition(
         "ReceiverFrequencyOffsetHz", float(receiver_frequency_offset_hz)
@@ -1556,6 +1703,7 @@ def make_pulseq_radial_me_bssfp(
     rf_custom_raster_s: float | None = None,
     rf_custom_flip_angle_deg: float | None = None,
     rf_custom_name: str | None = None,
+    rf_spectral_spatial_pulse=None,
     rf_frequency_offset_hz: float = 0.0,
     repetition_time_s: float = 16e-3,
     rf_phase_start_deg: float = 0.0,
@@ -1696,12 +1844,32 @@ def make_pulseq_radial_me_bssfp(
             custom_raster_s=rf_custom_raster_s,
             custom_flip_angle_deg=rf_custom_flip_angle_deg,
             frequency_offset_hz=rf_frequency_offset_hz,
+            spectral_spatial_pulse=rf_spectral_spatial_pulse,
+            slice_thickness_m=(
+                fov_m
+                if normalize_rf_pulse_type(rf_pulse_type) == "spectral_spatial"
+                else None
+            ),
+            nucleus=nucleus,
         )
     )
-    rf, alpha_half, tip_back = rf_events
+    if rf_pulse_type == "spectral_spatial":
+        (rf, rf_select), (alpha_half, alpha_select), (tip_back, tip_back_select) = (
+            rf_events
+        )
+        rf_select = _remap_select_gradient(rf_select, encoding_frame)
+        alpha_select = _remap_select_gradient(alpha_select, encoding_frame)
+        tip_back_select = _remap_select_gradient(tip_back_select, encoding_frame)
+    else:
+        rf, alpha_half, tip_back = rf_events
+        rf_select = None
+        alpha_select = None
+        tip_back_select = None
     rf_center, _ = pp.calc_rf_center(rf)
     rf_center_from_start = rf.delay + rf_center
-    rf_block_duration = pp.calc_duration(rf)
+    rf_block_duration = pp.calc_duration(
+        *([rf, rf_select] if rf_select is not None else [rf])
+    )
     alpha_center, _ = pp.calc_rf_center(alpha_half)
     alpha_center_from_start = alpha_half.delay + alpha_center
     raster = system.block_duration_raster
@@ -1750,10 +1918,18 @@ def make_pulseq_radial_me_bssfp(
             frequency_offset_hz=rf_frequency_offset_hz,
             event_center_s=alpha_center,
         )
-        sequence.add_block(alpha_half)
+        sequence.add_block(
+            *([alpha_half, alpha_select] if alpha_select is not None else [alpha_half])
+        )
         preparation_delay = (
             resolved_alpha_half_center_spacing_s
-            - pp.calc_duration(alpha_half)
+            - pp.calc_duration(
+                *(
+                    [alpha_half, alpha_select]
+                    if alpha_select is not None
+                    else [alpha_half]
+                )
+            )
             + alpha_center_from_start
             - rf_center_from_start
         )
@@ -1799,7 +1975,7 @@ def make_pulseq_radial_me_bssfp(
                 frequency_offset_hz=rf_frequency_offset_hz,
                 phase_increment_deg=rf_phase_increment_deg,
             )
-            sequence.add_block(rf)
+            sequence.add_block(*([rf, rf_select] if rf_select is not None else [rf]))
             if delay_before_prephaser:
                 sequence.add_block(pp.make_delay(delay_before_prephaser))
             prephasers = _vector_trapezoids(
@@ -1872,7 +2048,13 @@ def make_pulseq_radial_me_bssfp(
             frequency_offset_hz=rf_frequency_offset_hz,
             event_center_s=pp.calc_rf_center(tip_back)[0],
         )
-        sequence.add_block(tip_back)
+        sequence.add_block(
+            *(
+                [tip_back, tip_back_select]
+                if tip_back_select is not None
+                else [tip_back]
+            )
+        )
 
     _raise_for_timing_errors(sequence, "radial multi-echo bSSFP")
     echo_times = [
@@ -1954,6 +2136,7 @@ def make_pulseq_radial_me_bssfp(
         custom_name=rf_custom_name,
         custom_flip_angle_deg=rf_custom_flip_angle_deg,
         frequency_offset_hz=rf_frequency_offset_hz,
+        spectral_spatial_pulse=rf_spectral_spatial_pulse,
     )
     sequence.set_definition("GradientBalancing", "per_tr_xyz")
     sequence.set_definition("ReadoutPolarity", "monopolar")

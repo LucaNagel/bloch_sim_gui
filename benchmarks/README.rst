@@ -232,7 +232,7 @@ The kernel benchmark separates the two independent execution-engine settings:
 * the **Sequence Bloch kernel** propagates the ordinary Bloch equation. Static
   spectral metabolites are simulated independently and their signals are
   summed;
-* the **Dynamic two-pool kernel** retains coupled pyruvate/lactate states and
+* the **Dynamic spectral kernel** retains coupled pyruvate/lactate states and
   additionally integrates kPL conversion, polarization, inflow, and dynamic
   B0 when present.
 

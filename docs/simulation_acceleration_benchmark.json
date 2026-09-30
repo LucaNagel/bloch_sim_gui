@@ -1,0 +1,389 @@
+{
+  "environment": {
+    "python": "3.12.14 (main, Sep  3 2026, 03:46:19) [Clang 21.1.8 ]",
+    "executable": "/opt/miniconda3/envs/bloch-simulator/bin/python",
+    "numpy": "2.5.1",
+    "scipy": "1.18.0",
+    "platform": "macOS-27.0-arm64-arm-64bit",
+    "shape": [
+      16,
+      16,
+      16
+    ],
+    "rf_intervals_nominal": 512,
+    "adc_samples": 256,
+    "repeats": 3,
+    "thread_environment": {
+      "OPENBLAS_NUM_THREADS": "1",
+      "VECLIB_MAXIMUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1",
+      "OMP_DYNAMIC": "FALSE"
+    },
+    "blas": {
+      "name": "accelerate",
+      "found": true,
+      "version": "unknown",
+      "detection method": "system",
+      "include directory": "unknown",
+      "lib directory": "unknown",
+      "openblas configuration": "unknown",
+      "pc file directory": "unknown"
+    },
+    "openmp_max_threads_before_runs": 8
+  },
+  "results": [
+    {
+      "tx": "unity",
+      "kernel": "optimized",
+      "threads": 1,
+      "seconds": [
+        0.26189720799993665,
+        0.26558387499972014,
+        0.28144604199951573
+      ],
+      "median_s": 0.26558387499972014,
+      "errors_vs_same_tx_reference": {
+        "signal": 0.0,
+        "species_signal": 0.0,
+        "final_pool_magnetization": 0.0
+      },
+      "metadata": {
+        "sequence_kernel": "optimized",
+        "native_fallback_reason": null,
+        "native_rf_block_enabled": false,
+        "native_rf_fused_block_enabled": false,
+        "native_rf_fused_fallback_reason": "persistent RF blocks require coupled concentration/polarized inflow",
+        "native_rf_fused_blocks": 0,
+        "native_rf_fused_intervals": 0,
+        "native_rf_threads": 1,
+        "native_longitudinal_threads": 1,
+        "compiled_interval_count": 776,
+        "n_simulated_spins": 4096
+      }
+    },
+    {
+      "tx": "unity",
+      "kernel": "native_serial",
+      "threads": 1,
+      "seconds": [
+        0.11073662500075443,
+        0.103732750000745,
+        0.10300258300048881
+      ],
+      "median_s": 0.103732750000745,
+      "errors_vs_same_tx_reference": {
+        "signal": 2.37523572631892e-17,
+        "species_signal": 1.6939147850238024e-17,
+        "final_pool_magnetization": 3.1568558260538723e-17
+      },
+      "metadata": {
+        "sequence_kernel": "native_serial",
+        "native_fallback_reason": null,
+        "native_rf_block_enabled": true,
+        "native_rf_fused_block_enabled": true,
+        "native_rf_fused_fallback_reason": null,
+        "native_rf_fused_blocks": 8,
+        "native_rf_fused_intervals": 512,
+        "native_rf_threads": 1,
+        "native_longitudinal_threads": 1,
+        "compiled_interval_count": 776,
+        "n_simulated_spins": 4096
+      }
+    },
+    {
+      "tx": "unity",
+      "kernel": "native_parallel",
+      "threads": 4,
+      "seconds": [
+        0.09121012499963399,
+        0.09527204099958908,
+        0.09567037499982689
+      ],
+      "median_s": 0.09527204099958908,
+      "errors_vs_same_tx_reference": {
+        "signal": 2.37523572631892e-17,
+        "species_signal": 1.6939147850238024e-17,
+        "final_pool_magnetization": 3.1568558260538723e-17
+      },
+      "metadata": {
+        "sequence_kernel": "native_parallel",
+        "native_fallback_reason": null,
+        "native_rf_block_enabled": true,
+        "native_rf_fused_block_enabled": true,
+        "native_rf_fused_fallback_reason": null,
+        "native_rf_fused_blocks": 8,
+        "native_rf_fused_intervals": 512,
+        "native_rf_threads": 4,
+        "native_longitudinal_threads": 4,
+        "compiled_interval_count": 776,
+        "n_simulated_spins": 4096
+      }
+    },
+    {
+      "tx": "unity",
+      "kernel": "native_parallel",
+      "threads": 8,
+      "seconds": [
+        0.1078711670006669,
+        0.10876462499982154,
+        0.1092791250002847
+      ],
+      "median_s": 0.10876462499982154,
+      "errors_vs_same_tx_reference": {
+        "signal": 2.37523572631892e-17,
+        "species_signal": 1.6939147850238024e-17,
+        "final_pool_magnetization": 3.1568558260538723e-17
+      },
+      "metadata": {
+        "sequence_kernel": "native_parallel",
+        "native_fallback_reason": null,
+        "native_rf_block_enabled": true,
+        "native_rf_fused_block_enabled": true,
+        "native_rf_fused_fallback_reason": null,
+        "native_rf_fused_blocks": 8,
+        "native_rf_fused_intervals": 512,
+        "native_rf_threads": 8,
+        "native_longitudinal_threads": 8,
+        "compiled_interval_count": 776,
+        "n_simulated_spins": 4096
+      }
+    },
+    {
+      "tx": "uniform_0.9",
+      "kernel": "optimized",
+      "threads": 1,
+      "seconds": [
+        0.2583576670003822,
+        0.2488527499999691,
+        0.26180687500072963
+      ],
+      "median_s": 0.2583576670003822,
+      "errors_vs_same_tx_reference": {
+        "signal": 0.0,
+        "species_signal": 0.0,
+        "final_pool_magnetization": 0.0
+      },
+      "metadata": {
+        "sequence_kernel": "optimized",
+        "native_fallback_reason": null,
+        "native_rf_block_enabled": false,
+        "native_rf_fused_block_enabled": false,
+        "native_rf_fused_fallback_reason": "persistent RF blocks require coupled concentration/polarized inflow",
+        "native_rf_fused_blocks": 0,
+        "native_rf_fused_intervals": 0,
+        "native_rf_threads": 1,
+        "native_longitudinal_threads": 1,
+        "compiled_interval_count": 776,
+        "n_simulated_spins": 4096
+      }
+    },
+    {
+      "tx": "uniform_0.9",
+      "kernel": "native_serial",
+      "threads": 1,
+      "seconds": [
+        0.20076008400064893,
+        0.2066257090000363,
+        0.1951216249999561
+      ],
+      "median_s": 0.20076008400064893,
+      "errors_vs_same_tx_reference": {
+        "signal": 0.0,
+        "species_signal": 0.0,
+        "final_pool_magnetization": 0.0
+      },
+      "metadata": {
+        "sequence_kernel": "native_serial",
+        "native_fallback_reason": null,
+        "native_rf_block_enabled": false,
+        "native_rf_fused_block_enabled": false,
+        "native_rf_fused_fallback_reason": "persistent RF blocks require uniform transmit sensitivity",
+        "native_rf_fused_blocks": 0,
+        "native_rf_fused_intervals": 0,
+        "native_rf_threads": 1,
+        "native_longitudinal_threads": 1,
+        "compiled_interval_count": 776,
+        "n_simulated_spins": 4096
+      }
+    },
+    {
+      "tx": "uniform_0.9",
+      "kernel": "native_parallel",
+      "threads": 4,
+      "seconds": [
+        0.23817575000066427,
+        0.23423708300015278,
+        0.7151920410005914
+      ],
+      "median_s": 0.23817575000066427,
+      "errors_vs_same_tx_reference": {
+        "signal": 0.0,
+        "species_signal": 0.0,
+        "final_pool_magnetization": 0.0
+      },
+      "metadata": {
+        "sequence_kernel": "native_parallel",
+        "native_fallback_reason": null,
+        "native_rf_block_enabled": false,
+        "native_rf_fused_block_enabled": false,
+        "native_rf_fused_fallback_reason": "persistent RF blocks require uniform transmit sensitivity",
+        "native_rf_fused_blocks": 0,
+        "native_rf_fused_intervals": 0,
+        "native_rf_threads": 1,
+        "native_longitudinal_threads": 4,
+        "compiled_interval_count": 776,
+        "n_simulated_spins": 4096
+      }
+    },
+    {
+      "tx": "uniform_0.9",
+      "kernel": "native_parallel",
+      "threads": 8,
+      "seconds": [
+        0.3917229999997289,
+        0.28581075000056444,
+        0.2887889579997136
+      ],
+      "median_s": 0.2887889579997136,
+      "errors_vs_same_tx_reference": {
+        "signal": 0.0,
+        "species_signal": 0.0,
+        "final_pool_magnetization": 0.0
+      },
+      "metadata": {
+        "sequence_kernel": "native_parallel",
+        "native_fallback_reason": null,
+        "native_rf_block_enabled": false,
+        "native_rf_fused_block_enabled": false,
+        "native_rf_fused_fallback_reason": "persistent RF blocks require uniform transmit sensitivity",
+        "native_rf_fused_blocks": 0,
+        "native_rf_fused_intervals": 0,
+        "native_rf_threads": 1,
+        "native_longitudinal_threads": 8,
+        "compiled_interval_count": 776,
+        "n_simulated_spins": 4096
+      }
+    },
+    {
+      "tx": "spatial",
+      "kernel": "optimized",
+      "threads": 1,
+      "seconds": [
+        0.25162162499964325,
+        0.24405633399965154,
+        0.2496179169993411
+      ],
+      "median_s": 0.2496179169993411,
+      "errors_vs_same_tx_reference": {
+        "signal": 0.0,
+        "species_signal": 0.0,
+        "final_pool_magnetization": 0.0
+      },
+      "metadata": {
+        "sequence_kernel": "optimized",
+        "native_fallback_reason": null,
+        "native_rf_block_enabled": false,
+        "native_rf_fused_block_enabled": false,
+        "native_rf_fused_fallback_reason": "persistent RF blocks require coupled concentration/polarized inflow",
+        "native_rf_fused_blocks": 0,
+        "native_rf_fused_intervals": 0,
+        "native_rf_threads": 1,
+        "native_longitudinal_threads": 1,
+        "compiled_interval_count": 776,
+        "n_simulated_spins": 4096
+      }
+    },
+    {
+      "tx": "spatial",
+      "kernel": "native_serial",
+      "threads": 1,
+      "seconds": [
+        0.18461095800012117,
+        0.1786382500004038,
+        0.18601070800013986
+      ],
+      "median_s": 0.18461095800012117,
+      "errors_vs_same_tx_reference": {
+        "signal": 0.0,
+        "species_signal": 0.0,
+        "final_pool_magnetization": 0.0
+      },
+      "metadata": {
+        "sequence_kernel": "native_serial",
+        "native_fallback_reason": null,
+        "native_rf_block_enabled": false,
+        "native_rf_fused_block_enabled": false,
+        "native_rf_fused_fallback_reason": "persistent RF blocks require uniform transmit sensitivity",
+        "native_rf_fused_blocks": 0,
+        "native_rf_fused_intervals": 0,
+        "native_rf_threads": 1,
+        "native_longitudinal_threads": 1,
+        "compiled_interval_count": 776,
+        "n_simulated_spins": 4096
+      }
+    },
+    {
+      "tx": "spatial",
+      "kernel": "native_parallel",
+      "threads": 4,
+      "seconds": [
+        0.2272093749998021,
+        0.2221073749997231,
+        0.22058529100013402
+      ],
+      "median_s": 0.2221073749997231,
+      "errors_vs_same_tx_reference": {
+        "signal": 0.0,
+        "species_signal": 0.0,
+        "final_pool_magnetization": 0.0
+      },
+      "metadata": {
+        "sequence_kernel": "native_parallel",
+        "native_fallback_reason": null,
+        "native_rf_block_enabled": false,
+        "native_rf_fused_block_enabled": false,
+        "native_rf_fused_fallback_reason": "persistent RF blocks require uniform transmit sensitivity",
+        "native_rf_fused_blocks": 0,
+        "native_rf_fused_intervals": 0,
+        "native_rf_threads": 1,
+        "native_longitudinal_threads": 4,
+        "compiled_interval_count": 776,
+        "n_simulated_spins": 4096
+      }
+    },
+    {
+      "tx": "spatial",
+      "kernel": "native_parallel",
+      "threads": 8,
+      "seconds": [
+        0.2855924169998616,
+        0.28562445899933664,
+        0.28242833300009806
+      ],
+      "median_s": 0.2855924169998616,
+      "errors_vs_same_tx_reference": {
+        "signal": 0.0,
+        "species_signal": 0.0,
+        "final_pool_magnetization": 0.0
+      },
+      "metadata": {
+        "sequence_kernel": "native_parallel",
+        "native_fallback_reason": null,
+        "native_rf_block_enabled": false,
+        "native_rf_fused_block_enabled": false,
+        "native_rf_fused_fallback_reason": "persistent RF blocks require uniform transmit sensitivity",
+        "native_rf_fused_blocks": 0,
+        "native_rf_fused_intervals": 0,
+        "native_rf_threads": 1,
+        "native_longitudinal_threads": 8,
+        "compiled_interval_count": 776,
+        "n_simulated_spins": 4096
+      }
+    }
+  ],
+  "profiles": {
+    "unity": "         114756 function calls (113674 primitive calls) in 0.116 seconds\n\n   Ordered by: cumulative time\n   List reduced from 305 to 18 due to restriction <18>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n        1    0.001    0.001    0.116    0.116 simulator.py:2139(simulate_dynamic_sequence)\n        1    0.043    0.043    0.116    0.116 dynamic_phantom.py:2146(simulate_dynamic_sequence)\n        8    0.021    0.003    0.048    0.006 dynamic_phantom.py:3014(preapply_native_rf_fused_block)\n     3104    0.002    0.000    0.019    0.000 dynamic_phantom.py:167(interval_values)\n     6208    0.007    0.000    0.017    0.000 dynamic_phantom.py:130(value_at)\n        8    0.001    0.000    0.016    0.002 dynamic_phantom.py:2827(_native_rf_fused_plan)\n       48    0.000    0.000    0.010    0.000 dynamic_phantom.py:1710(_prepare_longitudinal_step_for_dtype)\n       48    0.002    0.000    0.010    0.000 dynamic_phantom.py:1671(_prepare_longitudinal_step)\n     1056    0.000    0.000    0.008    0.000 dynamic_phantom.py:243(_time_curve_interval_values)\n       96    0.008    0.000    0.008    0.000 dynamic_phantom.py:1364(_decay_convolution)\n     6208    0.003    0.000    0.007    0.000 _function_base_impl.py:1549(interp)\n       66    0.000    0.000    0.005    0.000 dynamic_phantom.py:2044(_prepare_transverse_factors_for_dtype)\n       66    0.000    0.000    0.005    0.000 dynamic_phantom.py:2036(_prepare_transverse_factors)\n      198    0.005    0.000    0.005    0.000 dynamic_phantom.py:2038(<genexpr>)\n     1024    0.001    0.000    0.004    0.000 dynamic_phantom.py:2873(factor_group)\n        1    0.000    0.000    0.004    0.004 compiler.py:90(compile)\n    21416    0.003    0.000    0.003    0.000 {built-in method numpy.asarray}\n      777    0.001    0.000    0.003    0.000 dynamic_phantom.py:2589(observe)\n\n\n",
+    "uniform_0.9": "         121196 function calls (120338 primitive calls) in 0.668 seconds\n\n   Ordered by: cumulative time\n   List reduced from 298 to 18 due to restriction <18>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n        1    0.001    0.001    0.668    0.668 simulator.py:2139(simulate_dynamic_sequence)\n        1    0.441    0.441    0.666    0.666 dynamic_phantom.py:2146(simulate_dynamic_sequence)\n      512    0.101    0.000    0.111    0.000 dynamic_phantom.py:2121(_rf_rotate_spatial)\n     3104    0.002    0.000    0.051    0.000 dynamic_phantom.py:243(_time_curve_interval_values)\n     3104    0.004    0.000    0.049    0.000 dynamic_phantom.py:167(interval_values)\n     6208    0.019    0.000    0.045    0.000 dynamic_phantom.py:130(value_at)\n       48    0.000    0.000    0.016    0.000 dynamic_phantom.py:1710(_prepare_longitudinal_step_for_dtype)\n       48    0.004    0.000    0.016    0.000 dynamic_phantom.py:1671(_prepare_longitudinal_step)\n     6208    0.006    0.000    0.015    0.000 _function_base_impl.py:1549(interp)\n    25498    0.013    0.000    0.013    0.000 {built-in method numpy.asarray}\n       96    0.012    0.000    0.012    0.000 dynamic_phantom.py:1364(_decay_convolution)\n       66    0.000    0.000    0.010    0.000 dynamic_phantom.py:2044(_prepare_transverse_factors_for_dtype)\n       66    0.000    0.000    0.010    0.000 dynamic_phantom.py:2036(_prepare_transverse_factors)\n      198    0.010    0.000    0.010    0.000 dynamic_phantom.py:2038(<genexpr>)\n      513    0.009    0.000    0.009    0.000 dynamic_phantom.py:2584(sync_transverse_to_state)\n     3077    0.009    0.000    0.009    0.000 {method 'copy' of 'numpy.ndarray' objects}\n      777    0.004    0.000    0.009    0.000 dynamic_phantom.py:2589(observe)\n     3104    0.003    0.000    0.006    0.000 dynamic_phantom.py:34(get)\n\n\n",
+    "spatial": "         121196 function calls (120338 primitive calls) in 0.258 seconds\n\n   Ordered by: cumulative time\n   List reduced from 298 to 18 due to restriction <18>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n        1    0.000    0.000    0.258    0.258 simulator.py:2139(simulate_dynamic_sequence)\n        1    0.147    0.147    0.257    0.257 dynamic_phantom.py:2146(simulate_dynamic_sequence)\n      512    0.053    0.000    0.057    0.000 dynamic_phantom.py:2121(_rf_rotate_spatial)\n     3104    0.001    0.000    0.021    0.000 dynamic_phantom.py:243(_time_curve_interval_values)\n     3104    0.002    0.000    0.021    0.000 dynamic_phantom.py:167(interval_values)\n     6208    0.008    0.000    0.019    0.000 dynamic_phantom.py:130(value_at)\n       48    0.000    0.000    0.010    0.000 dynamic_phantom.py:1710(_prepare_longitudinal_step_for_dtype)\n       48    0.002    0.000    0.010    0.000 dynamic_phantom.py:1671(_prepare_longitudinal_step)\n     6208    0.003    0.000    0.008    0.000 _function_base_impl.py:1549(interp)\n       96    0.007    0.000    0.007    0.000 dynamic_phantom.py:1364(_decay_convolution)\n       66    0.000    0.000    0.005    0.000 dynamic_phantom.py:2044(_prepare_transverse_factors_for_dtype)\n       66    0.000    0.000    0.005    0.000 dynamic_phantom.py:2036(_prepare_transverse_factors)\n      198    0.005    0.000    0.005    0.000 dynamic_phantom.py:2038(<genexpr>)\n     3077    0.005    0.000    0.005    0.000 {method 'copy' of 'numpy.ndarray' objects}\n      513    0.004    0.000    0.004    0.000 dynamic_phantom.py:2584(sync_transverse_to_state)\n    25498    0.004    0.000    0.004    0.000 {built-in method numpy.asarray}\n        1    0.000    0.000    0.004    0.004 compiler.py:90(compile)\n      777    0.001    0.000    0.003    0.000 dynamic_phantom.py:2589(observe)\n\n\n"
+  }
+}

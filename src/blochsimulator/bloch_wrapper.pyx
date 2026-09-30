@@ -6,6 +6,12 @@ cimport numpy as np
 cimport cython
 from libc.math cimport exp, sqrt
 
+
+# The strict wrapper includes this file and overrides the marker after the
+# shared bindings have been defined.  The module name and separate C source
+# determine which compiler contract was actually used.
+NUMERICAL_CONTRACT = "legacy-fast-math"
+
 # Import the C functions
 cdef extern from "bloch_core.h":
     int blochsim(double *b1real, double *b1imag,

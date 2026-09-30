@@ -441,16 +441,62 @@ def array_similarity(reference, candidate, *, prefix: str) -> dict:
             abs(np.vdot(reference.reshape(-1), candidate.reshape(-1)))
             / (reference_norm * candidate_norm)
         )
-    return {
+    maximum_absolute_error = float(
+        np.max(np.abs(candidate - reference)) if reference.size else 0.0
+    )
+    reference_peak = float(np.max(np.abs(reference)) if reference.size else 0.0)
+    metrics = {
         f"{prefix}_reference_l2_norm": reference_norm,
         f"{prefix}_candidate_l2_norm": candidate_norm,
         f"{prefix}_relative_l2_error": relative_error,
         f"{prefix}_l2_similarity": l2_similarity,
         f"{prefix}_complex_correlation": min(1.0, max(0.0, correlation)),
-        f"{prefix}_max_abs_error": float(
-            np.max(np.abs(candidate - reference)) if reference.size else 0.0
+        f"{prefix}_max_abs_error": maximum_absolute_error,
+        f"{prefix}_reference_peak": reference_peak,
+        f"{prefix}_max_error_over_reference_peak": (
+            maximum_absolute_error / reference_peak
+            if reference_peak > 0.0
+            else maximum_absolute_error
         ),
+        f"{prefix}_zero_reference": reference_peak == 0.0,
     }
+    if np.iscomplexobj(reference) or np.iscomplexobj(candidate):
+        significant = np.abs(reference) > reference_peak * 1e-8
+        if reference_peak > 0.0 and np.any(significant):
+            phase_error = np.angle(
+                candidate[significant] * np.conj(reference[significant])
+            )
+            metrics[f"{prefix}_significant_phase_rms_rad"] = float(
+                np.sqrt(np.mean(np.square(phase_error)))
+            )
+            metrics[f"{prefix}_significant_phase_max_abs_rad"] = float(
+                np.max(np.abs(phase_error), initial=0.0)
+            )
+            metrics[f"{prefix}_significant_phase_sample_count"] = int(
+                np.count_nonzero(significant)
+            )
+        else:
+            metrics[f"{prefix}_significant_phase_rms_rad"] = 0.0
+            metrics[f"{prefix}_significant_phase_max_abs_rad"] = 0.0
+            metrics[f"{prefix}_significant_phase_sample_count"] = 0
+    if reference.ndim > 0 and reference.shape[-1] > 1:
+        split = reference.shape[-1] // 2
+        for label, selection in (
+            ("early", (..., slice(None, split))),
+            ("late", (..., slice(split, None))),
+        ):
+            selected_reference = reference[selection]
+            selected_candidate = candidate[selection]
+            selected_norm = float(np.linalg.norm(selected_reference))
+            selected_difference = float(
+                np.linalg.norm(selected_candidate - selected_reference)
+            )
+            metrics[f"{prefix}_{label}_relative_l2_error"] = (
+                selected_difference / selected_norm
+                if selected_norm > 0.0
+                else selected_difference
+            )
+    return metrics
 
 
 def result_similarity(reference, candidate) -> dict:
@@ -465,9 +511,36 @@ def result_similarity(reference, candidate) -> dict:
                 prefix="pool_signal",
             )
         )
+        for pool_index in range(np.asarray(reference_species).shape[0]):
+            metrics.update(
+                array_similarity(
+                    np.asarray(reference_species)[pool_index],
+                    np.asarray(candidate_species)[pool_index],
+                    prefix=f"pool_{pool_index}_signal",
+                )
+            )
+
+    reference_signal = np.asarray(reference.signal)
+    candidate_signal = np.asarray(candidate.signal)
+    if reference_signal.ndim >= 2:
+        for coil_index in range(reference_signal.shape[0]):
+            metrics.update(
+                array_similarity(
+                    reference_signal[coil_index],
+                    candidate_signal[coil_index],
+                    prefix=f"coil_{coil_index}_signal",
+                )
+            )
 
     reference_final = np.asarray(reference.final_magnetization)
     candidate_final = np.asarray(candidate.final_magnetization)
+    metrics.update(
+        array_similarity(
+            reference_final,
+            candidate_final,
+            prefix="final_state",
+        )
+    )
     metrics.update(
         array_similarity(
             reference_final[..., :2],
@@ -475,6 +548,17 @@ def result_similarity(reference, candidate) -> dict:
             prefix="final_transverse",
         )
     )
+    for attribute, prefix in (
+        ("final_pool_magnetization", "final_pool_state"),
+        ("checkpoint_magnetization", "checkpoint_state"),
+        ("checkpoint_pool_magnetization", "checkpoint_pool_state"),
+    ):
+        reference_value = getattr(reference, attribute, None)
+        candidate_value = getattr(candidate, attribute, None)
+        if reference_value is not None and candidate_value is not None:
+            metrics.update(
+                array_similarity(reference_value, candidate_value, prefix=prefix)
+            )
 
     crusher_times = np.asarray(
         reference.metadata.get("declared_ideal_spoiler_end_times_s", ()), dtype=float

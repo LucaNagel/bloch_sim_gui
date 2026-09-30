@@ -20,6 +20,7 @@ from typing import Optional
 from pathlib import Path
 
 from ..memory import MemoryPolicy, format_bytes, resolve_memory_budget
+from ..kernel_capabilities import detect_kernel_capabilities, resolve_kernel_request
 from ..sequence.scanner import ScannerParameters
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
 from .default_settings import WorkspaceDefaults
@@ -35,7 +36,10 @@ class SettingsDialog(QDialog):
         ("Fixed simulation limit", "fixed_limit"),
     )
     SEQUENCE_KERNELS = (("Optimized (recommended)", "optimized"),)
-    SEQUENCE_KERNEL_EXTRAS = (("Reference (advanced validation)", "reference"),)
+    SEQUENCE_KERNEL_EXTRAS = (
+        ("Strict reference (advanced validation)", "strict_reference"),
+        ("Reference (advanced validation)", "reference"),
+    )
     DYNAMIC_SEQUENCE_KERNELS = (
         ("Optimized NumPy (recommended)", "optimized"),
         ("Native automatic (recommended for large objects)", "native_parallel"),
@@ -56,18 +60,23 @@ class SettingsDialog(QDialog):
             "path without the optimized fast paths. It is intended for numerical "
             "comparisons and diagnostics, not as a speed setting."
         ),
+        "strict_reference": (
+            "Preferred validation option. Uses a separately compiled Float64 reference "
+            "kernel without fast-math or floating-point contraction, so optimized and "
+            "native paths can be checked against a strict numerical baseline."
+        ),
     }
     DYNAMIC_SEQUENCE_KERNEL_TOOLTIPS = {
         "optimized": (
-            "Recommended and most compatible dynamic two-pool implementation. Uses "
-            "optimized NumPy, supports the complete model, and is the safe fallback "
-            "for combinations unsupported by a native kernel."
+            "Recommended and most compatible dynamic spectral implementation. Uses "
+            "optimized NumPy, supports the complete model including additional pools, "
+            "and is the safe fallback for combinations unsupported by a native kernel."
         ),
         "native_parallel": (
-            "Recommended for large dynamic two-pool phantoms with uniform transmit "
-            "sensitivity. Uses compiled RF blocks and automatically enables multiple "
-            "CPU workers for sufficiently large workloads. Unsupported cases fall "
-            "back safely to Optimized NumPy."
+            "Recommended for large dynamic spectral phantoms. Uses a compiled complete "
+            "plan for supported two-pool and multi-pool models, including spatial "
+            "transmit sensitivity and inflow, and automatically enables multiple CPU "
+            "workers. Unsupported cases fall back safely to Optimized NumPy."
         ),
         "native_serial": (
             "Advanced benchmark option. Runs the compiled dynamic RF-block kernel "
@@ -114,6 +123,33 @@ class SettingsDialog(QDialog):
             combo.setItemData(combo.count() - 1, tooltips[kernel], Qt.ToolTipRole)
 
     @staticmethod
+    def _annotate_kernel_capabilities(combo, capabilities):
+        """Append runtime availability and fallback behavior to each tooltip."""
+        for index in range(combo.count()):
+            kernel = combo.itemData(index)
+            capability = capabilities.get(kernel)
+            if capability is None:
+                continue
+            tooltip = str(combo.itemData(index, Qt.ToolTipRole) or "").rstrip()
+            if capability.available:
+                status = "Current capability: available in this installation."
+            elif capability.fallback_supported:
+                status = (
+                    "Current accelerator capability: unavailable"
+                    f" ({capability.reason}). A request remains safe and uses the "
+                    "documented CPU fallback."
+                )
+            else:
+                status = (
+                    "Current capability: unavailable"
+                    f" ({capability.reason}). Rebuild the required extension before use."
+                )
+                item = combo.model().item(index)
+                if item is not None:
+                    item.setEnabled(False)
+            combo.setItemData(index, f"{tooltip} {status}", Qt.ToolTipRole)
+
+    @staticmethod
     def _recommended_sequence_field(control, hint, object_name):
         """Place a loaded-sequence recommendation beside one settings control."""
         container = QWidget()
@@ -152,6 +188,7 @@ class SettingsDialog(QDialog):
         scanner_parameters: Optional[ScannerParameters] = None,
         workspace_defaults: Optional[WorkspaceDefaults] = None,
         interface_style: str = "automatic",
+        sequence_section_titles_bold: bool = True,
     ):
         super().__init__(parent)
         scanner_parameters = ScannerParameters.from_mapping(scanner_parameters)
@@ -322,6 +359,7 @@ class SettingsDialog(QDialog):
         )
         simulation_form.addRow("Manual thread count:", self.manual_thread_count_spin)
 
+        kernel_capabilities = detect_kernel_capabilities()
         self.sequence_kernel_combo = QComboBox()
         self.sequence_kernel_combo.setObjectName("sequence_simulation_kernel")
         self._add_kernel_choices(
@@ -330,12 +368,17 @@ class SettingsDialog(QDialog):
             self.SEQUENCE_KERNEL_EXTRAS,
             self.SEQUENCE_KERNEL_TOOLTIPS,
         )
+        self._annotate_kernel_capabilities(
+            self.sequence_kernel_combo, kernel_capabilities["sequence"]
+        )
+        sequence_kernel = resolve_kernel_request("sequence", sequence_kernel)
         kernel_index = self.sequence_kernel_combo.findData(sequence_kernel)
         self.sequence_kernel_combo.setCurrentIndex(max(0, kernel_index))
         self.sequence_kernel_combo.setToolTip(
             "Choose the implementation for ordinary Bloch propagation. Optimized "
-            "is recommended for simulations; the advanced Reference option is for "
-            "numerical validation and diagnostics. Hover over an option for details."
+            "is recommended for simulations; the advanced Strict reference and "
+            "Reference options are for numerical validation and diagnostics. Hover "
+            "over an option for details."
         )
         simulation_form.addRow("Sequence Bloch kernel:", self.sequence_kernel_combo)
 
@@ -349,19 +392,24 @@ class SettingsDialog(QDialog):
             self.DYNAMIC_SEQUENCE_KERNEL_EXTRAS,
             self.DYNAMIC_SEQUENCE_KERNEL_TOOLTIPS,
         )
+        self._annotate_kernel_capabilities(
+            self.dynamic_sequence_kernel_combo, kernel_capabilities["dynamic"]
+        )
+        dynamic_sequence_kernel = resolve_kernel_request(
+            "dynamic", dynamic_sequence_kernel
+        )
         dynamic_kernel_index = self.dynamic_sequence_kernel_combo.findData(
             dynamic_sequence_kernel
         )
         self.dynamic_sequence_kernel_combo.setCurrentIndex(max(0, dynamic_kernel_index))
         self.dynamic_sequence_kernel_combo.setToolTip(
-            "Choose the implementation for coupled dynamic pyruvate/lactate "
-            "simulation. Optimized NumPy is the most compatible default; Native "
-            "automatic can accelerate large supported objects. Diagnostic and "
-            "experimental kernels are listed as extras. Hover over an option for "
-            "details."
+            "Choose the implementation for dynamic spectral simulation. Optimized "
+            "NumPy is the most compatible default; Native automatic can accelerate "
+            "large supported two-pool and multi-pool objects. Diagnostic and "
+            "experimental kernels are listed as extras. Hover over an option for details."
         )
         simulation_form.addRow(
-            "Dynamic two-pool kernel:", self.dynamic_sequence_kernel_combo
+            "Dynamic spectral kernel:", self.dynamic_sequence_kernel_combo
         )
 
         self.sequence_spoiler_mode_combo = QComboBox()
@@ -684,6 +732,20 @@ class SettingsDialog(QDialog):
         )
         interface_form.addRow("Application style:", self.interface_style_combo)
         interface_layout.addLayout(interface_form)
+        self.sequence_section_titles_bold_checkbox = QCheckBox(
+            "Bold sequence section titles"
+        )
+        self.sequence_section_titles_bold_checkbox.setObjectName(
+            "bold_sequence_section_titles"
+        )
+        self.sequence_section_titles_bold_checkbox.setChecked(
+            bool(sequence_section_titles_bold)
+        )
+        self.sequence_section_titles_bold_checkbox.setToolTip(
+            "Apply bold section headings such as RF pulse and spatial encoding "
+            "to every sequence form."
+        )
+        interface_layout.addWidget(self.sequence_section_titles_bold_checkbox)
         self.tooltips_checkbox = QCheckBox("Show explanatory tooltips")
         self.tooltips_checkbox.setObjectName("tooltips_enabled")
         self.tooltips_checkbox.setChecked(bool(tooltips_enabled))
@@ -760,6 +822,9 @@ class SettingsDialog(QDialog):
 
     def interface_style(self) -> str:
         return normalize_interface_style(self.interface_style_combo.currentData())
+
+    def sequence_section_titles_bold(self) -> bool:
+        return self.sequence_section_titles_bold_checkbox.isChecked()
 
     def sequence_live_progress_enabled(self) -> bool:
         return self.sequence_live_progress_checkbox.isChecked()

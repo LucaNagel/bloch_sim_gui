@@ -181,6 +181,39 @@ Ensure any new asset directories are added here to be bundled with the library.
 
 ## 7. Extending the Simulator
 
+### Spectral-Spatial Pulse Schedules
+
+`sequence.spectral_spatial` keeps waveform identity separate from ordered use:
+
+- `SpectralSpatialPulseLibrary` maps stable IDs to complete
+  `SpectralSpatialPulse` objects.
+- `SpectralSpatialSchedule` owns ordered entries and cyclic selection.
+- `SpectralSpatialScheduleEntry` references a pulse ID and stores names,
+  enabled state, repeat count, and either a flip-angle request or RF amplitude
+  scale.
+
+Use `migrate_spectral_spatial_state` when accepting project state. It converts
+the old `sequence_spectral_spatial_pulse` singleton to deterministic legacy
+IDs. Use `validate_spectral_spatial_schedule` after the final target thickness
+and scanner profile are known; this repeats B1, gradient, slew, duration, and
+nucleus checks after entry scaling.
+
+`make_pulseq_flash` accepts `rf_spectral_spatial_library` and
+`rf_spectral_spatial_schedule`. The default selection level is `frame`, meaning
+one complete FLASH image per expanded schedule step. The `tr` level is
+explicitly labelled as contrast mixing. Schedule index uses the standard
+Pulseq `SET` label, while reproducibility data is stored in
+`SPSPSchedule*` definitions. The importer retains both. Simulation-result
+metadata copies the definitions, ADC label values, and the schedule-definition
+subset.
+
+The pure `spectral_spatial_peaks` function is the canonical conversion from
+absolute phantom/preset ppm to sequence-relative and carrier-relative Hz.
+`simulate_spectral_spatial_schedule_preview` is the UI-independent reduced-grid
+preview and propagates complex magnetization through full RF/gradient samples.
+Keep future GUI changes in the schedule dialogs and shared plotting helpers;
+do not duplicate the frequency or Bloch logic in widgets.
+
 ### Choosing Subvoxel Sampling for Imported Pulseq Sequences
 
 Imported `.seq` files must use gradient-waveform spoiling because they do not
@@ -197,7 +230,91 @@ when the full train cannot be checked or a regular grid shows artificial exact
 rephasing; they reproducibly break short grid recurrences, but generally need
 more spins and still require a convergence check.
 
+### Sequence Simulation Backends and Numerical Contracts
+
+The ordinary sequence solver has two separately compiled extensions. The
+historical `blochsimulator_cy` target retains its established `-ffast-math`
+build and reports `legacy-fast-math`. The validation-only
+`blochsimulator_strict_cy` target uses `-fno-fast-math` and
+`-ffp-contract=off`; select it with `sequence_kernel="strict_reference"`.
+Keep the source files and object targets separate so an incremental build
+cannot accidentally reuse fast-math objects in the strict extension.
+
+The dynamic extension `dynamic_bloch_cy` uses the strict compiler flags. Its
+backend-neutral input is the immutable Float64/Complex128
+`DynamicExecutionPlan` from `dynamic_execution.py`. This plan owns exact
+interval boundaries, RF and gradient samples, both dynamic-$B_0$
+half-interval integrals, conversion state, source samples, ordered boundary
+actions, and a SHA-256 fingerprint. CPU and Metal adapters must consume this
+same plan; reduced precision belongs only in the backend adapter.
+
+The complete native two-pool driver is deliberately capability-gated. It
+executes free half-steps, conversion, unity/constant/spatial Tx, static or
+dynamic $B_0$, RF, crushers, ADC reduction, and checkpoints in byte-bounded
+time blocks. The same worker uses explicit source modes for coupled
+concentration/polarization delivery, direct magnetization inflow, polarized
+magnetization inflow without concentration delivery, and concentration tracking
+without inflow. Voxelwise arrival delays use eight rate/polarization endpoint
+planes prepared only for the current bounded time and voxel block; do not
+replace them with a global spin-by-timeline table. A separate multi-pool worker
+uses the same plan and action order for the existing precursor-to-products
+model. Its coefficient tables include the total precursor loss in every cache
+entry and apply the individual conversion rate to each product; this avoids
+slowing the specialized two-pool loop. Reduced precision or insufficient
+memory retain the established NumPy path. Never drop an unsupported field: add
+a fallback reason and expose the actual path in result metadata.
+
+An ADC action at state index zero intentionally disables the complete-plan
+driver. It samples the unadvanced initial state through the established
+interval path so the existing bitwise contract is retained; this is a
+compatibility gate, not an unsupported acquisition event.
+
+The outer dynamic driver may stream the object by parent voxel, but never by
+subspin or by time. It compiles the sequence and execution plan once, keeps all
+subspins of a parent together for the full timeline, and reduces one leaf per
+global parent with a fixed binary accumulator. This invariant is what makes
+results independent of `parent_voxel_chunk_size` and OpenMP thread count.
+New backends must preserve the same action order: crusher, then ADC, then
+checkpoint at each state boundary.
+
+The GUI deliberately reads these machine-readable result fields instead of
+inferring execution from the selected combo-box entry. Ordinary and dynamic
+results publish `requested_sequence_kernel`, `sequence_kernel`,
+`effective_threads`, and `numerical_contract`; dynamic fallbacks additionally
+publish their reason and complete-plan metadata. Stable names, numerical
+contracts, optional-extension coverage, experiment status, and fallback
+capability live in `kernel_capabilities.py`. `BlochSimulator`, the settings
+loaders, the GUI tooltips, and `benchmark_kernels.py` consume that registry;
+extend it before adding a new label or dispatch branch. A stored experimental
+Metal request remains selectable on a machine without a usable Apple GPU
+because dispatch performs a controlled exact-CPU fallback and the completion
+status displays the actual path.
+
+Run the Qt-safe project test entry point before release changes:
+
+```bash
+python scripts/run_test_suite.py
+```
+
+The focused backend tests are `tests/test_numerical_contracts.py`,
+`tests/test_dynamic_execution_plan.py`, `tests/test_dynamic_native_plan.py`,
+and `tests/test_dynamic_chunking.py`. Benchmark claims must include warm-up,
+at least five timed repetitions, environment and loaded-extension identity,
+plan/build time, error metrics, and RSS; do not infer a speed-up from CPU
+utilization alone.
+
 ### Mouse Perfusion: Current Transport Semantics
+
+`MousePerfusionConfig.fov_m` and `MousePerfusionConfig.mouse_size_m` are
+independent physical extents. `mouse_size_m` is the visible body bounding box,
+not the abstract atlas coordinate cube. Atlas coordinates are obtained by
+mapping FOV voxel centers through the fixed procedural body bounds; vessel
+centerlines use the same transform. `mouse_offset_m` translates anatomy and
+vessels relative to the FOV center. Preview image rectangles use physical
+coordinates, so matrix dimensions affect sampling density but not displayed
+scale or aspect ratio. Legacy configurations without
+`mouse_size_m` convert their saved implicit atlas extent to the corresponding
+visible body dimensions.
 
 The mouse perfusion phantom currently implements a spatially delayed source,
 not advection of existing spins. Its concentration source is

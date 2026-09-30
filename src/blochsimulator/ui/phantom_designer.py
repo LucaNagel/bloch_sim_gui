@@ -681,7 +681,8 @@ class SpectralPhantomDesignerDialog(QDialog):
         )
         self.b0_inhomogeneity_ppm = self._number_spin(-1000.0, 1000.0, 0.0, " ppm")
         self.b0_inhomogeneity_ppm.setToolTip(
-            "Signed maximum deviation at the edge/corners of the FOV"
+            "Full radial B0 span about the sequence reference; e.g. 1 ppm "
+            "gives -0.5 to +0.5 ppm from centre to edge/corners."
         )
         spectral_fields.addWidget(QLabel("Global B0"), 3, 0)
         spectral_fields.addWidget(self.b0_mode_combo, 3, 1)

@@ -17,7 +17,7 @@ blochsimulator = ["rfpulses/*.txt", "metal/*.metal"]
 
 [project]
 name = "blochsimulator"
-version = "2.7.0"
+version = "2.8.0"
 description = "High-performance Bloch equation simulator for MRI"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -62,7 +62,7 @@ blochsimulator-gui = "blochsimulator.gui:main"
 [tool.cibuildwheel]
 skip = "*musllinux* cp*t-*"
 environment = { PIP_ONLY_BINARY = "numpy", PIP_PREFER_BINARY = "1" }
-test-command = "python -c \"import blochsimulator.blochsimulator_cy; import blochsimulator.dynamic_bloch_cy\""
+test-command = "python -c \"import blochsimulator.blochsimulator_cy; import blochsimulator.blochsimulator_strict_cy; import blochsimulator.dynamic_bloch_cy\""
 
 [tool.black]
 line-length = 88

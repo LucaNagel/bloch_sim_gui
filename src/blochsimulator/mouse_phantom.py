@@ -41,6 +41,14 @@ INJECTION_COMPOUNDS = {
 }
 
 
+# Bounds of the procedural body surface in atlas coordinates. ``mouse_size_m``
+# refers to this visible bounding box, rather than to the wider abstract atlas
+# coordinate cube.
+MOUSE_ATLAS_BOUNDS = np.asarray(
+    ((-0.62, 0.62), (-0.52, 0.52), (-1.15, 1.10)), dtype=float
+)
+
+
 @dataclass(frozen=True)
 class VascularNode:
     """One named vascular junction in normalized mouse coordinates."""
@@ -142,6 +150,8 @@ class MousePerfusionConfig:
     name: str = "Mouse renal perfusion phantom"
     shape: Tuple[int, int, int] = (48, 32, 96)
     fov_m: Tuple[float, float, float] = (0.045, 0.032, 0.105)
+    mouse_size_m: Tuple[float, float, float] = (0.045, 0.032, 0.105)
+    mouse_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     field_strength_t: float = 7.0
     injection_compound: str = "pyruvate"
     injection_amount_umol: float = 0.25
@@ -185,6 +195,8 @@ class MousePerfusionConfig:
     def validate(self) -> None:
         self.shape = tuple(int(value) for value in self.shape)
         self.fov_m = tuple(float(value) for value in self.fov_m)
+        self.mouse_size_m = tuple(float(value) for value in self.mouse_size_m)
+        self.mouse_offset_m = tuple(float(value) for value in self.mouse_offset_m)
         if not self.name.strip():
             raise ValueError("mouse phantom name must not be empty")
         self.injection_compound = str(self.injection_compound).strip().lower()
@@ -201,6 +213,16 @@ class MousePerfusionConfig:
             or np.any(np.asarray(self.fov_m) <= 0)
         ):
             raise ValueError("mouse phantom FOV requires three positive values")
+        if (
+            len(self.mouse_size_m) != 3
+            or not np.all(np.isfinite(self.mouse_size_m))
+            or np.any(np.asarray(self.mouse_size_m) <= 0)
+        ):
+            raise ValueError("mouse size requires three positive values")
+        if len(self.mouse_offset_m) != 3 or not np.all(
+            np.isfinite(self.mouse_offset_m)
+        ):
+            raise ValueError("mouse position requires three finite values")
         positive = {
             "field strength": self.field_strength_t,
             "injection duration": self.injection_duration_s,
@@ -277,9 +299,20 @@ class MousePerfusionConfig:
 
     @classmethod
     def from_dict(cls, values: Dict) -> "MousePerfusionConfig":
-        config = cls(**dict(values))
+        restored = dict(values)
+        # Older saved phantoms used the FOV as the implicit [-1, 1] atlas
+        # extent. Convert that extent to the approximate visible body bounds
+        # used by the current, independently editable mouse size.
+        if "mouse_size_m" not in restored:
+            legacy_fov = np.asarray(restored.get("fov_m", cls.fov_m), dtype=float)
+            restored["mouse_size_m"] = tuple(
+                legacy_fov * 0.5 * np.ptp(MOUSE_ATLAS_BOUNDS, axis=1)
+            )
+        config = cls(**restored)
         config.shape = tuple(config.shape)
         config.fov_m = tuple(config.fov_m)
+        config.mouse_size_m = tuple(config.mouse_size_m)
+        config.mouse_offset_m = tuple(config.mouse_offset_m)
         return config
 
     def build(self) -> "MousePerfusionPhantom":
@@ -442,6 +475,35 @@ def _normalized_axes(shape: Tuple[int, int, int]):
     )
 
 
+def _anatomy_axes(
+    shape: Tuple[int, int, int],
+    fov_m: Tuple[float, float, float],
+    mouse_size_m: Tuple[float, float, float],
+    mouse_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+    grid_center_m: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+):
+    """Return voxel centres in atlas coordinates for a physical FOV."""
+
+    normalized_fov_axes = _normalized_axes(shape)
+    atlas_centers = np.mean(MOUSE_ATLAS_BOUNDS, axis=1)
+    atlas_spans = np.ptp(MOUSE_ATLAS_BOUNDS, axis=1)
+    return tuple(
+        atlas_center
+        + (float(grid_center) + axis * 0.5 * float(fov_extent) - float(mouse_offset))
+        * float(atlas_span)
+        / float(mouse_extent)
+        for axis, fov_extent, mouse_extent, mouse_offset, grid_center, atlas_center, atlas_span in zip(
+            normalized_fov_axes,
+            fov_m,
+            mouse_size_m,
+            mouse_offset_m,
+            grid_center_m,
+            atlas_centers,
+            atlas_spans,
+        )
+    )
+
+
 def _ellipsoid(x, y, z, center, radii):
     return ((x - center[0]) / radii[0]) ** 2 + ((y - center[1]) / radii[1]) ** 2 + (
         (z - center[2]) / radii[2]
@@ -452,10 +514,15 @@ def _rasterize_vascular_graph(
     shape: Tuple[int, int, int],
     fov_m: Tuple[float, float, float],
     graph: VascularGraph,
+    mouse_size_m: Optional[Tuple[float, float, float]] = None,
+    mouse_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+    grid_center_m: Tuple[float, float, float] = (0.0, 0.0, 0.0),
 ):
     axes = _normalized_axes(shape)
     normalized = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1)
-    physical = normalized * (np.asarray(fov_m, dtype=float) / 2.0)
+    physical = normalized * (np.asarray(fov_m, dtype=float) / 2.0) + np.asarray(
+        grid_center_m, dtype=float
+    )
     voxel_spacing_m = np.asarray(fov_m, dtype=float) / np.asarray(shape, dtype=float)
     resolved_axes = np.asarray(shape, dtype=int) > 1
     minimum_resolved_radius_m = 0.6 * float(
@@ -482,10 +549,15 @@ def _rasterize_vascular_graph(
         "right_renal_vein": (1.05, 1.22),
         "vena_cava": (1.22, 1.38),
     }
+    visible_mouse_size_m = np.asarray(
+        fov_m if mouse_size_m is None else mouse_size_m, dtype=float
+    )
+    atlas_centers = np.mean(MOUSE_ATLAS_BOUNDS, axis=1)
+    atlas_spans = np.ptp(MOUSE_ATLAS_BOUNDS, axis=1)
     for edge in graph.edges:
-        points = np.asarray(edge.centerline, dtype=float) * (
-            np.asarray(fov_m, dtype=float) / 2.0
-        )
+        points = (
+            np.asarray(edge.centerline, dtype=float) - atlas_centers
+        ) / atlas_spans * visible_mouse_size_m + np.asarray(mouse_offset_m, dtype=float)
         target = arterial if edge.kind == "arterial" else venous
         resolved_radius_m = max(edge.radius_m, minimum_resolved_radius_m)
         segment_lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
@@ -524,12 +596,22 @@ def build_reference_mouse_anatomy(
     fov_m: Tuple[float, float, float],
     graph: Optional[VascularGraph] = None,
     *,
+    mouse_size_m: Optional[Tuple[float, float, float]] = None,
+    mouse_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+    grid_center_m: Tuple[float, float, float] = (0.0, 0.0, 0.0),
     return_vascular_transit: bool = False,
 ):
     """Create a deterministic labelled mouse template and large-vessel masks."""
 
     graph = reference_mouse_vascular_graph() if graph is None else graph
-    x_axis, y_axis, z_axis = _normalized_axes(shape)
+    atlas_extent_m = fov_m if mouse_size_m is None else mouse_size_m
+    x_axis, y_axis, z_axis = _anatomy_axes(
+        shape,
+        fov_m,
+        atlas_extent_m,
+        mouse_offset_m,
+        grid_center_m,
+    )
     x, y, z = np.meshgrid(x_axis, y_axis, z_axis, indexing="ij")
     labels = np.zeros(shape, dtype=np.uint8)
 
@@ -565,7 +647,14 @@ def build_reference_mouse_anatomy(
     labels[right_kidney] = 4
     labels[right_medulla] = 5
 
-    arterial, venous, vascular_transit = _rasterize_vascular_graph(shape, fov_m, graph)
+    arterial, venous, vascular_transit = _rasterize_vascular_graph(
+        shape,
+        fov_m,
+        graph,
+        atlas_extent_m,
+        mouse_offset_m,
+        grid_center_m,
+    )
     labels[arterial & body] = 9
     labels[venous & body] = 10
     if return_vascular_transit:
@@ -698,10 +787,12 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
             config.shape,
             config.fov_m,
             graph,
+            mouse_size_m=config.mouse_size_m,
+            mouse_offset_m=config.mouse_offset_m,
             return_vascular_transit=True,
         )
-        if not np.any(labels == 2) or not np.any(labels == 4):
-            raise ValueError("mouse matrix is too coarse to resolve both kidneys")
+        if not np.any(labels > 0):
+            raise ValueError("mouse position and FOV do not overlap")
 
         kpl = np.zeros(config.shape, dtype=np.float64)
         kpl[labels == 2] = config.left_cortex_kpl_s_inv
@@ -739,7 +830,12 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         # therefore yields mol/m^3/s and conserves the configured injected dose.
         delivery_map = perfusion_weight / spatial_integral
 
-        relative_z = _normalized_axes(config.shape)[2][None, None, :]
+        relative_z = _anatomy_axes(
+            config.shape,
+            config.fov_m,
+            config.mouse_size_m,
+            config.mouse_offset_m,
+        )[2][None, None, :]
         arrival_time_map = np.full(config.shape, np.nan, dtype=np.float64)
         arrival_variation = 0.08 * (relative_z + 0.25)
         arrival_time_map[body] = (
@@ -995,6 +1091,71 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
                     curves[name][index] = float(np.mean(frame[mask]))
         return curves
 
+    def preview_pool_curves_at(self, index, times_s) -> Dict[str, np.ndarray]:
+        """Return local perfusion/conversion preview curves for one voxel.
+
+        This compact authoring preview applies the configured delayed source,
+        tissue clearance, renal kPL, and liver kPA. It intentionally does not
+        include RF pulses or readout effects from a sequence simulation.
+        """
+
+        index = tuple(int(value) for value in index)
+        if len(index) != 3 or any(
+            value < 0 or value >= extent for value, extent in zip(index, self.shape)
+        ):
+            raise IndexError("mouse preview voxel is outside the phantom")
+        times = np.asarray(times_s, dtype=float)
+        if times.ndim != 1 or np.any(~np.isfinite(times)):
+            raise ValueError("preview times must be a finite one-dimensional array")
+        if times.size > 1 and np.any(np.diff(times) < 0):
+            raise ValueError("preview times must be monotonically increasing")
+        curves = {
+            pool.name: np.zeros(times.shape, dtype=np.float64) for pool in self.pools
+        }
+        if times.size == 0 or self.anatomy_labels[index] == 0:
+            return curves
+
+        delay = float(self.pyruvate_inflow.arrival_delay_map_s[index])
+        delivery = float(self.pyruvate_inflow.delivery_map[index])
+        if not np.isfinite(delay) or delivery <= 0.0:
+            return curves
+        source_curve = self.pyruvate_inflow.rate_curve_s_inv
+        source = np.asarray(
+            [source_curve.value_at(float(time) - delay) * delivery for time in times],
+            dtype=float,
+        )
+        kpl = float(self.kpl_map_s_inv[index]) if len(self.pools) > 1 else 0.0
+        kpa = float(self.kpa_map_s_inv[index]) if len(self.pools) > 2 else 0.0
+        clearance = float(self.config.tissue_clearance_s_inv)
+        precursor = curves[self.pools[0].name]
+        lactate = curves.get("Lactate")
+        alanine = curves.get("Alanine")
+        for sample in range(1, times.size):
+            dt = float(times[sample] - times[sample - 1])
+            precursor_decay = np.exp(-(clearance + kpl + kpa) * dt)
+            precursor[sample] = (
+                precursor[sample - 1] * precursor_decay
+                + 0.5 * (source[sample - 1] * precursor_decay + source[sample]) * dt
+            )
+            product_decay = np.exp(-clearance * dt)
+            if lactate is not None:
+                lactate[sample] = (
+                    lactate[sample - 1] * product_decay
+                    + 0.5
+                    * kpl
+                    * (precursor[sample - 1] * product_decay + precursor[sample])
+                    * dt
+                )
+            if alanine is not None:
+                alanine[sample] = (
+                    alanine[sample - 1] * product_decay
+                    + 0.5
+                    * kpa
+                    * (precursor[sample - 1] * product_decay + precursor[sample])
+                    * dt
+                )
+        return curves
+
     def displacement_map_m(self, time_s: float) -> np.ndarray:
         """Return the configured smooth breathing preview displacement field."""
 
@@ -1005,7 +1166,12 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
             2.0 * np.pi * self.config.breathing_rate_hz * float(time_s)
             + self.config.breathing_phase_rad
         )
-        z = _normalized_axes(self.shape)[2][None, None, :]
+        z = _anatomy_axes(
+            self.shape,
+            self.config.fov_m,
+            self.config.mouse_size_m,
+            self.config.mouse_offset_m,
+        )[2][None, None, :]
         envelope = np.exp(-(((z - 0.08) / 0.55) ** 2))
         envelope = np.broadcast_to(envelope, self.shape) * (self.anatomy_labels > 0)
         amplitude_m = self.config.breathing_amplitude_mm * 1e-3

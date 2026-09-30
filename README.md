@@ -53,6 +53,20 @@ A mode that lets you load, generate and simulate [Pulseq
   Cartesian 3D bSSFP, alternating-frequency [spectrally selective 3D bSSFP](https://doi.org/10.1002/mrm.29676), and
   Cartesian or [spiral-phyllotaxis radial 3D multi-echo bSSFP sequences](https://doi.org/10.1002/mrm.30614), with
   export to `.seq` files and reproducing Jupyter notebooks.
+- **Spectral-spatial RF design** with explicit spatial and frequency target
+  ranges, coupled RF/slice-gradient waveforms, configurable two-dimensional
+  Bloch validation, spatial and spectral profile cuts, and phantom-aware
+  metabolite frequencies. A stable-ID pulse library and ordered cyclic
+  schedule support separate metabolite pulses, per-entry flip-angle or RF
+  amplitude scaling, repetition, reordering, and a coherent cumulative
+  preview. FLASH applies one schedule step per complete image frame by default
+  and preserves schedule definitions and ADC labels through Pulseq export and
+  import. Pulses, schedule, and legacy-single-pulse migration are stored with
+  project files.
+  The native Python flyback method is based on the Larson/Kerr design approach;
+  supported modes, validation scope, differences from the MATLAB reference,
+  citations, and license provenance are documented in
+  [Spectral-spatial RF pulse design](docs/SPECTRAL_SPATIAL_RF.md).
 - Spin Probe mode enables the investigation of the behaviour of spectral/spatial spin distributions during sequences.
 - Spectral and dynamic **phantom design** with spatial peak distributions,
   pyruvate-to-lactate kinetics, spatial B0 inhomogeneity maps, and optional

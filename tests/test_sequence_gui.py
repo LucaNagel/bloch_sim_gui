@@ -42,6 +42,8 @@ from blochsimulator.spectral_phantom import ChemicalSpecies, SpectralPhantom
 from blochsimulator.sequence import (
     ADCEvent,
     AcquisitionDimensions,
+    CartesianAcquisition,
+    EncodingFrame,
     GradientEvent,
     RFEvent,
     SequenceCompiler,
@@ -68,6 +70,63 @@ def _select_workspace(window, mode, timeout_ms=2_000):
         QTest.qWait(10)
 
     assert window.workspace_mode == mode
+
+
+def test_sequence_widget_accepts_strict_reference_kernel():
+    widget = SimpleNamespace(simulator=SimpleNamespace(sequence_kernel="optimized"))
+
+    SequenceSimulationWidget.set_sequence_kernel(widget, "strict_reference")
+
+    assert widget.simulator.sequence_kernel == "strict_reference"
+    with pytest.raises(ValueError, match="strict_reference"):
+        SequenceSimulationWidget.set_sequence_kernel(widget, "invalid")
+
+
+def test_execution_completion_message_reports_backend_contract_and_fallback():
+    complete = SequenceSimulationWidget._execution_completion_message(
+        {
+            "requested_sequence_kernel": "native_parallel",
+            "sequence_kernel": "native_parallel",
+            "effective_threads": 8,
+            "numerical_contract": "float64-close",
+            "native_full_plan_enabled": True,
+            "native_full_plan_model": "multi-pool-coupled-concentration-inflow",
+        }
+    )
+    assert "used Native automatic" in complete
+    assert "8 CPU threads" in complete
+    assert "tight Float64 contract" in complete
+    assert "complete native plan (multi pool coupled concentration inflow)" in complete
+
+    fallback = SequenceSimulationWidget._execution_completion_message(
+        {
+            "requested_sequence_kernel": "native_parallel",
+            "sequence_kernel": "optimized",
+            "effective_threads": 1,
+            "numerical_contract": "bitwise",
+            "native_fallback_reason": "initial-time ADC requires the CPU path",
+        }
+    )
+    assert "requested Native automatic; used Optimized CPU" in fallback
+    assert "1 CPU thread" in fallback
+    assert "bitwise contract" in fallback
+    assert "fallback: initial-time ADC requires the CPU path" in fallback
+
+
+def test_execution_completion_message_marks_checked_gpu_as_experimental():
+    message = SequenceSimulationWidget._execution_completion_message(
+        {
+            "requested_sequence_kernel": "metal_hybrid",
+            "sequence_kernel": "metal_hybrid",
+            "effective_threads": 1,
+            "numerical_contract": "experimental-mixed",
+            "hybrid_fallback_used": False,
+        }
+    )
+
+    assert "CPU + Apple GPU (experimental)" in message
+    assert "experimental mixed-precision contract" in message
+    assert "GPU accuracy check passed" in message
 
 
 def test_rf_phase_plot_includes_programmed_phase_and_carrier_evolution():
@@ -505,6 +564,46 @@ def test_phantom_workspace_is_visible():
     window.tab_widget.setCurrentIndex(window.phantom_tab_index)
     app.processEvents()
     assert window.phantom_widget is not None
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
+def test_parameter_loop_opens_on_demand_beside_simulations():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+
+    assert (
+        window.sequence_parameter_loop_tab_index
+        == window.simulation_explorer_tab_index + 1
+    )
+    assert (
+        window.tab_widget.tabText(window.sequence_parameter_loop_tab_index)
+        == "Parameter Loop"
+    )
+    assert not window.tab_widget.isTabVisible(window.sequence_parameter_loop_tab_index)
+
+    window.set_workspace_mode("sequence")
+    sequence_widget = window.sequence_simulation_widget
+    assert sequence_widget is not None
+    assert not window.tab_widget.isTabVisible(window.sequence_parameter_loop_tab_index)
+
+    # Opening the on-demand editor must refresh a stale button state left by a
+    # preceding sequence/source transition.
+    sequence_widget.parameter_loop_button.setEnabled(False)
+    sequence_widget.open_parameter_loop_button.click()
+    app.processEvents()
+
+    assert window.tab_widget.isTabVisible(window.sequence_parameter_loop_tab_index)
+    assert window.tab_widget.currentIndex() == window.sequence_parameter_loop_tab_index
+    assert sequence_widget.parameter_loop_button.isEnabled()
+    assert (
+        window.sequence_parameter_loop_panel_layout.indexOf(
+            sequence_widget.parameter_loop_group
+        )
+        == 0
+    )
 
     window.close()
     window.deleteLater()
@@ -1035,6 +1134,164 @@ def test_generated_sequence_fov_warning_ignores_slice_extent(monkeypatch):
 
     assert widget._confirm_generated_sequence_fov()
     warning.assert_not_called()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_phantom_resolution_warning_identifies_flash_read_and_phase_axes(monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    shape = (45, 32, 32)
+    widget.phantom = Phantom(
+        shape=shape,
+        fov=(0.045, 0.032, 0.013),
+        t1_map=np.ones(shape),
+        t2_map=np.ones(shape),
+    )
+    widget.program = SequenceProgram(events=(), duration_s=0.0)
+    widget.acquisition = CartesianAcquisition(
+        read_matrix=64,
+        phase_matrix=64,
+        fov_m=(0.045, 0.032),
+        dwell_s=1e-5,
+    )
+    warning = {}
+
+    def capture_warning(_parent, title, message, buttons, default):
+        warning.update(title=title, message=message, buttons=buttons, default=default)
+        return QMessageBox.No
+
+    monkeypatch.setattr(QMessageBox, "warning", capture_warning)
+
+    assert not widget._confirm_phantom_resolution_for_run()
+    assert warning["title"] == "Phantom resolution is lower than sequence resolution"
+    assert (
+        "Read / x: phantom voxel 1 mm > sequence pixel 0.7031 mm" in warning["message"]
+    )
+    assert "Phase / y: phantom voxel 1 mm > sequence pixel 0.5 mm" in warning["message"]
+    assert "Partition" not in warning["message"]
+    assert warning["buttons"] == QMessageBox.Yes | QMessageBox.No
+    assert warning["default"] == QMessageBox.No
+
+    monkeypatch.setattr(QMessageBox, "warning", lambda *_args: QMessageBox.Yes)
+    assert widget._confirm_phantom_resolution_for_run()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_phantom_resolution_warning_respects_encoding_direction_and_2d_slice(
+    monkeypatch,
+):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    shape = (128, 64, 32)
+    widget.phantom = Phantom(
+        shape=shape,
+        fov=(0.045, 0.032, 0.013),
+        t1_map=np.ones(shape),
+        t2_map=np.ones(shape),
+    )
+    widget.program = SequenceProgram(events=(), duration_s=0.0)
+    widget.acquisition = CartesianAcquisition(
+        read_matrix=64,
+        phase_matrix=64,
+        fov_m=(0.013, 0.045),
+        dwell_s=1e-5,
+        encoding_frame=EncodingFrame.from_read_phase_axes("+z", "+x"),
+    )
+    messages = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, message, *_args: messages.append(message)
+        or QMessageBox.No,
+    )
+
+    assert not widget._confirm_phantom_resolution_for_run()
+    assert "Read / z: phantom voxel 0.4062 mm > sequence pixel 0.2031 mm" in messages[0]
+    assert "Phase / x" not in messages[0]
+    assert "Partition / y" not in messages[0]
+
+    widget.acquisition = CartesianAcquisition(
+        read_matrix=32,
+        phase_matrix=64,
+        fov_m=(0.013, 0.045),
+        dwell_s=1e-5,
+        encoding_frame=EncodingFrame.from_read_phase_axes("+z", "+x"),
+    )
+    assert widget._confirm_phantom_resolution_for_run()
+    assert len(messages) == 1
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_phantom_resolution_warning_cancels_run_before_worker_starts(monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    shape = (32, 32, 1)
+    widget.phantom = Phantom(
+        shape=shape,
+        fov=(0.032, 0.032, 0.003),
+        t1_map=np.ones(shape),
+        t2_map=np.ones(shape),
+    )
+    widget.program = SequenceProgram(events=(), duration_s=0.0)
+    widget.acquisition = CartesianAcquisition(64, 64, (0.032, 0.032), 1e-5)
+    monkeypatch.setattr(widget, "_build_phantom", lambda: None)
+    monkeypatch.setattr(widget, "_checkpoint_seconds", lambda: ())
+    monkeypatch.setattr(widget, "_animation_request", lambda: (None, None, ""))
+    monkeypatch.setattr(QMessageBox, "warning", lambda *_args: QMessageBox.No)
+
+    widget._run()
+
+    assert widget.worker is None
+    assert widget.run_button.isEnabled()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_phantom_resolution_warning_checks_partition_for_declared_3d_grid(
+    monkeypatch,
+):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    shape = (64, 64, 16)
+    widget.phantom = Phantom(
+        shape=shape,
+        fov=(0.045, 0.032, 0.013),
+        t1_map=np.ones(shape),
+        t2_map=np.ones(shape),
+    )
+    widget.program = SequenceProgram(
+        events=(),
+        duration_s=0.0,
+        metadata={
+            "definitions": {
+                "EncodingMatrixSize": (64, 64, 64),
+                "EncodingFOV": (0.045, 0.032, 0.013),
+            }
+        },
+    )
+    messages = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, _title, message, *_args: messages.append(message)
+        or QMessageBox.No,
+    )
+
+    assert not widget._confirm_phantom_resolution_for_run()
+    assert "Partition / z: phantom voxel 0.8125 mm" in messages[0]
+    assert "Read / x" not in messages[0]
+    assert "Phase / y" not in messages[0]
 
     widget.close()
     widget.deleteLater()
@@ -1577,6 +1834,7 @@ def test_all_generated_sequences_share_rf_controls_and_loaded_pulse_parameters()
     widget = SequenceSimulationWidget()
     prefixes = (
         "epi",
+        "epsi",
         "csi",
         "flash",
         "bssfp",
@@ -1593,6 +1851,7 @@ def test_all_generated_sequences_share_rf_controls_and_loaded_pulse_parameters()
             "Gaussian",
             "Block",
             "RF Pulse Designer",
+            "Spectral-spatial Designer",
         ]
         pulse_type.setCurrentText("SLR")
         getattr(widget, f"{prefix}_rf_time_bandwidth_product").setValue(3.5)
@@ -2382,14 +2641,19 @@ def test_sequence_workspace_builds_geometry_probe_positions():
     geometry_position = widget.probe_button_layout.getItemPosition(
         widget.probe_button_layout.indexOf(widget.run_geometry_probe_button)
     )
+    parameter_loop_position = widget.probe_button_layout.getItemPosition(
+        widget.probe_button_layout.indexOf(widget.open_parameter_loop_button)
+    )
     simulation_position = widget.probe_button_layout.getItemPosition(
         widget.probe_button_layout.indexOf(widget.run_button)
     )
     assert spectral_position[:2] == (0, 0)
     assert geometry_position[:2] == (0, 1)
-    assert simulation_position[:2] == (0, 2)
+    assert parameter_loop_position[:2] == (1, 0)
+    assert simulation_position[:2] == (1, 1)
     assert widget.run_probe_button.text() == "Spectral Probe"
     assert widget.run_geometry_probe_button.text() == "Geometry Probe"
+    assert widget.open_parameter_loop_button.text() == "Param. Loop"
     assert widget.run_button.text() == "Seq. Simulation"
     assert widget.cancel_probe_button is widget.cancel_button
     assert widget.export_cancel_layout.indexOf(widget.export_button) == 0

@@ -5,8 +5,9 @@ Goal
 ----
 Measure speed and numerical agreement between implementations of two different
 physical solvers. Sequence Bloch kernels propagate ordinary independent Bloch
-states. Dynamic two-pool kernels additionally retain coupled pyruvate/lactate
-states and integrate conversion, polarization, inflow, and optional dynamic B0.
+states. Dynamic spectral kernels additionally retain coupled pyruvate/lactate
+states, optional product pools, and integrate conversion, polarization, inflow,
+and optional dynamic B0.
 Each optimized, native, or experimental result is compared with the reference
 implementation from the same solver family.
 
@@ -44,8 +45,12 @@ from time import perf_counter
 import numpy as np
 
 from blochsimulator import BlochSimulator
-from blochsimulator.dynamic_metal_backend import metal_capability
 from blochsimulator.dynamic_phantom import DynamicSpectralPhantom
+from blochsimulator.kernel_capabilities import (
+    DYNAMIC_KERNEL_NAMES,
+    SEQUENCE_KERNEL_NAMES,
+    detect_kernel_capabilities,
+)
 
 try:
     from .benchmark_resolution import (
@@ -95,13 +100,22 @@ except ImportError:  # Allow: python benchmarks/benchmark_kernels.py
     )
 
 
+SEQUENCE_KERNEL_CHOICES = tuple(
+    name
+    for name in ("reference", "optimized", "strict_reference")
+    if name in SEQUENCE_KERNEL_NAMES
+)
 SEQUENCE_KERNELS = ("reference", "optimized")
-DYNAMIC_KERNELS = (
-    "reference",
-    "optimized",
-    "native_serial",
-    "native_parallel",
-    "metal_hybrid",
+DYNAMIC_KERNELS = tuple(
+    name
+    for name in (
+        "reference",
+        "optimized",
+        "native_serial",
+        "native_parallel",
+        "metal_hybrid",
+    )
+    if name in DYNAMIC_KERNEL_NAMES
 )
 DEFAULT_KERNEL_PHANTOM_MATRIX = (24, 24)
 DEFAULT_KERNEL_FLASH_MATRIX = (16, 16)
@@ -115,6 +129,10 @@ KERNEL_DESCRIPTIONS = {
     "sequence/optimized": (
         "Native streaming ordinary-Bloch path with RF-free, quaternion, and "
         "relaxation-cache fast paths; spins are distributed over CPU threads."
+    ),
+    "sequence/strict_reference": (
+        "Separately compiled no-fast-math Float64 validation baseline with "
+        "floating-point contraction disabled."
     ),
     "dynamic/reference": (
         "Direct allocation-heavy NumPy two-pool implementation. It is the "
@@ -143,7 +161,7 @@ def add_kernel_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--sequence-kernels",
         nargs="+",
-        choices=SEQUENCE_KERNELS,
+        choices=SEQUENCE_KERNEL_CHOICES,
         default=list(SEQUENCE_KERNELS),
         help="Ordinary Sequence Bloch kernels to compare (default: both).",
     )
@@ -152,7 +170,7 @@ def add_kernel_arguments(parser: argparse.ArgumentParser) -> None:
         nargs="+",
         choices=DYNAMIC_KERNELS,
         default=list(DYNAMIC_KERNELS),
-        help="Dynamic two-pool kernels to compare (default: all).",
+        help="Dynamic spectral kernels to compare (default: all).",
     )
     parser.add_argument(
         "--kernel-phantom-matrix",
@@ -216,19 +234,21 @@ def print_kernel_descriptions(sequence_kernels, dynamic_kernels) -> None:
     for kernel in sequence_kernels:
         print(f"    {kernel}: {KERNEL_DESCRIPTIONS[f'sequence/{kernel}']}", flush=True)
     print(
-        "  Dynamic two-pool kernels retain coupled pyruvate and lactate states and "
-        "also integrate kPL conversion, polarization, inflow, and optional dynamic B0.",
+        "  Dynamic spectral kernels retain coupled pyruvate and lactate states, "
+        "optional product pools, and also integrate kPL conversion, polarization, "
+        "inflow, and optional dynamic B0.",
         flush=True,
     )
     for kernel in dynamic_kernels:
         print(f"    {kernel}: {KERNEL_DESCRIPTIONS[f'dynamic/{kernel}']}", flush=True)
 
     if "metal_hybrid" in dynamic_kernels:
-        capability = metal_capability()
+        capability = detect_kernel_capabilities()["dynamic"]["metal_hybrid"]
+        details = dict(capability.details or {})
         status = (
-            f"available ({capability.get('device_name') or 'Apple GPU'})"
-            if capability["available"]
-            else f"unavailable: {capability.get('reason') or 'unknown reason'}"
+            f"available ({details.get('device_name') or 'Apple GPU'})"
+            if capability.available
+            else f"unavailable: {capability.reason or 'unknown reason'}"
         )
         print(f"  Metal capability: {status}", flush=True)
 

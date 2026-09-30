@@ -6,17 +6,18 @@ pyruvate/lactate sequence simulator.  It complements the physical model in
 flow in
 [sequence_simulation_architecture.md](sequence_simulation_architecture.md).
 
-The `optimized` path and the strict single-interval native primitives preserve
-the reference implementation bit for bit.  The persistent RF-waveform block
-uses the same float64 coefficients and integration topology but groups many
-intervals inside one compiled loop.  Its different complex-arithmetic code
-path can change the final few float64 bits, so it has a separate
-`float64-close` contract with tight regression tolerances.  Result metadata
-states which contract and native capabilities were used.
+The `optimized` path preserves the dynamic reference implementation bit for
+bit. Persistent RF-waveform blocks, the complete native plan driver, and fixed
+parent-voxel reduction use the same Float64 integration topology but may change
+the final few Float64 bits. They therefore have a `float64-close` contract with
+tight regression tolerances. Result metadata states which contract, plan,
+native capabilities, memory chunks, and effective thread counts were used.
 
 ## Available execution paths
 
-`simulate_dynamic_sequence` currently exposes four kernel selections:
+The low-level `simulate_dynamic_sequence` driver exposes four CPU kernel
+selections, while `BlochSimulator` adds the fifth, experimental
+`metal_hybrid` selection:
 
 - `reference` keeps the direct, allocation-heavy Python/NumPy formulation.  It
   is the correctness oracle for the other CPU paths and is intended mainly for
@@ -24,25 +25,35 @@ states which contract and native capabilities were used.
 - `optimized` keeps the same operation and summation order while reusing
   state and coefficient arrays.  It supports static and dynamic B0 as well as
   pyruvate inflow.
-- `native_serial` uses the optimized Python driver together with compiled
+- `native_serial` uses compiled
   Cython primitives for longitudinal two-pool evolution and RF rotation.  The
   common Phantom Designer model with pyruvate inflow, a polarization curve,
   and explicit concentration tracking uses one fused magnetization/
-  concentration primitive.  Other unsupported driver combinations retain the
-  explicit optimized fallback.  Dynamic B0 does not by itself require a
-  longitudinal fallback.
-- `native_parallel` adds OpenMP voxel parallelism to the native block
+  concentration primitive. The complete two-pool plan also covers direct or
+  polarized inflow without concentration delivery and concentration tracking
+  without inflow. A separate multi-pool plan worker advances the existing
+  precursor-to-products model, including pyruvate-to-alanine conversion,
+  without adding branches to the specialized two-pool loop. Bounded native
+  plan blocks execute free half-steps, conversion, RF, ADC reception, ideal
+  crushers, and checkpoints without returning to Python per interval. Dynamic
+  B0 does not by itself require a longitudinal fallback.
+- `native_parallel` adds OpenMP parent-voxel parallelism to the native block
   primitives.  Consecutive RF raster intervals in the common coupled model are
   executed as persistent waveform blocks, amortizing one OpenMP region over
-  the complete RF waveform.  ADC summation remains in NumPy and retains the
-  original active voxel order.  Small objects use one thread because OpenMP
-  startup and synchronization cost more than the available parallel work.
+  the complete RF waveform. In the supported full-plan model, ADC weighting
+  and accumulation are part of the same native worker. Small objects use one
+  thread because OpenMP startup and synchronization cost more than the
+  available parallel work.
 
 The requested and actually used paths, complete and longitudinal-only fallback
 reasons, enabled native capabilities, effective thread counts, and memory-limit
 decisions are stored in the simulation result metadata.  The GUI exposes the
-dynamic kernel in the performance settings and reports hybrid execution while
-the simulation is running.
+dynamic kernel in the performance settings. Its completion status reports the
+requested and actual path, effective CPU threads, numerical contract, complete
+plan model, and fallback reason. `strict_reference` is likewise available for
+ordinary simulations in the GUI as a validation-only choice. API, GUI, and
+`benchmark_kernels.py` obtain stable names and runtime availability from the
+shared `kernel_capabilities.py` registry.
 
 ## NumPy driver optimizations
 
@@ -85,10 +96,12 @@ disabled fast math and disabled floating-point contraction.  This separation
 prevents a performance experiment from silently weakening the established
 bit-exact CPU contract.
 
-The Cython layer receives coefficients that NumPy has already calculated and
-rounded.  It does not recompute exponentials or trigonometric functions.  The
-native operations deliberately reproduce the optimized driver's order of
-multiplication and addition.
+The Cython layer normally receives coefficients that have already been
+calculated and rounded. For chunked spatial RF and transverse phase factors,
+strict scalar coefficient preparation is also compiled so the selected SIMD
+width cannot change the last bit when a memory-block length changes. The
+native state operations deliberately retain the established multiplication and
+addition topology.
 
 The largest gain for RF-intensive spectral-selective bSSFP comes from the RF
 voxel-block primitive.  It reads the contiguous complex transverse state and
@@ -112,10 +125,59 @@ active model.  Only unique half-step coefficient tables are passed to the
 block.  The table is capped at 8 MiB and reduced further by the global
 simulation memory budget.  Parallel execution is enabled only from 1,024
 active voxels.  Unsupported longitudinal cases retain native RF rotation and
-use the optimized NumPy kinetics solver.  The persistent RF block is currently
-limited to 131,072 simulated spins and static B0 with uniform transmit
-sensitivity; larger subvoxel objects keep the safe interval path until the
-full-sequence chunked backend is available.
+use the optimized NumPy kinetics solver. A local native block remains limited
+to 131,072 simulated spins, but the outer driver now divides larger objects by
+parent voxel before applying this limit. Constant complex and spatial Tx are
+supported in both interval and persistent RF blocks.
+
+The complete two-pool plan driver uses bounded coefficient blocks of at most
+64 MiB, reduced further by the simulation memory budget. It supports Unity,
+constant complex, and spatial Tx, delayed conversion, gradients, static B0,
+dynamic B0 through distinct exact first- and second-half integral tables,
+multiple receive coils, subvoxel sampling, ADC, ideal crushers, and
+checkpoints. Explicit source modes cover concentration-tracked polarized
+inflow, direct magnetization inflow, polarized inflow without concentration
+delivery, and concentration tracking without inflow in the same native worker.
+For voxelwise arrival delays, eight source endpoint planes are prepared only
+for the current bounded time/voxel block and counted in the block-size limit.
+The previous persistent RF block remains a fallback for compatible coupled
+cases that do not enter the complete plan.
+
+The updated synthetic B1/inflow benchmark contains 4,096 spins, 776 compiled
+intervals, 256 ADC values, a warm-up, and seven timed repetitions. End-to-end
+medians, including compilation and plan preparation, are:
+
+| Tx model | `optimized` median | best native median | End-to-end factor |
+| --- | ---: | ---: | ---: |
+| Unity | 259.7 ms | 60.6 ms, 8 threads | 4.28x |
+| Constant 0.9 | 240.6 ms | 62.5 ms, 8 threads | 3.85x |
+| Spatial complex | 235.2 ms | 81.0 ms, 8 threads | 2.90x |
+
+Signal relative L2 errors are between $1.80\times10^{-15}$ and
+$1.88\times10^{-15}$; final pool-state relative L2 errors are below
+$2.7\times10^{-16}$. The complete measurements and profiles are stored in
+[simulation_acceleration_b1_benchmark.json](simulation_acceleration_b1_benchmark.json).
+
+### Multi-pool precursor-to-products benchmark
+
+The synthetic three-pool benchmark uses 4,096 voxels, 544 compiled intervals,
+384 ADC values, two checkpoints, two parent-voxel chunks, spatial complex Tx,
+dynamic B0, delayed concentration/polarization delivery, and simultaneous
+pyruvate-to-lactate and pyruvate-to-alanine conversion. After one warm-up, five
+timed repetitions gave:
+
+| Kernel | Threads | Median | End-to-end factor over `optimized` |
+| --- | ---: | ---: | ---: |
+| `optimized` | 1 | 1.500 s | 1.00x |
+| `native_serial` | 1 | 0.557 s | 2.70x |
+| `native_parallel` | 4 | 0.453 s | 3.31x |
+| `native_parallel` | 8 | 0.409 s | 3.66x |
+
+The relative total-signal L2 error was $9.13\times10^{-17}$ and the relative
+final pool-state error was $3.43\times10^{-15}$. Complete timing samples,
+per-pool errors, checkpoint errors, environment data, and maximum resident
+memory are stored in
+[simulation_acceleration_multipool_benchmark.json](simulation_acceleration_multipool_benchmark.json).
 
 For four representative TRs of the spectral-selective 3D bSSFP simulation
 with 19,086 active voxels, measured median runtimes were approximately:
@@ -134,10 +196,30 @@ improvement is removal of NumPy RF temporaries, while ADC reduction and much of
 the interval driver remain serial.  Higher total CPU utilization is therefore
 not itself the optimization target.
 
-### Coupled inflow/concentration benchmark
+### Bounded full-plan benchmark
 
-The current end-to-end benchmark uses the local project and result artifacts
-from the original user run:
+The current synthetic ADC-heavy benchmark contains 4,096 spins, 528 compiled
+intervals, 384 ADC values, two checkpoints, a delayed conversion start, and
+five timed repetitions. Complete results and error metrics are stored in
+[simulation_acceleration_native_plan_benchmark.json](simulation_acceleration_native_plan_benchmark.json).
+
+| Tx model | `optimized` median | best native median | End-to-end factor |
+| --- | ---: | ---: | ---: |
+| Unity | 94.5 ms | 71.7 ms, 8 threads | 1.32x |
+| Constant complex | 82.8 ms | 69.4 ms, 8 threads | 1.19x |
+| Spatial complex | 82.1 ms | 79.6 ms, 8 threads | 1.03x |
+
+Signal relative L2 errors were between $1.57\times10^{-15}$ and
+$1.82\times10^{-15}$; final pool-state errors were below
+$7.7\times10^{-16}$. The spatial result is only a 3% gain on this small
+workload and should be treated as break-even rather than a general speed-up
+claim.
+
+### Earlier real-project coupled inflow/concentration benchmark
+
+This validation predates the complete coupled-inflow plan driver and records
+the former persistent-RF-block path. It uses the local project and result
+artifacts from the original user run:
 
 - shape 42x56x112, with 32,692 active voxels, a 512-point phantom spectral
   grid, and one spin per voxel in ideal-spoiler mode;
@@ -181,20 +263,21 @@ run once per interval.
 
 ## Current limits and next performance phase
 
-Spatially varying transmit sensitivity still requires the NumPy RF
-implementation.  Dynamic B0 and unsupported inflow/concentration combinations
-use the strict interval driver instead of the persistent RF-waveform block.
-ADC observation and RF-free readout evolution are not yet fused into a native
-segment, so ADC-heavy acquisitions still spend substantial time in the Python/
-NumPy driver.
+All existing two-pool inflow/concentration combinations, dynamic B0, spatial
+arrival delays, and existing passive precursor-to-products conversions are
+covered by bounded native plan workers. New kinetic topologies must still add
+an explicit capability gate. Supported fields are never ignored; metadata
+records the actual path and fallback reason.
 
-The next CPU phase is full-sequence voxel chunking.  The dynamic solver still
-expands every subvoxel spin for the full timeline, while a 3x3x3 sampling grid
-multiplies state and work by 27.  Chunking must keep a voxel batch through the
-complete sequence, accumulate its signal deterministically, and then release
-its coefficient/state workspace.  This also removes the current 131,072-spin
-limit of the persistent RF plan without allowing coefficient caches to grow
-with the complete expanded object.
+The dynamic solver now streams large expanded objects by parent voxel. Every
+block remains resident for the complete sequence, and only that block's
+subspins, coefficients, ADC leaves, and checkpoints are expanded. Signals use
+one fixed leaf per global parent voxel and a streaming binary tree, so the
+result does not depend on the selected memory-block size or OpenMP thread
+count. Preview output contains only completed object blocks. Public final and
+checkpoint arrays remain global requested outputs. A pre-allocation memory
+plan accounts separately for these outputs, per-parent work, and a bounded
+cache reserve.
 
 The next experimental path is `float32`/`complex64` GPU execution.  Unlike the
 CPU optimizations, it cannot be bit-identical to the `float64` reference and

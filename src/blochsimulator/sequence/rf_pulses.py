@@ -8,20 +8,32 @@ the resulting baseband waveform.
 
 from __future__ import annotations
 
+from copy import copy
 from functools import lru_cache
 
 import numpy as np
 from scipy.signal import remez
 from scipy.signal.windows import tukey
 
+from ..units import NUCLEUS_GAMMA_HZ_PER_T
+from .spectral_spatial import SpectralSpatialPulse
 
-RF_PULSE_TYPES = ("sinc", "slr", "gaussian", "block", "designer")
+
+RF_PULSE_TYPES = (
+    "sinc",
+    "slr",
+    "gaussian",
+    "block",
+    "designer",
+    "spectral_spatial",
+)
 RF_PULSE_TYPE_LABELS = (
     "Sinc",
     "SLR",
     "Gaussian",
     "Block",
     "RF Pulse Designer",
+    "Spectral-spatial Designer",
 )
 DEFAULT_ANALYTIC_RF_SHAPE_PARAMETER = 4.0
 
@@ -47,6 +59,9 @@ def normalize_rf_pulse_type(value: str) -> str:
         "rf pulse designer / loaded file": "designer",
         "loaded file": "designer",
         "custom": "designer",
+        "spectral spatial": "spectral_spatial",
+        "spectral spatial designer": "spectral_spatial",
+        "spsp": "spectral_spatial",
     }
     try:
         return aliases[normalized]
@@ -200,6 +215,11 @@ def design_rf_envelope(
     from the completed normalized pulse shape and is used for slice selection.
     """
     pulse_type = normalize_rf_pulse_type(pulse_type)
+    if pulse_type == "spectral_spatial":
+        raise ValueError(
+            "spectral-spatial pulses require design_spectral_spatial_pulse and "
+            "cannot be represented by an RF envelope alone"
+        )
     for name, value in {
         "duration_s": duration_s,
         "raster_s": raster_s,
@@ -339,6 +359,9 @@ def make_pulseq_rf_events(
     frequency_offset_hz: float = 0.0,
     use: str = "excitation",
     center_s: float | None = None,
+    spectral_spatial_pulse=None,
+    spatial_offset_m: float = 0.0,
+    nucleus: str | None = None,
 ):
     """Create Pulseq RF events from the shared envelope designer.
 
@@ -356,6 +379,91 @@ def make_pulseq_rf_events(
         not np.isfinite(slice_thickness_m) or slice_thickness_m <= 0
     ):
         raise ValueError("slice_thickness_m must be positive and finite")
+
+    normalized_type = normalize_rf_pulse_type(pulse_type)
+    if normalized_type == "spectral_spatial":
+        pulse = SpectralSpatialPulse.from_mapping(spectral_spatial_pulse)
+        if nucleus is not None and str(nucleus) != pulse.nucleus:
+            raise ValueError(
+                f"spectral-spatial pulse was designed for {pulse.nucleus}, not {nucleus}"
+            )
+        target_thickness_m = (
+            pulse.reference_thickness_m
+            if slice_thickness_m is None
+            else float(slice_thickness_m)
+        )
+        results = []
+        for angle_deg in angles:
+            rf_samples, gradient_samples = pulse.scaled_waveforms(
+                flip_angle_deg=angle_deg,
+                thickness_m=target_thickness_m,
+                spatial_offset_m=spatial_offset_m,
+            )
+            target_rf_count = int(round(pulse.duration_s / system.rf_raster_time))
+            target_gradient_count = int(
+                round(pulse.duration_s / system.grad_raster_time)
+            )
+            rf_samples = _resample_complex(rf_samples, target_rf_count)
+            if gradient_samples.size != target_gradient_count:
+                source = (
+                    np.arange(gradient_samples.size, dtype=float) + 0.5
+                ) / gradient_samples.size
+                target = (
+                    np.arange(target_gradient_count, dtype=float) + 0.5
+                ) / target_gradient_count
+                gradient_samples = np.interp(target, source, gradient_samples)
+            gamma_hz_per_t = NUCLEUS_GAMMA_HZ_PER_T[pulse.nucleus]
+            physical_gradient = gradient_samples / gamma_hz_per_t
+            physical_limit = float(system.max_grad) / float(system.gamma)
+            if np.max(np.abs(physical_gradient)) > physical_limit * (1 + 1e-9):
+                raise ValueError(
+                    "target slice/slab thickness makes the spectral-spatial "
+                    "gradient exceed the scanner amplitude limit"
+                )
+            physical_slew = (
+                np.concatenate(
+                    (
+                        [2.0 * physical_gradient[0]],
+                        np.diff(physical_gradient),
+                        [-2.0 * physical_gradient[-1]],
+                    )
+                )
+                / system.grad_raster_time
+            )
+            physical_slew_limit = float(system.max_slew) / float(system.gamma)
+            if np.max(np.abs(physical_slew)) > physical_slew_limit * (1 + 1e-9):
+                raise ValueError(
+                    "target slice/slab thickness makes the spectral-spatial "
+                    "gradient exceed the scanner slew limit"
+                )
+            rf_event = pp.make_arbitrary_rf(
+                signal=rf_samples,
+                flip_angle=np.deg2rad(angle_deg),
+                dwell=system.rf_raster_time,
+                no_signal_scaling=True,
+                delay=system.rf_dead_time,
+                system=system,
+                use=use,
+                center=(
+                    pulse.excitation_center_s if center_s is None else float(center_s)
+                ),
+            )
+            rf_event.freq_offset = float(frequency_offset_hz)
+            gradient_event = pp.make_arbitrary_grad(
+                channel="z",
+                waveform=np.asarray(gradient_samples, dtype=float),
+                first=0.0,
+                last=0.0,
+                delay=system.rf_dead_time,
+                system=system,
+            )
+            results.append((rf_event, gradient_event))
+        return (
+            tuple(results),
+            pulse.duration_s,
+            pulse.spatial_time_bandwidth_product,
+            normalized_type,
+        )
 
     envelope, actual_duration_s, effective_tbw, normalized_type = design_rf_envelope(
         pulse_type=pulse_type,
@@ -407,6 +515,29 @@ def make_pulseq_rf_events(
     return tuple(results), actual_duration_s, effective_tbw, normalized_type
 
 
+def shifted_spectral_spatial_rf_event(
+    rf_event,
+    gradient_event,
+    *,
+    spatial_offset_m: float,
+    rf_raster_s: float,
+    gradient_raster_s: float,
+):
+    """Copy an SPSP RF event and translate its spatial excitation profile."""
+    spatial_offset_m = float(spatial_offset_m)
+    shifted = copy(rf_event)
+    shifted.signal = np.array(rf_event.signal, dtype=np.complex128, copy=True)
+    if not spatial_offset_m:
+        return shifted
+    gradient = np.asarray(gradient_event.waveform, dtype=float).reshape(-1)
+    rf_times = (np.arange(shifted.signal.size, dtype=float) + 0.5) * rf_raster_s
+    indices = np.floor(rf_times / gradient_raster_s).astype(int)
+    gradient_on_rf = gradient[np.clip(indices, 0, gradient.size - 1)]
+    k_future = np.cumsum(gradient_on_rf[::-1])[::-1] * rf_raster_s
+    shifted.signal *= np.exp(-2j * np.pi * k_future * spatial_offset_m)
+    return shifted
+
+
 def set_rf_definitions(
     sequence,
     *,
@@ -420,6 +551,7 @@ def set_rf_definitions(
     custom_flip_angle_deg: float | None,
     frequency_offset_hz: float,
     prefix: str = "",
+    spectral_spatial_pulse=None,
 ) -> None:
     """Persist one consistent set of reproducible RF definitions."""
     key = str(prefix)
@@ -445,3 +577,68 @@ def set_rf_definitions(
             sequence.set_definition(
                 f"{key}RFDesignerFlipAngleDeg", custom_flip_angle_deg
             )
+    if pulse_type == "spectral_spatial":
+        pulse = SpectralSpatialPulse.from_mapping(spectral_spatial_pulse)
+        sequence.set_definition(f"{key}RFBandwidth", pulse.spectral_alias_bandwidth_hz)
+        sequence.set_definition(f"{key}RFSpectralSpatialName", pulse.name)
+        sequence.set_definition(f"{key}RFSpectralSpatialMethod", pulse.method)
+        sequence.set_definition(
+            f"{key}RFSpectralSpatialPhaseType", pulse.spectral_phase_type
+        )
+        sequence.set_definition(
+            f"{key}RFSpectralSpatialImplementation",
+            pulse.design_metadata.get("implementation", "legacy"),
+        )
+        sequence.set_definition(f"{key}RFSpectralSpatialNucleus", pulse.nucleus)
+        sequence.set_definition(
+            f"{key}RFSpectralSpatialReferenceThickness",
+            pulse.reference_thickness_m,
+        )
+        sequence.set_definition(
+            f"{key}RFSpectralSpatialReferenceCenter",
+            pulse.reference_spatial_center_m,
+        )
+        sequence.set_definition(
+            f"{key}RFSpectralSpatialReferenceSpatialTransition",
+            pulse.reference_spatial_transition_m,
+        )
+        sequence.set_definition(
+            f"{key}RFSpectralSpatialReferenceFlipAngleDeg",
+            pulse.reference_flip_angle_deg,
+        )
+        sequence.set_definition(
+            f"{key}RFSpectralSpatialTBW",
+            pulse.spatial_time_bandwidth_product,
+        )
+        sequence.set_definition(
+            f"{key}RFSpectralSpatialSubpulseDuration",
+            pulse.subpulse_duration_s,
+        )
+        sequence.set_definition(
+            f"{key}RFSpectralSpatialSubpulsePeriod", pulse.subpulse_period_s
+        )
+        sequence.set_definition(f"{key}RFSpectralSpatialPeakB1T", pulse.peak_b1_t)
+        sequence.set_definition(
+            f"{key}RFSpectralSpatialAliasBandwidth",
+            pulse.spectral_alias_bandwidth_hz,
+        )
+        sequence.set_definition(
+            f"{key}RFSpectralSpatialBandCenters",
+            [band.center_hz for band in pulse.bands],
+        )
+        sequence.set_definition(
+            f"{key}RFSpectralSpatialBandWidths",
+            [band.width_hz for band in pulse.bands],
+        )
+        sequence.set_definition(
+            f"{key}RFSpectralSpatialBandTransitionWidths",
+            [band.transition_width_hz for band in pulse.bands],
+        )
+        sequence.set_definition(
+            f"{key}RFSpectralSpatialBandAmplitudes",
+            [band.amplitude for band in pulse.bands],
+        )
+        sequence.set_definition(
+            f"{key}RFSpectralSpatialBandPhasesDeg",
+            [band.phase_deg for band in pulse.bands],
+        )

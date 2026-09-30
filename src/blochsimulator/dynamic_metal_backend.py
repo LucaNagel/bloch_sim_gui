@@ -21,6 +21,7 @@ from .dynamic_phantom import (
     _prepare_rf_rotation,
     kinetic_preroll_start_s,
 )
+from .dynamic_execution import build_dynamic_execution_plan
 from .sequence import SequenceCompiler
 from .sequence.spin_sampling import coerce_spin_sampling, phantom_voxel_basis_m
 from .units import ppm_to_hz
@@ -309,14 +310,15 @@ def _hybrid_signal_correction(
 
 def _build_interval_plan(compiled, phantom) -> np.ndarray:
     """Prepare compact Float64 interval values, then round once to Float32."""
-    interval_count = compiled.n_intervals
+    execution_plan = build_dynamic_execution_plan(compiled, phantom)
+    interval_count = execution_plan.n_intervals
     plan64 = np.zeros((interval_count, 16), dtype=np.float64)
-    starts = np.concatenate(([0.0], compiled.interval_end_s[:-1]))
-    mids = starts + compiled.dt_s / 2.0
-    plan64[:, 0:3] = compiled.gradient_hz_per_m
-    plan64[:, 3] = compiled.dt_s
+    plan64[:, 0:3] = execution_plan.gradient_hz_per_m
+    plan64[:, 3] = execution_plan.dt_s
     plan64[:, 6] = 1.0
-    for index, (rf_hz, duration) in enumerate(zip(compiled.rf_hz, compiled.dt_s)):
+    for index, (rf_hz, duration) in enumerate(
+        zip(execution_plan.rf_hz, execution_plan.dt_s)
+    ):
         prepared = _prepare_rf_rotation(rf_hz, duration)
         if prepared is None:
             continue
@@ -326,24 +328,10 @@ def _build_interval_plan(compiled, phantom) -> np.ndarray:
         plan64[index, 7] = prepared[3]
         plan64[index, 8] = prepared[4]
 
-    inflow_curve = phantom.inflow_curve_on_sequence_timeline
-    polarization_curve = phantom.inflow_polarization_curve_on_sequence_timeline
-    if inflow_curve is not None:
-        for index, (start, mid, end) in enumerate(
-            zip(starts, mids, compiled.interval_end_s)
-        ):
-            rate_start, rate_mid = inflow_curve.interval_values(start, mid)
-            _, rate_end = inflow_curve.interval_values(mid, end)
-            plan64[index, 9:12] = (rate_start, rate_mid, rate_end)
-            if polarization_curve is None:
-                plan64[index, 12:15] = 1.0
-            else:
-                pol_start, pol_mid = polarization_curve.interval_values(start, mid)
-                _, pol_end = polarization_curve.interval_values(mid, end)
-                plan64[index, 12:15] = (pol_start, pol_mid, pol_end)
-    plan64[:, 15] = (mids >= phantom.conversion_start_on_sequence_timeline_s).astype(
-        np.float64
-    )
+    if execution_plan.source_rate_samples is not None:
+        plan64[:, 9:12] = execution_plan.source_rate_samples[:, (0, 1, 3)]
+        plan64[:, 12:15] = execution_plan.source_polarization_samples[:, (0, 1, 3)]
+    plan64[:, 15] = execution_plan.conversion_active.astype(np.float64)
     return np.ascontiguousarray(plan64, dtype=np.float32)
 
 
@@ -1338,6 +1326,12 @@ def run_metal_hybrid_sequence(
                 else "mixed_float32_float64"
             ),
             "signal_dtype": "complex128",
+            "effective_threads": 1,
+            "numerical_contract": (
+                metadata.get("numerical_contract", "bitwise")
+                if raw["metadata"].get("hybrid_fallback_used")
+                else "experimental-mixed"
+            ),
             "spin_sampling": sampling.to_metadata(),
             "subvoxel_spin_counts_xyz": sampling.counts_xyz,
             "subvoxel_spins_per_voxel": sampling.spins_per_voxel,

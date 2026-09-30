@@ -71,6 +71,7 @@ from ..visualization import (
     imageio as vz_imageio,
 )
 from ..slice_explorer import SliceSelectionExplorer
+from ..kernel_capabilities import resolve_kernel_request
 from ..project_io import load_project, save_project
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
 
@@ -1296,6 +1297,46 @@ class BlochSimulatorGUI(QMainWindow):
             self.simulation_explorer, "Simulations"
         )
 
+        # === SEQUENCE PARAMETER LOOP ===
+        # Kept out of the compact Run panel because it is an occasional
+        # workflow. The tab is revealed only after the corresponding button in
+        # Sequence Simulation has been clicked.
+        self.sequence_parameter_loop_tab_opened = False
+        self.sequence_parameter_loop_page = QWidget()
+        self.sequence_parameter_loop_page.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Ignored
+        )
+        parameter_loop_page_layout = QVBoxLayout(self.sequence_parameter_loop_page)
+        parameter_loop_page_layout.setContentsMargins(24, 20, 24, 20)
+        parameter_loop_title = QLabel("Sequence Parameter Loop")
+        parameter_loop_title_font = parameter_loop_title.font()
+        parameter_loop_title_font.setBold(True)
+        parameter_loop_title_font.setPointSize(
+            max(parameter_loop_title_font.pointSize() + 2, 12)
+        )
+        parameter_loop_title.setFont(parameter_loop_title_font)
+        parameter_loop_page_layout.addWidget(parameter_loop_title)
+        parameter_loop_description = QLabel(
+            "Select any numerical parameter from the active sequence, define "
+            "its range, and run the sequence once for every value."
+        )
+        parameter_loop_description.setWordWrap(True)
+        parameter_loop_page_layout.addWidget(parameter_loop_description)
+        self.sequence_parameter_loop_panel_host = QWidget()
+        self.sequence_parameter_loop_panel_host.setMaximumWidth(680)
+        self.sequence_parameter_loop_panel_layout = QVBoxLayout(
+            self.sequence_parameter_loop_panel_host
+        )
+        self.sequence_parameter_loop_panel_layout.setContentsMargins(0, 8, 0, 0)
+        parameter_loop_page_layout.addWidget(
+            self.sequence_parameter_loop_panel_host, 0, Qt.AlignLeft | Qt.AlignTop
+        )
+        parameter_loop_page_layout.addStretch(1)
+        self.sequence_parameter_loop_tab_index = self.tab_widget.addTab(
+            self.sequence_parameter_loop_page, "Parameter Loop"
+        )
+        self._set_main_tab_visible(self.sequence_parameter_loop_tab_index, False)
+
         # === K-SPACE TAB (Signal-based simulation) ===
         if KSPACE_AVAILABLE:
 
@@ -1455,8 +1496,24 @@ class BlochSimulatorGUI(QMainWindow):
         self._workspace_field_strength_t = workspace_defaults.field_strength_t
         self._workspace_nucleus = workspace_defaults.phantom_nucleus
         self.sequence_simulation_widget = SequenceSimulationWidget(self)
+        self.sequence_simulation_widget.parameter_loop_requested.connect(
+            self._show_sequence_parameter_loop
+        )
+        self.sequence_parameter_loop_panel_layout.addWidget(
+            self.sequence_simulation_widget.parameter_loop_group
+        )
+        self.sequence_simulation_widget.parameter_loop_group.show()
         layout.addWidget(self.sequence_simulation_widget)
         self._connect_phantom_sequence_workspaces()
+
+    def _show_sequence_parameter_loop(self):
+        """Reveal and open the on-demand sequence parameter-loop workspace."""
+        sequence_widget = self.sequence_simulation_widget
+        if sequence_widget is not None:
+            sequence_widget.prepare_parameter_loop_workspace()
+        self.sequence_parameter_loop_tab_opened = True
+        self._set_main_tab_visible(self.sequence_parameter_loop_tab_index, True)
+        self.tab_widget.setCurrentIndex(self.sequence_parameter_loop_tab_index)
 
     def _ensure_phantom_workspace(self, index: int):
         """Create phantom designer/viewers only when their tab is opened."""
@@ -1778,6 +1835,9 @@ class BlochSimulatorGUI(QMainWindow):
             "Simulations": (
                 "Switch between completed sequence simulations retained for this "
                 "application session, inspect their metadata, or delete runs."
+            ),
+            "Parameter Loop": (
+                "Configure and run a generic parameter loop for the active sequence."
             ),
             "📡 K-Space": "Simulate and inspect sampled k-space data.",
             "Parameter Sweep": (
@@ -4704,6 +4764,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self.b1_tab_index,
                 self.b1_combo_tab_index,
                 self.simulation_explorer_tab_index,
+                self.sequence_parameter_loop_tab_index,
             }:
                 self._free_mode_tab_index = current
 
@@ -4739,6 +4800,8 @@ class BlochSimulatorGUI(QMainWindow):
                 self.b1_combo_tab_index,
                 self.simulation_explorer_tab_index,
             }
+            if self.sequence_parameter_loop_tab_opened:
+                allowed_sequence_tabs.add(self.sequence_parameter_loop_tab_index)
             for index in range(self.tab_widget.count()):
                 self._set_main_tab_visible(index, index in allowed_sequence_tabs)
             sequence_widget = getattr(self, "sequence_simulation_widget", None)
@@ -4755,6 +4818,7 @@ class BlochSimulatorGUI(QMainWindow):
                     self.b1_tab_index,
                     self.b1_combo_tab_index,
                     self.simulation_explorer_tab_index,
+                    self.sequence_parameter_loop_tab_index,
                 }:
                     self._set_main_tab_visible(index, True)
             self.main_splitter.setSizes([420, max(1, self.width() - 420)])
@@ -4778,6 +4842,7 @@ class BlochSimulatorGUI(QMainWindow):
             self._set_main_tab_visible(self.b1_tab_index, False)
             self._set_main_tab_visible(self.b1_combo_tab_index, False)
             self._set_main_tab_visible(self.simulation_explorer_tab_index, False)
+            self._set_main_tab_visible(self.sequence_parameter_loop_tab_index, False)
             free_geometry = getattr(self, "_free_workspace_geometry", None)
             if previous_mode == "sequence" and free_geometry is not None:
                 # Opening the much larger focused workspace must not permanently
@@ -4831,23 +4896,12 @@ class BlochSimulatorGUI(QMainWindow):
     def _load_sequence_kernel(self) -> str:
         """Load the persistent event-based sequence kernel selection."""
         kernel = str(self.app_settings.value("sequence/kernel", "optimized"))
-        return kernel if kernel in {"optimized", "reference"} else "optimized"
+        return resolve_kernel_request("sequence", kernel)
 
     def _load_dynamic_sequence_kernel(self) -> str:
         """Load the persistent dynamic two-pool kernel selection."""
         kernel = str(self.app_settings.value("sequence/dynamic_kernel", "optimized"))
-        return (
-            kernel
-            if kernel
-            in {
-                "optimized",
-                "native_parallel",
-                "native_serial",
-                "metal_hybrid",
-                "reference",
-            }
-            else "optimized"
-        )
+        return resolve_kernel_request("dynamic", kernel)
 
     def _load_sequence_spoiler_mode(self) -> str:
         """Load ideal-crusher or physical gradient-waveform spoiling."""
@@ -4927,11 +4981,22 @@ class BlochSimulatorGUI(QMainWindow):
             self.app_settings.value("interface/style", "automatic")
         )
 
+    def _load_sequence_section_titles_bold(self) -> bool:
+        """Load the application-wide sequence section-heading preference."""
+        return bool(
+            self.app_settings.value(
+                "interface/bold_sequence_section_titles", True, type=bool
+            )
+        )
+
     def show_settings(self, initial_tab: str = "general"):
         """Show and persist application, simulation and scanner settings."""
         previous_scanner_parameters = self._load_scanner_parameters()
         previous_workspace_defaults = WorkspaceDefaults.from_settings(self.app_settings)
         previous_interface_style = self._load_interface_style()
+        previous_sequence_section_titles_bold = (
+            self._load_sequence_section_titles_bold()
+        )
         loaded_pulseq_recommendation = None
         sequence_widget = getattr(self, "sequence_simulation_widget", None)
         recommendation_provider = getattr(
@@ -4965,6 +5030,7 @@ class BlochSimulatorGUI(QMainWindow):
             scanner_parameters=previous_scanner_parameters,
             workspace_defaults=previous_workspace_defaults,
             interface_style=previous_interface_style,
+            sequence_section_titles_bold=previous_sequence_section_titles_bold,
         )
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -4996,6 +5062,10 @@ class BlochSimulatorGUI(QMainWindow):
         self.app_settings.setValue("interface/tooltips_enabled", tooltips_enabled)
         interface_style = normalize_interface_style(dialog.interface_style())
         self.app_settings.setValue("interface/style", interface_style)
+        sequence_section_titles_bold = bool(dialog.sequence_section_titles_bold())
+        self.app_settings.setValue(
+            "interface/bold_sequence_section_titles", sequence_section_titles_bold
+        )
         live_progress_enabled = dialog.sequence_live_progress_enabled()
         self.app_settings.setValue(
             "sequence/live_progress_enabled", live_progress_enabled
@@ -5042,6 +5112,9 @@ class BlochSimulatorGUI(QMainWindow):
         set_default_memory_policy(policy)
         self._set_tooltips_enabled(tooltips_enabled)
         if sequence_widget is not None:
+            sequence_widget.set_sequence_section_titles_bold(
+                sequence_section_titles_bold
+            )
             sequence_widget.set_live_preview_enabled(live_progress_enabled)
             sequence_widget.set_sequence_kernel(sequence_kernel)
             sequence_widget.set_dynamic_sequence_kernel(dynamic_sequence_kernel)
@@ -5688,6 +5761,21 @@ class BlochSimulatorGUI(QMainWindow):
                 if sequence_widget is not None
                 else None
             ),
+            "sequence_spectral_spatial_pulse": (
+                sequence_widget.spectral_spatial_pulse_state()
+                if sequence_widget is not None
+                else None
+            ),
+            "sequence_spectral_spatial_pulse_library": (
+                sequence_widget.spectral_spatial_pulse_library_state()
+                if sequence_widget is not None
+                else None
+            ),
+            "sequence_spectral_spatial_schedule": (
+                sequence_widget.spectral_spatial_schedule_state()
+                if sequence_widget is not None
+                else None
+            ),
             "spoiler_configuration": (
                 {
                     "mode": sequence_widget.spoiler_mode,
@@ -5852,6 +5940,11 @@ class BlochSimulatorGUI(QMainWindow):
             sequence_widget = self.sequence_simulation_widget
             sequence_widget.restore_rf_designer_pulse_state(
                 state.get("sequence_rf_pulse"), program=project["program"]
+            )
+            sequence_widget.restore_spectral_spatial_schedule_state(
+                state.get("sequence_spectral_spatial_pulse_library"),
+                state.get("sequence_spectral_spatial_schedule"),
+                legacy_pulse_state=state.get("sequence_spectral_spatial_pulse"),
             )
             _restore_widget_state(sequence_widget, state.get("sequence_controls", {}))
             spoiler_configuration = state.get("spoiler_configuration", {})

@@ -1,4 +1,4 @@
-__version__ = "2.7.0"
+__version__ = "2.8.0"
 
 from .simulator import (
     BlochSimulator,
@@ -13,6 +13,13 @@ from .simulator import (
     design_rf_pulse,
     apply_rf_carrier,
 )  # noqa: F401
+from .kernel_capabilities import (  # noqa: F401
+    DYNAMIC_KERNEL_NAMES,
+    SEQUENCE_KERNEL_NAMES,
+    detect_kernel_capabilities,
+    kernel_capability_metadata,
+    resolve_kernel_request,
+)
 
 try:
     from . import notebook_exporter

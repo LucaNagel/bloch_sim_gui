@@ -13,6 +13,8 @@ import pytest
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
 
+from blochsimulator.memory import get_default_memory_policy, set_default_memory_policy
+
 
 BATCHED_PYTEST_ENV = "BLOCHSIMULATOR_BATCHED_PYTEST"
 _QT_APPLICATION = None
@@ -57,8 +59,10 @@ def qt_application():
 @pytest.fixture(autouse=True)
 def cleanup_qt_widgets(qt_application):
     """Close top-level widgets while keeping pyqtgraph's exit registry intact."""
+    memory_policy = get_default_memory_policy()
     yield
 
+    set_default_memory_policy(memory_policy)
     for widget in QApplication.topLevelWidgets():
         widget.close()
     qt_application.processEvents()

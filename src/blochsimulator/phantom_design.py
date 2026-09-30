@@ -482,7 +482,7 @@ class PhantomDesign:
         return coverage / float(int(self.supersampling_factor) ** 3)
 
     def rasterize_b0_inhomogeneity(self) -> np.ndarray:
-        """Return an analytic 2D/3D B0 map with edge amplitude in ppm."""
+        """Return an analytic 2D/3D B0 map centred on the reference in ppm."""
         mode = self.b0_inhomogeneity_mode
         amplitude = float(self.b0_inhomogeneity_ppm)
         if mode == "none" or amplitude == 0.0:
@@ -499,9 +499,21 @@ class PhantomDesign:
         elif mode == "linear_z":
             normalized = z
         elif mode == "radial_xy":
-            normalized = 2.0 * np.sqrt((x * x + y * y) / 2.0) - 1.0
+            radial_distance = np.sqrt((x * x + y * y) / 2.0)
+            edge_distance = float(np.max(radial_distance))
+            normalized = (
+                radial_distance / edge_distance - 0.5
+                if edge_distance > 0.0
+                else np.zeros(self.shape, dtype=float)
+            )
         else:
-            normalized = 2.0 * np.sqrt((x * x + y * y + z * z) / 3.0) - 1.0
+            radial_distance = np.sqrt((x * x + y * y + z * z) / 3.0)
+            edge_distance = float(np.max(radial_distance))
+            normalized = (
+                radial_distance / edge_distance - 0.5
+                if edge_distance > 0.0
+                else np.zeros(self.shape, dtype=float)
+            )
         return amplitude * normalized
 
     def rasterize_kpl(self) -> np.ndarray:

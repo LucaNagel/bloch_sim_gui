@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QGridLayout
 from unittest.mock import MagicMock, patch
 
 from blochsimulator import BlochSimulator
@@ -16,7 +16,10 @@ from blochsimulator.phantom_widget import PhantomCreatorWidget
 from blochsimulator.sequence import SequenceProgram
 from blochsimulator.spectral_phantom import ChemicalSpecies
 from blochsimulator.ui.phantom_designer import load_any_phantom
-from blochsimulator.ui.mouse_phantom_designer import MousePhantomDesignerDialog
+from blochsimulator.ui.mouse_phantom_designer import (
+    MousePhantomDesignerDialog,
+    MouseSlicePreviewWidget,
+)
 
 
 def test_reference_mouse_builds_anatomy_vessels_kidney_maps_and_conserves_dose():
@@ -54,6 +57,70 @@ def test_reference_mouse_builds_anatomy_vessels_kidney_maps_and_conserves_dose()
         phantom.kpa_map_s_inv[phantom.anatomy_labels == 6],
         config.liver_kpa_s_inv,
     )
+
+
+def test_mouse_physical_size_is_independent_from_fov_and_old_configs_migrate():
+    baseline = MousePerfusionConfig(shape=(48, 32, 96)).build()
+    cropped = MousePerfusionConfig(
+        shape=(48, 32, 96),
+        fov_m=(0.045, 0.032, 0.080),
+        mouse_size_m=(0.045, 0.032, 0.105),
+    ).build()
+    smaller_mouse = MousePerfusionConfig(
+        shape=(48, 32, 96),
+        fov_m=(0.045, 0.032, 0.105),
+        mouse_size_m=(0.036, 0.026, 0.084),
+    ).build()
+
+    assert not np.array_equal(cropped.anatomy_labels, baseline.anatomy_labels)
+    assert np.count_nonzero(cropped.anatomy_labels) > np.count_nonzero(
+        baseline.anatomy_labels
+    )
+    assert np.count_nonzero(smaller_mouse.anatomy_labels) < np.count_nonzero(
+        baseline.anatomy_labels
+    )
+
+    legacy_values = MousePerfusionConfig().to_dict()
+    legacy_values.pop("mouse_size_m")
+    legacy_values["fov_m"] = (0.050, 0.030, 0.090)
+    restored = MousePerfusionConfig.from_dict(legacy_values)
+    assert restored.mouse_size_m == pytest.approx((0.031, 0.0156, 0.10125))
+
+
+def test_mouse_size_describes_visible_body_bounds():
+    phantom = MousePerfusionConfig(
+        shape=(48, 40, 96),
+        fov_m=(0.032, 0.025, 0.075),
+        mouse_size_m=(0.032, 0.025, 0.075),
+    ).build()
+
+    for axis in range(3):
+        assert np.any(np.take(phantom.anatomy_labels, 0, axis=axis))
+        assert np.any(np.take(phantom.anatomy_labels, -1, axis=axis))
+
+
+def test_mouse_position_translates_anatomy_in_physical_coordinates():
+    common = dict(
+        shape=(64, 48, 96),
+        fov_m=(0.080, 0.060, 0.140),
+        mouse_size_m=(0.032, 0.025, 0.075),
+    )
+    centered = MousePerfusionConfig(**common).build()
+    offset_m = np.asarray((0.010, -0.006, 0.018))
+    shifted = MousePerfusionConfig(**common, mouse_offset_m=tuple(offset_m)).build()
+
+    def physical_center(phantom):
+        coordinates = tuple(
+            (np.arange(count) + 0.5) / count * extent - 0.5 * extent
+            for count, extent in zip(phantom.shape, phantom.fov)
+        )
+        mesh = np.meshgrid(*coordinates, indexing="ij")
+        body = phantom.anatomy_labels > 0
+        return np.asarray([np.mean(axis[body]) for axis in mesh])
+
+    measured_translation = physical_center(shifted) - physical_center(centered)
+    voxel_size = np.asarray(common["fov_m"]) / np.asarray(common["shape"])
+    assert measured_translation == pytest.approx(offset_m, abs=max(voxel_size))
 
 
 def test_spatial_bolus_preview_uses_arrival_map_and_breathing_is_periodic():
@@ -117,6 +184,7 @@ def test_mouse_phantom_round_trip_restores_editable_configuration(tmp_path):
         left_cortex_kpl_s_inv=0.123,
         right_medulla_ph=6.75,
         breathing_enabled=True,
+        mouse_offset_m=(0.003, -0.002, 0.004),
     )
     phantom = config.build()
     path = tmp_path / "renal_mouse.npz"
@@ -128,6 +196,7 @@ def test_mouse_phantom_round_trip_restores_editable_configuration(tmp_path):
     assert loaded.config.left_cortex_kpl_s_inv == pytest.approx(0.123)
     assert loaded.config.right_medulla_ph == pytest.approx(6.75)
     assert loaded.config.breathing_enabled
+    assert loaded.config.mouse_offset_m == pytest.approx((0.003, -0.002, 0.004))
     assert np.array_equal(loaded.anatomy_labels, phantom.anatomy_labels)
     assert np.array_equal(loaded.kpl_map_s_inv, phantom.kpl_map_s_inv)
     assert np.array_equal(loaded.kpa_map_s_inv, phantom.kpa_map_s_inv)
@@ -232,6 +301,22 @@ def test_injected_concentration_and_organ_curves_follow_delayed_bolus():
     assert all(np.max(values) > 0 for values in curves.values())
 
 
+def test_voxel_preview_curves_include_configured_conversion_products():
+    phantom = MousePerfusionConfig(shape=(24, 16, 48)).build()
+    start, end = phantom.preview_time_bounds_s()
+    times = np.linspace(start, end, 400)
+    renal_voxel = tuple(np.argwhere(phantom.anatomy_labels == 2)[0])
+    liver_voxel = tuple(np.argwhere(phantom.anatomy_labels == 6)[0])
+
+    renal = phantom.preview_pool_curves_at(renal_voxel, times)
+    liver = phantom.preview_pool_curves_at(liver_voxel, times)
+
+    assert np.max(renal["Pyruvate"]) > 0
+    assert np.max(renal["Lactate"]) > 0
+    assert np.max(renal["Alanine"]) == pytest.approx(0.0)
+    assert np.max(liver["Alanine"]) > 0
+
+
 @pytest.mark.parametrize("kernel", ["reference", "optimized"])
 def test_mouse_sequence_solver_converts_pyruvate_to_alanine_in_liver(kernel):
     phantom = MousePerfusionConfig(shape=(24, 16, 48)).build()
@@ -285,14 +370,71 @@ def test_mouse_designer_exposes_animation_curves_and_hd_anatomy_controls():
     assert "Injected perfusion" in tabs
     assert "Anatomy + perfusion" in tabs
     assert dialog.anatomy_resolution.findData("hd") >= 0
+    assert dialog.anatomy_resolution.currentData() == "hd"
+    assert dialog.combined_anatomy_resolution.currentData() == "hd"
+    assert dialog.animation_speed.value() == pytest.approx(0.5)
+    assert dialog.perfusion_animation_speed.value() == pytest.approx(0.5)
+    assert "alpha" in dialog.bolus_alpha.toolTip()
+    assert "beta" in dialog.bolus_beta.toolTip()
+    assert [spin.value() for spin in dialog.mouse_size_spins] == pytest.approx(
+        [45.0, 32.0, 105.0]
+    )
+    assert [spin.value() for spin in dialog.mouse_offset_spins] == pytest.approx(
+        [0.0, 0.0, 0.0]
+    )
+    for spins in (
+        dialog.matrix_spins,
+        dialog.fov_spins,
+        dialog.mouse_size_spins,
+        dialog.mouse_offset_spins,
+    ):
+        layout = spins[0].parentWidget().layout()
+        assert isinstance(layout, QGridLayout)
+        for axis, spin in enumerate(spins):
+            assert layout.getItemPosition(layout.indexOf(spin)) == (
+                0,
+                2 * axis + 1,
+                1,
+                1,
+            )
     assert dialog.animation_time.value() < dialog.config.injection_start_s
     dialog.anatomy_resolution.setCurrentIndex(dialog.anatomy_resolution.findData("hd"))
     assert dialog.anatomy_preview.items[0][0].image.shape == (16 * 8, 24 * 8)
+    axial_item = dialog.anatomy_preview.items[0][0]
+    assert axial_item.transform().m11() * axial_item.image.shape[0] == pytest.approx(
+        dialog.config.fov_m[1]
+    )
+    assert axial_item.transform().m22() * axial_item.image.shape[1] == pytest.approx(
+        dialog.config.fov_m[0]
+    )
     dialog.perfusion_animation_slider.setValue(400)
     assert dialog.animation_slider.value() == 400
     dialog._animation_slider_changed(500)
     assert dialog.perfusion_preview.perfusion.max() > 0
     assert dialog.organ_curve_plot.listDataItems()
+    assert dialog._selected_voxel is not None
+    assert "Voxel" in dialog.voxel_spectrum_label.text()
+
+    axial_image = dialog.combined_preview.items[0][0]
+    axial_image.clicked.emit(
+        float(axial_image.image.shape[0] / 2),
+        float(axial_image.image.shape[1] / 2),
+    )
+    assert "Voxel" in dialog.voxel_spectrum_label.text()
+
+    dialog.animation_time.setValue(3.0)
+    combined_anatomy = dialog.combined_preview.items[0][0].image
+    combined_perfusion = dialog.combined_preview.items[0][1].image
+    assert combined_perfusion.shape == combined_anatomy.shape
+    assert np.max(combined_perfusion) > 0
+
+    renal_voxel = tuple(np.argwhere(dialog.phantom.anatomy_labels == 2)[0])
+    dialog._voxel_selected(renal_voxel)
+    spectrum_times, spectrum_curves = dialog._voxel_pool_curves
+    peak_index = int(np.argmax(spectrum_curves["Lactate"]))
+    dialog.animation_time.setValue(float(spectrum_times[peak_index]))
+    assert "Lactate" in dialog.voxel_spectrum_label.text()
+    assert len(dialog.voxel_spectrum_plot.listDataItems()) >= 2
 
     dialog.injection_amount.setValue(0.5)
     assert dialog._live_preview_timer.isActive()
@@ -301,3 +443,18 @@ def test_mouse_designer_exposes_animation_curves_and_hd_anatomy_controls():
 
     dialog.close()
     app.processEvents()
+
+
+def test_mouse_slice_preview_preserves_voxel_marker_when_perfusion_is_rendered():
+    preview = MouseSlicePreviewWidget(show_anatomy=False)
+    shape = (24, 16, 48)
+    preview.set_anatomy(np.ones(shape, dtype=np.uint8))
+    preview.set_selected_voxel((12, 8, 24))
+
+    preview.set_perfusion(np.ones(shape, dtype=float))
+
+    for marker in preview.selection_items:
+        assert marker.data["x"].shape == (1,)
+        assert marker.data["y"].shape == (1,)
+
+    preview.close()

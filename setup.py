@@ -111,6 +111,18 @@ extensions = [
         language="c",
     ),
     Extension(
+        "blochsimulator.blochsimulator_strict_cy",
+        sources=[
+            "src/blochsimulator/bloch_wrapper_strict.pyx",
+            "src/blochsimulator/bloch_core_strict.c",
+        ],
+        include_dirs=["src/blochsimulator"],
+        define_macros=define_macros,
+        extra_compile_args=strict_compile_args,
+        extra_link_args=strict_link_args,
+        language="c",
+    ),
+    Extension(
         "blochsimulator.dynamic_bloch_cy",
         sources=["src/blochsimulator/dynamic_bloch_wrapper.pyx"],
         extra_compile_args=strict_compile_args,

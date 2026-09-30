@@ -23,6 +23,7 @@ from .memory import (
     enforce_sequence_memory,
     resolve_memory_budget,
 )
+from .kernel_capabilities import DYNAMIC_KERNEL_NAMES, SEQUENCE_KERNEL_NAMES
 
 RF_PULSE_TYPE_OPTIONS = (
     "Rectangle",
@@ -1371,11 +1372,12 @@ class BlochSimulator:
         memory_policy : MemoryPolicy, optional
             Reserve-based or fixed-limit RAM policy. The process-wide GUI policy
             is used when omitted.
-        sequence_kernel : {"optimized", "reference"}
+        sequence_kernel : {"optimized", "reference", "strict_reference"}
             Native kernel used by event-based sequence simulations. The reference
-            kernel remains available for numerical comparisons.
+            kernel remains available for numerical comparisons. ``strict_reference``
+            selects the separately compiled no-fast-math reference extension.
         dynamic_sequence_kernel : {"optimized", "native_parallel", "native_serial", "metal_hybrid", "reference"}
-            Kernel used specifically for dynamic two-pool sequence simulations.
+            Kernel used specifically for dynamic spectral sequence simulations.
         dynamic_sequence_precision : {"float64", "float32"}
             Arithmetic used by the optimized dynamic CPU path. ``float64`` is
             the bit-exact default; ``float32`` is an experimental GPU-precision
@@ -1386,16 +1388,13 @@ class BlochSimulator:
         self.verbose = verbose
         self.memory_limit_bytes = memory_limit_bytes
         self.memory_policy = memory_policy
-        if sequence_kernel not in {"optimized", "reference"}:
-            raise ValueError("sequence_kernel must be 'optimized' or 'reference'")
+        if sequence_kernel not in SEQUENCE_KERNEL_NAMES:
+            raise ValueError(
+                "sequence_kernel must be 'optimized', 'reference', or "
+                "'strict_reference'"
+            )
         self.sequence_kernel = sequence_kernel
-        if dynamic_sequence_kernel not in {
-            "optimized",
-            "native_parallel",
-            "native_serial",
-            "metal_hybrid",
-            "reference",
-        }:
+        if dynamic_sequence_kernel not in DYNAMIC_KERNEL_NAMES:
             raise ValueError(
                 "dynamic_sequence_kernel must be 'optimized', 'native_parallel', "
                 "'native_serial', 'metal_hybrid', or 'reference'"
@@ -2379,8 +2378,11 @@ class BlochSimulator:
         selected_kernel = (
             self.sequence_kernel if sequence_kernel is None else sequence_kernel
         )
-        if selected_kernel not in {"optimized", "reference"}:
-            raise ValueError("sequence_kernel must be 'optimized' or 'reference'")
+        if selected_kernel not in SEQUENCE_KERNEL_NAMES:
+            raise ValueError(
+                "sequence_kernel must be 'optimized', 'reference', or "
+                "'strict_reference'"
+            )
         if n_active == 0:
             raise ValueError("phantom has no active voxels")
         if signal_weighting not in {"voxel", "voxel_volume"}:
@@ -2470,12 +2472,25 @@ class BlochSimulator:
             ),
         )
 
+        native_selected_kernel = selected_kernel
+        numerical_contract = "legacy-fast-math"
         try:
-            from .blochsimulator_cy import simulate_sequence_chunk
+            if selected_kernel == "strict_reference":
+                from .blochsimulator_strict_cy import simulate_sequence_chunk
+
+                native_selected_kernel = "reference"
+                numerical_contract = "strict-float64"
+            else:
+                from .blochsimulator_cy import simulate_sequence_chunk
         except ImportError as exc:
+            extension_name = (
+                "blochsimulator_strict_cy"
+                if selected_kernel == "strict_reference"
+                else "blochsimulator_cy"
+            )
             raise ImportError(
-                "blochsimulator_cy does not contain the streaming sequence kernel; "
-                "rebuild the extension"
+                f"{extension_name} does not contain the streaming sequence "
+                "kernel; rebuild the extensions"
             ) from exc
 
         coil_signal = np.zeros((n_rx_coils, n_adc), dtype=np.complex128)
@@ -2565,7 +2580,7 @@ class BlochSimulator:
                 compiled.checkpoint_state_indices,
                 crush_state_indices,
                 native_threads,
-                selected_kernel,
+                native_selected_kernel,
             )
             coil_signal += chunk_signal
             if sampling.enabled:
@@ -2721,6 +2736,10 @@ class BlochSimulator:
                 "simulation_timestep_s": simulation_timestep_s,
                 "signal_weighting": signal_weighting,
                 "sequence_kernel": selected_kernel,
+                "requested_sequence_kernel": selected_kernel,
+                "native_sequence_kernel": native_selected_kernel,
+                "effective_threads": native_threads,
+                "numerical_contract": numerical_contract,
                 "phantom_metadata": dict(phantom.metadata),
                 "field_strength_t": phantom.metadata.get("field_strength_t"),
                 "nucleus": phantom.metadata.get("nucleus"),
@@ -2736,6 +2755,12 @@ class BlochSimulator:
                 "cartesian_acquisition_volumes": cartesian_volume_metadata,
                 "spiral_acquisition": spiral_metadata,
                 "sequence_definitions": definitions,
+                "adc_label_values": dict(program.metadata.get("adc_label_values", {})),
+                "spectral_spatial_schedule": {
+                    key: value
+                    for key, value in definitions.items()
+                    if str(key).lower().startswith("spspschedule")
+                },
                 "physical_waveform_nucleus": physical_nucleus,
                 "physical_rf_unit": "G",
                 "physical_gradient_unit": "T/m",

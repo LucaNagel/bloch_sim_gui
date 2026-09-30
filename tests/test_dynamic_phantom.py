@@ -1466,6 +1466,125 @@ def test_native_rf_voxel_block_is_bitwise_equal_to_numpy(num_threads, rf_hz):
     assert np.array_equal(state, expected)
 
 
+@pytest.mark.parametrize("num_threads", [1, 4])
+def test_native_spatial_rf_voxel_block_matches_numpy_plane_basis(num_threads):
+    from blochsimulator.dynamic_bloch_cy import (
+        apply_spatial_rf_rotation_transverse_block,
+    )
+    from blochsimulator.dynamic_phantom import (
+        _prepare_spatial_rf_rotation,
+        _rf_rotate_spatial,
+    )
+
+    rng = np.random.default_rng(20260927)
+    state = rng.standard_normal((2, 1728, 3))
+    expected = state.copy()
+    transverse = np.ascontiguousarray(state[:, :, 0] + 1j * state[:, :, 1])
+    tx_storage = np.empty(2 * state.shape[1], dtype=np.complex128)
+    tx_storage[::2] = np.linspace(0.0, 1.2, state.shape[1]) * np.exp(
+        1j * np.linspace(-0.7, 0.5, state.shape[1])
+    )
+    tx_sensitivity = tx_storage[::2]
+    duration_s = 10e-6
+    rf_hz = 123.4 - 56.7j
+
+    _rf_rotate_spatial(expected, rf_hz, tx_sensitivity, duration_s)
+    prepared = _prepare_spatial_rf_rotation(rf_hz, tx_sensitivity, duration_s)
+    assert all(value.flags.c_contiguous for value in prepared)
+    apply_spatial_rf_rotation_transverse_block(
+        state, transverse, *prepared, num_threads
+    )
+    state[:, :, 0] = transverse.real
+    state[:, :, 1] = transverse.imag
+
+    np.testing.assert_allclose(state, expected, rtol=2e-15, atol=2e-15)
+
+
+@pytest.mark.parametrize(
+    ("tx_values", "classification", "fused"),
+    [
+        ((0.0 + 0.0j, 0.0 + 0.0j), "constant", False),
+        ((0.9 + 0.0j, 0.9 + 0.0j), "constant", True),
+        ((0.0 + 0.8j, 0.0 + 0.8j), "constant", True),
+        ((0.75 + 0.25j, 0.75 + 0.25j), "constant", True),
+        ((0.0 + 0.0j, 0.85 - 0.2j), "spatial", True),
+    ],
+    ids=("zero", "amplitude", "phase", "complex", "spatial"),
+)
+def test_native_rf_blocks_support_constant_and_spatial_tx(
+    tx_values, classification, fused
+):
+    phantom = _dynamic_phantom(kpl=(0.03, 0.1))
+    phantom.initial_spin_density_maps = {
+        "Pyruvate": np.ones(phantom.shape),
+        "Lactate": np.full(phantom.shape, 0.05),
+    }
+    phantom.equilibrium_polarization = 0.7
+    phantom.pyruvate_inflow = PyruvateInflow(
+        TimeCurve((0.0, 1e-3), (0.2, 0.5), "linear", "hold"),
+        np.asarray([0.8, 1.1]).reshape(phantom.shape),
+        TimeCurve((0.0, 1e-3), (0.4, 0.25), "linear", "hold"),
+    )
+    phantom.tx_sensitivity_map = np.asarray(tx_values).reshape(phantom.shape)
+    raster = 20e-6
+    program = SequenceProgram(
+        (
+            RFEvent(
+                0.0,
+                np.linspace(40.0 + 15.0j, 110.0 - 10.0j, 12),
+                raster,
+            ),
+            GradientEvent("z", 0.0, np.full(12, 120.0), raster),
+            ADCEvent(12 * raster, 1, raster),
+        ),
+        duration_s=13 * raster,
+    )
+    simulator = BlochSimulator(use_parallel=True, num_threads=2)
+    optimized = simulator.simulate_dynamic_sequence(
+        program, phantom, sequence_kernel="optimized", simulation_timestep_s=5e-6
+    )
+    native = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        sequence_kernel="native_parallel",
+        simulation_timestep_s=5e-6,
+        spin_sampling=SpinSampling((2, 1, 1)),
+        spoiler_mode="gradient",
+    )
+    sampled_reference = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        sequence_kernel="optimized",
+        simulation_timestep_s=5e-6,
+        spin_sampling=SpinSampling((2, 1, 1)),
+        spoiler_mode="gradient",
+    )
+
+    assert optimized.metadata["tx_sensitivity"] == classification
+    assert native.metadata["sequence_kernel"] == "native_parallel"
+    assert native.metadata["tx_sensitivity"] == classification
+    assert native.metadata["native_rf_block_enabled"] is True
+    assert native.metadata["native_rf_fused_block_enabled"] is fused
+    assert native.metadata["native_full_plan_enabled"] is True
+    assert native.metadata["native_rf_fused_blocks"] == 0
+    assert native.metadata["subvoxel_spins_per_voxel"] == 2
+    if classification == "spatial":
+        assert native.metadata["native_spatial_rf_block_enabled"] is True
+        assert native.metadata["native_spatial_rf_cache_misses"] > 0
+    for name in (
+        "signal",
+        "species_signal",
+        "final_magnetization",
+        "final_pool_magnetization",
+    ):
+        np.testing.assert_allclose(
+            getattr(native, name),
+            getattr(sampled_reference, name),
+            rtol=2e-13,
+            atol=2e-13,
+        )
+
+
 @pytest.mark.parametrize("kernel", ["native_serial", "native_parallel"])
 @pytest.mark.parametrize(
     "driver",
@@ -1510,20 +1629,11 @@ def test_native_dynamic_kernel_keeps_rf_fast_path_with_driver(driver, kernel):
     assert native.metadata["sequence_kernel"] == kernel
     assert native.metadata["native_fallback_reason"] is None
     assert native.metadata["native_rf_block_enabled"] is True
-    if driver != "dynamic_b0":
-        assert native.metadata["native_hybrid"] is True
-        assert native.metadata["native_longitudinal_step_enabled"] is False
-        reason_fragment = {
-            "inflow": "pyruvate inflow",
-            "delayed_conversion": "delayed conversion",
-            "concentration_tracking": "concentration tracking",
-        }[driver]
-        assert reason_fragment in native.metadata["native_longitudinal_fallback_reason"]
-        assert any("hybrid dynamic kernel" in message for message in status_messages)
-    else:
-        assert native.metadata["native_hybrid"] is False
-        assert native.metadata["native_longitudinal_step_enabled"] is True
-        assert native.metadata["native_longitudinal_fallback_reason"] is None
+    assert native.metadata["native_hybrid"] is False
+    assert native.metadata["native_longitudinal_fallback_reason"] is None
+    assert native.metadata["native_full_plan_enabled"] is True
+    assert native.metadata["numerical_contract"] == "float64-close"
+    assert any("bounded native plan" in message for message in status_messages)
     for name in (
         "signal",
         "species_signal",
@@ -1532,10 +1642,15 @@ def test_native_dynamic_kernel_keeps_rf_fast_path_with_driver(driver, kernel):
         "checkpoint_magnetization",
         "checkpoint_pool_magnetization",
     ):
-        assert np.array_equal(getattr(native, name), getattr(optimized, name))
+        np.testing.assert_allclose(
+            getattr(native, name),
+            getattr(optimized, name),
+            rtol=2e-13,
+            atol=2e-13,
+        )
 
 
-def test_native_inflow_with_spatial_tx_reports_complete_optimized_fallback():
+def test_native_inflow_with_spatial_tx_uses_complete_native_plan():
     phantom = _dynamic_phantom()
     phantom.pyruvate_inflow = PyruvateInflow(
         TimeCurve((0.0, 1e-3), (0.0, 1.0), "linear", "hold"),
@@ -1555,17 +1670,28 @@ def test_native_inflow_with_spatial_tx_reports_complete_optimized_fallback():
     )
 
     assert native.metadata["requested_sequence_kernel"] == "native_parallel"
-    assert native.metadata["sequence_kernel"] == "optimized"
+    assert native.metadata["sequence_kernel"] == "native_parallel"
+    assert native.metadata["tx_sensitivity"] == "spatial"
     assert native.metadata["native_hybrid"] is False
-    assert native.metadata["native_rf_block_enabled"] is False
-    assert "spatial transmit sensitivity" in native.metadata["native_fallback_reason"]
+    assert native.metadata["native_rf_block_enabled"] is True
+    assert native.metadata["native_spatial_rf_block_enabled"] is True
+    assert native.metadata["native_fallback_reason"] is None
+    assert native.metadata["native_longitudinal_fallback_reason"] is None
+    assert native.metadata["native_full_plan_enabled"] is True
+    assert native.metadata["native_full_plan_model"] == "direct-magnetization-inflow"
+    assert native.metadata["numerical_contract"] == "float64-close"
     for name in (
         "signal",
         "species_signal",
         "final_magnetization",
         "final_pool_magnetization",
     ):
-        assert np.array_equal(getattr(native, name), getattr(optimized, name))
+        np.testing.assert_allclose(
+            getattr(native, name),
+            getattr(optimized, name),
+            rtol=2e-13,
+            atol=2e-13,
+        )
 
 
 @pytest.mark.parametrize("num_threads", [1, 2, 4, 8])
@@ -1664,8 +1790,12 @@ def test_native_fused_rf_block_tracks_coupled_concentration_inflow(num_threads):
 
     assert native.metadata["native_concentration_inflow_step_enabled"] is True
     assert native.metadata["native_rf_fused_block_enabled"] is True
-    assert native.metadata["native_rf_fused_blocks"] == 1
-    assert native.metadata["native_rf_fused_intervals"] >= 8
+    assert native.metadata["native_full_plan_enabled"] is True
+    assert native.metadata["native_full_plan_intervals"] == (
+        native.metadata["compiled_interval_count"]
+    )
+    assert native.metadata["native_rf_fused_blocks"] == 0
+    assert native.metadata["native_rf_fused_intervals"] == 0
     for name in (
         "signal",
         "species_signal",
@@ -1717,7 +1847,7 @@ def test_native_serial_fused_rf_block_keeps_one_worker(monkeypatch):
     worker_counts = []
 
     def record_worker_count(*args):
-        worker_counts.append(args[-1])
+        worker_counts.append(args[43])
         return native_block(*args)
 
     monkeypatch.setattr(
@@ -1734,6 +1864,7 @@ def test_native_serial_fused_rf_block_keeps_one_worker(monkeypatch):
 
     assert worker_counts
     assert set(worker_counts) == {1}
+    assert result.metadata["native_full_plan_enabled"] is True
     assert result.metadata["native_rf_threads"] == 1
     assert result.metadata["native_longitudinal_threads"] == 1
 

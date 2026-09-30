@@ -245,27 +245,58 @@ def test_explorer_uses_two_handle_contrast_slider(qt_application):
     np.testing.assert_allclose(restored.contrast_slider.values(), selected)
 
 
-def test_auto_contrast_uses_one_zero_based_range_across_repetitions(qt_application):
+def test_auto_contrast_tracks_minimum_and_maximum_of_selected_image(qt_application):
     dataset = _framed_cartesian_dataset()
     explorer = SequenceReconstructionExplorer()
     explorer.set_dataset(dataset)
 
-    # Echo 0 contains frames 0 and 2. The later repetition supplies the global
-    # maximum, which must also be used while repetition 0 is displayed.
-    expected_maximum = (
-        1.1 * np.abs(dataset.cartesian_image.isel(cartesian_frame=[0, 2])).max().item()
-    )
-    assert explorer.contrast_slider.values() == (0.0, expected_maximum)
-    np.testing.assert_allclose(
-        explorer.image_panel.image.levels, (0.0, expected_maximum)
-    )
+    first_image = np.abs(dataset.cartesian_image.isel(cartesian_frame=0))
+    expected = (first_image.min().item(), first_image.max().item())
+    np.testing.assert_allclose(explorer.contrast_slider.values(), expected)
+    np.testing.assert_allclose(explorer.image_panel.image.levels, expected)
 
     explorer.outer_controls["repetition"].setValue(1)
 
-    assert explorer.contrast_slider.values() == (0.0, expected_maximum)
-    np.testing.assert_allclose(
-        explorer.image_panel.image.levels, (0.0, expected_maximum)
-    )
+    selected_image = np.abs(dataset.cartesian_image.isel(cartesian_frame=2))
+    expected = (selected_image.min().item(), selected_image.max().item())
+    np.testing.assert_allclose(explorer.contrast_slider.values(), expected)
+    np.testing.assert_allclose(explorer.image_panel.image.levels, expected)
+
+
+def test_auto_contrast_includes_negative_values_of_selected_component(
+    qt_application,
+):
+    dataset = _framed_cartesian_dataset()
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(dataset)
+
+    explorer._set_combo_data(explorer.component_combo, "real")
+    explorer.outer_controls["repetition"].setValue(1)
+
+    selected_image = dataset.cartesian_image.real.isel(cartesian_frame=2)
+    expected = (selected_image.min().item(), selected_image.max().item())
+    np.testing.assert_allclose(explorer.contrast_slider.values(), expected)
+    np.testing.assert_allclose(explorer.image_panel.image.levels, expected)
+
+
+def test_manual_contrast_survives_navigation_from_strong_to_weak_echo(
+    qt_application,
+):
+    dataset = _framed_cartesian_dataset()
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(dataset)
+    echo_control = explorer.outer_controls["echo"]
+
+    echo_control.setValue(1)
+    explorer.auto_contrast.setChecked(False)
+    explorer.contrast_slider.set_values(50.0, 60.0)
+
+    echo_control.setValue(0)
+
+    expected_domain = (0.0, 1.1 * np.abs(dataset.cartesian_image).max().item())
+    assert explorer.contrast_slider._domain == expected_domain
+    assert explorer.contrast_slider.values() == (50.0, 60.0)
+    np.testing.assert_allclose(explorer.image_panel.image.levels, (50.0, 60.0))
 
 
 def test_explorer_uses_labelled_slider_for_2d_slice_series(qt_application):
@@ -296,7 +327,7 @@ def test_manual_contrast_domain_covers_all_slices_with_headroom_and_survives_nav
     explorer.set_dataset(dataset)
     slice_control = explorer.outer_controls["slice"]
 
-    assert explorer.contrast_slider.values() == (0.0, 64.9)
+    assert explorer.contrast_slider.values() == (0.0, 19.0)
     explorer.auto_contrast.setChecked(False)
     explorer.contrast_slider.set_values(5.0, 55.0)
 

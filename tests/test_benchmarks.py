@@ -301,9 +301,13 @@ def test_benchmark_progress_output_describes_case_before_and_after_simulation(
 
 def test_kernel_benchmark_defaults_cover_both_kernel_families():
     args = build_kernel_parser().parse_args([])
+    strict_args = build_kernel_parser().parse_args(
+        ["--sequence-kernels", "reference", "strict_reference"]
+    )
 
     assert tuple(args.sequence_kernels) == SEQUENCE_KERNELS
     assert tuple(args.dynamic_kernels) == DYNAMIC_KERNELS
+    assert tuple(strict_args.sequence_kernels) == ("reference", "strict_reference")
     assert args.kernel_phantom_matrix == DEFAULT_KERNEL_PHANTOM_MATRIX == (24, 24)
     assert tuple(args.kernel_flash_matrix) == DEFAULT_KERNEL_FLASH_MATRIX == (16, 16)
     assert (
