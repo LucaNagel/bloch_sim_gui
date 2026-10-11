@@ -264,13 +264,14 @@ def simulate_bloch(np.ndarray[CTYPE_t, ndim=1] b1_complex,
         mz_buf[start_slice] = 1.0
 
     # Call the C function
-    blochsimfz(<double*>b1_real.data, <double*>b1_imag.data,
-               <double*>gx.data, <double*>gy.data, <double*>gz.data,
-               <double*>time_c.data, ntime, t1, t2,
-               <double*>freq_c.data, nfreq,
-               <double*>dx.data, <double*>dy.data, <double*>dz.data, npos,
-               <double*>mx_buf.data, <double*>my_buf.data, <double*>mz_buf.data,
-               mode)
+    with nogil:
+        blochsimfz(<double*>b1_real.data, <double*>b1_imag.data,
+                   <double*>gx.data, <double*>gy.data, <double*>gz.data,
+                   <double*>time_c.data, ntime, t1, t2,
+                   <double*>freq_c.data, nfreq,
+                   <double*>dx.data, <double*>dy.data, <double*>dz.data, npos,
+                   <double*>mx_buf.data, <double*>my_buf.data, <double*>mz_buf.data,
+                   mode)
 
     # Reshape output based on mode. The C core stores blocks in order:
     #   for freq in nfreq:

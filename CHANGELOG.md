@@ -4,6 +4,53 @@ All notable changes to BlochSimulator are documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/).
 
+## [2.8.1] - 2026-10-11
+
+### Added
+
+- Added formula-based parameter loops with an editable expression, start and
+  end values, point count, and a preview of the generated values. Expressions
+  such as `sin(x)` and `x^2` are applied to evenly spaced input points.
+- Added a simulation selector to Reconstruction Explorer so individual loop
+  iterations can be inspected directly, with parameter values in their names.
+- Added adaptive AHP/AFP integration for Free Induction Decay in Free Mode,
+  with independent waveform sampling, internal integration, and saved output
+  spacing, plus numerical validation and usage guidance.
+
+### Changed
+
+- Parameter loops accept finite values outside the sequence form's default
+  ranges, including negative RF scales and scales above 10. Form controls
+  expand to preserve requested values instead of silently clipping them.
+- Reduced Free Mode memory use by storing a configurable output raster,
+  bounding plot and animation samples, and releasing previous result views
+  before a new simulation starts.
+- Improved cancellation, progress reporting, and UI responsiveness during
+  Free Mode simulations, including releasing the Python interpreter lock
+  while the serial native kernel computes.
+
+### Fixed
+
+- Kept Reconstruction Explorer's simulation list synchronized with renamed
+  and deleted session runs.
+- Preserved exact final magnetization when the saved output raster does not
+  include the last integration point.
+- Corrected Free Induction Decay tail timing and kept RF waveform timing
+  independent of saved result sampling in plots and notebook exports.
+- Included the strict reference kernel's Cython source in source distributions
+  so the package can be rebuilt from the published source archive.
+- Made the commit test hook use the active Python environment instead of a
+  machine-specific interpreter path.
+
+### Compatibility notes
+
+- Integer loop parameters remain rounded to the form's integer representation;
+  the sequence builders still validate physical requirements such as positive
+  durations and matrix sizes.
+- Adaptive Free Mode integration retains the existing proton-based kernel
+  convention. It does not correct non-proton nucleus scaling in that legacy
+  path; see [AHP/AFP validation and limitations](docs/free_mode_ahp_performance.md).
+
 ## [2.8.0] - 2026-09-30
 
 ### Added

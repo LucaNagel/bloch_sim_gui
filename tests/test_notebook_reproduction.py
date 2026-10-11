@@ -137,6 +137,37 @@ def test_exported_fid_flip_angle_changes_waveform_and_simulation(tmp_path, monke
     assert np.max(np.abs(signal_45)) < np.max(np.abs(signal_90))
 
 
+def test_fid_notebook_runs_adaptive_ahp_with_independent_saved_spacing(
+    tmp_path, monkeypatch
+):
+    notebook = _export_fid_reproduction_notebook(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    namespace = _fid_namespace()
+    exec(_code_cell(notebook, "# Canonical simulation parameters"), namespace)
+    namespace["sequence_params"]["rf_designer_snapshot"].update(
+        pulse_type="Adiabatic Half Passage",
+        duration_s=0.005,
+        b1_amplitude_g=5.0,
+    )
+    namespace["simulation_params"].update(
+        adaptive_rf=True,
+        time_step_us=0.1,
+        output_step_us=1.0,
+    )
+    for marker in (
+        "# Create simulator",
+        "# Create Free Induction Decay",
+        "# Use the exact sampled axes",
+        "# Run simulation",
+    ):
+        exec(_code_cell(notebook, marker), namespace)
+    result = namespace["result"]
+    assert result["integration"]["solver"] == "DOP853"
+    assert len(result["time"]) == 15001
+    assert len(namespace["b1"]) > 100000
+    np.testing.assert_allclose(np.diff(result["time"]), 1e-6, atol=1e-15)
+
+
 def test_fid_notebook_marks_irrelevant_parameters_and_plots_sequence(
     tmp_path, monkeypatch
 ):

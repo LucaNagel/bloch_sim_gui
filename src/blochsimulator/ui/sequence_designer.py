@@ -639,16 +639,16 @@ class SequenceDesigner(QGroupBox):
 
             # Extend to full TR
             dt = time[1] - time[0] if len(time) > 1 else self.default_dt
-            current_dur = time[-1] if len(time) > 0 else 0
+            current_dur = float(time[-1] - time[0] + dt) if len(time) > 0 else 0
             target_dur = max(tr, current_dur)
 
             if target_dur > current_dur + dt / 2:
-                n_extra = int(np.ceil((target_dur - current_dur) / dt))
+                n_extra = int(np.ceil((target_dur - current_dur) / dt - 1e-9))
                 # Clamp to avoid huge allocations if TR is very large relative to dt
                 n_extra = min(n_extra, 1000000)
                 if n_extra > 0:
                     b1 = np.pad(b1, (0, n_extra), "constant")
-                    extra_time = current_dur + np.arange(1, n_extra + 1) * dt
+                    extra_time = time[-1] + np.arange(1, n_extra + 1) * dt
                     time = np.concatenate([time, extra_time])
 
             gradients = np.zeros((len(time), 3))
@@ -1433,6 +1433,12 @@ class SequenceDesigner(QGroupBox):
             self.playhead_line.setVisible(True)
         except Exception:
             pass
+
+    def set_cursor_time(self, time_s: float):
+        """Position the playhead independently of display downsampling."""
+        if self.playhead_line is not None:
+            self.playhead_line.setValue(float(time_s) * 1000.0)
+            self.playhead_line.show()
 
     def get_state(self) -> dict:
         """Return current widget state as a dictionary."""

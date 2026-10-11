@@ -107,6 +107,35 @@ anyway or **Cancel** to return without starting; Cancel is selected by default.
 Starting a run also preserves the currently selected result tab; use the
 **Signal** tab when the ADC signal, FID, or CSI spectrum is wanted.
 
+Use **Param. Loop** to open the **Parameter Loop** tab and select a numerical
+sequence parameter. Enter a **Formula y =**, the start and end of the **x
+range**, and the **Number of points**. The loop evaluates the formula at
+evenly spaced $x$ values and runs one simulation per resulting parameter value:
+
+$$
+x_i = a + \frac{i}{N-1}(b-a), \qquad y_i = f(x_i),
+\qquad i = 0, \ldots, N-1, \quad N > 1.
+$$
+
+For example, formula `sin(x)`, start 0, end 5, and 11 points produce
+`sin(linspace(0, 5, 11))`. Use `x` for linear spacing, `x^2` or `x**2` for
+squared values, or expressions such as `exp(-x)`. Trigonometric functions
+use radians; `pi` and `e` are available. A single point uses the start value.
+The **Values** preview shows the generated parameter values. The loop accepts
+finite values outside the sequence form's default editing range, including
+negative RF scales and scales above 10. The corresponding form field expands
+to accommodate each requested value. Integer parameters are rounded and must
+fit the form field's 32-bit integer representation. Sequence generation and
+simulation still validate requirements such as positive durations and matrix
+sizes.
+
+In **Reconstruction Explorer**, the **Simulation** list includes each completed
+loop iteration with its parameter value. Choose a run to inspect its images,
+k-space, or spectra without changing the sequence setup. These results remain
+available during the current application session and also appear under
+**Simulations**. Renaming or deleting a run there updates the reconstruction
+list.
+
 In **Spin probe → Spectrum**, **Y scale** controls how magnetization is
 reported. **Per-spin response (90° = 1)** divides by the configured initial
 magnetization magnitude `M0`, so an ideal on-resonance 90° excitation produces

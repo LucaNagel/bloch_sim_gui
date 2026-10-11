@@ -108,6 +108,13 @@ from .sequence_simulation_widget import SequenceSimulationWidget
 from .b1_widgets import B1PhantomCombinationWidget, B1WorkspaceWidget
 from .project_explorer import ProjectExplorerDialog
 from .simulation_explorer import SessionSimulationExplorer
+
+
+def _display_time_indices(count, limit=20000):
+    """Bound plot data independently of saved or integrated sample counts."""
+    return np.unique(np.linspace(0, count - 1, min(count, limit)).astype(int))
+
+
 from .styles import (
     BOLD_GROUP_TITLES_STYLE,
     INTERFACE_STYLE_FUSION,
@@ -533,9 +540,10 @@ class BlochSimulatorGUI(QMainWindow):
         self.time_step_spin.setDecimals(2)
         self.time_step_spin.setSingleStep(0.01)
         self.time_step_spin.setToolTip(
-            "Simulation time step in microseconds. Smaller values improve time "
-            "resolution but create more points and can strongly increase runtime "
-            "and RAM usage."
+            "Fixed integration and RF waveform time step in microseconds. "
+            "With adaptive AHP/AFP integration, this controls only waveform sampling "
+            "(at most 0.1 us); internal solver steps follow the error tolerance. "
+            "The saved time step controls result size separately."
         )
         self.time_step_spin.valueChanged.connect(self._update_time_step)
         control_layout.addWidget(self.time_step_spin, 8, 1)
@@ -567,6 +575,30 @@ class BlochSimulatorGUI(QMainWindow):
         )
         control_layout.addWidget(self.max_traces_spin, 10, 1)
 
+        control_layout.addWidget(QLabel("Saved time step (us):"), 11, 0)
+        self.output_step_spin = QDoubleSpinBox()
+        self.output_step_spin.setObjectName("output_step_spin")
+        self.output_step_spin.setRange(0.0, 5000.0)
+        self.output_step_spin.setDecimals(2)
+        self.output_step_spin.setValue(1.0)
+        self.output_step_spin.setSpecialValueText("All integration points")
+        self.output_step_spin.setToolTip(
+            "Spacing of saved magnetization samples, independent of internal integration. "
+            "Larger values reduce RAM and export size. Set 0 to save every fixed-raster point. "
+            "Choose a spacing fine enough to resolve the fastest magnetization oscillations."
+        )
+        control_layout.addWidget(self.output_step_spin, 11, 1)
+        self.adaptive_rf_checkbox = QCheckBox("Adaptive AHP/AFP integration (FID)")
+        self.adaptive_rf_checkbox.setObjectName("adaptive_rf_checkbox")
+        self.adaptive_rf_checkbox.setChecked(True)
+        self.adaptive_rf_checkbox.setToolTip(
+            "For an AHP/AFP in Free Induction Decay, adjust internal steps to control "
+            "magnetization error (relative tolerance 1e-8). Amplitude, phase, off-resonance "
+            "and relaxation all enter the error estimate. RF-free decay is propagated exactly. "
+            "Other sequences use the fixed time step."
+        )
+        control_layout.addWidget(self.adaptive_rf_checkbox, 12, 0, 1, 2)
+
         for field in (
             self.mode_combo,
             self.pos_spin,
@@ -578,6 +610,7 @@ class BlochSimulatorGUI(QMainWindow):
             self.time_step_spin,
             self.extra_tail_spin,
             self.max_traces_spin,
+            self.output_step_spin,
         ):
             field.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -1289,9 +1322,7 @@ class BlochSimulatorGUI(QMainWindow):
             self._export_session_simulation_runs
         )
         self.simulation_explorer.run_renamed.connect(
-            lambda run: self.statusBar().showMessage(
-                f"Simulation renamed to {run.display_name}", 5000
-            )
+            self._rename_session_simulation_run
         )
         self.simulation_explorer_tab_index = self.tab_widget.addTab(
             self.simulation_explorer, "Simulations"
@@ -1317,8 +1348,8 @@ class BlochSimulatorGUI(QMainWindow):
         parameter_loop_title.setFont(parameter_loop_title_font)
         parameter_loop_page_layout.addWidget(parameter_loop_title)
         parameter_loop_description = QLabel(
-            "Select any numerical parameter from the active sequence, define "
-            "its range, and run the sequence once for every value."
+            "Select a numerical parameter and enter a formula, x range, and "
+            "number of points. Explore each completed run in Reconstruction Explorer."
         )
         parameter_loop_description.setWordWrap(True)
         parameter_loop_page_layout.addWidget(parameter_loop_description)
@@ -2494,9 +2525,15 @@ class BlochSimulatorGUI(QMainWindow):
 
     def _build_playback_indices(self, total_frames: int) -> np.ndarray:
         """Construct (optionally downsampled) playback indices for animation."""
-        # Return all indices to ensure every simulated point is accessible.
-        # The animation loop handles frame skipping automatically to maintain speed.
-        return np.arange(total_frames, dtype=int)
+        # Display data must stay bounded even when opening an older project
+        # containing millions of integration points. Raw results remain intact.
+        spin_count = max(
+            1, self.last_result["mx"].shape[1] * self.last_result["mx"].shape[2]
+        )
+        limit = max(2, min(20000, (64 * 1024**2) // (spin_count * 3 * 4)))
+        return np.unique(
+            np.linspace(0, total_frames - 1, min(total_frames, limit)).astype(int)
+        )
 
     def _reset_playback_anchor(self, idx: Optional[int] = None):
         """Record the wall-clock anchor for the current playback position."""
@@ -2534,7 +2571,7 @@ class BlochSimulatorGUI(QMainWindow):
         selector = self.mag_3d.get_selector_index()
 
         if mean_only or (npos == 1 and nfreq == 1):
-            anim = np.mean(base_vectors, axis=(1, 2), keepdims=True)
+            anim = np.mean(base_vectors, axis=(1, 2))[:, None, :]
             colors = [self._color_tuple(pg.mkColor("c"))]
         elif mode == "Positions @ freq":
             fi = min(max(selector, 0), nfreq - 1)
@@ -2691,8 +2728,8 @@ class BlochSimulatorGUI(QMainWindow):
             return
         actual_idx = self._playback_to_full_index(time_idx)
         # Convert to ms for sequence diagram alignment
-        if hasattr(self.sequence_designer, "set_cursor_index"):
-            self.sequence_designer.set_cursor_index(actual_idx)
+        if hasattr(self.sequence_designer, "set_cursor_time"):
+            self.sequence_designer.set_cursor_time(float(self.last_time[actual_idx]))
 
         # Update sequence diagram cursor
         # Update 3D vector view
@@ -3061,6 +3098,9 @@ class BlochSimulatorGUI(QMainWindow):
                     idx += 1
         else:
             # Time-resolved
+            indices = _display_time_indices(len(time_ms))
+            time_ms = time_ms[indices]
+            mx_all, my_all, mz_all = (arr[indices] for arr in (mx_all, my_all, mz_all))
             ntime, npos, nfreq = mx_all.shape
             mean_only = self.mean_only_checkbox.isChecked()
 
@@ -3166,6 +3206,8 @@ class BlochSimulatorGUI(QMainWindow):
             )
         elif signal_all.ndim == 3:
             # Time-resolved 3D data (ntime, npos, nfreq)
+            indices = _display_time_indices(len(time_ms))
+            time_ms, signal_all = time_ms[indices], signal_all[indices]
             ntime, npos, nfreq = signal_all.shape
             mean_only = self.mean_only_checkbox.isChecked()
 
@@ -4555,6 +4597,12 @@ class BlochSimulatorGUI(QMainWindow):
             f"{run.display_name} deleted from this session", 5000
         )
 
+    def _rename_session_simulation_run(self, run):
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        if sequence_widget is not None and run.run_type == "sequence":
+            sequence_widget.reconstruction_explorer.add_session_run(run)
+        self.statusBar().showMessage(f"Simulation renamed to {run.display_name}", 5000)
+
     @staticmethod
     def _available_project_path(path):
         path = Path(path)
@@ -5220,7 +5268,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.status_run_bar = bar
 
     def _confirm_adiabatic_free_mode_run(self) -> bool:
-        """Validate AHP/AFP inputs and offer the Free Mode raster once."""
+        """Validate direct AHP/AFP amplitude without forcing a global 10 ns raster."""
         if getattr(self, "workspace_mode", "free") != "free":
             return True
         if not self.rf_designer.is_adiabatic_passage():
@@ -5234,44 +5282,71 @@ class BlochSimulatorGUI(QMainWindow):
                 "Adiabatic pulse needs a B1 amplitude",
                 f"{pulse_name} does not use the Flip Angle setting. Set "
                 "B1 Amplitude directly to a value above 0 G before running.\n\n"
-                "A Time step of 0.01 us is recommended for this Free Mode "
-                "simulation. The pulse duration was set to 10 ms when the pulse "
-                "type was selected.",
+                "Adaptive AHP/AFP integration is available for Free Induction Decay.",
             )
             self.rf_designer.b1_amplitude.setFocus()
             return False
 
-        if np.isclose(self.time_step_spin.value(), 0.01, rtol=0.0, atol=1e-12):
-            return True
-        if self._adiabatic_timestep_warning_shown:
-            return True
+        return True
 
-        self._adiabatic_timestep_warning_shown = True
-        dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Warning)
-        dialog.setWindowTitle("Recommended adiabatic time step")
-        dialog.setText(
-            f"{pulse_name} uses the directly specified B1 amplitude "
-            f"({b1_amplitude_g:.4g} G); Flip Angle does not apply."
-        )
-        dialog.setInformativeText(
-            "The recommended Free Mode Time step is 0.01 us. Confirm to apply "
-            "this value automatically and start the simulation."
-        )
-        confirm_button = dialog.addButton(
-            "Confirm and use 0.01 us", QMessageBox.AcceptRole
-        )
-        dialog.addButton(QMessageBox.Cancel)
-        dialog.exec_()
-        if dialog.clickedButton() is confirm_button:
-            self.time_step_spin.setValue(0.01)
-            return True
-        return False
+    def _release_free_simulation_result(self):
+        """Release the previous Free Mode run before budgeting its replacement."""
+        self.anim_timer.stop()
+        self._sync_play_toggle(False)
+        self.time_control.setEnabled(False)
+        self.time_control.set_time_range(None)
+        self.mag_3d.set_preview_data(None, None, None, None)
+        self._invalidate_plot_caches()
+        for plot in (
+            self.mxy_plot,
+            self.mz_plot,
+            self.signal_plot,
+            self.spectrum_plot,
+            self.spatial_mxy_plot,
+            self.spatial_mz_plot,
+        ):
+            self._safe_clear_plot(plot)
+        for name in (
+            "mxy_heatmap_item",
+            "mz_heatmap_item",
+            "signal_heatmap_item",
+            "spectrum_heatmap_item",
+            "spatial_heatmap_mxy_item",
+            "spatial_heatmap_mz_item",
+        ):
+            getattr(self, name).clear()
+        for name in (
+            "last_result",
+            "last_time",
+            "last_b1",
+            "last_gradients",
+            "last_waveform_time",
+            "anim_data",
+            "anim_time",
+            "anim_vectors_full",
+            "anim_b1",
+            "playback_indices",
+            "playback_time",
+            "playback_time_ms",
+            "spatial_mx_time_series",
+            "spatial_my_time_series",
+            "spatial_mz_time_series",
+            "_last_spatial_export",
+            "_last_spectrum_export",
+            "_last_export_parameters",
+        ):
+            setattr(self, name, None)
+        self.simulator.last_result = None
+        self.simulation_thread = None
 
     def run_simulation(self):
         """Run the Bloch simulation."""
         if not self._confirm_adiabatic_free_mode_run():
             return
+        if self.simulation_thread is not None and self.simulation_thread.isRunning():
+            return
+
+        self._release_free_simulation_result()
 
         self.statusBar().showMessage("Running simulation...")
         self.simulate_button.setEnabled(False)
@@ -5295,8 +5370,18 @@ class BlochSimulatorGUI(QMainWindow):
         self.log_message("Starting simulation...")
 
         tissue = self.tissue_widget.get_parameters()
-        pulse = self.rf_designer.get_pulse()
         dt_s = max(self.time_step_spin.value(), 0.01) * 1e-6
+        adaptive_rf = (
+            self.adaptive_rf_checkbox.isChecked()
+            and self.rf_designer.is_adiabatic_passage()
+            and self.sequence_designer.sequence_type.currentText()
+            == "Free Induction Decay"
+        )
+        if adaptive_rf:
+            # Input waveform accuracy is separate from solver step accuracy.
+            dt_s = min(dt_s, 0.1e-6)
+            self.rf_designer.set_time_step(dt_s)
+        pulse = self.rf_designer.get_pulse()
         try:
             sequence_tuple = self.sequence_designer.compile_sequence(
                 custom_pulse=pulse, dt=dt_s, log_info=True
@@ -5323,6 +5408,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.last_b1 = np.asarray(b1_arr)
         self.last_gradients = np.asarray(gradients_arr)
         self.last_time = np.asarray(time_arr)
+        self.last_waveform_time = self.last_time
         b1_abs = np.abs(self.last_b1)
         thr = b1_abs.max() * 1e-3 if b1_abs.size else 0.0
         mask = b1_abs > thr
@@ -5392,6 +5478,8 @@ class BlochSimulatorGUI(QMainWindow):
                 "preview_mode": bool(preview_on),
                 "field_strength_t": self._workspace_field_strength_t,
                 "nucleus": self._workspace_nucleus,
+                "adaptive_rf": adaptive_rf,
+                "output_step_us": self.output_step_spin.value(),
             }
         )
         self._pending_export_parameters = run_metadata
@@ -5406,6 +5494,8 @@ class BlochSimulatorGUI(QMainWindow):
             dt=dt_s,
             m_init=m_init,
             rf_carrier_offset=rf_carrier_offset,
+            output_step_s=self.output_step_spin.value() * 1e-6 or None,
+            adaptive_rf=adaptive_rf,
         )
         self.simulation_thread.finished.connect(self.on_simulation_finished)
         self.simulation_thread.cancelled.connect(self.on_simulation_cancelled)
@@ -5471,6 +5561,11 @@ class BlochSimulatorGUI(QMainWindow):
             self.anim_b1_scale = 1.0
 
         self.update_plots(result)
+        integration = result.get("integration")
+        if integration is not None:
+            self.log_message(
+                f"Integration: {integration['solver']}; {len(result['time']):,} saved time points."
+            )
 
     def on_simulation_error(self, error_msg):
         """Handle simulation error."""
@@ -5659,17 +5754,31 @@ class BlochSimulatorGUI(QMainWindow):
                 self._refresh_mag_plots()
                 self._refresh_signal_plots()
 
-                self.anim_vectors_full = np.stack([mx_all, my_all, mz_all], axis=3)
                 self.playback_indices = self._build_playback_indices(ntime)
+                self.anim_vectors_full = np.stack(
+                    [
+                        component[self.playback_indices]
+                        for component in (mx_all, my_all, mz_all)
+                    ],
+                    axis=3,
+                ).astype(np.float32)
                 self.playback_time = self.last_time[self.playback_indices]
                 self.playback_time_ms = self.playback_time * 1000.0
 
                 # Prepare B1 for playback
                 if hasattr(self, "last_b1") and self.last_b1 is not None:
-                    self.anim_b1 = np.asarray(self.last_b1)[self.playback_indices]
+                    waveform_time = getattr(self, "last_waveform_time", None)
+                    if waveform_time is not None and len(waveform_time) == len(
+                        self.last_b1
+                    ):
+                        self.anim_b1 = np.interp(
+                            self.playback_time, waveform_time, self.last_b1
+                        )
+                    else:
+                        self.anim_b1 = None
                     max_b1 = (
                         float(np.nanmax(np.abs(self.anim_b1)))
-                        if self.anim_b1.size
+                        if self.anim_b1 is not None and self.anim_b1.size
                         else 0.0
                     )
                     self.anim_b1_scale = 1.5 / max(max_b1, 1e-6)
@@ -6341,8 +6450,11 @@ class BlochSimulatorGUI(QMainWindow):
         if mx is None:
             return
 
-        # Extract final state
-        if mx.ndim == 3:  # (ntime, npos, nfreq)
+        # A saved output raster need not contain the final integration step.
+        exact_final = self.last_result.get("integration", {}).get("final_magnetization")
+        if exact_final is not None:
+            mx_final, my_final, mz_final = exact_final
+        elif mx.ndim == 3:  # (ntime, npos, nfreq)
             mx_final = mx[-1]
             my_final = my[-1]
             mz_final = mz[-1]
@@ -6537,7 +6649,9 @@ class BlochSimulatorGUI(QMainWindow):
         # Store RF waveform if available
         if hasattr(self, "last_b1") and self.last_b1 is not None:
             params["b1_waveform"] = self.last_b1
-            params["time_waveform"] = self.last_time
+            params["time_waveform"] = getattr(self, "last_waveform_time", None)
+            if params["time_waveform"] is None:
+                params["time_waveform"] = self.last_time
             if hasattr(self, "last_gradients"):
                 params["gradients_waveform"] = self.last_gradients
 
@@ -6557,6 +6671,8 @@ class BlochSimulatorGUI(QMainWindow):
                 "time_step": self.time_step_spin.value(),
                 "extra_tail": self.extra_tail_spin.value(),
                 "max_traces": self.max_traces_spin.value(),
+                "output_step_us": self.output_step_spin.value(),
+                "adaptive_rf": self.adaptive_rf_checkbox.isChecked(),
                 "field_strength_t": self._workspace_field_strength_t,
                 "nucleus": self._workspace_nucleus,
             }
@@ -6568,6 +6684,13 @@ class BlochSimulatorGUI(QMainWindow):
                 else "endpoint"
             ),
             "time_step_us": self.time_step_spin.value(),
+            "output_step_us": self.output_step_spin.value(),
+            "adaptive_rf": bool(
+                self.adaptive_rf_checkbox.isChecked()
+                and self.rf_designer.is_adiabatic_passage()
+                and self.sequence_designer.sequence_type.currentText()
+                == "Free Induction Decay"
+            ),
             "num_positions": self.pos_spin.value(),
             "position_range_mm": self.pos_range.value(),
             "position_range_cm": self.pos_range.value() / 10.0,
@@ -6836,7 +6959,9 @@ class BlochSimulatorGUI(QMainWindow):
 
         if show_evolution:
             # Direct spin magnitudes over time (no FFT)
-            time_ms = time_arr[: time_idx + 1] * 1000.0
+            indices = _display_time_indices(time_idx + 1, limit=8000)
+            sig_slice = sig_slice[indices]
+            time_ms = time_arr[indices] * 1000.0
 
             # Reshape to (ntime, spin_count)
             mags = np.abs(sig_slice).reshape(sig_slice.shape[0], -1)
@@ -8505,6 +8630,10 @@ class BlochSimulatorGUI(QMainWindow):
             return
 
         ntime, npos, nfreq = mx_all.shape
+        indices = _display_time_indices(ntime, limit=8000)
+        mx_all, my_all, mz_all = (arr[indices] for arr in (mx_all, my_all, mz_all))
+        time_arr = time_arr[indices]
+        ntime = len(indices)
         time_ms = time_arr * 1000  # Convert to ms
 
         # Get view mode
@@ -8674,6 +8803,9 @@ class BlochSimulatorGUI(QMainWindow):
             return
 
         ntime, npos, nfreq = signal_all.shape
+        indices = _display_time_indices(ntime, limit=8000)
+        signal_all, time_arr = signal_all[indices], time_arr[indices]
+        ntime = len(indices)
         time_ms = time_arr * 1000  # Convert to ms
 
         # Get view mode

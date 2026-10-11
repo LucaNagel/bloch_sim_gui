@@ -109,6 +109,7 @@ from ..sequence import (
     variable_flip_angle_schedule,
 )
 from ..sequence.encoding import numeric_definition_array
+from ..sequence.parameter_loop import parameter_loop_values
 from ..sequence.spin_sampling import phantom_voxel_basis_m
 from ..sequence.rf_pulses import (
     RF_PULSE_TYPE_LABELS,
@@ -3641,6 +3642,15 @@ class SequenceSimulationWidget(QWidget):
         )
         parameter_loop_form.addRow("Parameter", self.parameter_loop_parameter)
 
+        self.parameter_loop_formula = QLineEdit("x")
+        self.parameter_loop_formula.setObjectName("sequence_parameter_loop_formula")
+        self.parameter_loop_formula.setToolTip(
+            "Apply this formula to x = linspace(start, end, number of points). "
+            "Examples: x, x^2, sin(x), exp(x), or y = x^2. "
+            "Trigonometric functions use radians; pi and e are available."
+        )
+        parameter_loop_form.addRow("Formula y =", self.parameter_loop_formula)
+
         parameter_range = QWidget()
         parameter_range_layout = QHBoxLayout(parameter_range)
         parameter_range_layout.setContentsMargins(0, 0, 0, 0)
@@ -3648,20 +3658,45 @@ class SequenceSimulationWidget(QWidget):
         self.parameter_loop_start.setObjectName("sequence_parameter_loop_start")
         self.parameter_loop_stop = QDoubleSpinBox()
         self.parameter_loop_stop.setObjectName("sequence_parameter_loop_stop")
-        parameter_range_layout.addWidget(QLabel("From"))
+        for control in (self.parameter_loop_start, self.parameter_loop_stop):
+            control.setDecimals(8)
+            control.setRange(-1e12, 1e12)
+            control.setToolTip("Endpoint of the evenly spaced x values")
+        parameter_range_layout.addWidget(QLabel("Start"))
         parameter_range_layout.addWidget(self.parameter_loop_start, 1)
-        parameter_range_layout.addWidget(QLabel("to"))
+        parameter_range_layout.addWidget(QLabel("End"))
         parameter_range_layout.addWidget(self.parameter_loop_stop, 1)
-        parameter_loop_form.addRow("Range", parameter_range)
+        parameter_loop_form.addRow("x range", parameter_range)
 
         self.parameter_loop_steps = QSpinBox()
         self.parameter_loop_steps.setObjectName("sequence_parameter_loop_steps")
-        self.parameter_loop_steps.setRange(2, 500)
+        self.parameter_loop_steps.setRange(1, 500)
         self.parameter_loop_steps.setValue(5)
         self.parameter_loop_steps.setToolTip(
-            "Number of simulations, including both range endpoints"
+            "Number of evenly spaced x points and simulations, including "
+            "both endpoints when there is more than one point"
         )
-        parameter_loop_form.addRow("Simulations", self.parameter_loop_steps)
+        parameter_loop_form.addRow("Number of points", self.parameter_loop_steps)
+
+        formula_help = QLabel(
+            "x is evenly spaced from start to end; the formula gives the parameter "
+            "values. Use x for linear spacing. Integer parameters are rounded."
+        )
+        formula_help.setWordWrap(True)
+        parameter_loop_form.addRow(formula_help)
+        self.parameter_loop_preview = QLabel()
+        self.parameter_loop_preview.setWordWrap(True)
+        self.parameter_loop_preview.setTextFormat(Qt.PlainText)
+        parameter_loop_form.addRow("Values", self.parameter_loop_preview)
+        self.parameter_loop_formula.textChanged.connect(
+            self._update_parameter_loop_preview
+        )
+        for control in (
+            self.parameter_loop_start,
+            self.parameter_loop_stop,
+            self.parameter_loop_steps,
+        ):
+            control.valueChanged.connect(self._update_parameter_loop_preview)
 
         self.parameter_loop_button = QPushButton("Run parameter loop")
         self.parameter_loop_button.setObjectName("run_sequence_parameter_loop")
@@ -5287,12 +5322,6 @@ class SequenceSimulationWidget(QWidget):
             self.parameter_loop_button.setEnabled(False)
             return
         decimals = max(0, int(parameter.decimals))
-        for control in (self.parameter_loop_start, self.parameter_loop_stop):
-            previous = control.blockSignals(True)
-            control.setDecimals(decimals)
-            control.setRange(parameter.minimum, parameter.maximum)
-            control.setSuffix(f" {parameter.unit}" if parameter.unit else "")
-            control.blockSignals(previous)
         current = float(parameter.current_value())
         if np.isclose(current, 0.0):
             delta = max(
@@ -5310,6 +5339,7 @@ class SequenceSimulationWidget(QWidget):
             stop = max(parameter.minimum, min(parameter.maximum, 1.5 * current))
         self.parameter_loop_start.setValue(start)
         self.parameter_loop_stop.setValue(stop)
+        self._update_parameter_loop_preview()
         self._update_run_action_availability()
 
     @staticmethod
@@ -5329,20 +5359,49 @@ class SequenceSimulationWidget(QWidget):
         return replace(program, events=events, metadata=metadata)
 
     def _parameter_loop_values(self, parameter):
-        values = np.linspace(
+        values = parameter_loop_values(
+            self.parameter_loop_formula.text(),
             self.parameter_loop_start.value(),
             self.parameter_loop_stop.value(),
             self.parameter_loop_steps.value(),
-            dtype=float,
         )
         if parameter.integer:
-            values = np.rint(values).astype(np.int64)
+            # QSpinBox uses signed 32-bit integers. Reject values it cannot
+            # represent instead of silently overflowing or clipping them.
+            limits = np.iinfo(np.int32)
+            rounded = np.rint(values)
+            if np.any(rounded < limits.min) or np.any(rounded > limits.max):
+                raise ValueError("Integer parameter values must fit a 32-bit integer.")
+            values = rounded.astype(np.int64)
         return values
+
+    def _update_parameter_loop_preview(self, *_):
+        parameter = self.parameter_loop_parameter.currentData()
+        if not isinstance(parameter, _SequenceLoopParameter):
+            self.parameter_loop_preview.setText("Select a loop parameter.")
+            return
+        try:
+            values = self._parameter_loop_values(parameter)
+        except ValueError as exc:
+            self.parameter_loop_preview.setText(str(exc))
+            return
+        preview_parameter = replace(parameter, unit="")
+        labels = [
+            self._format_parameter_loop_value(preview_parameter, value)
+            for value in values
+        ]
+        if len(labels) > 12:
+            labels = labels[:6] + ["…"] + labels[-3:]
+        text = ", ".join(labels)
+        if parameter.unit:
+            text += f" {parameter.unit}"
+        self.parameter_loop_preview.setText(text)
 
     def _set_parameter_loop_controls_locked(self, locked):
         for control in (
             self.sequence_source,
             self.parameter_loop_parameter,
+            self.parameter_loop_formula,
             self.parameter_loop_start,
             self.parameter_loop_stop,
             self.parameter_loop_steps,
@@ -5368,6 +5427,11 @@ class SequenceSimulationWidget(QWidget):
                 "the built-in quick object first.",
             )
             return
+        try:
+            values = self._parameter_loop_values(parameter)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Parameter loop", str(exc))
+            return
         if self.sequence_source.currentIndex() in self.GENERATED_SOURCES:
             if not self._ensure_current_generated_sequence():
                 self._show_generation_error_dialog()
@@ -5378,10 +5442,15 @@ class SequenceSimulationWidget(QWidget):
             )
             return
 
-        values = self._parameter_loop_values(parameter)
         self._parameter_loop_state = {
             "parameter": parameter,
             "values": values,
+            "formula": self.parameter_loop_formula.text().strip(),
+            "x_values": np.linspace(
+                self.parameter_loop_start.value(),
+                self.parameter_loop_stop.value(),
+                self.parameter_loop_steps.value(),
+            ),
             "index": 0,
             "completed": 0,
             "cancel_requested": False,
@@ -5410,9 +5479,17 @@ class SequenceSimulationWidget(QWidget):
             )
             self._show_program(compiled=self._acquisition_compiled)
         else:
-            parameter.widget.setValue(
+            value = (
                 int(requested_value) if parameter.integer else float(requested_value)
             )
+            # The form's default range is a convenient editing range, not a
+            # constraint on a sweep. Expand it before assigning the value so
+            # Qt and sequence generation receive the requested parameter.
+            parameter.widget.setRange(
+                min(parameter.widget.minimum(), value),
+                max(parameter.widget.maximum(), value),
+            )
+            parameter.widget.setValue(value)
             actual_value = parameter.widget.value()
         state["current_value"] = float(actual_value)
         self._status_update(
@@ -5447,6 +5524,10 @@ class SequenceSimulationWidget(QWidget):
             "unit": parameter.unit,
             "decimals": int(parameter.decimals),
             "integer": bool(parameter.integer),
+            "formula": state["formula"],
+            "x": float(state["x_values"][state["index"]]),
+            "x_start": float(state["x_values"][0]),
+            "x_stop": float(self.parameter_loop_stop.value()),
             "index": int(state["index"]),
             "count": int(len(state["values"])),
         }
@@ -5486,7 +5567,7 @@ class SequenceSimulationWidget(QWidget):
             self.progress.setFormat(f"Loop complete · {completed}/{total} runs")
             self.status.setText(
                 f"Parameter loop complete — {completed} simulations retained in "
-                "Session simulations"
+                "Session simulations; select a run in Reconstruction Explorer"
             )
 
     def _parameter_loop_prefix(self):
@@ -10877,7 +10958,7 @@ class SequenceSimulationWidget(QWidget):
         self.rf_progress_cursor.setPos(position)
         self.gradient_progress_cursor.setPos(position)
 
-    def _clear_previous_simulation_views(self):
+    def _clear_previous_simulation_views(self, *, clear_reconstruction=True):
         """Remove stale result data before the next simulation starts."""
         self._active_session_run_id = None
         self.result = None
@@ -10897,7 +10978,8 @@ class SequenceSimulationWidget(QWidget):
         self.spectrum_info.setText(message)
         self.kspace_info.setText(message)
         self.reconstruction_info.setText(message)
-        self.reconstruction_explorer.clear(message)
+        if clear_reconstruction:
+            self.reconstruction_explorer.clear(message)
         self.magnetization_animation_viewer.clear(
             "Animation states will be available after the simulation completes."
             if self.animation_enabled.isChecked()
@@ -11318,6 +11400,7 @@ class SequenceSimulationWidget(QWidget):
         if callable(register):
             register(run)
             self._active_session_run_id = run.run_id
+        self.reconstruction_explorer.add_session_run(run, current=True)
         return run
 
     def _session_run_state(self, *, phantom, **extra):
@@ -11449,6 +11532,7 @@ class SequenceSimulationWidget(QWidget):
 
     def forget_session_simulation_run(self, run):
         """Clear result views when the run currently being shown is deleted."""
+        self.reconstruction_explorer.remove_session_run(run)
         if self._active_session_run_id != run.run_id:
             return
         if run.run_type == "spin_probe":
@@ -11460,7 +11544,7 @@ class SequenceSimulationWidget(QWidget):
             self.probe_status.setText("Spin-probe run deleted")
             self._active_session_run_id = None
             return
-        self._clear_previous_simulation_views()
+        self._clear_previous_simulation_views(clear_reconstruction=False)
         self.export_button.setEnabled(False)
         self.progress.setRange(0, 100)
         self.progress.setValue(0)

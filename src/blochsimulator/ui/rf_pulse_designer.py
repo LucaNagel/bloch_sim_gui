@@ -700,6 +700,9 @@ class RFPulseDesigner(QGroupBox):
 
     def _update_plot(self, b1, time):
         """Helper to update the plot widget."""
+        if len(time) > 8000:
+            indices = np.linspace(0, len(time) - 1, 8000).astype(int)
+            b1, time = b1[indices], time[indices]
         self.plot_widget.clear()
         self.plot_widget.plot(time * 1000, np.abs(b1), pen="b", name="Magnitude")
         self.plot_widget.plot(time * 1000, np.real(b1), pen="r", name="Real")

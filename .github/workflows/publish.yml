@@ -417,9 +417,16 @@ jobs:
           path: apps
           merge-multiple: true
 
+      - name: Prepare release notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/release_notes.py "$RELEASE_TAG" release-notes.md
+
       - name: Update Release with Apps
         uses: softprops/action-gh-release@v3
         with:
+          name: BlochSimulator ${{ github.ref_name }}
+          body_path: release-notes.md
           files: |
             apps/*
             phantoms/phantoms/T1_multiphantom.npz

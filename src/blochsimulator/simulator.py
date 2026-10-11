@@ -191,9 +191,11 @@ def design_rf_pulse(
 
         freq_modulation = -omega_max * np.tanh(beta * t_arg)
 
-        # Integrate to get phase: phi(t) = integral(omega(t) dt)
-        dt = duration / npoints
-        instantaneous_phase = np.cumsum(freq_modulation * dt)
+        # Exact phase integral at the sample centres. A cumulative rectangular
+        # sum made the RF shape itself depend on the chosen simulation raster.
+        log_cosh = np.logaddexp(beta * t_arg, -beta * t_arg) - np.log(2.0)
+        log_cosh_start = np.logaddexp(beta, -beta) - np.log(2.0)
+        instantaneous_phase = -np.pi * (log_cosh - log_cosh_start)
 
         # Complex B1: A(t) * exp(i*phi(t))
         b1_complex = amplitude * np.exp(1j * instantaneous_phase)
@@ -227,9 +229,10 @@ def design_rf_pulse(
         # Full sweep: omega goes from +omega_max to -omega_max
         freq_modulation = -omega_max * np.tanh(beta * t_centered / (duration / 2))
 
-        # Integrate to get phase
-        dt = duration / npoints
-        instantaneous_phase = np.cumsum(freq_modulation * dt)
+        phase_arg = beta * t_centered / (duration / 2)
+        log_cosh = np.logaddexp(phase_arg, -phase_arg) - np.log(2.0)
+        log_cosh_start = np.logaddexp(beta, -beta) - np.log(2.0)
+        instantaneous_phase = -(np.pi / 2) * (log_cosh - log_cosh_start)
 
         # Complex B1
         b1_complex = amplitude * np.exp(1j * instantaneous_phase)
@@ -1424,10 +1427,10 @@ class BlochSimulator:
         )
 
     def _check_standard_simulation_memory(
-        self, ntime: int, npos: int, nfreq: int, mode: int
+        self, ntime: int, npos: int, nfreq: int, mode: int, *, output_stride: int = 1
     ) -> None:
         """Check peak memory before the Cython output buffers are allocated."""
-        ntout = ntime if (mode & 2) else 1
+        ntout = (ntime - 1) // output_stride + 1 if (mode & 2) else 1
         output_samples = ntout * npos * nfreq
         spin_count = npos * nfreq
 
@@ -1435,6 +1438,8 @@ class BlochSimulator:
         # temporaries. Sequence working arrays and initial magnetization are
         # included separately. This is intentionally conservative.
         estimated_bytes = output_samples * 64 + ntime * 64 + spin_count * 56
+        if mode == 2 and output_stride > 1:
+            estimated_bytes += min(ntime, 8192) * spin_count * 24
         if mode & 2:
             suggestions = (
                 "Use Endpoint mode, increase the time step, reduce positions or "
@@ -1493,6 +1498,10 @@ class BlochSimulator:
         dt: float = 1e-5,
         mode: int = 0,
         rf_carrier_offset: Optional[float] = None,
+        output_step_s: Optional[float] = None,
+        adaptive_rf: bool = False,
+        cancel_check=None,
+        progress_callback=None,
     ) -> Dict:
         """
         Simulate MRI signal using Bloch equations.
@@ -1517,6 +1526,13 @@ class BlochSimulator:
             RF carrier offset in Hz. Used to report effective detuning as
             ``frequencies - rf_carrier_offset``. For PulseSequence instances,
             the sequence value is inferred when omitted.
+        output_step_s : float, optional
+            Saved time spacing, independent of the fixed integration raster.
+            Fixed-raster output uses an integer multiple of that raster.
+        adaptive_rf : bool
+            Use error-controlled integration for a single initial RF pulse
+            with zero gradients, followed by exact RF-free propagation.
+            Input RF timestamps must describe sample centres.
 
         Returns
         -------
@@ -1603,9 +1619,43 @@ class BlochSimulator:
         frequencies = np.ravel(frequencies)
         frequencies = np.ascontiguousarray(frequencies)
 
-        self._check_standard_simulation_memory(
-            len(time), positions.shape[0], frequencies.shape[0], mode
-        )
+        if output_step_s is not None and (
+            not np.isfinite(output_step_s) or output_step_s <= 0
+        ):
+            raise ValueError("output_step_s must be positive and finite")
+        output_stride = 1
+        if output_step_s is not None and len(time) > 1 and not adaptive_rf:
+            steps = np.diff(time)
+            if not np.allclose(steps, steps[0], rtol=1e-7, atol=1e-15):
+                raise ValueError("Saved output spacing requires a uniform input raster")
+            output_stride = max(1, int(np.ceil(output_step_s / steps[0] - 1e-9)))
+        if not adaptive_rf:
+            self._check_standard_simulation_memory(
+                len(time),
+                positions.shape[0],
+                frequencies.shape[0],
+                mode,
+                output_stride=output_stride,
+            )
+        else:
+            if len(time) < 2:
+                raise ValueError(
+                    "Adaptive RF integration needs at least two input samples"
+                )
+            duration = time[-1] + (time[-1] - time[-2]) - time[0]
+            saved_count = (
+                int(np.ceil(duration / (output_step_s or dt) - 1e-9)) + 1
+                if mode == 2
+                else 1
+            )
+            enforce_memory_budget(
+                saved_count * len(positions) * len(frequencies) * 128
+                + len(time) * 64
+                + len(positions) * len(frequencies) * 2048,
+                self._memory_budget(),
+                description=f"Adaptive RF: {saved_count:,} saved times × {len(positions):,} positions × {len(frequencies):,} frequencies",
+                suggestions="Increase the output time step or reduce positions or frequencies",
+            )
 
         # Prepare initial magnetization if provided (shape expected: 3 x (npos*nfreq))
         m_init = None
@@ -1650,7 +1700,72 @@ class BlochSimulator:
         # The OpenMP path can be unstable on some macOS/Python builds; keep the
         # threshold high to avoid crashes for small/medium workloads.
         parallel_threshold = 256
-        if (
+        integration_metadata = None
+        if adaptive_rf:
+            from .adaptive import integrate_rf_pulse
+
+            if np.any(gradients_gauss != 0):
+                raise ValueError(
+                    "Adaptive RF integration currently supports zero-gradient FID only"
+                )
+            values, time, integration_metadata = integrate_rf_pulse(
+                b1_gauss,
+                time,
+                tissue,
+                positions,
+                frequencies,
+                m_init,
+                output_step_s=output_step_s or dt,
+                budget=self._memory_budget(),
+                mode=mode,
+                cancel_check=cancel_check,
+                progress=progress_callback,
+            )
+            mx, my, mz = values if mode == 2 else values[:, -1]
+        elif mode == 2 and (output_stride > 1 or cancel_check is not None):
+            from .adaptive import SimulationCancelled
+
+            saved_indices = np.arange(0, len(time), output_stride)
+            shape = (len(saved_indices), len(positions), len(frequencies))
+            mx, my, mz = (np.empty(shape) for _ in range(3))
+            state = m_init
+            for begin in range(0, len(time), 8192):
+                if cancel_check is not None and cancel_check():
+                    raise SimulationCancelled()
+                end = min(begin + 8192, len(time))
+                parts = simulate_bloch(
+                    b1_gauss[begin:end],
+                    gradients_gauss[begin:end],
+                    dt_array[begin:end],
+                    tissue.t1,
+                    tissue.t2,
+                    frequencies,
+                    positions_cm,
+                    state,
+                    2,
+                )
+                # A one-interval chunk returns endpoint-shaped arrays.
+                parts = tuple(part[None] if part.ndim == 2 else part for part in parts)
+                lo, hi = np.searchsorted(saved_indices, [begin, end])
+                local = saved_indices[lo:hi] - begin
+                for target, part in zip((mx, my, mz), parts):
+                    target[lo:hi] = part[local]
+                state = np.ascontiguousarray(
+                    np.stack([part[-1].T.ravel() for part in parts])
+                )
+                if progress_callback is not None:
+                    progress_callback(min(99, int(100 * end / len(time))))
+            # Preserve the exact endpoint separately if it is not on the saved raster.
+            integration_metadata = {
+                "solver": "fixed",
+                "output_stride": output_stride,
+                "input_points": int(len(time)),
+                "final_magnetization": state.reshape(
+                    3, len(frequencies), len(positions)
+                ).transpose(0, 2, 1),
+            }
+            time = time[saved_indices]
+        elif (
             self.use_parallel
             and len(positions) * len(frequencies) >= parallel_threshold
         ):
@@ -1695,6 +1810,8 @@ class BlochSimulator:
             "rf_carrier_offset": rf_carrier_offset,
             "tissue": tissue,
         }
+        if integration_metadata is not None:
+            self.last_result["integration"] = integration_metadata
 
         return self.last_result
 

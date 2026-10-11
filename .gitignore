@@ -74,6 +74,7 @@ docs/_build/
 !docs/SPECTRAL_SPATIAL_RF.md
 !THIRD_PARTY_NOTICES.md
 !docs/dynamic_metal_feasibility.md
+!docs/free_mode_ahp_performance.md
 !docs/sequence_simulation_roadmap.md
 
 # Generated C files

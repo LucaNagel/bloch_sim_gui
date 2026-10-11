@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import numpy as np
 import xarray as xr
 from PyQt5.QtWidgets import QSlider
@@ -8,6 +10,84 @@ from blochsimulator.sequence.reconstruction import (
     ideal_separate,
 )
 from blochsimulator.ui.reconstruction_explorer import SequenceReconstructionExplorer
+from blochsimulator.ui.simulation_explorer import SessionSimulationRun
+
+
+def _session_run(dataset, run_id, name):
+    return SessionSimulationRun(
+        run_id=run_id,
+        created_at_utc="2026-10-11T10:00:00+00:00",
+        sequence_name="test-sequence",
+        phantom_name="test-phantom",
+        phantom_shape=(2, 2, 1),
+        sequence_duration_s=0.01,
+        adc_samples=4,
+        runtime_s=0.1,
+        kernel="reference",
+        result=SimpleNamespace(metadata={}, to_xarray=lambda: dataset),
+        display_name=name,
+    )
+
+
+def test_explorer_selects_retained_runs_with_different_reconstruction_geometry(
+    qt_application,
+):
+    explorer = SequenceReconstructionExplorer()
+    first = _session_run(_framed_cartesian_dataset(), "first", "Loop 1/2 · flip = 30°")
+    second = _session_run(_cartesian_3d_dataset(), "second", "Loop 2/2 · flip = 60°")
+    for run in (first, second):
+        explorer.set_result(run.result)
+        explorer.add_session_run(run)
+
+    assert explorer.simulation_combo.count() == 2
+    assert explorer.simulation_combo.currentData() == second.run_id
+    assert explorer.model.kind == "cartesian_3d"
+    explorer.simulation_combo.setCurrentIndex(0)
+    assert explorer.model.kind == "cartesian_2d"
+    assert explorer._result is first.result
+    assert explorer.pages.currentWidget() is explorer.two_d_page
+    np.testing.assert_allclose(
+        explorer._current_display,
+        np.abs(_framed_cartesian_dataset().cartesian_image[0]),
+    )
+    explorer.simulation_combo.setCurrentIndex(1)
+    assert explorer._result is second.result
+    assert explorer.pages.currentWidget() is explorer.three_d_page
+    explorer.set_result(first.result)
+    assert explorer.simulation_combo.currentData() == first.run_id
+
+
+def test_explorer_run_list_survives_clear_and_tracks_rename_and_delete(qt_application):
+    explorer = SequenceReconstructionExplorer()
+    first = _session_run(_framed_cartesian_dataset(), "first", "First run")
+    second = _session_run(_cartesian_3d_dataset(), "second", "Second run")
+    explorer.add_session_run(first)
+    explorer.add_session_run(second)
+    explorer.simulation_combo.setCurrentIndex(0)
+
+    first.display_name = "Baseline"
+    explorer.add_session_run(first)
+    assert explorer.simulation_combo.count() == 2
+    assert explorer.simulation_combo.currentText() == "Baseline"
+    explorer.remove_session_run(second)
+    assert explorer._result is first.result
+    assert explorer.simulation_combo.currentData() == first.run_id
+
+    explorer.clear("Next simulation running")
+    assert explorer.simulation_combo.currentIndex() == -1
+    assert explorer.simulation_combo.count() == 1
+    explorer.simulation_combo.setCurrentIndex(0)
+    assert explorer._result is first.result
+
+    explorer.set_dataset(_cartesian_3d_dataset(), source="imported.nc")
+    assert explorer.simulation_combo.currentIndex() == -1
+    explorer.simulation_combo.setCurrentIndex(0)
+    assert explorer._result is first.result
+    explorer.remove_session_run(first)
+    assert explorer.model is None
+    assert explorer._result is None
+    assert not explorer.simulation_combo.isEnabled()
+    assert not explorer._session_runs
 
 
 def _framed_cartesian_dataset():

@@ -1807,6 +1807,8 @@ result = sim.simulate(
     mode=mode,
     dt=time_step_s,
     rf_carrier_offset=simulation_params.get('rf_carrier_offset_hz', 0.0),
+    output_step_s=(simulation_params.get('output_step_us', 0.0) * 1e-6 or None),
+    adaptive_rf=simulation_params.get('adaptive_rf', False),
 )
 
 # Extract results for easier access

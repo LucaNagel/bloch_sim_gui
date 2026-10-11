@@ -256,7 +256,7 @@ def test_shared_pulse_loader_dispatches_headerless_txt_import_options():
     assert shared_metadata.duration == pytest.approx(direct_metadata.duration)
 
 
-def test_adiabatic_free_mode_prompt_confirms_time_step_only_once():
+def test_adiabatic_free_mode_does_not_force_global_ten_ns_time_step():
     window = MagicMock()
     window.workspace_mode = "free"
     window._adiabatic_timestep_warning_shown = False
@@ -265,20 +265,15 @@ def test_adiabatic_free_mode_prompt_confirms_time_step_only_once():
     window.rf_designer.b1_amplitude.value.return_value = 0.08
     window.time_step_spin.value.return_value = 1.0
 
-    confirm_button = object()
-    cancel_button = object()
     dialog = MagicMock()
-    dialog.addButton.side_effect = [confirm_button, cancel_button]
-    dialog.clickedButton.return_value = confirm_button
     with patch("blochsimulator.ui.main_window.QMessageBox", return_value=dialog) as box:
         proceed = BlochSimulatorGUI._confirm_adiabatic_free_mode_run(window)
         proceed_again = BlochSimulatorGUI._confirm_adiabatic_free_mode_run(window)
 
     assert proceed
     assert proceed_again
-    box.assert_called_once_with(window)
-    assert window._adiabatic_timestep_warning_shown
-    window.time_step_spin.setValue.assert_called_once_with(0.01)
+    box.assert_not_called()
+    window.time_step_spin.setValue.assert_not_called()
 
 
 def test_adiabatic_free_mode_skips_prompt_at_recommended_time_step():
@@ -310,6 +305,22 @@ def test_adiabatic_free_mode_run_requires_direct_b1():
     assert not proceed
     warning.assert_called_once()
     window.rf_designer.b1_amplitude.setFocus.assert_called_once()
+
+
+def test_fid_extension_preserves_sample_centres_and_exact_tr_duration():
+    designer = SequenceDesigner()
+    designer.sequence_type.setCurrentText("Free Induction Decay")
+    designer.tr_spin.setValue(10.0)
+    dt = 1e-6
+    pulse_time = (np.arange(1000) + 0.5) * dt
+    b1, gradients, time_axis = designer.compile_sequence(
+        custom_pulse=(np.ones(1000, complex), pulse_time), dt=dt
+    )
+    assert len(time_axis) == 10000
+    assert time_axis[-1] + dt / 2 == pytest.approx(0.01)
+    np.testing.assert_allclose(np.diff(time_axis), dt, atol=1e-15)
+    assert np.all(b1[1000:] == 0)
+    assert np.all(gradients == 0)
 
 
 def test_settings_dialog_returns_selected_values(tmp_path):

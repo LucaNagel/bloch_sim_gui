@@ -302,10 +302,29 @@ class SequenceReconstructionExplorer(QWidget):
         self._pending_state = None
         self._volume_initialized = False
         self._contrast_domain_cache = {}
+        self._session_runs = {}
+        self._result = None
         self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        simulation_row = QHBoxLayout()
+        simulation_row.addWidget(QLabel("Simulation"))
+        self.simulation_combo = QComboBox()
+        self.simulation_combo.setObjectName("reconstruction_simulation_selector")
+        self.simulation_combo.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.simulation_combo.setMinimumContentsLength(30)
+        self.simulation_combo.setPlaceholderText("Run a sequence simulation first")
+        self.simulation_combo.setEnabled(False)
+        self.simulation_combo.setToolTip(
+            "Choose a completed simulation, including individual parameter-loop runs. "
+            "This changes the reconstruction view without changing the sequence setup."
+        )
+        self.simulation_combo.currentIndexChanged.connect(self._simulation_changed)
+        simulation_row.addWidget(self.simulation_combo, 1)
+        layout.addLayout(simulation_row)
         self.summary = QLabel(
             "Run a sequence simulation or open an exported .nc result to explore it."
         )
@@ -474,6 +493,8 @@ class SequenceReconstructionExplorer(QWidget):
     def clear(self, message=None):
         self.model = None
         self.source = None
+        self._result = None
+        self._select_session_run(None)
         self._current_display = None
         self._volume_initialized = False
         self._contrast_domain_cache.clear()
@@ -490,12 +511,21 @@ class SequenceReconstructionExplorer(QWidget):
 
     def set_result(self, result, phantom=None):
         source = result.metadata.get("sequence_source", "current simulation")
+        run = next(
+            (run for run in self._session_runs.values() if run.result is result), None
+        )
+        if run is not None:
+            source = run.sequence_name
         self.set_model(SequenceReconstructionModel.from_result(result), source=source)
+        self._result = result
+        self._select_session_run(None if run is None else run.run_id)
 
     def set_dataset(self, dataset, *, source=None):
         self.set_model(SequenceReconstructionModel(dataset), source=source)
 
     def set_model(self, model: SequenceReconstructionModel, *, source=None):
+        self._result = None
+        self._select_session_run(None)
         self.model = model
         self.source = None if source is None else str(source)
         self._contrast_domain_cache.clear()
@@ -504,6 +534,60 @@ class SequenceReconstructionExplorer(QWidget):
         if self._pending_state is not None:
             state, self._pending_state = self._pending_state, None
             self.restore_state(state)
+
+    def _session_run_label(self, run):
+        number = list(self._session_runs).index(run.run_id) + 1
+        return run.display_name or f"Simulation {number} · {run.sequence_name}"
+
+    def _select_session_run(self, run_id):
+        previous = self.simulation_combo.blockSignals(True)
+        self.simulation_combo.setCurrentIndex(
+            -1 if run_id is None else self.simulation_combo.findData(run_id)
+        )
+        self.simulation_combo.blockSignals(previous)
+
+    def add_session_run(self, run, *, current=False):
+        """Expose a retained result without copying its scientific arrays."""
+        self._session_runs[run.run_id] = run
+        index = self.simulation_combo.findData(run.run_id)
+        previous = self.simulation_combo.blockSignals(True)
+        if index < 0:
+            index = self.simulation_combo.count()
+            self.simulation_combo.addItem(self._session_run_label(run), run.run_id)
+        else:
+            self.simulation_combo.setItemText(index, self._session_run_label(run))
+        self.simulation_combo.setItemData(
+            index, f"{run.sequence_name} · {run.phantom_name}", Qt.ToolTipRole
+        )
+        if current or self._result is run.result:
+            self.simulation_combo.setCurrentIndex(index)
+        elif self._result is None and self.simulation_combo.count() == 1:
+            self.simulation_combo.setCurrentIndex(-1)
+        self.simulation_combo.blockSignals(previous)
+        self.simulation_combo.setEnabled(True)
+        self.simulation_combo.setPlaceholderText("Select a completed simulation")
+
+    def remove_session_run(self, run):
+        selected = self.simulation_combo.currentData() == run.run_id
+        self._session_runs.pop(run.run_id, None)
+        index = self.simulation_combo.findData(run.run_id)
+        previous = self.simulation_combo.blockSignals(True)
+        if index >= 0:
+            self.simulation_combo.removeItem(index)
+        self.simulation_combo.blockSignals(previous)
+        if selected:
+            self.clear("The displayed session simulation was deleted")
+        self.simulation_combo.setEnabled(bool(self._session_runs))
+
+    def _simulation_changed(self, *_):
+        run = self._session_runs.get(self.simulation_combo.currentData())
+        if run is None:
+            return
+        try:
+            self.set_result(run.result, run.state.get("phantom"))
+        except Exception as exc:
+            self.clear(f"Interactive reconstruction unavailable: {exc}")
+            self._select_session_run(run.run_id)
 
     def _clear_outer_controls(self):
         while self.outer_layout.count():
