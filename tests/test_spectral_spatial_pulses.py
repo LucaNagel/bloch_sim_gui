@@ -19,6 +19,7 @@ from blochsimulator.sequence import (
     make_pulseq_flash,
     make_pulseq_me_bssfp,
     make_pulseq_radial_me_bssfp,
+    make_pulseq_slice_selection,
     make_pulseq_spectral_selective_bssfp,
     make_pulseq_spiral,
     simulate_spectral_spatial_profile,
@@ -90,6 +91,11 @@ def test_every_generated_sequence_builder_accepts_spectral_spatial_rf():
         "nucleus": "H1",
     }
     cases = (
+        (
+            make_pulseq_slice_selection,
+            {"slice_thickness_m": 30e-3, "rephase": True, **shared},
+            "RFPulseType",
+        ),
         (
             make_pulseq_csi,
             {"matrix": (2, 2), "slice_thickness_m": 30e-3, **shared},

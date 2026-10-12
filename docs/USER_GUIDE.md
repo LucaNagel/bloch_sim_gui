@@ -28,17 +28,41 @@ You can launch the GUI from within a notebook cell:
 
 ## 3. GUI Overview
 
+#### Free Mode
+![Free Mode](_static/media/free_mode_preview.png)
+***Free Mode***: This mode lets you perform highly resolved simulations of spins and obeserve their behaviour under RF pulse and gradients.
+Highlighted in green is the <font color="green"> **Run Single-Spin Simulation** </font> button to start the simulation. The <font color="red"> **Workspace** </font> dropdown lets you switch between *Free Mode* (shown here) and *Sequence Mode*.
+
 The interface is divided into two main areas:
 
 *   **Left Panel (Controls):** Configuration for Tissues, RF Pulses, Sequences, and Simulation Settings.
 *   **Right Panel (Visualization):** Interactive tabs for viewing results (Magnetization, 3D Vector, Signal, Spectrum, Spatial).
 
-### Simulation Controls (Bottom Left)
-*   **Mode:**
-    *   *Time-resolved:* Simulates and stores every time point (required for animations).
-    *   *Endpoint:* Only calculates the final state (faster, good for large sweeps).
-*   **Positions/Frequencies:** Set the number of spatial spins and off-resonance frequencies to simulate.
-*   **Time step:** Simulation temporal resolution (default 10.0 µs).
+##### Simulation Results
+![Free Mode Simulation Results Spectral](_static/media/free_mode_spectral_view.png)
+***Spectrum***: The Spectrum Tab lets you see the time-resolveed behaviour of spins at different frequencies to your sequence, in this case a non-localized hard pulse, hence the ringing.
+
+
+![Free Mode Simulation Results Spatial](_static/media/free_mode_spatial_view.png)
+***Spatial***: The Spatial Tab lets you see the time-resolveed behaviour of spins at different position to a slice-selective sequence. In this case, a sinc pulse with Hamming apodization was chosen as the RF pulse.
+
+
+#### Sequence Mode
+By switching the  Workspace to sequence mode, we can now simulate pulseq sequences, that are either live generated, or can be loaded.
+
+![Sequence Mode](_static/media/sequence_mode_basic.png)
+***Sequence Mode***: A preview of a 2D FLASH sequence. Nucleus was set to 13C, reference frequency to 163.5 ppm (13C-Urea). By ticking *live preview*, changing parameters automatically update the preivew of the sequence. This can be slow for big sequence (many repetitions especially).
+Zooming into the preview works by scrolling either on the *Time (ms)* axis (changes zoom in x) or on the B1(mG) or Gradient (mT/m) axis to change the zoom in y.
+
+
+![Sequence Mode Phantom design](_static/media/sequence_mode_phantom_design.png)
+***Sequence Mode Phantom design***: By either hitting **Seq. Simulation** with no loaded phantom, or by going to the *Phantom* Tab on the top, you can get to the phantom designer. This lets you design your phantom (shape, position, size), setting resonances, T1, T2, density.
+
+
+
+![Sequence Mode Reconstruction Explorer](_static/media/sequence_mode_reconstruction_explorer.png)
+***Sequence Mode Reconstruction Explorer***: You can inspect the simulation results in the Reconstruction Explorer after the simulation ran. This is the simulation of what you would see on your scanner if you ran the sequence with the set parameters, phantom and B1.
+
 
 ## 4. Key Use Cases & Tutorials
 

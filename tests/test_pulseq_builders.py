@@ -864,6 +864,7 @@ def test_sequence_workspace_builds_and_exports_configurable_fov(tmp_path):
         "FLASH (2D)",
         "EPSI / MGE (2D)",
         "Pulseq .seq file",
+        "RF + Slice Selection",
     ]
 
     widget.epi_read_fov_mm.setValue(80.0)

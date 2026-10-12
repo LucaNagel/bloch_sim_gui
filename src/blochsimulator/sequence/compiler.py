@@ -111,7 +111,27 @@ class SequenceCompiler:
             )
 
         status(f"Validating {len(program.events):,} sequence events…")
+        definitions = program.metadata.get("definitions", {})
+        if not isinstance(definitions, dict):
+            definitions = {}
         checkpoints = self._validate_checkpoints(checkpoints_s, program.duration_s)
+        declared = np.asarray(
+            definitions.get("MagnetizationCheckpointTimes", ()), dtype=float
+        )
+        if declared.ndim == 0:
+            declared = declared.reshape(1)
+        # Definitions undergo text rounding during Pulseq export/import.
+        tolerance = max(1e-15, program.duration_s * 1e-12)
+        if np.any(declared < -tolerance) or np.any(
+            declared > program.duration_s + tolerance
+        ):
+            raise ValueError(
+                "declared magnetization checkpoints must lie within the sequence"
+            )
+        declared = self._validate_checkpoints(
+            np.clip(declared, 0.0, program.duration_s), program.duration_s
+        )
+        checkpoints = np.unique(np.concatenate((checkpoints, declared)))
         extra_boundaries = self._validate_extra_boundaries(
             extra_boundaries_s, program.duration_s
         )

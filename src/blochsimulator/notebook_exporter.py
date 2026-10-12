@@ -3777,6 +3777,7 @@ def export_pulseq_generation_notebook(
         "spiral": "make_pulseq_spiral",
         "csi": "make_pulseq_csi",
         "flash": "make_pulseq_flash",
+        "slice_selection": "make_pulseq_slice_selection",
         "bssfp_3d": "make_pulseq_bssfp",
         "spectral_bssfp_3d": "make_pulseq_spectral_selective_bssfp",
         "me_bssfp_3d": "make_pulseq_me_bssfp",
@@ -3786,7 +3787,7 @@ def export_pulseq_generation_notebook(
         builder_name = builders[str(sequence_kind)]
     except KeyError as exc:
         raise ValueError(
-            "sequence_kind must be 'epi', 'epsi_mge', 'spiral', 'csi', 'flash', "
+            "sequence_kind must be 'epi', 'epsi_mge', 'spiral', 'csi', 'flash', 'slice_selection', "
             "'bssfp_3d', 'spectral_bssfp_3d', 'me_bssfp_3d', or "
             "'radial_me_bssfp_3d'"
         ) from exc

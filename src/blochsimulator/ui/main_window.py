@@ -4601,6 +4601,7 @@ class BlochSimulatorGUI(QMainWindow):
         sequence_widget = getattr(self, "sequence_simulation_widget", None)
         if sequence_widget is not None and run.run_type == "sequence":
             sequence_widget.reconstruction_explorer.add_session_run(run)
+            sequence_widget.result_volume_viewer.add_session_run(run)
         self.statusBar().showMessage(f"Simulation renamed to {run.display_name}", 5000)
 
     @staticmethod

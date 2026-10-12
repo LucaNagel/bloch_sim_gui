@@ -108,6 +108,7 @@ from .pulseq_builders import (
     make_pulseq_epsi_mge,
     make_pulseq_epi,
     make_pulseq_flash,
+    make_pulseq_slice_selection,
     make_pulseq_spiral,
 )
 from .advanced_bssfp_builders import (
@@ -123,6 +124,7 @@ from .advanced_bssfp_builders import (
 )
 
 __all__ = [
+    "make_pulseq_slice_selection",
     "ADCEvent",
     "AcquisitionDimensions",
     "CartesianAcquisition",

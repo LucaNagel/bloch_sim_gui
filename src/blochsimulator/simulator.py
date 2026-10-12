@@ -2822,7 +2822,10 @@ class BlochSimulator:
                 cartesian_volume_metadata = None
         definitions = dict(program.metadata.get("definitions", {}))
         physical_nucleus = str(
-            phantom.metadata.get("nucleus") or definitions.get("nucleus") or "H1"
+            phantom.metadata.get("nucleus")
+            or definitions.get("Nucleus")
+            or definitions.get("nucleus")
+            or "H1"
         )
         from .units import NUCLEUS_GAMMA_HZ_PER_T
 

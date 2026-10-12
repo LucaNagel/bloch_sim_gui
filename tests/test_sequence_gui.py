@@ -642,6 +642,10 @@ def test_session_simulations_tab_is_next_to_phantom_b1_and_accepts_runs():
     run = sequence_widget._register_session_simulation_run(result)
 
     assert run.display_name == "Run 1"
+    assert (
+        sequence_widget.result_volume_viewer.simulation_combo.currentData()
+        == run.run_id
+    )
     assert window.simulation_explorer.run_tree.topLevelItemCount() == 1
     assert window.simulation_explorer.run_tree.topLevelItem(0).text(1) == (
         sequence_widget.program.source
@@ -665,6 +669,16 @@ def test_session_simulations_tab_is_next_to_phantom_b1_and_accepts_runs():
     sequence_widget.restore_session_simulation_run = restore_run
     window._open_session_simulation_run(run)
     assert restored == [run]
+
+    run.display_name = "Renamed run"
+    window._rename_session_simulation_run(run)
+    simulation_combo = sequence_widget.result_volume_viewer.simulation_combo
+    assert (
+        simulation_combo.itemText(simulation_combo.findData(run.run_id))
+        == "Renamed run"
+    )
+    window._delete_session_simulation_run(run)
+    assert sequence_widget.result_volume_viewer.simulation_combo.count() == 0
 
     window.close()
     window.deleteLater()

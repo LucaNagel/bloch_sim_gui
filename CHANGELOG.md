@@ -4,6 +4,23 @@ All notable changes to BlochSimulator are documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/).
 
+## [2.8.2] - 2026-10-12
+
+### Added
+
+- Added RF + Slice Selection in Sequence Mode for 3D magnetization volumes
+  after one excitation, with selectable slice normal and offset, shared RF
+  pulse controls, optional slice rephasing, and Pulseq/notebook export.
+- Automatically retain the state before optional rephasing and label both
+  states in Spatial Magnetization. Results and controls persist in projects.
+- Select individual parameter-loop runs directly in Spatial Magnetization,
+  preserving the chosen map, observation stage, and pool when available.
+
+### Fixed
+
+- Use the sequence's declared nucleus when exporting physical RF and
+  gradient waveforms for spectral component phantoms.
+
 ## [2.8.1] - 2026-10-11
 
 ### Added

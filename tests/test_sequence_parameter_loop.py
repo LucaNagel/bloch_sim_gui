@@ -350,6 +350,66 @@ def test_parameter_loop_chains_real_sequence_workers(qt_application, monkeypatch
     assert widget.parameter_loop_formula.isEnabled()
 
 
+def test_slice_selection_loop_runs_are_selectable_in_spatial_magnetization(
+    qt_application,
+):
+    pytest.importorskip("pypulseq")
+    widget = SequenceSimulationWidget()
+    widget.object_source.setCurrentIndex(1)
+    widget.matrix_size.setValue(2)
+    widget.z_matrix_size.setValue(1)
+    widget.sequence_source.setCurrentIndex(widget.SLICE_SELECTION_SOURCE)
+    widget.slice_selection_rephase.setChecked(True)
+    flip_index = next(
+        index
+        for index, parameter in enumerate(_loop_parameters(widget))
+        if parameter.key == "slice_selection_flip_angle_deg"
+    )
+    widget.parameter_loop_parameter.setCurrentIndex(flip_index)
+    widget.parameter_loop_start.setValue(30)
+    widget.parameter_loop_stop.setValue(60)
+    widget.parameter_loop_steps.setValue(2)
+    widget._start_parameter_loop()
+    deadline = time.monotonic() + 20.0
+    while widget._parameter_loop_state is not None and time.monotonic() < deadline:
+        QTest.qWait(10)
+    assert widget._parameter_loop_state is None
+
+    viewer = widget.result_volume_viewer
+    assert viewer.simulation_combo.count() == 2
+    assert "60°" in viewer.simulation_combo.currentText()
+    final_result, final_program, final_phantom = (
+        widget.result,
+        widget.program,
+        widget.phantom,
+    )
+    viewer.map_combo.setCurrentText("Mz")
+    viewer.state_combo.setCurrentIndex(1)
+    final_display = viewer.volume.data.copy()
+    viewer.simulation_combo.setCurrentIndex(0)
+    assert viewer.result.metadata["parameter_loop"]["value"] == 30
+    assert viewer.map_combo.currentText() == "Mz"
+    assert viewer.state_combo.currentData() == "SliceSelectionEndTime"
+    np.testing.assert_allclose(
+        viewer.volume.data, viewer.result.checkpoint_magnetization[0, ..., 2]
+    )
+    assert not np.allclose(viewer.volume.data, final_display)
+    assert widget.result is final_result
+    assert widget.program is final_program
+    assert widget.phantom is final_phantom
+    assert widget.slice_selection_flip_angle_deg.value() == 60
+
+    first = viewer._session_runs[viewer.simulation_combo.currentData()]
+    assert widget.restore_session_simulation_run(first)
+    assert viewer.simulation_combo.currentData() == first.run_id
+    viewer.simulation_combo.setCurrentIndex(1)
+    widget.forget_session_simulation_run(first)
+    assert widget.result is None
+    assert viewer.result is final_result
+    assert viewer.simulation_combo.count() == 1
+    assert viewer.simulation_combo.currentIndex() == 0
+
+
 @pytest.mark.parametrize("flip_angles", [(30.0, 60.0), (390.0, 420.0)])
 def test_parameter_loop_regenerates_active_sequence_for_each_value(
     qt_application, monkeypatch, flip_angles

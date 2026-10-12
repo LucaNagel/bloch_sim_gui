@@ -889,7 +889,25 @@ class SequenceResultVolumeViewer(QWidget):
         super().__init__(parent)
         self.result = None
         self.phantom = None
+        self._session_runs = {}
         layout = QVBoxLayout(self)
+        simulation_row = QHBoxLayout()
+        simulation_row.addWidget(QLabel("Simulation"))
+        self.simulation_combo = QComboBox()
+        self.simulation_combo.setObjectName("spatial_magnetization_simulation_selector")
+        self.simulation_combo.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.simulation_combo.setMinimumContentsLength(30)
+        self.simulation_combo.setPlaceholderText("Run a sequence simulation first")
+        self.simulation_combo.setEnabled(False)
+        self.simulation_combo.setToolTip(
+            "Choose a completed simulation, including individual parameter-loop runs. "
+            "This changes the magnetization view without changing the sequence setup."
+        )
+        self.simulation_combo.currentIndexChanged.connect(self._simulation_changed)
+        simulation_row.addWidget(self.simulation_combo, 1)
+        layout.addLayout(simulation_row)
         semantics = QLabel(
             "This view shows magnetization in object coordinates, not a 3D image "
             "reconstruction. No z-FFT is applied. A z-IFFT is only valid for a "
@@ -914,25 +932,123 @@ class SequenceResultVolumeViewer(QWidget):
         row.addWidget(self.pool_combo)
         row.addStretch()
         layout.addLayout(row)
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
         self.volume = VolumeViewerWidget()
         layout.addWidget(self.volume)
+        self.clear()
 
-    def set_result(self, result, phantom) -> None:
+    def clear(self, message="Run a sequence simulation to inspect magnetization."):
+        self.result = None
+        self.phantom = None
+        self._select_session_run(None)
+        for control in (self.map_combo, self.state_combo, self.pool_combo):
+            control.setEnabled(False)
+        self.volume.set_volume(np.zeros((1, 1, 1)), fov_m=(1.0, 1.0, 1.0))
+        self.volume.hide()
+        self.status.setText(message)
+        self.status.show()
+
+    def _session_run_label(self, run):
+        number = list(self._session_runs).index(run.run_id) + 1
+        return run.display_name or f"Simulation {number} · {run.sequence_name}"
+
+    def _select_session_run(self, run_id):
+        previous = self.simulation_combo.blockSignals(True)
+        self.simulation_combo.setCurrentIndex(
+            -1 if run_id is None else self.simulation_combo.findData(run_id)
+        )
+        self.simulation_combo.blockSignals(previous)
+
+    def add_session_run(self, run, *, current=False):
+        """Expose a retained result without copying its magnetization arrays."""
+        self._session_runs[run.run_id] = run
+        index = self.simulation_combo.findData(run.run_id)
+        previous = self.simulation_combo.blockSignals(True)
+        if index < 0:
+            index = self.simulation_combo.count()
+            self.simulation_combo.addItem(self._session_run_label(run), run.run_id)
+        else:
+            self.simulation_combo.setItemText(index, self._session_run_label(run))
+        self.simulation_combo.setItemData(
+            index, f"{run.sequence_name} · {run.phantom_name}", Qt.ToolTipRole
+        )
+        if current or self.result is run.result:
+            self.simulation_combo.setCurrentIndex(index)
+        elif self.result is None and self.simulation_combo.count() == 1:
+            self.simulation_combo.setCurrentIndex(-1)
+        self.simulation_combo.blockSignals(previous)
+        self.simulation_combo.setEnabled(True)
+        self.simulation_combo.setPlaceholderText("Select a completed simulation")
+
+    def remove_session_run(self, run):
+        selected = self.simulation_combo.currentData() == run.run_id
+        self._session_runs.pop(run.run_id, None)
+        index = self.simulation_combo.findData(run.run_id)
+        previous = self.simulation_combo.blockSignals(True)
+        if index >= 0:
+            self.simulation_combo.removeItem(index)
+        self.simulation_combo.blockSignals(previous)
+        if selected:
+            self.clear("The displayed session simulation was deleted")
+        self.simulation_combo.setEnabled(bool(self._session_runs))
+
+    def _simulation_changed(self, *_):
+        run = self._session_runs.get(self.simulation_combo.currentData())
+        if run is not None:
+            self.set_result(run.result, run.state["phantom"], preserve_view=True)
+
+    def set_result(self, result, phantom, *, preserve_view=False) -> None:
+        state_key = self.state_combo.currentData() if preserve_view else None
+        pool_name = self.pool_combo.currentText() if preserve_view else "Sum"
         self.result = result
         self.phantom = phantom
+        run = next(
+            (run for run in self._session_runs.values() if run.result is result), None
+        )
+        self._select_session_run(None if run is None else run.run_id)
         self.state_combo.blockSignals(True)
         self.state_combo.clear()
-        self.state_combo.addItem("Final")
+        definitions = result.metadata.get("sequence_definitions", {})
+
+        def state_item(time_s, fallback, fallback_key):
+            for key, label in (
+                ("RephasingEndTime", "After slice rephasing"),
+                ("SliceSelectionEndTime", "After slice selection"),
+            ):
+                if key in definitions and np.isclose(
+                    float(time_s), float(definitions[key]), rtol=0.0, atol=1e-9
+                ):
+                    return f"{label} ({time_s * 1000:.3f} ms)", key
+            return fallback, fallback_key
+
+        final_time = float(result.metadata.get("duration_s", 0.0))
+        self.state_combo.addItem(*state_item(final_time, "Final", "final"))
         for value in np.asarray(result.checkpoint_times_s):
-            self.state_combo.addItem(f"Checkpoint {value * 1000:.3f} ms")
+            self.state_combo.addItem(
+                *state_item(
+                    value,
+                    f"Checkpoint {value * 1000:.3f} ms",
+                    f"checkpoint:{value:.12g}",
+                )
+            )
+        self.state_combo.setCurrentIndex(max(0, self.state_combo.findData(state_key)))
         self.state_combo.blockSignals(False)
         self.pool_combo.blockSignals(True)
         self.pool_combo.clear()
         self.pool_combo.addItem("Sum")
         for name in getattr(result, "pool_names", ()):
             self.pool_combo.addItem(str(name))
+        self.pool_combo.setCurrentIndex(max(0, self.pool_combo.findText(pool_name)))
         self.pool_combo.setEnabled(bool(getattr(result, "pool_names", ())))
         self.pool_combo.blockSignals(False)
+        self.map_combo.setEnabled(True)
+        self.state_combo.setEnabled(True)
+        if definitions.get("MagnetizationOnly") and not preserve_view:
+            self.map_combo.setCurrentText("|Mxy|")
+        self.status.hide()
+        self.volume.show()
         self._update()
 
     def _magnetization(self):

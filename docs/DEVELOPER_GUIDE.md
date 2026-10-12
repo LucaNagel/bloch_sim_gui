@@ -2,6 +2,8 @@
 
 This guide explains how to build, package, and release the BlochSimulator application, as well as how to extend it with new pulse sequences and GUI options.
 
+**Note: This paragraph was fully AI-generated and not yet reviewed**
+
 ## 1. Environment Setup
 
 The source GUI and PyInstaller build share the Python 3.12 runtime declared in

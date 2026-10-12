@@ -58,7 +58,7 @@ from ..kernel_capabilities import (
     SEQUENCE_KERNEL_NAMES,
     resolve_kernel_request,
 )
-from ..phantom import Phantom, PhantomFactory
+from ..phantom import Phantom
 from ..notebook_exporter import (
     export_pulseq_generation_notebook,
     export_sequence_result_notebook,
@@ -99,6 +99,7 @@ from ..sequence import (
     make_pulseq_epsi_mge,
     make_pulseq_epi,
     make_pulseq_flash,
+    make_pulseq_slice_selection,
     make_pulseq_me_bssfp,
     make_pulseq_radial_me_bssfp,
     make_pulseq_spectral_selective_bssfp,
@@ -588,6 +589,17 @@ def _infer_sequence_acquisition(program, compiled):
     spectroscopic_acquisition = None
     spiral_acquisition = None
     definitions = program.metadata.get("definitions", {})
+    if not program.adc_events:
+        return _SequenceLoadPayload(
+            program,
+            compiled,
+            acquisition,
+            acquisition_frames,
+            acquisition_volumes,
+            spectroscopic_acquisition,
+            spiral_acquisition,
+            "Spatial magnetization after excitation; no ADC acquisition.",
+        )
     if definitions.get("TrajectoryType") == "radial_3d_spiral_phyllotaxis":
         spokes = int(definitions.get("SpokesPerMeasurement", 0))
         measurements = int(definitions.get("Measurements", 0))
@@ -1099,7 +1111,10 @@ class SequenceSimulationWidget(QWidget):
     FLASH_SOURCE = 7
     EPSI_MGE_SOURCE = 8
     PULSEQ_SOURCE = 9
-    GENERATED_SOURCES = frozenset(range(EPI_SOURCE, EPSI_MGE_SOURCE + 1))
+    SLICE_SELECTION_SOURCE = 10
+    GENERATED_SOURCES = frozenset(
+        (*range(EPI_SOURCE, EPSI_MGE_SOURCE + 1), SLICE_SELECTION_SOURCE)
+    )
     CARTESIAN_3D_SOURCES = frozenset((BSSFP_SOURCE, SS_BSSFP_SOURCE, ME_BSSFP_SOURCE))
     NO_PHANTOM_MESSAGE = (
         "No phantom is loaded in the Phantom tab. Create or load one first."
@@ -1436,6 +1451,7 @@ class SequenceSimulationWidget(QWidget):
                 "ss_bssfp",
                 "radial_me",
                 "me_bssfp",
+                "slice_selection",
             ):
                 duration_control = getattr(self, f"{prefix}_rf_duration_ms", None)
                 if duration_control is None:
@@ -1462,6 +1478,7 @@ class SequenceSimulationWidget(QWidget):
                 "ss_bssfp",
                 "radial_me",
                 "me_bssfp",
+                "slice_selection",
             )
         ):
             self._request_generated_sequence_refresh()
@@ -1522,6 +1539,7 @@ class SequenceSimulationWidget(QWidget):
             "ss_bssfp",
             "radial_me",
             "me_bssfp",
+            "slice_selection",
         ):
             if hasattr(self, f"{prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(prefix)
@@ -1639,6 +1657,7 @@ class SequenceSimulationWidget(QWidget):
             "ss_bssfp",
             "radial_me",
             "me_bssfp",
+            "slice_selection",
         ):
             if self._selected_shared_rf_pulse_type(prefix) == "designer":
                 self._update_shared_rf_controls(prefix)
@@ -1723,6 +1742,7 @@ class SequenceSimulationWidget(QWidget):
             "ss_bssfp": self.ss_bssfp_partition_fov_mm,
             "radial_me": self.radial_me_fov_mm,
             "me_bssfp": self.me_bssfp_partition_fov_mm,
+            "slice_selection": self.slice_selection_thickness_mm,
         }
         return float(controls[prefix].value()) / 1000.0
 
@@ -1779,6 +1799,7 @@ class SequenceSimulationWidget(QWidget):
             "ss_bssfp",
             "radial_me",
             "me_bssfp",
+            "slice_selection",
         ):
             if hasattr(self, f"{control_prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(control_prefix)
@@ -1841,6 +1862,7 @@ class SequenceSimulationWidget(QWidget):
             "ss_bssfp",
             "radial_me",
             "me_bssfp",
+            "slice_selection",
         ):
             if hasattr(self, f"{control_prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(control_prefix)
@@ -1897,13 +1919,14 @@ class SequenceSimulationWidget(QWidget):
                 "FLASH (2D)",
                 "EPSI / MGE (2D)",
                 "Pulseq .seq file",
+                "RF + Slice Selection",
             ]
         )
         self.sequence_source.currentIndexChanged.connect(self._source_changed)
         self.sequence_source.setToolTip(
             "Build EPI, EPSI/MGE, CSI, FLASH, Cartesian bSSFP, spectrally "
             "selective bSSFP, Cartesian or radial multi-echo bSSFP "
-            "interactively, or load a Pulseq file"
+            "interactively, inspect RF + Slice Selection, or load a Pulseq file"
         )
         sequence_layout.addWidget(self.sequence_source)
 
@@ -3253,6 +3276,51 @@ class SequenceSimulationWidget(QWidget):
         self.me_bssfp_group.setVisible(False)
         controls_layout.addWidget(self.me_bssfp_group)
 
+        self.slice_selection_group = QGroupBox("RF + Slice Selection")
+        selection_form = _left_aligned_form(self.slice_selection_group)
+        hint = QLabel(
+            "Simulate one excitation on the full phantom volume. The final state "
+            "is taken immediately after slice selection or optional rephasing."
+        )
+        hint.setWordWrap(True)
+        selection_form.addRow(hint)
+        self.slice_selection_flip_angle_deg = self._parameter_spin(
+            0.001, 50_000.0, 90.0, "°"
+        )
+        self.slice_selection_rf_phase_deg = self._parameter_spin(
+            -360.0, 360.0, 0.0, "°"
+        )
+        self.slice_selection_thickness_mm = self._parameter_spin(
+            0.01, 1000.0, 3.0, " mm"
+        )
+        self.slice_selection_offset_mm = self._parameter_spin(
+            -1000.0, 1000.0, 0.0, " mm"
+        )
+        self.slice_selection_axis = QComboBox()
+        self.slice_selection_axis.addItems(["+X", "-X", "+Y", "-Y", "+Z", "-Z"])
+        self.slice_selection_axis.setCurrentText("+Z")
+        self.slice_selection_rephase = QCheckBox("Add slice rephasing gradient")
+        self.slice_selection_rephase_duration_ms = self._parameter_spin(
+            0.01, 100.0, 3.0, " ms"
+        )
+        self.slice_selection_rephase_duration_ms.setEnabled(False)
+        self.slice_selection_rephase.setToolTip(
+            "Rewind the slice-gradient moment after the RF centre. Both the "
+            "state before rephasing and the final state are retained."
+        )
+        selection_form.addRow("Flip angle", self.slice_selection_flip_angle_deg)
+        selection_form.addRow("RF phase", self.slice_selection_rf_phase_deg)
+        selection_form.addRow("Slice thickness", self.slice_selection_thickness_mm)
+        selection_form.addRow("Slice offset", self.slice_selection_offset_mm)
+        selection_form.addRow("Slice normal", self.slice_selection_axis)
+        self._add_shared_rf_controls(selection_form, "slice_selection", duration_ms=5.0)
+        selection_form.addRow("Rephasing", self.slice_selection_rephase)
+        selection_form.addRow(
+            "Rephasing duration", self.slice_selection_rephase_duration_ms
+        )
+        self.slice_selection_group.hide()
+        controls_layout.addWidget(self.slice_selection_group)
+
         self.spoiling_quality_group = QGroupBox("Spoiling")
         spoiling_quality_layout = QHBoxLayout(self.spoiling_quality_group)
         spoiling_quality_layout.addWidget(QLabel("Quality"))
@@ -4079,8 +4147,21 @@ class SequenceSimulationWidget(QWidget):
             ("ss_bssfp", self._ss_bssfp_changed),
             ("radial_me", self._radial_me_bssfp_changed),
             ("me_bssfp", self._me_bssfp_changed),
+            ("slice_selection", self._slice_selection_changed),
         ):
             self._connect_shared_rf_controls(prefix, callback)
+        for control in (
+            self.slice_selection_flip_angle_deg,
+            self.slice_selection_rf_phase_deg,
+            self.slice_selection_thickness_mm,
+            self.slice_selection_offset_mm,
+            self.slice_selection_rephase_duration_ms,
+        ):
+            control.valueChanged.connect(self._slice_selection_changed)
+        self.slice_selection_axis.currentTextChanged.connect(
+            self._slice_selection_changed
+        )
+        self.slice_selection_rephase.toggled.connect(self._slice_selection_changed)
         self.fov_mm.valueChanged.connect(self._acquisition_changed)
         self.fov_z_mm.valueChanged.connect(self._acquisition_changed)
         self.t1_ms.valueChanged.connect(self._phantom_relaxation_changed)
@@ -5772,6 +5853,7 @@ class SequenceSimulationWidget(QWidget):
     def _reload_selected_generated_sequence(self):
         source_index = self.sequence_source.currentIndex()
         loaders = {
+            self.SLICE_SELECTION_SOURCE: self._load_slice_selection,
             1: self._load_cartesian_epi,
             2: self._load_csi,
             3: self._load_bssfp,
@@ -6087,6 +6169,12 @@ class SequenceSimulationWidget(QWidget):
         me_bssfp_selected = source_index == self.ME_BSSFP_SOURCE
         flash_selected = source_index == self.FLASH_SOURCE
         epsi_mge_selected = source_index == self.EPSI_MGE_SOURCE
+        self.slice_selection_group.setVisible(
+            source_index == self.SLICE_SELECTION_SOURCE
+        )
+        self.slice_selection_group.setEnabled(
+            source_index == self.SLICE_SELECTION_SOURCE
+        )
         self.acquisition_group.setVisible(epi_selected)
         self.acquisition_group.setEnabled(epi_selected)
         self.epsi_mge_group.setVisible(epsi_mge_selected)
@@ -7137,6 +7225,11 @@ class SequenceSimulationWidget(QWidget):
                 "coherent signal is 100% because this sequence is fully balanced "
                 "during acquisition and intentionally retains transverse coherence."
             )
+        elif source_index == self.SLICE_SELECTION_SOURCE:
+            self._set_spoiling_quality_unavailable(
+                "RF + Slice Selection has no spoiler. Inspect the local "
+                "magnetization under Spatial Magnetization."
+            )
         elif source_index == self.INTERNAL_SOURCE:
             self._set_spoiling_quality_unavailable(
                 "Internal FID has no gradient spoiler (0 cycles/voxel). Expected "
@@ -7243,6 +7336,7 @@ class SequenceSimulationWidget(QWidget):
             "ss_bssfp",
             "radial_me",
             "me_bssfp",
+            "slice_selection",
         ):
             if not hasattr(self, f"{prefix}_rf_pulse_type"):
                 continue
@@ -8117,6 +8211,12 @@ class SequenceSimulationWidget(QWidget):
 
     def _pulseq_export_spec(self):
         source_index = self.sequence_source.currentIndex()
+        if source_index == self.SLICE_SELECTION_SOURCE:
+            return (
+                "slice_selection",
+                self._slice_selection_pulseq_parameters(),
+                "rf_slice_selection.seq",
+            )
         if source_index == 1:
             if self.epi_readout_trajectory.currentText() == "Spiral":
                 return "spiral", self._spiral_pulseq_parameters(), "spiral.seq"
@@ -8152,6 +8252,39 @@ class SequenceSimulationWidget(QWidget):
                 "epsi_mge_2d.seq",
             )
         raise ValueError("Select a generated sequence")
+
+    def _slice_selection_changed(self, *_):
+        self.slice_selection_rephase_duration_ms.setEnabled(
+            self.slice_selection_rephase.isChecked()
+        )
+        self._request_generated_sequence_refresh()
+
+    def _slice_selection_pulseq_parameters(self):
+        parameters = self._shared_rf_parameters("slice_selection")
+        parameters.update(
+            flip_angle_deg=self.slice_selection_flip_angle_deg.value(),
+            rf_phase_deg=self.slice_selection_rf_phase_deg.value(),
+            slice_thickness_m=self.slice_selection_thickness_mm.value() / 1000.0,
+            slice_offset_m=self.slice_selection_offset_mm.value() / 1000.0,
+            slice_axis=self.slice_selection_axis.currentText().lower(),
+            rephase=self.slice_selection_rephase.isChecked(),
+            rephase_duration_s=self.slice_selection_rephase_duration_ms.value()
+            / 1000.0,
+            scanner_parameters=self.scanner_parameters.to_dict(),
+            nucleus=self.nucleus.currentText(),
+        )
+        return parameters
+
+    def _load_slice_selection(self):
+        try:
+            sequence = make_pulseq_slice_selection(
+                **self._slice_selection_pulseq_parameters()
+            )
+            self._set_generated_pulseq_sequence(sequence, "internal-rf-slice-selection")
+            return True
+        except Exception as exc:
+            self._generation_error = f"Invalid RF + Slice Selection: {exc}"
+            return False
 
     def _load_internal_sequence(self):
         self._generated_pulseq_sequence = None
@@ -9214,6 +9347,12 @@ class SequenceSimulationWidget(QWidget):
                 "system limits",
             )
         ):
+            if self.sequence_source.currentIndex() == self.SLICE_SELECTION_SOURCE:
+                return (
+                    "Increase the RF duration or slice thickness to reduce the "
+                    "slice gradient. For a rephasing-gradient error, increase "
+                    "the rephasing duration."
+                )
             return (
                 "The requested readout exceeds the scanner gradient or slew-rate "
                 "limits. Reduce bandwidth or matrix size, or increase the FOV or "
@@ -9738,10 +9877,17 @@ class SequenceSimulationWidget(QWidget):
 
     def _checkpoint_seconds(self):
         text = self.checkpoints.text().strip()
-        if not text:
-            return ()
-        values = tuple(float(value.strip()) / 1000.0 for value in text.split(","))
-        return values
+        values = (
+            [float(value.strip()) / 1000.0 for value in text.split(",")] if text else []
+        )
+        if self.program is not None:
+            definitions = self.program.metadata.get("definitions", {})
+            values.extend(
+                np.asarray(
+                    definitions.get("MagnetizationCheckpointTimes", ()), dtype=float
+                ).reshape(-1)
+            )
+        return tuple(np.unique(values))
 
     def _animation_request(self):
         """Return resolution, memory-bounded frame limit, and status text."""
@@ -10946,6 +11092,7 @@ class SequenceSimulationWidget(QWidget):
             "ss_bssfp",
             "radial_me",
             "me_bssfp",
+            "slice_selection",
         ):
             if hasattr(self, f"{prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(prefix)
@@ -10958,7 +11105,9 @@ class SequenceSimulationWidget(QWidget):
         self.rf_progress_cursor.setPos(position)
         self.gradient_progress_cursor.setPos(position)
 
-    def _clear_previous_simulation_views(self, *, clear_reconstruction=True):
+    def _clear_previous_simulation_views(
+        self, *, clear_reconstruction=True, clear_spatial_magnetization=True
+    ):
         """Remove stale result data before the next simulation starts."""
         self._active_session_run_id = None
         self.result = None
@@ -10980,6 +11129,8 @@ class SequenceSimulationWidget(QWidget):
         self.reconstruction_info.setText(message)
         if clear_reconstruction:
             self.reconstruction_explorer.clear(message)
+        if clear_spatial_magnetization:
+            self.result_volume_viewer.clear(message)
         self.magnetization_animation_viewer.clear(
             "Animation states will be available after the simulation completes."
             if self.animation_enabled.isChecked()
@@ -11224,6 +11375,9 @@ class SequenceSimulationWidget(QWidget):
                     name=f"|{name}|",
                 )
         self.result_volume_viewer.set_result(result, self.phantom)
+        if not result.adc_times_s.size:
+            self.signal_plot.setTitle("Spatial magnetization — no ADC acquisition")
+            self.views.setCurrentWidget(self.result_volume_viewer)
         if animation is None:
             self.magnetization_animation_viewer.clear(
                 animation_message
@@ -11240,7 +11394,12 @@ class SequenceSimulationWidget(QWidget):
                 capture_note=animation_message,
             )
         try:
-            self.reconstruction_explorer.set_result(result, self.phantom)
+            if result.adc_times_s.size:
+                self.reconstruction_explorer.set_result(result, self.phantom)
+            else:
+                self.reconstruction_explorer.clear(
+                    "Inspect the excitation volume under Spatial Magnetization."
+                )
         except Exception as exc:
             self.reconstruction_explorer.clear(
                 f"Interactive reconstruction unavailable: {exc}"
@@ -11401,6 +11560,7 @@ class SequenceSimulationWidget(QWidget):
             register(run)
             self._active_session_run_id = run.run_id
         self.reconstruction_explorer.add_session_run(run, current=True)
+        self.result_volume_viewer.add_session_run(run, current=True)
         return run
 
     def _session_run_state(self, *, phantom, **extra):
@@ -11533,6 +11693,7 @@ class SequenceSimulationWidget(QWidget):
     def forget_session_simulation_run(self, run):
         """Clear result views when the run currently being shown is deleted."""
         self.reconstruction_explorer.remove_session_run(run)
+        self.result_volume_viewer.remove_session_run(run)
         if self._active_session_run_id != run.run_id:
             return
         if run.run_type == "spin_probe":
@@ -11544,7 +11705,9 @@ class SequenceSimulationWidget(QWidget):
             self.probe_status.setText("Spin-probe run deleted")
             self._active_session_run_id = None
             return
-        self._clear_previous_simulation_views(clear_reconstruction=False)
+        self._clear_previous_simulation_views(
+            clear_reconstruction=False, clear_spatial_magnetization=False
+        )
         self.export_button.setEnabled(False)
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
@@ -11960,8 +12123,13 @@ class SequenceSimulationWidget(QWidget):
         if self.acquisition is None:
             self.kspace_view.clear()
             self.reconstruction_view.clear()
-            self.kspace_info.setText("No Cartesian acquisition metadata")
-            self.reconstruction_info.setText("No Cartesian acquisition metadata")
+            message = (
+                "Inspect the excitation volume under Spatial Magnetization."
+                if not result.adc_times_s.size
+                else "No Cartesian acquisition metadata"
+            )
+            self.kspace_info.setText(message)
+            self.reconstruction_info.setText(message)
             return
         if self.acquisition_volumes is not None:
             self._show_cartesian_volume_result(result)

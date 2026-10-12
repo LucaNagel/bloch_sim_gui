@@ -3,6 +3,10 @@
 
 A high-performance Python implementation of the Bloch equation solver originally developed by Brian Hargreaves at Stanford University. This package provides a fast C-based core with Python bindings, parallel processing support, and an interactive GUI with classic waveform simulation and an event-based Sequence mode for [Pulseq](https://github.com/pulseq/pypulseq) workflows.
 
+```bash
+pip install "blochsimulator[gui,pulseq]"
+```
+
 ## Demo
 
 ### Sequence mode
@@ -47,6 +51,10 @@ A mode that lets you load, generate and simulate [Pulseq
 
 *Features:*
 
+- **RF + Slice Selection** for full 3D excitation volumes immediately after
+  a pulse and its slice gradient, with optional rephasing and direct
+  $|M_{xy}|$, $M_z$, and phase inspection. See
+  [RF excitation volumes](docs/rf_slice_selection.md).
 - **Interactive generation of Pulseq** bipolar or flyback EPI, centre-out 2D
   spiral, 2D EPSI/MGE, 2D CSI,
   spoiled 2D FLASH,
