@@ -4746,6 +4746,9 @@ class BlochSimulatorGUI(QMainWindow):
             self.tab_widget.setCornerWidget(self.workspace_switch, Qt.TopRightCorner)
         else:
             self.free_mode_colormap_layout.addWidget(self.workspace_switch)
+        # Reparenting a visible widget hides it; both destinations need an
+        # explicit show so the selector survives every workspace transition.
+        self.workspace_switch.show()
         self.workspace_header.setVisible(False)
 
     def _request_workspace_mode(self, mode: str):

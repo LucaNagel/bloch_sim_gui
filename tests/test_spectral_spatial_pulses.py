@@ -83,6 +83,36 @@ def test_spectral_spatial_design_is_balanced_serializable_and_simulatable():
     assert int(np.argmax(translated)) == 2
 
 
+def test_rf_only_spectral_spatial_pulse_omits_gradient_and_its_hardware_limits(
+    tmp_path,
+):
+    pulse = _test_pulse().to_dict()
+    shared = dict(
+        rf_pulse_type="spectral_spatial",
+        rf_spectral_spatial_pulse=pulse,
+        slice_thickness_m=30e-3,
+        nucleus="H1",
+        flip_angle_deg=30,
+    )
+    selected = make_pulseq_slice_selection(**shared)
+    rf_only = make_pulseq_slice_selection(
+        **shared,
+        slice_gradient_enabled=False,
+        rephase=True,
+        scanner_parameters=ScannerParameters(max_grad_mtm=0.001, max_slew_tms=0.01),
+    )
+    programs = []
+    for name, sequence in (("selected", selected), ("rf_only", rf_only)):
+        assert sequence.check_timing()[0]
+        path = tmp_path / f"{name}.seq"
+        sequence.write(str(path), v141_compat=True)
+        programs.append(load_pulseq(path))
+    assert not programs[1].gradient_events
+    np.testing.assert_array_equal(
+        programs[0].rf_events[0].samples_hz, programs[1].rf_events[0].samples_hz
+    )
+
+
 def test_every_generated_sequence_builder_accepts_spectral_spatial_rf():
     pulse = _test_pulse().to_dict()
     shared = {

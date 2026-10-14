@@ -39,7 +39,10 @@ def _phantom(shape=(3, 3, 101), fov=(0.012, 0.012, 0.020), **kwargs):
 
 
 @pytest.mark.parametrize("pulse_type", ["sinc", "slr", "gaussian", "block", "designer"])
-def test_shared_rf_shapes_preserve_nominal_flip_and_phase(tmp_path, pulse_type):
+@pytest.mark.parametrize("slice_gradient_enabled", [True, False])
+def test_shared_rf_shapes_preserve_nominal_flip_and_phase(
+    tmp_path, pulse_type, slice_gradient_enabled
+):
     parameters = {}
     if pulse_type == "designer":
         parameters.update(
@@ -52,6 +55,7 @@ def test_shared_rf_shapes_preserve_nominal_flip_and_phase(tmp_path, pulse_type):
         rf_pulse_type=pulse_type,
         flip_angle_deg=30,
         rf_phase_deg=45,
+        slice_gradient_enabled=slice_gradient_enabled,
         **parameters,
     )
     result = BlochSimulator(use_parallel=False).simulate_sequence(
@@ -66,6 +70,116 @@ def test_shared_rf_shapes_preserve_nominal_flip_and_phase(tmp_path, pulse_type):
     assert np.angle(magnetization[0] + 1j * magnetization[1]) == pytest.approx(
         expected_phase, abs=3e-6
     )
+
+
+@pytest.mark.parametrize("rephase", [False, True])
+def test_rf_only_round_trip_omits_all_gradients_and_slice_carrier_shift(
+    tmp_path, rephase
+):
+    program = _program(
+        tmp_path,
+        slice_gradient_enabled=False,
+        slice_thickness_m=1e-9,
+        slice_offset_m=0.1,
+        rf_frequency_offset_hz=125,
+        rf_duration_s=5.003e-3,
+        rephase=rephase,
+        scanner_parameters=ScannerParameters(max_grad_mtm=0.001, max_slew_tms=0.01),
+    )
+    compiled = SequenceCompiler().compile(program)
+    definitions = program.metadata["definitions"]
+    assert len(program.rf_events) == 1
+    assert not program.gradient_events
+    assert not program.adc_events
+    assert compiled.checkpoint_times_s.size == 0
+    assert compiled.transverse_crush_times_s.size == 0
+    assert program.rf_events[0].frequency_offset_hz == pytest.approx(125)
+    assert definitions["SliceGradientEnabled"] == 0
+    assert definitions["RephasingEnabled"] == 0
+    assert "RephasingEndTime" not in definitions
+    assert "SliceSelectionEndTime" not in definitions
+    assert definitions["RFExcitationEndTime"] == pytest.approx(program.duration_s)
+    assert program.duration_s == pytest.approx(5.140e-3)
+
+
+def test_rf_only_excites_full_volume_with_local_transmit_field(tmp_path):
+    program = _program(
+        tmp_path, slice_gradient_enabled=False, flip_angle_deg=30, rephase=True
+    )
+    shape = (3, 3, 101)
+    tx = np.broadcast_to(np.array([0.5, 1.0, 1.5])[:, None, None], shape).copy()
+    result = BlochSimulator(use_parallel=False).simulate_sequence(
+        program, _phantom(tx_sensitivity_map=tx), simulation_timestep_s=2e-6
+    )
+    angles = np.broadcast_to(np.deg2rad([15.0, 30.0, 45.0])[:, None, None], shape)
+    np.testing.assert_allclose(
+        np.hypot(result.mx, result.my), np.sin(angles), atol=3e-6
+    )
+    np.testing.assert_allclose(result.mz, np.cos(angles), atol=3e-6)
+    assert result.signal.size == 0
+    assert result.checkpoint_times_s.size == 0
+
+
+def test_rf_only_gui_controls_project_and_export(tmp_path):
+    widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(widget.SLICE_SELECTION_SOURCE)
+    assert widget.slice_selection_gradient_enabled.isChecked()
+    assert widget.slice_selection_rephase.isChecked()
+    widget.slice_selection_gradient_enabled.setChecked(False)
+    for control in (
+        widget.slice_selection_thickness_mm,
+        widget.slice_selection_offset_mm,
+        widget.slice_selection_axis,
+        widget.slice_selection_rephase,
+        widget.slice_selection_rephase_duration_ms,
+    ):
+        assert not control.isEnabled()
+    assert widget.slice_selection_rf_duration_ms.isEnabled()
+    assert widget._ensure_current_generated_sequence(), widget._generation_error
+    assert not widget.program.gradient_events
+    kind, parameters, filename = widget._pulseq_export_spec()
+    assert parameters["slice_gradient_enabled"] is False
+    assert parameters["rephase"] is False
+    notebook = export_pulseq_generation_notebook(
+        tmp_path / "rf_only.ipynb", kind, parameters, seq_filename=filename
+    )
+    code = "\n".join(
+        cell.source for cell in nbformat.read(notebook, as_version=4).cells
+    )
+    assert "'slice_gradient_enabled': False" in code
+    phantom = _phantom(shape=(3, 3, 5))
+    result = widget.simulator.simulate_sequence(widget.program, phantom)
+    widget.phantom = phantom
+    widget._finished(result, record_run=False)
+    viewer = widget.result_volume_viewer
+    assert viewer.state_combo.count() == 1
+    assert "After RF excitation" in viewer.state_combo.currentText()
+    assert viewer.map_combo.currentText() == "|Mxy|"
+    viewer.map_combo.setCurrentText("Mz")
+    np.testing.assert_array_equal(viewer.volume.data, result.mz)
+
+    path = tmp_path / "rf_only.blochproj"
+    save_project(
+        path,
+        {"sequence_controls": _capture_widget_state(widget)},
+        phantom=phantom,
+        program=widget.program,
+        sequence_result=result,
+    )
+    loaded = load_project(path)
+    restored = SequenceSimulationWidget()
+    _restore_widget_state(restored, loaded["state"]["sequence_controls"])
+    assert not restored.slice_selection_gradient_enabled.isChecked()
+    assert not restored.slice_selection_rephase.isEnabled()
+    assert not loaded["program"].gradient_events
+    np.testing.assert_array_equal(
+        loaded["sequence_result"].final_magnetization, result.final_magnetization
+    )
+    restored.slice_selection_gradient_enabled.setChecked(True)
+    assert restored.slice_selection_rephase.isChecked()
+    assert restored.slice_selection_rephase_duration_ms.isEnabled()
+    assert restored._ensure_current_generated_sequence(), restored._generation_error
+    assert len(restored.program.gradient_events) == 2
 
 
 @pytest.mark.parametrize("rephase", [False, True])

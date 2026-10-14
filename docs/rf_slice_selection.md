@@ -1,9 +1,10 @@
 # RF excitation volumes
 
 The **RF + Slice Selection** source in Sequence Mode simulates one RF pulse
-with its simultaneous slice-selection gradient on the full phantom volume.
-The final state is taken immediately after the gradient ramp ends. There is
-no ADC, spoiler, or subsequent relaxation delay.
+on the full phantom volume, with optional slice selection and rephasing.
+The final state is taken after the last excitation block. There is no ADC,
+spoiler, or subsequent relaxation delay. RF dead time, ringdown time, and
+block-duration raster follow the selected scanner profile.
 
 ## Desktop workflow
 
@@ -13,7 +14,11 @@ no ADC, spoiler, or subsequent relaxation delay.
 3. Set the RF pulse, nominal flip angle, RF phase, slice thickness, slice
    offset, and signed slice normal. Loaded RF waveforms and pulses from the
    RF Pulse Designer use the same controls as other generated sequences.
-4. Optionally enable **Add slice rephasing gradient** and set its duration.
+4. **Add slice rephasing gradient** is enabled by default. Set its duration,
+   or disable it to end the sequence immediately after slice selection.
+   To apply RF alone, disable **Apply slice-selection gradient**. Slice
+   thickness, offset, normal, and rephasing then become inactive. Re-enabling
+   the slice gradient restores the previous rephasing setting.
 5. Generate and run the sequence. **Spatial Magnetization** opens with
    $|M_{xy}|$ selected. Choose **Mz**, **Mx**, **My**, or **Mxy phase** as needed.
 6. Inspect linked orthogonal slices or switch the volume viewer to **3D**.
@@ -32,6 +37,14 @@ the applicable scanner gradient and slew limits. If a thin slice requires
 too much gradient amplitude, increase RF duration or slice thickness.
 
 ## Observation states
+
+With the slice gradient disabled, **After RF excitation** is the final state.
+It contains the full spatial magnetization after the RF block. Spatial
+variation comes from the local transmit field, frequency offsets, relaxation,
+and initial magnetization; the sequence applies no gradients. The explicit RF
+frequency offset still applies, while the slice-position carrier shift is
+omitted. An SPSP pulse uses its RF waveform alone in this mode; its coupled
+RF/gradient design profile must be reassessed without the gradient.
 
 With rephasing disabled, **After slice selection** is the final state. With
 rephasing enabled, the state selector offers **After slice selection** and
@@ -88,6 +101,11 @@ Mz = M_after_selection[..., 2]
 For a `SpectralPhantom`, use `simulate_spectral_sequence` and set the sequence
 reference consistently with the desired RF carrier. With rephasing disabled,
 read the excitation state directly from `final_magnetization`.
+
+For RF alone, pass `slice_gradient_enabled=False` to
+`make_pulseq_slice_selection`. The builder omits both slice selection and
+rephasing, even if `rephase=True` was supplied. Read the RF-only state from
+`final_magnetization`.
 
 The generated Pulseq sequence, its reproducing notebook, and complete
 `.blochproj` projects preserve the excitation settings and observation times.

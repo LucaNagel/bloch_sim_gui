@@ -350,8 +350,10 @@ def test_parameter_loop_chains_real_sequence_workers(qt_application, monkeypatch
     assert widget.parameter_loop_formula.isEnabled()
 
 
+@pytest.mark.parametrize("slice_gradient_enabled", [True, False])
 def test_slice_selection_loop_runs_are_selectable_in_spatial_magnetization(
     qt_application,
+    slice_gradient_enabled,
 ):
     pytest.importorskip("pypulseq")
     widget = SequenceSimulationWidget()
@@ -359,6 +361,7 @@ def test_slice_selection_loop_runs_are_selectable_in_spatial_magnetization(
     widget.matrix_size.setValue(2)
     widget.z_matrix_size.setValue(1)
     widget.sequence_source.setCurrentIndex(widget.SLICE_SELECTION_SOURCE)
+    widget.slice_selection_gradient_enabled.setChecked(slice_gradient_enabled)
     widget.slice_selection_rephase.setChecked(True)
     flip_index = next(
         index
@@ -384,14 +387,21 @@ def test_slice_selection_loop_runs_are_selectable_in_spatial_magnetization(
         widget.phantom,
     )
     viewer.map_combo.setCurrentText("Mz")
-    viewer.state_combo.setCurrentIndex(1)
+    viewer.state_combo.setCurrentIndex(1 if slice_gradient_enabled else 0)
     final_display = viewer.volume.data.copy()
     viewer.simulation_combo.setCurrentIndex(0)
     assert viewer.result.metadata["parameter_loop"]["value"] == 30
     assert viewer.map_combo.currentText() == "Mz"
-    assert viewer.state_combo.currentData() == "SliceSelectionEndTime"
+    assert viewer.state_combo.currentData() == (
+        "SliceSelectionEndTime" if slice_gradient_enabled else "RFExcitationEndTime"
+    )
     np.testing.assert_allclose(
-        viewer.volume.data, viewer.result.checkpoint_magnetization[0, ..., 2]
+        viewer.volume.data,
+        (
+            viewer.result.checkpoint_magnetization[0, ..., 2]
+            if slice_gradient_enabled
+            else viewer.result.mz
+        ),
     )
     assert not np.allclose(viewer.volume.data, final_display)
     assert widget.result is final_result

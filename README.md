@@ -110,6 +110,12 @@ Loaded and generated sequences can be inspected in a sequence viewer. A 3D phant
 
 ## Get started
 
+## Documentation
+
+For detailed instructions on installation, GUI features, and Python API usage,
+see the **[User Guide](https://github.com/LucaNagel/bloch_sim_gui/blob/main/docs/USER_GUIDE.md)**.
+
+
 ### Desktop application
 
 Download the standalone application for Windows or macOS from
@@ -363,10 +369,6 @@ liver = TissueParameters(
 
 </details>
 
-## Documentation
-
-For detailed instructions on installation, GUI features, and Python API usage,
-see the **[User Guide](https://github.com/LucaNagel/bloch_sim_gui/blob/main/docs/USER_GUIDE.md)**.
 
 ## Development
 
@@ -529,6 +531,7 @@ the code is available [here](https://github.com/ZhengguoTan/BlochSim).
 
 - Original Bloch simulator by Brian Hargreaves, Stanford University
 - NumPy and SciPy communities
+- [xarray team](https://docs.xarray.dev/en/stable/)
 - PyQt/PySide developers
 - OpenMP project
 - Built partially with [Codex](https://openai.com/codex/),

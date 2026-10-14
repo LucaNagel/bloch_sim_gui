@@ -2091,6 +2091,10 @@ class BlochSimulator:
         own centre frequency and ``T2*`` transverse decay. This produces a
         Lorentzian frequency-domain line. Chemical exchange and J-coupling are
         intentionally not part of this independent-component model.
+
+        ``progress_callback(done, total)`` reports completed active voxels
+        across all components after each chunk. Voxels shared by components
+        count once per component, matching the independent simulation work.
         """
         from .sequence import SequenceSimulationResult
         from .spectral_phantom import SpectralPhantom
@@ -2116,6 +2120,19 @@ class BlochSimulator:
         if not components:
             raise ValueError("spectral phantom has no active components")
 
+        total_voxels = sum(component.n_active for _, component in components)
+        completed_voxels = 0
+        progress_chunk_voxels = chunk_voxels
+        if progress_callback is not None and progress_chunk_voxels is None:
+            from .sequence.spin_sampling import coerce_spin_sampling
+
+            sampling = coerce_spin_sampling(
+                spin_sampling
+                if str(spoiler_mode).strip().lower() == "gradient"
+                else None
+            )
+            progress_chunk_voxels = max(1, 65536 // sampling.spins_per_voxel)
+
         combined_signal = None
         component_signals = []
         component_final_magnetizations = []
@@ -2130,6 +2147,12 @@ class BlochSimulator:
         for component_index, (name, component) in enumerate(components):
             if cancel_callback is not None and cancel_callback():
                 raise RuntimeError("sequence simulation cancelled")
+
+            component_voxels = component.n_active
+
+            def component_progress(done, total):
+                done_voxels = min(component_voxels, int(done * progress_chunk_voxels))
+                progress_callback(completed_voxels + done_voxels, total_voxels)
 
             def component_preview(fraction, partial_signal):
                 if preview_callback is None:
@@ -2155,6 +2178,7 @@ class BlochSimulator:
                 checkpoints_s=checkpoints_s,
                 chunk_voxels=chunk_voxels,
                 signal_weighting=signal_weighting,
+                progress_callback=(component_progress if progress_callback else None),
                 preview_callback=(component_preview if preview_callback else None),
                 cancel_callback=cancel_callback,
                 status_callback=component_status,
@@ -2193,8 +2217,7 @@ class BlochSimulator:
                 checkpoint_numerator += (
                     result.checkpoint_magnetization * concentration[None, ..., None]
                 )
-            if progress_callback is not None:
-                progress_callback(component_index + 1, len(components))
+            completed_voxels += component_voxels
 
         denominator = total_concentration[..., None]
         final_magnetization = np.divide(
@@ -2645,6 +2668,9 @@ class BlochSimulator:
                 f"spin-interval "
                 f"updates in {chunks:,} chunk(s) on {native_threads} thread(s)."
             )
+        if progress_callback is not None:
+            # Start the measured run rate after compilation and allocation.
+            progress_callback(0, chunks)
         for chunk_index, start in enumerate(range(0, n_active, chunk_voxels)):
             if cancel_callback is not None and cancel_callback():
                 raise RuntimeError("sequence simulation cancelled")

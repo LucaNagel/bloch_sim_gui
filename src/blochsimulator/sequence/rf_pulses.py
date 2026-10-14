@@ -362,6 +362,7 @@ def make_pulseq_rf_events(
     spectral_spatial_pulse=None,
     spatial_offset_m: float = 0.0,
     nucleus: str | None = None,
+    include_slice_gradient: bool = True,
 ):
     """Create Pulseq RF events from the shared envelope designer.
 
@@ -369,7 +370,12 @@ def make_pulseq_rf_events(
     ``(rf, slice_gradient)`` tuple returned by Pulseq.  Otherwise
     each result is a non-selective RF event.  Loaded/designer waveforms retain
     their complex phase and are rescaled from their reference flip angle.
+    ``include_slice_gradient=False`` also omits the coupled gradient of an
+    SPSP pulse, returning its RF waveform alone without gradient limit checks.
     """
+    if not include_slice_gradient:
+        slice_thickness_m = None
+        spatial_offset_m = 0.0
     angles = tuple(float(value) for value in flip_angles_deg)
     if not angles or not np.all(np.isfinite(angles)):
         raise ValueError("flip_angles_deg must contain finite values")
@@ -412,30 +418,31 @@ def make_pulseq_rf_events(
                     np.arange(target_gradient_count, dtype=float) + 0.5
                 ) / target_gradient_count
                 gradient_samples = np.interp(target, source, gradient_samples)
-            gamma_hz_per_t = NUCLEUS_GAMMA_HZ_PER_T[pulse.nucleus]
-            physical_gradient = gradient_samples / gamma_hz_per_t
-            physical_limit = float(system.max_grad) / float(system.gamma)
-            if np.max(np.abs(physical_gradient)) > physical_limit * (1 + 1e-9):
-                raise ValueError(
-                    "target slice/slab thickness makes the spectral-spatial "
-                    "gradient exceed the scanner amplitude limit"
-                )
-            physical_slew = (
-                np.concatenate(
-                    (
-                        [2.0 * physical_gradient[0]],
-                        np.diff(physical_gradient),
-                        [-2.0 * physical_gradient[-1]],
+            if include_slice_gradient:
+                gamma_hz_per_t = NUCLEUS_GAMMA_HZ_PER_T[pulse.nucleus]
+                physical_gradient = gradient_samples / gamma_hz_per_t
+                physical_limit = float(system.max_grad) / float(system.gamma)
+                if np.max(np.abs(physical_gradient)) > physical_limit * (1 + 1e-9):
+                    raise ValueError(
+                        "target slice/slab thickness makes the spectral-spatial "
+                        "gradient exceed the scanner amplitude limit"
                     )
+                physical_slew = (
+                    np.concatenate(
+                        (
+                            [2.0 * physical_gradient[0]],
+                            np.diff(physical_gradient),
+                            [-2.0 * physical_gradient[-1]],
+                        )
+                    )
+                    / system.grad_raster_time
                 )
-                / system.grad_raster_time
-            )
-            physical_slew_limit = float(system.max_slew) / float(system.gamma)
-            if np.max(np.abs(physical_slew)) > physical_slew_limit * (1 + 1e-9):
-                raise ValueError(
-                    "target slice/slab thickness makes the spectral-spatial "
-                    "gradient exceed the scanner slew limit"
-                )
+                physical_slew_limit = float(system.max_slew) / float(system.gamma)
+                if np.max(np.abs(physical_slew)) > physical_slew_limit * (1 + 1e-9):
+                    raise ValueError(
+                        "target slice/slab thickness makes the spectral-spatial "
+                        "gradient exceed the scanner slew limit"
+                    )
             rf_event = pp.make_arbitrary_rf(
                 signal=rf_samples,
                 flip_angle=np.deg2rad(angle_deg),
@@ -449,6 +456,9 @@ def make_pulseq_rf_events(
                 ),
             )
             rf_event.freq_offset = float(frequency_offset_hz)
+            if not include_slice_gradient:
+                results.append(rf_event)
+                continue
             gradient_event = pp.make_arbitrary_grad(
                 channel="z",
                 waveform=np.asarray(gradient_samples, dtype=float),

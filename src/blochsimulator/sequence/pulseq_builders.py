@@ -328,16 +328,19 @@ def make_pulseq_slice_selection(
     slice_thickness_m: float = 3e-3,
     slice_offset_m: float = 0.0,
     slice_axis: str = "+z",
+    slice_gradient_enabled: bool = True,
     rephase: bool = False,
     rephase_duration_s: float = 3e-3,
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
     nucleus: str = "H1",
 ):
-    """Build one RF excitation with slice selection and optional rephasing.
+    """Build one RF excitation with optional slice selection and rephasing.
 
     There is no ADC or spoiler, and no delay after the final gradient. The
     declared magnetization checkpoints retain the state after slice selection
     and, when enabled, after rephasing. Offsets follow the signed slice axis.
+    With ``slice_gradient_enabled=False``, only RF is applied; slice position
+    and rephasing are ignored, and the final state is taken after the RF block.
     """
     for name, value in (
         ("flip_angle_deg", flip_angle_deg),
@@ -351,6 +354,7 @@ def make_pulseq_slice_selection(
     axis_code = str(slice_axis).lower()
     if axis_code not in {"+x", "-x", "+y", "-y", "+z", "-z"}:
         raise ValueError("slice_axis must be +x, -x, +y, -y, +z, or -z")
+    rephase = bool(rephase and slice_gradient_enabled)
     if rephase and (not np.isfinite(rephase_duration_s) or rephase_duration_s <= 0):
         raise ValueError("rephase_duration_s must be positive and finite")
     pp = _pypulseq()
@@ -361,43 +365,60 @@ def make_pulseq_slice_selection(
         gamma=NUCLEUS_GAMMA_HZ_PER_T[nucleus],
     )
     sequence = pp.Sequence(system)
-    raw, actual_duration, tbw, pulse_type = _make_slice_selective_rf_events(
+    raw, actual_duration, tbw, pulse_type = make_pulseq_rf_events(
         pp,
         system,
-        flip_angle_schedule_deg=(flip_angle_deg,),
-        slice_thickness_m=slice_thickness_m,
-        rf_pulse_type=rf_pulse_type,
-        rf_duration_s=rf_duration_s,
-        rf_time_bandwidth_product=rf_time_bandwidth_product,
-        rf_apodization=rf_apodization,
-        rf_slr_sharpness=rf_slr_sharpness,
-        rf_custom_waveform_hz=rf_custom_waveform_hz,
-        rf_custom_raster_s=rf_custom_raster_s,
-        rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
-        rf_frequency_offset_hz=rf_frequency_offset_hz,
-        rf_spectral_spatial_pulse=rf_spectral_spatial_pulse,
+        flip_angles_deg=(flip_angle_deg,),
+        slice_thickness_m=slice_thickness_m if slice_gradient_enabled else None,
+        pulse_type=rf_pulse_type,
+        duration_s=rf_duration_s,
+        time_bandwidth_product=rf_time_bandwidth_product,
+        apodization=rf_apodization,
+        slr_sharpness=rf_slr_sharpness,
+        custom_waveform_hz=rf_custom_waveform_hz,
+        custom_raster_s=rf_custom_raster_s,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        frequency_offset_hz=rf_frequency_offset_hz,
+        spectral_spatial_pulse=rf_spectral_spatial_pulse,
         spatial_offset_m=slice_offset_m,
         nucleus=nucleus,
+        include_slice_gradient=slice_gradient_enabled,
     )
-    rf, logical_gradient = raw[0]
+    rf, logical_gradient = raw[0] if slice_gradient_enabled else (raw[0], None)
     rf = copy(rf)
-    if pulse_type != "spectral_spatial":
+    if slice_gradient_enabled and pulse_type != "spectral_spatial":
         rf.freq_offset += logical_gradient.amplitude * slice_offset_m
     rf.phase_offset = pulseq_phase_offset_rad(
         rf_phase_deg,
         frequency_offset_hz=rf.freq_offset,
         event_center_s=pp.calc_rf_center(rf)[0],
     )
-    gradient = copy(logical_gradient)
-    gradient.channel = axis_code[-1]
     sign = -1.0 if axis_code[0] == "-" else 1.0
-    for attribute in ("amplitude", "area", "flat_area", "first", "last", "waveform"):
-        value = getattr(gradient, attribute, None)
-        if value is not None:
-            setattr(gradient, attribute, sign * value)
-    sequence.add_block(rf, gradient)
+    if slice_gradient_enabled:
+        gradient = copy(logical_gradient)
+        gradient.channel = axis_code[-1]
+        for attribute in (
+            "amplitude",
+            "area",
+            "flat_area",
+            "first",
+            "last",
+            "waveform",
+        ):
+            value = getattr(gradient, attribute, None)
+            if value is not None:
+                setattr(gradient, attribute, sign * value)
+        sequence.add_block(rf, gradient)
+    else:
+        block_duration = _ceil_to_raster(
+            pp.calc_duration(rf), system.block_duration_raster
+        )
+        sequence.add_block(rf, pp.make_delay(block_duration))
     selection_end = _sequence_duration_s(sequence)
-    sequence.set_definition("SliceSelectionEndTime", selection_end)
+    sequence.set_definition(
+        "SliceSelectionEndTime" if slice_gradient_enabled else "RFExcitationEndTime",
+        selection_end,
+    )
     checkpoints = []
     if rephase:
         rf_center = rf.delay + pp.calc_rf_center(rf)[0]
@@ -435,8 +456,11 @@ def make_pulseq_slice_selection(
         sequence.set_definition("RephasingEndTime", rephasing_end)
         if rephasing_end > selection_end:
             checkpoints.append(selection_end)
-    sequence.set_definition("Name", "rf_slice_selection")
+    sequence.set_definition(
+        "Name", "rf_slice_selection" if slice_gradient_enabled else "rf_excitation"
+    )
     sequence.set_definition("MagnetizationOnly", 1)
+    sequence.set_definition("SliceGradientEnabled", int(bool(slice_gradient_enabled)))
     if checkpoints:
         sequence.set_definition("MagnetizationCheckpointTimes", checkpoints)
     sequence.set_definition("FlipAngleDeg", flip_angle_deg)

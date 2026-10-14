@@ -3280,7 +3280,7 @@ class SequenceSimulationWidget(QWidget):
         selection_form = _left_aligned_form(self.slice_selection_group)
         hint = QLabel(
             "Simulate one excitation on the full phantom volume. The final state "
-            "is taken immediately after slice selection or optional rephasing."
+            "is taken after RF excitation, slice selection, or optional rephasing."
         )
         hint.setWordWrap(True)
         selection_form.addRow(hint)
@@ -3299,17 +3299,26 @@ class SequenceSimulationWidget(QWidget):
         self.slice_selection_axis = QComboBox()
         self.slice_selection_axis.addItems(["+X", "-X", "+Y", "-Y", "+Z", "-Z"])
         self.slice_selection_axis.setCurrentText("+Z")
+        self.slice_selection_gradient_enabled = QCheckBox(
+            "Apply slice-selection gradient"
+        )
+        self.slice_selection_gradient_enabled.setChecked(True)
+        self.slice_selection_gradient_enabled.setToolTip(
+            "Disable to apply the RF pulse alone to the full phantom. "
+            "Slice position and rephasing are then inactive."
+        )
         self.slice_selection_rephase = QCheckBox("Add slice rephasing gradient")
+        self.slice_selection_rephase.setChecked(True)
         self.slice_selection_rephase_duration_ms = self._parameter_spin(
             0.01, 100.0, 3.0, " ms"
         )
-        self.slice_selection_rephase_duration_ms.setEnabled(False)
         self.slice_selection_rephase.setToolTip(
             "Rewind the slice-gradient moment after the RF centre. Both the "
             "state before rephasing and the final state are retained."
         )
         selection_form.addRow("Flip angle", self.slice_selection_flip_angle_deg)
         selection_form.addRow("RF phase", self.slice_selection_rf_phase_deg)
+        selection_form.addRow("Slice selection", self.slice_selection_gradient_enabled)
         selection_form.addRow("Slice thickness", self.slice_selection_thickness_mm)
         selection_form.addRow("Slice offset", self.slice_selection_offset_mm)
         selection_form.addRow("Slice normal", self.slice_selection_axis)
@@ -4162,6 +4171,9 @@ class SequenceSimulationWidget(QWidget):
             self._slice_selection_changed
         )
         self.slice_selection_rephase.toggled.connect(self._slice_selection_changed)
+        self.slice_selection_gradient_enabled.toggled.connect(
+            self._slice_selection_changed
+        )
         self.fov_mm.valueChanged.connect(self._acquisition_changed)
         self.fov_z_mm.valueChanged.connect(self._acquisition_changed)
         self.t1_ms.valueChanged.connect(self._phantom_relaxation_changed)
@@ -6175,6 +6187,7 @@ class SequenceSimulationWidget(QWidget):
         self.slice_selection_group.setEnabled(
             source_index == self.SLICE_SELECTION_SOURCE
         )
+        self._update_slice_selection_controls()
         self.acquisition_group.setVisible(epi_selected)
         self.acquisition_group.setEnabled(epi_selected)
         self.epsi_mge_group.setVisible(epsi_mge_selected)
@@ -8254,10 +8267,21 @@ class SequenceSimulationWidget(QWidget):
         raise ValueError("Select a generated sequence")
 
     def _slice_selection_changed(self, *_):
-        self.slice_selection_rephase_duration_ms.setEnabled(
-            self.slice_selection_rephase.isChecked()
-        )
+        self._update_slice_selection_controls()
         self._request_generated_sequence_refresh()
+
+    def _update_slice_selection_controls(self):
+        enabled = self.slice_selection_gradient_enabled.isChecked()
+        for control in (
+            self.slice_selection_thickness_mm,
+            self.slice_selection_offset_mm,
+            self.slice_selection_axis,
+            self.slice_selection_rephase,
+        ):
+            control.setEnabled(enabled)
+        self.slice_selection_rephase_duration_ms.setEnabled(
+            enabled and self.slice_selection_rephase.isChecked()
+        )
 
     def _slice_selection_pulseq_parameters(self):
         parameters = self._shared_rf_parameters("slice_selection")
@@ -8267,7 +8291,11 @@ class SequenceSimulationWidget(QWidget):
             slice_thickness_m=self.slice_selection_thickness_mm.value() / 1000.0,
             slice_offset_m=self.slice_selection_offset_mm.value() / 1000.0,
             slice_axis=self.slice_selection_axis.currentText().lower(),
-            rephase=self.slice_selection_rephase.isChecked(),
+            slice_gradient_enabled=self.slice_selection_gradient_enabled.isChecked(),
+            rephase=(
+                self.slice_selection_gradient_enabled.isChecked()
+                and self.slice_selection_rephase.isChecked()
+            ),
             rephase_duration_s=self.slice_selection_rephase_duration_ms.value()
             / 1000.0,
             scanner_parameters=self.scanner_parameters.to_dict(),
@@ -10931,7 +10959,7 @@ class SequenceSimulationWidget(QWidget):
         if isinstance(self.phantom, DynamicSpectralPhantom):
             unit = "Interval"
         elif isinstance(self.phantom, SpectralPhantom):
-            unit = "Component"
+            unit = "Voxel"
         else:
             unit = "Chunk"
         status_text = (
@@ -10982,7 +11010,7 @@ class SequenceSimulationWidget(QWidget):
             return max(
                 1,
                 sum(
-                    bool(np.any(values > 0))
+                    int(np.count_nonzero(values > 0))
                     for values in self.phantom.concentration_maps.values()
                 ),
             )

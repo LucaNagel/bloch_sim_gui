@@ -1016,6 +1016,7 @@ class SequenceResultVolumeViewer(QWidget):
             for key, label in (
                 ("RephasingEndTime", "After slice rephasing"),
                 ("SliceSelectionEndTime", "After slice selection"),
+                ("RFExcitationEndTime", "After RF excitation"),
             ):
                 if key in definitions and np.isclose(
                     float(time_s), float(definitions[key]), rtol=0.0, atol=1e-9

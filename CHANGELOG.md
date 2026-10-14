@@ -4,6 +4,22 @@ All notable changes to BlochSimulator are documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [2.8.3] - 2026-10-14
+
+### Added
+
+- Disable the slice-selection gradient in RF + Slice Selection to inspect
+  the full spatial magnetization after RF alone. Slice controls and rephasing
+  become inactive, and the viewer labels the result After RF excitation.
+
+### Fixed
+
+- Update sequence progress and remaining-time estimates after each spectral
+  component chunk, including single-component phantoms. Start timing the
+  simulation rate after compilation and allocation.
+
 ## [2.8.2] - 2026-10-12
 
 ### Added

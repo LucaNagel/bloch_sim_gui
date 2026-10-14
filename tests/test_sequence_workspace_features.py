@@ -12,9 +12,13 @@ from PyQt5.QtWidgets import QApplication
 from blochsimulator import BlochSimulator
 from blochsimulator.paths import workspace_directory
 from blochsimulator.phantom_design import PhantomDesign
-from blochsimulator.sequence import BrukerExportOptions
+from blochsimulator.sequence import ADCEvent, BrukerExportOptions, SequenceProgram
+from blochsimulator.spectral_phantom import ChemicalSpecies, SpectralPhantom
 from blochsimulator.ui.phantom_designer import SpectralPhantomDesignerDialog
-from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
+from blochsimulator.ui.sequence_simulation_widget import (
+    SequenceSimulationThread,
+    SequenceSimulationWidget,
+)
 from blochsimulator.ui.widgets import IMAGE_CANVAS_BACKGROUND, IMAGE_FOV_BORDER
 
 
@@ -200,6 +204,78 @@ def test_sequence_progress_estimate_excludes_compile_time_and_uses_run_rate(
     assert widget.progress.value() == 50
     assert widget.progress.format() == "50% · ETA 20s"
     assert widget.status.text() == "Chunk 50/100 · 50% · approximately 20s remaining"
+    widget.close()
+    app.processEvents()
+
+
+@pytest.mark.parametrize("live_preview", [False, True])
+@pytest.mark.parametrize("with_animation", [False, True])
+def test_spectral_worker_updates_percentage_and_eta_within_one_component(
+    monkeypatch, live_preview, with_animation
+):
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+    widget.phantom = SpectralPhantom(
+        shape=(5, 1, 1),
+        fov=(0.05, 0.01, 0.01),
+        species=[ChemicalSpecies("Urea", 0.0, 1.0, 0.2)],
+        concentration_maps={"Urea": np.ones((5, 1, 1))},
+    )
+    program = SequenceProgram((ADCEvent(0.0, 3, 1e-3),), duration_s=3e-3)
+    widget._simulation_started_at = 100.0
+    assert widget._estimated_work_units() == 5
+    worker = SequenceSimulationThread(
+        BlochSimulator(use_parallel=False),
+        program,
+        widget.phantom,
+        (),
+        live_preview=live_preview,
+        chunk_voxels=2,
+        animation_time_resolution_s=1e-3 if with_animation else None,
+        animation_maximum_frames=10 if with_animation else 0,
+    )
+    now = 108.0
+    monkeypatch.setattr(
+        "blochsimulator.ui.sequence_simulation_widget.time.monotonic", lambda: now
+    )
+    snapshots = []
+
+    def record_progress(done, total):
+        nonlocal now
+        now += 2.0
+        widget._progress(done, total)
+        snapshots.append(
+            (done, total, widget.progress.format(), widget.simulation_time_label.text())
+        )
+
+    completed = []
+    failed = []
+    previews = []
+    worker.progress.connect(record_progress)
+    worker.stage.connect(widget._status_update)
+    worker.preview.connect(lambda fraction, signal: previews.append(fraction))
+    worker.result_ready.connect(completed.append)
+    worker.failed.connect(failed.append)
+    worker.run()
+
+    assert not failed
+    assert len(completed) == 1
+    total = 10 if with_animation else 5
+    assert snapshots[0][:3] == (0, total, "0% · Estimating remaining time…")
+    first_percent = 20 if with_animation else 40
+    first_eta = "8s" if with_animation else "3s"
+    assert snapshots[1] == (
+        2,
+        total,
+        f"{first_percent}% · ETA {first_eta}",
+        f"Elapsed: 12s · Remaining: approximately {first_eta}",
+    )
+    assert snapshots[-1][:3] == (total, total, "100% · Finishing…")
+    assert [done for done, *_ in snapshots] == sorted(done for done, *_ in snapshots)
+    assert all(count == total for _, count, *_ in snapshots)
+    assert bool(previews) == live_preview
+
+    worker.deleteLater()
     widget.close()
     app.processEvents()
 

@@ -21,6 +21,7 @@ from blochsimulator.sequence import (
     export_bruker_raw,
 )
 from blochsimulator.simulator import resolve_num_threads
+from blochsimulator.spectral_phantom import ChemicalSpecies, SpectralPhantom
 from blochsimulator.units import NUCLEUS_GAMMA_HZ_PER_T
 
 
@@ -434,6 +435,64 @@ def test_sequence_simulation_reports_compile_and_chunk_status():
     assert any("spin-interval updates" in message for message in messages)
     assert any("Simulating chunk 1/2" in message for message in messages)
     assert any("Simulating chunk 2/2" in message for message in messages)
+
+
+@pytest.mark.parametrize(
+    "component_sizes, expected_done",
+    [((5,), [0, 2, 4, 5]), ((5, 2), [0, 2, 4, 5, 5, 7])],
+)
+@pytest.mark.parametrize("chunk_voxels", [2, None])
+def test_spectral_progress_reports_each_chunk_across_components(
+    component_sizes, expected_done, chunk_voxels
+):
+    shape = (5, 1, 1)
+    species = [
+        ChemicalSpecies(f"Peak {index}", 0.0, 1.0, 0.2)
+        for index in range(len(component_sizes))
+    ]
+    phantom = SpectralPhantom(
+        shape=shape,
+        fov=(0.05, 0.01, 0.01),
+        species=species,
+        concentration_maps={
+            peak.name: (np.arange(5) < size).reshape(shape).astype(float)
+            for peak, size in zip(species, component_sizes)
+        },
+    )
+    program = SequenceProgram(
+        (RFEvent(0.0, np.array([250.0]), 1e-3), ADCEvent(1e-3, 2, 1e-3)),
+        duration_s=3e-3,
+    )
+    simulator = BlochSimulator(use_parallel=False)
+    # With default chunking, 32^3 subspins leave room for two parent voxels.
+    sampling = SpinSampling((32, 32, 32)) if chunk_voxels is None else None
+    simulation_options = {
+        "chunk_voxels": chunk_voxels,
+        "spin_sampling": sampling,
+        "spoiler_mode": "gradient",
+        "checkpoints_s": (1e-3,),
+        "simulation_timestep_s": 1e-3,
+    }
+    baseline = simulator.simulate_spectral_sequence(
+        program, phantom, **simulation_options
+    )
+    updates = []
+    result = simulator.simulate_spectral_sequence(
+        program,
+        phantom,
+        **simulation_options,
+        progress_callback=lambda done, total: updates.append((done, total)),
+    )
+
+    total_voxels = sum(component_sizes)
+    assert updates == [(done, total_voxels) for done in expected_done]
+    np.testing.assert_array_equal(result.signal, baseline.signal)
+    np.testing.assert_array_equal(
+        result.final_magnetization, baseline.final_magnetization
+    )
+    np.testing.assert_array_equal(
+        result.checkpoint_magnetization, baseline.checkpoint_magnetization
+    )
 
 
 def test_multi_rx_chunking_and_openmp_do_not_change_signal():

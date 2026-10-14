@@ -59,11 +59,23 @@ from blochsimulator.sequence.rf_pulses import (
 from blochsimulator.units import NUCLEUS_GAMMA_HZ_PER_T, rf_hz_to_gauss
 
 
-def _select_workspace(window, mode, timeout_ms=2_000):
+def _select_workspace(window, mode, timeout_ms=2_000, *, use_popup=False):
     """Select a workspace and wait until its deferred transition completes."""
     index = window.workspace_mode_selector.findData(mode)
     assert index >= 0
-    window.workspace_mode_selector.setCurrentIndex(index)
+    if use_popup:
+        selector = window.workspace_mode_selector
+        QTest.mouseClick(selector, Qt.LeftButton)
+        # Qt briefly suppresses popup mouse releases after opening the combo.
+        QTest.qWait(QApplication.doubleClickInterval())
+        view = selector.view()
+        assert view.isVisible()
+        item = selector.model().index(index, 0)
+        position = view.visualRect(item).center()
+        QTest.mouseMove(view.viewport(), position)
+        QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=position)
+    else:
+        window.workspace_mode_selector.setCurrentIndex(index)
 
     deadline = time.monotonic() + timeout_ms / 1_000
     while window.workspace_mode != mode and time.monotonic() < deadline:
@@ -791,26 +803,40 @@ def test_completed_spin_probe_is_retained_and_can_be_reopened():
     app.processEvents()
 
 
-def test_workspace_roundtrip_remains_interactive():
+@pytest.mark.parametrize("use_popup", [False, True])
+def test_workspace_roundtrip_remains_interactive(use_popup):
     app = QApplication.instance() or QApplication(sys.argv)
     window = BlochSimulatorGUI()
     window.show()
     app.processEvents()
     initial_window_size = window.size()
     initial_frame_geometry = window.frameGeometry()
+    assert window.workspace_switch.isVisible()
+    assert window.workspace_mode_selector.isVisible()
 
-    _select_workspace(window, "sequence")
-    assert window.workspace_mode == "sequence"
-    assert not window.workspace_header.isVisible()
-    assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is window.workspace_switch
+    for _ in range(3):
+        _select_workspace(window, "sequence", use_popup=use_popup)
+        app.processEvents()
+        assert window.workspace_mode == "sequence"
+        assert not window.workspace_header.isVisible()
+        assert (
+            window.tab_widget.cornerWidget(Qt.TopRightCorner) is window.workspace_switch
+        )
+        assert window.workspace_switch.isVisible()
+        assert window.workspace_mode_selector.isVisible()
 
-    _select_workspace(window, "free")
-    assert window.workspace_mode == "free"
-    assert not window.workspace_header.isVisible()
-    assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is None
-    assert window.workspace_switch.parentWidget() is window.free_mode_colormap_controls
-    assert window.size() == initial_window_size
-    assert window.frameGeometry() == initial_frame_geometry
+        _select_workspace(window, "free", use_popup=use_popup)
+        app.processEvents()
+        assert window.workspace_mode == "free"
+        assert not window.workspace_header.isVisible()
+        assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is None
+        assert (
+            window.workspace_switch.parentWidget() is window.free_mode_colormap_controls
+        )
+        assert window.workspace_switch.isVisible()
+        assert window.workspace_mode_selector.isVisible()
+        assert window.size() == initial_window_size
+        assert window.frameGeometry() == initial_frame_geometry
 
     preview_checked = window.status_preview_checkbox.isChecked()
     QTest.mouseClick(window.status_preview_checkbox, Qt.LeftButton)
