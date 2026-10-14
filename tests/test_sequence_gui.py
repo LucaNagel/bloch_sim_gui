@@ -66,14 +66,15 @@ def _select_workspace(window, mode, timeout_ms=2_000, *, use_popup=False):
     if use_popup:
         selector = window.workspace_mode_selector
         QTest.mouseClick(selector, Qt.LeftButton)
-        # Qt briefly suppresses popup mouse releases after opening the combo.
-        QTest.qWait(QApplication.doubleClickInterval())
         view = selector.view()
         assert view.isVisible()
         item = selector.model().index(index, 0)
-        position = view.visualRect(item).center()
-        QTest.mouseMove(view.viewport(), position)
-        QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=position)
+        # On X11, Qt can suppress the synthetic mouse release following the
+        # click that opens the combo box. Select the visible popup item through
+        # its keyboard path, which exercises the same popup-acceptance logic
+        # without relying on that platform-specific pointer timing.
+        view.setCurrentIndex(item)
+        QTest.keyClick(view, Qt.Key_Return)
     else:
         window.workspace_mode_selector.setCurrentIndex(index)
 
