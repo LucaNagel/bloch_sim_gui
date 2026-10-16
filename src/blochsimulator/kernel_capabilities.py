@@ -18,11 +18,7 @@ DYNAMIC_KERNEL_NAMES = (
     "optimized",
     "native_parallel",
     "native_serial",
-    "metal_hybrid",
     "reference",
-)
-DYNAMIC_CPU_KERNEL_NAMES = tuple(
-    name for name in DYNAMIC_KERNEL_NAMES if name != "metal_hybrid"
 )
 # The settings dialog offers only these choices; the first one is the default.
 # The remaining kernels stay available from Python for benchmarks and validation.
@@ -70,7 +66,7 @@ def _extension_status(module_name: str, required_attributes=()):
 
 
 def detect_kernel_capabilities() -> dict[str, dict[str, KernelCapability]]:
-    """Detect ordinary, dynamic-native, and experimental Metal capabilities."""
+    """Detect ordinary and dynamic-native kernel capabilities."""
     legacy_available, legacy_reason, _ = _extension_status(
         "blochsimulator.blochsimulator_cy", ("simulate_sequence_chunk",)
     )
@@ -96,21 +92,6 @@ def detect_kernel_capabilities() -> dict[str, dict[str, KernelCapability]]:
             and hasattr(dynamic_module, "run_dynamic_plan_block_multi_pool")
         ),
     }
-
-    try:
-        from .dynamic_metal_backend import metal_capability
-
-        metal = dict(metal_capability())
-        metal_available = bool(metal.get("available"))
-        metal_reason = (
-            None
-            if metal_available
-            else str(metal.get("reason") or "Metal accelerator is unavailable")
-        )
-    except (ImportError, OSError, RuntimeError, ValueError) as error:
-        metal = {}
-        metal_available = False
-        metal_reason = f"Metal capability check failed: {error}"
 
     sequence = {
         "optimized": KernelCapability(
@@ -159,16 +140,6 @@ def detect_kernel_capabilities() -> dict[str, dict[str, KernelCapability]]:
             reason=dynamic_reason,
             numerical_contract="float64-close",
             details=dynamic_details,
-        ),
-        "metal_hybrid": KernelCapability(
-            "dynamic",
-            "metal_hybrid",
-            metal_available,
-            experimental=True,
-            fallback_supported=True,
-            reason=metal_reason,
-            numerical_contract="experimental-mixed",
-            details=metal,
         ),
         "reference": KernelCapability(
             "dynamic",

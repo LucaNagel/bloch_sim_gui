@@ -2,9 +2,7 @@
 
 Inputs may be Pulseq ``.seq`` files or self-contained ``.blochproj`` projects.
 The validator reports total/species signal, phase, low-signal, time-resolved
-growth, final pool state, optional reconstruction, and repeatability metrics.
-The private Metal candidate remains a feasibility probe and is never selected
-by the normal simulator or GUI.
+growth, final pool state, and optional reconstruction metrics.
 """
 
 from __future__ import annotations
@@ -19,11 +17,7 @@ import numpy as np
 from blochsimulator import BlochSimulator
 from blochsimulator.dynamic_phantom import DynamicSpectralPhantom
 from blochsimulator.project_io import load_project
-from blochsimulator.sequence import (
-    SequenceProgram,
-    SequenceSimulationResult,
-    load_pulseq,
-)
+from blochsimulator.sequence import SequenceProgram, load_pulseq
 from blochsimulator.spectral_phantom import ChemicalSpecies
 
 
@@ -201,23 +195,6 @@ def _synthetic_phantom(program, shape):
     )
 
 
-def _metal_result(program, reference, raw):
-    metadata = dict(reference.metadata)
-    metadata.update(raw["metadata"])
-    return SequenceSimulationResult(
-        signal=np.asarray(raw["signal"]),
-        adc_times_s=np.asarray(raw["adc_times_s"]),
-        final_magnetization=np.asarray(raw["final_magnetization"]),
-        checkpoint_magnetization=None,
-        checkpoint_times_s=np.zeros(0, dtype=float),
-        metadata=metadata,
-        adc_gradient_moment_cyc_per_m=reference.adc_gradient_moment_cyc_per_m,
-        pool_names=tuple(reference.pool_names),
-        species_signal=np.asarray(raw["species_signal"]),
-        final_pool_magnetization=np.asarray(raw["final_pool_magnetization"]),
-    )
-
-
 def _result_metrics(reference, candidate):
     pool_names = tuple(reference.pool_names) or tuple(
         f"pool_{index}" for index in range(reference.species_signal.shape[0])
@@ -255,47 +232,14 @@ def _result_metrics(reference, candidate):
     return metrics
 
 
-def _repeatability_metrics(results):
-    first = results[0]
-    comparisons = []
-    for index, candidate in enumerate(results[1:], start=2):
-        comparisons.append(
-            {
-                "run": index,
-                "signal": _array_metric(first.signal, candidate.signal),
-                "species_signal": _array_metric(
-                    first.species_signal, candidate.species_signal
-                ),
-                "final_pool_state": _array_metric(
-                    first.final_pool_magnetization,
-                    candidate.final_pool_magnetization,
-                ),
-                "bitwise_equal": bool(
-                    np.array_equal(first.signal, candidate.signal)
-                    and np.array_equal(
-                        first.final_pool_magnetization,
-                        candidate.final_pool_magnetization,
-                    )
-                ),
-            }
-        )
-    return {"run_count": len(results), "comparisons_to_first": comparisons}
-
-
 def compare_precision(
     program,
     phantom,
     *,
     simulation_timestep_s,
     candidates=("cpu_float32",),
-    metal_repeat_runs=3,
     signal_nrmse_gate=DEFAULT_SIGNAL_NRMSE_GATE,
     spin_sampling=None,
-    hybrid_calibration_fraction=0.10,
-    hybrid_validation_fraction=0.05,
-    hybrid_fallback_to_cpu=True,
-    hybrid_run_concurrently=True,
-    metal_spin_chunk_size="auto",
 ):
     from blochsimulator.sequence.spin_sampling import coerce_spin_sampling
 
@@ -357,73 +301,6 @@ def compare_precision(
                     "note": "the deterministic CPU shadow candidate was run once",
                 },
             }
-        elif candidate_name in {"metal_probe", "metal_double_single"}:
-            from blochsimulator.dynamic_metal_backend import run_metal_precision_probe
-
-            metal_results = []
-            runtimes = []
-            native_metadata = []
-            for _ in range(max(1, int(metal_repeat_runs))):
-                start = time.perf_counter()
-                raw = run_metal_precision_probe(
-                    program,
-                    phantom,
-                    simulation_timestep_s=simulation_timestep_s,
-                    spin_sampling=spin_sampling,
-                    precision_strategy=(
-                        "double_single"
-                        if candidate_name == "metal_double_single"
-                        else "float32"
-                    ),
-                )
-                runtimes.append(time.perf_counter() - start)
-                native_metadata.append(raw["metadata"])
-                metal_results.append(_metal_result(program, reference, raw))
-            metrics = _result_metrics(reference, metal_results[0])
-            report["candidates"][candidate_name] = {
-                "runtime_seconds": runtimes,
-                "metadata": native_metadata,
-                "metrics": metrics,
-                "gate_passed": bool(
-                    metrics["total_signal"]["nrmse"] <= signal_nrmse_gate
-                ),
-                "repeatability": _repeatability_metrics(metal_results),
-            }
-        elif candidate_name == "metal_hybrid":
-            from blochsimulator.dynamic_metal_backend import run_metal_hybrid_probe
-
-            start = time.perf_counter()
-            raw = run_metal_hybrid_probe(
-                program,
-                phantom,
-                simulation_timestep_s=simulation_timestep_s,
-                spin_sampling=spin_sampling,
-                calibration_fraction=hybrid_calibration_fraction,
-                validation_fraction=hybrid_validation_fraction,
-                signal_nrmse_gate=signal_nrmse_gate,
-                fallback_to_cpu=hybrid_fallback_to_cpu,
-                run_concurrently=hybrid_run_concurrently,
-                spin_chunk_size=metal_spin_chunk_size,
-            )
-            runtime = time.perf_counter() - start
-            candidate = _metal_result(program, reference, raw)
-            metrics = _result_metrics(reference, candidate)
-            hybrid_validation_passed = bool(raw["metadata"]["hybrid_validation_passed"])
-            report["candidates"][candidate_name] = {
-                "runtime_seconds": runtime,
-                "metadata": raw["metadata"],
-                "metrics": metrics,
-                "gate_passed": bool(
-                    hybrid_validation_passed
-                    and metrics["total_signal"]["nrmse"] <= signal_nrmse_gate
-                ),
-                "hybrid_validation_passed": hybrid_validation_passed,
-                "fallback_used": bool(raw["metadata"]["hybrid_fallback_used"]),
-                "repeatability": {
-                    "run_count": 1,
-                    "note": "the CPU-corrected hybrid candidate was run once",
-                },
-            }
         else:
             raise ValueError(f"unknown precision candidate {candidate_name!r}")
     return report
@@ -481,41 +358,15 @@ def _parse_args():
     parser.add_argument(
         "--candidate",
         action="append",
-        choices=(
-            "cpu_float32",
-            "metal_probe",
-            "metal_double_single",
-            "metal_hybrid",
-        ),
-        help="Candidate to validate; repeat to test both (default: cpu_float32)",
+        choices=("cpu_float32",),
+        help="Candidate to validate (default: cpu_float32)",
     )
-    parser.add_argument("--metal-repeat-runs", type=int, default=3)
     parser.add_argument(
         "--subvoxel-spins",
         nargs=3,
         type=int,
         metavar=("NX", "NY", "NZ"),
-        help=(
-            "Midpoint subvoxel grid. The hybrid candidate requires at least "
-            "three total spins, for example 2 2 2."
-        ),
-    )
-    parser.add_argument("--hybrid-calibration-fraction", type=float, default=0.10)
-    parser.add_argument("--hybrid-validation-fraction", type=float, default=0.05)
-    parser.add_argument(
-        "--hybrid-no-fallback",
-        action="store_true",
-        help="Raise instead of returning the trusted Float64 CPU result on failure",
-    )
-    parser.add_argument(
-        "--hybrid-sequential",
-        action="store_true",
-        help="Run the GPU and the two CPU samples sequentially for diagnostics",
-    )
-    parser.add_argument(
-        "--metal-spin-chunk-size",
-        default="auto",
-        help="GPU spin chunk size for the hybrid probe (default: auto)",
+        help="Midpoint subvoxel grid, for example 2 2 2.",
     )
     parser.add_argument(
         "--signal-nrmse-gate", type=float, default=DEFAULT_SIGNAL_NRMSE_GATE
@@ -528,22 +379,13 @@ def main():
     args = _parse_args()
     program, phantom, saved_reference = _load_inputs(args)
     program = _truncate_at_adc_event(program, args.max_adc_events)
-    metal_spin_chunk_size = args.metal_spin_chunk_size
-    if metal_spin_chunk_size != "auto":
-        metal_spin_chunk_size = int(metal_spin_chunk_size)
     report = compare_precision(
         program,
         phantom,
         simulation_timestep_s=args.timestep_us * 1e-6,
         candidates=tuple(args.candidate or ("cpu_float32",)),
-        metal_repeat_runs=args.metal_repeat_runs,
         signal_nrmse_gate=args.signal_nrmse_gate,
         spin_sampling=args.subvoxel_spins,
-        hybrid_calibration_fraction=args.hybrid_calibration_fraction,
-        hybrid_validation_fraction=args.hybrid_validation_fraction,
-        hybrid_fallback_to_cpu=not args.hybrid_no_fallback,
-        hybrid_run_concurrently=not args.hybrid_sequential,
-        metal_spin_chunk_size=metal_spin_chunk_size,
     )
     if saved_reference is not None and args.max_adc_events is None:
         report["saved_project_reference_present"] = True

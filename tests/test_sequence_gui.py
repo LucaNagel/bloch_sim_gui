@@ -126,22 +126,6 @@ def test_execution_completion_message_reports_backend_contract_and_fallback():
     assert "fallback: initial-time ADC requires the CPU path" in fallback
 
 
-def test_execution_completion_message_marks_checked_gpu_as_experimental():
-    message = SequenceSimulationWidget._execution_completion_message(
-        {
-            "requested_sequence_kernel": "metal_hybrid",
-            "sequence_kernel": "metal_hybrid",
-            "effective_threads": 1,
-            "numerical_contract": "experimental-mixed",
-            "hybrid_fallback_used": False,
-        }
-    )
-
-    assert "CPU + Apple GPU (experimental)" in message
-    assert "experimental mixed-precision contract" in message
-    assert "GPU accuracy check passed" in message
-
-
 def test_rf_phase_plot_includes_programmed_phase_and_carrier_evolution():
     event = RFEvent(
         1e-3,
@@ -1630,7 +1614,7 @@ def test_ideal_spoiler_diagnostics_are_hidden_for_every_sequence_source():
 def test_ideal_spoiling_always_uses_one_spin_and_hides_quality_group():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
-    widget.set_dynamic_sequence_kernel("metal_hybrid")
+    widget.set_dynamic_sequence_kernel("optimized")
     widget.set_spoiler_configuration("gradient", (3, 5, 11), "stratified")
 
     assert widget._configured_spin_sampling().counts_xyz == (3, 5, 11)

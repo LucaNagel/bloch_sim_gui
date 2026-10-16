@@ -33,7 +33,7 @@ Signal and final-state similarities close to one indicate numerical agreement.
 The reference path is a correctness oracle, not the recommended production
 kernel. A row with ``fallback_used=true`` does not measure the requested backend;
 inspect ``actual_kernel`` and ``fallback_reason`` before drawing a performance
-conclusion, especially for the experimental Metal hybrid.
+conclusion.
 """
 
 from __future__ import annotations
@@ -49,7 +49,6 @@ from blochsimulator.dynamic_phantom import DynamicSpectralPhantom
 from blochsimulator.kernel_capabilities import (
     DYNAMIC_KERNEL_NAMES,
     SEQUENCE_KERNEL_NAMES,
-    detect_kernel_capabilities,
 )
 
 try:
@@ -113,7 +112,6 @@ DYNAMIC_KERNELS = tuple(
         "optimized",
         "native_serial",
         "native_parallel",
-        "metal_hybrid",
     )
     if name in DYNAMIC_KERNEL_NAMES
 )
@@ -149,10 +147,6 @@ KERNEL_DESCRIPTIONS = {
     "dynamic/native_parallel": (
         "Native dynamic blocks with OpenMP across spins. Small objects may use "
         "one thread, and unsupported pieces retain the optimized NumPy path."
-    ),
-    "dynamic/metal_hybrid": (
-        "Experimental Apple-GPU subvoxel calculation checked against independent "
-        "Float64 CPU samples; unavailable or failed validation uses exact CPU fallback."
     ),
 }
 
@@ -208,10 +202,7 @@ def add_kernel_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=DEFAULT_KERNEL_SUBVOXEL_SPINS,
         metavar=("X", "Y", "Z"),
-        help=(
-            "Common dynamic subvoxel grid; at least three total spins are needed "
-            "to exercise Metal rather than its CPU fallback (default: 1 1 9)."
-        ),
+        help=("Common dynamic subvoxel grid (default: 1 1 9)."),
     )
 
 
@@ -241,16 +232,6 @@ def print_kernel_descriptions(sequence_kernels, dynamic_kernels) -> None:
     )
     for kernel in dynamic_kernels:
         print(f"    {kernel}: {KERNEL_DESCRIPTIONS[f'dynamic/{kernel}']}", flush=True)
-
-    if "metal_hybrid" in dynamic_kernels:
-        capability = detect_kernel_capabilities()["dynamic"]["metal_hybrid"]
-        details = dict(capability.details or {})
-        status = (
-            f"available ({details.get('device_name') or 'Apple GPU'})"
-            if capability.available
-            else f"unavailable: {capability.reason or 'unknown reason'}"
-        )
-        print(f"  Metal capability: {status}", flush=True)
 
 
 def _validate_args(args) -> None:
@@ -345,9 +326,7 @@ def _kernel_record(
     )
     metadata = dict(result.metadata)
     actual_kernel = str(metadata.get("sequence_kernel", kernel))
-    fallback_reason = metadata.get("hybrid_fallback_reason") or metadata.get(
-        "native_fallback_reason"
-    )
+    fallback_reason = metadata.get("native_fallback_reason")
     record.update(_kernel_similarity(reference_result, result))
     record.update(
         {
@@ -386,7 +365,6 @@ def _kernel_record(
                 "native_rf_fused_block_enabled"
             ),
             "native_parallel_threads": metadata.get("native_parallel_threads"),
-            "hybrid_validation_passed": metadata.get("hybrid_validation_passed"),
             "actual_backend": metadata.get("actual_backend"),
         }
     )

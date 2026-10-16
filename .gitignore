@@ -82,7 +82,6 @@ docs/_build/
 src/blochsimulator/bloch_wrapper.c
 src/blochsimulator/bloch_wrapper_strict.c
 src/blochsimulator/dynamic_bloch_wrapper.c
-src/blochsimulator/dynamic_metal_probe_wrapper.cpp
 
 # Generated test notebooks (can be generated from tests/test_notebook_export.py)
 test_mode_a.ipynb

@@ -325,5 +325,3 @@ def test_kernel_benchmark_prints_physical_and_implementation_differences(capsys)
     assert "kPL conversion" in output
     assert "reference: Direct allocation-heavy NumPy" in output
     assert "native_parallel: Native dynamic blocks with OpenMP" in output
-    assert "metal_hybrid: Experimental Apple-GPU" in output
-    assert "Metal capability:" in output

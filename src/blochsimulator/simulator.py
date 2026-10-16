@@ -1379,7 +1379,7 @@ class BlochSimulator:
             Native kernel used by event-based sequence simulations. The reference
             kernel remains available for numerical comparisons. ``strict_reference``
             selects the separately compiled no-fast-math reference extension.
-        dynamic_sequence_kernel : {"optimized", "native_parallel", "native_serial", "metal_hybrid", "reference"}
+        dynamic_sequence_kernel : {"optimized", "native_parallel", "native_serial", "reference"}
             Kernel used specifically for dynamic spectral sequence simulations.
         dynamic_sequence_precision : {"float64", "float32"}
             Arithmetic used by the optimized dynamic CPU path. ``float64`` is
@@ -1400,7 +1400,7 @@ class BlochSimulator:
         if dynamic_sequence_kernel not in DYNAMIC_KERNEL_NAMES:
             raise ValueError(
                 "dynamic_sequence_kernel must be 'optimized', 'native_parallel', "
-                "'native_serial', 'metal_hybrid', or 'reference'"
+                "'native_serial', or 'reference'"
             )
         self.dynamic_sequence_kernel = dynamic_sequence_kernel
         if dynamic_sequence_precision not in {"float64", "float32"}:
@@ -2277,12 +2277,6 @@ class BlochSimulator:
 
     def simulate_dynamic_sequence(self, program, phantom, **kwargs):
         """Simulate a regional two-pool hyperpolarized dynamic phantom."""
-        if self.dynamic_sequence_kernel == "metal_hybrid":
-            from .dynamic_metal_backend import run_metal_hybrid_sequence
-
-            kwargs.setdefault("memory_budget_bytes", self._memory_budget().limit_bytes)
-            return run_metal_hybrid_sequence(program, phantom, **kwargs)
-
         from .dynamic_phantom import simulate_dynamic_sequence
 
         kwargs.setdefault("sequence_kernel", self.dynamic_sequence_kernel)

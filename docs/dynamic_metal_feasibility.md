@@ -1,5 +1,10 @@
 # Experimental Metal backend: feasibility design
 
+> **Removed.** The Metal precision probe, the `metal_hybrid` dynamic kernel,
+> and the related validator candidates have been removed from the code base.
+> This document is kept as a historical record of the feasibility study; the
+> modules, options, and commands it refers to no longer exist.
+
 ## Decision gate
 
 The Float64 CPU solver remains the scientific reference.  Metal execution is

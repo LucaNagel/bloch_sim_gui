@@ -20,7 +20,7 @@ from .dynamic_execution import (
     ACTION_CRUSH,
     build_dynamic_execution_plan,
 )
-from .kernel_capabilities import DYNAMIC_CPU_KERNEL_NAMES
+from .kernel_capabilities import DYNAMIC_KERNEL_NAMES
 
 
 class _BoundedArrayCache:
@@ -2384,7 +2384,7 @@ def _simulate_dynamic_sequence_block(
     conversion_start_s = phantom.conversion_start_on_sequence_timeline_s
     if sequence_kernel is None:
         sequence_kernel = "optimized"
-    if sequence_kernel not in DYNAMIC_CPU_KERNEL_NAMES:
+    if sequence_kernel not in DYNAMIC_KERNEL_NAMES:
         raise ValueError(
             "sequence_kernel must be 'optimized', 'reference', 'native_serial', "
             "or 'native_parallel'"

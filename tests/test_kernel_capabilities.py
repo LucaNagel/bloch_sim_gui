@@ -6,7 +6,6 @@ import pytest
 import blochsimulator
 import blochsimulator.kernel_capabilities as capability_module
 from blochsimulator.kernel_capabilities import (
-    DYNAMIC_CPU_KERNEL_NAMES,
     DYNAMIC_KERNEL_NAMES,
     GUI_KERNEL_NAMES,
     SEQUENCE_KERNEL_NAMES,
@@ -22,7 +21,7 @@ def test_shared_kernel_registry_covers_api_families():
     assert tuple(capabilities) == ("sequence", "dynamic")
     assert set(capabilities["sequence"]) == set(SEQUENCE_KERNEL_NAMES)
     assert set(capabilities["dynamic"]) == set(DYNAMIC_KERNEL_NAMES)
-    assert set(DYNAMIC_CPU_KERNEL_NAMES) == set(DYNAMIC_KERNEL_NAMES) - {"metal_hybrid"}
+    assert "metal_hybrid" not in DYNAMIC_KERNEL_NAMES
     assert blochsimulator.SEQUENCE_KERNEL_NAMES is SEQUENCE_KERNEL_NAMES
     assert blochsimulator.DYNAMIC_KERNEL_NAMES is DYNAMIC_KERNEL_NAMES
     assert blochsimulator.detect_kernel_capabilities is detect_kernel_capabilities
@@ -43,20 +42,13 @@ def test_kernel_capabilities_report_contract_fallback_and_plan_coverage():
     assert native.details["complete_two_pool_plan"]
     assert native.details["complete_multi_pool_plan"]
 
-    metal = capabilities["dynamic"]["metal_hybrid"]
-    assert metal.experimental
-    assert metal.fallback_supported
-    assert metal.numerical_contract == "experimental-mixed"
-    if not metal.available:
-        assert metal.reason
-
 
 def test_kernel_capability_metadata_is_json_serializable():
     metadata = kernel_capability_metadata()
 
     encoded = json.dumps(metadata, sort_keys=True)
     assert '"strict_reference"' in encoded
-    assert '"metal_hybrid"' in encoded
+    assert '"native_parallel"' in encoded
 
 
 def test_persisted_kernel_resolution_keeps_safe_fallback_only(monkeypatch):
@@ -88,7 +80,7 @@ def test_gui_kernel_lists_are_api_subsets_with_cpu_defaults():
         "dynamic": ("native_parallel", "optimized"),
     }
     assert set(GUI_KERNEL_NAMES["sequence"]) <= set(SEQUENCE_KERNEL_NAMES)
-    assert set(GUI_KERNEL_NAMES["dynamic"]) <= set(DYNAMIC_CPU_KERNEL_NAMES)
+    assert set(GUI_KERNEL_NAMES["dynamic"]) <= set(DYNAMIC_KERNEL_NAMES)
 
 
 def test_persisted_kernels_outside_gui_lists_resolve_to_gui_defaults():

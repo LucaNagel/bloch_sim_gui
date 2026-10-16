@@ -8,12 +8,11 @@ packages = [
     "blochsimulator.ui",
     "blochsimulator.sequence",
     "blochsimulator.rfpulses",
-    "blochsimulator.metal",
 ]
 package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
-blochsimulator = ["rfpulses/*.txt", "metal/*.metal"]
+blochsimulator = ["rfpulses/*.txt"]
 
 [project]
 name = "blochsimulator"

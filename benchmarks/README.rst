@@ -238,7 +238,7 @@ The kernel benchmark separates the two independent execution-engine settings:
 
 By default it compares ``reference`` and ``optimized`` for the ordinary
 Sequence Bloch path. For the dynamic phantom it compares ``reference``,
-``optimized``, ``native_serial``, ``native_parallel``, and ``metal_hybrid``.
+``optimized``, ``native_serial``, and ``native_parallel``.
 Each candidate uses the same phantom, FLASH acquisition, time step, spin grid,
 and ideal-crusher model as its family reference. The console explains every
 kernel before the simulation and reports runtime, speed-up, signal similarity,
@@ -248,9 +248,6 @@ The default comparison resamples every source Z plane to a ``24x24`` X/Y grid,
 retaining the complete 3D phantom, and uses a ``16x16`` FLASH matrix. Together
 with the common ``1x1x9`` dynamic subvoxel grid, this normally exceeds the
 1,024-spin threshold at which ``native_parallel`` enables multiple workers.
-Metal is experimental and platform-dependent: when the device is unavailable
-or validation fails, the row is retained as a tested exact-CPU fallback but is
-marked as invalid for Metal performance conclusions.
 
 Selections and workload can be changed explicitly::
 
@@ -264,5 +261,4 @@ Selections and workload can be changed explicitly::
 
 CSV/JSON output includes requested and actual kernels, fallback reasons,
 runtime and speed-up relative to ``reference``, signal and state errors, native
-block capability flags, effective native thread counts, and Metal validation
-status.
+block capability flags, and effective native thread counts.

@@ -11748,14 +11748,12 @@ class SequenceSimulationWidget(QWidget):
             "native_serial": "Native serial",
             "reference": "Reference",
             "strict_reference": "Strict reference",
-            "metal_hybrid": "CPU + Apple GPU (experimental)",
         }
         contract_labels = {
             "bitwise": "bitwise contract",
             "float64-close": "tight Float64 contract",
             "strict-float64": "strict Float64 contract",
             "legacy-fast-math": "legacy Float64 contract",
-            "experimental-mixed": "experimental mixed-precision contract",
         }
 
         actual = str(metadata.get("sequence_kernel") or "").strip()
@@ -11790,15 +11788,10 @@ class SequenceSimulationWidget(QWidget):
             model = str(metadata.get("native_full_plan_model") or "").replace("-", " ")
             details.append(f"complete native plan{f' ({model})' if model else ''}")
 
-        fallback_reason = (
-            metadata.get("hybrid_fallback_reason")
-            or metadata.get("native_fallback_reason")
-            or metadata.get("fallback_reason")
+        fallback_reason = metadata.get("native_fallback_reason") or metadata.get(
+            "fallback_reason"
         )
-        fallback_used = bool(
-            metadata.get("hybrid_fallback_used")
-            or (requested and actual and requested != actual)
-        )
+        fallback_used = bool(requested and actual and requested != actual)
         if fallback_used:
             details.append(
                 f"fallback: {fallback_reason}" if fallback_reason else "fallback used"
@@ -11812,8 +11805,6 @@ class SequenceSimulationWidget(QWidget):
                 if partial_reason
                 else "mixed native/NumPy execution"
             )
-        elif requested == "metal_hybrid":
-            details.append("GPU accuracy check passed")
 
         if details:
             message += "; " + "; ".join(details)

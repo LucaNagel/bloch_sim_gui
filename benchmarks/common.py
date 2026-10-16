@@ -107,7 +107,6 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
             "optimized",
             "native_serial",
             "native_parallel",
-            "metal_hybrid",
             "reference",
         ),
         default="optimized",

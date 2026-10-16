@@ -558,9 +558,7 @@ to result exports or to manually requested checkpoints. Choose `float32` for
 the default display storage or `float16` for smaller animations. Very long
 sequences or large objects automatically receive a coarser effective time
 resolution to bound the temporary float64 checkpoint memory used during the
-replay. The experimental Metal backend does not expose intermediate states;
-the scientific run can still use Metal, while its separate animation replay
-uses the checkpoint-capable CPU path.
+replay.
 
 #### Sequence Bloch kernel
 
@@ -617,10 +615,9 @@ quantity.
 #### Dynamic spectral kernels
 
 The GUI offers **Native automatic** as the default and, below a separator,
-**Optimized NumPy** for compatibility checks and validation. The benchmark,
-validation, and experimental kernels `native_serial`, `reference`, and
-`metal_hybrid` are no longer listed in the GUI; they remain available from
-Python through `dynamic_sequence_kernel=...`. Hovering over a choice shows an
+**Optimized NumPy** for compatibility checks and validation. The benchmark and
+validation kernels `native_serial` and `reference` are no longer listed in the
+GUI; they remain available from Python through `dynamic_sequence_kernel=...`. Hovering over a choice shows an
 English summary of its purpose, current runtime availability, and fallback
 behavior. The same capability registry is available from Python through
 `detect_kernel_capabilities()` and is used by the kernel benchmark.
@@ -636,8 +633,6 @@ Native automatic once. An Optimized NumPy selection saved afterwards is kept.
 | **Native automatic (recommended)** | Adds OpenMP across spins to strict native primitives and bounded plan blocks. Parallel work starts at 1,024 simulated spins; smaller jobs automatically use one thread. The complete bounded driver supports unity, constant complex, or spatial transmit sensitivity, static or dynamic B0, delayed conversion, ADC, crushers, receive coils, subvoxel sampling, and checkpoints. It covers direct or polarized pyruvate inflow, with or without concentration tracking, as well as concentration tracking without inflow. A separate multi-pool worker supports the existing precursor-to-product conversions, including pyruvate-to-alanine. Voxelwise arrival delays use bounded local source tables. This is the GUI default for dynamic phantoms. |
 | `native_serial` (Python only) | Uses the same compiled uniform-transmit RF and longitudinal primitives with one worker thread. The common Phantom Designer model with pyruvate inflow, a polarization curve, and concentration tracking advances both states in one fused pass. This option is useful for separating gains from compiled blocks from gains due to multithreading; it is not normally needed for production simulations. |
 | `reference` (Python only) | Direct, allocation-heavy Python/NumPy formulation. It recomputes intermediate phase, relaxation, exchange, inflow, and RF arrays at each interval and is the correctness oracle for the optimized CPU paths. It supports the complete model but is intended for small validation and diagnostic runs. |
-| `metal_hybrid` (Python only, experimental) | Apple-Silicon-only hybrid for multiple subvoxel spins. It performs the subvoxel work on the GPU, checks separate samples on the CPU, and uses the CPU result automatically if the accuracy check fails. |
-
 The native extension receives coefficients already evaluated and rounded by
 NumPy and is built without fast math or floating-point contraction. Individual
 native primitives reproduce the optimized operation order bit for bit. The

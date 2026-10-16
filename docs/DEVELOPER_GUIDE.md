@@ -293,7 +293,7 @@ backend-neutral input is the immutable Float64/Complex128
 `DynamicExecutionPlan` from `dynamic_execution.py`. This plan owns exact
 interval boundaries, RF and gradient samples, both dynamic-$B_0$
 half-interval integrals, conversion state, source samples, ordered boundary
-actions, and a SHA-256 fingerprint. CPU and Metal adapters must consume this
+actions, and a SHA-256 fingerprint. Every backend adapter must consume this
 same plan; reduced precision belongs only in the backend adapter.
 
 The complete native two-pool driver is deliberately capability-gated. It
