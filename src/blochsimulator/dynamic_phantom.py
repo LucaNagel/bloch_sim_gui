@@ -1824,46 +1824,6 @@ def _prepare_multi_pool_longitudinal_step(
     )
 
 
-def _prepare_longitudinal_step_for_dtype(
-    kpl,
-    r1_p,
-    r1_l,
-    duration,
-    *,
-    with_source,
-    dtype,
-):
-    """Prepare in float64, then round once to the requested state dtype."""
-    dtype = np.dtype(dtype)
-    if dtype == np.dtype(np.float64):
-        return _prepare_longitudinal_step(
-            kpl,
-            r1_p,
-            r1_l,
-            duration,
-            with_source=with_source,
-        )
-    prepared = _prepare_longitudinal_step(
-        np.asarray(kpl, dtype=np.float64),
-        float(r1_p),
-        float(r1_l),
-        float(duration),
-        with_source=with_source,
-    )
-    exp_a, exp_b, difference, regular, source_coefficients = prepared
-    if source_coefficients is not None:
-        source_coefficients = tuple(
-            np.asarray(value, dtype=dtype) for value in source_coefficients
-        )
-    return (
-        np.asarray(exp_a, dtype=dtype),
-        dtype.type(exp_b),
-        np.asarray(difference, dtype=dtype),
-        regular,
-        source_coefficients,
-    )
-
-
 def kinetic_preroll_start_s(
     inflow_curve: Optional[TimeCurve],
     conversion_start_s: float,
@@ -2158,19 +2118,6 @@ def _prepare_transverse_factors(phase_cycles, t2, duration):
     )
 
 
-def _prepare_transverse_factors_for_dtype(phase_cycles, t2, duration, dtype):
-    """Prepare complex factors in float64 and round once for float32 runs."""
-    dtype = np.dtype(dtype)
-    if dtype == np.dtype(np.float64):
-        return _prepare_transverse_factors(phase_cycles, t2, duration)
-    prepared = _prepare_transverse_factors(
-        np.asarray(phase_cycles, dtype=np.float64),
-        np.asarray(t2, dtype=np.float64),
-        float(duration),
-    )
-    return tuple(np.asarray(value, dtype=np.complex64) for value in prepared)
-
-
 def _prepare_rf_rotation(rf_hz, duration):
     """Return the already-rounded scalar coefficients for one RF rotation."""
     nx = -2 * np.pi * rf_hz.real * duration
@@ -2188,15 +2135,6 @@ def _prepare_rf_rotation(rf_hz, duration):
         float(sine),
         float(1.0 - cosine),
     )
-
-
-def _prepare_rf_rotation_for_dtype(rf_hz, duration, dtype):
-    """Prepare RF scalars in float64 and round once for float32 execution."""
-    prepared = _prepare_rf_rotation(complex(rf_hz), float(duration))
-    dtype = np.dtype(dtype)
-    if prepared is None or dtype == np.dtype(np.float64):
-        return prepared
-    return tuple(dtype.type(value) for value in prepared)
 
 
 def _classify_tx_sensitivity(tx_sensitivity):
@@ -2231,25 +2169,6 @@ def _prepare_spatial_rf_rotation(rf_hz, tx_sensitivity, duration):
     )
 
 
-def _rf_rotate_float32(state, prepared):
-    """Apply one xy-axis RF rotation in a stable float32 plane basis."""
-    if prepared is None:
-        return
-    axis_x, axis_y, cosine, sine, one_minus_cosine = prepared
-    for pool in range(state.shape[0]):
-        vectors = state[pool]
-        value_x = vectors[:, 0]
-        value_y = vectors[:, 1]
-        value_z = vectors[:, 2]
-        parallel = value_x * axis_x + value_y * axis_y
-        perpendicular = -value_x * axis_y + value_y * axis_x
-        rotated_perpendicular = perpendicular * cosine - value_z * sine
-        rotated_z = perpendicular * sine + value_z * cosine
-        vectors[:, 0] = parallel * axis_x - rotated_perpendicular * axis_y
-        vectors[:, 1] = parallel * axis_y + rotated_perpendicular * axis_x
-        vectors[:, 2] = rotated_z
-
-
 def _rf_rotate(state, rf_hz, duration):
     prepared = _prepare_rf_rotation(rf_hz, duration)
     if prepared is None:
@@ -2272,11 +2191,6 @@ def _rf_rotate_spatial(state, rf_hz, tx_sensitivity, duration):
     axis_x, axis_y, cosine, sine = _prepare_spatial_rf_rotation(
         rf_hz, tx_sensitivity, duration
     )
-    if state.dtype != np.dtype(np.float64):
-        axis_x = axis_x.astype(state.dtype)
-        axis_y = axis_y.astype(state.dtype)
-        cosine = cosine.astype(state.dtype)
-        sine = sine.astype(state.dtype)
     for pool in range(state.shape[0]):
         vectors = state[pool]
         value_x = vectors[:, 0].copy()
@@ -2313,7 +2227,6 @@ def _simulate_dynamic_sequence_block(
     simulation_timestep_s=1e-6,
     signal_weighting="voxel",
     sequence_kernel="optimized",
-    simulation_precision="float64",
     use_parallel=True,
     num_threads=1,
     memory_budget_bytes=None,
@@ -2389,13 +2302,7 @@ def _simulate_dynamic_sequence_block(
             "sequence_kernel must be 'optimized', 'reference', 'native_serial', "
             "or 'native_parallel'"
         )
-    if simulation_precision not in {"float64", "float32"}:
-        raise ValueError("simulation_precision must be 'float64' or 'float32'")
-    if simulation_precision == "float32" and sequence_kernel != "optimized":
-        raise ValueError(
-            "float32 precision currently requires sequence_kernel='optimized'"
-        )
-    real_dtype = np.dtype(simulation_precision)
+    real_dtype = np.dtype(np.float64)
     checkpoint_dtype = np.dtype(
         real_dtype if checkpoint_dtype is None else checkpoint_dtype
     )
@@ -2405,9 +2312,7 @@ def _simulate_dynamic_sequence_block(
         np.dtype(np.float64),
     }:
         raise ValueError("checkpoint_dtype must be float16, float32, or float64")
-    complex_dtype = np.dtype(
-        np.complex64 if real_dtype == np.dtype(np.float32) else np.complex128
-    )
+    complex_dtype = np.dtype(np.complex128)
     real_type = real_dtype.type
     requested_sequence_kernel = sequence_kernel
     native_fallback_reason = None
@@ -2678,19 +2583,14 @@ def _simulate_dynamic_sequence_block(
 
     def prepare_transverse_factors(phase_cycles, duration_s):
         if not _parent_resolved_signal or native_transverse_prepare is None:
-            return _prepare_transverse_factors_for_dtype(
-                phase_cycles, t2, duration_s, real_dtype
-            )
+            return _prepare_transverse_factors(phase_cycles, t2, duration_s)
         table = native_transverse_prepare(
             np.ascontiguousarray(phase_cycles, dtype=np.float64),
             np.ascontiguousarray(t2[:, 0], dtype=np.float64),
             float(duration_s),
         )
-        target_dtype = (
-            np.complex64 if real_dtype == np.dtype(np.float32) else np.complex128
-        )
         return tuple(
-            np.ascontiguousarray(table[pool], dtype=target_dtype)
+            np.ascontiguousarray(table[pool], dtype=np.complex128)
             for pool in range(table.shape[0])
         )
 
@@ -2809,11 +2709,7 @@ def _simulate_dynamic_sequence_block(
     native_rf_hz = (
         rf_hz * constant_tx_sensitivity if tx_classification == "constant" else rf_hz
     )
-    adc_demodulation = (
-        compiled.adc_demodulation
-        if complex_dtype == np.dtype(np.complex128)
-        else np.asarray(compiled.adc_demodulation, dtype=complex_dtype)
-    )
+    adc_demodulation = compiled.adc_demodulation
     action_cursor = 0
     transverse_crush_state_set = set(
         int(value)
@@ -3084,7 +2980,6 @@ def _simulate_dynamic_sequence_block(
                 and passive_conversion is None
             )
         )
-        and real_dtype == np.dtype(np.float64)
         and checkpoint_dtype == np.dtype(np.float64)
         and native_full_plan_table_limit_bytes
         >= n_simulated_spins * native_full_plan_bytes_per_spin
@@ -3371,13 +3266,12 @@ def _simulate_dynamic_sequence_block(
                 half_duration, _ = longitudinal_key
                 prepared = coefficient_cache.get(longitudinal_key)
                 if prepared is None:
-                    prepared = _prepare_longitudinal_step_for_dtype(
+                    prepared = _prepare_longitudinal_step(
                         coefficient_kpl,
                         coefficient_r1[0],
                         coefficient_r1[1],
                         half_duration,
                         with_source=True,
-                        dtype=real_dtype,
                     )
                     coefficient_cache.put(longitudinal_key, prepared)
                 concentration_key = (
@@ -3387,13 +3281,12 @@ def _simulate_dynamic_sequence_block(
                 )
                 concentration_prepared = coefficient_cache.get(concentration_key)
                 if concentration_prepared is None:
-                    concentration_prepared = _prepare_longitudinal_step_for_dtype(
+                    concentration_prepared = _prepare_longitudinal_step(
                         coefficient_kpl,
                         0.0,
                         0.0,
                         half_duration,
                         with_source=True,
-                        dtype=real_dtype,
                     )
                     coefficient_cache.put(concentration_key, concentration_prepared)
                 longitudinal_values.append(prepared)
@@ -3594,13 +3487,12 @@ def _simulate_dynamic_sequence_block(
                 group_by_duration[half_duration] = group
                 prepared = coefficient_cache.get(half_duration)
                 if prepared is None:
-                    prepared = _prepare_longitudinal_step_for_dtype(
+                    prepared = _prepare_longitudinal_step(
                         kpl,
                         r1[0],
                         r1[1],
                         half_duration,
                         with_source=False,
-                        dtype=real_dtype,
                     )
                     coefficient_cache.put(half_duration, prepared)
                 prepared_by_group.append(prepared)
@@ -3849,13 +3741,12 @@ def _simulate_dynamic_sequence_block(
                         )
                         prepared = coefficient_cache.get(prepared_key)
                         if prepared is None:
-                            prepared = _prepare_longitudinal_step_for_dtype(
+                            prepared = _prepare_longitudinal_step(
                                 interval_kpl,
                                 r1[0],
                                 r1[1],
                                 half_duration,
                                 with_source=native_full_plan_source_model,
-                                dtype=real_dtype,
                             )
                             coefficient_cache.put(prepared_key, prepared)
                         regular_values = prepared[3]
@@ -3870,15 +3761,12 @@ def _simulate_dynamic_sequence_block(
                                 concentration_key
                             )
                             if concentration_prepared is None:
-                                concentration_prepared = (
-                                    _prepare_longitudinal_step_for_dtype(
-                                        interval_kpl,
-                                        0.0,
-                                        0.0,
-                                        half_duration,
-                                        with_source=True,
-                                        dtype=real_dtype,
-                                    )
+                                concentration_prepared = _prepare_longitudinal_step(
+                                    interval_kpl,
+                                    0.0,
+                                    0.0,
+                                    half_duration,
+                                    with_source=True,
                                 )
                                 coefficient_cache.put(
                                     concentration_key, concentration_prepared
@@ -4409,13 +4297,12 @@ def _simulate_dynamic_sequence_block(
             )
             longitudinal_prepared = coefficient_cache.get(longitudinal_key)
             if longitudinal_prepared is None:
-                longitudinal_prepared = _prepare_longitudinal_step_for_dtype(
+                longitudinal_prepared = _prepare_longitudinal_step(
                     coefficient_interval_kpl,
                     coefficient_r1[0],
                     coefficient_r1[1],
                     coefficient_half_duration,
                     with_source=phantom.pyruvate_inflow is not None,
-                    dtype=real_dtype,
                 )
                 coefficient_cache.put(longitudinal_key, longitudinal_prepared)
             concentration_longitudinal_prepared = None
@@ -4430,15 +4317,12 @@ def _simulate_dynamic_sequence_block(
                     concentration_key
                 )
                 if concentration_longitudinal_prepared is None:
-                    concentration_longitudinal_prepared = (
-                        _prepare_longitudinal_step_for_dtype(
-                            coefficient_interval_kpl,
-                            0.0,
-                            0.0,
-                            coefficient_half_duration,
-                            with_source=True,
-                            dtype=real_dtype,
-                        )
+                    concentration_longitudinal_prepared = _prepare_longitudinal_step(
+                        coefficient_interval_kpl,
+                        0.0,
+                        0.0,
+                        coefficient_half_duration,
+                        with_source=True,
                     )
                     coefficient_cache.put(
                         concentration_key, concentration_longitudinal_prepared
@@ -4647,15 +4531,7 @@ def _simulate_dynamic_sequence_block(
                     transverse_state[:] = state[:, :, 0] + 1j * state[:, :, 1]
                 elif native_rf_rotation_block is None:
                     sync_transverse_to_state()
-                    if real_dtype == np.dtype(np.float32):
-                        _rf_rotate_float32(
-                            state,
-                            _prepare_rf_rotation_for_dtype(
-                                native_rf_hz[interval], dt, real_dtype
-                            ),
-                        )
-                    else:
-                        _rf_rotate(state, native_rf_hz[interval], dt)
+                    _rf_rotate(state, native_rf_hz[interval], dt)
                     transverse_state[:] = state[:, :, 0] + 1j * state[:, :, 1]
                 else:
                     rf_prepared = _prepare_rf_rotation(native_rf_hz[interval], dt)
@@ -4976,7 +4852,6 @@ def _simulate_dynamic_sequence_block(
                 else None
             ),
             "n_rx_coils": n_rx_coils,
-            "simulation_precision": simulation_precision,
             "simulation_timestep_s": float(simulation_timestep_s),
             "compiled_interval_count": interval_count,
             "execution_plan_segment_count": execution_plan.n_segments,
@@ -4987,7 +4862,6 @@ def _simulate_dynamic_sequence_block(
             "execution_plan_build_s": execution_plan_build_s,
             "state_dtype": real_dtype.name,
             "signal_dtype": complex_dtype.name,
-            "coefficient_precompute_dtype": "float64",
             "sequence_kernel": sequence_kernel,
             "requested_sequence_kernel": requested_sequence_kernel,
             "numerical_contract": (
@@ -5176,7 +5050,6 @@ def simulate_dynamic_sequence(
     simulation_timestep_s=1e-6,
     signal_weighting="voxel",
     sequence_kernel="optimized",
-    simulation_precision="float64",
     use_parallel=True,
     num_threads=1,
     memory_budget_bytes=None,
@@ -5230,12 +5103,8 @@ def simulate_dynamic_sequence(
     execution_plan = build_dynamic_execution_plan(compiled, phantom)
     execution_plan_build_s = perf_counter() - plan_started
 
-    real_dtype = np.dtype(simulation_precision)
-    if real_dtype not in {np.dtype(np.float32), np.dtype(np.float64)}:
-        raise ValueError("simulation_precision must be 'float64' or 'float32'")
-    complex_dtype = np.dtype(
-        np.complex64 if real_dtype == np.dtype(np.float32) else np.complex128
-    )
+    real_dtype = np.dtype(np.float64)
+    complex_dtype = np.dtype(np.complex128)
     effective_checkpoint_dtype = np.dtype(
         real_dtype if checkpoint_dtype is None else checkpoint_dtype
     )
@@ -5349,7 +5218,6 @@ def simulate_dynamic_sequence(
         simulation_timestep_s=simulation_timestep_s,
         signal_weighting=signal_weighting,
         sequence_kernel=sequence_kernel,
-        simulation_precision=simulation_precision,
         use_parallel=use_parallel,
         num_threads=num_threads,
         memory_budget_bytes=memory_budget_bytes,

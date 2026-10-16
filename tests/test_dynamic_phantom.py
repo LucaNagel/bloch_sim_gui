@@ -753,76 +753,6 @@ def test_optimized_dynamic_kernel_is_bitwise_equal_to_reference(with_drivers, kp
         assert np.array_equal(getattr(optimized, name), getattr(reference, name))
 
 
-def test_float32_dynamic_shadow_path_reports_dtypes_and_tracks_float64():
-    phantom = _dynamic_phantom()
-    raster = 20e-6
-    phantom.pyruvate_inflow = PyruvateInflow(
-        TimeCurve(
-            (0.0, 6 * raster, 12 * raster),
-            (0.0, 0.2, 0.1),
-            "linear",
-            "hold",
-        ),
-        np.ones(phantom.shape),
-    )
-    phantom.dynamic_b0 = DynamicB0(
-        TimeCurve(
-            (0.0, 6 * raster, 12 * raster),
-            (-3.0, 5.0, 2.0),
-            "linear",
-            "hold",
-        ),
-        np.linspace(0.5, 1.0, phantom.nvoxels).reshape(phantom.shape),
-        (1.0, 0.8),
-    )
-    program = SequenceProgram(
-        (
-            RFEvent(
-                2 * raster,
-                np.asarray([80.0 + 20.0j, 120.0 - 10.0j, 60.0 + 5.0j, 0.0j]),
-                raster,
-            ),
-            GradientEvent("x", 0.0, np.linspace(-150.0, 200.0, 12), raster),
-            ADCEvent(0.0, 6, 2 * raster, phase_offset_rad=0.37),
-        ),
-        duration_s=12 * raster,
-    )
-    kwargs = {
-        "checkpoints_s": (0.0, 7 * raster, 12 * raster),
-        "simulation_timestep_s": 5e-6,
-    }
-    float64 = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
-        program, phantom, **kwargs
-    )
-    float32 = BlochSimulator(
-        use_parallel=False,
-        dynamic_sequence_precision="float32",
-    ).simulate_dynamic_sequence(program, phantom, **kwargs)
-
-    assert float32.metadata["simulation_precision"] == "float32"
-    assert float32.metadata["state_dtype"] == "float32"
-    assert float32.metadata["signal_dtype"] == "complex64"
-    assert float32.metadata["coefficient_precompute_dtype"] == "float64"
-    assert float32.signal.dtype == np.complex64
-    assert float32.species_signal.dtype == np.complex64
-    assert float32.final_magnetization.dtype == np.float32
-    assert float32.final_pool_magnetization.dtype == np.float32
-    assert float32.checkpoint_magnetization.dtype == np.float32
-    assert float32.checkpoint_pool_magnetization.dtype == np.float32
-    for name in (
-        "signal",
-        "species_signal",
-        "final_magnetization",
-        "final_pool_magnetization",
-        "checkpoint_magnetization",
-        "checkpoint_pool_magnetization",
-    ):
-        actual = getattr(float32, name)
-        expected = getattr(float64, name)
-        assert np.all(np.isfinite(actual))
-        np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-6)
-
-
 def test_dynamic_animation_can_reduce_only_checkpoint_storage_precision():
     phantom = _dynamic_phantom()
     program = SequenceProgram((), duration_s=1e-3)
@@ -850,26 +780,6 @@ def test_dynamic_animation_can_reduce_only_checkpoint_storage_precision():
         rtol=1e-6,
         atol=1e-7,
     )
-
-
-@pytest.mark.parametrize("kernel", ["reference", "native_serial", "native_parallel"])
-def test_float32_dynamic_shadow_path_rejects_nonoptimized_kernels(kernel):
-    with pytest.raises(ValueError, match="requires sequence_kernel='optimized'"):
-        BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
-            SequenceProgram((), duration_s=1e-3),
-            _dynamic_phantom(),
-            sequence_kernel=kernel,
-            simulation_precision="float32",
-        )
-
-
-def test_bloch_simulator_rejects_native_kernel_with_float32_precision():
-    with pytest.raises(ValueError, match="requires the optimized kernel"):
-        BlochSimulator(
-            use_parallel=False,
-            dynamic_sequence_kernel="native_serial",
-            dynamic_sequence_precision="float32",
-        )
 
 
 @pytest.mark.parametrize(

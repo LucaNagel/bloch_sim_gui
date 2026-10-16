@@ -1,4 +1,4 @@
-"""Validate mixed-precision dynamic execution against the Float64 CPU oracle.
+"""Validate dynamic sequence kernels against the optimized Float64 oracle.
 
 Inputs may be Pulseq ``.seq`` files or self-contained ``.blochproj`` projects.
 The validator reports total/species signal, phase, low-signal, time-resolved
@@ -15,6 +15,7 @@ import time
 import numpy as np
 
 from blochsimulator import BlochSimulator
+from blochsimulator.kernel_capabilities import DYNAMIC_KERNEL_NAMES
 from blochsimulator.dynamic_phantom import DynamicSpectralPhantom
 from blochsimulator.project_io import load_project
 from blochsimulator.sequence import SequenceProgram, load_pulseq
@@ -24,6 +25,11 @@ from blochsimulator.spectral_phantom import ChemicalSpecies
 DEFAULT_SIGNAL_NRMSE_GATE = 1.0e-3
 SIGNIFICANT_MAGNITUDE_FRACTION = 1.0e-3
 LOW_SIGNAL_MAGNITUDE_FRACTION = 1.0e-4
+REFERENCE_KERNEL = "optimized"
+CANDIDATE_KERNELS = tuple(
+    name for name in DYNAMIC_KERNEL_NAMES if name != REFERENCE_KERNEL
+)
+DEFAULT_CANDIDATES = ("native_parallel",)
 
 
 def _array_metric(reference, candidate):
@@ -232,31 +238,37 @@ def _result_metrics(reference, candidate):
     return metrics
 
 
-def compare_precision(
+def compare_kernels(
     program,
     phantom,
     *,
     simulation_timestep_s,
-    candidates=("cpu_float32",),
+    candidates=DEFAULT_CANDIDATES,
     signal_nrmse_gate=DEFAULT_SIGNAL_NRMSE_GATE,
     spin_sampling=None,
 ):
     from blochsimulator.sequence.spin_sampling import coerce_spin_sampling
 
+    for candidate_name in candidates:
+        if candidate_name not in CANDIDATE_KERNELS:
+            raise ValueError(f"unknown candidate kernel {candidate_name!r}")
     sampling_metadata = coerce_spin_sampling(spin_sampling).to_metadata()
-    reference_simulator = BlochSimulator(
-        use_parallel=False,
-        dynamic_sequence_kernel="optimized",
-        dynamic_sequence_precision="float64",
-    )
-    start = time.perf_counter()
-    reference = reference_simulator.simulate_dynamic_sequence(
-        program,
-        phantom,
-        simulation_timestep_s=simulation_timestep_s,
-        spin_sampling=spin_sampling,
-    )
-    reference_seconds = time.perf_counter() - start
+
+    def run(kernel):
+        simulator = BlochSimulator(
+            use_parallel=kernel == "native_parallel",
+            dynamic_sequence_kernel=kernel,
+        )
+        start = time.perf_counter()
+        result = simulator.simulate_dynamic_sequence(
+            program,
+            phantom,
+            simulation_timestep_s=simulation_timestep_s,
+            spin_sampling=spin_sampling,
+        )
+        return result, time.perf_counter() - start
+
+    reference, reference_seconds = run(REFERENCE_KERNEL)
     report = {
         "duration_s": float(program.duration_s),
         "active_voxels": int(phantom.n_active),
@@ -265,7 +277,7 @@ def compare_precision(
         "signal_nrmse_gate": float(signal_nrmse_gate),
         "spin_sampling": sampling_metadata,
         "reference": {
-            "backend": "optimized CPU Float64",
+            "kernel": REFERENCE_KERNEL,
             "runtime_seconds": reference_seconds,
             "compiled_interval_count": reference.metadata.get(
                 "compiled_interval_count"
@@ -274,35 +286,18 @@ def compare_precision(
         "candidates": {},
     }
     for candidate_name in candidates:
-        if candidate_name == "cpu_float32":
-            simulator = BlochSimulator(
-                use_parallel=False,
-                dynamic_sequence_kernel="optimized",
-                dynamic_sequence_precision="float32",
-            )
-            start = time.perf_counter()
-            candidate = simulator.simulate_dynamic_sequence(
-                program,
-                phantom,
-                simulation_timestep_s=simulation_timestep_s,
-                spin_sampling=spin_sampling,
-            )
-            runtime = time.perf_counter() - start
-            metrics = _result_metrics(reference, candidate)
-            report["candidates"][candidate_name] = {
-                "runtime_seconds": runtime,
-                "metadata": candidate.metadata,
-                "metrics": metrics,
-                "gate_passed": bool(
-                    metrics["total_signal"]["nrmse"] <= signal_nrmse_gate
-                ),
-                "repeatability": {
-                    "run_count": 1,
-                    "note": "the deterministic CPU shadow candidate was run once",
-                },
-            }
-        else:
-            raise ValueError(f"unknown precision candidate {candidate_name!r}")
+        candidate, runtime = run(candidate_name)
+        metrics = _result_metrics(reference, candidate)
+        report["candidates"][candidate_name] = {
+            "runtime_seconds": runtime,
+            "speedup_vs_reference": (
+                reference_seconds / runtime if runtime > 0 else None
+            ),
+            "actual_kernel": candidate.metadata.get("sequence_kernel"),
+            "metadata": candidate.metadata,
+            "metrics": metrics,
+            "gate_passed": bool(metrics["total_signal"]["nrmse"] <= signal_nrmse_gate),
+        }
     return report
 
 
@@ -358,8 +353,8 @@ def _parse_args():
     parser.add_argument(
         "--candidate",
         action="append",
-        choices=("cpu_float32",),
-        help="Candidate to validate (default: cpu_float32)",
+        choices=CANDIDATE_KERNELS,
+        help="Dynamic kernel to validate; repeatable (default: native_parallel)",
     )
     parser.add_argument(
         "--subvoxel-spins",
@@ -379,11 +374,11 @@ def main():
     args = _parse_args()
     program, phantom, saved_reference = _load_inputs(args)
     program = _truncate_at_adc_event(program, args.max_adc_events)
-    report = compare_precision(
+    report = compare_kernels(
         program,
         phantom,
         simulation_timestep_s=args.timestep_us * 1e-6,
-        candidates=tuple(args.candidate or ("cpu_float32",)),
+        candidates=tuple(args.candidate or DEFAULT_CANDIDATES),
         signal_nrmse_gate=args.signal_nrmse_gate,
         spin_sampling=args.subvoxel_spins,
     )

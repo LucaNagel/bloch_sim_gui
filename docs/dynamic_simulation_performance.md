@@ -278,38 +278,29 @@ checkpoint arrays remain global requested outputs. A pre-allocation memory
 plan accounts separately for these outputs, per-parent work, and a bounded
 cache reserve.
 
-The next experimental path is `float32`/`complex64` GPU execution.  Unlike the
-CPU optimizations, it cannot be bit-identical to the `float64` reference and
-must remain an explicit, separately validated backend.  The first gate is a
-CPU `float32` shadow execution using the same integration topology; only if
-the complete dynamic bSSFP signal and reconstruction remain within the agreed
-scientific error limits should a fused Metal kernel become a production path.
-
-The shadow path is selected with `simulation_precision="float32"` or
-`BlochSimulator(dynamic_sequence_precision="float32")`.  It stores state in
-`float32`, transverse values and ADC output in `complex64`, but prepares the
-physical coefficients in `float64` and rounds them once before application.
-The default remains `float64`, and the strict native kernels currently reject
-the experimental precision instead of silently changing execution.
-
-For a reproducible precision report, including optional 3D k-space and image
-metrics, run:
+For a reproducible accuracy report of a dynamic kernel against the optimized
+`float64` oracle, including optional 3D k-space and image metrics, run:
 
 ```bash
 python scripts/validate_dynamic_precision.py \
   sequences/sequences/bssfp_3d_spectral_selective_skinner.seq \
   --phantom path/to/dynamic_phantom.npz \
   --timestep-us 10 \
+  --candidate native_parallel \
   --output-json /tmp/dynamic_precision.json
 ```
 
-Omit `--phantom` to use a small heterogeneous synthetic two-pool object.  The
-`--max-adc-events` option provides a shorter accumulation test while retaining
-the original RF/gradient events through the selected acquisition.
+`--candidate` is repeatable and accepts `native_parallel`, `native_serial`,
+and `reference`.  Omit `--phantom` to use a small heterogeneous synthetic
+two-pool object.  The `--max-adc-events` option provides a shorter
+accumulation test while retaining the original RF/gradient events through the
+selected acquisition.
 
-### Initial float32 gate result
+### Reduced-precision experiments (removed)
 
-The first accumulation test used the checked-in 50-frame Skinner-style
+Dynamic execution is `float64` only.  An experimental CPU `float32` shadow
+path and the Metal probes built on it were evaluated as a gate for GPU
+execution and then removed.  The first accumulation test used the checked-in 50-frame Skinner-style
 spectral-selective sequence at a 10 us simulation step and an eight-voxel
 heterogeneous synthetic phantom.  It intentionally tests the complete RF
 waveforms rather than replacing them with ideal flip matrices:

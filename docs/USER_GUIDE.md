@@ -686,9 +686,7 @@ For routine use:
 - More CPU threads do not guarantee a proportional speed-up. Sequence driving,
   coefficient preparation, ADC summation, and unsupported longitudinal kinetics
   can remain in NumPy, while frequent small native calls incur OpenMP overhead.
-- The default dynamic state precision is `float64`. The scripting-only
-  `float32` shadow path requires **Optimized NumPy** and is experimental; it can
-  accumulate unacceptable error over long RF-intensive sequences.
+- Dynamic state is always integrated in `float64`.
 
 **Export results…** in the same workspace defaults to exporting both
 `sequence_result.nc` and `sequence_result.ipynb`. The notebook loads the
