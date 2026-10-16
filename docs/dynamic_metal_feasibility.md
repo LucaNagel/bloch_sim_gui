@@ -110,15 +110,16 @@ unacceptable throughput cost.
 
 ## Optional CPU/Metal subvoxel hybrid probe
 
-An opt-in hybrid experiment is available through both the precision validator
-and the GUI's dynamic-kernel setting. The GPU predicts the complete subvoxel
+An opt-in hybrid experiment is available through the precision validator and
+from Python with `dynamic_sequence_kernel="metal_hybrid"`. The GPU predicts the complete subvoxel
 grid while two disjoint, centre-symmetric sets of subvoxel offsets are run in
 Float64 on the CPU at the same time. One CPU set estimates a species-wise
 complex amplitude/phase correction. The other set is held out and cannot
 influence that correction. Signals are combined in Float64 on the CPU.
 
-In the GUI the extra option is named **CPU + Apple GPU (experimental)**.
-Subvoxel counts are configurable only with gradient-waveform spoiling; ideal
+The GUI no longer offers this option; earlier GUI versions named it
+**CPU + Apple GPU (experimental)**, and a stored selection now resolves to
+Native automatic. Subvoxel counts are configurable only with gradient-waveform spoiling; ideal
 spoiling always uses one spin per voxel. Checkpoints, unavailable Metal
 hardware, unsupported field maps, invalid sampling grids, memory limits in the
 GPU path, and failed accuracy checks all select the exact CPU path

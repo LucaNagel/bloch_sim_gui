@@ -54,11 +54,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..memory import MEMORY_ERROR_PREFIX
-from ..kernel_capabilities import (
-    DYNAMIC_KERNEL_NAMES,
-    SEQUENCE_KERNEL_NAMES,
-    resolve_kernel_request,
-)
+from ..kernel_capabilities import DYNAMIC_KERNEL_NAMES, SEQUENCE_KERNEL_NAMES
 from ..phantom import Phantom
 from ..notebook_exporter import (
     export_pulseq_generation_notebook,
@@ -154,7 +150,7 @@ from .widgets import (
     compact_image_histogram,
     style_image_item,
 )
-from .default_settings import WorkspaceDefaults
+from .default_settings import WorkspaceDefaults, load_kernel_settings
 
 
 def _format_duration(seconds):
@@ -1248,20 +1244,7 @@ class SequenceSimulationWidget(QWidget):
             if settings is not None
             else True
         )
-        sequence_kernel = (
-            str(settings.value("sequence/kernel", "optimized"))
-            if settings is not None
-            else "optimized"
-        )
-        sequence_kernel = resolve_kernel_request("sequence", sequence_kernel)
-        dynamic_sequence_kernel = (
-            str(settings.value("sequence/dynamic_kernel", "optimized"))
-            if settings is not None
-            else "optimized"
-        )
-        dynamic_sequence_kernel = resolve_kernel_request(
-            "dynamic", dynamic_sequence_kernel
-        )
+        sequence_kernel, dynamic_sequence_kernel = load_kernel_settings(settings)
         spoiler_mode = (
             str(settings.value("sequence/spoiler_mode", "ideal"))
             if settings is not None

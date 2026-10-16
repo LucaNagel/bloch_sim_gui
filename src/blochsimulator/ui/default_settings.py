@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 
+from ..kernel_capabilities import GUI_KERNEL_NAMES, resolve_kernel_request
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
+
+# Revision 2 made Native automatic the dynamic default. Older settings stored
+# the previous default, Optimized NumPy, even when it was never chosen.
+KERNEL_SETTINGS_REVISION = 2
 
 
 @dataclass(frozen=True)
@@ -61,3 +66,32 @@ class WorkspaceDefaults:
             settings.setValue(f"defaults/phantom_fov_{axis}_mm", float(value))
         settings.setValue("defaults/phantom_nucleus", self.phantom_nucleus)
         settings.setValue("defaults/field_strength_t", float(self.field_strength_t))
+
+
+def load_kernel_settings(settings) -> tuple[str, str]:
+    """Return the persisted sequence and dynamic kernel choices for the GUI."""
+    if settings is None:
+        return GUI_KERNEL_NAMES["sequence"][0], GUI_KERNEL_NAMES["dynamic"][0]
+    sequence_kernel = str(
+        settings.value("sequence/kernel", GUI_KERNEL_NAMES["sequence"][0])
+    )
+    dynamic_kernel = str(
+        settings.value("sequence/dynamic_kernel", GUI_KERNEL_NAMES["dynamic"][0])
+    )
+    try:
+        revision = int(settings.value("sequence/kernel_settings_revision", 1))
+    except (TypeError, ValueError):
+        revision = 1
+    if revision < KERNEL_SETTINGS_REVISION and dynamic_kernel == "optimized":
+        dynamic_kernel = GUI_KERNEL_NAMES["dynamic"][0]
+    return (
+        resolve_kernel_request("sequence", sequence_kernel),
+        resolve_kernel_request("dynamic", dynamic_kernel),
+    )
+
+
+def save_kernel_settings(settings, sequence_kernel: str, dynamic_kernel: str) -> None:
+    """Persist explicit kernel choices together with the settings revision."""
+    settings.setValue("sequence/kernel", str(sequence_kernel))
+    settings.setValue("sequence/dynamic_kernel", str(dynamic_kernel))
+    settings.setValue("sequence/kernel_settings_revision", KERNEL_SETTINGS_REVISION)

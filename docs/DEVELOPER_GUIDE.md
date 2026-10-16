@@ -333,10 +333,13 @@ publish their reason and complete-plan metadata. Stable names, numerical
 contracts, optional-extension coverage, experiment status, and fallback
 capability live in `kernel_capabilities.py`. `BlochSimulator`, the settings
 loaders, the GUI tooltips, and `benchmark_kernels.py` consume that registry;
-extend it before adding a new label or dispatch branch. A stored experimental
-Metal request remains selectable on a machine without a usable Apple GPU
-because dispatch performs a controlled exact-CPU fallback and the completion
-status displays the actual path.
+extend it before adding a new label or dispatch branch. `GUI_KERNEL_NAMES` in
+the same module lists the subset offered by the settings dialog, with the GUI
+default first; the dialog's combo-box constants must match it. Stored settings
+outside that subset resolve to the GUI default, and
+`ui/default_settings.py:load_kernel_settings` moves the former Optimized NumPy
+dynamic default once (`sequence/kernel_settings_revision`). The remaining
+kernels stay available from Python for benchmarks and validation.
 
 Run the Qt-safe project test entry point before release changes:
 

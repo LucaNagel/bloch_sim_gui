@@ -70,7 +70,6 @@ from ..visualization import (
     imageio as vz_imageio,
 )
 from ..slice_explorer import SliceSelectionExplorer
-from ..kernel_capabilities import resolve_kernel_request
 from ..project_io import load_project, save_project
 from ..project_naming import ProjectExportNamer, project_timestamp
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
@@ -103,7 +102,11 @@ from .parameter_sweep import ParameterSweepWidget
 from .tutorial_manager import TutorialManager
 from .tutorial_overlay import TutorialOverlay
 from .dialogs import SettingsDialog
-from .default_settings import WorkspaceDefaults
+from .default_settings import (
+    WorkspaceDefaults,
+    load_kernel_settings,
+    save_kernel_settings,
+)
 from .sequence_simulation_widget import SequenceSimulationWidget
 from .b1_widgets import B1PhantomCombinationWidget, B1WorkspaceWidget
 from .project_explorer import ProjectExplorerDialog
@@ -5004,13 +5007,11 @@ class BlochSimulatorGUI(QMainWindow):
 
     def _load_sequence_kernel(self) -> str:
         """Load the persistent event-based sequence kernel selection."""
-        kernel = str(self.app_settings.value("sequence/kernel", "optimized"))
-        return resolve_kernel_request("sequence", kernel)
+        return load_kernel_settings(self.app_settings)[0]
 
     def _load_dynamic_sequence_kernel(self) -> str:
         """Load the persistent dynamic two-pool kernel selection."""
-        kernel = str(self.app_settings.value("sequence/dynamic_kernel", "optimized"))
-        return resolve_kernel_request("dynamic", kernel)
+        return load_kernel_settings(self.app_settings)[1]
 
     def _load_sequence_spoiler_mode(self) -> str:
         """Load ideal-crusher or physical gradient-waveform spoiling."""
@@ -5180,9 +5181,10 @@ class BlochSimulatorGUI(QMainWindow):
             "sequence/live_progress_enabled", live_progress_enabled
         )
         sequence_kernel = dialog.sequence_kernel()
-        self.app_settings.setValue("sequence/kernel", sequence_kernel)
         dynamic_sequence_kernel = dialog.dynamic_sequence_kernel()
-        self.app_settings.setValue("sequence/dynamic_kernel", dynamic_sequence_kernel)
+        save_kernel_settings(
+            self.app_settings, sequence_kernel, dynamic_sequence_kernel
+        )
         timestep_preset = dialog.sequence_timestep_preset()
         timestep_us = dialog.sequence_timestep_us()
         self.app_settings.setValue("sequence/timestep_preset", timestep_preset)

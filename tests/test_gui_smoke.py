@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
     QSlider,
     QSpinBox,
 )
+from blochsimulator.kernel_capabilities import GUI_KERNEL_NAMES
 from blochsimulator.memory import GIB, MemoryPolicy
 from blochsimulator.pulse_loader import load_amp_phase_dat, load_pulse_from_file
 from blochsimulator.sequence import ScannerParameters
@@ -350,20 +351,18 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     assert dialog.interface_style() == "fusion"
     assert dialog.sequence_live_progress_enabled()
     assert dialog.sequence_kernel() == "optimized"
-    dialog.sequence_kernel_combo.setCurrentIndex(
-        dialog.sequence_kernel_combo.findData("reference")
-    )
-    assert dialog.sequence_kernel() == "reference"
+    assert dialog.sequence_kernel_combo.findData("reference") == -1
     dialog.sequence_kernel_combo.setCurrentIndex(
         dialog.sequence_kernel_combo.findData("strict_reference")
     )
     assert dialog.sequence_kernel() == "strict_reference"
-    assert dialog.dynamic_sequence_kernel() == "optimized"
-    assert dialog.dynamic_sequence_kernel_combo.findData("metal_hybrid") >= 0
+    assert dialog.dynamic_sequence_kernel() == "native_parallel"
+    for kernel in ("native_serial", "reference", "metal_hybrid"):
+        assert dialog.dynamic_sequence_kernel_combo.findData(kernel) == -1
     dialog.dynamic_sequence_kernel_combo.setCurrentIndex(
-        dialog.dynamic_sequence_kernel_combo.findData("metal_hybrid")
+        dialog.dynamic_sequence_kernel_combo.findData("optimized")
     )
-    assert dialog.dynamic_sequence_kernel() == "metal_hybrid"
+    assert dialog.dynamic_sequence_kernel() == "optimized"
     assert not any(spin.isEnabled() for spin in dialog.subvoxel_spin_count_spins)
     dialog.dynamic_sequence_kernel_combo.setCurrentIndex(
         dialog.dynamic_sequence_kernel_combo.findData("native_parallel")
@@ -474,55 +473,48 @@ def test_settings_dialog_groups_kernel_extras_and_has_english_tooltips(tmp_path)
 
     dialog = SettingsDialog(MemoryPolicy(), tmp_path, tooltips_enabled=True)
 
+    def offered(combo):
+        return tuple(
+            combo.itemData(index)
+            for index in range(combo.count())
+            if combo.itemData(index) is not None
+        )
+
     sequence = dialog.sequence_kernel_combo
+    assert offered(sequence) == GUI_KERNEL_NAMES["sequence"]
     sequence_optimized = sequence.findData("optimized")
     sequence_strict_reference = sequence.findData("strict_reference")
-    sequence_reference = sequence.findData("reference")
     assert sequence.itemText(sequence_optimized) == "Optimized (recommended)"
     assert (
-        sequence.itemText(sequence_strict_reference)
-        == "Strict reference (advanced validation)"
+        sequence.itemText(sequence_strict_reference) == "Strict reference (validation)"
     )
-    assert sequence.itemText(sequence_reference) == "Reference (advanced validation)"
     assert sequence_strict_reference > sequence_optimized + 1
-    assert sequence_reference > sequence_strict_reference
     assert "ordinary Bloch simulations" in sequence.itemData(
         sequence_optimized, Qt.ToolTipRole
-    )
-    assert "numerical comparisons" in sequence.itemData(
-        sequence_reference, Qt.ToolTipRole
     )
     assert "strict numerical baseline" in sequence.itemData(
         sequence_strict_reference, Qt.ToolTipRole
     )
 
     dynamic = dialog.dynamic_sequence_kernel_combo
+    assert offered(dynamic) == GUI_KERNEL_NAMES["dynamic"]
     expected_labels = {
-        "optimized": "Optimized NumPy (recommended)",
-        "native_parallel": "Native automatic (recommended for large objects)",
-        "native_serial": "Native serial (advanced benchmark)",
-        "reference": "Reference (advanced validation)",
-        "metal_hybrid": "CPU + Apple GPU (experimental)",
+        "native_parallel": "Native automatic (recommended)",
+        "optimized": "Optimized NumPy (compatibility and validation)",
     }
     indices = {kernel: dynamic.findData(kernel) for kernel in expected_labels}
-    assert all(index >= 0 for index in indices.values())
-    assert indices["native_serial"] > indices["native_parallel"] + 1
+    assert indices["optimized"] > indices["native_parallel"] + 1
     for kernel, label in expected_labels.items():
         index = indices[kernel]
         assert dynamic.itemText(index) == label
         assert dynamic.itemData(index, Qt.ToolTipRole)
 
-    assert "safe fallback" in dynamic.itemData(indices["optimized"], Qt.ToolTipRole)
     assert "multiple CPU workers" in dynamic.itemData(
         indices["native_parallel"], Qt.ToolTipRole
     )
-    assert "one CPU worker" in dynamic.itemData(
-        indices["native_serial"], Qt.ToolTipRole
+    assert "automatic fallback" in dynamic.itemData(
+        indices["optimized"], Qt.ToolTipRole
     )
-    assert "correctness reference" in dynamic.itemData(
-        indices["reference"], Qt.ToolTipRole
-    )
-    assert "Apple Silicon" in dynamic.itemData(indices["metal_hybrid"], Qt.ToolTipRole)
 
 
 def test_memory_limit_uses_warning_instead_of_generic_error():
@@ -814,7 +806,7 @@ def test_configured_export_directory_is_used(tmp_path, monkeypatch):
     window.app_settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
     export_directory = tmp_path / "custom-exports"
     window.app_settings.setValue("general/export_directory", str(export_directory))
-    window.app_settings.setValue("sequence/kernel", "reference")
+    window.app_settings.setValue("sequence/kernel", "strict_reference")
     window.app_settings.setValue("sequence/dynamic_kernel", "native_parallel")
     window.app_settings.setValue("sequence/timestep_preset", "fast")
     window.app_settings.setValue("sequence/timestep_us", 10.0)
@@ -827,7 +819,7 @@ def test_configured_export_directory_is_used(tmp_path, monkeypatch):
 
     assert window._get_export_directory() == export_directory
     assert export_directory.is_dir()
-    assert window._load_sequence_kernel() == "reference"
+    assert window._load_sequence_kernel() == "strict_reference"
     assert window._load_dynamic_sequence_kernel() == "native_parallel"
     assert window._load_sequence_timestep_preset() == "fast"
     assert window._load_sequence_timestep_us() == pytest.approx(10.0)
@@ -847,12 +839,18 @@ def test_configured_export_directory_is_used(tmp_path, monkeypatch):
 
     window.app_settings.setValue("sequence/kernel", "invalid")
     assert window._load_sequence_kernel() == "optimized"
-    window.app_settings.setValue("sequence/kernel", "strict_reference")
-    assert window._load_sequence_kernel() == "strict_reference"
+    window.app_settings.setValue("sequence/kernel", "reference")
+    assert window._load_sequence_kernel() == "optimized"
     window.app_settings.setValue("sequence/dynamic_kernel", "invalid")
+    assert window._load_dynamic_sequence_kernel() == "native_parallel"
+    for removed in ("native_serial", "reference", "metal_hybrid"):
+        window.app_settings.setValue("sequence/dynamic_kernel", removed)
+        assert window._load_dynamic_sequence_kernel() == "native_parallel"
+    # Settings saved before revision 2 stored Optimized NumPy as the old default.
+    window.app_settings.setValue("sequence/dynamic_kernel", "optimized")
+    assert window._load_dynamic_sequence_kernel() == "native_parallel"
+    window.app_settings.setValue("sequence/kernel_settings_revision", 2)
     assert window._load_dynamic_sequence_kernel() == "optimized"
-    window.app_settings.setValue("sequence/dynamic_kernel", "metal_hybrid")
-    assert window._load_dynamic_sequence_kernel() == "metal_hybrid"
     window.app_settings.setValue("sequence/spoiler_mode", "invalid")
     assert window._load_sequence_spoiler_mode() == "ideal"
 
@@ -868,8 +866,8 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     dialog.tooltips_enabled.return_value = True
     dialog.interface_style.return_value = "fusion"
     dialog.sequence_live_progress_enabled.return_value = False
-    dialog.sequence_kernel.return_value = "reference"
-    dialog.dynamic_sequence_kernel.return_value = "native_parallel"
+    dialog.sequence_kernel.return_value = "strict_reference"
+    dialog.dynamic_sequence_kernel.return_value = "optimized"
     dialog.sequence_timestep_preset.return_value = "fast"
     dialog.sequence_timestep_us.return_value = 10.0
     dialog.sequence_spoiler_mode.return_value = "gradient"
@@ -909,14 +907,18 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     assert float(window.app_settings.value("defaults/sequence_fov_x_mm")) == 180.0
     assert window.app_settings.value("defaults/phantom_nucleus") == "C13"
     assert float(window.app_settings.value("defaults/field_strength_t")) == 7.0
-    assert window.simulator.sequence_kernel == "reference"
-    assert window.simulator.dynamic_sequence_kernel == "native_parallel"
+    assert window.app_settings.value("sequence/kernel") == "strict_reference"
+    assert window.app_settings.value("sequence/dynamic_kernel") == "optimized"
+    assert int(window.app_settings.value("sequence/kernel_settings_revision")) == 2
+    assert window._load_dynamic_sequence_kernel() == "optimized"
+    assert window.simulator.sequence_kernel == "strict_reference"
+    assert window.simulator.dynamic_sequence_kernel == "optimized"
     assert window.simulator.num_threads == 2
     window.sequence_simulation_widget.set_sequence_timestep_us.assert_called_once_with(
         10.0
     )
     window.sequence_simulation_widget.set_dynamic_sequence_kernel.assert_called_once_with(
-        "native_parallel"
+        "optimized"
     )
     window.sequence_simulation_widget.set_spoiler_configuration.assert_called_once_with(
         "gradient", (3, 5, 11), "stratified"

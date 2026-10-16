@@ -35,19 +35,13 @@ class SettingsDialog(QDialog):
         ("Custom free-memory reserve", "custom_reserve"),
         ("Fixed simulation limit", "fixed_limit"),
     )
+    # Offered kernels must match GUI_KERNEL_NAMES in kernel_capabilities.py.
+    # Other kernels remain available from Python for benchmarks and validation.
     SEQUENCE_KERNELS = (("Optimized (recommended)", "optimized"),)
-    SEQUENCE_KERNEL_EXTRAS = (
-        ("Strict reference (advanced validation)", "strict_reference"),
-        ("Reference (advanced validation)", "reference"),
-    )
-    DYNAMIC_SEQUENCE_KERNELS = (
-        ("Optimized NumPy (recommended)", "optimized"),
-        ("Native automatic (recommended for large objects)", "native_parallel"),
-    )
+    SEQUENCE_KERNEL_EXTRAS = (("Strict reference (validation)", "strict_reference"),)
+    DYNAMIC_SEQUENCE_KERNELS = (("Native automatic (recommended)", "native_parallel"),)
     DYNAMIC_SEQUENCE_KERNEL_EXTRAS = (
-        ("Native serial (advanced benchmark)", "native_serial"),
-        ("Reference (advanced validation)", "reference"),
-        ("CPU + Apple GPU (experimental)", "metal_hybrid"),
+        ("Optimized NumPy (compatibility and validation)", "optimized"),
     )
     SEQUENCE_KERNEL_TOOLTIPS = {
         "optimized": (
@@ -55,44 +49,24 @@ class SettingsDialog(QDialog):
             "propagation and mathematically equivalent fast paths for RF-free "
             "intervals and uniform relaxation."
         ),
-        "reference": (
-            "Advanced validation option. Uses the original general native propagation "
-            "path without the optimized fast paths. It is intended for numerical "
-            "comparisons and diagnostics, not as a speed setting."
-        ),
         "strict_reference": (
-            "Preferred validation option. Uses a separately compiled Float64 reference "
-            "kernel without fast-math or floating-point contraction, so optimized and "
-            "native paths can be checked against a strict numerical baseline."
+            "Validation option. Uses a separately compiled Float64 reference "
+            "kernel without fast-math or floating-point contraction, so optimized "
+            "results can be checked against a strict numerical baseline. It is "
+            "slower and not intended as a speed setting."
         ),
     }
     DYNAMIC_SEQUENCE_KERNEL_TOOLTIPS = {
-        "optimized": (
-            "Recommended and most compatible dynamic spectral implementation. Uses "
-            "optimized NumPy, supports the complete model including additional pools, "
-            "and is the safe fallback for combinations unsupported by a native kernel."
-        ),
         "native_parallel": (
-            "Recommended for large dynamic spectral phantoms. Uses a compiled complete "
+            "Recommended for dynamic spectral simulations. Uses a compiled complete "
             "plan for supported two-pool and multi-pool models, including spatial "
             "transmit sensitivity and inflow, and automatically enables multiple CPU "
             "workers. Unsupported cases fall back safely to Optimized NumPy."
         ),
-        "native_serial": (
-            "Advanced benchmark option. Runs the compiled dynamic RF-block kernel "
-            "with one CPU worker, which separates native-kernel gains from "
-            "multithreading gains. It is usually unnecessary for normal simulations."
-        ),
-        "reference": (
-            "Advanced validation option. Uses the direct NumPy formulation as a "
-            "correctness reference. It is expected to be slower and is intended for "
-            "small comparison runs or diagnostics."
-        ),
-        "metal_hybrid": (
-            "Experimental extra for Apple Silicon and multiple subvoxel spins. It "
-            "calculates the subvoxel work on the Apple GPU, validates separate CPU "
-            "samples, and uses the CPU result automatically if the accuracy check "
-            "fails."
+        "optimized": (
+            "Compatibility and validation option. Uses optimized NumPy, supports the "
+            "complete model including additional pools, and serves as the automatic "
+            "fallback of Native automatic. It is much slower for large objects."
         ),
     }
     SEQUENCE_TIMESTEP_PRESETS = (
@@ -174,7 +148,7 @@ class SettingsDialog(QDialog):
         initial_tab: str = "general",
         sequence_live_progress_enabled: bool = True,
         sequence_kernel: str = "optimized",
-        dynamic_sequence_kernel: str = "optimized",
+        dynamic_sequence_kernel: str = "native_parallel",
         sequence_timestep_preset: str = "balanced",
         sequence_timestep_us: float = 5.0,
         sequence_spoiler_mode: str = "ideal",
@@ -376,9 +350,8 @@ class SettingsDialog(QDialog):
         self.sequence_kernel_combo.setCurrentIndex(max(0, kernel_index))
         self.sequence_kernel_combo.setToolTip(
             "Choose the implementation for ordinary Bloch propagation. Optimized "
-            "is recommended for simulations; the advanced Strict reference and "
-            "Reference options are for numerical validation and diagnostics. Hover "
-            "over an option for details."
+            "is recommended for simulations; Strict reference is a slower Float64 "
+            "baseline for numerical validation. Hover over an option for details."
         )
         simulation_form.addRow("Sequence Bloch kernel:", self.sequence_kernel_combo)
 
@@ -403,10 +376,10 @@ class SettingsDialog(QDialog):
         )
         self.dynamic_sequence_kernel_combo.setCurrentIndex(max(0, dynamic_kernel_index))
         self.dynamic_sequence_kernel_combo.setToolTip(
-            "Choose the implementation for dynamic spectral simulation. Optimized "
-            "NumPy is the most compatible default; Native automatic can accelerate "
-            "large supported two-pool and multi-pool objects. Diagnostic and "
-            "experimental kernels are listed as extras. Hover over an option for details."
+            "Choose the implementation for dynamic spectral simulation. Native "
+            "automatic is recommended and falls back to Optimized NumPy for "
+            "unsupported models. Optimized NumPy remains available for compatibility "
+            "checks and validation. Hover over an option for details."
         )
         simulation_form.addRow(
             "Dynamic spectral kernel:", self.dynamic_sequence_kernel_combo

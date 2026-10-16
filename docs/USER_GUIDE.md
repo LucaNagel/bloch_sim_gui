@@ -572,8 +572,8 @@ received signals are then summed.
 | Selection | Implementation and intended use |
 | --- | --- |
 | **Optimized (recommended)** | Native streaming C kernel. It propagates one spin through the complete sequence without storing a spin-by-time history, processes active spins in bounded chunks, and distributes spins over the configured CPU threads. RF-free intervals avoid the general 3×3 rotation, RF-active intervals use a quaternion rotation, and phantoms with at most 64 distinct exact T1/T2 pairs reuse precomputed relaxation factors. Continuous T1/T2 maps automatically use per-spin factors instead. Use this for normal simulations. |
-| **Strict reference (advanced validation)** | Separately compiled Float64 reference extension selected in the GUI or with `sequence_kernel="strict_reference"`. It disables fast math and floating-point contraction and reports the `strict-float64` numerical contract. It is the preferred reproducible validation baseline, not a performance choice. |
-| **Reference (advanced validation)** | Native streaming C kernel with the original general rotation-matrix path and per-spin/per-interval relaxation evaluation. It has the same event, ADC, checkpoint, receive-coil, transmit-field, subvoxel, and spoiler semantics as the optimized kernel, but deliberately omits its fast paths. Its historical build retains the `legacy-fast-math` contract. Use it for comparisons with earlier results or when diagnosing a suspected optimized-kernel problem, not as a speed setting. |
+| **Strict reference (validation)** | Separately compiled Float64 reference extension selected in the GUI or with `sequence_kernel="strict_reference"`. It disables fast math and floating-point contraction and reports the `strict-float64` numerical contract. It is the preferred reproducible validation baseline, not a performance choice. |
+| `sequence_kernel="reference"` (Python only) | Native streaming C kernel with the original general rotation-matrix path and per-spin/per-interval relaxation evaluation. It has the same event, ADC, checkpoint, receive-coil, transmit-field, subvoxel, and spoiler semantics as the optimized kernel, but deliberately omits its fast paths. Its historical build retains the `legacy-fast-math` contract. Use it for comparisons with earlier results or when diagnosing a suspected optimized-kernel problem, not as a speed setting. The GUI no longer offers it; Strict reference is the GUI validation baseline. |
 
 The optimized and reference paths implement the same Bloch propagation, but
 their floating-point operation order is not identical. Very small rounding-level
@@ -616,20 +616,27 @@ quantity.
 
 #### Dynamic spectral kernels
 
-The GUI lists the routine production choices first. Less commonly needed
-benchmark, validation, and experimental kernels remain available below a
-separator as clearly labelled extras. Hovering over any choice shows an English
-summary of its purpose, current runtime availability, and fallback behavior.
-The same capability registry is available from Python through
+The GUI offers **Native automatic** as the default and, below a separator,
+**Optimized NumPy** for compatibility checks and validation. The benchmark,
+validation, and experimental kernels `native_serial`, `reference`, and
+`metal_hybrid` are no longer listed in the GUI; they remain available from
+Python through `dynamic_sequence_kernel=...`. Hovering over a choice shows an
+English summary of its purpose, current runtime availability, and fallback
+behavior. The same capability registry is available from Python through
 `detect_kernel_capabilities()` and is used by the kernel benchmark.
+
+A stored GUI selection that is no longer offered resolves to the GUI default.
+Settings saved by earlier versions recorded Optimized NumPy as the previous
+default even when it was never chosen explicitly; these settings move to
+Native automatic once. An Optimized NumPy selection saved afterwards is kept.
 
 | Selection | Implementation and intended use |
 | --- | --- |
-| **Optimized NumPy (recommended)** | Complete production-capability CPU path. It keeps the transverse state in a persistent complex array, reuses scratch buffers, caches exact longitudinal coefficients by half-step duration, and caches T2/phase factors by duration, gradient, and dynamic-B0 integral. It supports inflow, delayed conversion, concentration tracking, dynamic B0, spatial transmit sensitivity, multiple receive coils, checkpoints, and both spoiler modes. It is also the safe fallback for unsupported native combinations. |
-| **Native automatic (recommended for large objects)** | Adds OpenMP across spins to strict native primitives and bounded plan blocks. Parallel work starts at 1,024 simulated spins; smaller jobs automatically use one thread. The complete bounded driver supports unity, constant complex, or spatial transmit sensitivity, static or dynamic B0, delayed conversion, ADC, crushers, receive coils, subvoxel sampling, and checkpoints. It covers direct or polarized pyruvate inflow, with or without concentration tracking, as well as concentration tracking without inflow. A separate multi-pool worker supports the existing precursor-to-product conversions, including pyruvate-to-alanine. Voxelwise arrival delays use bounded local source tables. This is the first native kernel to try for a large dynamic phantom. |
-| **Native serial (advanced benchmark)** | Uses the same compiled uniform-transmit RF and longitudinal primitives with one worker thread. The common Phantom Designer model with pyruvate inflow, a polarization curve, and concentration tracking advances both states in one fused pass. This option is useful for separating gains from compiled blocks from gains due to multithreading; it is not normally needed for production simulations. |
-| **Reference (advanced validation)** | Direct, allocation-heavy Python/NumPy formulation. It recomputes intermediate phase, relaxation, exchange, inflow, and RF arrays at each interval and is the correctness oracle for the optimized CPU paths. It supports the complete model but is intended for small validation and diagnostic runs. |
-| **CPU + Apple GPU (experimental)** | Apple-Silicon-only hybrid for multiple subvoxel spins. It performs the subvoxel work on the GPU, checks separate samples on the CPU, and uses the CPU result automatically if the accuracy check fails. |
+| **Optimized NumPy (compatibility and validation)** | Complete production-capability CPU path. It keeps the transverse state in a persistent complex array, reuses scratch buffers, caches exact longitudinal coefficients by half-step duration, and caches T2/phase factors by duration, gradient, and dynamic-B0 integral. It supports inflow, delayed conversion, concentration tracking, dynamic B0, spatial transmit sensitivity, multiple receive coils, checkpoints, and both spoiler modes. It is also the safe fallback for unsupported native combinations. |
+| **Native automatic (recommended)** | Adds OpenMP across spins to strict native primitives and bounded plan blocks. Parallel work starts at 1,024 simulated spins; smaller jobs automatically use one thread. The complete bounded driver supports unity, constant complex, or spatial transmit sensitivity, static or dynamic B0, delayed conversion, ADC, crushers, receive coils, subvoxel sampling, and checkpoints. It covers direct or polarized pyruvate inflow, with or without concentration tracking, as well as concentration tracking without inflow. A separate multi-pool worker supports the existing precursor-to-product conversions, including pyruvate-to-alanine. Voxelwise arrival delays use bounded local source tables. This is the GUI default for dynamic phantoms. |
+| `native_serial` (Python only) | Uses the same compiled uniform-transmit RF and longitudinal primitives with one worker thread. The common Phantom Designer model with pyruvate inflow, a polarization curve, and concentration tracking advances both states in one fused pass. This option is useful for separating gains from compiled blocks from gains due to multithreading; it is not normally needed for production simulations. |
+| `reference` (Python only) | Direct, allocation-heavy Python/NumPy formulation. It recomputes intermediate phase, relaxation, exchange, inflow, and RF arrays at each interval and is the correctness oracle for the optimized CPU paths. It supports the complete model but is intended for small validation and diagnostic runs. |
+| `metal_hybrid` (Python only, experimental) | Apple-Silicon-only hybrid for multiple subvoxel spins. It performs the subvoxel work on the GPU, checks separate samples on the CPU, and uses the CPU result automatically if the accuracy check fails. |
 
 The native extension receives coefficients already evaluated and rounded by
 NumPy and is built without fast math or floating-point contraction. Individual
@@ -674,14 +681,13 @@ For routine use:
 
 - Keep **Sequence Bloch kernel → Optimized** for ordinary and independent
   spectral phantoms.
-- Keep **Dynamic spectral kernel → Optimized NumPy** when bit-identical reference
-  behavior is required. For a large uniform-transmit inflow/concentration
-  phantom, use **Native automatic**; unsupported parts fall back
-  explicitly and the persistent block reports its close-float64 contract. Try
-  **Native serial** as an advanced benchmark if the automatic path is no faster.
-- Use **Reference** only for a controlled comparison. It is expected to be
-  slower and low CPU utilization is not evidence that it is more accurate for
-  routine work.
+- Keep **Dynamic spectral kernel → Native automatic**. Unsupported parts fall
+  back explicitly to Optimized NumPy, and the persistent block reports its
+  close-float64 contract. Select **Optimized NumPy** when bit-identical
+  agreement with earlier Optimized NumPy results is required.
+- Use the Python-only `reference` kernels only for a controlled comparison.
+  They are expected to be slower, and low CPU utilization is not evidence that
+  they are more accurate for routine work.
 - More CPU threads do not guarantee a proportional speed-up. Sequence driving,
   coefficient preparation, ADC summation, and unsupported longitudinal kinetics
   can remain in NumPy, while frequent small native calls incur OpenMP overhead.

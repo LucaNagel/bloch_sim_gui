@@ -8,6 +8,7 @@ import blochsimulator.kernel_capabilities as capability_module
 from blochsimulator.kernel_capabilities import (
     DYNAMIC_CPU_KERNEL_NAMES,
     DYNAMIC_KERNEL_NAMES,
+    GUI_KERNEL_NAMES,
     SEQUENCE_KERNEL_NAMES,
     detect_kernel_capabilities,
     kernel_capability_metadata,
@@ -79,3 +80,20 @@ def test_persisted_kernel_resolution_keeps_safe_fallback_only(monkeypatch):
     assert resolve_kernel_request("sequence", "invalid") == "optimized"
     with pytest.raises(ValueError, match="kernel family"):
         resolve_kernel_request("invalid", "optimized")
+
+
+def test_gui_kernel_lists_are_api_subsets_with_cpu_defaults():
+    assert GUI_KERNEL_NAMES == {
+        "sequence": ("optimized", "strict_reference"),
+        "dynamic": ("native_parallel", "optimized"),
+    }
+    assert set(GUI_KERNEL_NAMES["sequence"]) <= set(SEQUENCE_KERNEL_NAMES)
+    assert set(GUI_KERNEL_NAMES["dynamic"]) <= set(DYNAMIC_CPU_KERNEL_NAMES)
+
+
+def test_persisted_kernels_outside_gui_lists_resolve_to_gui_defaults():
+    assert resolve_kernel_request("sequence", "reference") == "optimized"
+    assert resolve_kernel_request("dynamic", "invalid") == "native_parallel"
+    for kernel in ("native_serial", "reference", "metal_hybrid"):
+        assert resolve_kernel_request("dynamic", kernel) == "native_parallel"
+    assert resolve_kernel_request("dynamic", "optimized") == "optimized"

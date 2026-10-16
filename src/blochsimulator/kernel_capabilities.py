@@ -24,6 +24,14 @@ DYNAMIC_KERNEL_NAMES = (
 DYNAMIC_CPU_KERNEL_NAMES = tuple(
     name for name in DYNAMIC_KERNEL_NAMES if name != "metal_hybrid"
 )
+# The settings dialog offers only these choices; the first one is the default.
+# The remaining kernels stay available from Python for benchmarks and validation.
+GUI_SEQUENCE_KERNEL_NAMES = ("optimized", "strict_reference")
+GUI_DYNAMIC_KERNEL_NAMES = ("native_parallel", "optimized")
+GUI_KERNEL_NAMES = {
+    "sequence": GUI_SEQUENCE_KERNEL_NAMES,
+    "dynamic": GUI_DYNAMIC_KERNEL_NAMES,
+}
 
 
 @dataclass(frozen=True)
@@ -181,15 +189,21 @@ def kernel_capability_metadata() -> dict[str, dict[str, dict]]:
 
 
 def resolve_kernel_request(family: str, requested: str) -> str:
-    """Resolve a persisted GUI choice without hiding supported CPU fallback."""
+    """Resolve a persisted GUI choice without hiding supported CPU fallback.
+
+    Choices that the settings dialog no longer offers, unknown names, and
+    unavailable kernels without a CPU fallback resolve to the GUI default.
+    """
     family = str(family)
     requested = str(requested)
     capabilities = detect_kernel_capabilities()
     if family not in capabilities:
         raise ValueError("kernel family must be 'sequence' or 'dynamic'")
     capability = capabilities[family].get(requested)
-    if capability is not None and (
-        capability.available or capability.fallback_supported
+    if (
+        requested in GUI_KERNEL_NAMES[family]
+        and capability is not None
+        and (capability.available or capability.fallback_supported)
     ):
         return requested
-    return "optimized"
+    return GUI_KERNEL_NAMES[family][0]

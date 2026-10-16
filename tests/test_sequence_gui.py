@@ -397,7 +397,7 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     app = QApplication.instance() or QApplication(sys.argv)
     window = BlochSimulatorGUI()
     window.app_settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
-    window.app_settings.setValue("sequence/kernel", "reference")
+    window.app_settings.setValue("sequence/kernel", "strict_reference")
     window.app_settings.setValue("sequence/dynamic_kernel", "native_parallel")
     window.app_settings.setValue("sequence/timestep_preset", "fast")
     window.app_settings.setValue("sequence/timestep_us", 10.0)
@@ -424,7 +424,10 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     app.processEvents()
 
     assert window.sequence_simulation_widget.simulation_timestep_us.value() == 10.0
-    assert window.sequence_simulation_widget.simulator.sequence_kernel == "reference"
+    assert (
+        window.sequence_simulation_widget.simulator.sequence_kernel
+        == "strict_reference"
+    )
     assert (
         window.sequence_simulation_widget.simulator.dynamic_sequence_kernel
         == "native_parallel"
