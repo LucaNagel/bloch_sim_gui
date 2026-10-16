@@ -236,7 +236,7 @@ The kernel benchmark separates the two independent execution-engine settings:
   additionally integrates kPL conversion, polarization, inflow, and dynamic
   B0 when present.
 
-By default it compares ``reference`` and ``optimized`` for the ordinary
+By default it compares ``strict_reference`` and ``optimized`` for the ordinary
 Sequence Bloch path. For the dynamic phantom it compares ``reference``,
 ``optimized``, ``native_serial``, and ``native_parallel``.
 Each candidate uses the same phantom, FLASH acquisition, time step, spin grid,
@@ -252,7 +252,7 @@ with the common ``1x1x9`` dynamic subvoxel grid, this normally exceeds the
 Selections and workload can be changed explicitly::
 
     python -m benchmarks.benchmark_kernels \
-      --sequence-kernels reference optimized \
+      --sequence-kernels strict_reference optimized \
       --dynamic-kernels reference optimized native_serial native_parallel \
       --kernel-phantom-matrix 32x32 \
       --kernel-flash-matrix 16 16 \
@@ -260,5 +260,6 @@ Selections and workload can be changed explicitly::
       --repeats 3
 
 CSV/JSON output includes requested and actual kernels, fallback reasons,
-runtime and speed-up relative to ``reference``, signal and state errors, native
+runtime and speed-up relative to the family reference (``strict_reference`` or
+``reference``), signal and state errors, native
 block capability flags, and effective native thread counts.

@@ -9,7 +9,8 @@ states. Dynamic spectral kernels additionally retain coupled pyruvate/lactate
 states, optional product pools, and integrate conversion, polarization, inflow,
 and optional dynamic B0.
 Each optimized, native, or experimental result is compared with the reference
-implementation from the same solver family.
+implementation from the same solver family: ``strict_reference`` for Sequence
+Bloch kernels and ``reference`` for dynamic spectral kernels.
 
 Typical use
 -----------
@@ -18,7 +19,7 @@ Run from the repository root::
     python -m benchmarks.benchmark_kernels
     python -m benchmarks.benchmark_kernels --repeats 3
     python -m benchmarks.benchmark_kernels \\
-        --sequence-kernels reference optimized \\
+        --sequence-kernels strict_reference optimized \\
         --dynamic-kernels reference optimized native_serial native_parallel
 
 ``--kernel-phantom-matrix`` changes only X/Y sampling; the complete source Z
@@ -30,8 +31,8 @@ Reading the output
 ------------------
 ``speedup_vs_reference`` above one is faster than the reference implementation.
 Signal and final-state similarities close to one indicate numerical agreement.
-The reference path is a correctness oracle, not the recommended production
-kernel. A row with ``fallback_used=true`` does not measure the requested backend;
+The reference paths are correctness oracles, not recommended production
+kernels. A row with ``fallback_used=true`` does not measure the requested backend;
 inspect ``actual_kernel`` and ``fallback_reason`` before drawing a performance
 conclusion.
 """
@@ -100,11 +101,9 @@ except ImportError:  # Allow: python benchmarks/benchmark_kernels.py
 
 
 SEQUENCE_KERNEL_CHOICES = tuple(
-    name
-    for name in ("reference", "optimized", "strict_reference")
-    if name in SEQUENCE_KERNEL_NAMES
+    name for name in ("strict_reference", "optimized") if name in SEQUENCE_KERNEL_NAMES
 )
-SEQUENCE_KERNELS = ("reference", "optimized")
+SEQUENCE_KERNELS = ("strict_reference", "optimized")
 DYNAMIC_KERNELS = tuple(
     name
     for name in (
@@ -115,22 +114,20 @@ DYNAMIC_KERNELS = tuple(
     )
     if name in DYNAMIC_KERNEL_NAMES
 )
+REFERENCE_KERNELS = {"sequence": "strict_reference", "dynamic": "reference"}
 DEFAULT_KERNEL_PHANTOM_MATRIX = (24, 24)
 DEFAULT_KERNEL_FLASH_MATRIX = (16, 16)
 DEFAULT_KERNEL_SUBVOXEL_SPINS = (1, 1, 9)
 
 KERNEL_DESCRIPTIONS = {
-    "sequence/reference": (
-        "General rotation-matrix and per-spin relaxation path. It is the "
-        "ordinary Bloch correctness reference and intentionally omits fast paths."
-    ),
     "sequence/optimized": (
         "Native streaming ordinary-Bloch path with RF-free, quaternion, and "
         "relaxation-cache fast paths; spins are distributed over CPU threads."
     ),
     "sequence/strict_reference": (
-        "Separately compiled no-fast-math Float64 validation baseline with "
-        "floating-point contraction disabled."
+        "General rotation-matrix and per-spin relaxation path, separately "
+        "compiled without fast math or floating-point contraction. It is the "
+        "ordinary Bloch correctness reference and intentionally omits fast paths."
     ),
     "dynamic/reference": (
         "Direct allocation-heavy NumPy two-pool implementation. It is the "
@@ -248,9 +245,11 @@ def _validate_args(args) -> None:
         )
     if len(args.kernel_subvoxel_spins) != 3 or min(args.kernel_subvoxel_spins) <= 0:
         raise ValueError("--kernel-subvoxel-spins requires three positive integers")
-    if "reference" not in args.sequence_kernels:
-        raise ValueError("--sequence-kernels must include reference for comparison")
-    if "reference" not in args.dynamic_kernels:
+    if REFERENCE_KERNELS["sequence"] not in args.sequence_kernels:
+        raise ValueError(
+            "--sequence-kernels must include strict_reference for comparison"
+        )
+    if REFERENCE_KERNELS["dynamic"] not in args.dynamic_kernels:
         raise ValueError("--dynamic-kernels must include reference for comparison")
 
 
@@ -335,7 +334,7 @@ def _kernel_record(
             "requested_kernel": kernel,
             "actual_kernel": actual_kernel,
             "kernel_description": KERNEL_DESCRIPTIONS[f"{family}/{kernel}"],
-            "reference_kernel": "reference",
+            "reference_kernel": REFERENCE_KERNELS[family],
             "runtime_vs_reference": (
                 simulation_time_s / reference_time_s
                 if reference_time_s > 0
@@ -406,12 +405,13 @@ def _run_family(
         tuple(args.kernel_subvoxel_spins) if family == "dynamic" else (1, 1, 1)
     )
     timestep_s = args.timestep_us * 1e-6
+    reference_kernel = REFERENCE_KERNELS[family]
     for repeat in range(1, args.repeats + 1):
         results = {}
         timings = {}
         ordered_kernels = [
-            "reference",
-            *(item for item in kernels if item != "reference"),
+            reference_kernel,
+            *(item for item in kernels if item != reference_kernel),
         ]
         for kernel in ordered_kernels:
             simulator = _make_simulator(
@@ -446,8 +446,8 @@ def _run_family(
                 args=args,
                 family=family,
                 kernel=kernel,
-                reference_result=results["reference"],
-                reference_time_s=timings["reference"],
+                reference_result=results[reference_kernel],
+                reference_time_s=timings[reference_kernel],
                 result=result,
                 simulation_time_s=runtime_s,
                 phantom_label=phantom_label,

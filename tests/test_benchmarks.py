@@ -302,12 +302,15 @@ def test_benchmark_progress_output_describes_case_before_and_after_simulation(
 def test_kernel_benchmark_defaults_cover_both_kernel_families():
     args = build_kernel_parser().parse_args([])
     strict_args = build_kernel_parser().parse_args(
-        ["--sequence-kernels", "reference", "strict_reference"]
+        ["--sequence-kernels", "strict_reference"]
     )
 
     assert tuple(args.sequence_kernels) == SEQUENCE_KERNELS
     assert tuple(args.dynamic_kernels) == DYNAMIC_KERNELS
-    assert tuple(strict_args.sequence_kernels) == ("reference", "strict_reference")
+    assert tuple(args.sequence_kernels) == ("strict_reference", "optimized")
+    assert tuple(strict_args.sequence_kernels) == ("strict_reference",)
+    with pytest.raises(SystemExit):
+        build_kernel_parser().parse_args(["--sequence-kernels", "reference"])
     assert args.kernel_phantom_matrix == DEFAULT_KERNEL_PHANTOM_MATRIX == (24, 24)
     assert tuple(args.kernel_flash_matrix) == DEFAULT_KERNEL_FLASH_MATRIX == (16, 16)
     assert (
@@ -323,5 +326,6 @@ def test_kernel_benchmark_prints_physical_and_implementation_differences(capsys)
     assert "runs each metabolite independently" in output
     assert "coupled pyruvate and lactate" in output
     assert "kPL conversion" in output
+    assert "strict_reference: General rotation-matrix" in output
     assert "reference: Direct allocation-heavy NumPy" in output
     assert "native_parallel: Native dynamic blocks with OpenMP" in output

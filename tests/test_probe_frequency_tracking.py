@@ -183,7 +183,7 @@ def test_per_spin_spectrum_scale_matches_known_bloch_rotations(
         duration_s=duration_s,
     )
     result = BlochSimulator(
-        use_parallel=False, sequence_kernel="reference"
+        use_parallel=False, sequence_kernel="strict_reference"
     ).simulate_sequence_probes(
         program,
         positions_m=np.array([[0.0, 0.0, 0.0]]),

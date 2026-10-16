@@ -570,11 +570,10 @@ received signals are then summed.
 | Selection | Implementation and intended use |
 | --- | --- |
 | **Optimized (recommended)** | Native streaming C kernel. It propagates one spin through the complete sequence without storing a spin-by-time history, processes active spins in bounded chunks, and distributes spins over the configured CPU threads. RF-free intervals avoid the general 3×3 rotation, RF-active intervals use a quaternion rotation, and phantoms with at most 64 distinct exact T1/T2 pairs reuse precomputed relaxation factors. Continuous T1/T2 maps automatically use per-spin factors instead. Use this for normal simulations. |
-| **Strict reference (validation)** | Separately compiled Float64 reference extension selected in the GUI or with `sequence_kernel="strict_reference"`. It disables fast math and floating-point contraction and reports the `strict-float64` numerical contract. It is the preferred reproducible validation baseline, not a performance choice. |
-| `sequence_kernel="reference"` (Python only) | Native streaming C kernel with the original general rotation-matrix path and per-spin/per-interval relaxation evaluation. It has the same event, ADC, checkpoint, receive-coil, transmit-field, subvoxel, and spoiler semantics as the optimized kernel, but deliberately omits its fast paths. Its historical build retains the `legacy-fast-math` contract. Use it for comparisons with earlier results or when diagnosing a suspected optimized-kernel problem, not as a speed setting. The GUI no longer offers it; Strict reference is the GUI validation baseline. |
+| **Strict reference (validation)** | Separately compiled Float64 reference extension selected in the GUI or with `sequence_kernel="strict_reference"`. It uses the general rotation-matrix path with per-spin/per-interval relaxation and has the same event, ADC, checkpoint, receive-coil, transmit-field, subvoxel, and spoiler semantics as the optimized kernel, but deliberately omits its fast paths. It disables fast math and floating-point contraction and reports the `strict-float64` numerical contract. Use it as the reproducible validation baseline or when diagnosing a suspected optimized-kernel problem, not as a performance choice. |
 
-The optimized and reference paths implement the same Bloch propagation, but
-their floating-point operation order is not identical. Very small rounding-level
+The optimized and strict reference paths implement the same Bloch
+propagation, but their floating-point operation order is not identical. Very small rounding-level
 differences are therefore possible. OpenMP parallelism is across spins, and
 thread-local ADC sums are combined after propagation. This makes the standard
 kernel much easier to parallelize than the dynamic solver.

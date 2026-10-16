@@ -26,6 +26,7 @@ import numpy as np
 
 from blochsimulator import BlochSimulator
 from blochsimulator.dynamic_phantom import DynamicSpectralPhantom
+from blochsimulator.kernel_capabilities import SEQUENCE_KERNEL_NAMES
 from blochsimulator.project_io import load_project, save_project
 from blochsimulator.sequence import RFEvent, SequenceProgram
 from blochsimulator.sequence.spin_sampling import SpinSampling
@@ -219,6 +220,9 @@ def simulation_settings(project: dict, args) -> dict:
     sequence_kernel = args.sequence_kernel or str(
         metadata.get("sequence_kernel", "optimized")
     )
+    if sequence_kernel not in SEQUENCE_KERNEL_NAMES:
+        # Projects saved before a kernel was removed fall back to the default.
+        sequence_kernel = "optimized"
     chunk_voxels = (
         args.chunk_voxels
         if args.chunk_voxels is not None
@@ -447,7 +451,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--sequence-kernel",
-        choices=("optimized", "reference"),
+        choices=("optimized", "strict_reference"),
         help="Override the saved sequence kernel.",
     )
     parser.add_argument(

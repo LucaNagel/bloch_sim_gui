@@ -13,7 +13,7 @@ from importlib import import_module
 from typing import Mapping
 
 
-SEQUENCE_KERNEL_NAMES = ("optimized", "reference", "strict_reference")
+SEQUENCE_KERNEL_NAMES = ("optimized", "strict_reference")
 DYNAMIC_KERNEL_NAMES = (
     "optimized",
     "native_parallel",
@@ -97,13 +97,6 @@ def detect_kernel_capabilities() -> dict[str, dict[str, KernelCapability]]:
         "optimized": KernelCapability(
             "sequence",
             "optimized",
-            legacy_available,
-            reason=legacy_reason,
-            numerical_contract="legacy-fast-math",
-        ),
-        "reference": KernelCapability(
-            "sequence",
-            "reference",
             legacy_available,
             reason=legacy_reason,
             numerical_contract="legacy-fast-math",

@@ -94,7 +94,7 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--sequence-kernel",
-        choices=("optimized", "reference"),
+        choices=("optimized", "strict_reference"),
         default="optimized",
         help=(
             "Ordinary Bloch kernel used outside the dedicated kernel comparison "

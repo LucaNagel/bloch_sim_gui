@@ -608,7 +608,7 @@ def test_sequence_geometry_probe_preserves_explicit_positions():
 
 
 @pytest.mark.parametrize("relaxation_model", ["uniform", "discrete", "continuous"])
-def test_optimized_sequence_kernel_matches_reference(relaxation_model):
+def test_optimized_sequence_kernel_matches_strict_reference(relaxation_model):
     """Keep the optimized native path tied to the reference implementation."""
     rng = np.random.default_rng(20260708)
     shape = (5, 4, 4)
@@ -654,13 +654,6 @@ def test_optimized_sequence_kernel_matches_reference(relaxation_model):
         duration_s=interval_count * raster,
     )
     simulator = BlochSimulator(use_parallel=True, num_threads=2)
-    reference = simulator.simulate_sequence(
-        program,
-        phantom,
-        checkpoints_s=(0.0, 6 * raster, 13 * raster, interval_count * raster),
-        chunk_voxels=np.prod(shape),
-        sequence_kernel="reference",
-    )
     optimized = simulator.simulate_sequence(
         program,
         phantom,
@@ -685,22 +678,9 @@ def test_optimized_sequence_kernel_matches_reference(relaxation_model):
     assert strict.metadata["native_sequence_kernel"] == "reference"
     assert strict.metadata["effective_threads"] == 2
     assert strict.metadata["numerical_contract"] == "strict-float64"
-    assert np.allclose(optimized.signal, reference.signal, rtol=5e-13, atol=5e-13)
-    assert np.allclose(
-        optimized.final_magnetization,
-        reference.final_magnetization,
-        rtol=5e-13,
-        atol=5e-13,
-    )
-    assert np.allclose(
-        optimized.checkpoint_magnetization,
-        reference.checkpoint_magnetization,
-        rtol=5e-13,
-        atol=5e-13,
-    )
     for name in ("signal", "final_magnetization", "checkpoint_magnetization"):
         np.testing.assert_allclose(
-            getattr(strict, name), getattr(reference, name), rtol=5e-13, atol=5e-13
+            getattr(optimized, name), getattr(strict, name), rtol=5e-13, atol=5e-13
         )
 
 

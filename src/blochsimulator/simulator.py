@@ -1374,10 +1374,10 @@ class BlochSimulator:
         memory_policy : MemoryPolicy, optional
             Reserve-based or fixed-limit RAM policy. The process-wide GUI policy
             is used when omitted.
-        sequence_kernel : {"optimized", "reference", "strict_reference"}
-            Native kernel used by event-based sequence simulations. The reference
-            kernel remains available for numerical comparisons. ``strict_reference``
-            selects the separately compiled no-fast-math reference extension.
+        sequence_kernel : {"optimized", "strict_reference"}
+            Native kernel used by event-based sequence simulations.
+            ``strict_reference`` selects the separately compiled no-fast-math
+            reference extension for numerical comparisons.
         dynamic_sequence_kernel : {"optimized", "native_parallel", "native_serial", "reference"}
             Kernel used specifically for dynamic spectral sequence simulations.
         """
@@ -1388,8 +1388,7 @@ class BlochSimulator:
         self.memory_policy = memory_policy
         if sequence_kernel not in SEQUENCE_KERNEL_NAMES:
             raise ValueError(
-                "sequence_kernel must be 'optimized', 'reference', or "
-                "'strict_reference'"
+                "sequence_kernel must be 'optimized' or 'strict_reference'"
             )
         self.sequence_kernel = sequence_kernel
         if dynamic_sequence_kernel not in DYNAMIC_KERNEL_NAMES:
@@ -2437,7 +2436,7 @@ class BlochSimulator:
         physical voxel volume of a 3D phantom. ``simulation_timestep_s`` sets
         the maximum compiler interval while RF is active; event boundaries and
         ADC observation times are always retained exactly. ``sequence_kernel``
-        overrides the simulator's ``"optimized"`` or ``"reference"`` kernel
+        overrides the simulator's ``"optimized"`` or ``"strict_reference"`` kernel
         selection for this call. ``spin_sampling`` controls deterministic
         intravoxel position sampling in gradient-waveform mode.
         ``spoiler_mode='ideal'`` always uses one spin per voxel and applies
@@ -2492,8 +2491,7 @@ class BlochSimulator:
         )
         if selected_kernel not in SEQUENCE_KERNEL_NAMES:
             raise ValueError(
-                "sequence_kernel must be 'optimized', 'reference', or "
-                "'strict_reference'"
+                "sequence_kernel must be 'optimized' or 'strict_reference'"
             )
         if n_active == 0:
             raise ValueError("phantom has no active voxels")

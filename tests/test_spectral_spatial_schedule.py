@@ -323,7 +323,7 @@ def test_fast_preview_matches_full_event_based_bloch_simulation():
         t1_s=1e12,
         t2_s=1e12,
         simulation_timestep_s=pulse.rf_raster_s,
-        sequence_kernel="reference",
+        sequence_kernel="strict_reference",
     )
     full = probes.magnetization[0]
     np.testing.assert_allclose(
