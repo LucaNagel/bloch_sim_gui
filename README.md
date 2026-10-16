@@ -3,9 +3,13 @@
 
 A high-performance Python implementation of the Bloch equation solver originally developed by Brian Hargreaves at Stanford University. This package provides a fast C-based core with Python bindings, parallel processing support, and an interactive GUI with classic waveform simulation and an event-based Sequence mode for [Pulseq](https://github.com/pulseq/pypulseq) workflows.
 
+Download:
+
 ```bash
 pip install "blochsimulator[gui,pulseq]"
 ```
+or already built on
+[GitHub Releases](https://github.com/LucaNagel/bloch_sim_gui/releases)
 
 ## Demo
 
