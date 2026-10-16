@@ -340,9 +340,14 @@ def _result_to_data(result, arrays):
     if result is None:
         return None
     if isinstance(result, SequenceSimulationResult):
+        values = result.to_dict()
+        # These properties are direct views of final_magnetization[..., 0/1/2].
+        # Preserve the complete array once; the result restores the views on load.
+        for component in ("mx", "my", "mz"):
+            values.pop(component)
         return {
             "kind": "sequence",
-            "value": _encode(result.to_dict(), arrays, "result"),
+            "value": _encode(values, arrays, "result"),
         }
     if isinstance(result, SequenceProbeResult):
         return {

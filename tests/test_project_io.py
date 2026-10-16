@@ -1,4 +1,9 @@
+import io
+import json
+import zipfile
+
 import numpy as np
+import pytest
 
 from blochsimulator.b1_fields import B1Field
 from blochsimulator.phantom import Phantom
@@ -65,6 +70,131 @@ def test_complete_project_round_trip(tmp_path):
     )
     np.testing.assert_allclose(loaded["legacy_result"]["time"], np.arange(3))
     np.testing.assert_allclose(loaded["sequence_result"].signal, result.signal)
+
+
+@pytest.mark.parametrize(
+    "word_dtype, float_dtype, words",
+    [
+        (
+            np.uint32,
+            np.float32,
+            [
+                0x00000000,
+                0x80000000,
+                0x3F800000,
+                0x3F800001,
+                0x7F800000,
+                0xFF800000,
+                0x7FC00001,
+                0xFFC00002,
+                0x00000001,
+                0x80000001,
+                0x3F000000,
+                0xBF000000,
+            ],
+        ),
+        (
+            np.uint64,
+            np.float64,
+            [
+                0x0000000000000000,
+                0x8000000000000000,
+                0x3FF0000000000000,
+                0x3FF0000000000001,
+                0x7FF0000000000000,
+                0xFFF0000000000000,
+                0x7FF8000000000001,
+                0xFFF8000000000002,
+                0x0000000000000001,
+                0x8000000000000001,
+                0x3FE0000000000000,
+                0xBFE0000000000000,
+            ],
+        ),
+    ],
+)
+def test_sequence_project_preserves_magnetization_bits_without_component_copies(
+    tmp_path, word_dtype, float_dtype, words
+):
+    # Include signed zeros, adjacent floats, infinities, NaN payloads, and
+    # subnormal values in a non-contiguous array. No tolerance is appropriate.
+    magnetization = (
+        np.asarray(words, dtype=word_dtype)
+        .view(float_dtype)
+        .reshape(2, 2, 3)
+        .transpose(1, 0, 2)
+    )
+    assert not magnetization.flags.c_contiguous
+    result = SequenceSimulationResult(
+        signal=np.empty(0, dtype=complex),
+        adc_times_s=np.empty(0),
+        final_magnetization=magnetization,
+        checkpoint_magnetization=None,
+        checkpoint_times_s=np.empty(0),
+    )
+    path = tmp_path / "magnetization.blochproj"
+    save_project(path, {"workspace_mode": "sequence"}, sequence_result=result)
+
+    with zipfile.ZipFile(path) as archive:
+        values = json.loads(archive.read("manifest.json"))["sequence_result"]["value"]
+        assert {"mx", "my", "mz"}.isdisjoint(values)
+        with np.load(io.BytesIO(archive.read("arrays.npz"))) as arrays:
+            stored = arrays[values["final_magnetization"]["$array"]]
+            assert stored.dtype == magnetization.dtype
+            assert stored.shape == magnetization.shape
+            assert stored.tobytes() == magnetization.tobytes()
+
+    loaded = load_project(path)["sequence_result"]
+    assert loaded.final_magnetization.dtype == magnetization.dtype
+    assert loaded.final_magnetization.shape == magnetization.shape
+    assert loaded.final_magnetization.tobytes() == magnetization.tobytes()
+    for index, name in enumerate(("mx", "my", "mz")):
+        expected = magnetization[..., index]
+        for candidate in (result, loaded):
+            component = getattr(candidate, name)
+            assert component.dtype == expected.dtype
+            assert component.shape == expected.shape
+            assert component.tobytes() == expected.tobytes()
+            assert np.shares_memory(component, candidate.final_magnetization)
+            assert candidate.to_dict()[name].tobytes() == expected.tobytes()
+
+
+def test_sequence_project_loads_legacy_magnetization_component_arrays(tmp_path):
+    magnetization = np.arange(18, dtype=np.float64).reshape(2, 3, 3)
+    arrays = {
+        "signal": np.empty(0, dtype=complex),
+        "adc_times_s": np.empty(0),
+        "final_magnetization": magnetization,
+        "checkpoint_times_s": np.empty(0),
+        "mx": magnetization[..., 0],
+        "my": magnetization[..., 1],
+        "mz": magnetization[..., 2],
+    }
+    # Reproduce the previous on-disk schema independently of the current writer.
+    manifest = {
+        "format": "bloch-simulator-project",
+        "version": 1,
+        "sequence_result": {
+            "kind": "sequence",
+            "value": {
+                **{name: {"$array": name} for name in arrays},
+                "checkpoint_magnetization": None,
+                "metadata": {"legacy_components": True},
+            },
+        },
+    }
+    path = tmp_path / "legacy.blochproj"
+    buffer = io.BytesIO()
+    np.savez_compressed(buffer, **arrays)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("manifest.json", json.dumps(manifest))
+        archive.writestr("arrays.npz", buffer.getvalue())
+
+    loaded = load_project(path)["sequence_result"]
+    assert loaded.final_magnetization.tobytes() == magnetization.tobytes()
+    assert loaded.metadata == {"legacy_components": True}
+    for name in ("mx", "my", "mz"):
+        assert getattr(loaded, name).tobytes() == arrays[name].tobytes()
 
 
 def test_project_state_round_trips_complex_rf_waveform_arrays(tmp_path):
