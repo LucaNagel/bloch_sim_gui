@@ -703,6 +703,8 @@ def test_free_mode_result_controls_use_consistent_headers_and_rows():
         window.mag_3d.spin_display_combo.itemText(index)
         for index in range(window.mag_3d.spin_display_combo.count())
     ] == ["Show all spins", "Show all spins + mean", "Show only mean"]
+    assert window.mag_3d.track_checkbox.isChecked()
+    assert window.mag_3d.spin_display_combo.currentText() == "Show all spins + mean"
     rainbow = window.mag_3d.color_for_index(0, 5).name()
     window.mag_3d.vector_palette_combo.setCurrentText("Viridis")
     assert window.mag_3d.color_for_index(0, 5).name() != rainbow

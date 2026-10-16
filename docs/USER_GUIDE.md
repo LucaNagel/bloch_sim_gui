@@ -132,7 +132,14 @@ Starting a run also preserves the currently selected result tab; use the
 **Signal** tab when the ADC signal, FID, or CSI spectrum is wanted.
 
 Use **Param. Loop** to open the **Parameter Loop** tab and select a numerical
-sequence parameter. Enter a **Formula y =**, the start and end of the **x
+sequence parameter. Under **Values from**, choose **Manual values** to enter
+a comma-separated list, for example `30, 60, 90, 45`. The loop runs one
+simulation per value in the entered order, including repeated values. Use a
+dot for decimals, such as `0.5, 1, 1.5`; scientific notation such as `1e-3`
+is also accepted. The list can contain up to 500 finite numbers. The formula,
+range, and point-count controls are disabled in this mode.
+
+Choose **Formula** to enter a **Formula y =**, the start and end of the **x
 range**, and the **Number of points**. The loop evaluates the formula at
 evenly spaced $x$ values and runs one simulation per resulting parameter value:
 
@@ -145,20 +152,56 @@ For example, formula `sin(x)`, start 0, end 5, and 11 points produce
 `sin(linspace(0, 5, 11))`. Use `x` for linear spacing, `x^2` or `x**2` for
 squared values, or expressions such as `exp(-x)`. Trigonometric functions
 use radians; `pi` and `e` are available. A single point uses the start value.
-The **Values** preview shows the generated parameter values. The loop accepts
-finite values outside the sequence form's default editing range, including
+The **Values** preview shows the generated parameter values. A small plot beside
+the editor shows these values against their index (starting at 0), including repeated
+values and rounded integer parameters. Both previews update as you edit;
+invalid input clears the plotted points. The loop accepts finite values
+outside the sequence form's default editing range, including
 negative RF scales and scales above 10. The corresponding form field expands
 to accommodate each requested value. Integer parameters are rounded and must
 fit the form field's 32-bit integer representation. Sequence generation and
 simulation still validate requirements such as positive durations and matrix
 sizes.
 
+For large loops, set **Results** to **Save to folder (limit RAM)** and choose
+an **Output folder** with **Browse…** or enter its path. Each completed run is
+saved immediately as a separate `.blochproj`, including the simulation result,
+sequence, phantom, and current setup. By default, filenames include the loop
+iteration, parameter, and value, so repeated values produce separate files.
+
+The loop waits for each file to finish saving before starting the next
+simulation. Earlier results from this loop are released from memory; the
+current result remains visible. Existing session simulations are preserved.
+Reopen saved runs with **Open Project…** or browse the output folder in the
+**Project Explorer**. **Keep in memory** retains the existing session workflow.
+Cancelling during a save finishes the current file before stopping. A save
+failure stops the loop and retains the unsaved result for manual export;
+earlier files remain available.
+
 In **Reconstruction Explorer**, the **Simulation** list includes each completed
-loop iteration with its parameter value. Choose a run to inspect its images,
-k-space, or spectra without changing the sequence setup. These results remain
-available during the current application session and also appear under
-**Simulations**. Renaming or deleting a run there updates the reconstruction
-list.
+loop iteration retained in memory with its parameter value. Choose a run to
+inspect its images, k-space, or spectra without changing the sequence setup.
+These results remain available during the current application session and also
+appear under **Simulations**. Renaming or deleting a run there updates the
+reconstruction list.
+
+To export several retained runs, select them under **Simulations** and choose
+**Export selected…**. Choose the output folder and **File naming**:
+
+- **Current names** preserves the existing date/time names and manually renamed
+  runs. Direct loop saves keep their existing iteration and parameter names.
+- **Prefix + date and time** uses your prefix followed by the completion date
+  and time, for example `study_20261015_120000.blochproj`.
+- **Prefix + number** uses your prefix, **Start** number, and minimum number of
+  **Digits**. Prefix `simulation`, start 1, and 2 digits produce
+  `simulation_01.blochproj`, `simulation_02.blochproj`, and so on.
+
+The preview shows up to three filenames. Existing files are preserved; numbered
+exports skip occupied numbers, and date/time names receive a suffix when
+needed. Batch numbering follows the selected rows from top to bottom. The
+same naming controls are available in **Parameter Loop** when saving to a
+folder, where numbering follows the simulation order. Single-run session
+exports use a Save dialog where the filename can be edited directly.
 
 In **Spin probe → Spectrum**, **Y scale** controls how magnetization is
 reported. **Per-spin response (90° = 1)** divides by the configured initial

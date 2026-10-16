@@ -70,6 +70,9 @@ def test_complete_project_round_trip(tmp_path):
     )
     np.testing.assert_allclose(loaded["legacy_result"]["time"], np.arange(3))
     np.testing.assert_allclose(loaded["sequence_result"].signal, result.signal)
+    with zipfile.ZipFile(path) as archive:
+        assert archive.getinfo("arrays.npz").compress_type == zipfile.ZIP_STORED
+        assert archive.getinfo("phantom.npz").compress_type == zipfile.ZIP_STORED
 
 
 @pytest.mark.parametrize(
@@ -195,6 +198,23 @@ def test_sequence_project_loads_legacy_magnetization_component_arrays(tmp_path):
     assert loaded.metadata == {"legacy_components": True}
     for name in ("mx", "my", "mz"):
         assert getattr(loaded, name).tobytes() == arrays[name].tobytes()
+
+
+def test_failed_project_write_preserves_previous_file_and_removes_partial_output(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "saved.blochproj"
+    save_project(path, {"workspace_mode": "sequence"})
+    previous = path.read_bytes()
+
+    def fail_write(*args, **kwargs):
+        raise OSError("Disk full")
+
+    monkeypatch.setattr("blochsimulator.project_io.np.savez_compressed", fail_write)
+    with pytest.raises(OSError, match="Disk full"):
+        save_project(path, {"workspace_mode": "free"})
+    assert path.read_bytes() == previous
+    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_project_state_round_trips_complex_rf_waveform_arrays(tmp_path):

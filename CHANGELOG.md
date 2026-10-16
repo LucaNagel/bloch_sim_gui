@@ -6,6 +6,30 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.8.4] - 2026-10-16
+
+### Added
+
+- Added manually entered, comma-separated parameter-loop values. The entered
+  order and repeated values are retained, with a preview plot beside the
+  existing formula workflow.
+- Added export of parameter-loop results directly to separate project files to
+  limit memory use, including configurable, collision-safe file names.
+- Added configurable batch export names for simulations retained in the
+  session.
+
+### Changed
+
+- Project archives are written atomically and stream compressed arrays directly
+  into the archive, avoiding duplicate in-memory magnetization arrays.
+- Added `ipympl` to the notebook dependencies and documented the Conda setup
+  for notebooks and the Python API.
+
+### Fixed
+
+- Prevent switching the displayed session simulation while a parameter loop is
+  running.
+
 ## [2.8.3] - 2026-10-14
 
 ### Added

@@ -5,7 +5,11 @@ import pytest
 from PyQt5.QtTest import QTest
 
 from blochsimulator.sequence import ADCEvent, RFEvent, SequenceProgram
-from blochsimulator.sequence.parameter_loop import parameter_loop_values
+from blochsimulator.sequence.parameter_loop import (
+    MAX_PARAMETER_LOOP_POINTS,
+    manual_parameter_loop_values,
+    parameter_loop_values,
+)
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
 
 
@@ -59,11 +63,104 @@ def test_formula_rejects_invalid_values_and_python_code(formula):
         parameter_loop_values(formula, 0, 2, 3)
 
 
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("0.5, 1, 1.75", [0.5, 1, 1.75]),
+        ("3, -2, 3, 1e-3", [3, -2, 3, 0.001]),
+        ("  -2.5  ", [-2.5]),
+        (" 1e3,\n +2.5E-2, 0 ", [1000, 0.025, 0]),
+        (",".join(["1"] * MAX_PARAMETER_LOOP_POINTS), [1] * MAX_PARAMETER_LOOP_POINTS),
+    ],
+)
+def test_manual_values_preserve_entered_numbers_and_order(text, expected):
+    np.testing.assert_array_equal(manual_parameter_loop_values(text), expected)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "   ",
+        "1,",
+        ",1",
+        "1, ,2",
+        "1; 2",
+        "1, nan",
+        "inf, 1",
+        "-inf",
+        "1e309",
+        "1, 2j",
+        "1, sin(2)",
+        "__import__('os').getcwd()",
+        ",".join(["1"] * (MAX_PARAMETER_LOOP_POINTS + 1)),
+    ],
+)
+def test_manual_values_reject_invalid_or_oversized_lists(text):
+    with pytest.raises(ValueError):
+        manual_parameter_loop_values(text)
+
+
 def _loop_parameters(widget):
     return [
         widget.parameter_loop_parameter.itemData(index)
         for index in range(widget.parameter_loop_parameter.count())
     ]
+
+
+def test_manual_values_in_parameter_loop_tab(qt_application):
+    from blochsimulator.ui.main_window import BlochSimulatorGUI
+
+    window = BlochSimulatorGUI()
+    window.set_workspace_mode("sequence")
+    widget = window.sequence_simulation_widget
+    widget.open_parameter_loop_button.click()
+    qt_application.processEvents()
+
+    assert window.tab_widget.currentIndex() == window.sequence_parameter_loop_tab_index
+    assert widget.parameter_loop_input_mode.currentData() == "formula"
+    assert not widget.parameter_loop_manual_values.isEnabled()
+    widget.parameter_loop_formula.setText("x^2")
+    widget.parameter_loop_start.setValue(0)
+    widget.parameter_loop_stop.setValue(2)
+    widget.parameter_loop_steps.setValue(3)
+    widget.parameter_loop_input_mode.setCurrentIndex(
+        widget.parameter_loop_input_mode.findData("manual")
+    )
+    widget.parameter_loop_manual_values.setText("1.5, 0.5, 1.5, 2")
+
+    assert widget.parameter_loop_manual_values.isEnabled()
+    assert not any(
+        control.isEnabled()
+        for control in (
+            widget.parameter_loop_formula,
+            widget.parameter_loop_start,
+            widget.parameter_loop_stop,
+            widget.parameter_loop_steps,
+        )
+    )
+    assert widget._parameter_loop_values(
+        widget.parameter_loop_parameter.currentData()
+    ).tolist() == [1.5, 0.5, 1.5, 2]
+    assert widget.parameter_loop_preview.text() == "1.5, 0.5, 1.5, 2 ×"
+    x, y = widget.parameter_loop_plot_curve.getData()
+    np.testing.assert_array_equal(x, [0, 1, 2, 3])
+    np.testing.assert_array_equal(y, [1.5, 0.5, 1.5, 2])
+    assert widget.parameter_loop_plot.getAxis("left").labelUnits == "×"
+
+    widget.parameter_loop_input_mode.setCurrentIndex(
+        widget.parameter_loop_input_mode.findData("formula")
+    )
+    assert widget.parameter_loop_formula.isEnabled()
+    assert not widget.parameter_loop_manual_values.isEnabled()
+    assert widget.parameter_loop_preview.text() == "0, 1, 4 ×"
+    x, y = widget.parameter_loop_plot_curve.getData()
+    np.testing.assert_array_equal(x, [0, 1, 2])
+    np.testing.assert_array_equal(y, [0, 1, 4])
+    assert widget.parameter_loop_manual_values.text() == "1.5, 0.5, 1.5, 2"
+    window.close()
+    window.deleteLater()
+    qt_application.processEvents()
 
 
 def test_parameter_loop_discovers_controls_for_every_sequence_source(qt_application):
@@ -140,6 +237,33 @@ def test_integer_sequence_parameters_produce_integer_loop_values(qt_application)
     assert values.tolist() == [4, 6, 8]
 
 
+def test_manual_integer_values_are_rounded_without_reordering(qt_application):
+    widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(widget.EPI_SOURCE)
+    matrix_index = next(
+        index
+        for index, parameter in enumerate(_loop_parameters(widget))
+        if parameter.key == "read_matrix"
+    )
+    widget.parameter_loop_parameter.setCurrentIndex(matrix_index)
+    widget.parameter_loop_input_mode.setCurrentIndex(
+        widget.parameter_loop_input_mode.findData("manual")
+    )
+    widget.parameter_loop_manual_values.setText("514.2, 4.1, 7.9, 4.1")
+    parameter = widget.parameter_loop_parameter.currentData()
+
+    assert widget._parameter_loop_values(parameter).tolist() == [514, 4, 8, 4]
+    assert widget.parameter_loop_preview.text() == "514, 4, 8, 4"
+    np.testing.assert_array_equal(
+        widget.parameter_loop_plot_curve.getData()[1], [514, 4, 8, 4]
+    )
+    assert widget.parameter_loop_plot.getAxis("left").labelUnits == ""
+    widget.parameter_loop_manual_values.setText("2147483648")
+    with pytest.raises(ValueError, match="32-bit integer"):
+        widget._parameter_loop_values(parameter)
+    assert widget.parameter_loop_plot_curve.getData()[1] is None
+
+
 def test_formula_x_range_is_independent_of_integer_parameter_range(qt_application):
     widget = SequenceSimulationWidget()
     widget.sequence_source.setCurrentIndex(widget.EPI_SOURCE)
@@ -161,13 +285,55 @@ def test_formula_x_range_is_independent_of_integer_parameter_range(qt_applicatio
     assert widget.parameter_loop_start.value() == 0
     assert values.tolist() == [4, 4, 5, 6, 8]
     assert widget.parameter_loop_preview.text() == "4, 4, 5, 6, 8"
+    np.testing.assert_array_equal(
+        widget.parameter_loop_plot_curve.getData()[1], [4, 4, 5, 6, 8]
+    )
 
 
-@pytest.mark.parametrize("formula", ["sqrt(-x)", "1/(x-x)"])
-def test_invalid_formula_does_not_start_a_loop(qt_application, monkeypatch, formula):
+@pytest.mark.parametrize(
+    "text, expected",
+    [("-2", [-2]), ("3, -2, 3, 0.001", [3, -2, 3, 0.001])],
+)
+def test_loop_plot_updates_and_clears_invalid_input(qt_application, text, expected):
+    widget = SequenceSimulationWidget()
+    widget.parameter_loop_input_mode.setCurrentIndex(
+        widget.parameter_loop_input_mode.findData("manual")
+    )
+    widget.parameter_loop_manual_values.setText(text)
+    x, y = widget.parameter_loop_plot_curve.getData()
+    np.testing.assert_array_equal(x, np.arange(len(expected)))
+    assert widget.parameter_loop_plot.getAxis("bottom").labelText == "Index"
+    assert widget.parameter_loop_plot.getAxis("left").labelText == "Parameter value"
+    np.testing.assert_array_equal(y, expected)
+    widget.parameter_loop_manual_values.setText("1,,2")
+    assert widget.parameter_loop_plot_curve.getData()[1] is None
+    widget.parameter_loop_manual_values.setText("2, 1")
+    np.testing.assert_array_equal(widget.parameter_loop_plot_curve.getData()[1], [2, 1])
+
+
+@pytest.mark.parametrize(
+    "input_mode, text",
+    [
+        ("formula", "sqrt(-x)"),
+        ("formula", "1/(x-x)"),
+        ("manual", ""),
+        ("manual", "1,,2"),
+    ],
+)
+def test_invalid_input_does_not_start_a_loop(
+    qt_application, monkeypatch, input_mode, text
+):
     widget = SequenceSimulationWidget()
     widget.object_source.setCurrentIndex(1)
-    widget.parameter_loop_formula.setText(formula)
+    widget.parameter_loop_input_mode.setCurrentIndex(
+        widget.parameter_loop_input_mode.findData(input_mode)
+    )
+    input_field = (
+        widget.parameter_loop_manual_values
+        if input_mode == "manual"
+        else widget.parameter_loop_formula
+    )
+    input_field.setText(text)
     widget.parameter_loop_start.setValue(0)
     widget.parameter_loop_stop.setValue(5)
     messages = []
@@ -181,7 +347,7 @@ def test_invalid_formula_does_not_start_a_loop(qt_application, monkeypatch, form
     assert messages
     assert widget._parameter_loop_state is None
     assert widget.worker is None
-    assert widget.parameter_loop_formula.isEnabled()
+    assert input_field.isEnabled()
 
 
 def test_universal_rf_scale_preserves_timing_and_adc():
@@ -269,8 +435,9 @@ def test_loop_values_are_not_clipped_by_form_controls(
     assert widget._parameter_loop_state is None
 
 
+@pytest.mark.parametrize("input_mode", ["formula", "manual"])
 def test_parameter_loop_runs_each_value_against_the_same_base_program(
-    qt_application, monkeypatch
+    qt_application, monkeypatch, input_mode
 ):
     widget = SequenceSimulationWidget()
     base_samples = np.array(widget.program.rf_events[0].samples_hz, copy=True)
@@ -278,9 +445,16 @@ def test_parameter_loop_runs_each_value_against_the_same_base_program(
     widget.parameter_loop_start.setValue(0.5)
     widget.parameter_loop_stop.setValue(1.5)
     widget.parameter_loop_steps.setValue(3)
+    widget.parameter_loop_input_mode.setCurrentIndex(
+        widget.parameter_loop_input_mode.findData(input_mode)
+    )
+    widget.parameter_loop_manual_values.setText("1.5, 0.5, 1.5, -12")
     observed = []
 
     def fake_run():
+        assert not widget.parameter_loop_input_mode.isEnabled()
+        assert not widget.parameter_loop_formula.isEnabled()
+        assert not widget.parameter_loop_manual_values.isEnabled()
         observed.append(np.array(widget.program.rf_events[0].samples_hz, copy=True))
         widget._parameter_loop_iteration_finished()
         return True
@@ -293,15 +467,21 @@ def test_parameter_loop_runs_each_value_against_the_same_base_program(
 
     widget._start_parameter_loop()
 
-    assert len(observed) == 3
-    assert np.allclose(observed[0], 0.5 * base_samples)
-    assert np.allclose(observed[1], 1.0 * base_samples)
-    assert np.allclose(observed[2], 1.5 * base_samples)
+    scales = [1.5, 0.5, 1.5, -12] if input_mode == "manual" else [0.5, 1.0, 1.5]
+    assert len(observed) == len(scales)
+    for samples, scale in zip(observed, scales):
+        np.testing.assert_allclose(samples, scale * base_samples)
     assert widget._parameter_loop_state is None
     assert "Parameter loop complete" in widget.status.text()
+    assert widget.parameter_loop_input_mode.isEnabled()
+    assert widget.parameter_loop_manual_values.isEnabled() == (input_mode == "manual")
+    assert widget.parameter_loop_formula.isEnabled() == (input_mode == "formula")
 
 
-def test_parameter_loop_chains_real_sequence_workers(qt_application, monkeypatch):
+@pytest.mark.parametrize("input_mode", ["formula", "manual"])
+def test_parameter_loop_chains_real_sequence_workers(
+    qt_application, monkeypatch, input_mode
+):
     widget = SequenceSimulationWidget()
     widget.object_source.setCurrentIndex(1)
     widget.matrix_size.setValue(2)
@@ -311,6 +491,10 @@ def test_parameter_loop_chains_real_sequence_workers(qt_application, monkeypatch
     widget.parameter_loop_stop.setValue(1.0)
     widget.parameter_loop_steps.setValue(2)
     widget.parameter_loop_formula.setText("12*x")
+    widget.parameter_loop_input_mode.setCurrentIndex(
+        widget.parameter_loop_input_mode.findData(input_mode)
+    )
+    widget.parameter_loop_manual_values.setText("-12, 5, -12")
     loop_metadata = []
     register = widget._register_session_simulation_run
 
@@ -325,13 +509,26 @@ def test_parameter_loop_chains_real_sequence_workers(qt_application, monkeypatch
         QTest.qWait(10)
 
     assert widget._parameter_loop_state is None
-    assert [metadata["value"] for metadata in loop_metadata] == [-12.0, 12.0]
-    assert [metadata["index"] for metadata in loop_metadata] == [0, 1]
-    assert all(metadata["count"] == 2 for metadata in loop_metadata)
-    assert all(metadata["formula"] == "12*x" for metadata in loop_metadata)
-    assert [metadata["x"] for metadata in loop_metadata] == [-1.0, 1.0]
+    expected = [-12.0, 5.0, -12.0] if input_mode == "manual" else [-12.0, 12.0]
+    assert [metadata["value"] for metadata in loop_metadata] == expected
+    assert [metadata["index"] for metadata in loop_metadata] == list(
+        range(len(expected))
+    )
+    assert all(metadata["count"] == len(expected) for metadata in loop_metadata)
+    assert all(metadata["input_mode"] == input_mode for metadata in loop_metadata)
+    if input_mode == "manual":
+        assert all(
+            metadata["manual_values"] == "-12, 5, -12" for metadata in loop_metadata
+        )
+        assert all(
+            "formula" not in metadata and "x" not in metadata
+            for metadata in loop_metadata
+        )
+    else:
+        assert all(metadata["formula"] == "12*x" for metadata in loop_metadata)
+        assert [metadata["x"] for metadata in loop_metadata] == [-1.0, 1.0]
     explorer = widget.reconstruction_explorer
-    assert explorer.simulation_combo.count() == 2
+    assert explorer.simulation_combo.count() == len(expected)
     assert "-12" in explorer.simulation_combo.itemText(0)
     final_result = widget.result
     explorer.simulation_combo.setCurrentIndex(0)
@@ -347,7 +544,9 @@ def test_parameter_loop_chains_real_sequence_workers(qt_application, monkeypatch
     QTest.qWait(10)
     assert widget.run_button.isEnabled()
     assert widget.parameter_loop_button.isEnabled()
-    assert widget.parameter_loop_formula.isEnabled()
+    assert widget.parameter_loop_input_mode.isEnabled()
+    assert widget.parameter_loop_manual_values.isEnabled() == (input_mode == "manual")
+    assert widget.parameter_loop_formula.isEnabled() == (input_mode == "formula")
 
 
 @pytest.mark.parametrize("slice_gradient_enabled", [True, False])

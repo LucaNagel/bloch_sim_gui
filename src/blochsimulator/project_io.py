@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import zipfile
 from datetime import datetime, timezone
@@ -415,7 +416,7 @@ def save_project(
     legacy_result=None,
     sequence_result=None,
 ):
-    """Write one self-contained project archive."""
+    """Atomically write a project without buffering the archive in RAM."""
     filename = Path(filename)
     arrays = _Arrays()
     manifest = {
@@ -445,17 +446,32 @@ def save_project(
         "phantom_entry": None,
         "phantom_name": None if phantom is None else str(phantom.name),
     }
-    with zipfile.ZipFile(filename, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        if phantom is not None:
-            with tempfile.TemporaryDirectory() as directory:
-                phantom_path = Path(directory) / "phantom.npz"
-                phantom.save(phantom_path)
-                archive.write(phantom_path, "phantom.npz")
-                manifest["phantom_entry"] = "phantom.npz"
-        buffer = io.BytesIO()
-        np.savez_compressed(buffer, **arrays.values)
-        archive.writestr("arrays.npz", buffer.getvalue())
-        archive.writestr("manifest.json", json.dumps(manifest, indent=2))
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{filename.name}.", suffix=".tmp", dir=filename.parent, delete=False
+    ) as temporary:
+        temporary_path = Path(temporary.name)
+    try:
+        with zipfile.ZipFile(
+            temporary_path, "w", compression=zipfile.ZIP_DEFLATED
+        ) as archive:
+            if phantom is not None:
+                with tempfile.TemporaryDirectory() as directory:
+                    phantom_path = Path(directory) / "phantom.npz"
+                    phantom.save(phantom_path)
+                    archive.write(
+                        phantom_path, "phantom.npz", compress_type=zipfile.ZIP_STORED
+                    )
+                    manifest["phantom_entry"] = "phantom.npz"
+            # NPZ already compresses its arrays. Stream it into the project
+            # without a full BytesIO copy or a second compression pass.
+            entry = zipfile.ZipInfo("arrays.npz")
+            entry.compress_type = zipfile.ZIP_STORED
+            with archive.open(entry, "w", force_zip64=True) as output:
+                np.savez_compressed(output, **arrays.values)
+            archive.writestr("manifest.json", json.dumps(manifest, indent=2))
+        os.replace(temporary_path, filename)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _legacy_project_metadata(manifest):

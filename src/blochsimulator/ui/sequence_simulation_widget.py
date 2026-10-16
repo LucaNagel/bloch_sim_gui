@@ -20,6 +20,7 @@ import pyqtgraph as pg
 from PyQt5.QtCore import QProcess, QRectF, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -64,6 +65,7 @@ from ..notebook_exporter import (
     export_sequence_result_notebook,
 )
 from ..paths import workspace_directory
+from ..project_naming import ProjectExportNamer, project_timestamp
 from ..spectral_phantom import SpectralPhantom
 from ..dynamic_phantom import DynamicSpectralPhantom
 from ..sequence import (
@@ -110,7 +112,11 @@ from ..sequence import (
     variable_flip_angle_schedule,
 )
 from ..sequence.encoding import numeric_definition_array
-from ..sequence.parameter_loop import parameter_loop_values
+from ..sequence.parameter_loop import (
+    MAX_PARAMETER_LOOP_POINTS,
+    manual_parameter_loop_values,
+    parameter_loop_values,
+)
 from ..sequence.spin_sampling import phantom_voxel_basis_m
 from ..sequence.rf_pulses import (
     RF_PULSE_TYPE_LABELS,
@@ -135,6 +141,7 @@ from .spectral_spatial_designer import (
 from .magnetization_viewer import MagnetizationViewer
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
 from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumViewer
+from .project_export_dialog import ProjectExportNamingWidget
 from .reconstruction_explorer import SequenceReconstructionExplorer
 from .simulation_explorer import SessionSimulationRun
 from .styles import BOLD_GROUP_TITLES_STYLE
@@ -803,6 +810,27 @@ class PulseqLoadThread(QThread):
             self.failed.emit(str(exc))
 
 
+class ParameterLoopSaveThread(QThread):
+    """Save exactly one run before allowing the parameter loop to continue."""
+
+    def __init__(self, filename, simulation_run, arguments):
+        super().__init__()
+        self.filename = Path(filename)
+        self.simulation_run = simulation_run
+        self.arguments = arguments
+        self.error = ""
+
+    def run(self):
+        from ..project_io import save_project
+
+        try:
+            save_project(self.filename, **self.arguments)
+        except Exception as exc:
+            self.error = str(exc) or type(exc).__name__
+        finally:
+            self.arguments = None
+
+
 class SequenceSimulationThread(QThread):
     """Run chunked sequence simulation without blocking Qt."""
 
@@ -1184,6 +1212,8 @@ class SequenceSimulationWidget(QWidget):
             "No spectral-spatial pulse has been designed"
         )
         self._parameter_loop_state = None
+        self._parameter_loop_save_worker = None
+        QApplication.instance().aboutToQuit.connect(self._wait_for_parameter_loop_save)
         self.probe_playback_timer = QTimer(self)
         self.probe_playback_timer.setInterval(16)
         self.probe_playback_timer.timeout.connect(self._advance_probe_playback)
@@ -3719,6 +3749,26 @@ class SequenceSimulationWidget(QWidget):
         )
         parameter_loop_form.addRow("Parameter", self.parameter_loop_parameter)
 
+        self.parameter_loop_input_mode = QComboBox()
+        self.parameter_loop_input_mode.setObjectName(
+            "sequence_parameter_loop_input_mode"
+        )
+        self.parameter_loop_input_mode.addItem("Formula", "formula")
+        self.parameter_loop_input_mode.addItem("Manual values", "manual")
+        parameter_loop_form.addRow("Values from", self.parameter_loop_input_mode)
+
+        self.parameter_loop_manual_values = QLineEdit()
+        self.parameter_loop_manual_values.setObjectName(
+            "sequence_parameter_loop_manual_values"
+        )
+        self.parameter_loop_manual_values.setPlaceholderText("0.5, 1, 1.5")
+        self.parameter_loop_manual_values.setToolTip(
+            "Enter comma-separated numbers in simulation order. "
+            "Use a dot for decimals; scientific notation such as 1e-3 is supported. "
+            f"At most {MAX_PARAMETER_LOOP_POINTS} values."
+        )
+        parameter_loop_form.addRow("Manual values", self.parameter_loop_manual_values)
+
         self.parameter_loop_formula = QLineEdit("x")
         self.parameter_loop_formula.setObjectName("sequence_parameter_loop_formula")
         self.parameter_loop_formula.setToolTip(
@@ -3747,7 +3797,7 @@ class SequenceSimulationWidget(QWidget):
 
         self.parameter_loop_steps = QSpinBox()
         self.parameter_loop_steps.setObjectName("sequence_parameter_loop_steps")
-        self.parameter_loop_steps.setRange(1, 500)
+        self.parameter_loop_steps.setRange(1, MAX_PARAMETER_LOOP_POINTS)
         self.parameter_loop_steps.setValue(5)
         self.parameter_loop_steps.setToolTip(
             "Number of evenly spaced x points and simulations, including "
@@ -3755,18 +3805,40 @@ class SequenceSimulationWidget(QWidget):
         )
         parameter_loop_form.addRow("Number of points", self.parameter_loop_steps)
 
-        formula_help = QLabel(
-            "x is evenly spaced from start to end; the formula gives the parameter "
-            "values. Use x for linear spacing. Integer parameters are rounded."
-        )
-        formula_help.setWordWrap(True)
-        parameter_loop_form.addRow(formula_help)
+        self.parameter_loop_help = QLabel()
+        self.parameter_loop_help.setWordWrap(True)
+        parameter_loop_form.addRow(self.parameter_loop_help)
         self.parameter_loop_preview = QLabel()
         self.parameter_loop_preview.setWordWrap(True)
         self.parameter_loop_preview.setTextFormat(Qt.PlainText)
         parameter_loop_form.addRow("Values", self.parameter_loop_preview)
+        self.parameter_loop_plot = pg.PlotWidget(self)
+        self.parameter_loop_plot.setObjectName("sequence_parameter_loop_plot")
+        self.parameter_loop_plot.setFixedHeight(220)
+        self.parameter_loop_plot.setLabel("bottom", "Index")
+        self.parameter_loop_plot.setLabel("left", "Parameter value")
+        for axis in ("left", "bottom"):
+            self.parameter_loop_plot.getAxis(axis).enableAutoSIPrefix(False)
+        self.parameter_loop_plot.showGrid(x=True, y=True, alpha=0.15)
+        self.parameter_loop_plot.setMouseEnabled(x=False, y=False)
+        self.parameter_loop_plot.setMenuEnabled(False)
+        self.parameter_loop_plot.hideButtons()
+        self.parameter_loop_plot_curve = self.parameter_loop_plot.plot(
+            pen=pg.mkPen("#47a8f5", width=2),
+            symbol="o",
+            symbolSize=5,
+            symbolBrush="#47a8f5",
+            symbolPen=None,
+        )
+        self.parameter_loop_plot.hide()
         self.parameter_loop_formula.textChanged.connect(
             self._update_parameter_loop_preview
+        )
+        self.parameter_loop_manual_values.textChanged.connect(
+            self._update_parameter_loop_preview
+        )
+        self.parameter_loop_input_mode.currentIndexChanged.connect(
+            self._update_parameter_loop_input_controls
         )
         for control in (
             self.parameter_loop_start,
@@ -3775,11 +3847,53 @@ class SequenceSimulationWidget(QWidget):
         ):
             control.valueChanged.connect(self._update_parameter_loop_preview)
 
+        self.parameter_loop_output_mode = QComboBox()
+        self.parameter_loop_output_mode.setObjectName(
+            "sequence_parameter_loop_output_mode"
+        )
+        self.parameter_loop_output_mode.addItem("Keep in memory", "memory")
+        self.parameter_loop_output_mode.addItem("Save to folder (limit RAM)", "disk")
+        parameter_loop_form.addRow("Results", self.parameter_loop_output_mode)
+        output_folder = QWidget()
+        output_folder_layout = QHBoxLayout(output_folder)
+        output_folder_layout.setContentsMargins(0, 0, 0, 0)
+        self.parameter_loop_output_directory = QLineEdit()
+        self.parameter_loop_output_directory.setObjectName(
+            "sequence_parameter_loop_output_directory"
+        )
+        self.parameter_loop_output_directory.setPlaceholderText("Select output folder")
+        self.parameter_loop_output_directory.setToolTip(
+            "Save every completed loop run as a separate Bloch project in this folder. "
+            "Previous loop results are released from RAM; reopen them from disk."
+        )
+        output_folder_layout.addWidget(self.parameter_loop_output_directory, 1)
+        self.parameter_loop_output_browse = QPushButton("Browse…")
+        self.parameter_loop_output_browse.clicked.connect(
+            self._browse_parameter_loop_output_directory
+        )
+        output_folder_layout.addWidget(self.parameter_loop_output_browse)
+        parameter_loop_form.addRow("Output folder", output_folder)
+        self.parameter_loop_export_naming = ProjectExportNamingWidget(
+            object_prefix="sequence_parameter_loop_export"
+        )
+        self._update_parameter_loop_naming_preview()
+        parameter_loop_form.addRow(self.parameter_loop_export_naming)
+        self.parameter_loop_output_directory.textChanged.connect(
+            self._update_parameter_loop_naming_preview
+        )
+        self.parameter_loop_storage_help = QLabel()
+        self.parameter_loop_storage_help.setWordWrap(True)
+        parameter_loop_form.addRow(self.parameter_loop_storage_help)
+        self.parameter_loop_output_mode.currentIndexChanged.connect(
+            self._update_parameter_loop_input_controls
+        )
+
         self.parameter_loop_button = QPushButton("Run parameter loop")
         self.parameter_loop_button.setObjectName("run_sequence_parameter_loop")
         self.parameter_loop_button.setStyleSheet(inactive_button_style)
         self.parameter_loop_button.clicked.connect(self._start_parameter_loop)
         parameter_loop_form.addRow(self.parameter_loop_button)
+        self._update_parameter_loop_input_controls()
         self.parameter_loop_group.hide()
 
         self.cancel_button = QPushButton("Cancel")
@@ -5452,12 +5566,17 @@ class SequenceSimulationWidget(QWidget):
         return replace(program, events=events, metadata=metadata)
 
     def _parameter_loop_values(self, parameter):
-        values = parameter_loop_values(
-            self.parameter_loop_formula.text(),
-            self.parameter_loop_start.value(),
-            self.parameter_loop_stop.value(),
-            self.parameter_loop_steps.value(),
-        )
+        if self.parameter_loop_input_mode.currentData() == "manual":
+            values = manual_parameter_loop_values(
+                self.parameter_loop_manual_values.text()
+            )
+        else:
+            values = parameter_loop_values(
+                self.parameter_loop_formula.text(),
+                self.parameter_loop_start.value(),
+                self.parameter_loop_stop.value(),
+                self.parameter_loop_steps.value(),
+            )
         if parameter.integer:
             # QSpinBox uses signed 32-bit integers. Reject values it cannot
             # represent instead of silently overflowing or clipping them.
@@ -5470,13 +5589,19 @@ class SequenceSimulationWidget(QWidget):
 
     def _update_parameter_loop_preview(self, *_):
         parameter = self.parameter_loop_parameter.currentData()
+        self.parameter_loop_plot_curve.clear()
         if not isinstance(parameter, _SequenceLoopParameter):
             self.parameter_loop_preview.setText("Select a loop parameter.")
+            self.parameter_loop_plot.setTitle("Select a loop parameter")
             return
+        self.parameter_loop_plot.setLabel(
+            "left", "Parameter value", units=parameter.unit
+        )
         try:
             values = self._parameter_loop_values(parameter)
         except ValueError as exc:
             self.parameter_loop_preview.setText(str(exc))
+            self.parameter_loop_plot.setTitle("Enter valid loop values")
             return
         preview_parameter = replace(parameter, unit="")
         labels = [
@@ -5489,17 +5614,76 @@ class SequenceSimulationWidget(QWidget):
         if parameter.unit:
             text += f" {parameter.unit}"
         self.parameter_loop_preview.setText(text)
+        self.parameter_loop_plot.setTitle(parameter.label)
+        self.parameter_loop_plot_curve.setData(np.arange(len(values)), values)
+        ticks = np.unique(
+            np.linspace(0, len(values) - 1, min(len(values), 6), dtype=int)
+        )
+        self.parameter_loop_plot.getAxis("bottom").setTicks(
+            [[(int(index), str(index)) for index in ticks]]
+        )
+        self.parameter_loop_plot.autoRange()
 
-    def _set_parameter_loop_controls_locked(self, locked):
+    def _update_parameter_loop_input_controls(self, *_):
+        manual = self.parameter_loop_input_mode.currentData() == "manual"
+        locked = self._parameter_loop_state is not None
+        self.parameter_loop_manual_values.setEnabled(manual and not locked)
         for control in (
-            self.sequence_source,
-            self.parameter_loop_parameter,
             self.parameter_loop_formula,
             self.parameter_loop_start,
             self.parameter_loop_stop,
             self.parameter_loop_steps,
         ):
+            control.setEnabled(not manual and not locked)
+        self.parameter_loop_help.setText(
+            "One run per value, in the entered order. Integer parameters are rounded."
+            if manual
+            else "The formula maps evenly spaced x values. Integer parameters "
+            "are rounded."
+        )
+        disk = self.parameter_loop_output_mode.currentData() == "disk"
+        self.parameter_loop_output_directory.setEnabled(disk and not locked)
+        self.parameter_loop_output_browse.setEnabled(disk and not locked)
+        self.parameter_loop_export_naming.setEnabled(disk and not locked)
+        self.parameter_loop_export_naming._update_controls()
+        self.parameter_loop_storage_help.setText(
+            "Save each run as a .blochproj; keep only the current result in RAM."
+            if disk
+            else "Completed runs stay in Simulations until the app closes."
+        )
+        self._update_parameter_loop_preview()
+
+    def _update_parameter_loop_naming_preview(self, *_):
+        self.parameter_loop_export_naming.set_preview_context(
+            self.parameter_loop_output_directory.text(),
+            [
+                (
+                    f"parameter_loop_DATE_TIME_ID_{index:03d}_parameter_value",
+                    "DATE_TIME",
+                )
+                for index in range(1, 4)
+            ],
+        )
+
+    def _browse_parameter_loop_output_directory(self):
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Save parameter loop results",
+            self.parameter_loop_output_directory.text()
+            or str(self._export_directory()),
+        )
+        if directory:
+            self.parameter_loop_output_directory.setText(directory)
+
+    def _set_parameter_loop_controls_locked(self, locked):
+        for control in (
+            self.sequence_source,
+            self.parameter_loop_parameter,
+            self.parameter_loop_input_mode,
+            self.parameter_loop_output_mode,
+        ):
             control.setEnabled(not locked)
+        self._update_parameter_loop_input_controls()
         group = self._active_sequence_parameter_group()
         if group is not None:
             group.setEnabled(not locked)
@@ -5522,7 +5706,20 @@ class SequenceSimulationWidget(QWidget):
             return
         try:
             values = self._parameter_loop_values(parameter)
-        except ValueError as exc:
+            output_directory = None
+            file_namer = None
+            if self.parameter_loop_output_mode.currentData() == "disk":
+                naming = self.parameter_loop_export_naming.options()
+                directory = self.parameter_loop_output_directory.text().strip()
+                if not directory:
+                    raise ValueError("Choose an output folder for the loop results.")
+                output_directory = Path(directory).expanduser().resolve()
+                output_directory.mkdir(parents=True, exist_ok=True)
+                # Check write access before starting an expensive simulation.
+                with tempfile.TemporaryFile(dir=output_directory):
+                    pass
+                file_namer = ProjectExportNamer(output_directory, naming)
+        except (ValueError, OSError) as exc:
             QMessageBox.warning(self, "Parameter loop", str(exc))
             return
         if self.sequence_source.currentIndex() in self.GENERATED_SOURCES:
@@ -5535,14 +5732,30 @@ class SequenceSimulationWidget(QWidget):
             )
             return
 
+        manual = self.parameter_loop_input_mode.currentData() == "manual"
         self._parameter_loop_state = {
             "parameter": parameter,
             "values": values,
-            "formula": self.parameter_loop_formula.text().strip(),
-            "x_values": np.linspace(
-                self.parameter_loop_start.value(),
-                self.parameter_loop_stop.value(),
-                self.parameter_loop_steps.value(),
+            "output_directory": output_directory,
+            "file_namer": file_namer,
+            "output_prefix": (
+                f"parameter_loop_{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
+                f"{uuid4().hex[:8]}"
+            ),
+            "saved": 0,
+            "input_mode": self.parameter_loop_input_mode.currentData(),
+            "manual_values": (
+                self.parameter_loop_manual_values.text().strip() if manual else None
+            ),
+            "formula": None if manual else self.parameter_loop_formula.text().strip(),
+            "x_values": (
+                None
+                if manual
+                else np.linspace(
+                    self.parameter_loop_start.value(),
+                    self.parameter_loop_stop.value(),
+                    self.parameter_loop_steps.value(),
+                )
             ),
             "index": 0,
             "completed": 0,
@@ -5610,20 +5823,27 @@ class SequenceSimulationWidget(QWidget):
         if state is None or state["current_value"] is None:
             return None
         parameter = state["parameter"]
-        return {
+        metadata = {
             "parameter_key": parameter.key,
             "parameter_label": parameter.label,
             "value": float(state["current_value"]),
             "unit": parameter.unit,
             "decimals": int(parameter.decimals),
             "integer": bool(parameter.integer),
-            "formula": state["formula"],
-            "x": float(state["x_values"][state["index"]]),
-            "x_start": float(state["x_values"][0]),
-            "x_stop": float(self.parameter_loop_stop.value()),
+            "input_mode": state["input_mode"],
             "index": int(state["index"]),
             "count": int(len(state["values"])),
         }
+        if state["input_mode"] == "manual":
+            metadata["manual_values"] = state["manual_values"]
+        else:
+            metadata.update(
+                formula=state["formula"],
+                x=float(state["x_values"][state["index"]]),
+                x_start=float(state["x_values"][0]),
+                x_stop=float(self.parameter_loop_stop.value()),
+            )
+        return metadata
 
     def _parameter_loop_iteration_finished(self):
         state = self._parameter_loop_state
@@ -5635,6 +5855,75 @@ class SequenceSimulationWidget(QWidget):
             self._finish_parameter_loop(cancelled=state["cancel_requested"])
         else:
             QTimer.singleShot(0, self._run_parameter_loop_iteration)
+
+    def _save_parameter_loop_run(self, run):
+        state = self._parameter_loop_state
+        parameter = state["parameter"]
+        key = re.sub(r"[^A-Za-z0-9_-]", "_", parameter.key).strip("_")
+        existing_stem = (
+            f"{state['output_prefix']}_{state['index'] + 1:03d}_"
+            f"{key}_{state['current_value']:g}"
+        )
+        try:
+            filename = state["file_namer"].next_path(
+                existing_stem, project_timestamp(run.created_at_utc)
+            )
+            snapshot = getattr(self.window(), "_session_run_project_arguments", None)
+            arguments = (
+                snapshot(run)
+                if callable(snapshot)
+                else {
+                    "state": {"workspace_mode": "sequence"},
+                    "phantom": run.state.get("phantom"),
+                    "program": run.state.get("program"),
+                    "sequence_result": run.result,
+                }
+            )
+            worker = ParameterLoopSaveThread(filename, run, arguments)
+            worker.finished.connect(self._parameter_loop_save_finished)
+            self._parameter_loop_save_worker = worker
+            self.cancel_button.setEnabled(True)
+            self.export_button.setEnabled(False)
+            self.progress.setFormat("Saving loop result…")
+            self._status_update(f"Saving {filename.name}…")
+            worker.start()
+        except Exception as exc:
+            self._parameter_loop_save_failed(run, str(exc))
+
+    def _parameter_loop_save_finished(self):
+        worker = self._parameter_loop_save_worker
+        if worker is None:
+            return
+        self._parameter_loop_save_worker = None
+        run, error = worker.simulation_run, worker.error
+        worker.simulation_run = None
+        worker.deleteLater()
+        if error:
+            self._parameter_loop_save_failed(run, error)
+            return
+        state = self._parameter_loop_state
+        if state is None:
+            return
+        state["saved"] += 1
+        self.export_button.setEnabled(True)
+        self._parameter_loop_iteration_finished()
+
+    def _parameter_loop_save_failed(self, run, error):
+        # Keep the unsaved run available for manual export and stop the loop.
+        self._retain_session_simulation_run(run)
+        self.export_button.setEnabled(True)
+        self._finish_parameter_loop(error=f"Saving failed: {error}")
+        QMessageBox.critical(
+            self,
+            "Parameter loop saving failed",
+            f"{error}\n\nThe loop has stopped. Earlier project files remain saved. "
+            "The unsaved result is retained in Simulations for manual export.",
+        )
+
+    def _wait_for_parameter_loop_save(self):
+        worker = self._parameter_loop_save_worker
+        if worker is not None:
+            worker.wait()
 
     def _finish_parameter_loop(self, *, cancelled=False, error=""):
         state = self._parameter_loop_state
@@ -5658,10 +5947,16 @@ class SequenceSimulationWidget(QWidget):
         else:
             self.progress.setValue(self.progress.maximum())
             self.progress.setFormat(f"Loop complete · {completed}/{total} runs")
-            self.status.setText(
-                f"Parameter loop complete — {completed} simulations retained in "
-                "Session simulations; select a run in Reconstruction Explorer"
-            )
+            if state["output_directory"] is not None:
+                self.status.setText(
+                    f"Parameter loop complete — {state['saved']} projects saved to "
+                    f"{state['output_directory']}; only the current result kept in RAM"
+                )
+            else:
+                self.status.setText(
+                    f"Parameter loop complete — {completed} simulations retained in "
+                    "Session simulations; select a run in Reconstruction Explorer"
+                )
 
     def _parameter_loop_prefix(self):
         state = self._parameter_loop_state
@@ -10237,6 +10532,12 @@ class SequenceSimulationWidget(QWidget):
         """Cancel whichever sequence or probe worker currently owns the run area."""
         if self._parameter_loop_state is not None:
             self._parameter_loop_state["cancel_requested"] = True
+            if self._parameter_loop_save_worker is not None:
+                self.cancel_button.setEnabled(False)
+                self._status_update(
+                    "Finishing the current file before stopping the loop…"
+                )
+                return
         probe_running = self.probe_worker is not None and self.probe_worker.isRunning()
         sequence_running = self.worker is not None and self.worker.isRunning()
         if probe_running:
@@ -11439,12 +11740,19 @@ class SequenceSimulationWidget(QWidget):
         else:
             self._show_cartesian_result(result)
         if record_run:
-            self._register_session_simulation_run(
+            save_to_disk = (
+                loop_metadata is not None
+                and self._parameter_loop_state["output_directory"] is not None
+            )
+            run = self._register_session_simulation_run(
                 result,
                 animation=animation,
                 animation_message=animation_message,
+                retain=not save_to_disk,
             )
-            if loop_metadata is not None:
+            if save_to_disk:
+                self._save_parameter_loop_run(run)
+            elif loop_metadata is not None:
                 self._parameter_loop_iteration_finished()
 
     @staticmethod
@@ -11536,7 +11844,7 @@ class SequenceSimulationWidget(QWidget):
         return source
 
     def _register_session_simulation_run(
-        self, result, *, animation=None, animation_message=""
+        self, result, *, animation=None, animation_message="", retain=True
     ):
         """Hand one completed run to the main window's session explorer."""
         if self.program is None or self.phantom is None:
@@ -11583,13 +11891,21 @@ class SequenceSimulationWidget(QWidget):
                 parameter, loop_metadata.get("value", 0.0)
             )
             run.display_name = f"Loop {index}/{count} · {parameter.label} = {value}"
+        if retain:
+            self._retain_session_simulation_run(run)
+        else:
+            capture = getattr(self.window(), "_capture_sequence_simulation_run", None)
+            if callable(capture):
+                capture(run)
+        return run
+
+    def _retain_session_simulation_run(self, run):
         register = getattr(self.window(), "register_sequence_simulation_run", None)
         if callable(register):
             register(run)
             self._active_session_run_id = run.run_id
         self.reconstruction_explorer.add_session_run(run, current=True)
         self.result_volume_viewer.add_session_run(run, current=True)
-        return run
 
     def _session_run_state(self, *, phantom, **extra):
         state = {
@@ -11705,6 +12021,7 @@ class SequenceSimulationWidget(QWidget):
         """Refresh dependent labels and panel visibility without regenerating."""
         self._source_changed()
         self._object_source_changed()
+        self._update_parameter_loop_input_controls()
         for update in (
             self._update_bandwidth_labels,
             self._update_csi_labels,

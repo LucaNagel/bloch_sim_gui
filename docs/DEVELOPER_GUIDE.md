@@ -21,6 +21,52 @@ To set up the environment (handled automatically by the build script, but good t
 
 **Note:** The `.venv-packaging` directory contains many files but is configured to be ignored by `.gitignore`. You should **not** commit it to the repository.
 
+### Conda for notebooks and the Python API
+
+For a separate notebook or Python API environment, run these commands from the
+repository root:
+
+```bash
+conda create -n bloch-simulator python=3.12 pip
+conda activate bloch-simulator
+python -m pip install "ipykernel==7.4.0" ".[gui,pulseq]"
+```
+
+Use `-e ".[gui,pulseq]"` in place of `".[gui,pulseq]"` for an editable
+development installation. Select the `bloch-simulator` environment as the
+kernel in your notebook editor. If the editor requires a registered kernel,
+register it from the active environment:
+
+```bash
+python -m ipykernel install --user --name bloch-simulator --display-name "BlochSimulator (Python 3.12)"
+```
+
+Specify `python=3.12` explicitly: creating an environment without a Python
+version lets Conda choose one when Python is installed as a dependency of pip.
+The version in `.python-version` is used by the project's launcher and build
+scripts; it does not constrain `conda create`.
+Python 3.12 matches the desktop development runtime, and
+[ipykernel 7.4.0 requires Python 3.11 or later](https://pypi.org/project/ipykernel/7.4.0/).
+
+`h5py` is already a required dependency in `pyproject.toml`, so pip installs it
+automatically. A compatible pre-built wheel includes the HDF5 libraries needed
+at runtime. If pip downloads an `h5py-*.tar.gz` archive instead, it attempts a
+source build that requires an installed HDF5 library and development headers.
+An error mentioning `Unable to load dependency HDF5` or a missing
+`libhdf5.dylib` indicates that this build cannot find HDF5. See the
+[h5py installation documentation](https://docs.h5py.org/en/stable/build.html).
+
+To let Conda provide `h5py` and its HDF5 dependency, add `h5py` when creating
+the environment, then run the activation and pip commands above:
+
+```bash
+conda create -n bloch-simulator python=3.12 pip h5py
+```
+
+This is an alternative to installing `h5py` through pip. The desktop launcher
+and PyInstaller build continue to use their dedicated `.venv-packaging`
+environment.
+
 ## 2. Release Workflow (Recommended)
 
 Follow these steps to publish a new version of BlochSimulator. This process is highly automated via GitHub Actions.

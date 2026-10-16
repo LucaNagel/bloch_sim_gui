@@ -5,7 +5,6 @@ import math
 import copy
 import re
 import numpy as np
-from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -73,6 +72,7 @@ from ..visualization import (
 from ..slice_explorer import SliceSelectionExplorer
 from ..kernel_capabilities import resolve_kernel_request
 from ..project_io import load_project, save_project
+from ..project_naming import ProjectExportNamer, project_timestamp
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
 
 # Import phantom/kspace if available
@@ -107,6 +107,7 @@ from .default_settings import WorkspaceDefaults
 from .sequence_simulation_widget import SequenceSimulationWidget
 from .b1_widgets import B1PhantomCombinationWidget, B1WorkspaceWidget
 from .project_explorer import ProjectExplorerDialog
+from .project_export_dialog import SimulationProjectExportDialog
 from .simulation_explorer import SessionSimulationExplorer
 
 
@@ -812,6 +813,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         # 3D visualization
         self.mag_3d = MagnetizationViewer()
+        self.mag_3d.spin_display_combo.setCurrentText("Show all spins + mean")
         self.mag_3d.playhead_line = self.sequence_designer.playhead_line
         self.mag_3d.set_export_directory_provider(self._get_export_directory)
         self.mag_3d.position_changed.connect(
@@ -1348,8 +1350,9 @@ class BlochSimulatorGUI(QMainWindow):
         parameter_loop_title.setFont(parameter_loop_title_font)
         parameter_loop_page_layout.addWidget(parameter_loop_title)
         parameter_loop_description = QLabel(
-            "Select a numerical parameter and enter a formula, x range, and "
-            "number of points. Explore each completed run in Reconstruction Explorer."
+            "Select a numerical parameter and enter comma-separated values or "
+            "a formula with an x range and number of points. Explore each completed "
+            "run in Reconstruction Explorer."
         )
         parameter_loop_description.setWordWrap(True)
         parameter_loop_page_layout.addWidget(parameter_loop_description)
@@ -1359,9 +1362,24 @@ class BlochSimulatorGUI(QMainWindow):
             self.sequence_parameter_loop_panel_host
         )
         self.sequence_parameter_loop_panel_layout.setContentsMargins(0, 8, 0, 0)
-        parameter_loop_page_layout.addWidget(
-            self.sequence_parameter_loop_panel_host, 0, Qt.AlignLeft | Qt.AlignTop
+        parameter_loop_body = QWidget()
+        parameter_loop_body_layout = QHBoxLayout(parameter_loop_body)
+        parameter_loop_body_layout.setContentsMargins(0, 0, 0, 0)
+        parameter_loop_body_layout.setSpacing(24)
+        parameter_loop_body_layout.addWidget(
+            self.sequence_parameter_loop_panel_host, 1, Qt.AlignTop
         )
+        self.sequence_parameter_loop_plot_host = QWidget()
+        self.sequence_parameter_loop_plot_host.setMinimumWidth(240)
+        self.sequence_parameter_loop_plot_host.setMaximumWidth(440)
+        self.sequence_parameter_loop_plot_layout = QVBoxLayout(
+            self.sequence_parameter_loop_plot_host
+        )
+        self.sequence_parameter_loop_plot_layout.setContentsMargins(0, 8, 0, 0)
+        parameter_loop_body_layout.addWidget(
+            self.sequence_parameter_loop_plot_host, 1, Qt.AlignTop
+        )
+        parameter_loop_page_layout.addWidget(parameter_loop_body, 0, Qt.AlignTop)
         parameter_loop_page_layout.addStretch(1)
         self.sequence_parameter_loop_tab_index = self.tab_widget.addTab(
             self.sequence_parameter_loop_page, "Parameter Loop"
@@ -1534,6 +1552,10 @@ class BlochSimulatorGUI(QMainWindow):
             self.sequence_simulation_widget.parameter_loop_group
         )
         self.sequence_simulation_widget.parameter_loop_group.show()
+        self.sequence_parameter_loop_plot_layout.addWidget(
+            self.sequence_simulation_widget.parameter_loop_plot
+        )
+        self.sequence_simulation_widget.parameter_loop_plot.show()
         layout.addWidget(self.sequence_simulation_widget)
         self._connect_phantom_sequence_workspaces()
 
@@ -4498,6 +4520,15 @@ class BlochSimulatorGUI(QMainWindow):
 
     def register_sequence_simulation_run(self, run):
         """Retain a completed sequence simulation for the current app session."""
+        self._capture_sequence_simulation_run(run)
+        self.simulation_explorer.add_run(run)
+        self.statusBar().showMessage(
+            f"{run.display_name} retained temporarily in Simulations", 5000
+        )
+        return run
+
+    def _capture_sequence_simulation_run(self, run):
+        """Capture GUI state without retaining the scientific data in a list."""
         project_state = self._complete_project_state()
         run.state["project_state"] = project_state
         run.state["sequence_controls"] = copy.deepcopy(
@@ -4517,10 +4548,6 @@ class BlochSimulatorGUI(QMainWindow):
         b1_widget = getattr(self, "b1_widget", None)
         run.state["tx_field"] = None if b1_widget is None else b1_widget.tx_field
         run.state["rx_field"] = None if b1_widget is None else b1_widget.rx_field
-        self.simulation_explorer.add_run(run)
-        self.statusBar().showMessage(
-            f"{run.display_name} retained temporarily in Simulations", 5000
-        )
         return run
 
     def _open_session_simulation_run(self, run):
@@ -4529,6 +4556,13 @@ class BlochSimulatorGUI(QMainWindow):
                 self.sequence_simulation_tab_index
             )
         sequence_widget = self.sequence_simulation_widget
+        if sequence_widget._parameter_loop_state is not None:
+            QMessageBox.warning(
+                self,
+                "Parameter loop running",
+                "Cancel or finish the parameter loop before switching simulations.",
+            )
+            return
         sequence_widget._restoring_session_run = True
         try:
             self._restore_session_run_phantom(run)
@@ -4618,13 +4652,7 @@ class BlochSimulatorGUI(QMainWindow):
     @staticmethod
     def _session_run_timestamp(run):
         """Return the run completion time in the standard local filename format."""
-        try:
-            completed = datetime.fromisoformat(str(run.created_at_utc))
-            if completed.tzinfo is not None:
-                completed = completed.astimezone()
-            return completed.strftime("%Y%m%d_%H%M%S")
-        except (TypeError, ValueError):
-            return time.strftime("%Y%m%d_%H%M%S")
+        return project_timestamp(run.created_at_utc)
 
     @classmethod
     def _session_run_export_stem(cls, run):
@@ -4639,6 +4667,10 @@ class BlochSimulatorGUI(QMainWindow):
         return name or f"bloch_project_{cls._session_run_timestamp(run)}"
 
     def _save_session_run_project(self, run, filename):
+        save_project(filename, **self._session_run_project_arguments(run))
+
+    def _session_run_project_arguments(self, run):
+        """Snapshot export arguments on the GUI thread before background I/O."""
         state = copy.deepcopy(run.state.get("project_state", {}))
         state["workspace_mode"] = "sequence"
         state["active_tab"] = self.sequence_simulation_tab_index
@@ -4652,15 +4684,31 @@ class BlochSimulatorGUI(QMainWindow):
             run.state.get("reconstruction_view", {})
         )
         state["sequence_view_name"] = run.state.get("sequence_view_name", "Signal")
-        save_project(
-            filename,
-            state,
-            phantom=run.state.get("phantom"),
-            tx_field=run.state.get("tx_field"),
-            rx_field=run.state.get("rx_field"),
-            program=run.state.get("program"),
-            sequence_result=run.result,
+        return {
+            "state": state,
+            "phantom": run.state.get("phantom"),
+            "tx_field": run.state.get("tx_field"),
+            "rx_field": run.state.get("rx_field"),
+            "program": run.state.get("program"),
+            "sequence_result": run.result,
+        }
+
+    def _prompt_session_project_export(self, runs):
+        examples = [
+            (self._session_run_export_stem(run), self._session_run_timestamp(run))
+            for run in runs
+        ]
+        dialog = SimulationProjectExportDialog(
+            self._get_export_directory(),
+            examples,
+            self,
+            naming=getattr(self, "_simulation_export_naming", None),
         )
+        if dialog.exec_() != dialog.Accepted:
+            return None
+        directory, naming = dialog.export_options()
+        self._simulation_export_naming = naming
+        return directory, naming
 
     def _export_session_simulation_runs(self, runs):
         runs = tuple(runs)
@@ -4684,18 +4732,27 @@ class BlochSimulatorGUI(QMainWindow):
                 filename += ".blochproj"
             paths.append((runs[0], Path(filename)))
         else:
-            directory = QFileDialog.getExistingDirectory(
-                self,
-                f"Export {len(runs)} simulations as projects",
-                str(export_directory),
-            )
-            if not directory:
+            options = self._prompt_session_project_export(runs)
+            if options is None:
                 return
-            for run in runs:
-                candidate = Path(directory) / (
-                    f"{self._session_run_export_stem(run)}.blochproj"
-                )
-                paths.append((run, self._available_project_path(candidate)))
+            directory, naming = options
+            try:
+                directory = Path(directory).resolve()
+                directory.mkdir(parents=True, exist_ok=True)
+                namer = ProjectExportNamer(directory, naming)
+                paths = [
+                    (
+                        run,
+                        namer.next_path(
+                            self._session_run_export_stem(run),
+                            self._session_run_timestamp(run),
+                        ),
+                    )
+                    for run in runs
+                ]
+            except (ValueError, OSError) as exc:
+                QMessageBox.critical(self, "Export simulation projects", str(exc))
+                return
 
         exported = []
         try:
@@ -5991,6 +6048,17 @@ class BlochSimulatorGUI(QMainWindow):
 
     def open_project(self, filename=None):
         """Restore a complete project and refresh all affected workspaces."""
+        sequence_widget = self.sequence_simulation_widget
+        if (
+            sequence_widget is not None
+            and sequence_widget._parameter_loop_state is not None
+        ):
+            QMessageBox.warning(
+                self,
+                "Parameter loop running",
+                "Cancel or finish the parameter loop before opening a project.",
+            )
+            return
         # QAction.triggered may provide its checked state as a boolean.
         if not filename or isinstance(filename, bool):
             filename, _ = QFileDialog.getOpenFileName(

@@ -617,6 +617,13 @@ def test_parameter_loop_opens_on_demand_beside_simulations():
         )
         == 0
     )
+    assert (
+        window.sequence_parameter_loop_plot_layout.indexOf(
+            sequence_widget.parameter_loop_plot
+        )
+        == 0
+    )
+    assert not sequence_widget.parameter_loop_plot.isHidden()
 
     window.close()
     window.deleteLater()
@@ -741,10 +748,12 @@ def test_session_simulations_export_single_and_multiple_projects(tmp_path, monke
 
     batch_dir = tmp_path / "batch"
     batch_dir.mkdir()
+    from blochsimulator.project_naming import ProjectExportNaming
+
     monkeypatch.setattr(
-        QFileDialog,
-        "getExistingDirectory",
-        lambda *args, **kwargs: str(batch_dir),
+        window,
+        "_prompt_session_project_export",
+        lambda _runs: (batch_dir, ProjectExportNaming()),
     )
     second.display_name = "Renal baseline"
     second.custom_name = True

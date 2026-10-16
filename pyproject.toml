@@ -17,7 +17,7 @@ blochsimulator = ["rfpulses/*.txt", "metal/*.metal"]
 
 [project]
 name = "blochsimulator"
-version = "2.8.3"
+version = "2.8.4"
 description = "High-performance Bloch equation simulator for MRI"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -38,6 +38,7 @@ dependencies = [
     "nbformat>=5.0.0",
     "ipykernel",
     "ipywidgets>=8.0.0",
+    "ipympl>=0.9.0",
     "imageio>=2.34.0",
     "imageio-ffmpeg>=0.4.9",
     "psutil>=5.9.0; sys_platform != 'emscripten'",

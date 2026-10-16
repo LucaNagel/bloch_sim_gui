@@ -428,6 +428,27 @@ tissue = TissueParameters.gray_matter(3.0)
 print(f"T1: {tissue.t1:.3f}s, T2: {tissue.t2:.3f}s")
 ```
 
+### Conda environment for notebooks and the Python API
+
+From the repository root, create an environment with an explicit Python version:
+
+```bash
+conda create -n bloch-simulator python=3.12 pip
+conda activate bloch-simulator
+python -m pip install "ipykernel==7.4.0" ".[gui,pulseq]"
+```
+
+Python 3.12 matches the project's desktop development runtime and supports
+ipykernel 7.4.0. Select this environment as the kernel in your notebook editor.
+
+Pip installs `h5py` automatically because it is declared in `pyproject.toml`.
+If no compatible pre-built wheel is available, pip attempts a source build,
+which needs a separately installed HDF5 library. To use Conda's pre-built
+`h5py` package and its HDF5 dependency, optionally add `h5py` to the
+`conda create` command before running pip. See the
+[Conda setup notes](docs/DEVELOPER_GUIDE.md#conda-for-notebooks-and-the-python-api)
+for details.
+
 ### Build the desktop application
 
 Standalone applications for macOS, Windows, and Linux are automatically built

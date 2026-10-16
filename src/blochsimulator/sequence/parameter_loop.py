@@ -1,4 +1,4 @@
-"""Evaluate mathematical parameter-loop formulas on an evenly spaced grid."""
+"""Build parameter-loop values from formulas or a manually entered list."""
 
 from __future__ import annotations
 
@@ -7,6 +7,31 @@ import operator
 import re
 
 import numpy as np
+
+
+MAX_PARAMETER_LOOP_POINTS = 500
+
+
+def manual_parameter_loop_values(text: str):
+    """Parse finite, comma-separated numbers while preserving order and repeats."""
+    if not text.strip():
+        raise ValueError("Enter comma-separated values, for example 0.5, 1, 1.5.")
+    entries = text.split(",")
+    if len(entries) > MAX_PARAMETER_LOOP_POINTS:
+        raise ValueError(f"Use at most {MAX_PARAMETER_LOOP_POINTS} values.")
+    values = []
+    for index, entry in enumerate(entries, start=1):
+        try:
+            value = float(entry.strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"Value {index} must be a number. Separate values with commas "
+                "and use a dot for decimals."
+            ) from exc
+        if not np.isfinite(value):
+            raise ValueError(f"Value {index} must be finite.")
+        values.append(value)
+    return np.asarray(values, dtype=float)
 
 
 _FUNCTIONS = {
