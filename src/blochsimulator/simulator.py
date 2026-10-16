@@ -1805,7 +1805,6 @@ class BlochSimulator:
         dt: float = 1e-5,
         mode: int = 0,
         additional_frequencies: Optional[np.ndarray] = None,
-        use_grouped: bool = True,
     ) -> Dict:
         """
         Simulate Bloch equations for a heterogeneous phantom.
@@ -1831,9 +1830,6 @@ class BlochSimulator:
             Extra frequency offsets to simulate (Hz). These are added to
             each voxel's df_map value. Useful for multi-frequency/spectroscopic
             imaging.
-        use_grouped : bool
-            If True and phantom has discrete tissue labels, use optimized
-            grouped simulation (faster for segmented phantoms).
 
         Returns
         -------

@@ -80,21 +80,6 @@ void blochsim_heterogeneous(
     double *mx, double *my, double *mz,
     int mode, int num_threads);
 
-/* Optimized version for grouped tissue types (fewer unique T1/T2 combinations) */
-void blochsim_heterogeneous_grouped(
-    double *b1real, double *b1imag,
-    double *gx, double *gy, double *gz, double *tsteps,
-    int ntime,
-    int *tissue_labels,
-    double *t1_per_label, double *t2_per_label,
-    int nlabels,
-    double *df_arr,
-    double *dx, double *dy, double *dz,
-    double *mx_init, double *my_init, double *mz_init,
-    int nvoxels,
-    double *mx, double *my, double *mz,
-    int mode, int num_threads);
-
 /* Streaming sequence simulation in canonical frequency units (Hz, Hz/m, m). */
 int blochsim_sequence_streaming(
     double *rf_real_hz, double *rf_imag_hz,
