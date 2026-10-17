@@ -8,6 +8,7 @@ simulator's frequency units: Hz and Hz/m, respectively.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field, replace
 from typing import Mapping, Sequence
 from uuid import uuid4
@@ -1540,8 +1541,14 @@ def simulate_spectral_spatial_profile(
     flip_angle_deg: float | None = None,
     thickness_m: float | None = None,
     spatial_offset_m: float | None = None,
+    progress_callback=None,
+    cancel_check=None,
 ) -> dict[str, np.ndarray]:
-    """Run a relaxation-free Bloch simulation on a position/frequency grid."""
+    """Run a relaxation-free Bloch simulation on a position/frequency grid.
+
+    ``progress_callback(fraction)`` receives values in ``[0, 1]``; a truthy
+    ``cancel_check()`` raises :class:`SpectralSpatialSimulationCancelled`.
+    """
     pulse = SpectralSpatialPulse.from_mapping(pulse)
     positions = np.asarray(positions_m, dtype=float).reshape(-1)
     frequencies = np.asarray(frequency_offsets_hz, dtype=float).reshape(-1)
@@ -1558,49 +1565,20 @@ def simulate_spectral_spatial_profile(
         thickness_m=thickness_m,
         spatial_offset_m=spatial_offset_m,
     )
-    gradient_rf = _resample_piecewise_constant(
+    shape = (positions.size, frequencies.size)
+    mx, my, mz = _apply_spectral_spatial_waveform(
+        pulse,
+        rf,
         gradient,
-        pulse.gradient_raster_s,
-        rf.size,
-        pulse.rf_raster_s,
+        positions,
+        frequencies,
+        np.zeros(shape),
+        np.zeros(shape),
+        np.ones(shape),
+        progress_callback=progress_callback,
+        cancel_check=cancel_check,
     )
-    position_grid, frequency_grid = np.meshgrid(positions, frequencies, indexing="ij")
-    mx = np.zeros(position_grid.size, dtype=float)
-    my = np.zeros_like(mx)
-    mz = np.ones_like(mx)
-    positions_flat = position_grid.reshape(-1)
-    frequencies_flat = frequency_grid.reshape(-1)
-    dt = pulse.rf_raster_s
-    for b1, gradient_value in zip(rf, gradient_rf):
-        # Match the simulator's canonical rotating-frame convention exactly:
-        # rotx=-2*pi*Re(B1)*dt, roty=+2*pi*Im(B1)*dt, and
-        # rotz=-2*pi*(off-resonance + gradient position)*dt.
-        bx = np.full(mx.size, -float(np.real(b1)))
-        by = np.full(mx.size, float(np.imag(b1)))
-        bz = -(frequencies_flat + gradient_value * positions_flat)
-        magnitude = np.sqrt(bx * bx + by * by + bz * bz)
-        active = magnitude > 0
-        if not np.any(active):
-            continue
-        nx = np.divide(bx, magnitude, out=np.zeros_like(bx), where=active)
-        ny = np.divide(by, magnitude, out=np.zeros_like(by), where=active)
-        nz = np.divide(bz, magnitude, out=np.zeros_like(bz), where=active)
-        angle = 2.0 * np.pi * magnitude * dt
-        cosine = np.cos(angle)
-        sine = np.sin(angle)
-        dot = nx * mx + ny * my + nz * mz
-        cross_x = ny * mz - nz * my
-        cross_y = nz * mx - nx * mz
-        cross_z = nx * my - ny * mx
-        one_minus = 1.0 - cosine
-        mx, my, mz = (
-            mx * cosine + cross_x * sine + nx * dot * one_minus,
-            my * cosine + cross_y * sine + ny * dot * one_minus,
-            mz * cosine + cross_z * sine + nz * dot * one_minus,
-        )
-    shape = position_grid.shape
-    mxy = (mx + 1j * my).reshape(shape)
-    mz = mz.reshape(shape)
+    mxy = mx + 1j * my
     flip = np.rad2deg(np.arctan2(np.abs(mxy), mz))
     return {
         "positions_m": positions,
@@ -1838,6 +1816,24 @@ def spectral_spatial_schedule_warnings(
     return tuple(dict.fromkeys(warnings))
 
 
+class SpectralSpatialSimulationCancelled(RuntimeError):
+    """Raised when a caller cancels a spectral-spatial Bloch simulation."""
+
+
+# The native kernel uses the proton gyromagnetic ratio in rad/s/G. Expressing
+# B1 and gradients in "proton Gauss" makes its rotations nucleus independent.
+_NATIVE_GAMMA_RAD_PER_S_PER_G = 26753.0
+_NATIVE_SPINS_PER_CHUNK = 16384
+
+
+def _native_bloch_kernel():
+    try:
+        from ..blochsimulator_cy import simulate_bloch_parallel
+    except ImportError:
+        return None
+    return simulate_bloch_parallel
+
+
 def _apply_spectral_spatial_waveform(
     pulse: SpectralSpatialPulse,
     rf: np.ndarray,
@@ -1847,6 +1843,9 @@ def _apply_spectral_spatial_waveform(
     mx: np.ndarray,
     my: np.ndarray,
     mz: np.ndarray,
+    *,
+    progress_callback=None,
+    cancel_check=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Apply one complex SPSP waveform to arbitrary initial magnetization."""
     gradient_rf = _resample_piecewise_constant(
@@ -1855,16 +1854,71 @@ def _apply_spectral_spatial_waveform(
         rf.size,
         pulse.rf_raster_s,
     )
+    shape = (positions.size, frequencies.size)
+    state = [
+        np.asarray(component, dtype=float).reshape(-1).copy()
+        for component in (mx, my, mz)
+    ]
+    if any(component.size != positions.size * frequencies.size for component in state):
+        raise ValueError("magnetization shape does not match position/frequency grid")
+    state = [component.reshape(shape) for component in state]
+    kernel = _native_bloch_kernel()
+    if kernel is None:
+        return _apply_spectral_spatial_waveform_numpy(
+            pulse, rf, gradient_rf, positions, frequencies, *state, cancel_check
+        )
+    scale = 2.0 * np.pi / _NATIVE_GAMMA_RAD_PER_S_PER_G
+    b1 = np.ascontiguousarray(np.asarray(rf, dtype=np.complex128) * scale)
+    gradients = np.zeros((rf.size, 3))
+    gradients[:, 2] = gradient_rf * scale / 100.0
+    intervals = np.full(rf.size, float(pulse.rf_raster_s))
+    positions_cm = np.zeros((positions.size, 3))
+    positions_cm[:, 2] = positions * 100.0
+    threads = max(1, int(os.cpu_count() or 1))
+    out = [np.empty(shape) for _ in range(3)]
+    chunk = max(1, _NATIVE_SPINS_PER_CHUNK // positions.size)
+    for begin in range(0, frequencies.size, chunk):
+        if cancel_check is not None and cancel_check():
+            raise SpectralSpatialSimulationCancelled()
+        end = min(begin + chunk, frequencies.size)
+        # The kernel orders spins frequency-major: index = frequency * npos + position.
+        initial = np.stack([component[:, begin:end].T.ravel() for component in state])
+        result = kernel(
+            b1,
+            gradients,
+            intervals,
+            np.inf,
+            np.inf,
+            np.ascontiguousarray(frequencies[begin:end]),
+            positions_cm,
+            np.ascontiguousarray(initial),
+            0,
+            threads,
+        )
+        for target, part in zip(out, result):
+            target[:, begin:end] = np.asarray(part).reshape(positions.size, end - begin)
+        if progress_callback is not None:
+            progress_callback(end / frequencies.size)
+    return tuple(out)
+
+
+def _apply_spectral_spatial_waveform_numpy(
+    pulse, rf, gradient_rf, positions, frequencies, mx, my, mz, cancel_check=None
+):
+    """Reference NumPy propagation used when the native kernel is unavailable."""
     position_grid, frequency_grid = np.meshgrid(positions, frequencies, indexing="ij")
     positions_flat = position_grid.reshape(-1)
     frequencies_flat = frequency_grid.reshape(-1)
-    mx = np.asarray(mx, dtype=float).reshape(-1).copy()
-    my = np.asarray(my, dtype=float).reshape(-1).copy()
-    mz = np.asarray(mz, dtype=float).reshape(-1).copy()
-    if mx.size != positions_flat.size or my.size != mx.size or mz.size != mx.size:
-        raise ValueError("magnetization shape does not match position/frequency grid")
+    mx = mx.reshape(-1)
+    my = my.reshape(-1)
+    mz = mz.reshape(-1)
     dt = pulse.rf_raster_s
-    for b1, gradient_value in zip(rf, gradient_rf):
+    for index, (b1, gradient_value) in enumerate(zip(rf, gradient_rf)):
+        if cancel_check is not None and index % 1000 == 0 and cancel_check():
+            raise SpectralSpatialSimulationCancelled()
+        # Match the simulator's canonical rotating-frame convention exactly:
+        # rotx=-2*pi*Re(B1)*dt, roty=+2*pi*Im(B1)*dt, and
+        # rotz=-2*pi*(off-resonance + gradient position)*dt.
         bx = np.full(mx.size, -float(np.real(b1)))
         by = np.full(mx.size, float(np.imag(b1)))
         bz = -(frequencies_flat + gradient_value * positions_flat)
@@ -2040,3 +2094,294 @@ def simulate_spectral_spatial_schedule_preview(
             "motion, exchange, B0 distributions, and receive reconstruction are omitted."
         ),
     }
+
+
+@dataclass(frozen=True)
+class MetaboliteSelectiveDesign:
+    """An automatically designed single-metabolite SPSP pulse and its checks.
+
+    Fractions are transverse-magnetization ratios relative to an ideal
+    excitation of the target at the requested flip angle, evaluated at the
+    slice center with a relaxation-free Bloch simulation. ``worst_leak_fraction``
+    covers every other peak over ``±suppression_half_width_hz``;
+    ``passband_min_fraction`` covers the target over ``±passband_half_width_hz``.
+    """
+
+    target: str
+    pulse: SpectralSpatialPulse
+    peak_flip_angles_deg: Mapping[str, float]
+    worst_leak_fraction: float
+    worst_leak_peak: str
+    passband_min_fraction: float
+    candidates_evaluated: int
+
+    @property
+    def meets_tolerance(self) -> bool:
+        return bool(
+            self.pulse.design_metadata.get("metabolite_selective", {}).get(
+                "meets_tolerance", False
+            )
+        )
+
+
+def _metabolite_selective_candidates(
+    target_hz,
+    other_hz,
+    *,
+    passband_half_width_hz,
+    suppression_half_width_hz,
+    minimum_period_samples,
+    gradient_raster_s,
+    max_duration_s,
+    max_subpulse_count,
+):
+    """Return ``(subpulses, sampling_rate_hz, guard_hz)`` design candidates.
+
+    For each odd subpulse count, the shortest period whose folded peaks leave a
+    guard of at least ``1.4 * rate / subpulses`` (roughly one FIR transition)
+    is preferred; the period with the largest relative guard is the fallback.
+    """
+    candidates = []
+    for count in range(7, int(max_subpulse_count) + 1, 2):
+        maximum_period = int(np.floor(max_duration_s / (count * gradient_raster_s)))
+        if maximum_period < minimum_period_samples:
+            break
+        periods = np.arange(minimum_period_samples, maximum_period + 1)
+        rates = 1.0 / (periods * gradient_raster_s)
+        if other_hz.size:
+            folded = np.abs(
+                (other_hz[None, :] - target_hz + rates[:, None] / 2.0) % rates[:, None]
+                - rates[:, None] / 2.0
+            ).min(axis=1)
+            guard = folded - passband_half_width_hz - suppression_half_width_hz
+        else:
+            guard = rates / 2.0 - passband_half_width_hz
+        # A pass band plus transitions must stay inside one alias period.
+        guard = np.minimum(guard, rates / 2.0 - passband_half_width_hz - 1e-6)
+        relative = guard * count / rates
+        chosen = set()
+        sufficient = np.flatnonzero(relative >= 1.4)
+        if sufficient.size:
+            chosen.add(int(sufficient[0]))
+        best = int(np.argmax(relative))
+        if guard[best] > 0:
+            chosen.add(best)
+        for index in sorted(chosen):
+            candidates.append((count, float(rates[index]), float(guard[index])))
+    return candidates
+
+
+def design_metabolite_selective_pulse(
+    target: str,
+    peaks: Sequence[SpectralSpatialPeak | Mapping],
+    *,
+    flip_angle_deg: float = 30.0,
+    slice_thickness_m: float = 10e-3,
+    passband_half_width_hz: float = 20.0,
+    suppression_half_width_hz: float = 20.0,
+    leak_tolerance: float = 0.05,
+    max_duration_s: float = 0.05,
+    max_subpulse_count: int = 41,
+    subpulse_duration_s: float = 0.7e-3,
+    spatial_time_bandwidth_product: float = 3.0,
+    spectral_phase_type: str = "linear",
+    rf_raster_s: float = 1e-6,
+    gradient_raster_s: float = 10e-6,
+    max_gradient_t_per_m: float = 0.05,
+    max_slew_t_per_m_s: float = 200.0,
+    max_b1_t: float | None = None,
+    nucleus: str = "C13",
+    name: str | None = None,
+    progress_callback=None,
+    cancel_check=None,
+) -> MetaboliteSelectiveDesign:
+    """Design one flyback SPSP pulse that excites ``target`` and suppresses peaks.
+
+    The target becomes a pass band of ``±passband_half_width_hz`` around its
+    carrier-relative offset and every other peak a stop band of
+    ``±suppression_half_width_hz``. Subpulse count and spectral sampling rate
+    are searched: each candidate is Bloch-simulated at the peaks, and the
+    shortest candidate whose leak stays within ``leak_tolerance`` and whose
+    pass band keeps at least 90 % of the target signal is returned. Without
+    such a candidate, the one with the smallest leak is returned and
+    ``meets_tolerance`` is false.
+    """
+    peaks = tuple(SpectralSpatialPeak.from_mapping(peak) for peak in peaks)
+    matches = [peak for peak in peaks if peak.name == str(target)]
+    if len(matches) != 1:
+        raise ValueError(f"target {target!r} must name exactly one peak")
+    target_peak = matches[0]
+    others = tuple(peak for peak in peaks if peak is not target_peak)
+    flip_angle_deg = _positive_finite("flip_angle_deg", flip_angle_deg)
+    passband_half_width_hz = _positive_finite(
+        "passband_half_width_hz", passband_half_width_hz
+    )
+    suppression_half_width_hz = _positive_finite(
+        "suppression_half_width_hz", suppression_half_width_hz
+    )
+    leak_tolerance = _ripple("leak_tolerance", leak_tolerance)
+    max_duration_s = _positive_finite("max_duration_s", max_duration_s)
+    name = str(name or f"{target_peak.name} SPSP")
+    common = {
+        "flip_angle_deg": flip_angle_deg,
+        "slice_thickness_m": slice_thickness_m,
+        "spatial_time_bandwidth_product": spatial_time_bandwidth_product,
+        "subpulse_duration_s": subpulse_duration_s,
+        "spectral_phase_type": spectral_phase_type,
+        "rf_raster_s": rf_raster_s,
+        "gradient_raster_s": gradient_raster_s,
+        "max_gradient_t_per_m": max_gradient_t_per_m,
+        "max_slew_t_per_m_s": max_slew_t_per_m_s,
+        "max_b1_t": max_b1_t,
+        "nucleus": nucleus,
+        "name": name,
+    }
+    target_hz = float(target_peak.carrier_offset_hz)
+    # A short probe validates the hardware limits and yields the minimum
+    # flyback period (excitation lobe plus rewinder) for this slice.
+    probe = design_spectral_spatial_pulse(
+        bands=(SpectralBand(target_hz, 2.0 * passband_half_width_hz),),
+        subpulse_count=3,
+        **{**common, "max_b1_t": None},
+    )
+    minimum_period = int(
+        probe.design_metadata["alias_search"]["minimum_period_samples"]
+    )
+    other_hz = np.array([peak.carrier_offset_hz for peak in others], dtype=float)
+    candidates = _metabolite_selective_candidates(
+        target_hz,
+        other_hz,
+        passband_half_width_hz=passband_half_width_hz,
+        suppression_half_width_hz=suppression_half_width_hz,
+        minimum_period_samples=minimum_period,
+        gradient_raster_s=float(gradient_raster_s),
+        max_duration_s=max_duration_s,
+        max_subpulse_count=max_subpulse_count,
+    )
+    if not candidates:
+        minimum_period_s = minimum_period * float(gradient_raster_s)
+        raise ValueError(
+            f"no flyback period separates {target_peak.name!r} from the other "
+            f"peaks within {max_duration_s * 1e3:.3g} ms. This slice needs at "
+            f"least {minimum_period_s * 1e3:.2f} ms per sub-pulse, so the spectral "
+            f"response repeats every {1.0 / minimum_period_s:.0f} Hz or less; "
+            "use a thicker slice or shorter sub-pulses, narrower pass-band or "
+            "suppression widths, or allow a longer pulse"
+        )
+
+    offsets = np.linspace(-1.0, 1.0, 9)
+    leak_frequencies = (
+        other_hz[:, None] + suppression_half_width_hz * offsets[None, :]
+    ).ravel()
+    pass_frequencies = target_hz + passband_half_width_hz * offsets
+    frequencies = np.concatenate(
+        (leak_frequencies, pass_frequencies, other_hz, [target_hz])
+    )
+    ideal = np.sin(np.deg2rad(min(flip_angle_deg, 90.0)))
+    stopbands = tuple(
+        SpectralStopBand(
+            peak.carrier_offset_hz - suppression_half_width_hz,
+            peak.carrier_offset_hz + suppression_half_width_hz,
+            maximum_amplitude=leak_tolerance,
+            name=peak.name,
+        )
+        for peak in others
+    )
+    best = None
+    last_error = None
+    evaluated = 0
+    for index, (count, rate, guard) in enumerate(candidates):
+        if cancel_check is not None and cancel_check():
+            raise SpectralSpatialSimulationCancelled("metabolite design cancelled")
+        band = SpectralBand(
+            target_hz,
+            2.0 * passband_half_width_hz,
+            name=target_peak.name,
+            transition_width_hz=guard,
+            passband_ripple=0.1,
+            stopband_ripple=leak_tolerance,
+        )
+        try:
+            pulse = design_spectral_spatial_pulse(
+                bands=(band,),
+                stopbands=stopbands,
+                subpulse_count=count,
+                spectral_sampling_rate_hz=rate,
+                max_duration_s=max_duration_s,
+                **common,
+            )
+        except ValueError as exc:
+            last_error = exc
+            continue
+        evaluated += 1
+        response = simulate_spectral_spatial_profile(
+            pulse,
+            [pulse.reference_spatial_center_m],
+            frequencies,
+            spatial_offset_m=pulse.reference_spatial_center_m,
+        )
+        mxy = np.abs(response["mxy"][0]) / ideal
+        leak = mxy[: leak_frequencies.size]
+        passband = mxy[leak_frequencies.size : leak_frequencies.size + offsets.size]
+        worst = float(leak.max()) if leak.size else 0.0
+        meets = worst <= leak_tolerance and float(passband.min()) >= 0.9
+        # Without a compliant candidate, minimize the larger of the normalized
+        # leak and pass-band violations rather than the leak alone.
+        violation = max(worst / leak_tolerance, (1.0 - float(passband.min())) / 0.1)
+        score = (not meets, pulse.duration_s if meets else violation, pulse.duration_s)
+        if best is None or score < best[0]:
+            worst_peak = (
+                others[int(np.argmax(leak)) // offsets.size].name if leak.size else ""
+            )
+            flips = response["flip_angle_deg"][0][-(len(others) + 1) :]
+            best = (
+                score,
+                pulse,
+                worst,
+                worst_peak,
+                float(passband.min()),
+                meets,
+                {
+                    **{peak.name: float(flip) for peak, flip in zip(others, flips)},
+                    target_peak.name: float(flips[-1]),
+                },
+                (count, rate, guard),
+            )
+        if progress_callback is not None:
+            progress_callback((index + 1) / len(candidates))
+    if best is None:
+        raise ValueError(
+            f"could not design a pulse for {target_peak.name!r}: {last_error}"
+        )
+    _, pulse, worst, worst_peak, passband_min, meets, flips, choice = best
+    metadata = dict(pulse.design_metadata)
+    metadata["metabolite_selective"] = {
+        "schema_version": 1,
+        "target": target_peak.name,
+        "target_carrier_offset_hz": target_hz,
+        "target_peak": target_peak.to_dict(),
+        "suppressed": [peak.to_dict() for peak in others],
+        "passband_half_width_hz": float(passband_half_width_hz),
+        "suppression_half_width_hz": float(suppression_half_width_hz),
+        "leak_tolerance": float(leak_tolerance),
+        "max_duration_s": float(max_duration_s),
+        "subpulse_count": int(choice[0]),
+        "spectral_sampling_rate_hz": float(choice[1]),
+        "guard_hz": float(choice[2]),
+        "worst_leak_fraction": worst,
+        "worst_leak_peak": worst_peak,
+        "passband_min_fraction": passband_min,
+        "peak_flip_angles_deg": dict(flips),
+        "meets_tolerance": bool(meets),
+        "candidates_evaluated": int(evaluated),
+    }
+    pulse = replace(pulse, design_metadata=metadata)
+    return MetaboliteSelectiveDesign(
+        target=target_peak.name,
+        pulse=pulse,
+        peak_flip_angles_deg=dict(flips),
+        worst_leak_fraction=worst,
+        worst_leak_peak=worst_peak,
+        passband_min_fraction=passband_min,
+        candidates_evaluated=evaluated,
+    )

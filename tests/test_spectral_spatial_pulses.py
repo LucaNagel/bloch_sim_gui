@@ -313,17 +313,25 @@ def test_spsp_designer_exposes_band_parameters_and_continuous_map(qt_application
     assert dialog.sim_frequency_max_hz.value() == pytest.approx(1500.0)
     assert dialog.sim_frequency_points.value() == 513
     assert dialog.sim_frequency_points.maximum() == 8193
+    assert dialog.auto_simulation_range.isChecked()
+    assert not any(control.isEnabled() for control in dialog.simulation_range_controls)
+    assert not any(
+        label.isEnabled() for label in dialog.simulation_range_control_labels
+    )
 
     dialog.subpulse_count.setValue(3)
     dialog.sim_position_points.setValue(33)
     dialog.sim_frequency_points.setValue(81)
     dialog._design()
+    dialog.wait_for_response_simulation()
     assert dialog.response_image.image.shape == (33, 81)
     assert "33 positions" in dialog.response_description.text()
     assert "81 frequency offsets" in dialog.response_description.text()
     assert "pass-band RMS error" in dialog.validation_metrics.text()
 
     dialog.auto_simulation_range.setChecked(False)
+    assert all(control.isEnabled() for control in dialog.simulation_range_controls)
+    assert all(label.isEnabled() for label in dialog.simulation_range_control_labels)
     dialog.sim_position_min_mm.setValue(-8.0)
     dialog.sim_position_max_mm.setValue(12.0)
     dialog.sim_position_points.setValue(17)
@@ -331,11 +339,94 @@ def test_spsp_designer_exposes_band_parameters_and_continuous_map(qt_application
     dialog.sim_frequency_max_hz.setValue(180.0)
     dialog.sim_frequency_points.setValue(31)
     dialog._simulate_requested_range()
+    dialog.wait_for_response_simulation()
     assert dialog.response_image.image.shape == (17, 31)
 
     dialog.close()
     dialog.deleteLater()
     qt_application.processEvents()
+
+
+def test_spsp_designer_reopens_without_blocking_and_reuses_cached_map(
+    qt_application, monkeypatch
+):
+    import blochsimulator.ui.spectral_spatial_designer as designer
+
+    dialog = SpectralSpatialPulseDesignerDialog(
+        scanner_parameters=ScannerParameters(),
+        nucleus="C13",
+        field_strength_t=3.0,
+        target_thickness_m=10e-3,
+    )
+    dialog.subpulse_count.setValue(3)
+    dialog._design()
+    dialog.wait_for_response_simulation()
+    pulse = dialog.pulse()
+    assert dialog.response_image.image.shape == (101, 513)
+    dialog.close()
+
+    calls = []
+    original = designer.simulate_spectral_spatial_profile
+
+    def counting(pulse, positions, frequencies, **kwargs):
+        calls.append(np.size(positions) * np.size(frequencies))
+        return original(pulse, positions, frequencies, **kwargs)
+
+    monkeypatch.setattr(designer, "simulate_spectral_spatial_profile", counting)
+    reopened = SpectralSpatialPulseDesignerDialog(
+        scanner_parameters=ScannerParameters(),
+        nucleus="C13",
+        field_strength_t=3.0,
+        target_thickness_m=10e-3,
+        initial_pulse=pulse,
+    )
+    assert calls == []
+    assert reopened._response_thread is None
+    assert reopened.response_image.image.shape == (101, 513)
+    assert len(reopened.object_plot.listDataItems()) >= 3
+    reopened.close()
+
+
+def test_spsp_designer_map_runs_in_background_and_can_be_cancelled(qt_application):
+    dialog = SpectralSpatialPulseDesignerDialog(
+        scanner_parameters=ScannerParameters(),
+        nucleus="C13",
+        field_strength_t=3.0,
+        target_thickness_m=10e-3,
+    )
+    dialog.subpulse_count.setValue(3)
+    dialog.sim_position_points.setValue(301)
+    dialog.sim_frequency_points.setValue(4001)
+    dialog._design()
+    assert dialog._response_thread is not None
+    assert dialog.response_progress_row.isVisibleTo(dialog)
+    dialog._cancel_response_simulation()
+    dialog.wait_for_response_simulation()
+    assert dialog._response_thread is None
+    assert dialog._last_response is None
+    assert "cancelled" in dialog.response_description.text()
+    dialog.close()
+
+
+def test_spsp_automatic_range_covers_every_active_peak(qt_application):
+    dialog = SpectralSpatialPulseDesignerDialog(
+        scanner_parameters=ScannerParameters(),
+        nucleus="C13",
+        field_strength_t=3.0,
+        sequence_reference_ppm=171.076,
+        target_thickness_m=10e-3,
+    )
+    dialog.subpulse_count.setValue(3)
+    dialog.sim_position_points.setValue(9)
+    dialog.sim_frequency_points.setValue(17)
+    dialog._design()
+    dialog.wait_for_response_simulation()
+    alias = dialog.pulse().spectral_alias_bandwidth_hz
+    offsets = [peak.carrier_offset_hz for peak in dialog._resolved_peaks()]
+    assert max(offsets) - min(offsets) > alias
+    assert dialog.sim_frequency_min_hz.value() < min(min(offsets), -alias / 2)
+    assert dialog.sim_frequency_max_hz.value() > max(max(offsets), alias / 2)
+    dialog.close()
 
 
 def test_spsp_metabolite_table_supports_c13_presets_and_editable_peaks(

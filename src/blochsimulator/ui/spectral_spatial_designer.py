@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import threading
+from collections import OrderedDict
 from dataclasses import replace
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QTimer, QUrl, Qt
+from PyQt5.QtCore import QCoreApplication, QThread, QTimer, QUrl, Qt, pyqtSignal
 from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtWidgets import (
     QCheckBox,
@@ -22,6 +25,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -42,6 +46,7 @@ from ..sequence.spectral_spatial import (
     SpectralSpatialPeak,
     SpectralSpatialSchedule,
     SpectralSpatialScheduleEntry,
+    SpectralSpatialSimulationCancelled,
     design_spectral_spatial_pulse,
     fold_frequency_offset_hz,
     simulate_spectral_spatial_profile,
@@ -88,6 +93,277 @@ def render_spectral_spatial_waveforms(plot, pulse, *, flip_angle_deg=None):
     )
 
 
+_RESPONSE_CACHE_LIMIT = 12
+_RESPONSE_CACHE: "OrderedDict[tuple, dict]" = OrderedDict()
+_RESPONSE_CACHE_LOCK = threading.Lock()
+
+
+def _array_digest(values) -> str:
+    array = np.ascontiguousarray(values)
+    return hashlib.sha1(array.tobytes() + str(array.dtype).encode()).hexdigest()
+
+
+def spectral_spatial_response_key(pulse, positions_m, frequencies_hz) -> tuple:
+    """Identify one Bloch response by waveform, reference geometry and grid."""
+    pulse = SpectralSpatialPulse.from_mapping(pulse)
+    waveform = (
+        _array_digest(pulse.rf_hz),
+        _array_digest(pulse.gradient_hz_per_m),
+        float(pulse.rf_raster_s),
+        float(pulse.gradient_raster_s),
+        float(pulse.reference_flip_angle_deg),
+        float(pulse.reference_thickness_m),
+        float(pulse.reference_spatial_center_m),
+        str(pulse.nucleus),
+    )
+    return (
+        waveform,
+        _array_digest(np.asarray(positions_m, dtype=float)),
+        _array_digest(np.asarray(frequencies_hz, dtype=float)),
+    )
+
+
+def cached_spectral_spatial_response(key):
+    """Return a cached response and mark it as recently used."""
+    with _RESPONSE_CACHE_LOCK:
+        response = _RESPONSE_CACHE.get(key)
+        if response is not None:
+            _RESPONSE_CACHE.move_to_end(key)
+        return response
+
+
+def store_spectral_spatial_response(key, response) -> None:
+    # Detached worker threads call this directly, hence the lock.
+    with _RESPONSE_CACHE_LOCK:
+        _RESPONSE_CACHE[key] = response
+        _RESPONSE_CACHE.move_to_end(key)
+        while len(_RESPONSE_CACHE) > _RESPONSE_CACHE_LIMIT:
+            _RESPONSE_CACHE.popitem(last=False)
+
+
+_DETACHED_RESPONSE_THREADS: set = set()
+
+
+def _stop_detached_response_threads():
+    for thread in tuple(_DETACHED_RESPONSE_THREADS):
+        thread.request_cancel()
+        thread.wait()
+    _DETACHED_RESPONSE_THREADS.clear()
+
+
+def _detach_response_thread(thread) -> None:
+    """Let an accepted pulse's map finish into the cache after its dialog closes."""
+    for signal in (thread.progress, thread.completed, thread.failed, thread.finished):
+        try:
+            signal.disconnect()
+        except TypeError:
+            pass
+    thread.setParent(None)
+    if not _DETACHED_RESPONSE_THREADS:
+        application = QCoreApplication.instance()
+        if application is not None:
+            application.aboutToQuit.connect(_stop_detached_response_threads)
+    _DETACHED_RESPONSE_THREADS.add(thread)
+    thread.completed.connect(store_spectral_spatial_response)
+    thread.finished.connect(lambda: _DETACHED_RESPONSE_THREADS.discard(thread))
+    thread.finished.connect(thread.deleteLater)
+
+
+class SpectralSpatialResponseThread(QThread):
+    """Run one position/frequency Bloch map without blocking the GUI."""
+
+    progress = pyqtSignal(int)
+    completed = pyqtSignal(object, object)
+    failed = pyqtSignal(object, str)
+
+    def __init__(self, key, pulse, positions_m, frequencies_hz, parent=None):
+        super().__init__(parent)
+        self.key = key
+        self.pulse = pulse
+        self.positions_m = np.asarray(positions_m, dtype=float)
+        self.frequencies_hz = np.asarray(frequencies_hz, dtype=float)
+        self._cancel_requested = False
+
+    def request_cancel(self):
+        self._cancel_requested = True
+
+    def run(self):
+        try:
+            response = simulate_spectral_spatial_profile(
+                self.pulse,
+                self.positions_m,
+                self.frequencies_hz,
+                spatial_offset_m=self.pulse.reference_spatial_center_m,
+                progress_callback=lambda fraction: self.progress.emit(
+                    int(round(100.0 * fraction))
+                ),
+                cancel_check=lambda: self._cancel_requested,
+            )
+        except SpectralSpatialSimulationCancelled:
+            return
+        except Exception as exc:  # reported to the dialog thread
+            self.failed.emit(self.key, str(exc))
+            return
+        self.completed.emit(self.key, response)
+
+
+def spectral_spatial_peak_sources(
+    *,
+    nucleus,
+    field_strength_t,
+    sequence_reference_ppm,
+    carrier_offset_hz,
+    phantom=None,
+):
+    """Return ``(label, specification)`` peak sources for a nucleus.
+
+    Nucleus-specific pathways come first, then an editable common list, the
+    current phantom (when its nucleus matches) and an empty custom list.
+    """
+    presets = tuple(metabolite_presets(nucleus))
+    by_key = {preset.key: preset for preset in presets}
+
+    def available(keys):
+        return tuple(by_key[key] for key in keys if key in by_key)
+
+    specifications = []
+    if nucleus == "C13":
+        specifications.extend(
+            (
+                (
+                    "Pyruvate metabolism (13C)",
+                    "c13_pyruvate",
+                    available(
+                        (
+                            "pyruvate",
+                            "lactate",
+                            "alanine",
+                            "pyruvatehydrate",
+                            "bicarbonate",
+                        )
+                    ),
+                    None,
+                ),
+                (
+                    "Fumarate / malate (13C)",
+                    "c13_fumarate",
+                    available(("fumarate", "malate1", "malate4")),
+                    None,
+                ),
+                (
+                    "alpha-Ketoglutarate / 2HG (13C)",
+                    "c13_ketoglutarate",
+                    available(
+                        (
+                            "alpha_ketoglutarate_c1",
+                            "alpha_ketoglutarate_hydrate",
+                            "2hg_c1",
+                        )
+                    ),
+                    None,
+                ),
+                (
+                    "Redox: DHA / vitamin C (13C)",
+                    "c13_redox",
+                    available(("dehydroascorbate_c1", "vitamin_c_c1")),
+                    None,
+                ),
+            )
+        )
+        common_enabled = {
+            "pyruvate",
+            "lactate",
+            "alanine",
+            "pyruvatehydrate",
+        }
+    elif nucleus == "H1":
+        specifications.extend(
+            (
+                (
+                    "Brain MRS metabolites (1H)",
+                    "h1_brain",
+                    available(
+                        (
+                            "naa",
+                            "creatine",
+                            "choline",
+                            "glutamate",
+                            "glutamine",
+                            "myoinositol",
+                            "lactate",
+                        )
+                    ),
+                    None,
+                ),
+                (
+                    "Edited metabolites (1H)",
+                    "h1_edited",
+                    available(("gaba", "glutathione", "2hg", "lactate")),
+                    None,
+                ),
+            )
+        )
+        common_enabled = {"naa", "creatine", "choline", "lactate"}
+    elif nucleus == "P31":
+        specifications.extend(
+            (
+                (
+                    "Bioenergetics (31P)",
+                    "p31_bioenergetics",
+                    available(("pcr", "pi", "gamma_atp", "alpha_atp", "beta_atp")),
+                    None,
+                ),
+                (
+                    "Phospholipid metabolism (31P)",
+                    "p31_phospholipids",
+                    available(("pe", "pc", "gpe", "gpc", "membrane_phospholipids")),
+                    None,
+                ),
+            )
+        )
+        common_enabled = {"pcr", "pi", "gamma_atp", "alpha_atp", "beta_atp"}
+    else:
+        common_enabled = set()
+
+    if presets:
+        specifications.append(
+            (
+                f"Common {nucleus} metabolites (choose rows)",
+                "common",
+                presets,
+                common_enabled,
+            )
+        )
+
+    phantom_peaks = ()
+    if phantom is not None and str(getattr(phantom, "nucleus", nucleus)) == nucleus:
+        try:
+            phantom_peaks = spectral_spatial_peaks(
+                phantom=phantom,
+                field_strength_t=field_strength_t,
+                nucleus=nucleus,
+                sequence_reference_ppm=sequence_reference_ppm,
+                rf_carrier_offset_hz=carrier_offset_hz,
+            )
+        except (AttributeError, TypeError, ValueError):
+            phantom_peaks = ()
+    if phantom_peaks:
+        specifications.append(("Current phantom peaks", "phantom", phantom_peaks, None))
+    specifications.append(("Custom peak list", "custom", (), None))
+
+    return [
+        (
+            label,
+            {
+                "key": key,
+                "components": tuple(components),
+                "enabled_keys": enabled_keys,
+            },
+        )
+        for label, key, components, enabled_keys in specifications
+    ]
+
+
 class SpectralSpatialPulseDesignerDialog(QDialog):
     """Design an SPSP waveform from explicit spatial and spectral targets."""
 
@@ -124,6 +400,9 @@ class SpectralSpatialPulseDesignerDialog(QDialog):
         )
         self._design_dirty = self._pulse is None
         self._last_response = None
+        self._response_thread = None
+        self._pending_response_key = None
+        self._displayed_response_key = None
         self._target_lines = []
         self._bands_linked_to_peak_table = False
         self._updating_peak_table = False
@@ -138,8 +417,11 @@ class SpectralSpatialPulseDesignerDialog(QDialog):
                 self._pulse.spectral_alias_bandwidth_hz,
             )
             if not self._design_dirty:
+                # Never simulate synchronously here: cached maps appear at once,
+                # missing ones are computed in the background after opening.
                 self._show_pulse()
-                self._simulate_current_range()
+                self._update_metabolite_profiles()
+                self._simulate_current_range(select_tab=False)
 
     @staticmethod
     def _double(minimum, maximum, value, suffix="", decimals=3):
@@ -152,152 +434,15 @@ class SpectralSpatialPulseDesignerDialog(QDialog):
 
     def _populate_peak_preset_choices(self):
         """Expose nucleus-specific pathways plus an editable common list."""
-        presets = tuple(metabolite_presets(self.nucleus))
-        by_key = {preset.key: preset for preset in presets}
-
-        def available(keys):
-            return tuple(by_key[key] for key in keys if key in by_key)
-
-        specifications = []
-        if self.nucleus == "C13":
-            specifications.extend(
-                (
-                    (
-                        "Pyruvate metabolism (13C)",
-                        "c13_pyruvate",
-                        available(
-                            (
-                                "pyruvate",
-                                "lactate",
-                                "alanine",
-                                "pyruvatehydrate",
-                                "bicarbonate",
-                            )
-                        ),
-                        None,
-                    ),
-                    (
-                        "Fumarate / malate (13C)",
-                        "c13_fumarate",
-                        available(("fumarate", "malate1", "malate4")),
-                        None,
-                    ),
-                    (
-                        "alpha-Ketoglutarate / 2HG (13C)",
-                        "c13_ketoglutarate",
-                        available(
-                            (
-                                "alpha_ketoglutarate_c1",
-                                "alpha_ketoglutarate_hydrate",
-                                "2hg_c1",
-                            )
-                        ),
-                        None,
-                    ),
-                    (
-                        "Redox: DHA / vitamin C (13C)",
-                        "c13_redox",
-                        available(("dehydroascorbate_c1", "vitamin_c_c1")),
-                        None,
-                    ),
-                )
-            )
-            common_enabled = {
-                "pyruvate",
-                "lactate",
-                "alanine",
-                "pyruvatehydrate",
-            }
-        elif self.nucleus == "H1":
-            specifications.extend(
-                (
-                    (
-                        "Brain MRS metabolites (1H)",
-                        "h1_brain",
-                        available(
-                            (
-                                "naa",
-                                "creatine",
-                                "choline",
-                                "glutamate",
-                                "glutamine",
-                                "myoinositol",
-                                "lactate",
-                            )
-                        ),
-                        None,
-                    ),
-                    (
-                        "Edited metabolites (1H)",
-                        "h1_edited",
-                        available(("gaba", "glutathione", "2hg", "lactate")),
-                        None,
-                    ),
-                )
-            )
-            common_enabled = {"naa", "creatine", "choline", "lactate"}
-        elif self.nucleus == "P31":
-            specifications.extend(
-                (
-                    (
-                        "Bioenergetics (31P)",
-                        "p31_bioenergetics",
-                        available(("pcr", "pi", "gamma_atp", "alpha_atp", "beta_atp")),
-                        None,
-                    ),
-                    (
-                        "Phospholipid metabolism (31P)",
-                        "p31_phospholipids",
-                        available(("pe", "pc", "gpe", "gpc", "membrane_phospholipids")),
-                        None,
-                    ),
-                )
-            )
-            common_enabled = {"pcr", "pi", "gamma_atp", "alpha_atp", "beta_atp"}
-        else:
-            common_enabled = set()
-
-        if presets:
-            specifications.append(
-                (
-                    f"Common {self.nucleus} metabolites (choose rows)",
-                    "common",
-                    presets,
-                    common_enabled,
-                )
-            )
-
-        phantom_peaks = ()
-        if (
-            self.phantom is not None
-            and str(getattr(self.phantom, "nucleus", self.nucleus)) == self.nucleus
-        ):
-            try:
-                phantom_peaks = spectral_spatial_peaks(
-                    phantom=self.phantom,
-                    field_strength_t=self.field_strength_t,
-                    nucleus=self.nucleus,
-                    sequence_reference_ppm=self.sequence_reference_ppm,
-                    rf_carrier_offset_hz=self.carrier_offset_hz,
-                )
-            except (AttributeError, TypeError, ValueError):
-                phantom_peaks = ()
-        if phantom_peaks:
-            specifications.append(
-                ("Current phantom peaks", "phantom", phantom_peaks, None)
-            )
-        specifications.append(("Custom peak list", "custom", (), None))
-
         self.object_preset.clear()
-        for label, key, components, enabled_keys in specifications:
-            self.object_preset.addItem(
-                label,
-                {
-                    "key": key,
-                    "components": tuple(components),
-                    "enabled_keys": enabled_keys,
-                },
-            )
+        for label, specification in spectral_spatial_peak_sources(
+            nucleus=self.nucleus,
+            field_strength_t=self.field_strength_t,
+            sequence_reference_ppm=self.sequence_reference_ppm,
+            carrier_offset_hz=self.carrier_offset_hz,
+            phantom=self.phantom,
+        ):
+            self.object_preset.addItem(label, specification)
 
     def _append_peak_row(
         self,
@@ -629,7 +774,7 @@ class SpectralSpatialPulseDesignerDialog(QDialog):
         simulation_group = QGroupBox("2. Simulation and validation range")
         simulation_form = QFormLayout(simulation_group)
         self.auto_simulation_range = QCheckBox(
-            "Automatic from spatial target and one alias period"
+            "Automatic: ±1.5 slice widths, all active peaks and one alias period"
         )
         self.auto_simulation_range.setChecked(True)
         self.sim_position_min_mm = self._double(-1000.0, 1000.0, -15.0, " mm")
@@ -653,6 +798,18 @@ class SpectralSpatialPulseDesignerDialog(QDialog):
         simulation_form.addRow("Frequency from", self.sim_frequency_min_hz)
         simulation_form.addRow("Frequency to", self.sim_frequency_max_hz)
         simulation_form.addRow("Frequency samples", self.sim_frequency_points)
+        self.simulation_range_controls = (
+            self.sim_position_min_mm,
+            self.sim_position_max_mm,
+            self.sim_position_points,
+            self.sim_frequency_min_hz,
+            self.sim_frequency_max_hz,
+            self.sim_frequency_points,
+        )
+        self.simulation_range_control_labels = tuple(
+            simulation_form.labelForField(control)
+            for control in self.simulation_range_controls
+        )
         controls_layout.addWidget(simulation_group)
 
         method_group = QGroupBox("Method and attribution")
@@ -754,9 +911,17 @@ class SpectralSpatialPulseDesignerDialog(QDialog):
         self.status.setWordWrap(True)
         controls_layout.addWidget(self.status)
         action_buttons = QHBoxLayout()
-        self.design_button = QPushButton("Design pulse and simulate")
+        self.design_button = QPushButton("Design pulse")
+        self.design_button.setToolTip(
+            "Design the waveform, update the metabolite profiles and compute the "
+            "excitation map in the background."
+        )
         self.design_button.clicked.connect(self._design)
-        self.resimulate_button = QPushButton("Simulate selected range")
+        self.resimulate_button = QPushButton("Recompute excitation map")
+        self.resimulate_button.setToolTip(
+            "Recompute the excitation map for the range in section 2 without "
+            "redesigning the pulse."
+        )
         self.resimulate_button.clicked.connect(self._simulate_requested_range)
         action_buttons.addWidget(self.design_button)
         action_buttons.addWidget(self.resimulate_button)
@@ -799,6 +964,19 @@ class SpectralSpatialPulseDesignerDialog(QDialog):
         )
         self.response_description.setWordWrap(True)
         layout.addWidget(self.response_description)
+
+        progress_row = QHBoxLayout()
+        self.response_progress = QProgressBar()
+        self.response_progress.setRange(0, 100)
+        self.response_progress.setFormat("Simulating excitation map… %p%")
+        self.response_cancel_button = QPushButton("Cancel")
+        self.response_cancel_button.clicked.connect(self._cancel_response_simulation)
+        progress_row.addWidget(self.response_progress, 1)
+        progress_row.addWidget(self.response_cancel_button)
+        self.response_progress_row = QWidget()
+        self.response_progress_row.setLayout(progress_row)
+        self.response_progress_row.setVisible(False)
+        layout.addWidget(self.response_progress_row)
 
         self.response_graphics = pg.GraphicsLayoutWidget()
         self.response_plot = self.response_graphics.addPlot(row=0, col=0)
@@ -884,13 +1062,12 @@ class SpectralSpatialPulseDesignerDialog(QDialog):
 
     def _simulation_range_mode_changed(self, *_):
         editable = not self.auto_simulation_range.isChecked()
-        for widget in (
-            self.sim_position_min_mm,
-            self.sim_position_max_mm,
-            self.sim_frequency_min_hz,
-            self.sim_frequency_max_hz,
+        for control, label in zip(
+            self.simulation_range_controls, self.simulation_range_control_labels
         ):
-            widget.setEnabled(editable)
+            control.setEnabled(editable)
+            if label is not None:
+                label.setEnabled(editable)
         if not editable:
             bandwidth = (
                 None if self._pulse is None else self._pulse.spectral_alias_bandwidth_hz
@@ -907,14 +1084,38 @@ class SpectralSpatialPulseDesignerDialog(QDialog):
             (self.sim_position_max_mm, center_mm + half_position_mm),
         )
         if alias_bandwidth_hz is not None:
-            values += (
-                (self.sim_frequency_min_hz, -float(alias_bandwidth_hz) / 2.0),
-                (self.sim_frequency_max_hz, float(alias_bandwidth_hz) / 2.0),
+            values += tuple(
+                zip(
+                    (self.sim_frequency_min_hz, self.sim_frequency_max_hz),
+                    self._default_frequency_range(float(alias_bandwidth_hz)),
+                )
             )
         for widget, value in values:
             previous = widget.blockSignals(True)
             widget.setValue(value)
             widget.blockSignals(previous)
+
+    def _default_frequency_range(self, alias_bandwidth_hz):
+        """Cover one alias period, every active peak and every target band.
+
+        Peaks outside the first alias period fold back onto the pass bands, so a
+        range of only one period hides exactly the leakage that matters.
+        """
+        edges = [-alias_bandwidth_hz / 2.0, alias_bandwidth_hz / 2.0]
+        edges.extend(
+            peak.carrier_offset_hz for peak in self._resolved_peaks(strict=False)
+        )
+        bands = () if self._pulse is None else self._pulse.bands
+        for band in bands:
+            edges.extend(
+                (
+                    band.center_hz - band.width_hz / 2.0,
+                    band.center_hz + band.width_hz / 2.0,
+                )
+            )
+        lower, upper = min(edges), max(edges)
+        margin = max(0.1 * (upper - lower), 0.25 * alias_bandwidth_hz)
+        return lower - margin, upper + margin
 
     def _load_default_band(self):
         self.bands.blockSignals(True)
@@ -1206,6 +1407,7 @@ class SpectralSpatialPulseDesignerDialog(QDialog):
                     candidate.spectral_alias_bandwidth_hz,
                 )
             self._show_pulse()
+            self._update_metabolite_profiles()
             self._simulate_current_range()
         except Exception as exc:
             self._design_dirty = True
@@ -1269,21 +1471,126 @@ class SpectralSpatialPulseDesignerDialog(QDialog):
         except Exception as exc:
             QMessageBox.critical(self, "SPSP simulation failed", str(exc))
 
-    def _simulate_current_range(self):
+    def _simulate_current_range(self, *, select_tab=True):
+        """Show the map for the current grid, computing it in the background."""
         pulse = self._pulse
         if pulse is None:
             return
         positions, frequencies = self._requested_grid()
-        response = simulate_spectral_spatial_profile(
-            pulse,
-            positions,
-            frequencies,
-            spatial_offset_m=pulse.reference_spatial_center_m,
+        key = spectral_spatial_response_key(pulse, positions, frequencies)
+        if select_tab:
+            self.tabs.setCurrentWidget(self.response_widget)
+        if key == self._displayed_response_key:
+            self._cancel_response_simulation()
+            return
+        cached = cached_spectral_spatial_response(key)
+        if cached is not None:
+            self._cancel_response_simulation()
+            self._display_response(key, cached)
+            return
+        if key == self._pending_response_key and self._response_thread is not None:
+            return
+        self._cancel_response_simulation()
+        self._pending_response_key = key
+        thread = SpectralSpatialResponseThread(key, pulse, positions, frequencies, self)
+        thread.progress.connect(self.response_progress.setValue)
+        thread.completed.connect(self._response_completed)
+        thread.failed.connect(self._response_failed)
+        thread.finished.connect(
+            lambda thread=thread: self._response_thread_finished(thread)
         )
+        self._response_thread = thread
+        self.response_progress.setValue(0)
+        self.response_progress_row.setVisible(True)
+        self.response_description.setText(
+            f"Computing the excitation map in the background: {positions.size} "
+            f"positions × {frequencies.size} frequency offsets. The dialog stays "
+            "usable meanwhile."
+        )
+        thread.start()
+
+    def _response_completed(self, key, response):
+        store_spectral_spatial_response(key, response)
+        if key != self._pending_response_key:
+            return
+        self._pending_response_key = None
+        self.response_progress_row.setVisible(False)
+        self._display_response(key, response)
+
+    def _response_failed(self, key, message):
+        if key != self._pending_response_key:
+            return
+        self._pending_response_key = None
+        self.response_progress_row.setVisible(False)
+        self.response_description.setText(f"Excitation map failed: {message}")
+        QMessageBox.critical(self, "SPSP simulation failed", message)
+
+    def _response_thread_finished(self, thread):
+        if self._response_thread is thread:
+            self._response_thread = None
+        thread.deleteLater()
+
+    def _cancel_response_simulation(self):
+        thread = self._response_thread
+        self._pending_response_key = None
+        self.response_progress_row.setVisible(False)
+        if thread is not None:
+            thread.request_cancel()
+            if self._displayed_response_key is None:
+                self.response_description.setText(
+                    "Excitation map cancelled. Use 'Recompute excitation map' to "
+                    "start it again."
+                )
+
+    def wait_for_response_simulation(self, timeout_ms=120_000):
+        """Block until the running map finishes; used by tests and scripts."""
+        thread = self._response_thread
+        if thread is not None:
+            thread.wait(int(timeout_ms))
+        QCoreApplication.processEvents()
+        QCoreApplication.processEvents()
+
+    def _stop_response_thread(self):
+        thread = self._response_thread
+        if thread is None:
+            return
+        thread.request_cancel()
+        thread.wait()
+        self._response_thread = None
+
+    def done(self, result):
+        thread = self._response_thread
+        if (
+            result == QDialog.Accepted
+            and thread is not None
+            and self._pending_response_key is not None
+        ):
+            # Keep computing the accepted pulse's map so reopening is instant.
+            self._response_thread = None
+            _detach_response_thread(thread)
+        else:
+            self._stop_response_thread()
+        super().done(result)
+
+    def closeEvent(self, event):
+        self._stop_response_thread()
+        super().closeEvent(event)
+
+    def _display_response(self, key, response):
+        pulse = self._pulse
+        if pulse is None:
+            return
+        positions = response["positions_m"]
+        frequencies = response["frequency_offsets_hz"]
         self._last_response = response
+        self._displayed_response_key = key
         image = response["flip_angle_deg"]
-        frequency_step_hz = frequencies[1] - frequencies[0]
-        position_step_mm = (positions[1] - positions[0]) * 1000.0
+        frequency_step_hz = (
+            frequencies[1] - frequencies[0] if frequencies.size > 1 else 1.0
+        )
+        position_step_mm = (
+            (positions[1] - positions[0]) * 1000.0 if positions.size > 1 else 1.0
+        )
         upper_level = max(
             1.0,
             pulse.reference_flip_angle_deg,
@@ -1322,7 +1629,6 @@ class SpectralSpatialPulseDesignerDialog(QDialog):
             f"{frequencies[-1]:.1f} Hz. Brightness and the color scale show "
             "flip angle in degrees; dashed lines mark the requested target edges."
         )
-        self.tabs.setCurrentWidget(self.response_widget)
 
     def _show_target_boundaries(self):
         for item in self._target_lines:
@@ -1336,8 +1642,9 @@ class SpectralSpatialPulseDesignerDialog(QDialog):
             self.response_plot.addItem(line)
             self._target_lines.append(line)
         bandwidth = self._pulse.spectral_alias_bandwidth_hz
-        x_min = self.sim_frequency_min_hz.value()
-        x_max = self.sim_frequency_max_hz.value()
+        frequencies = self._last_response["frequency_offsets_hz"]
+        x_min = float(frequencies[0])
+        x_max = float(frequencies[-1])
         for band in self._pulse.bands:
             first_alias = int(np.floor((x_min - band.center_hz) / bandwidth)) - 1
             last_alias = int(np.ceil((x_max - band.center_hz) / bandwidth)) + 1
@@ -1560,34 +1867,48 @@ class SpectralSpatialPulseDesignerDialog(QDialog):
             self.bands.blockSignals(False)
             QMessageBox.critical(self, "Invalid metabolite peaks", str(exc))
 
-    def _simulate_metabolite_profiles(self):
-        if self._pulse is None or self._design_dirty:
-            self._design()
-            if self._pulse is None or self._design_dirty:
-                return
-        try:
-            peaks = self._preset_peaks()
-            positions, _ = self._requested_grid()
-            frequencies = [peak[1] for peak in peaks]
+    def _update_metabolite_profiles(self):
+        """Refresh the cheap per-peak slice profiles; returns the peak count."""
+        if self._pulse is None:
+            return 0
+        peaks = self._resolved_peaks(strict=False)
+        self.object_plot.clear()
+        if not peaks:
+            return 0
+        positions, _ = self._requested_grid()
+        frequencies = np.array([peak.carrier_offset_hz for peak in peaks])
+        key = spectral_spatial_response_key(self._pulse, positions, frequencies)
+        response = cached_spectral_spatial_response(key)
+        if response is None:
             response = simulate_spectral_spatial_profile(
                 self._pulse,
                 positions,
                 frequencies,
                 spatial_offset_m=self._pulse.reference_spatial_center_m,
             )
-            self.object_plot.clear()
-            colors = ("c", "m", "y", "g", "r", "w")
-            for index, (name, offset, concentration) in enumerate(peaks):
-                self.object_plot.plot(
-                    positions * 1000.0,
-                    concentration * np.abs(response["mxy"][:, index]),
-                    pen=pg.mkPen(colors[index % len(colors)], width=2),
-                    name=f"{name} ({offset:+.1f} Hz)",
-                )
+            store_spectral_spatial_response(key, response)
+        colors = ("c", "m", "y", "g", "r", "w")
+        for index, peak in enumerate(peaks):
+            self.object_plot.plot(
+                positions * 1000.0,
+                peak.relative_weight * np.abs(response["mxy"][:, index]),
+                pen=pg.mkPen(colors[index % len(colors)], width=2),
+                name=f"{peak.name} ({peak.carrier_offset_hz:+.1f} Hz)",
+            )
+        return len(peaks)
+
+    def _simulate_metabolite_profiles(self):
+        if self._pulse is None or self._design_dirty:
+            self._design()
+            if self._pulse is None or self._design_dirty:
+                return
+        try:
+            self._resolved_peaks()
+            count = self._update_metabolite_profiles()
             self.tabs.setCurrentWidget(self.object_plot)
             self.status.setText(
                 self.status.text()
-                + f" · metabolite profiles: {len(peaks)} discrete peaks at "
+                + f" · metabolite profiles: {count} discrete peaks at "
                 f"{self.field_strength_t:g} T"
             )
         except Exception as exc:

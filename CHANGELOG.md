@@ -6,6 +6,21 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- "Plan metabolite excitation…" in the RF settings of generated sequences
+  designs one metabolite-selective spectral-spatial pulse per target
+  (`design_metabolite_selective_pulse`) from a metabolite list. For FLASH,
+  the ordered steps (for example pyruvate 10°, then lactate 30°) become the
+  pulse schedule. A flip-angle matrix shows how much each pulse excites
+  the other peaks.
+
+### Changed
+
+- The spectral-spatial pulse designer opens without simulating. Its excitation
+  map runs in a background thread and is cached, so reopening the designer
+  for an unchanged pulse is immediate.
+
 ## [2.8.4] - 2026-10-16
 
 ### Added

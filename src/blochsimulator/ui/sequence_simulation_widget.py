@@ -130,6 +130,7 @@ from ..units import (
 )
 from .controls import UniversalTimeControl
 from .dialogs import PulseImportDialog
+from .metabolite_excitation_plan import MetaboliteExcitationPlanDialog
 from .spectral_spatial_designer import (
     SpectralSpatialPulseDesignerDialog,
     SpectralSpatialScheduleDialog,
@@ -1818,6 +1819,93 @@ class SequenceSimulationWidget(QWidget):
                 self._update_shared_rf_controls(control_prefix)
         if already_selected:
             self._request_generated_sequence_refresh()
+
+    def _plan_metabolite_excitation(self, prefix):
+        """Open the metabolite-first planner and select its SPSP pulses."""
+        if (
+            not self._spectral_spatial_pulse_library.pulses
+            and self._spectral_spatial_pulse_data is not None
+        ):
+            self.restore_spectral_spatial_pulse_state(
+                self._spectral_spatial_pulse_data.to_dict()
+            )
+        nucleus = self.nucleus.currentText()
+        library = self._spectral_spatial_pulse_library
+        if any(pulse.nucleus != nucleus for pulse in library.pulses.values()):
+            # Pulses of another nucleus cannot be reused; start a fresh plan.
+            library, schedule, selected_id = None, None, None
+        else:
+            schedule = self._spectral_spatial_schedule
+            selected_id = self._spectral_spatial_selected_pulse_id
+        dialog = MetaboliteExcitationPlanDialog(
+            self,
+            scanner_parameters=self.scanner_parameters,
+            nucleus=nucleus,
+            field_strength_t=self.field_strength_t.value(),
+            sequence_reference_ppm=self.sequence_reference_ppm.value(),
+            carrier_offset_hz=getattr(self, f"{prefix}_rf_offset_hz").value(),
+            target_thickness_m=self._shared_rf_target_thickness_m(prefix),
+            phantom=self._selected_designed_phantom(),
+            library=library,
+            schedule=schedule,
+            selected_pulse_id=selected_id,
+            allow_multiple_steps=prefix == "flash",
+        )
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        self._spectral_spatial_pulse_library = dialog.pulse_library()
+        self._spectral_spatial_schedule = dialog.pulse_schedule()
+        selected_id = dialog.selected_pulse_id()
+        self._spectral_spatial_selected_pulse_id = selected_id
+        self._spectral_spatial_pulse_data = self._spectral_spatial_pulse_library.get(
+            selected_id
+        )
+        self._spectral_spatial_pulse_error = ""
+        pulse_type = getattr(self, f"{prefix}_rf_pulse_type")
+        already_selected = pulse_type.currentText() == "Spectral-spatial Designer"
+        pulse_type.setCurrentText("Spectral-spatial Designer")
+        for control_prefix in (
+            "epi",
+            "epsi",
+            "csi",
+            "flash",
+            "bssfp",
+            "ss_bssfp",
+            "radial_me",
+            "me_bssfp",
+            "slice_selection",
+        ):
+            if hasattr(self, f"{control_prefix}_rf_pulse_type"):
+                self._update_shared_rf_controls(control_prefix)
+        if already_selected:
+            self._request_generated_sequence_refresh()
+
+    def _spectral_spatial_plan_summary(self, prefix):
+        """Return a one-line metabolite plan such as ``Pyr 10° → Lac 30°``."""
+        pulse = self._spectral_spatial_pulse_data
+        schedule = self._spectral_spatial_schedule
+        if prefix == "flash" and schedule.entries:
+            steps = []
+            for entry in schedule.entries:
+                if not entry.enabled:
+                    continue
+                try:
+                    flip = entry.effective_flip_angle_deg(
+                        self._spectral_spatial_pulse_library.get(entry.pulse_id)
+                    )
+                except KeyError:
+                    continue
+                name = entry.target_metabolite or entry.display_name or "pulse"
+                repeat = f" ×{entry.repeat_count}" if entry.repeat_count > 1 else ""
+                steps.append(f"{name} {flip:g}°{repeat}")
+            if steps:
+                level = "frame" if schedule.selection_level == "frame" else "TR"
+                return " → ".join(steps) + f" (next step per {level})"
+        if pulse is not None:
+            selective = pulse.design_metadata.get("metabolite_selective", {})
+            if isinstance(selective, dict) and selective.get("target"):
+                return f"Excites {selective['target']}"
+        return ""
 
     def _manage_spectral_spatial_schedule(self, prefix):
         """Open the reusable library/schedule editor and adopt its state."""
@@ -4832,14 +4920,22 @@ class SequenceSimulationWidget(QWidget):
             "Load an RF waveform directly into Sequence Mode and select it "
             "for this sequence"
         )
-        spsp_button = QPushButton("Design spectral-spatial pulse…")
+        spsp_plan_button = QPushButton("Plan metabolite excitation…")
+        spsp_plan_button.setObjectName(f"{prefix}_rf_spsp_plan_button")
+        spsp_plan_button.setToolTip(
+            "List the metabolites in the sample and choose which one to excite"
+            + (" in each step" if prefix == "flash" else "")
+            + "; a selective spectral-spatial pulse is designed and checked for "
+            "every target automatically"
+        )
+        spsp_button = QPushButton("Detailed pulse designer…")
         spsp_button.setObjectName(f"{prefix}_rf_spsp_design_button")
         spsp_button.setToolTip(
             "Define spatial and spectral target ranges, design a coupled RF and "
             "slice/slab-gradient waveform, and validate its position-frequency "
             "response on a configurable Bloch simulation grid"
         )
-        spsp_schedule_button = QPushButton("Manage pulse library and schedule…")
+        spsp_schedule_button = QPushButton("Pulse library and schedule…")
         spsp_schedule_button.setObjectName(f"{prefix}_rf_spsp_schedule_button")
         spsp_schedule_button.setToolTip(
             "Create, duplicate, edit, delete, and order several SPSP pulses. "
@@ -4859,6 +4955,7 @@ class SequenceSimulationWidget(QWidget):
             "bandwidth_hz": bandwidth,
             "offset_hz": frequency_offset,
             "load_button": load_button,
+            "spsp_plan_button": spsp_plan_button,
             "spsp_design_button": spsp_button,
             "spsp_schedule_button": spsp_schedule_button,
             "spsp_summary": spsp_summary,
@@ -4891,10 +4988,13 @@ class SequenceSimulationWidget(QWidget):
         )
         form.addRow(f"{label_prefix} frequency offset", frequency_offset)
         form.addRow("Loaded waveform", load_button)
-        spsp_button_label = QLabel("SPSP designer")
+        spsp_plan_button_label = QLabel("Metabolite excitation")
+        form.addRow(spsp_plan_button_label, spsp_plan_button)
+        setattr(self, f"{prefix}_rf_spsp_plan_button_label", spsp_plan_button_label)
+        spsp_button_label = QLabel("Manual SPSP pulse")
         spsp_summary_label = QLabel("SPSP design")
         form.addRow(spsp_button_label, spsp_button)
-        spsp_schedule_button_label = QLabel("SPSP schedule")
+        spsp_schedule_button_label = QLabel("Manual SPSP schedule")
         form.addRow(spsp_schedule_button_label, spsp_schedule_button)
         form.addRow(spsp_summary_label, spsp_summary)
         setattr(self, f"{prefix}_rf_spsp_design_button_label", spsp_button_label)
@@ -4924,6 +5024,9 @@ class SequenceSimulationWidget(QWidget):
             )
         getattr(self, f"{prefix}_rf_load_button").clicked.connect(
             lambda *_: self._load_sequence_rf_pulse(prefix)
+        )
+        getattr(self, f"{prefix}_rf_spsp_plan_button").clicked.connect(
+            lambda *_: self._plan_metabolite_excitation(prefix)
         )
         getattr(self, f"{prefix}_rf_spsp_design_button").clicked.connect(
             lambda *_: self._design_spectral_spatial_pulse(prefix)
@@ -4963,11 +5066,15 @@ class SequenceSimulationWidget(QWidget):
     def _spectral_spatial_reference_mismatch(self, pulse, prefix):
         """Return whether a peak-linked SPSP prescription needs retargeting."""
         prescription = pulse.design_metadata.get("frequency_prescription", {})
-        if not isinstance(prescription, dict) or not prescription.get(
+        selective = pulse.design_metadata.get("metabolite_selective", {})
+        if isinstance(selective, dict) and "reference" in selective:
+            reference = selective["reference"]
+        elif isinstance(prescription, dict) and prescription.get(
             "bands_linked_to_peak_table", False
         ):
+            reference = prescription.get("reference", {})
+        else:
             return False
-        reference = prescription.get("reference", {})
         if not isinstance(reference, dict):
             return False
         try:
@@ -5052,7 +5159,9 @@ class SequenceSimulationWidget(QWidget):
                 else ""
             )
             if self._spectral_spatial_reference_mismatch(pulse, prefix):
-                mismatch += " · frequency reference changed: redesign required"
+                mismatch += (
+                    " · frequency reference changed: reopen the plan to redesign"
+                )
             spatial_low_mm = (
                 pulse.reference_spatial_center_m - pulse.reference_thickness_m / 2.0
             ) * 1000.0
@@ -5064,8 +5173,10 @@ class SequenceSimulationWidget(QWidget):
                 f"{band.center_hz + band.width_hz / 2.0:g} Hz"
                 for band in pulse.bands
             )
+            plan = self._spectral_spatial_plan_summary(prefix)
             summary.setText(
-                f"{pulse.name} · {pulse.duration_s * 1000:.3f} ms · "
+                (f"{plan}\n" if plan else "")
+                + f"{pulse.name} · {pulse.duration_s * 1000:.3f} ms · "
                 f"alias spacing {pulse.spectral_alias_bandwidth_hz:.1f} Hz · "
                 f"target z {spatial_low_mm:g}…{spatial_high_mm:g} mm · "
                 f"target f {spectral_targets} · {pulse.nucleus}{mismatch} · "
