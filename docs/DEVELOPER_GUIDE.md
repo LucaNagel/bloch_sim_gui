@@ -294,7 +294,25 @@ backend-neutral input is the immutable Float64/Complex128
 interval boundaries, RF and gradient samples, both dynamic-$B_0$
 half-interval integrals, conversion state, source samples, ordered boundary
 actions, and a SHA-256 fingerprint. Every backend adapter must consume this
-same plan; reduced precision belongs only in the backend adapter.
+same plan. Dynamic integration remains Float64.
+
+`dynamic_spin_major_cy` is a second strict Float64 extension, selected
+automatically by the native dynamic choices for supported two-pool models.
+It advances 64-spin tiles through bounded plan slices and reduces ADC sums
+over fixed work blocks. Complex spatial Tx fields are multiplied by the RF
+waveform per spin; the spatial rotation uses the same plane basis as NumPy.
+Repeated RF segments can use simulation-local affine propagators, keyed by
+exact interval inputs. Source samples must fit the source basis within a
+relative tolerance of $10^{-12}$; other occurrences remain stepwise.
+Cached segments containing internal ADC, crusher, or checkpoint actions are
+ineligible. Dynamic B0, spatial inflow delays, additional pools, and smaller
+checkpoint dtypes retain the established execution paths.
+
+Use `BLOCHSIM_DYNAMIC_SPIN_MAJOR=0` to compare the previous native driver and
+`BLOCHSIM_DYNAMIC_SPIN_MAJOR_RF_CACHE=0` to compare uncached spin-major
+execution. Metadata beginning with `native_spin_major_` reports selection,
+fallback, timings, memory, and RF-propagator coverage. An older extension
+without spatial-Tx support safely retains the previous spatial kernel.
 
 The complete native two-pool driver is deliberately capability-gated. It
 executes free half-steps, conversion, unity/constant/spatial Tx, static or
@@ -319,9 +337,12 @@ compatibility gate, not an unsupported acquisition event.
 
 The outer dynamic driver may stream the object by parent voxel, but never by
 subspin or by time. It compiles the sequence and execution plan once, keeps all
-subspins of a parent together for the full timeline, and reduces one leaf per
-global parent with a fixed binary accumulator. This invariant is what makes
-results independent of `parent_voxel_chunk_size` and OpenMP thread count.
+subspins of a parent together for the full timeline. The previous native
+driver reduces one leaf per global parent with a fixed binary accumulator.
+Spin-major instead retains one reduced signal row per object block. Its
+results are bitwise stable across thread counts and time-slice/cache sizes
+for a fixed object partition. Changing `parent_voxel_chunk_size` can change
+the last Float64 bits and retains the `float64-close` numerical contract.
 New backends must preserve the same action order: crusher, then ADC, then
 checkpoint at each state boundary.
 

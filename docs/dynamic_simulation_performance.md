@@ -15,6 +15,18 @@ native capabilities, memory chunks, and effective thread counts were used.
 
 ## Available execution paths
 
+The native choices automatically use the strict Float64 spin-major executor
+for supported two-pool models. It advances tiles of 64 spins through bounded
+plan slices, including spatial complex Tx, receive coils, subvoxel spins, and
+existing inflow/concentration modes. Repeated RF segments may use cached
+affine propagators. Cache keys use exact interval inputs; source samples
+must fit their basis within a relative tolerance of $10^{-12}$, and internal
+boundary actions force stepwise execution. Dynamic B0, spatial inflow delays,
+additional pools, and smaller checkpoint dtypes use the previous paths.
+`BLOCHSIM_DYNAMIC_SPIN_MAJOR=0` selects the previous driver;
+`BLOCHSIM_DYNAMIC_SPIN_MAJOR_RF_CACHE=0` disables only the propagator cache.
+Result metadata reports the actual `native_spin_major_` coverage and fallback.
+
 The `simulate_dynamic_sequence` driver and `BlochSimulator` expose four CPU
 kernel selections:
 
@@ -271,9 +283,12 @@ records the actual path and fallback reason.
 The dynamic solver now streams large expanded objects by parent voxel. Every
 block remains resident for the complete sequence, and only that block's
 subspins, coefficients, ADC leaves, and checkpoints are expanded. Signals use
-one fixed leaf per global parent voxel and a streaming binary tree, so the
-result does not depend on the selected memory-block size or OpenMP thread
-count. Preview output contains only completed object blocks. Public final and
+one fixed leaf per global parent voxel and a streaming binary tree in the
+previous native path. Spin-major keeps one reduced signal row per object
+block. For a fixed object partition its results are bitwise independent of
+OpenMP threads, time slices, and RF-cache capacity. Different object-block
+sizes retain Float64-close agreement. Preview output contains only completed
+object blocks. Public final and
 checkpoint arrays remain global requested outputs. A pre-allocation memory
 plan accounts separately for these outputs, per-parent work, and a bounded
 cache reserve.
@@ -287,6 +302,8 @@ python scripts/validate_dynamic_precision.py \
   --phantom path/to/dynamic_phantom.npz \
   --timestep-us 10 \
   --candidate native_parallel \
+  --compare-native-variants \
+  --refined-timestep-us 5 \
   --output-json /tmp/dynamic_precision.json
 ```
 
@@ -295,6 +312,26 @@ and `reference`.  Omit `--phantom` to use a small heterogeneous synthetic
 two-pool object.  The `--max-adc-events` option provides a shorter
 accumulation test while retaining the original RF/gradient events through the
 selected acquisition.
+
+Validation uses a default relative tolerance of $10^{-10}$ and a normalized
+absolute tolerance of $10^{-12}$ (`--rtol` and `--atol`). The absolute term
+is multiplied by each compared array's reference peak, with a minimum scale
+of one in stored units, and is recorded in the report. Every pool's endpoint
+and checkpoint states have their own comparisons. There is also a per-pool
+and total-signal NRMSE
+limit of $10^{-10}$ (`--signal-nrmse-gate`). This norm comparison retains
+the absolute-error floor: signal RMS error must not exceed the absolute
+scaled tolerance plus the NRMSE limit times reference RMS. Every available final state,
+checkpoint, k-space, and image comparison must pass. Default checkpoints
+are at half duration and sequence end; override with `--checkpoints-s`.
+A backend fallback is reported separately and a different actual kernel
+cannot pass the requested-backend gate. Failures produce a nonzero exit code.
+`--compare-native-variants` adds previous-native and uncached spin-major runs.
+`--subvoxel-spins` automatically selects gradient spoiling; requesting ideal
+spoiling with a subvoxel grid raises an error. Reports contain actual sampling.
+Timestep refinement is a separate discretization comparison, with no Float64
+parity gate. If both timesteps are below the RF raster, the compiled grid can
+remain unchanged; the report explicitly records this case.
 
 ### Reduced-precision experiments (removed)
 

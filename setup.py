@@ -129,6 +129,17 @@ extensions = [
         extra_link_args=strict_link_args,
         language="c",
     ),
+    Extension(
+        "blochsimulator.dynamic_spin_major_cy",
+        sources=[
+            "src/blochsimulator/dynamic_spin_major_wrapper.pyx",
+            "src/blochsimulator/dynamic_spin_major.c",
+        ],
+        include_dirs=["src/blochsimulator"],
+        extra_compile_args=strict_compile_args,
+        extra_link_args=strict_link_args,
+        language="c",
+    ),
 ]
 
 

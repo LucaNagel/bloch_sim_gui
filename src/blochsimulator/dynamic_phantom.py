@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 import json
+import os
 from pathlib import Path
 from time import perf_counter
 from typing import Dict, Optional, Tuple
@@ -18,6 +19,7 @@ from .dynamic_execution import (
     ACTION_ADC,
     ACTION_CHECKPOINT,
     ACTION_CRUSH,
+    SEGMENT_RF,
     build_dynamic_execution_plan,
 )
 from .kernel_capabilities import DYNAMIC_KERNEL_NAMES
@@ -2137,6 +2139,539 @@ def _prepare_rf_rotation(rf_hz, duration):
     )
 
 
+_SPIN_MAJOR_SLICE_INTERVALS = 16384
+_SPIN_MAJOR_SLICE_ADC_VALUES = 4096
+_SPIN_MAJOR_WORK_BLOCKS = 64
+_SPIN_MAJOR_RF_CACHE_ENTRIES = 65536
+# Conservative working-set terms of one slice: per-thread coefficient slots
+# and tile state, interval tables, and per-block ADC accumulators.
+_SPIN_MAJOR_THREAD_BYTES = 480 * 1024
+_SPIN_MAJOR_INTERVAL_BYTES = 256
+# Repeated RF segments run as cached per-spin affine propagators. Entries are
+# planned per block, kept across slices, and evicted in LRU order.
+_SPIN_MAJOR_RF_PROPAGATOR_ENTRIES = 8
+_SPIN_MAJOR_RF_PROPAGATOR_MIN_OCCURRENCES = 16
+_SPIN_MAJOR_RF_PROPAGATOR_SOURCE_TOLERANCE = 1e-12
+
+
+def _spin_major_requested(value):
+    """Resolve the private spin-major switch; the environment is the default."""
+    if value is not None:
+        return bool(value)
+    setting = os.environ.get("BLOCHSIM_DYNAMIC_SPIN_MAJOR", "").strip().lower()
+    return setting not in {"0", "false", "off", "no"}
+
+
+def _spin_major_rf_cache_requested(value):
+    """Resolve the private RF propagator cache switch; on by default."""
+    if value is not None:
+        return bool(value)
+    setting = os.environ.get("BLOCHSIM_DYNAMIC_SPIN_MAJOR_RF_CACHE", "").strip().lower()
+    return setting not in {"0", "false", "off", "no"}
+
+
+def _spin_major_kernel():
+    """Return the spin-major executor and its tile width, or None."""
+    try:
+        from .dynamic_spin_major_cy import API_VERSION, TILE_SPINS, run_spin_major_chunk
+    except (ImportError, OSError):
+        return None
+    if API_VERSION != 2:
+        return None
+    return run_spin_major_chunk, int(TILE_SPINS)
+
+
+def _spin_major_fallback_reason(
+    *,
+    requested,
+    available,
+    phantom,
+    real_dtype,
+    checkpoint_dtype,
+    spatial_inflow,
+    spatial_tx,
+    execution_plan,
+):
+    """Return why the spin-major executor cannot run a plan, or None.
+
+    The executor covers the common two-pool float64 plan with per-spin B0 and
+    kPL maps. Everything else keeps the existing native paths.
+    """
+    if not requested:
+        return "disabled by request"
+    if not available:
+        return "extension is unavailable"
+    if phantom.n_species != 2:
+        return "only two-pool phantoms are supported"
+    if np.dtype(real_dtype) != np.dtype(np.float64) or np.dtype(
+        checkpoint_dtype
+    ) != np.dtype(np.float64):
+        return "requires float64 state and checkpoints"
+    if spatial_inflow:
+        return "spatial inflow delays are unsupported"
+    if phantom.dynamic_b0 is not None:
+        return "dynamic B0 is unsupported"
+    if spatial_tx:
+        try:
+            from .dynamic_spin_major_cy import SPATIAL_TX_SUPPORTED
+        except ImportError:
+            return "the installed extension does not support spatial Tx sensitivity"
+        if not SPATIAL_TX_SUPPORTED:
+            return "the installed extension does not support spatial Tx sensitivity"
+    if execution_plan.n_intervals == 0:
+        return "the plan has no intervals"
+    if not np.all(execution_plan.dt_s > 0.0):
+        return "the plan has empty intervals"
+    adc_actions = execution_plan.action_kinds == ACTION_ADC
+    if np.any(execution_plan.action_state_indices[adc_actions] == 0):
+        return "ADC at sequence time zero"
+    return None
+
+
+def _spin_major_slice_limits(memory_budget_bytes, n_rx_coils, n_threads):
+    """Return (interval, ADC) limits per slice, or None if the budget is too small.
+
+    Slice sizes do not change results: state stays float64 between slices and
+    every ADC value is reduced from the same fixed work blocks.
+    """
+    interval_limit = _SPIN_MAJOR_SLICE_INTERVALS
+    adc_limit = max(1, _SPIN_MAJOR_SLICE_ADC_VALUES // n_rx_coils)
+    if memory_budget_bytes is None:
+        return interval_limit, adc_limit
+    work_bytes = int(memory_budget_bytes) // 8 - n_threads * (
+        _SPIN_MAJOR_THREAD_BYTES + n_rx_coils * 2 * 64 * 8
+    )
+    adc_value_bytes = 32 * n_rx_coils * (_SPIN_MAJOR_WORK_BLOCKS + 1)
+    interval_limit = min(interval_limit, work_bytes // 2 // _SPIN_MAJOR_INTERVAL_BYTES)
+    adc_limit = min(adc_limit, work_bytes // 2 // adc_value_bytes)
+    if interval_limit < 1 or adc_limit < 1:
+        return None
+    return interval_limit, adc_limit
+
+
+def _spin_major_slice_end(
+    first_interval,
+    interval_count,
+    adc_states,
+    adc_limit,
+    interval_limit,
+    segment_first=None,
+    segment_end=None,
+):
+    """Return a slice end that bounds both interval and ADC counts.
+
+    Cached RF segments are never split: the end moves before a segment it
+    would cut, or past it when the slice starts there. Segments have no inner
+    actions, so the interval limit can be exceeded by one segment length and
+    the ADC limit only by ADC values at one state, which no slice splits.
+    """
+    end_interval = min(interval_count, first_interval + interval_limit)
+    adc_index = int(np.searchsorted(adc_states, first_interval + 1, side="left"))
+    if adc_index + adc_limit < adc_states.size:
+        # The interval ending at state s is s - 1; stop before it.
+        limit_state = int(adc_states[adc_index + adc_limit])
+        end_interval = min(end_interval, max(first_interval + 1, limit_state - 1))
+    if segment_first is not None and segment_first.size:
+        index = int(np.searchsorted(segment_first, end_interval, side="right")) - 1
+        if index >= 0 and segment_first[index] < end_interval < segment_end[index]:
+            if segment_first[index] > first_interval:
+                end_interval = int(segment_first[index])
+            else:
+                end_interval = int(segment_end[index])
+    return end_interval
+
+
+@dataclass(frozen=True)
+class _SpinMajorRfPropagatorPlan:
+    """Cached RF segment occurrences of one block in plan interval order.
+
+    Occurrence ``k`` replaces intervals ``[first[k], end[k])`` by propagator
+    entry ``entry[k]`` with source weights ``sources[k]``. A nonnegative
+    ``basis[k]`` builds that entry first from the source basis rows starting
+    at that row of ``basis_rows``.
+    """
+
+    first: np.ndarray
+    end: np.ndarray
+    entry: np.ndarray
+    basis: np.ndarray
+    sources: np.ndarray
+    basis_rows: np.ndarray
+    capacity: int
+    keys: int
+    builds: int
+
+
+def _spin_major_source_samples(execution_plan, index, *, source_mode, equilibrium):
+    """Return excess-magnetization and concentration source samples."""
+    rate = execution_plan.source_rate_samples[index]
+    polarization = execution_plan.source_polarization_samples
+    polarization = np.ones_like(rate) if polarization is None else polarization[index]
+    magnetization = rate if source_mode == 1 else rate * polarization
+    concentration = rate if source_mode == 0 else np.zeros_like(rate)
+    return magnetization - equilibrium * concentration, concentration
+
+
+def _spin_major_source_basis(phase, half):
+    """Return quadratic source shapes of one RF segment, or None.
+
+    ``phase`` holds (mid - start, end - mid) per interval. The Lagrange nodes
+    are the segment start, the midpoint of its middle interval, and its end,
+    so the weights of a source are its samples there. Returns the shapes at
+    the (start, mid, mid, end) sample times, shape (3, m, 4), and basis rows
+    (m, 3, 4) built from them like the stepwise source rows.
+    """
+    count = phase.shape[0]
+    start = np.zeros(count, dtype=np.float64)
+    start[1:] = np.cumsum(phase[:, 0] + phase[:, 1])[:-1]
+    middle = start + phase[:, 0]
+    end = middle + phase[:, 1]
+    nodes = (0.0, float(middle[count // 2]), float(end[-1]))
+    if not 0.0 < nodes[1] < nodes[2]:
+        return None
+    times = np.stack((start, middle, middle, end), axis=1)
+    shapes = np.empty((3, count, 4), dtype=np.float64)
+    for node in range(3):
+        others = [nodes[other] for other in range(3) if other != node]
+        shapes[node] = (
+            (times - others[0])
+            * (times - others[1])
+            / ((nodes[node] - others[0]) * (nodes[node] - others[1]))
+        )
+    rows = np.empty((count, 3, 4), dtype=np.float64)
+    for half_index in range(2):
+        first = 2 * half_index
+        rows[:, :, first] = shapes[:, :, first].T
+        rows[:, :, first + 1] = (
+            (shapes[:, :, first + 1] - shapes[:, :, first]) / half
+        ).T
+    return shapes, rows
+
+
+def _spin_major_source_weights(samples, shapes):
+    """Return node weights and whether the shapes reproduce the samples."""
+    count = samples.shape[1]
+    weights = np.stack(
+        (samples[:, 0, 0], samples[:, count // 2, 1], samples[:, -1, 3]), axis=1
+    )
+    residual = np.abs(np.einsum("oj,jmk->omk", weights, shapes) - samples)
+    scale = np.abs(samples).max(axis=(1, 2))
+    return weights, residual.max(axis=(1, 2)) <= (
+        _SPIN_MAJOR_RF_PROPAGATOR_SOURCE_TOLERANCE * scale
+    )
+
+
+def _spin_major_rf_lru(occurrence_keys, capacity):
+    """Assign LRU propagator entries; return entries and build flags."""
+    resident = OrderedDict()
+    entries = np.empty(len(occurrence_keys), dtype=np.int32)
+    builds = np.zeros(len(occurrence_keys), dtype=bool)
+    for position, key in enumerate(occurrence_keys):
+        entry = resident.get(key)
+        if entry is None:
+            entry = (
+                len(resident)
+                if len(resident) < capacity
+                else resident.popitem(last=False)[1]
+            )
+            resident[key] = entry
+            builds[position] = True
+        else:
+            resident.move_to_end(key)
+        entries[position] = entry
+    return entries, builds
+
+
+def _spin_major_rf_propagator_plan(
+    execution_plan,
+    native_rf_hz,
+    *,
+    source_mode,
+    equilibrium,
+    track_concentration,
+    states,
+    values,
+    entry_bytes,
+    budget_bytes,
+):
+    """Plan cached RF segment propagators of one block.
+
+    Returns the plan or None, and the fallback reason. Segments are keyed by
+    every per-interval input of the stepwise code, so equal keys give equal
+    propagators per spin wherever they are built. Occurrences whose source
+    samples do not follow the quadratic source basis run stepwise.
+    """
+    rf_segments = execution_plan.segment_kinds == SEGMENT_RF
+    firsts = execution_plan.segment_start_intervals[rf_segments]
+    ends = execution_plan.segment_end_intervals[rf_segments]
+    if firsts.size == 0:
+        return None, "no repeated RF segments"
+    action_states = execution_plan.action_state_indices
+    eligible = np.searchsorted(action_states, ends, side="left") == np.searchsorted(
+        action_states, firsts + 1, side="left"
+    )
+
+    dt = execution_plan.dt_s
+    start_s = execution_plan.interval_start_s
+    mid_s = execution_plan.interval_mid_s
+    end_s = execution_plan.interval_end_s
+    gradient = execution_plan.gradient_hz_per_m
+    conversion = execution_plan.conversion_active
+    key_index = {}
+    segment_key = np.empty(firsts.size, dtype=np.int64)
+    for index, (first, end) in enumerate(zip(firsts.tolist(), ends.tolist())):
+        key = b"".join(
+            (
+                native_rf_hz[first:end].tobytes(),
+                dt[first:end].tobytes(),
+                (mid_s[first:end] - start_s[first:end]).tobytes(),
+                (end_s[first:end] - mid_s[first:end]).tobytes(),
+                gradient[first:end].tobytes(),
+                conversion[first:end].tobytes(),
+            )
+        )
+        segment_key[index] = key_index.setdefault(key, len(key_index))
+
+    sources = np.zeros((firsts.size, 6), dtype=np.float64)
+    cached = np.zeros(firsts.size, dtype=bool)
+    key_rows = {}
+    order = np.argsort(segment_key, kind="stable")
+    boundaries = np.flatnonzero(np.diff(segment_key[order])) + 1
+    for members in np.split(order, boundaries):
+        members = members[eligible[members]]
+        if members.size < _SPIN_MAJOR_RF_PROPAGATOR_MIN_OCCURRENCES:
+            continue
+        first = int(firsts[members[0]])
+        end = int(ends[members[0]])
+        phase = np.stack(
+            (
+                mid_s[first:end] - start_s[first:end],
+                end_s[first:end] - mid_s[first:end],
+            ),
+            axis=1,
+        )
+        basis = _spin_major_source_basis(phase, dt[first:end] / 2.0)
+        if basis is None:
+            continue
+        shapes, rows = basis
+        if source_mode != 2:
+            intervals = firsts[members][:, None] + np.arange(end - first)
+            excess, concentration = _spin_major_source_samples(
+                execution_plan,
+                intervals,
+                source_mode=source_mode,
+                equilibrium=equilibrium,
+            )
+            excess_weights, fits = _spin_major_source_weights(excess, shapes)
+            sources[members, 0:3] = excess_weights
+            if source_mode == 0 and track_concentration:
+                concentration_weights, concentration_fits = _spin_major_source_weights(
+                    concentration, shapes
+                )
+                sources[members, 3:6] = concentration_weights
+                fits &= concentration_fits
+            members = members[fits]
+            if members.size < _SPIN_MAJOR_RF_PROPAGATOR_MIN_OCCURRENCES:
+                continue
+        cached[members] = True
+        key_rows[int(segment_key[members[0]])] = rows
+    positions = np.flatnonzero(cached)
+    if positions.size == 0:
+        return None, "no repeated RF segments"
+
+    occurrence_keys = segment_key[positions].tolist()
+    limit = min(_SPIN_MAJOR_RF_PROPAGATOR_ENTRIES, len(key_rows))
+    entries, builds = _spin_major_rf_lru(occurrence_keys, limit)
+    capacity = limit
+    # The smallest capacity with the same number of builds saves memory.
+    for candidate in range(1, limit):
+        candidate_entries, candidate_builds = _spin_major_rf_lru(
+            occurrence_keys, candidate
+        )
+        if np.count_nonzero(candidate_builds) == np.count_nonzero(builds):
+            capacity, entries, builds = candidate, candidate_entries, candidate_builds
+            break
+    if budget_bytes is not None and capacity * entry_bytes > budget_bytes:
+        capacity = int(budget_bytes) // entry_bytes
+        if capacity < 1:
+            return None, "memory budget is too small"
+        entries, builds = _spin_major_rf_lru(occurrence_keys, capacity)
+    # A build advances every propagator column through the segment; it must
+    # cost less than the stepwise work the cached occurrences replace.
+    lengths = ends[positions] - firsts[positions]
+    build_steps = (values // states) * int(lengths[builds].sum())
+    if build_steps + positions.size >= int(lengths.sum()):
+        return None, "RF segments repeat too rarely for the cache capacity"
+
+    row_offsets = {}
+    offset = 0
+    for key, rows in key_rows.items():
+        row_offsets[key] = offset
+        offset += rows.shape[0]
+    basis = np.full(positions.size, -1, dtype=np.int64)
+    basis[builds] = [row_offsets[key] for key in segment_key[positions][builds]]
+    return (
+        _SpinMajorRfPropagatorPlan(
+            first=np.ascontiguousarray(firsts[positions], dtype=np.int64),
+            end=np.ascontiguousarray(ends[positions], dtype=np.int64),
+            entry=entries,
+            basis=basis,
+            sources=np.ascontiguousarray(sources[positions]),
+            basis_rows=np.ascontiguousarray(np.concatenate(list(key_rows.values()))),
+            capacity=capacity,
+            keys=len(key_rows),
+            builds=int(np.count_nonzero(builds)),
+        ),
+        None,
+    )
+
+
+def _spin_major_rf_slice(plan, propagators, first_interval, end_interval):
+    """Return the cached-segment arguments of one plan slice."""
+    low, high = np.searchsorted(plan.first, (first_interval, end_interval))
+    return {
+        "segment_first": np.ascontiguousarray(
+            plan.first[low:high] - first_interval, dtype=np.int32
+        ),
+        "segment_end": np.ascontiguousarray(
+            plan.end[low:high] - first_interval, dtype=np.int32
+        ),
+        "segment_entry": plan.entry[low:high],
+        "segment_basis": plan.basis[low:high],
+        "segment_sources": plan.sources[low:high],
+        "basis_rows": plan.basis_rows,
+        "propagators": propagators,
+    }
+
+
+def _spin_major_plan_slice(
+    execution_plan,
+    native_rf_hz,
+    first_interval,
+    end_interval,
+    *,
+    source_mode,
+    equilibrium,
+    rf_cache,
+):
+    """Build the compact interval tables of one spin-major plan slice.
+
+    Free-evolution coefficients are keyed by (half step, conversion active)
+    and evaluated per spin inside the executor. RF rotations and source rates
+    do not depend on the spin, so they are prepared here once per value.
+    """
+    interval_slice = slice(first_interval, end_interval)
+    interval_count = end_interval - first_interval
+    dt = execution_plan.dt_s[interval_slice]
+    half = dt / 2.0
+    group_keys = np.column_stack(
+        (half, execution_plan.conversion_active[interval_slice].astype(np.float64))
+    )
+    unique_groups, interval_group = np.unique(group_keys, axis=0, return_inverse=True)
+
+    rf_values = native_rf_hz[interval_slice]
+    interval_rf = np.full(interval_count, -1, dtype=np.int32)
+    rf_rows = []
+    rf_input_rows = []
+    rf_mask = rf_values != 0.0
+    if np.any(rf_mask):
+        rf_keys = np.column_stack(
+            (rf_values.real[rf_mask], rf_values.imag[rf_mask], dt[rf_mask])
+        )
+        unique_rf, rf_inverse = np.unique(rf_keys, axis=0, return_inverse=True)
+        row_by_unique = np.empty(unique_rf.shape[0], dtype=np.int32)
+        for index, (real, imag, duration) in enumerate(unique_rf):
+            key = (float(real), float(imag), float(duration))
+            if key not in rf_cache:
+                if len(rf_cache) >= _SPIN_MAJOR_RF_CACHE_ENTRIES:
+                    rf_cache.clear()
+                rf_cache[key] = _prepare_rf_rotation(complex(key[0], key[1]), key[2])
+            prepared = rf_cache[key]
+            if prepared is None:
+                row_by_unique[index] = -1
+            else:
+                row_by_unique[index] = len(rf_rows)
+                rf_rows.append(prepared)
+                rf_input_rows.append((real, imag, duration))
+        interval_rf[rf_mask] = row_by_unique[rf_inverse.reshape(-1)]
+    rf_table = np.asarray(rf_rows, dtype=np.float64).reshape(-1, 5)
+
+    gradients = execution_plan.gradient_hz_per_m[interval_slice]
+    gradient_mask = np.any(gradients != 0.0, axis=1)
+    interval_gradient = np.full(interval_count, -1, dtype=np.int32)
+    interval_gradient[gradient_mask] = np.arange(
+        np.count_nonzero(gradient_mask), dtype=np.int32
+    )
+    gradient_table = np.ascontiguousarray(gradients[gradient_mask], dtype=np.float64)
+
+    interval_source = np.full(interval_count, -1, dtype=np.int32)
+    source_table = np.zeros((0, 8), dtype=np.float64)
+    if source_mode != 2:
+        excess, concentration = _spin_major_source_samples(
+            execution_plan,
+            interval_slice,
+            source_mode=source_mode,
+            equilibrium=equilibrium,
+        )
+        rows = np.empty((interval_count, 8), dtype=np.float64)
+        for half_index in range(2):
+            start = 2 * half_index
+            column = 4 * half_index
+            rows[:, column] = excess[:, start]
+            rows[:, column + 1] = (excess[:, start + 1] - excess[:, start]) / half
+            rows[:, column + 2] = concentration[:, start]
+            rows[:, column + 3] = (
+                concentration[:, start + 1] - concentration[:, start]
+            ) / half
+        source_mask = np.any(rows != 0.0, axis=1)
+        interval_source[source_mask] = np.arange(
+            np.count_nonzero(source_mask), dtype=np.int32
+        )
+        source_table = np.ascontiguousarray(rows[source_mask])
+
+    phase = np.empty((interval_count, 2), dtype=np.float64)
+    phase[:, 0] = (
+        execution_plan.interval_mid_s[interval_slice]
+        - execution_plan.interval_start_s[interval_slice]
+    )
+    phase[:, 1] = (
+        execution_plan.interval_end_s[interval_slice]
+        - execution_plan.interval_mid_s[interval_slice]
+    )
+
+    action_offsets = np.searchsorted(
+        execution_plan.action_state_indices,
+        np.arange(first_interval + 1, end_interval + 2, dtype=np.int64),
+        side="left",
+    ).astype(np.int64)
+    action_slice = slice(int(action_offsets[0]), int(action_offsets[-1]))
+    adc_payloads = execution_plan.action_payload_indices[action_slice][
+        execution_plan.action_kinds[action_slice] == ACTION_ADC
+    ]
+    adc_first = int(adc_payloads.min()) if adc_payloads.size else 0
+    adc_count = int(adc_payloads.max()) - adc_first + 1 if adc_payloads.size else 0
+    return {
+        "group_half_s": np.ascontiguousarray(unique_groups[:, 0]),
+        "group_conversion": np.ascontiguousarray(
+            unique_groups[:, 1] != 0.0, dtype=np.int8
+        ),
+        "interval_group": np.ascontiguousarray(
+            interval_group.reshape(-1), dtype=np.int32
+        ),
+        "interval_rf": interval_rf,
+        "interval_gradient": interval_gradient,
+        "interval_source": interval_source,
+        "interval_phase_s": phase,
+        "rf_table": rf_table,
+        "rf_inputs": np.asarray(rf_input_rows, dtype=np.float64).reshape(-1, 3),
+        "gradient_table": gradient_table,
+        "source_table": source_table,
+        "action_offsets": action_offsets,
+        "adc_first_payload": adc_first,
+        "adc_count": adc_count,
+    }
+
+
 def _classify_tx_sensitivity(tx_sensitivity):
     """Classify an already validated Tx vector using exact equality."""
     tx_sensitivity = np.asarray(tx_sensitivity, dtype=np.complex128)
@@ -2242,6 +2777,9 @@ def _simulate_dynamic_sequence_block(
     _execution_plan_build_s=0.0,
     _tx_classification=None,
     _constant_tx_sensitivity=None,
+    _native_spin_major=None,
+    _native_spin_major_rf_cache=None,
+    _spin_major_rf_propagator_budget_bytes=None,
     **_ignored,
 ):
     """Run the complete sequence on a regional dynamic spectral phantom.
@@ -2389,6 +2927,24 @@ def _simulate_dynamic_sequence_block(
         except ImportError:
             native_fallback_reason = "strict native extension is unavailable"
             sequence_kernel = "optimized"
+    native_spin_major_requested = _spin_major_requested(_native_spin_major)
+    native_spin_major_rf_cache_requested = _spin_major_rf_cache_requested(
+        _native_spin_major_rf_cache
+    )
+    if (
+        _spin_major_rf_propagator_budget_bytes is None
+        and memory_budget_bytes is not None
+    ):
+        _spin_major_rf_propagator_budget_bytes = int(memory_budget_bytes) // 8
+    native_spin_major_chunk = None
+    native_spin_major_tile_spins = 0
+    if native_spin_major_requested and sequence_kernel in {
+        "native_serial",
+        "native_parallel",
+    }:
+        spin_major_kernel = _spin_major_kernel()
+        if spin_major_kernel is not None:
+            native_spin_major_chunk, native_spin_major_tile_spins = spin_major_kernel
     if _compiled is None:
         compile_started = perf_counter()
         compiled = SequenceCompiler().compile(
@@ -2665,12 +3221,43 @@ def _simulate_dynamic_sequence_block(
         dynamic_b0_pool_scale = np.asarray(
             phantom.dynamic_b0.pool_scale, dtype=np.float64
         )[:, None]
+    native_spin_major_fallback_reason = None
+    if sequence_kernel in {"native_serial", "native_parallel"}:
+        native_spin_major_fallback_reason = _spin_major_fallback_reason(
+            requested=native_spin_major_requested,
+            available=native_spin_major_chunk is not None,
+            phantom=phantom,
+            real_dtype=real_dtype,
+            checkpoint_dtype=checkpoint_dtype,
+            spatial_inflow=spatial_inflow_active,
+            spatial_tx=spatial_tx_active,
+            execution_plan=execution_plan,
+        )
+    native_spin_major_limits = None
+    if (
+        sequence_kernel in {"native_serial", "native_parallel"}
+        and native_spin_major_fallback_reason is None
+    ):
+        native_spin_major_limits = _spin_major_slice_limits(
+            memory_budget_bytes,
+            n_rx_coils,
+            max(1, int(num_threads)) if use_parallel else 1,
+        )
+        if native_spin_major_limits is None:
+            native_spin_major_fallback_reason = "memory budget is too small"
+    native_spin_major_enabled = bool(
+        sequence_kernel in {"native_serial", "native_parallel"}
+        and native_spin_major_fallback_reason is None
+    )
+    # Spin-major ADC sums are reduced over the whole block in a fixed order,
+    # so a parent-resolved block only needs one signal row.
+    signal_parent_rows = 1 if native_spin_major_enabled else parent_active_count
     if _parent_resolved_signal:
         species_signal_shape = (
-            (parent_active_count, phantom.n_species, compiled.adc_times_s.size)
+            (signal_parent_rows, phantom.n_species, compiled.adc_times_s.size)
             if n_rx_coils == 1
             else (
-                parent_active_count,
+                signal_parent_rows,
                 phantom.n_species,
                 n_rx_coils,
                 compiled.adc_times_s.size,
@@ -4180,8 +4767,220 @@ def _simulate_dynamic_sequence_block(
         native_rf_fused_preapplied_end = interval_count
         return True
 
-    native_full_plan_executed = execute_native_full_plan()
-    if status_callback is not None and native_full_plan_executed:
+    native_spin_major_chunks = 0
+    native_spin_major_intervals = 0
+    native_spin_major_threads = 0
+    native_spin_major_table_s = 0.0
+    native_spin_major_kernel_s = 0.0
+    rf_propagator_metadata = {
+        "native_spin_major_rf_propagator_enabled": False,
+        "native_spin_major_rf_propagator_fallback_reason": None,
+        "native_spin_major_rf_propagator_keys": 0,
+    }
+    rf_propagator_stats = {
+        "native_spin_major_rf_propagator_builds": 0,
+        "native_spin_major_rf_propagator_applications": 0,
+        "native_spin_major_rf_propagator_stepwise_segments": 0,
+        "native_spin_major_rf_propagator_bytes": 0,
+        "native_spin_major_rf_propagator_build_s": 0.0,
+    }
+
+    def plan_rf_propagators(source_mode, equilibrium):
+        """Plan cached RF segments and allocate their propagator entries."""
+        rf_segments = int(np.count_nonzero(execution_plan.segment_kinds == SEGMENT_RF))
+        rf_propagator_stats["native_spin_major_rf_propagator_stepwise_segments"] = (
+            rf_segments
+        )
+        if not native_spin_major_rf_cache_requested:
+            rf_propagator_metadata[
+                "native_spin_major_rf_propagator_fallback_reason"
+            ] = "disabled by request"
+            return None, None
+        from .dynamic_spin_major_cy import propagator_values
+
+        track_concentration = concentration_state is not None
+        values = propagator_values(
+            track_concentration, source_mode != 2, source_mode == 0
+        )
+        tiles = -(-n_simulated_spins // native_spin_major_tile_spins)
+        entry_shape = (tiles, values, native_spin_major_tile_spins)
+        plan, reason = _spin_major_rf_propagator_plan(
+            execution_plan,
+            native_rf_hz,
+            source_mode=source_mode,
+            equilibrium=equilibrium,
+            track_concentration=track_concentration,
+            states=8 if track_concentration else 6,
+            values=values,
+            entry_bytes=int(np.prod(entry_shape)) * 8,
+            budget_bytes=_spin_major_rf_propagator_budget_bytes,
+        )
+        if plan is None:
+            rf_propagator_metadata[
+                "native_spin_major_rf_propagator_fallback_reason"
+            ] = reason
+            return None, None
+        propagators = np.empty((plan.capacity,) + entry_shape, dtype=np.float64)
+        rf_propagator_metadata.update(
+            {
+                "native_spin_major_rf_propagator_enabled": True,
+                "native_spin_major_rf_propagator_keys": plan.keys,
+            }
+        )
+        rf_propagator_stats.update(
+            {
+                "native_spin_major_rf_propagator_builds": plan.builds,
+                "native_spin_major_rf_propagator_applications": int(plan.first.size),
+                "native_spin_major_rf_propagator_stepwise_segments": (
+                    rf_segments - int(plan.first.size)
+                ),
+                "native_spin_major_rf_propagator_bytes": int(propagators.nbytes),
+            }
+        )
+        return plan, propagators
+
+    def execute_native_spin_major():
+        nonlocal action_cursor
+        nonlocal native_rf_fused_preapplied_end
+        nonlocal native_full_plan_blocks, native_full_plan_intervals
+        nonlocal native_spin_major_chunks, native_spin_major_intervals
+        nonlocal native_spin_major_threads
+        nonlocal native_spin_major_table_s, native_spin_major_kernel_s
+        if not native_spin_major_enabled:
+            return False
+
+        source_mode = native_full_plan_source_mode
+        equilibrium = (
+            float(phantom.equilibrium_polarization)
+            if concentration_state is not None
+            else 0.0
+        )
+        delivery = None
+        if source_mode != 2:
+            delivery = (
+                np.zeros(n_simulated_spins, dtype=np.float64)
+                if inflow_delivery is None
+                else np.ascontiguousarray(inflow_delivery, dtype=np.float64)
+            )
+        signal_target = species_signal[0] if _parent_resolved_signal else species_signal
+        adc_states = execution_plan.action_state_indices[
+            execution_plan.action_kinds == ACTION_ADC
+        ]
+        interval_limit, adc_limit = native_spin_major_limits
+        worker_threads = native_threads if sequence_kernel == "native_parallel" else 1
+        native_spin_major_threads = worker_threads
+        spin_arguments = dict(
+            tx_sensitivity=(
+                np.ascontiguousarray(tx_sensitivity, dtype=np.complex128)
+                if spatial_tx_active
+                else None
+            ),
+            positions_m=np.ascontiguousarray(positions, dtype=np.float64),
+            b0_hz=np.ascontiguousarray(b0, dtype=np.float64),
+            kpl=np.ascontiguousarray(coefficient_kpl, dtype=np.float64),
+            delivery=delivery,
+            rx_sensitivities=np.ascontiguousarray(
+                rx_sensitivities, dtype=np.complex128
+            ),
+            signal_weights=np.ascontiguousarray(spin_signal_weights, dtype=np.float64),
+            transverse_state=transverse_state,
+            state=state,
+            concentration_state=concentration_state,
+            checkpoint_states=checkpoint_states,
+            action_kinds=execution_plan.action_kinds,
+            action_payloads=execution_plan.action_payload_indices,
+            r1_pyruvate=float(coefficient_r1[0]),
+            r1_lactate=float(coefficient_r1[1]),
+            t2_s=np.ascontiguousarray(t2[:, 0], dtype=np.float64),
+            pool_offset_hz=np.ascontiguousarray(pool_offsets, dtype=np.float64),
+            equilibrium=equilibrium,
+            ideal_crush=spoiler_mode == "ideal",
+            concentration_sources=source_mode == 0,
+            num_threads=worker_threads,
+            num_blocks=_SPIN_MAJOR_WORK_BLOCKS,
+        )
+        rf_cache = {}
+        table_started = perf_counter()
+        rf_plan, propagators = plan_rf_propagators(source_mode, equilibrium)
+        native_spin_major_table_s += perf_counter() - table_started
+        build_seconds = 0.0
+        first_interval = 0
+        while first_interval < interval_count:
+            if cancel_callback is not None and cancel_callback():
+                raise RuntimeError("sequence simulation cancelled")
+            table_started = perf_counter()
+            end_interval = _spin_major_slice_end(
+                first_interval,
+                interval_count,
+                adc_states,
+                adc_limit,
+                interval_limit,
+                *(() if rf_plan is None else (rf_plan.first, rf_plan.end)),
+            )
+            segments = (
+                {}
+                if rf_plan is None
+                else _spin_major_rf_slice(
+                    rf_plan, propagators, first_interval, end_interval
+                )
+            )
+            tables = _spin_major_plan_slice(
+                execution_plan,
+                native_rf_hz,
+                first_interval,
+                end_interval,
+                source_mode=source_mode,
+                equilibrium=equilibrium,
+                rf_cache=rf_cache,
+            )
+            adc_first = tables.pop("adc_first_payload")
+            adc_count = tables.pop("adc_count")
+            adc_signal = np.zeros((2, n_rx_coils, adc_count), dtype=np.complex128)
+            kernel_started = perf_counter()
+            native_spin_major_table_s += kernel_started - table_started
+            build_seconds += native_spin_major_chunk(
+                **tables,
+                **spin_arguments,
+                **segments,
+                adc_first_payload=adc_first,
+                adc_signal=adc_signal,
+            )
+            native_spin_major_kernel_s += perf_counter() - kernel_started
+            if adc_count:
+                payloads = slice(adc_first, adc_first + adc_count)
+                received = adc_signal * signal_scale * adc_demodulation[payloads]
+                if n_rx_coils == 1:
+                    signal_target[:, payloads] = received[:, 0, :]
+                else:
+                    signal_target[:, :, payloads] = received
+            native_spin_major_chunks += 1
+            native_spin_major_intervals += end_interval - first_interval
+            first_interval = end_interval
+            if progress_callback is not None:
+                progress_callback(end_interval, interval_count)
+            if preview_callback is not None:
+                preview_callback(
+                    end_interval / interval_count, combined_signal_snapshot()
+                )
+        # The executor sums build time over threads; report wall-clock share.
+        rf_propagator_stats["native_spin_major_rf_propagator_build_s"] = (
+            build_seconds / worker_threads
+        )
+        native_full_plan_blocks += native_spin_major_chunks
+        native_full_plan_intervals += native_spin_major_intervals
+        action_cursor = execution_plan.n_actions
+        native_rf_fused_preapplied_end = interval_count
+        return True
+
+    native_spin_major_executed = execute_native_spin_major()
+    native_full_plan_executed = native_spin_major_executed or execute_native_full_plan()
+    if status_callback is not None and native_spin_major_executed:
+        status_callback(
+            "Executed dynamic free evolution, RF, ADC, crushers, and "
+            f"checkpoints in {native_spin_major_chunks:,} bounded native plan "
+            f"slice(s), spin-major with {native_spin_major_threads} thread(s)."
+        )
+    elif status_callback is not None and native_full_plan_executed:
         status_callback(
             "Executed dynamic free evolution, RF, ADC, crushers, and "
             f"checkpoints in {native_full_plan_blocks:,} bounded native plan "
@@ -4742,6 +5541,9 @@ def _simulate_dynamic_sequence_block(
     block_runtime_stats = {
         "native_full_plan_blocks": native_full_plan_blocks,
         "native_full_plan_intervals": native_full_plan_intervals,
+        "native_spin_major_chunks": native_spin_major_chunks,
+        "native_spin_major_intervals": native_spin_major_intervals,
+        "native_spin_major_parent_blocks": int(native_spin_major_executed),
         "native_rf_fused_blocks": native_rf_fused_blocks,
         "native_rf_fused_intervals": native_rf_fused_intervals,
         "native_spatial_rf_cache_hits": spatial_rf_cache_hits,
@@ -4754,6 +5556,7 @@ def _simulate_dynamic_sequence_block(
             if native_rf_fused_plan_cache is not None
             else 0
         ),
+        **rf_propagator_stats,
     }
     if _block_result_mode == "minimal":
         return _DynamicBlockResult(
@@ -4994,6 +5797,16 @@ def _simulate_dynamic_sequence_block(
             ),
             "native_full_plan_blocks": native_full_plan_blocks,
             "native_full_plan_intervals": native_full_plan_intervals,
+            "native_spin_major_enabled": native_spin_major_executed,
+            "native_spin_major_fallback_reason": native_spin_major_fallback_reason,
+            "native_spin_major_chunks": native_spin_major_chunks,
+            "native_spin_major_intervals": native_spin_major_intervals,
+            "native_spin_major_threads": native_spin_major_threads,
+            "native_spin_major_tile_spins": native_spin_major_tile_spins,
+            "native_spin_major_table_s": native_spin_major_table_s,
+            "native_spin_major_kernel_s": native_spin_major_kernel_s,
+            **rf_propagator_metadata,
+            **rf_propagator_stats,
             "native_rf_fused_spin_limit": native_rf_fused_spin_limit,
             "native_rf_fused_interval_limit": native_rf_fused_interval_limit,
             "native_rf_fused_cache_limit_bytes": (native_rf_fused_cache_limit_bytes),
@@ -5186,6 +5999,34 @@ def simulate_dynamic_sequence(
     global_tx_classification, global_constant_tx = _classify_tx_sensitivity(
         full_tx_sensitivity
     )
+    # Every block sees the same plan, phantom, and Tx classification, so a
+    # spin-major prediction here holds for all of them. Spin-major blocks keep
+    # one ADC row per block instead of one per parent voxel.
+    spin_major_planned = False
+    if sequence_kernel in {"native_serial", "native_parallel"}:
+        spin_major_planned = (
+            _spin_major_fallback_reason(
+                requested=_spin_major_requested(_ignored.get("_native_spin_major")),
+                available=_spin_major_kernel() is not None,
+                phantom=phantom,
+                real_dtype=real_dtype,
+                checkpoint_dtype=effective_checkpoint_dtype,
+                spatial_inflow=bool(
+                    phantom.pyruvate_inflow is not None
+                    and phantom.pyruvate_inflow.has_spatial_delays
+                ),
+                spatial_tx=global_tx_classification == "spatial",
+                execution_plan=execution_plan,
+            )
+            is None
+            and _spin_major_slice_limits(
+                memory_budget_bytes,
+                n_rx_coils,
+                max(1, int(num_threads)) if use_parallel else 1,
+            )
+            is not None
+        )
+    adc_row_bytes = phantom.n_species * n_rx_coils * adc_count * complex_dtype.itemsize
 
     # Public outputs remain global. Everything proportional to the expanded
     # subspin count belongs to the current parent-voxel memory block.
@@ -5214,10 +6055,11 @@ def simulate_dynamic_sequence(
         * spins_per_parent
         * 3
         * effective_checkpoint_dtype.itemsize
-        + phantom.n_species * n_rx_coils * adc_count * complex_dtype.itemsize
+        + (0 if spin_major_planned else adc_row_bytes)
     )
     # The reserve covers bounded coefficient/RF caches and allocator overhead.
     reserve_bytes = 64 * 1024**2
+    per_block_work_bytes = adc_row_bytes if spin_major_planned else 0
     memory_parent_limit = parent_count
     enforce_memory_plan = bool(
         sampling.enabled or parent_voxel_chunk_size is not None or total_spins > 131072
@@ -5227,10 +6069,20 @@ def simulate_dynamic_sequence(
         if memory_budget_bytes <= 0:
             raise MemoryError("Memory limit must leave room for simulation outputs")
         reserve_bytes = min(reserve_bytes, max(1024**2, memory_budget_bytes // 10))
-        available_work_bytes = memory_budget_bytes - global_output_bytes - reserve_bytes
+        available_work_bytes = (
+            memory_budget_bytes
+            - global_output_bytes
+            - reserve_bytes
+            - per_block_work_bytes
+        )
         memory_parent_limit = available_work_bytes // max(1, per_parent_work_bytes)
         if memory_parent_limit < 1:
-            required = global_output_bytes + reserve_bytes + per_parent_work_bytes
+            required = (
+                global_output_bytes
+                + reserve_bytes
+                + per_block_work_bytes
+                + per_parent_work_bytes
+            )
             raise MemoryError(
                 "Memory limit exceeded before dynamic state allocation: one "
                 "parent voxel plus requested outputs needs approximately "
@@ -5260,6 +6112,21 @@ def simulate_dynamic_sequence(
         or total_spins > native_expanded_spin_limit
         or chunk_parent_count < parent_count
     )
+    # Cached RF propagators use what the planned blocks and spin-major slice
+    # tables leave of the budget; they never shrink the blocks.
+    spin_major_rf_budget_bytes = _ignored.pop(
+        "_spin_major_rf_propagator_budget_bytes", None
+    )
+    if spin_major_rf_budget_bytes is None and memory_budget_bytes is not None:
+        spin_major_rf_budget_bytes = max(
+            0,
+            int(memory_budget_bytes)
+            - global_output_bytes
+            - reserve_bytes
+            - per_block_work_bytes
+            - chunk_parent_count * per_parent_work_bytes
+            - int(memory_budget_bytes) // 8,
+        )
     common_arguments = dict(
         checkpoints_s=checkpoints_s,
         field_strength_t=field_strength_t,
@@ -5281,6 +6148,7 @@ def simulate_dynamic_sequence(
         _execution_plan_build_s=execution_plan_build_s,
         _tx_classification=global_tx_classification,
         _constant_tx_sensitivity=global_constant_tx,
+        _spin_major_rf_propagator_budget_bytes=spin_major_rf_budget_bytes,
         **_ignored,
     )
     if not use_chunking:
@@ -5318,12 +6186,20 @@ def simulate_dynamic_sequence(
     aggregate_stats = {
         "native_full_plan_blocks": 0,
         "native_full_plan_intervals": 0,
+        "native_spin_major_chunks": 0,
+        "native_spin_major_intervals": 0,
+        "native_spin_major_parent_blocks": 0,
         "native_rf_fused_blocks": 0,
         "native_rf_fused_intervals": 0,
         "native_spatial_rf_cache_hits": 0,
         "native_spatial_rf_cache_misses": 0,
         "native_spatial_rf_cache_bytes": 0,
         "native_rf_fused_cache_bytes": 0,
+        "native_spin_major_rf_propagator_builds": 0,
+        "native_spin_major_rf_propagator_applications": 0,
+        "native_spin_major_rf_propagator_stepwise_segments": 0,
+        "native_spin_major_rf_propagator_bytes": 0,
+        "native_spin_major_rf_propagator_build_s": 0.0,
     }
     completed_parents = 0
     for block_index, first_parent in enumerate(
@@ -5353,6 +6229,8 @@ def simulate_dynamic_sequence(
         for key, value in block.runtime_stats.items():
             if key.endswith("_bytes"):
                 aggregate_stats[key] = max(aggregate_stats[key], int(value))
+            elif key.endswith("_s"):
+                aggregate_stats[key] += float(value)
             else:
                 aggregate_stats[key] += int(value)
         completed_parents += int(block.active_indices.size)
@@ -5386,10 +6264,19 @@ def simulate_dynamic_sequence(
             "dynamic_parent_chunk_count": block_count,
             "dynamic_parent_chunk_size": chunk_parent_count,
             "dynamic_requested_parent_chunk_size": parent_voxel_chunk_size,
-            "dynamic_reduction_group_parent_voxels": 1,
-            "dynamic_signal_reduction": "fixed-parent-streaming-pairwise",
+            "dynamic_reduction_group_parent_voxels": (
+                chunk_parent_count
+                if aggregate_stats["native_spin_major_parent_blocks"] == block_count
+                else 1
+            ),
+            "dynamic_signal_reduction": (
+                "fixed-block-streaming-pairwise"
+                if aggregate_stats["native_spin_major_parent_blocks"]
+                else "fixed-parent-streaming-pairwise"
+            ),
             "dynamic_global_output_bytes_estimate": int(global_output_bytes),
             "dynamic_parent_work_bytes_estimate": int(per_parent_work_bytes),
+            "dynamic_block_work_bytes_estimate": int(per_block_work_bytes),
             "dynamic_memory_reserve_bytes": int(reserve_bytes),
             "numerical_contract": "float64-close",
         }

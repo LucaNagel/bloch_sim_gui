@@ -6,8 +6,14 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-10-17
+
 ### Added
 
+- Added a strict Float64 spin-major dynamic executor with bounded work buffers,
+  deterministic thread reduction, and cached affine propagators for repeated
+  RF segments. Two-pool models support spatial complex Tx sensitivity,
+  multiple receive coils, subvoxel sampling, and existing inflow modes.
 - "Plan metabolite excitation…" in the RF settings of generated sequences
   designs one metabolite-selective spectral-spatial pulse per target
   (`design_metabolite_selective_pulse`) from a metabolite list. For FLASH,
@@ -29,6 +35,13 @@ The project follows [Semantic Versioning](https://semver.org/).
   `strict_reference` instead of `reference`.
 - `scripts/validate_dynamic_precision.py` compares dynamic kernels against the
   optimized Float64 result instead of a Float32 shadow run.
+
+### Fixed
+
+- Dynamic precision validation now executes requested subvoxel sampling and
+  checks every pool, final state, checkpoint, and available reconstruction
+  against explicit Float64 tolerances. Failed comparisons return a failing
+  exit status; native-path variants and timestep refinement can be compared.
 
 ### Removed
 

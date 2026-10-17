@@ -1,0 +1,471 @@
+{
+  "date": "2026-10-17",
+  "base_commit": "e9fbea11",
+  "integrated_feature_commit": "09815a67",
+  "tests": {
+    "current_conda_environment": {
+      "passed": 1070,
+      "skipped": 1,
+      "subtests": 12
+    },
+    "packaging_environment_full_suite": {
+      "passed": 1066
+    }
+  },
+  "environment": {
+    "full_object_validation": {
+      "python": "3.12.2",
+      "numpy": "2.3.5",
+      "scipy": "1.16.3"
+    },
+    "current_conda": {
+      "python": "3.12.15",
+      "numpy": "2.5.4",
+      "scipy": "1.18.1"
+    }
+  },
+  "full_object": {
+    "shape": [
+      64,
+      64,
+      64
+    ],
+    "active_voxels": 39074,
+    "timings": {
+      "cached": {
+        "wall_s": 79.25210604199674,
+        "peak_rss_bytes": 904888320,
+        "timestep_s": 1e-05,
+        "compiled_intervals": 1041538,
+        "spin_major": true,
+        "rf_cache": true
+      },
+      "stepwise": {
+        "wall_s": 257.26485816700733,
+        "peak_rss_bytes": 1071366144,
+        "timestep_s": 1e-05,
+        "compiled_intervals": 1041538,
+        "spin_major": true,
+        "rf_cache": false
+      },
+      "previous": {
+        "wall_s": 2421.211364500021,
+        "peak_rss_bytes": 889356288,
+        "timestep_s": 1e-05,
+        "compiled_intervals": 1041538,
+        "spin_major": false,
+        "rf_cache": false
+      },
+      "refined": {
+        "wall_s": 172.4115098749753,
+        "peak_rss_bytes": 976076800,
+        "timestep_s": 5e-06,
+        "compiled_intervals": 1940918,
+        "spin_major": true,
+        "rf_cache": true
+      },
+      "accurate": {
+        "wall_s": 286.77817504201084,
+        "peak_rss_bytes": 1627389952,
+        "timestep_s": 1e-06,
+        "compiled_intervals": 9135958,
+        "spin_major": true,
+        "rf_cache": true
+      },
+      "numpy_parallel": {
+        "wall_s": 2471.8159382909944,
+        "processes": 4,
+        "sum_worker_peak_rss_bytes": 4218273792
+      }
+    },
+    "errors_vs_numpy": {
+      "cached": {
+        "failed_metrics": [],
+        "total_signal_nrmse": 1.053089909345256e-11,
+        "pool_signal_nrmse": {
+          "Pyruvate": 1.0544471602798387e-11,
+          "Lactate": 1.0262818797492545e-11
+        },
+        "pool_phase_max_rad": {
+          "Pyruvate": 3.677173270479071e-12,
+          "Lactate": 1.4331101524904582e-10
+        },
+        "final_pool_state_nrmse": 1.1405473892950441e-11,
+        "checkpoint_pool_state_nrmse": 1.132221060314231e-11,
+        "per_pool_final_state_nrmse": {
+          "Pyruvate": 1.3741025700901628e-11,
+          "Lactate": 1.131351083105064e-11
+        },
+        "pool_image_nrmse": {
+          "Pyruvate": 1.0544473648869093e-11,
+          "Lactate": 1.0262803584807623e-11
+        }
+      },
+      "stepwise": {
+        "failed_metrics": [],
+        "total_signal_nrmse": 3.190841838253175e-14,
+        "pool_signal_nrmse": {
+          "Pyruvate": 2.969759847267569e-14,
+          "Lactate": 1.824374519132381e-13
+        },
+        "pool_phase_max_rad": {
+          "Pyruvate": 1.521150268534455e-12,
+          "Lactate": 8.414966527085921e-11
+        },
+        "final_pool_state_nrmse": 1.3149431950600903e-14,
+        "checkpoint_pool_state_nrmse": 1.2174302681298506e-14,
+        "per_pool_final_state_nrmse": {
+          "Pyruvate": 1.535036302866425e-14,
+          "Lactate": 1.3064307465501883e-14
+        },
+        "pool_image_nrmse": {
+          "Pyruvate": 2.969805791161959e-14,
+          "Lactate": 1.8243693606341152e-13
+        }
+      },
+      "previous": {
+        "failed_metrics": [],
+        "total_signal_nrmse": 1.4494784494565473e-13,
+        "pool_signal_nrmse": {
+          "Pyruvate": 1.413721430473549e-13,
+          "Lactate": 2.14827122813867e-13
+        },
+        "pool_phase_max_rad": {
+          "Pyruvate": 1.1565714102356203e-11,
+          "Lactate": 9.077970673704944e-11
+        },
+        "final_pool_state_nrmse": 1.2716287114334612e-14,
+        "checkpoint_pool_state_nrmse": 1.045850870843408e-14,
+        "per_pool_final_state_nrmse": {
+          "Pyruvate": 9.656017979799636e-15,
+          "Lactate": 1.2811696071146485e-14
+        },
+        "pool_image_nrmse": {
+          "Pyruvate": 1.4136963100816104e-13,
+          "Lactate": 2.1483348846294115e-13
+        }
+      }
+    }
+  },
+  "controlled_benchmarks": {
+    "integrated-uniform": {
+      "optimized": {
+        "median_s": 1.6916290000081062,
+        "samples_s": [
+          1.6207443329913076,
+          1.6942299589863978,
+          1.6383971250033937,
+          1.6916290000081062,
+          1.797213042009389
+        ],
+        "errors_nrmse": {
+          "signal": 0.0,
+          "species_signal": 0.0,
+          "final_pool": 0.0,
+          "checkpoint_pool": 0.0,
+          "Pyruvate": 0.0,
+          "Lactate": 0.0
+        },
+        "metadata": {
+          "native_spin_major_enabled": false,
+          "native_spin_major_fallback_reason": null,
+          "native_spin_major_rf_propagator_enabled": false,
+          "native_spin_major_rf_propagator_keys": 0,
+          "native_spin_major_rf_propagator_builds": 0,
+          "native_spin_major_rf_propagator_applications": 0,
+          "native_spin_major_rf_propagator_bytes": 0,
+          "native_spin_major_rf_propagator_fallback_reason": null
+        }
+      },
+      "previous": {
+        "median_s": 0.35157316699041985,
+        "samples_s": [
+          0.3448836670140736,
+          0.35403695798595436,
+          0.3428112080146093,
+          0.35157316699041985,
+          0.35224425001069903
+        ],
+        "errors_nrmse": {
+          "signal": 1.5996916635797664e-15,
+          "species_signal": 1.853718060582989e-15,
+          "final_pool": 7.735777068142189e-16,
+          "checkpoint_pool": 6.118478003533061e-16,
+          "Pyruvate": 1.8652801577741447e-15,
+          "Lactate": 1.7499405488202977e-15
+        },
+        "metadata": {
+          "native_spin_major_enabled": false,
+          "native_spin_major_fallback_reason": "disabled by request",
+          "native_spin_major_rf_propagator_enabled": false,
+          "native_spin_major_rf_propagator_keys": 0,
+          "native_spin_major_rf_propagator_builds": 0,
+          "native_spin_major_rf_propagator_applications": 0,
+          "native_spin_major_rf_propagator_bytes": 0,
+          "native_spin_major_rf_propagator_fallback_reason": null
+        }
+      },
+      "stepwise": {
+        "median_s": 0.12608054099837318,
+        "samples_s": [
+          0.12378658400848508,
+          0.12608054099837318,
+          0.12668937499984168,
+          0.1277617079904303,
+          0.12464554200414568
+        ],
+        "errors_nrmse": {
+          "signal": 1.8928910097591766e-15,
+          "species_signal": 2.176714056173413e-15,
+          "final_pool": 3.9796183342624206e-14,
+          "checkpoint_pool": 3.175413643897213e-14,
+          "Pyruvate": 1.819500761340956e-15,
+          "Lactate": 4.141676595446686e-15
+        },
+        "metadata": {
+          "native_spin_major_enabled": true,
+          "native_spin_major_fallback_reason": null,
+          "native_spin_major_rf_propagator_enabled": false,
+          "native_spin_major_rf_propagator_keys": 0,
+          "native_spin_major_rf_propagator_builds": 0,
+          "native_spin_major_rf_propagator_applications": 0,
+          "native_spin_major_rf_propagator_bytes": 0,
+          "native_spin_major_rf_propagator_fallback_reason": "disabled by request"
+        }
+      },
+      "cached": {
+        "median_s": 0.09152149999863468,
+        "samples_s": [
+          0.09318862500367686,
+          0.09152149999863468,
+          0.0919771250046324,
+          0.09120708299451508,
+          0.09077375000924803
+        ],
+        "errors_nrmse": {
+          "signal": 2.6219116254302386e-15,
+          "species_signal": 3.0523119669186787e-15,
+          "final_pool": 5.173145112400268e-14,
+          "checkpoint_pool": 4.125972423847421e-14,
+          "Pyruvate": 1.851232111152543e-15,
+          "Lactate": 7.780729888172543e-15
+        },
+        "metadata": {
+          "native_spin_major_enabled": true,
+          "native_spin_major_fallback_reason": null,
+          "native_spin_major_rf_propagator_enabled": true,
+          "native_spin_major_rf_propagator_keys": 2,
+          "native_spin_major_rf_propagator_builds": 2,
+          "native_spin_major_rf_propagator_applications": 64,
+          "native_spin_major_rf_propagator_bytes": 7340032,
+          "native_spin_major_rf_propagator_fallback_reason": null
+        }
+      }
+    },
+    "integrated-spatial": {
+      "optimized": {
+        "median_s": 1.3608664170023985,
+        "samples_s": [
+          1.3645058749825694,
+          1.3466209589969367,
+          1.384075500012841,
+          1.3311337079794612,
+          1.3608664170023985
+        ],
+        "errors_nrmse": {
+          "signal": 0.0,
+          "species_signal": 0.0,
+          "final_pool": 0.0,
+          "checkpoint_pool": 0.0,
+          "Pyruvate": 0.0,
+          "Lactate": 0.0
+        },
+        "metadata": {
+          "native_spin_major_enabled": false,
+          "native_spin_major_fallback_reason": null,
+          "native_spin_major_rf_propagator_enabled": false,
+          "native_spin_major_rf_propagator_keys": 0,
+          "native_spin_major_rf_propagator_builds": 0,
+          "native_spin_major_rf_propagator_applications": 0,
+          "native_spin_major_rf_propagator_bytes": 0,
+          "native_spin_major_rf_propagator_fallback_reason": null
+        }
+      },
+      "previous": {
+        "median_s": 0.42923962499480695,
+        "samples_s": [
+          0.4234496669960208,
+          0.42923962499480695,
+          0.42311324999900535,
+          0.45418945798883215,
+          0.4344964160118252
+        ],
+        "errors_nrmse": {
+          "signal": 1.422828553058006e-15,
+          "species_signal": 1.6417893431770161e-15,
+          "final_pool": 4.826684365216637e-15,
+          "checkpoint_pool": 3.901455225617468e-15,
+          "Pyruvate": 1.6474427575256978e-15,
+          "Lactate": 1.5976893087548038e-15
+        },
+        "metadata": {
+          "native_spin_major_enabled": false,
+          "native_spin_major_fallback_reason": "disabled by request",
+          "native_spin_major_rf_propagator_enabled": false,
+          "native_spin_major_rf_propagator_keys": 0,
+          "native_spin_major_rf_propagator_builds": 0,
+          "native_spin_major_rf_propagator_applications": 0,
+          "native_spin_major_rf_propagator_bytes": 0,
+          "native_spin_major_rf_propagator_fallback_reason": null
+        }
+      },
+      "stepwise": {
+        "median_s": 0.1541209590213839,
+        "samples_s": [
+          0.15198145800968632,
+          0.15423641601228155,
+          0.1544557079905644,
+          0.150449667009525,
+          0.1541209590213839
+        ],
+        "errors_nrmse": {
+          "signal": 2.593486819136722e-15,
+          "species_signal": 2.978877610638044e-15,
+          "final_pool": 3.959481659364151e-14,
+          "checkpoint_pool": 3.159817987740537e-14,
+          "Pyruvate": 2.7914731455507296e-15,
+          "Lactate": 4.1450698641456015e-15
+        },
+        "metadata": {
+          "native_spin_major_enabled": true,
+          "native_spin_major_fallback_reason": null,
+          "native_spin_major_rf_propagator_enabled": false,
+          "native_spin_major_rf_propagator_keys": 0,
+          "native_spin_major_rf_propagator_builds": 0,
+          "native_spin_major_rf_propagator_applications": 0,
+          "native_spin_major_rf_propagator_bytes": 0,
+          "native_spin_major_rf_propagator_fallback_reason": "disabled by request"
+        }
+      },
+      "cached": {
+        "median_s": 0.09373854100704193,
+        "samples_s": [
+          0.09426370897563174,
+          0.09502925002016127,
+          0.09327837498858571,
+          0.09373854100704193,
+          0.09216729199397378
+        ],
+        "errors_nrmse": {
+          "signal": 2.4466963844849207e-15,
+          "species_signal": 2.7857971171232398e-15,
+          "final_pool": 5.160625312623366e-14,
+          "checkpoint_pool": 4.122745221545526e-14,
+          "Pyruvate": 2.5279878099543655e-15,
+          "Lactate": 4.276143497252074e-15
+        },
+        "metadata": {
+          "native_spin_major_enabled": true,
+          "native_spin_major_fallback_reason": null,
+          "native_spin_major_rf_propagator_enabled": true,
+          "native_spin_major_rf_propagator_keys": 2,
+          "native_spin_major_rf_propagator_builds": 2,
+          "native_spin_major_rf_propagator_applications": 64,
+          "native_spin_major_rf_propagator_bytes": 7340032,
+          "native_spin_major_rf_propagator_fallback_reason": null
+        }
+      }
+    }
+  },
+  "refinement": {
+    "10us_vs_5us": {
+      "total_signal_nrmse": 5.921232496991165e-05,
+      "pool_signal_nrmse": {
+        "Pyruvate": 5.275394233430641e-05,
+        "Lactate": 0.0007270664070318645
+      },
+      "pool_phase_max_rad": {
+        "Pyruvate": 0.0007995662807649831,
+        "Lactate": 0.01982272037108079
+      },
+      "final_pool_state_nrmse": 2.0868863524036284e-05,
+      "checkpoint_pool_state_nrmse": 1.6087532749263894e-05,
+      "per_pool_final_state_nrmse": {
+        "Pyruvate": 8.433057993997456e-06,
+        "Lactate": 2.1177186462700563e-05
+      },
+      "pool_image_nrmse": {
+        "Pyruvate": 5.2753942334312166e-05,
+        "Lactate": 0.0007270664070318617
+      }
+    },
+    "10us_vs_1us": {
+      "total_signal_nrmse": 7.816098688047072e-05,
+      "pool_signal_nrmse": {
+        "Pyruvate": 6.963800652489884e-05,
+        "Lactate": 0.0009600596225095036
+      },
+      "pool_phase_max_rad": {
+        "Pyruvate": 0.0010555943657326841,
+        "Lactate": 0.02634667784737329
+      },
+      "final_pool_state_nrmse": 2.7547780758550994e-05,
+      "checkpoint_pool_state_nrmse": 2.1236145197768337e-05,
+      "per_pool_final_state_nrmse": {
+        "Pyruvate": 1.1130392040184721e-05,
+        "Lactate": 2.7954810381631033e-05
+      },
+      "pool_image_nrmse": {
+        "Pyruvate": 6.963800652489916e-05,
+        "Lactate": 0.0009600596225095036
+      }
+    },
+    "5us_vs_1us": {
+      "total_signal_nrmse": 1.8949261814253526e-05,
+      "pool_signal_nrmse": {
+        "Pyruvate": 1.688461715160449e-05,
+        "Lactate": 0.00023301354950763318
+      },
+      "pool_phase_max_rad": {
+        "Pyruvate": 0.00025602808496773456,
+        "Lactate": 0.0065271218103061576
+      },
+      "final_pool_state_nrmse": 6.678782593504909e-06,
+      "checkpoint_pool_state_nrmse": 5.148550842303931e-06,
+      "per_pool_final_state_nrmse": {
+        "Pyruvate": 2.697356793153591e-06,
+        "Lactate": 6.777480390964328e-06
+      },
+      "pool_image_nrmse": {
+        "Pyruvate": 1.6884617151599017e-05,
+        "Lactate": 0.00023301354950763372
+      }
+    }
+  },
+  "accurate_reference_probe": {
+    "probe_voxels": 64,
+    "adc_events": 256,
+    "duration_s": 1.6235599999999826,
+    "timestep_s": 1e-06,
+    "rf_cache_applications": 236,
+    "failed_metrics": [],
+    "errors": {
+      "total_signal_nrmse": 2.3177239194482325e-12,
+      "pool_signal_nrmse": {
+        "Pyruvate": 2.318021987515159e-12,
+        "Lactate": 3.2956500620305796e-11
+      },
+      "pool_phase_max_rad": {
+        "Pyruvate": 4.9693557606585894e-12,
+        "Lactate": 2.0448590247712622e-09
+      },
+      "final_pool_state_nrmse": 7.568910632738887e-13,
+      "checkpoint_pool_state_nrmse": 7.57145320113115e-13,
+      "per_pool_final_state_nrmse": {
+        "Pyruvate": 2.651435370781485e-13,
+        "Lactate": 2.099179066090555e-11
+      },
+      "pool_image_nrmse": {}
+    }
+  }
+}

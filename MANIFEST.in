@@ -4,6 +4,9 @@ include src/blochsimulator/bloch_core.h
 include src/blochsimulator/bloch_wrapper.pyx
 include src/blochsimulator/bloch_wrapper_strict.pyx
 include src/blochsimulator/dynamic_bloch_wrapper.pyx
+include src/blochsimulator/dynamic_spin_major.c
+include src/blochsimulator/dynamic_spin_major.h
+include src/blochsimulator/dynamic_spin_major_wrapper.pyx
 include requirements.txt
 include README.md
 include CHANGELOG.md

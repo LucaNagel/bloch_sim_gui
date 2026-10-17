@@ -22,7 +22,9 @@ from blochsimulator.sequence import SequenceProgram, load_pulseq
 from blochsimulator.spectral_phantom import ChemicalSpecies
 
 
-DEFAULT_SIGNAL_NRMSE_GATE = 1.0e-3
+DEFAULT_SIGNAL_NRMSE_GATE = 1.0e-10
+DEFAULT_RELATIVE_TOLERANCE = 1.0e-10
+DEFAULT_ABSOLUTE_TOLERANCE = 1.0e-12
 SIGNIFICANT_MAGNITUDE_FRACTION = 1.0e-3
 LOW_SIGNAL_MAGNITUDE_FRACTION = 1.0e-4
 REFERENCE_KERNEL = "optimized"
@@ -32,9 +34,17 @@ CANDIDATE_KERNELS = tuple(
 DEFAULT_CANDIDATES = ("native_parallel",)
 
 
-def _array_metric(reference, candidate):
-    if reference is None or candidate is None:
+def _array_metric(
+    reference,
+    candidate,
+    *,
+    rtol=DEFAULT_RELATIVE_TOLERANCE,
+    atol=DEFAULT_ABSOLUTE_TOLERANCE,
+):
+    if reference is None and candidate is None:
         return None
+    if reference is None or candidate is None:
+        return {"comparison_available": False, "within_tolerance": False}
     reference = np.asarray(reference)
     candidate = np.asarray(candidate)
     if reference.shape != candidate.shape:
@@ -46,11 +56,22 @@ def _array_metric(reference, candidate):
     reference_norm = float(np.linalg.norm(reference.reshape(-1)))
     difference_norm = float(np.linalg.norm(difference.reshape(-1)))
     peak = float(np.max(np.abs(reference), initial=0.0))
+    absolute_tolerance = atol * max(1.0, peak)
     max_absolute = float(np.max(np.abs(difference), initial=0.0))
     return {
+        "within_tolerance": bool(
+            np.all(np.isfinite(reference))
+            and np.all(np.isfinite(candidate))
+            and np.all(
+                np.abs(difference) <= absolute_tolerance + rtol * np.abs(reference)
+            )
+        ),
         "shape": list(reference.shape),
         "reference_dtype": reference.dtype.name,
         "candidate_dtype": candidate.dtype.name,
+        "absolute_tolerance": absolute_tolerance,
+        "reference_rms": reference_norm / np.sqrt(max(1, reference.size)),
+        "rms_absolute_error": difference_norm / np.sqrt(max(1, reference.size)),
         "nrmse": (
             difference_norm / reference_norm if reference_norm else difference_norm
         ),
@@ -62,10 +83,10 @@ def _array_metric(reference, candidate):
     }
 
 
-def _signal_metric(reference, candidate):
-    metric = _array_metric(reference, candidate)
-    if metric is None:
-        return None
+def _signal_metric(reference, candidate, **tolerances):
+    metric = _array_metric(reference, candidate, **tolerances)
+    if metric is None or reference is None or candidate is None:
+        return metric
     reference = np.asarray(reference, dtype=np.complex128)
     candidate = np.asarray(candidate, dtype=np.complex128)
     difference = candidate - reference
@@ -120,7 +141,7 @@ def _signal_metric(reference, candidate):
     return metric
 
 
-def _error_growth(reference, candidate, adc_times_s, bin_count=10):
+def _error_growth(reference, candidate, adc_times_s, bin_count=10, **tolerances):
     reference = np.asarray(reference)
     candidate = np.asarray(candidate)
     times = np.asarray(adc_times_s, dtype=float)
@@ -140,9 +161,11 @@ def _error_growth(reference, candidate, adc_times_s, bin_count=10):
                 "adc_index_stop": int(stop),
                 "time_start_s": float(times[start]),
                 "time_end_s": float(times[stop - 1]),
-                "window": _signal_metric(reference[window], candidate[window]),
+                "window": _signal_metric(
+                    reference[window], candidate[window], **tolerances
+                ),
                 "cumulative": _signal_metric(
-                    reference[cumulative], candidate[cumulative]
+                    reference[cumulative], candidate[cumulative], **tolerances
                 ),
             }
         )
@@ -201,41 +224,90 @@ def _synthetic_phantom(program, shape):
     )
 
 
-def _result_metrics(reference, candidate):
+def _result_metrics(reference, candidate, **tolerances):
     pool_names = tuple(reference.pool_names) or tuple(
         f"pool_{index}" for index in range(reference.species_signal.shape[0])
     )
     metrics = {
-        "total_signal": _signal_metric(reference.signal, candidate.signal),
+        "total_signal": _signal_metric(
+            reference.signal, candidate.signal, **tolerances
+        ),
         "species_signal": {
             name: _signal_metric(
-                reference.species_signal[index], candidate.species_signal[index]
+                reference.species_signal[index],
+                candidate.species_signal[index],
+                **tolerances,
             )
             for index, name in enumerate(pool_names)
         },
-        "final_pool_state": _array_metric(
-            reference.final_pool_magnetization,
-            candidate.final_pool_magnetization,
-        ),
-        "final_combined_state": _array_metric(
-            reference.final_magnetization,
-            candidate.final_magnetization,
-        ),
         "error_growth": _error_growth(
             reference.signal,
             candidate.signal,
             reference.adc_times_s,
+            **tolerances,
         ),
+    }
+    for label, attribute in (
+        ("final_pool_state", "final_pool_magnetization"),
+        ("final_combined_state", "final_magnetization"),
+        ("checkpoint_pool_state", "checkpoint_pool_magnetization"),
+        ("checkpoint_combined_state", "checkpoint_magnetization"),
+    ):
+        metrics[label] = _array_metric(
+            getattr(reference, attribute),
+            getattr(candidate, attribute),
+            **tolerances,
+        )
+    metrics["final_species_states"] = {
+        name: _array_metric(
+            reference.final_pool_magnetization[index],
+            candidate.final_pool_magnetization[index],
+            **tolerances,
+        )
+        for index, name in enumerate(pool_names)
+    }
+    metrics["checkpoint_species_states"] = {
+        name: _array_metric(
+            (
+                None
+                if reference.checkpoint_pool_magnetization is None
+                else reference.checkpoint_pool_magnetization[:, index]
+            ),
+            (
+                None
+                if candidate.checkpoint_pool_magnetization is None
+                else candidate.checkpoint_pool_magnetization[:, index]
+            ),
+            **tolerances,
+        )
+        for index, name in enumerate(pool_names)
     }
     if reference.cartesian_acquisition_volumes is not None:
         metrics["cartesian_3d_kspace"] = _array_metric(
-            reference.to_cartesian_3d_kspace(), candidate.to_cartesian_3d_kspace()
+            reference.to_cartesian_3d_kspace(),
+            candidate.to_cartesian_3d_kspace(),
+            **tolerances,
         )
         metrics["cartesian_3d_image"] = _array_metric(
             reference.reconstruct_cartesian_3d(),
             candidate.reconstruct_cartesian_3d(),
+            **tolerances,
         )
     return metrics
+
+
+def _failed_metrics(metrics, prefix=""):
+    """Collect failed array comparisons, including pools and time windows."""
+    failures = []
+    if isinstance(metrics, dict):
+        if metrics.get("within_tolerance") is False:
+            failures.append(prefix)
+        for key, value in metrics.items():
+            failures.extend(_failed_metrics(value, f"{prefix}.{key}".strip(".")))
+    elif isinstance(metrics, list):
+        for index, value in enumerate(metrics):
+            failures.extend(_failed_metrics(value, f"{prefix}[{index}]"))
+    return failures
 
 
 def compare_kernels(
@@ -246,15 +318,39 @@ def compare_kernels(
     candidates=DEFAULT_CANDIDATES,
     signal_nrmse_gate=DEFAULT_SIGNAL_NRMSE_GATE,
     spin_sampling=None,
+    spoiler_mode=None,
+    checkpoints_s=None,
+    rtol=DEFAULT_RELATIVE_TOLERANCE,
+    atol=DEFAULT_ABSOLUTE_TOLERANCE,
+    native_variants=False,
+    refined_timestep_s=None,
 ):
     from blochsimulator.sequence.spin_sampling import coerce_spin_sampling
 
+    for value, name in (
+        (rtol, "rtol"),
+        (atol, "atol"),
+        (signal_nrmse_gate, "signal_nrmse_gate"),
+    ):
+        if not np.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be finite and nonnegative")
     for candidate_name in candidates:
         if candidate_name not in CANDIDATE_KERNELS:
             raise ValueError(f"unknown candidate kernel {candidate_name!r}")
-    sampling_metadata = coerce_spin_sampling(spin_sampling).to_metadata()
+    sampling = coerce_spin_sampling(spin_sampling)
+    mode = spoiler_mode or ("gradient" if sampling.enabled else "ideal")
+    if sampling.enabled and mode == "ideal":
+        raise ValueError("subvoxel sampling requires spoiler_mode='gradient'")
+    if refined_timestep_s is not None and not (
+        0 < refined_timestep_s < simulation_timestep_s
+    ):
+        raise ValueError(
+            "refined timestep must be positive and smaller than the baseline"
+        )
+    if checkpoints_s is None:
+        checkpoints_s = (program.duration_s / 2, program.duration_s)
 
-    def run(kernel):
+    def run(kernel, *, timestep=simulation_timestep_s, **extra):
         simulator = BlochSimulator(
             use_parallel=kernel == "native_parallel",
             dynamic_sequence_kernel=kernel,
@@ -263,8 +359,11 @@ def compare_kernels(
         result = simulator.simulate_dynamic_sequence(
             program,
             phantom,
-            simulation_timestep_s=simulation_timestep_s,
-            spin_sampling=spin_sampling,
+            simulation_timestep_s=timestep,
+            spin_sampling=sampling,
+            spoiler_mode=mode,
+            checkpoints_s=checkpoints_s,
+            **extra,
         )
         return result, time.perf_counter() - start
 
@@ -275,28 +374,89 @@ def compare_kernels(
         "adc_samples": int(reference.adc_times_s.size),
         "simulation_timestep_s": float(simulation_timestep_s),
         "signal_nrmse_gate": float(signal_nrmse_gate),
-        "spin_sampling": sampling_metadata,
+        "relative_tolerance": float(rtol),
+        "absolute_tolerance": float(atol),
+        "spoiler_mode": mode,
+        "requested_spin_sampling": sampling.to_metadata(),
+        "spin_sampling": reference.metadata["spin_sampling"],
         "reference": {
             "kernel": REFERENCE_KERNEL,
             "runtime_seconds": reference_seconds,
+            "execution_plan_fingerprint": reference.metadata.get(
+                "execution_plan_fingerprint"
+            ),
             "compiled_interval_count": reference.metadata.get(
                 "compiled_interval_count"
             ),
         },
         "candidates": {},
     }
-    for candidate_name in candidates:
-        candidate, runtime = run(candidate_name)
-        metrics = _result_metrics(reference, candidate)
-        report["candidates"][candidate_name] = {
+    variants = [(name, name, {}) for name in candidates]
+    if native_variants:
+        for name in candidates:
+            if name in {"native_serial", "native_parallel"}:
+                variants.extend(
+                    (
+                        (name + "_previous", name, {"_native_spin_major": False}),
+                        (
+                            name + "_stepwise",
+                            name,
+                            {"_native_spin_major_rf_cache": False},
+                        ),
+                    )
+                )
+    for label, kernel, extra in variants:
+        candidate, runtime = run(kernel, **extra)
+        metrics = _result_metrics(reference, candidate, rtol=rtol, atol=atol)
+        failures = _failed_metrics(metrics)
+        for metric_name, metric in [
+            ("total_signal", metrics["total_signal"]),
+            *metrics["species_signal"].items(),
+        ]:
+            # Retain the absolute-error floor for vanishing pool signals.
+            if not np.isfinite(metric["rms_absolute_error"]) or (
+                metric["rms_absolute_error"]
+                > metric["absolute_tolerance"]
+                + signal_nrmse_gate * metric["reference_rms"]
+            ):
+                failures.append(metric_name + ".nrmse")
+        actual = candidate.metadata.get("sequence_kernel")
+        backend_match = actual == kernel
+        spin_major = bool(candidate.metadata.get("native_spin_major_enabled"))
+        if label.endswith("_stepwise"):
+            backend_match = backend_match and spin_major
+        elif label.endswith("_previous"):
+            backend_match = backend_match and not spin_major
+        fallback_reason = candidate.metadata.get("native_fallback_reason") or (
+            candidate.metadata.get("native_spin_major_fallback_reason")
+        )
+        if fallback_reason == "disabled by request":
+            fallback_reason = None
+        report["candidates"][label] = {
             "runtime_seconds": runtime,
             "speedup_vs_reference": (
                 reference_seconds / runtime if runtime > 0 else None
             ),
-            "actual_kernel": candidate.metadata.get("sequence_kernel"),
+            "requested_kernel": kernel,
+            "actual_kernel": actual,
+            "requested_backend_executed": backend_match,
+            "fallback_used": bool(fallback_reason or actual != kernel),
+            "fallback_reason": fallback_reason,
             "metadata": candidate.metadata,
             "metrics": metrics,
-            "gate_passed": bool(metrics["total_signal"]["nrmse"] <= signal_nrmse_gate),
+            "failed_metrics": failures,
+            "accuracy_gate_passed": not failures,
+            "gate_passed": not failures and backend_match,
+        }
+    if refined_timestep_s is not None:
+        refined, runtime = run(REFERENCE_KERNEL, timestep=refined_timestep_s)
+        report["timestep_refinement"] = {
+            "timestep_s": float(refined_timestep_s),
+            "runtime_seconds": runtime,
+            "compiled_interval_count": refined.metadata["compiled_interval_count"],
+            "compiled_grid_changed": refined.metadata["execution_plan_fingerprint"]
+            != reference.metadata["execution_plan_fingerprint"],
+            "metrics": _result_metrics(refined, reference, rtol=rtol, atol=atol),
         }
     return report
 
@@ -366,6 +526,17 @@ def _parse_args():
     parser.add_argument(
         "--signal-nrmse-gate", type=float, default=DEFAULT_SIGNAL_NRMSE_GATE
     )
+    parser.add_argument("--rtol", type=float, default=DEFAULT_RELATIVE_TOLERANCE)
+    parser.add_argument(
+        "--atol",
+        type=float,
+        default=DEFAULT_ABSOLUTE_TOLERANCE,
+        help="Absolute tolerance scaled by max(1, each array's reference peak)",
+    )
+    parser.add_argument("--spoiler-mode", choices=("ideal", "gradient"))
+    parser.add_argument("--checkpoints-s", nargs="*", type=float)
+    parser.add_argument("--compare-native-variants", action="store_true")
+    parser.add_argument("--refined-timestep-us", type=float)
     parser.add_argument("--output-json", type=Path)
     return parser.parse_args()
 
@@ -381,6 +552,16 @@ def main():
         candidates=tuple(args.candidate or DEFAULT_CANDIDATES),
         signal_nrmse_gate=args.signal_nrmse_gate,
         spin_sampling=args.subvoxel_spins,
+        spoiler_mode=args.spoiler_mode,
+        checkpoints_s=args.checkpoints_s,
+        rtol=args.rtol,
+        atol=args.atol,
+        native_variants=args.compare_native_variants,
+        refined_timestep_s=(
+            None
+            if args.refined_timestep_us is None
+            else args.refined_timestep_us * 1e-6
+        ),
     )
     if saved_reference is not None and args.max_adc_events is None:
         report["saved_project_reference_present"] = True
@@ -391,7 +572,8 @@ def main():
     print(rendered)
     if args.output_json is not None:
         args.output_json.write_text(rendered + "\n", encoding="utf-8")
+    return 0 if all(row["gate_passed"] for row in report["candidates"].values()) else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

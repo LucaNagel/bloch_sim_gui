@@ -77,11 +77,13 @@ docs/_build/
 !docs/free_mode_ahp_performance.md
 !docs/rf_slice_selection.md
 !docs/sequence_simulation_roadmap.md
+!docs/native_kernel_validation.md
 
 # Generated C files
 src/blochsimulator/bloch_wrapper.c
 src/blochsimulator/bloch_wrapper_strict.c
 src/blochsimulator/dynamic_bloch_wrapper.c
+src/blochsimulator/dynamic_spin_major_wrapper.c
 
 # Generated test notebooks (can be generated from tests/test_notebook_export.py)
 test_mode_a.ipynb

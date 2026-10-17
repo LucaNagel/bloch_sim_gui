@@ -969,6 +969,8 @@ def test_native_rf_blocks_support_constant_and_spatial_tx(
         simulation_timestep_s=5e-6,
         spin_sampling=SpinSampling((2, 1, 1)),
         spoiler_mode="gradient",
+        # Inspect the existing spatial coefficient-cache path separately.
+        _native_spin_major=False,
     )
     sampled_reference = simulator.simulate_dynamic_sequence(
         program,
@@ -1279,6 +1281,8 @@ def test_native_serial_fused_rf_block_keeps_one_worker(monkeypatch):
         phantom,
         sequence_kernel="native_serial",
         simulation_timestep_s=5e-6,
+        # This test inspects the voxel-major fused RF driver.
+        _native_spin_major=False,
     )
 
     assert worker_counts

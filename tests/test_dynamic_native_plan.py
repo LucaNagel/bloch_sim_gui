@@ -92,6 +92,8 @@ def test_native_plan_adc_windows_match_single_block_signal():
         simulation_timestep_s=raster,
         spoiler_mode="ideal",
         sequence_kernel="native_serial",
+        # Exercise the bounded voxel-major ADC windows in both runs.
+        _native_spin_major=False,
     )
     simulator = BlochSimulator(use_parallel=False)
     single = simulator.simulate_dynamic_sequence(
