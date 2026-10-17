@@ -21,6 +21,28 @@ The project follows [Semantic Versioning](https://semver.org/).
   map runs in a background thread and is cached, so reopening the designer
   for an unchanged pulse is immediate.
 
+- The settings dialog offers only Optimized and Strict reference sequence
+  kernels and Native automatic (`native_parallel`, now the default) and
+  Optimized NumPy dynamic kernels. Saved choices that are no longer offered
+  fall back to the default.
+- The kernel benchmark compares Sequence Bloch kernels against
+  `strict_reference` instead of `reference`.
+- `scripts/validate_dynamic_precision.py` compares dynamic kernels against the
+  optimized Float64 result instead of a Float32 shadow run.
+
+### Removed
+
+- Removed the experimental Metal backend, including the `metal_hybrid`
+  dynamic kernel and the Metal feasibility probe.
+- Removed Float32 dynamic simulation. Dynamic state is always integrated in
+  Float64; `BlochSimulator(dynamic_sequence_precision=...)` and
+  `simulate_dynamic_sequence(simulation_precision=...)` no longer exist.
+- Removed the Python-only `sequence_kernel="reference"`. Use
+  `"strict_reference"`, which runs the same general rotation-matrix path
+  without fast math.
+- Removed the unused `simulate_phantom_grouped` extension function and the
+  ineffective `use_grouped` argument of `BlochSimulator.simulate_phantom`.
+
 ## [2.8.4] - 2026-10-16
 
 ### Added
