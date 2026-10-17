@@ -9,8 +9,9 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pyqtgraph as pg
+from pyqtgraph.Qt import isQObjectAlive
 import pytest
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QEvent, Qt
 from PyQt5.QtWidgets import QApplication
 
 from blochsimulator.memory import get_default_memory_policy, set_default_memory_policy
@@ -49,20 +50,54 @@ def qt_application():
         return
 
     for widget in QApplication.topLevelWidgets():
-        widget.close()
+        if widget.isVisible():
+            widget.close()
     app.processEvents()
     # Normal pytest processes still need pyqtgraph's ViewBox signal
     # disconnection while QApplication and all Qt wrappers are alive.
     pg.cleanup()
 
 
+def _is_application_widget(widget):
+    return type(widget).__module__.startswith("blochsimulator.")
+
+
+def _forget_deleted_viewboxes():
+    """Drop ViewBoxes whose Qt object is gone from pyqtgraph's global registry.
+
+    With automatic GC disabled, their Python wrappers stay referenced by
+    cycles, so the WeakKeyDictionary never forgets them on its own.
+    """
+    for view in list(pg.ViewBox.AllViews):
+        if not isQObjectAlive(view):
+            pg.ViewBox.AllViews.pop(view, None)
+
+
 @pytest.fixture(autouse=True)
 def cleanup_qt_widgets(qt_application):
-    """Close top-level widgets while keeping pyqtgraph's exit registry intact."""
+    """Close and destroy top-level widgets between tests.
+
+    ``processEvents`` never delivers ``DeferredDelete`` outside a running
+    event loop, so ``deleteLater`` alone left every test's windows alive.
+    Each new named pyqtgraph ViewBox then refreshed the context menus of all
+    ViewBoxes ever created, making every test slower than the one before.
+    Parentless application widgets a test did not delete itself are deleted
+    too. Third-party top-level widgets are left alone: some are owned
+    elsewhere (e.g. QWidgetAction default widgets in pyqtgraph menus), and
+    deleting them separately crashes when their owner is destroyed.
+    Those stay alive hidden, so only visible windows are closed: every
+    ``close()`` scans all top-level widgets, which grows quadratically.
+    """
     memory_policy = get_default_memory_policy()
     yield
 
     set_default_memory_policy(memory_policy)
     for widget in QApplication.topLevelWidgets():
-        widget.close()
+        if widget.isVisible():
+            widget.close()
     qt_application.processEvents()
+    for widget in QApplication.topLevelWidgets():
+        if widget.parentWidget() is None and _is_application_widget(widget):
+            widget.deleteLater()
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    _forget_deleted_viewboxes()
