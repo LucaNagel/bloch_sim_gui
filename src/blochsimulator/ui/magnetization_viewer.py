@@ -209,6 +209,13 @@ class MagnetizationViewer(QWidget):
         self._update_selector_range()
 
         self.setLayout(layout)
+        self.show_equilibrium_magnetization()
+
+    def show_equilibrium_magnetization(self):
+        """Display normalized longitudinal magnetization before a simulation."""
+        self.update_magnetization(np.array([[0.0, 0.0, 1.0]], dtype=float))
+        # The static startup state is not part of a simulated trajectory.
+        self._clear_path()
 
     def color_for_index(self, index: int, total: int):
         """Return the selected 3D palette color for one displayed vector."""

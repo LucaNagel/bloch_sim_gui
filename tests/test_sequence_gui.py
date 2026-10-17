@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
 )
 
 from blochsimulator.ui.main_window import BlochSimulatorGUI
+from blochsimulator.ui.magnetization_viewer import MagnetizationViewer
 from blochsimulator.ui.sequence_simulation_widget import (
     SequenceProbeThread,
     SequenceSimulationThread,
@@ -57,6 +58,20 @@ from blochsimulator.sequence.rf_pulses import (
     rf_time_bandwidth_product_from_envelope,
 )
 from blochsimulator.units import NUCLEUS_GAMMA_HZ_PER_T, rf_hz_to_gauss
+
+
+def test_3d_vector_viewer_shows_equilibrium_before_simulation(qt_application):
+    viewer = MagnetizationViewer()
+
+    np.testing.assert_allclose(
+        viewer.vector_plot.pos, [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+    )
+    np.testing.assert_allclose(
+        viewer.mean_vector.pos, [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+    )
+    assert viewer._has_vector_data
+    assert viewer._has_mean_vector
+    assert not viewer.path_points
 
 
 def _select_workspace(window, mode, timeout_ms=2_000, *, use_popup=False):
