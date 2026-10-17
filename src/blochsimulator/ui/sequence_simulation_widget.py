@@ -4481,6 +4481,15 @@ class SequenceSimulationWidget(QWidget):
         self.gradient_plot.setLabel("bottom", "Time", "ms")
         self.gradient_plot.addLegend()
         self.gradient_plot.setXLink(self.rf_plot)
+        zero_line_pen = pg.mkPen("#757575", width=1)
+        self.rf_zero_line = pg.InfiniteLine(
+            pos=0.0, angle=0, movable=False, pen=zero_line_pen
+        )
+        self.gradient_zero_line = pg.InfiniteLine(
+            pos=0.0, angle=0, movable=False, pen=zero_line_pen
+        )
+        self.rf_zero_line.setZValue(-100)
+        self.gradient_zero_line.setZValue(-100)
         self.rf_plot.sigXRangeChanged.connect(self._sequence_plot_range_changed)
         self.rf_progress_cursor = pg.InfiniteLine(
             pos=0.0, angle=90, movable=False, pen=pg.mkPen("y", width=2)
@@ -10092,6 +10101,8 @@ class SequenceSimulationWidget(QWidget):
         self.rf_plot.clear()
         self._rf_phase_view.clear()
         self.gradient_plot.clear()
+        self.rf_plot.addItem(self.rf_zero_line)
+        self.gradient_plot.addItem(self.gradient_zero_line)
         self._rf_waveform_item = self.rf_plot.plot(
             np.empty(0), np.empty(0), pen=pg.mkPen("m", width=1.5)
         )

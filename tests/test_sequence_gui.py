@@ -2944,6 +2944,25 @@ def test_sequence_workspace_caps_overview_adc_markers():
     app.processEvents()
 
 
+def test_sequence_workspace_displays_zero_reference_lines():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.program = SequenceProgram((), duration_s=10e-3)
+    widget._acquisition_compiled = None
+
+    widget._show_program()
+
+    assert widget.rf_zero_line in widget.rf_plot.plotItem.items
+    assert widget.gradient_zero_line in widget.gradient_plot.plotItem.items
+    assert widget.rf_zero_line.value() == pytest.approx(0.0)
+    assert widget.gradient_zero_line.value() == pytest.approx(0.0)
+    assert widget.rf_zero_line.angle == 0
+    assert widget.gradient_zero_line.angle == 0
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
 def test_sequence_workspace_preserves_timeline_zoom_when_regenerating():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
