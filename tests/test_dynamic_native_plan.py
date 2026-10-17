@@ -85,6 +85,37 @@ def test_native_plan_driver_executes_rf_adc_crusher_and_checkpoints():
         )
 
 
+def test_native_plan_adc_windows_match_single_block_signal():
+    phantom, program, raster = _native_plan_fixture()
+    kwargs = dict(
+        checkpoints_s=(6 * raster, 12 * raster),
+        simulation_timestep_s=raster,
+        spoiler_mode="ideal",
+        sequence_kernel="native_serial",
+    )
+    simulator = BlochSimulator(use_parallel=False)
+    single = simulator.simulate_dynamic_sequence(
+        program, phantom, memory_budget_bytes=None, **kwargs
+    )
+    previews = []
+    windowed = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        memory_budget_bytes=4096,
+        preview_callback=lambda fraction, signal: previews.append(
+            (fraction, signal.copy())
+        ),
+        **kwargs,
+    )
+
+    assert single.metadata["native_full_plan_blocks"] == 1
+    assert windowed.metadata["native_full_plan_enabled"] is True
+    assert windowed.metadata["native_full_plan_blocks"] > 1
+    np.testing.assert_array_equal(windowed.species_signal, single.species_signal)
+    assert previews[-1][0] == 1.0
+    np.testing.assert_array_equal(previews[-1][1], single.species_signal.sum(axis=0))
+
+
 def test_native_plan_driver_supports_dynamic_b0_half_interval_integrals():
     phantom, program, raster = _native_plan_fixture()
     phantom.dynamic_b0 = DynamicB0(

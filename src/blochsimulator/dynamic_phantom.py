@@ -3529,20 +3529,21 @@ def _simulate_dynamic_sequence_block(
         if not native_full_plan_enabled or interval_count == 0:
             return False
 
+        # The kernels accumulate per parent voxel so threads never share an
+        # output element. Only the ADC samples of the current time block are
+        # held per parent; a whole-acquisition parent array can exceed RAM.
         if _parent_resolved_signal:
-            parent_signal = (
+            resolved_signal = (
                 species_signal[:, :, None, :] if n_rx_coils == 1 else species_signal
             )
         else:
-            parent_signal = np.zeros(
-                (
-                    parent_active_count,
-                    phantom.n_species,
-                    n_rx_coils,
-                    compiled.adc_times_s.size,
-                ),
-                dtype=np.complex128,
+            reduced_signal = (
+                species_signal[:, None, :] if n_rx_coils == 1 else species_signal
             )
+        all_adc_demodulation = np.ascontiguousarray(
+            adc_demodulation, dtype=np.complex128
+        )
+        last_preview_step = -1
         plan_concentration_state = concentration_state
         if (
             native_full_plan_source_model or native_full_plan_multi_pool
@@ -3567,10 +3568,36 @@ def _simulate_dynamic_sequence_block(
             ),
         )
 
-        for first_interval in range(0, interval_count, time_block_intervals):
+        # Each block also holds a per-parent window over its ADC samples, so
+        # dense acquisitions shorten the block to keep that window bounded.
+        adc_state_indices = execution_plan.action_state_indices[
+            np.asarray(execution_plan.action_kinds) == ACTION_ADC
+        ]
+        adc_window_sample_bytes = (
+            parent_active_count * phantom.n_species * n_rx_coils * 16
+        )
+        max_block_adc_samples = max(
+            1, native_full_plan_table_limit_bytes // max(1, adc_window_sample_bytes)
+        )
+        plan_blocks = []
+        first_interval = 0
+        while first_interval < interval_count:
+            end_interval = min(interval_count, first_interval + time_block_intervals)
+            adc_start = int(
+                np.searchsorted(adc_state_indices, first_interval, side="right")
+            )
+            limit_index = adc_start + max_block_adc_samples
+            if limit_index < adc_state_indices.size:
+                end_interval = max(
+                    first_interval + 1,
+                    min(end_interval, int(adc_state_indices[limit_index]) - 1),
+                )
+            plan_blocks.append((first_interval, end_interval))
+            first_interval = end_interval
+
+        for first_interval, end_interval in plan_blocks:
             if cancel_callback is not None and cancel_callback():
                 raise RuntimeError("sequence simulation cancelled")
-            end_interval = min(interval_count, first_interval + time_block_intervals)
             factor_group_by_key = {}
             factor_values = []
             longitudinal_group_by_key = {}
@@ -3894,6 +3921,26 @@ def _simulate_dynamic_sequence_block(
                 )
                 action_offsets.append(len(action_kinds))
 
+            # ADC samples are time ordered, so one block covers a contiguous
+            # sample range. Kernels index the window with block-local payloads.
+            block_action_kinds = np.asarray(action_kinds, dtype=np.int8)
+            block_action_payloads = np.array(action_payloads, dtype=np.int64)
+            block_adc = block_action_kinds == ACTION_ADC
+            if np.any(block_adc):
+                adc_first = int(block_action_payloads[block_adc].min())
+                adc_end = int(block_action_payloads[block_adc].max()) + 1
+                block_action_payloads[block_adc] -= adc_first
+            else:
+                adc_first = adc_end = 0
+            parent_signal = np.zeros(
+                (
+                    parent_active_count,
+                    phantom.n_species,
+                    n_rx_coils,
+                    max(1, adc_end - adc_first),
+                ),
+                dtype=np.complex128,
+            )
             kpl_table = (
                 None
                 if native_full_plan_multi_pool
@@ -3903,9 +3950,11 @@ def _simulate_dynamic_sequence_block(
             )
             action_arrays = (
                 np.ascontiguousarray(action_offsets, dtype=np.int32),
-                np.ascontiguousarray(action_kinds, dtype=np.int8),
-                np.ascontiguousarray(action_payloads, dtype=np.int64),
-                np.ascontiguousarray(adc_demodulation, dtype=np.complex128),
+                block_action_kinds,
+                block_action_payloads,
+                np.ascontiguousarray(
+                    all_adc_demodulation[adc_first : max(adc_first + 1, adc_end)]
+                ),
                 np.ascontiguousarray(rx_sensitivities, dtype=np.complex128),
                 np.ascontiguousarray(spin_signal_weights, dtype=np.float64),
                 parent_signal,
@@ -4108,23 +4157,25 @@ def _simulate_dynamic_sequence_block(
                     *action_arrays,
                     worker_threads,
                 )
+            if adc_end > adc_first:
+                window = parent_signal[..., : adc_end - adc_first]
+                if _parent_resolved_signal:
+                    resolved_signal[..., adc_first:adc_end] += window
+                else:
+                    reduced_signal[..., adc_first:adc_end] += window.sum(axis=0)
             native_full_plan_blocks += 1
             native_full_plan_intervals += end_interval - first_interval
             if progress_callback is not None:
                 progress_callback(end_interval, interval_count)
-            if preview_callback is not None:
-                preview_signal = parent_signal.sum(axis=(0, 1))
+            preview_step = end_interval // progress_stride
+            if preview_callback is not None and (
+                preview_step > last_preview_step or end_interval == interval_count
+            ):
+                last_preview_step = preview_step
                 preview_callback(
-                    end_interval / interval_count,
-                    preview_signal[0] if n_rx_coils == 1 else preview_signal,
+                    end_interval / interval_count, combined_signal_snapshot()
                 )
 
-        if not _parent_resolved_signal:
-            reduced = parent_signal.sum(axis=0)
-            if n_rx_coils == 1:
-                species_signal[:] += reduced[:, 0, :]
-            else:
-                species_signal[:] += reduced
         action_cursor = execution_plan.n_actions
         native_rf_fused_preapplied_end = interval_count
         return True
