@@ -548,6 +548,34 @@ def shifted_spectral_spatial_rf_event(
     return shifted
 
 
+def spectral_spatial_refocus_area(
+    rf_event,
+    gradient_event,
+    *,
+    gradient_raster_s: float,
+) -> float:
+    """Return the gradient area that refocuses an SPSP excitation.
+
+    Each subpulse leaves the slice wound to the gradient moment that follows
+    it. The |B1|-weighted mean of that remaining moment is the effective
+    excitation k-space position, so the rephaser must add its negative. For
+    flyback designs this is half a positive lobe, while the pulse's own net
+    area is zero. The result is in the gradient event's channel convention.
+    """
+    gradient = np.asarray(gradient_event.waveform, dtype=float).reshape(-1)
+    signal = np.abs(np.asarray(rf_event.signal, dtype=np.complex128).reshape(-1))
+    if gradient.size == 0 or not np.any(signal > 0):
+        return 0.0
+    gradient_delay_s = float(getattr(gradient_event, "delay", 0.0) or 0.0)
+    edges_s = gradient_delay_s + np.arange(gradient.size + 1) * gradient_raster_s
+    cumulative = np.concatenate(([0.0], np.cumsum(gradient) * gradient_raster_s))
+    rf_times_s = float(getattr(rf_event, "delay", 0.0) or 0.0) + np.asarray(
+        rf_event.t, dtype=float
+    ).reshape(-1)
+    k_future = cumulative[-1] - np.interp(rf_times_s, edges_s, cumulative)
+    return -float(np.sum(signal * k_future) / np.sum(signal))
+
+
 def set_rf_definitions(
     sequence,
     *,

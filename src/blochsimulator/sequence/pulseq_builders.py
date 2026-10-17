@@ -23,6 +23,7 @@ from .rf_pulses import (
     normalize_rf_pulse_type,
     set_rf_definitions,
     shifted_spectral_spatial_rf_event,
+    spectral_spatial_refocus_area,
 )
 from .scanner import ScannerParameters
 from .spectral_spatial import (
@@ -233,6 +234,23 @@ def _remap_gradient_event(event, frame: EncodingFrame, role: str):
     return mapped
 
 
+def _slice_rephase_area(
+    rf_event,
+    gradient_event,
+    frame: EncodingFrame,
+    *,
+    rf_pulse_type: str,
+    gradient_raster_s: float,
+) -> float:
+    """Return the logical partition area that refocuses the excited slice."""
+    if rf_pulse_type == "spectral_spatial":
+        _, sign = frame.axis_and_sign("partition")
+        return sign * spectral_spatial_refocus_area(
+            rf_event, gradient_event, gradient_raster_s=gradient_raster_s
+        )
+    return -logical_gradient_area(gradient_event, frame, "partition") / 2.0
+
+
 def _set_rf_definitions(
     sequence,
     *,
@@ -436,6 +454,12 @@ def make_pulseq_slice_selection(
             tail = np.clip(t - rise - flat, 0.0, fall)
             before += tail - 0.5 * tail**2 / fall if fall else 0.0
             moment = logical_gradient.area - logical_gradient.amplitude * before
+        elif pulse_type == "spectral_spatial":
+            # SPSP subpulses each sit on their own lobe, so the moment after
+            # the overall RF centre does not describe the slice phase.
+            moment = -spectral_spatial_refocus_area(
+                rf, logical_gradient, gradient_raster_s=system.grad_raster_time
+            )
         else:
             waveform = np.asarray(logical_gradient.waveform)
             starts = np.arange(waveform.size) * system.grad_raster_time
@@ -748,7 +772,13 @@ def make_pulseq_csi(
                 pp,
                 encoding_frame,
                 "partition",
-                area=-logical_gradient_area(gz, encoding_frame, "partition") / 2,
+                area=_slice_rephase_area(
+                    rf,
+                    gz,
+                    encoding_frame,
+                    rf_pulse_type=rf_pulse_type,
+                    gradient_raster_s=system.grad_raster_time,
+                ),
                 duration=encoding_duration_s,
                 system=system,
             )
@@ -1114,6 +1144,18 @@ def make_pulseq_bssfp(
 
     ky_areas = (np.arange(n_phase) - n_phase // 2) / fov_y
     kz_areas = (np.arange(n_partition) - n_partition // 2) / fov_z
+    # The SPSP slab is refocused inside the balanced partition gradients.
+    slab_refocus_area = (
+        _slice_rephase_area(
+            rf,
+            rf_select,
+            encoding_frame,
+            rf_pulse_type=rf_pulse_type,
+            gradient_raster_s=system.grad_raster_time,
+        )
+        if rf_select is not None
+        else 0.0
+    )
     rf_phase = wrap_phase_deg(rf_phase_start_deg)
 
     def add_repetition(
@@ -1162,7 +1204,7 @@ def make_pulseq_bssfp(
             pp,
             encoding_frame,
             "partition",
-            area=kz,
+            area=kz + slab_refocus_area,
             duration=encoding_duration_s,
             system=system,
         )
@@ -1170,7 +1212,7 @@ def make_pulseq_bssfp(
             pp,
             encoding_frame,
             "partition",
-            area=-kz,
+            area=-kz - slab_refocus_area,
             duration=encoding_duration_s,
             system=system,
         )
@@ -1473,7 +1515,13 @@ def make_pulseq_epi(
         pp,
         encoding_frame,
         "partition",
-        area=-logical_gradient_area(gz, encoding_frame, "partition") / 2,
+        area=_slice_rephase_area(
+            rf,
+            gz,
+            encoding_frame,
+            rf_pulse_type=rf_pulse_type,
+            gradient_raster_s=system.grad_raster_time,
+        ),
         duration=pre_time,
         system=system,
     )
@@ -1965,7 +2013,13 @@ def make_pulseq_epsi_mge(
         pp,
         encoding_frame,
         "partition",
-        area=-logical_gradient_area(gz, encoding_frame, "partition") / 2.0,
+        area=_slice_rephase_area(
+            rf,
+            gz,
+            encoding_frame,
+            rf_pulse_type=rf_pulse_type,
+            gradient_raster_s=system.grad_raster_time,
+        ),
         duration=encoding_duration_s,
         system=system,
     )
@@ -2465,11 +2519,18 @@ def make_pulseq_flash(
         rf_center, _ = pp.calc_rf_center(rf)
         rf_block_duration = pp.calc_duration(rf, gz)
         logical_slice_area = logical_gradient_area(gz, encoding_frame, "partition")
+        slice_rephase_area = _slice_rephase_area(
+            rf,
+            gz,
+            encoding_frame,
+            rf_pulse_type=rf_pulse_type,
+            gradient_raster_s=system.grad_raster_time,
+        )
         gz_rephase = make_role_trapezoid(
             pp,
             encoding_frame,
             "partition",
-            area=-logical_slice_area / 2.0,
+            area=slice_rephase_area,
             duration=encoding_duration_s,
             system=system,
         )
@@ -2520,6 +2581,7 @@ def make_pulseq_flash(
             rf_center=rf_center,
             rf_block_duration=rf_block_duration,
             logical_slice_area=logical_slice_area,
+            slice_rephase_area=slice_rephase_area,
             gz_rephase=gz_rephase,
             te_delay=te_delay_value,
             actual_te=actual_te_variant,
@@ -2565,6 +2627,7 @@ def make_pulseq_flash(
                 spsp_logical_gz = variant["logical_gz"]
                 rf_center = variant["rf_center"]
                 logical_slice_area = variant["logical_slice_area"]
+                slice_rephase_area = variant["slice_rephase_area"]
                 gz_rephase = variant["gz_rephase"]
                 te_delay_value = variant["te_delay"]
                 tr_delay_value = variant["tr_delay"]
@@ -2628,8 +2691,9 @@ def make_pulseq_flash(
                     pp,
                     encoding_frame,
                     "partition",
+                    # Keep the net moment per TR equal to the spoiler moment.
                     area=(
-                        -logical_slice_area / 2.0
+                        -(logical_slice_area + slice_rephase_area)
                         + spoiler_cycles_per_slice / slice_thickness_m
                     ),
                     duration=spoiler_duration_s,
@@ -3023,7 +3087,13 @@ def make_pulseq_spiral(
         pp,
         encoding_frame,
         "partition",
-        area=-logical_gradient_area(gz, encoding_frame, "partition") / 2.0,
+        area=_slice_rephase_area(
+            rf,
+            gz,
+            encoding_frame,
+            rf_pulse_type=rf_pulse_type,
+            gradient_raster_s=system.grad_raster_time,
+        ),
         duration=rephase_time,
         system=system,
     )

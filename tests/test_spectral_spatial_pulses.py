@@ -258,6 +258,209 @@ def test_spectral_spatial_pulseq_round_trip_compiles(tmp_path):
     )
 
 
+def _gradient_samples(event, times_s):
+    if event is None:
+        return np.zeros_like(times_s)
+    if event.type == "trap":
+        corners = event.delay + np.cumsum(
+            [0.0, event.rise_time, event.flat_time, event.fall_time]
+        )
+        amplitudes = [0.0, event.amplitude, event.amplitude, 0.0]
+    else:
+        corners = event.delay + np.concatenate(([0.0], event.tt, [event.shape_dur]))
+        amplitudes = np.concatenate(([event.first], event.waveform, [event.last]))
+    return np.interp(times_s, corners, amplitudes, left=0.0, right=0.0)
+
+
+def _slice_profile_at_first_echo(sequence, positions_m, raster_s=1e-6):
+    """Rotate spins along the slice axis from the first RF to the first echo.
+
+    Only the slice-axis gradient is played, so the phase across the slice is
+    the excitation phase left after slice refocusing. The first ADC centre
+    lies after every rephaser; for radial spokes along the slab axis it is
+    also where the readout prephaser has been undone. Sequences without an
+    ADC are followed to their end.
+    """
+    block_ids = list(sequence.block_events)
+    blocks = [sequence.get_block(block_id) for block_id in block_ids]
+    first = next(
+        index
+        for index, block in enumerate(blocks)
+        if block.rf is not None and np.any(np.abs(block.rf.signal) > 0)
+    )
+    axis = next(
+        channel
+        for channel in "xyz"
+        if getattr(blocks[first], f"g{channel}") is not None
+    )
+    magnetization = np.zeros((positions_m.size, 3))
+    magnetization[:, 2] = 1.0
+    for block in blocks[first:]:
+        duration_s = float(block.block_duration)
+        if block.adc is not None:
+            duration_s = block.adc.delay + block.adc.num_samples * block.adc.dwell / 2
+        times_s = (np.arange(int(round(duration_s / raster_s))) + 0.5) * raster_s
+        b1_hz = np.zeros(times_s.size, dtype=complex)
+        if block.rf is not None:
+            rf_times_s = block.rf.delay + block.rf.t
+            b1_hz = np.interp(
+                times_s, rf_times_s, block.rf.signal.real, left=0.0, right=0.0
+            ) + 1j * np.interp(
+                times_s, rf_times_s, block.rf.signal.imag, left=0.0, right=0.0
+            )
+        gradient_hz_per_m = _gradient_samples(getattr(block, f"g{axis}"), times_s)
+        for b1, gradient in zip(b1_hz, gradient_hz_per_m):
+            field = (
+                2.0
+                * np.pi
+                * np.column_stack(
+                    (
+                        np.full(positions_m.size, b1.real),
+                        np.full(positions_m.size, b1.imag),
+                        gradient * positions_m,
+                    )
+                )
+            )
+            norm = np.linalg.norm(field, axis=1, keepdims=True)
+            angle = norm * raster_s
+            unit = np.divide(field, norm, out=np.zeros_like(field), where=norm > 0)
+            magnetization = (
+                magnetization * np.cos(angle)
+                + np.cross(magnetization, unit) * np.sin(angle)
+                + unit
+                * np.sum(unit * magnetization, axis=1, keepdims=True)
+                * (1.0 - np.cos(angle))
+            )
+        if block.adc is not None:
+            break
+    return magnetization[:, 0] + 1j * magnetization[:, 1]
+
+
+def _assert_flat_slice_phase(transverse, tolerance_rad=0.05):
+    selected = np.abs(transverse) > 0.5 * np.max(np.abs(transverse))
+    assert np.count_nonzero(selected) > 10
+    phase = np.unwrap(np.angle(transverse[selected]))
+    assert np.ptp(phase) < tolerance_rad, f"slice phase spans {np.ptp(phase):.3f} rad"
+
+
+def test_spectral_spatial_slice_rephaser_flattens_simulated_slice_phase(tmp_path):
+    from blochsimulator import BlochSimulator
+    from blochsimulator.phantom import Phantom
+
+    pulse = _test_pulse()
+    sequence = make_pulseq_slice_selection(
+        rf_pulse_type="spectral_spatial",
+        rf_spectral_spatial_pulse=pulse.to_dict(),
+        slice_thickness_m=30e-3,
+        flip_angle_deg=30.0,
+        rephase=True,
+        nucleus="H1",
+    )
+    path = tmp_path / "spsp_rephased.seq"
+    sequence.write(str(path), v141_compat=True)
+    shape = (1, 1, 121)
+    phantom = Phantom(
+        shape, (0.01, 0.01, 0.06), np.full(shape, 1e6), np.full(shape, 1e6)
+    )
+    result = BlochSimulator(use_parallel=False).simulate_sequence(
+        load_pulseq(path), phantom, simulation_timestep_s=2e-6
+    )
+
+    # The flyback lobes leave half a lobe of moment after every subpulse,
+    # although the pulse's net gradient area is zero.
+    metrics = pulse.design_metadata["metrics"]
+    lobe = pulse.gradient_hz_per_m[: int(metrics["positive_lobe_samples"])]
+    assert sequence.get_block(2).gz.area == pytest.approx(
+        np.sum(lobe) * pulse.gradient_raster_s / 2.0, rel=1e-2
+    )
+    _assert_flat_slice_phase(result.mx[0, 0] + 1j * result.my[0, 0])
+
+
+@pytest.mark.parametrize(
+    "builder,parameters",
+    [
+        (make_pulseq_slice_selection, {"slice_thickness_m": 30e-3, "rephase": True}),
+        (make_pulseq_csi, {"matrix": (1, 1), "slice_thickness_m": 30e-3}),
+        (make_pulseq_epi, {"matrix": (4, 4), "slice_thickness_m": 30e-3}),
+        (
+            make_pulseq_epsi_mge,
+            {"matrix": (4, 4), "echoes": 3, "slice_thickness_m": 30e-3},
+        ),
+        (make_pulseq_flash, {"matrix": (4, 4), "slice_thickness_m": 30e-3}),
+        (make_pulseq_spiral, {"matrix": (4, 4), "slice_thickness_m": 30e-3}),
+        (
+            make_pulseq_bssfp,
+            {
+                "fov_m": (0.1, 0.1, 30e-3),
+                "matrix": (2, 2, 1),
+                "repetition_time_s": 20e-3,
+                "dummy_repetitions": 0,
+                "use_alpha_half": False,
+            },
+        ),
+        (
+            make_pulseq_spectral_selective_bssfp,
+            {
+                "fov_m": (0.1, 0.1, 30e-3),
+                "matrix": (2, 2, 1),
+                "target_frequency_offsets_hz": (0.0,),
+                "receiver_frequency_offsets_hz": (0.0,),
+                "target_metabolite_names": ("Target",),
+                "flip_angle_deg": (30.0,),
+                "repetition_time_s": 20e-3,
+                "use_alpha_half": False,
+            },
+        ),
+        (
+            make_pulseq_me_bssfp,
+            {
+                "fov_m": (0.1, 0.1, 30e-3),
+                "matrix": (2, 2, 1),
+                "echoes": 3,
+                "repetition_time_s": 30e-3,
+                "encoding_duration_s": 1e-3,
+                "use_alpha_half": False,
+            },
+        ),
+        (
+            make_pulseq_radial_me_bssfp,
+            {
+                "fov_m": 30e-3,
+                "base_resolution": 4,
+                "readout_oversampling": 1,
+                "spokes_per_measurement": 1,
+                "measurements": 1,
+                "echoes": 3,
+                "repetition_time_s": 30e-3,
+                "prephaser_duration_s": 1e-3,
+                "use_alpha_half": False,
+                "use_tip_back": False,
+            },
+        ),
+    ],
+    ids=lambda value: getattr(value, "__name__", ""),
+)
+def test_every_builder_refocuses_spectral_spatial_slice_phase(builder, parameters):
+    pulse = _test_pulse().to_dict()
+    if builder is make_pulseq_spectral_selective_bssfp:
+        rf = {
+            "spectral_rf_pulse_type": "spectral_spatial",
+            "spectral_rf_spectral_spatial_pulse": pulse,
+        }
+    else:
+        rf = {
+            "rf_pulse_type": "spectral_spatial",
+            "rf_spectral_spatial_pulse": pulse,
+            "flip_angle_deg": 30.0,
+        }
+    sequence = builder(**parameters, **rf, nucleus="H1")
+    assert sequence.check_timing()[0]
+
+    transverse = _slice_profile_at_first_echo(sequence, np.linspace(-0.03, 0.03, 121))
+
+    _assert_flat_slice_phase(transverse)
+
+
 def test_metabolite_profiles_run_for_a_predefined_peak_set(qt_application):
     dialog = SpectralSpatialPulseDesignerDialog(
         scanner_parameters=ScannerParameters(),

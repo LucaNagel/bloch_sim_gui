@@ -19,6 +19,7 @@ from .rf_pulses import (
     make_pulseq_rf_events,
     normalize_rf_pulse_type,
     set_rf_definitions,
+    spectral_spatial_refocus_area,
 )
 from .scanner import ScannerParameters
 from .spectral_spatial import SpectralSpatialPulse
@@ -225,6 +226,15 @@ def _remap_select_gradient(event, frame: EncodingFrame):
     if hasattr(mapped, "waveform"):
         mapped.waveform = sign * np.asarray(mapped.waveform)
     return mapped
+
+
+def _slab_refocus_area(rf_event, select_event, system) -> float:
+    """Return the physical slab-axis area that refocuses an SPSP excitation."""
+    if select_event is None:
+        return 0.0
+    return spectral_spatial_refocus_area(
+        rf_event, select_event, gradient_raster_s=system.grad_raster_time
+    )
 
 
 def make_pulseq_spectral_selective_bssfp(
@@ -497,6 +507,12 @@ def make_pulseq_spectral_selective_bssfp(
         rf_selects = (None,) * len(rfs)
         alpha_halves = tuple(rf_events[1 + target_count :])
         alpha_selects = (None,) * len(alpha_halves)
+    # SPSP slabs are refocused inside the balanced partition gradients.
+    _, partition_sign = encoding_frame.axis_and_sign("partition")
+    slab_refocus_areas = tuple(
+        partition_sign * _slab_refocus_area(rf, select, system)
+        for rf, select in zip(rfs, rf_selects)
+    )
 
     dwell = _adc_dwell_for_bandwidth(
         sample_count=n_read,
@@ -538,7 +554,8 @@ def make_pulseq_spectral_selective_bssfp(
     encoding_areas = (
         abs(readout_area) / 2,
         float(np.max(np.abs(ky_areas))),
-        float(np.max(np.abs(kz_areas))),
+        float(np.max(np.abs(kz_areas)))
+        + max((abs(area) for area in slab_refocus_areas), default=0.0),
     )
     minimum_encoding_duration = max(
         pp.calc_duration(
@@ -702,6 +719,7 @@ def make_pulseq_spectral_selective_bssfp(
         target_index = repetition % len(target_offsets)
         rf = rfs[target_index]
         rf_select = rf_selects[target_index]
+        slab_refocus_area = slab_refocus_areas[target_index]
         rf_timing = rf
         target_offset = target_offsets[target_index]
         rf_offset = target_offset + spectral_rf_frequency_offset_hz
@@ -830,7 +848,7 @@ def make_pulseq_spectral_selective_bssfp(
                     pp,
                     encoding_frame,
                     "partition",
-                    area=float(kz),
+                    area=float(kz) + slab_refocus_area,
                     duration=encoding_duration_s,
                     system=system,
                 )
@@ -846,7 +864,7 @@ def make_pulseq_spectral_selective_bssfp(
                     pp,
                     encoding_frame,
                     "partition",
-                    area=-float(kz),
+                    area=-float(kz) - slab_refocus_area,
                     duration=encoding_duration_s,
                     system=system,
                 )
@@ -1233,6 +1251,8 @@ def make_pulseq_me_bssfp(
         rf, alpha_half = rf_events
         rf_select = None
         alpha_select = None
+    _, partition_sign = encoding_frame.axis_and_sign("partition")
+    slab_refocus_area = partition_sign * _slab_refocus_area(rf, rf_select, system)
     rf_center, _ = pp.calc_rf_center(rf)
     rf_center_from_start = rf.delay + rf_center
     rf_block_duration = (
@@ -1411,7 +1431,7 @@ def make_pulseq_me_bssfp(
             pp,
             encoding_frame,
             "partition",
-            area=kz,
+            area=kz + slab_refocus_area,
             duration=encoding_duration_s,
             system=system,
         )
@@ -1427,7 +1447,7 @@ def make_pulseq_me_bssfp(
             pp,
             encoding_frame,
             "partition",
-            area=-kz,
+            area=-kz - slab_refocus_area,
             duration=encoding_duration_s,
             system=system,
         )
@@ -1865,6 +1885,11 @@ def make_pulseq_radial_me_bssfp(
         rf_select = None
         alpha_select = None
         tip_back_select = None
+    slab_refocus_vector = np.zeros(3)
+    if rf_select is not None:
+        slab_refocus_vector["xyz".index(str(rf_select.channel))] = _slab_refocus_area(
+            rf, rf_select, system
+        )
     rf_center, _ = pp.calc_rf_center(rf)
     rf_center_from_start = rf.delay + rf_center
     rf_block_duration = pp.calc_duration(
@@ -1981,7 +2006,7 @@ def make_pulseq_radial_me_bssfp(
             prephasers = _vector_trapezoids(
                 pp,
                 system,
-                -0.5 * readout_total_area * direction,
+                -0.5 * readout_total_area * direction + slab_refocus_vector,
                 duration_s=prephaser_duration_s,
             )
             sequence.add_block(*prephasers)
@@ -2022,7 +2047,7 @@ def make_pulseq_radial_me_bssfp(
             postphasers = _vector_trapezoids(
                 pp,
                 system,
-                -0.5 * readout_total_area * direction,
+                -0.5 * readout_total_area * direction - slab_refocus_vector,
                 duration_s=prephaser_duration_s,
             )
             sequence.add_block(*postphasers)
