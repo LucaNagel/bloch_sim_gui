@@ -4,7 +4,9 @@
 Goal
 ----
 Provide one reproducible entry point for measuring sequence runtime, crusher
-convergence, phantom-resolution convergence, and simulation-kernel performance.
+convergence, phantom-resolution convergence, RF time-step accuracy, phantom
+oversampling relative to the acquisition matrix, and simulation-kernel
+performance.
 The runner can execute one group or the complete suite and writes each group's
 raw records to CSV and JSON.
 
@@ -25,7 +27,8 @@ Reading the output
 ------------------
 ``simulation_time_s`` measures the simulator call; sequence setup is recorded
 separately. Accuracy fields use the relevant reference for their benchmark:
-ideal crushing, the finest requested phantom grid, or the reference kernel.
+ideal crushing, the finest requested phantom grid, the reference RF time
+step, or the reference kernel.
 Values close to one indicate high similarity; relative L2 errors close to zero
 indicate close agreement. Always check requested versus actual kernel and any
 fallback reason before interpreting accelerator timings.
@@ -38,8 +41,13 @@ import argparse
 try:
     from .benchmark_crushers import add_crusher_arguments, run as run_crushers
     from .benchmark_kernels import add_kernel_arguments, run as run_kernels
+    from .benchmark_phantom_oversampling import (
+        add_oversampling_arguments,
+        run as run_oversampling,
+    )
     from .benchmark_resolution import add_resolution_arguments, run as run_resolution
     from .benchmark_sequences import add_sequence_arguments, run as run_sequences
+    from .benchmark_timestep import add_timestep_arguments, run as run_timestep
     from .common import (
         SEQUENCE_NAMES,
         add_common_arguments,
@@ -50,11 +58,16 @@ try:
 except ImportError:  # Allow: python benchmarks/run_benchmarks.py
     from benchmark_crushers import add_crusher_arguments, run as run_crushers  # type: ignore
     from benchmark_kernels import add_kernel_arguments, run as run_kernels  # type: ignore
+    from benchmark_phantom_oversampling import (  # type: ignore
+        add_oversampling_arguments,
+        run as run_oversampling,
+    )
     from benchmark_resolution import (  # type: ignore
         add_resolution_arguments,
         run as run_resolution,
     )
     from benchmark_sequences import add_sequence_arguments, run as run_sequences  # type: ignore
+    from benchmark_timestep import add_timestep_arguments, run as run_timestep  # type: ignore
     from common import (  # type: ignore
         SEQUENCE_NAMES,
         add_common_arguments,
@@ -64,7 +77,15 @@ except ImportError:  # Allow: python benchmarks/run_benchmarks.py
     )
 
 
-BENCHMARK_NAMES = ("sequences", "crushers", "resolution", "kernels", "all")
+BENCHMARK_NAMES = (
+    "sequences",
+    "crushers",
+    "resolution",
+    "timestep",
+    "oversampling",
+    "kernels",
+    "all",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -86,6 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_sequence_arguments(parser)
     add_crusher_arguments(parser)
     add_resolution_arguments(parser)
+    add_timestep_arguments(parser)
+    add_oversampling_arguments(parser)
     add_kernel_arguments(parser)
     return parser
 
@@ -93,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     if args.list:
-        print("Benchmark groups: sequences, crushers, resolution, kernels, all")
+        print("Benchmark groups: " + ", ".join(BENCHMARK_NAMES))
         print("Sequences: " + ", ".join(SEQUENCE_NAMES))
         return 0
 
@@ -112,6 +135,18 @@ def main(argv=None) -> int:
         resolution_records = run_resolution(args, output_dir=output_dir)
         print_saved_results(
             *write_records(output_dir, "resolution_benchmarks", resolution_records)
+        )
+    if args.benchmark in {"timestep", "all"}:
+        timestep_records = run_timestep(args, output_dir=output_dir)
+        print_saved_results(
+            *write_records(output_dir, "timestep_benchmarks", timestep_records)
+        )
+    if args.benchmark in {"oversampling", "all"}:
+        oversampling_records = run_oversampling(args, output_dir=output_dir)
+        print_saved_results(
+            *write_records(
+                output_dir, "phantom_oversampling_benchmarks", oversampling_records
+            )
         )
     if args.benchmark in {"kernels", "all"}:
         kernel_records = run_kernels(args, output_dir=output_dir)

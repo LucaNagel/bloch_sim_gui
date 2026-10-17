@@ -19,6 +19,10 @@ Each benchmark answers a different question:
   reproduce ideal transverse spoiling, and how many subvoxel spins are needed?
 * ``resolution``: At what phantom grid does the received signal and reconstructed
   image stop changing materially for a fixed 2D FLASH acquisition?
+* ``timestep``: How much accuracy is lost, and how much runtime saved, with a
+  coarser RF simulation time step, and how does this depend on the RF pulse?
+* ``oversampling``: Does a phantom grid of 1x, 2x, 4x, or 8x the acquisition
+  matrix change signal, images, and ROI values, and what does it cost?
 * ``kernels``: Which numerical implementation is fastest for the same physical
   model, and does it remain sufficiently close to its reference implementation?
 
@@ -61,6 +65,8 @@ Run these commands from the repository root::
     python -m benchmarks.run_benchmarks --benchmark sequences
     python -m benchmarks.run_benchmarks --benchmark crushers
     python -m benchmarks.run_benchmarks --benchmark resolution
+    python -m benchmarks.run_benchmarks --benchmark timestep
+    python -m benchmarks.run_benchmarks --benchmark oversampling
     python -m benchmarks.run_benchmarks --benchmark kernels
     python -m benchmarks.run_benchmarks --benchmark all
 
@@ -76,6 +82,8 @@ The sub-benchmarks are also directly executable::
     python -m benchmarks.benchmark_sequences --sequences ss_bssfp me_bssfp
     python -m benchmarks.benchmark_crushers --gradient-z-spins 1 5 9
     python -m benchmarks.benchmark_resolution --resolution-scales 0.25 0.5 1 2
+    python -m benchmarks.benchmark_timestep --timesteps-us 1 5 10
+    python -m benchmarks.benchmark_phantom_oversampling --oversampling-ratios 1 2 4
     python -m benchmarks.benchmark_kernels
     python -m benchmarks.benchmark_flash_spoiler_train --quick
 
@@ -223,6 +231,55 @@ sequence.
 CSV/JSON output reports runtime, active/total voxels, voxel dimensions,
 frame-wise and pool-wise signal norms, temporal signal change, and signal/image
 similarity to the finest requested phantom grid.
+
+RF time-step comparison
+-----------------------
+
+``simulation_timestep_s`` (the GUI presets Accurate 1 us, Balanced 5 us, and
+Fast 10 us) only subdivides RF-active intervals. Free precession, gradients
+outside RF pulses, and ADC sampling are exact at every time step, so this
+benchmark isolates the RF integration error. It needs no phantom files: six
+generated sequences cover a block pulse, a slice-selective sinc pulse,
+Gaussian spectral pulses (SS-bSSFP), a 3 ms CSI sinc pulse, and a
+lactate-selective spectral-spatial pulse, simulated on the analytic
+two-container phantom from ``benchmarks/synthetic_phantoms.py`` in a static
+and a dynamic (kPL plus inflow) variant::
+
+    python -m benchmarks.benchmark_timestep \
+      --timesteps-us 1 2 5 10 20 50 \
+      --timestep-sequences flash_sinc ss_bssfp flash_spsp \
+      --repeats 3
+
+Every candidate is compared with the same simulation at
+``--reference-timestep-us`` (default 1 us, the native RF raster of the
+generated sequences). Your own sequences and phantoms can be compared with
+``--sequence-files`` (optionally ``--only-sequence-files``) and
+``--timestep-phantom-files``. Records contain the median runtime, speed-up,
+compiled interval count, signal error, and per-metabolite errors relative to
+the total signal (``pool_<name>_error_vs_signal``). The standalone command
+uses the ``native_parallel`` dynamic kernel like the GUI.
+
+Phantom-oversampling comparison
+-------------------------------
+
+This benchmark asks whether a phantom grid finer than the acquisition matrix
+matters. The analytic two-container object is rasterized with exact
+partial-volume fractions at ``ratio x`` the acquisition matrix, so a finer grid
+describes the same object more accurately. 2D FLASH (16x16) and CSI (8x8)
+scale X/Y and keep ``--oversampling-slice-planes`` Z planes; 3D bSSFP (8x8x8)
+scales all three axes. The largest ratio is the reference::
+
+    python -m benchmarks.benchmark_phantom_oversampling \
+      --oversampling-ratios 1 2 4 8 \
+      --oversampling-sequences flash csi bssfp \
+      --repeats 3
+
+Records contain runtime, phantom and active voxel counts, signal and complex
+image errors relative to the reference, and the mean magnitude in the core of
+each container per metabolite (``roi_<A|B>_<metabolite>_mean``). The
+``max_roi_deviation`` column is the largest ROI change relative to the
+brightest container ROI. Crushing is ideal, so the phantom grid is the only
+intravoxel sampling in this comparison.
 
 Kernel comparison
 -----------------

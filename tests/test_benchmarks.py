@@ -39,8 +39,24 @@ from benchmarks.benchmark_resolution import (
     make_resolution_slice,
     make_resolution_volume,
 )
+from benchmarks.benchmark_phantom_oversampling import (
+    build_parser as build_oversampling_parser,
+    oversampled_shape,
+    run as run_oversampling,
+)
 from benchmarks.benchmark_sequences import build_parser as build_sequence_parser
+from benchmarks.benchmark_timestep import (
+    TIMESTEP_SEQUENCES,
+    build_parser as build_timestep_parser,
+    run as run_timestep,
+)
 from benchmarks.run_benchmarks import build_parser as build_runner_parser
+from benchmarks.synthetic_phantoms import (
+    CONTAINER_HALF_LENGTH_M,
+    CONTAINER_RADIUS_M,
+    container_fractions,
+    make_synthetic_phantom,
+)
 from blochsimulator.dynamic_phantom import DynamicSpectralPhantom
 from blochsimulator.spectral_phantom import SpectralPhantom
 
@@ -53,6 +69,8 @@ from blochsimulator.spectral_phantom import SpectralPhantom
         (build_crusher_parser, "how many subvoxel spins"),
         (build_resolution_parser, "phantom discretization"),
         (build_kernel_parser, "speed and numerical agreement"),
+        (build_timestep_parser, "how much accuracy is lost"),
+        (build_oversampling_parser, "finer than the acquisition matrix"),
     ],
 )
 def test_benchmark_help_explains_goal_usage_and_results(parser_builder, goal_text):
@@ -329,3 +347,73 @@ def test_kernel_benchmark_prints_physical_and_implementation_differences(capsys)
     assert "strict_reference: General rotation-matrix" in output
     assert "reference: Direct allocation-heavy NumPy" in output
     assert "native_parallel: Native dynamic blocks with OpenMP" in output
+
+
+@pytest.mark.parametrize("shape", [(8, 8, 8), (16, 16, 32), (32, 24, 10)])
+def test_synthetic_phantom_keeps_container_volume_on_every_grid(shape):
+    phantom = make_synthetic_phantom("static", shape)
+    voxel_volume = float(np.prod(np.asarray(phantom.fov) / np.asarray(shape)))
+    expected = np.pi * CONTAINER_RADIUS_M**2 * 2 * CONTAINER_HALF_LENGTH_M
+
+    for fraction in container_fractions(shape):
+        assert fraction.sum() * voxel_volume == pytest.approx(expected, rel=0.02)
+    assert isinstance(phantom, SpectralPhantom)
+    assert isinstance(make_synthetic_phantom("dynamic", shape), DynamicSpectralPhantom)
+
+
+def test_timestep_benchmark_compares_with_reference_step(tmp_path):
+    args = build_timestep_parser().parse_args(
+        [
+            "--timesteps-us",
+            "10",
+            "--timestep-sequences",
+            "flash_block",
+            "--timestep-phantoms",
+            "static",
+            "--timestep-phantom-matrix",
+            "4",
+            "4",
+            "4",
+        ]
+    )
+
+    records = run_timestep(args, output_dir=tmp_path)
+
+    assert args.dynamic_kernel == "native_parallel"
+    assert "flash_spsp" in TIMESTEP_SEQUENCES
+    assert [record["timestep_us"] for record in records] == [1.0, 10.0]
+    reference, candidate = records
+    assert reference["is_reference"]
+    assert reference["signal_relative_l2_error"] == 0.0
+    assert 0.0 < candidate["signal_relative_l2_error"] < 1e-3
+    assert candidate["compiled_intervals"] < reference["compiled_intervals"]
+    assert "pool_lactate_error_vs_signal" in candidate
+
+
+def test_oversampling_benchmark_scales_phantom_with_acquisition_matrix(tmp_path):
+    assert oversampled_shape("flash", 4, 32) == (64, 64, 32)
+    assert oversampled_shape("bssfp", 2, 32) == (16, 16, 16)
+    args = build_oversampling_parser().parse_args(
+        [
+            "--oversampling-ratios",
+            "1",
+            "2",
+            "--oversampling-sequences",
+            "flash",
+            "--oversampling-phantoms",
+            "static",
+            "--oversampling-slice-planes",
+            "8",
+        ]
+    )
+
+    records = run_oversampling(args, output_dir=tmp_path)
+
+    by_ratio = {record["oversampling_ratio"]: record for record in records}
+    assert by_ratio[2]["is_reference"]
+    assert by_ratio[2]["phantom_shape"] == "32x32x8"
+    assert by_ratio[2]["image_relative_l2_error"] == 0.0
+    assert by_ratio[1]["phantom_shape"] == "16x16x8"
+    assert by_ratio[1]["image_relative_l2_error"] > 0.0
+    assert by_ratio[1]["max_roi_deviation"] < 0.2
+    assert {"roi_A_pyruvate_mean", "roi_B_lactate_mean"} <= set(by_ratio[1])

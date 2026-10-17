@@ -354,6 +354,119 @@ at least five timed repetitions, environment and loaded-extension identity,
 plan/build time, error metrics, and RSS; do not infer a speed-up from CPU
 utilization alone.
 
+### Choosing the RF Time Step and Phantom Grid
+
+Two settings trade accuracy for runtime: the RF simulation time step
+(`simulation_timestep_s`, GUI presets Accurate 1 µs, Balanced 5 µs, Fast 10 µs)
+and how finely the phantom is sampled relative to the acquisition matrix. Two
+self-contained benchmarks measure both on an analytic two-container phantom
+(`benchmarks/synthetic_phantoms.py`, pyruvate/lactate, ±15 Hz B0 gradient), so
+they need no local phantom files. The tables below were measured on an Apple M3
+(8 cores) with the `native_parallel` dynamic kernel. Errors are deterministic;
+runtimes are medians of three runs and only indicative.
+
+#### RF time step
+
+The time step only subdivides intervals in which an RF pulse plays. RF and
+gradient waveforms are averaged over each step, while free precession,
+gradients outside RF pulses, and ADC sampling stay exact. The error therefore
+depends almost entirely on the RF pulse, not on the sequence around it.
+
+Relative signal error against 1 µs (the larger value of the static and dynamic
+phantom):
+
+| Sequence (RF pulse)                          | 2 µs     | 5 µs     | 10 µs    | 20 µs    | 50 µs  |
+|----------------------------------------------|----------|----------|----------|----------|--------|
+| 3D bSSFP (1 ms block)                        | < 0.001% | < 0.001% | 0.002%   | 0.003%   | 0.009% |
+| 2D FLASH (0.5 ms block)                      | < 0.001% | 0.001%   | 0.006%   | 0.02%    | 0.15%  |
+| 2D FID-CSI (3 ms slice-selective sinc)       | < 0.001% | 0.002%   | 0.006%   | 0.02%    | 0.12%  |
+| 2D FLASH (2 ms slice-selective sinc)         | < 0.001% | 0.004%   | 0.016%   | 0.06%    | 0.37%  |
+| 3D SS-bSSFP (Gaussian spectral pulses)       | 0.03%    | 0.26%    | 1.1%     | 4.4%     | 27%    |
+| 2D FLASH (lactate spectral-spatial, 26 ms)   | 1.3%     | 5.1%     | 11%      | (0.4%)\* | 112%   |
+
+Speed-up against 1 µs (dynamic phantom, 16×16×32 grid):
+
+| Sequence       | Runtime at 1 µs | 2 µs | 5 µs | 10 µs | 20 µs | 50 µs |
+|----------------|-----------------|------|------|-------|-------|-------|
+| 3D bSSFP       | 1.7 s           | ×1.9 | ×3.7 | ×5.4  | ×8.1  | ×11   |
+| 2D FLASH block | 0.36 s          | ×1.6 | ×2.5 | ×3.4  | ×4.3  | ×5.5  |
+| 2D FID-CSI     | 7.5 s           | ×1.9 | ×4.0 | ×6.5  | ×9.5  | ×13   |
+| 2D FLASH sinc  | 1.3 s           | ×1.8 | ×3.6 | ×5.4  | ×8.0  | ×12   |
+| 3D SS-bSSFP    | 4.2 s           | ×1.9 | ×4.2 | ×7.2  | ×11   | ×17   |
+| 2D FLASH SPSP  | 16 s            | ×1.8 | ×3.3 | ×5.9  | ×11   | ×20   |
+
+\* The small 20 µs error of the spectral-spatial pulse is an accidental
+cancellation, not convergence; do not rely on it.
+
+Recommendations:
+
+- Block, sinc, and CSI excitation pulses: **10 µs** ("Fast") keeps the error
+  below 0.02% and is 3–7× faster. Even 20 µs stays below 0.1%.
+- Spectrally selective pulses (SS-bSSFP, Gaussian): **5 µs** ("Balanced")
+  stays below 0.3%; 10 µs costs about 1%.
+- Spectral-spatial (SPSP) pulses: **1 µs** ("Accurate"). Their many short
+  sub-pulses under an oscillating slice gradient make the error grow roughly
+  linearly with the step, so even 2 µs costs about 1%.
+- For other pulses, the error grows roughly with the square of the time step:
+  halving the step reduces the error about fourfold.
+
+#### Phantom grid relative to the acquisition matrix
+
+The same continuous object is sampled with exact partial-volume fractions on
+grids of 1×, 2×, 4×, and 8× the acquisition matrix (2D sequences refine X/Y,
+3D bSSFP all three axes). The 8× grid is the reference. Crushing is ideal, so
+the phantom grid is the only intravoxel sampling. The "ROI" value is the mean
+magnitude in the core of each container, per metabolite, relative to the
+brightest ROI.
+
+| Sequence (matrix)   | Phantom grid | Image error | ROI deviation | Runtime (dynamic) |
+|---------------------|--------------|-------------|---------------|-------------------|
+| 2D FLASH (16×16)    | 1×           | 12%         | 2.6%          | 1.0 s             |
+|                     | 2×           | 2.8%        | 0.56%         | 2.4 s             |
+|                     | 4×           | 0.44%       | 0.05%         | 10 s              |
+|                     | 8× (ref.)    | –           | –             | 86 s              |
+| 2D FID-CSI (8×8)    | 1×           | 25%         | 14%           | 1.8 s             |
+|                     | 2×           | 3.8%        | 2.0%          | 1.9 s             |
+|                     | 4×           | 1.0%        | 0.52%         | 5.0 s             |
+|                     | 8× (ref.)    | –           | –             | 20 s              |
+| 3D bSSFP (8×8×8)    | 1×           | 20%         | 15%           | 0.33 s            |
+|                     | 2×           | 3.3%        | 2.1%          | 0.62 s            |
+|                     | 4×           | 0.70%       | 0.55%         | 1.5 s             |
+|                     | 8× (ref.)    | –           | –             | 14 s              |
+
+A phantom on the acquisition grid (1×) has one isochromat per voxel. It misses
+the signal decay across each voxel, sharp container edges (partial volume), and
+the resulting Gibbs ringing, so coarse matrices such as 8×8 CSI change ROI
+values by 10–15%. Recommendations:
+
+- Use at least **2×** the acquisition matrix (ROI values within about 2%).
+- Use **4×** for quantitative ROI values or metabolite ratios (within about
+  0.5%). Finer grids rarely pay off: 8× costs about 4–10× more than 4×.
+- The cost grows with the number of phantom voxels: ×4 per refinement step in
+  2D and ×8 in 3D. CSI is an exception at small grids because its many RF and
+  ADC intervals dominate the runtime.
+
+#### Running the benchmarks yourself
+
+```bash
+python -m benchmarks.run_benchmarks --benchmark timestep
+python -m benchmarks.run_benchmarks --benchmark oversampling
+```
+
+The standalone modules reproduce the tables above and accept your own files:
+
+```bash
+python -m benchmarks.benchmark_timestep --repeats 3
+python -m benchmarks.benchmark_timestep --sequence-files my.seq \
+  --only-sequence-files --timestep-phantom-files my_phantom.npz
+python -m benchmarks.benchmark_phantom_oversampling --repeats 3
+```
+
+Both write CSV/JSON records to a timestamped directory below
+`exports/benchmarks/` (or `--output-dir`); see
+[`benchmarks/README.rst`](../benchmarks/README.rst) for all options and
+metric definitions.
+
 ### Mouse Perfusion: Current Transport Semantics
 
 `MousePerfusionConfig.fov_m` and `MousePerfusionConfig.mouse_size_m` are
