@@ -309,6 +309,9 @@ class SettingsDialog(QDialog):
         simulation_form.addRow(
             "RF-active simulation time step:", self.sequence_timestep_us_spin
         )
+        self.sequence_timestep_control_label = simulation_form.labelForField(
+            self.sequence_timestep_us_spin
+        )
 
         detected_threads = max(1, int(detected_thread_count or 1))
         self.thread_mode_combo = QComboBox()
@@ -332,6 +335,9 @@ class SettingsDialog(QDialog):
             "Native worker count used when CPU thread selection is manual."
         )
         simulation_form.addRow("Manual thread count:", self.manual_thread_count_spin)
+        self.manual_thread_count_control_label = simulation_form.labelForField(
+            self.manual_thread_count_spin
+        )
 
         kernel_capabilities = detect_kernel_capabilities()
         self.sequence_kernel_combo = QComboBox()
@@ -440,6 +446,7 @@ class SettingsDialog(QDialog):
         )
         simulation_form.addRow("Subvoxel sampling:", sampling_field)
         self.subvoxel_control_labels = [simulation_form.labelForField(sampling_field)]
+        self.subvoxel_control_fields = [sampling_field]
 
         counts = tuple(subvoxel_spin_counts)
         if len(counts) != 3:
@@ -487,6 +494,7 @@ class SettingsDialog(QDialog):
             self.subvoxel_control_labels.append(
                 simulation_form.labelForField(spin_field)
             )
+            self.subvoxel_control_fields.append(spin_field)
         if loaded_pulseq_recommendation is not None:
             recommendation_note = str(
                 loaded_pulseq_recommendation.get("detail", "")
@@ -643,6 +651,7 @@ class SettingsDialog(QDialog):
             "Amount of currently available RAM that must remain unused by the simulation."
         )
         form.addRow("Keep free:", self.reserve_spin)
+        self.memory_reserve_control_label = form.labelForField(self.reserve_spin)
 
         self.limit_spin = QDoubleSpinBox()
         self.limit_spin.setObjectName("memory_limit_gib")
@@ -655,6 +664,7 @@ class SettingsDialog(QDialog):
             "Maximum estimated RAM allocation permitted for one simulation."
         )
         form.addRow("Maximum per simulation:", self.limit_spin)
+        self.memory_limit_control_label = form.labelForField(self.limit_spin)
 
         self.animation_memory_budget_spin = QDoubleSpinBox()
         self.animation_memory_budget_spin.setObjectName("animation_memory_budget_mib")
@@ -863,18 +873,24 @@ class SettingsDialog(QDialog):
         preset_values = {key: value for _, key, value in self.SEQUENCE_TIMESTEP_PRESETS}
         if preset != "custom":
             self.sequence_timestep_us_spin.setValue(preset_values[preset])
-        self.sequence_timestep_us_spin.setEnabled(preset == "custom")
-        self.manual_thread_count_spin.setEnabled(self.thread_mode() == "manual")
+        self._set_control_enabled(
+            self.sequence_timestep_us_spin,
+            self.sequence_timestep_control_label,
+            preset == "custom",
+        )
+        self._set_control_enabled(
+            self.manual_thread_count_spin,
+            self.manual_thread_count_control_label,
+            self.thread_mode() == "manual",
+        )
         enabled = self.sequence_spoiler_mode() == "gradient"
         if not enabled:
             for spin in self.subvoxel_spin_count_spins:
                 spin.setValue(1)
-        for spin in self.subvoxel_spin_count_spins:
-            spin.setEnabled(enabled)
-        self.subvoxel_sampling_method_combo.setEnabled(enabled)
-        for label in self.subvoxel_control_labels:
-            if label is not None:
-                label.setEnabled(enabled)
+        for field, label in zip(
+            self.subvoxel_control_fields, self.subvoxel_control_labels
+        ):
+            self._set_control_enabled(field, label, enabled)
 
     def _browse_export_directory(self):
         current = str(self.get_export_directory())
@@ -886,8 +902,16 @@ class SettingsDialog(QDialog):
 
     def _update_summary(self):
         mode = str(self.mode_combo.currentData())
-        self.reserve_spin.setEnabled(mode == "custom_reserve")
-        self.limit_spin.setEnabled(mode == "fixed_limit")
+        self._set_control_enabled(
+            self.reserve_spin,
+            self.memory_reserve_control_label,
+            mode == "custom_reserve",
+        )
+        self._set_control_enabled(
+            self.limit_spin,
+            self.memory_limit_control_label,
+            mode == "fixed_limit",
+        )
 
         budget = resolve_memory_budget(policy=self.get_policy())
         if budget.available_bytes is None:
@@ -902,6 +926,13 @@ class SettingsDialog(QDialog):
                 f"Effective budget now: {format_bytes(budget.limit_bytes)}."
             )
         self.status_label.setText(summary)
+
+    @staticmethod
+    def _set_control_enabled(control: QWidget, label: Optional[QLabel], enabled: bool):
+        """Keep an unavailable input and its form label visually in sync."""
+        control.setEnabled(enabled)
+        if label is not None:
+            label.setEnabled(enabled)
 
 
 class PulseImportDialog(QDialog):

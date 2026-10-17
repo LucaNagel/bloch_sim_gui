@@ -339,7 +339,9 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     assert policy.mode == "custom_reserve"
     assert policy.reserve_bytes == int(3.5 * GIB)
     assert dialog.reserve_spin.isEnabled()
+    assert dialog.memory_reserve_control_label.isEnabled()
     assert not dialog.limit_spin.isEnabled()
+    assert not dialog.memory_limit_control_label.isEnabled()
     dialog.animation_memory_budget_spin.setValue(2048.0)
     assert dialog.animation_memory_budget_bytes() == 2048 * 1024**2
     assert dialog.get_export_directory() == tmp_path
@@ -371,17 +373,20 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     assert dialog.sequence_timestep_preset() == "balanced"
     assert dialog.sequence_timestep_us() == pytest.approx(5.0)
     assert not dialog.sequence_timestep_us_spin.isEnabled()
+    assert not dialog.sequence_timestep_control_label.isEnabled()
     dialog.sequence_timestep_preset_combo.setCurrentIndex(
         dialog.sequence_timestep_preset_combo.findData("custom")
     )
     dialog.sequence_timestep_us_spin.setValue(7.5)
     assert dialog.sequence_timestep_us() == pytest.approx(7.5)
     assert dialog.sequence_timestep_us_spin.isEnabled()
+    assert dialog.sequence_timestep_control_label.isEnabled()
     assert dialog.sequence_spoiler_mode() == "ideal"
     assert dialog.subvoxel_spin_counts() == (1, 1, 1)
     assert dialog.subvoxel_sampling_method() == "midpoint"
     assert not any(spin.isEnabled() for spin in dialog.subvoxel_spin_count_spins)
     assert not dialog.subvoxel_sampling_method_combo.isEnabled()
+    assert not any(field.isEnabled() for field in dialog.subvoxel_control_fields)
     assert not any(label.isEnabled() for label in dialog.subvoxel_control_labels)
     dialog.sequence_spoiler_mode_combo.setCurrentIndex(
         dialog.sequence_spoiler_mode_combo.findData("gradient")
@@ -396,9 +401,11 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     assert dialog.subvoxel_sampling_method() == "stratified"
     assert all(spin.isEnabled() for spin in dialog.subvoxel_spin_count_spins)
     assert dialog.subvoxel_sampling_method_combo.isEnabled()
+    assert all(field.isEnabled() for field in dialog.subvoxel_control_fields)
     assert all(label.isEnabled() for label in dialog.subvoxel_control_labels)
     assert dialog.thread_mode() == "automatic"
     assert not dialog.manual_thread_count_spin.isEnabled()
+    assert not dialog.manual_thread_count_control_label.isEnabled()
     dialog.thread_mode_combo.setCurrentIndex(
         dialog.thread_mode_combo.findData("manual")
     )
@@ -406,6 +413,7 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     assert dialog.thread_mode() == "manual"
     assert dialog.manual_thread_count() == 3
     assert dialog.manual_thread_count_spin.isEnabled()
+    assert dialog.manual_thread_count_control_label.isEnabled()
     dialog.scanner_max_grad_spin.setValue(40.0)
     dialog.scanner_max_slew_spin.setValue(180.0)
     scanner = dialog.scanner_parameters()
