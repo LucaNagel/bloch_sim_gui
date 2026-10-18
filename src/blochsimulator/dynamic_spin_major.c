@@ -1074,10 +1074,12 @@ int dsm_run_chunk(const dsm_chunk *c) {
                                          DSM_SLOT_DOUBLES
                    : NULL;
         w.build_seconds = 0.0;
+        /* MSVC's C OpenMP parser requires a separately declared loop index. */
+        int block;
 #ifdef _OPENMP
 #pragma omp for schedule(dynamic, 1)
 #endif
-        for (int block = 0; block < n_blocks; block++) {
+        for (block = 0; block < n_blocks; block++) {
             const int64_t first_tile = (int64_t)block * n_tiles / n_blocks;
             const int64_t end_tile = (int64_t)(block + 1) * n_tiles / n_blocks;
             double *adc_block =
