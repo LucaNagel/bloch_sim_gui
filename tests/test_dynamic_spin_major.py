@@ -264,7 +264,10 @@ def test_spin_major_parent_chunks_reduce_one_row_per_block():
 
 
 def test_spin_major_memory_plan_counts_adc_rows_per_block():
-    n_adc = 20000
+    # Receive channels create ADC-buffer pressure without a long propagation
+    # whose accumulated libm/NumPy rounding can dominate this memory-plan test.
+    n_adc = 1000
+    n_rx_coils = 40
     program = SequenceProgram(
         (
             RFEvent(0.0, np.full(3, 60.0 - 20.0j), RASTER),
@@ -273,17 +276,23 @@ def test_spin_major_memory_plan_counts_adc_rows_per_block():
         duration_s=(n_adc + 6) * RASTER,
     )
     phantom = _phantom(inflow="polarized", tracked=True)
+    coil_indices = np.arange(n_rx_coils)
+    sensitivities = (0.8 + 0.01 * coil_indices) * np.exp(0.03j * coil_indices)
+    phantom.rx_sensitivity_maps = np.broadcast_to(
+        sensitivities[:, None, None, None], (n_rx_coils, *phantom.shape)
+    ).copy()
     kwargs = dict(
         spoiler_mode="gradient",
         spin_sampling=SpinSampling((2, 1, 1)),
-        memory_budget_bytes=4 * 1024**2,
+        memory_budget_bytes=8 * 1024**2,
     )
 
+    reference = _run(phantom, program, "optimized", **kwargs)
     spin_major = _run(phantom, program, **kwargs)
     voxel_major = _run(phantom, program, _native_spin_major=False, **kwargs)
     explicit = _run(phantom, program, parent_voxel_chunk_size=3, **kwargs)
 
-    adc_row_bytes = phantom.n_species * n_adc * 16
+    adc_row_bytes = phantom.n_species * n_rx_coils * n_adc * 16
     # One ADC row per parent voxel forces the voxel-major path into blocks.
     assert voxel_major.metadata["dynamic_parent_chunk_count"] == 2
     assert voxel_major.metadata["dynamic_block_work_bytes_estimate"] == 0
@@ -295,6 +304,9 @@ def test_spin_major_memory_plan_counts_adc_rows_per_block():
     )
     _assert_close(spin_major, voxel_major)
     _assert_close(explicit, voxel_major)
+    for result in (spin_major, voxel_major, explicit):
+        _assert_close(result, reference)
+    _assert_close(explicit, spin_major)
 
 
 def test_spin_major_switch_follows_environment(monkeypatch):
