@@ -998,6 +998,58 @@ def test_epsi_mge_timing_plan_matches_built_sequence(bandwidth_hz, strategy):
     )
 
 
+@pytest.mark.parametrize("bandwidth_hz", [50e3, 100e3, 150e3, 77e3])
+def test_flash_timing_plan_matches_built_sequence(bandwidth_hz):
+    common = dict(matrix=(16, 3), sampling_bandwidth_hz=bandwidth_hz)
+    plan = make_pulseq_flash(
+        **common, echo_time_s=1e-6, repetition_time_s=1e-6, timing_only=True
+    )
+    sequence = make_pulseq_flash(
+        **common,
+        echo_time_s=plan.minimum_echo_time_s,
+        repetition_time_s=plan.minimum_repetition_time_s,
+    )
+    assert sequence.check_timing()[0]
+    assert sequence.definitions["SamplingBandwidth"] == pytest.approx(
+        plan.sampling_bandwidth_hz
+    )
+    assert sequence.definitions["TE"] == pytest.approx(plan.minimum_echo_time_s)
+    assert sequence.definitions["TR"] == pytest.approx(plan.minimum_repetition_time_s)
+    # A too-short request is a plan, not an error, when only planning.
+    with pytest.raises(ValueError, match="too short"):
+        make_pulseq_flash(**common, echo_time_s=1e-6)
+
+
+def test_sequence_workspace_resolves_flash_timing_conflicts():
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+    widget.sequence_live_preview.setChecked(False)
+    widget.sequence_source.setCurrentIndex(widget.FLASH_SOURCE)
+
+    widget.flash_sampling_bandwidth_khz.setValue(150.0)
+    widget._settle_flash_timing()
+    assert widget.flash_sampling_bandwidth_khz.value() != pytest.approx(150.0)
+    assert widget._reload_selected_generated_sequence()
+
+    # Raising TE pushes TR up; lowering TE afterwards never lowers TR again.
+    widget.flash_repetition_time_ms.setValue(15.0)
+    widget.flash_echo_time_ms.setValue(40.0)
+    assert widget.flash_repetition_time_ms.value() > 40.0
+    assert "TR" in widget.flash_timing_info.text()
+    raised_tr = widget.flash_repetition_time_ms.value()
+    widget.flash_echo_time_ms.setValue(5.0)
+    assert widget.flash_repetition_time_ms.value() == pytest.approx(raised_tr)
+
+    # A longer RF pulse needs a longer minimum TE and TR.
+    widget.flash_rf_duration_ms.setValue(8.0)
+    assert widget.flash_echo_time_ms.value() > 5.0
+    assert widget._reload_selected_generated_sequence()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
 def test_sequence_workspace_builds_flyback_epi_and_epsi_mge(tmp_path):
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()

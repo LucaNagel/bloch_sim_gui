@@ -16,6 +16,10 @@ The project follows [Semantic Versioning](https://semver.org/).
   status line under "Timing" lists the adjustments and the current minima.
   `make_pulseq_epsi_mge(timing_only=True)` returns these limits without
   building a sequence.
+- FLASH uses the same automatic timing resolution: bandwidth, TE, TR and the
+  acquisition interval are raised to the shortest feasible values (per RF pulse
+  of an SPSP schedule), with a status line under the timing fields.
+  `make_pulseq_flash(timing_only=True)` returns the limits.
 - The sampling-bandwidth field of FLASH and Cartesian EPI is now rounded up when
   it shows the bandwidth the builder achieved, so repeated generation no longer
   lowers the bandwidth step by step (150 → 142.9 → 133.3 → 125 kHz).

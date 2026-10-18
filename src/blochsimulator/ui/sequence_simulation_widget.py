@@ -1220,6 +1220,12 @@ class SequenceSimulationWidget(QWidget):
         self.epsi_timing_settle_timer.setSingleShot(True)
         self.epsi_timing_settle_timer.setInterval(600)
         self.epsi_timing_settle_timer.timeout.connect(self._settle_epsi_mge_timing)
+        self._resolving_flash_timing = False
+        self._flash_timing_notes: list[str] = []
+        self.flash_timing_settle_timer = QTimer(self)
+        self.flash_timing_settle_timer.setSingleShot(True)
+        self.flash_timing_settle_timer.setInterval(600)
+        self.flash_timing_settle_timer.timeout.connect(self._settle_flash_timing)
         self.sequence_plot_refresh_timer = QTimer(self)
         self.sequence_plot_refresh_timer.setSingleShot(True)
         self.sequence_plot_refresh_timer.setInterval(60)
@@ -2702,6 +2708,9 @@ class SequenceSimulationWidget(QWidget):
         self.flash_spoiler_cycles_per_voxel.setDisabled(True)
         self.flash_spoiler_duration_ms = self._parameter_spin(0.001, 1000.0, 2.0, " ms")
         self.flash_dwell_info = QLabel()
+        self.flash_timing_info = QLabel()
+        self.flash_timing_info.setObjectName("flash_timing_info")
+        self.flash_timing_info.setWordWrap(True)
         # Retain the original FLASH-specific objects as a compatibility surface
         # for callers that inspect the per-sequence check directly.  The visible
         # UI uses the shared Spoiling quality unit created below.
@@ -2749,6 +2758,7 @@ class SequenceSimulationWidget(QWidget):
             "Acquisition interval (start-to-start)",
             self.flash_acquisition_interval_ms,
         )
+        flash_form.addRow(self.flash_timing_info)
         _add_form_section(flash_form, "Spoiling")
         flash_form.addRow("RF spoiling", self.flash_rf_spoiling)
         flash_form.addRow("RF spoiling increment", self.flash_rf_spoiling_increment_deg)
@@ -6754,20 +6764,33 @@ class SequenceSimulationWidget(QWidget):
             self._resolving_epsi_timing = False
         return bool(notes)
 
+    @staticmethod
+    def _set_timing_control(control, value, label, unit, notes):
+        """Set a spin box without emitting signals and record the change."""
+        previous = control.value()
+        previous_signals = control.blockSignals(True)
+        control.setValue(value)
+        control.blockSignals(previous_signals)
+        notes.append(f"{label} {previous:.4g} → {control.value():.6g} {unit}")
+
+    def _raise_timing_control(self, control, minimum_s, label, protected, notes):
+        """Raise a millisecond control to ``minimum_s``; never lower it."""
+        if control is protected:
+            return False
+        minimum_ms = self._ceil_spin_value(minimum_s * 1000.0, control.decimals())
+        if control.value() >= minimum_ms - 1e-9:
+            return False
+        self._set_timing_control(control, minimum_ms, label, "ms", notes)
+        return True
+
     def _apply_epsi_timing_plan(self, plan, protected, notes):
         """Raise controls below their limits; return whether any was changed."""
         changed = False
 
         def set_value(control, value, label, unit, decimals):
             nonlocal changed
-            previous = control.value()
-            previous_signals = control.blockSignals(True)
-            control.setValue(value)
-            control.blockSignals(previous_signals)
+            self._set_timing_control(control, value, label, unit, notes)
             changed = True
-            notes.append(
-                f"{label} {previous:.4g} → {control.value():.{decimals}g} {unit}"
-            )
 
         control = self.epsi_sampling_bandwidth_khz
         if control is not protected:
@@ -6835,10 +6858,98 @@ class SequenceSimulationWidget(QWidget):
             self._request_generated_sequence_refresh()
 
     def _flash_changed(self, *_):
+        flash_selected = self.sequence_source.currentIndex() == self.FLASH_SOURCE
+        if flash_selected:
+            self._resolve_flash_timing(protected=self.sender())
+            self.flash_timing_settle_timer.start()
         self._update_flash_labels()
         self._update_spoiling_quality()
-        if self.sequence_source.currentIndex() == self.FLASH_SOURCE:
+        if flash_selected:
             self._request_generated_sequence_refresh()
+
+    def _settle_flash_timing(self):
+        """Correct the field the user last edited once input has paused."""
+        if self.sequence_source.currentIndex() != self.FLASH_SOURCE:
+            return
+        if self._resolve_flash_timing(protected=None, keep_notes=True):
+            self._update_flash_labels()
+            self._request_generated_sequence_refresh()
+
+    def _resolve_flash_timing(self, protected=None, keep_notes=False):
+        """Raise FLASH bandwidth, TE, TR and interval to mutually valid values.
+
+        Same policy as EPSI / MGE: values below the shortest feasible timing are
+        raised, larger values are never reduced, and the control being edited is
+        left alone until input settles.  Returns whether any control changed.
+        """
+        if self._resolving_flash_timing or self._restoring_session_run:
+            return False
+        self._resolving_flash_timing = True
+        notes: list[str] = []
+        plan = None
+        try:
+            for _ in range(5):
+                try:
+                    plan = make_pulseq_flash(
+                        **self._flash_pulseq_parameters(), timing_only=True
+                    )
+                except Exception as exc:
+                    self._show_flash_timing_status(None, notes, error=str(exc))
+                    return bool(notes)
+                if not self._apply_flash_timing_plan(plan, protected, notes):
+                    break
+            if notes or not keep_notes:
+                self._flash_timing_notes = notes
+            self._show_flash_timing_status(plan, self._flash_timing_notes)
+        finally:
+            self._resolving_flash_timing = False
+        return bool(notes)
+
+    def _apply_flash_timing_plan(self, plan, protected, notes):
+        changed = False
+        control = self.flash_sampling_bandwidth_khz
+        if control is not protected:
+            bandwidth_khz = self._ceil_spin_value(
+                plan.sampling_bandwidth_hz / 1000.0, control.decimals()
+            )
+            if abs(control.value() - bandwidth_khz) > 0.5 * 10.0 ** -control.decimals():
+                self._set_timing_control(
+                    control, bandwidth_khz, "Bandwidth", "kHz", notes
+                )
+                changed = True
+        for control, minimum_s, label in (
+            (self.flash_echo_time_ms, plan.minimum_echo_time_s, "TE"),
+            (self.flash_repetition_time_ms, plan.minimum_repetition_time_s, "TR"),
+        ):
+            changed |= self._raise_timing_control(
+                control, minimum_s, label, protected, notes
+            )
+        if self.flash_acquisition_interval_ms.value() > 0.0:
+            changed |= self._raise_timing_control(
+                self.flash_acquisition_interval_ms,
+                plan.minimum_acquisition_interval_s,
+                "Acquisition interval",
+                protected,
+                notes,
+            )
+        return changed
+
+    def _show_flash_timing_status(self, plan, notes, error=None):
+        if error is not None:
+            self.flash_timing_info.setText(f"Timing cannot be resolved: {error}")
+            self.flash_timing_info.setStyleSheet("color: #b00020;")
+            return
+        lines = []
+        if notes:
+            lines.append("Adjusted automatically: " + "; ".join(notes) + ".")
+        lines.append(
+            f"Shortest possible: TE {plan.minimum_echo_time_s * 1e3:.4g} ms, "
+            f"TR {plan.minimum_repetition_time_s * 1e3:.4g} ms."
+        )
+        self.flash_timing_info.setText("\n".join(lines))
+        self.flash_timing_info.setStyleSheet(
+            "color: #b45309;" if notes else "color: #475569;"
+        )
 
     def _flash_auto_spoiler_toggled(self, enabled):
         self.flash_spoiler_cycles_per_slice.setDisabled(enabled)
@@ -8958,6 +9069,8 @@ class SequenceSimulationWidget(QWidget):
 
     def _load_flash(self):
         try:
+            self._resolve_flash_timing()
+            self._update_flash_labels()
             sequence = make_pulseq_flash(**self._flash_pulseq_parameters())
             self._set_generated_pulseq_sequence(sequence, "internal-flash-2d")
             self._sync_sampling_bandwidth_control(

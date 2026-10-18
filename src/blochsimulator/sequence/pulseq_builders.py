@@ -1799,6 +1799,17 @@ def make_pulseq_epi(
 
 
 @dataclass(frozen=True)
+class FlashTimingPlan:
+    """Shortest feasible FLASH timing for the requested parameters."""
+
+    sampling_bandwidth_hz: float
+    dwell_s: float
+    minimum_echo_time_s: float
+    minimum_repetition_time_s: float
+    minimum_acquisition_interval_s: float
+
+
+@dataclass(frozen=True)
 class EpsiMgeTimingPlan:
     """Hardware-compatible timing limits of an EPSI / MGE parameter set."""
 
@@ -2362,6 +2373,7 @@ def make_pulseq_flash(
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
     nucleus: str = "H1",
+    timing_only: bool = False,
 ):
     """Build a slice-selective 2D spoiled gradient-echo (FLASH) sequence.
 
@@ -2567,6 +2579,8 @@ def make_pulseq_flash(
         system=system,
     )
     readout_duration = pp.calc_duration(gx_read, adc)
+    minimum_echo_time = 0.0
+    minimum_repetition_time = 0.0
     for variant in rf_variants:
         rf = variant["rf"]
         gz = variant["gz"]
@@ -2596,7 +2610,9 @@ def make_pulseq_flash(
             + adc_duration / 2.0
         )
         requested_te_delay = echo_time_s - echo_without_delay
-        if requested_te_delay < -1e-12:
+        if timing_only:
+            minimum_echo_time = max(minimum_echo_time, echo_without_delay)
+        if requested_te_delay < -1e-12 and not timing_only:
             label = (
                 variant["entry"].display_name or variant["pulse"].name
                 if variant["entry"] is not None
@@ -2618,7 +2634,11 @@ def make_pulseq_flash(
             + spoiler_duration_s
         )
         requested_tr_delay = repetition_time_s - line_without_tr_delay
-        if requested_tr_delay < -1e-12:
+        if timing_only:
+            minimum_repetition_time = max(
+                minimum_repetition_time, line_without_tr_delay
+            )
+        if requested_tr_delay < -1e-12 and not timing_only:
             label = (
                 variant["entry"].display_name or variant["pulse"].name
                 if variant["entry"] is not None
@@ -2645,6 +2665,15 @@ def make_pulseq_flash(
         )
     actual_te = max(variant["actual_te"] for variant in rf_variants)
     actual_tr = max(variant["actual_tr"] for variant in rf_variants)
+    if timing_only:
+        actual_tr = max(actual_tr, minimum_repetition_time)
+        return FlashTimingPlan(
+            sampling_bandwidth_hz=1.0 / dwell,
+            dwell_s=float(dwell),
+            minimum_echo_time_s=float(minimum_echo_time),
+            minimum_repetition_time_s=float(minimum_repetition_time),
+            minimum_acquisition_interval_s=float(n_slices * n_phase * actual_tr),
+        )
 
     phase_areas = (np.arange(n_phase) - n_phase // 2) / fov_phase
     slice_positions = float(slice_offset_m) + (
