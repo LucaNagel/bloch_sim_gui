@@ -84,11 +84,17 @@ def detect_kernel_capabilities() -> dict[str, dict[str, KernelCapability]]:
         "blochsimulator.dynamic_spin_major_cy",
         ("run_spin_major_chunk", "propagator_values"),
     )
-    spin_available = spin_available and getattr(spin_module, "API_VERSION", None) == 2
+    spin_available = spin_available and getattr(spin_module, "API_VERSION", None) == 3
     dynamic_details = {
         "spin_major": spin_available,
         "spin_major_spatial_tx": bool(
             spin_available and getattr(spin_module, "SPATIAL_TX_SUPPORTED", False)
+        ),
+        "spin_major_multi_pool": bool(
+            spin_available and getattr(spin_module, "MULTI_POOL_SUPPORTED", False)
+        ),
+        "spin_major_spatial_inflow": bool(
+            spin_available and getattr(spin_module, "SPATIAL_INFLOW_SUPPORTED", False)
         ),
         "complete_two_pool_plan": bool(
             dynamic_module is not None

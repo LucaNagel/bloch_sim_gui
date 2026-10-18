@@ -2144,9 +2144,14 @@ _SPIN_MAJOR_SLICE_ADC_VALUES = 4096
 _SPIN_MAJOR_WORK_BLOCKS = 64
 _SPIN_MAJOR_RF_CACHE_ENTRIES = 65536
 # Conservative working-set terms of one slice: per-thread coefficient slots
-# and tile state, interval tables, and per-block ADC accumulators.
+# and tile state, interval tables, and per-block ADC accumulators. Each pool
+# beyond two adds coefficient slot fields and tile state; delayed inflow adds
+# the interval times.
 _SPIN_MAJOR_THREAD_BYTES = 480 * 1024
+_SPIN_MAJOR_POOL_THREAD_BYTES = 160 * 1024
 _SPIN_MAJOR_INTERVAL_BYTES = 256
+_SPIN_MAJOR_SPATIAL_INTERVAL_BYTES = 32
+_SPIN_MAJOR_MAX_POOLS = 6
 # Repeated RF segments run as cached per-spin affine propagators. Entries are
 # planned per block, kept across slices, and evicted in LRU order.
 _SPIN_MAJOR_RF_PROPAGATOR_ENTRIES = 8
@@ -2176,7 +2181,7 @@ def _spin_major_kernel():
         from .dynamic_spin_major_cy import API_VERSION, TILE_SPINS, run_spin_major_chunk
     except (ImportError, OSError):
         return None
-    if API_VERSION != 2:
+    if API_VERSION != 3:
         return None
     return run_spin_major_chunk, int(TILE_SPINS)
 
@@ -2188,27 +2193,25 @@ def _spin_major_fallback_reason(
     phantom,
     real_dtype,
     checkpoint_dtype,
-    spatial_inflow,
     spatial_tx,
     execution_plan,
 ):
     """Return why the spin-major executor cannot run a plan, or None.
 
-    The executor covers the common two-pool float64 plan with per-spin B0 and
-    kPL maps. Everything else keeps the existing native paths.
+    The executor covers float64 plans of two to six pools with per-spin B0 and
+    conversion-rate maps, including inflow with per-spin arrival delays.
+    Everything else keeps the existing native paths.
     """
     if not requested:
         return "disabled by request"
     if not available:
         return "extension is unavailable"
-    if phantom.n_species != 2:
-        return "only two-pool phantoms are supported"
+    if phantom.n_species > _SPIN_MAJOR_MAX_POOLS:
+        return "more than six pools are unsupported"
     if np.dtype(real_dtype) != np.dtype(np.float64) or np.dtype(
         checkpoint_dtype
     ) != np.dtype(np.float64):
         return "requires float64 state and checkpoints"
-    if spatial_inflow:
-        return "spatial inflow delays are unsupported"
     if phantom.dynamic_b0 is not None:
         return "dynamic B0 is unsupported"
     if spatial_tx:
@@ -2228,7 +2231,9 @@ def _spin_major_fallback_reason(
     return None
 
 
-def _spin_major_slice_limits(memory_budget_bytes, n_rx_coils, n_threads):
+def _spin_major_slice_limits(
+    memory_budget_bytes, n_rx_coils, n_threads, n_pools=2, spatial_inflow=False
+):
     """Return (interval, ADC) limits per slice, or None if the budget is too small.
 
     Slice sizes do not change results: state stays float64 between slices and
@@ -2238,11 +2243,19 @@ def _spin_major_slice_limits(memory_budget_bytes, n_rx_coils, n_threads):
     adc_limit = max(1, _SPIN_MAJOR_SLICE_ADC_VALUES // n_rx_coils)
     if memory_budget_bytes is None:
         return interval_limit, adc_limit
+    extra_pools = max(0, int(n_pools) - 2)
     work_bytes = int(memory_budget_bytes) // 8 - n_threads * (
-        _SPIN_MAJOR_THREAD_BYTES + n_rx_coils * 2 * 64 * 8
+        _SPIN_MAJOR_THREAD_BYTES
+        + extra_pools * _SPIN_MAJOR_POOL_THREAD_BYTES
+        + n_rx_coils * 2 * 64 * 8
     )
-    adc_value_bytes = 32 * n_rx_coils * (_SPIN_MAJOR_WORK_BLOCKS + 1)
-    interval_limit = min(interval_limit, work_bytes // 2 // _SPIN_MAJOR_INTERVAL_BYTES)
+    adc_value_bytes = (
+        16 * max(2, int(n_pools)) * n_rx_coils * (_SPIN_MAJOR_WORK_BLOCKS + 1)
+    )
+    interval_bytes = _SPIN_MAJOR_INTERVAL_BYTES + (
+        _SPIN_MAJOR_SPATIAL_INTERVAL_BYTES if spatial_inflow else 0
+    )
+    interval_limit = min(interval_limit, work_bytes // 2 // interval_bytes)
     adc_limit = min(adc_limit, work_bytes // 2 // adc_value_bytes)
     if interval_limit < 1 or adc_limit < 1:
         return None
@@ -2553,12 +2566,14 @@ def _spin_major_plan_slice(
     source_mode,
     equilibrium,
     rf_cache,
+    spatial_inflow=False,
 ):
     """Build the compact interval tables of one spin-major plan slice.
 
     Free-evolution coefficients are keyed by (half step, conversion active)
     and evaluated per spin inside the executor. RF rotations and source rates
     do not depend on the spin, so they are prepared here once per value.
+    Delayed inflow is evaluated per spin from the interval times instead.
     """
     interval_slice = slice(first_interval, end_interval)
     interval_count = end_interval - first_interval
@@ -2606,7 +2621,7 @@ def _spin_major_plan_slice(
 
     interval_source = np.full(interval_count, -1, dtype=np.int32)
     source_table = np.zeros((0, 8), dtype=np.float64)
-    if source_mode != 2:
+    if source_mode != 2 and not spatial_inflow:
         excess, concentration = _spin_major_source_samples(
             execution_plan,
             interval_slice,
@@ -2650,7 +2665,20 @@ def _spin_major_plan_slice(
     ]
     adc_first = int(adc_payloads.min()) if adc_payloads.size else 0
     adc_count = int(adc_payloads.max()) - adc_first + 1 if adc_payloads.size else 0
+    spatial_tables = {}
+    if spatial_inflow:
+        spatial_tables["interval_time_s"] = np.ascontiguousarray(
+            np.column_stack(
+                (
+                    execution_plan.interval_start_s[interval_slice],
+                    execution_plan.interval_mid_s[interval_slice],
+                    execution_plan.interval_end_s[interval_slice],
+                )
+            ),
+            dtype=np.float64,
+        )
     return {
+        **spatial_tables,
         "group_half_s": np.ascontiguousarray(unique_groups[:, 0]),
         "group_conversion": np.ascontiguousarray(
             unique_groups[:, 1] != 0.0, dtype=np.int8
@@ -3229,7 +3257,6 @@ def _simulate_dynamic_sequence_block(
             phantom=phantom,
             real_dtype=real_dtype,
             checkpoint_dtype=checkpoint_dtype,
-            spatial_inflow=spatial_inflow_active,
             spatial_tx=spatial_tx_active,
             execution_plan=execution_plan,
         )
@@ -3242,6 +3269,8 @@ def _simulate_dynamic_sequence_block(
             memory_budget_bytes,
             n_rx_coils,
             max(1, int(num_threads)) if use_parallel else 1,
+            phantom.n_species,
+            spatial_inflow_active,
         )
         if native_spin_major_limits is None:
             native_spin_major_fallback_reason = "memory budget is too small"
@@ -4796,6 +4825,16 @@ def _simulate_dynamic_sequence_block(
                 "native_spin_major_rf_propagator_fallback_reason"
             ] = "disabled by request"
             return None, None
+        if phantom.n_species != 2:
+            rf_propagator_metadata[
+                "native_spin_major_rf_propagator_fallback_reason"
+            ] = "multi-pool phantoms are unsupported"
+            return None, None
+        if spatial_inflow_active:
+            rf_propagator_metadata[
+                "native_spin_major_rf_propagator_fallback_reason"
+            ] = "spatial inflow delays are unsupported"
+            return None, None
         from .dynamic_spin_major_cy import propagator_values
 
         track_concentration = concentration_state is not None
@@ -4869,6 +4908,32 @@ def _simulate_dynamic_sequence_block(
         interval_limit, adc_limit = native_spin_major_limits
         worker_threads = native_threads if sequence_kernel == "native_parallel" else 1
         native_spin_major_threads = worker_threads
+        conversion = (
+            coefficient_kpl[None]
+            if multi_pool_conversion is None
+            else multi_pool_conversion
+        )
+        spatial_arguments = {}
+        if spatial_inflow_active and source_mode != 2:
+
+            def curve_argument(curve):
+                if curve is None:
+                    return None
+                return (
+                    np.ascontiguousarray(curve.times_s, dtype=np.float64),
+                    np.ascontiguousarray(curve.values, dtype=np.float64),
+                    curve.interpolation == "step",
+                    curve.outside == "hold",
+                )
+
+            spatial_arguments = dict(
+                arrival_delay_s=np.ascontiguousarray(
+                    inflow_arrival_delay, dtype=np.float64
+                ),
+                spatial_mode=source_mode,
+                rate_curve=curve_argument(inflow_curve),
+                polarization_curve=curve_argument(inflow_polarization_curve),
+            )
         spin_arguments = dict(
             tx_sensitivity=(
                 np.ascontiguousarray(tx_sensitivity, dtype=np.complex128)
@@ -4877,7 +4942,7 @@ def _simulate_dynamic_sequence_block(
             ),
             positions_m=np.ascontiguousarray(positions, dtype=np.float64),
             b0_hz=np.ascontiguousarray(b0, dtype=np.float64),
-            kpl=np.ascontiguousarray(coefficient_kpl, dtype=np.float64),
+            conversion=np.ascontiguousarray(conversion, dtype=np.float64),
             delivery=delivery,
             rx_sensitivities=np.ascontiguousarray(
                 rx_sensitivities, dtype=np.complex128
@@ -4889,8 +4954,7 @@ def _simulate_dynamic_sequence_block(
             checkpoint_states=checkpoint_states,
             action_kinds=execution_plan.action_kinds,
             action_payloads=execution_plan.action_payload_indices,
-            r1_pyruvate=float(coefficient_r1[0]),
-            r1_lactate=float(coefficient_r1[1]),
+            r1=np.ascontiguousarray(coefficient_r1, dtype=np.float64),
             t2_s=np.ascontiguousarray(t2[:, 0], dtype=np.float64),
             pool_offset_hz=np.ascontiguousarray(pool_offsets, dtype=np.float64),
             equilibrium=equilibrium,
@@ -4898,6 +4962,7 @@ def _simulate_dynamic_sequence_block(
             concentration_sources=source_mode == 0,
             num_threads=worker_threads,
             num_blocks=_SPIN_MAJOR_WORK_BLOCKS,
+            **spatial_arguments,
         )
         rf_cache = {}
         table_started = perf_counter()
@@ -4932,10 +4997,13 @@ def _simulate_dynamic_sequence_block(
                 source_mode=source_mode,
                 equilibrium=equilibrium,
                 rf_cache=rf_cache,
+                spatial_inflow=bool(spatial_arguments),
             )
             adc_first = tables.pop("adc_first_payload")
             adc_count = tables.pop("adc_count")
-            adc_signal = np.zeros((2, n_rx_coils, adc_count), dtype=np.complex128)
+            adc_signal = np.zeros(
+                (phantom.n_species, n_rx_coils, adc_count), dtype=np.complex128
+            )
             kernel_started = perf_counter()
             native_spin_major_table_s += kernel_started - table_started
             build_seconds += native_spin_major_chunk(
@@ -6011,10 +6079,6 @@ def simulate_dynamic_sequence(
                 phantom=phantom,
                 real_dtype=real_dtype,
                 checkpoint_dtype=effective_checkpoint_dtype,
-                spatial_inflow=bool(
-                    phantom.pyruvate_inflow is not None
-                    and phantom.pyruvate_inflow.has_spatial_delays
-                ),
                 spatial_tx=global_tx_classification == "spatial",
                 execution_plan=execution_plan,
             )
@@ -6023,6 +6087,11 @@ def simulate_dynamic_sequence(
                 memory_budget_bytes,
                 n_rx_coils,
                 max(1, int(num_threads)) if use_parallel else 1,
+                phantom.n_species,
+                bool(
+                    phantom.pyruvate_inflow is not None
+                    and phantom.pyruvate_inflow.has_spatial_delays
+                ),
             )
             is not None
         )

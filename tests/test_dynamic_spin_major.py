@@ -345,12 +345,37 @@ def _three_pool_phantom():
     )
 
 
+@pytest.mark.parametrize("case", ["spatial_delay", "three_pools"])
+def test_spin_major_runs_models_it_used_to_refuse(case):
+    if case == "spatial_delay":
+        phantom = _phantom(inflow="polarized", tracked=True)
+        inflow = phantom.pyruvate_inflow
+        phantom.pyruvate_inflow = PyruvateInflow(
+            inflow.rate_curve_s_inv,
+            inflow.delivery_map,
+            inflow.polarization_curve,
+            arrival_delay_map_s=np.linspace(0.0, 4 * RASTER, phantom.nvoxels).reshape(
+                phantom.shape
+            ),
+        )
+    else:
+        phantom = _three_pool_phantom()
+    program = _program()
+
+    spin_major = _run(phantom, program)
+    interval_major = _run(phantom, program, _native_spin_major=False)
+
+    assert spin_major.metadata["native_spin_major_enabled"] is True
+    assert spin_major.metadata["native_spin_major_chunks"] > 0
+    assert spin_major.metadata["native_spin_major_fallback_reason"] is None
+    assert interval_major.metadata["native_spin_major_enabled"] is False
+    _assert_close(spin_major, interval_major)
+
+
 @pytest.mark.parametrize(
     "case, reason",
     [
         ("dynamic_b0", "dynamic B0 is unsupported"),
-        ("spatial_delay", "spatial inflow delays are unsupported"),
-        ("three_pools", "only two-pool phantoms are supported"),
         ("float32_checkpoints", "requires float64 state and checkpoints"),
         ("tiny_budget", "memory budget is too small"),
     ],
@@ -364,22 +389,10 @@ def test_spin_major_falls_back_for_unsupported_models(case, reason):
             TimeCurve((0.0, 25 * RASTER), (-3.0, 4.0), "linear", "hold"),
             np.ones(phantom.shape),
         )
-    elif case == "spatial_delay":
-        inflow = phantom.pyruvate_inflow
-        phantom.pyruvate_inflow = PyruvateInflow(
-            inflow.rate_curve_s_inv,
-            inflow.delivery_map,
-            inflow.polarization_curve,
-            arrival_delay_map_s=np.linspace(0.0, 4 * RASTER, phantom.nvoxels).reshape(
-                phantom.shape
-            ),
-        )
     elif case == "spatial_tx":
         phantom.tx_sensitivity_map = np.linspace(0.8, 1.1, phantom.nvoxels).reshape(
             phantom.shape
         ) * np.exp(0.2j)
-    elif case == "three_pools":
-        phantom = _three_pool_phantom()
     elif case == "float32_checkpoints":
         kwargs["checkpoint_dtype"] = np.float32
     else:

@@ -1,9 +1,11 @@
-"""Python entry point for the spin-major two-pool dynamic executor.
+"""Python entry point for the spin-major multi-pool dynamic executor.
 
 The executor applies a bounded slice of a dynamic execution plan in strict
 float64. Callers build the compact interval tables in NumPy; this module only
 checks shapes, dtypes, and contiguity before releasing the GIL. Repeated RF
-segments can optionally be replaced by cached per-spin affine propagators.
+segments of two-pool plans can optionally be replaced by cached per-spin
+affine propagators. Inflow with per-spin arrival delays is evaluated from the
+delayed time curves inside the executor.
 """
 
 import numpy as np
@@ -15,24 +17,32 @@ cnp.import_array()
 
 cdef extern from "dynamic_spin_major.h":
     int DSM_TILE
+    int DSM_MAX_POOLS
+
+    ctypedef struct dsm_curve:
+        int32_t n
+        int32_t step
+        int32_t hold
+        const double *times_s
+        const double *values
 
     ctypedef struct dsm_chunk:
         int64_t nspins
         int32_t ncoils
         int32_t n_threads
         int32_t n_blocks
+        int32_t npools
         int32_t track_concentration
         int32_t has_sources
         int32_t concentration_sources
         int32_t ideal_crush
-        double r1_pyruvate
-        double r1_lactate
-        double t2_s[2]
-        double pool_offset_hz[2]
+        double r1[6]
+        double t2_s[6]
+        double pool_offset_hz[6]
         double equilibrium
         const double *positions_m
         const double *b0_hz
-        const double *kpl
+        const double *conversion
         const double *delivery
         const double *rx
         const double *weights
@@ -58,6 +68,12 @@ cdef extern from "dynamic_spin_major.h":
         const double *rf_inputs
         const double *gradient_table
         const double *source_table
+        int32_t spatial_sources
+        int32_t spatial_mode
+        const double *interval_time_s
+        const double *arrival_delay_s
+        dsm_curve rate_curve
+        dsm_curve polarization_curve
         int64_t n_actions
         const int64_t *action_offsets
         const int8_t *action_kinds
@@ -84,8 +100,11 @@ cdef extern from "dynamic_spin_major.h":
 
 
 TILE_SPINS = DSM_TILE
-API_VERSION = 2
+MAX_POOLS = DSM_MAX_POOLS
+API_VERSION = 3
 SPATIAL_TX_SUPPORTED = True
+MULTI_POOL_SUPPORTED = True
+SPATIAL_INFLOW_SUPPORTED = True
 
 cdef double _empty_storage[8]
 
@@ -115,6 +134,30 @@ cdef void *_writable(object array, object dtype, tuple shape, str name) except N
     return pointer
 
 
+cdef object _curve(dsm_curve *target, object curve, str name):
+    """Point ``target`` at ``(times_s, values, step, hold)``; keep the arrays."""
+    if curve is None:
+        target.n = 0
+        target.step = 0
+        target.hold = 0
+        target.times_s = NULL
+        target.values = NULL
+        return None
+    times, values, step, hold = curve
+    times = np.ascontiguousarray(times, dtype=np.float64)
+    values = np.ascontiguousarray(values, dtype=np.float64)
+    if times.ndim != 1 or times.shape[0] < 1 or values.shape != times.shape:
+        raise ValueError(f"{name} needs matching one-dimensional knots")
+    if times.shape[0] >= 2**31:
+        raise ValueError(f"{name} has too many knots")
+    target.n = <int32_t>times.shape[0]
+    target.step = bool(step)
+    target.hold = bool(hold)
+    target.times_s = <const double *>_data(times, np.float64, (None,), name)
+    target.values = <const double *>_data(values, np.float64, (None,), name)
+    return (times, values)
+
+
 def propagator_values(bint track_concentration, bint has_sources,
                       bint concentration_sources):
     """Return the doubles per spin of one cached RF propagator entry."""
@@ -126,7 +169,7 @@ def run_spin_major_chunk(
         *,
         positions_m,
         b0_hz,
-        kpl,
+        conversion,
         delivery,
         rx_sensitivities,
         signal_weights,
@@ -149,8 +192,7 @@ def run_spin_major_chunk(
         action_payloads,
         long long adc_first_payload,
         adc_signal,
-        double r1_pyruvate,
-        double r1_lactate,
+        r1,
         t2_s,
         pool_offset_hz,
         double equilibrium,
@@ -166,13 +208,28 @@ def run_spin_major_chunk(
         basis_rows=None,
         propagators=None,
         tx_sensitivity=None,
-        rf_inputs=None):
+        rf_inputs=None,
+        interval_time_s=None,
+        arrival_delay_s=None,
+        int spatial_mode=0,
+        rate_curve=None,
+        polarization_curve=None):
     """Advance ``state`` through one plan slice and add unscaled ADC sums.
 
-    ``adc_signal`` has shape ``(2, ncoils, payload_count)`` and receives
+    Pool 0 is the precursor; ``conversion`` has shape ``(npools - 1, nspins)``
+    and holds the per-spin precursor-to-product rates. ``r1``, ``t2_s`` and
+    ``pool_offset_hz`` have one entry per pool. ``adc_signal`` has shape
+    ``(npools, ncoils, payload_count)`` and receives
     ``sum(transverse * rx * weight)`` per pool for payloads
     ``adc_first_payload + index``. Signal scaling and demodulation stay with
     the caller.
+
+    ``arrival_delay_s`` enables delayed inflow: every ``interval_source`` entry
+    must be -1, ``interval_time_s`` holds the start, mid and end time of each
+    interval, and the half-step sources follow ``rate_curve`` and the optional
+    ``polarization_curve``, each ``(times_s, values, step, hold)``, at the
+    spin's delayed time. ``spatial_mode`` is the source mode of the full-plan
+    path (0 coupled, 1 direct, 3 polarized without concentration).
 
     The optional segment arrays replace intervals ``[first, end)`` by the
     propagator entry ``propagators[entry]`` with shape
@@ -185,7 +242,8 @@ def run_spin_major_chunk(
     cdef double build_seconds = 0.0
     cdef Py_ssize_t n_segments = 0
     cdef Py_ssize_t n_tiles
-    cdef Py_ssize_t nspins = kpl.shape[0]
+    cdef Py_ssize_t nspins = conversion.shape[1]
+    cdef Py_ssize_t npools = conversion.shape[0] + 1
     cdef Py_ssize_t ncoils = rx_sensitivities.shape[0]
     cdef Py_ssize_t n_intervals = interval_group.shape[0]
     cdef Py_ssize_t n_groups = group_half_s.shape[0]
@@ -197,29 +255,36 @@ def run_spin_major_chunk(
             rf_table.shape[0] >= 2**31 or gradient_table.shape[0] >= 2**31 or
             source_table.shape[0] >= 2**31):
         raise ValueError("plan slice is too large for 32-bit table indices")
-    if t2_s.shape != (2,) or pool_offset_hz.shape != (2,):
-        raise ValueError("t2_s and pool_offset_hz must contain two pools")
+    if npools < 2 or npools > DSM_MAX_POOLS:
+        raise ValueError(f"spin-major executor supports 2 to {DSM_MAX_POOLS} pools")
+    r1 = np.asarray(r1, dtype=np.float64)
+    t2_s = np.asarray(t2_s, dtype=np.float64)
+    pool_offset_hz = np.asarray(pool_offset_hz, dtype=np.float64)
+    if (r1.shape != (npools,) or t2_s.shape != (npools,) or
+            pool_offset_hz.shape != (npools,)):
+        raise ValueError("r1, t2_s and pool_offset_hz need one entry per pool")
 
     chunk.nspins = nspins
     chunk.ncoils = <int32_t>ncoils
     chunk.n_threads = num_threads
     chunk.n_blocks = num_blocks
+    chunk.npools = <int32_t>npools
     chunk.track_concentration = concentration_state is not None
     chunk.has_sources = delivery is not None
     chunk.concentration_sources = concentration_sources
     chunk.ideal_crush = ideal_crush
-    chunk.r1_pyruvate = r1_pyruvate
-    chunk.r1_lactate = r1_lactate
-    chunk.t2_s[0] = float(t2_s[0])
-    chunk.t2_s[1] = float(t2_s[1])
-    chunk.pool_offset_hz[0] = float(pool_offset_hz[0])
-    chunk.pool_offset_hz[1] = float(pool_offset_hz[1])
+    for pool in range(DSM_MAX_POOLS):
+        chunk.r1[pool] = float(r1[pool]) if pool < npools else 0.0
+        chunk.t2_s[pool] = float(t2_s[pool]) if pool < npools else 1.0
+        chunk.pool_offset_hz[pool] = (
+            float(pool_offset_hz[pool]) if pool < npools else 0.0)
     chunk.equilibrium = equilibrium
 
     chunk.positions_m = <const double *>_data(
         positions_m, np.float64, (nspins, 3), "positions_m")
     chunk.b0_hz = <const double *>_data(b0_hz, np.float64, (nspins,), "b0_hz")
-    chunk.kpl = <const double *>_data(kpl, np.float64, (nspins,), "kpl")
+    chunk.conversion = <const double *>_data(
+        conversion, np.float64, (npools - 1, nspins), "conversion")
     chunk.delivery = (
         NULL if delivery is None else
         <const double *>_data(delivery, np.float64, (nspins,), "delivery"))
@@ -234,16 +299,17 @@ def run_spin_major_chunk(
         NULL if tx_sensitivity is None else
         <const double *>_data(rf_inputs, np.float64, (rf_table.shape[0], 3), "rf_inputs"))
     chunk.transverse = <double *>_writable(
-        transverse_state, np.complex128, (2, nspins), "transverse_state")
-    chunk.state = <double *>_writable(state, np.float64, (2, nspins, 3), "state")
+        transverse_state, np.complex128, (npools, nspins), "transverse_state")
+    chunk.state = <double *>_writable(
+        state, np.float64, (npools, nspins, 3), "state")
     chunk.concentration = (
         NULL if concentration_state is None else
         <double *>_writable(
-            concentration_state, np.float64, (2, nspins, 3),
+            concentration_state, np.float64, (npools, nspins, 3),
             "concentration_state"))
     if n_checkpoints:
         chunk.checkpoints = <double *>_writable(
-            checkpoint_states, np.float64, (n_checkpoints, 2, nspins, 3),
+            checkpoint_states, np.float64, (n_checkpoints, npools, nspins, 3),
             "checkpoint_states")
     else:
         chunk.checkpoints = NULL
@@ -276,6 +342,25 @@ def run_spin_major_chunk(
     chunk.source_table = <const double *>_data(
         source_table, np.float64, (None, 8), "source_table")
 
+    chunk.spatial_sources = arrival_delay_s is not None
+    chunk.spatial_mode = spatial_mode
+    chunk.interval_time_s = NULL
+    chunk.arrival_delay_s = NULL
+    rate_arrays = _curve(&chunk.rate_curve, None, "rate_curve")
+    polarization_arrays = _curve(
+        &chunk.polarization_curve, None, "polarization_curve")
+    if chunk.spatial_sources:
+        if rate_curve is None:
+            raise ValueError("delayed inflow needs a rate curve")
+        chunk.interval_time_s = <const double *>_data(
+            interval_time_s, np.float64, (n_intervals, 3), "interval_time_s")
+        chunk.arrival_delay_s = <const double *>_data(
+            arrival_delay_s, np.float64, (nspins,), "arrival_delay_s")
+        rate_arrays = _curve(&chunk.rate_curve, rate_curve, "rate_curve")
+        polarization_arrays = _curve(
+            &chunk.polarization_curve, polarization_curve,
+            "polarization_curve")
+
     chunk.n_actions = action_kinds.shape[0]
     chunk.action_offsets = <const int64_t *>_data(
         action_offsets, np.int64, (n_intervals + 1,), "action_offsets")
@@ -287,7 +372,7 @@ def run_spin_major_chunk(
     chunk.adc_first_payload = adc_first_payload
     chunk.adc_payload_count = adc_signal.shape[2]
     chunk.adc_signal = <double *>_writable(
-        adc_signal, np.complex128, (2, ncoils, None), "adc_signal")
+        adc_signal, np.complex128, (npools, ncoils, None), "adc_signal")
 
     chunk.n_segments = 0
     chunk.segment_first = NULL

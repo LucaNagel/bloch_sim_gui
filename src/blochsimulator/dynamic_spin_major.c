@@ -1,6 +1,6 @@
-/* Spin-major strict-float64 executor for two-pool dynamic Bloch plans.
+/* Spin-major strict-float64 executor for multi-pool dynamic Bloch plans.
  *
- * Mirrors the interval order of the native full-plan driver in
+ * Mirrors the interval order of the native full-plan drivers in
  * dynamic_bloch_wrapper.pyx: first transverse half, first longitudinal half,
  * RF rotation, second transverse half, second longitudinal half, then the
  * boundary actions at the next state index. Coefficients are evaluated in
@@ -27,31 +27,30 @@
 
 #define DSM_TWO_PI 6.283185307179586476925286766559
 #define DSM_PHASE_SERIES_LIMIT 1e-12
+#define DSM_MAX_PRODUCTS (DSM_MAX_POOLS - 1)
 
-enum {
-    F_FAC0R,
-    F_FAC0I,
-    F_FAC1R,
-    F_FAC1I,
-    F_EA,
-    F_KT,
-    F_F0A,
-    F_F1A,
-    F_KJ0,
-    F_KJ1,
-    F_EAC,
-    F_KTC,
-    F_F0AC,
-    F_F1AC,
-    F_KJ0C,
-    F_KJ1C,
-    F_COUNT
-};
+/* Per-spin coefficient fields of one cache slot for np pools: one complex
+ * transverse factor per pool, the precursor decay and source weights, three
+ * fields per product, then the same for concentration. 8 * np fields. */
+static inline int field_fac_real(int pool) { return 2 * pool; }
+static inline int field_fac_imag(int pool) { return 2 * pool + 1; }
+static inline int field_ea(int np) { return 2 * np; }
+static inline int field_f0a(int np) { return 2 * np + 1; }
+static inline int field_f1a(int np) { return 2 * np + 2; }
+static inline int field_kt(int np, int j) { return 2 * np + 3 + 3 * j; }
+static inline int field_kj0(int np, int j) { return 2 * np + 4 + 3 * j; }
+static inline int field_kj1(int np, int j) { return 2 * np + 5 + 3 * j; }
+static inline int field_eac(int np) { return 5 * np; }
+static inline int field_f0ac(int np) { return 5 * np + 1; }
+static inline int field_f1ac(int np) { return 5 * np + 2; }
+static inline int field_ktc(int np, int j) { return 5 * np + 3 + 3 * j; }
+static inline int field_kj0c(int np, int j) { return 5 * np + 4 + 3 * j; }
+static inline int field_kj1c(int np, int j) { return 5 * np + 5 + 3 * j; }
 
-#define DSM_SLOT_DOUBLES (F_COUNT * DSM_TILE)
+static inline size_t slot_doubles(int np) { return (size_t)8 * np * DSM_TILE; }
 
-/* Cached RF propagators: up to eight state components and three source nodes
- * each for excess magnetization and concentration. */
+/* Cached RF propagators (two pools): up to eight state components and three
+ * source nodes each for excess magnetization and concentration. */
 #define DSM_MAX_STATES 8
 #define DSM_SOURCE_NODES 3
 #define DSM_BUILD_SLOTS 4
@@ -59,36 +58,79 @@ enum {
 typedef struct {
     double half;
     int conversion;
-    double eb;
-    double f0b;
-    double f1b;
-    double e2[2];
+    double eb[DSM_MAX_PRODUCTS];
+    double f0b[DSM_MAX_PRODUCTS];
+    double f1b[DSM_MAX_PRODUCTS];
+    double e2[DSM_MAX_POOLS];
     double f0bc;
     double f1bc;
 } dsm_group;
+
+/* A time curve as value = slope * (q - x0) + y0 on the regions
+ * [bound[r], bound[r + 1]) for r = 0..n+1: before the first knot, between
+ * consecutive knots, exactly at the last knot, and after it. This reproduces
+ * np.interp with end values (linear) and the clipped searchsorted lookup
+ * (step) of TimeCurve.values_at. */
+typedef struct {
+    int32_t n_regions;
+    int step;
+    double *bound;   /* (n_regions + 1,) */
+    double *slope;   /* (n_regions,) */
+    double *x0;
+    double *y0;
+} dsm_curve_table;
+
+/* Region of the last query, per spin. A query outside [lo, hi) relocates. */
+typedef struct {
+    double lo[DSM_TILE];
+    double hi[DSM_TILE];
+    double slope[DSM_TILE];
+    double x0[DSM_TILE];
+    double y0[DSM_TILE];
+} dsm_curve_state;
 
 typedef struct {
     double px[DSM_TILE];
     double py[DSM_TILE];
     double pz[DSM_TILE];
-    double fs0[DSM_TILE];
-    double fs1[DSM_TILE];
-    double kpl[DSM_TILE];
+    double fs[DSM_MAX_POOLS][DSM_TILE];
+    double k[DSM_MAX_PRODUCTS][DSM_TILE];
     double d[DSM_TILE];
-    double x0[DSM_TILE];
-    double y0[DSM_TILE];
-    double x1[DSM_TILE];
-    double y1[DSM_TILE];
-    double P[DSM_TILE];
-    double L[DSM_TILE];
-    double Cp[DSM_TILE];
-    double Cl[DSM_TILE];
+    double delay[DSM_TILE];
+    double x[DSM_MAX_POOLS][DSM_TILE];
+    double y[DSM_MAX_POOLS][DSM_TILE];
+    double z[DSM_MAX_POOLS][DSM_TILE];
+    double c[DSM_MAX_POOLS][DSM_TILE];
     double wg[DSM_TILE];
     double gc[DSM_TILE];
     double gs[DSM_TILE];
     double tx_real[DSM_TILE];
     double tx_imag[DSM_TILE];
+    dsm_curve_state curve[2];
 } dsm_tile;
+
+/* Per-spin linear source of one half step: precursor excess start value and
+ * slope, concentration start value and slope. */
+typedef struct {
+    double start[DSM_TILE];
+    double slope[DSM_TILE];
+    double cstart[DSM_TILE];
+    double cslope[DSM_TILE];
+} dsm_source;
+
+/* Read-only state shared by all threads of one call. */
+typedef struct {
+    const dsm_chunk *c;
+    const dsm_group *groups;
+    const int32_t *slot_of;
+    const uint8_t *miss;
+    size_t slot_doubles;
+    dsm_curve_table curves[2];
+    int polarized;
+    int rate_nonzero;
+    double support_lo;   /* the rate curve is zero for q < support_lo */
+    double support_hi;   /* and for q >= support_hi */
+} dsm_context;
 
 /* Per-thread buffers. ``columns`` and ``build_slots`` are NULL when the call
  * builds no propagator. */
@@ -96,6 +138,7 @@ typedef struct {
     dsm_tile *tile;
     double *slots;
     double *rw;
+    dsm_source *sources;
     dsm_tile *columns;
     double *build_slots;
     double build_seconds;
@@ -136,86 +179,105 @@ static void prepare_group(const dsm_chunk *c, int32_t index, dsm_group *g) {
     double h = c->group_half_s[index];
     g->half = h;
     g->conversion = c->group_conversion[index] != 0;
-    g->eb = exp(-c->r1_lactate * h);
-    decay_convolution(c->r1_lactate, h, &g->f0b, &g->f1b);
-    g->e2[0] = exp(-h / c->t2_s[0]);
-    g->e2[1] = exp(-h / c->t2_s[1]);
+    for (int j = 0; j < c->npools - 1; j++) {
+        g->eb[j] = exp(-c->r1[j + 1] * h);
+        decay_convolution(c->r1[j + 1], h, &g->f0b[j], &g->f1b[j]);
+    }
+    for (int pool = 0; pool < c->npools; pool++) {
+        g->e2[pool] = exp(-h / c->t2_s[pool]);
+    }
     decay_convolution(0.0, h, &g->f0bc, &g->f1bc);
 }
 
-/* Evaluate every per-spin coefficient of one group into a cache slot. */
+/* Evaluate every per-spin coefficient of one group into a cache slot, with
+ * the operation order of _prepare_multi_pool_longitudinal_step. */
 static void fill_slot(const dsm_chunk *c, const dsm_group *g,
                       const dsm_tile *t, double *slot) {
     const double h = g->half;
-    const double r1l = c->r1_lactate;
+    const int np = c->npools;
+    const int nproducts = np - 1;
     for (int s = 0; s < DSM_TILE; s++) {
-        double k = g->conversion ? t->kpl[s] : 0.0;
-        double angle = -DSM_TWO_PI * (t->fs0[s] * h);
-        slot[F_FAC0R * DSM_TILE + s] = g->e2[0] * cos(angle);
-        slot[F_FAC0I * DSM_TILE + s] = g->e2[0] * sin(angle);
-        angle = -DSM_TWO_PI * (t->fs1[s] * h);
-        slot[F_FAC1R * DSM_TILE + s] = g->e2[1] * cos(angle);
-        slot[F_FAC1I * DSM_TILE + s] = g->e2[1] * sin(angle);
+        double k[DSM_MAX_PRODUCTS];
+        double ksum = 0.0;
+        for (int j = 0; j < nproducts; j++) {
+            k[j] = g->conversion ? t->k[j][s] : 0.0;
+            ksum = ksum + k[j];
+        }
+        for (int pool = 0; pool < np; pool++) {
+            double angle = -DSM_TWO_PI * (t->fs[pool][s] * h);
+            slot[field_fac_real(pool) * DSM_TILE + s] = g->e2[pool] * cos(angle);
+            slot[field_fac_imag(pool) * DSM_TILE + s] = g->e2[pool] * sin(angle);
+        }
 
-        double a = c->r1_pyruvate + k;
+        double a = c->r1[0] + ksum;
         double ea = exp(-a * h);
-        double difference = a - r1l;
-        slot[F_EA * DSM_TILE + s] = ea;
-        slot[F_KT * DSM_TILE + s] = fabs(difference) > 1e-12
-                                        ? k * ((g->eb - ea) / difference)
-                                        : (k * h) * g->eb;
+        slot[field_ea(np) * DSM_TILE + s] = ea;
+        for (int j = 0; j < nproducts; j++) {
+            double difference = a - c->r1[j + 1];
+            slot[field_kt(np, j) * DSM_TILE + s] =
+                fabs(difference) > 1e-12
+                    ? k[j] * ((g->eb[j] - ea) / difference)
+                    : (k[j] * h) * g->eb[j];
+        }
         if (c->has_sources) {
-            double f0a, f1a, j0, j1;
+            double f0a, f1a;
             decay_convolution(a, h, &f0a, &f1a);
-            if (fabs(difference * h) > 1e-7) {
-                j0 = (g->f0b - f0a) / difference;
-                j1 = (g->f1b - f1a) / difference;
-            } else {
-                equal_rate_convolution(0.5 * (a + r1l), h, &j0, &j1);
+            slot[field_f0a(np) * DSM_TILE + s] = f0a;
+            slot[field_f1a(np) * DSM_TILE + s] = f1a;
+            for (int j = 0; j < nproducts; j++) {
+                double difference = a - c->r1[j + 1];
+                double j0, j1;
+                if (fabs(difference * h) > 1e-7) {
+                    j0 = (g->f0b[j] - f0a) / difference;
+                    j1 = (g->f1b[j] - f1a) / difference;
+                } else {
+                    equal_rate_convolution(0.5 * (a + c->r1[j + 1]), h, &j0, &j1);
+                }
+                slot[field_kj0(np, j) * DSM_TILE + s] = k[j] * j0;
+                slot[field_kj1(np, j) * DSM_TILE + s] = k[j] * j1;
             }
-            slot[F_F0A * DSM_TILE + s] = f0a;
-            slot[F_F1A * DSM_TILE + s] = f1a;
-            slot[F_KJ0 * DSM_TILE + s] = k * j0;
-            slot[F_KJ1 * DSM_TILE + s] = k * j1;
         }
         if (c->track_concentration) {
-            double eac = exp(-k * h);
-            slot[F_EAC * DSM_TILE + s] = eac;
-            slot[F_KTC * DSM_TILE + s] =
-                fabs(k) > 1e-12 ? k * ((1.0 - eac) / k) : (k * h) * 1.0;
+            double eac = exp(-ksum * h);
+            slot[field_eac(np) * DSM_TILE + s] = eac;
+            for (int j = 0; j < nproducts; j++) {
+                slot[field_ktc(np, j) * DSM_TILE + s] =
+                    fabs(ksum) > 1e-12 ? k[j] * ((1.0 - eac) / ksum)
+                                       : (k[j] * h) * 1.0;
+            }
             if (c->concentration_sources) {
                 double f0ac, f1ac, j0c, j1c;
-                decay_convolution(k, h, &f0ac, &f1ac);
-                if (fabs(k * h) > 1e-7) {
-                    j0c = (g->f0bc - f0ac) / k;
-                    j1c = (g->f1bc - f1ac) / k;
+                decay_convolution(ksum, h, &f0ac, &f1ac);
+                if (fabs(ksum * h) > 1e-7) {
+                    j0c = (g->f0bc - f0ac) / ksum;
+                    j1c = (g->f1bc - f1ac) / ksum;
                 } else {
-                    equal_rate_convolution(0.5 * k, h, &j0c, &j1c);
+                    equal_rate_convolution(0.5 * ksum, h, &j0c, &j1c);
                 }
-                slot[F_F0AC * DSM_TILE + s] = f0ac;
-                slot[F_F1AC * DSM_TILE + s] = f1ac;
-                slot[F_KJ0C * DSM_TILE + s] = k * j0c;
-                slot[F_KJ1C * DSM_TILE + s] = k * j1c;
+                slot[field_f0ac(np) * DSM_TILE + s] = f0ac;
+                slot[field_f1ac(np) * DSM_TILE + s] = f1ac;
+                for (int j = 0; j < nproducts; j++) {
+                    slot[field_kj0c(np, j) * DSM_TILE + s] = k[j] * j0c;
+                    slot[field_kj1c(np, j) * DSM_TILE + s] = k[j] * j1c;
+                }
             }
         }
     }
 }
 
-static inline void transverse_plain(dsm_tile *DSM_RESTRICT t,
+static inline void transverse_plain(dsm_tile *DSM_RESTRICT t, int np,
                                     const double *DSM_RESTRICT slot) {
-    const double *DSM_RESTRICT f0r = slot + F_FAC0R * DSM_TILE;
-    const double *DSM_RESTRICT f0i = slot + F_FAC0I * DSM_TILE;
-    const double *DSM_RESTRICT f1r = slot + F_FAC1R * DSM_TILE;
-    const double *DSM_RESTRICT f1i = slot + F_FAC1I * DSM_TILE;
-    for (int s = 0; s < DSM_TILE; s++) {
-        double x = t->x0[s];
-        double y = t->y0[s];
-        t->x0[s] = x * f0r[s] - y * f0i[s];
-        t->y0[s] = x * f0i[s] + y * f0r[s];
-        x = t->x1[s];
-        y = t->y1[s];
-        t->x1[s] = x * f1r[s] - y * f1i[s];
-        t->y1[s] = x * f1i[s] + y * f1r[s];
+    for (int pool = 0; pool < np; pool++) {
+        const double *DSM_RESTRICT fr = slot + field_fac_real(pool) * DSM_TILE;
+        const double *DSM_RESTRICT fi = slot + field_fac_imag(pool) * DSM_TILE;
+        double *DSM_RESTRICT xs = t->x[pool];
+        double *DSM_RESTRICT ys = t->y[pool];
+        for (int s = 0; s < DSM_TILE; s++) {
+            double x = xs[s];
+            double y = ys[s];
+            xs[s] = x * fr[s] - y * fi[s];
+            ys[s] = x * fi[s] + y * fr[s];
+        }
     }
 }
 
@@ -234,45 +296,37 @@ static inline void phase_correction(double eps, int series, double *cr,
 /* Apply the cached static factor times the gradient rotation (when present)
  * times a small correction for the difference between the plan's phase
  * duration and the cached half step. */
-static inline void transverse_corrected(dsm_tile *DSM_RESTRICT t,
+static inline void transverse_corrected(dsm_tile *DSM_RESTRICT t, int np,
                                         const double *DSM_RESTRICT slot,
                                         int gradient, double da, double db,
                                         int correct) {
-    const double *DSM_RESTRICT f0r = slot + F_FAC0R * DSM_TILE;
-    const double *DSM_RESTRICT f0i = slot + F_FAC0I * DSM_TILE;
-    const double *DSM_RESTRICT f1r = slot + F_FAC1R * DSM_TILE;
-    const double *DSM_RESTRICT f1i = slot + F_FAC1I * DSM_TILE;
     const int series =
         fabs(da) <= DSM_PHASE_SERIES_LIMIT && fabs(db) <= DSM_PHASE_SERIES_LIMIT;
-    for (int s = 0; s < DSM_TILE; s++) {
-        double base_r = gradient ? t->gc[s] : 1.0;
-        double base_i = gradient ? t->gs[s] : 0.0;
-        double gradient_term = gradient ? t->wg[s] * db : 0.0;
-        double rot0_r = base_r, rot0_i = base_i;
-        double rot1_r = base_r, rot1_i = base_i;
-        if (correct) {
-            double cr, ci;
-            phase_correction(-DSM_TWO_PI * t->fs0[s] * da + gradient_term,
-                             series, &cr, &ci);
-            rot0_r = base_r * cr - base_i * ci;
-            rot0_i = base_r * ci + base_i * cr;
-            phase_correction(-DSM_TWO_PI * t->fs1[s] * da + gradient_term,
-                             series, &cr, &ci);
-            rot1_r = base_r * cr - base_i * ci;
-            rot1_i = base_r * ci + base_i * cr;
+    for (int pool = 0; pool < np; pool++) {
+        const double *DSM_RESTRICT f0r = slot + field_fac_real(pool) * DSM_TILE;
+        const double *DSM_RESTRICT f0i = slot + field_fac_imag(pool) * DSM_TILE;
+        const double *DSM_RESTRICT fs = t->fs[pool];
+        double *DSM_RESTRICT xs = t->x[pool];
+        double *DSM_RESTRICT ys = t->y[pool];
+        for (int s = 0; s < DSM_TILE; s++) {
+            double base_r = gradient ? t->gc[s] : 1.0;
+            double base_i = gradient ? t->gs[s] : 0.0;
+            double gradient_term = gradient ? t->wg[s] * db : 0.0;
+            double rot_r = base_r, rot_i = base_i;
+            if (correct) {
+                double cr, ci;
+                phase_correction(-DSM_TWO_PI * fs[s] * da + gradient_term,
+                                 series, &cr, &ci);
+                rot_r = base_r * cr - base_i * ci;
+                rot_i = base_r * ci + base_i * cr;
+            }
+            double fr = f0r[s] * rot_r - f0i[s] * rot_i;
+            double fi = f0r[s] * rot_i + f0i[s] * rot_r;
+            double x = xs[s];
+            double y = ys[s];
+            xs[s] = x * fr - y * fi;
+            ys[s] = x * fi + y * fr;
         }
-        double fr = f0r[s] * rot0_r - f0i[s] * rot0_i;
-        double fi = f0r[s] * rot0_i + f0i[s] * rot0_r;
-        double x = t->x0[s];
-        double y = t->y0[s];
-        t->x0[s] = x * fr - y * fi;
-        t->y0[s] = x * fi + y * fr;
-        fr = f1r[s] * rot1_r - f1i[s] * rot1_i;
-        fi = f1r[s] * rot1_i + f1i[s] * rot1_r;
-        x = t->x1[s];
-        y = t->y1[s];
-        t->x1[s] = x * fr - y * fi;
-        t->y1[s] = x * fi + y * fr;
     }
 }
 
@@ -290,72 +344,139 @@ static inline void prepare_gradient(dsm_tile *DSM_RESTRICT t, const double *g,
     }
 }
 
-/* One free longitudinal half-step. ``source`` holds e0, de, c0, dc (global
- * rates without delivery) or is NULL when the interval has no source. */
-static inline void longitudinal_half(dsm_tile *DSM_RESTRICT t,
-                                     const double *DSM_RESTRICT slot, double eb,
-                                     const double *source, double equilibrium,
-                                     int track_concentration,
-                                     int concentration_sources) {
-    const double *DSM_RESTRICT ea = slot + F_EA * DSM_TILE;
-    const double *DSM_RESTRICT kt = slot + F_KT * DSM_TILE;
-    const double *DSM_RESTRICT f0a = slot + F_F0A * DSM_TILE;
-    const double *DSM_RESTRICT f1a = slot + F_F1A * DSM_TILE;
-    const double *DSM_RESTRICT kj0 = slot + F_KJ0 * DSM_TILE;
-    const double *DSM_RESTRICT kj1 = slot + F_KJ1 * DSM_TILE;
-    const double *DSM_RESTRICT eac = slot + F_EAC * DSM_TILE;
-    const double *DSM_RESTRICT ktc = slot + F_KTC * DSM_TILE;
-    const double *DSM_RESTRICT f0ac = slot + F_F0AC * DSM_TILE;
-    const double *DSM_RESTRICT f1ac = slot + F_F1AC * DSM_TILE;
-    const double *DSM_RESTRICT kj0c = slot + F_KJ0C * DSM_TILE;
-    const double *DSM_RESTRICT kj1c = slot + F_KJ1C * DSM_TILE;
+/* One free longitudinal half-step of every pool. ``source`` holds e0, de,
+ * c0, dc (global rates without delivery), ``spatial`` per-spin source values;
+ * both are NULL when the half step has no source. */
+static inline void longitudinal_half(const dsm_chunk *c, const dsm_group *g,
+                                     const double *DSM_RESTRICT slot,
+                                     dsm_tile *DSM_RESTRICT t,
+                                     const double *source,
+                                     const dsm_source *spatial) {
+    const int np = c->npools;
+    const int nproducts = np - 1;
+    const double equilibrium = c->equilibrium;
+    const int track_concentration = c->track_concentration;
     const int coupled = track_concentration && equilibrium != 0.0;
-    const int with_source = source != NULL;
+    const int with_source = source != NULL || spatial != NULL;
     const int with_concentration_source =
-        with_source && track_concentration && concentration_sources;
-    const double e0 = with_source ? source[0] : 0.0;
-    const double de = with_source ? source[1] : 0.0;
-    const double c0 = with_source ? source[2] : 0.0;
-    const double dc = with_source ? source[3] : 0.0;
+        with_source && track_concentration && c->concentration_sources;
+    double precursor[DSM_TILE];
+    double start_values[DSM_TILE];
+    double slope_values[DSM_TILE];
 
-    for (int s = 0; s < DSM_TILE; s++) {
-        double p = t->P[s];
-        double l = t->L[s];
-        double cp = t->Cp[s];
-        double cl = t->Cl[s];
+    if (coupled) {
+        for (int pool = 0; pool < np; pool++) {
+            double *DSM_RESTRICT z = t->z[pool];
+            const double *DSM_RESTRICT cz = t->c[pool];
+            for (int s = 0; s < DSM_TILE; s++) {
+                z[s] = z[s] - equilibrium * cz[s];
+            }
+        }
+    }
+    {
+        const double *DSM_RESTRICT ea = slot + field_ea(np) * DSM_TILE;
+        double *DSM_RESTRICT z = t->z[0];
+        for (int s = 0; s < DSM_TILE; s++) {
+            precursor[s] = z[s];
+            z[s] = z[s] * ea[s];
+        }
+    }
+    for (int j = 0; j < nproducts; j++) {
+        const double *DSM_RESTRICT kt = slot + field_kt(np, j) * DSM_TILE;
+        const double eb = g->eb[j];
+        double *DSM_RESTRICT z = t->z[j + 1];
+        for (int s = 0; s < DSM_TILE; s++) {
+            double transfer = kt[s] * precursor[s];
+            double l = z[s] * eb;
+            z[s] = l + transfer;
+        }
+    }
+    if (with_source) {
+        const double *DSM_RESTRICT start = start_values;
+        const double *DSM_RESTRICT slope = slope_values;
+        if (spatial != NULL) {
+            start = spatial->start;
+            slope = spatial->slope;
+        } else {
+            const double e0 = source[0];
+            const double de = source[1];
+            for (int s = 0; s < DSM_TILE; s++) {
+                start_values[s] = t->d[s] * e0;
+                slope_values[s] = t->d[s] * de;
+            }
+        }
+        const double *DSM_RESTRICT f0a = slot + field_f0a(np) * DSM_TILE;
+        const double *DSM_RESTRICT f1a = slot + field_f1a(np) * DSM_TILE;
+        double *DSM_RESTRICT z = t->z[0];
+        for (int s = 0; s < DSM_TILE; s++) {
+            z[s] = z[s] + (start[s] * f0a[s] + slope[s] * f1a[s]);
+        }
+        for (int j = 0; j < nproducts; j++) {
+            const double *DSM_RESTRICT kj0 = slot + field_kj0(np, j) * DSM_TILE;
+            const double *DSM_RESTRICT kj1 = slot + field_kj1(np, j) * DSM_TILE;
+            z = t->z[j + 1];
+            for (int s = 0; s < DSM_TILE; s++) {
+                z[s] = z[s] + (start[s] * kj0[s] + slope[s] * kj1[s]);
+            }
+        }
+    }
+    if (track_concentration) {
+        {
+            const double *DSM_RESTRICT eac = slot + field_eac(np) * DSM_TILE;
+            double *DSM_RESTRICT cz = t->c[0];
+            for (int s = 0; s < DSM_TILE; s++) {
+                precursor[s] = cz[s];
+                cz[s] = cz[s] * eac[s];
+            }
+        }
+        for (int j = 0; j < nproducts; j++) {
+            const double *DSM_RESTRICT ktc = slot + field_ktc(np, j) * DSM_TILE;
+            double *DSM_RESTRICT cz = t->c[j + 1];
+            for (int s = 0; s < DSM_TILE; s++) {
+                double concentration_transfer = ktc[s] * precursor[s];
+                cz[s] = cz[s] + concentration_transfer;
+            }
+        }
+        if (with_concentration_source) {
+            const double *DSM_RESTRICT start = start_values;
+            const double *DSM_RESTRICT slope = slope_values;
+            if (spatial != NULL) {
+                start = spatial->cstart;
+                slope = spatial->cslope;
+            } else {
+                const double c0 = source[2];
+                const double dc = source[3];
+                for (int s = 0; s < DSM_TILE; s++) {
+                    start_values[s] = t->d[s] * c0;
+                    slope_values[s] = t->d[s] * dc;
+                }
+            }
+            const double *DSM_RESTRICT f0ac = slot + field_f0ac(np) * DSM_TILE;
+            const double *DSM_RESTRICT f1ac = slot + field_f1ac(np) * DSM_TILE;
+            double *DSM_RESTRICT cz = t->c[0];
+            for (int s = 0; s < DSM_TILE; s++) {
+                cz[s] = cz[s] + (start[s] * f0ac[s] + slope[s] * f1ac[s]);
+            }
+            for (int j = 0; j < nproducts; j++) {
+                const double *DSM_RESTRICT kj0c =
+                    slot + field_kj0c(np, j) * DSM_TILE;
+                const double *DSM_RESTRICT kj1c =
+                    slot + field_kj1c(np, j) * DSM_TILE;
+                cz = t->c[j + 1];
+                for (int s = 0; s < DSM_TILE; s++) {
+                    cz[s] = cz[s] + (start[s] * kj0c[s] + slope[s] * kj1c[s]);
+                }
+            }
+        }
         if (coupled) {
-            p = p - equilibrium * cp;
-            l = l - equilibrium * cl;
-        }
-        double transfer = kt[s] * p;
-        p = p * ea[s];
-        l = l * eb;
-        l = l + transfer;
-        if (with_source) {
-            double start = t->d[s] * e0;
-            double slope = t->d[s] * de;
-            p = p + (start * f0a[s] + slope * f1a[s]);
-            l = l + (start * kj0[s] + slope * kj1[s]);
-        }
-        if (track_concentration) {
-            double concentration_transfer = ktc[s] * cp;
-            cp = cp * eac[s];
-            cl = cl + concentration_transfer;
-            if (with_concentration_source) {
-                double start = t->d[s] * c0;
-                double slope = t->d[s] * dc;
-                cp = cp + (start * f0ac[s] + slope * f1ac[s]);
-                cl = cl + (start * kj0c[s] + slope * kj1c[s]);
+            for (int pool = 0; pool < np; pool++) {
+                double *DSM_RESTRICT z = t->z[pool];
+                const double *DSM_RESTRICT cz = t->c[pool];
+                for (int s = 0; s < DSM_TILE; s++) {
+                    z[s] = z[s] + equilibrium * cz[s];
+                }
             }
-            if (coupled) {
-                p = p + equilibrium * cp;
-                l = l + equilibrium * cl;
-            }
-            t->Cp[s] = cp;
-            t->Cl[s] = cl;
         }
-        t->P[s] = p;
-        t->L[s] = l;
     }
 }
 
@@ -438,10 +559,186 @@ static inline void accumulate_adc(const double *DSM_RESTRICT x,
               ((sum_i[4] + sum_i[5]) + (sum_i[6] + sum_i[7]));
 }
 
+/* Build the region table of one curve. Returns -1 for invalid knots. */
+static int build_curve_table(const dsm_curve *curve, dsm_curve_table *table) {
+    const int32_t n = curve->n;
+    memset(table, 0, sizeof(*table));
+    if (n < 1 || curve->times_s == NULL || curve->values == NULL) {
+        return -1;
+    }
+    const double *times = curve->times_s;
+    const double *values = curve->values;
+    for (int32_t k = 0; k < n; k++) {
+        if (!isfinite(times[k]) || !isfinite(values[k]) ||
+            (k > 0 && !(times[k] > times[k - 1]))) {
+            return -1;
+        }
+    }
+    table->n_regions = n + 2;
+    table->step = curve->step != 0;
+    table->bound = malloc(sizeof(double) * (size_t)(n + 3));
+    table->slope = malloc(sizeof(double) * (size_t)(n + 2));
+    table->x0 = malloc(sizeof(double) * (size_t)(n + 2));
+    table->y0 = malloc(sizeof(double) * (size_t)(n + 2));
+    if (table->bound == NULL || table->slope == NULL || table->x0 == NULL ||
+        table->y0 == NULL) {
+        return -2;
+    }
+    table->bound[0] = -INFINITY;
+    for (int32_t k = 0; k < n; k++) {
+        table->bound[k + 1] = times[k];
+    }
+    table->bound[n + 1] = nextafter(times[n - 1], INFINITY);
+    table->bound[n + 2] = INFINITY;
+
+    table->slope[0] = 0.0;
+    table->x0[0] = 0.0;
+    table->y0[0] = curve->hold ? values[0] : 0.0;
+    for (int32_t j = 0; j + 1 < n; j++) {
+        table->slope[j + 1] =
+            table->step ? 0.0
+                        : (values[j + 1] - values[j]) / (times[j + 1] - times[j]);
+        table->x0[j + 1] = times[j];
+        table->y0[j + 1] = values[j];
+    }
+    table->slope[n] = 0.0;
+    table->x0[n] = times[n - 1];
+    table->y0[n] = values[n - 1];
+    table->slope[n + 1] = 0.0;
+    table->x0[n + 1] = 0.0;
+    table->y0[n + 1] = curve->hold ? values[n - 1] : 0.0;
+    return 0;
+}
+
+static void free_curve_table(dsm_curve_table *table) {
+    free(table->bound);
+    free(table->slope);
+    free(table->x0);
+    free(table->y0);
+}
+
+static void reset_curve_state(dsm_curve_state *state) {
+    for (int s = 0; s < DSM_TILE; s++) {
+        state->lo[s] = INFINITY;
+        state->hi[s] = -INFINITY;
+    }
+}
+
+static void locate_region(const dsm_curve_table *table, dsm_curve_state *state,
+                          int s, double q) {
+    int32_t lo = 0;
+    int32_t hi = table->n_regions;
+    while (hi - lo > 1) {
+        const int32_t middle = lo + (hi - lo) / 2;
+        if (table->bound[middle] <= q) {
+            lo = middle;
+        } else {
+            hi = middle;
+        }
+    }
+    state->lo[s] = table->bound[lo];
+    state->hi[s] = table->bound[lo + 1];
+    state->slope[s] = table->slope[lo];
+    state->x0[s] = table->x0[lo];
+    state->y0[s] = table->y0[lo];
+}
+
+/* Curve values at time - delay[s]. Queries mostly stay inside the region of
+ * the previous one; the rare others are relocated by binary search. */
+static void evaluate_curve(const dsm_curve_table *table,
+                           dsm_curve_state *DSM_RESTRICT state,
+                           const double *DSM_RESTRICT delay, double time,
+                           double *DSM_RESTRICT out) {
+    int outside = 0;
+    for (int s = 0; s < DSM_TILE; s++) {
+        const double q = time - delay[s];
+        outside |= (q < state->lo[s]) | (q >= state->hi[s]);
+    }
+    if (outside) {
+        for (int s = 0; s < DSM_TILE; s++) {
+            const double q = time - delay[s];
+            if (q < state->lo[s] || q >= state->hi[s]) {
+                locate_region(table, state, s, q);
+            }
+        }
+    }
+    for (int s = 0; s < DSM_TILE; s++) {
+        const double q = time - delay[s];
+        out[s] = state->slope[s] * (q - state->x0[s]) + state->y0[s];
+    }
+}
+
+/* Delayed curve values of interval i: endpoint values start, mid, end for
+ * linear curves, half midpoints for step curves. */
+static void sample_curve(const dsm_curve_table *table, dsm_curve_state *state,
+                         const double *delay, const double *time,
+                         double values[3][DSM_TILE]) {
+    if (table->step) {
+        evaluate_curve(table, state, delay, 0.5 * (time[0] + time[1]),
+                       values[0]);
+        evaluate_curve(table, state, delay, 0.5 * (time[1] + time[2]),
+                       values[1]);
+    } else {
+        evaluate_curve(table, state, delay, time[0], values[0]);
+        evaluate_curve(table, state, delay, time[1], values[1]);
+        evaluate_curve(table, state, delay, time[2], values[2]);
+    }
+}
+
+/* Per-spin linear sources of both halves of interval i, with the operation
+ * order of the interval-major spatial source path. */
+static void fill_spatial_sources(const dsm_context *x, dsm_tile *t, int32_t i,
+                                 double h, dsm_source *out) {
+    const dsm_chunk *c = x->c;
+    const double *time = c->interval_time_s + 3 * (int64_t)i;
+    const double equilibrium = c->equilibrium;
+    const int mode = c->spatial_mode;
+    double rate[3][DSM_TILE];
+    double polarization[3][DSM_TILE];
+    sample_curve(&x->curves[0], &t->curve[0], t->delay, time, rate);
+    if (x->polarized) {
+        sample_curve(&x->curves[1], &t->curve[1], t->delay, time, polarization);
+    }
+    for (int half = 0; half < 2; half++) {
+        const double *ra = rate[half];
+        const double *rb = x->curves[0].step ? rate[half] : rate[half + 1];
+        const double *pa = polarization[half];
+        const double *pb =
+            x->curves[1].step ? polarization[half] : polarization[half + 1];
+        dsm_source *o = out + half;
+        for (int s = 0; s < DSM_TILE; s++) {
+            const double d = t->d[s];
+            double source_start, source_end, cs, ce;
+            if (mode == DSM_SOURCE_DIRECT) {
+                source_start = d * ra[s];
+                source_end = d * rb[s];
+                cs = 0.0;
+                ce = 0.0;
+            } else {
+                cs = d * ra[s];
+                ce = d * rb[s];
+                source_start = x->polarized ? cs * pa[s] : cs * 1.0;
+                source_end = x->polarized ? ce * pb[s] : ce * 1.0;
+                if (mode == DSM_SOURCE_POLARIZED) {
+                    cs = 0.0;
+                    ce = 0.0;
+                }
+            }
+            const double precursor_start = source_start - equilibrium * cs;
+            const double precursor_end = source_end - equilibrium * ce;
+            o->start[s] = precursor_start;
+            o->slope[s] = (precursor_end - precursor_start) / h;
+            o->cstart[s] = cs;
+            o->cslope[s] = (ce - cs) / h;
+        }
+    }
+}
+
 static void load_tile(const dsm_chunk *c, int64_t first, int valid,
                       dsm_tile *t, double *rw) {
     const int64_t n = c->nspins;
     const int ncoils = c->ncoils;
+    const int np = c->npools;
     memset(t, 0, sizeof(*t));
     memset(rw, 0, sizeof(double) * 2 * (size_t)ncoils * DSM_TILE);
     for (int s = 0; s < valid; s++) {
@@ -449,23 +746,25 @@ static void load_tile(const dsm_chunk *c, int64_t first, int valid,
         t->px[s] = c->positions_m[3 * spin];
         t->py[s] = c->positions_m[3 * spin + 1];
         t->pz[s] = c->positions_m[3 * spin + 2];
-        t->fs0[s] = c->b0_hz[spin] + c->pool_offset_hz[0];
-        t->fs1[s] = c->b0_hz[spin] + c->pool_offset_hz[1];
-        t->kpl[s] = c->kpl[spin];
+        for (int pool = 0; pool < np; pool++) {
+            t->fs[pool][s] = c->b0_hz[spin] + c->pool_offset_hz[pool];
+            t->x[pool][s] = c->transverse[2 * (pool * n + spin)];
+            t->y[pool][s] = c->transverse[2 * (pool * n + spin) + 1];
+            t->z[pool][s] = c->state[3 * (pool * n + spin) + 2];
+            if (c->track_concentration) {
+                t->c[pool][s] = c->concentration[3 * (pool * n + spin) + 2];
+            }
+        }
+        for (int j = 0; j < np - 1; j++) {
+            t->k[j][s] = c->conversion[j * n + spin];
+        }
         if (c->tx != NULL) {
             t->tx_real[s] = c->tx[2 * spin];
             t->tx_imag[s] = c->tx[2 * spin + 1];
         }
         t->d[s] = c->delivery != NULL ? c->delivery[spin] : 0.0;
-        t->x0[s] = c->transverse[2 * spin];
-        t->y0[s] = c->transverse[2 * spin + 1];
-        t->x1[s] = c->transverse[2 * (n + spin)];
-        t->y1[s] = c->transverse[2 * (n + spin) + 1];
-        t->P[s] = c->state[3 * spin + 2];
-        t->L[s] = c->state[3 * (n + spin) + 2];
-        if (c->track_concentration) {
-            t->Cp[s] = c->concentration[3 * spin + 2];
-            t->Cl[s] = c->concentration[3 * (n + spin) + 2];
+        if (c->spatial_sources) {
+            t->delay[s] = c->arrival_delay_s[spin];
         }
         for (int coil = 0; coil < ncoils; coil++) {
             const double *rx = c->rx + 2 * ((int64_t)coil * n + spin);
@@ -473,31 +772,35 @@ static void load_tile(const dsm_chunk *c, int64_t first, int valid,
             rw[(2 * coil + 1) * DSM_TILE + s] = rx[1] * c->weights[spin];
         }
     }
+    reset_curve_state(&t->curve[0]);
+    reset_curve_state(&t->curve[1]);
 }
 
 static void store_tile(const dsm_chunk *c, int64_t first, int valid,
                        const dsm_tile *t) {
     const int64_t n = c->nspins;
+    const int np = c->npools;
     for (int s = 0; s < valid; s++) {
         int64_t spin = first + s;
-        c->transverse[2 * spin] = t->x0[s];
-        c->transverse[2 * spin + 1] = t->y0[s];
-        c->transverse[2 * (n + spin)] = t->x1[s];
-        c->transverse[2 * (n + spin) + 1] = t->y1[s];
-        c->state[3 * spin + 2] = t->P[s];
-        c->state[3 * (n + spin) + 2] = t->L[s];
-        if (c->track_concentration) {
-            c->concentration[3 * spin + 2] = t->Cp[s];
-            c->concentration[3 * (n + spin) + 2] = t->Cl[s];
+        for (int pool = 0; pool < np; pool++) {
+            c->transverse[2 * (pool * n + spin)] = t->x[pool][s];
+            c->transverse[2 * (pool * n + spin) + 1] = t->y[pool][s];
+            c->state[3 * (pool * n + spin) + 2] = t->z[pool][s];
+            if (c->track_concentration) {
+                c->concentration[3 * (pool * n + spin) + 2] = t->c[pool][s];
+            }
         }
     }
 }
 
 /* Advance a tile across plan interval i. Gradient factors must already be
- * prepared for the first half; ``source`` is an 8-value source row or NULL. */
+ * prepared for the first half; ``source`` is an 8-value source row and
+ * ``spatial`` holds both halves of per-spin sources, or both are NULL. */
 static inline void step_interval(const dsm_chunk *c, const dsm_group *g,
                                  const double *slot, dsm_tile *t, int32_t i,
-                                 const double *source, const double *spatial_rf) {
+                                 const double *source, const dsm_source *spatial,
+                                 const double *spatial_rf) {
+    const int np = c->npools;
     const double h = g->half;
     const double pd1 = c->interval_phase_s[2 * i];
     const double pd2 = c->interval_phase_s[2 * i + 1];
@@ -506,35 +809,35 @@ static inline void step_interval(const dsm_chunk *c, const dsm_group *g,
 
     double da = pd1 - h;
     if (gradient || da != 0.0) {
-        transverse_corrected(t, slot, gradient, da, 0.0, da != 0.0);
+        transverse_corrected(t, np, slot, gradient, da, 0.0, da != 0.0);
     } else {
-        transverse_plain(t, slot);
+        transverse_plain(t, np, slot);
     }
-    longitudinal_half(t, slot, g->eb, source, c->equilibrium,
-                      c->track_concentration, c->concentration_sources);
+    longitudinal_half(c, g, slot, t, source, spatial);
 
     if (rf_index >= 0) {
         if (spatial_rf != NULL) {
-            rotate_spatial_rf(t->x0, t->y0, t->P, spatial_rf);
-            rotate_spatial_rf(t->x1, t->y1, t->L, spatial_rf);
+            for (int pool = 0; pool < np; pool++) {
+                rotate_spatial_rf(t->x[pool], t->y[pool], t->z[pool], spatial_rf);
+            }
         } else {
             const double *rf = c->rf_table + 5 * (int64_t)rf_index;
-            rotate_rf(t->x0, t->y0, t->P, rf);
-            rotate_rf(t->x1, t->y1, t->L, rf);
+            for (int pool = 0; pool < np; pool++) {
+                rotate_rf(t->x[pool], t->y[pool], t->z[pool], rf);
+            }
         }
     }
 
     da = pd2 - h;
     double db = gradient ? pd2 - pd1 : 0.0;
     if (gradient || da != 0.0) {
-        transverse_corrected(t, slot, gradient, da, db,
+        transverse_corrected(t, np, slot, gradient, da, db,
                              da != 0.0 || db != 0.0);
     } else {
-        transverse_plain(t, slot);
+        transverse_plain(t, np, slot);
     }
-    longitudinal_half(t, slot, g->eb, source != NULL ? source + 4 : NULL,
-                      c->equilibrium, c->track_concentration,
-                      c->concentration_sources);
+    longitudinal_half(c, g, slot, t, source != NULL ? source + 4 : NULL,
+                      spatial != NULL ? spatial + 1 : NULL);
 }
 
 /* Boundary actions at state index i + 1. */
@@ -543,6 +846,7 @@ static void run_actions(const dsm_chunk *c, dsm_tile *t, const double *rw,
                         int32_t i) {
     const int64_t n = c->nspins;
     const int ncoils = c->ncoils;
+    const int np = c->npools;
     const int64_t count = c->adc_payload_count;
     for (int64_t action = c->action_offsets[i];
          action < c->action_offsets[i + 1]; action++) {
@@ -550,33 +854,32 @@ static void run_actions(const dsm_chunk *c, dsm_tile *t, const double *rw,
         const int64_t payload = c->action_payloads[action];
         if (kind == DSM_ACTION_CRUSH) {
             if (c->ideal_crush) {
-                memset(t->x0, 0, sizeof(t->x0));
-                memset(t->y0, 0, sizeof(t->y0));
-                memset(t->x1, 0, sizeof(t->x1));
-                memset(t->y1, 0, sizeof(t->y1));
+                for (int pool = 0; pool < np; pool++) {
+                    memset(t->x[pool], 0, sizeof(t->x[pool]));
+                    memset(t->y[pool], 0, sizeof(t->y[pool]));
+                }
             }
         } else if (kind == DSM_ACTION_ADC) {
             const int64_t index = payload - c->adc_first_payload;
-            for (int coil = 0; coil < ncoils; coil++) {
-                const double *rw_r = rw + (2 * coil) * DSM_TILE;
-                const double *rw_i = rw + (2 * coil + 1) * DSM_TILE;
-                accumulate_adc(t->x0, t->y0, rw_r, rw_i,
-                               adc_block + 2 * ((int64_t)coil * count + index));
-                accumulate_adc(
-                    t->x1, t->y1, rw_r, rw_i,
-                    adc_block + 2 * ((int64_t)(ncoils + coil) * count + index));
+            for (int pool = 0; pool < np; pool++) {
+                for (int coil = 0; coil < ncoils; coil++) {
+                    const double *rw_r = rw + (2 * coil) * DSM_TILE;
+                    const double *rw_i = rw + (2 * coil + 1) * DSM_TILE;
+                    accumulate_adc(
+                        t->x[pool], t->y[pool], rw_r, rw_i,
+                        adc_block +
+                            2 * ((int64_t)(pool * ncoils + coil) * count + index));
+                }
             }
         } else if (kind == DSM_ACTION_CHECKPOINT) {
-            double *pyruvate = c->checkpoints + 3 * ((payload * 2) * n);
-            double *lactate = c->checkpoints + 3 * ((payload * 2 + 1) * n);
-            for (int s = 0; s < valid; s++) {
-                int64_t spin = first + s;
-                pyruvate[3 * spin] = t->x0[s];
-                pyruvate[3 * spin + 1] = t->y0[s];
-                pyruvate[3 * spin + 2] = t->P[s];
-                lactate[3 * spin] = t->x1[s];
-                lactate[3 * spin + 1] = t->y1[s];
-                lactate[3 * spin + 2] = t->L[s];
+            for (int pool = 0; pool < np; pool++) {
+                double *values = c->checkpoints + 3 * ((payload * np + pool) * n);
+                for (int s = 0; s < valid; s++) {
+                    int64_t spin = first + s;
+                    values[3 * spin] = t->x[pool][s];
+                    values[3 * spin + 1] = t->y[pool][s];
+                    values[3 * spin + 2] = t->z[pool][s];
+                }
             }
         }
     }
@@ -606,25 +909,26 @@ int32_t dsm_propagator_values(int32_t track_concentration, int32_t has_sources,
                      propagator_states(track_concentration != 0));
 }
 
-/* Tile state component in propagator order x0, y0, P, x1, y1, L, Cp, Cl. */
+/* Two-pool tile state component in propagator order x0, y0, P, x1, y1, L,
+ * Cp, Cl. */
 static inline double *tile_state(dsm_tile *t, int index) {
     switch (index) {
     case 0:
-        return t->x0;
+        return t->x[0];
     case 1:
-        return t->y0;
+        return t->y[0];
     case 2:
-        return t->P;
+        return t->z[0];
     case 3:
-        return t->x1;
+        return t->x[1];
     case 4:
-        return t->y1;
+        return t->y[1];
     case 5:
-        return t->L;
+        return t->z[1];
     case 6:
-        return t->Cp;
+        return t->c[0];
     default:
-        return t->Cl;
+        return t->c[1];
     }
 }
 
@@ -640,10 +944,11 @@ static double wall_seconds(void) {
  * with layout (column, state, TILE). Every column advances a unit state or a
  * unit source shape through the stepwise interval code, so an entry depends
  * only on the segment's plan values and the spin, not on where it is built. */
-static void build_propagator(const dsm_chunk *c, const dsm_group *groups,
-                             const dsm_tile *t, int32_t first, int32_t end,
-                             const double *basis, dsm_tile *columns,
-                             double *build_slots, double *out) {
+static void build_propagator(const dsm_context *x, const dsm_tile *t,
+                             int32_t first, int32_t end, const double *basis,
+                             dsm_tile *columns, double *build_slots,
+                             double *out) {
+    const dsm_chunk *c = x->c;
     const int n_state = propagator_states(c->track_concentration);
     const int n_columns = propagator_columns(
         c->track_concentration, c->has_sources, c->concentration_sources);
@@ -681,12 +986,11 @@ static void build_propagator(const dsm_chunk *c, const dsm_group *groups,
                 }
             }
             slot_group[slot] = group;
-            fill_slot(c, &groups[group], t,
-                      build_slots + (size_t)slot * DSM_SLOT_DOUBLES);
+            fill_slot(c, &x->groups[group], t,
+                      build_slots + (size_t)slot * x->slot_doubles);
         }
         last_used[slot] = i;
-        const double *coefficients =
-            build_slots + (size_t)slot * DSM_SLOT_DOUBLES;
+        const double *coefficients = build_slots + (size_t)slot * x->slot_doubles;
 
         const int32_t gradient_index = c->interval_gradient[i];
         if (gradient_index >= 0) {
@@ -724,8 +1028,8 @@ static void build_propagator(const dsm_chunk *c, const dsm_group *groups,
                 row[offset + 5] = node[3];
                 source = row;
             }
-            step_interval(c, &groups[group], coefficients, columns + column, i,
-                          source, spatial ? spatial_rf : NULL);
+            step_interval(c, &x->groups[group], coefficients, columns + column, i,
+                          source, NULL, spatial ? spatial_rf : NULL);
         }
     }
 
@@ -781,15 +1085,30 @@ static void apply_propagator(const dsm_chunk *c, dsm_tile *t,
     }
 }
 
-static void run_tile(const dsm_chunk *c, const dsm_group *groups,
-                     const int32_t *slot_of, const uint8_t *miss, int64_t tile,
-                     int64_t n_tiles, int32_t values, dsm_workspace *w,
-                     double *adc_block) {
+static void run_tile(const dsm_context *x, int64_t tile, int64_t n_tiles,
+                     int32_t values, dsm_workspace *w, double *adc_block) {
+    const dsm_chunk *c = x->c;
     const int64_t first = tile * DSM_TILE;
     const int64_t remaining = c->nspins - first;
     const int valid = (int)(remaining < DSM_TILE ? remaining : DSM_TILE);
     dsm_tile *t = w->tile;
     load_tile(c, first, valid, t, w->rw);
+
+    /* Delay range of the spins that receive inflow. An interval whose delayed
+     * query times all fall where the rate curve is zero has exactly zero
+     * source and takes the source-free update. */
+    int spatial_sources = 0;
+    double delay_min = INFINITY;
+    double delay_max = -INFINITY;
+    if (c->spatial_sources && x->rate_nonzero) {
+        for (int s = 0; s < valid; s++) {
+            if (t->d[s] != 0.0) {
+                delay_min = t->delay[s] < delay_min ? t->delay[s] : delay_min;
+                delay_max = t->delay[s] > delay_max ? t->delay[s] : delay_max;
+            }
+        }
+        spatial_sources = delay_min <= delay_max;
+    }
 
     int32_t segment = 0;
     for (int32_t i = 0; i < c->n_intervals; i++) {
@@ -803,7 +1122,7 @@ static void run_tile(const dsm_chunk *c, const dsm_group *groups,
             const int64_t basis = c->segment_basis[segment];
             if (basis >= 0) {
                 const double started = wall_seconds();
-                build_propagator(c, groups, t, i, end,
+                build_propagator(x, t, i, end,
                                  c->basis_rows +
                                      basis * DSM_SOURCE_NODES * 4,
                                  w->columns, w->build_slots, propagator);
@@ -814,9 +1133,9 @@ static void run_tile(const dsm_chunk *c, const dsm_group *groups,
             i = end - 1;
             segment++;
         } else {
-            const dsm_group *g = &groups[c->interval_group[i]];
-            double *slot = w->slots + (size_t)slot_of[i] * DSM_SLOT_DOUBLES;
-            if (miss[i]) {
+            const dsm_group *g = &x->groups[c->interval_group[i]];
+            double *slot = w->slots + (size_t)x->slot_of[i] * x->slot_doubles;
+            if (x->miss[i]) {
                 fill_slot(c, g, t, slot);
             }
             const int32_t gradient_index = c->interval_gradient[i];
@@ -832,10 +1151,20 @@ static void run_tile(const dsm_chunk *c, const dsm_group *groups,
             if (spatial) {
                 prepare_spatial_rf(t, c->rf_inputs + 3 * (int64_t)rf_index, spatial_rf);
             }
+            const dsm_source *delayed = NULL;
+            if (spatial_sources) {
+                const double *time = c->interval_time_s + 3 * (int64_t)i;
+                if (!(time[2] - delay_min < x->support_lo ||
+                      time[0] - delay_max >= x->support_hi)) {
+                    fill_spatial_sources(x, t, i, g->half, w->sources);
+                    delayed = w->sources;
+                }
+            }
             step_interval(c, g, slot, t, i,
                           source_index >= 0
                               ? c->source_table + 8 * (int64_t)source_index
-                              : NULL, spatial ? spatial_rf : NULL);
+                              : NULL,
+                          delayed, spatial ? spatial_rf : NULL);
         }
         run_actions(c, t, w->rw, first, valid, adc_block, i);
     }
@@ -851,6 +1180,14 @@ static int validate(const dsm_chunk *c) {
         c->n_blocks < 1 || c->n_intervals < 0 || c->n_groups < 1) {
         return -1;
     }
+    if (c->npools < 2 || c->npools > DSM_MAX_POOLS || c->conversion == NULL) {
+        return -1;
+    }
+    for (int pool = 0; pool < c->npools; pool++) {
+        if (!(c->t2_s[pool] > 0.0)) {
+            return -1;
+        }
+    }
     if (c->track_concentration && c->concentration == NULL) {
         return -1;
     }
@@ -864,6 +1201,29 @@ static int validate(const dsm_chunk *c) {
     if (c->n_checkpoints > 0 && c->checkpoints == NULL) {
         return -1;
     }
+    if (c->spatial_sources) {
+        if (!c->has_sources || c->interval_time_s == NULL ||
+            c->arrival_delay_s == NULL || c->n_segments != 0) {
+            return -1;
+        }
+        if (c->spatial_mode != DSM_SOURCE_COUPLED &&
+            c->spatial_mode != DSM_SOURCE_DIRECT &&
+            c->spatial_mode != DSM_SOURCE_POLARIZED) {
+            return -1;
+        }
+        if (c->concentration_sources !=
+            (c->spatial_mode == DSM_SOURCE_COUPLED)) {
+            return -1;
+        }
+        if (c->rate_curve.n < 1 || c->polarization_curve.n < 0) {
+            return -1;
+        }
+        for (int64_t spin = 0; spin < c->nspins; spin++) {
+            if (!isfinite(c->arrival_delay_s[spin])) {
+                return -1;
+            }
+        }
+    }
     for (int32_t i = 0; i < c->n_intervals; i++) {
         if (c->interval_group[i] < 0 || c->interval_group[i] >= c->n_groups ||
             c->interval_rf[i] >= c->n_rf ||
@@ -871,7 +1231,8 @@ static int validate(const dsm_chunk *c) {
             c->interval_source[i] >= c->n_source) {
             return -1;
         }
-        if (c->interval_source[i] >= 0 && !c->has_sources) {
+        if (c->interval_source[i] >= 0 &&
+            (!c->has_sources || c->spatial_sources)) {
             return -1;
         }
         if (c->action_offsets[i] > c->action_offsets[i + 1]) {
@@ -903,9 +1264,10 @@ static int validate(const dsm_chunk *c) {
         return -1;
     }
     if (c->n_segments > 0) {
-        if (c->segment_first == NULL || c->segment_end == NULL ||
-            c->segment_entry == NULL || c->segment_basis == NULL ||
-            c->segment_sources == NULL || c->propagators == NULL) {
+        if (c->npools != 2 || c->segment_first == NULL ||
+            c->segment_end == NULL || c->segment_entry == NULL ||
+            c->segment_basis == NULL || c->segment_sources == NULL ||
+            c->propagators == NULL) {
             return -1;
         }
         int32_t previous_end = 0;
@@ -976,6 +1338,39 @@ static void plan_slots(const dsm_chunk *c, int32_t *group_slot,
     }
 }
 
+/* Region tables of the delayed curves and the support of the rate curve. */
+static int prepare_curves(const dsm_chunk *c, dsm_context *x) {
+    int status = build_curve_table(&c->rate_curve, &x->curves[0]);
+    if (status != 0) {
+        return status;
+    }
+    x->polarized = c->spatial_mode != DSM_SOURCE_DIRECT &&
+                   c->polarization_curve.n > 0;
+    if (x->polarized) {
+        status = build_curve_table(&c->polarization_curve, &x->curves[1]);
+        if (status != 0) {
+            return status;
+        }
+    }
+    const dsm_curve_table *rate = &x->curves[0];
+    int32_t first_nonzero = -1;
+    int32_t last_nonzero = -1;
+    for (int32_t r = 0; r < rate->n_regions; r++) {
+        if (rate->slope[r] != 0.0 || rate->y0[r] != 0.0) {
+            if (first_nonzero < 0) {
+                first_nonzero = r;
+            }
+            last_nonzero = r;
+        }
+    }
+    x->rate_nonzero = first_nonzero >= 0;
+    if (x->rate_nonzero) {
+        x->support_lo = rate->bound[first_nonzero];
+        x->support_hi = rate->bound[last_nonzero + 1];
+    }
+    return 0;
+}
+
 static void *aligned_buffer(size_t bytes) {
     void *pointer = NULL;
     if (bytes == 0) {
@@ -1009,10 +1404,11 @@ int dsm_run_chunk(const dsm_chunk *c) {
     const int64_t n_tiles = (c->nspins + DSM_TILE - 1) / DSM_TILE;
     const int n_blocks = (int)(c->n_blocks < n_tiles ? c->n_blocks : n_tiles);
     const int n_threads = c->n_threads < n_blocks ? c->n_threads : n_blocks;
-    const size_t block_doubles =
-        4 * (size_t)c->ncoils * (size_t)c->adc_payload_count;
+    const size_t slot_size = slot_doubles(c->npools);
+    const size_t block_doubles = 2 * (size_t)c->npools * (size_t)c->ncoils *
+                                 (size_t)c->adc_payload_count;
     const size_t thread_doubles =
-        (size_t)DSM_SLOTS * DSM_SLOT_DOUBLES + 2 * (size_t)c->ncoils * DSM_TILE;
+        (size_t)DSM_SLOTS * slot_size + 2 * (size_t)c->ncoils * DSM_TILE;
     const int32_t values = dsm_propagator_values(
         c->track_concentration, c->has_sources, c->concentration_sources);
     const int n_columns = propagator_columns(
@@ -1022,11 +1418,15 @@ int dsm_run_chunk(const dsm_chunk *c) {
         builds = builds || c->segment_basis[k] >= 0;
     }
 
+    dsm_context context;
+    memset(&context, 0, sizeof(context));
     dsm_group *groups = malloc(sizeof(dsm_group) * (size_t)c->n_groups);
     int32_t *group_slot = malloc(sizeof(int32_t) * (size_t)c->n_groups);
     int32_t *slot_of = malloc(sizeof(int32_t) * (size_t)c->n_intervals);
     uint8_t *miss = malloc((size_t)c->n_intervals);
     dsm_tile *tiles = aligned_buffer(sizeof(dsm_tile) * (size_t)n_threads);
+    dsm_source *sources =
+        aligned_buffer(sizeof(dsm_source) * 2 * (size_t)n_threads);
     double *thread_buffers =
         aligned_buffer(sizeof(double) * thread_doubles * (size_t)n_threads);
     double *adc_blocks =
@@ -1038,22 +1438,33 @@ int dsm_run_chunk(const dsm_chunk *c) {
                                 (size_t)n_threads)
                : NULL;
     double *build_buffers =
-        builds ? aligned_buffer(sizeof(double) * DSM_BUILD_SLOTS *
-                                DSM_SLOT_DOUBLES * (size_t)n_threads)
+        builds ? aligned_buffer(sizeof(double) * DSM_BUILD_SLOTS * slot_size *
+                                (size_t)n_threads)
                : NULL;
     double build_seconds = 0.0;
     int status = 0;
     if (groups == NULL || group_slot == NULL || slot_of == NULL ||
-        miss == NULL || tiles == NULL || thread_buffers == NULL ||
-        (block_doubles > 0 && adc_blocks == NULL) ||
+        miss == NULL || tiles == NULL || sources == NULL ||
+        thread_buffers == NULL || (block_doubles > 0 && adc_blocks == NULL) ||
         (builds && (column_tiles == NULL || build_buffers == NULL))) {
         status = -2;
         goto cleanup;
+    }
+    if (c->spatial_sources) {
+        status = prepare_curves(c, &context);
+        if (status != 0) {
+            goto cleanup;
+        }
     }
     for (int32_t g = 0; g < c->n_groups; g++) {
         prepare_group(c, g, &groups[g]);
     }
     plan_slots(c, group_slot, slot_of, miss);
+    context.c = c;
+    context.groups = groups;
+    context.slot_of = slot_of;
+    context.miss = miss;
+    context.slot_doubles = slot_size;
 
 #ifdef _OPENMP
 #pragma omp parallel num_threads(n_threads)
@@ -1067,11 +1478,11 @@ int dsm_run_chunk(const dsm_chunk *c) {
         dsm_workspace w;
         w.tile = tiles + thread;
         w.slots = thread_buffers + (size_t)thread * thread_doubles;
-        w.rw = w.slots + (size_t)DSM_SLOTS * DSM_SLOT_DOUBLES;
+        w.rw = w.slots + (size_t)DSM_SLOTS * slot_size;
+        w.sources = sources + 2 * (size_t)thread;
         w.columns = builds ? column_tiles + (size_t)thread * n_columns : NULL;
         w.build_slots =
-            builds ? build_buffers + (size_t)thread * DSM_BUILD_SLOTS *
-                                         DSM_SLOT_DOUBLES
+            builds ? build_buffers + (size_t)thread * DSM_BUILD_SLOTS * slot_size
                    : NULL;
         w.build_seconds = 0.0;
         /* MSVC's C OpenMP parser requires a separately declared loop index. */
@@ -1086,8 +1497,7 @@ int dsm_run_chunk(const dsm_chunk *c) {
                 adc_blocks != NULL ? adc_blocks + (size_t)block * block_doubles
                                    : NULL;
             for (int64_t tile = first_tile; tile < end_tile; tile++) {
-                run_tile(c, groups, slot_of, miss, tile, n_tiles, values, &w,
-                         adc_block);
+                run_tile(&context, tile, n_tiles, values, &w, adc_block);
             }
         }
 #ifdef _OPENMP
@@ -1109,11 +1519,14 @@ int dsm_run_chunk(const dsm_chunk *c) {
     }
 
 cleanup:
+    free_curve_table(&context.curves[0]);
+    free_curve_table(&context.curves[1]);
     free(groups);
     free(group_slot);
     free(slot_of);
     free(miss);
     aligned_free(tiles);
+    aligned_free(sources);
     aligned_free(thread_buffers);
     free(adc_blocks);
     aligned_free(column_tiles);
