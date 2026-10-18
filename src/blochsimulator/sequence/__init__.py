@@ -108,6 +108,7 @@ from .pulseq import (
 from .pulseq_builders import (
     make_pulseq_bssfp,
     make_pulseq_csi,
+    EpiTimingPlan,
     EpsiMgeTimingPlan,
     FlashTimingPlan,
     make_pulseq_epsi_mge,
@@ -218,6 +219,7 @@ __all__ = [
     "make_cartesian_epi",
     "make_pulseq_bssfp",
     "make_pulseq_csi",
+    "EpiTimingPlan",
     "EpsiMgeTimingPlan",
     "FlashTimingPlan",
     "make_pulseq_epsi_mge",

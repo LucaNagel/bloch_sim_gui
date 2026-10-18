@@ -1050,6 +1050,62 @@ def test_sequence_workspace_resolves_flash_timing_conflicts():
     app.processEvents()
 
 
+@pytest.mark.parametrize("strategy", ["bipolar", "flyback"])
+@pytest.mark.parametrize("bandwidth_hz", [50e3, 150e3])
+def test_epi_timing_plan_matches_built_sequence(bandwidth_hz, strategy):
+    common = dict(
+        matrix=(16, 5),
+        n_slices=3,
+        readout_strategy=strategy,
+        sampling_bandwidth_hz=bandwidth_hz,
+    )
+    plan = make_pulseq_epi(
+        **common, echo_time_s=1e-6, repetition_time_s=1e-6, timing_only=True
+    )
+    sequence = make_pulseq_epi(
+        **common,
+        echo_time_s=plan.minimum_echo_time_s,
+        repetition_time_s=plan.minimum_repetition_time_s,
+    )
+    assert sequence.check_timing()[0]
+    assert sequence.definitions["TE"] == pytest.approx(plan.minimum_echo_time_s)
+    assert sequence.definitions["MinimumRepetitionTime"] == pytest.approx(
+        plan.minimum_repetition_time_s
+    )
+    with pytest.raises(ValueError, match="too short"):
+        make_pulseq_epi(**common, echo_time_s=1e-6)
+
+
+def test_sequence_workspace_resolves_epi_timing_conflicts():
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+    widget.sequence_live_preview.setChecked(False)
+    widget.sequence_source.setCurrentIndex(widget.EPI_SOURCE)
+    widget.epi_readout_trajectory.setCurrentText("Cartesian EPI")
+
+    widget.sampling_bandwidth_khz.setValue(150.0)
+    widget._settle_epi_timing()
+    assert widget.sampling_bandwidth_khz.value() != pytest.approx(150.0)
+    assert widget._reload_selected_generated_sequence()
+
+    # A TE or slice count that no longer fits raises the interval, not vice versa.
+    widget.epi_repetition_time_ms.setValue(100.0)
+    widget.epi_echo_time_ms.setValue(150.0)
+    assert widget.epi_repetition_time_ms.value() > 150.0
+    assert "Acquisition interval" in widget.epi_timing_info.text()
+    raised = widget.epi_repetition_time_ms.value()
+    widget.epi_echo_time_ms.setValue(20.0)
+    assert widget.epi_repetition_time_ms.value() == pytest.approx(raised)
+
+    widget.epi_slice_count.setValue(40)
+    assert widget.epi_repetition_time_ms.value() > raised
+    assert widget._reload_selected_generated_sequence()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
 def test_sequence_workspace_builds_flyback_epi_and_epsi_mge(tmp_path):
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()

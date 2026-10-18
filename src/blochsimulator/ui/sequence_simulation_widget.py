@@ -1226,6 +1226,12 @@ class SequenceSimulationWidget(QWidget):
         self.flash_timing_settle_timer.setSingleShot(True)
         self.flash_timing_settle_timer.setInterval(600)
         self.flash_timing_settle_timer.timeout.connect(self._settle_flash_timing)
+        self._resolving_epi_timing = False
+        self._epi_timing_notes: list[str] = []
+        self.epi_timing_settle_timer = QTimer(self)
+        self.epi_timing_settle_timer.setSingleShot(True)
+        self.epi_timing_settle_timer.setInterval(600)
+        self.epi_timing_settle_timer.timeout.connect(self._settle_epi_timing)
         self.sequence_plot_refresh_timer = QTimer(self)
         self.sequence_plot_refresh_timer.setSingleShot(True)
         self.sequence_plot_refresh_timer.setInterval(60)
@@ -2263,6 +2269,9 @@ class SequenceSimulationWidget(QWidget):
         )
         self.epi_echo_time_ms = self._parameter_spin(0.1, 10000.0, 20.0, " ms")
         self.epi_echo_time_ms.setObjectName("epi_echo_time_ms")
+        self.epi_timing_info = QLabel()
+        self.epi_timing_info.setObjectName("epi_timing_info")
+        self.epi_timing_info.setWordWrap(True)
         self.epi_echo_time_ms.setToolTip(
             "Time from the excitation centre to the centre of EPI k-space; "
             "for centre-out spiral this is the first ADC sample"
@@ -2355,6 +2364,7 @@ class SequenceSimulationWidget(QWidget):
             "Acquisition interval (start-to-start)",
             self.epi_repetition_time_ms,
         )
+        acquisition_form.addRow(self.epi_timing_info)
         acquisition_form.addRow("Repetitions", self.epi_repetitions)
         _add_form_section(acquisition_form, "Spoiling")
         acquisition_form.addRow("RF spoiling", self.epi_rf_spoiling)
@@ -6680,9 +6690,98 @@ class SequenceSimulationWidget(QWidget):
         )
 
     def _acquisition_changed(self, *_):
+        if self._cartesian_epi_timing_active():
+            self._resolve_epi_timing(protected=self.sender())
+            self.epi_timing_settle_timer.start()
         self._update_bandwidth_labels()
         self._update_spoiling_quality()
         self._request_generated_sequence_refresh()
+
+    def _cartesian_epi_timing_active(self):
+        return (
+            self.sequence_source.currentIndex() == self.EPI_SOURCE
+            and self.epi_readout_trajectory.currentText() != "Spiral"
+        )
+
+    def _settle_epi_timing(self):
+        """Correct the field the user last edited once input has paused."""
+        if not self._cartesian_epi_timing_active():
+            return
+        if self._resolve_epi_timing(protected=None, keep_notes=True):
+            self._update_bandwidth_labels()
+            self._request_generated_sequence_refresh()
+
+    def _resolve_epi_timing(self, protected=None, keep_notes=False):
+        """Raise Cartesian EPI bandwidth, TE and TR to mutually valid values.
+
+        Same policy as FLASH and EPSI / MGE: values below the shortest feasible
+        timing are raised, never lowered, and the control being edited is left
+        alone until input settles.  Returns whether any control changed.
+        """
+        if self._resolving_epi_timing or self._restoring_session_run:
+            return False
+        self._resolving_epi_timing = True
+        notes: list[str] = []
+        plan = None
+        try:
+            for _ in range(5):
+                try:
+                    plan = make_pulseq_epi(
+                        **self._epi_pulseq_parameters(), timing_only=True
+                    )
+                except Exception as exc:
+                    self._show_epi_timing_status(None, notes, error=str(exc))
+                    return bool(notes)
+                if not self._apply_epi_timing_plan(plan, protected, notes):
+                    break
+            if notes or not keep_notes:
+                self._epi_timing_notes = notes
+            self._show_epi_timing_status(plan, self._epi_timing_notes)
+        finally:
+            self._resolving_epi_timing = False
+        return bool(notes)
+
+    def _apply_epi_timing_plan(self, plan, protected, notes):
+        changed = False
+        control = self.sampling_bandwidth_khz
+        if control is not protected:
+            bandwidth_khz = self._ceil_spin_value(
+                plan.sampling_bandwidth_hz / 1000.0, control.decimals()
+            )
+            if abs(control.value() - bandwidth_khz) > 0.5 * 10.0 ** -control.decimals():
+                self._set_timing_control(
+                    control, bandwidth_khz, "Bandwidth", "kHz", notes
+                )
+                changed = True
+        for control, minimum_s, label in (
+            (self.epi_echo_time_ms, plan.minimum_echo_time_s, "TE"),
+            (
+                self.epi_repetition_time_ms,
+                plan.minimum_repetition_time_s,
+                "Acquisition interval",
+            ),
+        ):
+            changed |= self._raise_timing_control(
+                control, minimum_s, label, protected, notes
+            )
+        return changed
+
+    def _show_epi_timing_status(self, plan, notes, error=None):
+        if error is not None:
+            self.epi_timing_info.setText(f"Timing cannot be resolved: {error}")
+            self.epi_timing_info.setStyleSheet("color: #b00020;")
+            return
+        lines = []
+        if notes:
+            lines.append("Adjusted automatically: " + "; ".join(notes) + ".")
+        lines.append(
+            f"Shortest possible: TE {plan.minimum_echo_time_s * 1e3:.4g} ms, "
+            f"interval {plan.minimum_repetition_time_s * 1e3:.4g} ms."
+        )
+        self.epi_timing_info.setText("\n".join(lines))
+        self.epi_timing_info.setStyleSheet(
+            "color: #b45309;" if notes else "color: #475569;"
+        )
 
     def _readout_trajectory_changed(self, *_):
         spiral = self.epi_readout_trajectory.currentText() == "Spiral"
@@ -8995,6 +9094,8 @@ class SequenceSimulationWidget(QWidget):
         if self.epi_readout_trajectory.currentText() == "Spiral":
             return self._load_spiral()
         try:
+            self._resolve_epi_timing()
+            self._update_bandwidth_labels()
             sequence = make_pulseq_epi(**self._epi_pulseq_parameters())
             self._set_generated_pulseq_sequence(sequence, "internal-cartesian-epi")
             self._sync_sampling_bandwidth_control(self.sampling_bandwidth_khz, sequence)

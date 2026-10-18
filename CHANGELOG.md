@@ -20,6 +20,8 @@ The project follows [Semantic Versioning](https://semver.org/).
   acquisition interval are raised to the shortest feasible values (per RF pulse
   of an SPSP schedule), with a status line under the timing fields.
   `make_pulseq_flash(timing_only=True)` returns the limits.
+- Cartesian EPI resolves bandwidth, TE and the acquisition interval the same way
+  (`make_pulseq_epi(timing_only=True)` returns the limits); spiral is unchanged.
 - The sampling-bandwidth field of FLASH and Cartesian EPI is now rounded up when
   it shows the bandwidth the builder achieved, so repeated generation no longer
   lowers the bandwidth step by step (150 → 142.9 → 133.3 → 125 kHz).

@@ -1362,6 +1362,7 @@ def make_pulseq_epi(
     spoiler_duration_s: float = 4e-3,
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
     nucleus: str = "H1",
+    timing_only: bool = False,
 ):
     """Build a Cartesian single-shot EPI Pulseq sequence for export.
 
@@ -1631,7 +1632,7 @@ def make_pulseq_epi(
         + adc_duration / 2.0
     )
     requested_te_delay = float(echo_time_s) - echo_without_delay
-    if requested_te_delay < -1e-12:
+    if requested_te_delay < -1e-12 and not timing_only:
         raise ValueError(
             f"echo_time_s is too short; minimum is {echo_without_delay:.9g} s"
         )
@@ -1639,6 +1640,22 @@ def make_pulseq_epi(
         max(0.0, requested_te_delay), system.block_duration_raster
     )
     actual_te = echo_without_delay + te_delay_value
+    if timing_only:
+        slice_duration = (
+            rf_block_duration
+            + pp.calc_duration(gx_pre, gy_pre, gz_rephase)
+            + te_delay_value
+            + n_y * readout_block_duration
+            + (n_y - 1) * blip_duration
+            + pp.calc_duration(gx_post, gy_post)
+            + (pp.calc_duration(*spoilers) if spoilers else 0.0)
+        )
+        return EpiTimingPlan(
+            sampling_bandwidth_hz=1.0 / dwell,
+            dwell_s=float(dwell),
+            minimum_echo_time_s=float(echo_without_delay),
+            minimum_repetition_time_s=float(n_slices * slice_duration),
+        )
     _, slice_sign = encoding_frame.axis_and_sign("partition")
     package_duration = None
     actual_repetition_time = None
@@ -1796,6 +1813,16 @@ def make_pulseq_epi(
     sequence.set_definition("SpoilerEndTimes", spoiler_end_times)
     sequence.set_definition("IdealSpoilerEndTimes", spoiler_end_times)
     return sequence
+
+
+@dataclass(frozen=True)
+class EpiTimingPlan:
+    """Shortest feasible single-shot EPI timing for the requested parameters."""
+
+    sampling_bandwidth_hz: float
+    dwell_s: float
+    minimum_echo_time_s: float
+    minimum_repetition_time_s: float
 
 
 @dataclass(frozen=True)
