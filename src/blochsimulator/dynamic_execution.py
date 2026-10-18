@@ -31,6 +31,10 @@ class DynamicExecutionPlan:
     interval_start_s: np.ndarray
     interval_mid_s: np.ndarray
     interval_end_s: np.ndarray
+    # (mid - start, end - mid) per interval. Inside RF pulses these come from
+    # the compiler's pulse-relative grid, so identical pulses get identical
+    # half steps wherever they sit on the absolute timeline.
+    interval_half_s: np.ndarray
     rf_hz: np.ndarray
     gradient_hz_per_m: np.ndarray
     conversion_active: np.ndarray
@@ -53,6 +57,7 @@ class DynamicExecutionPlan:
             "interval_start_s": np.float64,
             "interval_mid_s": np.float64,
             "interval_end_s": np.float64,
+            "interval_half_s": np.float64,
             "rf_hz": np.complex128,
             "gradient_hz_per_m": np.float64,
             "conversion_active": np.bool_,
@@ -170,7 +175,15 @@ def build_dynamic_execution_plan(compiled, phantom) -> DynamicExecutionPlan:
         if interval_end_s.size
         else np.zeros(0, dtype=np.float64)
     )
-    interval_mid_s = interval_start_s + dt_s / 2.0
+    interval_mid_s = getattr(compiled, "interval_mid_s", None)
+    interval_half_s = getattr(compiled, "interval_half_s", None)
+    if interval_mid_s is None or interval_half_s is None:
+        interval_mid_s = interval_start_s + dt_s / 2.0
+        interval_half_s = np.column_stack(
+            (interval_mid_s - interval_start_s, interval_end_s - interval_mid_s)
+        ).reshape(-1, 2)
+    interval_mid_s = np.asarray(interval_mid_s, dtype=np.float64)
+    interval_half_s = np.asarray(interval_half_s, dtype=np.float64)
     conversion_active = (
         interval_mid_s >= phantom.conversion_start_on_sequence_timeline_s
     )
@@ -219,6 +232,8 @@ def build_dynamic_execution_plan(compiled, phantom) -> DynamicExecutionPlan:
     fingerprint_arrays = (
         dt_s,
         interval_end_s,
+        interval_mid_s,
+        interval_half_s,
         compiled.rf_hz,
         compiled.gradient_hz_per_m,
         conversion_active,
@@ -236,6 +251,7 @@ def build_dynamic_execution_plan(compiled, phantom) -> DynamicExecutionPlan:
         interval_start_s=interval_start_s,
         interval_mid_s=interval_mid_s,
         interval_end_s=interval_end_s,
+        interval_half_s=interval_half_s,
         rf_hz=compiled.rf_hz,
         gradient_hz_per_m=compiled.gradient_hz_per_m,
         conversion_active=conversion_active,

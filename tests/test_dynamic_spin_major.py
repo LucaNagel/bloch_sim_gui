@@ -552,6 +552,43 @@ def test_rf_cache_keys_conversion_state_of_each_occurrence():
     _assert_close(cached, stepwise)
 
 
+def test_rf_cache_gives_repeated_pulses_at_arbitrary_times_one_key():
+    # Decimal start times give every repetition different absolute rounding;
+    # the pulse-relative compilation must still make their keys equal.
+    raster = 2e-6
+    period = 0.7e-3
+    count = 24
+    events = []
+    for repetition in range(count):
+        start = 1.37e-3 + repetition * period
+        phase = np.deg2rad(117.0) * repetition * (repetition + 1) / 2
+        events.append(
+            RFEvent(start, CACHE_PULSE, raster, 150.0, phase_offset_rad=phase)
+        )
+        events.append(
+            GradientEvent("x", start - 6e-6, np.full(CACHE_PULSE.size + 6, 90.0), 2e-6)
+        )
+        events.append(ADCEvent(start + 30e-6, 2, raster, phase_offset_rad=-phase))
+    program = SequenceProgram(tuple(events), duration_s=1.37e-3 + count * period)
+    phantom = _phantom(inflow="polarized", tracked=True)
+    kwargs = dict(
+        simulation_timestep_s=4e-6,
+        checkpoints_s=(program.duration_s,),
+        spoiler_mode="gradient",
+    )
+
+    reference = _run(phantom, program, "optimized", **kwargs)
+    stepwise = _run(phantom, program, _native_spin_major_rf_cache=False, **kwargs)
+    cached = _run(phantom, program, **kwargs)
+
+    assert _rf_cache(cached, "keys") == 1
+    assert _rf_cache(cached, "builds") == 1
+    assert _rf_cache(cached, "applications") == count
+    assert _rf_cache(cached, "stepwise_segments") == 0
+    _assert_close(cached, reference)
+    _assert_close(cached, stepwise)
+
+
 def test_rf_cache_supports_slice_selective_pulses_constant_tx_multi_rx_and_subvoxels():
     phantom = _phantom(inflow="polarized", tracked=True)
     grid = np.linspace(0.0, 1.0, phantom.nvoxels).reshape(phantom.shape)

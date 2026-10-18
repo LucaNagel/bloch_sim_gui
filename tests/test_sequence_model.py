@@ -194,6 +194,72 @@ def test_compiler_uses_configured_rf_active_simulation_timestep():
     assert np.allclose(coarse.rf_hz, [3.0, 8.0])
 
 
+def _repeated_slice_selective_program(count=6, *, rf_raster=1e-6, step=1e-5):
+    # Pulse starts are not representable in binary, so absolute boundaries of
+    # the repetitions carry different rounding.
+    samples = np.sinc(np.linspace(-2.5, 2.5, 200)) * np.exp(
+        1j * np.linspace(0.0, 0.8, 200)
+    )
+    events = []
+    starts = []
+    for repetition in range(count):
+        start = 0.0123 + repetition * 0.1003
+        phase = np.deg2rad(117.0) * repetition * (repetition + 1) / 2
+        events.append(
+            RFEvent(start, 40.0 * samples, rf_raster, 300.0, phase_offset_rad=phase)
+        )
+        events.append(
+            GradientEvent("z", start - 12e-6, np.linspace(0.5, 1.5, 25) * 4e5, 10e-6)
+        )
+        starts.append(start)
+    program = SequenceProgram(tuple(events), duration_s=count * 0.1003 + 0.02)
+    return program, starts, samples.size * rf_raster, step
+
+
+def test_compiler_compiles_repeated_rf_pulses_identically():
+    program, starts, pulse_duration, step = _repeated_slice_selective_program()
+    compiled = SequenceCompiler().compile(program, simulation_timestep_s=step)
+    boundaries = np.concatenate(([0.0], compiled.interval_end_s))
+    intervals = int(round(pulse_duration / step))
+
+    ranges = []
+    for start in starts:
+        first = int(np.argmin(np.abs(boundaries - start)))
+        ranges.append(slice(first, first + intervals))
+        # Boundaries stay absolute: the pulse grid starts at the pulse start.
+        np.testing.assert_array_equal(
+            boundaries[first : first + intervals + 1][:-1],
+            start + np.arange(intervals) * step,
+        )
+        assert boundaries[first + intervals] == start + pulse_duration
+    absolute_dt = [np.diff(boundaries[r.start : r.stop + 1]) for r in ranges]
+    assert not all(np.array_equal(dt, absolute_dt[0]) for dt in absolute_dt[1:])
+
+    reference = ranges[0]
+    phases = [event.phase_offset_rad for event in program.rf_events]
+    for index, interval_range in enumerate(ranges[1:], start=1):
+        for name in ("dt_s", "interval_half_s", "gradient_hz_per_m"):
+            np.testing.assert_array_equal(
+                getattr(compiled, name)[interval_range],
+                getattr(compiled, name)[reference],
+                err_msg=name,
+            )
+        np.testing.assert_allclose(
+            compiled.rf_hz[interval_range],
+            compiled.rf_hz[reference] * np.exp(1j * (phases[index] - phases[0])),
+            rtol=1e-14,
+            atol=0.0,
+        )
+    assert compiled.metadata["pulse_relative_rf_events"] == len(starts)
+    np.testing.assert_allclose(
+        compiled.interval_mid_s,
+        boundaries[:-1] + np.diff(boundaries) / 2,
+        rtol=0.0,
+        atol=1e-15,
+    )
+    assert np.sum(compiled.dt_s) == pytest.approx(program.duration_s, abs=1e-14)
+
+
 def test_compiler_rejects_invalid_simulation_timestep():
     program = SequenceProgram((), duration_s=0.0)
     with pytest.raises(ValueError, match="simulation_timestep_s"):

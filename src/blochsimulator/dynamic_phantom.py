@@ -2434,9 +2434,7 @@ def _spin_major_rf_segment_keys(execution_plan, native_rf_hz, firsts, ends):
     checked against the first segment of the key.
     """
     dt = execution_plan.dt_s
-    start_s = execution_plan.interval_start_s
-    mid_s = execution_plan.interval_mid_s
-    end_s = execution_plan.interval_end_s
+    half = execution_plan.interval_half_s
     gradient = execution_plan.gradient_hz_per_m
     conversion = execution_plan.conversion_active
     representatives = {}
@@ -2451,8 +2449,7 @@ def _spin_major_rf_segment_keys(execution_plan, native_rf_hz, firsts, ends):
             (
                 np.float64(float(f"{energy:.9e}")).tobytes(),
                 dt[first:end].tobytes(),
-                (mid_s[first:end] - start_s[first:end]).tobytes(),
-                (end_s[first:end] - mid_s[first:end]).tobytes(),
+                half[first:end].tobytes(),
                 gradient[first:end].tobytes(),
                 conversion[first:end].tobytes(),
             )
@@ -2502,9 +2499,7 @@ def _spin_major_rf_propagator_plan(
     )
 
     dt = execution_plan.dt_s
-    start_s = execution_plan.interval_start_s
-    mid_s = execution_plan.interval_mid_s
-    end_s = execution_plan.interval_end_s
+    half = execution_plan.interval_half_s
     segment_key = _spin_major_rf_segment_keys(
         execution_plan, native_rf_hz, firsts, ends
     )
@@ -2523,13 +2518,7 @@ def _spin_major_rf_propagator_plan(
             continue
         first = int(firsts[members[0]])
         end = int(ends[members[0]])
-        phase = np.stack(
-            (
-                mid_s[first:end] - start_s[first:end],
-                end_s[first:end] - mid_s[first:end],
-            ),
-            axis=1,
-        )
+        phase = np.ascontiguousarray(half[first:end])
         basis = _spin_major_source_basis(phase, dt[first:end] / 2.0)
         if basis is None:
             continue
@@ -2740,14 +2729,8 @@ def _spin_major_plan_slice(
         )
         source_table = np.ascontiguousarray(rows[source_mask])
 
-    phase = np.empty((interval_count, 2), dtype=np.float64)
-    phase[:, 0] = (
-        execution_plan.interval_mid_s[interval_slice]
-        - execution_plan.interval_start_s[interval_slice]
-    )
-    phase[:, 1] = (
-        execution_plan.interval_end_s[interval_slice]
-        - execution_plan.interval_mid_s[interval_slice]
+    phase = np.ascontiguousarray(
+        execution_plan.interval_half_s[interval_slice], dtype=np.float64
     )
 
     action_offsets = np.searchsorted(
@@ -3856,9 +3839,7 @@ def _simulate_dynamic_sequence_block(
         while end < hard_end and native_rf_hz[end] != 0.0:
             if end > first_interval and end in protected_state_set:
                 break
-            interval_left = 0.0 if end == 0 else float(compiled.interval_end_s[end - 1])
-            interval_right = float(compiled.interval_end_s[end])
-            if (interval_left + interval_right) / 2.0 < conversion_start_s:
+            if not execution_plan.conversion_active[end]:
                 break
             if spatial_tx_active:
                 rf_group_key = (
@@ -3882,35 +3863,28 @@ def _simulate_dynamic_sequence_block(
         factor_keys = []
         longitudinal_keys = []
         rf_values = []
-        interval_left = (
-            0.0
-            if first_interval == 0
-            else float(compiled.interval_end_s[first_interval - 1])
-        )
         for block_interval in range(first_interval, end_interval):
             dt_value = float(compiled.dt_s[block_interval])
-            interval_right = float(compiled.interval_end_s[block_interval])
-            interval_middle = interval_left + dt_value / 2.0
+            first_phase, second_phase = execution_plan.interval_half_s[block_interval]
             half_duration = dt_value / 2.0
             gradient_key = tuple(
                 float(value) for value in gradient_hz_per_m[block_interval]
             )
             first_key = (
                 half_duration,
-                float(interval_middle - interval_left),
+                float(first_phase),
                 gradient_key,
                 None,
             )
             second_key = (
                 half_duration,
-                float(interval_right - interval_middle),
+                float(second_phase),
                 gradient_key,
                 None,
             )
             factor_keys.append((first_key, second_key))
             longitudinal_keys.append((half_duration, True))
             rf_values.append(complex(native_rf_hz[block_interval]))
-            interval_left = interval_right
         plan_key = (
             tuple(factor_keys),
             tuple(longitudinal_keys),
@@ -4373,13 +4347,9 @@ def _simulate_dynamic_sequence_block(
 
             for block_interval in range(first_interval, end_interval):
                 half_duration = float(execution_plan.dt_s[block_interval]) / 2.0
-                first_phase_duration = float(
-                    execution_plan.interval_mid_s[block_interval]
-                    - execution_plan.interval_start_s[block_interval]
-                )
-                second_phase_duration = float(
-                    execution_plan.interval_end_s[block_interval]
-                    - execution_plan.interval_mid_s[block_interval]
+                first_phase_duration, second_phase_duration = (
+                    float(value)
+                    for value in execution_plan.interval_half_s[block_interval]
                 )
                 gradient_key = tuple(
                     float(value) for value in gradient_hz_per_m[block_interval]
@@ -5219,8 +5189,8 @@ def _simulate_dynamic_sequence_block(
                 b0[None, :] + pool_offsets[:, None] + gradient_frequency[None, :]
             )
 
-            def phase_cycles(start_s, end_s):
-                phase = static_frequencies * (end_s - start_s)
+            def phase_cycles(start_s, end_s, duration_s):
+                phase = static_frequencies * duration_s
                 if phantom.dynamic_b0 is not None:
                     dynamic_integral = phantom.dynamic_b0.offset_curve_hz.integral(
                         start_s, end_s
@@ -5268,7 +5238,11 @@ def _simulate_dynamic_sequence_block(
             )
             _free_step(
                 state,
-                phase_cycles(interval_start, interval_mid),
+                phase_cycles(
+                    interval_start,
+                    interval_mid,
+                    execution_plan.interval_half_s[interval, 0],
+                ),
                 t2,
                 interval_kpl,
                 r1,
@@ -5290,7 +5264,11 @@ def _simulate_dynamic_sequence_block(
             )
             _free_step(
                 state,
-                phase_cycles(interval_mid, interval_end),
+                phase_cycles(
+                    interval_mid,
+                    interval_end,
+                    execution_plan.interval_half_s[interval, 1],
+                ),
                 t2,
                 interval_kpl,
                 r1,
@@ -5347,8 +5325,9 @@ def _simulate_dynamic_sequence_block(
                     if conversion_active
                     else inactive_concentration_longitudinal_scratch
                 )
-            first_phase_duration = interval_mid - interval_start
-            second_phase_duration = interval_end - interval_mid
+            first_phase_duration, second_phase_duration = (
+                float(value) for value in execution_plan.interval_half_s[interval]
+            )
             if phantom.dynamic_b0 is None:
                 first_dynamic_integral = second_dynamic_integral = None
             else:

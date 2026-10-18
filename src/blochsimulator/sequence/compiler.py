@@ -30,11 +30,32 @@ class CompiledSequence:
     adc_gradient_moment_cyc_per_m: np.ndarray = field(
         default_factory=lambda: np.zeros((0, 3), dtype=float)
     )
+    # Absolute interval midpoints and the half-step durations (mid - start,
+    # end - mid). Inside an RF pulse the compiler evaluates both on the
+    # pulse-relative grid, so they need not equal differences of absolute
+    # boundary times. Derived from the boundaries when omitted.
+    interval_mid_s: np.ndarray | None = None
+    interval_half_s: np.ndarray | None = None
 
     def __post_init__(self) -> None:
+        if self.interval_mid_s is None or self.interval_half_s is None:
+            dt = np.asarray(self.dt_s, dtype=np.float64)
+            end = np.asarray(self.interval_end_s, dtype=np.float64)
+            start = np.concatenate(([0.0], end[:-1])) if end.size else end
+            middle = start + dt / 2.0
+            if self.interval_mid_s is None:
+                object.__setattr__(self, "interval_mid_s", middle)
+            if self.interval_half_s is None:
+                object.__setattr__(
+                    self,
+                    "interval_half_s",
+                    np.column_stack((middle - start, end - middle)).reshape(-1, 2),
+                )
         for name in (
             "dt_s",
             "interval_end_s",
+            "interval_mid_s",
+            "interval_half_s",
             "rf_hz",
             "gradient_hz_per_m",
             "adc_times_s",
@@ -160,15 +181,50 @@ class SequenceCompiler:
             simulation_timestep_s,
             acquisition_only,
         )
+        rf_events = program.rf_events
+        frames = {}
         if boundaries.size == 1:
             dt = np.zeros(0, dtype=float)
             interval_end = np.zeros(0, dtype=float)
+            interval_mid = np.zeros(0, dtype=float)
+            interval_half = np.zeros((0, 2), dtype=float)
             rf = np.zeros(0, dtype=np.complex128)
             gradients = np.zeros((0, 3), dtype=float)
         else:
             starts = boundaries[:-1]
             interval_end = boundaries[1:]
             dt = interval_end - starts
+            interval_mid = starts + dt / 2.0
+            interval_half = np.column_stack(
+                (interval_mid - starts, interval_end - interval_mid)
+            )
+            # RF pulses are compiled on their own pulse-relative time grid:
+            # absolute boundaries carry the rounding of the pulse start, so
+            # identical pulses at different times would otherwise get
+            # slightly different dt, half steps, RF and gradient integrals.
+            # The boundaries themselves stay absolute.
+            if not acquisition_only:
+                frames = self._rf_pulse_frames(
+                    rf_events,
+                    boundaries,
+                    simulation_timestep_s,
+                    self._time_tolerance(program.duration_s),
+                )
+            frame_of_interval = np.full(dt.size, -1, dtype=np.int64)
+            local_start = np.zeros(dt.size, dtype=float)
+            local_end = np.zeros(dt.size, dtype=float)
+            for event_index, (first, last, local) in frames.items():
+                lower = local[:-1]
+                upper = local[1:]
+                width = upper - lower
+                middle = lower + width / 2.0
+                frame_of_interval[first:last] = event_index
+                local_start[first:last] = lower
+                local_end[first:last] = upper
+                dt[first:last] = width
+                interval_mid[first:last] = rf_events[event_index].start_s + middle
+                interval_half[first:last, 0] = middle - lower
+                interval_half[first:last, 1] = upper - middle
             rf_integrals = np.zeros(dt.size, dtype=np.complex128)
             gradient_integrals = np.zeros((dt.size, 3), dtype=float)
 
@@ -178,8 +234,18 @@ class SequenceCompiler:
             if acquisition_only:
                 status("Skipping RF rasterization for acquisition inference…")
             else:
-                status(f"Rasterizing {len(program.rf_events):,} RF events…")
-                for event in program.rf_events:
+                status(f"Rasterizing {len(rf_events):,} RF events…")
+                for event_index, event in enumerate(rf_events):
+                    frame = frames.get(event_index)
+                    if frame is not None:
+                        for index in range(frame[0], frame[1]):
+                            rf_integrals[index] += self._rf_event_integral(
+                                event,
+                                local_start[index],
+                                local_end[index],
+                                event_start_s=0.0,
+                            )
+                        continue
                     first, last = self._overlapping_interval_range(
                         interval_end, starts, event.start_s, event.end_s
                     )
@@ -188,18 +254,43 @@ class SequenceCompiler:
                             event, starts[index], interval_end[index]
                         )
             status(f"Rasterizing {len(program.gradient_events):,} gradient events…")
+            tolerance = self._time_tolerance(program.duration_s)
             for event in program.gradient_events:
                 axis_index = "xyz".index(event.axis)
                 first, last = self._overlapping_interval_range(
                     interval_end, starts, event.start_s, event.end_s
                 )
+                local_event_starts = {}
                 for index in range(first, last):
+                    event_index = int(frame_of_interval[index])
+                    if event_index < 0:
+                        event_start, interval_start, interval_stop = (
+                            event.start_s,
+                            starts[index],
+                            interval_end[index],
+                        )
+                    else:
+                        event_start = local_event_starts.get(event_index)
+                        if event_start is None:
+                            event_start = self._pulse_relative_offset(
+                                rf_events[event_index],
+                                frames[event_index][2],
+                                event.start_s,
+                                simulation_timestep_s,
+                                event.raster_s,
+                                tolerance,
+                            )
+                            local_event_starts[event_index] = event_start
+                        interval_start, interval_stop = (
+                            local_start[index],
+                            local_end[index],
+                        )
                     gradient_integrals[index, axis_index] += self._event_integral(
-                        event.start_s,
+                        event_start,
                         event.raster_s,
                         event.samples_hz_per_m,
-                        starts[index],
-                        interval_end[index],
+                        interval_start,
+                        interval_stop,
                     )
             rf = rf_integrals / dt
             gradients = gradient_integrals / dt[:, None]
@@ -219,6 +310,8 @@ class SequenceCompiler:
         return CompiledSequence(
             dt_s=np.asarray(dt, dtype=np.float64),
             interval_end_s=np.asarray(interval_end, dtype=np.float64),
+            interval_mid_s=np.asarray(interval_mid, dtype=np.float64),
+            interval_half_s=np.asarray(interval_half, dtype=np.float64),
             rf_hz=np.asarray(rf, dtype=np.complex128),
             gradient_hz_per_m=np.asarray(gradients, dtype=np.float64),
             adc_times_s=adc_times,
@@ -237,6 +330,7 @@ class SequenceCompiler:
                 "extra_boundary_count": int(extra_boundaries.size),
                 "transverse_crush_count": int(transverse_crush_times.size),
                 "acquisition_only": bool(acquisition_only),
+                "pulse_relative_rf_events": len(frames),
             },
         )
 
@@ -376,19 +470,10 @@ class SequenceCompiler:
         rf_starts = np.asarray([value[0] for value in rf_ranges], dtype=float)
         rf_ends = np.asarray([value[1] for value in rf_ranges], dtype=float)
         rf_max_ends = np.maximum.accumulate(rf_ends)
+        tolerance = self._time_tolerance(program.duration_s)
         for event in program.rf_events:
-            step = (
-                event.raster_s
-                if simulation_timestep_s is None
-                else max(event.raster_s, simulation_timestep_s)
-            )
-            internal_count = max(
-                0,
-                int(np.ceil((event.end_s - event.start_s) / step)) - 1,
-            )
-            values.extend(
-                (event.start_s + np.arange(1, internal_count + 1) * step).tolist()
-            )
+            grid = self._rf_local_grid(event, simulation_timestep_s, tolerance)
+            values.extend((event.start_s + grid[1:-1]).tolist())
         if simulation_timestep_s is not None:
             return self._coalesce_boundaries(values, program.duration_s)
         for event in program.gradient_events:
@@ -423,12 +508,155 @@ class SequenceCompiler:
         return self._coalesce_boundaries(values, program.duration_s)
 
     @staticmethod
-    def _coalesce_boundaries(values, duration: float) -> np.ndarray:
-        boundaries = np.sort(np.asarray(values, dtype=float))
-        tolerance = max(
-            1e-15,
-            32 * np.spacing(max(1.0, abs(duration))),
+    def _time_tolerance(duration: float) -> float:
+        """Return the distance below which two sequence times coincide."""
+        return float(max(1e-15, 32 * np.spacing(max(1.0, abs(duration)))))
+
+    @staticmethod
+    def _rf_step(event: RFEvent, simulation_timestep_s: float | None) -> float:
+        """Return the boundary step inside one RF event."""
+        if simulation_timestep_s is None:
+            return event.raster_s
+        return max(event.raster_s, simulation_timestep_s)
+
+    @staticmethod
+    def _rf_local_grid(
+        event: RFEvent, simulation_timestep_s: float | None, tolerance: float
+    ) -> np.ndarray:
+        """Return the pulse-relative RF boundaries from 0 to the pulse duration.
+
+        The grid depends only on the pulse itself, never on its start time.
+        Steps closer than ``tolerance`` to the end coincide with it.
+        """
+        step = SequenceCompiler._rf_step(event, simulation_timestep_s)
+        duration = event.samples_hz.size * event.raster_s
+        internal = np.arange(1, max(1, int(np.ceil(duration / step))), dtype=float)
+        internal = internal * step
+        internal = internal[internal < duration - tolerance]
+        return np.concatenate(([0.0], internal, [duration]))
+
+    @classmethod
+    def _rf_pulse_frames(
+        cls,
+        rf_events: Sequence[RFEvent],
+        boundaries: np.ndarray,
+        simulation_timestep_s: float | None,
+        tolerance: float,
+    ) -> dict:
+        """Map RF event indices to (first interval, end interval, local times).
+
+        The local times are the pulse's boundaries relative to its start,
+        snapped to the pulse grid or the RF raster when they lie within
+        ``tolerance`` of it, so the absolute rounding of the start cancels.
+        Overlapping RF events and pulses whose boundaries do not tile the
+        pulse exactly keep absolute compilation.
+        """
+        order = sorted(range(len(rf_events)), key=lambda i: rf_events[i].start_s)
+        overlapping = set()
+        cluster = []
+        cluster_end = -np.inf
+        for event_index in order:
+            event = rf_events[event_index]
+            if cluster and event.start_s < cluster_end - tolerance:
+                cluster.append(event_index)
+                cluster_end = max(cluster_end, event.end_s)
+                continue
+            if len(cluster) > 1:
+                overlapping.update(cluster)
+            cluster = [event_index]
+            cluster_end = event.end_s
+        if len(cluster) > 1:
+            overlapping.update(cluster)
+
+        frames = {}
+        for event_index, event in enumerate(rf_events):
+            if event_index in overlapping:
+                continue
+            grid = cls._rf_local_grid(event, simulation_timestep_s, tolerance)
+            duration = grid[-1]
+            if duration <= 2 * tolerance:
+                continue
+            first = cls._nearest_boundary(boundaries, event.start_s, tolerance)
+            last = cls._nearest_boundary(boundaries, event.end_s, tolerance)
+            if first is None or last is None or last <= first:
+                continue
+            local = cls._snap_local_times(
+                boundaries[first : last + 1] - event.start_s,
+                grid,
+                event.raster_s,
+                tolerance,
+            )
+            if (
+                local[0] != 0.0
+                or local[-1] != duration
+                or np.any(local[1:] <= local[:-1])
+            ):
+                continue
+            frames[event_index] = (first, last, local)
+        return frames
+
+    @staticmethod
+    def _nearest_boundary(
+        boundaries: np.ndarray, time_s: float, tolerance: float
+    ) -> int | None:
+        index = int(np.searchsorted(boundaries, time_s))
+        candidates = [
+            candidate
+            for candidate in (index - 1, index)
+            if 0 <= candidate < boundaries.size
+            and abs(boundaries[candidate] - time_s) <= tolerance
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda value: abs(boundaries[value] - time_s))
+
+    @staticmethod
+    def _snap_local_times(
+        offsets: np.ndarray, grid: np.ndarray, raster: float, tolerance: float
+    ) -> np.ndarray:
+        """Snap pulse-relative times to the pulse grid, then the RF raster."""
+        offsets = np.asarray(offsets, dtype=float)
+        index = np.clip(np.searchsorted(grid, offsets), 1, grid.size - 1)
+        left = grid[index - 1]
+        right = grid[index]
+        nearest = np.where(offsets - left <= right - offsets, left, right)
+        on_raster = np.round(offsets / raster) * raster
+        return np.where(
+            np.abs(offsets - nearest) <= tolerance,
+            nearest,
+            np.where(np.abs(offsets - on_raster) <= tolerance, on_raster, offsets),
         )
+
+    @classmethod
+    def _pulse_relative_offset(
+        cls,
+        event: RFEvent,
+        local: np.ndarray,
+        time_s: float,
+        simulation_timestep_s: float | None,
+        raster: float,
+        tolerance: float,
+    ) -> float:
+        """Return ``time_s`` relative to the pulse start, snapped like its grid.
+
+        Times off the pulse's local boundaries snap to the pulse step, the RF
+        raster, or ``raster`` (the other event's raster), in that order.
+        """
+        offset = time_s - event.start_s
+        nearest = local[np.argmin(np.abs(local - offset))]
+        if abs(offset - nearest) <= tolerance:
+            return float(nearest)
+        steps = (cls._rf_step(event, simulation_timestep_s), event.raster_s, raster)
+        for step in steps:
+            snapped = np.round(offset / step) * step
+            if abs(offset - snapped) <= tolerance:
+                return float(snapped)
+        return float(offset)
+
+    @classmethod
+    def _coalesce_boundaries(cls, values, duration: float) -> np.ndarray:
+        boundaries = np.sort(np.asarray(values, dtype=float))
+        tolerance = cls._time_tolerance(duration)
         boundaries[np.abs(boundaries) < tolerance] = 0.0
         boundaries[np.abs(boundaries - duration) < tolerance] = duration
         boundaries = boundaries[(boundaries >= 0) & (boundaries <= duration)]
@@ -447,27 +675,38 @@ class SequenceCompiler:
         return np.asarray(coalesced, dtype=float)
 
     @staticmethod
-    def _rf_event_integral(event: RFEvent, start: float, end: float):
-        overlap_start = max(start, event.start_s)
-        overlap_end = min(end, event.end_s)
+    def _rf_event_integral(
+        event: RFEvent, start: float, end: float, event_start_s: float | None = None
+    ):
+        """Integrate one RF event over [start, end].
+
+        ``event_start_s`` places the event on another time axis, e.g. 0.0 for
+        pulse-relative ``start`` and ``end``.
+        """
+        event_start = event.start_s if event_start_s is None else event_start_s
+        overlap_start = max(start, event_start)
+        overlap_end = min(end, event_start + event.samples_hz.size * event.raster_s)
         if overlap_start >= overlap_end:
             return 0j
-        first = max(0, int(np.floor((overlap_start - event.start_s) / event.raster_s)))
+        first = max(0, int(np.floor((overlap_start - event_start) / event.raster_s)))
         last = min(
             event.samples_hz.size - 1,
-            int(np.ceil((overlap_end - event.start_s) / event.raster_s)) - 1,
+            int(np.ceil((overlap_end - event_start) / event.raster_s)) - 1,
         )
         total = 0j
         for index in range(first, last + 1):
-            cell_start = event.start_s + index * event.raster_s
+            cell_start = event_start + index * event.raster_s
             cell_end = cell_start + event.raster_s
             width = max(
                 0.0, min(overlap_end, cell_end) - max(overlap_start, cell_start)
             )
-            phase = event.phase_offset_rad + 2 * np.pi * event.frequency_offset_hz * (
-                cell_start - event.start_s
-            )
+            phase = 2 * np.pi * event.frequency_offset_hz * (cell_start - event_start)
             total += event.samples_hz[index] * np.exp(1j * phase) * width
+        # The constant phase is applied once, so pulses that differ only in
+        # their phase offset (e.g. RF spoiling) differ by one exact rotation
+        # instead of by the rounding of large phase arguments.
+        if event.phase_offset_rad != 0.0:
+            total = np.exp(1j * event.phase_offset_rad) * total
         return total
 
     @staticmethod
