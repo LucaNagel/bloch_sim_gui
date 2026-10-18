@@ -964,6 +964,40 @@ def test_sequence_workspace_builds_and_exports_configurable_fov(tmp_path):
     app.processEvents()
 
 
+@pytest.mark.parametrize("bandwidth_hz", [50e3, 100e3, 150e3, 200e3, 77e3])
+@pytest.mark.parametrize("strategy", ["bipolar", "flyback"])
+def test_epsi_mge_timing_plan_matches_built_sequence(bandwidth_hz, strategy):
+    common = dict(
+        matrix=(16, 3),
+        echoes=4,
+        readout_strategy=strategy,
+        sampling_bandwidth_hz=bandwidth_hz,
+    )
+    plan = make_pulseq_epsi_mge(
+        **common,
+        echo_spacing_s=1e-6,
+        echo_time_s=1e-6,
+        repetition_time_s=1e-6,
+        timing_only=True,
+    )
+    # Every bandwidth is moved onto a raster-compatible one, so the ADC delay
+    # check cannot fail, and the planned minima are exactly buildable.
+    sequence = make_pulseq_epsi_mge(
+        **common,
+        echo_spacing_s=plan.minimum_echo_spacing_s,
+        echo_time_s=plan.minimum_echo_time_s + 1e-5,
+        repetition_time_s=plan.minimum_repetition_time_s + 1e-5,
+    )
+    assert sequence.check_timing()[0]
+    assert sequence.definitions["SamplingBandwidth"] == pytest.approx(
+        plan.sampling_bandwidth_hz
+    )
+    assert sequence.definitions["RequestedSamplingBandwidth"] == bandwidth_hz
+    assert sequence.definitions["EchoSpacing"] == pytest.approx(
+        plan.minimum_echo_spacing_s
+    )
+
+
 def test_sequence_workspace_builds_flyback_epi_and_epsi_mge(tmp_path):
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()
@@ -1051,6 +1085,63 @@ def test_sequence_workspace_exports_pulseq_and_reproduction_notebook_by_default(
     for source in code_cells:
         exec(compile(source, str(notebook_path), "exec"), namespace)
     assert output.read_text(encoding="utf-8") == original_sequence
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_workspace_resolves_epsi_mge_timing_conflicts():
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+    widget.sequence_live_preview.setChecked(False)
+    widget.sequence_source.setCurrentIndex(widget.EPSI_MGE_SOURCE)
+
+    # 150 kHz is not raster-compatible: the field moves to the nearest usable
+    # bandwidth and the sequence builds without a timing error.
+    widget.epsi_sampling_bandwidth_khz.setValue(150.0)
+    widget._settle_epsi_mge_timing()
+    assert widget.epsi_sampling_bandwidth_khz.value() != pytest.approx(150.0)
+    assert widget._reload_selected_generated_sequence()
+
+    # Raising TE1 pushes TR up, never the other way round.
+    widget.epsi_repetition_time_ms.setValue(50.0)
+    widget.epsi_echo_time_ms.setValue(60.0)
+    assert widget.epsi_repetition_time_ms.value() > 60.0
+    assert "TR" in widget.epsi_timing_info.text()
+    raised_tr = widget.epsi_repetition_time_ms.value()
+    widget.epsi_echo_time_ms.setValue(6.0)
+    assert widget.epsi_repetition_time_ms.value() == pytest.approx(raised_tr)
+
+    # A longer echo train raises the echo-spacing-dependent minimum TR.
+    widget.epsi_echoes.setValue(64)
+    assert widget.epsi_repetition_time_ms.value() > raised_tr
+    assert widget._reload_selected_generated_sequence()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+@pytest.mark.parametrize("source_name", ["FLASH_SOURCE", "EPI_SOURCE"])
+def test_sequence_workspace_bandwidth_does_not_drift_on_regeneration(source_name):
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+    widget.sequence_live_preview.setChecked(False)
+    widget.sequence_source.setCurrentIndex(getattr(widget, source_name))
+    control = (
+        widget.flash_sampling_bandwidth_khz
+        if source_name == "FLASH_SOURCE"
+        else widget.sampling_bandwidth_khz
+    )
+    control.setValue(150.0)
+
+    assert widget._reload_selected_generated_sequence()
+    settled = control.value()
+    assert settled == pytest.approx(142.857, abs=0.01)
+    for _ in range(3):
+        assert widget._reload_selected_generated_sequence()
+        assert control.value() == pytest.approx(settled)
 
     widget.close()
     widget.deleteLater()

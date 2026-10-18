@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import copy
+from dataclasses import dataclass
 import json
 from typing import Mapping, Sequence
 
@@ -1797,6 +1798,19 @@ def make_pulseq_epi(
     return sequence
 
 
+@dataclass(frozen=True)
+class EpsiMgeTimingPlan:
+    """Hardware-compatible timing limits of an EPSI / MGE parameter set."""
+
+    sampling_bandwidth_hz: float
+    dwell_s: float
+    readout_block_duration_s: float
+    minimum_echo_spacing_s: float
+    minimum_echo_time_s: float
+    minimum_repetition_time_s: float
+    minimum_acquisition_interval_s: float
+
+
 def make_pulseq_epsi_mge(
     *,
     fov_m: Sequence[float] = (0.22, 0.22),
@@ -1835,6 +1849,7 @@ def make_pulseq_epsi_mge(
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
     nucleus: str = "H1",
+    timing_only: bool = False,
 ):
     """Build a phase-encoded 2D EPSI / multi-gradient-echo sequence.
 
@@ -1843,6 +1858,12 @@ def make_pulseq_epsi_mge(
     series, or Fourier transformed along the uniformly spaced echo dimension
     for EPSI processing. Bipolar readout alternates the spatial traversal;
     flyback readout acquires every echo in the same direction.
+
+    With ``timing_only=True`` no sequence is assembled.  The function instead
+    returns an :class:`EpsiMgeTimingPlan` holding the hardware-compatible
+    sampling bandwidth and the shortest echo spacing, first echo time,
+    repetition time and acquisition interval for the given parameters.  Requested
+    timings below these minima are reported rather than rejected.
     """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -1914,12 +1935,7 @@ def make_pulseq_epsi_mge(
         },
     )
     sequence = pp.Sequence(system)
-    dwell = (
-        round((1.0 / sampling_bandwidth_hz) / system.adc_raster_time)
-        * system.adc_raster_time
-    )
-    if dwell <= 0:
-        raise ValueError("sampling bandwidth exceeds the ADC raster capability")
+    dwell = _centered_adc_dwell(1.0 / sampling_bandwidth_hz, n_x, system)
 
     rf_events, actual_rf_duration_s, effective_rf_tbw, rf_pulse_type = (
         _make_slice_selective_rf_events(
@@ -1974,9 +1990,41 @@ def make_pulseq_epsi_mge(
     )
     readout_area = logical_gradient_area(gx_positive, encoding_frame, "read")
     readout_block_duration = pp.calc_duration(gx_positive, adc)
-    actual_echo_spacing = _ceil_to_raster(echo_spacing_s, system.block_duration_raster)
+    block_raster = system.block_duration_raster
+    actual_echo_spacing = _ceil_to_raster(echo_spacing_s, block_raster)
+    minimum_echo_spacing = _ceil_to_raster(readout_block_duration, block_raster)
+    if strategy == "flyback" and echoes > 1:
+        # The flyback gradient needs extra time beyond the bare readout, so find
+        # the shortest spacing at which it fits the scanner's gradient limits.
+        for _ in range(5000):
+            try:
+                make_role_trapezoid(
+                    pp,
+                    encoding_frame,
+                    "read",
+                    area=-readout_area,
+                    # Test slightly short so float noise at an exact boundary
+                    # cannot make the reported minimum unbuildable.
+                    duration=minimum_echo_spacing - readout_block_duration - 1e-9,
+                    system=system,
+                )
+                break
+            except Exception:
+                minimum_echo_spacing += block_raster
+        else:
+            raise ValueError(
+                "no echo spacing leaves enough time for the flyback gradient; "
+                "reduce the readout area or increase scanner gradient performance"
+            )
+    if timing_only:
+        actual_echo_spacing = max(actual_echo_spacing, minimum_echo_spacing)
     connector_duration = actual_echo_spacing - readout_block_duration
-    if connector_duration < -system.block_duration_raster / 2:
+    if actual_echo_spacing < minimum_echo_spacing - block_raster / 2:
+        if strategy == "flyback" and echoes > 1:
+            raise ValueError(
+                "echo_spacing_s leaves too little time for the flyback gradient; "
+                f"use at least {minimum_echo_spacing:.9g} s"
+            )
         raise ValueError(
             "echo_spacing_s is shorter than the readout gradient duration; "
             f"use at least {readout_block_duration:.9g} s"
@@ -1984,20 +2032,14 @@ def make_pulseq_epsi_mge(
     connector_duration = max(0.0, connector_duration)
     between_echo_event = None
     if strategy == "flyback" and echoes > 1:
-        try:
-            between_echo_event = make_role_trapezoid(
-                pp,
-                encoding_frame,
-                "read",
-                area=-readout_area,
-                duration=connector_duration,
-                system=system,
-            )
-        except Exception as exc:
-            raise ValueError(
-                "echo_spacing_s leaves too little time for the flyback gradient; "
-                "increase echo spacing or scanner gradient performance"
-            ) from exc
+        between_echo_event = make_role_trapezoid(
+            pp,
+            encoding_frame,
+            "read",
+            area=-readout_area,
+            duration=connector_duration,
+            system=system,
+        )
     elif connector_duration:
         between_echo_event = pp.make_delay(connector_duration)
 
@@ -2071,7 +2113,7 @@ def make_pulseq_epsi_mge(
         + adc_center_from_readout_start
     )
     requested_te_delay = float(echo_time_s) - echo_without_delay
-    if requested_te_delay < -1e-12:
+    if requested_te_delay < -1e-12 and not timing_only:
         raise ValueError(
             f"echo_time_s is too short; minimum is {echo_without_delay:.9g} s"
         )
@@ -2091,6 +2133,17 @@ def make_pulseq_epsi_mge(
         + (spoiler_duration_s if spoilers else 0.0)
     )
     actual_tr = _ceil_to_raster(repetition_time_s, system.block_duration_raster)
+    if timing_only:
+        actual_tr = max(actual_tr, _ceil_to_raster(minimum_tr, block_raster))
+        return EpsiMgeTimingPlan(
+            sampling_bandwidth_hz=1.0 / dwell,
+            dwell_s=dwell,
+            readout_block_duration_s=readout_block_duration,
+            minimum_echo_spacing_s=minimum_echo_spacing,
+            minimum_echo_time_s=float(echo_without_delay),
+            minimum_repetition_time_s=minimum_tr,
+            minimum_acquisition_interval_s=n_slices * n_y * actual_tr,
+        )
     if actual_tr < minimum_tr - 1e-12:
         raise ValueError(
             f"repetition_time_s is too short; minimum is {minimum_tr:.9g} s"
@@ -2216,6 +2269,7 @@ def make_pulseq_epsi_mge(
         matrix=(n_x, n_y, n_slices),
     )
     sequence.set_definition("SamplingBandwidth", 1.0 / dwell)
+    sequence.set_definition("RequestedSamplingBandwidth", sampling_bandwidth_hz)
     sequence.set_definition("Echoes", echoes)
     sequence.set_definition("EchoTimes", echo_times)
     sequence.set_definition("TE", actual_first_te)

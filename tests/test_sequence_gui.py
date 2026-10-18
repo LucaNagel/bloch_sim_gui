@@ -1479,7 +1479,8 @@ def test_epi_generation_uses_nearest_supported_bandwidth():
 
     assert widget.program.source == "internal-cartesian-epi"
     assert widget._generated_pulseq_sequence.check_timing()[0]
-    assert widget.sampling_bandwidth_khz.value() == pytest.approx(142.857)
+    # The field is rounded up (not to nearest) so regenerating keeps the same dwell.
+    assert widget.sampling_bandwidth_khz.value() == pytest.approx(142.857, abs=1.5e-3)
     assert widget.acquisition.sampling_bandwidth_hz == pytest.approx(
         142_857.14285714287
     )

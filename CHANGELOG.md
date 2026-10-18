@@ -6,6 +6,20 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- EPSI / MGE parameters now resolve against each other as you edit them. The
+  sampling bandwidth snaps to the nearest ADC/RF-raster-compatible value
+  (fixing the ADC-delay raster error at e.g. 150 kHz), and echo spacing, TE1,
+  TR and the measurement interval are raised when a change pushes them below
+  their shortest possible value. Values are never lowered automatically, and a
+  status line under "Timing" lists the adjustments and the current minima.
+  `make_pulseq_epsi_mge(timing_only=True)` returns these limits without
+  building a sequence.
+- The sampling-bandwidth field of FLASH and Cartesian EPI is now rounded up when
+  it shows the bandwidth the builder achieved, so repeated generation no longer
+  lowers the bandwidth step by step (150 → 142.9 → 133.3 → 125 kHz).
+
 ## [2.9.0] - 2026-10-17
 
 ### Added

@@ -1214,6 +1214,12 @@ class SequenceSimulationWidget(QWidget):
         self.probe_playback_timer = QTimer(self)
         self.probe_playback_timer.setInterval(16)
         self.probe_playback_timer.timeout.connect(self._advance_probe_playback)
+        self._resolving_epsi_timing = False
+        self._epsi_timing_notes: list[str] = []
+        self.epsi_timing_settle_timer = QTimer(self)
+        self.epsi_timing_settle_timer.setSingleShot(True)
+        self.epsi_timing_settle_timer.setInterval(600)
+        self.epsi_timing_settle_timer.timeout.connect(self._settle_epsi_mge_timing)
         self.sequence_plot_refresh_timer = QTimer(self)
         self.sequence_plot_refresh_timer.setSingleShot(True)
         self.sequence_plot_refresh_timer.setInterval(60)
@@ -2434,6 +2440,9 @@ class SequenceSimulationWidget(QWidget):
             0.0, 1000.0, 0.0, " cycles/voxel"
         )
         self.epsi_spoiler_duration_ms = self._parameter_spin(0.001, 1000.0, 2.0, " ms")
+        self.epsi_timing_info = QLabel()
+        self.epsi_timing_info.setObjectName("epsi_timing_info")
+        self.epsi_timing_info.setWordWrap(True)
         self.epsi_dwell_info = QLabel()
         self.epsi_pixel_bandwidth_info = QLabel()
         self.epsi_spectral_info = QLabel()
@@ -2474,6 +2483,7 @@ class SequenceSimulationWidget(QWidget):
             "Measurement interval (start-to-start)",
             self.epsi_acquisition_interval_ms,
         )
+        epsi_form.addRow(self.epsi_timing_info)
         _add_form_section(epsi_form, "Spoiling")
         epsi_form.addRow("RF spoiling", self.epsi_rf_spoiling)
         epsi_form.addRow("RF spoiling increment", self.epsi_rf_spoiling_increment_deg)
@@ -6687,10 +6697,136 @@ class SequenceSimulationWidget(QWidget):
         return self._shared_rf_parameters("epi")
 
     def _epsi_mge_changed(self, *_):
+        if self.sequence_source.currentIndex() == self.EPSI_MGE_SOURCE:
+            # Fields other than the one being edited follow it immediately; the
+            # edited field itself is only corrected once typing has settled.
+            self._resolve_epsi_mge_timing(protected=self.sender())
+            self.epsi_timing_settle_timer.start()
         self._update_epsi_mge_labels()
         self._update_spoiling_quality()
         if self.sequence_source.currentIndex() == self.EPSI_MGE_SOURCE:
             self._request_generated_sequence_refresh()
+
+    def _settle_epsi_mge_timing(self):
+        """Correct the field the user last edited once input has paused."""
+        if self.sequence_source.currentIndex() != self.EPSI_MGE_SOURCE:
+            return
+        if self._resolve_epsi_mge_timing(protected=None, keep_notes=True):
+            self._update_epsi_mge_labels()
+            self._request_generated_sequence_refresh()
+
+    @staticmethod
+    def _ceil_spin_value(value, decimals):
+        """Round up to a spin box's precision so the minimum stays satisfied."""
+        scale = 10.0**decimals
+        return float(np.ceil(float(value) * scale - 1e-6) / scale)
+
+    def _resolve_epsi_mge_timing(self, protected=None, keep_notes=False):
+        """Bring EPSI / MGE bandwidth and timings into a mutually valid state.
+
+        The scanner's ADC / RF rasters fix the achievable sampling bandwidth, and
+        bandwidth, matrix, RF, echo count and spoilers fix the shortest possible
+        echo spacing, TE1, TR and measurement interval.  Values below those limits
+        are raised; larger values are never reduced.  ``protected`` is the control
+        the user is currently editing and is left untouched.  Returns whether any
+        control changed.
+        """
+        if self._resolving_epsi_timing or self._restoring_session_run:
+            return False
+        self._resolving_epsi_timing = True
+        notes: list[str] = []
+        plan = None
+        try:
+            for _ in range(5):
+                try:
+                    plan = make_pulseq_epsi_mge(
+                        **self._epsi_mge_pulseq_parameters(), timing_only=True
+                    )
+                except Exception as exc:
+                    self._show_epsi_timing_status(None, notes, error=str(exc))
+                    return bool(notes)
+                if not self._apply_epsi_timing_plan(plan, protected, notes):
+                    break
+            if notes or not keep_notes:
+                self._epsi_timing_notes = notes
+            self._show_epsi_timing_status(plan, self._epsi_timing_notes)
+        finally:
+            self._resolving_epsi_timing = False
+        return bool(notes)
+
+    def _apply_epsi_timing_plan(self, plan, protected, notes):
+        """Raise controls below their limits; return whether any was changed."""
+        changed = False
+
+        def set_value(control, value, label, unit, decimals):
+            nonlocal changed
+            previous = control.value()
+            previous_signals = control.blockSignals(True)
+            control.setValue(value)
+            control.blockSignals(previous_signals)
+            changed = True
+            notes.append(
+                f"{label} {previous:.4g} → {control.value():.{decimals}g} {unit}"
+            )
+
+        control = self.epsi_sampling_bandwidth_khz
+        if control is not protected:
+            bandwidth_khz = self._ceil_spin_value(
+                plan.sampling_bandwidth_hz / 1000.0, control.decimals()
+            )
+            if abs(control.value() - bandwidth_khz) > 0.5 * 10.0 ** -control.decimals():
+                set_value(control, bandwidth_khz, "Bandwidth", "kHz", 6)
+        for control, minimum_s, label, decimals in (
+            (
+                self.epsi_echo_spacing_ms,
+                plan.minimum_echo_spacing_s,
+                "Echo spacing",
+                self.epsi_echo_spacing_ms.decimals(),
+            ),
+            (
+                self.epsi_echo_time_ms,
+                plan.minimum_echo_time_s,
+                "TE1",
+                self.epsi_echo_time_ms.decimals(),
+            ),
+            (
+                self.epsi_repetition_time_ms,
+                plan.minimum_repetition_time_s,
+                "TR",
+                self.epsi_repetition_time_ms.decimals(),
+            ),
+        ):
+            if control is protected:
+                continue
+            minimum_ms = self._ceil_spin_value(minimum_s * 1000.0, decimals)
+            if control.value() < minimum_ms - 1e-9:
+                set_value(control, minimum_ms, label, "ms", 6)
+        control = self.epsi_acquisition_interval_ms
+        if control is not protected and control.value() > 0.0:
+            minimum_ms = self._ceil_spin_value(
+                plan.minimum_acquisition_interval_s * 1000.0, control.decimals()
+            )
+            if control.value() < minimum_ms - 1e-9:
+                set_value(control, minimum_ms, "Measurement interval", "ms", 8)
+        return changed
+
+    def _show_epsi_timing_status(self, plan, notes, error=None):
+        if error is not None:
+            self.epsi_timing_info.setText(f"Timing cannot be resolved: {error}")
+            self.epsi_timing_info.setStyleSheet("color: #b00020;")
+            return
+        lines = []
+        if notes:
+            lines.append("Adjusted automatically: " + "; ".join(notes) + ".")
+        lines.append(
+            f"Shortest possible: echo spacing {plan.minimum_echo_spacing_s * 1e3:.4g} ms, "
+            f"TE1 {plan.minimum_echo_time_s * 1e3:.4g} ms, "
+            f"TR {plan.minimum_repetition_time_s * 1e3:.4g} ms."
+        )
+        self.epsi_timing_info.setText("\n".join(lines))
+        self.epsi_timing_info.setStyleSheet(
+            "color: #b45309;" if notes else "color: #475569;"
+        )
 
     def _csi_changed(self, *_):
         self._update_csi_labels()
@@ -8803,6 +8939,8 @@ class SequenceSimulationWidget(QWidget):
 
     def _load_epsi_mge(self):
         try:
+            self._resolve_epsi_mge_timing()
+            self._update_epsi_mge_labels()
             sequence = make_pulseq_epsi_mge(**self._epsi_mge_pulseq_parameters())
             self._set_generated_pulseq_sequence(sequence, "internal-epsi-mge-2d")
             return True
@@ -8952,6 +9090,11 @@ class SequenceSimulationWidget(QWidget):
             return
         if not np.isfinite(actual_khz) or actual_khz <= 0:
             return
+        # Round up to the control's precision: rounding to nearest can land just
+        # below the achieved dwell's bandwidth, so the next build would pick the
+        # next slower dwell and the shown bandwidth would creep downwards.
+        scale = 10.0 ** control.decimals()
+        actual_khz = float(np.ceil(actual_khz * scale - 1e-6) / scale)
         previous = control.blockSignals(True)
         control.setValue(actual_khz)
         control.blockSignals(previous)
