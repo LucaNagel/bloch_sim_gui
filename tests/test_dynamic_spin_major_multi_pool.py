@@ -322,33 +322,6 @@ def test_spin_major_multi_pool_result_does_not_depend_on_slices_or_threads(
         np.testing.assert_array_equal(getattr(sliced, name), getattr(serial, name))
 
 
-@pytest.mark.parametrize(
-    "n_pools, max_delay_s, reason",
-    [
-        (3, None, "multi-pool phantoms are unsupported"),
-        (2, 6 * RASTER, "spatial inflow delays are unsupported"),
-    ],
-)
-def test_rf_cache_falls_back_for_multi_pool_and_spatial_inflow(
-    n_pools, max_delay_s, reason
-):
-    phantom = _phantom(
-        n_pools, inflow="polarized", tracked=True, max_delay_s=max_delay_s
-    )
-    program = _program()
-
-    stepwise = _run(phantom, program, _native_spin_major_rf_cache=False)
-    result = _run(phantom, program, _native_spin_major_rf_cache=True)
-
-    assert result.metadata["native_spin_major_enabled"] is True
-    assert result.metadata["native_spin_major_rf_propagator_enabled"] is False
-    assert result.metadata["native_spin_major_rf_propagator_fallback_reason"] == (
-        reason
-    )
-    for name in OUTPUTS:
-        np.testing.assert_array_equal(getattr(result, name), getattr(stepwise, name))
-
-
 def test_spin_major_falls_back_beyond_six_pools():
     phantom = _phantom(7, inflow="polarized", tracked=True)
 
@@ -381,3 +354,5 @@ def test_kernel_capabilities_report_spin_major_extensions():
     assert native.details["spin_major"]
     assert native.details["spin_major_multi_pool"]
     assert native.details["spin_major_spatial_inflow"]
+    assert native.details["spin_major_rf_cache_multi_pool"]
+    assert native.details["spin_major_rf_cache_phase"]

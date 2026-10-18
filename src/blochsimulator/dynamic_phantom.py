@@ -2157,6 +2157,10 @@ _SPIN_MAJOR_MAX_POOLS = 6
 _SPIN_MAJOR_RF_PROPAGATOR_ENTRIES = 8
 _SPIN_MAJOR_RF_PROPAGATOR_MIN_OCCURRENCES = 16
 _SPIN_MAJOR_RF_PROPAGATOR_SOURCE_TOLERANCE = 1e-12
+# Segments whose RF differs only by a constant phase share one entry, applied
+# as R_z(t) A R_z(-t). The phase-rotated RF must match the occurrence's own RF
+# to this many float64 epsilons of the pulse amplitude.
+_SPIN_MAJOR_RF_PROPAGATOR_PHASE_EPSILONS = 64
 
 
 def _spin_major_requested(value):
@@ -2181,7 +2185,7 @@ def _spin_major_kernel():
         from .dynamic_spin_major_cy import API_VERSION, TILE_SPINS, run_spin_major_chunk
     except (ImportError, OSError):
         return None
-    if API_VERSION != 3:
+    if API_VERSION != 4:
         return None
     return run_spin_major_chunk, int(TILE_SPINS)
 
@@ -2301,7 +2305,8 @@ class _SpinMajorRfPropagatorPlan:
     Occurrence ``k`` replaces intervals ``[first[k], end[k])`` by propagator
     entry ``entry[k]`` with source weights ``sources[k]``. A nonnegative
     ``basis[k]`` builds that entry first from the source basis rows starting
-    at that row of ``basis_rows``.
+    at that row of ``basis_rows``. ``phase[k]`` holds (cos t, sin t) of the
+    rotation R_z(t) A R_z(-t) that maps the entry's build to occurrence ``k``.
     """
 
     first: np.ndarray
@@ -2309,10 +2314,12 @@ class _SpinMajorRfPropagatorPlan:
     entry: np.ndarray
     basis: np.ndarray
     sources: np.ndarray
+    phase: np.ndarray
     basis_rows: np.ndarray
     capacity: int
     keys: int
     builds: int
+    rotated: int
 
 
 def _spin_major_source_samples(execution_plan, index, *, source_mode, equilibrium):
@@ -2395,6 +2402,73 @@ def _spin_major_rf_lru(occurrence_keys, capacity):
     return entries, builds
 
 
+def _spin_major_rf_phasor(rf, reference):
+    """Return the unit phasor u with rf == u * reference, or None.
+
+    The match must hold to _SPIN_MAJOR_RF_PROPAGATOR_PHASE_EPSILONS float64
+    epsilons of the reference amplitude in every interval, so a propagator
+    built for ``reference`` and rotated by the phase of u reproduces ``rf`` to
+    rounding.
+    """
+    scale = float(np.abs(reference).max())
+    if scale == 0.0:
+        return 1.0 + 0.0j if not np.any(rf) else None
+    overlap = complex(np.sum(rf * np.conj(reference)))
+    magnitude = abs(overlap)
+    if magnitude == 0.0:
+        return None
+    phasor = overlap / magnitude
+    tolerance = (
+        _SPIN_MAJOR_RF_PROPAGATOR_PHASE_EPSILONS * np.finfo(np.float64).eps * scale
+    )
+    if float(np.abs(rf - phasor * reference).max()) > tolerance:
+        return None
+    return phasor
+
+
+def _spin_major_rf_segment_keys(execution_plan, native_rf_hz, firsts, ends):
+    """Return phase-free segment keys.
+
+    Segments share a key when every per-interval input of the stepwise code
+    but the RF is bitwise equal and their RF differs only by a constant phase,
+    checked against the first segment of the key.
+    """
+    dt = execution_plan.dt_s
+    start_s = execution_plan.interval_start_s
+    mid_s = execution_plan.interval_mid_s
+    end_s = execution_plan.interval_end_s
+    gradient = execution_plan.gradient_hz_per_m
+    conversion = execution_plan.conversion_active
+    representatives = {}
+    segment_key = np.empty(firsts.size, dtype=np.int64)
+    keys = 0
+    for index, (first, end) in enumerate(zip(firsts.tolist(), ends.tolist())):
+        rf = native_rf_hz[first:end]
+        energy = float(np.sum(rf.real * rf.real + rf.imag * rf.imag))
+        # The energy bucket only narrows the phase search; a near-boundary
+        # rounding split costs a cache hit, never accuracy.
+        group = b"".join(
+            (
+                np.float64(float(f"{energy:.9e}")).tobytes(),
+                dt[first:end].tobytes(),
+                (mid_s[first:end] - start_s[first:end]).tobytes(),
+                (end_s[first:end] - mid_s[first:end]).tobytes(),
+                gradient[first:end].tobytes(),
+                conversion[first:end].tobytes(),
+            )
+        )
+        candidates = representatives.setdefault(group, [])
+        for key, reference in candidates:
+            if _spin_major_rf_phasor(rf, reference) is not None:
+                segment_key[index] = key
+                break
+        else:
+            candidates.append((keys, rf))
+            segment_key[index] = keys
+            keys += 1
+    return segment_key
+
+
 def _spin_major_rf_propagator_plan(
     execution_plan,
     native_rf_hz,
@@ -2402,17 +2476,20 @@ def _spin_major_rf_propagator_plan(
     source_mode,
     equilibrium,
     track_concentration,
-    states,
-    values,
+    columns,
     entry_bytes,
     budget_bytes,
+    spatial_sources=False,
 ):
     """Plan cached RF segment propagators of one block.
 
     Returns the plan or None, and the fallback reason. Segments are keyed by
-    every per-interval input of the stepwise code, so equal keys give equal
-    propagators per spin wherever they are built. Occurrences whose source
-    samples do not follow the quadratic source basis run stepwise.
+    every per-interval input of the stepwise code up to a constant RF phase,
+    so equal keys give propagators per spin that are exact z rotations of
+    each other wherever they are built. Occurrences whose global source
+    samples do not follow the quadratic source basis, or whose RF phase does
+    not match the entry's build to rounding, run stepwise. With spatial
+    sources the executor evaluates the source weights per spin.
     """
     rf_segments = execution_plan.segment_kinds == SEGMENT_RF
     firsts = execution_plan.segment_start_intervals[rf_segments]
@@ -2428,22 +2505,9 @@ def _spin_major_rf_propagator_plan(
     start_s = execution_plan.interval_start_s
     mid_s = execution_plan.interval_mid_s
     end_s = execution_plan.interval_end_s
-    gradient = execution_plan.gradient_hz_per_m
-    conversion = execution_plan.conversion_active
-    key_index = {}
-    segment_key = np.empty(firsts.size, dtype=np.int64)
-    for index, (first, end) in enumerate(zip(firsts.tolist(), ends.tolist())):
-        key = b"".join(
-            (
-                native_rf_hz[first:end].tobytes(),
-                dt[first:end].tobytes(),
-                (mid_s[first:end] - start_s[first:end]).tobytes(),
-                (end_s[first:end] - mid_s[first:end]).tobytes(),
-                gradient[first:end].tobytes(),
-                conversion[first:end].tobytes(),
-            )
-        )
-        segment_key[index] = key_index.setdefault(key, len(key_index))
+    segment_key = _spin_major_rf_segment_keys(
+        execution_plan, native_rf_hz, firsts, ends
+    )
 
     sources = np.zeros((firsts.size, 6), dtype=np.float64)
     cached = np.zeros(firsts.size, dtype=bool)
@@ -2452,7 +2516,10 @@ def _spin_major_rf_propagator_plan(
     boundaries = np.flatnonzero(np.diff(segment_key[order])) + 1
     for members in np.split(order, boundaries):
         members = members[eligible[members]]
-        if members.size < _SPIN_MAJOR_RF_PROPAGATOR_MIN_OCCURRENCES:
+        # One build advances every propagator column through the segment, so
+        # a key needs more occurrences than columns to pay off.
+        minimum = max(_SPIN_MAJOR_RF_PROPAGATOR_MIN_OCCURRENCES, columns + 1)
+        if members.size < minimum:
             continue
         first = int(firsts[members[0]])
         end = int(ends[members[0]])
@@ -2467,7 +2534,7 @@ def _spin_major_rf_propagator_plan(
         if basis is None:
             continue
         shapes, rows = basis
-        if source_mode != 2:
+        if source_mode != 2 and not spatial_sources:
             intervals = firsts[members][:, None] + np.arange(end - first)
             excess, concentration = _spin_major_source_samples(
                 execution_plan,
@@ -2484,7 +2551,7 @@ def _spin_major_rf_propagator_plan(
                 sources[members, 3:6] = concentration_weights
                 fits &= concentration_fits
             members = members[fits]
-            if members.size < _SPIN_MAJOR_RF_PROPAGATOR_MIN_OCCURRENCES:
+            if members.size < minimum:
                 continue
         cached[members] = True
         key_rows[int(segment_key[members[0]])] = rows
@@ -2509,10 +2576,35 @@ def _spin_major_rf_propagator_plan(
         if capacity < 1:
             return None, "memory budget is too small"
         entries, builds = _spin_major_rf_lru(occurrence_keys, capacity)
+
+    # Each application rotates the build of its entry by the phase between
+    # their RF. Hits whose RF does not match that build to rounding run
+    # stepwise; the entry keeps its build either way.
+    phase = np.empty((positions.size, 2), dtype=np.float64)
+    phase[:, 0] = 1.0
+    phase[:, 1] = 0.0
+    keep = np.ones(positions.size, dtype=bool)
+    builder = {}
+    for position, segment in enumerate(positions.tolist()):
+        rf = native_rf_hz[firsts[segment] : ends[segment]]
+        entry = int(entries[position])
+        if builds[position]:
+            builder[entry] = rf
+            continue
+        phasor = _spin_major_rf_phasor(rf, builder[entry])
+        if phasor is None:
+            keep[position] = False
+        elif phasor != 1.0:
+            phase[position] = (phasor.real, -phasor.imag)
+    positions = positions[keep]
+    entries = entries[keep]
+    builds = builds[keep]
+    phase = phase[keep]
+
     # A build advances every propagator column through the segment; it must
     # cost less than the stepwise work the cached occurrences replace.
     lengths = ends[positions] - firsts[positions]
-    build_steps = (values // states) * int(lengths[builds].sum())
+    build_steps = columns * int(lengths[builds].sum())
     if build_steps + positions.size >= int(lengths.sum()):
         return None, "RF segments repeat too rarely for the cache capacity"
 
@@ -2523,17 +2615,20 @@ def _spin_major_rf_propagator_plan(
         offset += rows.shape[0]
     basis = np.full(positions.size, -1, dtype=np.int64)
     basis[builds] = [row_offsets[key] for key in segment_key[positions][builds]]
+    rotated = int(np.count_nonzero((phase[:, 0] != 1.0) | (phase[:, 1] != 0.0)))
     return (
         _SpinMajorRfPropagatorPlan(
             first=np.ascontiguousarray(firsts[positions], dtype=np.int64),
             end=np.ascontiguousarray(ends[positions], dtype=np.int64),
-            entry=entries,
+            entry=np.ascontiguousarray(entries),
             basis=basis,
             sources=np.ascontiguousarray(sources[positions]),
+            phase=np.ascontiguousarray(phase),
             basis_rows=np.ascontiguousarray(np.concatenate(list(key_rows.values()))),
             capacity=capacity,
             keys=len(key_rows),
             builds=int(np.count_nonzero(builds)),
+            rotated=rotated,
         ),
         None,
     )
@@ -2552,6 +2647,7 @@ def _spin_major_rf_slice(plan, propagators, first_interval, end_interval):
         "segment_entry": plan.entry[low:high],
         "segment_basis": plan.basis[low:high],
         "segment_sources": plan.sources[low:high],
+        "segment_phase": plan.phase[low:high],
         "basis_rows": plan.basis_rows,
         "propagators": propagators,
     }
@@ -4810,6 +4906,8 @@ def _simulate_dynamic_sequence_block(
         "native_spin_major_rf_propagator_builds": 0,
         "native_spin_major_rf_propagator_applications": 0,
         "native_spin_major_rf_propagator_stepwise_segments": 0,
+        "native_spin_major_rf_propagator_rotated_applications": 0,
+        "native_spin_major_rf_propagator_stepwise_tiles": 0,
         "native_spin_major_rf_propagator_bytes": 0,
         "native_spin_major_rf_propagator_build_s": 0.0,
     }
@@ -4825,21 +4923,11 @@ def _simulate_dynamic_sequence_block(
                 "native_spin_major_rf_propagator_fallback_reason"
             ] = "disabled by request"
             return None, None
-        if phantom.n_species != 2:
-            rf_propagator_metadata[
-                "native_spin_major_rf_propagator_fallback_reason"
-            ] = "multi-pool phantoms are unsupported"
-            return None, None
-        if spatial_inflow_active:
-            rf_propagator_metadata[
-                "native_spin_major_rf_propagator_fallback_reason"
-            ] = "spatial inflow delays are unsupported"
-            return None, None
-        from .dynamic_spin_major_cy import propagator_values
+        from .dynamic_spin_major_cy import propagator_columns, propagator_values
 
         track_concentration = concentration_state is not None
         values = propagator_values(
-            track_concentration, source_mode != 2, source_mode == 0
+            phantom.n_species, track_concentration, source_mode != 2, source_mode == 0
         )
         tiles = -(-n_simulated_spins // native_spin_major_tile_spins)
         entry_shape = (tiles, values, native_spin_major_tile_spins)
@@ -4849,10 +4937,12 @@ def _simulate_dynamic_sequence_block(
             source_mode=source_mode,
             equilibrium=equilibrium,
             track_concentration=track_concentration,
-            states=8 if track_concentration else 6,
-            values=values,
+            columns=propagator_columns(
+                track_concentration, source_mode != 2, source_mode == 0
+            ),
             entry_bytes=int(np.prod(entry_shape)) * 8,
             budget_bytes=_spin_major_rf_propagator_budget_bytes,
+            spatial_sources=spatial_inflow_active,
         )
         if plan is None:
             rf_propagator_metadata[
@@ -4873,6 +4963,7 @@ def _simulate_dynamic_sequence_block(
                 "native_spin_major_rf_propagator_stepwise_segments": (
                     rf_segments - int(plan.first.size)
                 ),
+                "native_spin_major_rf_propagator_rotated_applications": plan.rotated,
                 "native_spin_major_rf_propagator_bytes": int(propagators.nbytes),
             }
         )
@@ -4969,6 +5060,7 @@ def _simulate_dynamic_sequence_block(
         rf_plan, propagators = plan_rf_propagators(source_mode, equilibrium)
         native_spin_major_table_s += perf_counter() - table_started
         build_seconds = 0.0
+        stepwise_tiles = 0
         first_interval = 0
         while first_interval < interval_count:
             if cancel_callback is not None and cancel_callback():
@@ -5006,13 +5098,15 @@ def _simulate_dynamic_sequence_block(
             )
             kernel_started = perf_counter()
             native_spin_major_table_s += kernel_started - table_started
-            build_seconds += native_spin_major_chunk(
+            chunk_build_seconds, chunk_stepwise_tiles = native_spin_major_chunk(
                 **tables,
                 **spin_arguments,
                 **segments,
                 adc_first_payload=adc_first,
                 adc_signal=adc_signal,
             )
+            build_seconds += chunk_build_seconds
+            stepwise_tiles += chunk_stepwise_tiles
             native_spin_major_kernel_s += perf_counter() - kernel_started
             if adc_count:
                 payloads = slice(adc_first, adc_first + adc_count)
@@ -5033,6 +5127,9 @@ def _simulate_dynamic_sequence_block(
         # The executor sums build time over threads; report wall-clock share.
         rf_propagator_stats["native_spin_major_rf_propagator_build_s"] = (
             build_seconds / worker_threads
+        )
+        rf_propagator_stats["native_spin_major_rf_propagator_stepwise_tiles"] = (
+            stepwise_tiles
         )
         native_full_plan_blocks += native_spin_major_chunks
         native_full_plan_intervals += native_spin_major_intervals
@@ -6267,6 +6364,8 @@ def simulate_dynamic_sequence(
         "native_spin_major_rf_propagator_builds": 0,
         "native_spin_major_rf_propagator_applications": 0,
         "native_spin_major_rf_propagator_stepwise_segments": 0,
+        "native_spin_major_rf_propagator_rotated_applications": 0,
+        "native_spin_major_rf_propagator_stepwise_tiles": 0,
         "native_spin_major_rf_propagator_bytes": 0,
         "native_spin_major_rf_propagator_build_s": 0.0,
     }

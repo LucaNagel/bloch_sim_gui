@@ -417,14 +417,16 @@ def test_optimized_kernel_does_not_report_spin_major_fallback():
 CACHE_RASTER = 2.0**-16
 CACHE_PULSE = np.array([25.0 + 8.0j, 60.0 - 6.0j, 85.0, 60.0 + 6.0j, 25.0 - 8.0j])
 CACHE_PERIOD = 10
-ALTERNATING = tuple((-1.0) ** repetition for repetition in range(48))
+# Alternating amplitudes give two cache keys; pulses that differ only by a
+# constant phase share one key.
+ALTERNATING = tuple(1.0 if repetition % 2 == 0 else 0.5 for repetition in range(48))
 
 
-def _repeated_program(signs, *, gradient=False):
+def _repeated_program(scales, *, gradient=False):
     events = []
-    for repetition, sign in enumerate(signs):
+    for repetition, scale in enumerate(scales):
         start = repetition * CACHE_PERIOD * CACHE_RASTER
-        events.append(RFEvent(start, sign * CACHE_PULSE, CACHE_RASTER))
+        events.append(RFEvent(start, scale * CACHE_PULSE, CACHE_RASTER))
         if gradient:
             events.append(
                 GradientEvent("x", start, np.full(CACHE_PULSE.size, 90.0), CACHE_RASTER)
@@ -438,7 +440,7 @@ def _repeated_program(signs, *, gradient=False):
             )
         )
     return SequenceProgram(
-        tuple(events), duration_s=len(signs) * CACHE_PERIOD * CACHE_RASTER
+        tuple(events), duration_s=len(scales) * CACHE_PERIOD * CACHE_RASTER
     )
 
 
@@ -528,13 +530,13 @@ def test_rf_cache_runs_occurrences_with_source_knots_stepwise():
 
 
 def test_rf_cache_keys_conversion_state_of_each_occurrence():
-    signs = ALTERNATING * 2
+    scales = ALTERNATING * 2
     # Conversion starts inside one pulse, between two cached halves of the run.
     conversion_start = (len(ALTERNATING) * CACHE_PERIOD + 2) * CACHE_RASTER
     phantom = _phantom(
         inflow="polarized", tracked=True, conversion_start=conversion_start
     )
-    program = _repeated_program(signs)
+    program = _repeated_program(scales)
 
     reference = _run_cached(phantom, program, "optimized")
     stepwise = _run_cached(phantom, program, _native_spin_major_rf_cache=False)
@@ -545,7 +547,7 @@ def test_rf_cache_keys_conversion_state_of_each_occurrence():
     assert _rf_cache(cached, "stepwise_segments") >= 1
     assert _rf_cache(cached, "applications") + _rf_cache(
         cached, "stepwise_segments"
-    ) == len(signs)
+    ) == len(scales)
     _assert_close(cached, reference)
     _assert_close(cached, stepwise)
 
@@ -584,7 +586,9 @@ def test_rf_cache_result_does_not_depend_on_slices_threads_or_capacity(
     if spatial_tx:
         grid = np.linspace(0, 1, phantom.nvoxels).reshape(phantom.shape)
         phantom.tx_sensitivity_map = (0.5 + grid) * np.exp(1j * (-1 + 2 * grid))
-    program = _repeated_program((1.0,) * 20 + (-1.0,) * 20 + (1.0,) * 20)
+    # The last pulses are the first ones turned by 90 degrees: they reuse the
+    # first entry rotated, or rebuild it after an eviction.
+    program = _repeated_program((1.0,) * 20 + (0.5,) * 20 + (1.0j,) * 20)
     kwargs = dict(use_parallel=True)
 
     serial = _run_cached(phantom, program, "native_serial")
@@ -598,8 +602,10 @@ def test_rf_cache_result_does_not_depend_on_slices_threads_or_capacity(
 
     assert _rf_cache(serial, "keys") == 2
     assert _rf_cache(serial, "builds") == 2
+    assert _rf_cache(serial, "rotated_applications") == 20
     assert _rf_cache(serial, "bytes") == 2 * _rf_cache(evicting, "bytes")
     assert _rf_cache(evicting, "builds") == 3
+    assert _rf_cache(evicting, "rotated_applications") == 0
     assert sliced.metadata["native_spin_major_chunks"] > (
         parallel.metadata["native_spin_major_chunks"]
     )

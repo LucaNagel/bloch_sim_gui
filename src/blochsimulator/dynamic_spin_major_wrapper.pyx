@@ -3,9 +3,9 @@
 The executor applies a bounded slice of a dynamic execution plan in strict
 float64. Callers build the compact interval tables in NumPy; this module only
 checks shapes, dtypes, and contiguity before releasing the GIL. Repeated RF
-segments of two-pool plans can optionally be replaced by cached per-spin
-affine propagators. Inflow with per-spin arrival delays is evaluated from the
-delayed time curves inside the executor.
+segments can optionally be replaced by cached per-spin affine propagators,
+also when they differ only by a constant RF phase. Inflow with per-spin
+arrival delays is evaluated from the delayed time curves inside the executor.
 """
 
 import numpy as np
@@ -87,24 +87,31 @@ cdef extern from "dynamic_spin_major.h":
         const int32_t *segment_entry
         const int64_t *segment_basis
         const double *segment_sources
+        const double *segment_phase
         int64_t n_basis_rows
         const double *basis_rows
         int32_t n_propagators
         double *propagators
         double *build_seconds
+        int64_t *stepwise_tiles
 
     int dsm_run_chunk(const dsm_chunk *chunk) nogil
     int32_t dsm_propagator_values(
+        int32_t npools, int32_t track_concentration, int32_t has_sources,
+        int32_t concentration_sources)
+    int32_t dsm_propagator_columns(
         int32_t track_concentration, int32_t has_sources,
         int32_t concentration_sources)
 
 
 TILE_SPINS = DSM_TILE
 MAX_POOLS = DSM_MAX_POOLS
-API_VERSION = 3
+API_VERSION = 4
 SPATIAL_TX_SUPPORTED = True
 MULTI_POOL_SUPPORTED = True
 SPATIAL_INFLOW_SUPPORTED = True
+RF_CACHE_MULTI_POOL_SUPPORTED = True
+RF_CACHE_PHASE_SUPPORTED = True
 
 cdef double _empty_storage[8]
 
@@ -158,10 +165,19 @@ cdef object _curve(dsm_curve *target, object curve, str name):
     return (times, values)
 
 
-def propagator_values(bint track_concentration, bint has_sources,
+def propagator_values(int npools, bint track_concentration, bint has_sources,
                       bint concentration_sources):
     """Return the doubles per spin of one cached RF propagator entry."""
+    if npools < 2 or npools > DSM_MAX_POOLS:
+        raise ValueError(f"spin-major executor supports 2 to {DSM_MAX_POOLS} pools")
     return int(dsm_propagator_values(
+        npools, track_concentration, has_sources, concentration_sources))
+
+
+def propagator_columns(bint track_concentration, bint has_sources,
+                       bint concentration_sources):
+    """Return the tile columns one cached RF propagator build advances."""
+    return int(dsm_propagator_columns(
         track_concentration, has_sources, concentration_sources))
 
 
@@ -205,6 +221,7 @@ def run_spin_major_chunk(
         segment_entry=None,
         segment_basis=None,
         segment_sources=None,
+        segment_phase=None,
         basis_rows=None,
         propagators=None,
         tx_sensitivity=None,
@@ -234,12 +251,18 @@ def run_spin_major_chunk(
     The optional segment arrays replace intervals ``[first, end)`` by the
     propagator entry ``propagators[entry]`` with shape
     ``(n_tiles, values, TILE_SPINS)``. Segments with ``basis >= 0`` build their
-    entry from ``basis_rows[basis:basis + end - first]`` first. Returns the
-    build time summed over threads in seconds.
+    entry from ``basis_rows[basis:basis + end - first]`` first. With delayed
+    inflow the source weights are evaluated per spin, and a tile whose delayed
+    curve queries cross a curve knot runs that occurrence stepwise. The
+    optional ``segment_phase`` rows ``(cos t, sin t)`` apply the entry to a
+    segment whose RF phases are all advanced by ``-t``. Returns the build time
+    summed over threads in seconds and the number of stepwise tile
+    occurrences.
     """
     cdef dsm_chunk chunk
     cdef int status
     cdef double build_seconds = 0.0
+    cdef int64_t stepwise_tiles = 0
     cdef Py_ssize_t n_segments = 0
     cdef Py_ssize_t n_tiles
     cdef Py_ssize_t nspins = conversion.shape[1]
@@ -380,11 +403,13 @@ def run_spin_major_chunk(
     chunk.segment_entry = NULL
     chunk.segment_basis = NULL
     chunk.segment_sources = NULL
+    chunk.segment_phase = NULL
     chunk.n_basis_rows = 0
     chunk.basis_rows = NULL
     chunk.n_propagators = 0
     chunk.propagators = NULL
     chunk.build_seconds = &build_seconds
+    chunk.stepwise_tiles = &stepwise_tiles
     if segment_first is not None and segment_first.shape[0] > 0:
         n_segments = segment_first.shape[0]
         if n_segments >= 2**31:
@@ -403,6 +428,9 @@ def run_spin_major_chunk(
             segment_basis, np.int64, (n_segments,), "segment_basis")
         chunk.segment_sources = <const double *>_data(
             segment_sources, np.float64, (n_segments, 6), "segment_sources")
+        if segment_phase is not None:
+            chunk.segment_phase = <const double *>_data(
+                segment_phase, np.float64, (n_segments, 2), "segment_phase")
         chunk.n_basis_rows = basis_rows.shape[0]
         chunk.basis_rows = <const double *>_data(
             basis_rows, np.float64, (None, 3, 4), "basis_rows")
@@ -413,7 +441,7 @@ def run_spin_major_chunk(
             propagators, np.float64,
             (None, n_tiles,
              dsm_propagator_values(
-                 chunk.track_concentration, chunk.has_sources,
+                 chunk.npools, chunk.track_concentration, chunk.has_sources,
                  chunk.concentration_sources),
              DSM_TILE),
             "propagators")
@@ -424,4 +452,4 @@ def run_spin_major_chunk(
         raise MemoryError("spin-major dynamic executor could not allocate buffers")
     if status != 0:
         raise ValueError("spin-major dynamic executor rejected its plan slice")
-    return build_seconds
+    return build_seconds, int(stepwise_tiles)

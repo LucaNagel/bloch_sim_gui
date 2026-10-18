@@ -115,33 +115,46 @@ typedef struct {
     int64_t adc_payload_count;
     double *adc_signal;             /* (npools, ncoils, adc_payload_count) complex */
 
-    /* Optional cached RF segments (two pools without spatial sources only).
-     * Each segment covers intervals [first, end) without boundary actions
-     * before its last interval and is replaced by one affine per-spin
-     * propagator
+    /* Optional cached RF segments. Each segment covers intervals
+     * [first, end) without boundary actions before its last interval and is
+     * replaced by one affine per-spin propagator
      *     u' = A u + sum_j a_j S_j + sum_j c_j Q_j
-     * over the tile state u. The source columns S_j and Q_j are the response
-     * to the excess and concentration source shapes given by basis rows; the
-     * weights a_j and c_j are per segment. A segment with a basis row index
-     * builds its propagator entry before applying it. */
+     * over the tile state u of all pools. The source columns S_j and Q_j are
+     * the response to the excess and concentration source shapes given by
+     * basis rows. The weights a_j and c_j are per segment with global
+     * sources, and evaluated per spin from the delayed curves at the basis
+     * nodes with spatial sources; a tile whose delayed queries cross a curve
+     * region runs that occurrence stepwise. A segment with a basis row index
+     * builds its propagator entry before applying it. With a segment phase
+     * (cos t, sin t), the entry is applied as R_z(t) A R_z(-t), the
+     * propagator of the same segment with every RF phase advanced by -t. */
     int32_t n_segments;
     const int32_t *segment_first;   /* (n_segments,), sorted, disjoint */
     const int32_t *segment_end;
     const int32_t *segment_entry;   /* propagator entry index */
     const int64_t *segment_basis;   /* first basis row of a build, or -1 */
     const double *segment_sources;  /* (n_segments, 6): a0..a2, c0..c2 */
+    const double *segment_phase;    /* (n_segments, 2): cos, sin, or NULL */
     int64_t n_basis_rows;
     const double *basis_rows;       /* (n_basis_rows, 3, 4) per node j */
     int32_t n_propagators;
     double *propagators;            /* (n_propagators, n_tiles, values, TILE) */
     double *build_seconds;          /* optional, summed over threads */
+    int64_t *stepwise_tiles;        /* optional, cached occurrences run
+                                       stepwise per tile, summed */
 } dsm_chunk;
 
 /* Returns 0 on success, -1 for invalid input and -2 for allocation failure. */
 int dsm_run_chunk(const dsm_chunk *chunk);
 
-/* Number of doubles per spin of one two-pool propagator entry. */
-int32_t dsm_propagator_values(int32_t track_concentration, int32_t has_sources,
+/* Number of doubles per spin of one propagator entry, or 0 for an
+ * unsupported pool count. */
+int32_t dsm_propagator_values(int32_t npools, int32_t track_concentration,
+                              int32_t has_sources,
                               int32_t concentration_sources);
+
+/* Number of tile columns one propagator build advances. */
+int32_t dsm_propagator_columns(int32_t track_concentration, int32_t has_sources,
+                               int32_t concentration_sources);
 
 #endif

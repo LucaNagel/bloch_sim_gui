@@ -49,12 +49,6 @@ static inline int field_kj1c(int np, int j) { return 5 * np + 5 + 3 * j; }
 
 static inline size_t slot_doubles(int np) { return (size_t)8 * np * DSM_TILE; }
 
-/* Cached RF propagators (two pools): up to eight state components and three
- * source nodes each for excess magnetization and concentration. */
-#define DSM_MAX_STATES 8
-#define DSM_SOURCE_NODES 3
-#define DSM_BUILD_SLOTS 4
-
 typedef struct {
     double half;
     int conversion;
@@ -132,8 +126,8 @@ typedef struct {
     double support_hi;   /* and for q >= support_hi */
 } dsm_context;
 
-/* Per-thread buffers. ``columns`` and ``build_slots`` are NULL when the call
- * builds no propagator. */
+/* Per-thread buffers. ``columns`` is NULL when the call builds no
+ * propagator and ``build_slots`` when it has no cached segment. */
 typedef struct {
     dsm_tile *tile;
     double *slots;
@@ -142,6 +136,7 @@ typedef struct {
     dsm_tile *columns;
     double *build_slots;
     double build_seconds;
+    int64_t stepwise_tiles;
 } dsm_workspace;
 
 static void decay_convolution(double rate, double h, double *f0, double *f1) {
@@ -885,50 +880,112 @@ static void run_actions(const dsm_chunk *c, dsm_tile *t, const double *rw,
     }
 }
 
-static inline int propagator_states(int track_concentration) {
-    return track_concentration ? DSM_MAX_STATES : 6;
+/* Layout of a cached RF propagator. Pools couple only through the precursor:
+ * pool 0 evolves on its own, and product p depends on itself and on pool 0
+ * but never on another product. A build therefore advances, independent of
+ * the pool count,
+ *     ``block`` unit states of pool 0 (columns [0, block)),
+ *     ``block`` unit states set in all products at once ([block, 2 block)),
+ *     the excess and concentration source shapes (from 2 block on),
+ * with block = 4 (x, y, z, c) under tracked concentration, else 3. Products
+ * never feed each other, so the all-product unit columns give every
+ * product's own block exactly, and their pool-0 response is exactly zero.
+ * Concentration does not depend on magnetization, so the c row of a column
+ * without concentration input is exactly zero and is not stored. */
+#define DSM_SOURCE_NODES 3
+#define DSM_WEIGHTS (2 * DSM_SOURCE_NODES)
+#define DSM_MAX_BLOCK 4
+#define DSM_MAX_COLUMNS (2 * DSM_MAX_BLOCK + DSM_WEIGHTS)
+#define DSM_BUILD_SLOTS 4
+
+typedef struct {
+    int block;   /* state components per pool */
+    int excess;  /* excess source shapes */
+    int columns; /* build columns */
+} dsm_layout;
+
+static inline dsm_layout propagator_layout(int track_concentration,
+                                           int has_sources,
+                                           int concentration_sources) {
+    dsm_layout l;
+    l.block = track_concentration ? DSM_MAX_BLOCK : 3;
+    l.excess = has_sources ? DSM_SOURCE_NODES : 0;
+    l.columns = 2 * l.block + l.excess +
+                (has_sources && track_concentration && concentration_sources
+                     ? DSM_SOURCE_NODES
+                     : 0);
+    return l;
 }
 
-static inline int propagator_columns(int track_concentration, int has_sources,
-                                     int concentration_sources) {
-    int columns = propagator_states(track_concentration);
-    if (has_sources) {
-        columns += DSM_SOURCE_NODES;
-        if (track_concentration && concentration_sources) {
-            columns += DSM_SOURCE_NODES;
+/* Stored rows of a build column: the c row only where concentration enters,
+ * through a c unit state or a concentration source shape. */
+static inline int column_rows(const dsm_layout *l, int column) {
+    if (l->block == 3) {
+        return 3;
+    }
+    if (column == 3 || column == 7) {
+        return 4;
+    }
+    return column >= 2 * l->block + l->excess ? 4 : 3;
+}
+
+/* Build columns of the pool-0 block, or of a product block (own states, the
+ * pool-0 states, then the sources), in storage order. Returns the count. */
+static int block_columns(const dsm_layout *l, int product, int *out) {
+    int n = 0;
+    if (product) {
+        for (int b = 0; b < l->block; b++) {
+            out[n++] = l->block + b;
         }
     }
-    return columns;
+    for (int b = 0; b < l->block; b++) {
+        out[n++] = b;
+    }
+    for (int column = 2 * l->block; column < l->columns; column++) {
+        out[n++] = column;
+    }
+    return n;
 }
 
-int32_t dsm_propagator_values(int32_t track_concentration, int32_t has_sources,
+static int block_values(const dsm_layout *l, int product) {
+    int columns[DSM_MAX_COLUMNS];
+    const int n = block_columns(l, product, columns);
+    int values = 0;
+    for (int k = 0; k < n; k++) {
+        values += column_rows(l, columns[k]);
+    }
+    return values;
+}
+
+int32_t dsm_propagator_columns(int32_t track_concentration, int32_t has_sources,
+                               int32_t concentration_sources) {
+    const dsm_layout l = propagator_layout(
+        track_concentration != 0, has_sources != 0, concentration_sources != 0);
+    return (int32_t)l.columns;
+}
+
+int32_t dsm_propagator_values(int32_t npools, int32_t track_concentration,
+                              int32_t has_sources,
                               int32_t concentration_sources) {
-    return (int32_t)(propagator_columns(track_concentration != 0,
-                                        has_sources != 0,
-                                        concentration_sources != 0) *
-                     propagator_states(track_concentration != 0));
+    if (npools < 2 || npools > DSM_MAX_POOLS) {
+        return 0;
+    }
+    const dsm_layout l = propagator_layout(
+        track_concentration != 0, has_sources != 0, concentration_sources != 0);
+    return (int32_t)(block_values(&l, 0) + (npools - 1) * block_values(&l, 1));
 }
 
-/* Two-pool tile state component in propagator order x0, y0, P, x1, y1, L,
- * Cp, Cl. */
-static inline double *tile_state(dsm_tile *t, int index) {
-    switch (index) {
+/* State component x, y, z or c of one pool. */
+static inline double *pool_state(dsm_tile *t, int pool, int component) {
+    switch (component) {
     case 0:
-        return t->x[0];
+        return t->x[pool];
     case 1:
-        return t->y[0];
+        return t->y[pool];
     case 2:
-        return t->z[0];
-    case 3:
-        return t->x[1];
-    case 4:
-        return t->y[1];
-    case 5:
-        return t->z[1];
-    case 6:
-        return t->c[0];
+        return t->z[pool];
     default:
-        return t->c[1];
+        return t->c[pool];
     }
 }
 
@@ -940,87 +997,155 @@ static double wall_seconds(void) {
 #endif
 }
 
-/* Build the propagator of intervals [first, end) for one tile into ``out``
- * with layout (column, state, TILE). Every column advances a unit state or a
- * unit source shape through the stepwise interval code, so an entry depends
- * only on the segment's plan values and the spin, not on where it is built. */
+/* Least-recently-used coefficient slots local to one build or one stepwise
+ * cached segment. Slot contents depend only on the spin and group. */
+typedef struct {
+    int32_t group[DSM_BUILD_SLOTS];
+    int32_t last_used[DSM_BUILD_SLOTS];
+} dsm_local_slots;
+
+static void reset_local_slots(dsm_local_slots *l) {
+    for (int slot = 0; slot < DSM_BUILD_SLOTS; slot++) {
+        l->group[slot] = -1;
+        l->last_used[slot] = -1;
+    }
+}
+
+static const double *local_slot(const dsm_context *x, dsm_local_slots *l,
+                                const dsm_tile *t, double *buffer, int32_t i) {
+    const int32_t group = x->c->interval_group[i];
+    int slot = 0;
+    while (slot < DSM_BUILD_SLOTS && l->group[slot] != group) {
+        slot++;
+    }
+    if (slot == DSM_BUILD_SLOTS) {
+        slot = 0;
+        for (int candidate = 1; candidate < DSM_BUILD_SLOTS; candidate++) {
+            if (l->last_used[candidate] < l->last_used[slot]) {
+                slot = candidate;
+            }
+        }
+        l->group[slot] = group;
+        fill_slot(x->c, &x->groups[group], t,
+                  buffer + (size_t)slot * x->slot_doubles);
+    }
+    l->last_used[slot] = i;
+    return buffer + (size_t)slot * x->slot_doubles;
+}
+
+/* Delay range of the spins of a tile that receive delayed inflow. */
+typedef struct {
+    int active;
+    double delay_min;
+    double delay_max;
+} dsm_inflow;
+
+/* Advance a tile stepwise across plan interval i with coefficient slot
+ * ``slot``: gradient, local RF and delayed sources of the interval, then the
+ * interval itself. An interval whose delayed query times all fall where the
+ * rate curve is zero has exactly zero source and takes the source-free
+ * update. */
+static void advance_interval(const dsm_context *x, dsm_workspace *w,
+                             dsm_tile *t, int32_t i, const double *slot,
+                             const dsm_inflow *inflow) {
+    const dsm_chunk *c = x->c;
+    const dsm_group *g = &x->groups[c->interval_group[i]];
+    const int32_t gradient_index = c->interval_gradient[i];
+    const int32_t source_index = c->interval_source[i];
+    if (gradient_index >= 0) {
+        prepare_gradient(t, c->gradient_table + 3 * (int64_t)gradient_index,
+                         c->interval_phase_s[2 * i]);
+    }
+    double spatial_rf[4 * DSM_TILE];
+    const int32_t rf_index = c->interval_rf[i];
+    const int spatial = c->tx != NULL && rf_index >= 0;
+    if (spatial) {
+        prepare_spatial_rf(t, c->rf_inputs + 3 * (int64_t)rf_index, spatial_rf);
+    }
+    const dsm_source *delayed = NULL;
+    if (inflow->active) {
+        const double *time = c->interval_time_s + 3 * (int64_t)i;
+        if (!(time[2] - inflow->delay_min < x->support_lo ||
+              time[0] - inflow->delay_max >= x->support_hi)) {
+            fill_spatial_sources(x, t, i, g->half, w->sources);
+            delayed = w->sources;
+        }
+    }
+    step_interval(c, g, slot, t, i,
+                  source_index >= 0 ? c->source_table + 8 * (int64_t)source_index
+                                    : NULL,
+                  delayed, spatial ? spatial_rf : NULL);
+}
+
+/* Build the propagator of intervals [first, end) for one tile into ``out``:
+ * the pool-0 block, then one block per product, each laid out as
+ * (column, row, TILE) over its block columns. Every column advances unit
+ * states or a unit source shape through the stepwise interval code, so an
+ * entry depends only on the segment's plan values and the spin, not on where
+ * it is built. */
 static void build_propagator(const dsm_context *x, const dsm_tile *t,
                              int32_t first, int32_t end, const double *basis,
                              dsm_tile *columns, double *build_slots,
                              double *out) {
     const dsm_chunk *c = x->c;
-    const int n_state = propagator_states(c->track_concentration);
-    const int n_columns = propagator_columns(
+    const int np = c->npools;
+    const dsm_layout l = propagator_layout(
         c->track_concentration, c->has_sources, c->concentration_sources);
-    int32_t slot_group[DSM_BUILD_SLOTS];
-    int32_t last_used[DSM_BUILD_SLOTS];
-    for (int slot = 0; slot < DSM_BUILD_SLOTS; slot++) {
-        slot_group[slot] = -1;
-        last_used[slot] = -1;
-    }
-    for (int column = 0; column < n_columns; column++) {
+    for (int column = 0; column < l.columns; column++) {
         dsm_tile *u = columns + column;
         memcpy(u, t, sizeof(*u));
-        for (int row = 0; row < DSM_MAX_STATES; row++) {
-            memset(tile_state(u, row), 0, sizeof(double) * DSM_TILE);
+        for (int pool = 0; pool < np; pool++) {
+            for (int component = 0; component < DSM_MAX_BLOCK; component++) {
+                memset(pool_state(u, pool, component), 0,
+                       sizeof(double) * DSM_TILE);
+            }
         }
-        if (column < n_state) {
-            double *unit = tile_state(u, column);
-            for (int s = 0; s < DSM_TILE; s++) {
-                unit[s] = 1.0;
+        if (column < 2 * l.block) {
+            const int component = column % l.block;
+            for (int pool = column < l.block ? 0 : 1;
+                 pool < (column < l.block ? 1 : np); pool++) {
+                double *unit = pool_state(u, pool, component);
+                for (int s = 0; s < DSM_TILE; s++) {
+                    unit[s] = 1.0;
+                }
             }
         }
     }
 
+    dsm_local_slots local;
+    reset_local_slots(&local);
     for (int32_t i = first; i < end; i++) {
-        const int32_t group = c->interval_group[i];
-        int slot = 0;
-        while (slot < DSM_BUILD_SLOTS && slot_group[slot] != group) {
-            slot++;
-        }
-        if (slot == DSM_BUILD_SLOTS) {
-            slot = 0;
-            for (int candidate = 1; candidate < DSM_BUILD_SLOTS; candidate++) {
-                if (last_used[candidate] < last_used[slot]) {
-                    slot = candidate;
-                }
-            }
-            slot_group[slot] = group;
-            fill_slot(c, &x->groups[group], t,
-                      build_slots + (size_t)slot * x->slot_doubles);
-        }
-        last_used[slot] = i;
-        const double *coefficients = build_slots + (size_t)slot * x->slot_doubles;
-
+        const double *coefficients = local_slot(x, &local, t, build_slots, i);
+        const dsm_group *g = &x->groups[c->interval_group[i]];
         const int32_t gradient_index = c->interval_gradient[i];
         if (gradient_index >= 0) {
             prepare_gradient(columns,
                              c->gradient_table + 3 * (int64_t)gradient_index,
                              c->interval_phase_s[2 * i]);
-            for (int column = 1; column < n_columns; column++) {
+            for (int column = 1; column < l.columns; column++) {
                 memcpy(columns[column].wg, columns[0].wg, sizeof(columns[0].wg));
                 memcpy(columns[column].gc, columns[0].gc, sizeof(columns[0].gc));
                 memcpy(columns[column].gs, columns[0].gs, sizeof(columns[0].gs));
             }
         }
 
-        /* Basis node j holds v0, dv0, v1, dv1 for both halves. Excess shapes
-         * fill the e0/de entries of a source row, concentration shapes the
-         * c0/dc entries. */
         double spatial_rf[4 * DSM_TILE];
         const int32_t rf_index = c->interval_rf[i];
         const int spatial = c->tx != NULL && rf_index >= 0;
         if (spatial) {
             prepare_spatial_rf(t, c->rf_inputs + 3 * (int64_t)rf_index, spatial_rf);
         }
+        /* Basis node j holds v0, dv0, v1, dv1 for both halves. Excess shapes
+         * fill the e0/de entries of a source row, concentration shapes the
+         * c0/dc entries. */
         const double *nodes = basis + (int64_t)(i - first) * DSM_SOURCE_NODES * 4;
-        for (int column = 0; column < n_columns; column++) {
+        for (int column = 0; column < l.columns; column++) {
             double row[8];
             const double *source = NULL;
-            if (column >= n_state) {
-                const int shape = column - n_state;
+            if (column >= 2 * l.block) {
+                const int shape = column - 2 * l.block;
                 const double *node = nodes + 4 * (shape % DSM_SOURCE_NODES);
-                const int offset = shape < DSM_SOURCE_NODES ? 0 : 2;
+                const int offset = shape < l.excess ? 0 : 2;
                 memset(row, 0, sizeof(row));
                 row[offset] = node[0];
                 row[offset + 1] = node[1];
@@ -1028,61 +1153,214 @@ static void build_propagator(const dsm_context *x, const dsm_tile *t,
                 row[offset + 5] = node[3];
                 source = row;
             }
-            step_interval(c, &x->groups[group], coefficients, columns + column, i,
-                          source, NULL, spatial ? spatial_rf : NULL);
+            step_interval(c, g, coefficients, columns + column, i, source, NULL,
+                          spatial ? spatial_rf : NULL);
         }
     }
 
-    for (int column = 0; column < n_columns; column++) {
-        for (int row = 0; row < n_state; row++) {
-            memcpy(out + ((size_t)column * n_state + row) * DSM_TILE,
-                   tile_state(columns + column, row), sizeof(double) * DSM_TILE);
+    double *o = out;
+    for (int pool = 0; pool < np; pool++) {
+        int block[DSM_MAX_COLUMNS];
+        const int n = block_columns(&l, pool > 0, block);
+        for (int k = 0; k < n; k++) {
+            const int rows = column_rows(&l, block[k]);
+            for (int row = 0; row < rows; row++) {
+                memcpy(o, pool_state(columns + block[k], pool, row),
+                       sizeof(double) * DSM_TILE);
+                o += DSM_TILE;
+            }
         }
     }
 }
 
-/* Replace the tile state by A u + sum_j w_j S_j. Source columns with a zero
- * weight contribute nothing and are skipped. */
+/* Rotate the transverse state of every pool about z by (cosine, sine). */
+static void rotate_transverse(dsm_tile *t, int np, double cosine, double sine) {
+    for (int pool = 0; pool < np; pool++) {
+        double *DSM_RESTRICT xs = t->x[pool];
+        double *DSM_RESTRICT ys = t->y[pool];
+        for (int s = 0; s < DSM_TILE; s++) {
+            const double x = xs[s];
+            const double y = ys[s];
+            xs[s] = x * cosine - y * sine;
+            ys[s] = x * sine + y * cosine;
+        }
+    }
+}
+
+/* Replace the tile state by A u + sum_j w_j S_j with per-spin source weights.
+ * Source columns whose weights are all zero contribute nothing and are
+ * skipped. Every non-RF operation commutes with rotations about z, so with
+ * ``phase`` = (cos t, sin t) the propagator of the same segment with all RF
+ * phases advanced by -t is R_z(t) A R_z(-t), applied by rotating the
+ * transverse input by -t and the output by t. */
 static void apply_propagator(const dsm_chunk *c, dsm_tile *t,
                              const double *DSM_RESTRICT propagator,
-                             const double *weights) {
-    const int n_state = propagator_states(c->track_concentration);
-    const int n_columns = propagator_columns(
+                             double weights[DSM_WEIGHTS][DSM_TILE],
+                             const double *phase) {
+    const int np = c->npools;
+    const dsm_layout l = propagator_layout(
         c->track_concentration, c->has_sources, c->concentration_sources);
-    double result[DSM_MAX_STATES][DSM_TILE];
-    const double *DSM_RESTRICT input = tile_state(t, 0);
-    for (int row = 0; row < n_state; row++) {
-        const double *DSM_RESTRICT a = propagator + (size_t)row * DSM_TILE;
+    const int rotate = phase != NULL && !(phase[0] == 1.0 && phase[1] == 0.0);
+    int active[DSM_WEIGHTS];
+    for (int k = 0; k < DSM_WEIGHTS; k++) {
+        active[k] = 0;
         for (int s = 0; s < DSM_TILE; s++) {
-            result[row][s] = a[s] * input[s];
+            active[k] |= weights[k][s] != 0.0;
         }
     }
-    for (int column = 1; column < n_state; column++) {
-        input = tile_state(t, column);
-        for (int row = 0; row < n_state; row++) {
-            const double *DSM_RESTRICT a =
-                propagator + ((size_t)column * n_state + row) * DSM_TILE;
-            for (int s = 0; s < DSM_TILE; s++) {
-                result[row][s] = result[row][s] + a[s] * input[s];
+    if (rotate) {
+        rotate_transverse(t, np, phase[0], -phase[1]);
+    }
+
+    double result[DSM_MAX_POOLS][DSM_MAX_BLOCK][DSM_TILE];
+    memset(result, 0, sizeof(result));
+    const double *DSM_RESTRICT a = propagator;
+    for (int pool = 0; pool < np; pool++) {
+        int block[DSM_MAX_COLUMNS];
+        const int n = block_columns(&l, pool > 0, block);
+        for (int k = 0; k < n; k++) {
+            const int column = block[k];
+            const int rows = column_rows(&l, column);
+            const double *DSM_RESTRICT input = NULL;
+            if (column < l.block) {
+                input = pool_state(t, 0, column);
+            } else if (column < 2 * l.block) {
+                input = pool_state(t, pool, column - l.block);
+            } else {
+                const int shape = column - 2 * l.block;
+                const int index =
+                    shape < l.excess ? shape : DSM_SOURCE_NODES + shape - l.excess;
+                if (active[index]) {
+                    input = weights[index];
+                }
             }
+            if (input != NULL) {
+                for (int row = 0; row < rows; row++) {
+                    double *DSM_RESTRICT r = result[pool][row];
+                    const double *DSM_RESTRICT ar = a + (size_t)row * DSM_TILE;
+                    for (int s = 0; s < DSM_TILE; s++) {
+                        r[s] = r[s] + ar[s] * input[s];
+                    }
+                }
+            }
+            a += (size_t)rows * DSM_TILE;
         }
     }
-    for (int column = n_state; column < n_columns; column++) {
-        const double weight = weights[column - n_state];
-        if (weight == 0.0) {
+    for (int pool = 0; pool < np; pool++) {
+        for (int component = 0; component < l.block; component++) {
+            memcpy(pool_state(t, pool, component), result[pool][component],
+                   sizeof(double) * DSM_TILE);
+        }
+    }
+    if (rotate) {
+        rotate_transverse(t, np, phase[0], phase[1]);
+    }
+}
+
+/* Query times of one delayed curve over intervals [first, end): the start of
+ * the first and the end of the last interval for linear curves, the first and
+ * last half midpoints for step curves. */
+static void curve_query_range(const dsm_curve_table *table,
+                              const double *time_first,
+                              const double *time_last, double *first,
+                              double *last) {
+    if (table->step) {
+        *first = 0.5 * (time_first[0] + time_first[1]);
+        *last = 0.5 * (time_last[1] + time_last[2]);
+    } else {
+        *first = time_first[0];
+        *last = time_last[2];
+    }
+}
+
+/* Locate the region of q_first for spin s; returns nonzero unless q_last lies
+ * in the same region, where the curve is one polynomial of degree <= 1. */
+static int crosses_region(const dsm_curve_table *table, dsm_curve_state *state,
+                          int s, double q_first, double q_last) {
+    if (q_first < state->lo[s] || q_first >= state->hi[s]) {
+        locate_region(table, state, s, q_first);
+    }
+    return q_last < state->lo[s] || q_last >= state->hi[s];
+}
+
+static inline double region_value(const dsm_curve_state *state, int s,
+                                  double q) {
+    return state->slope[s] * (q - state->x0[s]) + state->y0[s];
+}
+
+/* Per-spin source weights of a cached segment under delayed inflow: the
+ * excess and concentration source values at the three basis nodes, without
+ * delivery, which the propagator's source columns carry. When every delayed
+ * query range of a receiving spin stays inside one region of each curve, its
+ * sources are polynomials of degree <= 2 in time, which the quadratic basis
+ * reproduces; otherwise the function returns 1 and the tile runs the segment
+ * stepwise. */
+static int segment_spatial_weights(const dsm_context *x, dsm_tile *t,
+                                   const dsm_inflow *inflow, int32_t first,
+                                   int32_t end,
+                                   double weights[DSM_WEIGHTS][DSM_TILE]) {
+    const dsm_chunk *c = x->c;
+    memset(weights, 0, sizeof(double) * DSM_WEIGHTS * DSM_TILE);
+    if (!inflow->active) {
+        return 0;
+    }
+    const double *time_first = c->interval_time_s + 3 * (int64_t)first;
+    const double *time_last = c->interval_time_s + 3 * (int64_t)(end - 1);
+    const double *time_middle =
+        c->interval_time_s + 3 * (int64_t)(first + (end - first) / 2);
+    if (time_last[2] - inflow->delay_min < x->support_lo ||
+        time_first[0] - inflow->delay_max >= x->support_hi) {
+        return 0;
+    }
+    const double nodes[DSM_SOURCE_NODES] = {time_first[0], time_middle[1],
+                                            time_last[2]};
+    const double equilibrium = c->equilibrium;
+    const int mode = c->spatial_mode;
+    double rate_first, rate_last, polarization_first = 0.0,
+                                  polarization_last = 0.0;
+    curve_query_range(&x->curves[0], time_first, time_last, &rate_first,
+                      &rate_last);
+    if (x->polarized) {
+        curve_query_range(&x->curves[1], time_first, time_last,
+                          &polarization_first, &polarization_last);
+    }
+    for (int s = 0; s < DSM_TILE; s++) {
+        if (t->d[s] == 0.0) {
             continue;
         }
-        for (int row = 0; row < n_state; row++) {
-            const double *DSM_RESTRICT a =
-                propagator + ((size_t)column * n_state + row) * DSM_TILE;
-            for (int s = 0; s < DSM_TILE; s++) {
-                result[row][s] = result[row][s] + a[s] * weight;
+        const double delay = t->delay[s];
+        const double q_first = rate_first - delay;
+        const double q_last = rate_last - delay;
+        if (q_last < x->support_lo || q_first >= x->support_hi) {
+            continue;
+        }
+        if (crosses_region(&x->curves[0], &t->curve[0], s, q_first, q_last)) {
+            return 1;
+        }
+        if (x->polarized &&
+            crosses_region(&x->curves[1], &t->curve[1], s,
+                           polarization_first - delay,
+                           polarization_last - delay)) {
+            return 1;
+        }
+        for (int j = 0; j < DSM_SOURCE_NODES; j++) {
+            const double q = nodes[j] - delay;
+            const double rate = region_value(&t->curve[0], s, q);
+            double magnetization, concentration;
+            if (mode == DSM_SOURCE_DIRECT) {
+                magnetization = rate;
+                concentration = 0.0;
+            } else {
+                magnetization = x->polarized
+                                    ? rate * region_value(&t->curve[1], s, q)
+                                    : rate;
+                concentration = mode == DSM_SOURCE_POLARIZED ? 0.0 : rate;
             }
+            weights[j][s] = magnetization - equilibrium * concentration;
+            weights[DSM_SOURCE_NODES + j][s] = concentration;
         }
     }
-    for (int row = 0; row < n_state; row++) {
-        memcpy(tile_state(t, row), result[row], sizeof(double) * DSM_TILE);
-    }
+    return 0;
 }
 
 static void run_tile(const dsm_context *x, int64_t tile, int64_t n_tiles,
@@ -1094,20 +1372,20 @@ static void run_tile(const dsm_context *x, int64_t tile, int64_t n_tiles,
     dsm_tile *t = w->tile;
     load_tile(c, first, valid, t, w->rw);
 
-    /* Delay range of the spins that receive inflow. An interval whose delayed
-     * query times all fall where the rate curve is zero has exactly zero
-     * source and takes the source-free update. */
-    int spatial_sources = 0;
-    double delay_min = INFINITY;
-    double delay_max = -INFINITY;
+    dsm_inflow inflow;
+    inflow.active = 0;
+    inflow.delay_min = INFINITY;
+    inflow.delay_max = -INFINITY;
     if (c->spatial_sources && x->rate_nonzero) {
         for (int s = 0; s < valid; s++) {
             if (t->d[s] != 0.0) {
-                delay_min = t->delay[s] < delay_min ? t->delay[s] : delay_min;
-                delay_max = t->delay[s] > delay_max ? t->delay[s] : delay_max;
+                inflow.delay_min =
+                    t->delay[s] < inflow.delay_min ? t->delay[s] : inflow.delay_min;
+                inflow.delay_max =
+                    t->delay[s] > inflow.delay_max ? t->delay[s] : inflow.delay_max;
             }
         }
-        spatial_sources = delay_min <= delay_max;
+        inflow.active = inflow.delay_min <= inflow.delay_max;
     }
 
     int32_t segment = 0;
@@ -1128,43 +1406,44 @@ static void run_tile(const dsm_context *x, int64_t tile, int64_t n_tiles,
                                  w->columns, w->build_slots, propagator);
                 w->build_seconds += wall_seconds() - started;
             }
-            apply_propagator(c, t, propagator,
-                             c->segment_sources + 6 * (int64_t)segment);
+            double weights[DSM_WEIGHTS][DSM_TILE];
+            int stepwise = 0;
+            if (c->spatial_sources) {
+                stepwise = segment_spatial_weights(x, t, &inflow, i, end, weights);
+            } else {
+                const double *sources =
+                    c->segment_sources + DSM_WEIGHTS * (int64_t)segment;
+                for (int k = 0; k < DSM_WEIGHTS; k++) {
+                    for (int s = 0; s < DSM_TILE; s++) {
+                        weights[k][s] = sources[k];
+                    }
+                }
+            }
+            if (stepwise) {
+                /* The entry stays valid for later occurrences; only this
+                 * one runs stepwise, with local coefficient slots. */
+                dsm_local_slots local;
+                reset_local_slots(&local);
+                for (int32_t k = i; k < end; k++) {
+                    advance_interval(x, w, t, k,
+                                     local_slot(x, &local, t, w->build_slots, k),
+                                     &inflow);
+                }
+                w->stepwise_tiles++;
+            } else {
+                apply_propagator(c, t, propagator, weights,
+                                 c->segment_phase != NULL
+                                     ? c->segment_phase + 2 * (int64_t)segment
+                                     : NULL);
+            }
             i = end - 1;
             segment++;
         } else {
-            const dsm_group *g = &x->groups[c->interval_group[i]];
             double *slot = w->slots + (size_t)x->slot_of[i] * x->slot_doubles;
             if (x->miss[i]) {
-                fill_slot(c, g, t, slot);
+                fill_slot(c, &x->groups[c->interval_group[i]], t, slot);
             }
-            const int32_t gradient_index = c->interval_gradient[i];
-            const int32_t source_index = c->interval_source[i];
-            if (gradient_index >= 0) {
-                prepare_gradient(t,
-                                 c->gradient_table + 3 * (int64_t)gradient_index,
-                                 c->interval_phase_s[2 * i]);
-            }
-            double spatial_rf[4 * DSM_TILE];
-            const int32_t rf_index = c->interval_rf[i];
-            const int spatial = c->tx != NULL && rf_index >= 0;
-            if (spatial) {
-                prepare_spatial_rf(t, c->rf_inputs + 3 * (int64_t)rf_index, spatial_rf);
-            }
-            const dsm_source *delayed = NULL;
-            if (spatial_sources) {
-                const double *time = c->interval_time_s + 3 * (int64_t)i;
-                if (!(time[2] - delay_min < x->support_lo ||
-                      time[0] - delay_max >= x->support_hi)) {
-                    fill_spatial_sources(x, t, i, g->half, w->sources);
-                    delayed = w->sources;
-                }
-            }
-            step_interval(c, g, slot, t, i,
-                          source_index >= 0
-                              ? c->source_table + 8 * (int64_t)source_index
-                              : NULL,
-                          delayed, spatial ? spatial_rf : NULL);
+            advance_interval(x, w, t, i, slot, &inflow);
         }
         run_actions(c, t, w->rw, first, valid, adc_block, i);
     }
@@ -1203,7 +1482,7 @@ static int validate(const dsm_chunk *c) {
     }
     if (c->spatial_sources) {
         if (!c->has_sources || c->interval_time_s == NULL ||
-            c->arrival_delay_s == NULL || c->n_segments != 0) {
+            c->arrival_delay_s == NULL) {
             return -1;
         }
         if (c->spatial_mode != DSM_SOURCE_COUPLED &&
@@ -1264,10 +1543,9 @@ static int validate(const dsm_chunk *c) {
         return -1;
     }
     if (c->n_segments > 0) {
-        if (c->npools != 2 || c->segment_first == NULL ||
-            c->segment_end == NULL || c->segment_entry == NULL ||
-            c->segment_basis == NULL || c->segment_sources == NULL ||
-            c->propagators == NULL) {
+        if (c->segment_first == NULL || c->segment_end == NULL ||
+            c->segment_entry == NULL || c->segment_basis == NULL ||
+            c->segment_sources == NULL || c->propagators == NULL) {
             return -1;
         }
         int32_t previous_end = 0;
@@ -1286,6 +1564,11 @@ static int validate(const dsm_chunk *c) {
             }
             /* Only the last interval of a segment may carry actions. */
             if (c->action_offsets[first] != c->action_offsets[end - 1]) {
+                return -1;
+            }
+            if (c->segment_phase != NULL &&
+                !(isfinite(c->segment_phase[2 * (int64_t)k]) &&
+                  isfinite(c->segment_phase[2 * (int64_t)k + 1]))) {
                 return -1;
             }
             previous_end = end;
@@ -1409,10 +1692,14 @@ int dsm_run_chunk(const dsm_chunk *c) {
                                  (size_t)c->adc_payload_count;
     const size_t thread_doubles =
         (size_t)DSM_SLOTS * slot_size + 2 * (size_t)c->ncoils * DSM_TILE;
-    const int32_t values = dsm_propagator_values(
-        c->track_concentration, c->has_sources, c->concentration_sources);
-    const int n_columns = propagator_columns(
-        c->track_concentration, c->has_sources, c->concentration_sources);
+    const int32_t values =
+        dsm_propagator_values(c->npools, c->track_concentration,
+                              c->has_sources, c->concentration_sources);
+    const int n_columns =
+        propagator_layout(c->track_concentration, c->has_sources,
+                          c->concentration_sources)
+            .columns;
+    const int cached = c->n_segments > 0;
     int builds = 0;
     for (int32_t k = 0; k < c->n_segments; k++) {
         builds = builds || c->segment_basis[k] >= 0;
@@ -1438,15 +1725,16 @@ int dsm_run_chunk(const dsm_chunk *c) {
                                 (size_t)n_threads)
                : NULL;
     double *build_buffers =
-        builds ? aligned_buffer(sizeof(double) * DSM_BUILD_SLOTS * slot_size *
+        cached ? aligned_buffer(sizeof(double) * DSM_BUILD_SLOTS * slot_size *
                                 (size_t)n_threads)
                : NULL;
     double build_seconds = 0.0;
+    int64_t stepwise_tiles = 0;
     int status = 0;
     if (groups == NULL || group_slot == NULL || slot_of == NULL ||
         miss == NULL || tiles == NULL || sources == NULL ||
         thread_buffers == NULL || (block_doubles > 0 && adc_blocks == NULL) ||
-        (builds && (column_tiles == NULL || build_buffers == NULL))) {
+        (builds && column_tiles == NULL) || (cached && build_buffers == NULL)) {
         status = -2;
         goto cleanup;
     }
@@ -1482,9 +1770,10 @@ int dsm_run_chunk(const dsm_chunk *c) {
         w.sources = sources + 2 * (size_t)thread;
         w.columns = builds ? column_tiles + (size_t)thread * n_columns : NULL;
         w.build_slots =
-            builds ? build_buffers + (size_t)thread * DSM_BUILD_SLOTS * slot_size
+            cached ? build_buffers + (size_t)thread * DSM_BUILD_SLOTS * slot_size
                    : NULL;
         w.build_seconds = 0.0;
+        w.stepwise_tiles = 0;
         /* MSVC's C OpenMP parser requires a separately declared loop index. */
         int block;
 #ifdef _OPENMP
@@ -1504,6 +1793,10 @@ int dsm_run_chunk(const dsm_chunk *c) {
 #pragma omp atomic
 #endif
         build_seconds += w.build_seconds;
+#ifdef _OPENMP
+#pragma omp atomic
+#endif
+        stepwise_tiles += w.stepwise_tiles;
     }
 
     if (adc_blocks != NULL) {
@@ -1516,6 +1809,9 @@ int dsm_run_chunk(const dsm_chunk *c) {
     }
     if (c->build_seconds != NULL) {
         *c->build_seconds += build_seconds;
+    }
+    if (c->stepwise_tiles != NULL) {
+        *c->stepwise_tiles += stepwise_tiles;
     }
 
 cleanup:
