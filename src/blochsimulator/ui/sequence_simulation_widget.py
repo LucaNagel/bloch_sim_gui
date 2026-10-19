@@ -4040,6 +4040,24 @@ class SequenceSimulationWidget(QWidget):
         self.epi_readout_trajectory.currentIndexChanged.connect(
             self._readout_trajectory_changed
         )
+        # Typed values are applied on Enter / focus loss instead of per keystroke,
+        # so the timing resolver never sees a half-typed number such as the "3"
+        # of "3000".
+        for control in (
+            self.sampling_bandwidth_khz,
+            self.epi_echo_time_ms,
+            self.epi_repetition_time_ms,
+            self.flash_sampling_bandwidth_khz,
+            self.flash_echo_time_ms,
+            self.flash_repetition_time_ms,
+            self.flash_acquisition_interval_ms,
+            self.epsi_sampling_bandwidth_khz,
+            self.epsi_echo_spacing_ms,
+            self.epsi_echo_time_ms,
+            self.epsi_repetition_time_ms,
+            self.epsi_acquisition_interval_ms,
+        ):
+            control.setKeyboardTracking(False)
         self.epi_read_fov_mm.valueChanged.connect(self._acquisition_changed)
         self.epi_phase_fov_mm.valueChanged.connect(self._acquisition_changed)
         self.sampling_bandwidth_khz.valueChanged.connect(self._acquisition_changed)

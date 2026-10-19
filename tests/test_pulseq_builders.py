@@ -1254,3 +1254,36 @@ def test_sequence_workspace_bandwidth_does_not_drift_on_regeneration(source_name
     widget.close()
     widget.deleteLater()
     app.processEvents()
+
+
+@pytest.mark.parametrize(
+    "source_name, control_name",
+    [
+        ("EPI_SOURCE", "epi_repetition_time_ms"),
+        ("FLASH_SOURCE", "flash_repetition_time_ms"),
+        ("EPSI_MGE_SOURCE", "epsi_repetition_time_ms"),
+    ],
+)
+def test_timing_fields_are_not_resolved_while_typing(source_name, control_name):
+    from PyQt5.QtTest import QTest
+    from PyQt5.QtCore import Qt
+
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+    widget.sequence_live_preview.setChecked(False)
+    widget.sequence_source.setCurrentIndex(getattr(widget, source_name))
+    widget.show()
+    control = getattr(widget, control_name)
+    control.setValue(50.0)
+    control.setFocus()
+    control.selectAll()
+    for key in "3000":
+        QTest.keyClicks(control, key)
+    # Nothing is applied (or corrected) until the entry is confirmed.
+    assert control.value() == pytest.approx(50.0)
+    QTest.keyClick(control, Qt.Key_Return)
+    assert control.value() == pytest.approx(3000.0)
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()

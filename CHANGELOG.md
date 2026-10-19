@@ -49,6 +49,9 @@ The project follows [Semantic Versioning](https://semver.org/).
   `make_pulseq_flash(timing_only=True)` returns the limits.
 - Cartesian EPI resolves bandwidth, TE and the acquisition interval the same way
   (`make_pulseq_epi(timing_only=True)` returns the limits); spiral is unchanged.
+- The timing fields that are resolved automatically (bandwidth, TE, TR, echo
+  spacing, acquisition interval) apply typed values on Enter or focus loss, so a
+  half-typed number such as the "3" of "3000" is never corrected.
 - The sampling-bandwidth field of FLASH and Cartesian EPI is now rounded up when
   it shows the bandwidth the builder achieved, so repeated generation no longer
   lowers the bandwidth step by step (150 → 142.9 → 133.3 → 125 kHz).
