@@ -6,6 +6,33 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Sequence results export as Bruker ParaVision studies
+  (`export_bruker_dataset`): `subject`, scan folder with `acqp`, `method`,
+  `fid` and/or `rawdata.job0`, and reconstructed `pdata/1` (`2dseq`,
+  `visu_pars`, `reco`, ...). ParaVision 7.0.0 (default) and 6.0.1 are checked
+  against scanner data, 5.1 and 360 V3.6 against public example datasets
+  (BrukerAPI test data, PV360_StdData). The method
+  (FLASH, MGE, EPI, CSI, SPIRAL, NSPECT) is suggested from the acquisition, a new
+  study is created by default, and a scan can be appended to an existing study.
+- Real ParaVision datasets can serve as templates (`load_bruker_template`):
+  owner, operator, station, subject, study, coils and reference frequencies
+  flow into the exported study and can be edited or anonymized
+  (`anonymize_template`) before export.
+- DICOM export (`export_dicom`, MR Image Storage, one file per image) with
+  scanner geometry, echo/repetition indices, separate pool and phase series,
+  and CSI metabolite maps. NIfTI export (`export_nifti`) writes one RAS-oriented
+  volume per series with a BIDS-style JSON sidecar. Both share the subject and
+  study of a Bruker export from the same run and need the new `export` extra
+  (`pip install blochsimulator[export]` for pydicom and nibabel).
+- One export dialog for sequence results (File → Export and the sequence
+  workspace) selects NetCDF, notebook, HDF5, NPZ, Bruker, DICOM and NIfTI
+  together, with ParaVision version, raw files, method, scan name, geometry,
+  template preview/editing, anonymization and new-study/append options. Raw
+  data are stored complex-conjugated by default, like measured ParaVision data
+  (`RECO_qopts = COMPLEX_CONJUGATE`); the option can be switched off.
+
 ### Changed
 
 - EPSI / MGE parameters now resolve against each other as you edit them. The

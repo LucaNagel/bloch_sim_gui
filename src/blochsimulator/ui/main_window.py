@@ -6302,9 +6302,27 @@ class BlochSimulatorGUI(QMainWindow):
         self.mag_3d.b1_arrow.setData(pos=pos)
         self.mag_3d.b1_arrow.setVisible(True)
 
+    def _sequence_export_target(self):
+        """Return the sequence workspace when File > Export should use it."""
+        widget = self.sequence_simulation_widget
+        if getattr(self, "workspace_mode", "free") == "sequence":
+            return widget if widget is not None else False
+        if self.last_result is None and getattr(widget, "result", None) is not None:
+            return widget
+        return None
+
     def export_results(self):
         """Export simulation results and parameters using the new multi-format dialog."""
-        if self.last_result is None and not hasattr(self, "last_b1"):
+        sequence_target = self._sequence_export_target()
+        if sequence_target is False:
+            QMessageBox.warning(
+                self, "No Data", "Please run a sequence simulation first."
+            )
+            return
+        if sequence_target is not None:
+            sequence_target.export_results()
+            return
+        if self.last_result is None:
             QMessageBox.warning(self, "No Data", "Please run a simulation first.")
             return
 
@@ -6401,9 +6419,10 @@ class BlochSimulatorGUI(QMainWindow):
             except Exception as e:
                 self.log_message(f"Failed to export animation: {e}")
 
-        # 3. HDF5 Export
+        # 3. HDF5 Export. The analysis notebook loads this file, so it is
+        # written whenever that notebook is requested.
         h5_path = f"{base_path}.h5" if base_path else None
-        if options["hdf5"]:
+        if options["hdf5"] or options["notebook_analysis"]:
             try:
                 self.simulator.save_results(h5_path, sequence_params, simulation_params)
                 self.log_message(f"Exported HDF5: {h5_path}")

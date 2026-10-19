@@ -642,6 +642,98 @@ def test_free_mode_export_uses_parameters_captured_for_completed_run(tmp_path):
     assert save_results.call_args.args[2]["field_strength_t"] == 7.0
 
 
+def test_file_export_in_sequence_mode_opens_sequence_export(tmp_path):
+    window = BlochSimulatorGUI()
+    window.app_settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    window.set_workspace_mode("sequence")
+    window._ensure_sequence_simulation_workspace(window.sequence_simulation_tab_index)
+    window.sequence_simulation_widget.result = object()
+    export_action = window.findChild(QAction, "action_export_results")
+
+    with (
+        patch("blochsimulator.ui.main_window.ExportDataDialog") as free_dialog,
+        patch.object(
+            window.sequence_simulation_widget, "export_results"
+        ) as sequence_export,
+    ):
+        export_action.trigger()
+
+    sequence_export.assert_called_once_with()
+    free_dialog.assert_not_called()
+
+
+def test_file_export_in_sequence_mode_without_result_warns(tmp_path):
+    window = BlochSimulatorGUI()
+    window.app_settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    window.set_workspace_mode("sequence")
+    window.sequence_simulation_widget = None
+
+    with (
+        patch("blochsimulator.ui.main_window.ExportDataDialog") as free_dialog,
+        patch("blochsimulator.ui.main_window.QMessageBox.warning") as warning,
+    ):
+        window.export_results()
+
+    free_dialog.assert_not_called()
+    assert "sequence simulation" in warning.call_args.args[2]
+
+
+def test_free_mode_export_after_released_result_warns(tmp_path):
+    window = BlochSimulatorGUI()
+    window.app_settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    window.set_workspace_mode("free")
+    window.last_result = None
+    window.last_b1 = None
+
+    with (
+        patch("blochsimulator.ui.main_window.ExportDataDialog") as free_dialog,
+        patch("blochsimulator.ui.main_window.QMessageBox.warning") as warning,
+    ):
+        window.export_results()
+
+    free_dialog.assert_not_called()
+    warning.assert_called_once()
+
+
+def test_free_mode_analysis_notebook_writes_its_hdf5(tmp_path):
+    window = BlochSimulatorGUI()
+    window.app_settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    window.set_workspace_mode("free")
+    window._last_export_parameters = {
+        "tissue": {},
+        "sequence": {"sequence_type": "Spin Echo"},
+        "simulation": {"mode": "endpoint"},
+    }
+    window.last_result = {"time": np.array([0.0]), "mx": np.array([[0.0]])}
+    window.last_time = np.array([0.0])
+    dialog = MagicMock()
+    dialog.exec_.return_value = QDialog.Accepted
+    dialog.get_export_options.return_value = {
+        "base_path": str(tmp_path / "run"),
+        "image": False,
+        "image_format": "png",
+        "animation": False,
+        "animation_format": "gif",
+        "animation_fps": 30,
+        "include_sequence": False,
+        "hdf5": False,
+        "notebook_analysis": True,
+        "notebook_repro": False,
+        "csv": False,
+        "csv_format": "csv",
+    }
+    with (
+        patch("blochsimulator.ui.main_window.ExportDataDialog", return_value=dialog),
+        patch.object(window.simulator, "save_results") as save_results,
+        patch("blochsimulator.notebook_exporter.export_notebook") as export_notebook,
+        patch("blochsimulator.ui.main_window.QMessageBox.information"),
+    ):
+        window.export_results()
+
+    assert save_results.call_args.args[0] == str(tmp_path / "run.h5")
+    assert export_notebook.call_args.kwargs["h5_filename"] == "run.h5"
+
+
 def test_simulation_controls_have_explanatory_tooltips():
     app = QApplication.instance()
     if app is None:
@@ -839,11 +931,11 @@ def test_configured_export_directory_is_used(tmp_path, monkeypatch):
     assert window.sequence_simulation_widget._export_directory() == export_directory
     window.sequence_simulation_widget.result = object()
     with patch(
-        "blochsimulator.ui.sequence_simulation_widget.QFileDialog.getSaveFileName",
-        return_value=("", ""),
+        "blochsimulator.ui.sequence_simulation_widget.SequenceExportDialog"
     ) as sequence_export_dialog:
+        sequence_export_dialog.return_value.exec_.return_value = 0
         window.sequence_simulation_widget._export_results()
-    assert Path(sequence_export_dialog.call_args.args[2]).parent == export_directory
+    assert sequence_export_dialog.call_args.kwargs["directory"] == export_directory
 
     window.app_settings.setValue("sequence/kernel", "invalid")
     assert window._load_sequence_kernel() == "optimized"

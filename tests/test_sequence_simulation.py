@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -852,13 +854,14 @@ def test_sequence_result_bruker_raw_export_writes_interleaved_fid(tmp_path):
     assert np.count_nonzero(fid[4:]) == 0
     acqp = (output / "acqp").read_text()
     method = (output / "method").read_text()
-    assert "##$ACQ_scan_name=<BlochSimulator " in acqp
+    assert "##$ACQ_scan_name=( 64 )\n<BlochSimulator " in acqp
     assert "##$GO_raw_data_format=GO_32BIT_SGN_INT" in acqp
     assert "##$BYTORDA=little" in acqp
-    assert "##$BLOCHSIM_signal_scale=1000" in acqp
+    provenance = json.loads((output / "blochsim_provenance.json").read_text())
+    assert provenance["signal_scale"] == 1000
     assert "##$PVM_EncNReceivers=1" in method
-    assert "##$PVM_EncSpectroscopy=No" in method
-    assert "##$Method=<Bruker:RARE>" in method
+    assert "##$PVM_EncSpectroscopy=Yes" in method
+    assert "##$Method=<Bruker:NSPECT>" in method
     assert "##$PVM_FrqWorkOffsetPpm=( 8 )\n183.35 " in method
 
 
@@ -885,8 +888,8 @@ def test_bruker_export_accepts_method_and_spatial_metadata_overrides(tmp_path):
 
     acqp = (output / "acqp").read_text()
     method = (output / "method").read_text()
-    assert "##$ACQ_scan_name=<custom scan>" in acqp
-    assert "##$ACQ_method=<Bruker:FLASH>" in acqp
+    assert "##$ACQ_scan_name=( 64 )\n<custom scan" in acqp
+    assert "##$ACQ_method=( 40 )\n<Bruker:FLASH>" in acqp
     assert "##$Method=<Bruker:FLASH>" in method
     assert "##$PVM_Matrix=( 2 )\n64 32" in method
     assert "##$PVM_Fov=( 2 )\n60 30" in method

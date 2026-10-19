@@ -7,14 +7,16 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QDialog
 
 from blochsimulator import BlochSimulator
 from blochsimulator.paths import workspace_directory
 from blochsimulator.phantom_design import PhantomDesign
 from blochsimulator.sequence import ADCEvent, BrukerExportOptions, SequenceProgram
+from blochsimulator.sequence.export_bundle import SequenceExportRequest
 from blochsimulator.spectral_phantom import ChemicalSpecies, SpectralPhantom
 from blochsimulator.ui.phantom_designer import SpectralPhantomDesignerDialog
+from blochsimulator.ui.sequence_export_dialog import SequenceExportDialog
 from blochsimulator.ui.sequence_simulation_widget import (
     SequenceSimulationThread,
     SequenceSimulationWidget,
@@ -412,15 +414,17 @@ def test_sequence_workspace_exports_xarray_result(tmp_path):
     output = tmp_path / "sequence_result.nc"
 
     with (
-        patch(
-            "blochsimulator.ui.sequence_simulation_widget.QFileDialog.getSaveFileName",
-            return_value=(str(output), "xarray NetCDF (*.nc)"),
+        patch.object(
+            widget,
+            "_prompt_export_request",
+            return_value=SequenceExportRequest(directory=tmp_path, formats=("netcdf",)),
         ),
         patch("blochsimulator.ui.sequence_simulation_widget.QMessageBox.information"),
     ):
         widget._export_results()
 
     assert output.is_file()
+    assert not output.with_suffix(".ipynb").exists()
     import xarray as xr
 
     with xr.open_dataset(output) as exported:
@@ -450,13 +454,19 @@ def test_sequence_workspace_exports_result_data_and_notebook_by_default(tmp_path
         widget.program, widget.phantom
     )
     output = tmp_path / "sequence_result.nc"
-    combined_filter = "xarray NetCDF + Jupyter notebook (*.nc)"
+    shown = []
+
+    class AcceptDefaults(SequenceExportDialog):
+        def exec_(self):
+            shown.append(self)
+            self.directory_edit.setText(str(tmp_path))
+            return QDialog.Accepted
 
     with (
         patch(
-            "blochsimulator.ui.sequence_simulation_widget.QFileDialog.getSaveFileName",
-            return_value=(str(output), combined_filter),
-        ) as save_dialog,
+            "blochsimulator.ui.sequence_simulation_widget.SequenceExportDialog",
+            AcceptDefaults,
+        ),
         patch("blochsimulator.ui.sequence_simulation_widget.QMessageBox.information"),
     ):
         widget._export_results()
@@ -465,7 +475,7 @@ def test_sequence_workspace_exports_result_data_and_notebook_by_default(tmp_path
     assert output.is_file()
     assert notebook.is_file()
     assert "sequence_result.nc" in notebook.read_text(encoding="utf-8")
-    assert save_dialog.call_args.args[3].startswith(combined_filter)
+    assert shown[0].selected_formats() == ("netcdf", "notebook")
 
     widget.close()
     app.processEvents()
@@ -481,25 +491,20 @@ def test_sequence_workspace_exports_bruker_raw_directory(tmp_path):
     widget.result = BlochSimulator(use_parallel=False).simulate_sequence(
         widget.program, widget.phantom
     )
-    output = tmp_path / "bruker_export" / "1"
+    request = SequenceExportRequest(
+        directory=tmp_path / "bruker_export",
+        formats=("bruker",),
+        bruker=BrukerExportOptions(method_name="Bruker:RARE", raw_data_files="both"),
+    )
 
     with (
-        patch(
-            "blochsimulator.ui.sequence_simulation_widget.QFileDialog.getSaveFileName",
-            return_value=(str(output), "Bruker raw dataset (directory)"),
-        ),
-        patch.object(
-            widget,
-            "_prompt_bruker_export_options",
-            return_value=BrukerExportOptions(
-                method_name="Bruker:RARE",
-                raw_data_files="both",
-            ),
-        ),
+        patch.object(widget, "_prompt_export_request", return_value=request),
         patch("blochsimulator.ui.sequence_simulation_widget.QMessageBox.information"),
     ):
         widget._export_results()
 
+    (output,) = (tmp_path / "bruker_export").glob("*/1")
+    assert (output.parent / "subject").is_file()
     assert (output / "fid").is_file()
     assert (output / "rawdata.job0").is_file()
     assert (output / "acqp").is_file()

@@ -564,6 +564,7 @@ class ExportDataDialog(QDialog):
         img_opts_layout.addWidget(self.img_format)
         self.img_opts.setLayout(img_opts_layout)
         self.img_opts.setVisible(False)
+        self.chk_image.toggled.connect(self.img_opts.setVisible)
         visual_layout.addWidget(self.img_opts)
 
         # 2. Animation Exports
@@ -626,7 +627,8 @@ class ExportDataDialog(QDialog):
         self.chk_nb_analysis = QCheckBox("Jupyter Notebook: Analysis")
         self.chk_nb_analysis.setChecked(True)
         self.chk_nb_analysis.setToolTip(
-            "Loads the accompanying HDF5 data and provides analysis plots."
+            "Loads the accompanying HDF5 data and provides analysis plots. "
+            "The HDF5 file is written with it."
         )
         data_layout.addWidget(self.chk_nb_analysis)
 

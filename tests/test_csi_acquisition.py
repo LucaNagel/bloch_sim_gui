@@ -158,8 +158,8 @@ def test_csi_bruker_export_writes_rawdata_job0_in_linear_grid_order(
     method = (output / "method").read_text()
     assert "##$Method=<Bruker:CSI>" in method
     assert "##$PVM_EncSpectroscopy=Yes" in method
-    assert "##$PVM_SpecMatrix=256" in method
-    assert "##$PVM_EncOrder=LINEAR_ENC LINEAR_ENC" in method
+    assert "##$PVM_SpecMatrix=( 1 )\n256" in method
+    assert "##$PVM_EncOrder=( 2 )\nLINEAR_ENC LINEAR_ENC" in method
 
 
 def test_centric_builder_matches_luca_csi4_14_by_11_method_order():

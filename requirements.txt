@@ -22,6 +22,8 @@ h5py>=3.0.0        # For saving/loading results
 numba>=0.53.0       # For JIT compilation (optional optimization)
 jupyterlab>=3.0.0   # For interactive notebooks
 pypulseq>=1.5.0,<1.5.1  # Pulseq .seq import in the desktop app
+pydicom>=2.4        # DICOM image export
+nibabel>=5.0        # NIfTI image export
 
 # For GPU acceleration (optional)
 # cupy>=9.0.0       # Uncomment if you have CUDA available

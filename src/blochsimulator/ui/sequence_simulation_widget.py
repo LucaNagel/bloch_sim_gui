@@ -56,17 +56,13 @@ from PyQt5.QtWidgets import (
 from ..memory import MEMORY_ERROR_PREFIX
 from ..kernel_capabilities import DYNAMIC_KERNEL_NAMES, SEQUENCE_KERNEL_NAMES
 from ..phantom import Phantom
-from ..notebook_exporter import (
-    export_pulseq_generation_notebook,
-    export_sequence_result_notebook,
-)
+from ..notebook_exporter import export_pulseq_generation_notebook
 from ..paths import workspace_directory
 from ..project_naming import ProjectExportNamer, project_timestamp
 from ..spectral_phantom import SpectralPhantom
 from ..dynamic_phantom import DynamicSpectralPhantom
 from ..sequence import (
     ADCEvent,
-    BrukerExportOptions,
     CartesianAcquisition,
     CartesianAcquisitionFrames,
     CartesianAcquisitionVolumes,
@@ -84,7 +80,6 @@ from ..sequence import (
     analyze_adc_moment_train,
     analyze_repeated_spoiler_train,
     ernst_angle_deg,
-    export_bruker_raw,
     infer_cartesian_acquisition,
     infer_cartesian_acquisition_frames,
     infer_cartesian_acquisition_volumes,
@@ -107,7 +102,9 @@ from ..sequence import (
     recommend_spin_grid_for_phase_train,
     variable_flip_angle_schedule,
 )
+from ..sequence.bruker_export import suggest_bruker_method
 from ..sequence.encoding import numeric_definition_array
+from ..sequence.export_bundle import existing_export_targets, perform_sequence_export
 from ..sequence.parameter_loop import (
     MAX_PARAMETER_LOOP_POINTS,
     manual_parameter_loop_values,
@@ -140,6 +137,7 @@ from .plot_interaction import AXIS_ZOOM_TOOLTIP
 from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumViewer
 from .project_export_dialog import ProjectExportNamingWidget
 from .reconstruction_explorer import SequenceReconstructionExplorer
+from .sequence_export_dialog import SequenceExportDialog
 from .simulation_explorer import SessionSimulationRun
 from .styles import BOLD_GROUP_TITLES_STYLE
 from .volume_viewer import (
@@ -13195,83 +13193,92 @@ class SequenceSimulationWidget(QWidget):
         self._simulation_last_progress_total = 1
         self._simulation_progress_rate = None
 
+    def export_results(self):
+        """Open the sequence export dialog (also used by File > Export)."""
+        self._export_results()
+
     def _export_results(self):
         if self.result is None:
             QMessageBox.warning(self, "No result", "Run a simulation first.")
             return
-        data_notebook_filter = "xarray NetCDF + Jupyter notebook (*.nc)"
-        bruker_filter = "Bruker raw dataset (directory)"
-        default_path = self._export_directory() / "sequence_result.nc"
-        filename, selected_filter = QFileDialog.getSaveFileName(
-            self,
-            "Export sequence simulation result",
-            str(default_path),
-            (
-                f"{data_notebook_filter};;xarray NetCDF only (*.nc);;"
-                "HDF5 only (*.h5);;NumPy archive only (*.npz);;"
-                "Jupyter notebook + NetCDF data (*.ipynb);;"
-                "Bruker raw dataset (directory)"
-            ),
-        )
-        if not filename:
+        request = self._prompt_export_request()
+        if request is None:
             return
-        path = Path(filename)
-        if selected_filter != bruker_filter and not path.suffix:
-            suffixes = {
-                data_notebook_filter: ".nc",
-                "xarray NetCDF only (*.nc)": ".nc",
-                "HDF5 only (*.h5)": ".h5",
-                "NumPy archive only (*.npz)": ".npz",
-                "Jupyter notebook + NetCDF data (*.ipynb)": ".ipynb",
-            }
-            path = path.with_suffix(suffixes.get(selected_filter, ".nc"))
-        try:
-            if selected_filter == bruker_filter:
-                options = self._prompt_bruker_export_options(path)
-                if options is None:
-                    return
-                export_bruker_raw(
-                    self.result,
-                    path,
-                    program=self.program,
-                    phantom=self.phantom,
-                    acquisition=self.acquisition,
-                    acquisition_frames=self.acquisition_frames,
-                    options=options,
-                )
-                raw_names = {
-                    "fid": ["fid"],
-                    "rawdata.job0": ["rawdata.job0"],
-                    "both": ["fid", "rawdata.job0"],
-                }[options.raw_data_files]
-                exported = "\n".join(
-                    raw_names
-                    + ["acqp", "method", "visu_pars", "pulseprogram", "pdata/1"]
-                )
-            elif selected_filter == data_notebook_filter:
-                data_path = path.with_suffix(".nc")
-                notebook_path = path.with_suffix(".ipynb")
-                self.result.save(data_path)
-                export_sequence_result_notebook(
-                    str(notebook_path),
-                    str(data_path),
-                )
-                exported = f"{data_path.name}\n{notebook_path.name}"
-            elif path.suffix.lower() == ".ipynb":
-                data_path = path.with_suffix(".nc")
-                self.result.save(data_path)
-                export_sequence_result_notebook(str(path), str(data_path))
-                exported = f"{path.name}\n{data_path.name}"
-            else:
-                self.result.save(path)
-                exported = path.name
-            QMessageBox.information(
+        existing = existing_export_targets(request)
+        if existing:
+            names = "\n".join(str(path) for path in existing[:8])
+            more = f"\n... and {len(existing) - 8} more" if len(existing) > 8 else ""
+            answer = QMessageBox.question(
                 self,
-                "Export complete",
-                f"Exported to {path.parent}:\n{exported}",
+                "Replace existing export?",
+                f"These outputs already exist and will be replaced:\n{names}{more}",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+            request = replace(request, overwrite=True)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            report = perform_sequence_export(
+                request,
+                self.result,
+                program=self.program,
+                phantom=self.phantom,
+                acquisition=self.acquisition,
+                acquisition_frames=self.acquisition_frames,
             )
         except Exception as exc:
+            QApplication.restoreOverrideCursor()
             QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        QApplication.restoreOverrideCursor()
+        QMessageBox.information(self, "Export complete", report.summary_text())
+
+    def _prompt_export_request(self):
+        """Show the export dialog and return its request (``None`` if cancelled)."""
+
+        try:
+            matrix, fov_m = self._default_bruker_spatial_metadata()
+        except Exception:
+            matrix, fov_m = (1, 1), (0.1, 0.1)
+        try:
+            profile_method, slice_thickness_mm, raw_data_files = (
+                self._default_bruker_export_profile()
+            )
+        except Exception:
+            profile_method, slice_thickness_mm, raw_data_files = (None, 1.0, None)
+        method = profile_method if profile_method != "Bruker:RARE" else None
+        if method is None:
+            try:
+                method = suggest_bruker_method(
+                    self.result,
+                    acquisition=self.acquisition,
+                    acquisition_frames=self.acquisition_frames,
+                )
+            except Exception:
+                method = "Bruker:FLASH"
+        scan_name = "BlochSimulator sequence"
+        if self.program is not None and getattr(self.program, "source", None):
+            scan_name = f"BlochSimulator {Path(self.program.source).name}"
+        dialog = SequenceExportDialog(
+            self,
+            directory=self._export_directory(),
+            formats=getattr(self, "_last_export_formats", ("netcdf", "notebook")),
+            suggested_method=method,
+            scan_name=scan_name,
+            matrix=matrix,
+            fov_m=fov_m,
+            slice_thickness_mm=slice_thickness_mm,
+            raw_data_files=raw_data_files,
+            template=getattr(self, "_export_template", None),
+        )
+        if dialog.exec_() != QDialog.Accepted:
+            return None
+        request = dialog.request()
+        self._export_template = dialog.template()
+        self._last_export_formats = request.formats
+        return request
 
     def _open_reconstruction_result(self):
         filename, _ = QFileDialog.getOpenFileName(
@@ -13291,97 +13298,6 @@ class SequenceSimulationWidget(QWidget):
             self._status_update(f"Opened result {Path(filename).name}")
         except Exception as exc:
             QMessageBox.critical(self, "Open result failed", str(exc))
-
-    def _prompt_bruker_export_options(self, path: Path):
-        matrix, fov_m = self._default_bruker_spatial_metadata()
-        default_method, default_slice_thickness, default_raw_files = (
-            self._default_bruker_export_profile()
-        )
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Bruker export metadata")
-        layout = QFormLayout(dialog)
-
-        method_name = QComboBox()
-        method_name.setEditable(True)
-        method_name.addItems(
-            [
-                "Bruker:RARE",
-                "Bruker:FLASH",
-                "Bruker:CSI",
-                "User:lucaCSI4",
-                "User:pulseq",
-                "BlochSimulator:SequenceSimulation",
-            ]
-        )
-        method_name.setCurrentText(default_method)
-        layout.addRow("Method", method_name)
-
-        scan_name = QLineEdit()
-        default_scan_name = f"BlochSimulator {path.name or 'sequence'}"
-        if self.program is not None and self.program.source:
-            default_scan_name = f"BlochSimulator {Path(self.program.source).name}"
-        scan_name.setText(default_scan_name)
-        layout.addRow("Scan name", scan_name)
-
-        matrix_widget = QWidget()
-        matrix_layout = QHBoxLayout(matrix_widget)
-        matrix_layout.setContentsMargins(0, 0, 0, 0)
-        matrix_read = QSpinBox()
-        matrix_read.setRange(1, 8192)
-        matrix_read.setValue(int(matrix[0]))
-        matrix_phase = QSpinBox()
-        matrix_phase.setRange(1, 8192)
-        matrix_phase.setValue(int(matrix[1]))
-        matrix_layout.addWidget(matrix_read)
-        matrix_layout.addWidget(QLabel("read x phase"))
-        matrix_layout.addWidget(matrix_phase)
-        layout.addRow("PVM_Matrix", matrix_widget)
-
-        fov_widget = QWidget()
-        fov_layout = QHBoxLayout(fov_widget)
-        fov_layout.setContentsMargins(0, 0, 0, 0)
-        fov_read = QDoubleSpinBox()
-        fov_read.setRange(0.001, 10000.0)
-        fov_read.setDecimals(4)
-        fov_read.setValue(float(fov_m[0]) * 1000.0)
-        fov_read.setSuffix(" mm")
-        fov_phase = QDoubleSpinBox()
-        fov_phase.setRange(0.001, 10000.0)
-        fov_phase.setDecimals(4)
-        fov_phase.setValue(float(fov_m[1]) * 1000.0)
-        fov_phase.setSuffix(" mm")
-        fov_layout.addWidget(fov_read)
-        fov_layout.addWidget(QLabel("read x phase"))
-        fov_layout.addWidget(fov_phase)
-        layout.addRow("PVM_Fov", fov_widget)
-
-        slice_thickness = QDoubleSpinBox()
-        slice_thickness.setRange(0.001, 10000.0)
-        slice_thickness.setDecimals(4)
-        slice_thickness.setValue(default_slice_thickness)
-        slice_thickness.setSuffix(" mm")
-        layout.addRow("PVM_SliceThick", slice_thickness)
-
-        raw_data_files = QComboBox()
-        raw_data_files.addItems(["fid", "rawdata.job0", "both"])
-        raw_data_files.setCurrentText(default_raw_files)
-        layout.addRow("Raw data file", raw_data_files)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addRow(buttons)
-
-        if dialog.exec_() != QDialog.Accepted:
-            return None
-        return BrukerExportOptions(
-            method_name=method_name.currentText(),
-            scan_name=scan_name.text(),
-            matrix=(matrix_read.value(), matrix_phase.value()),
-            fov_m=(fov_read.value() / 1000.0, fov_phase.value() / 1000.0),
-            slice_thickness_mm=slice_thickness.value(),
-            raw_data_files=raw_data_files.currentText(),
-        )
 
     def _default_bruker_spatial_metadata(self):
         acquisition = self.acquisition

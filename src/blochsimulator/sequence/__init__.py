@@ -98,7 +98,29 @@ from .spectral_spatial import (
     spectral_spatial_schedule_warnings,
     validate_spectral_spatial_schedule,
 )
-from .bruker_export import BrukerExportOptions, export_bruker_raw
+from .bruker_export import (
+    BrukerExportOptions,
+    BrukerExportResult,
+    export_bruker_dataset,
+    build_scan_identity,
+    export_bruker_raw,
+    suggest_bruker_method,
+)
+from .bruker_jcamp import (
+    BrukerTemplateMetadata,
+    anonymize_template,
+    load_bruker_template,
+)
+from .dicom_export import DicomExportOptions, DicomExportResult, export_dicom
+from .image_export import (
+    AcquisitionSummary,
+    ImageFrame,
+    ImageSeries,
+    acquisition_summary,
+    extract_image_series,
+)
+from .nifti_export import NiftiExportOptions, NiftiExportResult, export_nifti
+from .paravision import PARAVISION_PROFILES, get_paravision_profile
 
 from .pulseq import (
     PulseqImportError,
@@ -204,7 +226,27 @@ __all__ = [
     "variable_flip_angle_schedule",
     "ernst_angle_deg",
     "BrukerExportOptions",
+    "BrukerExportResult",
+    "BrukerTemplateMetadata",
+    "PARAVISION_PROFILES",
+    "anonymize_template",
+    "build_scan_identity",
+    "export_bruker_dataset",
     "export_bruker_raw",
+    "AcquisitionSummary",
+    "DicomExportOptions",
+    "DicomExportResult",
+    "ImageFrame",
+    "ImageSeries",
+    "NiftiExportOptions",
+    "NiftiExportResult",
+    "acquisition_summary",
+    "export_dicom",
+    "export_nifti",
+    "extract_image_series",
+    "get_paravision_profile",
+    "load_bruker_template",
+    "suggest_bruker_method",
     "PulseqImportError",
     "UnsupportedPulseqVersionError",
     "infer_cartesian_acquisition",
