@@ -13,7 +13,6 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -58,6 +57,7 @@ from ..units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm
 from .volume_viewer import PhantomInspectorWidget
 from .default_settings import WorkspaceDefaults
 from .styles import BOLD_GROUP_TITLES_STYLE
+from .widgets import ExplicitAcceptDialog
 
 try:
     import pyqtgraph.opengl as gl
@@ -466,7 +466,7 @@ def load_any_phantom(filename):
     return phantom
 
 
-class SpectralPhantomDesignerDialog(QDialog):
+class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
     """Compose rotatable 3D primitives and assign Lorentzian peak lists."""
 
     def __init__(

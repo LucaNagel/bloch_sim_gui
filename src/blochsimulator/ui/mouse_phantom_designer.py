@@ -10,7 +10,6 @@ from PyQt5.QtCore import QRectF, Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -37,6 +36,7 @@ from ..mouse_phantom import (
 )
 from .default_settings import WorkspaceDefaults
 from .volume_viewer import PhantomInspectorWidget
+from .widgets import ExplicitAcceptDialog
 
 
 class ClickableImageItem(pg.ImageItem):
@@ -410,7 +410,7 @@ class MouseSlicePreviewWidget(QWidget):
             self.set_selected_voxel(self.selected_voxel)
 
 
-class MousePhantomDesignerDialog(QDialog):
+class MousePhantomDesignerDialog(ExplicitAcceptDialog):
     """Configure anatomy, injection, renal kinetics, pH, and breathing."""
 
     def __init__(

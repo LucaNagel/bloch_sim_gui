@@ -8,7 +8,7 @@ from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -575,6 +575,8 @@ class B1WorkspaceWidget(QWidget):
         super().__init__(parent)
         self.phantom = None
         self.sequence_context = {}
+        self._fields_pending = False
+        self._editor_tab_index = 0
         self._apply_timer = QTimer(self)
         self._apply_timer.setSingleShot(True)
         self._apply_timer.setInterval(120)
@@ -647,7 +649,7 @@ class B1WorkspaceWidget(QWidget):
         self.preview_tabs.addTab(self.rx_preview, "Receive preview")
         # Editing a field opens its matching preview. Preview selection itself
         # stays independent so users can still compare either field manually.
-        self.editor_tabs.currentChanged.connect(self._show_matching_preview)
+        self.editor_tabs.currentChanged.connect(self._editor_tab_changed)
         splitter.addWidget(self.preview_tabs)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -661,9 +663,45 @@ class B1WorkspaceWidget(QWidget):
         if 0 <= index < self.preview_tabs.count():
             self.preview_tabs.setCurrentIndex(index)
 
+    def _editor_tab_changed(self, index: int) -> None:
+        if not self.confirm_pending_changes():
+            with QSignalBlocker(self.editor_tabs):
+                self.editor_tabs.setCurrentIndex(self._editor_tab_index)
+            return
+        self._editor_tab_index = index
+        self._show_matching_preview(index)
+
+    def confirm_pending_changes(self) -> bool:
+        """Resolve unapplied edits before leaving an editor or the B1 tab."""
+        if not self._fields_pending or self.phantom is None:
+            return True
+        if self.auto_apply.isChecked() and self._apply_timer.isActive():
+            return self.apply_fields()
+        answer = QMessageBox.question(
+            self,
+            "Apply B1 field changes?",
+            "The transmit or receive B1 fields have unapplied changes.\n\n"
+            "Apply them to the current phantom before switching tabs?\n"
+            "No keeps the edits without applying them. Cancel stays on this tab.",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if answer == QMessageBox.Yes:
+            if self.apply_fields():
+                return True
+            QMessageBox.warning(
+                self, "Could not apply B1 fields", self.apply_status.text()
+            )
+            return False
+        return answer == QMessageBox.No
+
     def set_phantom(self, phantom) -> None:
         previous_phantom = self.phantom
         self.phantom = phantom
+        if phantom is not previous_phantom:
+            self._fields_pending = (
+                self.tx_field is not None or self.rx_field is not None
+            )
         self.tx_preview.set_phantom(phantom)
         self.rx_preview.set_phantom(phantom)
         self.tx_editor.set_reference_phantom(phantom)
@@ -699,6 +737,8 @@ class B1WorkspaceWidget(QWidget):
                         name="Phantom receive B1−",
                     )
                 )
+            # These fields were read from the phantom's already applied maps.
+            self._fields_pending = False
             if tx is None and rx is None and self.auto_apply.isChecked():
                 self._apply_timer.start()
         elif self.auto_apply.isChecked():
@@ -713,6 +753,7 @@ class B1WorkspaceWidget(QWidget):
         self.tx_preview.set_sequence_context(self.sequence_context)
 
     def _field_changed(self, _field=None) -> None:
+        self._fields_pending = True
         self.tx_preview.set_field(self.tx_field)
         self.rx_preview.set_field(self.rx_field)
         self.fields_changed.emit(self.tx_field, self.rx_field)
@@ -726,14 +767,17 @@ class B1WorkspaceWidget(QWidget):
     def _auto_apply_changed(self, enabled: bool) -> None:
         if enabled and self.phantom is not None:
             self._apply_timer.start()
+        elif not enabled:
+            self._apply_timer.stop()
 
-    def apply_fields(self) -> None:
+    def apply_fields(self) -> bool:
+        self._apply_timer.stop()
         phantom = self.phantom
         if phantom is None:
             self.apply_status.setText(
                 "Create or load a phantom before applying B1 fields."
             )
-            return
+            return False
         try:
             if self.tx_field is None:
                 tx = np.ones(tuple(phantom.shape), dtype=np.complex128)
@@ -747,8 +791,9 @@ class B1WorkspaceWidget(QWidget):
             phantom.rx_sensitivity_maps = rx
         except Exception as exc:
             self.apply_status.setText(f"B1 application failed: {exc}")
-            return
+            return False
 
+        self._fields_pending = False
         self.tx_preview.set_phantom(phantom)
 
         active = np.asarray(phantom.mask, dtype=bool)
@@ -760,6 +805,7 @@ class B1WorkspaceWidget(QWidget):
             f"inside both fields; {rx.shape[0]} receive channel(s)."
         )
         self.phantom_updated.emit(phantom)
+        return True
 
 
 def _line_segments(corners: np.ndarray) -> np.ndarray:

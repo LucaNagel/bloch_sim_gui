@@ -1488,6 +1488,7 @@ class BlochSimulatorGUI(QMainWindow):
                     break
 
         # Connect tab change to optimize rendering
+        self._last_main_tab_index = self.tab_widget.currentIndex()
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
 
         # Add panels to main layout
@@ -2792,6 +2793,16 @@ class BlochSimulatorGUI(QMainWindow):
 
         Disable updates on plots that aren't visible to speed up tab switching.
         """
+        previous_index = self._last_main_tab_index
+        self._last_main_tab_index = index
+        if (
+            previous_index == self.b1_tab_index
+            and index != previous_index
+            and self.b1_widget is not None
+            and not self.b1_widget.confirm_pending_changes()
+        ):
+            self.tab_widget.setCurrentIndex(previous_index)
+            return
         free_mode = getattr(self, "workspace_mode", "free") == "free"
         magnetization_active = free_mode and index == self.magnetization_tab_index
         signal_active = free_mode and index == self.signal_tab_index

@@ -5,6 +5,8 @@ from PyQt5.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
     QComboBox,
+    QDialog,
+    QPushButton,
     QWidget,
 )
 import pyqtgraph as pg
@@ -13,6 +15,22 @@ import pyqtgraph as pg
 IMAGE_HISTOGRAM_WIDTH = 48
 IMAGE_CANVAS_BACKGROUND = (18, 18, 20)
 IMAGE_FOV_BORDER = (62, 62, 68)
+
+
+class ExplicitAcceptDialog(QDialog):
+    """Keep Enter available to editors; accept only through an explicit action."""
+
+    def showEvent(self, event):
+        for button in self.findChildren(QPushButton):
+            button.setAutoDefault(False)
+            button.setDefault(False)
+        super().showEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class SpinBoxWheelGuard(QObject):
