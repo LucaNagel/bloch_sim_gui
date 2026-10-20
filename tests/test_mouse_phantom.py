@@ -6,14 +6,14 @@ from unittest.mock import MagicMock, patch
 
 from blochsimulator import BlochSimulator
 from blochsimulator.dynamic_phantom import DynamicSpectralPhantom
-from blochsimulator.dynamic_phantom import PyruvateInflow, TimeCurve
+from blochsimulator.dynamic_phantom import PyruvateInflow, TimeCurve, VoxelWashout
 from blochsimulator.mouse_phantom import (
     MousePerfusionConfig,
     MousePerfusionPhantom,
     reference_mouse_vascular_graph,
 )
 from blochsimulator.phantom_widget import PhantomCreatorWidget
-from blochsimulator.sequence import SequenceProgram
+from blochsimulator.sequence import RFEvent, SequenceProgram
 from blochsimulator.spectral_phantom import ChemicalSpecies
 from blochsimulator.ui.phantom_designer import load_any_phantom
 from blochsimulator.ui.mouse_phantom_designer import (
@@ -351,6 +351,217 @@ def test_renal_excretion_can_be_disabled_and_legacy_configs_keep_it_off():
     assert MousePerfusionConfig.from_dict(legacy).renal_excretion_s_inv == 0.0
     with pytest.raises(ValueError, match="renal excretion"):
         MousePerfusionConfig(ureter_transit_s=-1.0).validate()
+
+
+def _fast_renal_config(**overrides):
+    values = dict(
+        shape=(24, 16, 48),
+        renal_tubular_transit_s=4.0,
+        ureter_transit_s=3.0,
+        renal_excretion_s_inv=0.3,
+    )
+    values.update(overrides)
+    return MousePerfusionConfig(**values)
+
+
+def _urinary_masks(phantom):
+    labels = phantom.anatomy_labels
+    return {
+        "left_ureter": labels == 13,
+        "right_ureter": labels == 14,
+        "bladder": labels == 12,
+    }
+
+
+def test_mouse_phantom_builds_solver_washout_with_urinary_sources():
+    phantom = _fast_renal_config().build()
+    washout = phantom.voxel_washout
+    labels = phantom.anatomy_labels
+
+    assert washout is not None and washout.has_sources
+    assert washout.compartment_names == ("left_ureter", "right_ureter", "bladder")
+    assert np.all(washout.loss_map_s_inv[labels == 0] == 0.0)
+    assert np.allclose(
+        washout.loss_map_s_inv[np.isin(labels, (2, 3, 4, 5))],
+        phantom._renal_loss_s_inv,
+    )
+    assert np.allclose(washout.loss_map_s_inv[np.isin(labels, (13, 14))], 1 / 3.0)
+    assert np.all(washout.loss_map_s_inv[labels == 12] == 0.0)
+    for index, mask in enumerate(_urinary_masks(phantom).values()):
+        assert np.all(washout.compartment_map[mask] == index)
+    assert np.all(phantom.mask[labels == 12])
+    assert (
+        phantom.metadata["renal_excretion_model"]
+        == "solver_first_order_washout_with_urinary_compartment_sources"
+    )
+
+    disabled = _fast_renal_config(renal_excretion_s_inv=0.0).build()
+    assert not disabled.voxel_washout.has_sources
+    assert np.allclose(
+        disabled.voxel_washout.loss_map_s_inv[labels == 2],
+        disabled.config.tissue_clearance_s_inv,
+    )
+
+
+@pytest.mark.parametrize("kernel", ["reference", "optimized"])
+def test_mouse_solver_excretion_matches_preview_urinary_amounts(kernel):
+    # With unit injection polarization Mz equals the concentration, so the
+    # solver's urinary magnetization integrates to the preview's amounts.
+    phantom = _fast_renal_config(injection_polarization=1.0).build()
+    checkpoints = (10.0, 20.0)
+    result = BlochSimulator(
+        use_parallel=False, dynamic_sequence_kernel=kernel
+    ).simulate_dynamic_sequence(
+        SequenceProgram((), duration_s=20.0),
+        phantom,
+        checkpoints_s=checkpoints,
+    )
+    mz = result.checkpoint_pool_magnetization[..., 2]
+    lookup = phantom._urinary_pool_lookup()
+    volume = phantom.voxel_volume_m3
+
+    for index, time_s in enumerate(checkpoints):
+        for name, mask in _urinary_masks(phantom).items():
+            for pool_index, pool in enumerate(phantom.pools):
+                expected = np.interp(time_s, lookup["times_s"], lookup[name][pool.name])
+                solved = np.sum(mz[index, pool_index][mask]) * volume
+                assert solved == pytest.approx(expected, rel=2e-3, abs=1e-14)
+    assert np.sum(mz[-1, 0][phantom.anatomy_labels == 12]) > 0
+    assert (
+        result.metadata["voxel_washout_model"]
+        == "strang_split_first_order_loss_with_compartment_sources"
+    )
+
+
+def test_urinary_hyperpolarization_relaxes_with_t1_during_transit():
+    config = MousePerfusionConfig(shape=(24, 16, 48), injection_compound="lactate")
+    phantom = config.build()
+    lookup = phantom._urinary_pool_lookup()
+    times = lookup["times_s"]
+    pool = phantom.pools[0]
+    rates = lookup["rates"]["bladder"]
+    concentration = rates["concentration"][pool.name]
+    excess = rates["magnetization"][pool.name] - concentration
+
+    ratio = np.trapezoid(excess, times) / (
+        (config.injection_polarization - 1.0) * np.trapezoid(concentration, times)
+    )
+    r1 = 1.0 / pool.t1
+    loss = phantom._renal_loss_s_inv
+    tubular = config.renal_tubular_transit_s
+    # Kidney residence, uniform tubular transit in [0.5, 1.5] x mean, and the
+    # well-mixed ureter each attenuate the excess magnetization.
+    expected = (
+        loss
+        / (loss + r1)
+        * (np.exp(-0.5 * r1 * tubular) - np.exp(-1.5 * r1 * tubular))
+        / (r1 * tubular)
+        / (1.0 + r1 * config.ureter_transit_s)
+    )
+    assert ratio == pytest.approx(expected, rel=1e-3)
+    assert ratio < np.exp(-r1 * tubular) < 1.0
+
+
+def test_mouse_solver_bladder_signal_is_t1_attenuated_and_kernels_agree():
+    config = _fast_renal_config()
+    phantom = config.build()
+    raster = 20e-6
+    events = tuple(
+        RFEvent(time_s, np.full(10, 20.0 + 0.0j), raster)
+        for time_s in np.arange(1.0, 12.0, 2.0)
+    )
+    program = SequenceProgram(events, duration_s=12.0)
+    results = {
+        kernel: BlochSimulator(
+            use_parallel=False, dynamic_sequence_kernel=kernel
+        ).simulate_dynamic_sequence(program, phantom, checkpoints_s=(6.0, 11.01, 12.0))
+        for kernel in ("reference", "optimized", "native_serial")
+    }
+    reference = results["reference"].checkpoint_pool_magnetization
+    for kernel in ("optimized", "native_serial"):
+        assert np.allclose(
+            results[kernel].checkpoint_pool_magnetization,
+            reference,
+            rtol=1e-9,
+            atol=1e-12 * np.max(np.abs(reference)),
+        )
+    native = results["native_serial"].metadata
+    assert native["sequence_kernel"] == "optimized"
+    assert "washout" in native["native_fallback_reason"]
+
+    # No RF reaches the lumen in this check: compare the bladder against the
+    # source convolution with T1 relaxation toward the thermal level.
+    free = BlochSimulator(
+        use_parallel=False, dynamic_sequence_kernel="optimized"
+    ).simulate_dynamic_sequence(
+        SequenceProgram((), duration_s=12.0), phantom, checkpoints_s=(12.0,)
+    )
+    bladder = phantom.anatomy_labels == 12
+    volume = phantom.voxel_volume_m3
+    lookup = phantom._urinary_pool_lookup()
+    times = lookup["times_s"]
+    window = times <= 12.0
+    pool = phantom.pools[0]
+    rates = lookup["rates"]["bladder"]
+    concentration = rates["concentration"][pool.name][window]
+    excess = rates["magnetization"][pool.name][window] - concentration
+    decay = np.exp(-(12.0 - times[window]) / pool.t1)
+    amount = np.trapezoid(concentration, times[window])
+    expected = amount + np.trapezoid(excess * decay, times[window])
+    solved = np.sum(free.checkpoint_pool_magnetization[0, 0, ..., 2][bladder]) * volume
+    assert solved == pytest.approx(expected, rel=5e-3)
+    hyperpolarized = config.injection_polarization * amount
+    assert solved < 0.8 * hyperpolarized
+
+
+@pytest.mark.parametrize("suffix", [".npz", ".h5", ".nc"])
+def test_mouse_voxel_washout_round_trips_through_saved_phantoms(tmp_path, suffix):
+    phantom = _fast_renal_config().build()
+    path = tmp_path / f"washout{suffix}"
+    phantom.save(path)
+    loaded = (
+        load_any_phantom(path)
+        if suffix == ".npz"
+        else DynamicSpectralPhantom.load(path)
+    )
+
+    original = phantom.voxel_washout
+    restored = loaded.voxel_washout
+    assert restored is not None
+    assert restored.compartment_names == original.compartment_names
+    for name in (
+        "loss_map_s_inv",
+        "compartment_map",
+        "times_s",
+        "concentration_rates",
+        "magnetization_rates",
+    ):
+        assert np.array_equal(getattr(restored, name), getattr(original, name))
+
+
+def test_voxel_washout_validation_rejects_inconsistent_sources():
+    shape = (2, 1, 1)
+    loss = np.zeros(shape)
+    compartments = np.asarray([-1, 0], dtype=np.int32).reshape(shape)
+    rates = np.zeros((1, 1, 2))
+    valid = dict(
+        loss_map_s_inv=loss,
+        compartment_map=compartments,
+        times_s=np.asarray([0.0, 1.0]),
+        concentration_rates=rates,
+        magnetization_rates=rates,
+        compartment_names=("lumen",),
+    )
+    VoxelWashout(**valid).validate(shape, 1)
+    for update in (
+        {"loss_map_s_inv": np.full(shape, -1.0)},
+        {"times_s": np.asarray([1.0, 0.0])},
+        {"compartment_map": np.full(shape, 1, dtype=np.int32)},
+        {"magnetization_rates": np.full((1, 1, 2), np.nan)},
+        {"compartment_names": ("a", "b")},
+    ):
+        with pytest.raises(ValueError):
+            VoxelWashout(**{**valid, **update}).validate(shape, 1)
 
 
 def test_voxel_preview_curves_include_configured_conversion_products():

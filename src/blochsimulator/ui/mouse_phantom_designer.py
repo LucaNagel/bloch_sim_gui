@@ -634,7 +634,8 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.renal_excretion.setToolTip(
             "Rate at which kidney tissue passes injected compound into the "
             "urine, in addition to tissue clearance. 0 disables excretion. "
-            "Preview only; the Bloch solver keeps the vascular delivery."
+            "The Bloch solver removes the excreted compound from the kidneys "
+            "and feeds it, T1-relaxed, into the ureters and bladder."
         )
         self.renal_tubular_transit = self._float_spin(
             0.0, 10000.0, decimals=2, suffix=" s", step=5.0
@@ -643,13 +644,15 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             "Mean nephron/pelvis transit; individual transit times are spread "
             "uniformly over 0.5–1.5× this value. Rodent tubular fluid reaches "
             "the end of the proximal tubule after ~10–15 s and the urine after "
-            "roughly 1–2 min."
+            "roughly 1–2 min. Hyperpolarization relaxes with T1 during "
+            "transit; tubular content is shown in the preview only."
         )
         self.ureter_transit = self._float_spin(
             0.0, 10000.0, decimals=2, suffix=" s", step=1.0
         )
         self.ureter_transit.setToolTip(
-            "Plug-flow delay between renal pelvis and bladder."
+            "Mean residence of urine in each well-mixed ureter before it "
+            "drains into the bladder. 0 passes urine straight to the bladder."
         )
         injection_form.addRow("Injected compound", self.injection_compound)
         injection_form.addRow("Injected amount", self.injection_amount)
