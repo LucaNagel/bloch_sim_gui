@@ -471,23 +471,42 @@ def test_mouse_solver_bladder_signal_is_t1_attenuated_and_kernels_agree():
         for time_s in np.arange(1.0, 12.0, 2.0)
     )
     program = SequenceProgram(events, duration_s=12.0)
+    runs = {
+        "reference": ("reference", {}),
+        "optimized": ("optimized", {}),
+        "native_serial": ("native_serial", {}),
+        "native_parallel": ("native_parallel", {}),
+        "interval_major": ("native_serial", {"_native_spin_major": False}),
+    }
     results = {
-        kernel: BlochSimulator(
-            use_parallel=False, dynamic_sequence_kernel=kernel
-        ).simulate_dynamic_sequence(program, phantom, checkpoints_s=(6.0, 11.01, 12.0))
-        for kernel in ("reference", "optimized", "native_serial")
+        name: BlochSimulator(
+            use_parallel=kernel == "native_parallel", num_threads=2
+        ).simulate_dynamic_sequence(
+            program,
+            phantom,
+            sequence_kernel=kernel,
+            checkpoints_s=(6.0, 11.01, 12.0),
+            **options,
+        )
+        for name, (kernel, options) in runs.items()
     }
     reference = results["reference"].checkpoint_pool_magnetization
-    for kernel in ("optimized", "native_serial"):
+    for name in tuple(runs)[1:]:
         assert np.allclose(
-            results[kernel].checkpoint_pool_magnetization,
+            results[name].checkpoint_pool_magnetization,
             reference,
             rtol=1e-9,
             atol=1e-12 * np.max(np.abs(reference)),
         )
-    native = results["native_serial"].metadata
-    assert native["sequence_kernel"] == "optimized"
-    assert "washout" in native["native_fallback_reason"]
+    # The native kernels apply the washout themselves instead of falling back.
+    for name in ("native_serial", "native_parallel", "interval_major"):
+        native = results[name].metadata
+        assert native["sequence_kernel"] == runs[name][0]
+        assert native["native_fallback_reason"] is None
+    for name in ("native_serial", "native_parallel"):
+        assert results[name].metadata["native_spin_major_enabled"] is True
+        assert results[name].metadata["native_spin_major_fallback_reason"] is None
+    assert results["interval_major"].metadata["native_full_plan_enabled"] is True
 
     # No RF reaches the lumen in this check: compare the bladder against the
     # source convolution with T1 relaxation toward the thermal level.

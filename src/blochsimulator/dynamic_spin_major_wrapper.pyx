@@ -6,6 +6,7 @@ checks shapes, dtypes, and contiguity before releasing the GIL. Repeated RF
 segments can optionally be replaced by cached per-spin affine propagators,
 also when they differ only by a constant RF phase. Inflow with per-spin
 arrival delays is evaluated from the delayed time curves inside the executor.
+Voxel washout applies a per-spin loss and precomputed compartment gains.
 """
 
 import numpy as np
@@ -74,6 +75,12 @@ cdef extern from "dynamic_spin_major.h":
         const double *arrival_delay_s
         dsm_curve rate_curve
         dsm_curve polarization_curve
+        const double *washout_loss
+        const int32_t *washout_compartment
+        int32_t washout_compartments
+        const int32_t *interval_washout
+        int32_t n_washout
+        const double *washout_table
         int64_t n_actions
         const int64_t *action_offsets
         const int8_t *action_kinds
@@ -106,12 +113,13 @@ cdef extern from "dynamic_spin_major.h":
 
 TILE_SPINS = DSM_TILE
 MAX_POOLS = DSM_MAX_POOLS
-API_VERSION = 4
+API_VERSION = 5
 SPATIAL_TX_SUPPORTED = True
 MULTI_POOL_SUPPORTED = True
 SPATIAL_INFLOW_SUPPORTED = True
 RF_CACHE_MULTI_POOL_SUPPORTED = True
 RF_CACHE_PHASE_SUPPORTED = True
+WASHOUT_SUPPORTED = True
 
 cdef double _empty_storage[8]
 
@@ -230,7 +238,11 @@ def run_spin_major_chunk(
         arrival_delay_s=None,
         int spatial_mode=0,
         rate_curve=None,
-        polarization_curve=None):
+        polarization_curve=None,
+        washout_loss=None,
+        washout_compartment=None,
+        interval_washout=None,
+        washout_table=None):
     """Advance ``state`` through one plan slice and add unscaled ADC sums.
 
     Pool 0 is the precursor; ``conversion`` has shape ``(npools - 1, nspins)``
@@ -247,6 +259,14 @@ def run_spin_major_chunk(
     ``polarization_curve``, each ``(times_s, values, step, hold)``, at the
     spin's delayed time. ``spatial_mode`` is the source mode of the full-plan
     path (0 coupled, 1 direct, 3 polarized without concentration).
+
+    ``washout_loss`` (per spin, 1/s) scales every pool's x, y, z and
+    concentration by ``exp(-loss * dt / 4)`` around each free half step.
+    ``washout_compartment`` (int32 per spin, -1 outside sources) selects the
+    gains ``washout_table[interval_washout[i], half, compartment, pool]``
+    (magnetization, concentration), added after each longitudinal half step;
+    ``interval_washout`` is -1 for intervals without gains. A tile with source
+    spins runs cached segments that carry gains stepwise.
 
     The optional segment arrays replace intervals ``[first, end)`` by the
     propagator entry ``propagators[entry]`` with shape
@@ -383,6 +403,29 @@ def run_spin_major_chunk(
         polarization_arrays = _curve(
             &chunk.polarization_curve, polarization_curve,
             "polarization_curve")
+
+    chunk.washout_loss = (
+        NULL if washout_loss is None else
+        <const double *>_data(washout_loss, np.float64, (nspins,), "washout_loss"))
+    chunk.washout_compartment = NULL
+    chunk.washout_compartments = 0
+    chunk.interval_washout = NULL
+    chunk.n_washout = 0
+    chunk.washout_table = NULL
+    if washout_compartment is not None:
+        if washout_table is None or interval_washout is None:
+            raise ValueError("washout sources need gains and interval rows")
+        if washout_table.ndim != 5 or washout_table.shape[0] >= 2**31:
+            raise ValueError("washout_table must have five dimensions")
+        chunk.washout_compartment = <const int32_t *>_data(
+            washout_compartment, np.int32, (nspins,), "washout_compartment")
+        chunk.washout_compartments = <int32_t>washout_table.shape[2]
+        chunk.n_washout = <int32_t>washout_table.shape[0]
+        chunk.washout_table = <const double *>_data(
+            washout_table, np.float64, (None, 2, None, npools, 2),
+            "washout_table")
+        chunk.interval_washout = <const int32_t *>_data(
+            interval_washout, np.int32, (n_intervals,), "interval_washout")
 
     chunk.n_actions = action_kinds.shape[0]
     chunk.action_offsets = <const int64_t *>_data(
