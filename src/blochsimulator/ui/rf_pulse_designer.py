@@ -622,7 +622,7 @@ class RFPulseDesigner(QGroupBox):
 
         # Target point count
         if self.target_dt and self.target_dt > 0:
-            npoints = max(32, int(np.ceil(duration / self.target_dt)))
+            npoints = max(32, int(np.ceil(duration / self.target_dt - 1e-9)))
             npoints = min(npoints, self.MAX_DESIGN_POINTS)
         else:
             npoints = 100
@@ -655,8 +655,11 @@ class RFPulseDesigner(QGroupBox):
                 win = np.ones(len(shape))
             shape = shape * win
 
-        # Compute integration factor
-        area = np.trapezoid(shape, dx=dt)
+        # RF samples are piecewise-constant raster cells in the simulator, so
+        # the flip angle follows their rectangular area (as in
+        # _scale_pulse_to_flip); the trapezoid rule loses half a sample at
+        # each end and over-flipped a hard pulse by 1/(n-1).
+        area = np.sum(shape) * dt
         opt_phase = -np.angle(area) if np.isfinite(area) else 0.0
         aligned_area = np.real(area * np.exp(1j * opt_phase))
         if not np.isfinite(aligned_area) or abs(aligned_area) < 1e-12:

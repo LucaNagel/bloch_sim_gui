@@ -22,6 +22,13 @@ from blochsimulator.kernel_capabilities import GUI_KERNEL_NAMES
 from blochsimulator.memory import GIB, MemoryPolicy
 from blochsimulator.pulse_loader import load_amp_phase_dat, load_pulse_from_file
 from blochsimulator.sequence import ScannerParameters
+from blochsimulator.simulator import (
+    GradientEcho,
+    InversionRecovery,
+    SliceSelectRephase,
+    SpinEcho,
+    SpinEchoTipAxis,
+)
 from blochsimulator.ui.dialogs import PulseImportDialog, SettingsDialog
 from blochsimulator.ui.default_settings import WorkspaceDefaults
 from blochsimulator.ui.magnetization_viewer import (
@@ -35,6 +42,7 @@ from blochsimulator.ui.sequence_diagram import (
     DiagramAnnotations,
     SequenceDiagramWidget,
     TimingMarker,
+    find_pulse_segments,
 )
 from blochsimulator.units import LEGACY_GAMMA_RAD_PER_S_PER_GAUSS
 
@@ -244,6 +252,65 @@ def test_loaded_slr_auto_b1_matches_flip_angle_after_free_mode_resampling():
     designer.close()
     designer.deleteLater()
     app.processEvents()
+
+
+@pytest.mark.parametrize("pulse_type", ["Rectangle", "Sinc", "Gaussian"])
+def test_designed_pulse_flip_matches_piecewise_constant_simulation(pulse_type):
+    app = QApplication.instance() or QApplication(sys.argv)
+    designer = RFPulseDesigner(compact=True)
+    designer.set_time_step(10e-6)
+    designer.pulse_type.setCurrentText(pulse_type)
+    designer.duration.setValue(1.0)
+    designer.flip_angle.setValue(90.0)
+    designer.b1_amplitude.setValue(0.0)
+    designer.update_pulse()
+
+    b1, time = designer.get_pulse()
+    dt = float(np.median(np.diff(time)))
+    flip = np.rad2deg(LEGACY_GAMMA_RAD_PER_S_PER_GAUSS * abs(np.sum(b1) * dt))
+
+    # 1 ms on a 10 us raster is exactly 100 samples, not 101.
+    assert b1.size == 100
+    # A trapezoid scaling over-flipped a hard pulse by 1/(n-1).
+    assert flip == pytest.approx(90.0, abs=0.05)
+
+    designer.close()
+    designer.deleteLater()
+    app.processEvents()
+
+
+@pytest.mark.parametrize(
+    "build, pulse_index",
+    [
+        (lambda pulse: SpinEcho(te=10e-3, tr=20e-3, custom_excitation=pulse), 0),
+        (
+            lambda pulse: SpinEchoTipAxis(te=10e-3, tr=20e-3, custom_excitation=pulse),
+            0,
+        ),
+        (lambda pulse: GradientEcho(te=5e-3, tr=20e-3, custom_excitation=pulse), 0),
+        # The generated 180 deg inversion comes first.
+        (
+            lambda pulse: InversionRecovery(
+                ti=20e-3, tr=50e-3, te=5e-3, custom_excitation=pulse
+            ),
+            1,
+        ),
+        (lambda pulse: SliceSelectRephase(custom_pulse=pulse), 0),
+    ],
+    ids=["spin-echo", "spin-echo-tip-axis", "gradient-echo", "ir", "slice-select"],
+)
+def test_sequence_builders_keep_custom_pulse_flip_on_other_raster(build, pulse_index):
+    # 0.995 ms block on a 9.95 us raster: neither duration nor raster matches
+    # the 10 us simulation step.
+    source_dt = 9.95e-6
+    time = (np.arange(100) + 0.5) * source_dt
+    area = np.deg2rad(90.0) / LEGACY_GAMMA_RAD_PER_S_PER_GAUSS
+    pulse = (np.full(100, area / (100 * source_dt), dtype=complex), time)
+
+    b1, _, sim_time = build(pulse).compile(dt=10e-6)
+
+    segment = find_pulse_segments(b1, sim_time)[pulse_index]
+    assert segment.flip_deg == pytest.approx(90.0, abs=0.05)
 
 
 def test_shared_pulse_loader_dispatches_headerless_txt_import_options():

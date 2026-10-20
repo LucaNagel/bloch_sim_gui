@@ -32,6 +32,7 @@ from ..simulator import (
     InversionRecovery,
     design_rf_pulse,
     apply_rf_carrier,
+    resample_rf_pulse,
 )
 
 
@@ -637,13 +638,7 @@ class SequenceDesigner(QGroupBox):
         if np.any(source_steps <= 0.0):
             raise ValueError("Custom pulse time values must be strictly increasing.")
 
-        source_dt = float(np.median(source_steps))
-        pulse_duration = float(time_relative[-1] + source_dt)
-        target_points = max(1, int(np.rint(pulse_duration / target_dt)))
-        target_time = np.arange(target_points, dtype=float) * target_dt
-        real_part = np.interp(target_time, time_relative, np.real(b1_wave))
-        imag_part = np.interp(target_time, time_relative, np.imag(b1_wave))
-        return real_part + 1j * imag_part
+        return resample_rf_pulse(b1_wave, time_wave, target_dt)
 
     def get_sequence(self, custom_pulse=None):
         """
@@ -765,21 +760,10 @@ class SequenceDesigner(QGroupBox):
                 pulse = self.parent_gui.rf_designer.get_pulse()
             if pulse is not None and len(pulse) == 2 and pulse[0] is not None:
                 b1_wave, t_wave = pulse
-                b1_wave = np.asarray(b1_wave, dtype=complex)
-                t_wave = np.asarray(t_wave, dtype=float)
-                if b1_wave.size < 2 or t_wave.size < 2:
-                    b1_wave = np.array([0.0], dtype=complex)
-                    t_wave = np.array([0.0], dtype=float)
-                wave_duration = float(
-                    t_wave[-1] - t_wave[0] + (t_wave[1] - t_wave[0])
-                    if len(t_wave) > 1
-                    else dt
-                )
-                n_wave = max(1, int(np.ceil(wave_duration / dt)))
-                t_resample = np.arange(0, n_wave) * dt
-                real_part = np.interp(t_resample, t_wave - t_wave[0], np.real(b1_wave))
-                imag_part = np.interp(t_resample, t_wave - t_wave[0], np.imag(b1_wave))
-                b1_exc = real_part + 1j * imag_part
+                if np.size(b1_wave) < 2 or np.size(t_wave) < 2:
+                    b1_exc = np.array([0.0], dtype=complex)
+                else:
+                    b1_exc = resample_rf_pulse(b1_wave, t_wave, dt)
             else:
                 exc_duration = 1e-3
                 n_exc = max(int(np.ceil(exc_duration / dt)), 16)
@@ -1031,26 +1015,8 @@ class SequenceDesigner(QGroupBox):
         # If a custom pulse is provided, resample it onto dt and override the pulse shape.
         custom_b1 = None
         if custom_pulse is not None:
-            b1_wave, t_wave = custom_pulse
-            b1_wave = np.asarray(b1_wave, dtype=complex)
-            t_wave = np.asarray(t_wave, dtype=float)
-            if b1_wave.shape[0] != t_wave.shape[0]:
-                raise ValueError(
-                    "Custom pulse B1 and time arrays must have the same length."
-                )
-            if len(t_wave) > 1:
-                wave_dt = np.median(np.diff(t_wave))
-                wave_duration = len(t_wave) * wave_dt
-            else:
-                wave_dt = dt
-                wave_duration = dt
-            n_wave = max(1, int(np.round(wave_duration / dt)))
-            t_resample = np.arange(0, n_wave) * dt
-            # Resample real/imag separately to avoid dropping complex parts
-            real_part = np.interp(t_resample, t_wave - t_wave[0], np.real(b1_wave))
-            imag_part = np.interp(t_resample, t_wave - t_wave[0], np.imag(b1_wave))
-            custom_b1 = real_part + 1j * imag_part
-            pulse_dur = wave_duration
+            custom_b1 = SequenceDesigner._resample_custom_pulse(custom_pulse, dt)
+            pulse_dur = len(custom_b1) * dt
 
         pulse_points = max(1, int(np.rint(pulse_dur / dt)))
 
