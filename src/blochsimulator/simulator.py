@@ -2230,9 +2230,11 @@ class BlochSimulator:
         one-dimensional.  The simulator evaluates the Cartesian product of both
         axes and returns time-resolved magnetization at ``checkpoints_s``.
 
-        ``equilibrium_mz`` is the longitudinal magnetization approached by T1
-        recovery: 1 is thermal equilibrium and 0 models hyperpolarized
-        magnetization that only decays. ``ideal_spoiling`` applies the
+        ``equilibrium_mz`` is the thermal equilibrium Mz that T1 recovery
+        approaches, in the units of ``initial_magnetization``. Use 1 for Mz in
+        units of thermal M0. For hyperpolarized spins normalized to their
+        initial polarization, use ``1 / enhancement``: Mz then relaxes from
+        above toward that thermal level. ``ideal_spoiling`` applies the
         sequence's declared ideal transverse crushers (``IdealSpoilerEndTimes``);
         when disabled, spoiler gradients only change each probe spin's phase.
         """
@@ -2406,10 +2408,11 @@ class BlochSimulator:
         ``spoiler_mode='ideal'`` always uses one spin per voxel and applies
         declared transverse crushers, while ``'gradient'`` derives spoiling
         only from the simulated gradient waveform and spin positions.
-        ``equilibrium_mz`` is the longitudinal magnetization per unit proton
-        density approached by T1 recovery, as a scalar or a map with the
-        phantom's shape. ``None`` or 1 is thermal equilibrium; 0 models
-        hyperpolarized magnetization that decays without recovering.
+        ``equilibrium_mz`` is the thermal equilibrium Mz per unit proton
+        density that T1 recovery approaches, as a scalar or a map with the
+        phantom's shape. ``None`` or 1 means Mz is in units of thermal M0. For
+        hyperpolarized magnetization normalized to its initial polarization,
+        use ``1 / enhancement``, so Mz relaxes from above toward that level.
         """
         from .phantom import Phantom
         from .sequence import (
@@ -2512,12 +2515,7 @@ class BlochSimulator:
             if np.all(equilibrium_active == 1.0):
                 # Thermal recovery keeps the historical native expression.
                 equilibrium_active = None
-        if equilibrium_active is None:
-            longitudinal_equilibrium = "thermal"
-        elif np.all(equilibrium_active == 0.0):
-            longitudinal_equilibrium = "hyperpolarized"
-        else:
-            longitudinal_equilibrium = "custom"
+        longitudinal_equilibrium = "thermal" if equilibrium_active is None else "custom"
 
         if chunk_voxels is None:
             chunk_voxels = min(n_active, max(1, 65536 // spins_per_voxel))

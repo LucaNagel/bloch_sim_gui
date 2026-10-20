@@ -3112,7 +3112,7 @@ def test_sequence_probe_equilibrium_and_spoiling_controls(monkeypatch):
         checkpoints=np.array([0.0]),
         label="spectral",
     )
-    assert widget.probe_longitudinal_equilibrium.currentIndex() == 0
+    assert widget.probe_polarization.currentIndex() == 0
     assert widget.probe_ideal_spoiling.isChecked()
     assert "above one" not in widget.probe_initial_mz.toolTip()
 
@@ -3121,25 +3121,29 @@ def test_sequence_probe_equilibrium_and_spoiling_controls(monkeypatch):
     assert widget.probe_worker.ideal_spoiling is True
     widget.probe_worker.deleteLater()
 
-    widget.probe_longitudinal_equilibrium.setCurrentIndex(1)
+    widget.probe_polarization.setCurrentIndex(1)
+    widget.probe_hp_enhancement.setValue(2000.0)
     widget.probe_ideal_spoiling.setChecked(False)
     widget._start_probe(**probe_kwargs)
-    assert widget.probe_worker.equilibrium_mz == 0.0
+    assert widget.probe_worker.equilibrium_mz == pytest.approx(1.0 / 2000.0)
     assert widget.probe_worker.ideal_spoiling is False
     widget.probe_worker.deleteLater()
     widget.probe_worker = None
 
     widget.object_source.setCurrentIndex(2)
     rows = dict(widget._simulation_object_summary_rows())
-    assert rows["Longitudinal equilibrium"].startswith("Hyperpolarized")
+    assert rows["Polarization"].startswith("Hyperpolarized, ε = 2000")
+    assert "from above toward thermal 0.0005" in rows["Polarization"]
     assert rows["Ideal spoilers"].startswith("Off")
 
     state = _capture_widget_state(widget)
-    assert state["probe_longitudinal_equilibrium"]["index"] == 1
+    assert state["probe_polarization"]["index"] == 1
+    assert state["probe_hp_enhancement"]["value"] == 2000.0
     assert state["probe_ideal_spoiling"]["value"] is False
     restored = SequenceSimulationWidget()
     _restore_widget_state(restored, state)
-    assert restored.probe_longitudinal_equilibrium.currentIndex() == 1
+    assert restored.probe_polarization.currentIndex() == 1
+    assert restored._probe_equilibrium_mz() == pytest.approx(1.0 / 2000.0)
     assert not restored.probe_ideal_spoiling.isChecked()
 
     note = SequenceSimulationWidget._probe_ideal_spoiler_note
@@ -3471,6 +3475,26 @@ def test_sequence_workspace_preserves_timeline_zoom_when_regenerating():
     widget._show_program()
 
     assert widget.rf_plot.getViewBox().viewRange()[0] == pytest.approx([5.0, 10.0])
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_workspace_timeline_cannot_leave_the_sequence():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.program = SequenceProgram((ADCEvent(0.0, 20, 1e-3),), duration_s=20e-3)
+    widget._acquisition_compiled = None
+    widget._show_program()
+
+    # A zoom window that starts before the sequence keeps its width.
+    widget.rf_plot.setXRange(-0.12, 1.9, padding=0)
+    for plot in (widget.rf_plot, widget.gradient_plot):
+        assert plot.getViewBox().viewRange()[0] == pytest.approx([0.0, 2.02])
+
+    widget.gradient_plot.setXRange(-5.0, 30.0, padding=0)
+    for plot in (widget.rf_plot, widget.gradient_plot):
+        assert plot.getViewBox().viewRange()[0] == pytest.approx([0.0, 20.0])
     widget.close()
     widget.deleteLater()
     app.processEvents()

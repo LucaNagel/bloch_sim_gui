@@ -1,4 +1,4 @@
-"""Probe longitudinal equilibrium (thermal vs hyperpolarized) and spoiling."""
+"""Probe T1 recovery for thermal and normalized hyperpolarized Mz, and spoiling."""
 
 import numpy as np
 import pytest
@@ -9,6 +9,7 @@ from blochsimulator.sequence import GradientEvent, RFEvent, SequenceProgram
 KERNELS = ("optimized", "strict_reference")
 T1_S = 25.0
 T2_S = 1.0
+ENHANCEMENT = 1.0e4
 
 
 def _rf_train(n_pulses=20, tr_s=0.01, pulse_s=1e-3, flip_deg=10.0):
@@ -33,22 +34,60 @@ def _probe(program, checkpoints, frequencies, **kwargs):
     )
 
 
+def _hp_relaxation(t_s):
+    """Normalized HP Mz relaxing from above toward the thermal level 1/ε."""
+    thermal = 1.0 / ENHANCEMENT
+    return thermal + (1.0 - thermal) * np.exp(-np.asarray(t_s) / T1_S)
+
+
 @pytest.mark.parametrize("kernel", KERNELS)
-def test_hyperpolarized_free_decay_follows_t1(kernel):
-    checkpoints = np.array([0.0, 4.0, 16.0])
+def test_hyperpolarized_free_decay_relaxes_toward_thermal_level(kernel):
+    checkpoints = np.array([0.0, 4.0, 16.0, 200.0])
 
     result = _probe(
-        SequenceProgram((), duration_s=16.0),
+        SequenceProgram((), duration_s=200.0),
         checkpoints,
         [0.0],
         initial_magnetization=(0.0, 0.0, 1.0),
-        equilibrium_mz=0.0,
+        equilibrium_mz=1.0 / ENHANCEMENT,
         sequence_kernel=kernel,
     )
 
-    assert result.mz[:, 0, 0] == pytest.approx(np.exp(-checkpoints / T1_S), rel=1e-9)
-    assert result.metadata["longitudinal_equilibrium"] == "hyperpolarized"
-    assert result.metadata["equilibrium_mz"] == 0.0
+    assert result.mz[:, 0, 0] == pytest.approx(_hp_relaxation(checkpoints), rel=1e-9)
+    assert np.all(result.mz[:, 0, 0] > 1.0 / ENHANCEMENT)
+    assert result.metadata["longitudinal_equilibrium"] == "custom"
+    assert result.metadata["equilibrium_mz"] == 1.0 / ENHANCEMENT
+
+
+@pytest.mark.parametrize("kernel", KERNELS)
+def test_normalized_hyperpolarization_matches_thermal_units(kernel):
+    # The same spins in thermal units start at Mz = ε and relax toward 1.
+    program = _rf_train()
+    checkpoints = np.linspace(0.0, program.duration_s, 5)
+    frequencies = [-3000.0, -40.0, 0.0]
+
+    normalized = _probe(
+        program,
+        checkpoints,
+        frequencies,
+        initial_magnetization=(0.0, 0.0, 1.0),
+        equilibrium_mz=1.0 / ENHANCEMENT,
+        sequence_kernel=kernel,
+    )
+    thermal_units = _probe(
+        program,
+        checkpoints,
+        frequencies,
+        initial_magnetization=(0.0, 0.0, ENHANCEMENT),
+        sequence_kernel=kernel,
+    )
+
+    np.testing.assert_allclose(
+        normalized.magnetization * ENHANCEMENT,
+        thermal_units.magnetization,
+        rtol=1e-9,
+        atol=1e-9 * ENHANCEMENT,
+    )
 
 
 @pytest.mark.parametrize("kernel", KERNELS)
@@ -63,7 +102,7 @@ def test_hyperpolarized_far_off_resonant_spin_decays_through_rf(kernel):
         checkpoints,
         [-3000.0],
         initial_magnetization=(0.0, 0.0, 1.0),
-        equilibrium_mz=0.0,
+        equilibrium_mz=1.0 / ENHANCEMENT,
         sequence_kernel=kernel,
     )
     thermal = _probe(
@@ -74,24 +113,31 @@ def test_hyperpolarized_far_off_resonant_spin_decays_through_rf(kernel):
         sequence_kernel=kernel,
     )
 
-    expected = np.exp(-program.duration_s / T1_S)
-    assert hp.mz[-1, 0, 0] == pytest.approx(expected, rel=1e-6)
+    assert hp.mz[-1, 0, 0] == pytest.approx(
+        _hp_relaxation(program.duration_s), rel=1e-6
+    )
     assert thermal.mz[-1, 0, 0] == pytest.approx(1.0, abs=1e-6)
 
 
 @pytest.mark.parametrize("kernel", KERNELS)
-def test_saturated_mz_recovers_only_in_thermal_mode(kernel):
+def test_saturated_hyperpolarized_mz_recovers_only_to_thermal_level(kernel):
     checkpoints = np.array([0.0, 5.0, 20.0])
     program = SequenceProgram((), duration_s=20.0)
     kwargs = dict(initial_magnetization=(0.0, 0.0, 0.0), sequence_kernel=kernel)
 
-    hp = _probe(program, checkpoints, [0.0, -3000.0], equilibrium_mz=0.0, **kwargs)
+    hp = _probe(
+        program,
+        checkpoints,
+        [0.0, -3000.0],
+        equilibrium_mz=1.0 / ENHANCEMENT,
+        **kwargs,
+    )
     thermal = _probe(program, checkpoints, [0.0, -3000.0], **kwargs)
 
-    assert np.all(hp.mz == 0.0)
-    expected = 1.0 - np.exp(-checkpoints / T1_S)
-    assert thermal.mz[:, 0, 0] == pytest.approx(expected, rel=1e-9)
-    assert thermal.mz[:, 0, 1] == pytest.approx(expected, rel=1e-9)
+    recovery = 1.0 - np.exp(-checkpoints / T1_S)
+    for spin in range(2):
+        assert thermal.mz[:, 0, spin] == pytest.approx(recovery, rel=1e-9)
+        assert hp.mz[:, 0, spin] == pytest.approx(recovery / ENHANCEMENT, rel=1e-9)
 
 
 @pytest.mark.parametrize("kernel", KERNELS)

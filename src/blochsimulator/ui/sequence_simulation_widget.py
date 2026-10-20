@@ -4034,23 +4034,34 @@ class SequenceSimulationWidget(QWidget):
         self.probe_initial_mz.setDecimals(4)
         self.probe_initial_mz.setValue(1.0)
         self.probe_initial_mz.setToolTip(
-            "Longitudinal magnetization Mz at the start, relative to thermal "
-            "equilibrium (1). It only scales the starting state; T1 recovery "
-            "follows the selected longitudinal equilibrium."
+            "Longitudinal magnetization Mz at the start. With thermal "
+            "polarization it is relative to thermal equilibrium M0 = 1, so a "
+            "hyperpolarized start can also be entered as its enhancement. With "
+            "hyperpolarized polarization it is relative to the initial "
+            "hyperpolarized magnetization (1 = fully polarized)."
         )
         probe_form.addRow("Initial Mz", self.probe_initial_mz)
-        self.probe_longitudinal_equilibrium = QComboBox()
-        self.probe_longitudinal_equilibrium.addItems(
-            ["Thermal (Mz → 1)", "Hyperpolarized (Mz → 0)"]
+        self.probe_polarization = QComboBox()
+        self.probe_polarization.addItems(["Thermal", "Hyperpolarized"])
+        self.probe_polarization.setToolTip(
+            "Thermal: Mz is in units of thermal equilibrium M0 and T1 recovery "
+            "approaches 1. Hyperpolarized: Mz is normalized to the "
+            "hyperpolarized magnetization, which is ε times M0. T1 relaxes it "
+            "from above toward the thermal level 1/ε, and after RF depletes "
+            "it, it recovers only to 1/ε."
         )
-        self.probe_longitudinal_equilibrium.setToolTip(
-            "Value that T1 recovery approaches. Thermal magnetization recovers "
-            "toward Mz = 1. Hyperpolarized magnetization decays toward 0 as "
-            "exp(-t/T1) and does not recover after RF depletes it."
+        probe_form.addRow("Polarization", self.probe_polarization)
+        self.probe_hp_enhancement = QDoubleSpinBox()
+        self.probe_hp_enhancement.setRange(1.0, 1e9)
+        self.probe_hp_enhancement.setDecimals(1)
+        self.probe_hp_enhancement.setValue(10000.0)
+        self.probe_hp_enhancement.setPrefix("ε = ")
+        self.probe_hp_enhancement.setToolTip(
+            "Polarization enhancement ε of the hyperpolarized magnetization over "
+            "thermal equilibrium at this field. Normalized Mz relaxes toward the "
+            "thermal level 1/ε. Used only with hyperpolarized polarization."
         )
-        probe_form.addRow(
-            "Longitudinal equilibrium", self.probe_longitudinal_equilibrium
-        )
+        probe_form.addRow("HP enhancement", self.probe_hp_enhancement)
         self.probe_ideal_spoiling = QCheckBox("Apply declared ideal spoilers")
         self.probe_ideal_spoiling.setChecked(True)
         self.probe_ideal_spoiling.setToolTip(
@@ -4754,7 +4765,10 @@ class SequenceSimulationWidget(QWidget):
         self.probe_frequency_units.currentIndexChanged.connect(
             self._update_simulation_object_table
         )
-        self.probe_longitudinal_equilibrium.currentIndexChanged.connect(
+        self.probe_polarization.currentIndexChanged.connect(
+            self._update_simulation_object_table
+        )
+        self.probe_hp_enhancement.valueChanged.connect(
             self._update_simulation_object_table
         )
         self.probe_ideal_spoiling.toggled.connect(self._update_simulation_object_table)
@@ -6830,14 +6844,7 @@ class SequenceSimulationWidget(QWidget):
                         f"T1 {self.probe_t1_ms.value():g} ms; T2/T2* "
                         f"{self.probe_t2_ms.value():g} ms",
                     ),
-                    (
-                        "Longitudinal equilibrium",
-                        (
-                            "Hyperpolarized: Mz decays toward 0"
-                            if self._probe_equilibrium_mz() == 0.0
-                            else "Thermal: Mz recovers toward 1"
-                        ),
-                    ),
+                    ("Polarization", self._probe_polarization_text()),
                     (
                         "Ideal spoilers",
                         (
@@ -10959,6 +10966,9 @@ class SequenceSimulationWidget(QWidget):
             visible_span_ms = min(max(end_ms - start_ms, 1e-9), duration_ms)
             start_ms = min(max(start_ms, 0.0), duration_ms - visible_span_ms)
             end_ms = start_ms + visible_span_ms
+        # Keep zoom and pan inside the sequence so the time axis starts at 0.
+        for plot in (self.rf_plot, self.gradient_plot):
+            plot.setLimits(xMin=0.0, xMax=duration_ms)
         self.rf_plot.setXRange(start_ms, end_ms, padding=0)
         self._refresh_sequence_waveforms(start_ms / 1000.0, end_ms / 1000.0)
         self._refresh_sequence_overviews()
@@ -11849,9 +11859,22 @@ class SequenceSimulationWidget(QWidget):
         if time_index is not None:
             self._update_probe_vector(time_index)
 
+    def _probe_hyperpolarized(self):
+        return self.probe_polarization.currentIndex() == 1
+
     def _probe_equilibrium_mz(self):
-        """Return the Mz value that probe T1 recovery approaches."""
-        return 0.0 if self.probe_longitudinal_equilibrium.currentIndex() == 1 else 1.0
+        """Return thermal equilibrium Mz in the units of the probe's Mz."""
+        if self._probe_hyperpolarized():
+            return 1.0 / self.probe_hp_enhancement.value()
+        return 1.0
+
+    def _probe_polarization_text(self):
+        if not self._probe_hyperpolarized():
+            return "Thermal: Mz recovers toward M0 = 1"
+        return (
+            f"Hyperpolarized, ε = {self.probe_hp_enhancement.value():g}: Mz "
+            f"relaxes from above toward thermal {self._probe_equilibrium_mz():.3g}"
+        )
 
     @staticmethod
     def _probe_ideal_spoiler_note(metadata):
