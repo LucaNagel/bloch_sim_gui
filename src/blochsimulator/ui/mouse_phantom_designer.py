@@ -72,6 +72,9 @@ class MouseSlicePreviewWidget(QWidget):
             (240, 55, 55, 255),
             (66, 105, 220, 255),
             (202, 174, 126, 255),
+            (236, 214, 92, 255),
+            (214, 186, 64, 255),
+            (214, 186, 64, 255),
         ],
         dtype=np.ubyte,
     )
@@ -390,7 +393,7 @@ class MouseSlicePreviewWidget(QWidget):
                 perfusion, orientation, anatomy.shape
             )
             base = anatomy if self.show_anatomy else np.zeros_like(anatomy)
-            anatomy_item.setImage(base, autoLevels=False, levels=(0, 11))
+            anatomy_item.setImage(base, autoLevels=False, levels=(0, 14))
             perfusion_item.setImage(
                 np.nan_to_num(perfusion), autoLevels=False, levels=(0.0, high)
             )
@@ -625,6 +628,29 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.tissue_clearance = self._float_spin(
             0.0001, 100.0, decimals=4, suffix=" s⁻¹", step=0.01
         )
+        self.renal_excretion = self._float_spin(
+            0.0, 100.0, decimals=4, suffix=" s⁻¹", step=0.01
+        )
+        self.renal_excretion.setToolTip(
+            "Rate at which kidney tissue passes injected compound into the "
+            "urine, in addition to tissue clearance. 0 disables excretion. "
+            "Preview only; the Bloch solver keeps the vascular delivery."
+        )
+        self.renal_tubular_transit = self._float_spin(
+            0.0, 10000.0, decimals=2, suffix=" s", step=5.0
+        )
+        self.renal_tubular_transit.setToolTip(
+            "Mean nephron/pelvis transit; individual transit times are spread "
+            "uniformly over 0.5–1.5× this value. Rodent tubular fluid reaches "
+            "the end of the proximal tubule after ~10–15 s and the urine after "
+            "roughly 1–2 min."
+        )
+        self.ureter_transit = self._float_spin(
+            0.0, 10000.0, decimals=2, suffix=" s", step=1.0
+        )
+        self.ureter_transit.setToolTip(
+            "Plug-flow delay between renal pelvis and bladder."
+        )
         injection_form.addRow("Injected compound", self.injection_compound)
         injection_form.addRow("Injected amount", self.injection_amount)
         injection_form.addRow("Injection starts", self.injection_start)
@@ -637,6 +663,9 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         injection_form.addRow("Bolus alpha", self.bolus_alpha)
         injection_form.addRow("Bolus beta", self.bolus_beta)
         injection_form.addRow("Preview tissue clearance", self.tissue_clearance)
+        injection_form.addRow("Renal excretion to urine", self.renal_excretion)
+        injection_form.addRow("Renal tubular transit", self.renal_tubular_transit)
+        injection_form.addRow("Ureter transit", self.ureter_transit)
         injection_controls_layout.addLayout(injection_form)
 
         perfusion_group = QGroupBox("Relative delivery weights")
@@ -889,6 +918,9 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             self.bolus_alpha,
             self.bolus_beta,
             self.tissue_clearance,
+            self.renal_excretion,
+            self.renal_tubular_transit,
+            self.ureter_transit,
             self.background_perfusion,
             self.cortex_perfusion,
             self.medulla_perfusion,
@@ -936,6 +968,9 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.bolus_alpha.setValue(config.bolus_alpha)
         self.bolus_beta.setValue(config.bolus_beta)
         self.tissue_clearance.setValue(config.tissue_clearance_s_inv)
+        self.renal_excretion.setValue(config.renal_excretion_s_inv)
+        self.renal_tubular_transit.setValue(config.renal_tubular_transit_s)
+        self.ureter_transit.setValue(config.ureter_transit_s)
         self.background_perfusion.setValue(config.background_perfusion_weight)
         self.cortex_perfusion.setValue(config.renal_cortex_perfusion_weight)
         self.medulla_perfusion.setValue(config.renal_medulla_perfusion_weight)
@@ -982,6 +1017,9 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             bolus_alpha=self.bolus_alpha.value(),
             bolus_beta=self.bolus_beta.value(),
             tissue_clearance_s_inv=self.tissue_clearance.value(),
+            renal_excretion_s_inv=self.renal_excretion.value(),
+            renal_tubular_transit_s=self.renal_tubular_transit.value(),
+            ureter_transit_s=self.ureter_transit.value(),
             background_perfusion_weight=self.background_perfusion.value(),
             renal_cortex_perfusion_weight=self.cortex_perfusion.value(),
             renal_medulla_perfusion_weight=self.medulla_perfusion.value(),
@@ -1192,7 +1230,12 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         )
         time_start, time_end = self._animation_bounds_s
         times = np.linspace(time_start, time_end, 120)
-        colors = {"Brain": "#e9c46a", "Liver": "#2a9d8f", "Kidneys": "#e76f51"}
+        colors = {
+            "Brain": "#e9c46a",
+            "Liver": "#2a9d8f",
+            "Kidneys": "#e76f51",
+            "Bladder": "#8ecae6",
+        }
         for name, values in self.phantom.organ_bolus_curves(times).items():
             self.organ_curve_plot.plot(
                 times,

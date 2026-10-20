@@ -296,9 +296,61 @@ def test_injected_concentration_and_organ_curves_follow_delayed_bolus():
     assert np.max(frames[0]) == pytest.approx(0.0)
     assert max(float(np.max(frame)) for frame in frames[1:]) > 0.0
     curves = phantom.organ_bolus_curves(times)
-    assert set(curves) == {"Brain", "Liver", "Kidneys"}
+    assert set(curves) == {"Brain", "Liver", "Kidneys", "Bladder"}
     assert all(values.shape == times.shape for values in curves.values())
     assert all(np.max(values) > 0 for values in curves.values())
+
+
+def test_renal_excretion_moves_injected_dose_from_kidneys_to_bladder():
+    config = MousePerfusionConfig(shape=(24, 16, 48))
+    phantom = config.build()
+    labels = phantom.anatomy_labels
+    bladder = labels == 12
+    ureters = np.isin(labels, (13, 14))
+    kidneys = np.isin(labels, (2, 3, 4, 5))
+    assert np.any(bladder) and np.any(ureters)
+    assert not np.any(phantom.pyruvate_inflow.delivery_map[bladder | ureters])
+
+    volume = phantom.voxel_volume_m3
+    _, end = phantom.preview_time_bounds_s()
+    early = phantom.injected_concentration_map(config.injection_start_s + 5.0)
+    late = phantom.injected_concentration_map(end)
+    assert np.sum(early[bladder]) == pytest.approx(0.0)
+    assert np.sum(late[bladder]) * volume > 0.03 * config.injection_amount_umol * 1e-6
+    assert np.sum(late[kidneys]) < 0.01 * np.sum(late[bladder])
+
+    # Once the vascular bolus has passed, excreted tracer is conserved.
+    totals = [
+        np.sum(phantom.injected_concentration_map(time)) * volume
+        for time in (end - 40.0, end - 20.0, end)
+    ]
+    renal_and_urinary = bladder | ureters | kidneys
+    excreted = [
+        np.sum(phantom.injected_concentration_map(time)[renal_and_urinary])
+        for time in (end - 20.0, end)
+    ]
+    assert excreted[1] * volume == pytest.approx(totals[2], rel=0.05)
+    assert totals[1] == pytest.approx(totals[2], rel=0.02)
+
+    bladder_voxel = tuple(np.argwhere(bladder)[0])
+    pools = phantom.preview_pool_curves_at(bladder_voxel, np.array([end]))
+    assert pools["Pyruvate"][-1] + pools["Lactate"][-1] == pytest.approx(
+        late[bladder_voxel], rel=0.02
+    )
+
+
+def test_renal_excretion_can_be_disabled_and_legacy_configs_keep_it_off():
+    config = MousePerfusionConfig(shape=(24, 16, 48), renal_excretion_s_inv=0.0)
+    phantom = config.build()
+    _, end = phantom.preview_time_bounds_s()
+    frame = phantom.injected_concentration_map(end)
+    assert not np.any(frame[np.isin(phantom.anatomy_labels, (12, 13, 14))])
+
+    legacy = MousePerfusionConfig().to_dict()
+    del legacy["renal_excretion_s_inv"]
+    assert MousePerfusionConfig.from_dict(legacy).renal_excretion_s_inv == 0.0
+    with pytest.raises(ValueError, match="renal excretion"):
+        MousePerfusionConfig(ureter_transit_s=-1.0).validate()
 
 
 def test_voxel_preview_curves_include_configured_conversion_products():
