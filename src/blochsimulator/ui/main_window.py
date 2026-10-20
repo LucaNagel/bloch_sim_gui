@@ -97,7 +97,7 @@ from .tissue_parameters import TissueParameterWidget
 from .rf_pulse_designer import RFPulseDesigner
 from .sequence_designer import SequenceDesigner
 from .controls import UniversalTimeControl
-from .magnetization_viewer import MagnetizationViewer
+from .magnetization_viewer import MagnetizationViewer, centered_stride_indices
 from .parameter_sweep import ParameterSweepWidget
 from .tutorial_manager import TutorialManager
 from .tutorial_overlay import TutorialOverlay
@@ -237,6 +237,9 @@ class BlochSimulatorGUI(QMainWindow):
 
     WORKSPACE_SWITCH_DELAY_MS = 25 if sys.platform == "darwin" else 0
     FREE_MODE_COMPONENT_WIDTH = 220
+    # Isochromats drawn per position when the 3D view arranges spins along
+    # their positions; the position means still use every frequency.
+    SPATIAL_VECTOR_MAX_FREQUENCIES = 32
 
     def __init__(self):
         super().__init__()
@@ -289,6 +292,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.anim_timer.timeout.connect(self._animate_vector)
         self.anim_interval_ms = 30
         self.anim_data = None
+        self.anim_position_means = None
+        self.anim_net = None
         self.anim_time = None
         self.playback_indices = (
             None  # Mapping from playback frame to full-resolution time index
@@ -314,6 +319,7 @@ class BlochSimulatorGUI(QMainWindow):
         self._playback_frame_counter = 0
         self.anim_b1 = None
         self.anim_b1_scale = 1.0
+        self.anim_gradients = None
         self.anim_vectors_full = None  # (ntime, npos, nfreq, 3) before flattening
         self.mxy_legend = None
         self.mz_legend = None
@@ -825,6 +831,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.mag_3d.view_filter_changed.connect(lambda: self._refresh_vector_view())
         # Disable selector until data is available
         self.mag_3d.set_selector_limits(1, 1, disable=True)
+        self.mag_3d.set_spatial_layout_available(True)
         # Show controls so track/mean toggles are available
         if hasattr(self.mag_3d, "control_container"):
             self.mag_3d.control_container.setVisible(True)
@@ -2087,6 +2094,50 @@ class BlochSimulatorGUI(QMainWindow):
                 "Choose whether the 3D view shows individual spins, their mean, or both.",
             ),
             (
+                self.mag_3d.arrangement_combo,
+                "Draw all vectors from one origin, or give each position its own "
+                "origin along a display axis.",
+            ),
+            (
+                self.mag_3d.max_positions_spin,
+                "Largest number of positions drawn along the position axis; more "
+                "positions are evenly subsampled.",
+            ),
+            (
+                self.mag_3d.vector_length_spin,
+                "Length of a fully relaxed vector relative to the spacing between "
+                "positions; below 1 neighboring vectors along z do not overlap.",
+            ),
+            (
+                self.mag_3d.color_by_combo,
+                "Color vectors by position (palette) or by transverse phase; with "
+                "phase, longitudinal vectors fade to white.",
+            ),
+            (
+                self.mag_3d.tip_markers_checkbox,
+                "Mark the tip of each position vector.",
+            ),
+            (
+                self.mag_3d.tip_curve_checkbox,
+                "Connect the tips of neighboring positions, e.g. to show the phase "
+                "helix after a gradient.",
+            ),
+            (
+                self.mag_3d.net_vector_checkbox,
+                "Draw the mean over all positions and frequencies beside the column.",
+            ),
+            (
+                self.mag_3d.b1_field_checkbox,
+                "Draw the RF field (rotating frame) at every position, scaled to "
+                "the largest B1 of the sequence.",
+            ),
+            (
+                self.mag_3d.gradient_field_checkbox,
+                "Draw the gradient field G·r at every position as a bar left of "
+                "the column (red positive, blue negative), scaled to the largest "
+                "value of the sequence.",
+            ),
+            (
                 self.tissue_widget.preset_combo,
                 "Load predefined relaxation parameters for a tissue type.",
             ),
@@ -2595,8 +2646,55 @@ class BlochSimulatorGUI(QMainWindow):
         nframes, npos, nfreq, _ = base_vectors.shape
         mode = self.mag_3d.get_view_mode()
         selector = self.mag_3d.get_selector_index()
+        self.anim_position_means = None
+        self.anim_net = None
+        spatial = (
+            self.mag_3d.get_vector_arrangement()
+            == self.mag_3d.ARRANGEMENT_ALONG_POSITION
+            and npos > 1
+            and mode != "Freqs @ position"
+            and self.last_positions is not None
+            and len(self.last_positions) == npos
+        )
+        if not spatial:
+            self.mag_3d.set_spatial_groups(None)
 
-        if mean_only or (npos == 1 and nfreq == 1):
+        if spatial:
+            pos_idx = self._display_subsample_indices(
+                npos, self.mag_3d.get_max_display_positions()
+            )
+            selected = base_vectors[:, pos_idx]
+            if mean_only:
+                position_means = selected.mean(axis=2)
+                anim = position_means[:, :, None, :]
+                net = base_vectors.mean(axis=(1, 2))
+            elif mode == "Positions @ freq":
+                fi = min(max(selector, 0), nfreq - 1)
+                anim = selected[:, :, fi : fi + 1, :]
+                position_means = anim[:, :, 0, :]
+                net = base_vectors[:, :, fi, :].mean(axis=1)
+            else:
+                position_means = selected.mean(axis=2)
+                freq_idx = self._display_subsample_indices(
+                    nfreq, self.SPATIAL_VECTOR_MAX_FREQUENCIES
+                )
+                anim = selected[:, :, freq_idx, :]
+                net = base_vectors.mean(axis=(1, 2))
+            spins_per_position = anim.shape[2]
+            self.mag_3d.set_spatial_groups(
+                np.asarray(self.last_positions)[pos_idx, 2] * 1000.0,
+                spins_per_position,
+            )
+            self.mag_3d.set_spatial_fields(
+                self.anim_b1,
+                self.anim_gradients,
+                np.asarray(self.last_positions)[pos_idx],
+            )
+            anim = anim.reshape(nframes, len(pos_idx) * spins_per_position, 3)
+            colors = None
+            self.anim_position_means = position_means
+            self.anim_net = net
+        elif mean_only or (npos == 1 and nfreq == 1):
             anim = np.mean(base_vectors, axis=(1, 2))[:, None, :]
             colors = [self._color_tuple(pg.mkColor("c"))]
         elif mode == "Positions @ freq":
@@ -2626,7 +2724,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.anim_time = self.playback_time
 
         # Update preview plot with mean vectors
-        mean_vectors = np.mean(anim, axis=1)
+        mean_vectors = self.anim_net if spatial else np.mean(anim, axis=1)
         self.mag_3d.set_preview_data(
             (
                 self.playback_time_ms
@@ -2734,6 +2832,10 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Connect 3D vector position changes to universal control
         self.mag_3d.position_changed.connect(self._on_3d_vector_position_changed)
+        # Clicking into the sequence diagram seeks playback to that time
+        self.sequence_designer.time_clicked.connect(
+            self._on_sequence_diagram_time_clicked
+        )
 
     def _on_universal_time_changed(
         self, time_idx: int, skip_expensive_updates=False, reset_anchor=True
@@ -2929,12 +3031,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.mag_3d._clear_path()
         self._reset_playback_anchor(0)
         if self.anim_data is not None and len(self.anim_data) > 0:
-            vectors = self.anim_data[0]
-            colors = [
-                self._color_tuple(self._vector_color_for_index(i, vectors.shape[0]))
-                for i in range(vectors.shape[0])
-            ]
-            self.mag_3d.update_magnetization(vectors, colors=colors)
+            self._show_vector_frame(0)
             self.mag_3d.set_cursor_index(0)
         if self.playback_time is not None:
             self.time_control.set_time_index(0)
@@ -2974,6 +3071,26 @@ class BlochSimulatorGUI(QMainWindow):
         if self.anim_timer.isActive():
             self.anim_timer.start(self.anim_interval_ms)
 
+    def _show_vector_frame(self, idx: int):
+        """Draw one playback frame of the current vector selection in 3D."""
+        means = (
+            self.anim_position_means[idx]
+            if self.anim_position_means is not None
+            else None
+        )
+        net = self.anim_net[idx] if self.anim_net is not None else None
+        self.mag_3d.update_magnetization(
+            self.anim_data[idx],
+            colors=self.anim_colors,
+            position_means=means,
+            net=net,
+        )
+
+    @staticmethod
+    def _display_subsample_indices(total: int, limit: int) -> np.ndarray:
+        """Return at most ``limit`` uniformly strided indices into ``range(total)``."""
+        return centered_stride_indices(total, limit)
+
     def _set_animation_index_from_slider(self, idx: int, reset_anchor=True):
         """Scrub animation position from the preview slider."""
         if self.anim_data is None or len(self.anim_data) == 0:
@@ -2984,12 +3101,21 @@ class BlochSimulatorGUI(QMainWindow):
             self.mag_3d._clear_path()
 
         self.anim_index = idx
-        vectors = self.anim_data[idx]
-        self.mag_3d.update_magnetization(vectors, colors=self.anim_colors)
+        self._show_vector_frame(idx)
         self.mag_3d.set_cursor_index(idx)
         self._update_b1_arrow(idx)
         if reset_anchor:
             self._reset_playback_anchor(idx)
+
+    def _on_sequence_diagram_time_clicked(self, time_s: float):
+        """Seek playback to the frame closest to a time clicked in the diagram."""
+        if self.playback_time is None or len(self.playback_time) == 0:
+            return
+        playback_time = np.asarray(self.playback_time, dtype=float)
+        last_time = getattr(self, "last_time", None)
+        origin = float(last_time[0]) if last_time is not None else 0.0
+        idx = int(np.argmin(np.abs(playback_time - (origin + time_s))))
+        self._on_3d_vector_position_changed(idx)
 
     def _on_3d_vector_position_changed(self, time_idx: int):
         """Handle 3D vector view position changes."""
@@ -5409,9 +5535,12 @@ class BlochSimulatorGUI(QMainWindow):
             "last_gradients",
             "last_waveform_time",
             "anim_data",
+            "anim_position_means",
+            "anim_net",
             "anim_time",
             "anim_vectors_full",
             "anim_b1",
+            "anim_gradients",
             "playback_indices",
             "playback_time",
             "playback_time_ms",
@@ -5646,6 +5775,8 @@ class BlochSimulatorGUI(QMainWindow):
         else:
             self.anim_b1 = None
             self.anim_b1_scale = 1.0
+        gradients = getattr(self, "last_gradients", None)
+        self.anim_gradients = None if gradients is None else np.asarray(gradients)
 
         self.update_plots(result)
         integration = result.get("integration")
@@ -5863,6 +5994,7 @@ class BlochSimulatorGUI(QMainWindow):
                         )
                     else:
                         self.anim_b1 = None
+                    self.anim_gradients = self._playback_gradients(waveform_time)
                     max_b1 = (
                         float(np.nanmax(np.abs(self.anim_b1)))
                         if self.anim_b1 is not None and self.anim_b1.size
@@ -5872,6 +6004,9 @@ class BlochSimulatorGUI(QMainWindow):
                 else:
                     self.anim_b1 = None
                     self.anim_b1_scale = 1.0
+                    self.anim_gradients = self._playback_gradients(
+                        getattr(self, "last_waveform_time", None)
+                    )
 
                 self.mag_3d.set_selector_limits(npos, nfreq, disable=mean_only)
                 self.anim_index = 0
@@ -6326,8 +6461,30 @@ class BlochSimulatorGUI(QMainWindow):
         )
         self._last_render_wall = now
 
+    def _playback_gradients(self, waveform_time):
+        """Interpolate the gradient waveform (G/cm) onto the playback time."""
+        gradients = getattr(self, "last_gradients", None)
+        if gradients is None or waveform_time is None or self.playback_time is None:
+            return None
+        gradients = np.asarray(gradients, dtype=float)
+        if gradients.ndim == 1:
+            gradients = gradients[:, None]
+        if len(gradients) != len(waveform_time):
+            return None
+        return np.column_stack(
+            [
+                np.interp(self.playback_time, waveform_time, gradients[:, axis])
+                for axis in range(gradients.shape[1])
+            ]
+        )
+
     def _update_b1_arrow(self, playback_idx: int):
         """Update the B1 direction/length indicator in the 3D view."""
+        if self.mag_3d is not None and self.mag_3d.is_spatial_layout_active():
+            # The spatial layout draws B1 and gradient fields per position.
+            self.mag_3d.b1_arrow.setVisible(False)
+            self.mag_3d.show_field_frame(playback_idx)
+            return
         if self.anim_b1 is None or self.mag_3d is None:
             return
         idx = int(max(0, min(playback_idx, len(self.anim_b1) - 1)))

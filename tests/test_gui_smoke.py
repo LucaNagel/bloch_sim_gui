@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-from PyQt5.QtCore import QSettings, Qt
+from PyQt5.QtCore import QPointF, QSettings, Qt
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -24,10 +24,18 @@ from blochsimulator.pulse_loader import load_amp_phase_dat, load_pulse_from_file
 from blochsimulator.sequence import ScannerParameters
 from blochsimulator.ui.dialogs import PulseImportDialog, SettingsDialog
 from blochsimulator.ui.default_settings import WorkspaceDefaults
-from blochsimulator.ui.magnetization_viewer import MagnetizationViewer
+from blochsimulator.ui.magnetization_viewer import (
+    MagnetizationViewer,
+    centered_stride_indices,
+)
 from blochsimulator.ui.main_window import BlochSimulatorGUI, _apply_platform_style
 from blochsimulator.ui.rf_pulse_designer import RFPulseDesigner
 from blochsimulator.ui.sequence_designer import SequenceDesigner
+from blochsimulator.ui.sequence_diagram import (
+    DiagramAnnotations,
+    SequenceDiagramWidget,
+    TimingMarker,
+)
 from blochsimulator.units import LEGACY_GAMMA_RAD_PER_S_PER_GAUSS
 
 
@@ -541,6 +549,114 @@ def test_memory_limit_uses_warning_instead_of_generic_error():
     critical.assert_not_called()
 
 
+def test_sequence_diagram_draws_slice_gradient_in_gz_lane_after_error_view():
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+
+    window = BlochSimulatorGUI()
+    designer = window.sequence_designer
+    diagram = designer.diagram_widget
+    diagram.show_error("broken")
+    assert "broken" in diagram.error_text()
+    time = np.linspace(0, 1e-3, 11)
+    b1 = np.zeros(time.size, complex)
+    b1[1:4] = 0.05
+    gradients = np.zeros((time.size, 3))
+    gradients[:5, 2] = 1.0
+
+    designer._render_sequence_diagram(b1, gradients, time)
+
+    assert diagram.error_text() == ""
+    _, gz = diagram.lane_data("gz")
+    _, gx = diagram.lane_data("gx")
+    assert np.ptp(gz) == pytest.approx(10.0)  # 1 G/cm = 10 mT/m
+    assert np.ptp(gx) == 0
+    assert diagram.collapsed == {
+        "rf": False,
+        "phase": False,
+        "gz": False,
+        "gy": True,
+        "gx": True,
+    }
+    y_min, y_max = diagram.plots["gz"].getViewBox().viewRange()[1]
+    assert y_min < -10 and y_max > 10
+    assert diagram.time_axis_plot.getAxis("bottom").labelText == "Time"
+
+
+def test_sequence_diagram_annotates_pulses_and_scales_gradients_together():
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+
+    diagram = SequenceDiagramWidget()
+    diagram.resize(400, 600)
+    diagram.show()
+    dt = 1e-5
+    time = np.arange(1000) * dt
+    b1 = np.zeros(time.size, complex)
+    # 90 deg about x, then 180 deg about y at TE/2 = 4 ms.
+    area_90 = 0.25 / 4257.7
+    b1[10:110] = area_90 / (100 * dt)
+    b1[400:500] = 1j * 2 * area_90 / (100 * dt)
+    gradients = np.zeros((time.size, 3))
+    gradients[10:110, 2] = 1.0
+    gradients[120:170, 2] = -1.0
+    gradients[600:900, 0] = 0.05
+
+    diagram.set_sequence(
+        b1,
+        gradients,
+        time,
+        DiagramAnnotations(
+            brackets=[TimingMarker("TE 8 ms", 0.6e-3, 8.6e-3)],
+            first_tr_window_s=(0.0, 5e-3),
+        ),
+    )
+    app.processEvents()
+
+    assert diagram.visible_pulse_labels() == ["90°x", "180°y"]
+    assert diagram.gradient_zoomed["gx"] and not diagram.gradient_zoomed["gz"]
+    assert diagram.collapsed["gy"] and not diagram.collapsed["gx"]
+    lo, hi = diagram.visible_time_range_ms()
+    assert lo < 0 and hi > 9.99
+    diagram.show_first_tr()
+    lo, hi = diagram.visible_time_range_ms()
+    assert lo < 0 and 5 < hi < 5.5
+    diagram.close()
+
+
+def test_sequence_diagram_click_moves_playback_to_that_time():
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+
+    window = BlochSimulatorGUI()
+    designer = window.sequence_designer
+    diagram = designer.diagram_widget
+    time = np.linspace(0, 10e-3, 101)
+    b1 = np.zeros(time.size, complex)
+    b1[1:5] = 0.05
+    designer._render_sequence_diagram(b1, np.zeros((time.size, 3)), time)
+    diagram.resize(400, 600)
+    diagram.show()
+    app.processEvents()
+
+    view = diagram.plots["rf"].getViewBox()
+    event = MagicMock()
+    event.button.return_value = Qt.LeftButton
+    event.double.return_value = False
+    event.scenePos.return_value = view.mapViewToScene(QPointF(4.0, 0.5))
+    window.playback_time = 1.0 + time
+    window.last_time = 1.0 + time
+    with patch.object(window, "_on_3d_vector_position_changed") as seek:
+        diagram._on_scene_clicked(event)
+
+    assert diagram.playhead.value() == pytest.approx(4.0, abs=0.1)
+    seek.assert_called_once_with(40)
+    diagram.close()
+
+
 def test_simulation_controls_use_non_overlapping_grid_rows():
     app = QApplication.instance()
     if app is None:
@@ -849,6 +965,244 @@ def test_3d_spin_display_mode_does_not_change_tip_path_tracking(
     viewer.mean_vector.setVisible.assert_called_with(show_mean)
     assert viewer.track_checkbox.isChecked()
     assert len(viewer.path_points) == 1
+
+
+def _spatial_viewer(positions_mm, spins_per_position):
+    viewer = MagnetizationViewer()
+    viewer.set_spatial_layout_available(True)
+    viewer.arrangement_combo.setCurrentText(viewer.ARRANGEMENT_ALONG_POSITION)
+    viewer.set_spatial_groups(positions_mm, spins_per_position)
+    return viewer
+
+
+def test_3d_spatial_layout_draws_each_position_at_its_own_origin():
+    app = QApplication.instance() or QApplication(sys.argv)
+    viewer = _spatial_viewer([-10.0, 0.0, 10.0], 2)
+    viewer.spin_display_combo.setCurrentText("Show all spins + mean")
+    spins = np.array(
+        [
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+            [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]],
+        ]
+    )
+    means = np.array([[0.5, 0.5, 0.0], [0.0, 0.0, 1.0], [-0.5, -0.5, 0.0]])
+    net = np.array([0.0, 0.0, 0.25])
+
+    assert not viewer.tip_curve_checkbox.isChecked()
+    assert not viewer.net_vector_checkbox.isChecked()
+    viewer.update_magnetization(spins.reshape(-1, 3), position_means=means, net=net)
+
+    # Positions are stacked along the display z axis.
+    spacing = 1.0 / viewer.vector_length_spin.value()
+    origins = np.array([[0, 0, -spacing], [0, 0, 0], [0, 0, spacing]])
+    np.testing.assert_allclose(viewer.vector_plot.pos[0::2], np.repeat(origins, 2, 0))
+    np.testing.assert_allclose(
+        viewer.vector_plot.pos[1::2], np.repeat(origins, 2, 0) + spins.reshape(-1, 3)
+    )
+    np.testing.assert_allclose(viewer.position_mean_plot.pos[1::2], origins + means)
+    assert viewer.vector_plot.visible()
+    assert viewer.position_mean_plot.visible()
+    assert not viewer.tip_curve_item.visible()
+    # The net vector and its path stay hidden until requested.
+    assert not viewer.mean_vector.visible()
+    assert not viewer.path_item.visible()
+    assert viewer.path_points == []
+
+    viewer.net_vector_checkbox.setChecked(True)
+    viewer.tip_curve_checkbox.setChecked(True)
+    np.testing.assert_allclose(viewer.tip_curve_item.pos, origins + means)
+    viewer.update_magnetization(spins.reshape(-1, 3), position_means=means, net=net)
+    np.testing.assert_allclose(viewer.mean_vector.pos, [[0, 0, 0], net])
+    assert viewer.mean_vector.transform().column(3).x() == pytest.approx(
+        viewer.NET_VECTOR_X
+    )
+    assert viewer.mean_vector.visible()
+    assert viewer.tip_curve_item.visible()
+    assert len(viewer.path_points) == 1
+
+    viewer.spin_display_combo.setCurrentText("Show only mean")
+    assert not viewer.vector_plot.visible()
+    assert viewer.position_mean_plot.visible()
+    viewer.spin_display_combo.setCurrentText("Show all spins")
+    assert viewer.vector_plot.visible()
+    assert not viewer.position_mean_plot.visible()
+    assert viewer.mean_vector.visible()
+    assert len(viewer.path_points) == 1
+
+
+def test_3d_spatial_layout_tracks_one_tip_path_per_position():
+    app = QApplication.instance() or QApplication(sys.argv)
+    viewer = _spatial_viewer([0.0, 5.0], 2)
+    first = np.array([[1.0, 0, 0], [1.0, 0, 0], [0, 0, 1.0], [0, 0, 1.0]])
+    second = np.array([[0, 1.0, 0], [0, 1.0, 0], [0, 1.0, 0], [0, 1.0, 0]])
+
+    viewer.update_magnetization(first)
+    assert not viewer.position_path_item.visible()
+    viewer.update_magnetization(second)
+
+    spacing = 1.0 / viewer.vector_length_spin.value()
+    origins = np.array([[0, 0, -0.5 * spacing], [0, 0, 0.5 * spacing]])
+    # One segment per position from the previous to the current mean tip.
+    np.testing.assert_allclose(
+        viewer.position_path_item.pos,
+        [
+            origins[0] + [1, 0, 0],
+            origins[0] + [0, 1, 0],
+            origins[1] + [0, 0, 1],
+            origins[1] + [0, 1, 0],
+        ],
+    )
+    assert viewer.position_path_item.visible()
+
+    viewer.track_checkbox.setChecked(False)
+    assert not viewer.position_path_item.visible()
+
+
+def test_3d_spatial_layout_shows_b1_and_gradient_at_each_position():
+    app = QApplication.instance() or QApplication(sys.argv)
+    viewer = _spatial_viewer([-10.0, 0.0, 10.0], 1)
+    b1 = np.array([0.0, 0.1j, 0.05])
+    gradients = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    positions_m = np.array([[0, 0, -0.01], [0, 0, 0.0], [0, 0, 0.01]])
+    viewer.set_spatial_fields(b1, gradients, positions_m)
+    viewer.update_magnetization(np.tile([0.0, 0.0, 1.0], (3, 1)))
+
+    viewer.show_field_frame(0)
+    assert not viewer.position_b1_plot.visible()
+
+    viewer.show_field_frame(1)
+    origins = viewer._spatial_origins
+    np.testing.assert_allclose(viewer.position_b1_plot.pos[0::2], origins)
+    # Full length for the largest B1, oriented like the overlay B1 indicator.
+    np.testing.assert_allclose(
+        viewer.position_b1_plot.pos[1::2] - origins,
+        np.tile([0, 1, 0], (3, 1)),
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        viewer.gradient_bar_plot.pos[1::2, 0], viewer.GRADIENT_BAR_X
+    )
+
+    viewer.show_field_frame(2)
+    bars = viewer.gradient_bar_plot.pos[1::2, 0] - viewer.GRADIENT_BAR_X
+    np.testing.assert_allclose(
+        bars, [-viewer.GRADIENT_BAR_LENGTH, 0.0, viewer.GRADIENT_BAR_LENGTH]
+    )
+    assert viewer.gradient_bar_plot.visible()
+    assert "10.00 mT/m" in viewer.field_label_item.text
+    assert "5.00 µT" in viewer.field_label_item.text
+
+    viewer.gradient_field_checkbox.setChecked(False)
+    viewer.b1_field_checkbox.setChecked(False)
+    assert not viewer.gradient_bar_plot.visible()
+    assert not viewer.position_b1_plot.visible()
+    assert not viewer.field_label_item.visible()
+
+    viewer.set_spatial_groups(None)
+    assert not viewer.gradient_bar_plot.visible()
+
+
+def test_3d_spatial_layout_returns_to_overlay():
+    app = QApplication.instance() or QApplication(sys.argv)
+    viewer = _spatial_viewer([-1.0, 1.0], 1)
+    viewer.update_magnetization(np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]))
+    assert viewer.position_axis_item.visible()
+
+    viewer.set_spatial_groups(None)
+    viewer.update_magnetization(np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]))
+
+    assert not viewer.position_axis_item.visible()
+    assert not viewer.position_mean_plot.visible()
+    assert not viewer.position_label_items
+    np.testing.assert_allclose(viewer.vector_plot.pos[0::2], 0.0)
+    assert viewer.mean_vector.transform().column(3).x() == pytest.approx(0.0)
+    assert viewer.axis_item.transform().column(3).z() == pytest.approx(0.0)
+
+
+def test_3d_arrangement_controls_are_hidden_without_positions():
+    app = QApplication.instance() or QApplication(sys.argv)
+    viewer = MagnetizationViewer()
+    viewer.arrangement_combo.setCurrentText(viewer.ARRANGEMENT_ALONG_POSITION)
+
+    assert viewer.spatial_controls.isHidden()
+    assert viewer.get_vector_arrangement() == viewer.ARRANGEMENT_OVERLAID
+
+
+@pytest.mark.parametrize(
+    ("total", "limit", "expected"),
+    [
+        (5, 32, [0, 1, 2, 3, 4]),
+        (41, 32, list(range(0, 41, 2))),
+        (40, 32, list(range(1, 40, 2))),
+        (1100, 32, list(range(9, 1100, 36))),
+        (9, 1, [4]),
+    ],
+)
+def test_centered_stride_indices_keep_uniform_spacing(total, limit, expected):
+    indices = centered_stride_indices(total, limit)
+
+    assert indices.tolist() == expected
+    assert len(indices) <= limit
+
+
+def test_3d_phase_colors_follow_transverse_phase():
+    colors = MagnetizationViewer.phase_colors(
+        [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+    )
+
+    np.testing.assert_allclose(colors[0], [1.0, 0.0, 0.0, 1.0])
+    np.testing.assert_allclose(colors[1], [0.0, 1.0, 1.0, 1.0])
+    np.testing.assert_allclose(colors[2], [1.0, 1.0, 1.0, 1.0])
+
+
+def test_free_mode_vector_view_arranges_subsampled_positions():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    nframes, npos, nfreq = 4, 9, 5
+    rng = np.random.default_rng(0)
+    window.anim_vectors_full = rng.normal(size=(nframes, npos, nfreq, 3))
+    window.playback_indices = np.arange(nframes)
+    window.playback_time = np.linspace(0.0, 3e-3, nframes)
+    window.playback_time_ms = window.playback_time * 1000.0
+    window.last_positions = np.zeros((npos, 3))
+    window.last_positions[:, 2] = np.linspace(-0.02, 0.02, npos)
+    window.anim_b1 = np.full(nframes, 0.1 + 0j)
+    window.anim_gradients = np.zeros((nframes, 3))
+    window.anim_gradients[:, 2] = 1.0
+    window.mag_3d.set_selector_limits(npos, nfreq)
+    window.mag_3d.max_positions_spin.setValue(5)
+    window.mag_3d.arrangement_combo.setCurrentText(
+        window.mag_3d.ARRANGEMENT_ALONG_POSITION
+    )
+
+    window._refresh_vector_view(mean_only=False, restart=False)
+
+    shown = window._display_subsample_indices(npos, 5)
+    np.testing.assert_allclose(
+        window.mag_3d._spatial_positions_mm, window.last_positions[shown, 2] * 1000
+    )
+    assert window.anim_data.shape == (nframes, len(shown) * nfreq, 3)
+    np.testing.assert_allclose(
+        window.anim_position_means,
+        window.anim_vectors_full[:, shown].mean(axis=2),
+    )
+    np.testing.assert_allclose(
+        window.anim_net, window.anim_vectors_full.mean(axis=(1, 2))
+    )
+    # G·r in G for the drawn positions (cm) and every playback frame.
+    np.testing.assert_allclose(
+        window.mag_3d._field_offsets,
+        np.tile(window.last_positions[shown, 2] * 100.0, (nframes, 1)),
+    )
+    window._update_b1_arrow(1)
+    assert not window.mag_3d.b1_arrow.visible()
+    assert window.mag_3d._field_frame_idx == 1
+
+    window.mag_3d.view_mode_combo.setCurrentText("Freqs @ position")
+    window._refresh_vector_view(mean_only=False, restart=False)
+    assert not window.mag_3d.is_spatial_layout_active()
+    assert window.anim_net is None
 
 
 def test_core_dialog_fields_have_tooltips(tmp_path):

@@ -9,13 +9,19 @@ from PyQt5.QtWidgets import (
     QSpinBox,
     QDoubleSpinBox,
     QCheckBox,
+    QPushButton,
 )
 import numpy as np
-import pyqtgraph as pg
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import pyqtSignal
 from typing import Optional
 
 from ..memory import enforce_sequence_memory
+from .sequence_diagram import (
+    DiagramAnnotations,
+    SequenceDiagramWidget,
+    TimingMarker,
+    find_pulse_segments,
+)
 from ..sequence.bssfp_phase import advance_bssfp_phase_deg, wrap_phase_deg
 from ..simulator import (
     PulseSequence,
@@ -32,12 +38,15 @@ from ..simulator import (
 class SequenceDesigner(QGroupBox):
     """Widget for designing pulse sequences."""
 
+    # Emitted with a time in seconds when the user clicks into the diagram.
+    time_clicked = pyqtSignal(float)
+
     def __init__(self):
         super().__init__("Sequence Design")
         self.default_dt = 1e-5  # 10 us
         self.custom_pulse = None
         self.playhead_line = None
-        self.diagram_labels = []
+        self.preview_time = None
         self.pulse_states = {}  # Store UI state for each pulse role
         self.pulse_waveforms = {}  # Store (b1, time) for each pulse role
         self.current_role = None
@@ -291,15 +300,35 @@ class SequenceDesigner(QGroupBox):
         self._update_sequence_options()
 
         # Sequence diagram
-        self.diagram_widget = pg.PlotWidget()
-        self.diagram_widget.setLabel("left", "")
-        self.diagram_widget.setLabel("bottom", "Time", "ms")
-        self.diagram_widget.setMinimumHeight(250)
+        zoom_layout = QHBoxLayout()
+        zoom_layout.setContentsMargins(0, 0, 0, 0)
+        self.diagram_full_button = QPushButton("Full sequence")
+        self.diagram_full_button.setObjectName("sequence_diagram_full")
+        self.diagram_full_button.setToolTip(
+            "Zoom the sequence diagram to the whole sequence (also: double-click)."
+        )
+        self.diagram_first_tr_button = QPushButton("First TR")
+        self.diagram_first_tr_button.setObjectName("sequence_diagram_first_tr")
+        self.diagram_first_tr_button.setToolTip(
+            "Zoom to the start pulse and the first repetition of a pulse train."
+        )
+        zoom_layout.addWidget(self.diagram_full_button)
+        zoom_layout.addWidget(self.diagram_first_tr_button)
+        zoom_layout.addStretch(1)
+        layout.addLayout(zoom_layout)
+        self.diagram_widget = SequenceDiagramWidget()
+        self.diagram_widget.setToolTip(
+            "Click: jump to this time · Wheel: zoom time · Double-click: whole sequence"
+        )
         layout.addWidget(self.diagram_widget)
-        self.diagram_arrows = []
-        self.playhead_line = pg.InfiniteLine(angle=90, pen=pg.mkPen("y", width=2))
-        self.diagram_widget.addItem(self.playhead_line)
-        self.playhead_line.hide()
+        hint = QLabel("Click: set time · Wheel: zoom · Double-click: all")
+        hint.setStyleSheet("color: #888; font-size: 8pt;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.diagram_full_button.clicked.connect(self.diagram_widget.show_full_sequence)
+        self.diagram_first_tr_button.clicked.connect(self.diagram_widget.show_first_tr)
+        self.diagram_widget.time_clicked.connect(self.time_clicked)
+        self.playhead_line = self.diagram_widget.playhead
 
         self.setLayout(layout)
         # Draw initial diagram even before simulation
@@ -1218,206 +1247,75 @@ class SequenceDesigner(QGroupBox):
             )
         except ValueError as e:
             # Handle validation errors (e.g. TE too short)
-            self.diagram_widget.clear()
-            self.diagram_widget.setLabel("bottom", "")
-            self.diagram_widget.setTitle(f"Invalid Sequence: {str(e)}")
-            text = pg.TextItem(text=f"Error:\n{str(e)}", color="r", anchor=(0.5, 0.5))
-            # Put text roughly in center
-            self.diagram_widget.addItem(text)
-            text.setPos(0.5, 0.5)
-            # Need to set arbitrary range to show text
-            self.diagram_widget.setXRange(0, 1)
-            self.diagram_widget.setYRange(0, 1)
+            self.preview_time = None
+            self.diagram_widget.show_error(str(e))
+            self.diagram_first_tr_button.setEnabled(False)
             return
         except Exception as e:
-            self.diagram_widget.clear()
-            self.diagram_widget.setTitle(f"Error: {str(e)}")
+            self.preview_time = None
+            self.diagram_widget.show_error(f"Error: {e}")
+            self.diagram_first_tr_button.setEnabled(False)
             return
 
-        self.diagram_widget.setTitle(None)
         self._render_sequence_diagram(b1, gradients, time)
 
     def _render_sequence_diagram(self, b1, gradients, time):
-        """Plot a lane-based sequence diagram (RF, Gradients)."""
-        self.diagram_widget.clear()
-        if self.playhead_line is not None:
-            # Check if already in the plot to avoid UserWarning
-            if self.playhead_line not in self.diagram_widget.items():
-                self.diagram_widget.addItem(self.playhead_line)
-            self.playhead_line.hide()
-        for arr in self.diagram_arrows:
-            try:
-                self.diagram_widget.removeItem(arr)
-            except Exception:
-                pass
-        self.diagram_arrows = []
-        for lbl in getattr(self, "diagram_labels", []):
-            try:
-                self.diagram_widget.removeItem(lbl)
-            except Exception:
-                pass
-        self.diagram_labels = []
-        if time is None or len(time) == 0:
-            return
-        max_points = 4000
-        if len(time) > max_points:
-            idx = np.linspace(0, len(time) - 1, max_points).astype(int)
-            time = time[idx]
-            b1 = b1[idx]
-            gradients = gradients[idx]
-        time_ms = (time - time[0]) * 1000.0
-        b1_mag = np.abs(b1)
-        b1_phase = np.angle(b1)  # Phase in radians
-
-        # Lane positions and labels
-        lanes = [
-            ("RF Mag", 4.0, "b"),
-            ("RF Phase", 3.0, "c"),
-            ("Gz (slice/readout)", 2.0, "m"),
-            ("Gy (phase1)", 1.0, "g"),
-            ("Gx (phase2)", 0.0, "r"),
-        ]
-
-        # Draw horizontal grid lines for clarity
-        for _, y, _ in lanes:
-            line = pg.InfiniteLine(
-                pos=y, angle=0, pen=pg.mkPen((180, 180, 180, 120), width=1)
-            )
-            self.diagram_widget.addItem(line)
-        # Add lane labels near time zero
-        for label, y, color in lanes:
-            txt = pg.TextItem(text=label, color=color, anchor=(0, 0.5))
-            txt.setPos(time_ms[0] if len(time_ms) else 0, y)
-            self.diagram_widget.addItem(txt)
-            self.diagram_labels.append(txt)
-
-        # RF Magnitude lane
-        rf_mag_y = lanes[0][1]
-        rf_scale = 0.8 if b1_mag.max() == 0 else 0.8 / b1_mag.max()
-        self.diagram_widget.plot(
-            time_ms,
-            rf_mag_y + b1_mag * rf_scale,
-            pen=pg.mkPen("b", width=2),
-            name="RF Mag",
-        )
-
-        # RF Phase lane (convert radians to normalized display: -π to π → -0.8 to 0.8)
-        rf_phase_y = lanes[1][1]
-        # Only plot phase where there's significant RF (avoid noise)
-        phase_mask = (
-            b1_mag > (b1_mag.max() * 0.01)
-            if b1_mag.max() > 0
-            else np.zeros_like(b1_mag, dtype=bool)
-        )
-        if np.any(phase_mask):
-            phase_display = b1_phase / np.pi * 0.8  # Normalize to ±0.8 for display
-            # Create connected segments only where RF is active
-            self.diagram_widget.plot(
-                time_ms,
-                rf_phase_y + phase_display,
-                pen=pg.mkPen("c", width=2),
-                name="RF Phase",
-                connect="finite",
-            )
-
-            # Add phase reference markers at -π, 0, +π
-            phase_ref_pen = pg.mkPen((150, 150, 150, 100), width=1, style=Qt.DashLine)
-            for phase_val, label_text in [(-np.pi, "-π"), (0, "0"), (np.pi, "+π")]:
-                y_pos = rf_phase_y + (phase_val / np.pi * 0.8)
-                ref_line = pg.InfiniteLine(pos=y_pos, angle=0, pen=phase_ref_pen)
-                self.diagram_widget.addItem(ref_line)
-                # Add small label at the right edge
-                if len(time_ms) > 0:
-                    phase_label = pg.TextItem(
-                        text=label_text, color=(150, 150, 150), anchor=(1, 0.5), angle=0
-                    )
-                    phase_label.setPos(time_ms[-1] * 1.02, y_pos)
-                    self.diagram_widget.addItem(phase_label)
-                    self.diagram_labels.append(phase_label)
-
-        # Gradient lanes
-        grad_scales = []
-        for i, (label, y, color) in enumerate(lanes[2:]):
-            if i >= gradients.shape[1]:
-                continue
-            g = gradients[:, i]
-            scale = 0.8 / (np.max(np.abs(g)) + 1e-9)
-            grad_scales.append(scale)
-            self.diagram_widget.plot(
-                time_ms,
-                y + g * scale,
-                pen=pg.mkPen(color, width=2, style=Qt.SolidLine),
-                name=label,
-            )
-            nonzero = np.where(np.abs(g) > 0)[0]
-            if nonzero.size:
-                mid = nonzero[nonzero.size // 2]
-                x = time_ms[mid]
-                angle = 90 if g[mid] > 0 else -90
-                arr = pg.ArrowItem(
-                    pos=(x, y + g[mid] * scale), angle=angle, brush=color
-                )
-                self.diagram_widget.addItem(arr)
-                self.diagram_arrows.append(arr)
-
-        # TE / TR markers
-        te_ms = self.te_spin.value()
-        tr_ms = self.tr_spin.value()
-        actual_tr_ms = time_ms[-1] if len(time_ms) > 0 else 0
-
+        """Plot the RF, RF phase and gradient lanes with timing annotations."""
         # Remove actual TR label (user request)
         self.tr_actual_label.setText("")
-
-        if actual_tr_ms > 0:
-            tr_line = pg.InfiniteLine(
-                pos=actual_tr_ms,
-                angle=90,
-                pen=pg.mkPen((120, 120, 120), style=Qt.DashLine),
-            )
-            self.diagram_widget.addItem(tr_line)
-            # Removed "Actual TR" text item
-
-        if te_ms > 0 and te_ms <= actual_tr_ms:
-            # Calculate actual echo position based on sequence type
-            seq_type = self.sequence_type.currentText()
-            echo_pos_ms = te_ms
-
-            if seq_type in ("Spin Echo", "Spin Echo (Tip-axis 180)", "Gradient Echo"):
-                # Estimate excitation duration
-                exc = self.pulse_waveforms.get("Excitation", self.custom_pulse)
-                if exc is not None and len(exc[1]) > 1:
-                    exc_dur_ms = (exc[1][-1] - exc[1][0]) * 1000.0
-                else:
-                    exc_dur_ms = 1.0  # default 1ms
-
-                # Echo happens at exc_duration/2 + TE
-                echo_pos_ms = exc_dur_ms / 2.0 + te_ms
-
-            if echo_pos_ms <= actual_tr_ms:
-                te_line = pg.InfiniteLine(
-                    pos=echo_pos_ms,
-                    angle=90,
-                    pen=pg.mkPen((200, 150, 0), style=Qt.DotLine, width=2),
-                )
-                self.diagram_widget.addItem(te_line)
-                te_lbl = pg.TextItem(
-                    text=f"TE={te_ms:.1f}ms", color=(200, 150, 0), anchor=(0, 1)
-                )
-                te_lbl.setPos(echo_pos_ms, 4.8)
-                self.diagram_widget.addItem(te_lbl)
-                self.diagram_labels.append(te_lbl)
-
-        self.diagram_widget.setLimits(xMin=0)
-        if len(time_ms):
-            self.diagram_widget.setXRange(0, time_ms[-1], padding=0)
-            if self.playhead_line is not None:
-                self.playhead_line.setValue(time_ms[0])
-                self.playhead_line.show()
-
-        # Store time array for cursor positioning
-        self.preview_time = time_ms if len(time_ms) > 0 else None
-        # Ensure playhead is initialized at start
+        if time is None or len(time) == 0:
+            self.preview_time = None
+            return
+        time = np.asarray(time, dtype=float)
+        segments = find_pulse_segments(b1, time - time[0])
+        annotations = self._diagram_annotations(segments, float(time[-1] - time[0]))
+        self.diagram_widget.set_sequence(b1, gradients, time, annotations)
+        self.diagram_first_tr_button.setEnabled(
+            annotations.first_tr_window_s is not None
+        )
+        self.preview_time = (time - time[0]) * 1000.0
         self.set_cursor_index(0)
+
+    def _diagram_annotations(self, segments, duration_s: float) -> DiagramAnnotations:
+        """Timing brackets (TE, TI, TR) and echo ticks for the current sequence."""
+        seq_type = self.sequence_type.currentText()
+        te = self.te_spin.value() / 1000.0
+        tr = self.tr_spin.value() / 1000.0
+        annotations = DiagramAnnotations()
+        tolerance = max(self.default_dt, 1e-9)
+        if seq_type in ("Spin Echo", "Spin Echo (Tip-axis 180)", "Gradient Echo"):
+            if segments and te > 0:
+                center = segments[0].center_s
+                annotations.brackets.append(
+                    TimingMarker(f"TE {te * 1e3:.3g} ms", center, center + te)
+                )
+                echoes = (
+                    self.spin_echo_echoes.value() if seq_type != "Gradient Echo" else 1
+                )
+                if echoes > 1:
+                    for k in range(1, echoes + 1):
+                        annotations.ticks.append((f"E{k}", center + k * te))
+        if seq_type == "Inversion Recovery" and len(segments) >= 2:
+            annotations.brackets.append(
+                TimingMarker(
+                    f"TI {(segments[1].center_s - segments[0].center_s) * 1e3:.3g} ms",
+                    segments[0].center_s,
+                    segments[1].center_s,
+                )
+            )
+        if seq_type == "SSFP (Loop)":
+            if len(segments) >= 3:
+                start, nxt = segments[1].start_s, segments[2].start_s
+                annotations.brackets.append(
+                    TimingMarker(f"TR {(nxt - start) * 1e3:.3g} ms", start, nxt, 1)
+                )
+                annotations.first_tr_window_s = (0.0, nxt + 0.5 * (nxt - start))
+        elif seq_type not in ("Slice Select + Rephase", "EPI") and tr > 0:
+            if tr <= duration_s + 2 * tolerance:
+                annotations.brackets.append(
+                    TimingMarker(f"TR {tr * 1e3:.3g} ms", 0.0, tr, 1)
+                )
+        return annotations
 
     def set_cursor_index(self, idx: int):
         """Move cursor/playhead to a specific time index."""
