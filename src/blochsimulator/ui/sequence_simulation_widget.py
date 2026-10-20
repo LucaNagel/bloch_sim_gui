@@ -1228,6 +1228,8 @@ class SequenceProbeThread(QThread):
         t2_s,
         initial_magnetization=(0.0, 0.0, 1.0),
         simulation_timestep_s=1e-6,
+        equilibrium_mz=1.0,
+        ideal_spoiling=True,
     ):
         super().__init__()
         self.simulator = simulator
@@ -1239,6 +1241,8 @@ class SequenceProbeThread(QThread):
         self.t2_s = t2_s
         self.initial_magnetization = initial_magnetization
         self.simulation_timestep_s = simulation_timestep_s
+        self.equilibrium_mz = equilibrium_mz
+        self.ideal_spoiling = ideal_spoiling
         self._cancel_requested = False
 
     def request_cancel(self):
@@ -1258,6 +1262,8 @@ class SequenceProbeThread(QThread):
                 cancel_callback=lambda: self._cancel_requested,
                 status_callback=lambda message: self.stage.emit(message),
                 simulation_timestep_s=self.simulation_timestep_s,
+                equilibrium_mz=self.equilibrium_mz,
+                ideal_spoiling=self.ideal_spoiling,
             )
             adc_events = self.program.adc_events
             result.metadata.update(
@@ -4028,10 +4034,31 @@ class SequenceSimulationWidget(QWidget):
         self.probe_initial_mz.setDecimals(4)
         self.probe_initial_mz.setValue(1.0)
         self.probe_initial_mz.setToolTip(
-            "Initial longitudinal magnetization Mz. Values above one can model "
-            "hyperpolarized starting magnetization."
+            "Longitudinal magnetization Mz at the start, relative to thermal "
+            "equilibrium (1). It only scales the starting state; T1 recovery "
+            "follows the selected longitudinal equilibrium."
         )
         probe_form.addRow("Initial Mz", self.probe_initial_mz)
+        self.probe_longitudinal_equilibrium = QComboBox()
+        self.probe_longitudinal_equilibrium.addItems(
+            ["Thermal (Mz → 1)", "Hyperpolarized (Mz → 0)"]
+        )
+        self.probe_longitudinal_equilibrium.setToolTip(
+            "Value that T1 recovery approaches. Thermal magnetization recovers "
+            "toward Mz = 1. Hyperpolarized magnetization decays toward 0 as "
+            "exp(-t/T1) and does not recover after RF depletes it."
+        )
+        probe_form.addRow(
+            "Longitudinal equilibrium", self.probe_longitudinal_equilibrium
+        )
+        self.probe_ideal_spoiling = QCheckBox("Apply declared ideal spoilers")
+        self.probe_ideal_spoiling.setChecked(True)
+        self.probe_ideal_spoiling.setToolTip(
+            "Set Mxy to zero at the sequence's IdealSpoilerEndTimes. When off, "
+            "spoiler gradients only change each probe spin's phase, so a single "
+            "position cannot be spoiled."
+        )
+        probe_form.addRow("Spoiling", self.probe_ideal_spoiling)
         self.probe_time_points = QSpinBox()
         self.probe_time_points.setRange(2, 20000)
         self.probe_time_points.setValue(512)
@@ -4727,6 +4754,10 @@ class SequenceSimulationWidget(QWidget):
         self.probe_frequency_units.currentIndexChanged.connect(
             self._update_simulation_object_table
         )
+        self.probe_longitudinal_equilibrium.currentIndexChanged.connect(
+            self._update_simulation_object_table
+        )
+        self.probe_ideal_spoiling.toggled.connect(self._update_simulation_object_table)
         self._update_bandwidth_labels()
         self._update_epsi_mge_labels()
         self._update_csi_labels()
@@ -6798,6 +6829,22 @@ class SequenceSimulationWidget(QWidget):
                         "Relaxation",
                         f"T1 {self.probe_t1_ms.value():g} ms; T2/T2* "
                         f"{self.probe_t2_ms.value():g} ms",
+                    ),
+                    (
+                        "Longitudinal equilibrium",
+                        (
+                            "Hyperpolarized: Mz decays toward 0"
+                            if self._probe_equilibrium_mz() == 0.0
+                            else "Thermal: Mz recovers toward 1"
+                        ),
+                    ),
+                    (
+                        "Ideal spoilers",
+                        (
+                            "Mxy set to zero at IdealSpoilerEndTimes"
+                            if self.probe_ideal_spoiling.isChecked()
+                            else "Off: spoiler gradients only change phase"
+                        ),
                     ),
                 )
             )
@@ -11415,6 +11462,8 @@ class SequenceSimulationWidget(QWidget):
             self.probe_t2_ms.value() / 1000.0,
             initial_magnetization=(0.0, 0.0, self.probe_initial_mz.value()),
             simulation_timestep_s=self.simulation_timestep_us.value() * 1e-6,
+            equilibrium_mz=self._probe_equilibrium_mz(),
+            ideal_spoiling=self.probe_ideal_spoiling.isChecked(),
         )
         self.probe_worker.stage.connect(self._probe_status_update)
         self.probe_worker.progress.connect(self._probe_progress)
@@ -11800,6 +11849,32 @@ class SequenceSimulationWidget(QWidget):
         if time_index is not None:
             self._update_probe_vector(time_index)
 
+    def _probe_equilibrium_mz(self):
+        """Return the Mz value that probe T1 recovery approaches."""
+        return 0.0 if self.probe_longitudinal_equilibrium.currentIndex() == 1 else 1.0
+
+    @staticmethod
+    def _probe_ideal_spoiler_note(metadata):
+        """Describe how declared ideal spoilers affected a probe result."""
+        declared = metadata.get("declared_ideal_spoiler_end_times_s")
+        if declared is None:
+            # Older probe results always applied the declared ideal spoilers.
+            return "Declared ideal spoilers (IdealSpoilerEndTimes) set Mxy to zero."
+        count = len(declared)
+        if count == 0:
+            return "The sequence declares no ideal spoilers (IdealSpoilerEndTimes)."
+        times = "time" if count == 1 else "times"
+        if metadata.get("ideal_spoiling_applied"):
+            return (
+                f"Mxy is set to zero at {count} declared ideal spoiler {times} "
+                "(IdealSpoilerEndTimes)."
+            )
+        verb = "is" if count == 1 else "are"
+        return (
+            f"Ideal spoiling is off, so {count} declared ideal spoiler {times} "
+            f"(IdealSpoilerEndTimes) {verb} ignored."
+        )
+
     def _update_probe_vector(self, time_index=None):
         result = self.probe_result
         if result is None or result.time_s.size == 0:
@@ -11810,18 +11885,20 @@ class SequenceSimulationWidget(QWidget):
         self._update_probe_adc_status(time_index)
         coherent = result.coherent_mxy_magnitude[time_index]
         mean_spin_magnitude = np.mean(np.abs(result.mxy[time_index]), axis=0)
+        ideal_note = self._probe_ideal_spoiler_note(result.metadata)
         if result.positions_m.shape[0] == 1:
             self.probe_coherence_info.setText(
-                "Single-position probe: a gradient spoiler changes phase but cannot "
-                "reduce the spin's |Mxy|; at position (0, 0, 0) even the gradient "
-                "phase is zero. Use Run geometry probe to inspect coherent spoiling."
+                f"Single-position probe: {ideal_note} Spoiler gradients only "
+                "change the spin's phase and cannot reduce its |Mxy|; at position "
+                "(0, 0, 0) even that phase is zero. Use Geometry Probe to inspect "
+                "gradient spoiling."
             )
         else:
             self.probe_coherence_info.setText(
                 "Coherent ensemble |mean(Mxy)|: "
                 f"{float(np.mean(coherent)):.5g}; mean individual |Mxy|: "
-                f"{float(np.mean(mean_spin_magnitude)):.5g}. "
-                "A working spoiler lowers the coherent value, not each spin magnitude."
+                f"{float(np.mean(mean_spin_magnitude)):.5g}. Spoiler gradients "
+                f"lower the coherent value, not each spin magnitude. {ideal_note}"
             )
         self.probe_magnetization_viewer.set_cursor_index(time_index)
         self.probe_spectrum_viewer.time_index = time_index

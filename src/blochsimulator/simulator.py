@@ -2221,12 +2221,20 @@ class BlochSimulator:
         status_callback=None,
         simulation_timestep_s=None,
         sequence_kernel=None,
+        equilibrium_mz: float = 1.0,
+        ideal_spoiling: bool = True,
     ):
         """Simulate explicit position/frequency spin probes over a sequence.
 
         ``positions_m`` is ``(position, xyz)`` and ``frequency_offsets_hz`` is
         one-dimensional.  The simulator evaluates the Cartesian product of both
         axes and returns time-resolved magnetization at ``checkpoints_s``.
+
+        ``equilibrium_mz`` is the longitudinal magnetization approached by T1
+        recovery: 1 is thermal equilibrium and 0 models hyperpolarized
+        magnetization that only decays. ``ideal_spoiling`` applies the
+        sequence's declared ideal transverse crushers (``IdealSpoilerEndTimes``);
+        when disabled, spoiler gradients only change each probe spin's phase.
         """
         from .phantom import Phantom
         from .sequence import SequenceProbeResult, SequenceProgram
@@ -2258,6 +2266,9 @@ class BlochSimulator:
             raise ValueError("frequency_offsets_hz must be finite")
         if not np.isfinite(t1_s) or t1_s <= 0 or not np.isfinite(t2_s) or t2_s <= 0:
             raise ValueError("t1_s and t2_s must be positive and finite")
+        equilibrium_mz = float(equilibrium_mz)
+        if not np.isfinite(equilibrium_mz):
+            raise ValueError("equilibrium_mz must be finite")
 
         n_positions = positions.shape[0]
         n_frequencies = frequencies.size
@@ -2310,6 +2321,8 @@ class BlochSimulator:
             status_callback=status_callback,
             simulation_timestep_s=simulation_timestep_s,
             sequence_kernel=sequence_kernel,
+            spoiler_mode="ideal" if ideal_spoiling else "gradient",
+            equilibrium_mz=equilibrium_mz,
         )
         if result.checkpoint_magnetization is None:
             raise RuntimeError("probe simulation did not return checkpoint states")
@@ -2337,6 +2350,16 @@ class BlochSimulator:
                 ),
                 "simulation_timestep_s": simulation_timestep_s,
                 "sequence_kernel": result.metadata.get("sequence_kernel"),
+                "equilibrium_mz": equilibrium_mz,
+                "longitudinal_equilibrium": result.metadata["longitudinal_equilibrium"],
+                "spoiler_mode": result.metadata["spoiler_mode"],
+                "ideal_spoiling_applied": result.metadata["ideal_spoiling_applied"],
+                "ideal_spoiler_end_times_s": result.metadata[
+                    "ideal_spoiler_end_times_s"
+                ],
+                "declared_ideal_spoiler_end_times_s": result.metadata[
+                    "declared_ideal_spoiler_end_times_s"
+                ],
                 "probe_type": (
                     "spectral"
                     if n_positions == 1 and n_frequencies > 1
@@ -2364,6 +2387,7 @@ class BlochSimulator:
         spin_sampling=None,
         spoiler_mode: str = "ideal",
         checkpoint_dtype=None,
+        equilibrium_mz=None,
     ):
         """Simulate an event-based sequence on a heterogeneous 1D/2D/3D object.
 
@@ -2382,6 +2406,10 @@ class BlochSimulator:
         ``spoiler_mode='ideal'`` always uses one spin per voxel and applies
         declared transverse crushers, while ``'gradient'`` derives spoiling
         only from the simulated gradient waveform and spin positions.
+        ``equilibrium_mz`` is the longitudinal magnetization per unit proton
+        density approached by T1 recovery, as a scalar or a map with the
+        phantom's shape. ``None`` or 1 is thermal equilibrium; 0 models
+        hyperpolarized magnetization that decays without recovering.
         """
         from .phantom import Phantom
         from .sequence import (
@@ -2466,6 +2494,30 @@ class BlochSimulator:
             raise ValueError("active phantom voxels require T1 > 0 and T2 > 0")
         if np.any(props["pd"] < 0):
             raise ValueError("active phantom proton density must not be negative")
+        equilibrium_active = None
+        if equilibrium_mz is not None:
+            try:
+                equilibrium_map = np.broadcast_to(
+                    np.asarray(equilibrium_mz, dtype=np.float64), phantom.shape
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "equilibrium_mz must be a scalar or match the phantom shape"
+                ) from exc
+            equilibrium_active = np.ascontiguousarray(
+                equilibrium_map.reshape(-1)[props["indices"]]
+            )
+            if not np.all(np.isfinite(equilibrium_active)):
+                raise ValueError("equilibrium_mz must be finite")
+            if np.all(equilibrium_active == 1.0):
+                # Thermal recovery keeps the historical native expression.
+                equilibrium_active = None
+        if equilibrium_active is None:
+            longitudinal_equilibrium = "thermal"
+        elif np.all(equilibrium_active == 0.0):
+            longitudinal_equilibrium = "hyperpolarized"
+        else:
+            longitudinal_equilibrium = "custom"
 
         if chunk_voxels is None:
             chunk_voxels = min(n_active, max(1, 65536 // spins_per_voxel))
@@ -2606,6 +2658,11 @@ class BlochSimulator:
                     rx_sensitivities[:, start:end], spins_per_voxel, axis=1
                 )
                 chunk_m0 = np.repeat(m0[start:end], spins_per_voxel, axis=0)
+                chunk_equilibrium = (
+                    None
+                    if equilibrium_active is None
+                    else np.repeat(equilibrium_active[start:end], spins_per_voxel)
+                )
             else:
                 chunk_positions = positions[start:end]
                 chunk_t1 = t1[start:end]
@@ -2615,6 +2672,17 @@ class BlochSimulator:
                 chunk_tx = tx_sensitivity[start:end]
                 chunk_rx = rx_sensitivities[:, start:end]
                 chunk_m0 = m0[start:end]
+                chunk_equilibrium = (
+                    None
+                    if equilibrium_active is None
+                    else equilibrium_active[start:end]
+                )
+            # Thermal runs omit the argument so they keep the historical call.
+            equilibrium_kwargs = (
+                {}
+                if chunk_equilibrium is None
+                else {"mz_equilibrium": chunk_equilibrium}
+            )
 
             chunk_signal, chunk_final, chunk_checkpoints = simulate_sequence_chunk(
                 compiled.rf_hz,
@@ -2634,6 +2702,7 @@ class BlochSimulator:
                 crush_state_indices,
                 native_threads,
                 native_selected_kernel,
+                **equilibrium_kwargs,
             )
             coil_signal += chunk_signal
             if sampling.enabled:
@@ -2832,6 +2901,7 @@ class BlochSimulator:
                 "declared_ideal_spoiler_end_times_s": (
                     compiled.transverse_crush_times_s.tolist()
                 ),
+                "longitudinal_equilibrium": longitudinal_equilibrium,
                 "units": {
                     "time": "s",
                     "position": "m",

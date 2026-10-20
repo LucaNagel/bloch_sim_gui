@@ -80,7 +80,9 @@ void blochsim_heterogeneous(
     double *mx, double *my, double *mz,
     int mode, int num_threads);
 
-/* Streaming sequence simulation in canonical frequency units (Hz, Hz/m, m). */
+/* Streaming sequence simulation in canonical frequency units (Hz, Hz/m, m).
+ * T1 recovery relaxes Mz toward mz_equilibrium[spin]; pass NULL for the
+ * thermal equilibrium Mz = 1 (relative to proton density). */
 int blochsim_sequence_streaming(
     double *rf_real_hz, double *rf_imag_hz,
     double *gx_hz_m, double *gy_hz_m, double *gz_hz_m,
@@ -90,6 +92,7 @@ int blochsim_sequence_streaming(
     double *tx_real, double *tx_imag,
     double *rx_real, double *rx_imag, int ncoils,
     double *mx_init, double *my_init, double *mz_init, int nspins,
+    double *mz_equilibrium,
     int *adc_state_indices, double *adc_demod_real, double *adc_demod_imag,
     int nadc, int *checkpoint_state_indices, int ncheckpoints,
     int *transverse_crush_state_indices, int ncrushes,
@@ -108,6 +111,7 @@ int blochsim_sequence_streaming_optimized(
     double *tx_real, double *tx_imag,
     double *rx_real, double *rx_imag, int ncoils,
     double *mx_init, double *my_init, double *mz_init, int nspins,
+    double *mz_equilibrium,
     int *adc_state_indices, double *adc_demod_real, double *adc_demod_imag,
     int nadc, int *checkpoint_state_indices, int ncheckpoints,
     int *transverse_crush_state_indices, int ncrushes,

@@ -57,6 +57,7 @@ cdef extern from "bloch_core.h":
         double *tx_real, double *tx_imag,
         double *rx_real, double *rx_imag, int ncoils,
         double *mx_init, double *my_init, double *mz_init, int nspins,
+        double *mz_equilibrium,
         int *adc_state_indices, double *adc_demod_real, double *adc_demod_imag,
         int nadc, int *checkpoint_state_indices, int ncheckpoints,
         int *transverse_crush_state_indices, int ncrushes,
@@ -74,6 +75,7 @@ cdef extern from "bloch_core.h":
         double *tx_real, double *tx_imag,
         double *rx_real, double *rx_imag, int ncoils,
         double *mx_init, double *my_init, double *mz_init, int nspins,
+        double *mz_equilibrium,
         int *adc_state_indices, double *adc_demod_real, double *adc_demod_imag,
         int nadc, int *checkpoint_state_indices, int ncheckpoints,
         int *transverse_crush_state_indices, int ncrushes,
@@ -625,12 +627,15 @@ def simulate_sequence_chunk(
         np.ndarray[np.int32_t, ndim=1] checkpoint_state_indices,
         np.ndarray[np.int32_t, ndim=1] transverse_crush_state_indices,
         int num_threads=1,
-        str kernel="optimized"):
+        str kernel="optimized",
+        mz_equilibrium=None):
     """Propagate one voxel chunk and collect sparse sequence output.
 
     All inputs use canonical units: RF in Hz, gradients in Hz/m, positions in
     metres, time in seconds, and off-resonance in Hz. ``kernel`` can be
-    ``"reference"`` or ``"optimized"``.
+    ``"reference"`` or ``"optimized"``. ``mz_equilibrium`` is the per-spin
+    longitudinal magnetization approached by T1 recovery; ``None`` keeps the
+    thermal equilibrium Mz = 1, and zero models hyperpolarized decay.
     """
     cdef int nintervals = rf_hz.shape[0]
     cdef int nspins = t1_s.shape[0]
@@ -663,6 +668,15 @@ def simulate_sequence_chunk(
         raise ValueError("m_init must have shape (nspins, 3)")
     if adc_demodulation.shape[0] != nadc:
         raise ValueError("adc_demodulation length must match ADC indices")
+    cdef np.ndarray[DTYPE_t, ndim=1] mz_equilibrium_c = None
+    cdef double *mz_equilibrium_ptr = NULL
+    if mz_equilibrium is not None:
+        mz_equilibrium_c = np.ascontiguousarray(mz_equilibrium, dtype=np.float64)
+        if mz_equilibrium_c.ndim != 1 or mz_equilibrium_c.shape[0] != nspins:
+            raise ValueError("mz_equilibrium length must match spin count")
+        if not np.all(np.isfinite(mz_equilibrium_c)):
+            raise ValueError("mz_equilibrium must be finite")
+        mz_equilibrium_ptr = <double*>mz_equilibrium_c.data
     if ncrushes and (
         np.any(transverse_crush_state_indices < 0)
         or np.any(transverse_crush_state_indices > nintervals)
@@ -726,6 +740,7 @@ def simulate_sequence_chunk(
                 <double*>tx_real.data, <double*>tx_imag.data,
                 <double*>rx_real.data, <double*>rx_imag.data, ncoils,
                 <double*>mx_init.data, <double*>my_init.data, <double*>mz_init.data, nspins,
+                mz_equilibrium_ptr,
                 <int*>adc_indices_c.data, <double*>demod_real.data, <double*>demod_imag.data,
                 nadc, <int*>checkpoint_indices_c.data, ncheckpoints,
                 <int*>crush_indices_c.data, ncrushes,
@@ -744,6 +759,7 @@ def simulate_sequence_chunk(
                 <double*>tx_real.data, <double*>tx_imag.data,
                 <double*>rx_real.data, <double*>rx_imag.data, ncoils,
                 <double*>mx_init.data, <double*>my_init.data, <double*>mz_init.data, nspins,
+                mz_equilibrium_ptr,
                 <int*>adc_indices_c.data, <double*>demod_real.data, <double*>demod_imag.data,
                 nadc, <int*>checkpoint_indices_c.data, ncheckpoints,
                 <int*>crush_indices_c.data, ncrushes,

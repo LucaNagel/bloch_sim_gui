@@ -736,6 +736,7 @@ static int blochsim_sequence_streaming_impl(
     double *tx_real, double *tx_imag,
     double *rx_real, double *rx_imag, int ncoils,
     double *mx_init, double *my_init, double *mz_init, int nspins,
+    double *mz_equilibrium,
     int *adc_state_indices, double *adc_demod_real, double *adc_demod_imag,
     int nadc, int *checkpoint_state_indices, int ncheckpoints,
     int *transverse_crush_state_indices, int ncrushes,
@@ -941,7 +942,11 @@ static int blochsim_sequence_streaming_impl(
                       : exp(-dt / t2_s[spin]);
             magnetization[0] = rotated[0] * e2;
             magnetization[1] = rotated[1] * e2;
-            magnetization[2] = rotated[2] * e1 + (1.0 - e1);
+            /* The thermal branch keeps the historical expression unchanged so
+             * fast-math builds cannot reassociate default results. */
+            magnetization[2] = mz_equilibrium == NULL
+                ? rotated[2] * e1 + (1.0 - e1)
+                : rotated[2] * e1 + mz_equilibrium[spin] * (1.0 - e1);
 
             int state_index = interval + 1;
             while (crush_cursor < ncrushes
@@ -1001,8 +1006,9 @@ static int blochsim_sequence_streaming_impl(
 #define STREAMING_ARGUMENTS \
     rf_real_hz, rf_imag_hz, gx_hz_m, gy_hz_m, gz_hz_m, dt_s, nintervals, \
     t1_s, t2_s, df_hz, x_m, y_m, z_m, pd, tx_real, tx_imag, rx_real, \
-    rx_imag, ncoils, mx_init, my_init, mz_init, nspins, adc_state_indices, \
-    adc_demod_real, adc_demod_imag, nadc, checkpoint_state_indices, \
+    rx_imag, ncoils, mx_init, my_init, mz_init, nspins, mz_equilibrium, \
+    adc_state_indices, adc_demod_real, adc_demod_imag, nadc, \
+    checkpoint_state_indices, \
     ncheckpoints, transverse_crush_state_indices, ncrushes, signal_real, \
     signal_imag, mx_final, my_final, mz_final, \
     mx_checkpoints, my_checkpoints, mz_checkpoints, num_threads
@@ -1017,6 +1023,7 @@ int name( \
     double *tx_real, double *tx_imag, \
     double *rx_real, double *rx_imag, int ncoils, \
     double *mx_init, double *my_init, double *mz_init, int nspins, \
+    double *mz_equilibrium, \
     int *adc_state_indices, double *adc_demod_real, double *adc_demod_imag, \
     int nadc, int *checkpoint_state_indices, int ncheckpoints, \
     int *transverse_crush_state_indices, int ncrushes, \

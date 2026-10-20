@@ -3093,6 +3093,77 @@ def test_sequence_workspace_passes_large_initial_mz_to_probe_worker(monkeypatch)
     app.processEvents()
 
 
+def test_sequence_probe_equilibrium_and_spoiling_controls(monkeypatch):
+    from blochsimulator.ui.main_window import (
+        _capture_widget_state,
+        _restore_widget_state,
+    )
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    monkeypatch.setattr(
+        "blochsimulator.ui.sequence_simulation_widget.SequenceProbeThread.start",
+        lambda _worker: None,
+    )
+    probe_kwargs = dict(
+        positions=np.array([[0.0, 0.0, 0.0]]),
+        hz_axis=np.array([0.0]),
+        display_axis=np.array([0.0]),
+        checkpoints=np.array([0.0]),
+        label="spectral",
+    )
+    assert widget.probe_longitudinal_equilibrium.currentIndex() == 0
+    assert widget.probe_ideal_spoiling.isChecked()
+    assert "above one" not in widget.probe_initial_mz.toolTip()
+
+    widget._start_probe(**probe_kwargs)
+    assert widget.probe_worker.equilibrium_mz == 1.0
+    assert widget.probe_worker.ideal_spoiling is True
+    widget.probe_worker.deleteLater()
+
+    widget.probe_longitudinal_equilibrium.setCurrentIndex(1)
+    widget.probe_ideal_spoiling.setChecked(False)
+    widget._start_probe(**probe_kwargs)
+    assert widget.probe_worker.equilibrium_mz == 0.0
+    assert widget.probe_worker.ideal_spoiling is False
+    widget.probe_worker.deleteLater()
+    widget.probe_worker = None
+
+    widget.object_source.setCurrentIndex(2)
+    rows = dict(widget._simulation_object_summary_rows())
+    assert rows["Longitudinal equilibrium"].startswith("Hyperpolarized")
+    assert rows["Ideal spoilers"].startswith("Off")
+
+    state = _capture_widget_state(widget)
+    assert state["probe_longitudinal_equilibrium"]["index"] == 1
+    assert state["probe_ideal_spoiling"]["value"] is False
+    restored = SequenceSimulationWidget()
+    _restore_widget_state(restored, state)
+    assert restored.probe_longitudinal_equilibrium.currentIndex() == 1
+    assert not restored.probe_ideal_spoiling.isChecked()
+
+    note = SequenceSimulationWidget._probe_ideal_spoiler_note
+    assert "set to zero at 2 declared" in note(
+        {
+            "ideal_spoiling_applied": True,
+            "declared_ideal_spoiler_end_times_s": [0.1, 0.2],
+        }
+    )
+    assert "1 declared ideal spoiler time" in note(
+        {
+            "ideal_spoiling_applied": False,
+            "declared_ideal_spoiler_end_times_s": [0.1],
+        }
+    )
+    assert "declares no ideal spoilers" in note(
+        {"ideal_spoiling_applied": False, "declared_ideal_spoiler_end_times_s": []}
+    )
+    for owner in (widget, restored):
+        owner.close()
+        owner.deleteLater()
+    app.processEvents()
+
+
 def test_sequence_probe_defaults_to_individual_rf_event_ends():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
