@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import numpy as np
 
 from ..kernel_capabilities import GUI_KERNEL_NAMES, resolve_kernel_request
@@ -11,6 +11,9 @@ from ..units import NUCLEUS_GAMMA_HZ_PER_T
 # Revision 2 made Native automatic the dynamic default. Older settings stored
 # the previous default, Optimized NumPy, even when it was never chosen.
 KERNEL_SETTINGS_REVISION = 2
+DEFAULT_SEQUENCE_REFERENCE_PPM = {
+    nucleus: 171.0 if nucleus == "C13" else 0.0 for nucleus in NUCLEUS_GAMMA_HZ_PER_T
+}
 
 
 @dataclass(frozen=True)
@@ -23,6 +26,18 @@ class WorkspaceDefaults:
     # The value is now the concrete nucleus shared by every workspace.
     phantom_nucleus: str = "H1"
     field_strength_t: float = 3.0
+    sequence_reference_ppm_by_nucleus: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_SEQUENCE_REFERENCE_PPM)
+    )
+
+    def __post_init__(self):
+        references = dict(DEFAULT_SEQUENCE_REFERENCE_PPM)
+        references.update(self.sequence_reference_ppm_by_nucleus)
+        object.__setattr__(self, "sequence_reference_ppm_by_nucleus", references)
+
+    def sequence_reference_ppm(self, nucleus: str) -> float:
+        """Return the configured absolute sequence reference for one nucleus."""
+        return float(self.sequence_reference_ppm_by_nucleus[nucleus])
 
     @classmethod
     def from_settings(cls, settings) -> "WorkspaceDefaults":
@@ -57,7 +72,19 @@ class WorkspaceDefaults:
         field_strength_t = positive_value(
             "defaults/field_strength_t", defaults.field_strength_t
         )
-        return cls(sequence_fov, phantom_fov, nucleus, field_strength_t)
+        references = dict(defaults.sequence_reference_ppm_by_nucleus)
+        for reference_nucleus, fallback in references.items():
+            try:
+                value = float(
+                    settings.value(
+                        f"defaults/sequence_reference_ppm/{reference_nucleus}", fallback
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(value) and -10000.0 <= value <= 10000.0:
+                references[reference_nucleus] = value
+        return cls(sequence_fov, phantom_fov, nucleus, field_strength_t, references)
 
     def save(self, settings) -> None:
         for axis, value in zip("xyz", self.sequence_fov_mm):
@@ -66,6 +93,11 @@ class WorkspaceDefaults:
             settings.setValue(f"defaults/phantom_fov_{axis}_mm", float(value))
         settings.setValue("defaults/phantom_nucleus", self.phantom_nucleus)
         settings.setValue("defaults/field_strength_t", float(self.field_strength_t))
+        for nucleus in NUCLEUS_GAMMA_HZ_PER_T:
+            settings.setValue(
+                f"defaults/sequence_reference_ppm/{nucleus}",
+                self.sequence_reference_ppm(nucleus),
+            )
 
 
 def load_kernel_settings(settings) -> tuple[str, str]:

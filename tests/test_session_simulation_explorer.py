@@ -105,15 +105,30 @@ def test_sequence_workspace_restores_and_forgets_a_session_run(qt_application):
     widget.matrix_size.setValue(2)
     widget.z_matrix_size.setValue(2)
     widget._build_phantom()
+    widget.program.metadata["test_reference"] = {"ppm": 171.0}
+    widget.phantom.metadata["test_reference"] = {"ppm": 171.0}
     result = widget.simulator.simulate_sequence(widget.program, widget.phantom)
     run = widget._register_session_simulation_run(result)
     run.display_name = "Run 1"
+    assert (
+        run.state["program"].rf_events[0].samples_hz
+        is widget.program.rf_events[0].samples_hz
+    )
+    assert run.state["phantom"].t1_map is widget.phantom.t1_map
+    widget.program.metadata["test_reference"]["ppm"] = 180.0
+    widget.phantom.metadata["test_reference"]["ppm"] = 180.0
 
     widget.result = None
     assert widget.restore_session_simulation_run(run)
     assert widget.result is result
     assert widget._active_session_run_id == run.run_id
     assert widget.status.text() == "Showing Run 1 from this session"
+    assert widget.program.metadata["test_reference"]["ppm"] == 171.0
+    assert widget.phantom.metadata["test_reference"]["ppm"] == 171.0
+    widget.program.metadata["test_reference"]["ppm"] = 190.0
+    widget.phantom.metadata["test_reference"]["ppm"] = 190.0
+    assert run.state["program"].metadata["test_reference"]["ppm"] == 171.0
+    assert run.state["phantom"].metadata["test_reference"]["ppm"] == 171.0
 
     widget.forget_session_simulation_run(run)
     assert widget.result is None

@@ -965,6 +965,7 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     dialog.get_policy.return_value = MemoryPolicy()
     dialog.tooltips_enabled.return_value = True
     dialog.interface_style.return_value = "fusion"
+    dialog.sequence_timing_visible.return_value = False
     dialog.sequence_live_progress_enabled.return_value = False
     dialog.sequence_kernel.return_value = "strict_reference"
     dialog.dynamic_sequence_kernel.return_value = "optimized"
@@ -983,6 +984,7 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
         phantom_fov_mm=(60.0, 50.0, 40.0),
         phantom_nucleus="C13",
         field_strength_t=7.0,
+        sequence_reference_ppm_by_nucleus={"C13": 175.5},
     )
     dialog.workspace_defaults.return_value = workspace_defaults
 
@@ -1002,11 +1004,20 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     assert int(window.app_settings.value("simulation/manual_threads")) == 2
     assert int(window.app_settings.value("memory/animation_replay_mib")) == 2048
     assert window.app_settings.value("interface/style") == "fusion"
+    assert (
+        window.app_settings.value("interface/show_sequence_timing", type=bool) is False
+    )
+    window.sequence_simulation_widget.set_sequence_timing_visible.assert_called_once_with(
+        False
+    )
     assert float(window.app_settings.value("scanner/max_grad_mtm")) == 40.0
     assert float(window.app_settings.value("scanner/max_slew_tms")) == 180.0
     assert float(window.app_settings.value("defaults/sequence_fov_x_mm")) == 180.0
     assert window.app_settings.value("defaults/phantom_nucleus") == "C13"
     assert float(window.app_settings.value("defaults/field_strength_t")) == 7.0
+    assert (
+        float(window.app_settings.value("defaults/sequence_reference_ppm/C13")) == 175.5
+    )
     assert window.app_settings.value("sequence/kernel") == "strict_reference"
     assert window.app_settings.value("sequence/dynamic_kernel") == "optimized"
     assert int(window.app_settings.value("sequence/kernel_settings_revision")) == 2
@@ -1075,6 +1086,47 @@ def test_changing_only_spoiler_settings_preserves_active_sequence_parameters(
     window.sequence_simulation_widget.set_workspace_defaults.assert_not_called()
 
 
+def test_settings_dialog_sequence_timing_preference(tmp_path):
+    dialog = SettingsDialog(MemoryPolicy(), tmp_path, tooltips_enabled=True)
+    assert dialog.sequence_timing_visible() is True
+    checkbox = dialog.sequence_timing_checkbox
+    interface_tab = dialog.tabs.widget(dialog.tabs.count() - 1)
+    assert interface_tab.isAncestorOf(checkbox)
+    checkbox.setChecked(False)
+    assert dialog.sequence_timing_visible() is False
+    reopened = SettingsDialog(
+        MemoryPolicy(), tmp_path, tooltips_enabled=True, sequence_timing_visible=False
+    )
+    assert reopened.sequence_timing_visible() is False
+
+
+def test_settings_dialog_saves_sequence_reference_defaults_per_nucleus(tmp_path):
+    original = WorkspaceDefaults(phantom_nucleus="C13")
+    dialog = SettingsDialog(
+        MemoryPolicy(), tmp_path, tooltips_enabled=True, workspace_defaults=original
+    )
+    assert dialog.default_sequence_reference_spin.value() == 171.0
+    dialog.default_sequence_reference_spin.setValue(183.35)
+    dialog.phantom_nucleus_combo.setCurrentText("H1")
+    assert dialog.default_sequence_reference_spin.value() == 0.0
+    dialog.default_sequence_reference_spin.setValue(4.7)
+    dialog.phantom_nucleus_combo.setCurrentText("C13")
+    assert dialog.default_sequence_reference_spin.value() == 183.35
+    assert original.sequence_reference_ppm("C13") == 171.0
+
+    settings = QSettings(str(tmp_path / "references.ini"), QSettings.IniFormat)
+    dialog.workspace_defaults().save(settings)
+    settings.sync()
+    reloaded_settings = QSettings(str(tmp_path / "references.ini"), QSettings.IniFormat)
+    restored = WorkspaceDefaults.from_settings(reloaded_settings)
+    reopened = SettingsDialog(
+        MemoryPolicy(), tmp_path, tooltips_enabled=True, workspace_defaults=restored
+    )
+    assert reopened.default_sequence_reference_spin.value() == 183.35
+    reopened.phantom_nucleus_combo.setCurrentText("H1")
+    assert reopened.default_sequence_reference_spin.value() == 4.7
+
+
 def test_workspace_defaults_round_trip_through_settings(tmp_path):
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
     expected = WorkspaceDefaults(
@@ -1082,11 +1134,26 @@ def test_workspace_defaults_round_trip_through_settings(tmp_path):
         phantom_fov_mm=(80.0, 70.0, 60.0),
         phantom_nucleus="P31",
         field_strength_t=9.4,
+        sequence_reference_ppm_by_nucleus={"C13": 183.35, "P31": -10.0},
     )
     expected.save(settings)
     settings.sync()
 
     assert WorkspaceDefaults.from_settings(settings) == expected
+
+
+@pytest.mark.parametrize("invalid_reference", ["invalid", "nan", "inf", -10001, 10001])
+def test_invalid_reference_default_falls_back_for_each_nucleus(
+    tmp_path, invalid_reference
+):
+    settings = QSettings(str(tmp_path / "invalid.ini"), QSettings.IniFormat)
+    for nucleus in ("H1", "C13"):
+        settings.setValue(
+            f"defaults/sequence_reference_ppm/{nucleus}", invalid_reference
+        )
+    defaults = WorkspaceDefaults.from_settings(settings)
+    assert defaults.sequence_reference_ppm("C13") == 171.0
+    assert defaults.sequence_reference_ppm("H1") == 0.0
 
 
 def test_legacy_automatic_nucleus_default_migrates_to_shared_h1(tmp_path):

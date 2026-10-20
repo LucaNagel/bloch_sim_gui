@@ -1020,22 +1020,28 @@ def test_flash_timing_plan_matches_built_sequence(bandwidth_hz):
         make_pulseq_flash(**common, echo_time_s=1e-6)
 
 
-def test_sequence_workspace_resolves_flash_timing_conflicts():
+@pytest.mark.parametrize("live_preview", [False, True])
+def test_sequence_workspace_resolves_flash_timing_conflicts(live_preview):
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()
-    widget.sequence_live_preview.setChecked(False)
+    widget.sequence_live_preview.setChecked(live_preview)
     widget.sequence_source.setCurrentIndex(widget.FLASH_SOURCE)
 
     widget.flash_sampling_bandwidth_khz.setValue(150.0)
     widget._settle_flash_timing()
     assert widget.flash_sampling_bandwidth_khz.value() != pytest.approx(150.0)
+    warning = widget.status.text()
+    assert "Bandwidth 150" in warning
     assert widget._reload_selected_generated_sequence()
+    assert widget.status.text() == warning
+    assert widget.log_widget.toPlainText().count(warning) == 1
 
     # Raising TE pushes TR up; lowering TE afterwards never lowers TR again.
     widget.flash_repetition_time_ms.setValue(15.0)
     widget.flash_echo_time_ms.setValue(40.0)
     assert widget.flash_repetition_time_ms.value() > 40.0
-    assert "TR" in widget.flash_timing_info.text()
+    assert "TR" in widget.status.text()
+    assert "FLASH timing [Warning]" in widget.log_widget.toPlainText()
     raised_tr = widget.flash_repetition_time_ms.value()
     widget.flash_echo_time_ms.setValue(5.0)
     assert widget.flash_repetition_time_ms.value() == pytest.approx(raised_tr)
@@ -1076,23 +1082,29 @@ def test_epi_timing_plan_matches_built_sequence(bandwidth_hz, strategy):
         make_pulseq_epi(**common, echo_time_s=1e-6)
 
 
-def test_sequence_workspace_resolves_epi_timing_conflicts():
+@pytest.mark.parametrize("live_preview", [False, True])
+def test_sequence_workspace_resolves_epi_timing_conflicts(live_preview):
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()
-    widget.sequence_live_preview.setChecked(False)
+    widget.sequence_live_preview.setChecked(live_preview)
     widget.sequence_source.setCurrentIndex(widget.EPI_SOURCE)
     widget.epi_readout_trajectory.setCurrentText("Cartesian EPI")
 
     widget.sampling_bandwidth_khz.setValue(150.0)
     widget._settle_epi_timing()
     assert widget.sampling_bandwidth_khz.value() != pytest.approx(150.0)
+    warning = widget.status.text()
+    assert "Bandwidth 150" in warning
     assert widget._reload_selected_generated_sequence()
+    assert widget.status.text() == warning
+    assert widget.log_widget.toPlainText().count(warning) == 1
 
     # A TE or slice count that no longer fits raises the interval, not vice versa.
     widget.epi_repetition_time_ms.setValue(100.0)
     widget.epi_echo_time_ms.setValue(150.0)
     assert widget.epi_repetition_time_ms.value() > 150.0
-    assert "Acquisition interval" in widget.epi_timing_info.text()
+    assert "Acquisition interval" in widget.status.text()
+    assert "EPI timing [Warning]" in widget.log_widget.toPlainText()
     raised = widget.epi_repetition_time_ms.value()
     widget.epi_echo_time_ms.setValue(20.0)
     assert widget.epi_repetition_time_ms.value() == pytest.approx(raised)
@@ -1199,10 +1211,11 @@ def test_sequence_workspace_exports_pulseq_and_reproduction_notebook_by_default(
     app.processEvents()
 
 
-def test_sequence_workspace_resolves_epsi_mge_timing_conflicts():
+@pytest.mark.parametrize("live_preview", [False, True])
+def test_sequence_workspace_resolves_epsi_mge_timing_conflicts(live_preview):
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()
-    widget.sequence_live_preview.setChecked(False)
+    widget.sequence_live_preview.setChecked(live_preview)
     widget.sequence_source.setCurrentIndex(widget.EPSI_MGE_SOURCE)
 
     # 150 kHz is not raster-compatible: the field moves to the nearest usable
@@ -1210,13 +1223,18 @@ def test_sequence_workspace_resolves_epsi_mge_timing_conflicts():
     widget.epsi_sampling_bandwidth_khz.setValue(150.0)
     widget._settle_epsi_mge_timing()
     assert widget.epsi_sampling_bandwidth_khz.value() != pytest.approx(150.0)
+    warning = widget.status.text()
+    assert "Bandwidth 150" in warning
     assert widget._reload_selected_generated_sequence()
+    assert widget.status.text() == warning
+    assert widget.log_widget.toPlainText().count(warning) == 1
 
     # Raising TE1 pushes TR up, never the other way round.
     widget.epsi_repetition_time_ms.setValue(50.0)
     widget.epsi_echo_time_ms.setValue(60.0)
     assert widget.epsi_repetition_time_ms.value() > 60.0
-    assert "TR" in widget.epsi_timing_info.text()
+    assert "TR" in widget.status.text()
+    assert "EPSI / MGE timing [Warning]" in widget.log_widget.toPlainText()
     raised_tr = widget.epsi_repetition_time_ms.value()
     widget.epsi_echo_time_ms.setValue(6.0)
     assert widget.epsi_repetition_time_ms.value() == pytest.approx(raised_tr)

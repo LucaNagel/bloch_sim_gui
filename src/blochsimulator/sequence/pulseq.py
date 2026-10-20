@@ -87,6 +87,7 @@ def load_pulseq(path, strict: bool = True) -> SequenceProgram:
         )
 
     events = []
+    rf_timing = []
     labels = []
     triggers = []
     import_warnings: List[str] = []
@@ -169,6 +170,16 @@ def load_pulseq(path, strict: bool = True) -> SequenceProgram:
 
         rf = getattr(block, "rf", None)
         if rf is not None:
+            rf_timing.append(
+                {
+                    "start_s": block_start + float(rf.delay),
+                    "center_s": block_start
+                    + float(rf.delay)
+                    + float(pp.calc_rf_center(rf)[0]),
+                    "block_start_s": block_start,
+                    "use": str(getattr(rf, "use", "undefined")),
+                }
+            )
             signal = np.asarray(rf.signal, dtype=np.complex128)
             times = np.asarray(rf.t, dtype=float)
             if signal.ndim != 1 or signal.size == 0 or times.shape != signal.shape:
@@ -269,6 +280,7 @@ def load_pulseq(path, strict: bool = True) -> SequenceProgram:
                 for key, value in sequence.definitions.items()
             },
             "labels": labels,
+            "rf_timing": rf_timing,
             "adc_label_values": adc_label_values,
             "triggers": triggers,
             "warnings": import_warnings,

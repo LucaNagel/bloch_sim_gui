@@ -55,6 +55,14 @@ A mode that lets you load, generate and simulate [Pulseq
 
 *Features:*
 
+- **Internal FID** with configurable Block, Sinc, Gaussian, SLR, or imported
+  RF Designer pulses, flip angle, RF duration, phase and carrier offset.
+  Set the complex FID points per repetition, sampling bandwidth, ADC delay,
+  receiver offset, repetition count and TR. TR is measured from RF start to
+  RF start; **Shortest possible** fits the pulse, delay and complete FID.
+  Magnetization evolves continuously between repetitions, without resetting,
+  averaging or spoiling. The sequence ends after the final FID. Use
+  **Generate sequence** or **Live preview** to refresh the timeline.
 - **RF + Slice Selection** for full 3D excitation volumes immediately after
   a pulse and its slice gradient, with optional rephasing and direct
   $|M_{xy}|$, $M_z$, and phase inspection. See

@@ -163,6 +163,7 @@ class SettingsDialog(QDialog):
         workspace_defaults: Optional[WorkspaceDefaults] = None,
         interface_style: str = "automatic",
         sequence_section_titles_bold: bool = True,
+        sequence_timing_visible: bool = True,
     ):
         super().__init__(parent)
         scanner_parameters = ScannerParameters.from_mapping(scanner_parameters)
@@ -264,6 +265,37 @@ class SettingsDialog(QDialog):
             "Shared default nucleus for Free Mode, Phantom and Sequence Mode."
         )
         defaults_form.addRow("Nucleus:", self.phantom_nucleus_combo)
+
+        self._sequence_reference_ppm_by_nucleus = dict(
+            workspace_defaults.sequence_reference_ppm_by_nucleus
+        )
+        self.default_sequence_reference_spin = QDoubleSpinBox()
+        self.default_sequence_reference_spin.setObjectName(
+            "default_sequence_reference_ppm"
+        )
+        self.default_sequence_reference_spin.setRange(-10000.0, 10000.0)
+        self.default_sequence_reference_spin.setDecimals(4)
+        self.default_sequence_reference_spin.setSingleStep(0.1)
+        self.default_sequence_reference_spin.setSuffix(" ppm")
+        self.default_sequence_reference_spin.setValue(
+            workspace_defaults.sequence_reference_ppm(
+                self.phantom_nucleus_combo.currentData()
+            )
+        )
+        self.default_sequence_reference_spin.setToolTip(
+            "Default absolute frequency taken as 0 Hz in Sequence Mode for the "
+            "nucleus selected above. A separate value is saved for each nucleus; "
+            "the initial C13 default is 171 ppm."
+        )
+        self.default_sequence_reference_spin.valueChanged.connect(
+            self._default_sequence_reference_changed
+        )
+        self.phantom_nucleus_combo.currentIndexChanged.connect(
+            self._default_reference_nucleus_changed
+        )
+        defaults_form.addRow(
+            "Sequence reference:", self.default_sequence_reference_spin
+        )
 
         self.default_field_strength_spin = QDoubleSpinBox()
         self.default_field_strength_spin.setObjectName("default_field_strength_t")
@@ -729,6 +761,16 @@ class SettingsDialog(QDialog):
             "to every sequence form."
         )
         interface_layout.addWidget(self.sequence_section_titles_bold_checkbox)
+        self.sequence_timing_checkbox = QCheckBox(
+            "Show echo time (TE) and repetition time (TR) in sequence preview"
+        )
+        self.sequence_timing_checkbox.setObjectName("show_sequence_timing")
+        self.sequence_timing_checkbox.setChecked(bool(sequence_timing_visible))
+        self.sequence_timing_checkbox.setToolTip(
+            "Display the current sequence's declared TE and TR above the waveform "
+            "plots. The change takes effect when the settings are accepted."
+        )
+        interface_layout.addWidget(self.sequence_timing_checkbox)
         self.tooltips_checkbox = QCheckBox("Show explanatory tooltips")
         self.tooltips_checkbox.setObjectName("tooltips_enabled")
         self.tooltips_checkbox.setChecked(bool(tooltips_enabled))
@@ -803,6 +845,9 @@ class SettingsDialog(QDialog):
     def tooltips_enabled(self) -> bool:
         return self.tooltips_checkbox.isChecked()
 
+    def sequence_timing_visible(self) -> bool:
+        return self.sequence_timing_checkbox.isChecked()
+
     def interface_style(self) -> str:
         return normalize_interface_style(self.interface_style_combo.currentData())
 
@@ -855,6 +900,18 @@ class SettingsDialog(QDialog):
             adc_dead_time_s=float(self.scanner_adc_dead_time_spin.value()) * 1e-6,
         )
 
+    def _default_sequence_reference_changed(self, value):
+        self._sequence_reference_ppm_by_nucleus[
+            self.phantom_nucleus_combo.currentData()
+        ] = float(value)
+
+    def _default_reference_nucleus_changed(self, *_):
+        self.default_sequence_reference_spin.setValue(
+            self._sequence_reference_ppm_by_nucleus[
+                self.phantom_nucleus_combo.currentData()
+            ]
+        )
+
     def workspace_defaults(self) -> WorkspaceDefaults:
         """Return defaults used for newly created sequences and phantoms."""
         return WorkspaceDefaults(
@@ -866,6 +923,9 @@ class SettingsDialog(QDialog):
             ),
             phantom_nucleus=self.phantom_nucleus_combo.currentData(),
             field_strength_t=float(self.default_field_strength_spin.value()),
+            sequence_reference_ppm_by_nucleus=dict(
+                self._sequence_reference_ppm_by_nucleus
+            ),
         )
 
     def _update_simulation_controls(self):

@@ -4543,7 +4543,7 @@ class BlochSimulatorGUI(QMainWindow):
 
     def _capture_sequence_simulation_run(self, run):
         """Capture GUI state without retaining the scientific data in a list."""
-        project_state = self._complete_project_state()
+        project_state = copy.deepcopy(self._complete_project_state())
         run.state["project_state"] = project_state
         run.state["sequence_controls"] = copy.deepcopy(
             project_state.get("sequence_controls", {})
@@ -4612,7 +4612,9 @@ class BlochSimulatorGUI(QMainWindow):
             self.tab_widget.setCurrentIndex(self.sequence_simulation_tab_index)
 
     def _restore_session_run_phantom(self, run):
-        phantom = run.state.get("phantom")
+        phantom = self.sequence_simulation_widget._snapshot_phantom_context(
+            run.state.get("phantom")
+        )
         object_source = run.state.get("sequence_controls", {}).get("object_source", {})
         uses_phantom_tab = int(object_source.get("index", -1)) == 0
         if phantom is not None and uses_phantom_tab:
@@ -4685,26 +4687,29 @@ class BlochSimulatorGUI(QMainWindow):
 
     def _session_run_project_arguments(self, run):
         """Snapshot export arguments on the GUI thread before background I/O."""
-        state = copy.deepcopy(run.state.get("project_state", {}))
+        return self._simulation_project_arguments(run.state, run.result)
+
+    def _simulation_project_arguments(self, run_state, result):
+        state = copy.deepcopy(run_state.get("project_state", {}))
         state["workspace_mode"] = "sequence"
         state["active_tab"] = self.sequence_simulation_tab_index
         state["sequence_controls"] = copy.deepcopy(
-            run.state.get("sequence_controls", {})
+            run_state.get("sequence_controls", {})
         )
         state["spoiler_configuration"] = copy.deepcopy(
-            run.state.get("spoiler_configuration", {})
+            run_state.get("spoiler_configuration", {})
         )
         state["reconstruction_view"] = copy.deepcopy(
-            run.state.get("reconstruction_view", {})
+            run_state.get("reconstruction_view", {})
         )
-        state["sequence_view_name"] = run.state.get("sequence_view_name", "Signal")
+        state["sequence_view_name"] = run_state.get("sequence_view_name", "Signal")
         return {
             "state": state,
-            "phantom": run.state.get("phantom"),
-            "tx_field": run.state.get("tx_field"),
-            "rx_field": run.state.get("rx_field"),
-            "program": run.state.get("program"),
-            "sequence_result": run.result,
+            "phantom": run_state.get("phantom"),
+            "tx_field": run_state.get("tx_field"),
+            "rx_field": run_state.get("rx_field"),
+            "program": run_state.get("program"),
+            "sequence_result": result,
         }
 
     def _prompt_session_project_export(self, runs):
@@ -5152,6 +5157,9 @@ class BlochSimulatorGUI(QMainWindow):
             workspace_defaults=previous_workspace_defaults,
             interface_style=previous_interface_style,
             sequence_section_titles_bold=previous_sequence_section_titles_bold,
+            sequence_timing_visible=self.app_settings.value(
+                "interface/show_sequence_timing", True, type=bool
+            ),
         )
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -5188,6 +5196,10 @@ class BlochSimulatorGUI(QMainWindow):
             "interface/bold_sequence_section_titles", sequence_section_titles_bold
         )
         live_progress_enabled = dialog.sequence_live_progress_enabled()
+        sequence_timing_visible = bool(dialog.sequence_timing_visible())
+        self.app_settings.setValue(
+            "interface/show_sequence_timing", sequence_timing_visible
+        )
         self.app_settings.setValue(
             "sequence/live_progress_enabled", live_progress_enabled
         )
@@ -5238,6 +5250,7 @@ class BlochSimulatorGUI(QMainWindow):
                 sequence_section_titles_bold
             )
             sequence_widget.set_live_preview_enabled(live_progress_enabled)
+            sequence_widget.set_sequence_timing_visible(sequence_timing_visible)
             sequence_widget.set_sequence_kernel(sequence_kernel)
             sequence_widget.set_dynamic_sequence_kernel(dynamic_sequence_kernel)
             sequence_widget.set_sequence_timestep_us(timestep_us)
@@ -6029,15 +6042,16 @@ class BlochSimulatorGUI(QMainWindow):
                 legacy_result["_project_effective_frequencies"] = (
                     self.last_effective_frequencies
                 )
-            save_project(
-                filename,
-                self._complete_project_state(),
-                phantom,
-                None if b1_widget is None else b1_widget.tx_field,
-                None if b1_widget is None else b1_widget.rx_field,
-                None if sequence_widget is None else sequence_widget.program,
-                legacy_result,
-                (
+            project_arguments = {
+                "state": self._complete_project_state(),
+                "phantom": phantom,
+                "tx_field": None if b1_widget is None else b1_widget.tx_field,
+                "rx_field": None if b1_widget is None else b1_widget.rx_field,
+                "program": (
+                    None if sequence_widget is None else sequence_widget.program
+                ),
+                "legacy_result": legacy_result,
+                "sequence_result": (
                     None
                     if sequence_widget is None
                     else (
@@ -6049,7 +6063,14 @@ class BlochSimulatorGUI(QMainWindow):
                         else sequence_widget.result
                     )
                 ),
-            )
+            }
+            if self.workspace_mode == "sequence" and sequence_widget is not None:
+                context = sequence_widget.project_export_context()
+                if context is not None:
+                    project_arguments.update(
+                        self._simulation_project_arguments(*context)
+                    )
+            save_project(filename, **project_arguments)
             self.statusBar().showMessage(f"Project saved: {Path(filename).name}", 7000)
             self.log_message(f"Project saved to {filename}")
             if self.project_explorer_dialog is not None:
@@ -6132,6 +6153,10 @@ class BlochSimulatorGUI(QMainWindow):
                 self.b1_widget.rx_editor.set_field(project["rx_field"])
 
             sequence_widget = self.sequence_simulation_widget
+            sequence_widget._project_export_contexts.clear()
+            sequence_widget._active_session_run_id = None
+            sequence_widget.result = None
+            sequence_widget.probe_result = None
             sequence_widget.restore_rf_designer_pulse_state(
                 state.get("sequence_rf_pulse"), program=project["program"]
             )
@@ -6215,6 +6240,18 @@ class BlochSimulatorGUI(QMainWindow):
             else:
                 self._synchronize_workspace_field_strength(project_field_strength_t)
                 self._synchronize_workspace_nucleus(project_nucleus)
+
+            loaded_result = project["sequence_result"]
+            if loaded_result is not None:
+                sequence_widget._active_session_run_id = None
+                if isinstance(loaded_result, SequenceProbeResult):
+                    sequence_widget._register_session_probe_run(
+                        loaded_result, retain=False
+                    )
+                else:
+                    sequence_widget._register_session_simulation_run(
+                        loaded_result, retain=False
+                    )
 
             mode = state.get("workspace_mode", "free")
             self.set_workspace_mode(mode if mode in {"free", "sequence"} else "free")

@@ -20,6 +20,7 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QToolBar,
+    QWidget,
 )
 
 from blochsimulator.ui.main_window import BlochSimulatorGUI
@@ -32,6 +33,8 @@ from blochsimulator.ui.sequence_simulation_widget import (
     _animation_checkpoint_times,
     _event_step_plot_data,
     _rf_phase_plot_data,
+    _sequence_preview_range_ms,
+    _sequence_preview_timing_text,
     _split_animation_result,
 )
 from blochsimulator.ui.volume_viewer import SequenceMagnetizationAnimationViewer
@@ -108,6 +111,77 @@ def test_sequence_widget_accepts_strict_reference_kernel():
     assert widget.simulator.sequence_kernel == "strict_reference"
     with pytest.raises(ValueError, match="strict_reference"):
         SequenceSimulationWidget.set_sequence_kernel(widget, "invalid")
+
+
+@pytest.mark.parametrize("source", ["epi", "flash", "epsi"])
+def test_timing_feedback_moves_to_run_status_and_survives_in_log(source, monkeypatch):
+    widget = SequenceSimulationWidget()
+    show_timing_status = getattr(widget, f"_show_{source}_timing_status")
+    plan = SimpleNamespace(
+        minimum_echo_time_s=0.01236,
+        minimum_repetition_time_s=0.03677,
+        minimum_echo_spacing_s=0.002,
+    )
+    notes = ["Bandwidth 150 → 142.858 kHz"]
+    monkeypatch.setattr(
+        "blochsimulator.ui.sequence_simulation_widget.time.strftime",
+        lambda _format: "2026-10-20 12:34:56",
+    )
+
+    show_timing_status(plan, notes)
+    warning = widget.status.text()
+    assert "Adjusted automatically: Bandwidth 150 → 142.858 kHz." in warning
+    assert "Shortest possible:" in warning
+    assert not widget.findChildren(QLabel, f"{source}_timing_info")
+    log = widget.log_widget.toPlainText()
+    assert "[2026-10-20 12:34:56]" in log
+    assert "timing [Warning]: " + warning in log
+
+    # Settle timers and live previews can report the same correction repeatedly.
+    show_timing_status(plan, notes)
+    assert widget.log_widget.toPlainText() == log
+
+    widget._status_update("Preparing and compiling sequence…")
+    assert widget.status.text() == "Preparing and compiling sequence…"
+    show_timing_status(plan, notes)
+    assert widget.status.text() == "Preparing and compiling sequence…"
+    assert widget.log_widget.toPlainText().count(warning) == 1
+    assert "Sequence simulation: Preparing and compiling sequence…" in (
+        widget.log_widget.toPlainText()
+    )
+
+    show_timing_status(None, [], error="ADC duration <limit>")
+    assert widget.status.text() == "Timing cannot be resolved: ADC duration <limit>"
+    assert "timing [Error]: Timing cannot be resolved: ADC duration <limit>" in (
+        widget.log_widget.toPlainText()
+    )
+
+
+def test_sequence_log_beside_spin_probe_shares_application_history(qt_application):
+    window = BlochSimulatorGUI()
+    window.show()
+    window.log_message("Message before opening Sequence Mode")
+    window.set_workspace_mode("sequence")
+    widget = window.sequence_simulation_widget
+
+    assert widget.views.tabText(widget.log_tab_index - 1) == "Spin Probe"
+    assert widget.views.tabText(widget.log_tab_index) == "Log"
+    assert widget.log_widget.isReadOnly()
+    assert widget.log_widget.document() is window.log_widget.document()
+    assert "Message before opening Sequence Mode" in widget.log_widget.toPlainText()
+
+    widget._show_epi_timing_status(None, [], error="ADC timing exceeds limit")
+    assert "ADC timing exceeds limit" in window.log_widget.toPlainText()
+    assert window.log_widget.toPlainText().count("ADC timing exceeds limit") == 1
+    widget.views.setCurrentIndex(widget.log_tab_index)
+    qt_application.processEvents()
+    assert widget.log_widget.isVisible()
+
+    window.set_workspace_mode("free")
+    window.log_message("Message after switching to Free Mode")
+    window.set_workspace_mode("sequence")
+    assert "Message after switching to Free Mode" in widget.log_widget.toPlainText()
+    assert widget.log_widget.toPlainText() == window.log_widget.toPlainText()
 
 
 def test_execution_completion_message_reports_backend_contract_and_fallback():
@@ -412,6 +486,7 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     window.app_settings.setValue("defaults/sequence_fov_z_mm", 80.0)
     window.app_settings.setValue("defaults/field_strength_t", 7.0)
     window.app_settings.setValue("defaults/phantom_nucleus", "C13")
+    window.app_settings.setValue("defaults/sequence_reference_ppm/C13", 175.5)
     assert window.sequence_simulation_widget is None
     assert not window.tab_widget.isTabVisible(window.sequence_simulation_tab_index)
     assert not window.tab_widget.isTabVisible(window.phantom_tab_index)
@@ -445,10 +520,12 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert window.sequence_simulation_widget.bssfp_partition_fov_mm.value() == 80.0
     assert window.sequence_simulation_widget.field_strength_t.value() == 7.0
     assert window.sequence_simulation_widget.nucleus.currentText() == "C13"
+    assert window.sequence_simulation_widget.sequence_reference_ppm.value() == 175.5
     updated_defaults = WorkspaceDefaults(
         sequence_fov_mm=(90.0, 85.0, 40.0),
         phantom_nucleus="P31",
         field_strength_t=9.4,
+        sequence_reference_ppm_by_nucleus={"P31": -10.0},
     )
     window.sequence_simulation_widget.set_workspace_defaults(updated_defaults)
     assert window.sequence_simulation_widget.epi_read_fov_mm.value() == 90.0
@@ -456,6 +533,10 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert window.sequence_simulation_widget.bssfp_partition_fov_mm.value() == 40.0
     assert window.sequence_simulation_widget.field_strength_t.value() == 9.4
     assert window.sequence_simulation_widget.nucleus.currentText() == "P31"
+    assert window.sequence_simulation_widget.sequence_reference_ppm.value() == -10.0
+    window.sequence_simulation_widget.sequence_reference_ppm.setValue(5.0)
+    window.sequence_simulation_widget.set_workspace_defaults(updated_defaults)
+    assert window.sequence_simulation_widget.sequence_reference_ppm.value() == -10.0
     assert isinstance(window.sequence_simulation_widget, SequenceSimulationWidget)
     assert window.sequence_simulation_widget.program.source == "internal-fid"
     assert window.sequence_simulation_widget._rf_designer is window.rf_designer
@@ -776,7 +857,109 @@ def test_session_simulations_export_single_and_multiple_projects(tmp_path, monke
     app.processEvents()
 
 
-def test_completed_spin_probe_is_retained_and_can_be_reopened():
+@pytest.mark.parametrize("regenerate_sequence", [False, True])
+def test_project_export_keeps_simulated_parameters_after_edits(
+    qt_application, tmp_path, monkeypatch, regenerate_sequence
+):
+    window = BlochSimulatorGUI()
+    window.app_settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    window.set_workspace_mode("sequence")
+    widget = window.sequence_simulation_widget
+    widget.object_source.setCurrentIndex(1)
+    widget.matrix_size.setValue(2)
+    widget.z_matrix_size.setValue(1)
+    widget.nucleus.setCurrentText("C13")
+    widget.field_strength_t.setValue(3.0)
+    widget.sequence_reference_ppm.setValue(171.0)
+    widget.sequence_source.setCurrentIndex(widget.EPI_SOURCE)
+    widget.read_matrix.setValue(2)
+    widget.phase_matrix.setValue(2)
+    widget.epi_flip_angle_deg.setValue(30.0)
+    assert widget._ensure_current_generated_sequence()
+    widget._build_phantom()
+    widget.phantom.metadata["provenance"] = {"state": "simulated"}
+    expected_rf = widget.program.rf_events[0].samples_hz.copy()
+    result = widget.simulator.simulate_sequence(widget.program, widget.phantom)
+    widget._finished(result)
+    run = window.simulation_explorer.runs[-1]
+
+    widget.read_matrix.setValue(3)
+    widget.epi_flip_angle_deg.setValue(70.0)
+    widget.sequence_reference_ppm.setValue(183.35)
+    widget.field_strength_t.setValue(9.4)
+    widget.phantom.metadata["provenance"]["state"] = "edited"
+    widget.matrix_size.setValue(3)
+    widget._build_phantom()
+    if regenerate_sequence:
+        assert widget._ensure_current_generated_sequence()
+
+    path = tmp_path / "completed.blochproj"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(path), ""))
+    errors = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *args: errors.append(args[-1]))
+    window.save_project()
+    assert not errors
+    assert widget.read_matrix.value() == 3
+    assert widget.sequence_reference_ppm.value() == 183.35
+
+    def assert_simulated_project(filename):
+        saved = load_project(filename)
+        controls = saved["state"]["sequence_controls"]
+        assert controls["read_matrix"]["value"] == 2
+        assert controls["epi_flip_angle_deg"]["value"] == 30.0
+        assert controls["matrix_size"]["value"] == 2
+        assert controls["sequence_reference_ppm"]["value"] == 171.0
+        assert controls["field_strength_t"]["value"] == 3.0
+        assert saved["phantom"].shape == (2, 2, 1)
+        assert saved["phantom"].metadata["provenance"]["state"] == "simulated"
+        definitions = saved["program"].metadata["definitions"]
+        assert definitions["SequenceReferencePpm"] == 171.0
+        assert definitions["FieldStrengthT"] == 3.0
+        np.testing.assert_array_equal(
+            saved["program"].rf_events[0].samples_hz, expected_rf
+        )
+        np.testing.assert_array_equal(saved["sequence_result"].signal, result.signal)
+
+    assert_simulated_project(path)
+    session_path = tmp_path / "session.blochproj"
+    window._open_session_simulation_run(run)
+    widget.sequence_reference_ppm.setValue(180.0)
+    window._save_session_run_project(run, session_path)
+    assert_simulated_project(session_path)
+
+    window.open_project(str(path))
+    assert not errors
+    widget.read_matrix.setValue(4)
+    widget.sequence_reference_ppm.setValue(190.0)
+    reopened_path = tmp_path / "reopened.blochproj"
+    monkeypatch.setattr(
+        QFileDialog, "getSaveFileName", lambda *args: (str(reopened_path), "")
+    )
+    window.save_project()
+    assert not errors
+    assert_simulated_project(reopened_path)
+
+
+def test_project_export_without_result_saves_current_parameters(
+    qt_application, tmp_path, monkeypatch
+):
+    window = BlochSimulatorGUI()
+    window.set_workspace_mode("sequence")
+    widget = window.sequence_simulation_widget
+    widget.read_matrix.setValue(7)
+    widget.sequence_reference_ppm.setValue(183.35)
+    path = tmp_path / "unrun.blochproj"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(path), ""))
+    window.save_project()
+    saved = load_project(path)
+    assert saved["sequence_result"] is None
+    assert saved["state"]["sequence_controls"]["read_matrix"]["value"] == 7
+    assert (
+        saved["state"]["sequence_controls"]["sequence_reference_ppm"]["value"] == 183.35
+    )
+
+
+def test_completed_spin_probe_is_retained_and_can_be_reopened(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication(sys.argv)
     window = BlochSimulatorGUI()
     window.set_workspace_mode("sequence")
@@ -802,6 +985,26 @@ def test_completed_spin_probe_is_retained_and_can_be_reopened():
     assert run.run_type == "spin_probe"
     assert run.result is result
     assert run.runtime_s == pytest.approx(0.25)
+    initial_mz = widget.probe_initial_mz.value()
+    widget.probe_initial_mz.setValue(initial_mz + 5.0)
+    widget.views.setCurrentIndex(
+        next(
+            index
+            for index in range(widget.views.count())
+            if widget.views.tabText(index) == "Spin Probe"
+        )
+    )
+    path = tmp_path / "probe.blochproj"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(path), ""))
+    window.save_project()
+    saved = load_project(path)
+    assert isinstance(saved["sequence_result"], SequenceProbeResult)
+    assert (
+        saved["state"]["sequence_controls"]["probe_initial_mz"]["value"] == initial_mz
+    )
+    np.testing.assert_array_equal(
+        saved["sequence_result"].magnetization, result.magnetization
+    )
     widget.probe_result = None
 
     window._open_session_simulation_run(run)
@@ -1905,6 +2108,7 @@ def test_all_generated_sequences_share_rf_controls_and_loaded_pulse_parameters()
             "Block",
             "RF Pulse Designer",
             "Spectral-spatial Designer",
+            "Load RF pulse…",
         ]
         pulse_type.setCurrentText("SLR")
         getattr(widget, f"{prefix}_rf_time_bandwidth_product").setValue(3.5)
@@ -1916,7 +2120,6 @@ def test_all_generated_sequences_share_rf_controls_and_loaded_pulse_parameters()
         assert parameters["rf_slr_sharpness"] == pytest.approx(5.0)
         assert parameters["rf_frequency_offset_hz"] == pytest.approx(125.0)
         assert getattr(widget, f"{prefix}_rf_slr_sharpness").isEnabled()
-        assert hasattr(widget, f"{prefix}_rf_load_button")
 
     widget.close()
     widget.deleteLater()
@@ -1967,7 +2170,7 @@ def test_sequence_mode_loads_a_free_mode_rf_pulse_file(monkeypatch):
         lambda *args, **kwargs: (str(pulse_path), ""),
     )
 
-    widget._load_sequence_rf_pulse("bssfp")
+    widget.bssfp_rf_pulse_type.setCurrentText("Load RF pulse…")
     parameter_factories = {
         "epi": widget._epi_pulseq_parameters,
         "csi": widget._csi_pulseq_parameters,
@@ -2038,7 +2241,7 @@ def test_ss_bssfp_reloads_and_calibrates_consecutive_headerless_rf_files(
             for event in widget.program.rf_events
         )
 
-    widget._load_sequence_rf_pulse("ss_bssfp")
+    widget.ss_bssfp_rf_pulse_type.setCurrentText("Load RF pulse…")
     assert widget._ensure_current_generated_sequence()
     assert (
         widget._generated_pulseq_sequence.definitions["SpectralRFDesignerPulseName"]
@@ -2046,7 +2249,7 @@ def test_ss_bssfp_reloads_and_calibrates_consecutive_headerless_rf_files(
     )
     assert generated_rotations_deg() == pytest.approx((45.0, 90.0), abs=0.02)
 
-    widget._load_sequence_rf_pulse("ss_bssfp")
+    widget.ss_bssfp_rf_pulse_type.setCurrentText("Load RF pulse…")
     assert widget._sequence_generation_pending
     assert (
         widget._generated_pulseq_sequence.definitions["SpectralRFDesignerPulseName"]
@@ -2721,6 +2924,42 @@ def test_sequence_workspace_builds_geometry_probe_positions():
     app.processEvents()
 
 
+@pytest.mark.parametrize("saved_reference_ppm", [None, 0.0, 183.35])
+@pytest.mark.parametrize("configured_reference_ppm", [171.0, 175.5])
+def test_sequence_reference_defaults_follow_nucleus_and_respect_loaded_values(
+    qt_application, saved_reference_ppm, configured_reference_ppm
+):
+    widget = SequenceSimulationWidget()
+    widget.set_workspace_defaults(
+        WorkspaceDefaults(
+            sequence_reference_ppm_by_nucleus={"C13": configured_reference_ppm}
+        )
+    )
+    assert widget.sequence_reference_ppm.value() == 0.0
+    widget.nucleus.setCurrentText("C13")
+    assert widget.sequence_reference_ppm.value() == configured_reference_ppm
+
+    widget.sequence_reference_ppm.setValue(180.0)
+    widget.field_strength_t.setValue(7.0)
+    widget.epi_rf_pulse_type.setCurrentText("Gaussian")
+    assert widget.sequence_reference_ppm.value() == 180.0
+
+    widget.nucleus.setCurrentText("H1")
+    assert widget.sequence_reference_ppm.value() == 0.0
+    definitions = {"Nucleus": "C13"}
+    if saved_reference_ppm is not None:
+        definitions["SequenceReferencePpm"] = saved_reference_ppm
+    widget.program = SequenceProgram(
+        events=(), duration_s=1e-3, metadata={"definitions": definitions}
+    )
+    widget._apply_pulseq_frequency_reference()
+    expected = (
+        configured_reference_ppm if saved_reference_ppm is None else saved_reference_ppm
+    )
+    assert widget.nucleus.currentText() == "C13"
+    assert widget.sequence_reference_ppm.value() == pytest.approx(expected)
+
+
 def test_spectral_phantom_probe_defaults_follow_window_relative_to_reference():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
@@ -2962,6 +3201,192 @@ def test_sequence_workspace_displays_zero_reference_lines():
     widget.close()
     widget.deleteLater()
     app.processEvents()
+
+
+@pytest.mark.parametrize(
+    "definitions, echo, repetition",
+    [
+        ({"TE": 0.02, "TR": 0.06}, "20 ms", "60 ms"),
+        (
+            {"EchoTimes": [0.002, 0.004, 0.006], "TE": 0.002, "TR": 0.01},
+            "2, 4, 6 ms",
+            "10 ms",
+        ),
+        ({"echotime": "0.005", "RepetitionTime": [0.1]}, "5 ms", "100 ms"),
+        ({"TR": [0.01, 0.02]}, "not specified", "10, 20 ms"),
+        ({}, "not specified", "not specified"),
+        ({"TE": float("nan"), "TR": -1}, "not specified", "not specified"),
+        ({"TE": "unknown", "TR": []}, "not specified", "not specified"),
+        (
+            {"EchoTimes": [float("inf")], "TE": 0.005, "TR": 0.1},
+            "5 ms",
+            "100 ms",
+        ),
+        ({"EchoTimes": np.arange(1, 9) * 0.001}, "1–8 ms (8 values)", "not specified"),
+    ],
+)
+def test_sequence_preview_displays_declared_timings(definitions, echo, repetition):
+    program = SequenceProgram((), duration_s=0.1, metadata={"definitions": definitions})
+    assert _sequence_preview_timing_text(program) == (
+        f"Echo time (TE): {echo}    |    Repetition time (TR): {repetition}"
+    )
+
+
+def test_sequence_preview_timing_refresh_and_saved_visibility(tmp_path, qt_application):
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    parent = QWidget()
+    parent.app_settings = settings
+    widget = SequenceSimulationWidget(parent)
+    widget.program = SequenceProgram(
+        (), duration_s=0.06, metadata={"definitions": {"TE": 0.02, "TR": 0.06}}
+    )
+    widget._acquisition_compiled = None
+    widget._show_program()
+    assert not widget.sequence_timing_summary.isHidden()
+    assert "TE): 20 ms" in widget.sequence_timing_summary.text()
+    assert "TR): 60 ms" in widget.sequence_timing_summary.text()
+    widget.rf_plot.setXRange(5.0, 15.0, padding=0)
+    widget.set_sequence_timing_visible(False)
+    assert widget.sequence_timing_summary.isHidden()
+    assert widget.rf_plot.viewRange()[0] == pytest.approx([5.0, 15.0])
+    widget.program = SequenceProgram((), duration_s=0.02)
+    widget._acquisition_compiled = None
+    widget._show_program()
+    assert widget.sequence_timing_summary.isHidden()
+    widget.set_sequence_timing_visible(True)
+    assert not widget.sequence_timing_summary.isHidden()
+    assert widget.sequence_timing_summary.text().count("not specified") == 2
+
+    settings.setValue("interface/show_sequence_timing", False)
+    settings.sync()
+    reopened = SequenceSimulationWidget(parent)
+    assert reopened.sequence_timing_summary.isHidden()
+    parent.deleteLater()
+
+
+@pytest.mark.parametrize(
+    "definitions, end_ms",
+    [
+        ({"TR": 0.01}, 10.0),
+        ({"RepetitionTime": [0.012]}, 12.0),
+        ({"tr": "0.008"}, 8.0),
+        ({"TR": 0.1}, 30.0),
+        ({}, 30.0),
+        ({"TR": -1.0, "RepetitionTime": 0.01}, 10.0),
+        ({"TR": [0.01, 0.02]}, 30.0),
+        ({"TR": float("nan")}, 30.0),
+        ({"TR": "unknown"}, 30.0),
+    ],
+)
+def test_sequence_preview_uses_one_declared_repetition(definitions, end_ms):
+    program = SequenceProgram(
+        (), duration_s=0.03, metadata={"definitions": definitions}
+    )
+
+    assert _sequence_preview_range_ms(program) == pytest.approx((0.0, end_ms))
+
+
+def test_sequence_workspace_overviews_track_and_navigate_both_waveform_plots(
+    qt_application,
+):
+    widget = SequenceSimulationWidget()
+    widget.program = SequenceProgram(
+        tuple(
+            event
+            for start_s in (0.0, 0.01, 0.02)
+            for event in (
+                RFEvent(start_s, np.asarray([100.0]), 1e-3),
+                GradientEvent("x", start_s, np.asarray([1000.0]), 1e-3),
+            )
+        ),
+        duration_s=0.03,
+        metadata={"definitions": {"TR": 0.01}},
+    )
+    widget._acquisition_compiled = None
+    widget.resize(1600, 1000)
+    widget.show()
+    widget._show_program()
+    qt_application.processEvents()
+    widget.views.currentWidget().grab()
+
+    for plot, overview in (
+        (widget.rf_plot, widget.rf_overview),
+        (widget.gradient_plot, widget.gradient_overview),
+    ):
+        assert plot.getViewBox().viewRange()[0] == pytest.approx([0.0, 10.0])
+        assert overview.isVisible()
+        assert overview.viewRange()[0] == pytest.approx([0.0, 30.0])
+        assert overview.region.getRegion() == pytest.approx((0.0, 10.0))
+        assert np.nanmax(overview.listDataItems()[0].xData) > 20.0
+        curve = overview.listDataItems()[0].curve
+        curve_bounds = curve.mapRectToScene(curve.boundingRect())
+        assert overview.vb.sceneBoundingRect().intersects(curve_bounds)
+        assert curve_bounds.height() > 1.0
+        bounds = plot.getViewBox().mapRectToItem(
+            plot.plotItem, plot.getViewBox().rect()
+        )
+        assert overview.geometry().right() == pytest.approx(bounds.right() - 8)
+        assert overview.geometry().bottom() == pytest.approx(bounds.bottom() - 8)
+
+    widget.rf_plot.setXRange(5.0, 15.0, padding=0)
+    for overview in (widget.rf_overview, widget.gradient_overview):
+        assert overview.region.getRegion() == pytest.approx((5.0, 15.0))
+
+    widget.gradient_overview.region.setRegion((10.0, 20.0))
+    for plot in (widget.rf_plot, widget.gradient_plot):
+        assert plot.getViewBox().viewRange()[0] == pytest.approx([10.0, 20.0])
+    assert widget.rf_overview.region.getRegion() == pytest.approx((10.0, 20.0))
+
+    widget.rf_overview.region.setRegion((0.0, 5.0))
+    widget.waveform_units.setCurrentIndex(widget.waveform_units.findData("simulation"))
+    assert np.nanmax(widget.rf_overview.listDataItems()[0].yData) == pytest.approx(100)
+    assert np.nanmax(
+        widget.gradient_overview.listDataItems()[0].yData
+    ) == pytest.approx(1)
+    widget._preserve_sequence_plot_range_on_next_show = True
+    widget._show_program()
+    for overview in (widget.rf_overview, widget.gradient_overview):
+        assert overview.region.getRegion() == pytest.approx((0.0, 5.0))
+        assert (
+            overview.scene() is widget.rf_plot.scene()
+            or overview.scene() is widget.gradient_plot.scene()
+        )
+
+    widget.resize(1800, 1100)
+    qt_application.processEvents()
+    for plot, overview in (
+        (widget.rf_plot, widget.rf_overview),
+        (widget.gradient_plot, widget.gradient_overview),
+    ):
+        bounds = plot.getViewBox().mapRectToItem(
+            plot.plotItem, plot.getViewBox().rect()
+        )
+        assert overview.geometry().right() == pytest.approx(bounds.right() - 8)
+        assert overview.geometry().bottom() == pytest.approx(bounds.bottom() - 8)
+
+
+def test_sequence_workspace_default_preview_follows_regenerated_tr():
+    widget = SequenceSimulationWidget()
+    widget.program = SequenceProgram(
+        (), duration_s=0.03, metadata={"definitions": {"TR": 0.01}}
+    )
+    widget._acquisition_compiled = None
+    widget._show_program()
+    widget.program = SequenceProgram(
+        (), duration_s=0.02, metadata={"definitions": {"TR": 0.005}}
+    )
+    widget._acquisition_compiled = None
+    widget._preserve_sequence_plot_range_on_next_show = True
+
+    widget._show_program()
+
+    for plot, overview in (
+        (widget.rf_plot, widget.rf_overview),
+        (widget.gradient_plot, widget.gradient_overview),
+    ):
+        assert plot.getViewBox().viewRange()[0] == pytest.approx([0.0, 5.0])
+        assert overview.region.getRegion() == pytest.approx((0.0, 5.0))
+        assert overview.viewRange()[0] == pytest.approx([0.0, 20.0])
 
 
 def test_sequence_workspace_preserves_timeline_zoom_when_regenerating():

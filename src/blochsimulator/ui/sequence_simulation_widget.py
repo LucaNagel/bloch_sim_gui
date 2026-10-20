@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import copy
 import math
 import re
 import sys
@@ -105,6 +106,7 @@ from ..sequence import (
 from ..sequence.bruker_export import suggest_bruker_method
 from ..sequence.encoding import numeric_definition_array
 from ..sequence.export_bundle import existing_export_targets, perform_sequence_export
+from ..sequence.internal_fid import make_internal_fid
 from ..sequence.parameter_loop import (
     MAX_PARAMETER_LOOP_POINTS,
     manual_parameter_loop_values,
@@ -208,6 +210,211 @@ def _representative_sample_indices(values, max_samples):
     selected.add(int(np.argmin(values)))
     selected.add(int(np.argmax(values)))
     return np.asarray(sorted(selected), dtype=int)
+
+
+def _sequence_preview_range_ms(program):
+    """Use one declared TR without guessing repetition boundaries from RF pulses."""
+    duration_s = max(float(program.duration_s), 1e-9)
+    definitions = {
+        str(key).lower(): value
+        for key, value in program.metadata.get("definitions", {}).items()
+    }
+    for name in ("tr", "repetitiontime"):
+        try:
+            values = np.asarray(definitions.get(name), dtype=float).reshape(-1)
+            repetition_s = float(values[0]) if values.size == 1 else np.nan
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(repetition_s) and repetition_s > 0.0:
+            return 0.0, min(repetition_s, duration_s) * 1000.0
+    return 0.0, duration_s * 1000.0
+
+
+def _sequence_timing_values(program, names):
+    """Read valid declared times in seconds with the same aliases for text and plots."""
+    definitions = {
+        str(key).lower(): value
+        for key, value in program.metadata.get("definitions", {}).items()
+    }
+    for name in names:
+        try:
+            values = np.asarray(definitions.get(name), dtype=float).reshape(-1)
+        except (TypeError, ValueError):
+            continue
+        if values.size and np.all(np.isfinite(values) & (values > 0)):
+            return np.unique(values)
+    return np.empty(0)
+
+
+def _sequence_preview_timing_text(program):
+    """Format declared timings in milliseconds, including multi-echo sequences."""
+
+    def timing(names):
+        values = _sequence_timing_values(program, names) * 1000.0
+        if not values.size:
+            return "not specified"
+        if values.size > 6:
+            return f"{values[0]:.6g}–{values[-1]:.6g} ms ({values.size} values)"
+        return ", ".join(f"{value:.6g}" for value in values) + " ms"
+
+    echo = timing(("echotimes", "te", "echotime"))
+    repetition = timing(("tr", "repetitiontime"))
+    return f"Echo time (TE): {echo}    |    Repetition time (TR): {repetition}"
+
+
+def _sequence_preview_timing_markers(program):
+    """Locate declared echoes relative to acquired RF excitations, in seconds."""
+    echo_times = _sequence_timing_values(program, ("echotimes", "te", "echotime"))
+    repetition = _sequence_timing_values(program, ("tr", "repetitiontime"))
+    timing = {item["start_s"]: item for item in program.metadata.get("rf_timing", ())}
+    rf_events = [
+        rf
+        for rf in program.rf_events
+        if timing.get(rf.start_s, {}).get("use", "undefined")
+        in {"excitation", "undefined", ""}
+    ]
+    if not rf_events:
+        return []
+    rf_ends = np.asarray([rf.end_s for rf in rf_events])
+    acquisitions = {}
+    for adc in program.adc_events:
+        index = int(np.searchsorted(rf_ends, adc.start_s + 1e-12, side="right")) - 1
+        if index >= 0:
+            first, last = acquisitions.get(
+                index, (adc.start_s, adc.end_s + adc.dwell_s)
+            )
+            acquisitions[index] = (
+                min(first, adc.start_s),
+                max(last, adc.end_s + adc.dwell_s),
+            )
+    markers = []
+    center_offsets = {}
+    for index, (first_adc, last_adc) in acquisitions.items():
+        rf = rf_events[index]
+        info = timing.get(rf.start_s)
+        if info is not None:
+            center = info["center_s"]
+        else:
+            # Match Pulseq's peak/plateau convention for older saved programs.
+            key = id(rf.samples_hz)
+            if key not in center_offsets:
+                magnitude = np.abs(rf.samples_hz)
+                peak = np.max(magnitude)
+                if peak == 0.0:
+                    continue
+                indices = np.flatnonzero(magnitude >= peak * 0.99999)
+                center_offsets[key] = (indices[0] + indices[-1] + 1) * rf.raster_s / 2
+            center = rf.start_s + center_offsets[key]
+        for echo_index, echo in enumerate(echo_times):
+            position = center + echo
+            if first_adc - 1e-12 <= position <= last_adc + 1e-12:
+                name = "TE" if echo_times.size == 1 else f"TE{echo_index + 1}"
+                markers.append((position, f"{name} = {echo * 1000:.6g} ms", "#80cbc4"))
+    if repetition.size == 1:
+        # TR boundaries start at the acquisition block; preparation RF pulses
+        # without ADC must not move the repetition reference.
+        previous = -np.inf
+        for index in acquisitions:
+            rf = rf_events[index]
+            start = timing.get(rf.start_s, {}).get("block_start_s", rf.start_s)
+            if start < previous - 1e-12:
+                continue
+            boundary = start + float(repetition[0])
+            if boundary <= program.duration_s + 1e-12:
+                markers.append(
+                    (boundary, f"TR = {repetition[0] * 1000:.6g} ms", "#b39ddb")
+                )
+            previous = boundary
+    return sorted(markers)
+
+
+class _SequenceOverviewPlot(pg.PlotItem):
+    """Small full-sequence navigator anchored inside a waveform plot."""
+
+    def __init__(self, main_plot):
+        super().__init__(enableMenu=False)
+        # Attach after construction so the nested ViewBox receives its scene
+        # change and connects the transform updates required before painting.
+        self.setParentItem(main_plot.plotItem)
+        self._main_plot = main_plot
+        self._syncing_region = False
+        self._duration_ms = 0.0
+        self.setZValue(1000)
+        self.setTitle("Full sequence", size="8pt", color="#b0bec5")
+        self.hideAxis("left")
+        self.hideAxis("bottom")
+        self.hideButtons()
+        self.layout.setContentsMargins(3, 1, 3, 3)
+        self.vb.setBackgroundColor("#151a20")
+        self.vb.setBorder(pg.mkPen("#607078"))
+        self.setMouseEnabled(x=False, y=False)
+        self.disableAutoRange()
+        self.region = pg.LinearRegionItem(
+            values=(0.0, 1.0),
+            brush=pg.mkBrush(128, 203, 235, 65),
+            pen=pg.mkPen("#a9e4ff", width=1.5),
+        )
+        self.region.setZValue(10)
+        self.region.setToolTip("Highlighted time range. Drag to navigate the sequence.")
+        self.addItem(self.region, ignoreBounds=True)
+        self.region.sigRegionChanged.connect(self._region_changed)
+        main_plot.sigXRangeChanged.connect(self._sync_region)
+        main_plot.getViewBox().sigResized.connect(self._update_geometry)
+        self.setVisible(False)
+
+    def set_waveforms(self, waveforms, duration_ms):
+        """Replace bounded overview curves; keep the navigator across plot clears."""
+        for item in self.listDataItems():
+            self.removeItem(item)
+        low, high = 0.0, 0.0
+        for x, y, color in waveforms:
+            self.plot(x, y, pen=pg.mkPen(color, width=1), connect="finite")
+            finite = y[np.isfinite(y)]
+            if finite.size:
+                low = min(low, float(np.min(finite)))
+                high = max(high, float(np.max(finite)))
+        self._duration_ms = max(float(duration_ms), 1e-6)
+        self._syncing_region = True
+        try:
+            self.region.setBounds((0.0, self._duration_ms))
+        finally:
+            self._syncing_region = False
+        self.setXRange(0.0, self._duration_ms, padding=0)
+        self.setYRange(low, max(high, low + 1e-12), padding=0.08)
+        self.setVisible(True)
+        self._sync_region(None, self._main_plot.getViewBox().viewRange()[0])
+        self._update_geometry()
+
+    def _update_geometry(self, *_):
+        view = self._main_plot.getViewBox()
+        bounds = view.mapRectToItem(self.parentItem(), view.rect())
+        width = min(190.0, bounds.width() * 0.32)
+        height = min(82.0, bounds.height() * 0.30)
+        self.setGeometry(
+            QRectF(
+                bounds.right() - width - 8, bounds.bottom() - height - 8, width, height
+            )
+        )
+        # This inset lives outside the main plot's managed layout. Resolve its
+        # layout and transform now so its curves are visible on the first paint.
+        self.layout.activate()
+        self.vb.updateMatrix()
+
+    def _sync_region(self, _view, x_range):
+        if self._syncing_region or self._duration_ms <= 0.0:
+            return
+        self._syncing_region = True
+        try:
+            self.region.setRegion(np.clip(x_range, 0.0, self._duration_ms))
+        finally:
+            self._syncing_region = False
+
+    def _region_changed(self):
+        if self._syncing_region:
+            return
+        start_ms, end_ms = self.region.getRegion()
+        if end_ms > start_ms:
+            self._main_plot.setXRange(start_ms, end_ms, padding=0)
 
 
 def _event_step_plot_data(
@@ -1138,6 +1345,7 @@ class SequenceSimulationWidget(QWidget):
     GENERATED_SOURCES = frozenset(
         (*range(EPI_SOURCE, EPSI_MGE_SOURCE + 1), SLICE_SELECTION_SOURCE)
     )
+    CONFIGURABLE_SOURCES = GENERATED_SOURCES | {INTERNAL_SOURCE}
     CARTESIAN_3D_SOURCES = frozenset((BSSFP_SOURCE, SS_BSSFP_SOURCE, ME_BSSFP_SOURCE))
     NO_PHANTOM_MESSAGE = (
         "No phantom is loaded in the Phantom tab. Create or load one first."
@@ -1162,6 +1370,7 @@ class SequenceSimulationWidget(QWidget):
         self.result = None
         self.magnetization_animation = None
         self._active_session_run_id = None
+        self._project_export_contexts = {}
         self._restoring_session_run = False
         self.probe_result = None
         self._split_csi_data = None
@@ -1191,11 +1400,15 @@ class SequenceSimulationWidget(QWidget):
         self._probe_playback_clock_ms = np.zeros(0, dtype=float)
         self._sequence_plot_window_s = None
         self._sequence_plot_pending_window_s = None
+        self._sequence_plot_default_range_ms = None
+        self._syncing_sequence_plot_ranges = False
         self._preserve_sequence_plot_range_on_next_show = False
         self._rf_waveform_item = None
         self._rf_phase_item = None
         self._gradient_waveform_items = {}
         self._sequence_spoiler_markers = []
+        self._sequence_timing_markers = []
+        self._sequence_timing_annotations = []
         self._rf_designer = None
         self._rf_designer_pulse_data = None
         self._rf_designer_pulse_error = "No RF Pulse Designer waveform is available"
@@ -1226,6 +1439,7 @@ class SequenceSimulationWidget(QWidget):
         self.flash_timing_settle_timer.timeout.connect(self._settle_flash_timing)
         self._resolving_epi_timing = False
         self._epi_timing_notes: list[str] = []
+        self._last_timing_status = None
         self.epi_timing_settle_timer = QTimer(self)
         self.epi_timing_settle_timer.setSingleShot(True)
         self.epi_timing_settle_timer.setInterval(600)
@@ -1336,6 +1550,11 @@ class SequenceSimulationWidget(QWidget):
             if settings is not None
             else True
         )
+        self._sequence_timing_visible = (
+            bool(settings.value("interface/show_sequence_timing", True, type=bool))
+            if settings is not None
+            else True
+        )
         self.spoiler_mode = spoiler_mode
         self.subvoxel_spin_counts = (
             tuple(subvoxel_counts) if spoiler_mode == "gradient" else (1, 1, 1)
@@ -1369,6 +1588,12 @@ class SequenceSimulationWidget(QWidget):
             # some Qt styles, so make this preference explicit on each title.
             label.setStyleSheet(f"font-weight: {weight};")
 
+    def set_sequence_timing_visible(self, enabled: bool) -> None:
+        """Apply the preview preference immediately without regenerating a sequence."""
+        self._sequence_timing_visible = bool(enabled)
+        self.sequence_timing_summary.setVisible(self._sequence_timing_visible)
+        self._refresh_sequence_timing_markers()
+
     def set_default_fov_mm(self, fov_mm) -> None:
         """Apply newly saved FOV defaults to editable generated-sequence controls."""
         x, y, z = (float(value) for value in fov_mm)
@@ -1396,6 +1621,9 @@ class SequenceSimulationWidget(QWidget):
         self.set_default_fov_mm(defaults.sequence_fov_mm)
         self.field_strength_t.setValue(defaults.field_strength_t)
         self.nucleus.setCurrentText(defaults.phantom_nucleus)
+        self.sequence_reference_ppm.setValue(
+            defaults.sequence_reference_ppm(self.nucleus.currentText())
+        )
 
     def _export_directory(self) -> Path:
         """Resolve the application-wide configured export directory."""
@@ -1473,6 +1701,7 @@ class SequenceSimulationWidget(QWidget):
             }
             self._rf_designer_pulse_error = ""
             for prefix in (
+                "fid",
                 "epi",
                 "epsi",
                 "csi",
@@ -1500,6 +1729,7 @@ class SequenceSimulationWidget(QWidget):
             hasattr(self, f"{prefix}_rf_pulse_type")
             and self._selected_shared_rf_pulse_type(prefix) == "designer"
             for prefix in (
+                "fid",
                 "epi",
                 "epsi",
                 "csi",
@@ -1561,6 +1791,7 @@ class SequenceSimulationWidget(QWidget):
             else ""
         )
         for prefix in (
+            "fid",
             "epi",
             "epsi",
             "csi",
@@ -1679,6 +1910,7 @@ class SequenceSimulationWidget(QWidget):
         }
         self._rf_designer_pulse_error = ""
         for prefix in (
+            "fid",
             "epi",
             "epsi",
             "csi",
@@ -1821,6 +2053,7 @@ class SequenceSimulationWidget(QWidget):
         already_selected = pulse_type.currentText() == "Spectral-spatial Designer"
         pulse_type.setCurrentText("Spectral-spatial Designer")
         for control_prefix in (
+            "fid",
             "epi",
             "epsi",
             "csi",
@@ -1881,6 +2114,7 @@ class SequenceSimulationWidget(QWidget):
         already_selected = pulse_type.currentText() == "Spectral-spatial Designer"
         pulse_type.setCurrentText("Spectral-spatial Designer")
         for control_prefix in (
+            "fid",
             "epi",
             "epsi",
             "csi",
@@ -1971,6 +2205,7 @@ class SequenceSimulationWidget(QWidget):
             else ""
         )
         for control_prefix in (
+            "fid",
             "epi",
             "epsi",
             "csi",
@@ -2069,6 +2304,9 @@ class SequenceSimulationWidget(QWidget):
         self.sequence_reference_ppm.setDecimals(4)
         self.sequence_reference_ppm.setSingleStep(0.1)
         self.sequence_reference_ppm.setSuffix(" ppm")
+        self.sequence_reference_ppm.setValue(
+            self.workspace_defaults.sequence_reference_ppm(self.nucleus.currentText())
+        )
         self.sequence_reference_ppm.setToolTip(
             "Absolute sequence frequency taken as 0 Hz. RF and receiver carrier "
             "offsets are applied relative to this reference; the phantom's "
@@ -2092,7 +2330,6 @@ class SequenceSimulationWidget(QWidget):
         )
         self.sequence_live_preview.toggled.connect(self._sequence_live_preview_changed)
         self.generate_sequence_button = QPushButton("Generate sequence")
-        self.generate_sequence_button.setEnabled(False)
         self.generate_sequence_button.setToolTip(
             "Generate the sequence from the current parameters and refresh the timeline"
         )
@@ -2166,6 +2403,58 @@ class SequenceSimulationWidget(QWidget):
         )
         sequence_layout.addWidget(self.sequence_summary_table)
         controls_layout.addWidget(sequence_group)
+
+        self.fid_group = QGroupBox("Internal FID")
+        fid_form = _left_aligned_form(self.fid_group)
+        self.fid_flip_angle_deg = self._parameter_spin(0.0, 50_000.0, 90.0, "°")
+        self.fid_rf_phase_deg = self._parameter_spin(-360.0, 360.0, 0.0, "°")
+        fid_form.addRow("Flip angle", self.fid_flip_angle_deg)
+        fid_form.addRow("RF phase", self.fid_rf_phase_deg)
+        self._add_shared_rf_controls(fid_form, "fid", pulse_type="Block")
+        # Internal FID is gradient-free; SPSP requires its coupled gradient.
+        self.fid_rf_pulse_type.removeItem(
+            self.fid_rf_pulse_type.findText("Spectral-spatial Designer")
+        )
+        _add_form_section(fid_form, "FID acquisition")
+        self.fid_points = QSpinBox()
+        self.fid_points.setRange(1, 1_000_000)
+        self.fid_points.setValue(256)
+        self.fid_points.setToolTip("Number of complex ADC samples per repetition")
+        self.fid_bandwidth_khz = self._parameter_spin(0.001, 2000.0, 10.0, " kHz")
+        self.fid_bandwidth_khz.setToolTip(
+            "Total sampling bandwidth. ADC dwell = 1 / bandwidth."
+        )
+        self.fid_adc_delay_ms = self._parameter_spin(0.0, 1_000_000.0, 0.0, " ms")
+        self.fid_adc_delay_ms.setToolTip("Delay from RF end to the ADC window")
+        self.fid_receiver_offset_hz = self._parameter_spin(
+            -1_000_000.0, 1_000_000.0, 0.0, " Hz"
+        )
+        self.fid_receiver_offset_hz.setToolTip(
+            "Receiver carrier offset relative to the sequence reference frequency"
+        )
+        self.fid_repetitions = QSpinBox()
+        self.fid_repetitions.setRange(1, 100_000)
+        self.fid_repetitions.setValue(1)
+        self.fid_repetitions.setToolTip(
+            "Repeat excitation and FID with continuous magnetization evolution; "
+            "no reset, averaging or spoiling between repetitions."
+        )
+        self.fid_repetition_time_ms = self._parameter_spin(0.0, 1_000_000.0, 0.0, " ms")
+        self.fid_repetition_time_ms.setSpecialValueText("Shortest possible")
+        self.fid_repetition_time_ms.setToolTip(
+            "RF-start to RF-start interval. Zero uses RF duration + ADC delay + "
+            "FID duration. The sequence ends after the final FID."
+        )
+        fid_form.addRow("FID points / repetition", self.fid_points)
+        fid_form.addRow("Sampling bandwidth", self.fid_bandwidth_khz)
+        fid_form.addRow("ADC delay after RF", self.fid_adc_delay_ms)
+        fid_form.addRow("Receiver frequency offset", self.fid_receiver_offset_hz)
+        fid_form.addRow("Repetitions", self.fid_repetitions)
+        fid_form.addRow("TR (start-to-start)", self.fid_repetition_time_ms)
+        self.fid_sampling_info = QLabel()
+        self.fid_sampling_info.setWordWrap(True)
+        fid_form.addRow("Derived sampling", self.fid_sampling_info)
+        controls_layout.addWidget(self.fid_group)
 
         self.acquisition_group = QGroupBox("2D acquisition (EPI / spiral)")
         acquisition_form = _left_aligned_form(self.acquisition_group)
@@ -2267,9 +2556,6 @@ class SequenceSimulationWidget(QWidget):
         )
         self.epi_echo_time_ms = self._parameter_spin(0.1, 10000.0, 20.0, " ms")
         self.epi_echo_time_ms.setObjectName("epi_echo_time_ms")
-        self.epi_timing_info = QLabel()
-        self.epi_timing_info.setObjectName("epi_timing_info")
-        self.epi_timing_info.setWordWrap(True)
         self.epi_echo_time_ms.setToolTip(
             "Time from the excitation centre to the centre of EPI k-space; "
             "for centre-out spiral this is the first ADC sample"
@@ -2362,7 +2648,6 @@ class SequenceSimulationWidget(QWidget):
             "Acquisition interval (start-to-start)",
             self.epi_repetition_time_ms,
         )
-        acquisition_form.addRow(self.epi_timing_info)
         acquisition_form.addRow("Repetitions", self.epi_repetitions)
         _add_form_section(acquisition_form, "Spoiling")
         acquisition_form.addRow("RF spoiling", self.epi_rf_spoiling)
@@ -2454,9 +2739,6 @@ class SequenceSimulationWidget(QWidget):
             0.0, 1000.0, 0.0, " cycles/voxel"
         )
         self.epsi_spoiler_duration_ms = self._parameter_spin(0.001, 1000.0, 2.0, " ms")
-        self.epsi_timing_info = QLabel()
-        self.epsi_timing_info.setObjectName("epsi_timing_info")
-        self.epsi_timing_info.setWordWrap(True)
         self.epsi_dwell_info = QLabel()
         self.epsi_pixel_bandwidth_info = QLabel()
         self.epsi_spectral_info = QLabel()
@@ -2497,7 +2779,6 @@ class SequenceSimulationWidget(QWidget):
             "Measurement interval (start-to-start)",
             self.epsi_acquisition_interval_ms,
         )
-        epsi_form.addRow(self.epsi_timing_info)
         _add_form_section(epsi_form, "Spoiling")
         epsi_form.addRow("RF spoiling", self.epsi_rf_spoiling)
         epsi_form.addRow("RF spoiling increment", self.epsi_rf_spoiling_increment_deg)
@@ -2716,9 +2997,6 @@ class SequenceSimulationWidget(QWidget):
         self.flash_spoiler_cycles_per_voxel.setDisabled(True)
         self.flash_spoiler_duration_ms = self._parameter_spin(0.001, 1000.0, 2.0, " ms")
         self.flash_dwell_info = QLabel()
-        self.flash_timing_info = QLabel()
-        self.flash_timing_info.setObjectName("flash_timing_info")
-        self.flash_timing_info.setWordWrap(True)
         # Retain the original FLASH-specific objects as a compatibility surface
         # for callers that inspect the per-sequence check directly.  The visible
         # UI uses the shared Spoiling quality unit created below.
@@ -2766,7 +3044,6 @@ class SequenceSimulationWidget(QWidget):
             "Acquisition interval (start-to-start)",
             self.flash_acquisition_interval_ms,
         )
-        flash_form.addRow(self.flash_timing_info)
         _add_form_section(flash_form, "Spoiling")
         flash_form.addRow("RF spoiling", self.flash_rf_spoiling)
         flash_form.addRow("RF spoiling increment", self.flash_rf_spoiling_increment_deg)
@@ -4023,6 +4300,7 @@ class SequenceSimulationWidget(QWidget):
         export_cancel_row.addWidget(self.cancel_button, 1)
         run_panel_layout.addLayout(export_cancel_row)
         self.status = QLabel("Ready")
+        self.status.setTextFormat(Qt.PlainText)
         self.status.setWordWrap(True)
         run_panel_layout.addWidget(self.status)
         self._sequence_run_widgets = (
@@ -4379,6 +4657,7 @@ class SequenceSimulationWidget(QWidget):
             self._me_bssfp_changed,
         )
         for prefix, callback in (
+            ("fid", self._fid_changed),
             ("epi", self._acquisition_changed),
             ("epsi", self._epsi_mge_changed),
             ("csi", self._csi_changed),
@@ -4390,6 +4669,17 @@ class SequenceSimulationWidget(QWidget):
             ("slice_selection", self._slice_selection_changed),
         ):
             self._connect_shared_rf_controls(prefix, callback)
+        for control in (
+            self.fid_flip_angle_deg,
+            self.fid_rf_phase_deg,
+            self.fid_points,
+            self.fid_bandwidth_khz,
+            self.fid_adc_delay_ms,
+            self.fid_receiver_offset_hz,
+            self.fid_repetitions,
+            self.fid_repetition_time_ms,
+        ):
+            control.valueChanged.connect(self._fid_changed)
         for control in (
             self.slice_selection_flip_angle_deg,
             self.slice_selection_rf_phase_deg,
@@ -4496,7 +4786,7 @@ class SequenceSimulationWidget(QWidget):
         self.waveform_units.currentIndexChanged.connect(self._waveform_units_changed)
         self.nucleus.currentTextChanged.connect(self._waveform_units_changed)
         self.field_strength_t.valueChanged.connect(self._frequency_reference_changed)
-        self.nucleus.currentTextChanged.connect(self._frequency_reference_changed)
+        self.nucleus.currentTextChanged.connect(self._sequence_nucleus_changed)
         self.sequence_reference_ppm.valueChanged.connect(
             self._frequency_reference_changed
         )
@@ -4508,6 +4798,16 @@ class SequenceSimulationWidget(QWidget):
         self.waveform_value_summary = QLabel("No sequence waveforms")
         self.waveform_value_summary.setWordWrap(True)
         timeline_layout.addWidget(self.waveform_value_summary)
+        self.sequence_timing_summary = QLabel("No sequence timing available")
+        self.sequence_timing_summary.setObjectName("sequence_timing_summary")
+        self.sequence_timing_summary.setWordWrap(True)
+        self.sequence_timing_summary.setToolTip(
+            "TE and TR declared by the current sequence, in milliseconds. "
+            "Echo markers are placed relative to the RF excitation center; "
+            "TR markers show repetition boundaries."
+        )
+        self.sequence_timing_summary.setVisible(self._sequence_timing_visible)
+        timeline_layout.addWidget(self.sequence_timing_summary)
         self.rf_plot = pg.PlotWidget(title="RF magnitude and phase")
         self.rf_plot.setLabel("left", "B1", "G")
         self.rf_plot.setLabel("bottom", "Time", "ms")
@@ -4526,7 +4826,8 @@ class SequenceSimulationWidget(QWidget):
         self.gradient_plot.setLabel("left", "Gradient", "T/m")
         self.gradient_plot.setLabel("bottom", "Time", "ms")
         self.gradient_plot.addLegend()
-        self.gradient_plot.setXLink(self.rf_plot)
+        self.rf_overview = _SequenceOverviewPlot(self.rf_plot)
+        self.gradient_overview = _SequenceOverviewPlot(self.gradient_plot)
         zero_line_pen = pg.mkPen("#757575", width=1)
         self.rf_zero_line = pg.InfiniteLine(
             pos=0.0, angle=0, movable=False, pen=zero_line_pen
@@ -4537,6 +4838,7 @@ class SequenceSimulationWidget(QWidget):
         self.rf_zero_line.setZValue(-100)
         self.gradient_zero_line.setZValue(-100)
         self.rf_plot.sigXRangeChanged.connect(self._sequence_plot_range_changed)
+        self.gradient_plot.sigXRangeChanged.connect(self._sequence_plot_range_changed)
         self.rf_progress_cursor = pg.InfiniteLine(
             pos=0.0, angle=90, movable=False, pen=pg.mkPen("y", width=2)
         )
@@ -4774,6 +5076,17 @@ class SequenceSimulationWidget(QWidget):
             "Run and inspect spectral or geometry spin probes.",
         )
 
+        self.log_widget = QTextEdit()
+        self.log_widget.setReadOnly(True)
+        main_log = getattr(self.parentWidget(), "log_widget", None)
+        if main_log is not None:
+            self.log_widget.setDocument(main_log.document())
+        self.log_tab_index = views.addTab(self.log_widget, "Log")
+        views.setTabToolTip(
+            self.log_tab_index,
+            "Review simulator status messages, warnings, and export activity.",
+        )
+
         split_page = QWidget()
         split_page_layout = QVBoxLayout(split_page)
         split_views = QSplitter(Qt.Horizontal)
@@ -4921,10 +5234,13 @@ class SequenceSimulationWidget(QWidget):
         pulse_type_control = QComboBox()
         pulse_type_control.setObjectName(f"{prefix}_rf_pulse_type")
         pulse_type_control.addItems(RF_PULSE_TYPE_LABELS)
+        pulse_type_control.addItem("Load RF pulse…")
         pulse_type_control.setCurrentText(pulse_type)
+        pulse_type_control.setProperty("selected_rf_pulse_type", pulse_type)
         pulse_type_control.setToolTip(
             "All generated sequences use the same global RF envelope designer. "
-            "RF Pulse Designer uses the waveform designed or loaded in Free Mode."
+            "RF Pulse Designer uses the waveform designed or loaded in Free Mode. "
+            "Choose Load RF pulse… to import a waveform into Sequence Mode."
         )
         duration = self._parameter_spin(0.001, 100.0, duration_ms, " ms")
         duration.setObjectName(f"{prefix}_rf_duration_ms")
@@ -4969,12 +5285,6 @@ class SequenceSimulationWidget(QWidget):
         frequency_offset.setToolTip(
             "RF carrier offset relative to the sequence reference frequency"
         )
-        load_button = QPushButton("Load RF pulse…")
-        load_button.setObjectName(f"{prefix}_rf_load_button")
-        load_button.setToolTip(
-            "Load an RF waveform directly into Sequence Mode and select it "
-            "for this sequence"
-        )
         spsp_plan_button = QPushButton("Plan metabolite excitation…")
         spsp_plan_button.setObjectName(f"{prefix}_rf_spsp_plan_button")
         spsp_plan_button.setToolTip(
@@ -5009,7 +5319,6 @@ class SequenceSimulationWidget(QWidget):
             "slr_sharpness": sharpness,
             "bandwidth_hz": bandwidth,
             "offset_hz": frequency_offset,
-            "load_button": load_button,
             "spsp_plan_button": spsp_plan_button,
             "spsp_design_button": spsp_button,
             "spsp_schedule_button": spsp_schedule_button,
@@ -5019,7 +5328,10 @@ class SequenceSimulationWidget(QWidget):
 
         form.addRow(f"{label_prefix} pulse type", pulse_type_control)
         form.addRow(f"{label_prefix} duration", duration)
-        form.addRow(f"{label_prefix} time-bandwidth product", tbw)
+        tbw_label = QLabel(f"{label_prefix} time-bandwidth product")
+        tbw_label.setEnabled(False)
+        form.addRow(tbw_label, tbw)
+        setattr(self, f"{prefix}_rf_time_bandwidth_product_label", tbw_label)
         sinc_lobes_label = QLabel("Sinc lobes")
         sinc_apodization_label = QLabel("Sinc apodization")
         slr_sharpness_label = QLabel("SLR sharpness")
@@ -5042,7 +5354,6 @@ class SequenceSimulationWidget(QWidget):
             f"{label_prefix} bandwidth (auto)",
         )
         form.addRow(f"{label_prefix} frequency offset", frequency_offset)
-        form.addRow("Loaded waveform", load_button)
         spsp_plan_button_label = QLabel("Metabolite excitation")
         form.addRow(spsp_plan_button_label, spsp_plan_button)
         setattr(self, f"{prefix}_rf_spsp_plan_button_label", spsp_plan_button_label)
@@ -5059,7 +5370,21 @@ class SequenceSimulationWidget(QWidget):
             spsp_schedule_button_label,
         )
         setattr(self, f"{prefix}_rf_spsp_summary_label", spsp_summary_label)
+        # Handle the file action before generation callbacks see the selection.
+        pulse_type_control.currentIndexChanged.connect(
+            lambda *_: self._shared_rf_pulse_type_selected(prefix)
+        )
         return pulse_type_control
+
+    def _shared_rf_pulse_type_selected(self, prefix):
+        pulse_type = getattr(self, f"{prefix}_rf_pulse_type")
+        if pulse_type.currentText() != "Load RF pulse…":
+            pulse_type.setProperty("selected_rf_pulse_type", pulse_type.currentText())
+            return
+        previous = pulse_type.blockSignals(True)
+        pulse_type.setCurrentText(pulse_type.property("selected_rf_pulse_type"))
+        pulse_type.blockSignals(previous)
+        self._load_sequence_rf_pulse(prefix)
 
     def _connect_shared_rf_controls(self, prefix, callback):
         pulse_type = getattr(self, f"{prefix}_rf_pulse_type")
@@ -5077,9 +5402,6 @@ class SequenceSimulationWidget(QWidget):
             control.valueChanged.connect(
                 lambda *_, p=prefix, cb=callback: self._shared_rf_control_changed(p, cb)
             )
-        getattr(self, f"{prefix}_rf_load_button").clicked.connect(
-            lambda *_: self._load_sequence_rf_pulse(prefix)
-        )
         getattr(self, f"{prefix}_rf_spsp_plan_button").clicked.connect(
             lambda *_: self._plan_metabolite_excitation(prefix)
         )
@@ -5197,6 +5519,7 @@ class SequenceSimulationWidget(QWidget):
             duration.blockSignals(previous)
 
         for suffix in (
+            "spsp_plan_button",
             "spsp_design_button",
             "spsp_schedule_button",
             "spsp_summary",
@@ -5871,7 +6194,7 @@ class SequenceSimulationWidget(QWidget):
         except (ValueError, OSError) as exc:
             QMessageBox.warning(self, "Parameter loop", str(exc))
             return
-        if self.sequence_source.currentIndex() in self.GENERATED_SOURCES:
+        if self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES:
             if not self._ensure_current_generated_sequence():
                 self._show_generation_error_dialog()
                 return
@@ -6261,7 +6584,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _mark_sequence_generation_pending(self):
         source_index = self.sequence_source.currentIndex()
-        if source_index not in self.GENERATED_SOURCES:
+        if source_index not in self.CONFIGURABLE_SOURCES:
             return
         self._sequence_generation_pending = True
         self.generate_sequence_button.setEnabled(True)
@@ -6279,7 +6602,7 @@ class SequenceSimulationWidget(QWidget):
         self._refresh_parameter_loop_parameters()
         if self._restoring_session_run:
             return False
-        if self.sequence_source.currentIndex() not in self.GENERATED_SOURCES:
+        if self.sequence_source.currentIndex() not in self.CONFIGURABLE_SOURCES:
             return False
         self._mark_sequence_generation_pending()
         if self.sequence_live_preview.isChecked():
@@ -6287,7 +6610,7 @@ class SequenceSimulationWidget(QWidget):
         return False
 
     def _sequence_live_preview_changed(self, enabled):
-        if enabled and self.sequence_source.currentIndex() in self.GENERATED_SOURCES:
+        if enabled and self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES:
             self._reload_selected_generated_sequence()
 
     def _generate_sequence_clicked(self):
@@ -6296,7 +6619,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _ensure_current_generated_sequence(self):
         source_index = self.sequence_source.currentIndex()
-        if source_index not in self.GENERATED_SOURCES:
+        if source_index not in self.CONFIGURABLE_SOURCES:
             return self.program is not None
         if (
             self.program is None
@@ -6309,6 +6632,7 @@ class SequenceSimulationWidget(QWidget):
     def _reload_selected_generated_sequence(self):
         source_index = self.sequence_source.currentIndex()
         loaders = {
+            self.INTERNAL_SOURCE: self._load_internal_sequence,
             self.SLICE_SELECTION_SOURCE: self._load_slice_selection,
             1: self._load_cartesian_epi,
             2: self._load_csi,
@@ -6617,6 +6941,8 @@ class SequenceSimulationWidget(QWidget):
         source_index = self.sequence_source.currentIndex()
         source_changed = source_index != self._selected_sequence_source_index
         self._selected_sequence_source_index = source_index
+        self.fid_group.setVisible(source_index == self.INTERNAL_SOURCE)
+        self.fid_group.setEnabled(source_index == self.INTERNAL_SOURCE)
         epi_selected = source_index == self.EPI_SOURCE
         csi_selected = source_index == self.CSI_SOURCE
         bssfp_selected = source_index == self.BSSFP_SOURCE
@@ -6649,8 +6975,9 @@ class SequenceSimulationWidget(QWidget):
         self.flash_group.setVisible(flash_selected)
         self.flash_group.setEnabled(flash_selected)
         generated_selected = source_index in self.GENERATED_SOURCES
-        self.sequence_live_preview.setEnabled(generated_selected)
-        self.generate_sequence_button.setEnabled(generated_selected)
+        configurable_selected = source_index in self.CONFIGURABLE_SOURCES
+        self.sequence_live_preview.setEnabled(configurable_selected)
+        self.generate_sequence_button.setEnabled(configurable_selected)
         self.export_pulseq_button.setEnabled(generated_selected)
         self.acquisition_hint.setText(
             "Read/phase matrix and sampling bandwidth define each 2D frame. "
@@ -6665,9 +6992,7 @@ class SequenceSimulationWidget(QWidget):
             self._refresh_parameter_loop_parameters()
             return
         if source_index == self.INTERNAL_SOURCE:
-            self._sequence_generation_pending = False
-            self._generated_sequence_source_index = None
-            self._load_internal_sequence()
+            self._reload_selected_generated_sequence()
         elif generated_selected:
             if source_changed or self._generated_sequence_source_index != source_index:
                 self._mark_sequence_generation_pending()
@@ -6783,21 +7108,50 @@ class SequenceSimulationWidget(QWidget):
         return changed
 
     def _show_epi_timing_status(self, plan, notes, error=None):
-        if error is not None:
-            self.epi_timing_info.setText(f"Timing cannot be resolved: {error}")
-            self.epi_timing_info.setStyleSheet("color: #b00020;")
+        minimum_text = (
+            ""
+            if plan is None
+            else (
+                f"Shortest possible: TE {plan.minimum_echo_time_s * 1e3:.4g} ms, "
+                f"interval {plan.minimum_repetition_time_s * 1e3:.4g} ms."
+            )
+        )
+        self._show_timing_status("EPI", minimum_text, notes, error=error)
+
+    def _show_timing_status(self, source, minimum_text, notes, error=None):
+        """Keep timing feedback in the run area and retain it in the log."""
+        if self._restoring_session_run:
             return
-        lines = []
-        if notes:
-            lines.append("Adjusted automatically: " + "; ".join(notes) + ".")
-        lines.append(
-            f"Shortest possible: TE {plan.minimum_echo_time_s * 1e3:.4g} ms, "
-            f"interval {plan.minimum_repetition_time_s * 1e3:.4g} ms."
-        )
-        self.epi_timing_info.setText("\n".join(lines))
-        self.epi_timing_info.setStyleSheet(
-            "color: #b45309;" if notes else "color: #475569;"
-        )
+        if error is not None:
+            message = f"Timing cannot be resolved: {error}"
+        else:
+            lines = []
+            if notes:
+                lines.append("Adjusted automatically: " + "; ".join(notes) + ".")
+            lines.append(minimum_text)
+            message = "\n".join(lines)
+        timing_status = (source, message)
+        if timing_status == self._last_timing_status:
+            return
+        self._last_timing_status = timing_status
+        self.status.setText(message)
+        level = "Error" if error is not None else "Warning" if notes else "Info"
+        self._log_message(f"{source} timing [{level}]: {message}")
+
+    def _log_message(self, message):
+        """Use the shared application log, with a local log when run standalone."""
+        logger = getattr(self.window(), "log_message", None)
+        if callable(logger):
+            logger(message)
+            return
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        cursor = self.log_widget.textCursor()
+        cursor.movePosition(cursor.End)
+        if not self.log_widget.document().isEmpty():
+            cursor.insertBlock()
+        cursor.insertText(f"[{timestamp}] {message}")
+        self.log_widget.setTextCursor(cursor)
+        self.log_widget.ensureCursorVisible()
 
     def _readout_trajectory_changed(self, *_):
         spiral = self.epi_readout_trajectory.currentText() == "Spiral"
@@ -6949,22 +7303,16 @@ class SequenceSimulationWidget(QWidget):
         return changed
 
     def _show_epsi_timing_status(self, plan, notes, error=None):
-        if error is not None:
-            self.epsi_timing_info.setText(f"Timing cannot be resolved: {error}")
-            self.epsi_timing_info.setStyleSheet("color: #b00020;")
-            return
-        lines = []
-        if notes:
-            lines.append("Adjusted automatically: " + "; ".join(notes) + ".")
-        lines.append(
-            f"Shortest possible: echo spacing {plan.minimum_echo_spacing_s * 1e3:.4g} ms, "
-            f"TE1 {plan.minimum_echo_time_s * 1e3:.4g} ms, "
-            f"TR {plan.minimum_repetition_time_s * 1e3:.4g} ms."
+        minimum_text = (
+            ""
+            if plan is None
+            else (
+                f"Shortest possible: echo spacing {plan.minimum_echo_spacing_s * 1e3:.4g} ms, "
+                f"TE1 {plan.minimum_echo_time_s * 1e3:.4g} ms, "
+                f"TR {plan.minimum_repetition_time_s * 1e3:.4g} ms."
+            )
         )
-        self.epsi_timing_info.setText("\n".join(lines))
-        self.epsi_timing_info.setStyleSheet(
-            "color: #b45309;" if notes else "color: #475569;"
-        )
+        self._show_timing_status("EPSI / MGE", minimum_text, notes, error=error)
 
     def _csi_changed(self, *_):
         self._update_csi_labels()
@@ -7050,21 +7398,15 @@ class SequenceSimulationWidget(QWidget):
         return changed
 
     def _show_flash_timing_status(self, plan, notes, error=None):
-        if error is not None:
-            self.flash_timing_info.setText(f"Timing cannot be resolved: {error}")
-            self.flash_timing_info.setStyleSheet("color: #b00020;")
-            return
-        lines = []
-        if notes:
-            lines.append("Adjusted automatically: " + "; ".join(notes) + ".")
-        lines.append(
-            f"Shortest possible: TE {plan.minimum_echo_time_s * 1e3:.4g} ms, "
-            f"TR {plan.minimum_repetition_time_s * 1e3:.4g} ms."
+        minimum_text = (
+            ""
+            if plan is None
+            else (
+                f"Shortest possible: TE {plan.minimum_echo_time_s * 1e3:.4g} ms, "
+                f"TR {plan.minimum_repetition_time_s * 1e3:.4g} ms."
+            )
         )
-        self.flash_timing_info.setText("\n".join(lines))
-        self.flash_timing_info.setStyleSheet(
-            "color: #b45309;" if notes else "color: #475569;"
-        )
+        self._show_timing_status("FLASH", minimum_text, notes, error=error)
 
     def _flash_auto_spoiler_toggled(self, enabled):
         self.flash_spoiler_cycles_per_slice.setDisabled(enabled)
@@ -8097,10 +8439,19 @@ class SequenceSimulationWidget(QWidget):
         if self.sequence_source.currentIndex() == 6:
             self._request_generated_sequence_refresh()
 
+    def _sequence_nucleus_changed(self, nucleus):
+        previous = self.sequence_reference_ppm.blockSignals(True)
+        self.sequence_reference_ppm.setValue(
+            self.workspace_defaults.sequence_reference_ppm(nucleus)
+        )
+        self.sequence_reference_ppm.blockSignals(previous)
+        self._frequency_reference_changed()
+
     def _frequency_reference_changed(self, *_):
         self._update_frequency_reference_info()
         active_spsp = False
         for prefix in (
+            "fid",
             "epi",
             "epsi",
             "csi",
@@ -9074,10 +9425,39 @@ class SequenceSimulationWidget(QWidget):
             self._generation_error = f"Invalid RF + Slice Selection: {exc}"
             return False
 
+    def _fid_changed(self, *_):
+        self._update_fid_sampling_info()
+        if self.sequence_source.currentIndex() == self.INTERNAL_SOURCE:
+            self._request_generated_sequence_refresh()
+
+    def _update_fid_sampling_info(self):
+        dwell_us = 1000.0 / self.fid_bandwidth_khz.value()
+        duration_ms = self.fid_points.value() * dwell_us / 1000.0
+        self.fid_sampling_info.setText(
+            f"Dwell {dwell_us:.6g} µs; FID duration {duration_ms:.6g} ms; "
+            f"{self.fid_points.value() * self.fid_repetitions.value()} total samples"
+        )
+
     def _load_internal_sequence(self):
+        try:
+            program = make_internal_fid(
+                **self._shared_rf_parameters("fid"),
+                rf_raster_s=self.scanner_parameters.rf_raster_time_s,
+                flip_angle_deg=self.fid_flip_angle_deg.value(),
+                rf_phase_deg=self.fid_rf_phase_deg.value(),
+                num_samples=self.fid_points.value(),
+                sampling_bandwidth_hz=self.fid_bandwidth_khz.value() * 1000.0,
+                adc_delay_s=self.fid_adc_delay_ms.value() / 1000.0,
+                receiver_frequency_offset_hz=self.fid_receiver_offset_hz.value(),
+                repetitions=self.fid_repetitions.value(),
+                repetition_time_s=self.fid_repetition_time_ms.value() / 1000.0,
+            )
+        except (TypeError, ValueError) as exc:
+            self._generation_error = f"Invalid Internal FID: {exc}"
+            return False
         self._generated_pulseq_sequence = None
         self._sequence_generation_pending = False
-        self._generated_sequence_source_index = None
+        self._generated_sequence_source_index = self.INTERNAL_SOURCE
         self._generation_error = ""
         self._acquisition_compiled = None
         self.export_pulseq_button.setEnabled(False)
@@ -9087,19 +9467,8 @@ class SequenceSimulationWidget(QWidget):
         self.spiral_acquisition = None
         self.spectroscopic_acquisition = None
         self.acquisition_note = ""
-        rf_duration = 1e-3
-        dwell = 100e-6
-        sample_count = 256
-        adc_start = rf_duration + dwell / 2
-        duration = rf_duration + sample_count * dwell
-        self.program = SequenceProgram(
-            events=(
-                RFEvent(0.0, np.array([250.0]), rf_duration),
-                ADCEvent(adc_start, sample_count, dwell),
-            ),
-            duration_s=duration,
-            source="internal-fid",
-        )
+        self.program = program
+        self._update_fid_sampling_info()
         self._apply_probe_defaults_from_program()
         self._configure_frame_selector()
         self._configure_spectroscopy_selectors()
@@ -9110,7 +9479,7 @@ class SequenceSimulationWidget(QWidget):
         if self.epi_readout_trajectory.currentText() == "Spiral":
             return self._load_spiral()
         try:
-            self._resolve_epi_timing()
+            self._resolve_epi_timing(keep_notes=True)
             self._update_bandwidth_labels()
             sequence = make_pulseq_epi(**self._epi_pulseq_parameters())
             self._set_generated_pulseq_sequence(sequence, "internal-cartesian-epi")
@@ -9167,7 +9536,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _load_epsi_mge(self):
         try:
-            self._resolve_epsi_mge_timing()
+            self._resolve_epsi_mge_timing(keep_notes=True)
             self._update_epsi_mge_labels()
             sequence = make_pulseq_epsi_mge(**self._epsi_mge_pulseq_parameters())
             self._set_generated_pulseq_sequence(sequence, "internal-epsi-mge-2d")
@@ -9186,7 +9555,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _load_flash(self):
         try:
-            self._resolve_flash_timing()
+            self._resolve_flash_timing(keep_notes=True)
             self._update_flash_labels()
             sequence = make_pulseq_flash(**self._flash_pulseq_parameters())
             self._set_generated_pulseq_sequence(sequence, "internal-flash-2d")
@@ -9699,9 +10068,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _pulseq_load_status(self, message):
         self.status.setText(str(message))
-        logger = getattr(self.window(), "log_message", None)
-        if callable(logger):
-            logger(f"Pulseq import: {message}")
+        self._log_message(f"Pulseq import: {message}")
 
     def _pulseq_load_finished(self, payload, filename):
         self._apply_loaded_pulseq(payload, filename)
@@ -9993,6 +10360,7 @@ class SequenceSimulationWidget(QWidget):
             if end_s <= start_s:
                 start_s, end_s = 0.0, float(self.program.duration_s)
             self._refresh_sequence_waveforms(start_s, end_s)
+            self._refresh_sequence_overviews()
             self._update_waveform_y_ranges()
             self._update_waveform_value_summary()
         self._emit_physical_b1_changed()
@@ -10212,10 +10580,21 @@ class SequenceSimulationWidget(QWidget):
     def _show_program(self, compiled=None):
         if self.program is None:
             return
+        self.sequence_timing_summary.setText(
+            _sequence_preview_timing_text(self.program)
+        )
         preserved_x_range_ms = None
         if self._preserve_sequence_plot_range_on_next_show:
             current_range = self.rf_plot.getViewBox().viewRange()[0]
-            if len(current_range) == 2 and np.all(np.isfinite(current_range)):
+            default_range = self._sequence_plot_default_range_ms
+            was_default = default_range is not None and np.allclose(
+                current_range, default_range, rtol=0.0, atol=1e-6
+            )
+            if (
+                not was_default
+                and len(current_range) == 2
+                and np.all(np.isfinite(current_range))
+            ):
                 preserved_x_range_ms = tuple(float(value) for value in current_range)
         try:
             if compiled is None:
@@ -10525,8 +10904,9 @@ class SequenceSimulationWidget(QWidget):
         self._sequence_plot_window_s = None
         duration = max(float(self.program.duration_s), 1e-9)
         duration_ms = duration * 1000.0
+        self._sequence_plot_default_range_ms = _sequence_preview_range_ms(self.program)
         if preserved_x_range_ms is None:
-            start_ms, end_ms = 0.0, duration_ms
+            start_ms, end_ms = self._sequence_plot_default_range_ms
         else:
             start_ms, end_ms = preserved_x_range_ms
             visible_span_ms = min(max(end_ms - start_ms, 1e-9), duration_ms)
@@ -10534,13 +10914,29 @@ class SequenceSimulationWidget(QWidget):
             end_ms = start_ms + visible_span_ms
         self.rf_plot.setXRange(start_ms, end_ms, padding=0)
         self._refresh_sequence_waveforms(start_ms / 1000.0, end_ms / 1000.0)
+        self._refresh_sequence_overviews()
         self._update_waveform_y_ranges()
         self._set_sequence_cursor(0.0)
         self._update_run_action_availability()
         self._emit_physical_b1_changed()
 
     def _sequence_plot_range_changed(self, _view_box, x_range):
-        if self.program is None or x_range is None or len(x_range) != 2:
+        if self._syncing_sequence_plot_ranges or x_range is None or len(x_range) != 2:
+            return
+        # ViewBox.setXLink aligns pixels, which gives different time ranges when
+        # the RF phase axis makes one plot narrower. Share the actual range so
+        # both previews show exactly the same repetition, also after resizing.
+        other_plot = (
+            self.gradient_plot
+            if _view_box is self.rf_plot.getViewBox()
+            else self.rf_plot
+        )
+        self._syncing_sequence_plot_ranges = True
+        try:
+            other_plot.setXRange(*x_range, padding=0)
+        finally:
+            self._syncing_sequence_plot_ranges = False
+        if self.program is None:
             return
         start_s = max(0.0, float(x_range[0]) / 1000.0)
         end_s = min(float(self.program.duration_s), float(x_range[1]) / 1000.0)
@@ -10548,6 +10944,35 @@ class SequenceSimulationWidget(QWidget):
             return
         self._sequence_plot_pending_window_s = (start_s, end_s)
         self.sequence_plot_refresh_timer.start()
+
+    def _refresh_sequence_overviews(self):
+        if self.program is None:
+            return
+        duration_s = max(float(self.program.duration_s), 1e-9)
+        rf_scale, gradient_scale, *_labels = self._waveform_scales()
+        rf_x, rf_y = _event_step_plot_data(
+            self.program.rf_events,
+            samples_attribute="samples_hz",
+            start_s=0.0,
+            end_s=duration_s,
+            scale=rf_scale,
+            magnitude=True,
+            max_vertices=1800,
+        )
+        self.rf_overview.set_waveforms([(rf_x, rf_y, "m")], duration_s * 1000.0)
+        gradients = self.program.gradient_events
+        waveforms = []
+        for axis, color in zip("xyz", ("r", "g", "b")):
+            x, y = _event_step_plot_data(
+                tuple(event for event in gradients if event.axis == axis),
+                samples_attribute="samples_hz_per_m",
+                start_s=0.0,
+                end_s=duration_s,
+                scale=gradient_scale,
+                max_vertices=1800,
+            )
+            waveforms.append((x, y, color))
+        self.gradient_overview.set_waveforms(waveforms, duration_s * 1000.0)
 
     def _refresh_pending_sequence_plot(self):
         if self._sequence_plot_pending_window_s is None:
@@ -10907,7 +11332,7 @@ class SequenceSimulationWidget(QWidget):
             self.probe_points.setValue(points)
 
     def _can_start_probe(self):
-        if self.sequence_source.currentIndex() in self.GENERATED_SOURCES:
+        if self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES:
             if not self._ensure_current_generated_sequence():
                 QMessageBox.warning(
                     self,
@@ -11029,9 +11454,7 @@ class SequenceSimulationWidget(QWidget):
     def _probe_status_update(self, message):
         message = str(message)
         self.probe_status.setText(message)
-        logger = getattr(self.window(), "log_message", None)
-        if callable(logger):
-            logger(f"Sequence probe: {message}")
+        self._log_message(f"Sequence probe: {message}")
 
     def _probe_failed(self, message):
         probe_selected = self.object_source.currentIndex() == 2
@@ -11605,7 +12028,7 @@ class SequenceSimulationWidget(QWidget):
                 "configuration panel.",
             )
             return False
-        if self.sequence_source.currentIndex() in self.GENERATED_SOURCES:
+        if self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES:
             if not self._ensure_current_generated_sequence():
                 self._show_generation_error_dialog()
                 return False
@@ -11692,9 +12115,7 @@ class SequenceSimulationWidget(QWidget):
         message = str(message)
         display_message = f"{self._parameter_loop_prefix()}{message}"
         self.status.setText(display_message)
-        logger = getattr(self.window(), "log_message", None)
-        if callable(logger):
-            logger(f"Sequence simulation: {display_message}")
+        self._log_message(f"Sequence simulation: {display_message}")
 
     def _progress(self, done, total):
         total = max(1, int(total))
@@ -11891,6 +12312,7 @@ class SequenceSimulationWidget(QWidget):
         """Apply scanner hardware limits to generated sequences and exports."""
         self.scanner_parameters = ScannerParameters.from_mapping(parameters)
         for prefix in (
+            "fid",
             "epi",
             "epsi",
             "csi",
@@ -11917,6 +12339,7 @@ class SequenceSimulationWidget(QWidget):
     ):
         """Remove stale result data before the next simulation starts."""
         self._active_session_run_id = None
+        self._project_export_contexts.pop("sequence", None)
         self.result = None
         self.magnetization_animation = None
         self._split_csi_data = None
@@ -12360,6 +12783,7 @@ class SequenceSimulationWidget(QWidget):
                 parameter, loop_metadata.get("value", 0.0)
             )
             run.display_name = f"Loop {index}/{count} · {parameter.label} = {value}"
+        self._project_export_contexts["sequence"] = (run.state, result)
         if retain:
             self._retain_session_simulation_run(run)
         else:
@@ -12376,11 +12800,40 @@ class SequenceSimulationWidget(QWidget):
         self.reconstruction_explorer.add_session_run(run, current=True)
         self.result_volume_viewer.add_session_run(run, current=True)
 
+    @staticmethod
+    def _snapshot_phantom_context(phantom):
+        """Detach editable phantom context while sharing its voxel arrays."""
+        if phantom is None:
+            return None
+        snapshot = copy.copy(phantom)
+        snapshot.metadata = copy.deepcopy(phantom.metadata)
+        return snapshot
+
+    @staticmethod
+    def _snapshot_generated_sequence(sequence):
+        if sequence is None:
+            return None
+        snapshot = copy.copy(sequence)
+        snapshot.definitions = copy.deepcopy(sequence.definitions)
+        return snapshot
+
+    def project_export_context(self):
+        """Return the saved context belonging to the result selected for export."""
+        probe_selected = self.views.tabText(self.views.currentIndex()) == "Spin Probe"
+        run_type = "spin_probe" if probe_selected else "sequence"
+        result = self.probe_result if probe_selected else self.result
+        context = self._project_export_contexts.get(run_type)
+        return context if context is not None and context[1] is result else None
+
     def _session_run_state(self, *, phantom, **extra):
         state = {
-            "program": self.program,
-            "phantom": phantom,
-            "generated_pulseq_sequence": self._generated_pulseq_sequence,
+            "program": replace(
+                self.program, metadata=copy.deepcopy(self.program.metadata)
+            ),
+            "phantom": self._snapshot_phantom_context(phantom),
+            "generated_pulseq_sequence": self._snapshot_generated_sequence(
+                self._generated_pulseq_sequence
+            ),
             "generated_sequence_source_index": self._generated_sequence_source_index,
             "sequence_generation_pending": self._sequence_generation_pending,
             "sequence_source_index": self.sequence_source.currentIndex(),
@@ -12395,7 +12848,7 @@ class SequenceSimulationWidget(QWidget):
         state.update(extra)
         return state
 
-    def _register_session_probe_run(self, result, *, mode=None):
+    def _register_session_probe_run(self, result, *, mode=None, retain=True):
         """Hand one completed spin-probe run to the session explorer."""
         if self.program is None:
             return None
@@ -12429,10 +12882,16 @@ class SequenceSimulationWidget(QWidget):
             ),
             run_type="spin_probe",
         )
-        register = getattr(self.window(), "register_sequence_simulation_run", None)
-        if callable(register):
-            register(run)
-            self._active_session_run_id = run.run_id
+        self._project_export_contexts["spin_probe"] = (run.state, result)
+        if retain:
+            register = getattr(self.window(), "register_sequence_simulation_run", None)
+            if callable(register):
+                register(run)
+                self._active_session_run_id = run.run_id
+        else:
+            capture = getattr(self.window(), "_capture_sequence_simulation_run", None)
+            if callable(capture):
+                capture(run)
         return run
 
     def restore_session_simulation_run(self, run):
@@ -12445,9 +12904,13 @@ class SequenceSimulationWidget(QWidget):
             )
             return False
         state = dict(run.state)
-        self.program = state["program"]
-        self.phantom = state["phantom"]
-        self._generated_pulseq_sequence = state.get("generated_pulseq_sequence")
+        self.program = replace(
+            state["program"], metadata=copy.deepcopy(state["program"].metadata)
+        )
+        self.phantom = self._snapshot_phantom_context(state["phantom"])
+        self._generated_pulseq_sequence = self._snapshot_generated_sequence(
+            state.get("generated_pulseq_sequence")
+        )
         self._generated_sequence_source_index = state.get(
             "generated_sequence_source_index"
         )
@@ -12462,6 +12925,7 @@ class SequenceSimulationWidget(QWidget):
         self.acquisition_note = state.get("acquisition_note", "")
         self._acquisition_compiled = state.get("acquisition_compiled")
         self._active_session_run_id = run.run_id
+        self._project_export_contexts[run.run_type] = (run.state, run.result)
         self._show_program(compiled=self._acquisition_compiled)
         if run.run_type == "spin_probe":
             self.result = None
@@ -12506,6 +12970,9 @@ class SequenceSimulationWidget(QWidget):
 
     def forget_session_simulation_run(self, run):
         """Clear result views when the run currently being shown is deleted."""
+        context = self._project_export_contexts.get(run.run_type)
+        if context is not None and context[0] is run.state:
+            self._project_export_contexts.pop(run.run_type)
         self.reconstruction_explorer.remove_session_run(run)
         self.result_volume_viewer.remove_session_run(run)
         if self._active_session_run_id != run.run_id:
