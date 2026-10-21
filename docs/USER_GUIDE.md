@@ -762,7 +762,15 @@ to any simulated sequence, for example a hyperpolarized in-vivo experiment.
 2.  **Enter the calibration:** open **Receiver / Noise**, choose
     **Calibrated from phantom FID** and enter the FID amplitude, the noise std
     per real or imaginary channel, averages, bandwidth, flip angle,
-    concentration (mM), volume (ml), enrichment and both temperatures. A
+    concentration (mM), volume (ml), enrichment and both temperatures.
+    **Load FID…** fills the measured values instead. It reads a ParaVision
+    scan folder (or its `fid` / `rawdata.job0`) or a complex `.npy`, `.txt`,
+    `.csv` or `.dat` array. The amplitude is extrapolated through the
+    digital-filter delay to the start of the acquisition. Averages, bandwidth,
+    flip angle, TR, dummy scans, T2* and the amplitude delay come from the
+    scan. **Load noise scan…** adds the 0° scan, which must share NA, receiver
+    gain and bandwidth; without one, the noise comes from the FID tail. Check
+    the summary line and any warning below the buttons. A
     **Noise factor (loading)** above 1 accounts for extra noise of the
     simulated object, e.g. a loaded coil in vivo.
 3.  **Describe the reference scan (optional):** enable **Reference scan

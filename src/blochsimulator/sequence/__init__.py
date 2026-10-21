@@ -15,6 +15,16 @@ from .acquisition import (
     make_cartesian_epi,
 )
 from .compiler import CompiledSequence, SequenceCompiler
+from .measured_fid import (
+    AmplitudeEstimate,
+    MeasuredCalibrationInputs,
+    MeasuredScan,
+    NoiseEstimate,
+    estimate_fid_amplitude,
+    estimate_noise_std,
+    load_measured_scan,
+    measured_calibration_inputs,
+)
 from .receiver import (
     ReceiverCalibration,
     ReceiverNoise,
@@ -168,6 +178,14 @@ __all__ = [
     "ReceiverNoise",
     "apply_receiver_noise",
     "receiver_acquisition_metadata",
+    "AmplitudeEstimate",
+    "MeasuredCalibrationInputs",
+    "MeasuredScan",
+    "NoiseEstimate",
+    "estimate_fid_amplitude",
+    "estimate_noise_std",
+    "load_measured_scan",
+    "measured_calibration_inputs",
     "ReferenceEfficiency",
     "ReferenceScan",
     "coil_dependent",

@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 import math
+from pathlib import Path
 import sys
 
 from PyQt5.QtCore import QLocale, pyqtSignal
@@ -11,6 +12,7 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -21,11 +23,23 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from ..sequence.measured_fid import (
+    check_noise_scan,
+    load_measured_scan,
+    measured_calibration_inputs,
+)
 from ..sequence.receiver import ReceiverCalibration, ReceiverNoise
 from ..sequence.reference_scan import ReferenceScan, reference_signal_efficiency
 from ..sequence.snr_budget import format_amount
 
 KELVIN_AT_0_CELSIUS = 273.15
+# Scanners quote e.g. 7.05 T for a nominal 7 T magnet.
+MEASURED_FIELD_TOLERANCE = 0.02
+MEASURED_DATA_FILTER = (
+    "Measured data (fid rawdata.job0 acqp method *.npy *.txt *.csv *.dat);;"
+    "ParaVision raw data (fid rawdata.job0 acqp method);;"
+    "Arrays (*.npy *.txt *.csv *.dat);;All files (*)"
+)
 
 
 class ScientificSpinBox(QDoubleSpinBox):
@@ -107,6 +121,8 @@ class ReceiverNoiseWidget(QGroupBox):
         super().__init__("Receiver / Noise", parent)
         self.calibration = None
         self._result_available = False
+        self._measured_fid = None
+        self._measured_noise = None
         # Returns the (transmit, receive) B1 fields the simulated object uses;
         # the main window points it at the B1 workspace.
         self.coil_fields = None
@@ -194,7 +210,8 @@ class ReceiverNoiseWidget(QGroupBox):
         self.amplitude.setToolTip(
             "Measured FID amplitude immediately after excitation, before decay. "
             "Use the first valid FID point only if acquisition delay is negligible. "
-            "Amplitude and noise must have the same scanner scaling."
+            "Amplitude and noise must have the same scanner scaling. 'Load FID…' "
+            "extrapolates it to the acquisition start."
         )
         sigma_help = (
             "Standard deviation of the real or imaginary noise channel. "
@@ -210,6 +227,10 @@ class ReceiverNoiseWidget(QGroupBox):
         self.calibration_box = QWidget()
         calibration_form = QFormLayout(self.calibration_box)
         calibration_form.setContentsMargins(0, 0, 0, 0)
+        calibration_form.addRow("Measured data", self._build_measured_loader())
+        self.measured_info = QLabel()
+        self.measured_info.setWordWrap(True)
+        calibration_form.addRow(self.measured_info)
         calibration_form.addRow("Measured FID amplitude", self.amplitude)
         calibration_form.addRow("Measured noise std", self.reference_std)
         calibration_form.addRow("Averages", self.averages)
@@ -280,6 +301,101 @@ class ReceiverNoiseWidget(QGroupBox):
         self.reference_geometry.currentIndexChanged.connect(self._refresh)
         self.seed.valueChanged.connect(self._refresh)
         self._refresh()
+
+    def _build_measured_loader(self):
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.load_fid_button = QPushButton("Load FID…")
+        self.load_fid_button.setToolTip(
+            "Read a ParaVision fid / rawdata.job0 (with acqp and method) or a "
+            "complex .npy / text array. Fills the amplitude extrapolated to the "
+            "acquisition start, the noise std of the FID tail unless a noise "
+            "scan is loaded, averages (NA × NR), bandwidth, flip angle and the "
+            "reference scan timing."
+        )
+        self.load_noise_button = QPushButton("Load noise scan…")
+        self.load_noise_button.setToolTip(
+            "Read a scan without excitation (0° pulse) with the FID's averages, "
+            "receiver gain and bandwidth; its noise std replaces the FID tail "
+            "estimate."
+        )
+        self.load_fid_button.clicked.connect(
+            lambda: self._choose_measured_file("Load measured FID", self.load_fid)
+        )
+        self.load_noise_button.clicked.connect(
+            lambda: self._choose_measured_file("Load noise scan", self.load_noise_scan)
+        )
+        layout.addWidget(self.load_fid_button)
+        layout.addWidget(self.load_noise_button)
+        return row
+
+    def _choose_measured_file(self, title, load):
+        path, _ = QFileDialog.getOpenFileName(self, title, "", MEASURED_DATA_FILTER)
+        if path:
+            load(path)
+
+    def load_fid(self, path):
+        """Read a measured FID and fill the calibration inputs from it."""
+        try:
+            scan = load_measured_scan(path)
+        except (OSError, ValueError) as exc:
+            self.measured_info.setText(f"Could not read the FID: {exc}.")
+            return False
+        self._measured_fid = scan
+        return self._apply_measured_data()
+
+    def load_noise_scan(self, path):
+        """Read a scan without excitation as the calibration noise."""
+        try:
+            scan = load_measured_scan(path)
+            if self._measured_fid is not None:
+                check_noise_scan(self._measured_fid, scan)
+        except (OSError, ValueError) as exc:
+            self.measured_info.setText(f"Could not use the noise scan: {exc}.")
+            return False
+        self._measured_noise = scan
+        if self._measured_fid is None:
+            self.measured_info.setText("Noise scan loaded; load the FID next.")
+            return True
+        return self._apply_measured_data()
+
+    def _apply_measured_data(self):
+        fid, noise, note = self._measured_fid, self._measured_noise, ""
+        if noise is not None:
+            try:
+                check_noise_scan(fid, noise)
+            except ValueError as exc:
+                noise, self._measured_noise = None, None
+                note = f"Noise scan dropped ({exc}); using the FID tail.\n"
+        try:
+            inputs = measured_calibration_inputs(fid, noise)
+        except ValueError as exc:
+            self.measured_info.setText(f"{note}Could not analyse the FID: {exc}.")
+            return False
+        self.amplitude.setText(f"{inputs.amplitude.amplitude:.6g}")
+        self.reference_std.setValue(float(f"{inputs.noise.std:.6g}"))
+        self.averages.setValue(inputs.averages)
+        if inputs.dwell_s is not None:
+            self.bandwidth_khz.setValue(1e-3 / inputs.dwell_s)
+        if inputs.flip_angle_deg is not None:
+            self.flip_angle.setValue(inputs.flip_angle_deg)
+        if inputs.repetition_time_s is not None:
+            self.reference_tr.setValue(inputs.repetition_time_s)
+        if inputs.dummy_scans is not None:
+            self.reference_dummy_scans.setValue(inputs.dummy_scans)
+        if inputs.amplitude.t2star_s is not None:
+            self.reference_t2star.setValue(inputs.amplitude.t2star_s * 1e3)
+        if inputs.amplitude_delay_s is not None:
+            self.reference_delay.setValue(inputs.amplitude_delay_s * 1e3)
+        scanner = ""
+        if inputs.nucleus is not None and inputs.field_strength_t is not None:
+            scanner = f" ({inputs.nucleus} at {inputs.field_strength_t:.4g} T)"
+        source = Path(fid.source)
+        self.measured_info.setText(
+            f"{note}{source.parent.name}/{source.name}{scanner}: " + inputs.summary()
+        )
+        return True
 
     def _build_reference_scan(self):
         """Optional signal model of the measured reference FID."""
@@ -616,7 +732,12 @@ class ReceiverNoiseWidget(QGroupBox):
         self._refresh_reference(calibrated)
         self.calibration_button.setVisible(calibrated)
         self.assumptions.setVisible(mode != "off")
-        for control in (*calibration_fields, self.calibration_button):
+        for control in (
+            *calibration_fields,
+            self.calibration_button,
+            self.load_fid_button,
+            self.load_noise_button,
+        ):
             control.setEnabled(calibrated)
         self.seed.setEnabled(mode != "off")
         self.apply_button.setEnabled(self._result_available)
@@ -686,7 +807,27 @@ class ReceiverNoiseWidget(QGroupBox):
             "signal."
         )
 
+    def _check_measured_context(self, nucleus, field_strength_t):
+        """Refuse a loaded FID of another nucleus or field strength."""
+        fid = self._measured_fid
+        if fid is None:
+            return
+        problems = []
+        if fid.nucleus is not None and fid.nucleus != nucleus:
+            problems.append(fid.nucleus)
+        field = fid.field_strength_t
+        if field is not None and not math.isclose(
+            field, field_strength_t, rel_tol=MEASURED_FIELD_TOLERANCE
+        ):
+            problems.append(f"{field:.4g} T")
+        if problems:
+            raise ValueError(
+                f"The loaded FID was measured with {' at '.join(problems)}, but "
+                f"the workspace uses {nucleus} at {field_strength_t:g} T"
+            )
+
     def capture_calibration(self, *, nucleus, field_strength_t):
+        self._check_measured_context(nucleus, field_strength_t)
         self.calibration = ReceiverCalibration(
             **self._calibration_inputs(),
             nucleus=nucleus,
@@ -771,6 +912,7 @@ class ReceiverNoiseWidget(QGroupBox):
             "reference_std": self.reference_std.text(),
             "concentration": self.concentration.text(),
             "volume": self.volume.text(),
+            "measured_info": self.measured_info.text(),
             "seed": self.seed.value(),
             "calibration": (
                 None if self.calibration is None else self.calibration.to_metadata()
@@ -804,8 +946,10 @@ class ReceiverNoiseWidget(QGroupBox):
             ("reference_std", "0.01"),
             ("concentration", ""),
             ("volume", ""),
+            ("measured_info", ""),
         ):
             getattr(self, name).setText(str(state.get(name, default)))
+        self._measured_fid = self._measured_noise = None
         for name, default in self._SPIN_STATE:
             getattr(self, name).setValue(state.get(name, default))
         self.reference_geometry.setCurrentIndex(

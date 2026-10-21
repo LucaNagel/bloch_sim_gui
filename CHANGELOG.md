@@ -54,6 +54,16 @@ The project follows [Semantic Versioning](https://semver.org/).
   off-centre reference no longer reads as lower receiver sensitivity. The SNR
   budget lists the factor and its inputs; runs reject a coil-dependent
   calibration for an object without B1 maps.
+- **Load FID…** and **Load noise scan…** fill the receiver calibration from
+  measured data. They read ParaVision 1-D raw data (`fid` or `rawdata.job0`
+  with `acqp`, integer or float, either byte order) or complex arrays
+  (`.npy`, `.txt`, `.csv`, `.dat`). The FID amplitude is extrapolated through
+  the digital-filter group delay with T2*. The noise std comes from a
+  matching 0° noise scan (same NA, receiver gain and bandwidth) or the FID
+  tail. Averages, bandwidth, flip angle, TR, dummy scans and the amplitude
+  delay come from the scan parameters, and warnings flag a non-white tail or
+  low SNR (`sequence.measured_fid`). **Set calibration** refuses a loaded FID
+  of another nucleus or field strength.
 
 ### Changed
 

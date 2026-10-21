@@ -127,7 +127,9 @@ The time-resolved bevahiour of spins during and after RF Pulse can be visualized
   enrichment and temperature. Noise follows each ADC event's bandwidth, so a
   thermal phantom scan predicts e.g. hyperpolarized in-vivo SNR. An optional
   reference scan model corrects the calibration for T1 saturation, T2* decay
-  and the B1 workspace coil at the phantom position. Its dedicated
+  and the B1 workspace coil at the phantom position. **Load FID…** and
+  **Load noise scan…** read the ParaVision raw data or complex arrays of the
+  phantom FID and 0° noise scan directly. Its dedicated
   tab between **Phantom + B1** and **Simulations** shows an SNR budget from
   the receiver setting through the whole-object FID and each readout
   bandwidth to the image voxels of the current object and last run. Clean ADC

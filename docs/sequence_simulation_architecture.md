@@ -420,7 +420,8 @@ inside the coil's sensitive region. Without the reference scan model the
 reference must also be fully relaxed (TR ≥ 5 T1, or a doped phantom) and read
 at $t=0$. On Bruker data the digital-filter group delay makes the first stored
 points unsuitable as $A(t=0)$; fit or extrapolate the FID, or enter the time
-of the measured point as the amplitude delay.
+of the measured point as the amplitude delay. **Load FID…** does this from
+the raw data (see below).
 
 #### Reference scan model
 
@@ -474,6 +475,52 @@ change. The calibration stores $\eta$ as `signal_efficiency` and the scan as
 inputs as **Reference signal fraction**. Only one transmit and one receive
 channel are supported.
 
+#### Measured scan import
+
+**Load FID…** and **Load noise scan…** (`load_measured_scan`,
+`measured_calibration_inputs` in `sequence.measured_fid`) fill the
+calibration inputs from raw data:
+
+- a ParaVision scan folder, or its `fid` or `rawdata.job0` next to `acqp`:
+  1-D, one receiver, 16- or 32-bit integer or 32- or 64-bit float in either
+  byte order, `fid` rows padded to 1024 bytes;
+- a complex array (`.npy`, `.txt`, `.csv`, `.dat`) of complex numbers or
+  real/imaginary pairs, one repetition per row, without scanner parameters.
+
+ParaVision parameters give the dwell $1/\mathrm{SW_h}$, the filter group delay
+`GRPDLY`, NA, receiver gain, nucleus, field $\mathrm{BF1}/\gamma$, flip
+angle, TR and dummy scans. The digital filter delays the FID by `GRPDLY`
+points, so sample $k$ lies at $t_k = (k - \mathrm{GRPDLY})\,\Delta t$ after
+the acquisition start; that start follows the excitation centre by half the
+excitation pulse plus `DeadTime`, the amplitude delay.
+
+The amplitude is fitted to the mean of all repetitions. Starting four points
+after the group delay, $\ln|z|$ is fitted with a magnitude-weighted
+polynomial (quadratic from 12 points) until the smoothed magnitude falls to
+60 % of its first value, using 8 to 256 points. Averaging adjacent samples
+first cancels the filter's alternating ringing. The fit at $t=0$ gives $A$,
+its slope $T_2^*$.
+
+The noise std is per quadrature and refers to the mean of the FID's
+repetitions. A noise scan without excitation must share NA, receiver gain and
+bandwidth with the FID; its time-domain std is taken after two group delays,
+with each row's mean removed. Without a noise scan, the last quarter of every
+FID row is used. While its time-domain std is at most 1.1 times the median of
+its Hann-windowed periodogram, the tail counts as white noise and the
+time-domain std is used. Otherwise the spectral median, which ignores a
+residual line, is used with a warning. An SNR below 20 also warns. Averages
+are NA × repetitions, so the calibration's single-scan SNR is
+$A/(\sigma\sqrt{N_A N_R})$. This holds whether the scanner sums or averages
+the accumulations, provided FID and noise scan are treated alike.
+
+Loading never sets the calibration or enables the reference scan model.
+Concentration, volume, enrichment and temperatures are still entered by hand.
+**Set calibration** refuses a loaded FID of another nucleus, or with a field
+more than 2 % away from the workspace field strength. On two repeated 90° FIDs
+of 2 M [13C]urea at 7 T (2048 points, 2.008 kHz) the import gives
+$A = 5.71\times10^4$ and $\sigma = 113$, with the two SNRs (about 505)
+agreeing to 1 %.
+
 **Set calibration** freezes the entered values together with the current
 nucleus and field strength. Runs and later **Apply to result** calls check the
 result's nucleus and field strength against the calibration; another field
@@ -488,7 +535,8 @@ Calibrated mode requires `signal_weighting="voxel_volume"` and a 3D phantom.
 (reference moles and polarization, target thermal polarization, single-scan
 SNR and sensitivity) and the signal unit. Simulated runs are single scans.
 Receiver filter shapes, field-strength scaling of coil sensitivity,
-multichannel covariance and scanner-data import are outside this model.
+multichannel covariance and multi-receiver or multidimensional scanner data
+are outside this model.
 
 `SequenceSimulationResult.signal` contains the measured realization and
 `signal_noiseless` retains the original ADC data when receiver processing has
