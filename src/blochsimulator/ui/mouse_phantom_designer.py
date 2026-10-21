@@ -30,6 +30,7 @@ from PyQt5.QtWidgets import (
 
 from ..mouse_phantom import (
     INJECTION_COMPOUNDS,
+    TRANSVERSE_DECAY_MODES,
     MousePerfusionConfig,
     MousePerfusionPhantom,
     build_reference_mouse_anatomy,
@@ -435,13 +436,14 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.config = MousePerfusionConfig.from_dict(config.to_dict())
         self.phantom = None
         self._selected_voxel = None
+        self._anatomy_slice_cache = {}
         self._animation_bounds_s = (0.0, 1.0)
         self._animation_timer = QTimer(self)
         self._animation_timer.setInterval(50)
         self._animation_timer.timeout.connect(self._advance_animation)
         self._live_preview_timer = QTimer(self)
         self._live_preview_timer.setSingleShot(True)
-        self._live_preview_timer.setInterval(300)
+        self._live_preview_timer.setInterval(150)
         self._live_preview_timer.timeout.connect(self._preview)
         self._build_ui()
         self._load_config()
@@ -464,6 +466,13 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         if step is not None:
             spin.setSingleStep(float(step))
         return spin
+
+    @staticmethod
+    def _group_form(group: QGroupBox) -> QFormLayout:
+        form = QFormLayout(group)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        return form
 
     @staticmethod
     def _scrollable_form(widget: QWidget) -> QScrollArea:
@@ -581,24 +590,92 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         injection_layout = QHBoxLayout(injection_page)
         injection_controls = QWidget()
         injection_controls_layout = QVBoxLayout(injection_controls)
-        injection_controls_layout.setContentsMargins(0, 0, 0, 0)
+        injection_controls_layout.setContentsMargins(0, 0, 6, 0)
         injection_figures = QWidget()
         injection_figures_layout = QVBoxLayout(injection_figures)
         injection_figures_layout.setContentsMargins(0, 0, 0, 0)
-        injection_controls.setMinimumWidth(410)
-        injection_controls.setMaximumWidth(540)
-        injection_layout.addWidget(injection_controls, 0)
+        injection_scroll = self._scrollable_form(injection_controls)
+        injection_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        injection_scroll.setMinimumWidth(440)
+        injection_scroll.setMaximumWidth(560)
+        injection_layout.addWidget(injection_scroll, 0)
         injection_layout.addWidget(injection_figures, 1)
-        injection_form = QFormLayout()
+
+        compound_group = QGroupBox("Injected compound")
+        compound_form = self._group_form(compound_group)
         self.injection_compound = QComboBox()
         for key, label in INJECTION_COMPOUNDS.items():
             self.injection_compound.addItem(label, key)
         self.injection_compound.currentIndexChanged.connect(
             self._compound_selection_changed
         )
-        self.injection_amount = self._float_spin(
-            0.0, 1e6, decimals=6, suffix=" µmol", step=0.05
+        self.injection_concentration = self._float_spin(
+            0.0, 10000.0, decimals=2, suffix=" mM", step=5.0
         )
+        self.injection_volume = self._float_spin(
+            0.0, 100000.0, decimals=1, suffix=" µl", step=10.0
+        )
+        self.injection_volume.setToolTip(
+            "Injected volume. Mice typically receive about 10 µl per gram of "
+            "body weight."
+        )
+        self.injection_dose_label = QLabel()
+        self.injection_dose_label.setStyleSheet("color: palette(mid);")
+        self.injection_polarization = self._float_spin(
+            0.000001, 1e9, decimals=3, suffix=" × thermal", step=100.0
+        )
+        self.injection_polarization.setToolTip(
+            "Polarization of the inflowing compound relative to thermal "
+            "equilibrium at B0."
+        )
+        compound_form.addRow("Compound", self.injection_compound)
+        compound_form.addRow("Concentration", self.injection_concentration)
+        compound_form.addRow("Volume", self.injection_volume)
+        compound_form.addRow("Dose", self.injection_dose_label)
+        compound_form.addRow("Polarization", self.injection_polarization)
+        injection_controls_layout.addWidget(compound_group)
+
+        relaxation_group = QGroupBox("Hyperpolarized relaxation")
+        relaxation_grid = QGridLayout(relaxation_group)
+        for column, header in enumerate(("T1", "T2", "T2*"), start=1):
+            label = QLabel(header)
+            label.setAlignment(Qt.AlignCenter)
+            relaxation_grid.addWidget(label, 0, column)
+            relaxation_grid.setColumnStretch(column, 1)
+        self.relaxation_spins = {}
+        self.relaxation_row_labels = {}
+        for row, (key, label) in enumerate(
+            (("injected", "Injected"), ("metabolite", "Metabolites")), start=1
+        ):
+            row_label = QLabel(label)
+            self.relaxation_row_labels[key] = row_label
+            relaxation_grid.addWidget(row_label, row, 0)
+            spins = (
+                self._float_spin(0.1, 1000.0, decimals=1, suffix=" s", step=1.0),
+                self._float_spin(0.1, 100000.0, decimals=1, suffix=" ms", step=10.0),
+                self._float_spin(0.1, 100000.0, decimals=1, suffix=" ms", step=1.0),
+            )
+            for column, spin in enumerate(spins, start=1):
+                relaxation_grid.addWidget(spin, row, column)
+            self.relaxation_spins[key] = spins
+        self.relaxation_row_labels["metabolite"].setToolTip(
+            "Lactate and alanine produced from injected pyruvate."
+        )
+        self.transverse_decay = QComboBox()
+        for key, label in TRANSVERSE_DECAY_MODES.items():
+            self.transverse_decay.addItem(label, key)
+        self.transverse_decay.setToolTip(
+            "The Bloch solver has no intravoxel frequency spread, so one "
+            "constant sets the transverse decay. Use T2* for FID, CSI and EPSI "
+            "readouts; use T2 for refocused sequences such as bSSFP. T2* always "
+            "sets the preview linewidth."
+        )
+        relaxation_grid.addWidget(QLabel("Solver decay"), 3, 0)
+        relaxation_grid.addWidget(self.transverse_decay, 3, 1, 1, 3)
+        injection_controls_layout.addWidget(relaxation_group)
+
+        bolus_group = QGroupBox("Bolus timing and shape")
+        bolus_form = self._group_form(bolus_group)
         self.injection_start = self._float_spin(
             -10000.0, 10000.0, decimals=4, suffix=" s", step=0.1
         )
@@ -608,11 +685,8 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.circulation_delay = self._float_spin(
             0.0, 10000.0, decimals=4, suffix=" s", step=0.05
         )
-        self.perfusion_timestep = self._float_spin(
-            0.0001, 100.0, decimals=4, suffix=" s", step=0.005
-        )
-        self.injection_polarization = self._float_spin(
-            0.000001, 1e9, decimals=3, suffix=" × thermal", step=100.0
+        self.circulation_delay.setToolTip(
+            "Representative delay from the injection site to the organs."
         )
         self.bolus_alpha = self._float_spin(0.05, 100.0, decimals=3, step=0.1)
         self.bolus_beta = self._float_spin(0.05, 100.0, decimals=3, step=0.1)
@@ -625,8 +699,34 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             "u^alpha (1-u)^beta. Larger beta shifts the peak earlier and "
             "shortens the tail."
         )
+        self.perfusion_timestep = self._float_spin(
+            0.0001, 100.0, decimals=4, suffix=" s", step=0.005
+        )
+        self.perfusion_timestep.setToolTip(
+            "Maximum step used by the sequence solver to integrate the inflow."
+        )
+        bolus_shape = QWidget()
+        bolus_shape_layout = QHBoxLayout(bolus_shape)
+        bolus_shape_layout.setContentsMargins(0, 0, 0, 0)
+        bolus_shape_layout.addWidget(QLabel("α"))
+        bolus_shape_layout.addWidget(self.bolus_alpha, 1)
+        bolus_shape_layout.addWidget(QLabel("β"))
+        bolus_shape_layout.addWidget(self.bolus_beta, 1)
+        bolus_form.addRow("Injection starts", self.injection_start)
+        bolus_form.addRow("Duration", self.injection_duration)
+        bolus_form.addRow("Shape", bolus_shape)
+        bolus_form.addRow("Circulation delay", self.circulation_delay)
+        bolus_form.addRow("Inflow time step", self.perfusion_timestep)
+        injection_controls_layout.addWidget(bolus_group)
+
+        clearance_group = QGroupBox("Clearance and renal excretion")
+        clearance_form = self._group_form(clearance_group)
         self.tissue_clearance = self._float_spin(
             0.0001, 100.0, decimals=4, suffix=" s⁻¹", step=0.01
+        )
+        self.tissue_clearance.setToolTip(
+            "Wash-out rate of the injected compound from perfused tissue. "
+            "Preview only."
         )
         self.renal_excretion = self._float_spin(
             0.0, 100.0, decimals=4, suffix=" s⁻¹", step=0.01
@@ -637,7 +737,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             "Preview only; the Bloch solver keeps the vascular delivery."
         )
         self.renal_tubular_transit = self._float_spin(
-            0.0, 10000.0, decimals=2, suffix=" s", step=5.0
+            0.0, 10000.0, decimals=1, suffix=" s", step=5.0
         )
         self.renal_tubular_transit.setToolTip(
             "Mean nephron/pelvis transit; individual transit times are spread "
@@ -646,54 +746,58 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             "roughly 1–2 min."
         )
         self.ureter_transit = self._float_spin(
-            0.0, 10000.0, decimals=2, suffix=" s", step=1.0
+            0.0, 10000.0, decimals=1, suffix=" s", step=1.0
         )
         self.ureter_transit.setToolTip(
             "Plug-flow delay between renal pelvis and bladder."
         )
-        injection_form.addRow("Injected compound", self.injection_compound)
-        injection_form.addRow("Injected amount", self.injection_amount)
-        injection_form.addRow("Injection starts", self.injection_start)
-        injection_form.addRow("Bolus duration", self.injection_duration)
-        injection_form.addRow(
-            "Representative circulation delay", self.circulation_delay
-        )
-        injection_form.addRow("Perfusion time step", self.perfusion_timestep)
-        injection_form.addRow("Inflow polarization", self.injection_polarization)
-        injection_form.addRow("Bolus alpha", self.bolus_alpha)
-        injection_form.addRow("Bolus beta", self.bolus_beta)
-        injection_form.addRow("Preview tissue clearance", self.tissue_clearance)
-        injection_form.addRow("Renal excretion to urine", self.renal_excretion)
-        injection_form.addRow("Renal tubular transit", self.renal_tubular_transit)
-        injection_form.addRow("Ureter transit", self.ureter_transit)
-        injection_controls_layout.addLayout(injection_form)
+        clearance_form.addRow("Tissue clearance", self.tissue_clearance)
+        clearance_form.addRow("Renal excretion", self.renal_excretion)
+        clearance_form.addRow("Tubular transit", self.renal_tubular_transit)
+        clearance_form.addRow("Ureter transit", self.ureter_transit)
+        injection_controls_layout.addWidget(clearance_group)
 
         perfusion_group = QGroupBox("Relative delivery weights")
-        perfusion_form = QFormLayout(perfusion_group)
-        self.background_perfusion = self._float_spin(0.0, 1e6, decimals=4)
-        self.cortex_perfusion = self._float_spin(0.0, 1e6, decimals=4)
-        self.medulla_perfusion = self._float_spin(0.0, 1e6, decimals=4)
-        self.liver_perfusion = self._float_spin(0.0, 1e6, decimals=4)
-        self.heart_perfusion = self._float_spin(0.0, 1e6, decimals=4)
-        self.brain_perfusion = self._float_spin(0.0, 1e6, decimals=4)
-        self.vessel_perfusion = self._float_spin(0.0, 1e6, decimals=4)
-        perfusion_form.addRow("Other perfused tissue", self.background_perfusion)
-        perfusion_form.addRow("Renal cortex", self.cortex_perfusion)
-        perfusion_form.addRow("Renal medulla", self.medulla_perfusion)
-        perfusion_form.addRow("Liver", self.liver_perfusion)
-        perfusion_form.addRow("Heart", self.heart_perfusion)
-        perfusion_form.addRow("Brain", self.brain_perfusion)
-        perfusion_form.addRow("Resolved vessels", self.vessel_perfusion)
+        perfusion_group.setToolTip(
+            "Relative blood flow per tissue, roughly in ml/g/min. The weights "
+            "only distribute the injected dose; their absolute scale cancels."
+        )
+        perfusion_grid = QGridLayout(perfusion_group)
+        self.background_perfusion = self._float_spin(0.0, 1e6, decimals=4, step=0.1)
+        self.cortex_perfusion = self._float_spin(0.0, 1e6, decimals=4, step=0.1)
+        self.medulla_perfusion = self._float_spin(0.0, 1e6, decimals=4, step=0.1)
+        self.liver_perfusion = self._float_spin(0.0, 1e6, decimals=4, step=0.1)
+        self.heart_perfusion = self._float_spin(0.0, 1e6, decimals=4, step=0.1)
+        self.brain_perfusion = self._float_spin(0.0, 1e6, decimals=4, step=0.1)
+        self.vessel_perfusion = self._float_spin(0.0, 1e6, decimals=4, step=0.1)
+        for index, (label, spin) in enumerate(
+            (
+                ("Renal cortex", self.cortex_perfusion),
+                ("Renal medulla", self.medulla_perfusion),
+                ("Liver", self.liver_perfusion),
+                ("Heart", self.heart_perfusion),
+                ("Brain", self.brain_perfusion),
+                ("Vessels", self.vessel_perfusion),
+                ("Other tissue", self.background_perfusion),
+            )
+        ):
+            row, column = divmod(index, 2)
+            perfusion_grid.addWidget(QLabel(label), row, 2 * column)
+            perfusion_grid.addWidget(spin, row, 2 * column + 1)
+            perfusion_grid.setColumnStretch(2 * column + 1, 1)
         injection_controls_layout.addWidget(perfusion_group)
+
         injection_help = QLabel(
             "The delivery map is normalized by physical voxel volume, so the "
-            "space-time integral of the source equals the entered amount. "
+            "space-time integral of the source equals the injected dose. "
             "Absolute receive signal still requires scanner/coil calibration."
         )
         injection_help.setWordWrap(True)
+        injection_help.setStyleSheet("color: palette(mid);")
         injection_controls_layout.addWidget(injection_help)
         self.compound_help = QLabel()
         self.compound_help.setWordWrap(True)
+        self.compound_help.setStyleSheet("color: palette(mid);")
         injection_controls_layout.addWidget(self.compound_help)
         injection_controls_layout.addStretch(1)
         perfusion_animation_row = QHBoxLayout()
@@ -723,10 +827,11 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         curve_row = QHBoxLayout()
         self.source_curve_plot = pg.PlotWidget(title="Injected bolus")
         self.source_curve_plot.setLabel("bottom", "Time", "s")
-        self.source_curve_plot.setLabel("left", "Rate", "µmol/s")
+        self.source_curve_plot.setLabel("left", "Rate", "mol/s")
         self.organ_curve_plot = pg.PlotWidget(title="Organ concentration")
         self.organ_curve_plot.setLabel("bottom", "Time", "s")
-        self.organ_curve_plot.setLabel("left", "Mean concentration", "mM")
+        # Base units so pyqtgraph's SI prefix does not produce "mmM".
+        self.organ_curve_plot.setLabel("left", "Mean concentration", "M")
         self.organ_curve_plot.addLegend()
         self.source_curve_plot.setMinimumHeight(150)
         self.organ_curve_plot.setMinimumHeight(150)
@@ -932,13 +1037,19 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
 
         self.name_edit.textChanged.connect(self._schedule_live_preview)
         self.injection_compound.currentIndexChanged.connect(self._schedule_live_preview)
+        self.transverse_decay.currentIndexChanged.connect(self._schedule_live_preview)
+        self.injection_concentration.valueChanged.connect(self._update_dose_label)
+        self.injection_volume.valueChanged.connect(self._update_dose_label)
         controls = [
             *self.matrix_spins,
             *self.fov_spins,
             *self.mouse_size_spins,
             *self.mouse_offset_spins,
             self.field_strength,
-            self.injection_amount,
+            self.injection_concentration,
+            self.injection_volume,
+            *self.relaxation_spins["injected"],
+            *self.relaxation_spins["metabolite"],
             self.injection_start,
             self.injection_duration,
             self.circulation_delay,
@@ -993,7 +1104,16 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.field_strength.setValue(config.field_strength_t)
         compound_index = self.injection_compound.findData(config.injection_compound)
         self.injection_compound.setCurrentIndex(max(0, compound_index))
-        self.injection_amount.setValue(config.injection_amount_umol)
+        self.injection_concentration.setValue(config.injection_concentration_mm)
+        self.injection_volume.setValue(config.injection_volume_ul)
+        for key in ("injected", "metabolite"):
+            t1, t2, t2_star = self.relaxation_spins[key]
+            t1.setValue(getattr(config, f"{key}_t1_s"))
+            t2.setValue(getattr(config, f"{key}_t2_s") * 1000.0)
+            t2_star.setValue(getattr(config, f"{key}_t2_star_s") * 1000.0)
+        self.transverse_decay.setCurrentIndex(
+            max(0, self.transverse_decay.findData(config.transverse_decay))
+        )
         self.injection_start.setValue(config.injection_start_s)
         self.injection_duration.setValue(config.injection_duration_s)
         self.circulation_delay.setValue(config.circulation_delay_s)
@@ -1036,6 +1156,13 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             config.injection_start_s - 0.1 * config.injection_duration_s
         )
         self._compound_selection_changed()
+        self._update_dose_label()
+
+    def _update_dose_label(self, *_):
+        dose_umol = (
+            self.injection_concentration.value() * self.injection_volume.value() * 1e-3
+        )
+        self.injection_dose_label.setText(f"{dose_umol:.4g} µmol")
 
     def _read_config(self) -> MousePerfusionConfig:
         values = self.config.to_dict()
@@ -1049,7 +1176,17 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             ),
             field_strength_t=self.field_strength.value(),
             injection_compound=str(self.injection_compound.currentData()),
-            injection_amount_umol=self.injection_amount.value(),
+            injection_concentration_mm=self.injection_concentration.value(),
+            injection_volume_ul=self.injection_volume.value(),
+            injected_t1_s=self.relaxation_spins["injected"][0].value(),
+            injected_t2_s=self.relaxation_spins["injected"][1].value() / 1000.0,
+            injected_t2_star_s=self.relaxation_spins["injected"][2].value() / 1000.0,
+            metabolite_t1_s=self.relaxation_spins["metabolite"][0].value(),
+            metabolite_t2_s=self.relaxation_spins["metabolite"][1].value() / 1000.0,
+            metabolite_t2_star_s=(
+                self.relaxation_spins["metabolite"][2].value() / 1000.0
+            ),
+            transverse_decay=str(self.transverse_decay.currentData()),
             injection_start_s=self.injection_start.value(),
             injection_duration_s=self.injection_duration.value(),
             circulation_delay_s=self.circulation_delay.value(),
@@ -1199,6 +1336,9 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         }
         self.compound_help.setText(messages.get(key, ""))
         enabled = key == "pyruvate"
+        self.relaxation_row_labels["metabolite"].setEnabled(enabled)
+        for spin in self.relaxation_spins["metabolite"]:
+            spin.setEnabled(enabled)
         for spin in self.kpl_spins.values():
             spin.setEnabled(enabled)
         for spin in (
@@ -1239,6 +1379,26 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             widget.set_anatomy_slices(*slices_by_scale[scale])
 
     def _build_anatomy_slices(self, scale, display_extent, display_center):
+        # Rasterising the HD outline slices dominates the live preview, but
+        # they only depend on the geometry, not on the injection parameters.
+        key = (
+            int(scale),
+            tuple(int(n) for n in self.phantom.shape),
+            tuple(float(v) for v in display_extent),
+            tuple(float(v) for v in display_center),
+            tuple(float(v) for v in self.phantom.config.mouse_size_m),
+            tuple(float(v) for v in self.phantom.config.mouse_offset_m),
+        )
+        cache = self._anatomy_slice_cache
+        if key not in cache:
+            if len(cache) >= 4:
+                cache.pop(next(iter(cache)))
+            cache[key] = self._rasterise_anatomy_slices(
+                scale, display_extent, display_center
+            )
+        return cache[key]
+
+    def _rasterise_anatomy_slices(self, scale, display_extent, display_center):
         nx, ny, nz = self.phantom.shape
         kwargs = {
             "graph": self.phantom.vascular_graph,
@@ -1276,7 +1436,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.organ_curve_plot.clear()
         curve = self.phantom.pyruvate_inflow.rate_curve_s_inv
         source_times = np.asarray(curve.times_s, dtype=float)
-        source_rate = np.asarray(curve.values, dtype=float) * 1e6
+        source_rate = np.asarray(curve.values, dtype=float)
         self.source_curve_plot.plot(
             source_times,
             source_rate,
@@ -1296,8 +1456,8 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         for name, values in self.phantom.organ_bolus_curves(times).items():
             self.organ_curve_plot.plot(
                 times,
-                values,
-                pen=pg.mkPen(colors[name], width=2),
+                np.asarray(values, dtype=float) * 1e-3,
+                pen=pg.mkPen(colors.get(name, "#cccccc"), width=2),
                 name=name,
             )
         self.source_time_marker = pg.InfiniteLine(
