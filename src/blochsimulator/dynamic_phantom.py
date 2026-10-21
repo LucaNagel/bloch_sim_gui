@@ -6502,7 +6502,9 @@ def _simulate_dynamic_sequence_block(
                 else None
             ),
             "n_rx_coils": n_rx_coils,
-            "simulation_timestep_s": float(simulation_timestep_s),
+            "simulation_timestep_s": (
+                None if simulation_timestep_s is None else float(simulation_timestep_s)
+            ),
             "compiled_interval_count": interval_count,
             "execution_plan_segment_count": execution_plan.n_segments,
             "execution_plan_action_count": execution_plan.n_actions,
