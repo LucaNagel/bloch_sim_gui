@@ -1,4 +1,5 @@
 import sys
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -19,6 +20,7 @@ from PyQt5.QtWidgets import (
     QSlider,
     QSpinBox,
 )
+from blochsimulator.gradient_lobes import GradientLobe, gradient_moments_mt_ms_per_m
 from blochsimulator.kernel_capabilities import GUI_KERNEL_NAMES
 from blochsimulator.memory import GIB, MemoryPolicy
 from blochsimulator.project_io import load_project, save_project
@@ -734,6 +736,109 @@ def test_sequence_diagram_click_moves_playback_to_that_time():
     assert diagram.playhead.value() == pytest.approx(4.0, abs=0.1)
     seek.assert_called_once_with(40)
     diagram.close()
+
+
+def test_slice_axis_moves_the_slice_gradient_and_defaults_change_nothing():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    designer = window.sequence_designer
+    designer.sequence_type.setCurrentText("Slice Select + Rephase")
+    dt = designer.default_dt
+    _, base_gradients, base_time = designer._compile_base_sequence(None, dt, False)
+
+    assert designer.slice_axis_combo.currentText() == "z"
+    assert designer.gradient_lobes() == []
+    _, gradients, time = designer.compile_sequence(dt=dt)
+    np.testing.assert_array_equal(time, base_time)
+    np.testing.assert_array_equal(gradients, base_gradients)
+    assert np.ptp(base_gradients[:, 2]) > 0
+
+    designer.slice_axis_combo.setCurrentText("x")
+    _, gradients, _ = designer.compile_sequence(dt=dt)
+    np.testing.assert_array_equal(gradients[:, 0], base_gradients[:, 2])
+    assert np.all(gradients[:, 2] == 0.0)
+    _, gx = designer.diagram_widget.lane_data("gx")
+    _, gz = designer.diagram_widget.lane_data("gz")
+    assert np.ptp(gx) > 0 and np.ptp(gz) == 0
+
+
+def test_gradient_lobe_table_extends_the_sequence_and_reports_its_moment():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    designer = window.sequence_designer
+    designer.sequence_type.setCurrentText("Free Induction Decay")
+    dt = designer.default_dt
+    _, _, base_time = designer.compile_sequence(dt=dt)
+    base_ms = (base_time[-1] - base_time[0] + dt) * 1e3
+
+    lobe = GradientLobe("y", base_ms + 1.0, 2.0, 5.0, 0.2)
+    designer.set_gradient_lobes([lobe])
+    b1, gradients, time = designer.compile_sequence(dt=dt)
+
+    assert time[-1] - time[0] + dt == pytest.approx((base_ms + 3.0) * 1e-3, abs=dt)
+    assert np.all(b1[base_time.size :] == 0.0)
+    moments = gradient_moments_mt_ms_per_m(gradients, time)
+    assert moments[1] == pytest.approx(9.0)
+    label = designer.gradient_moment_label.text()
+    assert "y 9" in label and "Phase twist (cycles/mm): y 0.383" in label
+
+    table = designer.gradient_lobe_table
+    designer.add_gradient_lobe_button.click()
+    assert table.rowCount() == 2
+    added = designer.gradient_lobes()[1]
+    assert added.axis == "x" and added.start_ms == pytest.approx(lobe.end_ms)
+
+    table.item(1, 3).setData(Qt.EditRole, -20.0)
+    assert designer.gradient_lobes()[1].amplitude_mt_per_m == -20.0
+    assert "x -18" in designer.gradient_moment_label.text()
+
+    table.selectRow(0)
+    designer.remove_gradient_lobe_button.click()
+    assert designer.gradient_lobes() == [replace(added, amplitude_mt_per_m=-20.0)]
+
+
+def test_gradient_options_round_trip_and_legacy_states_reset():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    designer = window.sequence_designer
+    lobes = [GradientLobe("z", 0.5, 1.0, -8.0, 0.1), GradientLobe("x", 2.0)]
+    designer.slice_axis_combo.setCurrentText("y")
+    designer.set_gradient_lobes(lobes)
+    state = designer.get_state()
+
+    restored = BlochSimulatorGUI().sequence_designer
+    restored.set_state(state)
+    assert restored.slice_axis_combo.currentText() == "y"
+    assert restored.gradient_lobes() == lobes
+
+    legacy = {
+        key: value
+        for key, value in state.items()
+        if key not in ("slice_axis", "gradient_lobes")
+    }
+    restored.set_state(legacy)
+    assert restored.slice_axis_combo.currentText() == "z"
+    assert restored.gradient_lobes() == []
+
+
+def test_free_mode_run_simulates_gradient_lobes_on_an_x_line():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    designer = window.sequence_designer
+    designer.sequence_type.setCurrentText("Free Induction Decay")
+    window.pos_axis_combo.setCurrentText("x")
+    window.pos_spin.setValue(5)
+    lobe = GradientLobe("x", 50.0, 2.0, 10.0, 0.25)
+    designer.set_gradient_lobes([lobe])
+
+    with patch("blochsimulator.ui.main_window.SimulationThread") as thread:
+        window.run_simulation()
+
+    (_, (b1, gradients, time), _, positions, *_), _ = thread.call_args
+    assert positions.shape == (5, 3) and np.ptp(positions[:, 0]) > 0
+    moments = gradient_moments_mt_ms_per_m(gradients, time)
+    assert moments[0] == pytest.approx(lobe.moment_mt_ms_per_m)
+    np.testing.assert_array_equal(window.last_gradients, gradients)
 
 
 def test_simulation_controls_use_non_overlapping_grid_rows():

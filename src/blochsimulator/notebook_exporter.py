@@ -148,9 +148,12 @@ class NotebookExporter:
             configured_pulse_type = excitation_state.get(
                 "pulse_type", configured_pulse_type
             )
+        # The regenerated FID has no gradients, so extra gradient lobes keep
+        # the exact waveforms, which contain them.
         regenerate_fid = (
             "free induction" in type_lower
             and str(configured_pulse_type or "gaussian").lower() != "custom"
+            and not raw.get("gradient_lobes")
         )
         if regenerate_fid:
             for key in (
@@ -268,6 +271,9 @@ class NotebookExporter:
         ):
             raw.pop("slice_thickness", None)
             raw.pop("slice_gradient", None)
+            raw.pop("slice_axis", None)
+        if not raw.get("gradient_lobes"):
+            raw.pop("gradient_lobes", None)
         if "slice select" not in type_lower:
             raw.pop("rephase_pct", None)
 
@@ -1496,6 +1502,7 @@ print(f"  T1: {tissue.t1*1000:.1f} ms, T2: {tissue.t2*1000:.1f} ms")
         if "Free Induction Decay" in seq_type:
             return """# Create Free Induction Decay (FID) sequence
 # Analytic pulses are regenerated from the editable canonical RF parameters.
+# Custom pulses and FIDs with extra gradient lobes use the exported arrays.
 rf_params = sequence_params.get('sequence_role_pulses', {}).get('Excitation')
 if rf_params is None:
     rf_params = sequence_params.get('rf_designer_snapshot', {})
@@ -1518,7 +1525,10 @@ rf_slr_sharpness = int(rf_params.get('slr_sharpness', 1))
 rf_apodization = rf_params.get('apodization', 'None')
 
 dt = float(simulation_params.get('time_step_us', 1.0)) * 1e-6
-if rf_design_type == 'custom':
+use_exported_waveforms = rf_design_type == 'custom' or (
+    sequence_params.get('sequence_definition_source') == 'exact_exported_waveforms'
+)
+if use_exported_waveforms:
     b1 = np.asarray(sequence_params.get('b1_waveform_g'), dtype=complex).copy()
     time = np.asarray(sequence_params.get('time_waveform_s'), dtype=float).copy()
     gradients_value = sequence_params.get('gradients_waveform_g_per_cm')
@@ -1528,7 +1538,7 @@ if rf_design_type == 'custom':
         else np.asarray(gradients_value, dtype=float).copy()
     )
     if b1.ndim != 1 or time.ndim != 1 or b1.shape != time.shape:
-        raise ValueError('The exported custom RF waveform is missing or invalid.')
+        raise ValueError('The exported FID waveform is missing or invalid.')
 else:
     rf_points = max(32, int(np.ceil(rf_duration_s / dt)))
     if rf_design_type == 'sinc':

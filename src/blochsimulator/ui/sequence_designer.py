@@ -10,12 +10,25 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox,
     QCheckBox,
     QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QStyledItemDelegate,
+    QHeaderView,
+    QAbstractItemView,
 )
 import numpy as np
-from PyQt5.QtCore import pyqtSignal
-from typing import Optional
+from PyQt5.QtCore import Qt, pyqtSignal
+from typing import List, Optional
 
+from ..gradient_lobes import (
+    GradientLobe,
+    add_gradient_lobes,
+    gradient_moments_mt_ms_per_m,
+    phase_twist_cycles_per_mm,
+    remap_slice_axis,
+)
 from ..memory import enforce_sequence_memory
+from ..position_sampling import AXIS_NAMES
 from .sequence_diagram import (
     DiagramAnnotations,
     SequenceDiagramWidget,
@@ -34,6 +47,46 @@ from ..simulator import (
     apply_rf_carrier,
     resample_rf_pulse,
 )
+
+
+# Columns of the extra gradient lobe table: (header, lobe field, range, step).
+GRADIENT_LOBE_COLUMNS = (
+    ("Axis", "axis", None, None),
+    ("Start\n(ms)", "start_ms", (0.0, 1.0e6), 0.1),
+    ("Duration\n(ms)", "duration_ms", (0.001, 1.0e6), 0.1),
+    ("Amplitude\n(mT/m)", "amplitude_mt_per_m", (-1.0e4, 1.0e4), 1.0),
+    ("Ramp\n(ms)", "ramp_ms", (0.0, 1.0e5), 0.05),
+)
+
+
+class _GradientLobeDelegate(QStyledItemDelegate):
+    """Edit lobe cells with an axis combo or a bounded spin box."""
+
+    def createEditor(self, parent, option, index):
+        _, _, value_range, step = GRADIENT_LOBE_COLUMNS[index.column()]
+        if value_range is None:
+            editor = QComboBox(parent)
+            editor.addItems(list(AXIS_NAMES))
+            return editor
+        editor = QDoubleSpinBox(parent)
+        editor.setRange(*value_range)
+        editor.setDecimals(3)
+        editor.setSingleStep(step)
+        return editor
+
+    def setEditorData(self, editor, index):
+        value = index.data(Qt.EditRole)
+        if isinstance(editor, QComboBox):
+            editor.setCurrentText(str(value))
+        else:
+            editor.setValue(float(value))
+
+    def setModelData(self, editor, model, index):
+        if isinstance(editor, QComboBox):
+            model.setData(index, editor.currentText(), Qt.EditRole)
+        else:
+            editor.interpretText()
+            model.setData(index, float(editor.value()), Qt.EditRole)
 
 
 class SequenceDesigner(QGroupBox):
@@ -277,6 +330,23 @@ class SequenceDesigner(QGroupBox):
         g_layout.addWidget(self.slice_gradient_spin)
         grad_layout.addLayout(g_layout)
 
+        axis_layout = QHBoxLayout()
+        axis_layout.addWidget(QLabel("Slice axis:"))
+        self.slice_axis_combo = QComboBox()
+        self.slice_axis_combo.setObjectName("slice_axis_combo")
+        self.slice_axis_combo.addItems(list(AXIS_NAMES))
+        self.slice_axis_combo.setCurrentText("z")
+        self.slice_axis_combo.setToolTip(
+            "Physical axis of the slice-select gradient. The sequences are "
+            "defined with the slice along z; x or y moves the slice gradient "
+            "there, e.g. to select a slab across a line or plane in x/y."
+        )
+        self.slice_axis_combo.currentTextChanged.connect(
+            lambda _: self.update_diagram()
+        )
+        axis_layout.addWidget(self.slice_axis_combo)
+        grad_layout.addLayout(axis_layout)
+
         self.gradient_opts_container.setLayout(grad_layout)
         layout.addWidget(self.gradient_opts_container)
 
@@ -306,6 +376,9 @@ class SequenceDesigner(QGroupBox):
         self.ti_widget.setLayout(ti_layout)
         layout.addWidget(self.ti_widget)
         self.ti_spin.valueChanged.connect(lambda _: self.update_diagram())
+
+        layout.addWidget(self._build_gradient_lobe_group())
+
         # Initialize option visibility after all widgets are created
         self._update_sequence_options()
 
@@ -343,6 +416,161 @@ class SequenceDesigner(QGroupBox):
         self.setLayout(layout)
         # Draw initial diagram even before simulation
         self.update_diagram()
+
+    def _build_gradient_lobe_group(self) -> QGroupBox:
+        """Table of user gradient lobes added on top of every sequence."""
+        group = QGroupBox("Extra gradient lobes")
+        group.setObjectName("gradient_lobe_group")
+        group_layout = QVBoxLayout(group)
+        group_layout.setContentsMargins(6, 6, 6, 6)
+
+        self.gradient_lobe_table = QTableWidget(0, len(GRADIENT_LOBE_COLUMNS))
+        self.gradient_lobe_table.setObjectName("gradient_lobe_table")
+        self.gradient_lobe_table.setHorizontalHeaderLabels(
+            [header for header, *_ in GRADIENT_LOBE_COLUMNS]
+        )
+        self.gradient_lobe_table.setItemDelegate(
+            _GradientLobeDelegate(self.gradient_lobe_table)
+        )
+        self.gradient_lobe_table.verticalHeader().setVisible(False)
+        self.gradient_lobe_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self.gradient_lobe_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.gradient_lobe_table.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.SelectedClicked
+            | QAbstractItemView.EditKeyPressed
+        )
+        self.gradient_lobe_table.setFixedHeight(116)
+        self.gradient_lobe_table.setToolTip(
+            "Trapezoid gradient lobes added to the selected sequence on x, y "
+            "or z. Start is measured from the sequence start, duration "
+            "includes both ramps, and lobes past the end extend the sequence. "
+            "Double-click a cell to edit it."
+        )
+        self.gradient_lobe_table.itemChanged.connect(
+            lambda _: self._on_gradient_lobes_changed()
+        )
+        group_layout.addWidget(self.gradient_lobe_table)
+
+        button_layout = QHBoxLayout()
+        self.add_gradient_lobe_button = QPushButton("Add lobe")
+        self.add_gradient_lobe_button.setObjectName("add_gradient_lobe")
+        self.add_gradient_lobe_button.setToolTip(
+            "Append a lobe on x after the current lobes (10 mT/m for 1 ms)."
+        )
+        self.add_gradient_lobe_button.clicked.connect(self._add_default_gradient_lobe)
+        self.remove_gradient_lobe_button = QPushButton("Remove")
+        self.remove_gradient_lobe_button.setObjectName("remove_gradient_lobe")
+        self.remove_gradient_lobe_button.setToolTip("Remove the selected lobes.")
+        self.remove_gradient_lobe_button.clicked.connect(
+            self._remove_selected_gradient_lobes
+        )
+        button_layout.addWidget(self.add_gradient_lobe_button)
+        button_layout.addWidget(self.remove_gradient_lobe_button)
+        button_layout.addStretch(1)
+        group_layout.addLayout(button_layout)
+
+        self.gradient_moment_label = QLabel("")
+        self.gradient_moment_label.setObjectName("gradient_moment_label")
+        self.gradient_moment_label.setWordWrap(True)
+        self.gradient_moment_label.setStyleSheet("color: #666;")
+        self.gradient_moment_label.setToolTip(
+            "Net gradient area of the whole sequence per axis and the phase "
+            "twist it winds across the object (Free Mode proton gamma)."
+        )
+        group_layout.addWidget(self.gradient_moment_label)
+        return group
+
+    def gradient_lobes(self) -> List[GradientLobe]:
+        """Return the lobes of the table in row order."""
+        lobes = []
+        table = self.gradient_lobe_table
+        for row in range(table.rowCount()):
+            values = {}
+            for column, (_, field, _, _) in enumerate(GRADIENT_LOBE_COLUMNS):
+                item = table.item(row, column)
+                values[field] = item.data(Qt.EditRole) if item is not None else None
+            try:
+                lobes.append(
+                    GradientLobe(
+                        axis=str(values["axis"]),
+                        start_ms=float(values["start_ms"]),
+                        duration_ms=float(values["duration_ms"]),
+                        amplitude_mt_per_m=float(values["amplitude_mt_per_m"]),
+                        ramp_ms=float(values["ramp_ms"]),
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Gradient lobe {row + 1}: {exc}") from exc
+        return lobes
+
+    def set_gradient_lobes(self, lobes):
+        """Replace the table contents with ``lobes`` (GradientLobe or dicts)."""
+        lobes = [
+            lobe if isinstance(lobe, GradientLobe) else GradientLobe.from_state(lobe)
+            for lobe in (lobes or [])
+        ]
+        table = self.gradient_lobe_table
+        table.blockSignals(True)
+        try:
+            table.setRowCount(0)
+            for lobe in lobes:
+                row = table.rowCount()
+                table.insertRow(row)
+                state = lobe.to_state()
+                for column, (_, field, _, _) in enumerate(GRADIENT_LOBE_COLUMNS):
+                    item = QTableWidgetItem()
+                    item.setData(Qt.EditRole, state[field])
+                    item.setTextAlignment(Qt.AlignCenter)
+                    table.setItem(row, column, item)
+        finally:
+            table.blockSignals(False)
+        self._on_gradient_lobes_changed()
+
+    def _add_default_gradient_lobe(self):
+        lobes = self.gradient_lobes()
+        start = max((lobe.end_ms for lobe in lobes), default=0.0)
+        self.set_gradient_lobes(lobes + [GradientLobe("x", start_ms=start)])
+
+    def _remove_selected_gradient_lobes(self):
+        rows = {index.row() for index in self.gradient_lobe_table.selectedIndexes()}
+        if not rows:
+            return
+        lobes = [
+            lobe for row, lobe in enumerate(self.gradient_lobes()) if row not in rows
+        ]
+        self.set_gradient_lobes(lobes)
+
+    def _on_gradient_lobes_changed(self):
+        self.update_diagram()
+
+    def _apply_gradient_options(self, sequence_tuple, dt):
+        """Move the slice gradient to the chosen axis and add the extra lobes."""
+        b1, gradients, time = sequence_tuple
+        gradients = remap_slice_axis(
+            np.asarray(gradients, dtype=float).reshape(-1, 3),
+            self.slice_axis_combo.currentText(),
+        )
+        return add_gradient_lobes(b1, gradients, time, self.gradient_lobes(), dt)
+
+    def _update_gradient_moment_label(self, gradients, time):
+        if gradients is None or len(time) == 0:
+            self.gradient_moment_label.setText("")
+            return
+        moments = gradient_moments_mt_ms_per_m(gradients, time)
+        twists = phase_twist_cycles_per_mm(moments)
+        parts = [f"{name} {moment:.3g}" for name, moment in zip(AXIS_NAMES, moments)]
+        text = "Net moment (mT·ms/m): " + " · ".join(parts)
+        winding = [
+            f"{name} {twist:.3g}"
+            for name, twist in zip(AXIS_NAMES, twists)
+            if abs(twist) >= 1e-3
+        ]
+        if winding:
+            text += "\nPhase twist (cycles/mm): " + " · ".join(winding)
+        self.gradient_moment_label.setText(text)
 
     def _slice_thickness_m(self) -> float:
         """Current slice thickness in meters."""
@@ -796,8 +1024,18 @@ class SequenceDesigner(QGroupBox):
     def compile_sequence(
         self, custom_pulse=None, dt: float = None, log_info: bool = False
     ):
-        """Return explicit (b1, gradients, time) arrays for the current sequence."""
+        """Return explicit (b1, gradients, time) arrays for the current sequence.
+
+        The slice gradient is moved to the selected slice axis and the extra
+        gradient lobes are added on top of every sequence type.
+        """
         dt = dt or self.default_dt
+        return self._apply_gradient_options(
+            self._compile_base_sequence(custom_pulse, dt, log_info), dt
+        )
+
+    def _compile_base_sequence(self, custom_pulse, dt, log_info):
+        """Compile the selected sequence with its slice gradient on z."""
         seq_type = self.sequence_type.currentText()
         if seq_type == "EPI":
             return self._apply_current_rf_carrier(self._build_epi(custom_pulse, dt))
@@ -1254,6 +1492,7 @@ class SequenceDesigner(QGroupBox):
         segments = find_pulse_segments(b1, time - time[0])
         annotations = self._diagram_annotations(segments, float(time[-1] - time[0]))
         self.diagram_widget.set_sequence(b1, gradients, time, annotations)
+        self._update_gradient_moment_label(gradients, time)
         self.diagram_first_tr_button.setEnabled(
             annotations.first_tr_window_s is not None
         )
@@ -1352,6 +1591,8 @@ class SequenceDesigner(QGroupBox):
             "rephase_pct": self.rephase_percentage.value(),
             "slice_thickness": self.slice_thickness_spin.value(),
             "slice_gradient": self.slice_gradient_spin.value(),
+            "slice_axis": self.slice_axis_combo.currentText(),
+            "gradient_lobes": [lobe.to_state() for lobe in self.gradient_lobes()],
             "pulse_states": self.pulse_states,
         }
 
@@ -1394,6 +1635,9 @@ class SequenceDesigner(QGroupBox):
                 self.slice_thickness_spin.setValue(state["slice_thickness"])
             if "slice_gradient" in state:
                 self.slice_gradient_spin.setValue(state["slice_gradient"])
+            # States from before these options compiled without them.
+            self.slice_axis_combo.setCurrentText(state.get("slice_axis", "z"))
+            self.set_gradient_lobes(state.get("gradient_lobes", []))
             if "pulse_states" in state:
                 self.pulse_states = state["pulse_states"]
 

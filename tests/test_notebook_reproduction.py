@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from blochsimulator import BlochSimulator, TissueParameters, design_rf_pulse
+from blochsimulator.gradient_lobes import GradientLobe, add_gradient_lobes
 from blochsimulator.notebook_exporter import export_notebook
 
 
@@ -22,12 +23,14 @@ def _code_cell(notebook, marker: str) -> str:
     )
 
 
-def _export_fid_reproduction_notebook(tmp_path: Path):
+def _export_fid_reproduction_notebook(tmp_path: Path, gradient_lobes=None):
     """Export with frozen arrays, matching the GUI path that caused the bug."""
     time = np.arange(750, dtype=float) * 20e-6
     b1 = np.zeros(time.size, dtype=complex)
     b1[:50] = 0.01
     gradients = np.zeros((time.size, 3), dtype=float)
+    for lobe in gradient_lobes or []:
+        _, gradients, _ = add_gradient_lobes(b1, gradients, time, [lobe], 20e-6)
     sequence_params = {
         "sequence_type": "Free Induction Decay",
         "type": "Free Induction Decay",
@@ -56,6 +59,8 @@ def _export_fid_reproduction_notebook(tmp_path: Path):
         "b1_waveform": b1,
         "time_waveform": time,
         "gradients_waveform": gradients,
+        "slice_axis": "z",
+        "gradient_lobes": [lobe.to_state() for lobe in gradient_lobes or []],
     }
     simulation_params = {
         "mode": "time-resolved",
@@ -203,3 +208,40 @@ def test_fid_notebook_marks_irrelevant_parameters_and_plots_sequence(
         figure.axes[0].lines[0].get_ydata(), np.abs(namespace["b1"])
     )
     plt.close(figure)
+
+
+def test_fid_notebook_with_gradient_lobes_uses_the_exported_waveforms(
+    tmp_path, monkeypatch
+):
+    lobe = GradientLobe("x", 2.0, 4.0, 10.0, 0.5)
+    notebook = _export_fid_reproduction_notebook(tmp_path, [lobe])
+    monkeypatch.chdir(tmp_path)
+    parameter_code = _code_cell(notebook, "# Canonical simulation parameters")
+    assert "'sequence_definition_source': 'exact_exported_waveforms'" in (
+        parameter_code
+    )
+    assert "'gradient_lobes': [{'axis': 'x'" in parameter_code
+    assert "'slice_axis'" not in parameter_code
+
+    namespace = _fid_namespace()
+    for marker in (
+        "# Canonical simulation parameters",
+        "# Create Free Induction Decay",
+    ):
+        exec(
+            compile(_code_cell(notebook, marker), "fid_repro.ipynb", "exec"), namespace
+        )
+
+    gradients = namespace["gradients"]
+    assert gradients.shape == (750, 3)
+    area_mt_ms_per_m = gradients[:, 0].sum() * 20e-6 / 0.1 * 1e3
+    assert area_mt_ms_per_m == pytest.approx(lobe.moment_mt_ms_per_m)
+
+
+def test_fid_notebook_without_gradient_lobes_drops_the_empty_table(tmp_path):
+    notebook = _export_fid_reproduction_notebook(tmp_path)
+    parameter_code = _code_cell(notebook, "# Canonical simulation parameters")
+    assert "'gradient_lobes'" not in parameter_code
+    assert "'sequence_definition_source': 'regenerated_from_parameters'" in (
+        parameter_code
+    )
