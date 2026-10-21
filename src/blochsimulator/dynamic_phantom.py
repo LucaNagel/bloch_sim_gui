@@ -329,6 +329,9 @@ class PyruvateInflow:
     legacy direct-Mz source for backwards compatibility. An optional
     ``arrival_delay_map_s`` shifts both curves independently in every voxel;
     ``max_step_s`` bounds their piecewise-linear integration grid.
+    ``colabelled_pools`` names further pools that arrive with the same source,
+    e.g. a second labelled carbon of the injected molecule.  Each receives an
+    identical inflow and must not take part in any conversion.
     """
 
     rate_curve_s_inv: TimeCurve
@@ -336,8 +339,10 @@ class PyruvateInflow:
     polarization_curve: Optional[TimeCurve] = None
     arrival_delay_map_s: Optional[np.ndarray] = None
     max_step_s: Optional[float] = None
+    colabelled_pools: Tuple[str, ...] = ()
 
     def validate(self, shape: Tuple[int, int, int]) -> None:
+        self.colabelled_pools = tuple(str(name) for name in self.colabelled_pools)
         values = np.asarray(self.delivery_map, dtype=np.float64)
         if values.shape != shape or not np.all(np.isfinite(values)):
             raise ValueError(
@@ -492,6 +497,7 @@ class DynamicSpectralPhantom:
     metadata: Dict = field(default_factory=dict)
     coordinate_system: str = "object_xyz"
     affine_ijk_to_xyz_m: Optional[np.ndarray] = None
+    chemical_shift_maps_ppm: Optional[Dict[str, np.ndarray]] = None
     positions: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -587,10 +593,34 @@ class DynamicSpectralPhantom:
                 if values.shape != self.shape or not np.all(np.isfinite(values)):
                     raise ValueError(f"{name} must be finite and match phantom shape")
                 setattr(self, name, values)
+        if self.chemical_shift_maps_ppm is not None:
+            pool_names = {pool.name for pool in self.pools}
+            shift_maps = {}
+            for name, values in dict(self.chemical_shift_maps_ppm).items():
+                if name not in pool_names:
+                    raise ValueError(f"chemical-shift map for unknown pool {name!r}")
+                values = np.asarray(values, dtype=np.float64)
+                if values.shape != self.shape or not np.all(np.isfinite(values)):
+                    raise ValueError(
+                        f"chemical-shift map for {name!r} must be finite and "
+                        "match phantom shape"
+                    )
+                shift_maps[name] = values
+            self.chemical_shift_maps_ppm = shift_maps or None
         for region in self.kinetic_regions:
             region.validate()
         if self.pyruvate_inflow is not None:
             self.pyruvate_inflow.validate(self.shape)
+            names = [pool.name for pool in self.pools]
+            for name in self.pyruvate_inflow.colabelled_pools:
+                if name not in names:
+                    raise ValueError(f"co-labelled pool {name!r} does not exist")
+                if names.index(name) == 0:
+                    raise ValueError("the inflow precursor cannot be co-labelled")
+                if names.index(name) == 1 and np.any(self.kpl_map_s_inv != 0):
+                    raise ValueError(
+                        f"co-labelled pool {name!r} must not receive conversion"
+                    )
         if self.dynamic_b0 is not None:
             self.dynamic_b0.validate(self.shape)
             scales = tuple(self.dynamic_b0.pool_scale)
@@ -754,6 +784,38 @@ class DynamicSpectralPhantom:
             )
         return np.zeros(self.shape, dtype=float)
 
+    def chemical_shift_map_ppm(self, name) -> np.ndarray:
+        """Return the voxelwise shift of one pool relative to its nominal ppm."""
+        if self.chemical_shift_maps_ppm is not None:
+            values = self.chemical_shift_maps_ppm.get(name)
+            if values is not None:
+                return values
+        return np.zeros(self.shape, dtype=float)
+
+    def pool_shift_offsets_hz(
+        self, field_strength=None, nucleus=None
+    ) -> Optional[np.ndarray]:
+        """Return voxelwise pool shifts in Hz with shape ``(npools,) + shape``."""
+        if not self.chemical_shift_maps_ppm:
+            return None
+        return np.stack(
+            [
+                np.asarray(
+                    ppm_to_hz(
+                        self.chemical_shift_map_ppm(pool.name),
+                        (
+                            self.field_strength
+                            if field_strength is None
+                            else float(field_strength)
+                        ),
+                        self.nucleus if nucleus is None else str(nucleus),
+                    ),
+                    dtype=np.float64,
+                )
+                for pool in self.pools
+            ]
+        )
+
     def get_frequency_offset(self, name, field_strength=None, nucleus=None) -> float:
         """Return one pool frequency in Hz at the requested field strength."""
         for pool in self.pools:
@@ -797,7 +859,11 @@ class DynamicSpectralPhantom:
         result = self.get_b0_offset_map_ppm()
         for pool in self.pools:
             result = result + self.initial_concentration_maps[pool.name] * (
-                self.get_frequency_offset_ppm(pool.name) / np.maximum(total, 1e-15)
+                (
+                    self.get_frequency_offset_ppm(pool.name)
+                    + self.chemical_shift_map_ppm(pool.name)
+                )
+                / np.maximum(total, 1e-15)
             )
         return result
 
@@ -844,6 +910,12 @@ class DynamicSpectralPhantom:
         for pool in self.pools:
             centre_hz = self.get_frequency_offset(
                 pool.name, effective_field, effective_nucleus
+            ) + float(
+                ppm_to_hz(
+                    self.chemical_shift_map_ppm(pool.name)[index],
+                    effective_field,
+                    effective_nucleus,
+                )
             )
             half_width_hz = 1.0 / (2.0 * np.pi * pool.t2_star)
             amplitude = float(self.initial_concentration_maps[pool.name][index])
@@ -896,7 +968,7 @@ class DynamicSpectralPhantom:
         for pool in self.pools:
             centre_ppm = self.get_frequency_offset_ppm(
                 pool.name, effective_field, effective_nucleus
-            )
+            ) + float(self.chemical_shift_map_ppm(pool.name)[index])
             fwhm_ppm = abs(
                 float(
                     hz_to_ppm(
@@ -921,7 +993,14 @@ class DynamicSpectralPhantom:
         result = self.b0_offset_hz() * (total > 0)
         for pool in self.pools:
             result += self.initial_concentration_maps[pool.name] * (
-                pool.get_frequency_offset(self.field_strength, self.nucleus)
+                (
+                    pool.get_frequency_offset(self.field_strength, self.nucleus)
+                    + ppm_to_hz(
+                        self.chemical_shift_map_ppm(pool.name),
+                        self.field_strength,
+                        self.nucleus,
+                    )
+                )
                 / np.maximum(total, 1e-15)
             )
         return result
@@ -997,6 +1076,7 @@ class DynamicSpectralPhantom:
                 else {
                     "rate_curve_s_inv": self.pyruvate_inflow.rate_curve_s_inv.to_dict(),
                     "max_step_s": self.pyruvate_inflow.max_step_s,
+                    "colabelled_pools": list(self.pyruvate_inflow.colabelled_pools),
                     "polarization_curve": (
                         None
                         if self.pyruvate_inflow.polarization_curve is None
@@ -1016,6 +1096,7 @@ class DynamicSpectralPhantom:
             "kinetics_time_offset_s": self.kinetics_time_offset_s,
             "equilibrium_polarization": self.equilibrium_polarization,
             "metadata": self.metadata,
+            "chemical_shift_map_pools": sorted(self.chemical_shift_maps_ppm or ()),
         }
         data_vars = {
             "initial_concentration": (
@@ -1090,6 +1171,12 @@ class DynamicSpectralPhantom:
                     self.pyruvate_inflow.arrival_delay_map_s,
                     {"units": "s"},
                 )
+        if self.chemical_shift_maps_ppm:
+            data_vars["chemical_shift_map_ppm"] = (
+                ("species",) + spatial_dims,
+                np.stack([self.chemical_shift_map_ppm(name) for name in pool_names]),
+                {"units": "ppm", "long_name": "voxelwise pool shift"},
+            )
         if self.dynamic_b0 is not None:
             data_vars["dynamic_b0_scale_map"] = (
                 spatial_dims,
@@ -1177,6 +1264,7 @@ class DynamicSpectralPhantom:
                     else np.asarray(ds["pyruvate_arrival_delay_s"])
                 ),
                 max_step_s=inflow_metadata.get("max_step_s"),
+                colabelled_pools=tuple(inflow_metadata.get("colabelled_pools", ())),
             )
         dynamic_b0_metadata = header.get("dynamic_b0")
         dynamic_b0 = None
@@ -1236,6 +1324,15 @@ class DynamicSpectralPhantom:
             metadata=dict(header.get("metadata", {})),
             coordinate_system=str(ds.attrs.get("coordinate_system", "object_xyz")),
             affine_ijk_to_xyz_m=affine,
+            chemical_shift_maps_ppm=(
+                None
+                if "chemical_shift_map_ppm" not in ds
+                else {
+                    name: np.asarray(ds["chemical_shift_map_ppm"].sel(species=name))
+                    for name in pool_names
+                    if name in header.get("chemical_shift_map_pools", pool_names)
+                }
+            ),
         )
         return phantom.restore_missing_designed_pools()
 
@@ -1261,6 +1358,7 @@ class DynamicSpectralPhantom:
                 else {
                     "rate_curve_s_inv": self.pyruvate_inflow.rate_curve_s_inv.to_dict(),
                     "max_step_s": self.pyruvate_inflow.max_step_s,
+                    "colabelled_pools": list(self.pyruvate_inflow.colabelled_pools),
                     "polarization_curve": (
                         None
                         if self.pyruvate_inflow.polarization_curve is None
@@ -1305,6 +1403,14 @@ class DynamicSpectralPhantom:
                 )
         if self.dynamic_b0 is not None:
             arrays["dynamic_b0_scale_map"] = self.dynamic_b0.spatial_scale_map
+        for index, pool in enumerate(self.pools):
+            if (
+                self.chemical_shift_maps_ppm
+                and pool.name in self.chemical_shift_maps_ppm
+            ):
+                arrays[f"chemical_shift_{index}"] = self.chemical_shift_maps_ppm[
+                    pool.name
+                ]
         header_json = json.dumps(header, default=str)
         if path.suffix.lower() == ".npz":
             np.savez_compressed(path, header_json=np.asarray(header_json), **arrays)
@@ -1367,6 +1473,7 @@ class DynamicSpectralPhantom:
                 ),
                 arrival_delay_map_s=arrays.get("pyruvate_arrival_delay_s"),
                 max_step_s=inflow_metadata.get("max_step_s"),
+                colabelled_pools=tuple(inflow_metadata.get("colabelled_pools", ())),
             )
         dynamic_b0_metadata = header.get("dynamic_b0")
         dynamic_b0 = None
@@ -1418,6 +1525,11 @@ class DynamicSpectralPhantom:
             metadata=header.get("metadata", {}),
             coordinate_system=header.get("coordinate_system", "object_xyz"),
             affine_ijk_to_xyz_m=header.get("affine_ijk_to_xyz_m"),
+            chemical_shift_maps_ppm={
+                pool.name: arrays[f"chemical_shift_{index}"]
+                for index, pool in enumerate(pools)
+                if f"chemical_shift_{index}" in arrays
+            },
         )
         return phantom.restore_missing_designed_pools()
 
@@ -2185,7 +2297,7 @@ def _spin_major_kernel():
         from .dynamic_spin_major_cy import API_VERSION, TILE_SPINS, run_spin_major_chunk
     except (ImportError, OSError):
         return None
-    if API_VERSION != 4:
+    if API_VERSION != 5:
         return None
     return run_spin_major_chunk, int(TILE_SPINS)
 
@@ -3242,6 +3354,16 @@ def _simulate_dynamic_sequence_block(
             effective_nucleus,
         )
     )
+    pool_b0 = phantom.pool_shift_offsets_hz(field, effective_nucleus)
+    if pool_b0 is not None:
+        pool_b0 = np.ascontiguousarray(
+            pool_b0.reshape(phantom.n_species, -1)[:, active], dtype=np.float64
+        )
+        if sampling.enabled:
+            pool_b0 = np.repeat(pool_b0, spins_per_voxel, axis=1)
+    static_pool_frequency = b0[None, :] + pool_offsets[:, None]
+    if pool_b0 is not None:
+        static_pool_frequency = static_pool_frequency + pool_b0
     t2 = np.asarray([pool.t2 for pool in phantom.pools], dtype=np.float64)[:, None]
 
     def prepare_transverse_factors(phase_cycles, duration_s):
@@ -3911,9 +4033,7 @@ def _simulate_dynamic_sequence_block(
                     gradient = np.asarray(gradient_key, dtype=np.float64)
                     gradient_frequency = _gradient_frequency_hz(positions, gradient)
                     static_frequencies = (
-                        b0[None, :]
-                        + pool_offsets[:, None]
-                        + gradient_frequency[None, :]
+                        static_pool_frequency + gradient_frequency[None, :]
                     )
                     static_frequency_by_gradient[gradient_key] = static_frequencies
                 phase = static_frequencies * phase_duration
@@ -4328,9 +4448,7 @@ def _simulate_dynamic_sequence_block(
                         gradient = np.asarray(gradient_key, dtype=np.float64)
                         gradient_frequency = _gradient_frequency_hz(positions, gradient)
                         static_frequencies = (
-                            b0[None, :]
-                            + pool_offsets[:, None]
-                            + gradient_frequency[None, :]
+                            static_pool_frequency + gradient_frequency[None, :]
                         )
                         static_frequency_by_gradient[gradient_key] = static_frequencies
                     phase = static_frequencies * phase_duration
@@ -5003,6 +5121,7 @@ def _simulate_dynamic_sequence_block(
             ),
             positions_m=np.ascontiguousarray(positions, dtype=np.float64),
             b0_hz=np.ascontiguousarray(b0, dtype=np.float64),
+            pool_b0_hz=pool_b0,
             conversion=np.ascontiguousarray(conversion, dtype=np.float64),
             delivery=delivery,
             rx_sensitivities=np.ascontiguousarray(
@@ -5185,9 +5304,7 @@ def _simulate_dynamic_sequence_block(
         )
         if sequence_kernel == "reference":
             gradient_frequency = _gradient_frequency_hz(positions, gradient)
-            static_frequencies = (
-                b0[None, :] + pool_offsets[:, None] + gradient_frequency[None, :]
-            )
+            static_frequencies = static_pool_frequency + gradient_frequency[None, :]
 
             def phase_cycles(start_s, end_s, duration_s):
                 phase = static_frequencies * duration_s
@@ -5355,9 +5472,7 @@ def _simulate_dynamic_sequence_block(
             static_frequencies = None
             if first_transverse_factors is None or second_transverse_factors is None:
                 gradient_frequency = _gradient_frequency_hz(positions, gradient)
-                static_frequencies = (
-                    b0[None, :] + pool_offsets[:, None] + gradient_frequency[None, :]
-                )
+                static_frequencies = static_pool_frequency + gradient_frequency[None, :]
             if first_transverse_factors is None:
                 first_phase = static_frequencies * first_phase_duration
                 if first_dynamic_integral is not None:
@@ -6043,7 +6158,7 @@ def _simulate_dynamic_sequence_block(
     return result
 
 
-def simulate_dynamic_sequence(
+def _simulate_dynamic_sequence_single_source(
     program,
     phantom: DynamicSpectralPhantom,
     *,
@@ -6430,6 +6545,161 @@ def simulate_dynamic_sequence(
     )
     return replace(
         template_result,
+        signal=species_signal.sum(axis=0),
+        final_magnetization=final_pool.sum(axis=0),
+        checkpoint_magnetization=(
+            None if checkpoint_pool is None else checkpoint_pool.sum(axis=1)
+        ),
+        metadata=metadata,
+        species_signal=species_signal,
+        final_pool_magnetization=final_pool,
+        checkpoint_pool_magnetization=checkpoint_pool,
+    )
+
+
+def _colabelled_pass_phantom(
+    phantom: DynamicSpectralPhantom, source_name: Optional[str]
+) -> DynamicSpectralPhantom:
+    """Return a phantom for one source of a co-labelled superposition.
+
+    ``source_name=None`` yields the primary pass, in which every co-labelled
+    pool is left empty.  Otherwise the named pool becomes the inflow precursor
+    while all other pools are empty and conversion is disabled.  Without
+    conversion the pools evolve independently, so the passes add exactly.
+    """
+    import copy
+
+    colabelled = set(phantom.pyruvate_inflow.colabelled_pools)
+    names = [pool.name for pool in phantom.pools]
+
+    def emptied(maps, keep):
+        if maps is None:
+            return None
+        return {
+            name: (
+                np.asarray(values, dtype=np.float64)
+                if keep(name)
+                else np.zeros(phantom.shape, dtype=np.float64)
+            )
+            for name, values in maps.items()
+        }
+
+    result = copy.copy(phantom)
+    if source_name is None:
+        result.initial_concentration_maps = emptied(
+            phantom.initial_concentration_maps, lambda name: name not in colabelled
+        )
+        result.initial_spin_density_maps = emptied(
+            phantom.initial_spin_density_maps, lambda name: name not in colabelled
+        )
+        result.pyruvate_inflow = replace(phantom.pyruvate_inflow, colabelled_pools=())
+        return result
+    order = [names.index(source_name)] + [
+        index for index, name in enumerate(names) if name != source_name
+    ]
+    result.pools = tuple(phantom.pools[index] for index in order)
+    result.initial_concentration_maps = emptied(
+        phantom.initial_concentration_maps, lambda name: name == source_name
+    )
+    result.initial_spin_density_maps = emptied(
+        phantom.initial_spin_density_maps, lambda name: name == source_name
+    )
+    result.kpl_map_s_inv = np.zeros(phantom.shape, dtype=np.float64)
+    if hasattr(phantom, "kpa_map_s_inv"):
+        result.kpa_map_s_inv = np.zeros(phantom.shape, dtype=np.float64)
+    result.kinetic_regions = ()
+    result.pyruvate_inflow = replace(phantom.pyruvate_inflow, colabelled_pools=())
+    if phantom.dynamic_b0 is not None:
+        result.dynamic_b0 = replace(
+            phantom.dynamic_b0,
+            pool_scale=tuple(phantom.dynamic_b0.pool_scale[index] for index in order),
+        )
+    return result
+
+
+def simulate_dynamic_sequence(program, phantom: DynamicSpectralPhantom, **kwargs):
+    """Run a dynamic sequence, streaming large objects by parent voxel.
+
+    Pools named in ``phantom.pyruvate_inflow.colabelled_pools`` receive the
+    same inflow as the precursor (e.g. both labelled carbons of one injected
+    molecule). They are simulated in additional passes as their own
+    precursor and superposed onto the primary result.
+    """
+    inflow = phantom.pyruvate_inflow
+    colabelled = () if inflow is None else tuple(inflow.colabelled_pools)
+    if not colabelled:
+        return _simulate_dynamic_sequence_single_source(program, phantom, **kwargs)
+    names = [pool.name for pool in phantom.pools]
+    for name in colabelled:
+        index = names.index(name)
+        if index == 0:
+            raise ValueError("the inflow precursor cannot be co-labelled")
+        conversion = None
+        if index == 1:
+            conversion = phantom.kpl_map_s_inv
+        elif index == 2 and hasattr(phantom, "kpa_map_s_inv"):
+            conversion = phantom.kpa_map_s_inv
+        if conversion is not None and np.any(np.asarray(conversion) != 0):
+            raise ValueError(f"co-labelled pool {name!r} must not receive conversion")
+    sources = (None,) + colabelled
+    progress_callback = kwargs.pop("progress_callback", None)
+    preview_callback = kwargs.pop("preview_callback", None)
+    previous_signal = None
+    results = []
+    for pass_index, source_name in enumerate(sources):
+        pass_kwargs = dict(kwargs)
+        if progress_callback is not None:
+
+            def pass_progress(done, total, _index=pass_index):
+                progress_callback(
+                    _index * int(total) + int(done), len(sources) * int(total)
+                )
+
+            pass_kwargs["progress_callback"] = pass_progress
+        if preview_callback is not None:
+
+            def pass_preview(
+                fraction, signal, _index=pass_index, _base=previous_signal
+            ):
+                combined = signal if _base is None else _base + signal
+                preview_callback((_index + float(fraction)) / len(sources), combined)
+
+            pass_kwargs["preview_callback"] = pass_preview
+        result = _simulate_dynamic_sequence_single_source(
+            program, _colabelled_pass_phantom(phantom, source_name), **pass_kwargs
+        )
+        results.append(result)
+        previous_signal = (
+            result.signal
+            if previous_signal is None
+            else previous_signal + result.signal
+        )
+    primary = results[0]
+    species_signal = np.array(primary.species_signal, copy=True)
+    final_pool = np.array(primary.final_pool_magnetization, copy=True)
+    checkpoint_pool = (
+        None
+        if primary.checkpoint_pool_magnetization is None
+        else np.array(primary.checkpoint_pool_magnetization, copy=True)
+    )
+    for source_name, result in zip(colabelled, results[1:]):
+        index = names.index(source_name)
+        species_signal[index] += result.species_signal[0]
+        final_pool[index] += result.final_pool_magnetization[0]
+        if checkpoint_pool is not None:
+            checkpoint_pool[:, index] += result.checkpoint_pool_magnetization[:, 0]
+    metadata = dict(primary.metadata)
+    metadata["colabelled_pools"] = list(colabelled)
+    metadata["colabelled_superposition_passes"] = len(sources)
+    metadata["colabelled_pass_metadata"] = [
+        {
+            "source_pool": name,
+            "n_simulated_spins": result.metadata.get("n_simulated_spins"),
+        }
+        for name, result in zip(colabelled, results[1:])
+    ]
+    return replace(
+        primary,
         signal=species_signal.sum(axis=0),
         final_magnetization=final_pool.sum(axis=0),
         checkpoint_magnetization=(

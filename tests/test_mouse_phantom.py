@@ -296,9 +296,61 @@ def test_injected_concentration_and_organ_curves_follow_delayed_bolus():
     assert np.max(frames[0]) == pytest.approx(0.0)
     assert max(float(np.max(frame)) for frame in frames[1:]) > 0.0
     curves = phantom.organ_bolus_curves(times)
-    assert set(curves) == {"Brain", "Liver", "Kidneys"}
+    assert set(curves) == {"Brain", "Heart", "Liver", "Kidneys", "Bladder"}
     assert all(values.shape == times.shape for values in curves.values())
     assert all(np.max(values) > 0 for values in curves.values())
+
+
+def test_renal_excretion_moves_injected_dose_from_kidneys_to_bladder():
+    config = MousePerfusionConfig(shape=(24, 16, 48))
+    phantom = config.build()
+    labels = phantom.anatomy_labels
+    bladder = labels == 12
+    ureters = np.isin(labels, (13, 14))
+    kidneys = np.isin(labels, (2, 3, 4, 5))
+    assert np.any(bladder) and np.any(ureters)
+    assert not np.any(phantom.pyruvate_inflow.delivery_map[bladder | ureters])
+
+    volume = phantom.voxel_volume_m3
+    _, end = phantom.preview_time_bounds_s()
+    early = phantom.injected_concentration_map(config.injection_start_s + 5.0)
+    late = phantom.injected_concentration_map(end)
+    assert np.sum(early[bladder]) == pytest.approx(0.0)
+    assert np.sum(late[bladder]) * volume > 0.03 * config.injection_amount_umol * 1e-6
+    assert np.sum(late[kidneys]) < 0.01 * np.sum(late[bladder])
+
+    # Once the vascular bolus has passed, excreted tracer is conserved.
+    totals = [
+        np.sum(phantom.injected_concentration_map(time)) * volume
+        for time in (end - 40.0, end - 20.0, end)
+    ]
+    renal_and_urinary = bladder | ureters | kidneys
+    excreted = [
+        np.sum(phantom.injected_concentration_map(time)[renal_and_urinary])
+        for time in (end - 20.0, end)
+    ]
+    assert excreted[1] * volume == pytest.approx(totals[2], rel=0.05)
+    assert totals[1] == pytest.approx(totals[2], rel=0.02)
+
+    bladder_voxel = tuple(np.argwhere(bladder)[0])
+    pools = phantom.preview_pool_curves_at(bladder_voxel, np.array([end]))
+    assert pools["Pyruvate"][-1] + pools["Lactate"][-1] == pytest.approx(
+        late[bladder_voxel], rel=0.02
+    )
+
+
+def test_renal_excretion_can_be_disabled_and_legacy_configs_keep_it_off():
+    config = MousePerfusionConfig(shape=(24, 16, 48), renal_excretion_s_inv=0.0)
+    phantom = config.build()
+    _, end = phantom.preview_time_bounds_s()
+    frame = phantom.injected_concentration_map(end)
+    assert not np.any(frame[np.isin(phantom.anatomy_labels, (12, 13, 14))])
+
+    legacy = MousePerfusionConfig().to_dict()
+    del legacy["renal_excretion_s_inv"]
+    assert MousePerfusionConfig.from_dict(legacy).renal_excretion_s_inv == 0.0
+    with pytest.raises(ValueError, match="renal excretion"):
+        MousePerfusionConfig(ureter_transit_s=-1.0).validate()
 
 
 def test_voxel_preview_curves_include_configured_conversion_products():
@@ -317,6 +369,42 @@ def test_voxel_preview_curves_include_configured_conversion_products():
     assert np.max(liver["Alanine"]) > 0
 
 
+def test_heart_and_brain_have_literature_kinetics_and_legacy_configs_keep_them_off():
+    config = MousePerfusionConfig(shape=(24, 16, 48))
+    phantom = config.build()
+    labels = phantom.anatomy_labels
+    heart = labels == 8
+    brain = labels == 11
+    np.testing.assert_allclose(phantom.kpl_map_s_inv[heart], config.heart_kpl_s_inv)
+    np.testing.assert_allclose(phantom.kpa_map_s_inv[heart], config.heart_kpa_s_inv)
+    np.testing.assert_allclose(phantom.kpl_map_s_inv[brain], config.brain_kpl_s_inv)
+    delivery = phantom.pyruvate_inflow.delivery_map
+    background = labels == 1
+    assert np.mean(delivery[heart]) > np.mean(delivery[brain])
+    assert np.mean(delivery[heart]) > np.mean(delivery[background])
+
+    start, end = phantom.preview_time_bounds_s()
+    times = np.linspace(start, end, 300)
+    heart_curves = phantom.preview_pool_curves_at(tuple(np.argwhere(heart)[0]), times)
+    assert np.max(heart_curves["Lactate"]) > 0
+    assert np.max(heart_curves["Alanine"]) > 0
+
+    legacy = config.to_dict()
+    for key in (
+        "heart_perfusion_weight",
+        "heart_kpl_s_inv",
+        "heart_kpa_s_inv",
+        "brain_kpl_s_inv",
+        "brain_kpa_s_inv",
+    ):
+        del legacy[key]
+    restored = MousePerfusionConfig.from_dict(legacy)
+    assert restored.heart_perfusion_weight == restored.background_perfusion_weight
+    assert restored.heart_kpl_s_inv == restored.brain_kpl_s_inv == 0.0
+    with pytest.raises(ValueError, match="kPL and kPA"):
+        MousePerfusionConfig(brain_kpl_s_inv=-0.1).validate()
+
+
 @pytest.mark.parametrize("kernel", ["reference", "optimized"])
 def test_mouse_sequence_solver_converts_pyruvate_to_alanine_in_liver(kernel):
     phantom = MousePerfusionConfig(shape=(24, 16, 48)).build()
@@ -330,8 +418,9 @@ def test_mouse_sequence_solver_converts_pyruvate_to_alanine_in_liver(kernel):
 
     alanine = result.checkpoint_pool_magnetization[0, 2, ..., 2]
     liver = phantom.anatomy_labels == 6
+    converting = phantom.kpa_map_s_inv > 0
     assert np.max(alanine[liver]) > 0
-    assert np.allclose(alanine[~liver], 0.0, atol=1e-12)
+    assert np.allclose(alanine[~converting], 0.0, atol=1e-12)
     assert result.metadata["additional_product_conversion"]
 
 
@@ -458,3 +547,91 @@ def test_mouse_slice_preview_preserves_voxel_marker_when_perfusion_is_rendered()
         assert marker.data["y"].shape == (1,)
 
     preview.close()
+
+
+def _small_z_ompd_config(**overrides):
+    values = dict(injection_compound="z_ompd", shape=(16, 12, 32))
+    values.update(overrides)
+    return MousePerfusionConfig(**values)
+
+
+def test_z_ompd_shifts_follow_grashei_titration_per_voxel():
+    from blochsimulator.mouse_phantom import z_ompd_shift_ppm
+
+    config = _small_z_ompd_config()
+    phantom = config.build()
+    c5, c1 = phantom.pools
+    reference = config.spectral_reference_ppm
+
+    # Grashei et al.: C5 and C1 at pH 7.4 relative to 163.5 ppm urea.
+    assert c5.chemical_shift_ppm + reference == pytest.approx(178.874, abs=1e-3)
+    assert c1.chemical_shift_ppm + reference == pytest.approx(171.584, abs=1e-3)
+    assert z_ompd_shift_ppm("C5", 6.545) == pytest.approx(163.5 + 12.4801 + 1.64875)
+    assert phantom.pyruvate_inflow.colabelled_pools == (c1.name,)
+    assert phantom.metadata["ph_model"] == "z_ompd_grashei_titration_shift_maps"
+
+    labels = phantom.anatomy_labels
+    for label, ph in (
+        (2, config.left_cortex_ph),
+        (3, config.left_medulla_ph),
+        (12, config.urine_ph),
+    ):
+        mask = labels == label
+        assert np.allclose(phantom.ph_map[mask], ph)
+        absolute_c5 = (
+            c5.chemical_shift_ppm
+            + reference
+            + phantom.chemical_shift_maps_ppm[c5.name][mask]
+        )
+        absolute_c1 = (
+            c1.chemical_shift_ppm
+            + reference
+            + phantom.chemical_shift_maps_ppm[c1.name][mask]
+        )
+        assert np.allclose(absolute_c5, z_ompd_shift_ppm("C5", ph))
+        assert np.allclose(absolute_c1, z_ompd_shift_ppm("C1", ph))
+    assert np.allclose(phantom.ph_map[phantom.arterial_mask], config.blood_ph)
+    cortex = phantom.chemical_shift_maps_ppm[c5.name][labels == 2].mean()
+    medulla = phantom.chemical_shift_maps_ppm[c5.name][labels == 3].mean()
+    assert cortex - medulla == pytest.approx(0.566, abs=0.01)
+
+
+def test_z_ompd_c1_receives_the_same_inflow_as_c5():
+    phantom = _small_z_ompd_config(shape=(8, 8, 16)).build()
+    result = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        SequenceProgram((), duration_s=6.0),
+        phantom,
+        checkpoints_s=(3.0, 6.0),
+    )
+    c5 = result.checkpoint_pool_magnetization[:, 0, ..., 2]
+    c1 = result.checkpoint_pool_magnetization[:, 1, ..., 2]
+    assert np.max(c5) > 0
+    np.testing.assert_allclose(c1, c5, rtol=1e-10, atol=1e-15)
+
+
+def test_legacy_z_ompd_phantom_gains_titration_model_on_reload():
+    config = _small_z_ompd_config()
+    legacy = config.build()
+    legacy.pools = (
+        ChemicalSpecies("Z-OMPD C5", 3.0, 25.0, 0.3, t2_star=0.3),
+        ChemicalSpecies("Z-OMPD C1 reference", 0.4, 25.0, 0.3, t2_star=0.3),
+    )
+    legacy.chemical_shift_maps_ppm = None
+    legacy.pyruvate_inflow.colabelled_pools = ()
+    legacy.metadata["ph_model"] = "z_ompd_ground_truth_context"
+    old_config = config.to_dict()
+    del old_config["blood_ph"], old_config["urine_ph"]
+    legacy.metadata["mouse_perfusion_config"] = old_config
+
+    restored = MousePerfusionPhantom.from_dynamic_phantom(legacy)
+
+    assert restored.config.blood_ph == pytest.approx(config.background_ph)
+    assert restored.config.urine_ph == pytest.approx(config.background_ph)
+    assert restored.pools[0].chemical_shift_ppm == pytest.approx(
+        178.874 - config.spectral_reference_ppm, abs=1e-3
+    )
+    assert restored.pyruvate_inflow.colabelled_pools == ("Z-OMPD C1 reference",)
+    assert set(restored.chemical_shift_maps_ppm) == {
+        "Z-OMPD C5",
+        "Z-OMPD C1 reference",
+    }

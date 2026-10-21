@@ -72,6 +72,9 @@ class MouseSlicePreviewWidget(QWidget):
             (240, 55, 55, 255),
             (66, 105, 220, 255),
             (202, 174, 126, 255),
+            (236, 214, 92, 255),
+            (214, 186, 64, 255),
+            (214, 186, 64, 255),
         ],
         dtype=np.ubyte,
     )
@@ -390,7 +393,7 @@ class MouseSlicePreviewWidget(QWidget):
                 perfusion, orientation, anatomy.shape
             )
             base = anatomy if self.show_anatomy else np.zeros_like(anatomy)
-            anatomy_item.setImage(base, autoLevels=False, levels=(0, 11))
+            anatomy_item.setImage(base, autoLevels=False, levels=(0, 14))
             perfusion_item.setImage(
                 np.nan_to_num(perfusion), autoLevels=False, levels=(0.0, high)
             )
@@ -625,6 +628,29 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.tissue_clearance = self._float_spin(
             0.0001, 100.0, decimals=4, suffix=" s⁻¹", step=0.01
         )
+        self.renal_excretion = self._float_spin(
+            0.0, 100.0, decimals=4, suffix=" s⁻¹", step=0.01
+        )
+        self.renal_excretion.setToolTip(
+            "Rate at which kidney tissue passes injected compound into the "
+            "urine, in addition to tissue clearance. 0 disables excretion. "
+            "Preview only; the Bloch solver keeps the vascular delivery."
+        )
+        self.renal_tubular_transit = self._float_spin(
+            0.0, 10000.0, decimals=2, suffix=" s", step=5.0
+        )
+        self.renal_tubular_transit.setToolTip(
+            "Mean nephron/pelvis transit; individual transit times are spread "
+            "uniformly over 0.5–1.5× this value. Rodent tubular fluid reaches "
+            "the end of the proximal tubule after ~10–15 s and the urine after "
+            "roughly 1–2 min."
+        )
+        self.ureter_transit = self._float_spin(
+            0.0, 10000.0, decimals=2, suffix=" s", step=1.0
+        )
+        self.ureter_transit.setToolTip(
+            "Plug-flow delay between renal pelvis and bladder."
+        )
         injection_form.addRow("Injected compound", self.injection_compound)
         injection_form.addRow("Injected amount", self.injection_amount)
         injection_form.addRow("Injection starts", self.injection_start)
@@ -637,6 +663,9 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         injection_form.addRow("Bolus alpha", self.bolus_alpha)
         injection_form.addRow("Bolus beta", self.bolus_beta)
         injection_form.addRow("Preview tissue clearance", self.tissue_clearance)
+        injection_form.addRow("Renal excretion to urine", self.renal_excretion)
+        injection_form.addRow("Renal tubular transit", self.renal_tubular_transit)
+        injection_form.addRow("Ureter transit", self.ureter_transit)
         injection_controls_layout.addLayout(injection_form)
 
         perfusion_group = QGroupBox("Relative delivery weights")
@@ -645,12 +674,14 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.cortex_perfusion = self._float_spin(0.0, 1e6, decimals=4)
         self.medulla_perfusion = self._float_spin(0.0, 1e6, decimals=4)
         self.liver_perfusion = self._float_spin(0.0, 1e6, decimals=4)
+        self.heart_perfusion = self._float_spin(0.0, 1e6, decimals=4)
         self.brain_perfusion = self._float_spin(0.0, 1e6, decimals=4)
         self.vessel_perfusion = self._float_spin(0.0, 1e6, decimals=4)
         perfusion_form.addRow("Other perfused tissue", self.background_perfusion)
         perfusion_form.addRow("Renal cortex", self.cortex_perfusion)
         perfusion_form.addRow("Renal medulla", self.medulla_perfusion)
         perfusion_form.addRow("Liver", self.liver_perfusion)
+        perfusion_form.addRow("Heart", self.heart_perfusion)
         perfusion_form.addRow("Brain", self.brain_perfusion)
         perfusion_form.addRow("Resolved vessels", self.vessel_perfusion)
         injection_controls_layout.addWidget(perfusion_group)
@@ -743,11 +774,36 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         liver_form.addRow(liver_note)
         kidney_layout.addWidget(liver_group)
 
+        organ_group = QGroupBox("Heart and brain conversion")
+        organ_form = QFormLayout(organ_group)
+        self.heart_kpl = self._float_spin(0.0, 100.0, decimals=5, suffix=" s⁻¹")
+        self.heart_kpa = self._float_spin(0.0, 100.0, decimals=5, suffix=" s⁻¹")
+        self.brain_kpl = self._float_spin(0.0, 100.0, decimals=5, suffix=" s⁻¹")
+        self.brain_kpa = self._float_spin(0.0, 100.0, decimals=5, suffix=" s⁻¹")
+        for spin in (self.heart_kpl, self.heart_kpa, self.brain_kpl, self.brain_kpa):
+            spin.setMaximumWidth(300)
+        organ_form.addRow("Heart kPL", self.heart_kpl)
+        organ_form.addRow("Heart kPA", self.heart_kpa)
+        organ_form.addRow("Brain kPL", self.brain_kpl)
+        organ_form.addRow("Brain kPA", self.brain_kpa)
+        organ_note = QLabel(
+            "Defaults: fed mouse heart (Dodd 2013) and human brain (Grist 2019). "
+            "Brain kPL lumps blood-brain-barrier transport and LDH exchange. "
+            "Pyruvate → bicarbonate (PDH) is not modelled."
+        )
+        organ_note.setWordWrap(True)
+        organ_form.addRow(organ_note)
+        kidney_layout.addWidget(organ_group)
+
         ph_group = QGroupBox("Ground-truth pH regions")
         ph_grid = QGridLayout(ph_group)
         ph_grid.setColumnStretch(2, 1)
         self.ph_spins = {}
-        ph_regions = (("background", "Other tissue"),) + regions
+        ph_regions = (
+            (("background", "Other tissue"),)
+            + regions
+            + (("blood", "Blood (vessels)"), ("urine", "Urine (ureters/bladder)"))
+        )
         for row, (key, label) in enumerate(ph_regions):
             ph_grid.addWidget(QLabel(label), row, 0)
             spin = self._float_spin(0.0, 14.0, decimals=3, step=0.05)
@@ -756,10 +812,12 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             ph_grid.addWidget(spin, row, 1)
         kidney_layout.addWidget(ph_group)
         ph_help = QLabel(
-            "pH is stored as ground truth and shown in the preview. It does not "
-            "silently shift pyruvate or lactate. A later pH-sensitive compound "
-            "model can explicitly connect this map to chemical shift or an "
-            "acid/base reaction."
+            "pH is stored as ground truth and shown in the preview. For Z-OMPD "
+            "it sets the voxelwise C5 and C1 shifts via the Grashei titration "
+            "(pKa 6.545; C5 +3.30 ppm, C1 -0.46 ppm from acid to base). "
+            "Pyruvate and lactate are not shifted. Defaults are the in-vivo "
+            "values of Grashei et al.: blood 7.39, cortex 7.43, medulla 6.94, "
+            "renal pelvis 6.42."
         )
         ph_help.setWordWrap(True)
         kidney_layout.addWidget(ph_help)
@@ -889,14 +947,22 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             self.bolus_alpha,
             self.bolus_beta,
             self.tissue_clearance,
+            self.renal_excretion,
+            self.renal_tubular_transit,
+            self.ureter_transit,
             self.background_perfusion,
             self.cortex_perfusion,
             self.medulla_perfusion,
             self.liver_perfusion,
+            self.heart_perfusion,
             self.brain_perfusion,
             self.vessel_perfusion,
             *self.kpl_spins.values(),
             self.liver_kpa,
+            self.heart_kpl,
+            self.heart_kpa,
+            self.brain_kpl,
+            self.brain_kpa,
             *self.ph_spins.values(),
             self.breathing_rate,
             self.breathing_amplitude,
@@ -936,10 +1002,14 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.bolus_alpha.setValue(config.bolus_alpha)
         self.bolus_beta.setValue(config.bolus_beta)
         self.tissue_clearance.setValue(config.tissue_clearance_s_inv)
+        self.renal_excretion.setValue(config.renal_excretion_s_inv)
+        self.renal_tubular_transit.setValue(config.renal_tubular_transit_s)
+        self.ureter_transit.setValue(config.ureter_transit_s)
         self.background_perfusion.setValue(config.background_perfusion_weight)
         self.cortex_perfusion.setValue(config.renal_cortex_perfusion_weight)
         self.medulla_perfusion.setValue(config.renal_medulla_perfusion_weight)
         self.liver_perfusion.setValue(config.liver_perfusion_weight)
+        self.heart_perfusion.setValue(config.heart_perfusion_weight)
         self.brain_perfusion.setValue(config.brain_perfusion_weight)
         self.vessel_perfusion.setValue(config.vessel_perfusion_weight)
         self.kpl_spins["left_cortex"].setValue(config.left_cortex_kpl_s_inv)
@@ -947,11 +1017,17 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.kpl_spins["right_cortex"].setValue(config.right_cortex_kpl_s_inv)
         self.kpl_spins["right_medulla"].setValue(config.right_medulla_kpl_s_inv)
         self.liver_kpa.setValue(config.liver_kpa_s_inv)
+        self.heart_kpl.setValue(config.heart_kpl_s_inv)
+        self.heart_kpa.setValue(config.heart_kpa_s_inv)
+        self.brain_kpl.setValue(config.brain_kpl_s_inv)
+        self.brain_kpa.setValue(config.brain_kpa_s_inv)
         self.ph_spins["background"].setValue(config.background_ph)
         self.ph_spins["left_cortex"].setValue(config.left_cortex_ph)
         self.ph_spins["left_medulla"].setValue(config.left_medulla_ph)
         self.ph_spins["right_cortex"].setValue(config.right_cortex_ph)
         self.ph_spins["right_medulla"].setValue(config.right_medulla_ph)
+        self.ph_spins["blood"].setValue(config.blood_ph)
+        self.ph_spins["urine"].setValue(config.urine_ph)
         self.breathing_enabled.setChecked(config.breathing_enabled)
         self.breathing_rate.setValue(config.breathing_rate_hz)
         self.breathing_amplitude.setValue(config.breathing_amplitude_mm)
@@ -982,10 +1058,14 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             bolus_alpha=self.bolus_alpha.value(),
             bolus_beta=self.bolus_beta.value(),
             tissue_clearance_s_inv=self.tissue_clearance.value(),
+            renal_excretion_s_inv=self.renal_excretion.value(),
+            renal_tubular_transit_s=self.renal_tubular_transit.value(),
+            ureter_transit_s=self.ureter_transit.value(),
             background_perfusion_weight=self.background_perfusion.value(),
             renal_cortex_perfusion_weight=self.cortex_perfusion.value(),
             renal_medulla_perfusion_weight=self.medulla_perfusion.value(),
             liver_perfusion_weight=self.liver_perfusion.value(),
+            heart_perfusion_weight=self.heart_perfusion.value(),
             brain_perfusion_weight=self.brain_perfusion.value(),
             vessel_perfusion_weight=self.vessel_perfusion.value(),
             left_cortex_kpl_s_inv=self.kpl_spins["left_cortex"].value(),
@@ -993,11 +1073,17 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             right_cortex_kpl_s_inv=self.kpl_spins["right_cortex"].value(),
             right_medulla_kpl_s_inv=self.kpl_spins["right_medulla"].value(),
             liver_kpa_s_inv=self.liver_kpa.value(),
+            heart_kpl_s_inv=self.heart_kpl.value(),
+            heart_kpa_s_inv=self.heart_kpa.value(),
+            brain_kpl_s_inv=self.brain_kpl.value(),
+            brain_kpa_s_inv=self.brain_kpa.value(),
             background_ph=self.ph_spins["background"].value(),
             left_cortex_ph=self.ph_spins["left_cortex"].value(),
             left_medulla_ph=self.ph_spins["left_medulla"].value(),
             right_cortex_ph=self.ph_spins["right_cortex"].value(),
             right_medulla_ph=self.ph_spins["right_medulla"].value(),
+            blood_ph=self.ph_spins["blood"].value(),
+            urine_ph=self.ph_spins["urine"].value(),
             breathing_enabled=self.breathing_enabled.isChecked(),
             breathing_rate_hz=self.breathing_rate.value(),
             breathing_amplitude_mm=self.breathing_amplitude.value(),
@@ -1101,9 +1187,10 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
                 "pyruvate conversion."
             ),
             "z_ompd": (
-                "Z-OMPD is transported as a pH/perfusion tracer. C5 and C1 "
-                "spectral pools are created; the current source drives C5 while "
-                "the renal pH map remains explicit ground truth."
+                "Z-OMPD is transported as a pH/perfusion tracer. Both labelled "
+                "carbons (C5 and C1) receive the injected bolus; their shifts "
+                "follow the voxelwise pH map, so C5 splits into one peak per "
+                "pH compartment while C1 stays nearly fixed."
             ),
             "contrast_agent": (
                 "Generic contrast agent animates tracer delivery and clearance. "
@@ -1114,7 +1201,14 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         enabled = key == "pyruvate"
         for spin in self.kpl_spins.values():
             spin.setEnabled(enabled)
-        self.liver_kpa.setEnabled(enabled)
+        for spin in (
+            self.liver_kpa,
+            self.heart_kpl,
+            self.heart_kpa,
+            self.brain_kpl,
+            self.brain_kpa,
+        ):
+            spin.setEnabled(enabled)
 
     def _anatomy_resolution_changed(self, *_):
         if self.phantom is None:
@@ -1192,7 +1286,13 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         )
         time_start, time_end = self._animation_bounds_s
         times = np.linspace(time_start, time_end, 120)
-        colors = {"Brain": "#e9c46a", "Liver": "#2a9d8f", "Kidneys": "#e76f51"}
+        colors = {
+            "Brain": "#e9c46a",
+            "Heart": "#d62828",
+            "Liver": "#2a9d8f",
+            "Kidneys": "#e76f51",
+            "Bladder": "#8ecae6",
+        }
         for name, values in self.phantom.organ_bolus_curves(times).items():
             self.organ_curve_plot.plot(
                 times,
