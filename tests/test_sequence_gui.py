@@ -2278,6 +2278,7 @@ def test_ss_bssfp_matches_named_phantom_peaks_and_uses_phantom_voxel_size(
 ):
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(widget.SS_BSSFP_SOURCE)
     shape = (2, 4, 8)
     species = [
         ChemicalSpecies("Shape 1: Pyruvate", 0.0, 25.0, 0.3, frequency_offset_hz=0.0),
@@ -2338,6 +2339,7 @@ def test_ss_bssfp_matches_named_phantom_peaks_and_uses_phantom_voxel_size(
 def test_ss_bssfp_peak_matching_uses_the_simulated_frequency_frame(monkeypatch):
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(widget.SS_BSSFP_SOURCE)
     shape = (2, 2, 2)
     species = [
         ChemicalSpecies("Pyruvate", 0.0, 25.0, 0.3, frequency_offset_hz=0.0),
