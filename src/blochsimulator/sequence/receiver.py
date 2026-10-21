@@ -122,6 +122,12 @@ class ReceiverCalibration:
     Simulated signal is read as mol times polarization relative to thermal at
     ``target_temperature_k``; ``noise_factor`` multiplies the target noise (e.g.
     extra coil loading in vivo).
+
+    ``signal_efficiency`` is the measured amplitude relative to the fully
+    relaxed 90-degree amplitude at t=0 in a unit coil, for example from
+    :func:`~blochsimulator.sequence.reference_scan.reference_signal_efficiency`
+    with TR saturation, T2* decay and B1 maps; None means sin(flip angle).
+    ``reference_scan`` records the inputs of that model.
     """
 
     measured_amplitude: float
@@ -139,6 +145,8 @@ class ReceiverCalibration:
     polarization: Optional[float] = None
     target_temperature_k: float = 310.15
     noise_factor: float = 1.0
+    signal_efficiency: Optional[float] = None
+    reference_scan: Optional[dict] = None
 
     def __post_init__(self):
         for name, label in (
@@ -168,6 +176,8 @@ class ReceiverCalibration:
             raise ValueError("Reference polarization must be in (0, 1]")
         if not self.nucleus:
             raise ValueError("Reference nucleus must not be empty")
+        if self.signal_efficiency is not None:
+            _positive(self.signal_efficiency, "Reference signal efficiency")
         # Validates the nucleus/field/temperature for both polarizations.
         self.reference_polarization
         self.target_thermal_polarization
@@ -206,11 +216,19 @@ class ReceiverCalibration:
         return self.measured_snr / np.sqrt(self.averages)
 
     @property
+    def reference_signal_fraction(self):
+        """Measured amplitude per ideal fully relaxed 90-degree amplitude."""
+        if self.signal_efficiency is not None:
+            return float(self.signal_efficiency)
+        return float(np.sin(np.deg2rad(self.flip_angle_deg)))
+
+    @property
     def sensitivity_per_mol(self):
         """Single-scan FID SNR per mol of fully polarized nuclei at ``dwell_s``."""
-        transverse = np.sin(np.deg2rad(self.flip_angle_deg))
         return self.single_scan_snr / (
-            self.reference_moles * self.reference_polarization * transverse
+            self.reference_moles
+            * self.reference_polarization
+            * self.reference_signal_fraction
         )
 
     def noise_std(self, dwell_s):
@@ -243,6 +261,7 @@ class ReceiverCalibration:
             "reference_polarization": self.reference_polarization,
             "target_thermal_polarization": self.target_thermal_polarization,
             "single_scan_snr": self.single_scan_snr,
+            "reference_signal_fraction": self.reference_signal_fraction,
             "sensitivity_per_mol": self.sensitivity_per_mol,
         }
 

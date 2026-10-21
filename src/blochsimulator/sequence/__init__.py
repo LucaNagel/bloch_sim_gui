@@ -21,6 +21,11 @@ from .receiver import (
     apply_receiver_noise,
     receiver_acquisition_metadata,
 )
+from .reference_scan import (
+    ReferenceEfficiency,
+    ReferenceScan,
+    reference_signal_efficiency,
+)
 from .convergence import (
     DEFAULT_TIMESTEPS_S,
     ConvergenceCriteria,
@@ -162,6 +167,9 @@ __all__ = [
     "ReceiverNoise",
     "apply_receiver_noise",
     "receiver_acquisition_metadata",
+    "ReferenceEfficiency",
+    "ReferenceScan",
+    "reference_signal_efficiency",
     "make_pulseq_slice_selection",
     "ADCEvent",
     "AcquisitionDimensions",
