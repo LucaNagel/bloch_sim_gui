@@ -354,8 +354,16 @@ class B1Field:
             or ("Uniform B1+" if normalized_kind == "transmit" else "Uniform B1−"),
         )
 
-    def sample_world(self, positions_m: np.ndarray) -> np.ndarray:
-        """Interpolate all channels at object-space positions in metres."""
+    def sample_world(
+        self,
+        positions_m: np.ndarray,
+        channels: Optional[Sequence[int]] = None,
+    ) -> np.ndarray:
+        """Interpolate channels at object-space positions in metres.
+
+        All channels are returned unless ``channels`` selects a subset; the
+        result has shape ``(channel, position)``.
+        """
         positions = np.asarray(positions_m, dtype=float)
         if positions.ndim != 2 or positions.shape[1] != 3:
             raise ValueError("positions_m must have shape (position, 3)")
@@ -378,8 +386,14 @@ class B1Field:
             )
             coordinates.append(coordinate)
         coordinates = np.asarray(coordinates)
-        sampled = np.empty((self.n_channels, positions.shape[0]), dtype=np.complex128)
-        for channel, values in enumerate(self.data):
+        selected = (
+            range(self.n_channels)
+            if channels is None
+            else [int(channel) for channel in channels]
+        )
+        sampled = np.empty((len(selected), positions.shape[0]), dtype=np.complex128)
+        for row, channel in enumerate(selected):
+            values = self.data[channel]
             real = map_coordinates(
                 values.real,
                 coordinates,
@@ -396,7 +410,7 @@ class B1Field:
                 cval=0.0,
                 prefilter=False,
             )
-            sampled[channel] = real + 1j * imag
+            sampled[row] = real + 1j * imag
         return sampled
 
     def resample_to_phantom(self, phantom) -> np.ndarray:

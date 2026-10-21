@@ -89,6 +89,10 @@ def test_sequence_workspace_uses_default_sphere_and_shows_geometry_tab():
     widget = SequenceSimulationWidget()
     assert widget.views.tabText(widget.geometry_tab_index) == "Geometry"
     assert widget.geometry_tab_index == widget.sequence_tab_index + 1
+    # The workspace opens on the geometry preview of the default FLASH.
+    assert widget.views.currentIndex() == widget.geometry_tab_index
+    app.processEvents()
+    assert "Sequence FOV" in widget.geometry_viewer.summary.text()
 
     phantom = widget._selected_designed_phantom()
     assert is_default_phantom(phantom)

@@ -63,6 +63,7 @@ from ..default_phantoms import (
     is_default_phantom,
 )
 from ..phantom import Phantom
+from ..phantom_loop import phantom_loop_parameters, phantom_with_parameter
 from ..notebook_exporter import export_pulseq_generation_notebook
 from ..paths import workspace_directory
 from ..project_naming import ProjectExportNamer, project_timestamp
@@ -269,7 +270,49 @@ def _sequence_preview_timing_text(program):
 
     echo = timing(("echotimes", "te", "echotime"))
     repetition = timing(("tr", "repetitiontime"))
-    return f"Echo time (TE): {echo}    |    Repetition time (TR): {repetition}"
+    text = f"Echo time (TE): {echo}    |    Repetition time (TR): {repetition}"
+    image_time = _sequence_image_time_text(program)
+    if image_time:
+        text += f"    |    Time per image: {image_time}"
+    return text
+
+
+def _sequence_image_time_text(program):
+    """Format the start-to-start time of one complete image acquisition.
+
+    Generated sequences declare ``AcquisitionInterval`` for one full image or
+    volume, including every slice of a multi-slice acquisition. Sequences
+    without that declaration return an empty string.
+    """
+    interval = _sequence_timing_values(
+        program, ("acquisitioninterval", "volumeinterval")
+    )
+    if not interval.size:
+        return ""
+
+    def duration(seconds):
+        if seconds >= 1.0:
+            return f"{seconds:.4g} s"
+        return f"{seconds * 1000.0:.4g} ms"
+
+    text = duration(float(interval.max()))
+    details = []
+    definitions = {
+        str(key).lower(): value
+        for key, value in program.metadata.get("definitions", {}).items()
+    }
+    try:
+        slices = np.asarray(definitions.get("slicepositions", ()), dtype=float).size
+    except (TypeError, ValueError):
+        slices = 0
+    if slices > 1:
+        details.append(f"{slices} slices")
+    minimum = _sequence_timing_values(program, ("minimumacquisitioninterval",))
+    if minimum.size and float(minimum.max()) < float(interval.max()) - 1e-9:
+        details.append(f"minimum {duration(float(minimum.max()))}")
+    if details:
+        text += f" ({', '.join(details)})"
+    return text
 
 
 def _sequence_preview_timing_markers(program):
@@ -605,7 +648,12 @@ class _SequenceSimulationPayload:
 
 @dataclass(frozen=True)
 class _SequenceLoopParameter:
-    """One scalar parameter exposed by the generic sequence loop runner."""
+    """One scalar parameter exposed by the generic sequence loop runner.
+
+    ``category`` separates sequence/simulation settings from properties of the
+    simulated object. Parameters with ``phantom_key`` rebuild the selected
+    designed phantom from its authoring configuration for every loop value.
+    """
 
     key: str
     label: str
@@ -615,10 +663,13 @@ class _SequenceLoopParameter:
     decimals: int
     integer: bool = False
     widget: object = None
+    category: str = "sequence"
+    phantom_key: Optional[str] = None
+    value: float = 1.0
 
     def current_value(self):
         if self.widget is None:
-            return 1.0
+            return self.value
         return self.widget.value()
 
 
@@ -1438,6 +1489,8 @@ class SequenceSimulationWidget(QWidget):
             "No spectral-spatial pulse has been designed"
         )
         self._parameter_loop_state = None
+        # Phantom rebuilt for the current value of a phantom loop parameter.
+        self._parameter_loop_phantom = None
         self._parameter_loop_save_worker = None
         QApplication.instance().aboutToQuit.connect(self._wait_for_parameter_loop_save)
         self.probe_playback_timer = QTimer(self)
@@ -1583,7 +1636,15 @@ class SequenceSimulationWidget(QWidget):
         self._last_valid_epi_bandwidth_khz = self.sampling_bandwidth_khz.value()
         self._last_valid_flash_bandwidth_khz = self.flash_sampling_bandwidth_khz.value()
         self._connect_rf_designer(parent)
-        self._load_internal_sequence()
+        self._load_default_sequence()
+        # Show the planned geometry first; results replace it only on request.
+        self.views.setCurrentIndex(self.geometry_tab_index)
+
+    def _load_default_sequence(self) -> None:
+        """Start with a generated 2D FLASH and fall back to the internal FID."""
+        self.sequence_source.setCurrentIndex(self.FLASH_SOURCE)
+        if not self._reload_selected_generated_sequence():
+            self.sequence_source.setCurrentIndex(self.INTERNAL_SOURCE)
 
     def _connect_rf_designer(self, parent) -> None:
         """Subscribe to the main RF designer when hosted by the desktop app."""
@@ -2344,10 +2405,9 @@ class SequenceSimulationWidget(QWidget):
             "physical RF/gradient units"
         )
         nucleus_row.addWidget(self.nucleus, 1)
-        sequence_layout.addLayout(nucleus_row)
-
-        reference_row = QHBoxLayout()
-        reference_row.addWidget(QLabel("Sequence reference"))
+        nucleus_row.addSpacing(8)
+        self.sequence_reference_label = QLabel("Sequence reference")
+        nucleus_row.addWidget(self.sequence_reference_label)
         self.sequence_reference_ppm = QDoubleSpinBox()
         self.sequence_reference_ppm.setObjectName("sequence_reference_ppm")
         self.sequence_reference_ppm.setRange(-10000.0, 10000.0)
@@ -2362,8 +2422,8 @@ class SequenceSimulationWidget(QWidget):
             "offsets are applied relative to this reference; the phantom's "
             "spectrum centre and bandwidth remain independent."
         )
-        reference_row.addWidget(self.sequence_reference_ppm, 1)
-        sequence_layout.addLayout(reference_row)
+        nucleus_row.addWidget(self.sequence_reference_ppm, 1)
+        sequence_layout.addLayout(nucleus_row)
 
         generation_grid = QGridLayout()
         generation_grid.setHorizontalSpacing(10)
@@ -2853,10 +2913,10 @@ class SequenceSimulationWidget(QWidget):
         csi_hint.setWordWrap(True)
         self.csi_read_matrix = QSpinBox()
         self.csi_read_matrix.setRange(1, 128)
-        self.csi_read_matrix.setValue(12)
+        self.csi_read_matrix.setValue(16)
         self.csi_phase_matrix = QSpinBox()
         self.csi_phase_matrix.setRange(1, 128)
-        self.csi_phase_matrix.setValue(12)
+        self.csi_phase_matrix.setValue(16)
         self.csi_read_fov_mm = self._parameter_spin(0.1, 10000.0, default_fov_x, " mm")
         self.csi_phase_fov_mm = self._parameter_spin(0.1, 10000.0, default_fov_y, " mm")
         self.csi_spectral_points = QSpinBox()
@@ -4204,17 +4264,33 @@ class SequenceSimulationWidget(QWidget):
         self.parameter_loop_group = QGroupBox("Parameter loop", self)
         self.parameter_loop_group.setMaximumWidth(680)
         parameter_loop_form = _left_aligned_form(self.parameter_loop_group)
+        self.parameter_loop_category = QComboBox()
+        self.parameter_loop_category.setObjectName("sequence_parameter_loop_category")
+        self.parameter_loop_category.addItem("Sequence parameters", "sequence")
+        self.parameter_loop_category.addItem("Phantom parameters", "phantom")
+        self.parameter_loop_category.setToolTip(
+            "Sequence parameters change the generated sequence or the simulation "
+            "settings; the phantom stays fixed.\n"
+            "Phantom parameters change the simulated object; the sequence stays "
+            "fixed. Designed and mouse phantoms are rebuilt from their designer "
+            "settings for every value (e.g. circulation delay, kPL, T1)."
+        )
+        self.parameter_loop_category.currentIndexChanged.connect(
+            self._refresh_parameter_loop_parameters
+        )
+        parameter_loop_form.addRow("Loop over", self.parameter_loop_category)
         self.parameter_loop_parameter = QComboBox()
         self.parameter_loop_parameter.setObjectName("sequence_parameter_loop_parameter")
-        self.parameter_loop_parameter.setToolTip(
-            "Numerical controls are discovered from the active sequence form. "
-            "The RF/flip-angle scale is available for every sequence, including "
-            "loaded Pulseq files."
-        )
         self.parameter_loop_parameter.currentIndexChanged.connect(
             self._parameter_loop_parameter_changed
         )
         parameter_loop_form.addRow("Parameter", self.parameter_loop_parameter)
+        self.parameter_loop_parameter_info = QLabel()
+        self.parameter_loop_parameter_info.setObjectName(
+            "sequence_parameter_loop_parameter_info"
+        )
+        self.parameter_loop_parameter_info.setWordWrap(True)
+        parameter_loop_form.addRow(self.parameter_loop_parameter_info)
 
         self.parameter_loop_input_mode = QComboBox()
         self.parameter_loop_input_mode.setObjectName(
@@ -4902,7 +4978,9 @@ class SequenceSimulationWidget(QWidget):
         self.sequence_timing_summary.setToolTip(
             "TE and TR declared by the current sequence, in milliseconds. "
             "Echo markers are placed relative to the RF excitation center; "
-            "TR markers show repetition boundaries."
+            "TR markers show repetition boundaries. Time per image is the "
+            "start-to-start time of one complete image or volume, including "
+            "all slices."
         )
         self.sequence_timing_summary.setVisible(self._sequence_timing_visible)
         timeline_layout.addWidget(self.sequence_timing_summary)
@@ -6028,6 +6106,17 @@ class SequenceSimulationWidget(QWidget):
         if group is None:
             return parameters
 
+        discovered = self._form_loop_parameters(group, category="sequence")
+        # Flip-angle controls are the most common loop target. The remaining
+        # controls retain construction order, which follows their form order.
+        discovered.sort(
+            key=lambda parameter: (0 if "flip angle" in parameter.label.lower() else 1,)
+        )
+        parameters.extend(discovered)
+        return parameters
+
+    def _form_loop_parameters(self, group, *, category):
+        """Return the enabled numeric controls of ``group`` as loop parameters."""
         discovered = []
         seen_widgets = set()
         for key, widget in vars(self).items():
@@ -6056,25 +6145,87 @@ class SequenceSimulationWidget(QWidget):
                     ),
                     integer=isinstance(widget, QSpinBox),
                     widget=widget,
+                    category=category,
                 )
             )
-
-        # Flip-angle controls are the most common loop target. The remaining
-        # controls retain construction order, which follows their form order.
-        discovered.sort(
-            key=lambda parameter: (0 if "flip angle" in parameter.label.lower() else 1,)
-        )
         labels = {}
         for parameter in discovered:
             labels[parameter.label] = labels.get(parameter.label, 0) + 1
-        for parameter in discovered:
-            if labels[parameter.label] > 1:
-                parameter = replace(
-                    parameter,
-                    label=f"{parameter.label} ({parameter.key})",
-                )
-            parameters.append(parameter)
-        return parameters
+        return [
+            (
+                replace(parameter, label=f"{parameter.label} ({parameter.key})")
+                if labels[parameter.label] > 1
+                else parameter
+            )
+            for parameter in discovered
+        ]
+
+    def _phantom_loop_parameters(self):
+        """Discover loopable properties of the object selected for simulation."""
+        source_index = self.object_source.currentIndex()
+        if source_index == 1:
+            return self._form_loop_parameters(
+                self.built_in_properties_group, category="phantom"
+            )
+        if source_index != 0:
+            return []
+        try:
+            authored = phantom_loop_parameters(self._selected_designed_phantom())
+        except Exception:
+            # A phantom with an unreadable designer configuration simply
+            # offers no phantom loop parameters.
+            return []
+        return [
+            _SequenceLoopParameter(
+                key=item.key,
+                label=item.label,
+                unit=item.unit,
+                minimum=item.minimum,
+                maximum=item.maximum,
+                decimals=item.decimals,
+                integer=item.integer,
+                category="phantom",
+                phantom_key=item.key,
+                value=item.value,
+            )
+            for item in authored
+        ]
+
+    def _parameter_loop_parameters(self):
+        if self.parameter_loop_category.currentData() == "phantom":
+            return self._phantom_loop_parameters()
+        return self._sequence_loop_parameters()
+
+    def _update_parameter_loop_parameter_info(self, has_parameters):
+        phantom = self.parameter_loop_category.currentData() == "phantom"
+        source_index = self.object_source.currentIndex()
+        if not phantom:
+            text = (
+                "Controls of the active sequence form plus the RF/flip-angle "
+                "scale, sequence reference and simulation time resolution. "
+                "The phantom stays fixed."
+            )
+        elif source_index == 2:
+            text = (
+                "Spin probe mode has no simulation phantom. Select a phantom or "
+                "the built-in quick object."
+            )
+        elif source_index == 1:
+            text = "Properties of the built-in quick object. The sequence stays fixed."
+        elif has_parameters:
+            text = (
+                "Designer settings of the selected phantom. The phantom is rebuilt "
+                "for every value; the Phantom tab keeps its original phantom and "
+                "the sequence stays fixed."
+            )
+        else:
+            text = (
+                "The selected phantom has no designer settings to vary. Create it "
+                "with the phantom designer or the mouse designer, or use the "
+                "built-in quick object."
+            )
+        self.parameter_loop_parameter_info.setText(text)
+        self.parameter_loop_parameter.setToolTip(text)
 
     def _refresh_parameter_loop_parameters(self):
         if not hasattr(self, "parameter_loop_parameter"):
@@ -6086,13 +6237,15 @@ class SequenceSimulationWidget(QWidget):
         previous = self.parameter_loop_parameter.blockSignals(True)
         self.parameter_loop_parameter.clear()
         selected_index = -1
-        for index, parameter in enumerate(self._sequence_loop_parameters()):
+        parameters = self._parameter_loop_parameters()
+        for index, parameter in enumerate(parameters):
             self.parameter_loop_parameter.addItem(parameter.label, parameter)
             if parameter.key == selected_key:
                 selected_index = index
         if selected_index >= 0:
             self.parameter_loop_parameter.setCurrentIndex(selected_index)
         self.parameter_loop_parameter.blockSignals(previous)
+        self._update_parameter_loop_parameter_info(bool(parameters))
         self._parameter_loop_parameter_changed()
         self._update_run_action_availability()
 
@@ -6256,6 +6409,8 @@ class SequenceSimulationWidget(QWidget):
     def _set_parameter_loop_controls_locked(self, locked):
         for control in (
             self.sequence_source,
+            self.object_source,
+            self.parameter_loop_category,
             self.parameter_loop_parameter,
             self.parameter_loop_input_mode,
             self.parameter_loop_output_mode,
@@ -6265,6 +6420,9 @@ class SequenceSimulationWidget(QWidget):
         group = self._active_sequence_parameter_group()
         if group is not None:
             group.setEnabled(not locked)
+        self.built_in_properties_group.setEnabled(
+            not locked and self.object_source.currentIndex() == 1
+        )
         self.parameter_loop_button.setEnabled(False if locked else True)
 
     def _start_parameter_loop(self):
@@ -6309,10 +6467,34 @@ class SequenceSimulationWidget(QWidget):
                 self, "No sequence", "Load or generate a sequence first."
             )
             return
+        base_phantom = None
+        if parameter.phantom_key is not None:
+            # Every value rebuilds this snapshot, so edits in the Phantom tab
+            # during the loop cannot leak into later runs.
+            base_phantom = (
+                self._selected_designed_phantom()
+                if self.object_source.currentIndex() == 0
+                else None
+            )
+            available = (
+                {item.key for item in phantom_loop_parameters(base_phantom)}
+                if base_phantom is not None
+                else set()
+            )
+            if parameter.phantom_key not in available:
+                QMessageBox.warning(
+                    self,
+                    "Parameter loop",
+                    "The selected phantom no longer provides this parameter. "
+                    "Select the loop parameter again.",
+                )
+                self._refresh_parameter_loop_parameters()
+                return
 
         manual = self.parameter_loop_input_mode.currentData() == "manual"
         self._parameter_loop_state = {
             "parameter": parameter,
+            "base_phantom": base_phantom,
             "values": values,
             "output_directory": output_directory,
             "file_namer": file_namer,
@@ -6356,7 +6538,20 @@ class SequenceSimulationWidget(QWidget):
             return
         parameter = state["parameter"]
         requested_value = state["values"][state["index"]]
-        if parameter.widget is None:
+        if parameter.phantom_key is not None:
+            actual_value = float(requested_value)
+            self._status_update(
+                f"Rebuilding phantom for {parameter.label} = "
+                f"{self._format_parameter_loop_value(parameter, actual_value)}"
+            )
+            try:
+                self._parameter_loop_phantom = phantom_with_parameter(
+                    state["base_phantom"], parameter.phantom_key, actual_value
+                )
+            except Exception as exc:
+                self._finish_parameter_loop(error=f"Phantom rebuild failed: {exc}")
+                return
+        elif parameter.widget is None:
             actual_value = float(requested_value)
             self.program = self._program_with_rf_scale(
                 state["base_program"], actual_value
@@ -6402,6 +6597,7 @@ class SequenceSimulationWidget(QWidget):
             return None
         parameter = state["parameter"]
         metadata = {
+            "category": parameter.category,
             "parameter_key": parameter.key,
             "parameter_label": parameter.label,
             "value": float(state["current_value"]),
@@ -6510,6 +6706,7 @@ class SequenceSimulationWidget(QWidget):
         completed = int(state["completed"])
         total = int(len(state["values"]))
         self._parameter_loop_state = None
+        self._parameter_loop_phantom = None
         self._set_parameter_loop_controls_locked(False)
         self._update_run_action_availability()
         QTimer.singleShot(0, self._update_run_action_availability)
@@ -6665,6 +6862,9 @@ class SequenceSimulationWidget(QWidget):
 
     def refresh_object_summary(self, *_):
         """Refresh the read-only summary of the shared Phantom-tab object."""
+        loop_category = getattr(self, "parameter_loop_category", None)
+        if loop_category is not None and loop_category.currentData() == "phantom":
+            self._refresh_parameter_loop_parameters()
         if self.object_source.currentIndex() != 0:
             self._update_simulation_object_table()
             self._update_spoiling_quality()
@@ -11327,7 +11527,9 @@ class SequenceSimulationWidget(QWidget):
     def _build_phantom(self):
         source_index = self.object_source.currentIndex()
         if source_index == 0:
-            designed = self._selected_designed_phantom()
+            designed = self._parameter_loop_phantom
+            if designed is None:
+                designed = self._selected_designed_phantom()
             if designed is None:
                 raise ValueError(self.NO_PHANTOM_MESSAGE)
             self.phantom = designed

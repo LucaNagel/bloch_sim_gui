@@ -1312,7 +1312,7 @@ class BlochSimulatorGUI(QMainWindow):
         combo_layout = QVBoxLayout(self.b1_combo_placeholder)
         combo_layout.setContentsMargins(0, 0, 0, 0)
         combo_layout.addWidget(
-            QLabel("Open this tab to initialize the 3D Phantom/B1 alignment view.")
+            QLabel("Open this tab to initialize the Phantom/B1 slice view.")
         )
         combo_layout.addStretch()
         self.b1_combo_tab_index = self.tab_widget.addTab(
@@ -1626,7 +1626,7 @@ class BlochSimulatorGUI(QMainWindow):
         self._connect_sequence_b1_display()
 
     def _ensure_b1_combo_workspace(self, index: int):
-        """Create the combined OpenGL view only when its tab is opened."""
+        """Create the combined B1/phantom slice view only when its tab is opened."""
         if (
             index != getattr(self, "b1_combo_tab_index", -1)
             or self.b1_combo_widget is not None
@@ -1894,7 +1894,8 @@ class BlochSimulatorGUI(QMainWindow):
                 "and receive B1− fields."
             ),
             "Phantom + B1": (
-                "Inspect the phantom and the transformed B1 field together in 3D."
+                "Step through axial, coronal, and sagittal B1 maps with the phantom "
+                "outline overlaid."
             ),
             "Simulations": (
                 "Switch between completed sequence simulations retained for this "

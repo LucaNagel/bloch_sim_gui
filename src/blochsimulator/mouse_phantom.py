@@ -166,9 +166,9 @@ class MousePerfusionConfig:
     """Serializable authoring configuration for the reference mouse phantom."""
 
     name: str = "Mouse renal perfusion phantom"
-    shape: Tuple[int, int, int] = (48, 32, 96)
-    fov_m: Tuple[float, float, float] = (0.045, 0.032, 0.105)
-    mouse_size_m: Tuple[float, float, float] = (0.045, 0.032, 0.105)
+    shape: Tuple[int, int, int] = (64, 64, 105)
+    fov_m: Tuple[float, float, float] = (0.032, 0.032, 0.105)
+    mouse_size_m: Tuple[float, float, float] = (0.028, 0.028, 0.090)
     mouse_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     field_strength_t: float = 7.0
     injection_compound: str = "pyruvate"

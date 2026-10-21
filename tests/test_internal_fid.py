@@ -110,8 +110,14 @@ def test_repeated_fid_accumulates_excitation_without_reset_or_spoiling():
     )
 
 
-def test_fid_controls_generate_and_live_refresh_without_stale_probe_program():
+def _fid_widget():
     widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(widget.INTERNAL_SOURCE)
+    return widget
+
+
+def test_fid_controls_generate_and_live_refresh_without_stale_probe_program():
+    widget = _fid_widget()
     original = widget.program
     assert widget.generate_sequence_button.isEnabled()
     assert widget.sequence_live_preview.isEnabled()
@@ -141,7 +147,7 @@ def test_fid_controls_generate_and_live_refresh_without_stale_probe_program():
 
 
 def test_short_fid_tr_preserves_last_valid_program_and_blocks_execution():
-    widget = SequenceSimulationWidget()
+    widget = _fid_widget()
     original = widget.program
     widget.fid_repetition_time_ms.setValue(1)
     assert not widget._ensure_current_generated_sequence()
@@ -154,7 +160,7 @@ def test_short_fid_tr_preserves_last_valid_program_and_blocks_execution():
 
 
 def test_fid_controls_survive_source_switch_and_project_control_restore():
-    widget = SequenceSimulationWidget()
+    widget = _fid_widget()
     widget.fid_rf_pulse_type.setCurrentText("Sinc")
     widget.fid_rf_sinc_lobes.setValue(5)
     widget.fid_flip_angle_deg.setValue(25)
@@ -179,7 +185,7 @@ def test_fid_controls_survive_source_switch_and_project_control_restore():
 
 
 def test_fid_accepts_imported_designer_pulse_and_refreshes_its_duration():
-    widget = SequenceSimulationWidget()
+    widget = _fid_widget()
     widget.set_rf_designer_pulse(
         (np.array([0.01, 0.02, 0.01]), np.array([0, 1e-3, 2e-3])),
         state={"duration": 3.0, "flip_angle": 60.0, "freq_offset": 75},

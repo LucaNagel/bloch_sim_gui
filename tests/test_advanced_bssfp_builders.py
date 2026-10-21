@@ -871,7 +871,7 @@ def test_sequence_generation_is_explicit_by_default_and_live_preview_is_opt_in()
     widget.ss_bssfp_repetition_time_ms.setValue(8.0)
     widget.sequence_source.setCurrentIndex(4)
 
-    assert widget.program.source == "internal-fid"
+    assert widget.program.source == "internal-flash-2d"
     assert widget._sequence_generation_pending
     assert "Generate sequence" in widget.sequence_info.text()
 

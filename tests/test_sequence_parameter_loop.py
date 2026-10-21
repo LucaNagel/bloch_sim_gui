@@ -483,6 +483,8 @@ def test_parameter_loop_chains_real_sequence_workers(
     qt_application, monkeypatch, input_mode
 ):
     widget = SequenceSimulationWidget()
+    # A non-imaging FID keeps the chained workers fast on a 2x2 object.
+    widget.sequence_source.setCurrentIndex(widget.INTERNAL_SOURCE)
     widget.object_source.setCurrentIndex(1)
     widget.matrix_size.setValue(2)
     widget.z_matrix_size.setValue(1)
@@ -670,3 +672,107 @@ def test_parameter_loop_regenerates_active_sequence_for_each_value(
     assert explorer._current_display.shape == final_display.shape
     assert not np.allclose(explorer._current_display, final_display)
     assert widget.result is final_result
+
+
+def test_parameter_loop_separates_sequence_and_phantom_parameters(
+    qt_application, monkeypatch
+):
+    from blochsimulator.mouse_phantom import MousePerfusionConfig
+
+    widget = SequenceSimulationWidget()
+    category = widget.parameter_loop_category
+    assert category.currentData() == "sequence"
+    sequence_parameters = _loop_parameters(widget)
+    assert {parameter.category for parameter in sequence_parameters} == {"sequence"}
+    assert "flash_flip_angle_deg" in {
+        parameter.key for parameter in sequence_parameters
+    }
+
+    widget.object_source.setCurrentIndex(1)
+    category.setCurrentIndex(category.findData("phantom"))
+    built_in = {parameter.key: parameter for parameter in _loop_parameters(widget)}
+    assert {"t1_ms", "t2_ms", "b0_ppm"} <= set(built_in)
+    assert all(parameter.category == "phantom" for parameter in built_in.values())
+    assert not set(built_in) & {parameter.key for parameter in sequence_parameters}
+    assert built_in["t1_ms"].widget is widget.t1_ms
+
+    mouse = MousePerfusionConfig(shape=(12, 12, 16)).build()
+    monkeypatch.setattr(widget, "_loaded_designed_phantom", lambda: mouse)
+    widget.object_source.setCurrentIndex(0)
+    designed = {parameter.key: parameter for parameter in _loop_parameters(widget)}
+    delay = designed["mouse.circulation_delay_s"]
+    assert delay.label == "Circulation delay"
+    assert delay.phantom_key == delay.key
+    assert delay.widget is None
+    assert "Designer settings" in widget.parameter_loop_parameter_info.text()
+
+    widget.object_source.setCurrentIndex(2)
+    assert _loop_parameters(widget) == []
+    assert not widget.parameter_loop_button.isEnabled()
+
+    category.setCurrentIndex(category.findData("sequence"))
+    assert {parameter.key for parameter in _loop_parameters(widget)} == {
+        parameter.key for parameter in sequence_parameters
+    }
+
+
+def test_phantom_parameter_loop_rebuilds_phantom_for_each_value(
+    qt_application, monkeypatch
+):
+    from blochsimulator.mouse_phantom import MousePerfusionConfig
+
+    widget = SequenceSimulationWidget()
+    mouse = MousePerfusionConfig(shape=(12, 12, 16)).build()
+    original_delay = mouse.metadata["mouse_perfusion_config"]["circulation_delay_s"]
+    monkeypatch.setattr(widget, "_loaded_designed_phantom", lambda: mouse)
+    widget.object_source.setCurrentIndex(0)
+    category = widget.parameter_loop_category
+    category.setCurrentIndex(category.findData("phantom"))
+    widget.parameter_loop_parameter.setCurrentIndex(
+        widget.parameter_loop_parameter.findText("Circulation delay")
+    )
+    widget.parameter_loop_input_mode.setCurrentIndex(
+        widget.parameter_loop_input_mode.findData("manual")
+    )
+    widget.parameter_loop_manual_values.setText("0.5, 3")
+    observed = []
+
+    def fake_run():
+        assert not category.isEnabled()
+        assert not widget.object_source.isEnabled()
+        widget._build_phantom()
+        observed.append(
+            (
+                widget.phantom.metadata["mouse_perfusion_config"][
+                    "circulation_delay_s"
+                ],
+                widget._parameter_loop_metadata(),
+            )
+        )
+        widget._parameter_loop_iteration_finished()
+        return True
+
+    monkeypatch.setattr(widget, "_run", fake_run)
+    monkeypatch.setattr(
+        "blochsimulator.ui.sequence_simulation_widget.QTimer.singleShot",
+        lambda _delay, callback: callback(),
+    )
+
+    widget._start_parameter_loop()
+
+    assert [delay for delay, _ in observed] == [0.5, 3.0]
+    assert [metadata["value"] for _, metadata in observed] == [0.5, 3.0]
+    assert all(metadata["category"] == "phantom" for _, metadata in observed)
+    assert all(
+        metadata["parameter_key"] == "mouse.circulation_delay_s"
+        for _, metadata in observed
+    )
+    assert widget._parameter_loop_state is None
+    assert widget._parameter_loop_phantom is None
+    assert category.isEnabled() and widget.object_source.isEnabled()
+    assert (
+        mouse.metadata["mouse_perfusion_config"]["circulation_delay_s"]
+        == original_delay
+    )
+    widget._build_phantom()
+    assert widget.phantom is mouse
