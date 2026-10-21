@@ -11,6 +11,7 @@ from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidge
 
 
 def _configure_disk_loop(widget, directory, *, input_mode="manual"):
+    widget.sequence_source.setCurrentIndex(widget.INTERNAL_SOURCE)
     widget.object_source.setCurrentIndex(1)
     widget.matrix_size.setValue(2)
     widget.z_matrix_size.setValue(1)

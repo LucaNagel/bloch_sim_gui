@@ -60,7 +60,11 @@ def test_reference_mouse_builds_anatomy_vessels_kidney_maps_and_conserves_dose()
 
 
 def test_mouse_physical_size_is_independent_from_fov_and_old_configs_migrate():
-    baseline = MousePerfusionConfig(shape=(48, 32, 96)).build()
+    baseline = MousePerfusionConfig(
+        shape=(48, 32, 96),
+        fov_m=(0.045, 0.032, 0.105),
+        mouse_size_m=(0.045, 0.032, 0.105),
+    ).build()
     cropped = MousePerfusionConfig(
         shape=(48, 32, 96),
         fov_m=(0.045, 0.032, 0.080),
@@ -156,15 +160,23 @@ def test_spatial_bolus_preview_uses_arrival_map_and_breathing_is_periodic():
     )
 
 
+def _mouse_axial_position(config, z_index):
+    """Return a voxel centre's z in units of the mouse half-length."""
+    fov_z = config.fov_m[2]
+    z_m = (z_index + 0.5) / config.shape[2] * fov_z - 0.5 * fov_z
+    return (z_m - config.mouse_offset_m[2]) / (0.5 * config.mouse_size_m[2])
+
+
 def test_bolus_enters_at_tail_vein_before_cardiopulmonary_circulation():
     config = MousePerfusionConfig(shape=(24, 16, 48))
     phantom = config.build()
     earliest = np.unravel_index(
         np.nanargmin(phantom.perfusion_arrival_time_s), phantom.shape
     )
-    earliest_z = (earliest[2] + 0.5) / phantom.shape[2] * 2.0 - 1.0
+    earliest_z = _mouse_axial_position(config, earliest[2])
 
-    assert earliest_z < -0.8
+    # The default mouse no longer fills the FOV, so measure along the body.
+    assert earliest_z < -0.75
     assert phantom.anatomy_labels[earliest] == 10
     assert phantom.perfusion_arrival_time_s[earliest] == pytest.approx(
         config.injection_start_s
@@ -174,8 +186,7 @@ def test_bolus_enters_at_tail_vein_before_cardiopulmonary_circulation():
         config.injection_start_s + 0.1 * config.injection_duration_s
     )
     maximum = np.unravel_index(np.argmax(early_frame), phantom.shape)
-    maximum_z = (maximum[2] + 0.5) / phantom.shape[2] * 2.0 - 1.0
-    assert maximum_z < -0.8
+    assert _mouse_axial_position(config, maximum[2]) < -0.75
 
 
 def test_mouse_phantom_round_trip_restores_editable_configuration(tmp_path):
@@ -466,7 +477,7 @@ def test_mouse_designer_exposes_animation_curves_and_hd_anatomy_controls():
     assert "alpha" in dialog.bolus_alpha.toolTip()
     assert "beta" in dialog.bolus_beta.toolTip()
     assert [spin.value() for spin in dialog.mouse_size_spins] == pytest.approx(
-        [45.0, 32.0, 105.0]
+        [28.0, 28.0, 90.0]
     )
     assert [spin.value() for spin in dialog.mouse_offset_spins] == pytest.approx(
         [0.0, 0.0, 0.0]

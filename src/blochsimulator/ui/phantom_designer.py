@@ -1671,7 +1671,17 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
     def _b0_settings_changed(self, *_):
         if self._updating:
             return
-        self.design.b0_inhomogeneity_mode = str(self.b0_mode_combo.currentData())
+        mode = str(self.b0_mode_combo.currentData())
+        if (
+            self.design.b0_inhomogeneity_mode == "none"
+            and mode != "none"
+            and self.b0_inhomogeneity_ppm.value() == 0.0
+        ):
+            # A pattern without strength has no effect; start from 1 ppm.
+            blocked = self.b0_inhomogeneity_ppm.blockSignals(True)
+            self.b0_inhomogeneity_ppm.setValue(1.0)
+            self.b0_inhomogeneity_ppm.blockSignals(blocked)
+        self.design.b0_inhomogeneity_mode = mode
         self.design.b0_inhomogeneity_ppm = self.b0_inhomogeneity_ppm.value()
         self.design.b0_inhomogeneity_center = self._b0_center_fraction()
         self._inspector_preview_dirty = True

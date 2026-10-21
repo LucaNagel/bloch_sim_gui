@@ -1,14 +1,14 @@
-"""Editors and 3D alignment views for spatial transmit/receive B1 fields."""
+"""Editors and slice views for spatial transmit/receive B1 fields."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt, QSignalBlocker, QTimer, pyqtSignal
+from PyQt5.QtGui import QTransform
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -37,17 +37,13 @@ from ..paths import workspace_directory
 from .volume_viewer import VolumeViewerWidget
 from .styles import BOLD_GROUP_TITLES_STYLE
 
-try:
-    import pyqtgraph.opengl as gl
-
-    HAS_OPENGL = True
-except Exception:
-    gl = None
-    HAS_OPENGL = False
-
 
 def _complex_label(kind: str) -> str:
     return "Transmit B1+" if kind == "transmit" else "Receive B1−"
+
+
+def _magnitude_label(kind: str) -> str:
+    return "B1+" if kind == "transmit" else "B1−"
 
 
 class B1FieldEditor(QGroupBox):
@@ -808,29 +804,56 @@ class B1WorkspaceWidget(QWidget):
         return True
 
 
-def _line_segments(corners: np.ndarray) -> np.ndarray:
-    if len(corners) == 4:
-        edges = ((0, 1), (1, 2), (2, 3), (3, 0))
-    else:
-        edges = (
-            (0, 1),
-            (2, 3),
-            (4, 5),
-            (6, 7),
-            (0, 2),
-            (1, 3),
-            (4, 6),
-            (5, 7),
-            (0, 4),
-            (1, 5),
-            (2, 6),
-            (3, 7),
-        )
-    return np.vstack([corners[list(edge)] for edge in edges])
+# Samples along the longest axis when the view covers the whole B1 field.
+_FIELD_GRID_POINTS = 96
+
+
+def _phantom_support_on_grid(phantom, coordinates) -> np.ndarray:
+    """Return nearest-voxel phantom support at the centres of a 3D grid.
+
+    ``coordinates`` holds the X, Y and Z grid-centre vectors in metres. Grid
+    axes beyond the phantom's dimensionality only meet the phantom in the
+    plane through the origin.
+    """
+    shape = tuple(int(count) for count in phantom.shape)
+    positions = np.asarray(phantom.positions, dtype=float).reshape(*shape, 3)
+    support = np.asarray(phantom.mask, dtype=bool).reshape(shape)
+    support = support.reshape(shape + (1,) * (3 - len(shape)))
+    indices = []
+    inside = []
+    for axis, grid in enumerate(coordinates):
+        grid = np.asarray(grid, dtype=float)
+        if axis < len(shape):
+            line = positions[
+                tuple(
+                    slice(None) if other == axis else 0 for other in range(len(shape))
+                )
+            ][:, axis]
+            count = shape[axis]
+            step = (
+                (line[-1] - line[0]) / (count - 1)
+                if count > 1
+                else float(phantom.fov[axis])
+            )
+            index = np.rint((grid - line[0]) / step).astype(int)
+            inside.append((index >= 0) & (index < count))
+            indices.append(np.clip(index, 0, count - 1))
+        else:
+            step = grid[1] - grid[0] if grid.size > 1 else np.inf
+            inside.append(np.abs(grid) <= 0.5 * step + 1e-12)
+            indices.append(np.zeros(grid.size, dtype=int))
+    return (
+        support[np.ix_(*indices)]
+        & inside[0][:, None, None]
+        & inside[1][None, :, None]
+        & inside[2][None, None, :]
+    )
 
 
 class B1PhantomCombinationWidget(QWidget):
-    """Show an active phantom inside a transformed B1 field in 3D."""
+    """Show B1 magnitude maps in orthogonal slices with the phantom outline."""
+
+    PLANES = ("xy", "xz", "yz")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -838,19 +861,30 @@ class B1PhantomCombinationWidget(QWidget):
         self.tx_field: Optional[B1Field] = None
         self.rx_field: Optional[B1Field] = None
         self.sequence_context = {}
+        # Display grid shared by both views: (shape, fov_m, phantom support).
+        self._grid = None
+        self._relative = {}
+        self._synchronizing_slices = False
         self._build_ui()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         controls = QHBoxLayout()
-        self.show_phantom = QCheckBox("Show phantom")
+        controls.addWidget(QLabel("View"))
+        self.extent_combo = QComboBox()
+        self.extent_combo.addItem("Phantom grid", "phantom")
+        self.extent_combo.addItem("Whole B1 field", "field")
+        self.extent_combo.setToolTip(
+            "Phantom grid: B1 exactly as each phantom voxel receives it in the "
+            "simulation.\nWhole B1 field: the full transformed field around the "
+            "phantom, to check alignment."
+        )
+        self.extent_combo.currentIndexChanged.connect(self._rebuild)
+        controls.addWidget(self.extent_combo)
+        self.show_phantom = QCheckBox("Phantom outline")
         self.show_phantom.setChecked(True)
-        self.show_phantom.toggled.connect(self._refresh)
+        self.show_phantom.toggled.connect(self._refresh_outlines)
         controls.addWidget(self.show_phantom)
-        self.show_field = QCheckBox("Show B1 samples")
-        self.show_field.setChecked(True)
-        self.show_field.toggled.connect(self._refresh)
-        controls.addWidget(self.show_field)
         controls.addWidget(QLabel("Transmit values"))
         self.transmit_display_combo = QComboBox()
         self.transmit_display_combo.addItem("Relative |B1+|", "relative")
@@ -867,21 +901,14 @@ class B1PhantomCombinationWidget(QWidget):
         layout.addLayout(controls)
 
         self.channel_combo = QComboBox()
-        self.channel_combo.currentIndexChanged.connect(self._refresh)
-        self.gl_views = {}
-        self.field_scatters = {}
-        self.phantom_scatters = {}
-        self.field_bounds_items = {}
-        self.phantom_bounds_items = {}
-        self.grids = {}
+        self.channel_combo.currentIndexChanged.connect(self._rebuild)
+        self.viewers = {}
+        self.outline_items = {}
         self.view_infos = {}
 
         splitter = QSplitter(Qt.Vertical)
         splitter.setChildrenCollapsible(False)
         self.view_splitter = splitter
-        open_gl_enabled = (
-            HAS_OPENGL and os.environ.get("QT_QPA_PLATFORM", "").lower() != "offscreen"
-        )
         for kind, title in (("transmit", "Transmit B1+"), ("receive", "Receive B1−")):
             group = QGroupBox(title)
             group_layout = QVBoxLayout(group)
@@ -891,56 +918,27 @@ class B1PhantomCombinationWidget(QWidget):
                 channel_row.addWidget(self.channel_combo)
                 channel_row.addStretch()
                 group_layout.addLayout(channel_row)
-            if open_gl_enabled:
-                gl_view = gl.GLViewWidget()
-                gl_view.setCameraPosition(distance=400, elevation=25, azimuth=35)
-                grid = gl.GLGridItem()
-                gl_view.addItem(grid)
-                field_scatter = gl.GLScatterPlotItem(
-                    pos=np.zeros((0, 3)), color=(0.1, 0.7, 1.0, 0.45), size=5
+            viewer = VolumeViewerWidget(show_3d=False)
+            viewer.info.hide()
+            viewer.indices_changed.connect(
+                lambda indices, selected=kind: self._slices_changed(selected, indices)
+            )
+            outlines = {}
+            for plane, view in zip(
+                self.PLANES, (viewer.xy_view, viewer.xz_view, viewer.yz_view)
+            ):
+                outline = pg.IsocurveItem(
+                    level=0.5, pen=pg.mkPen((255, 165, 20), width=2)
                 )
-                gl_view.addItem(field_scatter)
-                phantom_scatter = gl.GLScatterPlotItem(
-                    pos=np.zeros((0, 3)), color=(1.0, 0.72, 0.1, 0.75), size=6
-                )
-                gl_view.addItem(phantom_scatter)
-                field_bounds = gl.GLLinePlotItem(
-                    pos=np.zeros((0, 3)),
-                    color=(0.2, 0.8, 1.0, 0.95),
-                    width=2,
-                    mode="lines",
-                    antialias=True,
-                )
-                gl_view.addItem(field_bounds)
-                phantom_bounds = gl.GLLinePlotItem(
-                    pos=np.zeros((0, 3)),
-                    color=(1.0, 0.65, 0.05, 0.95),
-                    width=2,
-                    mode="lines",
-                    antialias=True,
-                )
-                gl_view.addItem(phantom_bounds)
-                group_layout.addWidget(gl_view, 1)
-            else:
-                gl_view = grid = field_scatter = phantom_scatter = None
-                field_bounds = phantom_bounds = None
-                unavailable = QLabel(
-                    "The interactive 3D combination view requires OpenGL. Field "
-                    "alignment is still calculated and applied to simulations."
-                )
-                unavailable.setWordWrap(True)
-                unavailable.setAlignment(Qt.AlignCenter)
-                unavailable.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-                group_layout.addWidget(unavailable, 1)
+                outline.setZValue(50)
+                view.getView().addItem(outline, ignoreBounds=True)
+                outlines[plane] = outline
+            group_layout.addWidget(viewer, 1)
             info = QLabel("Create a phantom and define this B1 field.")
             info.setWordWrap(True)
             group_layout.addWidget(info)
-            self.gl_views[kind] = gl_view
-            self.grids[kind] = grid
-            self.field_scatters[kind] = field_scatter
-            self.phantom_scatters[kind] = phantom_scatter
-            self.field_bounds_items[kind] = field_bounds
-            self.phantom_bounds_items[kind] = phantom_bounds
+            self.viewers[kind] = viewer
+            self.outline_items[kind] = outlines
             self.view_infos[kind] = info
             if kind == "transmit":
                 self.tx_panel = group
@@ -955,7 +953,7 @@ class B1PhantomCombinationWidget(QWidget):
 
     def set_phantom(self, phantom) -> None:
         self.phantom = phantom
-        self._refresh()
+        self._rebuild()
 
     def set_fields(
         self,
@@ -984,53 +982,150 @@ class B1PhantomCombinationWidget(QWidget):
         self.channel_combo.setEnabled(
             self.rx_field is not None and self.rx_field.n_channels > 1
         )
+        self._rebuild()
+
+    def _display_grid(self):
+        """Return grid shape, FOV, sample positions and phantom support."""
+        phantom = self.phantom
+        if phantom is not None and self.extent_combo.currentData() == "phantom":
+            shape = tuple(int(count) for count in phantom.shape)
+            support = np.asarray(phantom.mask, dtype=bool).reshape(shape)
+            shape3 = shape + (1,) * (3 - len(shape))
+            return (
+                shape,
+                tuple(float(value) for value in phantom.fov),
+                np.asarray(phantom.positions, dtype=float),
+                support.reshape(shape3),
+            )
+
+        half = np.zeros(3, dtype=float)
+        for field in (self.tx_field, self.rx_field):
+            if field is not None:
+                half = np.maximum(half, np.abs(field.transformed_corners()).max(axis=0))
+        if phantom is not None:
+            shape = tuple(int(count) for count in phantom.shape)
+            voxel = np.zeros(3, dtype=float)
+            voxel[: len(shape)] = np.asarray(phantom.fov, dtype=float) / shape
+            positions = np.asarray(phantom.positions, dtype=float)
+            half = np.maximum(half, np.abs(positions).max(axis=0) + 0.5 * voxel)
+        if not np.any(half > 0):
+            return None
+        step = 2.0 * float(half.max()) / _FIELD_GRID_POINTS
+        counts = np.maximum(1, np.ceil(2.0 * half / step - 1e-9).astype(int))
+        fov = counts * step
+        coordinates = [
+            ((np.arange(count) + 0.5) / count - 0.5) * extent
+            for count, extent in zip(counts, fov)
+        ]
+        grid = np.meshgrid(*coordinates, indexing="ij")
+        positions = np.column_stack([axis.ravel() for axis in grid])
+        support = (
+            None if phantom is None else _phantom_support_on_grid(phantom, coordinates)
+        )
+        return tuple(int(count) for count in counts), tuple(fov), positions, support
+
+    def _rebuild(self, *_):
+        """Resample the selected fields onto the shared display grid."""
+        self._relative = {}
+        self._grid = None
+        grid = (
+            self._display_grid()
+            if any(
+                item is not None
+                for item in (self.phantom, self.tx_field, self.rx_field)
+            )
+            else None
+        )
+        if grid is not None:
+            shape, fov, positions, support = grid
+            self._grid = (shape, fov, support)
+            selections = (
+                ("transmit", self.tx_field, 0),
+                ("receive", self.rx_field, max(0, self.channel_combo.currentIndex())),
+            )
+            for kind, field, channel in selections:
+                if field is None:
+                    # Simulations use a uniform unit field when none is defined.
+                    self._relative[kind] = np.ones(shape, dtype=float)
+                else:
+                    channel = min(channel, field.n_channels - 1)
+                    sampled = field.sample_world(positions, channels=[channel])[0]
+                    self._relative[kind] = np.abs(sampled).reshape(shape)
         self._refresh()
+
+    def _transmit_peak_gauss(self):
+        if self.transmit_display_combo.currentData() != "max_b1_gauss":
+            return None
+        try:
+            peak = float(self.sequence_context.get("nominal_peak_b1_gauss"))
+        except (TypeError, ValueError):
+            return None
+        return peak if np.isfinite(peak) and peak >= 0.0 else None
 
     def _refresh(self, *_):
         phantom = self.phantom
-        selections = (
-            ("transmit", self.tx_field, 0),
-            ("receive", self.rx_field, max(0, self.channel_combo.currentIndex())),
+        peak = self._transmit_peak_gauss()
+        color_map = pg.colormap.get("viridis")
+        for kind, field in (("transmit", self.tx_field), ("receive", self.rx_field)):
+            viewer = self.viewers[kind]
+            relative = self._relative.get(kind)
+            viewer.setVisible(relative is not None)
+            if relative is not None:
+                values, name, unit = (
+                    relative,
+                    f"Relative |{_magnitude_label(kind)}|",
+                    "",
+                )
+                if kind == "transmit" and peak is not None:
+                    values, name, unit = peak * relative, "Max B1", "G"
+                shape, fov, _support = self._grid
+                levels = None
+                if np.ptp(values) <= 1e-12 * max(1.0, float(np.max(values))):
+                    # A uniform field would otherwise get an arbitrary scale.
+                    level = float(np.max(values))
+                    levels = (min(0.0, level - 1.0), max(level, 1e-12))
+                promoted = viewer._promote_to_volume(np.asarray(values))
+                if promoted.shape == viewer.data.shape and tuple(
+                    fov + (viewer.fov_m[2],) * (3 - len(fov))
+                ) == tuple(viewer.fov_m):
+                    viewer.update_volume_data(
+                        values, name=name, unit=unit, levels=levels, color_map=color_map
+                    )
+                else:
+                    viewer.set_volume(
+                        values,
+                        fov_m=fov,
+                        name=name,
+                        unit=unit,
+                        levels=levels,
+                        color_map=color_map,
+                    )
+            self.view_infos[kind].setText(self._info_text(kind, field, phantom))
+
+    def _info_text(self, kind, field, phantom) -> str:
+        if field is None and phantom is None:
+            return "Create a phantom and define this B1 field."
+        if field is None:
+            text = f"{phantom.name} is shown with the uniform fallback field."
+            peak = self._transmit_peak_gauss()
+            if kind == "transmit" and peak is not None:
+                text += f" Max B1 is uniformly {peak:.5g} G."
+            return text
+        channel = max(0, self.channel_combo.currentIndex())
+        scale = " × ".join(f"{value:g}" for value in field.scale_xyz)
+        rotation = " / ".join(f"{value:g}°" for value in field.rotation_deg_xyz)
+        channel_text = f" Channel {channel + 1}." if field.n_channels > 1 else ""
+        geometry = (
+            f"{field.name}.{channel_text} Stretch X/Y/Z {scale}; rotation X/Y/Z "
+            f"{rotation}."
         )
-        for kind, field, channel in selections:
-            if self.gl_views[kind] is not None:
-                self._refresh_gl(kind, field, phantom, channel)
-            info = self.view_infos[kind]
-            if field is None and phantom is None:
-                info.setText("Create a phantom and define this B1 field.")
-            elif field is None:
-                fallback_text = ""
-                if (
-                    kind == "transmit"
-                    and self.transmit_display_combo.currentData() == "max_b1_gauss"
-                ):
-                    try:
-                        peak = float(self.sequence_context.get("nominal_peak_b1_gauss"))
-                    except (TypeError, ValueError):
-                        peak = np.nan
-                    if np.isfinite(peak) and peak >= 0.0:
-                        fallback_text = f" Max B1 is uniformly {peak:.5g} G."
-                info.setText(
-                    f"{phantom.name} is shown with the uniform fallback field."
-                    f"{fallback_text}"
-                )
-            elif phantom is None:
-                info.setText(
-                    f"{field.name} is ready. Create or load a phantom in the "
-                    "Phantom tab."
-                )
-            else:
-                scale = " × ".join(f"{value:g}" for value in field.scale_xyz)
-                rotation = " / ".join(f"{value:g}°" for value in field.rotation_deg_xyz)
-                channel_text = (
-                    f" Channel {channel + 1}." if field.n_channels > 1 else ""
-                )
-                value_text = self._field_value_text(kind, field, phantom, channel)
-                info.setText(
-                    f"Orange: {phantom.name}. Blue: {field.name}.{channel_text} "
-                    f"Stretch X/Y/Z {scale}; rotation X/Y/Z {rotation}."
-                    f"{value_text}"
-                )
+        if phantom is None:
+            return (
+                f"{geometry} Create or load a phantom in the Phantom tab to see "
+                "its outline."
+            )
+        value_text = self._field_value_text(kind, field, phantom, channel)
+        return f"Orange outline: {phantom.name}. Colour: {geometry}{value_text}"
 
     def _field_value_text(self, kind, field, phantom, channel) -> str:
         if kind != "transmit":
@@ -1072,93 +1167,57 @@ class B1PhantomCombinationWidget(QWidget):
             f"(nominal {peak:.5g} G).{pending_text}"
         )
 
-    def _refresh_gl(self, kind, field, phantom, channel) -> None:
-        gl_view = self.gl_views[kind]
-        grid = self.grids[kind]
-        field_scatter = self.field_scatters[kind]
-        phantom_scatter = self.phantom_scatters[kind]
-        field_bounds = self.field_bounds_items[kind]
-        phantom_bounds = self.phantom_bounds_items[kind]
-        extents = [100.0]
-        if field is None or not self.show_field.isChecked():
-            field_scatter.setData(pos=np.zeros((0, 3)))
-            field_bounds.setData(pos=np.zeros((0, 3)))
-        else:
-            positions, indices = field.transformed_voxel_positions(max_points=20000)
-            positions_mm = positions * 1000.0
-            channel = min(max(0, channel), field.n_channels - 1)
-            values = np.abs(field.data[channel].ravel()[indices])
-            if (
-                kind == "transmit"
-                and self.transmit_display_combo.currentData() == "max_b1_gauss"
-            ):
-                try:
-                    peak = float(self.sequence_context.get("nominal_peak_b1_gauss"))
-                except (TypeError, ValueError):
-                    peak = np.nan
-                if np.isfinite(peak) and peak >= 0.0:
-                    values = peak * values
-            low, high = float(values.min()), float(values.max())
-            normalized = (
-                np.ones_like(values)
-                if np.isclose(low, high)
-                else np.clip((values - low) / (high - low), 0.0, 1.0)
-            )
-            colors = pg.colormap.get("viridis").map(normalized, mode="float")
-            colors[:, 3] = 0.18 + 0.52 * normalized
-            size = max(4.5, 18.0 / np.cbrt(max(1, len(positions_mm))))
-            field_scatter.setData(
-                pos=np.asarray(positions_mm, dtype=np.float32),
-                color=np.asarray(colors, dtype=np.float32),
-                size=size,
-            )
-            corners_mm = field.transformed_corners() * 1000.0
-            field_bounds.setData(
-                pos=np.asarray(_line_segments(corners_mm), dtype=np.float32)
-            )
-            extents.append(float(np.max(np.ptp(corners_mm, axis=0))))
+    def _slices_changed(self, kind, indices) -> None:
+        self._update_outlines(kind)
+        if self._synchronizing_slices:
+            return
+        other = self.viewers["receive" if kind == "transmit" else "transmit"]
+        if other.data.shape != self.viewers[kind].data.shape:
+            return
+        if tuple(other.indices) == tuple(indices):
+            return
+        # Keep transmit and receive planes at the same position.
+        self._synchronizing_slices = True
+        try:
+            other.set_indices(indices)
+        finally:
+            self._synchronizing_slices = False
 
-        if phantom is None or not self.show_phantom.isChecked():
-            phantom_scatter.setData(pos=np.zeros((0, 3)))
-            phantom_bounds.setData(pos=np.zeros((0, 3)))
-        else:
-            active = np.asarray(phantom.mask, dtype=bool).ravel()
-            positions = np.asarray(phantom.positions, dtype=float)[active]
-            stride = max(1, int(np.ceil(len(positions) / 20000)))
-            positions_mm = positions[::stride] * 1000.0
-            phantom_scatter.setData(
-                pos=np.asarray(positions_mm, dtype=np.float32),
-                color=(1.0, 0.72, 0.1, 0.72),
-                size=max(5.0, 20.0 / np.cbrt(max(1, len(positions_mm)))),
-            )
-            ndim = len(phantom.shape)
-            half = np.zeros(3, dtype=float)
-            half[:ndim] = np.asarray(phantom.fov) * 500.0
-            if ndim == 2:
-                corners = np.asarray(
-                    [
-                        (-half[0], -half[1], 0),
-                        (half[0], -half[1], 0),
-                        (half[0], half[1], 0),
-                        (-half[0], half[1], 0),
-                    ]
-                )
-            else:
-                corners = np.asarray(
-                    [
-                        (x, y, z)
-                        for z in (-half[2], half[2])
-                        for y in (-half[1], half[1])
-                        for x in (-half[0], half[0])
-                    ]
-                )
-            phantom_bounds.setData(
-                pos=np.asarray(_line_segments(corners), dtype=np.float32)
-            )
-            extents.append(float(np.max(np.asarray(phantom.fov) * 1000.0)))
+    def _refresh_outlines(self, *_):
+        for kind in self.viewers:
+            self._update_outlines(kind)
 
-        extent = max(extents)
-        grid.setSize(x=extent * 1.2, y=extent * 1.2, z=0)
-        spacing = max(extent / 10.0, 1e-6)
-        grid.setSpacing(x=spacing, y=spacing, z=1.0)
-        gl_view.setCameraPosition(distance=extent * 1.8)
+    def _update_outlines(self, kind) -> None:
+        viewer = self.viewers[kind]
+        support = None if self._grid is None else self._grid[2]
+        visible = (
+            support is not None
+            and self.show_phantom.isChecked()
+            and support.shape == viewer.data.shape
+        )
+        ix, iy, iz = viewer.indices
+        for plane, outline in self.outline_items[kind].items():
+            if not visible:
+                outline.setData(None)
+                outline.hide()
+                continue
+            axes = {"xy": (0, 1), "xz": (0, 2), "yz": (1, 2)}[plane]
+            values = {
+                "xy": support[:, :, iz],
+                "xz": support[:, iy, :],
+                "yz": support[ix, :, :],
+            }[plane]
+            steps = [
+                viewer.fov_m[axis] * 1000.0 / viewer.data.shape[axis] for axis in axes
+            ]
+            # Isocurves place sample i at i + 0.5 like ImageItem pixels; the
+            # one-sample zero padding closes contours at the grid border.
+            transform = QTransform()
+            transform.translate(
+                -viewer.fov_m[axes[0]] * 500.0 - steps[0],
+                -viewer.fov_m[axes[1]] * 500.0 - steps[1],
+            )
+            transform.scale(*steps)
+            outline.setTransform(transform)
+            outline.setData(np.pad(values.astype(float), 1), level=0.5)
+            outline.show()

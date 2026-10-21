@@ -71,7 +71,7 @@ class VolumeViewerWidget(QWidget):
 
     indices_changed = pyqtSignal(tuple)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, show_3d: bool = True):
         super().__init__(parent)
         self.data = np.zeros((1, 1, 1), dtype=float)
         self.mask = np.ones((1, 1, 1), dtype=bool)
@@ -82,9 +82,9 @@ class VolumeViewerWidget(QWidget):
         self.interpolation = "nearest"
         self._gl_sample_indices = None
         self._gl_sample_positions = None
-        self._build_ui()
+        self._build_ui(show_3d=show_3d)
 
-    def _build_ui(self):
+    def _build_ui(self, *, show_3d=True):
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
@@ -156,6 +156,12 @@ class VolumeViewerWidget(QWidget):
         self.scatter = None
         self.bounds = None
         self.gl_grid = None
+        self.info = QLabel("No volume")
+        self.info.setWordWrap(True)
+        if not show_3d:
+            self.tabs.tabBar().hide()
+            layout.addWidget(self.info)
+            return
         three_d_page = QWidget()
         three_d_layout = QVBoxLayout(three_d_page)
         three_d_layout.setContentsMargins(0, 0, 0, 0)
@@ -202,9 +208,6 @@ class VolumeViewerWidget(QWidget):
         point_size_row.addWidget(self.point_size_label)
         three_d_layout.addLayout(point_size_row)
         self.tabs.addTab(three_d_page, "3D")
-
-        self.info = QLabel("No volume")
-        self.info.setWordWrap(True)
         layout.addWidget(self.info)
 
     def _image_view(
@@ -243,6 +246,17 @@ class VolumeViewerWidget(QWidget):
     @property
     def indices(self) -> Tuple[int, int, int]:
         return tuple(slider.value() for slider in self.sliders)
+
+    def set_indices(self, indices) -> None:
+        """Move all three slice sliders at once and redraw a single time."""
+        previous = [slider.blockSignals(True) for slider in self.sliders]
+        try:
+            for slider, value in zip(self.sliders, indices):
+                slider.setValue(int(value))
+        finally:
+            for slider, was_blocked in zip(self.sliders, previous):
+                slider.blockSignals(was_blocked)
+        self._indices_updated()
 
     def set_volume(
         self,

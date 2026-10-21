@@ -538,7 +538,7 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     window.sequence_simulation_widget.set_workspace_defaults(updated_defaults)
     assert window.sequence_simulation_widget.sequence_reference_ppm.value() == -10.0
     assert isinstance(window.sequence_simulation_widget, SequenceSimulationWidget)
-    assert window.sequence_simulation_widget.program.source == "internal-fid"
+    assert window.sequence_simulation_widget.program.source == "internal-flash-2d"
     assert window.sequence_simulation_widget._rf_designer is window.rf_designer
     assert window.sequence_simulation_widget._rf_designer_pulse_data is not None
     assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is None
@@ -1518,6 +1518,7 @@ def test_phantom_resolution_warning_checks_partition_for_declared_3d_grid(
 ):
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(widget.INTERNAL_SOURCE)
     shape = (64, 64, 16)
     widget.phantom = Phantom(
         shape=shape,
@@ -1930,6 +1931,8 @@ def test_loaded_pulseq_warning_links_to_prefilled_simulation_settings(monkeypatc
 def test_loaded_pulseq_settings_use_multispin_fallback_without_train_analysis():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
+    # Start without a generated Cartesian acquisition, like an unanalysed file.
+    widget.sequence_source.setCurrentIndex(widget.INTERNAL_SOURCE)
     widget.sequence_source.setCurrentIndex(widget.PULSEQ_SOURCE)
     widget.program = SequenceProgram(events=(), duration_s=0.0, source="custom.seq")
 
@@ -2002,6 +2005,7 @@ def test_flash_auto_spoiler_tracks_phantom_geometry_and_subvoxel_grid(monkeypatc
 def test_sequence_workspace_derives_shaped_rf_bandwidth_and_shares_reference():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(widget.SS_BSSFP_SOURCE)
 
     assert not widget.ss_bssfp_rf_bandwidth_hz.isEnabled()
     assert widget.ss_bssfp_spoiler_cycles.value() == pytest.approx(0.0)
@@ -2088,18 +2092,20 @@ def test_sequence_workspace_derives_shaped_rf_bandwidth_and_shares_reference():
 def test_all_generated_sequences_share_rf_controls_and_loaded_pulse_parameters():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
-    prefixes = (
-        "epi",
-        "epsi",
-        "csi",
-        "flash",
-        "bssfp",
-        "ss_bssfp",
-        "radial_me",
-        "me_bssfp",
-    )
+    sources = {
+        "epi": widget.EPI_SOURCE,
+        "epsi": widget.EPSI_MGE_SOURCE,
+        "csi": widget.CSI_SOURCE,
+        "flash": widget.FLASH_SOURCE,
+        "bssfp": widget.BSSFP_SOURCE,
+        "ss_bssfp": widget.SS_BSSFP_SOURCE,
+        "radial_me": widget.RADIAL_ME_BSSFP_SOURCE,
+        "me_bssfp": widget.ME_BSSFP_SOURCE,
+    }
 
-    for prefix in prefixes:
+    for prefix, source in sources.items():
+        # Only the selected sequence form is editable.
+        widget.sequence_source.setCurrentIndex(source)
         pulse_type = getattr(widget, f"{prefix}_rf_pulse_type")
         assert [pulse_type.itemText(index) for index in range(pulse_type.count())] == [
             "Sinc",
@@ -2850,6 +2856,7 @@ def test_focused_sequence_workspace_uses_wider_control_panel():
 def test_starting_sequence_preserves_selected_result_tab(monkeypatch):
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(widget.INTERNAL_SOURCE)
     widget.object_source.setCurrentIndex(1)
     widget.views.setCurrentIndex(widget.sequence_tab_index)
     widget.view_stack.setCurrentIndex(1)
@@ -3307,6 +3314,37 @@ def test_sequence_preview_displays_declared_timings(definitions, echo, repetitio
     )
 
 
+@pytest.mark.parametrize(
+    "definitions, image_time",
+    [
+        ({"TR": 0.01, "AcquisitionInterval": 0.64}, "640 ms"),
+        (
+            {
+                "TR": 0.1,
+                "AcquisitionInterval": 2.5,
+                "MinimumAcquisitionInterval": 0.3,
+                "SlicePositions": [-0.005, 0.0, 0.005],
+            },
+            "2.5 s (3 slices, minimum 300 ms)",
+        ),
+        ({"TR": 0.01, "VolumeInterval": [1.2]}, "1.2 s"),
+    ],
+)
+def test_sequence_preview_displays_time_per_image(definitions, image_time):
+    program = SequenceProgram((), duration_s=0.1, metadata={"definitions": definitions})
+    assert _sequence_preview_timing_text(program).endswith(
+        f"    |    Time per image: {image_time}"
+    )
+
+
+def test_default_flash_sequence_reports_time_per_image(qt_application):
+    widget = SequenceSimulationWidget()
+    assert widget.sequence_source.currentIndex() == widget.FLASH_SOURCE
+    assert widget._ensure_current_generated_sequence(), widget._generation_error
+    widget._show_program()
+    assert "Time per image:" in widget.sequence_timing_summary.text()
+
+
 def test_sequence_preview_timing_refresh_and_saved_visibility(tmp_path, qt_application):
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
     parent = QWidget()
@@ -3378,6 +3416,7 @@ def test_sequence_workspace_overviews_track_and_navigate_both_waveform_plots(
         metadata={"definitions": {"TR": 0.01}},
     )
     widget._acquisition_compiled = None
+    widget.views.setCurrentIndex(widget.sequence_tab_index)
     widget.resize(1600, 1000)
     widget.show()
     widget._show_program()

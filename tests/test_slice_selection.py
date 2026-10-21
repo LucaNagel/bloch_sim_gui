@@ -1,5 +1,7 @@
 """Validate excitation volumes independently of any ADC acquisition."""
 
+from datetime import datetime, timezone
+
 import numpy as np
 import nbformat
 import pytest
@@ -209,6 +211,32 @@ def test_selection_round_trip_has_no_adc_spoiler_or_tail(tmp_path, rephase, axis
     else:
         assert compiled.checkpoint_times_s.size == 0
         assert definitions["SliceSelectionEndTime"] == pytest.approx(program.duration_s)
+
+
+def test_pulseq_notebook_records_export_date_inside_notebook(tmp_path):
+    widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(widget.SLICE_SELECTION_SOURCE)
+    assert widget._ensure_current_generated_sequence(), widget._generation_error
+    kind, parameters, filename = widget._pulseq_export_spec()
+    exported_at = datetime(2026, 10, 21, 9, 30, tzinfo=timezone.utc).astimezone()
+
+    notebook_path = export_pulseq_generation_notebook(
+        tmp_path / "slice.ipynb",
+        kind,
+        parameters,
+        seq_filename=filename,
+        exported_at=exported_at,
+    )
+
+    notebook = nbformat.read(notebook_path, as_version=4)
+    stamp = exported_at.strftime("%Y-%m-%d %H:%M:%S")
+    assert f"**Exported:** {stamp}" in notebook.cells[0].source
+    assert notebook.metadata["blochsimulator"]["exported_at"] == (
+        exported_at.isoformat(timespec="seconds")
+    )
+    # The date belongs to the notebook content, not to the exported names.
+    assert notebook_path.name == "slice.ipynb"
+    assert "2026" not in filename
 
 
 def test_3d_profile_uses_local_tx_and_keeps_receiver_out_of_magnetization(tmp_path):

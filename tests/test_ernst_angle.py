@@ -49,6 +49,8 @@ def test_gui_ernst_angle_state_and_summary_table():
     widget = SequenceSimulationWidget()
     widget.object_source.setCurrentIndex(1)
     widget.t1_ms.setValue(1000.0)
+    # Only the selected sequence form is editable.
+    widget.sequence_source.setCurrentIndex(widget.EPI_SOURCE)
 
     assert widget.epi_use_ernst_angle.isEnabled()
     assert widget.epi_ernst_info.isHidden()
@@ -91,10 +93,12 @@ def test_gui_ernst_angle_state_and_summary_table():
     assert widget.epi_vfa_final_flip_angle_deg.isHidden()
     assert widget.epi_vfa_info.isHidden()
 
+    widget.sequence_source.setCurrentIndex(widget.FLASH_SOURCE)
     assert widget.flash_use_ernst_angle.isEnabled()
     widget.flash_rf_spoiling.setChecked(False)
     assert widget.flash_use_ernst_angle.isEnabled()
     assert not widget.flash_rf_spoiling_increment_deg.isEnabled()
+    widget.sequence_source.setCurrentIndex(widget.CSI_SOURCE)
     assert widget.csi_use_ernst_angle.isEnabled()
     assert not widget.csi_rf_spoiling_increment_deg.isEnabled()
     widget.csi_rf_spoiling.setChecked(True)

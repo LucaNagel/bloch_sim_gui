@@ -690,6 +690,28 @@ def test_designer_b0_tab_edits_pattern_centre_and_shape_offsets():
     app.processEvents()
 
 
+def test_choosing_a_b0_pattern_starts_from_one_ppm_strength():
+    app = QApplication.instance() or QApplication([])
+    design = _spectral_design()
+    dialog = SpectralPhantomDesignerDialog(design=design)
+    assert dialog.b0_mode_combo.currentData() == "none"
+    assert dialog.b0_inhomogeneity_ppm.value() == 0.0
+
+    dialog.b0_mode_combo.setCurrentIndex(dialog.b0_mode_combo.findData("linear_x"))
+    assert dialog.b0_inhomogeneity_ppm.value() == pytest.approx(1.0)
+    assert design.b0_inhomogeneity_ppm == pytest.approx(1.0)
+    assert "1 ppm per half FOV" in dialog.b0_pattern_info.text()
+
+    # A user-chosen strength survives switching between patterns and via None.
+    dialog.b0_inhomogeneity_ppm.setValue(3.0)
+    dialog.b0_mode_combo.setCurrentIndex(dialog.b0_mode_combo.findData("radial_xy"))
+    dialog.b0_mode_combo.setCurrentIndex(dialog.b0_mode_combo.findData("none"))
+    dialog.b0_mode_combo.setCurrentIndex(dialog.b0_mode_combo.findData("linear_z"))
+    assert design.b0_inhomogeneity_ppm == pytest.approx(3.0)
+    dialog.close()
+    app.processEvents()
+
+
 def test_spatial_b0_inhomogeneity_changes_the_simulated_adc_signal():
     reference_design = _spectral_design()
     inhomogeneous_design = _spectral_design()

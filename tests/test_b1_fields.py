@@ -351,6 +351,56 @@ def test_phantom_b1_combination_shows_transmit_and_receive_vertically():
     app.processEvents()
 
 
+def test_phantom_b1_combination_shows_linked_orthogonal_slices():
+    app = QApplication.instance() or QApplication([])
+    phantom = PhantomFactory.spherical_3d(n=12, fov=0.04)
+    x = np.linspace(-1.0, 1.0, 16)
+    tx = B1Field(
+        np.broadcast_to(1.0 + 0.5 * x[:, None, None], (16, 16, 16)),
+        (0.06, 0.06, 0.06),
+        kind="transmit",
+    )
+    rx = B1Field.uniform((8, 8, 8), (0.08, 0.08, 0.08), kind="receive", channels=2)
+    combination = B1PhantomCombinationWidget()
+    combination.set_phantom(phantom)
+    combination.set_fields(tx, rx)
+
+    tx_viewer = combination.viewers["transmit"]
+    rx_viewer = combination.viewers["receive"]
+    assert tx_viewer.gl_view is None and tx_viewer.tabs.count() == 1
+    # The phantom grid shows exactly the B1 that each voxel sees.
+    assert tx_viewer.data.shape == (12, 12, 12)
+    expected = np.abs(tx.sample_world(phantom.positions)[0]).reshape(12, 12, 12)
+    np.testing.assert_allclose(tx_viewer.data, expected)
+    np.testing.assert_allclose(rx_viewer.data, 1.0)
+
+    outline = combination.outline_items["transmit"]["xy"]
+    assert outline.isVisible() and outline.data is not None
+    combination.show_phantom.setChecked(False)
+    assert not outline.isVisible()
+    combination.show_phantom.setChecked(True)
+    assert outline.isVisible()
+
+    tx_viewer.set_indices((2, 3, 4))
+    assert rx_viewer.indices == (2, 3, 4)
+
+    combination.set_sequence_context({"nominal_peak_b1_gauss": 0.2})
+    combination.transmit_display_combo.setCurrentIndex(
+        combination.transmit_display_combo.findData("max_b1_gauss")
+    )
+    np.testing.assert_allclose(tx_viewer.data, 0.2 * expected)
+    assert "Max B1 in active phantom voxels" in combination.tx_info.text()
+
+    combination.extent_combo.setCurrentIndex(combination.extent_combo.findData("field"))
+    # The whole-field grid covers the larger receive field around the phantom.
+    assert max(rx_viewer.data.shape) == 96
+    assert min(rx_viewer.fov_m) >= 0.08 - 1e-9
+    assert rx_viewer.data.shape == tx_viewer.data.shape
+    assert outline.isVisible()
+    combination.close()
+    app.processEvents()
+
+
 def test_sequence_mode_exposes_b1_and_combination_tabs():
     app = QApplication.instance() or QApplication([])
     window = BlochSimulatorGUI()
