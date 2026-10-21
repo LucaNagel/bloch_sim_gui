@@ -1,0 +1,183 @@
+"""Nucleus-specific default phantom used when no phantom has been loaded.
+
+The Sequence workspace falls back to a single on-resonance sphere so a
+generated sequence can be run immediately.  The sphere sits in a cubic grid
+that fits inside the sequence FOV and whose cells are no wider than the
+sequence pixels, so neither the aliasing nor the resolution warning fires
+for the default object.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Optional, Sequence
+
+import numpy as np
+
+from .metabolite_presets import METABOLITE_PRESETS_BY_NUCLEUS
+from .phantom_design import PhantomDesign, ShapeDefinition, SpectralPeakDefinition
+
+DEFAULT_PHANTOM_METADATA_KEY = "default_sequence_phantom"
+DEFAULT_SPHERE_DIAMETER_FRACTION = 0.6
+DEFAULT_PHANTOM_MATRIX = 64
+MIN_DEFAULT_PHANTOM_MATRIX = 32
+MAX_DEFAULT_PHANTOM_MATRIX = 128
+MAX_DEFAULT_SLICE_AXIS_MATRIX = 256
+CELLS_PER_SLICE_THICKNESS = 2
+DEFAULT_PHANTOM_FOV_M = 0.22
+
+
+@dataclass(frozen=True)
+class DefaultCompound:
+    """The single resonance filling the default sphere of one nucleus."""
+
+    name: str
+    t1_s: float
+    t2_star_s: float
+    spectral_bandwidth_ppm: float
+
+
+def _preset_compound(nucleus, key, bandwidth_ppm):
+    for preset in METABOLITE_PRESETS_BY_NUCLEUS.get(nucleus, ()):
+        if preset.key == key:
+            return DefaultCompound(
+                preset.name, preset.t1_s, preset.t2_star_s, bandwidth_ppm
+            )
+    raise KeyError(f"missing {nucleus} metabolite preset {key!r}")
+
+
+# Relaxation follows the curated presets where one exists; the remaining
+# values are generic starting points and only need to be plausible.
+DEFAULT_COMPOUNDS = {
+    "H1": DefaultCompound("Water", 1.5, 0.080, 10.0),
+    "C13": _preset_compound("C13", "pyruvate", 20.0),
+    "P31": _preset_compound("P31", "pcr", 30.0),
+    "F19": DefaultCompound("Fluorine", 1.0, 0.050, 20.0),
+    "Na23": DefaultCompound("Sodium", 0.040, 0.020, 20.0),
+}
+
+
+def default_compound(nucleus: str) -> DefaultCompound:
+    try:
+        return DEFAULT_COMPOUNDS[nucleus]
+    except KeyError:
+        raise ValueError(f"no default phantom for nucleus {nucleus!r}") from None
+
+
+def _cells(side_m, width_m, maximum=MAX_DEFAULT_PHANTOM_MATRIX):
+    cells = 8 * math.ceil(side_m / width_m / 8.0 - 1e-9)
+    return int(np.clip(cells, MIN_DEFAULT_PHANTOM_MATRIX, maximum))
+
+
+def default_phantom_grid(
+    sequence_fov_m: Optional[Sequence[float]] = None,
+    sequence_matrix: Optional[Sequence[int]] = None,
+    encoding_matrix=None,
+    *,
+    slice_thickness_m: Optional[float] = None,
+    slice_normal=None,
+) -> tuple[float, tuple[int, int, int]]:
+    """Return the cubic grid side length and the x/y/z matrix.
+
+    ``sequence_fov_m`` and ``sequence_matrix`` are the encoded extents and
+    sample counts in read/phase(/partition) order.  ``encoding_matrix`` holds
+    the encoding directions as scanner-xyz columns; an oblique direction sees
+    the cube stretched by the column's L1 norm, so the extents are divided by
+    it.  Scanner axes along ``slice_normal`` are refined until a slice spans
+    at least two cells, so the slice profile is resolved.  Matrix sizes are
+    rounded up to multiples of eight and clamped to keep the object fast.
+    """
+    side_m, cells = _isotropic_grid(sequence_fov_m, sequence_matrix, encoding_matrix)
+    shape = [cells] * 3
+    if slice_thickness_m is not None and slice_normal is not None:
+        thickness = float(slice_thickness_m)
+        if np.isfinite(thickness) and thickness > 0.0:
+            normal = np.abs(np.asarray(slice_normal, dtype=float))
+            for axis in np.flatnonzero(normal > 1e-9):
+                width = thickness / CELLS_PER_SLICE_THICKNESS / normal[axis]
+                shape[axis] = max(
+                    shape[axis],
+                    _cells(side_m, width, MAX_DEFAULT_SLICE_AXIS_MATRIX),
+                )
+    return side_m, tuple(shape)
+
+
+def _isotropic_grid(sequence_fov_m, sequence_matrix, encoding_matrix):
+    if sequence_fov_m is None or sequence_matrix is None:
+        return DEFAULT_PHANTOM_FOV_M, DEFAULT_PHANTOM_MATRIX
+    fov = np.asarray(tuple(sequence_fov_m), dtype=float)
+    matrix = np.asarray(tuple(sequence_matrix), dtype=float)
+    count = min(fov.size, matrix.size)
+    fov, matrix = fov[:count], matrix[:count]
+    if (
+        count == 0
+        or not np.all(np.isfinite(fov))
+        or not np.all(np.isfinite(matrix))
+        or np.any(fov <= 0)
+        or np.any(matrix <= 0)
+    ):
+        return DEFAULT_PHANTOM_FOV_M, DEFAULT_PHANTOM_MATRIX
+    if encoding_matrix is not None:
+        stretch = np.sum(np.abs(np.asarray(encoding_matrix, dtype=float)), axis=0)
+        fov = fov / np.maximum(stretch[:count], 1.0)
+    side_m = float(np.min(fov))
+    return side_m, _cells(side_m, float(np.min(fov / matrix)))
+
+
+def default_phantom_design(
+    nucleus: str,
+    *,
+    field_strength_t: float,
+    sequence_reference_ppm: float,
+    side_m: float = DEFAULT_PHANTOM_FOV_M,
+    matrix=DEFAULT_PHANTOM_MATRIX,
+) -> PhantomDesign:
+    """Design one centred sphere whose resonance is at the sequence reference."""
+    compound = default_compound(nucleus)
+    diameter = DEFAULT_SPHERE_DIAMETER_FRACTION
+    return PhantomDesign(
+        name=f"Default sphere ({nucleus} {compound.name.lower()})",
+        shape=tuple(int(value) for value in np.broadcast_to(matrix, 3)),
+        fov_m=(float(side_m),) * 3,
+        field_strength_t=float(field_strength_t),
+        nucleus=nucleus,
+        spectral_reference_ppm=float(sequence_reference_ppm),
+        spectral_window_center_ppm=float(sequence_reference_ppm),
+        spectral_bandwidth_ppm=compound.spectral_bandwidth_ppm,
+        spectral_points=256,
+        supersampling_enabled=True,
+        supersampling_factor=2,
+        shapes=[
+            ShapeDefinition(
+                name="Sphere",
+                kind="ellipsoid",
+                center=(0.5, 0.5, 0.5),
+                size=(diameter, diameter, diameter),
+                t1_s=compound.t1_s,
+                peaks=[
+                    SpectralPeakDefinition(
+                        name=compound.name,
+                        amplitude=1.0,
+                        frequency_ppm=0.0,
+                        t2_star_s=compound.t2_star_s,
+                        t1_s=compound.t1_s,
+                    )
+                ],
+            )
+        ],
+    )
+
+
+def build_default_phantom(nucleus: str, **kwargs):
+    """Build the default sphere and tag it so the UI can label it."""
+    phantom = default_phantom_design(nucleus, **kwargs).build()
+    phantom.metadata[DEFAULT_PHANTOM_METADATA_KEY] = True
+    return phantom
+
+
+def is_default_phantom(phantom) -> bool:
+    metadata = getattr(phantom, "metadata", None)
+    return isinstance(metadata, dict) and bool(
+        metadata.get(DEFAULT_PHANTOM_METADATA_KEY)
+    )
