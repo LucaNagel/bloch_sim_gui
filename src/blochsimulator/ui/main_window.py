@@ -2224,12 +2224,12 @@ class BlochSimulatorGUI(QMainWindow):
             (
                 self.mag_3d.arrangement_combo,
                 "Draw all vectors from one origin, or give each position its own "
-                "origin along a display axis.",
+                "origin along its axis or in its plane.",
             ),
             (
                 self.mag_3d.max_positions_spin,
-                "Largest number of positions drawn along the position axis; more "
-                "positions are evenly subsampled.",
+                "Largest number of positions drawn along the position axis, or "
+                "per axis for a plane; more positions are evenly subsampled.",
             ),
             (
                 self.mag_3d.vector_length_spin,
@@ -2238,8 +2238,9 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             (
                 self.mag_3d.color_by_combo,
-                "Color vectors by position (palette) or by transverse phase; with "
-                "phase, longitudinal vectors fade to white.",
+                "Color vectors by position (palette, along the first axis of a "
+                "plane) or by transverse phase; with phase, longitudinal vectors "
+                "fade to white.",
             ),
             (
                 self.mag_3d.tip_markers_checkbox,
@@ -2247,12 +2248,13 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             (
                 self.mag_3d.tip_curve_checkbox,
-                "Connect the tips of neighboring positions, e.g. to show the phase "
-                "helix after a gradient.",
+                "Connect the tips of neighboring positions (along both axes of a "
+                "plane), e.g. to show the phase helix after a gradient.",
             ),
             (
                 self.mag_3d.net_vector_checkbox,
-                "Draw the mean over all positions and frequencies beside the column.",
+                "Draw the mean over all positions and frequencies beside the "
+                "positions.",
             ),
             (
                 self.mag_3d.b1_field_checkbox,
@@ -2261,9 +2263,10 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             (
                 self.mag_3d.gradient_field_checkbox,
-                "Draw the gradient field G·r at every position as a bar left of "
-                "the column (red positive, blue negative), scaled to the largest "
-                "value of the sequence.",
+                "Draw the gradient field G·r at every position as a bar beside "
+                "the column or row, or as a colored marker in a plane (red "
+                "positive, blue negative), scaled to the largest value of the "
+                "sequence.",
             ),
             (
                 self.tissue_widget.preset_combo,
@@ -2953,9 +2956,13 @@ class BlochSimulatorGUI(QMainWindow):
             self.mag_3d.set_spatial_groups(None)
 
         if spatial:
-            pos_idx = self._display_subsample_indices(
-                npos, self.mag_3d.get_max_display_positions()
-            )
+            # Lines are subsampled along their axis, planes per axis.
+            layout = self._position_layout()
+            limit = self.mag_3d.get_max_display_positions()
+            if layout.ndim >= 1:
+                pos_idx = layout.grid_indices(limit)
+            else:
+                pos_idx = self._display_subsample_indices(npos, limit)
             selected = base_vectors[:, pos_idx]
             if mean_only:
                 position_means = selected.mean(axis=2)
@@ -2974,9 +2981,8 @@ class BlochSimulatorGUI(QMainWindow):
                 anim = selected[:, :, freq_idx, :]
                 net = base_vectors.mean(axis=(1, 2))
             spins_per_position = anim.shape[2]
-            axis = self._position_layout().primary_axis
             self.mag_3d.set_spatial_groups(
-                np.asarray(self.last_positions)[pos_idx, axis] * 1000.0,
+                np.asarray(self.last_positions)[pos_idx] * 1000.0,
                 spins_per_position,
             )
             self.mag_3d.set_spatial_fields(

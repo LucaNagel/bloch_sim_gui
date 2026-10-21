@@ -1477,6 +1477,170 @@ def test_3d_spatial_layout_shows_b1_and_gradient_at_each_position():
     assert not viewer.gradient_bar_plot.visible()
 
 
+def _label_texts(viewer):
+    return [item.text for item in viewer.position_label_items]
+
+
+@pytest.mark.parametrize(("axis", "azimuth"), [("x", -90.0), ("y", 0.0)])
+def test_3d_spatial_line_along_x_or_y_is_a_row_on_its_scene_axis(axis, azimuth):
+    app = QApplication.instance() or QApplication(sys.argv)
+    positions_m = build_line_positions(3, 0.02, axis=axis)
+    viewer = _spatial_viewer(positions_m * 1000.0, 1)
+    column = "xyz".index(axis)
+
+    spacing = 1.0 / viewer.vector_length_spin.value()
+    origins = np.zeros((3, 3))
+    origins[:, column] = [-spacing, 0.0, spacing]
+    np.testing.assert_allclose(viewer._spatial_origins, origins)
+    assert viewer._scene_kind() == "row"
+    # Face-on default camera: x rows from the front, y rows from the side.
+    assert viewer.gl_widget.opts["azimuth"] == pytest.approx(azimuth)
+    assert _label_texts(viewer)[:4] == ["-10.0", "0.0", "10.0", f"{axis} (mm)"]
+    assert viewer.max_positions_label.text() == "Max positions:"
+
+    means = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]])
+    viewer.update_magnetization(means)
+    np.testing.assert_allclose(viewer.position_mean_plot.pos[0::2], origins)
+    np.testing.assert_allclose(viewer.position_mean_plot.pos[1::2], origins + means)
+    viewer.net_vector_checkbox.setChecked(True)
+    assert viewer.mean_vector.transform().column(3)[column] == pytest.approx(
+        -spacing - viewer.NET_GAP
+    )
+
+    # Gradient bars point up from a baseline below the row.
+    gradients = np.zeros((1, 3))
+    gradients[0, column] = 1.0
+    viewer.set_spatial_fields(np.zeros(1), gradients, positions_m)
+    viewer.show_field_frame(0)
+    bases = viewer.gradient_bar_plot.pos[0::2]
+    tips = viewer.gradient_bar_plot.pos[1::2]
+    np.testing.assert_allclose(bases[:, column], origins[:, column])
+    np.testing.assert_allclose(bases[:, 2], viewer.ROW_GRADIENT_Z)
+    np.testing.assert_allclose(
+        tips[:, 2] - bases[:, 2],
+        [-viewer.GRADIENT_BAR_LENGTH, 0.0, viewer.GRADIENT_BAR_LENGTH],
+    )
+    assert viewer.gradient_bar_plot.visible()
+    assert not viewer.gradient_marker_item.visible()
+    assert "G 10.00 mT/m" in viewer.field_label_item.text
+
+
+def test_3d_spatial_plane_draws_a_lattice_on_the_floor():
+    app = QApplication.instance() or QApplication(sys.argv)
+    positions_m = build_plane_positions((3, 2), (0.02, 0.01), "xy")
+    viewer = _spatial_viewer(positions_m * 1000.0, 1)
+
+    spacing = 1.0 / viewer.vector_length_spin.value()
+    xs = np.array([-spacing, 0.0, spacing])
+    ys = np.array([-0.5, 0.5]) * spacing
+    origins = np.column_stack([np.tile(xs, 2), np.repeat(ys, 3), np.zeros(6)])
+    np.testing.assert_allclose(viewer._spatial_origins, origins)
+    assert viewer._scene_kind() == "plane"
+    assert viewer.max_positions_label.text() == "Max per axis:"
+    # The lattice replaces the floor grid; the camera looks from above.
+    assert not viewer.grid_item.visible()
+    assert viewer.gl_widget.opts["elevation"] == pytest.approx(22.0)
+    assert viewer.gl_widget.opts["azimuth"] == pytest.approx(-55.0)
+    lattice = viewer.position_axis_item.pos.reshape(-1, 2, 3)
+    assert len(lattice) == 2 + 3
+    np.testing.assert_allclose(lattice[..., 2], 0.0)
+    texts = _label_texts(viewer)
+    assert texts[:4] == ["-10.0", "0.0", "10.0", "x (mm)"]
+    assert texts[4:7] == ["-5.0", "5.0", "y (mm)"]
+
+    # Mz points up from every lattice point.
+    means = np.tile([0.0, 0.0, 1.0], (6, 1))
+    means[4] = [1.0, 0.0, 0.0]
+    viewer.tip_curve_checkbox.setChecked(True)
+    viewer.update_magnetization(means)
+    np.testing.assert_allclose(viewer.position_mean_plot.pos[1::2], origins + means)
+    # The tip mesh joins neighbours along x and along y.
+    pairs = [(0, 1), (1, 2), (3, 4), (4, 5), (0, 3), (1, 4), (2, 5)]
+    np.testing.assert_allclose(
+        viewer.tip_curve_item.pos,
+        (origins + means)[np.array(pairs)].reshape(-1, 3),
+    )
+    # Position colors follow the first plane axis.
+    colors = viewer._position_colors(6)
+    np.testing.assert_allclose(colors[:3], colors[3:])
+    assert not np.allclose(colors[0], colors[1])
+
+    # G·r is shown as a marker at every origin: blue, gray, red along x.
+    viewer.set_spatial_fields(np.zeros(1), np.array([[1.0, 0.0, 0.0]]), positions_m)
+    viewer.show_field_frame(0)
+    assert viewer.gradient_marker_item.visible()
+    assert not viewer.gradient_bar_plot.visible()
+    assert not viewer.gradient_axis_item.visible()
+    np.testing.assert_allclose(viewer.gradient_marker_item.pos, origins)
+    marker_colors = np.asarray(viewer.gradient_marker_item.color)
+    np.testing.assert_allclose(marker_colors[0], [0.35, 0.55, 1.0, 1.0])
+    np.testing.assert_allclose(marker_colors[1], [0.5, 0.5, 0.5, 1.0])
+    np.testing.assert_allclose(marker_colors[5], [1.0, 0.35, 0.3, 1.0])
+    assert "Gx 10.00 Gy 0.00 mT/m" in viewer.field_label_item.text
+
+    viewer.camera_buttons["Top"].click()
+    assert viewer.gl_widget.opts["elevation"] == pytest.approx(90.0)
+
+    viewer.set_spatial_groups(None)
+    assert viewer.grid_item.visible()
+    assert not viewer.gradient_marker_item.visible()
+    assert viewer.max_positions_label.text() == "Max positions:"
+
+
+@pytest.mark.parametrize(("plane", "azimuth"), [("xz", -90.0), ("yz", 0.0)])
+def test_3d_spatial_upright_plane_keeps_its_scene_axes(plane, azimuth):
+    app = QApplication.instance() or QApplication(sys.argv)
+    positions_m = build_plane_positions((3, 2), (0.02, 0.01), plane)
+    viewer = _spatial_viewer(positions_m * 1000.0, 1)
+
+    horizontal = "xyz".index(plane[0])
+    np.testing.assert_allclose(viewer._spatial_origins[:, 3 - horizontal - 2], 0.0)
+    assert np.ptp(viewer._spatial_origins[:, horizontal]) > 0
+    assert np.ptp(viewer._spatial_origins[:, 2]) > 0
+    assert viewer.gl_widget.opts["azimuth"] == pytest.approx(azimuth)
+    assert viewer.grid_item.visible()
+    # The floor grid sits below the lowest row and its labels.
+    floor = viewer.grid_item.transform().column(3).z()
+    assert floor < viewer._spatial_origins[:, 2].min() - viewer.LABEL_GAP
+
+
+def test_free_mode_vector_view_subsamples_a_plane_per_axis():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    nframes, nfreq = 3, 2
+    positions = build_plane_positions((7, 5), (0.03, 0.02), "xy")
+    npos = len(positions)
+    rng = np.random.default_rng(1)
+    window.anim_vectors_full = rng.normal(size=(nframes, npos, nfreq, 3))
+    window.playback_indices = np.arange(nframes)
+    window.playback_time = np.linspace(0.0, 2e-3, nframes)
+    window.playback_time_ms = window.playback_time * 1000.0
+    window.last_positions = positions
+    window.anim_b1 = np.zeros(nframes, dtype=complex)
+    window.anim_gradients = np.tile([1.0, 0.0, 0.0], (nframes, 1))
+    window.mag_3d.set_selector_limits(npos, nfreq)
+    window.mag_3d.max_positions_spin.setValue(4)
+    window.mag_3d.arrangement_combo.setCurrentText(
+        window.mag_3d.ARRANGEMENT_ALONG_POSITION
+    )
+
+    window._refresh_vector_view(mean_only=False, restart=False)
+
+    shown = infer_layout(positions).grid_indices(4)
+    assert len(shown) == 9
+    np.testing.assert_allclose(
+        window.mag_3d._spatial_positions_mm, positions[shown] * 1000.0
+    )
+    assert window.mag_3d._scene_kind() == "plane"
+    assert window.mag_3d._spatial_layout.counts == (3, 3)
+    assert window.mag_3d.max_positions_label.text() == "Max per axis:"
+    assert window.anim_data.shape == (nframes, len(shown) * nfreq, 3)
+    np.testing.assert_allclose(
+        window.mag_3d._field_offsets,
+        np.tile(positions[shown, 0] * 100.0, (nframes, 1)),
+    )
+
+
 def test_3d_spatial_layout_returns_to_overlay():
     app = QApplication.instance() or QApplication(sys.argv)
     viewer = _spatial_viewer([-1.0, 1.0], 1)
@@ -1554,7 +1718,7 @@ def test_free_mode_vector_view_arranges_subsampled_positions():
 
     shown = window._display_subsample_indices(npos, 5)
     np.testing.assert_allclose(
-        window.mag_3d._spatial_positions_mm, window.last_positions[shown, 2] * 1000
+        window.mag_3d._spatial_positions_mm, window.last_positions[shown] * 1000
     )
     assert window.anim_data.shape == (nframes, len(shown) * nfreq, 3)
     np.testing.assert_allclose(
