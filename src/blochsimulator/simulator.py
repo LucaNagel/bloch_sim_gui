@@ -1233,24 +1233,20 @@ class CustomPulse(PulseSequence):
         time : ndarray
             Time points in seconds
         """
-        # Resample B1 if needed
-        b1 = self.b1.copy()
-        time = self.time.copy()
+        b1 = np.asarray(self.b1, dtype=complex).copy()
+        time = np.asarray(self.time, dtype=float).copy()
+        duration = rf_pulse_duration(b1, time, dt)
+        cell_dt = duration / max(len(b1), 1)
 
-        # Check if resampling is needed
-        if len(time) > 1:
-            actual_dt = time[1] - time[0]
-        else:
-            actual_dt = dt
-
-        if actual_dt != dt and dt > 0:
-            # Resample to new dt
-            new_npoints = int(np.ceil((time[-1] - time[0]) / dt))
-            enforce_sequence_memory(new_npoints)
-            new_time = np.linspace(time[0], time[-1], new_npoints)
-            # Simple linear interpolation
-            b1 = np.interp(new_time, time, b1)
-            time = new_time
+        # Samples are piecewise-constant cells; a pulse already on the target
+        # raster keeps its samples.
+        if len(time) > 1 and dt > 0:
+            source_dt = float(np.median(np.diff(time)))
+            if not np.isclose(source_dt, dt, rtol=1e-9, atol=0.0):
+                enforce_sequence_memory(max(1, int(np.rint(duration / dt))))
+                b1 = resample_rf_pulse(b1, time, dt)
+                time = time[0] + np.arange(len(b1)) * dt
+                cell_dt = dt
 
         # Apply B1 scaling
         b1 = b1 * self.scale_b1
@@ -1268,15 +1264,18 @@ class CustomPulse(PulseSequence):
                 # Broadcast single gradient to all points
                 gradients = np.tile(gradients, (len(b1), 1))
             else:
-                # Resample gradients to match B1 length
-                old_time = np.linspace(0, gradients.shape[0] - 1, gradients.shape[0])
-                new_time_idx = np.linspace(0, gradients.shape[0] - 1, len(b1))
-                gradients_resampled = np.zeros((len(b1), 3))
-                for i in range(3):
-                    gradients_resampled[:, i] = np.interp(
-                        new_time_idx, old_time, gradients[:, i]
-                    )
-                gradients = gradients_resampled
+                # Gradient samples split the pulse duration into equal cells,
+                # resampled like B1 so each axis keeps its gradient area.
+                grad_time = (
+                    time[0]
+                    + np.arange(gradients.shape[0]) * duration / gradients.shape[0]
+                )
+                gradients = np.column_stack(
+                    [
+                        resample_rf_pulse(gradients[:, i], grad_time, cell_dt).real
+                        for i in range(gradients.shape[1])
+                    ]
+                )
 
         return b1, gradients, time
 

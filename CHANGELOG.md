@@ -6,6 +6,12 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `CustomPulse.compile` keeps the duration and flip angle of loaded pulses on
+  any raster (a 1 ms hard pulse resampled to 3 us rotated by 89.4 instead of
+  90 deg) and resamples custom gradients together with B1.
+
 ## [2.9.1] - 2026-10-21
 
 ### Added
