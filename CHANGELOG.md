@@ -15,6 +15,12 @@ The project follows [Semantic Versioning](https://semver.org/).
 - `load_amp_phase_dat` reads decimal durations from file names: `pulse_2.5ms.dat`
   lasted 5 ms and `HS_0.25MS.dat` 25 ms. The GUI import dialog always passes
   its own duration and was not affected.
+- The library pulse `AHP_5ms_Hsn` stores its amplitudes in percent and now
+  peaks at `max_b1_gauss` (1 G) instead of 100 G, by name and by file path.
+  A JSON file next to an amp/phase pulse (`AHP_5ms_Hsn.json`) records its
+  import options; `load_pulse_from_file` uses them for options it is not
+  given. The GUI import dialog asks for the unit and rescales to the flip
+  angle, so it was not affected.
 
 ## [2.9.1] - 2026-10-21
 

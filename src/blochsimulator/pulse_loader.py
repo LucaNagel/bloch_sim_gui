@@ -12,6 +12,7 @@ import numpy as np
 from pathlib import Path
 from typing import Tuple, Dict, Optional, Union
 from dataclasses import dataclass
+import json
 import re
 import sys
 
@@ -375,7 +376,7 @@ class PulseLibrary:
         if suffix == ".exc":
             b1, time, metadata = JCAMPPulseLoader.load(filepath)
         elif suffix == ".dat":
-            b1, time, metadata = load_amp_phase_dat(filepath)
+            b1, time, metadata = load_pulse_from_file(filepath)
         else:
             raise ValueError(f"Unsupported pulse format for {filepath}")
 
@@ -425,32 +426,52 @@ def load_pulse(pulse_name: str) -> Tuple[np.ndarray, np.ndarray, PulseMetadata]:
     return lib.load(pulse_name)
 
 
+def _sidecar_import_options(filepath: Path) -> Dict:
+    """Read load_amp_phase_dat options from an optional JSON sidecar.
+
+    Headerless amp/phase files do not state their amplitude unit, so a pulse
+    file can record it next to the data, e.g. ``AHP_5ms_Hsn.json`` with
+    ``{"amplitude_unit": "percent"}``.
+    """
+    sidecar = filepath.with_suffix(".json")
+    if not sidecar.exists():
+        return {}
+    with open(sidecar, "r") as f:
+        return json.load(f)
+
+
 def load_pulse_from_file(
     filepath: Union[str, Path],
     *,
     duration_s: Optional[float] = None,
     max_b1_gauss: Optional[float] = None,
-    amplitude_unit: str = "relative",
-    phase_unit: str = "deg",
-    layout: str = "columns",
+    amplitude_unit: Optional[str] = None,
+    phase_unit: Optional[str] = None,
+    layout: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray, PulseMetadata]:
     """Load a pulse directly from a file path.
 
     Headerless amp/phase text files share this entry point with JCAMP-DX
     ``.exc`` files.  The optional import settings are ignored for JCAMP-DX
     files and forwarded to :func:`load_amp_phase_dat` for ``.dat``, ``.txt``,
-    and ``.csv`` files.
+    and ``.csv`` files.  Settings left at None come from a ``<name>.json``
+    sidecar next to the file, if present, and otherwise from the
+    :func:`load_amp_phase_dat` defaults.
     """
     filepath = Path(filepath)
     if filepath.suffix.lower() in {".dat", ".txt", ".csv"}:
-        return load_amp_phase_dat(
-            filepath,
-            duration_s=duration_s,
-            max_b1_gauss=max_b1_gauss,
-            amplitude_unit=amplitude_unit,
-            phase_unit=phase_unit,
-            layout=layout,
+        options = _sidecar_import_options(filepath)
+        explicit = {
+            "duration_s": duration_s,
+            "max_b1_gauss": max_b1_gauss,
+            "amplitude_unit": amplitude_unit,
+            "phase_unit": phase_unit,
+            "layout": layout,
+        }
+        options.update(
+            {key: value for key, value in explicit.items() if value is not None}
         )
+        return load_amp_phase_dat(filepath, **options)
     return JCAMPPulseLoader.load(filepath)
 
 

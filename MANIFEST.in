@@ -15,4 +15,4 @@ include examples/spin_echo_reproduction.ipynb
 include examples/spin_echo_analysis.ipynb
 include examples/spin_echo_analysis_data.h5
 recursive-include rfpulses *
-recursive-include src/blochsimulator/rfpulses *.txt *.dat *.exc
+recursive-include src/blochsimulator/rfpulses *.txt *.dat *.json *.exc

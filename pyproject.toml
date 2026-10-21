@@ -15,6 +15,7 @@ package-dir = {"" = "src"}
 blochsimulator = [
     "rfpulses/*.txt",
     "rfpulses/*.dat",
+    "rfpulses/*.json",
     "rfpulses/*.exc",
     "rfpulses/bruker/*.exc",
 ]

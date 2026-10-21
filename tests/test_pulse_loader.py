@@ -5,11 +5,16 @@ import numpy as np
 import pytest
 
 from blochsimulator import pulse_loader
-from blochsimulator.pulse_loader import PulseLibrary, load_amp_phase_dat, load_pulse
+from blochsimulator.pulse_loader import (
+    PulseLibrary,
+    load_amp_phase_dat,
+    load_pulse,
+    load_pulse_from_file,
+)
 from blochsimulator.simulator import CustomPulse
 
 REPO_ROOT = Path(__file__).parents[1]
-PULSE_SUFFIXES = {".exc", ".dat", ".txt"}
+PULSE_SUFFIXES = {".exc", ".dat", ".json", ".txt"}
 
 
 def _pulse_file_digests(directory):
@@ -67,3 +72,35 @@ def test_amp_phase_dat_reads_duration_from_filename(
 
     assert metadata.duration == pytest.approx(expected_duration_s)
     np.testing.assert_allclose(np.diff(time), expected_duration_s / 4)
+
+
+def test_library_ahp_percent_amplitudes_peak_at_max_b1():
+    b1, time, metadata = PulseLibrary().load("AHP_5ms_Hsn")
+
+    assert np.max(np.abs(b1)) == pytest.approx(1.0)
+    assert metadata.max_b1 == pytest.approx(1.0)
+    assert metadata.duration == pytest.approx(5e-3)
+    assert b1.size == 1024
+
+    for source in ("AHP_5ms_Hsn", REPO_ROOT / "rfpulses" / "AHP_5ms_Hsn.dat"):
+        pulse = CustomPulse(source)
+        assert np.max(np.abs(pulse.b1)) == pytest.approx(1.0)
+
+
+def test_library_dat_sidecar_sets_import_options(tmp_path):
+    np.savetxt(tmp_path / "ramp_1ms.dat", [[50.0, 0.0], [100.0, 90.0]])
+    (tmp_path / "ramp_1ms.json").write_text(
+        '{"amplitude_unit": "percent", "max_b1_gauss": 0.2}'
+    )
+
+    library = PulseLibrary(tmp_path)
+    b1, time, metadata = library.load("ramp_1ms")
+
+    assert library.list_pulses() == ["ramp_1ms"]
+    np.testing.assert_allclose(b1, [0.1, 0.2j], atol=1e-15)
+    assert metadata.max_b1 == pytest.approx(0.2)
+
+    b1_override, _, _ = load_pulse_from_file(
+        tmp_path / "ramp_1ms.dat", max_b1_gauss=1.0
+    )
+    np.testing.assert_allclose(b1_override, [0.5, 1.0j], atol=1e-15)
