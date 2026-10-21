@@ -38,7 +38,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QLineEdit,
 )
-from PyQt5.QtCore import Qt, QSettings, QTimer
+from PyQt5.QtCore import Qt, QRectF, QSettings, QTimer
 from PyQt5.QtGui import QFont, QIcon, QImage, QPalette, QColor
 
 import pyqtgraph as pg
@@ -125,6 +125,16 @@ from .simulation_explorer import SessionSimulationExplorer
 def _display_time_indices(count, limit=20000):
     """Bound plot data independently of saved or integrated sample counts."""
     return np.unique(np.linspace(0, count - 1, min(count, limit)).astype(int))
+
+
+def _cyclic_colormap():
+    """Colormap whose ends meet, for phase maps (-180° and 180° look alike)."""
+    for name in ("CET-C7", "CET-C6", "hsv"):
+        try:
+            return pg.colormap.get(name)
+        except Exception:
+            continue
+    return None
 
 
 from .styles import (
@@ -1221,9 +1231,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.spatial_markers_checkbox.setToolTip(
             "Display vertical lines at each position/frequency with 3D-view colors"
         )
-        self.spatial_markers_checkbox.toggled.connect(
-            lambda _: self.update_spatial_plot_from_last_result()
-        )
+        self.spatial_markers_checkbox.toggled.connect(self._refresh_spatial_view)
         spatial_options.addWidget(self.spatial_markers_checkbox)
 
         # Component selector for spatial plot
@@ -1237,7 +1245,7 @@ class BlochSimulatorGUI(QMainWindow):
             ["Magnitude", "Real", "Imaginary"]
         )
         self.spatial_component_combo.selection_changed.connect(
-            lambda: self.update_spatial_plot_from_last_result()
+            self._refresh_spatial_view
         )
         spatial_options.addWidget(self.spatial_component_combo, 1)
         spatial_layout.addLayout(spatial_options)
@@ -1246,7 +1254,9 @@ class BlochSimulatorGUI(QMainWindow):
         spatial_controls.addWidget(QLabel("Plot type:"))
         self.spatial_plot_type = QComboBox()
         self.spatial_plot_type.setObjectName("spatial_plot_type")
-        self.spatial_plot_type.addItems(["Line", "Heatmap"])
+        self.spatial_plot_type.addItems(["Line", "Heatmap", "Map"])
+        # "Map" needs a 2D position grid; enabled once a plane was simulated.
+        self.spatial_plot_type.model().item(2).setEnabled(False)
 
         spatial_controls.addWidget(self.spatial_plot_type)
         spatial_controls.addWidget(QLabel("Heatmap mode:"))
@@ -1255,36 +1265,94 @@ class BlochSimulatorGUI(QMainWindow):
         self.spatial_heatmap_mode.addItems(
             ["Position vs Frequency", "Position vs Time"]
         )
-        self.spatial_heatmap_mode.currentTextChanged.connect(
-            lambda _: self.update_spatial_plot_from_last_result()
-        )
+        self.spatial_heatmap_mode.currentTextChanged.connect(self._refresh_spatial_view)
         spatial_controls.addWidget(self.spatial_heatmap_mode)
 
         self.spatial_plot_type.currentTextChanged.connect(
             lambda text: self._update_spatial_controls_visibility(text)
         )
-        self.spatial_plot_type.currentTextChanged.connect(
-            lambda _: self.update_spatial_plot_from_last_result()
-        )
+        self.spatial_plot_type.currentTextChanged.connect(self._refresh_spatial_view)
 
         spatial_controls.addWidget(QLabel("View:"))
         self.spatial_mode = QComboBox()  # Renamed from spatial_mode to avoid confusion
         self.spatial_mode.setObjectName("spatial_mode")
         self.spatial_mode.addItems(["Individual freq", "Mean over freqs"])
-        self.spatial_mode.currentIndexChanged.connect(
-            self.update_spatial_plot_from_last_result
-        )
+        self.spatial_mode.currentIndexChanged.connect(self._refresh_spatial_view)
         spatial_controls.addWidget(self.spatial_mode)
         self.spatial_freq_slider = QSlider(Qt.Horizontal)
         self.spatial_freq_slider.setObjectName("spatial_freq_slider")
         self.spatial_freq_slider.setRange(0, 0)
-        self.spatial_freq_slider.valueChanged.connect(
-            lambda: self.update_spatial_plot_from_last_result()
-        )
+        self.spatial_freq_slider.valueChanged.connect(self._refresh_spatial_view)
         self.spatial_freq_label = QLabel("Freq: 0.0 Hz")
         spatial_controls.addWidget(self.spatial_freq_label)
         spatial_controls.addWidget(self.spatial_freq_slider)
         spatial_layout.addLayout(spatial_controls)
+
+        # Row or column of a 2D position grid shown by the line plots and
+        # heatmaps (hidden for lines and single points)
+        self.spatial_profile_controls = QWidget()
+        spatial_profile_layout = QHBoxLayout(self.spatial_profile_controls)
+        spatial_profile_layout.setContentsMargins(0, 0, 0, 0)
+        spatial_profile_layout.addWidget(QLabel("Profile along:"))
+        self.spatial_profile_axis = QComboBox()
+        self.spatial_profile_axis.setObjectName("spatial_profile_axis")
+        self.spatial_profile_axis.addItems(["x", "y"])
+        self.spatial_profile_axis.currentIndexChanged.connect(
+            self._refresh_spatial_view
+        )
+        spatial_profile_layout.addWidget(self.spatial_profile_axis)
+        self.spatial_profile_label = QLabel("")
+        spatial_profile_layout.addWidget(self.spatial_profile_label)
+        self.spatial_profile_slider = QSlider(Qt.Horizontal)
+        self.spatial_profile_slider.setObjectName("spatial_profile_slider")
+        self.spatial_profile_slider.setRange(0, 0)
+        self.spatial_profile_slider.valueChanged.connect(self._refresh_spatial_view)
+        spatial_profile_layout.addWidget(self.spatial_profile_slider, 1)
+        self.spatial_profile_controls.hide()
+        spatial_layout.addWidget(self.spatial_profile_controls)
+        self._spatial_profile_state = None
+
+        # |Mxy|, phase and Mz over a 2D position grid (plot type "Map")
+        self.spatial_map_widget = pg.GraphicsLayoutWidget()
+        self.spatial_map_widget.setObjectName("spatial_map_widget")
+        self.spatial_map_widget.setMinimumHeight(300)
+        self.spatial_map_plots = {}
+        self.spatial_map_items = {}
+        self.spatial_map_colorbars = {}
+        self.spatial_map_profile_lines = {}
+        map_specs = (
+            ("mxy", "|Mxy|", None),
+            ("phase", "Phase (°)", _cyclic_colormap()),
+            ("mz", "Mz", pg.colormap.get("CET-D1")),
+        )
+        for column, (key, title, cmap) in enumerate(map_specs):
+            plot = self.spatial_map_widget.addPlot(row=0, col=2 * column)
+            plot.setTitle(title)
+            plot.setAspectLocked(True)
+            item = pg.ImageItem(axisOrder="row-major")
+            plot.addItem(item)
+            colorbar = pg.ColorBarItem(
+                values=(-180.0, 180.0) if key == "phase" else (0.0, 1.0),
+                colorMap=cmap,
+                interactive=False,
+            )
+            colorbar.setImageItem(item)
+            self.spatial_map_widget.addItem(colorbar, row=0, col=2 * column + 1)
+            # A dark line under a light dashed one stays visible on any colour
+            lines = (
+                pg.InfiniteLine(angle=0, pen=pg.mkPen((0, 0, 0, 170), width=3)),
+                pg.InfiniteLine(
+                    angle=0, pen=pg.mkPen((255, 255, 255), width=1.5, style=Qt.DashLine)
+                ),
+            )
+            for line in lines:
+                plot.addItem(line)
+            self.spatial_map_plots[key] = plot
+            self.spatial_map_items[key] = item
+            self.spatial_map_colorbars[key] = colorbar
+            self.spatial_map_profile_lines[key] = lines
+        self.spatial_map_widget.hide()
+        spatial_layout.addWidget(self.spatial_map_widget)
 
         # Mxy and Mz plots side by side
         spatial_plots_layout = QHBoxLayout()
@@ -2127,7 +2195,18 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             (
                 self.spatial_plot_type,
-                "Choose between individual spatial curves and a two-dimensional heatmap.",
+                "Choose between spatial curves, a two-dimensional heatmap and, for a "
+                "2D position grid, maps of |Mxy|, phase and Mz over the plane.",
+            ),
+            (
+                self.spatial_profile_axis,
+                "Plane axis along which the line plots and heatmaps follow the "
+                "position grid.",
+            ),
+            (
+                self.spatial_profile_slider,
+                "Row or column of the position grid shown as a profile; the maps "
+                "mark it with a dashed line.",
             ),
             (
                 self.spatial_heatmap_mode,
@@ -2815,6 +2894,7 @@ class BlochSimulatorGUI(QMainWindow):
                         pass
             cache.clear()
         self._plot_items_initialized = False
+        self._spatial_map_level_cache = None
 
     def _reshape_to_tpf(self, arr: np.ndarray, pos_len: int, freq_len: int):
         """
@@ -3757,6 +3837,7 @@ class BlochSimulatorGUI(QMainWindow):
             getattr(self, "spectrum_heatmap_colorbar", None),
             getattr(self, "spatial_heatmap_mxy_colorbar", None),
             getattr(self, "spatial_heatmap_mz_colorbar", None),
+            getattr(self, "spatial_map_colorbars", {}).get("mxy"),
         ]:
             _set_cb(cb)
 
@@ -3774,6 +3855,7 @@ class BlochSimulatorGUI(QMainWindow):
                 getattr(self, "spectrum_heatmap_item", None),
                 getattr(self, "spatial_heatmap_mxy_item", None),
                 getattr(self, "spatial_heatmap_mz_item", None),
+                getattr(self, "spatial_map_items", {}).get("mxy"),
             ]:
                 if img is not None and hasattr(img, "setLookupTable"):
                     try:
@@ -4030,12 +4112,39 @@ class BlochSimulatorGUI(QMainWindow):
             )
             mz_pos = mz_display[:, freq_sel]
 
-        # Choose a signed position axis (prefer the axis with largest span)
-        pos_axis = self.last_positions
-        spans = np.ptp(pos_axis, axis=0)  # max - min per axis
-        axis_idx = int(np.argmax(spans))
-        pos_distance_m = pos_axis[:, axis_idx]
+        # A line is plotted against its own axis; a plane is shown as maps
+        # plus a profile through one row or column of the grid.
+        positions = np.asarray(self.last_positions)
+        layout = self._position_layout()
+        plane = (
+            layout
+            if layout is not None
+            and layout.ndim >= 2
+            and layout.is_grid
+            and layout.size == mx_display.shape[0]
+            else None
+        )
+        self._sync_spatial_profile_controls(plane)
+        plane_maps = None
+        if plane is not None:
+            profile, axis_idx = self._spatial_profile_indices(plane)
+            plane_maps = (
+                mxy_pos,
+                self._spatial_phase_deg(
+                    mx_display, my_display, freq_sel, spatial_view_mode
+                ),
+                mz_pos,
+            )
+            mx_display, my_display, mz_display = (
+                values[profile] for values in (mx_display, my_display, mz_display)
+            )
+            mxy_pos, mz_pos = mxy_pos[profile], mz_pos[profile]
+        else:
+            profile = slice(None)
+            axis_idx = layout.primary_axis if layout is not None else 2
+        pos_distance_m = positions[profile, axis_idx]
         pos_distance_mm = pos_distance_m * 1000.0
+        axis_name = AXIS_NAMES[axis_idx]
 
         self.log_message(
             f"Spatial plot: mxy_pos shape = {mxy_pos.shape}, mz_pos shape = {mz_pos.shape}, pos_distance shape = {pos_distance_m.shape}"
@@ -4069,7 +4178,19 @@ class BlochSimulatorGUI(QMainWindow):
             "mz_per_freq": mz_display,
             "frequency_axis": freq_axis,
             "heatmap_mode": None,
+            "position_axis": axis_name,
         }
+        if plane is not None:
+            self._last_spatial_export.update(
+                {
+                    "grid_axes": plane.axis_names,
+                    "grid_coordinates_m": plane.coordinates,
+                    "profile_indices": profile,
+                    "mxy_map": plane.reshape(plane_maps[0]),
+                    "phase_map_deg": plane.reshape(plane_maps[1]),
+                    "mz_map": plane.reshape(plane_maps[2]),
+                }
+            )
 
         # Update plots
         plot_type = (
@@ -4082,16 +4203,21 @@ class BlochSimulatorGUI(QMainWindow):
             if hasattr(self, "spatial_heatmap_mode")
             else "Position vs Frequency"
         )
-        show_heatmap = plot_type == "Heatmap"
-        self._set_spatial_plot_visibility(show_heatmap)
-        if show_heatmap:
+        view = {"Heatmap": "heatmap", "Map": "map"}.get(plot_type, "line")
+        if plane is None and view == "map":
+            view = "line"
+        self._set_spatial_plot_visibility(view)
+        self._set_spatial_position_label(f"Position {axis_name}")
+        if view == "map":
+            self._update_spatial_maps(plane, *plane_maps)
+        if view == "heatmap":
             # Heatmap mode
             if heatmap_mode == "Position vs Time" and is_time_resolved:
                 mxy_time = np.sqrt(
-                    self.spatial_mx_time_series[:, :, freq_sel] ** 2
-                    + self.spatial_my_time_series[:, :, freq_sel] ** 2
+                    self.spatial_mx_time_series[:, profile, freq_sel] ** 2
+                    + self.spatial_my_time_series[:, profile, freq_sel] ** 2
                 )
-                mz_time = self.spatial_mz_time_series[:, :, freq_sel]
+                mz_time = self.spatial_mz_time_series[:, profile, freq_sel]
                 self._last_spatial_export.update(
                     {
                         "heatmap_mode": "time",
@@ -4122,7 +4248,11 @@ class BlochSimulatorGUI(QMainWindow):
                     freq_axis,
                 )
         else:
-            # Line plot mode
+            # Line plot mode (also the profile below the maps)
+            slice_axis_combo = getattr(self.sequence_designer, "slice_axis_combo", None)
+            slice_axis = (
+                slice_axis_combo.currentText() if slice_axis_combo is not None else "z"
+            )
             self._update_spatial_line_plots(
                 pos_distance_mm,
                 mxy_pos,
@@ -4132,7 +4262,16 @@ class BlochSimulatorGUI(QMainWindow):
                 mz_display,
                 freq_sel,
                 spatial_view_mode,
+                slice_guides=axis_name == slice_axis,
             )
+            if plane is not None:
+                where = self.spatial_profile_label.text()
+                self.spatial_mxy_plot.setTitle(
+                    f"Transverse Magnetization along {axis_name} at {where}"
+                )
+                self.spatial_mz_plot.setTitle(
+                    f"Longitudinal Magnetization along {axis_name} at {where}"
+                )
 
         # Keep sequence diagram in sync but avoid time cursors on spatial (position) axes
         if hasattr(self, "spatial_mxy_time_line"):
@@ -4150,14 +4289,188 @@ class BlochSimulatorGUI(QMainWindow):
                     if not self.sequence_designer.playhead_line.isVisible():
                         self.sequence_designer.playhead_line.show()
 
-    def _set_spatial_plot_visibility(self, show_heatmap: bool):
-        """Toggle between line plots and heatmaps in the Spatial view."""
+    def _refresh_spatial_view(self, *_):
+        """Redraw the Spatial tab at the current playback time."""
+        if self.last_result is None or self.last_positions is None:
+            return
+        self.update_spatial_plot_from_last_result(
+            time_idx=self._current_playback_index()
+        )
+
+    def _sync_spatial_profile_controls(self, plane):
+        """Match the "Map" plot type and the profile controls to the grid.
+
+        ``plane`` is the layout of a 2D position grid, or None for lines and
+        single points (the controls are then hidden and "Map" disabled).
+        """
+        map_index = self.spatial_plot_type.findText("Map")
+        self.spatial_plot_type.model().item(map_index).setEnabled(plane is not None)
+        if plane is None and self.spatial_plot_type.currentIndex() == map_index:
+            self.spatial_plot_type.blockSignals(True)
+            self.spatial_plot_type.setCurrentText("Line")
+            self.spatial_plot_type.blockSignals(False)
+            self._update_spatial_controls_visibility("Line")
+        self.spatial_profile_controls.setVisible(plane is not None)
+        if plane is None:
+            self._spatial_profile_state = None
+            return
+
+        combo, slider = self.spatial_profile_axis, self.spatial_profile_slider
+        names = list(plane.axis_names)
+        combo.blockSignals(True)
+        slider.blockSignals(True)
+        try:
+            if [combo.itemText(i) for i in range(combo.count())] != names:
+                along = combo.currentIndex()
+                combo.clear()
+                combo.addItems(names)
+                combo.setCurrentIndex(min(max(along, 0), 1))
+            across = 1 - combo.currentIndex()
+            coords = np.asarray(plane.coordinates[across])
+            slider.setRange(0, coords.size - 1)
+            state = (plane.axes, plane.counts, across)
+            if state != self._spatial_profile_state:
+                # A new grid or profile axis starts at the grid centre
+                middle = 0.5 * (coords.min() + coords.max())
+                slider.setValue(int(np.argmin(np.abs(coords - middle))))
+                self._spatial_profile_state = state
+        finally:
+            combo.blockSignals(False)
+            slider.blockSignals(False)
+        self.spatial_profile_label.setText(
+            f"{AXIS_NAMES[plane.axes[across]]} = "
+            f"{coords[slider.value()] * 1000.0:.2f} mm"
+        )
+
+    def _spatial_profile_indices(self, plane):
+        """Flat position indices and world axis of the selected profile."""
+        along = min(max(self.spatial_profile_axis.currentIndex(), 0), 1)
+        n_first, n_second = plane.counts
+        index = self.spatial_profile_slider.value()
+        if along == 0:
+            indices = min(index, n_second - 1) * n_first + np.arange(n_first)
+        else:
+            indices = min(index, n_first - 1) + n_first * np.arange(n_second)
+        return indices, plane.axes[along]
+
+    def _spatial_phase_deg(self, mx, my, freq_sel, view_mode):
+        """Transverse phase per position in degrees, NaN where |Mxy| vanishes.
+
+        "Mean over freqs" takes the phase of the mean transverse vector,
+        like the phase line plot.
+        """
+        if view_mode == "Mean over freqs":
+            transverse = np.mean(mx + 1j * my, axis=1)
+        else:
+            transverse = mx[:, freq_sel] + 1j * my[:, freq_sel]
+        phase = np.degrees(np.angle(transverse))
+        mxy_max, _ = self._spatial_map_levels()
+        phase[np.abs(transverse) < 1e-3 * mxy_max] = np.nan
+        return phase
+
+    def _spatial_map_levels(self):
+        """Largest |Mxy| and |Mz| of the whole result, for fixed map levels.
+
+        The maps keep these levels while the time slider moves, so colours
+        stay comparable between frames.
+        """
+        cached = getattr(self, "_spatial_map_level_cache", None)
+        if cached is not None and cached[0] is self.last_result:
+            return cached[1]
+        mx, my, mz = (np.asarray(self.last_result[key]) for key in ("mx", "my", "mz"))
+        rows = mx.shape[0] if mx.ndim == 3 else 1
+        mx, my, mz = (values.reshape(rows, -1) for values in (mx, my, mz))
+        # Chunk over time to bound the temporary |Mxy| array
+        step = max(1, 2_000_000 // max(mx.shape[1], 1))
+        mxy_max = mz_max = 0.0
+        for start in range(0, rows, step):
+            block = slice(start, start + step)
+            mxy_max = max(mxy_max, float(np.nanmax(np.hypot(mx[block], my[block]))))
+            mz_max = max(mz_max, float(np.nanmax(np.abs(mz[block]))))
+        levels = (max(mxy_max, 1e-6), max(mz_max, 1e-6))
+        self._spatial_map_level_cache = (self.last_result, levels)
+        return levels
+
+    def _update_spatial_maps(self, plane, mxy, phase_deg, mz):
+        """Draw |Mxy|, phase and Mz over the position grid."""
+        mxy_max, mz_max = self._spatial_map_levels()
+        first_mm, second_mm = plane.coordinates_mm()
+        images = {
+            "mxy": plane.reshape(mxy),
+            "phase": plane.reshape(phase_deg),
+            "mz": plane.reshape(mz),
+        }
+        # Image rows run along the second axis, columns along the first; sort
+        # both ascending so the image rectangle maps straight onto them.
+        if first_mm[-1] < first_mm[0]:
+            first_mm = first_mm[::-1]
+            images = {key: image[:, ::-1] for key, image in images.items()}
+        if second_mm[-1] < second_mm[0]:
+            second_mm = second_mm[::-1]
+            images = {key: image[::-1] for key, image in images.items()}
+        step_first = (first_mm[-1] - first_mm[0]) / (first_mm.size - 1)
+        step_second = (second_mm[-1] - second_mm[0]) / (second_mm.size - 1)
+        rect = QRectF(
+            first_mm[0] - 0.5 * step_first,
+            second_mm[0] - 0.5 * step_second,
+            step_first * first_mm.size,
+            step_second * second_mm.size,
+        )
+        levels = {
+            "mxy": (0.0, mxy_max),
+            "phase": (-180.0, 180.0),
+            "mz": (-mz_max, mz_max),
+        }
+        along = min(max(self.spatial_profile_axis.currentIndex(), 0), 1)
+        across_mm = plane.coordinates_mm()[1 - along]
+        profile_at = float(
+            across_mm[min(self.spatial_profile_slider.value(), across_mm.size - 1)]
+        )
+        frame = (rect.getRect(), plane.axis_names)
+        new_frame = frame != getattr(self, "_spatial_map_frame", None)
+        self._spatial_map_frame = frame
+        for key, item in self.spatial_map_items.items():
+            item.setImage(
+                np.ascontiguousarray(images[key], dtype=float),
+                autoLevels=False,
+                levels=levels[key],
+            )
+            item.setRect(rect)
+            self.spatial_map_colorbars[key].setLevels(levels[key])
+            for line in self.spatial_map_profile_lines[key]:
+                line.setAngle(0 if along == 0 else 90)
+                line.setValue(profile_at)
+            if new_frame:
+                plot = self.spatial_map_plots[key]
+                plot.setLabel("bottom", plane.axis_names[0], "mm")
+                plot.setLabel("left", plane.axis_names[1], "mm")
+                plot.setRange(rect=rect, padding=0.02)
+
+    def _set_spatial_position_label(self, text):
+        """Name the position axis of the Spatial line plots and heatmaps."""
+        if text == getattr(self, "_spatial_position_label", None):
+            return
+        self._spatial_position_label = text
+        for plot in (
+            self.spatial_mxy_plot,
+            self.spatial_mz_plot,
+            self.spatial_heatmap_mxy,
+            self.spatial_heatmap_mz,
+        ):
+            plot.setLabel("bottom", text, "mm")
+
+    def _set_spatial_plot_visibility(self, view: str):
+        """Show the line plots ("line"), the heatmaps ("heatmap") or the plane
+        maps with the profile line plots below them ("map")."""
+        show_lines = view in ("line", "map")
         if hasattr(self, "spatial_heatmap_container"):
-            self.spatial_heatmap_container.setVisible(show_heatmap)
+            self.spatial_heatmap_container.setVisible(view == "heatmap")
+        if hasattr(self, "spatial_map_widget"):
+            self.spatial_map_widget.setVisible(view == "map")
         if hasattr(self, "spatial_mxy_plot"):
-            self.spatial_mxy_plot.setVisible(not show_heatmap)
+            self.spatial_mxy_plot.setVisible(show_lines)
         if hasattr(self, "spatial_mz_plot"):
-            self.spatial_mz_plot.setVisible(not show_heatmap)
+            self.spatial_mz_plot.setVisible(show_lines)
         # Hide Mz plot when showing ONLY phase (wrapped or unwrapped)
         selected = self.spatial_component_combo.get_selected_items()
         if len(selected) > 0 and all(
@@ -4175,8 +4488,13 @@ class BlochSimulatorGUI(QMainWindow):
         mz_display=None,
         freq_sel=0,
         spatial_mode="Mean only",
+        slice_guides=True,
     ):
-        """Update the Mxy and Mz line plots."""
+        """Update the Mxy and Mz line plots.
+
+        ``slice_guides`` marks the slice thickness; it only makes sense when
+        the plotted position axis is the slice-select axis.
+        """
         try:
             # Safely clear plots while preserving persistent items
             persistent_mxy = [self.spatial_mxy_time_line] + self.spatial_slice_lines[
@@ -4453,7 +4771,12 @@ class BlochSimulatorGUI(QMainWindow):
                 slice_thk = self.sequence_designer._slice_thickness_m()
             except Exception:
                 slice_thk = None
-            if slice_thk is not None and slice_thk > 0 and np.isfinite(slice_thk):
+            if (
+                slice_guides
+                and slice_thk is not None
+                and slice_thk > 0
+                and np.isfinite(slice_thk)
+            ):
                 center = float(np.median(position))
                 half_mm = slice_thk * 500.0
                 positions = [center - half_mm, center + half_mm]
@@ -4680,7 +5003,6 @@ class BlochSimulatorGUI(QMainWindow):
                 img_item.setRect(pos_min, t_min, x_span, t_span)
                 plot_widget.setXRange(pos_min, pos_max, padding=0)
                 plot_widget.setYRange(t_min, t_max, padding=0)
-                plot_widget.setLabel("bottom", "Position", "mm")
                 plot_widget.setLabel("left", "Time", "ms")
                 plot_widget.setTitle(title)
                 if colorbar is not None:

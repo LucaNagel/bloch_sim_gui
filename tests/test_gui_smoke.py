@@ -1641,6 +1641,136 @@ def test_free_mode_vector_view_subsamples_a_plane_per_axis():
     )
 
 
+def _plane_result(positions, nframes):
+    """Magnetization whose |Mxy| grows with the x index and phase/Mz with y."""
+    n_first, n_second = infer_layout(positions).counts
+    ix = np.tile(np.arange(n_first), n_second)
+    iy = np.repeat(np.arange(n_second), n_first)
+    scale = np.linspace(0.5, 1.0, nframes)[:, None, None]
+    ones = np.ones((1, 1, 2))
+    amp = scale * (0.2 * ix)[None, :, None] * ones
+    phi = np.radians(40.0 * iy - 60.0)[None, :, None]
+    mz = scale * (-0.5 + 0.4 * iy)[None, :, None] * ones
+    return {"mx": amp * np.cos(phi), "my": amp * np.sin(phi), "mz": mz}, ix, iy
+
+
+def _show_spatial_result(window, positions, result):
+    nframes = result["mx"].shape[0]
+    window.last_positions = positions
+    window.last_result = result
+    window.last_time = np.linspace(0.0, 1e-3, nframes)
+    window.last_frequencies = np.zeros(result["mx"].shape[2])
+    window._precompute_plot_ranges(result)
+    window.update_spatial_plot_from_last_result()
+
+
+def _spatial_curve(plot, name):
+    """Unclipped data of a named curve (the plots clip to their view)."""
+    item = next(item for item in plot.listDataItems() if item.name() == name)
+    return item.xData, item.yData
+
+
+def test_free_mode_spatial_map_shows_plane_and_profile():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    positions = build_plane_positions((4, 3), (0.03, 0.02), "xy")
+    result, ix, iy = _plane_result(positions, nframes=3)
+    _show_spatial_result(window, positions, result)
+
+    assert not window.spatial_profile_controls.isHidden()
+    combo = window.spatial_plot_type
+    assert combo.model().item(combo.findText("Map")).isEnabled()
+    combo.setCurrentText("Map")
+    assert not window.spatial_map_widget.isHidden()
+    assert not window.spatial_mxy_plot.isHidden()
+    assert window.spatial_heatmap_container.isHidden()
+
+    # Images are indexed [y, x]; phase is masked where |Mxy| vanishes (x0)
+    images = {key: item.image for key, item in window.spatial_map_items.items()}
+    np.testing.assert_allclose(images["mxy"], (0.2 * ix).reshape(3, 4))
+    assert np.isnan(images["phase"][:, 0]).all()
+    np.testing.assert_allclose(
+        images["phase"][:, 1:], (40.0 * iy - 60.0).reshape(3, 4)[:, 1:]
+    )
+    np.testing.assert_allclose(images["mz"], (-0.5 + 0.4 * iy).reshape(3, 4))
+    item = window.spatial_map_items["mxy"]
+    rect = item.mapRectToParent(item.boundingRect())
+    assert (rect.left(), rect.top(), rect.width(), rect.height()) == pytest.approx(
+        (-20.0, -15.0, 40.0, 30.0)
+    )
+
+    # Earlier frames keep the levels of the whole result
+    window.update_spatial_plot_from_last_result(time_idx=0)
+    np.testing.assert_allclose(
+        window.spatial_map_items["mxy"].image, 0.5 * (0.2 * ix).reshape(3, 4)
+    )
+    assert window.spatial_map_colorbars["mxy"].levels() == pytest.approx((0.0, 0.6))
+    assert window.spatial_map_colorbars["mz"].levels() == pytest.approx((-0.5, 0.5))
+    assert window.spatial_map_colorbars["phase"].levels() == pytest.approx(
+        (-180.0, 180.0)
+    )
+
+    # The profile starts along x through the grid centre (y = 0)
+    assert window.spatial_profile_label.text() == "y = 0.00 mm"
+    x, y = _spatial_curve(window.spatial_mxy_plot, "|Mxy|")
+    np.testing.assert_allclose(x, [-15.0, -5.0, 5.0, 15.0])
+    np.testing.assert_allclose(y, 0.5 * 0.2 * np.arange(4))
+    assert window.spatial_mxy_plot.getAxis("bottom").labelText == "Position x"
+    marker = window.spatial_map_profile_lines["mxy"][1]
+    assert marker.angle == 0
+    assert marker.value() == pytest.approx(0.0)
+
+    window.spatial_profile_axis.setCurrentIndex(1)
+    assert window.spatial_profile_slider.maximum() == 3
+    assert window.spatial_profile_label.text() == "x = -5.00 mm"
+    x, y = _spatial_curve(window.spatial_mxy_plot, "|Mxy|")
+    np.testing.assert_allclose(x, [-10.0, 0.0, 10.0])
+    np.testing.assert_allclose(y, 0.2)
+    assert window.spatial_mxy_plot.getAxis("bottom").labelText == "Position y"
+    assert marker.angle == 90
+    assert marker.value() == pytest.approx(-5.0)
+
+    export = window._last_spatial_export
+    assert export["position_axis"] == "y"
+    assert export["grid_axes"] == ("x", "y")
+    np.testing.assert_array_equal(export["profile_indices"], [1, 5, 9])
+    np.testing.assert_allclose(export["position_m"], [-0.01, 0.0, 0.01])
+    assert export["mxy_per_freq"].shape == (3, 2)
+    assert export["mz_map"].shape == (3, 4)
+
+
+def test_free_mode_spatial_line_along_x_uses_its_axis():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    plane = build_plane_positions((4, 3), (0.03, 0.02), "xy")
+    _show_spatial_result(window, plane, _plane_result(plane, nframes=2)[0])
+    window.spatial_plot_type.setCurrentText("Map")
+
+    positions = build_line_positions(5, 0.02, "x")
+    amp = np.linspace(0.0, 1.0, 5)[None, :, None] * np.ones((2, 1, 1))
+    result = {"mx": amp, "my": np.zeros_like(amp), "mz": 1.0 - amp}
+    _show_spatial_result(window, positions, result)
+
+    combo = window.spatial_plot_type
+    assert combo.currentText() == "Line"
+    assert not combo.model().item(combo.findText("Map")).isEnabled()
+    assert window.spatial_profile_controls.isHidden()
+    assert window.spatial_map_widget.isHidden()
+    x, y = _spatial_curve(window.spatial_mxy_plot, "|Mxy|")
+    np.testing.assert_allclose(x, [-10.0, -5.0, 0.0, 5.0, 10.0])
+    np.testing.assert_allclose(y, amp[-1, :, 0])
+    assert window.spatial_mz_plot.getAxis("bottom").labelText == "Position x"
+    assert window._last_spatial_export["position_axis"] == "x"
+
+    # Slice-thickness guides belong to the slice-select axis only
+    guides = window.spatial_slice_lines["mxy"]
+    assert not any(line.isVisible() for line in guides)
+    window.sequence_designer.slice_axis_combo.setCurrentText("x")
+    window._refresh_spatial_view()
+    if window.sequence_designer._slice_thickness_m():
+        assert all(line.isVisible() for line in guides)
+
+
 def test_3d_spatial_layout_returns_to_overlay():
     app = QApplication.instance() or QApplication(sys.argv)
     viewer = _spatial_viewer([-1.0, 1.0], 1)
