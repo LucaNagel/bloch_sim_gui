@@ -547,6 +547,44 @@ def test_mouse_solver_bladder_signal_is_t1_attenuated_and_kernels_agree():
     assert solved < 0.8 * hyperpolarized
 
 
+@pytest.mark.parametrize("kernel", ["optimized", "native_serial"])
+def test_urinary_sources_are_exact_without_interval_boundaries_at_knots(
+    kernel, monkeypatch
+):
+    # Source knots do not split the sequence intervals; the compartment gains
+    # integrate across them, including the ureter outflow of entering spins.
+    phantom = _fast_renal_config().build()
+    events = tuple(
+        RFEvent(time_s, np.full(10, 20.0 + 0.0j), 20e-6)
+        for time_s in np.arange(1.0, 12.0, 3.0)
+    )
+    program = SequenceProgram(events, duration_s=12.0)
+
+    def simulate():
+        return BlochSimulator(
+            use_parallel=False, dynamic_sequence_kernel=kernel
+        ).simulate_dynamic_sequence(program, phantom, checkpoints_s=(12.0,))
+
+    coarse = simulate()
+    breakpoints = DynamicSpectralPhantom.dynamic_breakpoints_s
+    monkeypatch.setattr(
+        DynamicSpectralPhantom,
+        "dynamic_breakpoints_s",
+        lambda self, duration: tuple(
+            sorted(set(breakpoints(self, duration)) | set(np.arange(0.0, 12.0, 0.01)))
+        ),
+    )
+    fine = simulate()
+
+    # Only the injection curve, which ends before 3 s, sets phantom knots.
+    assert max(breakpoints(phantom, 12.0)) < 3.0
+    urinary = phantom.voxel_washout.source_mask
+    expected = fine.checkpoint_pool_magnetization[0, ..., 2][:, urinary]
+    solved = coarse.checkpoint_pool_magnetization[0, ..., 2][:, urinary]
+    assert np.max(np.abs(expected)) > 0
+    assert np.allclose(solved, expected, rtol=1e-10, atol=1e-12 * np.max(expected))
+
+
 @pytest.mark.parametrize("suffix", [".npz", ".h5", ".nc"])
 def test_mouse_voxel_washout_round_trips_through_saved_phantoms(tmp_path, suffix):
     phantom = _fast_renal_config().build()

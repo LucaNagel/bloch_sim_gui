@@ -881,13 +881,6 @@ class DynamicSpectralPhantom:
                     timeline_offset_s=-self.kinetics_time_offset_s,
                 )
             )
-        if self.voxel_washout is not None:
-            values.extend(
-                self.voxel_washout.breakpoints_s(
-                    duration_s,
-                    timeline_offset_s=-self.kinetics_time_offset_s,
-                )
-            )
         if self.dynamic_b0 is not None:
             values.extend(self.dynamic_b0.offset_curve_hz.breakpoints_s(duration_s))
         conversion_start_s = self.conversion_start_on_sequence_timeline_s
@@ -1729,18 +1722,26 @@ def _decay_convolution(rate, duration):
     """Return integrals for a linearly varying source under exponential decay."""
     rate = np.asarray(rate, dtype=float)
     x = rate * duration
+    if np.ndim(duration):
+        duration = np.broadcast_to(np.asarray(duration, dtype=float), x.shape)
+        small_duration = duration[np.abs(x) < 1e-5]
+        regular_duration = duration[np.abs(x) >= 1e-5]
+    else:
+        small_duration = regular_duration = duration
     small = np.abs(x) < 1e-5
     f0 = np.empty_like(x, dtype=float)
     f1 = np.empty_like(x, dtype=float)
-    f0[small] = duration * (
+    f0[small] = small_duration * (
         1.0 - x[small] / 2.0 + x[small] ** 2 / 6.0 - x[small] ** 3 / 24.0
     )
-    f1[small] = duration**2 * (
+    f1[small] = small_duration**2 * (
         0.5 - x[small] / 6.0 + x[small] ** 2 / 24.0 - x[small] ** 3 / 120.0
     )
     regular = ~small
-    f0[regular] = duration * (-np.expm1(-x[regular])) / x[regular]
-    f1[regular] = duration**2 * (x[regular] + np.expm1(-x[regular])) / x[regular] ** 2
+    f0[regular] = regular_duration * (-np.expm1(-x[regular])) / x[regular]
+    f1[regular] = (
+        regular_duration**2 * (x[regular] + np.expm1(-x[regular])) / x[regular] ** 2
+    )
     return f0, f1
 
 
@@ -2194,19 +2195,13 @@ def _advance_longitudinal_kinetics(
         internal_knots.extend(
             start_s + index * inflow_max_step_s for index in range(1, step_count)
         )
-    if washout is not None:
+    if washout is not None and not washout.exact_sources:
+        # Bound the Strang weighting error of entering spins.
+        step_count = int(np.ceil((end_s - start_s) / _WASHOUT_PREROLL_STEP_S))
         internal_knots.extend(
-            knot
-            for knot in washout.source_times_on_sequence_timeline_s
-            if start_s < knot < end_s
+            start_s + index * (end_s - start_s) / step_count
+            for index in range(1, step_count)
         )
-        if washout.loss is not None:
-            # Bound the Strang weighting error of entering spins.
-            step_count = int(np.ceil((end_s - start_s) / _WASHOUT_PREROLL_STEP_S))
-            internal_knots.extend(
-                start_s + index * (end_s - start_s) / step_count
-                for index in range(1, step_count)
-            )
     boundaries = (float(start_s), *sorted(set(internal_knots)), float(end_s))
     zero_kpl = np.zeros_like(kpl)
     zero_passive_conversion = (
@@ -2454,9 +2449,12 @@ class _WashoutDriver:
     transverse, longitudinal and concentration states, so it commutes with
     RF, precession, relaxation and conversion. Each free-evolution step is
     therefore wrapped in two half-step loss factors (Strang splitting), which
-    is exact without sources and second order in ``loss * duration`` for the
-    weighting of newly entering spins. Compartment sources enter voxels
-    without conversion, so every pool is integrated exactly on its own.
+    is exact without sources. Compartment sources enter voxels without
+    conversion, so every pool is integrated exactly on its own, across the
+    interior knots of the piecewise-linear source rates. When all spins of a
+    compartment share one loss rate, the gains also carry the exact loss
+    weighting of entering spins, compensated for the trailing half-step loss
+    factor that the caller applies after :meth:`add_sources`.
     """
 
     _FACTOR_CACHE_LIMIT = 64
@@ -2476,30 +2474,37 @@ class _WashoutDriver:
         self.loss = loss if np.any(loss > 0) else None
         self.source_spins = None
         self.source_compartments = None
+        self.washout = washout
+        self.r1 = np.asarray(r1, dtype=np.float64)
+        self.equilibrium_polarization = float(equilibrium_polarization)
+        self.kinetics_time_offset_s = float(kinetics_time_offset_s)
+        self.exact_sources = True
         if washout.has_sources:
             compartments = np.asarray(washout.compartment_map).ravel()[voxel_indices]
             spins = np.flatnonzero(compartments >= 0)
             if spins.size:
                 self.source_spins = spins
                 self.source_compartments = compartments[spins]
-        self.washout = washout
-        self.r1 = np.asarray(r1, dtype=np.float64)
-        self.equilibrium_polarization = float(equilibrium_polarization)
-        self.kinetics_time_offset_s = float(kinetics_time_offset_s)
+        self.source_loss = None
+        if self.source_spins is not None:
+            count = washout.concentration_rates.shape[0]
+            self.source_loss = np.zeros(count, dtype=np.float64)
+            if self.loss is not None:
+                for compartment in range(count):
+                    values = self.loss[
+                        self.source_spins[self.source_compartments == compartment]
+                    ]
+                    if values.size == 0:
+                        continue
+                    if np.all(values == values[0]):
+                        self.source_loss[compartment] = values[0]
+                    else:
+                        self.exact_sources = False
         self._factors = {}
-        self._convolutions = {}
 
     @property
     def active(self) -> bool:
         return self.loss is not None or self.source_spins is not None
-
-    @property
-    def source_times_on_sequence_timeline_s(self):
-        if self.source_spins is None:
-            return ()
-        return tuple(
-            float(value) - self.kinetics_time_offset_s for value in self.washout.times_s
-        )
 
     def decay(self, duration, state, concentration_state=None, transverse_state=None):
         if self.loss is None or duration == 0:
@@ -2520,59 +2525,104 @@ class _WashoutDriver:
             concentration_state *= factor[None, :, None]
 
     def add_sources(self, start_s, end_s, state, concentration_state=None):
-        """Add compartment influx over one sequence-time interval."""
+        """Add compartment influx over one sequence-time interval.
+
+        The caller applies the loss of half the interval afterwards.
+        """
         if self.source_spins is None or end_s <= start_s:
             return
-        duration = float(end_s - start_s)
+        knots = self.washout.times_s
         offset = self.kinetics_time_offset_s
-        c0, m0 = self.washout.compartment_rates_at(float(start_s) + offset)
-        c1, m1 = self.washout.compartment_rates_at(float(end_s) + offset)
-        if not (np.any(c0) or np.any(c1) or np.any(m0) or np.any(m1)):
+        if end_s + offset <= knots[0] or start_s + offset >= knots[-1]:
             return
-        convolution = self._convolutions.get(duration)
-        if convolution is None:
-            if len(self._convolutions) >= self._FACTOR_CACHE_LIMIT:
-                self._convolutions.clear()
-            convolution = _decay_convolution(self.r1, duration)
-            self._convolutions[duration] = convolution
-        f0, f1 = convolution
         equilibrium = (
             self.equilibrium_polarization if concentration_state is not None else 0.0
         )
-        concentration_gain = 0.5 * duration * (c0 + c1)
-        excess0 = m0 - equilibrium * c0
-        excess1 = m1 - equilibrium * c1
-        magnetization_gain = (
-            excess0 * f0[None, :]
-            + (excess1 - excess0) / duration * f1[None, :]
-            + equilibrium * concentration_gain
+        concentration_gain, magnetization_gain = self.source_gains(
+            [start_s], [end_s], equilibrium
         )
         compartments = self.source_compartments
         spins = self.source_spins
-        state[:, spins, 2] += magnetization_gain[compartments].T
+        state[:, spins, 2] += magnetization_gain[0, compartments].T
         if concentration_state is not None:
-            concentration_state[:, spins, 2] += concentration_gain[compartments].T
+            concentration_state[:, spins, 2] += concentration_gain[0, compartments].T
 
-    def _rates_at(self, times_s):
-        """Vectorized :meth:`VoxelWashout.compartment_rates_at`, time first."""
+    def source_gains(self, start_s, end_s, equilibrium):
+        """Return exact compartment gains over sequence-time intervals.
+
+        The piecewise-linear rates are split at their interior knots and each
+        piece is convolved with relaxation and the compartment loss up to the
+        interval end. Gains are scaled by the inverse of the loss over half
+        the interval, which the caller applies after adding them. Returns
+        concentration and magnetization gains of shape
+        ``(intervals, compartments, pools)``.
+        """
         knots = self.washout.times_s
-        times = np.asarray(times_s, dtype=np.float64) + self.kinetics_time_offset_s
-        index = np.clip(np.searchsorted(knots, times) - 1, 0, knots.size - 2)
-        weight = (times - knots[index]) / (knots[index + 1] - knots[index])
-        inside = (times >= knots[0]) & (times <= knots[-1])
-        result = []
+        offset = self.kinetics_time_offset_s
+        start = np.asarray(start_s, dtype=np.float64) + offset
+        end = np.maximum(np.asarray(end_s, dtype=np.float64) + offset, start)
+        interior = np.maximum(
+            np.searchsorted(knots, end, side="left")
+            - np.searchsorted(knots, start, side="right"),
+            0,
+        )
+        pieces = interior + 1
+        first_piece = np.cumsum(pieces) - pieces
+        owner = np.repeat(np.arange(start.size), pieces)
+        local = np.arange(owner.size) - first_piece[owner]
+        first_knot = np.searchsorted(knots, start, side="right")[owner]
+        piece_start = np.where(
+            local > 0,
+            knots[np.minimum(first_knot + local - 1, knots.size - 1)],
+            start[owner],
+        )
+        piece_end = np.where(
+            local < interior[owner],
+            knots[np.minimum(first_knot + local, knots.size - 1)],
+            end[owner],
+        )
+        # Rates within one piece follow a single segment, chosen at its middle.
+        middle = 0.5 * (piece_start + piece_end)
+        segment = np.clip(np.searchsorted(knots, middle) - 1, 0, knots.size - 2)
+        inside = (middle >= knots[0]) & (middle <= knots[-1])
+        span = knots[segment + 1] - knots[segment]
+        rates = []
         for values in (
             self.washout.concentration_rates,
             self.washout.magnetization_rates,
         ):
-            rates = np.moveaxis(
-                (1.0 - weight) * values[:, :, index] + weight * values[:, :, index + 1],
-                -1,
-                0,
-            )
-            rates[~inside] = 0.0
-            result.append(rates)
-        return result[0], result[1]
+            low = values[:, :, segment]
+            high = values[:, :, segment + 1]
+            at = []
+            for times in (piece_start, piece_end):
+                weight = (times - knots[segment]) / span
+                rate = np.moveaxis((1.0 - weight) * low + weight * high, -1, 0)
+                rate[~inside] = 0.0
+                at.append(rate)
+            rates.append(at)
+        (c0, c1), (m0, m1) = rates
+        length = piece_end - piece_start
+        safe = np.where(length > 0, length, 1.0)[:, None, None]
+        remaining = (end[owner] - piece_end)[:, None, None]
+        compensation = (0.5 * (end - start))[owner][:, None, None]
+        loss = self.source_loss[None, :, None]
+        g0, g1 = _decay_convolution(loss, length[:, None, None])
+        concentration_gain = np.exp(loss * (compensation - remaining)) * (
+            c0 * g0 + (c1 - c0) / safe * g1
+        )
+        rate = self.r1[None, None, :] + loss
+        f0, f1 = _decay_convolution(rate, length[:, None, None])
+        excess0 = m0 - equilibrium * c0
+        excess1 = m1 - equilibrium * c1
+        excess_gain = np.exp(loss * compensation - rate * remaining) * (
+            excess0 * f0 + (excess1 - excess0) / safe * f1
+        )
+        concentration_gain = np.add.reduceat(concentration_gain, first_piece, axis=0)
+        magnetization_gain = (
+            np.add.reduceat(excess_gain, first_piece, axis=0)
+            + equilibrium * concentration_gain
+        )
+        return concentration_gain, magnetization_gain
 
     def source_gain_table(self, start_s, mid_s, end_s, concentration_tracked):
         """Return per-interval rows and gains of :meth:`add_sources`.
@@ -2594,32 +2644,15 @@ class _WashoutDriver:
             np.asarray(mid_s, dtype=np.float64),
             np.asarray(end_s, dtype=np.float64),
         )
-        rates = [self._rates_at(times) for times in bounds]
         equilibrium = self.equilibrium_polarization if concentration_tracked else 0.0
         gains = np.zeros((count, 2, compartments, pools, 2), dtype=np.float64)
         for half in range(2):
-            c0, m0 = rates[half]
-            c1, m1 = rates[half + 1]
-            duration = bounds[half + 1] - bounds[half]
-            positive = duration > 0
-            safe = np.where(positive, duration, 1.0)
-            durations, inverse = np.unique(safe, return_inverse=True)
-            convolutions = np.array(
-                [_decay_convolution(self.r1, value) for value in durations]
-            ).reshape(durations.size, 2, pools)
-            f0 = convolutions[inverse.reshape(-1), 0]
-            f1 = convolutions[inverse.reshape(-1), 1]
-            concentration_gain = 0.5 * safe[:, None, None] * (c0 + c1)
-            excess0 = m0 - equilibrium * c0
-            excess1 = m1 - equilibrium * c1
-            magnetization_gain = (
-                excess0 * f0[:, None, :]
-                + (excess1 - excess0) / safe[:, None, None] * f1[:, None, :]
-                + equilibrium * concentration_gain
+            concentration_gain, magnetization_gain = self.source_gains(
+                bounds[half], bounds[half + 1], equilibrium
             )
-            gains[positive, half, :, :, 0] = magnetization_gain[positive]
+            gains[:, half, :, :, 0] = magnetization_gain
             if concentration_tracked:
-                gains[positive, half, :, :, 1] = concentration_gain[positive]
+                gains[:, half, :, :, 1] = concentration_gain
         active = np.any(gains != 0.0, axis=(1, 2, 3, 4))
         rows = np.full(count, -1, dtype=np.int32)
         rows[active] = np.arange(np.count_nonzero(active), dtype=np.int32)

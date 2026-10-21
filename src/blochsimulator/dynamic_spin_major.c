@@ -46,11 +46,17 @@ static inline int field_f1ac(int np) { return 5 * np + 2; }
 static inline int field_ktc(int np, int j) { return 5 * np + 3 + 3 * j; }
 static inline int field_kj0c(int np, int j) { return 5 * np + 4 + 3 * j; }
 static inline int field_kj1c(int np, int j) { return 5 * np + 5 + 3 * j; }
-/* Washout factor exp(-loss * half / 2) of a quarter interval. */
+/* Washout factors of a half step, exp(-loss * half), and of the quarter
+ * interval after the half-step gains, exp(-loss * half / 2). The loss is
+ * the same scalar for every pool and commutes with relaxation, conversion
+ * and RF, so the half-step factor is folded into the transverse and
+ * homogeneous longitudinal coefficients and the quarter factor into the
+ * source weights (Strang splitting around each half step). */
 static inline int field_washout(int np) { return 8 * np; }
+static inline int field_washout_gain(int np) { return 8 * np + 1; }
 
 static inline size_t slot_doubles(int np) {
-    return (size_t)(8 * np + 1) * DSM_TILE;
+    return (size_t)(8 * np + 2) * DSM_TILE;
 }
 
 typedef struct {
@@ -205,31 +211,36 @@ static void fill_slot(const dsm_chunk *c, const dsm_group *g,
             k[j] = g->conversion ? t->k[j][s] : 0.0;
             ksum = ksum + k[j];
         }
-        for (int pool = 0; pool < np; pool++) {
-            double angle = -DSM_TWO_PI * (t->fs[pool][s] * h);
-            slot[field_fac_real(pool) * DSM_TILE + s] = g->e2[pool] * cos(angle);
-            slot[field_fac_imag(pool) * DSM_TILE + s] = g->e2[pool] * sin(angle);
-        }
-
-        slot[field_washout(np) * DSM_TILE + s] =
+        const double qh =
+            c->washout_loss != NULL ? exp(-t->washout_loss[s] * h) : 1.0;
+        const double qg =
             c->washout_loss != NULL ? exp(-t->washout_loss[s] * (h / 2.0))
                                     : 1.0;
+        slot[field_washout(np) * DSM_TILE + s] = qh;
+        slot[field_washout_gain(np) * DSM_TILE + s] = qg;
+        for (int pool = 0; pool < np; pool++) {
+            double angle = -DSM_TWO_PI * (t->fs[pool][s] * h);
+            double e2 = g->e2[pool] * qh;
+            slot[field_fac_real(pool) * DSM_TILE + s] = e2 * cos(angle);
+            slot[field_fac_imag(pool) * DSM_TILE + s] = e2 * sin(angle);
+        }
 
         double a = c->r1[0] + ksum;
         double ea = exp(-a * h);
-        slot[field_ea(np) * DSM_TILE + s] = ea;
+        slot[field_ea(np) * DSM_TILE + s] = ea * qh;
         for (int j = 0; j < nproducts; j++) {
             double difference = a - c->r1[j + 1];
             slot[field_kt(np, j) * DSM_TILE + s] =
-                fabs(difference) > 1e-12
-                    ? k[j] * ((g->eb[j] - ea) / difference)
-                    : (k[j] * h) * g->eb[j];
+                (fabs(difference) > 1e-12
+                     ? k[j] * ((g->eb[j] - ea) / difference)
+                     : (k[j] * h) * g->eb[j]) *
+                qh;
         }
         if (c->has_sources) {
             double f0a, f1a;
             decay_convolution(a, h, &f0a, &f1a);
-            slot[field_f0a(np) * DSM_TILE + s] = f0a;
-            slot[field_f1a(np) * DSM_TILE + s] = f1a;
+            slot[field_f0a(np) * DSM_TILE + s] = f0a * qg;
+            slot[field_f1a(np) * DSM_TILE + s] = f1a * qg;
             for (int j = 0; j < nproducts; j++) {
                 double difference = a - c->r1[j + 1];
                 double j0, j1;
@@ -239,17 +250,18 @@ static void fill_slot(const dsm_chunk *c, const dsm_group *g,
                 } else {
                     equal_rate_convolution(0.5 * (a + c->r1[j + 1]), h, &j0, &j1);
                 }
-                slot[field_kj0(np, j) * DSM_TILE + s] = k[j] * j0;
-                slot[field_kj1(np, j) * DSM_TILE + s] = k[j] * j1;
+                slot[field_kj0(np, j) * DSM_TILE + s] = k[j] * j0 * qg;
+                slot[field_kj1(np, j) * DSM_TILE + s] = k[j] * j1 * qg;
             }
         }
         if (c->track_concentration) {
             double eac = exp(-ksum * h);
-            slot[field_eac(np) * DSM_TILE + s] = eac;
+            slot[field_eac(np) * DSM_TILE + s] = eac * qh;
             for (int j = 0; j < nproducts; j++) {
                 slot[field_ktc(np, j) * DSM_TILE + s] =
-                    fabs(ksum) > 1e-12 ? k[j] * ((1.0 - eac) / ksum)
-                                       : (k[j] * h) * 1.0;
+                    (fabs(ksum) > 1e-12 ? k[j] * ((1.0 - eac) / ksum)
+                                        : (k[j] * h) * 1.0) *
+                    qh;
             }
             if (c->concentration_sources) {
                 double f0ac, f1ac, j0c, j1c;
@@ -260,11 +272,11 @@ static void fill_slot(const dsm_chunk *c, const dsm_group *g,
                 } else {
                     equal_rate_convolution(0.5 * ksum, h, &j0c, &j1c);
                 }
-                slot[field_f0ac(np) * DSM_TILE + s] = f0ac;
-                slot[field_f1ac(np) * DSM_TILE + s] = f1ac;
+                slot[field_f0ac(np) * DSM_TILE + s] = f0ac * qg;
+                slot[field_f1ac(np) * DSM_TILE + s] = f1ac * qg;
                 for (int j = 0; j < nproducts; j++) {
-                    slot[field_kj0c(np, j) * DSM_TILE + s] = k[j] * j0c;
-                    slot[field_kj1c(np, j) * DSM_TILE + s] = k[j] * j1c;
+                    slot[field_kj0c(np, j) * DSM_TILE + s] = k[j] * j0c * qg;
+                    slot[field_kj1c(np, j) * DSM_TILE + s] = k[j] * j1c * qg;
                 }
             }
         }
@@ -366,6 +378,8 @@ static inline void longitudinal_half(const dsm_chunk *c, const dsm_group *g,
     const int with_source = source != NULL || spatial != NULL;
     const int with_concentration_source =
         with_source && track_concentration && c->concentration_sources;
+    const int loss = c->washout_loss != NULL;
+    const double *DSM_RESTRICT qh = slot + field_washout(np) * DSM_TILE;
     double precursor[DSM_TILE];
     double start_values[DSM_TILE];
     double slope_values[DSM_TILE];
@@ -391,10 +405,18 @@ static inline void longitudinal_half(const dsm_chunk *c, const dsm_group *g,
         const double *DSM_RESTRICT kt = slot + field_kt(np, j) * DSM_TILE;
         const double eb = g->eb[j];
         double *DSM_RESTRICT z = t->z[j + 1];
-        for (int s = 0; s < DSM_TILE; s++) {
-            double transfer = kt[s] * precursor[s];
-            double l = z[s] * eb;
-            z[s] = l + transfer;
+        if (loss) {
+            for (int s = 0; s < DSM_TILE; s++) {
+                double transfer = kt[s] * precursor[s];
+                double l = z[s] * (eb * qh[s]);
+                z[s] = l + transfer;
+            }
+        } else {
+            for (int s = 0; s < DSM_TILE; s++) {
+                double transfer = kt[s] * precursor[s];
+                double l = z[s] * eb;
+                z[s] = l + transfer;
+            }
         }
     }
     if (with_source) {
@@ -438,9 +460,16 @@ static inline void longitudinal_half(const dsm_chunk *c, const dsm_group *g,
         for (int j = 0; j < nproducts; j++) {
             const double *DSM_RESTRICT ktc = slot + field_ktc(np, j) * DSM_TILE;
             double *DSM_RESTRICT cz = t->c[j + 1];
-            for (int s = 0; s < DSM_TILE; s++) {
-                double concentration_transfer = ktc[s] * precursor[s];
-                cz[s] = cz[s] + concentration_transfer;
+            if (loss) {
+                for (int s = 0; s < DSM_TILE; s++) {
+                    double concentration_transfer = ktc[s] * precursor[s];
+                    cz[s] = cz[s] * qh[s] + concentration_transfer;
+                }
+            } else {
+                for (int s = 0; s < DSM_TILE; s++) {
+                    double concentration_transfer = ktc[s] * precursor[s];
+                    cz[s] = cz[s] + concentration_transfer;
+                }
             }
         }
         if (with_concentration_source) {
@@ -811,39 +840,13 @@ static void store_tile(const dsm_chunk *c, int64_t first, int valid,
     }
 }
 
-/* Scale x, y, z and c of every pool by the per-spin washout factor of the
- * slot, squared when ``twice``. */
-static inline void washout_decay(const dsm_chunk *c, dsm_tile *DSM_RESTRICT t,
-                                 const double *DSM_RESTRICT slot, int twice) {
-    const int np = c->npools;
-    const double *DSM_RESTRICT q = slot + field_washout(np) * DSM_TILE;
-    double factor[DSM_TILE];
-    for (int s = 0; s < DSM_TILE; s++) {
-        factor[s] = twice ? q[s] * q[s] : q[s];
-    }
-    for (int pool = 0; pool < np; pool++) {
-        double *DSM_RESTRICT xs = t->x[pool];
-        double *DSM_RESTRICT ys = t->y[pool];
-        double *DSM_RESTRICT zs = t->z[pool];
-        for (int s = 0; s < DSM_TILE; s++) {
-            xs[s] = xs[s] * factor[s];
-            ys[s] = ys[s] * factor[s];
-            zs[s] = zs[s] * factor[s];
-        }
-        if (c->track_concentration) {
-            double *DSM_RESTRICT cs = t->c[pool];
-            for (int s = 0; s < DSM_TILE; s++) {
-                cs[s] = cs[s] * factor[s];
-            }
-        }
-    }
-}
-
 /* Add one half step of compartment gains (compartment, pool, 2) to the
- * spins of source compartments. */
+ * spins of source compartments, weighted by the trailing quarter-interval
+ * washout factor. */
 static inline void washout_gain(const dsm_chunk *c, dsm_tile *t,
-                                const double *gains) {
+                                const double *slot, const double *gains) {
     const int np = c->npools;
+    const double *q = slot + field_washout_gain(np) * DSM_TILE;
     for (int s = 0; s < DSM_TILE; s++) {
         const int32_t compartment = t->washout_compartment[s];
         if (compartment < 0) {
@@ -851,9 +854,9 @@ static inline void washout_gain(const dsm_chunk *c, dsm_tile *t,
         }
         const double *row = gains + 2 * (int64_t)compartment * np;
         for (int pool = 0; pool < np; pool++) {
-            t->z[pool][s] = t->z[pool][s] + row[2 * pool];
+            t->z[pool][s] = t->z[pool][s] + row[2 * pool] * q[s];
             if (c->track_concentration) {
-                t->c[pool][s] = t->c[pool][s] + row[2 * pool + 1];
+                t->c[pool][s] = t->c[pool][s] + row[2 * pool + 1] * q[s];
             }
         }
     }
@@ -885,11 +888,7 @@ static inline void step_interval(const dsm_chunk *c, const dsm_group *g,
     const double pd2 = c->interval_phase_s[2 * i + 1];
     const int32_t rf_index = c->interval_rf[i];
     const int gradient = c->interval_gradient[i] >= 0;
-    const int loss = c->washout_loss != NULL;
 
-    if (loss) {
-        washout_decay(c, t, slot, 0);
-    }
     double da = pd1 - h;
     if (gradient || da != 0.0) {
         transverse_corrected(t, np, slot, gradient, da, 0.0, da != 0.0);
@@ -898,10 +897,7 @@ static inline void step_interval(const dsm_chunk *c, const dsm_group *g,
     }
     longitudinal_half(c, g, slot, t, source, spatial);
     if (washout != NULL) {
-        washout_gain(c, t, washout);
-    }
-    if (loss) {
-        washout_decay(c, t, slot, 1);
+        washout_gain(c, t, slot, washout);
     }
 
     if (rf_index >= 0) {
@@ -928,10 +924,8 @@ static inline void step_interval(const dsm_chunk *c, const dsm_group *g,
     longitudinal_half(c, g, slot, t, source != NULL ? source + 4 : NULL,
                       spatial != NULL ? spatial + 1 : NULL);
     if (washout != NULL) {
-        washout_gain(c, t, washout + 2 * (int64_t)c->washout_compartments * np);
-    }
-    if (loss) {
-        washout_decay(c, t, slot, 0);
+        washout_gain(c, t, slot,
+                     washout + 2 * (int64_t)c->washout_compartments * np);
     }
 }
 
