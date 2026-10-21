@@ -12,9 +12,11 @@ from blochsimulator.mouse_phantom import (
     MousePerfusionPhantom,
 )
 from blochsimulator.phantom import Phantom
+from blochsimulator.sequence.encoding import slice_package_positions
 from blochsimulator.spectral_phantom import ChemicalSpecies, SpectralPhantom
 from blochsimulator.ui.sequence_geometry_viewer import (
     OrientedBox,
+    SequenceGeometry,
     SequenceGeometryViewer,
     automatic_contrast,
     configured_object_box,
@@ -147,7 +149,7 @@ def test_sequence_workspace_uses_default_sphere_and_shows_geometry_tab():
     app.processEvents()
 
 
-def test_geometry_tab_offers_update_after_sequence_parameters_change():
+def test_geometry_tab_previews_sequence_parameter_changes():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
     widget.sequence_live_preview.setChecked(False)
@@ -157,23 +159,136 @@ def test_geometry_tab_offers_update_after_sequence_parameters_change():
     app.processEvents()
     notice = widget.geometry_viewer.stale_notice
     assert notice.isHidden()
+    assert "Generated (dotted)" not in widget.geometry_viewer.summary.text()
 
     widget.flash_slice_offset_mm.setValue(4.0)
     app.processEvents()
     assert widget._sequence_generation_pending
     assert not notice.isHidden()
-    assert "changed" in widget.geometry_viewer.stale_notice_label.text()
-    # The drawn slice stays where the shown sequence put it.
-    assert " at 0 mm" in widget.geometry_viewer.summary.text()
+    label = widget.geometry_viewer.stale_notice_label.text()
+    assert "changed" in label and "Generate the sequence now?" in label
+    # The slice follows the form; the generated one stays as a reference.
+    summary = widget.geometry_viewer.summary.text()
+    assert "1 × 3 mm at 4 mm" in summary
+    generated_row = summary[summary.index("Generated (dotted)") :]
+    assert " at 0 mm" in generated_row
 
     widget.geometry_viewer.update_button.click()
     app.processEvents()
     assert not widget._sequence_generation_pending
     assert notice.isHidden()
-    assert " at 4 mm" in widget.geometry_viewer.summary.text()
+    summary = widget.geometry_viewer.summary.text()
+    assert " at 4 mm" in summary
+    assert "Generated (dotted)" not in summary
 
     widget.close()
     widget.deleteLater()
+    app.processEvents()
+
+
+def test_slice_package_is_centred_on_its_offset():
+    assert slice_package_positions(1, 0.003) == pytest.approx([0.0])
+    assert slice_package_positions(3, 0.004, 0.001, 0.002) == pytest.approx(
+        [-0.003, 0.002, 0.007]
+    )
+    assert slice_package_positions(2, 0.002, 0.0, -0.01) == pytest.approx(
+        [-0.011, -0.009]
+    )
+
+
+def _shift_slice_package(widget, prefix):
+    getattr(widget, f"{prefix}_slice_count").setValue(3)
+    getattr(widget, f"{prefix}_slice_gap_mm").setValue(1.0)
+    getattr(widget, f"{prefix}_slice_offset_mm").setValue(5.0)
+
+
+def test_planned_geometry_matches_the_generated_sequence():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.sequence_live_preview.setChecked(False)
+    cases = {
+        "EPI": (widget.EPI_SOURCE, "_epi_pulseq_parameters"),
+        "Spiral": (widget.EPI_SOURCE, "_spiral_pulseq_parameters"),
+        "CSI": (widget.CSI_SOURCE, "_csi_pulseq_parameters"),
+        "bSSFP": (widget.BSSFP_SOURCE, "_bssfp_pulseq_parameters"),
+        "Radial": (widget.RADIAL_ME_BSSFP_SOURCE, "_radial_me_bssfp_pulseq_parameters"),
+        "ME-bSSFP": (widget.ME_BSSFP_SOURCE, "_me_bssfp_pulseq_parameters"),
+        "FLASH": (widget.FLASH_SOURCE, "_flash_pulseq_parameters"),
+        "EPSI": (widget.EPSI_MGE_SOURCE, "_epsi_mge_pulseq_parameters"),
+        "Slice": (widget.SLICE_SELECTION_SOURCE, "_slice_selection_pulseq_parameters"),
+    }
+    _shift_slice_package(widget, "epi")
+    _shift_slice_package(widget, "epsi")
+    _shift_slice_package(widget, "flash")
+    widget.csi_slice_offset_mm.setValue(-6.0)
+    widget.bssfp_phase_matrix.setValue(6)
+    widget.slice_selection_offset_mm.setValue(7.0)
+    widget.slice_selection_axis.setCurrentText("-Y")
+    for label, (source, builder) in cases.items():
+        widget.epi_readout_trajectory.setCurrentText(
+            "Spiral" if label == "Spiral" else "Cartesian EPI"
+        )
+        widget.sequence_source.setCurrentIndex(source)
+        widget._sequence_generation_pending = True
+        planned = widget._planned_sequence_geometry()
+        assert planned is not None, label
+        # The Pulseq builders receive the geometry entries unchanged.
+        parameters = getattr(widget, builder)()
+        for key, value in widget._sequence_geometry_parameters(source).items():
+            assert parameters[key] == value, (label, key)
+
+        assert widget._reload_selected_generated_sequence(), label
+        assert widget._planned_sequence_geometry() is None, label
+        generated = widget._sequence_geometry()
+        assert planned.covers_same_region(generated), label
+        assert planned.matrix == generated.matrix, label
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_overlay_update_keeps_contrast_and_marks_generated_outline():
+    app = QApplication.instance() or QApplication(sys.argv)
+    viewer = SequenceGeometryViewer()
+    generated = SequenceGeometry(
+        frame=np.eye(3),
+        fov_m=(0.03, 0.03),
+        matrix=(16, 16),
+        slice_positions_m=(0.0,),
+        slice_thickness_m=0.003,
+    )
+    viewer.update_geometry(_two_sphere_phantom(), generated, object_label="Spheres")
+    combo = viewer.contrast_combo
+    combo.setCurrentIndex(combo.findData("concentration:Lactate"))
+    app.processEvents()
+
+    same = SequenceGeometry(
+        frame=np.eye(3),
+        fov_m=(0.03, 0.03),
+        matrix=(32, 32),
+        slice_positions_m=(0.0,),
+        slice_thickness_m=0.003,
+    )
+    viewer.set_sequence_geometry(same, generated_sequence=generated)
+    assert "Generated (dotted)" not in viewer.summary.text()
+
+    moved = SequenceGeometry(
+        frame=np.eye(3),
+        fov_m=(0.03, 0.03),
+        matrix=(16, 16),
+        slice_positions_m=(0.004,),
+        slice_thickness_m=0.003,
+    )
+    viewer.set_sequence_geometry(moved, generated_sequence=generated)
+    summary = viewer.summary.text()
+    assert "1 × 3 mm at 4 mm" in summary
+    assert "Generated (dotted)" in summary
+    assert viewer.contrast.key == "concentration:Lactate"
+    assert "Lactate concentration" in summary
+
+    viewer.set_sequence_geometry(None, generated_sequence=generated)
+    assert "Generated (dotted)" not in viewer.summary.text()
+    viewer.deleteLater()
     app.processEvents()
 
 

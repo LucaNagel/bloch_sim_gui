@@ -44,6 +44,18 @@ def numeric_definition_array(value, name: str) -> np.ndarray:
     return result.reshape(-1)
 
 
+def slice_package_positions(
+    n_slices: int,
+    slice_thickness_m: float,
+    slice_gap_m: float = 0.0,
+    slice_offset_m: float = 0.0,
+) -> np.ndarray:
+    """Return slice centres of a contiguous package centred on the offset."""
+    spacing = float(slice_thickness_m) + float(slice_gap_m)
+    indices = np.arange(int(n_slices), dtype=float) - (int(n_slices) - 1) / 2.0
+    return float(slice_offset_m) + indices * spacing
+
+
 def _axis_vector(code: str, name: str) -> np.ndarray:
     normalized = str(code).strip().lower()
     sign = 1.0

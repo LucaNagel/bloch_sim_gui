@@ -111,7 +111,12 @@ from ..sequence import (
     variable_flip_angle_schedule,
 )
 from ..sequence.bruker_export import suggest_bruker_method
-from ..sequence.encoding import _axis_vector, numeric_definition_array
+from ..sequence.encoding import (
+    _axis_vector,
+    numeric_definition_array,
+    resolve_encoding_frame,
+    slice_package_positions,
+)
 from ..sequence.export_bundle import existing_export_targets, perform_sequence_export
 from ..sequence.internal_fid import make_internal_fid
 from ..sequence.parameter_loop import (
@@ -164,6 +169,7 @@ from .project_export_dialog import ProjectExportNamingWidget
 from .reconstruction_explorer import SequenceReconstructionExplorer
 from .sequence_geometry_viewer import (
     STALE_SEQUENCE_MESSAGE,
+    SequenceGeometry,
     SequenceGeometryViewer,
     sequence_geometry_from_definitions,
 )
@@ -5081,6 +5087,7 @@ class SequenceSimulationWidget(QWidget):
             "Check object, simulated grid, sequence FOV and slices before running.",
         )
         self._geometry_viewer_stale = True
+        self._geometry_overlays_stale = False
         views.currentChanged.connect(self._views_current_changed)
 
         signal_page = QWidget()
@@ -6997,7 +7004,7 @@ class SequenceSimulationWidget(QWidget):
         self._sequence_generation_pending = True
         self._sequence_revision += 1
         self._update_probe_stale_warning()
-        self._update_geometry_stale_notice()
+        self._schedule_geometry_refresh(sequence_only=True)
         self.generate_sequence_button.setEnabled(True)
         if self.program is None:
             preview_text = "No generated sequence is loaded yet."
@@ -9366,13 +9373,124 @@ class SequenceSimulationWidget(QWidget):
         )
         return answer == QMessageBox.Yes
 
+    def _slice_package_parameters(self, prefix):
+        return {
+            "slice_thickness_m": (
+                getattr(self, f"{prefix}_slice_thickness_mm").value() / 1000.0
+            ),
+            "slice_gap_m": getattr(self, f"{prefix}_slice_gap_mm").value() / 1000.0,
+            "n_slices": getattr(self, f"{prefix}_slice_count").value(),
+            "slice_offset_m": (
+                getattr(self, f"{prefix}_slice_offset_mm").value() / 1000.0
+            ),
+        }
+
+    def _sequence_geometry_parameters(self, source_index):
+        """Return the form values that place a generated sequence in space.
+
+        The Pulseq parameter builders take these entries unchanged, so the
+        geometry preview cannot drift from the generated sequence. Reading
+        them designs no RF pulse and changes no control. Mismatched read and
+        phase axes raise ValueError.
+        """
+        source_index = int(source_index)
+        if source_index == self.SLICE_SELECTION_SOURCE:
+            return {
+                "slice_thickness_m": (
+                    self.slice_selection_thickness_mm.value() / 1000.0
+                ),
+                "slice_offset_m": self.slice_selection_offset_mm.value() / 1000.0,
+                "slice_axis": self.slice_selection_axis.currentText().lower(),
+            }
+        if source_index == self.RADIAL_ME_BSSFP_SOURCE:
+            return {
+                "fov_m": self.radial_me_fov_mm.value() / 1000.0,
+                "base_resolution": self.radial_me_base_resolution.value(),
+                "readout_oversampling": self.radial_me_readout_oversampling.value(),
+                "encoding_axes": self._three_dimensional_encoding_frame(
+                    source_index
+                ).axis_codes,
+            }
+        if source_index in self.CARTESIAN_3D_SOURCES:
+            fov_m, matrix = {
+                self.BSSFP_SOURCE: (
+                    self._bssfp_fov_m(),
+                    (
+                        self.bssfp_read_matrix,
+                        self.bssfp_phase_matrix,
+                        self.bssfp_partition_matrix,
+                    ),
+                ),
+                self.SS_BSSFP_SOURCE: (
+                    self._ss_bssfp_fov_m(),
+                    (
+                        self.ss_bssfp_read_matrix,
+                        self.ss_bssfp_phase_matrix,
+                        self.ss_bssfp_partition_matrix,
+                    ),
+                ),
+                self.ME_BSSFP_SOURCE: (
+                    self._me_bssfp_fov_m(),
+                    (
+                        self.me_bssfp_read_matrix,
+                        self.me_bssfp_phase_matrix,
+                        self.me_bssfp_partition_matrix,
+                    ),
+                ),
+            }[source_index]
+            return {
+                "fov_m": fov_m,
+                "matrix": tuple(spin.value() for spin in matrix),
+                "encoding_axes": self._three_dimensional_encoding_frame(
+                    source_index
+                ).axis_codes,
+            }
+        two_dimensional = {
+            self.EPI_SOURCE: (
+                self._epi_fov_m(),
+                (self.read_matrix, self.phase_matrix),
+                self._slice_package_parameters("epi"),
+            ),
+            self.EPSI_MGE_SOURCE: (
+                (
+                    self.epsi_read_fov_mm.value() / 1000.0,
+                    self.epsi_phase_fov_mm.value() / 1000.0,
+                ),
+                (self.epsi_read_matrix, self.epsi_phase_matrix),
+                self._slice_package_parameters("epsi"),
+            ),
+            self.FLASH_SOURCE: (
+                self._flash_fov_m(),
+                (self.flash_read_matrix, self.flash_phase_matrix),
+                self._slice_package_parameters("flash"),
+            ),
+            # CSI excites a single slice.
+            self.CSI_SOURCE: (
+                self._csi_fov_m(),
+                (self.csi_read_matrix, self.csi_phase_matrix),
+                {
+                    "slice_thickness_m": self.csi_slice_thickness_mm.value() / 1000.0,
+                    "slice_offset_m": self.csi_slice_offset_mm.value() / 1000.0,
+                },
+            ),
+        }.get(source_index)
+        if two_dimensional is None:
+            return {}
+        fov_m, matrix, slices = two_dimensional
+        frame = self._two_dimensional_encoding_frame(source_index)
+        return {
+            "fov_m": fov_m,
+            "matrix": tuple(spin.value() for spin in matrix),
+            **slices,
+            "encoding_axes": frame.axis_codes,
+        }
+
     def _epi_pulseq_parameters(self):
         ernst = self._update_ernst_controls(
             "epi", self.epi_repetition_time_ms.value(), has_vfa=True
         )
         parameters = {
-            "fov_m": self._epi_fov_m(),
-            "matrix": (self.read_matrix.value(), self.phase_matrix.value()),
+            **self._sequence_geometry_parameters(self.EPI_SOURCE),
             "sampling_bandwidth_hz": self.sampling_bandwidth_khz.value() * 1000.0,
             "readout_strategy": (
                 "flyback"
@@ -9386,18 +9504,11 @@ class SequenceSimulationWidget(QWidget):
             ),
             "variable_flip_angle": self.epi_variable_flip_angle.isChecked(),
             "vfa_final_flip_angle_deg": self.epi_vfa_final_flip_angle_deg.value(),
-            "slice_thickness_m": self.epi_slice_thickness_mm.value() / 1000.0,
-            "slice_gap_m": self.epi_slice_gap_mm.value() / 1000.0,
-            "n_slices": self.epi_slice_count.value(),
             "repetitions": self.epi_repetitions.value(),
             "echo_time_s": self.epi_echo_time_ms.value() / 1000.0,
             "repetition_time_s": self.epi_repetition_time_ms.value() / 1000.0,
             "rf_spoiling": self._rf_spoiling_is_effective("epi"),
             "rf_spoiling_increment_deg": (self.epi_rf_spoiling_increment_deg.value()),
-            "slice_offset_m": self.epi_slice_offset_mm.value() / 1000.0,
-            "encoding_axes": self._two_dimensional_encoding_frame(
-                self.EPI_SOURCE
-            ).axis_codes,
             "spoil_after_slice": self.epi_spoil_after_slice.isChecked(),
             "spoiler_cycles_per_slice": self.epi_spoiler_cycles_per_slice.value(),
             "spoiler_cycles_per_voxel": self.epi_spoiler_cycles_per_voxel.value(),
@@ -9416,14 +9527,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _epsi_mge_pulseq_parameters(self):
         parameters = {
-            "fov_m": (
-                self.epsi_read_fov_mm.value() / 1000.0,
-                self.epsi_phase_fov_mm.value() / 1000.0,
-            ),
-            "matrix": (
-                self.epsi_read_matrix.value(),
-                self.epsi_phase_matrix.value(),
-            ),
+            **self._sequence_geometry_parameters(self.EPSI_MGE_SOURCE),
             "echoes": self.epsi_echoes.value(),
             "echo_spacing_s": self.epsi_echo_spacing_ms.value() / 1000.0,
             "readout_strategy": (
@@ -9435,10 +9539,6 @@ class SequenceSimulationWidget(QWidget):
                 self.epsi_sampling_bandwidth_khz.value() * 1000.0
             ),
             "flip_angle_deg": self.epsi_flip_angle_deg.value(),
-            "slice_thickness_m": self.epsi_slice_thickness_mm.value() / 1000.0,
-            "slice_gap_m": self.epsi_slice_gap_mm.value() / 1000.0,
-            "n_slices": self.epsi_slice_count.value(),
-            "slice_offset_m": self.epsi_slice_offset_mm.value() / 1000.0,
             "echo_time_s": self.epsi_echo_time_ms.value() / 1000.0,
             "repetition_time_s": self.epsi_repetition_time_ms.value() / 1000.0,
             "repetitions": self.epsi_repetitions.value(),
@@ -9451,9 +9551,6 @@ class SequenceSimulationWidget(QWidget):
             "spoiler_cycles_per_slice": (self.epsi_spoiler_cycles_per_slice.value()),
             "spoiler_cycles_per_voxel": (self.epsi_spoiler_cycles_per_voxel.value()),
             "spoiler_duration_s": self.epsi_spoiler_duration_ms.value() / 1000.0,
-            "encoding_axes": self._two_dimensional_encoding_frame(
-                self.EPSI_MGE_SOURCE
-            ).axis_codes,
             "nucleus": self.nucleus.currentText(),
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
@@ -9465,12 +9562,7 @@ class SequenceSimulationWidget(QWidget):
             "csi", self.csi_repetition_time_ms.value(), has_vfa=True
         )
         parameters = {
-            "fov_m": self._csi_fov_m(),
-            "matrix": (
-                self.csi_read_matrix.value(),
-                self.csi_phase_matrix.value(),
-            ),
-            "slice_thickness_m": self.csi_slice_thickness_mm.value() / 1000.0,
+            **self._sequence_geometry_parameters(self.CSI_SOURCE),
             "spectral_bandwidth_hz": self.csi_bandwidth_hz.value(),
             "spectral_points": self.csi_spectral_points.value(),
             "phase_encoding_order": self.csi_encoding_order.currentText(),
@@ -9489,10 +9581,6 @@ class SequenceSimulationWidget(QWidget):
             "acquisition_interval_s": self._optional_acquisition_interval_s(
                 self.csi_acquisition_interval_ms
             ),
-            "slice_offset_m": self.csi_slice_offset_mm.value() / 1000.0,
-            "encoding_axes": self._two_dimensional_encoding_frame(
-                self.CSI_SOURCE
-            ).axis_codes,
             "spoil_after_readout": self.csi_spoil_after_readout.isChecked(),
             "spoiler_cycles_per_slice": self.csi_spoiler_cycles_per_slice.value(),
             "spoiler_cycles_per_voxel": self.csi_spoiler_cycles_per_voxel.value(),
@@ -9508,11 +9596,7 @@ class SequenceSimulationWidget(QWidget):
             "flash", self.flash_repetition_time_ms.value()
         )
         parameters = {
-            "fov_m": self._flash_fov_m(),
-            "matrix": (
-                self.flash_read_matrix.value(),
-                self.flash_phase_matrix.value(),
-            ),
+            **self._sequence_geometry_parameters(self.FLASH_SOURCE),
             "sampling_bandwidth_hz": (
                 self.flash_sampling_bandwidth_khz.value() * 1000.0
             ),
@@ -9521,10 +9605,6 @@ class SequenceSimulationWidget(QWidget):
                 if ernst is not None
                 else self.flash_flip_angle_deg.value()
             ),
-            "slice_thickness_m": self.flash_slice_thickness_mm.value() / 1000.0,
-            "slice_gap_m": self.flash_slice_gap_mm.value() / 1000.0,
-            "n_slices": self.flash_slice_count.value(),
-            "slice_offset_m": self.flash_slice_offset_mm.value() / 1000.0,
             "echo_time_s": self.flash_echo_time_ms.value() / 1000.0,
             "repetition_time_s": (self.flash_repetition_time_ms.value() / 1000.0),
             "repetitions": self.flash_repetitions.value(),
@@ -9536,9 +9616,6 @@ class SequenceSimulationWidget(QWidget):
             "spoiler_cycles_per_slice": (self.flash_spoiler_cycles_per_slice.value()),
             "spoiler_cycles_per_voxel": (self.flash_spoiler_cycles_per_voxel.value()),
             "spoiler_duration_s": self.flash_spoiler_duration_ms.value() / 1000.0,
-            "encoding_axes": self._two_dimensional_encoding_frame(
-                self.FLASH_SOURCE
-            ).axis_codes,
             "nucleus": self.nucleus.currentText(),
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
@@ -9547,12 +9624,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _bssfp_pulseq_parameters(self):
         parameters = {
-            "fov_m": self._bssfp_fov_m(),
-            "matrix": (
-                self.bssfp_read_matrix.value(),
-                self.bssfp_phase_matrix.value(),
-                self.bssfp_partition_matrix.value(),
-            ),
+            **self._sequence_geometry_parameters(self.BSSFP_SOURCE),
             "sampling_bandwidth_hz": self.bssfp_bandwidth_khz.value() * 1000.0,
             "flip_angle_deg": self.bssfp_flip_angle_deg.value(),
             "repetition_time_s": self.bssfp_repetition_time_ms.value() / 1000.0,
@@ -9572,9 +9644,6 @@ class SequenceSimulationWidget(QWidget):
                 self.bssfp_acquisition_interval_ms
             ),
             "use_alpha_half": self.bssfp_alpha_half.isChecked(),
-            "encoding_axes": self._three_dimensional_encoding_frame(
-                self.BSSFP_SOURCE
-            ).axis_codes,
             "nucleus": self.nucleus.currentText(),
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
@@ -9602,12 +9671,7 @@ class SequenceSimulationWidget(QWidget):
         if not target_names:
             raise ValueError("Target names must not be empty")
         parameters = {
-            "fov_m": self._ss_bssfp_fov_m(),
-            "matrix": (
-                self.ss_bssfp_read_matrix.value(),
-                self.ss_bssfp_phase_matrix.value(),
-                self.ss_bssfp_partition_matrix.value(),
-            ),
+            **self._sequence_geometry_parameters(self.SS_BSSFP_SOURCE),
             "target_frequency_offsets_hz": self._comma_separated_floats(
                 self.ss_bssfp_target_offsets_hz.text(), "RF target offsets"
             ),
@@ -9659,9 +9723,6 @@ class SequenceSimulationWidget(QWidget):
             ),
             "field_strength_t": self.field_strength_t.value(),
             "nucleus": self.nucleus.currentText(),
-            "encoding_axes": self._three_dimensional_encoding_frame(
-                self.SS_BSSFP_SOURCE
-            ).axis_codes,
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
         shared_rf = self._shared_rf_parameters("ss_bssfp")
@@ -9681,9 +9742,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _radial_me_bssfp_pulseq_parameters(self):
         parameters = {
-            "fov_m": self.radial_me_fov_mm.value() / 1000.0,
-            "base_resolution": self.radial_me_base_resolution.value(),
-            "readout_oversampling": self.radial_me_readout_oversampling.value(),
+            **self._sequence_geometry_parameters(self.RADIAL_ME_BSSFP_SOURCE),
             "spokes_per_measurement": self.radial_me_spokes.value(),
             "measurements": self.radial_me_measurements.value(),
             "acquisition_interval_s": self._optional_acquisition_interval_s(
@@ -9712,9 +9771,6 @@ class SequenceSimulationWidget(QWidget):
             "inter_measurement_rotation_deg": self.radial_me_rotation_deg.value(),
             "field_strength_t": self.field_strength_t.value(),
             "nucleus": self.nucleus.currentText(),
-            "encoding_axes": self._three_dimensional_encoding_frame(
-                self.RADIAL_ME_BSSFP_SOURCE
-            ).axis_codes,
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
         parameters.update(self._shared_rf_parameters("radial_me"))
@@ -9722,12 +9778,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _me_bssfp_pulseq_parameters(self):
         parameters = {
-            "fov_m": self._me_bssfp_fov_m(),
-            "matrix": (
-                self.me_bssfp_read_matrix.value(),
-                self.me_bssfp_phase_matrix.value(),
-                self.me_bssfp_partition_matrix.value(),
-            ),
+            **self._sequence_geometry_parameters(self.ME_BSSFP_SOURCE),
             "echoes": self.me_bssfp_echoes.value(),
             "echo_spacing_s": self.me_bssfp_echo_spacing_ms.value() / 1000.0,
             "readout_strategy": (
@@ -9762,9 +9813,6 @@ class SequenceSimulationWidget(QWidget):
             ),
             "field_strength_t": self.field_strength_t.value(),
             "nucleus": self.nucleus.currentText(),
-            "encoding_axes": self._three_dimensional_encoding_frame(
-                self.ME_BSSFP_SOURCE
-            ).axis_codes,
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
         parameters.update(self._shared_rf_parameters("me_bssfp"))
@@ -9838,9 +9886,7 @@ class SequenceSimulationWidget(QWidget):
         parameters.update(
             flip_angle_deg=self.slice_selection_flip_angle_deg.value(),
             rf_phase_deg=self.slice_selection_rf_phase_deg.value(),
-            slice_thickness_m=self.slice_selection_thickness_mm.value() / 1000.0,
-            slice_offset_m=self.slice_selection_offset_mm.value() / 1000.0,
-            slice_axis=self.slice_selection_axis.currentText().lower(),
+            **self._sequence_geometry_parameters(self.SLICE_SELECTION_SOURCE),
             slice_gradient_enabled=self.slice_selection_gradient_enabled.isChecked(),
             rephase=(
                 self.slice_selection_gradient_enabled.isChecked()
@@ -11371,7 +11417,7 @@ class SequenceSimulationWidget(QWidget):
         if index == getattr(self, "geometry_tab_index", -1):
             self._schedule_geometry_refresh()
 
-    def _update_geometry_stale_notice(self):
+    def _update_geometry_stale_notice(self, previewing=None):
         """Ask for an update while the drawn sequence lags its parameters."""
         if not hasattr(self, "geometry_viewer"):
             return
@@ -11379,6 +11425,21 @@ class SequenceSimulationWidget(QWidget):
             self._sequence_generation_pending
             and self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES
         )
+        if previewing is None:
+            previewing = self._planned_sequence_geometry() is not None
+        if previewing:
+            if self.program is None:
+                message = (
+                    "No sequence has been generated yet; the views show the FOV "
+                    "and slices of the current parameters."
+                )
+            else:
+                message = (
+                    "Sequence parameters changed. The views show the new FOV "
+                    "and slices, but timing and k-space are not regenerated yet."
+                )
+            self.geometry_viewer.set_stale(stale, message, "Generate the sequence now?")
+            return
         if self.program is None:
             message = "No sequence has been generated for these parameters yet."
         else:
@@ -11387,21 +11448,93 @@ class SequenceSimulationWidget(QWidget):
 
     def _geometry_update_requested(self):
         self._generate_sequence_clicked()
-        self._update_geometry_stale_notice()
-        self._schedule_geometry_refresh()
+        self._schedule_geometry_refresh(sequence_only=True)
 
-    def _schedule_geometry_refresh(self):
-        """Redraw the geometry tab once, and only while it is visible."""
+    def _schedule_geometry_refresh(self, *, sequence_only=False):
+        """Redraw the geometry tab once, and only while it is visible.
+
+        ``sequence_only`` keeps the object projections and redraws just the
+        FOV and slice overlays; a pending full redraw still wins.
+        """
         if not hasattr(self, "geometry_viewer"):
             return
-        self._update_geometry_stale_notice()
-        self._geometry_viewer_stale = True
+        if sequence_only:
+            self._geometry_overlays_stale = True
+        else:
+            self._geometry_viewer_stale = True
         if self.views.currentIndex() != self.geometry_tab_index:
+            self._update_geometry_stale_notice()
             return
         if getattr(self, "_geometry_refresh_queued", False):
             return
         self._geometry_refresh_queued = True
         QTimer.singleShot(0, self._refresh_geometry_viewer)
+
+    def _geometry_preview_active(self):
+        """Return whether the geometry tab should show unsent form values."""
+        return self.sequence_source.currentIndex() in self.GENERATED_SOURCES and (
+            self._sequence_generation_pending or self.program is None
+        )
+
+    def _planned_sequence_geometry(self):
+        """Return the FOV and slices the current form values would generate.
+
+        Returns None when the shown sequence is current, for sources without
+        a form, and while the form holds an invalid axis combination.
+        """
+        if not self._geometry_preview_active():
+            return None
+        source_index = self.sequence_source.currentIndex()
+        try:
+            parameters = self._sequence_geometry_parameters(source_index)
+        except ValueError:
+            return None
+        name = self.sequence_source.currentText()
+        if source_index == self.SLICE_SELECTION_SOURCE:
+            return SequenceGeometry(
+                frame=self._slice_axis_frame(parameters["slice_axis"]),
+                slice_positions_m=(parameters["slice_offset_m"],),
+                slice_thickness_m=parameters["slice_thickness_m"],
+                name=name,
+            )
+        frame = resolve_encoding_frame(parameters["encoding_axes"]).matrix
+        if source_index == self.RADIAL_ME_BSSFP_SOURCE:
+            samples = parameters["base_resolution"] * parameters["readout_oversampling"]
+            return SequenceGeometry(
+                frame=frame,
+                fov_m=(parameters["fov_m"],) * 3,
+                matrix=(samples,) * 3,
+                name=name,
+            )
+        thickness = parameters.get("slice_thickness_m")
+        positions = ()
+        if thickness is not None:
+            positions = tuple(
+                slice_package_positions(
+                    parameters.get("n_slices", 1),
+                    thickness,
+                    parameters.get("slice_gap_m", 0.0),
+                    parameters["slice_offset_m"],
+                )
+            )
+        return SequenceGeometry(
+            frame=frame,
+            fov_m=tuple(parameters["fov_m"]),
+            matrix=tuple(parameters["matrix"]),
+            slice_positions_m=positions,
+            slice_thickness_m=thickness,
+            name=name,
+        )
+
+    @staticmethod
+    def _slice_axis_frame(axis_code):
+        """Return a frame whose third column is the given slice normal."""
+        normal = _axis_vector(str(axis_code), "slice axis")
+        axis = int(np.flatnonzero(np.abs(normal) > 0.5)[0])
+        in_plane = [index for index in range(3) if index != axis]
+        return np.column_stack(
+            (np.eye(3)[:, in_plane[0]], np.eye(3)[:, in_plane[1]], normal)
+        )
 
     def _sequence_geometry(self):
         """Return the encoded FOV and slices of the shown sequence."""
@@ -11420,15 +11553,9 @@ class SequenceSimulationWidget(QWidget):
         axis_code = normalized.get("slicegradientaxis")
         if axis_code is not None:
             try:
-                normal = _axis_vector(str(axis_code), "slice axis")
+                frame_matrix = self._slice_axis_frame(axis_code)
             except ValueError:
-                normal = None
-            if normal is not None:
-                axis = int(np.flatnonzero(np.abs(normal) > 0.5)[0])
-                in_plane = [index for index in range(3) if index != axis]
-                frame_matrix = np.column_stack(
-                    (np.eye(3)[:, in_plane[0]], np.eye(3)[:, in_plane[1]], normal)
-                )
+                pass
         else:
             try:
                 frame_matrix = EncodingFrame.from_definitions(definitions).matrix
@@ -11472,9 +11599,23 @@ class SequenceSimulationWidget(QWidget):
 
     def _refresh_geometry_viewer(self):
         self._geometry_refresh_queued = False
-        if not self._geometry_viewer_stale:
+        full = self._geometry_viewer_stale
+        if not full and not self._geometry_overlays_stale:
             return
         self._geometry_viewer_stale = False
+        self._geometry_overlays_stale = False
+        # While parameters wait for generation, the views follow the form and
+        # keep the last generated placement as a dotted reference.
+        generated = self._sequence_geometry()
+        sequence = self._planned_sequence_geometry()
+        self._update_geometry_stale_notice(previewing=sequence is not None)
+        if sequence is None:
+            sequence, generated = generated, None
+        if not full:
+            self.geometry_viewer.set_sequence_geometry(
+                sequence, generated_sequence=generated
+            )
+            return
         phantom, label = self._geometry_viewer_object()
         probe_position = None
         if self.object_source.currentIndex() == 2:
@@ -11488,9 +11629,10 @@ class SequenceSimulationWidget(QWidget):
             )
         self.geometry_viewer.update_geometry(
             phantom,
-            self._sequence_geometry(),
+            sequence,
             object_label=label,
             probe_position_m=probe_position,
+            generated_sequence=generated,
         )
 
     def _sequence_plot_range_changed(self, _view_box, x_range):

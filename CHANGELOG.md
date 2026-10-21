@@ -64,6 +64,15 @@ The project follows [Semantic Versioning](https://semver.org/).
   delay come from the scan parameters, and warnings flag a non-white tail or
   low SNR (`sequence.measured_fid`). **Set calibration** refuses a loaded FID
   of another nucleus or field strength.
+- The Geometry tab colours the object by the phantom property with the
+  largest spatial differences: anatomy labels or dominant species regions
+  first, otherwise the widest map (concentration, T1/T2, kPL, delivery,
+  shifts, B0, ...). A selector overrides the automatic choice and the summary
+  shows a legend.
+- The Geometry tab follows FOV, matrix and slice edits in the sequence form
+  without generating the sequence; the last generated placement stays as a
+  dotted outline. A notice says that timing and k-space are not regenerated
+  yet and offers to generate the sequence.
 
 ### Changed
 
@@ -72,6 +81,9 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The Sequence-mode ETA counts completed voxels instead of a misscaled chunk
+  count and gets an early run rate from a small first chunk, so it no longer
+  jumps or stalls. Progress, elapsed and remaining time share one line.
 - `CustomPulse.compile` keeps the duration and flip angle of loaded pulses on
   any raster (a 1 ms hard pulse resampled to 3 us rotated by 89.4 instead of
   90 deg) and resamples custom gradients together with B1.

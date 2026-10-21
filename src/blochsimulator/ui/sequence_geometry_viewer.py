@@ -47,6 +47,9 @@ OBJECT_COLOR = "#4caf50"
 SEQUENCE_COLOR = "#ff9800"
 SLICE_COLOR = "#26c6da"
 PROBE_COLOR = "#e91e63"
+# The last generated FOV and slices while the views preview new parameters.
+GENERATED_COLOR = "#ffcc80"
+GENERATED_ALPHA = 140
 
 # Region colours for categorical maps without their own palette.
 CATEGORY_COLORS = (
@@ -137,6 +140,38 @@ class SequenceGeometry:
             )
             for position in self.slice_positions_m
         ]
+
+    def covers_same_region(self, other: "SequenceGeometry") -> bool:
+        """Return whether both geometries place the same FOV and slices."""
+        return all(
+            _same_values(first, second)
+            for first, second in (
+                (self.frame, other.frame),
+                (self.fov_m, other.fov_m),
+                (self.slice_positions_m, other.slice_positions_m),
+                (self.slice_thickness_m, other.slice_thickness_m),
+            )
+        )
+
+    def slice_text(self) -> str:
+        """Describe the slice package, e.g. ``2 × 3 mm at -1.5, 1.5 mm``."""
+        if not self.slice_thickness_m or not self.slice_positions_m:
+            return ""
+        positions = ", ".join(f"{value * 1000:.3g}" for value in self.slice_positions_m)
+        return (
+            f"{len(self.slice_positions_m)} × {self.slice_thickness_m * 1000:.3g} mm "
+            f"at {positions} mm"
+        )
+
+
+def _same_values(first, second) -> bool:
+    if first is None or second is None:
+        return first is None and second is None
+    first = np.ravel(np.asarray(first, dtype=float))
+    second = np.ravel(np.asarray(second, dtype=float))
+    return first.shape == second.shape and np.allclose(
+        first, second, rtol=1e-9, atol=1e-12
+    )
 
 
 def sequence_geometry_from_definitions(
@@ -683,6 +718,12 @@ def _contrast_legend_html(contrast: Optional[ObjectContrast], shown_range=None) 
     )
 
 
+def _faded(color):
+    faded = pg.mkColor(color)
+    faded.setAlpha(GENERATED_ALPHA)
+    return faded
+
+
 def _format_mm(values) -> str:
     return " × ".join(f"{float(value) * 1000:.4g}" for value in values) + " mm"
 
@@ -761,16 +802,25 @@ class SequenceGeometryViewer(QWidget):
         grid.setColumnStretch(1, 1)
         layout.addLayout(grid, 1)
         self._phantom = None
+        self._object_label = ""
+        self._probe_position_m = None
+        self._sequence = None
+        self._generated_sequence = None
         self.contrasts = []
         self.contrast = None
         self._contrast_range = None
         self._summary_parts = ("", [], [])
         self.update_geometry(None, None)
 
-    def set_stale(self, stale: bool, message: str = STALE_SEQUENCE_MESSAGE):
+    def set_stale(
+        self,
+        stale: bool,
+        message: str = STALE_SEQUENCE_MESSAGE,
+        question: str = "Update the geometry view?",
+    ):
         """Show or hide the notice that the drawn sequence is outdated."""
         if stale:
-            self.stale_notice_label.setText(f"{message} Update the geometry view?")
+            self.stale_notice_label.setText(f"{message} {question}")
         self.stale_notice.setVisible(bool(stale))
 
     def _populate_contrast_combo(self):
@@ -887,15 +937,42 @@ class SequenceGeometryViewer(QWidget):
         *,
         object_label: str = "",
         probe_position_m=None,
+        generated_sequence: Optional[SequenceGeometry] = None,
     ):
         """Redraw the projections and overlays for the current selection."""
-        self._clear_overlays()
-        rows = []
-        object_box = None
         self._phantom = phantom
+        self._object_label = object_label
+        self._probe_position_m = probe_position_m
         self.contrasts = object_contrasts(phantom)
         self._populate_contrast_combo()
         self._draw_object()
+        self.set_sequence_geometry(sequence, generated_sequence=generated_sequence)
+        for plot in self.plots:
+            plot.enableAutoRange()
+
+    def set_sequence_geometry(
+        self,
+        sequence: Optional[SequenceGeometry],
+        *,
+        generated_sequence: Optional[SequenceGeometry] = None,
+    ):
+        """Redraw only the sequence overlays and keep the object projections.
+
+        ``generated_sequence`` is the placement of the last generated
+        sequence; while it differs from ``sequence`` it stays visible as a
+        dotted outline.
+        """
+        self._sequence = sequence
+        self._generated_sequence = generated_sequence
+        self._draw_overlays()
+
+    def _draw_overlays(self):
+        phantom = self._phantom
+        sequence = self._sequence
+        probe_position_m = self._probe_position_m
+        self._clear_overlays()
+        rows = []
+        object_box = None
         if phantom is not None:
             grid_box = phantom_grid_box(phantom)
             self._add_outline(grid_box, GRID_COLOR, style=Qt.DashLine, z=11)
@@ -934,6 +1011,11 @@ class SequenceGeometryViewer(QWidget):
                 if phantom is not None
                 else 0.0
             )
+            extent = (
+                phantom_grid_box(phantom).size_m
+                if phantom is not None
+                else (fallback,) * 3
+            )
             fov_box = sequence.fov_box(fallback)
             if fov_box is not None:
                 self._add_outline(fov_box, SEQUENCE_COLOR, z=13)
@@ -947,11 +1029,6 @@ class SequenceGeometryViewer(QWidget):
                     + (" (2D, read × phase)" if sequence.is_2d else "")
                 )
                 rows.append((SEQUENCE_COLOR, "Sequence FOV", encoded))
-            extent = (
-                phantom_grid_box(phantom).size_m
-                if phantom is not None
-                else (fallback,) * 3
-            )
             slices = sequence.slice_boxes(extent)
             for box in slices:
                 self._add_outline(box, SLICE_COLOR, fill_alpha=50, z=14, thin_axis=2)
@@ -960,24 +1037,38 @@ class SequenceGeometryViewer(QWidget):
                     (
                         SLICE_COLOR,
                         "Slices" if len(slices) > 1 else "Slice",
-                        f"{len(slices)} × {sequence.slice_thickness_m * 1000:.3g} mm "
-                        "at "
-                        + ", ".join(
-                            f"{value * 1000:.3g}"
-                            for value in sequence.slice_positions_m
-                        )
-                        + " mm",
+                        sequence.slice_text(),
                     )
                 )
-        for plot in self.plots:
-            plot.enableAutoRange()
+            previous = self._generated_sequence
+            if previous is not None and not previous.covers_same_region(sequence):
+                rows.append(self._draw_generated_outline(previous, fallback, extent))
         notes = (
             coverage_notes(phantom, sequence, object_box)
             if (phantom is not None or sequence is not None)
             else []
         )
-        self._summary_parts = (object_label, rows, notes)
+        self._summary_parts = (self._object_label, rows, notes)
         self._update_summary()
+
+    def _draw_generated_outline(self, sequence, fallback_partition_m, extent_m):
+        """Draw the last generated placement dotted and return its summary row."""
+        parts = []
+        fov_box = sequence.fov_box(fallback_partition_m)
+        if fov_box is not None:
+            self._add_outline(fov_box, _faded(SEQUENCE_COLOR), style=Qt.DotLine, z=9)
+            parts.append(_format_mm(sequence.fov_m))
+        for box in sequence.slice_boxes(extent_m):
+            self._add_outline(
+                box, _faded(SLICE_COLOR), style=Qt.DotLine, z=10, thin_axis=2
+            )
+        if sequence.slice_text():
+            parts.append(sequence.slice_text())
+        return (
+            GENERATED_COLOR,
+            "Generated (dotted)",
+            ", ".join(parts) or "no spatial encoding",
+        )
 
     @staticmethod
     def _summary_html(object_label, rows, notes, contrast_html="") -> str:
