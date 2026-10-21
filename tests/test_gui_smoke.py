@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QGridLayout,
     QLineEdit,
     QRadioButton,
@@ -20,6 +21,7 @@ from PyQt5.QtWidgets import (
 )
 from blochsimulator.kernel_capabilities import GUI_KERNEL_NAMES
 from blochsimulator.memory import GIB, MemoryPolicy
+from blochsimulator.project_io import load_project, save_project
 from blochsimulator.pulse_loader import load_amp_phase_dat, load_pulse_from_file
 from blochsimulator.sequence import ScannerParameters
 from blochsimulator.simulator import (
@@ -35,7 +37,17 @@ from blochsimulator.ui.magnetization_viewer import (
     MagnetizationViewer,
     centered_stride_indices,
 )
-from blochsimulator.ui.main_window import BlochSimulatorGUI, _apply_platform_style
+from blochsimulator.position_sampling import (
+    build_line_positions,
+    build_plane_positions,
+    infer_layout,
+)
+from blochsimulator.ui.main_window import (
+    BlochSimulatorGUI,
+    _apply_platform_style,
+    _capture_widget_state,
+    _restore_widget_state,
+)
 from blochsimulator.ui.rf_pulse_designer import RFPulseDesigner
 from blochsimulator.ui.sequence_designer import SequenceDesigner
 from blochsimulator.ui.sequence_diagram import (
@@ -736,11 +748,20 @@ def test_simulation_controls_use_non_overlapping_grid_rows():
     def position(widget):
         return layout.getItemPosition(layout.indexOf(widget))
 
-    assert position(window.pos_range) == (2, 1, 1, 1)
-    assert position(window.freq_spin) == (3, 1, 1, 1)
-    assert position(window.freq_center) == (4, 1, 1, 1)
-    assert position(window.freq_range) == (5, 1, 1, 1)
-    assert position(window.freq_axis_mode) == (6, 1, 1, 1)
+    assert position(window.pos_geometry_combo) == (1, 1, 1, 1)
+    # Axis (1D) and plane (2D) share one cell; only one is visible.
+    assert position(window.pos_axis_combo) == (2, 1, 1, 1)
+    assert position(window.pos_plane_combo) == (2, 1, 1, 1)
+    assert position(window.pos_spin) == (3, 1, 1, 1)
+    assert position(window.pos_range) == (4, 1, 1, 1)
+    assert position(window.pos2_spin) == (5, 1, 1, 1)
+    assert position(window.pos2_range) == (6, 1, 1, 1)
+    assert position(window.pos_center_widget) == (7, 1, 1, 1)
+    assert position(window.position_summary_label) == (8, 0, 1, 2)
+    assert position(window.freq_spin) == (9, 1, 1, 1)
+    assert position(window.freq_center) == (10, 1, 1, 1)
+    assert position(window.freq_range) == (11, 1, 1, 1)
+    assert position(window.freq_axis_mode) == (12, 1, 1, 1)
 
 
 def test_free_mode_and_slice_explorer_spatial_controls_use_mm():
@@ -915,6 +936,187 @@ def test_free_mode_analysis_notebook_writes_its_hdf5(tmp_path):
 
     assert save_results.call_args.args[0] == str(tmp_path / "run.h5")
     assert export_notebook.call_args.kwargs["h5_filename"] == "run.h5"
+
+
+def test_free_mode_defaults_to_a_z_line_and_hides_plane_controls():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+
+    assert window.pos_geometry_combo.currentText() == "1D line"
+    assert window.pos_axis_combo.currentText() == "z"
+    assert window.pos_plane_combo.isHidden()
+    assert window.pos2_spin.isHidden() and window.pos2_range.isHidden()
+    assert window.pos_count_label.text() == "Positions along z:"
+    window.pos_spin.setValue(3)
+    np.testing.assert_allclose(
+        window._build_position_grid(), [[0, 0, -0.01], [0, 0, 0], [0, 0, 0.01]]
+    )
+    assert window.position_summary_label.text().startswith(
+        "3 positions (3 along z) × 31 frequencies = 93 spins"
+    )
+
+
+def test_free_mode_line_along_x_with_center_offset():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.pos_axis_combo.setCurrentText("x")
+    window.pos_spin.setValue(3)
+    window.pos_range.setValue(10.0)
+    window.pos_center_z.setValue(2.0)
+
+    assert window.pos_range_label.text() == "Range along x:"
+    np.testing.assert_allclose(
+        window._build_position_grid(),
+        [[-0.005, 0, 0.002], [0, 0, 0.002], [0.005, 0, 0.002]],
+    )
+    parameters = window._collect_simulation_parameters()
+    assert parameters["position_geometry"] == "line"
+    assert parameters["position_axes"] == "x"
+    assert parameters["position_center_mm"] == [0.0, 0.0, 2.0]
+
+
+def test_switching_free_mode_to_a_plane_applies_the_starting_grid():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    index = window.pos_geometry_combo.findText("2D plane")
+    window.pos_geometry_combo.setCurrentIndex(index)
+    window.pos_geometry_combo.activated.emit(index)
+
+    assert window.pos_plane_combo.currentText() == "xy"
+    assert not window.pos_plane_combo.isHidden()
+    assert window.pos_axis_combo.isHidden()
+    assert not window.pos2_spin.isHidden()
+    assert window.pos_axis_label.text() == "Plane:"
+    assert window.pos_count_label.text() == "Positions along x:"
+    assert window.pos2_count_label.text() == "Positions along y:"
+    assert (window.pos_spin.value(), window.pos2_spin.value()) == (12, 12)
+    assert window.freq_spin.value() == 1
+    assert window.position_summary_label.text().startswith(
+        "144 positions (12 × 12 in xy) × 1 frequency = 144 spins"
+    )
+
+    positions = window._build_position_grid()
+    assert positions.shape == (144, 3)
+    np.testing.assert_allclose(positions[:12, 1], -0.01)
+    np.testing.assert_allclose(positions[:12, 0], np.linspace(-0.01, 0.01, 12))
+    assert np.all(positions[:, 2] == 0.0)
+    parameters = window._collect_simulation_parameters()
+    assert parameters["num_positions"] == 144
+    assert parameters["position_geometry"] == "plane"
+    assert parameters["position_axes"] == "xy"
+    assert parameters["position_counts"] == [12, 12]
+
+
+def test_plane_preview_strides_each_axis_and_keeps_the_grid():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.pos_geometry_combo.setCurrentText("2D plane")
+    window.pos_plane_combo.setCurrentText("yz")
+    window.pos_spin.setValue(20)
+    window.pos2_spin.setValue(5)
+
+    positions = window._build_position_grid()
+    preview = window._preview_positions(positions, [20, 5])
+    layout = infer_layout(preview)
+
+    assert layout.plane_name == "yz"
+    assert layout.counts == (7, 5)
+    np.testing.assert_allclose(layout.coordinates[0], positions[:20:3, 1])
+
+
+def test_plane_keeps_its_grid_when_sequence_presets_load():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.pos_geometry_combo.setCurrentText("2D plane")
+    window.pos_spin.setValue(12)
+    window.pos2_spin.setValue(12)
+
+    window.sequence_designer.sequence_type.setCurrentText("Slice Select + Rephase")
+
+    assert (window.pos_spin.value(), window.pos2_spin.value()) == (12, 12)
+
+
+def test_position_geometry_round_trips_through_project_controls():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.pos_geometry_combo.setCurrentText("2D plane")
+    window.pos_plane_combo.setCurrentText("xz")
+    window.pos_spin.setValue(4)
+    window.pos2_spin.setValue(6)
+    window.pos_center_y.setValue(-3.0)
+    state = _capture_widget_state(window)
+
+    restored = BlochSimulatorGUI()
+    _restore_widget_state(restored, state)
+
+    assert restored.pos_geometry_combo.currentText() == "2D plane"
+    assert restored.pos_plane_combo.currentText() == "xz"
+    assert (restored.pos_spin.value(), restored.pos2_spin.value()) == (4, 6)
+    np.testing.assert_allclose(
+        restored._build_position_grid(), window._build_position_grid()
+    )
+    assert not restored.pos2_spin.isHidden()
+
+
+def test_projects_without_position_geometry_open_as_a_z_line(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.pos_spin.setValue(5)
+    path = tmp_path / "current.blochproj"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(path), ""))
+    window.save_project()
+    project = load_project(path)
+    controls = project["state"]["main_controls"]
+    for name in (
+        "pos_geometry_combo",
+        "pos_axis_combo",
+        "pos_plane_combo",
+        "pos2_spin",
+        "pos2_range",
+        "pos_center_x",
+        "pos_center_y",
+        "pos_center_z",
+    ):
+        controls.pop(name, None)
+    legacy_path = tmp_path / "legacy.blochproj"
+    save_project(
+        legacy_path,
+        project["state"],
+        project["phantom"],
+        project["tx_field"],
+        project["rx_field"],
+        project["program"],
+        project["legacy_result"],
+        project["sequence_result"],
+    )
+
+    reopened = BlochSimulatorGUI()
+    reopened.pos_geometry_combo.setCurrentText("2D plane")
+    reopened.pos_center_x.setValue(4.0)
+    reopened.open_project(str(legacy_path))
+
+    assert reopened.pos_geometry_combo.currentText() == "1D line"
+    assert reopened.pos_axis_combo.currentText() == "z"
+    positions = reopened._build_position_grid()
+    assert positions.shape == (5, 3)
+    assert np.all(positions[:, :2] == 0.0)
+
+
+def test_free_mode_position_labels_follow_the_simulated_axis():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.last_positions = build_plane_positions((3, 2), (0.02, 0.01), "xy")
+
+    assert window._position_label(4) == "(x, y) = (0.00, 5.00) mm"
+    assert window._center_position_index() in (1, 4)
+    label, values = window._position_plot_axis()
+    assert label == "Position index (x fastest)" and values is None
+
+    window.last_positions = build_line_positions(3, 0.02, "y")
+    label, values = window._position_plot_axis()
+    assert label == "Position y (mm)"
+    np.testing.assert_allclose(values, [-10.0, 0.0, 10.0])
+    assert window._position_label(2) == "y = 10.00 mm"
 
 
 def test_simulation_controls_have_explanatory_tooltips():

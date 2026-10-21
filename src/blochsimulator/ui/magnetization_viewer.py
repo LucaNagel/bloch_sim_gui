@@ -20,24 +20,8 @@ import pyqtgraph.opengl as gl
 import pyqtgraph as pg
 import numpy as np
 from pathlib import Path
+from ..position_sampling import centered_stride_indices, infer_layout
 from ..visualization import ImageExporter
-
-
-def centered_stride_indices(total: int, limit: int) -> np.ndarray:
-    """Return at most ``limit`` indices into ``range(total)`` with one stride.
-
-    A constant stride keeps the physical spacing uniform, and the indices are
-    aligned to the central element so a symmetric axis stays symmetric.
-    """
-    total = max(int(total), 0)
-    limit = max(int(limit), 1)
-    if total <= limit:
-        return np.arange(total)
-    if limit == 1:
-        return np.array([(total - 1) // 2])
-    stride = int(np.ceil((total - 1) / (limit - 1)))
-    start = ((total - 1) // 2) % stride
-    return np.arange(start, total, stride)
 
 
 class MagnetizationViewer(QWidget):
@@ -1146,12 +1130,11 @@ class MagnetizationViewer(QWidget):
         elif mode == "Freqs @ position":
             max_idx = max(0, self._npos - 1)
             idx = min(self.selector_slider.value(), max_idx)
-            pos_val = (
-                self.last_positions[idx, 2] * 1000
-                if self.last_positions is not None and idx < len(self.last_positions)
-                else idx
-            )
-            label_text = f"Pos: {pos_val:.2f} mm"
+            if self.last_positions is not None and idx < len(self.last_positions):
+                layout = infer_layout(self.last_positions)
+                label_text = f"Pos: {layout.label(self.last_positions[idx])}"
+            else:
+                label_text = f"Pos: idx {idx}"
         else:
             max_idx = 0
             label_text = "All spins"

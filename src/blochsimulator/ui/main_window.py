@@ -6,7 +6,7 @@ import copy
 import re
 import numpy as np
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 
 from PyQt5.QtWidgets import (
     QApplication,
@@ -98,6 +98,14 @@ from .rf_pulse_designer import RFPulseDesigner
 from .sequence_designer import SequenceDesigner
 from .controls import UniversalTimeControl
 from .magnetization_viewer import MagnetizationViewer, centered_stride_indices
+from ..position_sampling import (
+    AXIS_NAMES,
+    PLANES,
+    axis_index,
+    build_positions,
+    infer_layout,
+    plane_axes,
+)
 from .parameter_sweep import ParameterSweepWidget
 from .tutorial_manager import TutorialManager
 from .tutorial_overlay import TutorialOverlay
@@ -240,6 +248,14 @@ class BlochSimulatorGUI(QMainWindow):
     # Isochromats drawn per position when the 3D view arranges spins along
     # their positions; the position means still use every frequency.
     SPATIAL_VECTOR_MAX_FREQUENCIES = 32
+    POSITION_GEOMETRY_LINE = "1D line"
+    POSITION_GEOMETRY_PLANE = "2D plane"
+    # Starting grid when switching to a plane; one frequency keeps a
+    # time-resolved 2D run small and isolates the gradient dephasing.
+    PLANE_DEFAULT_POSITIONS = 12
+    # Largest preview sample count: positions of a line, or per plane axis.
+    PREVIEW_MAX_LINE_POSITIONS = 64
+    PREVIEW_MAX_PLANE_POSITIONS = 8
 
     def __init__(self):
         super().__init__()
@@ -459,18 +475,51 @@ class BlochSimulatorGUI(QMainWindow):
         self.mode_combo.setCurrentText("Time-resolved")
         control_layout.addWidget(self.mode_combo, 0, 1)
 
-        # Positions
-        control_layout.addWidget(QLabel("Positions:"), 1, 0)
+        # Spatial sampling: a line along one axis or a row-major grid in a
+        # plane. Spins at different positions see different fields G·r.
+        control_layout.addWidget(QLabel("Geometry:"), 1, 0)
+        self.pos_geometry_combo = QComboBox()
+        self.pos_geometry_combo.setObjectName("pos_geometry_combo")
+        self.pos_geometry_combo.addItems(
+            [self.POSITION_GEOMETRY_LINE, self.POSITION_GEOMETRY_PLANE]
+        )
+        self.pos_geometry_combo.setToolTip(
+            "Arrange the simulated positions on a 1D line along one axis or on "
+            "a 2D grid in a plane. Positions differ only through the gradient "
+            "field G·r, so x or y positions need x or y gradients."
+        )
+        control_layout.addWidget(self.pos_geometry_combo, 1, 1)
+
+        self.pos_axis_label = QLabel("Axis:")
+        control_layout.addWidget(self.pos_axis_label, 2, 0)
+        self.pos_axis_combo = QComboBox()
+        self.pos_axis_combo.setObjectName("pos_axis_combo")
+        self.pos_axis_combo.addItems(list(AXIS_NAMES))
+        self.pos_axis_combo.setCurrentText("z")
+        self.pos_axis_combo.setToolTip("Physical axis of the 1D line of positions.")
+        control_layout.addWidget(self.pos_axis_combo, 2, 1)
+        self.pos_plane_combo = QComboBox()
+        self.pos_plane_combo.setObjectName("pos_plane_combo")
+        self.pos_plane_combo.addItems(list(PLANES))
+        self.pos_plane_combo.setToolTip(
+            "Physical plane of the 2D grid. The first named axis runs along "
+            "the grid rows, the second across them."
+        )
+        control_layout.addWidget(self.pos_plane_combo, 2, 1)
+
+        self.pos_count_label = QLabel("Positions along z:")
+        control_layout.addWidget(self.pos_count_label, 3, 0)
         self.pos_spin = QSpinBox()
         self.pos_spin.setObjectName("pos_spin")
         self.pos_spin.setRange(1, 1100)
         self.pos_spin.setValue(1)
         self.pos_spin.setToolTip(
-            "Number of spatial positions simulated along the selected range. "
-            "More positions increase runtime and result memory proportionally."
+            "Number of positions along the (first) axis. More positions "
+            "increase runtime and result memory proportionally."
         )
-        control_layout.addWidget(self.pos_spin, 1, 1)
-        control_layout.addWidget(QLabel("Position range (mm):"), 2, 0)
+        control_layout.addWidget(self.pos_spin, 3, 1)
+        self.pos_range_label = QLabel("Range along z:")
+        control_layout.addWidget(self.pos_range_label, 4, 0)
         self.pos_range = QDoubleSpinBox()
         self.pos_range.setObjectName("pos_range")
         self.pos_range.setRange(0.1, 99990.0)
@@ -478,14 +527,86 @@ class BlochSimulatorGUI(QMainWindow):
         self.pos_range.setSingleStep(10.0)
         self.pos_range.setSuffix(" mm")
         self.pos_range.setToolTip(
-            "Total spatial extent in millimeters. Positions are distributed "
-            "evenly across this range."
+            "Total extent along the (first) axis in millimeters. Positions are "
+            "distributed evenly across this range, centered on the center below."
         )
-        control_layout.addWidget(self.pos_range, 2, 1)
+        control_layout.addWidget(self.pos_range, 4, 1)
+
+        self.pos2_count_label = QLabel("Positions along y:")
+        control_layout.addWidget(self.pos2_count_label, 5, 0)
+        self.pos2_spin = QSpinBox()
+        self.pos2_spin.setObjectName("pos2_spin")
+        self.pos2_spin.setRange(1, 1100)
+        self.pos2_spin.setValue(self.PLANE_DEFAULT_POSITIONS)
+        self.pos2_spin.setToolTip(
+            "Number of grid positions along the second axis of the plane. "
+            "The total number of positions is the product of both counts."
+        )
+        control_layout.addWidget(self.pos2_spin, 5, 1)
+        self.pos2_range_label = QLabel("Range along y:")
+        control_layout.addWidget(self.pos2_range_label, 6, 0)
+        self.pos2_range = QDoubleSpinBox()
+        self.pos2_range.setObjectName("pos2_range")
+        self.pos2_range.setRange(0.1, 99990.0)
+        self.pos2_range.setValue(20.0)
+        self.pos2_range.setSingleStep(10.0)
+        self.pos2_range.setSuffix(" mm")
+        self.pos2_range.setToolTip(
+            "Total extent of the grid along the second axis of the plane in "
+            "millimeters."
+        )
+        control_layout.addWidget(self.pos2_range, 6, 1)
+
+        control_layout.addWidget(QLabel("Center (mm):"), 7, 0)
+        self.pos_center_widget = QWidget()
+        center_row = QHBoxLayout(self.pos_center_widget)
+        center_row.setContentsMargins(0, 0, 0, 0)
+        center_row.setSpacing(4)
+        for axis_name in AXIS_NAMES:
+            spin = QDoubleSpinBox()
+            spin.setObjectName(f"pos_center_{axis_name}")
+            spin.setRange(-50000.0, 50000.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(1.0)
+            spin.setValue(0.0)
+            spin.setPrefix(f"{axis_name} ")
+            spin.setToolTip(
+                f"{axis_name} coordinate of the center of the line or plane in "
+                "millimeters, e.g. to place an xy plane outside the excited "
+                "slice."
+            )
+            spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            setattr(self, f"pos_center_{axis_name}", spin)
+            center_row.addWidget(spin)
+        control_layout.addWidget(self.pos_center_widget, 7, 1)
+
+        self.position_summary_label = QLabel()
+        self.position_summary_label.setWordWrap(True)
+        self.position_summary_label.setObjectName("position_summary")
+        control_layout.addWidget(self.position_summary_label, 8, 0, 1, 2)
+
+        self.pos_geometry_combo.currentIndexChanged.connect(
+            self._update_position_geometry_controls
+        )
+        # Only a user's switch to a plane applies the 2D starting grid, not
+        # restoring a project.
+        self.pos_geometry_combo.activated.connect(self._on_position_geometry_activated)
+        for combo in (self.pos_axis_combo, self.pos_plane_combo):
+            combo.currentIndexChanged.connect(self._update_position_geometry_controls)
+        for spin in (
+            self.pos_spin,
+            self.pos_range,
+            self.pos2_spin,
+            self.pos2_range,
+            self.pos_center_x,
+            self.pos_center_y,
+            self.pos_center_z,
+        ):
+            spin.valueChanged.connect(self._update_position_summary)
 
         # Frequency sampling. Keep count on its own row so the labels do not
         # collapse when the left panel is narrow.
-        control_layout.addWidget(QLabel("Frequencies:"), 3, 0)
+        control_layout.addWidget(QLabel("Frequencies:"), 9, 0)
         self.freq_spin = QSpinBox()
         self.freq_spin.setObjectName("freq_spin")
         self.freq_spin.setRange(1, 10000)
@@ -494,9 +615,9 @@ class BlochSimulatorGUI(QMainWindow):
             "Number of off-resonance frequencies to simulate. More samples give "
             "a denser spectrum but increase runtime and RAM usage proportionally."
         )
-        control_layout.addWidget(self.freq_spin, 3, 1)
+        control_layout.addWidget(self.freq_spin, 9, 1)
 
-        control_layout.addWidget(QLabel("Center (Hz):"), 4, 0)
+        control_layout.addWidget(QLabel("Center (Hz):"), 10, 0)
         self.freq_center = QDoubleSpinBox()
         self.freq_center.setObjectName("freq_center")
         self.freq_center.setRange(-1e6, 1e6)
@@ -505,8 +626,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.freq_center.setToolTip(
             "Center frequency of the simulated spin-offset interval in hertz."
         )
-        control_layout.addWidget(self.freq_center, 4, 1)
-        control_layout.addWidget(QLabel("Range (Hz):"), 5, 0)
+        control_layout.addWidget(self.freq_center, 10, 1)
+        control_layout.addWidget(QLabel("Range (Hz):"), 11, 0)
         self.freq_range = QDoubleSpinBox()
         self.freq_range.setObjectName("freq_range")
         self.freq_range.setRange(0.0, 1e4)
@@ -515,10 +636,10 @@ class BlochSimulatorGUI(QMainWindow):
             "Full width of the simulated frequency interval in hertz. For "
             "example, 100 Hz around 0 Hz covers −50 to +50 Hz."
         )
-        control_layout.addWidget(self.freq_range, 5, 1)
+        control_layout.addWidget(self.freq_range, 11, 1)
 
         # Frequency-axis convention and helper text
-        control_layout.addWidget(QLabel("Display axis:"), 6, 0)
+        control_layout.addWidget(QLabel("Display axis:"), 12, 0)
         self.freq_axis_mode = QComboBox()
         self.freq_axis_mode.setObjectName("freq_axis_mode")
         self.freq_axis_mode.addItems(
@@ -528,21 +649,23 @@ class BlochSimulatorGUI(QMainWindow):
             "Choose whether plots show laboratory-frame spin offsets or "
             "detuning relative to the RF carrier frequency."
         )
-        control_layout.addWidget(self.freq_axis_mode, 6, 1)
+        control_layout.addWidget(self.freq_axis_mode, 12, 1)
         self.freq_label = QLabel()
         self.freq_label.setWordWrap(True)
         self.freq_label.setObjectName("frequency_summary")
-        control_layout.addWidget(self.freq_label, 7, 0, 1, 2)
+        control_layout.addWidget(self.freq_label, 13, 0, 1, 2)
         self.freq_spin.valueChanged.connect(self._update_frequency_summary)
+        self.freq_spin.valueChanged.connect(self._update_position_summary)
         self.freq_center.valueChanged.connect(self._update_frequency_summary)
         self.freq_range.valueChanged.connect(self._update_frequency_summary)
         self.freq_axis_mode.currentTextChanged.connect(
             self._on_frequency_axis_mode_changed
         )
         self._update_frequency_summary()
+        self._update_position_geometry_controls()
 
         # Time resolution control
-        control_layout.addWidget(QLabel("Time step (us):"), 8, 0)
+        control_layout.addWidget(QLabel("Time step (us):"), 14, 0)
         self.time_step_spin = QDoubleSpinBox()
         self.time_step_spin.setObjectName("time_step_spin")
         self.time_step_spin.setRange(0.01, 5000)
@@ -556,10 +679,10 @@ class BlochSimulatorGUI(QMainWindow):
             "The saved time step controls result size separately."
         )
         self.time_step_spin.valueChanged.connect(self._update_time_step)
-        control_layout.addWidget(self.time_step_spin, 8, 1)
+        control_layout.addWidget(self.time_step_spin, 14, 1)
 
         # Extra post-sequence simulation time
-        control_layout.addWidget(QLabel("Extra tail (ms):"), 9, 0)
+        control_layout.addWidget(QLabel("Extra tail (ms):"), 15, 0)
         self.extra_tail_spin = QDoubleSpinBox()
         self.extra_tail_spin.setObjectName("extra_tail_spin")
         self.extra_tail_spin.setRange(0.0, 1e6)
@@ -570,10 +693,10 @@ class BlochSimulatorGUI(QMainWindow):
             "Additional simulation time after the sequence in milliseconds. "
             "Useful for observing relaxation or signal decay after the final event."
         )
-        control_layout.addWidget(self.extra_tail_spin, 9, 1)
+        control_layout.addWidget(self.extra_tail_spin, 15, 1)
 
         # Max traces control for performance
-        control_layout.addWidget(QLabel("Max plot traces:"), 10, 0)
+        control_layout.addWidget(QLabel("Max plot traces:"), 16, 0)
         self.max_traces_spin = QSpinBox()
         self.max_traces_spin.setObjectName("max_traces_spin")
         self.max_traces_spin.setRange(1, 500)
@@ -583,9 +706,9 @@ class BlochSimulatorGUI(QMainWindow):
             "Maximum number of individual curves drawn in line plots. This only "
             "limits visualization complexity; it does not reduce simulated data."
         )
-        control_layout.addWidget(self.max_traces_spin, 10, 1)
+        control_layout.addWidget(self.max_traces_spin, 16, 1)
 
-        control_layout.addWidget(QLabel("Saved time step (us):"), 11, 0)
+        control_layout.addWidget(QLabel("Saved time step (us):"), 17, 0)
         self.output_step_spin = QDoubleSpinBox()
         self.output_step_spin.setObjectName("output_step_spin")
         self.output_step_spin.setRange(0.0, 5000.0)
@@ -597,7 +720,7 @@ class BlochSimulatorGUI(QMainWindow):
             "Larger values reduce RAM and export size. Set 0 to save every fixed-raster point. "
             "Choose a spacing fine enough to resolve the fastest magnetization oscillations."
         )
-        control_layout.addWidget(self.output_step_spin, 11, 1)
+        control_layout.addWidget(self.output_step_spin, 17, 1)
         self.adaptive_rf_checkbox = QCheckBox("Adaptive AHP/AFP integration (FID)")
         self.adaptive_rf_checkbox.setObjectName("adaptive_rf_checkbox")
         self.adaptive_rf_checkbox.setChecked(True)
@@ -607,12 +730,17 @@ class BlochSimulatorGUI(QMainWindow):
             "and relaxation all enter the error estimate. RF-free decay is propagated exactly. "
             "Other sequences use the fixed time step."
         )
-        control_layout.addWidget(self.adaptive_rf_checkbox, 12, 0, 1, 2)
+        control_layout.addWidget(self.adaptive_rf_checkbox, 18, 0, 1, 2)
 
         for field in (
             self.mode_combo,
+            self.pos_geometry_combo,
+            self.pos_axis_combo,
+            self.pos_plane_combo,
             self.pos_spin,
             self.pos_range,
+            self.pos2_spin,
+            self.pos2_range,
             self.freq_spin,
             self.freq_center,
             self.freq_range,
@@ -2348,6 +2476,171 @@ class BlochSimulatorGUI(QMainWindow):
             return "Effective detuning Δfspin − fRF (Hz)"
         return "Spin offset Δfspin (Hz)"
 
+    def _is_plane_geometry(self) -> bool:
+        return (
+            hasattr(self, "pos_geometry_combo")
+            and self.pos_geometry_combo.currentText() == self.POSITION_GEOMETRY_PLANE
+        )
+
+    def _position_axes(self) -> Tuple[int, ...]:
+        """Physical axes sampled by the position controls, first axis first."""
+        if self._is_plane_geometry():
+            return plane_axes(self.pos_plane_combo.currentText())
+        return (axis_index(self.pos_axis_combo.currentText()),)
+
+    def _position_counts_and_spans_mm(self):
+        counts = [self.pos_spin.value()]
+        spans = [self.pos_range.value()]
+        if self._is_plane_geometry():
+            counts.append(self.pos2_spin.value())
+            spans.append(self.pos2_range.value())
+        return counts, spans
+
+    def _position_center_mm(self) -> np.ndarray:
+        return np.array(
+            [
+                self.pos_center_x.value(),
+                self.pos_center_y.value(),
+                self.pos_center_z.value(),
+            ]
+        )
+
+    def _build_position_grid(self) -> np.ndarray:
+        """Positions (N, 3) in metres from the geometry controls."""
+        counts, spans_mm = self._position_counts_and_spans_mm()
+        return build_positions(
+            self._position_axes(),
+            counts,
+            [span / 1000.0 for span in spans_mm],
+            self._position_center_mm() / 1000.0,
+        )
+
+    def _preview_strides(self, counts):
+        """Position stride per axis of the fast preview run."""
+        limit = (
+            self.PREVIEW_MAX_PLANE_POSITIONS
+            if len(counts) > 1
+            else self.PREVIEW_MAX_LINE_POSITIONS
+        )
+        return [max(1, int(np.ceil(n / limit))) for n in counts]
+
+    def _preview_positions(self, positions: np.ndarray, counts) -> np.ndarray:
+        """Stride a line, or each axis of a plane, for the fast preview run."""
+        strides = self._preview_strides(counts)
+        if len(counts) > 1:
+            grid = positions.reshape(counts[1], counts[0], 3)
+            return grid[:: strides[1], :: strides[0]].reshape(-1, 3)
+        return positions[:: strides[0]]
+
+    def _reset_position_geometry(self):
+        """Return to a line along z through the origin."""
+        self.pos_geometry_combo.setCurrentText(self.POSITION_GEOMETRY_LINE)
+        self.pos_axis_combo.setCurrentText("z")
+        for spin in (self.pos_center_x, self.pos_center_y, self.pos_center_z):
+            spin.setValue(0.0)
+
+    def _update_position_geometry_controls(self, *_):
+        if not hasattr(self, "pos2_range"):
+            return
+        plane = self._is_plane_geometry()
+        self.pos_axis_label.setText("Plane:" if plane else "Axis:")
+        self.pos_axis_combo.setVisible(not plane)
+        self.pos_plane_combo.setVisible(plane)
+        names = [AXIS_NAMES[axis] for axis in self._position_axes()]
+        self.pos_count_label.setText(f"Positions along {names[0]}:")
+        self.pos_range_label.setText(f"Range along {names[0]}:")
+        for widget in (
+            self.pos2_count_label,
+            self.pos2_spin,
+            self.pos2_range_label,
+            self.pos2_range,
+        ):
+            widget.setVisible(plane)
+        if plane:
+            self.pos2_count_label.setText(f"Positions along {names[1]}:")
+            self.pos2_range_label.setText(f"Range along {names[1]}:")
+        self._update_position_summary()
+
+    def _on_position_geometry_activated(self, *_):
+        """Start a plane from a 12 × 12 grid with one frequency."""
+        if not self._is_plane_geometry():
+            return
+        changes = []
+        for spin in (self.pos_spin, self.pos2_spin):
+            if spin.value() == 1:
+                spin.setValue(self.PLANE_DEFAULT_POSITIONS)
+        counts, _ = self._position_counts_and_spans_mm()
+        changes.append(f"{counts[0]} × {counts[1]} positions")
+        if self.freq_spin.value() > 1:
+            self.freq_spin.setValue(1)
+            changes.append("1 frequency")
+        self.statusBar().showMessage(
+            "2D plane: " + ", ".join(changes) + " (adjust freely).", 6000
+        )
+
+    def _update_position_summary(self, *_):
+        if not hasattr(self, "position_summary_label"):
+            return
+        counts, spans_mm = self._position_counts_and_spans_mm()
+        names = [AXIS_NAMES[axis] for axis in self._position_axes()]
+        npos = int(np.prod(counts))
+        nfreq = self.freq_spin.value()
+        grid = " × ".join(str(n) for n in counts)
+        if len(counts) > 1:
+            grid += f" in {''.join(names)}"
+        else:
+            grid += f" along {names[0]}"
+        spacings = [
+            f"Δ{name} = {span / (n - 1):.3g} mm"
+            for name, n, span in zip(names, counts, spans_mm)
+            if n > 1
+        ]
+        text = (
+            f"{npos} position{'s' if npos != 1 else ''} ({grid}) × {nfreq} "
+            f"frequenc{'ies' if nfreq != 1 else 'y'} = {npos * nfreq} spins"
+        )
+        if spacings:
+            text += "; " + ", ".join(spacings)
+        self.position_summary_label.setText(text)
+
+    def _position_layout(self):
+        """Line or plane structure of the last simulated positions."""
+        positions = getattr(self, "last_positions", None)
+        if positions is None or len(positions) == 0:
+            return None
+        return infer_layout(positions)
+
+    def _position_label(self, idx: int) -> str:
+        """Coordinates of one simulated position, e.g. "x = 1.00 mm"."""
+        layout = self._position_layout()
+        if layout is None or idx >= len(self.last_positions):
+            return f"idx {idx}"
+        return layout.label(self.last_positions[idx])
+
+    def _center_position_index(self) -> int:
+        """Index of the simulated position closest to the origin."""
+        positions = getattr(self, "last_positions", None)
+        if positions is None or len(positions) == 0:
+            return 0
+        return int(np.argmin(np.linalg.norm(np.asarray(positions), axis=1)))
+
+    def _position_plot_axis(self):
+        """Axis label and mm coordinates of the positions for 1D plots.
+
+        A plane has no single coordinate axis; it returns an index label and
+        ``None`` so callers plot against the row-major position index.
+        """
+        layout = self._position_layout()
+        if layout is None:
+            return "Position index", None
+        if layout.ndim >= 2:
+            return f"Position index ({layout.axis_names[0]} fastest)", None
+        axis = layout.primary_axis
+        return (
+            f"Position {AXIS_NAMES[axis]} (mm)",
+            np.asarray(self.last_positions)[:, axis] * 1000.0,
+        )
+
     def _update_frequency_summary(self, *_):
         if not hasattr(self, "freq_label"):
             return
@@ -2681,8 +2974,9 @@ class BlochSimulatorGUI(QMainWindow):
                 anim = selected[:, :, freq_idx, :]
                 net = base_vectors.mean(axis=(1, 2))
             spins_per_position = anim.shape[2]
+            axis = self._position_layout().primary_axis
             self.mag_3d.set_spatial_groups(
-                np.asarray(self.last_positions)[pos_idx, 2] * 1000.0,
+                np.asarray(self.last_positions)[pos_idx, axis] * 1000.0,
                 spins_per_position,
             )
             self.mag_3d.set_spatial_fields(
@@ -3532,20 +3826,10 @@ class BlochSimulatorGUI(QMainWindow):
 
             # If current value is out of range or we just switched, try to set to 0 cm
             if slider.value() > max_idx:
-                target = (
-                    _get_zero_idx(self.last_positions[:, 2] * 1000)
-                    if self.last_positions is not None
-                    else 0
-                )
-                slider.setValue(target)
+                slider.setValue(self._center_position_index())
 
             idx = slider.value()
-            pos_val = (
-                self.last_positions[idx, 2] * 1000
-                if self.last_positions is not None and idx < len(self.last_positions)
-                else idx
-            )
-            self.mag_view_selector_label.setText(f"Pos: {pos_val:.2f} mm")
+            self.mag_view_selector_label.setText(f"Pos: {self._position_label(idx)}")
         else:
             slider.setRange(0, 0)
             slider.setEnabled(False)
@@ -3595,12 +3879,7 @@ class BlochSimulatorGUI(QMainWindow):
             max_idx = max(0, npos - 1)
             prefix = "Pos"
             idx = min(slider.value(), max_idx)
-            pos_val = (
-                self.last_positions[idx, 2] * 1000
-                if self.last_positions is not None and idx < len(self.last_positions)
-                else idx
-            )
-            label_text = f"{prefix}: {pos_val:.2f} mm"
+            label_text = f"{prefix}: {self._position_label(idx)}"
         else:
             max_idx = 0
             prefix = "All"
@@ -4505,11 +4784,13 @@ class BlochSimulatorGUI(QMainWindow):
             self.sequence_designer.ssfp_alternate_phase.setChecked(
                 presets["ssfp_alternate_phase"]
             )
-        # Optional simulation grid presets
-        if "num_positions" in presets:
-            self.pos_spin.setValue(int(presets["num_positions"]))
-        if "position_range_cm" in presets:
-            self.pos_range.setValue(float(presets["position_range_cm"]) * 10.0)
+        # Optional simulation grid presets. They describe a 1D line, so a
+        # 2D plane keeps its grid when the sequence type changes.
+        if not self._is_plane_geometry():
+            if "num_positions" in presets:
+                self.pos_spin.setValue(int(presets["num_positions"]))
+            if "position_range_cm" in presets:
+                self.pos_range.setValue(float(presets["position_range_cm"]) * 10.0)
         if "num_frequencies" in presets:
             self.freq_spin.setValue(int(presets["num_frequencies"]))
         if "frequency_center_hz" in presets:
@@ -4523,6 +4804,7 @@ class BlochSimulatorGUI(QMainWindow):
         for widget in widgets_to_block:
             widget.blockSignals(False)
         self._update_frequency_summary()
+        self._update_position_summary()
 
         # Force regeneration of the current pulse (Excitation) to match the new presets
         self.rf_designer.update_pulse()
@@ -5634,13 +5916,9 @@ class BlochSimulatorGUI(QMainWindow):
         else:
             self.last_pulse_range = None
 
-        npos = self.pos_spin.value()
-        pos_span_mm = self.pos_range.value()
-        span_m = pos_span_mm / 1000.0
-        half_span = span_m / 2.0
-        positions = np.zeros((npos, 3))
-        if npos > 1:
-            positions[:, 2] = np.linspace(-half_span, half_span, npos)
+        positions = self._build_position_grid()
+        npos = positions.shape[0]
+        position_counts, _ = self._position_counts_and_spans_mm()
 
         frequencies = self._build_frequency_axis()
         nfreq = frequencies.size
@@ -5651,11 +5929,15 @@ class BlochSimulatorGUI(QMainWindow):
             and self.status_preview_checkbox.isChecked()
         )
         if preview_on:
-            prev_stride = max(1, int(np.ceil(npos / 64)))
             freq_stride = max(1, int(np.ceil(nfreq / 16)))
-            if prev_stride > 1:
-                positions = positions[::prev_stride]
-                npos = positions.shape[0]
+            positions = self._preview_positions(positions, position_counts)
+            npos = positions.shape[0]
+            position_counts = [
+                len(range(0, n, stride))
+                for n, stride in zip(
+                    position_counts, self._preview_strides(position_counts)
+                )
+            ]
             if freq_stride > 1:
                 frequencies = frequencies[::freq_stride]
                 nfreq = frequencies.shape[0]
@@ -5684,6 +5966,7 @@ class BlochSimulatorGUI(QMainWindow):
                 "mode": "time-resolved" if mode == 2 else "endpoint",
                 "time_step_us": dt_s * 1e6,
                 "num_positions": int(positions.shape[0]),
+                "position_counts": list(position_counts),
                 "num_frequencies": int(frequencies.size),
                 "position_axis": np.array(positions, copy=True),
                 "frequency_axis": np.array(frequencies, copy=True),
@@ -5909,13 +6192,11 @@ class BlochSimulatorGUI(QMainWindow):
             if hasattr(self, "spatial_freq_slider"):
                 self.spatial_freq_slider.setValue(f_idx)
 
-            p_idx = _get_zero_idx(
-                (
-                    self.last_positions[:, 2] * 1000
-                    if self.last_positions is not None
-                    else None
-                ),
-                pos_len,
+            p_idx = (
+                self._center_position_index()
+                if self.last_positions is not None
+                and len(self.last_positions) == pos_len
+                else 0
             )
             if hasattr(self, "spectrum_pos_slider"):
                 self.spectrum_pos_slider.setValue(p_idx)
@@ -6250,7 +6531,11 @@ class BlochSimulatorGUI(QMainWindow):
             project_nucleus = self.tissue_widget.get_nucleus()
             self.rf_designer.set_state(state.get("rf", {}))
             self.sequence_designer.set_state(state.get("sequence", {}))
-            _restore_widget_state(self, state.get("main_controls", {}))
+            main_controls = state.get("main_controls", {})
+            if "pos_geometry_combo" not in main_controls:
+                # Projects from before 2D sampling simulated a line along z.
+                self._reset_position_geometry()
+            _restore_widget_state(self, main_controls)
 
             # Instantiate lazy workspaces before assigning their stored objects.
             if getattr(self, "phantom_widget", None) is None:
@@ -6788,7 +7073,9 @@ class BlochSimulatorGUI(QMainWindow):
                         [
                             "Pos_Index",
                             "Freq_Index",
-                            "Position_m",
+                            "Position_x_m",
+                            "Position_y_m",
+                            "Position_z_m",
                             "Frequency_Hz",
                             "Mx",
                             "My",
@@ -6799,9 +7086,9 @@ class BlochSimulatorGUI(QMainWindow):
 
                     npos, nfreq = mx_final.shape
                     positions = (
-                        self.last_positions[:, 2]
+                        np.asarray(self.last_positions)
                         if self.last_positions is not None
-                        else np.zeros(npos)
+                        else np.zeros((npos, 3))
                     )
                     frequencies = (
                         self.last_frequencies
@@ -6810,7 +7097,7 @@ class BlochSimulatorGUI(QMainWindow):
                     )
 
                     for p in range(npos):
-                        pos_val = positions[p] if p < len(positions) else 0
+                        pos_val = positions[p] if p < len(positions) else np.zeros(3)
                         for f_idx in range(nfreq):
                             freq_hz_val = (
                                 frequencies[f_idx] if f_idx < len(frequencies) else 0
@@ -6824,7 +7111,7 @@ class BlochSimulatorGUI(QMainWindow):
                                 [
                                     p,
                                     f_idx,
-                                    pos_val,
+                                    *(float(v) for v in pos_val),
                                     freq_hz_val,
                                     val_mx,
                                     val_my,
@@ -6965,6 +7252,12 @@ class BlochSimulatorGUI(QMainWindow):
                 "mode": self.mode_combo.currentText(),
                 "num_pos": self.pos_spin.value(),
                 "pos_range_mm": self.pos_range.value(),
+                "pos_geometry": self.pos_geometry_combo.currentText(),
+                "pos_axis": self.pos_axis_combo.currentText(),
+                "pos_plane": self.pos_plane_combo.currentText(),
+                "num_pos_2": self.pos2_spin.value(),
+                "pos_range_2_mm": self.pos2_range.value(),
+                "pos_center_mm": self._position_center_mm().tolist(),
                 "num_freq": self.freq_spin.value(),
                 "freq_center": self.freq_center.value(),
                 "freq_range": self.freq_range.value(),
@@ -6992,7 +7285,12 @@ class BlochSimulatorGUI(QMainWindow):
                 and self.sequence_designer.sequence_type.currentText()
                 == "Free Induction Decay"
             ),
-            "num_positions": self.pos_spin.value(),
+            "num_positions": int(np.prod(self._position_counts_and_spans_mm()[0])),
+            "position_geometry": "plane" if self._is_plane_geometry() else "line",
+            "position_axes": "".join(AXIS_NAMES[a] for a in self._position_axes()),
+            "position_counts": list(self._position_counts_and_spans_mm()[0]),
+            "position_ranges_mm": list(self._position_counts_and_spans_mm()[1]),
+            "position_center_mm": self._position_center_mm().tolist(),
             "position_range_mm": self.pos_range.value(),
             "position_range_cm": self.pos_range.value() / 10.0,
             "num_frequencies": self.freq_spin.value(),
@@ -7014,15 +7312,7 @@ class BlochSimulatorGUI(QMainWindow):
         if hasattr(self, "last_positions") and self.last_positions is not None:
             params["position_axis"] = self.last_positions
         else:
-            # Reconstruct from range if missing but requested
-            npos = self.pos_spin.value()
-            pos_span_mm = self.pos_range.value()
-            span_m = pos_span_mm / 1000.0
-            half_span = span_m / 2.0
-            positions = np.zeros((npos, 3))
-            if npos > 1:
-                positions[:, 2] = np.linspace(-half_span, half_span, npos)
-            params["position_axis"] = positions
+            params["position_axis"] = self._build_position_grid()
 
         if hasattr(self, "last_frequencies") and self.last_frequencies is not None:
             params["frequency_axis"] = self.last_frequencies
@@ -7165,10 +7455,8 @@ class BlochSimulatorGUI(QMainWindow):
             min(self.spectrum_pos_slider.value(), pos_count - 1) if pos_count > 0 else 0
         )
 
-        actual_pos_mm = 0.0
         if self.last_positions is not None and pos_sel < len(self.last_positions):
-            actual_pos_mm = self.last_positions[pos_sel, 2] * 1000
-            self.spectrum_pos_label.setText(f"Pos: {actual_pos_mm:.3f} mm")
+            self.spectrum_pos_label.setText(f"Pos: {self._position_label(pos_sel)}")
         else:
             self.spectrum_pos_label.setText(f"Pos idx: {pos_sel}")
 
@@ -8985,14 +9273,11 @@ class BlochSimulatorGUI(QMainWindow):
             my_slice = my_all[:, :, fi]
             mz_slice = mz_all[:, :, fi]
 
-            y_label = "Position (mm)"
             n_y = npos
-            if self.last_positions is not None:
-                # Assume Z-axis varying
-                pos_vals = self.last_positions[:, 2] * 1000
+            y_label, pos_vals = self._position_plot_axis()
+            if pos_vals is not None and len(pos_vals) == npos:
                 y_min, y_max = pos_vals[0], pos_vals[-1]
             else:
-                y_label = "Position Index"
                 y_min, y_max = 0, npos
 
         elif view_mode == "Freqs @ position":
@@ -9157,13 +9442,11 @@ class BlochSimulatorGUI(QMainWindow):
             fi = min(selector, nfreq - 1)
             signal_slice = signal_all[:, :, fi]  # (ntime, npos)
 
-            y_label = "Position (mm)"
             n_y = npos
-            if self.last_positions is not None:
-                pos_vals = self.last_positions[:, 2] * 1000
+            y_label, pos_vals = self._position_plot_axis()
+            if pos_vals is not None and len(pos_vals) == npos:
                 y_min, y_max = pos_vals[0], pos_vals[-1]
             else:
-                y_label = "Position Index"
                 y_min, y_max = 0, npos
 
         elif view_mode == "Freqs @ position":
