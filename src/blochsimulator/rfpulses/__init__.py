@@ -1,1 +1,1 @@
-"""Bundled RF waveforms used by sequence builders."""
+"""RF pulse library shipped with the package (see ``pulse_loader.PulseLibrary``)."""

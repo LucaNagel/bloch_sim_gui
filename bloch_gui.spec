@@ -33,9 +33,10 @@ datas += collect_data_files("rfc3987_syntax")
 datas += collect_data_files("imageio")
 datas += collect_data_files("imageio_ffmpeg")
 
-rf_dir = project_root / "rfpulses"
+rf_dir = project_root / "src" / "blochsimulator" / "rfpulses"
 if rf_dir.exists():
-    # Place rfpulses inside blochsimulator package so pulse_loader.py finds it relative to __file__
+    # Ship the same pulse library as the wheel; pulse_loader.py finds it
+    # relative to __file__
     datas.append((str(rf_dir), "blochsimulator/rfpulses"))
 
 # Native binaries

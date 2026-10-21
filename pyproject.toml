@@ -12,7 +12,13 @@ packages = [
 package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
-blochsimulator = ["rfpulses/*.txt"]
+blochsimulator = [
+    "rfpulses/*.txt",
+    "rfpulses/*.dat",
+    "rfpulses/*.json",
+    "rfpulses/*.exc",
+    "rfpulses/bruker/*.exc",
+]
 
 [project]
 name = "blochsimulator"
