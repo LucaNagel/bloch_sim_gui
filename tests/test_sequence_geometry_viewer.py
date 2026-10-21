@@ -6,12 +6,24 @@ import pytest
 from PyQt5.QtWidgets import QApplication
 
 from blochsimulator.default_phantoms import is_default_phantom
-from blochsimulator.mouse_phantom import MousePerfusionConfig
+from blochsimulator.mouse_phantom import (
+    MOUSE_TISSUE_COLORS,
+    MousePerfusionConfig,
+    MousePerfusionPhantom,
+)
+from blochsimulator.phantom import Phantom
+from blochsimulator.sequence.encoding import slice_package_positions
+from blochsimulator.spectral_phantom import ChemicalSpecies, SpectralPhantom
 from blochsimulator.ui.sequence_geometry_viewer import (
     OrientedBox,
+    SequenceGeometry,
+    SequenceGeometryViewer,
+    automatic_contrast,
     configured_object_box,
+    contrast_projections,
     convex_hull_2d,
     coverage_notes,
+    object_contrasts,
     phantom_grid_box,
     projected_outline_mm,
     sequence_geometry_from_definitions,
@@ -134,4 +146,254 @@ def test_sequence_workspace_uses_default_sphere_and_shows_geometry_tab():
 
     widget.close()
     widget.deleteLater()
+    app.processEvents()
+
+
+def test_geometry_tab_previews_sequence_parameter_changes():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.sequence_live_preview.setChecked(False)
+    widget.sequence_source.setCurrentIndex(widget.FLASH_SOURCE)
+    assert widget._reload_selected_generated_sequence()
+    widget.views.setCurrentIndex(widget.geometry_tab_index)
+    app.processEvents()
+    notice = widget.geometry_viewer.stale_notice
+    assert notice.isHidden()
+    assert "Generated (dotted)" not in widget.geometry_viewer.summary.text()
+
+    widget.flash_slice_offset_mm.setValue(4.0)
+    app.processEvents()
+    assert widget._sequence_generation_pending
+    assert not notice.isHidden()
+    label = widget.geometry_viewer.stale_notice_label.text()
+    assert "changed" in label and "Generate the sequence now?" in label
+    # The slice follows the form; the generated one stays as a reference.
+    summary = widget.geometry_viewer.summary.text()
+    assert "1 × 3 mm at 4 mm" in summary
+    generated_row = summary[summary.index("Generated (dotted)") :]
+    assert " at 0 mm" in generated_row
+
+    widget.geometry_viewer.update_button.click()
+    app.processEvents()
+    assert not widget._sequence_generation_pending
+    assert notice.isHidden()
+    summary = widget.geometry_viewer.summary.text()
+    assert " at 4 mm" in summary
+    assert "Generated (dotted)" not in summary
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_slice_package_is_centred_on_its_offset():
+    assert slice_package_positions(1, 0.003) == pytest.approx([0.0])
+    assert slice_package_positions(3, 0.004, 0.001, 0.002) == pytest.approx(
+        [-0.003, 0.002, 0.007]
+    )
+    assert slice_package_positions(2, 0.002, 0.0, -0.01) == pytest.approx(
+        [-0.011, -0.009]
+    )
+
+
+def _shift_slice_package(widget, prefix):
+    getattr(widget, f"{prefix}_slice_count").setValue(3)
+    getattr(widget, f"{prefix}_slice_gap_mm").setValue(1.0)
+    getattr(widget, f"{prefix}_slice_offset_mm").setValue(5.0)
+
+
+def test_planned_geometry_matches_the_generated_sequence():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.sequence_live_preview.setChecked(False)
+    cases = {
+        "EPI": (widget.EPI_SOURCE, "_epi_pulseq_parameters"),
+        "Spiral": (widget.EPI_SOURCE, "_spiral_pulseq_parameters"),
+        "CSI": (widget.CSI_SOURCE, "_csi_pulseq_parameters"),
+        "bSSFP": (widget.BSSFP_SOURCE, "_bssfp_pulseq_parameters"),
+        "Radial": (widget.RADIAL_ME_BSSFP_SOURCE, "_radial_me_bssfp_pulseq_parameters"),
+        "ME-bSSFP": (widget.ME_BSSFP_SOURCE, "_me_bssfp_pulseq_parameters"),
+        "FLASH": (widget.FLASH_SOURCE, "_flash_pulseq_parameters"),
+        "EPSI": (widget.EPSI_MGE_SOURCE, "_epsi_mge_pulseq_parameters"),
+        "Slice": (widget.SLICE_SELECTION_SOURCE, "_slice_selection_pulseq_parameters"),
+    }
+    _shift_slice_package(widget, "epi")
+    _shift_slice_package(widget, "epsi")
+    _shift_slice_package(widget, "flash")
+    widget.csi_slice_offset_mm.setValue(-6.0)
+    widget.bssfp_phase_matrix.setValue(6)
+    widget.slice_selection_offset_mm.setValue(7.0)
+    widget.slice_selection_axis.setCurrentText("-Y")
+    for label, (source, builder) in cases.items():
+        widget.epi_readout_trajectory.setCurrentText(
+            "Spiral" if label == "Spiral" else "Cartesian EPI"
+        )
+        widget.sequence_source.setCurrentIndex(source)
+        widget._sequence_generation_pending = True
+        planned = widget._planned_sequence_geometry()
+        assert planned is not None, label
+        # The Pulseq builders receive the geometry entries unchanged.
+        parameters = getattr(widget, builder)()
+        for key, value in widget._sequence_geometry_parameters(source).items():
+            assert parameters[key] == value, (label, key)
+
+        assert widget._reload_selected_generated_sequence(), label
+        assert widget._planned_sequence_geometry() is None, label
+        generated = widget._sequence_geometry()
+        assert planned.covers_same_region(generated), label
+        assert planned.matrix == generated.matrix, label
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_overlay_update_keeps_contrast_and_marks_generated_outline():
+    app = QApplication.instance() or QApplication(sys.argv)
+    viewer = SequenceGeometryViewer()
+    generated = SequenceGeometry(
+        frame=np.eye(3),
+        fov_m=(0.03, 0.03),
+        matrix=(16, 16),
+        slice_positions_m=(0.0,),
+        slice_thickness_m=0.003,
+    )
+    viewer.update_geometry(_two_sphere_phantom(), generated, object_label="Spheres")
+    combo = viewer.contrast_combo
+    combo.setCurrentIndex(combo.findData("concentration:Lactate"))
+    app.processEvents()
+
+    same = SequenceGeometry(
+        frame=np.eye(3),
+        fov_m=(0.03, 0.03),
+        matrix=(32, 32),
+        slice_positions_m=(0.0,),
+        slice_thickness_m=0.003,
+    )
+    viewer.set_sequence_geometry(same, generated_sequence=generated)
+    assert "Generated (dotted)" not in viewer.summary.text()
+
+    moved = SequenceGeometry(
+        frame=np.eye(3),
+        fov_m=(0.03, 0.03),
+        matrix=(16, 16),
+        slice_positions_m=(0.004,),
+        slice_thickness_m=0.003,
+    )
+    viewer.set_sequence_geometry(moved, generated_sequence=generated)
+    summary = viewer.summary.text()
+    assert "1 × 3 mm at 4 mm" in summary
+    assert "Generated (dotted)" in summary
+    assert viewer.contrast.key == "concentration:Lactate"
+    assert "Lactate concentration" in summary
+
+    viewer.set_sequence_geometry(None, generated_sequence=generated)
+    assert "Generated (dotted)" not in viewer.summary.text()
+    viewer.deleteLater()
+    app.processEvents()
+
+
+def _two_sphere_phantom(lactate_scale=1.0):
+    n = 20
+    coordinate = (np.arange(n) + 0.5) / n - 0.5
+    x, y, z = np.meshgrid(coordinate, coordinate, coordinate, indexing="ij")
+    left = (x + 0.2) ** 2 + y**2 + z**2 <= 0.15**2
+    right = (x - 0.2) ** 2 + y**2 + z**2 <= 0.1**2
+    species = [
+        ChemicalSpecies(name="Pyruvate", chemical_shift_ppm=0.0, t1=30.0, t2=0.5),
+        ChemicalSpecies(name="Lactate", chemical_shift_ppm=12.0, t1=30.0, t2=0.5),
+    ]
+    return SpectralPhantom(
+        shape=(n, n, n),
+        fov=(0.04, 0.04, 0.04),
+        species=species,
+        concentration_maps={
+            "Pyruvate": left * 10.0,
+            "Lactate": right * 10.0 * lactate_scale,
+        },
+    )
+
+
+def test_anatomy_labels_drive_the_automatic_mouse_contrast():
+    mouse = MousePerfusionPhantom.from_config(MousePerfusionConfig(shape=(16, 16, 24)))
+    contrasts = object_contrasts(mouse)
+    contrast = automatic_contrast(contrasts)
+    assert contrast.key == "anatomy"
+    assert 0 not in contrast.categories
+    names = [name for name, _color in contrast.categories.values()]
+    assert names[0] == "Soft tissue"  # Largest region, painted first.
+    assert "Liver" in names
+    # kPL stays selectable and differs between organs and body.
+    assert any(item.key == "kpl" and item.score > 0.5 for item in contrasts)
+
+    projections, shown_range = contrast_projections(mouse, contrast)
+    assert shown_range is None
+    xy, _rect = projections[0]
+    assert xy.dtype == np.uint8 and xy.shape == (16, 16, 4)
+    colors = {tuple(pixel[:3]) for pixel in xy.reshape(-1, 4) if pixel[3]}
+    assert MOUSE_TISSUE_COLORS[6] in colors  # Liver
+    assert set(np.unique(xy[..., 3])) <= {0, 255}
+
+
+def test_species_regions_or_widest_map_set_the_contrast():
+    # Two compartments of different species show as species regions.
+    two_species = automatic_contrast(object_contrasts(_two_sphere_phantom()))
+    assert two_species.key == "species"
+    assert [name for name, _ in two_species.categories.values()] == [
+        "Pyruvate",
+        "Lactate",
+    ]
+
+    # Without a second region, the most varying map is shown instead.
+    phantom = _two_sphere_phantom(lactate_scale=0.0)
+    phantom.concentration_maps["Pyruvate"][
+        phantom.concentration_maps["Pyruvate"] > 0
+    ] = 10.0
+    phantom.concentration_maps["Pyruvate"][:, :, :8] *= 0.5
+    contrasts = object_contrasts(phantom)
+    assert "species" not in {item.key for item in contrasts}
+    contrast = automatic_contrast(contrasts)
+    assert contrast.key == "concentration"
+    assert contrast.value_range == pytest.approx((5.0, 10.0))
+    projections, shown_range = contrast_projections(phantom, contrast)
+    assert 5.0 <= shown_range[0] < shown_range[1] <= 10.0
+    xz, _rect = projections[1]
+    assert np.any(xz[..., 3] == 0) and np.any(xz[..., 3] == 255)
+
+    # Relaxation maps of a plain phantom work the same way.
+    shape = (8, 8, 8)
+    t1 = np.full(shape, 1.0)
+    t1[:4] = 0.5
+    plain = Phantom(shape=shape, fov=(0.02,) * 3, t1_map=t1, t2_map=np.full(shape, 0.1))
+    assert automatic_contrast(object_contrasts(plain)).key == "t1"
+
+    # Uniform objects keep the plain density projection.
+    uniform = Phantom(
+        shape=shape, fov=(0.02,) * 3, t1_map=np.ones(shape), t2_map=np.ones(shape)
+    )
+    assert automatic_contrast(object_contrasts(uniform)) is None
+
+
+def test_geometry_viewer_contrast_selector_overrides_auto():
+    app = QApplication.instance() or QApplication(sys.argv)
+    viewer = SequenceGeometryViewer()
+    combo = viewer.contrast_combo
+    viewer.update_geometry(None, None)
+    assert not combo.isEnabled()
+    assert combo.itemText(0) == "Auto: object density"
+
+    viewer.update_geometry(_two_sphere_phantom(), None, object_label="Spheres")
+    assert combo.isEnabled()
+    assert combo.itemText(0) == "Auto: Dominant species"
+    assert viewer.contrast.key == "species"
+    assert "Pyruvate" in viewer.summary.text()
+    combo.setCurrentIndex(combo.findData("concentration:Lactate"))
+    app.processEvents()
+    assert viewer.contrast.key == "concentration:Lactate"
+    assert "Lactate concentration" in viewer.summary.text()
+    assert viewer.images[0].image.shape[-1] == 4
+
+    # A redraw keeps the chosen property while the object still has it.
+    viewer.update_geometry(_two_sphere_phantom(), None, object_label="Spheres")
+    assert viewer.contrast.key == "concentration:Lactate"
+    viewer.deleteLater()
     app.processEvents()

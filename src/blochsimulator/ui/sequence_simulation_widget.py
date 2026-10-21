@@ -111,7 +111,12 @@ from ..sequence import (
     variable_flip_angle_schedule,
 )
 from ..sequence.bruker_export import suggest_bruker_method
-from ..sequence.encoding import _axis_vector, numeric_definition_array
+from ..sequence.encoding import (
+    _axis_vector,
+    numeric_definition_array,
+    resolve_encoding_frame,
+    slice_package_positions,
+)
 from ..sequence.export_bundle import existing_export_targets, perform_sequence_export
 from ..sequence.internal_fid import make_internal_fid
 from ..sequence.parameter_loop import (
@@ -163,6 +168,8 @@ from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumView
 from .project_export_dialog import ProjectExportNamingWidget
 from .reconstruction_explorer import SequenceReconstructionExplorer
 from .sequence_geometry_viewer import (
+    STALE_SEQUENCE_MESSAGE,
+    SequenceGeometry,
     SequenceGeometryViewer,
     sequence_geometry_from_definitions,
 )
@@ -180,6 +187,10 @@ from .widgets import (
     style_image_item,
 )
 from .default_settings import WorkspaceDefaults, load_kernel_settings
+
+
+# Run progress is drawn in permille so time extrapolation moves smoothly.
+RUN_PROGRESS_SCALE = 1000
 
 
 def _format_duration(seconds):
@@ -1491,6 +1502,7 @@ class SequenceSimulationWidget(QWidget):
         self._simulation_last_progress_done = 0
         self._simulation_last_progress_total = 1
         self._simulation_progress_rate = None
+        self._simulation_displayed_fraction = 0.0
         self._probe_playback_anchor_wall = None
         self._probe_playback_anchor_time_ms = None
         self._probe_playback_indices = np.zeros(0, dtype=np.int64)
@@ -1551,7 +1563,7 @@ class SequenceSimulationWidget(QWidget):
         )
         self.simulation_time_timer = QTimer(self)
         self.simulation_time_timer.setInterval(1000)
-        self.simulation_time_timer.timeout.connect(self._update_simulation_time_label)
+        self.simulation_time_timer.timeout.connect(self._update_run_progress_display)
         settings = getattr(parent, "app_settings", None)
         self.app_settings = settings
         self.signal_unit = normalize_signal_unit(
@@ -4490,9 +4502,6 @@ class SequenceSimulationWidget(QWidget):
         self.progress.setTextVisible(True)
         self.progress.setFormat("Not started")
         run_panel_layout.addWidget(self.progress)
-        self.simulation_time_label = QLabel("Elapsed: — · Remaining: —")
-        self.simulation_time_label.setWordWrap(True)
-        run_panel_layout.addWidget(self.simulation_time_label)
         self.export_button = QPushButton("Export results…")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self._export_results)
@@ -4515,7 +4524,6 @@ class SequenceSimulationWidget(QWidget):
             self.run_button,
             self.open_parameter_loop_button,
             self.progress,
-            self.simulation_time_label,
             self.export_button,
             self.status,
         )
@@ -5072,12 +5080,14 @@ class SequenceSimulationWidget(QWidget):
             "Inspect the generated RF, gradient, and ADC sequence waveforms.",
         )
         self.geometry_viewer = SequenceGeometryViewer()
+        self.geometry_viewer.update_requested.connect(self._geometry_update_requested)
         self.geometry_tab_index = views.addTab(self.geometry_viewer, "Geometry")
         views.setTabToolTip(
             self.geometry_tab_index,
             "Check object, simulated grid, sequence FOV and slices before running.",
         )
         self._geometry_viewer_stale = True
+        self._geometry_overlays_stale = False
         views.currentChanged.connect(self._views_current_changed)
 
         signal_page = QWidget()
@@ -6994,6 +7004,7 @@ class SequenceSimulationWidget(QWidget):
         self._sequence_generation_pending = True
         self._sequence_revision += 1
         self._update_probe_stale_warning()
+        self._schedule_geometry_refresh(sequence_only=True)
         self.generate_sequence_button.setEnabled(True)
         if self.program is None:
             preview_text = "No generated sequence is loaded yet."
@@ -7089,6 +7100,7 @@ class SequenceSimulationWidget(QWidget):
             if source_index == self.FLASH_SOURCE:
                 self._update_flash_spoiler_info()
             self._update_spoiling_quality()
+            self._update_geometry_stale_notice()
             self._emit_physical_b1_changed()
             return True
         for name, value in previous_state.items():
@@ -9361,13 +9373,124 @@ class SequenceSimulationWidget(QWidget):
         )
         return answer == QMessageBox.Yes
 
+    def _slice_package_parameters(self, prefix):
+        return {
+            "slice_thickness_m": (
+                getattr(self, f"{prefix}_slice_thickness_mm").value() / 1000.0
+            ),
+            "slice_gap_m": getattr(self, f"{prefix}_slice_gap_mm").value() / 1000.0,
+            "n_slices": getattr(self, f"{prefix}_slice_count").value(),
+            "slice_offset_m": (
+                getattr(self, f"{prefix}_slice_offset_mm").value() / 1000.0
+            ),
+        }
+
+    def _sequence_geometry_parameters(self, source_index):
+        """Return the form values that place a generated sequence in space.
+
+        The Pulseq parameter builders take these entries unchanged, so the
+        geometry preview cannot drift from the generated sequence. Reading
+        them designs no RF pulse and changes no control. Mismatched read and
+        phase axes raise ValueError.
+        """
+        source_index = int(source_index)
+        if source_index == self.SLICE_SELECTION_SOURCE:
+            return {
+                "slice_thickness_m": (
+                    self.slice_selection_thickness_mm.value() / 1000.0
+                ),
+                "slice_offset_m": self.slice_selection_offset_mm.value() / 1000.0,
+                "slice_axis": self.slice_selection_axis.currentText().lower(),
+            }
+        if source_index == self.RADIAL_ME_BSSFP_SOURCE:
+            return {
+                "fov_m": self.radial_me_fov_mm.value() / 1000.0,
+                "base_resolution": self.radial_me_base_resolution.value(),
+                "readout_oversampling": self.radial_me_readout_oversampling.value(),
+                "encoding_axes": self._three_dimensional_encoding_frame(
+                    source_index
+                ).axis_codes,
+            }
+        if source_index in self.CARTESIAN_3D_SOURCES:
+            fov_m, matrix = {
+                self.BSSFP_SOURCE: (
+                    self._bssfp_fov_m(),
+                    (
+                        self.bssfp_read_matrix,
+                        self.bssfp_phase_matrix,
+                        self.bssfp_partition_matrix,
+                    ),
+                ),
+                self.SS_BSSFP_SOURCE: (
+                    self._ss_bssfp_fov_m(),
+                    (
+                        self.ss_bssfp_read_matrix,
+                        self.ss_bssfp_phase_matrix,
+                        self.ss_bssfp_partition_matrix,
+                    ),
+                ),
+                self.ME_BSSFP_SOURCE: (
+                    self._me_bssfp_fov_m(),
+                    (
+                        self.me_bssfp_read_matrix,
+                        self.me_bssfp_phase_matrix,
+                        self.me_bssfp_partition_matrix,
+                    ),
+                ),
+            }[source_index]
+            return {
+                "fov_m": fov_m,
+                "matrix": tuple(spin.value() for spin in matrix),
+                "encoding_axes": self._three_dimensional_encoding_frame(
+                    source_index
+                ).axis_codes,
+            }
+        two_dimensional = {
+            self.EPI_SOURCE: (
+                self._epi_fov_m(),
+                (self.read_matrix, self.phase_matrix),
+                self._slice_package_parameters("epi"),
+            ),
+            self.EPSI_MGE_SOURCE: (
+                (
+                    self.epsi_read_fov_mm.value() / 1000.0,
+                    self.epsi_phase_fov_mm.value() / 1000.0,
+                ),
+                (self.epsi_read_matrix, self.epsi_phase_matrix),
+                self._slice_package_parameters("epsi"),
+            ),
+            self.FLASH_SOURCE: (
+                self._flash_fov_m(),
+                (self.flash_read_matrix, self.flash_phase_matrix),
+                self._slice_package_parameters("flash"),
+            ),
+            # CSI excites a single slice.
+            self.CSI_SOURCE: (
+                self._csi_fov_m(),
+                (self.csi_read_matrix, self.csi_phase_matrix),
+                {
+                    "slice_thickness_m": self.csi_slice_thickness_mm.value() / 1000.0,
+                    "slice_offset_m": self.csi_slice_offset_mm.value() / 1000.0,
+                },
+            ),
+        }.get(source_index)
+        if two_dimensional is None:
+            return {}
+        fov_m, matrix, slices = two_dimensional
+        frame = self._two_dimensional_encoding_frame(source_index)
+        return {
+            "fov_m": fov_m,
+            "matrix": tuple(spin.value() for spin in matrix),
+            **slices,
+            "encoding_axes": frame.axis_codes,
+        }
+
     def _epi_pulseq_parameters(self):
         ernst = self._update_ernst_controls(
             "epi", self.epi_repetition_time_ms.value(), has_vfa=True
         )
         parameters = {
-            "fov_m": self._epi_fov_m(),
-            "matrix": (self.read_matrix.value(), self.phase_matrix.value()),
+            **self._sequence_geometry_parameters(self.EPI_SOURCE),
             "sampling_bandwidth_hz": self.sampling_bandwidth_khz.value() * 1000.0,
             "readout_strategy": (
                 "flyback"
@@ -9381,18 +9504,11 @@ class SequenceSimulationWidget(QWidget):
             ),
             "variable_flip_angle": self.epi_variable_flip_angle.isChecked(),
             "vfa_final_flip_angle_deg": self.epi_vfa_final_flip_angle_deg.value(),
-            "slice_thickness_m": self.epi_slice_thickness_mm.value() / 1000.0,
-            "slice_gap_m": self.epi_slice_gap_mm.value() / 1000.0,
-            "n_slices": self.epi_slice_count.value(),
             "repetitions": self.epi_repetitions.value(),
             "echo_time_s": self.epi_echo_time_ms.value() / 1000.0,
             "repetition_time_s": self.epi_repetition_time_ms.value() / 1000.0,
             "rf_spoiling": self._rf_spoiling_is_effective("epi"),
             "rf_spoiling_increment_deg": (self.epi_rf_spoiling_increment_deg.value()),
-            "slice_offset_m": self.epi_slice_offset_mm.value() / 1000.0,
-            "encoding_axes": self._two_dimensional_encoding_frame(
-                self.EPI_SOURCE
-            ).axis_codes,
             "spoil_after_slice": self.epi_spoil_after_slice.isChecked(),
             "spoiler_cycles_per_slice": self.epi_spoiler_cycles_per_slice.value(),
             "spoiler_cycles_per_voxel": self.epi_spoiler_cycles_per_voxel.value(),
@@ -9411,14 +9527,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _epsi_mge_pulseq_parameters(self):
         parameters = {
-            "fov_m": (
-                self.epsi_read_fov_mm.value() / 1000.0,
-                self.epsi_phase_fov_mm.value() / 1000.0,
-            ),
-            "matrix": (
-                self.epsi_read_matrix.value(),
-                self.epsi_phase_matrix.value(),
-            ),
+            **self._sequence_geometry_parameters(self.EPSI_MGE_SOURCE),
             "echoes": self.epsi_echoes.value(),
             "echo_spacing_s": self.epsi_echo_spacing_ms.value() / 1000.0,
             "readout_strategy": (
@@ -9430,10 +9539,6 @@ class SequenceSimulationWidget(QWidget):
                 self.epsi_sampling_bandwidth_khz.value() * 1000.0
             ),
             "flip_angle_deg": self.epsi_flip_angle_deg.value(),
-            "slice_thickness_m": self.epsi_slice_thickness_mm.value() / 1000.0,
-            "slice_gap_m": self.epsi_slice_gap_mm.value() / 1000.0,
-            "n_slices": self.epsi_slice_count.value(),
-            "slice_offset_m": self.epsi_slice_offset_mm.value() / 1000.0,
             "echo_time_s": self.epsi_echo_time_ms.value() / 1000.0,
             "repetition_time_s": self.epsi_repetition_time_ms.value() / 1000.0,
             "repetitions": self.epsi_repetitions.value(),
@@ -9446,9 +9551,6 @@ class SequenceSimulationWidget(QWidget):
             "spoiler_cycles_per_slice": (self.epsi_spoiler_cycles_per_slice.value()),
             "spoiler_cycles_per_voxel": (self.epsi_spoiler_cycles_per_voxel.value()),
             "spoiler_duration_s": self.epsi_spoiler_duration_ms.value() / 1000.0,
-            "encoding_axes": self._two_dimensional_encoding_frame(
-                self.EPSI_MGE_SOURCE
-            ).axis_codes,
             "nucleus": self.nucleus.currentText(),
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
@@ -9460,12 +9562,7 @@ class SequenceSimulationWidget(QWidget):
             "csi", self.csi_repetition_time_ms.value(), has_vfa=True
         )
         parameters = {
-            "fov_m": self._csi_fov_m(),
-            "matrix": (
-                self.csi_read_matrix.value(),
-                self.csi_phase_matrix.value(),
-            ),
-            "slice_thickness_m": self.csi_slice_thickness_mm.value() / 1000.0,
+            **self._sequence_geometry_parameters(self.CSI_SOURCE),
             "spectral_bandwidth_hz": self.csi_bandwidth_hz.value(),
             "spectral_points": self.csi_spectral_points.value(),
             "phase_encoding_order": self.csi_encoding_order.currentText(),
@@ -9484,10 +9581,6 @@ class SequenceSimulationWidget(QWidget):
             "acquisition_interval_s": self._optional_acquisition_interval_s(
                 self.csi_acquisition_interval_ms
             ),
-            "slice_offset_m": self.csi_slice_offset_mm.value() / 1000.0,
-            "encoding_axes": self._two_dimensional_encoding_frame(
-                self.CSI_SOURCE
-            ).axis_codes,
             "spoil_after_readout": self.csi_spoil_after_readout.isChecked(),
             "spoiler_cycles_per_slice": self.csi_spoiler_cycles_per_slice.value(),
             "spoiler_cycles_per_voxel": self.csi_spoiler_cycles_per_voxel.value(),
@@ -9503,11 +9596,7 @@ class SequenceSimulationWidget(QWidget):
             "flash", self.flash_repetition_time_ms.value()
         )
         parameters = {
-            "fov_m": self._flash_fov_m(),
-            "matrix": (
-                self.flash_read_matrix.value(),
-                self.flash_phase_matrix.value(),
-            ),
+            **self._sequence_geometry_parameters(self.FLASH_SOURCE),
             "sampling_bandwidth_hz": (
                 self.flash_sampling_bandwidth_khz.value() * 1000.0
             ),
@@ -9516,10 +9605,6 @@ class SequenceSimulationWidget(QWidget):
                 if ernst is not None
                 else self.flash_flip_angle_deg.value()
             ),
-            "slice_thickness_m": self.flash_slice_thickness_mm.value() / 1000.0,
-            "slice_gap_m": self.flash_slice_gap_mm.value() / 1000.0,
-            "n_slices": self.flash_slice_count.value(),
-            "slice_offset_m": self.flash_slice_offset_mm.value() / 1000.0,
             "echo_time_s": self.flash_echo_time_ms.value() / 1000.0,
             "repetition_time_s": (self.flash_repetition_time_ms.value() / 1000.0),
             "repetitions": self.flash_repetitions.value(),
@@ -9531,9 +9616,6 @@ class SequenceSimulationWidget(QWidget):
             "spoiler_cycles_per_slice": (self.flash_spoiler_cycles_per_slice.value()),
             "spoiler_cycles_per_voxel": (self.flash_spoiler_cycles_per_voxel.value()),
             "spoiler_duration_s": self.flash_spoiler_duration_ms.value() / 1000.0,
-            "encoding_axes": self._two_dimensional_encoding_frame(
-                self.FLASH_SOURCE
-            ).axis_codes,
             "nucleus": self.nucleus.currentText(),
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
@@ -9542,12 +9624,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _bssfp_pulseq_parameters(self):
         parameters = {
-            "fov_m": self._bssfp_fov_m(),
-            "matrix": (
-                self.bssfp_read_matrix.value(),
-                self.bssfp_phase_matrix.value(),
-                self.bssfp_partition_matrix.value(),
-            ),
+            **self._sequence_geometry_parameters(self.BSSFP_SOURCE),
             "sampling_bandwidth_hz": self.bssfp_bandwidth_khz.value() * 1000.0,
             "flip_angle_deg": self.bssfp_flip_angle_deg.value(),
             "repetition_time_s": self.bssfp_repetition_time_ms.value() / 1000.0,
@@ -9567,9 +9644,6 @@ class SequenceSimulationWidget(QWidget):
                 self.bssfp_acquisition_interval_ms
             ),
             "use_alpha_half": self.bssfp_alpha_half.isChecked(),
-            "encoding_axes": self._three_dimensional_encoding_frame(
-                self.BSSFP_SOURCE
-            ).axis_codes,
             "nucleus": self.nucleus.currentText(),
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
@@ -9597,12 +9671,7 @@ class SequenceSimulationWidget(QWidget):
         if not target_names:
             raise ValueError("Target names must not be empty")
         parameters = {
-            "fov_m": self._ss_bssfp_fov_m(),
-            "matrix": (
-                self.ss_bssfp_read_matrix.value(),
-                self.ss_bssfp_phase_matrix.value(),
-                self.ss_bssfp_partition_matrix.value(),
-            ),
+            **self._sequence_geometry_parameters(self.SS_BSSFP_SOURCE),
             "target_frequency_offsets_hz": self._comma_separated_floats(
                 self.ss_bssfp_target_offsets_hz.text(), "RF target offsets"
             ),
@@ -9654,9 +9723,6 @@ class SequenceSimulationWidget(QWidget):
             ),
             "field_strength_t": self.field_strength_t.value(),
             "nucleus": self.nucleus.currentText(),
-            "encoding_axes": self._three_dimensional_encoding_frame(
-                self.SS_BSSFP_SOURCE
-            ).axis_codes,
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
         shared_rf = self._shared_rf_parameters("ss_bssfp")
@@ -9676,9 +9742,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _radial_me_bssfp_pulseq_parameters(self):
         parameters = {
-            "fov_m": self.radial_me_fov_mm.value() / 1000.0,
-            "base_resolution": self.radial_me_base_resolution.value(),
-            "readout_oversampling": self.radial_me_readout_oversampling.value(),
+            **self._sequence_geometry_parameters(self.RADIAL_ME_BSSFP_SOURCE),
             "spokes_per_measurement": self.radial_me_spokes.value(),
             "measurements": self.radial_me_measurements.value(),
             "acquisition_interval_s": self._optional_acquisition_interval_s(
@@ -9707,9 +9771,6 @@ class SequenceSimulationWidget(QWidget):
             "inter_measurement_rotation_deg": self.radial_me_rotation_deg.value(),
             "field_strength_t": self.field_strength_t.value(),
             "nucleus": self.nucleus.currentText(),
-            "encoding_axes": self._three_dimensional_encoding_frame(
-                self.RADIAL_ME_BSSFP_SOURCE
-            ).axis_codes,
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
         parameters.update(self._shared_rf_parameters("radial_me"))
@@ -9717,12 +9778,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _me_bssfp_pulseq_parameters(self):
         parameters = {
-            "fov_m": self._me_bssfp_fov_m(),
-            "matrix": (
-                self.me_bssfp_read_matrix.value(),
-                self.me_bssfp_phase_matrix.value(),
-                self.me_bssfp_partition_matrix.value(),
-            ),
+            **self._sequence_geometry_parameters(self.ME_BSSFP_SOURCE),
             "echoes": self.me_bssfp_echoes.value(),
             "echo_spacing_s": self.me_bssfp_echo_spacing_ms.value() / 1000.0,
             "readout_strategy": (
@@ -9757,9 +9813,6 @@ class SequenceSimulationWidget(QWidget):
             ),
             "field_strength_t": self.field_strength_t.value(),
             "nucleus": self.nucleus.currentText(),
-            "encoding_axes": self._three_dimensional_encoding_frame(
-                self.ME_BSSFP_SOURCE
-            ).axis_codes,
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
         parameters.update(self._shared_rf_parameters("me_bssfp"))
@@ -9833,9 +9886,7 @@ class SequenceSimulationWidget(QWidget):
         parameters.update(
             flip_angle_deg=self.slice_selection_flip_angle_deg.value(),
             rf_phase_deg=self.slice_selection_rf_phase_deg.value(),
-            slice_thickness_m=self.slice_selection_thickness_mm.value() / 1000.0,
-            slice_offset_m=self.slice_selection_offset_mm.value() / 1000.0,
-            slice_axis=self.slice_selection_axis.currentText().lower(),
+            **self._sequence_geometry_parameters(self.SLICE_SELECTION_SOURCE),
             slice_gradient_enabled=self.slice_selection_gradient_enabled.isChecked(),
             rephase=(
                 self.slice_selection_gradient_enabled.isChecked()
@@ -11366,17 +11417,124 @@ class SequenceSimulationWidget(QWidget):
         if index == getattr(self, "geometry_tab_index", -1):
             self._schedule_geometry_refresh()
 
-    def _schedule_geometry_refresh(self):
-        """Redraw the geometry tab once, and only while it is visible."""
+    def _update_geometry_stale_notice(self, previewing=None):
+        """Ask for an update while the drawn sequence lags its parameters."""
         if not hasattr(self, "geometry_viewer"):
             return
-        self._geometry_viewer_stale = True
+        stale = (
+            self._sequence_generation_pending
+            and self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES
+        )
+        if previewing is None:
+            previewing = self._planned_sequence_geometry() is not None
+        if previewing:
+            if self.program is None:
+                message = (
+                    "No sequence has been generated yet; the views show the FOV "
+                    "and slices of the current parameters."
+                )
+            else:
+                message = (
+                    "Sequence parameters changed. The views show the new FOV "
+                    "and slices, but timing and k-space are not regenerated yet."
+                )
+            self.geometry_viewer.set_stale(stale, message, "Generate the sequence now?")
+            return
+        if self.program is None:
+            message = "No sequence has been generated for these parameters yet."
+        else:
+            message = STALE_SEQUENCE_MESSAGE
+        self.geometry_viewer.set_stale(stale, message)
+
+    def _geometry_update_requested(self):
+        self._generate_sequence_clicked()
+        self._schedule_geometry_refresh(sequence_only=True)
+
+    def _schedule_geometry_refresh(self, *, sequence_only=False):
+        """Redraw the geometry tab once, and only while it is visible.
+
+        ``sequence_only`` keeps the object projections and redraws just the
+        FOV and slice overlays; a pending full redraw still wins.
+        """
+        if not hasattr(self, "geometry_viewer"):
+            return
+        if sequence_only:
+            self._geometry_overlays_stale = True
+        else:
+            self._geometry_viewer_stale = True
         if self.views.currentIndex() != self.geometry_tab_index:
+            self._update_geometry_stale_notice()
             return
         if getattr(self, "_geometry_refresh_queued", False):
             return
         self._geometry_refresh_queued = True
         QTimer.singleShot(0, self._refresh_geometry_viewer)
+
+    def _geometry_preview_active(self):
+        """Return whether the geometry tab should show unsent form values."""
+        return self.sequence_source.currentIndex() in self.GENERATED_SOURCES and (
+            self._sequence_generation_pending or self.program is None
+        )
+
+    def _planned_sequence_geometry(self):
+        """Return the FOV and slices the current form values would generate.
+
+        Returns None when the shown sequence is current, for sources without
+        a form, and while the form holds an invalid axis combination.
+        """
+        if not self._geometry_preview_active():
+            return None
+        source_index = self.sequence_source.currentIndex()
+        try:
+            parameters = self._sequence_geometry_parameters(source_index)
+        except ValueError:
+            return None
+        name = self.sequence_source.currentText()
+        if source_index == self.SLICE_SELECTION_SOURCE:
+            return SequenceGeometry(
+                frame=self._slice_axis_frame(parameters["slice_axis"]),
+                slice_positions_m=(parameters["slice_offset_m"],),
+                slice_thickness_m=parameters["slice_thickness_m"],
+                name=name,
+            )
+        frame = resolve_encoding_frame(parameters["encoding_axes"]).matrix
+        if source_index == self.RADIAL_ME_BSSFP_SOURCE:
+            samples = parameters["base_resolution"] * parameters["readout_oversampling"]
+            return SequenceGeometry(
+                frame=frame,
+                fov_m=(parameters["fov_m"],) * 3,
+                matrix=(samples,) * 3,
+                name=name,
+            )
+        thickness = parameters.get("slice_thickness_m")
+        positions = ()
+        if thickness is not None:
+            positions = tuple(
+                slice_package_positions(
+                    parameters.get("n_slices", 1),
+                    thickness,
+                    parameters.get("slice_gap_m", 0.0),
+                    parameters["slice_offset_m"],
+                )
+            )
+        return SequenceGeometry(
+            frame=frame,
+            fov_m=tuple(parameters["fov_m"]),
+            matrix=tuple(parameters["matrix"]),
+            slice_positions_m=positions,
+            slice_thickness_m=thickness,
+            name=name,
+        )
+
+    @staticmethod
+    def _slice_axis_frame(axis_code):
+        """Return a frame whose third column is the given slice normal."""
+        normal = _axis_vector(str(axis_code), "slice axis")
+        axis = int(np.flatnonzero(np.abs(normal) > 0.5)[0])
+        in_plane = [index for index in range(3) if index != axis]
+        return np.column_stack(
+            (np.eye(3)[:, in_plane[0]], np.eye(3)[:, in_plane[1]], normal)
+        )
 
     def _sequence_geometry(self):
         """Return the encoded FOV and slices of the shown sequence."""
@@ -11395,15 +11553,9 @@ class SequenceSimulationWidget(QWidget):
         axis_code = normalized.get("slicegradientaxis")
         if axis_code is not None:
             try:
-                normal = _axis_vector(str(axis_code), "slice axis")
+                frame_matrix = self._slice_axis_frame(axis_code)
             except ValueError:
-                normal = None
-            if normal is not None:
-                axis = int(np.flatnonzero(np.abs(normal) > 0.5)[0])
-                in_plane = [index for index in range(3) if index != axis]
-                frame_matrix = np.column_stack(
-                    (np.eye(3)[:, in_plane[0]], np.eye(3)[:, in_plane[1]], normal)
-                )
+                pass
         else:
             try:
                 frame_matrix = EncodingFrame.from_definitions(definitions).matrix
@@ -11447,9 +11599,23 @@ class SequenceSimulationWidget(QWidget):
 
     def _refresh_geometry_viewer(self):
         self._geometry_refresh_queued = False
-        if not self._geometry_viewer_stale:
+        full = self._geometry_viewer_stale
+        if not full and not self._geometry_overlays_stale:
             return
         self._geometry_viewer_stale = False
+        self._geometry_overlays_stale = False
+        # While parameters wait for generation, the views follow the form and
+        # keep the last generated placement as a dotted reference.
+        generated = self._sequence_geometry()
+        sequence = self._planned_sequence_geometry()
+        self._update_geometry_stale_notice(previewing=sequence is not None)
+        if sequence is None:
+            sequence, generated = generated, None
+        if not full:
+            self.geometry_viewer.set_sequence_geometry(
+                sequence, generated_sequence=generated
+            )
+            return
         phantom, label = self._geometry_viewer_object()
         probe_position = None
         if self.object_source.currentIndex() == 2:
@@ -11463,9 +11629,10 @@ class SequenceSimulationWidget(QWidget):
             )
         self.geometry_viewer.update_geometry(
             phantom,
-            self._sequence_geometry(),
+            sequence,
             object_label=label,
             probe_position_m=probe_position,
+            generated_sequence=generated,
         )
 
     def _sequence_plot_range_changed(self, _view_box, x_range):
@@ -12036,7 +12203,7 @@ class SequenceSimulationWidget(QWidget):
             self._cancel()
 
     def _probe_progress(self, done, total):
-        self.probe_status.setText(f"Probe chunk {done}/{total}")
+        self.probe_status.setText(f"Probe isochromats {done:,}/{total:,}")
 
     def _probe_status_update(self, message):
         message = str(message)
@@ -12767,9 +12934,6 @@ class SequenceSimulationWidget(QWidget):
         self.receiver_noise.setEnabled(False)
         work_units = self._estimated_work_units()
         self._clear_previous_simulation_views()
-        self.progress.setRange(0, work_units)
-        self.progress.setValue(0)
-        self.progress.setFormat("0% · Estimating remaining time…")
         self._simulation_started_at = time.monotonic()
         self._simulation_started_at_utc = datetime.now(timezone.utc).isoformat()
         self._simulation_progress_started_at = None
@@ -12778,8 +12942,9 @@ class SequenceSimulationWidget(QWidget):
         self._simulation_last_progress_done = 0
         self._simulation_last_progress_total = work_units
         self._simulation_progress_rate = None
+        self._simulation_displayed_fraction = 0.0
         self.simulation_time_timer.start()
-        self._update_simulation_time_label()
+        self._update_run_progress_display()
         self._status_update("Preparing and compiling sequence…")
         chunk_voxels = self._preview_chunk_voxels()
         self.worker = SequenceSimulationThread(
@@ -12820,24 +12985,17 @@ class SequenceSimulationWidget(QWidget):
     def _progress(self, done, total):
         total = max(1, int(total))
         done = min(total, max(0, int(done)))
-        self.progress.setRange(0, total)
-        self.progress.setValue(done)
-        self._simulation_last_progress_total = total
-        percent = min(100, int(round(100.0 * done / total)))
         now = time.monotonic()
         if self._simulation_started_at is None:
             self._simulation_started_at = now
-        if self._simulation_progress_started_at is None:
+        if (
+            self._simulation_progress_started_at is None
+            or self._simulation_progress_baseline_done is None
+        ):
             self._simulation_progress_started_at = now
             self._simulation_progress_baseline_done = done
-            self._simulation_last_progress_at = now
-            self._simulation_last_progress_done = done
         else:
-            baseline_done = self._simulation_progress_baseline_done
-            if baseline_done is None:
-                baseline_done = done
-                self._simulation_progress_baseline_done = done
-            completed_work = done - baseline_done
+            completed_work = done - self._simulation_progress_baseline_done
             measured_s = now - self._simulation_progress_started_at
             if completed_work > 0 and measured_s > 0.0:
                 # Progress callbacks arrive after uneven voxel chunks.  A rate
@@ -12845,61 +13003,55 @@ class SequenceSimulationWidget(QWidget):
                 # ETA abruptly.  The cumulative throughput remains anchored at
                 # the post-compilation baseline and converges as work completes.
                 self._simulation_progress_rate = completed_work / measured_s
-            if done > self._simulation_last_progress_done:
-                self._simulation_last_progress_at = now
-                self._simulation_last_progress_done = done
-        if done >= total:
-            progress_text = "100% · Finishing…"
-            eta_text = None
-        elif self._simulation_progress_rate is not None:
-            remaining_s = (total - done) / self._simulation_progress_rate
-            eta_text = _format_duration(remaining_s)
-            progress_text = f"{percent}% · ETA {eta_text}"
-        else:
-            eta_text = None
-            progress_text = f"{percent}% · Estimating remaining time…"
-        self.progress.setFormat(progress_text)
+        if (
+            self._simulation_last_progress_at is None
+            or done > self._simulation_last_progress_done
+        ):
+            self._simulation_last_progress_at = now
+        self._simulation_last_progress_done = done
+        self._simulation_last_progress_total = total
         if isinstance(self.phantom, DynamicSpectralPhantom):
             unit = "Interval"
-        elif isinstance(self.phantom, SpectralPhantom):
-            unit = "Voxel"
         else:
-            unit = "Chunk"
-        status_text = (
-            f"{self._parameter_loop_prefix()}{unit} {done}/{total} · {percent}%"
-        )
-        if eta_text is not None:
-            status_text += f" · approximately {eta_text} remaining"
-        self.status.setText(status_text)
-        self._update_simulation_time_label(now=now)
+            unit = "Voxel"
+        self.status.setText(f"{self._parameter_loop_prefix()}{unit} {done:,}/{total:,}")
+        self._update_run_progress_display(now=now)
 
-    def _estimated_remaining_seconds(self, now=None):
-        """Estimate outstanding wall time from the latest measured work rate."""
-        if self._simulation_progress_rate is None:
-            return None
-        now = time.monotonic() if now is None else float(now)
-        done = float(self._simulation_last_progress_done)
-        total = float(max(1, self._simulation_last_progress_total))
-        if self._simulation_last_progress_at is not None:
-            done += self._simulation_progress_rate * max(
-                0.0, now - self._simulation_last_progress_at
-            )
-        return max(0.0, total - done) / self._simulation_progress_rate
+    def _update_run_progress_display(self, now=None):
+        """Show progress, elapsed time, and remaining time in the progress bar.
 
-    def _update_simulation_time_label(self, now=None):
-        """Refresh elapsed and remaining wall-clock time while a run is active."""
+        Native chunks report progress rarely, so the done count is extrapolated
+        at the measured rate between callbacks. The bar never moves back and
+        stays below 100% until the run reports completion.
+        """
         if self._simulation_started_at is None:
             return
         now = time.monotonic() if now is None else float(now)
-        elapsed_s = max(0.0, now - self._simulation_started_at)
-        remaining_s = self._estimated_remaining_seconds(now)
-        remaining_text = (
-            f"approximately {_format_duration(remaining_s)}"
-            if remaining_s is not None
-            else "estimating…"
-        )
-        self.simulation_time_label.setText(
-            f"Elapsed: {_format_duration(elapsed_s)} · Remaining: {remaining_text}"
+        elapsed_text = f"{_format_duration(now - self._simulation_started_at)} elapsed"
+        total = max(1, int(self._simulation_last_progress_total))
+        reported_done = min(total, max(0, int(self._simulation_last_progress_done)))
+        done = float(reported_done)
+        rate = self._simulation_progress_rate
+        if reported_done >= total:
+            remaining_text = "finishing…"
+        elif rate is None:
+            remaining_text = "estimating time left…"
+        else:
+            if self._simulation_last_progress_at is not None:
+                done += rate * max(0.0, now - self._simulation_last_progress_at)
+            remaining_s = max(0.0, total - done) / rate
+            remaining_text = (
+                "<1s left"
+                if remaining_s < 1.0
+                else f"~{_format_duration(remaining_s)} left"
+            )
+        fraction = 1.0 if reported_done >= total else min(0.99, done / total)
+        fraction = max(self._simulation_displayed_fraction, fraction)
+        self._simulation_displayed_fraction = fraction
+        self.progress.setRange(0, RUN_PROGRESS_SCALE)
+        self.progress.setValue(int(round(fraction * RUN_PROGRESS_SCALE)))
+        self.progress.setFormat(
+            f"{int(fraction * 100)}% · {elapsed_text} · {remaining_text}"
         )
 
     def _estimated_work_units(self):
@@ -12917,12 +13069,7 @@ class SequenceSimulationWidget(QWidget):
                     for values in self.phantom.concentration_maps.values()
                 ),
             )
-        chunk_voxels = self._preview_chunk_voxels()
-        if chunk_voxels is None:
-            chunk_voxels = max(
-                1, 65536 // self._configured_spin_sampling().spins_per_voxel
-            )
-        return max(1, int(np.ceil(self.phantom.n_active / chunk_voxels)))
+        return max(1, int(self.phantom.n_active))
 
     def _preview_chunk_voxels(self):
         if not self.live_preview_enabled or isinstance(
@@ -13753,7 +13900,6 @@ class SequenceSimulationWidget(QWidget):
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setFormat("Run deleted")
-        self.simulation_time_label.setText("Elapsed: — · Remaining: —")
         self.status.setText("The displayed session simulation was deleted")
 
     def _record_simulation_timing(self, result, *, now=None, finished_at_utc=None):
@@ -14457,15 +14603,9 @@ class SequenceSimulationWidget(QWidget):
                 elapsed_s = max(0.0, time.monotonic() - self._simulation_started_at)
             if elapsed_s is None:
                 self.progress.setFormat("100% · Complete")
-                self.simulation_time_label.setText(
-                    "Total runtime: unavailable · Remaining: 0s"
-                )
             else:
                 self.progress.setFormat(
                     f"100% · Complete in {_format_duration(elapsed_s)}"
-                )
-                self.simulation_time_label.setText(
-                    f"Total runtime: {_format_duration(elapsed_s)} · Remaining: 0s"
                 )
         else:
             elapsed_s = (
@@ -14475,9 +14615,8 @@ class SequenceSimulationWidget(QWidget):
             )
             self.progress.setRange(0, 100)
             self.progress.setValue(0)
-            self.progress.setFormat("Stopped")
-            self.simulation_time_label.setText(
-                "Elapsed: — · Remaining: —"
+            self.progress.setFormat(
+                "Stopped"
                 if elapsed_s is None
                 else f"Stopped after {_format_duration(elapsed_s)}"
             )
@@ -14489,6 +14628,7 @@ class SequenceSimulationWidget(QWidget):
         self._simulation_last_progress_done = 0
         self._simulation_last_progress_total = 1
         self._simulation_progress_rate = None
+        self._simulation_displayed_fraction = 0.0
 
     def export_results(self):
         """Open the sequence export dialog (also used by File > Export)."""

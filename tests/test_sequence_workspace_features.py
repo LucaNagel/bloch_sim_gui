@@ -180,7 +180,7 @@ def test_sequence_progress_is_determinate_from_simulation_start():
     work_units = widget._estimated_work_units()
     widget.progress.setRange(0, work_units)
     widget.progress.setValue(0)
-    assert work_units == 32
+    assert work_units == widget.phantom.n_active == 64
     assert widget.progress.minimum() == 0
     assert widget.progress.maximum() == work_units
     widget.close()
@@ -200,12 +200,12 @@ def test_sequence_progress_estimate_excludes_compile_time_and_uses_run_rate(
     )
 
     widget._progress(25, 100)
-    assert widget.progress.format() == "25% · Estimating remaining time…"
+    assert widget.progress.format() == ("25% · 10s elapsed · estimating time left…")
     widget._progress(50, 100)
 
-    assert widget.progress.value() == 50
-    assert widget.progress.format() == "50% · ETA 20s"
-    assert widget.status.text() == "Chunk 50/100 · 50% · approximately 20s remaining"
+    assert widget.progress.value() == 500
+    assert widget.progress.format() == "50% · 20s elapsed · ~20s left"
+    assert widget.status.text() == "Voxel 50/100"
     widget.close()
     app.processEvents()
 
@@ -221,13 +221,13 @@ def test_sequence_progress_uses_cumulative_throughput_for_eta(monkeypatch):
 
     widget._progress(0, 100)
     widget._progress(25, 100)
-    assert widget.progress.format() == "25% · ETA 3s"
+    assert widget.progress.format() == "25% · 1s elapsed · ~3s left"
 
     widget._progress(50, 100)
 
     assert widget._simulation_progress_rate == pytest.approx(50.0 / 11.0)
-    assert widget.progress.format() == "50% · ETA 11s"
-    assert widget.status.text() == "Chunk 50/100 · 50% · approximately 11s remaining"
+    assert widget.progress.format() == "50% · 11s elapsed · ~11s left"
+    assert widget.status.text() == "Voxel 50/100"
     widget.close()
     app.processEvents()
 
@@ -268,9 +268,7 @@ def test_spectral_worker_updates_percentage_and_eta_within_one_component(
         nonlocal now
         now += 2.0
         widget._progress(done, total)
-        snapshots.append(
-            (done, total, widget.progress.format(), widget.simulation_time_label.text())
-        )
+        snapshots.append((done, total, widget.progress.format()))
 
     completed = []
     failed = []
@@ -285,16 +283,17 @@ def test_spectral_worker_updates_percentage_and_eta_within_one_component(
     assert not failed
     assert len(completed) == 1
     total = 10 if with_animation else 5
-    assert snapshots[0][:3] == (0, total, "0% · Estimating remaining time…")
+    assert snapshots[0] == (0, total, "0% · 10s elapsed · estimating time left…")
     first_percent = 20 if with_animation else 40
     first_eta = "8s" if with_animation else "3s"
     assert snapshots[1] == (
         2,
         total,
-        f"{first_percent}% · ETA {first_eta}",
-        f"Elapsed: 12s · Remaining: approximately {first_eta}",
+        f"{first_percent}% · 12s elapsed · ~{first_eta} left",
     )
-    assert snapshots[-1][:3] == (total, total, "100% · Finishing…")
+    assert snapshots[-1][:2] == (total, total)
+    assert snapshots[-1][2].startswith("100% · ")
+    assert snapshots[-1][2].endswith(" elapsed · finishing…")
     assert [done for done, *_ in snapshots] == sorted(done for done, *_ in snapshots)
     assert all(count == total for _, count, *_ in snapshots)
     assert bool(previews) == live_preview
@@ -319,13 +318,12 @@ def test_completed_sequence_progress_shows_percentage_and_elapsed_time(monkeypat
 
     assert widget.progress.value() == 100
     assert widget.progress.format() == "100% · Complete in 13s"
-    assert widget.simulation_time_label.text() == ("Total runtime: 13s · Remaining: 0s")
     assert widget._simulation_started_at is None
     widget.close()
     app.processEvents()
 
 
-def test_sequence_time_label_updates_between_progress_events():
+def test_sequence_progress_extrapolates_between_progress_events():
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()
     widget._simulation_started_at = 100.0
@@ -334,11 +332,32 @@ def test_sequence_time_label_updates_between_progress_events():
     widget._simulation_last_progress_total = 100
     widget._simulation_progress_rate = 2.0
 
-    widget._update_simulation_time_label(now=115.0)
+    widget._update_run_progress_display(now=115.0)
 
-    assert widget.simulation_time_label.text() == (
-        "Elapsed: 15s · Remaining: approximately 35s"
+    assert widget.progress.value() == 300
+    assert widget.progress.format() == "30% · 15s elapsed · ~35s left"
+    widget.close()
+    app.processEvents()
+
+
+def test_sequence_progress_never_moves_back_or_completes_early(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+    timestamps = iter((100.0, 110.0, 130.0))
+    monkeypatch.setattr(
+        "blochsimulator.ui.sequence_simulation_widget.time.monotonic",
+        lambda: next(timestamps),
     )
+    widget._progress(0, 100)
+    widget._progress(50, 100)
+
+    # The extrapolated run would be done by now, but completion is reported.
+    widget._update_run_progress_display(now=125.0)
+    assert widget.progress.format() == "99% · 25s elapsed · <1s left"
+    widget._progress(60, 100)
+
+    assert widget.progress.value() == 990
+    assert widget.progress.format().startswith("99% · 30s elapsed · ~")
     widget.close()
     app.processEvents()
 

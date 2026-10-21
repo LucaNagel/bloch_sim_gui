@@ -30,7 +30,7 @@ from typing import Mapping, Optional, Sequence
 import numpy as np
 
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
-from .encoding import EncodingFrame
+from .encoding import EncodingFrame, slice_package_positions
 from .reconstruction import SequenceReconstructionModel
 
 
@@ -389,7 +389,7 @@ class _Context:
         if spacing is None:
             gap = definition_float(self.definitions, "SliceGap") or 0.0
             spacing = self.slice_thickness_m() + gap
-        return offset + (np.arange(count) - (count - 1) / 2.0) * spacing
+        return slice_package_positions(count, spacing, 0.0, offset)
 
     def echo_time_s(self, echo_index: int) -> Optional[float]:
         echoes = definition_values(self.definitions, "EchoTimes")

@@ -18,6 +18,7 @@ from .encoding import (
     make_role_trapezoid,
     resolve_encoding_frame,
     set_pulseq_encoding_definitions,
+    slice_package_positions,
 )
 from .rf_pulses import (
     make_pulseq_rf_events,
@@ -1635,9 +1636,9 @@ def make_pulseq_epi(
                 )
             )
 
-    slice_positions = float(slice_offset_m) + (
-        np.arange(n_slices, dtype=float) - (n_slices - 1) / 2
-    ) * (slice_thickness_m + slice_gap_m)
+    slice_positions = slice_package_positions(
+        n_slices, slice_thickness_m, slice_gap_m, slice_offset_m
+    )
     rf_center, _ = pp.calc_rf_center(rf)
     rf_block_duration = pp.calc_duration(rf, gz)
     readout_block_duration = pp.calc_duration(gx, adc)
@@ -2212,10 +2213,8 @@ def make_pulseq_epsi_mge(
         )
     trailing_delay = max(0.0, actual_tr - minimum_tr)
 
-    slice_spacing = slice_thickness_m + slice_gap_m
-    slice_positions = (
-        float(slice_offset_m)
-        + (np.arange(n_slices, dtype=float) - (n_slices - 1) / 2.0) * slice_spacing
+    slice_positions = slice_package_positions(
+        n_slices, slice_thickness_m, slice_gap_m, slice_offset_m
     )
     ky_areas = (np.arange(n_y, dtype=float) - n_y // 2) * delta_ky
     _, slice_sign = encoding_frame.axis_and_sign("partition")
@@ -2358,7 +2357,7 @@ def make_pulseq_epsi_mge(
     )
     sequence.set_definition("SliceThickness", slice_thickness_m)
     sequence.set_definition("SliceGap", slice_gap_m)
-    sequence.set_definition("SliceSpacing", slice_spacing)
+    sequence.set_definition("SliceSpacing", slice_thickness_m + slice_gap_m)
     sequence.set_definition("SliceOffset", float(slice_offset_m))
     sequence.set_definition(
         "SlicePositions", [float(value) for value in slice_positions]
@@ -2727,9 +2726,9 @@ def make_pulseq_flash(
         )
 
     phase_areas = (np.arange(n_phase) - n_phase // 2) / fov_phase
-    slice_positions = float(slice_offset_m) + (
-        np.arange(n_slices, dtype=float) - (n_slices - 1) / 2.0
-    ) * (slice_thickness_m + slice_gap_m)
+    slice_positions = slice_package_positions(
+        n_slices, slice_thickness_m, slice_gap_m, slice_offset_m
+    )
     _, slice_sign = encoding_frame.axis_and_sign("partition")
     excitation_index = 0
     spoiler_end_times = []
@@ -3289,10 +3288,8 @@ def make_pulseq_spiral(
                 )
             )
 
-    slice_spacing = slice_thickness_m + slice_gap_m
-    slice_positions = (
-        float(slice_offset_m)
-        + (np.arange(n_slices, dtype=float) - (n_slices - 1) / 2.0) * slice_spacing
+    slice_positions = slice_package_positions(
+        n_slices, slice_thickness_m, slice_gap_m, slice_offset_m
     )
     rf_center, _ = pp.calc_rf_center(rf)
     rf_block_duration = pp.calc_duration(rf, gz)
@@ -3436,7 +3433,7 @@ def make_pulseq_spiral(
         sequence.set_definition("VariableFlipAngleReferenceDOI", VFA_REFERENCE_DOI)
     sequence.set_definition("SliceThickness", slice_thickness_m)
     sequence.set_definition("SliceGap", slice_gap_m)
-    sequence.set_definition("SliceSpacing", slice_spacing)
+    sequence.set_definition("SliceSpacing", slice_thickness_m + slice_gap_m)
     sequence.set_definition("SliceOffset", float(slice_offset_m))
     sequence.set_definition(
         "SlicePositions", [float(value) for value in slice_positions]

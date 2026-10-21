@@ -10,7 +10,11 @@ from typing import ClassVar, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from .flip_angles import VFA_REFERENCE_DOI, variable_flip_angle_schedule
-from .encoding import EncodingFrame, numeric_definition_array
+from .encoding import (
+    EncodingFrame,
+    numeric_definition_array,
+    slice_package_positions,
+)
 from .model import ADCEvent, GradientEvent, RFEvent, SequenceProgram
 from .rf_pulses import design_rf_envelope, scale_rf_envelope_to_flip
 
@@ -2299,10 +2303,9 @@ def make_cartesian_epi(
             raise ValueError("slice_thickness_m must be positive and finite")
         if not np.isfinite(slice_gap_m) or slice_gap_m < 0:
             raise ValueError("slice_gap_m must be finite and non-negative")
-        slice_spacing = slice_thickness_m + float(slice_gap_m)
-        slice_positions = (
-            np.arange(n_slices, dtype=float) - (n_slices - 1) / 2.0
-        ) * slice_spacing
+        slice_positions = slice_package_positions(
+            n_slices, slice_thickness_m, slice_gap_m
+        )
     if repetition_time_s is not None and (
         not np.isfinite(repetition_time_s) or repetition_time_s <= 0
     ):

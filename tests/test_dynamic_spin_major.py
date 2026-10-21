@@ -243,6 +243,36 @@ def test_spin_major_result_does_not_depend_on_slices_or_threads(monkeypatch):
         np.testing.assert_array_equal(getattr(sliced, name), getattr(serial, name))
 
 
+def test_spin_major_progress_starts_at_zero_with_short_first_slice(monkeypatch):
+    phantom = _phantom(shape=(12, 10, 10), inflow="polarized", tracked=True)
+    program = _program()
+    monkeypatch.setattr(dynamic_module, "_SPIN_MAJOR_PROGRESS_LEAD_DIVISOR", 8)
+    monkeypatch.setattr(dynamic_module, "_SPIN_MAJOR_PROGRESS_DIVISOR", 4)
+    updates = []
+
+    reported = _run(
+        phantom,
+        program,
+        progress_callback=lambda done, total: updates.append((done, total)),
+    )
+    silent = _run(phantom, program)
+
+    total = updates[0][1]
+    assert updates[0] == (0, total)
+    assert updates[-1] == (total, total)
+    assert all(count == total for _, count in updates)
+    done = [value for value, _ in updates]
+    assert done == sorted(done)
+    # The first slice is short, later ones are bounded by a quarter of the run.
+    assert 0 < done[1] <= -(-total // 8)
+    assert max(np.diff(done)) <= -(-total // 4) + 3
+    assert reported.metadata["native_spin_major_chunks"] > (
+        silent.metadata["native_spin_major_chunks"]
+    )
+    for name in OUTPUTS:
+        np.testing.assert_array_equal(getattr(reported, name), getattr(silent, name))
+
+
 def test_spin_major_parent_chunks_reduce_one_row_per_block():
     phantom = _phantom(inflow="polarized", tracked=True)
     program = _program()

@@ -417,6 +417,31 @@ class TissueParameters:
             raise ValueError(f"No data for {field_strength}T")
 
 
+# Default sequence chunking starts with about 1/64 of the active voxels.
+LEADING_CHUNK_DIVISOR = 64
+
+
+def sequence_chunk_bounds(n_active, chunk_voxels, *, leading_chunk=False):
+    """Return ``(start, end)`` active-voxel ranges for native sequence chunks.
+
+    A leading chunk lets progress reporting measure a run rate after a small
+    part of the work. The split does not depend on callbacks, so reporting
+    progress never changes the result.
+    """
+    n_active = int(n_active)
+    chunk_voxels = int(chunk_voxels)
+    bounds = []
+    start = 0
+    if leading_chunk and n_active >= LEADING_CHUNK_DIVISOR:
+        lead = -(-n_active // LEADING_CHUNK_DIVISOR)
+        if lead < chunk_voxels:
+            bounds.append((0, lead))
+            start = lead
+    for first in range(start, n_active, chunk_voxels):
+        bounds.append((first, min(first + chunk_voxels, n_active)))
+    return bounds
+
+
 def rf_pulse_duration(b1, time, fallback_dt: float) -> float:
     """Duration of an RF waveform whose samples are piecewise-constant cells."""
     time = np.asarray(time, dtype=float)
@@ -2039,16 +2064,6 @@ class BlochSimulator:
 
         total_voxels = sum(component.n_active for _, component in components)
         completed_voxels = 0
-        progress_chunk_voxels = chunk_voxels
-        if progress_callback is not None and progress_chunk_voxels is None:
-            from .sequence.spin_sampling import coerce_spin_sampling
-
-            sampling = coerce_spin_sampling(
-                spin_sampling
-                if str(spoiler_mode).strip().lower() == "gradient"
-                else None
-            )
-            progress_chunk_voxels = max(1, 65536 // sampling.spins_per_voxel)
 
         combined_signal = None
         component_signals = []
@@ -2068,7 +2083,7 @@ class BlochSimulator:
             component_voxels = component.n_active
 
             def component_progress(done, total):
-                done_voxels = min(component_voxels, int(done * progress_chunk_voxels))
+                done_voxels = min(component_voxels, int(done))
                 progress_callback(completed_voxels + done_voxels, total_voxels)
 
             def component_preview(fraction, partial_signal):
@@ -2412,6 +2427,11 @@ class BlochSimulator:
         phantom's shape. ``None`` or 1 means Mz is in units of thermal M0. For
         hyperpolarized magnetization normalized to its initial polarization,
         use ``1 / enhancement``, so Mz relaxes from above toward that level.
+
+        ``progress_callback(done, total)`` reports completed active voxels,
+        starting with ``(0, total)`` after compilation. Without explicit
+        ``chunk_voxels`` the first chunk holds about 1/64 of the voxels so
+        an early run rate is available.
         """
         from .phantom import Phantom
         from .sequence import (
@@ -2516,6 +2536,7 @@ class BlochSimulator:
                 equilibrium_active = None
         longitudinal_equilibrium = "thermal" if equilibrium_active is None else "custom"
 
+        default_chunking = chunk_voxels is None
         if chunk_voxels is None:
             chunk_voxels = min(n_active, max(1, 65536 // spins_per_voxel))
         if int(chunk_voxels) != chunk_voxels or chunk_voxels <= 0:
@@ -2620,7 +2641,10 @@ class BlochSimulator:
             else np.zeros(0, dtype=np.int32)
         )
 
-        chunks = (n_active + chunk_voxels - 1) // chunk_voxels
+        chunk_bounds = sequence_chunk_bounds(
+            n_active, chunk_voxels, leading_chunk=default_chunking
+        )
+        chunks = len(chunk_bounds)
         if status_callback is not None:
             status_callback(
                 f"Starting {compiled.n_intervals * n_simulated_spins:,} "
@@ -2629,11 +2653,11 @@ class BlochSimulator:
             )
         if progress_callback is not None:
             # Start the measured run rate after compilation and allocation.
-            progress_callback(0, chunks)
-        for chunk_index, start in enumerate(range(0, n_active, chunk_voxels)):
+            # Progress counts active voxels because chunks differ in size.
+            progress_callback(0, n_active)
+        for chunk_index, (start, end) in enumerate(chunk_bounds):
             if cancel_callback is not None and cancel_callback():
                 raise RuntimeError("sequence simulation cancelled")
-            end = min(start + chunk_voxels, n_active)
             if status_callback is not None:
                 status_callback(
                     f"Simulating chunk {chunk_index + 1}/{chunks} "
@@ -2723,11 +2747,11 @@ class BlochSimulator:
                 if n_checkpoints:
                     checkpoints_active[:, start:end] = chunk_checkpoints
             if progress_callback is not None:
-                progress_callback(chunk_index + 1, chunks)
+                progress_callback(end, n_active)
             if preview_callback is not None:
                 partial_signal = coil_signal[0] if n_rx_coils == 1 else coil_signal
                 preview_callback(
-                    (chunk_index + 1) / chunks,
+                    end / n_active,
                     np.array(partial_signal, copy=True),
                 )
 
