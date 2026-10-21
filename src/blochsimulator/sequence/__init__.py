@@ -24,6 +24,7 @@ from .receiver import (
 from .reference_scan import (
     ReferenceEfficiency,
     ReferenceScan,
+    coil_dependent,
     reference_signal_efficiency,
 )
 from .convergence import (
@@ -169,6 +170,7 @@ __all__ = [
     "receiver_acquisition_metadata",
     "ReferenceEfficiency",
     "ReferenceScan",
+    "coil_dependent",
     "reference_signal_efficiency",
     "make_pulseq_slice_selection",
     "ADCEvent",

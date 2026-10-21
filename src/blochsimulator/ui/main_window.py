@@ -1769,6 +1769,9 @@ class BlochSimulatorGUI(QMainWindow):
         self._workspace_field_strength_t = workspace_defaults.field_strength_t
         self._workspace_nucleus = workspace_defaults.phantom_nucleus
         self.sequence_simulation_widget = SequenceSimulationWidget(self)
+        self.sequence_simulation_widget.receiver_noise.coil_fields = (
+            self._b1_workspace_fields
+        )
         self.sequence_simulation_widget.parameter_loop_requested.connect(
             self._show_sequence_parameter_loop
         )
@@ -2067,10 +2070,20 @@ class BlochSimulatorGUI(QMainWindow):
         if combo_widget is not None:
             combo_widget.set_phantom(phantom)
 
+    def _b1_workspace_fields(self):
+        """Transmit and receive fields of the B1 workspace, None where unset."""
+        b1_widget = getattr(self, "b1_widget", None)
+        if b1_widget is None:
+            return None, None
+        return b1_widget.tx_field, b1_widget.rx_field
+
     def _on_b1_fields_changed(self, tx_field, rx_field):
         combo_widget = getattr(self, "b1_combo_widget", None)
         if combo_widget is not None:
             combo_widget.set_fields(tx_field, rx_field)
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        if sequence_widget is not None:
+            sequence_widget.receiver_noise.coil_fields_changed()
 
     def _on_b1_phantom_updated(self, phantom):
         sequence_widget = getattr(self, "sequence_simulation_widget", None)

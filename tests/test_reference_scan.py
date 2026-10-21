@@ -11,6 +11,7 @@ from blochsimulator.phantom import Phantom
 from blochsimulator.sequence import (
     ReceiverCalibration,
     ReferenceScan,
+    coil_dependent,
     reference_signal_efficiency,
 )
 from blochsimulator.sequence.internal_fid import make_internal_fid
@@ -254,3 +255,26 @@ def test_multichannel_coil_is_rejected():
     )
     with pytest.raises(ValueError, match="one receive channel"):
         reference_signal_efficiency(scan(), None, array)
+
+
+def test_only_a_coil_that_changes_the_efficiency_needs_object_maps():
+    reference = scan(flip_angle_deg=60.0, t2star_s=0.02, amplitude_delay_s=1e-3)
+
+    def calibration(*fields):
+        result = reference_signal_efficiency(reference, *fields)
+        metadata = {**reference.to_metadata(), "coil_model": result.coil_model}
+        return ReceiverCalibration(
+            measured_amplitude=1.0,
+            measured_noise_std=0.01,
+            concentration_mm=1000.0,
+            volume_ml=VOLUME_ML,
+            nucleus="C13",
+            field_strength_t=7.0,
+            dwell_s=1e-4,
+            signal_efficiency=result.efficiency,
+            reference_scan=metadata,
+        )
+
+    assert coil_dependent(calibration(*coil()))
+    assert not coil_dependent(calibration(*coil("uniform", "uniform")))
+    assert not coil_dependent(calibration())

@@ -191,8 +191,27 @@ def _message(title, text, status=""):
     return BudgetSection(title, (BudgetRow(text),), status)
 
 
+def _reference_model_note(calibration):
+    """Short description of the reference scan model behind the efficiency."""
+    scan = calibration.reference_scan or {}
+    parts = [f"sin {calibration.flip_angle_deg:g}°"]
+    if scan.get("t1_s") and scan.get("dummy_scans", 0) + scan.get("averages", 1) > 1:
+        parts.append(
+            f"T1 {scan['t1_s']:g} s at TR {scan['repetition_time_s']:g} s, "
+            f"{scan.get('dummy_scans', 0)} dummy scan(s)"
+        )
+    if scan.get("t2star_s"):
+        parts.append(
+            f"T2* {scan['t2star_s'] * 1e3:g} ms after "
+            f"{scan.get('amplitude_delay_s', 0.0) * 1e3:g} ms"
+        )
+    if scan.get("coil_model"):
+        parts.append(scan["coil_model"])
+    return " × ".join(parts)
+
+
 def _calibration_section(calibration, preview):
-    transverse = np.sin(np.deg2rad(calibration.flip_angle_deg))
+    transverse = calibration.reference_signal_fraction
     polarization = calibration.reference_polarization
     if calibration.polarization is None:
         polarization_row = BudgetRow(
@@ -225,11 +244,20 @@ def _calibration_section(calibration, preview):
                 "nuclei × polarization",
                 moles * polarization,
             ),
-            BudgetRow(
-                "Transverse fraction",
-                _number(transverse, 3),
-                f"sin {calibration.flip_angle_deg:g}°",
-                transverse,
+            (
+                BudgetRow(
+                    "Transverse fraction",
+                    _number(transverse, 3),
+                    f"sin {calibration.flip_angle_deg:g}°",
+                    transverse,
+                )
+                if calibration.signal_efficiency is None
+                else BudgetRow(
+                    "Reference signal fraction",
+                    _number(transverse, 4),
+                    _reference_model_note(calibration),
+                    transverse,
+                )
             ),
             BudgetRow(
                 "Measured SNR",

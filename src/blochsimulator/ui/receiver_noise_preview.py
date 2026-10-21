@@ -208,8 +208,15 @@ class SNRBudgetPanel(QWidget):
             self.plot_info.setText(text)
             return
         amplitude, std, dwell = parameters
+        t2star = None
+        if self.controls.mode.currentData() == "calibrated":
+            t2star = self.controls.reference_t2star_s()
         time_s, ideal, noisy = reference_fid(
-            amplitude, std, dwell, seed=self.controls.seed.value()
+            amplitude,
+            std,
+            dwell,
+            seed=self.controls.seed.value(),
+            t2star_s=t2star or REFERENCE_T2STAR_S,
         )
         if snr_units:
             ideal, noisy = ideal / std, noisy / std
@@ -219,10 +226,12 @@ class SNRBudgetPanel(QWidget):
         for line, value in zip(self.sigma_lines, (std, -std)):
             line.setValue(value)
             line.show()
-        self.plot_info.setText(
-            f"{text}; dashed: ±σ per quadrature. Decay T2* "
-            f"{REFERENCE_T2STAR_S * 1e3:g} ms is illustrative only."
+        decay = (
+            f"Decay T2* {REFERENCE_T2STAR_S * 1e3:g} ms is illustrative only."
+            if t2star is None
+            else f"Decay with the reference T2* {t2star * 1e3:g} ms."
         )
+        self.plot_info.setText(f"{text}; dashed: ±σ per quadrature. {decay}")
 
 
 class ReceiverNoiseWorkspace(QWidget):
@@ -237,7 +246,11 @@ class ReceiverNoiseWorkspace(QWidget):
         control_layout = QVBoxLayout(control_host)
         control_layout.setContentsMargins(0, 0, 0, 0)
         controls.setParent(control_host)
-        for form in (controls.layout(), controls.calibration_box.layout()):
+        for form in (
+            controls.layout(),
+            controls.calibration_box.layout(),
+            controls.reference_scan_box.layout(),
+        ):
             form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         controls.show()
         control_layout.addWidget(controls)

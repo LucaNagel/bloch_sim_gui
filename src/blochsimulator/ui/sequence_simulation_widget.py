@@ -119,6 +119,7 @@ from ..sequence.parameter_loop import (
     manual_parameter_loop_values,
     parameter_loop_values,
 )
+from ..sequence.reference_scan import coil_dependent
 from ..sequence.receiver import (
     ReceiverNoise,
     apply_receiver_noise,
@@ -12721,6 +12722,24 @@ class SequenceSimulationWidget(QWidget):
                 raise ValueError(
                     "Calibrated receiver noise requires a 3D phantom with "
                     "physical volume"
+                )
+            unit_b1 = all(
+                maps is None or np.all(np.asarray(maps) == 1)
+                for maps in (
+                    receive_maps,
+                    getattr(self.phantom, "tx_sensitivity_map", None),
+                )
+            )
+            if (
+                unit_b1
+                and receiver_noise.calibration is not None
+                and coil_dependent(receiver_noise.calibration)
+            ):
+                raise ValueError(
+                    "The receiver calibration models the B1 workspace coil, but "
+                    "the simulated object has no B1 maps. Apply the B1 fields to "
+                    "the phantom or clear 'Use B1 workspace coil fields' and set "
+                    "the calibration again"
                 )
             if receiver_noise.mode == "relative":
                 # Fail before the run instead of after it.

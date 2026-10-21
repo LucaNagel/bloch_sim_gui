@@ -240,3 +240,18 @@ def reference_signal_efficiency(
     return ReferenceEfficiency(
         efficiency, homogeneous, coverage, int(points.shape[0]), ", ".join(names)
     )
+
+
+def coil_dependent(calibration, rel_tol=1e-9):
+    """Whether a calibration's efficiency differs from its homogeneous model.
+
+    Such a calibration only holds for an object carrying the same B1 maps.
+    """
+    metadata = calibration.reference_scan
+    if not metadata or not metadata.get("coil_model"):
+        return False
+    scan = ReferenceScan(
+        **{key: value for key, value in metadata.items() if key != "coil_model"}
+    )
+    homogeneous = reference_signal_efficiency(scan).efficiency
+    return not np.isclose(calibration.signal_efficiency, homogeneous, rtol=rel_tol)

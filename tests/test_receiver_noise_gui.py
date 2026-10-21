@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
 )
 
 from blochsimulator import BlochSimulator
+from blochsimulator.b1_fields import create_b1_preset
 from blochsimulator.dynamic_phantom import DynamicSpectralPhantom
 from blochsimulator.phantom import Phantom
 from blochsimulator.sequence import ADCEvent, RFEvent, SequenceProgram, ReceiverNoise
@@ -22,6 +23,10 @@ from blochsimulator.sequence.receiver import (
     ReceiverCalibration,
     ideal_fid_amplitude,
     receiver_acquisition_metadata,
+)
+from blochsimulator.sequence.reference_scan import (
+    ReferenceScan,
+    reference_signal_efficiency,
 )
 from blochsimulator.spectral_phantom import ChemicalSpecies, SpectralPhantom
 from blochsimulator.ui.main_window import BlochSimulatorGUI
@@ -833,4 +838,175 @@ def test_image_units_follow_frame_and_volume_selection(trajectory, tmp_path):
                 widget.reconstruction_view.image, np.abs(image).T
             )
     assert widget.result is result
+    widget.close()
+
+
+def _fill_saturated_reference(panel):
+    """Urea reference at 60 deg, 4 averages after 2 dummy scans, read at 0.5 ms."""
+    _fill_urea_calibration(panel, "1000", "5")
+    panel.averages.setValue(4)
+    panel.flip_angle.setValue(60)
+    panel.reference_scan_box.setChecked(True)
+    panel.reference_t1.setValue(1.2)
+    panel.reference_dummy_scans.setValue(2)
+    panel.reference_t2star.setValue(20)
+    panel.reference_delay.setValue(0.5)
+
+
+def _coil_fields():
+    shape, fov = (16, 16, 16), (0.08,) * 3
+    return (
+        create_b1_preset("birdcage_cp", shape, fov),
+        create_b1_preset("surface_loop", shape, fov, kind="receive"),
+    )
+
+
+def test_reference_scan_model_corrects_the_calibration_and_round_trips():
+    context = {"phantom": _pyruvate_phantom(), "nucleus": "C13", "field_strength_t": 7}
+    panel = ReceiverNoiseWidget()
+    budget = SNRBudgetPanel(panel, lambda: context)
+    _fill_saturated_reference(panel)
+    # Repeated excitations with T1 need the TR before anything is computed.
+    assert "Enter the reference TR" in panel.reference_info.text()
+    assert "Complete the reference scan model" in panel.info.text()
+    panel.reference_tr.setValue(1.0)
+    expected = reference_signal_efficiency(
+        ReferenceScan(
+            volume_ml=50,
+            flip_angle_deg=60,
+            averages=4,
+            dummy_scans=2,
+            repetition_time_s=1.0,
+            t1_s=1.2,
+            t2star_s=0.02,
+            amplitude_delay_s=5e-4,
+        )
+    ).efficiency
+    assert expected < 0.7
+    assert f"η = {expected:.4g}" in panel.reference_info.text()
+    # The geometry only matters inside coil fields.
+    assert not panel.reference_geometry.isEnabled()
+    assert "reference T2* 20 ms" in budget.plot_info.text()
+    rows = _budget_rows(budget)
+    assert rows[("Reference phantom", "Reference signal fraction")] == (
+        f"{expected:.4g}"
+    )
+    panel.capture_calibration(nucleus="C13", field_strength_t=7)
+    calibration = panel.settings().calibration
+    assert calibration.signal_efficiency == pytest.approx(expected, rel=1e-12)
+    assert calibration.reference_scan["t1_s"] == 1.2
+    assert calibration.reference_scan["coil_model"] is None
+    # Without the model the calibration assumes sin(alpha) of the ideal FID.
+    ideal = replace(calibration, signal_efficiency=None, reference_scan=None)
+    assert calibration.noise_std(1e-4) == pytest.approx(
+        ideal.noise_std(1e-4) * expected / np.sin(np.deg2rad(60))
+    )
+    assert "per ideal 90° FID" in panel.info.text()
+    restored = ReceiverNoiseWidget()
+    restored.restore_state(panel.get_state())
+    assert restored.reference_scan_box.isChecked()
+    assert restored.settings().calibration == calibration
+    panel.reference_t1.setValue(1.0)
+    with pytest.raises(ValueError, match="changing"):
+        panel.settings()
+    panel.reference_t1.setValue(1.2)
+    panel.settings()
+    panel.reference_scan_box.setChecked(False)
+    assert panel.reference_info.text() == ""
+    with pytest.raises(ValueError, match="changing"):
+        panel.settings()
+    # Projects without the reference model restore it switched off.
+    old = panel.get_state()
+    for key in [key for key in old if key.startswith("reference_")]:
+        if key != "reference_std":
+            del old[key]
+    restored.restore_state({**old, "calibration": ideal.to_metadata()})
+    assert not restored.reference_scan_box.isChecked()
+    assert restored.settings().calibration == ideal
+
+
+def test_reference_scan_samples_the_coil_fields_at_the_phantom_position():
+    tx_field, rx_field = _coil_fields()
+    panel = ReceiverNoiseWidget()
+    _fill_saturated_reference(panel)
+    panel.reference_tr.setValue(1.0)
+    panel.reference_use_coil.setChecked(True)
+    assert "Define a B1 field" in panel.reference_info.text()
+    with pytest.raises(ValueError, match="Define a B1 field"):
+        panel.capture_calibration(nucleus="C13", field_strength_t=7)
+    fields = [tx_field, rx_field]
+    panel.coil_fields = lambda: tuple(fields)
+    panel.coil_fields_changed()
+    assert panel.reference_geometry.isEnabled()
+    assert not panel.reference_diameter.isEnabled()
+    panel.reference_position[0].setValue(10)
+    scan = ReferenceScan(
+        volume_ml=50,
+        flip_angle_deg=60,
+        averages=4,
+        dummy_scans=2,
+        repetition_time_s=1.0,
+        t1_s=1.2,
+        t2star_s=0.02,
+        amplitude_delay_s=5e-4,
+        position_m=(0.01, 0.0, 0.0),
+    )
+    expected = reference_signal_efficiency(scan, tx_field, rx_field)
+    assert expected.efficiency < 0.9 * expected.homogeneous
+    assert f"η = {expected.efficiency:.4g}" in panel.reference_info.text()
+    assert "Rx Circular surface loop" in panel.reference_info.text()
+    panel.capture_calibration(nucleus="C13", field_strength_t=7)
+    calibration = panel.settings().calibration
+    assert calibration.signal_efficiency == pytest.approx(expected.efficiency)
+    assert calibration.reference_scan["coil_model"] == expected.coil_model
+    assert calibration.reference_scan["position_m"] == [0.01, 0.0, 0.0]
+    panel.reference_geometry.setCurrentIndex(1)
+    assert panel.reference_diameter.isEnabled()
+    with pytest.raises(ValueError, match="changing"):
+        panel.settings()
+    panel.reference_geometry.setCurrentIndex(0)
+    panel.settings()
+    # Editing the coil in the B1 workspace invalidates the calibration.
+    fields[1] = create_b1_preset("uniform", (16, 16, 16), (0.08,) * 3, kind="receive")
+    panel.coil_fields_changed()
+    with pytest.raises(ValueError, match="changing"):
+        panel.settings()
+
+
+def test_main_window_feeds_the_b1_workspace_coil_to_the_reference_model():
+    tx_field, rx_field = _coil_fields()
+    window = BlochSimulatorGUI()
+    window.set_workspace_mode("sequence")
+    panel = window.sequence_simulation_widget.receiver_noise
+    assert panel.coil_fields() == (None, None)
+    _fill_saturated_reference(panel)
+    panel.reference_tr.setValue(1.0)
+    panel.reference_use_coil.setChecked(True)
+    assert "Define a B1 field" in panel.reference_info.text()
+    window._ensure_b1_workspace(window.b1_tab_index)
+    window.b1_widget.tx_editor.set_field(tx_field)
+    window.b1_widget.rx_editor.set_field(rx_field)
+    tx, rx = panel.coil_fields()
+    assert tx is window.b1_widget.tx_field and rx is window.b1_widget.rx_field
+    assert "Rx Circular surface loop" in panel.reference_info.text()
+    window.close()
+
+
+def test_run_rejects_a_coil_calibration_for_an_object_without_b1_maps(monkeypatch):
+    widget = SequenceSimulationWidget()
+    widget.object_source.setCurrentIndex(1)
+    widget.program = _inputs()[1]
+    panel = widget.receiver_noise
+    panel.coil_fields = _coil_fields
+    _fill_saturated_reference(panel)
+    panel.reference_tr.setValue(1.0)
+    panel.reference_use_coil.setChecked(True)
+    widget._capture_noise_calibration()
+    monkeypatch.setattr(widget, "_ensure_current_generated_sequence", lambda: True)
+    with patch(
+        "blochsimulator.ui.sequence_simulation_widget.QMessageBox.critical"
+    ) as error:
+        assert widget._run() is False
+    assert "no B1 maps" in error.call_args.args[2]
+    assert widget.worker is None
     widget.close()

@@ -8,6 +8,7 @@ from PyQt5.QtCore import QLocale, pyqtSignal
 from PyQt5.QtGui import QDoubleValidator
 from PyQt5.QtWidgets import (
     QAbstractSpinBox,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -21,6 +22,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..sequence.receiver import ReceiverCalibration, ReceiverNoise
+from ..sequence.reference_scan import ReferenceScan, reference_signal_efficiency
 from ..sequence.snr_budget import format_amount
 
 KELVIN_AT_0_CELSIUS = 273.15
@@ -105,6 +107,10 @@ class ReceiverNoiseWidget(QGroupBox):
         super().__init__("Receiver / Noise", parent)
         self.calibration = None
         self._result_available = False
+        # Returns the (transmit, receive) B1 fields the simulated object uses;
+        # the main window points it at the B1 workspace.
+        self.coil_fields = None
+        self._reference_error = False
         form = QFormLayout(self)
         self.mode = QComboBox()
         self.mode.addItem("Off", "off")
@@ -217,6 +223,8 @@ class ReceiverNoiseWidget(QGroupBox):
         calibration_form.addRow("Phantom temperature", self.reference_temperature)
         calibration_form.addRow("Simulated object temperature", self.target_temperature)
         calibration_form.addRow("Noise factor (loading)", self.noise_factor)
+        self._build_reference_scan()
+        calibration_form.addRow(self.reference_scan_box)
         form.addRow(self.calibration_box)
         self.seed = QSpinBox()
         self.seed.setRange(0, 2**31 - 1)
@@ -232,9 +240,10 @@ class ReceiverNoiseWidget(QGroupBox):
         self.assumptions = QLabel(
             "Single receive channel; noise std is per real / imaginary channel "
             "and scales with √(bandwidth) for each ADC event. Simulated runs are "
-            "single scans. Calibration assumes a fully relaxed reference, "
-            "physical 3D voxel volume, the same nucleus, field and receive coil. "
-            "Sequence streaming previews remain noiseless."
+            "single scans. Calibration assumes a fully relaxed reference at "
+            "t = 0 in a homogeneous coil unless the reference scan model says "
+            "otherwise, physical 3D voxel volume, the same nucleus, field and "
+            "receive coil. Sequence streaming previews remain noiseless."
         )
         self.assumptions.setWordWrap(True)
         form.addRow(self.assumptions)
@@ -264,8 +273,214 @@ class ReceiverNoiseWidget(QGroupBox):
         self.reference_std.valueChanged.connect(self._refresh)
         for control in (*self._calibration_spin_boxes(), self.bandwidth_khz):
             control.valueChanged.connect(self._refresh)
+        for control in self._reference_spin_boxes():
+            control.valueChanged.connect(self._refresh)
+        self.reference_scan_box.toggled.connect(self._refresh)
+        self.reference_use_coil.toggled.connect(self._refresh)
+        self.reference_geometry.currentIndexChanged.connect(self._refresh)
         self.seed.valueChanged.connect(self._refresh)
         self._refresh()
+
+    def _build_reference_scan(self):
+        """Optional signal model of the measured reference FID."""
+        box = self.reference_scan_box = QGroupBox("Reference scan model")
+        box.setCheckable(True)
+        box.setChecked(False)
+        box.setToolTip(
+            "Correct the measured amplitude for T1 saturation by dummy scans and "
+            "averages, T2* decay until the measured point and the B1 profile "
+            "over the phantom. Off: the reference is fully relaxed, measured at "
+            "t = 0 and in a homogeneous coil."
+        )
+        self.reference_t1 = _spin(
+            0.0,
+            1e4,
+            0.0,
+            3,
+            " s",
+            "Phantom T1. ∞: full recovery before every repetition.",
+        )
+        self.reference_t1.setSpecialValueText("∞ (full recovery)")
+        self.reference_tr = _spin(
+            0.0,
+            1e4,
+            0.0,
+            3,
+            " s",
+            "Repetition time of the reference scan; needed with T1 when dummy "
+            "scans or averages repeat the excitation.",
+        )
+        self.reference_tr.setSpecialValueText("not set")
+        self.reference_dummy_scans = QSpinBox()
+        self.reference_dummy_scans.setRange(0, 2**16)
+        self.reference_dummy_scans.setToolTip(
+            "Excitations before the averaged repetitions; they saturate the "
+            "phantom with T1. The sample is fully relaxed before the first one."
+        )
+        self.reference_t2star = _spin(
+            0.0,
+            1e5,
+            0.0,
+            2,
+            " ms",
+            "Phantom T2* (linewidth 1 / (π T2*)). ∞: no decay before the "
+            "measured point.",
+        )
+        self.reference_t2star.setSpecialValueText("∞ (no decay)")
+        self.reference_delay = _spin(
+            0.0,
+            1e4,
+            0.0,
+            3,
+            " ms",
+            "Time from the excitation centre to the measured amplitude: half "
+            "the pulse, the ADC delay and the sample offset. 0 if the amplitude "
+            "was extrapolated to t = 0.",
+        )
+        self.reference_geometry = QComboBox()
+        self.reference_geometry.addItem("Sphere", "sphere")
+        self.reference_geometry.addItem("Cylinder along z", "cylinder")
+        self.reference_geometry.setToolTip(
+            "Shape of the reference volume inside the coil fields."
+        )
+        self.reference_diameter = _spin(
+            0.1,
+            1e4,
+            20.0,
+            1,
+            " mm",
+            "Inner diameter of the cylinder; its length follows from the volume.",
+        )
+        self.reference_position = tuple(
+            _spin(
+                -1e4,
+                1e4,
+                0.0,
+                1,
+                " mm",
+                f"Phantom centre {axis} in the object coordinates of the B1 fields.",
+            )
+            for axis in "xyz"
+        )
+        position = QWidget()
+        position_layout = QHBoxLayout(position)
+        position_layout.setContentsMargins(0, 0, 0, 0)
+        for control in self.reference_position:
+            position_layout.addWidget(control)
+        self.reference_use_coil = QCheckBox("Use B1 workspace coil fields")
+        self.reference_use_coil.setToolTip(
+            "Sample the B1+ and B1− fields of the B1 workspace over the phantom. "
+            "Simulations must apply the same fields to their object, because "
+            "noise is calibrated per unit B1− weight."
+        )
+        self.reference_info = QLabel()
+        self.reference_info.setWordWrap(True)
+        scan_form = QFormLayout(box)
+        scan_form.addRow("Phantom T1", self.reference_t1)
+        scan_form.addRow("Repetition time", self.reference_tr)
+        scan_form.addRow("Dummy scans", self.reference_dummy_scans)
+        scan_form.addRow("Phantom T2*", self.reference_t2star)
+        scan_form.addRow("Amplitude delay", self.reference_delay)
+        scan_form.addRow(self.reference_use_coil)
+        scan_form.addRow("Geometry", self.reference_geometry)
+        scan_form.addRow("Cylinder diameter", self.reference_diameter)
+        scan_form.addRow("Centre x / y / z", position)
+        scan_form.addRow(self.reference_info)
+
+    def _reference_spin_boxes(self):
+        return (
+            self.reference_t1,
+            self.reference_tr,
+            self.reference_dummy_scans,
+            self.reference_t2star,
+            self.reference_delay,
+            self.reference_diameter,
+            *self.reference_position,
+        )
+
+    def coil_fields_changed(self):
+        """Follow edits of the coil fields that the reference model samples."""
+        if self.reference_scan_box.isChecked() and self.reference_use_coil.isChecked():
+            self._refresh()
+
+    def reference_t2star_s(self):
+        """T2* of the reference scan model, or None without one."""
+        if not self.reference_scan_box.isChecked():
+            return None
+        return self.reference_t2star.value() * 1e-3 or None
+
+    def _reference_scan(self, volume_ml):
+        """Entered reference scan, or None when the model is off."""
+        if not self.reference_scan_box.isChecked():
+            return None
+        geometry = self.reference_geometry.currentData()
+        return ReferenceScan(
+            volume_ml=volume_ml,
+            flip_angle_deg=self.flip_angle.value(),
+            averages=self.averages.value(),
+            dummy_scans=self.reference_dummy_scans.value(),
+            repetition_time_s=self.reference_tr.value() or None,
+            t1_s=self.reference_t1.value() or None,
+            t2star_s=self.reference_t2star.value() * 1e-3 or None,
+            amplitude_delay_s=self.reference_delay.value() * 1e-3,
+            geometry=geometry,
+            diameter_m=(
+                self.reference_diameter.value() * 1e-3
+                if geometry == "cylinder"
+                else None
+            ),
+            position_m=tuple(
+                control.value() * 1e-3 for control in self.reference_position
+            ),
+        )
+
+    def _reference_efficiency(self, scan):
+        tx_field = rx_field = None
+        if self.reference_use_coil.isChecked():
+            if self.coil_fields is not None:
+                tx_field, rx_field = self.coil_fields()
+            if tx_field is None and rx_field is None:
+                raise ValueError(
+                    "Define a B1 field in the B1 workspace or clear "
+                    "'Use B1 workspace coil fields'"
+                )
+        return reference_signal_efficiency(scan, tx_field, rx_field)
+
+    def _reference_inputs(self, volume_ml):
+        """Calibration fields of the reference model and its efficiency."""
+        scan = self._reference_scan(volume_ml)
+        if scan is None:
+            return {"signal_efficiency": None, "reference_scan": None}, None
+        efficiency = self._reference_efficiency(scan)
+        metadata = scan.to_metadata()
+        metadata["coil_model"] = efficiency.coil_model
+        return {
+            "signal_efficiency": efficiency.efficiency,
+            "reference_scan": metadata,
+        }, efficiency
+
+    def _reference_text(self, efficiency):
+        flip = self.flip_angle.value()
+        parts = [
+            f"Measured amplitude per ideal 90° FID: η = {efficiency.efficiency:.4g}"
+        ]
+        transverse = math.sin(math.radians(flip))
+        parts.append(
+            f"sin {flip:g}° = {transverse:.4g}, with saturation and T2* decay "
+            f"{efficiency.homogeneous:.4g}"
+        )
+        if efficiency.coil_model:
+            coverage = (
+                ""
+                if efficiency.coverage == 1.0
+                else f"; {100 * (1 - efficiency.coverage):.3g} % of the phantom "
+                "lies outside the fields"
+            )
+            parts.append(
+                f"{efficiency.coil_model} over {efficiency.sample_points} points "
+                f"× {efficiency.efficiency / efficiency.homogeneous:.4g}{coverage}"
+            )
+        return "; ".join(parts) + "."
 
     @staticmethod
     def _align_label_columns(*forms):
@@ -303,11 +518,12 @@ class ReceiverNoiseWidget(QGroupBox):
                 raise ValueError(f"Enter the {name}")
             return float(text)
 
-        return {
+        volume_ml = required(self.volume, "reference volume")
+        inputs = {
             "measured_amplitude": float(self.amplitude.text()),
             "measured_noise_std": float(self.reference_std.text()),
             "concentration_mm": required(self.concentration, "reference concentration"),
-            "volume_ml": required(self.volume, "reference volume"),
+            "volume_ml": volume_ml,
             "dwell_s": self._reference_dwell_s(),
             "averages": self.averages.value(),
             "flip_angle_deg": self.flip_angle.value(),
@@ -318,6 +534,8 @@ class ReceiverNoiseWidget(QGroupBox):
             + KELVIN_AT_0_CELSIUS,
             "noise_factor": self.noise_factor.value(),
         }
+        inputs.update(self._reference_inputs(volume_ml)[0])
+        return inputs
 
     def _reference_dwell_s(self):
         return 1.0 / (self.bandwidth_khz.value() * 1e3)
@@ -338,8 +556,20 @@ class ReceiverNoiseWidget(QGroupBox):
             inputs = self._calibration_inputs()
         except ValueError:
             return False
-        return self.calibration.polarization is None and all(
-            getattr(self.calibration, key) == value for key, value in inputs.items()
+        efficiency = inputs.pop("signal_efficiency")
+        stored = self.calibration.signal_efficiency
+        # Coil fields are sampled again from the B1 workspace on every check.
+        same_efficiency = (
+            stored == efficiency
+            if stored is None or efficiency is None
+            else math.isclose(stored, efficiency, rel_tol=1e-9)
+        )
+        return (
+            self.calibration.polarization is None
+            and same_efficiency
+            and all(
+                getattr(self.calibration, key) == value for key, value in inputs.items()
+            )
         )
 
     def _calibration_text(self):
@@ -355,6 +585,12 @@ class ReceiverNoiseWidget(QGroupBox):
             "relative to thermal at "
             f"{calibration.target_temperature_k - KELVIN_AT_0_CELSIUS:g} °C "
             f"(polarization {calibration.target_thermal_polarization:.4g})."
+            + (
+                ""
+                if calibration.signal_efficiency is None
+                else " Reference amplitude per ideal 90° FID: "
+                f"{calibration.signal_efficiency:.4g}."
+            )
         )
 
     def _refresh(self):
@@ -377,6 +613,7 @@ class ReceiverNoiseWidget(QGroupBox):
             control.setVisible(visible)
             self.layout().labelForField(control).setVisible(visible)
         self.calibration_box.setVisible(calibrated)
+        self._refresh_reference(calibrated)
         self.calibration_button.setVisible(calibrated)
         self.assumptions.setVisible(mode != "off")
         for control in (*calibration_fields, self.calibration_button):
@@ -398,12 +635,41 @@ class ReceiverNoiseWidget(QGroupBox):
                 message = "Set the calibration to use it in simulations."
             except (ValueError, ZeroDivisionError) as exc:
                 prefix = ""
-                message = (
-                    (f"{exc}. " if "Enter the" in str(exc) else "")
-                    + "Enter positive FID amplitude, noise std, concentration and volume."
-                )
+                if self._reference_error:
+                    message = "Complete the reference scan model."
+                else:
+                    message = (
+                        (f"{exc}. " if "Enter the" in str(exc) else "")
+                        + "Enter positive FID amplitude, noise std, concentration and volume."
+                    )
             self.info.setText(prefix + message)
         self.preview_changed.emit()
+
+    def _refresh_reference(self, calibrated):
+        """Show the reference model's efficiency or why it cannot be computed."""
+        self._reference_error = False
+        if not (calibrated and self.reference_scan_box.isChecked()):
+            self.reference_info.setText("")
+            return
+        coil = self.reference_use_coil.isChecked()
+        cylinder = self.reference_geometry.currentData() == "cylinder"
+        # Placement only matters inside non-uniform coil fields.
+        self.reference_geometry.setEnabled(coil)
+        self.reference_diameter.setEnabled(coil and cylinder)
+        for control in self.reference_position:
+            control.setEnabled(coil)
+        try:
+            volume_ml = float(self.volume.text())
+        except ValueError:
+            self.reference_info.setText("Enter the reference volume.")
+            return
+        try:
+            _, efficiency = self._reference_inputs(volume_ml)
+        except ValueError as exc:
+            self._reference_error = True
+            self.reference_info.setText(f"{exc}.")
+            return
+        self.reference_info.setText(self._reference_text(efficiency))
 
     def _relative_text(self):
         try:
@@ -489,6 +755,12 @@ class ReceiverNoiseWidget(QGroupBox):
         ("reference_temperature", 20.0),
         ("target_temperature", 37.0),
         ("noise_factor", 1.0),
+        ("reference_t1", 0.0),
+        ("reference_tr", 0.0),
+        ("reference_dummy_scans", 0),
+        ("reference_t2star", 0.0),
+        ("reference_delay", 0.0),
+        ("reference_diameter", 20.0),
     )
 
     def get_state(self):
@@ -506,6 +778,16 @@ class ReceiverNoiseWidget(QGroupBox):
         }
         state.update(
             {name: getattr(self, name).value() for name, _ in self._SPIN_STATE}
+        )
+        state.update(
+            {
+                "reference_model": self.reference_scan_box.isChecked(),
+                "reference_use_coil": self.reference_use_coil.isChecked(),
+                "reference_geometry": self.reference_geometry.currentData(),
+                "reference_position_mm": [
+                    control.value() for control in self.reference_position
+                ],
+            }
         )
         return state
 
@@ -526,6 +808,15 @@ class ReceiverNoiseWidget(QGroupBox):
             getattr(self, name).setText(str(state.get(name, default)))
         for name, default in self._SPIN_STATE:
             getattr(self, name).setValue(state.get(name, default))
+        self.reference_geometry.setCurrentIndex(
+            max(0, self.reference_geometry.findData(state.get("reference_geometry")))
+        )
+        for control, value in zip(
+            self.reference_position, state.get("reference_position_mm", (0, 0, 0))
+        ):
+            control.setValue(value)
+        self.reference_use_coil.setChecked(bool(state.get("reference_use_coil")))
+        self.reference_scan_box.setChecked(bool(state.get("reference_model")))
         self.seed.setValue(int(state.get("seed", 0)))
         self.mode.setCurrentIndex(max(0, self.mode.findData(state.get("mode", "off"))))
         self._refresh()
