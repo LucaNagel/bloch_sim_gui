@@ -525,10 +525,20 @@ def test_mouse_designer_exposes_animation_curves_and_hd_anatomy_controls():
     assert "Lactate" in dialog.voxel_spectrum_label.text()
     assert len(dialog.voxel_spectrum_plot.listDataItems()) >= 2
 
-    dialog.injection_amount.setValue(0.5)
+    dialog.injection_concentration.setValue(10.0)
+    dialog.injection_volume.setValue(50.0)
     assert dialog._live_preview_timer.isActive()
+    assert "0.5 µmol" in dialog.injection_dose_label.text()
     QTest.qWait(400)
     assert dialog.phantom.config.injection_amount_umol == pytest.approx(0.5)
+
+    dialog.relaxation_spins["injected"][2].setValue(15.0)
+    dialog.transverse_decay.setCurrentIndex(dialog.transverse_decay.findData("t2"))
+    QTest.qWait(400)
+    config = dialog.phantom.config
+    assert config.injected_t2_star_s == pytest.approx(0.015)
+    assert config.transverse_decay == "t2"
+    assert dialog.relaxation_spins["metabolite"][0].isEnabled()
 
     dialog.close()
     app.processEvents()
@@ -635,3 +645,55 @@ def test_legacy_z_ompd_phantom_gains_titration_model_on_reload():
         "Z-OMPD C5",
         "Z-OMPD C1 reference",
     }
+
+
+def test_mouse_config_dose_and_transverse_decay():
+    config = MousePerfusionConfig(
+        injection_concentration_mm=80.0, injection_volume_ul=250.0
+    )
+    assert config.injection_amount_umol == pytest.approx(20.0)
+    assert config.solver_t2_s(0.3, 0.02) == pytest.approx(0.02)
+    assert MousePerfusionConfig(transverse_decay="t2").solver_t2_s(
+        0.3, 0.02
+    ) == pytest.approx(0.3)
+    with pytest.raises(ValueError):
+        MousePerfusionConfig(injected_t2_s=0.01, injected_t2_star_s=0.02).validate()
+    with pytest.raises(ValueError):
+        MousePerfusionConfig(transverse_decay="bogus").validate()
+
+
+def test_mouse_config_migrates_legacy_amount_and_relaxation():
+    legacy = MousePerfusionConfig().to_dict()
+    for key in (
+        "injection_concentration_mm",
+        "injection_volume_ul",
+        "injected_t1_s",
+        "injected_t2_s",
+        "injected_t2_star_s",
+        "metabolite_t1_s",
+        "metabolite_t2_s",
+        "metabolite_t2_star_s",
+        "transverse_decay",
+    ):
+        legacy.pop(key)
+    legacy.update(
+        injection_amount_umol=0.25,
+        pyruvate_t1_s=30.0,
+        pyruvate_t2_s=0.4,
+        lactate_t1_s=20.0,
+        lactate_t2_s=0.2,
+    )
+    config = MousePerfusionConfig.from_dict(legacy)
+    assert config.injection_amount_umol == pytest.approx(0.25)
+    assert config.injected_t1_s == pytest.approx(30.0)
+    assert config.metabolite_t1_s == pytest.approx(20.0)
+    # Legacy phantoms decayed with T2; keep that behaviour on load.
+    assert config.solver_t2_s(config.injected_t2_s, config.injected_t2_star_s) == (
+        pytest.approx(0.4)
+    )
+
+
+def test_mouse_phantom_pools_use_t2_star_by_default():
+    phantom = MousePerfusionPhantom.from_config(MousePerfusionConfig(shape=(8, 8, 12)))
+    for pool in phantom.pools:
+        assert pool.t2 == pytest.approx(pool.t2_star)

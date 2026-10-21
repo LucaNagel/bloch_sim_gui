@@ -9,6 +9,7 @@ the sequence solver and the animated authoring preview.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
+from functools import lru_cache
 from typing import Dict, Iterable, Optional, Tuple
 
 import numpy as np
@@ -46,6 +47,15 @@ INJECTION_COMPOUNDS = {
     "lactate": "[1-13C]Lactate",
     "z_ompd": "[1,5-13C2]Z-OMPD",
     "contrast_agent": "Generic contrast agent",
+}
+
+# Which relaxation time sets the transverse decay in the Bloch solver. The
+# solver has no static intravoxel frequency spread, so FID and gradient-echo
+# readouts need T2* as the decay constant, while refocused sequences (bSSFP,
+# spin echo) decay with T2.
+TRANSVERSE_DECAY_MODES = {
+    "t2_star": "T2* (FID / gradient-echo readout)",
+    "t2": "T2 (refocused readout, e.g. bSSFP)",
 }
 
 
@@ -162,7 +172,9 @@ class MousePerfusionConfig:
     mouse_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     field_strength_t: float = 7.0
     injection_compound: str = "pyruvate"
-    injection_amount_umol: float = 0.25
+    # 80 mM pyruvate at ~10 µl/g body weight is a typical mouse injection.
+    injection_concentration_mm: float = 80.0
+    injection_volume_ul: float = 250.0
     injection_start_s: float = 0.0
     injection_duration_s: float = 2.0
     circulation_delay_s: float = 0.6
@@ -208,10 +220,15 @@ class MousePerfusionConfig:
     breathing_rate_hz: float = 1.2
     breathing_amplitude_mm: float = 1.0
     breathing_phase_rad: float = 0.0
-    pyruvate_t1_s: float = 25.0
-    lactate_t1_s: float = 25.0
-    pyruvate_t2_s: float = 0.300
-    lactate_t2_s: float = 0.300
+    # Relaxation of the injected hyperpolarized compound (all its labelled
+    # carbons) and of its metabolic products (lactate and alanine).
+    injected_t1_s: float = 25.0
+    injected_t2_s: float = 0.300
+    injected_t2_star_s: float = 0.020
+    metabolite_t1_s: float = 25.0
+    metabolite_t2_s: float = 0.300
+    metabolite_t2_star_s: float = 0.020
+    transverse_decay: str = "t2_star"
     spectral_reference_ppm: float = 171.076
     spectral_bandwidth_ppm: float = 18.0
     spectral_points: int = 257
@@ -229,6 +246,12 @@ class MousePerfusionConfig:
             raise ValueError(
                 "injection compound must be one of "
                 + ", ".join(sorted(INJECTION_COMPOUNDS))
+            )
+        self.transverse_decay = str(self.transverse_decay).strip().lower()
+        if self.transverse_decay not in TRANSVERSE_DECAY_MODES:
+            raise ValueError(
+                "transverse decay must be one of "
+                + ", ".join(sorted(TRANSVERSE_DECAY_MODES))
             )
         if len(self.shape) != 3 or any(value < 8 for value in self.shape):
             raise ValueError("mouse phantom matrix requires three values >= 8")
@@ -256,21 +279,29 @@ class MousePerfusionConfig:
             "bolus alpha": self.bolus_alpha,
             "bolus beta": self.bolus_beta,
             "breathing rate": self.breathing_rate_hz,
-            "pyruvate T1": self.pyruvate_t1_s,
-            "lactate T1": self.lactate_t1_s,
-            "pyruvate T2": self.pyruvate_t2_s,
-            "lactate T2": self.lactate_t2_s,
+            "injected compound T1": self.injected_t1_s,
+            "injected compound T2": self.injected_t2_s,
+            "injected compound T2*": self.injected_t2_star_s,
+            "metabolite T1": self.metabolite_t1_s,
+            "metabolite T2": self.metabolite_t2_s,
+            "metabolite T2*": self.metabolite_t2_star_s,
             "spectral bandwidth": self.spectral_bandwidth_ppm,
             "tissue clearance": self.tissue_clearance_s_inv,
         }
         for label, value in positive.items():
             if not np.isfinite(value) or value <= 0:
                 raise ValueError(f"{label} must be positive and finite")
-        if (
-            not np.isfinite(self.injection_amount_umol)
-            or self.injection_amount_umol < 0
+        for label, t2, t2_star in (
+            ("injected compound", self.injected_t2_s, self.injected_t2_star_s),
+            ("metabolite", self.metabolite_t2_s, self.metabolite_t2_star_s),
         ):
-            raise ValueError("injection amount must be finite and non-negative")
+            if t2_star > t2:
+                raise ValueError(f"{label} T2* must not exceed its T2")
+        injection = (self.injection_concentration_mm, self.injection_volume_ul)
+        if not np.all(np.isfinite(injection)) or np.any(np.asarray(injection) < 0):
+            raise ValueError(
+                "injection concentration and volume must be finite and non-negative"
+            )
         finite = (
             self.injection_start_s,
             self.circulation_delay_s,
@@ -335,6 +366,15 @@ class MousePerfusionConfig:
         ):
             raise ValueError("spectral points must be an integer >= 2")
 
+    @property
+    def injection_amount_umol(self) -> float:
+        """Injected dose; mM × µl = nmol."""
+        return self.injection_concentration_mm * self.injection_volume_ul * 1e-3
+
+    def solver_t2_s(self, t2_s: float, t2_star_s: float) -> float:
+        """Return the transverse decay constant handed to the Bloch solver."""
+        return t2_star_s if self.transverse_decay == "t2_star" else t2_s
+
     def to_dict(self) -> Dict:
         self.validate()
         return asdict(self)
@@ -342,6 +382,41 @@ class MousePerfusionConfig:
     @classmethod
     def from_dict(cls, values: Dict) -> "MousePerfusionConfig":
         restored = dict(values)
+        # Older phantoms stored the dose directly; keep it at the default
+        # injection volume.
+        legacy_amount = restored.pop("injection_amount_umol", None)
+        if legacy_amount is not None and "injection_concentration_mm" not in restored:
+            volume = float(restored.get("injection_volume_ul", cls.injection_volume_ul))
+            restored["injection_volume_ul"] = volume
+            restored["injection_concentration_mm"] = float(legacy_amount) / (
+                volume * 1e-3
+            )
+        # Older phantoms named relaxation by pyruvate/lactate and used T2 as
+        # both decay constant and linewidth. Equal T2* keeps their behaviour.
+        legacy_relaxation = {
+            key: restored.pop(key)
+            for key in (
+                "pyruvate_t1_s",
+                "pyruvate_t2_s",
+                "lactate_t1_s",
+                "lactate_t2_s",
+            )
+            if key in restored
+        }
+        if legacy_relaxation:
+            injected = (
+                "lactate"
+                if restored.get("injection_compound") == "lactate"
+                else "pyruvate"
+            )
+            for prefix, source in (("injected", injected), ("metabolite", "lactate")):
+                t1 = legacy_relaxation.get(f"{source}_t1_s")
+                t2 = legacy_relaxation.get(f"{source}_t2_s")
+                if t1 is not None:
+                    restored.setdefault(f"{prefix}_t1_s", t1)
+                if t2 is not None:
+                    restored.setdefault(f"{prefix}_t2_s", t2)
+                    restored.setdefault(f"{prefix}_t2_star_s", t2)
         # Older saved phantoms used the FOV as the implicit [-1, 1] atlas
         # extent. Convert that extent to the approximate visible body bounds
         # used by the current, independently editable mouse size.
@@ -778,6 +853,27 @@ def build_reference_mouse_anatomy(
     return labels, arterial & body, venous & body
 
 
+@lru_cache(maxsize=4)
+def _cached_reference_anatomy(shape, fov_m, mouse_size_m, mouse_offset_m):
+    """Rasterize the reference anatomy once per geometry.
+
+    Editing injection or kinetic parameters rebuilds the phantom many times
+    with unchanged geometry; rasterization dominates that rebuild otherwise.
+    """
+
+    result = build_reference_mouse_anatomy(
+        shape,
+        fov_m,
+        reference_mouse_vascular_graph(),
+        mouse_size_m=mouse_size_m,
+        mouse_offset_m=mouse_offset_m,
+        return_vascular_transit=True,
+    )
+    for values in result:
+        values.setflags(write=False)
+    return result
+
+
 def _dose_rate_curve(config: MousePerfusionConfig, *, delay_s: float) -> TimeCurve:
     sample_count = 65
     normalized_time = np.linspace(0.0, 1.0, sample_count)
@@ -839,84 +935,51 @@ def _compound_pools(config: MousePerfusionConfig) -> Tuple[ChemicalSpecies, ...]
     Pool zero is always the injected source because this is the convention of
     :class:`DynamicSpectralPhantom`.  Non-pyruvate presets deliberately have
     zero conversion and use their second resonance only as a spectral
-    reference component for now.
+    reference component for now.  Every pool keeps T2* as its linewidth; the
+    solver decay constant (``pool.t2``) follows ``config.transverse_decay``.
     """
+
+    def species(name, shift_ppm, *, metabolite=False):
+        t1, t2, t2_star = (
+            (
+                config.metabolite_t1_s,
+                config.metabolite_t2_s,
+                config.metabolite_t2_star_s,
+            )
+            if metabolite
+            else (config.injected_t1_s, config.injected_t2_s, config.injected_t2_star_s)
+        )
+        return ChemicalSpecies(
+            name, shift_ppm, t1, config.solver_t2_s(t2, t2_star), t2_star=t2_star
+        )
 
     if config.injection_compound == "pyruvate":
         return (
-            ChemicalSpecies(
-                "Pyruvate",
-                0.0,
-                config.pyruvate_t1_s,
-                config.pyruvate_t2_s,
-                t2_star=config.pyruvate_t2_s,
-            ),
-            ChemicalSpecies(
-                "Lactate",
-                183.35 - config.spectral_reference_ppm,
-                config.lactate_t1_s,
-                config.lactate_t2_s,
-                t2_star=config.lactate_t2_s,
-            ),
-            ChemicalSpecies(
-                "Alanine",
-                176.5 - config.spectral_reference_ppm,
-                config.lactate_t1_s,
-                config.lactate_t2_s,
-                t2_star=config.lactate_t2_s,
-            ),
+            species("Pyruvate", 0.0),
+            species("Lactate", 183.35 - config.spectral_reference_ppm, metabolite=True),
+            species("Alanine", 176.5 - config.spectral_reference_ppm, metabolite=True),
         )
     if config.injection_compound == "lactate":
         return (
-            ChemicalSpecies(
-                "Lactate",
-                0.0,
-                config.lactate_t1_s,
-                config.lactate_t2_s,
-                t2_star=config.lactate_t2_s,
-            ),
-            ChemicalSpecies(
-                "Spectral reference",
-                -12.274,
-                config.lactate_t1_s,
-                config.lactate_t2_s,
-                t2_star=config.lactate_t2_s,
-            ),
+            species("Lactate", 0.0),
+            species("Spectral reference", -12.274),
         )
     if config.injection_compound == "z_ompd":
         return (
-            ChemicalSpecies(
+            species(
                 Z_OMPD_C5_POOL,
                 z_ompd_shift_ppm("C5", Z_OMPD_REFERENCE_PH)
                 - config.spectral_reference_ppm,
-                config.pyruvate_t1_s,
-                config.pyruvate_t2_s,
-                t2_star=config.pyruvate_t2_s,
             ),
-            ChemicalSpecies(
+            species(
                 Z_OMPD_C1_POOL,
                 z_ompd_shift_ppm("C1", Z_OMPD_REFERENCE_PH)
                 - config.spectral_reference_ppm,
-                config.pyruvate_t1_s,
-                config.pyruvate_t2_s,
-                t2_star=config.pyruvate_t2_s,
             ),
         )
     return (
-        ChemicalSpecies(
-            "Contrast agent",
-            0.0,
-            config.pyruvate_t1_s,
-            config.pyruvate_t2_s,
-            t2_star=config.pyruvate_t2_s,
-        ),
-        ChemicalSpecies(
-            "Spectral reference",
-            0.5 * config.spectral_bandwidth_ppm,
-            config.pyruvate_t1_s,
-            config.pyruvate_t2_s,
-            t2_star=config.pyruvate_t2_s,
-        ),
+        species("Contrast agent", 0.0),
+        species("Spectral reference", 0.5 * config.spectral_bandwidth_ppm),
     )
 
 
@@ -973,13 +1036,14 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
     def from_config(cls, config: MousePerfusionConfig) -> "MousePerfusionPhantom":
         config.validate()
         graph = reference_mouse_vascular_graph()
-        labels, arterial, venous, vascular_transit = build_reference_mouse_anatomy(
-            config.shape,
-            config.fov_m,
-            graph,
-            mouse_size_m=config.mouse_size_m,
-            mouse_offset_m=config.mouse_offset_m,
-            return_vascular_transit=True,
+        labels, arterial, venous, vascular_transit = (
+            values.copy()
+            for values in _cached_reference_anatomy(
+                tuple(config.shape),
+                tuple(config.fov_m),
+                tuple(config.mouse_size_m),
+                tuple(config.mouse_offset_m),
+            )
         )
         if not np.any(labels > 0):
             raise ValueError("mouse position and FOV do not overlap")
@@ -1448,12 +1512,51 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         }
         if np.any(self.anatomy_labels == BLADDER_LABEL):
             regions["Bladder"] = self.anatomy_labels == BLADDER_LABEL
-        curves = {name: np.zeros(times.shape, dtype=float) for name in regions}
-        for index, time_s in np.ndenumerate(times):
-            frame = self.injected_concentration_map(float(time_s))
-            for name, mask in regions.items():
-                if np.any(mask):
-                    curves[name][index] = float(np.mean(frame[mask]))
+        delays = self.perfusion_arrival_time_s - self.config.injection_start_s
+        delivery = np.asarray(self.pyruvate_inflow.delivery_map)
+        active = np.isfinite(delays) & (delivery > 0)
+        loss = self._local_loss_map_s_inv()
+        urinary = self._urinary_lookup() if self._renal_excretion_active else None
+        compartments = () if urinary is None else self._urinary_compartments()
+        curves = {}
+        # Same model as ``injected_concentration_map`` averaged over each
+        # region, but evaluated once per distinct (delay, loss) group instead
+        # of once per voxel and time point.
+        for name, mask in regions.items():
+            values = np.zeros(times.shape, dtype=float)
+            count = int(np.count_nonzero(mask))
+            if count == 0:
+                curves[name] = values
+                continue
+            selected = mask & active
+            for loss_value in np.unique(loss[selected]):
+                group = selected & (loss == loss_value)
+                group_delays, inverse = np.unique(delays[group], return_inverse=True)
+                weights = np.bincount(inverse.ravel(), weights=delivery[group])
+                lookup_t, response = self._response_lookup(loss_value)
+                values += weights @ np.interp(
+                    times[None, :] - group_delays[:, None],
+                    lookup_t,
+                    response,
+                    left=0.0,
+                    right=0.0,
+                )
+            for compartment, compartment_mask in compartments:
+                overlap = int(np.count_nonzero(compartment_mask & mask))
+                if overlap:
+                    amount = np.interp(
+                        times,
+                        urinary["times_s"],
+                        urinary[compartment],
+                        left=0.0,
+                        right=float(urinary[compartment][-1]),
+                    )
+                    values += (
+                        overlap
+                        * amount
+                        / (np.count_nonzero(compartment_mask) * self.voxel_volume_m3)
+                    )
+            curves[name] = values / count
         return curves
 
     def preview_pool_curves_at(self, index, times_s) -> Dict[str, np.ndarray]:
