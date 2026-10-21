@@ -617,6 +617,79 @@ def test_radial_b0_inhomogeneity_is_centred_on_the_reference(mode, edge_index):
     assert (float(np.min(added)), float(np.max(added))) == pytest.approx((-0.5, 0.5))
 
 
+def test_b0_inhomogeneity_centre_translates_the_pattern():
+    design = _spectral_design()
+    design.shape = (5, 5, 5)
+    design.b0_inhomogeneity_ppm = 1.0
+    design.b0_inhomogeneity_mode = "linear_x"
+    centred = design.rasterize_b0_inhomogeneity()
+    design.b0_inhomogeneity_center = (0.7, 0.5, 0.5)
+    shifted = design.rasterize_b0_inhomogeneity()
+
+    # Moving the centre by one voxel (20 % of the FOV) moves the zero crossing
+    # by one voxel without changing the gradient.
+    assert centred[2, 0, 0] == pytest.approx(0.0)
+    assert shifted[3, 0, 0] == pytest.approx(0.0)
+    assert np.diff(shifted[:, 0, 0]) == pytest.approx(np.diff(centred[:, 0, 0]))
+
+    design.b0_inhomogeneity_mode = "radial_xyz"
+    design.b0_inhomogeneity_center = (0.3, 0.7, 0.5)
+    radial = design.rasterize_b0_inhomogeneity()
+    assert np.unravel_index(np.argmin(radial), radial.shape) == (1, 3, 2)
+    assert float(np.min(radial)) == pytest.approx(-0.5)
+
+    restored = PhantomDesign.from_dict(design.to_dict())
+    assert restored.b0_inhomogeneity_center == pytest.approx((0.3, 0.7, 0.5))
+    assert PhantomDesign.from_dict(
+        {
+            key: value
+            for key, value in design.to_dict().items()
+            if key != "b0_inhomogeneity_center"
+        }
+    ).b0_inhomogeneity_center == (0.5, 0.5, 0.5)
+
+
+def test_designer_b0_tab_edits_pattern_centre_and_shape_offsets():
+    app = QApplication.instance() or QApplication([])
+    design = _spectral_design()
+    design.b0_inhomogeneity_mode = "radial_xy"
+    design.b0_inhomogeneity_ppm = 2.0
+    design.b0_inhomogeneity_center = (0.25, 0.5, 0.5)
+    dialog = SpectralPhantomDesignerDialog(design=design)
+
+    assert dialog.b0_mode_combo.currentData() == "radial_xy"
+    assert [spin.value() for spin in dialog.b0_center_spins] == pytest.approx(
+        [25.0, 50.0, 50.0]
+    )
+    assert dialog.tabs.tabText(1) == "B0"
+    dialog.tabs.setCurrentWidget(dialog.b0_page)
+    app.processEvents()
+    assert "-1 ppm at the centre" in dialog.b0_pattern_info.text()
+    assert dialog.b0_offset_table.rowCount() == 1
+    _, spectrum = dialog.b0_spectrum_curve.getData()
+    _, reference = dialog.b0_spectrum_reference_curve.getData()
+    assert spectrum is not None and reference is not None
+    # The inhomogeneity broadens the lines, which lowers their peak height.
+    assert np.max(spectrum) < np.max(reference)
+    xy_map = dialog.b0_map_images[0].image
+    assert np.unravel_index(np.argmin(xy_map), xy_map.shape)[0] < xy_map.shape[0] / 2
+
+    fov_x_mm = design.fov_m[0] * 1000.0
+    dialog.b0_center_targets[0].setPos(0.25 * fov_x_mm, 0.0)
+    app.processEvents()
+    assert dialog.b0_center_spins[0].value() == pytest.approx(75.0)
+    assert design.b0_inhomogeneity_center[0] == pytest.approx(0.75)
+
+    dialog.b0_offset_table.item(0, 1).setText("0.75")
+    assert design.shapes[0].b0_ppm == pytest.approx(0.75)
+
+    dialog._sync_global()
+    assert design.b0_inhomogeneity_center == pytest.approx((0.75, 0.5, 0.5))
+    assert design.b0_inhomogeneity_mode == "radial_xy"
+    dialog.close()
+    app.processEvents()
+
+
 def test_spatial_b0_inhomogeneity_changes_the_simulated_adc_signal():
     reference_design = _spectral_design()
     inhomogeneous_design = _spectral_design()
@@ -1064,7 +1137,8 @@ def test_designer_selects_shape_by_roi_and_highlights_current_shape():
     dialog._select_roi(dialog._rois[1])
 
     assert dialog.shape_list.currentRow() == 1
-    assert dialog.initial_mz.value() == pytest.approx(10.0)
+    # The shape-level polarization is shown as each peak's effective value.
+    assert float(dialog.peak_table.item(0, 2).text()) == pytest.approx(10.0)
     assert dialog._rois[1].pen.width() > dialog._rois[0].pen.width()
     dialog.close()
     app.processEvents()
@@ -1254,16 +1328,26 @@ def test_designer_edits_optional_metabolite_t1_and_preserves_default_fallback():
     design.shapes[0].peaks[1].t1_s = None
     dialog = SpectralPhantomDesignerDialog(design=design)
 
+    fallback_t1_ms = design.shapes[0].t1_s * 1000.0
     assert float(dialog.peak_table.item(0, 4).text()) == pytest.approx(700.0)
-    assert dialog.peak_table.item(1, 4).text() == ""
+    # Inherited values are shown instead of an empty cell...
+    assert float(dialog.peak_table.item(1, 4).text()) == pytest.approx(fallback_t1_ms)
     peaks = dialog._read_peak_table()
     assert peaks[0].t1_s == pytest.approx(0.7)
+    # ...but stay inherited until the user enters a different value.
     assert peaks[1].t1_s is None
-    assert "spin density" in dialog.peak_table.horizontalHeaderItem(1).text().lower()
-    assert (
-        "initial polarization"
-        in dialog.peak_table.horizontalHeaderItem(2).text().lower()
-    )
+    assert peaks[1].initial_polarization is None
+    dialog.peak_table.item(1, 4).setText("900")
+    assert dialog._read_peak_table()[1].t1_s == pytest.approx(0.9)
+    headers = [
+        dialog.peak_table.horizontalHeaderItem(column).text().replace("\n", " ")
+        for column in range(dialog.peak_table.columnCount())
+    ]
+    assert headers[1].lower() == "relative concentration"
+    assert headers[2].lower() == "initial polarization"
+    assert headers[5] == "T2 (ms)"
+    delegate = dialog.peak_table.itemDelegateForColumn(2)
+    assert delegate.displayText("10000", None) == "10000 × thermal"
 
     dialog.close()
     app.processEvents()

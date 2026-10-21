@@ -313,6 +313,7 @@ class PhantomDesign:
     shapes: List[ShapeDefinition] = field(default_factory=list)
     b0_inhomogeneity_mode: str = "none"
     b0_inhomogeneity_ppm: float = 0.0
+    b0_inhomogeneity_center: Tuple[float, float, float] = (0.5, 0.5, 0.5)
     dynamic_enabled: bool = False
     pyruvate_peak_name: str = "Pyruvate"
     lactate_peak_name: str = "Lactate"
@@ -370,6 +371,10 @@ class PhantomDesign:
 
         if not np.isfinite(self.b0_inhomogeneity_ppm):
             raise ValueError("B0 inhomogeneity amplitude must be finite")
+        if len(self.b0_inhomogeneity_center) != 3 or not np.all(
+            np.isfinite(self.b0_inhomogeneity_center)
+        ):
+            raise ValueError("B0 inhomogeneity centre must contain three finite values")
         if not np.isfinite(self.default_kpl_s_inv) or self.default_kpl_s_inv < 0:
             raise ValueError("default kPL must be finite and non-negative")
         if not np.isfinite(self.conversion_start_s):
@@ -482,33 +487,43 @@ class PhantomDesign:
         return coverage / float(int(self.supersampling_factor) ** 3)
 
     def rasterize_b0_inhomogeneity(self) -> np.ndarray:
-        """Return an analytic 2D/3D B0 map centred on the reference in ppm."""
+        """Return an analytic 2D/3D B0 map centred on the reference in ppm.
+
+        ``b0_inhomogeneity_center`` (normalized like shape centres) translates
+        the pattern: linear maps cross zero there and radial maps have their
+        minimum there.  The scale is that of the unshifted pattern, so moving
+        the centre never changes the gradient or curvature.
+        """
         mode = self.b0_inhomogeneity_mode
         amplitude = float(self.b0_inhomogeneity_ppm)
         if mode == "none" or amplitude == 0.0:
             return np.zeros(self.shape, dtype=float)
-        axes = [
+        unshifted_axes = [
             2.0 * (np.arange(count, dtype=float) + 0.5) / count - 1.0
             for count in self.shape
         ]
-        x, y, z = np.meshgrid(*axes, indexing="ij")
+        shift = 2.0 * np.asarray(self.b0_inhomogeneity_center, dtype=float) - 1.0
+        x, y, z = np.meshgrid(
+            *(axis - offset for axis, offset in zip(unshifted_axes, shift)),
+            indexing="ij",
+        )
         if mode == "linear_x":
             normalized = x
         elif mode == "linear_y":
             normalized = y
         elif mode == "linear_z":
             normalized = z
-        elif mode == "radial_xy":
-            radial_distance = np.sqrt((x * x + y * y) / 2.0)
-            edge_distance = float(np.max(radial_distance))
-            normalized = (
-                radial_distance / edge_distance - 0.5
-                if edge_distance > 0.0
-                else np.zeros(self.shape, dtype=float)
-            )
         else:
-            radial_distance = np.sqrt((x * x + y * y + z * z) / 3.0)
-            edge_distance = float(np.max(radial_distance))
+            radial_axes = 2 if mode == "radial_xy" else 3
+            radial_distance = np.sqrt(
+                sum(axis * axis for axis in (x, y, z)[:radial_axes]) / radial_axes
+            )
+            edge_distance = float(
+                np.sqrt(
+                    sum(np.max(axis * axis) for axis in unshifted_axes[:radial_axes])
+                    / radial_axes
+                )
+            )
             normalized = (
                 radial_distance / edge_distance - 0.5
                 if edge_distance > 0.0
@@ -823,6 +838,10 @@ class PhantomDesign:
             shapes=shapes,
             b0_inhomogeneity_mode=str(data.get("b0_inhomogeneity_mode", "none")),
             b0_inhomogeneity_ppm=float(data.get("b0_inhomogeneity_ppm", 0.0)),
+            b0_inhomogeneity_center=tuple(
+                float(value)
+                for value in data.get("b0_inhomogeneity_center", (0.5, 0.5, 0.5))
+            ),
             dynamic_enabled=bool(data.get("dynamic_enabled", False)),
             pyruvate_peak_name=str(data.get("pyruvate_peak_name", "Pyruvate")),
             lactate_peak_name=str(data.get("lactate_peak_name", "Lactate")),
