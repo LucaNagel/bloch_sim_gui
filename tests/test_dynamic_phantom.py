@@ -2037,12 +2037,27 @@ def test_phantom_designer_does_not_show_hp_decay_when_hp_model_is_disabled():
 
     assert pyruvate is None
     assert lactate is None
-    assert "Hyperpolarized preview inactive" in dialog.kinetics_preview_info.text()
+    assert "Conversion model off" in dialog.kinetics_preview_info.text()
+    assert not dialog.kinetics_model_controls.isEnabled()
 
+    # Switching conversion on with every rate at zero starts from a typical kPL.
     dialog.dynamic_enabled.setChecked(True)
+    assert dialog.kinetics_model_controls.isEnabled()
+    assert dialog.shape_kpl.value() == pytest.approx(0.05)
+    assert design.shapes[0].kpl_s_inv == pytest.approx(0.05)
     _, pyruvate = dialog.pyruvate_preview_curve.getData()
+    _, lactate = dialog.lactate_preview_curve.getData()
     assert pyruvate[0] == pytest.approx(1.0)
-    assert pyruvate[-1] == pytest.approx(1.0)
+    assert pyruvate[-1] < 1.0
+    assert lactate[-1] > lactate[0]
+    assert "not hyperpolarized" in dialog.kinetics_preview_info.text()
+
+    # A user-chosen rate survives switching the model off and on again.
+    dialog.shape_kpl.setValue(0.0)
+    dialog.dynamic_enabled.setChecked(False)
+    dialog.shape_kpl.setValue(0.3)
+    dialog.dynamic_enabled.setChecked(True)
+    assert dialog.shape_kpl.value() == pytest.approx(0.3)
     dialog.close()
     app.processEvents()
 
