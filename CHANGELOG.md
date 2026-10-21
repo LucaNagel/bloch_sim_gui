@@ -12,6 +12,9 @@ The project follows [Semantic Versioning](https://semver.org/).
   and `CustomPulse("AHP_5ms_Hsn")` resolve in source checkouts and pip
   installs. The `.exc`/`.dat` pulses now ship as package data; before, only
   the PyInstaller app contained them.
+- `load_amp_phase_dat` reads decimal durations from file names: `pulse_2.5ms.dat`
+  lasted 5 ms and `HS_0.25MS.dat` 25 ms. The GUI import dialog always passes
+  its own duration and was not affected.
 
 ## [2.9.1] - 2026-10-21
 

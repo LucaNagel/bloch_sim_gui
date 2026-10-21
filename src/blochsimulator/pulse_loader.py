@@ -585,7 +585,7 @@ def load_amp_phase_dat(
     # Derive duration if not provided (look for '<number>ms' in filename).
     pulse_duration = duration_s
     if pulse_duration is None:
-        m = re.search(r"(\d+(?:\\.\\d+)?)ms", path.stem, re.IGNORECASE)
+        m = re.search(r"(\d+(?:\.\d+)?)ms", path.stem, re.IGNORECASE)
         if m:
             pulse_duration = float(m.group(1)) / 1000.0
     if pulse_duration is not None:
