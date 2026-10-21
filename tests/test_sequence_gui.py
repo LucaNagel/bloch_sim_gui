@@ -2285,6 +2285,8 @@ def test_ss_bssfp_matches_named_phantom_peaks_and_uses_phantom_voxel_size(
             "Shape 2: Lactate", 0.0, 25.0, 0.3, frequency_offset_hz=925.44725
         ),
     ]
+    # Peak offsets are relative to pyruvate at the default C13 sequence
+    # reference, so pyruvate sits at 0 Hz in the sequence frame.
     phantom = SpectralPhantom(
         shape=shape,
         fov=(1e-3, 2e-3, 4e-3),
@@ -2292,6 +2294,7 @@ def test_ss_bssfp_matches_named_phantom_peaks_and_uses_phantom_voxel_size(
         concentration_maps={item.name: np.ones(shape) for item in species},
         field_strength=7.0,
         nucleus="C13",
+        spectral_reference_ppm=171.0,
     )
     monkeypatch.setattr(widget, "_loaded_designed_phantom", lambda: phantom)
 
@@ -2303,6 +2306,7 @@ def test_ss_bssfp_matches_named_phantom_peaks_and_uses_phantom_voxel_size(
     widget.refresh_object_summary()
     parameters = widget._ss_bssfp_pulseq_parameters()
 
+    assert widget.sequence_reference_ppm.value() == pytest.approx(171.0)
     assert parameters["target_frequency_offsets_hz"] == pytest.approx((1655, -245))
     assert parameters["receiver_frequency_offsets_hz"] == pytest.approx(
         (925.44725, 0.0)
@@ -2325,6 +2329,58 @@ def test_ss_bssfp_matches_named_phantom_peaks_and_uses_phantom_voxel_size(
 
     assert widget.ss_bssfp_target_offsets_hz.isEnabled()
     assert widget.ss_bssfp_receiver_offsets_hz.isEnabled()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_ss_bssfp_peak_matching_uses_the_simulated_frequency_frame(monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    shape = (2, 2, 2)
+    species = [
+        ChemicalSpecies("Pyruvate", 0.0, 25.0, 0.3, frequency_offset_hz=0.0),
+        ChemicalSpecies("Lactate", 0.0, 25.0, 0.3, frequency_offset_hz=925.44725),
+    ]
+    # Without a spectral reference the peaks sit at absolute 0 ppm, far below
+    # the 171 ppm C13 sequence reference.
+    phantom = SpectralPhantom(
+        shape=shape,
+        fov=(2e-3, 2e-3, 2e-3),
+        species=species,
+        concentration_maps={item.name: np.ones(shape) for item in species},
+        field_strength=7.0,
+        nucleus="C13",
+    )
+    monkeypatch.setattr(widget, "_loaded_designed_phantom", lambda: phantom)
+    widget.ss_bssfp_target_names.setText("Lac, Py")
+    widget.ss_bssfp_receiver_offsets_hz.setText("925.44725, 0")
+    widget.refresh_object_summary()
+
+    assert widget.nucleus.currentText() == "C13"
+    assert widget.sequence_reference_ppm.value() == pytest.approx(171.0)
+    simulated = {
+        name: float(np.unique(component.chemical_shift_map)[0])
+        for name, component in phantom.to_component_phantoms(
+            7.0, "C13", sequence_reference_ppm=171.0
+        )
+    }
+    assert widget._ss_bssfp_phantom_peak_offsets() == pytest.approx(
+        (simulated["Lactate"], simulated["Pyruvate"])
+    )
+    assert simulated["Pyruvate"] == pytest.approx(-12813.885)
+    assert (
+        "Receiver/phantom mismatch: +1.281e+04 Hz, +1.281e+04 Hz."
+        in widget.ss_bssfp_spoiler_info.text()
+    )
+
+    widget.sequence_reference_ppm.setValue(0.0)
+    assert widget._ss_bssfp_phantom_peak_offsets() == pytest.approx((925.44725, 0.0))
+    assert "Receiver offsets match" in widget.ss_bssfp_spoiler_info.text()
+
+    widget.sequence_reference_ppm.setValue(171.0)
+    assert "Receiver/phantom mismatch" in widget.ss_bssfp_spoiler_info.text()
 
     widget.close()
     widget.deleteLater()

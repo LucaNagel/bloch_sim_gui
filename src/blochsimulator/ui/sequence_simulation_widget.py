@@ -8857,6 +8857,10 @@ class SequenceSimulationWidget(QWidget):
             active_spsp = active_spsp or (
                 self._selected_shared_rf_pulse_type(prefix) == "spectral_spatial"
             )
+        # Phantom peaks in Hz depend on field strength and sequence reference,
+        # so the receiver/phantom match must be re-evaluated here.
+        if hasattr(self, "ss_bssfp_spoiler_info"):
+            self._update_ss_bssfp_spoiler_info()
         phantom = self._selected_designed_phantom()
         if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
             phantom.metadata["sequence_reference_ppm"] = (
