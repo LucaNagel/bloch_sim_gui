@@ -6,6 +6,8 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.9.1] - 2026-10-21
+
 ### Added
 
 - Sequence results export as Bruker ParaVision studies
@@ -32,9 +34,40 @@ The project follows [Semantic Versioning](https://semver.org/).
   template preview/editing, anonymization and new-study/append options. Raw
   data are stored complex-conjugated by default, like measured ParaVision data
   (`RECO_qopts = COMPLEX_CONJUGATE`); the option can be switched off.
+- Free Mode samples positions along a line (x, y or z) or on an xy, xz or yz
+  grid. The Spatial tab shows planes as |Mxy|, phase and Mz maps with
+  row/column profiles, the 3D view lays positions out as rows and floor
+  lattices, and sweeps, notebooks and spatial exports record the geometry.
+- Free Mode sequence design has a slice-axis selector, extra gradient lobes on
+  any axis and an internal FID sequence. The sequence diagram shows one lane
+  per channel on a shared time axis, and the preview has an overview strip with
+  optional timing markers.
+- Dynamic phantoms gain per-voxel washout (clearance, renal excretion into
+  ureters and bladder) and voxelwise per-pool chemical-shift maps (ppm) with
+  co-labelled pyruvate inflow. The mouse phantom uses them for urinary
+  transport and pH-dependent shifts.
+- The Sequence workspace falls back to an on-resonance default sphere per
+  nucleus when no phantom is loaded and shows a Geometry tab (object, simulated
+  grid, FOV, slice package) before the run. The parameter loop can sweep
+  phantom parameters.
+- The spin probe offers hyperpolarized or thermal longitudinal equilibrium and
+  declared ideal spoiling.
 
 ### Changed
 
+- The spin-major kernel (executor API 5) runs two to six pools with delayed
+  per-voxel inflow, caches RF propagators for N-pool phantoms and RF-spoiling
+  phase, supports per-pool frequency offsets and folds washout into its cached
+  coefficients. Repeated RF pulses compile identically in a pulse-local frame,
+  so all repeats share one cache key. The three-pool `dyn_epsi_test` run drops
+  from ~115 s to ~84 s, and the mouse washout case is ~18x faster than the
+  optimized kernel. The native multi-pool plan applies washout too.
+- FLASH is the default sequence and the CSI matrix defaults to 16x16. The mouse
+  phantom defaults to a 32x32x105 mm FOV.
+- Mouse perfusion pools decay with T2* by default (switchable to T2), and the
+  injection is specified by concentration and volume.
+- The phantom designer shows inherited peak values, polarization as "x thermal"
+  and has a dedicated B0 tab.
 - EPSI / MGE parameters now resolve against each other as you edit them. The
   sampling bandwidth snaps to the nearest ADC/RF-raster-compatible value
   (fixing the ADC-delay raster error at e.g. 150 kHz), and echo spacing, TE1,
@@ -55,6 +88,20 @@ The project follows [Semantic Versioning](https://semver.org/).
 - The sampling-bandwidth field of FLASH and Cartesian EPI is now rounded up when
   it shows the bandwidth the builder achieved, so repeated generation no longer
   lowers the bandwidth step by step (150 → 142.9 → 133.3 → 125 kHz).
+
+### Fixed
+
+- RF designer flip angles are exact (a 90 deg hard pulse no longer rotates by
+  90.9 deg), and spin echo, inversion recovery and similar builders keep pulse
+  area when resampling custom pulses.
+- bSSFP builders use the realised alpha/2 spacings, lock multi-echo receiver
+  phase to the exciting pulse and centre radial echo trains. SSFP startup
+  spacing follows the Pulseq centre-to-centre convention.
+- Hyperpolarized spin probes relax toward the thermal level from above instead
+  of toward zero.
+- The sequence preview can no longer be zoomed or panned before time 0.
+- SS-bSSFP receiver/phantom matching refreshes when the reference or field
+  changes.
 
 ## [2.9.0] - 2026-10-17
 
