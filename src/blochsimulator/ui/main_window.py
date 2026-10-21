@@ -6349,10 +6349,13 @@ class BlochSimulatorGUI(QMainWindow):
                     legacy_index = int(state.get("sequence_view_tab", 0))
                     if legacy_index == 3:
                         saved_view_index = sequence_widget.two_d_result_tab_index
-                    elif legacy_index >= 4:
-                        saved_view_index = legacy_index - 1
                     else:
-                        saved_view_index = legacy_index
+                        saved_view_index = (
+                            legacy_index - 1 if legacy_index >= 4 else legacy_index
+                        )
+                        # Unnamed saves also predate the Geometry tab.
+                        if saved_view_index >= sequence_widget.geometry_tab_index:
+                            saved_view_index += 1
                 sequence_widget.views.setCurrentIndex(
                     max(0, min(saved_view_index, sequence_widget.views.count() - 1))
                 )

@@ -56,6 +56,12 @@ from PyQt5.QtWidgets import (
 
 from ..memory import MEMORY_ERROR_PREFIX
 from ..kernel_capabilities import DYNAMIC_KERNEL_NAMES, SEQUENCE_KERNEL_NAMES
+from ..default_phantoms import (
+    DEFAULT_COMPOUNDS,
+    build_default_phantom,
+    default_phantom_grid,
+    is_default_phantom,
+)
 from ..phantom import Phantom
 from ..notebook_exporter import export_pulseq_generation_notebook
 from ..paths import workspace_directory
@@ -104,7 +110,7 @@ from ..sequence import (
     variable_flip_angle_schedule,
 )
 from ..sequence.bruker_export import suggest_bruker_method
-from ..sequence.encoding import numeric_definition_array
+from ..sequence.encoding import _axis_vector, numeric_definition_array
 from ..sequence.export_bundle import existing_export_targets, perform_sequence_export
 from ..sequence.internal_fid import make_internal_fid
 from ..sequence.parameter_loop import (
@@ -139,6 +145,10 @@ from .plot_interaction import AXIS_ZOOM_TOOLTIP
 from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumViewer
 from .project_export_dialog import ProjectExportNamingWidget
 from .reconstruction_explorer import SequenceReconstructionExplorer
+from .sequence_geometry_viewer import (
+    SequenceGeometryViewer,
+    sequence_geometry_from_definitions,
+)
 from .sequence_export_dialog import SequenceExportDialog
 from .simulation_explorer import SessionSimulationRun
 from .styles import BOLD_GROUP_TITLES_STYLE
@@ -2063,7 +2073,7 @@ class SequenceSimulationWidget(QWidget):
             carrier_offset_hz=getattr(self, f"{prefix}_rf_offset_hz").value(),
             target_thickness_m=self._shared_rf_target_thickness_m(prefix),
             initial_pulse=initial_pulse,
-            phantom=self._selected_designed_phantom(),
+            phantom=self._loaded_designed_phantom(),
         )
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -2134,7 +2144,7 @@ class SequenceSimulationWidget(QWidget):
             sequence_reference_ppm=self.sequence_reference_ppm.value(),
             carrier_offset_hz=getattr(self, f"{prefix}_rf_offset_hz").value(),
             target_thickness_m=self._shared_rf_target_thickness_m(prefix),
-            phantom=self._selected_designed_phantom(),
+            phantom=self._loaded_designed_phantom(),
             library=library,
             schedule=schedule,
             selected_pulse_id=selected_id,
@@ -2219,7 +2229,7 @@ class SequenceSimulationWidget(QWidget):
             sequence_reference_ppm=self.sequence_reference_ppm.value(),
             carrier_offset_hz=getattr(self, f"{prefix}_rf_offset_hz").value(),
             target_thickness_m=self._shared_rf_target_thickness_m(prefix),
-            phantom=self._selected_designed_phantom(),
+            phantom=self._loaded_designed_phantom(),
             pulse_spacing_s=pulse_spacing_s,
             spoiling="ideal" if self.spoiler_mode == "ideal" else "none",
         )
@@ -4942,6 +4952,14 @@ class SequenceSimulationWidget(QWidget):
             self.sequence_tab_index,
             "Inspect the generated RF, gradient, and ADC sequence waveforms.",
         )
+        self.geometry_viewer = SequenceGeometryViewer()
+        self.geometry_tab_index = views.addTab(self.geometry_viewer, "Geometry")
+        views.setTabToolTip(
+            self.geometry_tab_index,
+            "Check object, simulated grid, sequence FOV and slices before running.",
+        )
+        self._geometry_viewer_stale = True
+        views.currentChanged.connect(self._views_current_changed)
 
         signal_page = QWidget()
         self.signal_page = signal_page
@@ -6552,7 +6570,7 @@ class SequenceSimulationWidget(QWidget):
         self._update_frequency_reference_info()
         self._update_spoiling_quality()
         if probe_selected:
-            phantom = self._selected_designed_phantom()
+            phantom = self._loaded_designed_phantom()
             if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
                 self.field_strength_t.setValue(phantom.field_strength)
                 nucleus_index = self.nucleus.findText(phantom.nucleus)
@@ -6585,9 +6603,65 @@ class SequenceSimulationWidget(QWidget):
         )
 
     def _selected_designed_phantom(self):
+        phantom = self._loaded_designed_phantom()
+        if phantom is not None:
+            return phantom
+        return self._default_sequence_phantom()
+
+    def _loaded_designed_phantom(self):
+        """Return the Phantom-tab phantom without the automatic default.
+
+        Sequence design inputs (RF plans, spoiler voxel sizes, SS-bSSFP peak
+        offsets, probe defaults) use this, because the default sphere's grid
+        itself follows the generated sequence.
+        """
         main_window = self.window()
         phantom_widget = getattr(main_window, "phantom_widget", None)
         return getattr(phantom_widget, "current_phantom", None)
+
+    def _default_sequence_phantom(self):
+        """Return the on-resonance sphere used while the Phantom tab is empty.
+
+        The sphere is rebuilt only when nucleus, sequence reference or the
+        encoded grid change, so the many callers that inspect the selected
+        phantom share one cached object.
+        """
+        if not hasattr(self, "sequence_reference_ppm"):
+            return None
+        nucleus = self.nucleus.currentText()
+        if nucleus not in DEFAULT_COMPOUNDS:
+            return None
+        geometry = (
+            self._sequence_geometry()
+            if getattr(self, "program", None) is not None
+            else None
+        )
+        if geometry is None:
+            side_m, cells = default_phantom_grid()
+        else:
+            side_m, cells = default_phantom_grid(
+                geometry.fov_m,
+                geometry.matrix,
+                geometry.frame,
+                slice_thickness_m=geometry.slice_thickness_m,
+                slice_normal=geometry.frame[:, 2],
+            )
+        reference_ppm = round(float(self.sequence_reference_ppm.value()), 6)
+        key = (nucleus, reference_ppm, round(side_m, 9), cells)
+        cached = getattr(self, "_default_phantom_cache", None)
+        if cached is None or cached[0] != key:
+            phantom = build_default_phantom(
+                nucleus,
+                field_strength_t=self.field_strength_t.value(),
+                sequence_reference_ppm=reference_ppm,
+                side_m=side_m,
+                matrix=cells,
+            )
+            cached = (key, phantom)
+            self._default_phantom_cache = cached
+        phantom = cached[1]
+        phantom.field_strength = self.field_strength_t.value()
+        return phantom
 
     def refresh_object_summary(self, *_):
         """Refresh the read-only summary of the shared Phantom-tab object."""
@@ -6612,7 +6686,9 @@ class SequenceSimulationWidget(QWidget):
             self._phantom_relaxation_changed()
             return
         active = np.asarray(phantom.mask, dtype=bool)
-        if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+        if isinstance(
+            phantom, (SpectralPhantom, DynamicSpectralPhantom)
+        ) and not is_default_phantom(phantom):
             self.field_strength_t.setValue(phantom.field_strength)
             nucleus_index = self.nucleus.findText(phantom.nucleus)
             if nucleus_index >= 0:
@@ -6923,9 +6999,15 @@ class SequenceSimulationWidget(QWidget):
         t1 = np.asarray(phantom.t1_map)[active] * 1000.0
         t2 = np.asarray(phantom.t2_map)[active] * 1000.0
         fov_mm = " × ".join(f"{value * 1000:.4g}" for value in phantom.fov)
+        phantom_name = phantom.name
+        if is_default_phantom(phantom):
+            phantom_name += (
+                " — automatic default, on resonance at the sequence reference. "
+                "Create or load a phantom in the Phantom tab to replace it."
+            )
         rows.extend(
             (
-                ("Selected phantom", phantom.name),
+                ("Selected phantom", phantom_name),
                 (
                     "Geometry",
                     f"{phantom.ndim}D; matrix {tuple(phantom.shape)}; "
@@ -6980,6 +7062,7 @@ class SequenceSimulationWidget(QWidget):
     def _update_simulation_object_table(self, *_):
         if not hasattr(self, "simulation_object_table"):
             return
+        self._schedule_geometry_refresh()
         table = self.simulation_object_table
         rows = self._simulation_object_summary_rows()
         table.setRowCount(len(rows))
@@ -7547,7 +7630,7 @@ class SequenceSimulationWidget(QWidget):
         return normalized
 
     def _ss_bssfp_phantom_peak_offsets(self):
-        phantom = self._selected_designed_phantom()
+        phantom = self._loaded_designed_phantom()
         if isinstance(phantom, SpectralPhantom):
             components = phantom.species
         elif isinstance(phantom, DynamicSpectralPhantom):
@@ -7603,8 +7686,8 @@ class SequenceSimulationWidget(QWidget):
             )
         if source_index == 2:
             return None
-        phantom = self._selected_designed_phantom()
-        if phantom is None:
+        phantom = self._loaded_designed_phantom()
+        if phantom is None and not is_default_phantom(self.phantom):
             phantom = self.phantom
         if phantom is None or int(getattr(phantom, "ndim", 0)) != 3:
             return None
@@ -11030,6 +11113,115 @@ class SequenceSimulationWidget(QWidget):
         self._set_sequence_cursor(0.0)
         self._update_run_action_availability()
         self._emit_physical_b1_changed()
+        # The default phantom follows the encoded grid, so its summary changes
+        # with every newly shown sequence.
+        self._update_simulation_object_table()
+
+    def _views_current_changed(self, index):
+        if index == getattr(self, "geometry_tab_index", -1):
+            self._schedule_geometry_refresh()
+
+    def _schedule_geometry_refresh(self):
+        """Redraw the geometry tab once, and only while it is visible."""
+        if not hasattr(self, "geometry_viewer"):
+            return
+        self._geometry_viewer_stale = True
+        if self.views.currentIndex() != self.geometry_tab_index:
+            return
+        if getattr(self, "_geometry_refresh_queued", False):
+            return
+        self._geometry_refresh_queued = True
+        QTimer.singleShot(0, self._refresh_geometry_viewer)
+
+    def _sequence_geometry(self):
+        """Return the encoded FOV and slices of the shown sequence."""
+        if self.program is None:
+            return None
+        definitions = dict(self.program.metadata.get("definitions", {}))
+        name = str(definitions.get("Name", self.sequence_source.currentText()))
+        grid = self._sequence_spatial_grid_for_resolution_warning()
+        if grid is not None:
+            matrix, fov_m, frame = grid
+            return sequence_geometry_from_definitions(
+                definitions, frame.matrix, fov_m=fov_m, matrix=matrix, name=name
+            )
+        normalized = {str(key).lower(): value for key, value in definitions.items()}
+        frame_matrix = np.eye(3)
+        axis_code = normalized.get("slicegradientaxis")
+        if axis_code is not None:
+            try:
+                normal = _axis_vector(str(axis_code), "slice axis")
+            except ValueError:
+                normal = None
+            if normal is not None:
+                axis = int(np.flatnonzero(np.abs(normal) > 0.5)[0])
+                in_plane = [index for index in range(3) if index != axis]
+                frame_matrix = np.column_stack(
+                    (np.eye(3)[:, in_plane[0]], np.eye(3)[:, in_plane[1]], normal)
+                )
+        else:
+            try:
+                frame_matrix = EncodingFrame.from_definitions(definitions).matrix
+            except (TypeError, ValueError):
+                pass
+        return sequence_geometry_from_definitions(definitions, frame_matrix, name=name)
+
+    def _geometry_viewer_object(self):
+        """Return the object shown in the geometry tab and its label."""
+        source_index = self.object_source.currentIndex()
+        if source_index == 2:
+            return None, "Spin probe (no spatial object)"
+        if source_index == 1:
+            n = self.matrix_size.value()
+            nz = self.z_matrix_size.value()
+            fov = self.fov_mm.value() / 1000.0
+            fov_z = self.fov_z_mm.value() / 1000.0
+            if self.object_type.currentIndex() == 1:
+                mask = np.ones((n, n, nz), dtype=bool)
+            else:
+                coordinate = (np.arange(n) + 0.5) / n - 0.5
+                coordinate_z = (np.arange(nz) + 0.5) / nz - 0.5
+                x, y, z = np.meshgrid(
+                    coordinate, coordinate, coordinate_z, indexing="ij"
+                )
+                mask = x * x + y * y + z * z <= 0.4**2
+            quick_object = SimpleNamespace(
+                shape=(n, n, nz), fov=(fov, fov, fov_z), mask=mask, pd_map=None
+            )
+            return (
+                quick_object,
+                f"Built-in quick object: {self.object_type.currentText()}",
+            )
+        phantom = self._selected_designed_phantom()
+        if phantom is None:
+            return None, "No phantom selected"
+        label = str(phantom.name)
+        if is_default_phantom(phantom):
+            label += " — automatic default (Phantom tab is empty)"
+        return phantom, label
+
+    def _refresh_geometry_viewer(self):
+        self._geometry_refresh_queued = False
+        if not self._geometry_viewer_stale:
+            return
+        self._geometry_viewer_stale = False
+        phantom, label = self._geometry_viewer_object()
+        probe_position = None
+        if self.object_source.currentIndex() == 2:
+            probe_position = tuple(
+                spin.value() / 1000.0
+                for spin in (
+                    self.probe_position_x_mm,
+                    self.probe_position_y_mm,
+                    self.probe_position_z_mm,
+                )
+            )
+        self.geometry_viewer.update_geometry(
+            phantom,
+            self._sequence_geometry(),
+            object_label=label,
+            probe_position_m=probe_position,
+        )
 
     def _sequence_plot_range_changed(self, _view_box, x_range):
         if self._syncing_sequence_plot_ranges or x_range is None or len(x_range) != 2:

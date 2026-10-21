@@ -1592,7 +1592,7 @@ def test_sequence_workspace_scopes_object_controls_to_the_selected_source():
     assert not widget.object_type.isEnabled()
     assert not widget.t1_ms.isEnabled()
     assert widget.built_in_properties_group.isHidden()
-    assert "No phantom selected" in widget.phantom_summary.text()
+    assert widget.phantom_summary.text().startswith("Default sphere (H1 water)")
     assert widget.probe_group.isHidden()
 
     widget.object_source.setCurrentIndex(1)
@@ -1637,7 +1637,7 @@ def test_simulation_object_summary_uses_structured_table(monkeypatch):
         t2_map=np.full((2, 3, 4), 0.09),
         pd_map=np.ones((2, 3, 4)),
     )
-    monkeypatch.setattr(widget, "_selected_designed_phantom", lambda: phantom)
+    monkeypatch.setattr(widget, "_loaded_designed_phantom", lambda: phantom)
 
     widget.refresh_object_summary()
     rows = {
@@ -1786,7 +1786,7 @@ def test_shared_spoiling_quality_unit_covers_every_sequence_source():
         t2_map=np.ones((2, 2, 2)),
         pd_map=np.ones((2, 2, 2)),
     )
-    widget._selected_designed_phantom = lambda: phantom
+    widget._loaded_designed_phantom = lambda: phantom
     widget.acquisition = MagicMock(
         moment_origins_cyc_per_m=((0.0, 0.0, 0.0), (1000.0, 0.0, 0.0))
     )
@@ -1966,7 +1966,7 @@ def test_flash_auto_spoiler_tracks_phantom_geometry_and_subvoxel_grid(monkeypatc
         t2_map=np.ones((2, 2, 2)),
         pd_map=np.ones((2, 2, 2)),
     )
-    monkeypatch.setattr(widget, "_selected_designed_phantom", lambda: phantom)
+    monkeypatch.setattr(widget, "_loaded_designed_phantom", lambda: phantom)
 
     assert widget.flash_auto_spoiler.isChecked()
     assert not widget.flash_spoiler_cycles_per_slice.isEnabled()
@@ -2287,7 +2287,7 @@ def test_ss_bssfp_matches_named_phantom_peaks_and_uses_phantom_voxel_size(
         field_strength=7.0,
         nucleus="C13",
     )
-    monkeypatch.setattr(widget, "_selected_designed_phantom", lambda: phantom)
+    monkeypatch.setattr(widget, "_loaded_designed_phantom", lambda: phantom)
 
     widget.flash_auto_spoiler.setChecked(False)
     widget.flash_spoiler_cycles_per_slice.setValue(4.0)
