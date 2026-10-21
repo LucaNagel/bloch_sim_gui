@@ -25,6 +25,7 @@ import time
 import json
 from typing import Optional
 from pathlib import Path
+from ..position_sampling import AXIS_NAMES
 from ..visualization import ParameterSweepExportDialog
 from ..notebook_exporter import export_notebook
 
@@ -252,75 +253,7 @@ class ParameterSweepWidget(QWidget):
         # Standard metrics to collect for every sweep
         selected_metrics = ["Mx", "My", "Mz", "Signal", "Mean Signal"]
 
-        # Capture constant parameters
-        constant_params = {}
-        try:
-            # Tissue
-            if hasattr(self.parent_gui, "tissue_widget"):
-                tw = self.parent_gui.tissue_widget
-                params = tw.get_parameters()
-                constant_params["t1"] = float(params.t1)
-                constant_params["t2"] = float(params.t2)
-                constant_params["tissue_name"] = str(params.name)
-                constant_params["m0"] = float(tw.get_initial_mz())
-
-            # Sequence (basic params)
-            if hasattr(self.parent_gui, "sequence_designer"):
-                sd = self.parent_gui.sequence_designer
-                constant_params["te"] = float(sd.te_spin.value() / 1000.0)
-                constant_params["tr"] = float(sd.tr_spin.value() / 1000.0)
-                constant_params["ti"] = float(sd.ti_spin.value() / 1000.0)
-                constant_params["sequence_type"] = str(sd.sequence_type.currentText())
-                constant_params["echo_count"] = int(sd.spin_echo_echoes.value())
-                constant_params["slice_thickness"] = float(
-                    sd.slice_thickness_spin.value()
-                )
-                constant_params["slice_gradient"] = float(
-                    sd.slice_gradient_spin.value()
-                )
-                constant_params["ssfp_repeats"] = int(sd.ssfp_repeats.value())
-
-            # RF
-            if hasattr(self.parent_gui, "rf_designer"):
-                rd = self.parent_gui.rf_designer
-                constant_params["flip_angle"] = float(rd.flip_angle.value())
-                constant_params["pulse_duration"] = float(rd.duration.value() / 1000.0)
-                constant_params["pulse_type"] = str(rd.pulse_type.currentText())
-                constant_params["rf_phase"] = float(rd.phase.value())
-                constant_params["rf_freq_offset"] = float(rd.freq_offset.value())
-                constant_params["rf_time_bw_product"] = float(rd.tbw.value())
-
-            # Simulation
-            if hasattr(self.parent_gui, "pos_spin"):
-                constant_params["num_positions"] = int(self.parent_gui.pos_spin.value())
-                constant_params["position_range_cm"] = float(
-                    self.parent_gui.pos_range.value() / 10.0
-                )
-            if hasattr(self.parent_gui, "freq_spin"):
-                constant_params["num_frequencies"] = int(
-                    self.parent_gui.freq_spin.value()
-                )
-                constant_params["frequency_range_hz"] = float(
-                    self.parent_gui.freq_range.value()
-                )
-                constant_params["frequency_center_hz"] = float(
-                    self.parent_gui.freq_center.value()
-                )
-            if hasattr(self.parent_gui, "time_step_spin"):
-                # Keep the exported value in the same explicit unit used by
-                # the rest of the application.  Exporting seconds under the
-                # ambiguous key ``time_step`` also exposed normal binary-float
-                # noise such as 1.9999999999999998e-05 for 20 us.
-                constant_params["time_step_us"] = float(
-                    self.parent_gui.time_step_spin.value()
-                )
-
-        except Exception as e:
-            msg = f"Warning: Could not capture constant parameters: {e}"
-            if self.parent_gui:
-                self.parent_gui.log_message(msg)
-            print(msg)
-
+        constant_params = self._constant_params()
         if constant_params and self.parent_gui:
             self.parent_gui.log_message(
                 f"Captured {len(constant_params)} constant parameters for export."
@@ -500,6 +433,101 @@ class ParameterSweepWidget(QWidget):
             self.export_button.setEnabled(True)
             if hasattr(self.parent_gui, "set_sweep_mode"):
                 self.parent_gui.set_sweep_mode(False)
+
+    def _constant_params(self) -> dict:
+        """Settings held fixed during the sweep, saved with its results."""
+        constant_params = {}
+        try:
+            # Tissue
+            if hasattr(self.parent_gui, "tissue_widget"):
+                tw = self.parent_gui.tissue_widget
+                params = tw.get_parameters()
+                constant_params["t1"] = float(params.t1)
+                constant_params["t2"] = float(params.t2)
+                constant_params["tissue_name"] = str(params.name)
+                constant_params["m0"] = float(tw.get_initial_mz())
+
+            # Sequence (basic params)
+            if hasattr(self.parent_gui, "sequence_designer"):
+                sd = self.parent_gui.sequence_designer
+                constant_params["te"] = float(sd.te_spin.value() / 1000.0)
+                constant_params["tr"] = float(sd.tr_spin.value() / 1000.0)
+                constant_params["ti"] = float(sd.ti_spin.value() / 1000.0)
+                constant_params["sequence_type"] = str(sd.sequence_type.currentText())
+                constant_params["echo_count"] = int(sd.spin_echo_echoes.value())
+                constant_params["slice_thickness"] = float(
+                    sd.slice_thickness_spin.value()
+                )
+                constant_params["slice_gradient"] = float(
+                    sd.slice_gradient_spin.value()
+                )
+                constant_params["ssfp_repeats"] = int(sd.ssfp_repeats.value())
+                if hasattr(sd, "slice_axis_combo"):
+                    constant_params["slice_axis"] = str(
+                        sd.slice_axis_combo.currentText()
+                    )
+                if hasattr(sd, "gradient_lobes"):
+                    constant_params["gradient_lobes"] = [
+                        lobe.to_state() for lobe in sd.gradient_lobes()
+                    ]
+
+            # RF
+            if hasattr(self.parent_gui, "rf_designer"):
+                rd = self.parent_gui.rf_designer
+                constant_params["flip_angle"] = float(rd.flip_angle.value())
+                constant_params["pulse_duration"] = float(rd.duration.value() / 1000.0)
+                constant_params["pulse_type"] = str(rd.pulse_type.currentText())
+                constant_params["rf_phase"] = float(rd.phase.value())
+                constant_params["rf_freq_offset"] = float(rd.freq_offset.value())
+                constant_params["rf_time_bw_product"] = float(rd.tbw.value())
+
+            # Simulation
+            if hasattr(self.parent_gui, "pos_spin"):
+                # Line or plane sampling: counts and ranges per sampled axis,
+                # first (fastest) axis first.
+                gui = self.parent_gui
+                counts, spans_mm = gui._position_counts_and_spans_mm()
+                constant_params["num_positions"] = int(np.prod(counts))
+                constant_params["position_range_cm"] = float(
+                    gui.pos_range.value() / 10.0
+                )
+                constant_params["position_geometry"] = (
+                    "plane" if gui._is_plane_geometry() else "line"
+                )
+                constant_params["position_axes"] = "".join(
+                    AXIS_NAMES[axis] for axis in gui._position_axes()
+                )
+                constant_params["position_counts"] = [int(n) for n in counts]
+                constant_params["position_ranges_mm"] = [float(v) for v in spans_mm]
+                constant_params["position_center_mm"] = [
+                    float(v) for v in gui._position_center_mm()
+                ]
+            if hasattr(self.parent_gui, "freq_spin"):
+                constant_params["num_frequencies"] = int(
+                    self.parent_gui.freq_spin.value()
+                )
+                constant_params["frequency_range_hz"] = float(
+                    self.parent_gui.freq_range.value()
+                )
+                constant_params["frequency_center_hz"] = float(
+                    self.parent_gui.freq_center.value()
+                )
+            if hasattr(self.parent_gui, "time_step_spin"):
+                # Keep the exported value in the same explicit unit used by
+                # the rest of the application.  Exporting seconds under the
+                # ambiguous key ``time_step`` also exposed normal binary-float
+                # noise such as 1.9999999999999998e-05 for 20 us.
+                constant_params["time_step_us"] = float(
+                    self.parent_gui.time_step_spin.value()
+                )
+
+        except Exception as e:
+            msg = f"Warning: Could not capture constant parameters: {e}"
+            if self.parent_gui:
+                self.parent_gui.log_message(msg)
+            print(msg)
+
+        return constant_params
 
     def stop_sweep(self):
         """Stop the parameter sweep."""

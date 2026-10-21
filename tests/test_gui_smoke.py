@@ -1,3 +1,4 @@
+import json
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -39,6 +40,7 @@ from blochsimulator.ui.magnetization_viewer import (
     MagnetizationViewer,
     centered_stride_indices,
 )
+from blochsimulator.visualization import ImageExporter
 from blochsimulator.position_sampling import (
     build_line_positions,
     build_plane_positions,
@@ -1769,6 +1771,94 @@ def test_free_mode_spatial_line_along_x_uses_its_axis():
     window._refresh_spatial_view()
     if window.sequence_designer._slice_thickness_m():
         assert all(line.isVisible() for line in guides)
+
+
+def _read_export_columns(path):
+    """Column names and values of a CSV written by DatasetExporter."""
+    lines = Path(path).read_text().splitlines()
+    header = next(i for i, line in enumerate(lines) if not line.startswith("#"))
+    values = np.loadtxt(path, delimiter=",", skiprows=header + 1, ndmin=2)
+    return lines[header].split(","), values, lines[:header]
+
+
+def test_free_mode_plane_spatial_export_writes_every_grid_position(tmp_path):
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    positions = build_plane_positions((4, 3), (0.03, 0.02), "xy")
+    result, ix, iy = _plane_result(positions, nframes=3)
+    _show_spatial_result(window, positions, result)
+    window.spatial_plot_type.setCurrentText("Map")
+    cache = window._last_spatial_export
+
+    path = window._write_spatial_export(cache, tmp_path / "plane.csv", "csv")
+
+    names, values, header = _read_export_columns(path)
+    assert names == ["x_m", "y_m", "z_m", "mxy", "phase_deg", "mz"]
+    assert "#   grid: 4 x 3 in xy (x fastest)" in header
+    assert f"#   time_s: {cache['time_s']}" in header
+    t = cache["time_idx"]
+    np.testing.assert_allclose(values[:, :3], positions)
+    np.testing.assert_allclose(
+        values[:, 3], np.hypot(result["mx"][t, :, 0], result["my"][t, :, 0])
+    )
+    np.testing.assert_allclose(values[:, 5], result["mz"][t, :, 0])
+    phase = values[:, 4]
+    assert np.isnan(phase[ix == 0]).all()
+    np.testing.assert_allclose(phase[ix > 0], (40.0 * iy - 60.0)[ix > 0])
+
+    # The map panel exports as one image next to the profile plots
+    maps_png = ImageExporter().export_pyqtgraph_plot(
+        window.spatial_map_widget, str(tmp_path / "maps.png"), width=600
+    )
+    assert maps_png and Path(maps_png).stat().st_size > 0
+
+
+def test_free_mode_line_spatial_export_names_its_axis(tmp_path):
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    positions = build_line_positions(5, 0.02, "x")
+    amp = np.linspace(0.0, 1.0, 5)[None, :, None] * np.ones((2, 1, 1))
+    _show_spatial_result(
+        window, positions, {"mx": amp, "my": np.zeros_like(amp), "mz": 1.0 - amp}
+    )
+
+    path = window._write_spatial_export(
+        window._last_spatial_export, tmp_path / "line.csv", "csv"
+    )
+
+    names, values, header = _read_export_columns(path)
+    assert names[:3] == ["position_m", "mxy", "mz"]
+    assert "#   position_axis: x" in header
+    np.testing.assert_allclose(values[:, 0], positions[:, 0])
+    np.testing.assert_allclose(values[:, 1], amp[-1, :, 0])
+
+
+def test_parameter_sweep_records_plane_geometry_and_gradient_lobes():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.pos_geometry_combo.setCurrentText("2D plane")
+    window.pos_plane_combo.setCurrentText("xz")
+    window.pos_spin.setValue(4)
+    window.pos2_spin.setValue(3)
+    window.pos_range.setValue(30.0)
+    window.pos2_range.setValue(20.0)
+    window.pos_center_y.setValue(2.0)
+    designer = window.sequence_designer
+    designer.slice_axis_combo.setCurrentText("y")
+    lobe = GradientLobe(axis="x", start_ms=1.0, duration_ms=2.0)
+    designer.set_gradient_lobes([lobe])
+
+    params = window.param_sweep_widget._constant_params()
+
+    assert params["num_positions"] == 12
+    assert params["position_geometry"] == "plane"
+    assert params["position_axes"] == "xz"
+    assert params["position_counts"] == [4, 3]
+    assert params["position_ranges_mm"] == [30.0, 20.0]
+    assert params["position_center_mm"] == [0.0, 2.0, 0.0]
+    assert params["slice_axis"] == "y"
+    assert params["gradient_lobes"] == [lobe.to_state()]
+    assert json.loads(json.dumps(params)) == params
 
 
 def test_3d_spatial_layout_returns_to_overlay():

@@ -4179,6 +4179,7 @@ class BlochSimulatorGUI(QMainWindow):
             "frequency_axis": freq_axis,
             "heatmap_mode": None,
             "position_axis": axis_name,
+            "frequency_view": spatial_view_mode,
         }
         if plane is not None:
             self._last_spatial_export.update(
@@ -9455,16 +9456,31 @@ class BlochSimulatorGUI(QMainWindow):
                     width=params["width"],
                 )
 
-                if result_mxy and result_mz:
+                results = {"Mxy": result_mxy, "Mz": result_mz}
+                if not self.spatial_map_widget.isHidden():
+                    maps_path = (
+                        base_path.parent / f"{base_path.stem}_maps{base_path.suffix}"
+                    )
+                    results["Maps"] = exporter.export_pyqtgraph_plot(
+                        self.spatial_map_widget,
+                        str(maps_path),
+                        format=params["format"],
+                        width=params["width"],
+                    )
+
+                if all(results.values()):
                     self.log_message(
-                        f"Exported spatial plots to:\n  {result_mxy}\n  {result_mz}"
+                        "Exported spatial plots to:\n"
+                        + "\n".join(f"  {path}" for path in results.values())
                     )
                     QMessageBox.information(
                         self,
                         "Export Successful",
-                        f"Spatial plots exported successfully:\n\n"
-                        f"Mxy: {Path(result_mxy).name}\n"
-                        f"Mz: {Path(result_mz).name}",
+                        "Spatial plots exported successfully:\n\n"
+                        + "\n".join(
+                            f"{name}: {Path(path).name}"
+                            for name, path in results.items()
+                        ),
                     )
                 else:
                     self.log_message("Export failed")
@@ -9507,15 +9523,7 @@ class BlochSimulatorGUI(QMainWindow):
         if not path:
             return
         try:
-            result_path = self.dataset_exporter.export_spatial(
-                position,
-                mxy,
-                mz,
-                str(path),
-                format=fmt,
-                mxy_per_freq=cache.get("mxy_per_freq"),
-                mz_per_freq=cache.get("mz_per_freq"),
-            )
+            result_path = self._write_spatial_export(cache, path, fmt)
             self.log_message(f"Spatial data exported to {result_path}")
             QMessageBox.information(
                 self,
@@ -9527,6 +9535,40 @@ class BlochSimulatorGUI(QMainWindow):
             QMessageBox.critical(
                 self, "Export Error", f"Could not export spatial data:\n{e}"
             )
+
+    def _write_spatial_export(self, cache: dict, path, fmt: str) -> str:
+        """Write the Spatial tab data: a plane as maps over all grid
+        positions, a line as profiles along its axis."""
+        if cache.get("frequency_view") == "Mean over freqs":
+            frequency = "mean over frequencies"
+        else:
+            frequency = f"index {cache.get('freq_index', 0)}"
+        info = {"time_s": cache.get("time_s"), "frequency": frequency}
+        if "mxy_map" in cache:
+            ny, nx = cache["mxy_map"].shape
+            first, second = cache["grid_axes"]
+            info["grid"] = f"{nx} x {ny} in {first}{second} ({first} fastest)"
+            info["phase_deg"] = "NaN where |Mxy| < 0.1 % of its maximum"
+            return self.dataset_exporter.export_spatial_plane(
+                self.last_positions,
+                cache["mxy_map"],
+                cache["phase_map_deg"],
+                cache["mz_map"],
+                str(path),
+                format=fmt,
+                metadata={"spatial": info},
+            )
+        info["position_axis"] = cache.get("position_axis", "z")
+        return self.dataset_exporter.export_spatial(
+            cache["position_m"],
+            cache["mxy"],
+            cache["mz"],
+            str(path),
+            format=fmt,
+            mxy_per_freq=cache.get("mxy_per_freq"),
+            mz_per_freq=cache.get("mz_per_freq"),
+            metadata={"spatial": info},
+        )
 
     def _update_mag_heatmaps(self):
         """Update magnetization heatmaps (Time vs Position/Frequency)."""
