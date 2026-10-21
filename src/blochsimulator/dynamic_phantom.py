@@ -448,6 +448,158 @@ class DynamicB0:
         self.pool_scale = scales
 
 
+@dataclass
+class VoxelWashout:
+    """First-order voxel washout with compartment-resolved secondary sources.
+
+    ``loss_map_s_inv`` removes spins from every pool of a voxel at a constant
+    rate (tissue clearance, renal excretion, or outflow from a well-mixed
+    lumen); longitudinal, transverse and concentration states all leave with
+    the spins. Voxels with ``compartment_map >= 0`` additionally receive the
+    piecewise-linear source rates of that compartment, given per pool as
+    concentration rates (mol/m^3/s) and the matching longitudinal
+    magnetization rates on the phantom kinetics timeline. Compartment voxels
+    must not convert between pools, so each pool integrates independently.
+    """
+
+    loss_map_s_inv: np.ndarray
+    compartment_map: Optional[np.ndarray] = None
+    times_s: Optional[np.ndarray] = None
+    concentration_rates: Optional[np.ndarray] = None
+    magnetization_rates: Optional[np.ndarray] = None
+    compartment_names: Tuple[str, ...] = ()
+
+    def validate(self, shape: Tuple[int, int, int], n_pools: int) -> None:
+        loss = np.asarray(self.loss_map_s_inv, dtype=np.float64)
+        if loss.shape != shape or not np.all(np.isfinite(loss)) or np.any(loss < 0):
+            raise ValueError(
+                "washout loss map must be finite, non-negative and match "
+                "phantom shape"
+            )
+        self.loss_map_s_inv = loss
+        self.compartment_names = tuple(str(name) for name in self.compartment_names)
+        if self.compartment_map is None:
+            if (
+                self.times_s is not None
+                or self.concentration_rates is not None
+                or self.magnetization_rates is not None
+            ):
+                raise ValueError("washout source rates require a compartment map")
+            return
+        compartments = np.asarray(self.compartment_map)
+        if compartments.shape != shape or not np.issubdtype(
+            compartments.dtype, np.integer
+        ):
+            raise ValueError(
+                "washout compartment map must be an integer map of phantom shape"
+            )
+        self.compartment_map = compartments.astype(np.int32)
+        times = np.asarray(self.times_s, dtype=np.float64)
+        if (
+            times.ndim != 1
+            or times.size < 2
+            or not np.all(np.isfinite(times))
+            or np.any(np.diff(times) <= 0)
+        ):
+            raise ValueError("washout source times must increase strictly")
+        self.times_s = times
+        concentration = np.asarray(self.concentration_rates, dtype=np.float64)
+        magnetization = np.asarray(self.magnetization_rates, dtype=np.float64)
+        count = int(concentration.shape[0]) if concentration.ndim == 3 else -1
+        expected = (count, int(n_pools), times.size)
+        if concentration.shape != expected or magnetization.shape != expected:
+            raise ValueError(
+                "washout source rates must have shape (compartments, pools, times)"
+            )
+        if np.any(self.compartment_map < -1) or np.any(self.compartment_map >= count):
+            raise ValueError("washout compartment map references unknown rates")
+        for values in (concentration, magnetization):
+            if not np.all(np.isfinite(values)) or np.any(values < 0):
+                raise ValueError("washout source rates must be finite and non-negative")
+        if self.compartment_names and len(self.compartment_names) != count:
+            raise ValueError("washout compartment names must match the rate rows")
+        self.concentration_rates = concentration
+        self.magnetization_rates = magnetization
+
+    @property
+    def has_sources(self) -> bool:
+        return self.compartment_map is not None
+
+    @property
+    def source_mask(self) -> np.ndarray:
+        if self.compartment_map is None:
+            return np.zeros(np.shape(self.loss_map_s_inv), dtype=bool)
+        return np.asarray(self.compartment_map) >= 0
+
+    def breakpoints_s(
+        self, duration_s: float, *, timeline_offset_s: float = 0.0
+    ) -> Tuple[float, ...]:
+        if self.times_s is None:
+            return ()
+        shifted = np.asarray(self.times_s) + float(timeline_offset_s)
+        return tuple(
+            float(value) for value in shifted if 0.0 <= value <= float(duration_s)
+        )
+
+    def compartment_rates_at(self, time_s: float):
+        """Return (concentration, magnetization) rates at a kinetics time."""
+        times = self.times_s
+        if time_s < times[0] or time_s > times[-1]:
+            shape = self.concentration_rates.shape[:2]
+            return np.zeros(shape), np.zeros(shape)
+        index = int(np.clip(np.searchsorted(times, time_s) - 1, 0, times.size - 2))
+        weight = (time_s - times[index]) / (times[index + 1] - times[index])
+        result = []
+        for values in (self.concentration_rates, self.magnetization_rates):
+            result.append(
+                (1.0 - weight) * values[:, :, index] + weight * values[:, :, index + 1]
+            )
+        return result[0], result[1]
+
+    def header(self) -> Dict:
+        return {
+            "has_sources": self.has_sources,
+            "times_s": None if self.times_s is None else self.times_s.tolist(),
+            "compartment_names": list(self.compartment_names),
+        }
+
+    def arrays(self) -> Dict[str, np.ndarray]:
+        arrays = {"washout_loss_map_s_inv": self.loss_map_s_inv}
+        if self.has_sources:
+            arrays["washout_compartment_map"] = self.compartment_map
+            arrays["washout_concentration_rates"] = self.concentration_rates
+            arrays["washout_magnetization_rates"] = self.magnetization_rates
+        return arrays
+
+    @classmethod
+    def from_saved(cls, header: Optional[Dict], arrays) -> Optional["VoxelWashout"]:
+        if header is None or "washout_loss_map_s_inv" not in arrays:
+            return None
+        has_sources = bool(header.get("has_sources")) and (
+            "washout_compartment_map" in arrays
+        )
+        return cls(
+            loss_map_s_inv=np.asarray(arrays["washout_loss_map_s_inv"]),
+            compartment_map=(
+                np.asarray(arrays["washout_compartment_map"]) if has_sources else None
+            ),
+            times_s=(
+                np.asarray(header["times_s"], dtype=np.float64) if has_sources else None
+            ),
+            concentration_rates=(
+                np.asarray(arrays["washout_concentration_rates"])
+                if has_sources
+                else None
+            ),
+            magnetization_rates=(
+                np.asarray(arrays["washout_magnetization_rates"])
+                if has_sources
+                else None
+            ),
+            compartment_names=tuple(header.get("compartment_names", ())),
+        )
+
+
 def rasterize_kpl_regions(
     shape: Tuple[int, int, int],
     regions: Tuple[KineticRegionDefinition, ...],
@@ -498,6 +650,7 @@ class DynamicSpectralPhantom:
     coordinate_system: str = "object_xyz"
     affine_ijk_to_xyz_m: Optional[np.ndarray] = None
     chemical_shift_maps_ppm: Optional[Dict[str, np.ndarray]] = None
+    voxel_washout: Optional[VoxelWashout] = None
     positions: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -621,6 +774,12 @@ class DynamicSpectralPhantom:
                     raise ValueError(
                         f"co-labelled pool {name!r} must not receive conversion"
                     )
+        if self.voxel_washout is not None:
+            self.voxel_washout.validate(self.shape, len(self.pools))
+            if self.voxel_washout.has_sources and np.any(
+                self.kpl_map_s_inv[self.voxel_washout.source_mask] > 0
+            ):
+                raise ValueError("washout source compartments must not convert pools")
         if self.dynamic_b0 is not None:
             self.dynamic_b0.validate(self.shape)
             scales = tuple(self.dynamic_b0.pool_scale)
@@ -670,6 +829,8 @@ class DynamicSpectralPhantom:
         active = self.pd_map > 0
         if self.pyruvate_inflow is not None:
             active = active | self.pyruvate_inflow.support_mask
+        if self.voxel_washout is not None:
+            active = active | self.voxel_washout.source_mask
         return active
 
     @property
@@ -716,6 +877,13 @@ class DynamicSpectralPhantom:
         if self.pyruvate_inflow is not None:
             values.extend(
                 self.pyruvate_inflow.breakpoints_s(
+                    duration_s,
+                    timeline_offset_s=-self.kinetics_time_offset_s,
+                )
+            )
+        if self.voxel_washout is not None:
+            values.extend(
+                self.voxel_washout.breakpoints_s(
                     duration_s,
                     timeline_offset_s=-self.kinetics_time_offset_s,
                 )
@@ -1092,6 +1260,9 @@ class DynamicSpectralPhantom:
                     "pool_scale": self.dynamic_b0.pool_scale,
                 }
             ),
+            "voxel_washout": (
+                None if self.voxel_washout is None else self.voxel_washout.header()
+            ),
             "conversion_start_s": self.conversion_start_s,
             "kinetics_time_offset_s": self.kinetics_time_offset_s,
             "equilibrium_polarization": self.equilibrium_polarization,
@@ -1177,6 +1348,14 @@ class DynamicSpectralPhantom:
                 np.stack([self.chemical_shift_map_ppm(name) for name in pool_names]),
                 {"units": "ppm", "long_name": "voxelwise pool shift"},
             )
+        if self.voxel_washout is not None:
+            for key, values in self.voxel_washout.arrays().items():
+                dims = (
+                    spatial_dims
+                    if np.ndim(values) == 3 and np.shape(values) == self.shape
+                    else tuple(f"{key}_dim_{axis}" for axis in range(np.ndim(values)))
+                )
+                data_vars[key] = (dims, values)
         if self.dynamic_b0 is not None:
             data_vars["dynamic_b0_scale_map"] = (
                 spatial_dims,
@@ -1266,6 +1445,10 @@ class DynamicSpectralPhantom:
                 max_step_s=inflow_metadata.get("max_step_s"),
                 colabelled_pools=tuple(inflow_metadata.get("colabelled_pools", ())),
             )
+        voxel_washout = VoxelWashout.from_saved(
+            header.get("voxel_washout"),
+            {name: np.asarray(ds[name]) for name in ds.data_vars},
+        )
         dynamic_b0_metadata = header.get("dynamic_b0")
         dynamic_b0 = None
         if dynamic_b0_metadata is not None and "dynamic_b0_scale_map" in ds:
@@ -1319,6 +1502,7 @@ class DynamicSpectralPhantom:
             kinetic_regions=regions,
             pyruvate_inflow=pyruvate_inflow,
             dynamic_b0=dynamic_b0,
+            voxel_washout=voxel_washout,
             conversion_start_s=float(header.get("conversion_start_s", 0.0)),
             kinetics_time_offset_s=float(header.get("kinetics_time_offset_s", 0.0)),
             metadata=dict(header.get("metadata", {})),
@@ -1374,6 +1558,9 @@ class DynamicSpectralPhantom:
                     "pool_scale": self.dynamic_b0.pool_scale,
                 }
             ),
+            "voxel_washout": (
+                None if self.voxel_washout is None else self.voxel_washout.header()
+            ),
             "conversion_start_s": self.conversion_start_s,
             "kinetics_time_offset_s": self.kinetics_time_offset_s,
             "equilibrium_polarization": self.equilibrium_polarization,
@@ -1401,6 +1588,8 @@ class DynamicSpectralPhantom:
                 arrays["pyruvate_arrival_delay_s"] = (
                     self.pyruvate_inflow.arrival_delay_map_s
                 )
+        if self.voxel_washout is not None:
+            arrays.update(self.voxel_washout.arrays())
         if self.dynamic_b0 is not None:
             arrays["dynamic_b0_scale_map"] = self.dynamic_b0.spatial_scale_map
         for index, pool in enumerate(self.pools):
@@ -1475,6 +1664,7 @@ class DynamicSpectralPhantom:
                 max_step_s=inflow_metadata.get("max_step_s"),
                 colabelled_pools=tuple(inflow_metadata.get("colabelled_pools", ())),
             )
+        voxel_washout = VoxelWashout.from_saved(header.get("voxel_washout"), arrays)
         dynamic_b0_metadata = header.get("dynamic_b0")
         dynamic_b0 = None
         if dynamic_b0_metadata is not None and "dynamic_b0_scale_map" in arrays:
@@ -1520,6 +1710,7 @@ class DynamicSpectralPhantom:
             kinetic_regions=regions,
             pyruvate_inflow=pyruvate_inflow,
             dynamic_b0=dynamic_b0,
+            voxel_washout=voxel_washout,
             conversion_start_s=float(header.get("conversion_start_s", 0.0)),
             kinetics_time_offset_s=float(header.get("kinetics_time_offset_s", 0.0)),
             metadata=header.get("metadata", {}),
@@ -1981,9 +2172,12 @@ def _advance_longitudinal_kinetics(
     inflow_arrival_delay_s=None,
     inflow_max_step_s=None,
     passive_conversion=None,
+    washout: Optional["_WashoutDriver"] = None,
 ):
     if end_s < start_s:
         raise ValueError("kinetics interval end must not precede its start")
+    if washout is not None and not washout.active:
+        washout = None
     internal_knots = []
     if inflow_curve is not None:
         internal_knots.extend(
@@ -2000,6 +2194,19 @@ def _advance_longitudinal_kinetics(
         internal_knots.extend(
             start_s + index * inflow_max_step_s for index in range(1, step_count)
         )
+    if washout is not None:
+        internal_knots.extend(
+            knot
+            for knot in washout.source_times_on_sequence_timeline_s
+            if start_s < knot < end_s
+        )
+        if washout.loss is not None:
+            # Bound the Strang weighting error of entering spins.
+            step_count = int(np.ceil((end_s - start_s) / _WASHOUT_PREROLL_STEP_S))
+            internal_knots.extend(
+                start_s + index * (end_s - start_s) / step_count
+                for index in range(1, step_count)
+            )
     boundaries = (float(start_s), *sorted(set(internal_knots)), float(end_s))
     zero_kpl = np.zeros_like(kpl)
     zero_passive_conversion = (
@@ -2039,6 +2246,8 @@ def _advance_longitudinal_kinetics(
                 concentration_source_end = inflow_delivery * end_value
                 source_start = concentration_source_start * polarization_start
                 source_end = concentration_source_end * polarization_end
+        if washout is not None:
+            washout.decay((end - start) / 2.0, state, concentration_state)
         _longitudinal_step(
             state,
             interval_kpl,
@@ -2054,6 +2263,9 @@ def _advance_longitudinal_kinetics(
             passive_r1=r1[2:],
             passive_conversion=interval_passive_conversion,
         )
+        if washout is not None:
+            washout.add_sources(start, end, state, concentration_state)
+            washout.decay((end - start) / 2.0, state, concentration_state)
 
 
 def simulate_two_pool_kinetics(
@@ -2224,6 +2436,124 @@ def _free_step(
     )
 
 
+_WASHOUT_PREROLL_STEP_S = 0.02
+
+
+def _washout_active(phantom) -> bool:
+    washout = getattr(phantom, "voxel_washout", None)
+    return bool(
+        washout is not None
+        and (washout.has_sources or np.any(washout.loss_map_s_inv > 0))
+    )
+
+
+class _WashoutDriver:
+    """Apply :class:`VoxelWashout` to the spins of one simulated block.
+
+    The loss is a scalar per spin acting identically on every pool and on
+    transverse, longitudinal and concentration states, so it commutes with
+    RF, precession, relaxation and conversion. Each free-evolution step is
+    therefore wrapped in two half-step loss factors (Strang splitting), which
+    is exact without sources and second order in ``loss * duration`` for the
+    weighting of newly entering spins. Compartment sources enter voxels
+    without conversion, so every pool is integrated exactly on its own.
+    """
+
+    _FACTOR_CACHE_LIMIT = 64
+
+    def __init__(
+        self,
+        washout: VoxelWashout,
+        voxel_indices,
+        *,
+        r1,
+        equilibrium_polarization,
+        kinetics_time_offset_s,
+    ):
+        loss = np.asarray(washout.loss_map_s_inv, dtype=np.float64).ravel()[
+            voxel_indices
+        ]
+        self.loss = loss if np.any(loss > 0) else None
+        self.source_spins = None
+        self.source_compartments = None
+        if washout.has_sources:
+            compartments = np.asarray(washout.compartment_map).ravel()[voxel_indices]
+            spins = np.flatnonzero(compartments >= 0)
+            if spins.size:
+                self.source_spins = spins
+                self.source_compartments = compartments[spins]
+        self.washout = washout
+        self.r1 = np.asarray(r1, dtype=np.float64)
+        self.equilibrium_polarization = float(equilibrium_polarization)
+        self.kinetics_time_offset_s = float(kinetics_time_offset_s)
+        self._factors = {}
+        self._convolutions = {}
+
+    @property
+    def active(self) -> bool:
+        return self.loss is not None or self.source_spins is not None
+
+    @property
+    def source_times_on_sequence_timeline_s(self):
+        if self.source_spins is None:
+            return ()
+        return tuple(
+            float(value) - self.kinetics_time_offset_s for value in self.washout.times_s
+        )
+
+    def decay(self, duration, state, concentration_state=None, transverse_state=None):
+        if self.loss is None or duration == 0:
+            return
+        key = float(duration)
+        factor = self._factors.get(key)
+        if factor is None:
+            if len(self._factors) >= self._FACTOR_CACHE_LIMIT:
+                self._factors.clear()
+            factor = np.exp(-self.loss * key)
+            self._factors[key] = factor
+        if transverse_state is None:
+            state *= factor[None, :, None]
+        else:
+            state[:, :, 2] *= factor[None, :]
+            transverse_state *= factor[None, :]
+        if concentration_state is not None:
+            concentration_state *= factor[None, :, None]
+
+    def add_sources(self, start_s, end_s, state, concentration_state=None):
+        """Add compartment influx over one sequence-time interval."""
+        if self.source_spins is None or end_s <= start_s:
+            return
+        duration = float(end_s - start_s)
+        offset = self.kinetics_time_offset_s
+        c0, m0 = self.washout.compartment_rates_at(float(start_s) + offset)
+        c1, m1 = self.washout.compartment_rates_at(float(end_s) + offset)
+        if not (np.any(c0) or np.any(c1) or np.any(m0) or np.any(m1)):
+            return
+        convolution = self._convolutions.get(duration)
+        if convolution is None:
+            if len(self._convolutions) >= self._FACTOR_CACHE_LIMIT:
+                self._convolutions.clear()
+            convolution = _decay_convolution(self.r1, duration)
+            self._convolutions[duration] = convolution
+        f0, f1 = convolution
+        equilibrium = (
+            self.equilibrium_polarization if concentration_state is not None else 0.0
+        )
+        concentration_gain = 0.5 * duration * (c0 + c1)
+        excess0 = m0 - equilibrium * c0
+        excess1 = m1 - equilibrium * c1
+        magnetization_gain = (
+            excess0 * f0[None, :]
+            + (excess1 - excess0) / duration * f1[None, :]
+            + equilibrium * concentration_gain
+        )
+        compartments = self.source_compartments
+        spins = self.source_spins
+        state[:, spins, 2] += magnetization_gain[compartments].T
+        if concentration_state is not None:
+            concentration_state[:, spins, 2] += concentration_gain[compartments].T
+
+
 def _prepare_transverse_factors(phase_cycles, t2, duration):
     """Evaluate the state-independent transverse factors once."""
     return tuple(
@@ -2330,6 +2660,8 @@ def _spin_major_fallback_reason(
         return "requires float64 state and checkpoints"
     if phantom.dynamic_b0 is not None:
         return "dynamic B0 is unsupported"
+    if _washout_active(phantom):
+        return "per-voxel washout and compartment sources are unsupported"
     if spatial_tx:
         try:
             from .dynamic_spin_major_cy import SPATIAL_TX_SUPPORTED
@@ -3085,6 +3417,14 @@ def _simulate_dynamic_sequence_block(
     native_plan_driver = None
     native_plan_inflow_driver = None
     native_plan_multi_pool_driver = None
+    if _washout_active(phantom) and sequence_kernel in {
+        "native_serial",
+        "native_parallel",
+    }:
+        native_fallback_reason = (
+            "per-voxel washout and compartment sources require the optimized kernel"
+        )
+        sequence_kernel = "optimized"
     if sequence_kernel in {"native_serial", "native_parallel"}:
         try:
             from .dynamic_bloch_cy import (
@@ -3398,6 +3738,20 @@ def _simulate_dynamic_sequence_block(
             inflow_delivery = np.repeat(inflow_delivery, spins_per_voxel)
             if inflow_arrival_delay is not None:
                 inflow_arrival_delay = np.repeat(inflow_arrival_delay, spins_per_voxel)
+    washout = None
+    if _washout_active(phantom):
+        washout_voxels = (
+            np.repeat(active, spins_per_voxel) if sampling.enabled else active
+        )
+        washout = _WashoutDriver(
+            phantom.voxel_washout,
+            washout_voxels,
+            r1=coefficient_r1,
+            equilibrium_polarization=phantom.equilibrium_polarization,
+            kinetics_time_offset_s=phantom.kinetics_time_offset_s,
+        )
+        if not washout.active:
+            washout = None
     preroll_start_s = kinetic_preroll_start_s(
         (
             None
@@ -3428,6 +3782,7 @@ def _simulate_dynamic_sequence_block(
                 else phantom.pyruvate_inflow.max_step_s
             ),
             passive_conversion=passive_conversion,
+            washout=washout,
         )
         if status_callback is not None:
             status_callback(
@@ -5353,6 +5708,8 @@ def _simulate_dynamic_sequence_block(
             source_start, source_mid, concentration_start, concentration_mid = (
                 source_values(interval_start, interval_mid)
             )
+            if washout is not None:
+                washout.decay(dt / 4.0, state, concentration_state)
             _free_step(
                 state,
                 phase_cycles(
@@ -5372,6 +5729,11 @@ def _simulate_dynamic_sequence_block(
                 equilibrium_polarization=phantom.equilibrium_polarization,
                 passive_conversion=interval_passive_conversion,
             )
+            if washout is not None:
+                washout.add_sources(
+                    interval_start, interval_mid, state, concentration_state
+                )
+                washout.decay(dt / 4.0, state, concentration_state)
             if nonunity_tx_active and rf_hz[interval] != 0.0:
                 _rf_rotate_spatial(state, rf_hz[interval], tx_sensitivity, dt)
             else:
@@ -5379,6 +5741,8 @@ def _simulate_dynamic_sequence_block(
             source_mid, source_end, concentration_mid, concentration_end = (
                 source_values(interval_mid, interval_end)
             )
+            if washout is not None:
+                washout.decay(dt / 4.0, state, concentration_state)
             _free_step(
                 state,
                 phase_cycles(
@@ -5398,6 +5762,11 @@ def _simulate_dynamic_sequence_block(
                 equilibrium_polarization=phantom.equilibrium_polarization,
                 passive_conversion=interval_passive_conversion,
             )
+            if washout is not None:
+                washout.add_sources(
+                    interval_mid, interval_end, state, concentration_state
+                )
+                washout.decay(dt / 4.0, state, concentration_state)
         else:
             half_duration = real_type(dt / 2.0)
             coefficient_half_duration = dt / 2.0
@@ -5544,6 +5913,8 @@ def _simulate_dynamic_sequence_block(
                     concentration_mid = inflow_delivery * mid_value
                     source_start = concentration_start * polarization_start
                     source_mid = concentration_mid * polarization_mid
+            if washout is not None:
+                washout.decay(dt / 4.0, state, concentration_state, transverse_state)
             if native_concentration_inflow_step is not None:
                 for pool in range(phantom.n_species):
                     transverse_state[pool] *= first_transverse_factors[pool]
@@ -5615,6 +5986,11 @@ def _simulate_dynamic_sequence_block(
                         half_duration,
                         regular_mode,
                     )
+            if washout is not None:
+                washout.add_sources(
+                    interval_start, interval_mid, state, concentration_state
+                )
+                washout.decay(dt / 4.0, state, concentration_state, transverse_state)
             if rf_hz[interval] != 0.0:
                 if spatial_tx_active and native_spatial_rf_rotation_block is not None:
                     spatial_prepared = spatial_rf_coefficients(rf_hz[interval], dt)
@@ -5693,6 +6069,8 @@ def _simulate_dynamic_sequence_block(
                     concentration_end = inflow_delivery * end_value
                     source_mid = concentration_mid * polarization_mid
                     source_end = concentration_end * polarization_end
+            if washout is not None:
+                washout.decay(dt / 4.0, state, concentration_state, transverse_state)
             if native_concentration_inflow_step is not None:
                 for pool in range(phantom.n_species):
                     transverse_state[pool] *= second_transverse_factors[pool]
@@ -5764,6 +6142,11 @@ def _simulate_dynamic_sequence_block(
                         half_duration,
                         regular_mode,
                     )
+            if washout is not None:
+                washout.add_sources(
+                    interval_mid, interval_end, state, concentration_state
+                )
+                washout.decay(dt / 4.0, state, concentration_state, transverse_state)
         process_boundary_actions(interval + 1)
         interval_start = interval_end
         if progress_callback is not None and (
@@ -6108,6 +6491,11 @@ def _simulate_dynamic_sequence_block(
             "kinetics_time_offset_s": phantom.kinetics_time_offset_s,
             "sequence_conversion_start_s": conversion_start_s,
             "kinetic_preroll_start_s": preroll_start_s,
+            "voxel_washout_model": (
+                None
+                if phantom.voxel_washout is None
+                else "strang_split_first_order_loss_with_compartment_sources"
+            ),
             "ideal_spoiling_applied": bool(
                 spoiler_mode == "ideal" and compiled.transverse_crush_times_s.size
             ),
@@ -6566,6 +6954,8 @@ def _colabelled_pass_phantom(
     pool is left empty.  Otherwise the named pool becomes the inflow precursor
     while all other pools are empty and conversion is disabled.  Without
     conversion the pools evolve independently, so the passes add exactly.
+    Urinary washout sources follow the same pool order and reach only the
+    pools that are populated in the pass.
     """
     import copy
 
@@ -6584,6 +6974,19 @@ def _colabelled_pass_phantom(
             for name, values in maps.items()
         }
 
+    def washout_for(order, keep):
+        washout = phantom.voxel_washout
+        if washout is None or not washout.has_sources:
+            return washout
+        mask = np.asarray([keep(names[index]) for index in order], dtype=float)
+        return replace(
+            washout,
+            concentration_rates=washout.concentration_rates[:, order, :]
+            * mask[None, :, None],
+            magnetization_rates=washout.magnetization_rates[:, order, :]
+            * mask[None, :, None],
+        )
+
     result = copy.copy(phantom)
     if source_name is None:
         result.initial_concentration_maps = emptied(
@@ -6593,6 +6996,9 @@ def _colabelled_pass_phantom(
             phantom.initial_spin_density_maps, lambda name: name not in colabelled
         )
         result.pyruvate_inflow = replace(phantom.pyruvate_inflow, colabelled_pools=())
+        result.voxel_washout = washout_for(
+            list(range(len(names))), lambda name: name not in colabelled
+        )
         return result
     order = [names.index(source_name)] + [
         index for index, name in enumerate(names) if name != source_name
@@ -6609,6 +7015,7 @@ def _colabelled_pass_phantom(
         result.kpa_map_s_inv = np.zeros(phantom.shape, dtype=np.float64)
     result.kinetic_regions = ()
     result.pyruvate_inflow = replace(phantom.pyruvate_inflow, colabelled_pools=())
+    result.voxel_washout = washout_for(order, lambda name: name == source_name)
     if phantom.dynamic_b0 is not None:
         result.dynamic_b0 = replace(
             phantom.dynamic_b0,

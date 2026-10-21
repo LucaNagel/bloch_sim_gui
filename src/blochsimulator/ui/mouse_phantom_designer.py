@@ -725,8 +725,8 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             0.0001, 100.0, decimals=4, suffix=" s⁻¹", step=0.01
         )
         self.tissue_clearance.setToolTip(
-            "Wash-out rate of the injected compound from perfused tissue. "
-            "Preview only."
+            "Wash-out rate of the injected compound from perfused tissue, "
+            "applied in the preview and the Bloch solver."
         )
         self.renal_excretion = self._float_spin(
             0.0, 100.0, decimals=4, suffix=" s⁻¹", step=0.01
@@ -734,22 +734,25 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.renal_excretion.setToolTip(
             "Rate at which kidney tissue passes injected compound into the "
             "urine, in addition to tissue clearance. 0 disables excretion. "
-            "Preview only; the Bloch solver keeps the vascular delivery."
+            "The Bloch solver removes the excreted compound from the kidneys "
+            "and feeds it, T1-relaxed, into the ureters and bladder."
         )
         self.renal_tubular_transit = self._float_spin(
-            0.0, 10000.0, decimals=1, suffix=" s", step=5.0
+            0.0, 10000.0, decimals=2, suffix=" s", step=5.0
         )
         self.renal_tubular_transit.setToolTip(
             "Mean nephron/pelvis transit; individual transit times are spread "
             "uniformly over 0.5–1.5× this value. Rodent tubular fluid reaches "
             "the end of the proximal tubule after ~10–15 s and the urine after "
-            "roughly 1–2 min."
+            "roughly 1–2 min. Hyperpolarization relaxes with T1 during "
+            "transit; tubular content is shown in the preview only."
         )
         self.ureter_transit = self._float_spin(
-            0.0, 10000.0, decimals=1, suffix=" s", step=1.0
+            0.0, 10000.0, decimals=2, suffix=" s", step=1.0
         )
         self.ureter_transit.setToolTip(
-            "Plug-flow delay between renal pelvis and bladder."
+            "Mean residence of urine in each well-mixed ureter before it "
+            "drains into the bladder. 0 passes urine straight to the bladder."
         )
         clearance_form.addRow("Tissue clearance", self.tissue_clearance)
         clearance_form.addRow("Renal excretion", self.renal_excretion)
