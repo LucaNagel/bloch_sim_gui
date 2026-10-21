@@ -688,6 +688,91 @@ def test_full_image_repetitions_use_requested_start_to_start_intervals(tmp_path)
         )
 
 
+@pytest.mark.parametrize(
+    ("encoding_axes", "n_slices"),
+    ((("+x", "+y", "+z"), 1), (("-y", "+x", "+z"), 2), (("+y", "-x", "+z"), 1)),
+)
+def test_flash_read_phase_offsets_centre_an_off_centre_object(
+    tmp_path, encoding_axes, n_slices
+):
+    from blochsimulator.sequence.encoding import resolve_encoding_frame
+    from blochsimulator.sequence.image_export import extract_image_series
+
+    shape = (32, 32, 1)
+    positions = (np.arange(32) - 15.5) * 2e-3
+    x, y = np.meshgrid(positions, positions, indexing="ij")
+    disc = np.array([0.012, -0.008, 0.0])
+    pd_map = ((x - disc[0]) ** 2 + (y - disc[1]) ** 2 < 0.004**2).astype(float)
+    phantom = Phantom(
+        shape=shape,
+        fov=(0.064, 0.064, 3e-3),
+        t1_map=np.ones(shape),
+        t2_map=np.ones(shape),
+        pd_map=pd_map[..., None],
+    )
+    frame = resolve_encoding_frame(encoding_axes).matrix
+    read_offset, phase_offset = float(disc @ frame[:, 0]), float(disc @ frame[:, 1])
+    sequence = make_pulseq_flash(
+        fov_m=(0.032, 0.032),
+        matrix=(16, 16),
+        sampling_bandwidth_hz=20e3,
+        echo_time_s=4e-3,
+        repetition_time_s=10e-3,
+        n_slices=n_slices,
+        read_offset_m=read_offset,
+        phase_offset_m=phase_offset,
+        encoding_axes=encoding_axes,
+    )
+    program = _write_and_load(sequence, tmp_path / "flash_offsets.seq")
+    definitions = program.metadata["definitions"]
+    assert float(definitions["ReadOffset"]) == pytest.approx(read_offset)
+    assert float(definitions["PhaseOffset"]) == pytest.approx(phase_offset)
+
+    result = BlochSimulator(use_parallel=False).simulate_sequence(program, phantom)
+    acquisition = (
+        result.cartesian_acquisition
+        if n_slices == 1
+        else result.cartesian_acquisition_frames.acquisitions[0]
+    )
+    assert acquisition.center_m == pytest.approx((read_offset, phase_offset))
+    restored = type(acquisition).from_metadata(acquisition.to_metadata())
+    assert restored.center_m == acquisition.center_m
+    dataset = result.to_xarray()
+    image = dataset["cartesian_image_magnitude"]
+    if "cartesian_frame" in image.dims:
+        image = image.isel(cartesian_frame=0)
+    phase_dim, read_dim = image.dims
+    weights = np.asarray(image) / float(image.sum())
+    # The sequence demodulates the offsets: the disc sits in the image centre.
+    centre_pixel = (
+        float(weights.sum(axis=1) @ np.arange(16)),
+        float(weights.sum(axis=0) @ np.arange(16)),
+    )
+    assert centre_pixel == pytest.approx((7.5, 7.5), abs=1e-3)
+    # The image coordinates carry the shifted FOV centre.
+    read_positions = dataset.coords["cartesian_read_position_m"].values
+    phase_positions = dataset.coords["cartesian_phase_position_m"].values
+    assert float(weights.sum(axis=0) @ read_positions) == pytest.approx(
+        read_offset, abs=1e-6
+    )
+    assert float(weights.sum(axis=1) @ phase_positions) == pytest.approx(
+        phase_offset, abs=1e-6
+    )
+
+    # DICOM, NIfTI and Bruker export place the image centre on the disc.
+    series = extract_image_series(result, include_pools=False)[0]
+    row_spacing, column_spacing = series.pixel_spacing_m
+    first = series.frames[0]
+    rows, columns = first.magnitude.shape
+    centre = (
+        np.asarray(first.position_m)
+        + 0.5 * (columns - 1) * column_spacing * np.asarray(series.row_direction)
+        + 0.5 * (rows - 1) * row_spacing * np.asarray(series.column_direction)
+    )
+    slice_position = -1.5e-3 if n_slices == 2 else 0.0
+    assert centre == pytest.approx(disc + slice_position * frame[:, 2], abs=1e-9)
+
+
 def test_flash_rejects_an_interval_shorter_than_one_complete_image():
     with pytest.raises(ValueError, match="too short for one FLASH image"):
         make_pulseq_flash(

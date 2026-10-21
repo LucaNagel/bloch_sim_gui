@@ -3124,6 +3124,18 @@ class SequenceSimulationWidget(QWidget):
         self.flash_slice_thickness_mm = self._parameter_spin(0.05, 100.0, 3.0, " mm")
         self.flash_slice_gap_mm = self._parameter_spin(0.0, 100.0, 0.0, " mm")
         self.flash_slice_offset_mm = self._parameter_spin(-10000.0, 10000.0, 0.0, " mm")
+        self.flash_read_offset_mm = self._parameter_spin(-10000.0, 10000.0, 0.0, " mm")
+        self.flash_phase_offset_mm = self._parameter_spin(-10000.0, 10000.0, 0.0, " mm")
+        for spin, role in (
+            (self.flash_read_offset_mm, "read"),
+            (self.flash_phase_offset_mm, "phase"),
+        ):
+            spin.setObjectName(f"flash_{role}_offset_mm")
+            spin.setToolTip(
+                f"Move the FOV centre along the {role} gradient direction. The "
+                "sequence encodes the shift in the receiver frequency and phase, "
+                "as a scanner does, so the exported .seq carries it as well."
+            )
         self.flash_echo_time_ms = self._parameter_spin(0.1, 10000.0, 5.0, " ms")
         self.flash_repetition_time_ms = self._parameter_spin(0.1, 100000.0, 15.0, " ms")
         self.flash_repetitions = QSpinBox()
@@ -3170,6 +3182,8 @@ class SequenceSimulationWidget(QWidget):
         flash_form.addRow("Phase matrix", self.flash_phase_matrix)
         flash_form.addRow("Read FOV", self.flash_read_fov_mm)
         flash_form.addRow("Phase FOV", self.flash_phase_fov_mm)
+        flash_form.addRow("Read offset", self.flash_read_offset_mm)
+        flash_form.addRow("Phase offset", self.flash_phase_offset_mm)
         flash_form.addRow("Sampling bandwidth", self.flash_sampling_bandwidth_khz)
         _add_form_section(flash_form, "RF pulse")
         flash_form.addRow("Flip angle", self.flash_flip_angle_deg)
@@ -4699,6 +4713,8 @@ class SequenceSimulationWidget(QWidget):
             self.flash_slice_thickness_mm,
             self.flash_slice_gap_mm,
             self.flash_slice_offset_mm,
+            self.flash_read_offset_mm,
+            self.flash_phase_offset_mm,
             self.flash_echo_time_ms,
             self.flash_repetition_time_ms,
             self.flash_repetitions,
@@ -9385,6 +9401,14 @@ class SequenceSimulationWidget(QWidget):
             ),
         }
 
+    def _in_plane_offset_parameters(self, prefix):
+        return {
+            f"{role}_offset_m": (
+                getattr(self, f"{prefix}_{role}_offset_mm").value() / 1000.0
+            )
+            for role in ("read", "phase")
+        }
+
     def _sequence_geometry_parameters(self, source_index):
         """Return the form values that place a generated sequence in space.
 
@@ -9462,7 +9486,10 @@ class SequenceSimulationWidget(QWidget):
             self.FLASH_SOURCE: (
                 self._flash_fov_m(),
                 (self.flash_read_matrix, self.flash_phase_matrix),
-                self._slice_package_parameters("flash"),
+                {
+                    **self._slice_package_parameters("flash"),
+                    **self._in_plane_offset_parameters("flash"),
+                },
             ),
             # CSI excites a single slice.
             self.CSI_SOURCE: (
@@ -11524,6 +11551,10 @@ class SequenceSimulationWidget(QWidget):
             slice_positions_m=positions,
             slice_thickness_m=thickness,
             name=name,
+            in_plane_center_m=(
+                parameters.get("read_offset_m", 0.0),
+                parameters.get("phase_offset_m", 0.0),
+            ),
         )
 
     @staticmethod

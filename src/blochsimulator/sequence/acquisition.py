@@ -1180,7 +1180,12 @@ class SpectroscopicAcquisition:
 
 @dataclass(frozen=True)
 class CartesianAcquisition:
-    """Describe how a chronological ADC stream maps to a 2D Cartesian grid."""
+    """Describe how a chronological ADC stream maps to a 2D Cartesian grid.
+
+    ``center_m`` is the logical read/phase position of the FOV centre. The
+    sequence already demodulates it, so it only places the reconstructed
+    image and leaves the FFT unchanged.
+    """
 
     read_matrix: int
     phase_matrix: int
@@ -1192,6 +1197,7 @@ class CartesianAcquisition:
     ky_offset_cells: float = 0.0
     encoding_frame: EncodingFrame = field(default_factory=EncodingFrame.identity)
     moment_origins_cyc_per_m: Tuple[Tuple[float, float, float], ...] = ()
+    center_m: Tuple[float, float] = (0.0, 0.0)
 
     def __post_init__(self) -> None:
         read_matrix = _positive_integer(self.read_matrix, "read_matrix")
@@ -1199,6 +1205,9 @@ class CartesianAcquisition:
         fov = tuple(float(value) for value in self.fov_m)
         if len(fov) != 2 or not np.all(np.isfinite(fov)) or min(fov) <= 0:
             raise ValueError("fov_m must contain two positive finite values")
+        center = tuple(float(value) for value in self.center_m)
+        if len(center) != 2 or not np.all(np.isfinite(center)):
+            raise ValueError("center_m must contain two finite values")
         dwell = float(self.dwell_s)
         if not np.isfinite(dwell) or dwell <= 0:
             raise ValueError("dwell_s must be positive and finite")
@@ -1245,6 +1254,7 @@ class CartesianAcquisition:
         object.__setattr__(self, "read_matrix", read_matrix)
         object.__setattr__(self, "phase_matrix", phase_matrix)
         object.__setattr__(self, "fov_m", fov)
+        object.__setattr__(self, "center_m", center)
         object.__setattr__(self, "dwell_s", dwell)
         object.__setattr__(self, "phase_indices", phase_indices)
         object.__setattr__(self, "readout_directions", directions)
@@ -1432,6 +1442,7 @@ class CartesianAcquisition:
             "ky_offset_cells": self.ky_offset_cells,
             "encoding_frame": self.encoding_frame.to_metadata(),
             "moment_origins_cyc_per_m": self.moment_origins_cyc_per_m,
+            "center_m": self.center_m,
         }
 
     @classmethod
@@ -1453,7 +1464,25 @@ class CartesianAcquisition:
             moment_origins_cyc_per_m=tuple(
                 tuple(value) for value in metadata.get("moment_origins_cyc_per_m", ())
             ),
+            center_m=tuple(metadata.get("center_m", (0.0, 0.0))),
         )
+
+
+def _in_plane_center_from_definitions(definitions: Mapping) -> Tuple[float, float]:
+    """Return the logical read/phase FOV centre stored by a builder in m."""
+
+    lowered = {str(key).lower(): value for key, value in definitions.items()}
+    center = []
+    for key in ("readoffset", "phaseoffset"):
+        value = lowered.get(key)
+        if value is None:
+            center.append(0.0)
+            continue
+        values = numeric_definition_array(value, key)
+        if values.size != 1 or not np.isfinite(values[0]):
+            raise ValueError(f"Pulseq {key} definition must be one finite value")
+        center.append(float(values[0]))
+    return (center[0], center[1])
 
 
 def infer_spiral_acquisition(
@@ -1734,6 +1763,7 @@ def infer_cartesian_acquisition(
         moment_origins_cyc_per_m=tuple(
             tuple(float(value) for value in origin) for origin in moment_origins
         ),
+        center_m=_in_plane_center_from_definitions(definitions),
     )
     acquisition.validate_adc_times(compiled.adc_times_s)
     acquisition.validate_gradient_moments(moments)

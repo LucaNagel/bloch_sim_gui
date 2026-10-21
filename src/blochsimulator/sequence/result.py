@@ -45,8 +45,12 @@ def _add_cartesian_position_coordinates(
     }
     if "partition" in roles:
         matrix_by_role["partition"] = int(acquisition.partition_matrix)
+    read_center, phase_center = getattr(acquisition, "center_m", (0.0, 0.0))
+    center_by_role = {"read": float(read_center), "phase": float(phase_center)}
     for role, dimension in zip(roles, dimensions):
-        positions = _centered_voxel_positions(matrix_by_role[role], fov_by_role[role])
+        positions = _centered_voxel_positions(
+            matrix_by_role[role], fov_by_role[role]
+        ) + center_by_role.get(role, 0.0)
         coords[f"cartesian_{role}_position_m"] = (dimension, positions)
         axis, sign = acquisition.encoding_frame.axis_and_sign(role)
         coords[f"cartesian_{axis}_position_m"] = (

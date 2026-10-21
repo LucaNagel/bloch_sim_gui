@@ -96,6 +96,63 @@ def test_coverage_notes_report_aliasing_and_truncated_mouse():
     assert any("Phantom cells" in note and "read pixel" in note for note in notes)
 
 
+def test_read_phase_offsets_shift_the_fov_and_slices():
+    frame = np.array([[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    definitions = {
+        "SliceThickness": 0.003,
+        "SlicePositions": [-0.002, 0.002],
+        "ReadOffset": 0.01,
+        "PhaseOffset": -0.005,
+    }
+    geometry = sequence_geometry_from_definitions(
+        definitions, frame, fov_m=(0.04, 0.03), matrix=(32, 24)
+    )
+    assert geometry.in_plane_center_m == pytest.approx((0.01, -0.005))
+    shift = 0.01 * frame[:, 0] - 0.005 * frame[:, 1]
+    assert geometry.fov_box(0.3).center_m == pytest.approx(shift)
+    slices = geometry.slice_boxes((0.3, 0.3, 0.3))
+    assert [box.center_m for box in slices] == [
+        pytest.approx(shift + position * frame[:, 2]) for position in (-0.002, 0.002)
+    ]
+    assert geometry.center_text() == "centre read 10, phase -5 mm"
+
+    centred = sequence_geometry_from_definitions(
+        {**definitions, "ReadOffset": 0.0, "PhaseOffset": 0.0},
+        frame,
+        fov_m=(0.04, 0.03),
+        matrix=(32, 24),
+    )
+    assert centred.center_text() == ""
+    assert not centred.covers_same_region(geometry)
+
+
+def test_coverage_notes_report_a_grid_beyond_the_offset_fov():
+    phantom = Phantom(
+        shape=(16, 16, 1),
+        fov=(0.032, 0.032, 0.003),
+        t1_map=np.ones((16, 16, 1)),
+        t2_map=np.ones((16, 16, 1)),
+        pd_map=np.ones((16, 16, 1)),
+    )
+    grid = phantom_grid_box(phantom)
+
+    def notes(read_offset_m):
+        geometry = sequence_geometry_from_definitions(
+            {"SliceThickness": 0.003, "ReadOffset": read_offset_m},
+            np.eye(3),
+            fov_m=(0.04, 0.04),
+            matrix=(16, 16),
+        )
+        return coverage_notes(phantom, geometry, grid)
+
+    assert not any("offset" in note for note in notes(0.003))
+    shifted = [note for note in notes(0.006) if "offset read FOV" in note]
+    assert shifted == [
+        "The simulated grid reaches 2 mm beyond the offset read FOV: signal "
+        "outside the FOV aliases."
+    ]
+
+
 def test_sequence_workspace_uses_default_sphere_and_shows_geometry_tab():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
@@ -181,6 +238,14 @@ def test_geometry_tab_previews_sequence_parameter_changes():
     assert " at 4 mm" in summary
     assert "Generated (dotted)" not in summary
 
+    widget.flash_read_offset_mm.setValue(6.0)
+    widget.flash_phase_offset_mm.setValue(-4.0)
+    app.processEvents()
+    summary = widget.geometry_viewer.summary.text()
+    assert "centre read 6, phase -4 mm" in summary
+    generated_row = summary[summary.index("Generated (dotted)") :]
+    assert "centre read" not in generated_row
+
     widget.close()
     widget.deleteLater()
     app.processEvents()
@@ -220,6 +285,8 @@ def test_planned_geometry_matches_the_generated_sequence():
     _shift_slice_package(widget, "epi")
     _shift_slice_package(widget, "epsi")
     _shift_slice_package(widget, "flash")
+    widget.flash_read_offset_mm.setValue(6.0)
+    widget.flash_phase_offset_mm.setValue(-4.0)
     widget.csi_slice_offset_mm.setValue(-6.0)
     widget.bssfp_phase_matrix.setValue(6)
     widget.slice_selection_offset_mm.setValue(7.0)
@@ -242,6 +309,8 @@ def test_planned_geometry_matches_the_generated_sequence():
         generated = widget._sequence_geometry()
         assert planned.covers_same_region(generated), label
         assert planned.matrix == generated.matrix, label
+        if label == "FLASH":
+            assert generated.in_plane_center_m == pytest.approx((0.006, -0.004))
     widget.close()
     widget.deleteLater()
     app.processEvents()

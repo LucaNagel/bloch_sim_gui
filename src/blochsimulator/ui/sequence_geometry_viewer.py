@@ -101,23 +101,35 @@ class SequenceGeometry:
     slice_positions_m: tuple[float, ...] = ()
     slice_thickness_m: Optional[float] = None
     name: str = "Sequence"
+    # Logical read/phase position of the FOV centre.
+    in_plane_center_m: tuple[float, float] = (0.0, 0.0)
 
     @property
     def is_2d(self) -> bool:
         return self.fov_m is not None and len(self.fov_m) == 2
+
+    def _in_plane_shift(self) -> np.ndarray:
+        frame = np.asarray(self.frame, dtype=float)
+        read, phase = (float(value) for value in self.in_plane_center_m)
+        return read * frame[:, 0] + phase * frame[:, 1]
 
     def fov_box(self, fallback_partition_m: float) -> Optional[OrientedBox]:
         """Return the encoded FOV; 2D packages span their slices."""
         if self.fov_m is None:
             return None
         if len(self.fov_m) >= 3:
-            return OrientedBox((0.0, 0.0, 0.0), tuple(self.fov_m[:3]), self.frame)
+            return OrientedBox(
+                tuple(self._in_plane_shift()), tuple(self.fov_m[:3]), self.frame
+            )
         if self.slice_positions_m and self.slice_thickness_m:
             low = min(self.slice_positions_m) - 0.5 * self.slice_thickness_m
             high = max(self.slice_positions_m) + 0.5 * self.slice_thickness_m
         else:
             low, high = -0.5 * fallback_partition_m, 0.5 * fallback_partition_m
-        center = 0.5 * (low + high) * np.asarray(self.frame, dtype=float)[:, 2]
+        center = (
+            0.5 * (low + high) * np.asarray(self.frame, dtype=float)[:, 2]
+            + self._in_plane_shift()
+        )
         return OrientedBox(
             tuple(center), (*self.fov_m[:2], high - low), np.asarray(self.frame)
         )
@@ -129,12 +141,14 @@ class SequenceGeometry:
         frame = np.asarray(self.frame, dtype=float)
         if self.fov_m is not None:
             in_plane_m = self.fov_m[:2]
+            shift = self._in_plane_shift()
         else:
             in_plane_m = np.abs(frame[:, :2]).T @ np.asarray(scanner_extent_m, float)
+            shift = np.zeros(3)
         normal = frame[:, 2]
         return [
             OrientedBox(
-                tuple(position * normal),
+                tuple(position * normal + shift),
                 (in_plane_m[0], in_plane_m[1], self.slice_thickness_m),
                 np.asarray(self.frame),
             )
@@ -148,10 +162,18 @@ class SequenceGeometry:
             for first, second in (
                 (self.frame, other.frame),
                 (self.fov_m, other.fov_m),
+                (self.in_plane_center_m, other.in_plane_center_m),
                 (self.slice_positions_m, other.slice_positions_m),
                 (self.slice_thickness_m, other.slice_thickness_m),
             )
         )
+
+    def center_text(self) -> str:
+        """Describe a shifted FOV centre, e.g. ``centre read 6, phase -4 mm``."""
+        read, phase = (value * 1000 for value in self.in_plane_center_m)
+        if self.fov_m is None or np.allclose((read, phase), 0.0, atol=1e-9):
+            return ""
+        return f"centre read {read:.3g}, phase {phase:.3g} mm"
 
     def slice_text(self) -> str:
         """Describe the slice package, e.g. ``2 × 3 mm at -1.5, 1.5 mm``."""
@@ -214,6 +236,7 @@ def sequence_geometry_from_definitions(
         slice_positions_m=positions,
         slice_thickness_m=thickness,
         name=name,
+        in_plane_center_m=(scalar("readoffset") or 0.0, scalar("phaseoffset") or 0.0),
     )
 
 
@@ -658,6 +681,8 @@ def coverage_notes(
         return notes
     frame = np.asarray(sequence.frame, dtype=float)
     required = np.abs(frame).T @ np.asarray(grid.size_m, dtype=float)
+    grid_centers = frame.T @ np.asarray(grid.center_m, dtype=float)
+    fov_centers = (*sequence.in_plane_center_m, 0.0)
     roles = ("read", "phase", "partition")
     encoded = len(sequence.fov_m)
     for index in range(encoded):
@@ -669,6 +694,15 @@ def coverage_notes(
                 f"{roles[index].title()} FOV {sequence_fov * 1000:.4g} mm is smaller "
                 f"than the simulated grid ({required[index] * 1000:.4g} mm): signal "
                 "outside the FOV aliases."
+            )
+            continue
+        overhang = abs(grid_centers[index] - fov_centers[index]) - 0.5 * (
+            sequence_fov - required[index]
+        )
+        if index < 2 and overhang > 1e-9:
+            notes.append(
+                f"The simulated grid reaches {overhang * 1000:.3g} mm beyond the "
+                f"offset {roles[index]} FOV: signal outside the FOV aliases."
             )
     if sequence.matrix is not None:
         voxel = np.asarray(grid.size_m) / np.maximum(
@@ -1027,6 +1061,7 @@ class SequenceGeometryViewer(QWidget):
                         else ""
                     )
                     + (" (2D, read × phase)" if sequence.is_2d else "")
+                    + (f", {sequence.center_text()}" if sequence.center_text() else "")
                 )
                 rows.append((SEQUENCE_COLOR, "Sequence FOV", encoded))
             slices = sequence.slice_boxes(extent)
@@ -1058,6 +1093,8 @@ class SequenceGeometryViewer(QWidget):
         if fov_box is not None:
             self._add_outline(fov_box, _faded(SEQUENCE_COLOR), style=Qt.DotLine, z=9)
             parts.append(_format_mm(sequence.fov_m))
+            if sequence.center_text():
+                parts.append(sequence.center_text())
         for box in sequence.slice_boxes(extent_m):
             self._add_outline(
                 box, _faded(SLICE_COLOR), style=Qt.DotLine, z=10, thin_axis=2
