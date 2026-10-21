@@ -112,6 +112,29 @@ The time-resolved bevahiour of spins during and after RF Pulse can be visualized
 
 **Sequence Mode**
 
+- Phantom Designer polarization inputs use absolute percent with the thermal
+  multiple alongside them, based on nucleus, B0 and temperature. Mouse
+  injections use mM × µl and show the resulting µmol dose and fully polarized
+  equivalent. New injections start at 80 mM × 200 µl and 20 % polarization;
+  older files retain their original dose and relative-polarization values.
+- **Receiver / Noise** adds reproducible complex noise from a relative SNR
+  (single-scan SNR of the ideal 90° FID of the whole object, including any
+  delivered bolus) or a calibration from a measured phantom FID: amplitude,
+  noise std, averages, bandwidth, flip angle, concentration (mM), volume (ml),
+  enrichment and temperature. Noise follows each ADC event's bandwidth, so a
+  thermal phantom scan predicts e.g. hyperpolarized in-vivo SNR. Its dedicated
+  tab between **Phantom + B1** and **Simulations** shows an SNR budget from
+  the receiver setting through the whole-object FID and each readout
+  bandwidth to the image voxels of the current object and last run. Clean ADC
+  data and noise settings are preserved in projects and result exports.
+  **Settings → Interface → Signal units** switches the current Sequence
+  plots between physical amounts (mol with automatic SI prefixes, calibrated
+  runs) and SNR units (noise σ = 1 per complex quadrature), without rerunning
+  the simulation. Cartesian/CSI FFTs preserve that noise normalization;
+  spiral images use a labelled estimate from their noise realization. Runs
+  without the required calibration or noise metadata show simulation units.
+  See [receiver calibration](docs/sequence_simulation_architecture.md#receiver-noise-and-phantom-calibration).
+
 Loaded and generated sequences can be inspected in a sequence viewer. A 3D phantom design viewer in addition to a 3D B1 design viewer are provided.
 
 - Experimental **export of simulated acquisitions as Bruker raw datasets**,

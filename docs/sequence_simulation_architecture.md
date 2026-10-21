@@ -278,6 +278,333 @@ The default is one unity map. Consequently `result.signal` remains `(Nadc,)`
 for the default/single-coil case and is `(Ncoil, Nadc)` for multiple coils.
 Final and checkpoint magnetization remain coil-independent and normalized.
 
+## Receiver noise and phantom calibration
+
+The Sequence workspace's **Receiver / Noise** tab, between **Phantom + B1**
+and **Simulations**, supports off, relative-SNR and
+calibrated-from-phantom-FID modes for one receive channel.
+`blochsimulator.sequence.apply_receiver_noise(result, ReceiverNoise(...))`
+is the common post-simulation operation for static, independent spectral, and
+dynamic phantoms. It acts once on the summed chronological ADC stream, before
+the existing spatial or spectral reconstruction. Live streaming previews stay
+noiseless. Magnetization, checkpoints, and species-resolved ground truth remain
+unchanged.
+
+The SNR and measured-noise inputs have native spin-box arrows and accept
+Up/Down keys. Steps adapt to the current decimal order (for example, 50 to 51
+or 0.05 to 0.051) while direct typing and scientific notation remain
+available. Very small or large values retain double precision instead of being
+rounded to a fixed number of displayed decimal places.
+
+For each sample the receiver adds
+
+$$
+n = \sigma(\xi_R + i\xi_I), \qquad
+\xi_R,\xi_I \sim \mathcal{N}(0,1).
+$$
+
+Here $\sigma$ is the standard deviation of each quadrature; complex noise power
+is $2\sigma^2$. Measured magnitude standard deviation and complex RMS are not
+interchangeable with this input. The local PCG64 generator and saved seed give
+reproducible realizations without affecting NumPy's global random state.
+
+### Relative SNR
+
+Relative mode sets the single-scan SNR of the ideal 90-degree FID of the whole
+simulated object at a reference dwell $\Delta t_{\mathrm{ref}}$ (the GUI's
+reference bandwidth, $1/\Delta t_{\mathrm{ref}}$). Each ADC event with dwell
+$\Delta t$ receives
+
+$$
+\sigma(\Delta t) = \frac{A_{\mathrm{ideal}}}{\mathrm{SNR}}
+\sqrt{\frac{\Delta t_{\mathrm{ref}}}{\Delta t}},
+\qquad
+A_{\mathrm{ideal}} = w\,\Bigl|\sum_{\mathbf r} m_0(\mathbf r)\,
+s_{\mathrm{rx}}(\mathbf r)
++ D\sum_{\mathbf r} d(\mathbf r)\,s_{\mathrm{rx}}(\mathbf r)\Bigr|,
+\qquad
+D = \int r(t)\,P(t)\,\mathrm{d}t .
+$$
+
+$m_0$ is the initial longitudinal magnetization (proton density times $|M_0|$
+for static phantoms, concentration times initial $M_z$ summed over species for
+spectral phantoms, initial concentration maps for dynamic phantoms),
+$s_{\mathrm{rx}}$ the receive sensitivity and $w$ the voxel volume in m³ for
+`signal_weighting="voxel_volume"` (1 for `"voxel"`). A pyruvate inflow adds its
+whole delivered dose: the delivery map $d$ times the integral of the rate curve
+$r$ and the polarization curve $P$ ($P=1$ for the legacy direct-$M_z$ source).
+The integral is exact for linear and step segments and covers the curves'
+sampled range, so phantoms that start empty and are filled only by a bolus have
+a defined reference.
+
+Because the reference is the whole object at its own signal weighting, the
+same SNR gives the same noise relative to the signal for any grid and either
+weighting. The reference is ideal and instantaneous: Tx inhomogeneity,
+off-resonance, relaxation, metabolism and the actual flip angles are not
+included, so a simulated 30-degree FID has half the stated SNR and a
+0-degree scan contains only noise of that scale. Use calibrated mode when the
+SNR should follow from a phantom measurement and physical amounts.
+
+Runs record the amplitude as
+`metadata["receiver_acquisition"]["ideal_fid_amplitude"]` (None when the
+object has no initial or delivered magnetization), so **Apply to result** and
+reloaded projects work without the phantom. Results from before this field
+existed must be simulated again for relative SNR. `metadata["receiver_noise"]`
+stores the per-event std and `relative_snr` (SNR, reference dwell and
+amplitude). Saved controls from the former direct-std mode restore with noise
+off.
+
+### Calibration from a phantom FID
+
+`ReceiverCalibration` turns one measured phantom FID into a scanner
+sensitivity. It stores:
+
+- the FID amplitude $A$ at $t=0$ after a flip angle $\alpha$ and the
+  per-quadrature noise std $\sigma_{\mathrm{meas}}$ (for example from a
+  0-degree scan), in the same scanner units and from scans with the same
+  receiver gain, $N_A$ averages and ADC dwell $\Delta t_{\mathrm{ref}}$;
+- the concentration $c$ in mM and volume $V$ in ml inside the coil's sensitive
+  region, labelled nuclei per molecule $n_l$ and isotope enrichment
+  $\varepsilon$;
+- the phantom temperature $T_{\mathrm{ref}}$ (thermal polarization), or an
+  absolute reference polarization.
+
+A concentration in mM equals mol/m³. With `signal_weighting="voxel_volume"`,
+which multiplies by the voxel volume in m³, the simulated signal is therefore
+in mol times polarization relative to thermal equilibrium at the simulated
+object temperature $T_{\mathrm{sim}}$; $M_z=1$ is thermal. Hyperpolarized
+pools enter with $M_z = P_{\mathrm{abs}}/P_{\mathrm{th}}(B_0,T_{\mathrm{sim}})$.
+
+$$
+n_{\mathrm{ref}} = c\,V\,10^{-6}\,n_l\,\varepsilon \;[\mathrm{mol}],
+\qquad
+P_{\mathrm{th}}(B_0,T) = \tanh\frac{h\gamma B_0}{2k_BT}
+\quad(\text{spin } 1/2),
+$$
+
+$$
+\mathrm{SNR}_1 = \frac{A/\sigma_{\mathrm{meas}}}{\sqrt{N_A}},
+\qquad
+k = \frac{\mathrm{SNR}_1}{n_{\mathrm{ref}}\,P_{\mathrm{ref}}\sin\alpha},
+\qquad
+\sigma_{\mathrm{sim}}(\Delta t) =
+\frac{f}{k\,P_{\mathrm{th}}(B_0,T_{\mathrm{sim}})}
+\sqrt{\frac{\Delta t_{\mathrm{ref}}}{\Delta t}}.
+$$
+
+$k$ is the single-scan FID SNR per mol of fully polarized nuclei at the
+reference dwell. Noise power is proportional to the receiver bandwidth
+$1/\Delta t$, so each ADC event uses its own dwell. $f$ is a noise factor for
+the simulated object, for example extra coil loading in vivo. A target with
+$n$ mol and absolute polarization $P$ therefore has an initial single-scan
+SNR of $k\,n\,P\sin\alpha\sqrt{\Delta t/\Delta t_{\mathrm{ref}}}/f$.
+`units.thermal_polarization` evaluates the Boltzmann polarization for any spin
+with hyperbolic sums that avoid cancellation at polarizations near $10^{-6}$.
+
+Worked example at 7 T. 2 M [13C]urea in 50 ml at 20 °C holds 0.1 mol of
+nuclei with $P_{\mathrm{th}} = 6.13\times10^{-6}$, or 0.613 µmol fully
+polarized. 80 mM pyruvate in 200 µl at 20 % polarization holds 16 µmol, or
+3.2 µmol fully polarized; at 37 °C its $M_z$ is about 34 500. At equal dwell
+and single scans the predicted SNR ratio is 5.2. If the urea scan has SNR 200
+with 4 averages, its single-scan SNR is 100 and the pyruvate FID starts at
+SNR 522 after a 90-degree pulse, before T2*, delivery and metabolism. At 3 T
+the thermal reference is 3/7 as large while the hyperpolarized signal is not,
+so the ratio becomes about 12.
+
+Practical requirements for the measurement: a fully relaxed reference
+(TR ≥ 5 T1, or a doped phantom), identical gain, averages and bandwidth for the
+FID and noise scans, noise std per quadrature, and the volume inside the coil's
+sensitive region. On Bruker data the digital-filter group delay makes the
+first stored points unsuitable as $A(t=0)$; fit or extrapolate the FID.
+
+**Set calibration** freezes the entered values together with the current
+nucleus and field strength. Runs and later **Apply to result** calls check the
+result's nucleus and field strength against the calibration; another field
+needs a new calibration because coil sensitivity and loading change. Different
+ADC dwells are allowed and rescaled. Runs record
+`metadata["receiver_acquisition"]` with nucleus, field strength, each ADC
+event's dwell and sample count in signal order, and the ideal FID amplitude.
+
+Calibrated mode requires `signal_weighting="voxel_volume"` and a 3D phantom.
+`metadata["receiver_noise"]` stores the per-event noise std
+(`noise_std_scope="per_adc_event"`), the calibration fields, derived values
+(reference moles and polarization, target thermal polarization, single-scan
+SNR and sensitivity) and the signal unit. Simulated runs are single scans.
+Receiver filter shapes, field-strength scaling of coil sensitivity,
+multichannel covariance and scanner-data import are outside this model.
+
+`SequenceSimulationResult.signal` contains the measured realization and
+`signal_noiseless` retains the original ADC data when receiver processing has
+been used. Applying noise again starts from `signal_noiseless`, so realizations
+never accumulate. **Apply to result** and **New realization** reuse the existing
+Bloch result. The generic ADC plot overlays the noiseless magnitude; all
+reconstruction paths consume the measured `signal`. NPZ, HDF5, NetCDF and
+complete projects preserve the clean signal and receiver metadata. Projects
+and retained simulation runs also preserve the controls and frozen calibration.
+
+### Phantom authoring units
+
+The Spectral Phantom Designer accepts initial and inflow polarization in
+absolute percent. A read-only column or label beside each value shows the
+corresponding multiple of thermal equilibrium. The reference uses the selected
+nucleus, field strength and phantom temperature:
+
+$$
+P_{\mathrm{rel}} = \frac{P_{\%}/100}{P_{\mathrm{th}}(B_0,T)}.
+$$
+
+Shape defaults, metabolite overrides, inflow curves and the kinetics
+polarization plot use this display convention. The **Thermal** button sets a
+shape default to equilibrium. Empty metabolite cells retain their shape
+fallback. Changing nucleus, B0 or temperature in the designer preserves
+entered absolute percentages and updates their thermal multiples. Shared
+workspace B0/nucleus changes also rebase the temperature-aware phantom's
+initial states and inflow, including authoring metadata, while preserving its
+concentrations, geometry and absolute polarized amount.
+
+Stored `initial_mz`, `initial_polarization` and inflow polarization curves
+remain thermal-relative solver quantities. `PhantomDesign.temperature_k` and
+`MousePerfusionConfig.temperature_k` record their thermal reference. Designs
+without this field use 310.15 K (37 °C), matching the existing default target
+reference, while keeping their stored relative values unchanged. Phantoms
+built from these designs include `metadata["temperature_k"]`; receiver run
+metadata carries it forward. Calibrated processing and the SNR budget use
+this explicit object temperature, while objects without temperature metadata
+retain the calibration's configured target-temperature fallback. The measured
+reference phantom temperature and sensitivity remain unchanged.
+
+The mouse designer's injection recipe is concentration in mM and volume in µl:
+
+$$
+n\,[\mathrm{\mu mol}]
+= c\,[\mathrm{mM}]\,V\,[\mathrm{\mu l}]\,10^{-3}.
+$$
+
+The derived dose and its fully polarized equivalent are shown beside the
+inputs. A new mouse injection starts at 80 mM, 200 µl and 20 % polarization:
+16 µmol nuclei and 3.2 µmol fully polarized equivalent. The perfusion source
+remains normalized to this dose on every spatial grid. Both recipe fields are
+saved; `injection_amount_umol` remains the derived amount for existing APIs.
+An older file containing only an amount keeps that dose and explicitly reports
+that concentration and volume were not recorded. Enabling **Specify
+concentration and volume** supplies a new recipe; no unique recipe is inferred
+from the old amount. Zero concentration or zero polarization is supported.
+
+### Display units
+
+**Settings → Interface → Signal units** selects physical amounts (the default)
+or SNR units. The choice is saved as `sequence/signal_unit` in QSettings and
+redraws the current result without another simulation. It applies to the
+Sequence signal, Cartesian images (including frames and volumes), CSI FIDs
+and spectra, split views, and spiral images. The Reconstruction Explorer
+retains its own display conventions for now.
+
+For calibrated runs the physical display multiplies the simulated
+$\mathrm{mol}\times P/P_{\mathrm{th}}$ signal by the calibration's target
+thermal polarization. Values then represent mol of fully polarized nuclei;
+axes choose their SI prefix automatically, and information labels use µmol
+where appropriate. Thus 80 mM in 200 µl at 20 % polarization gives 3.2 µmol
+fully polarized equivalent. The Cartesian inverse FFT divides by the spatial
+voxel count, so each voxel holds its share of the amount. Spectra use
+$\mathrm{FFT}/N_{\mathrm{spec}}$, preserving the initial FID amplitude when
+summing complex frequency bins.
+
+In SNR units each chronological ADC sample is divided by its own event's
+per-quadrature noise standard deviation:
+
+$$
+s_i^{\mathrm{display}} = \frac{s_i}{\sigma_i}.
+$$
+
+Spatial FFTs use orthonormal normalization and the spectral FFT is divided by
+$\sqrt{N_{\mathrm{spec}}}$. Fully sampled Cartesian images, CSI voxel FIDs
+and CSI frequency bins therefore retain $\sigma=1$ per complex quadrature.
+This refers to the complex noise before taking magnitudes or combining coils
+with RSS; magnitude noise does not have standard deviation one. Different
+event bandwidths are whitened before reconstruction. Signal and noiseless
+species curves use the same sample factors along their last (ADC) axis.
+
+Spiral gridding is not unitary. Each displayed frame is divided by the global
+per-quadrature RMS of the reconstructed noise-only realization. Its image
+information explicitly identifies this estimate: it is realization-dependent
+and does not describe spatial variations or correlations of the gridded noise.
+
+Physical display requires a calibrated run; SNR display requires valid receiver
+noise metadata. Otherwise the display falls back to simulation units with an
+explanation. Live previews show simulation units because receiver processing
+occurs after the Bloch calculation. Stored results, exports, magnetization,
+animation and calibration data remain in their original units.
+
+The SNR budget's reference FID also follows the SNR choice: ideal and noisy
+curves are divided by the measured reference $\sigma$, with dashed lines at
+$\pm1$. In physical display mode this reference plot retains its measured
+amplitude and noise units (or the relative mode's amplitude of one).
+
+### SNR budget
+
+Beside the controls, the receiver tab shows an **SNR budget**: the chain from
+the receiver setting to the voxel SNR of the current object and sequence. It
+needs no Bloch simulation and updates while values are typed and when the
+object, sequence, nucleus or field strength changes. Its sections are:
+
+1. **Receiver setting** (relative mode): SNR and reference bandwidth.
+   **Reference phantom** (calibrated mode): observed nuclei $n_{\mathrm{ref}}$,
+   polarization, fully polarized equivalent $n_{\mathrm{ref}}P_{\mathrm{ref}}$,
+   $\sin\alpha$, measured and single-scan SNR, sensitivity $k$ per µmol and
+   reference bandwidth. Entered values that are not set yet appear as a
+   preview for the current nucleus and field. **Simulation units** gives the
+   signal unit (mol × $P/P_{\mathrm{th}}$ at $T_{\mathrm{sim}}$), the noise
+   factor and $\sigma_{\mathrm{sim}}(\Delta t_{\mathrm{ref}})$.
+2. **Simulated object**: $A_{\mathrm{ideal}}$ and the whole-object FID SNR
+   $A_{\mathrm{ideal}}/\sigma(\Delta t_{\mathrm{ref}})$, the single-scan ceiling.
+   Calibrated mode also converts $A_{\mathrm{ideal}}$ to the fully polarized
+   equivalent $A_{\mathrm{ideal}}P_{\mathrm{th}}$ in mol: 3.2 µmol and SNR 521.7
+   for the pyruvate example above.
+3. **Sequence readout**: one row per ADC dwell with the whole-object SNR per
+   sample at that bandwidth, $\mathrm{SNR}_{\mathrm{ideal}}
+   \sqrt{\Delta t/\Delta t_{\mathrm{ref}}}$, and the events, samples and σ.
+4. **Image voxels**, for sequences that declare a spatial grid (matrix, FOV
+   and encoding frame): the ideal amplitude map is binned by voxel centre into
+   image voxels. Voxel $n$ of an axis with $N$ cells of width $d$ covers
+   $[(n-N/2)d,\,(n-N/2+1)d)$ along read, phase and partition; a 2D grid sums
+   through the excited slab. The rows give the grid, voxel size, voxels with
+   signal and their equivalent number of equally bright voxels
+   $(\sum_v a_v)^2/\sum_v a_v^2$, the brightest voxel's share
+   $a_{\max}/A_{\mathrm{ideal}}$ of the whole-object FID, its SNR in one sample
+   $a_{\max}/\sigma(\Delta t_{\mathrm{ref}})$, and the fraction of the object
+   outside the FOV, which aliases.
+5. **Last run**, from the noiseless signal of the current result and therefore
+   including flip angles, relaxation, delivery and metabolism: the strongest
+   sample $\max_i |s_i|/\sigma_i$, the matched-filter SNR of all samples
+   $\mathrm{SNR}_{\mathrm{tot}} = \sqrt{\sum_i |s_i|^2/\sigma_i^2}$, the same
+   per species for spectral and dynamic phantoms, and the brightest voxel over
+   all samples.
+
+The last value uses a sum rule. An orthonormal reconstruction keeps the noise
+std per quadrature in every voxel and frame and preserves signal energy
+(Parseval), so
+
+$$
+\sum_{v,\,\mathrm{frames}} \mathrm{SNR}_v^2 = \mathrm{SNR}_{\mathrm{tot}}^2 .
+$$
+
+If every frame keeps the object's distribution $a_v$, voxel $v$ reaches
+$\mathrm{SNR}_{\mathrm{tot}}\,a_v/\sqrt{\sum_u a_u^2}$, combined over frames.
+This is exact for fully sampled Cartesian imaging and EPSI. Spiral, radial and
+undersampled reconstructions are not unitary, so the value is an upper bound
+there. Decay during the readout and species or frames with other spatial
+distributions move individual voxels away from it, while the sum still holds.
+The NumPy default inverse transform scales signal and noise alike and leaves
+voxel SNR unchanged.
+
+Below the table a reference FID draws the receiver setting: relative mode
+normalizes the ideal FID to one with $\sigma = 1/\mathrm{SNR}$, calibrated mode
+uses the measured amplitude and noise std. Its noise comes from the production
+sampler with the current seed, dashed lines mark $\pm\sigma$ per quadrature,
+and its 20 ms T2* is illustrative only; no budget value uses it. **New
+realization** redraws it and also works without a simulation result; **Apply
+to result** processes an existing result.
+
 Multiple transmit channels and coupled chemical-species dynamics are later
 extensions of the same streaming interface. Independent spectral components
 use the composition model below.

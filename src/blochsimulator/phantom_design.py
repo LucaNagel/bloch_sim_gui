@@ -324,6 +324,7 @@ class PhantomDesign:
     conversion_start_s: float = 0.0
     kinetics_time_offset_s: float = 0.0
     dynamic_b0_curve: Optional[TimeCurve] = None
+    temperature_k: float = 310.15
 
     def validate(self) -> None:
         if len(self.shape) != 3 or any(
@@ -336,6 +337,8 @@ class PhantomDesign:
             raise ValueError("design FOV must be positive")
         if not np.isfinite(self.field_strength_t) or self.field_strength_t <= 0:
             raise ValueError("design field strength must be positive and finite")
+        if not np.isfinite(self.temperature_k) or self.temperature_k <= 0:
+            raise ValueError("design temperature must be positive and finite")
         if self.nucleus is not None and self.nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
             raise ValueError(f"unsupported nucleus {self.nucleus!r}")
         if not np.isfinite(self.spectral_reference_ppm):
@@ -694,7 +697,10 @@ class PhantomDesign:
                         spatial_scale_map=np.ones(self.shape, dtype=float),
                     )
                 ),
-                metadata={"phantom_design": self.to_dict()},
+                metadata={
+                    "phantom_design": self.to_dict(),
+                    "temperature_k": self.temperature_k,
+                },
             )
         return SpectralPhantom(
             shape=tuple(int(value) for value in self.shape),
@@ -711,7 +717,10 @@ class PhantomDesign:
             spectral_bandwidth_ppm=float(self.spectral_bandwidth_ppm),
             spectral_points=int(self.spectral_points),
             name=self.name,
-            metadata={"phantom_design": self.to_dict()},
+            metadata={
+                "phantom_design": self.to_dict(),
+                "temperature_k": self.temperature_k,
+            },
         )
 
     def to_dict(self) -> Dict:
@@ -810,6 +819,7 @@ class PhantomDesign:
             )
         return cls(
             name=str(data.get("name", "Designed spectral phantom")),
+            temperature_k=float(data.get("temperature_k", 310.15)),
             shape=tuple(int(value) for value in data.get("shape", (128, 128, 128))),
             fov_m=tuple(
                 float(value) for value in data.get("fov_m", (0.22, 0.22, 0.22))

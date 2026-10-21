@@ -119,7 +119,22 @@ from ..sequence.parameter_loop import (
     manual_parameter_loop_values,
     parameter_loop_values,
 )
+from ..sequence.receiver import (
+    ReceiverNoise,
+    apply_receiver_noise,
+    ideal_fid_amplitude,
+    receiver_acquisition_metadata,
+)
 from ..sequence.spin_sampling import phantom_voxel_basis_m
+from ..phantom_polarization import rebase_phantom_polarization
+from ..sequence.signal_units import (
+    SignalDisplay,
+    display_result,
+    noise_only_result,
+    normalize_signal_unit,
+    realized_noise_std,
+    signal_display,
+)
 from ..sequence.rf_pulses import (
     RF_PULSE_TYPE_LABELS,
     analytic_rf_shape_parameter,
@@ -150,6 +165,7 @@ from .sequence_geometry_viewer import (
     SequenceGeometryViewer,
     sequence_geometry_from_definitions,
 )
+from .receiver_noise import ReceiverNoiseWidget
 from .sequence_export_dialog import SequenceExportDialog
 from .simulation_explorer import SessionSimulationRun
 from .styles import BOLD_GROUP_TITLES_STYLE
@@ -1122,6 +1138,7 @@ class SequenceSimulationThread(QThread):
         animation_storage_dtype="float32",
         animation_note="",
         sequence_reference_ppm=0.0,
+        receiver_noise=None,
     ):
         super().__init__()
         self.simulator = simulator
@@ -1132,6 +1149,7 @@ class SequenceSimulationThread(QThread):
         self.field_strength_t = field_strength_t
         self.nucleus = nucleus
         self.sequence_reference_ppm = float(sequence_reference_ppm)
+        self.receiver_noise = receiver_noise or ReceiverNoise()
         self.live_preview = bool(live_preview)
         self.chunk_voxels = chunk_voxels
         self.simulation_timestep_s = simulation_timestep_s
@@ -1203,6 +1221,14 @@ class SequenceSimulationThread(QThread):
                     sequence_reference_ppm=self.sequence_reference_ppm,
                 )
             result = simulate(self.program, self.phantom, **kwargs)
+            result.metadata["receiver_acquisition"] = receiver_acquisition_metadata(
+                self.program,
+                nucleus=self.nucleus,
+                field_strength_t=self.field_strength_t,
+                phantom=self.phantom,
+                signal_weighting=self.signal_weighting,
+            )
+            result = apply_receiver_noise(result, self.receiver_noise)
             if not self._cancel_requested:
                 animation = None
                 if animation_times.size:
@@ -1459,6 +1485,7 @@ class SequenceSimulationWidget(QWidget):
         self._probe_started_at = None
         self._probe_started_at_utc = None
         self._simulation_progress_started_at = None
+        self._simulation_progress_baseline_done = None
         self._simulation_last_progress_at = None
         self._simulation_last_progress_done = 0
         self._simulation_last_progress_total = 1
@@ -1526,6 +1553,11 @@ class SequenceSimulationWidget(QWidget):
         self.simulation_time_timer.timeout.connect(self._update_simulation_time_label)
         settings = getattr(parent, "app_settings", None)
         self.app_settings = settings
+        self.signal_unit = normalize_signal_unit(
+            settings.value("sequence/signal_unit", "physical")
+            if settings is not None
+            else "physical"
+        )
         self.workspace_defaults = WorkspaceDefaults.from_settings(settings)
         self.scanner_parameters = load_scanner_parameters(settings)
         try:
@@ -4000,6 +4032,14 @@ class SequenceSimulationWidget(QWidget):
             self.chemical_ppm,
         )
         self.object_source.currentIndexChanged.connect(self._object_source_changed)
+
+        self.receiver_noise = ReceiverNoiseWidget(self)
+        self.receiver_noise.hide()
+        self.receiver_noise.calibration_requested.connect(
+            self._capture_noise_calibration
+        )
+        self.receiver_noise.apply_requested.connect(self._apply_noise_to_result)
+        self.receiver_noise.mode_changed.connect(self._receiver_mode_changed)
 
         self.output_group = QGroupBox("Sparse output")
         output_form = _left_aligned_form(self.output_group)
@@ -11538,6 +11578,11 @@ class SequenceSimulationWidget(QWidget):
                 raise ValueError(self.NO_PHANTOM_MESSAGE)
             self.phantom = designed
             if isinstance(self.phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+                rebase_phantom_polarization(
+                    self.phantom,
+                    field_strength_t=self.field_strength_t.value(),
+                    nucleus=self.nucleus.currentText(),
+                )
                 self.phantom.field_strength = self.field_strength_t.value()
                 self.phantom.nucleus = self.nucleus.currentText()
                 self.phantom.metadata["sequence_reference_ppm"] = (
@@ -11562,6 +11607,9 @@ class SequenceSimulationWidget(QWidget):
                 "Spin probe mode does not create a simulation phantom. "
                 "Use Run spectral probe or Run geometry probe instead."
             )
+        self.phantom = self._built_in_phantom()
+
+    def _built_in_phantom(self):
         n = self.matrix_size.value()
         nz = self.z_matrix_size.value()
         shape = (n, n, nz)
@@ -11577,7 +11625,7 @@ class SequenceSimulationWidget(QWidget):
             coordinate_z = (np.arange(nz) + 0.5) / nz - 0.5
             x, y, z = np.meshgrid(coordinate, coordinate, coordinate_z, indexing="ij")
             mask = x * x + y * y + z * z <= 0.4**2
-        self.phantom = Phantom(
+        return Phantom(
             shape=shape,
             fov=(fov, fov, fov_z),
             t1_map=np.where(mask, t1, 0.0),
@@ -11610,6 +11658,30 @@ class SequenceSimulationWidget(QWidget):
                 "chemical_shift_ppm": self.chemical_ppm.value(),
             },
         )
+
+    def receiver_budget_context(self):
+        """Object, sequence and last result for the receiver SNR budget.
+
+        Reads the selected object without the run-time metadata updates of
+        ``_build_phantom``.
+        """
+        source_index = self.object_source.currentIndex()
+        if source_index == 0:
+            phantom = self._selected_designed_phantom()
+        elif source_index == 1:
+            phantom = self._built_in_phantom()
+        else:
+            phantom = None
+        return {
+            "phantom": phantom,
+            "signal_weighting": self._signal_weighting_mode(),
+            "program": self.program,
+            "grid": self._sequence_spatial_grid_for_resolution_warning(),
+            "result": self.result,
+            "nucleus": self.nucleus.currentText(),
+            "field_strength_t": self.field_strength_t.value(),
+            "signal_unit": self.signal_unit,
+        }
 
     def _checkpoint_seconds(self):
         text = self.checkpoints.text().strip()
@@ -12424,7 +12496,36 @@ class SequenceSimulationWidget(QWidget):
         self.probe_adc_status.setText("ADC: on" if active else "ADC: off")
 
     def _signal_weighting_mode(self):
+        if self.receiver_noise.mode.currentData() == "calibrated":
+            return "voxel_volume"
         return "voxel_volume" if self.signal_weighting.currentIndex() == 1 else "voxel"
+
+    def _receiver_mode_changed(self):
+        calibrated = self.receiver_noise.mode.currentData() == "calibrated"
+        self.signal_weighting.setEnabled(not calibrated)
+        if calibrated:
+            self.signal_weighting.setCurrentIndex(1)
+
+    def _capture_noise_calibration(self):
+        try:
+            self.receiver_noise.capture_calibration(
+                nucleus=self.nucleus.currentText(),
+                field_strength_t=self.field_strength_t.value(),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Receiver calibration", str(exc))
+
+    def _apply_noise_to_result(self):
+        if self.result is None or (self.worker is not None and self.worker.isRunning()):
+            return
+        try:
+            settings = self.receiver_noise.settings()
+            result = apply_receiver_noise(self.result, settings)
+        except Exception as exc:
+            QMessageBox.warning(self, "Receiver noise", str(exc))
+            return
+        animation = self.magnetization_animation
+        self._finished(_SequenceSimulationPayload(result, animation), record_run=False)
 
     def _confirm_sequence_reference_for_run(self) -> bool:
         """Require confirmation when sequence zero is outside the spectrum."""
@@ -12603,6 +12704,27 @@ class SequenceSimulationWidget(QWidget):
         try:
             self._build_phantom()
             checkpoints = self._checkpoint_seconds()
+            receiver_noise = self.receiver_noise.settings(
+                nucleus=self.nucleus.currentText(),
+                field_strength_t=self.field_strength_t.value(),
+            )
+            receive_maps = getattr(self.phantom, "rx_sensitivity_maps", None)
+            if (
+                receiver_noise.mode != "off"
+                and receive_maps is not None
+                and len(receive_maps) != 1
+            ):
+                raise ValueError(
+                    "Receiver noise currently supports one receive channel"
+                )
+            if receiver_noise.mode == "calibrated" and self.phantom.ndim != 3:
+                raise ValueError(
+                    "Calibrated receiver noise requires a 3D phantom with "
+                    "physical volume"
+                )
+            if receiver_noise.mode == "relative":
+                # Fail before the run instead of after it.
+                ideal_fid_amplitude(self.phantom, self._signal_weighting_mode())
             (
                 animation_time_resolution_s,
                 animation_maximum_frames,
@@ -12623,6 +12745,7 @@ class SequenceSimulationWidget(QWidget):
         self.run_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.export_button.setEnabled(False)
+        self.receiver_noise.setEnabled(False)
         work_units = self._estimated_work_units()
         self._clear_previous_simulation_views()
         self.progress.setRange(0, work_units)
@@ -12631,6 +12754,7 @@ class SequenceSimulationWidget(QWidget):
         self._simulation_started_at = time.monotonic()
         self._simulation_started_at_utc = datetime.now(timezone.utc).isoformat()
         self._simulation_progress_started_at = None
+        self._simulation_progress_baseline_done = None
         self._simulation_last_progress_at = None
         self._simulation_last_progress_done = 0
         self._simulation_last_progress_total = work_units
@@ -12657,6 +12781,7 @@ class SequenceSimulationWidget(QWidget):
             animation_storage_dtype=self.animation_storage_dtype.currentText(),
             animation_note=animation_note,
             sequence_reference_ppm=self.sequence_reference_ppm.value(),
+            receiver_noise=receiver_noise,
         )
         self.worker.progress.connect(self._progress)
         self.worker.stage.connect(self._status_update)
@@ -12685,20 +12810,23 @@ class SequenceSimulationWidget(QWidget):
             self._simulation_started_at = now
         if self._simulation_progress_started_at is None:
             self._simulation_progress_started_at = now
+            self._simulation_progress_baseline_done = done
             self._simulation_last_progress_at = now
             self._simulation_last_progress_done = done
         else:
-            delta_done = done - self._simulation_last_progress_done
-            delta_s = now - self._simulation_last_progress_at
-            if delta_done > 0 and delta_s > 0.0:
-                instantaneous_rate = delta_done / delta_s
-                if self._simulation_progress_rate is None:
-                    self._simulation_progress_rate = instantaneous_rate
-                else:
-                    self._simulation_progress_rate = (
-                        0.25 * instantaneous_rate
-                        + 0.75 * self._simulation_progress_rate
-                    )
+            baseline_done = self._simulation_progress_baseline_done
+            if baseline_done is None:
+                baseline_done = done
+                self._simulation_progress_baseline_done = done
+            completed_work = done - baseline_done
+            measured_s = now - self._simulation_progress_started_at
+            if completed_work > 0 and measured_s > 0.0:
+                # Progress callbacks arrive after uneven voxel chunks.  A rate
+                # based only on the latest chunk lets one unusual chunk move the
+                # ETA abruptly.  The cumulative throughput remains anchored at
+                # the post-compilation baseline and converges as work completes.
+                self._simulation_progress_rate = completed_work / measured_s
+            if done > self._simulation_last_progress_done:
                 self._simulation_last_progress_at = now
                 self._simulation_last_progress_done = done
         if done >= total:
@@ -12894,6 +13022,7 @@ class SequenceSimulationWidget(QWidget):
         self, *, clear_reconstruction=True, clear_spatial_magnetization=True
     ):
         """Remove stale result data before the next simulation starts."""
+        self.receiver_noise.set_result_available(False)
         self._active_session_run_id = None
         self._project_export_contexts.pop("sequence", None)
         self.result = None
@@ -12901,6 +13030,8 @@ class SequenceSimulationWidget(QWidget):
         self._split_csi_data = None
         self.signal_plot.clear()
         self.signal_plot.setTitle("Received ADC signal — current simulation")
+        for plot in (self.signal_plot, self.split_signal_plot):
+            self._set_signal_axis(plot, SignalDisplay("simulation"))
         self.signal_plot.setLabel("bottom", "Time", "ms")
         self.kspace_view.clear()
         self.reconstruction_view.clear()
@@ -12971,6 +13102,7 @@ class SequenceSimulationWidget(QWidget):
         """Plot only ADC data produced by the simulation currently running."""
         self.signal_plot.clear()
         self.signal_plot.setTitle("Live received ADC signal")
+        self._set_signal_axis(self.signal_plot, SignalDisplay("simulation"))
         self.signal_plot.setLabel("bottom", "Time", "ms")
         visible_samples = min(int(visible_samples), int(adc_times.size))
         if visible_samples > 0:
@@ -13091,31 +13223,37 @@ class SequenceSimulationWidget(QWidget):
             process.waitForFinished(1000)
         super().closeEvent(event)
 
-    def _finished(self, result, *, record_run=True):
-        animation = None
-        animation_message = ""
-        if isinstance(result, _SequenceSimulationPayload):
-            animation = result.animation
-            animation_message = result.animation_message
-            result = result.result
-        loop_metadata = self._parameter_loop_metadata() if record_run else None
-        if loop_metadata is not None:
-            result.metadata["parameter_loop"] = loop_metadata
-        if record_run:
-            elapsed_s = self._record_simulation_timing(result)
+    @staticmethod
+    def _set_signal_axis(plot, display):
+        plot.setLabel("left", display.axis_label, units=display.axis_units or "")
+
+    def set_signal_unit(self, unit):
+        """Redraw received data in the chosen unit without changing the run."""
+        unit = normalize_signal_unit(unit)
+        if unit == self.signal_unit:
+            return
+        self.signal_unit = unit
+        if self.result is not None:
+            self._plot_received_signal(self.result)
+            if self.spectroscopic_acquisition is not None:
+                self._show_spectroscopic_result(self.result)
+            elif self.spiral_acquisition is not None:
+                self._show_spiral_result(self.result)
+            else:
+                self._show_cartesian_result(self.result)
         else:
-            elapsed_s = result.metadata.get("simulation_wall_time_s")
-        self.result = result
-        self.magnetization_animation = animation
-        self._reset_run_controls(completed=True, elapsed_s=elapsed_s)
-        self.export_button.setEnabled(True)
-        self._status_update(self._execution_completion_message(result.metadata))
-        self._set_sequence_cursor(1.0)
-        self._configure_frame_selector()
-        self._configure_spectroscopy_selectors()
+            for plot in (self.signal_plot, self.split_signal_plot):
+                self._set_signal_axis(plot, SignalDisplay("simulation"))
+        self.receiver_noise.preview_changed.emit()
+
+    def _plot_received_signal(self, result):
+        display = signal_display(result, self.signal_unit)
+        result = display_result(result, display)
         self.signal_plot.clear()
         self.signal_plot.setTitle("Received ADC signal")
         self.signal_plot.setLabel("bottom", "Time", "ms")
+        self._set_signal_axis(self.signal_plot, display)
+        self._set_signal_axis(self.split_signal_plot, display)
         time_ms = result.adc_times_s * 1000
         signal = np.asarray(result.signal)
         if self.spectroscopic_acquisition is not None:
@@ -13148,18 +13286,61 @@ class SequenceSimulationWidget(QWidget):
                     pen=pg.intColor(coil, hues=plot_signal.shape[0]),
                     name=f"Coil {coil + 1}",
                 )
+        if (
+            (signal.ndim == 1 or signal.shape[0] == 1)
+            and result.signal_noiseless is not None
+            and self.spectroscopic_acquisition is None
+        ):
+            self.signal_plot.plot(
+                plot_time,
+                np.abs(np.asarray(result.signal_noiseless).reshape(-1)),
+                pen=pg.mkPen("#a0a0a0", style=Qt.DashLine),
+                name="Noiseless magnitude",
+            )
         if result.species_signal is not None:
             pool_signal = np.asarray(result.species_signal)
             if self.spectroscopic_acquisition is not None:
                 pool_signal = pool_signal[..., start:stop]
             colors = ("#ffb000", "#00b7ff", "#d95fef", "#7ad151")
             for pool_index, name in enumerate(result.pool_names):
+                pool_values = pool_signal[pool_index]
+                magnitude = (
+                    np.sqrt(np.sum(np.abs(pool_values) ** 2, axis=0))
+                    if pool_values.ndim == 2
+                    else np.abs(pool_values)
+                )
                 self.signal_plot.plot(
                     plot_time,
-                    np.abs(pool_signal[pool_index]),
+                    magnitude,
                     pen=pg.mkPen(colors[pool_index % len(colors)], width=2),
                     name=f"|{name}|",
                 )
+        self.spectrum_info.setText(display.note or display.description)
+
+    def _finished(self, result, *, record_run=True):
+        animation = None
+        animation_message = ""
+        if isinstance(result, _SequenceSimulationPayload):
+            animation = result.animation
+            animation_message = result.animation_message
+            result = result.result
+        loop_metadata = self._parameter_loop_metadata() if record_run else None
+        if loop_metadata is not None:
+            result.metadata["parameter_loop"] = loop_metadata
+        if record_run:
+            elapsed_s = self._record_simulation_timing(result)
+        else:
+            elapsed_s = result.metadata.get("simulation_wall_time_s")
+        self.result = result
+        self.receiver_noise.set_result_available(True)
+        self.magnetization_animation = animation
+        self._reset_run_controls(completed=True, elapsed_s=elapsed_s)
+        self.export_button.setEnabled(True)
+        self._status_update(self._execution_completion_message(result.metadata))
+        self._set_sequence_cursor(1.0)
+        self._configure_frame_selector()
+        self._configure_spectroscopy_selectors()
+        self._plot_received_signal(result)
         self.result_volume_viewer.set_result(result, self.phantom)
         if not result.adc_times_s.size:
             self.signal_plot.setTitle("Spatial magnetization — no ADC acquisition")
@@ -13383,6 +13564,7 @@ class SequenceSimulationWidget(QWidget):
 
     def _session_run_state(self, *, phantom, **extra):
         state = {
+            "receiver_noise": self.receiver_noise.get_state(),
             "program": replace(
                 self.program, metadata=copy.deepcopy(self.program.metadata)
             ),
@@ -13743,6 +13925,8 @@ class SequenceSimulationWidget(QWidget):
         self._set_csi_voxel(round(point.x()), round(point.y()))
 
     def _update_split_view(self, csi, kspace, spatial_fid, spectra):
+        display = signal_display(self.result, self.signal_unit)
+        self._set_signal_axis(self.split_signal_plot, display)
         self._split_csi_data = (csi, kspace, spatial_fid, spectra)
         point = min(self.spectral_point_selector.value(), csi.spectral_points - 1)
         x_index = min(self.spectrum_x_selector.value(), csi.matrix[0] - 1)
@@ -13769,7 +13953,9 @@ class SequenceSimulationWidget(QWidget):
             f"{title} — FID sample {point}/{csi.spectral_points - 1}"
         )
         self.split_voxel_marker.setData([x_index], [y_index])
-        self.split_image_info.setText(image_note)
+        self.split_image_info.setText(
+            f"{image_note} {display.note or display.description}"
+        )
 
         self.split_signal_plot.clear()
         if self.split_signal_source.currentText() == "FID":
@@ -13800,10 +13986,14 @@ class SequenceSimulationWidget(QWidget):
         x_mm = ((x_index + 0.5) / csi.matrix[0] - 0.5) * csi.fov_m[0] * 1000
         y_mm = ((y_index + 0.5) / csi.matrix[1] - 0.5) * csi.fov_m[1] * 1000
         self.split_signal_info.setText(
-            f"Voxel (x={x_index}, y={y_index}) at ({x_mm:.4g}, {y_mm:.4g}) mm"
+            f"Voxel (x={x_index}, y={y_index}) at ({x_mm:.4g}, {y_mm:.4g}) mm; "
+            f"{display.note or display.description}"
         )
 
     def _show_spectroscopic_result(self, result):
+        display = signal_display(result, self.signal_unit)
+        result = display_result(result, display)
+        self._set_signal_axis(self.signal_plot, display)
         csi = self.spectroscopic_acquisition
         try:
             csi.validate_adc_times(result.adc_times_s)
@@ -13811,10 +14001,11 @@ class SequenceSimulationWidget(QWidget):
                 csi.validate_gradient_moments(result.adc_gradient_moment_cyc_per_m)
             kspace = self._selected_csi_repetition(csi.reshape_signal(result.signal))
             spatial_fid = self._selected_csi_repetition(
-                csi.reconstruct_spatial(result.signal)
+                csi.reconstruct_spatial(result.signal, norm=display.image_norm)
             )
             spectra = self._selected_csi_repetition(
-                csi.reconstruct_spectra(result.signal)
+                csi.reconstruct_spectra(result.signal, norm=display.image_norm)
+                * display.spectrum_scale(csi.spectral_points)
             )
             point = min(self.spectral_point_selector.value(), csi.spectral_points - 1)
             if kspace.ndim == 4:
@@ -13836,12 +14027,15 @@ class SequenceSimulationWidget(QWidget):
             time_ms = csi.spectral_time_s[point] * 1000.0
             self.kspace_info.setText(
                 f"CSI log(1+|k|), grid={csi.matrix[1]}×{csi.matrix[0]}, "
-                f"FID sample={point} ({time_ms:.4g} ms){coil_text}"
+                f"FID sample={point} ({time_ms:.4g} ms){coil_text}; "
+                f"{display.note or display.description}"
             )
             self.reconstruction_info.setText(
                 f"CSI spatial |IFFT2| at FID sample {point}; "
-                f"min={spatial_image.min():.5g}, max={spatial_image.max():.5g}"
-                f"{coil_text}; spectral FFT is shown in the signal tab"
+                f"min={display.format_value(spatial_image.min())}, "
+                f"max={display.format_value(spatial_image.max())}"
+                f"{coil_text}; {display.note or display.description}; "
+                "spectral FFT is shown in the signal tab"
             )
 
             x_index = min(self.spectrum_x_selector.value(), csi.matrix[0] - 1)
@@ -13872,7 +14066,8 @@ class SequenceSimulationWidget(QWidget):
                 f"Voxel (x={x_index}, y={y_index}) at ({x_mm:.4g}, {y_mm:.4g}) mm; "
                 f"repetition={self.csi_repetition_selector.value()}; "
                 f"BW={csi.spectral_bandwidth_hz:.6g} Hz; "
-                f"resolution={csi.spectral_resolution_hz:.6g} Hz"
+                f"resolution={csi.spectral_resolution_hz:.6g} Hz; "
+                f"{display.note or display.description}"
             )
             self._update_split_view(csi, kspace, spatial_fid, spectra)
             if not self._csi_click_view_initialized:
@@ -13911,6 +14106,9 @@ class SequenceSimulationWidget(QWidget):
         if spiral is None:
             return
         try:
+            display = signal_display(result, self.signal_unit)
+            result = display_result(result, display)
+            noise_result = noise_only_result(result) if display.snr else None
             selected = self.frame_selector.currentData()
             selected = 0 if selected is None else int(selected)
             frames = (
@@ -13929,6 +14127,11 @@ class SequenceSimulationWidget(QWidget):
                 else:
                     kspace_magnitude = np.abs(kspace)
                     image = np.abs(spiral.reconstruct(result, frame))
+                if noise_result is not None:
+                    sigma = realized_noise_std(spiral.reconstruct(noise_result, frame))
+                    if not np.isfinite(sigma) or sigma <= 0:
+                        raise ValueError("Cannot estimate spiral image noise std")
+                    image = image / sigma
                 views.append((np.asarray(kspace_magnitude), np.asarray(image)))
             kspace_display = self._montage([view[0] for view in views])
             image_display = self._montage([view[1] for view in views])
@@ -13945,12 +14148,21 @@ class SequenceSimulationWidget(QWidget):
             )
             self.kspace_info.setText(
                 f"2D spiral samples linearly gridded to "
-                f"{spiral.matrix[1]}×{spiral.matrix[0]}{coil_text}{frame_text}"
+                f"{spiral.matrix[1]}×{spiral.matrix[0]}{coil_text}{frame_text}; "
+                f"{display.note or display.description}"
             )
             self.reconstruction_info.setText(
-                f"Spiral gridding + |IFFT2|, min={np.min(np.abs(image_display)):.5g}, "
-                f"max={np.max(np.abs(image_display)):.5g}{coil_text}{frame_text}; "
-                "slice-selective 2D frames (no kz encoding)"
+                "Spiral gridding + |IFFT2|, "
+                f"min={display.format_value(np.min(np.abs(image_display)))}, "
+                f"max={display.format_value(np.max(np.abs(image_display)))}"
+                f"{coil_text}{frame_text}; slice-selective 2D frames (no kz encoding); "
+                f"{display.note or display.description}"
+                + (
+                    "; image σ estimated per frame from this noise realization "
+                    "(global RMS; spatial noise can vary)"
+                    if display.snr
+                    else ""
+                )
             )
         except Exception as exc:
             self.kspace_view.clear()
@@ -13960,6 +14172,7 @@ class SequenceSimulationWidget(QWidget):
             self.reconstruction_info.setText(message)
 
     def _show_cartesian_result(self, result):
+        display = signal_display(result, self.signal_unit)
         if self.acquisition is None:
             self.kspace_view.clear()
             self.reconstruction_view.clear()
@@ -14007,7 +14220,8 @@ class SequenceSimulationWidget(QWidget):
             )
             self.kspace_info.setText(
                 f"2D log(1+|k|), grid={acquisition.phase_matrix}×"
-                f"{acquisition.read_matrix}{coil_text}{frame_text}"
+                f"{acquisition.read_matrix}{coil_text}{frame_text}; "
+                f"{display.note or display.description}"
             )
             if self.acquisition_volumes is not None:
                 z_note = (
@@ -14024,8 +14238,8 @@ class SequenceSimulationWidget(QWidget):
             else:
                 z_note = "; no kz encoding"
             self.reconstruction_info.setText(
-                f"2D |IFFT2|, min={np.min(np.abs(image)):.5g}, "
-                f"max={np.max(np.abs(image)):.5g}{coil_text}{frame_text}{z_note}"
+                f"2D |IFFT2|, min={display.format_value(np.min(np.abs(image)))}, "
+                f"max={display.format_value(np.max(np.abs(image)))}{coil_text}{frame_text}{z_note}; {display.note or display.description}"
             )
         except Exception as exc:
             self.kspace_view.clear()
@@ -14035,6 +14249,7 @@ class SequenceSimulationWidget(QWidget):
             self.reconstruction_info.setText(message)
 
     def _show_cartesian_volume_result(self, result):
+        display = signal_display(result, self.signal_unit)
         try:
             selected = self.frame_selector.currentData()
             selected = 0 if selected is None else int(selected)
@@ -14068,7 +14283,7 @@ class SequenceSimulationWidget(QWidget):
             self.kspace_info.setText(
                 f"3D log(1+|k|), central partition ({partition_axis}) plane, "
                 f"grid={nz}×{ny}×{nx}; read={read_axis}, phase={phase_axis}"
-                f"{coil_text}{volume_text}"
+                f"{coil_text}{volume_text}; {display.note or display.description}"
             )
             z_index = nz // 2
             z_mm = ((z_index + 0.5) / nz - 0.5) * self.acquisition_volumes.fov_z_m * 1e3
@@ -14079,8 +14294,9 @@ class SequenceSimulationWidget(QWidget):
             self.reconstruction_info.setText(
                 f"3D |IFFT3|, central {partition_scanner_axis}="
                 f"{scanner_position_mm:.4g} mm, "
-                f"min={np.min(image):.5g}, max={np.max(image):.5g}"
-                f"{coil_text}{volume_text}"
+                f"min={display.format_value(np.min(image))}, "
+                f"max={display.format_value(np.max(image))}"
+                f"{coil_text}{volume_text}; {display.note or display.description}"
             )
         except Exception as exc:
             self.kspace_view.clear()
@@ -14090,16 +14306,22 @@ class SequenceSimulationWidget(QWidget):
             self.reconstruction_info.setText(message)
 
     def _cartesian_volume_views(self, result, volume):
+        display = signal_display(result, self.signal_unit)
+        result = display_result(result, display)
         kspace = self.acquisition_volumes.to_cartesian_kspace(result, volume)
         if kspace.ndim == 4:
             kspace_magnitude = np.sqrt(np.sum(np.abs(kspace) ** 2, axis=0))
             image = self.acquisition_volumes.reconstruct(
-                result, volume, coil_combine="rss"
+                result, volume, norm=display.image_norm, coil_combine="rss"
             )
             coil_text = f", {kspace.shape[0]} coils (RSS)"
         else:
             kspace_magnitude = np.abs(kspace)
-            image = np.abs(self.acquisition_volumes.reconstruct(result, volume))
+            image = np.abs(
+                self.acquisition_volumes.reconstruct(
+                    result, volume, norm=display.image_norm
+                )
+            )
             coil_text = ""
         centre = self.acquisition_volumes.partition_matrix // 2
         return (
@@ -14109,6 +14331,8 @@ class SequenceSimulationWidget(QWidget):
         )
 
     def _cartesian_frame_views(self, result, frame):
+        display = signal_display(result, self.signal_unit)
+        result = display_result(result, display)
         if self.acquisition_frames is not None:
             acquisition = self.acquisition_frames.acquisitions[frame]
             kspace = self.acquisition_frames.to_cartesian_kspace(result, frame)
@@ -14119,17 +14343,25 @@ class SequenceSimulationWidget(QWidget):
             kspace_magnitude = np.sqrt(np.sum(np.abs(kspace) ** 2, axis=0))
             if self.acquisition_frames is not None:
                 image = self.acquisition_frames.reconstruct(
-                    result, frame, coil_combine="rss"
+                    result, frame, norm=display.image_norm, coil_combine="rss"
                 )
             else:
-                image = result.reconstruct_cartesian(acquisition, coil_combine="rss")
+                image = result.reconstruct_cartesian(
+                    acquisition, norm=display.image_norm, coil_combine="rss"
+                )
             coil_text = f", {kspace.shape[0]} coils (RSS)"
         else:
             kspace_magnitude = np.abs(kspace)
             if self.acquisition_frames is not None:
-                image = np.abs(self.acquisition_frames.reconstruct(result, frame))
+                image = np.abs(
+                    self.acquisition_frames.reconstruct(
+                        result, frame, norm=display.image_norm
+                    )
+                )
             else:
-                image = np.abs(result.reconstruct_cartesian(acquisition))
+                image = np.abs(
+                    result.reconstruct_cartesian(acquisition, norm=display.image_norm)
+                )
             coil_text = ""
         return (
             np.asarray(kspace_magnitude),
@@ -14185,6 +14417,7 @@ class SequenceSimulationWidget(QWidget):
         QMessageBox.critical(self, str(title), message)
 
     def _reset_run_controls(self, *, completed=False, elapsed_s=None):
+        self.receiver_noise.setEnabled(True)
         self.run_button.setEnabled(
             self._parameter_loop_state is None
             and self.program is not None
@@ -14232,6 +14465,7 @@ class SequenceSimulationWidget(QWidget):
         self._simulation_started_at = None
         self._simulation_started_at_utc = None
         self._simulation_progress_started_at = None
+        self._simulation_progress_baseline_done = None
         self._simulation_last_progress_at = None
         self._simulation_last_progress_done = 0
         self._simulation_last_progress_total = 1

@@ -210,6 +210,28 @@ def test_sequence_progress_estimate_excludes_compile_time_and_uses_run_rate(
     app.processEvents()
 
 
+def test_sequence_progress_uses_cumulative_throughput_for_eta(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+    timestamps = iter((100.0, 101.0, 111.0))
+    monkeypatch.setattr(
+        "blochsimulator.ui.sequence_simulation_widget.time.monotonic",
+        lambda: next(timestamps),
+    )
+
+    widget._progress(0, 100)
+    widget._progress(25, 100)
+    assert widget.progress.format() == "25% · ETA 3s"
+
+    widget._progress(50, 100)
+
+    assert widget._simulation_progress_rate == pytest.approx(50.0 / 11.0)
+    assert widget.progress.format() == "50% · ETA 11s"
+    assert widget.status.text() == "Chunk 50/100 · 50% · approximately 11s remaining"
+    widget.close()
+    app.processEvents()
+
+
 @pytest.mark.parametrize("live_preview", [False, True])
 @pytest.mark.parametrize("with_animation", [False, True])
 def test_spectral_worker_updates_percentage_and_eta_within_one_component(

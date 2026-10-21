@@ -73,6 +73,8 @@ from ..slice_explorer import SliceSelectionExplorer
 from ..project_io import load_project, save_project
 from ..project_naming import ProjectExportNamer, project_timestamp
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
+from ..sequence.signal_units import normalize_signal_unit
+from ..phantom_polarization import rebase_phantom_polarization
 
 # Import phantom/kspace if available
 try:
@@ -116,6 +118,7 @@ from .default_settings import (
     save_kernel_settings,
 )
 from .sequence_simulation_widget import SequenceSimulationWidget
+from .receiver_noise_preview import ReceiverNoiseWorkspace
 from .b1_widgets import B1PhantomCombinationWidget, B1WorkspaceWidget
 from .project_explorer import ProjectExplorerDialog
 from .project_export_dialog import SimulationProjectExportDialog
@@ -1516,6 +1519,20 @@ class BlochSimulatorGUI(QMainWindow):
         )
         self.tab_widget.currentChanged.connect(self._ensure_b1_combo_workspace)
 
+        self.receiver_noise_workspace = None
+        self.receiver_noise_page = QWidget()
+        self.receiver_noise_page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        receiver_layout = QVBoxLayout(self.receiver_noise_page)
+        receiver_layout.setContentsMargins(0, 0, 0, 0)
+        receiver_layout.addWidget(
+            QLabel("Open this tab to configure and preview receiver noise.")
+        )
+        receiver_layout.addStretch()
+        self.receiver_noise_tab_index = self.tab_widget.addTab(
+            self.receiver_noise_page, "Receiver / Noise"
+        )
+        self.tab_widget.currentChanged.connect(self._ensure_receiver_noise_workspace)
+
         # === TEMPORARY SESSION SIMULATIONS ===
         # This intentionally lives next to Phantom + B1 and is separate from
         # the persistent, file-based Project Explorer in the File menu.
@@ -1775,6 +1792,27 @@ class BlochSimulatorGUI(QMainWindow):
         self._set_main_tab_visible(self.sequence_parameter_loop_tab_index, True)
         self.tab_widget.setCurrentIndex(self.sequence_parameter_loop_tab_index)
 
+    def _ensure_receiver_noise_workspace(self, index):
+        if (
+            index != self.receiver_noise_tab_index
+            or self.receiver_noise_workspace is not None
+        ):
+            return
+        self._ensure_sequence_simulation_workspace(self.sequence_simulation_tab_index)
+        layout = self.receiver_noise_page.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+        self.receiver_noise_workspace = ReceiverNoiseWorkspace(
+            self.sequence_simulation_widget.receiver_noise,
+            self,
+            context=self.sequence_simulation_widget.receiver_budget_context,
+        )
+        layout.addWidget(self.receiver_noise_workspace)
+
     def _ensure_phantom_workspace(self, index: int):
         """Create phantom designer/viewers only when their tab is opened."""
         if (
@@ -1934,6 +1972,11 @@ class BlochSimulatorGUI(QMainWindow):
                     creator.set_field_strength(value_t)
                 phantom = phantom_widget.current_phantom
                 if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+                    rebase_phantom_polarization(
+                        phantom,
+                        field_strength_t=value_t,
+                        nucleus=phantom.nucleus,
+                    )
                     phantom.field_strength = value_t
                     design_metadata = phantom.metadata.get("phantom_design")
                     if isinstance(design_metadata, dict):
@@ -1984,6 +2027,11 @@ class BlochSimulatorGUI(QMainWindow):
                     creator.set_nucleus(nucleus)
                 phantom = phantom_widget.current_phantom
                 if isinstance(phantom, (SpectralPhantom, DynamicSpectralPhantom)):
+                    rebase_phantom_polarization(
+                        phantom,
+                        field_strength_t=phantom.field_strength,
+                        nucleus=nucleus,
+                    )
                     phantom.nucleus = nucleus
                     design_metadata = phantom.metadata.get("phantom_design")
                     if isinstance(design_metadata, dict):
@@ -5286,6 +5334,9 @@ class BlochSimulatorGUI(QMainWindow):
         run.state["sequence_controls"] = copy.deepcopy(
             project_state.get("sequence_controls", {})
         )
+        run.state["receiver_noise"] = copy.deepcopy(
+            project_state.get("receiver_noise", {})
+        )
         run.state["spoiler_configuration"] = copy.deepcopy(
             project_state.get("spoiler_configuration", {})
         )
@@ -5322,6 +5373,9 @@ class BlochSimulatorGUI(QMainWindow):
                 sequence_widget,
                 run.state.get("sequence_controls", {}),
                 block_signals=True,
+            )
+            sequence_widget.receiver_noise.restore_state(
+                run.state.get("receiver_noise")
             )
             spoiler_configuration = run.state.get("spoiler_configuration", {})
             if spoiler_configuration:
@@ -5434,6 +5488,7 @@ class BlochSimulatorGUI(QMainWindow):
         state["sequence_controls"] = copy.deepcopy(
             run_state.get("sequence_controls", {})
         )
+        state["receiver_noise"] = copy.deepcopy(run_state.get("receiver_noise", {}))
         state["spoiler_configuration"] = copy.deepcopy(
             run_state.get("spoiler_configuration", {})
         )
@@ -5629,6 +5684,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self.phantom_tab_index,
                 self.b1_tab_index,
                 self.b1_combo_tab_index,
+                self.receiver_noise_tab_index,
                 self.simulation_explorer_tab_index,
                 self.sequence_parameter_loop_tab_index,
             }:
@@ -5664,6 +5720,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self.phantom_tab_index,
                 self.b1_tab_index,
                 self.b1_combo_tab_index,
+                self.receiver_noise_tab_index,
                 self.simulation_explorer_tab_index,
             }
             if self.sequence_parameter_loop_tab_opened:
@@ -5683,6 +5740,7 @@ class BlochSimulatorGUI(QMainWindow):
                     self.phantom_tab_index,
                     self.b1_tab_index,
                     self.b1_combo_tab_index,
+                    self.receiver_noise_tab_index,
                     self.simulation_explorer_tab_index,
                     self.sequence_parameter_loop_tab_index,
                 }:
@@ -5707,6 +5765,7 @@ class BlochSimulatorGUI(QMainWindow):
             self._set_main_tab_visible(self.phantom_tab_index, False)
             self._set_main_tab_visible(self.b1_tab_index, False)
             self._set_main_tab_visible(self.b1_combo_tab_index, False)
+            self._set_main_tab_visible(self.receiver_noise_tab_index, False)
             self._set_main_tab_visible(self.simulation_explorer_tab_index, False)
             self._set_main_tab_visible(self.sequence_parameter_loop_tab_index, False)
             free_geometry = getattr(self, "_free_workspace_geometry", None)
@@ -5894,6 +5953,7 @@ class BlochSimulatorGUI(QMainWindow):
             scanner_parameters=previous_scanner_parameters,
             workspace_defaults=previous_workspace_defaults,
             interface_style=previous_interface_style,
+            signal_unit=self.app_settings.value("sequence/signal_unit", "physical"),
             sequence_section_titles_bold=previous_sequence_section_titles_bold,
             sequence_timing_visible=self.app_settings.value(
                 "interface/show_sequence_timing", True, type=bool
@@ -5929,6 +5989,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.app_settings.setValue("interface/tooltips_enabled", tooltips_enabled)
         interface_style = normalize_interface_style(dialog.interface_style())
         self.app_settings.setValue("interface/style", interface_style)
+        signal_unit = normalize_signal_unit(dialog.signal_unit())
+        self.app_settings.setValue("sequence/signal_unit", signal_unit)
         sequence_section_titles_bold = bool(dialog.sequence_section_titles_bold())
         self.app_settings.setValue(
             "interface/bold_sequence_section_titles", sequence_section_titles_bold
@@ -5984,6 +6046,7 @@ class BlochSimulatorGUI(QMainWindow):
         set_default_memory_policy(policy)
         self._set_tooltips_enabled(tooltips_enabled)
         if sequence_widget is not None:
+            sequence_widget.set_signal_unit(signal_unit)
             sequence_widget.set_sequence_section_titles_bold(
                 sequence_section_titles_bold
             )
@@ -6698,6 +6761,11 @@ class BlochSimulatorGUI(QMainWindow):
                 if sequence_widget is not None
                 else {}
             ),
+            "receiver_noise": (
+                sequence_widget.receiver_noise.get_state()
+                if sequence_widget is not None
+                else {}
+            ),
             "sequence_rf_pulse": (
                 sequence_widget.rf_designer_pulse_state()
                 if sequence_widget is not None
@@ -6916,6 +6984,7 @@ class BlochSimulatorGUI(QMainWindow):
                 legacy_pulse_state=state.get("sequence_spectral_spatial_pulse"),
             )
             _restore_widget_state(sequence_widget, state.get("sequence_controls", {}))
+            sequence_widget.receiver_noise.restore_state(state.get("receiver_noise"))
             spoiler_configuration = state.get("spoiler_configuration", {})
             if spoiler_configuration:
                 sequence_widget.set_spoiler_configuration(

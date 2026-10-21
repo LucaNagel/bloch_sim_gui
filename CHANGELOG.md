@@ -10,6 +10,44 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Phantom Designers accept absolute polarization in percent, with the thermal
+  multiple shown alongside it using nucleus, B0 and a saved temperature.
+  Shape defaults, metabolites, inflow and the kinetics polarization plot use
+  this convention; stored solver values retain their thermal-relative meaning.
+  Workspace B0/nucleus changes preserve authored absolute polarization.
+  Mouse injections use mM × µl with a derived µmol dose and polarized amount;
+  legacy dose-only files retain their amount without an inferred recipe.
+  Calibrated noise and physical signal display use the phantom's explicit
+  temperature when available.
+- Settings → Interface offers persistent Sequence signal units: physical
+  fully polarized amounts (mol with SI prefixes, by default) or SNR units
+  (noise σ = 1 per quadrature). Existing results redraw immediately across
+  signal, Cartesian frame/volume, CSI and split views; spiral images use a
+  labelled per-frame noise estimate. The reference FID follows SNR units with
+  ±1 noise lines. Missing calibration/noise metadata falls back explicitly to
+  simulation units; live previews retain simulation units.
+- Sequence Mode receiver noise from a relative SNR or a `ReceiverCalibration`
+  from a measured phantom FID (concentration in mM, volume in ml, averages,
+  bandwidth, flip angle, enrichment, temperatures and a loading noise factor),
+  reproducible seeds, and new realizations without rerunning Bloch
+  simulation. Relative SNR is the single-scan SNR of the ideal 90° FID of the
+  whole object (initial magnetization plus any delivered bolus dose) at a
+  reference bandwidth, so it is independent of grid and signal weighting; runs
+  record that amplitude as `receiver_acquisition["ideal_fid_amplitude"]`.
+  Noise scales with √(bandwidth) per ADC event; calibrated noise also with
+  √(averages) of the reference scan. Projects and result exports retain the
+  clean ADC stream and receiver settings.
+- `units.thermal_polarization(nucleus, field_strength_t, temperature_k)`
+  returns the Boltzmann polarization for spin-1/2 and higher-spin nuclei.
+- Receiver / Noise has its own tab between Phantom + B1 and Simulations with
+  an SNR budget instead of example images: reference phantom (nuclei,
+  polarization, sensitivity per µmol), ideal whole-object FID SNR, SNR per
+  readout bandwidth, image-voxel shares of the object and, after a run, the
+  matched-filter SNR (also per species) with a sum-rule estimate for the
+  brightest voxel. A reference FID draws the setting with ±σ. Entered
+  calibration values are previewed before they are set.
+- The relative SNR and measured noise std support adaptive spin-box arrows and
+  scientific notation.
 - Sequence results export as Bruker ParaVision studies
   (`export_bruker_dataset`): `subject`, scan folder with `acqp`, `method`,
   `fid` and/or `rawdata.job0`, and reconstructed `pdata/1` (`2dseq`,
@@ -139,6 +177,8 @@ The project follows [Semantic Versioning](https://semver.org/).
   checks every pool, final state, checkpoint, and available reconstruction
   against explicit Float64 tolerances. Failed comparisons return a failing
   exit status; native-path variants and timestep refinement can be compared.
+- Sequence-mode ETA now uses cumulative post-compilation throughput, preventing
+  individual uneven work chunks from causing abrupt remaining-time changes.
 
 ### Removed
 

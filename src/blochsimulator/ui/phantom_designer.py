@@ -56,7 +56,7 @@ from ..phantom_design import (
     SpectralPeakDefinition,
 )
 from ..spectral_phantom import SpectralPhantom
-from ..units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm
+from ..units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm, thermal_polarization
 from .volume_viewer import PhantomInspectorWidget
 from .default_settings import WorkspaceDefaults
 from .styles import BOLD_GROUP_TITLES_STYLE
@@ -692,6 +692,16 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             "Default number of samples in spectral previews"
         )
         self.spectral_resolution_info = QLabel()
+        self.temperature_c = self._number_spin(-273.0, 1000.0, 37.0, " °C")
+        self.temperature_c.setDecimals(2)
+        self.temperature_c.setObjectName("phantom_temperature_c")
+        self.temperature_c.setToolTip(
+            "Sample temperature. With nucleus and B0 it sets the thermal "
+            "polarization that 1 × thermal stands for; receiver calibration "
+            "uses it to convert the signal to physical units."
+        )
+        self.thermal_polarization_info = QLabel()
+        self.thermal_polarization_info.setWordWrap(True)
 
         spectral_fields.addWidget(QLabel("B0"), 0, 0)
         spectral_fields.addWidget(self.field_strength_t, 0, 1)
@@ -706,10 +716,13 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         spectral_fields.addWidget(QLabel("Points"), 2, 2)
         spectral_fields.addWidget(self.spectral_points, 2, 3)
 
-        spectral_fields.addWidget(self.spectral_resolution_info, 3, 0, 1, 4)
+        spectral_fields.addWidget(QLabel("Temperature"), 3, 0)
+        spectral_fields.addWidget(self.temperature_c, 3, 1)
+        spectral_fields.addWidget(self.thermal_polarization_info, 3, 2, 1, 2)
+        spectral_fields.addWidget(self.spectral_resolution_info, 4, 0, 1, 4)
         # Absorb spare vertical space below the resolution instead of between
         # the field rows, so the resolution reads as part of the settings.
-        spectral_fields.setRowStretch(4, 1)
+        spectral_fields.setRowStretch(5, 1)
         spectral_group_layout.addLayout(spectral_fields, 0)
 
         spectral_preview_layout = QVBoxLayout()
@@ -743,6 +756,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             self._spectral_settings_changed
         )
         self.spectral_points.valueChanged.connect(self._spectral_settings_changed)
+        self.temperature_c.valueChanged.connect(self._spectral_settings_changed)
         configuration_row.addWidget(spectral_group, 1)
         draw_layout.addLayout(configuration_row)
 
@@ -1620,6 +1634,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
     def _dynamic_enabled_toggled(self, enabled):
         self.kinetics_model_controls.setEnabled(bool(enabled))
         self._inspector_preview_dirty = True
+        self._update_thermal_polarization_info()
         if not enabled or self._updating or self._suppress_default_kpl:
             return
         # Switching conversion on with every rate at zero would preview nothing
@@ -1974,6 +1989,21 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         widget.setSuffix(suffix)
         return widget
 
+    def _update_thermal_polarization_info(self):
+        nucleus = self._effective_nucleus()
+        try:
+            pth = thermal_polarization(
+                nucleus,
+                self.field_strength_t.value(),
+                self.temperature_c.value() + 273.15,
+            )
+        except (KeyError, ValueError):
+            self.thermal_polarization_info.setText("")
+            return
+        self.thermal_polarization_info.setText(
+            f"1 × thermal = {100 * pth:.4g} % ({nucleus})"
+        )
+
     def _effective_nucleus(self):
         nucleus = self.nucleus.currentData()
         if nucleus is None:
@@ -2038,6 +2068,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         for widget, value in zip(self.fov_spins, self.design.fov_m):
             widget.setValue(float(value) * 1000.0)
         self.field_strength_t.setValue(float(self.design.field_strength_t))
+        self.temperature_c.setValue(self.design.temperature_k - 273.15)
         nucleus_index = self.nucleus.findData(self.design.nucleus)
         self.nucleus.setCurrentIndex(max(0, nucleus_index))
         self.spectral_reference_ppm.setValue(self.design.spectral_reference_ppm)
@@ -2049,6 +2080,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         self.supersampling_enabled.setChecked(self.design.supersampling_enabled)
         self.supersampling_factor.setValue(int(self.design.supersampling_factor))
         self._update_spectral_resolution_info()
+        self._update_thermal_polarization_info()
         mode_index = self.b0_mode_combo.findData(self.design.b0_inhomogeneity_mode)
         self.b0_mode_combo.setCurrentIndex(max(0, mode_index))
         self.b0_inhomogeneity_ppm.setValue(self.design.b0_inhomogeneity_ppm)
@@ -2306,6 +2338,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         self.design.spectral_window_center_ppm = self.spectral_window_center_ppm.value()
         self._inspector_preview_dirty = True
         self._update_spectral_resolution_info()
+        self._update_thermal_polarization_info()
         self._update_spectral_preview()
 
     def _update_spectral_resolution_info(self):
@@ -3260,6 +3293,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         self.design.shape = tuple(widget.value() for widget in self.matrix_spins)
         self.design.fov_m = tuple(widget.value() / 1000.0 for widget in self.fov_spins)
         self.design.field_strength_t = self.field_strength_t.value()
+        self.design.temperature_k = self.temperature_c.value() + 273.15
         self.design.nucleus = self.nucleus.currentData()
         self.design.spectral_reference_ppm = self.spectral_reference_ppm.value()
         self.design.spectral_window_center_ppm = self.spectral_window_center_ppm.value()

@@ -398,6 +398,7 @@ def _result_from_data(data, arrays):
         "checkpoint_pool_magnetization",
         "sequence_waveforms",
         "physical_field_maps",
+        "signal_noiseless",
     )
     arguments = {key: value.get(key) for key in keys}
     arguments["pool_names"] = tuple(arguments.get("pool_names") or ())

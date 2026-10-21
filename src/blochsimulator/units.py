@@ -19,6 +19,9 @@ NUCLEUS_GAMMA_HZ_PER_T = {
     "F19": 40.052e6,
     "Na23": 11.262e6,
 }
+NUCLEUS_SPIN = {"H1": 0.5, "C13": 0.5, "P31": 0.5, "F19": 0.5, "Na23": 1.5}
+PLANCK_J_S = 6.62607015e-34
+BOLTZMANN_J_PER_K = 1.380649e-23
 GAUSS_PER_TESLA = 1.0e4
 CM_PER_M = 100.0
 LEGACY_GAMMA_RAD_PER_S_PER_GAUSS = 26753.0
@@ -83,3 +86,53 @@ def hz_to_ppm(values, field_strength_t: float, nucleus: str = "H1"):
     """Convert a relative frequency offset from Hz to ppm."""
     scale = ppm_to_hz(1.0, field_strength_t, nucleus)
     return np.asarray(values) / scale
+
+
+def thermal_polarization(
+    nucleus: str, field_strength_t: float, temperature_k: float
+) -> float:
+    """Boltzmann polarization <Iz>/I of a nucleus at thermal equilibrium.
+
+    Spin 1/2 gives ``tanh(h*gamma*B0 / (2*k*T))``. Hyperbolic sums keep the
+    tiny polarizations (~1e-6 for 13C) free of cancellation.
+    """
+    field = float(field_strength_t)
+    temperature = float(temperature_k)
+    if not np.isfinite(field) or field <= 0:
+        raise ValueError("field_strength_t must be positive and finite")
+    if not np.isfinite(temperature) or temperature <= 0:
+        raise ValueError("temperature_k must be positive and finite")
+    gamma = _nucleus_gamma_hz_per_t(nucleus)
+    spin = NUCLEUS_SPIN[str(nucleus).strip()]
+    x = PLANCK_J_S * gamma * field / (BOLTZMANN_J_PER_K * temperature)
+    m = np.arange(-spin, spin + 0.5)
+    positive = m[m > 0]
+    return float(
+        np.sum(2.0 * positive * np.sinh(positive * x)) / (spin * np.sum(np.cosh(m * x)))
+    )
+
+
+def polarization_percent_to_relative(percent, nucleus, field_strength_t, temperature_k):
+    """Convert absolute polarization in percent to multiples of thermal."""
+    values = np.asarray(percent, dtype=float)
+    if not np.all(np.isfinite(values)) or np.any((values < 0) | (values > 100)):
+        raise ValueError("Absolute polarization must lie between 0 and 100 percent")
+    relative = values / (
+        100 * thermal_polarization(nucleus, field_strength_t, temperature_k)
+    )
+    return float(relative) if relative.ndim == 0 else relative
+
+
+def relative_polarization_to_percent(
+    relative, nucleus, field_strength_t, temperature_k
+):
+    """Display a stored thermal multiple as absolute polarization in percent.
+
+    Legacy simulation values above full polarization remain readable; new
+    percentage inputs are bounded by ``polarization_percent_to_relative``.
+    """
+    values = np.asarray(relative, dtype=float)
+    percent = values * (
+        100 * thermal_polarization(nucleus, field_strength_t, temperature_k)
+    )
+    return float(percent) if percent.ndim == 0 else percent

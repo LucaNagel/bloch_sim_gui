@@ -6,6 +6,7 @@ from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QPushButton,
     QWidget,
 )
@@ -15,6 +16,21 @@ import pyqtgraph as pg
 IMAGE_HISTOGRAM_WIDTH = 48
 IMAGE_CANVAS_BACKGROUND = (18, 18, 20)
 IMAGE_FOV_BORDER = (62, 62, 68)
+
+
+class PolarizationPercentSpinBox(QDoubleSpinBox):
+    """Precise percent values with compact, locale-aware fixed-point text."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDecimals(12)
+        self.setRange(0.0, 100.0)
+        self.setSuffix(" %")
+        self.setSingleStep(1.0)
+
+    def textFromValue(self, value):
+        text = self.locale().toString(value, "f", self.decimals())
+        return text.rstrip("0").rstrip(self.locale().decimalPoint())
 
 
 class ExplicitAcceptDialog(QDialog):

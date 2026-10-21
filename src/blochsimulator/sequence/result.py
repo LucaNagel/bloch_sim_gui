@@ -76,6 +76,7 @@ class SequenceSimulationResult:
     checkpoint_pool_magnetization: Optional[np.ndarray] = None
     sequence_waveforms: Dict[str, np.ndarray] = field(default_factory=dict)
     physical_field_maps: Dict[str, np.ndarray] = field(default_factory=dict)
+    signal_noiseless: Optional[np.ndarray] = None
 
     @property
     def mx(self) -> np.ndarray:
@@ -191,6 +192,7 @@ class SequenceSimulationResult:
             "checkpoint_pool_magnetization": self.checkpoint_pool_magnetization,
             "sequence_waveforms": self.sequence_waveforms,
             "physical_field_maps": self.physical_field_maps,
+            "signal_noiseless": self.signal_noiseless,
             "metadata": self.metadata,
         }
 
@@ -211,6 +213,10 @@ class SequenceSimulationResult:
                 self.final_magnetization,
             ),
         }
+        if self.signal_noiseless is not None:
+            if np.shape(self.signal_noiseless) != np.shape(self.signal):
+                raise ValueError("signal_noiseless must have the same shape as signal")
+            data_vars["signal_noiseless"] = (signal_dims, self.signal_noiseless)
         coords = {
             "adc": np.arange(self.adc_times_s.size),
             "adc_time_s": ("adc", self.adc_times_s),
@@ -951,6 +957,10 @@ class SequenceSimulationResult:
                     units="a.u.",
                 )
         dataset["t"].attrs.update(long_name="ADC sample time", units="s")
+        if "signal_noiseless" in dataset:
+            dataset["signal_noiseless"].attrs.update(
+                long_name="Received ADC signal before receiver noise", units="a.u."
+            )
         dataset["adc_time_s"].attrs.update(long_name="ADC sample time", units="s")
         waveform_units = {
             "rf_sample_time_s": "s",
@@ -1042,6 +1052,8 @@ class SequenceSimulationResult:
                 for name, values in self.sequence_waveforms.items()
             }
         )
+        if self.signal_noiseless is not None:
+            arrays["signal_noiseless"] = self.signal_noiseless
         arrays.update(
             {
                 name: np.asarray(values)

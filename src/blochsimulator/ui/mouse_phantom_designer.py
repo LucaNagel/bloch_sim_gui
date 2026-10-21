@@ -35,9 +35,14 @@ from ..mouse_phantom import (
     MousePerfusionPhantom,
     build_reference_mouse_anatomy,
 )
+from ..units import (
+    thermal_polarization,
+    polarization_percent_to_relative,
+    relative_polarization_to_percent,
+)
 from .default_settings import WorkspaceDefaults
 from .volume_viewer import PhantomInspectorWidget
-from .widgets import ExplicitAcceptDialog
+from .widgets import ExplicitAcceptDialog, PolarizationPercentSpinBox
 
 
 class ClickableImageItem(pg.ImageItem):
@@ -432,7 +437,15 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.resize(1250, 850)
         if config is None:
             defaults = WorkspaceDefaults.from_settings(settings)
-            config = MousePerfusionConfig(field_strength_t=defaults.field_strength_t)
+            config = MousePerfusionConfig(
+                field_strength_t=defaults.field_strength_t,
+                injection_polarization=polarization_percent_to_relative(
+                    20.0,
+                    "C13",
+                    defaults.field_strength_t,
+                    310.15,
+                ),
+            )
         self.config = MousePerfusionConfig.from_dict(config.to_dict())
         self.phantom = None
         self._selected_voxel = None
@@ -565,6 +578,11 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             0.001, 1000.0, decimals=3, suffix=" T", step=0.1
         )
         anatomy_form.addRow("B0", self.field_strength)
+        self.temperature_c = self._float_spin(
+            -273.0, 1000.0, decimals=2, suffix=" °C", step=1.0
+        )
+        self.temperature_c.setObjectName("mouse_temperature_c")
+        anatomy_form.addRow("Temperature", self.temperature_c)
         self.anatomy_resolution = self._anatomy_resolution_combo()
         self.anatomy_resolution.currentIndexChanged.connect(
             self._anatomy_resolution_changed
@@ -621,18 +639,20 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         )
         self.injection_dose_label = QLabel()
         self.injection_dose_label.setStyleSheet("color: palette(mid);")
-        self.injection_polarization = self._float_spin(
-            0.000001, 1e9, decimals=3, suffix=" × thermal", step=100.0
-        )
+        self.injection_polarization = PolarizationPercentSpinBox()
+        self.injection_polarization.setObjectName("injection_polarization_percent")
         self.injection_polarization.setToolTip(
-            "Polarization of the inflowing compound relative to thermal "
-            "equilibrium at B0."
+            "Absolute polarization at injection, independent of concentration."
         )
+        self.injection_polarization_thermal = QLabel()
+        self.injection_polarization_thermal.setWordWrap(True)
+        self.injection_polarization_thermal.setStyleSheet("color: palette(mid);")
         compound_form.addRow("Compound", self.injection_compound)
         compound_form.addRow("Concentration", self.injection_concentration)
         compound_form.addRow("Volume", self.injection_volume)
         compound_form.addRow("Dose", self.injection_dose_label)
         compound_form.addRow("Polarization", self.injection_polarization)
+        compound_form.addRow("", self.injection_polarization_thermal)
         injection_controls_layout.addWidget(compound_group)
 
         relaxation_group = QGroupBox("Hyperpolarized relaxation")
@@ -1043,6 +1063,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.transverse_decay.currentIndexChanged.connect(self._schedule_live_preview)
         self.injection_concentration.valueChanged.connect(self._update_dose_label)
         self.injection_volume.valueChanged.connect(self._update_dose_label)
+        self.injection_polarization.valueChanged.connect(self._update_dose_label)
         controls = [
             *self.matrix_spins,
             *self.fov_spins,
@@ -1053,6 +1074,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             self.injection_volume,
             *self.relaxation_spins["injected"],
             *self.relaxation_spins["metabolite"],
+            self.temperature_c,
             self.injection_start,
             self.injection_duration,
             self.circulation_delay,
@@ -1087,7 +1109,23 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.breathing_enabled.toggled.connect(self._schedule_live_preview)
 
     def _schedule_live_preview(self, *_):
+        self._update_injection_summary()
         self._live_preview_timer.start()
+
+    def _update_injection_summary(self):
+        percent = self.injection_polarization.value()
+        relative = polarization_percent_to_relative(
+            percent,
+            "C13",
+            self.field_strength.value(),
+            self.temperature_c.value() + 273.15,
+        )
+        pth = thermal_polarization(
+            "C13", self.field_strength.value(), self.temperature_c.value() + 273.15
+        )
+        self.injection_polarization_thermal.setText(
+            f"{relative:.6g} × thermal (thermal P = {100 * pth:.6g} %)"
+        )
 
     def _load_config(self):
         config = self.config
@@ -1105,6 +1143,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             self.combined_anatomy_resolution.findData("hd")
         )
         self.field_strength.setValue(config.field_strength_t)
+        self.temperature_c.setValue(config.temperature_k - 273.15)
         compound_index = self.injection_compound.findData(config.injection_compound)
         self.injection_compound.setCurrentIndex(max(0, compound_index))
         self.injection_concentration.setValue(config.injection_concentration_mm)
@@ -1121,7 +1160,14 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.injection_duration.setValue(config.injection_duration_s)
         self.circulation_delay.setValue(config.circulation_delay_s)
         self.perfusion_timestep.setValue(config.perfusion_timestep_s)
-        self.injection_polarization.setValue(config.injection_polarization)
+        percent = relative_polarization_to_percent(
+            config.injection_polarization,
+            "C13",
+            config.field_strength_t,
+            config.temperature_k,
+        )
+        self.injection_polarization.setMaximum(max(100.0, percent))
+        self.injection_polarization.setValue(percent)
         self.bolus_alpha.setValue(config.bolus_alpha)
         self.bolus_beta.setValue(config.bolus_beta)
         self.tissue_clearance.setValue(config.tissue_clearance_s_inv)
@@ -1160,12 +1206,17 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         )
         self._compound_selection_changed()
         self._update_dose_label()
+        self._update_injection_summary()
 
     def _update_dose_label(self, *_):
         dose_umol = (
             self.injection_concentration.value() * self.injection_volume.value() * 1e-3
         )
-        self.injection_dose_label.setText(f"{dose_umol:.4g} µmol")
+        polarized_umol = dose_umol * self.injection_polarization.value() / 100.0
+        self.injection_dose_label.setText(
+            f"{dose_umol:.4g} µmol ({polarized_umol:.4g} µmol fully polarized "
+            "equivalent)"
+        )
 
     def _read_config(self) -> MousePerfusionConfig:
         values = self.config.to_dict()
@@ -1181,6 +1232,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             injection_compound=str(self.injection_compound.currentData()),
             injection_concentration_mm=self.injection_concentration.value(),
             injection_volume_ul=self.injection_volume.value(),
+            temperature_k=self.temperature_c.value() + 273.15,
             injected_t1_s=self.relaxation_spins["injected"][0].value(),
             injected_t2_s=self.relaxation_spins["injected"][1].value() / 1000.0,
             injected_t2_star_s=self.relaxation_spins["injected"][2].value() / 1000.0,
@@ -1194,7 +1246,12 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             injection_duration_s=self.injection_duration.value(),
             circulation_delay_s=self.circulation_delay.value(),
             perfusion_timestep_s=self.perfusion_timestep.value(),
-            injection_polarization=self.injection_polarization.value(),
+            injection_polarization=polarization_percent_to_relative(
+                self.injection_polarization.value(),
+                "C13",
+                self.field_strength.value(),
+                self.temperature_c.value() + 273.15,
+            ),
             bolus_alpha=self.bolus_alpha.value(),
             bolus_beta=self.bolus_beta.value(),
             tissue_clearance_s_inv=self.tissue_clearance.value(),
@@ -1229,7 +1286,22 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             breathing_amplitude_mm=self.breathing_amplitude.value(),
             breathing_phase_rad=self.breathing_phase.value(),
         )
-        return MousePerfusionConfig.from_dict(values)
+        result = MousePerfusionConfig.from_dict(values)
+        original_percent = relative_polarization_to_percent(
+            self.config.injection_polarization,
+            "C13",
+            self.config.field_strength_t,
+            self.config.temperature_k,
+        )
+        if (
+            result.field_strength_t == self.config.field_strength_t
+            and result.temperature_k == self.config.temperature_k
+            and self.injection_polarization.value()
+            == round(original_percent, self.injection_polarization.decimals())
+        ):
+            result.injection_polarization = self.config.injection_polarization
+        result.validate()
+        return result
 
     def _build_phantom(self) -> MousePerfusionPhantom:
         config = self._read_config()

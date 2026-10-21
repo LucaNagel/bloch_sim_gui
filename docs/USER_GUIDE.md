@@ -847,6 +847,18 @@ scaffold. Select `[1-13C]Pyruvate`, `[1-13C]Lactate`, `[1,5-13C2]Z-OMPD`, or a
 generic contrast tracer as the injected compound. Delivery remains normalized
 to the entered dose for every preset.
 
+In **Injected perfusion**, enter **Injection concentration** in mM and
+**Injection volume** in µl. The derived amount is shown in µmol; for example,
+80 mM × 200 µl gives 16 µmol. **Polarization at injection** is an absolute
+percentage, with its thermal multiple shown below. At 20 %, this dose holds
+3.2 µmol fully polarized equivalent. Set the object's temperature under
+**Anatomy**; nucleus, B0 and temperature determine thermal equilibrium.
+Enter the polarization at injection, including any polarization lost during
+transfer before injection.
+Older files that store only a dose keep that amount and report the missing
+concentration and volume. Enable **Specify concentration and volume** to
+enter a new recipe.
+
 The **Anatomy** tab separates the physical FOV from the visible physical mouse
 bounding box. Mouse size can be changed independently in $x$, $y$, and $z$; if
 mouse size and FOV match along an axis, the body reaches both FOV boundaries.
@@ -903,10 +915,13 @@ the [metabolite preset reference](METABOLITE_PRESETS.md).
 
 Peak **Spin density / concentration** and **Initial polarization** are separate.
 Spin density describes how much signal-producing material is present. Initial
-polarization describes its longitudinal start state, and the initial signal is
-their product. For example, pyruvate and lactate can both have spin density 1,
-while their initial polarizations are 1 and 0, respectively; this starts with
-`Pz=1` and `Lz=0` without removing the lactate pool. Positive `kPL` can then
+polarization is entered in absolute percent; the adjacent **× thermal** column
+shows its internal thermal-relative value. The reference follows nucleus, B0
+and **Temperature** in the spectral settings. The shape's **Thermal** button
+sets its default to thermal equilibrium. For example, pyruvate and lactate can
+both have spin density 1, with pyruvate at thermal polarization and lactate at
+0 %. Their internal start states are then $P_z=1$ and $L_z=0$, retaining both
+concentration pools. Positive `kPL` can then
 create lactate from pyruvate. The **Set selected shape to initial Lz = 0** button
 applies this setup by setting only lactate polarization to zero. An empty peak
 polarization cell uses the shape's **Default initial polarization**; an empty
@@ -914,13 +929,13 @@ metabolite T1 cell similarly uses **Default T1**. In older dynamic designs, the
 former initial pool weight is migrated to peak polarization while spin density
 defaults to 1, preserving the same initial HP magnetization.
 
-Turn on **Enable hyperpolarized pyruvate/lactate model (polarization → 1)** to
+Turn on **Enable hyperpolarized pyruvate/lactate model** to
 select concentration-resolved hyperpolarized dynamics. This is separate from
 conversion: `kPL=0` still gives T1 relaxation but no pyruvate-to-lactate
-conversion. Polarization 1 is thermal equilibrium. T1 therefore evolves any
-larger or smaller polarization toward 1. The longitudinal magnetization is
-`Mz = concentration × polarization`, so a concentration of 10 at thermal
-equilibrium approaches `Mz=10`, while its polarization approaches 1.
+conversion. T1 evolves polarization toward the thermal value at the selected
+temperature, B0 and nucleus. The stored longitudinal magnetization is
+$M_z=cP/P_{\mathrm{th}}$, so a concentration of 10 at thermal equilibrium
+approaches $M_z=10$. The polarization preview shows absolute percent.
 For a pyruvate-injection experiment, lactate will therefore normally start with
 initial polarization 0. If both spin densities, polarizations, and T1 values are
 equal while `kPL=0`, `Pz(t)` and `Lz(t)` are identical; the preview draws lactate
@@ -943,7 +958,8 @@ In the **Kinetics / kPL** tab:
    inflow samples and conversion start keep their relative timing and do not
    need to be edited when comparing different sequence start times.
 6. Optionally enable pyruvate inflow and enter kinetics time, concentration
-   rate, and inflow polarization. Values are linearly interpolated between
+   rate, and absolute inflow polarization in percent. Its thermal multiple is
+   shown alongside it. Values are linearly interpolated between
    rows, and the concentration rate is zero outside the listed interval. Use
    **Time curves → Simulated values** (the default) to see the densely sampled
    values passed to the simulator, or **Set values** to show only the entered

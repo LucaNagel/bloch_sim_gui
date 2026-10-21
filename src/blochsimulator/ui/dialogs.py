@@ -25,6 +25,7 @@ from ..sequence.scanner import ScannerParameters
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
 from .default_settings import WorkspaceDefaults
 from .styles import INTERFACE_STYLE_CHOICES, normalize_interface_style
+from ..sequence.signal_units import SIGNAL_UNITS, normalize_signal_unit
 
 
 class SettingsDialog(QDialog):
@@ -164,6 +165,7 @@ class SettingsDialog(QDialog):
         interface_style: str = "automatic",
         sequence_section_titles_bold: bool = True,
         sequence_timing_visible: bool = True,
+        signal_unit: str = "physical",
     ):
         super().__init__(parent)
         scanner_parameters = ScannerParameters.from_mapping(scanner_parameters)
@@ -746,6 +748,19 @@ class SettingsDialog(QDialog):
             "takes effect immediately after the settings are accepted."
         )
         interface_form.addRow("Application style:", self.interface_style_combo)
+        self.signal_unit_combo = QComboBox()
+        self.signal_unit_combo.setObjectName("signal_unit")
+        for label, unit in SIGNAL_UNITS:
+            self.signal_unit_combo.addItem(label, unit)
+        self.signal_unit_combo.setCurrentIndex(
+            self.signal_unit_combo.findData(normalize_signal_unit(signal_unit))
+        )
+        self.signal_unit_combo.setToolTip(
+            "Sequence signal, image and spectrum units. Physical amounts need "
+            "a calibrated receiver; SNR units need receiver noise. Otherwise "
+            "simulation units are shown. Applies to the current result immediately."
+        )
+        interface_form.addRow("Signal units:", self.signal_unit_combo)
         interface_layout.addLayout(interface_form)
         self.sequence_section_titles_bold_checkbox = QCheckBox(
             "Bold sequence section titles"
@@ -850,6 +865,9 @@ class SettingsDialog(QDialog):
 
     def interface_style(self) -> str:
         return normalize_interface_style(self.interface_style_combo.currentData())
+
+    def signal_unit(self) -> str:
+        return normalize_signal_unit(self.signal_unit_combo.currentData())
 
     def sequence_section_titles_bold(self) -> bool:
         return self.sequence_section_titles_bold_checkbox.isChecked()

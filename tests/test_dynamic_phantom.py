@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 from dataclasses import replace
 from PyQt5.QtWidgets import QApplication, QLabel
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from blochsimulator import BlochSimulator
@@ -2020,6 +2021,7 @@ def test_phantom_designer_does_not_show_hp_decay_when_hp_model_is_disabled():
         shape=(1, 1, 1),
         fov_m=(0.01, 0.01, 0.01),
         dynamic_enabled=False,
+        nucleus="C13",
         shapes=[
             ShapeDefinition(
                 "Conventional pools",
@@ -2092,7 +2094,10 @@ def test_phantom_designer_selects_shape_for_representative_kinetics_preview():
 def test_sequence_worker_dispatches_dynamic_phantom_to_dynamic_solver():
     app = QApplication.instance() or QApplication([])
     phantom = _dynamic_phantom()
-    expected = object()
+    # Minimal result: the worker records the receiver context; noise is off.
+    expected = SimpleNamespace(
+        metadata={}, signal=np.zeros(0, complex), signal_noiseless=None
+    )
     simulator = MagicMock()
     simulator.simulate_dynamic_sequence.return_value = expected
     worker = SequenceSimulationThread(
@@ -2109,4 +2114,5 @@ def test_sequence_worker_dispatches_dynamic_phantom_to_dynamic_solver():
 
     simulator.simulate_dynamic_sequence.assert_called_once()
     assert results == [expected]
+    assert expected.metadata["receiver_acquisition"]["adc_dwell_s"] == []
     app.processEvents()

@@ -238,6 +238,7 @@ class MousePerfusionConfig:
     spectral_bandwidth_ppm: float = 18.0
     spectral_points: int = 257
     metadata: Dict = field(default_factory=dict)
+    temperature_k: float = 310.15
 
     def validate(self) -> None:
         self.shape = tuple(int(value) for value in self.shape)
@@ -278,9 +279,9 @@ class MousePerfusionConfig:
             raise ValueError("mouse position requires three finite values")
         positive = {
             "field strength": self.field_strength_t,
+            "temperature": self.temperature_k,
             "injection duration": self.injection_duration_s,
             "perfusion timestep": self.perfusion_timestep_s,
-            "injection polarization": self.injection_polarization,
             "bolus alpha": self.bolus_alpha,
             "bolus beta": self.bolus_beta,
             "breathing rate": self.breathing_rate_hz,
@@ -296,6 +297,11 @@ class MousePerfusionConfig:
         for label, value in positive.items():
             if not np.isfinite(value) or value <= 0:
                 raise ValueError(f"{label} must be positive and finite")
+        if (
+            not np.isfinite(self.injection_polarization)
+            or self.injection_polarization < 0
+        ):
+            raise ValueError("Injection polarization must be finite and non-negative")
         for label, t2, t2_star in (
             ("injected compound", self.injected_t2_s, self.injected_t2_star_s),
             ("metabolite", self.metabolite_t2_s, self.metabolite_t2_star_s),
@@ -1203,6 +1209,7 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
                 },
                 "vascular_graph": graph.to_dict(),
                 "concentration_units": "mol/m^3 (numerically mM)",
+                "temperature_k": config.temperature_k,
                 "injection_amount_mol": config.injection_amount_umol * 1e-6,
                 "injection_compound": config.injection_compound,
                 "injection_compound_label": INJECTION_COMPOUNDS[
