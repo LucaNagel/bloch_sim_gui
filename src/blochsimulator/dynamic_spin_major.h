@@ -60,6 +60,7 @@ typedef struct {
     /* Per-spin inputs. */
     const double *positions_m;   /* (nspins, 3) */
     const double *b0_hz;         /* (nspins,) */
+    const double *pool_b0_hz;    /* (npools, nspins) extra shifts, or NULL */
     const double *conversion;    /* (npools - 1, nspins) precursor->product */
     const double *delivery;      /* (nspins,), NULL without sources */
     const double *rx;            /* (ncoils, nspins) complex */

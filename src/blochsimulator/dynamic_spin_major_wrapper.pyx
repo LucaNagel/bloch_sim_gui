@@ -42,6 +42,7 @@ cdef extern from "dynamic_spin_major.h":
         double equilibrium
         const double *positions_m
         const double *b0_hz
+        const double *pool_b0_hz
         const double *conversion
         const double *delivery
         const double *rx
@@ -106,7 +107,7 @@ cdef extern from "dynamic_spin_major.h":
 
 TILE_SPINS = DSM_TILE
 MAX_POOLS = DSM_MAX_POOLS
-API_VERSION = 4
+API_VERSION = 5
 SPATIAL_TX_SUPPORTED = True
 MULTI_POOL_SUPPORTED = True
 SPATIAL_INFLOW_SUPPORTED = True
@@ -230,7 +231,8 @@ def run_spin_major_chunk(
         arrival_delay_s=None,
         int spatial_mode=0,
         rate_curve=None,
-        polarization_curve=None):
+        polarization_curve=None,
+        pool_b0_hz=None):
     """Advance ``state`` through one plan slice and add unscaled ADC sums.
 
     Pool 0 is the precursor; ``conversion`` has shape ``(npools - 1, nspins)``
@@ -306,6 +308,9 @@ def run_spin_major_chunk(
     chunk.positions_m = <const double *>_data(
         positions_m, np.float64, (nspins, 3), "positions_m")
     chunk.b0_hz = <const double *>_data(b0_hz, np.float64, (nspins,), "b0_hz")
+    chunk.pool_b0_hz = (
+        NULL if pool_b0_hz is None else
+        <const double *>_data(pool_b0_hz, np.float64, (npools, nspins), "pool_b0_hz"))
     chunk.conversion = <const double *>_data(
         conversion, np.float64, (npools - 1, nspins), "conversion")
     chunk.delivery = (

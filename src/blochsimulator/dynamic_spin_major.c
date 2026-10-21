@@ -743,6 +743,8 @@ static void load_tile(const dsm_chunk *c, int64_t first, int valid,
         t->pz[s] = c->positions_m[3 * spin + 2];
         for (int pool = 0; pool < np; pool++) {
             t->fs[pool][s] = c->b0_hz[spin] + c->pool_offset_hz[pool];
+            if (c->pool_b0_hz != NULL)
+                t->fs[pool][s] += c->pool_b0_hz[pool * n + spin];
             t->x[pool][s] = c->transverse[2 * (pool * n + spin)];
             t->y[pool][s] = c->transverse[2 * (pool * n + spin) + 1];
             t->z[pool][s] = c->state[3 * (pool * n + spin) + 2];
