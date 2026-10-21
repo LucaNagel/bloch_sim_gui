@@ -24,6 +24,7 @@ from blochsimulator.sequence import (
     make_pulseq_flash,
     make_pulseq_spiral,
 )
+from blochsimulator.sequence.model import ADCEvent
 from blochsimulator.sequence.rf_pulses import (
     rf_time_bandwidth_product_from_envelope,
 )
@@ -468,6 +469,25 @@ def test_epi_builder_applies_edge_to_edge_slice_gap(tmp_path):
     assert definitions["SlicePositions"] == pytest.approx([-6e-3, 0.0, 6e-3])
     assert definitions["FOV"] == pytest.approx([0.22, 0.22, 16e-3])
     assert len({event.frequency_offset_hz for event in program.rf_events}) == 3
+
+
+@pytest.mark.parametrize("bandwidth_hz", [3000.0, 7000.0])
+def test_csi_pads_adc_block_to_block_raster(tmp_path, bandwidth_hz):
+    # 256 samples at the 3000 Hz raster-rounded dwell (333.3 us) do not sum to
+    # the 10 us block raster on their own.
+    sequence = make_pulseq_csi(
+        matrix=(1, 1),
+        spectral_bandwidth_hz=bandwidth_hz,
+        spectral_points=256,
+        repetition_time_s=0.2,
+        nucleus="C13",
+    )
+    program = _write_and_load(sequence, tmp_path / "csi.seq")
+    acquisition = infer_spectroscopic_acquisition(program)
+
+    assert sequence.check_timing()[0]
+    assert acquisition.spectral_points == 256
+    assert sequence.duration()[0] == pytest.approx(0.2)
 
 
 def test_epi_and_csi_export_slice_orientation_offset_and_echo_time(tmp_path):
@@ -1305,3 +1325,44 @@ def test_timing_fields_are_not_resolved_while_typing(source_name, control_name):
     widget.close()
     widget.deleteLater()
     app.processEvents()
+
+
+def test_bssfp_startup_is_coherent_with_the_rf_carrier_offset(tmp_path):
+    """The alpha/2 phase advance must use the realised spacing at the carrier.
+
+    Spins that sit at the same offset from the RF carrier must see the same
+    transient, independent of the absolute carrier frequency.
+    """
+    detunings_hz = np.array([0.0, 20.0, 40.0])
+    mz = {}
+    for carrier_hz in (0.0, 137.0):
+        program = _write_and_load(
+            make_pulseq_bssfp(
+                matrix=(4, 8, 4),
+                flip_angle_deg=40.0,
+                repetition_time_s=5e-3,
+                rf_frequency_offset_hz=carrier_hz,
+                dummy_repetitions=0,
+            ),
+            tmp_path / f"bssfp_{carrier_hz:g}.seq",
+        )
+        adc_centres = np.array(
+            [
+                event.start_s + 0.5 * (event.num_samples - 1) * event.dwell_s
+                for event in program.events
+                if isinstance(event, ADCEvent)
+            ]
+        )
+        result = BlochSimulator().simulate_sequence_probes(
+            program,
+            np.zeros((1, 3)),
+            carrier_hz + detunings_hz,
+            checkpoints_s=adc_centres,
+            t1_s=50.0,
+            t2_s=10.0,
+        )
+        mz[carrier_hz] = result.magnetization[:, 0, :, 2]
+
+    np.testing.assert_allclose(mz[137.0], mz[0.0], atol=2e-3)
+    # On resonance the alpha/2 - TR/2 catalyst leaves Mz nearly constant.
+    assert np.ptp(mz[0.0][:, 0]) < 0.02

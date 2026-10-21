@@ -924,3 +924,161 @@ def test_spin_probe_generates_pending_sequence_and_reports_invalid_parameters():
     widget.close()
     widget.deleteLater()
     app.processEvents()
+
+
+def _rf_centres_s(program):
+    return np.array(
+        [
+            event.start_s + 0.5 * event.samples_hz.size * event.raster_s
+            for event in program.rf_events
+        ]
+    )
+
+
+def _adc_centres_s(program):
+    return np.array(
+        [
+            event.start_s + 0.5 * (event.num_samples - 1) * event.dwell_s
+            for event in program.adc_events
+        ]
+    )
+
+
+def test_me_bssfp_receiver_phase_is_target_locked_for_any_receiver_offset(
+    tmp_path,
+):
+    """A spin at the receiver frequency must give the same line phase.
+
+    With 460 Hz * 8 ms = 3.68 cycles a receiver phase that also accumulates
+    360 * (f_rf - f_rx) * TR per line would rotate consecutive lines by 245 deg.
+    """
+    receiver_offset_hz = -460.0
+    echoes = 3
+    program = _round_trip(
+        make_pulseq_me_bssfp(
+            matrix=(8, 16, 2),
+            echoes=echoes,
+            flip_angle_deg=30.0,
+            repetition_time_s=8e-3,
+            receiver_frequency_offset_hz=receiver_offset_hz,
+            rf_frequency_offset_hz=0.0,
+        ),
+        tmp_path / "me_receiver.seq",
+    )
+    adcs = program.adc_events
+    centres = _adc_centres_s(program)
+    result = BlochSimulator().simulate_sequence_probes(
+        program,
+        np.zeros((1, 3)),
+        np.array([receiver_offset_hz]),
+        checkpoints_s=centres,
+        t1_s=0.2,
+        t2_s=0.02,
+    )
+    magnetization = result.magnetization[:, 0, 0]
+    transverse = magnetization[:, 0] + 1j * magnetization[:, 1]
+    demodulated = np.array(
+        [
+            transverse[index]
+            * np.exp(
+                1j
+                * (
+                    adc.phase_offset_rad
+                    + 2
+                    * np.pi
+                    * adc.frequency_offset_hz
+                    * (centres[index] - adc.start_s)
+                )
+            )
+            for index, adc in enumerate(adcs)
+        ]
+    )
+    # Echo 0 of the last lines, after the short-T2 transient has decayed.
+    line_phase_deg = np.rad2deg(np.unwrap(np.angle(demodulated[0::echoes][-10:])))
+
+    assert np.ptp(line_phase_deg) < 1.0
+
+
+@pytest.mark.parametrize("rf_frequency_offset_hz", [0.0, 137.0])
+def test_radial_me_bssfp_tip_back_stores_the_steady_state(
+    tmp_path, rf_frequency_offset_hz
+):
+    program = _round_trip(
+        make_pulseq_radial_me_bssfp(
+            base_resolution=8,
+            spokes_per_measurement=40,
+            measurements=1,
+            flip_angle_deg=40.0,
+            use_tip_back=True,
+            rf_phase_increment_deg=180.0,
+            rf_frequency_offset_hz=rf_frequency_offset_hz,
+        ),
+        tmp_path / "radial_tip_back.seq",
+    )
+    repetition_time = float(program.metadata["definitions"]["TR"])
+    centres = _rf_centres_s(program)
+    rf_events = program.rf_events
+
+    # The non-acquired alpha follows one TR after the last spoke and the
+    # alpha/2 tip-back sits TR/2 after it.
+    assert centres[-2] - centres[-3] == pytest.approx(repetition_time, abs=1e-7)
+    assert centres[-1] - centres[-2] == pytest.approx(repetition_time / 2, abs=1e-7)
+    alpha_peak = np.max(np.abs(rf_events[-2].samples_hz))
+    assert np.max(np.abs(rf_events[-1].samples_hz)) == pytest.approx(
+        alpha_peak / 2, rel=1e-3
+    )
+    # Tip-back is the next member of the 0/180 cycle at the carrier.
+    # Pulseq evaluates the frequency offset in event-local time.
+    last_alpha_phase = _pulseq_event_center_phase_deg(
+        rf_events[-2], centres[-2] - rf_events[-2].start_s
+    )
+    tip_back_phase = _pulseq_event_center_phase_deg(
+        rf_events[-1], centres[-1] - rf_events[-1].start_s
+    )
+    expected = np.mod(
+        last_alpha_phase
+        + 180.0
+        + 360.0 * rf_frequency_offset_hz * (centres[-1] - centres[-2]),
+        360.0,
+    )
+    assert np.cos(np.deg2rad(tip_back_phase - expected)) == pytest.approx(1.0)
+
+    detunings = rf_frequency_offset_hz + np.array([0.0, 5.0])
+    result = BlochSimulator().simulate_sequence_probes(
+        program,
+        np.zeros((1, 3)),
+        detunings,
+        checkpoints_s=[program.duration_s],
+        t1_s=50.0,
+        t2_s=10.0,
+    )
+    final = result.magnetization[-1, 0]
+    stored_fraction = final[:, 2] / np.linalg.norm(final, axis=-1)
+    assert np.all(stored_fraction > 0.995)
+
+
+def test_radial_me_bssfp_centres_the_realised_echo_train(tmp_path):
+    echoes = 5
+    program = _round_trip(
+        make_pulseq_radial_me_bssfp(
+            base_resolution=8,
+            spokes_per_measurement=2,
+            measurements=1,
+            echoes=echoes,
+            echo_spacing_s=2.0049e-3,
+            repetition_time_s=20e-3,
+            use_alpha_half=False,
+            use_tip_back=False,
+        ),
+        tmp_path / "radial_echo_centre.seq",
+    )
+    definitions = program.metadata["definitions"]
+    echo_spacing = float(definitions["EchoSpacing"])
+    repetition_time = float(definitions["TR"])
+    rf_centres = _rf_centres_s(program)
+    adc_centres = _adc_centres_s(program)[:echoes]
+    echo_times = adc_centres - rf_centres[0]
+
+    assert echo_spacing != pytest.approx(2.0049e-3, abs=1e-7)
+    np.testing.assert_allclose(np.diff(echo_times), echo_spacing, atol=1e-7)
+    assert echo_times[echoes // 2] == pytest.approx(repetition_time / 2, abs=5e-6)

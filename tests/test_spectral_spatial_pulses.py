@@ -1,5 +1,7 @@
 import numpy as np
 import pytest
+
+from blochsimulator import BlochSimulator
 from PyQt5.QtCore import Qt
 
 from blochsimulator.sequence import (
@@ -1086,3 +1088,55 @@ def test_sequence_mode_restores_and_exposes_spectral_spatial_design(qt_applicati
     widget.close()
     widget.deleteLater()
     qt_application.processEvents()
+
+
+def test_radial_me_bssfp_spectral_spatial_tip_back_is_slab_refocused(tmp_path):
+    pulse = _test_pulse().to_dict()
+    sequence = make_pulseq_radial_me_bssfp(
+        fov_m=30e-3,
+        base_resolution=4,
+        readout_oversampling=1,
+        spokes_per_measurement=2,
+        measurements=1,
+        echoes=3,
+        repetition_time_s=30e-3,
+        use_alpha_half=True,
+        use_tip_back=True,
+        rf_pulse_type="spectral_spatial",
+        rf_spectral_spatial_pulse=pulse,
+        nucleus="H1",
+    )
+    assert sequence.check_timing()[0]
+    path = tmp_path / "radial_spsp_tip_back.seq"
+    sequence.write(path)
+    program = load_pulseq(path)
+    repetition_time = float(program.metadata["definitions"]["TR"])
+    rf_events = program.rf_events
+    centres = np.array(
+        [
+            event.start_s + 0.5 * event.samples_hz.size * event.raster_s
+            for event in rf_events
+        ]
+    )
+
+    # alpha/2, two acquired spokes, the extra alpha and the alpha/2 tip-back.
+    assert len(rf_events) == 5
+    assert centres[-1] - centres[-2] == pytest.approx(repetition_time / 2, abs=2e-6)
+    assert np.max(np.abs(rf_events[-1].samples_hz)) == pytest.approx(
+        0.5 * np.max(np.abs(rf_events[-2].samples_hz)), rel=1e-3
+    )
+    # The tip-back slab gradient is refocused like every other SPSP pulse, so
+    # spins across the slab are stored back along z alike.
+    positions = np.zeros((3, 3))
+    positions[:, 2] = (-10e-3, 0.0, 10e-3)
+    result = BlochSimulator().simulate_sequence_probes(
+        program,
+        positions,
+        np.array([0.0]),
+        checkpoints_s=[program.duration_s],
+        t1_s=50.0,
+        t2_s=10.0,
+    )
+    final = result.magnetization[-1, :, 0]
+    stored_fraction = final[:, 2] / np.linalg.norm(final, axis=-1)
+    assert np.all(stored_fraction > 0.999)

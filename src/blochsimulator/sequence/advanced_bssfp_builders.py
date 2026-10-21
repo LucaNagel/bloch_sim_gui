@@ -765,6 +765,14 @@ def make_pulseq_spectral_selective_bssfp(
             )
             if spacing_delay:
                 sequence.add_block(pp.make_delay(spacing_delay))
+            realized_alpha_half_spacing_s = (
+                alpha_block_duration
+                - alpha_timing.delay
+                - alpha_center
+                + spacing_delay
+                + rf_timing.delay
+                + frame_rf_center
+            )
 
         # Pulseq applies frequency offsets with time local to each RF/ADC
         # event. Continue the target RF oscillator explicitly between events
@@ -778,7 +786,7 @@ def make_pulseq_spectral_selective_bssfp(
         if use_alpha_half:
             common_phase = advance_bssfp_phase_deg(
                 common_phase,
-                elapsed_s=resolved_alpha_half_center_spacing_s,
+                elapsed_s=realized_alpha_half_spacing_s,
                 frequency_offset_hz=rf_offset,
             )
         for _ in range(dummy_repetitions):
@@ -1364,6 +1372,12 @@ def make_pulseq_me_bssfp(
         )
         if preparation_delay:
             sequence.add_block(pp.make_delay(preparation_delay))
+        realized_alpha_half_spacing_s = (
+            alpha_block_duration
+            - alpha_center_from_start
+            + preparation_delay
+            + rf_center_from_start
+        )
 
     gx_pre = make_role_trapezoid(
         pp,
@@ -1375,18 +1389,17 @@ def make_pulseq_me_bssfp(
     )
     ky_areas = (np.arange(n_phase) - n_phase // 2) / fov[1]
     kz_areas = (np.arange(n_partition) - n_partition // 2) / fov[2]
+    # The receiver is locked to the phase of the exciting RF pulse and only
+    # evolves at the receiver frequency from that pulse to each echo, as in the
+    # spectrally selective builder.  The bSSFP steady state is periodic in the
+    # RF frame; a receiver oscillator running independently over absolute time
+    # would write 360*(f_rf - f_rx)*TR into successive Cartesian lines.
     rf_phase = wrap_phase_deg(rf_phase_start_deg)
-    receiver_phase = wrap_phase_deg(rf_phase_start_deg)
     if use_alpha_half:
         rf_phase = advance_bssfp_phase_deg(
             rf_phase,
-            elapsed_s=resolved_alpha_half_center_spacing_s,
+            elapsed_s=realized_alpha_half_spacing_s,
             frequency_offset_hz=rf_frequency_offset_hz,
-        )
-        receiver_phase = advance_bssfp_phase_deg(
-            receiver_phase,
-            elapsed_s=resolved_alpha_half_center_spacing_s,
-            frequency_offset_hz=receiver_frequency_offset_hz,
         )
 
     def add_tr(
@@ -1398,9 +1411,8 @@ def make_pulseq_me_bssfp(
         partition_index: int = 0,
         volume_index: int = 0,
     ) -> None:
-        nonlocal receiver_phase, rf_phase
+        nonlocal rf_phase
         current_rf_phase = rf_phase
-        current_receiver_phase = receiver_phase
         rf.phase_offset = pulseq_phase_offset_rad(
             current_rf_phase,
             frequency_offset_hz=rf_frequency_offset_hz,
@@ -1411,12 +1423,6 @@ def make_pulseq_me_bssfp(
             rf_phase,
             elapsed_s=actual_tr,
             frequency_offset_hz=rf_frequency_offset_hz,
-            phase_increment_deg=rf_phase_increment_deg,
-        )
-        receiver_phase = advance_bssfp_phase_deg(
-            receiver_phase,
-            elapsed_s=actual_tr,
-            frequency_offset_hz=receiver_frequency_offset_hz,
             phase_increment_deg=rf_phase_increment_deg,
         )
         gy_pre = make_role_trapezoid(
@@ -1468,7 +1474,7 @@ def make_pulseq_me_bssfp(
             )
             if acquire:
                 adc_phase = advance_bssfp_phase_deg(
-                    current_receiver_phase,
+                    current_rf_phase,
                     elapsed_s=first_echo_time + echo * actual_echo_spacing,
                     frequency_offset_hz=receiver_frequency_offset_hz,
                 )
@@ -1532,11 +1538,6 @@ def make_pulseq_me_bssfp(
                 rf_phase,
                 elapsed_s=interval_delay,
                 frequency_offset_hz=rf_frequency_offset_hz,
-            )
-            receiver_phase = advance_bssfp_phase_deg(
-                receiver_phase,
-                elapsed_s=interval_delay,
-                frequency_offset_hz=receiver_frequency_offset_hz,
             )
         minimum_acquisition_intervals.append(minimum_interval)
         acquisition_intervals.append(actual_interval)
@@ -1901,13 +1902,16 @@ def make_pulseq_radial_me_bssfp(
 
     middle_echo = echoes // 2
     adc_center_from_readout_start = readout_rise + readout_flat_time / 2
+    # The flyback is rounded to the gradient raster, so centre the train with
+    # the realised echo spacing that is also reported in ``EchoTimes``.
+    actual_echo_spacing = readout_block_duration + flyback_duration
     delay_before_prephaser = (
         repetition_time_s / 2
         + rf_center_from_start
         - rf_block_duration
         - prephaser_duration_s
         - adc_center_from_readout_start
-        - middle_echo * echo_spacing_s
+        - middle_echo * actual_echo_spacing
     )
     delay_before_prephaser = round(delay_before_prephaser / raster) * raster
     if delay_before_prephaser < 0:
@@ -1926,7 +1930,6 @@ def make_pulseq_radial_me_bssfp(
             f"repetition_time_s is too short; minimum is {occupied_tr:.9g} s"
         )
     actual_tr = occupied_tr + trailing_delay
-    actual_echo_spacing = readout_block_duration + flyback_duration
     resolved_alpha_half_center_spacing_s = (
         actual_tr * float(alpha_half_tr_ratio)
         if alpha_half_use_ratios
@@ -1965,6 +1968,18 @@ def make_pulseq_radial_me_bssfp(
             )
         if preparation_delay:
             sequence.add_block(pp.make_delay(preparation_delay))
+        realized_alpha_half_spacing_s = (
+            pp.calc_duration(
+                *(
+                    [alpha_half, alpha_select]
+                    if alpha_select is not None
+                    else [alpha_half]
+                )
+            )
+            - alpha_center_from_start
+            + preparation_delay
+            + rf_center_from_start
+        )
 
     directions = encoding_frame.encoding_to_scanner(
         spiral_phyllotaxis_directions(
@@ -1977,7 +1992,7 @@ def make_pulseq_radial_me_bssfp(
     if use_alpha_half:
         rf_phase = advance_bssfp_phase_deg(
             rf_phase,
-            elapsed_s=resolved_alpha_half_center_spacing_s,
+            elapsed_s=realized_alpha_half_spacing_s,
             frequency_offset_hz=rf_frequency_offset_hz,
         )
     acquisition_start_times = []
@@ -2054,7 +2069,7 @@ def make_pulseq_radial_me_bssfp(
             if trailing_delay:
                 sequence.add_block(pp.make_delay(trailing_delay))
         minimum_interval = _sequence_duration_s(sequence) - acquisition_start
-        actual_interval, _ = _finish_acquisition_interval(
+        actual_interval, interval_delay = _finish_acquisition_interval(
             pp,
             sequence,
             acquisition_start_s=acquisition_start,
@@ -2064,14 +2079,80 @@ def make_pulseq_radial_me_bssfp(
             raster_s=raster,
             acquisition_name="radial measurement",
         )
+        if interval_delay:
+            # The bSSFP train continues across the interval; keep the RF
+            # carrier coherent over the extra delay.
+            rf_phase = advance_bssfp_phase_deg(
+                rf_phase,
+                elapsed_s=interval_delay,
+                frequency_offset_hz=rf_frequency_offset_hz,
+            )
         minimum_acquisition_intervals.append(minimum_interval)
         acquisition_intervals.append(actual_interval)
 
     if use_tip_back:
-        tip_back.phase_offset = pulseq_phase_offset_rad(
-            wrap_phase_deg(rf_phase + 180.0),
+        # alpha/2 - TR/2 storage, the time-reversed startup: one final
+        # non-acquired alpha pulse, then alpha/2 with the next cycle phase TR/2
+        # later (equivalent to -alpha/2 with the last phase for 0/180 cycling).
+        # The acquired echo train is centred at TR/2, so the tip-back cannot
+        # follow the last acquired pulse directly.
+        rf.phase_offset = pulseq_phase_offset_rad(
+            rf_phase,
             frequency_offset_hz=rf_frequency_offset_hz,
-            event_center_s=pp.calc_rf_center(tip_back)[0],
+            event_center_s=rf_center,
+        )
+        sequence.add_block(*([rf, rf_select] if rf_select is not None else [rf]))
+        storage_refocus = []
+        storage_predephase = []
+        if rf_select is not None:
+            storage_refocus = _vector_trapezoids(
+                pp, system, slab_refocus_vector, duration_s=prephaser_duration_s
+            )
+            tip_back_refocus_vector = np.zeros(3)
+            tip_back_refocus_vector["xyz".index(str(tip_back_select.channel))] = (
+                _slab_refocus_area(tip_back, tip_back_select, system)
+            )
+            storage_predephase = _vector_trapezoids(
+                pp, system, -tip_back_refocus_vector, duration_s=prephaser_duration_s
+            )
+        tip_back_center, _ = pp.calc_rf_center(tip_back)
+        tip_back_center_from_start = tip_back.delay + tip_back_center
+        storage_gradient_duration = sum(
+            pp.calc_duration(*gradients)
+            for gradients in (storage_refocus, storage_predephase)
+            if gradients
+        )
+        storage_delay = (
+            actual_tr / 2
+            - (rf_block_duration - rf_center_from_start)
+            - storage_gradient_duration
+            - tip_back_center_from_start
+        )
+        storage_delay = round(storage_delay / raster) * raster
+        if storage_delay < 0:
+            raise ValueError("TR is too short for the alpha/2 - TR/2 tip-back")
+        storage_spacing = (
+            rf_block_duration
+            - rf_center_from_start
+            + storage_gradient_duration
+            + storage_delay
+            + tip_back_center_from_start
+        )
+        if storage_refocus:
+            sequence.add_block(*storage_refocus)
+        if storage_delay:
+            sequence.add_block(pp.make_delay(storage_delay))
+        if storage_predephase:
+            sequence.add_block(*storage_predephase)
+        tip_back.phase_offset = pulseq_phase_offset_rad(
+            advance_bssfp_phase_deg(
+                rf_phase,
+                elapsed_s=storage_spacing,
+                frequency_offset_hz=rf_frequency_offset_hz,
+                phase_increment_deg=rf_phase_increment_deg,
+            ),
+            frequency_offset_hz=rf_frequency_offset_hz,
+            event_center_s=tip_back_center,
         )
         sequence.add_block(
             *(

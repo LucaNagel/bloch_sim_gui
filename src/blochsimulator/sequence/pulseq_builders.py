@@ -704,11 +704,14 @@ def make_pulseq_csi(
         raise ValueError(f"echo_time_s is too short; minimum is {minimum_te:.9g} s")
     raster = system.block_duration_raster
     te_delay_value = _ceil_to_raster(te_delay_value, raster)
+    # The ADC occupies its block alone; arbitrary sample counts and dwell
+    # times rarely sum to the block raster, so pad the block with a delay.
+    adc_block_delay = pp.make_delay(_ceil_to_raster(pp.calc_duration(adc), raster))
     repetition_without_delay = (
         rf_block_duration
         + encoding_duration_s
         + te_delay_value
-        + pp.calc_duration(adc)
+        + pp.calc_duration(adc_block_delay)
         + (max((pp.calc_duration(e) for e in spoiler_events), default=0.0))
     )
     tr_delay_value = repetition_time_s - repetition_without_delay
@@ -789,6 +792,7 @@ def make_pulseq_csi(
                 sequence.add_block(pp.make_delay(te_delay_value))
             sequence.add_block(
                 adc,
+                adc_block_delay,
                 pp.make_label("LIN", "SET", x_index),
                 pp.make_label("PAR", "SET", y_index),
                 pp.make_label("REP", "SET", repetition),
@@ -1158,6 +1162,26 @@ def make_pulseq_bssfp(
         else 0.0
     )
     rf_phase = wrap_phase_deg(rf_phase_start_deg)
+    if use_alpha_half:
+        # ``rf_phase_start`` is the phase relative to the startup pulse frame;
+        # a coherent RF carrier keeps advancing over the realised alpha/2
+        # spacing, exactly as between two regular pulses.
+        rf_phase = advance_bssfp_phase_deg(
+            rf_phase,
+            elapsed_s=(
+                pp.calc_duration(
+                    *(
+                        [rf_alpha_half, rf_alpha_half_select]
+                        if rf_alpha_half_select is not None
+                        else [rf_alpha_half]
+                    )
+                )
+                - rf_alpha_half_center_from_start
+                + preparation_delay
+                + rf_center_from_start
+            ),
+            frequency_offset_hz=rf_frequency_offset_hz,
+        )
 
     def add_repetition(
         ky: float,
