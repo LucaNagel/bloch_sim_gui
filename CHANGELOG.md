@@ -6,6 +6,13 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Library pulse names such as `load_pulse("bruker/13C_Ultimate_SPSP_Pulse_QuEMRT")`
+  and `CustomPulse("AHP_5ms_Hsn")` resolve in source checkouts and pip
+  installs. The `.exc`/`.dat` pulses now ship as package data; before, only
+  the PyInstaller app contained them.
+
 ## [2.9.1] - 2026-10-21
 
 ### Added

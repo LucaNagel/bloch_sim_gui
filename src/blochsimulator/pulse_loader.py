@@ -301,7 +301,8 @@ class PulseLibrary:
         Parameters
         ----------
         base_path : str or Path, optional
-            Base directory for pulse files. If None, uses './rfpulses'
+            Base directory for pulse files. If None, uses the ``rfpulses``
+            directory shipped inside the package.
         """
         if base_path is None:
             if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
@@ -323,6 +324,8 @@ class PulseLibrary:
 
     def _build_index(self):
         """Build index of available pulse files."""
+        # Headerless .txt waveforms state neither duration nor amplitude unit,
+        # so they are loaded with load_pulse_from_file and explicit options.
         for pulse_file in self.base_path.rglob("*"):
             if pulse_file.suffix.lower() not in {".exc", ".dat"}:
                 continue
