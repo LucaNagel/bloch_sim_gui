@@ -20,24 +20,8 @@ import pyqtgraph.opengl as gl
 import pyqtgraph as pg
 import numpy as np
 from pathlib import Path
+from ..position_sampling import AXIS_NAMES, centered_stride_indices, infer_layout
 from ..visualization import ImageExporter
-
-
-def centered_stride_indices(total: int, limit: int) -> np.ndarray:
-    """Return at most ``limit`` indices into ``range(total)`` with one stride.
-
-    A constant stride keeps the physical spacing uniform, and the indices are
-    aligned to the central element so a symmetric axis stays symmetric.
-    """
-    total = max(int(total), 0)
-    limit = max(int(limit), 1)
-    if total <= limit:
-        return np.arange(total)
-    if limit == 1:
-        return np.array([(total - 1) // 2])
-    stride = int(np.ceil((total - 1) / (limit - 1)))
-    start = ((total - 1) // 2) % stride
-    return np.arange(start, total, stride)
 
 
 class MagnetizationViewer(QWidget):
@@ -57,6 +41,19 @@ class MagnetizationViewer(QWidget):
     POSITION_LABEL_X = 1.15
     MAX_POSITION_LABELS = 7
     MAX_PATH_FRAMES = 1500
+    # Rows along x or y and planes keep the physical axes as scene axes:
+    # labels sit just beyond the vector reach, the gradient bars of a row
+    # below it and the net vector before the first position.
+    LABEL_GAP = 1.25
+    ROW_GRADIENT_Z = -2.4
+    NET_GAP = 2.4
+    # Camera (elevation, azimuth) in degrees.
+    CAMERA_PRESETS = {
+        "Front": (12.0, -90.0),
+        "Side": (10.0, 0.0),
+        "Top": (90.0, -90.0),
+        "Oblique": (22.0, -55.0),
+    }
 
     def __init__(self):
         super().__init__()
@@ -124,7 +121,7 @@ class MagnetizationViewer(QWidget):
         self.vector_colors = None
 
         # Items for the "Along position" arrangement: each position gets its
-        # own origin on a vertical display axis, the net vector sits beside it.
+        # own origin on a display axis or plane, the net vector sits beside it.
         self.position_axis_item = gl.GLLinePlotItem(
             pos=np.zeros((2, 3)), color=(0.6, 0.6, 0.6, 0.9), width=1, mode="lines"
         )
@@ -149,6 +146,9 @@ class MagnetizationViewer(QWidget):
         self.gradient_bar_plot = gl.GLLinePlotItem(
             pos=np.zeros((2, 3)), color=(1, 1, 1, 1), width=4, mode="lines"
         )
+        self.gradient_marker_item = gl.GLScatterPlotItem(
+            pos=np.zeros((1, 3)), color=(1, 1, 1, 1), size=10, pxMode=True
+        )
         self.field_label_item = gl.GLTextItem(
             pos=(0.0, 0.0, 0.0), text="", color=(200, 200, 200, 255)
         )
@@ -161,6 +161,7 @@ class MagnetizationViewer(QWidget):
             self.position_b1_plot,
             self.gradient_axis_item,
             self.gradient_bar_plot,
+            self.gradient_marker_item,
             self.field_label_item,
         ):
             item.setVisible(False)
@@ -168,15 +169,22 @@ class MagnetizationViewer(QWidget):
         self.position_label_items = []
         self._spatial_available = False
         self._spatial_positions_mm = None
+        self._spatial_layout = None
         self._spins_per_position = 1
         self._spatial_origins = np.zeros((0, 3))
         self._net_origin = np.zeros(3)
+        self._scene_extent = np.array([-np.ones(3), np.ones(3)])
+        self._tip_mesh_pairs = None
+        self._gradient_bar_offset = None
+        self._gradient_bar_direction = None
         self._last_spatial_frame = None
         self._position_color_cache = None
         self._position_path_points = []
         self._field_b1 = None
         self._field_offsets = None
         self._field_gradient_along = None
+        self._field_gradients = None
+        self._field_plane_axes = None
         self._field_frame_idx = None
         self._field_b1_max = 0.0
         self._field_offset_max = 0.0
@@ -325,7 +333,7 @@ class MagnetizationViewer(QWidget):
         )
         self.arrangement_combo.setToolTip(
             "Draw all vectors from one origin, or give each position its own "
-            "origin along a vertical display axis."
+            "origin along its axis or in its plane."
         )
         self.arrangement_combo.currentTextChanged.connect(
             lambda _: self.view_filter_changed.emit()
@@ -335,12 +343,14 @@ class MagnetizationViewer(QWidget):
         # Options that only apply to the "Along position" arrangement.
         self.spatial_option_widgets = []
         max_label = QLabel("Max positions:")
+        self.max_positions_label = max_label
         self.max_positions_spin = QSpinBox()
         self.max_positions_spin.setObjectName("mag_3d_max_positions")
         self.max_positions_spin.setRange(2, 256)
         self.max_positions_spin.setValue(16)
         self.max_positions_spin.setToolTip(
-            "Largest number of positions drawn; more positions are evenly subsampled."
+            "Largest number of positions drawn, per axis for a plane; more "
+            "positions are evenly subsampled."
         )
         self.max_positions_spin.valueChanged.connect(
             lambda _: self.view_filter_changed.emit()
@@ -357,15 +367,19 @@ class MagnetizationViewer(QWidget):
             "positions; below 1 neighboring vectors along z do not overlap."
         )
         self.vector_length_spin.valueChanged.connect(
-            lambda _: self._rebuild_spatial_scene(fit_camera=True)
+            lambda _: self._rebuild_spatial_scene(
+                fit_camera=True,
+                preset=self._camera_preset[0] if self._camera_preset else None,
+            )
         )
         color_label = QLabel("Color by:")
         self.color_by_combo = QComboBox()
         self.color_by_combo.setObjectName("mag_3d_color_by")
         self.color_by_combo.addItems(["Position", "Phase"])
         self.color_by_combo.setToolTip(
-            "Color vectors by position (palette) or by transverse phase; "
-            "with phase, longitudinal vectors fade to white."
+            "Color vectors by position (palette, along the first axis of a "
+            "plane) or by transverse phase; with phase, longitudinal vectors "
+            "fade to white."
         )
         self.color_by_combo.currentTextChanged.connect(
             lambda _: self._redraw_spatial_frame()
@@ -386,7 +400,7 @@ class MagnetizationViewer(QWidget):
         row.addWidget(camera_label)
         self.spatial_option_widgets.append(camera_label)
         self.camera_buttons = {}
-        for preset in ("Front", "Side", "Oblique"):
+        for preset in self.CAMERA_PRESETS:
             button = QPushButton(preset)
             button.setObjectName(f"mag_3d_camera_{preset.lower()}")
             button.setToolTip(f"Point the camera at the scene: {preset.lower()} view.")
@@ -409,14 +423,14 @@ class MagnetizationViewer(QWidget):
         self.tip_curve_checkbox.setObjectName("mag_3d_tip_curve")
         self.tip_curve_checkbox.setChecked(False)
         self.tip_curve_checkbox.setToolTip(
-            "Connect the tips of neighboring positions, e.g. to show the "
-            "phase helix after a gradient."
+            "Connect the tips of neighboring positions (along both axes of a "
+            "plane), e.g. to show the phase helix after a gradient."
         )
         self.net_vector_checkbox = QCheckBox("Net vector")
         self.net_vector_checkbox.setObjectName("mag_3d_net_vector")
         self.net_vector_checkbox.setChecked(False)
         self.net_vector_checkbox.setToolTip(
-            "Draw the mean over all positions and frequencies beside the column."
+            "Draw the mean over all positions and frequencies beside the positions."
         )
         self.b1_field_checkbox = QCheckBox("B1")
         self.b1_field_checkbox.setObjectName("mag_3d_b1_field")
@@ -429,9 +443,10 @@ class MagnetizationViewer(QWidget):
         self.gradient_field_checkbox.setObjectName("mag_3d_gradient_field")
         self.gradient_field_checkbox.setChecked(True)
         self.gradient_field_checkbox.setToolTip(
-            "Draw the gradient field G·r at every position as a bar left of "
-            "the column (red positive, blue negative), scaled to the largest "
-            "value of the sequence."
+            "Draw the gradient field G·r at every position as a bar beside "
+            "the column or row, or as a colored marker in a plane (red "
+            "positive, blue negative), scaled to the largest value of the "
+            "sequence."
         )
         for checkbox in (
             self.tip_markers_checkbox,
@@ -485,57 +500,119 @@ class MagnetizationViewer(QWidget):
         return self.net_vector_checkbox.isChecked()
 
     def set_spatial_groups(self, positions_mm, spins_per_position: int = 1):
-        """Arrange vectors along their positions, or pass None to overlay them.
+        """Arrange vectors at their positions, or pass None to overlay them.
 
         Parameters
         ----------
         positions_mm : array-like or None
-            Position (mm) of every displayed position group, in display order.
+            Position of every displayed position group in mm, in display
+            order: (N, 3) coordinates, or N values that are stacked along z.
+            Lines along x or y become horizontal rows and row-major planes a
+            grid in their plane; physical axes keep their scene axes.
         spins_per_position : int
             Number of consecutive vectors (isochromats) per position group.
         """
         new = None
         if positions_mm is not None:
-            arr = np.asarray(positions_mm, dtype=float).ravel()
-            if arr.size >= 2:
-                new = arr
+            arr = np.asarray(positions_mm, dtype=float)
+            if arr.ndim != 2 or arr.shape[1] != 3:
+                values = arr.ravel()
+                arr = np.zeros((values.size, 3))
+                arr[:, 2] = values
+            if len(arr) >= 2:
+                new = arr.copy()
         old = self._spatial_positions_mm
         layout_changed = (old is None) != (new is None) or (
-            new is not None and (old.size != new.size or not np.allclose(old, new))
+            new is not None and (old.shape != new.shape or not np.allclose(old, new))
         )
         self._spatial_positions_mm = new
         self._spins_per_position = max(1, int(spins_per_position))
         if new is None:
             self.set_spatial_fields(None)
         if layout_changed:
+            self._spatial_layout = None if new is None else infer_layout(new / 1e3)
+            self.max_positions_label.setText(
+                "Max per axis:" if self._scene_kind() == "plane" else "Max positions:"
+            )
             self._last_spatial_frame = None
             self._clear_path()
             self._rebuild_spatial_scene(fit_camera=True)
 
+    def _scene_kind(self) -> str:
+        """Return "column" (stacked along z), "row" (along x or y) or "plane"."""
+        layout = self._spatial_layout
+        if layout is None or not layout.is_grid:
+            return "column"
+        if layout.ndim == 2:
+            return "plane"
+        if layout.ndim == 1 and layout.axes[0] in (0, 1):
+            return "row"
+        return "column"
+
+    def _default_camera_preset(self) -> str:
+        """Camera preset that looks at the positions face-on."""
+        kind = self._scene_kind()
+        if kind == "plane":
+            normal = 3 - sum(self._spatial_layout.axes)
+            return {0: "Side", 1: "Front", 2: "Oblique"}[normal]
+        if kind == "row" and self._spatial_layout.axes[0] == 1:
+            return "Side"
+        return "Front"
+
     def _spatial_spacing(self) -> float:
         return 1.0 / max(float(self.vector_length_spin.value()), 1e-6)
 
-    def _scene_bounds(self):
-        """Return the (x_min, x_max, z_min, z_max) range of the arrangement."""
-        if not self.is_spatial_layout_active() or not len(self._spatial_origins):
-            return -1.0, 1.0, -1.0, 1.0
-        zs = self._spatial_origins[:, 2]
-        x_min = self.GRADIENT_BAR_X - self.GRADIENT_BAR_LENGTH - 0.2
-        if self.is_net_vector_shown():
-            x_min = self.NET_VECTOR_X - 1.1
-        x_max = self.POSITION_LABEL_X + 1.2
-        return x_min, x_max, float(zs[0]) - 1.1, float(zs[-1]) + 1.4
+    @staticmethod
+    def _index_steps(count: int, spacing: float) -> np.ndarray:
+        """Scene coordinates of ``count`` evenly spaced, centred origins."""
+        return (np.arange(count) - 0.5 * (count - 1)) * spacing
 
-    def _rebuild_spatial_scene(self, fit_camera: bool = False):
-        """Lay out origins, position axis, labels and the net-vector anchor."""
+    def _scene_box(self):
+        """Return the (lo, hi) corners of everything drawn in the arrangement."""
+        if not self.is_spatial_layout_active() or not len(self._spatial_origins):
+            return -np.ones(3), np.ones(3)
+        lo, hi = self._scene_extent
+        if self.is_net_vector_shown():
+            lo = np.minimum(lo, self._net_origin - [1.1, 1.1, 1.3])
+            hi = np.maximum(hi, self._net_origin + [1.1, 1.1, 1.1])
+        return lo, hi
+
+    def _add_scene_label(self, pos, text: str):
+        label = gl.GLTextItem(
+            pos=tuple(float(v) for v in pos), text=text, color=(180, 180, 180, 255)
+        )
+        self.gl_widget.addItem(label)
+        self.position_label_items.append(label)
+        return label
+
+    def _place_floor(self, axis_pos, grid_pos=None, grid_size=(4, 4)):
+        """Put the axis triad and, unless ``grid_pos`` is None, the floor grid."""
+        self.axis_item.resetTransform()
+        self.axis_item.translate(*axis_pos)
+        self.axis_item.setSize(1, 1, 1)
+        self.grid_item.resetTransform()
+        self.grid_item.setVisible(grid_pos is not None)
+        if grid_pos is not None:
+            self.grid_item.translate(*grid_pos)
+            self.grid_item.setSize(*grid_size)
+
+    @staticmethod
+    def _floor_length(extent: float) -> int:
+        """Even grid size covering ``extent`` plus a margin."""
+        return int(2 * np.ceil(0.5 * (extent + 3.0)))
+
+    def _rebuild_spatial_scene(self, fit_camera: bool = False, preset=None):
+        """Lay out origins, position axes, labels and the net-vector anchor."""
         for item in self.position_label_items:
             self.gl_widget.removeItem(item)
         self.position_label_items = []
+        self._net_label_item = None
         anchored = (self.mean_vector, self.path_item)
 
         if not self.is_spatial_layout_active():
             self._spatial_origins = np.zeros((0, 3))
             self._net_origin = np.zeros(3)
+            self._tip_mesh_pairs = None
             for item in (
                 self.position_axis_item,
                 self.position_mean_plot,
@@ -545,6 +622,7 @@ class MagnetizationViewer(QWidget):
                 self.position_b1_plot,
                 self.gradient_axis_item,
                 self.gradient_bar_plot,
+                self.gradient_marker_item,
                 self.field_label_item,
             ):
                 item.setVisible(False)
@@ -552,16 +630,43 @@ class MagnetizationViewer(QWidget):
                 item.resetTransform()
             self.axis_item.setSize(2, 2, 2)
             self.grid_item.setSize(4, 4)
+            self.grid_item.setVisible(True)
             if fit_camera:
                 self.set_camera_preset("Front")
             return
 
-        positions_mm = self._spatial_positions_mm
-        count = positions_mm.size
         spacing = self._spatial_spacing()
-        zs = (np.arange(count) - 0.5 * (count - 1)) * spacing
+        kind = self._scene_kind()
+        if kind == "plane":
+            self._build_plane_scene(spacing)
+        elif kind == "row":
+            self._build_row_scene(spacing)
+        else:
+            self._build_column_scene(spacing)
+        self.position_axis_item.setVisible(True)
+
+        net_label = self._add_scene_label(self._net_origin + [-0.15, 0.0, -1.3], "net")
+        net_label.setVisible(self.is_net_vector_shown())
+        self._net_label_item = net_label
+        for item in anchored:
+            item.resetTransform()
+            item.translate(*self._net_origin)
+        if fit_camera:
+            self.set_camera_preset(preset or self._default_camera_preset())
+        self._redraw_spatial_frame()
+        self._draw_field_frame()
+
+    def _build_column_scene(self, spacing: float):
+        """Stack the positions along the display z axis in display order."""
+        values = self._spatial_positions_mm[:, self._spatial_layout.primary_axis]
+        count = values.size
+        zs = self._index_steps(count, spacing)
         self._spatial_origins = np.column_stack([np.zeros(count), np.zeros(count), zs])
         self._net_origin = np.array([self.NET_VECTOR_X, 0.0, 0.0])
+        self._tip_mesh_pairs = None
+        gx = self.GRADIENT_BAR_X
+        self._gradient_bar_offset = np.array([gx, 0.0, 0.0])
+        self._gradient_bar_direction = np.array([1.0, 0.0, 0.0])
 
         tick = min(0.08, 0.3 * spacing)
         segments = [
@@ -571,73 +676,209 @@ class MagnetizationViewer(QWidget):
         for z in zs:
             segments.extend([[-tick, 0.0, z], [tick, 0.0, z]])
         self.position_axis_item.setData(pos=np.asarray(segments, dtype=np.float32))
-        self.position_axis_item.setVisible(True)
-
-        gx = self.GRADIENT_BAR_X
         self.gradient_axis_item.setData(
             pos=np.array(
                 [[gx, 0.0, zs[0] - 0.5 * spacing], [gx, 0.0, zs[-1] + 0.5 * spacing]],
                 dtype=np.float32,
             )
         )
-
-        label_color = (180, 180, 180, 255)
-        label_indices = centered_stride_indices(count, self.MAX_POSITION_LABELS)
-        for idx in label_indices:
-            label = gl.GLTextItem(
-                pos=(self.POSITION_LABEL_X, 0.0, float(zs[idx])),
-                text=f"{positions_mm[idx]:.1f} mm",
-                color=label_color,
+        for idx in centered_stride_indices(count, self.MAX_POSITION_LABELS):
+            self._add_scene_label(
+                (self.POSITION_LABEL_X, 0.0, zs[idx]), f"{values[idx]:.1f} mm"
             )
-            self.gl_widget.addItem(label)
-            self.position_label_items.append(label)
-        net_label = gl.GLTextItem(
-            pos=(self.NET_VECTOR_X - 0.15, 0.0, -1.3), text="net", color=label_color
-        )
-        net_label.setVisible(self.is_net_vector_shown())
-        self.gl_widget.addItem(net_label)
-        self.position_label_items.append(net_label)
-        self._net_label_item = net_label
         self.field_label_item.setData(
-            pos=(self.GRADIENT_BAR_X - self.GRADIENT_BAR_LENGTH, 0.0, zs[-1] + 1.2)
+            pos=(gx - self.GRADIENT_BAR_LENGTH, 0.0, zs[-1] + 1.2)
         )
-
-        for item in anchored:
-            item.resetTransform()
-            item.translate(*self._net_origin)
         # Axis triad and floor grid sit below the column.
         floor = float(zs[0]) - 1.05
-        self.axis_item.resetTransform()
-        self.axis_item.translate(0.0, 0.0, floor)
-        self.axis_item.setSize(1, 1, 1)
-        self.grid_item.resetTransform()
-        self.grid_item.translate(0.0, 0.0, floor)
-        self.grid_item.setSize(4, 4)
-        if fit_camera:
-            self.set_camera_preset("Front")
-        self._redraw_spatial_frame()
-        self._draw_field_frame()
+        self._place_floor((0.0, 0.0, floor), (0.0, 0.0, floor), (4, 4))
+        self._scene_extent = np.array(
+            [
+                [gx - self.GRADIENT_BAR_LENGTH - 0.2, -1.3, zs[0] - 1.1],
+                [self.POSITION_LABEL_X + 1.2, 1.3, zs[-1] + 1.4],
+            ]
+        )
+
+    def _build_row_scene(self, spacing: float):
+        """Put the positions of a line along x or y on that scene axis."""
+        axis = self._spatial_layout.axes[0]
+        values = self._spatial_positions_mm[:, axis]
+        count = values.size
+        steps = self._index_steps(count, spacing)
+        unit = np.eye(3)[axis]
+        up = np.array([0.0, 0.0, 1.0])
+        self._spatial_origins = steps[:, None] * unit
+        self._net_origin = (steps[0] - self.NET_GAP) * unit
+        self._tip_mesh_pairs = None
+        bar = self.ROW_GRADIENT_Z * up
+        self._gradient_bar_offset = bar
+        self._gradient_bar_direction = up
+
+        tick = min(0.08, 0.3 * spacing)
+        start = (steps[0] - 0.5 * spacing) * unit
+        end = (steps[-1] + 0.5 * spacing) * unit
+        segments = [start, end]
+        for origin in self._spatial_origins:
+            segments.extend([origin - tick * up, origin + tick * up])
+        self.position_axis_item.setData(pos=np.asarray(segments, dtype=np.float32))
+        self.gradient_axis_item.setData(
+            pos=np.array([start + bar, end + bar], dtype=np.float32)
+        )
+        below = -self.LABEL_GAP * up
+        for idx in centered_stride_indices(count, self.MAX_POSITION_LABELS):
+            self._add_scene_label(
+                self._spatial_origins[idx] + below - 0.3 * unit, f"{values[idx]:.1f}"
+            )
+        self._add_scene_label(end + 0.3 * unit + below, f"{AXIS_NAMES[axis]} (mm)")
+        self.field_label_item.setData(pos=tuple(start + 1.5 * up))
+        # Axis triad and floor grid sit below the gradient bars.
+        floor = self.ROW_GRADIENT_Z - self.GRADIENT_BAR_LENGTH - 0.3
+        length = self._floor_length(steps[-1] - steps[0])
+        size = (length, 4) if axis == 0 else (4, length)
+        self._place_floor((0.0, 0.0, floor), (0.0, 0.0, floor), size)
+        lo = np.array([-1.1, -1.1, floor - 0.1])
+        hi = np.array([1.1, 1.1, 1.8])
+        lo[axis] = steps[0] - 0.8
+        hi[axis] = steps[-1] + 2.0
+        self._scene_extent = np.array([lo, hi])
+
+    def _build_plane_scene(self, spacing: float):
+        """Lay the positions of a row-major plane out as a lattice in that plane."""
+        layout = self._spatial_layout
+        first, second = layout.axes
+        n_first, n_second = layout.counts
+        # In-plane horizontal axis h (x, or y for yz) and the other axis v.
+        h, v = min(first, second), max(first, second)
+        unit = np.eye(3)
+        steps = {
+            first: self._index_steps(n_first, spacing),
+            second: self._index_steps(n_second, spacing),
+        }
+        values_mm = dict(zip((first, second), layout.coordinates_mm()))
+        index = np.arange(n_first * n_second)
+        origins = np.zeros((index.size, 3))
+        origins[:, first] = steps[first][index % n_first]
+        origins[:, second] = steps[second][index // n_first]
+        self._spatial_origins = origins
+        h_steps, v_steps = steps[h], steps[v]
+        self._net_origin = (h_steps[0] - self.NET_GAP) * unit[h]
+        self._gradient_bar_offset = None
+        self._gradient_bar_direction = None
+        # Neighbour pairs along both plane axes for the tip mesh.
+        grid = index.reshape(n_second, n_first)
+        self._tip_mesh_pairs = np.concatenate(
+            [
+                np.column_stack([grid[:, :-1].ravel(), grid[:, 1:].ravel()]),
+                np.column_stack([grid[:-1, :].ravel(), grid[1:, :].ravel()]),
+            ]
+        )
+
+        # Lattice lines through the origins along both plane axes.
+        half = 0.5 * spacing
+        segments = []
+        for value in v_steps:
+            segments.extend(
+                [
+                    (h_steps[0] - half) * unit[h] + value * unit[v],
+                    (h_steps[-1] + half) * unit[h] + value * unit[v],
+                ]
+            )
+        for value in h_steps:
+            segments.extend(
+                [
+                    value * unit[h] + (v_steps[0] - half) * unit[v],
+                    value * unit[h] + (v_steps[-1] + half) * unit[v],
+                ]
+            )
+        self.position_axis_item.setData(pos=np.asarray(segments, dtype=np.float32))
+
+        # h values before the first row, v values right of the last column.
+        # Over a floor lattice the titles and readout also step off the floor
+        # along z, since a low camera foreshortens v.
+        gap = self.LABEL_GAP
+        lift = 0.0 if v == 2 else 1.0
+        front = (v_steps[0] - gap) * unit[v]
+        right = (h_steps[-1] + gap) * unit[h]
+        for i in centered_stride_indices(h_steps.size, self.MAX_POSITION_LABELS):
+            self._add_scene_label(
+                (h_steps[i] - 0.3) * unit[h] + front, f"{values_mm[h][i]:.1f}"
+            )
+        self._add_scene_label(
+            (0.5 * (h_steps[0] + h_steps[-1]) - 0.3) * unit[h]
+            + front
+            - unit[v]
+            - 0.6 * lift * unit[2],
+            f"{AXIS_NAMES[h]} (mm)",
+        )
+        v_ticks = centered_stride_indices(v_steps.size, self.MAX_POSITION_LABELS)
+        for j in v_ticks:
+            self._add_scene_label(
+                right + v_steps[j] * unit[v], f"{values_mm[v][j]:.1f}"
+            )
+        # The v title takes the next tick slot after the last value.
+        stride = int(v_ticks[1] - v_ticks[0]) if v_ticks.size > 1 else 1
+        title_v = max(v_steps[v_ticks[-1]] + stride * spacing, v_steps[-1] + gap)
+        self._add_scene_label(
+            right + title_v * unit[v] + 0.5 * lift * unit[2], f"{AXIS_NAMES[v]} (mm)"
+        )
+        back = (v_steps[-1] + gap) * unit[v]
+        self.field_label_item.setData(
+            pos=tuple((h_steps[0] - 0.3) * unit[h] + back + 1.5 * lift * unit[2])
+        )
+
+        corner = (h_steps[0] - self.NET_GAP) * unit[h] + front
+        if v == 2:
+            # Upright plane: the floor grid sits below the axis titles.
+            floor = v_steps[0] - gap - 0.9
+            length = self._floor_length(h_steps[-1] - h_steps[0] + self.NET_GAP)
+            size = (length, 4) if h == 0 else (4, length)
+            self._place_floor(corner, floor * unit[2], size)
+        else:
+            # The xy lattice is the floor itself.
+            self._place_floor(corner)
+        lo = np.full(3, -1.1)
+        hi = np.full(3, 1.1)
+        lo[h] = h_steps[0] - 0.8
+        hi[h] = h_steps[-1] + gap + 1.2
+        lo[v] = v_steps[0] - gap - 0.8
+        hi[v] = title_v + 0.4
+        hi[2] = max(hi[2], 1.5 * lift + 0.2)
+        self._scene_extent = np.array([lo, hi])
 
     def set_camera_preset(self, preset: str):
         """Point the camera at the whole scene from a fixed direction."""
-        x_min, x_max, z_min, z_max = self._scene_bounds()
-        width = max(x_max - x_min, 2.0)
-        height = max(z_max - z_min, 2.0)
-        center = QVector3D(0.5 * (x_min + x_max), 0.0, 0.5 * (z_min + z_max))
-        if preset == "Side":
-            elevation, azimuth = 10.0, 0.0
-            width = 2.6
-        elif preset == "Oblique":
-            elevation, azimuth = 22.0, -55.0
-        else:
-            elevation, azimuth = 12.0, -90.0
+        elevation, azimuth = self.CAMERA_PRESETS.get(
+            preset, self.CAMERA_PRESETS["Front"]
+        )
+        lo, hi = self._scene_box()
+        corners = np.array(np.meshgrid(*zip(lo, hi), indexing="ij")).reshape(3, -1).T
+        el, az = np.radians(elevation), np.radians(azimuth)
+        # Screen right and up directions of the camera.
+        right = np.array([-np.sin(az), np.cos(az), 0.0])
+        up = np.array([-np.sin(el) * np.cos(az), -np.sin(el) * np.sin(az), np.cos(el)])
+        toward = np.array(
+            [np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)]
+        )
+        center = 0.5 * (lo + hi)
+        relative = corners - center
         # The field of view is horizontal; fit both extents to the widget.
         view_w = max(self.gl_widget.width(), 1)
         view_h = max(self.gl_widget.height(), 1)
-        span = 2.0 * np.tan(0.5 * np.radians(self.gl_widget.opts.get("fov", 60)))
-        distance = 1.1 * max(width / span, height * view_w / (view_h * span), 4.0)
+        tan_w = np.tan(0.5 * np.radians(self.gl_widget.opts.get("fov", 60)))
+        tan_h = tan_w * view_h / view_w
+        # In perspective a corner nearer the camera needs more room, so each
+        # corner sets the distance at which it just fits.
+        needed = (
+            np.maximum(np.abs(relative @ right) / tan_w, np.abs(relative @ up) / tan_h)
+            * 1.1
+            + relative @ toward
+        )
+        distance = max(float(needed.max()), 4.4)
         self.gl_widget.setCameraPosition(
-            pos=center, distance=distance, elevation=elevation, azimuth=azimuth
+            pos=QVector3D(*center),
+            distance=distance,
+            elevation=elevation,
+            azimuth=azimuth,
         )
         self._camera_preset = (preset, self._camera_state())
 
@@ -665,13 +906,20 @@ class MagnetizationViewer(QWidget):
         return super().eventFilter(obj, event)
 
     def _position_colors(self, count: int) -> np.ndarray:
-        """Return palette RGBA colors (0..1) for each position group."""
-        key = (self.vector_palette_combo.currentText(), int(count))
+        """Return palette RGBA colors (0..1) for each position group.
+
+        In a plane the palette runs along its first axis.
+        """
+        hues = int(count)
+        if self._scene_kind() == "plane":
+            hues = self._spatial_layout.counts[0]
+        key = (self.vector_palette_combo.currentText(), int(count), hues)
         if self._position_color_cache is None or self._position_color_cache[0] != key:
             colors = np.array(
-                [self.color_for_index(i, count).getRgbF() for i in range(count)],
+                [self.color_for_index(i, hues).getRgbF() for i in range(hues)],
                 dtype=float,
             )
+            colors = np.tile(colors, (int(count) // hues, 1))
             self._position_color_cache = (key, colors)
         return self._position_color_cache[1].copy()
 
@@ -708,7 +956,7 @@ class MagnetizationViewer(QWidget):
 
     def _update_spatial_magnetization(self, vecs, means, net, append_path=True):
         """Draw spins, position means and the net vector at separate origins."""
-        count = self._spatial_positions_mm.size
+        count = len(self._spatial_positions_mm)
         per_position = self._spins_per_position
         norm = 1.0 / max(self.length_scale, 1e-9)
         spins = np.asarray(vecs, dtype=float).reshape(count, per_position, 3) * norm
@@ -756,7 +1004,14 @@ class MagnetizationViewer(QWidget):
             if self.tip_markers_checkbox.isChecked():
                 self.tip_marker_item.setData(pos=mean_tips, color=mean_colors)
             if self.tip_curve_checkbox.isChecked():
-                self.tip_curve_item.setData(pos=mean_tips.astype(np.float32))
+                if self._tip_mesh_pairs is None:
+                    curve, curve_mode = mean_tips, "line_strip"
+                else:
+                    curve = mean_tips[self._tip_mesh_pairs].reshape(-1, 3)
+                    curve_mode = "lines"
+                self.tip_curve_item.setData(
+                    pos=curve.astype(np.float32), mode=curve_mode
+                )
         self.position_mean_plot.setVisible(show_means)
         self.tip_marker_item.setVisible(
             show_means and self.tip_markers_checkbox.isChecked()
@@ -822,6 +1077,8 @@ class MagnetizationViewer(QWidget):
         self._field_b1 = None
         self._field_offsets = None
         self._field_gradient_along = None
+        self._field_gradients = None
+        self._field_plane_axes = None
         if b1 is not None:
             b1_arr = np.asarray(b1).ravel()
             if b1_arr.size:
@@ -836,6 +1093,10 @@ class MagnetizationViewer(QWidget):
             if len(padded) and len(pos_cm):
                 # Field offset G·r (G) at every drawn position and frame.
                 self._field_offsets = padded @ pos_cm.T
+                self._field_gradients = padded
+                layout = infer_layout(pos_cm)
+                if layout.ndim == 2 and layout.is_grid:
+                    self._field_plane_axes = tuple(sorted(layout.axes))
                 spread = pos_cm[-1] - pos_cm[0]
                 length = float(np.linalg.norm(spread))
                 direction = spread / length if length > 0 else np.array([0, 0, 1.0])
@@ -862,6 +1123,7 @@ class MagnetizationViewer(QWidget):
             self.position_b1_plot,
             self.gradient_axis_item,
             self.gradient_bar_plot,
+            self.gradient_marker_item,
             self.field_label_item,
         )
         idx = self._field_frame_idx
@@ -895,29 +1157,52 @@ class MagnetizationViewer(QWidget):
             and self._field_offsets is not None
             and self._field_offsets.shape[1] == count
         )
+        bars = self._gradient_bar_direction is not None
         if grad_shown:
             frame = min(max(idx, 0), len(self._field_offsets) - 1)
             offsets = self._field_offsets[frame]
-            scale = (
-                self.GRADIENT_BAR_LENGTH / self._field_offset_max
+            relative = (
+                offsets / self._field_offset_max
                 if self._field_offset_max > 0
-                else 0.0
+                else np.zeros_like(offsets)
             )
-            gx = self.GRADIENT_BAR_X
-            pos = np.empty((count * 2, 3), dtype=np.float32)
-            pos[0::2] = origins + [gx, 0.0, 0.0]
-            pos[1::2] = origins + [gx, 0.0, 0.0]
-            pos[1::2, 0] += offsets * scale
-            colors = np.where(
+            signed = np.where(
                 (offsets >= 0)[:, None],
                 np.array([1.0, 0.35, 0.3, 1.0]),
                 np.array([0.35, 0.55, 1.0, 1.0]),
             )
-            self.gradient_bar_plot.setData(pos=pos, color=np.repeat(colors, 2, axis=0))
-            along = float(self._field_gradient_along[frame])
-            readout.append(f"G {along * 10.0:.2f} mT/m")
-        self.gradient_bar_plot.setVisible(grad_shown)
-        self.gradient_axis_item.setVisible(grad_shown)
+            if bars:
+                base = origins + self._gradient_bar_offset
+                pos = np.empty((count * 2, 3), dtype=np.float32)
+                pos[0::2] = base
+                pos[1::2] = base + np.outer(
+                    relative * self.GRADIENT_BAR_LENGTH, self._gradient_bar_direction
+                )
+                self.gradient_bar_plot.setData(
+                    pos=pos, color=np.repeat(signed, 2, axis=0)
+                )
+            else:
+                # Markers fade from gray at G·r = 0 to the signed color.
+                weight = np.abs(relative)[:, None]
+                colors = (1.0 - weight) * np.array(
+                    [0.5, 0.5, 0.5, 1.0]
+                ) + weight * signed
+                self.gradient_marker_item.setData(
+                    pos=origins.astype(np.float32), color=colors
+                )
+            if self._field_plane_axes is not None:
+                grads = self._field_gradients[frame]
+                parts = [
+                    f"G{AXIS_NAMES[a]} {grads[a] * 10.0:.2f}"
+                    for a in self._field_plane_axes
+                ]
+                readout.append(" ".join(parts) + " mT/m")
+            else:
+                along = float(self._field_gradient_along[frame])
+                readout.append(f"G {along * 10.0:.2f} mT/m")
+        self.gradient_bar_plot.setVisible(grad_shown and bars)
+        self.gradient_axis_item.setVisible(grad_shown and bars)
+        self.gradient_marker_item.setVisible(grad_shown and not bars)
 
         self.field_label_item.setData(text="   ".join(readout))
         self.field_label_item.setVisible(bool(readout))
@@ -1002,7 +1287,7 @@ class MagnetizationViewer(QWidget):
         self._ensure_vectors(count, colors=colors)
         if (
             self.is_spatial_layout_active()
-            and count == self._spatial_positions_mm.size * self._spins_per_position
+            and count == len(self._spatial_positions_mm) * self._spins_per_position
         ):
             self._last_spatial_frame = (vecs, position_means, net)
             self._update_spatial_magnetization(vecs, position_means, net)
@@ -1146,12 +1431,11 @@ class MagnetizationViewer(QWidget):
         elif mode == "Freqs @ position":
             max_idx = max(0, self._npos - 1)
             idx = min(self.selector_slider.value(), max_idx)
-            pos_val = (
-                self.last_positions[idx, 2] * 1000
-                if self.last_positions is not None and idx < len(self.last_positions)
-                else idx
-            )
-            label_text = f"Pos: {pos_val:.2f} mm"
+            if self.last_positions is not None and idx < len(self.last_positions):
+                layout = infer_layout(self.last_positions)
+                label_text = f"Pos: {layout.label(self.last_positions[idx])}"
+            else:
+                label_text = f"Pos: idx {idx}"
         else:
             max_idx = 0
             label_text = "All spins"

@@ -1,4 +1,6 @@
+import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -12,14 +14,17 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QGridLayout,
     QLineEdit,
     QRadioButton,
     QSlider,
     QSpinBox,
 )
+from blochsimulator.gradient_lobes import GradientLobe, gradient_moments_mt_ms_per_m
 from blochsimulator.kernel_capabilities import GUI_KERNEL_NAMES
 from blochsimulator.memory import GIB, MemoryPolicy
+from blochsimulator.project_io import load_project, save_project
 from blochsimulator.pulse_loader import load_amp_phase_dat, load_pulse_from_file
 from blochsimulator.sequence import ScannerParameters
 from blochsimulator.simulator import (
@@ -35,7 +40,18 @@ from blochsimulator.ui.magnetization_viewer import (
     MagnetizationViewer,
     centered_stride_indices,
 )
-from blochsimulator.ui.main_window import BlochSimulatorGUI, _apply_platform_style
+from blochsimulator.visualization import ImageExporter
+from blochsimulator.position_sampling import (
+    build_line_positions,
+    build_plane_positions,
+    infer_layout,
+)
+from blochsimulator.ui.main_window import (
+    BlochSimulatorGUI,
+    _apply_platform_style,
+    _capture_widget_state,
+    _restore_widget_state,
+)
 from blochsimulator.ui.rf_pulse_designer import RFPulseDesigner
 from blochsimulator.ui.sequence_designer import SequenceDesigner
 from blochsimulator.ui.sequence_diagram import (
@@ -724,6 +740,109 @@ def test_sequence_diagram_click_moves_playback_to_that_time():
     diagram.close()
 
 
+def test_slice_axis_moves_the_slice_gradient_and_defaults_change_nothing():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    designer = window.sequence_designer
+    designer.sequence_type.setCurrentText("Slice Select + Rephase")
+    dt = designer.default_dt
+    _, base_gradients, base_time = designer._compile_base_sequence(None, dt, False)
+
+    assert designer.slice_axis_combo.currentText() == "z"
+    assert designer.gradient_lobes() == []
+    _, gradients, time = designer.compile_sequence(dt=dt)
+    np.testing.assert_array_equal(time, base_time)
+    np.testing.assert_array_equal(gradients, base_gradients)
+    assert np.ptp(base_gradients[:, 2]) > 0
+
+    designer.slice_axis_combo.setCurrentText("x")
+    _, gradients, _ = designer.compile_sequence(dt=dt)
+    np.testing.assert_array_equal(gradients[:, 0], base_gradients[:, 2])
+    assert np.all(gradients[:, 2] == 0.0)
+    _, gx = designer.diagram_widget.lane_data("gx")
+    _, gz = designer.diagram_widget.lane_data("gz")
+    assert np.ptp(gx) > 0 and np.ptp(gz) == 0
+
+
+def test_gradient_lobe_table_extends_the_sequence_and_reports_its_moment():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    designer = window.sequence_designer
+    designer.sequence_type.setCurrentText("Free Induction Decay")
+    dt = designer.default_dt
+    _, _, base_time = designer.compile_sequence(dt=dt)
+    base_ms = (base_time[-1] - base_time[0] + dt) * 1e3
+
+    lobe = GradientLobe("y", base_ms + 1.0, 2.0, 5.0, 0.2)
+    designer.set_gradient_lobes([lobe])
+    b1, gradients, time = designer.compile_sequence(dt=dt)
+
+    assert time[-1] - time[0] + dt == pytest.approx((base_ms + 3.0) * 1e-3, abs=dt)
+    assert np.all(b1[base_time.size :] == 0.0)
+    moments = gradient_moments_mt_ms_per_m(gradients, time)
+    assert moments[1] == pytest.approx(9.0)
+    label = designer.gradient_moment_label.text()
+    assert "y 9" in label and "Phase twist (cycles/mm): y 0.383" in label
+
+    table = designer.gradient_lobe_table
+    designer.add_gradient_lobe_button.click()
+    assert table.rowCount() == 2
+    added = designer.gradient_lobes()[1]
+    assert added.axis == "x" and added.start_ms == pytest.approx(lobe.end_ms)
+
+    table.item(1, 3).setData(Qt.EditRole, -20.0)
+    assert designer.gradient_lobes()[1].amplitude_mt_per_m == -20.0
+    assert "x -18" in designer.gradient_moment_label.text()
+
+    table.selectRow(0)
+    designer.remove_gradient_lobe_button.click()
+    assert designer.gradient_lobes() == [replace(added, amplitude_mt_per_m=-20.0)]
+
+
+def test_gradient_options_round_trip_and_legacy_states_reset():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    designer = window.sequence_designer
+    lobes = [GradientLobe("z", 0.5, 1.0, -8.0, 0.1), GradientLobe("x", 2.0)]
+    designer.slice_axis_combo.setCurrentText("y")
+    designer.set_gradient_lobes(lobes)
+    state = designer.get_state()
+
+    restored = BlochSimulatorGUI().sequence_designer
+    restored.set_state(state)
+    assert restored.slice_axis_combo.currentText() == "y"
+    assert restored.gradient_lobes() == lobes
+
+    legacy = {
+        key: value
+        for key, value in state.items()
+        if key not in ("slice_axis", "gradient_lobes")
+    }
+    restored.set_state(legacy)
+    assert restored.slice_axis_combo.currentText() == "z"
+    assert restored.gradient_lobes() == []
+
+
+def test_free_mode_run_simulates_gradient_lobes_on_an_x_line():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    designer = window.sequence_designer
+    designer.sequence_type.setCurrentText("Free Induction Decay")
+    window.pos_axis_combo.setCurrentText("x")
+    window.pos_spin.setValue(5)
+    lobe = GradientLobe("x", 50.0, 2.0, 10.0, 0.25)
+    designer.set_gradient_lobes([lobe])
+
+    with patch("blochsimulator.ui.main_window.SimulationThread") as thread:
+        window.run_simulation()
+
+    (_, (b1, gradients, time), _, positions, *_), _ = thread.call_args
+    assert positions.shape == (5, 3) and np.ptp(positions[:, 0]) > 0
+    moments = gradient_moments_mt_ms_per_m(gradients, time)
+    assert moments[0] == pytest.approx(lobe.moment_mt_ms_per_m)
+    np.testing.assert_array_equal(window.last_gradients, gradients)
+
+
 def test_simulation_controls_use_non_overlapping_grid_rows():
     app = QApplication.instance()
     if app is None:
@@ -736,11 +855,20 @@ def test_simulation_controls_use_non_overlapping_grid_rows():
     def position(widget):
         return layout.getItemPosition(layout.indexOf(widget))
 
-    assert position(window.pos_range) == (2, 1, 1, 1)
-    assert position(window.freq_spin) == (3, 1, 1, 1)
-    assert position(window.freq_center) == (4, 1, 1, 1)
-    assert position(window.freq_range) == (5, 1, 1, 1)
-    assert position(window.freq_axis_mode) == (6, 1, 1, 1)
+    assert position(window.pos_geometry_combo) == (1, 1, 1, 1)
+    # Axis (1D) and plane (2D) share one cell; only one is visible.
+    assert position(window.pos_axis_combo) == (2, 1, 1, 1)
+    assert position(window.pos_plane_combo) == (2, 1, 1, 1)
+    assert position(window.pos_spin) == (3, 1, 1, 1)
+    assert position(window.pos_range) == (4, 1, 1, 1)
+    assert position(window.pos2_spin) == (5, 1, 1, 1)
+    assert position(window.pos2_range) == (6, 1, 1, 1)
+    assert position(window.pos_center_widget) == (7, 1, 1, 1)
+    assert position(window.position_summary_label) == (8, 0, 1, 2)
+    assert position(window.freq_spin) == (9, 1, 1, 1)
+    assert position(window.freq_center) == (10, 1, 1, 1)
+    assert position(window.freq_range) == (11, 1, 1, 1)
+    assert position(window.freq_axis_mode) == (12, 1, 1, 1)
 
 
 def test_free_mode_and_slice_explorer_spatial_controls_use_mm():
@@ -915,6 +1043,187 @@ def test_free_mode_analysis_notebook_writes_its_hdf5(tmp_path):
 
     assert save_results.call_args.args[0] == str(tmp_path / "run.h5")
     assert export_notebook.call_args.kwargs["h5_filename"] == "run.h5"
+
+
+def test_free_mode_defaults_to_a_z_line_and_hides_plane_controls():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+
+    assert window.pos_geometry_combo.currentText() == "1D line"
+    assert window.pos_axis_combo.currentText() == "z"
+    assert window.pos_plane_combo.isHidden()
+    assert window.pos2_spin.isHidden() and window.pos2_range.isHidden()
+    assert window.pos_count_label.text() == "Positions along z:"
+    window.pos_spin.setValue(3)
+    np.testing.assert_allclose(
+        window._build_position_grid(), [[0, 0, -0.01], [0, 0, 0], [0, 0, 0.01]]
+    )
+    assert window.position_summary_label.text().startswith(
+        "3 positions (3 along z) × 31 frequencies = 93 spins"
+    )
+
+
+def test_free_mode_line_along_x_with_center_offset():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.pos_axis_combo.setCurrentText("x")
+    window.pos_spin.setValue(3)
+    window.pos_range.setValue(10.0)
+    window.pos_center_z.setValue(2.0)
+
+    assert window.pos_range_label.text() == "Range along x:"
+    np.testing.assert_allclose(
+        window._build_position_grid(),
+        [[-0.005, 0, 0.002], [0, 0, 0.002], [0.005, 0, 0.002]],
+    )
+    parameters = window._collect_simulation_parameters()
+    assert parameters["position_geometry"] == "line"
+    assert parameters["position_axes"] == "x"
+    assert parameters["position_center_mm"] == [0.0, 0.0, 2.0]
+
+
+def test_switching_free_mode_to_a_plane_applies_the_starting_grid():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    index = window.pos_geometry_combo.findText("2D plane")
+    window.pos_geometry_combo.setCurrentIndex(index)
+    window.pos_geometry_combo.activated.emit(index)
+
+    assert window.pos_plane_combo.currentText() == "xy"
+    assert not window.pos_plane_combo.isHidden()
+    assert window.pos_axis_combo.isHidden()
+    assert not window.pos2_spin.isHidden()
+    assert window.pos_axis_label.text() == "Plane:"
+    assert window.pos_count_label.text() == "Positions along x:"
+    assert window.pos2_count_label.text() == "Positions along y:"
+    assert (window.pos_spin.value(), window.pos2_spin.value()) == (12, 12)
+    assert window.freq_spin.value() == 1
+    assert window.position_summary_label.text().startswith(
+        "144 positions (12 × 12 in xy) × 1 frequency = 144 spins"
+    )
+
+    positions = window._build_position_grid()
+    assert positions.shape == (144, 3)
+    np.testing.assert_allclose(positions[:12, 1], -0.01)
+    np.testing.assert_allclose(positions[:12, 0], np.linspace(-0.01, 0.01, 12))
+    assert np.all(positions[:, 2] == 0.0)
+    parameters = window._collect_simulation_parameters()
+    assert parameters["num_positions"] == 144
+    assert parameters["position_geometry"] == "plane"
+    assert parameters["position_axes"] == "xy"
+    assert parameters["position_counts"] == [12, 12]
+
+
+def test_plane_preview_strides_each_axis_and_keeps_the_grid():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.pos_geometry_combo.setCurrentText("2D plane")
+    window.pos_plane_combo.setCurrentText("yz")
+    window.pos_spin.setValue(20)
+    window.pos2_spin.setValue(5)
+
+    positions = window._build_position_grid()
+    preview = window._preview_positions(positions, [20, 5])
+    layout = infer_layout(preview)
+
+    assert layout.plane_name == "yz"
+    assert layout.counts == (7, 5)
+    np.testing.assert_allclose(layout.coordinates[0], positions[:20:3, 1])
+
+
+def test_plane_keeps_its_grid_when_sequence_presets_load():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.pos_geometry_combo.setCurrentText("2D plane")
+    window.pos_spin.setValue(12)
+    window.pos2_spin.setValue(12)
+
+    window.sequence_designer.sequence_type.setCurrentText("Slice Select + Rephase")
+
+    assert (window.pos_spin.value(), window.pos2_spin.value()) == (12, 12)
+
+
+def test_position_geometry_round_trips_through_project_controls():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.pos_geometry_combo.setCurrentText("2D plane")
+    window.pos_plane_combo.setCurrentText("xz")
+    window.pos_spin.setValue(4)
+    window.pos2_spin.setValue(6)
+    window.pos_center_y.setValue(-3.0)
+    state = _capture_widget_state(window)
+
+    restored = BlochSimulatorGUI()
+    _restore_widget_state(restored, state)
+
+    assert restored.pos_geometry_combo.currentText() == "2D plane"
+    assert restored.pos_plane_combo.currentText() == "xz"
+    assert (restored.pos_spin.value(), restored.pos2_spin.value()) == (4, 6)
+    np.testing.assert_allclose(
+        restored._build_position_grid(), window._build_position_grid()
+    )
+    assert not restored.pos2_spin.isHidden()
+
+
+def test_projects_without_position_geometry_open_as_a_z_line(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.pos_spin.setValue(5)
+    path = tmp_path / "current.blochproj"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(path), ""))
+    window.save_project()
+    project = load_project(path)
+    controls = project["state"]["main_controls"]
+    for name in (
+        "pos_geometry_combo",
+        "pos_axis_combo",
+        "pos_plane_combo",
+        "pos2_spin",
+        "pos2_range",
+        "pos_center_x",
+        "pos_center_y",
+        "pos_center_z",
+    ):
+        controls.pop(name, None)
+    legacy_path = tmp_path / "legacy.blochproj"
+    save_project(
+        legacy_path,
+        project["state"],
+        project["phantom"],
+        project["tx_field"],
+        project["rx_field"],
+        project["program"],
+        project["legacy_result"],
+        project["sequence_result"],
+    )
+
+    reopened = BlochSimulatorGUI()
+    reopened.pos_geometry_combo.setCurrentText("2D plane")
+    reopened.pos_center_x.setValue(4.0)
+    reopened.open_project(str(legacy_path))
+
+    assert reopened.pos_geometry_combo.currentText() == "1D line"
+    assert reopened.pos_axis_combo.currentText() == "z"
+    positions = reopened._build_position_grid()
+    assert positions.shape == (5, 3)
+    assert np.all(positions[:, :2] == 0.0)
+
+
+def test_free_mode_position_labels_follow_the_simulated_axis():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.last_positions = build_plane_positions((3, 2), (0.02, 0.01), "xy")
+
+    assert window._position_label(4) == "(x, y) = (0.00, 5.00) mm"
+    assert window._center_position_index() in (1, 4)
+    label, values = window._position_plot_axis()
+    assert label == "Position index (x fastest)" and values is None
+
+    window.last_positions = build_line_positions(3, 0.02, "y")
+    label, values = window._position_plot_axis()
+    assert label == "Position y (mm)"
+    np.testing.assert_allclose(values, [-10.0, 0.0, 10.0])
+    assert window._position_label(2) == "y = 10.00 mm"
 
 
 def test_simulation_controls_have_explanatory_tooltips():
@@ -1170,6 +1479,388 @@ def test_3d_spatial_layout_shows_b1_and_gradient_at_each_position():
     assert not viewer.gradient_bar_plot.visible()
 
 
+def _label_texts(viewer):
+    return [item.text for item in viewer.position_label_items]
+
+
+@pytest.mark.parametrize(("axis", "azimuth"), [("x", -90.0), ("y", 0.0)])
+def test_3d_spatial_line_along_x_or_y_is_a_row_on_its_scene_axis(axis, azimuth):
+    app = QApplication.instance() or QApplication(sys.argv)
+    positions_m = build_line_positions(3, 0.02, axis=axis)
+    viewer = _spatial_viewer(positions_m * 1000.0, 1)
+    column = "xyz".index(axis)
+
+    spacing = 1.0 / viewer.vector_length_spin.value()
+    origins = np.zeros((3, 3))
+    origins[:, column] = [-spacing, 0.0, spacing]
+    np.testing.assert_allclose(viewer._spatial_origins, origins)
+    assert viewer._scene_kind() == "row"
+    # Face-on default camera: x rows from the front, y rows from the side.
+    assert viewer.gl_widget.opts["azimuth"] == pytest.approx(azimuth)
+    assert _label_texts(viewer)[:4] == ["-10.0", "0.0", "10.0", f"{axis} (mm)"]
+    assert viewer.max_positions_label.text() == "Max positions:"
+
+    means = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]])
+    viewer.update_magnetization(means)
+    np.testing.assert_allclose(viewer.position_mean_plot.pos[0::2], origins)
+    np.testing.assert_allclose(viewer.position_mean_plot.pos[1::2], origins + means)
+    viewer.net_vector_checkbox.setChecked(True)
+    assert viewer.mean_vector.transform().column(3)[column] == pytest.approx(
+        -spacing - viewer.NET_GAP
+    )
+
+    # Gradient bars point up from a baseline below the row.
+    gradients = np.zeros((1, 3))
+    gradients[0, column] = 1.0
+    viewer.set_spatial_fields(np.zeros(1), gradients, positions_m)
+    viewer.show_field_frame(0)
+    bases = viewer.gradient_bar_plot.pos[0::2]
+    tips = viewer.gradient_bar_plot.pos[1::2]
+    np.testing.assert_allclose(bases[:, column], origins[:, column])
+    np.testing.assert_allclose(bases[:, 2], viewer.ROW_GRADIENT_Z)
+    np.testing.assert_allclose(
+        tips[:, 2] - bases[:, 2],
+        [-viewer.GRADIENT_BAR_LENGTH, 0.0, viewer.GRADIENT_BAR_LENGTH],
+    )
+    assert viewer.gradient_bar_plot.visible()
+    assert not viewer.gradient_marker_item.visible()
+    assert "G 10.00 mT/m" in viewer.field_label_item.text
+
+
+def test_3d_spatial_plane_draws_a_lattice_on_the_floor():
+    app = QApplication.instance() or QApplication(sys.argv)
+    positions_m = build_plane_positions((3, 2), (0.02, 0.01), "xy")
+    viewer = _spatial_viewer(positions_m * 1000.0, 1)
+
+    spacing = 1.0 / viewer.vector_length_spin.value()
+    xs = np.array([-spacing, 0.0, spacing])
+    ys = np.array([-0.5, 0.5]) * spacing
+    origins = np.column_stack([np.tile(xs, 2), np.repeat(ys, 3), np.zeros(6)])
+    np.testing.assert_allclose(viewer._spatial_origins, origins)
+    assert viewer._scene_kind() == "plane"
+    assert viewer.max_positions_label.text() == "Max per axis:"
+    # The lattice replaces the floor grid; the camera looks from above.
+    assert not viewer.grid_item.visible()
+    assert viewer.gl_widget.opts["elevation"] == pytest.approx(22.0)
+    assert viewer.gl_widget.opts["azimuth"] == pytest.approx(-55.0)
+    lattice = viewer.position_axis_item.pos.reshape(-1, 2, 3)
+    assert len(lattice) == 2 + 3
+    np.testing.assert_allclose(lattice[..., 2], 0.0)
+    texts = _label_texts(viewer)
+    assert texts[:4] == ["-10.0", "0.0", "10.0", "x (mm)"]
+    assert texts[4:7] == ["-5.0", "5.0", "y (mm)"]
+
+    # Mz points up from every lattice point.
+    means = np.tile([0.0, 0.0, 1.0], (6, 1))
+    means[4] = [1.0, 0.0, 0.0]
+    viewer.tip_curve_checkbox.setChecked(True)
+    viewer.update_magnetization(means)
+    np.testing.assert_allclose(viewer.position_mean_plot.pos[1::2], origins + means)
+    # The tip mesh joins neighbours along x and along y.
+    pairs = [(0, 1), (1, 2), (3, 4), (4, 5), (0, 3), (1, 4), (2, 5)]
+    np.testing.assert_allclose(
+        viewer.tip_curve_item.pos,
+        (origins + means)[np.array(pairs)].reshape(-1, 3),
+    )
+    # Position colors follow the first plane axis.
+    colors = viewer._position_colors(6)
+    np.testing.assert_allclose(colors[:3], colors[3:])
+    assert not np.allclose(colors[0], colors[1])
+
+    # G·r is shown as a marker at every origin: blue, gray, red along x.
+    viewer.set_spatial_fields(np.zeros(1), np.array([[1.0, 0.0, 0.0]]), positions_m)
+    viewer.show_field_frame(0)
+    assert viewer.gradient_marker_item.visible()
+    assert not viewer.gradient_bar_plot.visible()
+    assert not viewer.gradient_axis_item.visible()
+    np.testing.assert_allclose(viewer.gradient_marker_item.pos, origins)
+    marker_colors = np.asarray(viewer.gradient_marker_item.color)
+    np.testing.assert_allclose(marker_colors[0], [0.35, 0.55, 1.0, 1.0])
+    np.testing.assert_allclose(marker_colors[1], [0.5, 0.5, 0.5, 1.0])
+    np.testing.assert_allclose(marker_colors[5], [1.0, 0.35, 0.3, 1.0])
+    assert "Gx 10.00 Gy 0.00 mT/m" in viewer.field_label_item.text
+
+    viewer.camera_buttons["Top"].click()
+    assert viewer.gl_widget.opts["elevation"] == pytest.approx(90.0)
+
+    viewer.set_spatial_groups(None)
+    assert viewer.grid_item.visible()
+    assert not viewer.gradient_marker_item.visible()
+    assert viewer.max_positions_label.text() == "Max positions:"
+
+
+@pytest.mark.parametrize(("plane", "azimuth"), [("xz", -90.0), ("yz", 0.0)])
+def test_3d_spatial_upright_plane_keeps_its_scene_axes(plane, azimuth):
+    app = QApplication.instance() or QApplication(sys.argv)
+    positions_m = build_plane_positions((3, 2), (0.02, 0.01), plane)
+    viewer = _spatial_viewer(positions_m * 1000.0, 1)
+
+    horizontal = "xyz".index(plane[0])
+    np.testing.assert_allclose(viewer._spatial_origins[:, 3 - horizontal - 2], 0.0)
+    assert np.ptp(viewer._spatial_origins[:, horizontal]) > 0
+    assert np.ptp(viewer._spatial_origins[:, 2]) > 0
+    assert viewer.gl_widget.opts["azimuth"] == pytest.approx(azimuth)
+    assert viewer.grid_item.visible()
+    # The floor grid sits below the lowest row and its labels.
+    floor = viewer.grid_item.transform().column(3).z()
+    assert floor < viewer._spatial_origins[:, 2].min() - viewer.LABEL_GAP
+
+
+def test_free_mode_vector_view_subsamples_a_plane_per_axis():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    nframes, nfreq = 3, 2
+    positions = build_plane_positions((7, 5), (0.03, 0.02), "xy")
+    npos = len(positions)
+    rng = np.random.default_rng(1)
+    window.anim_vectors_full = rng.normal(size=(nframes, npos, nfreq, 3))
+    window.playback_indices = np.arange(nframes)
+    window.playback_time = np.linspace(0.0, 2e-3, nframes)
+    window.playback_time_ms = window.playback_time * 1000.0
+    window.last_positions = positions
+    window.anim_b1 = np.zeros(nframes, dtype=complex)
+    window.anim_gradients = np.tile([1.0, 0.0, 0.0], (nframes, 1))
+    window.mag_3d.set_selector_limits(npos, nfreq)
+    window.mag_3d.max_positions_spin.setValue(4)
+    window.mag_3d.arrangement_combo.setCurrentText(
+        window.mag_3d.ARRANGEMENT_ALONG_POSITION
+    )
+
+    window._refresh_vector_view(mean_only=False, restart=False)
+
+    shown = infer_layout(positions).grid_indices(4)
+    assert len(shown) == 9
+    np.testing.assert_allclose(
+        window.mag_3d._spatial_positions_mm, positions[shown] * 1000.0
+    )
+    assert window.mag_3d._scene_kind() == "plane"
+    assert window.mag_3d._spatial_layout.counts == (3, 3)
+    assert window.mag_3d.max_positions_label.text() == "Max per axis:"
+    assert window.anim_data.shape == (nframes, len(shown) * nfreq, 3)
+    np.testing.assert_allclose(
+        window.mag_3d._field_offsets,
+        np.tile(positions[shown, 0] * 100.0, (nframes, 1)),
+    )
+
+
+def _plane_result(positions, nframes):
+    """Magnetization whose |Mxy| grows with the x index and phase/Mz with y."""
+    n_first, n_second = infer_layout(positions).counts
+    ix = np.tile(np.arange(n_first), n_second)
+    iy = np.repeat(np.arange(n_second), n_first)
+    scale = np.linspace(0.5, 1.0, nframes)[:, None, None]
+    ones = np.ones((1, 1, 2))
+    amp = scale * (0.2 * ix)[None, :, None] * ones
+    phi = np.radians(40.0 * iy - 60.0)[None, :, None]
+    mz = scale * (-0.5 + 0.4 * iy)[None, :, None] * ones
+    return {"mx": amp * np.cos(phi), "my": amp * np.sin(phi), "mz": mz}, ix, iy
+
+
+def _show_spatial_result(window, positions, result):
+    nframes = result["mx"].shape[0]
+    window.last_positions = positions
+    window.last_result = result
+    window.last_time = np.linspace(0.0, 1e-3, nframes)
+    window.last_frequencies = np.zeros(result["mx"].shape[2])
+    window._precompute_plot_ranges(result)
+    window.update_spatial_plot_from_last_result()
+
+
+def _spatial_curve(plot, name):
+    """Unclipped data of a named curve (the plots clip to their view)."""
+    item = next(item for item in plot.listDataItems() if item.name() == name)
+    return item.xData, item.yData
+
+
+def test_free_mode_spatial_map_shows_plane_and_profile():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    positions = build_plane_positions((4, 3), (0.03, 0.02), "xy")
+    result, ix, iy = _plane_result(positions, nframes=3)
+    _show_spatial_result(window, positions, result)
+
+    assert not window.spatial_profile_controls.isHidden()
+    combo = window.spatial_plot_type
+    assert combo.model().item(combo.findText("Map")).isEnabled()
+    combo.setCurrentText("Map")
+    assert not window.spatial_map_widget.isHidden()
+    assert not window.spatial_mxy_plot.isHidden()
+    assert window.spatial_heatmap_container.isHidden()
+
+    # Images are indexed [y, x]; phase is masked where |Mxy| vanishes (x0)
+    images = {key: item.image for key, item in window.spatial_map_items.items()}
+    np.testing.assert_allclose(images["mxy"], (0.2 * ix).reshape(3, 4))
+    assert np.isnan(images["phase"][:, 0]).all()
+    np.testing.assert_allclose(
+        images["phase"][:, 1:], (40.0 * iy - 60.0).reshape(3, 4)[:, 1:]
+    )
+    np.testing.assert_allclose(images["mz"], (-0.5 + 0.4 * iy).reshape(3, 4))
+    item = window.spatial_map_items["mxy"]
+    rect = item.mapRectToParent(item.boundingRect())
+    assert (rect.left(), rect.top(), rect.width(), rect.height()) == pytest.approx(
+        (-20.0, -15.0, 40.0, 30.0)
+    )
+
+    # Earlier frames keep the levels of the whole result
+    window.update_spatial_plot_from_last_result(time_idx=0)
+    np.testing.assert_allclose(
+        window.spatial_map_items["mxy"].image, 0.5 * (0.2 * ix).reshape(3, 4)
+    )
+    assert window.spatial_map_colorbars["mxy"].levels() == pytest.approx((0.0, 0.6))
+    assert window.spatial_map_colorbars["mz"].levels() == pytest.approx((-0.5, 0.5))
+    assert window.spatial_map_colorbars["phase"].levels() == pytest.approx(
+        (-180.0, 180.0)
+    )
+
+    # The profile starts along x through the grid centre (y = 0)
+    assert window.spatial_profile_label.text() == "y = 0.00 mm"
+    x, y = _spatial_curve(window.spatial_mxy_plot, "|Mxy|")
+    np.testing.assert_allclose(x, [-15.0, -5.0, 5.0, 15.0])
+    np.testing.assert_allclose(y, 0.5 * 0.2 * np.arange(4))
+    assert window.spatial_mxy_plot.getAxis("bottom").labelText == "Position x"
+    marker = window.spatial_map_profile_lines["mxy"][1]
+    assert marker.angle == 0
+    assert marker.value() == pytest.approx(0.0)
+
+    window.spatial_profile_axis.setCurrentIndex(1)
+    assert window.spatial_profile_slider.maximum() == 3
+    assert window.spatial_profile_label.text() == "x = -5.00 mm"
+    x, y = _spatial_curve(window.spatial_mxy_plot, "|Mxy|")
+    np.testing.assert_allclose(x, [-10.0, 0.0, 10.0])
+    np.testing.assert_allclose(y, 0.2)
+    assert window.spatial_mxy_plot.getAxis("bottom").labelText == "Position y"
+    assert marker.angle == 90
+    assert marker.value() == pytest.approx(-5.0)
+
+    export = window._last_spatial_export
+    assert export["position_axis"] == "y"
+    assert export["grid_axes"] == ("x", "y")
+    np.testing.assert_array_equal(export["profile_indices"], [1, 5, 9])
+    np.testing.assert_allclose(export["position_m"], [-0.01, 0.0, 0.01])
+    assert export["mxy_per_freq"].shape == (3, 2)
+    assert export["mz_map"].shape == (3, 4)
+
+
+def test_free_mode_spatial_line_along_x_uses_its_axis():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    plane = build_plane_positions((4, 3), (0.03, 0.02), "xy")
+    _show_spatial_result(window, plane, _plane_result(plane, nframes=2)[0])
+    window.spatial_plot_type.setCurrentText("Map")
+
+    positions = build_line_positions(5, 0.02, "x")
+    amp = np.linspace(0.0, 1.0, 5)[None, :, None] * np.ones((2, 1, 1))
+    result = {"mx": amp, "my": np.zeros_like(amp), "mz": 1.0 - amp}
+    _show_spatial_result(window, positions, result)
+
+    combo = window.spatial_plot_type
+    assert combo.currentText() == "Line"
+    assert not combo.model().item(combo.findText("Map")).isEnabled()
+    assert window.spatial_profile_controls.isHidden()
+    assert window.spatial_map_widget.isHidden()
+    x, y = _spatial_curve(window.spatial_mxy_plot, "|Mxy|")
+    np.testing.assert_allclose(x, [-10.0, -5.0, 0.0, 5.0, 10.0])
+    np.testing.assert_allclose(y, amp[-1, :, 0])
+    assert window.spatial_mz_plot.getAxis("bottom").labelText == "Position x"
+    assert window._last_spatial_export["position_axis"] == "x"
+
+    # Slice-thickness guides belong to the slice-select axis only
+    guides = window.spatial_slice_lines["mxy"]
+    assert not any(line.isVisible() for line in guides)
+    window.sequence_designer.slice_axis_combo.setCurrentText("x")
+    window._refresh_spatial_view()
+    if window.sequence_designer._slice_thickness_m():
+        assert all(line.isVisible() for line in guides)
+
+
+def _read_export_columns(path):
+    """Column names and values of a CSV written by DatasetExporter."""
+    lines = Path(path).read_text().splitlines()
+    header = next(i for i, line in enumerate(lines) if not line.startswith("#"))
+    values = np.loadtxt(path, delimiter=",", skiprows=header + 1, ndmin=2)
+    return lines[header].split(","), values, lines[:header]
+
+
+def test_free_mode_plane_spatial_export_writes_every_grid_position(tmp_path):
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    positions = build_plane_positions((4, 3), (0.03, 0.02), "xy")
+    result, ix, iy = _plane_result(positions, nframes=3)
+    _show_spatial_result(window, positions, result)
+    window.spatial_plot_type.setCurrentText("Map")
+    cache = window._last_spatial_export
+
+    path = window._write_spatial_export(cache, tmp_path / "plane.csv", "csv")
+
+    names, values, header = _read_export_columns(path)
+    assert names == ["x_m", "y_m", "z_m", "mxy", "phase_deg", "mz"]
+    assert "#   grid: 4 x 3 in xy (x fastest)" in header
+    assert f"#   time_s: {cache['time_s']}" in header
+    t = cache["time_idx"]
+    np.testing.assert_allclose(values[:, :3], positions)
+    np.testing.assert_allclose(
+        values[:, 3], np.hypot(result["mx"][t, :, 0], result["my"][t, :, 0])
+    )
+    np.testing.assert_allclose(values[:, 5], result["mz"][t, :, 0])
+    phase = values[:, 4]
+    assert np.isnan(phase[ix == 0]).all()
+    np.testing.assert_allclose(phase[ix > 0], (40.0 * iy - 60.0)[ix > 0])
+
+    # The map panel exports as one image next to the profile plots
+    maps_png = ImageExporter().export_pyqtgraph_plot(
+        window.spatial_map_widget, str(tmp_path / "maps.png"), width=600
+    )
+    assert maps_png and Path(maps_png).stat().st_size > 0
+
+
+def test_free_mode_line_spatial_export_names_its_axis(tmp_path):
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    positions = build_line_positions(5, 0.02, "x")
+    amp = np.linspace(0.0, 1.0, 5)[None, :, None] * np.ones((2, 1, 1))
+    _show_spatial_result(
+        window, positions, {"mx": amp, "my": np.zeros_like(amp), "mz": 1.0 - amp}
+    )
+
+    path = window._write_spatial_export(
+        window._last_spatial_export, tmp_path / "line.csv", "csv"
+    )
+
+    names, values, header = _read_export_columns(path)
+    assert names[:3] == ["position_m", "mxy", "mz"]
+    assert "#   position_axis: x" in header
+    np.testing.assert_allclose(values[:, 0], positions[:, 0])
+    np.testing.assert_allclose(values[:, 1], amp[-1, :, 0])
+
+
+def test_parameter_sweep_records_plane_geometry_and_gradient_lobes():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.pos_geometry_combo.setCurrentText("2D plane")
+    window.pos_plane_combo.setCurrentText("xz")
+    window.pos_spin.setValue(4)
+    window.pos2_spin.setValue(3)
+    window.pos_range.setValue(30.0)
+    window.pos2_range.setValue(20.0)
+    window.pos_center_y.setValue(2.0)
+    designer = window.sequence_designer
+    designer.slice_axis_combo.setCurrentText("y")
+    lobe = GradientLobe(axis="x", start_ms=1.0, duration_ms=2.0)
+    designer.set_gradient_lobes([lobe])
+
+    params = window.param_sweep_widget._constant_params()
+
+    assert params["num_positions"] == 12
+    assert params["position_geometry"] == "plane"
+    assert params["position_axes"] == "xz"
+    assert params["position_counts"] == [4, 3]
+    assert params["position_ranges_mm"] == [30.0, 20.0]
+    assert params["position_center_mm"] == [0.0, 2.0, 0.0]
+    assert params["slice_axis"] == "y"
+    assert params["gradient_lobes"] == [lobe.to_state()]
+    assert json.loads(json.dumps(params)) == params
+
+
 def test_3d_spatial_layout_returns_to_overlay():
     app = QApplication.instance() or QApplication(sys.argv)
     viewer = _spatial_viewer([-1.0, 1.0], 1)
@@ -1247,7 +1938,7 @@ def test_free_mode_vector_view_arranges_subsampled_positions():
 
     shown = window._display_subsample_indices(npos, 5)
     np.testing.assert_allclose(
-        window.mag_3d._spatial_positions_mm, window.last_positions[shown, 2] * 1000
+        window.mag_3d._spatial_positions_mm, window.last_positions[shown] * 1000
     )
     assert window.anim_data.shape == (nframes, len(shown) * nfreq, 3)
     np.testing.assert_allclose(

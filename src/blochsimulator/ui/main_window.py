@@ -6,7 +6,7 @@ import copy
 import re
 import numpy as np
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 
 from PyQt5.QtWidgets import (
     QApplication,
@@ -38,7 +38,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QLineEdit,
 )
-from PyQt5.QtCore import Qt, QSettings, QTimer
+from PyQt5.QtCore import Qt, QRectF, QSettings, QTimer
 from PyQt5.QtGui import QFont, QIcon, QImage, QPalette, QColor
 
 import pyqtgraph as pg
@@ -98,6 +98,14 @@ from .rf_pulse_designer import RFPulseDesigner
 from .sequence_designer import SequenceDesigner
 from .controls import UniversalTimeControl
 from .magnetization_viewer import MagnetizationViewer, centered_stride_indices
+from ..position_sampling import (
+    AXIS_NAMES,
+    PLANES,
+    axis_index,
+    build_positions,
+    infer_layout,
+    plane_axes,
+)
 from .parameter_sweep import ParameterSweepWidget
 from .tutorial_manager import TutorialManager
 from .tutorial_overlay import TutorialOverlay
@@ -117,6 +125,16 @@ from .simulation_explorer import SessionSimulationExplorer
 def _display_time_indices(count, limit=20000):
     """Bound plot data independently of saved or integrated sample counts."""
     return np.unique(np.linspace(0, count - 1, min(count, limit)).astype(int))
+
+
+def _cyclic_colormap():
+    """Colormap whose ends meet, for phase maps (-180° and 180° look alike)."""
+    for name in ("CET-C7", "CET-C6", "hsv"):
+        try:
+            return pg.colormap.get(name)
+        except Exception:
+            continue
+    return None
 
 
 from .styles import (
@@ -240,6 +258,14 @@ class BlochSimulatorGUI(QMainWindow):
     # Isochromats drawn per position when the 3D view arranges spins along
     # their positions; the position means still use every frequency.
     SPATIAL_VECTOR_MAX_FREQUENCIES = 32
+    POSITION_GEOMETRY_LINE = "1D line"
+    POSITION_GEOMETRY_PLANE = "2D plane"
+    # Starting grid when switching to a plane; one frequency keeps a
+    # time-resolved 2D run small and isolates the gradient dephasing.
+    PLANE_DEFAULT_POSITIONS = 12
+    # Largest preview sample count: positions of a line, or per plane axis.
+    PREVIEW_MAX_LINE_POSITIONS = 64
+    PREVIEW_MAX_PLANE_POSITIONS = 8
 
     def __init__(self):
         super().__init__()
@@ -459,18 +485,51 @@ class BlochSimulatorGUI(QMainWindow):
         self.mode_combo.setCurrentText("Time-resolved")
         control_layout.addWidget(self.mode_combo, 0, 1)
 
-        # Positions
-        control_layout.addWidget(QLabel("Positions:"), 1, 0)
+        # Spatial sampling: a line along one axis or a row-major grid in a
+        # plane. Spins at different positions see different fields G·r.
+        control_layout.addWidget(QLabel("Geometry:"), 1, 0)
+        self.pos_geometry_combo = QComboBox()
+        self.pos_geometry_combo.setObjectName("pos_geometry_combo")
+        self.pos_geometry_combo.addItems(
+            [self.POSITION_GEOMETRY_LINE, self.POSITION_GEOMETRY_PLANE]
+        )
+        self.pos_geometry_combo.setToolTip(
+            "Arrange the simulated positions on a 1D line along one axis or on "
+            "a 2D grid in a plane. Positions differ only through the gradient "
+            "field G·r, so x or y positions need x or y gradients."
+        )
+        control_layout.addWidget(self.pos_geometry_combo, 1, 1)
+
+        self.pos_axis_label = QLabel("Axis:")
+        control_layout.addWidget(self.pos_axis_label, 2, 0)
+        self.pos_axis_combo = QComboBox()
+        self.pos_axis_combo.setObjectName("pos_axis_combo")
+        self.pos_axis_combo.addItems(list(AXIS_NAMES))
+        self.pos_axis_combo.setCurrentText("z")
+        self.pos_axis_combo.setToolTip("Physical axis of the 1D line of positions.")
+        control_layout.addWidget(self.pos_axis_combo, 2, 1)
+        self.pos_plane_combo = QComboBox()
+        self.pos_plane_combo.setObjectName("pos_plane_combo")
+        self.pos_plane_combo.addItems(list(PLANES))
+        self.pos_plane_combo.setToolTip(
+            "Physical plane of the 2D grid. The first named axis runs along "
+            "the grid rows, the second across them."
+        )
+        control_layout.addWidget(self.pos_plane_combo, 2, 1)
+
+        self.pos_count_label = QLabel("Positions along z:")
+        control_layout.addWidget(self.pos_count_label, 3, 0)
         self.pos_spin = QSpinBox()
         self.pos_spin.setObjectName("pos_spin")
         self.pos_spin.setRange(1, 1100)
         self.pos_spin.setValue(1)
         self.pos_spin.setToolTip(
-            "Number of spatial positions simulated along the selected range. "
-            "More positions increase runtime and result memory proportionally."
+            "Number of positions along the (first) axis. More positions "
+            "increase runtime and result memory proportionally."
         )
-        control_layout.addWidget(self.pos_spin, 1, 1)
-        control_layout.addWidget(QLabel("Position range (mm):"), 2, 0)
+        control_layout.addWidget(self.pos_spin, 3, 1)
+        self.pos_range_label = QLabel("Range along z:")
+        control_layout.addWidget(self.pos_range_label, 4, 0)
         self.pos_range = QDoubleSpinBox()
         self.pos_range.setObjectName("pos_range")
         self.pos_range.setRange(0.1, 99990.0)
@@ -478,14 +537,86 @@ class BlochSimulatorGUI(QMainWindow):
         self.pos_range.setSingleStep(10.0)
         self.pos_range.setSuffix(" mm")
         self.pos_range.setToolTip(
-            "Total spatial extent in millimeters. Positions are distributed "
-            "evenly across this range."
+            "Total extent along the (first) axis in millimeters. Positions are "
+            "distributed evenly across this range, centered on the center below."
         )
-        control_layout.addWidget(self.pos_range, 2, 1)
+        control_layout.addWidget(self.pos_range, 4, 1)
+
+        self.pos2_count_label = QLabel("Positions along y:")
+        control_layout.addWidget(self.pos2_count_label, 5, 0)
+        self.pos2_spin = QSpinBox()
+        self.pos2_spin.setObjectName("pos2_spin")
+        self.pos2_spin.setRange(1, 1100)
+        self.pos2_spin.setValue(self.PLANE_DEFAULT_POSITIONS)
+        self.pos2_spin.setToolTip(
+            "Number of grid positions along the second axis of the plane. "
+            "The total number of positions is the product of both counts."
+        )
+        control_layout.addWidget(self.pos2_spin, 5, 1)
+        self.pos2_range_label = QLabel("Range along y:")
+        control_layout.addWidget(self.pos2_range_label, 6, 0)
+        self.pos2_range = QDoubleSpinBox()
+        self.pos2_range.setObjectName("pos2_range")
+        self.pos2_range.setRange(0.1, 99990.0)
+        self.pos2_range.setValue(20.0)
+        self.pos2_range.setSingleStep(10.0)
+        self.pos2_range.setSuffix(" mm")
+        self.pos2_range.setToolTip(
+            "Total extent of the grid along the second axis of the plane in "
+            "millimeters."
+        )
+        control_layout.addWidget(self.pos2_range, 6, 1)
+
+        control_layout.addWidget(QLabel("Center (mm):"), 7, 0)
+        self.pos_center_widget = QWidget()
+        center_row = QHBoxLayout(self.pos_center_widget)
+        center_row.setContentsMargins(0, 0, 0, 0)
+        center_row.setSpacing(4)
+        for axis_name in AXIS_NAMES:
+            spin = QDoubleSpinBox()
+            spin.setObjectName(f"pos_center_{axis_name}")
+            spin.setRange(-50000.0, 50000.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(1.0)
+            spin.setValue(0.0)
+            spin.setPrefix(f"{axis_name} ")
+            spin.setToolTip(
+                f"{axis_name} coordinate of the center of the line or plane in "
+                "millimeters, e.g. to place an xy plane outside the excited "
+                "slice."
+            )
+            spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            setattr(self, f"pos_center_{axis_name}", spin)
+            center_row.addWidget(spin)
+        control_layout.addWidget(self.pos_center_widget, 7, 1)
+
+        self.position_summary_label = QLabel()
+        self.position_summary_label.setWordWrap(True)
+        self.position_summary_label.setObjectName("position_summary")
+        control_layout.addWidget(self.position_summary_label, 8, 0, 1, 2)
+
+        self.pos_geometry_combo.currentIndexChanged.connect(
+            self._update_position_geometry_controls
+        )
+        # Only a user's switch to a plane applies the 2D starting grid, not
+        # restoring a project.
+        self.pos_geometry_combo.activated.connect(self._on_position_geometry_activated)
+        for combo in (self.pos_axis_combo, self.pos_plane_combo):
+            combo.currentIndexChanged.connect(self._update_position_geometry_controls)
+        for spin in (
+            self.pos_spin,
+            self.pos_range,
+            self.pos2_spin,
+            self.pos2_range,
+            self.pos_center_x,
+            self.pos_center_y,
+            self.pos_center_z,
+        ):
+            spin.valueChanged.connect(self._update_position_summary)
 
         # Frequency sampling. Keep count on its own row so the labels do not
         # collapse when the left panel is narrow.
-        control_layout.addWidget(QLabel("Frequencies:"), 3, 0)
+        control_layout.addWidget(QLabel("Frequencies:"), 9, 0)
         self.freq_spin = QSpinBox()
         self.freq_spin.setObjectName("freq_spin")
         self.freq_spin.setRange(1, 10000)
@@ -494,9 +625,9 @@ class BlochSimulatorGUI(QMainWindow):
             "Number of off-resonance frequencies to simulate. More samples give "
             "a denser spectrum but increase runtime and RAM usage proportionally."
         )
-        control_layout.addWidget(self.freq_spin, 3, 1)
+        control_layout.addWidget(self.freq_spin, 9, 1)
 
-        control_layout.addWidget(QLabel("Center (Hz):"), 4, 0)
+        control_layout.addWidget(QLabel("Center (Hz):"), 10, 0)
         self.freq_center = QDoubleSpinBox()
         self.freq_center.setObjectName("freq_center")
         self.freq_center.setRange(-1e6, 1e6)
@@ -505,8 +636,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.freq_center.setToolTip(
             "Center frequency of the simulated spin-offset interval in hertz."
         )
-        control_layout.addWidget(self.freq_center, 4, 1)
-        control_layout.addWidget(QLabel("Range (Hz):"), 5, 0)
+        control_layout.addWidget(self.freq_center, 10, 1)
+        control_layout.addWidget(QLabel("Range (Hz):"), 11, 0)
         self.freq_range = QDoubleSpinBox()
         self.freq_range.setObjectName("freq_range")
         self.freq_range.setRange(0.0, 1e4)
@@ -515,10 +646,10 @@ class BlochSimulatorGUI(QMainWindow):
             "Full width of the simulated frequency interval in hertz. For "
             "example, 100 Hz around 0 Hz covers −50 to +50 Hz."
         )
-        control_layout.addWidget(self.freq_range, 5, 1)
+        control_layout.addWidget(self.freq_range, 11, 1)
 
         # Frequency-axis convention and helper text
-        control_layout.addWidget(QLabel("Display axis:"), 6, 0)
+        control_layout.addWidget(QLabel("Display axis:"), 12, 0)
         self.freq_axis_mode = QComboBox()
         self.freq_axis_mode.setObjectName("freq_axis_mode")
         self.freq_axis_mode.addItems(
@@ -528,21 +659,23 @@ class BlochSimulatorGUI(QMainWindow):
             "Choose whether plots show laboratory-frame spin offsets or "
             "detuning relative to the RF carrier frequency."
         )
-        control_layout.addWidget(self.freq_axis_mode, 6, 1)
+        control_layout.addWidget(self.freq_axis_mode, 12, 1)
         self.freq_label = QLabel()
         self.freq_label.setWordWrap(True)
         self.freq_label.setObjectName("frequency_summary")
-        control_layout.addWidget(self.freq_label, 7, 0, 1, 2)
+        control_layout.addWidget(self.freq_label, 13, 0, 1, 2)
         self.freq_spin.valueChanged.connect(self._update_frequency_summary)
+        self.freq_spin.valueChanged.connect(self._update_position_summary)
         self.freq_center.valueChanged.connect(self._update_frequency_summary)
         self.freq_range.valueChanged.connect(self._update_frequency_summary)
         self.freq_axis_mode.currentTextChanged.connect(
             self._on_frequency_axis_mode_changed
         )
         self._update_frequency_summary()
+        self._update_position_geometry_controls()
 
         # Time resolution control
-        control_layout.addWidget(QLabel("Time step (us):"), 8, 0)
+        control_layout.addWidget(QLabel("Time step (us):"), 14, 0)
         self.time_step_spin = QDoubleSpinBox()
         self.time_step_spin.setObjectName("time_step_spin")
         self.time_step_spin.setRange(0.01, 5000)
@@ -556,10 +689,10 @@ class BlochSimulatorGUI(QMainWindow):
             "The saved time step controls result size separately."
         )
         self.time_step_spin.valueChanged.connect(self._update_time_step)
-        control_layout.addWidget(self.time_step_spin, 8, 1)
+        control_layout.addWidget(self.time_step_spin, 14, 1)
 
         # Extra post-sequence simulation time
-        control_layout.addWidget(QLabel("Extra tail (ms):"), 9, 0)
+        control_layout.addWidget(QLabel("Extra tail (ms):"), 15, 0)
         self.extra_tail_spin = QDoubleSpinBox()
         self.extra_tail_spin.setObjectName("extra_tail_spin")
         self.extra_tail_spin.setRange(0.0, 1e6)
@@ -570,10 +703,10 @@ class BlochSimulatorGUI(QMainWindow):
             "Additional simulation time after the sequence in milliseconds. "
             "Useful for observing relaxation or signal decay after the final event."
         )
-        control_layout.addWidget(self.extra_tail_spin, 9, 1)
+        control_layout.addWidget(self.extra_tail_spin, 15, 1)
 
         # Max traces control for performance
-        control_layout.addWidget(QLabel("Max plot traces:"), 10, 0)
+        control_layout.addWidget(QLabel("Max plot traces:"), 16, 0)
         self.max_traces_spin = QSpinBox()
         self.max_traces_spin.setObjectName("max_traces_spin")
         self.max_traces_spin.setRange(1, 500)
@@ -583,9 +716,9 @@ class BlochSimulatorGUI(QMainWindow):
             "Maximum number of individual curves drawn in line plots. This only "
             "limits visualization complexity; it does not reduce simulated data."
         )
-        control_layout.addWidget(self.max_traces_spin, 10, 1)
+        control_layout.addWidget(self.max_traces_spin, 16, 1)
 
-        control_layout.addWidget(QLabel("Saved time step (us):"), 11, 0)
+        control_layout.addWidget(QLabel("Saved time step (us):"), 17, 0)
         self.output_step_spin = QDoubleSpinBox()
         self.output_step_spin.setObjectName("output_step_spin")
         self.output_step_spin.setRange(0.0, 5000.0)
@@ -597,7 +730,7 @@ class BlochSimulatorGUI(QMainWindow):
             "Larger values reduce RAM and export size. Set 0 to save every fixed-raster point. "
             "Choose a spacing fine enough to resolve the fastest magnetization oscillations."
         )
-        control_layout.addWidget(self.output_step_spin, 11, 1)
+        control_layout.addWidget(self.output_step_spin, 17, 1)
         self.adaptive_rf_checkbox = QCheckBox("Adaptive AHP/AFP integration (FID)")
         self.adaptive_rf_checkbox.setObjectName("adaptive_rf_checkbox")
         self.adaptive_rf_checkbox.setChecked(True)
@@ -607,12 +740,17 @@ class BlochSimulatorGUI(QMainWindow):
             "and relaxation all enter the error estimate. RF-free decay is propagated exactly. "
             "Other sequences use the fixed time step."
         )
-        control_layout.addWidget(self.adaptive_rf_checkbox, 12, 0, 1, 2)
+        control_layout.addWidget(self.adaptive_rf_checkbox, 18, 0, 1, 2)
 
         for field in (
             self.mode_combo,
+            self.pos_geometry_combo,
+            self.pos_axis_combo,
+            self.pos_plane_combo,
             self.pos_spin,
             self.pos_range,
+            self.pos2_spin,
+            self.pos2_range,
             self.freq_spin,
             self.freq_center,
             self.freq_range,
@@ -1093,9 +1231,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.spatial_markers_checkbox.setToolTip(
             "Display vertical lines at each position/frequency with 3D-view colors"
         )
-        self.spatial_markers_checkbox.toggled.connect(
-            lambda _: self.update_spatial_plot_from_last_result()
-        )
+        self.spatial_markers_checkbox.toggled.connect(self._refresh_spatial_view)
         spatial_options.addWidget(self.spatial_markers_checkbox)
 
         # Component selector for spatial plot
@@ -1109,7 +1245,7 @@ class BlochSimulatorGUI(QMainWindow):
             ["Magnitude", "Real", "Imaginary"]
         )
         self.spatial_component_combo.selection_changed.connect(
-            lambda: self.update_spatial_plot_from_last_result()
+            self._refresh_spatial_view
         )
         spatial_options.addWidget(self.spatial_component_combo, 1)
         spatial_layout.addLayout(spatial_options)
@@ -1118,7 +1254,9 @@ class BlochSimulatorGUI(QMainWindow):
         spatial_controls.addWidget(QLabel("Plot type:"))
         self.spatial_plot_type = QComboBox()
         self.spatial_plot_type.setObjectName("spatial_plot_type")
-        self.spatial_plot_type.addItems(["Line", "Heatmap"])
+        self.spatial_plot_type.addItems(["Line", "Heatmap", "Map"])
+        # "Map" needs a 2D position grid; enabled once a plane was simulated.
+        self.spatial_plot_type.model().item(2).setEnabled(False)
 
         spatial_controls.addWidget(self.spatial_plot_type)
         spatial_controls.addWidget(QLabel("Heatmap mode:"))
@@ -1127,36 +1265,94 @@ class BlochSimulatorGUI(QMainWindow):
         self.spatial_heatmap_mode.addItems(
             ["Position vs Frequency", "Position vs Time"]
         )
-        self.spatial_heatmap_mode.currentTextChanged.connect(
-            lambda _: self.update_spatial_plot_from_last_result()
-        )
+        self.spatial_heatmap_mode.currentTextChanged.connect(self._refresh_spatial_view)
         spatial_controls.addWidget(self.spatial_heatmap_mode)
 
         self.spatial_plot_type.currentTextChanged.connect(
             lambda text: self._update_spatial_controls_visibility(text)
         )
-        self.spatial_plot_type.currentTextChanged.connect(
-            lambda _: self.update_spatial_plot_from_last_result()
-        )
+        self.spatial_plot_type.currentTextChanged.connect(self._refresh_spatial_view)
 
         spatial_controls.addWidget(QLabel("View:"))
         self.spatial_mode = QComboBox()  # Renamed from spatial_mode to avoid confusion
         self.spatial_mode.setObjectName("spatial_mode")
         self.spatial_mode.addItems(["Individual freq", "Mean over freqs"])
-        self.spatial_mode.currentIndexChanged.connect(
-            self.update_spatial_plot_from_last_result
-        )
+        self.spatial_mode.currentIndexChanged.connect(self._refresh_spatial_view)
         spatial_controls.addWidget(self.spatial_mode)
         self.spatial_freq_slider = QSlider(Qt.Horizontal)
         self.spatial_freq_slider.setObjectName("spatial_freq_slider")
         self.spatial_freq_slider.setRange(0, 0)
-        self.spatial_freq_slider.valueChanged.connect(
-            lambda: self.update_spatial_plot_from_last_result()
-        )
+        self.spatial_freq_slider.valueChanged.connect(self._refresh_spatial_view)
         self.spatial_freq_label = QLabel("Freq: 0.0 Hz")
         spatial_controls.addWidget(self.spatial_freq_label)
         spatial_controls.addWidget(self.spatial_freq_slider)
         spatial_layout.addLayout(spatial_controls)
+
+        # Row or column of a 2D position grid shown by the line plots and
+        # heatmaps (hidden for lines and single points)
+        self.spatial_profile_controls = QWidget()
+        spatial_profile_layout = QHBoxLayout(self.spatial_profile_controls)
+        spatial_profile_layout.setContentsMargins(0, 0, 0, 0)
+        spatial_profile_layout.addWidget(QLabel("Profile along:"))
+        self.spatial_profile_axis = QComboBox()
+        self.spatial_profile_axis.setObjectName("spatial_profile_axis")
+        self.spatial_profile_axis.addItems(["x", "y"])
+        self.spatial_profile_axis.currentIndexChanged.connect(
+            self._refresh_spatial_view
+        )
+        spatial_profile_layout.addWidget(self.spatial_profile_axis)
+        self.spatial_profile_label = QLabel("")
+        spatial_profile_layout.addWidget(self.spatial_profile_label)
+        self.spatial_profile_slider = QSlider(Qt.Horizontal)
+        self.spatial_profile_slider.setObjectName("spatial_profile_slider")
+        self.spatial_profile_slider.setRange(0, 0)
+        self.spatial_profile_slider.valueChanged.connect(self._refresh_spatial_view)
+        spatial_profile_layout.addWidget(self.spatial_profile_slider, 1)
+        self.spatial_profile_controls.hide()
+        spatial_layout.addWidget(self.spatial_profile_controls)
+        self._spatial_profile_state = None
+
+        # |Mxy|, phase and Mz over a 2D position grid (plot type "Map")
+        self.spatial_map_widget = pg.GraphicsLayoutWidget()
+        self.spatial_map_widget.setObjectName("spatial_map_widget")
+        self.spatial_map_widget.setMinimumHeight(300)
+        self.spatial_map_plots = {}
+        self.spatial_map_items = {}
+        self.spatial_map_colorbars = {}
+        self.spatial_map_profile_lines = {}
+        map_specs = (
+            ("mxy", "|Mxy|", None),
+            ("phase", "Phase (°)", _cyclic_colormap()),
+            ("mz", "Mz", pg.colormap.get("CET-D1")),
+        )
+        for column, (key, title, cmap) in enumerate(map_specs):
+            plot = self.spatial_map_widget.addPlot(row=0, col=2 * column)
+            plot.setTitle(title)
+            plot.setAspectLocked(True)
+            item = pg.ImageItem(axisOrder="row-major")
+            plot.addItem(item)
+            colorbar = pg.ColorBarItem(
+                values=(-180.0, 180.0) if key == "phase" else (0.0, 1.0),
+                colorMap=cmap,
+                interactive=False,
+            )
+            colorbar.setImageItem(item)
+            self.spatial_map_widget.addItem(colorbar, row=0, col=2 * column + 1)
+            # A dark line under a light dashed one stays visible on any colour
+            lines = (
+                pg.InfiniteLine(angle=0, pen=pg.mkPen((0, 0, 0, 170), width=3)),
+                pg.InfiniteLine(
+                    angle=0, pen=pg.mkPen((255, 255, 255), width=1.5, style=Qt.DashLine)
+                ),
+            )
+            for line in lines:
+                plot.addItem(line)
+            self.spatial_map_plots[key] = plot
+            self.spatial_map_items[key] = item
+            self.spatial_map_colorbars[key] = colorbar
+            self.spatial_map_profile_lines[key] = lines
+        self.spatial_map_widget.hide()
+        spatial_layout.addWidget(self.spatial_map_widget)
 
         # Mxy and Mz plots side by side
         spatial_plots_layout = QHBoxLayout()
@@ -2000,7 +2196,18 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             (
                 self.spatial_plot_type,
-                "Choose between individual spatial curves and a two-dimensional heatmap.",
+                "Choose between spatial curves, a two-dimensional heatmap and, for a "
+                "2D position grid, maps of |Mxy|, phase and Mz over the plane.",
+            ),
+            (
+                self.spatial_profile_axis,
+                "Plane axis along which the line plots and heatmaps follow the "
+                "position grid.",
+            ),
+            (
+                self.spatial_profile_slider,
+                "Row or column of the position grid shown as a profile; the maps "
+                "mark it with a dashed line.",
             ),
             (
                 self.spatial_heatmap_mode,
@@ -2097,12 +2304,12 @@ class BlochSimulatorGUI(QMainWindow):
             (
                 self.mag_3d.arrangement_combo,
                 "Draw all vectors from one origin, or give each position its own "
-                "origin along a display axis.",
+                "origin along its axis or in its plane.",
             ),
             (
                 self.mag_3d.max_positions_spin,
-                "Largest number of positions drawn along the position axis; more "
-                "positions are evenly subsampled.",
+                "Largest number of positions drawn along the position axis, or "
+                "per axis for a plane; more positions are evenly subsampled.",
             ),
             (
                 self.mag_3d.vector_length_spin,
@@ -2111,8 +2318,9 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             (
                 self.mag_3d.color_by_combo,
-                "Color vectors by position (palette) or by transverse phase; with "
-                "phase, longitudinal vectors fade to white.",
+                "Color vectors by position (palette, along the first axis of a "
+                "plane) or by transverse phase; with phase, longitudinal vectors "
+                "fade to white.",
             ),
             (
                 self.mag_3d.tip_markers_checkbox,
@@ -2120,12 +2328,13 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             (
                 self.mag_3d.tip_curve_checkbox,
-                "Connect the tips of neighboring positions, e.g. to show the phase "
-                "helix after a gradient.",
+                "Connect the tips of neighboring positions (along both axes of a "
+                "plane), e.g. to show the phase helix after a gradient.",
             ),
             (
                 self.mag_3d.net_vector_checkbox,
-                "Draw the mean over all positions and frequencies beside the column.",
+                "Draw the mean over all positions and frequencies beside the "
+                "positions.",
             ),
             (
                 self.mag_3d.b1_field_checkbox,
@@ -2134,9 +2343,10 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             (
                 self.mag_3d.gradient_field_checkbox,
-                "Draw the gradient field G·r at every position as a bar left of "
-                "the column (red positive, blue negative), scaled to the largest "
-                "value of the sequence.",
+                "Draw the gradient field G·r at every position as a bar beside "
+                "the column or row, or as a colored marker in a plane (red "
+                "positive, blue negative), scaled to the largest value of the "
+                "sequence.",
             ),
             (
                 self.tissue_widget.preset_combo,
@@ -2349,6 +2559,171 @@ class BlochSimulatorGUI(QMainWindow):
             return "Effective detuning Δfspin − fRF (Hz)"
         return "Spin offset Δfspin (Hz)"
 
+    def _is_plane_geometry(self) -> bool:
+        return (
+            hasattr(self, "pos_geometry_combo")
+            and self.pos_geometry_combo.currentText() == self.POSITION_GEOMETRY_PLANE
+        )
+
+    def _position_axes(self) -> Tuple[int, ...]:
+        """Physical axes sampled by the position controls, first axis first."""
+        if self._is_plane_geometry():
+            return plane_axes(self.pos_plane_combo.currentText())
+        return (axis_index(self.pos_axis_combo.currentText()),)
+
+    def _position_counts_and_spans_mm(self):
+        counts = [self.pos_spin.value()]
+        spans = [self.pos_range.value()]
+        if self._is_plane_geometry():
+            counts.append(self.pos2_spin.value())
+            spans.append(self.pos2_range.value())
+        return counts, spans
+
+    def _position_center_mm(self) -> np.ndarray:
+        return np.array(
+            [
+                self.pos_center_x.value(),
+                self.pos_center_y.value(),
+                self.pos_center_z.value(),
+            ]
+        )
+
+    def _build_position_grid(self) -> np.ndarray:
+        """Positions (N, 3) in metres from the geometry controls."""
+        counts, spans_mm = self._position_counts_and_spans_mm()
+        return build_positions(
+            self._position_axes(),
+            counts,
+            [span / 1000.0 for span in spans_mm],
+            self._position_center_mm() / 1000.0,
+        )
+
+    def _preview_strides(self, counts):
+        """Position stride per axis of the fast preview run."""
+        limit = (
+            self.PREVIEW_MAX_PLANE_POSITIONS
+            if len(counts) > 1
+            else self.PREVIEW_MAX_LINE_POSITIONS
+        )
+        return [max(1, int(np.ceil(n / limit))) for n in counts]
+
+    def _preview_positions(self, positions: np.ndarray, counts) -> np.ndarray:
+        """Stride a line, or each axis of a plane, for the fast preview run."""
+        strides = self._preview_strides(counts)
+        if len(counts) > 1:
+            grid = positions.reshape(counts[1], counts[0], 3)
+            return grid[:: strides[1], :: strides[0]].reshape(-1, 3)
+        return positions[:: strides[0]]
+
+    def _reset_position_geometry(self):
+        """Return to a line along z through the origin."""
+        self.pos_geometry_combo.setCurrentText(self.POSITION_GEOMETRY_LINE)
+        self.pos_axis_combo.setCurrentText("z")
+        for spin in (self.pos_center_x, self.pos_center_y, self.pos_center_z):
+            spin.setValue(0.0)
+
+    def _update_position_geometry_controls(self, *_):
+        if not hasattr(self, "pos2_range"):
+            return
+        plane = self._is_plane_geometry()
+        self.pos_axis_label.setText("Plane:" if plane else "Axis:")
+        self.pos_axis_combo.setVisible(not plane)
+        self.pos_plane_combo.setVisible(plane)
+        names = [AXIS_NAMES[axis] for axis in self._position_axes()]
+        self.pos_count_label.setText(f"Positions along {names[0]}:")
+        self.pos_range_label.setText(f"Range along {names[0]}:")
+        for widget in (
+            self.pos2_count_label,
+            self.pos2_spin,
+            self.pos2_range_label,
+            self.pos2_range,
+        ):
+            widget.setVisible(plane)
+        if plane:
+            self.pos2_count_label.setText(f"Positions along {names[1]}:")
+            self.pos2_range_label.setText(f"Range along {names[1]}:")
+        self._update_position_summary()
+
+    def _on_position_geometry_activated(self, *_):
+        """Start a plane from a 12 × 12 grid with one frequency."""
+        if not self._is_plane_geometry():
+            return
+        changes = []
+        for spin in (self.pos_spin, self.pos2_spin):
+            if spin.value() == 1:
+                spin.setValue(self.PLANE_DEFAULT_POSITIONS)
+        counts, _ = self._position_counts_and_spans_mm()
+        changes.append(f"{counts[0]} × {counts[1]} positions")
+        if self.freq_spin.value() > 1:
+            self.freq_spin.setValue(1)
+            changes.append("1 frequency")
+        self.statusBar().showMessage(
+            "2D plane: " + ", ".join(changes) + " (adjust freely).", 6000
+        )
+
+    def _update_position_summary(self, *_):
+        if not hasattr(self, "position_summary_label"):
+            return
+        counts, spans_mm = self._position_counts_and_spans_mm()
+        names = [AXIS_NAMES[axis] for axis in self._position_axes()]
+        npos = int(np.prod(counts))
+        nfreq = self.freq_spin.value()
+        grid = " × ".join(str(n) for n in counts)
+        if len(counts) > 1:
+            grid += f" in {''.join(names)}"
+        else:
+            grid += f" along {names[0]}"
+        spacings = [
+            f"Δ{name} = {span / (n - 1):.3g} mm"
+            for name, n, span in zip(names, counts, spans_mm)
+            if n > 1
+        ]
+        text = (
+            f"{npos} position{'s' if npos != 1 else ''} ({grid}) × {nfreq} "
+            f"frequenc{'ies' if nfreq != 1 else 'y'} = {npos * nfreq} spins"
+        )
+        if spacings:
+            text += "; " + ", ".join(spacings)
+        self.position_summary_label.setText(text)
+
+    def _position_layout(self):
+        """Line or plane structure of the last simulated positions."""
+        positions = getattr(self, "last_positions", None)
+        if positions is None or len(positions) == 0:
+            return None
+        return infer_layout(positions)
+
+    def _position_label(self, idx: int) -> str:
+        """Coordinates of one simulated position, e.g. "x = 1.00 mm"."""
+        layout = self._position_layout()
+        if layout is None or idx >= len(self.last_positions):
+            return f"idx {idx}"
+        return layout.label(self.last_positions[idx])
+
+    def _center_position_index(self) -> int:
+        """Index of the simulated position closest to the origin."""
+        positions = getattr(self, "last_positions", None)
+        if positions is None or len(positions) == 0:
+            return 0
+        return int(np.argmin(np.linalg.norm(np.asarray(positions), axis=1)))
+
+    def _position_plot_axis(self):
+        """Axis label and mm coordinates of the positions for 1D plots.
+
+        A plane has no single coordinate axis; it returns an index label and
+        ``None`` so callers plot against the row-major position index.
+        """
+        layout = self._position_layout()
+        if layout is None:
+            return "Position index", None
+        if layout.ndim >= 2:
+            return f"Position index ({layout.axis_names[0]} fastest)", None
+        axis = layout.primary_axis
+        return (
+            f"Position {AXIS_NAMES[axis]} (mm)",
+            np.asarray(self.last_positions)[:, axis] * 1000.0,
+        )
+
     def _update_frequency_summary(self, *_):
         if not hasattr(self, "freq_label"):
             return
@@ -2520,6 +2895,7 @@ class BlochSimulatorGUI(QMainWindow):
                         pass
             cache.clear()
         self._plot_items_initialized = False
+        self._spatial_map_level_cache = None
 
     def _reshape_to_tpf(self, arr: np.ndarray, pos_len: int, freq_len: int):
         """
@@ -2661,9 +3037,13 @@ class BlochSimulatorGUI(QMainWindow):
             self.mag_3d.set_spatial_groups(None)
 
         if spatial:
-            pos_idx = self._display_subsample_indices(
-                npos, self.mag_3d.get_max_display_positions()
-            )
+            # Lines are subsampled along their axis, planes per axis.
+            layout = self._position_layout()
+            limit = self.mag_3d.get_max_display_positions()
+            if layout.ndim >= 1:
+                pos_idx = layout.grid_indices(limit)
+            else:
+                pos_idx = self._display_subsample_indices(npos, limit)
             selected = base_vectors[:, pos_idx]
             if mean_only:
                 position_means = selected.mean(axis=2)
@@ -2683,7 +3063,7 @@ class BlochSimulatorGUI(QMainWindow):
                 net = base_vectors.mean(axis=(1, 2))
             spins_per_position = anim.shape[2]
             self.mag_3d.set_spatial_groups(
-                np.asarray(self.last_positions)[pos_idx, 2] * 1000.0,
+                np.asarray(self.last_positions)[pos_idx] * 1000.0,
                 spins_per_position,
             )
             self.mag_3d.set_spatial_fields(
@@ -3458,6 +3838,7 @@ class BlochSimulatorGUI(QMainWindow):
             getattr(self, "spectrum_heatmap_colorbar", None),
             getattr(self, "spatial_heatmap_mxy_colorbar", None),
             getattr(self, "spatial_heatmap_mz_colorbar", None),
+            getattr(self, "spatial_map_colorbars", {}).get("mxy"),
         ]:
             _set_cb(cb)
 
@@ -3475,6 +3856,7 @@ class BlochSimulatorGUI(QMainWindow):
                 getattr(self, "spectrum_heatmap_item", None),
                 getattr(self, "spatial_heatmap_mxy_item", None),
                 getattr(self, "spatial_heatmap_mz_item", None),
+                getattr(self, "spatial_map_items", {}).get("mxy"),
             ]:
                 if img is not None and hasattr(img, "setLookupTable"):
                     try:
@@ -3533,20 +3915,10 @@ class BlochSimulatorGUI(QMainWindow):
 
             # If current value is out of range or we just switched, try to set to 0 cm
             if slider.value() > max_idx:
-                target = (
-                    _get_zero_idx(self.last_positions[:, 2] * 1000)
-                    if self.last_positions is not None
-                    else 0
-                )
-                slider.setValue(target)
+                slider.setValue(self._center_position_index())
 
             idx = slider.value()
-            pos_val = (
-                self.last_positions[idx, 2] * 1000
-                if self.last_positions is not None and idx < len(self.last_positions)
-                else idx
-            )
-            self.mag_view_selector_label.setText(f"Pos: {pos_val:.2f} mm")
+            self.mag_view_selector_label.setText(f"Pos: {self._position_label(idx)}")
         else:
             slider.setRange(0, 0)
             slider.setEnabled(False)
@@ -3596,12 +3968,7 @@ class BlochSimulatorGUI(QMainWindow):
             max_idx = max(0, npos - 1)
             prefix = "Pos"
             idx = min(slider.value(), max_idx)
-            pos_val = (
-                self.last_positions[idx, 2] * 1000
-                if self.last_positions is not None and idx < len(self.last_positions)
-                else idx
-            )
-            label_text = f"{prefix}: {pos_val:.2f} mm"
+            label_text = f"{prefix}: {self._position_label(idx)}"
         else:
             max_idx = 0
             prefix = "All"
@@ -3746,12 +4113,39 @@ class BlochSimulatorGUI(QMainWindow):
             )
             mz_pos = mz_display[:, freq_sel]
 
-        # Choose a signed position axis (prefer the axis with largest span)
-        pos_axis = self.last_positions
-        spans = np.ptp(pos_axis, axis=0)  # max - min per axis
-        axis_idx = int(np.argmax(spans))
-        pos_distance_m = pos_axis[:, axis_idx]
+        # A line is plotted against its own axis; a plane is shown as maps
+        # plus a profile through one row or column of the grid.
+        positions = np.asarray(self.last_positions)
+        layout = self._position_layout()
+        plane = (
+            layout
+            if layout is not None
+            and layout.ndim >= 2
+            and layout.is_grid
+            and layout.size == mx_display.shape[0]
+            else None
+        )
+        self._sync_spatial_profile_controls(plane)
+        plane_maps = None
+        if plane is not None:
+            profile, axis_idx = self._spatial_profile_indices(plane)
+            plane_maps = (
+                mxy_pos,
+                self._spatial_phase_deg(
+                    mx_display, my_display, freq_sel, spatial_view_mode
+                ),
+                mz_pos,
+            )
+            mx_display, my_display, mz_display = (
+                values[profile] for values in (mx_display, my_display, mz_display)
+            )
+            mxy_pos, mz_pos = mxy_pos[profile], mz_pos[profile]
+        else:
+            profile = slice(None)
+            axis_idx = layout.primary_axis if layout is not None else 2
+        pos_distance_m = positions[profile, axis_idx]
         pos_distance_mm = pos_distance_m * 1000.0
+        axis_name = AXIS_NAMES[axis_idx]
 
         self.log_message(
             f"Spatial plot: mxy_pos shape = {mxy_pos.shape}, mz_pos shape = {mz_pos.shape}, pos_distance shape = {pos_distance_m.shape}"
@@ -3785,7 +4179,20 @@ class BlochSimulatorGUI(QMainWindow):
             "mz_per_freq": mz_display,
             "frequency_axis": freq_axis,
             "heatmap_mode": None,
+            "position_axis": axis_name,
+            "frequency_view": spatial_view_mode,
         }
+        if plane is not None:
+            self._last_spatial_export.update(
+                {
+                    "grid_axes": plane.axis_names,
+                    "grid_coordinates_m": plane.coordinates,
+                    "profile_indices": profile,
+                    "mxy_map": plane.reshape(plane_maps[0]),
+                    "phase_map_deg": plane.reshape(plane_maps[1]),
+                    "mz_map": plane.reshape(plane_maps[2]),
+                }
+            )
 
         # Update plots
         plot_type = (
@@ -3798,16 +4205,21 @@ class BlochSimulatorGUI(QMainWindow):
             if hasattr(self, "spatial_heatmap_mode")
             else "Position vs Frequency"
         )
-        show_heatmap = plot_type == "Heatmap"
-        self._set_spatial_plot_visibility(show_heatmap)
-        if show_heatmap:
+        view = {"Heatmap": "heatmap", "Map": "map"}.get(plot_type, "line")
+        if plane is None and view == "map":
+            view = "line"
+        self._set_spatial_plot_visibility(view)
+        self._set_spatial_position_label(f"Position {axis_name}")
+        if view == "map":
+            self._update_spatial_maps(plane, *plane_maps)
+        if view == "heatmap":
             # Heatmap mode
             if heatmap_mode == "Position vs Time" and is_time_resolved:
                 mxy_time = np.sqrt(
-                    self.spatial_mx_time_series[:, :, freq_sel] ** 2
-                    + self.spatial_my_time_series[:, :, freq_sel] ** 2
+                    self.spatial_mx_time_series[:, profile, freq_sel] ** 2
+                    + self.spatial_my_time_series[:, profile, freq_sel] ** 2
                 )
-                mz_time = self.spatial_mz_time_series[:, :, freq_sel]
+                mz_time = self.spatial_mz_time_series[:, profile, freq_sel]
                 self._last_spatial_export.update(
                     {
                         "heatmap_mode": "time",
@@ -3838,7 +4250,11 @@ class BlochSimulatorGUI(QMainWindow):
                     freq_axis,
                 )
         else:
-            # Line plot mode
+            # Line plot mode (also the profile below the maps)
+            slice_axis_combo = getattr(self.sequence_designer, "slice_axis_combo", None)
+            slice_axis = (
+                slice_axis_combo.currentText() if slice_axis_combo is not None else "z"
+            )
             self._update_spatial_line_plots(
                 pos_distance_mm,
                 mxy_pos,
@@ -3848,7 +4264,16 @@ class BlochSimulatorGUI(QMainWindow):
                 mz_display,
                 freq_sel,
                 spatial_view_mode,
+                slice_guides=axis_name == slice_axis,
             )
+            if plane is not None:
+                where = self.spatial_profile_label.text()
+                self.spatial_mxy_plot.setTitle(
+                    f"Transverse Magnetization along {axis_name} at {where}"
+                )
+                self.spatial_mz_plot.setTitle(
+                    f"Longitudinal Magnetization along {axis_name} at {where}"
+                )
 
         # Keep sequence diagram in sync but avoid time cursors on spatial (position) axes
         if hasattr(self, "spatial_mxy_time_line"):
@@ -3866,14 +4291,188 @@ class BlochSimulatorGUI(QMainWindow):
                     if not self.sequence_designer.playhead_line.isVisible():
                         self.sequence_designer.playhead_line.show()
 
-    def _set_spatial_plot_visibility(self, show_heatmap: bool):
-        """Toggle between line plots and heatmaps in the Spatial view."""
+    def _refresh_spatial_view(self, *_):
+        """Redraw the Spatial tab at the current playback time."""
+        if self.last_result is None or self.last_positions is None:
+            return
+        self.update_spatial_plot_from_last_result(
+            time_idx=self._current_playback_index()
+        )
+
+    def _sync_spatial_profile_controls(self, plane):
+        """Match the "Map" plot type and the profile controls to the grid.
+
+        ``plane`` is the layout of a 2D position grid, or None for lines and
+        single points (the controls are then hidden and "Map" disabled).
+        """
+        map_index = self.spatial_plot_type.findText("Map")
+        self.spatial_plot_type.model().item(map_index).setEnabled(plane is not None)
+        if plane is None and self.spatial_plot_type.currentIndex() == map_index:
+            self.spatial_plot_type.blockSignals(True)
+            self.spatial_plot_type.setCurrentText("Line")
+            self.spatial_plot_type.blockSignals(False)
+            self._update_spatial_controls_visibility("Line")
+        self.spatial_profile_controls.setVisible(plane is not None)
+        if plane is None:
+            self._spatial_profile_state = None
+            return
+
+        combo, slider = self.spatial_profile_axis, self.spatial_profile_slider
+        names = list(plane.axis_names)
+        combo.blockSignals(True)
+        slider.blockSignals(True)
+        try:
+            if [combo.itemText(i) for i in range(combo.count())] != names:
+                along = combo.currentIndex()
+                combo.clear()
+                combo.addItems(names)
+                combo.setCurrentIndex(min(max(along, 0), 1))
+            across = 1 - combo.currentIndex()
+            coords = np.asarray(plane.coordinates[across])
+            slider.setRange(0, coords.size - 1)
+            state = (plane.axes, plane.counts, across)
+            if state != self._spatial_profile_state:
+                # A new grid or profile axis starts at the grid centre
+                middle = 0.5 * (coords.min() + coords.max())
+                slider.setValue(int(np.argmin(np.abs(coords - middle))))
+                self._spatial_profile_state = state
+        finally:
+            combo.blockSignals(False)
+            slider.blockSignals(False)
+        self.spatial_profile_label.setText(
+            f"{AXIS_NAMES[plane.axes[across]]} = "
+            f"{coords[slider.value()] * 1000.0:.2f} mm"
+        )
+
+    def _spatial_profile_indices(self, plane):
+        """Flat position indices and world axis of the selected profile."""
+        along = min(max(self.spatial_profile_axis.currentIndex(), 0), 1)
+        n_first, n_second = plane.counts
+        index = self.spatial_profile_slider.value()
+        if along == 0:
+            indices = min(index, n_second - 1) * n_first + np.arange(n_first)
+        else:
+            indices = min(index, n_first - 1) + n_first * np.arange(n_second)
+        return indices, plane.axes[along]
+
+    def _spatial_phase_deg(self, mx, my, freq_sel, view_mode):
+        """Transverse phase per position in degrees, NaN where |Mxy| vanishes.
+
+        "Mean over freqs" takes the phase of the mean transverse vector,
+        like the phase line plot.
+        """
+        if view_mode == "Mean over freqs":
+            transverse = np.mean(mx + 1j * my, axis=1)
+        else:
+            transverse = mx[:, freq_sel] + 1j * my[:, freq_sel]
+        phase = np.degrees(np.angle(transverse))
+        mxy_max, _ = self._spatial_map_levels()
+        phase[np.abs(transverse) < 1e-3 * mxy_max] = np.nan
+        return phase
+
+    def _spatial_map_levels(self):
+        """Largest |Mxy| and |Mz| of the whole result, for fixed map levels.
+
+        The maps keep these levels while the time slider moves, so colours
+        stay comparable between frames.
+        """
+        cached = getattr(self, "_spatial_map_level_cache", None)
+        if cached is not None and cached[0] is self.last_result:
+            return cached[1]
+        mx, my, mz = (np.asarray(self.last_result[key]) for key in ("mx", "my", "mz"))
+        rows = mx.shape[0] if mx.ndim == 3 else 1
+        mx, my, mz = (values.reshape(rows, -1) for values in (mx, my, mz))
+        # Chunk over time to bound the temporary |Mxy| array
+        step = max(1, 2_000_000 // max(mx.shape[1], 1))
+        mxy_max = mz_max = 0.0
+        for start in range(0, rows, step):
+            block = slice(start, start + step)
+            mxy_max = max(mxy_max, float(np.nanmax(np.hypot(mx[block], my[block]))))
+            mz_max = max(mz_max, float(np.nanmax(np.abs(mz[block]))))
+        levels = (max(mxy_max, 1e-6), max(mz_max, 1e-6))
+        self._spatial_map_level_cache = (self.last_result, levels)
+        return levels
+
+    def _update_spatial_maps(self, plane, mxy, phase_deg, mz):
+        """Draw |Mxy|, phase and Mz over the position grid."""
+        mxy_max, mz_max = self._spatial_map_levels()
+        first_mm, second_mm = plane.coordinates_mm()
+        images = {
+            "mxy": plane.reshape(mxy),
+            "phase": plane.reshape(phase_deg),
+            "mz": plane.reshape(mz),
+        }
+        # Image rows run along the second axis, columns along the first; sort
+        # both ascending so the image rectangle maps straight onto them.
+        if first_mm[-1] < first_mm[0]:
+            first_mm = first_mm[::-1]
+            images = {key: image[:, ::-1] for key, image in images.items()}
+        if second_mm[-1] < second_mm[0]:
+            second_mm = second_mm[::-1]
+            images = {key: image[::-1] for key, image in images.items()}
+        step_first = (first_mm[-1] - first_mm[0]) / (first_mm.size - 1)
+        step_second = (second_mm[-1] - second_mm[0]) / (second_mm.size - 1)
+        rect = QRectF(
+            first_mm[0] - 0.5 * step_first,
+            second_mm[0] - 0.5 * step_second,
+            step_first * first_mm.size,
+            step_second * second_mm.size,
+        )
+        levels = {
+            "mxy": (0.0, mxy_max),
+            "phase": (-180.0, 180.0),
+            "mz": (-mz_max, mz_max),
+        }
+        along = min(max(self.spatial_profile_axis.currentIndex(), 0), 1)
+        across_mm = plane.coordinates_mm()[1 - along]
+        profile_at = float(
+            across_mm[min(self.spatial_profile_slider.value(), across_mm.size - 1)]
+        )
+        frame = (rect.getRect(), plane.axis_names)
+        new_frame = frame != getattr(self, "_spatial_map_frame", None)
+        self._spatial_map_frame = frame
+        for key, item in self.spatial_map_items.items():
+            item.setImage(
+                np.ascontiguousarray(images[key], dtype=float),
+                autoLevels=False,
+                levels=levels[key],
+            )
+            item.setRect(rect)
+            self.spatial_map_colorbars[key].setLevels(levels[key])
+            for line in self.spatial_map_profile_lines[key]:
+                line.setAngle(0 if along == 0 else 90)
+                line.setValue(profile_at)
+            if new_frame:
+                plot = self.spatial_map_plots[key]
+                plot.setLabel("bottom", plane.axis_names[0], "mm")
+                plot.setLabel("left", plane.axis_names[1], "mm")
+                plot.setRange(rect=rect, padding=0.02)
+
+    def _set_spatial_position_label(self, text):
+        """Name the position axis of the Spatial line plots and heatmaps."""
+        if text == getattr(self, "_spatial_position_label", None):
+            return
+        self._spatial_position_label = text
+        for plot in (
+            self.spatial_mxy_plot,
+            self.spatial_mz_plot,
+            self.spatial_heatmap_mxy,
+            self.spatial_heatmap_mz,
+        ):
+            plot.setLabel("bottom", text, "mm")
+
+    def _set_spatial_plot_visibility(self, view: str):
+        """Show the line plots ("line"), the heatmaps ("heatmap") or the plane
+        maps with the profile line plots below them ("map")."""
+        show_lines = view in ("line", "map")
         if hasattr(self, "spatial_heatmap_container"):
-            self.spatial_heatmap_container.setVisible(show_heatmap)
+            self.spatial_heatmap_container.setVisible(view == "heatmap")
+        if hasattr(self, "spatial_map_widget"):
+            self.spatial_map_widget.setVisible(view == "map")
         if hasattr(self, "spatial_mxy_plot"):
-            self.spatial_mxy_plot.setVisible(not show_heatmap)
+            self.spatial_mxy_plot.setVisible(show_lines)
         if hasattr(self, "spatial_mz_plot"):
-            self.spatial_mz_plot.setVisible(not show_heatmap)
+            self.spatial_mz_plot.setVisible(show_lines)
         # Hide Mz plot when showing ONLY phase (wrapped or unwrapped)
         selected = self.spatial_component_combo.get_selected_items()
         if len(selected) > 0 and all(
@@ -3891,8 +4490,13 @@ class BlochSimulatorGUI(QMainWindow):
         mz_display=None,
         freq_sel=0,
         spatial_mode="Mean only",
+        slice_guides=True,
     ):
-        """Update the Mxy and Mz line plots."""
+        """Update the Mxy and Mz line plots.
+
+        ``slice_guides`` marks the slice thickness; it only makes sense when
+        the plotted position axis is the slice-select axis.
+        """
         try:
             # Safely clear plots while preserving persistent items
             persistent_mxy = [self.spatial_mxy_time_line] + self.spatial_slice_lines[
@@ -4169,7 +4773,12 @@ class BlochSimulatorGUI(QMainWindow):
                 slice_thk = self.sequence_designer._slice_thickness_m()
             except Exception:
                 slice_thk = None
-            if slice_thk is not None and slice_thk > 0 and np.isfinite(slice_thk):
+            if (
+                slice_guides
+                and slice_thk is not None
+                and slice_thk > 0
+                and np.isfinite(slice_thk)
+            ):
                 center = float(np.median(position))
                 half_mm = slice_thk * 500.0
                 positions = [center - half_mm, center + half_mm]
@@ -4396,7 +5005,6 @@ class BlochSimulatorGUI(QMainWindow):
                 img_item.setRect(pos_min, t_min, x_span, t_span)
                 plot_widget.setXRange(pos_min, pos_max, padding=0)
                 plot_widget.setYRange(t_min, t_max, padding=0)
-                plot_widget.setLabel("bottom", "Position", "mm")
                 plot_widget.setLabel("left", "Time", "ms")
                 plot_widget.setTitle(title)
                 if colorbar is not None:
@@ -4506,11 +5114,13 @@ class BlochSimulatorGUI(QMainWindow):
             self.sequence_designer.ssfp_alternate_phase.setChecked(
                 presets["ssfp_alternate_phase"]
             )
-        # Optional simulation grid presets
-        if "num_positions" in presets:
-            self.pos_spin.setValue(int(presets["num_positions"]))
-        if "position_range_cm" in presets:
-            self.pos_range.setValue(float(presets["position_range_cm"]) * 10.0)
+        # Optional simulation grid presets. They describe a 1D line, so a
+        # 2D plane keeps its grid when the sequence type changes.
+        if not self._is_plane_geometry():
+            if "num_positions" in presets:
+                self.pos_spin.setValue(int(presets["num_positions"]))
+            if "position_range_cm" in presets:
+                self.pos_range.setValue(float(presets["position_range_cm"]) * 10.0)
         if "num_frequencies" in presets:
             self.freq_spin.setValue(int(presets["num_frequencies"]))
         if "frequency_center_hz" in presets:
@@ -4524,6 +5134,7 @@ class BlochSimulatorGUI(QMainWindow):
         for widget in widgets_to_block:
             widget.blockSignals(False)
         self._update_frequency_summary()
+        self._update_position_summary()
 
         # Force regeneration of the current pulse (Excitation) to match the new presets
         self.rf_designer.update_pulse()
@@ -5635,13 +6246,9 @@ class BlochSimulatorGUI(QMainWindow):
         else:
             self.last_pulse_range = None
 
-        npos = self.pos_spin.value()
-        pos_span_mm = self.pos_range.value()
-        span_m = pos_span_mm / 1000.0
-        half_span = span_m / 2.0
-        positions = np.zeros((npos, 3))
-        if npos > 1:
-            positions[:, 2] = np.linspace(-half_span, half_span, npos)
+        positions = self._build_position_grid()
+        npos = positions.shape[0]
+        position_counts, _ = self._position_counts_and_spans_mm()
 
         frequencies = self._build_frequency_axis()
         nfreq = frequencies.size
@@ -5652,11 +6259,15 @@ class BlochSimulatorGUI(QMainWindow):
             and self.status_preview_checkbox.isChecked()
         )
         if preview_on:
-            prev_stride = max(1, int(np.ceil(npos / 64)))
             freq_stride = max(1, int(np.ceil(nfreq / 16)))
-            if prev_stride > 1:
-                positions = positions[::prev_stride]
-                npos = positions.shape[0]
+            positions = self._preview_positions(positions, position_counts)
+            npos = positions.shape[0]
+            position_counts = [
+                len(range(0, n, stride))
+                for n, stride in zip(
+                    position_counts, self._preview_strides(position_counts)
+                )
+            ]
             if freq_stride > 1:
                 frequencies = frequencies[::freq_stride]
                 nfreq = frequencies.shape[0]
@@ -5685,6 +6296,7 @@ class BlochSimulatorGUI(QMainWindow):
                 "mode": "time-resolved" if mode == 2 else "endpoint",
                 "time_step_us": dt_s * 1e6,
                 "num_positions": int(positions.shape[0]),
+                "position_counts": list(position_counts),
                 "num_frequencies": int(frequencies.size),
                 "position_axis": np.array(positions, copy=True),
                 "frequency_axis": np.array(frequencies, copy=True),
@@ -5910,13 +6522,11 @@ class BlochSimulatorGUI(QMainWindow):
             if hasattr(self, "spatial_freq_slider"):
                 self.spatial_freq_slider.setValue(f_idx)
 
-            p_idx = _get_zero_idx(
-                (
-                    self.last_positions[:, 2] * 1000
-                    if self.last_positions is not None
-                    else None
-                ),
-                pos_len,
+            p_idx = (
+                self._center_position_index()
+                if self.last_positions is not None
+                and len(self.last_positions) == pos_len
+                else 0
             )
             if hasattr(self, "spectrum_pos_slider"):
                 self.spectrum_pos_slider.setValue(p_idx)
@@ -6251,7 +6861,11 @@ class BlochSimulatorGUI(QMainWindow):
             project_nucleus = self.tissue_widget.get_nucleus()
             self.rf_designer.set_state(state.get("rf", {}))
             self.sequence_designer.set_state(state.get("sequence", {}))
-            _restore_widget_state(self, state.get("main_controls", {}))
+            main_controls = state.get("main_controls", {})
+            if "pos_geometry_combo" not in main_controls:
+                # Projects from before 2D sampling simulated a line along z.
+                self._reset_position_geometry()
+            _restore_widget_state(self, main_controls)
 
             # Instantiate lazy workspaces before assigning their stored objects.
             if getattr(self, "phantom_widget", None) is None:
@@ -6789,7 +7403,9 @@ class BlochSimulatorGUI(QMainWindow):
                         [
                             "Pos_Index",
                             "Freq_Index",
-                            "Position_m",
+                            "Position_x_m",
+                            "Position_y_m",
+                            "Position_z_m",
                             "Frequency_Hz",
                             "Mx",
                             "My",
@@ -6800,9 +7416,9 @@ class BlochSimulatorGUI(QMainWindow):
 
                     npos, nfreq = mx_final.shape
                     positions = (
-                        self.last_positions[:, 2]
+                        np.asarray(self.last_positions)
                         if self.last_positions is not None
-                        else np.zeros(npos)
+                        else np.zeros((npos, 3))
                     )
                     frequencies = (
                         self.last_frequencies
@@ -6811,7 +7427,7 @@ class BlochSimulatorGUI(QMainWindow):
                     )
 
                     for p in range(npos):
-                        pos_val = positions[p] if p < len(positions) else 0
+                        pos_val = positions[p] if p < len(positions) else np.zeros(3)
                         for f_idx in range(nfreq):
                             freq_hz_val = (
                                 frequencies[f_idx] if f_idx < len(frequencies) else 0
@@ -6825,7 +7441,7 @@ class BlochSimulatorGUI(QMainWindow):
                                 [
                                     p,
                                     f_idx,
-                                    pos_val,
+                                    *(float(v) for v in pos_val),
                                     freq_hz_val,
                                     val_mx,
                                     val_my,
@@ -6966,6 +7582,12 @@ class BlochSimulatorGUI(QMainWindow):
                 "mode": self.mode_combo.currentText(),
                 "num_pos": self.pos_spin.value(),
                 "pos_range_mm": self.pos_range.value(),
+                "pos_geometry": self.pos_geometry_combo.currentText(),
+                "pos_axis": self.pos_axis_combo.currentText(),
+                "pos_plane": self.pos_plane_combo.currentText(),
+                "num_pos_2": self.pos2_spin.value(),
+                "pos_range_2_mm": self.pos2_range.value(),
+                "pos_center_mm": self._position_center_mm().tolist(),
                 "num_freq": self.freq_spin.value(),
                 "freq_center": self.freq_center.value(),
                 "freq_range": self.freq_range.value(),
@@ -6993,7 +7615,12 @@ class BlochSimulatorGUI(QMainWindow):
                 and self.sequence_designer.sequence_type.currentText()
                 == "Free Induction Decay"
             ),
-            "num_positions": self.pos_spin.value(),
+            "num_positions": int(np.prod(self._position_counts_and_spans_mm()[0])),
+            "position_geometry": "plane" if self._is_plane_geometry() else "line",
+            "position_axes": "".join(AXIS_NAMES[a] for a in self._position_axes()),
+            "position_counts": list(self._position_counts_and_spans_mm()[0]),
+            "position_ranges_mm": list(self._position_counts_and_spans_mm()[1]),
+            "position_center_mm": self._position_center_mm().tolist(),
             "position_range_mm": self.pos_range.value(),
             "position_range_cm": self.pos_range.value() / 10.0,
             "num_frequencies": self.freq_spin.value(),
@@ -7015,15 +7642,7 @@ class BlochSimulatorGUI(QMainWindow):
         if hasattr(self, "last_positions") and self.last_positions is not None:
             params["position_axis"] = self.last_positions
         else:
-            # Reconstruct from range if missing but requested
-            npos = self.pos_spin.value()
-            pos_span_mm = self.pos_range.value()
-            span_m = pos_span_mm / 1000.0
-            half_span = span_m / 2.0
-            positions = np.zeros((npos, 3))
-            if npos > 1:
-                positions[:, 2] = np.linspace(-half_span, half_span, npos)
-            params["position_axis"] = positions
+            params["position_axis"] = self._build_position_grid()
 
         if hasattr(self, "last_frequencies") and self.last_frequencies is not None:
             params["frequency_axis"] = self.last_frequencies
@@ -7166,10 +7785,8 @@ class BlochSimulatorGUI(QMainWindow):
             min(self.spectrum_pos_slider.value(), pos_count - 1) if pos_count > 0 else 0
         )
 
-        actual_pos_mm = 0.0
         if self.last_positions is not None and pos_sel < len(self.last_positions):
-            actual_pos_mm = self.last_positions[pos_sel, 2] * 1000
-            self.spectrum_pos_label.setText(f"Pos: {actual_pos_mm:.3f} mm")
+            self.spectrum_pos_label.setText(f"Pos: {self._position_label(pos_sel)}")
         else:
             self.spectrum_pos_label.setText(f"Pos idx: {pos_sel}")
 
@@ -8840,16 +9457,31 @@ class BlochSimulatorGUI(QMainWindow):
                     width=params["width"],
                 )
 
-                if result_mxy and result_mz:
+                results = {"Mxy": result_mxy, "Mz": result_mz}
+                if not self.spatial_map_widget.isHidden():
+                    maps_path = (
+                        base_path.parent / f"{base_path.stem}_maps{base_path.suffix}"
+                    )
+                    results["Maps"] = exporter.export_pyqtgraph_plot(
+                        self.spatial_map_widget,
+                        str(maps_path),
+                        format=params["format"],
+                        width=params["width"],
+                    )
+
+                if all(results.values()):
                     self.log_message(
-                        f"Exported spatial plots to:\n  {result_mxy}\n  {result_mz}"
+                        "Exported spatial plots to:\n"
+                        + "\n".join(f"  {path}" for path in results.values())
                     )
                     QMessageBox.information(
                         self,
                         "Export Successful",
-                        f"Spatial plots exported successfully:\n\n"
-                        f"Mxy: {Path(result_mxy).name}\n"
-                        f"Mz: {Path(result_mz).name}",
+                        "Spatial plots exported successfully:\n\n"
+                        + "\n".join(
+                            f"{name}: {Path(path).name}"
+                            for name, path in results.items()
+                        ),
                     )
                 else:
                     self.log_message("Export failed")
@@ -8892,15 +9524,7 @@ class BlochSimulatorGUI(QMainWindow):
         if not path:
             return
         try:
-            result_path = self.dataset_exporter.export_spatial(
-                position,
-                mxy,
-                mz,
-                str(path),
-                format=fmt,
-                mxy_per_freq=cache.get("mxy_per_freq"),
-                mz_per_freq=cache.get("mz_per_freq"),
-            )
+            result_path = self._write_spatial_export(cache, path, fmt)
             self.log_message(f"Spatial data exported to {result_path}")
             QMessageBox.information(
                 self,
@@ -8912,6 +9536,40 @@ class BlochSimulatorGUI(QMainWindow):
             QMessageBox.critical(
                 self, "Export Error", f"Could not export spatial data:\n{e}"
             )
+
+    def _write_spatial_export(self, cache: dict, path, fmt: str) -> str:
+        """Write the Spatial tab data: a plane as maps over all grid
+        positions, a line as profiles along its axis."""
+        if cache.get("frequency_view") == "Mean over freqs":
+            frequency = "mean over frequencies"
+        else:
+            frequency = f"index {cache.get('freq_index', 0)}"
+        info = {"time_s": cache.get("time_s"), "frequency": frequency}
+        if "mxy_map" in cache:
+            ny, nx = cache["mxy_map"].shape
+            first, second = cache["grid_axes"]
+            info["grid"] = f"{nx} x {ny} in {first}{second} ({first} fastest)"
+            info["phase_deg"] = "NaN where |Mxy| < 0.1 % of its maximum"
+            return self.dataset_exporter.export_spatial_plane(
+                self.last_positions,
+                cache["mxy_map"],
+                cache["phase_map_deg"],
+                cache["mz_map"],
+                str(path),
+                format=fmt,
+                metadata={"spatial": info},
+            )
+        info["position_axis"] = cache.get("position_axis", "z")
+        return self.dataset_exporter.export_spatial(
+            cache["position_m"],
+            cache["mxy"],
+            cache["mz"],
+            str(path),
+            format=fmt,
+            mxy_per_freq=cache.get("mxy_per_freq"),
+            mz_per_freq=cache.get("mz_per_freq"),
+            metadata={"spatial": info},
+        )
 
     def _update_mag_heatmaps(self):
         """Update magnetization heatmaps (Time vs Position/Frequency)."""
@@ -8986,14 +9644,11 @@ class BlochSimulatorGUI(QMainWindow):
             my_slice = my_all[:, :, fi]
             mz_slice = mz_all[:, :, fi]
 
-            y_label = "Position (mm)"
             n_y = npos
-            if self.last_positions is not None:
-                # Assume Z-axis varying
-                pos_vals = self.last_positions[:, 2] * 1000
+            y_label, pos_vals = self._position_plot_axis()
+            if pos_vals is not None and len(pos_vals) == npos:
                 y_min, y_max = pos_vals[0], pos_vals[-1]
             else:
-                y_label = "Position Index"
                 y_min, y_max = 0, npos
 
         elif view_mode == "Freqs @ position":
@@ -9158,13 +9813,11 @@ class BlochSimulatorGUI(QMainWindow):
             fi = min(selector, nfreq - 1)
             signal_slice = signal_all[:, :, fi]  # (ntime, npos)
 
-            y_label = "Position (mm)"
             n_y = npos
-            if self.last_positions is not None:
-                pos_vals = self.last_positions[:, 2] * 1000
+            y_label, pos_vals = self._position_plot_axis()
+            if pos_vals is not None and len(pos_vals) == npos:
                 y_min, y_max = pos_vals[0], pos_vals[-1]
             else:
-                y_label = "Position Index"
                 y_min, y_max = 0, npos
 
         elif view_mode == "Freqs @ position":

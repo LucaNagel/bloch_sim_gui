@@ -32,6 +32,20 @@ from pathlib import Path
 from . import __version__
 
 
+_CENTRAL_POSITION_CODE = """positions_mm = np.asarray(data['positions']) * 1000
+sampled_axes = [i for i in range(3) if np.ptp(positions_mm[:, i]) > 0] or [2]
+# Spin nearest the centre of the sampled line or plane
+position_idx = int(np.argmin(
+    np.linalg.norm(positions_mm - positions_mm.mean(axis=0), axis=1)
+))
+freq_idx = len(data['frequencies']) // 2
+pos_label = ', '.join(
+    f"{'xyz'[i]} = {positions_mm[position_idx, i]:.2f} mm" for i in sampled_axes
+)
+freq_hz = data['frequencies'][freq_idx]
+"""
+
+
 class NotebookExporter:
     """Generate Jupyter notebooks from Bloch Simulator parameters."""
 
@@ -149,9 +163,12 @@ class NotebookExporter:
             configured_pulse_type = excitation_state.get(
                 "pulse_type", configured_pulse_type
             )
+        # The regenerated FID has no gradients, so extra gradient lobes keep
+        # the exact waveforms, which contain them.
         regenerate_fid = (
             "free induction" in type_lower
             and str(configured_pulse_type or "gaussian").lower() != "custom"
+            and not raw.get("gradient_lobes")
         )
         if regenerate_fid:
             for key in (
@@ -269,6 +286,9 @@ class NotebookExporter:
         ):
             raw.pop("slice_thickness", None)
             raw.pop("slice_gradient", None)
+            raw.pop("slice_axis", None)
+        if not raw.get("gradient_lobes"):
+            raw.pop("gradient_lobes", None)
         if "slice select" not in type_lower:
             raw.pop("rephase_pct", None)
 
@@ -782,9 +802,20 @@ ds = xr.Dataset(
     data_vars,
     coords=coords
 )
-# Add constant params as attrs
+# Add constant params as attrs; nested settings (e.g. gradient lobes) are
+# kept as JSON text so the dataset can still be written to netCDF.
+def _attr_value(value):
+    if isinstance(value, (list, tuple)) and value and all(
+        isinstance(item, (int, float)) for item in value
+    ):
+        return list(value)
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value)
+    return value
+
+
 if constant_params:
-    ds.attrs.update(constant_params)
+    ds.attrs.update({{k: _attr_value(v) for k, v in constant_params.items()}})
 
 print('Xarray Dataset created:')
 print(ds)"""
@@ -802,9 +833,9 @@ if constant_params:
     for k, v in sorted(constant_params.items()):
         if k in ['t1', 't2', 't2_star', 'density', 'name', 'tissue_name']:
             categories['Tissue'].append((k, v))
-        elif k in ['te', 'tr', 'flip_angle', 'sequence_type']:
+        elif k in ['te', 'tr', 'flip_angle', 'sequence_type', 'slice_axis', 'gradient_lobes']:
             categories['Sequence'].append((k, v))
-        elif k in ['num_positions', 'num_frequencies', 'time_step_us']:
+        elif k in ['num_positions', 'num_frequencies', 'time_step_us'] or k.startswith('position_'):
             categories['Simulation'].append((k, v))
         else:
             categories['Other'].append((k, v))
@@ -1286,15 +1317,10 @@ if data['mx'].ndim == 3:  # Time-resolved
 
     def _generate_magnetization_plot_code(self) -> str:
         """Generate magnetization plotting code."""
-        return """# Plot magnetization evolution
-# Always choose central index for position and frequency
-position_idx = data['positions'].shape[0] // 2
-freq_idx = len(data['frequencies']) // 2
-
-# Get actual values for title
-pos_z_mm = data['positions'][position_idx, 2] * 1000
-freq_hz = data['frequencies'][freq_idx]
-
+        return (
+            "# Plot magnetization evolution of the central position and frequency\n"
+            + _CENTRAL_POSITION_CODE
+            + """
 if data['mx'].ndim == 3:  # Time-resolved
     time_ms = data['time'] * 1000
     mx = data['mx'][:, position_idx, freq_idx]
@@ -1328,24 +1354,21 @@ if data['mx'].ndim == 3:  # Time-resolved
     axes[1, 1].set_title('Transverse Magnitude')
     axes[1, 1].grid(True, alpha=0.3)
 
-    plt.suptitle(f'Magnetization Evolution - Pos: {pos_z_mm:.2f} mm, Freq: {freq_hz:.1f} Hz',
+    plt.suptitle(f'Magnetization Evolution - {pos_label}, Freq: {freq_hz:.1f} Hz',
                  fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.show()
 else:
     print("Endpoint data - no time evolution to plot")
 """
+        )
 
     def _generate_signal_plot_code(self) -> str:
         """Generate signal plotting code."""
-        return """# Plot signal
-# Re-use central indices
-position_idx = data['positions'].shape[0] // 2
-freq_idx = len(data['frequencies']) // 2
-
-pos_z_mm = data['positions'][position_idx, 2] * 1000
-freq_hz = data['frequencies'][freq_idx]
-
+        return (
+            "# Plot the signal of the central position and frequency\n"
+            + _CENTRAL_POSITION_CODE
+            + """
 if data['signal'].ndim == 3:  # Time-resolved
     signal = data['signal'][:, position_idx, freq_idx]
     time_ms = data['time'] * 1000
@@ -1366,13 +1389,14 @@ if data['signal'].ndim == 3:  # Time-resolved
     axes[1].set_title('Signal Magnitude')
     axes[1].grid(True, alpha=0.3)
 
-    plt.suptitle(f'MRI Signal - Pos: {pos_z_mm:.2f} mm, Freq: {freq_hz:.1f} Hz',
+    plt.suptitle(f'MRI Signal - {pos_label}, Freq: {freq_hz:.1f} Hz',
                  fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.show()
 else:
     print("Endpoint data - no time evolution to plot")
 """
+        )
 
     def _generate_spatial_profile_code(self) -> str:
         """Generate spatial profile plotting code."""
@@ -1390,24 +1414,60 @@ elif data['mz'].ndim == 2:
     my = data['my'][:, freq_idx]
 
 mxy = np.sqrt(mx**2 + my**2)
-z_pos = data['positions'][:, 2] * 1000  # Convert to mm
-
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-ax1.plot(z_pos, mz, 'go-', linewidth=2, markersize=6)
-ax1.set_xlabel('Position (mm)')
-ax1.set_ylabel('Mz')
-ax1.set_title('Longitudinal Magnetization Profile')
-ax1.grid(True, alpha=0.3)
-ax1.axhline(y=0, color='k', linestyle='--', alpha=0.3)
-
-ax2.plot(z_pos, mxy, 'mo-', linewidth=2, markersize=6)
-ax2.set_xlabel('Position (mm)')
-ax2.set_ylabel('|Mxy|')
-ax2.set_title('Transverse Magnetization Profile')
-ax2.grid(True, alpha=0.3)
-
+positions_mm = np.asarray(data['positions']) * 1000
+sampled_axes = [i for i in range(3) if np.ptp(positions_mm[:, i]) > 0] or [2]
 freq = data['frequencies'][freq_idx]
+
+# A plane is stored row-major: its first axis varies fastest.
+n_first = 0
+if len(sampled_axes) == 2:
+    first = next(i for i in sampled_axes if positions_mm[1, i] != positions_mm[0, i])
+    second = next(i for i in sampled_axes if i != first)
+    n_first = int(np.argmax(positions_mm[:, second] != positions_mm[0, second]))
+
+if n_first > 1 and len(positions_mm) % n_first == 0:
+    shape = (len(positions_mm) // n_first, n_first)
+    extent = [
+        positions_mm[0, first], positions_mm[n_first - 1, first],
+        positions_mm[0, second], positions_mm[-1, second],
+    ]
+    phase = np.degrees(np.arctan2(my, mx))
+    # Phase is undefined without transverse magnetization
+    phase[mxy < 1e-3 * max(mxy.max(), 1e-12)] = np.nan
+    mz_lim = max(np.abs(mz).max(), 1e-6)
+    maps = [
+        (mxy, '|Mxy|', 'viridis', 0.0, max(mxy.max(), 1e-6)),
+        (phase, 'Phase (°)', 'twilight', -180.0, 180.0),
+        (mz, 'Mz', 'RdBu_r', -mz_lim, mz_lim),
+    ]
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
+    for ax, (values, title, cmap, vmin, vmax) in zip(axes, maps):
+        image = ax.imshow(
+            values.reshape(shape), origin='lower', extent=extent,
+            cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest',
+        )
+        ax.set_xlabel(f"{'xyz'[first]} (mm)")
+        ax.set_ylabel(f"{'xyz'[second]} (mm)")
+        ax.set_title(title)
+        fig.colorbar(image, ax=ax)
+else:
+    axis = sampled_axes[0]
+    pos = positions_mm[:, axis]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    ax1.plot(pos, mz, 'go-', linewidth=2, markersize=6)
+    ax1.set_xlabel(f"Position {'xyz'[axis]} (mm)")
+    ax1.set_ylabel('Mz')
+    ax1.set_title('Longitudinal Magnetization Profile')
+    ax1.grid(True, alpha=0.3)
+    ax1.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+
+    ax2.plot(pos, mxy, 'mo-', linewidth=2, markersize=6)
+    ax2.set_xlabel(f"Position {'xyz'[axis]} (mm)")
+    ax2.set_ylabel('|Mxy|')
+    ax2.set_title('Transverse Magnetization Profile')
+    ax2.grid(True, alpha=0.3)
+
 plt.suptitle(f'Spatial Profile - Frequency: {freq:.1f} Hz',
              fontsize=14, fontweight='bold')
 plt.tight_layout()
@@ -1497,6 +1557,7 @@ print(f"  T1: {tissue.t1*1000:.1f} ms, T2: {tissue.t2*1000:.1f} ms")
         if "Free Induction Decay" in seq_type:
             return """# Create Free Induction Decay (FID) sequence
 # Analytic pulses are regenerated from the editable canonical RF parameters.
+# Custom pulses and FIDs with extra gradient lobes use the exported arrays.
 rf_params = sequence_params.get('sequence_role_pulses', {}).get('Excitation')
 if rf_params is None:
     rf_params = sequence_params.get('rf_designer_snapshot', {})
@@ -1519,7 +1580,10 @@ rf_slr_sharpness = int(rf_params.get('slr_sharpness', 1))
 rf_apodization = rf_params.get('apodization', 'None')
 
 dt = float(simulation_params.get('time_step_us', 1.0)) * 1e-6
-if rf_design_type == 'custom':
+use_exported_waveforms = rf_design_type == 'custom' or (
+    sequence_params.get('sequence_definition_source') == 'exact_exported_waveforms'
+)
+if use_exported_waveforms:
     b1 = np.asarray(sequence_params.get('b1_waveform_g'), dtype=complex).copy()
     time = np.asarray(sequence_params.get('time_waveform_s'), dtype=float).copy()
     gradients_value = sequence_params.get('gradients_waveform_g_per_cm')
@@ -1529,7 +1593,7 @@ if rf_design_type == 'custom':
         else np.asarray(gradients_value, dtype=float).copy()
     )
     if b1.ndim != 1 or time.ndim != 1 or b1.shape != time.shape:
-        raise ValueError('The exported custom RF waveform is missing or invalid.')
+        raise ValueError('The exported FID waveform is missing or invalid.')
 else:
     rf_points = max(32, int(np.ceil(rf_duration_s / dt)))
     if rf_design_type == 'sinc':

@@ -70,8 +70,8 @@ class ImageExporter:
 
         Parameters
         ----------
-        plot_widget : pg.PlotWidget
-            The plot widget to export
+        plot_widget : pg.PlotWidget or pg.GraphicsLayoutWidget
+            The plot widget to export; a layout widget exports all its plots
         filename : str
             Output filename (extension determines format if not specified)
         format : str
@@ -96,10 +96,14 @@ class ImageExporter:
 
             # Ensure parent directory exists
             filepath.parent.mkdir(parents=True, exist_ok=True)
+            if hasattr(plot_widget, "plotItem"):
+                item = plot_widget.plotItem
+            else:
+                item = plot_widget.ci
 
             if format == "png":
                 # Use ImageExporter for PNG
-                exporter = PgImageExporter(plot_widget.plotItem)
+                exporter = PgImageExporter(item)
 
                 # Set resolution
                 if width is None:
@@ -112,14 +116,14 @@ class ImageExporter:
 
             elif format == "svg":
                 # Use SVGExporter for vector format
-                exporter = PgSVGExporter(plot_widget.plotItem)
+                exporter = PgSVGExporter(item)
                 exporter.export(str(filepath))
 
             elif format == "pdf":
                 # PyQtGraph doesn't have native PDF export, convert SVG to PDF
                 # For now, we'll use the SVG exporter and let the user convert
                 # A future enhancement could use reportlab or similar
-                exporter = PgSVGExporter(plot_widget.plotItem)
+                exporter = PgSVGExporter(item)
                 svg_path = filepath.with_suffix(".svg")
                 exporter.export(str(svg_path))
 
@@ -1317,4 +1321,30 @@ class DatasetExporter:
             mz_arr = np.asarray(mz_per_freq)
             for fi in range(mz_arr.shape[1]):
                 columns[f"mz_f{fi}"] = mz_arr[:, fi]
+        return self._write_columns(columns, filename, format=format, metadata=metadata)
+
+    def export_spatial_plane(
+        self,
+        positions: np.ndarray,
+        mxy: np.ndarray,
+        phase_deg: np.ndarray,
+        mz: np.ndarray,
+        filename: str,
+        format: str = "csv",
+        metadata: Optional[Dict] = None,
+    ) -> str:
+        """Export maps over a plane of positions, one row per grid position.
+
+        ``positions`` is ``(N, 3)`` in metres; the maps hold ``N`` values in
+        the same (row-major) order, in any shape.
+        """
+        positions = np.asarray(positions, dtype=float).reshape(-1, 3)
+        columns: Dict[str, np.ndarray] = {
+            "x_m": positions[:, 0],
+            "y_m": positions[:, 1],
+            "z_m": positions[:, 2],
+            "mxy": np.asarray(mxy).ravel(),
+            "phase_deg": np.asarray(phase_deg).ravel(),
+            "mz": np.asarray(mz).ravel(),
+        }
         return self._write_columns(columns, filename, format=format, metadata=metadata)

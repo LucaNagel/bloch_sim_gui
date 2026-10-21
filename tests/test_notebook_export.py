@@ -461,6 +461,145 @@ def test_sweep_notebook_exposes_saved_axes_as_xarray_coordinates(tmp_path, monke
     assert dataset.attrs["time_step_us"] == 20.0
 
 
+def _run_plot_code(code, data):
+    """Execute generated plotting code headless and return its figure."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plt.close("all")
+    namespace = {"np": np, "plt": plt, "data": data}
+    exec(compile(code, "<notebook cell>", "exec"), namespace)
+    return plt.gcf(), namespace
+
+
+def _magnetization_data(positions, nt=3, nf=2):
+    n = len(positions)
+    mx = np.arange(nt * n * nf, dtype=float).reshape(nt, n, nf) / (nt * n * nf)
+    return {
+        "positions": positions,
+        "frequencies": np.linspace(-50.0, 50.0, nf),
+        "time": np.arange(nt) * 1e-3,
+        "mx": mx,
+        "my": np.zeros_like(mx),
+        "mz": 1.0 - mx,
+        "signal": mx + 0j,
+    }
+
+
+def test_spatial_profile_code_maps_a_position_plane():
+    from blochsimulator.position_sampling import build_plane_positions
+
+    positions = build_plane_positions((4, 3), (0.03, 0.02), "xy")
+    data = _magnetization_data(positions)
+    data["mx"][-1, :, 0] = np.where(positions[:, 0] > 0, 0.5, 0.0)
+
+    fig, _ = _run_plot_code(NotebookExporter()._generate_spatial_profile_code(), data)
+
+    map_axes = [ax for ax in fig.axes if ax.images]
+    assert [ax.get_title() for ax in map_axes] == ["|Mxy|", "Phase (°)", "Mz"]
+    assert all(ax.get_xlabel() == "x (mm)" for ax in map_axes)
+    assert all(ax.get_ylabel() == "y (mm)" for ax in map_axes)
+    mxy, phase, mz = (np.asarray(ax.images[0].get_array()) for ax in map_axes)
+    assert mxy.shape == (3, 4)
+    np.testing.assert_allclose(mxy, data["mx"][-1, :, 0].reshape(3, 4))
+    np.testing.assert_allclose(mz, data["mz"][-1, :, 0].reshape(3, 4))
+    # Phase is blank wherever there is no transverse magnetization
+    assert np.isnan(phase[:, :2]).all() and np.allclose(phase[:, 2:], 0.0)
+    np.testing.assert_allclose(map_axes[0].images[0].get_extent(), [-15, 15, -10, 10])
+
+
+def test_spatial_profile_code_plots_a_line_along_its_axis():
+    from blochsimulator.position_sampling import build_line_positions
+
+    positions = build_line_positions(5, 0.02, "x")
+    data = _magnetization_data(positions)
+
+    fig, _ = _run_plot_code(NotebookExporter()._generate_spatial_profile_code(), data)
+
+    assert [ax.get_xlabel() for ax in fig.axes] == ["Position x (mm)"] * 2
+    np.testing.assert_allclose(fig.axes[0].lines[0].get_xdata(), positions[:, 0] * 1e3)
+
+
+def test_evolution_plots_use_the_spin_at_the_plane_centre():
+    from blochsimulator.position_sampling import build_plane_positions
+
+    positions = build_plane_positions((5, 3), (0.04, 0.02), "xy")
+    data = _magnetization_data(positions)
+    exporter = NotebookExporter()
+
+    for code in (
+        exporter._generate_magnetization_plot_code(),
+        exporter._generate_signal_plot_code(),
+    ):
+        fig, namespace = _run_plot_code(code, data)
+        assert namespace["position_idx"] == 7
+        assert namespace["pos_label"] == "x = 0.00 mm, y = 0.00 mm"
+        assert namespace["pos_label"] in fig._suptitle.get_text()
+
+
+def test_sweep_notebook_keeps_position_geometry_and_gradient_lobes(
+    tmp_path, monkeypatch
+):
+    import json
+    import nbformat
+    from blochsimulator.position_sampling import build_plane_positions
+
+    data_path = tmp_path / "sweep_plane.npz"
+    notebook_path = tmp_path / "sweep_plane.ipynb"
+    positions = build_plane_positions((2, 2), (0.01, 0.01), "xy")
+    lobes = [{"axis": "x", "start_ms": 1.0, "duration_ms": 2.0, "amplitude": 0.5}]
+    np.savez(
+        data_path,
+        parameter_name="TR (ms)",
+        parameter_values=np.array([8.0, 9.0]),
+        constant_params=json.dumps(
+            {
+                "num_positions": 4,
+                "position_geometry": "plane",
+                "position_axes": "xy",
+                "position_counts": [2, 2],
+                "position_center_mm": [0.0, 0.0, 0.0],
+                "slice_axis": "z",
+                "gradient_lobes": lobes,
+            }
+        ),
+        positions=positions,
+        frequencies=np.array([0.0]),
+        Signal=np.zeros((2, 4, 1), dtype=complex),
+    )
+    export_notebook(
+        mode="sweep",
+        filename=str(notebook_path),
+        data_filename=data_path.name,
+        param_name="TR (ms)",
+        metrics=["Signal"],
+        is_dynamic=False,
+    )
+
+    notebook = nbformat.read(notebook_path, as_version=4)
+    cells = [
+        cell.source
+        for cell in notebook.cells
+        if cell.cell_type == "code"
+        and ("coordinate_keys" in cell.source or "dimension_lengths" in cell.source)
+    ]
+    monkeypatch.chdir(tmp_path)
+    namespace = {"np": np, "json": json, "xr": __import__("xarray"), "Path": Path}
+    for source in cells:
+        exec(compile(source, str(notebook_path), "exec"), namespace)
+    attrs = namespace["ds"].attrs
+
+    assert attrs["position_geometry"] == "plane"
+    assert attrs["position_axes"] == "xy"
+    assert list(attrs["position_counts"]) == [2, 2]
+    assert list(attrs["position_center_mm"]) == [0.0, 0.0, 0.0]
+    assert json.loads(attrs["gradient_lobes"]) == lobes
+    # netCDF only takes scalars, strings and flat numeric lists as attributes
+    namespace["xr"].Dataset(attrs=attrs).to_netcdf(tmp_path / "sweep_plane.nc")
+
+
 def helper_notebook_execution(nb_file):
     """
     Test that notebook can be executed (requires jupyter/nbconvert).
