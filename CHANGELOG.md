@@ -73,6 +73,12 @@ The project follows [Semantic Versioning](https://semver.org/).
   without generating the sequence; the last generated placement stays as a
   dotted outline. A notice says that timing and k-space are not regenerated
   yet and offers to generate the sequence.
+- Generated FLASH takes read and phase offsets that move the FOV centre in
+  the sequence itself: the ADC frequency offset shifts the read FOV and the
+  receiver phase per phase-encoding step shifts the phase FOV, so the
+  exported `.seq` carries them too (`ReadOffset`/`PhaseOffset` definitions).
+  Image coordinates, DICOM, NIfTI and Bruker export, the Geometry tab and its
+  coverage notes follow the shifted centre.
 
 ### Changed
 

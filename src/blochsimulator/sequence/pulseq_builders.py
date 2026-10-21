@@ -2410,6 +2410,8 @@ def make_pulseq_flash(
     slice_gap_m: float = 0.0,
     n_slices: int = 1,
     slice_offset_m: float = 0.0,
+    read_offset_m: float = 0.0,
+    phase_offset_m: float = 0.0,
     echo_time_s: float = 5e-3,
     repetition_time_s: float = 15e-3,
     repetitions: int = 1,
@@ -2432,6 +2434,11 @@ def make_pulseq_flash(
     same pulse. ``selection_level='tr'`` is supported explicitly for advanced
     experiments and is labelled with Pulseq ``SET`` values, but it mixes
     spectral contrasts within k-space and does not imply separated images.
+
+    ``read_offset_m`` and ``phase_offset_m`` move the FOV centre along the
+    logical read and phase axes. They are encoded in the ADC events as on a
+    scanner: a receiver frequency offset for read and a per-line phase ramp
+    for phase, so the reconstruction stays a centred FFT.
     """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -2463,8 +2470,13 @@ def make_pulseq_flash(
     }.items():
         if not np.isfinite(value) or value < 0:
             raise ValueError(f"{name} must be non-negative and finite")
-    if not np.isfinite(slice_offset_m):
-        raise ValueError("slice_offset_m must be finite")
+    for name, value in {
+        "slice_offset_m": slice_offset_m,
+        "read_offset_m": read_offset_m,
+        "phase_offset_m": phase_offset_m,
+    }.items():
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
     if not np.isfinite(rf_spoiling_increment_deg):
         raise ValueError("rf_spoiling_increment_deg must be finite")
     rf_spoiling = _uses_rf_spoiling(rf_spoiling, rf_spoiling_increment_deg)
@@ -2619,6 +2631,10 @@ def make_pulseq_flash(
         delay=gx_read.rise_time + flat_time / 2.0 - adc_duration / 2.0,
         system=system,
     )
+    # The receiver phase 2*pi*k*offset moves the FOV centre; k_read is zero at
+    # the ADC centre and grows with the read gradient amplitude in Hz/m.
+    adc.freq_offset = float(read_offset_m) * (n_read / fov_read) / adc_duration
+    adc_center = adc.delay + adc_duration / 2.0
     logical_read_area = logical_gradient_area(gx_read, encoding_frame, "read")
     gx_pre = make_role_trapezoid(
         pp,
@@ -2789,7 +2805,11 @@ def make_pulseq_flash(
                     np.deg2rad(rf_phase_deg)
                     - 2.0 * np.pi * total_rf_frequency_offset_hz * rf_center
                 )
-                adc.phase_offset = np.deg2rad(rf_phase_deg)
+                adc.phase_offset = pulseq_phase_offset_rad(
+                    rf_phase_deg + 360.0 * float(phase_area) * phase_offset_m,
+                    frequency_offset_hz=adc.freq_offset,
+                    event_center_s=adc_center,
+                )
                 gy_phase = make_role_trapezoid(
                     pp,
                     encoding_frame,
@@ -2893,6 +2913,8 @@ def make_pulseq_flash(
     sequence.set_definition("SliceThickness", slice_thickness_m)
     sequence.set_definition("SliceGap", slice_gap_m)
     sequence.set_definition("SliceOffset", float(slice_offset_m))
+    sequence.set_definition("ReadOffset", float(read_offset_m))
+    sequence.set_definition("PhaseOffset", float(phase_offset_m))
     sequence.set_definition(
         "SlicePositions", [float(value) for value in slice_positions]
     )
