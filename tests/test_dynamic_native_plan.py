@@ -632,3 +632,56 @@ def test_native_multi_pool_plan_supports_untracked_inflow_modes(
         np.testing.assert_allclose(
             getattr(native, name), getattr(reference, name), rtol=2e-13, atol=2e-13
         )
+
+
+@pytest.mark.parametrize("sequence_kernel", ("optimized", "native_serial"))
+def test_dynamic_flash_without_timestep_uses_native_rf_raster(
+    tmp_path, sequence_kernel
+):
+    pytest.importorskip("pypulseq")
+    from blochsimulator.sequence import load_pulseq, make_pulseq_flash
+
+    phantom, _program, _raster = _native_plan_fixture()
+    sequence = make_pulseq_flash(
+        fov_m=phantom.fov[:2],
+        matrix=(4, 2),
+        sampling_bandwidth_hz=20_000.0,
+        flip_angle_deg=10.0,
+        rf_duration_s=0.5e-3,
+        slice_thickness_m=phantom.fov[2],
+        nucleus="C13",
+    )
+    path = tmp_path / "flash.seq"
+    sequence.write(str(path), v141_compat=True)
+    program = load_pulseq(path)
+    assert program.rf_events[0].raster_s == pytest.approx(1e-6)
+
+    simulator = BlochSimulator(use_parallel=False)
+    native_raster = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        sequence_kernel=sequence_kernel,
+        simulation_timestep_s=None,
+    )
+    explicit = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        sequence_kernel=sequence_kernel,
+        simulation_timestep_s=1e-6,
+    )
+
+    assert native_raster.metadata["simulation_timestep_s"] is None
+    assert explicit.metadata["simulation_timestep_s"] == pytest.approx(1e-6)
+    assert native_raster.signal.size == 4 * 2
+    for name in (
+        "signal",
+        "species_signal",
+        "final_magnetization",
+        "final_pool_magnetization",
+    ):
+        np.testing.assert_allclose(
+            getattr(native_raster, name),
+            getattr(explicit, name),
+            rtol=1e-12,
+            atol=1e-12,
+        )
