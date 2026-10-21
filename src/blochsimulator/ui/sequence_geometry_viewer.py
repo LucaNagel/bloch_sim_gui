@@ -1,10 +1,14 @@
 """Pre-run planning view of object, simulated grid and sequence coverage.
 
-Three orthogonal sum projections of the selected object are overlaid with
-the simulated phantom grid, the configured object extent (mouse phantoms can
+Three orthogonal projections of the selected object are overlaid with the
+simulated phantom grid, the configured object extent (mouse phantoms can
 extend beyond or sit off the grid), the encoded sequence FOV and any 2D
 slices.  Boxes are oriented by the sequence encoding frame and drawn as the
 convex hull of their projected corners, so oblique frames are handled too.
+
+The object is coloured by the property that differs most across it: anatomy
+or species regions when there are several, otherwise the map with the
+largest relative spread (kPL, concentration, T1, ...).
 """
 
 from __future__ import annotations
@@ -15,16 +19,21 @@ from typing import Optional, Sequence
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QPointF, QRectF, Qt
+from PyQt5.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt5.QtGui import QPolygonF
 from PyQt5.QtWidgets import (
+    QComboBox,
+    QFrame,
     QGraphicsPolygonItem,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
+from ..mouse_phantom import MOUSE_TISSUE_COLORS
 from ..phantom import Phantom
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
 
@@ -38,6 +47,27 @@ OBJECT_COLOR = "#4caf50"
 SEQUENCE_COLOR = "#ff9800"
 SLICE_COLOR = "#26c6da"
 PROBE_COLOR = "#e91e63"
+
+# Region colours for categorical maps without their own palette.
+CATEGORY_COLORS = (
+    (78, 121, 167),
+    (242, 142, 43),
+    (225, 87, 89),
+    (118, 183, 178),
+    (89, 161, 79),
+    (237, 201, 72),
+    (176, 122, 161),
+    (255, 157, 167),
+    (156, 117, 95),
+    (186, 176, 172),
+)
+CONTRAST_COLORMAP = "viridis"
+# Maps varying by less than this fraction leave the object uniform.
+MIN_CONTRAST_SPREAD = 0.01
+
+STALE_SEQUENCE_MESSAGE = (
+    "Sequence parameters changed since the shown sequence was generated."
+)
 
 
 @dataclass(frozen=True)
@@ -196,36 +226,326 @@ def _object_density(phantom) -> np.ndarray:
     return np.asarray(phantom.mask, dtype=np.float32)
 
 
-def object_projections(phantom) -> list[tuple[np.ndarray, QRectF]]:
-    """Return XY, XZ and YZ sum projections with their mm rectangles."""
-    density = _object_density(phantom)
-    while density.ndim < 3:
-        density = density[..., np.newaxis]
+def _volume(values) -> np.ndarray:
+    values = np.asarray(values)
+    while values.ndim < 3:
+        values = values[..., np.newaxis]
+    return values
+
+
+def _projection_layout(phantom, shape) -> tuple[tuple[slice, ...], list[QRectF]]:
+    """Return the sampling slices and mm rectangles of the three views."""
     # Projections only need to show the outline; strided sampling keeps
     # large dynamic phantoms responsive.
-    steps = tuple(max(1, int(np.ceil(n / MAX_PROJECTION_CELLS))) for n in density.shape)
-    density = density[:: steps[0], :: steps[1], :: steps[2]]
+    sampling = tuple(
+        slice(None, None, max(1, int(np.ceil(n / MAX_PROJECTION_CELLS)))) for n in shape
+    )
     box = phantom_grid_box(phantom)
     low = (np.asarray(box.center_m) - 0.5 * np.asarray(box.size_m)) * 1000.0
     size = np.asarray(box.size_m) * 1000.0
     size = np.where(size > 0.0, size, 1.0)
     low = np.where(np.asarray(box.size_m) > 0.0, low, -0.5)
+    rects = [
+        QRectF(low[horizontal], low[vertical], size[horizontal], size[vertical])
+        for horizontal, vertical in VIEW_PLANES
+    ]
+    return sampling, rects
+
+
+def object_projections(phantom) -> list[tuple[np.ndarray, QRectF]]:
+    """Return XY, XZ and YZ sum projections with their mm rectangles."""
+    density = _volume(_object_density(phantom))
+    sampling, rects = _projection_layout(phantom, density.shape)
+    density = density[sampling]
     projections = []
-    for horizontal, vertical in VIEW_PLANES:
-        summed_axis = 3 - horizontal - vertical
-        image = density.sum(axis=summed_axis)
+    for (horizontal, vertical), rect in zip(VIEW_PLANES, rects):
+        image = density.sum(axis=3 - horizontal - vertical)
         peak = float(np.max(image)) if image.size else 0.0
         if peak > 0.0:
             image = image / peak
-        projections.append(
+        projections.append((image, rect))
+    return projections
+
+
+@dataclass
+class ObjectContrast:
+    """A voxel property of the object that can colour the projections.
+
+    Categorical maps hold integer region labels and list them in
+    ``categories`` as ``label -> (name, rgb)``; ``score`` is then the number
+    of regions inside the object.  Continuous maps score their relative
+    spread over the object, offsets (B0, shifts, pH) their spread relative to
+    ``offset_scale``.
+    """
+
+    key: str
+    label: str
+    values: np.ndarray
+    unit: str = ""
+    categories: Optional[dict] = None
+    offset_scale: Optional[float] = None
+    score: float = 0.0
+    value_range: tuple[float, float] = (0.0, 0.0)
+
+    @property
+    def categorical(self) -> bool:
+        return self.categories is not None
+
+    @property
+    def title(self) -> str:
+        return f"{self.label} ({self.unit})" if self.unit else self.label
+
+
+def _attribute(*names):
+    def get(phantom):
+        value = phantom
+        for name in names:
+            value = getattr(value, name, None)
+            if value is None:
+                return None
+        return value
+
+    return get
+
+
+def _concentration_maps(phantom) -> dict:
+    maps = getattr(phantom, "concentration_maps", None)
+    if maps is None:
+        maps = getattr(phantom, "initial_concentration_maps", None)
+    return dict(maps or {})
+
+
+def _total_concentration(phantom):
+    maps = _concentration_maps(phantom)
+    if not maps:
+        return None
+    return sum(np.asarray(values, dtype=float) for values in maps.values())
+
+
+# (key, label, unit, getter, offset scale) of continuous object properties,
+# in the order that breaks ties of the automatic choice.
+CONTINUOUS_CONTRASTS = (
+    ("concentration", "Total concentration", "", _total_concentration, None),
+    ("pd", "Proton density", "", _attribute("pd_map"), None),
+    ("t1", "T1", "s", _attribute("t1_map"), None),
+    ("t2", "T2", "s", _attribute("t2_map"), None),
+    ("t2_star", "T2*", "s", _attribute("t2_star_map"), None),
+    ("kpl", "kPL", "1/s", _attribute("kpl_map_s_inv"), None),
+    ("kpa", "kPA", "1/s", _attribute("kpa_map_s_inv"), None),
+    (
+        "delivery",
+        "Bolus delivery",
+        "",
+        _attribute("pyruvate_inflow", "delivery_map"),
+        None,
+    ),
+    (
+        "arrival",
+        "Bolus arrival delay",
+        "s",
+        _attribute("pyruvate_inflow", "arrival_delay_map_s"),
+        None,
+    ),
+    (
+        "washout",
+        "Washout rate",
+        "1/s",
+        _attribute("voxel_washout", "loss_map_s_inv"),
+        None,
+    ),
+    ("ph", "pH", "", _attribute("ph_map"), 1.0),
+    ("b0_ppm", "B0 offset", "ppm", _attribute("b0_map_ppm"), 1.0),
+    ("b0", "B0 offset", "Hz", _attribute("b0_map"), 50.0),
+    # Spectral phantoms derive df_map in ppm from their species mix.
+    (
+        "df",
+        "Off-resonance",
+        "Hz",
+        lambda phantom: phantom.df_map if isinstance(phantom, Phantom) else None,
+        50.0,
+    ),
+    ("chemical_shift", "Chemical shift", "Hz", _attribute("chemical_shift_map"), 50.0),
+)
+
+
+def _labels_by_size(values) -> list[int]:
+    labels, counts = np.unique(values, return_counts=True)
+    return [int(labels[index]) for index in np.argsort(-counts, kind="stable")]
+
+
+def _categorical_contrasts(phantom, inside) -> list[ObjectContrast]:
+    contrasts = []
+    labels = getattr(phantom, "anatomy_labels", None)
+    if labels is not None and np.shape(labels) == inside.shape:
+        names = dict(getattr(phantom, "tissue_label_names", {}) or {})
+        values = np.asarray(labels).astype(np.int64)
+        categories = {}
+        for label in _labels_by_size(values[inside]):
+            color = (
+                MOUSE_TISSUE_COLORS[label]
+                if 0 <= label < len(MOUSE_TISSUE_COLORS)
+                else CATEGORY_COLORS[label % len(CATEGORY_COLORS)]
+            )
+            categories[label] = (str(names.get(label, f"Label {label}")), color)
+        contrasts.append(
+            ObjectContrast("anatomy", "Anatomy", values, categories=categories)
+        )
+    maps = _concentration_maps(phantom)
+    if len(maps) >= 2:
+        names = list(maps)
+        stacked = np.stack([np.asarray(maps[name], dtype=float) for name in names])
+        if stacked.shape[1:] == inside.shape:
+            dominant = np.argmax(stacked, axis=0) + 1
+            dominant[stacked.max(axis=0) <= 0.0] = 0
+            categories = {
+                label: (
+                    names[label - 1],
+                    CATEGORY_COLORS[(label - 1) % len(CATEGORY_COLORS)],
+                )
+                for label in _labels_by_size(dominant[inside])
+                if label > 0
+            }
+            contrasts.append(
+                ObjectContrast(
+                    "species", "Dominant species", dominant, categories=categories
+                )
+            )
+    for contrast in contrasts:
+        contrast.score = float(len(contrast.categories))
+    return [contrast for contrast in contrasts if contrast.score >= 2]
+
+
+def _continuous_contrasts(phantom, inside) -> list[ObjectContrast]:
+    specs = list(CONTINUOUS_CONTRASTS)
+    for name, values in dict(
+        getattr(phantom, "chemical_shift_maps_ppm", None) or {}
+    ).items():
+        specs.append(
+            (f"shift:{name}", f"Shift {name}", "ppm", lambda _p, v=values: v, 1.0)
+        )
+    for name, values in _concentration_maps(phantom).items():
+        specs.append(
             (
-                image,
-                QRectF(
-                    low[horizontal], low[vertical], size[horizontal], size[vertical]
-                ),
+                f"concentration:{name}",
+                f"{name} concentration",
+                "",
+                lambda _p, v=values: v,
+                None,
             )
         )
-    return projections
+    contrasts = []
+    for key, label, unit, getter, offset_scale in specs:
+        try:
+            raw = getter(phantom)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if raw is None:
+            continue
+        values = np.asarray(raw)
+        if values.shape != inside.shape or not np.isrealobj(values):
+            continue
+        values = values.astype(float, copy=False)
+        selected = values[inside]
+        selected = selected[np.isfinite(selected)]
+        if selected.size == 0:
+            continue
+        if any(np.array_equal(values, other.values) for other in contrasts):
+            continue
+        low, high = float(selected.min()), float(selected.max())
+        if high <= low:
+            continue
+        if offset_scale is None:
+            score = (high - low) / max(abs(low), abs(high))
+        else:
+            score = (high - low) / offset_scale
+        contrasts.append(
+            ObjectContrast(
+                key,
+                label,
+                values,
+                unit=unit,
+                offset_scale=offset_scale,
+                score=min(1.0, score),
+                value_range=(low, high),
+            )
+        )
+    return contrasts
+
+
+def object_contrasts(phantom) -> list[ObjectContrast]:
+    """Return the object properties that can colour the projections."""
+    if phantom is None:
+        return []
+    inside = np.asarray(_object_density(phantom)) > 0.0
+    if not np.any(inside):
+        return []
+    return _categorical_contrasts(phantom, inside) + _continuous_contrasts(
+        phantom, inside
+    )
+
+
+def automatic_contrast(contrasts) -> Optional[ObjectContrast]:
+    """Pick region labels when there are several, else the widest map."""
+    for contrast in contrasts:
+        if contrast.categorical and contrast.score >= 2:
+            return contrast
+    varying = [
+        contrast
+        for contrast in contrasts
+        if not contrast.categorical and contrast.score >= MIN_CONTRAST_SPREAD
+    ]
+    # max() keeps the first of equal scores, i.e. the table order.
+    return max(varying, key=lambda contrast: contrast.score) if varying else None
+
+
+def contrast_projections(phantom, contrast: ObjectContrast):
+    """Return RGBA projections coloured by ``contrast`` and the shown range.
+
+    Region labels are painted from the largest to the smallest region (their
+    order in ``categories``), so small organs stay visible in front of the
+    body around them.  Continuous maps show their mean along each viewing
+    ray, scaled to the range of these means so that small regions such as
+    the kidneys stand out; that range is returned for the legend (``None``
+    for region labels).
+    """
+    density = _volume(_object_density(phantom))
+    sampling, rects = _projection_layout(phantom, density.shape)
+    inside = density[sampling] > 0.0
+    values = _volume(contrast.values)[sampling]
+    axes = [3 - horizontal - vertical for horizontal, vertical in VIEW_PLANES]
+    covered = [np.any(inside, axis=axis) for axis in axes]
+    images = [np.zeros(mask.shape + (4,), dtype=np.ubyte) for mask in covered]
+    shown_range = None
+    if contrast.categorical:
+        for rgba, axis in zip(images, axes):
+            for label, (_name, color) in contrast.categories.items():
+                rgba[np.any(inside & (values == label), axis=axis), :3] = color
+    else:
+        counted = inside & np.isfinite(values)
+        filled = np.where(counted, values, 0.0)
+        means = [
+            filled.sum(axis=axis) / np.maximum(counted.sum(axis=axis), 1)
+            for axis in axes
+        ]
+        shown = np.concatenate([mean[mask] for mean, mask in zip(means, covered)])
+        low, high = (
+            (float(shown.min()), float(shown.max()))
+            if shown.size
+            else contrast.value_range
+        )
+        shown_range = (low, high)
+        lookup = pg.colormap.get(CONTRAST_COLORMAP).getLookupTable(
+            0.0, 1.0, 256, alpha=False
+        )
+        for rgba, mean in zip(images, means):
+            if high > low:
+                level = np.clip((mean - low) / (high - low), 0.0, 1.0)
+            else:
+                level = np.full(mean.shape, 0.5)
+            rgba[..., :3] = lookup[np.round(level * 255).astype(int)]
+    for rgba, mask in zip(images, covered):
+        rgba[..., 3] = np.where(mask, 255, 0)
+    return list(zip(images, rects)), shown_range
 
 
 def convex_hull_2d(points: np.ndarray) -> np.ndarray:
@@ -337,6 +657,32 @@ def coverage_notes(
     return notes
 
 
+def _swatch(color) -> str:
+    red, green, blue = (int(value) for value in color[:3])
+    return f"<span style='color:rgb({red},{green},{blue})'>■</span>"
+
+
+def _contrast_legend_html(contrast: Optional[ObjectContrast], shown_range=None) -> str:
+    """Return the legend of the projection colours."""
+    if contrast is None:
+        return ""
+    title = f"<b>Contrast:</b> {html.escape(contrast.title)}"
+    if contrast.categorical:
+        # Non-breaking names keep each swatch next to its whole label.
+        entries = " &nbsp; ".join(
+            f"{_swatch(color)}&nbsp;{html.escape(name).replace(' ', '&nbsp;')}"
+            for name, color in contrast.categories.values()
+        )
+        return f"<div>{title}<br>{entries}</div>"
+    lookup = pg.colormap.get(CONTRAST_COLORMAP).getLookupTable(0.0, 1.0, 5, alpha=False)
+    low, high = shown_range if shown_range is not None else contrast.value_range
+    gradient = "".join(_swatch(color) for color in lookup)
+    return (
+        f"<div>{title}, mean along the view<br>"
+        f"{low:.3g} {gradient} {high:.3g}</div>"
+    )
+
+
 def _format_mm(values) -> str:
     return " × ".join(f"{float(value) * 1000:.4g}" for value in values) + " mm"
 
@@ -344,10 +690,35 @@ def _format_mm(values) -> str:
 class SequenceGeometryViewer(QWidget):
     """Orthogonal projections of the object with grid and sequence FOV."""
 
+    update_requested = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
+        # The views redraw on their own when the object changes, but a new
+        # sequence FOV needs a regenerated sequence; this notice offers it.
+        self.stale_notice = QFrame()
+        self.stale_notice.setObjectName("geometryStaleNotice")
+        self.stale_notice.setStyleSheet(
+            "#geometryStaleNotice { background: #fef3c7; "
+            "border: 1px solid #f59e0b; border-radius: 4px; }"
+            "#geometryStaleNotice QLabel { color: #78350f; }"
+        )
+        notice_layout = QHBoxLayout(self.stale_notice)
+        notice_layout.setContentsMargins(8, 4, 4, 4)
+        self.stale_notice_label = QLabel()
+        self.stale_notice_label.setWordWrap(True)
+        self.update_button = QPushButton("Update")
+        self.update_button.setToolTip(
+            "Generate the sequence with the current parameters and redraw "
+            "its FOV and slices."
+        )
+        self.update_button.clicked.connect(self.update_requested)
+        notice_layout.addWidget(self.stale_notice_label, 1)
+        notice_layout.addWidget(self.update_button)
+        self.stale_notice.hide()
+        layout.addWidget(self.stale_notice)
         grid = QGridLayout()
         self.plots = []
         self.images = []
@@ -365,16 +736,103 @@ class SequenceGeometryViewer(QWidget):
             self.plots.append(plot)
             self.images.append(image)
             grid.addWidget(plot, index // 2, index % 2)
+        self.contrast_combo = QComboBox()
+        self.contrast_combo.setToolTip(
+            "Object property that colours the projections. Auto picks anatomy "
+            "or species regions when there are several, otherwise the map that "
+            "varies most across the object."
+        )
+        self.contrast_combo.currentIndexChanged.connect(self._contrast_changed)
+        contrast_row = QHBoxLayout()
+        contrast_row.addWidget(QLabel("Contrast"))
+        contrast_row.addWidget(self.contrast_combo, 1)
         self.summary = QLabel()
         self.summary.setWordWrap(True)
         self.summary.setTextFormat(Qt.RichText)
         self.summary.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        grid.addWidget(self.summary, 1, 1)
+        side_panel = QWidget()
+        side_layout = QVBoxLayout(side_panel)
+        side_layout.setContentsMargins(0, 0, 0, 0)
+        side_layout.addLayout(contrast_row)
+        side_layout.addWidget(self.summary, 1)
+        grid.addWidget(side_panel, 1, 1)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         layout.addLayout(grid, 1)
+        self._phantom = None
+        self.contrasts = []
+        self.contrast = None
+        self._contrast_range = None
+        self._summary_parts = ("", [], [])
         self.update_geometry(None, None)
+
+    def set_stale(self, stale: bool, message: str = STALE_SEQUENCE_MESSAGE):
+        """Show or hide the notice that the drawn sequence is outdated."""
+        if stale:
+            self.stale_notice_label.setText(f"{message} Update the geometry view?")
+        self.stale_notice.setVisible(bool(stale))
+
+    def _populate_contrast_combo(self):
+        previous = self.contrast_combo.currentData()
+        automatic = automatic_contrast(self.contrasts)
+        self.contrast_combo.blockSignals(True)
+        try:
+            self.contrast_combo.clear()
+            self.contrast_combo.addItem(
+                f"Auto: {automatic.title if automatic else 'object density'}", ""
+            )
+            for contrast in self.contrasts:
+                self.contrast_combo.addItem(contrast.title, contrast.key)
+            index = self.contrast_combo.findData(previous) if previous else 0
+            self.contrast_combo.setCurrentIndex(max(index, 0))
+        finally:
+            self.contrast_combo.blockSignals(False)
+        self.contrast_combo.setEnabled(bool(self.contrasts))
+
+    def _selected_contrast(self) -> Optional[ObjectContrast]:
+        key = self.contrast_combo.currentData()
+        for contrast in self.contrasts:
+            if key and contrast.key == key:
+                return contrast
+        return automatic_contrast(self.contrasts)
+
+    def _draw_object(self):
+        if self._phantom is None:
+            self.contrast = None
+            for image in self.images:
+                image.clear()
+            return
+        self.contrast = self._selected_contrast()
+        self._contrast_range = None
+        if self.contrast is None:
+            for image, (projection, rect) in zip(
+                self.images, object_projections(self._phantom)
+            ):
+                image.setImage(projection, levels=(0.0, 1.0), autoLevels=False)
+                image.setRect(rect)
+            return
+        projections, self._contrast_range = contrast_projections(
+            self._phantom, self.contrast
+        )
+        for image, (rgba, rect) in zip(self.images, projections):
+            image.setImage(rgba, levels=(0, 255), autoLevels=False)
+            image.setRect(rect)
+
+    def _contrast_changed(self, _index):
+        self._draw_object()
+        self._update_summary()
+
+    def _update_summary(self):
+        object_label, rows, notes = self._summary_parts
+        self.summary.setText(
+            self._summary_html(
+                object_label,
+                rows,
+                notes,
+                _contrast_legend_html(self.contrast, self._contrast_range),
+            )
+        )
 
     def _clear_overlays(self):
         for plot, item in self._overlay_items:
@@ -434,15 +892,11 @@ class SequenceGeometryViewer(QWidget):
         self._clear_overlays()
         rows = []
         object_box = None
-        if phantom is None:
-            for image in self.images:
-                image.clear()
-        else:
-            for image, (projection, rect) in zip(
-                self.images, object_projections(phantom)
-            ):
-                image.setImage(projection, levels=(0.0, 1.0), autoLevels=False)
-                image.setRect(rect)
+        self._phantom = phantom
+        self.contrasts = object_contrasts(phantom)
+        self._populate_contrast_combo()
+        self._draw_object()
+        if phantom is not None:
             grid_box = phantom_grid_box(phantom)
             self._add_outline(grid_box, GRID_COLOR, style=Qt.DashLine, z=11)
             rows.append(
@@ -522,10 +976,11 @@ class SequenceGeometryViewer(QWidget):
             if (phantom is not None or sequence is not None)
             else []
         )
-        self.summary.setText(self._summary_html(object_label, rows, notes))
+        self._summary_parts = (object_label, rows, notes)
+        self._update_summary()
 
     @staticmethod
-    def _summary_html(object_label, rows, notes) -> str:
+    def _summary_html(object_label, rows, notes, contrast_html="") -> str:
         parts = []
         if object_label:
             parts.append(f"<b>{html.escape(object_label)}</b>")
@@ -540,6 +995,8 @@ class SequenceGeometryViewer(QWidget):
                 )
                 + "</table>"
             )
+        if contrast_html:
+            parts.append(contrast_html)
         if notes:
             parts.append(
                 "<ul style='margin-left:-20px'>"

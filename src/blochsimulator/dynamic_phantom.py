@@ -2696,6 +2696,10 @@ def _prepare_rf_rotation(rf_hz, duration):
 
 _SPIN_MAJOR_SLICE_INTERVALS = 16384
 _SPIN_MAJOR_SLICE_ADC_VALUES = 4096
+# With progress reporting the first slice holds about 1/64 of the intervals
+# and later slices about 1/16, so a run rate is measured early.
+_SPIN_MAJOR_PROGRESS_LEAD_DIVISOR = 64
+_SPIN_MAJOR_PROGRESS_DIVISOR = 16
 _SPIN_MAJOR_WORK_BLOCKS = 64
 _SPIN_MAJOR_RF_CACHE_ENTRIES = 65536
 # Conservative working-set terms of one slice: per-thread coefficient slots
@@ -4866,6 +4870,9 @@ def _simulate_dynamic_sequence_block(
             plan_blocks.append((first_interval, end_interval))
             first_interval = end_interval
 
+        if progress_callback is not None:
+            # Start the measured run rate after table setup.
+            progress_callback(0, interval_count)
         for first_interval, end_interval in plan_blocks:
             if cancel_callback is not None and cancel_callback():
                 raise RuntimeError("sequence simulation cancelled")
@@ -5648,6 +5655,15 @@ def _simulate_dynamic_sequence_block(
         build_seconds = 0.0
         stepwise_tiles = 0
         first_interval = 0
+        slice_interval_limit = interval_limit
+        if progress_callback is not None:
+            # Slice sizes do not change results, so progress reporting can use
+            # finer slices. The measured run rate starts after table setup.
+            progress_callback(0, interval_count)
+            slice_interval_limit = min(
+                interval_limit,
+                -(-interval_count // _SPIN_MAJOR_PROGRESS_LEAD_DIVISOR),
+            )
         while first_interval < interval_count:
             if cancel_callback is not None and cancel_callback():
                 raise RuntimeError("sequence simulation cancelled")
@@ -5657,7 +5673,7 @@ def _simulate_dynamic_sequence_block(
                 interval_count,
                 adc_states,
                 adc_limit,
-                interval_limit,
+                slice_interval_limit,
                 *(() if rf_plan is None else (rf_plan.first, rf_plan.end)),
             )
             segments = (
@@ -5717,6 +5733,10 @@ def _simulate_dynamic_sequence_block(
             first_interval = end_interval
             if progress_callback is not None:
                 progress_callback(end_interval, interval_count)
+                slice_interval_limit = min(
+                    interval_limit,
+                    -(-interval_count // _SPIN_MAJOR_PROGRESS_DIVISOR),
+                )
             if preview_callback is not None:
                 preview_callback(
                     end_interval / interval_count, combined_signal_snapshot()
@@ -7008,6 +7028,8 @@ def _simulate_dynamic_sequence_single_source(
         "native_spin_major_rf_propagator_build_s": 0.0,
     }
     completed_parents = 0
+    if progress_callback is not None:
+        progress_callback(0, parent_count)
     for block_index, first_parent in enumerate(
         range(0, parent_count, chunk_parent_count)
     ):

@@ -30,6 +30,7 @@ from PyQt5.QtWidgets import (
 
 from ..mouse_phantom import (
     INJECTION_COMPOUNDS,
+    MOUSE_TISSUE_COLORS,
     TRANSVERSE_DECAY_MODES,
     MousePerfusionConfig,
     MousePerfusionPhantom,
@@ -65,24 +66,7 @@ class MouseSlicePreviewWidget(QWidget):
     voxel_clicked = pyqtSignal(tuple)
 
     _ANATOMY_COLORS = np.asarray(
-        [
-            (38, 42, 48, 255),
-            (116, 116, 126, 255),
-            (218, 132, 91, 255),
-            (150, 78, 60, 255),
-            (226, 145, 98, 255),
-            (157, 83, 64, 255),
-            (169, 108, 45, 255),
-            (80, 135, 170, 255),
-            (210, 73, 80, 255),
-            (240, 55, 55, 255),
-            (66, 105, 220, 255),
-            (202, 174, 126, 255),
-            (236, 214, 92, 255),
-            (214, 186, 64, 255),
-            (214, 186, 64, 255),
-        ],
-        dtype=np.ubyte,
+        [(*color, 255) for color in MOUSE_TISSUE_COLORS], dtype=np.ubyte
     )
 
     def __init__(self, *, show_anatomy=True, parent=None):

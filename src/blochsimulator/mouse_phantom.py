@@ -40,6 +40,24 @@ MOUSE_TISSUE_LABELS = {
     13: "Left ureter",
     14: "Right ureter",
 }
+# RGB display colours of the tissue labels, shared by the anatomy previews.
+MOUSE_TISSUE_COLORS = (
+    (38, 42, 48),
+    (116, 116, 126),
+    (218, 132, 91),
+    (150, 78, 60),
+    (226, 145, 98),
+    (157, 83, 64),
+    (169, 108, 45),
+    (80, 135, 170),
+    (210, 73, 80),
+    (240, 55, 55),
+    (66, 105, 220),
+    (202, 174, 126),
+    (236, 214, 92),
+    (214, 186, 64),
+    (214, 186, 64),
+)
 
 RENAL_LABELS = {"left": (2, 3), "right": (4, 5)}
 URETER_LABELS = {"left": 13, "right": 14}

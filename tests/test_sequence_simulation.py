@@ -22,7 +22,7 @@ from blochsimulator.sequence import (
     SpinSampling,
     export_bruker_raw,
 )
-from blochsimulator.simulator import resolve_num_threads
+from blochsimulator.simulator import resolve_num_threads, sequence_chunk_bounds
 from blochsimulator.spectral_phantom import ChemicalSpecies, SpectralPhantom
 from blochsimulator.units import NUCLEUS_GAMMA_HZ_PER_T
 
@@ -494,6 +494,48 @@ def test_spectral_progress_reports_each_chunk_across_components(
     )
     np.testing.assert_array_equal(
         result.checkpoint_magnetization, baseline.checkpoint_magnetization
+    )
+
+
+def test_sequence_chunk_bounds_start_with_short_leading_chunk():
+    assert sequence_chunk_bounds(10, 4) == [(0, 4), (4, 8), (8, 10)]
+    # Fewer voxels than the leading-chunk divisor keep uniform chunks.
+    assert sequence_chunk_bounds(10, 4, leading_chunk=True) == [
+        (0, 4),
+        (4, 8),
+        (8, 10),
+    ]
+    assert sequence_chunk_bounds(200, 150, leading_chunk=True) == [
+        (0, 4),
+        (4, 154),
+        (154, 200),
+    ]
+    # A leading chunk no smaller than the regular chunks is not split off.
+    assert sequence_chunk_bounds(200, 4, leading_chunk=True) == (
+        sequence_chunk_bounds(200, 4)
+    )
+
+
+def test_default_chunking_reports_voxel_progress_after_leading_chunk():
+    phantom = _phantom(shape=(200,), m0=(1.0, 0.0, 0.0))
+    program = SequenceProgram((ADCEvent(0.0, 2, 1e-3),), duration_s=2e-3)
+    simulator = BlochSimulator(use_parallel=False)
+    updates = []
+    previews = []
+
+    result = simulator.simulate_sequence(
+        program,
+        phantom,
+        progress_callback=lambda done, total: updates.append((done, total)),
+        preview_callback=lambda fraction, signal: previews.append(fraction),
+    )
+    baseline = simulator.simulate_sequence(program, phantom)
+
+    assert updates == [(0, 200), (4, 200), (200, 200)]
+    assert previews == pytest.approx([0.02, 1.0])
+    np.testing.assert_array_equal(result.signal, baseline.signal)
+    np.testing.assert_array_equal(
+        result.final_magnetization, baseline.final_magnetization
     )
 
 

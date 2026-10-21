@@ -163,6 +163,7 @@ from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumView
 from .project_export_dialog import ProjectExportNamingWidget
 from .reconstruction_explorer import SequenceReconstructionExplorer
 from .sequence_geometry_viewer import (
+    STALE_SEQUENCE_MESSAGE,
     SequenceGeometryViewer,
     sequence_geometry_from_definitions,
 )
@@ -180,6 +181,10 @@ from .widgets import (
     style_image_item,
 )
 from .default_settings import WorkspaceDefaults, load_kernel_settings
+
+
+# Run progress is drawn in permille so time extrapolation moves smoothly.
+RUN_PROGRESS_SCALE = 1000
 
 
 def _format_duration(seconds):
@@ -1491,6 +1496,7 @@ class SequenceSimulationWidget(QWidget):
         self._simulation_last_progress_done = 0
         self._simulation_last_progress_total = 1
         self._simulation_progress_rate = None
+        self._simulation_displayed_fraction = 0.0
         self._probe_playback_anchor_wall = None
         self._probe_playback_anchor_time_ms = None
         self._probe_playback_indices = np.zeros(0, dtype=np.int64)
@@ -1551,7 +1557,7 @@ class SequenceSimulationWidget(QWidget):
         )
         self.simulation_time_timer = QTimer(self)
         self.simulation_time_timer.setInterval(1000)
-        self.simulation_time_timer.timeout.connect(self._update_simulation_time_label)
+        self.simulation_time_timer.timeout.connect(self._update_run_progress_display)
         settings = getattr(parent, "app_settings", None)
         self.app_settings = settings
         self.signal_unit = normalize_signal_unit(
@@ -4490,9 +4496,6 @@ class SequenceSimulationWidget(QWidget):
         self.progress.setTextVisible(True)
         self.progress.setFormat("Not started")
         run_panel_layout.addWidget(self.progress)
-        self.simulation_time_label = QLabel("Elapsed: — · Remaining: —")
-        self.simulation_time_label.setWordWrap(True)
-        run_panel_layout.addWidget(self.simulation_time_label)
         self.export_button = QPushButton("Export results…")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self._export_results)
@@ -4515,7 +4518,6 @@ class SequenceSimulationWidget(QWidget):
             self.run_button,
             self.open_parameter_loop_button,
             self.progress,
-            self.simulation_time_label,
             self.export_button,
             self.status,
         )
@@ -5072,6 +5074,7 @@ class SequenceSimulationWidget(QWidget):
             "Inspect the generated RF, gradient, and ADC sequence waveforms.",
         )
         self.geometry_viewer = SequenceGeometryViewer()
+        self.geometry_viewer.update_requested.connect(self._geometry_update_requested)
         self.geometry_tab_index = views.addTab(self.geometry_viewer, "Geometry")
         views.setTabToolTip(
             self.geometry_tab_index,
@@ -6994,6 +6997,7 @@ class SequenceSimulationWidget(QWidget):
         self._sequence_generation_pending = True
         self._sequence_revision += 1
         self._update_probe_stale_warning()
+        self._update_geometry_stale_notice()
         self.generate_sequence_button.setEnabled(True)
         if self.program is None:
             preview_text = "No generated sequence is loaded yet."
@@ -7089,6 +7093,7 @@ class SequenceSimulationWidget(QWidget):
             if source_index == self.FLASH_SOURCE:
                 self._update_flash_spoiler_info()
             self._update_spoiling_quality()
+            self._update_geometry_stale_notice()
             self._emit_physical_b1_changed()
             return True
         for name, value in previous_state.items():
@@ -11366,10 +11371,30 @@ class SequenceSimulationWidget(QWidget):
         if index == getattr(self, "geometry_tab_index", -1):
             self._schedule_geometry_refresh()
 
+    def _update_geometry_stale_notice(self):
+        """Ask for an update while the drawn sequence lags its parameters."""
+        if not hasattr(self, "geometry_viewer"):
+            return
+        stale = (
+            self._sequence_generation_pending
+            and self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES
+        )
+        if self.program is None:
+            message = "No sequence has been generated for these parameters yet."
+        else:
+            message = STALE_SEQUENCE_MESSAGE
+        self.geometry_viewer.set_stale(stale, message)
+
+    def _geometry_update_requested(self):
+        self._generate_sequence_clicked()
+        self._update_geometry_stale_notice()
+        self._schedule_geometry_refresh()
+
     def _schedule_geometry_refresh(self):
         """Redraw the geometry tab once, and only while it is visible."""
         if not hasattr(self, "geometry_viewer"):
             return
+        self._update_geometry_stale_notice()
         self._geometry_viewer_stale = True
         if self.views.currentIndex() != self.geometry_tab_index:
             return
@@ -12036,7 +12061,7 @@ class SequenceSimulationWidget(QWidget):
             self._cancel()
 
     def _probe_progress(self, done, total):
-        self.probe_status.setText(f"Probe chunk {done}/{total}")
+        self.probe_status.setText(f"Probe isochromats {done:,}/{total:,}")
 
     def _probe_status_update(self, message):
         message = str(message)
@@ -12767,9 +12792,6 @@ class SequenceSimulationWidget(QWidget):
         self.receiver_noise.setEnabled(False)
         work_units = self._estimated_work_units()
         self._clear_previous_simulation_views()
-        self.progress.setRange(0, work_units)
-        self.progress.setValue(0)
-        self.progress.setFormat("0% · Estimating remaining time…")
         self._simulation_started_at = time.monotonic()
         self._simulation_started_at_utc = datetime.now(timezone.utc).isoformat()
         self._simulation_progress_started_at = None
@@ -12778,8 +12800,9 @@ class SequenceSimulationWidget(QWidget):
         self._simulation_last_progress_done = 0
         self._simulation_last_progress_total = work_units
         self._simulation_progress_rate = None
+        self._simulation_displayed_fraction = 0.0
         self.simulation_time_timer.start()
-        self._update_simulation_time_label()
+        self._update_run_progress_display()
         self._status_update("Preparing and compiling sequence…")
         chunk_voxels = self._preview_chunk_voxels()
         self.worker = SequenceSimulationThread(
@@ -12820,24 +12843,17 @@ class SequenceSimulationWidget(QWidget):
     def _progress(self, done, total):
         total = max(1, int(total))
         done = min(total, max(0, int(done)))
-        self.progress.setRange(0, total)
-        self.progress.setValue(done)
-        self._simulation_last_progress_total = total
-        percent = min(100, int(round(100.0 * done / total)))
         now = time.monotonic()
         if self._simulation_started_at is None:
             self._simulation_started_at = now
-        if self._simulation_progress_started_at is None:
+        if (
+            self._simulation_progress_started_at is None
+            or self._simulation_progress_baseline_done is None
+        ):
             self._simulation_progress_started_at = now
             self._simulation_progress_baseline_done = done
-            self._simulation_last_progress_at = now
-            self._simulation_last_progress_done = done
         else:
-            baseline_done = self._simulation_progress_baseline_done
-            if baseline_done is None:
-                baseline_done = done
-                self._simulation_progress_baseline_done = done
-            completed_work = done - baseline_done
+            completed_work = done - self._simulation_progress_baseline_done
             measured_s = now - self._simulation_progress_started_at
             if completed_work > 0 and measured_s > 0.0:
                 # Progress callbacks arrive after uneven voxel chunks.  A rate
@@ -12845,61 +12861,55 @@ class SequenceSimulationWidget(QWidget):
                 # ETA abruptly.  The cumulative throughput remains anchored at
                 # the post-compilation baseline and converges as work completes.
                 self._simulation_progress_rate = completed_work / measured_s
-            if done > self._simulation_last_progress_done:
-                self._simulation_last_progress_at = now
-                self._simulation_last_progress_done = done
-        if done >= total:
-            progress_text = "100% · Finishing…"
-            eta_text = None
-        elif self._simulation_progress_rate is not None:
-            remaining_s = (total - done) / self._simulation_progress_rate
-            eta_text = _format_duration(remaining_s)
-            progress_text = f"{percent}% · ETA {eta_text}"
-        else:
-            eta_text = None
-            progress_text = f"{percent}% · Estimating remaining time…"
-        self.progress.setFormat(progress_text)
+        if (
+            self._simulation_last_progress_at is None
+            or done > self._simulation_last_progress_done
+        ):
+            self._simulation_last_progress_at = now
+        self._simulation_last_progress_done = done
+        self._simulation_last_progress_total = total
         if isinstance(self.phantom, DynamicSpectralPhantom):
             unit = "Interval"
-        elif isinstance(self.phantom, SpectralPhantom):
-            unit = "Voxel"
         else:
-            unit = "Chunk"
-        status_text = (
-            f"{self._parameter_loop_prefix()}{unit} {done}/{total} · {percent}%"
-        )
-        if eta_text is not None:
-            status_text += f" · approximately {eta_text} remaining"
-        self.status.setText(status_text)
-        self._update_simulation_time_label(now=now)
+            unit = "Voxel"
+        self.status.setText(f"{self._parameter_loop_prefix()}{unit} {done:,}/{total:,}")
+        self._update_run_progress_display(now=now)
 
-    def _estimated_remaining_seconds(self, now=None):
-        """Estimate outstanding wall time from the latest measured work rate."""
-        if self._simulation_progress_rate is None:
-            return None
-        now = time.monotonic() if now is None else float(now)
-        done = float(self._simulation_last_progress_done)
-        total = float(max(1, self._simulation_last_progress_total))
-        if self._simulation_last_progress_at is not None:
-            done += self._simulation_progress_rate * max(
-                0.0, now - self._simulation_last_progress_at
-            )
-        return max(0.0, total - done) / self._simulation_progress_rate
+    def _update_run_progress_display(self, now=None):
+        """Show progress, elapsed time, and remaining time in the progress bar.
 
-    def _update_simulation_time_label(self, now=None):
-        """Refresh elapsed and remaining wall-clock time while a run is active."""
+        Native chunks report progress rarely, so the done count is extrapolated
+        at the measured rate between callbacks. The bar never moves back and
+        stays below 100% until the run reports completion.
+        """
         if self._simulation_started_at is None:
             return
         now = time.monotonic() if now is None else float(now)
-        elapsed_s = max(0.0, now - self._simulation_started_at)
-        remaining_s = self._estimated_remaining_seconds(now)
-        remaining_text = (
-            f"approximately {_format_duration(remaining_s)}"
-            if remaining_s is not None
-            else "estimating…"
-        )
-        self.simulation_time_label.setText(
-            f"Elapsed: {_format_duration(elapsed_s)} · Remaining: {remaining_text}"
+        elapsed_text = f"{_format_duration(now - self._simulation_started_at)} elapsed"
+        total = max(1, int(self._simulation_last_progress_total))
+        reported_done = min(total, max(0, int(self._simulation_last_progress_done)))
+        done = float(reported_done)
+        rate = self._simulation_progress_rate
+        if reported_done >= total:
+            remaining_text = "finishing…"
+        elif rate is None:
+            remaining_text = "estimating time left…"
+        else:
+            if self._simulation_last_progress_at is not None:
+                done += rate * max(0.0, now - self._simulation_last_progress_at)
+            remaining_s = max(0.0, total - done) / rate
+            remaining_text = (
+                "<1s left"
+                if remaining_s < 1.0
+                else f"~{_format_duration(remaining_s)} left"
+            )
+        fraction = 1.0 if reported_done >= total else min(0.99, done / total)
+        fraction = max(self._simulation_displayed_fraction, fraction)
+        self._simulation_displayed_fraction = fraction
+        self.progress.setRange(0, RUN_PROGRESS_SCALE)
+        self.progress.setValue(int(round(fraction * RUN_PROGRESS_SCALE)))
+        self.progress.setFormat(
+            f"{int(fraction * 100)}% · {elapsed_text} · {remaining_text}"
         )
 
     def _estimated_work_units(self):
@@ -12917,12 +12927,7 @@ class SequenceSimulationWidget(QWidget):
                     for values in self.phantom.concentration_maps.values()
                 ),
             )
-        chunk_voxels = self._preview_chunk_voxels()
-        if chunk_voxels is None:
-            chunk_voxels = max(
-                1, 65536 // self._configured_spin_sampling().spins_per_voxel
-            )
-        return max(1, int(np.ceil(self.phantom.n_active / chunk_voxels)))
+        return max(1, int(self.phantom.n_active))
 
     def _preview_chunk_voxels(self):
         if not self.live_preview_enabled or isinstance(
@@ -13753,7 +13758,6 @@ class SequenceSimulationWidget(QWidget):
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setFormat("Run deleted")
-        self.simulation_time_label.setText("Elapsed: — · Remaining: —")
         self.status.setText("The displayed session simulation was deleted")
 
     def _record_simulation_timing(self, result, *, now=None, finished_at_utc=None):
@@ -14457,15 +14461,9 @@ class SequenceSimulationWidget(QWidget):
                 elapsed_s = max(0.0, time.monotonic() - self._simulation_started_at)
             if elapsed_s is None:
                 self.progress.setFormat("100% · Complete")
-                self.simulation_time_label.setText(
-                    "Total runtime: unavailable · Remaining: 0s"
-                )
             else:
                 self.progress.setFormat(
                     f"100% · Complete in {_format_duration(elapsed_s)}"
-                )
-                self.simulation_time_label.setText(
-                    f"Total runtime: {_format_duration(elapsed_s)} · Remaining: 0s"
                 )
         else:
             elapsed_s = (
@@ -14475,9 +14473,8 @@ class SequenceSimulationWidget(QWidget):
             )
             self.progress.setRange(0, 100)
             self.progress.setValue(0)
-            self.progress.setFormat("Stopped")
-            self.simulation_time_label.setText(
-                "Elapsed: — · Remaining: —"
+            self.progress.setFormat(
+                "Stopped"
                 if elapsed_s is None
                 else f"Stopped after {_format_duration(elapsed_s)}"
             )
@@ -14489,6 +14486,7 @@ class SequenceSimulationWidget(QWidget):
         self._simulation_last_progress_done = 0
         self._simulation_last_progress_total = 1
         self._simulation_progress_rate = None
+        self._simulation_displayed_fraction = 0.0
 
     def export_results(self):
         """Open the sequence export dialog (also used by File > Export)."""

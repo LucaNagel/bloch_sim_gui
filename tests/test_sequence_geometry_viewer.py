@@ -6,12 +6,22 @@ import pytest
 from PyQt5.QtWidgets import QApplication
 
 from blochsimulator.default_phantoms import is_default_phantom
-from blochsimulator.mouse_phantom import MousePerfusionConfig
+from blochsimulator.mouse_phantom import (
+    MOUSE_TISSUE_COLORS,
+    MousePerfusionConfig,
+    MousePerfusionPhantom,
+)
+from blochsimulator.phantom import Phantom
+from blochsimulator.spectral_phantom import ChemicalSpecies, SpectralPhantom
 from blochsimulator.ui.sequence_geometry_viewer import (
     OrientedBox,
+    SequenceGeometryViewer,
+    automatic_contrast,
     configured_object_box,
+    contrast_projections,
     convex_hull_2d,
     coverage_notes,
+    object_contrasts,
     phantom_grid_box,
     projected_outline_mm,
     sequence_geometry_from_definitions,
@@ -134,4 +144,141 @@ def test_sequence_workspace_uses_default_sphere_and_shows_geometry_tab():
 
     widget.close()
     widget.deleteLater()
+    app.processEvents()
+
+
+def test_geometry_tab_offers_update_after_sequence_parameters_change():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.sequence_live_preview.setChecked(False)
+    widget.sequence_source.setCurrentIndex(widget.FLASH_SOURCE)
+    assert widget._reload_selected_generated_sequence()
+    widget.views.setCurrentIndex(widget.geometry_tab_index)
+    app.processEvents()
+    notice = widget.geometry_viewer.stale_notice
+    assert notice.isHidden()
+
+    widget.flash_slice_offset_mm.setValue(4.0)
+    app.processEvents()
+    assert widget._sequence_generation_pending
+    assert not notice.isHidden()
+    assert "changed" in widget.geometry_viewer.stale_notice_label.text()
+    # The drawn slice stays where the shown sequence put it.
+    assert " at 0 mm" in widget.geometry_viewer.summary.text()
+
+    widget.geometry_viewer.update_button.click()
+    app.processEvents()
+    assert not widget._sequence_generation_pending
+    assert notice.isHidden()
+    assert " at 4 mm" in widget.geometry_viewer.summary.text()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def _two_sphere_phantom(lactate_scale=1.0):
+    n = 20
+    coordinate = (np.arange(n) + 0.5) / n - 0.5
+    x, y, z = np.meshgrid(coordinate, coordinate, coordinate, indexing="ij")
+    left = (x + 0.2) ** 2 + y**2 + z**2 <= 0.15**2
+    right = (x - 0.2) ** 2 + y**2 + z**2 <= 0.1**2
+    species = [
+        ChemicalSpecies(name="Pyruvate", chemical_shift_ppm=0.0, t1=30.0, t2=0.5),
+        ChemicalSpecies(name="Lactate", chemical_shift_ppm=12.0, t1=30.0, t2=0.5),
+    ]
+    return SpectralPhantom(
+        shape=(n, n, n),
+        fov=(0.04, 0.04, 0.04),
+        species=species,
+        concentration_maps={
+            "Pyruvate": left * 10.0,
+            "Lactate": right * 10.0 * lactate_scale,
+        },
+    )
+
+
+def test_anatomy_labels_drive_the_automatic_mouse_contrast():
+    mouse = MousePerfusionPhantom.from_config(MousePerfusionConfig(shape=(16, 16, 24)))
+    contrasts = object_contrasts(mouse)
+    contrast = automatic_contrast(contrasts)
+    assert contrast.key == "anatomy"
+    assert 0 not in contrast.categories
+    names = [name for name, _color in contrast.categories.values()]
+    assert names[0] == "Soft tissue"  # Largest region, painted first.
+    assert "Liver" in names
+    # kPL stays selectable and differs between organs and body.
+    assert any(item.key == "kpl" and item.score > 0.5 for item in contrasts)
+
+    projections, shown_range = contrast_projections(mouse, contrast)
+    assert shown_range is None
+    xy, _rect = projections[0]
+    assert xy.dtype == np.uint8 and xy.shape == (16, 16, 4)
+    colors = {tuple(pixel[:3]) for pixel in xy.reshape(-1, 4) if pixel[3]}
+    assert MOUSE_TISSUE_COLORS[6] in colors  # Liver
+    assert set(np.unique(xy[..., 3])) <= {0, 255}
+
+
+def test_species_regions_or_widest_map_set_the_contrast():
+    # Two compartments of different species show as species regions.
+    two_species = automatic_contrast(object_contrasts(_two_sphere_phantom()))
+    assert two_species.key == "species"
+    assert [name for name, _ in two_species.categories.values()] == [
+        "Pyruvate",
+        "Lactate",
+    ]
+
+    # Without a second region, the most varying map is shown instead.
+    phantom = _two_sphere_phantom(lactate_scale=0.0)
+    phantom.concentration_maps["Pyruvate"][
+        phantom.concentration_maps["Pyruvate"] > 0
+    ] = 10.0
+    phantom.concentration_maps["Pyruvate"][:, :, :8] *= 0.5
+    contrasts = object_contrasts(phantom)
+    assert "species" not in {item.key for item in contrasts}
+    contrast = automatic_contrast(contrasts)
+    assert contrast.key == "concentration"
+    assert contrast.value_range == pytest.approx((5.0, 10.0))
+    projections, shown_range = contrast_projections(phantom, contrast)
+    assert 5.0 <= shown_range[0] < shown_range[1] <= 10.0
+    xz, _rect = projections[1]
+    assert np.any(xz[..., 3] == 0) and np.any(xz[..., 3] == 255)
+
+    # Relaxation maps of a plain phantom work the same way.
+    shape = (8, 8, 8)
+    t1 = np.full(shape, 1.0)
+    t1[:4] = 0.5
+    plain = Phantom(shape=shape, fov=(0.02,) * 3, t1_map=t1, t2_map=np.full(shape, 0.1))
+    assert automatic_contrast(object_contrasts(plain)).key == "t1"
+
+    # Uniform objects keep the plain density projection.
+    uniform = Phantom(
+        shape=shape, fov=(0.02,) * 3, t1_map=np.ones(shape), t2_map=np.ones(shape)
+    )
+    assert automatic_contrast(object_contrasts(uniform)) is None
+
+
+def test_geometry_viewer_contrast_selector_overrides_auto():
+    app = QApplication.instance() or QApplication(sys.argv)
+    viewer = SequenceGeometryViewer()
+    combo = viewer.contrast_combo
+    viewer.update_geometry(None, None)
+    assert not combo.isEnabled()
+    assert combo.itemText(0) == "Auto: object density"
+
+    viewer.update_geometry(_two_sphere_phantom(), None, object_label="Spheres")
+    assert combo.isEnabled()
+    assert combo.itemText(0) == "Auto: Dominant species"
+    assert viewer.contrast.key == "species"
+    assert "Pyruvate" in viewer.summary.text()
+    combo.setCurrentIndex(combo.findData("concentration:Lactate"))
+    app.processEvents()
+    assert viewer.contrast.key == "concentration:Lactate"
+    assert "Lactate concentration" in viewer.summary.text()
+    assert viewer.images[0].image.shape[-1] == 4
+
+    # A redraw keeps the chosen property while the object still has it.
+    viewer.update_geometry(_two_sphere_phantom(), None, object_label="Spheres")
+    assert viewer.contrast.key == "concentration:Lactate"
+    viewer.deleteLater()
     app.processEvents()
