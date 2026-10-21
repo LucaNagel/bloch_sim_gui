@@ -39,7 +39,8 @@ class MockSequenceDesigner:
         self.ssfp_start_phase.value.return_value = 180.0
 
         self.ssfp_start_tr = MagicMock()
-        self.ssfp_start_tr.value.return_value = 0.0
+        # Centre-to-centre startup spacing of one TR.
+        self.ssfp_start_tr.value.return_value = 10.0
 
         self.ssfp_use_ratios = MagicMock()
         self.ssfp_use_ratios.isChecked.return_value = False
@@ -184,7 +185,8 @@ def test_ssfp_loop_uses_one_constant_rasterized_tr(tr_ms):
 
     expected_tr_points = max(1, int(np.rint(tr_ms * 1e-3 / dt)))
     assert pulse_starts.size == 300
-    assert np.all(np.diff(pulse_starts) == expected_tr_points)
+    assert pulse_starts[1] - pulse_starts[0] == int(np.rint(0.5 * tr_ms * 1e-3 / dt))
+    assert np.all(np.diff(pulse_starts[1:]) == expected_tr_points)
 
 
 def test_ssfp_loop_reports_effective_tr_when_rasterized():
@@ -280,6 +282,7 @@ def test_ssfp_rf_carrier_phase_is_continuous_across_repetitions():
     mock_self = MockSequenceDesigner()
     mock_self.tr_spin.value.return_value = 5.0
     mock_self.ssfp_repeats.value.return_value = 5
+    mock_self.ssfp_start_tr.value.return_value = 5.0
     mock_self.ssfp_start_flip.value.return_value = 90.0
     mock_self.ssfp_start_phase.value.return_value = 0.0
     mock_self.ssfp_alternate_phase.isChecked.return_value = False
@@ -297,3 +300,141 @@ def test_ssfp_rf_carrier_phase_is_continuous_across_repetitions():
     measured = np.unwrap(np.angle(b1[starts]))
     expected = 2 * np.pi * 37.0 * np.arange(5) * 5e-3
     assert np.allclose(measured, expected, atol=1e-12)
+
+
+def _pulse_segments(b1):
+    active = np.abs(b1) > 0.0
+    starts = np.flatnonzero(active & np.r_[True, ~active[:-1]])
+    ends = np.flatnonzero(active & np.r_[~active[1:], True]) + 1
+    return starts, ends
+
+
+@pytest.mark.parametrize(
+    ("use_ratios", "tr_ratio", "start_tr_ms", "expected_spacing_s"),
+    ((True, 0.5, 0.0, 5e-3), (True, 0.3, 0.0, 3e-3), (False, 0.5, 4.0, 4e-3)),
+)
+def test_ssfp_startup_spacing_is_centre_to_centre(
+    use_ratios, tr_ratio, start_tr_ms, expected_spacing_s
+):
+    """Start TR (ratio) sets the alpha/2 spacing, not a delay of the whole train."""
+    mock_self = MockSequenceDesigner()
+    mock_self.ssfp_use_ratios.isChecked.return_value = use_ratios
+    mock_self.ssfp_tr_ratio.value.return_value = tr_ratio
+    mock_self.ssfp_start_tr.value.return_value = start_tr_ms
+
+    dt = 1e-5
+    b1, _, time = SequenceDesigner._build_ssfp(mock_self, None, dt)
+    starts, ends = _pulse_segments(b1)
+    centres = 0.5 * (starts + ends) * dt
+
+    assert starts[0] == 0
+    assert centres[1] - centres[0] == pytest.approx(expected_spacing_s)
+    assert np.diff(centres[1:]) == pytest.approx(10e-3)
+
+
+def test_ssfp_rejects_overlapping_startup_and_long_pulses():
+    mock_self = MockSequenceDesigner()
+    mock_self.ssfp_use_ratios.isChecked.return_value = True
+    mock_self.ssfp_tr_ratio.value.return_value = 0.05  # 0.5 ms < 1 ms pulse
+    with pytest.raises(ValueError, match="startup spacing"):
+        SequenceDesigner._build_ssfp(mock_self, None, 1e-5)
+
+    mock_self.ssfp_tr_ratio.value.return_value = 0.5
+    mock_self.parent_gui.rf_designer.duration.value.return_value = 12.0
+    with pytest.raises(ValueError, match="longer than TR"):
+        SequenceDesigner._build_ssfp(mock_self, None, 1e-5)
+
+
+@pytest.mark.parametrize("custom", (False, True))
+def test_ssfp_startup_and_regular_flip_angles_are_calibrated(custom):
+    mock_self = MockSequenceDesigner()
+    mock_self.parent_gui.rf_designer.flip_angle.value.return_value = 40.0
+    mock_self.ssfp_start_flip.value.return_value = 25.0
+    dt = 1e-5
+    reference, reference_time = design_rf_pulse(
+        "rect", duration=1e-3, flip_angle=40.0, npoints=100
+    )
+    custom_pulse = (reference, reference_time) if custom else None
+
+    b1, _, _ = SequenceDesigner._build_ssfp(mock_self, custom_pulse, dt)
+    starts, ends = _pulse_segments(b1)
+    areas = np.array([np.sum(np.abs(b1[a:b])) for a, b in zip(starts, ends)])
+    reference_area = np.sum(np.abs(reference))
+
+    assert areas[1:] == pytest.approx(reference_area, rel=1e-9)
+    assert areas[0] == pytest.approx(reference_area * 25.0 / 40.0, rel=1e-9)
+
+
+def test_ssfp_default_startup_suppresses_on_resonance_transient():
+    """Default phase 0° + ratio 0.5 must realise the alpha/2 - TR/2 catalyst."""
+    from blochsimulator.simulator import BlochSimulator, TissueParameters
+
+    mock_self = MockSequenceDesigner()
+    mock_self.tr_spin.value.return_value = 10.0
+    mock_self.ssfp_repeats.value.return_value = 40
+    mock_self.parent_gui.rf_designer.flip_angle.value.return_value = 60.0
+    mock_self.parent_gui.rf_designer.duration.value.return_value = 0.2
+    mock_self.ssfp_use_ratios.isChecked.return_value = True
+    mock_self.ssfp_start_phase.value.return_value = 0.0
+    dt = 1e-5
+    b1, gradients, time = SequenceDesigner._build_ssfp(mock_self, None, dt)
+    starts, _ = _pulse_segments(b1)
+
+    result = BlochSimulator().simulate(
+        (b1, gradients, time),
+        TissueParameters(name="slow", t1=50.0, t2=10.0),
+        positions=np.zeros((1, 3)),
+        frequencies=np.array([0.0, 10.0]),
+        dt=dt,
+        mode=2,
+    )
+    mz = np.asarray(result["mz"]).reshape(len(time), -1)
+    echoes = mz[starts[1:-1] + 10 + 500]
+    assert np.ptp(echoes[:, 0]) < 0.01
+    assert np.ptp(echoes[:, 1]) < 0.05
+
+
+def test_ssfp_widget_defaults_preset_and_preview_show_startup_spacing():
+    from blochsimulator.ui.sequence_diagram import find_pulse_segments
+
+    designer = SequenceDesigner()
+    assert designer.ssfp_start_phase.value() == 0.0
+    preset = designer.get_sequence_preset_params("SSFP (Loop)")
+    assert preset["ssfp_start_phase"] == 0.0
+    assert preset["ssfp_start_tr"] == pytest.approx(0.5 * preset["tr_ms"])
+
+    designer.sequence_type.setCurrentText("SSFP (Loop)")
+    designer.tr_spin.setValue(5.0)
+    designer.ssfp_repeats.setValue(4)
+    designer.ssfp_use_ratios.setChecked(True)
+    labels = {}
+    for ratio in (0.3, 0.5):
+        designer.ssfp_tr_ratio.setValue(ratio)
+        b1, _, time = designer.compile_sequence(dt=1e-5)
+        segments = find_pulse_segments(b1, time - time[0])
+        annotations = designer._diagram_annotations(segments, float(time[-1]))
+        labels[ratio] = [marker.label for marker in annotations.brackets]
+    assert "Start 1.5 ms" in labels[0.3]
+    assert "Start 2.5 ms" in labels[0.5]
+
+
+def test_probe_warns_when_sequence_parameters_change_after_probe():
+    from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
+    from PyQt5.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+    assert widget.probe_stale_warning.isHidden()
+
+    widget.probe_result = object()
+    widget._probe_sequence_revision = widget._sequence_revision
+    widget._update_probe_stale_warning()
+    assert widget.probe_stale_warning.isHidden()
+
+    widget._sequence_revision += 1
+    widget._update_probe_stale_warning()
+    assert not widget.probe_stale_warning.isHidden()
+
+    widget._probe_sequence_revision = widget._sequence_revision
+    widget._update_probe_stale_warning()
+    assert widget.probe_stale_warning.isHidden()

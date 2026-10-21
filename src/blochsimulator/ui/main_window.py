@@ -2179,11 +2179,11 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             (
                 self.sequence_designer.ssfp_use_ratios,
-                "Express the SSFP startup pulse and delay relative to the main flip angle and TR.",
+                "Express the SSFP startup flip angle and startup spacing relative to the main flip angle and TR.",
             ),
             (
                 self.sequence_designer.ssfp_start_tr,
-                "Absolute delay before the SSFP startup pulse, in milliseconds.",
+                "Center-to-center spacing from the SSFP startup pulse to the first regular pulse, in milliseconds. TR/2 gives the alpha/2 - TR/2 preparation.",
             ),
             (
                 self.sequence_designer.ssfp_start_flip,
@@ -2191,7 +2191,7 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             (
                 self.sequence_designer.ssfp_tr_ratio,
-                "Startup delay as a multiple of the main repetition time TR.",
+                "Startup-to-first-pulse center spacing as a multiple of TR. 0.5 gives the alpha/2 - TR/2 preparation.",
             ),
             (
                 self.sequence_designer.ssfp_flip_ratio,
@@ -2199,7 +2199,7 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             (
                 self.sequence_designer.ssfp_start_phase,
-                "Phase of only the SSFP startup pulse, in degrees. Regular pulses use the independent 0/180-degree cycle.",
+                "Phase of only the SSFP startup pulse, in degrees. Regular pulses run 180/0/180 degrees, so 0 degrees makes the startup pulse the preceding cycle member.",
             ),
             (
                 self.sequence_designer.ssfp_alternate_phase,

@@ -239,7 +239,7 @@ class NotebookExporter:
             start_flip_deg = raw.pop("ssfp_start_flip", None)
             if not use_ratios:
                 if start_delay_ms is not None:
-                    result["ssfp_start_delay_s"] = float(start_delay_ms) / 1000.0
+                    result["ssfp_startup_spacing_s"] = float(start_delay_ms) / 1000.0
                 if start_flip_deg is not None:
                     result["ssfp_start_flip_angle_deg"] = float(start_flip_deg)
             else:

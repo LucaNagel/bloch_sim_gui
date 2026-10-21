@@ -268,7 +268,7 @@ def test_ssfp_gui_parameters_are_canonical_and_pulse_context_is_clear(
     assert "'sequence_definition_source': 'exact_exported_waveforms'" in parameter_cell
     assert "'rf_designer_snapshot': {'pulse_type': 'Gaussian'" in parameter_cell
     assert "'flip_angle_deg': 30.0" in parameter_cell
-    assert "ssfp_start_delay_s" not in parameter_cell
+    assert "ssfp_startup_spacing_s" not in parameter_cell
     assert "ssfp_start_flip_angle_deg" not in parameter_cell
     assert "'position_axis_m': loaded_arrays" in parameter_cell
     assert "'frequency_axis_hz': loaded_arrays" in parameter_cell

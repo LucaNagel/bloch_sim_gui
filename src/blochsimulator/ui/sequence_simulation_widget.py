@@ -1379,6 +1379,8 @@ class SequenceSimulationWidget(QWidget):
         self._project_export_contexts = {}
         self._restoring_session_run = False
         self.probe_result = None
+        self._sequence_revision = 0
+        self._probe_sequence_revision = None
         self._split_csi_data = None
         self._csi_click_view_initialized = False
         self.worker = None
@@ -1414,7 +1416,7 @@ class SequenceSimulationWidget(QWidget):
         self._gradient_waveform_items = {}
         self._sequence_spoiler_markers = []
         self._sequence_timing_markers = []
-        self._sequence_timing_annotations = []
+        self._sequence_timing_marker_data = None
         self._rf_designer = None
         self._rf_designer_pulse_data = None
         self._rf_designer_pulse_error = "No RF Pulse Designer waveform is available"
@@ -1599,6 +1601,38 @@ class SequenceSimulationWidget(QWidget):
         self._sequence_timing_visible = bool(enabled)
         self.sequence_timing_summary.setVisible(self._sequence_timing_visible)
         self._refresh_sequence_timing_markers()
+
+    def _refresh_sequence_timing_markers(self) -> None:
+        """Redraw declared TE/TR markers for the displayed preview window."""
+        for marker in self._sequence_timing_markers:
+            for plot in (self.rf_plot, self.gradient_plot):
+                plot.removeItem(marker)
+        self._sequence_timing_markers = []
+        window = self._sequence_plot_window_s
+        if not self._sequence_timing_visible or self.program is None or window is None:
+            return
+        if self._sequence_timing_marker_data is None:
+            self._sequence_timing_marker_data = _sequence_preview_timing_markers(
+                self.program
+            )
+        # Long sequences declare one TR boundary per repetition, so only the
+        # markers inside the visible window become scene items.
+        for position_s, label, color in self._sequence_timing_marker_data:
+            if not window[0] - 1e-12 <= position_s <= window[1] + 1e-12:
+                continue
+            pen = pg.mkPen(color, width=1.25, style=Qt.DotLine)
+            for plot, text in ((self.rf_plot, label), (self.gradient_plot, None)):
+                marker = pg.InfiniteLine(
+                    pos=position_s * 1000.0,
+                    angle=90,
+                    movable=False,
+                    pen=pen,
+                    label=text,
+                    labelOpts={"position": 0.92, "color": color},
+                )
+                marker.setToolTip(label)
+                plot.addItem(marker, ignoreBounds=True)
+                self._sequence_timing_markers.append(marker)
 
     def set_default_fov_mm(self, fov_mm) -> None:
         """Apply newly saved FOV defaults to editable generated-sequence controls."""
@@ -4112,6 +4146,15 @@ class SequenceSimulationWidget(QWidget):
         self.probe_status = QLabel("No spin probe result")
         self.probe_status.setWordWrap(True)
         probe_form.addRow(self.probe_status)
+        self.probe_stale_warning = QLabel(
+            "⚠ The sequence parameters changed after this probe ran. The "
+            "displayed result no longer reflects the current parameters; "
+            "run the probe again to update it."
+        )
+        self.probe_stale_warning.setWordWrap(True)
+        self.probe_stale_warning.setStyleSheet("color: #b45309; font-weight: bold;")
+        self.probe_stale_warning.setVisible(False)
+        probe_form.addRow(self.probe_stale_warning)
         probe_group_layout.addWidget(self.probe_controls)
         self.probe_controls.setVisible(True)
         self.probe_group.setVisible(False)
@@ -6632,6 +6675,8 @@ class SequenceSimulationWidget(QWidget):
         if source_index not in self.CONFIGURABLE_SOURCES:
             return
         self._sequence_generation_pending = True
+        self._sequence_revision += 1
+        self._update_probe_stale_warning()
         self.generate_sequence_button.setEnabled(True)
         if self.program is None:
             preview_text = "No generated sequence is loaded yet."
@@ -6642,6 +6687,13 @@ class SequenceSimulationWidget(QWidget):
             f"{preview_text}"
         )
         self._emit_physical_b1_changed()
+
+    def _update_probe_stale_warning(self):
+        stale = (
+            self.probe_result is not None
+            and self._probe_sequence_revision != self._sequence_revision
+        )
+        self.probe_stale_warning.setVisible(stale)
 
     def _request_generated_sequence_refresh(self):
         self._refresh_parameter_loop_parameters()
@@ -10907,6 +10959,8 @@ class SequenceSimulationWidget(QWidget):
         self.rf_plot.clear()
         self._rf_phase_view.clear()
         self.gradient_plot.clear()
+        self._sequence_timing_markers = []
+        self._sequence_timing_marker_data = None
         self.rf_plot.addItem(self.rf_zero_line)
         self.gradient_plot.addItem(self.gradient_zero_line)
         self._rf_waveform_item = self.rf_plot.plot(
@@ -11076,6 +11130,7 @@ class SequenceSimulationWidget(QWidget):
             self._gradient_waveform_items[axis].setData(
                 grad_x, grad_y, connect="finite"
             )
+        self._refresh_sequence_timing_markers()
 
     def _build_phantom(self):
         source_index = self.object_source.currentIndex()
@@ -11460,6 +11515,8 @@ class SequenceSimulationWidget(QWidget):
         self.cancel_probe_button.setEnabled(True)
         self.probe_status.setText(f"Preparing {label} probe…")
         self.probe_result = None
+        self._probe_sequence_revision = self._sequence_revision
+        self._update_probe_stale_warning()
         self._probe_started_at = time.monotonic()
         self._probe_started_at_utc = datetime.now(timezone.utc)
         self.probe_worker = SequenceProbeThread(
@@ -11548,6 +11605,7 @@ class SequenceSimulationWidget(QWidget):
         self.run_geometry_probe_button.setEnabled(probe_selected)
         self.cancel_probe_button.setEnabled(False)
         self.probe_status.setText("Spin probe complete")
+        self._update_probe_stale_warning()
         self._show_probe_result()
         self._register_session_probe_run(result, mode=mode)
 
@@ -13030,6 +13088,8 @@ class SequenceSimulationWidget(QWidget):
         if run.run_type == "spin_probe":
             self.result = None
             self.probe_result = run.result
+            self._probe_sequence_revision = self._sequence_revision
+            self._update_probe_stale_warning()
             self._show_probe_result()
             self.probe_status.setText(f"Showing {run.display_name} from this session")
             for index in range(self.views.count()):
@@ -13080,6 +13140,7 @@ class SequenceSimulationWidget(QWidget):
         if run.run_type == "spin_probe":
             self._stop_probe_playback()
             self.probe_result = None
+            self._update_probe_stale_warning()
             self.probe_spectrum_viewer.result = None
             self.probe_spatial_viewer.result = None
             self.probe_info.setText("The displayed spin-probe run was deleted")

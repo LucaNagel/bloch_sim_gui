@@ -132,7 +132,11 @@ class SequenceDesigner(QGroupBox):
         self.ssfp_start_tr.setObjectName("ssfp_start_tr")
         self.ssfp_start_tr.setRange(0.0, 10000.0)
         self.ssfp_start_tr.setDecimals(3)
-        self.ssfp_start_tr.setValue(0.0)
+        self.ssfp_start_tr.setValue(2.5)
+        self.ssfp_start_tr.setToolTip(
+            "Center-to-center spacing from the startup pulse to the first "
+            "regular pulse. TR/2 gives the alpha/2 - TR/2 preparation."
+        )
         self.ssfp_start_tr.valueChanged.connect(lambda _: self.update_diagram())
         row_abs_tr.addWidget(self.ssfp_start_tr)
         abs_layout.addLayout(row_abs_tr)
@@ -161,6 +165,10 @@ class SequenceDesigner(QGroupBox):
         self.ssfp_tr_ratio.setRange(0.0, 2.0)
         self.ssfp_tr_ratio.setSingleStep(0.1)
         self.ssfp_tr_ratio.setValue(0.5)
+        self.ssfp_tr_ratio.setToolTip(
+            "Startup-to-first-pulse center spacing as a multiple of TR. "
+            "0.5 gives the alpha/2 - TR/2 preparation."
+        )
         self.ssfp_tr_ratio.valueChanged.connect(lambda _: self.update_diagram())
         row_ratio_tr.addWidget(self.ssfp_tr_ratio)
         ratio_layout.addLayout(row_ratio_tr)
@@ -184,10 +192,11 @@ class SequenceDesigner(QGroupBox):
         self.ssfp_start_phase.setObjectName("ssfp_start_phase")
         self.ssfp_start_phase.setRange(-3600, 3600)
         self.ssfp_start_phase.setDecimals(2)
-        self.ssfp_start_phase.setValue(180.0)
+        self.ssfp_start_phase.setValue(0.0)
         self.ssfp_start_phase.setToolTip(
             "Sets only the phase of the distinct startup pulse. Regular pulses "
-            "use the 0/180° phase cycle below."
+            "use the 180/0/180° cycle below, so 0° makes the startup pulse the "
+            "preceding cycle member (alpha/2 preparation)."
         )
         self.ssfp_start_phase.valueChanged.connect(lambda _: self.update_diagram())
         row_phase.addWidget(self.ssfp_start_phase)
@@ -553,7 +562,7 @@ class SequenceDesigner(QGroupBox):
                 "flip_angle": 30,
                 "ssfp_repeats": 100,
                 "ssfp_dur": 1.0,
-                "ssfp_start_tr": 0.0,
+                "ssfp_start_tr": 2.5,
                 "ssfp_start_flip": 15.0,
                 "ssfp_start_phase": 0.0,
                 "ssfp_alternate_phase": True,
@@ -969,7 +978,8 @@ class SequenceDesigner(QGroupBox):
     def _build_ssfp(self, custom_pulse, dt, log_info=False):
         """
         Build a simple balanced-SSFP-style pulse train: identical RF pulses every TR,
-        with an optional distinct first pulse (amplitude/phase/delay).
+        preceded by a distinct startup pulse (flip/phase) whose centre lies
+        the startup spacing before the first regular pulse centre.
         """
         dt = max(dt, 1e-6)
         tr = self.tr_spin.value() / 1000.0
@@ -999,6 +1009,10 @@ class SequenceDesigner(QGroupBox):
         # A looped steady-state sequence must use one reproducible interval.
         tr_points = max(1, int(np.rint(tr / dt)))
         effective_tr = tr_points * dt
+        # ``start_delay`` is the centre-to-centre spacing between the startup
+        # pulse and the first regular pulse (alpha/2 - TR/2 for ratio 0.5), the
+        # same convention as the Pulseq bSSFP builders.  Both pulses share one
+        # waveform, so equal start indices spacing means equal centre spacing.
         start_index = max(0, int(np.rint(start_delay / dt)))
         if (
             log_info
@@ -1012,17 +1026,37 @@ class SequenceDesigner(QGroupBox):
                 f"at a {dt * 1e6:.6g} us time step."
             )
 
-        # If a custom pulse is provided, resample it onto dt and override the pulse shape.
-        custom_b1 = None
+        # The RF designer pulse defines the regular flip angle.  Without one, a
+        # hard pulse is calibrated to the main flip angle so that the startup
+        # flip ratio still scales a physically meaningful waveform.
         if custom_pulse is not None:
-            custom_b1 = SequenceDesigner._resample_custom_pulse(custom_pulse, dt)
-            pulse_dur = len(custom_b1) * dt
+            pulse_b1 = SequenceDesigner._resample_custom_pulse(custom_pulse, dt)
+            pulse_flip = main_flip
+        else:
+            n_hard = max(1, int(np.rint(pulse_dur / dt)))
+            pulse_b1, _ = design_rf_pulse(
+                "rect", duration=n_hard * dt, flip_angle=1.0, npoints=n_hard
+            )
+            pulse_flip = 1.0
+        pulse_b1 = np.asarray(pulse_b1, dtype=complex)
+        pulse_points = len(pulse_b1)
 
-        pulse_points = max(1, int(np.rint(pulse_dur / dt)))
+        if pulse_points > tr_points:
+            raise ValueError(
+                f"SSFP RF pulse ({pulse_points * dt * 1e3:.3g} ms) is longer "
+                f"than TR ({effective_tr * 1e3:.3g} ms)."
+            )
+        if n_reps > 1 and start_flip != 0.0 and start_index < pulse_points:
+            raise ValueError(
+                f"SSFP startup spacing ({start_index * dt * 1e3:.3g} ms) is "
+                f"shorter than the RF pulse ({pulse_points * dt * 1e3:.3g} ms); "
+                "the startup and first regular pulse would overlap."
+            )
 
         # Determine timeline length from integer raster indices.  The trailing
         # half-TR keeps the endpoint sampling convention used by Free Mode.
-        final_pulse_start = start_index + (n_reps - 1) * tr_points
+        first_regular_start = start_index if n_reps > 1 else 0
+        final_pulse_start = first_regular_start + max(0, n_reps - 2) * tr_points
         tail_points = max(1, int(np.ceil(0.5 * effective_tr / dt)))
         npoints = final_pulse_start + pulse_points + tail_points + 1
         enforce_sequence_memory(npoints)
@@ -1030,32 +1064,16 @@ class SequenceDesigner(QGroupBox):
         gradients = np.zeros((npoints, 3), dtype=float)
         time = np.arange(npoints) * dt
 
-        base_peak = None
-        if custom_b1 is not None:
-            base_peak = (
-                float(np.max(np.abs(custom_b1))) if np.any(np.abs(custom_b1)) else 1.0
+        def _place_pulse(start_idx, flip_deg, phase):
+            # The designer waveform already carries its own phase; the SSFP
+            # phase cycle rotates it further.
+            scale = flip_deg / pulse_flip if pulse_flip else 0.0
+            b1[start_idx : start_idx + pulse_points] = (
+                pulse_b1 * scale * np.exp(1j * phase)
             )
 
-        def _place_pulse(start_idx, amp, phase):
-            end_idx = min(start_idx + pulse_points, npoints)
-            if custom_b1 is not None:
-                seg = custom_b1
-                seg_len = min(end_idx - start_idx, len(seg))
-                # Scale/rotate custom waveform by amp/phase controls
-                scale = amp / base_peak if base_peak else 1.0
-                # Note: custom_b1 already has the phase from the designer baked in.
-                # However, for SSFP we might want to rotate it further if alternating phase is used.
-                b1[start_idx : start_idx + seg_len] = (
-                    seg[:seg_len] * scale * np.exp(1j * phase)
-                )
-            else:
-                b1[start_idx:end_idx] = amp * np.exp(1j * phase)
-
-        # Optional distinct first pulse
-        # Calculate start amplitude from start flip angle
-        start_scale = start_flip / main_flip if main_flip > 0 else 0.5
-        start_amp = base_peak * start_scale if base_peak is not None else 0.025
-        _place_pulse(start_index, start_amp, np.deg2rad(start_phase_deg))
+        # Distinct startup pulse at t = 0.
+        _place_pulse(0, start_flip, np.deg2rad(start_phase_deg))
 
         # Remaining pulses are a regular phase cycle independent of the distinct
         # startup pulse.  In particular, a 90° startup followed by alternating
@@ -1068,8 +1086,8 @@ class SequenceDesigner(QGroupBox):
                 phase_increment_deg=180.0 if alternate else 0.0,
             )
             _place_pulse(
-                start_index + k * tr_points,
-                base_peak if base_peak is not None else 0.05,
+                first_regular_start + (k - 1) * tr_points,
+                main_flip,
                 np.deg2rad(regular_phase_deg),
             )
 
@@ -1270,6 +1288,17 @@ class SequenceDesigner(QGroupBox):
                 )
             )
         if seq_type == "SSFP (Loop)":
+            if self.ssfp_use_ratios.isChecked():
+                startup_flip = self.ssfp_flip_ratio.value()
+            else:
+                startup_flip = self.ssfp_start_flip.value()
+            if len(segments) >= 2 and startup_flip != 0.0:
+                first, second = segments[0].center_s, segments[1].center_s
+                annotations.brackets.append(
+                    TimingMarker(
+                        f"Start {(second - first) * 1e3:.3g} ms", first, second
+                    )
+                )
             if len(segments) >= 3:
                 start, nxt = segments[1].start_s, segments[2].start_s
                 annotations.brackets.append(
