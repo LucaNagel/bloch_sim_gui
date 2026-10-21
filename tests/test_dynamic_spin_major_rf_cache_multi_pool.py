@@ -352,3 +352,74 @@ def test_rf_cache_multi_pool_result_does_not_depend_on_slices_or_threads(monkeyp
         )
         _assert_equal(result, serial)
     _assert_close(evicting, serial)
+
+
+def _with_washout(phantom, sources):
+    """Add a voxel loss gradient and, optionally, two source compartments."""
+    shape = phantom.shape
+    grid = np.linspace(0.0, 1.0, int(np.prod(shape))).reshape(shape)
+    n_pools = len(phantom.pools)
+    washout = dict(loss_map_s_inv=20.0 + 200.0 * grid[::-1])
+    if sources:
+        compartments = np.full(shape, -1, dtype=np.int32)
+        compartments.reshape(-1)[-2:] = (0, 1)
+        source_mask = compartments >= 0
+        phantom.kpl_map_s_inv = np.where(source_mask, 0.0, phantom.kpl_map_s_inv)
+        if getattr(phantom, "kpa_map_s_inv", None) is not None:
+            phantom.kpa_map_s_inv = np.where(source_mask, 0.0, phantom.kpa_map_s_inv)
+        concentration = np.stack(
+            (
+                np.broadcast_to((30.0, 300.0, 120.0), (n_pools, 3)),
+                np.broadcast_to((200.0, 0.0, 500.0), (n_pools, 3)),
+            )
+        )
+        washout.update(
+            compartment_map=compartments,
+            times_s=np.asarray((40 * RASTER, 205 * RASTER, 400 * RASTER)),
+            concentration_rates=concentration,
+            magnetization_rates=concentration * np.asarray((4.0, 2.5))[:, None, None],
+        )
+    phantom.voxel_washout = dynamic_module.VoxelWashout(**washout)
+    phantom.voxel_washout.validate(phantom.shape, n_pools)
+    return phantom
+
+
+@pytest.mark.parametrize(
+    "kernel, n_pools, tracked, sources",
+    [
+        ("native_serial", 3, True, True),
+        ("native_parallel", 3, False, False),
+        ("native_serial", 2, True, True),
+    ],
+)
+def test_rf_cache_carries_voxel_washout_loss_and_steps_source_tiles(
+    kernel, n_pools, tracked, sources
+):
+    phantom = _with_washout(
+        _phantom(n_pools, inflow=None, tracked=tracked, max_delay_s=None), sources
+    )
+    program = _program()
+    kwargs = dict(
+        spin_sampling=SpinSampling((4, 1, 1)),
+        use_parallel=kernel == "native_parallel",
+        num_threads=3,
+    )
+
+    reference = _run(phantom, program, "optimized")
+    stepwise = _run(
+        phantom, program, kernel, _native_spin_major_rf_cache=False, **kwargs
+    )
+    cached = _run(phantom, program, kernel, **kwargs)
+
+    assert cached.metadata["sequence_kernel"] == kernel
+    assert _rf_cache(cached, "enabled") is True
+    assert _rf_cache(cached, "applications") > REPETITIONS // 2
+    # Only the tile holding the source voxels steps through the pulses.
+    if sources:
+        assert (
+            0 < _rf_cache(cached, "stepwise_tiles") <= _rf_cache(cached, "applications")
+        )
+    else:
+        assert _rf_cache(cached, "stepwise_tiles") == 0
+    _assert_close(cached, stepwise)
+    _assert_close(cached, reference, 1e-10)

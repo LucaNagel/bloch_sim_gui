@@ -46,8 +46,12 @@ static inline int field_f1ac(int np) { return 5 * np + 2; }
 static inline int field_ktc(int np, int j) { return 5 * np + 3 + 3 * j; }
 static inline int field_kj0c(int np, int j) { return 5 * np + 4 + 3 * j; }
 static inline int field_kj1c(int np, int j) { return 5 * np + 5 + 3 * j; }
+/* Washout factor exp(-loss * half / 2) of a quarter interval. */
+static inline int field_washout(int np) { return 8 * np; }
 
-static inline size_t slot_doubles(int np) { return (size_t)8 * np * DSM_TILE; }
+static inline size_t slot_doubles(int np) {
+    return (size_t)(8 * np + 1) * DSM_TILE;
+}
 
 typedef struct {
     double half;
@@ -100,6 +104,9 @@ typedef struct {
     double gs[DSM_TILE];
     double tx_real[DSM_TILE];
     double tx_imag[DSM_TILE];
+    double washout_loss[DSM_TILE];
+    int32_t washout_compartment[DSM_TILE]; /* -1 outside source compartments */
+    int washout_sources;                   /* any valid spin in a compartment */
     dsm_curve_state curve[2];
 } dsm_tile;
 
@@ -203,6 +210,10 @@ static void fill_slot(const dsm_chunk *c, const dsm_group *g,
             slot[field_fac_real(pool) * DSM_TILE + s] = g->e2[pool] * cos(angle);
             slot[field_fac_imag(pool) * DSM_TILE + s] = g->e2[pool] * sin(angle);
         }
+
+        slot[field_washout(np) * DSM_TILE + s] =
+            c->washout_loss != NULL ? exp(-t->washout_loss[s] * (h / 2.0))
+                                    : 1.0;
 
         double a = c->r1[0] + ksum;
         double ea = exp(-a * h);
@@ -736,6 +747,9 @@ static void load_tile(const dsm_chunk *c, int64_t first, int valid,
     const int np = c->npools;
     memset(t, 0, sizeof(*t));
     memset(rw, 0, sizeof(double) * 2 * (size_t)ncoils * DSM_TILE);
+    for (int s = 0; s < DSM_TILE; s++) {
+        t->washout_compartment[s] = -1;
+    }
     for (int s = 0; s < valid; s++) {
         int64_t spin = first + s;
         t->px[s] = c->positions_m[3 * spin];
@@ -760,6 +774,13 @@ static void load_tile(const dsm_chunk *c, int64_t first, int valid,
             t->tx_imag[s] = c->tx[2 * spin + 1];
         }
         t->d[s] = c->delivery != NULL ? c->delivery[spin] : 0.0;
+        if (c->washout_loss != NULL) {
+            t->washout_loss[s] = c->washout_loss[spin];
+        }
+        if (c->washout_compartment != NULL) {
+            t->washout_compartment[s] = c->washout_compartment[spin];
+            t->washout_sources |= c->washout_compartment[spin] >= 0;
+        }
         if (c->spatial_sources) {
             t->delay[s] = c->arrival_delay_s[spin];
         }
@@ -790,20 +811,85 @@ static void store_tile(const dsm_chunk *c, int64_t first, int valid,
     }
 }
 
+/* Scale x, y, z and c of every pool by the per-spin washout factor of the
+ * slot, squared when ``twice``. */
+static inline void washout_decay(const dsm_chunk *c, dsm_tile *DSM_RESTRICT t,
+                                 const double *DSM_RESTRICT slot, int twice) {
+    const int np = c->npools;
+    const double *DSM_RESTRICT q = slot + field_washout(np) * DSM_TILE;
+    double factor[DSM_TILE];
+    for (int s = 0; s < DSM_TILE; s++) {
+        factor[s] = twice ? q[s] * q[s] : q[s];
+    }
+    for (int pool = 0; pool < np; pool++) {
+        double *DSM_RESTRICT xs = t->x[pool];
+        double *DSM_RESTRICT ys = t->y[pool];
+        double *DSM_RESTRICT zs = t->z[pool];
+        for (int s = 0; s < DSM_TILE; s++) {
+            xs[s] = xs[s] * factor[s];
+            ys[s] = ys[s] * factor[s];
+            zs[s] = zs[s] * factor[s];
+        }
+        if (c->track_concentration) {
+            double *DSM_RESTRICT cs = t->c[pool];
+            for (int s = 0; s < DSM_TILE; s++) {
+                cs[s] = cs[s] * factor[s];
+            }
+        }
+    }
+}
+
+/* Add one half step of compartment gains (compartment, pool, 2) to the
+ * spins of source compartments. */
+static inline void washout_gain(const dsm_chunk *c, dsm_tile *t,
+                                const double *gains) {
+    const int np = c->npools;
+    for (int s = 0; s < DSM_TILE; s++) {
+        const int32_t compartment = t->washout_compartment[s];
+        if (compartment < 0) {
+            continue;
+        }
+        const double *row = gains + 2 * (int64_t)compartment * np;
+        for (int pool = 0; pool < np; pool++) {
+            t->z[pool][s] = t->z[pool][s] + row[2 * pool];
+            if (c->track_concentration) {
+                t->c[pool][s] = t->c[pool][s] + row[2 * pool + 1];
+            }
+        }
+    }
+}
+
+/* Washout gains of interval i for this tile, or NULL. */
+static inline const double *washout_row(const dsm_chunk *c, const dsm_tile *t,
+                                        int32_t i) {
+    if (!t->washout_sources || c->interval_washout == NULL ||
+        c->interval_washout[i] < 0) {
+        return NULL;
+    }
+    return c->washout_table + (int64_t)c->interval_washout[i] * 2 *
+                                  c->washout_compartments * c->npools * 2;
+}
+
 /* Advance a tile across plan interval i. Gradient factors must already be
  * prepared for the first half; ``source`` is an 8-value source row and
- * ``spatial`` holds both halves of per-spin sources, or both are NULL. */
+ * ``spatial`` holds both halves of per-spin sources, or both are NULL.
+ * ``washout`` holds both halves of compartment gains or is NULL. */
 static inline void step_interval(const dsm_chunk *c, const dsm_group *g,
                                  const double *slot, dsm_tile *t, int32_t i,
                                  const double *source, const dsm_source *spatial,
-                                 const double *spatial_rf) {
+                                 const double *spatial_rf,
+                                 const double *washout) {
     const int np = c->npools;
     const double h = g->half;
     const double pd1 = c->interval_phase_s[2 * i];
     const double pd2 = c->interval_phase_s[2 * i + 1];
     const int32_t rf_index = c->interval_rf[i];
     const int gradient = c->interval_gradient[i] >= 0;
+    const int loss = c->washout_loss != NULL;
 
+    if (loss) {
+        washout_decay(c, t, slot, 0);
+    }
     double da = pd1 - h;
     if (gradient || da != 0.0) {
         transverse_corrected(t, np, slot, gradient, da, 0.0, da != 0.0);
@@ -811,6 +897,12 @@ static inline void step_interval(const dsm_chunk *c, const dsm_group *g,
         transverse_plain(t, np, slot);
     }
     longitudinal_half(c, g, slot, t, source, spatial);
+    if (washout != NULL) {
+        washout_gain(c, t, washout);
+    }
+    if (loss) {
+        washout_decay(c, t, slot, 1);
+    }
 
     if (rf_index >= 0) {
         if (spatial_rf != NULL) {
@@ -835,6 +927,12 @@ static inline void step_interval(const dsm_chunk *c, const dsm_group *g,
     }
     longitudinal_half(c, g, slot, t, source != NULL ? source + 4 : NULL,
                       spatial != NULL ? spatial + 1 : NULL);
+    if (washout != NULL) {
+        washout_gain(c, t, washout + 2 * (int64_t)c->washout_compartments * np);
+    }
+    if (loss) {
+        washout_decay(c, t, slot, 0);
+    }
 }
 
 /* Boundary actions at state index i + 1. */
@@ -1076,7 +1174,7 @@ static void advance_interval(const dsm_context *x, dsm_workspace *w,
     step_interval(c, g, slot, t, i,
                   source_index >= 0 ? c->source_table + 8 * (int64_t)source_index
                                     : NULL,
-                  delayed, spatial ? spatial_rf : NULL);
+                  delayed, spatial ? spatial_rf : NULL, washout_row(c, t, i));
 }
 
 /* Build the propagator of intervals [first, end) for one tile into ``out``:
@@ -1155,8 +1253,9 @@ static void build_propagator(const dsm_context *x, const dsm_tile *t,
                 row[offset + 5] = node[3];
                 source = row;
             }
+            /* Washout gains are affine and never enter a propagator. */
             step_interval(c, g, coefficients, columns + column, i, source, NULL,
-                          spatial ? spatial_rf : NULL);
+                          spatial ? spatial_rf : NULL, NULL);
         }
     }
 
@@ -1410,8 +1509,15 @@ static void run_tile(const dsm_context *x, int64_t tile, int64_t n_tiles,
             }
             double weights[DSM_WEIGHTS][DSM_TILE];
             int stepwise = 0;
+            /* Washout gains are affine and not part of the entry. */
+            if (t->washout_sources && c->interval_washout != NULL) {
+                for (int32_t k = i; k < end && !stepwise; k++) {
+                    stepwise = c->interval_washout[k] >= 0;
+                }
+            }
             if (c->spatial_sources) {
-                stepwise = segment_spatial_weights(x, t, &inflow, i, end, weights);
+                stepwise = stepwise ||
+                           segment_spatial_weights(x, t, &inflow, i, end, weights);
             } else {
                 const double *sources =
                     c->segment_sources + DSM_WEIGHTS * (int64_t)segment;
@@ -1501,6 +1607,38 @@ static int validate(const dsm_chunk *c) {
         }
         for (int64_t spin = 0; spin < c->nspins; spin++) {
             if (!isfinite(c->arrival_delay_s[spin])) {
+                return -1;
+            }
+        }
+    }
+    if (c->washout_loss != NULL) {
+        for (int64_t spin = 0; spin < c->nspins; spin++) {
+            if (!(c->washout_loss[spin] >= 0.0) ||
+                !isfinite(c->washout_loss[spin])) {
+                return -1;
+            }
+        }
+    }
+    if (c->washout_compartment != NULL) {
+        if (c->washout_compartments < 1 || c->n_washout < 0 ||
+            (c->n_washout > 0 &&
+             (c->washout_table == NULL || c->interval_washout == NULL))) {
+            return -1;
+        }
+        for (int64_t spin = 0; spin < c->nspins; spin++) {
+            if (c->washout_compartment[spin] < -1 ||
+                c->washout_compartment[spin] >= c->washout_compartments) {
+                return -1;
+            }
+        }
+    }
+    if (c->interval_washout != NULL) {
+        if (c->washout_compartment == NULL) {
+            return -1;
+        }
+        for (int32_t i = 0; i < c->n_intervals; i++) {
+            if (c->interval_washout[i] < -1 ||
+                c->interval_washout[i] >= c->n_washout) {
                 return -1;
             }
         }

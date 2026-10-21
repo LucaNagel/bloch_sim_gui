@@ -2553,6 +2553,86 @@ class _WashoutDriver:
         if concentration_state is not None:
             concentration_state[:, spins, 2] += concentration_gain[compartments].T
 
+    def _rates_at(self, times_s):
+        """Vectorized :meth:`VoxelWashout.compartment_rates_at`, time first."""
+        knots = self.washout.times_s
+        times = np.asarray(times_s, dtype=np.float64) + self.kinetics_time_offset_s
+        index = np.clip(np.searchsorted(knots, times) - 1, 0, knots.size - 2)
+        weight = (times - knots[index]) / (knots[index + 1] - knots[index])
+        inside = (times >= knots[0]) & (times <= knots[-1])
+        result = []
+        for values in (
+            self.washout.concentration_rates,
+            self.washout.magnetization_rates,
+        ):
+            rates = np.moveaxis(
+                (1.0 - weight) * values[:, :, index] + weight * values[:, :, index + 1],
+                -1,
+                0,
+            )
+            rates[~inside] = 0.0
+            result.append(rates)
+        return result[0], result[1]
+
+    def source_gain_table(self, start_s, mid_s, end_s, concentration_tracked):
+        """Return per-interval rows and gains of :meth:`add_sources`.
+
+        The table has shape ``(rows, 2, compartments, pools, 2)`` holding, per
+        half step, the magnetization and concentration gains of
+        :meth:`add_sources`; intervals without influx have row -1.
+        """
+        compartments = self.washout.concentration_rates.shape[0]
+        pools = self.r1.size
+        count = len(start_s)
+        if self.source_spins is None:
+            return (
+                np.full(count, -1, dtype=np.int32),
+                np.zeros((0, 2, compartments, pools, 2), dtype=np.float64),
+            )
+        bounds = (
+            np.asarray(start_s, dtype=np.float64),
+            np.asarray(mid_s, dtype=np.float64),
+            np.asarray(end_s, dtype=np.float64),
+        )
+        rates = [self._rates_at(times) for times in bounds]
+        equilibrium = self.equilibrium_polarization if concentration_tracked else 0.0
+        gains = np.zeros((count, 2, compartments, pools, 2), dtype=np.float64)
+        for half in range(2):
+            c0, m0 = rates[half]
+            c1, m1 = rates[half + 1]
+            duration = bounds[half + 1] - bounds[half]
+            positive = duration > 0
+            safe = np.where(positive, duration, 1.0)
+            durations, inverse = np.unique(safe, return_inverse=True)
+            convolutions = np.array(
+                [_decay_convolution(self.r1, value) for value in durations]
+            ).reshape(durations.size, 2, pools)
+            f0 = convolutions[inverse.reshape(-1), 0]
+            f1 = convolutions[inverse.reshape(-1), 1]
+            concentration_gain = 0.5 * safe[:, None, None] * (c0 + c1)
+            excess0 = m0 - equilibrium * c0
+            excess1 = m1 - equilibrium * c1
+            magnetization_gain = (
+                excess0 * f0[:, None, :]
+                + (excess1 - excess0) / safe[:, None, None] * f1[:, None, :]
+                + equilibrium * concentration_gain
+            )
+            gains[positive, half, :, :, 0] = magnetization_gain[positive]
+            if concentration_tracked:
+                gains[positive, half, :, :, 1] = concentration_gain[positive]
+        active = np.any(gains != 0.0, axis=(1, 2, 3, 4))
+        rows = np.full(count, -1, dtype=np.int32)
+        rows[active] = np.arange(np.count_nonzero(active), dtype=np.int32)
+        return rows, np.ascontiguousarray(gains[active])
+
+    def compartment_by_spin(self, nspins):
+        """Return the int32 source compartment of every spin, -1 elsewhere."""
+        if self.source_spins is None:
+            return None
+        compartments = np.full(nspins, -1, dtype=np.int32)
+        compartments[self.source_spins] = self.source_compartments
+        return compartments
+
 
 def _prepare_transverse_factors(phase_cycles, t2, duration):
     """Evaluate the state-independent transverse factors once."""
@@ -2627,7 +2707,7 @@ def _spin_major_kernel():
         from .dynamic_spin_major_cy import API_VERSION, TILE_SPINS, run_spin_major_chunk
     except (ImportError, OSError):
         return None
-    if API_VERSION != 5:
+    if API_VERSION != 6:
         return None
     return run_spin_major_chunk, int(TILE_SPINS)
 
@@ -2660,8 +2740,6 @@ def _spin_major_fallback_reason(
         return "requires float64 state and checkpoints"
     if phantom.dynamic_b0 is not None:
         return "dynamic B0 is unsupported"
-    if _washout_active(phantom):
-        return "per-voxel washout and compartment sources are unsupported"
     if spatial_tx:
         try:
             from .dynamic_spin_major_cy import SPATIAL_TX_SUPPORTED
@@ -3417,14 +3495,6 @@ def _simulate_dynamic_sequence_block(
     native_plan_driver = None
     native_plan_inflow_driver = None
     native_plan_multi_pool_driver = None
-    if _washout_active(phantom) and sequence_kernel in {
-        "native_serial",
-        "native_parallel",
-    }:
-        native_fallback_reason = (
-            "per-voxel washout and compartment sources require the optimized kernel"
-        )
-        sequence_kernel = "optimized"
     if sequence_kernel in {"native_serial", "native_parallel"}:
         try:
             from .dynamic_bloch_cy import (
@@ -4141,8 +4211,11 @@ def _simulate_dynamic_sequence_block(
             if native_full_plan_source_model
             else (136 if spatial_tx_active else 96)
         )
+    # Only the multi-pool plan applies voxel washout; two-pool blocks keep the
+    # per-interval native loop, which wraps every interval in washout steps.
     native_full_plan_enabled = bool(
         sequence_kernel in {"native_serial", "native_parallel"}
+        and (washout is None or native_full_plan_multi_pool)
         and (
             native_full_plan_multi_pool
             or native_full_plan_no_inflow
@@ -4231,6 +4304,10 @@ def _simulate_dynamic_sequence_block(
     if spatial_inflow_active:
         native_rf_fused_fallback_reason = (
             "persistent RF blocks do not yet support voxelwise inflow arrival delays"
+        )
+    elif washout is not None:
+        native_rf_fused_fallback_reason = (
+            "persistent RF blocks do not apply per-voxel washout"
         )
     elif native_rf_concentration_block is None:
         native_rf_fused_fallback_reason = (
@@ -5207,6 +5284,28 @@ def _simulate_dynamic_sequence_block(
                         for index in range(4)
                     )
                 if native_full_plan_multi_pool:
+                    washout_arguments = {}
+                    if washout is not None:
+                        if washout.loss is not None:
+                            washout_arguments["washout_loss"] = np.ascontiguousarray(
+                                washout.loss, dtype=np.float64
+                            )
+                        washout_compartment = washout.compartment_by_spin(
+                            n_simulated_spins
+                        )
+                        if washout_compartment is not None:
+                            block = slice(first_interval, end_interval)
+                            rows, gains = washout.source_gain_table(
+                                execution_plan.interval_start_s[block],
+                                execution_plan.interval_mid_s[block],
+                                execution_plan.interval_end_s[block],
+                                concentration_state is not None,
+                            )
+                            washout_arguments.update(
+                                washout_compartment=washout_compartment,
+                                washout_rows=rows,
+                                washout_table=gains,
+                            )
                     native_plan_multi_pool_driver(
                         state,
                         transverse_state,
@@ -5242,6 +5341,7 @@ def _simulate_dynamic_sequence_block(
                         *action_arrays,
                         worker_threads,
                         spatial_source_table,
+                        **washout_arguments,
                     )
                 else:
                     native_plan_inflow_driver(
@@ -5499,6 +5599,15 @@ def _simulate_dynamic_sequence_block(
             num_blocks=_SPIN_MAJOR_WORK_BLOCKS,
             **spatial_arguments,
         )
+        washout_compartment = None
+        if washout is not None:
+            spin_arguments["washout_loss"] = (
+                None
+                if washout.loss is None
+                else np.ascontiguousarray(washout.loss, dtype=np.float64)
+            )
+            washout_compartment = washout.compartment_by_spin(n_simulated_spins)
+            spin_arguments["washout_compartment"] = washout_compartment
         rf_cache = {}
         table_started = perf_counter()
         rf_plan, propagators = plan_rf_propagators(source_mode, equilibrium)
@@ -5535,6 +5644,17 @@ def _simulate_dynamic_sequence_block(
                 rf_cache=rf_cache,
                 spatial_inflow=bool(spatial_arguments),
             )
+            if washout_compartment is not None:
+                interval_slice = slice(first_interval, end_interval)
+                (
+                    tables["interval_washout"],
+                    tables["washout_table"],
+                ) = washout.source_gain_table(
+                    execution_plan.interval_start_s[interval_slice],
+                    execution_plan.interval_mid_s[interval_slice],
+                    execution_plan.interval_end_s[interval_slice],
+                    concentration_state is not None,
+                )
             adc_first = tables.pop("adc_first_payload")
             adc_count = tables.pop("adc_count")
             adc_signal = np.zeros(
@@ -5647,6 +5767,7 @@ def _simulate_dynamic_sequence_block(
             sequence_kernel == "native_parallel"
             and native_longitudinal_block is not None
             and native_block_enabled
+            and washout is None
             and interval >= native_preapplied_end
             and rf_hz[interval] == 0.0
         ):

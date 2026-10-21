@@ -105,6 +105,21 @@ typedef struct {
     dsm_curve rate_curve;
     dsm_curve polarization_curve;
 
+    /* Voxel washout (VoxelWashout in dynamic_phantom.py). A per-spin
+     * first-order loss scales x, y, z and c of every pool by
+     * exp(-loss * half / 2) before and after each free half step (Strang
+     * splitting), and spins of a source compartment receive the precomputed
+     * gains of their compartment after each longitudinal half step. The loss
+     * is NULL without loss, the compartment map NULL without sources. */
+    const double *washout_loss;          /* (nspins,) 1/s */
+    const int32_t *washout_compartment;  /* (nspins,), -1 outside sources */
+    int32_t washout_compartments;
+    const int32_t *interval_washout;     /* (n_intervals,) row or -1 */
+    int32_t n_washout;
+    /* (n_washout, 2, compartments, npools, 2): per half step, compartment
+     * and pool the magnetization and concentration gains. */
+    const double *washout_table;
+
     /* Boundary actions at state index interval + 1 (CSR layout). */
     int64_t n_actions;
     const int64_t *action_offsets;  /* (n_intervals + 1,) into action arrays */
@@ -126,7 +141,9 @@ typedef struct {
      * sources, and evaluated per spin from the delayed curves at the basis
      * nodes with spatial sources; a tile whose delayed queries cross a curve
      * region runs that occurrence stepwise. A segment with a basis row index
-     * builds its propagator entry before applying it. With a segment phase
+     * builds its propagator entry before applying it. The washout loss is part
+     * of every entry; a tile with washout source spins runs an occurrence
+     * whose intervals carry washout gains stepwise. With a segment phase
      * (cos t, sin t), the entry is applied as R_z(t) A R_z(-t), the
      * propagator of the same segment with every RF phase advanced by -t. */
     int32_t n_segments;

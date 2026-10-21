@@ -356,3 +356,83 @@ def test_kernel_capabilities_report_spin_major_extensions():
     assert native.details["spin_major_spatial_inflow"]
     assert native.details["spin_major_rf_cache_multi_pool"]
     assert native.details["spin_major_rf_cache_phase"]
+
+
+def _with_washout(phantom, sources=True):
+    """Add a voxel loss gradient and, optionally, two source compartments."""
+    shape = phantom.shape
+    grid = np.linspace(0.0, 1.0, int(np.prod(shape))).reshape(shape)
+    n_pools = len(phantom.pools)
+    washout = dict(loss_map_s_inv=40.0 + 400.0 * grid[::-1])
+    if sources:
+        compartments = np.full(shape, -1, dtype=np.int32)
+        compartments.reshape(-1)[-2:] = (0, 1)
+        source_mask = compartments >= 0
+        phantom.kpl_map_s_inv = np.where(source_mask, 0.0, phantom.kpl_map_s_inv)
+        if getattr(phantom, "kpa_map_s_inv", None) is not None:
+            phantom.kpa_map_s_inv = np.where(source_mask, 0.0, phantom.kpa_map_s_inv)
+        times = np.asarray((2 * RASTER, 9 * RASTER, 20 * RASTER))
+        scale = np.arange(1, n_pools + 1, dtype=np.float64)[None, :, None]
+        concentration = (
+            np.stack(
+                (
+                    np.broadcast_to((30.0, 300.0, 120.0), (n_pools, 3)),
+                    np.broadcast_to((200.0, 0.0, 500.0), (n_pools, 3)),
+                )
+            )
+            / scale
+        )
+        washout.update(
+            compartment_map=compartments,
+            times_s=times,
+            concentration_rates=concentration,
+            magnetization_rates=concentration * np.asarray((4.0, 2.5))[:, None, None],
+            compartment_names=("ureter", "bladder"),
+        )
+    phantom.voxel_washout = dynamic_module.VoxelWashout(**washout)
+    phantom.voxel_washout.validate(phantom.shape, n_pools)
+    return phantom
+
+
+@pytest.mark.parametrize("kernel", ["native_serial", "native_parallel"])
+@pytest.mark.parametrize(
+    "n_pools, inflow, tracked, sources",
+    [
+        (2, None, False, True),
+        (2, "polarized", True, True),
+        (3, None, False, False),
+        (3, None, True, True),
+        (3, "direct", False, True),
+        (3, "polarized", True, True),
+        (4, "polarized", True, True),
+    ],
+)
+def test_native_kernels_apply_voxel_washout_like_the_reference(
+    kernel, n_pools, inflow, tracked, sources
+):
+    phantom = _with_washout(
+        _phantom(n_pools, inflow=inflow, tracked=tracked), sources=sources
+    )
+    program = _program()
+    kwargs = dict(use_parallel=kernel == "native_parallel", num_threads=2)
+
+    reference = _run(phantom, program, "reference")
+    interval_major = _run(phantom, program, kernel, _native_spin_major=False, **kwargs)
+    spin_major = _run(phantom, program, kernel, **kwargs)
+
+    _assert_spin_major(spin_major)
+    for result in (interval_major, spin_major):
+        assert result.metadata["sequence_kernel"] == kernel
+        assert result.metadata["native_fallback_reason"] is None
+    assert interval_major.metadata["native_full_plan_enabled"] is (n_pools > 2)
+    _assert_close(spin_major, reference, 1e-10)
+    _assert_close(interval_major, reference, 1e-10)
+    # The washout must matter at this scale, or the comparison proves nothing.
+    plain = _phantom(n_pools, inflow=inflow, tracked=tracked)
+    unwashed = _run(plain, program, "optimized")
+    assert not np.allclose(
+        unwashed.checkpoint_pool_magnetization,
+        reference.checkpoint_pool_magnetization,
+        rtol=1e-3,
+        atol=0.0,
+    )

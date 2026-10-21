@@ -670,6 +670,52 @@ cdef inline int _advance_multi_pool_voxel(
     return 0
 
 
+cdef inline void _scale_multi_pool_voxel(
+        double *state_data,
+        double *concentration_data,
+        double *transverse_data,
+        Py_ssize_t npools,
+        Py_ssize_t nspins,
+        Py_ssize_t spin,
+        double factor) noexcept nogil:
+    cdef Py_ssize_t pool
+    cdef Py_ssize_t offset
+    for pool in range(npools):
+        offset = 2 * (pool * nspins + spin)
+        transverse_data[offset] = transverse_data[offset] * factor
+        transverse_data[offset + 1] = transverse_data[offset + 1] * factor
+        offset = 3 * (pool * nspins + spin) + 2
+        state_data[offset] = state_data[offset] * factor
+        concentration_data[offset] = concentration_data[offset] * factor
+
+
+cdef inline void _add_washout_gains(
+        double *state_data,
+        double *concentration_data,
+        Py_ssize_t npools,
+        Py_ssize_t nspins,
+        Py_ssize_t spin,
+        int *compartment_data,
+        int *row_data,
+        double *table_data,
+        Py_ssize_t compartments,
+        Py_ssize_t step,
+        Py_ssize_t half) noexcept nogil:
+    cdef Py_ssize_t pool
+    cdef Py_ssize_t offset
+    cdef Py_ssize_t gain
+    cdef int compartment = compartment_data[spin]
+    cdef int row = row_data[step]
+    if compartment < 0 or row < 0:
+        return
+    gain = 2 * npools * (compartment + compartments * (half + 2 * row))
+    for pool in range(npools):
+        offset = 3 * (pool * nspins + spin) + 2
+        state_data[offset] = state_data[offset] + table_data[gain + 2 * pool]
+        concentration_data[offset] = (
+            concentration_data[offset] + table_data[gain + 2 * pool + 1])
+
+
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
@@ -726,8 +772,19 @@ def run_dynamic_plan_block_multi_pool(
         double signal_scale,
         bint ideal_crushers,
         int num_threads,
-        np.ndarray[DTYPE_t, ndim=3] spatial_source_values=None):
-    """Execute a bounded multi-pool precursor-to-products plan block."""
+        np.ndarray[DTYPE_t, ndim=3] spatial_source_values=None,
+        np.ndarray[DTYPE_t, ndim=1] washout_loss=None,
+        np.ndarray[np.int32_t, ndim=1] washout_compartment=None,
+        np.ndarray[np.int32_t, ndim=1] washout_rows=None,
+        np.ndarray[DTYPE_t, ndim=5] washout_table=None):
+    """Execute a bounded multi-pool precursor-to-products plan block.
+
+    Voxel washout scales every pool's x, y, z and concentration by
+    ``exp(-washout_loss * duration / 2)`` before and after each free half
+    step. Spins with ``washout_compartment >= 0`` receive the gains
+    ``washout_table[washout_rows[step], half, compartment, pool]``
+    (magnetization, concentration) after each longitudinal half step.
+    """
     cdef Py_ssize_t npools = state.shape[0]
     cdef Py_ssize_t nproducts = npools - 1
     cdef Py_ssize_t nspins = state.shape[1]
@@ -774,6 +831,15 @@ def run_dynamic_plan_block_multi_pool(
     cdef double weighted_imag
     cdef double received_real
     cdef double received_imag
+    cdef double washout_factor
+    cdef Py_ssize_t washout_offset
+    cdef bint has_washout_loss = washout_loss is not None
+    cdef bint has_washout_sources = washout_compartment is not None
+    cdef double *washout_loss_data = NULL
+    cdef int *washout_compartment_data = NULL
+    cdef int *washout_row_data = NULL
+    cdef double *washout_table_data = NULL
+    cdef Py_ssize_t washout_compartments = 0
     cdef bint has_spatial_sources = spatial_source_values is not None
     cdef double *state_data = <double *>state.data
     cdef double *concentration_data = <double *>concentration_state.data
@@ -830,12 +896,45 @@ def run_dynamic_plan_block_multi_pool(
     width = rf_axis_x.shape[1]
     if width != 1 and width != nspins:
         raise ValueError("RF coefficient width must be one or nspins")
+    if has_washout_loss:
+        if washout_loss.shape[0] != nspins:
+            raise ValueError("washout loss must contain every spin")
+        washout_loss_data = <double *>washout_loss.data
+    if has_washout_sources:
+        if washout_rows is None or washout_table is None:
+            raise ValueError("washout sources need rows and gains")
+        if (washout_compartment.shape[0] != nspins or
+                washout_rows.shape[0] != nsteps or
+                washout_table.shape[1] != 2 or
+                washout_table.shape[3] != npools or
+                washout_table.shape[4] != 2):
+            raise ValueError("washout source tables are inconsistent")
+        washout_compartments = washout_table.shape[2]
+        for step in range(nsteps):
+            if (washout_rows[step] < -1 or
+                    washout_rows[step] >= washout_table.shape[0]):
+                raise ValueError("washout rows must index the gain table")
+        for spin in range(nspins):
+            if (washout_compartment[spin] < -1 or
+                    washout_compartment[spin] >= washout_compartments):
+                raise ValueError("washout compartments must index the gains")
+        washout_compartment_data = <int *>washout_compartment.data
+        washout_row_data = <int *>washout_rows.data
+        washout_table_data = <double *>washout_table.data
 
     for parent in prange(
             nparents, nogil=True, schedule="static", num_threads=num_threads):
       for local_spin in range(spins_per_parent):
         spin = parent * spins_per_parent + local_spin
         for step in range(nsteps):
+            group = longitudinal_groups[step]
+            washout_factor = 1.0
+            if has_washout_loss:
+                washout_factor = exp(
+                    -washout_loss_data[spin] * (duration_by_group[group] / 2.0))
+                _scale_multi_pool_voxel(
+                    state_data, concentration_data, transverse_data, npools,
+                    nspins, spin, washout_factor)
             factor_group = first_factor_groups[step]
             for pool in range(npools):
                 transverse_offset = 2 * (pool * nspins + spin)
@@ -899,7 +998,6 @@ def run_dynamic_plan_block_multi_pool(
                 if source_mode == 3:
                     concentration_source_start = 0.0
                     concentration_source_end = 0.0
-            group = longitudinal_groups[step]
             _advance_multi_pool_voxel(
                 state_data, concentration_data, npools, nspins, spin, group,
                 conversion_data, exp_precursor_data, exp_products_data,
@@ -913,6 +1011,15 @@ def run_dynamic_plan_block_multi_pool(
                 duration_by_group[group], source_start, source_end,
                 concentration_source_start, concentration_source_end,
                 equilibrium)
+            if has_washout_sources:
+                _add_washout_gains(
+                    state_data, concentration_data, npools, nspins, spin,
+                    washout_compartment_data, washout_row_data,
+                    washout_table_data, washout_compartments, step, 0)
+            if has_washout_loss:
+                _scale_multi_pool_voxel(
+                    state_data, concentration_data, transverse_data, npools,
+                    nspins, spin, washout_factor * washout_factor)
 
             rf_group = rf_groups[step]
             if rf_group >= 0:
@@ -1016,6 +1123,15 @@ def run_dynamic_plan_block_multi_pool(
                 duration_by_group[group], source_start, source_end,
                 concentration_source_start, concentration_source_end,
                 equilibrium)
+            if has_washout_sources:
+                _add_washout_gains(
+                    state_data, concentration_data, npools, nspins, spin,
+                    washout_compartment_data, washout_row_data,
+                    washout_table_data, washout_compartments, step, 1)
+            if has_washout_loss:
+                _scale_multi_pool_voxel(
+                    state_data, concentration_data, transverse_data, npools,
+                    nspins, spin, washout_factor)
 
             for action in range(action_offsets[step], action_offsets[step + 1]):
                 action_kind = action_kinds[action]
