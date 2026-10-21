@@ -112,17 +112,22 @@ The time-resolved bevahiour of spins during and after RF Pulse can be visualized
 
 **Sequence Mode**
 
-- Phantom Designer polarization inputs use absolute percent with the thermal
-  multiple alongside them, based on nucleus, B0 and temperature. Mouse
+- Mouse Phantom Designer polarization inputs use absolute percent with the
+  thermal multiple alongside them, based on nucleus, B0 and temperature. Mouse
   injections use mM × µl and show the resulting µmol dose and fully polarized
-  equivalent. New injections start at 80 mM × 200 µl and 20 % polarization;
-  older files retain their original dose and relative-polarization values.
+  equivalent. New injections start at 80 mM × 250 µl (20 µmol) and
+  10000 × thermal, 5.8 % at 7 T and 37 °C; older files retain their original
+  dose and relative-polarization values.
+  The spectral Phantom Designer keeps × thermal and shows the thermal
+  polarization at its sample temperature.
 - **Receiver / Noise** adds reproducible complex noise from a relative SNR
   (single-scan SNR of the ideal 90° FID of the whole object, including any
   delivered bolus) or a calibration from a measured phantom FID: amplitude,
   noise std, averages, bandwidth, flip angle, concentration (mM), volume (ml),
   enrichment and temperature. Noise follows each ADC event's bandwidth, so a
-  thermal phantom scan predicts e.g. hyperpolarized in-vivo SNR. Its dedicated
+  thermal phantom scan predicts e.g. hyperpolarized in-vivo SNR. An optional
+  reference scan model corrects the calibration for T1 saturation, T2* decay
+  and the B1 workspace coil at the phantom position. Its dedicated
   tab between **Phantom + B1** and **Simulations** shows an SNR budget from
   the receiver setting through the whole-object FID and each readout
   bandwidth to the image voxels of the current object and last run. Clean ADC

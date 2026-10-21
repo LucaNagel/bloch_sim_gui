@@ -385,7 +385,7 @@ $$
 $$
 \mathrm{SNR}_1 = \frac{A/\sigma_{\mathrm{meas}}}{\sqrt{N_A}},
 \qquad
-k = \frac{\mathrm{SNR}_1}{n_{\mathrm{ref}}\,P_{\mathrm{ref}}\sin\alpha},
+k = \frac{\mathrm{SNR}_1}{n_{\mathrm{ref}}\,P_{\mathrm{ref}}\,\eta},
 \qquad
 \sigma_{\mathrm{sim}}(\Delta t) =
 \frac{f}{k\,P_{\mathrm{th}}(B_0,T_{\mathrm{sim}})}
@@ -393,11 +393,14 @@ k = \frac{\mathrm{SNR}_1}{n_{\mathrm{ref}}\,P_{\mathrm{ref}}\sin\alpha},
 $$
 
 $k$ is the single-scan FID SNR per mol of fully polarized nuclei at the
-reference dwell. Noise power is proportional to the receiver bandwidth
+reference dwell. $\eta$ is the measured amplitude per ideal 90° FID of the
+same nuclei: $\sin\alpha$ for a fully relaxed reference at $t=0$ in a
+homogeneous coil, or the value of the reference scan model below. Noise power is proportional to the receiver bandwidth
 $1/\Delta t$, so each ADC event uses its own dwell. $f$ is a noise factor for
 the simulated object, for example extra coil loading in vivo. A target with
 $n$ mol and absolute polarization $P$ therefore has an initial single-scan
-SNR of $k\,n\,P\sin\alpha\sqrt{\Delta t/\Delta t_{\mathrm{ref}}}/f$.
+SNR of $k\,n\,P\sin\beta\sqrt{\Delta t/\Delta t_{\mathrm{ref}}}/f$ after a
+flip angle $\beta$ in a homogeneous coil.
 `units.thermal_polarization` evaluates the Boltzmann polarization for any spin
 with hyperbolic sums that avoid cancellation at polarizations near $10^{-6}$.
 
@@ -411,11 +414,65 @@ SNR 522 after a 90-degree pulse, before T2*, delivery and metabolism. At 3 T
 the thermal reference is 3/7 as large while the hyperpolarized signal is not,
 so the ratio becomes about 12.
 
-Practical requirements for the measurement: a fully relaxed reference
-(TR ≥ 5 T1, or a doped phantom), identical gain, averages and bandwidth for the
-FID and noise scans, noise std per quadrature, and the volume inside the coil's
-sensitive region. On Bruker data the digital-filter group delay makes the
-first stored points unsuitable as $A(t=0)$; fit or extrapolate the FID.
+Practical requirements for the measurement: identical gain, averages and
+bandwidth for the FID and noise scans, noise std per quadrature, and the volume
+inside the coil's sensitive region. Without the reference scan model the
+reference must also be fully relaxed (TR ≥ 5 T1, or a doped phantom) and read
+at $t=0$. On Bruker data the digital-filter group delay makes the first stored
+points unsuitable as $A(t=0)$; fit or extrapolate the FID, or enter the time
+of the measured point as the amplitude delay.
+
+#### Reference scan model
+
+The optional **Reference scan model** (`ReferenceScan`,
+`reference_signal_efficiency`) predicts $\eta$ for a reference that was
+saturated, read after a delay or placed in an inhomogeneous coil. With
+spoiled repetitions (TR ≫ T2*), a fully relaxed sample before the first of
+$D$ dummy scans and instantaneous excitation, the longitudinal magnetization
+before repetition $n$ follows
+
+$$
+M_{n+1} = E_1\cos\theta\,M_n + (1-E_1)\,M_{\mathrm{eq}},
+\qquad E_1 = e^{-\mathrm{TR}/T_1},\quad M_0 = 1,
+$$
+
+and the acquired repetitions $D,\dots,D+N_A-1$ average to
+
+$$
+\bar M(\theta) = M_{\mathrm{ss}} + (1-M_{\mathrm{ss}})\,
+\frac{q^D(1-q^{N_A})}{N_A(1-q)},
+\qquad q = E_1\cos\theta,\quad
+M_{\mathrm{ss}} = \frac{(1-E_1)M_{\mathrm{eq}}}{1-q}.
+$$
+
+Without T1 (full recovery) or with one repetition, $\bar M = 1$. The measured
+point at delay $\tau$ after the excitation decays by $e^{-\tau/T_2^*}$. In a
+homogeneous coil
+
+$$
+\eta = \sin\alpha\;\bar M(\alpha)\;e^{-\tau/T_2^*}.
+$$
+
+With **Use B1 workspace coil fields** the transmit and receive fields of the
+B1 workspace are sampled on an equal-volume grid inside the reference, a
+sphere or a cylinder along z of the reference volume centred at the entered
+position in object coordinates. Every point $j$ is excited by
+$\theta_j = \alpha\,|B_{1,j}^+|$ and weighted like the simulator's signal:
+
+$$
+\eta = \left|\frac{1}{N}\sum_j \sin\theta_j\,\bar M(\theta_j)\,
+e^{-i\arg B_{1,j}^+}\,B_{1,j}^-\right| e^{-\tau/T_2^*}.
+$$
+
+The model matches the Bloch simulation of the same scan to $10^{-3}$
+(`tests/test_reference_scan.py`). Because noise is calibrated per unit
+$B_1^-$ weight, a calibration whose $\eta$ depends on the coil only holds for
+an object carrying the same B1 maps: runs reject it when the object's maps are
+all unity, and **Set calibration** must be repeated after the B1 fields
+change. The calibration stores $\eta$ as `signal_efficiency` and the scan as
+`reference_scan` (with `coil_model`); the SNR budget lists the factor and its
+inputs as **Reference signal fraction**. Only one transmit and one receive
+channel are supported.
 
 **Set calibration** freezes the entered values together with the current
 nucleus and field strength. Runs and later **Apply to result** calls check the
@@ -444,21 +501,18 @@ and retained simulation runs also preserve the controls and frozen calibration.
 
 ### Phantom authoring units
 
-The Spectral Phantom Designer accepts initial and inflow polarization in
-absolute percent. A read-only column or label beside each value shows the
-corresponding multiple of thermal equilibrium. The reference uses the selected
-nucleus, field strength and phantom temperature:
+The Spectral Phantom Designer keeps initial and inflow polarization in
+multiples of thermal equilibrium. Its **Temperature**, with the selected
+nucleus and field strength, sets the thermal polarization that 1 × thermal
+stands for and shows it in percent. The Mouse Phantom Designer accepts the
+injection polarization in absolute percent and shows the thermal multiple
+beside it:
 
 $$
 P_{\mathrm{rel}} = \frac{P_{\%}/100}{P_{\mathrm{th}}(B_0,T)}.
 $$
 
-Shape defaults, metabolite overrides, inflow curves and the kinetics
-polarization plot use this display convention. The **Thermal** button sets a
-shape default to equilibrium. Empty metabolite cells retain their shape
-fallback. Changing nucleus, B0 or temperature in the designer preserves
-entered absolute percentages and updates their thermal multiples. Shared
-workspace B0/nucleus changes also rebase the temperature-aware phantom's
+Shared workspace B0/nucleus changes rebase the temperature-aware phantom's
 initial states and inflow, including authoring metadata, while preserving its
 concentrations, geometry and absolute polarized amount.
 
@@ -481,8 +535,9 @@ n\,[\mathrm{\mu mol}]
 $$
 
 The derived dose and its fully polarized equivalent are shown beside the
-inputs. A new mouse injection starts at 80 mM, 200 µl and 20 % polarization:
-16 µmol nuclei and 3.2 µmol fully polarized equivalent. The perfusion source
+inputs. A new mouse injection starts at 80 mM and 250 µl with 10000 × thermal
+polarization (5.8 % at 7 T and 37 °C): 20 µmol nuclei and 1.16 µmol fully
+polarized equivalent. The perfusion source
 remains normalized to this dose on every spatial grid. Both recipe fields are
 saved; `injection_amount_umol` remains the derived amount for existing APIs.
 An older file containing only an amount keeps that dose and explicitly reports
@@ -550,7 +605,9 @@ object, sequence, nucleus or field strength changes. Its sections are:
 1. **Receiver setting** (relative mode): SNR and reference bandwidth.
    **Reference phantom** (calibrated mode): observed nuclei $n_{\mathrm{ref}}$,
    polarization, fully polarized equivalent $n_{\mathrm{ref}}P_{\mathrm{ref}}$,
-   $\sin\alpha$, measured and single-scan SNR, sensitivity $k$ per µmol and
+   the transverse fraction $\sin\alpha$ or, with the reference scan model, the
+   reference signal fraction $\eta$ and its inputs, measured and single-scan
+   SNR, sensitivity $k$ per µmol and
    reference bandwidth. Entered values that are not set yet appear as a
    preview for the current nucleus and field. **Simulation units** gives the
    signal unit (mol × $P/P_{\mathrm{th}}$ at $T_{\mathrm{sim}}$), the noise

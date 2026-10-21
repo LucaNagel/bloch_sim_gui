@@ -6,19 +6,16 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [2.9.1] - 2026-10-21
-
 ### Added
 
-- Phantom Designers accept absolute polarization in percent, with the thermal
-  multiple shown alongside it using nucleus, B0 and a saved temperature.
-  Shape defaults, metabolites, inflow and the kinetics polarization plot use
-  this convention; stored solver values retain their thermal-relative meaning.
-  Workspace B0/nucleus changes preserve authored absolute polarization.
-  Mouse injections use mM × µl with a derived µmol dose and polarized amount;
-  legacy dose-only files retain their amount without an inferred recipe.
-  Calibrated noise and physical signal display use the phantom's explicit
-  temperature when available.
+- The Mouse Phantom Designer accepts absolute polarization in percent, with
+  the thermal multiple shown alongside it using nucleus, B0 and a saved
+  temperature; mouse injections use mM × µl with a derived µmol dose and
+  polarized amount, and legacy dose-only files retain their amount without an
+  inferred recipe. The spectral Phantom Designer keeps "× thermal" and gains
+  a sample temperature with the thermal polarization it stands for. Calibrated
+  noise and physical signal display use the phantom's explicit temperature
+  when available.
 - Settings → Interface offers persistent Sequence signal units: physical
   fully polarized amounts (mol with SI prefixes, by default) or SNR units
   (noise σ = 1 per quadrature). Existing results redraw immediately across
@@ -48,6 +45,25 @@ The project follows [Semantic Versioning](https://semver.org/).
   calibration values are previewed before they are set.
 - The relative SNR and measured noise std support adaptive spin-box arrows and
   scientific notation.
+- An optional reference scan model in the receiver calibration describes how
+  the phantom FID was measured: T1 saturation from TR, dummy scans and
+  averages, T2* decay until the measured point, and the B1 workspace coil
+  sampled over a sphere or cylinder at the phantom position. Its amplitude per
+  ideal 90° FID (`ReceiverCalibration.signal_efficiency`, from
+  `reference_signal_efficiency`) replaces sin α, so a saturated, decayed or
+  off-centre reference no longer reads as lower receiver sensitivity. The SNR
+  budget lists the factor and its inputs; runs reject a coil-dependent
+  calibration for an object without B1 maps.
+
+### Changed
+
+- Sequence-mode ETA now uses cumulative post-compilation throughput, preventing
+  individual uneven work chunks from causing abrupt remaining-time changes.
+
+## [2.9.1] - 2026-10-21
+
+### Added
+
 - Sequence results export as Bruker ParaVision studies
   (`export_bruker_dataset`): `subject`, scan folder with `acqp`, `method`,
   `fid` and/or `rawdata.job0`, and reconstructed `pdata/1` (`2dseq`,
@@ -177,8 +193,6 @@ The project follows [Semantic Versioning](https://semver.org/).
   checks every pool, final state, checkpoint, and available reconstruction
   against explicit Float64 tolerances. Failed comparisons return a failing
   exit status; native-path variants and timestep refinement can be compared.
-- Sequence-mode ETA now uses cumulative post-compilation throughput, preventing
-  individual uneven work chunks from causing abrupt remaining-time changes.
 
 ### Removed
 

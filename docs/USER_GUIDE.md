@@ -751,6 +751,44 @@ positions.
     *   For text files, a dialog will ask for the data layout (Amplitude/Phase columns vs. Interleaved).
 3.  **Run:** The loaded pulse is now used in any sequence set to use the "Custom" pulse role (or standard sequences if compatible).
 
+### Use Case 6: Predicting SNR from a Phantom Measurement
+**Goal:** Use one measured thermal phantom FID to add realistic receiver noise
+to any simulated sequence, for example a hyperpolarized in-vivo experiment.
+
+1.  **Measure on the scanner:** an FID of a phantom with known concentration
+    and volume (e.g. 2 M [13C]urea, 50 ml) and a noise scan with the same
+    receiver gain, bandwidth and averages, but a flip angle of 0° (or the
+    signal-free tail of the FID).
+2.  **Enter the calibration:** open **Receiver / Noise**, choose
+    **Calibrated from phantom FID** and enter the FID amplitude, the noise std
+    per real or imaginary channel, averages, bandwidth, flip angle,
+    concentration (mM), volume (ml), enrichment and both temperatures. A
+    **Noise factor (loading)** above 1 accounts for extra noise of the
+    simulated object, e.g. a loaded coil in vivo.
+3.  **Describe the reference scan (optional):** enable **Reference scan
+    model** if the phantom was not fully relaxed or the amplitude was read
+    after the excitation. Enter the phantom T1 and the repetition time, dummy
+    scans, T2* and the time of the measured point. With **Use B1 workspace
+    coil fields** the transmit and receive fields of the B1 workspace are
+    sampled over a sphere or cylinder of the reference volume at its centre
+    position. The panel shows the resulting amplitude per ideal 90° FID, η,
+    which replaces sin α. Apply the same B1 fields to the simulated phantom.
+4.  **Set calibration:** **Set calibration** freezes the values with the
+    current nucleus and field strength. Changing any input, the field strength
+    or the B1 fields of a coil-dependent calibration asks for a new
+    **Set calibration**.
+5.  **Check the SNR budget:** beside the controls, the **SNR budget** lists
+    the reference phantom (including the reference signal fraction η), the
+    whole-object FID SNR of the simulated object, the brightest image voxel
+    and, after a run, the SNR of the simulated noiseless signal.
+6.  **Run:** the sequence result carries the noise realization; **New
+    realization** and **Apply to result** reuse the Bloch result.
+    **Settings → Interface → Signal units** switches plots between physical
+    amounts and SNR units.
+
+The formulas and assumptions are in the
+[receiver calibration reference](sequence_simulation_architecture.md#receiver-noise-and-phantom-calibration).
+
 ## 5. Saving & Loading Projects
 Save the complete workspace—including Free Mode controls, tissue and RF settings,
 phantoms, B1 fields, sequence programs, reconstruction state, and available
@@ -915,27 +953,27 @@ the [metabolite preset reference](METABOLITE_PRESETS.md).
 
 Peak **Spin density / concentration** and **Initial polarization** are separate.
 Spin density describes how much signal-producing material is present. Initial
-polarization is entered in absolute percent; the adjacent **× thermal** column
-shows its internal thermal-relative value. The reference follows nucleus, B0
-and **Temperature** in the spectral settings. The shape's **Thermal** button
-sets its default to thermal equilibrium. For example, pyruvate and lactate can
-both have spin density 1, with pyruvate at thermal polarization and lactate at
-0 %. Their internal start states are then $P_z=1$ and $L_z=0$, retaining both
-concentration pools. Positive `kPL` can then
-create lactate from pyruvate. The **Set selected shape to initial Lz = 0** button
+polarization is given in multiples of thermal equilibrium (**× thermal**);
+1 × thermal is a conventional sample. **Temperature** in the spectral settings
+sets, with nucleus and B0, the thermal polarization that 1 × thermal stands for
+and shows it in percent. For example, pyruvate and lactate can both have spin
+density 1, with pyruvate at 1 × thermal and lactate at 0 × thermal. Their start
+states are then $P_z=1$ and $L_z=0$, retaining both concentration pools.
+Positive `kPL` can then
+create lactate from pyruvate. The **Start lactate at 0 × thermal** button
 applies this setup by setting only lactate polarization to zero. An empty peak
 polarization cell uses the shape's **Default initial polarization**; an empty
 metabolite T1 cell similarly uses **Default T1**. In older dynamic designs, the
 former initial pool weight is migrated to peak polarization while spin density
 defaults to 1, preserving the same initial HP magnetization.
 
-Turn on **Enable hyperpolarized pyruvate/lactate model** to
+Turn on **Enable pyruvate → lactate conversion model (kPL, inflow)** to
 select concentration-resolved hyperpolarized dynamics. This is separate from
 conversion: `kPL=0` still gives T1 relaxation but no pyruvate-to-lactate
-conversion. T1 evolves polarization toward the thermal value at the selected
-temperature, B0 and nucleus. The stored longitudinal magnetization is
-$M_z=cP/P_{\mathrm{th}}$, so a concentration of 10 at thermal equilibrium
-approaches $M_z=10$. The polarization preview shows absolute percent.
+conversion. T1 evolves polarization toward 1 × thermal. The longitudinal
+magnetization is $M_z=cP$ with $P$ in multiples of thermal, so a concentration
+of 10 at thermal equilibrium approaches $M_z=10$. The polarization preview
+shows × thermal.
 For a pyruvate-injection experiment, lactate will therefore normally start with
 initial polarization 0. If both spin densities, polarizations, and T1 values are
 equal while `kPL=0`, `Pz(t)` and `Lz(t)` are identical; the preview draws lactate
@@ -958,8 +996,8 @@ In the **Kinetics / kPL** tab:
    inflow samples and conversion start keep their relative timing and do not
    need to be edited when comparing different sequence start times.
 6. Optionally enable pyruvate inflow and enter kinetics time, concentration
-   rate, and absolute inflow polarization in percent. Its thermal multiple is
-   shown alongside it. Values are linearly interpolated between
+   rate, and inflow polarization in × thermal. Values are linearly
+   interpolated between
    rows, and the concentration rate is zero outside the listed interval. Use
    **Time curves → Simulated values** (the default) to see the densely sampled
    values passed to the simulator, or **Set values** to show only the entered
