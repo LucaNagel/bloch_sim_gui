@@ -9,6 +9,8 @@ from PyQt5.QtWidgets import (
     QSpinBox,
     QDialogButtonBox,
     QFileDialog,
+    QInputDialog,
+    QMessageBox,
     QCheckBox,
     QHBoxLayout,
     QLineEdit,
@@ -16,7 +18,7 @@ from PyQt5.QtWidgets import (
     QTabWidget,
     QWidget,
 )
-from typing import Optional
+from typing import Mapping, Optional
 from pathlib import Path
 
 from ..memory import MemoryPolicy, format_bytes, resolve_memory_budget
@@ -161,6 +163,7 @@ class SettingsDialog(QDialog):
         animation_memory_budget_mib: float = 512.0,
         detected_thread_count: Optional[int] = None,
         scanner_parameters: Optional[ScannerParameters] = None,
+        scanner_profiles: Optional[Mapping[str, ScannerParameters]] = None,
         workspace_defaults: Optional[WorkspaceDefaults] = None,
         interface_style: str = "automatic",
         sequence_section_titles_bold: bool = True,
@@ -545,6 +548,30 @@ class SettingsDialog(QDialog):
         scanner_layout = QVBoxLayout(scanner_tab)
         scanner_form = QFormLayout()
 
+        self._scanner_profiles = dict(scanner_profiles or {})
+        profile_row = QHBoxLayout()
+        self.scanner_profile_combo = QComboBox()
+        self.scanner_profile_combo.setObjectName("scanner_profile_combo")
+        self.scanner_profile_combo.setToolTip(
+            "Stored scanner configurations. Choosing one fills in all values below."
+        )
+        profile_row.addWidget(self.scanner_profile_combo, 1)
+        self.scanner_profile_save_button = QPushButton("Save as…")
+        self.scanner_profile_save_button.setObjectName("scanner_profile_save")
+        self.scanner_profile_save_button.setToolTip(
+            "Store the current values under a scanner name."
+        )
+        self.scanner_profile_save_button.clicked.connect(self._save_scanner_profile)
+        profile_row.addWidget(self.scanner_profile_save_button)
+        self.scanner_profile_delete_button = QPushButton("Delete")
+        self.scanner_profile_delete_button.setObjectName("scanner_profile_delete")
+        self.scanner_profile_delete_button.setToolTip(
+            "Remove the selected scanner configuration."
+        )
+        self.scanner_profile_delete_button.clicked.connect(self._delete_scanner_profile)
+        profile_row.addWidget(self.scanner_profile_delete_button)
+        scanner_form.addRow("Scanner:", profile_row)
+
         self.scanner_max_grad_spin = QDoubleSpinBox()
         self.scanner_max_grad_spin.setObjectName("scanner_max_grad_mtm")
         self.scanner_max_grad_spin.setRange(0.1, 1000.0)
@@ -648,6 +675,23 @@ class SettingsDialog(QDialog):
         scanner_form.addRow("ADC dead time:", self.scanner_adc_dead_time_spin)
 
         scanner_layout.addLayout(scanner_form)
+        self._scanner_spins = (
+            self.scanner_max_grad_spin,
+            self.scanner_max_slew_spin,
+            self.scanner_grad_raster_spin,
+            self.scanner_rf_raster_spin,
+            self.scanner_adc_raster_spin,
+            self.scanner_block_raster_spin,
+            self.scanner_rf_ringdown_spin,
+            self.scanner_rf_dead_time_spin,
+            self.scanner_adc_dead_time_spin,
+        )
+        self._refresh_scanner_profile_combo()
+        self.scanner_profile_combo.currentIndexChanged.connect(
+            self._scanner_profile_selected
+        )
+        for spin in self._scanner_spins:
+            spin.valueChanged.connect(self._sync_scanner_profile_selection)
         scanner_explanation = QLabel(
             "These limits are applied to all EPI, spiral, CSI and bSSFP "
             "sequences generated after the settings are saved. Imported "
@@ -917,6 +961,112 @@ class SettingsDialog(QDialog):
             rf_dead_time_s=float(self.scanner_rf_dead_time_spin.value()) * 1e-6,
             adc_dead_time_s=float(self.scanner_adc_dead_time_spin.value()) * 1e-6,
         )
+
+    def scanner_profiles(self) -> dict[str, ScannerParameters]:
+        """Return the named scanner profiles as edited in the dialog."""
+        return dict(self._scanner_profiles)
+
+    @staticmethod
+    def _same_scanner_parameters(
+        first: Optional[ScannerParameters], second: Optional[ScannerParameters]
+    ) -> bool:
+        """Compare profiles up to the rounding of the µs spin-box conversion."""
+        if first is None or second is None:
+            return False
+        a, b = first.to_dict(), second.to_dict()
+        return all(abs(a[key] - b[key]) <= 1e-9 * max(abs(a[key]), 1e-12) for key in a)
+
+    def _current_scanner_parameters_or_none(self) -> Optional[ScannerParameters]:
+        try:
+            return self.scanner_parameters()
+        except ValueError:
+            return None
+
+    def _refresh_scanner_profile_combo(self, selected: Optional[str] = None):
+        """Rebuild the profile list and select the profile matching the values."""
+        if selected is None:
+            current = self._current_scanner_parameters_or_none()
+            selected = next(
+                (
+                    name
+                    for name, profile in self._scanner_profiles.items()
+                    if self._same_scanner_parameters(profile, current)
+                ),
+                None,
+            )
+        combo = self.scanner_profile_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Custom", None)
+        for name in sorted(self._scanner_profiles, key=str.lower):
+            combo.addItem(name, name)
+        combo.setCurrentIndex(max(0, combo.findData(selected)))
+        combo.blockSignals(False)
+        self.scanner_profile_delete_button.setEnabled(combo.currentData() is not None)
+
+    def _scanner_profile_selected(self, _index: int):
+        name = self.scanner_profile_combo.currentData()
+        self.scanner_profile_delete_button.setEnabled(name is not None)
+        profile = self._scanner_profiles.get(name)
+        if profile is None:
+            return
+        values = (
+            profile.max_grad_mtm,
+            profile.max_slew_tms,
+            profile.grad_raster_time_s * 1e6,
+            profile.rf_raster_time_s * 1e6,
+            profile.adc_raster_time_s * 1e6,
+            profile.block_duration_raster_s * 1e6,
+            profile.rf_ringdown_time_s * 1e6,
+            profile.rf_dead_time_s * 1e6,
+            profile.adc_dead_time_s * 1e6,
+        )
+        for spin, value in zip(self._scanner_spins, values):
+            spin.blockSignals(True)
+            spin.setValue(float(value))
+            spin.blockSignals(False)
+
+    def _sync_scanner_profile_selection(self, *_args):
+        """Fall back to "Custom" once the values no longer match the profile."""
+        name = self.scanner_profile_combo.currentData()
+        if name is not None and not self._same_scanner_parameters(
+            self._scanner_profiles.get(name),
+            self._current_scanner_parameters_or_none(),
+        ):
+            self._refresh_scanner_profile_combo(None)
+
+    def _save_scanner_profile(self):
+        name, accepted = QInputDialog.getText(
+            self,
+            "Save scanner",
+            "Scanner name:",
+            text=self.scanner_profile_combo.currentData() or "",
+        )
+        name = name.strip()
+        if not accepted or not name:
+            return
+        existing = next(
+            (key for key in self._scanner_profiles if key.lower() == name.lower()),
+            None,
+        )
+        if existing is not None:
+            answer = QMessageBox.question(
+                self,
+                "Overwrite scanner",
+                f"A scanner named '{existing}' already exists. Overwrite it?",
+            )
+            if answer != QMessageBox.Yes:
+                return
+            name = existing
+        self._scanner_profiles[name] = self.scanner_parameters()
+        self._refresh_scanner_profile_combo(name)
+
+    def _delete_scanner_profile(self):
+        name = self.scanner_profile_combo.currentData()
+        if name is None:
+            return
+        self._scanner_profiles.pop(name, None)
+        self._refresh_scanner_profile_combo(None)
 
     def _default_sequence_reference_changed(self, value):
         self._sequence_reference_ppm_by_nucleus[

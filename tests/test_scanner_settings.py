@@ -4,8 +4,10 @@ from PyQt5.QtCore import QSettings
 from blochsimulator.sequence import (
     ScannerParameters,
     load_scanner_parameters,
+    load_scanner_profiles,
     make_pulseq_epi,
     save_scanner_parameters,
+    save_scanner_profiles,
 )
 
 
@@ -71,3 +73,58 @@ def test_scanner_parameters_reject_unknown_or_non_physical_values():
         ScannerParameters(max_slew_tms=0.0)
     with pytest.raises(ValueError, match="unknown scanner parameter"):
         ScannerParameters.from_mapping({"gradient_coil_color": 1.0})
+
+
+def test_scanner_profiles_round_trip_and_skip_bad_entries(tmp_path):
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    profiles = {
+        "Prisma": ScannerParameters(max_grad_mtm=80.0, max_slew_tms=200.0),
+        "Preclinical": ScannerParameters(max_grad_mtm=500.0, max_slew_tms=720.0),
+    }
+    save_scanner_profiles(settings, profiles)
+    settings.sync()
+    assert load_scanner_profiles(settings) == profiles
+
+    settings.setValue(
+        "scanner/profiles",
+        '{"bad": {"max_slew_tms": -1}, "ok": {"max_grad_mtm": 10}, "x": 3}',
+    )
+    assert load_scanner_profiles(settings) == {
+        "ok": ScannerParameters(max_grad_mtm=10.0)
+    }
+    settings.setValue("scanner/profiles", "not json")
+    assert load_scanner_profiles(settings) == {}
+
+
+def test_settings_dialog_scanner_profiles(monkeypatch, tmp_path):
+    from PyQt5.QtWidgets import QInputDialog
+
+    from blochsimulator.memory import MemoryPolicy
+    from blochsimulator.ui.dialogs import SettingsDialog
+
+    preclinical = ScannerParameters(max_grad_mtm=500.0, max_slew_tms=720.0)
+    dialog = SettingsDialog(
+        MemoryPolicy(),
+        tmp_path,
+        tooltips_enabled=True,
+        scanner_parameters=ScannerParameters(),
+        scanner_profiles={"Preclinical": preclinical},
+    )
+    combo = dialog.scanner_profile_combo
+    assert combo.currentText() == "Custom"
+
+    combo.setCurrentIndex(combo.findData("Preclinical"))
+    assert dialog.scanner_parameters().to_dict() == pytest.approx(preclinical.to_dict())
+
+    dialog.scanner_max_grad_spin.setValue(450.0)
+    assert combo.currentText() == "Custom"
+
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Clinical 3T", True))
+    dialog.scanner_max_grad_spin.setValue(80.0)
+    dialog._save_scanner_profile()
+    assert combo.currentData() == "Clinical 3T"
+    assert dialog.scanner_profiles()["Clinical 3T"].max_grad_mtm == 80.0
+
+    dialog._delete_scanner_profile()
+    assert "Clinical 3T" not in dialog.scanner_profiles()
+    assert combo.currentText() == "Custom"
