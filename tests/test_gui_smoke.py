@@ -792,7 +792,12 @@ def test_gradient_lobe_table_extends_the_sequence_and_reports_its_moment():
 
     table.item(1, 3).setData(Qt.EditRole, -20.0)
     assert designer.gradient_lobes()[1].amplitude_mt_per_m == -20.0
-    assert "x -18" in designer.gradient_moment_label.text()
+    label = designer.gradient_moment_label.text()
+    assert "x -18" in label
+    assert "Extra lobes (mT·ms/m): x -18 · y 9" in label
+    assert table.item(0, 5).text() == "9"
+    assert table.item(1, 5).text() == "-18"
+    assert not table.item(1, 5).flags() & Qt.ItemIsEditable
 
     table.selectRow(0)
     designer.remove_gradient_lobe_button.click()
