@@ -2792,6 +2792,9 @@ class BlochSimulatorGUI(QMainWindow):
         self.mag_3d.track_checkbox.setChecked(False)
         if ndim == 3:
             self.mag_3d.color_by_combo.setCurrentText("Phase")
+            # The cube of the per-axis limit is drawn, so keep it small.
+            spin = self.mag_3d.max_positions_spin
+            spin.setValue(min(spin.value(), self.VOLUME_DEFAULT_POSITIONS))
         name = "2D plane" if ndim == 2 else "3D volume"
         self.statusBar().showMessage(
             f"{name}: " + ", ".join(changes) + " (adjust freely).", 6000

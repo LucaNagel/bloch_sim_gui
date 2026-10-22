@@ -44,6 +44,7 @@ from blochsimulator.visualization import ImageExporter
 from blochsimulator.position_sampling import (
     build_line_positions,
     build_plane_positions,
+    build_volume_positions,
     infer_layout,
 )
 from blochsimulator.ui.main_window import (
@@ -1196,6 +1197,7 @@ def test_switching_free_mode_to_a_volume_applies_the_starting_grid():
     viewer = window.mag_3d
     assert viewer.get_vector_arrangement() == viewer.ARRANGEMENT_ALONG_POSITION
     assert viewer.color_by_combo.currentText() == "Phase"
+    assert viewer.max_positions_spin.value() == window.VOLUME_DEFAULT_POSITIONS
     assert window.position_summary_label.text().startswith(
         "512 positions (8 × 8 × 8 in xyz) × 1 frequency = 512 spins"
     )
@@ -1707,6 +1709,75 @@ def test_3d_spatial_plane_draws_a_lattice_on_the_floor():
     assert viewer.max_positions_label.text() == "Max positions:"
 
 
+def test_3d_spatial_volume_draws_a_lattice_box_with_a_slice_filter():
+    app = QApplication.instance() or QApplication(sys.argv)
+    positions_m = build_volume_positions((3, 2, 2), (0.02, 0.01, 0.01))
+    viewer = _spatial_viewer(positions_m * 1000.0, 1)
+
+    spacing = 1.0 / viewer.vector_length_spin.value()
+    xs = np.array([-1.0, 0.0, 1.0]) * spacing
+    half = np.array([-0.5, 0.5]) * spacing
+    origins = np.column_stack(
+        [np.tile(xs, 4), np.tile(np.repeat(half, 3), 2), np.repeat(half, 6)]
+    )
+    np.testing.assert_allclose(viewer._spatial_origins, origins)
+    assert viewer._scene_kind() == "volume"
+    assert viewer.max_positions_label.text() == "Max per axis:"
+    assert viewer.gl_widget.opts["elevation"] == pytest.approx(22.0)
+    assert viewer.gl_widget.opts["azimuth"] == pytest.approx(-55.0)
+    # A floor grid below the volume and a 12-edge box around it.
+    assert viewer.grid_item.visible()
+    floor = viewer.grid_item.transform().column(3).z()
+    assert floor < origins[:, 2].min() - 1.0
+    assert len(viewer.position_axis_item.pos) == 2 * 12
+    texts = _label_texts(viewer)
+    assert texts[:4] == ["-10.0", "0.0", "10.0", "x (mm)"]
+    assert texts[4:7] == ["-5.0", "5.0", "y (mm)"]
+    assert texts[7:10] == ["-5.0", "5.0", "z (mm)"]
+
+    # The tip mesh joins neighbours along x, y and z.
+    viewer.tip_curve_checkbox.setChecked(True)
+    means = np.tile([0.0, 0.0, 1.0], (12, 1))
+    viewer.update_magnetization(means)
+    assert len(viewer.tip_curve_item.pos) == 2 * (2 * 4 + 3 * 2 + 3 * 2)
+    assert np.all(viewer.position_mean_plot.color[:, 3] == 1.0)
+
+    # The slice filter is only offered for volumes.
+    assert not viewer.spatial_slice_row.isHidden()
+    assert not viewer.slice_slider.isEnabled()
+    viewer.slice_axis_combo.setCurrentText("z")
+    assert viewer.slice_slider.maximum() == 1
+    viewer.slice_slider.setValue(1)
+    assert viewer.slice_value_label.text() == "z = 5.0 mm"
+    alpha = viewer.position_mean_plot.color[1::2, 3]
+    np.testing.assert_allclose(alpha[6:], 1.0)
+    np.testing.assert_allclose(alpha[:6], viewer.SLICE_FADE_ALPHA)
+    # The mesh stays inside the slice and the slice gets its own lattice.
+    curve = viewer.tip_curve_item.pos.reshape(-1, 2, 3)
+    assert len(curve) == 2 * 2 + 3
+    np.testing.assert_allclose(curve[..., 2], (origins + means)[6:, 2].max())
+    lattice = viewer.position_axis_item.pos.reshape(-1, 2, 3)[12:]
+    assert len(lattice) == 3 + 2
+    np.testing.assert_allclose(lattice[..., 2], half[1])
+    viewer.hide_other_slices_checkbox.setChecked(True)
+    np.testing.assert_allclose(viewer.position_mean_plot.color[1:12:2, 3], 0.0)
+
+    # A coarser grid keeps the slice at the nearest position.
+    viewer.set_spatial_groups(
+        build_volume_positions((3, 2, 3), (0.02, 0.01, 0.01)) * 1000.0, 1
+    )
+    assert viewer.slice_slider.maximum() == 2
+    assert viewer.slice_value_label.text() == "z = 5.0 mm"
+
+    # The gradient readout lists all three components.
+    viewer.set_spatial_fields(np.zeros(1), np.array([[1.0, 0.0, 0.5]]), positions_m)
+    viewer.show_field_frame(0)
+    assert "Gx 10.00 Gy 0.00 Gz 5.00 mT/m" in viewer.field_label_item.text
+
+    viewer.set_spatial_groups(build_plane_positions((3, 2), (0.02, 0.01), "xy"), 1)
+    assert viewer.spatial_slice_row.isHidden()
+
+
 @pytest.mark.parametrize(("plane", "azimuth"), [("xz", -90.0), ("yz", 0.0)])
 def test_3d_spatial_upright_plane_keeps_its_scene_axes(plane, azimuth):
     app = QApplication.instance() or QApplication(sys.argv)
@@ -1756,6 +1827,38 @@ def test_free_mode_vector_view_subsamples_a_plane_per_axis():
     assert window.mag_3d.max_positions_label.text() == "Max per axis:"
     assert window.anim_data.shape == (nframes, len(shown) * nfreq, 3)
     np.testing.assert_allclose(window.mag_3d._field_gradients, window.anim_gradients)
+
+
+def test_free_mode_vector_view_subsamples_a_volume_per_axis():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    nframes, nfreq = 2, 1
+    positions = build_volume_positions((5, 4, 3), (0.03, 0.02, 0.01))
+    npos = len(positions)
+    rng = np.random.default_rng(2)
+    window.anim_vectors_full = rng.normal(size=(nframes, npos, nfreq, 3))
+    window.playback_indices = np.arange(nframes)
+    window.playback_time = np.linspace(0.0, 1e-3, nframes)
+    window.playback_time_ms = window.playback_time * 1000.0
+    window.last_positions = positions
+    window.anim_b1 = np.zeros(nframes, dtype=complex)
+    window.anim_gradients = np.tile([0.0, 0.0, 1.0], (nframes, 1))
+    window.mag_3d.set_selector_limits(npos, nfreq)
+    window.mag_3d.max_positions_spin.setValue(3)
+    window.mag_3d.arrangement_combo.setCurrentText(
+        window.mag_3d.ARRANGEMENT_ALONG_POSITION
+    )
+
+    window._refresh_vector_view(mean_only=False, restart=False)
+
+    shown = infer_layout(positions).grid_indices(3)
+    np.testing.assert_allclose(
+        window.mag_3d._spatial_positions_mm, positions[shown] * 1000.0
+    )
+    assert window.mag_3d._scene_kind() == "volume"
+    assert window.mag_3d._spatial_layout.counts == (3, 2, 3)
+    assert window.anim_data.shape == (nframes, len(shown), 3)
+    assert not window.mag_3d.spatial_slice_row.isHidden()
 
 
 def _plane_result(positions, nframes):
