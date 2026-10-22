@@ -7053,6 +7053,9 @@ class BlochSimulatorGUI(QMainWindow):
                         # Unnamed saves also predate the Geometry tab.
                         if saved_view_index >= sequence_widget.geometry_tab_index:
                             saved_view_index += 1
+                if saved_view_index == sequence_widget.two_d_result_tab_index:
+                    # The combined 2D page is hidden behind the Explorer.
+                    saved_view_index = sequence_widget.reconstruction_explorer_tab_index
                 sequence_widget.views.setCurrentIndex(
                     max(0, min(saved_view_index, sequence_widget.views.count() - 1))
                 )

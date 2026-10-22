@@ -21,13 +21,14 @@ from blochsimulator.ui.sequence_geometry_viewer import (
     SequenceGeometryViewer,
     automatic_contrast,
     configured_object_box,
-    contrast_projections,
+    object_sections,
     convex_hull_2d,
     coverage_notes,
     object_contrasts,
     phantom_grid_box,
     projected_outline_mm,
     sequence_geometry_from_definitions,
+    SILHOUETTE_COLOR,
 )
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
 
@@ -599,7 +600,7 @@ def test_anatomy_labels_drive_the_automatic_mouse_contrast():
     # kPL stays selectable and differs between organs and body.
     assert any(item.key == "kpl" and item.score > 0.5 for item in contrasts)
 
-    projections, shown_range = contrast_projections(mouse, contrast)
+    projections, shown_range = object_sections(mouse, contrast)
     assert shown_range is None
     xy, _rect = projections[0]
     assert xy.dtype == np.uint8 and xy.shape == (16, 16, 4)
@@ -622,13 +623,13 @@ def test_species_regions_or_widest_map_set_the_contrast():
     phantom.concentration_maps["Pyruvate"][
         phantom.concentration_maps["Pyruvate"] > 0
     ] = 10.0
-    phantom.concentration_maps["Pyruvate"][:, :, :8] *= 0.5
+    phantom.concentration_maps["Pyruvate"][:, :, :10] *= 0.5
     contrasts = object_contrasts(phantom)
     assert "species" not in {item.key for item in contrasts}
     contrast = automatic_contrast(contrasts)
     assert contrast.key == "concentration"
     assert contrast.value_range == pytest.approx((5.0, 10.0))
-    projections, shown_range = contrast_projections(phantom, contrast)
+    projections, shown_range = object_sections(phantom, contrast)
     assert 5.0 <= shown_range[0] < shown_range[1] <= 10.0
     xz, _rect = projections[1]
     assert np.any(xz[..., 3] == 0) and np.any(xz[..., 3] == 255)
@@ -671,3 +672,37 @@ def test_geometry_viewer_contrast_selector_overrides_auto():
     assert viewer.contrast.key == "concentration:Lactate"
     viewer.deleteLater()
     app.processEvents()
+
+
+def test_uniform_sphere_with_soft_edges_shows_uniform_sections():
+    # Partial-volume edge voxels must neither select a contrast nor show up
+    # as apparent variation inside the object.
+    n = 24
+    coordinate = (np.arange(n) + 0.5) / n - 0.5
+    x, y, z = np.meshgrid(coordinate, coordinate, coordinate, indexing="ij")
+    radius = np.sqrt(x**2 + y**2 + z**2)
+    coverage = np.clip((0.3 - radius) * n + 0.5, 0.0, 1.0)
+    species = [
+        ChemicalSpecies(name="Pyruvate", chemical_shift_ppm=0.0, t1=30.0, t2=0.5)
+    ]
+    phantom = SpectralPhantom(
+        shape=(n, n, n),
+        fov=(0.03,) * 3,
+        species=species,
+        concentration_maps={"Pyruvate": coverage},
+    )
+    contrasts = object_contrasts(phantom)
+    assert automatic_contrast(contrasts) is None
+    concentration = next(item for item in contrasts if item.key == "concentration")
+    sections, shown_range = object_sections(phantom, concentration)
+    assert shown_range == concentration.value_range
+    xy, _rect = sections[0]
+    # The central section is uniform away from the rim.
+    core = (x[:, :, n // 2] ** 2 + y[:, :, n // 2] ** 2) < 0.2**2
+    assert len({tuple(pixel[:3]) for pixel in xy[core]}) == 1
+
+    # A section outside the object leaves only the faded silhouette.
+    outside, _ = object_sections(phantom, concentration, center_m=(0.0, 0.0, 0.0145))
+    xy_outside = outside[0][0]
+    shown = xy_outside[xy_outside[..., 3] > 0]
+    assert shown.size and np.all(shown[:, :3] == SILHOUETTE_COLOR)

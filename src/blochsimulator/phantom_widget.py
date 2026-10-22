@@ -441,6 +441,10 @@ class PhantomCreatorWidget(QGroupBox):
             if sequence_widget is None
             else sequence_widget.sequence_reference_ppm.value()
         )
+        if design is None and self.current_phantom is None:
+            # The sequence already simulates the default sphere; start the
+            # designer from that object so it can be edited like any other.
+            design = self._default_sequence_design(sequence_widget)
         dialog = SpectralPhantomDesignerDialog(
             self,
             design=design,
@@ -464,6 +468,19 @@ class PhantomCreatorWidget(QGroupBox):
             )
         )
         dialog.open()
+
+    @staticmethod
+    def _default_sequence_design(sequence_widget):
+        """Return the design of the automatic default sphere, if one is in use."""
+        if sequence_widget is None:
+            return None
+        phantom = sequence_widget._default_sequence_phantom()
+        if phantom is None:
+            return None
+        try:
+            return PhantomDesign.from_phantom(phantom)
+        except ValueError:
+            return None
 
     def _spectral_designer_accepted(self, dialog):
         """Install the phantom produced by an asynchronously opened designer."""

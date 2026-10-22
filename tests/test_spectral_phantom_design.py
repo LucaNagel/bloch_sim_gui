@@ -368,12 +368,12 @@ def test_build_uses_fractional_coverage_for_maps():
     )
 
     phantom = design.build()
-    concentration = phantom.concentration_maps["Object: Water"]
+    concentration = phantom.concentration_maps["Object: Compound"]
     fractional = (concentration > 0.0) & (concentration < 1.0)
 
     assert np.any(fractional)
     assert np.allclose(
-        phantom.initial_mz_maps["Object: Water"][fractional],
+        phantom.initial_mz_maps["Object: Compound"][fractional],
         1.0 + 4.0 * concentration[fractional],
     )
     assert np.allclose(phantom.b0_map_ppm[fractional], 2.0 * concentration[fractional])
