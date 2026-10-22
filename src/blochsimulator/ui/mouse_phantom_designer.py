@@ -421,14 +421,9 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.resize(1250, 850)
         if config is None:
             defaults = WorkspaceDefaults.from_settings(settings)
-            config = MousePerfusionConfig(
-                field_strength_t=defaults.field_strength_t,
-                injection_polarization=polarization_percent_to_relative(
-                    20.0,
-                    "C13",
-                    defaults.field_strength_t,
-                    310.15,
-                ),
+            config = MousePerfusionConfig(field_strength_t=defaults.field_strength_t)
+            config.injection_polarization = polarization_percent_to_relative(
+                20.0, config.nucleus, config.field_strength_t, config.temperature_k
             )
         self.config = MousePerfusionConfig.from_dict(config.to_dict())
         self.phantom = None
@@ -1097,16 +1092,13 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self._live_preview_timer.start()
 
     def _update_injection_summary(self):
-        percent = self.injection_polarization.value()
-        relative = polarization_percent_to_relative(
-            percent,
-            "C13",
+        # Display only: legacy values above 100 % must not raise here.
+        pth = thermal_polarization(
+            self.config.nucleus,
             self.field_strength.value(),
             self.temperature_c.value() + 273.15,
         )
-        pth = thermal_polarization(
-            "C13", self.field_strength.value(), self.temperature_c.value() + 273.15
-        )
+        relative = self.injection_polarization.value() / (100 * pth)
         self.injection_polarization_thermal.setText(
             f"{relative:.6g} × thermal (thermal P = {100 * pth:.6g} %)"
         )
@@ -1146,7 +1138,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.perfusion_timestep.setValue(config.perfusion_timestep_s)
         percent = relative_polarization_to_percent(
             config.injection_polarization,
-            "C13",
+            config.nucleus,
             config.field_strength_t,
             config.temperature_k,
         )
@@ -1230,12 +1222,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             injection_duration_s=self.injection_duration.value(),
             circulation_delay_s=self.circulation_delay.value(),
             perfusion_timestep_s=self.perfusion_timestep.value(),
-            injection_polarization=polarization_percent_to_relative(
-                self.injection_polarization.value(),
-                "C13",
-                self.field_strength.value(),
-                self.temperature_c.value() + 273.15,
-            ),
+            injection_polarization=self._read_injection_polarization(),
             bolus_alpha=self.bolus_alpha.value(),
             bolus_beta=self.bolus_beta.value(),
             tissue_clearance_s_inv=self.tissue_clearance.value(),
@@ -1271,21 +1258,34 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             breathing_phase_rad=self.breathing_phase.value(),
         )
         result = MousePerfusionConfig.from_dict(values)
-        original_percent = relative_polarization_to_percent(
-            self.config.injection_polarization,
-            "C13",
-            self.config.field_strength_t,
-            self.config.temperature_k,
-        )
-        if (
-            result.field_strength_t == self.config.field_strength_t
-            and result.temperature_k == self.config.temperature_k
-            and self.injection_polarization.value()
-            == round(original_percent, self.injection_polarization.decimals())
-        ):
-            result.injection_polarization = self.config.injection_polarization
         result.validate()
         return result
+
+    def _read_injection_polarization(self) -> float:
+        """Return the form's injection polarization in multiples of thermal.
+
+        An untouched form keeps the stored value exactly, so legacy values
+        above 100 % still open and rebuild; editing them raises instead.
+        """
+        config = self.config
+        percent = self.injection_polarization.value()
+        field_strength = self.field_strength.value()
+        temperature_k = self.temperature_c.value() + 273.15
+        stored_percent = relative_polarization_to_percent(
+            config.injection_polarization,
+            config.nucleus,
+            config.field_strength_t,
+            config.temperature_k,
+        )
+        if (
+            field_strength == config.field_strength_t
+            and temperature_k == config.temperature_k
+            and percent == round(stored_percent, self.injection_polarization.decimals())
+        ):
+            return config.injection_polarization
+        return polarization_percent_to_relative(
+            percent, config.nucleus, field_strength, temperature_k
+        )
 
     def _build_phantom(self) -> MousePerfusionPhantom:
         config = self._read_config()

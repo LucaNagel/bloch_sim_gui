@@ -21,6 +21,7 @@ from .dynamic_phantom import (
     VoxelWashout,
 )
 from .spectral_phantom import ChemicalSpecies
+from .units import NUCLEUS_SPIN
 
 
 MOUSE_TISSUE_LABELS = {
@@ -257,6 +258,9 @@ class MousePerfusionConfig:
     spectral_points: int = 257
     metadata: Dict = field(default_factory=dict)
     temperature_k: float = 310.15
+    # The injection polarization is a multiple of this nucleus' thermal
+    # polarization; workspace nucleus changes rebase both together.
+    nucleus: str = "C13"
 
     def validate(self) -> None:
         self.shape = tuple(int(value) for value in self.shape)
@@ -276,6 +280,11 @@ class MousePerfusionConfig:
             raise ValueError(
                 "transverse decay must be one of "
                 + ", ".join(sorted(TRANSVERSE_DECAY_MODES))
+            )
+        self.nucleus = str(self.nucleus).strip()
+        if self.nucleus not in NUCLEUS_SPIN:
+            raise ValueError(
+                "nucleus must be one of " + ", ".join(sorted(NUCLEUS_SPIN))
             )
         if len(self.shape) != 3 or any(value < 8 for value in self.shape):
             raise ValueError("mouse phantom matrix requires three values >= 8")
@@ -1269,7 +1278,7 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
             kpl_map_s_inv=kpl,
             b0_map_ppm=np.zeros(config.shape, dtype=np.float64),
             field_strength=config.field_strength_t,
-            nucleus="C13",
+            nucleus=config.nucleus,
             spectral_reference_ppm=config.spectral_reference_ppm,
             spectral_window_center_ppm=(0.5 * (config.spectral_reference_ppm + 183.35)),
             spectral_bandwidth_ppm=config.spectral_bandwidth_ppm,
@@ -1317,7 +1326,11 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         config_values = phantom.metadata.get("mouse_perfusion_config")
         if config_values is None:
             raise ValueError("dynamic phantom has no mouse perfusion configuration")
-        config = MousePerfusionConfig.from_dict(config_values)
+        # Configurations saved before the nucleus was stored follow the
+        # phantom, which a workspace nucleus change may have rebased.
+        config = MousePerfusionConfig.from_dict(
+            {"nucleus": phantom.nucleus, **config_values}
+        )
         template = cls.from_config(config)
         result = cls.__new__(cls)
         result.__dict__.update(phantom.__dict__)
