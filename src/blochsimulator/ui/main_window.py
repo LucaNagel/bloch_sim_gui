@@ -270,6 +270,9 @@ class BlochSimulatorGUI(QMainWindow):
     # time-resolved 2D run small and isolates the gradient dephasing.
     PLANE_DEFAULT_POSITIONS = 12
     VOLUME_DEFAULT_POSITIONS = 8
+    # Extent per axis: lines and planes start at 20 mm, a volume at 10 mm.
+    POSITION_DEFAULT_RANGE_MM = 20.0
+    VOLUME_DEFAULT_RANGE_MM = 10.0
     # Largest preview sample count: positions of a line, or per plane axis.
     PREVIEW_MAX_LINE_POSITIONS = 64
     PREVIEW_MAX_PLANE_POSITIONS = 8
@@ -547,7 +550,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.pos_range = QDoubleSpinBox()
         self.pos_range.setObjectName("pos_range")
         self.pos_range.setRange(0.1, 99990.0)
-        self.pos_range.setValue(20.0)
+        self.pos_range.setValue(self.POSITION_DEFAULT_RANGE_MM)
         self.pos_range.setSingleStep(10.0)
         self.pos_range.setSuffix(" mm")
         self.pos_range.setToolTip(
@@ -572,7 +575,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.pos2_range = QDoubleSpinBox()
         self.pos2_range.setObjectName("pos2_range")
         self.pos2_range.setRange(0.1, 99990.0)
-        self.pos2_range.setValue(20.0)
+        self.pos2_range.setValue(self.POSITION_DEFAULT_RANGE_MM)
         self.pos2_range.setSingleStep(10.0)
         self.pos2_range.setSuffix(" mm")
         self.pos2_range.setToolTip(
@@ -597,7 +600,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.pos3_range = QDoubleSpinBox()
         self.pos3_range.setObjectName("pos3_range")
         self.pos3_range.setRange(0.1, 99990.0)
-        self.pos3_range.setValue(20.0)
+        self.pos3_range.setValue(self.VOLUME_DEFAULT_RANGE_MM)
         self.pos3_range.setSingleStep(10.0)
         self.pos3_range.setSuffix(" mm")
         self.pos3_range.setToolTip(
@@ -2798,7 +2801,7 @@ class BlochSimulatorGUI(QMainWindow):
     def _on_position_geometry_activated(self, *_):
         """Start a plane from a 12 × 12 and a volume from an 8³ grid.
 
-        Both use one frequency.
+        A volume also starts at 10 mm per axis; both use one frequency.
         """
         ndim = self._position_ndim()
         if ndim == 1:
@@ -2812,8 +2815,15 @@ class BlochSimulatorGUI(QMainWindow):
         for spin in (self.pos_spin, self.pos2_spin, self.pos3_spin)[:ndim]:
             if spin.value() in starting:
                 spin.setValue(default)
-        counts, _ = self._position_counts_and_spans_mm()
+        if ndim == 3:
+            # Ranges left at the line/plane default take the volume default.
+            for box in (self.pos_range, self.pos2_range, self.pos3_range):
+                if box.value() == self.POSITION_DEFAULT_RANGE_MM:
+                    box.setValue(self.VOLUME_DEFAULT_RANGE_MM)
+        counts, spans_mm = self._position_counts_and_spans_mm()
         changes.append(" × ".join(str(n) for n in counts) + " positions")
+        if ndim == 3:
+            changes.append(" × ".join(f"{s:g}" for s in spans_mm) + " mm")
         if self.freq_spin.value() > 1:
             self.freq_spin.setValue(1)
             changes.append("1 frequency")

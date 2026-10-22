@@ -1193,6 +1193,8 @@ def test_switching_free_mode_to_a_volume_applies_the_starting_grid():
     assert window.pos3_count_label.text() == "Positions along z:"
     counts = (window.pos_spin.value(), window.pos2_spin.value())
     assert counts + (window.pos3_spin.value(),) == (8, 8, 8)
+    ranges = (window.pos_range, window.pos2_range, window.pos3_range)
+    assert [box.value() for box in ranges] == [10.0, 10.0, 10.0]
     assert window.freq_spin.value() == 1
     viewer = window.mag_3d
     assert viewer.get_vector_arrangement() == viewer.ARRANGEMENT_ALONG_POSITION
@@ -1206,7 +1208,7 @@ def test_switching_free_mode_to_a_volume_applies_the_starting_grid():
     window.pos3_range.setValue(4.0)
     positions = window._build_position_grid()
     assert positions.shape == (192, 3)
-    np.testing.assert_allclose(positions[:64:8, 1], np.linspace(-0.01, 0.01, 8))
+    np.testing.assert_allclose(positions[:64:8, 1], np.linspace(-0.005, 0.005, 8))
     np.testing.assert_allclose(positions[::64, 2], [-0.002, 0.0, 0.002])
     layout = infer_layout(positions)
     assert layout.counts == (8, 8, 3)
@@ -1215,7 +1217,7 @@ def test_switching_free_mode_to_a_volume_applies_the_starting_grid():
     assert parameters["position_geometry"] == "volume"
     assert parameters["position_axes"] == "xyz"
     assert parameters["position_counts"] == [8, 8, 3]
-    assert parameters["position_ranges_mm"] == [20.0, 20.0, 4.0]
+    assert parameters["position_ranges_mm"] == [10.0, 10.0, 4.0]
 
     window.pos_geometry_combo.setCurrentText("2D plane")
     assert window.pos3_spin.isHidden()
@@ -2156,6 +2158,27 @@ def test_parameter_sweep_records_plane_geometry_and_gradient_lobes():
     assert params["position_center_mm"] == [0.0, 2.0, 0.0]
     assert params["slice_axis"] == "y"
     assert params["gradient_lobes"] == [lobe.to_state()]
+    assert json.loads(json.dumps(params)) == params
+
+
+def test_parameter_sweep_records_volume_geometry():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    index = window.pos_geometry_combo.findText("3D volume")
+    window.pos_geometry_combo.setCurrentIndex(index)
+    window.pos_geometry_combo.activated.emit(index)
+    window.pos_spin.setValue(4)
+    window.pos2_spin.setValue(3)
+    window.pos3_spin.setValue(2)
+    window.pos3_range.setValue(6.0)
+
+    params = window.param_sweep_widget._constant_params()
+
+    assert params["num_positions"] == 24
+    assert params["position_geometry"] == "volume"
+    assert params["position_axes"] == "xyz"
+    assert params["position_counts"] == [4, 3, 2]
+    assert params["position_ranges_mm"] == [10.0, 10.0, 6.0]
     assert json.loads(json.dumps(params)) == params
 
 

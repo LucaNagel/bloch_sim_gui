@@ -34,7 +34,7 @@ from . import __version__
 
 _CENTRAL_POSITION_CODE = """positions_mm = np.asarray(data['positions']) * 1000
 sampled_axes = [i for i in range(3) if np.ptp(positions_mm[:, i]) > 0] or [2]
-# Spin nearest the centre of the sampled line or plane
+# Spin nearest the centre of the sampled line, plane or volume
 position_idx = int(np.argmin(
     np.linalg.norm(positions_mm - positions_mm.mean(axis=0), axis=1)
 ))
@@ -1418,19 +1418,45 @@ positions_mm = np.asarray(data['positions']) * 1000
 sampled_axes = [i for i in range(3) if np.ptp(positions_mm[:, i]) > 0] or [2]
 freq = data['frequencies'][freq_idx]
 
-# A plane is stored row-major: its first axis varies fastest.
-n_first = 0
-if len(sampled_axes) == 2:
-    first = next(i for i in sampled_axes if positions_mm[1, i] != positions_mm[0, i])
-    second = next(i for i in sampled_axes if i != first)
-    n_first = int(np.argmax(positions_mm[:, second] != positions_mm[0, second]))
+# Planes and volumes are stored row-major: the first axis varies fastest.
+n_pos = len(positions_mm)
+first_change = {
+    i: int(np.argmax(positions_mm[:, i] != positions_mm[0, i])) for i in sampled_axes
+}
+grid_axes = sorted(sampled_axes, key=first_change.get)
+# Identical positions never change: treat them as a stride of one.
+strides = [max(first_change[i], 1) for i in grid_axes]
+counts = [b // a for a, b in zip(strides, strides[1:] + [n_pos])]
+coordinates = [
+    positions_mm[: s * n : s, axis] for axis, s, n in zip(grid_axes, strides, counts)
+]
+is_grid = (
+    len(grid_axes) > 1
+    and strides[0] == 1
+    and all(n > 1 for n in counts)
+    and int(np.prod(counts)) == n_pos
+    and all(
+        np.allclose(
+            positions_mm[:, axis],
+            np.tile(np.repeat(c, s), n_pos // (s * len(c))),
+        )
+        for axis, s, c in zip(grid_axes, strides, coordinates)
+    )
+)
 
-if n_first > 1 and len(positions_mm) % n_first == 0:
-    shape = (len(positions_mm) // n_first, n_first)
-    extent = [
-        positions_mm[0, first], positions_mm[n_first - 1, first],
-        positions_mm[0, second], positions_mm[-1, second],
-    ]
+if is_grid:
+    flat = np.arange(n_pos)
+    if len(grid_axes) == 2:
+        sections = [(flat, (0, 1), '')]
+    else:
+        # A volume shows its three central slices: xy, xz and yz.
+        sections = []
+        for along in (2, 1, 0):
+            middle = counts[along] // 2
+            kept = tuple(k for k in range(3) if k != along)
+            indices = flat[(flat // strides[along]) % counts[along] == middle]
+            label = f" at {'xyz'[grid_axes[along]]} = {coordinates[along][middle]:.2f} mm"
+            sections.append((indices, kept, label))
     phase = np.degrees(np.arctan2(my, mx))
     # Phase is undefined without transverse magnetization
     phase[mxy < 1e-3 * max(mxy.max(), 1e-12)] = np.nan
@@ -1440,16 +1466,24 @@ if n_first > 1 and len(positions_mm) % n_first == 0:
         (phase, 'Phase (°)', 'twilight', -180.0, 180.0),
         (mz, 'Mz', 'RdBu_r', -mz_lim, mz_lim),
     ]
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
-    for ax, (values, title, cmap, vmin, vmax) in zip(axes, maps):
-        image = ax.imshow(
-            values.reshape(shape), origin='lower', extent=extent,
-            cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest',
-        )
-        ax.set_xlabel(f"{'xyz'[first]} (mm)")
-        ax.set_ylabel(f"{'xyz'[second]} (mm)")
-        ax.set_title(title)
-        fig.colorbar(image, ax=ax)
+    fig, axes = plt.subplots(
+        len(sections), 3, figsize=(16, 4.8 * len(sections)), squeeze=False
+    )
+    for row, (indices, (fast, slow), label) in zip(axes, sections):
+        shape = (counts[slow], counts[fast])
+        extent = [
+            coordinates[fast][0], coordinates[fast][-1],
+            coordinates[slow][0], coordinates[slow][-1],
+        ]
+        for ax, (values, title, cmap, vmin, vmax) in zip(row, maps):
+            image = ax.imshow(
+                values[indices].reshape(shape), origin='lower', extent=extent,
+                cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest',
+            )
+            ax.set_xlabel(f"{'xyz'[grid_axes[fast]]} (mm)")
+            ax.set_ylabel(f"{'xyz'[grid_axes[slow]]} (mm)")
+            ax.set_title(title + label)
+            fig.colorbar(image, ax=ax)
 else:
     axis = sampled_axes[0]
     pos = positions_mm[:, axis]
