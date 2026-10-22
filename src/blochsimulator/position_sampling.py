@@ -3,7 +3,9 @@
 Positions are ``(N, 3)`` arrays in metres. A 1D line varies one axis. A 2D
 plane varies two axes in row-major order: the first plane axis (x for
 ``"xy"``) is the inner, fast index, so ``positions.reshape(n_second,
-n_first, 3)`` is an image indexed ``[second, first]``, e.g. ``[y, x]``.
+n_first, 3)`` is an image indexed ``[second, first]``, e.g. ``[y, x]``. A 3D
+volume continues the pattern with x fastest and z slowest, so
+``positions.reshape(nz, ny, nx, 3)`` is indexed ``[z, y, x]``.
 
 The layout of any positions array can be recovered with ``infer_layout``, so
 saved results need no extra geometry metadata.
@@ -16,6 +18,7 @@ import numpy as np
 
 AXIS_NAMES = ("x", "y", "z")
 PLANES = {"xy": (0, 1), "xz": (0, 2), "yz": (1, 2)}
+VOLUME_AXES = (0, 1, 2)
 
 AxisLike = Union[int, str]
 
@@ -73,24 +76,22 @@ def build_positions(
     spans_m: Sequence[float],
     center_m: Optional[Sequence[float]] = None,
 ) -> np.ndarray:
-    """Build a line (one axis) or row-major plane (two axes) of positions.
+    """Build a line, plane or volume of positions in row-major order.
 
-    ``center_m`` shifts the whole object; it defaults to the origin.
+    The first axis varies fastest. ``center_m`` shifts the whole object; it
+    defaults to the origin.
     """
     axes = [axis_index(axis) for axis in axes]
-    if len(axes) not in (1, 2) or len(set(axes)) != len(axes):
-        raise ValueError("Positions need one axis or two distinct axes.")
+    if len(axes) not in (1, 2, 3) or len(set(axes)) != len(axes):
+        raise ValueError("Positions need one, two or three distinct axes.")
     if len(counts) != len(axes) or len(spans_m) != len(axes):
         raise ValueError("Give one count and one span per axis.")
     samples = [axis_samples(n, span) for n, span in zip(counts, spans_m)]
-    if len(axes) == 1:
-        positions = np.zeros((samples[0].size, 3))
-        positions[:, axes[0]] = samples[0]
-    else:
-        outer, inner = np.meshgrid(samples[1], samples[0], indexing="ij")
-        positions = np.zeros((inner.size, 3))
-        positions[:, axes[0]] = inner.ravel()
-        positions[:, axes[1]] = outer.ravel()
+    # meshgrid over the slowest axis first, so ravel() runs the first fastest.
+    grids = np.meshgrid(*reversed(samples), indexing="ij")
+    positions = np.zeros((grids[0].size, 3))
+    for axis, grid in zip(reversed(axes), grids):
+        positions[:, axis] = grid.ravel()
     if center_m is not None:
         positions += np.asarray(center_m, dtype=float).reshape(1, 3)
     return positions
@@ -106,12 +107,17 @@ def build_plane_positions(counts, spans_m, plane: str = "xy", center_m=None):
     return build_positions(plane_axes(plane), counts, spans_m, center_m)
 
 
+def build_volume_positions(counts, spans_m, center_m=None):
+    """Return a row-major ``nx × ny × nz`` grid of positions, x fastest."""
+    return build_positions(VOLUME_AXES, counts, spans_m, center_m)
+
+
 @dataclass(frozen=True)
 class PositionLayout:
     """Grid structure of a positions array.
 
-    ``axes`` lists the varying axes: none for a single point, one for a line
-    and (first, second) for a plane. ``coordinates`` holds the samples of each
+    ``axes`` lists the varying axes, fastest first: none for a single point,
+    one for a line, (first, second) for a plane and three for a volume. ``coordinates`` holds the samples of each
     varying axis in metres, in storage order. ``center`` is the coordinate
     of the constant axes (and of the varying ones' first sample).
     """
@@ -132,8 +138,16 @@ class PositionLayout:
 
     @property
     def shape(self) -> Tuple[int, ...]:
-        """Array shape of per-position values: ``(n_second, n_first)``."""
+        """Array shape of per-position values, slowest axis first.
+
+        ``(n_second, n_first)`` for a plane, ``(nz, ny, nx)`` for a volume.
+        """
         return tuple(reversed(self.counts))
+
+    @property
+    def strides(self) -> Tuple[int, ...]:
+        """Flat index step of each varying axis, first axis first."""
+        return tuple(int(np.prod(self.counts[:k])) for k in range(self.ndim))
 
     @property
     def size(self) -> int:
@@ -158,7 +172,9 @@ class PositionLayout:
             return "single position"
         if self.ndim == 1:
             return f"{self.counts[0]} positions along {self.axis_names[0]}"
-        return f"{self.counts[0]} × {self.counts[1]} grid in {self.plane_name}"
+        grid = " × ".join(str(n) for n in self.counts)
+        kind = "volume" if self.ndim == 3 else "grid"
+        return f"{grid} {kind} in {self.plane_name}"
 
     def coordinates_mm(self) -> Tuple[np.ndarray, ...]:
         return tuple(np.asarray(c) * 1000.0 for c in self.coordinates)
@@ -169,9 +185,11 @@ class PositionLayout:
             return np.arange(1)
         if self.ndim == 1 or not self.is_grid:
             return centered_stride_indices(self.counts[0], max_per_axis)
-        first = centered_stride_indices(self.counts[0], max_per_axis)
-        second = centered_stride_indices(self.counts[1], max_per_axis)
-        return (second[:, None] * self.counts[0] + first[None, :]).ravel()
+        picks = [centered_stride_indices(n, max_per_axis) for n in self.counts]
+        # Slowest axis first, so ravel() keeps the first axis fastest.
+        grids = np.ix_(*reversed(picks))
+        flat = sum(g * s for g, s in zip(grids, reversed(self.strides)))
+        return np.asarray(flat).ravel()
 
     def sub_layout(self, indices) -> "PositionLayout":
         """Layout of ``positions[indices]`` for indices from ``grid_indices``."""
@@ -185,17 +203,13 @@ class PositionLayout:
                 self.center,
                 self.is_grid,
             )
-        n_first = self.counts[0]
-        first = np.unique(indices % n_first)
-        second = np.unique(indices // n_first)
-        return PositionLayout(
-            self.axes,
-            (
-                np.asarray(self.coordinates[0])[first],
-                np.asarray(self.coordinates[1])[second],
-            ),
-            self.center,
+        coordinates = tuple(
+            np.asarray(coords)[np.unique((indices // stride) % count)]
+            for coords, stride, count in zip(
+                self.coordinates, self.strides, self.counts
+            )
         )
+        return PositionLayout(self.axes, coordinates, self.center)
 
     def reshape(self, values):
         """Reshape per-position values (leading axis N) to the grid shape."""
@@ -215,8 +229,43 @@ class PositionLayout:
         return f"({names}) = ({values}) mm"
 
 
+def _row_major_layout(pos, varying, tol) -> Optional[PositionLayout]:
+    """Return the grid layout if ``pos`` is row-major over ``varying`` axes."""
+    total = pos.shape[0]
+    # Each axis first changes after one full sweep of the faster axes.
+    first_change = {}
+    for axis in varying:
+        changed = np.nonzero(np.abs(pos[:, axis] - pos[0, axis]) > tol)[0]
+        first_change[axis] = int(changed[0])
+    order = sorted(varying, key=first_change.get)
+    strides = [first_change[axis] for axis in order] + [total]
+    if strides[0] != 1:
+        return None
+    counts = []
+    for inner, outer in zip(strides[:-1], strides[1:]):
+        if outer % inner or outer // inner < 2:
+            return None
+        counts.append(outer // inner)
+    grid = pos.reshape(tuple(reversed(counts)) + (3,))
+    coordinates = []
+    for k, axis in enumerate(order):
+        # Axis k is the k-th from the end of the grid shape.
+        dim = len(order) - 1 - k
+        index = [0] * len(order)
+        index[dim] = slice(None)
+        coords = grid[tuple(index) + (axis,)]
+        shape = [1] * len(order)
+        shape[dim] = coords.size
+        if np.any(np.abs(grid[..., axis] - coords.reshape(shape)) > tol) or np.any(
+            np.abs(np.diff(coords)) <= tol
+        ):
+            return None
+        coordinates.append(coords.copy())
+    return PositionLayout(tuple(order), tuple(coordinates), pos[0].copy())
+
+
 def infer_layout(positions) -> PositionLayout:
-    """Recover the line or plane structure of a positions array.
+    """Recover the line, plane or volume structure of a positions array.
 
     Arrays that vary along several axes without forming a row-major grid,
     e.g. a diagonal line, are treated as a line along the axis with the
@@ -240,28 +289,10 @@ def infer_layout(positions) -> PositionLayout:
         axis = varying[0]
         return PositionLayout((axis,), (pos[:, axis].copy(),), center)
 
-    if len(varying) == 2 and pos.shape[0] >= 4:
-        step = np.abs(pos[1] - pos[0]) > tol
-        if np.count_nonzero(step[varying]) == 1:
-            first = varying[0] if step[varying[0]] else varying[1]
-            second = varying[1] if first == varying[0] else varying[0]
-            changed = np.nonzero(np.abs(pos[:, second] - pos[0, second]) > tol)[0]
-            n_first = int(changed[0]) if changed.size else pos.shape[0]
-            if n_first >= 2 and pos.shape[0] % n_first == 0:
-                grid = pos.reshape(-1, n_first, 3)
-                first_row = grid[0, :, first]
-                second_col = grid[:, 0, second]
-                if (
-                    np.all(np.abs(grid[:, :, first] - first_row) <= tol)
-                    and np.all(np.abs(grid[:, :, second] - second_col[:, None]) <= tol)
-                    and np.all(np.abs(np.diff(first_row)) > tol)
-                    and np.all(np.abs(np.diff(second_col)) > tol)
-                ):
-                    return PositionLayout(
-                        (first, second),
-                        (first_row.copy(), second_col.copy()),
-                        center,
-                    )
+    if pos.shape[0] >= 2 ** len(varying):
+        layout = _row_major_layout(pos, varying, tol)
+        if layout is not None:
+            return layout
 
     axis = int(np.argmax(span))
     return PositionLayout((axis,), (pos[:, axis].copy(),), center, is_grid=False)

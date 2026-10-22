@@ -868,12 +868,14 @@ def test_simulation_controls_use_non_overlapping_grid_rows():
     assert position(window.pos_range) == (4, 1, 1, 1)
     assert position(window.pos2_spin) == (5, 1, 1, 1)
     assert position(window.pos2_range) == (6, 1, 1, 1)
-    assert position(window.pos_center_widget) == (7, 1, 1, 1)
-    assert position(window.position_summary_label) == (8, 0, 1, 2)
-    assert position(window.freq_spin) == (9, 1, 1, 1)
-    assert position(window.freq_center) == (10, 1, 1, 1)
-    assert position(window.freq_range) == (11, 1, 1, 1)
-    assert position(window.freq_axis_mode) == (12, 1, 1, 1)
+    assert position(window.pos3_spin) == (7, 1, 1, 1)
+    assert position(window.pos3_range) == (8, 1, 1, 1)
+    assert position(window.pos_center_widget) == (9, 1, 1, 1)
+    assert position(window.position_summary_label) == (10, 0, 1, 2)
+    assert position(window.freq_spin) == (11, 1, 1, 1)
+    assert position(window.freq_center) == (12, 1, 1, 1)
+    assert position(window.freq_range) == (13, 1, 1, 1)
+    assert position(window.freq_axis_mode) == (14, 1, 1, 1)
 
 
 def test_free_mode_and_slice_explorer_spatial_controls_use_mm():
@@ -1173,6 +1175,90 @@ def test_position_geometry_round_trips_through_project_controls():
         restored._build_position_grid(), window._build_position_grid()
     )
     assert not restored.pos2_spin.isHidden()
+
+
+def test_switching_free_mode_to_a_volume_applies_the_starting_grid():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    index = window.pos_geometry_combo.findText("3D volume")
+    window.pos_geometry_combo.setCurrentIndex(index)
+    window.pos_geometry_combo.activated.emit(index)
+
+    assert window.pos_axis_combo.isHidden() and window.pos_plane_combo.isHidden()
+    assert window.pos_axis_label.isHidden()
+    assert not window.pos3_spin.isHidden() and not window.pos3_range.isHidden()
+    assert window.pos_count_label.text() == "Positions along x:"
+    assert window.pos2_count_label.text() == "Positions along y:"
+    assert window.pos3_count_label.text() == "Positions along z:"
+    counts = (window.pos_spin.value(), window.pos2_spin.value())
+    assert counts + (window.pos3_spin.value(),) == (8, 8, 8)
+    assert window.freq_spin.value() == 1
+    viewer = window.mag_3d
+    assert viewer.get_vector_arrangement() == viewer.ARRANGEMENT_ALONG_POSITION
+    assert viewer.color_by_combo.currentText() == "Phase"
+    assert window.position_summary_label.text().startswith(
+        "512 positions (8 × 8 × 8 in xyz) × 1 frequency = 512 spins"
+    )
+
+    window.pos3_spin.setValue(3)
+    window.pos3_range.setValue(4.0)
+    positions = window._build_position_grid()
+    assert positions.shape == (192, 3)
+    np.testing.assert_allclose(positions[:64:8, 1], np.linspace(-0.01, 0.01, 8))
+    np.testing.assert_allclose(positions[::64, 2], [-0.002, 0.0, 0.002])
+    layout = infer_layout(positions)
+    assert layout.counts == (8, 8, 3)
+    parameters = window._collect_simulation_parameters()
+    assert parameters["num_positions"] == 192
+    assert parameters["position_geometry"] == "volume"
+    assert parameters["position_axes"] == "xyz"
+    assert parameters["position_counts"] == [8, 8, 3]
+    assert parameters["position_ranges_mm"] == [20.0, 20.0, 4.0]
+
+    window.pos_geometry_combo.setCurrentText("2D plane")
+    assert window.pos3_spin.isHidden()
+    assert not window.pos_axis_label.isHidden()
+    assert window._build_position_grid().shape == (64, 3)
+
+
+def test_volume_preview_strides_every_axis_and_keeps_the_grid():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.pos_geometry_combo.setCurrentText("3D volume")
+    for spin, count in zip(
+        (window.pos_spin, window.pos2_spin, window.pos3_spin), (9, 4, 6)
+    ):
+        spin.setValue(count)
+
+    positions = window._build_position_grid()
+    preview = window._preview_positions(positions, [9, 4, 6])
+    layout = infer_layout(preview)
+
+    assert window._preview_strides([9, 4, 6]) == [3, 1, 2]
+    assert layout.counts == (3, 4, 3)
+    np.testing.assert_allclose(layout.coordinates[0], positions[:9:3, 0])
+    np.testing.assert_allclose(layout.coordinates[2], positions[::72, 2])
+
+
+def test_volume_geometry_round_trips_through_project_controls():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.pos_geometry_combo.setCurrentText("3D volume")
+    window.pos_spin.setValue(3)
+    window.pos2_spin.setValue(4)
+    window.pos3_spin.setValue(5)
+    window.pos3_range.setValue(7.5)
+    state = _capture_widget_state(window)
+
+    restored = BlochSimulatorGUI()
+    _restore_widget_state(restored, state)
+
+    assert restored.pos_geometry_combo.currentText() == "3D volume"
+    assert restored.pos3_spin.value() == 5
+    assert restored.pos3_range.value() == 7.5
+    np.testing.assert_allclose(
+        restored._build_position_grid(), window._build_position_grid()
+    )
 
 
 def test_projects_without_position_geometry_open_as_a_z_line(tmp_path, monkeypatch):
