@@ -1296,7 +1296,7 @@ def test_free_mode_result_controls_use_consistent_headers_and_rows():
         window.mag_3d.spin_display_combo.itemText(index)
         for index in range(window.mag_3d.spin_display_combo.count())
     ] == ["Show all spins", "Show all spins + mean", "Show only mean"]
-    assert window.mag_3d.track_checkbox.isChecked()
+    assert not window.mag_3d.track_checkbox.isChecked()
     assert window.mag_3d.spin_display_combo.currentText() == "Show all spins + mean"
     rainbow = window.mag_3d.color_for_index(0, 5).name()
     window.mag_3d.vector_palette_combo.setCurrentText("Viridis")
@@ -1341,6 +1341,7 @@ def test_3d_spin_display_mode_does_not_change_tip_path_tracking(
 ):
     app = QApplication.instance() or QApplication(sys.argv)
     viewer = MagnetizationViewer()
+    viewer.track_checkbox.setChecked(True)
     viewer.vector_plot = MagicMock()
     viewer.mean_vector = MagicMock()
     viewer.spin_display_combo.setCurrentText(display_mode)
@@ -1369,6 +1370,7 @@ def _spatial_viewer(positions_mm, spins_per_position):
 def test_3d_spatial_layout_draws_each_position_at_its_own_origin():
     app = QApplication.instance() or QApplication(sys.argv)
     viewer = _spatial_viewer([-10.0, 0.0, 10.0], 2)
+    viewer.track_checkbox.setChecked(True)
     viewer.spin_display_combo.setCurrentText("Show all spins + mean")
     spins = np.array(
         [
@@ -1426,6 +1428,7 @@ def test_3d_spatial_layout_draws_each_position_at_its_own_origin():
 def test_3d_spatial_layout_tracks_one_tip_path_per_position():
     app = QApplication.instance() or QApplication(sys.argv)
     viewer = _spatial_viewer([0.0, 5.0], 2)
+    viewer.track_checkbox.setChecked(True)
     first = np.array([[1.0, 0, 0], [1.0, 0, 0], [0, 0, 1.0], [0, 0, 1.0]])
     second = np.array([[0, 1.0, 0], [0, 1.0, 0], [0, 1.0, 0], [0, 1.0, 0]])
 
@@ -2383,11 +2386,13 @@ def test_gradient_tour_echoes_on_a_2d_plane():
     designer.sequence_type.setCurrentText("Gradient & RF Tour")
     assert window._is_plane_geometry()
     assert not designer.gradient_tour_opts.isHidden()
+    assert window.freq_spin.value() == 3
+    assert window.freq_range.value() == pytest.approx(30.0)
     dt = 1e-5
     b1, gradients, time = designer.compile_sequence(
         custom_pulse=window.rf_designer.get_pulse(), dt=dt
     )
-    assert time[-1] - time[0] + dt == pytest.approx(30e-3, rel=1e-6)
+    assert time[-1] - time[0] + dt == pytest.approx(35e-3, rel=1e-6)
     # The rewind after the 180° pulse matches the net moment before it.
     refocus = int(np.argmax(np.abs(b1[400:]))) + 400
     before = gradient_moments_mt_ms_per_m(gradients[:refocus], time[:refocus])
@@ -2411,7 +2416,11 @@ def test_gradient_tour_echoes_on_a_2d_plane():
     def at(ms):
         return int(np.argmin(np.abs(result["time"] - ms * 1e-3)))
 
-    assert coherence[at(4.5)] < 0.1 * magnitude[at(4.5)]  # helix along x
-    assert coherence[at(6.0)] > 0.95 * magnitude[at(6.0)]  # gradient echo
-    assert coherence[at(15.0)] < 0.01 * magnitude[at(15.0)]  # diagonal helix
-    assert coherence[at(20.5)] > 0.95 * magnitude[at(20.5)]  # spin echo
+    assert coherence[at(5.5)] < 0.1 * magnitude[at(5.5)]  # helix along x
+    assert coherence[at(8.0)] > 0.95 * magnitude[at(8.0)]  # gradient echo
+    assert coherence[at(20.0)] < 0.01 * magnitude[at(20.0)]  # diagonal helix
+    assert coherence[at(27.0)] > 0.95 * magnitude[at(27.0)]  # rewound
+    # The flip-back pulse at the spin echo returns the magnetization to z.
+    mz = result["mz"].reshape(len(result["time"]), -1)
+    assert np.all(mz[-1] > 0.7)
+    assert magnitude[-1] < 0.01
