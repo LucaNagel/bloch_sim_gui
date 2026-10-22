@@ -95,7 +95,9 @@ from .reconstruction import (
 from .scanner import (
     ScannerParameters,
     load_scanner_parameters,
+    load_scanner_profiles,
     save_scanner_parameters,
+    save_scanner_profiles,
 )
 from .spectral_spatial import (
     AliasCompatibility,
@@ -296,6 +298,7 @@ __all__ = [
     "load_reconstruction_dataset",
     "load_pulseq",
     "load_scanner_parameters",
+    "load_scanner_profiles",
     "make_cartesian_epi",
     "make_pulseq_bssfp",
     "make_pulseq_csi",
@@ -316,5 +319,6 @@ __all__ = [
     "SKINNER_REFERENCE_DOI",
     "WANG_REFERENCE_DOI",
     "save_scanner_parameters",
+    "save_scanner_profiles",
     "resolve_encoding_frame",
 ]

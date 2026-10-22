@@ -57,7 +57,9 @@ from ..dynamic_phantom import DynamicSpectralPhantom
 from ..sequence import (
     SequenceProbeResult,
     load_scanner_parameters,
+    load_scanner_profiles,
     save_scanner_parameters,
+    save_scanner_profiles,
 )
 from ..visualization import (
     ImageExporter,
@@ -5928,6 +5930,7 @@ class BlochSimulatorGUI(QMainWindow):
             animation_memory_budget_mib=self._load_animation_memory_budget_mib(),
             detected_thread_count=resolve_num_threads(None),
             scanner_parameters=previous_scanner_parameters,
+            scanner_profiles=load_scanner_profiles(self.app_settings),
             workspace_defaults=previous_workspace_defaults,
             interface_style=previous_interface_style,
             signal_unit=self.app_settings.value("sequence/signal_unit", "physical"),
@@ -6005,6 +6008,7 @@ class BlochSimulatorGUI(QMainWindow):
         scanner_parameters = dialog.scanner_parameters()
         scanner_parameters_changed = scanner_parameters != previous_scanner_parameters
         save_scanner_parameters(self.app_settings, scanner_parameters)
+        save_scanner_profiles(self.app_settings, dialog.scanner_profiles())
         workspace_defaults = dialog.workspace_defaults()
         workspace_defaults_changed = workspace_defaults != previous_workspace_defaults
         workspace_defaults.save(self.app_settings)

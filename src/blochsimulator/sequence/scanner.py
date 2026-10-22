@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, fields
 from typing import Any, Mapping
 
@@ -130,3 +131,42 @@ def save_scanner_parameters(settings, parameters: ScannerParameters) -> None:
     parameters = ScannerParameters.from_mapping(parameters)
     for name, (key, scale) in _SETTING_FIELDS.items():
         settings.setValue(key, float(getattr(parameters, name)) / scale)
+
+
+_PROFILES_KEY = "scanner/profiles"
+
+
+def load_scanner_profiles(settings) -> dict[str, ScannerParameters]:
+    """Load the named scanner profiles stored in a QSettings-compatible object.
+
+    Profiles are stored as one JSON document. Entries that are malformed or
+    physically inconsistent are skipped so one bad profile cannot hide the rest.
+    """
+    if settings is None:
+        return {}
+    try:
+        raw = json.loads(str(settings.value(_PROFILES_KEY, "") or "{}"))
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    profiles: dict[str, ScannerParameters] = {}
+    for name, values in raw.items():
+        name = str(name).strip()
+        if not name or not isinstance(values, dict):
+            continue
+        try:
+            profiles[name] = ScannerParameters.from_mapping(values)
+        except (TypeError, ValueError):
+            continue
+    return profiles
+
+
+def save_scanner_profiles(settings, profiles: Mapping[str, ScannerParameters]) -> None:
+    """Persist named scanner profiles as a JSON document."""
+    payload = {
+        str(name).strip(): ScannerParameters.from_mapping(values).to_dict()
+        for name, values in profiles.items()
+        if str(name).strip()
+    }
+    settings.setValue(_PROFILES_KEY, json.dumps(payload))
