@@ -1485,6 +1485,22 @@ def test_3d_spatial_layout_shows_b1_and_gradient_once():
     assert "10.00 mT/m" in viewer.field_label_item.text
     assert "5.00 µT" in viewer.field_label_item.text
 
+    # The Labels box hides all scene text and brings it back.
+    viewer.net_vector_checkbox.setChecked(True)
+    assert viewer.position_label_items
+    assert all(item.visible() for item in viewer.position_label_items)
+    viewer.labels_checkbox.setChecked(False)
+    assert not any(item.visible() for item in viewer.position_label_items)
+    assert not viewer.field_label_item.visible()
+    viewer.set_spatial_groups([-10.0, 0.0, 10.0], 1)
+    assert not any(item.visible() for item in viewer.position_label_items)
+    viewer.labels_checkbox.setChecked(True)
+    assert all(item.visible() for item in viewer.position_label_items)
+    viewer.show_field_frame(2)
+    assert viewer.field_label_item.visible()
+    viewer.net_vector_checkbox.setChecked(False)
+    assert not viewer._net_label_item.visible()
+
     viewer.gradient_field_checkbox.setChecked(False)
     viewer.b1_field_checkbox.setChecked(False)
     assert not viewer.gradient_arrow_item.visible()
