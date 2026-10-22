@@ -223,13 +223,23 @@ class _SelectableImagePanel(QWidget):
         self.image = pg.ImageItem()
         style_image_item(self.image)
         self.plot.addItem(self.image)
-        self.marker = pg.ScatterPlotItem(
-            size=15,
+        # A dark halo under a magenta outline keeps the selected voxel visible
+        # on bright objects as well as on the dark background.
+        self.marker_halo = pg.ScatterPlotItem(
+            size=17,
             symbol="s",
-            pen=pg.mkPen("y", width=2),
+            pen=pg.mkPen(0, 0, 0, 220, width=5),
             brush=pg.mkBrush(0, 0, 0, 0),
         )
+        self.marker = pg.ScatterPlotItem(
+            size=17,
+            symbol="s",
+            pen=pg.mkPen(255, 0, 255, width=2),
+            brush=pg.mkBrush(0, 0, 0, 0),
+        )
+        self.marker_halo.setZValue(99)
         self.marker.setZValue(100)
+        self.plot.addItem(self.marker_halo)
         self.plot.addItem(self.marker)
         self.info = QLabel("No data")
         self.info.setWordWrap(True)
@@ -240,6 +250,7 @@ class _SelectableImagePanel(QWidget):
     def clear(self):
         self._shape = (0, 0)
         self.image.clear()
+        self.marker_halo.clear()
         self.marker.clear()
         self.info.setText("No data")
 
@@ -270,10 +281,12 @@ class _SelectableImagePanel(QWidget):
 
     def set_selected_pixel(self, x: int, y: int):
         if self._shape == (0, 0):
+            self.marker_halo.clear()
             self.marker.clear()
             return
         x = int(np.clip(x, 0, self._shape[1] - 1))
         y = int(np.clip(y, 0, self._shape[0] - 1))
+        self.marker_halo.setData([x + 0.5], [y + 0.5])
         self.marker.setData([x + 0.5], [y + 0.5])
 
     def _clicked(self, event):
@@ -307,6 +320,8 @@ class SequenceReconstructionExplorer(QWidget):
         self._pending_state = None
         self._volume_initialized = False
         self._contrast_domain_cache = {}
+        self._time_course_cache = {}
+        self._image_dims = ()
         self._session_runs = {}
         self._result = None
         self._build_ui()
@@ -450,6 +465,14 @@ class SequenceReconstructionExplorer(QWidget):
         spectral_layout.addWidget(self.spectral_point)
         spectral_layout.addWidget(self.spectral_value_label)
         data_layout.addRow(self.spectral_label, self.spectral_control)
+        self.voxel_plot_label = QLabel("Voxel plot")
+        self.voxel_plot_combo = QComboBox()
+        self.voxel_plot_combo.setObjectName("reconstruction_voxel_plot")
+        self.voxel_plot_combo.setToolTip(
+            "Signal of the selected voxel shown below the images"
+        )
+        self.voxel_plot_combo.currentIndexChanged.connect(self._voxel_plot_changed)
+        data_layout.addRow(self.voxel_plot_label, self.voxel_plot_combo)
         controls_layout.addWidget(data_group)
 
         contrast_group = QGroupBox("Contrast")
@@ -556,6 +579,7 @@ class SequenceReconstructionExplorer(QWidget):
         self._current_display = None
         self._volume_initialized = False
         self._contrast_domain_cache.clear()
+        self._time_course_cache.clear()
         self.kspace_panel.clear()
         self.image_panel.clear()
         self.spectrum_plot.clear()
@@ -587,6 +611,7 @@ class SequenceReconstructionExplorer(QWidget):
         self.model = model
         self.source = None if source is None else str(source)
         self._contrast_domain_cache.clear()
+        self._time_course_cache.clear()
         self._populate_controls()
         self._refresh()
         if self._pending_state is not None:
@@ -716,9 +741,47 @@ class SequenceReconstructionExplorer(QWidget):
             count = model.dataset.sizes.get("spectral_point", 1)
             self.spectral_point.setRange(0, max(0, count - 1))
             self._update_spectral_point_label(self.spectral_point.value())
-            self.spectrum_plot.setVisible(is_csi)
+            self._populate_voxel_plot_modes(is_csi)
         finally:
             self._updating = False
+
+    def _populate_voxel_plot_modes(self, is_csi):
+        previous = self.voxel_plot_combo.currentData()
+        self.voxel_plot_combo.blockSignals(True)
+        try:
+            self.voxel_plot_combo.clear()
+            if is_csi:
+                self.voxel_plot_combo.addItem("Spectrum", "spectrum")
+                self.voxel_plot_combo.addItem("FID", "fid")
+            if self._time_course_dimension() is not None:
+                self.voxel_plot_combo.addItem("Time course", "time_course")
+            index = self.voxel_plot_combo.findData(previous)
+            self.voxel_plot_combo.setCurrentIndex(max(0, index))
+        finally:
+            self.voxel_plot_combo.blockSignals(False)
+        available = self.voxel_plot_combo.count() > 0
+        self.voxel_plot_label.setVisible(available)
+        self.voxel_plot_combo.setVisible(available)
+        self.spectrum_plot.setVisible(available)
+
+    def _time_course_dimension(self):
+        """Return the outer dimension that orders dynamic acquisitions."""
+        if self.model is None:
+            return None
+        return next(
+            (item for item in self.model.outer_dimensions if item.name == "repetition"),
+            None,
+        )
+
+    def _voxel_plot_changed(self, *_):
+        if self._updating or self.model is None:
+            return
+        mode, pool_index = self._selected_data_mode()
+        self._refresh_voxel_plot(mode, pool_index, self._effective_coil_mode(mode))
+
+    def _effective_coil_mode(self, mode):
+        coil_mode = str(self.coil_combo.currentData() or "rss")
+        return "sum" if mode == "ideal" and coil_mode == "rss" else coil_mode
 
     def _selections(self):
         selections = {}
@@ -916,6 +979,7 @@ class SequenceReconstructionExplorer(QWidget):
         if len(image_dims) != 2:
             raise ValueError(f"expected two image dimensions, found {image_data.dims}")
         image_values = np.asarray(image_data.copy(data=display).transpose(*image_dims))
+        self._image_dims = tuple(image_dims)
 
         kspace_name = model.kspace_name(pool=mode == "pool")
         kspace = model.select(
@@ -946,10 +1010,7 @@ class SequenceReconstructionExplorer(QWidget):
         self.image_panel.set_selected_pixel(*self._voxel)
         self.pages.setCurrentWidget(self.two_d_page)
         self._current_display = image_values
-        if model.kind == "csi":
-            self._refresh_csi_spectrum(mode, pool_index, effective_coil_mode)
-        else:
-            self.spectrum_plot.clear()
+        self._refresh_voxel_plot(mode, pool_index, effective_coil_mode)
 
     def _contrast_mode_changed(self, automatic):
         self.contrast_slider.setEnabled(not automatic)
@@ -1047,34 +1108,139 @@ class SequenceReconstructionExplorer(QWidget):
             selected_high = np.nextafter(selected_low, np.inf)
         return selected_low, selected_high
 
-    def _refresh_csi_spectrum(self, mode, pool_index, coil_mode):
+    def _refresh_voxel_plot(self, mode, pool_index, coil_mode):
+        plot_mode = self.voxel_plot_combo.currentData()
+        self.spectrum_plot.clear()
+        if plot_mode is None or self.pages.currentWidget() is not self.two_d_page:
+            return
+        if plot_mode == "time_course":
+            self._plot_time_course(mode, pool_index)
+        else:
+            self._plot_csi_voxel(plot_mode, mode, pool_index, coil_mode)
+
+    def _plot_csi_voxel(self, plot_mode, mode, pool_index, coil_mode):
         model = self.model
-        spectrum_name = model.spectrum_name(pool=mode == "pool")
-        spectrum = model.select(
-            spectrum_name,
+        pool = mode == "pool"
+        if plot_mode == "fid":
+            name = model.image_name(pool=pool)
+            axis_name = "spectral_time_s"
+        else:
+            name = model.spectrum_name(pool=pool)
+            axis_name = "spectral_frequency_hz"
+        data = model.select(
+            name,
             self._selections(),
-            pool_index=pool_index if mode == "pool" else None,
+            pool_index=pool_index if pool else None,
             coil_mode=coil_mode,
         )
         x, y = self._voxel
-        spectrum = spectrum.isel(phase_x=x, phase_y=y)
-        values = np.asarray(spectrum)
-        frequency = np.asarray(
-            model.dataset.coords.get("spectral_frequency_hz", np.arange(values.size))
+        values = np.asarray(data.isel(phase_x=x, phase_y=y))
+        axis = np.asarray(model.dataset.coords.get(axis_name, np.arange(values.size)))
+        if plot_mode == "fid":
+            axis = axis * 1e3
+            self.spectrum_plot.setLabel("bottom", "Time", "ms")
+        else:
+            self.spectrum_plot.setLabel("bottom", "Frequency", "Hz")
+        self.spectrum_plot.setLabel("left", "Signal", "a.u.")
+        self.spectrum_plot.plot(axis, np.abs(values), pen="w", name="Magnitude")
+        self.spectrum_plot.plot(axis, values.real, pen="g", name="Real")
+        self.spectrum_plot.plot(axis, values.imag, pen="r", name="Imaginary")
+        title = "FID" if plot_mode == "fid" else "Spectrum"
+        self.spectrum_plot.setTitle(f"{title} · voxel x={x}, y={y}")
+
+    def _time_course_planes(self, dimension):
+        """Return the displayed image of every repetition, cached per view."""
+        selections = self._selections()
+        component = str(self.component_combo.currentData() or "magnitude")
+        spectral_point = (
+            self.spectral_point.value() if self.model.kind == "csi" else None
         )
-        self.spectrum_plot.clear()
-        self.spectrum_plot.plot(frequency, np.abs(values), pen="w", name="Magnitude")
-        self.spectrum_plot.plot(frequency, values.real, pen="g", name="Real")
-        self.spectrum_plot.plot(frequency, values.imag, pen="r", name="Imaginary")
-        self.spectrum_plot.setTitle(f"Voxel x={x}, y={y}")
+        key = (
+            self._selected_data_mode(),
+            str(self.coil_combo.currentData() or "rss"),
+            component,
+            spectral_point,
+            tuple(
+                sorted(
+                    (name, repr(value))
+                    for name, value in selections.items()
+                    if name != dimension.name
+                )
+            ),
+        )
+        cached = self._time_course_cache.get(key)
+        if cached is not None:
+            return cached
+        planes = []
+        for value in dimension.values:
+            frame_selections = dict(selections)
+            frame_selections[dimension.name] = value
+            try:
+                image_data, *_ = self._selected_image(frame_selections)
+            except ValueError:
+                planes.append(None)
+                continue
+            if spectral_point is not None:
+                image_data = image_data.isel(spectral_point=spectral_point)
+            display = self.model.display_values(image_data, component)
+            planes.append(
+                np.asarray(image_data.copy(data=display).transpose(*self._image_dims))
+            )
+        self._time_course_cache[key] = planes
+        return planes
+
+    def _plot_time_course(self, mode, pool_index):
+        dimension = self._time_course_dimension()
+        if dimension is None:
+            return
+        planes = self._time_course_planes(dimension)
+        x, y = self._voxel
+        values = np.asarray(
+            [
+                (
+                    np.nan
+                    if plane is None or y >= plane.shape[0] or x >= plane.shape[1]
+                    else float(plane[y, x])
+                )
+                for plane in planes
+            ]
+        )
+        times = self.model.outer_dimension_times_s(dimension.name)
+        if times is None:
+            axis = np.arange(values.size, dtype=float)
+            self.spectrum_plot.setLabel("bottom", "Repetition")
+        else:
+            axis = np.asarray(times, dtype=float)
+            self.spectrum_plot.setLabel("bottom", "Time", "s")
+        component = self.component_combo.currentText()
+        self.spectrum_plot.setLabel("left", component, "a.u.")
+        self.spectrum_plot.plot(
+            axis,
+            values,
+            pen="w",
+            symbol="o",
+            symbolSize=5,
+            symbolBrush="w",
+            name=component,
+        )
+        current = self._selections().get(dimension.name)
+        matches = [
+            index for index, value in enumerate(dimension.values) if value == current
+        ]
+        if matches:
+            self.spectrum_plot.addItem(
+                pg.InfiniteLine(
+                    axis[matches[0]], angle=90, pen=pg.mkPen(255, 0, 255, width=1)
+                )
+            )
+        self.spectrum_plot.setTitle(f"Time course · voxel x={x}, y={y}")
 
     def _voxel_selected(self, x: int, y: int):
         self._voxel = (int(x), int(y))
         self.image_panel.set_selected_pixel(x, y)
-        if self.model is not None and self.model.kind == "csi":
+        if self.model is not None:
             mode, pool_index = self._selected_data_mode()
-            coil_mode = str(self.coil_combo.currentData() or "rss")
-            self._refresh_csi_spectrum(mode, pool_index, coil_mode)
+            self._refresh_voxel_plot(mode, pool_index, self._effective_coil_mode(mode))
 
     @staticmethod
     def _set_volume_indices(viewer, indices):
@@ -1124,6 +1290,7 @@ class SequenceReconstructionExplorer(QWidget):
             "display_strength": self.display_strength.value(),
             "interpolation": self._image_interpolation(),
             "spectral_point": self.spectral_point.value(),
+            "voxel_plot": self.voxel_plot_combo.currentData(),
             "voxel": list(self._voxel),
             "image_volume_indices": list(self.image_volume.indices),
             "kspace_volume_indices": list(self.kspace_volume.indices),
@@ -1167,6 +1334,7 @@ class SequenceReconstructionExplorer(QWidget):
                 self.interpolation_combo, state.get("interpolation", "nearest")
             )
             self.spectral_point.setValue(int(state.get("spectral_point", 0)))
+            self._set_combo_data(self.voxel_plot_combo, state.get("voxel_plot"))
             voxel = state.get("voxel", (0, 0))
             if isinstance(voxel, (list, tuple)) and len(voxel) == 2:
                 self._voxel = (int(voxel[0]), int(voxel[1]))

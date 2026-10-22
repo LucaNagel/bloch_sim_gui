@@ -1098,6 +1098,11 @@ def test_switching_free_mode_to_a_plane_applies_the_starting_grid():
     assert window.pos2_count_label.text() == "Positions along y:"
     assert (window.pos_spin.value(), window.pos2_spin.value()) == (12, 12)
     assert window.freq_spin.value() == 1
+    # The 3D view follows with one origin per position and no tip clutter.
+    viewer = window.mag_3d
+    assert viewer.get_vector_arrangement() == viewer.ARRANGEMENT_ALONG_POSITION
+    assert not viewer.tip_markers_checkbox.isChecked()
+    assert not viewer.track_checkbox.isChecked()
     assert window.position_summary_label.text().startswith(
         "144 positions (12 × 12 in xy) × 1 frequency = 144 spins"
     )
@@ -1241,7 +1246,6 @@ def test_simulation_controls_have_explanatory_tooltips():
         window.freq_range,
         window.freq_axis_mode,
         window.time_step_spin,
-        window.extra_tail_spin,
         window.max_traces_spin,
     )
 
@@ -1292,6 +1296,12 @@ def test_free_mode_result_controls_use_consistent_headers_and_rows():
     rainbow = window.mag_3d.color_for_index(0, 5).name()
     window.mag_3d.vector_palette_combo.setCurrentText("Viridis")
     assert window.mag_3d.color_for_index(0, 5).name() != rainbow
+    window.mag_3d.vector_palette_combo.setCurrentText("Gray")
+    grays = [window.mag_3d.color_for_index(i, 5) for i in range(5)]
+    assert all(c.red() == c.green() == c.blue() for c in grays)
+    assert grays[0].red() < grays[-1].red() == 255
+    window.mag_3d.vector_palette_combo.setCurrentText("White")
+    assert {window.mag_3d.color_for_index(i, 5).name() for i in range(5)} == {"#ffffff"}
 
     assert window.spectrum_controls_layout.indexOf(window.spectrum_component_combo) >= 0
     for control in (
@@ -1390,9 +1400,10 @@ def test_3d_spatial_layout_draws_each_position_at_its_own_origin():
     np.testing.assert_allclose(viewer.tip_curve_item.pos, origins + means)
     viewer.update_magnetization(spins.reshape(-1, 3), position_means=means, net=net)
     np.testing.assert_allclose(viewer.mean_vector.pos, [[0, 0, 0], net])
-    assert viewer.mean_vector.transform().column(3).x() == pytest.approx(
-        viewer.NET_VECTOR_X
-    )
+    transform = viewer.mean_vector.transform()
+    assert transform.column(3).x() == pytest.approx(-viewer.FIELD_GAP - viewer.NET_GAP)
+    # The net vector is drawn enlarged.
+    assert transform.column(0).x() == pytest.approx(viewer.NET_VECTOR_SCALE)
     assert viewer.mean_vector.visible()
     assert viewer.tip_curve_item.visible()
     assert len(viewer.path_points) == 1
@@ -1435,7 +1446,7 @@ def test_3d_spatial_layout_tracks_one_tip_path_per_position():
     assert not viewer.position_path_item.visible()
 
 
-def test_3d_spatial_layout_shows_b1_and_gradient_at_each_position():
+def test_3d_spatial_layout_shows_b1_and_gradient_once():
     app = QApplication.instance() or QApplication(sys.argv)
     viewer = _spatial_viewer([-10.0, 0.0, 10.0], 1)
     b1 = np.array([0.0, 0.1j, 0.05])
@@ -1443,40 +1454,43 @@ def test_3d_spatial_layout_shows_b1_and_gradient_at_each_position():
     positions_m = np.array([[0, 0, -0.01], [0, 0, 0.0], [0, 0, 0.01]])
     viewer.set_spatial_fields(b1, gradients, positions_m)
     viewer.update_magnetization(np.tile([0.0, 0.0, 1.0], (3, 1)))
+    origin = np.array([-viewer.FIELD_GAP, 0.0, 0.0])
+    np.testing.assert_allclose(viewer._field_origin, origin)
 
     viewer.show_field_frame(0)
-    assert not viewer.position_b1_plot.visible()
+    assert not viewer.b1_arrow_item.visible()
+    assert not viewer.gradient_arrow_item.visible()
+    assert viewer.field_ring_item.visible()
 
     viewer.show_field_frame(1)
-    origins = viewer._spatial_origins
-    np.testing.assert_allclose(viewer.position_b1_plot.pos[0::2], origins)
-    # Full length for the largest B1, oriented like the overlay B1 indicator.
+    # One arrow at full length for the largest B1, oriented like the overlay.
     np.testing.assert_allclose(
-        viewer.position_b1_plot.pos[1::2] - origins,
-        np.tile([0, 1, 0], (3, 1)),
-        atol=1e-6,
+        viewer.b1_arrow_item.pos, [origin, origin + [0, 1, 0]], atol=1e-6
     )
-    np.testing.assert_allclose(
-        viewer.gradient_bar_plot.pos[1::2, 0], viewer.GRADIENT_BAR_X
-    )
+    assert viewer.b1_arrow_item.visible()
+    assert not viewer.gradient_arrow_item.visible()
 
     viewer.show_field_frame(2)
-    bars = viewer.gradient_bar_plot.pos[1::2, 0] - viewer.GRADIENT_BAR_X
+    # The gradient vector, scaled to the largest gradient of the sequence.
     np.testing.assert_allclose(
-        bars, [-viewer.GRADIENT_BAR_LENGTH, 0.0, viewer.GRADIENT_BAR_LENGTH]
+        viewer.gradient_arrow_item.pos, [origin, origin + [0, 0, 1]]
     )
-    assert viewer.gradient_bar_plot.visible()
+    assert viewer.gradient_arrow_item.visible()
+    assert len(viewer.field_tip_item.pos) == 2
     assert "10.00 mT/m" in viewer.field_label_item.text
     assert "5.00 µT" in viewer.field_label_item.text
 
     viewer.gradient_field_checkbox.setChecked(False)
     viewer.b1_field_checkbox.setChecked(False)
-    assert not viewer.gradient_bar_plot.visible()
-    assert not viewer.position_b1_plot.visible()
+    assert not viewer.gradient_arrow_item.visible()
+    assert not viewer.b1_arrow_item.visible()
+    assert not viewer.field_ring_item.visible()
+    assert not viewer.field_tip_item.visible()
     assert not viewer.field_label_item.visible()
 
+    viewer.gradient_field_checkbox.setChecked(True)
     viewer.set_spatial_groups(None)
-    assert not viewer.gradient_bar_plot.visible()
+    assert not viewer.gradient_arrow_item.visible()
 
 
 def _label_texts(viewer):
@@ -1506,24 +1520,21 @@ def test_3d_spatial_line_along_x_or_y_is_a_row_on_its_scene_axis(axis, azimuth):
     np.testing.assert_allclose(viewer.position_mean_plot.pos[1::2], origins + means)
     viewer.net_vector_checkbox.setChecked(True)
     assert viewer.mean_vector.transform().column(3)[column] == pytest.approx(
-        -spacing - viewer.NET_GAP
+        -spacing - viewer.FIELD_GAP - viewer.NET_GAP
     )
 
-    # Gradient bars point up from a baseline below the row.
+    # One gradient arrow before the first position, along the row axis.
     gradients = np.zeros((1, 3))
     gradients[0, column] = 1.0
     viewer.set_spatial_fields(np.zeros(1), gradients, positions_m)
     viewer.show_field_frame(0)
-    bases = viewer.gradient_bar_plot.pos[0::2]
-    tips = viewer.gradient_bar_plot.pos[1::2]
-    np.testing.assert_allclose(bases[:, column], origins[:, column])
-    np.testing.assert_allclose(bases[:, 2], viewer.ROW_GRADIENT_Z)
+    field_origin = np.zeros(3)
+    field_origin[column] = -spacing - viewer.FIELD_GAP
     np.testing.assert_allclose(
-        tips[:, 2] - bases[:, 2],
-        [-viewer.GRADIENT_BAR_LENGTH, 0.0, viewer.GRADIENT_BAR_LENGTH],
+        viewer.gradient_arrow_item.pos,
+        [field_origin, field_origin + gradients[0]],
     )
-    assert viewer.gradient_bar_plot.visible()
-    assert not viewer.gradient_marker_item.visible()
+    assert viewer.gradient_arrow_item.visible()
     assert "G 10.00 mT/m" in viewer.field_label_item.text
 
 
@@ -1567,17 +1578,14 @@ def test_3d_spatial_plane_draws_a_lattice_on_the_floor():
     np.testing.assert_allclose(colors[:3], colors[3:])
     assert not np.allclose(colors[0], colors[1])
 
-    # G·r is shown as a marker at every origin: blue, gray, red along x.
+    # The gradient is one arrow before the first column of the lattice.
     viewer.set_spatial_fields(np.zeros(1), np.array([[1.0, 0.0, 0.0]]), positions_m)
     viewer.show_field_frame(0)
-    assert viewer.gradient_marker_item.visible()
-    assert not viewer.gradient_bar_plot.visible()
-    assert not viewer.gradient_axis_item.visible()
-    np.testing.assert_allclose(viewer.gradient_marker_item.pos, origins)
-    marker_colors = np.asarray(viewer.gradient_marker_item.color)
-    np.testing.assert_allclose(marker_colors[0], [0.35, 0.55, 1.0, 1.0])
-    np.testing.assert_allclose(marker_colors[1], [0.5, 0.5, 0.5, 1.0])
-    np.testing.assert_allclose(marker_colors[5], [1.0, 0.35, 0.3, 1.0])
+    field_origin = np.array([xs[0] - viewer.FIELD_GAP, 0.0, 0.0])
+    np.testing.assert_allclose(
+        viewer.gradient_arrow_item.pos, [field_origin, field_origin + [1, 0, 0]]
+    )
+    assert viewer.gradient_arrow_item.visible()
     assert "Gx 10.00 Gy 0.00 mT/m" in viewer.field_label_item.text
 
     viewer.camera_buttons["Top"].click()
@@ -1585,7 +1593,7 @@ def test_3d_spatial_plane_draws_a_lattice_on_the_floor():
 
     viewer.set_spatial_groups(None)
     assert viewer.grid_item.visible()
-    assert not viewer.gradient_marker_item.visible()
+    assert not viewer.gradient_arrow_item.visible()
     assert viewer.max_positions_label.text() == "Max positions:"
 
 
@@ -1637,10 +1645,7 @@ def test_free_mode_vector_view_subsamples_a_plane_per_axis():
     assert window.mag_3d._spatial_layout.counts == (3, 3)
     assert window.mag_3d.max_positions_label.text() == "Max per axis:"
     assert window.anim_data.shape == (nframes, len(shown) * nfreq, 3)
-    np.testing.assert_allclose(
-        window.mag_3d._field_offsets,
-        np.tile(positions[shown, 0] * 100.0, (nframes, 1)),
-    )
+    np.testing.assert_allclose(window.mag_3d._field_gradients, window.anim_gradients)
 
 
 def _plane_result(positions, nframes):
@@ -1948,10 +1953,9 @@ def test_free_mode_vector_view_arranges_subsampled_positions():
     np.testing.assert_allclose(
         window.anim_net, window.anim_vectors_full.mean(axis=(1, 2))
     )
-    # G·r in G for the drawn positions (cm) and every playback frame.
+    # The global gradient vector of every playback frame.
     np.testing.assert_allclose(
-        window.mag_3d._field_offsets,
-        np.tile(window.last_positions[shown, 2] * 100.0, (nframes, 1)),
+        window.mag_3d._field_gradients, np.asarray(window.anim_gradients)
     )
     window._update_b1_arrow(1)
     assert not window.mag_3d.b1_arrow.visible()
@@ -2277,3 +2281,37 @@ def test_legacy_automatic_nucleus_default_migrates_to_shared_h1(tmp_path):
 
 if __name__ == "__main__":
     pytest.main([__file__])
+
+
+def test_free_mode_repetitions_play_the_sequence_once_per_tr():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    designer = window.sequence_designer
+    designer.sequence_type.setCurrentText("Free Induction Decay")
+    designer.tr_spin.setValue(10.0)
+    assert designer.repetitions_spin.value() == 1
+    assert not hasattr(window, "extra_tail_spin")
+    pulse = window.rf_designer.get_pulse()
+    dt = 1e-5
+    b1, gradients, time = designer.compile_sequence(custom_pulse=pulse, dt=dt)
+    period = time[-1] - time[0] + dt
+    assert period == pytest.approx(10e-3, rel=1e-3)
+
+    designer.repetitions_spin.setValue(3)
+    b1_rep, gradients_rep, time_rep = designer.compile_sequence(
+        custom_pulse=pulse, dt=dt
+    )
+    assert len(b1_rep) == 3 * len(b1)
+    np.testing.assert_allclose(b1_rep, np.tile(b1, 3))
+    np.testing.assert_allclose(gradients_rep, np.tile(gradients, (3, 1)))
+    np.testing.assert_allclose(np.diff(time_rep), dt, rtol=1e-6)
+    assert designer.get_state()["repetitions"] == 3
+
+    # The SSFP loop keeps its own repeat count and hides the control.
+    designer.sequence_type.setCurrentText("SSFP (Loop)")
+    assert designer.repetitions_widget.isHidden()
+    restored = designer.get_state()
+    designer.set_state({"tr": 10.0})
+    assert designer.repetitions_spin.value() == 1
+    designer.set_state(restored)
+    assert designer.repetitions_spin.value() == 3

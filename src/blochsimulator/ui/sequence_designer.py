@@ -364,6 +364,22 @@ class SequenceDesigner(QGroupBox):
         layout.addLayout(tr_layout)
         self.tr_spin.valueChanged.connect(lambda _: self.update_diagram())
 
+        # Repetitions of the whole sequence, one every TR (SSFP has its own)
+        self.repetitions_widget = QWidget()
+        repetitions_layout = QHBoxLayout(self.repetitions_widget)
+        repetitions_layout.setContentsMargins(0, 0, 0, 0)
+        repetitions_layout.addWidget(QLabel("Repetitions:"))
+        self.repetitions_spin = QSpinBox()
+        self.repetitions_spin.setObjectName("repetitions_spin")
+        self.repetitions_spin.setRange(1, 10000)
+        self.repetitions_spin.setValue(1)
+        self.repetitions_spin.setToolTip(
+            "Number of times the sequence is played, one repetition every TR."
+        )
+        repetitions_layout.addWidget(self.repetitions_spin)
+        layout.addWidget(self.repetitions_widget)
+        self.repetitions_spin.valueChanged.connect(lambda _: self.update_diagram())
+
         # TI parameter (for IR)
         ti_layout = QHBoxLayout()
         ti_layout.addWidget(QLabel("TI (ms):"))
@@ -609,6 +625,7 @@ class SequenceDesigner(QGroupBox):
             self._update_ssfp_visibility()
         self.slice_rephase_opts.setVisible(seq_type == "Slice Select + Rephase")
         self.ti_widget.setVisible(seq_type == "Inversion Recovery")
+        self.repetitions_widget.setVisible(seq_type != "SSFP (Loop)")
 
         # Hide gradient options for SSFP as it's typically a 0D/1D simulation without slice gradients in this context
         if hasattr(self, "gradient_opts_container"):
@@ -1030,8 +1047,46 @@ class SequenceDesigner(QGroupBox):
         gradient lobes are added on top of every sequence type.
         """
         dt = dt or self.default_dt
-        return self._apply_gradient_options(
+        sequence = self._apply_gradient_options(
             self._compile_base_sequence(custom_pulse, dt, log_info), dt
+        )
+        return self._repeat_every_tr(sequence, dt)
+
+    def _repeat_every_tr(self, sequence, dt):
+        """Play the compiled sequence ``Repetitions`` times, one every TR.
+
+        Each repetition is padded with zero B1 and gradients to TR, or to the
+        sequence duration if that is longer. The SSFP loop repeats itself.
+        """
+        count = self.repetitions_spin.value()
+        if count <= 1 or self.sequence_type.currentText() == "SSFP (Loop)":
+            return sequence
+        b1, gradients, time = sequence
+        b1 = np.asarray(b1, dtype=complex)
+        gradients = np.asarray(gradients, dtype=float)
+        time = np.asarray(time, dtype=float)
+        if time.size == 0:
+            return b1, gradients, time
+        step = float(np.median(np.diff(time))) if time.size > 1 else dt
+        if not np.isfinite(step) or step <= 0:
+            step = dt
+        relative = time - time[0]
+        tr = self.tr_spin.value() / 1000.0
+        n_block = max(time.size, int(round(tr / step)))
+        enforce_sequence_memory(n_block * count)
+        extra = n_block - time.size
+        if extra:
+            b1 = np.pad(b1, (0, extra))
+            gradients = np.pad(gradients, ((0, extra), (0, 0)))
+            relative = np.concatenate(
+                [relative, relative[-1] + np.arange(1, extra + 1) * step]
+            )
+        period = relative[-1] + step
+        offsets = np.arange(count)[:, None] * period
+        return (
+            np.tile(b1, count),
+            np.tile(gradients, (count, 1)),
+            time[0] + (relative[None, :] + offsets).ravel(),
         )
 
     def _compile_base_sequence(self, custom_pulse, dt, log_info):
@@ -1578,6 +1633,7 @@ class SequenceDesigner(QGroupBox):
             "type": self.sequence_type.currentText(),
             "te": self.te_spin.value(),
             "tr": self.tr_spin.value(),
+            "repetitions": self.repetitions_spin.value(),
             "ti": self.ti_spin.value(),
             "echo_count": self.spin_echo_echoes.value(),
             "ssfp_repeats": self.ssfp_repeats.value(),
@@ -1609,6 +1665,7 @@ class SequenceDesigner(QGroupBox):
                 self.te_spin.setValue(state["te"])
             if "tr" in state:
                 self.tr_spin.setValue(state["tr"])
+            self.repetitions_spin.setValue(int(state.get("repetitions", 1)))
             if "ti" in state:
                 self.ti_spin.setValue(state["ti"])
             if "echo_count" in state:

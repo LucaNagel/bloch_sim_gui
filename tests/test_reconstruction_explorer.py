@@ -519,6 +519,23 @@ def test_csi_explorer_links_voxel_selection_to_spectrum(qt_application):
     assert explorer._current_display.shape == (2, 3)
     assert len(explorer.spectrum_plot.listDataItems()) == 3
 
+    modes = [
+        explorer.voxel_plot_combo.itemData(index)
+        for index in range(explorer.voxel_plot_combo.count())
+    ]
+    assert modes == ["spectrum", "fid", "time_course"]
+    spectrum = explorer.spectrum_plot.listDataItems()[0]
+    np.testing.assert_allclose(spectrum.xData, [-200.0, -100.0, 0.0, 100.0])
+
+    explorer.voxel_plot_combo.setCurrentIndex(1)
+    fid = explorer.spectrum_plot.listDataItems()[0]
+    np.testing.assert_allclose(fid.yData, np.abs(values[1, 1, 2]))
+
+    explorer.voxel_plot_combo.setCurrentIndex(2)
+    course = explorer.spectrum_plot.listDataItems()[0]
+    np.testing.assert_allclose(course.yData, np.abs(values[:, 1, 2, 2]))
+    assert explorer.get_state()["voxel_plot"] == "time_course"
+
 
 def test_cartesian_3d_model_maps_logical_axes_back_to_scanner_coordinates():
     logical = np.arange(2 * 3 * 4).reshape(2, 3, 4).astype(complex)
@@ -603,3 +620,30 @@ def test_radial_multi_echo_result_exports_dimensioned_3d_reconstruction(tmp_path
     with np.load(output) as stored:
         assert stored["radial_3d_image"].shape == (2, 4, 4, 4)
         assert stored["radial_3d_echo_index"].tolist() == [0, 1]
+
+
+def test_dynamic_explorer_plots_voxel_time_course(qt_application):
+    dataset = _framed_cartesian_dataset()
+    dataset = dataset.assign_coords(
+        cartesian_frame_first_adc_time_s=("cartesian_frame", [0.0, 0.01, 1.0, 1.01])
+    )
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(dataset)
+
+    assert explorer.voxel_plot_combo.currentData() == "time_course"
+    assert explorer.spectrum_plot.isVisibleTo(explorer)
+    explorer.outer_controls["echo"].setValue(1)
+    explorer._voxel_selected(4, 2)
+
+    course = explorer.spectrum_plot.listDataItems()[0]
+    image = np.asarray(dataset["cartesian_image"])
+    np.testing.assert_allclose(course.xData, [0.0, 1.0])
+    np.testing.assert_allclose(course.yData, np.abs(image[[1, 3], 2, 4]))
+
+
+def test_single_frame_explorer_hides_voxel_plot(qt_application):
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(_sliced_cartesian_dataset())
+
+    assert explorer.voxel_plot_combo.count() == 0
+    assert not explorer.spectrum_plot.isVisibleTo(explorer)

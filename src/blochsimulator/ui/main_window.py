@@ -1,7 +1,6 @@
 import sys
 import os
 import time
-import math
 import copy
 import re
 import numpy as np
@@ -694,20 +693,6 @@ class BlochSimulatorGUI(QMainWindow):
         self.time_step_spin.valueChanged.connect(self._update_time_step)
         control_layout.addWidget(self.time_step_spin, 14, 1)
 
-        # Extra post-sequence simulation time
-        control_layout.addWidget(QLabel("Extra tail (ms):"), 15, 0)
-        self.extra_tail_spin = QDoubleSpinBox()
-        self.extra_tail_spin.setObjectName("extra_tail_spin")
-        self.extra_tail_spin.setRange(0.0, 1e6)
-        self.extra_tail_spin.setValue(5.0)
-        self.extra_tail_spin.setDecimals(3)
-        self.extra_tail_spin.setSingleStep(1.0)
-        self.extra_tail_spin.setToolTip(
-            "Additional simulation time after the sequence in milliseconds. "
-            "Useful for observing relaxation or signal decay after the final event."
-        )
-        control_layout.addWidget(self.extra_tail_spin, 15, 1)
-
         # Max traces control for performance
         control_layout.addWidget(QLabel("Max plot traces:"), 16, 0)
         self.max_traces_spin = QSpinBox()
@@ -759,7 +744,6 @@ class BlochSimulatorGUI(QMainWindow):
             self.freq_range,
             self.freq_axis_mode,
             self.time_step_spin,
-            self.extra_tail_spin,
             self.max_traces_spin,
             self.output_step_spin,
         ):
@@ -2399,15 +2383,13 @@ class BlochSimulatorGUI(QMainWindow):
             ),
             (
                 self.mag_3d.b1_field_checkbox,
-                "Draw the RF field (rotating frame) at every position, scaled to "
-                "the largest B1 of the sequence.",
+                "Draw the RF field (rotating frame) once beside the positions, "
+                "scaled to the largest B1 of the sequence (ring = maximum).",
             ),
             (
                 self.mag_3d.gradient_field_checkbox,
-                "Draw the gradient field G·r at every position as a bar beside "
-                "the column or row, or as a colored marker in a plane (red "
-                "positive, blue negative), scaled to the largest value of the "
-                "sequence.",
+                "Draw the gradient vector (Gx, Gy, Gz) once beside the positions, "
+                "scaled to the largest gradient of the sequence.",
             ),
             (
                 self.tissue_widget.preset_combo,
@@ -2492,6 +2474,10 @@ class BlochSimulatorGUI(QMainWindow):
             (
                 self.sequence_designer.tr_spin,
                 "Repetition time TR in milliseconds. Longer TR values create more simulation time points.",
+            ),
+            (
+                self.sequence_designer.repetitions_spin,
+                "Number of times the sequence is played, one repetition every TR.",
             ),
             (
                 self.sequence_designer.ti_spin,
@@ -2718,6 +2704,12 @@ class BlochSimulatorGUI(QMainWindow):
         if self.freq_spin.value() > 1:
             self.freq_spin.setValue(1)
             changes.append("1 frequency")
+        # Show the plane in the 3D view, without tip clutter.
+        self.mag_3d.arrangement_combo.setCurrentText(
+            self.mag_3d.ARRANGEMENT_ALONG_POSITION
+        )
+        self.mag_3d.tip_markers_checkbox.setChecked(False)
+        self.mag_3d.track_checkbox.setChecked(False)
         self.statusBar().showMessage(
             "2D plane: " + ", ".join(changes) + " (adjust freely).", 6000
         )
@@ -3185,48 +3177,6 @@ class BlochSimulatorGUI(QMainWindow):
             if self.anim_index >= len(anim):
                 self.anim_index = 0
             self._set_animation_index_from_slider(self.anim_index)
-
-    def _extend_sequence_with_tail(self, sequence_tuple, tail_ms: float, dt: float):
-        """Append a zero-B1/gradient tail after the sequence to continue acquisition."""
-        tail_s = max(0.0, tail_ms) * 1e-3
-        if tail_s <= 0:
-            return sequence_tuple
-        b1, gradients, time = sequence_tuple
-        b1 = np.asarray(b1, dtype=complex)
-        gradients = np.asarray(gradients, dtype=float)
-        time = np.asarray(time, dtype=float)
-        if time.size == 0:
-            return (b1, gradients, time)
-        if gradients.ndim == 1:
-            gradients = gradients.reshape(-1, 1)
-        if gradients.shape[1] < 3:
-            gradients = np.pad(
-                gradients, ((0, 0), (0, 3 - gradients.shape[1])), mode="constant"
-            )
-        elif gradients.shape[1] > 3:
-            gradients = gradients[:, :3]
-
-        dt_use = max(dt, 1e-9)
-        if len(time) > 1:
-            diffs = np.diff(time)
-            with np.errstate(invalid="ignore"):
-                mean_dt = float(np.nanmean(diffs))
-            if np.isfinite(mean_dt) and mean_dt > 0:
-                dt_use = mean_dt
-
-        n_tail = int(math.ceil(tail_s / dt_use))
-        if n_tail <= 0:
-            return (b1, gradients, time)
-
-        enforce_sequence_memory(len(time) + n_tail, estimated_bytes_per_point=96)
-        tail_time = time[-1] + np.arange(1, n_tail + 1) * dt_use
-        b1_tail = np.zeros(n_tail, dtype=complex)
-        grad_tail = np.zeros((n_tail, gradients.shape[1]), dtype=float)
-
-        b1_ext = np.concatenate([b1, b1_tail])
-        gradients_ext = np.vstack([gradients, grad_tail])
-        time_ext = np.concatenate([time, tail_time])
-        return (b1_ext, gradients_ext, time_ext)
 
     def log_message(self, message: str):
         """Append a message to the log console."""
@@ -6290,16 +6240,6 @@ class BlochSimulatorGUI(QMainWindow):
             sequence_tuple = self.sequence_designer.compile_sequence(
                 custom_pulse=pulse, dt=dt_s, log_info=True
             )
-            tail_ms = self.extra_tail_spin.value()
-            b1_orig_len = len(sequence_tuple[0])
-            sequence_tuple = self._extend_sequence_with_tail(
-                sequence_tuple, tail_ms, dt_s
-            )
-            if len(sequence_tuple[0]) > b1_orig_len:
-                added = len(sequence_tuple[0]) - b1_orig_len
-                self.log_message(
-                    f"Appended {tail_ms:.3f} ms tail ({added} pts) after sequence."
-                )
         except SimulationMemoryError as exc:
             self.on_simulation_error(str(exc))
             return
@@ -7678,7 +7618,6 @@ class BlochSimulatorGUI(QMainWindow):
                 "freq_range": self.freq_range.value(),
                 "freq_axis_mode": self.freq_axis_mode.currentText(),
                 "time_step": self.time_step_spin.value(),
-                "extra_tail": self.extra_tail_spin.value(),
                 "max_traces": self.max_traces_spin.value(),
                 "output_step_us": self.output_step_spin.value(),
                 "adaptive_rf": self.adaptive_rf_checkbox.isChecked(),
@@ -7711,7 +7650,6 @@ class BlochSimulatorGUI(QMainWindow):
             "num_frequencies": self.freq_spin.value(),
             "frequency_center_hz": self.freq_center.value(),
             "frequency_range_hz": self.freq_range.value(),
-            "extra_tail_ms": self.extra_tail_spin.value(),
             "use_parallel": self.simulator.use_parallel,
             "num_threads": self.simulator.num_threads,
             "field_strength_t": self._workspace_field_strength_t,

@@ -1253,13 +1253,6 @@ class PhantomWidget(QWidget):
                     custom_pulse=pulse, dt=dt_s
                 )
 
-                # Add tail if specified
-                tail_ms = self.parent_gui.extra_tail_spin.value()
-                if tail_ms > 0:
-                    sequence = self.parent_gui._extend_sequence_with_tail(
-                        sequence, tail_ms, dt_s
-                    )
-
                 return sequence, dt_s
             except Exception as e:
                 self.log(f"Error getting sequence from GUI: {e}")
