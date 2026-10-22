@@ -510,6 +510,44 @@ def test_spatial_profile_code_maps_a_position_plane():
     np.testing.assert_allclose(map_axes[0].images[0].get_extent(), [-15, 15, -10, 10])
 
 
+def test_spatial_profile_code_maps_the_central_slices_of_a_volume():
+    from blochsimulator.position_sampling import build_volume_positions
+
+    positions = build_volume_positions((4, 3, 5), (0.03, 0.02, 0.04))
+    data = _magnetization_data(positions)
+    data["mx"][-1, :, 0] = np.where(positions[:, 0] > 0, 0.5, 0.0)
+
+    fig, _ = _run_plot_code(NotebookExporter()._generate_spatial_profile_code(), data)
+
+    map_axes = [ax for ax in fig.axes if ax.images]
+    assert [ax.get_title() for ax in map_axes[::3]] == [
+        "|Mxy| at z = 0.00 mm",
+        "|Mxy| at y = 0.00 mm",
+        "|Mxy| at x = 5.00 mm",
+    ]
+    labels = [(ax.get_xlabel(), ax.get_ylabel()) for ax in map_axes[::3]]
+    assert labels == [("x (mm)", "y (mm)"), ("x (mm)", "z (mm)"), ("y (mm)", "z (mm)")]
+    volume = data["mx"][-1, :, 0].reshape(5, 3, 4)
+    expected = [volume[2], volume[:, 1, :], volume[:, :, 2]]
+    for ax, values in zip(map_axes[::3], expected):
+        np.testing.assert_allclose(np.asarray(ax.images[0].get_array()), values)
+    mz = data["mz"][-1, :, 0].reshape(5, 3, 4)
+    np.testing.assert_allclose(
+        np.asarray(map_axes[5].images[0].get_array()), mz[:, 1, :]
+    )
+    # All three slices share one colour scale per quantity
+    assert len({ax.images[0].get_clim() for ax in map_axes[::3]}) == 1
+    np.testing.assert_allclose(map_axes[3].images[0].get_extent(), [-15, 15, -20, 20])
+
+
+def test_spatial_profile_code_plots_identical_positions_as_a_line():
+    data = _magnetization_data(np.zeros((3, 3)))
+
+    fig, _ = _run_plot_code(NotebookExporter()._generate_spatial_profile_code(), data)
+
+    assert [ax.get_xlabel() for ax in fig.axes] == ["Position z (mm)"] * 2
+
+
 def test_spatial_profile_code_plots_a_line_along_its_axis():
     from blochsimulator.position_sampling import build_line_positions
 
