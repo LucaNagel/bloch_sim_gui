@@ -2716,3 +2716,83 @@ def test_gradient_tour_echoes_on_a_2d_plane():
     mz = result["mz"].reshape(len(result["time"]), -1)
     assert np.all(mz[-1] > 0.7)
     assert magnitude[-1] < 0.01
+
+
+def _play_pulse(live, flip):
+    live.pulse_buttons[flip].click()
+    while live.current_pulse() is not None:
+        live.advance(live.MAX_TICK_S)
+
+
+def test_live_mode_plays_pulses_and_gradients_along_a_line():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.pos_spin.setValue(5)
+    window.freq_spin.setValue(1)
+    window.mag_3d.arrangement_combo.setCurrentText(
+        window.mag_3d.ARRANGEMENT_ALONG_POSITION
+    )
+    live = window.live_mode
+    assert not live.controls.isEnabled()
+
+    live.live_button.setChecked(True)
+    assert live.is_active() and live.controls.isEnabled()
+    assert not window.anim_timer.isActive()
+    assert not live.hint_label.isVisibleTo(live)
+
+    _play_pulse(live, 90)
+    np.testing.assert_allclose(
+        live.system.magnetization.reshape(-1, 3), [[0.0, 1.0, 0.0]] * 5, atol=1e-12
+    )
+    assert live.system.time_s == 0.0
+
+    gradient_axis = int(np.argmax(np.ptp(live.system.positions_m, axis=0)))
+    live.gradient_buttons[gradient_axis].setChecked(True)
+    live.advance(0.05)
+    assert live.system.time_s == pytest.approx(0.05e-3)
+    window._render_live_frame(live)
+    assert window.mag_3d.is_spatial_layout_active()
+    label = "xyz"[gradient_axis]
+    assert window.mag_3d._field_readout == f"G{label} 2.00 mT/m"
+    phases = np.angle(
+        live.system.magnetization[:, 0, 0] + 1j * live.system.magnetization[:, 0, 1]
+    )
+    assert np.ptp(phases) > 0.0
+
+    # A 180° refocuses the gradient dephasing after the same time again.
+    _play_pulse(live, 180)
+    live.advance(0.05)
+    np.testing.assert_allclose(
+        live.system.magnetization.reshape(-1, 3), [[0.0, -1.0, 0.0]] * 5, atol=1e-9
+    )
+
+    live.reset_button.click()
+    np.testing.assert_allclose(live.system.magnetization.reshape(-1, 3)[:, 2], 1.0)
+    assert live.system.time_s == 0.0
+
+    live.live_button.setChecked(False)
+    assert not live.is_active() and not live.controls.isEnabled()
+
+
+def test_live_mode_queues_pulses_and_yields_to_playback():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    live = window.live_mode
+    live.set_active(True)
+    assert live.hint_label.isVisibleTo(live)
+    live.phase_combo.setCurrentText("y")
+    live.pulse_buttons[90].click()
+    live.pulse_buttons[90].click()
+    assert live.field_readout() == "90°y"
+    live.advance(live.MAX_TICK_S)
+    assert live.current_pulse() == (90.0, 90.0)
+    _play_pulse(live, 90)
+    # Three 90° pulses about y end at -x.
+    np.testing.assert_allclose(
+        live.system.magnetization.reshape(-1, 3),
+        np.tile([-1.0, 0.0, 0.0], (live.system.magnetization[..., 0].size, 1)),
+        atol=1e-12,
+    )
+
+    window._start_vector_animation()
+    assert not live.is_active() and not live.live_button.isChecked()

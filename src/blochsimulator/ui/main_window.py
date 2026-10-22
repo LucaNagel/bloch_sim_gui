@@ -73,7 +73,7 @@ from ..visualization import (
 from ..slice_explorer import SliceSelectionExplorer
 from ..project_io import load_project, save_project
 from ..project_naming import ProjectExportNamer, project_timestamp
-from ..units import NUCLEUS_GAMMA_HZ_PER_T
+from ..units import NUCLEUS_GAMMA_HZ_PER_T, gradient_t_per_m_to_g_per_cm
 from ..sequence.signal_units import normalize_signal_unit
 from ..phantom_polarization import rebase_phantom_polarization
 
@@ -101,6 +101,7 @@ from .rf_pulse_designer import RFPulseDesigner
 from .sequence_designer import SequenceDesigner
 from .controls import UniversalTimeControl
 from .magnetization_viewer import MagnetizationViewer, centered_stride_indices
+from .live_mode import LiveContext, LiveModePanel
 from ..position_sampling import (
     AXIS_NAMES,
     PLANES,
@@ -263,6 +264,7 @@ class BlochSimulatorGUI(QMainWindow):
     # Isochromats drawn per position when the 3D view arranges spins along
     # their positions; the position means still use every frequency.
     SPATIAL_VECTOR_MAX_FREQUENCIES = 32
+    LIVE_MAX_ISOCHROMATS = 100_000
     POSITION_GEOMETRY_LINE = "1D line"
     POSITION_GEOMETRY_PLANE = "2D plane"
     POSITION_GEOMETRY_VOLUME = "3D volume"
@@ -1007,6 +1009,10 @@ class BlochSimulatorGUI(QMainWindow):
             self.mag_3d.control_container.setVisible(True)
         self.mag_3d.export_3d_btn.setVisible(False)
         self.mag_3d.header_container.setVisible(False)
+        # Live mode: play pulses and gradients by hand in this view.
+        self.live_mode = LiveModePanel(self._live_context, self._render_live_frame)
+        self.live_mode.active_changed.connect(self._on_live_mode_changed)
+        self.mag_3d.control_container.layout().insertWidget(0, self.live_mode)
         # QOpenGLWidget does not need scrolling here. In particular, nesting it
         # in QAbstractScrollArea can leave the native macOS surface at the old
         # viewport size after a workspace switch, producing stale perspective,
@@ -3187,41 +3193,28 @@ class BlochSimulatorGUI(QMainWindow):
         self._last_render_wall = None
         self._playback_frame_counter = 0
 
-    def _refresh_vector_view(self, mean_only: bool = None, restart: bool = True):
-        """Apply the current vector filter (all/pos/freq) to the 3D view."""
-        if (
-            self.anim_vectors_full is None
-            or self.playback_indices is None
-            or self.playback_time is None
-        ):
-            return
-        if mean_only is None:
-            mean_only = self.mean_only_checkbox.isChecked()
+    def _select_vector_display(self, base_vectors, positions_m, mean_only: bool):
+        """Pick the vectors the 3D view draws and arrange the view for them.
 
-        base_vectors = self.anim_vectors_full
-        # Downsample to playback timeline if needed
-        if base_vectors.shape[0] != len(self.playback_indices):
-            base_vectors = base_vectors[self.playback_indices]
-
+        ``base_vectors`` is (frames, positions, freqs, 3). Returns ``(anim,
+        colors, position_means, net, shown_positions_m)``; the last three are
+        None unless the vectors stand at their positions.
+        """
         nframes, npos, nfreq, _ = base_vectors.shape
         mode = self.mag_3d.get_view_mode()
         selector = self.mag_3d.get_selector_index()
-        self.anim_position_means = None
-        self.anim_net = None
         spatial = (
             self.mag_3d.get_vector_arrangement()
             == self.mag_3d.ARRANGEMENT_ALONG_POSITION
             and npos > 1
             and mode != "Freqs @ position"
-            and self.last_positions is not None
-            and len(self.last_positions) == npos
+            and positions_m is not None
+            and len(positions_m) == npos
         )
-        if not spatial:
-            self.mag_3d.set_spatial_groups(None)
-
         if spatial:
             # Lines are subsampled along their axis, planes per axis.
-            layout = self._position_layout()
+            positions_m = np.asarray(positions_m)
+            layout = infer_layout(positions_m)
             limit = self.mag_3d.get_max_display_positions()
             if layout.ndim >= 1:
                 pos_idx = layout.grid_indices(limit)
@@ -3246,19 +3239,13 @@ class BlochSimulatorGUI(QMainWindow):
                 net = base_vectors.mean(axis=(1, 2))
             spins_per_position = anim.shape[2]
             self.mag_3d.set_spatial_groups(
-                np.asarray(self.last_positions)[pos_idx] * 1000.0,
-                spins_per_position,
-            )
-            self.mag_3d.set_spatial_fields(
-                self.anim_b1,
-                self.anim_gradients,
-                np.asarray(self.last_positions)[pos_idx],
+                positions_m[pos_idx] * 1000.0, spins_per_position
             )
             anim = anim.reshape(nframes, len(pos_idx) * spins_per_position, 3)
-            colors = None
-            self.anim_position_means = position_means
-            self.anim_net = net
-        elif mean_only or (npos == 1 and nfreq == 1):
+            return anim, None, position_means, net, positions_m[pos_idx]
+
+        self.mag_3d.set_spatial_groups(None)
+        if mean_only or (npos == 1 and nfreq == 1):
             anim = np.mean(base_vectors, axis=(1, 2))[:, None, :]
             colors = [self._color_tuple(pg.mkColor("c"))]
         elif mode == "Positions @ freq":
@@ -3282,6 +3269,38 @@ class BlochSimulatorGUI(QMainWindow):
                 self._color_tuple(self._vector_color_for_index(i, total))
                 for i in range(total)
             ]
+
+        return anim, colors, None, None, None
+
+    def _refresh_vector_view(self, mean_only: bool = None, restart: bool = True):
+        """Apply the current vector filter (all/pos/freq) to the 3D view."""
+        if self.live_mode.is_active():
+            self._render_live_frame(self.live_mode)
+            return
+        if (
+            self.anim_vectors_full is None
+            or self.playback_indices is None
+            or self.playback_time is None
+        ):
+            return
+        if mean_only is None:
+            mean_only = self.mean_only_checkbox.isChecked()
+
+        base_vectors = self.anim_vectors_full
+        # Downsample to playback timeline if needed
+        if base_vectors.shape[0] != len(self.playback_indices):
+            base_vectors = base_vectors[self.playback_indices]
+
+        anim, colors, position_means, net, shown_positions = (
+            self._select_vector_display(base_vectors, self.last_positions, mean_only)
+        )
+        spatial = shown_positions is not None
+        if spatial:
+            self.mag_3d.set_spatial_fields(
+                self.anim_b1, self.anim_gradients, shown_positions
+            )
+        self.anim_position_means = position_means
+        self.anim_net = net
 
         self.anim_data = anim
         self.anim_colors = colors
@@ -3505,6 +3524,8 @@ class BlochSimulatorGUI(QMainWindow):
 
     def _start_vector_animation(self):
         """Start or restart the 3D vector animation if data exists."""
+        # Playback takes the view back from the live mode.
+        self.live_mode.set_active(False)
         # Prevent animation during parameter sweeps
         if getattr(self, "_sweep_mode", False):
             self._sync_play_toggle(False)
@@ -3595,6 +3616,8 @@ class BlochSimulatorGUI(QMainWindow):
 
     def _show_vector_frame(self, idx: int):
         """Draw one playback frame of the current vector selection in 3D."""
+        if self.live_mode.is_active():
+            return
         means = (
             self.anim_position_means[idx]
             if self.anim_position_means is not None
@@ -3606,6 +3629,71 @@ class BlochSimulatorGUI(QMainWindow):
             colors=self.anim_colors,
             position_means=means,
             net=net,
+        )
+
+    def _live_context(self) -> LiveContext:
+        """Spins of the Free Mode geometry and offsets for the live mode."""
+        positions = self._build_position_grid()
+        offsets = self._build_frequency_axis()
+        limit = max(1, self.LIVE_MAX_ISOCHROMATS // max(len(positions), 1))
+        if len(offsets) > limit:
+            offsets = offsets[self._display_subsample_indices(len(offsets), limit)]
+        tissue = self.tissue_widget.get_parameters()
+        return LiveContext(
+            positions_m=positions,
+            offsets_hz=offsets,
+            gamma_hz_per_t=NUCLEUS_GAMMA_HZ_PER_T[self.tissue_widget.get_nucleus()],
+            t1_s=tissue.t1,
+            t2_s=tissue.t2,
+        )
+
+    def _on_live_mode_changed(self, active: bool):
+        """Hand the 3D view between the live mode and playback."""
+        if active:
+            self.anim_timer.stop()
+            self._sync_play_toggle(False)
+            self.mag_3d._clear_path()
+            self._live_field_key = None
+            return
+        self.mag_3d._clear_path()
+        if self.anim_data is not None and len(self.anim_data) > 0:
+            self._refresh_vector_view(restart=False)
+        else:
+            self.mag_3d.set_spatial_groups(None)
+            self.mag_3d.show_equilibrium_magnetization()
+
+    def _render_live_frame(self, live):
+        """Draw the live spins with the current 3D view filter."""
+        system = live.system
+        if system is None:
+            return
+        mean_only = self.mean_only_checkbox.isChecked()
+        anim, colors, means, net, shown = self._select_vector_display(
+            system.magnetization[None], system.positions_m, mean_only
+        )
+        if shown is not None:
+            pulse = live.current_pulse()
+            gradient = live.gradient_t_per_m()
+            key = (pulse, tuple(gradient), shown.shape, live.field_readout())
+            if key != getattr(self, "_live_field_key", None):
+                self._live_field_key = key
+                b1 = None if pulse is None else [np.exp(1j * np.radians(pulse[1]))]
+                gradients = (
+                    None
+                    if not np.any(gradient)
+                    else [gradient_t_per_m_to_g_per_cm(gradient)]
+                )
+                self.mag_3d.set_spatial_fields(
+                    b1, gradients, shown, readout=live.field_readout()
+                )
+                self.mag_3d.show_field_frame(0)
+        else:
+            self._live_field_key = None
+        self.mag_3d.update_magnetization(
+            anim[0],
+            colors=colors,
+            position_means=None if means is None else means[0],
+            net=None if net is None else net[0],
         )
 
     @staticmethod
@@ -5870,6 +5958,7 @@ class BlochSimulatorGUI(QMainWindow):
             # A hidden animation would continue waking the event loop and
             # updating the OpenGL buffers during the workspace transition.
             # Pause it at the current frame; the user can resume after returning.
+            self.live_mode.set_active(False)
             if self.anim_timer.isActive():
                 self.anim_timer.stop()
                 self._last_render_wall = None
@@ -6358,6 +6447,7 @@ class BlochSimulatorGUI(QMainWindow):
 
     def _release_free_simulation_result(self):
         """Release the previous Free Mode run before budgeting its replacement."""
+        self.live_mode.set_active(False)
         self.anim_timer.stop()
         self._sync_play_toggle(False)
         self.time_control.setEnabled(False)
@@ -7339,6 +7429,8 @@ class BlochSimulatorGUI(QMainWindow):
 
     def _update_b1_arrow(self, playback_idx: int):
         """Update the B1 direction/length indicator in the 3D view."""
+        if self.live_mode.is_active():
+            return
         if self.mag_3d is not None and self.mag_3d.is_spatial_layout_active():
             # The spatial layout draws B1 and gradient fields per position.
             self.mag_3d.b1_arrow.setVisible(False)
