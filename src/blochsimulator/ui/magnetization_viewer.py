@@ -193,6 +193,7 @@ class MagnetizationViewer(QWidget):
         self._field_gradients = None
         self._field_plane_axes = None
         self._field_frame_idx = None
+        self._field_readout = None
         self._field_b1_max = 0.0
         self._field_gradient_max = 0.0
         self._net_label_item = None
@@ -1327,7 +1328,9 @@ class MagnetizationViewer(QWidget):
         )
         self.position_path_item.setVisible(True)
 
-    def set_spatial_fields(self, b1=None, gradients=None, positions_m=None):
+    def set_spatial_fields(
+        self, b1=None, gradients=None, positions_m=None, readout=None
+    ):
         """Store the fields of every playback frame for the global indicator.
 
         Parameters
@@ -1339,7 +1342,10 @@ class MagnetizationViewer(QWidget):
         positions_m : array-like or None
             Position (x, y, z) in m of every drawn position group; selects
             the gradient components given in the readout.
+        readout : str or None
+            Label shown instead of the field values (e.g. "90°x").
         """
+        self._field_readout = readout
         self._field_b1 = None
         self._field_gradient_along = None
         self._field_gradients = None
@@ -1456,6 +1462,8 @@ class MagnetizationViewer(QWidget):
                 color=np.array([color for _, color in arrows]),
             )
         self.field_tip_item.setVisible(bool(arrows))
+        if self._field_readout is not None:
+            readout = [self._field_readout] if self._field_readout else []
         self.field_label_item.setData(text="   ".join(readout))
         self.field_label_item.setVisible(
             bool(readout) and self.labels_checkbox.isChecked()
