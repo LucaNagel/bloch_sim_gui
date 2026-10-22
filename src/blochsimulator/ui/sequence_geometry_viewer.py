@@ -1,6 +1,7 @@
 """Pre-run planning view of object, simulated grid and sequence coverage.
 
-Three orthogonal projections of the selected object are overlaid with the
+Three orthogonal sections through the selected object, cut at the sequence
+centre and drawn over the faded object silhouette, are overlaid with the
 simulated phantom grid, the configured object extent (mouse phantoms can
 extend beyond or sit off the grid), the encoded sequence FOV and any 2D
 slices.  Boxes are oriented by the sequence encoding frame and drawn as the
@@ -19,6 +20,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 import pyqtgraph as pg
+from scipy.ndimage import binary_erosion
 from PyQt5.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt5.QtGui import QPolygonF
 from PyQt5.QtWidgets import (
@@ -65,6 +67,8 @@ CATEGORY_COLORS = (
     (186, 176, 172),
 )
 CONTRAST_COLORMAP = "viridis"
+# Object parts outside the shown section.
+SILHOUETTE_COLOR = (64, 64, 64)
 # Maps varying by less than this fraction leave the object uniform.
 MIN_CONTRAST_SPREAD = 0.01
 
@@ -356,21 +360,6 @@ def _projection_layout(phantom, shape) -> tuple[tuple[slice, ...], list[QRectF]]
     return sampling, rects
 
 
-def object_projections(phantom) -> list[tuple[np.ndarray, QRectF]]:
-    """Return XY, XZ and YZ sum projections with their mm rectangles."""
-    density = _volume(_object_density(phantom))
-    sampling, rects = _projection_layout(phantom, density.shape)
-    density = density[sampling]
-    projections = []
-    for (horizontal, vertical), rect in zip(VIEW_PLANES, rects):
-        image = density.sum(axis=3 - horizontal - vertical)
-        peak = float(np.max(image)) if image.size else 0.0
-        if peak > 0.0:
-            image = image / peak
-        projections.append((image, rect))
-    return projections
-
-
 @dataclass
 class ObjectContrast:
     """A voxel property of the object that can colour the projections.
@@ -537,6 +526,12 @@ def _continuous_contrasts(phantom, inside) -> list[ObjectContrast]:
                 None,
             )
         )
+    # Partial-volume voxels at the object edge would make every uniform map
+    # look varying, so the spread is scored on the interior only (full
+    # connectivity, so diagonal rim voxels are dropped too).
+    interior = binary_erosion(inside, structure=np.ones((3,) * inside.ndim, bool))
+    if not np.any(interior):
+        interior = inside
     contrasts = []
     for key, label, unit, getter, offset_scale in specs:
         try:
@@ -558,10 +553,16 @@ def _continuous_contrasts(phantom, inside) -> list[ObjectContrast]:
         low, high = float(selected.min()), float(selected.max())
         if high <= low:
             continue
+        core = values[interior]
+        core = core[np.isfinite(core)]
+        core_low, core_high = (
+            (float(core.min()), float(core.max())) if core.size else (low, high)
+        )
         if offset_scale is None:
-            score = (high - low) / max(abs(low), abs(high))
+            scale = max(abs(core_low), abs(core_high))
+            score = (core_high - core_low) / scale if scale > 0.0 else 0.0
         else:
-            score = (high - low) / offset_scale
+            score = (core_high - core_low) / offset_scale
         contrasts.append(
             ObjectContrast(
                 key,
@@ -602,53 +603,77 @@ def automatic_contrast(contrasts) -> Optional[ObjectContrast]:
     return max(varying, key=lambda contrast: contrast.score) if varying else None
 
 
-def contrast_projections(phantom, contrast: ObjectContrast):
-    """Return RGBA projections coloured by ``contrast`` and the shown range.
+def _section_indices(phantom, shape, center_m) -> list[Optional[int]]:
+    """Return the sampled voxel index of ``center_m`` along each grid axis.
 
-    Region labels are painted from the largest to the smallest region (their
-    order in ``categories``), so small organs stay visible in front of the
-    body around them.  Continuous maps show their mean along each viewing
-    ray, scaled to the range of these means so that small regions such as
-    the kidneys stand out; that range is returned for the legend (``None``
-    for region labels).
+    ``None`` marks an axis whose section plane lies outside the grid.
+    """
+    box = phantom_grid_box(phantom)
+    size = np.asarray(box.size_m, dtype=float)
+    low = np.asarray(box.center_m, dtype=float) - 0.5 * size
+    center = np.asarray(box.center_m if center_m is None else center_m, dtype=float)
+    indices = []
+    for axis, count in enumerate(shape):
+        if count <= 1 or size[axis] <= 0.0:
+            indices.append(0)
+            continue
+        fraction = (center[axis] - low[axis]) / size[axis]
+        if not 0.0 <= fraction <= 1.0:
+            indices.append(None)
+            continue
+        indices.append(min(int(np.floor(fraction * count)), count - 1))
+    return indices
+
+
+def object_sections(phantom, contrast: Optional[ObjectContrast] = None, center_m=None):
+    """Return RGBA sections through ``center_m`` and the shown value range.
+
+    Each view cuts the object at ``center_m`` (default: the grid centre), so
+    a uniform object looks uniform; averaging along the viewing ray would
+    turn partial-volume edges into apparent contrast.  The rest of the
+    object stays visible as a faded silhouette.  Without ``contrast`` the
+    object density is shown in gray.  The range is ``None`` for region
+    labels and the density.
     """
     density = _volume(_object_density(phantom))
     sampling, rects = _projection_layout(phantom, density.shape)
-    inside = density[sampling] > 0.0
-    values = _volume(contrast.values)[sampling]
-    axes = [3 - horizontal - vertical for horizontal, vertical in VIEW_PLANES]
-    covered = [np.any(inside, axis=axis) for axis in axes]
-    images = [np.zeros(mask.shape + (4,), dtype=np.ubyte) for mask in covered]
+    density = density[sampling]
+    inside = density > 0.0
+    values = density if contrast is None else _volume(contrast.values)[sampling]
+    indices = _section_indices(phantom, inside.shape, center_m)
     shown_range = None
-    if contrast.categorical:
-        for rgba, axis in zip(images, axes):
-            for label, (_name, color) in contrast.categories.items():
-                rgba[np.any(inside & (values == label), axis=axis), :3] = color
-    else:
-        counted = inside & np.isfinite(values)
-        filled = np.where(counted, values, 0.0)
-        means = [
-            filled.sum(axis=axis) / np.maximum(counted.sum(axis=axis), 1)
-            for axis in axes
-        ]
-        shown = np.concatenate([mean[mask] for mean, mask in zip(means, covered)])
-        low, high = (
-            (float(shown.min()), float(shown.max()))
-            if shown.size
-            else contrast.value_range
-        )
-        shown_range = (low, high)
+    if contrast is None:
+        peak = float(np.max(density)) if density.size else 0.0
+        lookup = np.repeat(np.arange(256, dtype=np.ubyte)[:, np.newaxis], 3, axis=1)
+        low, high = 0.0, peak
+    elif not contrast.categorical:
         lookup = pg.colormap.get(CONTRAST_COLORMAP).getLookupTable(
             0.0, 1.0, 256, alpha=False
         )
-        for rgba, mean in zip(images, means):
-            if high > low:
-                level = np.clip((mean - low) / (high - low), 0.0, 1.0)
+        low, high = shown_range = contrast.value_range
+    images = []
+    for horizontal, vertical in VIEW_PLANES:
+        axis = 3 - horizontal - vertical
+        covered = np.any(inside, axis=axis)
+        rgba = np.zeros(covered.shape + (4,), dtype=np.ubyte)
+        rgba[covered, :3] = SILHOUETTE_COLOR
+        index = indices[axis]
+        if index is not None:
+            cut = np.take(inside, index, axis=axis)
+            cut_values = np.take(values, index, axis=axis)
+            if contrast is not None and contrast.categorical:
+                for label, (_name, color) in contrast.categories.items():
+                    rgba[cut & (cut_values == label), :3] = color
             else:
-                level = np.full(mean.shape, 0.5)
-            rgba[..., :3] = lookup[np.round(level * 255).astype(int)]
-    for rgba, mask in zip(images, covered):
-        rgba[..., 3] = np.where(mask, 255, 0)
+                finite = cut & np.isfinite(cut_values)
+                if high > low:
+                    level = np.clip((cut_values - low) / (high - low), 0.0, 1.0)
+                else:
+                    level = np.full(cut_values.shape, 0.5)
+                level = np.where(finite, level, 0.0)
+                rgba[finite, :3] = lookup[np.round(level * 255).astype(int)][finite]
+        rgba[..., 3] = np.where(covered, 255, 0)
+        images.append(rgba)
     return list(zip(images, rects)), shown_range
 
 
@@ -793,7 +818,7 @@ def _contrast_legend_html(contrast: Optional[ObjectContrast], shown_range=None) 
     low, high = shown_range if shown_range is not None else contrast.value_range
     gradient = "".join(_swatch(color) for color in lookup)
     return (
-        f"<div>{title}, mean along the view<br>"
+        f"<div>{title}, section through the sequence centre<br>"
         f"{low:.3g} {gradient} {high:.3g}</div>"
     )
 
@@ -964,6 +989,7 @@ class SequenceGeometryViewer(QWidget):
         self.contrasts = []
         self.contrast = None
         self._contrast_range = None
+        self._section_center_m = None
         self._summary_parts = ("", [], [])
         self.update_geometry(None, None)
 
@@ -1005,22 +1031,15 @@ class SequenceGeometryViewer(QWidget):
     def _draw_object(self):
         if self._phantom is None:
             self.contrast = None
+            self._contrast_range = None
             for image in self.images:
                 image.clear()
             return
         self.contrast = self._selected_contrast()
-        self._contrast_range = None
-        if self.contrast is None:
-            for image, (projection, rect) in zip(
-                self.images, object_projections(self._phantom)
-            ):
-                image.setImage(projection, levels=(0.0, 1.0), autoLevels=False)
-                image.setRect(rect)
-            return
-        projections, self._contrast_range = contrast_projections(
-            self._phantom, self.contrast
+        sections, self._contrast_range = object_sections(
+            self._phantom, self.contrast, self._section_center_m
         )
-        for image, (rgba, rect) in zip(self.images, projections):
+        for image, (rgba, rect) in zip(self.images, sections):
             image.setImage(rgba, levels=(0, 255), autoLevels=False)
             image.setRect(rect)
 
@@ -1104,6 +1123,7 @@ class SequenceGeometryViewer(QWidget):
         self._probe_position_m = probe_position_m
         self.contrasts = object_contrasts(phantom)
         self._populate_contrast_combo()
+        self._section_center_m = self._sequence_center_m(sequence)
         self._draw_object()
         self.set_sequence_geometry(
             sequence,
@@ -1130,7 +1150,28 @@ class SequenceGeometryViewer(QWidget):
         self._sequence = sequence
         self._generated_sequence = generated_sequence
         self._adjustable_offsets = tuple(adjustable_offsets)
+        center = self._sequence_center_m(sequence)
+        if not _same_values(center, self._section_center_m):
+            self._section_center_m = center
+            self._draw_object()
         self._draw_overlays()
+
+    def _sequence_center_m(self, sequence):
+        """Return where the views cut the object: the FOV or slice centre."""
+        if sequence is None:
+            return None
+        fallback = (
+            float(np.max(phantom_grid_box(self._phantom).size_m))
+            if self._phantom is not None
+            else 0.0
+        )
+        box = sequence.fov_box(fallback)
+        if box is None:
+            slices = sequence.slice_boxes((fallback,) * 3)
+            if not slices:
+                return None
+            return tuple(np.mean([item.center_m for item in slices], axis=0))
+        return tuple(box.center_m)
 
     def _draw_overlays(self):
         phantom = self._phantom

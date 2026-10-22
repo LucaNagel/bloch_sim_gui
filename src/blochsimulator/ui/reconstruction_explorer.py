@@ -15,12 +15,15 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSplitter,
     QStackedWidget,
@@ -288,6 +291,8 @@ class _SelectableImagePanel(QWidget):
 class SequenceReconstructionExplorer(QWidget):
     """Explore Cartesian, spiral, radial, and CSI sequence result datasets."""
 
+    sequence_settings_visibility_requested = pyqtSignal(bool)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("sequence_reconstruction_explorer")
@@ -324,6 +329,18 @@ class SequenceReconstructionExplorer(QWidget):
         )
         self.simulation_combo.currentIndexChanged.connect(self._simulation_changed)
         simulation_row.addWidget(self.simulation_combo, 1)
+        # The sequence parameters are not needed while browsing results, so
+        # the host collapses them for this tab; this button brings them back.
+        self.sequence_settings_button = QPushButton("Show sequence settings")
+        self.sequence_settings_button.setObjectName(
+            "reconstruction_sequence_settings_toggle"
+        )
+        self.sequence_settings_button.setCheckable(True)
+        self.sequence_settings_button.setToolTip(
+            "Show or hide the sequence parameter column while exploring results"
+        )
+        self.sequence_settings_button.toggled.connect(self._sequence_settings_toggled)
+        simulation_row.addWidget(self.sequence_settings_button)
         layout.addLayout(simulation_row)
         self.summary = QLabel(
             "Run a sequence simulation or open an exported .nc result to explore it."
@@ -331,122 +348,9 @@ class SequenceReconstructionExplorer(QWidget):
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
 
-        controls = QGroupBox("Reconstruction controls")
-        controls_layout = QGridLayout(controls)
-        self.outer_container = QWidget()
-        self.outer_layout = QGridLayout(self.outer_container)
-        self.outer_layout.setContentsMargins(0, 0, 0, 0)
-        self.outer_layout.setHorizontalSpacing(8)
-        self.outer_layout.setVerticalSpacing(2)
-        self.outer_layout.setColumnStretch(1, 1)
-        self.outer_layout.setColumnStretch(4, 1)
-        controls_layout.addWidget(self.outer_container, 0, 0, 1, 8)
-
-        controls_layout.addWidget(QLabel("Data"), 1, 0)
-        self.pool_combo = QComboBox()
-        self.pool_combo.currentIndexChanged.connect(self._refresh)
-        controls_layout.addWidget(self.pool_combo, 1, 1)
-        controls_layout.addWidget(QLabel("Receive channels"), 1, 2)
-        self.coil_combo = QComboBox()
-        self.coil_combo.currentIndexChanged.connect(self._refresh)
-        controls_layout.addWidget(self.coil_combo, 1, 3)
-        controls_layout.addWidget(QLabel("Display"), 1, 4)
-        self.component_combo = QComboBox()
-        for label, value in (
-            ("Magnitude", "magnitude"),
-            ("Phase", "phase"),
-            ("Real", "real"),
-            ("Imaginary", "imaginary"),
-        ):
-            self.component_combo.addItem(label, value)
-        self.component_combo.currentIndexChanged.connect(self._refresh)
-        controls_layout.addWidget(self.component_combo, 1, 5)
-        self.spectral_label = QLabel("FID point")
-        self.spectral_point = QSlider(Qt.Horizontal)
-        self.spectral_point.setTracking(True)
-        self.spectral_point.setMinimumWidth(150)
-        self.spectral_point.setToolTip(
-            "Browse the CSI FID sample used for the spatial reconstruction"
-        )
-        self.spectral_value_label = QLabel("0")
-        self.spectral_value_label.setMinimumWidth(150)
-        self.spectral_point.valueChanged.connect(self._spectral_point_changed)
-        self.spectral_control = QWidget()
-        spectral_layout = QHBoxLayout(self.spectral_control)
-        spectral_layout.setContentsMargins(0, 0, 0, 0)
-        spectral_layout.setSpacing(6)
-        spectral_layout.addWidget(self.spectral_point, 1)
-        spectral_layout.addWidget(self.spectral_value_label)
-        controls_layout.addWidget(self.spectral_label, 1, 6)
-        controls_layout.addWidget(self.spectral_control, 1, 7)
-
-        self.auto_contrast = QCheckBox("Auto contrast")
-        self.auto_contrast.setChecked(True)
-        self.auto_contrast.toggled.connect(self._contrast_mode_changed)
-        controls_layout.addWidget(self.auto_contrast, 2, 0)
-        self.contrast_min_label = QLabel("Minimum 0")
-        self.contrast_min_label.setMinimumWidth(125)
-        self.contrast_min_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        controls_layout.addWidget(self.contrast_min_label, 2, 1)
-        self.contrast_slider = _DoubleRangeSlider()
-        self.contrast_slider.setEnabled(False)
-        self.contrast_slider.valuesChanged.connect(self._contrast_range_changed)
-        controls_layout.addWidget(self.contrast_slider, 2, 2, 1, 4)
-        self.contrast_max_label = QLabel("Maximum 1")
-        self.contrast_max_label.setMinimumWidth(125)
-        controls_layout.addWidget(self.contrast_max_label, 2, 6, 1, 2)
-
-        action_row = QHBoxLayout()
-        self.export_button = QPushButton("Export current view…")
-        self.export_button.setEnabled(False)
-        self.export_button.clicked.connect(self._export_current_view)
-        action_row.addWidget(self.export_button)
-        action_row.addSpacing(12)
-        action_row.addWidget(QLabel("K-space view"))
-        self.kspace_scale_combo = QComboBox()
-        self.kspace_scale_combo.addItem("Magnitude", "magnitude")
-        self.kspace_scale_combo.addItem("Log magnitude", "log")
-        self.kspace_scale_combo.setCurrentIndex(1)
-        self.kspace_scale_combo.setToolTip(
-            "Show gridded k-space as linear magnitude or log(1 + magnitude)"
-        )
-        self.kspace_scale_combo.currentIndexChanged.connect(self._refresh)
-        action_row.addWidget(self.kspace_scale_combo)
-        action_row.addWidget(QLabel("Colormap"))
-        self.colormap_combo = QComboBox()
-        self.colormap_combo.addItems(
-            ["gray", "viridis", "plasma", "magma", "cividis", "inferno", "turbo"]
-        )
-        self.colormap_combo.setToolTip("Color palette for the reconstructed image")
-        self.colormap_combo.currentTextChanged.connect(self._refresh)
-        action_row.addWidget(self.colormap_combo)
-        action_row.addWidget(QLabel("Intensity γ"))
-        self.display_strength = QDoubleSpinBox()
-        self.display_strength.setRange(0.1, 5.0)
-        self.display_strength.setSingleStep(0.1)
-        self.display_strength.setDecimals(2)
-        self.display_strength.setValue(1.0)
-        self.display_strength.setToolTip(
-            "Colormap intensity (gamma): values above 1 brighten mid-tones"
-        )
-        self.display_strength.valueChanged.connect(self._refresh)
-        action_row.addWidget(self.display_strength)
-        action_row.addWidget(QLabel("Interpolation"))
-        self.interpolation_combo = QComboBox()
-        for label, value in (
-            ("Nearest", "nearest"),
-            ("Linear", "linear"),
-            ("Cubic", "cubic"),
-        ):
-            self.interpolation_combo.addItem(label, value)
-        self.interpolation_combo.setToolTip(
-            "Image-space interpolation; the reconstructed source data remain unchanged"
-        )
-        self.interpolation_combo.currentIndexChanged.connect(self._refresh)
-        action_row.addWidget(self.interpolation_combo)
-        action_row.addStretch()
-        controls_layout.addLayout(action_row, 3, 0, 1, 8)
-        layout.addWidget(controls)
+        body = QSplitter(Qt.Horizontal)
+        body.setChildrenCollapsible(False)
+        self.body_splitter = body
 
         self.pages = QStackedWidget()
         self.empty_page = QLabel("No reconstructable image data")
@@ -455,19 +359,27 @@ class SequenceReconstructionExplorer(QWidget):
 
         self.two_d_page = QWidget()
         two_d_layout = QVBoxLayout(self.two_d_page)
+        two_d_layout.setContentsMargins(0, 0, 0, 0)
+        result_splitter = QSplitter(Qt.Vertical)
         images = QSplitter(Qt.Horizontal)
         self.kspace_panel = _SelectableImagePanel("Gridded k-space")
         self.image_panel = _SelectableImagePanel("Reconstruction")
         self.image_panel.pixel_selected.connect(self._voxel_selected)
         images.addWidget(self.kspace_panel)
         images.addWidget(self.image_panel)
-        images.setSizes([1, 1])
-        two_d_layout.addWidget(images, 3)
+        # The reconstruction is the image of interest; k-space stays as a
+        # smaller companion view.
+        images.setStretchFactor(0, 2)
+        images.setStretchFactor(1, 3)
+        result_splitter.addWidget(images)
         self.spectrum_plot = pg.PlotWidget(title="Selected voxel")
         self.spectrum_plot.setLabel("left", "Signal", "a.u.")
         self.spectrum_plot.setLabel("bottom", "Frequency", "Hz")
         self.spectrum_plot.addLegend()
-        two_d_layout.addWidget(self.spectrum_plot, 2)
+        result_splitter.addWidget(self.spectrum_plot)
+        result_splitter.setStretchFactor(0, 3)
+        result_splitter.setStretchFactor(1, 2)
+        two_d_layout.addWidget(result_splitter, 1)
         self.pages.addWidget(self.two_d_page)
 
         self.three_d_page = QWidget()
@@ -488,7 +400,153 @@ class SequenceReconstructionExplorer(QWidget):
         )
         three_d_layout.addWidget(self.volume_pages, 1)
         self.pages.addWidget(self.three_d_page)
-        layout.addWidget(self.pages, 1)
+        body.addWidget(self.pages)
+
+        controls = QWidget()
+        controls_layout = QVBoxLayout(controls)
+        controls_layout.setContentsMargins(6, 0, 6, 0)
+
+        frame_group = QGroupBox("Frame")
+        frame_layout = QVBoxLayout(frame_group)
+        self.outer_container = QWidget()
+        self.outer_layout = QGridLayout(self.outer_container)
+        self.outer_layout.setContentsMargins(0, 0, 0, 0)
+        self.outer_layout.setHorizontalSpacing(6)
+        self.outer_layout.setVerticalSpacing(2)
+        self.outer_layout.setColumnStretch(1, 1)
+        frame_layout.addWidget(self.outer_container)
+        controls_layout.addWidget(frame_group)
+
+        data_group = QGroupBox("Data")
+        data_layout = QFormLayout(data_group)
+        self.pool_combo = QComboBox()
+        self.pool_combo.currentIndexChanged.connect(self._refresh)
+        data_layout.addRow("Data", self.pool_combo)
+        self.coil_combo = QComboBox()
+        self.coil_combo.currentIndexChanged.connect(self._refresh)
+        data_layout.addRow("Receive channels", self.coil_combo)
+        self.component_combo = QComboBox()
+        for label, value in (
+            ("Magnitude", "magnitude"),
+            ("Phase", "phase"),
+            ("Real", "real"),
+            ("Imaginary", "imaginary"),
+        ):
+            self.component_combo.addItem(label, value)
+        self.component_combo.currentIndexChanged.connect(self._refresh)
+        data_layout.addRow("Display", self.component_combo)
+        self.spectral_label = QLabel("FID point")
+        self.spectral_point = QSlider(Qt.Horizontal)
+        self.spectral_point.setTracking(True)
+        self.spectral_point.setToolTip(
+            "Browse the CSI FID sample used for the spatial reconstruction"
+        )
+        self.spectral_value_label = QLabel("0")
+        self.spectral_point.valueChanged.connect(self._spectral_point_changed)
+        self.spectral_control = QWidget()
+        spectral_layout = QVBoxLayout(self.spectral_control)
+        spectral_layout.setContentsMargins(0, 0, 0, 0)
+        spectral_layout.setSpacing(2)
+        spectral_layout.addWidget(self.spectral_point)
+        spectral_layout.addWidget(self.spectral_value_label)
+        data_layout.addRow(self.spectral_label, self.spectral_control)
+        controls_layout.addWidget(data_group)
+
+        contrast_group = QGroupBox("Contrast")
+        contrast_layout = QVBoxLayout(contrast_group)
+        self.auto_contrast = QCheckBox("Auto contrast")
+        self.auto_contrast.setChecked(True)
+        self.auto_contrast.toggled.connect(self._contrast_mode_changed)
+        contrast_layout.addWidget(self.auto_contrast)
+        self.contrast_slider = _DoubleRangeSlider()
+        self.contrast_slider.setEnabled(False)
+        self.contrast_slider.valuesChanged.connect(self._contrast_range_changed)
+        contrast_layout.addWidget(self.contrast_slider)
+        range_row = QHBoxLayout()
+        self.contrast_min_label = QLabel("Minimum 0")
+        range_row.addWidget(self.contrast_min_label)
+        range_row.addStretch()
+        self.contrast_max_label = QLabel("Maximum 1")
+        self.contrast_max_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        range_row.addWidget(self.contrast_max_label)
+        contrast_layout.addLayout(range_row)
+        controls_layout.addWidget(contrast_group)
+
+        appearance_group = QGroupBox("Appearance")
+        appearance_layout = QFormLayout(appearance_group)
+        self.kspace_scale_combo = QComboBox()
+        self.kspace_scale_combo.addItem("Magnitude", "magnitude")
+        self.kspace_scale_combo.addItem("Log magnitude", "log")
+        self.kspace_scale_combo.setCurrentIndex(1)
+        self.kspace_scale_combo.setToolTip(
+            "Show gridded k-space as linear magnitude or log(1 + magnitude)"
+        )
+        self.kspace_scale_combo.currentIndexChanged.connect(self._refresh)
+        appearance_layout.addRow("K-space view", self.kspace_scale_combo)
+        self.colormap_combo = QComboBox()
+        self.colormap_combo.addItems(
+            ["gray", "viridis", "plasma", "magma", "cividis", "inferno", "turbo"]
+        )
+        self.colormap_combo.setToolTip("Color palette for the reconstructed image")
+        self.colormap_combo.currentTextChanged.connect(self._refresh)
+        appearance_layout.addRow("Colormap", self.colormap_combo)
+        self.display_strength = QDoubleSpinBox()
+        self.display_strength.setRange(0.1, 5.0)
+        self.display_strength.setSingleStep(0.1)
+        self.display_strength.setDecimals(2)
+        self.display_strength.setValue(1.0)
+        self.display_strength.setToolTip(
+            "Colormap intensity (gamma): values above 1 brighten mid-tones"
+        )
+        self.display_strength.valueChanged.connect(self._refresh)
+        appearance_layout.addRow("Intensity γ", self.display_strength)
+        self.interpolation_combo = QComboBox()
+        for label, value in (
+            ("Nearest", "nearest"),
+            ("Linear", "linear"),
+            ("Cubic", "cubic"),
+        ):
+            self.interpolation_combo.addItem(label, value)
+        self.interpolation_combo.setToolTip(
+            "Image-space interpolation; the reconstructed source data remain unchanged"
+        )
+        self.interpolation_combo.currentIndexChanged.connect(self._refresh)
+        appearance_layout.addRow("Interpolation", self.interpolation_combo)
+        controls_layout.addWidget(appearance_group)
+
+        self.export_button = QPushButton("Export current view…")
+        self.export_button.setEnabled(False)
+        self.export_button.clicked.connect(self._export_current_view)
+        controls_layout.addWidget(self.export_button)
+        controls_layout.addStretch(1)
+
+        self.controls_scroll = QScrollArea()
+        self.controls_scroll.setObjectName("reconstruction_controls")
+        self.controls_scroll.setWidgetResizable(True)
+        self.controls_scroll.setFrameShape(QFrame.NoFrame)
+        self.controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.controls_scroll.setWidget(controls)
+        self.controls_scroll.setMinimumWidth(240)
+        self.controls_scroll.setMaximumWidth(380)
+        body.addWidget(self.controls_scroll)
+        body.setStretchFactor(0, 1)
+        body.setStretchFactor(1, 0)
+        layout.addWidget(body, 1)
+
+    def _sequence_settings_toggled(self, visible):
+        self.sequence_settings_button.setText(
+            "Hide sequence settings" if visible else "Show sequence settings"
+        )
+        self.sequence_settings_visibility_requested.emit(bool(visible))
+
+    def set_sequence_settings_visible(self, visible):
+        """Reflect the host's parameter-column state without re-emitting it."""
+        previous = self.sequence_settings_button.blockSignals(True)
+        self.sequence_settings_button.setChecked(bool(visible))
+        self.sequence_settings_button.blockSignals(previous)
+        self.sequence_settings_button.setText(
+            "Hide sequence settings" if visible else "Show sequence settings"
+        )
 
     def clear(self, message=None):
         self.model = None
@@ -606,19 +664,19 @@ class SequenceReconstructionExplorer(QWidget):
             self._clear_outer_controls()
             if model.outer_dimensions:
                 for position, dimension in enumerate(model.outer_dimensions):
-                    row = position // 2
-                    column = (position % 2) * 3
+                    row = position
+                    column = 0
                     label = QLabel(dimension.name.replace("_", " ").title())
                     self.outer_layout.addWidget(label, row, column)
                     slider = QSlider(Qt.Horizontal)
                     slider.setRange(0, len(dimension.values) - 1)
                     slider.setTracking(True)
-                    slider.setMinimumWidth(140)
+                    slider.setMinimumWidth(80)
                     slider.setToolTip(
                         f"Browse reconstruction dimension {dimension.name!r}"
                     )
                     value_label = QLabel()
-                    value_label.setMinimumWidth(90)
+                    value_label.setMinimumWidth(60)
                     slider.valueChanged.connect(
                         lambda index, name=dimension.name: self._outer_slider_changed(
                             name, index
@@ -632,7 +690,7 @@ class SequenceReconstructionExplorer(QWidget):
                     self._update_outer_slider_label(dimension.name, 0)
             else:
                 self.outer_layout.addWidget(
-                    QLabel("Single acquisition frame"), 0, 0, 1, 6
+                    QLabel("Single acquisition frame"), 0, 0, 1, 3
                 )
 
             self.pool_combo.clear()

@@ -2419,6 +2419,7 @@ class SequenceSimulationWidget(QWidget):
         root.addWidget(splitter)
 
         control_column = QWidget()
+        self.control_column = control_column
         control_column_layout = QVBoxLayout(control_column)
         control_column_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -3044,7 +3045,7 @@ class SequenceSimulationWidget(QWidget):
             "Nagashima VFA schedule without T1-decay compensation "
             "(doi:10.1016/j.jmr.2007.10.011)"
         )
-        self.csi_slice_thickness_mm = self._parameter_spin(0.05, 100.0, 10.0, " mm")
+        self.csi_slice_thickness_mm = self._parameter_spin(0.05, 100.0, 3.0, " mm")
         (
             self.csi_slice_orientation,
             self.csi_read_gradient_axis,
@@ -5281,10 +5282,19 @@ class SequenceSimulationWidget(QWidget):
             self.two_d_result_tab_index,
             "Inspect Cartesian 2D k-space and its reconstructed image.",
         )
+        # The Reconstruction Explorer covers this page; the views stay
+        # populated for exports and saved projects but are not shown.
+        views.setTabVisible(self.two_d_result_tab_index, False)
 
         self.reconstruction_explorer = SequenceReconstructionExplorer()
         self.reconstruction_explorer_tab_index = views.addTab(
             self.reconstruction_explorer, "Reconstruction Explorer"
+        )
+        # Browsing results does not need the sequence parameters, so the
+        # Explorer collapses them unless the user asks to keep them shown.
+        self._explorer_shows_sequence_settings = False
+        self.reconstruction_explorer.sequence_settings_visibility_requested.connect(
+            self._explorer_sequence_settings_requested
         )
         views.setTabToolTip(
             self.reconstruction_explorer_tab_index,
@@ -11575,6 +11585,17 @@ class SequenceSimulationWidget(QWidget):
     def _views_current_changed(self, index):
         if index == getattr(self, "geometry_tab_index", -1):
             self._schedule_geometry_refresh()
+        self._update_control_column_visibility()
+
+    def _update_control_column_visibility(self):
+        exploring = self.views.currentIndex() == self.reconstruction_explorer_tab_index
+        visible = not exploring or self._explorer_shows_sequence_settings
+        self.control_column.setVisible(visible)
+        self.reconstruction_explorer.set_sequence_settings_visible(visible)
+
+    def _explorer_sequence_settings_requested(self, visible):
+        self._explorer_shows_sequence_settings = bool(visible)
+        self._update_control_column_visibility()
 
     def _update_geometry_stale_notice(self, previewing=None):
         """Ask for an update while the drawn sequence lags its parameters."""

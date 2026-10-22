@@ -3865,3 +3865,45 @@ def test_sequence_workspace_routes_probe_memory_warning_to_settings_dialog():
     widget.close()
     widget.deleteLater()
     app.processEvents()
+
+
+def test_reconstruction_explorer_hides_2d_tab_and_sequence_settings(qt_application):
+    window = BlochSimulatorGUI()
+    window.show()
+    window.set_workspace_mode("sequence")
+    widget = window.sequence_simulation_widget
+    explorer = widget.reconstruction_explorer
+
+    assert not widget.views.isTabVisible(widget.two_d_result_tab_index)
+    assert widget.csi_slice_thickness_mm.value() == pytest.approx(3.0)
+
+    widget.views.setCurrentIndex(widget.reconstruction_explorer_tab_index)
+    qt_application.processEvents()
+    assert not widget.control_column.isVisible()
+    assert explorer.controls_scroll.isVisible()
+
+    explorer.sequence_settings_button.click()
+    qt_application.processEvents()
+    assert widget.control_column.isVisible()
+
+    explorer.sequence_settings_button.click()
+    widget.views.setCurrentIndex(widget.log_tab_index)
+    qt_application.processEvents()
+    assert widget.control_column.isVisible()
+
+
+def test_phantom_designer_starts_from_default_sphere(qt_application):
+    window = BlochSimulatorGUI()
+    window.set_workspace_mode("sequence")
+    window.tab_widget.setCurrentIndex(window.phantom_tab_index)
+    qt_application.processEvents()
+    phantom_widget = window.phantom_widget.phantom_creator
+    assert phantom_widget.current_phantom is None
+
+    phantom_widget._open_spectral_designer()
+    dialog = phantom_widget._retained_spectral_designer_dialogs[-1]
+    try:
+        assert dialog.design.shapes
+        assert dialog.design.nucleus == phantom_widget.get_nucleus()
+    finally:
+        dialog.reject()

@@ -22,7 +22,7 @@ from .units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm
 class SpectralPeakDefinition:
     """One Lorentzian peak assigned to a spatial shape."""
 
-    name: str = "Water"
+    name: str = "Compound"
     amplitude: float = 1.0
     frequency_ppm: float = 0.0
     t2_star_s: float = 0.050
