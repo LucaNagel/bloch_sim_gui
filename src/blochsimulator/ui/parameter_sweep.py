@@ -483,7 +483,7 @@ class ParameterSweepWidget(QWidget):
 
             # Simulation
             if hasattr(self.parent_gui, "pos_spin"):
-                # Line or plane sampling: counts and ranges per sampled axis,
+                # Line, plane or volume sampling: counts and ranges per axis,
                 # first (fastest) axis first.
                 gui = self.parent_gui
                 counts, spans_mm = gui._position_counts_and_spans_mm()
@@ -491,9 +491,7 @@ class ParameterSweepWidget(QWidget):
                 constant_params["position_range_cm"] = float(
                     gui.pos_range.value() / 10.0
                 )
-                constant_params["position_geometry"] = (
-                    "plane" if gui._is_plane_geometry() else "line"
-                )
+                constant_params["position_geometry"] = gui._position_geometry_name()
                 constant_params["position_axes"] = "".join(
                     AXIS_NAMES[axis] for axis in gui._position_axes()
                 )

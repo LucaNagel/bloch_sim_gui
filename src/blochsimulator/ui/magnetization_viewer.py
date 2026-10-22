@@ -45,6 +45,9 @@ class MagnetizationViewer(QWidget):
     # Rows along x or y and planes keep the physical axes as scene axes and
     # their labels sit just beyond the vector reach.
     LABEL_GAP = 1.25
+    # Opacity of the positions outside the selected slice of a volume.
+    SLICE_FADE_ALPHA = 0.12
+    SLICE_ALL = "All"
     B1_COLOR = (0.0, 1.0, 1.0, 1.0)
     GRADIENT_COLOR = (1.0, 0.55, 0.15, 1.0)
     # Camera (elevation, azimuth) in degrees.
@@ -179,6 +182,8 @@ class MagnetizationViewer(QWidget):
         self._net_origin = np.zeros(3)
         self._scene_extent = np.array([-np.ones(3), np.ones(3)])
         self._tip_mesh_pairs = None
+        self._volume_steps = None
+        self._slice_value_mm = None
         self._field_origin = np.zeros(3)
         self._last_spatial_frame = None
         self._position_color_cache = None
@@ -360,8 +365,8 @@ class MagnetizationViewer(QWidget):
         self.max_positions_spin.setRange(2, 256)
         self.max_positions_spin.setValue(16)
         self.max_positions_spin.setToolTip(
-            "Largest number of positions drawn, per axis for a plane; more "
-            "positions are evenly subsampled."
+            "Largest number of positions drawn, per axis for a plane or a "
+            "volume; more positions are evenly subsampled."
         )
         self.max_positions_spin.valueChanged.connect(
             lambda _: self.view_filter_changed.emit()
@@ -389,8 +394,8 @@ class MagnetizationViewer(QWidget):
         self.color_by_combo.addItems(["Position", "Phase"])
         self.color_by_combo.setToolTip(
             "Color vectors by position (palette, along the first axis of a "
-            "plane) or by transverse phase; with phase, longitudinal vectors "
-            "fade to white."
+            "plane or volume) or by transverse phase; with phase, "
+            "longitudinal vectors fade to white."
         )
         self.color_by_combo.currentTextChanged.connect(
             lambda _: self._redraw_spatial_frame()
@@ -434,8 +439,9 @@ class MagnetizationViewer(QWidget):
         self.tip_curve_checkbox.setObjectName("mag_3d_tip_curve")
         self.tip_curve_checkbox.setChecked(False)
         self.tip_curve_checkbox.setToolTip(
-            "Connect the tips of neighboring positions (along both axes of a "
-            "plane), e.g. to show the phase helix after a gradient."
+            "Connect the tips of neighboring positions (along every axis of a "
+            "plane or volume, within the selected slice), e.g. to show the "
+            "phase helix after a gradient."
         )
         self.net_vector_checkbox = QCheckBox("Net vector")
         self.net_vector_checkbox.setObjectName("mag_3d_net_vector")
@@ -479,6 +485,43 @@ class MagnetizationViewer(QWidget):
         rows.addWidget(self.spatial_show_row)
         self.spatial_option_widgets.append(self.spatial_show_row)
 
+        # Slice filter for volumes: one layer stays bright, the rest fades.
+        self.spatial_slice_row = QWidget()
+        slice_row = QHBoxLayout(self.spatial_slice_row)
+        slice_row.setContentsMargins(0, 0, 0, 0)
+        slice_row.addWidget(QLabel("Slice:"))
+        self.slice_axis_combo = QComboBox()
+        self.slice_axis_combo.setObjectName("mag_3d_slice_axis")
+        self.slice_axis_combo.addItems([self.SLICE_ALL, *AXIS_NAMES])
+        self.slice_axis_combo.setToolTip(
+            "Highlight one layer of the volume perpendicular to this axis; "
+            "the other positions fade out."
+        )
+        self.slice_axis_combo.currentTextChanged.connect(
+            lambda _: self._on_slice_axis_changed()
+        )
+        slice_row.addWidget(self.slice_axis_combo)
+        self.slice_slider = QSlider(Qt.Horizontal)
+        self.slice_slider.setObjectName("mag_3d_slice_index")
+        self.slice_slider.setRange(0, 0)
+        self.slice_slider.setToolTip("Layer of the volume that is highlighted.")
+        self.slice_slider.valueChanged.connect(lambda _: self._on_slice_changed())
+        slice_row.addWidget(self.slice_slider, 1)
+        self.slice_value_label = QLabel("")
+        self.slice_value_label.setMinimumWidth(90)
+        slice_row.addWidget(self.slice_value_label)
+        self.hide_other_slices_checkbox = QCheckBox("Hide others")
+        self.hide_other_slices_checkbox.setObjectName("mag_3d_hide_other_slices")
+        self.hide_other_slices_checkbox.setToolTip(
+            "Hide the positions outside the selected slice instead of fading them."
+        )
+        self.hide_other_slices_checkbox.toggled.connect(
+            lambda _: self._redraw_spatial_frame()
+        )
+        slice_row.addWidget(self.hide_other_slices_checkbox)
+        rows.addWidget(self.spatial_slice_row)
+        self._update_slice_controls()
+
         parent_layout.addWidget(self.spatial_controls)
         self.spatial_controls.setVisible(False)
         self.arrangement_combo.currentTextChanged.connect(
@@ -490,6 +533,11 @@ class MagnetizationViewer(QWidget):
         along = self.get_vector_arrangement() == self.ARRANGEMENT_ALONG_POSITION
         for widget in self.spatial_option_widgets:
             widget.setVisible(along)
+        self.spatial_slice_row.setVisible(
+            along
+            and getattr(self, "_spatial_layout", None) is not None
+            and self._scene_kind() == "volume"
+        )
 
     def set_spatial_layout_available(self, available: bool):
         """Show the arrangement controls for viewers that can provide positions."""
@@ -549,17 +597,24 @@ class MagnetizationViewer(QWidget):
         if layout_changed:
             self._spatial_layout = None if new is None else infer_layout(new / 1e3)
             self.max_positions_label.setText(
-                "Max per axis:" if self._scene_kind() == "plane" else "Max positions:"
+                "Max per axis:"
+                if self._scene_kind() in ("plane", "volume")
+                else "Max positions:"
             )
+            self._update_slice_controls()
+            self._update_spatial_option_visibility()
             self._last_spatial_frame = None
             self._clear_path()
             self._rebuild_spatial_scene(fit_camera=True)
 
     def _scene_kind(self) -> str:
-        """Return "column" (stacked along z), "row" (along x or y) or "plane"."""
+        """Return "column" (stacked along z), "row" (along x or y), "plane"
+        or "volume"."""
         layout = self._spatial_layout
         if layout is None or not layout.is_grid:
             return "column"
+        if layout.ndim == 3:
+            return "volume"
         if layout.ndim == 2:
             return "plane"
         if layout.ndim == 1 and layout.axes[0] in (0, 1):
@@ -569,6 +624,8 @@ class MagnetizationViewer(QWidget):
     def _default_camera_preset(self) -> str:
         """Camera preset that looks at the positions face-on."""
         kind = self._scene_kind()
+        if kind == "volume":
+            return "Oblique"
         if kind == "plane":
             normal = 3 - sum(self._spatial_layout.axes)
             return {0: "Side", 1: "Front", 2: "Oblique"}[normal]
@@ -666,7 +723,9 @@ class MagnetizationViewer(QWidget):
 
         spacing = self._spatial_spacing()
         kind = self._scene_kind()
-        if kind == "plane":
+        if kind == "volume":
+            self._build_volume_scene(spacing)
+        elif kind == "plane":
             self._build_plane_scene(spacing)
         elif kind == "row":
             self._build_row_scene(spacing)
@@ -863,6 +922,179 @@ class MagnetizationViewer(QWidget):
         hi[2] = max(hi[2], 1.5 * lift + 0.2)
         self._scene_extent = np.array([lo, hi])
 
+    def _build_volume_scene(self, spacing: float):
+        """Lay the positions of a row-major volume out as a 3D lattice."""
+        layout = self._spatial_layout
+        index = np.arange(int(np.prod(layout.counts)))
+        steps = {}
+        origins = np.zeros((index.size, 3))
+        for axis, count, stride in zip(layout.axes, layout.counts, layout.strides):
+            steps[axis] = self._index_steps(count, spacing)
+            origins[:, axis] = steps[axis][(index // stride) % count]
+        values_mm = dict(zip(layout.axes, layout.coordinates_mm()))
+        self._spatial_origins = origins
+        self._volume_steps = steps
+        xs, ys, zs = steps[0], steps[1], steps[2]
+        # Field indicator and net vector sit before the front top edge, so
+        # they and the readout stay clear of the volume in an oblique view.
+        anchor = np.array([xs[0], ys[0] - self.LABEL_GAP, zs[-1]])
+        self._field_origin = anchor - [self.FIELD_GAP, 0.0, 0.0]
+        self._net_origin = anchor - [self.FIELD_GAP + self.NET_GAP, 0.0, 0.0]
+        # Neighbour pairs along every volume axis for the tip mesh.
+        grid = index.reshape(tuple(reversed(layout.counts)))
+        pairs = []
+        for dim in range(3):
+            head = [slice(None)] * 3
+            tail = [slice(None)] * 3
+            head[dim] = slice(None, -1)
+            tail[dim] = slice(1, None)
+            pairs.append(
+                np.column_stack([grid[tuple(head)].ravel(), grid[tuple(tail)].ravel()])
+            )
+        self._tip_mesh_pairs = np.concatenate(pairs)
+        self._draw_volume_lattice()
+
+        # x values along the front bottom edge, y values along the right
+        # bottom edge and z values up the front right edge.
+        gap = self.LABEL_GAP
+        front = ys[0] - gap
+        right = xs[-1] + gap
+        for i in centered_stride_indices(xs.size, self.MAX_POSITION_LABELS):
+            self._add_scene_label((xs[i] - 0.3, front, zs[0]), f"{values_mm[0][i]:.1f}")
+        self._add_scene_label(
+            (0.5 * (xs[0] + xs[-1]) - 0.3, front - 1.0, zs[0] - 0.6), "x (mm)"
+        )
+        titles = {}
+        for axis in (1, 2):
+            ticks = centered_stride_indices(steps[axis].size, self.MAX_POSITION_LABELS)
+            for j in ticks:
+                pos = np.array([right, front, zs[0]])
+                pos[axis] = steps[axis][j]
+                self._add_scene_label(pos, f"{values_mm[axis][j]:.1f}")
+            # The title takes the next tick slot after the last value.
+            stride = int(ticks[1] - ticks[0]) if ticks.size > 1 else 1
+            titles[axis] = max(
+                steps[axis][ticks[-1]] + stride * spacing, steps[axis][-1] + gap
+            )
+            pos = np.array([right, front, zs[0]])
+            pos[axis] = titles[axis]
+            self._add_scene_label(pos, f"{AXIS_NAMES[axis]} (mm)")
+
+        # Floor grid below the volume, under the field and net vectors too.
+        floor = zs[0] - gap
+        left = self._net_origin[0] - self.NET_VECTOR_SCALE
+        length = self._floor_length(right - left)
+        width = self._floor_length(titles[1] - front)
+        self._place_floor(
+            (self._net_origin[0], front, floor),
+            (0.5 * (left + right), 0.5 * (front + titles[1]), floor),
+            (length, width),
+        )
+        self._scene_extent = np.array(
+            [
+                [xs[0] - 0.8, front - 1.8, floor - 0.1],
+                [right + 1.2, titles[1] + 0.4, titles[2] + 0.4],
+            ]
+        )
+
+    def _draw_volume_lattice(self):
+        """Draw the volume's bounding box and the lattice of the selected slice."""
+        steps = self._volume_steps
+        half = 0.5 * self._spatial_spacing()
+        lo = np.array([steps[a][0] - half for a in range(3)])
+        hi = np.array([steps[a][-1] + half for a in range(3)])
+        segments = []
+        for axis in range(3):
+            a, b = (o for o in range(3) if o != axis)
+            for u in (lo[a], hi[a]):
+                for w in (lo[b], hi[b]):
+                    start = np.empty(3)
+                    start[[axis, a, b]] = lo[axis], u, w
+                    end = start.copy()
+                    end[axis] = hi[axis]
+                    segments.extend([start, end])
+        axis = self._slice_axis()
+        if axis is not None:
+            level = steps[axis][self.slice_slider.value()]
+            a, b = (o for o in range(3) if o != axis)
+            for along, across in ((a, b), (b, a)):
+                for value in steps[across]:
+                    start = np.empty(3)
+                    start[[axis, across, along]] = level, value, lo[along]
+                    end = start.copy()
+                    end[along] = hi[along]
+                    segments.extend([start, end])
+        self.position_axis_item.setData(pos=np.asarray(segments, dtype=np.float32))
+
+    def _slice_axis(self):
+        """Scene axis of the selected volume slice, or None for all positions."""
+        if self._spatial_layout is None or self._scene_kind() != "volume":
+            return None
+        text = self.slice_axis_combo.currentText()
+        return AXIS_NAMES.index(text) if text in AXIS_NAMES else None
+
+    def _slice_values_mm(self, axis: int) -> np.ndarray:
+        layout = self._spatial_layout
+        return layout.coordinates_mm()[layout.axes.index(axis)]
+
+    def _update_slice_controls(self):
+        """Fit the slice slider to the selected axis, keeping its position."""
+        axis = self._slice_axis()
+        self.slice_slider.setEnabled(axis is not None)
+        self.hide_other_slices_checkbox.setEnabled(axis is not None)
+        if axis is None:
+            self.slice_value_label.setText("")
+            return
+        values = self._slice_values_mm(axis)
+        if self._slice_value_mm is None:
+            index = (values.size - 1) // 2
+        else:
+            index = int(np.argmin(np.abs(values - self._slice_value_mm)))
+        self.slice_slider.blockSignals(True)
+        self.slice_slider.setRange(0, values.size - 1)
+        self.slice_slider.setValue(index)
+        self.slice_slider.blockSignals(False)
+        self._show_slice_value(axis, values)
+
+    def _show_slice_value(self, axis: int, values):
+        index = self.slice_slider.value()
+        self._slice_value_mm = float(values[index])
+        self.slice_value_label.setText(
+            f"{AXIS_NAMES[axis]} = {self._slice_value_mm:.1f} mm"
+        )
+
+    def _on_slice_axis_changed(self):
+        self._slice_value_mm = None
+        self._update_slice_controls()
+        self._on_slice_changed()
+
+    def _on_slice_changed(self):
+        """Highlight the slice chosen with the slider."""
+        axis = self._slice_axis()
+        if axis is not None:
+            self._show_slice_value(axis, self._slice_values_mm(axis))
+        if self.is_spatial_layout_active() and self._scene_kind() == "volume":
+            self._draw_volume_lattice()
+        self._redraw_spatial_frame()
+
+    def _slice_alpha(self):
+        """Opacity of every position for the slice filter, or None for all."""
+        axis = self._slice_axis()
+        if axis is None:
+            return None
+        layout = self._spatial_layout
+        k = layout.axes.index(axis)
+        index = np.arange(len(self._spatial_positions_mm))
+        inside = (index // layout.strides[k]) % layout.counts[k] == (
+            self.slice_slider.value()
+        )
+        fade = (
+            0.0
+            if self.hide_other_slices_checkbox.isChecked()
+            else self.SLICE_FADE_ALPHA
+        )
+        return np.where(inside, 1.0, fade)
+
     def set_camera_preset(self, preset: str):
         """Point the camera at the whole scene from a fixed direction."""
         elevation, azimuth = self.CAMERA_PRESETS.get(
@@ -926,10 +1158,10 @@ class MagnetizationViewer(QWidget):
     def _position_colors(self, count: int) -> np.ndarray:
         """Return palette RGBA colors (0..1) for each position group.
 
-        In a plane the palette runs along its first axis.
+        In a plane or volume the palette runs along its first axis.
         """
         hues = int(count)
-        if self._scene_kind() == "plane":
+        if self._scene_kind() in ("plane", "volume"):
             hues = self._spatial_layout.counts[0]
         key = (self.vector_palette_combo.currentText(), int(count), hues)
         if self._position_color_cache is None or self._position_color_cache[0] != key:
@@ -993,6 +1225,9 @@ class MagnetizationViewer(QWidget):
         show_net = self.is_net_vector_shown()
         by_phase = self.color_by_combo.currentText() == "Phase"
         position_colors = self._position_colors(count)
+        alpha = self._slice_alpha()
+        if alpha is not None:
+            position_colors[:, 3] *= alpha
 
         if show_fan:
             pos = np.empty((count * per_position * 2, 3), dtype=np.float32)
@@ -1000,10 +1235,12 @@ class MagnetizationViewer(QWidget):
             pos[1::2] = (origins[:, None, :] + spins).reshape(-1, 3)
             if by_phase:
                 fan_colors = self.phase_colors(spins)
+                if alpha is not None:
+                    fan_colors[:, 3] *= np.repeat(alpha, per_position)
             else:
                 fan_colors = np.repeat(position_colors, per_position, axis=0)
             if show_means:
-                fan_colors[:, 3] = 0.45
+                fan_colors[:, 3] *= 0.45
             self.vector_plot.setData(
                 pos=pos,
                 color=np.repeat(fan_colors, 2, axis=0),
@@ -1014,6 +1251,8 @@ class MagnetizationViewer(QWidget):
 
         mean_tips = origins + means
         mean_colors = self.phase_colors(means) if by_phase else position_colors
+        if by_phase and alpha is not None:
+            mean_colors[:, 3] *= alpha
         if show_means:
             pos = np.empty((count * 2, 3), dtype=np.float32)
             pos[0::2] = origins
@@ -1027,7 +1266,11 @@ class MagnetizationViewer(QWidget):
                 if self._tip_mesh_pairs is None:
                     curve, curve_mode = mean_tips, "line_strip"
                 else:
-                    curve = mean_tips[self._tip_mesh_pairs].reshape(-1, 3)
+                    pairs = self._tip_mesh_pairs
+                    if alpha is not None:
+                        # Only connect neighbours within the selected slice.
+                        pairs = pairs[(alpha[pairs] == 1.0).all(axis=1)]
+                    curve = mean_tips[pairs].reshape(-1, 3)
                     curve_mode = "lines"
                 self.tip_curve_item.setData(
                     pos=curve.astype(np.float32), mode=curve_mode
@@ -1048,12 +1291,12 @@ class MagnetizationViewer(QWidget):
                 del self._position_path_points[: -self.MAX_PATH_FRAMES]
             if show_net:
                 self._append_path_point(net)
-        self._draw_position_paths(position_colors, by_phase)
+        self._draw_position_paths(position_colors, by_phase, alpha)
         self.path_item.setVisible(show_net)
         self.mean_vector.setData(pos=np.array([[0.0, 0.0, 0.0], net]))
         self.mean_vector.setVisible(show_net)
 
-    def _draw_position_paths(self, position_colors, by_phase):
+    def _draw_position_paths(self, position_colors, by_phase, alpha=None):
         """Draw the tracked tip path of every position (one per fan)."""
         frames = len(self._position_path_points)
         count = len(self._spatial_origins)
@@ -1071,9 +1314,11 @@ class MagnetizationViewer(QWidget):
         pos[:, :, 1] = tips[1:]
         if by_phase:
             colors = np.tile([0.85, 0.85, 0.85, 0.6], (count, 1))
+            if alpha is not None:
+                colors[:, 3] *= alpha
         else:
             colors = position_colors.copy()
-            colors[:, 3] = 0.7
+            colors[:, 3] *= 0.7
         vertex_colors = np.broadcast_to(
             colors[None, :, None, :], (frames - 1, count, 2, 4)
         ).reshape(-1, 4)
@@ -1115,7 +1360,7 @@ class MagnetizationViewer(QWidget):
             pos_cm = np.asarray(positions_m, dtype=float).reshape(-1, 3) * 100.0
             if len(pos_cm):
                 layout = infer_layout(pos_cm)
-                if layout.ndim == 2 and layout.is_grid:
+                if layout.ndim >= 2 and layout.is_grid:
                     self._field_plane_axes = tuple(sorted(layout.axes))
                 spread = pos_cm[-1] - pos_cm[0]
                 length = float(np.linalg.norm(spread))
