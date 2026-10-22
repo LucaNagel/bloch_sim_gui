@@ -5129,9 +5129,19 @@ class BlochSimulatorGUI(QMainWindow):
             self.sequence_designer.ssfp_alternate_phase.setChecked(
                 presets["ssfp_alternate_phase"]
             )
+        # A plane preset switches to a 2D grid of positions.
+        if "position_plane" in presets:
+            self.pos_geometry_combo.setCurrentText(self.POSITION_GEOMETRY_PLANE)
+            self.pos_plane_combo.setCurrentText(presets["position_plane"])
+            for count, span in (
+                (self.pos_spin, self.pos_range),
+                (self.pos2_spin, self.pos2_range),
+            ):
+                count.setValue(int(presets["plane_positions"]))
+                span.setValue(float(presets["plane_range_mm"]))
         # Optional simulation grid presets. They describe a 1D line, so a
         # 2D plane keeps its grid when the sequence type changes.
-        if not self._is_plane_geometry():
+        elif not self._is_plane_geometry():
             if "num_positions" in presets:
                 self.pos_spin.setValue(int(presets["num_positions"]))
             if "position_range_cm" in presets:

@@ -50,6 +50,8 @@ from ..simulator import (
 
 
 # Columns of the extra gradient lobe table: (header, lobe field, range, step).
+GRADIENT_TOUR = "Gradient & RF Tour"
+
 GRADIENT_LOBE_COLUMNS = (
     ("Axis", "axis", None, None),
     ("Start\n(ms)", "start_ms", (0.0, 1.0e6), 0.1),
@@ -143,6 +145,7 @@ class SequenceDesigner(QGroupBox):
                 "Slice Select + Rephase",
                 "SSFP (Loop)",
                 "Inversion Recovery",
+                GRADIENT_TOUR,
                 "Custom",
             ]
         )
@@ -293,10 +296,41 @@ class SequenceDesigner(QGroupBox):
         self.slice_rephase_opts.setLayout(sr_layout)
         self.options_container.addWidget(self.slice_rephase_opts)
 
+        # Gradient & RF tour options
+        self.gradient_tour_opts = QWidget()
+        tour_layout = QVBoxLayout(self.gradient_tour_opts)
+        tour_layout.setContentsMargins(0, 0, 0, 0)
+        cycles_layout = QHBoxLayout()
+        cycles_layout.addWidget(QLabel("Phase cycles across FOV:"))
+        self.tour_cycles = QDoubleSpinBox()
+        self.tour_cycles.setObjectName("tour_cycles")
+        self.tour_cycles.setRange(0.0, 50.0)
+        self.tour_cycles.setValue(2.0)
+        self.tour_cycles.setSingleStep(0.5)
+        self.tour_cycles.setToolTip(
+            "Phase cycles that each gradient lobe winds across the position "
+            "range of its axis."
+        )
+        self.tour_cycles.valueChanged.connect(lambda _: self.update_diagram())
+        cycles_layout.addWidget(self.tour_cycles)
+        tour_layout.addLayout(cycles_layout)
+        tour_info = QLabel(
+            "Best in a 2D plane. 90° pulse → +G1 winds a phase helix along the "
+            "first axis → −G1 unwinds it (gradient echo) → +G2 helix along the "
+            "second axis → +G1 adds a diagonal helix → 180° pulse conjugates the "
+            "phase → +G1 +G2 rewind it at the spin echo, which also refocuses "
+            "off-resonance."
+        )
+        tour_info.setWordWrap(True)
+        tour_info.setStyleSheet("color: gray;")
+        tour_layout.addWidget(tour_info)
+        self.options_container.addWidget(self.gradient_tour_opts)
+
         layout.addLayout(self.options_container)
         self.spin_echo_opts.setVisible(False)
         self.ssfp_opts.setVisible(False)
         self.slice_rephase_opts.setVisible(False)
+        self.gradient_tour_opts.setVisible(False)
 
         # TE parameter
         self.te_container = QWidget()
@@ -691,6 +725,7 @@ class SequenceDesigner(QGroupBox):
         if seq_type == "SSFP (Loop)":
             self._update_ssfp_visibility()
         self.slice_rephase_opts.setVisible(seq_type == "Slice Select + Rephase")
+        self.gradient_tour_opts.setVisible(seq_type == GRADIENT_TOUR)
         self.ti_widget.setVisible(seq_type == "Inversion Recovery")
         self.repetitions_widget.setVisible(seq_type != "SSFP (Loop)")
 
@@ -731,8 +766,11 @@ class SequenceDesigner(QGroupBox):
                 default_duration = presets.get(
                     "duration", current_state.get("duration", 1.0)
                 )
+                current_state["pulse_type"] = presets.get(
+                    "pulse_type", current_state.get("pulse_type")
+                )
 
-                # Excitation: 90 degrees, same type, correct duration, reset B1 override, reset phase
+                # Excitation: 90 degrees, preset type, correct duration, reset B1 override, reset phase
                 exc_state = current_state.copy()
                 exc_state["flip_angle"] = 90.0
                 exc_state["duration"] = default_duration
@@ -792,7 +830,13 @@ class SequenceDesigner(QGroupBox):
                     self.current_role = role
                     self.parent_gui.rf_designer.set_state(self.pulse_states[role])
 
-        elif seq_type in ("Gradient Echo", "Free Induction Decay", "FLASH", "EPI"):
+        elif seq_type in (
+            "Gradient Echo",
+            "Free Induction Decay",
+            "FLASH",
+            "EPI",
+            GRADIENT_TOUR,
+        ):
             roles = ["Excitation"]
             if hasattr(self, "parent_gui") and hasattr(self.parent_gui, "rf_designer"):
                 current_state = self.parent_gui.rf_designer.get_state()
@@ -830,8 +874,9 @@ class SequenceDesigner(QGroupBox):
                 "num_positions": 1,
                 "num_frequencies": 201,
                 "frequency_range_hz": 100,
-                "pulse_type": "gaussian",
-                "duration": 2.0,
+                "pulse_type": "Sinc",
+                "flip_angle": 90,
+                "duration": 3.0,  # ms
                 "b1_amplitude": 0.0,
             },
             "Spin Echo": {
@@ -840,7 +885,8 @@ class SequenceDesigner(QGroupBox):
                 "num_positions": 1,
                 "num_frequencies": 201,
                 "frequency_range_hz": 100,
-                "duration": 1.0,  # ms
+                "pulse_type": "Sinc",
+                "duration": 3.0,  # ms
                 "b1_amplitude": 0.0,
             },
             "Spin Echo (Tip-axis 180)": {
@@ -849,7 +895,8 @@ class SequenceDesigner(QGroupBox):
                 "num_positions": 1,
                 "num_frequencies": 201,
                 "frequency_range_hz": 100,
-                "duration": 1.0,  # ms
+                "pulse_type": "Sinc",
+                "duration": 3.0,  # ms
                 "b1_amplitude": 0.0,
             },
             "Gradient Echo": {
@@ -864,7 +911,8 @@ class SequenceDesigner(QGroupBox):
                 "tr_ms": 20,
                 "num_positions": 99,
                 "num_frequencies": 3,
-                "duration": 1.0,  # ms
+                "pulse_type": "Sinc",
+                "duration": 3.0,  # ms
                 "flip_angle": 90,
                 "b1_amplitude": 0.0,
             },
@@ -906,6 +954,17 @@ class SequenceDesigner(QGroupBox):
                 "num_frequencies": 3,
                 "duration": 1.0,  # ms
                 "b1_amplitude": 0.0,
+            },
+            GRADIENT_TOUR: {
+                "tr_ms": 30,
+                "pulse_type": "Sinc",
+                "flip_angle": 90,
+                "duration": 3.0,  # ms
+                "b1_amplitude": 0.0,
+                "num_frequencies": 1,
+                "position_plane": "xy",
+                "plane_positions": 31,
+                "plane_range_mm": 20.0,
             },
             "Custom": {
                 "te_ms": 10,
@@ -1170,6 +1229,10 @@ class SequenceDesigner(QGroupBox):
         if seq_type == "Slice Select + Rephase":
             return self._apply_current_rf_carrier(
                 self._build_slice_select_rephase(custom_pulse, dt, log_info=log_info)
+            )
+        if seq_type == GRADIENT_TOUR:
+            return self._apply_current_rf_carrier(
+                self._build_gradient_tour(custom_pulse, dt, log_info=log_info)
             )
         seq = self.get_sequence(custom_pulse=custom_pulse)
         if isinstance(seq, PulseSequence):
@@ -1456,6 +1519,7 @@ class SequenceDesigner(QGroupBox):
     def _build_slice_select_rephase(self, custom_pulse, dt, log_info=False):
         dt = max(dt, 1e-6)
         te = self.te_spin.value() / 1000.0
+        tr = self.tr_spin.value() / 1000.0
 
         # Excitation (use provided custom pulse if available)
         if custom_pulse is not None:
@@ -1498,8 +1562,8 @@ class SequenceDesigner(QGroupBox):
         rephase_pts = max(int(np.ceil(rephase_dur / dt)), 2)
         rephase_amp = rephase_area / (rephase_pts * dt)
 
-        # Total duration
-        total_dur = max(te, (exc_pts + slice_gap_pts + rephase_pts) * dt + 0.001)
+        # Total duration: one TR, or the pulse and rephase lobe if longer
+        total_dur = max(tr, (exc_pts + slice_gap_pts + rephase_pts) * dt + 0.001)
         npoints = int(np.ceil(total_dur / dt))
 
         enforce_sequence_memory(npoints)
@@ -1518,6 +1582,123 @@ class SequenceDesigner(QGroupBox):
         if end_rephase <= npoints:
             gradients[start_rephase:end_rephase, 2] = rephase_amp
 
+        return b1, gradients, time
+
+    def _tour_axes_and_spans_mm(self):
+        """Two in-plane axes and their position ranges for the gradient tour.
+
+        A 1D line uses its axis first and the next axis second.
+        """
+        gui = getattr(self, "parent_gui", None)
+        try:
+            axes = tuple(gui._position_axes())
+            _, spans = gui._position_counts_and_spans_mm()
+        except AttributeError:
+            return (0, 1), (20.0, 20.0)
+        if len(axes) < 2:
+            axes = (axes[0], (axes[0] + 1) % 3)
+            spans = [spans[0], spans[0]]
+        return axes[:2], tuple(max(float(span), 1e-3) for span in spans[:2])
+
+    def _build_gradient_tour(self, custom_pulse, dt, log_info=False):
+        """Teaching sequence that shows what gradients and RF pulses do.
+
+        90° pulse, +G1 winds a phase helix along the first axis, -G1 unwinds
+        it into a gradient echo, +G2 winds a helix along the second axis, +G1
+        adds to it a diagonal helix. A 180° pulse conjugates the phase, so
+        +G1 +G2 rewind it, timed to the spin echo that also refocuses
+        off-resonance.
+        """
+        dt = max(dt, 1e-6)
+        tr = self.tr_spin.value() / 1000.0
+        if custom_pulse is not None:
+            exc_b1 = self._resample_custom_pulse(custom_pulse, dt)
+        else:
+            n_exc = max(int(np.ceil(3e-3 / dt)), 16)
+            exc_b1, _ = design_rf_pulse(
+                "sinc", duration=n_exc * dt, flip_angle=90, npoints=n_exc
+            )
+        exc_b1 = np.asarray(exc_b1, dtype=complex)
+        if exc_b1.size == 0:
+            exc_b1 = np.zeros(1, dtype=complex)
+        flip = 90.0
+        gui = getattr(self, "parent_gui", None)
+        if gui is not None and hasattr(gui, "rf_designer"):
+            flip = float(gui.rf_designer.flip_angle.value())
+        # The refocusing pulse is the excitation pulse scaled to 180°.
+        ref_b1 = exc_b1 * (180.0 / flip if flip > 0.0 else 2.0)
+
+        pulse_ms = exc_b1.size * dt * 1e3
+        lobe_ms, gap_ms, ramp_ms = 1.0, 0.5, 0.1
+        axes, spans_mm = self._tour_axes_and_spans_mm()
+        cycles = self.tour_cycles.value()
+        twist_per_moment = phase_twist_cycles_per_mm([1.0])[0]
+        amplitudes = [
+            cycles / span / twist_per_moment / (lobe_ms - ramp_ms) for span in spans_mm
+        ]
+        first, second = (AXIS_NAMES[axis] for axis in axes)
+
+        def lobe(axis_name, sign, start_ms):
+            amplitude = amplitudes[0 if axis_name == first else 1]
+            return GradientLobe(
+                axis=axis_name,
+                start_ms=start_ms,
+                duration_ms=lobe_ms,
+                amplitude_mt_per_m=sign * amplitude,
+                ramp_ms=ramp_ms,
+            )
+
+        starts = [pulse_ms + gap_ms + k * (lobe_ms + gap_ms) for k in range(4)]
+        lobes = [
+            lobe(first, +1, starts[0]),
+            lobe(first, -1, starts[1]),
+            lobe(second, +1, starts[2]),
+            lobe(first, +1, starts[3]),
+        ]
+        ref_start_ms = starts[3] + lobe_ms + gap_ms
+        # Spin echo: excitation centre plus twice the centre-to-centre spacing
+        echo_ms = 0.5 * pulse_ms + 2.0 * ref_start_ms
+        rewind_start_ms = echo_ms - lobe_ms
+        lobes += [lobe(first, +1, rewind_start_ms), lobe(second, +1, rewind_start_ms)]
+
+        total_s = max(tr, (echo_ms + 2.0) * 1e-3)
+        npoints = int(np.ceil(total_s / dt - 1e-9))
+        enforce_sequence_memory(npoints)
+        b1 = np.zeros(npoints, dtype=complex)
+        time = np.arange(npoints) * dt
+        n_exc = min(exc_b1.size, npoints)
+        b1[:n_exc] = exc_b1[:n_exc]
+        ref_index = int(round(ref_start_ms * 1e-3 / dt))
+        n_ref = max(0, min(ref_b1.size, npoints - ref_index))
+        b1[ref_index : ref_index + n_ref] = ref_b1[:n_ref]
+        b1, gradients, time = add_gradient_lobes(
+            b1, np.zeros((npoints, 3)), time, lobes, dt
+        )
+
+        if log_info and gui is not None:
+            gui.log_message(f"{GRADIENT_TOUR}:")
+            gui.log_message(f"  0–{pulse_ms:.2f} ms: {flip:.0f}° excitation")
+            labels = [
+                f"+G{first}: phase helix along {first}",
+                f"−G{first}: unwinds it, gradient echo at the lobe end",
+                f"+G{second}: helix along {second}",
+                f"+G{first}: diagonal helix",
+            ]
+            for start, label in zip(starts, labels):
+                gui.log_message(f"  {start:.2f}–{start + lobe_ms:.2f} ms: {label}")
+            gui.log_message(
+                f"  {ref_start_ms:.2f}–{ref_start_ms + pulse_ms:.2f} ms: "
+                "180° pulse conjugates the phase"
+            )
+            gui.log_message(
+                f"  {rewind_start_ms:.2f}–{echo_ms:.2f} ms: +G{first} +G{second} "
+                f"rewind it, spin echo at {echo_ms:.2f} ms"
+            )
+            gui.log_message(
+                f"  Lobes {amplitudes[0]:.3g} mT/m ({first}), "
+                f"{amplitudes[1]:.3g} mT/m ({second}), {cycles:g} cycles across "
+                f"{spans_mm[0]:g} × {spans_mm[1]:g} mm"
+            )
         return b1, gradients, time
 
     def set_time_step(self, dt_s: float):
@@ -1666,7 +1847,7 @@ class SequenceDesigner(QGroupBox):
                     TimingMarker(f"TR {(nxt - start) * 1e3:.3g} ms", start, nxt, 1)
                 )
                 annotations.first_tr_window_s = (0.0, nxt + 0.5 * (nxt - start))
-        elif seq_type not in ("Slice Select + Rephase", "EPI") and tr > 0:
+        elif seq_type != "EPI" and tr > 0:
             if tr <= duration_s + 2 * tolerance:
                 annotations.brackets.append(
                     TimingMarker(f"TR {tr * 1e3:.3g} ms", 0.0, tr, 1)
@@ -1712,6 +1893,7 @@ class SequenceDesigner(QGroupBox):
             "ssfp_start_phase": self.ssfp_start_phase.value(),
             "ssfp_alternate": self.ssfp_alternate_phase.isChecked(),
             "rephase_pct": self.rephase_percentage.value(),
+            "tour_cycles": self.tour_cycles.value(),
             "slice_thickness": self.slice_thickness_spin.value(),
             "slice_gradient": self.slice_gradient_spin.value(),
             "slice_axis": self.slice_axis_combo.currentText(),
@@ -1755,6 +1937,8 @@ class SequenceDesigner(QGroupBox):
                 self.ssfp_alternate_phase.setChecked(state["ssfp_alternate"])
             if "rephase_pct" in state:
                 self.rephase_percentage.setValue(state["rephase_pct"])
+            if "tour_cycles" in state:
+                self.tour_cycles.setValue(state["tour_cycles"])
             if "slice_thickness" in state:
                 self.slice_thickness_spin.setValue(state["slice_thickness"])
             if "slice_gradient" in state:

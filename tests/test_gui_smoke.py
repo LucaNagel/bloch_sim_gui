@@ -2336,3 +2336,82 @@ def test_free_mode_repetitions_play_the_sequence_once_per_tr():
     assert designer.repetitions_spin.value() == 1
     designer.set_state(restored)
     assert designer.repetitions_spin.value() == 3
+
+
+def test_slice_select_rephase_lasts_one_tr():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    designer = window.sequence_designer
+    designer.sequence_type.setCurrentText("Slice Select + Rephase")
+    designer.te_spin.setValue(15.0)  # hidden for this sequence
+    designer.tr_spin.setValue(20.0)
+    dt = 1e-5
+    _, _, time = designer.compile_sequence(
+        custom_pulse=window.rf_designer.get_pulse(), dt=dt
+    )
+    assert time[-1] - time[0] + dt == pytest.approx(20e-3, rel=1e-6)
+
+
+def test_default_pulse_is_a_3_ms_90_degree_sinc():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    designer = window.sequence_designer
+    rf = window.rf_designer
+    assert (rf.pulse_type.currentText(), rf.flip_angle.value()) == ("Sinc", 90.0)
+    assert rf.duration.value() == 3.0
+    rf.set_state({"pulse_type": "Rectangle", "duration": 1.0})
+    for seq_type in (
+        "Spin Echo",
+        "Spin Echo (Tip-axis 180)",
+        "Slice Select + Rephase",
+        "Free Induction Decay",
+    ):
+        designer.sequence_type.setCurrentText(seq_type)
+        assert rf.pulse_type.currentText() == "Sinc", seq_type
+        assert rf.flip_angle.value() == 90.0, seq_type
+        assert rf.duration.value() == 3.0, seq_type
+    designer.sequence_type.setCurrentText("Spin Echo")
+    refocusing = designer.pulse_states["Refocusing"]
+    assert (refocusing["pulse_type"], refocusing["flip_angle"]) == ("Sinc", 180.0)
+    assert refocusing["duration"] == 3.0
+
+
+def test_gradient_tour_echoes_on_a_2d_plane():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    designer = window.sequence_designer
+    designer.sequence_type.setCurrentText("Gradient & RF Tour")
+    assert window._is_plane_geometry()
+    assert not designer.gradient_tour_opts.isHidden()
+    dt = 1e-5
+    b1, gradients, time = designer.compile_sequence(
+        custom_pulse=window.rf_designer.get_pulse(), dt=dt
+    )
+    assert time[-1] - time[0] + dt == pytest.approx(30e-3, rel=1e-6)
+    # The rewind after the 180° pulse matches the net moment before it.
+    refocus = int(np.argmax(np.abs(b1[400:]))) + 400
+    before = gradient_moments_mt_ms_per_m(gradients[:refocus], time[:refocus])
+    after = gradient_moments_mt_ms_per_m(gradients[refocus:], time[refocus:])
+    np.testing.assert_allclose(before[:2], after[:2], rtol=1e-6)
+    assert before[0] > 0 and before[1] > 0
+    assert np.max(np.abs(b1)) == pytest.approx(2.0 * np.max(np.abs(b1[:300])), rel=1e-6)
+
+    positions = window._build_position_grid()
+    result = window.simulator.simulate(
+        (b1, gradients, time),
+        window.tissue_widget.get_parameters(),
+        positions=positions,
+        frequencies=np.array([0.0]),
+        mode=2,
+    )
+    mxy = (result["mx"] + 1j * result["my"]).reshape(len(result["time"]), -1)
+    coherence = np.abs(mxy.mean(axis=1))
+    magnitude = np.abs(mxy).mean(axis=1)
+
+    def at(ms):
+        return int(np.argmin(np.abs(result["time"] - ms * 1e-3)))
+
+    assert coherence[at(4.5)] < 0.1 * magnitude[at(4.5)]  # helix along x
+    assert coherence[at(6.0)] > 0.95 * magnitude[at(6.0)]  # gradient echo
+    assert coherence[at(15.0)] < 0.01 * magnitude[at(15.0)]  # diagonal helix
+    assert coherence[at(20.5)] > 0.95 * magnitude[at(20.5)]  # spin echo

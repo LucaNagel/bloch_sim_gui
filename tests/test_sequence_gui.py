@@ -582,6 +582,8 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     sequence_widget.read_matrix.setValue(4)
     sequence_widget.phase_matrix.setValue(3)
     sequence_widget.epi_repetition_time_ms.setValue(100.0)
+    # A rectangle keeps the P31 slice rephase lobe within the EPI timing.
+    window.rf_designer.pulse_type.setCurrentText("Rectangle")
     sequence_widget.epi_rf_pulse_type.setCurrentText("RF Pulse Designer")
     window.rf_designer.duration.setValue(2.0)
     app.processEvents()
