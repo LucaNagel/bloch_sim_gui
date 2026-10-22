@@ -467,6 +467,14 @@ class MagnetizationViewer(QWidget):
         for checkbox in (self.b1_field_checkbox, self.gradient_field_checkbox):
             checkbox.toggled.connect(lambda _: self._draw_field_frame())
             show_row.addWidget(checkbox)
+        self.labels_checkbox = QCheckBox("Labels")
+        self.labels_checkbox.setObjectName("mag_3d_labels")
+        self.labels_checkbox.setChecked(True)
+        self.labels_checkbox.setToolTip(
+            "Show the position, axis and net labels and the B1/gradient readout."
+        )
+        self.labels_checkbox.toggled.connect(lambda _: self._apply_label_visibility())
+        show_row.addWidget(self.labels_checkbox)
         show_row.addStretch()
         rows.addWidget(self.spatial_show_row)
         self.spatial_option_widgets.append(self.spatial_show_row)
@@ -593,9 +601,17 @@ class MagnetizationViewer(QWidget):
         label = gl.GLTextItem(
             pos=tuple(float(v) for v in pos), text=text, color=(180, 180, 180, 255)
         )
+        label.setVisible(self.labels_checkbox.isChecked())
         self.gl_widget.addItem(label)
         self.position_label_items.append(label)
         return label
+
+    def _apply_label_visibility(self):
+        """Show or hide all scene text after the Labels box changed."""
+        for label in self.position_label_items:
+            label.setVisible(self.labels_checkbox.isChecked())
+        self._redraw_spatial_frame()
+        self._draw_field_frame()
 
     def _place_floor(self, axis_pos, grid_pos=None, grid_size=(4, 4)):
         """Put the axis triad and, unless ``grid_pos`` is None, the floor grid."""
@@ -660,7 +676,9 @@ class MagnetizationViewer(QWidget):
 
         below = -self.NET_VECTOR_SCALE - 0.3
         net_label = self._add_scene_label(self._net_origin + [-0.15, 0.0, below], "net")
-        net_label.setVisible(self.is_net_vector_shown())
+        net_label.setVisible(
+            self.is_net_vector_shown() and self.labels_checkbox.isChecked()
+        )
         self._net_label_item = net_label
         for item in anchored:
             item.resetTransform()
@@ -948,7 +966,9 @@ class MagnetizationViewer(QWidget):
             return
         label = getattr(self, "_net_label_item", None)
         if label is not None:
-            label.setVisible(self.is_net_vector_shown())
+            label.setVisible(
+                self.is_net_vector_shown() and self.labels_checkbox.isChecked()
+            )
         if self._last_spatial_frame is None:
             return
         vecs, means, net = self._last_spatial_frame
@@ -1192,7 +1212,9 @@ class MagnetizationViewer(QWidget):
             )
         self.field_tip_item.setVisible(bool(arrows))
         self.field_label_item.setData(text="   ".join(readout))
-        self.field_label_item.setVisible(bool(readout))
+        self.field_label_item.setVisible(
+            bool(readout) and self.labels_checkbox.isChecked()
+        )
 
     def show_equilibrium_magnetization(self):
         """Display normalized longitudinal magnetization before a simulation."""

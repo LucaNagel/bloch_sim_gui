@@ -2392,6 +2392,10 @@ class BlochSimulatorGUI(QMainWindow):
                 "scaled to the largest gradient of the sequence.",
             ),
             (
+                self.mag_3d.labels_checkbox,
+                "Show the position, axis and net labels and the B1/gradient readout.",
+            ),
+            (
                 self.tissue_widget.preset_combo,
                 "Load predefined relaxation parameters for a tissue type.",
             ),
