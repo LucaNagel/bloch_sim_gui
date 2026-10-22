@@ -56,6 +56,41 @@ def slice_package_positions(
     return float(slice_offset_m) + indices * spacing
 
 
+def in_plane_center_from_definitions(definitions: Mapping) -> tuple[float, float]:
+    """Return the logical read/phase FOV centre stored by a builder in m."""
+
+    lowered = {str(key).lower(): value for key, value in dict(definitions).items()}
+    center = []
+    for key in ("readoffset", "phaseoffset"):
+        value = lowered.get(key)
+        if value is None:
+            center.append(0.0)
+            continue
+        values = numeric_definition_array(value, key)
+        if values.size != 1 or not np.isfinite(values[0]):
+            raise ValueError(f"Pulseq {key} definition must be one finite value")
+        center.append(float(values[0]))
+    return (center[0], center[1])
+
+
+def fov_center_xyz_from_definitions(definitions: Mapping) -> np.ndarray:
+    """Return the read/phase FOV centre as a scanner-xyz vector in m."""
+    read, phase = in_plane_center_from_definitions(definitions)
+    frame = EncodingFrame.from_definitions(definitions)
+    return frame.matrix @ np.asarray((read, phase, 0.0))
+
+
+def offset_applied_in_reconstruction(definitions: Mapping) -> bool:
+    """Return whether the reconstruction, not the ADC, shifts the FOV centre.
+
+    Builders that cannot encode an offset in the receiver (spiral, radial)
+    write ``OffsetEncoding reconstruction``; otherwise the signal already
+    contains the shift and the offsets only place the image.
+    """
+    lowered = {str(key).lower(): value for key, value in dict(definitions).items()}
+    return str(lowered.get("offsetencoding", "")).strip().lower() == "reconstruction"
+
+
 def _axis_vector(code: str, name: str) -> np.ndarray:
     normalized = str(code).strip().lower()
     sign = 1.0

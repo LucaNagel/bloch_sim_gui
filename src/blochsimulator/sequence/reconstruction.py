@@ -14,6 +14,8 @@ from typing import Mapping, Optional
 
 import numpy as np
 
+from .encoding import fov_center_xyz_from_definitions, offset_applied_in_reconstruction
+
 
 def _definition_mapping(result) -> dict:
     return {
@@ -27,6 +29,11 @@ def is_radial_3d_result(result) -> bool:
     return str(_definition_mapping(result).get("trajectorytype", "")).lower() == (
         "radial_3d_spiral_phyllotaxis"
     )
+
+
+def radial_3d_fov_center_xyz_m(result) -> np.ndarray:
+    """Return the scanner-xyz centre of the radial reconstruction grid in m."""
+    return fov_center_xyz_from_definitions(_definition_mapping(result))
 
 
 def _numeric_definition(value) -> np.ndarray:
@@ -124,6 +131,12 @@ def radial_3d_reconstruction_arrays(result, signal=None):
     if values.shape[-1] != dimensions.num_samples:
         raise ValueError("radial signal does not match acquisition dimensions")
 
+    center_xyz = (
+        radial_3d_fov_center_xyz_m(result)
+        if offset_applied_in_reconstruction(definitions)
+        else np.zeros(3)
+    )
+
     event_offsets = np.concatenate(
         ([0], np.cumsum(dimensions.adc_event_sample_counts, dtype=np.int64))
     )
@@ -186,6 +199,11 @@ def radial_3d_reconstruction_arrays(result, signal=None):
             relative_trajectory.append(line - origin)
         trajectory = np.concatenate(relative_trajectory, axis=0)
         selected_values = np.take(values, selected_samples, axis=-1)
+        if np.any(center_xyz):
+            # The receiver phase a scanner would add for an off-centre FOV.
+            selected_values = selected_values * np.exp(
+                2j * np.pi * (trajectory @ center_xyz)
+            )
         grid = _trilinear_radial_grid(selected_values, trajectory, matrix, fov_m)
         position = tuple(
             outer_values[axis].index(value) for axis, value in zip(outer_axes, key)

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from PyQt5.QtCore import QPointF, Qt
 from PyQt5.QtWidgets import QApplication
 
 from blochsimulator.default_phantoms import is_default_phantom
@@ -124,6 +125,134 @@ def test_read_phase_offsets_shift_the_fov_and_slices():
     )
     assert centred.center_text() == ""
     assert not centred.covers_same_region(geometry)
+
+
+def _swapped_axis_package():
+    # Read along +y, phase along -x, slices along z.
+    frame = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    return SequenceGeometry(
+        frame=frame,
+        fov_m=(0.04, 0.03),
+        matrix=(32, 24),
+        slice_positions_m=(-0.002, 0.002),
+        slice_thickness_m=0.003,
+        in_plane_center_m=(0.01, -0.005),
+    )
+
+
+def test_dragged_offsets_follow_the_frame_and_snap():
+    geometry = _swapped_axis_package()
+    every = ("read", "phase", "slice")
+    assert geometry.offsets_m() == pytest.approx((0.01, -0.005, 0.0))
+    offsets = geometry.dragged_offsets_m((0, 1), (3.04, 2.0), every)
+    assert offsets == pytest.approx((0.012, -0.008, 0.0), abs=1e-12)
+    assert geometry.view_shift_mm((0, 1), offsets) == pytest.approx((3.0, 2.0))
+
+    # x-z view: x is the negative phase axis, z the slice normal.
+    assert geometry.dragged_offsets_m((0, 2), (1.0, 5.0), every) == pytest.approx(
+        (0.01, -0.006, 0.005)
+    )
+    assert geometry.dragged_offsets_m(
+        (0, 2), (1.0, 5.0), ("read", "phase")
+    ) == pytest.approx((0.01, -0.006, 0.0))
+    assert geometry.dragged_offsets_m(
+        (0, 2), (1.0, 5.0), every, single_axis=True
+    ) == pytest.approx((0.01, -0.005, 0.005))
+
+
+class _FakeDrag:
+    """Left-button drag event moved by ``delta`` in item coordinates."""
+
+    def __init__(self, delta, *, start=False, finish=False, shift=False):
+        self._delta = QPointF(*delta)
+        self._start = start
+        self._finish = finish
+        self._shift = shift
+
+    def button(self):
+        return Qt.LeftButton
+
+    def isStart(self):
+        return self._start
+
+    def isFinish(self):
+        return self._finish
+
+    def pos(self):
+        return self._delta
+
+    def buttonDownPos(self):
+        return QPointF(0.0, 0.0)
+
+    def modifiers(self):
+        return Qt.ShiftModifier if self._shift else Qt.NoModifier
+
+    def accept(self):
+        pass
+
+    def ignore(self):
+        pass
+
+
+def test_dragging_the_fov_requests_new_offsets():
+    app = QApplication.instance() or QApplication(sys.argv)
+    viewer = SequenceGeometryViewer()
+    requested = []
+    viewer.geometry_offset_requested.connect(lambda *offsets: requested.append(offsets))
+    geometry = _swapped_axis_package()
+    viewer.set_sequence_geometry(geometry)
+    assert viewer.drag_handles == []
+
+    viewer.set_sequence_geometry(
+        geometry, adjustable_offsets=("read", "phase", "slice")
+    )
+    assert [handle.plane for handle in viewer.drag_handles] == [(0, 1), (0, 2), (1, 2)]
+    # The x-y handle covers the shifted FOV: 30 mm phase along x, 40 mm read
+    # along y, centred at x = 5, y = 10 mm.
+    top_view = viewer.drag_handles[0]
+    assert tuple(top_view.pos()) == pytest.approx((-10.0, -10.0))
+    assert tuple(top_view.size()) == pytest.approx((30.0, 40.0))
+
+    side_view = viewer.drag_handles[1]
+    side_view.drag_by((1.0, 5.0), finish=False)
+    label = viewer.drag_labels[1]
+    assert label.isVisible()
+    assert label.textItem.toPlainText() == "phase -1.0 mm, slice +5.0 mm"
+    assert requested == []
+    side_view.drag_by((1.0, 5.0))
+    assert not label.isVisible()
+    assert requested == [pytest.approx((0.01, -0.006, 0.005))]
+
+    # A mouse drag with Shift held keeps the axis that moves most.
+    requested.clear()
+    viewer.set_sequence_geometry(
+        geometry, adjustable_offsets=("read", "phase", "slice")
+    )
+    side_view = viewer.drag_handles[1]
+    side_view.mouseDragEvent(_FakeDrag((0.4, 0.0), start=True, shift=True))
+    side_view.mouseDragEvent(_FakeDrag((1.0, 5.0), shift=True))
+    assert side_view.shift_mm() == pytest.approx((0.0, 5.0))
+    side_view.mouseDragEvent(_FakeDrag((1.0, 5.0), finish=True, shift=True))
+    assert requested == [pytest.approx((0.01, -0.005, 0.005))]
+
+    # A drag back to the start requests nothing.
+    requested.clear()
+    viewer.drag_handles[0].drag_by((0.02, -0.03))
+    assert requested == []
+
+    # Without a FOV only the slices move, in views that show them edge-on.
+    viewer.set_sequence_geometry(
+        SequenceGeometry(
+            frame=np.eye(3), slice_positions_m=(0.004,), slice_thickness_m=0.002
+        ),
+        adjustable_offsets=("slice",),
+    )
+    assert [handle.plane for handle in viewer.drag_handles] == [(0, 2), (1, 2)]
+    viewer.drag_handles[0].drag_by((7.0, -1.5))
+    assert requested == [pytest.approx((0.0, 0.0, 0.0025))]
+    viewer.close()
+    viewer.deleteLater()
+    app.processEvents()
 
 
 def test_coverage_notes_report_a_grid_beyond_the_offset_fov():
@@ -251,6 +380,55 @@ def test_geometry_tab_previews_sequence_parameter_changes():
     app.processEvents()
 
 
+def test_geometry_drag_sets_the_sequence_offsets():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.sequence_live_preview.setChecked(False)
+    widget.sequence_source.setCurrentIndex(widget.FLASH_SOURCE)
+    assert widget._reload_selected_generated_sequence()
+    widget.views.setCurrentIndex(widget.geometry_tab_index)
+    app.processEvents()
+    viewer = widget.geometry_viewer
+    requested = []
+    viewer.geometry_offset_requested.connect(lambda *offsets: requested.append(offsets))
+    assert len(viewer.drag_handles) == 3
+    for handle in viewer.drag_handles:
+        handle.drag_by((2.0, -3.0))
+        app.processEvents()
+    assert len(requested) == 3
+    read_m, phase_m, slice_m = requested[-1]
+    assert widget.flash_read_offset_mm.value() == pytest.approx(read_m * 1000)
+    assert widget.flash_phase_offset_mm.value() == pytest.approx(phase_m * 1000)
+    assert widget.flash_slice_offset_mm.value() == pytest.approx(slice_m * 1000)
+    assert widget._sequence_generation_pending
+    planned = widget._planned_sequence_geometry()
+    assert planned.offsets_m() == pytest.approx(requested[-1])
+    # Each view moved the package by 2 mm and -3 mm along its own axes.
+    assert widget._sequence_geometry().offsets_m() == pytest.approx((0.0, 0.0, 0.0))
+    centre = planned.frame @ planned.offsets_m()
+    assert centre * 1000 == pytest.approx((4.0, -1.0, -6.0))
+    assert not viewer.stale_notice.isHidden()
+
+    # 3D sequences have no slice offset: drags keep the partition centre.
+    widget.sequence_source.setCurrentIndex(widget.BSSFP_SOURCE)
+    widget._sequence_generation_pending = True
+    widget._schedule_geometry_refresh(sequence_only=True)
+    app.processEvents()
+    requested.clear()
+    for handle in viewer.drag_handles:
+        handle.drag_by((2.0, -3.0))
+        app.processEvents()
+    centre = widget._planned_sequence_geometry()
+    centre = centre.frame @ centre.offsets_m()
+    frame = widget._planned_sequence_geometry().frame
+    partition_axis = int(np.argmax(np.abs(frame[:, 2])))
+    assert centre[partition_axis] == 0.0
+    assert widget.bssfp_read_offset_mm.value() != 0.0
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
 def test_slice_package_is_centred_on_its_offset():
     assert slice_package_positions(1, 0.003) == pytest.approx([0.0])
     assert slice_package_positions(3, 0.004, 0.001, 0.002) == pytest.approx(
@@ -276,6 +454,7 @@ def test_planned_geometry_matches_the_generated_sequence():
         "Spiral": (widget.EPI_SOURCE, "_spiral_pulseq_parameters"),
         "CSI": (widget.CSI_SOURCE, "_csi_pulseq_parameters"),
         "bSSFP": (widget.BSSFP_SOURCE, "_bssfp_pulseq_parameters"),
+        "SS-bSSFP": (widget.SS_BSSFP_SOURCE, "_ss_bssfp_pulseq_parameters"),
         "Radial": (widget.RADIAL_ME_BSSFP_SOURCE, "_radial_me_bssfp_pulseq_parameters"),
         "ME-bSSFP": (widget.ME_BSSFP_SOURCE, "_me_bssfp_pulseq_parameters"),
         "FLASH": (widget.FLASH_SOURCE, "_flash_pulseq_parameters"),
@@ -285,10 +464,23 @@ def test_planned_geometry_matches_the_generated_sequence():
     _shift_slice_package(widget, "epi")
     _shift_slice_package(widget, "epsi")
     _shift_slice_package(widget, "flash")
-    widget.flash_read_offset_mm.setValue(6.0)
-    widget.flash_phase_offset_mm.setValue(-4.0)
+    offsets_mm = {
+        "epi": (3.0, -2.0),
+        "epsi": (-5.0, 1.0),
+        "csi": (4.0, 7.0),
+        "flash": (6.0, -4.0),
+        "bssfp": (2.0, 3.0),
+        "ss_bssfp": (-1.0, 2.5),
+        "me_bssfp": (1.5, -3.0),
+        "radial_me": (20.0, -10.0),
+    }
+    for prefix, (read_mm, phase_mm) in offsets_mm.items():
+        getattr(widget, f"{prefix}_read_offset_mm").setValue(read_mm)
+        getattr(widget, f"{prefix}_phase_offset_mm").setValue(phase_mm)
     widget.csi_slice_offset_mm.setValue(-6.0)
     widget.bssfp_phase_matrix.setValue(6)
+    # The default SS-bSSFP TR is too short for its centred readout.
+    widget.ss_bssfp_repetition_time_ms.setValue(8.0)
     widget.slice_selection_offset_mm.setValue(7.0)
     widget.slice_selection_axis.setCurrentText("-Y")
     for label, (source, builder) in cases.items():
@@ -309,8 +501,21 @@ def test_planned_geometry_matches_the_generated_sequence():
         generated = widget._sequence_geometry()
         assert planned.covers_same_region(generated), label
         assert planned.matrix == generated.matrix, label
-        if label == "FLASH":
-            assert generated.in_plane_center_m == pytest.approx((0.006, -0.004))
+        prefix = {
+            "EPI": "epi",
+            "Spiral": "epi",
+            "CSI": "csi",
+            "bSSFP": "bssfp",
+            "SS-bSSFP": "ss_bssfp",
+            "Radial": "radial_me",
+            "ME-bSSFP": "me_bssfp",
+            "FLASH": "flash",
+            "EPSI": "epsi",
+        }.get(label)
+        if prefix is not None:
+            expected = tuple(value / 1000.0 for value in offsets_mm[prefix])
+            assert planned.in_plane_center_m == pytest.approx(expected), label
+            assert generated.in_plane_center_m == pytest.approx(expected), label
     widget.close()
     widget.deleteLater()
     app.processEvents()

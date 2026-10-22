@@ -72,6 +72,15 @@ STALE_SEQUENCE_MESSAGE = (
     "Sequence parameters changed since the shown sequence was generated."
 )
 
+# Logical axes a drag in the views can move, in frame-column order.
+OFFSET_ROLES = ("read", "phase", "slice")
+# Dragged offsets snap to this step.
+OFFSET_SNAP_M = 1e-4
+DRAG_TOOLTIP = (
+    "Drag to move the FOV centre and slice package; hold Shift to move along "
+    "one axis only. Right-click while dragging cancels."
+)
+
 
 @dataclass(frozen=True)
 class OrientedBox:
@@ -167,6 +176,43 @@ class SequenceGeometry:
                 (self.slice_thickness_m, other.slice_thickness_m),
             )
         )
+
+    def offsets_m(self) -> np.ndarray:
+        """Return the read, phase and slice-package centre offsets."""
+        package = (
+            float(np.mean(self.slice_positions_m)) if self.slice_positions_m else 0.0
+        )
+        return np.array([*self.in_plane_center_m, package], dtype=float)
+
+    def dragged_offsets_m(
+        self, plane, delta_mm, adjustable, *, single_axis=False
+    ) -> np.ndarray:
+        """Return the offsets after dragging the placement in one view.
+
+        The view shift ``delta_mm`` is projected onto the read, phase and
+        slice axes. Only the ``adjustable`` roles move, with ``single_axis``
+        only the one that moves most, and moved offsets snap to 0.1 mm.
+        """
+        shift = np.zeros(3)
+        shift[list(plane)] = np.asarray(delta_mm, dtype=float) / 1000.0
+        moved = np.asarray(self.frame, dtype=float).T @ shift
+        moved[[role not in adjustable for role in OFFSET_ROLES]] = 0.0
+        if single_axis:
+            moved[np.arange(3) != int(np.argmax(np.abs(moved)))] = 0.0
+        offsets = self.offsets_m()
+        changed = np.abs(moved) > 0.0
+        offsets[changed] = (
+            np.round((offsets[changed] + moved[changed]) / OFFSET_SNAP_M)
+            * OFFSET_SNAP_M
+        )
+        return offsets
+
+    def view_shift_mm(self, plane, offsets_m) -> np.ndarray:
+        """Return how far new offsets move the placement in one view."""
+        shift = np.asarray(self.frame, dtype=float) @ (
+            np.asarray(offsets_m, dtype=float) - self.offsets_m()
+        )
+        return shift[list(plane)] * 1000.0
 
     def center_text(self) -> str:
         """Describe a shifted FOV centre, e.g. ``centre read 6, phase -4 mm``."""
@@ -762,10 +808,75 @@ def _format_mm(values) -> str:
     return " × ".join(f"{float(value) * 1000:.4g}" for value in values) + " mm"
 
 
+def _outline_rect(outlines) -> QRectF:
+    points = np.vstack(outlines)
+    low, high = points.min(axis=0), points.max(axis=0)
+    return QRectF(low[0], low[1], high[0] - low[0], high[1] - low[1])
+
+
+class OffsetDragHandle(pg.ROI):
+    """Translation-only area over the drawn FOV or slice package of one view.
+
+    ``place(delta_mm, single_axis)`` returns how far the placement may move
+    for a drag of ``delta_mm``; the handle follows that, not the cursor.
+    """
+
+    def __init__(self, rect: QRectF, plane, color, place):
+        super().__init__(
+            rect.topLeft(),
+            rect.size(),
+            movable=True,
+            rotatable=False,
+            resizable=False,
+            removable=False,
+            pen=pg.mkPen(None),
+            hoverPen=pg.mkPen(color, width=3),
+        )
+        self.origin = pg.Point(rect.topLeft())
+        self.plane = plane
+        self._place = place
+        self._drag_start = pg.Point(0.0, 0.0)
+        self.setCursor(Qt.SizeAllCursor)
+        self.setToolTip(DRAG_TOOLTIP)
+
+    def shift_mm(self) -> np.ndarray:
+        offset = self.pos() - self.origin
+        return np.array([offset.x(), offset.y()], dtype=float)
+
+    def drag_by(self, delta_mm, *, single_axis=False, finish=True):
+        """Move by ``delta_mm`` from the drawn position, as far as allowed."""
+        shown = self._place(np.asarray(delta_mm, dtype=float), single_axis)
+        self.setPos(self.origin + pg.Point(*shown), finish=finish)
+
+    def mouseDragEvent(self, ev):
+        # pyqtgraph would read Shift as a scale drag; here it keeps one axis.
+        if ev.button() != Qt.LeftButton:
+            ev.ignore()
+            return
+        ev.accept()
+        if ev.isStart():
+            self._moveStarted()
+            self._drag_start = self.pos() - self.origin
+        if not self.isMoving:  # a right click cancelled the drag
+            return
+        if ev.isFinish():
+            self._moveFinished()
+            return
+        moved = self.mapToParent(ev.pos()) - self.mapToParent(ev.buttonDownPos())
+        delta = self._drag_start + moved
+        self.drag_by(
+            (delta.x(), delta.y()),
+            single_axis=bool(ev.modifiers() & Qt.ShiftModifier),
+            finish=False,
+        )
+
+
 class SequenceGeometryViewer(QWidget):
     """Orthogonal projections of the object with grid and sequence FOV."""
 
     update_requested = pyqtSignal()
+    # New read, phase and slice-package offsets (m) dragged in the views.
+    geometry_offset_requested = pyqtSignal(float, float, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -797,6 +908,8 @@ class SequenceGeometryViewer(QWidget):
         grid = QGridLayout()
         self.plots = []
         self.images = []
+        self.drag_handles = []
+        self.drag_labels = []
         self._overlay_items = []
         for index, (horizontal, vertical) in enumerate(VIEW_PLANES):
             plot = pg.PlotWidget()
@@ -808,8 +921,15 @@ class SequenceGeometryViewer(QWidget):
             plot.setLabel("left", AXES[vertical], units="mm")
             image = pg.ImageItem(axisOrder="col-major")
             plot.addItem(image)
+            label = pg.TextItem(
+                color="w", fill=pg.mkBrush(0, 0, 0, 170), anchor=(0.5, 0.5)
+            )
+            label.setZValue(30)
+            label.hide()
+            plot.addItem(label, ignoreBounds=True)
             self.plots.append(plot)
             self.images.append(image)
+            self.drag_labels.append(label)
             grid.addWidget(plot, index // 2, index % 2)
         self.contrast_combo = QComboBox()
         self.contrast_combo.setToolTip(
@@ -840,6 +960,7 @@ class SequenceGeometryViewer(QWidget):
         self._probe_position_m = None
         self._sequence = None
         self._generated_sequence = None
+        self._adjustable_offsets = ()
         self.contrasts = []
         self.contrast = None
         self._contrast_range = None
@@ -922,6 +1043,9 @@ class SequenceGeometryViewer(QWidget):
         for plot, item in self._overlay_items:
             plot.removeItem(item)
         self._overlay_items = []
+        self.drag_handles = []
+        for label in self.drag_labels:
+            label.hide()
 
     def _add_outline(
         self, box, color, *, style=Qt.SolidLine, fill_alpha=0, z=10, thin_axis=None
@@ -972,6 +1096,7 @@ class SequenceGeometryViewer(QWidget):
         object_label: str = "",
         probe_position_m=None,
         generated_sequence: Optional[SequenceGeometry] = None,
+        adjustable_offsets: Sequence[str] = (),
     ):
         """Redraw the projections and overlays for the current selection."""
         self._phantom = phantom
@@ -980,7 +1105,11 @@ class SequenceGeometryViewer(QWidget):
         self.contrasts = object_contrasts(phantom)
         self._populate_contrast_combo()
         self._draw_object()
-        self.set_sequence_geometry(sequence, generated_sequence=generated_sequence)
+        self.set_sequence_geometry(
+            sequence,
+            generated_sequence=generated_sequence,
+            adjustable_offsets=adjustable_offsets,
+        )
         for plot in self.plots:
             plot.enableAutoRange()
 
@@ -989,15 +1118,18 @@ class SequenceGeometryViewer(QWidget):
         sequence: Optional[SequenceGeometry],
         *,
         generated_sequence: Optional[SequenceGeometry] = None,
+        adjustable_offsets: Sequence[str] = (),
     ):
         """Redraw only the sequence overlays and keep the object projections.
 
         ``generated_sequence`` is the placement of the last generated
         sequence; while it differs from ``sequence`` it stays visible as a
-        dotted outline.
+        dotted outline. ``adjustable_offsets`` names the offsets of
+        ``OFFSET_ROLES`` that dragging the FOV or slices may change.
         """
         self._sequence = sequence
         self._generated_sequence = generated_sequence
+        self._adjustable_offsets = tuple(adjustable_offsets)
         self._draw_overlays()
 
     def _draw_overlays(self):
@@ -1078,6 +1210,7 @@ class SequenceGeometryViewer(QWidget):
             previous = self._generated_sequence
             if previous is not None and not previous.covers_same_region(sequence):
                 rows.append(self._draw_generated_outline(previous, fallback, extent))
+            self._add_drag_handles(sequence, fov_box, slices)
         notes = (
             coverage_notes(phantom, sequence, object_box)
             if (phantom is not None or sequence is not None)
@@ -1085,6 +1218,72 @@ class SequenceGeometryViewer(QWidget):
         )
         self._summary_parts = (self._object_label, rows, notes)
         self._update_summary()
+
+    def _add_drag_handles(self, sequence, fov_box, slices):
+        """Make the FOV, or slices without one, draggable where offsets allow."""
+        adjustable = [role in self._adjustable_offsets for role in OFFSET_ROLES]
+        frame = np.asarray(sequence.frame, dtype=float)
+        for index, (plot, plane) in enumerate(zip(self.plots, VIEW_PLANES)):
+            if not np.any(np.abs(frame[list(plane)][:, adjustable]) > 1e-9):
+                continue
+            if fov_box is not None:
+                outlines = [projected_outline_mm(fov_box, plane)]
+            else:
+                outlines = [projected_outline_mm(box, plane) for box in slices]
+            if not outlines:
+                continue
+
+            def place(delta_mm, single_axis, plane=plane):
+                return sequence.view_shift_mm(
+                    plane,
+                    sequence.dragged_offsets_m(
+                        plane,
+                        delta_mm,
+                        self._adjustable_offsets,
+                        single_axis=single_axis,
+                    ),
+                )
+
+            handle = OffsetDragHandle(
+                _outline_rect(outlines), plane, SEQUENCE_COLOR, place
+            )
+            handle.setZValue(15)
+            handle.sigRegionChanged.connect(
+                lambda moved, index=index: self._offset_drag_moved(moved, index)
+            )
+            handle.sigRegionChangeFinished.connect(self._offset_drag_finished)
+            plot.addItem(handle, ignoreBounds=True)
+            self._overlay_items.append((plot, handle))
+            self.drag_handles.append(handle)
+
+    def _dragged_offsets(self, handle) -> np.ndarray:
+        return self._sequence.dragged_offsets_m(
+            handle.plane, handle.shift_mm(), self._adjustable_offsets
+        )
+
+    def _offset_drag_moved(self, handle, index):
+        if self._sequence is None:
+            return
+        moved_mm = (self._dragged_offsets(handle) - self._sequence.offsets_m()) * 1e3
+        text = ", ".join(
+            f"{role} {value:+.1f} mm"
+            for role, value in zip(OFFSET_ROLES, moved_mm)
+            if role in self._adjustable_offsets and abs(value) > 1e-6
+        )
+        label = self.drag_labels[index]
+        label.setText(text or "no shift")
+        label.setPos(handle.mapToParent(handle.boundingRect().center()))
+        label.show()
+
+    def _offset_drag_finished(self, handle):
+        for label in self.drag_labels:
+            label.hide()
+        if self._sequence is None:
+            return
+        offsets = self._dragged_offsets(handle)
+        if np.allclose(offsets, self._sequence.offsets_m(), rtol=0.0, atol=1e-9):
+            return
+        self.geometry_offset_requested.emit(*(float(value) for value in offsets))
 
     def _draw_generated_outline(self, sequence, fallback_partition_m, extent_m):
         """Draw the last generated placement dotted and return its summary row."""

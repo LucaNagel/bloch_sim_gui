@@ -168,6 +168,7 @@ from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumView
 from .project_export_dialog import ProjectExportNamingWidget
 from .reconstruction_explorer import SequenceReconstructionExplorer
 from .sequence_geometry_viewer import (
+    OFFSET_ROLES,
     STALE_SEQUENCE_MESSAGE,
     SequenceGeometry,
     SequenceGeometryViewer,
@@ -1452,6 +1453,37 @@ class SequenceSimulationWidget(QWidget):
     )
     CONFIGURABLE_SOURCES = GENERATED_SOURCES | {INTERNAL_SOURCE}
     CARTESIAN_3D_SOURCES = frozenset((BSSFP_SOURCE, SS_BSSFP_SOURCE, ME_BSSFP_SOURCE))
+    # Field-name prefix of the forms with read and phase offsets.
+    OFFSET_FORM_PREFIXES = {
+        EPI_SOURCE: "epi",
+        CSI_SOURCE: "csi",
+        BSSFP_SOURCE: "bssfp",
+        SS_BSSFP_SOURCE: "ss_bssfp",
+        RADIAL_ME_BSSFP_SOURCE: "radial_me",
+        ME_BSSFP_SOURCE: "me_bssfp",
+        FLASH_SOURCE: "flash",
+        EPSI_MGE_SOURCE: "epsi",
+    }
+    # Tooltip endings of the read/phase offset fields, by where the shift is
+    # applied.
+    OFFSET_IN_SEQUENCE = (
+        "The sequence encodes the shift in the receiver frequency and phase, "
+        "as a scanner does, so the exported .seq carries it as well."
+    )
+    OFFSET_IN_EPI_OR_SPIRAL = (
+        "EPI encodes the shift in the receiver frequency and phase, as a "
+        "scanner does. A spiral readout applies it as a k-space phase ramp in "
+        "the reconstruction; its exported .seq records the offsets."
+    )
+    OFFSET_IN_CSI = (
+        "The phase-encoding steps carry the shift as a receiver phase ramp, so "
+        "the exported .seq carries it as well."
+    )
+    OFFSET_IN_RECONSTRUCTION = (
+        "The reconstruction applies the shift as a k-space phase ramp, as a "
+        "scanner does for radial readouts; the exported .seq records the "
+        "offsets."
+    )
     NO_PHANTOM_MESSAGE = (
         "No phantom is loaded in the Phantom tab. Create or load one first."
     )
@@ -2637,6 +2669,9 @@ class SequenceSimulationWidget(QWidget):
         )
         self.epi_read_fov_mm = self._parameter_spin(0.1, 10000.0, default_fov_x, " mm")
         self.epi_phase_fov_mm = self._parameter_spin(0.1, 10000.0, default_fov_y, " mm")
+        self.epi_read_offset_mm, self.epi_phase_offset_mm = self._in_plane_offset_spins(
+            "epi", self.OFFSET_IN_EPI_OR_SPIRAL
+        )
         self.sampling_bandwidth_khz = self._sampling_bandwidth_spin(50.0)
         self.epi_flip_angle_deg = QDoubleSpinBox()
         self.epi_flip_angle_deg.setRange(0.1, 360.0)
@@ -2766,6 +2801,8 @@ class SequenceSimulationWidget(QWidget):
         acquisition_form.addRow("Phase matrix", self.phase_matrix)
         acquisition_form.addRow("Read FOV", self.epi_read_fov_mm)
         acquisition_form.addRow("Phase FOV", self.epi_phase_fov_mm)
+        acquisition_form.addRow("Read offset", self.epi_read_offset_mm)
+        acquisition_form.addRow("Phase offset", self.epi_phase_offset_mm)
         acquisition_form.addRow("Sampling bandwidth", self.sampling_bandwidth_khz)
         acquisition_form.addRow("Spiral revolutions", self.epi_spiral_turns)
         _add_form_section(acquisition_form, "RF pulse")
@@ -2846,6 +2883,9 @@ class SequenceSimulationWidget(QWidget):
         self.epsi_phase_fov_mm = self._parameter_spin(
             0.1, 10000.0, default_fov_y, " mm"
         )
+        self.epsi_read_offset_mm, self.epsi_phase_offset_mm = (
+            self._in_plane_offset_spins("epsi", self.OFFSET_IN_SEQUENCE)
+        )
         self.epsi_sampling_bandwidth_khz = self._sampling_bandwidth_spin(50.0)
         self.epsi_echoes = QSpinBox()
         self.epsi_echoes.setRange(1, 1024)
@@ -2905,6 +2945,8 @@ class SequenceSimulationWidget(QWidget):
         epsi_form.addRow("Phase matrix", self.epsi_phase_matrix)
         epsi_form.addRow("Read FOV", self.epsi_read_fov_mm)
         epsi_form.addRow("Phase FOV", self.epsi_phase_fov_mm)
+        epsi_form.addRow("Read offset", self.epsi_read_offset_mm)
+        epsi_form.addRow("Phase offset", self.epsi_phase_offset_mm)
         epsi_form.addRow("Sampling bandwidth", self.epsi_sampling_bandwidth_khz)
         epsi_form.addRow("Echoes / spectral points", self.epsi_echoes)
         epsi_form.addRow("Echo spacing", self.epsi_echo_spacing_ms)
@@ -2964,6 +3006,9 @@ class SequenceSimulationWidget(QWidget):
         self.csi_phase_matrix.setValue(16)
         self.csi_read_fov_mm = self._parameter_spin(0.1, 10000.0, default_fov_x, " mm")
         self.csi_phase_fov_mm = self._parameter_spin(0.1, 10000.0, default_fov_y, " mm")
+        self.csi_read_offset_mm, self.csi_phase_offset_mm = self._in_plane_offset_spins(
+            "csi", self.OFFSET_IN_CSI
+        )
         self.csi_spectral_points = QSpinBox()
         self.csi_spectral_points.setRange(2, 8192)
         self.csi_spectral_points.setValue(128)
@@ -3036,6 +3081,8 @@ class SequenceSimulationWidget(QWidget):
         csi_form.addRow("Phase phase matrix", self.csi_phase_matrix)
         csi_form.addRow("Read FOV", self.csi_read_fov_mm)
         csi_form.addRow("Phase FOV", self.csi_phase_fov_mm)
+        csi_form.addRow("Read offset", self.csi_read_offset_mm)
+        csi_form.addRow("Phase offset", self.csi_phase_offset_mm)
         csi_form.addRow("Encoding order", self.csi_encoding_order)
         _add_form_section(csi_form, "Spectral sampling")
         csi_form.addRow("Spectral points", self.csi_spectral_points)
@@ -3124,18 +3171,9 @@ class SequenceSimulationWidget(QWidget):
         self.flash_slice_thickness_mm = self._parameter_spin(0.05, 100.0, 3.0, " mm")
         self.flash_slice_gap_mm = self._parameter_spin(0.0, 100.0, 0.0, " mm")
         self.flash_slice_offset_mm = self._parameter_spin(-10000.0, 10000.0, 0.0, " mm")
-        self.flash_read_offset_mm = self._parameter_spin(-10000.0, 10000.0, 0.0, " mm")
-        self.flash_phase_offset_mm = self._parameter_spin(-10000.0, 10000.0, 0.0, " mm")
-        for spin, role in (
-            (self.flash_read_offset_mm, "read"),
-            (self.flash_phase_offset_mm, "phase"),
-        ):
-            spin.setObjectName(f"flash_{role}_offset_mm")
-            spin.setToolTip(
-                f"Move the FOV centre along the {role} gradient direction. The "
-                "sequence encodes the shift in the receiver frequency and phase, "
-                "as a scanner does, so the exported .seq carries it as well."
-            )
+        self.flash_read_offset_mm, self.flash_phase_offset_mm = (
+            self._in_plane_offset_spins("flash", self.OFFSET_IN_SEQUENCE)
+        )
         self.flash_echo_time_ms = self._parameter_spin(0.1, 10000.0, 5.0, " ms")
         self.flash_repetition_time_ms = self._parameter_spin(0.1, 100000.0, 15.0, " ms")
         self.flash_repetitions = QSpinBox()
@@ -3256,6 +3294,9 @@ class SequenceSimulationWidget(QWidget):
         self.bssfp_partition_fov_mm = self._parameter_spin(
             0.1, 10000.0, default_fov_z, " mm"
         )
+        self.bssfp_read_offset_mm, self.bssfp_phase_offset_mm = (
+            self._in_plane_offset_spins("bssfp", self.OFFSET_IN_SEQUENCE)
+        )
         self.bssfp_bandwidth_khz = self._sampling_bandwidth_spin(10.0)
         self.bssfp_flip_angle_deg = self._parameter_spin(0.1, 360.0, 15.0, "°")
         self.bssfp_repetition_time_ms = self._parameter_spin(0.1, 10000.0, 10.0, " ms")
@@ -3344,6 +3385,8 @@ class SequenceSimulationWidget(QWidget):
         bssfp_form.addRow("Read FOV", self.bssfp_read_fov_mm)
         bssfp_form.addRow("Phase FOV", self.bssfp_phase_fov_mm)
         bssfp_form.addRow("Partition FOV", self.bssfp_partition_fov_mm)
+        bssfp_form.addRow("Read offset", self.bssfp_read_offset_mm)
+        bssfp_form.addRow("Phase offset", self.bssfp_phase_offset_mm)
         bssfp_form.addRow("Sampling bandwidth", self.bssfp_bandwidth_khz)
         _add_form_section(bssfp_form, "RF pulse and timing")
         bssfp_form.addRow("Flip angle", self.bssfp_flip_angle_deg)
@@ -3401,6 +3444,9 @@ class SequenceSimulationWidget(QWidget):
         self.ss_bssfp_read_fov_mm = self._parameter_spin(0.1, 10000.0, 56.0, " mm")
         self.ss_bssfp_phase_fov_mm = self._parameter_spin(0.1, 10000.0, 28.0, " mm")
         self.ss_bssfp_partition_fov_mm = self._parameter_spin(0.1, 10000.0, 21.0, " mm")
+        self.ss_bssfp_read_offset_mm, self.ss_bssfp_phase_offset_mm = (
+            self._in_plane_offset_spins("ss_bssfp", self.OFFSET_IN_SEQUENCE)
+        )
         self.ss_bssfp_target_names = QLineEdit("Lac, Py")
         self.ss_bssfp_target_names.setToolTip(
             "Comma-separated names; one name per RF/receiver frequency pair"
@@ -3524,6 +3570,8 @@ class SequenceSimulationWidget(QWidget):
         ss_form.addRow("Read FOV", self.ss_bssfp_read_fov_mm)
         ss_form.addRow("Phase FOV", self.ss_bssfp_phase_fov_mm)
         ss_form.addRow("Partition FOV", self.ss_bssfp_partition_fov_mm)
+        ss_form.addRow("Read offset", self.ss_bssfp_read_offset_mm)
+        ss_form.addRow("Phase offset", self.ss_bssfp_phase_offset_mm)
         _add_form_section(ss_form, "Spectral targets and RF pulse")
         ss_form.addRow("Target names", self.ss_bssfp_target_names)
         ss_form.addRow("RF target offsets", self.ss_bssfp_target_offsets_hz)
@@ -3584,6 +3632,9 @@ class SequenceSimulationWidget(QWidget):
             self.radial_me_partition_gradient_axis,
         ) = self._three_dimensional_orientation_controls("radial_me")
         self.radial_me_fov_mm = self._parameter_spin(0.1, 10000.0, 356.0, " mm")
+        self.radial_me_read_offset_mm, self.radial_me_phase_offset_mm = (
+            self._in_plane_offset_spins("radial_me", self.OFFSET_IN_RECONSTRUCTION)
+        )
         self.radial_me_base_resolution = QSpinBox()
         self.radial_me_base_resolution.setRange(2, 256)
         self.radial_me_base_resolution.setValue(8)
@@ -3670,6 +3721,8 @@ class SequenceSimulationWidget(QWidget):
             "Trajectory partition axis", self.radial_me_partition_gradient_axis
         )
         radial_form.addRow("Isotropic FOV", self.radial_me_fov_mm)
+        radial_form.addRow("Read offset", self.radial_me_read_offset_mm)
+        radial_form.addRow("Phase offset", self.radial_me_phase_offset_mm)
         radial_form.addRow("Base resolution", self.radial_me_base_resolution)
         radial_form.addRow("Readout oversampling", self.radial_me_readout_oversampling)
         radial_form.addRow("Spokes / measurement", self.radial_me_spokes)
@@ -3735,6 +3788,9 @@ class SequenceSimulationWidget(QWidget):
         self.me_bssfp_read_fov_mm = self._parameter_spin(0.1, 10000.0, 56.0, " mm")
         self.me_bssfp_phase_fov_mm = self._parameter_spin(0.1, 10000.0, 28.0, " mm")
         self.me_bssfp_partition_fov_mm = self._parameter_spin(0.1, 10000.0, 24.5, " mm")
+        self.me_bssfp_read_offset_mm, self.me_bssfp_phase_offset_mm = (
+            self._in_plane_offset_spins("me_bssfp", self.OFFSET_IN_SEQUENCE)
+        )
         self.me_bssfp_echoes = QSpinBox()
         self.me_bssfp_echoes.setRange(1, 31)
         self.me_bssfp_echoes.setSingleStep(2)
@@ -3816,6 +3872,8 @@ class SequenceSimulationWidget(QWidget):
         me_form.addRow("Read FOV", self.me_bssfp_read_fov_mm)
         me_form.addRow("Phase FOV", self.me_bssfp_phase_fov_mm)
         me_form.addRow("Partition FOV", self.me_bssfp_partition_fov_mm)
+        me_form.addRow("Read offset", self.me_bssfp_read_offset_mm)
+        me_form.addRow("Phase offset", self.me_bssfp_phase_offset_mm)
         me_form.addRow("Echoes", self.me_bssfp_echoes)
         me_form.addRow("Echo spacing", self.me_bssfp_echo_spacing_ms)
         me_form.addRow("Readout strategy", self.me_bssfp_readout_strategy)
@@ -4586,6 +4644,8 @@ class SequenceSimulationWidget(QWidget):
         self.epi_slice_thickness_mm.valueChanged.connect(self._acquisition_changed)
         self.epi_slice_gap_mm.valueChanged.connect(self._acquisition_changed)
         self.epi_slice_offset_mm.valueChanged.connect(self._acquisition_changed)
+        self.epi_read_offset_mm.valueChanged.connect(self._acquisition_changed)
+        self.epi_phase_offset_mm.valueChanged.connect(self._acquisition_changed)
         self._connect_two_dimensional_orientation_controls(
             self.epi_slice_orientation,
             self.epi_read_gradient_axis,
@@ -4625,6 +4685,8 @@ class SequenceSimulationWidget(QWidget):
             self.epsi_slice_thickness_mm,
             self.epsi_slice_gap_mm,
             self.epsi_slice_offset_mm,
+            self.epsi_read_offset_mm,
+            self.epsi_phase_offset_mm,
             self.epsi_repetition_time_ms,
             self.epsi_repetitions,
             self.epsi_acquisition_interval_ms,
@@ -4667,6 +4729,8 @@ class SequenceSimulationWidget(QWidget):
             self.csi_rf_slr_sharpness,
             self.csi_slice_thickness_mm,
             self.csi_slice_offset_mm,
+            self.csi_read_offset_mm,
+            self.csi_phase_offset_mm,
             self.csi_echo_time_ms,
             self.csi_repetition_time_ms,
             self.csi_repetitions,
@@ -4749,6 +4813,8 @@ class SequenceSimulationWidget(QWidget):
             self.bssfp_read_fov_mm,
             self.bssfp_phase_fov_mm,
             self.bssfp_partition_fov_mm,
+            self.bssfp_read_offset_mm,
+            self.bssfp_phase_offset_mm,
             self.bssfp_bandwidth_khz,
             self.bssfp_flip_angle_deg,
             self.bssfp_rf_duration_ms,
@@ -4774,6 +4840,8 @@ class SequenceSimulationWidget(QWidget):
             self.ss_bssfp_read_fov_mm,
             self.ss_bssfp_phase_fov_mm,
             self.ss_bssfp_partition_fov_mm,
+            self.ss_bssfp_read_offset_mm,
+            self.ss_bssfp_phase_offset_mm,
             self.ss_bssfp_rf_duration_ms,
             self.ss_bssfp_rf_sinc_lobes,
             self.ss_bssfp_rf_slr_sharpness,
@@ -4805,6 +4873,8 @@ class SequenceSimulationWidget(QWidget):
         self.ss_bssfp_alpha_half_use_ratios.toggled.connect(self._ss_bssfp_changed)
         for widget in (
             self.radial_me_fov_mm,
+            self.radial_me_read_offset_mm,
+            self.radial_me_phase_offset_mm,
             self.radial_me_base_resolution,
             self.radial_me_readout_oversampling,
             self.radial_me_spokes,
@@ -4838,6 +4908,8 @@ class SequenceSimulationWidget(QWidget):
             self.me_bssfp_read_fov_mm,
             self.me_bssfp_phase_fov_mm,
             self.me_bssfp_partition_fov_mm,
+            self.me_bssfp_read_offset_mm,
+            self.me_bssfp_phase_offset_mm,
             self.me_bssfp_echoes,
             self.me_bssfp_echo_spacing_ms,
             self.me_bssfp_bandwidth_khz,
@@ -5097,6 +5169,9 @@ class SequenceSimulationWidget(QWidget):
         )
         self.geometry_viewer = SequenceGeometryViewer()
         self.geometry_viewer.update_requested.connect(self._geometry_update_requested)
+        self.geometry_viewer.geometry_offset_requested.connect(
+            self._geometry_offset_requested
+        )
         self.geometry_tab_index = views.addTab(self.geometry_viewer, "Geometry")
         views.setTabToolTip(
             self.geometry_tab_index,
@@ -5451,6 +5526,18 @@ class SequenceSimulationWidget(QWidget):
         widget.setValue(value)
         widget.setSuffix(suffix)
         return widget
+
+    def _in_plane_offset_spins(self, prefix, mechanism):
+        """Create the read and phase FOV-offset fields of one sequence form."""
+        spins = []
+        for role in ("read", "phase"):
+            spin = self._parameter_spin(-10000.0, 10000.0, 0.0, " mm")
+            spin.setObjectName(f"{prefix}_{role}_offset_mm")
+            spin.setToolTip(
+                f"Move the FOV centre along the {role} gradient direction. " + mechanism
+            )
+            spins.append(spin)
+        return tuple(spins)
 
     @staticmethod
     def _sampling_bandwidth_spin(default_khz):
@@ -9409,6 +9496,39 @@ class SequenceSimulationWidget(QWidget):
             for role in ("read", "phase")
         }
 
+    def _geometry_offset_spins(self, source_index):
+        """Return the offset fields a drag in the Geometry tab sets, by role."""
+        if source_index == self.SLICE_SELECTION_SOURCE:
+            return {"slice": self.slice_selection_offset_mm}
+        prefix = self.OFFSET_FORM_PREFIXES.get(source_index)
+        if prefix is None:
+            return {}
+        spins = {
+            role: getattr(self, f"{prefix}_{role}_offset_mm", None)
+            for role in OFFSET_ROLES
+        }
+        return {role: spin for role, spin in spins.items() if spin is not None}
+
+    def _geometry_offset_requested(self, read_m, phase_m, slice_m):
+        """Write offsets dragged in the Geometry tab into the sequence form."""
+        values_m = dict(zip(OFFSET_ROLES, (read_m, phase_m, slice_m)))
+        spins = self._geometry_offset_spins(self.sequence_source.currentIndex())
+        changed = False
+        for role, spin in spins.items():
+            value_mm = values_m[role] * 1000.0
+            if abs(spin.value() - value_mm) < 1e-9:
+                continue
+            # Offsets leave timing alone, so one refresh below replaces the
+            # change handling of each field.
+            spin.blockSignals(True)
+            try:
+                spin.setValue(value_mm)
+            finally:
+                spin.blockSignals(False)
+            changed = True
+        if changed:
+            self._request_generated_sequence_refresh()
+
     def _sequence_geometry_parameters(self, source_index):
         """Return the form values that place a generated sequence in space.
 
@@ -9434,10 +9554,12 @@ class SequenceSimulationWidget(QWidget):
                 "encoding_axes": self._three_dimensional_encoding_frame(
                     source_index
                 ).axis_codes,
+                **self._in_plane_offset_parameters("radial_me"),
             }
         if source_index in self.CARTESIAN_3D_SOURCES:
-            fov_m, matrix = {
+            prefix, fov_m, matrix = {
                 self.BSSFP_SOURCE: (
+                    "bssfp",
                     self._bssfp_fov_m(),
                     (
                         self.bssfp_read_matrix,
@@ -9446,6 +9568,7 @@ class SequenceSimulationWidget(QWidget):
                     ),
                 ),
                 self.SS_BSSFP_SOURCE: (
+                    "ss_bssfp",
                     self._ss_bssfp_fov_m(),
                     (
                         self.ss_bssfp_read_matrix,
@@ -9454,6 +9577,7 @@ class SequenceSimulationWidget(QWidget):
                     ),
                 ),
                 self.ME_BSSFP_SOURCE: (
+                    "me_bssfp",
                     self._me_bssfp_fov_m(),
                     (
                         self.me_bssfp_read_matrix,
@@ -9468,12 +9592,16 @@ class SequenceSimulationWidget(QWidget):
                 "encoding_axes": self._three_dimensional_encoding_frame(
                     source_index
                 ).axis_codes,
+                **self._in_plane_offset_parameters(prefix),
             }
         two_dimensional = {
             self.EPI_SOURCE: (
                 self._epi_fov_m(),
                 (self.read_matrix, self.phase_matrix),
-                self._slice_package_parameters("epi"),
+                {
+                    **self._slice_package_parameters("epi"),
+                    **self._in_plane_offset_parameters("epi"),
+                },
             ),
             self.EPSI_MGE_SOURCE: (
                 (
@@ -9481,7 +9609,10 @@ class SequenceSimulationWidget(QWidget):
                     self.epsi_phase_fov_mm.value() / 1000.0,
                 ),
                 (self.epsi_read_matrix, self.epsi_phase_matrix),
-                self._slice_package_parameters("epsi"),
+                {
+                    **self._slice_package_parameters("epsi"),
+                    **self._in_plane_offset_parameters("epsi"),
+                },
             ),
             self.FLASH_SOURCE: (
                 self._flash_fov_m(),
@@ -9498,6 +9629,7 @@ class SequenceSimulationWidget(QWidget):
                 {
                     "slice_thickness_m": self.csi_slice_thickness_mm.value() / 1000.0,
                     "slice_offset_m": self.csi_slice_offset_mm.value() / 1000.0,
+                    **self._in_plane_offset_parameters("csi"),
                 },
             ),
         }.get(source_index)
@@ -11532,6 +11664,10 @@ class SequenceSimulationWidget(QWidget):
                 fov_m=(parameters["fov_m"],) * 3,
                 matrix=(samples,) * 3,
                 name=name,
+                in_plane_center_m=(
+                    parameters["read_offset_m"],
+                    parameters["phase_offset_m"],
+                ),
             )
         thickness = parameters.get("slice_thickness_m")
         positions = ()
@@ -11642,9 +11778,12 @@ class SequenceSimulationWidget(QWidget):
         self._update_geometry_stale_notice(previewing=sequence is not None)
         if sequence is None:
             sequence, generated = generated, None
+        adjustable = tuple(
+            self._geometry_offset_spins(self.sequence_source.currentIndex())
+        )
         if not full:
             self.geometry_viewer.set_sequence_geometry(
-                sequence, generated_sequence=generated
+                sequence, generated_sequence=generated, adjustable_offsets=adjustable
             )
             return
         phantom, label = self._geometry_viewer_object()
@@ -11664,6 +11803,7 @@ class SequenceSimulationWidget(QWidget):
             object_label=label,
             probe_position_m=probe_position,
             generated_sequence=generated,
+            adjustable_offsets=adjustable,
         )
 
     def _sequence_plot_range_changed(self, _view_box, x_range):

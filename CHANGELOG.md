@@ -79,6 +79,18 @@ The project follows [Semantic Versioning](https://semver.org/).
   exported `.seq` carries them too (`ReadOffset`/`PhaseOffset` definitions).
   Image coordinates, DICOM, NIfTI and Bruker export, the Geometry tab and its
   coverage notes follow the shifted centre.
+- EPI, EPSI, CSI, 3D bSSFP, SS-bSSFP and ME-bSSFP take read and phase offsets
+  the same way: Cartesian readouts shift the ADC frequency (reversed lobes
+  with the opposite sign) and the receiver phase, CSI ramps the phase of its
+  encoding steps. Spiral and 3D radial readouts store the offsets with
+  `OffsetEncoding = reconstruction`; their reconstruction applies the
+  matching k-space phase ramp before gridding. Every sequence form has Read
+  offset and Phase offset fields, and the Geometry tab previews them.
+- The FOV and slice package can be dragged in the Geometry tab views: the
+  drag maps to read, phase and slice offsets through the sequence frame,
+  snaps to 0.1 mm, shows the shift while dragging and fills the sequence form
+  (the live preview follows). Shift keeps the largest axis only, a right
+  click cancels, and dragging outside the FOV still pans the view.
 
 ### Changed
 
@@ -87,6 +99,8 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- 3D radial image coordinates and exported positions sat half a voxel off:
+  voxel N // 2 holds the FOV centre, as the reconstruction places it.
 - The Sequence-mode ETA counts completed voxels instead of a misscaled chunk
   count and gets an early run rate from a small first chunk, so it no longer
   jumps or stalls. Progress, elapsed and remaining time share one line.
