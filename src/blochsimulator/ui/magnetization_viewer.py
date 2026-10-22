@@ -291,9 +291,9 @@ class MagnetizationViewer(QWidget):
         # Now create checkboxes that depend on these variables
         self.track_checkbox = QCheckBox("Track tip path")
         self.track_checkbox.setObjectName("mag_3d_track_checkbox")
-        self.track_checkbox.setChecked(True)
+        self.track_checkbox.setChecked(False)
         self.track_checkbox.toggled.connect(self._toggle_track_path)
-        # Sync internal flag to the initial checkbox state so tracking is active on first playback
+        # Sync internal flag to the initial checkbox state
         self._toggle_track_path(self.track_checkbox.isChecked())
         view_layout.addWidget(self.track_checkbox)
         self.spin_display_combo = QComboBox()

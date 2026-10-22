@@ -318,8 +318,8 @@ class SequenceDesigner(QGroupBox):
             "Best in a 2D plane. 90° pulse → +G1 winds a phase helix along the "
             "first axis → −G1 unwinds it (gradient echo) → +G2 helix along the "
             "second axis → +G1 adds a diagonal helix → 180° pulse conjugates the "
-            "phase → +G1 +G2 rewind it at the spin echo, which also refocuses "
-            "off-resonance."
+            "phase → +G1 +G2 rewind it → spin echo, which also refocuses "
+            "off-resonance → 90° pulse flips it back along z."
         )
         tour_info.setWordWrap(True)
         tour_info.setStyleSheet("color: gray;")
@@ -956,12 +956,14 @@ class SequenceDesigner(QGroupBox):
                 "b1_amplitude": 0.0,
             },
             GRADIENT_TOUR: {
-                "tr_ms": 30,
+                "tr_ms": 35,
                 "pulse_type": "Sinc",
                 "flip_angle": 90,
                 "duration": 3.0,  # ms
                 "b1_amplitude": 0.0,
-                "num_frequencies": 1,
+                "num_frequencies": 3,
+                "frequency_center_hz": 0.0,
+                "frequency_range_hz": 30,
                 "position_plane": "xy",
                 "plane_positions": 31,
                 "plane_range_mm": 20.0,
@@ -1606,8 +1608,9 @@ class SequenceDesigner(QGroupBox):
         90° pulse, +G1 winds a phase helix along the first axis, -G1 unwinds
         it into a gradient echo, +G2 winds a helix along the second axis, +G1
         adds to it a diagonal helix. A 180° pulse conjugates the phase, so
-        +G1 +G2 rewind it, timed to the spin echo that also refocuses
-        off-resonance.
+        +G1 +G2 rewind it before the spin echo that also refocuses
+        off-resonance. A 90° pulse centred on the echo flips the
+        magnetization back along z (90° + 180° + 90° = 360°).
         """
         dt = max(dt, 1e-6)
         tr = self.tr_spin.value() / 1000.0
@@ -1629,7 +1632,7 @@ class SequenceDesigner(QGroupBox):
         ref_b1 = exc_b1 * (180.0 / flip if flip > 0.0 else 2.0)
 
         pulse_ms = exc_b1.size * dt * 1e3
-        lobe_ms, gap_ms, ramp_ms = 1.0, 0.5, 0.1
+        lobe_ms, gap_ms, ramp_ms = 2.0, 0.5, 0.2
         axes, spans_mm = self._tour_axes_and_spans_mm()
         cycles = self.tour_cycles.value()
         twist_per_moment = phase_twist_cycles_per_mm([1.0])[0]
@@ -1658,7 +1661,9 @@ class SequenceDesigner(QGroupBox):
         ref_start_ms = starts[3] + lobe_ms + gap_ms
         # Spin echo: excitation centre plus twice the centre-to-centre spacing
         echo_ms = 0.5 * pulse_ms + 2.0 * ref_start_ms
-        rewind_start_ms = echo_ms - lobe_ms
+        flip_back_ms = echo_ms - 0.5 * pulse_ms
+        # The rewind ends before the flip-back pulse starts.
+        rewind_start_ms = flip_back_ms - gap_ms - lobe_ms
         lobes += [lobe(first, +1, rewind_start_ms), lobe(second, +1, rewind_start_ms)]
 
         total_s = max(tr, (echo_ms + 2.0) * 1e-3)
@@ -1671,6 +1676,9 @@ class SequenceDesigner(QGroupBox):
         ref_index = int(round(ref_start_ms * 1e-3 / dt))
         n_ref = max(0, min(ref_b1.size, npoints - ref_index))
         b1[ref_index : ref_index + n_ref] = ref_b1[:n_ref]
+        back_index = int(round(flip_back_ms * 1e-3 / dt))
+        n_back = max(0, min(exc_b1.size, npoints - back_index))
+        b1[back_index : back_index + n_back] = exc_b1[:n_back]
         b1, gradients, time = add_gradient_lobes(
             b1, np.zeros((npoints, 3)), time, lobes, dt
         )
@@ -1691,8 +1699,13 @@ class SequenceDesigner(QGroupBox):
                 "180° pulse conjugates the phase"
             )
             gui.log_message(
-                f"  {rewind_start_ms:.2f}–{echo_ms:.2f} ms: +G{first} +G{second} "
-                f"rewind it, spin echo at {echo_ms:.2f} ms"
+                f"  {rewind_start_ms:.2f}–{rewind_start_ms + lobe_ms:.2f} ms: "
+                f"+G{first} +G{second} rewind it"
+            )
+            gui.log_message(
+                f"  {flip_back_ms:.2f}–{flip_back_ms + pulse_ms:.2f} ms: "
+                f"{flip:.0f}° pulse at the spin echo ({echo_ms:.2f} ms) flips it "
+                "back along z"
             )
             gui.log_message(
                 f"  Lobes {amplitudes[0]:.3g} mT/m ({first}), "
