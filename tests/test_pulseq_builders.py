@@ -1246,7 +1246,7 @@ def test_sequence_workspace_builds_and_exports_configurable_fov(tmp_path):
     assert widget.csi_repetition_selector.maximum() == 1
     csi_definitions = load_pulseq(csi_path).metadata["definitions"]
     assert csi_definitions["Name"] == "csi_2d"
-    assert csi_definitions["FOV"] == pytest.approx([0.09, 0.07, 0.01])
+    assert csi_definitions["FOV"] == pytest.approx([0.09, 0.07, 0.003])
     compiled_csi = SequenceCompiler().compile(widget.program)
     widget.result = SequenceSimulationResult(
         signal=np.ones(widget.spectroscopic_acquisition.num_samples, dtype=complex),
