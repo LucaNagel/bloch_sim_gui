@@ -279,6 +279,8 @@ def make_pulseq_spectral_selective_bssfp(
     end_image_spoiler_duration_s: float = 1e-3,
     field_strength_t: float = 7.0,
     nucleus: str = "C13",
+    read_offset_m: float = 0.0,
+    phase_offset_m: float = 0.0,
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
 ):
@@ -287,6 +289,9 @@ def make_pulseq_spectral_selective_bssfp(
     The published Skinner et al. acquisition is represented by the defaults.
     Each complete 3D volume uses one RF/receiver frequency pair; target pairs
     repeat cyclically when ``repetitions`` exceeds their count.
+    ``read_offset_m`` and ``phase_offset_m`` move the FOV centre: the read
+    offset adds to each receiver frequency, the phase offset adds a per-line
+    receiver phase ramp.
 
     ``end_image_spoiler_cycles_per_voxel`` adds a crusher moment referenced to
     physical scanner X/Y/Z voxel sizes.  Supply the actual simulation-phantom
@@ -398,6 +403,12 @@ def make_pulseq_spectral_selective_bssfp(
         end_image_spoiler_cycles_per_fov < 0
     ):
         raise ValueError("end-image spoiler cycles must be non-negative and finite")
+    for name, value in {
+        "read_offset_m": read_offset_m,
+        "phase_offset_m": phase_offset_m,
+    }.items():
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
     if not np.isfinite(end_image_spoiler_cycles_per_voxel) or (
         end_image_spoiler_cycles_per_voxel < 0
     ):
@@ -542,6 +553,7 @@ def make_pulseq_spectral_selective_bssfp(
         delay=gx.rise_time,
         system=system,
     )
+    read_frequency_hz = float(read_offset_m) * readout_amplitude
     readout_area = logical_gradient_area(gx, encoding_frame, "read")
     ky_areas = (np.arange(n_phase) - n_phase // 2) / fov[1]
     kz_areas = (np.arange(n_partition) - n_partition // 2) / fov[2]
@@ -827,15 +839,15 @@ def make_pulseq_spectral_selective_bssfp(
                     frequency_offset_hz=rf_offset,
                     event_center_s=frame_rf_center,
                 )
-                adc.freq_offset = receiver_offset
+                adc.freq_offset = receiver_offset + read_frequency_hz
                 adc_phase = advance_bssfp_phase_deg(
                     common_phase,
                     elapsed_s=actual_tr / 2,
                     frequency_offset_hz=receiver_offset,
                 )
                 adc.phase_offset = pulseq_phase_offset_rad(
-                    adc_phase,
-                    frequency_offset_hz=receiver_offset,
+                    adc_phase + 360.0 * float(ky) * phase_offset_m,
+                    frequency_offset_hz=adc.freq_offset,
                     event_center_s=adc_center_from_start,
                 )
                 common_phase = advance_bssfp_phase_deg(
@@ -916,6 +928,8 @@ def make_pulseq_spectral_selective_bssfp(
     _raise_for_timing_errors(sequence, "spectrally selective bSSFP")
     sequence.set_definition("Name", "spectral_selective_bssfp_3d")
     sequence.set_definition("FOV", list(fov))
+    sequence.set_definition("ReadOffset", float(read_offset_m))
+    sequence.set_definition("PhaseOffset", float(phase_offset_m))
     sequence.set_definition("MatrixSize", list(matrix_values))
     set_pulseq_encoding_definitions(
         sequence,
@@ -1055,6 +1069,8 @@ def make_pulseq_me_bssfp(
     rf_spectral_spatial_pulse=None,
     rf_frequency_offset_hz: float = 0.0,
     receiver_frequency_offset_hz: float = -460.0,
+    read_offset_m: float = 0.0,
+    phase_offset_m: float = 0.0,
     encoding_duration_s: float = 0.5e-3,
     repetition_time_s: float = 8.696e-3,
     rf_phase_start_deg: float = 0.0,
@@ -1078,6 +1094,8 @@ def make_pulseq_me_bssfp(
     The defaults reproduce the short-TR in-vivo parameter set described by
     Gaubatz. Echoes are centered between consecutive RF pulses, and every TR
     is fully balanced in read, phase, and partition directions.
+    ``read_offset_m`` and ``phase_offset_m`` move the FOV centre on top of the
+    receiver frequency offset; bipolar echoes reverse the read frequency.
     """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -1121,6 +1139,8 @@ def make_pulseq_me_bssfp(
     for name, value in {
         "rf_frequency_offset_hz": rf_frequency_offset_hz,
         "receiver_frequency_offset_hz": receiver_frequency_offset_hz,
+        "read_offset_m": read_offset_m,
+        "phase_offset_m": phase_offset_m,
         "rf_phase_start_deg": rf_phase_start_deg,
         "rf_phase_increment_deg": rf_phase_increment_deg,
     }.items():
@@ -1174,6 +1194,7 @@ def make_pulseq_me_bssfp(
     )
     readout_flat_time = n_read * dwell
     readout_amplitude = 1.0 / (fov[0] * dwell)
+    read_frequency_hz = float(read_offset_m) * readout_amplitude
     readout_rise = max(
         system.adc_dead_time,
         np.ceil(abs(readout_amplitude) / system.max_slew / system.grad_raster_time)
@@ -1469,23 +1490,25 @@ def make_pulseq_me_bssfp(
             sequence.add_block(pp.make_delay(delay_before_encoding))
         sequence.add_block(gx_pre, gy_pre, gz_pre)
         for echo in range(echoes):
-            readout = (
-                gx_positive if strategy == "flyback" or echo % 2 == 0 else gx_negative
-            )
+            reverse = strategy == "symmetric" and echo % 2 == 1
+            readout = gx_negative if reverse else gx_positive
             if acquire:
                 adc_phase = advance_bssfp_phase_deg(
                     current_rf_phase,
                     elapsed_s=first_echo_time + echo * actual_echo_spacing,
                     frequency_offset_hz=receiver_frequency_offset_hz,
                 )
+                adc_frequency_hz = float(receiver_frequency_offset_hz) + (
+                    -read_frequency_hz if reverse else read_frequency_hz
+                )
                 adc = pp.make_adc(
                     num_samples=n_read,
                     dwell=dwell,
                     delay=readout_rise,
-                    freq_offset=float(receiver_frequency_offset_hz),
+                    freq_offset=adc_frequency_hz,
                     phase_offset=pulseq_phase_offset_rad(
-                        adc_phase,
-                        frequency_offset_hz=receiver_frequency_offset_hz,
+                        adc_phase + 360.0 * ky * phase_offset_m,
+                        frequency_offset_hz=adc_frequency_hz,
                         event_center_s=adc_center_from_readout_start,
                     ),
                     system=system,
@@ -1549,6 +1572,8 @@ def make_pulseq_me_bssfp(
     sequence.set_definition("Name", "me_bssfp_3d")
     sequence.set_definition("TrajectoryType", "cartesian_3d_multi_echo")
     sequence.set_definition("FOV", list(fov))
+    sequence.set_definition("ReadOffset", float(read_offset_m))
+    sequence.set_definition("PhaseOffset", float(phase_offset_m))
     sequence.set_definition("MatrixSize", list(matrix_values))
     set_pulseq_encoding_definitions(
         sequence,
@@ -1739,6 +1764,8 @@ def make_pulseq_radial_me_bssfp(
     prephaser_duration_s: float = 0.5e-3,
     inter_measurement_rotation_deg: float = GOLDEN_ANGLE_DEG,
     acquisition_interval_s: float | None = None,
+    read_offset_m: float = 0.0,
+    phase_offset_m: float = 0.0,
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     field_strength_t: float = 3.0,
     nucleus: str = "C13",
@@ -1750,6 +1777,9 @@ def make_pulseq_radial_me_bssfp(
     and the initial/final half-area lobes make the complete TR balanced.
     Measurements reuse one spherical spiral-phyllotaxis pattern with the
     published golden-angle z rotation between consecutive measurements.
+    ``read_offset_m`` and ``phase_offset_m`` move the FOV centre; the radial
+    reconstruction applies them as a k-space phase ramp
+    (``OffsetEncoding reconstruction``).
     """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -1778,8 +1808,13 @@ def make_pulseq_radial_me_bssfp(
     for name, value in positive_parameters.items():
         if not np.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be positive and finite")
-    if not np.isfinite(rf_frequency_offset_hz):
-        raise ValueError("rf_frequency_offset_hz must be finite")
+    for name, value in {
+        "rf_frequency_offset_hz": rf_frequency_offset_hz,
+        "read_offset_m": read_offset_m,
+        "phase_offset_m": phase_offset_m,
+    }.items():
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
     nucleus = str(nucleus).strip()
     if not nucleus:
         raise ValueError("nucleus must not be empty")
@@ -2170,6 +2205,9 @@ def make_pulseq_radial_me_bssfp(
     sequence.set_definition("Name", "radial_me_bssfp_3d")
     sequence.set_definition("TrajectoryType", "radial_3d_spiral_phyllotaxis")
     sequence.set_definition("FOV", [float(fov_m)] * 3)
+    sequence.set_definition("ReadOffset", float(read_offset_m))
+    sequence.set_definition("PhaseOffset", float(phase_offset_m))
+    sequence.set_definition("OffsetEncoding", "reconstruction")
     sequence.set_definition("MatrixSize", [sample_count] * 3)
     set_pulseq_encoding_definitions(
         sequence,

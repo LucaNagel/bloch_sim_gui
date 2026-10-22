@@ -717,6 +717,11 @@ def _spiral_series(context: _Context) -> list[ImageSeries]:
     if kx is None or ky is None:
         x_positions = _centered_positions(nx, fov_x)
         y_positions = _centered_positions(ny, fov_y)
+    # Results with an FOV offset carry the shifted voxel centres.
+    stored_x = _coordinate(dataset, "spiral_position_x_m", col_dim)
+    stored_y = _coordinate(dataset, "spiral_position_y_m", row_dim)
+    if stored_x is not None and stored_y is not None:
+        x_positions, y_positions = stored_x, stored_y
     row_direction = (1.0, 0.0, 0.0)
     column_direction = (0.0, 1.0, 0.0)
     normal = np.asarray((0.0, 0.0, 1.0))
@@ -864,7 +869,13 @@ def _csi_series(context: _Context) -> list[ImageSeries]:
     x_positions = _centered_positions(nx, fov_x_m)
     y_positions = _centered_positions(ny, fov_y_m)
     slice_offset = definition_float(context.definitions, "SliceOffset") or 0.0
-    position = (float(x_positions[0]), float(y_positions[0]), float(slice_offset))
+    read_offset = definition_float(context.definitions, "ReadOffset") or 0.0
+    phase_offset = definition_float(context.definitions, "PhaseOffset") or 0.0
+    position = (
+        float(x_positions[0] + read_offset),
+        float(y_positions[0] + phase_offset),
+        float(slice_offset),
+    )
     common = dict(
         kind=model.kind,
         row_direction=(1.0, 0.0, 0.0),

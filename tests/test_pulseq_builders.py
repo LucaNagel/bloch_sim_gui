@@ -22,6 +22,8 @@ from blochsimulator.sequence import (
     make_pulseq_epsi_mge,
     make_pulseq_epi,
     make_pulseq_flash,
+    make_pulseq_me_bssfp,
+    make_pulseq_spectral_selective_bssfp,
     make_pulseq_spiral,
 )
 from blochsimulator.sequence.model import ADCEvent
@@ -771,6 +773,245 @@ def test_flash_read_phase_offsets_centre_an_off_centre_object(
     )
     slice_position = -1.5e-3 if n_slices == 2 else 0.0
     assert centre == pytest.approx(disc + slice_position * frame[:, 2], abs=1e-9)
+
+
+def _off_centre_disc_phantom():
+    """Return a 4 mm disc at (12, -8) mm in a single-slice 64 mm phantom."""
+    shape = (32, 32, 1)
+    positions = (np.arange(32) - 15.5) * 2e-3
+    x, y = np.meshgrid(positions, positions, indexing="ij")
+    disc = np.array([0.012, -0.008, 0.0])
+    pd_map = ((x - disc[0]) ** 2 + (y - disc[1]) ** 2 < 0.004**2).astype(float)
+    phantom = Phantom(
+        shape=shape,
+        fov=(0.064, 0.064, 3e-3),
+        t1_map=np.ones(shape),
+        t2_map=np.ones(shape),
+        pd_map=pd_map[..., None],
+    )
+    return disc, phantom
+
+
+def _exported_centre(result):
+    """Return the scanner position of the first exported image's centre."""
+    from blochsimulator.sequence.image_export import extract_image_series
+
+    series = extract_image_series(result, include_pools=False)[0]
+    row_spacing, column_spacing = series.pixel_spacing_m
+    first = series.frames[0]
+    rows, columns = first.magnitude.shape
+    return (
+        np.asarray(first.position_m)
+        + 0.5 * (columns - 1) * column_spacing * np.asarray(series.row_direction)
+        + 0.5 * (rows - 1) * row_spacing * np.asarray(series.column_direction)
+    )
+
+
+_ME_BSSFP_OPTIONS = dict(
+    fov_m=(0.032, 0.032, 0.012),
+    matrix=(16, 16, 2),
+    echoes=3,
+    nucleus="H1",
+    sampling_bandwidth_hz=40e3,
+    repetition_time_s=12e-3,
+    dummy_repetitions=0,
+    # A receiver offset would add a chemical-shift displacement.
+    receiver_frequency_offset_hz=0.0,
+)
+
+
+@pytest.mark.parametrize(
+    ("builder", "encoding_axes", "options"),
+    (
+        (
+            make_pulseq_epi,
+            ("+x", "+y", "+z"),
+            dict(readout_strategy="bipolar", echo_time_s=40e-3),
+        ),
+        (
+            make_pulseq_epi,
+            ("-y", "+x", "+z"),
+            dict(readout_strategy="flyback", echo_time_s=40e-3),
+        ),
+        (
+            make_pulseq_epsi_mge,
+            ("+y", "-x", "+z"),
+            dict(
+                readout_strategy="bipolar",
+                echoes=3,
+                echo_spacing_s=2e-3,
+                echo_time_s=6e-3,
+                repetition_time_s=20e-3,
+            ),
+        ),
+        (
+            make_pulseq_epsi_mge,
+            ("+x", "+y", "+z"),
+            dict(
+                readout_strategy="flyback",
+                echoes=3,
+                echo_spacing_s=2e-3,
+                echo_time_s=6e-3,
+                repetition_time_s=20e-3,
+            ),
+        ),
+        (
+            make_pulseq_bssfp,
+            ("-y", "+x", "+z"),
+            dict(fov_m=(0.032, 0.032, 0.012), matrix=(16, 16, 2), dummy_repetitions=0),
+        ),
+        (
+            make_pulseq_spectral_selective_bssfp,
+            ("+x", "+y", "+z"),
+            dict(
+                fov_m=(0.032, 0.032, 0.012),
+                matrix=(16, 16, 2),
+                nucleus="H1",
+                target_metabolite_names=("water",),
+                target_frequency_offsets_hz=(0.0,),
+                receiver_frequency_offsets_hz=(0.0,),
+                flip_angle_deg=(30.0,),
+                repetition_time_s=None,
+            ),
+        ),
+        (
+            make_pulseq_me_bssfp,
+            ("+y", "-x", "+z"),
+            dict(_ME_BSSFP_OPTIONS, readout_strategy="flyback", echo_spacing_s=1.5e-3),
+        ),
+        (
+            make_pulseq_me_bssfp,
+            ("+x", "+y", "+z"),
+            dict(_ME_BSSFP_OPTIONS, readout_strategy="symmetric", echo_spacing_s=1e-3),
+        ),
+    ),
+    ids=(
+        "epi-bipolar",
+        "epi-flyback",
+        "epsi-bipolar",
+        "epsi-flyback",
+        "bssfp",
+        "ss-bssfp",
+        "me-bssfp-flyback",
+        "me-bssfp-symmetric",
+    ),
+)
+def test_cartesian_read_phase_offsets_centre_an_off_centre_object(
+    tmp_path, builder, encoding_axes, options
+):
+    from blochsimulator.sequence.encoding import resolve_encoding_frame
+
+    disc, phantom = _off_centre_disc_phantom()
+    frame = resolve_encoding_frame(encoding_axes).matrix
+    read_offset, phase_offset = float(disc @ frame[:, 0]), float(disc @ frame[:, 1])
+    parameters = dict(fov_m=(0.032, 0.032), matrix=(16, 16))
+    parameters["sampling_bandwidth_hz"] = 20e3
+    parameters.update(options)
+    sequence = builder(
+        read_offset_m=read_offset,
+        phase_offset_m=phase_offset,
+        encoding_axes=encoding_axes,
+        **parameters,
+    )
+    program = _write_and_load(sequence, tmp_path / "offsets.seq")
+    definitions = program.metadata["definitions"]
+    assert float(definitions["ReadOffset"]) == pytest.approx(read_offset)
+    assert float(definitions["PhaseOffset"]) == pytest.approx(phase_offset)
+    assert "OffsetEncoding" not in definitions
+
+    result = BlochSimulator(use_parallel=False).simulate_sequence(program, phantom)
+    dataset = result.to_xarray()
+    image = dataset["cartesian_image_magnitude"]
+    image = image.sum([dim for dim in image.dims[:-2]])
+    weights = np.asarray(image) / float(image.sum())
+    # The sequence demodulates the offsets: the disc sits in the image centre.
+    centre_pixel = (
+        float(weights.sum(axis=1) @ np.arange(16)),
+        float(weights.sum(axis=0) @ np.arange(16)),
+    )
+    assert centre_pixel == pytest.approx((7.5, 7.5), abs=1e-3)
+    read_positions = dataset.coords["cartesian_read_position_m"].values
+    phase_positions = dataset.coords["cartesian_phase_position_m"].values
+    assert float(weights.sum(axis=0) @ read_positions) == pytest.approx(
+        read_offset, abs=1e-6
+    )
+    assert float(weights.sum(axis=1) @ phase_positions) == pytest.approx(
+        phase_offset, abs=1e-6
+    )
+    centre = _exported_centre(result)
+    assert (centre @ frame[:, 0], centre @ frame[:, 1]) == pytest.approx(
+        (read_offset, phase_offset), abs=1e-9
+    )
+
+
+def test_csi_read_phase_offsets_centre_an_off_centre_object(tmp_path):
+    disc, phantom = _off_centre_disc_phantom()
+    sequence = make_pulseq_csi(
+        fov_m=(0.032, 0.032),
+        matrix=(16, 16),
+        spectral_points=16,
+        spectral_bandwidth_hz=2000.0,
+        repetition_time_s=20e-3,
+        slice_thickness_m=3e-3,
+        read_offset_m=float(disc[0]),
+        phase_offset_m=float(disc[1]),
+    )
+    program = _write_and_load(sequence, tmp_path / "csi_offsets.seq")
+    result = BlochSimulator(use_parallel=False).simulate_sequence(program, phantom)
+    spatial = result.to_xarray()["csi_spatial_fid"].isel(spectral_point=0)
+    weights = np.abs(np.asarray(spatial))
+    weights /= weights.sum()
+    # The phase-encoding steps carry the offsets: the disc sits in the centre.
+    assert (
+        float(weights.sum(axis=1) @ np.arange(16)),
+        float(weights.sum(axis=0) @ np.arange(16)),
+    ) == pytest.approx((7.5, 7.5), abs=1e-3)
+    assert _exported_centre(result)[:2] == pytest.approx(disc[:2], abs=1e-9)
+
+
+@pytest.mark.parametrize("encoding_axes", (("+x", "+y", "+z"), ("-y", "+x", "+z")))
+def test_spiral_reconstruction_applies_read_phase_offsets(tmp_path, encoding_axes):
+    from blochsimulator.sequence.encoding import resolve_encoding_frame
+
+    disc, phantom = _off_centre_disc_phantom()
+    frame = resolve_encoding_frame(encoding_axes).matrix
+    read_offset, phase_offset = float(disc @ frame[:, 0]), float(disc @ frame[:, 1])
+    sequence = make_pulseq_spiral(
+        fov_m=(0.032, 0.032),
+        matrix=(16, 16),
+        sampling_bandwidth_hz=50e3,
+        read_offset_m=read_offset,
+        phase_offset_m=phase_offset,
+        encoding_axes=encoding_axes,
+    )
+    program = _write_and_load(sequence, tmp_path / "spiral_offsets.seq")
+    assert program.metadata["definitions"]["OffsetEncoding"] == "reconstruction"
+    result = BlochSimulator(use_parallel=False).simulate_sequence(program, phantom)
+    assert result.spiral_acquisition.offset_in_reconstruction
+    restored = type(result.spiral_acquisition).from_metadata(
+        result.spiral_acquisition.to_metadata()
+    )
+    assert restored.fov_center_xyz_m == pytest.approx(tuple(disc))
+    assert restored.offset_in_reconstruction
+
+    dataset = result.to_xarray()
+    image = dataset["spiral_image_magnitude"].isel(spiral_frame=0)
+    # Squared magnitude keeps the gridding blur from biasing the centroid.
+    weights = np.asarray(image) ** 2
+    weights /= weights.sum()
+    # The reconstruction phase ramp moves the disc to the image centre, N // 2.
+    assert (
+        float(weights.sum(axis=1) @ np.arange(16)),
+        float(weights.sum(axis=0) @ np.arange(16)),
+    ) == pytest.approx((8.0, 8.0), abs=0.05)
+    x_positions = dataset["spiral_position_x_m"].values
+    y_positions = dataset["spiral_position_y_m"].values
+    assert (
+        float(weights.sum(axis=0) @ x_positions),
+        float(weights.sum(axis=1) @ y_positions),
+    ) == pytest.approx(tuple(disc[:2]), abs=1e-4)
+    # Voxel N // 2 holds the FOV centre, half a voxel above the grid middle.
+    assert _exported_centre(result)[:2] == pytest.approx(disc[:2] - 1e-3, abs=1e-9)
 
 
 def test_flash_rejects_an_interval_shorter_than_one_complete_image():

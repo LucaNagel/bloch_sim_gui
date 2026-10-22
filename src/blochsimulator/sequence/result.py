@@ -642,6 +642,20 @@ class SequenceSimulationResult:
                         "phase_y",
                         spiral.ky_grid_cyc_per_m,
                     ),
+                    # The grid puts k=0 at index N//2 and reconstructs with
+                    # fftshift, so image index n sits at (n - N//2) * voxel.
+                    "spiral_position_x_m": (
+                        "read_x",
+                        (np.arange(spiral.matrix[0]) - spiral.matrix[0] // 2)
+                        * (spiral.fov_m[0] / spiral.matrix[0])
+                        + spiral.center_m[0],
+                    ),
+                    "spiral_position_y_m": (
+                        "phase_y",
+                        (np.arange(spiral.matrix[1]) - spiral.matrix[1] // 2)
+                        * (spiral.fov_m[1] / spiral.matrix[1])
+                        + spiral.center_m[1],
+                    ),
                 }
             )
             for axis_index, axis in enumerate(spiral.dimensions.AXIS_NAMES):
@@ -694,6 +708,7 @@ class SequenceSimulationResult:
         from .reconstruction import (
             _numeric_definition,
             is_radial_3d_result,
+            radial_3d_fov_center_xyz_m,
             radial_3d_reconstruction_arrays,
         )
 
@@ -716,6 +731,12 @@ class SequenceSimulationResult:
                     for axis in radial_outer_axes
                 }
             )
+            # Gridding puts k=0 at index N//2 and the image is fftshifted,
+            # so voxel n sits at (n - N//2) * voxel from the FOV centre.
+            radial_offsets = (np.arange(radial_matrix) - radial_matrix // 2) * (
+                radial_fov_m / radial_matrix
+            )
+            radial_center = radial_3d_fov_center_xyz_m(self)
             coords.update(
                 {
                     "radial_x": np.arange(radial_matrix),
@@ -723,18 +744,15 @@ class SequenceSimulationResult:
                     "radial_z": np.arange(radial_matrix),
                     "radial_position_x_m": (
                         "radial_x",
-                        ((np.arange(radial_matrix) + 0.5) / radial_matrix - 0.5)
-                        * radial_fov_m,
+                        radial_offsets + radial_center[0],
                     ),
                     "radial_position_y_m": (
                         "radial_y",
-                        ((np.arange(radial_matrix) + 0.5) / radial_matrix - 0.5)
-                        * radial_fov_m,
+                        radial_offsets + radial_center[1],
                     ),
                     "radial_position_z_m": (
                         "radial_z",
-                        ((np.arange(radial_matrix) + 0.5) / radial_matrix - 0.5)
-                        * radial_fov_m,
+                        radial_offsets + radial_center[2],
                     ),
                 }
             )

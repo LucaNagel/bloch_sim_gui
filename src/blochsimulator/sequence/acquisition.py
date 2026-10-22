@@ -12,7 +12,10 @@ import numpy as np
 from .flip_angles import VFA_REFERENCE_DOI, variable_flip_angle_schedule
 from .encoding import (
     EncodingFrame,
+    fov_center_xyz_from_definitions,
+    in_plane_center_from_definitions,
     numeric_definition_array,
+    offset_applied_in_reconstruction,
     slice_package_positions,
 )
 from .model import ADCEvent, GradientEvent, RFEvent, SequenceProgram
@@ -351,6 +354,10 @@ class SpiralAcquisition:
     The trajectory itself remains in the compiled/result ADC gradient moments.
     This object records how those samples are split into slices and repetitions
     and provides a lightweight linear gridding reconstruction.
+
+    ``fov_center_xyz_m`` is the scanner-xyz FOV centre. With
+    ``offset_in_reconstruction`` the gridding applies it as a k-space phase
+    ramp; otherwise the signal is assumed to contain the shift already.
     """
 
     matrix: Tuple[int, int]
@@ -360,6 +367,8 @@ class SpiralAcquisition:
     frame_indices: Tuple[Tuple[int, ...], ...]
     dimensions: AcquisitionDimensions
     moment_origins_cyc_per_m: Tuple[Tuple[float, float, float], ...]
+    fov_center_xyz_m: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    offset_in_reconstruction: bool = False
 
     def __post_init__(self) -> None:
         matrix = tuple(
@@ -395,6 +404,9 @@ class SpiralAcquisition:
             raise ValueError("each spiral frame index must contain all outer axes")
         if any(len(item) != 3 or not np.all(np.isfinite(item)) for item in origins):
             raise ValueError("each spiral frame requires one finite 3D moment origin")
+        center = tuple(float(value) for value in self.fov_center_xyz_m)
+        if len(center) != 3 or not np.all(np.isfinite(center)):
+            raise ValueError("spiral fov_center_xyz_m must contain three finite values")
         flattened = [value for item in samples for value in item]
         if sorted(flattened) != list(range(self.dimensions.num_samples)):
             raise ValueError("spiral frames must cover the complete ADC stream once")
@@ -404,6 +416,10 @@ class SpiralAcquisition:
         object.__setattr__(self, "sample_indices", samples)
         object.__setattr__(self, "frame_indices", frames)
         object.__setattr__(self, "moment_origins_cyc_per_m", origins)
+        object.__setattr__(self, "fov_center_xyz_m", center)
+        object.__setattr__(
+            self, "offset_in_reconstruction", bool(self.offset_in_reconstruction)
+        )
 
     @property
     def num_frames(self) -> int:
@@ -412,6 +428,11 @@ class SpiralAcquisition:
     @property
     def samples_per_frame(self) -> int:
         return self.matrix[0] * self.matrix[1]
+
+    @property
+    def center_m(self) -> Tuple[float, float]:
+        """Scanner x/y position of the gridded image centre in m."""
+        return (self.fov_center_xyz_m[0], self.fov_center_xyz_m[1])
 
     @property
     def num_samples(self) -> int:
@@ -477,6 +498,10 @@ class SpiralAcquisition:
             raise ValueError("spiral gridding requires ADC gradient moments")
         trajectory = self.trajectory(result.adc_gradient_moment_cyc_per_m, frame)
         values = self._frame_values(result.signal, frame)
+        if self.offset_in_reconstruction and any(self.fov_center_xyz_m):
+            values = values * np.exp(
+                2j * np.pi * (trajectory @ np.asarray(self.fov_center_xyz_m))
+            )
         from scipy.interpolate import griddata
 
         target_x, target_y = np.meshgrid(
@@ -544,6 +569,8 @@ class SpiralAcquisition:
             "frame_indices": self.frame_indices,
             "dimensions": self.dimensions.to_metadata(),
             "moment_origins_cyc_per_m": self.moment_origins_cyc_per_m,
+            "fov_center_xyz_m": self.fov_center_xyz_m,
+            "offset_in_reconstruction": self.offset_in_reconstruction,
         }
 
     @classmethod
@@ -559,6 +586,10 @@ class SpiralAcquisition:
             dimensions=AcquisitionDimensions.from_metadata(metadata["dimensions"]),
             moment_origins_cyc_per_m=tuple(
                 tuple(item) for item in metadata["moment_origins_cyc_per_m"]
+            ),
+            fov_center_xyz_m=tuple(metadata.get("fov_center_xyz_m", (0.0, 0.0, 0.0))),
+            offset_in_reconstruction=bool(
+                metadata.get("offset_in_reconstruction", False)
             ),
         )
 
@@ -706,6 +737,10 @@ class CartesianAcquisitionVolumes:
     @property
     def encoding_frame(self) -> EncodingFrame:
         return self.frames.acquisitions[0].encoding_frame
+
+    @property
+    def center_m(self) -> Tuple[float, float]:
+        return self.frames.acquisitions[0].center_m
 
     @property
     def matrix(self) -> Tuple[int, int, int]:
@@ -1468,23 +1503,6 @@ class CartesianAcquisition:
         )
 
 
-def _in_plane_center_from_definitions(definitions: Mapping) -> Tuple[float, float]:
-    """Return the logical read/phase FOV centre stored by a builder in m."""
-
-    lowered = {str(key).lower(): value for key, value in definitions.items()}
-    center = []
-    for key in ("readoffset", "phaseoffset"):
-        value = lowered.get(key)
-        if value is None:
-            center.append(0.0)
-            continue
-        values = numeric_definition_array(value, key)
-        if values.size != 1 or not np.isfinite(values[0]):
-            raise ValueError(f"Pulseq {key} definition must be one finite value")
-        center.append(float(values[0]))
-    return (center[0], center[1])
-
-
 def infer_spiral_acquisition(
     program: SequenceProgram,
     *,
@@ -1567,6 +1585,8 @@ def infer_spiral_acquisition(
         frame_indices=tuple(frame_indices),
         dimensions=dimensions,
         moment_origins_cyc_per_m=tuple(origins),
+        fov_center_xyz_m=tuple(fov_center_xyz_from_definitions(definitions)),
+        offset_in_reconstruction=offset_applied_in_reconstruction(definitions),
     )
     reference = acquisition.trajectory(moments, 0)
     scale = np.asarray((matrix[0] / (2 * fov[0]), matrix[1] / (2 * fov[1])))
@@ -1763,7 +1783,7 @@ def infer_cartesian_acquisition(
         moment_origins_cyc_per_m=tuple(
             tuple(float(value) for value in origin) for origin in moment_origins
         ),
-        center_m=_in_plane_center_from_definitions(definitions),
+        center_m=in_plane_center_from_definitions(definitions),
     )
     acquisition.validate_adc_times(compiled.adc_times_s)
     acquisition.validate_gradient_moments(moments)

@@ -544,6 +544,8 @@ def make_pulseq_csi(
     rf_spoiling: bool = False,
     rf_spoiling_increment_deg: float = 117.0,
     slice_offset_m: float = 0.0,
+    read_offset_m: float = 0.0,
+    phase_offset_m: float = 0.0,
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     spoil_after_readout: bool = True,
     spoiler_cycles_per_slice: float = 4.0,
@@ -556,6 +558,9 @@ def make_pulseq_csi(
 
     Variable flip angles advance with the chronological phase-encoding order
     and restart at the beginning of every complete CSI repetition.
+    ``read_offset_m`` and ``phase_offset_m`` move the FOV centre with a
+    receiver phase ramp over both phase-encoding axes; without a readout
+    gradient no receiver frequency offset is needed, so spectra stay put.
     """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -586,8 +591,13 @@ def make_pulseq_csi(
     }.items():
         if not np.isfinite(value) or value < 0:
             raise ValueError(f"{name} must be non-negative and finite")
-    if not np.isfinite(slice_offset_m):
-        raise ValueError("slice_offset_m must be finite")
+    for name, value in {
+        "slice_offset_m": slice_offset_m,
+        "read_offset_m": read_offset_m,
+        "phase_offset_m": phase_offset_m,
+    }.items():
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
     if not np.isfinite(rf_frequency_offset_hz):
         raise ValueError("rf_frequency_offset_hz must be finite")
     if not np.isfinite(rf_spoiling_increment_deg):
@@ -756,7 +766,11 @@ def make_pulseq_csi(
                 np.deg2rad(rf_phase_deg)
                 - 2.0 * np.pi * total_frequency_offset_hz * rf_center
             )
-            adc.phase_offset = np.deg2rad(rf_phase_deg)
+            adc.phase_offset = np.deg2rad(
+                rf_phase_deg
+                + 360.0
+                * (x_areas[x_index] * read_offset_m + y_areas[y_index] * phase_offset_m)
+            )
             gx_phase = make_role_trapezoid(
                 pp,
                 encoding_frame,
@@ -858,6 +872,8 @@ def make_pulseq_csi(
     )
     sequence.set_definition("SliceThickness", slice_thickness_m)
     sequence.set_definition("SliceOffset", float(slice_offset_m))
+    sequence.set_definition("ReadOffset", float(read_offset_m))
+    sequence.set_definition("PhaseOffset", float(phase_offset_m))
     sequence.set_definition("RFSpoiling", bool(rf_spoiling))
     sequence.set_definition("RFSpoilingIncrementDeg", rf_spoiling_increment_deg)
     _set_rf_definitions(
@@ -916,6 +932,8 @@ def make_pulseq_bssfp(
     repetitions: int = 1,
     acquisition_interval_s: float | None = None,
     use_alpha_half: bool = True,
+    read_offset_m: float = 0.0,
+    phase_offset_m: float = 0.0,
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
     nucleus: str = "H1",
@@ -926,6 +944,8 @@ def make_pulseq_bssfp(
     phase-cycle member immediately preceding ``rf_phase_start_deg``. Startup
     spacing is measured between the preparation and first regular RF centers.
     Ratio mode preserves the conventional ``alpha/2 - TR/2`` preparation.
+    ``read_offset_m`` and ``phase_offset_m`` move the FOV centre as in
+    :func:`make_pulseq_flash`.
     """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -949,8 +969,13 @@ def make_pulseq_bssfp(
     }.items():
         if not np.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be positive and finite")
-    if not np.isfinite(rf_frequency_offset_hz):
-        raise ValueError("rf_frequency_offset_hz must be finite")
+    for name, value in {
+        "rf_frequency_offset_hz": rf_frequency_offset_hz,
+        "read_offset_m": read_offset_m,
+        "phase_offset_m": phase_offset_m,
+    }.items():
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
     if alpha_half_phase_deg is None:
         resolved_alpha_half_phase_deg = wrap_phase_deg(
             rf_phase_start_deg - rf_phase_increment_deg
@@ -1058,6 +1083,7 @@ def make_pulseq_bssfp(
         delay=gx.rise_time,
         system=system,
     )
+    adc.freq_offset = float(read_offset_m) * readout_amplitude
     readout_area = logical_gradient_area(gx, encoding_frame, "read")
     gx_pre = make_role_trapezoid(
         pp,
@@ -1200,8 +1226,8 @@ def make_pulseq_bssfp(
             event_center_s=rf_center,
         )
         adc.phase_offset = pulseq_phase_offset_rad(
-            rf_phase,
-            frequency_offset_hz=0.0,
+            rf_phase + 360.0 * ky * phase_offset_m,
+            frequency_offset_hz=adc.freq_offset,
             event_center_s=adc_center_from_start,
         )
         rf_phase = advance_bssfp_phase_deg(
@@ -1295,6 +1321,8 @@ def make_pulseq_bssfp(
     _raise_for_timing_errors(sequence, "bSSFP")
     sequence.set_definition("Name", "bssfp_3d")
     sequence.set_definition("FOV", [fov_x, fov_y, fov_z])
+    sequence.set_definition("ReadOffset", float(read_offset_m))
+    sequence.set_definition("PhaseOffset", float(phase_offset_m))
     sequence.set_definition("MatrixSize", [n_read, n_phase, n_partition])
     set_pulseq_encoding_definitions(
         sequence,
@@ -1380,6 +1408,8 @@ def make_pulseq_epi(
     rf_spoiling: bool = False,
     rf_spoiling_increment_deg: float = 117.0,
     slice_offset_m: float = 0.0,
+    read_offset_m: float = 0.0,
+    phase_offset_m: float = 0.0,
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     spoil_after_slice: bool = True,
     spoiler_cycles_per_slice: float = 8.0,
@@ -1395,6 +1425,10 @@ def make_pulseq_epi(
     slice acquired within that repetition. ``readout_strategy="bipolar"``
     alternates the read gradient direction, while ``"flyback"`` acquires every
     line in the positive direction and rewinds kx between lines.
+
+    ``read_offset_m`` and ``phase_offset_m`` move the FOV centre as in
+    :func:`make_pulseq_flash`; reversed bipolar lines use the opposite
+    receiver frequency.
     """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -1439,8 +1473,13 @@ def make_pulseq_epi(
         raise ValueError("slice_gap_m must be non-negative and finite")
     if not np.isfinite(rf_frequency_offset_hz):
         raise ValueError("rf_frequency_offset_hz must be finite")
-    if not np.isfinite(slice_offset_m):
-        raise ValueError("slice_offset_m must be finite")
+    for name, value in {
+        "slice_offset_m": slice_offset_m,
+        "read_offset_m": read_offset_m,
+        "phase_offset_m": phase_offset_m,
+    }.items():
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
     if not np.isfinite(rf_spoiling_increment_deg):
         raise ValueError("rf_spoiling_increment_deg must be finite")
     rf_spoiling = _uses_rf_spoiling(rf_spoiling, rf_spoiling_increment_deg)
@@ -1521,6 +1560,8 @@ def make_pulseq_epi(
         delay=gx.rise_time + flat_time / 2 - adc_duration / 2,
         system=system,
     )
+    adc_center = adc.delay + adc_duration / 2.0
+    read_frequency_hz = float(read_offset_m) * (n_x * delta_kx) / adc_duration
     pre_time = 0.8e-3
     gx_pre = make_role_trapezoid(
         pp,
@@ -1725,7 +1766,6 @@ def make_pulseq_epi(
                     np.deg2rad(rf_phase_deg)
                     - 2 * np.pi * slice_frequency_offset_hz * rf_center
                 )
-            adc.phase_offset = np.deg2rad(rf_phase_deg)
             sequence.add_block(
                 rf_for_slice,
                 gz,
@@ -1736,7 +1776,15 @@ def make_pulseq_epi(
             if te_delay_value:
                 sequence.add_block(pp.make_delay(te_delay_value))
             for line in range(n_y):
-                readout = gx if strategy == "flyback" or line % 2 == 0 else gx_reverse
+                reverse = strategy == "bipolar" and line % 2 == 1
+                readout = gx_reverse if reverse else gx
+                adc.freq_offset = -read_frequency_hz if reverse else read_frequency_hz
+                adc.phase_offset = pulseq_phase_offset_rad(
+                    rf_phase_deg
+                    + 360.0 * (-n_y / 2 + line) * delta_ky * phase_offset_m,
+                    frequency_offset_hz=adc.freq_offset,
+                    event_center_s=adc_center,
+                )
                 sequence.add_block(readout, adc)
                 if line < n_y - 1:
                     if gx_flyback is None:
@@ -1812,6 +1860,8 @@ def make_pulseq_epi(
     sequence.set_definition("SliceGap", slice_gap_m)
     sequence.set_definition("SliceSpacing", slice_thickness_m + slice_gap_m)
     sequence.set_definition("SliceOffset", float(slice_offset_m))
+    sequence.set_definition("ReadOffset", float(read_offset_m))
+    sequence.set_definition("PhaseOffset", float(phase_offset_m))
     sequence.set_definition(
         "SlicePositions", [float(value) for value in slice_positions]
     )
@@ -1898,6 +1948,8 @@ def make_pulseq_epsi_mge(
     slice_gap_m: float = 0.0,
     n_slices: int = 1,
     slice_offset_m: float = 0.0,
+    read_offset_m: float = 0.0,
+    phase_offset_m: float = 0.0,
     echo_time_s: float = 6e-3,
     repetition_time_s: float = 50e-3,
     repetitions: int = 1,
@@ -1921,6 +1973,9 @@ def make_pulseq_epsi_mge(
     series, or Fourier transformed along the uniformly spaced echo dimension
     for EPSI processing. Bipolar readout alternates the spatial traversal;
     flyback readout acquires every echo in the same direction.
+    ``read_offset_m`` and ``phase_offset_m`` move the FOV centre as in
+    :func:`make_pulseq_flash`, with the opposite receiver frequency on
+    reversed echoes.
 
     With ``timing_only=True`` no sequence is assembled.  The function instead
     returns an :class:`EpsiMgeTimingPlan` holding the hardware-compatible
@@ -1974,6 +2029,8 @@ def make_pulseq_epsi_mge(
     for name, value in {
         "rf_frequency_offset_hz": rf_frequency_offset_hz,
         "slice_offset_m": slice_offset_m,
+        "read_offset_m": read_offset_m,
+        "phase_offset_m": phase_offset_m,
         "rf_spoiling_increment_deg": rf_spoiling_increment_deg,
     }.items():
         if not np.isfinite(value):
@@ -2051,6 +2108,8 @@ def make_pulseq_epsi_mge(
         delay=gx_positive.rise_time + flat_time / 2 - adc_duration / 2,
         system=system,
     )
+    adc_center = adc.delay + adc_duration / 2.0
+    read_frequency_hz = float(read_offset_m) * (n_x * delta_kx) / adc_duration
     readout_area = logical_gradient_area(gx_positive, encoding_frame, "read")
     readout_block_duration = pp.calc_duration(gx_positive, adc)
     block_raster = system.block_duration_raster
@@ -2258,7 +2317,7 @@ def make_pulseq_epsi_mge(
                         np.deg2rad(rf_phase_deg)
                         - 2.0 * np.pi * slice_frequency_offset_hz * rf_center
                     )
-                adc.phase_offset = np.deg2rad(rf_phase_deg)
+                adc_phase_deg = rf_phase_deg + 360.0 * float(ky_area) * phase_offset_m
                 sequence.add_block(rf_for_slice, gz)
                 gy_pre = make_role_trapezoid(
                     pp,
@@ -2272,10 +2331,15 @@ def make_pulseq_epsi_mge(
                 if te_delay:
                     sequence.add_block(pp.make_delay(te_delay))
                 for echo in range(echoes):
-                    readout = (
-                        gx_positive
-                        if strategy == "flyback" or echo % 2 == 0
-                        else gx_negative
+                    reverse = strategy == "bipolar" and echo % 2 == 1
+                    readout = gx_negative if reverse else gx_positive
+                    adc.freq_offset = (
+                        -read_frequency_hz if reverse else read_frequency_hz
+                    )
+                    adc.phase_offset = pulseq_phase_offset_rad(
+                        adc_phase_deg,
+                        frequency_offset_hz=adc.freq_offset,
+                        event_center_s=adc_center,
                     )
                     sequence.add_block(
                         readout,
@@ -2359,6 +2423,8 @@ def make_pulseq_epsi_mge(
     sequence.set_definition("SliceGap", slice_gap_m)
     sequence.set_definition("SliceSpacing", slice_thickness_m + slice_gap_m)
     sequence.set_definition("SliceOffset", float(slice_offset_m))
+    sequence.set_definition("ReadOffset", float(read_offset_m))
+    sequence.set_definition("PhaseOffset", float(phase_offset_m))
     sequence.set_definition(
         "SlicePositions", [float(value) for value in slice_positions]
     )
@@ -3097,6 +3163,8 @@ def make_pulseq_spiral(
     rf_spoiling: bool = False,
     rf_spoiling_increment_deg: float = 117.0,
     slice_offset_m: float = 0.0,
+    read_offset_m: float = 0.0,
+    phase_offset_m: float = 0.0,
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     spoil_after_slice: bool = True,
     spoiler_cycles_per_slice: float = 8.0,
@@ -3111,6 +3179,11 @@ def make_pulseq_spiral(
     is acquired for every slice and repetition. The requested receiver
     bandwidth is reduced automatically when necessary to satisfy the gradient
     amplitude and slew-rate limits.
+
+    ``read_offset_m`` and ``phase_offset_m`` move the FOV centre. A constant
+    ADC frequency cannot follow a spiral, so the sequence stays centred and
+    the reconstruction applies the shift as a k-space phase ramp
+    (``OffsetEncoding reconstruction``).
     """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -3149,8 +3222,13 @@ def make_pulseq_spiral(
         raise ValueError("repetition_time_s must be positive and finite")
     if not np.isfinite(rf_frequency_offset_hz):
         raise ValueError("rf_frequency_offset_hz must be finite")
-    if not np.isfinite(slice_offset_m):
-        raise ValueError("slice_offset_m must be finite")
+    for name, value in {
+        "slice_offset_m": slice_offset_m,
+        "read_offset_m": read_offset_m,
+        "phase_offset_m": phase_offset_m,
+    }.items():
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
     if not np.isfinite(rf_spoiling_increment_deg):
         raise ValueError("rf_spoiling_increment_deg must be finite")
     rf_spoiling = _uses_rf_spoiling(rf_spoiling, rf_spoiling_increment_deg)
@@ -3457,6 +3535,9 @@ def make_pulseq_spiral(
     sequence.set_definition("SliceGap", slice_gap_m)
     sequence.set_definition("SliceSpacing", slice_thickness_m + slice_gap_m)
     sequence.set_definition("SliceOffset", float(slice_offset_m))
+    sequence.set_definition("ReadOffset", float(read_offset_m))
+    sequence.set_definition("PhaseOffset", float(phase_offset_m))
+    sequence.set_definition("OffsetEncoding", "reconstruction")
     sequence.set_definition(
         "SlicePositions", [float(value) for value in slice_positions]
     )

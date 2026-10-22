@@ -276,6 +276,7 @@ def test_planned_geometry_matches_the_generated_sequence():
         "Spiral": (widget.EPI_SOURCE, "_spiral_pulseq_parameters"),
         "CSI": (widget.CSI_SOURCE, "_csi_pulseq_parameters"),
         "bSSFP": (widget.BSSFP_SOURCE, "_bssfp_pulseq_parameters"),
+        "SS-bSSFP": (widget.SS_BSSFP_SOURCE, "_ss_bssfp_pulseq_parameters"),
         "Radial": (widget.RADIAL_ME_BSSFP_SOURCE, "_radial_me_bssfp_pulseq_parameters"),
         "ME-bSSFP": (widget.ME_BSSFP_SOURCE, "_me_bssfp_pulseq_parameters"),
         "FLASH": (widget.FLASH_SOURCE, "_flash_pulseq_parameters"),
@@ -285,10 +286,23 @@ def test_planned_geometry_matches_the_generated_sequence():
     _shift_slice_package(widget, "epi")
     _shift_slice_package(widget, "epsi")
     _shift_slice_package(widget, "flash")
-    widget.flash_read_offset_mm.setValue(6.0)
-    widget.flash_phase_offset_mm.setValue(-4.0)
+    offsets_mm = {
+        "epi": (3.0, -2.0),
+        "epsi": (-5.0, 1.0),
+        "csi": (4.0, 7.0),
+        "flash": (6.0, -4.0),
+        "bssfp": (2.0, 3.0),
+        "ss_bssfp": (-1.0, 2.5),
+        "me_bssfp": (1.5, -3.0),
+        "radial_me": (20.0, -10.0),
+    }
+    for prefix, (read_mm, phase_mm) in offsets_mm.items():
+        getattr(widget, f"{prefix}_read_offset_mm").setValue(read_mm)
+        getattr(widget, f"{prefix}_phase_offset_mm").setValue(phase_mm)
     widget.csi_slice_offset_mm.setValue(-6.0)
     widget.bssfp_phase_matrix.setValue(6)
+    # The default SS-bSSFP TR is too short for its centred readout.
+    widget.ss_bssfp_repetition_time_ms.setValue(8.0)
     widget.slice_selection_offset_mm.setValue(7.0)
     widget.slice_selection_axis.setCurrentText("-Y")
     for label, (source, builder) in cases.items():
@@ -309,8 +323,21 @@ def test_planned_geometry_matches_the_generated_sequence():
         generated = widget._sequence_geometry()
         assert planned.covers_same_region(generated), label
         assert planned.matrix == generated.matrix, label
-        if label == "FLASH":
-            assert generated.in_plane_center_m == pytest.approx((0.006, -0.004))
+        prefix = {
+            "EPI": "epi",
+            "Spiral": "epi",
+            "CSI": "csi",
+            "bSSFP": "bssfp",
+            "SS-bSSFP": "ss_bssfp",
+            "Radial": "radial_me",
+            "ME-bSSFP": "me_bssfp",
+            "FLASH": "flash",
+            "EPSI": "epsi",
+        }.get(label)
+        if prefix is not None:
+            expected = tuple(value / 1000.0 for value in offsets_mm[prefix])
+            assert planned.in_plane_center_m == pytest.approx(expected), label
+            assert generated.in_plane_center_m == pytest.approx(expected), label
     widget.close()
     widget.deleteLater()
     app.processEvents()

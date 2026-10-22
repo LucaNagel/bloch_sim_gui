@@ -642,6 +642,75 @@ def test_radial_me_bssfp_orients_the_complete_phyllotaxis_frame(tmp_path):
     assert {event.axis for event in program.gradient_events} == {"y"}
 
 
+@pytest.mark.parametrize("encoding_axes", (("+x", "+y", "+z"), ("-y", "+x", "+z")))
+def test_radial_reconstruction_applies_read_phase_offsets(tmp_path, encoding_axes):
+    from blochsimulator.sequence.encoding import resolve_encoding_frame
+    from blochsimulator.sequence.image_export import extract_image_series
+
+    positions = (np.arange(16) - 7.5) * 2e-3
+    x, y, z = np.meshgrid(positions, positions, positions, indexing="ij")
+    ball = np.array([0.008, -0.006, 0.0])
+    pd_map = (
+        (x - ball[0]) ** 2 + (y - ball[1]) ** 2 + (z - ball[2]) ** 2 < 0.005**2
+    ).astype(float)
+    phantom = Phantom(
+        shape=pd_map.shape,
+        fov=(0.032,) * 3,
+        t1_map=np.ones(pd_map.shape),
+        t2_map=np.ones(pd_map.shape),
+        pd_map=pd_map,
+    )
+    frame = resolve_encoding_frame(encoding_axes).matrix
+    sequence = make_pulseq_radial_me_bssfp(
+        fov_m=0.032,
+        base_resolution=16,
+        readout_oversampling=1,
+        spokes_per_measurement=300,
+        measurements=1,
+        echoes=1,
+        nucleus="H1",
+        read_offset_m=float(ball @ frame[:, 0]),
+        phase_offset_m=float(ball @ frame[:, 1]),
+        encoding_axes=encoding_axes,
+        use_alpha_half=False,
+        use_tip_back=False,
+    )
+    program = _round_trip(sequence, tmp_path / "radial_offsets.seq")
+    assert program.metadata["definitions"]["OffsetEncoding"] == "reconstruction"
+    result = BlochSimulator(use_parallel=False).simulate_sequence(program, phantom)
+    dataset = result.to_xarray()
+    image = dataset["radial_3d_image_magnitude"]
+    image = image.isel({dim: 0 for dim in image.dims[:-3]})
+    # Squared magnitude keeps the gridding blur from biasing the centroid.
+    weights = np.asarray(image) ** 2
+    weights /= weights.sum()
+    profiles = [
+        weights.sum(axis=tuple(other for other in range(3) if other != axis))
+        for axis in range(3)
+    ]
+    # The reconstruction phase ramp moves the ball to the image centre, N // 2.
+    assert [float(profile @ np.arange(16)) for profile in profiles] == pytest.approx(
+        [8.0, 8.0, 8.0], abs=0.05
+    )
+    # Volume axes run z, y, x; the coordinates carry the shifted FOV centre.
+    centroid = [
+        float(profiles[2 - axis] @ dataset[f"radial_position_{name}_m"].values)
+        for axis, name in enumerate("xyz")
+    ]
+    assert centroid == pytest.approx(list(ball), abs=1e-4)
+    series = extract_image_series(result, include_pools=False)[0]
+    first = series.frames[0]
+    rows, columns = first.magnitude.shape
+    row_spacing, column_spacing = series.pixel_spacing_m
+    centre = (
+        np.asarray(first.position_m)
+        + 0.5 * (columns - 1) * column_spacing * np.asarray(series.row_direction)
+        + 0.5 * (rows - 1) * row_spacing * np.asarray(series.column_direction)
+    )
+    # Voxel N // 2 holds the FOV centre, half a voxel above the grid middle.
+    assert centre[:2] == pytest.approx(ball[:2] - 1e-3, abs=1e-9)
+
+
 def test_radial_me_bssfp_labels_echoes_spokes_and_dynamic_measurements(tmp_path):
     sequence = RADIAL_SCRIPT_MAIN(
         base_resolution=4,
