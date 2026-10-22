@@ -33,6 +33,10 @@ class RFPulseDesigner(QGroupBox):
         {"Adiabatic Half Passage", "Adiabatic Full Passage"}
     )
     ADIABATIC_DEFAULT_DURATION_MS = 10.0
+    # Startup pulse: a 90° sinc, also the preset for FID, spin echo and
+    # slice select + rephase.
+    DEFAULT_PULSE_TYPE = "Sinc"
+    DEFAULT_DURATION_MS = 3.0
     MAX_DESIGN_POINTS = 1_000_000
 
     pulse_changed = pyqtSignal(object)
@@ -85,6 +89,7 @@ class RFPulseDesigner(QGroupBox):
         prefix = "rf_compact_" if self.compact else "rf_tab_"
         self.pulse_type.setObjectName(f"{prefix}pulse_type")
         self.pulse_type.addItems(list(RF_PULSE_TYPE_OPTIONS))
+        self.pulse_type.setCurrentText(self.DEFAULT_PULSE_TYPE)
         self.pulse_type.currentTextChanged.connect(self._on_pulse_type_changed)
         type_layout.addWidget(self.pulse_type)
         control_layout.addLayout(type_layout)
@@ -110,7 +115,7 @@ class RFPulseDesigner(QGroupBox):
         self.duration = QDoubleSpinBox()
         self.duration.setObjectName(f"{prefix}duration")
         self.duration.setRange(0.001, 1000.0)  # Extended range for custom pulses
-        self.duration.setValue(1.0)
+        self.duration.setValue(self.DEFAULT_DURATION_MS)
         self.duration.setSingleStep(0.1)
         self.duration.setDecimals(3)
         self.duration.valueChanged.connect(self.update_pulse)

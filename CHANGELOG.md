@@ -6,6 +6,31 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.9.2] - 2026-10-22
+
+### Added
+
+- Receiver noise calibration and SNR budget with a reference scan model
+  (saturation, T2* decay, coil fields) and loading of measured FID and noise
+  scans.
+- Reconstruction Explorer: larger layout, geometry sections, designer starting
+  from a default sphere, voxel Spectrum/FID/time-course view.
+- Geometry tab: live preview from the form, ETA and contrast, draggable FOV and
+  slice package, read/phase FOV offsets for all generated sequences.
+- Free Mode: repetitions, global B1/gradient field arrows, gradient integral
+  of extra lobes, Labels checkbox in the 3D vector view.
+- Dynamic simulations on the native RF raster.
+
+### Changed
+
+- The RF pulse library ships as package data.
+
+### Fixed
+
+- Mouse designer polarization for legacy values and rebased nuclei.
+- Simulation ETA, AHP library pulse amplitude units, decimal pulse durations
+  in amp/phase file names, CustomPulse duration/flip angle on resampling.
+
 ### Added
 
 - The Mouse Phantom Designer accepts absolute polarization in percent, with
