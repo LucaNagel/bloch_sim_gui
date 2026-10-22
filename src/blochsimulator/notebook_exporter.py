@@ -1644,9 +1644,11 @@ else:
         0.0, float(simulation_params.get('extra_tail_ms', 0.0))
     ) * 1e-3
     total_points = max(len(pulse), int(np.ceil(total_duration_s / pulse_dt)))
-    b1 = np.pad(pulse, (0, total_points - len(pulse)))
-    time = (np.arange(total_points, dtype=float) + 0.5) * pulse_dt
-    gradients = np.zeros((total_points, 3), dtype=float)
+    # The sequence is played once per repetition, one every TR.
+    repetitions = max(1, int(sequence_params.get('repetitions', 1)))
+    b1 = np.tile(np.pad(pulse, (0, total_points - len(pulse))), repetitions)
+    time = (np.arange(b1.size, dtype=float) + 0.5) * pulse_dt
+    gradients = np.zeros((b1.size, 3), dtype=float)
 
     b1 *= np.exp(1j * np.deg2rad(rf_phase_deg))
     if rf_frequency_offset_hz != 0:

@@ -563,6 +563,24 @@ class SequenceReconstructionModel:
             )
         return ideal_separate(np.stack(echoes), echo_times, offsets)
 
+    def outer_dimension_times_s(self, name: str) -> Optional[np.ndarray]:
+        """Return the first ADC time of each value of a framed outer dimension."""
+        item = next((item for item in self.outer_dimensions if item.name == name), None)
+        if (
+            item is None
+            or item.virtual_frame_dimension is None
+            or item.coordinate_name is None
+        ):
+            return None
+        time_name = f"{item.virtual_frame_dimension}_first_adc_time_s"
+        if time_name not in self.dataset.coords:
+            return None
+        frame_values = np.asarray(self.dataset.coords[item.coordinate_name].values)
+        frame_times = np.asarray(self.dataset.coords[time_name].values, dtype=float)
+        return np.asarray(
+            [float(np.min(frame_times[frame_values == value])) for value in item.values]
+        )
+
     def _frame_index(
         self, selections: Mapping[str, object]
     ) -> Optional[tuple[str, int]]:

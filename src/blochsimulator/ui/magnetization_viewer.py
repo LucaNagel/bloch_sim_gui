@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
 )
 from PyQt5.QtCore import QEvent, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QPalette, QVector3D
+from PyQt5.QtGui import QColor, QPalette, QVector3D
 import pyqtgraph.opengl as gl
 import pyqtgraph as pg
 import numpy as np
@@ -32,21 +32,21 @@ class MagnetizationViewer(QWidget):
 
     ARRANGEMENT_OVERLAID = "Overlaid"
     ARRANGEMENT_ALONG_POSITION = "Along position"
-    # Scene x coordinates of the "Along position" arrangement, in units of the
-    # normalized vector length: gradient bars left of the spins, the net
-    # vector left of the gradient bars, position labels on the right.
-    NET_VECTOR_X = -4.4
-    GRADIENT_BAR_X = -2.0
-    GRADIENT_BAR_LENGTH = 0.8
+    # Distances in the "Along position" arrangement, in units of the
+    # normalized vector length. Before the first position sit the global
+    # B1/gradient indicator (FIELD_GAP) and beyond it the enlarged net
+    # vector (NET_GAP further); position labels sit on the other side.
+    FIELD_GAP = 2.2
+    NET_GAP = 2.8
+    NET_VECTOR_SCALE = 1.6
     POSITION_LABEL_X = 1.15
     MAX_POSITION_LABELS = 7
     MAX_PATH_FRAMES = 1500
-    # Rows along x or y and planes keep the physical axes as scene axes:
-    # labels sit just beyond the vector reach, the gradient bars of a row
-    # below it and the net vector before the first position.
+    # Rows along x or y and planes keep the physical axes as scene axes and
+    # their labels sit just beyond the vector reach.
     LABEL_GAP = 1.25
-    ROW_GRADIENT_Z = -2.4
-    NET_GAP = 2.4
+    B1_COLOR = (0.0, 1.0, 1.0, 1.0)
+    GRADIENT_COLOR = (1.0, 0.55, 0.15, 1.0)
     # Camera (elevation, azimuth) in degrees.
     CAMERA_PRESETS = {
         "Front": (12.0, -90.0),
@@ -137,16 +137,20 @@ class MagnetizationViewer(QWidget):
         self.position_path_item = gl.GLLinePlotItem(
             pos=np.zeros((2, 3)), color=(1, 1, 1, 0.6), width=1.5, mode="lines"
         )
-        self.position_b1_plot = gl.GLLinePlotItem(
-            pos=np.zeros((2, 3)), color=(0, 1, 1, 0.9), width=2.5, mode="lines"
+        # One global B1 and gradient indicator beside the positions.
+        self.field_ring_item = gl.GLLinePlotItem(
+            pos=np.zeros((2, 3)),
+            color=(0.6, 0.6, 0.6, 0.6),
+            width=1,
+            mode="line_strip",
         )
-        self.gradient_axis_item = gl.GLLinePlotItem(
-            pos=np.zeros((2, 3)), color=(0.6, 0.6, 0.6, 0.9), width=1, mode="lines"
+        self.b1_arrow_item = gl.GLLinePlotItem(
+            pos=np.zeros((2, 3)), color=self.B1_COLOR, width=4, mode="lines"
         )
-        self.gradient_bar_plot = gl.GLLinePlotItem(
-            pos=np.zeros((2, 3)), color=(1, 1, 1, 1), width=4, mode="lines"
+        self.gradient_arrow_item = gl.GLLinePlotItem(
+            pos=np.zeros((2, 3)), color=self.GRADIENT_COLOR, width=4, mode="lines"
         )
-        self.gradient_marker_item = gl.GLScatterPlotItem(
+        self.field_tip_item = gl.GLScatterPlotItem(
             pos=np.zeros((1, 3)), color=(1, 1, 1, 1), size=10, pxMode=True
         )
         self.field_label_item = gl.GLTextItem(
@@ -158,10 +162,10 @@ class MagnetizationViewer(QWidget):
             self.tip_curve_item,
             self.tip_marker_item,
             self.position_path_item,
-            self.position_b1_plot,
-            self.gradient_axis_item,
-            self.gradient_bar_plot,
-            self.gradient_marker_item,
+            self.field_ring_item,
+            self.b1_arrow_item,
+            self.gradient_arrow_item,
+            self.field_tip_item,
             self.field_label_item,
         ):
             item.setVisible(False)
@@ -175,19 +179,17 @@ class MagnetizationViewer(QWidget):
         self._net_origin = np.zeros(3)
         self._scene_extent = np.array([-np.ones(3), np.ones(3)])
         self._tip_mesh_pairs = None
-        self._gradient_bar_offset = None
-        self._gradient_bar_direction = None
+        self._field_origin = np.zeros(3)
         self._last_spatial_frame = None
         self._position_color_cache = None
         self._position_path_points = []
         self._field_b1 = None
-        self._field_offsets = None
         self._field_gradient_along = None
         self._field_gradients = None
         self._field_plane_axes = None
         self._field_frame_idx = None
         self._field_b1_max = 0.0
-        self._field_offset_max = 0.0
+        self._field_gradient_max = 0.0
         self._net_label_item = None
 
         layout.addWidget(self.gl_widget, stretch=5)
@@ -250,7 +252,16 @@ class MagnetizationViewer(QWidget):
         self.vector_palette_combo = QComboBox()
         self.vector_palette_combo.setObjectName("mag_3d_vector_palette")
         self.vector_palette_combo.addItems(
-            ["Rainbow", "Viridis", "Plasma", "Magma", "Cividis", "Inferno", "Gray"]
+            [
+                "Rainbow",
+                "Viridis",
+                "Plasma",
+                "Magma",
+                "Cividis",
+                "Inferno",
+                "Gray",
+                "White",
+            ]
         )
         self.vector_palette_combo.setToolTip(
             "Choose the color palette used to distinguish displayed vectors."
@@ -417,7 +428,7 @@ class MagnetizationViewer(QWidget):
         show_row.addWidget(QLabel("Show:"))
         self.tip_markers_checkbox = QCheckBox("Tip markers")
         self.tip_markers_checkbox.setObjectName("mag_3d_tip_markers")
-        self.tip_markers_checkbox.setChecked(True)
+        self.tip_markers_checkbox.setChecked(False)
         self.tip_markers_checkbox.setToolTip("Mark the tip of each position vector.")
         self.tip_curve_checkbox = QCheckBox("Tip curve")
         self.tip_curve_checkbox.setObjectName("mag_3d_tip_curve")
@@ -436,17 +447,15 @@ class MagnetizationViewer(QWidget):
         self.b1_field_checkbox.setObjectName("mag_3d_b1_field")
         self.b1_field_checkbox.setChecked(True)
         self.b1_field_checkbox.setToolTip(
-            "Draw the RF field (rotating frame) at every position, scaled to "
-            "the largest B1 of the sequence."
+            "Draw the RF field (rotating frame) once beside the positions, "
+            "scaled to the largest B1 of the sequence (ring = maximum)."
         )
         self.gradient_field_checkbox = QCheckBox("Gradient")
         self.gradient_field_checkbox.setObjectName("mag_3d_gradient_field")
         self.gradient_field_checkbox.setChecked(True)
         self.gradient_field_checkbox.setToolTip(
-            "Draw the gradient field G·r at every position as a bar beside "
-            "the column or row, or as a colored marker in a plane (red "
-            "positive, blue negative), scaled to the largest value of the "
-            "sequence."
+            "Draw the gradient vector (Gx, Gy, Gz) once beside the positions, "
+            "scaled to the largest gradient of the sequence."
         )
         for checkbox in (
             self.tip_markers_checkbox,
@@ -572,9 +581,12 @@ class MagnetizationViewer(QWidget):
         if not self.is_spatial_layout_active() or not len(self._spatial_origins):
             return -np.ones(3), np.ones(3)
         lo, hi = self._scene_extent
+        lo = np.minimum(lo, self._field_origin - [1.1, 1.1, 1.3])
+        hi = np.maximum(hi, self._field_origin + [1.1, 1.1, 1.5])
         if self.is_net_vector_shown():
-            lo = np.minimum(lo, self._net_origin - [1.1, 1.1, 1.3])
-            hi = np.maximum(hi, self._net_origin + [1.1, 1.1, 1.1])
+            reach = self.NET_VECTOR_SCALE + 0.1
+            lo = np.minimum(lo, self._net_origin - reach - [0, 0, 0.3])
+            hi = np.maximum(hi, self._net_origin + reach)
         return lo, hi
 
     def _add_scene_label(self, pos, text: str):
@@ -612,6 +624,7 @@ class MagnetizationViewer(QWidget):
         if not self.is_spatial_layout_active():
             self._spatial_origins = np.zeros((0, 3))
             self._net_origin = np.zeros(3)
+            self._field_origin = np.zeros(3)
             self._tip_mesh_pairs = None
             for item in (
                 self.position_axis_item,
@@ -619,10 +632,10 @@ class MagnetizationViewer(QWidget):
                 self.tip_curve_item,
                 self.tip_marker_item,
                 self.position_path_item,
-                self.position_b1_plot,
-                self.gradient_axis_item,
-                self.gradient_bar_plot,
-                self.gradient_marker_item,
+                self.field_ring_item,
+                self.b1_arrow_item,
+                self.gradient_arrow_item,
+                self.field_tip_item,
                 self.field_label_item,
             ):
                 item.setVisible(False)
@@ -645,12 +658,19 @@ class MagnetizationViewer(QWidget):
             self._build_column_scene(spacing)
         self.position_axis_item.setVisible(True)
 
-        net_label = self._add_scene_label(self._net_origin + [-0.15, 0.0, -1.3], "net")
+        below = -self.NET_VECTOR_SCALE - 0.3
+        net_label = self._add_scene_label(self._net_origin + [-0.15, 0.0, below], "net")
         net_label.setVisible(self.is_net_vector_shown())
         self._net_label_item = net_label
         for item in anchored:
             item.resetTransform()
             item.translate(*self._net_origin)
+            item.scale(*(3 * [self.NET_VECTOR_SCALE]))
+        # Unit circle for the B1 scale around the field origin.
+        angles = np.linspace(0.0, 2.0 * np.pi, 49)
+        ring = np.column_stack([np.cos(angles), np.sin(angles), np.zeros_like(angles)])
+        self.field_ring_item.setData(pos=(ring + self._field_origin).astype(np.float32))
+        self.field_label_item.setData(pos=tuple(self._field_origin + [-0.9, 0.0, 1.35]))
         if fit_camera:
             self.set_camera_preset(preset or self._default_camera_preset())
         self._redraw_spatial_frame()
@@ -662,11 +682,9 @@ class MagnetizationViewer(QWidget):
         count = values.size
         zs = self._index_steps(count, spacing)
         self._spatial_origins = np.column_stack([np.zeros(count), np.zeros(count), zs])
-        self._net_origin = np.array([self.NET_VECTOR_X, 0.0, 0.0])
+        self._field_origin = np.array([-self.FIELD_GAP, 0.0, 0.0])
+        self._net_origin = np.array([-self.FIELD_GAP - self.NET_GAP, 0.0, 0.0])
         self._tip_mesh_pairs = None
-        gx = self.GRADIENT_BAR_X
-        self._gradient_bar_offset = np.array([gx, 0.0, 0.0])
-        self._gradient_bar_direction = np.array([1.0, 0.0, 0.0])
 
         tick = min(0.08, 0.3 * spacing)
         segments = [
@@ -676,25 +694,16 @@ class MagnetizationViewer(QWidget):
         for z in zs:
             segments.extend([[-tick, 0.0, z], [tick, 0.0, z]])
         self.position_axis_item.setData(pos=np.asarray(segments, dtype=np.float32))
-        self.gradient_axis_item.setData(
-            pos=np.array(
-                [[gx, 0.0, zs[0] - 0.5 * spacing], [gx, 0.0, zs[-1] + 0.5 * spacing]],
-                dtype=np.float32,
-            )
-        )
         for idx in centered_stride_indices(count, self.MAX_POSITION_LABELS):
             self._add_scene_label(
                 (self.POSITION_LABEL_X, 0.0, zs[idx]), f"{values[idx]:.1f} mm"
             )
-        self.field_label_item.setData(
-            pos=(gx - self.GRADIENT_BAR_LENGTH, 0.0, zs[-1] + 1.2)
-        )
         # Axis triad and floor grid sit below the column.
-        floor = float(zs[0]) - 1.05
+        floor = min(float(zs[0]) - 1.05, -self.NET_VECTOR_SCALE - 0.6)
         self._place_floor((0.0, 0.0, floor), (0.0, 0.0, floor), (4, 4))
         self._scene_extent = np.array(
             [
-                [gx - self.GRADIENT_BAR_LENGTH - 0.2, -1.3, zs[0] - 1.1],
+                [-1.3, -1.3, floor - 0.1],
                 [self.POSITION_LABEL_X + 1.2, 1.3, zs[-1] + 1.4],
             ]
         )
@@ -708,11 +717,9 @@ class MagnetizationViewer(QWidget):
         unit = np.eye(3)[axis]
         up = np.array([0.0, 0.0, 1.0])
         self._spatial_origins = steps[:, None] * unit
-        self._net_origin = (steps[0] - self.NET_GAP) * unit
+        self._field_origin = (steps[0] - self.FIELD_GAP) * unit
+        self._net_origin = (steps[0] - self.FIELD_GAP - self.NET_GAP) * unit
         self._tip_mesh_pairs = None
-        bar = self.ROW_GRADIENT_Z * up
-        self._gradient_bar_offset = bar
-        self._gradient_bar_direction = up
 
         tick = min(0.08, 0.3 * spacing)
         start = (steps[0] - 0.5 * spacing) * unit
@@ -721,18 +728,14 @@ class MagnetizationViewer(QWidget):
         for origin in self._spatial_origins:
             segments.extend([origin - tick * up, origin + tick * up])
         self.position_axis_item.setData(pos=np.asarray(segments, dtype=np.float32))
-        self.gradient_axis_item.setData(
-            pos=np.array([start + bar, end + bar], dtype=np.float32)
-        )
         below = -self.LABEL_GAP * up
         for idx in centered_stride_indices(count, self.MAX_POSITION_LABELS):
             self._add_scene_label(
                 self._spatial_origins[idx] + below - 0.3 * unit, f"{values[idx]:.1f}"
             )
         self._add_scene_label(end + 0.3 * unit + below, f"{AXIS_NAMES[axis]} (mm)")
-        self.field_label_item.setData(pos=tuple(start + 1.5 * up))
-        # Axis triad and floor grid sit below the gradient bars.
-        floor = self.ROW_GRADIENT_Z - self.GRADIENT_BAR_LENGTH - 0.3
+        # Axis triad and floor grid sit below the labels.
+        floor = -max(self.LABEL_GAP + 0.5, self.NET_VECTOR_SCALE + 0.6)
         length = self._floor_length(steps[-1] - steps[0])
         size = (length, 4) if axis == 0 else (4, length)
         self._place_floor((0.0, 0.0, floor), (0.0, 0.0, floor), size)
@@ -761,9 +764,8 @@ class MagnetizationViewer(QWidget):
         origins[:, second] = steps[second][index // n_first]
         self._spatial_origins = origins
         h_steps, v_steps = steps[h], steps[v]
-        self._net_origin = (h_steps[0] - self.NET_GAP) * unit[h]
-        self._gradient_bar_offset = None
-        self._gradient_bar_direction = None
+        self._field_origin = (h_steps[0] - self.FIELD_GAP) * unit[h]
+        self._net_origin = (h_steps[0] - self.FIELD_GAP - self.NET_GAP) * unit[h]
         # Neighbour pairs along both plane axes for the tip mesh.
         grid = index.reshape(n_second, n_first)
         self._tip_mesh_pairs = np.concatenate(
@@ -821,16 +823,14 @@ class MagnetizationViewer(QWidget):
         self._add_scene_label(
             right + title_v * unit[v] + 0.5 * lift * unit[2], f"{AXIS_NAMES[v]} (mm)"
         )
-        back = (v_steps[-1] + gap) * unit[v]
-        self.field_label_item.setData(
-            pos=tuple((h_steps[0] - 0.3) * unit[h] + back + 1.5 * lift * unit[2])
-        )
 
-        corner = (h_steps[0] - self.NET_GAP) * unit[h] + front
+        corner = self._net_origin + front
         if v == 2:
             # Upright plane: the floor grid sits below the axis titles.
             floor = v_steps[0] - gap - 0.9
-            length = self._floor_length(h_steps[-1] - h_steps[0] + self.NET_GAP)
+            length = self._floor_length(
+                h_steps[-1] - h_steps[0] + self.FIELD_GAP + self.NET_GAP
+            )
             size = (length, 4) if h == 0 else (4, length)
             self._place_floor(corner, floor * unit[2], size)
         else:
@@ -1063,7 +1063,7 @@ class MagnetizationViewer(QWidget):
         self.position_path_item.setVisible(True)
 
     def set_spatial_fields(self, b1=None, gradients=None, positions_m=None):
-        """Store the fields seen by the drawn positions for every playback frame.
+        """Store the fields of every playback frame for the global indicator.
 
         Parameters
         ----------
@@ -1072,10 +1072,10 @@ class MagnetizationViewer(QWidget):
         gradients : array-like or None
             Gradient (gx, gy, gz) per frame (G/cm).
         positions_m : array-like or None
-            Position (x, y, z) in m of every drawn position group.
+            Position (x, y, z) in m of every drawn position group; selects
+            the gradient components given in the readout.
         """
         self._field_b1 = None
-        self._field_offsets = None
         self._field_gradient_along = None
         self._field_gradients = None
         self._field_plane_axes = None
@@ -1083,32 +1083,32 @@ class MagnetizationViewer(QWidget):
             b1_arr = np.asarray(b1).ravel()
             if b1_arr.size:
                 self._field_b1 = b1_arr
-        if gradients is not None and positions_m is not None:
+        if gradients is not None:
             grads = np.asarray(gradients, dtype=float)
             if grads.ndim == 1:
                 grads = grads[:, None]
             padded = np.zeros((len(grads), 3))
             padded[:, : min(grads.shape[1], 3)] = grads[:, :3]
-            pos_cm = np.asarray(positions_m, dtype=float).reshape(-1, 3) * 100.0
-            if len(padded) and len(pos_cm):
-                # Field offset G·r (G) at every drawn position and frame.
-                self._field_offsets = padded @ pos_cm.T
+            if len(padded):
                 self._field_gradients = padded
+        if self._field_gradients is not None and positions_m is not None:
+            pos_cm = np.asarray(positions_m, dtype=float).reshape(-1, 3) * 100.0
+            if len(pos_cm):
                 layout = infer_layout(pos_cm)
                 if layout.ndim == 2 and layout.is_grid:
                     self._field_plane_axes = tuple(sorted(layout.axes))
                 spread = pos_cm[-1] - pos_cm[0]
                 length = float(np.linalg.norm(spread))
                 direction = spread / length if length > 0 else np.array([0, 0, 1.0])
-                self._field_gradient_along = padded @ direction
+                self._field_gradient_along = self._field_gradients @ direction
         self._field_b1_max = (
             float(np.nanmax(np.abs(self._field_b1)))
             if self._field_b1 is not None
             else 0.0
         )
-        self._field_offset_max = (
-            float(np.nanmax(np.abs(self._field_offsets)))
-            if self._field_offsets is not None
+        self._field_gradient_max = (
+            float(np.nanmax(np.linalg.norm(self._field_gradients, axis=1)))
+            if self._field_gradients is not None
             else 0.0
         )
         self._draw_field_frame()
@@ -1119,11 +1119,16 @@ class MagnetizationViewer(QWidget):
         self._draw_field_frame()
 
     def _draw_field_frame(self):
+        """Draw B1 and the gradient vector once, at the field origin.
+
+        Both arrows are scaled to their largest value in the sequence; the
+        ring marks full B1.
+        """
         items = (
-            self.position_b1_plot,
-            self.gradient_axis_item,
-            self.gradient_bar_plot,
-            self.gradient_marker_item,
+            self.field_ring_item,
+            self.b1_arrow_item,
+            self.gradient_arrow_item,
+            self.field_tip_item,
             self.field_label_item,
         )
         idx = self._field_frame_idx
@@ -1131,12 +1136,13 @@ class MagnetizationViewer(QWidget):
             for item in items:
                 item.setVisible(False)
             return
-        origins = self._spatial_origins
-        count = len(origins)
+        origin = self._field_origin
         readout = []
+        arrows = []
 
+        b1_on = self.b1_field_checkbox.isChecked() and self._field_b1 is not None
         b1_shown = False
-        if self.b1_field_checkbox.isChecked() and self._field_b1 is not None:
+        if b1_on:
             b1_val = self._field_b1[min(max(idx, 0), len(self._field_b1) - 1)]
             mag = abs(b1_val)
             if np.isfinite(mag) and self._field_b1_max > 0 and mag > 1e-9:
@@ -1144,66 +1150,47 @@ class MagnetizationViewer(QWidget):
                 phase = np.pi - np.angle(b1_val)
                 length = mag / self._field_b1_max
                 tip = np.array([np.cos(phase), np.sin(phase), 0.0]) * length
-                pos = np.empty((count * 2, 3), dtype=np.float32)
-                pos[0::2] = origins
-                pos[1::2] = origins + tip
-                self.position_b1_plot.setData(pos=pos)
+                self.b1_arrow_item.setData(
+                    pos=np.array([origin, origin + tip], dtype=np.float32)
+                )
+                arrows.append((origin + tip, self.B1_COLOR))
                 b1_shown = True
             readout.append(f"B1 {mag * 100.0:.2f} µT")
-        self.position_b1_plot.setVisible(b1_shown)
+        self.b1_arrow_item.setVisible(b1_shown)
+        self.field_ring_item.setVisible(b1_on)
 
-        grad_shown = (
-            self.gradient_field_checkbox.isChecked()
-            and self._field_offsets is not None
-            and self._field_offsets.shape[1] == count
-        )
-        bars = self._gradient_bar_direction is not None
-        if grad_shown:
-            frame = min(max(idx, 0), len(self._field_offsets) - 1)
-            offsets = self._field_offsets[frame]
-            relative = (
-                offsets / self._field_offset_max
-                if self._field_offset_max > 0
-                else np.zeros_like(offsets)
-            )
-            signed = np.where(
-                (offsets >= 0)[:, None],
-                np.array([1.0, 0.35, 0.3, 1.0]),
-                np.array([0.35, 0.55, 1.0, 1.0]),
-            )
-            if bars:
-                base = origins + self._gradient_bar_offset
-                pos = np.empty((count * 2, 3), dtype=np.float32)
-                pos[0::2] = base
-                pos[1::2] = base + np.outer(
-                    relative * self.GRADIENT_BAR_LENGTH, self._gradient_bar_direction
+        grad_shown = False
+        if self.gradient_field_checkbox.isChecked() and (
+            self._field_gradients is not None
+        ):
+            frame = min(max(idx, 0), len(self._field_gradients) - 1)
+            grads = self._field_gradients[frame]
+            if self._field_gradient_max > 0 and np.linalg.norm(grads) > 1e-12:
+                tip = grads / self._field_gradient_max
+                self.gradient_arrow_item.setData(
+                    pos=np.array([origin, origin + tip], dtype=np.float32)
                 )
-                self.gradient_bar_plot.setData(
-                    pos=pos, color=np.repeat(signed, 2, axis=0)
-                )
-            else:
-                # Markers fade from gray at G·r = 0 to the signed color.
-                weight = np.abs(relative)[:, None]
-                colors = (1.0 - weight) * np.array(
-                    [0.5, 0.5, 0.5, 1.0]
-                ) + weight * signed
-                self.gradient_marker_item.setData(
-                    pos=origins.astype(np.float32), color=colors
-                )
+                arrows.append((origin + tip, self.GRADIENT_COLOR))
+                grad_shown = True
             if self._field_plane_axes is not None:
-                grads = self._field_gradients[frame]
                 parts = [
                     f"G{AXIS_NAMES[a]} {grads[a] * 10.0:.2f}"
                     for a in self._field_plane_axes
                 ]
                 readout.append(" ".join(parts) + " mT/m")
-            else:
+            elif self._field_gradient_along is not None:
                 along = float(self._field_gradient_along[frame])
                 readout.append(f"G {along * 10.0:.2f} mT/m")
-        self.gradient_bar_plot.setVisible(grad_shown and bars)
-        self.gradient_axis_item.setVisible(grad_shown and bars)
-        self.gradient_marker_item.setVisible(grad_shown and not bars)
+            else:
+                readout.append(f"|G| {np.linalg.norm(grads) * 10.0:.2f} mT/m")
+        self.gradient_arrow_item.setVisible(grad_shown)
 
+        if arrows:
+            self.field_tip_item.setData(
+                pos=np.array([tip for tip, _ in arrows], dtype=np.float32),
+                color=np.array([color for _, color in arrows]),
+            )
+        self.field_tip_item.setVisible(bool(arrows))
         self.field_label_item.setData(text="   ".join(readout))
         self.field_label_item.setVisible(bool(readout))
 
@@ -1220,6 +1207,13 @@ class MagnetizationViewer(QWidget):
         palette = self.vector_palette_combo.currentText()
         if palette == "Rainbow":
             return pg.intColor(index, hues=total, values=1.0, maxValue=255)
+        if palette == "White":
+            return QColor(255, 255, 255)
+        if palette == "Gray":
+            # pyqtgraph ships no gray map; ramp from dark to light gray.
+            fraction = 1.0 if total == 1 else index / (total - 1)
+            level = int(round(90 + 165 * fraction))
+            return QColor(level, level, level)
         try:
             cmap = pg.colormap.get(palette.lower())
             position = 0.5 if total == 1 else index / (total - 1)
