@@ -53,9 +53,20 @@ from ..simulator import (
 GRADIENT_LOBE_COLUMNS = (
     ("Axis", "axis", None, None),
     ("Start\n(ms)", "start_ms", (0.0, 1.0e6), 0.1),
-    ("Duration\n(ms)", "duration_ms", (0.001, 1.0e6), 0.1),
-    ("Amplitude\n(mT/m)", "amplitude_mt_per_m", (-1.0e4, 1.0e4), 1.0),
+    ("Dur.\n(ms)", "duration_ms", (0.001, 1.0e6), 0.1),
+    ("Ampl.\n(mT/m)", "amplitude_mt_per_m", (-1.0e4, 1.0e4), 1.0),
     ("Ramp\n(ms)", "ramp_ms", (0.0, 1.0e5), 0.05),
+)
+# Read-only column after the editable ones with the area of each lobe.
+GRADIENT_LOBE_MOMENT_COLUMN = len(GRADIENT_LOBE_COLUMNS)
+GRADIENT_LOBE_MOMENT_HEADER = "∫G dt\n(mT·ms/m)"
+GRADIENT_LOBE_HEADER_TIPS = (
+    "Gradient axis",
+    "Lobe start from the sequence start (ms)",
+    "Lobe duration including both ramps (ms)",
+    "Plateau amplitude (mT/m)",
+    "Ramp time (ms)",
+    "Gradient integral of the lobe, amplitude × (duration − ramp) (mT·ms/m)",
 )
 
 
@@ -440,11 +451,17 @@ class SequenceDesigner(QGroupBox):
         group_layout = QVBoxLayout(group)
         group_layout.setContentsMargins(6, 6, 6, 6)
 
-        self.gradient_lobe_table = QTableWidget(0, len(GRADIENT_LOBE_COLUMNS))
+        self.gradient_lobe_table = QTableWidget(0, GRADIENT_LOBE_MOMENT_COLUMN + 1)
         self.gradient_lobe_table.setObjectName("gradient_lobe_table")
         self.gradient_lobe_table.setHorizontalHeaderLabels(
             [header for header, *_ in GRADIENT_LOBE_COLUMNS]
+            + [GRADIENT_LOBE_MOMENT_HEADER]
         )
+        for column, tip in enumerate(GRADIENT_LOBE_HEADER_TIPS):
+            self.gradient_lobe_table.horizontalHeaderItem(column).setToolTip(tip)
+        header_font = self.gradient_lobe_table.horizontalHeader().font()
+        header_font.setPointSizeF(header_font.pointSizeF() * 0.85)
+        self.gradient_lobe_table.horizontalHeader().setFont(header_font)
         self.gradient_lobe_table.setItemDelegate(
             _GradientLobeDelegate(self.gradient_lobe_table)
         )
@@ -452,6 +469,10 @@ class SequenceDesigner(QGroupBox):
         self.gradient_lobe_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.Stretch
         )
+        for column in (0, GRADIENT_LOBE_MOMENT_COLUMN):
+            self.gradient_lobe_table.horizontalHeader().setSectionResizeMode(
+                column, QHeaderView.ResizeToContents
+            )
         self.gradient_lobe_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.gradient_lobe_table.setEditTriggers(
             QAbstractItemView.DoubleClicked
@@ -463,7 +484,8 @@ class SequenceDesigner(QGroupBox):
             "Trapezoid gradient lobes added to the selected sequence on x, y "
             "or z. Start is measured from the sequence start, duration "
             "includes both ramps, and lobes past the end extend the sequence. "
-            "Double-click a cell to edit it."
+            "Moment is the gradient integral of each lobe (amplitude × "
+            "(duration − ramp)). Double-click a cell to edit it."
         )
         self.gradient_lobe_table.itemChanged.connect(
             lambda _: self._on_gradient_lobes_changed()
@@ -541,6 +563,10 @@ class SequenceDesigner(QGroupBox):
                     item.setData(Qt.EditRole, state[field])
                     item.setTextAlignment(Qt.AlignCenter)
                     table.setItem(row, column, item)
+                moment_item = QTableWidgetItem()
+                moment_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                moment_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, GRADIENT_LOBE_MOMENT_COLUMN, moment_item)
         finally:
             table.blockSignals(False)
         self._on_gradient_lobes_changed()
@@ -560,7 +586,32 @@ class SequenceDesigner(QGroupBox):
         self.set_gradient_lobes(lobes)
 
     def _on_gradient_lobes_changed(self):
+        self._update_lobe_moments()
         self.update_diagram()
+
+    def _update_lobe_moments(self):
+        """Fill the read-only moment column with each lobe's gradient area."""
+        table = self.gradient_lobe_table
+        table.blockSignals(True)
+        try:
+            for row in range(table.rowCount()):
+                values = {}
+                for column, (_, field, _, _) in enumerate(GRADIENT_LOBE_COLUMNS):
+                    item = table.item(row, column)
+                    values[field] = item.data(Qt.EditRole) if item else None
+                try:
+                    text = f"{GradientLobe(**values).moment_mt_ms_per_m:.4g}"
+                except (TypeError, ValueError):
+                    text = "–"
+                item = table.item(row, GRADIENT_LOBE_MOMENT_COLUMN)
+                if item is None:
+                    item = QTableWidgetItem()
+                    item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                    item.setTextAlignment(Qt.AlignCenter)
+                    table.setItem(row, GRADIENT_LOBE_MOMENT_COLUMN, item)
+                item.setText(text)
+        finally:
+            table.blockSignals(False)
 
     def _apply_gradient_options(self, sequence_tuple, dt):
         """Move the slice gradient to the chosen axis and add the extra lobes."""
@@ -579,6 +630,22 @@ class SequenceDesigner(QGroupBox):
         twists = phase_twist_cycles_per_mm(moments)
         parts = [f"{name} {moment:.3g}" for name, moment in zip(AXIS_NAMES, moments)]
         text = "Net moment (mT·ms/m): " + " · ".join(parts)
+        try:
+            lobes = self.gradient_lobes()
+        except ValueError:
+            lobes = []
+        if lobes:
+            lobe_moments = np.zeros(3)
+            for lobe in lobes:
+                lobe_moments[AXIS_NAMES.index(lobe.axis)] += lobe.moment_mt_ms_per_m
+            lobe_parts = [
+                f"{name} {moment:.3g}"
+                for name, moment in zip(AXIS_NAMES, lobe_moments)
+                if moment != 0.0
+            ]
+            text += "\nExtra lobes (mT·ms/m): " + (
+                " · ".join(lobe_parts) if lobe_parts else "0"
+            )
         winding = [
             f"{name} {twist:.3g}"
             for name, twist in zip(AXIS_NAMES, twists)
