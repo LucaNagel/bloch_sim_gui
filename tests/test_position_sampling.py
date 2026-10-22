@@ -176,6 +176,30 @@ def test_volume_grid_indices_subsample_every_axis():
         np.testing.assert_allclose(inferred, expected)
 
 
+@pytest.mark.parametrize("along", [0, 1, 2])
+def test_volume_slice_matches_the_inferred_plane(along):
+    positions = build_volume_positions((4, 3, 5), (0.03, 0.02, 0.04))
+    layout = infer_layout(positions)
+
+    indices, plane = layout.slice_plane(along, 1)
+
+    sliced = positions[indices]
+    np.testing.assert_allclose(sliced[:, along], layout.coordinates[along][1])
+    inferred = infer_layout(sliced)
+    assert plane.axes == inferred.axes
+    assert plane.counts == inferred.counts
+    for expected, got in zip(inferred.coordinates, plane.coordinates):
+        np.testing.assert_allclose(got, expected)
+    np.testing.assert_allclose(plane.center, sliced[0])
+
+
+def test_slice_plane_needs_a_volume():
+    layout = infer_layout(build_plane_positions((3, 2), (0.02, 0.01), "xy"))
+
+    with pytest.raises(ValueError):
+        layout.slice_plane(0, 0)
+
+
 def test_shuffled_volume_is_not_a_grid():
     positions = build_volume_positions((3, 3, 3), (0.02, 0.02, 0.02))
     rng = np.random.default_rng(0)

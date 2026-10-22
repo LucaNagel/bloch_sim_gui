@@ -1959,6 +1959,86 @@ def test_free_mode_spatial_map_shows_plane_and_profile():
     assert export["mz_map"].shape == (3, 4)
 
 
+def test_free_mode_spatial_map_shows_a_volume_slice(tmp_path):
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    positions = build_volume_positions((4, 3, 3), (0.03, 0.02, 0.02))
+    # |Mxy| and -Mz encode the flat position index
+    value = (np.arange(positions.shape[0]) + 1.0) / positions.shape[0]
+    amp = value[None, :, None] * np.ones((2, 1, 2))
+    result = {"mx": amp, "my": np.zeros_like(amp), "mz": -amp}
+    _show_spatial_result(window, positions, result)
+    volume = value.reshape(3, 3, 4)
+
+    assert not window.spatial_slice_controls.isHidden()
+    axis_combo = window.spatial_slice_axis
+    assert [axis_combo.itemText(i) for i in range(3)] == ["x", "y", "z"]
+    assert axis_combo.currentText() == "z"
+    assert window.spatial_slice_slider.maximum() == 2
+    assert window.spatial_slice_label.text() == "z = 0.00 mm"
+    combo = window.spatial_plot_type
+    assert combo.model().item(combo.findText("Map")).isEnabled()
+    combo.setCurrentText("Map")
+
+    # Across z the maps show the xy plane of the middle slice
+    images = {key: item.image for key, item in window.spatial_map_items.items()}
+    np.testing.assert_allclose(images["mxy"], volume[1])
+    np.testing.assert_allclose(images["mz"], -volume[1])
+    assert window.spatial_map_plots["mxy"].getAxis("left").labelText == "y"
+    assert window.spatial_profile_label.text() == "y = 0.00 mm"
+    x, y = _spatial_curve(window.spatial_mxy_plot, "|Mxy|")
+    np.testing.assert_allclose(x, [-15.0, -5.0, 5.0, 15.0])
+    np.testing.assert_allclose(y, volume[1, 1])
+    assert window.spatial_mxy_plot.getPlotItem().titleLabel.text.endswith(
+        "at y = 0.00 mm, z = 0.00 mm"
+    )
+
+    # Across x the maps show yz; the profile runs along y through z = 0
+    axis_combo.setCurrentText("x")
+    assert window.spatial_slice_label.text() == "x = -5.00 mm"
+    np.testing.assert_allclose(window.spatial_map_items["mxy"].image, volume[:, :, 1])
+    assert window.spatial_map_plots["mxy"].getAxis("bottom").labelText == "y"
+    assert window.spatial_map_plots["mxy"].getAxis("left").labelText == "z"
+    assert window.spatial_profile_label.text() == "z = 0.00 mm"
+    export = window._last_spatial_export
+    np.testing.assert_array_equal(export["profile_indices"], [13, 17, 21])
+    np.testing.assert_allclose(export["position_m"], [-0.01, 0.0, 0.01])
+    assert export["position_axis"] == "y"
+
+    window.spatial_slice_slider.setValue(3)
+    assert window.spatial_slice_label.text() == "x = 15.00 mm"
+    np.testing.assert_allclose(window.spatial_map_items["mxy"].image, volume[:, :, 3])
+
+    # The export holds the whole volume, not only the slice on screen
+    export = window._last_spatial_export
+    assert export["grid_axes"] == ("x", "y", "z")
+    assert export["mz_map"].shape == (3, 3, 4)
+    assert export["slice_axis"] == "x"
+    assert export["slice_position_m"] == pytest.approx(0.015)
+    path = window._write_spatial_export(export, tmp_path / "volume.csv", "csv")
+    names, values, header = _read_export_columns(path)
+    assert "#   grid: 4 x 3 x 3 in xyz (x fastest)" in header
+    np.testing.assert_allclose(values[:, :3], positions)
+    np.testing.assert_allclose(values[:, 3], value)
+
+    # A regridded volume keeps the slice nearest its previous position
+    finer = build_volume_positions((6, 3, 3), (0.05, 0.02, 0.02))
+    amp = np.ones((2, finer.shape[0], 2))
+    _show_spatial_result(
+        window, finer, {"mx": amp, "my": np.zeros_like(amp), "mz": 0.0 * amp}
+    )
+    assert window.spatial_slice_slider.value() == 4
+    assert window.spatial_slice_label.text() == "x = 15.00 mm"
+    assert window.spatial_map_items["mxy"].image.shape == (3, 3)
+
+    # A plane hides the slice controls again
+    plane = build_plane_positions((4, 3), (0.03, 0.02), "xy")
+    _show_spatial_result(window, plane, _plane_result(plane, nframes=2)[0])
+    assert window.spatial_slice_controls.isHidden()
+    assert combo.currentText() == "Map"
+    assert window.spatial_map_items["mxy"].image.shape == (3, 4)
+
+
 def test_free_mode_spatial_line_along_x_uses_its_axis():
     app = QApplication.instance() or QApplication(sys.argv)
     window = BlochSimulatorGUI()

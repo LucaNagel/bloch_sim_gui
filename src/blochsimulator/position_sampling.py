@@ -211,6 +211,28 @@ class PositionLayout:
         )
         return PositionLayout(self.axes, coordinates, self.center)
 
+    def slice_plane(self, along: int, index: int):
+        """Flat indices and plane layout of one slice through a volume.
+
+        ``along`` is the position of the sliced axis in ``axes`` and
+        ``index`` the sample along it. The other two axes keep their order,
+        so the indices come out row-major over the returned plane.
+        """
+        if self.ndim != 3 or not self.is_grid:
+            raise ValueError("slice_plane needs a 3D position grid")
+        index = min(max(int(index), 0), self.counts[along] - 1)
+        flat = np.arange(self.size)
+        indices = flat[(flat // self.strides[along]) % self.counts[along] == index]
+        kept = [k for k in range(3) if k != along]
+        center = np.array(self.center, dtype=float)
+        center[self.axes[along]] = self.coordinates[along][index]
+        plane = PositionLayout(
+            tuple(self.axes[k] for k in kept),
+            tuple(self.coordinates[k] for k in kept),
+            center,
+        )
+        return indices, plane
+
     def reshape(self, values):
         """Reshape per-position values (leading axis N) to the grid shape."""
         values = np.asarray(values)

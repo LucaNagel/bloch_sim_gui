@@ -1284,7 +1284,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.spatial_plot_type = QComboBox()
         self.spatial_plot_type.setObjectName("spatial_plot_type")
         self.spatial_plot_type.addItems(["Line", "Heatmap", "Map"])
-        # "Map" needs a 2D position grid; enabled once a plane was simulated.
+        # "Map" needs a 2D or 3D position grid; enabled once one was simulated.
         self.spatial_plot_type.model().item(2).setEnabled(False)
 
         spatial_controls.addWidget(self.spatial_plot_type)
@@ -1316,6 +1316,29 @@ class BlochSimulatorGUI(QMainWindow):
         spatial_controls.addWidget(self.spatial_freq_label)
         spatial_controls.addWidget(self.spatial_freq_slider)
         spatial_layout.addLayout(spatial_controls)
+
+        # Slice through a 3D position grid; the maps, profiles and heatmaps
+        # below then show that plane (hidden for lines and planes)
+        self.spatial_slice_controls = QWidget()
+        spatial_slice_layout = QHBoxLayout(self.spatial_slice_controls)
+        spatial_slice_layout.setContentsMargins(0, 0, 0, 0)
+        spatial_slice_layout.addWidget(QLabel("Volume slice across:"))
+        self.spatial_slice_axis = QComboBox()
+        self.spatial_slice_axis.setObjectName("spatial_slice_axis")
+        self.spatial_slice_axis.addItems(["x", "y", "z"])
+        self.spatial_slice_axis.setCurrentIndex(2)
+        self.spatial_slice_axis.currentIndexChanged.connect(self._refresh_spatial_view)
+        spatial_slice_layout.addWidget(self.spatial_slice_axis)
+        self.spatial_slice_label = QLabel("")
+        spatial_slice_layout.addWidget(self.spatial_slice_label)
+        self.spatial_slice_slider = QSlider(Qt.Horizontal)
+        self.spatial_slice_slider.setObjectName("spatial_slice_slider")
+        self.spatial_slice_slider.setRange(0, 0)
+        self.spatial_slice_slider.valueChanged.connect(self._refresh_spatial_view)
+        spatial_slice_layout.addWidget(self.spatial_slice_slider, 1)
+        self.spatial_slice_controls.hide()
+        spatial_layout.addWidget(self.spatial_slice_controls)
+        self._spatial_slice_state = None
 
         # Row or column of a 2D position grid shown by the line plots and
         # heatmaps (hidden for lines and single points)
@@ -2284,7 +2307,17 @@ class BlochSimulatorGUI(QMainWindow):
             (
                 self.spatial_plot_type,
                 "Choose between spatial curves, a two-dimensional heatmap and, for a "
-                "2D position grid, maps of |Mxy|, phase and Mz over the plane.",
+                "2D or 3D position grid, maps of |Mxy|, phase and Mz over the plane "
+                "or the selected volume slice.",
+            ),
+            (
+                self.spatial_slice_axis,
+                "Volume axis the slice is taken across; the maps show the plane of "
+                "the other two axes.",
+            ),
+            (
+                self.spatial_slice_slider,
+                "Position of the volume slice along the chosen axis.",
             ),
             (
                 self.spatial_profile_axis,
@@ -4213,28 +4246,39 @@ class BlochSimulatorGUI(QMainWindow):
 
         # A line is plotted against its own axis; a plane is shown as maps
         # plus a profile through one row or column of the grid. A volume is
-        # plotted against the position index.
+        # shown like the plane of one selected slice.
         positions = np.asarray(self.last_positions)
         layout = self._position_layout()
-        plane = (
+        grid = (
             layout
             if layout is not None
-            and layout.ndim == 2
+            and layout.ndim in (2, 3)
             and layout.is_grid
             and layout.size == mx_display.shape[0]
             else None
         )
-        self._sync_spatial_profile_controls(plane)
-        plane_maps = None
-        if plane is not None:
-            profile, axis_idx = self._spatial_profile_indices(plane)
-            plane_maps = (
+        volume = grid if grid is not None and grid.ndim == 3 else None
+        self._sync_spatial_slice_controls(volume)
+        grid_maps = None
+        if grid is not None:
+            grid_maps = (
                 mxy_pos,
                 self._spatial_phase_deg(
                     mx_display, my_display, freq_sel, spatial_view_mode
                 ),
                 mz_pos,
             )
+        if volume is not None:
+            slice_selection = self._spatial_slice_selection()
+            slice_indices, plane = volume.slice_plane(*slice_selection)
+            plane_maps = tuple(values[slice_indices] for values in grid_maps)
+        else:
+            slice_indices, plane, plane_maps = None, grid, grid_maps
+        self._sync_spatial_profile_controls(plane)
+        if plane is not None:
+            local, axis_idx = self._spatial_profile_indices(plane)
+            # ``local`` indexes the plane, ``profile`` all simulated positions
+            profile = local if slice_indices is None else slice_indices[local]
             mx_display, my_display, mz_display = (
                 values[profile] for values in (mx_display, my_display, mz_display)
             )
@@ -4281,15 +4325,24 @@ class BlochSimulatorGUI(QMainWindow):
             "position_axis": axis_name,
             "frequency_view": spatial_view_mode,
         }
-        if plane is not None:
+        if grid is not None:
+            # A volume is exported whole, not just the slice on screen
             self._last_spatial_export.update(
                 {
-                    "grid_axes": plane.axis_names,
-                    "grid_coordinates_m": plane.coordinates,
+                    "grid_axes": grid.axis_names,
+                    "grid_coordinates_m": grid.coordinates,
                     "profile_indices": profile,
-                    "mxy_map": plane.reshape(plane_maps[0]),
-                    "phase_map_deg": plane.reshape(plane_maps[1]),
-                    "mz_map": plane.reshape(plane_maps[2]),
+                    "mxy_map": grid.reshape(grid_maps[0]),
+                    "phase_map_deg": grid.reshape(grid_maps[1]),
+                    "mz_map": grid.reshape(grid_maps[2]),
+                }
+            )
+        if volume is not None:
+            along, index = slice_selection
+            self._last_spatial_export.update(
+                {
+                    "slice_axis": AXIS_NAMES[volume.axes[along]],
+                    "slice_position_m": float(volume.coordinates[along][index]),
                 }
             )
 
@@ -4367,6 +4420,8 @@ class BlochSimulatorGUI(QMainWindow):
             )
             if plane is not None:
                 where = self.spatial_profile_label.text()
+                if volume is not None:
+                    where += ", " + self.spatial_slice_label.text()
                 self.spatial_mxy_plot.setTitle(
                     f"Transverse Magnetization along {axis_name} at {where}"
                 )
@@ -4441,6 +4496,57 @@ class BlochSimulatorGUI(QMainWindow):
         self.spatial_profile_label.setText(
             f"{AXIS_NAMES[plane.axes[across]]} = "
             f"{coords[slider.value()] * 1000.0:.2f} mm"
+        )
+
+    def _sync_spatial_slice_controls(self, volume):
+        """Match the slice controls to a 3D position grid.
+
+        ``volume`` is the layout of a volume, or None (the controls are then
+        hidden). A new volume or slice axis starts at the middle slice; a
+        regridded volume keeps the slice nearest the previous position.
+        """
+        self.spatial_slice_controls.setVisible(volume is not None)
+        if volume is None:
+            self._spatial_slice_state = None
+            return
+        combo, slider = self.spatial_slice_axis, self.spatial_slice_slider
+        names = list(volume.axis_names)
+        combo.blockSignals(True)
+        slider.blockSignals(True)
+        try:
+            if [combo.itemText(i) for i in range(combo.count())] != names:
+                across = combo.currentIndex()
+                combo.clear()
+                combo.addItems(names)
+                combo.setCurrentIndex(min(max(across, 0), 2))
+            along = combo.currentIndex()
+            coords = np.asarray(volume.coordinates[along])
+            previous = self._spatial_slice_state
+            slider.setRange(0, coords.size - 1)
+            if previous is None or previous[0] != volume.axes[along]:
+                target = 0.5 * (coords.min() + coords.max())
+            elif previous[1] != volume.counts:
+                target = previous[2]
+            else:
+                target = coords[min(slider.value(), coords.size - 1)]
+            slider.setValue(int(np.argmin(np.abs(coords - target))))
+            self._spatial_slice_state = (
+                volume.axes[along],
+                volume.counts,
+                float(coords[slider.value()]),
+            )
+        finally:
+            combo.blockSignals(False)
+            slider.blockSignals(False)
+        self.spatial_slice_label.setText(
+            f"{names[along]} = {coords[slider.value()] * 1000.0:.2f} mm"
+        )
+
+    def _spatial_slice_selection(self):
+        """Position in the volume axes and index of the selected slice."""
+        return (
+            min(max(self.spatial_slice_axis.currentIndex(), 0), 2),
+            self.spatial_slice_slider.value(),
         )
 
     def _spatial_profile_indices(self, plane):
@@ -9663,7 +9769,7 @@ class BlochSimulatorGUI(QMainWindow):
             )
 
     def _write_spatial_export(self, cache: dict, path, fmt: str) -> str:
-        """Write the Spatial tab data: a plane as maps over all grid
+        """Write the Spatial tab data: a plane or volume as maps over all grid
         positions, a line as profiles along its axis."""
         if cache.get("frequency_view") == "Mean over freqs":
             frequency = "mean over frequencies"
@@ -9671,9 +9777,9 @@ class BlochSimulatorGUI(QMainWindow):
             frequency = f"index {cache.get('freq_index', 0)}"
         info = {"time_s": cache.get("time_s"), "frequency": frequency}
         if "mxy_map" in cache:
-            ny, nx = cache["mxy_map"].shape
-            first, second = cache["grid_axes"]
-            info["grid"] = f"{nx} x {ny} in {first}{second} ({first} fastest)"
+            counts = " x ".join(str(n) for n in reversed(cache["mxy_map"].shape))
+            axes = cache["grid_axes"]
+            info["grid"] = f"{counts} in {''.join(axes)} ({axes[0]} fastest)"
             info["phase_deg"] = "NaN where |Mxy| < 0.1 % of its maximum"
             return self.dataset_exporter.export_spatial_plane(
                 self.last_positions,
