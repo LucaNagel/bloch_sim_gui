@@ -86,6 +86,11 @@ The project follows [Semantic Versioning](https://semver.org/).
   `OffsetEncoding = reconstruction`; their reconstruction applies the
   matching k-space phase ramp before gridding. Every sequence form has Read
   offset and Phase offset fields, and the Geometry tab previews them.
+- The FOV and slice package can be dragged in the Geometry tab views: the
+  drag maps to read, phase and slice offsets through the sequence frame,
+  snaps to 0.1 mm, shows the shift while dragging and fills the sequence form
+  (the live preview follows). Shift keeps the largest axis only, a right
+  click cancels, and dragging outside the FOV still pans the view.
 
 ### Changed
 

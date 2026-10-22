@@ -168,6 +168,7 @@ from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumView
 from .project_export_dialog import ProjectExportNamingWidget
 from .reconstruction_explorer import SequenceReconstructionExplorer
 from .sequence_geometry_viewer import (
+    OFFSET_ROLES,
     STALE_SEQUENCE_MESSAGE,
     SequenceGeometry,
     SequenceGeometryViewer,
@@ -1452,6 +1453,17 @@ class SequenceSimulationWidget(QWidget):
     )
     CONFIGURABLE_SOURCES = GENERATED_SOURCES | {INTERNAL_SOURCE}
     CARTESIAN_3D_SOURCES = frozenset((BSSFP_SOURCE, SS_BSSFP_SOURCE, ME_BSSFP_SOURCE))
+    # Field-name prefix of the forms with read and phase offsets.
+    OFFSET_FORM_PREFIXES = {
+        EPI_SOURCE: "epi",
+        CSI_SOURCE: "csi",
+        BSSFP_SOURCE: "bssfp",
+        SS_BSSFP_SOURCE: "ss_bssfp",
+        RADIAL_ME_BSSFP_SOURCE: "radial_me",
+        ME_BSSFP_SOURCE: "me_bssfp",
+        FLASH_SOURCE: "flash",
+        EPSI_MGE_SOURCE: "epsi",
+    }
     # Tooltip endings of the read/phase offset fields, by where the shift is
     # applied.
     OFFSET_IN_SEQUENCE = (
@@ -5157,6 +5169,9 @@ class SequenceSimulationWidget(QWidget):
         )
         self.geometry_viewer = SequenceGeometryViewer()
         self.geometry_viewer.update_requested.connect(self._geometry_update_requested)
+        self.geometry_viewer.geometry_offset_requested.connect(
+            self._geometry_offset_requested
+        )
         self.geometry_tab_index = views.addTab(self.geometry_viewer, "Geometry")
         views.setTabToolTip(
             self.geometry_tab_index,
@@ -9481,6 +9496,39 @@ class SequenceSimulationWidget(QWidget):
             for role in ("read", "phase")
         }
 
+    def _geometry_offset_spins(self, source_index):
+        """Return the offset fields a drag in the Geometry tab sets, by role."""
+        if source_index == self.SLICE_SELECTION_SOURCE:
+            return {"slice": self.slice_selection_offset_mm}
+        prefix = self.OFFSET_FORM_PREFIXES.get(source_index)
+        if prefix is None:
+            return {}
+        spins = {
+            role: getattr(self, f"{prefix}_{role}_offset_mm", None)
+            for role in OFFSET_ROLES
+        }
+        return {role: spin for role, spin in spins.items() if spin is not None}
+
+    def _geometry_offset_requested(self, read_m, phase_m, slice_m):
+        """Write offsets dragged in the Geometry tab into the sequence form."""
+        values_m = dict(zip(OFFSET_ROLES, (read_m, phase_m, slice_m)))
+        spins = self._geometry_offset_spins(self.sequence_source.currentIndex())
+        changed = False
+        for role, spin in spins.items():
+            value_mm = values_m[role] * 1000.0
+            if abs(spin.value() - value_mm) < 1e-9:
+                continue
+            # Offsets leave timing alone, so one refresh below replaces the
+            # change handling of each field.
+            spin.blockSignals(True)
+            try:
+                spin.setValue(value_mm)
+            finally:
+                spin.blockSignals(False)
+            changed = True
+        if changed:
+            self._request_generated_sequence_refresh()
+
     def _sequence_geometry_parameters(self, source_index):
         """Return the form values that place a generated sequence in space.
 
@@ -11730,9 +11778,12 @@ class SequenceSimulationWidget(QWidget):
         self._update_geometry_stale_notice(previewing=sequence is not None)
         if sequence is None:
             sequence, generated = generated, None
+        adjustable = tuple(
+            self._geometry_offset_spins(self.sequence_source.currentIndex())
+        )
         if not full:
             self.geometry_viewer.set_sequence_geometry(
-                sequence, generated_sequence=generated
+                sequence, generated_sequence=generated, adjustable_offsets=adjustable
             )
             return
         phantom, label = self._geometry_viewer_object()
@@ -11752,6 +11803,7 @@ class SequenceSimulationWidget(QWidget):
             object_label=label,
             probe_position_m=probe_position,
             generated_sequence=generated,
+            adjustable_offsets=adjustable,
         )
 
     def _sequence_plot_range_changed(self, _view_box, x_range):
