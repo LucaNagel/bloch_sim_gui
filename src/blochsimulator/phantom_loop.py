@@ -146,7 +146,10 @@ def phantom_with_parameter(phantom, key: str, value: float):
 def _mouse_config(phantom):
     from .mouse_phantom import MousePerfusionConfig
 
-    return MousePerfusionConfig.from_dict(phantom.metadata["mouse_perfusion_config"])
+    # Configurations saved before the nucleus was stored follow the phantom.
+    return MousePerfusionConfig.from_dict(
+        {"nucleus": phantom.nucleus, **phantom.metadata["mouse_perfusion_config"]}
+    )
 
 
 def _mouse_parameters(config) -> List[PhantomLoopParameter]:

@@ -58,7 +58,9 @@ def rebase_phantom_polarization(phantom, *, field_strength_t, nucleus):
     if isinstance(mouse, dict):
         mouse["injection_polarization"] *= factor
         mouse["field_strength_t"] = float(field_strength_t)
+        mouse["nucleus"] = str(nucleus)
     config = getattr(phantom, "config", None)
     if config is not None:
         config.injection_polarization *= factor
         config.field_strength_t = float(field_strength_t)
+        config.nucleus = str(nucleus)

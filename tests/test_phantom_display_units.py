@@ -144,6 +144,7 @@ def test_mouse_recipe_conserves_amount_and_polarized_dose():
         dict(injection_concentration_mm=80, injection_volume_ul=np.nan),
         dict(temperature_k=0.0),
         dict(injection_polarization=-1.0),
+        dict(nucleus="X99"),
     ],
 )
 def test_invalid_mouse_recipe_rejected(recipe):
@@ -173,6 +174,61 @@ def test_mouse_dialog_keeps_unedited_exact_polarization():
     )
     assert "× thermal" in dialog.injection_polarization_thermal.text()
     dialog.close()
+
+
+def test_mouse_dialog_opens_legacy_polarization_above_full():
+    from unittest.mock import patch
+
+    # Older mouse phantoms stored free thermal multiples, here about 116 %.
+    config = MousePerfusionConfig(shape=(8, 8, 16), injection_polarization=2e5)
+    assert relative_polarization_to_percent(2e5, "C13", 7, 310.15) > 100
+    with patch.object(MousePhantomDesignerDialog, "_preview"):
+        dialog = MousePhantomDesignerDialog(config=config)
+    assert dialog._read_config().injection_polarization == 2e5
+    assert "× thermal" in dialog.injection_polarization_thermal.text()
+    dialog.field_strength.setValue(3)
+    with pytest.raises(ValueError, match="between 0 and 100"):
+        dialog._read_config()
+    dialog.close()
+
+
+def test_mouse_nucleus_rebase_keeps_absolute_polarization_in_designer():
+    from unittest.mock import patch
+    from blochsimulator.phantom_polarization import rebase_phantom_polarization
+
+    phantom = MousePerfusionConfig(
+        shape=(8, 8, 16),
+        injection_polarization=polarization_percent_to_relative(20, "C13", 7, 310.15),
+    ).build()
+    old_signal = ideal_fid_amplitude(phantom, "voxel_volume") * thermal_polarization(
+        "C13", 7, 310.15
+    )
+    rebase_phantom_polarization(phantom, field_strength_t=7, nucleus="H1")
+    phantom.nucleus = "H1"
+    assert phantom.config.nucleus == "H1"
+    assert phantom.metadata["mouse_perfusion_config"]["nucleus"] == "H1"
+    with patch.object(MousePhantomDesignerDialog, "_preview"):
+        dialog = MousePhantomDesignerDialog(config=phantom.config)
+    assert dialog.injection_polarization.text() == "20 %"
+    rebuilt = dialog._build_phantom()
+    dialog.close()
+    assert rebuilt.nucleus == "H1"
+    assert ideal_fid_amplitude(rebuilt, "voxel_volume") * thermal_polarization(
+        "H1", 7, 310.15
+    ) == pytest.approx(old_signal)
+
+
+def test_mouse_config_saved_without_nucleus_follows_phantom():
+    from blochsimulator.mouse_phantom import MousePerfusionPhantom
+    from blochsimulator.phantom_loop import phantom_with_parameter
+
+    phantom = MousePerfusionConfig(shape=(8, 8, 16)).build()
+    # A phantom rebased to 1H before the configuration stored its nucleus.
+    phantom.nucleus = "H1"
+    del phantom.metadata["mouse_perfusion_config"]["nucleus"]
+    assert MousePerfusionPhantom.from_dynamic_phantom(phantom).config.nucleus == "H1"
+    rebuilt = phantom_with_parameter(phantom, "mouse.injection_volume_ul", 100)
+    assert rebuilt.nucleus == "H1"
 
 
 def test_receiver_uses_explicit_phantom_temperature_for_calibration_and_display():
