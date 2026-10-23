@@ -25,7 +25,13 @@ from ..memory import MemoryPolicy, format_bytes, resolve_memory_budget
 from ..kernel_capabilities import detect_kernel_capabilities, resolve_kernel_request
 from ..sequence.scanner import ScannerParameters
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
-from .default_settings import WorkspaceDefaults
+from .default_settings import (
+    DEFAULT_SEQUENCE_TIMESTEP_PRESET,
+    DEFAULT_SEQUENCE_TIMESTEP_US,
+    SEQUENCE_TIMESTEP_PRESETS,
+    SEQUENCE_TIMESTEP_TOOLTIP,
+    WorkspaceDefaults,
+)
 from .styles import INTERFACE_STYLE_CHOICES, normalize_interface_style
 from ..sequence.signal_units import SIGNAL_UNITS, normalize_signal_unit
 
@@ -72,12 +78,7 @@ class SettingsDialog(QDialog):
             "fallback of Native automatic. It is much slower for large objects."
         ),
     }
-    SEQUENCE_TIMESTEP_PRESETS = (
-        ("Accurate — 1 µs", "accurate", 1.0),
-        ("Balanced — 5 µs", "balanced", 5.0),
-        ("Fast — 10 µs", "fast", 10.0),
-        ("Custom", "custom", None),
-    )
+    SEQUENCE_TIMESTEP_PRESETS = SEQUENCE_TIMESTEP_PRESETS
     SPOILER_MODES = (
         ("Ideal crusher (fast, current behavior)", "ideal"),
         ("Gradient waveform (subvoxel spins)", "gradient"),
@@ -152,8 +153,8 @@ class SettingsDialog(QDialog):
         sequence_live_progress_enabled: bool = True,
         sequence_kernel: str = "optimized",
         dynamic_sequence_kernel: str = "native_parallel",
-        sequence_timestep_preset: str = "balanced",
-        sequence_timestep_us: float = 5.0,
+        sequence_timestep_preset: str = DEFAULT_SEQUENCE_TIMESTEP_PRESET,
+        sequence_timestep_us: float = DEFAULT_SEQUENCE_TIMESTEP_US,
         sequence_spoiler_mode: str = "ideal",
         subvoxel_spin_counts=(1, 1, 9),
         subvoxel_sampling_method: str = "midpoint",
@@ -326,10 +327,7 @@ class SettingsDialog(QDialog):
             sequence_timestep_preset
         )
         self.sequence_timestep_preset_combo.setCurrentIndex(max(0, preset_index))
-        self.sequence_timestep_preset_combo.setToolTip(
-            "Larger RF-active time steps reduce runtime by averaging RF and "
-            "simultaneous gradients. ADC times and event boundaries remain exact."
-        )
+        self.sequence_timestep_preset_combo.setToolTip(SEQUENCE_TIMESTEP_TOOLTIP)
         simulation_form.addRow(
             "Sequence time-step preset:", self.sequence_timestep_preset_combo
         )
@@ -341,9 +339,7 @@ class SettingsDialog(QDialog):
         self.sequence_timestep_us_spin.setSingleStep(0.1)
         self.sequence_timestep_us_spin.setSuffix(" µs")
         self.sequence_timestep_us_spin.setValue(float(sequence_timestep_us))
-        self.sequence_timestep_us_spin.setToolTip(
-            "Custom maximum interval while RF is active, in microseconds."
-        )
+        self.sequence_timestep_us_spin.setToolTip(SEQUENCE_TIMESTEP_TOOLTIP)
         simulation_form.addRow(
             "RF-active simulation time step:", self.sequence_timestep_us_spin
         )

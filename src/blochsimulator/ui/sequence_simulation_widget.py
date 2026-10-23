@@ -156,6 +156,7 @@ from ..units import (
     rf_hz_to_gauss_for_nucleus,
 )
 from .controls import UniversalTimeControl
+from .default_settings import DEFAULT_SEQUENCE_TIMESTEP_US, SEQUENCE_TIMESTEP_TOOLTIP
 from .dialogs import PulseImportDialog
 from .metabolite_excitation_plan import MetaboliteExcitationPlanDialog
 from .spectral_spatial_designer import (
@@ -1657,17 +1658,17 @@ class SequenceSimulationWidget(QWidget):
             subvoxel_sampling_method = "midpoint"
         try:
             sequence_timestep_us = float(
-                settings.value("sequence/timestep_us", 5.0)
+                settings.value("sequence/timestep_us", DEFAULT_SEQUENCE_TIMESTEP_US)
                 if settings is not None
-                else 5.0
+                else DEFAULT_SEQUENCE_TIMESTEP_US
             )
         except (TypeError, ValueError):
-            sequence_timestep_us = 5.0
+            sequence_timestep_us = DEFAULT_SEQUENCE_TIMESTEP_US
         if (
             not np.isfinite(sequence_timestep_us)
             or not 0.1 <= sequence_timestep_us <= 1000.0
         ):
-            sequence_timestep_us = 5.0
+            sequence_timestep_us = DEFAULT_SEQUENCE_TIMESTEP_US
         thread_mode = (
             str(settings.value("simulation/thread_mode", "automatic"))
             if settings is not None
@@ -2554,11 +2555,7 @@ class SequenceSimulationWidget(QWidget):
         self.simulation_timestep_us.setSingleStep(0.1)
         self.simulation_timestep_us.setValue(self._initial_sequence_timestep_us)
         self.simulation_timestep_us.setSuffix(" µs")
-        self.simulation_timestep_us.setToolTip(
-            "Time step while RF is active. Larger values average RF and "
-            "simultaneous gradients over fewer intervals and can substantially "
-            "reduce runtime. ADC times and event boundaries remain exact."
-        )
+        self.simulation_timestep_us.setToolTip(SEQUENCE_TIMESTEP_TOOLTIP)
         time_resolution_row.addWidget(self.simulation_timestep_us, 1)
 
         self.load_pulseq_button = QPushButton("Load Pulseq…")
@@ -11865,6 +11862,15 @@ class SequenceSimulationWidget(QWidget):
         return np.column_stack(
             (np.eye(3)[:, in_plane[0]], np.eye(3)[:, in_plane[1]], normal)
         )
+
+    def current_sequence_geometry(self):
+        """Return the geometry the Geometry tab places.
+
+        While form values wait for generation these are the planned FOV and
+        slices, otherwise those of the shown sequence.
+        """
+        planned = self._planned_sequence_geometry()
+        return planned if planned is not None else self._sequence_geometry()
 
     def _sequence_geometry(self):
         """Return the encoded FOV and slices of the shown sequence."""

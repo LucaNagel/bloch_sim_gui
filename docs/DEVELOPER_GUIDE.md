@@ -378,7 +378,8 @@ utilization alone.
 ### Choosing the RF Time Step and Phantom Grid
 
 Two settings trade accuracy for runtime: the RF simulation time step
-(`simulation_timestep_s`, GUI presets Accurate 1 µs, Balanced 5 µs, Fast 10 µs)
+(`simulation_timestep_s`, GUI presets Accurate 1 µs, Balanced 5 µs, Fast 10 µs,
+Very fast 20 µs; the default is 20 µs)
 and how finely the phantom is sampled relative to the acquisition matrix. Two
 self-contained benchmarks measure both on an analytic two-container phantom
 (`benchmarks/synthetic_phantoms.py`, pyruvate/lactate, ±15 Hz B0 gradient), so
@@ -422,7 +423,9 @@ cancellation, not convergence; do not rely on it.
 Recommendations:
 
 - Block, sinc, and CSI excitation pulses: **10 µs** ("Fast") keeps the error
-  below 0.02% and is 3–7× faster. Even 20 µs stays below 0.1%.
+  below 0.02% and is 3–7× faster. Even 20 µs stays below 0.1%, which is why
+  20 µs ("Very fast") is the GUI default; switch to a finer preset for the
+  spectrally selective and SPSP pulses below.
 - Spectrally selective pulses (SS-bSSFP, Gaussian): **5 µs** ("Balanced")
   stays below 0.3%; 10 µs costs about 1%.
 - Spectral-spatial (SPSP) pulses: **1 µs** ("Accurate"). Their many short
@@ -591,18 +594,13 @@ For capillary or tissue-scale transport, evolve each pool according to an
 advection-reaction Bloch equation such as
 
 $$
-\frac{\partial \mathbf M_p}{\partial t}
-+\nabla\cdot\left(\mathbf v_p\mathbf M_p\right)
-=
-\mathcal B_p(\mathbf M)
-+\mathcal R_p(\mathbf M,C)
-+\mathbf S_p
--\mathbf W_p,
+\frac{\partial \mathbf{M}_p}{\partial t} + \nabla\cdot\left(\mathbf{v}_p \mathbf{M}_p\right) =
+\mathcal{B}_p(\mathbf{M}) + \mathcal{R}_p(\mathbf{M}, C) + \mathbf{S}_p - \mathbf{W}_p,
 $$
 
-where $\mathcal B_p$ contains RF, gradient phase, off-resonance, and
-relaxation; $\mathcal R_p$ contains metabolic exchange; $\mathbf S_p$ is true
-external injection; and $\mathbf W_p$ represents clearance or compartment
+where $\mathcal{B}_p$ contains RF, gradient phase, off-resonance, and
+relaxation; $\mathcal{R}_p$ contains metabolic exchange; $\mathbf{S}_p$ is true
+external injection; and $\mathbf{W}_p$ represents clearance or compartment
 exchange. Concentration must obey the corresponding conservative transport and
 reaction equation.
 

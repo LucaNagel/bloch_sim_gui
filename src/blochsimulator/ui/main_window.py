@@ -116,6 +116,9 @@ from .tutorial_manager import TutorialManager
 from .tutorial_overlay import TutorialOverlay
 from .dialogs import SettingsDialog
 from .default_settings import (
+    DEFAULT_SEQUENCE_TIMESTEP_PRESET,
+    DEFAULT_SEQUENCE_TIMESTEP_US,
+    SEQUENCE_TIMESTEP_PRESETS,
     WorkspaceDefaults,
     load_kernel_settings,
     save_kernel_settings,
@@ -6133,24 +6136,33 @@ class BlochSimulatorGUI(QMainWindow):
 
     def _load_sequence_timestep_preset(self) -> str:
         """Load the persistent RF-active sequence time-step preset."""
-        preset = str(self.app_settings.value("sequence/timestep_preset", "balanced"))
-        return (
-            preset
-            if preset in {"accurate", "balanced", "fast", "custom"}
-            else "balanced"
+        preset = str(
+            self.app_settings.value(
+                "sequence/timestep_preset", DEFAULT_SEQUENCE_TIMESTEP_PRESET
+            )
         )
+        presets = {key for _, key, _ in SEQUENCE_TIMESTEP_PRESETS}
+        return preset if preset in presets else DEFAULT_SEQUENCE_TIMESTEP_PRESET
 
     def _load_sequence_timestep_us(self) -> float:
         """Resolve the configured RF-active sequence time step in microseconds."""
         preset = self._load_sequence_timestep_preset()
-        preset_values = {"accurate": 1.0, "balanced": 5.0, "fast": 10.0}
+        preset_values = {
+            key: value
+            for _, key, value in SEQUENCE_TIMESTEP_PRESETS
+            if value is not None
+        }
         if preset in preset_values:
             return preset_values[preset]
         try:
-            value = float(self.app_settings.value("sequence/timestep_us", 5.0))
+            value = float(
+                self.app_settings.value(
+                    "sequence/timestep_us", DEFAULT_SEQUENCE_TIMESTEP_US
+                )
+            )
         except (TypeError, ValueError):
-            return 5.0
-        return value if 0.1 <= value <= 1000.0 else 5.0
+            return DEFAULT_SEQUENCE_TIMESTEP_US
+        return value if 0.1 <= value <= 1000.0 else DEFAULT_SEQUENCE_TIMESTEP_US
 
     def _load_thread_mode(self) -> str:
         mode = str(self.app_settings.value("simulation/thread_mode", "automatic"))
