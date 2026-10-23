@@ -28,7 +28,9 @@ from blochsimulator.ui.phantom_designer import (
     SpectralPhantomDesignerDialog,
     _shape_xy_projection,
     load_any_phantom,
+    sequence_axis_grids,
 )
+from blochsimulator.ui.sequence_geometry_viewer import SequenceGeometry
 from blochsimulator.ui.default_settings import WorkspaceDefaults
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
 from blochsimulator.ui.main_window import BlochSimulatorGUI
@@ -1662,3 +1664,55 @@ def test_volume_viewer_handles_fully_masked_and_nonfinite_slices():
     assert viewer.yz_view.getLevels() == pytest.approx((4.999995, 5.000005))
     viewer.close()
     app.processEvents()
+
+
+def test_from_sequence_buttons_copy_fov_and_double_the_matrix():
+    app = QApplication.instance() or QApplication([])
+    # Read along z, phase along x, slice along y: a 2D sequence whose
+    # encoded directions do not follow the scanner axes.
+    frame = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])
+    geometry = SequenceGeometry(frame=frame, fov_m=(0.040, 0.030), matrix=(32, 24))
+    dialog = SpectralPhantomDesignerDialog(
+        design=_spectral_design(), sequence_geometry=geometry
+    )
+    x_button, y_button, z_button = dialog.sequence_grid_buttons
+
+    assert x_button.isEnabled() and z_button.isEnabled()
+    assert not y_button.isEnabled()
+    assert "slice direction" in y_button.toolTip()
+    assert "compromise between simulation speed" in x_button.toolTip()
+    assert "(24 → 48)" in x_button.toolTip()
+
+    y_matrix = dialog.matrix_spins[1].value()
+    y_fov = dialog.fov_spins[1].value()
+    x_button.click()
+    z_button.click()
+    y_button.click()
+    assert [spin.value() for spin in dialog.matrix_spins] == [48, y_matrix, 64]
+    assert [spin.value() for spin in dialog.fov_spins] == pytest.approx(
+        [30.0, y_fov, 40.0]
+    )
+
+    dialog.set_sequence_geometry(None)
+    assert not any(button.isEnabled() for button in dialog.sequence_grid_buttons)
+    dialog.close()
+    app.processEvents()
+
+
+def test_sequence_axis_grids_reject_oblique_directions():
+    angle = np.deg2rad(30.0)
+    frame = np.array(
+        [
+            [np.cos(angle), -np.sin(angle), 0.0],
+            [np.sin(angle), np.cos(angle), 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    geometry = SequenceGeometry(
+        frame=frame, fov_m=(0.04, 0.04, 0.02), matrix=(16, 16, 8)
+    )
+
+    grids = sequence_axis_grids(geometry)
+
+    assert "oblique" in grids[0] and "oblique" in grids[1]
+    assert grids[2] == (pytest.approx(0.02), 8)

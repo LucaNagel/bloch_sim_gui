@@ -54,6 +54,7 @@ from blochsimulator.ui.main_window import (
     _restore_widget_state,
 )
 from blochsimulator.ui.rf_pulse_designer import RFPulseDesigner
+from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
 from blochsimulator.ui.sequence_designer import SequenceDesigner
 from blochsimulator.ui.sequence_diagram import (
     DiagramAnnotations,
@@ -462,8 +463,8 @@ def test_settings_dialog_returns_selected_values(tmp_path):
         dialog.dynamic_sequence_kernel_combo.findData("native_parallel")
     )
     assert dialog.dynamic_sequence_kernel() == "native_parallel"
-    assert dialog.sequence_timestep_preset() == "balanced"
-    assert dialog.sequence_timestep_us() == pytest.approx(5.0)
+    assert dialog.sequence_timestep_preset() == "very_fast"
+    assert dialog.sequence_timestep_us() == pytest.approx(20.0)
     assert not dialog.sequence_timestep_us_spin.isEnabled()
     assert not dialog.sequence_timestep_control_label.isEnabled()
     dialog.sequence_timestep_preset_combo.setCurrentIndex(
@@ -519,6 +520,41 @@ def test_settings_dialog_returns_selected_values(tmp_path):
         "Memory",
         "Interface",
     ]
+
+
+def test_sequence_timestep_defaults_to_twenty_microseconds(tmp_path):
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+
+    window = BlochSimulatorGUI()
+    window.app_settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    assert window._load_sequence_timestep_preset() == "very_fast"
+    assert window._load_sequence_timestep_us() == pytest.approx(20.0)
+    window.app_settings.setValue("sequence/timestep_preset", "unknown")
+    assert window._load_sequence_timestep_preset() == "very_fast"
+    window.app_settings.setValue("sequence/timestep_preset", "custom")
+    window.app_settings.setValue("sequence/timestep_us", "not a number")
+    assert window._load_sequence_timestep_us() == pytest.approx(20.0)
+    window.close()
+
+    widget = SequenceSimulationWidget()
+    assert widget.simulation_timestep_us.value() == pytest.approx(20.0)
+    dialog = SettingsDialog(
+        MemoryPolicy(), tmp_path, tooltips_enabled=True, detected_thread_count=8
+    )
+    tooltips = (
+        widget.simulation_timestep_us.toolTip(),
+        dialog.sequence_timestep_us_spin.toolTip(),
+        dialog.sequence_timestep_preset_combo.toolTip(),
+    )
+    for tooltip in tooltips:
+        # Benchmark summary from docs/DEVELOPER_GUIDE.md.
+        assert "< 0.1% at 20 µs" in tooltip
+        assert "Spectral-spatial (SPSP)" in tooltip
+    dialog.close()
+    widget.close()
+    app.processEvents()
 
 
 def test_settings_dialog_prefills_and_labels_loaded_pulseq_recommendations(tmp_path):

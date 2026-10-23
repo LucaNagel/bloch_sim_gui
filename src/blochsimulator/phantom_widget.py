@@ -450,6 +450,11 @@ class PhantomCreatorWidget(QGroupBox):
             design=design,
             settings=self.settings,
             sequence_reference_ppm=sequence_reference_ppm,
+            sequence_geometry=(
+                None
+                if sequence_widget is None
+                else sequence_widget.current_sequence_geometry()
+            ),
         )
         if design is None:
             dialog.design.field_strength_t = self.get_field_strength()

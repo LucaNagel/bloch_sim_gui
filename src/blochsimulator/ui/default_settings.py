@@ -15,6 +15,31 @@ DEFAULT_SEQUENCE_REFERENCE_PPM = {
     nucleus: 171.0 if nucleus == "C13" else 0.0 for nucleus in NUCLEUS_GAMMA_HZ_PER_T
 }
 
+# RF-active sequence time step presets (label, key, µs); see "Choosing the RF
+# Time Step and Phantom Grid" in docs/DEVELOPER_GUIDE.md for the benchmarks.
+SEQUENCE_TIMESTEP_PRESETS = (
+    ("Accurate — 1 µs", "accurate", 1.0),
+    ("Balanced — 5 µs", "balanced", 5.0),
+    ("Fast — 10 µs", "fast", 10.0),
+    ("Very fast — 20 µs", "very_fast", 20.0),
+    ("Custom", "custom", None),
+)
+DEFAULT_SEQUENCE_TIMESTEP_PRESET = "very_fast"
+DEFAULT_SEQUENCE_TIMESTEP_US = 20.0
+SEQUENCE_TIMESTEP_TOOLTIP = (
+    "Time step while RF is active. Larger steps average RF and simultaneous "
+    "gradients over fewer intervals; ADC times, event boundaries and free "
+    "precession stay exact.\n\n"
+    "Benchmarked signal error against 1 µs (speed-up):\n"
+    "• Block, sinc and CSI excitation: < 0.02% at 10 µs, < 0.1% at 20 µs "
+    "(×3–10 faster at 20 µs)\n"
+    "• Spectrally selective Gaussian (SS-bSSFP): 0.3% at 5 µs, 1% at 10 µs, "
+    "4% at 20 µs (×11)\n"
+    "• Spectral-spatial (SPSP): 1% at 2 µs, 5% at 5 µs, ≥ 10% from 10 µs — "
+    "use 1 µs\n\n"
+    "Otherwise the error grows roughly with the square of the step."
+)
+
 
 @dataclass(frozen=True)
 class WorkspaceDefaults:

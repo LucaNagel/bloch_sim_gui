@@ -75,6 +75,40 @@ except Exception:
 # is switched on for shapes that do not convert yet.
 DEFAULT_ENABLED_KPL_S_INV = 0.05
 
+# Phantom cells per sequence pixel set by the "From seq." geometry buttons.
+SEQUENCE_GRID_OVERSAMPLING = 2
+
+
+def sequence_axis_grids(geometry) -> list:
+    """Return the sequence FOV and matrix along scanner x, y and z.
+
+    Each entry is ``(fov_m, matrix)`` when exactly one encoded direction runs
+    along that scanner axis, otherwise a sentence saying why the axis has no
+    sequence grid: the slice direction of a 2D sequence is not encoded, and
+    an oblique direction spans several scanner axes.
+    """
+    if geometry is None or geometry.fov_m is None or geometry.matrix is None:
+        return ["The current sequence has no encoded FOV."] * 3
+    frame = np.asarray(geometry.frame, dtype=float)
+    encoded = min(len(geometry.fov_m), len(geometry.matrix))
+    grids = []
+    for axis in range(3):
+        directions = np.flatnonzero(np.abs(frame[axis]) > 1e-6)
+        if directions.size != 1:
+            grids.append("The sequence is oblique to this axis.")
+            continue
+        direction = int(directions[0])
+        if direction >= encoded:
+            grids.append(
+                "This is the slice direction of the 2D sequence, which is not "
+                "encoded. Set it by hand so that a slice spans several cells."
+            )
+            continue
+        grids.append(
+            (float(geometry.fov_m[direction]), int(geometry.matrix[direction]))
+        )
+    return grids
+
 
 class SuffixNumberDelegate(QStyledItemDelegate):
     """Show numeric table cells with a unit suffix but edit the bare number."""
@@ -510,6 +544,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         design: Optional[PhantomDesign] = None,
         settings=None,
         sequence_reference_ppm: Optional[float] = None,
+        sequence_geometry=None,
     ):
         super().__init__(parent)
         self.setWindowTitle(
@@ -556,6 +591,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         self._projection_items = []
         self._build_ui()
         self._load_design_into_ui()
+        self.set_sequence_geometry(sequence_geometry)
 
     def _build_ui(self):
         self.setStyleSheet(
@@ -593,6 +629,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         geometry_grid.setVerticalSpacing(6)
         self.matrix_spins = []
         self.fov_spins = []
+        self.sequence_grid_buttons = []
         matrix_heading = QLabel("Matrix")
         matrix_heading.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         geometry_grid.addWidget(matrix_heading, 0, 1)
@@ -612,9 +649,16 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             self.fov_spins.append(fov)
             axis_label = QLabel(axis)
             axis_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            from_sequence = QPushButton("From seq.")
+            from_sequence.setObjectName(f"phantom_{axis.lower()}_from_sequence")
+            from_sequence.clicked.connect(
+                lambda _checked=False, index=row - 1: self._copy_sequence_axis(index)
+            )
+            self.sequence_grid_buttons.append(from_sequence)
             geometry_grid.addWidget(axis_label, row, 0)
             geometry_grid.addWidget(matrix, row, 1)
             geometry_grid.addWidget(fov, row, 2)
+            geometry_grid.addWidget(from_sequence, row, 3)
         geometry_layout.addLayout(geometry_grid)
 
         sampling_row = QHBoxLayout()
@@ -2059,6 +2103,39 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             tooltip = text
         self.metabolite_preset_combo.setToolTip(tooltip)
         self.add_metabolite_preset_button.setToolTip(tooltip)
+
+    def set_sequence_geometry(self, geometry):
+        """Point the "From seq." buttons at the given sequence geometry."""
+        self._sequence_axis_grids = sequence_axis_grids(geometry)
+        for axis, (button, grid) in enumerate(
+            zip(self.sequence_grid_buttons, self._sequence_axis_grids)
+        ):
+            name = "XYZ"[axis]
+            if isinstance(grid, str):
+                button.setEnabled(False)
+                button.setToolTip(f"No sequence grid along {name}. {grid}")
+                continue
+            fov_m, matrix = grid
+            button.setEnabled(True)
+            button.setToolTip(
+                f"Copy the sequence FOV along {name} ({fov_m * 1000.0:.4g} mm) "
+                f"and set the phantom matrix to {SEQUENCE_GRID_OVERSAMPLING} × "
+                f"the sequence matrix ({matrix} → "
+                f"{SEQUENCE_GRID_OVERSAMPLING * matrix}). Two phantom cells per "
+                "sequence pixel are a good compromise between simulation speed "
+                "and image quality. FOV offsets are not copied."
+            )
+
+    def _copy_sequence_axis(self, axis):
+        grid = self._sequence_axis_grids[axis]
+        if isinstance(grid, str):
+            return
+        fov_m, matrix = grid
+        matrix_spin = self.matrix_spins[axis]
+        matrix_spin.setValue(
+            min(SEQUENCE_GRID_OVERSAMPLING * matrix, matrix_spin.maximum())
+        )
+        self.fov_spins[axis].setValue(fov_m * 1000.0)
 
     def _load_design_into_ui(self):
         self._updating = True

@@ -3919,6 +3919,32 @@ def test_phantom_designer_starts_from_default_sphere(qt_application):
         dialog.reject()
 
 
+def test_phantom_designer_from_sequence_buttons_follow_the_sequence(qt_application):
+    window = BlochSimulatorGUI()
+    window.set_workspace_mode("sequence")
+    sequence_widget = window.sequence_simulation_widget
+    sequence_widget.sequence_source.setCurrentIndex(sequence_widget.FLASH_SOURCE)
+    qt_application.processEvents()
+    geometry = sequence_widget.current_sequence_geometry()
+    assert geometry.is_2d
+    window.tab_widget.setCurrentIndex(window.phantom_tab_index)
+    qt_application.processEvents()
+    phantom_widget = window.phantom_widget.phantom_creator
+
+    phantom_widget._open_spectral_designer()
+    dialog = phantom_widget._retained_spectral_designer_dialogs[-1]
+    try:
+        x_button, y_button, z_button = dialog.sequence_grid_buttons
+        assert x_button.isEnabled() and y_button.isEnabled()
+        # The slice direction of the 2D FLASH is not encoded.
+        assert not z_button.isEnabled()
+        x_button.click()
+        assert dialog.matrix_spins[0].value() == 2 * geometry.matrix[0]
+        assert dialog.fov_spins[0].value() == pytest.approx(geometry.fov_m[0] * 1000.0)
+    finally:
+        dialog.reject()
+
+
 def _type_zero(app, spin):
     spin.setFocus()
     spin.lineEdit().selectAll()
