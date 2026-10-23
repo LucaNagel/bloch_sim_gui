@@ -87,6 +87,9 @@ from ..sequence import (
     SpinSampling,
     analyze_adc_moment_train,
     analyze_repeated_spoiler_train,
+    coherence_pathways_from_program,
+    declares_ideal_spoilers,
+    deduplicate_observations,
     ernst_angle_deg,
     infer_cartesian_acquisition,
     infer_cartesian_acquisition_frames,
@@ -107,10 +110,13 @@ from ..sequence import (
     make_pulseq_spiral,
     migrate_spectral_spatial_state,
     recommend_spin_grid,
+    recommend_spin_grid_for_pathways,
     recommend_spin_grid_for_phase_train,
     variable_flip_angle_schedule,
+    weighted_pathway_sampling_error,
 )
 from ..sequence.bruker_export import suggest_bruker_method
+from ..sequence.compiler import IDEAL_SPOILER_DEFINITION
 from ..sequence.encoding import (
     _axis_vector,
     numeric_definition_array,
@@ -163,6 +169,7 @@ from .spectral_spatial_designer import (
     SpectralSpatialScheduleDialog,
 )
 from .magnetization_viewer import MagnetizationViewer
+from .spoiling_analysis_view import SpoilingAnalysisSnapshot, SpoilingAnalysisView
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
 from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumViewer
 from .project_export_dialog import ProjectExportNamingWidget
@@ -192,6 +199,12 @@ from .default_settings import WorkspaceDefaults, load_kernel_settings
 
 # Run progress is drawn in permille so time extrapolation moves smoothly.
 RUN_PROGRESS_SCALE = 1000
+
+# Display names of the subvoxel spin-grid methods in diagnostics.
+_SPIN_GRID_METHOD_LABELS = {
+    "midpoint": "regular midpoint",
+    "stratified": "jittered stratified",
+}
 
 
 def _format_duration(seconds):
@@ -1426,6 +1439,8 @@ class SequenceSimulationWidget(QWidget):
 
     physical_b1_changed = pyqtSignal(object)
     parameter_loop_requested = pyqtSignal()
+    # Emitted with "ideal" or "gradient" whenever the spoiler mode is applied.
+    spoiler_mode_changed = pyqtSignal(str)
 
     # Generated-sequence forms (notably EPI, CSI, and FLASH) need enough
     # room for a label and its editor alongside the vertical scroll bar.
@@ -3964,6 +3979,11 @@ class SequenceSimulationWidget(QWidget):
         self.slice_selection_group.hide()
         controls_layout.addWidget(self.slice_selection_group)
 
+        # The main window shows this view as its own tab in gradient mode.
+        self.spoiling_analysis_view = SpoilingAnalysisView()
+        self.spoiling_analysis_view.apply_recommendation_requested.connect(
+            self._apply_current_recommended_spin_grid
+        )
         self.spoiling_quality_group = QGroupBox("Spoiling")
         spoiling_quality_layout = QHBoxLayout(self.spoiling_quality_group)
         spoiling_quality_layout.addWidget(QLabel("Quality"))
@@ -8277,7 +8297,7 @@ class SequenceSimulationWidget(QWidget):
             + ". Remaining coherent signal after one crusher: "
             + f"ideal {100 * report.single_continuous_coherence:.3g}%, "
             + f"{counts[0]}×{counts[1]}×{counts[2]} "
-            + f"{self.subvoxel_sampling_method} grid "
+            + f"{_SPIN_GRID_METHOD_LABELS[self.subvoxel_sampling_method]} grid "
             + f"{100 * report.single_sampled_coherence:.3g}%. "
             + f"Across {max(1, report.n_observations)} accumulated "
             + f"orders ({report_source}), maximum sampling error is "
@@ -8352,6 +8372,22 @@ class SequenceSimulationWidget(QWidget):
         self.flash_spoiler_info.setText(message)
         self.flash_spoiler_info.setStyleSheet(
             "color: #b45309;" if warning else "color: #15803d;"
+        )
+        phases = np.asarray(report.phase_cycles_per_voxel, dtype=float).reshape(-1, 3)
+        adc_rows = report_source == "actual ADC moment origins"
+        # ADC rows are relative to the first ADC, so they start at ADC 2.
+        first_observation = 2 if adc_rows else 1
+        self._flash_spoiling_analysis = SpoilingAnalysisSnapshot(
+            title="FLASH (2D): repeated gradient crusher",
+            summary=message,
+            phases=phases,
+            weights=np.ones(phases.shape[0]),
+            observation=np.arange(phases.shape[0]) + first_observation,
+            observation_label="ADC number" if adc_rows else "Crusher order",
+            sampling=sampling,
+            recommendation=recommendation,
+            weighted=False,
+            warning=warning,
         )
         recommendation_is_current = (
             self.subvoxel_sampling_method == recommendation.method
@@ -8562,6 +8598,12 @@ class SequenceSimulationWidget(QWidget):
         )
         self.spoiling_apply_recommended_grid.setEnabled(False)
         self.spoiling_apply_recommended_grid.setVisible(False)
+        self._publish_spoiling_analysis(None, message)
+
+    def _publish_spoiling_analysis(self, snapshot, message=None):
+        view = getattr(self, "spoiling_analysis_view", None)
+        if view is not None:
+            view.set_snapshot(snapshot, message)
 
     def _set_configured_spoiling_quality(self, spec):
         cycles_xyz = np.asarray(spec["cycles_xyz"], dtype=float)
@@ -8604,7 +8646,7 @@ class SequenceSimulationWidget(QWidget):
             + ". Remaining coherent signal after one spoiler: "
             + f"ideal {100 * report.single_continuous_coherence:.3g}%, "
             + f"{counts[0]}×{counts[1]}×{counts[2]} "
-            + f"{self.subvoxel_sampling_method} grid "
+            + f"{_SPIN_GRID_METHOD_LABELS[self.subvoxel_sampling_method]} grid "
             + f"{100 * report.single_sampled_coherence:.3g}%. "
             + f"Across {max(1, report.n_observations)} accumulated spoiler "
             + "orders, maximum sampling error is "
@@ -8644,7 +8686,8 @@ class SequenceSimulationWidget(QWidget):
             ),
             (
                 "Current subvoxel grid",
-                f"{counts[0]}×{counts[1]}×{counts[2]} {self.subvoxel_sampling_method}",
+                f"{counts[0]}×{counts[1]}×{counts[2]} "
+                f"{_SPIN_GRID_METHOD_LABELS[self.subvoxel_sampling_method]}",
             ),
             (
                 "Ideal coherence after one spoiler",
@@ -8689,6 +8732,21 @@ class SequenceSimulationWidget(QWidget):
             else f"Apply {recommendation_counts[0]}×{recommendation_counts[1]}"
             f"×{recommendation_counts[2]} midpoint grid"
         )
+        phases = np.asarray(report.phase_cycles_per_voxel, dtype=float).reshape(-1, 3)
+        self._publish_spoiling_analysis(
+            SpoilingAnalysisSnapshot(
+                title=f"{spec['name']}: repeated gradient spoiler",
+                summary=message,
+                phases=phases,
+                weights=np.ones(phases.shape[0]),
+                observation=np.arange(1, phases.shape[0] + 1),
+                observation_label="Spoiler order",
+                sampling=sampling,
+                recommendation=recommendation,
+                weighted=False,
+                warning=warning,
+            )
+        )
 
     def _sync_flash_spoiling_quality(self):
         if not hasattr(self, "spoiling_quality_info"):
@@ -8716,21 +8774,82 @@ class SequenceSimulationWidget(QWidget):
         self.spoiling_apply_recommended_grid.setText(
             self.flash_apply_recommended_grid.text()
         )
+        self._publish_spoiling_analysis(
+            getattr(self, "_flash_spoiling_analysis", None),
+            "FLASH spoiling analysis is not available yet.",
+        )
+
+    def _spoiling_object_relaxation(self, phantom):
+        """Return the longest T1/T2 and relative equilibrium Mz of the object.
+
+        The longest times keep pathways alive longest, so the estimate stays
+        conservative for heterogeneous phantoms. Hyperpolarized phantoms do not
+        recover towards their initial magnetization, which is modeled as zero
+        relative equilibrium.
+        """
+        if self.object_source.currentIndex() == 1:
+            return self.t1_ms.value() / 1000.0, self.t2_ms.value() / 1000.0, 1.0
+        relaxation = []
+        for name in ("t1_map", "t2_map"):
+            values = np.asarray(getattr(phantom, name, ()), dtype=float).ravel()
+            values = values[np.isfinite(values) & (values > 0.0)]
+            relaxation.append(float(np.max(values)) if values.size else np.inf)
+        equilibrium = 0.0 if hasattr(phantom, "pools") else 1.0
+        return relaxation[0], relaxation[1], equilibrium
+
+    def _imported_pulseq_pathway_analysis(self, voxel_basis, relaxation):
+        """Return cached pathways, deduplicated rows and grid recommendation."""
+        program = self.program
+        key = (
+            np.asarray(voxel_basis, dtype=float).tobytes(),
+            tuple(float(value) for value in relaxation),
+        )
+        cached = getattr(self, "_imported_pulseq_pathway_cache", None)
+        if cached is not None and cached[0] is program and cached[1] == key:
+            return cached[2]
+        t1_s, t2_s, equilibrium = relaxation
+        train = coherence_pathways_from_program(
+            program,
+            voxel_basis,
+            t1_s=t1_s,
+            t2_s=t2_s,
+            longitudinal_equilibrium=equilibrium,
+        )
+        phases, weights = deduplicate_observations(
+            train.phase_cycles_per_voxel, train.weights
+        )
+        gradient_axes = np.zeros(3, dtype=bool)
+        for event in program.gradient_events:
+            if np.any(np.abs(np.asarray(event.samples_hz_per_m, dtype=float)) > 1e-12):
+                gradient_axes["xyz".index(event.axis)] = True
+        gradient_resolved_voxel_axes = np.any(
+            np.abs(np.asarray(voxel_basis, dtype=float)[gradient_axes, :]) > 1e-15,
+            axis=0,
+        )
+        # A centred singleton cannot resolve gradient phase or slice-selective
+        # RF evolution, so every gradient-resolved voxel axis keeps two points.
+        minimum_counts = tuple(
+            (
+                2
+                if gradient_resolved_voxel_axes[axis]
+                or np.any(np.abs(phases[:, axis]) > 1e-12)
+                else 1
+            )
+            for axis in range(3)
+        )
+        recommendation = recommend_spin_grid_for_pathways(
+            phases,
+            weights,
+            minimum_counts,
+            0.01,
+            max(512, int(np.prod(minimum_counts))),
+            max(32, max(minimum_counts)),
+        )
+        result = (train, phases, weights, recommendation)
+        self._imported_pulseq_pathway_cache = (program, key, result)
+        return result
 
     def _set_imported_pulseq_spoiling_quality(self):
-        acquisition = next(
-            (
-                candidate
-                for candidate in (
-                    self.acquisition,
-                    self.spectroscopic_acquisition,
-                    self.spiral_acquisition,
-                )
-                if candidate is not None
-                and hasattr(candidate, "moment_origins_cyc_per_m")
-            ),
-            None,
-        )
         phantom = None
         voxel_basis = None
         if self.object_source.currentIndex() == 0:
@@ -8743,130 +8862,158 @@ class SequenceSimulationWidget(QWidget):
                 voxel_basis = np.diag(np.asarray(voxel_sizes, dtype=float))
         if phantom is not None:
             voxel_basis = phantom_voxel_basis_m(phantom)
-        if acquisition is None or voxel_basis is None:
+        if self.program is None or voxel_basis is None:
             self._set_spoiling_quality_unavailable(
                 "Imported Pulseq sequence: select a 3D phantom and load a "
-                "sequence with inferable ADC positions to estimate spoiling quality."
+                "sequence with RF pulses and ADCs to estimate spoiling quality."
             )
             return
-        moment_origins = np.asarray(acquisition.moment_origins_cyc_per_m, dtype=float)
-        if moment_origins.ndim != 2 or moment_origins.shape[0] < 2:
+        if self._loaded_pulseq_declares_ideal_spoilers():
             self._set_spoiling_quality_unavailable(
-                "Imported Pulseq sequence: at least two inferable ADC moment "
-                "origins are required to estimate spoiling quality."
+                "Imported Pulseq sequence declares ideal spoilers "
+                f"({IDEAL_SPOILER_DEFINITION}). Use the Ideal spoiler mode; "
+                "its gradient waveforms need no subvoxel spin grid."
             )
             return
-        limited_moments = moment_origins[: min(moment_origins.shape[0], 1025)]
+        relaxation = self._spoiling_object_relaxation(phantom)
+        try:
+            train, phases, weights, recommendation = (
+                self._imported_pulseq_pathway_analysis(voxel_basis, relaxation)
+            )
+        except ValueError as exc:
+            self._set_spoiling_quality_unavailable(
+                f"Imported Pulseq sequence: spoiling quality is unavailable ({exc})."
+            )
+            return
+        if train.evaluated_adc_count == 0:
+            self._set_spoiling_quality_unavailable(
+                "Imported Pulseq sequence: the sequence has no ADC after an RF "
+                "pulse, so no coherence pathway can be evaluated."
+            )
+            return
+        self._spoiling_spin_grid_recommendation = recommendation
         sampling = SpinSampling(
             tuple(int(value) for value in self.subvoxel_spin_counts),
             method=self.subvoxel_sampling_method,
         )
-        report = analyze_adc_moment_train(
-            limited_moments,
-            voxel_basis,
-            sampling,
-        )
-        phase_train = np.asarray(report.phase_cycles_per_voxel, dtype=float)
-        gradient_axes = np.zeros(3, dtype=bool)
-        for event in self.program.gradient_events:
-            if np.any(np.abs(np.asarray(event.samples_hz_per_m, dtype=float)) > 1e-12):
-                gradient_axes["xyz".index(event.axis)] = True
-        gradient_resolved_voxel_axes = np.any(
-            np.abs(np.asarray(voxel_basis, dtype=float)[gradient_axes, :]) > 1e-15,
-            axis=0,
-        )
-        minimum_counts = tuple(
-            (
-                2
-                if (
-                    gradient_resolved_voxel_axes[axis]
-                    or np.any(np.abs(phase_train[:, axis]) > 1e-12)
-                )
-                else 1
-            )
-            for axis in range(3)
-        )
-        recommendation = recommend_spin_grid_for_phase_train(
-            phase_train,
-            minimum_counts,
-            "midpoint",
-            0.01,
-            max(512, int(np.prod(minimum_counts))),
-            max(32, max(minimum_counts)),
-        )
-        self._spoiling_spin_grid_recommendation = recommendation
+        current = weighted_pathway_sampling_error(phases, weights, sampling)
         counts = sampling.counts_xyz
-        ideal_maximum = max(report.continuous_coherence, default=1.0)
-        sampled_maximum = max(report.sampled_coherence, default=1.0)
-        message = (
-            f"Imported Pulseq ADC moment train: {report.n_observations} moment "
-            f"offsets were evaluated on the selected phantom. Maximum remaining "
-            f"coherent signal is ideal {100 * ideal_maximum:.3g}% and "
+        recommended_counts = recommendation.counts_xyz
+        current_grid = (
             f"{counts[0]}×{counts[1]}×{counts[2]} "
-            f"{self.subvoxel_sampling_method} grid "
-            f"{100 * sampled_maximum:.3g}%; maximum sampling error is "
-            f"{100 * report.maximum_sampling_error:.3g}%. Recommended: "
-            f"{recommendation.counts_xyz[0]}×{recommendation.counts_xyz[1]}×"
-            f"{recommendation.counts_xyz[2]} regular midpoint spins "
-            f"({recommendation.spins_per_voxel} total; train error "
-            f"{100 * recommendation.maximum_sampling_error:.3g}%)."
+            f"{_SPIN_GRID_METHOD_LABELS[sampling.method]}"
         )
-        if moment_origins.shape[0] > limited_moments.shape[0]:
+        recommended_grid = (
+            f"{recommended_counts[0]}×{recommended_counts[1]}×"
+            f"{recommended_counts[2]} "
+            f"{_SPIN_GRID_METHOD_LABELS[recommendation.method]}"
+        )
+
+        def error_text(value, is_rms):
+            return f"{100 * value:.3g}%" + (" RMS" if is_rms else "")
+
+        t1_s, t2_s, equilibrium = relaxation
+        relaxation_text = ", ".join(
+            f"{name} {'∞' if not np.isfinite(value) else f'{1000 * value:.4g} ms'}"
+            for name, value in (("T1", t1_s), ("T2", t2_s))
+        )
+        if equilibrium == 0.0:
+            relaxation_text += ", no Mz recovery (hyperpolarized)"
+        message = (
+            "Imported Pulseq sequence: coherence pathways of "
+            f"{train.evaluated_adc_count} "
+            f"ADCs after {train.rf_pulse_count} RF pulses "
+            f"({train.refocusing_pulse_count} refocusing) were followed with "
+            f"{relaxation_text}. {weights.size} pathway phases reach at least "
+            "1% of the strongest coherence at an ADC (strongest "
+            f"{100 * max(train.maximum_weight, 0.0):.3g}%). Weighted subvoxel "
+            f"sampling error of the {current_grid} grid: "
+            f"{error_text(current.maximum_error, current.error_is_rms)}. "
+            f"Recommended: {recommended_grid} "
+            f"({recommendation.spins_per_voxel} spins/voxel; "
+            f"{error_text(recommendation.maximum_sampling_error, recommendation.error_is_rms)})."
+        )
+        if not recommendation.meets_target:
             message += (
-                f" The check is limited to the first {limited_moments.shape[0]} "
-                f"ADC origins of {moment_origins.shape[0]}."
+                " No tested grid reached the 1% target; check convergence by "
+                "repeating the simulation with more spins."
             )
-        if report.first_alias_observation is not None:
+        if train.evaluated_adc_count < train.total_adc_count:
             message += (
-                " Warning: artificial subvoxel rephasing occurs at ADC moment "
-                f"offset {report.first_alias_observation}."
+                f" The check is limited to the first {train.evaluated_adc_count} "
+                f"ADCs of {train.total_adc_count}."
             )
-        warning = ideal_maximum > 0.05 or report.maximum_sampling_error > 0.05
+        if train.states_were_capped:
+            message += (
+                " The number of tracked pathways hit its limit, so weak "
+                "pathways were dropped."
+            )
+        warning = current.maximum_error > 0.05
         self.spoiling_quality_info.setText(message)
         self.spoiling_quality_info.setStyleSheet(
             "color: #b45309;" if warning else "color: #15803d;"
         )
         quality_rows = [
-            ("Sequence", "Imported Pulseq ADC moment train"),
-            ("Evaluated ADC moment offsets", str(report.n_observations)),
+            ("Sequence", "Imported Pulseq coherence pathways"),
             (
-                "Current subvoxel grid",
-                f"{counts[0]}×{counts[1]}×{counts[2]} {self.subvoxel_sampling_method}",
+                "Evaluated ADCs",
+                f"{train.evaluated_adc_count} of {train.total_adc_count}",
             ),
-            ("Maximum ideal coherence", f"{100 * ideal_maximum:.3g}%"),
-            ("Maximum sampled coherence", f"{100 * sampled_maximum:.3g}%"),
             (
-                "Maximum train sampling error",
-                f"{100 * report.maximum_sampling_error:.3g}%",
+                "RF pulses",
+                f"{train.rf_pulse_count} ({train.refocusing_pulse_count} refocusing)",
+            ),
+            ("Relaxation", relaxation_text),
+            ("Pathway phases ≥ 1%", str(weights.size)),
+            ("Current subvoxel grid", current_grid),
+            (
+                "Weighted sampling error",
+                error_text(current.maximum_error, current.error_is_rms),
             ),
             (
                 "Recommended grid",
-                f"{recommendation.counts_xyz[0]}×{recommendation.counts_xyz[1]}×"
-                f"{recommendation.counts_xyz[2]} midpoint "
-                f"({recommendation.spins_per_voxel} spins; "
-                f"{100 * recommendation.maximum_sampling_error:.3g}% error)",
+                f"{recommended_grid} ({recommendation.spins_per_voxel} spins; "
+                f"{error_text(recommendation.maximum_sampling_error, recommendation.error_is_rms)})",
             ),
         ]
-        if report.first_alias_observation is not None:
+        if current.worst_phase_cycles_per_voxel is not None:
             quality_rows.append(
                 (
-                    "First artificial rephasing",
-                    f"ADC offset {report.first_alias_observation}",
+                    "Worst pathway (cycles/voxel XYZ)",
+                    ", ".join(
+                        f"{value:.3g}" for value in current.worst_phase_cycles_per_voxel
+                    )
+                    + f"; weight {100 * current.worst_weight:.3g}%",
                 )
             )
+        if not recommendation.meets_target:
+            quality_rows.append(("1% target", "No tested grid reached the target"))
         self._set_spoiling_quality_table(quality_rows, warning=warning)
         recommendation_is_current = (
-            self.subvoxel_sampling_method == recommendation.method
-            and sampling.counts_xyz == recommendation.counts_xyz
+            sampling.method == recommendation.method and counts == recommended_counts
         )
         self.spoiling_apply_recommended_grid.setVisible(True)
         self.spoiling_apply_recommended_grid.setEnabled(not recommendation_is_current)
         self.spoiling_apply_recommended_grid.setText(
-            "Grid already train-safe"
+            "Recommended grid already selected"
             if recommendation_is_current
-            else f"Apply {recommendation.counts_xyz[0]}×"
-            f"{recommendation.counts_xyz[1]}×{recommendation.counts_xyz[2]} "
-            "midpoint grid"
+            else f"Apply {recommended_grid} grid"
+        )
+        self._publish_spoiling_analysis(
+            SpoilingAnalysisSnapshot(
+                title="Imported Pulseq sequence: coherence pathways",
+                summary=message,
+                phases=np.asarray(train.phase_cycles_per_voxel, dtype=float).reshape(
+                    -1, 3
+                ),
+                weights=np.asarray(train.weights, dtype=float),
+                observation=np.asarray(train.adc_indices, dtype=float) + 1.0,
+                observation_label="ADC number",
+                sampling=sampling,
+                recommendation=recommendation,
+                weighted=True,
+                warning=warning,
+            )
         )
 
     def _update_spoiling_quality(self, *_):
@@ -10605,15 +10752,17 @@ class SequenceSimulationWidget(QWidget):
                 "A sequence-specific grid could not be derived yet. The settings "
                 f"therefore use a conservative <b>{int(recommended_counts[0])}"
                 f"&times;{int(recommended_counts[1])}&times;"
-                f"{int(recommended_counts[2])}</b> deterministic-stratified "
-                "starting grid that must be verified by convergence."
+                f"{int(recommended_counts[2])}</b> regular midpoint starting "
+                "grid. Verify it by doubling the spins per axis."
             )
         else:
             grid_text = (
                 "For the current sequence and phantom, the train-wide analysis "
                 f"recommends <b>{int(recommended_counts[0])}&times;"
                 f"{int(recommended_counts[1])}&times;"
-                f"{int(recommended_counts[2])}</b> subvoxel spins."
+                f"{int(recommended_counts[2])}</b> "
+                f"{_SPIN_GRID_METHOD_LABELS[recommendation['sampling_method']]} "
+                "subvoxel spins per axis."
             )
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Warning)
@@ -10646,6 +10795,7 @@ class SequenceSimulationWidget(QWidget):
             self.program is None
             or self.sequence_source.currentIndex() != self.PULSEQ_SOURCE
             or not str(getattr(self.program, "source", "")).lower().endswith(".seq")
+            or self._loaded_pulseq_declares_ideal_spoilers()
         ):
             return None
         self._update_spoiling_quality()
@@ -10656,22 +10806,24 @@ class SequenceSimulationWidget(QWidget):
             if selected_phantom is None:
                 selected_phantom = self.phantom
             phantom_ndim = int(getattr(selected_phantom, "ndim", 3))
+            # A regular grid makes any aliasing deterministic, so doubling the
+            # counts in a convergence check shows it as a changed signal. Two
+            # jittered points per axis would hide it in voxel-to-voxel noise.
             fallback_counts = tuple(
-                2 if axis < min(3, max(1, phantom_ndim)) else 1 for axis in range(3)
+                4 if axis < min(3, max(1, phantom_ndim)) else 1 for axis in range(3)
             )
             detail = (
                 f"{sequence_name}: no sequence-specific grid could be derived yet. "
-                "Select the simulation phantom and ensure that at least two ADC "
-                "gradient-moment origins can be inferred. Until then, deterministic "
-                f"stratified sampling on a {fallback_counts[0]}×"
-                f"{fallback_counts[1]}×{fallback_counts[2]} starting grid is the "
-                "robust fallback; determine the final X/Y/Z counts with a convergence "
-                "study."
+                "Select a 3D simulation phantom so the coherence pathways of the "
+                "sequence can be evaluated. Until then, a regular midpoint "
+                f"{fallback_counts[0]}×{fallback_counts[1]}×{fallback_counts[2]} "
+                "starting grid is used; confirm it by doubling the spins per axis "
+                "and checking that the signal does not change."
             )
             return {
                 "sequence_name": sequence_name,
                 "spoiler_mode": "gradient",
-                "sampling_method": "stratified",
+                "sampling_method": "midpoint",
                 "counts_xyz": fallback_counts,
                 "counts_are_fallback": True,
                 "detail": detail,
@@ -10690,9 +10842,11 @@ class SequenceSimulationWidget(QWidget):
             "detail": (
                 f"{sequence_name}: {recommendation.counts_xyz[0]}×"
                 f"{recommendation.counts_xyz[1]}×"
-                f"{recommendation.counts_xyz[2]} {recommendation.method} sampling "
-                f"{target_status} (maximum error "
-                f"{100 * recommendation.maximum_sampling_error:.3g}%)."
+                f"{recommendation.counts_xyz[2]} "
+                f"{_SPIN_GRID_METHOD_LABELS[recommendation.method]} sampling "
+                f"{target_status} ("
+                + ("RMS" if recommendation.error_is_rms else "maximum")
+                + f" error {100 * recommendation.maximum_sampling_error:.3g}%)."
             ),
         }
 
@@ -10727,7 +10881,13 @@ class SequenceSimulationWidget(QWidget):
     def _pulseq_load_finished(self, payload, filename):
         self._apply_loaded_pulseq(payload, filename)
         self._reset_pulseq_load_controls("Pulseq loaded")
-        self._display_pulseq_spoiler_warning()
+        if not self._loaded_pulseq_declares_ideal_spoilers():
+            self._display_pulseq_spoiler_warning()
+
+    def _loaded_pulseq_declares_ideal_spoilers(self):
+        # Files exported by this simulator mark their crushers, so the fast
+        # ideal crusher already reproduces them exactly.
+        return self.program is not None and declares_ideal_spoilers(self.program)
 
     def _pulseq_load_failed(self, message):
         self._reset_pulseq_load_controls("Pulseq import failed")
@@ -13327,6 +13487,7 @@ class SequenceSimulationWidget(QWidget):
         )
         self.subvoxel_sampling_method = sampling.method
         self._update_spoiling_quality_visibility()
+        self.spoiler_mode_changed.emit(mode)
         auto_changed = self._apply_flash_auto_spoilers()
         self._update_flash_spoiler_info()
         if auto_changed and self.sequence_source.currentIndex() == self.FLASH_SOURCE:

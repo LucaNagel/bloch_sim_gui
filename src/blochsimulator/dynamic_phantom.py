@@ -3694,9 +3694,13 @@ def _simulate_dynamic_sequence_block(
         concentration_state[:, :, 2] = initial_spin_density
     positions = np.asarray(phantom.positions[active], dtype=np.float64)
     if sampling.enabled:
-        positions = np.repeat(positions, spins_per_voxel, axis=0) + np.tile(
-            subvoxel_offsets_m, (parent_active_count, 1)
-        )
+        if sampling.varies_per_voxel:
+            spin_offsets_m = sampling.voxel_offsets_m(
+                phantom_voxel_basis_m(phantom), active
+            )
+        else:
+            spin_offsets_m = np.tile(subvoxel_offsets_m, (parent_active_count, 1))
+        positions = np.repeat(positions, spins_per_voxel, axis=0) + spin_offsets_m
     tx_map = getattr(phantom, "tx_sensitivity_map", None)
     if tx_map is None:
         tx_sensitivity = np.ones(parent_active_count, dtype=np.complex128)

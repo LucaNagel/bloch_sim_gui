@@ -2,6 +2,7 @@ import sys
 import runpy
 import time
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -718,7 +719,10 @@ def test_session_simulations_tab_is_next_to_phantom_b1_and_accepts_runs():
     window = BlochSimulatorGUI()
 
     assert window.receiver_noise_tab_index == window.b1_combo_tab_index + 1
-    assert window.simulation_explorer_tab_index == window.receiver_noise_tab_index + 1
+    assert window.spoiling_analysis_tab_index == window.receiver_noise_tab_index + 1
+    assert (
+        window.simulation_explorer_tab_index == window.spoiling_analysis_tab_index + 1
+    )
     assert window.tab_widget.tabText(window.simulation_explorer_tab_index) == (
         "Simulations"
     )
@@ -1756,6 +1760,58 @@ def test_invalid_epi_bandwidth_restores_last_valid_value(monkeypatch):
     app.processEvents()
 
 
+def test_spoiling_analysis_tab_is_shown_only_for_gradient_spoiling():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    index = window.spoiling_analysis_tab_index
+    tabs = window.tab_widget
+    assert tabs.tabText(index) == "Spoiling Analysis"
+    assert not tabs.isTabVisible(index)
+
+    window.set_workspace_mode("sequence")
+    sequence = window.sequence_simulation_widget
+    sequence.set_spoiler_configuration("ideal", (1, 1, 9))
+    assert not tabs.isTabVisible(index)
+    sequence.set_spoiler_configuration("gradient", (1, 4, 1), "midpoint")
+    assert tabs.isTabVisible(index)
+
+    sequence.sequence_source.setCurrentIndex(sequence.FLASH_SOURCE)
+    tabs.setCurrentIndex(index)
+    view = sequence.spoiling_analysis_view
+    assert window.spoiling_analysis_page.isAncestorOf(view)
+    snapshot = view.snapshot
+    assert snapshot is not None and snapshot.title.startswith("FLASH (2D)")
+    assert snapshot.phases.shape == (snapshot.weights.size, 3)
+    assert snapshot.recommendation == sequence._spoiling_spin_grid_recommendation
+    # The hidden window defers drawing until the view is shown.
+    assert view._dirty
+    view.render()
+    assert view.stack.currentIndex() == 1
+    assert view.apply_button.isEnabled()
+    view.apply_button.click()
+    assert sequence._configured_spin_sampling().counts_xyz == (
+        snapshot.recommendation.counts_xyz
+    )
+    assert view.snapshot.sampling.counts_xyz == snapshot.recommendation.counts_xyz
+    view.render()
+    assert not view.apply_button.isEnabled()
+
+    # Switching to the ideal crusher leaves the tab before hiding it.
+    sequence.set_spoiler_configuration("ideal", (1, 1, 9))
+    assert not tabs.isTabVisible(index)
+    assert tabs.currentIndex() == window.sequence_simulation_tab_index
+    sequence.set_spoiler_configuration("gradient", (1, 4, 1), "stratified")
+    assert tabs.isTabVisible(index)
+    window.set_workspace_mode("free")
+    assert not tabs.isTabVisible(index)
+    window.set_workspace_mode("sequence")
+    assert tabs.isTabVisible(index)
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
 def test_shared_spoiling_quality_unit_covers_every_sequence_source():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
@@ -1789,16 +1845,57 @@ def test_shared_spoiling_quality_unit_covers_every_sequence_source():
         pd_map=np.ones((2, 2, 2)),
     )
     widget._loaded_designed_phantom = lambda: phantom
-    widget.acquisition = MagicMock(
-        moment_origins_cyc_per_m=((0.0, 0.0, 0.0), (1000.0, 0.0, 0.0))
+    raster = 10e-6
+    events = []
+    for index in range(4):
+        start = index * 10e-3
+        events.extend(
+            (
+                RFEvent(
+                    start,
+                    np.full(100, np.deg2rad(30.0) / (2 * np.pi * 100 * raster)),
+                    raster,
+                ),
+                ADCEvent(start + 2e-3, 16, 20e-6),
+                GradientEvent("z", start + 5e-3, np.full(100, 3 / 2e-3 / 1e-3), raster),
+            )
+        )
+    widget.program = SequenceProgram(tuple(events), 40e-3, source="custom.seq")
+    widget._update_spoiling_quality()
+    text = widget.spoiling_quality_info.text()
+    assert "Imported Pulseq sequence: coherence pathways" in text
+    assert "Weighted subvoxel sampling error" in text
+    assert not widget.spoiling_apply_recommended_grid.isHidden()
+    recommendation = widget._spoiling_spin_grid_recommendation
+    assert recommendation is not None and recommendation.counts_xyz[2] >= 2
+    view = widget.spoiling_analysis_view
+    snapshot = view.snapshot
+    assert snapshot.weighted and snapshot.recommendation == recommendation
+    assert snapshot.observation_label == "ADC number"
+    assert snapshot.phases.shape == (snapshot.weights.size, 3)
+    assert np.all(snapshot.observation >= 1)
+    assert snapshot.summary == text
+    view.show()
+    assert view.stack.currentIndex() == 1
+    assert view.axis_selector.currentText() == "Z"
+    view.hide()
+
+    widget.program = replace(
+        widget.program,
+        metadata={"definitions": {"IdealSpoilerEndTimes": [9e-3]}},
     )
     widget._update_spoiling_quality()
-    assert "Imported Pulseq ADC moment train" in widget.spoiling_quality_info.text()
-    assert "maximum sampling error" in widget.spoiling_quality_info.text()
+    assert "declares ideal spoilers" in widget.spoiling_quality_info.text()
+    assert widget.spoiling_apply_recommended_grid.isHidden()
+    assert widget.spoiling_analysis_view.snapshot is None
+    assert "declares ideal spoilers" in widget.spoiling_analysis_view._message
 
     widget.sequence_source.setCurrentIndex(widget.EPI_SOURCE)
     assert "Remaining coherent signal" in widget.spoiling_quality_info.text()
     assert not widget.spoiling_apply_recommended_grid.isHidden()
+    snapshot = widget.spoiling_analysis_view.snapshot
+    assert snapshot.observation_label == "Spoiler order"
+    assert not snapshot.weighted and np.all(snapshot.weights == 1.0)
     widget.epi_spoil_after_slice.setChecked(False)
     assert "remaining coherent signal is 100%" in (widget.spoiling_quality_info.text())
     assert widget.spoiling_apply_recommended_grid.isHidden()
@@ -1940,9 +2037,10 @@ def test_loaded_pulseq_settings_use_multispin_fallback_without_train_analysis():
     recommendation = widget.loaded_pulseq_spoiler_recommendation()
 
     assert recommendation["spoiler_mode"] == "gradient"
-    assert recommendation["sampling_method"] == "stratified"
-    assert recommendation["counts_xyz"] == (2, 2, 2)
+    assert recommendation["sampling_method"] == "midpoint"
+    assert recommendation["counts_xyz"] == (4, 4, 4)
     assert recommendation["counts_are_fallback"]
+    assert "doubling the spins per axis" in recommendation["detail"]
 
     widget.close()
     widget.deleteLater()
@@ -1951,6 +2049,7 @@ def test_loaded_pulseq_settings_use_multispin_fallback_without_train_analysis():
 
 def test_successful_background_pulseq_load_displays_spoiler_warning():
     widget = MagicMock()
+    widget._loaded_pulseq_declares_ideal_spoilers.return_value = False
     payload = object()
 
     SequenceSimulationWidget._pulseq_load_finished(widget, payload, "custom.seq")
@@ -2714,10 +2813,9 @@ def test_sequence_workspace_infers_imported_epi_and_syncs_fov(tmp_path, monkeypa
     assert widget.fov_z_mm.suffix() == " mm"
     assert widget.fov_mm.value() == pytest.approx(220.0)
     assert widget.fov_z_mm.value() == pytest.approx(4.0)
-    spoiler_recommendation = widget.loaded_pulseq_spoiler_recommendation()
-    assert spoiler_recommendation["spoiler_mode"] == "gradient"
-    assert spoiler_recommendation["sampling_method"] == "midpoint"
-    assert spoiler_recommendation["counts_xyz"] == (2, 2, 2)
+    # The generator writes IdealSpoilerEndTimes, so the ideal spoiler applies
+    # and no gradient-waveform spin grid is recommended.
+    assert widget.loaded_pulseq_spoiler_recommendation() is None
 
     widget._build_phantom()
     result = widget.simulator.simulate_sequence(widget.program, widget.phantom)

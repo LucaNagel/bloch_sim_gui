@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
     QTabWidget,
     QWidget,
 )
+from math import prod
 from typing import Optional
 from pathlib import Path
 
@@ -82,7 +83,7 @@ class SettingsDialog(QDialog):
     )
     SPIN_SAMPLING_METHODS = (
         ("Regular midpoint grid", "midpoint"),
-        ("Deterministic stratified points", "stratified"),
+        ("Jittered stratified points (per voxel)", "stratified"),
     )
 
     @classmethod
@@ -458,19 +459,23 @@ class SettingsDialog(QDialog):
         )
         self.subvoxel_sampling_method_combo.setCurrentIndex(max(0, sampling_index))
         self.subvoxel_sampling_method_combo.setToolTip(
-            "The regular midpoint grid is efficient but must be checked across "
-            "the complete spoiler train. Deterministic stratified points avoid "
-            "short exact rephasing, but usually need more spins for the same "
-            "quadrature accuracy."
+            "Regular midpoint grid: the same evenly spaced points in every "
+            "voxel. Accurate and the first choice, but a long spoiler train can "
+            "rephase it artificially when a dephasing order reaches a multiple "
+            "of the count. Jittered stratified points: one reproducible random "
+            "point per grid cell, different in every voxel. The voxel signal "
+            "stays unbiased and aliasing turns into voxel-to-voxel noise, at "
+            "the cost of more spins for the same accuracy."
         )
+        method_labels = {method: label for label, method in self.SPIN_SAMPLING_METHODS}
         if loaded_pulseq_recommendation is None:
             sampling_hint = ""
         elif loaded_pulseq_recommendation.get("counts_are_fallback", False):
-            sampling_hint = "Loaded .seq fallback: Deterministic stratified points"
-        elif subvoxel_sampling_method == "midpoint":
-            sampling_hint = "Loaded .seq: Regular midpoint grid"
+            sampling_hint = (
+                f"Loaded .seq fallback: {method_labels[subvoxel_sampling_method]}"
+            )
         else:
-            sampling_hint = "Loaded .seq: Deterministic stratified points"
+            sampling_hint = f"Loaded .seq: {method_labels[subvoxel_sampling_method]}"
         sampling_field, self.subvoxel_sampling_recommendation_label = (
             self._recommended_sequence_field(
                 self.subvoxel_sampling_method_combo,
@@ -497,10 +502,11 @@ class SettingsDialog(QDialog):
             spin.setObjectName(f"subvoxel_spin_count_{axis.lower()}")
             spin.setRange(1, 128)
             spin.setValue(max(1, int(value)))
-            spin.setSuffix(" spins/voxel")
+            spin.setSuffix(" along " + axis)
             spin.setToolTip(
-                f"Number of deterministic sampling strata along voxel {axis}. "
-                "Runtime grows with the product of all three counts."
+                f"Spins along voxel axis {axis} in every phantom voxel. Each "
+                "phantom voxel holds X × Y × Z spins, and runtime grows with "
+                "that product."
             )
             axis_index = "XYZ".index(axis)
             if recommendation_counts is None:
@@ -516,19 +522,32 @@ class SettingsDialog(QDialog):
                         f"Loaded .seq start: {recommended_count}; verify convergence"
                     )
                 else:
-                    count_hint = f"Loaded .seq: {recommended_count} spins/voxel"
+                    count_hint = f"Loaded .seq: {recommended_count} along {axis}"
             spin_field, recommendation_label = self._recommended_sequence_field(
                 spin,
                 count_hint,
                 f"subvoxel_spin_{axis.lower()}_recommendation",
             )
-            simulation_form.addRow(f"Subvoxel spins {axis}:", spin_field)
+            simulation_form.addRow(f"Subvoxel spins along {axis}:", spin_field)
             self.subvoxel_spin_count_spins.append(spin)
             self.subvoxel_spin_recommendation_labels.append(recommendation_label)
             self.subvoxel_control_labels.append(
                 simulation_form.labelForField(spin_field)
             )
             self.subvoxel_control_fields.append(spin_field)
+            spin.valueChanged.connect(self._update_subvoxel_spin_total)
+        self.subvoxel_spin_total_label = QLabel()
+        self.subvoxel_spin_total_label.setObjectName("subvoxel_spin_total")
+        self.subvoxel_spin_total_label.setToolTip(
+            "Total spins simulated in every phantom voxel. The simulated spin "
+            "count is this value times the number of phantom voxels."
+        )
+        simulation_form.addRow("Spins per voxel:", self.subvoxel_spin_total_label)
+        self.subvoxel_control_labels.append(
+            simulation_form.labelForField(self.subvoxel_spin_total_label)
+        )
+        self.subvoxel_control_fields.append(self.subvoxel_spin_total_label)
+        self._update_subvoxel_spin_total()
         if loaded_pulseq_recommendation is not None:
             recommendation_note = str(
                 loaded_pulseq_recommendation.get("detail", "")
@@ -969,6 +988,12 @@ class SettingsDialog(QDialog):
             self.subvoxel_control_fields, self.subvoxel_control_labels
         ):
             self._set_control_enabled(field, label, enabled)
+
+    def _update_subvoxel_spin_total(self, *_):
+        counts = self.subvoxel_spin_counts()
+        self.subvoxel_spin_total_label.setText(
+            " × ".join(str(count) for count in counts) + f" = {prod(counts)} spins"
+        )
 
     def _browse_export_directory(self):
         current = str(self.get_export_directory())

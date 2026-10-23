@@ -170,6 +170,47 @@ def test_subvoxel_gradient_waveform_converges_to_rectangular_voxel_sinc():
     assert result.metadata["n_simulated_spins"] == 101
 
 
+def test_stratified_subvoxel_jitter_differs_per_voxel_and_ignores_chunking():
+    voxel_width_m = 0.02
+    duration_s = 0.01
+    cycles_across_voxel = 2.0
+    gradient_hz_per_m = cycles_across_voxel / voxel_width_m / duration_s
+    phantom = _phantom(shape=(4,), t1=1e12, t2=1e12, m0=(1.0, 0.0, 0.0))
+    program = SequenceProgram(
+        (
+            GradientEvent("x", 0.0, np.array([gradient_hz_per_m]), duration_s),
+            ADCEvent(duration_s, 1, 1e-3),
+        ),
+        duration_s=duration_s + 1e-3,
+    )
+    simulator = BlochSimulator(use_parallel=False)
+    runs = [
+        simulator.simulate_sequence(
+            program,
+            phantom,
+            chunk_voxels=chunk_voxels,
+            spin_sampling=SpinSampling((3, 1, 1), method="stratified"),
+            spoiler_mode="gradient",
+        )
+        for chunk_voxels in (1, 4)
+    ]
+    midpoint = simulator.simulate_sequence(
+        program,
+        phantom,
+        spin_sampling=SpinSampling((3, 1, 1), method="midpoint"),
+        spoiler_mode="gradient",
+    )
+
+    np.testing.assert_allclose(
+        runs[0].final_magnetization, runs[1].final_magnetization, atol=1e-12
+    )
+    # A whole number of cycles rephases nothing for an exact voxel integral;
+    # the jittered points leave a different residual in every voxel.
+    per_voxel_mx = runs[0].mx.ravel()
+    assert np.ptp(per_voxel_mx) > 1e-3
+    assert np.ptp(midpoint.mx.ravel()) == pytest.approx(0.0, abs=1e-12)
+
+
 def test_gradient_waveform_and_ideal_crusher_produce_matching_full_spoiling():
     voxel_width_m = 0.02
     duration_s = 0.01

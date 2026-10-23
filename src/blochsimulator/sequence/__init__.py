@@ -14,7 +14,7 @@ from .acquisition import (
     infer_spiral_acquisition,
     make_cartesian_epi,
 )
-from .compiler import CompiledSequence, SequenceCompiler
+from .compiler import CompiledSequence, SequenceCompiler, declares_ideal_spoilers
 from .measured_fid import (
     AmplitudeEstimate,
     MeasuredCalibrationInputs,
@@ -81,11 +81,20 @@ from .spin_sampling import SpinSampling
 from .spoiling import (
     SpinGridRecommendation,
     SpoilerTrainAnalysis,
+    WeightedPathwayError,
     analyze_adc_moment_train,
     analyze_phase_cycle_train,
     analyze_repeated_spoiler_train,
+    pathway_grid_coherence,
     recommend_spin_grid,
+    recommend_spin_grid_for_pathways,
     recommend_spin_grid_for_phase_train,
+    weighted_pathway_sampling_error,
+)
+from .coherence_pathways import (
+    CoherencePathwayTrain,
+    coherence_pathways_from_program,
+    deduplicate_observations,
 )
 from .reconstruction import (
     SequenceReconstructionModel,
@@ -229,9 +238,17 @@ __all__ = [
     "SpinSampling",
     "SpinGridRecommendation",
     "SpoilerTrainAnalysis",
+    "WeightedPathwayError",
+    "CoherencePathwayTrain",
+    "coherence_pathways_from_program",
+    "deduplicate_observations",
+    "recommend_spin_grid_for_pathways",
+    "pathway_grid_coherence",
+    "weighted_pathway_sampling_error",
     "analyze_adc_moment_train",
     "analyze_phase_cycle_train",
     "analyze_repeated_spoiler_train",
+    "declares_ideal_spoilers",
     "recommend_spin_grid",
     "recommend_spin_grid_for_phase_train",
     "TimestepConvergencePoint",

@@ -264,19 +264,249 @@ do not duplicate the frequency or Bloch logic in widgets.
 
 ### Choosing Subvoxel Sampling for Imported Pulseq Sequences
 
-Imported `.seq` files must use gradient-waveform spoiling because they do not
-contain the simulator's explicit ideal-crusher markers. Choose the subvoxel
-counts with a convergence study over the complete RF/ADC gradient-moment train:
-increase the X, Y, and Z counts only on axes with intravoxel phase dispersion
-until the signal change or the sampled-versus-continuous coherence error is
-below the chosen tolerance (the GUI recommendation uses 1%). The cost scales
-with the product $N_x N_y N_z$, so the optimal grid is the smallest converged
-one, not the largest affordable grid. Prefer the regular midpoint grid when its
-complete train has been checked, because it is symmetric and usually reaches a
-given quadrature accuracy with fewer spins. Use deterministic stratified points
-when the full train cannot be checked or a regular grid shows artificial exact
-rephasing; they reproducibly break short grid recurrences, but generally need
-more spins and still require a convergence check.
+#### Why imported sequences need gradient-waveform spoiling
+
+Generated sequences write the end of every spoiler block into the
+`IdealSpoilerEndTimes` definition. In **Ideal crusher** mode the simulator sets
+`Mx` and `My` to zero at these times. This needs only one spin per voxel and is
+fast and exact. An arbitrary imported `.seq` file has no such markers, and the
+simulator never guesses which gradient is a crusher. Such files must therefore
+be simulated with **Gradient waveform (subvoxel spins)**. In that mode every
+phantom voxel is represented by several spins at different positions. Spoiling
+then follows physically from the phase that the actual gradients give these
+spins. A `.seq` file exported by this simulator keeps its
+`IdealSpoilerEndTimes` markers, so Ideal crusher mode stays valid for it after
+reloading. For such files the GUI shows neither the load-time spoiling warning
+nor a subvoxel recommendation.
+
+#### What the counts mean
+
+**Subvoxel spins along X/Y/Z** are counts **per axis and per phantom voxel**.
+A setting of `2 / 2 / 2` therefore gives $2 \times 2 \times 2 = 8$ spins in
+every phantom voxel. The dialog shows this product in its **Spins per voxel**
+row. Runtime and memory grow with the product $N_x N_y N_z$.
+
+The reference length is the **phantom voxel**, not the imaging voxel. A
+crusher that winds 4 cycles across an imaging voxel winds only 1 cycle across
+a phantom voxel that is four times finer. The number of spins needed depends
+on that phase in cycles across one phantom voxel, written $\varphi$ below.
+
+#### How the spin positions are chosen
+
+`SpinSampling` (`sequence/spin_sampling.py`) splits each phantom voxel into
+$N_x \times N_y \times N_z$ equal cells and puts exactly one spin in each cell.
+All spins have the same weight $1/(N_x N_y N_z)$. The two methods differ only
+in where the spin sits inside its cell. Both are reproducible: the same counts
+and the same phantom always give the same positions.
+
+- **Regular midpoint grid** (`midpoint`): the spin sits at the cell centre,
+  at $-\tfrac12 + (k + \tfrac12)/N$ along each axis. The pattern is the same
+  in every voxel.
+- **Jittered stratified points (per voxel)** (`stratified`): the spin sits at
+  a pseudo-random position inside its cell. The position is a SplitMix64 hash
+  of a point ID, with one independent stream per axis. The ID is
+  `voxel_index * grid_spins_per_voxel + point_index`, where `voxel_index` is
+  the flat index of the voxel in the phantom. Every voxel therefore has its
+  own pattern. Because the ID does not depend on chunking or on which other
+  voxels are active, the result is identical for any `chunk_voxels`. Axes with
+  a count of 1 stay centred.
+
+`normalized_voxel_offsets(voxel_indices)` returns the offsets of many voxels at
+once; `simulate_sequence` uses `voxel_offsets_m` for every chunk when
+`varies_per_voxel` is true.
+
+#### How the two methods behave
+
+For a linear phase of $\varphi$ cycles across the voxel on one axis, a
+continuous, uniform voxel keeps the coherence $|\mathrm{sinc}(\varphi)|$. This
+is zero for every non-zero integer $\varphi$. A midpoint grid with $N$ points
+keeps
+
+$$
+\left|\frac{\sin(\pi\varphi)}{N \sin(\pi\varphi/N)}\right| .
+$$
+
+This is also zero for integer $\varphi$, **except at integer multiples of
+$N$, where it is exactly 1**. At those phases the grid refocuses completely
+and produces an artificial echo that is the same in every voxel.
+
+A jittered stratified grid is an unbiased estimate of the voxel signal: its
+mean over all possible jitters is exactly $\mathrm{sinc}(\varphi)$. Each single
+voxel deviates from that mean by a random residual with variance
+
+$$
+\frac{1 - \mathrm{sinc}^2(\varphi/N)}{N}
+$$
+
+per axis (for several axes, $\bigl(1 - \prod_a \mathrm{sinc}^2(\varphi_a/N_a)\bigr)/(N_x N_y N_z)$).
+For large phases this approaches $1/N$, i.e. a residual of $1/\sqrt{N}$.
+Because the jitter differs per voxel, these residuals have random phases and
+partly cancel when many voxels contribute to the same image pixel or spectrum.
+
+Remaining coherence after one crusher along one axis (target: 0 for
+$\varphi \ge 1$). For stratified sampling the table gives the RMS coherence
+of one voxel, $\sqrt{\mathrm{sinc}^2(\varphi) + \mathrm{variance}}$:
+
+| $\varphi$ [cycles/voxel] | 0.5 | 1 | 2 | 4 | 8 | 9 | 16 |
+|---|---|---|---|---|---|---|---|
+| continuous voxel | 0.64 | 0 | 0 | 0 | 0 | 0 | 0 |
+| midpoint, $N=2$ | 0.71 | 0 | **1** | **1** | **1** | 0 | **1** |
+| stratified, $N=2$ (RMS) | 0.71 | 0.55 | 0.71 | 0.71 | 0.71 | 0.71 | 0.71 |
+| midpoint, $N=9$ | 0.64 | 0 | 0 | 0 | 0 | **1** | 0 |
+| stratified, $N=9$ (RMS) | 0.64 | 0.07 | 0.13 | 0.24 | 0.33 | 0.33 | 0.33 |
+
+Two consequences matter in practice:
+
+- **Midpoint is exact up to its alias.** With $N$ points per axis it is
+  correct as long as every relevant phase stays below $N$ cycles across the
+  voxel. Choose $N$ above the largest such phase. An $N$ that shares no factor
+  with the crusher's cycle count delays the first alias. With 2 cycles per TR,
+  $N = 9$ first rephases after 9 repetitions, whereas $N = 8$ already rephases
+  after 4.
+- **Stratified trades the alias for noise.** It never produces a coherent
+  echo, but each voxel keeps a residual of about $1/\sqrt{N_x N_y N_z}$. With
+  few spins this is large (0.71 for 2 points), so stratified is useful only
+  when the relevant phases are too high for any affordable midpoint grid and
+  many voxels average the residual down.
+
+#### Repeated crushers: the train matters, not one crusher
+
+Transverse magnetization that was excited $n$ repetitions ago carries $n$
+times the crusher moment. A midpoint grid that looks perfectly spoiled after
+one crusher can therefore refocus exactly after a few repetitions. With
+hyperpolarized nuclei, long $T_2$, and small flip angles, many such old
+coherence pathways still carry signal. The phase that must stay below $N$ is
+the one of the **oldest pathway that still carries signal**, not that of one
+crusher.
+
+#### How the GUI recommendation is computed
+
+For imported Pulseq files, `_set_imported_pulseq_spoiling_quality` in
+`ui/sequence_simulation_widget.py` does the following:
+
+1. **Skip marker files.** If the file declares `IdealSpoilerEndTimes` (or the
+   legacy `SpoilerEndTimes` / `EndImageSpoilerEndTimes`), checked with
+   `declares_ideal_spoilers`, no analysis is run. The load-time warning and the
+   recommendation are suppressed too, because Ideal crusher mode is valid.
+2. **Choose the relaxation.** `_spoiling_object_relaxation` takes the longest
+   finite $T_1$ and $T_2$ of the selected phantom (or the built-in object's
+   values). Long relaxation keeps old pathways alive longest, so this is the
+   conservative choice. Phantoms with metabolite pools are treated as
+   hyperpolarized: $T_1$ recovery goes towards 0 instead of towards the initial
+   magnetization.
+3. **Follow the coherence pathways.** `coherence_pathways_from_program`
+   (`sequence/coherence_pathways.py`) runs an extended phase graph with
+   continuous 3D moments. Each RF pulse is applied instantaneously at its
+   $|B_1|$-weighted centre with its flip angle and phase. It keeps
+   $\cos^2(\alpha/2)$ of every transverse state, mirrors $\sin^2(\alpha/2)$ of
+   it about the current moment (refocusing, so spin echoes and stimulated
+   echoes are included), and exchanges amplitude with longitudinal states.
+   Transverse states decay with $T_2$ and longitudinal ones with $T_1$. States
+   with the same moment are summed with their complex amplitudes. At most
+   1024 ADCs and 4096 states are tracked; the GUI notes when either limit was
+   reached.
+4. **Weight the pathways.** At every ADC the strongest state is the reference
+   (normally the signal that is actually wanted). Every other state gets the
+   weight $|a_\mathrm{state}| / |a_\mathrm{reference}|$ and a phase equal to its
+   moment relative to the reference, in cycles across the phantom voxel.
+   States below 1% are dropped, because they cannot exceed a 1% error target.
+   `deduplicate_observations` keeps the largest weight for each distinct phase.
+5. **Search the grid.** `recommend_spin_grid_for_pathways`
+   (`sequence/spoiling.py`) tests grids in order of increasing total spin
+   count. The error of a grid is the largest
+   $w \cdot |S_\mathrm{grid} - S_\mathrm{voxel}|$ over all pathways. For
+   midpoint this is exact; for stratified it is the expected RMS deviation
+   in one voxel. At equal cost midpoint wins. Every axis that carries a phase
+   gets at least 2 points; the search stops at 32 points per axis and 512
+   spins in total. If no grid meets 1%, the grid with the smallest error is
+   reported with a note. The pathway train and the recommendation are cached
+   per program, voxel size and relaxation, so changing the grid only
+   re-evaluates the error of the current grid.
+
+RF spoiling with a quadratic phase increment randomises the phases of old
+pathways but leaves their amplitudes unchanged. A strong pathway with a
+weight close to 1 is therefore expected for RF-spoiled FLASH with long $T_2$;
+it is not a bug.
+
+If no recommendation can be derived (no phantom selected, or no evaluated
+ADC), `loaded_pulseq_spoiler_recommendation` falls back to a **midpoint** start
+grid of 4 points per phantom axis (`4 × 4 × 4` in 3D). Regular sampling is
+used because 2-point jitter keeps a residual of about 0.7 per axis, while a
+4-point midpoint grid is exact below 4 cycles per voxel. This grid is only a
+starting point.
+
+Generated FLASH sequences use the analogous `recommend_spin_grid`. It
+evaluates every accumulated crusher order $1 \ldots n_\mathrm{exc}-1$ of the
+known crusher moment.
+
+#### Spoiling Analysis tab
+
+`ui/spoiling_analysis_view.py` draws the analysis above. Each source of the
+Spoiling quality panel in `SequenceSimulationWidget` builds a frozen
+`SpoilingAnalysisSnapshot` (title, summary, phases in cycles/voxel per
+observation and axis, pathway weights, observation numbers and label, current
+`SpinSampling`, recommendation, `weighted` flag) and passes it to
+`_publish_spoiling_analysis`:
+
+| Source | Phases | Weights | Observation |
+| --- | --- | --- | --- |
+| `_update_flash_spoiler_info` (FLASH) | `SpoilerTrainAnalysis.phase_cycles_per_voxel` | 1 | ADC number from 2, or crusher order |
+| `_set_configured_spoiling_quality` (EPI, spiral, …) | repeated spoiler orders | 1 | spoiler order |
+| `_set_imported_pulseq_spoiling_quality` | `CoherencePathwayTrain.phase_cycles_per_voxel` | train weights | `adc_indices + 1` |
+
+`_set_spoiling_quality_unavailable` publishes `None` with the message, which
+the view shows instead of the plots. The curves come from
+`spoiling.pathway_grid_coherence(phases, counts_xyz, method)`, which returns
+the continuous-voxel coherence, the grid coherence (exact Dirichlet product
+for midpoint, RMS $\sqrt{(1-\prod_a \mathrm{sinc}^2(\varphi_a/N_a))/N}$ for
+stratified, with singleton axes centred) and their difference. It uses the
+same formulas as `weighted_pathway_sampling_error`, so the plots match the
+recommendation. Rendering is lazy: `set_snapshot` only marks the view dirty,
+and it draws on `showEvent` or immediately when visible. Above
+`MAX_PLOTTED_ROWS` pathways only the strongest-weighted ones are plotted.
+
+The view widget is owned by `SequenceSimulationWidget` (unparented until
+needed). `MainWindow` adds a placeholder tab after **Receiver / Noise**; on the
+first `currentChanged` to that tab `_ensure_spoiling_analysis_workspace`
+creates the sequence workspace and reparents the view into the page.
+`_spoiling_analysis_tab_wanted` is true in Sequence mode with spoiler mode
+`"gradient"`, read from the widget, or from the saved setting before the
+widget exists. `_update_spoiling_analysis_tab_visibility` runs on the widget's
+`spoiler_mode_changed` signal, on workspace changes and after the settings
+dialog; if the tab is hidden while current, the Sequence Simulation tab is
+selected first. The view's `apply_recommendation_requested` signal reuses
+`_apply_current_recommended_spin_grid`.
+
+#### Known limitations of the analysis
+
+- Heterogeneous phantoms are analysed with a single $T_1$/$T_2$ pair, the
+  longest in the object. Regions with shorter relaxation need fewer spins
+  than recommended.
+- Each RF pulse is treated as instantaneous at its centre. Gradients during a
+  pulse (slice selection) and the slice profile are not resolved, so pathways
+  of selective pulses are estimated with their on-resonance flip angle.
+- Diffusion, flow and off-resonance are ignored. They usually weaken old
+  echoes, so the recommendation errs towards more spins.
+- Pathways after the last evaluated ADC are not tracked.
+
+These limits concern only the **recommendation**. The Bloch simulation itself
+evolves every subvoxel spin exactly under the actual waveform.
+
+#### Recommended procedure
+
+1. If the `.seq` file was exported by this simulator, keep **Ideal crusher**.
+2. Otherwise select **Gradient waveform** and apply the recommended grid
+   (usually a **Regular midpoint grid**).
+3. Raise the counts only on axes that carry crusher moments. Choose $N$ above
+   the phase in cycles across one phantom voxel of the oldest pathway that
+   still carries signal. A finer phantom lowers this phase directly.
+4. Check convergence: run the same simulation again with twice the spins per
+   axis on the relevant axes. Doubling moves the first alias of a midpoint
+   grid from $N$ to $2N$ cycles. If the signal no longer changes within
+   your tolerance, the smaller grid is sufficient. The cheapest converged grid
+   is optimal, not the largest affordable one.
+5. Use **Jittered stratified points** only when no affordable midpoint grid
+   meets the target, and check that the residual noise is acceptable.
 
 ### Sequence Simulation Backends and Numerical Contracts
 

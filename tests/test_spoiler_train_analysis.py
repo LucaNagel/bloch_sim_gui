@@ -7,6 +7,7 @@ from blochsimulator.sequence import (
     SpinSampling,
     analyze_adc_moment_train,
     analyze_repeated_spoiler_train,
+    pathway_grid_coherence,
     recommend_spin_grid,
     recommend_spin_grid_for_phase_train,
 )
@@ -165,3 +166,24 @@ def test_project_like_flash_phantom_matrix_strength_and_spin_sweep(tmp_path):
         2.0,
     }
     assert all(np.isfinite(record["simulation_time_s"]) for record in records)
+
+
+def test_pathway_grid_coherence_matches_sinc_dirichlet_and_stratified_rms():
+    phases = np.array(
+        [[0.0, 0.0, 0.0], [0.3, 0.0, 0.0], [4.0, 0.0, 0.0], [0.0, 2.5, 1.0]]
+    )
+
+    continuous, sampled, errors = pathway_grid_coherence(phases, (4, 1, 1), "midpoint")
+    assert np.allclose(continuous, np.prod(np.sinc(phases), axis=1))
+    dirichlet = np.sin(np.pi * 0.3) / (4 * np.sin(np.pi * 0.3 / 4))
+    assert sampled[1] == pytest.approx(dirichlet)
+    # Four midpoint points rephase completely at 4 cycles per voxel.
+    assert abs(sampled[2]) == pytest.approx(1.0)
+    assert np.allclose(errors, np.abs(sampled - continuous))
+
+    continuous, rms, errors = pathway_grid_coherence(phases, (4, 1, 1), "stratified")
+    variance = (1.0 - np.sinc(phases[:, 0] / 4) ** 2) / 4
+    assert np.allclose(rms[:3], np.sqrt(continuous[:3] ** 2 + variance[:3]))
+    assert np.allclose(errors[:3], np.sqrt(variance[:3]))
+    # A singleton axis keeps its centered point and does not dephase.
+    assert rms[3] == pytest.approx(1.0)
