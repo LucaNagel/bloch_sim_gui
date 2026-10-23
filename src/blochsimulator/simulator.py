@@ -2632,9 +2632,9 @@ class BlochSimulator:
             props["rx_sensitivities"], dtype=np.complex128
         )
         m0 = np.ascontiguousarray(props["m0"], dtype=np.float64)
-        subvoxel_offsets_m, subvoxel_weights = sampling.offsets_m(
-            phantom_voxel_basis_m(phantom)
-        )
+        voxel_basis_m = phantom_voxel_basis_m(phantom)
+        subvoxel_offsets_m, subvoxel_weights = sampling.offsets_m(voxel_basis_m)
+        active_voxel_indices = np.asarray(props["indices"], dtype=np.int64)
         crush_state_indices = (
             compiled.transverse_crush_state_indices
             if spoiler_mode == "ideal"
@@ -2665,9 +2665,16 @@ class BlochSimulator:
                 )
             parent_count = end - start
             if sampling.enabled:
-                chunk_positions = np.repeat(
-                    positions[start:end], spins_per_voxel, axis=0
-                ) + np.tile(subvoxel_offsets_m, (parent_count, 1))
+                if sampling.varies_per_voxel:
+                    chunk_offsets_m = sampling.voxel_offsets_m(
+                        voxel_basis_m, active_voxel_indices[start:end]
+                    )
+                else:
+                    chunk_offsets_m = np.tile(subvoxel_offsets_m, (parent_count, 1))
+                chunk_positions = (
+                    np.repeat(positions[start:end], spins_per_voxel, axis=0)
+                    + chunk_offsets_m
+                )
                 chunk_t1 = np.repeat(t1[start:end], spins_per_voxel)
                 chunk_t2 = np.repeat(t2[start:end], spins_per_voxel)
                 chunk_df = np.repeat(df[start:end], spins_per_voxel)

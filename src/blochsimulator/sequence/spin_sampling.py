@@ -1,4 +1,4 @@
-"""Deterministic intravoxel spin sampling for sequence simulation."""
+"""Reproducible intravoxel spin sampling for sequence simulation."""
 
 from __future__ import annotations
 
@@ -17,11 +17,12 @@ class SpinSampling:
     reproduces the historical one-spin-per-voxel simulation exactly.
 
     ``method='midpoint'`` is the regular tensor-product midpoint rule. It is
-    symmetric and converges predictably, but repeated integer-cycle spoilers can
-    rephase it exactly. ``method='stratified'`` places one deterministic,
-    independently jittered point in every tensor-product stratum. It retains
-    equal weights and spatial coverage without the short exact recurrence of a
-    regular grid.
+    symmetric and converges predictably, but a gradient moment of ``N`` cycles
+    per voxel rephases an ``N``-point axis exactly. ``method='stratified'``
+    places one jittered point in every tensor-product stratum. The jitter is a
+    stateless hash of the phantom voxel index and the point index, so every
+    voxel has its own pattern and results are reproducible. The residual is
+    then zero-mean noise across voxels instead of one coherent alias echo.
     """
 
     counts_xyz: tuple[int, int, int] = (1, 1, 1)
@@ -109,47 +110,81 @@ class SpinSampling:
                     f"{axis}-axis phantom extent"
                 )
 
-    def normalized_offsets_and_weights(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return fractional voxel offsets and normalized quadrature weights."""
+    @property
+    def varies_per_voxel(self) -> bool:
+        """Whether spin positions differ between phantom voxels."""
+        return self.method == "stratified" and self.enabled
+
+    def normalized_offsets_and_weights(
+        self, voxel_index: int = 0
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return fractional offsets of one voxel and normalized weights.
+
+        Midpoint offsets are identical in every voxel. Stratified offsets
+        depend on ``voxel_index``, the flat index of the voxel in its phantom.
+        """
+        offsets = self.normalized_voxel_offsets(np.array([voxel_index]))
+        return offsets[0], self._weights()
+
+    def normalized_voxel_offsets(self, voxel_indices) -> np.ndarray:
+        """Return fractional offsets with shape ``(voxels, spins, 3)``."""
+        voxel_indices = np.asarray(voxel_indices, dtype=np.int64).reshape(-1)
+        if np.any(voxel_indices < 0):
+            raise ValueError("voxel indices must be non-negative")
         cell_axes = [np.arange(count, dtype=np.int64) for count in self.counts_xyz]
         cell_x, cell_y, cell_z = np.meshgrid(*cell_axes, indexing="ij")
         cells = np.column_stack((cell_x.ravel(), cell_y.ravel(), cell_z.ravel()))
-        if self.method == "midpoint":
-            within_cell = np.full(cells.shape, 0.5, dtype=np.float64)
+        if self.selected_indices is not None:
+            selected = np.asarray(self.selected_indices, dtype=np.intp)
+            cells = cells[selected]
         else:
-            point_indices = np.arange(cells.shape[0], dtype=np.uint64)
-            within_cell = np.column_stack(
-                (
-                    _deterministic_unit_interval(point_indices, 0),
-                    _deterministic_unit_interval(point_indices, 1),
-                    _deterministic_unit_interval(point_indices, 2),
-                )
-            )
-            # A singleton axis has no resolved intravoxel extent. Keeping its
-            # point centered avoids a deterministic positional bias.
-            for axis_index, count in enumerate(self.counts_xyz):
-                if count == 1:
-                    within_cell[:, axis_index] = 0.5
+            selected = np.arange(cells.shape[0], dtype=np.intp)
         counts = np.asarray(self.counts_xyz, dtype=np.float64)
-        offsets = (cells + within_cell) / counts - 0.5
-        weights = np.full(
-            self.grid_spins_per_voxel,
+        if self.method == "midpoint":
+            offsets = (cells + 0.5) / counts - 0.5
+            return np.broadcast_to(
+                offsets, (voxel_indices.size,) + offsets.shape
+            ).copy()
+        # Each voxel owns a contiguous block of point IDs, so its jitter is
+        # independent of chunking and of which other voxels are active.
+        point_ids = (
+            voxel_indices.astype(np.uint64)[:, None]
+            * np.uint64(self.grid_spins_per_voxel)
+            + selected.astype(np.uint64)[None, :]
+        )
+        within_cell = np.stack(
+            [_deterministic_unit_interval(point_ids, axis) for axis in range(3)],
+            axis=-1,
+        )
+        # A singleton axis has no resolved intravoxel extent. Keeping its
+        # point centered avoids a deterministic positional bias.
+        for axis_index, count in enumerate(self.counts_xyz):
+            if count == 1:
+                within_cell[..., axis_index] = 0.5
+        return (cells[None, :, :] + within_cell) / counts - 0.5
+
+    def _weights(self) -> np.ndarray:
+        return np.full(
+            self.spins_per_voxel,
             1.0 / self.grid_spins_per_voxel,
             dtype=np.float64,
         )
-        if self.selected_indices is not None:
-            selected = np.asarray(self.selected_indices, dtype=np.intp)
-            offsets = offsets[selected]
-            weights = weights[selected]
-        return offsets, weights
 
     def offsets_m(self, voxel_basis_m) -> tuple[np.ndarray, np.ndarray]:
-        """Return physical offsets for the supplied three voxel basis vectors."""
-        basis = np.asarray(voxel_basis_m, dtype=np.float64)
-        if basis.shape != (3, 3) or not np.all(np.isfinite(basis)):
-            raise ValueError("voxel_basis_m must be a finite 3x3 matrix")
+        """Return physical offsets of voxel 0 for three voxel basis vectors."""
+        basis = _validated_basis(voxel_basis_m)
         normalized, weights = self.normalized_offsets_and_weights()
         return np.ascontiguousarray(normalized @ basis.T), weights
+
+    def voxel_offsets_m(self, voxel_basis_m, voxel_indices) -> np.ndarray:
+        """Return physical offsets for many voxels, voxel-major.
+
+        The result has shape ``(len(voxel_indices) * spins_per_voxel, 3)`` and
+        lines up with ``np.repeat(voxel_positions, spins_per_voxel, axis=0)``.
+        """
+        basis = _validated_basis(voxel_basis_m)
+        normalized = self.normalized_voxel_offsets(voxel_indices)
+        return np.ascontiguousarray(normalized.reshape(-1, 3) @ basis.T)
 
     def to_metadata(self) -> dict:
         return {
@@ -193,6 +228,13 @@ def _deterministic_unit_interval(indices: np.ndarray, axis_index: int) -> np.nda
     values ^= values >> np.uint64(31)
     mantissa = values >> np.uint64(11)
     return (mantissa.astype(np.float64) + 0.5) * (1.0 / float(1 << 53))
+
+
+def _validated_basis(voxel_basis_m) -> np.ndarray:
+    basis = np.asarray(voxel_basis_m, dtype=np.float64)
+    if basis.shape != (3, 3) or not np.all(np.isfinite(basis)):
+        raise ValueError("voxel_basis_m must be a finite 3x3 matrix")
+    return basis
 
 
 def phantom_voxel_basis_m(phantom) -> np.ndarray:

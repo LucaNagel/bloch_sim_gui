@@ -240,13 +240,28 @@ definitions); arbitrary gradients are never classified heuristically. In
 gradient-waveform mode all gradients act physically whether or not a spoiler
 marker is present.
 
-In gradient-waveform mode, subvoxel counts are axis-specific because their
-product controls runtime.
-**Regular midpoint grid** is the efficient symmetric quadrature rule. The
-optional **Deterministic stratified points** place one reproducible point in
-each stratum and avoid short exact grid recurrences, but generally need more
-spins for the same quadrature error. Through-slice subvoxel sampling requires a
-3D phantom with explicit Z extent; a single Z voxel is sufficient.
+In gradient-waveform mode, **Subvoxel spins along X/Y/Z** are counts per axis
+and per phantom voxel; the **Spins per voxel** row shows their product (for
+example `2 × 3 × 11 = 66 spins`), which controls runtime.
+**Regular midpoint grid** is the efficient symmetric quadrature rule and the
+same in every voxel; it is exact until a pathway reaches `N` cycles per voxel
+on an `N`-point axis, where it rephases completely. The optional **Jittered
+stratified points (per voxel)** place one point at a reproducible random
+position in each cell, with a different pattern in every phantom voxel. This
+avoids coherent grid echoes, but every voxel keeps a noise-like residual of
+roughly `1/sqrt(spins per voxel)`, so it needs many more spins for the same
+accuracy. Through-slice subvoxel sampling requires a 3D phantom with explicit
+Z extent; a single Z voxel is sufficient.
+
+For an imported Pulseq file without ideal-spoiler markers, the Spoiling quality
+panel follows the coherence pathways of the actual sequence (RF flip angles
+and phases, refocusing pulses, and the longest T1/T2 of the selected phantom)
+and recommends the cheapest grid whose weighted error stays below 1%. Without a
+phantom the start grid is a 4-point midpoint grid per phantom axis. Check any
+grid by running again with twice the spins per axis. Files with
+`IdealSpoilerEndTimes` markers, such as `.seq` files exported by this
+simulator, show no spoiling warning or recommendation because Ideal crusher
+mode is valid for them.
 The relevant spoiler strength is the phase spread **inside one phantom
 voxel**, not merely the number of cycles across the complete imaging FOV. A
 regular midpoint grid can appear perfectly spoiled after one crusher and then
@@ -261,6 +276,33 @@ that axis. For example, a `3 × 3 × 3` grid at one cycle/voxel has zero coheren
 after one crusher but returns to 100% at crusher order 3. For a 64-line FLASH
 train, mutually non-recurrent axis counts totaling roughly 65 spins can be much
 safer than an isotropic grid with a larger apparent single-crusher accuracy.
+
+The **Spoiling Analysis** tab, between **Receiver / Noise** and
+**Simulations**, shows this calculation graphically. It appears only in
+Sequence mode when **Gradient waveform** spoiling is selected and is hidden
+for **Ideal crusher**. The heading names the source (generated FLASH, another
+generated sequence, or an imported `.seq` file), the summary repeats the
+Spoiling quality text, and **Axis** chooses the gradient axis that is
+plotted; it starts at the axis with the strongest dephasing. The four plots
+are:
+
+1. **Pathway dephasing**: the phase in cycles per phantom voxel of every
+   coherence pathway (or crusher order) against ADC number. Point size and
+   opacity show the pathway weight; orange rings mark pathways whose
+   weighted error exceeds 1% on the current grid. Dashed lines mark where a
+   midpoint grid (current or recommended) first rephases, at ±`N` cycles.
+2. **Signal of one voxel versus dephasing**: the signal a voxel returns for a
+   given phase spread, for the continuous voxel (|sinc|), the current grid,
+   and the recommended grid. Midpoint curves return to 1 at multiples of `N`;
+   stratified curves show the RMS level instead.
+3. **Weighted sampling error per pathway**: weight × |grid − continuous
+   voxel| on a logarithmic axis, with the 1% target as a red line.
+4. **Subvoxel spin positions in one voxel**: the spin positions in the two
+   most finely sampled axes. With jittered stratified points a second voxel
+   is shown to make the per-voxel pattern visible.
+
+**Apply** sets the recommended grid in the sequence panel; it is disabled
+when the current grid already matches the recommendation.
 
 Every 3D sequence panel has independent signed **Read gradient direction** and
 **Phase gradient direction** controls in its spatial-encoding section. The

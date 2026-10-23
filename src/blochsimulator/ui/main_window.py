@@ -1596,6 +1596,24 @@ class BlochSimulatorGUI(QMainWindow):
         )
         self.tab_widget.currentChanged.connect(self._ensure_receiver_noise_workspace)
 
+        # Shown only in Sequence Mode with gradient-waveform spoiling; the
+        # ideal crusher needs no subvoxel grid, so there is nothing to explain.
+        self.spoiling_analysis_page = QWidget()
+        self.spoiling_analysis_page.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Ignored
+        )
+        spoiling_layout = QVBoxLayout(self.spoiling_analysis_page)
+        spoiling_layout.setContentsMargins(0, 0, 0, 0)
+        spoiling_layout.addWidget(
+            QLabel("Open this tab to inspect the gradient spoiling analysis.")
+        )
+        spoiling_layout.addStretch()
+        self.spoiling_analysis_tab_index = self.tab_widget.addTab(
+            self.spoiling_analysis_page, "Spoiling Analysis"
+        )
+        self._spoiling_analysis_placed = False
+        self.tab_widget.currentChanged.connect(self._ensure_spoiling_analysis_workspace)
+
         # === TEMPORARY SESSION SIMULATIONS ===
         # This intentionally lives next to Phantom + B1 and is separate from
         # the persistent, file-based Project Explorer in the File menu.
@@ -1838,6 +1856,10 @@ class BlochSimulatorGUI(QMainWindow):
         self.sequence_simulation_widget.parameter_loop_requested.connect(
             self._show_sequence_parameter_loop
         )
+        self.sequence_simulation_widget.spoiler_mode_changed.connect(
+            self._update_spoiling_analysis_tab_visibility
+        )
+        self._update_spoiling_analysis_tab_visibility()
         self.sequence_parameter_loop_panel_layout.addWidget(
             self.sequence_simulation_widget.parameter_loop_group
         )
@@ -1878,6 +1900,42 @@ class BlochSimulatorGUI(QMainWindow):
             context=self.sequence_simulation_widget.receiver_budget_context,
         )
         layout.addWidget(self.receiver_noise_workspace)
+
+    def _ensure_spoiling_analysis_workspace(self, index):
+        if index != self.spoiling_analysis_tab_index or self._spoiling_analysis_placed:
+            return
+        self._ensure_sequence_simulation_workspace(self.sequence_simulation_tab_index)
+        layout = self.spoiling_analysis_page.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+        layout.addWidget(self.sequence_simulation_widget.spoiling_analysis_view)
+        self._spoiling_analysis_placed = True
+
+    def _spoiling_analysis_tab_wanted(self) -> bool:
+        """Whether the Spoiling Analysis tab belongs to the current workspace."""
+        if getattr(self, "workspace_mode", None) != "sequence":
+            return False
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        if sequence_widget is not None:
+            return sequence_widget.spoiler_mode == "gradient"
+        return self._load_sequence_spoiler_mode() == "gradient"
+
+    def _update_spoiling_analysis_tab_visibility(self, *_):
+        if not hasattr(self, "spoiling_analysis_tab_index"):
+            return
+        visible = self._spoiling_analysis_tab_wanted()
+        if (
+            not visible
+            and self.tab_widget.currentIndex() == self.spoiling_analysis_tab_index
+        ):
+            # Leave the tab before hiding it so Qt does not walk through the
+            # neighbouring tabs and initialize them.
+            self.tab_widget.setCurrentIndex(self.sequence_simulation_tab_index)
+        self._set_main_tab_visible(self.spoiling_analysis_tab_index, visible)
 
     def _ensure_phantom_workspace(self, index: int):
         """Create phantom designer/viewers only when their tab is opened."""
@@ -5966,6 +6024,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self.b1_tab_index,
                 self.b1_combo_tab_index,
                 self.receiver_noise_tab_index,
+                self.spoiling_analysis_tab_index,
                 self.simulation_explorer_tab_index,
                 self.sequence_parameter_loop_tab_index,
             }:
@@ -6007,6 +6066,8 @@ class BlochSimulatorGUI(QMainWindow):
             }
             if self.sequence_parameter_loop_tab_opened:
                 allowed_sequence_tabs.add(self.sequence_parameter_loop_tab_index)
+            if self._spoiling_analysis_tab_wanted():
+                allowed_sequence_tabs.add(self.spoiling_analysis_tab_index)
             for index in range(self.tab_widget.count()):
                 self._set_main_tab_visible(index, index in allowed_sequence_tabs)
             sequence_widget = getattr(self, "sequence_simulation_widget", None)
@@ -6023,6 +6084,7 @@ class BlochSimulatorGUI(QMainWindow):
                     self.b1_tab_index,
                     self.b1_combo_tab_index,
                     self.receiver_noise_tab_index,
+                    self.spoiling_analysis_tab_index,
                     self.simulation_explorer_tab_index,
                     self.sequence_parameter_loop_tab_index,
                 }:
@@ -6048,6 +6110,7 @@ class BlochSimulatorGUI(QMainWindow):
             self._set_main_tab_visible(self.b1_tab_index, False)
             self._set_main_tab_visible(self.b1_combo_tab_index, False)
             self._set_main_tab_visible(self.receiver_noise_tab_index, False)
+            self._set_main_tab_visible(self.spoiling_analysis_tab_index, False)
             self._set_main_tab_visible(self.simulation_explorer_tab_index, False)
             self._set_main_tab_visible(self.sequence_parameter_loop_tab_index, False)
             free_geometry = getattr(self, "_free_workspace_geometry", None)
@@ -6333,6 +6396,8 @@ class BlochSimulatorGUI(QMainWindow):
             )
             self._synchronize_workspace_nucleus(workspace_defaults.phantom_nucleus)
         self.app_settings.sync()
+        # Without a sequence widget the persisted mode decides the tab.
+        self._update_spoiling_analysis_tab_visibility()
         if interface_style != previous_interface_style:
             _apply_platform_style(
                 QApplication.instance(),

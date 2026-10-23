@@ -488,6 +488,7 @@ def test_settings_dialog_returns_selected_values(tmp_path):
         spin.setValue(value)
     assert dialog.sequence_spoiler_mode() == "gradient"
     assert dialog.subvoxel_spin_counts() == (3, 5, 11)
+    assert dialog.subvoxel_spin_total_label.text() == "3 × 5 × 11 = 165 spins"
     dialog.subvoxel_sampling_method_combo.setCurrentIndex(
         dialog.subvoxel_sampling_method_combo.findData("stratified")
     )
@@ -587,10 +588,11 @@ def test_settings_dialog_prefills_and_labels_loaded_pulseq_recommendations(tmp_p
         "Loaded .seq: Regular midpoint grid"
     )
     assert [label.text() for label in dialog.subvoxel_spin_recommendation_labels] == [
-        "Loaded .seq: 2 spins/voxel",
-        "Loaded .seq: 3 spins/voxel",
-        "Loaded .seq: 11 spins/voxel",
+        "Loaded .seq: 2 along X",
+        "Loaded .seq: 3 along Y",
+        "Loaded .seq: 11 along Z",
     ]
+    assert dialog.subvoxel_spin_total_label.text() == "2 × 3 × 11 = 66 spins"
     assert all(
         label.toolTip() == recommendation["detail"]
         for label in dialog.subvoxel_spin_recommendation_labels

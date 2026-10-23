@@ -76,6 +76,25 @@ class CompiledSequence:
         return int(self.dt_s.size)
 
 
+IDEAL_SPOILER_DEFINITION = "IdealSpoilerEndTimes"
+LEGACY_IDEAL_SPOILER_DEFINITIONS = ("SpoilerEndTimes", "EndImageSpoilerEndTimes")
+
+
+def declares_ideal_spoilers(program: SequenceProgram) -> bool:
+    """Whether a program states where its ideal transverse crushers are.
+
+    Sequences exported by this simulator carry these definitions, even when
+    the list is empty. Ideal-crusher simulation is then exact for them.
+    """
+    definitions = (getattr(program, "metadata", None) or {}).get("definitions")
+    if not isinstance(definitions, dict):
+        return False
+    return any(
+        key in definitions
+        for key in (IDEAL_SPOILER_DEFINITION, *LEGACY_IDEAL_SPOILER_DEFINITIONS)
+    )
+
+
 class SequenceCompiler:
     """Compile events while collapsing RF-free gradient evolution."""
 
@@ -394,11 +413,11 @@ class SequenceCompiler:
         if not isinstance(definitions, dict):
             return np.zeros(0, dtype=float)
 
-        if "IdealSpoilerEndTimes" in definitions:
+        if IDEAL_SPOILER_DEFINITION in definitions:
             raw_values = definitions.get("IdealSpoilerEndTimes")
         else:
             legacy_values = []
-            for key in ("SpoilerEndTimes", "EndImageSpoilerEndTimes"):
+            for key in LEGACY_IDEAL_SPOILER_DEFINITIONS:
                 value = definitions.get(key)
                 if value is None:
                     continue
