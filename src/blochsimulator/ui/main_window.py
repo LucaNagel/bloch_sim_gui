@@ -101,7 +101,7 @@ from .rf_pulse_designer import RFPulseDesigner
 from .sequence_designer import SequenceDesigner
 from .controls import UniversalTimeControl
 from .magnetization_viewer import MagnetizationViewer, centered_stride_indices
-from .live_mode import LiveContext, LiveModePanel
+from .live_mode import LIVE_TRACE_WINDOW_S, LiveContext, LiveModePanel
 from ..position_sampling import (
     AXIS_NAMES,
     PLANES,
@@ -146,6 +146,8 @@ def _cyclic_colormap():
 from .styles import (
     BOLD_GROUP_TITLES_STYLE,
     INTERFACE_STYLE_FUSION,
+    RUN_BUTTON_ACCENT_STYLE,
+    ProgressAccent,
     normalize_interface_style,
     resolve_interface_style,
 )
@@ -3654,11 +3656,14 @@ class BlochSimulatorGUI(QMainWindow):
             self._sync_play_toggle(False)
             self.mag_3d._clear_path()
             self._live_field_key = None
+            self.mag_3d.begin_live_trace()
             return
         self.mag_3d._clear_path()
+        self.mag_3d.end_live_trace()
         if self.anim_data is not None and len(self.anim_data) > 0:
             self._refresh_vector_view(restart=False)
         else:
+            self.mag_3d.set_preview_data(None, None, None, None)
             self.mag_3d.set_spatial_groups(None)
             self.mag_3d.show_equilibrium_magnetization()
 
@@ -3694,6 +3699,14 @@ class BlochSimulatorGUI(QMainWindow):
             colors=colors,
             position_means=None if means is None else means[0],
             net=None if net is None else net[0],
+        )
+        # Same mean as the run preview: the net vector of spatial spins,
+        # otherwise the mean of the shown vectors.
+        mean = net[0] if shown is not None and net is not None else anim[0].mean(0)
+        self.mag_3d.add_live_trace_point(
+            system.time_s * 1e3,
+            mean,
+            window_ms=LIVE_TRACE_WINDOW_S * live.speed_spin.value(),
         )
 
     @staticmethod
@@ -4094,8 +4107,8 @@ class BlochSimulatorGUI(QMainWindow):
                         pass
 
         # Keep a consistent palette for the status bar progress as well
-        if hasattr(self, "status_progress"):
-            self.status_progress.setStyleSheet("")
+        if hasattr(self, "status_progress_accent"):
+            self.status_progress_accent.set_enabled(self._load_color_accents())
 
     def _update_mag_selector_limits(self, npos: int, nfreq: int, disable: bool = False):
         """Sync magnetization view selector with available pos/freq counts."""
@@ -6225,6 +6238,7 @@ class BlochSimulatorGUI(QMainWindow):
             sequence_timing_visible=self.app_settings.value(
                 "interface/show_sequence_timing", True, type=bool
             ),
+            color_accents=self._load_color_accents(),
         )
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -6262,6 +6276,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.app_settings.setValue(
             "interface/bold_sequence_section_titles", sequence_section_titles_bold
         )
+        color_accents = bool(dialog.color_accents())
+        self.app_settings.setValue("interface/color_accents", color_accents)
         live_progress_enabled = dialog.sequence_live_progress_enabled()
         sequence_timing_visible = bool(dialog.sequence_timing_visible())
         self.app_settings.setValue(
@@ -6313,7 +6329,9 @@ class BlochSimulatorGUI(QMainWindow):
             )
         set_default_memory_policy(policy)
         self._set_tooltips_enabled(tooltips_enabled)
+        self._apply_color_accents(color_accents)
         if sequence_widget is not None:
+            sequence_widget.set_color_accents(color_accents)
             sequence_widget.set_signal_unit(signal_unit)
             sequence_widget.set_sequence_section_titles_bold(
                 sequence_section_titles_bold
@@ -6410,6 +6428,7 @@ class BlochSimulatorGUI(QMainWindow):
         if hasattr(self, "progress_bar"):
             initial_progress = self.progress_bar.value()
         self.status_progress.setValue(initial_progress)
+        self.status_progress_accent = ProgressAccent(self.status_progress, False)
         layout.addWidget(self.status_progress)
 
         layout.addStretch()
@@ -6422,6 +6441,16 @@ class BlochSimulatorGUI(QMainWindow):
         bar.setLayout(layout)
         self.statusBar().addPermanentWidget(bar, 1)
         self.status_run_bar = bar
+        self._apply_color_accents(self._load_color_accents())
+
+    def _load_color_accents(self) -> bool:
+        """Load the green-run-button and tinted-progress preference."""
+        return bool(self.app_settings.value("interface/color_accents", True, type=bool))
+
+    def _apply_color_accents(self, enabled: bool):
+        """Apply colour accents to the Free Mode run controls."""
+        self.status_run_button.setStyleSheet(RUN_BUTTON_ACCENT_STYLE if enabled else "")
+        self.status_progress_accent.set_enabled(enabled)
 
     def _confirm_adiabatic_free_mode_run(self) -> bool:
         """Validate direct AHP/AFP amplitude without forcing a global 10 ns raster."""

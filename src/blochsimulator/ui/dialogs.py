@@ -168,6 +168,7 @@ class SettingsDialog(QDialog):
         interface_style: str = "automatic",
         sequence_section_titles_bold: bool = True,
         sequence_timing_visible: bool = True,
+        color_accents: bool = True,
         signal_unit: str = "physical",
     ):
         super().__init__(parent)
@@ -820,6 +821,14 @@ class SettingsDialog(QDialog):
             "to every sequence form."
         )
         interface_layout.addWidget(self.sequence_section_titles_bold_checkbox)
+        self.color_accents_checkbox = QCheckBox("Colour accents")
+        self.color_accents_checkbox.setObjectName("color_accents")
+        self.color_accents_checkbox.setChecked(bool(color_accents))
+        self.color_accents_checkbox.setToolTip(
+            "Show the run buttons in green and tint the sequence progress bar "
+            "from orange to green as a run advances."
+        )
+        interface_layout.addWidget(self.color_accents_checkbox)
         self.sequence_timing_checkbox = QCheckBox(
             "Show echo time (TE) and repetition time (TR) in sequence preview"
         )
@@ -915,6 +924,9 @@ class SettingsDialog(QDialog):
 
     def sequence_section_titles_bold(self) -> bool:
         return self.sequence_section_titles_bold_checkbox.isChecked()
+
+    def color_accents(self) -> bool:
+        return self.color_accents_checkbox.isChecked()
 
     def sequence_live_progress_enabled(self) -> bool:
         return self.sequence_live_progress_checkbox.isChecked()

@@ -163,6 +163,7 @@ from .spectral_spatial_designer import (
     SpectralSpatialScheduleDialog,
 )
 from .magnetization_viewer import MagnetizationViewer
+from .spin_minimum import ZeroToMinimum, minimum_ms_from_message, spin_boxes
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
 from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumViewer
 from .project_export_dialog import ProjectExportNamingWidget
@@ -177,7 +178,11 @@ from .sequence_geometry_viewer import (
 from .receiver_noise import ReceiverNoiseWidget
 from .sequence_export_dialog import SequenceExportDialog
 from .simulation_explorer import SessionSimulationRun
-from .styles import BOLD_GROUP_TITLES_STYLE
+from .styles import (
+    BOLD_GROUP_TITLES_STYLE,
+    RUN_BUTTON_ACCENT_STYLE,
+    ProgressAccent,
+)
 from .volume_viewer import (
     SequenceMagnetizationAnimationViewer,
     SequenceResultVolumeViewer,
@@ -1698,6 +1703,11 @@ class SequenceSimulationWidget(QWidget):
             if settings is not None
             else True
         )
+        self._color_accents = (
+            bool(settings.value("interface/color_accents", True, type=bool))
+            if settings is not None
+            else True
+        )
         self._sequence_timing_visible = (
             bool(settings.value("interface/show_sequence_timing", True, type=bool))
             if settings is not None
@@ -1714,6 +1724,11 @@ class SequenceSimulationWidget(QWidget):
         self._last_valid_flash_bandwidth_khz = self.flash_sampling_bandwidth_khz.value()
         self._connect_rf_designer(parent)
         self._load_default_sequence()
+        # Typing 0 into a field picks the smallest value the sequence allows.
+        self.zero_to_minimum = ZeroToMinimum(
+            self._sequence_form_accepts, self._sequence_form_minimum_hint, self
+        )
+        self.zero_to_minimum.install(spin_boxes(self))
         # Show the planned geometry first; results replace it only on request.
         self.views.setCurrentIndex(self.geometry_tab_index)
 
@@ -1743,6 +1758,13 @@ class SequenceSimulationWidget(QWidget):
             # The enclosing QGroupBox stylesheet normalizes child widgets on
             # some Qt styles, so make this preference explicit on each title.
             label.setStyleSheet(f"font-weight: {weight};")
+
+    def set_color_accents(self, enabled: bool) -> None:
+        """Green run button and a progress bar tinted orange to green."""
+        self._color_accents = bool(enabled)
+        accent = RUN_BUTTON_ACCENT_STYLE if self._color_accents else ""
+        self.run_button.setStyleSheet(accent + self._inactive_button_style)
+        self.progress_accent.set_enabled(self._color_accents)
 
     def set_sequence_timing_visible(self, enabled: bool) -> None:
         """Apply the preview preference immediately without regenerating a sequence."""
@@ -4376,6 +4398,7 @@ class SequenceSimulationWidget(QWidget):
             "QPushButton:disabled { color: rgba(70, 70, 70, 145); "
             "background-color: rgba(210, 210, 210, 150); }"
         )
+        self._inactive_button_style = inactive_button_style
         for button in (
             self.run_probe_button,
             self.run_geometry_probe_button,
@@ -4574,6 +4597,8 @@ class SequenceSimulationWidget(QWidget):
         self.progress.setValue(0)
         self.progress.setTextVisible(True)
         self.progress.setFormat("Not started")
+        self.progress_accent = ProgressAccent(self.progress, self._color_accents)
+        self.set_color_accents(self._color_accents)
         run_panel_layout.addWidget(self.progress)
         self.export_button = QPushButton("Export results…")
         self.export_button.setEnabled(False)
@@ -7749,6 +7774,120 @@ class SequenceSimulationWidget(QWidget):
             self._update_epsi_mge_labels()
             self._request_generated_sequence_refresh()
 
+    def _sequence_builder(self):
+        """Callable generating the selected sequence form, or None."""
+        source = self.sequence_source.currentIndex()
+        if source == self.EPI_SOURCE and not self._cartesian_epi_timing_active():
+            return lambda: make_pulseq_spiral(**self._spiral_pulseq_parameters())
+        builders = {
+            self.INTERNAL_SOURCE: (make_internal_fid, self._internal_fid_parameters),
+            self.SLICE_SELECTION_SOURCE: (
+                make_pulseq_slice_selection,
+                self._slice_selection_pulseq_parameters,
+            ),
+            self.EPI_SOURCE: (make_pulseq_epi, self._epi_pulseq_parameters),
+            self.CSI_SOURCE: (make_pulseq_csi, self._csi_pulseq_parameters),
+            self.BSSFP_SOURCE: (make_pulseq_bssfp, self._bssfp_pulseq_parameters),
+            self.SS_BSSFP_SOURCE: (
+                make_pulseq_spectral_selective_bssfp,
+                self._ss_bssfp_pulseq_parameters,
+            ),
+            self.RADIAL_ME_BSSFP_SOURCE: (
+                make_pulseq_radial_me_bssfp,
+                self._radial_me_bssfp_pulseq_parameters,
+            ),
+            self.ME_BSSFP_SOURCE: (
+                make_pulseq_me_bssfp,
+                self._me_bssfp_pulseq_parameters,
+            ),
+            self.FLASH_SOURCE: (make_pulseq_flash, self._flash_pulseq_parameters),
+            self.EPSI_MGE_SOURCE: (
+                make_pulseq_epsi_mge,
+                self._epsi_mge_pulseq_parameters,
+            ),
+        }
+        if source not in builders:
+            return None
+        builder, parameters = builders[source]
+        return lambda: builder(**parameters())
+
+    def _timing_minimums_ms(self):
+        """Shortest feasible value of each timing field, or None.
+
+        Only FLASH, Cartesian EPI and EPSI / MGE have timing-only plans; the
+        limits are rounded up to each field's precision.
+        """
+        source = self.sequence_source.currentIndex()
+        if source == self.FLASH_SOURCE:
+            plan = make_pulseq_flash(
+                **self._flash_pulseq_parameters(), timing_only=True
+            )
+            limits = [
+                (self.flash_echo_time_ms, plan.minimum_echo_time_s),
+                (self.flash_repetition_time_ms, plan.minimum_repetition_time_s),
+                (
+                    self.flash_acquisition_interval_ms,
+                    plan.minimum_acquisition_interval_s,
+                ),
+            ]
+        elif self._cartesian_epi_timing_active():
+            plan = make_pulseq_epi(**self._epi_pulseq_parameters(), timing_only=True)
+            limits = [
+                (self.epi_echo_time_ms, plan.minimum_echo_time_s),
+                (self.epi_repetition_time_ms, plan.minimum_repetition_time_s),
+            ]
+        elif source == self.EPSI_MGE_SOURCE:
+            plan = make_pulseq_epsi_mge(
+                **self._epsi_mge_pulseq_parameters(), timing_only=True
+            )
+            limits = [
+                (self.epsi_echo_spacing_ms, plan.minimum_echo_spacing_s),
+                (self.epsi_echo_time_ms, plan.minimum_echo_time_s),
+                (self.epsi_repetition_time_ms, plan.minimum_repetition_time_s),
+                (
+                    self.epsi_acquisition_interval_ms,
+                    plan.minimum_acquisition_interval_s,
+                ),
+            ]
+        else:
+            return None
+        return {
+            control: self._ceil_spin_value(minimum_s * 1000.0, control.decimals())
+            for control, minimum_s in limits
+            # A zero measurement interval switches the interval off.
+            if control.value() > 0.0
+        }
+
+    def _sequence_form_accepts(self, control):
+        """Whether the selected sequence works with every field as it is.
+
+        ``control`` is the field being probed; the check covers the whole form
+        so that no other field would have to change.
+        """
+        minimums = self._timing_minimums_ms()
+        if minimums is not None and any(
+            spin.value() < minimum - 1e-9 for spin, minimum in minimums.items()
+        ):
+            return False
+        builder = self._sequence_builder()
+        if builder is not None:
+            builder()
+        return True
+
+    def _sequence_form_minimum_hint(self, control):
+        """Candidate minimum of ``control`` in its own unit, or None."""
+        try:
+            minimums = self._timing_minimums_ms()
+            if minimums is not None and control in minimums:
+                return minimums[control]
+            builder = self._sequence_builder()
+            if builder is not None:
+                builder()
+        except Exception as exc:
+            if control.suffix().strip() == "ms":
+                return minimum_ms_from_message(exc)
+        return None
+
     @staticmethod
     def _ceil_spin_value(value, decimals):
         """Round up to a spin box's precision so the minimum stays satisfied."""
@@ -10092,20 +10231,23 @@ class SequenceSimulationWidget(QWidget):
             f"{self.fid_points.value() * self.fid_repetitions.value()} total samples"
         )
 
+    def _internal_fid_parameters(self):
+        return dict(
+            **self._shared_rf_parameters("fid"),
+            rf_raster_s=self.scanner_parameters.rf_raster_time_s,
+            flip_angle_deg=self.fid_flip_angle_deg.value(),
+            rf_phase_deg=self.fid_rf_phase_deg.value(),
+            num_samples=self.fid_points.value(),
+            sampling_bandwidth_hz=self.fid_bandwidth_khz.value() * 1000.0,
+            adc_delay_s=self.fid_adc_delay_ms.value() / 1000.0,
+            receiver_frequency_offset_hz=self.fid_receiver_offset_hz.value(),
+            repetitions=self.fid_repetitions.value(),
+            repetition_time_s=self.fid_repetition_time_ms.value() / 1000.0,
+        )
+
     def _load_internal_sequence(self):
         try:
-            program = make_internal_fid(
-                **self._shared_rf_parameters("fid"),
-                rf_raster_s=self.scanner_parameters.rf_raster_time_s,
-                flip_angle_deg=self.fid_flip_angle_deg.value(),
-                rf_phase_deg=self.fid_rf_phase_deg.value(),
-                num_samples=self.fid_points.value(),
-                sampling_bandwidth_hz=self.fid_bandwidth_khz.value() * 1000.0,
-                adc_delay_s=self.fid_adc_delay_ms.value() / 1000.0,
-                receiver_frequency_offset_hz=self.fid_receiver_offset_hz.value(),
-                repetitions=self.fid_repetitions.value(),
-                repetition_time_s=self.fid_repetition_time_ms.value() / 1000.0,
-            )
+            program = make_internal_fid(**self._internal_fid_parameters())
         except (TypeError, ValueError) as exc:
             self._generation_error = f"Invalid Internal FID: {exc}"
             return False
@@ -13766,7 +13908,7 @@ class SequenceSimulationWidget(QWidget):
             "bitwise": "bitwise contract",
             "float64-close": "tight Float64 contract",
             "strict-float64": "strict Float64 contract",
-            "legacy-fast-math": "legacy Float64 contract",
+            "legacy-fast-math": "Float64 with fast-math (standard C build)",
         }
 
         actual = str(metadata.get("sequence_kernel") or "").strip()

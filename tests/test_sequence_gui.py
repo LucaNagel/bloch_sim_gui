@@ -56,6 +56,8 @@ from blochsimulator.sequence import (
     SequenceSimulationResult,
     SpectroscopicAcquisition,
     load_pulseq,
+    make_pulseq_bssfp,
+    make_pulseq_flash,
 )
 from blochsimulator.sequence.rf_pulses import (
     rf_time_bandwidth_product_from_envelope,
@@ -213,6 +215,12 @@ def test_execution_completion_message_reports_backend_contract_and_fallback():
     assert "1 CPU thread" in fallback
     assert "bitwise contract" in fallback
     assert "fallback: initial-time ADC requires the CPU path" in fallback
+
+    standard = SequenceSimulationWidget._execution_completion_message(
+        {"sequence_kernel": "optimized", "numerical_contract": "legacy-fast-math"}
+    )
+    assert "legacy" not in standard
+    assert "Float64 with fast-math (standard C build)" in standard
 
 
 def test_rf_phase_plot_includes_programmed_phase_and_carrier_evolution():
@@ -3909,3 +3917,59 @@ def test_phantom_designer_starts_from_default_sphere(qt_application):
         assert dialog.design.nucleus == phantom_widget.get_nucleus()
     finally:
         dialog.reject()
+
+
+def _type_zero(app, spin):
+    spin.setFocus()
+    spin.lineEdit().selectAll()
+    QTest.keyClicks(spin, "0")
+    QTest.keyClick(spin, Qt.Key_Return)
+    app.processEvents()
+
+
+def test_typing_zero_picks_the_shortest_flash_timing_without_touching_others():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(widget.FLASH_SOURCE)
+    widget.show()
+    app.processEvents()
+    widget.flash_echo_time_ms.setValue(5.0)
+    widget.flash_repetition_time_ms.setValue(15.0)
+
+    _type_zero(app, widget.flash_repetition_time_ms)
+    plan = make_pulseq_flash(**widget._flash_pulseq_parameters(), timing_only=True)
+    minimum_tr_ms = widget._ceil_spin_value(
+        plan.minimum_repetition_time_s * 1e3,
+        widget.flash_repetition_time_ms.decimals(),
+    )
+    assert widget.flash_repetition_time_ms.value() == pytest.approx(minimum_tr_ms)
+    assert minimum_tr_ms < 15.0
+    assert widget.flash_echo_time_ms.value() == pytest.approx(5.0)
+
+    _type_zero(app, widget.flash_echo_time_ms)
+    assert widget.flash_echo_time_ms.value() == pytest.approx(
+        widget._ceil_spin_value(
+            plan.minimum_echo_time_s * 1e3, widget.flash_echo_time_ms.decimals()
+        )
+    )
+    assert widget.flash_repetition_time_ms.value() == pytest.approx(minimum_tr_ms)
+    widget.close()
+
+
+def test_typing_zero_bisects_to_the_shortest_buildable_bssfp_tr():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.sequence_source.setCurrentIndex(widget.BSSFP_SOURCE)
+    widget.show()
+    app.processEvents()
+    spin = widget.bssfp_repetition_time_ms
+    original = spin.value()
+
+    _type_zero(app, spin)
+    minimum = spin.value()
+    assert spin.minimum() < minimum < original
+    make_pulseq_bssfp(**widget._bssfp_pulseq_parameters())
+    spin.setValue(minimum - 10.0 ** -spin.decimals())
+    with pytest.raises(Exception):
+        make_pulseq_bssfp(**widget._bssfp_pulseq_parameters())
+    widget.close()
