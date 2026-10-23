@@ -16,10 +16,13 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QShortcut,
+    QSizePolicy,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -27,6 +30,19 @@ from ..live_bloch import LiveSpinSystem
 from ..position_sampling import AXIS_NAMES
 
 PULSE_PHASES_DEG = {"x": 0.0, "y": 90.0, "-x": 180.0, "-y": 270.0}
+# Seconds on screen the live signal trace scrolls through.
+LIVE_TRACE_WINDOW_S = 10.0
+# Opacity of the live controls while live mode is off; native macOS buttons
+# hardly change when disabled, so fade them as well.
+INACTIVE_CONTROLS_OPACITY = 0.35
+LIVE_BUTTON_STYLE = (
+    "QPushButton#mag_3d_live_mode {"
+    " padding: 3px 12px; border: 1px solid palette(mid); border-radius: 5px;"
+    " background-color: palette(button); color: palette(button-text); }"
+    "QPushButton#mag_3d_live_mode:checked {"
+    " background-color: #a5e3a1; border-color: #3f9b3a; color: #10330e;"
+    " font-weight: bold; }"
+)
 
 
 @dataclass
@@ -80,6 +96,8 @@ class LiveModePanel(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
 
+        # Two short rows keep the 3D Vector tab narrow enough for laptop
+        # screens: pulses and gradients first, timing and status below.
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         self.live_button = QPushButton("Live mode")
@@ -89,12 +107,16 @@ class LiveModePanel(QWidget):
             "Play hard pulses and gradients by hand and watch the spins evolve.\n"
             "Keys while live: 1 = 90°, 2 = 180°, X/Y/Z = gradient, R = reset."
         )
+        self.live_button.setStyleSheet(LIVE_BUTTON_STYLE)
         self.live_button.toggled.connect(self.set_active)
         row.addWidget(self.live_button)
 
         self.controls = QWidget()
-        controls = QHBoxLayout(self.controls)
-        controls.setContentsMargins(0, 0, 0, 0)
+        rows = QVBoxLayout(self.controls)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(2)
+        controls = QHBoxLayout()
+        rows.addLayout(controls)
         self.pulse_buttons = {}
         for flip in (90, 180):
             button = QPushButton(f"{flip}°")
@@ -133,8 +155,10 @@ class LiveModePanel(QWidget):
         )
         self.gradient_spin.valueChanged.connect(lambda _: self._draw())
         controls.addWidget(self.gradient_spin)
+        controls.addStretch()
 
-        controls.addSpacing(12)
+        controls = QHBoxLayout()
+        rows.addLayout(controls)
         controls.addWidget(QLabel("Speed:"))
         self.speed_spin = QDoubleSpinBox()
         self.speed_spin.setObjectName("mag_3d_live_speed")
@@ -164,11 +188,16 @@ class LiveModePanel(QWidget):
         self.hint_label.setToolTip(
             "Gradients only spread spins that sit at different positions"
         )
+        self.hint_label.setWordWrap(True)
+        # The hint must never widen the window; it wraps or clips instead.
+        self.hint_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.hint_label.setVisible(False)
-        controls.addWidget(self.hint_label)
-        row.addWidget(self.controls)
-        row.addStretch()
-        self.controls.setEnabled(False)
+        controls.addWidget(self.hint_label, 2)
+        controls.addStretch(1)
+        row.addWidget(self.controls, 1)
+        self._controls_fade = QGraphicsOpacityEffect(self.controls)
+        self.controls.setGraphicsEffect(self._controls_fade)
+        self._set_controls_enabled(False)
 
         # Window-wide while live; text fields still take typed digits.
         self._shortcuts = []
@@ -201,7 +230,7 @@ class LiveModePanel(QWidget):
             self.live_button.blockSignals(True)
             self.live_button.setChecked(active)
             self.live_button.blockSignals(False)
-        self.controls.setEnabled(active)
+        self._set_controls_enabled(active)
         for shortcut in self._shortcuts:
             shortcut.setEnabled(active)
         if active:
@@ -214,6 +243,12 @@ class LiveModePanel(QWidget):
             self.timer.stop()
             self._pulses.clear()
             self.active_changed.emit(False)
+
+    def _set_controls_enabled(self, enabled: bool):
+        self.controls.setEnabled(enabled)
+        self._controls_fade.setOpacity(1.0 if enabled else INACTIVE_CONTROLS_OPACITY)
+        # Fully opaque needs no offscreen pass.
+        self._controls_fade.setEnabled(not enabled)
 
     def reset(self):
         """Return the spins to equilibrium and drop queued pulses."""

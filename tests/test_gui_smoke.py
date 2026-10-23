@@ -2734,11 +2734,14 @@ def test_live_mode_plays_pulses_and_gradients_along_a_line():
     )
     live = window.live_mode
     assert not live.controls.isEnabled()
+    assert live.controls.graphicsEffect().isEnabled()
 
     live.live_button.setChecked(True)
     assert live.is_active() and live.controls.isEnabled()
+    assert not live.controls.graphicsEffect().isEnabled()
     assert not window.anim_timer.isActive()
     assert not live.hint_label.isVisibleTo(live)
+    assert not window.mag_3d.preview_line.isVisible()
 
     _play_pulse(live, 90)
     np.testing.assert_allclose(
@@ -2752,6 +2755,12 @@ def test_live_mode_plays_pulses_and_gradients_along_a_line():
     assert live.system.time_s == pytest.approx(0.05e-3)
     window._render_live_frame(live)
     assert window.mag_3d.is_spatial_layout_active()
+    # The bottom plot traces the live net magnetization over live time.
+    trace_t, trace_my = window.mag_3d.preview_my.getData()
+    assert trace_t[-1] == pytest.approx(0.05)
+    assert trace_my[-1] == pytest.approx(
+        live.system.magnetization[..., 1].mean(), abs=1e-12
+    )
     label = "xyz"[gradient_axis]
     assert window.mag_3d._field_readout == f"G{label} 2.00 mT/m"
     phases = np.angle(
@@ -2769,9 +2778,13 @@ def test_live_mode_plays_pulses_and_gradients_along_a_line():
     live.reset_button.click()
     np.testing.assert_allclose(live.system.magnetization.reshape(-1, 3)[:, 2], 1.0)
     assert live.system.time_s == 0.0
+    window._render_live_frame(live)
+    trace_t, _ = window.mag_3d.preview_mz.getData()
+    assert list(trace_t) == [0.0]
 
     live.live_button.setChecked(False)
     assert not live.is_active() and not live.controls.isEnabled()
+    assert window.mag_3d.preview_mz.getData()[0] is None
 
 
 def test_live_mode_queues_pulses_and_yields_to_playback():
@@ -2796,3 +2809,35 @@ def test_live_mode_queues_pulses_and_yields_to_playback():
 
     window._start_vector_animation()
     assert not live.is_active() and not live.live_button.isChecked()
+
+
+def test_color_accents_tint_run_buttons_and_progress_bars():
+    from blochsimulator.ui.styles import progress_accent_style
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.set_workspace_mode("sequence")
+    window.tab_widget.setCurrentIndex(window.sequence_simulation_tab_index)
+    app.processEvents()
+    sequence = window.sequence_simulation_widget
+    window._apply_color_accents(True)
+    sequence.set_color_accents(True)
+    assert "#43a047" in window.status_run_button.styleSheet()
+    assert "#43a047" in sequence.run_button.styleSheet()
+
+    sequence.progress.setRange(0, 100)
+    sequence.progress.setValue(0)
+    assert "hsl(30," in sequence.progress.styleSheet()
+    sequence.progress.setValue(100)
+    assert "hsl(125," in sequence.progress.styleSheet()
+    assert sequence.progress.styleSheet() == progress_accent_style(1.0)
+
+    window._apply_color_accents(False)
+    sequence.set_color_accents(False)
+    assert window.status_run_button.styleSheet() == ""
+    assert window.status_progress.styleSheet() == ""
+    assert sequence.progress.styleSheet() == ""
+    assert "#43a047" not in sequence.run_button.styleSheet()
+    assert "QPushButton:disabled" in sequence.run_button.styleSheet()
+    sequence.progress.setValue(40)
+    assert sequence.progress.styleSheet() == ""

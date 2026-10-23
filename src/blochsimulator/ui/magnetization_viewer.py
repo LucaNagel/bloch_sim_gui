@@ -413,8 +413,10 @@ class MagnetizationViewer(QWidget):
             self.spatial_option_widgets.append(widget)
         row.addStretch()
 
+        # The camera presets sit on the shorter Show row so neither row
+        # widens the window beyond a laptop screen.
         camera_label = QLabel("Camera:")
-        row.addWidget(camera_label)
+        camera_widgets = [camera_label]
         self.spatial_option_widgets.append(camera_label)
         self.camera_buttons = {}
         for preset in self.CAMERA_PRESETS:
@@ -424,7 +426,7 @@ class MagnetizationViewer(QWidget):
             button.clicked.connect(
                 lambda _checked=False, name=preset: self.set_camera_preset(name)
             )
-            row.addWidget(button)
+            camera_widgets.append(button)
             self.camera_buttons[preset] = button
             self.spatial_option_widgets.append(button)
 
@@ -483,6 +485,8 @@ class MagnetizationViewer(QWidget):
         self.labels_checkbox.toggled.connect(lambda _: self._apply_label_visibility())
         show_row.addWidget(self.labels_checkbox)
         show_row.addStretch()
+        for widget in camera_widgets:
+            show_row.addWidget(widget)
         rows.addWidget(self.spatial_show_row)
         self.spatial_option_widgets.append(self.spatial_show_row)
 
@@ -1640,6 +1644,53 @@ class MagnetizationViewer(QWidget):
         self.time_slider.setValue(0)
         self.time_slider.blockSignals(False)
         self._update_cursor_line(0)
+
+    LIVE_TRACE_POINTS = 4000
+
+    def begin_live_trace(self):
+        """Show a running trace of the live mode instead of the last run."""
+        self._live_trace = []
+        self.preview_time = None
+        self.time_slider.setRange(0, 0)
+        self.preview_line.setVisible(False)
+        for curve in (self.preview_mx, self.preview_my, self.preview_mz):
+            curve.clear()
+        self.preview_plot.setLimits(xMin=None, xMax=None, yMin=-1.1, yMax=1.1)
+        self.preview_plot.setYRange(-1.1, 1.1, padding=0)
+
+    def add_live_trace_point(self, time_ms: float, vector, window_ms: float):
+        """Append the mean magnetization at ``time_ms`` and scroll the trace.
+
+        A reset (time running backwards) starts a new trace. Hard pulses do
+        not advance time, so they appear as vertical steps.
+        """
+        trace = getattr(self, "_live_trace", None)
+        if trace is None:
+            return
+        point = (float(time_ms), *(float(v) for v in vector[:3]))
+        if trace and point[0] < trace[-1][0]:
+            trace.clear()
+        if trace and point == trace[-1]:
+            return
+        trace.append(point)
+        if len(trace) > self.LIVE_TRACE_POINTS:
+            del trace[: len(trace) - self.LIVE_TRACE_POINTS]
+        data = np.asarray(trace)
+        for curve, column in zip(
+            (self.preview_mx, self.preview_my, self.preview_mz), (1, 2, 3)
+        ):
+            curve.setData(data[:, 0], data[:, column])
+        t_now = point[0]
+        window_ms = max(float(window_ms), 1e-6)
+        self.preview_plot.setXRange(max(0.0, t_now - window_ms), t_now, padding=0)
+        self.preview_plot.setYRange(-1.1, 1.1, padding=0)
+
+    def end_live_trace(self):
+        """Stop the live trace; the caller restores the run preview."""
+        self._live_trace = None
+        self.preview_line.setVisible(True)
+        for curve in (self.preview_mx, self.preview_my, self.preview_mz):
+            curve.clear()
 
     def set_cursor_index(self, idx: int):
         """Move cursor/slider without emitting position change."""
