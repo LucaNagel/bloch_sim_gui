@@ -6,6 +6,35 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.9.3] - 2026-10-23
+
+### Added
+
+- Free Mode: 3D volume positions (xyz) drawn as a lattice with a slice filter,
+  volume slices as maps in the Spatial tab and in exported notebooks, 10 mm
+  default volume FOV.
+- Free Mode 3D Vector view: live mode for hand-played 90°/180° pulses and
+  Gx/Gy/Gz gradients; Gradient & RF Tour with longer lobes, flip-back to z and
+  tip-path tracking off by default.
+- Subvoxel pathway recommendation: weighted coherence-pathway (EPG) grid
+  recommendation with per-voxel jitter, a Spoiling Analysis tab, and automatic
+  adjustment of the subvoxel grid to the recommendation.
+- Named scanner profiles in the Scanner settings tab.
+- Phantom geometry buttons that copy the sequence FOV per axis or double the
+  matrix.
+
+### Changed
+
+- The default RF time step is 20 µs (`very_fast`).
+- Free Mode timing fields: typing 0 selects the shortest allowed TR/TE; live
+  trace fading and colour accents.
+- Free Mode Slice Select + Rephase defaults to a 3 ms 90° sinc pulse.
+
+### Fixed
+
+- Free Mode Slice Select + Rephase TR.
+- Display math in two developer docs no longer parsed as a list or heading.
+
 ## [2.9.2] - 2026-10-22
 
 ### Added
