@@ -57,8 +57,7 @@ gegen null gilt
 $$
 \frac{d}{dt}
 \begin{pmatrix}M_{z,P}\\M_{z,L}\end{pmatrix}
-=
-\begin{pmatrix}-(R_{1,P}+k_{PL})&0\\k_{PL}&-R_{1,L}\end{pmatrix}
+= \begin{pmatrix}-(R_{1,P}+k_{PL})&0\\k_{PL}&-R_{1,L}\end{pmatrix}
 \begin{pmatrix}M_{z,P}\\M_{z,L}\end{pmatrix}.
 $$
 

@@ -320,8 +320,7 @@ $$
 \sqrt{\frac{\Delta t_{\mathrm{ref}}}{\Delta t}},
 \qquad
 A_{\mathrm{ideal}} = w\,\Bigl|\sum_{\mathbf r} m_0(\mathbf r)\,
-s_{\mathrm{rx}}(\mathbf r)
-+ D\sum_{\mathbf r} d(\mathbf r)\,s_{\mathrm{rx}}(\mathbf r)\Bigr|,
+s_{\mathrm{rx}}(\mathbf r) + D\sum_{\mathbf r} d(\mathbf r)\,s_{\mathrm{rx}}(\mathbf r)\Bigr|,
 \qquad
 D = \int r(t)\,P(t)\,\mathrm{d}t .
 $$
