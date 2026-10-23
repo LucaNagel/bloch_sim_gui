@@ -304,6 +304,15 @@ are:
 **Apply** sets the recommended grid in the sequence panel; it is disabled
 when the current grid already matches the recommendation.
 
+**Auto adjust subvoxel grid**, below Spoiling quality, is on by default. With
+gradient spoiling it selects the recommended grid whenever the recommendation
+changes, for example after editing FOV, matrix, crushers or the imported
+`.seq` file. Uncheck it to keep a grid of your own; changing the subvoxel grid
+in **Settings** also switches it off. Projects and runs store the setting;
+projects saved before it existed open with it off, so their grid is kept.
+**Show Spoiling Analysis**, next to the checkbox, opens the Spoiling Analysis
+tab.
+
 Every 3D sequence panel has independent signed **Read gradient direction** and
 **Phase gradient direction** controls in its spatial-encoding section. The
 right-handed **Partition gradient direction** is derived as Read × Phase and

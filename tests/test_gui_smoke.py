@@ -2502,7 +2502,7 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
         "optimized"
     )
     window.sequence_simulation_widget.set_spoiler_configuration.assert_called_once_with(
-        "gradient", (3, 5, 11), "stratified"
+        "gradient", (3, 5, 11), "stratified", auto_adjust=False
     )
     window.sequence_simulation_widget.set_thread_configuration.assert_called_once_with(
         "manual", 2
@@ -2550,7 +2550,11 @@ def test_changing_only_spoiler_settings_preserves_active_sequence_parameters(
         window.show_settings(initial_tab="simulation")
 
     window.sequence_simulation_widget.set_spoiler_configuration.assert_called_once_with(
-        "gradient", (1, 1, 17), "midpoint"
+        "gradient", (1, 1, 17), "midpoint", auto_adjust=False
+    )
+    # A grid chosen in Settings is a manual choice.
+    assert not window.app_settings.value(
+        "sequence/subvoxel_auto_adjust", True, type=bool
     )
     window.sequence_simulation_widget.set_scanner_parameters.assert_not_called()
     window.sequence_simulation_widget.set_workspace_defaults.assert_not_called()
