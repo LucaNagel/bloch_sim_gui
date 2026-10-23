@@ -477,6 +477,33 @@ dialog; if the tab is hidden while current, the Sequence Simulation tab is
 selected first. The view's `apply_recommendation_requested` signal reuses
 `_apply_current_recommended_spin_grid`.
 
+The **Show Spoiling Analysis** link in the Spoiling group emits
+`spoiling_analysis_requested`, which `MainWindow._open_spoiling_analysis_tab`
+answers by selecting the tab when it is wanted.
+
+#### Auto adjust of the subvoxel grid
+
+The `spoiling_auto_adjust` checkbox (setting `sequence/subvoxel_auto_adjust`,
+default true) makes the recommendation binding. `_publish_spoiling_analysis`
+schedules `_auto_adjust_spin_grid` with `QTimer.singleShot(0)` whenever a
+snapshot is published, so the caller finishes its update before the grid
+changes. `_auto_adjust_spin_grid` does nothing unless the spoiler mode is
+`"gradient"`, the box is checked and the recommended method and counts differ
+from the current ones; otherwise it calls `_apply_current_recommended_spin_grid`.
+FLASH auto spoilers depend on the grid, so a new grid can produce a new
+recommendation. A short history of the grids the chain has left (reset after
+1 s or when the box is toggled) stops it from returning to one of them, which
+prevents oscillation. `_run` flushes a pending adjustment before it checks the
+generated sequence, so a simulation started right after an edit uses the
+adjusted grid.
+
+`set_spoiler_configuration(..., auto_adjust=...)` sets the box without saving
+the setting; `None` keeps it. The project and run states store
+`spoiler_configuration["auto_adjust"]`; restoring a state without the key
+passes `False`, so older projects keep their stored grid. The settings dialog
+switches auto adjust off (and saves that) when the user changes the persisted
+gradient-mode grid there, because that is an explicit manual choice.
+
 #### Known limitations of the analysis
 
 - Heterogeneous phantoms are analysed with a single $T_1$/$T_2$ pair, the

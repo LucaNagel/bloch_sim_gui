@@ -1447,6 +1447,7 @@ class SequenceSimulationWidget(QWidget):
     parameter_loop_requested = pyqtSignal()
     # Emitted with "ideal" or "gradient" whenever the spoiler mode is applied.
     spoiler_mode_changed = pyqtSignal(str)
+    spoiling_analysis_requested = pyqtSignal()
 
     # Generated-sequence forms (notably EPI, CSI, and FLASH) need enough
     # room for a label and its editor alongside the vertical scroll bar.
@@ -4004,7 +4005,9 @@ class SequenceSimulationWidget(QWidget):
             self._apply_current_recommended_spin_grid
         )
         self.spoiling_quality_group = QGroupBox("Spoiling")
-        spoiling_quality_layout = QHBoxLayout(self.spoiling_quality_group)
+        spoiling_group_layout = QVBoxLayout(self.spoiling_quality_group)
+        spoiling_quality_layout = QHBoxLayout()
+        spoiling_group_layout.addLayout(spoiling_quality_layout)
         spoiling_quality_layout.addWidget(QLabel("Quality"))
         self.spoiling_quality_button = QToolButton()
         self.spoiling_quality_button.setObjectName("spoiling_quality_info_button")
@@ -4032,6 +4035,40 @@ class SequenceSimulationWidget(QWidget):
             "coherence follows the continuous voxel throughout this spoiler train."
         )
         spoiling_quality_layout.addWidget(self.spoiling_apply_recommended_grid)
+        spoiling_auto_layout = QHBoxLayout()
+        spoiling_group_layout.addLayout(spoiling_auto_layout)
+        self.spoiling_auto_adjust = QCheckBox("Auto adjust subvoxel grid")
+        self.spoiling_auto_adjust.setToolTip(
+            "Always use the recommended subvoxel grid. The grid follows every "
+            "change of sequence, spoiler or phantom. Uncheck to choose the grid "
+            "yourself in Settings."
+        )
+        self.spoiling_auto_adjust.setChecked(
+            bool(
+                self.app_settings.value(
+                    "sequence/subvoxel_auto_adjust", True, type=bool
+                )
+            )
+            if self.app_settings is not None
+            else True
+        )
+        self.spoiling_auto_adjust.toggled.connect(self._spin_grid_auto_adjust_toggled)
+        spoiling_auto_layout.addWidget(self.spoiling_auto_adjust)
+        spoiling_auto_layout.addStretch()
+        self.spoiling_analysis_link = QLabel(
+            "<a href='spoiling-analysis'>Show Spoiling Analysis</a>"
+        )
+        self.spoiling_analysis_link.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        self.spoiling_analysis_link.setToolTip(
+            "Open the Spoiling Analysis tab with the plots behind this rating."
+        )
+        self.spoiling_analysis_link.linkActivated.connect(
+            lambda _link: self.spoiling_analysis_requested.emit()
+        )
+        spoiling_auto_layout.addWidget(self.spoiling_analysis_link)
+        self._auto_spin_grid_pending = False
+        self._auto_spin_grid_history = []
+        self._auto_spin_grid_time = 0.0
         self._update_spoiling_quality_visibility()
         controls_layout.addWidget(self.spoiling_quality_group)
 
@@ -8740,6 +8777,48 @@ class SequenceSimulationWidget(QWidget):
         view = getattr(self, "spoiling_analysis_view", None)
         if view is not None:
             view.set_snapshot(snapshot, message)
+        if snapshot is not None and not self._auto_spin_grid_pending:
+            # Deferred, so the caller finishes its update before the grid
+            # changes and triggers the next one.
+            self._auto_spin_grid_pending = True
+            QTimer.singleShot(0, self._auto_adjust_spin_grid)
+
+    def _spin_grid_auto_adjust_toggled(self, checked):
+        if self.app_settings is not None:
+            self.app_settings.setValue("sequence/subvoxel_auto_adjust", bool(checked))
+            self.app_settings.sync()
+        if checked:
+            self._auto_spin_grid_history = []
+            self._auto_adjust_spin_grid()
+
+    def _auto_adjust_spin_grid(self):
+        """Select the recommended subvoxel grid when auto adjust is enabled."""
+        self._auto_spin_grid_pending = False
+        recommendation = getattr(self, "_spoiling_spin_grid_recommendation", None)
+        if (
+            self.spoiler_mode != "gradient"
+            or not self.spoiling_auto_adjust.isChecked()
+            or recommendation is None
+        ):
+            return
+        target = (recommendation.method, tuple(recommendation.counts_xyz))
+        current = (
+            self.subvoxel_sampling_method,
+            tuple(int(value) for value in self.subvoxel_spin_counts),
+        )
+        if target == current:
+            return
+        # FLASH auto spoilers depend on the grid, so a grid change can change
+        # the recommendation. Stop when a quick chain of adjustments would
+        # return to a grid it has just left.
+        now = time.monotonic()
+        if now - self._auto_spin_grid_time > 1.0:
+            self._auto_spin_grid_history = []
+        if target in self._auto_spin_grid_history:
+            return
+        self._auto_spin_grid_history.append(current)
+        self._auto_spin_grid_time = now
+        self._apply_current_recommended_spin_grid()
 
     def _set_configured_spoiling_quality(self, spec):
         cycles_xyz = np.asarray(spec["cycles_xyz"], dtype=float)
@@ -13353,6 +13432,9 @@ class SequenceSimulationWidget(QWidget):
                 "configuration panel.",
             )
             return False
+        # Apply a pending auto-adjusted grid before the sequence is checked.
+        if self._auto_spin_grid_pending:
+            self._auto_adjust_spin_grid()
         if self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES:
             if not self._ensure_current_generated_sequence():
                 self._show_generation_error_dialog()
@@ -13618,8 +13700,14 @@ class SequenceSimulationWidget(QWidget):
             raise ValueError("sequence time step must be between 0.1 and 1000 µs")
         self.simulation_timestep_us.setValue(value)
 
-    def set_spoiler_configuration(self, mode, counts_xyz, sampling_method=None):
-        """Apply persistent ideal or physical-gradient spoiler settings."""
+    def set_spoiler_configuration(
+        self, mode, counts_xyz, sampling_method=None, auto_adjust=None
+    ):
+        """Apply persistent ideal or physical-gradient spoiler settings.
+
+        ``auto_adjust`` sets the auto-adjust checkbox without saving it; None
+        keeps the current state.
+        """
         mode = str(mode).strip().lower()
         if mode not in {"ideal", "gradient"}:
             raise ValueError("spoiler mode must be 'ideal' or 'gradient'")
@@ -13634,6 +13722,10 @@ class SequenceSimulationWidget(QWidget):
             sampling.counts_xyz if mode == "gradient" else (1, 1, 1)
         )
         self.subvoxel_sampling_method = sampling.method
+        if auto_adjust is not None:
+            previous = self.spoiling_auto_adjust.blockSignals(True)
+            self.spoiling_auto_adjust.setChecked(bool(auto_adjust))
+            self.spoiling_auto_adjust.blockSignals(previous)
         self._update_spoiling_quality_visibility()
         self.spoiler_mode_changed.emit(mode)
         auto_changed = self._apply_flash_auto_spoilers()

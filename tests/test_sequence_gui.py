@@ -488,6 +488,8 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     window.app_settings.setValue("sequence/subvoxel_spins_y", 5)
     window.app_settings.setValue("sequence/subvoxel_spins_z", 11)
     window.app_settings.setValue("sequence/subvoxel_sampling_method", "stratified")
+    # Keep the stored grid instead of the recommended one.
+    window.app_settings.setValue("sequence/subvoxel_auto_adjust", False)
     window.app_settings.setValue("simulation/thread_mode", "manual")
     window.app_settings.setValue("simulation/manual_threads", 2)
     window.app_settings.setValue("defaults/sequence_fov_x_mm", 180.0)
@@ -1770,9 +1772,10 @@ def test_invalid_epi_bandwidth_restores_last_valid_value(monkeypatch):
     app.processEvents()
 
 
-def test_spoiling_analysis_tab_is_shown_only_for_gradient_spoiling():
+def test_spoiling_analysis_tab_is_shown_only_for_gradient_spoiling(tmp_path):
     app = QApplication.instance() or QApplication(sys.argv)
     window = BlochSimulatorGUI()
+    window.app_settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
     index = window.spoiling_analysis_tab_index
     tabs = window.tab_widget
     assert tabs.tabText(index) == "Spoiling Analysis"
@@ -1780,6 +1783,8 @@ def test_spoiling_analysis_tab_is_shown_only_for_gradient_spoiling():
 
     window.set_workspace_mode("sequence")
     sequence = window.sequence_simulation_widget
+    # Manual grids stay as set; auto adjust has its own test.
+    sequence.spoiling_auto_adjust.setChecked(False)
     sequence.set_spoiler_configuration("ideal", (1, 1, 9))
     assert not tabs.isTabVisible(index)
     sequence.set_spoiler_configuration("gradient", (1, 4, 1), "midpoint")
@@ -1816,6 +1821,62 @@ def test_spoiling_analysis_tab_is_shown_only_for_gradient_spoiling():
     assert not tabs.isTabVisible(index)
     window.set_workspace_mode("sequence")
     assert tabs.isTabVisible(index)
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
+def test_spoiling_auto_adjust_selects_recommended_grid_and_links_to_tab(tmp_path):
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    window.app_settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    window.set_workspace_mode("sequence")
+    sequence = window.sequence_simulation_widget
+    tabs = window.tab_widget
+    assert sequence.spoiling_auto_adjust.isChecked()
+    assert sequence.spoiling_analysis_link.text().startswith("<a ")
+
+    sequence.sequence_source.setCurrentIndex(sequence.FLASH_SOURCE)
+    sequence.set_spoiler_configuration("gradient", (1, 1, 1), "midpoint")
+    app.processEvents()
+    recommendation = sequence._spoiling_spin_grid_recommendation
+    assert recommendation is not None
+    assert recommendation.counts_xyz != (1, 1, 1)
+    assert sequence._configured_spin_sampling().counts_xyz == (
+        recommendation.counts_xyz
+    )
+    assert window.app_settings.value("sequence/subvoxel_spins_z", type=int) == (
+        recommendation.counts_xyz[2]
+    )
+    assert not sequence.spoiling_apply_recommended_grid.isEnabled()
+
+    # Unchecked, a manual grid stays; checking again applies at once.
+    sequence.spoiling_auto_adjust.setChecked(False)
+    assert not window.app_settings.value("sequence/subvoxel_auto_adjust", type=bool)
+    sequence.set_spoiler_configuration("gradient", (1, 1, 1), "midpoint")
+    app.processEvents()
+    assert sequence._configured_spin_sampling().counts_xyz == (1, 1, 1)
+    sequence.spoiling_auto_adjust.setChecked(True)
+    assert window.app_settings.value("sequence/subvoxel_auto_adjust", type=bool)
+    assert sequence._configured_spin_sampling().counts_xyz == (
+        recommendation.counts_xyz
+    )
+
+    # Project state keeps the choice; states without it keep their grid.
+    state = window._complete_project_state()["spoiler_configuration"]
+    assert state["auto_adjust"] is True
+    sequence.set_spoiler_configuration(
+        "gradient", (1, 1, 1), "midpoint", auto_adjust=False
+    )
+    app.processEvents()
+    assert not sequence.spoiling_auto_adjust.isChecked()
+    assert window.app_settings.value("sequence/subvoxel_auto_adjust", type=bool)
+    assert sequence._configured_spin_sampling().counts_xyz == (1, 1, 1)
+
+    sequence.spoiling_analysis_link.linkActivated.emit("spoiling-analysis")
+    assert tabs.currentIndex() == window.spoiling_analysis_tab_index
+    assert window.spoiling_analysis_page.isAncestorOf(sequence.spoiling_analysis_view)
 
     window.close()
     window.deleteLater()

@@ -506,7 +506,8 @@ class SettingsDialog(QDialog):
             spin.setToolTip(
                 f"Spins along voxel axis {axis} in every phantom voxel. Each "
                 "phantom voxel holds X × Y × Z spins, and runtime grows with "
-                "that product."
+                "that product. Changing the grid here switches off Auto adjust "
+                "in the sequence Spoiling panel."
             )
             axis_index = "XYZ".index(axis)
             if recommendation_counts is None:

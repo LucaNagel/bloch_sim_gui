@@ -1859,6 +1859,9 @@ class BlochSimulatorGUI(QMainWindow):
         self.sequence_simulation_widget.spoiler_mode_changed.connect(
             self._update_spoiling_analysis_tab_visibility
         )
+        self.sequence_simulation_widget.spoiling_analysis_requested.connect(
+            self._open_spoiling_analysis_tab
+        )
         self._update_spoiling_analysis_tab_visibility()
         self.sequence_parameter_loop_panel_layout.addWidget(
             self.sequence_simulation_widget.parameter_loop_group
@@ -1914,6 +1917,10 @@ class BlochSimulatorGUI(QMainWindow):
                 widget.deleteLater()
         layout.addWidget(self.sequence_simulation_widget.spoiling_analysis_view)
         self._spoiling_analysis_placed = True
+
+    def _open_spoiling_analysis_tab(self):
+        if self._spoiling_analysis_tab_wanted():
+            self.tab_widget.setCurrentIndex(self.spoiling_analysis_tab_index)
 
     def _spoiling_analysis_tab_wanted(self) -> bool:
         """Whether the Spoiling Analysis tab belongs to the current workspace."""
@@ -5726,6 +5733,8 @@ class BlochSimulatorGUI(QMainWindow):
                     spoiler_configuration.get(
                         "sampling_method", sequence_widget.subvoxel_sampling_method
                     ),
+                    # Older states keep their stored grid.
+                    auto_adjust=spoiler_configuration.get("auto_adjust", False),
                 )
             sequence_widget.refresh_after_session_control_restore()
             restored = sequence_widget.restore_session_simulation_run(run)
@@ -6269,6 +6278,10 @@ class BlochSimulatorGUI(QMainWindow):
     def show_settings(self, initial_tab: str = "general"):
         """Show and persist application, simulation and scanner settings."""
         previous_scanner_parameters = self._load_scanner_parameters()
+        previous_spin_grid = (
+            self._load_subvoxel_sampling_method(),
+            self._load_subvoxel_spin_counts(),
+        )
         previous_workspace_defaults = WorkspaceDefaults.from_settings(self.app_settings)
         previous_interface_style = self._load_interface_style()
         previous_sequence_section_titles_bold = (
@@ -6418,8 +6431,21 @@ class BlochSimulatorGUI(QMainWindow):
             sequence_widget.set_sequence_kernel(sequence_kernel)
             sequence_widget.set_dynamic_sequence_kernel(dynamic_sequence_kernel)
             sequence_widget.set_sequence_timestep_us(timestep_us)
+            # A grid chosen by hand in Settings switches auto adjust off.
+            grid_changed = (
+                subvoxel_sampling_method,
+                tuple(int(count) for count in subvoxel_spin_counts),
+            ) != previous_spin_grid
+            if grid_changed and spoiler_mode == "gradient":
+                self.app_settings.setValue("sequence/subvoxel_auto_adjust", False)
+                self.app_settings.sync()
             sequence_widget.set_spoiler_configuration(
-                spoiler_mode, subvoxel_spin_counts, subvoxel_sampling_method
+                spoiler_mode,
+                subvoxel_spin_counts,
+                subvoxel_sampling_method,
+                auto_adjust=(
+                    False if grid_changed and spoiler_mode == "gradient" else None
+                ),
             )
             sequence_widget.set_thread_configuration(thread_mode, manual_thread_count)
             sequence_widget.set_animation_memory_budget_bytes(
@@ -7156,6 +7182,7 @@ class BlochSimulatorGUI(QMainWindow):
                     "mode": sequence_widget.spoiler_mode,
                     "counts_xyz": sequence_widget.subvoxel_spin_counts,
                     "sampling_method": sequence_widget.subvoxel_sampling_method,
+                    "auto_adjust": sequence_widget.spoiling_auto_adjust.isChecked(),
                 }
                 if sequence_widget is not None
                 else {}
@@ -7360,6 +7387,8 @@ class BlochSimulatorGUI(QMainWindow):
                     spoiler_configuration.get(
                         "sampling_method", sequence_widget.subvoxel_sampling_method
                     ),
+                    # Older states keep their stored grid.
+                    auto_adjust=spoiler_configuration.get("auto_adjust", False),
                 )
             if project["program"] is not None:
                 sequence_widget.program = project["program"]
