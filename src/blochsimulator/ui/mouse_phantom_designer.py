@@ -37,6 +37,7 @@ from ..mouse_phantom import (
     build_reference_mouse_anatomy,
 )
 from ..units import (
+    NUCLEUS_GAMMA_HZ_PER_T,
     thermal_polarization,
     polarization_percent_to_relative,
     relative_polarization_to_percent,
@@ -1355,9 +1356,9 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         if not target_map:
             target_map = "Anatomy labels"
         self.inspector.map_combo.setCurrentText(target_map)
-        curve = phantom.pyruvate_inflow.rate_curve_s_inv
+        curve = phantom.bolus_inflow.rate_curve_s_inv
         delivered_mol = curve.integral(curve.times_s[0], curve.times_s[-1]) * (
-            np.sum(phantom.pyruvate_inflow.delivery_map) * phantom.voxel_volume_m3
+            np.sum(phantom.bolus_inflow.delivery_map) * phantom.voxel_volume_m3
         )
         kidney_voxels = int(
             np.count_nonzero(np.isin(phantom.anatomy_labels, (2, 3, 4, 5)))
@@ -1368,6 +1369,12 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             f"{phantom.n_active:,} active voxels · {kidney_voxels:,} renal voxels · "
             f"{len(phantom.vascular_graph.edges)} major-vessel segments · "
             f"integrated source {delivered_mol * 1e6:.6g} µmol"
+            + (
+                " · 1H images tissue water (7 T relaxation); the injection is "
+                "a preview only"
+                if phantom.pyruvate_inflow is None
+                else ""
+            )
         )
 
     def _compound_selection_changed(self, *_):
@@ -1493,7 +1500,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             return
         self.source_curve_plot.clear()
         self.organ_curve_plot.clear()
-        curve = self.phantom.pyruvate_inflow.rate_curve_s_inv
+        curve = self.phantom.bolus_inflow.rate_curve_s_inv
         source_times = np.asarray(curve.times_s, dtype=float)
         source_rate = np.asarray(curve.values, dtype=float)
         self.source_curve_plot.plot(
@@ -1594,7 +1601,16 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             max(1025, self.phantom.spectral_points),
         )
         total = np.zeros(axis.shape, dtype=float)
-        colors = ("#f4a261", "#2a9d8f", "#e76f51", "#8ecae6")
+        colors = (
+            "#f4a261",
+            "#2a9d8f",
+            "#e76f51",
+            "#8ecae6",
+            "#e9c46a",
+            "#d62828",
+            "#b5838d",
+            "#90be6d",
+        )
         components = []
         for pool, color in zip(self.phantom.pools, colors):
             amplitude = float(
@@ -1604,11 +1620,13 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
                 self.phantom.spectral_reference_ppm
                 + self.phantom.get_frequency_offset_ppm(pool.name)
             )
-            carbon_frequency_hz = max(
-                self.phantom.field_strength * 10.705e6, np.finfo(float).eps
+            larmor_hz = max(
+                self.phantom.field_strength
+                * abs(NUCLEUS_GAMMA_HZ_PER_T[self.phantom.nucleus]),
+                np.finfo(float).eps,
             )
             half_width = max(
-                0.5 * (1.0 / (np.pi * pool.t2_star)) / carbon_frequency_hz * 1e6,
+                0.5 * (1.0 / (np.pi * pool.t2_star)) / larmor_hz * 1e6,
                 np.finfo(float).eps,
             )
             component = amplitude / (1.0 + ((axis - center) / half_width) ** 2)
@@ -1626,8 +1644,11 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.voxel_spectrum_plot.plot(axis, total, pen=pg.mkPen("w", width=2))
         label_value = int(self.phantom.anatomy_labels[self._selected_voxel])
         tissue = self.phantom.tissue_label_names.get(label_value, "Unknown")
+        unit = "PD" if self.phantom.pyruvate_inflow is None else "mM"
         concentrations = ", ".join(
-            f"{name} {amplitude:.3g} mM" for name, _, _, amplitude in components
+            f"{name} {amplitude:.3g} {unit}"
+            for name, _, _, amplitude in components
+            if amplitude > 0.0 or unit == "mM"
         )
         self.voxel_spectrum_label.setText(
             f"Voxel {self._selected_voxel} · {tissue} · {concentrations}"

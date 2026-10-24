@@ -203,18 +203,18 @@ def test_mouse_nucleus_rebase_keeps_absolute_polarization_in_designer():
     old_signal = ideal_fid_amplitude(phantom, "voxel_volume") * thermal_polarization(
         "C13", 7, 310.15
     )
-    rebase_phantom_polarization(phantom, field_strength_t=7, nucleus="H1")
-    phantom.nucleus = "H1"
-    assert phantom.config.nucleus == "H1"
-    assert phantom.metadata["mouse_perfusion_config"]["nucleus"] == "H1"
+    rebase_phantom_polarization(phantom, field_strength_t=7, nucleus="P31")
+    phantom.nucleus = "P31"
+    assert phantom.config.nucleus == "P31"
+    assert phantom.metadata["mouse_perfusion_config"]["nucleus"] == "P31"
     with patch.object(MousePhantomDesignerDialog, "_preview"):
         dialog = MousePhantomDesignerDialog(config=phantom.config)
     assert dialog.injection_polarization.text() == "20 %"
     rebuilt = dialog._build_phantom()
     dialog.close()
-    assert rebuilt.nucleus == "H1"
+    assert rebuilt.nucleus == "P31"
     assert ideal_fid_amplitude(rebuilt, "voxel_volume") * thermal_polarization(
-        "H1", 7, 310.15
+        "P31", 7, 310.15
     ) == pytest.approx(old_signal)
 
 

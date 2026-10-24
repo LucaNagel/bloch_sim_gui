@@ -83,6 +83,47 @@ TRANSVERSE_DECAY_MODES = {
 }
 
 
+# A 1H mouse images tissue water at thermal equilibrium instead of the
+# injected 13C compound. Relaxation (T1, T2, T2*) in seconds is typical of
+# rodent tissue at 7 T and 37 °C; one pool per relaxation class keeps the
+# solver cost close to the 13C pool count.
+WATER_H1_PPM = 4.7
+TISSUE_WATER_POOLS = {
+    "Muscle water": (1.50, 0.028, 0.015),
+    "Kidney cortex water": (1.65, 0.050, 0.025),
+    "Kidney medulla water": (2.05, 0.070, 0.030),
+    "Liver water": (1.20, 0.022, 0.008),
+    "Lung water": (1.30, 0.018, 0.0006),
+    "Blood water": (2.20, 0.035, 0.012),
+    "Brain water": (1.85, 0.045, 0.025),
+    "Urine": (3.00, 0.800, 0.100),
+}
+# Anatomy label -> (water pool, proton density relative to pure water).
+# Myocardium shares the skeletal muscle relaxation class.
+TISSUE_WATER_BY_LABEL = {
+    1: ("Muscle water", 0.78),
+    2: ("Kidney cortex water", 0.80),
+    3: ("Kidney medulla water", 0.85),
+    4: ("Kidney cortex water", 0.80),
+    5: ("Kidney medulla water", 0.85),
+    6: ("Liver water", 0.71),
+    7: ("Lung water", 0.20),
+    8: ("Muscle water", 0.80),
+    9: ("Blood water", 0.85),
+    10: ("Blood water", 0.85),
+    11: ("Brain water", 0.80),
+    12: ("Urine", 0.98),
+    13: ("Urine", 0.98),
+    14: ("Urine", 0.98),
+}
+BLOOD_WATER_DENSITY = TISSUE_WATER_BY_LABEL[9][1]
+
+
+def uses_tissue_water(nucleus: str) -> bool:
+    """Return whether a mouse phantom of this nucleus images tissue water."""
+    return str(nucleus).strip() == "H1"
+
+
 # Bounds of the procedural body surface in atlas coordinates. ``mouse_size_m``
 # refers to this visible bounding box, rather than to the wider abstract atlas
 # coordinate cube.
@@ -1021,6 +1062,28 @@ def _compound_pools(config: MousePerfusionConfig) -> Tuple[ChemicalSpecies, ...]
     )
 
 
+def _tissue_water_pools(config: MousePerfusionConfig) -> Tuple[ChemicalSpecies, ...]:
+    """Return the 1H tissue water pools, all on the water resonance."""
+    return tuple(
+        ChemicalSpecies(name, 0.0, t1, config.solver_t2_s(t2, t2_star), t2_star=t2_star)
+        for name, (t1, t2, t2_star) in TISSUE_WATER_POOLS.items()
+    )
+
+
+def _tissue_water_density_maps(labels, vessels) -> Dict[str, np.ndarray]:
+    """Return per-pool proton density maps of the labelled anatomy."""
+    maps = {
+        name: np.zeros(labels.shape, dtype=np.float64) for name in TISSUE_WATER_POOLS
+    }
+    for label, (name, density) in TISSUE_WATER_BY_LABEL.items():
+        maps[name][labels == label] = density
+    # Major vessels run through other tissue labels and carry blood there.
+    vessels = vessels & (labels > 0)
+    for name, values in maps.items():
+        values[vessels] = BLOOD_WATER_DENSITY if name == "Blood water" else 0.0
+    return maps
+
+
 def _cumulative_trapezoid(values: np.ndarray, times: np.ndarray) -> np.ndarray:
     result = np.zeros_like(values, dtype=float)
     result[1:] = np.cumsum(0.5 * (values[1:] + values[:-1]) * np.diff(times))
@@ -1153,11 +1216,12 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         kpl[labels == 5] = config.right_medulla_kpl_s_inv
         kpl[labels == 8] = config.heart_kpl_s_inv
         kpl[labels == 11] = config.brain_kpl_s_inv
-        if config.injection_compound != "pyruvate":
+        tissue_water = uses_tissue_water(config.nucleus)
+        if config.injection_compound != "pyruvate" or tissue_water:
             kpl.fill(0.0)
 
         kpa = np.zeros(config.shape, dtype=np.float64)
-        if config.injection_compound == "pyruvate":
+        if config.injection_compound == "pyruvate" and not tissue_water:
             kpa[labels == 6] = config.liver_kpa_s_inv
             kpa[labels == 8] = config.heart_kpa_s_inv
             kpa[labels == 11] = config.brain_kpa_s_inv
@@ -1217,7 +1281,7 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
             arrival_time_map[body], config.injection_start_s
         )
 
-        pools = _compound_pools(config)
+        pools = _tissue_water_pools(config) if tissue_water else _compound_pools(config)
         zeros = np.zeros(config.shape, dtype=np.float64)
         rate_curve = _dose_rate_curve(config, delay_s=0.0)
         polarization_curve = TimeCurve(
@@ -1258,12 +1322,34 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
                 ),
                 "alanine_conversion_model": (
                     "liver_heart_brain_kpa_dynamic_third_pool"
-                    if config.injection_compound == "pyruvate"
+                    if config.injection_compound == "pyruvate" and not tissue_water
                     else "disabled"
+                ),
+                "tissue_water_model": (
+                    "h1_thermal_tissue_water_7t" if tissue_water else "disabled"
                 ),
             }
         )
-        initial_maps = {pool.name: zeros.copy() for pool in pools}
+        if tissue_water:
+            # The 13C injection is invisible to 1H; it stays a preview only.
+            metadata["transport_solver"] = "disabled"
+            metadata["renal_excretion_model"] = "disabled"
+            initial_maps = _tissue_water_density_maps(labels, arterial | venous)
+        else:
+            initial_maps = {pool.name: zeros.copy() for pool in pools}
+        bolus_inflow = PyruvateInflow(
+            rate_curve_s_inv=rate_curve,
+            delivery_map=delivery_map,
+            polarization_curve=polarization_curve,
+            arrival_delay_map_s=(arrival_time_map - config.injection_start_s),
+            max_step_s=config.perfusion_timestep_s,
+            colabelled_pools=(
+                (Z_OMPD_C1_POOL,)
+                if config.injection_compound == "z_ompd" and not tissue_water
+                else ()
+            ),
+        )
+        reference_ppm = WATER_H1_PPM if tissue_water else config.spectral_reference_ppm
         phantom = cls(
             shape=config.shape,
             fov=config.fov_m,
@@ -1279,30 +1365,26 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
             b0_map_ppm=np.zeros(config.shape, dtype=np.float64),
             field_strength=config.field_strength_t,
             nucleus=config.nucleus,
-            spectral_reference_ppm=config.spectral_reference_ppm,
-            spectral_window_center_ppm=(0.5 * (config.spectral_reference_ppm + 183.35)),
+            spectral_reference_ppm=reference_ppm,
+            spectral_window_center_ppm=(
+                WATER_H1_PPM
+                if tissue_water
+                else 0.5 * (config.spectral_reference_ppm + 183.35)
+            ),
             spectral_bandwidth_ppm=config.spectral_bandwidth_ppm,
             spectral_points=config.spectral_points,
             name=config.name,
-            pyruvate_inflow=PyruvateInflow(
-                rate_curve_s_inv=rate_curve,
-                delivery_map=delivery_map,
-                polarization_curve=polarization_curve,
-                arrival_delay_map_s=(arrival_time_map - config.injection_start_s),
-                max_step_s=config.perfusion_timestep_s,
-                colabelled_pools=(
-                    (Z_OMPD_C1_POOL,) if config.injection_compound == "z_ompd" else ()
-                ),
-            ),
+            pyruvate_inflow=None if tissue_water else bolus_inflow,
             conversion_start_s=config.injection_start_s,
             metadata=metadata,
             chemical_shift_maps_ppm=(
                 _z_ompd_shift_maps(ph_map)
-                if config.injection_compound == "z_ompd"
+                if config.injection_compound == "z_ompd" and not tissue_water
                 else None
             ),
         )
         phantom.config = config
+        phantom.bolus_inflow = bolus_inflow
         phantom.anatomy_labels = labels
         phantom.ph_map = ph_map
         phantom.kpa_map_s_inv = kpa
@@ -1314,9 +1396,10 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         phantom.preview_bolus_time_s = (
             config.injection_start_s - 0.1 * config.injection_duration_s
         )
-        washout = phantom._build_voxel_washout()
-        washout.validate(phantom.shape, len(phantom.pools))
-        phantom.voxel_washout = washout
+        if not tissue_water:
+            washout = phantom._build_voxel_washout()
+            washout.validate(phantom.shape, len(phantom.pools))
+            phantom.voxel_washout = washout
         return phantom
 
     @classmethod
@@ -1332,6 +1415,9 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
             {"nucleus": phantom.nucleus, **config_values}
         )
         template = cls.from_config(config)
+        if uses_tissue_water(config.nucleus) != _has_tissue_water(phantom):
+            # Saved under the other nucleus: the pools themselves differ.
+            return template
         result = cls.__new__(cls)
         result.__dict__.update(phantom.__dict__)
         for name in (
@@ -1345,6 +1431,7 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
             "vascular_graph",
             "vascular_transit_fraction",
             "preview_bolus_time_s",
+            "bolus_inflow",
         ):
             setattr(result, name, getattr(template, name))
         if (
@@ -1383,14 +1470,14 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         relative_delay = self.perfusion_arrival_time_s - self.config.injection_start_s
         result = np.zeros(self.shape, dtype=np.float64)
         active = np.isfinite(relative_delay) & (
-            np.asarray(self.pyruvate_inflow.delivery_map) > 0
+            np.asarray(self.bolus_inflow.delivery_map) > 0
         )
         flat_delays = relative_delay[active]
         result[active] = (
             np.asarray(
                 [base_curve.value_at(float(time_s) - value) for value in flat_delays]
             )
-            * np.asarray(self.pyruvate_inflow.delivery_map)[active]
+            * np.asarray(self.bolus_inflow.delivery_map)[active]
         )
         return result
 
@@ -1446,7 +1533,7 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         key = float(loss_s_inv)
         if key in cache:
             return cache[key]
-        curve = self.pyruvate_inflow.rate_curve_s_inv
+        curve = self.bolus_inflow.rate_curve_s_inv
         start = float(curve.times_s[0])
         end = float(curve.times_s[-1]) + 6.0 / key
         step = min(
@@ -1474,7 +1561,7 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         return cache[key]
 
     def _urinary_grid_s(self) -> np.ndarray:
-        curve = self.pyruvate_inflow.rate_curve_s_inv
+        curve = self.bolus_inflow.rate_curve_s_inv
         start = float(curve.times_s[0])
         # Long enough for the well-mixed ureters to drain into the bladder.
         end = (
@@ -1489,8 +1576,8 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
     def _renal_groups(self, side: str):
         """Group one kidney's voxels by identical source delay and kinetics."""
 
-        delays = self.pyruvate_inflow.arrival_delay_map_s
-        delivery = np.asarray(self.pyruvate_inflow.delivery_map)
+        delays = self.bolus_inflow.arrival_delay_map_s
+        delivery = np.asarray(self.bolus_inflow.delivery_map)
         mask = (
             np.isin(self.anatomy_labels, RENAL_LABELS[side])
             & np.isfinite(delays)
@@ -1577,7 +1664,7 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         """
 
         delays = self.perfusion_arrival_time_s - self.config.injection_start_s
-        delivery = np.asarray(self.pyruvate_inflow.delivery_map)
+        delivery = np.asarray(self.bolus_inflow.delivery_map)
         active = np.isfinite(delays) & (delivery > 0)
         result = np.zeros(self.shape, dtype=np.float64)
         if not np.any(active):
@@ -1625,7 +1712,7 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         if np.any(self.anatomy_labels == BLADDER_LABEL):
             regions["Bladder"] = self.anatomy_labels == BLADDER_LABEL
         delays = self.perfusion_arrival_time_s - self.config.injection_start_s
-        delivery = np.asarray(self.pyruvate_inflow.delivery_map)
+        delivery = np.asarray(self.bolus_inflow.delivery_map)
         active = np.isfinite(delays) & (delivery > 0)
         loss = self._local_loss_map_s_inv()
         urinary = self._urinary_lookup() if self._renal_excretion_active else None
@@ -1694,6 +1781,11 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         names = [pool.name for pool in self.pools]
         curves = {name: np.zeros(times.shape, dtype=np.float64) for name in names}
         if times.size == 0 or self.anatomy_labels[index] == 0:
+            return curves
+        if self.pyruvate_inflow is None:
+            # Thermal tissue water does not change during the preview.
+            for name in names:
+                curves[name][:] = self.initial_spin_density_maps[name][index]
             return curves
 
         delay = float(self.pyruvate_inflow.arrival_delay_map_s[index])
@@ -1973,6 +2065,10 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         amplitude_m = self.config.breathing_amplitude_mm * 1e-3
         result[..., 2] = amplitude_m * np.sin(phase) * envelope
         return result
+
+
+def _has_tissue_water(phantom) -> bool:
+    return any(pool.name in TISSUE_WATER_POOLS for pool in phantom.pools)
 
 
 def is_mouse_perfusion_phantom(phantom) -> bool:
