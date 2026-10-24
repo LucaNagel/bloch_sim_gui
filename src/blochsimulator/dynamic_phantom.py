@@ -7601,6 +7601,28 @@ def _run_superposed_passes(program, pass_phantoms, kwargs):
     return results
 
 
+def merged_pool_metadata(phantom: DynamicSpectralPhantom, pools, metadata):
+    """Return the pool names and offsets of a merged per-pool pass result.
+
+    Each pass simulates a two-pool phantom, so its result lists only that
+    pass' pools. The merged result must describe every pool of
+    ``phantom``. ``metadata`` is the first pass' metadata and ``pools`` the
+    phantom indices of the passes.
+    """
+    field = float(metadata["field_strength_t"])
+    nucleus = metadata["nucleus"]
+    # Every pass shares the reference shift; recover it from the first one.
+    shift = float(metadata["pool_frequency_offsets_hz"][0]) - float(
+        phantom.pools[pools[0]].get_frequency_offset(field, nucleus)
+    )
+    names = tuple(pool.name for pool in phantom.pools)
+    offsets = tuple(
+        float(pool.get_frequency_offset(field, nucleus)) + shift
+        for pool in phantom.pools
+    )
+    return names, offsets
+
+
 def _simulate_independent_pools(program, phantom, pools, kwargs):
     """Simulate independent pools in two-pool passes and merge them."""
     results = _run_superposed_passes(
@@ -7632,6 +7654,9 @@ def _simulate_independent_pools(program, phantom, pools, kwargs):
         if checkpoint_pool is not None:
             checkpoint_pool[:, index] = result.checkpoint_pool_magnetization[:, 0]
     metadata = dict(first.metadata)
+    pool_names, pool_offsets = merged_pool_metadata(phantom, pools, metadata)
+    metadata["pool_names"] = pool_names
+    metadata["pool_frequency_offsets_hz"] = pool_offsets
     metadata["n_simulated_spins"] = int(
         sum(result.metadata.get("n_simulated_spins", 0) for result in results)
     )
@@ -7654,6 +7679,7 @@ def _simulate_independent_pools(program, phantom, pools, kwargs):
             None if checkpoint_pool is None else checkpoint_pool.sum(axis=1)
         ),
         metadata=metadata,
+        pool_names=pool_names,
         species_signal=species_signal,
         final_pool_magnetization=final_pool,
         checkpoint_pool_magnetization=checkpoint_pool,

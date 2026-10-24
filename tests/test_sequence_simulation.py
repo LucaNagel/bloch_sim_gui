@@ -66,6 +66,30 @@ def test_automatic_thread_count_uses_available_logical_processors(monkeypatch):
         resolve_num_threads(-1)
 
 
+def test_result_rejects_pool_names_that_miss_pool_resolved_data():
+    def result(names, **metadata):
+        return SequenceSimulationResult(
+            signal=np.zeros(4, dtype=complex),
+            adc_times_s=np.arange(4.0),
+            final_magnetization=np.zeros((2, 3)),
+            checkpoint_magnetization=None,
+            checkpoint_times_s=np.empty(0),
+            metadata=metadata,
+            pool_names=names,
+            species_signal=np.zeros((3, 4), dtype=complex),
+            final_pool_magnetization=np.zeros((3, 2, 3)),
+        )
+
+    names = ("A", "B", "C")
+    result(names, pool_names=names, pool_frequency_offsets_hz=(0.0, 1.0, 2.0))
+    with pytest.raises(ValueError, match="species_signal resolves 3 pools"):
+        result(names[:2])
+    with pytest.raises(ValueError, match="metadata pool_names"):
+        result(names, pool_names=names[:2])
+    with pytest.raises(ValueError, match="2 pool frequency offsets"):
+        result(names, pool_frequency_offsets_hz=(0.0, 1.0))
+
+
 def test_free_relaxation_final_and_checkpoints():
     phantom = _phantom(m0=(1.0, 0.0, 0.0))
     program = SequenceProgram((), duration_s=0.1)

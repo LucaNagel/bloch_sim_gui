@@ -82,6 +82,31 @@ class SequenceSimulationResult:
     physical_field_maps: Dict[str, np.ndarray] = field(default_factory=dict)
     signal_noiseless: Optional[np.ndarray] = None
 
+    def __post_init__(self):
+        # Pool-resolved arrays and pool metadata must describe the same
+        # pools. A merged multi-pass result that keeps one pass' names
+        # otherwise fails only later, when the reconstruction is built.
+        count = len(self.pool_names)
+        for name, values, axis in (
+            ("species_signal", self.species_signal, 0),
+            ("final_pool_magnetization", self.final_pool_magnetization, 0),
+            ("checkpoint_pool_magnetization", self.checkpoint_pool_magnetization, 1),
+        ):
+            if values is not None and np.shape(values)[axis] != count:
+                raise ValueError(
+                    f"{name} resolves {np.shape(values)[axis]} pools but "
+                    f"pool_names lists {count}"
+                )
+        listed = self.metadata.get("pool_names")
+        if listed is not None and tuple(listed) != tuple(self.pool_names):
+            raise ValueError("metadata pool_names differ from the result pool_names")
+        offsets = self.metadata.get("pool_frequency_offsets_hz")
+        if offsets is not None and count and len(offsets) != count:
+            raise ValueError(
+                f"metadata lists {len(offsets)} pool frequency offsets for "
+                f"{count} pools"
+            )
+
     @property
     def mx(self) -> np.ndarray:
         return self.final_magnetization[..., 0]

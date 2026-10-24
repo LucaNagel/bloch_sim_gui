@@ -370,7 +370,37 @@ def _result_to_data(result, arrays):
     return None
 
 
-def _result_from_data(data, arrays):
+def _repair_merged_pool_names(arguments, phantom):
+    """Name every phantom pool in a legacy merged per-pool pass result.
+
+    Results merged from two-pool passes used to keep the first pass' two
+    pool names next to the data of all pools.
+    """
+    metadata = arguments.get("metadata") or {}
+    species = arguments.get("species_signal")
+    passes = metadata.get("independent_pool_passes")
+    if species is None or not passes or phantom is None:
+        return
+    count = np.shape(species)[0]
+    names = [pool.name for pool in getattr(phantom, "pools", ())]
+    if len(arguments["pool_names"]) == count or len(names) != count:
+        return
+    if not set(passes) <= set(names):
+        return
+    from .dynamic_phantom import merged_pool_metadata
+
+    pool_names, offsets = merged_pool_metadata(
+        phantom, [names.index(name) for name in passes], metadata
+    )
+    arguments["pool_names"] = pool_names
+    arguments["metadata"] = {
+        **metadata,
+        "pool_names": pool_names,
+        "pool_frequency_offsets_hz": offsets,
+    }
+
+
+def _result_from_data(data, arrays, phantom=None):
     if data is None:
         return None
     value = _decode(data["value"], arrays)
@@ -404,6 +434,7 @@ def _result_from_data(data, arrays):
     arguments["pool_names"] = tuple(arguments.get("pool_names") or ())
     arguments["sequence_waveforms"] = arguments.get("sequence_waveforms") or {}
     arguments["physical_field_maps"] = arguments.get("physical_field_maps") or {}
+    _repair_merged_pool_names(arguments, phantom)
     return SequenceSimulationResult(**arguments)
 
 
@@ -635,5 +666,7 @@ def load_project(filename):
         "rx_field": _field_from_data(manifest.get("b1", {}).get("rx"), arrays),
         "program": _program_from_data(manifest.get("program"), arrays),
         "legacy_result": _result_from_data(manifest.get("legacy_result"), arrays),
-        "sequence_result": _result_from_data(manifest.get("sequence_result"), arrays),
+        "sequence_result": _result_from_data(
+            manifest.get("sequence_result"), arrays, phantom
+        ),
     }
