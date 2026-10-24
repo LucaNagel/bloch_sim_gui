@@ -6678,7 +6678,7 @@ class BlochSimulatorGUI(QMainWindow):
             sequence_tuple = self.sequence_designer.compile_sequence(
                 custom_pulse=pulse, dt=dt_s, log_info=True
             )
-        except SimulationMemoryError as exc:
+        except (SimulationMemoryError, ValueError) as exc:
             self.on_simulation_error(str(exc))
             return
 
@@ -6790,8 +6790,9 @@ class BlochSimulatorGUI(QMainWindow):
 
     def cancel_simulation(self):
         """Request cancellation of the current simulation."""
-        if hasattr(self, "simulation_thread") and self.simulation_thread.isRunning():
-            self.simulation_thread.request_cancel()
+        thread = getattr(self, "simulation_thread", None)
+        if thread is not None and thread.isRunning():
+            thread.request_cancel()
             self.statusBar().showMessage("Cancellation requested...")
         if hasattr(self, "status_cancel_button"):
             self.status_cancel_button.setEnabled(False)
