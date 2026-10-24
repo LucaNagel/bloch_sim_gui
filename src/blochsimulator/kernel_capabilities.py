@@ -84,7 +84,7 @@ def detect_kernel_capabilities() -> dict[str, dict[str, KernelCapability]]:
         "blochsimulator.dynamic_spin_major_cy",
         ("run_spin_major_chunk", "propagator_values", "propagator_columns"),
     )
-    spin_available = spin_available and getattr(spin_module, "API_VERSION", None) == 6
+    spin_available = spin_available and getattr(spin_module, "API_VERSION", None) == 7
     dynamic_details = {
         "spin_major": spin_available,
         "spin_major_spatial_tx": bool(
@@ -102,6 +102,10 @@ def detect_kernel_capabilities() -> dict[str, dict[str, KernelCapability]]:
         ),
         "spin_major_rf_cache_phase": bool(
             spin_available and getattr(spin_module, "RF_CACHE_PHASE_SUPPORTED", False)
+        ),
+        "spin_major_contrast_relaxation": bool(
+            spin_available
+            and getattr(spin_module, "CONTRAST_RELAXATION_SUPPORTED", False)
         ),
         "complete_two_pool_plan": bool(
             dynamic_module is not None

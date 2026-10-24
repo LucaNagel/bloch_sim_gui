@@ -20,6 +20,12 @@ from .dynamic_phantom import (
     TimeCurve,
     VoxelWashout,
 )
+from .mouse_dce import (
+    CONTRAST_AGENTS,
+    DEFAULT_TOFTS_PARAMETERS,
+    build_mouse_dce_kinetics,
+    tofts_parameters,
+)
 from .spectral_phantom import ChemicalSpecies
 from .units import NUCLEUS_SPIN
 
@@ -302,6 +308,29 @@ class MousePerfusionConfig:
     # The injection polarization is a multiple of this nucleus' thermal
     # polarization; workspace nucleus changes rebase both together.
     nucleus: str = "C13"
+    # Gadolinium DCE of the 1H mouse (compound "contrast_agent"): relaxivity
+    # in 1/(mM s), whole-body physiology of the arterial input function and
+    # extended Tofts parameters (Ktrans 1/min, ve, vp) per tissue.
+    contrast_agent: str = "gd_dota"
+    contrast_r1_mm_s_inv: float = 3.0
+    contrast_r2_mm_s_inv: float = 4.0
+    body_mass_g: float = 25.0
+    hematocrit: float = 0.45
+    cardiac_output_ml_min: float = 15.0
+    gfr_ml_min: float = 0.25
+    capillary_ps_ml_min: float = 1.2
+    contrast_horizon_s: float = 900.0
+    contrast_step_s: float = 0.5
+    dce_tofts_parameters: Dict = field(
+        default_factory=lambda: dict(DEFAULT_TOFTS_PARAMETERS)
+    )
+
+    @property
+    def dce_enabled(self) -> bool:
+        return (
+            uses_tissue_water(self.nucleus)
+            and self.injection_compound == "contrast_agent"
+        )
 
     def validate(self) -> None:
         self.shape = tuple(int(value) for value in self.shape)
@@ -444,11 +473,42 @@ class MousePerfusionConfig:
             or self.spectral_points < 2
         ):
             raise ValueError("spectral points must be an integer >= 2")
+        self.contrast_agent = str(self.contrast_agent).strip().lower()
+        if self.contrast_agent not in CONTRAST_AGENTS:
+            raise ValueError(
+                "contrast agent must be one of " + ", ".join(sorted(CONTRAST_AGENTS))
+            )
+        dce = {
+            "contrast r1": self.contrast_r1_mm_s_inv,
+            "contrast r2": self.contrast_r2_mm_s_inv,
+            "capillary PS": self.capillary_ps_ml_min,
+            "GFR": self.gfr_ml_min,
+        }
+        for label, value in dce.items():
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f"{label} must be finite and non-negative")
+        dce_positive = {
+            "body mass": self.body_mass_g,
+            "cardiac output": self.cardiac_output_ml_min,
+            "contrast horizon": self.contrast_horizon_s,
+            "contrast step": self.contrast_step_s,
+        }
+        for label, value in dce_positive.items():
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(f"{label} must be positive and finite")
+        if not 0.0 <= self.hematocrit < 1.0:
+            raise ValueError("hematocrit must lie in [0, 1)")
+        self.dce_tofts_parameters = tofts_parameters(self.dce_tofts_parameters)
 
     @property
     def injection_amount_umol(self) -> float:
         """Injected dose; mM × µl = nmol."""
         return self.injection_concentration_mm * self.injection_volume_ul * 1e-3
+
+    @property
+    def contrast_dose_mmol_per_kg(self) -> float:
+        """Injected dose per body weight; µmol/g = mmol/kg."""
+        return self.injection_amount_umol / self.body_mass_g
 
     def solver_t2_s(self, t2_s: float, t2_star_s: float) -> float:
         """Return the transverse decay constant handed to the Bloch solver."""
@@ -1330,10 +1390,30 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
                 ),
             }
         )
+        dce_kinetics = None
+        contrast_relaxation = None
+        if config.dce_enabled:
+            dce_kinetics = build_mouse_dce_kinetics(
+                config,
+                labels,
+                arterial,
+                venous,
+                arrival_time_map,
+                float(np.prod(np.asarray(config.fov_m) / config.shape)),
+                rate_curve,
+            )
+            contrast_relaxation = dce_kinetics.relaxation(config.contrast_step_s)
+            metadata["contrast_model"] = (
+                "three_compartment_aif_extended_tofts_fast_exchange"
+            )
+            metadata["contrast_agent"] = CONTRAST_AGENTS[config.contrast_agent][0]
         if tissue_water:
-            # The 13C injection is invisible to 1H; it stays a preview only.
+            # A 13C injection is invisible to 1H and stays a preview only; a
+            # contrast agent acts through the tissue water relaxation rates.
             metadata["transport_solver"] = "disabled"
-            metadata["renal_excretion_model"] = "disabled"
+            metadata["renal_excretion_model"] = (
+                "contrast_glomerular_filtration" if config.dce_enabled else "disabled"
+            )
             initial_maps = _tissue_water_density_maps(labels, arterial | venous)
         else:
             initial_maps = {pool.name: zeros.copy() for pool in pools}
@@ -1382,8 +1462,10 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
                 if config.injection_compound == "z_ompd" and not tissue_water
                 else None
             ),
+            contrast_relaxation=contrast_relaxation,
         )
         phantom.config = config
+        phantom.dce_kinetics = dce_kinetics
         phantom.bolus_inflow = bolus_inflow
         phantom.anatomy_labels = labels
         phantom.ph_map = ph_map
@@ -1432,6 +1514,8 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
             "vascular_transit_fraction",
             "preview_bolus_time_s",
             "bolus_inflow",
+            "dce_kinetics",
+            "contrast_relaxation",
         ):
             setattr(result, name, getattr(template, name))
         if (
@@ -1488,6 +1572,11 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
     def preview_time_bounds_s(self) -> Tuple[float, float]:
         """Return a useful time interval containing arrival and wash-out."""
 
+        if getattr(self, "dce_kinetics", None) is not None:
+            return (
+                self.config.injection_start_s - 0.15 * self.config.injection_duration_s,
+                float(self.dce_kinetics.times_s[-1]),
+            )
         finite = self.perfusion_arrival_time_s[
             np.isfinite(self.perfusion_arrival_time_s)
         ]
@@ -1661,8 +1750,12 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         mono-exponential clearance and, in the kidneys, renal excretion into
         the tubules, ureters and bladder.  It is an authoring/visualization
         model, not an additional advection compartment in the Bloch solver.
+        A DCE phantom returns the contrast agent concentration that sets the
+        solver relaxation rates.
         """
 
+        if getattr(self, "dce_kinetics", None) is not None:
+            return self.dce_kinetics.concentration_map(time_s)
         delays = self.perfusion_arrival_time_s - self.config.injection_start_s
         delivery = np.asarray(self.bolus_inflow.delivery_map)
         active = np.isfinite(delays) & (delivery > 0)
@@ -1711,6 +1804,18 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         }
         if np.any(self.anatomy_labels == BLADDER_LABEL):
             regions["Bladder"] = self.anatomy_labels == BLADDER_LABEL
+        if getattr(self, "dce_kinetics", None) is not None:
+            compartments = self.dce_kinetics.compartment_map
+            concentration = self.dce_kinetics.concentrations_at(times)
+            curves = {}
+            for name, mask in regions.items():
+                counts = np.bincount(
+                    compartments[mask & (compartments >= 0)],
+                    minlength=concentration.shape[1],
+                )
+                total = max(int(np.count_nonzero(mask)), 1)
+                curves[name] = concentration @ counts / total
+            return curves
         delays = self.perfusion_arrival_time_s - self.config.injection_start_s
         delivery = np.asarray(self.bolus_inflow.delivery_map)
         active = np.isfinite(delays) & (delivery > 0)

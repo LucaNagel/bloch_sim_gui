@@ -62,6 +62,7 @@ static inline size_t slot_doubles(int np) {
 typedef struct {
     double half;
     int conversion;
+    const double *relaxation; /* (compartments, 2) row, or NULL */
     double eb[DSM_MAX_PRODUCTS];
     double f0b[DSM_MAX_PRODUCTS];
     double f1b[DSM_MAX_PRODUCTS];
@@ -113,6 +114,7 @@ typedef struct {
     double washout_loss[DSM_TILE];
     int32_t washout_compartment[DSM_TILE]; /* -1 outside source compartments */
     int washout_sources;                   /* any valid spin in a compartment */
+    int32_t relaxation_compartment[DSM_TILE]; /* -1 without contrast */
     dsm_curve_state curve[2];
 } dsm_tile;
 
@@ -187,6 +189,11 @@ static void prepare_group(const dsm_chunk *c, int32_t index, dsm_group *g) {
     double h = c->group_half_s[index];
     g->half = h;
     g->conversion = c->group_conversion[index] != 0;
+    g->relaxation = NULL;
+    if (c->relaxation_compartment != NULL && c->group_relaxation[index] >= 0) {
+        g->relaxation = c->relaxation_table + (int64_t)c->group_relaxation[index] *
+                                                  c->relaxation_compartments * 2;
+    }
     for (int j = 0; j < c->npools - 1; j++) {
         g->eb[j] = exp(-c->r1[j + 1] * h);
         decay_convolution(c->r1[j + 1], h, &g->f0b[j], &g->f1b[j]);
@@ -218,14 +225,24 @@ static void fill_slot(const dsm_chunk *c, const dsm_group *g,
                                     : 1.0;
         slot[field_washout(np) * DSM_TILE + s] = qh;
         slot[field_washout_gain(np) * DSM_TILE + s] = qg;
+        double dr1 = 0.0;
+        double e2_contrast = 1.0;
+        if (g->relaxation != NULL && t->relaxation_compartment[s] >= 0) {
+            const double *row = g->relaxation + 2 * t->relaxation_compartment[s];
+            dr1 = row[0];
+            e2_contrast = exp(-row[1] * h);
+        }
         for (int pool = 0; pool < np; pool++) {
             double angle = -DSM_TWO_PI * (t->fs[pool][s] * h);
             double e2 = g->e2[pool] * qh;
+            if (pool == 0) {
+                e2 = e2 * e2_contrast;
+            }
             slot[field_fac_real(pool) * DSM_TILE + s] = e2 * cos(angle);
             slot[field_fac_imag(pool) * DSM_TILE + s] = e2 * sin(angle);
         }
 
-        double a = c->r1[0] + ksum;
+        double a = c->r1[0] + ksum + dr1;
         double ea = exp(-a * h);
         slot[field_ea(np) * DSM_TILE + s] = ea * qh;
         for (int j = 0; j < nproducts; j++) {
@@ -778,6 +795,7 @@ static void load_tile(const dsm_chunk *c, int64_t first, int valid,
     memset(rw, 0, sizeof(double) * 2 * (size_t)ncoils * DSM_TILE);
     for (int s = 0; s < DSM_TILE; s++) {
         t->washout_compartment[s] = -1;
+        t->relaxation_compartment[s] = -1;
     }
     for (int s = 0; s < valid; s++) {
         int64_t spin = first + s;
@@ -809,6 +827,9 @@ static void load_tile(const dsm_chunk *c, int64_t first, int valid,
         if (c->washout_compartment != NULL) {
             t->washout_compartment[s] = c->washout_compartment[spin];
             t->washout_sources |= c->washout_compartment[spin] >= 0;
+        }
+        if (c->relaxation_compartment != NULL) {
+            t->relaxation_compartment[s] = c->relaxation_compartment[spin];
         }
         if (c->spatial_sources) {
             t->delay[s] = c->arrival_delay_s[spin];
@@ -1633,6 +1654,33 @@ static int validate(const dsm_chunk *c) {
         for (int32_t i = 0; i < c->n_intervals; i++) {
             if (c->interval_washout[i] < -1 ||
                 c->interval_washout[i] >= c->n_washout) {
+                return -1;
+            }
+        }
+    }
+    if (c->relaxation_compartment != NULL) {
+        if (c->relaxation_compartments < 1 || c->n_relaxation < 0 ||
+            c->group_relaxation == NULL ||
+            (c->n_relaxation > 0 && c->relaxation_table == NULL)) {
+            return -1;
+        }
+        for (int64_t spin = 0; spin < c->nspins; spin++) {
+            if (c->relaxation_compartment[spin] < -1 ||
+                c->relaxation_compartment[spin] >= c->relaxation_compartments) {
+                return -1;
+            }
+        }
+        for (int32_t group = 0; group < c->n_groups; group++) {
+            if (c->group_relaxation[group] < -1 ||
+                c->group_relaxation[group] >= c->n_relaxation) {
+                return -1;
+            }
+        }
+        const int64_t values =
+            (int64_t)c->n_relaxation * c->relaxation_compartments * 2;
+        for (int64_t value = 0; value < values; value++) {
+            if (!(c->relaxation_table[value] >= 0.0) ||
+                !isfinite(c->relaxation_table[value])) {
                 return -1;
             }
         }

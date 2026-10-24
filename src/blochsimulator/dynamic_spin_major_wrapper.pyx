@@ -7,6 +7,7 @@ segments can optionally be replaced by cached per-spin affine propagators,
 also when they differ only by a constant RF phase. Inflow with per-spin
 arrival delays is evaluated from the delayed time curves inside the executor.
 Voxel washout applies a per-spin loss and precomputed compartment gains.
+Contrast agents add per-spin, piecewise-constant pool-0 relaxation rates.
 """
 
 import numpy as np
@@ -82,6 +83,11 @@ cdef extern from "dynamic_spin_major.h":
         const int32_t *interval_washout
         int32_t n_washout
         const double *washout_table
+        const int32_t *relaxation_compartment
+        int32_t relaxation_compartments
+        const int32_t *group_relaxation
+        int32_t n_relaxation
+        const double *relaxation_table
         int64_t n_actions
         const int64_t *action_offsets
         const int8_t *action_kinds
@@ -114,13 +120,14 @@ cdef extern from "dynamic_spin_major.h":
 
 TILE_SPINS = DSM_TILE
 MAX_POOLS = DSM_MAX_POOLS
-API_VERSION = 6
+API_VERSION = 7
 SPATIAL_TX_SUPPORTED = True
 MULTI_POOL_SUPPORTED = True
 SPATIAL_INFLOW_SUPPORTED = True
 RF_CACHE_MULTI_POOL_SUPPORTED = True
 RF_CACHE_PHASE_SUPPORTED = True
 WASHOUT_SUPPORTED = True
+CONTRAST_RELAXATION_SUPPORTED = True
 
 cdef double _empty_storage[8]
 
@@ -244,7 +251,10 @@ def run_spin_major_chunk(
         washout_loss=None,
         washout_compartment=None,
         interval_washout=None,
-        washout_table=None):
+        washout_table=None,
+        relaxation_compartment=None,
+        group_relaxation=None,
+        relaxation_table=None):
     """Advance ``state`` through one plan slice and add unscaled ADC sums.
 
     Pool 0 is the precursor; ``conversion`` has shape ``(npools - 1, nspins)``
@@ -269,6 +279,11 @@ def run_spin_major_chunk(
     (magnetization, concentration), added after each longitudinal half step;
     ``interval_washout`` is -1 for intervals without gains. A tile with source
     spins runs cached segments that carry gains stepwise.
+
+    ``relaxation_compartment`` (int32 per spin, -1 without contrast) adds
+    ``relaxation_table[group_relaxation[g], compartment]`` (dR1, dR2 in 1/s)
+    to the pool-0 relaxation rates of every interval of group ``g``;
+    ``group_relaxation`` is -1 for groups without contrast.
 
     The optional segment arrays replace intervals ``[first, end)`` by the
     propagator entry ``propagators[entry]`` with shape
@@ -431,6 +446,25 @@ def run_spin_major_chunk(
             "washout_table")
         chunk.interval_washout = <const int32_t *>_data(
             interval_washout, np.int32, (n_intervals,), "interval_washout")
+
+    chunk.relaxation_compartment = NULL
+    chunk.relaxation_compartments = 0
+    chunk.group_relaxation = NULL
+    chunk.n_relaxation = 0
+    chunk.relaxation_table = NULL
+    if relaxation_compartment is not None:
+        if relaxation_table is None or group_relaxation is None:
+            raise ValueError("contrast relaxation needs a table and group rows")
+        if relaxation_table.ndim != 3 or relaxation_table.shape[0] >= 2**31:
+            raise ValueError("relaxation_table must have three dimensions")
+        chunk.relaxation_compartment = <const int32_t *>_data(
+            relaxation_compartment, np.int32, (nspins,), "relaxation_compartment")
+        chunk.relaxation_compartments = <int32_t>relaxation_table.shape[1]
+        chunk.n_relaxation = <int32_t>relaxation_table.shape[0]
+        chunk.relaxation_table = <const double *>_data(
+            relaxation_table, np.float64, (None, None, 2), "relaxation_table")
+        chunk.group_relaxation = <const int32_t *>_data(
+            group_relaxation, np.int32, (n_groups,), "group_relaxation")
 
     chunk.n_actions = action_kinds.shape[0]
     chunk.action_offsets = <const int64_t *>_data(

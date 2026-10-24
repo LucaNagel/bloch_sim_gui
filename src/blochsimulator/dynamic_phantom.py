@@ -600,6 +600,140 @@ class VoxelWashout:
         )
 
 
+@dataclass
+class ContrastRelaxation:
+    """Compartment-resolved relaxation-rate increments of a contrast agent.
+
+    Fast water exchange: a voxel of compartment ``k`` relaxes with
+    ``R1 + delta_r1_s_inv[:, k]`` and ``R2 + delta_r2_s_inv[:, k]`` (for
+    example ``r1 * C(t)`` and ``r2 * C(t)`` of its tissue concentration).
+    The rates are given at ``times_s`` on the phantom kinetics timeline,
+    interpolated linearly and held outside the knots. The solver holds them
+    constant over epochs of ``step_s`` on the kinetics timeline, evaluated at
+    the epoch midpoint, so cached RF propagators repeat within an epoch.
+    Contrast relaxation acts on independent pools only: the phantom must not
+    convert pools, receive inflow, or wash out.
+    """
+
+    compartment_map: np.ndarray
+    times_s: np.ndarray
+    delta_r1_s_inv: np.ndarray
+    delta_r2_s_inv: np.ndarray
+    step_s: float = 0.5
+    compartment_names: Tuple[str, ...] = ()
+
+    def validate(self, shape: Tuple[int, int, int]) -> None:
+        compartments = np.asarray(self.compartment_map)
+        if compartments.shape != shape or not np.issubdtype(
+            compartments.dtype, np.integer
+        ):
+            raise ValueError(
+                "contrast compartment map must be an integer map of phantom shape"
+            )
+        self.compartment_map = compartments.astype(np.int32)
+        times = np.asarray(self.times_s, dtype=np.float64)
+        if (
+            times.ndim != 1
+            or times.size < 1
+            or not np.all(np.isfinite(times))
+            or np.any(np.diff(times) <= 0)
+        ):
+            raise ValueError("contrast relaxation times must increase strictly")
+        self.times_s = times
+        rates = []
+        for values in (self.delta_r1_s_inv, self.delta_r2_s_inv):
+            values = np.asarray(values, dtype=np.float64)
+            if values.ndim != 2 or values.shape[0] != times.size:
+                raise ValueError(
+                    "contrast relaxation rates must have shape (times, compartments)"
+                )
+            if not np.all(np.isfinite(values)) or np.any(values < 0):
+                raise ValueError(
+                    "contrast relaxation rates must be finite and non-negative"
+                )
+            rates.append(values)
+        if rates[0].shape != rates[1].shape:
+            raise ValueError("contrast dR1 and dR2 rates must have equal shapes")
+        self.delta_r1_s_inv, self.delta_r2_s_inv = rates
+        count = self.n_compartments
+        if np.any(self.compartment_map < -1) or np.any(self.compartment_map >= count):
+            raise ValueError("contrast compartment map references unknown rates")
+        self.step_s = float(self.step_s)
+        if not np.isfinite(self.step_s) or self.step_s <= 0:
+            raise ValueError("contrast relaxation step must be positive")
+        self.compartment_names = tuple(str(name) for name in self.compartment_names)
+        if self.compartment_names and len(self.compartment_names) != count:
+            raise ValueError("contrast compartment names must match the rate columns")
+
+    @property
+    def n_compartments(self) -> int:
+        return int(np.asarray(self.delta_r1_s_inv).shape[1])
+
+    def rates_at(self, kinetics_time_s) -> np.ndarray:
+        """Return (dR1, dR2) with shape ``(times, compartments, 2)``."""
+        times = np.atleast_1d(np.asarray(kinetics_time_s, dtype=np.float64))
+        result = np.empty((times.size, self.n_compartments, 2), dtype=np.float64)
+        for column, values in enumerate((self.delta_r1_s_inv, self.delta_r2_s_inv)):
+            for compartment in range(self.n_compartments):
+                result[:, compartment, column] = np.interp(
+                    times, self.times_s, values[:, compartment]
+                )
+        return result
+
+    def interval_rows(self, interval_mid_s, kinetics_time_offset_s=0.0):
+        """Return (row per interval or -1, table (rows, compartments, 2)).
+
+        ``interval_mid_s`` is on the sequence timeline. Rows are the distinct
+        epoch rates; intervals in all-zero epochs get -1.
+        """
+        kinetics = np.asarray(interval_mid_s, dtype=np.float64) + float(
+            kinetics_time_offset_s
+        )
+        epochs = np.floor(kinetics / self.step_s)
+        unique_epochs, epoch_index = np.unique(epochs, return_inverse=True)
+        rates = self.rates_at((unique_epochs + 0.5) * self.step_s)
+        rows, row_index = np.unique(
+            rates.reshape(unique_epochs.size, -1), axis=0, return_inverse=True
+        )
+        row_index = row_index.reshape(-1).astype(np.int32)
+        nonzero = np.any(rows != 0.0, axis=1)
+        remap = np.full(rows.shape[0], -1, dtype=np.int32)
+        remap[nonzero] = np.arange(np.count_nonzero(nonzero), dtype=np.int32)
+        table = np.ascontiguousarray(
+            rows[nonzero].reshape(-1, self.n_compartments, 2), dtype=np.float64
+        )
+        return np.ascontiguousarray(remap[row_index][epoch_index.reshape(-1)]), table
+
+    def header(self) -> Dict:
+        return {
+            "times_s": self.times_s.tolist(),
+            "step_s": float(self.step_s),
+            "compartment_names": list(self.compartment_names),
+        }
+
+    def arrays(self) -> Dict[str, np.ndarray]:
+        return {
+            "contrast_compartment_map": self.compartment_map,
+            "contrast_delta_r1_s_inv": self.delta_r1_s_inv,
+            "contrast_delta_r2_s_inv": self.delta_r2_s_inv,
+        }
+
+    @classmethod
+    def from_saved(
+        cls, header: Optional[Dict], arrays
+    ) -> Optional["ContrastRelaxation"]:
+        if header is None or "contrast_compartment_map" not in arrays:
+            return None
+        return cls(
+            compartment_map=np.asarray(arrays["contrast_compartment_map"]),
+            times_s=np.asarray(header["times_s"], dtype=np.float64),
+            delta_r1_s_inv=np.asarray(arrays["contrast_delta_r1_s_inv"]),
+            delta_r2_s_inv=np.asarray(arrays["contrast_delta_r2_s_inv"]),
+            step_s=float(header.get("step_s", 0.5)),
+            compartment_names=tuple(header.get("compartment_names", ())),
+        )
+
+
 def rasterize_kpl_regions(
     shape: Tuple[int, int, int],
     regions: Tuple[KineticRegionDefinition, ...],
@@ -651,6 +785,7 @@ class DynamicSpectralPhantom:
     affine_ijk_to_xyz_m: Optional[np.ndarray] = None
     chemical_shift_maps_ppm: Optional[Dict[str, np.ndarray]] = None
     voxel_washout: Optional[VoxelWashout] = None
+    contrast_relaxation: Optional[ContrastRelaxation] = None
     positions: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -780,6 +915,18 @@ class DynamicSpectralPhantom:
                 self.kpl_map_s_inv[self.voxel_washout.source_mask] > 0
             ):
                 raise ValueError("washout source compartments must not convert pools")
+        if self.contrast_relaxation is not None:
+            self.contrast_relaxation.validate(self.shape)
+            if np.any(self.kpl_map_s_inv > 0) or np.any(
+                np.asarray(getattr(self, "kpa_map_s_inv", 0.0)) > 0
+            ):
+                raise ValueError(
+                    "contrast relaxation requires pools without conversion"
+                )
+            if self.pyruvate_inflow is not None or self.voxel_washout is not None:
+                raise ValueError(
+                    "contrast relaxation cannot be combined with inflow or washout"
+                )
         if self.dynamic_b0 is not None:
             self.dynamic_b0.validate(self.shape)
             scales = tuple(self.dynamic_b0.pool_scale)
@@ -1256,6 +1403,11 @@ class DynamicSpectralPhantom:
             "voxel_washout": (
                 None if self.voxel_washout is None else self.voxel_washout.header()
             ),
+            "contrast_relaxation": (
+                None
+                if self.contrast_relaxation is None
+                else self.contrast_relaxation.header()
+            ),
             "conversion_start_s": self.conversion_start_s,
             "kinetics_time_offset_s": self.kinetics_time_offset_s,
             "equilibrium_polarization": self.equilibrium_polarization,
@@ -1341,8 +1493,16 @@ class DynamicSpectralPhantom:
                 np.stack([self.chemical_shift_map_ppm(name) for name in pool_names]),
                 {"units": "ppm", "long_name": "voxelwise pool shift"},
             )
-        if self.voxel_washout is not None:
-            for key, values in self.voxel_washout.arrays().items():
+        washout_arrays = (
+            {} if self.voxel_washout is None else self.voxel_washout.arrays()
+        )
+        contrast_arrays = (
+            {}
+            if self.contrast_relaxation is None
+            else self.contrast_relaxation.arrays()
+        )
+        if washout_arrays or contrast_arrays:
+            for key, values in {**washout_arrays, **contrast_arrays}.items():
                 dims = (
                     spatial_dims
                     if np.ndim(values) == 3 and np.shape(values) == self.shape
@@ -1438,9 +1598,12 @@ class DynamicSpectralPhantom:
                 max_step_s=inflow_metadata.get("max_step_s"),
                 colabelled_pools=tuple(inflow_metadata.get("colabelled_pools", ())),
             )
+        saved_arrays = {name: np.asarray(ds[name]) for name in ds.data_vars}
         voxel_washout = VoxelWashout.from_saved(
-            header.get("voxel_washout"),
-            {name: np.asarray(ds[name]) for name in ds.data_vars},
+            header.get("voxel_washout"), saved_arrays
+        )
+        contrast_relaxation = ContrastRelaxation.from_saved(
+            header.get("contrast_relaxation"), saved_arrays
         )
         dynamic_b0_metadata = header.get("dynamic_b0")
         dynamic_b0 = None
@@ -1496,6 +1659,7 @@ class DynamicSpectralPhantom:
             pyruvate_inflow=pyruvate_inflow,
             dynamic_b0=dynamic_b0,
             voxel_washout=voxel_washout,
+            contrast_relaxation=contrast_relaxation,
             conversion_start_s=float(header.get("conversion_start_s", 0.0)),
             kinetics_time_offset_s=float(header.get("kinetics_time_offset_s", 0.0)),
             metadata=dict(header.get("metadata", {})),
@@ -1554,6 +1718,11 @@ class DynamicSpectralPhantom:
             "voxel_washout": (
                 None if self.voxel_washout is None else self.voxel_washout.header()
             ),
+            "contrast_relaxation": (
+                None
+                if self.contrast_relaxation is None
+                else self.contrast_relaxation.header()
+            ),
             "conversion_start_s": self.conversion_start_s,
             "kinetics_time_offset_s": self.kinetics_time_offset_s,
             "equilibrium_polarization": self.equilibrium_polarization,
@@ -1583,6 +1752,8 @@ class DynamicSpectralPhantom:
                 )
         if self.voxel_washout is not None:
             arrays.update(self.voxel_washout.arrays())
+        if self.contrast_relaxation is not None:
+            arrays.update(self.contrast_relaxation.arrays())
         if self.dynamic_b0 is not None:
             arrays["dynamic_b0_scale_map"] = self.dynamic_b0.spatial_scale_map
         for index, pool in enumerate(self.pools):
@@ -1658,6 +1829,9 @@ class DynamicSpectralPhantom:
                 colabelled_pools=tuple(inflow_metadata.get("colabelled_pools", ())),
             )
         voxel_washout = VoxelWashout.from_saved(header.get("voxel_washout"), arrays)
+        contrast_relaxation = ContrastRelaxation.from_saved(
+            header.get("contrast_relaxation"), arrays
+        )
         dynamic_b0_metadata = header.get("dynamic_b0")
         dynamic_b0 = None
         if dynamic_b0_metadata is not None and "dynamic_b0_scale_map" in arrays:
@@ -1704,6 +1878,7 @@ class DynamicSpectralPhantom:
             pyruvate_inflow=pyruvate_inflow,
             dynamic_b0=dynamic_b0,
             voxel_washout=voxel_washout,
+            contrast_relaxation=contrast_relaxation,
             conversion_start_s=float(header.get("conversion_start_s", 0.0)),
             kinetics_time_offset_s=float(header.get("kinetics_time_offset_s", 0.0)),
             metadata=header.get("metadata", {}),
@@ -2744,7 +2919,7 @@ def _spin_major_kernel():
         from .dynamic_spin_major_cy import API_VERSION, TILE_SPINS, run_spin_major_chunk
     except (ImportError, OSError):
         return None
-    if API_VERSION != 6:
+    if API_VERSION != 7:
         return None
     return run_spin_major_chunk, int(TILE_SPINS)
 
@@ -2985,7 +3160,9 @@ def _spin_major_rf_phasor(rf, reference):
     return phasor
 
 
-def _spin_major_rf_segment_keys(execution_plan, native_rf_hz, firsts, ends):
+def _spin_major_rf_segment_keys(
+    execution_plan, native_rf_hz, firsts, ends, relaxation_rows=None
+):
     """Return phase-free segment keys.
 
     Segments share a key when every per-interval input of the stepwise code
@@ -3011,6 +3188,11 @@ def _spin_major_rf_segment_keys(execution_plan, native_rf_hz, firsts, ends):
                 half[first:end].tobytes(),
                 gradient[first:end].tobytes(),
                 conversion[first:end].tobytes(),
+                (
+                    b""
+                    if relaxation_rows is None
+                    else relaxation_rows[first:end].tobytes()
+                ),
             )
         )
         candidates = representatives.setdefault(group, [])
@@ -3036,6 +3218,7 @@ def _spin_major_rf_propagator_plan(
     entry_bytes,
     budget_bytes,
     spatial_sources=False,
+    relaxation_rows=None,
 ):
     """Plan cached RF segment propagators of one block.
 
@@ -3060,7 +3243,7 @@ def _spin_major_rf_propagator_plan(
     dt = execution_plan.dt_s
     half = execution_plan.interval_half_s
     segment_key = _spin_major_rf_segment_keys(
-        execution_plan, native_rf_hz, firsts, ends
+        execution_plan, native_rf_hz, firsts, ends, relaxation_rows
     )
 
     sources = np.zeros((firsts.size, 6), dtype=np.float64)
@@ -3211,6 +3394,7 @@ def _spin_major_plan_slice(
     equilibrium,
     rf_cache,
     spatial_inflow=False,
+    relaxation_rows=None,
 ):
     """Build the compact interval tables of one spin-major plan slice.
 
@@ -3218,14 +3402,20 @@ def _spin_major_plan_slice(
     and evaluated per spin inside the executor. RF rotations and source rates
     do not depend on the spin, so they are prepared here once per value.
     Delayed inflow is evaluated per spin from the interval times instead.
+    Contrast relaxation rows join the group key, so every group carries one
+    row of per-compartment rates.
     """
     interval_slice = slice(first_interval, end_interval)
     interval_count = end_interval - first_interval
     dt = execution_plan.dt_s[interval_slice]
     half = dt / 2.0
-    group_keys = np.column_stack(
-        (half, execution_plan.conversion_active[interval_slice].astype(np.float64))
-    )
+    group_columns = [
+        half,
+        execution_plan.conversion_active[interval_slice].astype(np.float64),
+    ]
+    if relaxation_rows is not None:
+        group_columns.append(relaxation_rows[interval_slice].astype(np.float64))
+    group_keys = np.column_stack(group_columns)
     unique_groups, interval_group = np.unique(group_keys, axis=0, return_inverse=True)
 
     rf_values = native_rf_hz[interval_slice]
@@ -3314,6 +3504,10 @@ def _spin_major_plan_slice(
                 )
             ),
             dtype=np.float64,
+        )
+    if relaxation_rows is not None:
+        spatial_tables["group_relaxation"] = np.ascontiguousarray(
+            unique_groups[:, 2], dtype=np.int32
         )
     return {
         **spatial_tables,
@@ -3863,6 +4057,32 @@ def _simulate_dynamic_sequence_block(
         )
         if not washout.active:
             washout = None
+    contrast_compartment = None
+    contrast_interval_row = None
+    contrast_table = None
+    if phantom.contrast_relaxation is not None:
+        contrast_voxels = (
+            np.repeat(active, spins_per_voxel) if sampling.enabled else active
+        )
+        contrast_compartment = np.ascontiguousarray(
+            phantom.contrast_relaxation.compartment_map.ravel()[contrast_voxels],
+            dtype=np.int32,
+        )
+        contrast_interval_row, contrast_table = (
+            phantom.contrast_relaxation.interval_rows(
+                execution_plan.interval_mid_s, phantom.kinetics_time_offset_s
+            )
+        )
+        if not np.any(contrast_compartment >= 0) or contrast_table.shape[0] == 0:
+            contrast_compartment = None
+            contrast_interval_row = None
+            contrast_table = None
+        elif state.shape[0] > 1 and np.any(state[1:] != 0.0):
+            # Contrast rates act on pool 0 only; callers split independent
+            # water pools into passes in which pool 0 carries the signal.
+            raise ValueError(
+                "contrast relaxation requires magnetization in pool 0 only"
+            )
     preroll_start_s = kinetic_preroll_start_s(
         (
             None
@@ -3945,6 +4165,19 @@ def _simulate_dynamic_sequence_block(
         sequence_kernel in {"native_serial", "native_parallel"}
         and native_spin_major_fallback_reason is None
     )
+    if (
+        contrast_compartment is not None
+        and sequence_kernel != "reference"
+        and not native_spin_major_enabled
+    ):
+        raise ValueError(
+            "contrast relaxation runs on the reference or spin-major kernel only"
+            + (
+                ""
+                if native_spin_major_fallback_reason is None
+                else f" (spin-major: {native_spin_major_fallback_reason})"
+            )
+        )
     # Spin-major ADC sums are reduced over the whole block in a fixed order,
     # so a parent-resolved block only needs one signal row.
     signal_parent_rows = 1 if native_spin_major_enabled else parent_active_count
@@ -5530,6 +5763,7 @@ def _simulate_dynamic_sequence_block(
             entry_bytes=int(np.prod(entry_shape)) * 8,
             budget_bytes=_spin_major_rf_propagator_budget_bytes,
             spatial_sources=spatial_inflow_active,
+            relaxation_rows=contrast_interval_row,
         )
         if plan is None:
             rf_propagator_metadata[
@@ -5652,6 +5886,9 @@ def _simulate_dynamic_sequence_block(
             )
             washout_compartment = washout.compartment_by_spin(n_simulated_spins)
             spin_arguments["washout_compartment"] = washout_compartment
+        if contrast_compartment is not None:
+            spin_arguments["relaxation_compartment"] = contrast_compartment
+            spin_arguments["relaxation_table"] = contrast_table
         rf_cache = {}
         table_started = perf_counter()
         rf_plan, propagators = plan_rf_propagators(source_mode, equilibrium)
@@ -5696,6 +5933,7 @@ def _simulate_dynamic_sequence_block(
                 equilibrium=equilibrium,
                 rf_cache=rf_cache,
                 spatial_inflow=bool(spatial_arguments),
+                relaxation_rows=contrast_interval_row,
             )
             if washout_compartment is not None:
                 interval_slice = slice(first_interval, end_interval)
@@ -5773,6 +6011,7 @@ def _simulate_dynamic_sequence_block(
             "block(s)."
         )
 
+    contrast_rate_cache = {}
     interval_start = 0.0
     for interval in range(interval_count):
         if (
@@ -5837,6 +6076,27 @@ def _simulate_dynamic_sequence_block(
         )
         if sequence_kernel == "reference":
             gradient_frequency = _gradient_frequency_hz(positions, gradient)
+
+            def contrast_relaxation_rates(index):
+                row = (
+                    -1
+                    if contrast_interval_row is None
+                    else int(contrast_interval_row[index])
+                )
+                if row < 0:
+                    return t2, r1
+                cached = contrast_rate_cache.get(row)
+                if cached is None:
+                    rates = np.zeros((contrast_compartment.size, 2), dtype=np.float64)
+                    inside = contrast_compartment >= 0
+                    rates[inside] = contrast_table[row][contrast_compartment[inside]]
+                    cached = (
+                        [1.0 / (1.0 / t2[0] + rates[:, 1]), *t2[1:]],
+                        [r1[0] + rates[:, 0], *r1[1:]],
+                    )
+                    contrast_rate_cache[row] = cached
+                return cached
+
             static_frequencies = static_pool_frequency + gradient_frequency[None, :]
 
             def phase_cycles(start_s, end_s, duration_s):
@@ -5886,6 +6146,7 @@ def _simulate_dynamic_sequence_block(
             source_start, source_mid, concentration_start, concentration_mid = (
                 source_values(interval_start, interval_mid)
             )
+            interval_t2, interval_r1 = contrast_relaxation_rates(interval)
             if washout is not None:
                 washout.decay(dt / 4.0, state, concentration_state)
             _free_step(
@@ -5895,9 +6156,9 @@ def _simulate_dynamic_sequence_block(
                     interval_mid,
                     execution_plan.interval_half_s[interval, 0],
                 ),
-                t2,
+                interval_t2,
                 interval_kpl,
-                r1,
+                interval_r1,
                 dt / 2.0,
                 source_start,
                 source_mid,
@@ -5928,9 +6189,9 @@ def _simulate_dynamic_sequence_block(
                     interval_end,
                     execution_plan.interval_half_s[interval, 1],
                 ),
-                t2,
+                interval_t2,
                 interval_kpl,
-                r1,
+                interval_r1,
                 dt / 2.0,
                 source_mid,
                 source_end,
@@ -6854,6 +7115,20 @@ def _simulate_dynamic_sequence_single_source(
             )
             is not None
         )
+    contrast_kernel_fallback = None
+    if (
+        phantom.contrast_relaxation is not None
+        and sequence_kernel != "reference"
+        and not spin_major_planned
+    ):
+        # Contrast rates exist only in the reference and spin-major kernels.
+        contrast_kernel_fallback = sequence_kernel
+        sequence_kernel = "reference"
+        if status_callback is not None:
+            status_callback(
+                "Contrast relaxation needs the spin-major kernel; running the "
+                f"reference kernel instead of {contrast_kernel_fallback}."
+            )
     adc_row_bytes = phantom.n_species * n_rx_coils * adc_count * complex_dtype.itemsize
 
     # Public outputs remain global. Everything proportional to the expanded
@@ -6980,7 +7255,7 @@ def _simulate_dynamic_sequence_single_source(
         **_ignored,
     )
     if not use_chunking:
-        return _simulate_dynamic_sequence_block(
+        result = _simulate_dynamic_sequence_block(
             program,
             phantom,
             progress_callback=progress_callback,
@@ -6988,6 +7263,11 @@ def _simulate_dynamic_sequence_single_source(
             status_callback=status_callback,
             **common_arguments,
         )
+        if contrast_kernel_fallback is None:
+            return result
+        metadata = dict(result.metadata)
+        metadata["contrast_kernel_fallback_from"] = contrast_kernel_fallback
+        return replace(result, metadata=metadata)
 
     block_count = (parent_count + chunk_parent_count - 1) // chunk_parent_count
     if status_callback is not None:
@@ -7113,6 +7393,8 @@ def _simulate_dynamic_sequence_single_source(
             "numerical_contract": "float64-close",
         }
     )
+    if contrast_kernel_fallback is not None:
+        metadata["contrast_kernel_fallback_from"] = contrast_kernel_fallback
     return replace(
         template_result,
         signal=species_signal.sum(axis=0),
@@ -7206,17 +7488,195 @@ def _colabelled_pass_phantom(
     return result
 
 
+def _populated_pools(phantom: DynamicSpectralPhantom):
+    """Return indices of pools with initial magnetization or spin density."""
+    populated = []
+    for index, pool in enumerate(phantom.pools):
+        maps = [phantom.initial_concentration_maps.get(pool.name)]
+        if phantom.initial_spin_density_maps is not None:
+            maps.append(phantom.initial_spin_density_maps.get(pool.name))
+        if any(
+            values is not None and np.any(np.asarray(values) != 0) for values in maps
+        ):
+            populated.append(index)
+    return populated
+
+
+def _independent_pool_passes(phantom: DynamicSpectralPhantom, sequence_kernel):
+    """Return the pools to simulate one at a time, or None.
+
+    Without inflow, washout and conversion the pools never exchange
+    magnetization, so each populated pool can run alone. Contrast rates act
+    on pool 0, so contrast phantoms always run one pass per populated pool.
+    Phantoms with more pools than the spin-major kernel supports run passes
+    on the native kernels, where each pass fits it.
+    """
+    if phantom.pyruvate_inflow is not None or _washout_active(phantom):
+        return None
+    if np.any(np.asarray(phantom.kpl_map_s_inv) != 0):
+        return None
+    kpa = getattr(phantom, "kpa_map_s_inv", None)
+    if kpa is not None and np.any(np.asarray(kpa) != 0):
+        return None
+    populated = _populated_pools(phantom)
+    if not populated:
+        return None
+    if phantom.contrast_relaxation is not None:
+        return None if populated == [0] else populated
+    if phantom.n_species > _SPIN_MAJOR_MAX_POOLS and sequence_kernel in {
+        "native_serial",
+        "native_parallel",
+    }:
+        return populated
+    return None
+
+
+def _independent_pool_pass_phantom(
+    phantom: DynamicSpectralPhantom, index: int
+) -> DynamicSpectralPhantom:
+    """Return a two-pool phantom of pool ``index`` and an empty partner."""
+    import copy
+
+    partner = 1 if index == 0 else 0
+    order = (index, partner)
+    names = [phantom.pools[value].name for value in order]
+
+    def kept(maps):
+        if maps is None:
+            return None
+        return {
+            names[0]: np.asarray(maps[names[0]], dtype=np.float64),
+            names[1]: np.zeros(phantom.shape, dtype=np.float64),
+        }
+
+    result = copy.copy(phantom)
+    result.pools = tuple(phantom.pools[value] for value in order)
+    result.initial_concentration_maps = kept(phantom.initial_concentration_maps)
+    result.initial_spin_density_maps = kept(phantom.initial_spin_density_maps)
+    result.kpl_map_s_inv = np.zeros(phantom.shape, dtype=np.float64)
+    if hasattr(phantom, "kpa_map_s_inv"):
+        result.kpa_map_s_inv = np.zeros(phantom.shape, dtype=np.float64)
+    result.kinetic_regions = ()
+    if phantom.dynamic_b0 is not None:
+        result.dynamic_b0 = replace(
+            phantom.dynamic_b0,
+            pool_scale=tuple(phantom.dynamic_b0.pool_scale[value] for value in order),
+        )
+    return result
+
+
+def _run_superposed_passes(program, pass_phantoms, kwargs):
+    """Run single-source passes with combined progress and preview."""
+    progress_callback = kwargs.pop("progress_callback", None)
+    preview_callback = kwargs.pop("preview_callback", None)
+    count = len(pass_phantoms)
+    previous_signal = None
+    results = []
+    for pass_index, pass_phantom in enumerate(pass_phantoms):
+        pass_kwargs = dict(kwargs)
+        if progress_callback is not None:
+
+            def pass_progress(done, total, _index=pass_index):
+                progress_callback(_index * int(total) + int(done), count * int(total))
+
+            pass_kwargs["progress_callback"] = pass_progress
+        if preview_callback is not None:
+
+            def pass_preview(
+                fraction, signal, _index=pass_index, _base=previous_signal
+            ):
+                combined = signal if _base is None else _base + signal
+                preview_callback((_index + float(fraction)) / count, combined)
+
+            pass_kwargs["preview_callback"] = pass_preview
+        result = _simulate_dynamic_sequence_single_source(
+            program, pass_phantom, **pass_kwargs
+        )
+        results.append(result)
+        previous_signal = (
+            result.signal
+            if previous_signal is None
+            else previous_signal + result.signal
+        )
+    return results
+
+
+def _simulate_independent_pools(program, phantom, pools, kwargs):
+    """Simulate independent pools in two-pool passes and merge them."""
+    results = _run_superposed_passes(
+        program,
+        [_independent_pool_pass_phantom(phantom, index) for index in pools],
+        kwargs,
+    )
+    first = results[0]
+    species_signal = np.zeros(
+        (phantom.n_species,) + first.species_signal.shape[1:],
+        dtype=first.species_signal.dtype,
+    )
+    final_pool = np.zeros(
+        (phantom.n_species,) + first.final_pool_magnetization.shape[1:],
+        dtype=first.final_pool_magnetization.dtype,
+    )
+    checkpoint_pool = (
+        None
+        if first.checkpoint_pool_magnetization is None
+        else np.zeros(
+            (first.checkpoint_pool_magnetization.shape[0], phantom.n_species)
+            + first.checkpoint_pool_magnetization.shape[2:],
+            dtype=first.checkpoint_pool_magnetization.dtype,
+        )
+    )
+    for index, result in zip(pools, results):
+        species_signal[index] = result.species_signal[0]
+        final_pool[index] = result.final_pool_magnetization[0]
+        if checkpoint_pool is not None:
+            checkpoint_pool[:, index] = result.checkpoint_pool_magnetization[:, 0]
+    metadata = dict(first.metadata)
+    metadata["n_simulated_spins"] = int(
+        sum(result.metadata.get("n_simulated_spins", 0) for result in results)
+    )
+    metadata["independent_pool_passes"] = [phantom.pools[index].name for index in pools]
+    metadata["independent_pool_pass_metadata"] = [
+        {
+            "pool": phantom.pools[index].name,
+            "n_simulated_spins": result.metadata.get("n_simulated_spins"),
+            "native_spin_major_enabled": result.metadata.get(
+                "native_spin_major_enabled"
+            ),
+        }
+        for index, result in zip(pools, results)
+    ]
+    return replace(
+        first,
+        signal=species_signal.sum(axis=0),
+        final_magnetization=final_pool.sum(axis=0),
+        checkpoint_magnetization=(
+            None if checkpoint_pool is None else checkpoint_pool.sum(axis=1)
+        ),
+        metadata=metadata,
+        species_signal=species_signal,
+        final_pool_magnetization=final_pool,
+        checkpoint_pool_magnetization=checkpoint_pool,
+    )
+
+
 def simulate_dynamic_sequence(program, phantom: DynamicSpectralPhantom, **kwargs):
     """Run a dynamic sequence, streaming large objects by parent voxel.
 
     Pools named in ``phantom.pyruvate_inflow.colabelled_pools`` receive the
     same inflow as the precursor (e.g. both labelled carbons of one injected
     molecule). They are simulated in additional passes as their own
-    precursor and superposed onto the primary result.
+    precursor and superposed onto the primary result. Pools that never
+    exchange magnetization may likewise run in one pass each.
     """
     inflow = phantom.pyruvate_inflow
     colabelled = () if inflow is None else tuple(inflow.colabelled_pools)
     if not colabelled:
+        pools = _independent_pool_passes(
+            phantom, kwargs.get("sequence_kernel", "optimized")
+        )
+        if pools is not None:
+            return _simulate_independent_pools(program, phantom, pools, kwargs)
         return _simulate_dynamic_sequence_single_source(program, phantom, **kwargs)
     names = [pool.name for pool in phantom.pools]
     for name in colabelled:
@@ -7231,38 +7691,11 @@ def simulate_dynamic_sequence(program, phantom: DynamicSpectralPhantom, **kwargs
         if conversion is not None and np.any(np.asarray(conversion) != 0):
             raise ValueError(f"co-labelled pool {name!r} must not receive conversion")
     sources = (None,) + colabelled
-    progress_callback = kwargs.pop("progress_callback", None)
-    preview_callback = kwargs.pop("preview_callback", None)
-    previous_signal = None
-    results = []
-    for pass_index, source_name in enumerate(sources):
-        pass_kwargs = dict(kwargs)
-        if progress_callback is not None:
-
-            def pass_progress(done, total, _index=pass_index):
-                progress_callback(
-                    _index * int(total) + int(done), len(sources) * int(total)
-                )
-
-            pass_kwargs["progress_callback"] = pass_progress
-        if preview_callback is not None:
-
-            def pass_preview(
-                fraction, signal, _index=pass_index, _base=previous_signal
-            ):
-                combined = signal if _base is None else _base + signal
-                preview_callback((_index + float(fraction)) / len(sources), combined)
-
-            pass_kwargs["preview_callback"] = pass_preview
-        result = _simulate_dynamic_sequence_single_source(
-            program, _colabelled_pass_phantom(phantom, source_name), **pass_kwargs
-        )
-        results.append(result)
-        previous_signal = (
-            result.signal
-            if previous_signal is None
-            else previous_signal + result.signal
-        )
+    results = _run_superposed_passes(
+        program,
+        [_colabelled_pass_phantom(phantom, source_name) for source_name in sources],
+        kwargs,
+    )
     primary = results[0]
     species_signal = np.array(primary.species_signal, copy=True)
     final_pool = np.array(primary.final_pool_magnetization, copy=True)
