@@ -82,19 +82,28 @@ def fit_inversion_recovery_t1(
 ) -> InversionRecoveryFit:
     """Fit T1 voxelwise from an inversion-recovery series.
 
-    ``signal`` has the inversion times on its last axis. Complex data is
-    rotated by the phase of the longest-TI sample and fitted on its real
-    part, which keeps the sign of inverted samples. Magnitude data uses
-    polarity restoration: the fit tries flipping the first ``k`` sorted
-    samples and keeps the ``k`` with the smallest residual (NLS-PR, Barral
-    et al., MRM 2010). The fit is a log-spaced T1 grid search with two
-    local refinements and closed-form ``a``/``b`` at every candidate.
+    ``signal`` has the inversion times on its last axis. ``inversion_times_s``
+    is one TI per sample or any array that broadcasts to ``signal``, such as
+    ``(n_slices, 1, 1, n_ti)`` per-slice TIs of a global multi-slice
+    inversion (see :func:`slice_inversion_times`). Complex data is rotated by
+    the phase of the longest-TI sample and fitted on its real part, which
+    keeps the sign of inverted samples. Magnitude data uses polarity
+    restoration: the fit tries flipping the first ``k`` sorted samples and
+    keeps the ``k`` with the smallest residual (NLS-PR, Barral et al., MRM
+    2010). The fit is a log-spaced T1 grid search with two local refinements
+    and closed-form ``a``/``b`` at every candidate.
     """
-    inversion_times = np.asarray(inversion_times_s, dtype=float).reshape(-1)
     data = np.asarray(signal)
-    if data.shape[-1:] != inversion_times.shape:
+    inversion_times = np.asarray(inversion_times_s, dtype=float)
+    if data.ndim == 0 or inversion_times.shape[-1:] != data.shape[-1:]:
         raise ValueError("signal must have the inversion times on its last axis")
-    if inversion_times.size < 3:
+    try:
+        inversion_times = np.broadcast_to(inversion_times, data.shape)
+    except ValueError as exc:
+        raise ValueError(
+            "inversion_times_s must broadcast to the signal shape"
+        ) from exc
+    if data.shape[-1] < 3:
         raise ValueError("an inversion-recovery fit needs at least three TIs")
     if not np.all(np.isfinite(inversion_times)) or np.any(inversion_times < 0):
         raise ValueError("inversion_times_s must be non-negative and finite")
@@ -103,13 +112,77 @@ def fit_inversion_recovery_t1(
         raise ValueError("t1_bounds_s must be increasing positive values")
     if int(coarse_points) < 3 or int(fine_points) < 3:
         raise ValueError("coarse_points and fine_points must be at least three")
-    order = np.argsort(inversion_times, kind="stable")
-    inversion_times = inversion_times[order]
-    data = data[..., order]
     voxel_shape = data.shape[:-1]
-    data = data.reshape(-1, inversion_times.size)
+    count = data.shape[-1]
+    data = data.reshape(-1, count)
     if magnitude is None:
         magnitude = not np.iscomplexobj(data) and bool(np.all(data >= 0))
+    # Voxels that share one TI set are fitted together.
+    time_sets, set_index = np.unique(
+        inversion_times.reshape(-1, count), axis=0, return_inverse=True
+    )
+    set_index = set_index.reshape(-1)
+    fitted = {
+        name: np.full(data.shape[0], np.nan)
+        for name in ("t1_s", "a", "b", "rms_residual", "peak")
+    }
+    flip_counts = np.zeros(data.shape[0], dtype=int)
+    for index, times in enumerate(time_sets):
+        rows = np.flatnonzero(set_index == index)
+        t1, a, b, rms, flips, peak = _fit_inversion_rows(
+            times,
+            data[rows],
+            magnitude=magnitude,
+            t1_bounds_s=(low, high),
+            coarse_points=int(coarse_points),
+            fine_points=int(fine_points),
+        )
+        for name, values in (
+            ("t1_s", t1),
+            ("a", a),
+            ("b", b),
+            ("rms_residual", rms),
+            ("peak", peak),
+        ):
+            fitted[name][rows] = values
+        flip_counts[rows] = flips
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fitted["inversion_efficiency"] = fitted["b"] / fitted["a"] - 1.0
+
+    peak = fitted.pop("peak")
+    global_peak = float(np.max(peak)) if peak.size else 0.0
+    masked = peak <= float(minimum_signal_fraction) * global_peak
+    if global_peak == 0.0:
+        masked[:] = True
+    result = {}
+    for name in ("t1_s", "a", "b", "inversion_efficiency", "rms_residual"):
+        array = np.asarray(fitted[name], dtype=float).copy()
+        array[masked] = np.nan
+        result[name] = array.reshape(voxel_shape)
+    return InversionRecoveryFit(
+        **result,
+        polarity_flips=flip_counts.reshape(voxel_shape),
+    )
+
+
+def _fit_inversion_rows(
+    inversion_times,
+    data,
+    *,
+    magnitude: bool,
+    t1_bounds_s: tuple[float, float],
+    coarse_points: int,
+    fine_points: int,
+):
+    """Fit rows of ``data`` that share the TIs ``inversion_times``.
+
+    Returns T1, ``a``, ``b``, the RMS residual, the polarity flips and the
+    peak of the fitted values per row.
+    """
+    low, high = t1_bounds_s
+    order = np.argsort(inversion_times, kind="stable")
+    inversion_times = inversion_times[order]
+    data = data[:, order]
     if np.iscomplexobj(data):
         reference_phase = np.angle(data[:, -1])
         values = np.real(data * np.exp(-1j * reference_phase)[:, None])
@@ -131,7 +204,7 @@ def fit_inversion_recovery_t1(
         flips = np.zeros(1, dtype=int)
         candidates = values[:, None, :]
 
-    coarse_grid = np.geomspace(low, high, int(coarse_points))
+    coarse_grid = np.geomspace(low, high, coarse_points)
     best_flip = np.zeros(candidates.shape[0], dtype=int)
     best_grid = np.zeros(candidates.shape[0], dtype=int)
     chunk = max(1, 4_000_000 // (candidates.shape[1] * coarse_grid.size))
@@ -155,7 +228,7 @@ def fit_inversion_recovery_t1(
         half_window = np.log(coarse_grid[1] / coarse_grid[0])
         # Two local passes, each spanning one spacing of the previous grid.
         for _ in range(2):
-            offsets = np.linspace(-half_window, half_window, int(fine_points))
+            offsets = np.linspace(-half_window, half_window, fine_points)
             fine_grid = np.clip(t1[:, None] * np.exp(offsets)[None, :], low, high)
             fine_cost, fine_a, fine_b = _grid_fit(inversion_times, selected, fine_grid)
             best_fine = np.argmin(fine_cost, axis=1)
@@ -175,26 +248,44 @@ def fit_inversion_recovery_t1(
             best = tuple(np.where(better, new, old) for new, old in zip(trial, best))
     cost, t1, a, b, best_flip = best
     rms = np.sqrt(cost / inversion_times.size)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        efficiency = b / a - 1.0
-
     peak = np.max(np.abs(values), axis=1)
-    global_peak = float(np.max(peak)) if peak.size else 0.0
-    masked = peak <= float(minimum_signal_fraction) * global_peak
-    if global_peak == 0.0:
-        masked[:] = True
-    result = {}
-    for name, array in (
-        ("t1_s", t1),
-        ("a", a),
-        ("b", b),
-        ("inversion_efficiency", efficiency),
-        ("rms_residual", rms),
-    ):
-        array = np.asarray(array, dtype=float).copy()
-        array[masked] = np.nan
-        result[name] = array.reshape(voxel_shape)
-    return InversionRecoveryFit(
-        **result,
-        polarity_flips=np.asarray(flips[best_flip], dtype=int).reshape(voxel_shape),
+    return t1, a, b, rms, flips[best_flip], peak
+
+
+def slice_inversion_times(definitions, *, slice_axis: str = "first") -> np.ndarray:
+    """Return the TI of every slice and repetition from Pulseq definitions.
+
+    ``SliceInversionTimes`` stores one row per repetition in spatial slice
+    order. The result is ``(n_slices, n_repetitions)`` for
+    ``slice_axis='first'`` (append image axes with ``[:, None, None, :]`` to
+    broadcast against ``(slice, y, x, repetition)`` images) or
+    ``(n_repetitions, n_slices)`` for ``'last'``. Without per-slice values the
+    repetition TIs are repeated for every slice.
+    """
+    from .encoding import numeric_definition_array
+
+    if slice_axis not in ("first", "last"):
+        raise ValueError("slice_axis must be 'first' or 'last'")
+    if "InversionTimes" not in definitions:
+        raise ValueError("the definitions describe no inversion recovery")
+    repetition_times = numeric_definition_array(
+        definitions["InversionTimes"], "InversionTimes"
     )
+    n_slices = (
+        numeric_definition_array(definitions["SlicePositions"], "SlicePositions").size
+        if "SlicePositions" in definitions
+        else 1
+    )
+    n_slices = max(1, n_slices)
+    if "SliceInversionTimes" in definitions:
+        values = numeric_definition_array(
+            definitions["SliceInversionTimes"], "SliceInversionTimes"
+        )
+        if values.size != repetition_times.size * n_slices:
+            raise ValueError(
+                "SliceInversionTimes must hold one value per repetition and slice"
+            )
+        times = values.reshape(repetition_times.size, n_slices)
+    else:
+        times = np.repeat(repetition_times[:, None], n_slices, axis=1)
+    return times.T.copy() if slice_axis == "first" else times

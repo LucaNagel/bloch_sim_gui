@@ -93,6 +93,7 @@ from .relaxometry import (
     InversionRecoveryFit,
     fit_inversion_recovery_t1,
     inversion_recovery_signal,
+    slice_inversion_times,
 )
 from .reference import ReferenceSimulationResult, simulate_reference_sequence
 from .result import SequenceSimulationResult
@@ -180,7 +181,10 @@ from .pulseq import (
     load_pulseq,
 )
 from .pulseq_builders import (
+    INVERSION_INTERVALS,
+    INVERSION_MODES,
     INVERSION_PULSE_TYPES,
+    SLICE_ORDERS,
     PRESS_REFOCUSING_PULSE_TYPES,
     PressTimingPlan,
     make_pulseq_bssfp,
@@ -194,6 +198,12 @@ from .pulseq_builders import (
     make_pulseq_press,
     make_pulseq_slice_selection,
     make_pulseq_spiral,
+    slice_acquisition_order,
+)
+from .inversion_recovery import (
+    INVERSION_RECOVERY_READOUTS,
+    InversionRecoveryTimingPlan,
+    make_pulseq_inversion_recovery,
 )
 from .advanced_bssfp_builders import (
     GAUBATZ_REFERENCE_TITLE,
@@ -343,11 +353,19 @@ __all__ = [
     "make_pulseq_bssfp",
     "make_pulseq_csi",
     "EpiTimingPlan",
+    "INVERSION_INTERVALS",
+    "INVERSION_MODES",
     "INVERSION_PULSE_TYPES",
+    "INVERSION_RECOVERY_READOUTS",
     "IR_T1_FIT_REFERENCE_DOI",
     "InversionRecoveryFit",
+    "InversionRecoveryTimingPlan",
+    "SLICE_ORDERS",
     "fit_inversion_recovery_t1",
     "inversion_recovery_signal",
+    "make_pulseq_inversion_recovery",
+    "slice_acquisition_order",
+    "slice_inversion_times",
     "CS_REFERENCE_DOI",
     "PRIMAL_DUAL_REFERENCE_DOI",
     "CompressedSensingResult",

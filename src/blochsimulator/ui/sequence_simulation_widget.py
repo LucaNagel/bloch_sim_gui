@@ -104,6 +104,7 @@ from ..sequence import (
     make_pulseq_epsi_mge,
     make_pulseq_epi,
     make_pulseq_flash,
+    make_pulseq_inversion_recovery,
     make_pulseq_slice_selection,
     make_pulseq_me_bssfp,
     make_pulseq_press,
@@ -114,6 +115,7 @@ from ..sequence import (
     recommend_spin_grid,
     recommend_spin_grid_for_pathways,
     recommend_spin_grid_for_phase_train,
+    slice_inversion_times,
     variable_flip_angle_schedule,
     weighted_pathway_sampling_error,
 )
@@ -127,6 +129,7 @@ from ..sequence.encoding import (
 )
 from ..sequence.export_bundle import existing_export_targets, perform_sequence_export
 from ..sequence.internal_fid import make_internal_fid
+from ..sequence.inversion_recovery import default_inversion_recovery_repetitions
 from ..sequence.parameter_loop import (
     MAX_PARAMETER_LOOP_POINTS,
     manual_parameter_loop_values,
@@ -1480,11 +1483,13 @@ class SequenceSimulationWidget(QWidget):
     PULSEQ_SOURCE = 9
     SLICE_SELECTION_SOURCE = 10
     PRESS_SOURCE = 11
+    INVERSION_RECOVERY_SOURCE = 12
     GENERATED_SOURCES = frozenset(
         (
             *range(EPI_SOURCE, EPSI_MGE_SOURCE + 1),
             SLICE_SELECTION_SOURCE,
             PRESS_SOURCE,
+            INVERSION_RECOVERY_SOURCE,
         )
     )
     CONFIGURABLE_SOURCES = GENERATED_SOURCES | {INTERNAL_SOURCE}
@@ -1500,6 +1505,7 @@ class SequenceSimulationWidget(QWidget):
         FLASH_SOURCE: "flash",
         EPSI_MGE_SOURCE: "epsi",
         PRESS_SOURCE: "press",
+        INVERSION_RECOVERY_SOURCE: "ir",
     }
     # Tooltip endings of the read/phase offset fields, by where the shift is
     # applied.
@@ -1617,6 +1623,12 @@ class SequenceSimulationWidget(QWidget):
         self.flash_timing_settle_timer.setSingleShot(True)
         self.flash_timing_settle_timer.setInterval(600)
         self.flash_timing_settle_timer.timeout.connect(self._settle_flash_timing)
+        self._resolving_ir_timing = False
+        self._ir_timing_notes: list[str] = []
+        self.ir_timing_settle_timer = QTimer(self)
+        self.ir_timing_settle_timer.setSingleShot(True)
+        self.ir_timing_settle_timer.setInterval(600)
+        self.ir_timing_settle_timer.timeout.connect(self._settle_ir_timing)
         self._resolving_epi_timing = False
         self._epi_timing_notes: list[str] = []
         self._last_timing_status = None
@@ -1754,6 +1766,7 @@ class SequenceSimulationWidget(QWidget):
         self.set_sequence_section_titles_bold(self._sequence_section_titles_bold)
         self._last_valid_epi_bandwidth_khz = self.sampling_bandwidth_khz.value()
         self._last_valid_flash_bandwidth_khz = self.flash_sampling_bandwidth_khz.value()
+        self._last_valid_ir_bandwidth_khz = self.ir_sampling_bandwidth_khz.value()
         self._connect_rf_designer(parent)
         self._load_default_sequence()
         # Typing 0 into a field picks the smallest value the sequence allows.
@@ -1848,6 +1861,8 @@ class SequenceSimulationWidget(QWidget):
             (self.csi_phase_fov_mm, y),
             (self.flash_read_fov_mm, x),
             (self.flash_phase_fov_mm, y),
+            (self.ir_read_fov_mm, x),
+            (self.ir_phase_fov_mm, y),
             (self.bssfp_read_fov_mm, x),
             (self.bssfp_phase_fov_mm, y),
             (self.bssfp_partition_fov_mm, z),
@@ -1954,6 +1969,7 @@ class SequenceSimulationWidget(QWidget):
                 "me_bssfp",
                 "slice_selection",
                 "press",
+                "ir",
             ):
                 duration_control = getattr(self, f"{prefix}_rf_duration_ms", None)
                 if duration_control is None:
@@ -1983,6 +1999,7 @@ class SequenceSimulationWidget(QWidget):
                 "me_bssfp",
                 "slice_selection",
                 "press",
+                "ir",
             )
         ):
             self._request_generated_sequence_refresh()
@@ -2046,6 +2063,7 @@ class SequenceSimulationWidget(QWidget):
             "me_bssfp",
             "slice_selection",
             "press",
+            "ir",
         ):
             if hasattr(self, f"{prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(prefix)
@@ -2166,6 +2184,7 @@ class SequenceSimulationWidget(QWidget):
             "me_bssfp",
             "slice_selection",
             "press",
+            "ir",
         ):
             if self._selected_shared_rf_pulse_type(prefix) == "designer":
                 self._update_shared_rf_controls(prefix)
@@ -2252,6 +2271,7 @@ class SequenceSimulationWidget(QWidget):
             "me_bssfp": self.me_bssfp_partition_fov_mm,
             "slice_selection": self.slice_selection_thickness_mm,
             "press": self.press_slice_size_mm,
+            "ir": self.ir_slice_thickness_mm,
         }
         return float(controls[prefix].value()) / 1000.0
 
@@ -2311,6 +2331,7 @@ class SequenceSimulationWidget(QWidget):
             "me_bssfp",
             "slice_selection",
             "press",
+            "ir",
         ):
             if hasattr(self, f"{control_prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(control_prefix)
@@ -2373,6 +2394,7 @@ class SequenceSimulationWidget(QWidget):
             "me_bssfp",
             "slice_selection",
             "press",
+            "ir",
         ):
             if hasattr(self, f"{control_prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(control_prefix)
@@ -2468,6 +2490,7 @@ class SequenceSimulationWidget(QWidget):
             "me_bssfp",
             "slice_selection",
             "press",
+            "ir",
         ):
             if hasattr(self, f"{control_prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(control_prefix)
@@ -2527,6 +2550,7 @@ class SequenceSimulationWidget(QWidget):
                 "Pulseq .seq file",
                 "RF + Slice Selection",
                 "PRESS (single voxel)",
+                "Inversion Recovery (2D)",
             ]
         )
         self.sequence_source.currentIndexChanged.connect(self._source_changed)
@@ -2534,7 +2558,8 @@ class SequenceSimulationWidget(QWidget):
             "Build EPI, EPSI/MGE, CSI, FLASH, Cartesian bSSFP, spectrally "
             "selective bSSFP, Cartesian or radial multi-echo bSSFP "
             "interactively, inspect RF + Slice Selection, build single-voxel "
-            "PRESS spectroscopy, or load a Pulseq file"
+            "PRESS spectroscopy or multi-slice inversion recovery for T1 "
+            "mapping, or load a Pulseq file"
         )
         sequence_layout.addWidget(self.sequence_source)
 
@@ -3476,6 +3501,164 @@ class SequenceSimulationWidget(QWidget):
         flash_form.addRow("ADC dwell", self.flash_dwell_info)
         self.flash_group.setVisible(False)
         controls_layout.addWidget(self.flash_group)
+
+        self.ir_group = QGroupBox("Inversion recovery (2D, T1 mapping)")
+        ir_form = _left_aligned_form(self.ir_group)
+        ir_hint = QLabel(
+            "Multi-slice inversion recovery for T1 mapping. A global "
+            "non-selective 180° is followed by TI and the excitation of every "
+            "slice in turn (180° - TI - 90° slice 1 - 90° slice 2 ...), so "
+            "later slices see TI plus the earlier excitations and readouts. "
+            "Slice-selective inversion inverts each slice right before it and "
+            "gives every slice the requested TI."
+        )
+        ir_hint.setWordWrap(True)
+        self.ir_readout = QComboBox()
+        for label, value in self.INVERSION_RECOVERY_READOUT_CHOICES:
+            self.ir_readout.addItem(label, value)
+        self.ir_readout.setToolTip(
+            "EPI acquires each slice in one shot after the inversion. The "
+            "gradient echo repeats the inversion for every phase-encoding "
+            "line (classic IR); TurboFLASH acquires a low-flip image after "
+            "each inversion and times TI to the k-space centre line"
+        )
+        self.ir_epi_readout_strategy = QComboBox()
+        self.ir_epi_readout_strategy.addItems(["Bipolar", "Flyback"])
+        self.ir_read_matrix = QSpinBox()
+        self.ir_read_matrix.setRange(2, 512)
+        self.ir_read_matrix.setValue(32)
+        self.ir_phase_matrix = QSpinBox()
+        self.ir_phase_matrix.setRange(1, 512)
+        self.ir_phase_matrix.setValue(32)
+        self.ir_read_fov_mm = self._parameter_spin(0.1, 10000.0, default_fov_x, " mm")
+        self.ir_phase_fov_mm = self._parameter_spin(0.1, 10000.0, default_fov_y, " mm")
+        self.ir_read_offset_mm, self.ir_phase_offset_mm = self._in_plane_offset_spins(
+            "ir", self.OFFSET_IN_SEQUENCE
+        )
+        self.ir_sampling_bandwidth_khz = self._sampling_bandwidth_spin(100.0)
+        ir_defaults = self.INVERSION_RECOVERY_READOUT_DEFAULTS["epi"]
+        self._ir_previous_readout = "epi"
+        self.ir_flip_angle_deg = self._parameter_spin(
+            0.1, 360.0, ir_defaults["flip_angle_deg"], "°"
+        )
+        self.ir_flip_angle_deg.setToolTip(
+            "Excitation flip angle; the readout choice sets 90° for EPI and the "
+            "gradient echo and 10° for TurboFLASH while the angle is unchanged"
+        )
+        (
+            self.ir_slice_orientation,
+            self.ir_read_gradient_axis,
+            self.ir_phase_gradient_axis,
+            self.ir_slice_gradient_axis,
+        ) = self._two_dimensional_orientation_controls("ir")
+        self.ir_slice_count = QSpinBox()
+        self.ir_slice_count.setRange(1, 128)
+        self.ir_slice_count.setValue(3)
+        self.ir_slice_thickness_mm = self._parameter_spin(0.05, 100.0, 3.0, " mm")
+        self.ir_slice_gap_mm = self._parameter_spin(0.0, 100.0, 1.0, " mm")
+        self.ir_slice_offset_mm = self._parameter_spin(-10000.0, 10000.0, 0.0, " mm")
+        self.ir_slice_order = QComboBox()
+        for label, value in self.SLICE_ORDER_CHOICES:
+            self.ir_slice_order.addItem(label, value)
+        self.ir_slice_order.setToolTip(
+            "Order of the slices after each inversion. Cyclic rotates the "
+            "first slice from one TI series to the next, so with a global "
+            "inversion every slice is sampled at every train position"
+        )
+        self.ir_echo_time_ms = self._parameter_spin(
+            0.1, 10000.0, ir_defaults["echo_time_ms"], " ms"
+        )
+        self.ir_line_repetition_time_ms = self._parameter_spin(
+            0.1, 100000.0, 10.0, " ms"
+        )
+        self.ir_line_repetition_time_ms.setToolTip(
+            "Gradient-echo line TR. With the global inversion one inversion "
+            "is followed by one line of every slice"
+        )
+        self.ir_repetition_time_ms = self._parameter_spin(
+            0.1, 100_000_000.0, 5000.0, " ms"
+        )
+        self.ir_repetition_time_ms.setToolTip(
+            "Inversion-to-inversion time. Choose it several T1 long for full "
+            "recovery between inversions; type 0 for the shortest"
+        )
+        self.ir_repetitions = QSpinBox()
+        self.ir_repetitions.setRange(0, 10000)
+        self.ir_repetitions.setValue(0)
+        self.ir_repetitions.setSpecialValueText("One TI series")
+        self.ir_repetitions.setToolTip(
+            "Images per slice; the TI list cycles from one repetition to the "
+            "next. One TI series samples every TI once, and the cyclic order "
+            "repeats it once per slice"
+        )
+        self.ir_rf_spoiling = QCheckBox("Enable RF spoiling")
+        self.ir_rf_spoiling.setChecked(True)
+        self.ir_rf_spoiling_increment_deg = self._parameter_spin(
+            -360.0, 360.0, 117.0, "°"
+        )
+        self.ir_spoiler_cycles_per_slice = self._parameter_spin(
+            0.0, 1000.0, 4.0, " cycles/slice"
+        )
+        self.ir_spoiler_cycles_per_voxel = self._parameter_spin(
+            0.0, 1000.0, 0.0, " cycles/voxel"
+        )
+        self.ir_spoiler_duration_ms = self._parameter_spin(0.001, 1000.0, 2.0, " ms")
+        self.ir_timing_info = QLabel()
+        self.ir_timing_info.setWordWrap(True)
+        self.ir_slice_ti_info = QLabel()
+        self.ir_slice_ti_info.setWordWrap(True)
+        self.ir_dwell_info = QLabel()
+        ir_form.addRow(ir_hint)
+        _add_form_section(ir_form, "Readout")
+        ir_form.addRow("Readout", self.ir_readout)
+        ir_form.addRow("EPI trajectory", self.ir_epi_readout_strategy)
+        _add_form_section(ir_form, "Spatial encoding")
+        ir_form.addRow("Read matrix", self.ir_read_matrix)
+        ir_form.addRow("Phase matrix", self.ir_phase_matrix)
+        ir_form.addRow("Read FOV", self.ir_read_fov_mm)
+        ir_form.addRow("Phase FOV", self.ir_phase_fov_mm)
+        ir_form.addRow("Read offset", self.ir_read_offset_mm)
+        ir_form.addRow("Phase offset", self.ir_phase_offset_mm)
+        ir_form.addRow("Sampling bandwidth", self.ir_sampling_bandwidth_khz)
+        _add_form_section(ir_form, "RF pulse")
+        ir_form.addRow("Flip angle", self.ir_flip_angle_deg)
+        self._add_shared_rf_controls(
+            ir_form,
+            "ir",
+            pulse_type="Sinc",
+            duration_ms=2.0,
+            sinc_lobes=3,
+        )
+        _add_form_section(ir_form, "Slice selection")
+        ir_form.addRow("Plane preset", self.ir_slice_orientation)
+        ir_form.addRow("Read gradient direction", self.ir_read_gradient_axis)
+        ir_form.addRow("Phase gradient direction", self.ir_phase_gradient_axis)
+        ir_form.addRow("Slice gradient direction", self.ir_slice_gradient_axis)
+        ir_form.addRow("Slices", self.ir_slice_count)
+        ir_form.addRow("Slice thickness", self.ir_slice_thickness_mm)
+        ir_form.addRow("Slice gap", self.ir_slice_gap_mm)
+        ir_form.addRow("Slice package offset", self.ir_slice_offset_mm)
+        ir_form.addRow("Slice order", self.ir_slice_order)
+        self._add_inversion_controls(
+            ir_form, "ir", lambda *_: self._ir_changed(), optional=False
+        )
+        ir_form.addRow("Slice TIs", self.ir_slice_ti_info)
+        _add_form_section(ir_form, "Timing")
+        ir_form.addRow("Echo time (TE)", self.ir_echo_time_ms)
+        ir_form.addRow("Line TR", self.ir_line_repetition_time_ms)
+        ir_form.addRow("Inversion TR", self.ir_repetition_time_ms)
+        ir_form.addRow("Repetitions", self.ir_repetitions)
+        ir_form.addRow("Shortest timing", self.ir_timing_info)
+        _add_form_section(ir_form, "Spoiling")
+        ir_form.addRow("RF spoiling", self.ir_rf_spoiling)
+        ir_form.addRow("RF spoiling increment", self.ir_rf_spoiling_increment_deg)
+        ir_form.addRow("Through-slice spoiler", self.ir_spoiler_cycles_per_slice)
+        ir_form.addRow("In-plane spoiler", self.ir_spoiler_cycles_per_voxel)
+        ir_form.addRow("Spoiler duration", self.ir_spoiler_duration_ms)
+        _add_form_section(ir_form, "Derived sampling")
+        ir_form.addRow("ADC dwell", self.ir_dwell_info)
+        self.ir_group.setVisible(False)
+        controls_layout.addWidget(self.ir_group)
 
         self.bssfp_group = QGroupBox("bSSFP acquisition (3D)")
         bssfp_form = _left_aligned_form(self.bssfp_group)
@@ -5009,6 +5192,40 @@ class SequenceSimulationWidget(QWidget):
             self._csi_changed,
         )
         self.csi_variable_flip_angle.toggled.connect(self._csi_changed)
+        for widget in (
+            self.ir_read_matrix,
+            self.ir_phase_matrix,
+            self.ir_read_fov_mm,
+            self.ir_phase_fov_mm,
+            self.ir_read_offset_mm,
+            self.ir_phase_offset_mm,
+            self.ir_sampling_bandwidth_khz,
+            self.ir_flip_angle_deg,
+            self.ir_slice_count,
+            self.ir_slice_thickness_mm,
+            self.ir_slice_gap_mm,
+            self.ir_slice_offset_mm,
+            self.ir_echo_time_ms,
+            self.ir_line_repetition_time_ms,
+            self.ir_repetition_time_ms,
+            self.ir_repetitions,
+            self.ir_rf_spoiling_increment_deg,
+            self.ir_spoiler_cycles_per_slice,
+            self.ir_spoiler_cycles_per_voxel,
+            self.ir_spoiler_duration_ms,
+        ):
+            widget.valueChanged.connect(self._ir_changed)
+        self.ir_readout.currentIndexChanged.connect(self._ir_readout_changed)
+        self.ir_epi_readout_strategy.currentIndexChanged.connect(self._ir_changed)
+        self.ir_slice_order.currentIndexChanged.connect(self._ir_changed)
+        self.ir_rf_spoiling.toggled.connect(self._ir_changed)
+        self._connect_two_dimensional_orientation_controls(
+            self.ir_slice_orientation,
+            self.ir_read_gradient_axis,
+            self.ir_phase_gradient_axis,
+            self.ir_slice_gradient_axis,
+            self._ir_changed,
+        )
         self.csi_use_ernst_angle.toggled.connect(self._csi_changed)
         self.csi_rf_spoiling.toggled.connect(self._csi_changed)
         self.csi_spoil_after_readout.toggled.connect(self._csi_changed)
@@ -5264,6 +5481,7 @@ class SequenceSimulationWidget(QWidget):
             ("me_bssfp", self._me_bssfp_changed),
             ("slice_selection", self._slice_selection_changed),
             ("press", self._press_changed),
+            ("ir", self._ir_changed),
         ):
             self._connect_shared_rf_controls(prefix, callback)
         for control in (
@@ -5340,6 +5558,7 @@ class SequenceSimulationWidget(QWidget):
         self._update_radial_me_bssfp_labels()
         self._update_me_bssfp_labels()
         self._update_press_labels()
+        self._update_ir_labels()
         self._object_source_changed()
         self._refresh_parameter_loop_parameters()
 
@@ -6249,14 +6468,69 @@ class SequenceSimulationWidget(QWidget):
         ("Sinc", "sinc"),
         ("Block", "block"),
     )
+    INVERSION_MODE_CHOICES = (
+        ("Global (non-selective)", "global"),
+        ("Slice-selective", "slice_selective"),
+    )
+    SLICE_ORDER_CHOICES = (
+        ("Sequential", "sequential"),
+        ("Interleaved", "interleaved"),
+        ("Cyclic (rotate per TI series)", "cyclic"),
+    )
+    INVERSION_RECOVERY_READOUT_CHOICES = (
+        ("EPI (one image per slice and inversion)", "epi"),
+        ("Gradient echo (one line per inversion)", "gre"),
+        ("TurboFLASH (one image per inversion)", "turboflash"),
+    )
+    # Per-readout defaults; switching the readout replaces only values the
+    # user left at the previous readout's default.
+    INVERSION_RECOVERY_READOUT_DEFAULTS = {
+        "epi": {
+            "flip_angle_deg": 90.0,
+            "echo_time_ms": 20.0,
+            "inversion_times_ms": "100, 400, 1000, 2500",
+        },
+        "gre": {
+            "flip_angle_deg": 90.0,
+            "echo_time_ms": 4.0,
+            "inversion_times_ms": "100, 400, 1000, 2500",
+        },
+        # TurboFLASH times TI to the centre line, half an image after the
+        # inversion.
+        "turboflash": {
+            "flip_angle_deg": 10.0,
+            "echo_time_ms": 4.0,
+            "inversion_times_ms": "250, 500, 1000, 2500",
+        },
+    }
 
-    def _add_inversion_controls(self, form, prefix, changed):
-        """Add the inversion-recovery section of the FLASH or EPI form."""
-        enabled = QCheckBox("Before every repetition")
-        enabled.setToolTip(
-            "Prepend a non-selective 180° inversion, a crusher and a TI delay "
-            "to every repetition. TI runs from the inversion centre to the "
-            "excitation that samples the k-space centre of the first slice"
+    def _add_inversion_controls(self, form, prefix, changed, *, optional=True):
+        """Add the inversion-recovery section of a form.
+
+        ``optional=False`` leaves out the on/off checkbox for forms that
+        always invert.
+        """
+        enabled = None
+        if optional:
+            enabled = QCheckBox("Before every repetition")
+            enabled.setToolTip(
+                "Prepend a 180° inversion, a crusher and a TI delay to every "
+                "repetition. TI runs from the inversion centre to the "
+                "excitation that samples the k-space centre of the first slice"
+            )
+        mode = QComboBox()
+        for label, value in self.INVERSION_MODE_CHOICES:
+            mode.addItem(label, value)
+        mode.setToolTip(
+            "Global: one non-selective 180° before the slice train, so slice k "
+            "sees TI plus the k earlier excitations and readouts. "
+            "Slice-selective: a selective 180° right before each slice gives "
+            "every slice the requested TI"
+        )
+        slab_factor = self._parameter_spin(0.1, 100.0, 1.0, " × slice")
+        slab_factor.setToolTip(
+            "Thickness of the slice-selective inversion slab relative to the "
+            "slice; values above 1 cover the slice profile edges"
         )
         times = QLineEdit("100, 400, 1000, 2500")
         times.setToolTip(
@@ -6269,7 +6543,8 @@ class SequenceSimulationWidget(QWidget):
             pulse_type.addItem(label, value)
         pulse_type.setToolTip(
             "The adiabatic hyperbolic secant inverts robustly across B1 "
-            "inhomogeneity; sinc and block pulses are scaled to 180°"
+            "inhomogeneity; sinc and block pulses are scaled to 180°. "
+            "Slice-selective inversion needs a shaped pulse"
         )
         duration = self._parameter_spin(0.5, 100.0, 10.0, " ms")
         crusher = self._parameter_spin(0.0, 1000.0, 8.0, " cycles/slice")
@@ -6281,50 +6556,71 @@ class SequenceSimulationWidget(QWidget):
         info.setWordWrap(True)
         for suffix, control in (
             ("enabled", enabled),
+            ("mode", mode),
+            ("slab_factor", slab_factor),
             ("times_ms", times),
             ("pulse_type", pulse_type),
             ("duration_ms", duration),
             ("crusher_cycles_per_slice", crusher),
             ("info", info),
         ):
+            if control is None:
+                continue
             control.setObjectName(f"{prefix}_inversion_{suffix}")
             setattr(self, f"{prefix}_inversion_{suffix}", control)
         _add_form_section(form, "Inversion recovery")
-        form.addRow("Inversion", enabled)
+        if enabled is not None:
+            form.addRow("Inversion", enabled)
+            enabled.toggled.connect(lambda *_: self._update_inversion_controls(prefix))
+            enabled.toggled.connect(changed)
+        form.addRow("Inversion mode", mode)
+        form.addRow("Inversion slab", slab_factor)
         form.addRow("Inversion times (TI)", times)
         form.addRow("Inversion pulse", pulse_type)
         form.addRow("Inversion pulse duration", duration)
         form.addRow("Inversion crusher", crusher)
         form.addRow("TI timing", info)
-        enabled.toggled.connect(lambda *_: self._update_inversion_controls(prefix))
-        enabled.toggled.connect(changed)
+        mode.currentIndexChanged.connect(
+            lambda *_: self._update_inversion_controls(prefix)
+        )
+        mode.currentIndexChanged.connect(changed)
+        slab_factor.valueChanged.connect(changed)
         times.editingFinished.connect(changed)
         pulse_type.currentIndexChanged.connect(changed)
         duration.valueChanged.connect(changed)
         crusher.valueChanged.connect(changed)
         self._update_inversion_controls(prefix)
 
+    def _inversion_active(self, prefix):
+        enabled = getattr(self, f"{prefix}_inversion_enabled", None)
+        return enabled is None or (enabled.isEnabled() and enabled.isChecked())
+
     def _update_inversion_controls(self, prefix):
-        enabled = getattr(self, f"{prefix}_inversion_enabled")
+        enabled = getattr(self, f"{prefix}_inversion_enabled", None)
         if prefix == "epi":
             enabled.setEnabled(self.epi_readout_trajectory.currentText() != "Spiral")
-        active = enabled.isEnabled() and enabled.isChecked()
+        active = self._inversion_active(prefix)
         for suffix in (
+            "mode",
             "times_ms",
             "pulse_type",
             "duration_ms",
             "crusher_cycles_per_slice",
         ):
             getattr(self, f"{prefix}_inversion_{suffix}").setEnabled(active)
+        getattr(self, f"{prefix}_inversion_slab_factor").setEnabled(
+            active
+            and getattr(self, f"{prefix}_inversion_mode").currentData()
+            == "slice_selective"
+        )
         if not active:
             getattr(self, f"{prefix}_inversion_info").setText(
                 "Off" if enabled.isEnabled() else "Cartesian EPI readouts only"
             )
 
     def _inversion_parameters(self, prefix):
-        """Inversion-recovery builder arguments of the FLASH or EPI form."""
-        enabled = getattr(self, f"{prefix}_inversion_enabled")
-        if not (enabled.isEnabled() and enabled.isChecked()):
+        """Inversion-recovery builder arguments of a form."""
+        if not self._inversion_active(prefix):
             return {}
         text = getattr(self, f"{prefix}_inversion_times_ms").text()
         try:
@@ -6342,6 +6638,10 @@ class SequenceSimulationWidget(QWidget):
             raise ValueError("Enter at least one inversion time")
         return {
             "inversion_times_s": tuple(value / 1000.0 for value in times_ms),
+            "inversion_mode": getattr(self, f"{prefix}_inversion_mode").currentData(),
+            "inversion_slab_factor": getattr(
+                self, f"{prefix}_inversion_slab_factor"
+            ).value(),
             "inversion_pulse_type": getattr(
                 self, f"{prefix}_inversion_pulse_type"
             ).currentData(),
@@ -7599,6 +7899,7 @@ class SequenceSimulationWidget(QWidget):
             self.INTERNAL_SOURCE: self._load_internal_sequence,
             self.SLICE_SELECTION_SOURCE: self._load_slice_selection,
             self.PRESS_SOURCE: self._load_press,
+            self.INVERSION_RECOVERY_SOURCE: self._load_inversion_recovery,
             1: self._load_cartesian_epi,
             2: self._load_csi,
             3: self._load_bssfp,
@@ -7943,6 +8244,9 @@ class SequenceSimulationWidget(QWidget):
         press_selected = source_index == self.PRESS_SOURCE
         self.press_group.setVisible(press_selected)
         self.press_group.setEnabled(press_selected)
+        ir_selected = source_index == self.INVERSION_RECOVERY_SOURCE
+        self.ir_group.setVisible(ir_selected)
+        self.ir_group.setEnabled(ir_selected)
         self.acquisition_group.setVisible(epi_selected)
         self.acquisition_group.setEnabled(epi_selected)
         self.epsi_mge_group.setVisible(epsi_mge_selected)
@@ -8218,6 +8522,10 @@ class SequenceSimulationWidget(QWidget):
                 self._epsi_mge_pulseq_parameters,
             ),
             self.PRESS_SOURCE: (make_pulseq_press, self._press_pulseq_parameters),
+            self.INVERSION_RECOVERY_SOURCE: (
+                make_pulseq_inversion_recovery,
+                self._ir_pulseq_parameters,
+            ),
         }
         if source not in builders:
             return None
@@ -8227,8 +8535,9 @@ class SequenceSimulationWidget(QWidget):
     def _timing_minimums_ms(self):
         """Shortest feasible value of each timing field, or None.
 
-        Only FLASH, Cartesian EPI, EPSI / MGE and PRESS have timing-only
-        plans; the limits are rounded up to each field's precision.
+        Only FLASH, Cartesian EPI, EPSI / MGE, PRESS and inversion recovery
+        have timing-only plans; the limits are rounded up to each field's
+        precision.
         """
         source = self.sequence_source.currentIndex()
         if source == self.FLASH_SOURCE:
@@ -8271,6 +8580,21 @@ class SequenceSimulationWidget(QWidget):
                 (self.press_echo_time_ms, plan.minimum_echo_time_s),
                 (self.press_repetition_time_ms, plan.minimum_repetition_time_s),
             ]
+        elif source == self.INVERSION_RECOVERY_SOURCE:
+            plan = make_pulseq_inversion_recovery(
+                **self._ir_pulseq_parameters(), timing_only=True
+            )
+            limits = [
+                (self.ir_echo_time_ms, plan.minimum_echo_time_s),
+                (self.ir_repetition_time_ms, plan.minimum_repetition_time_s),
+            ]
+            if plan.minimum_readout_repetition_time_s is not None:
+                limits.append(
+                    (
+                        self.ir_line_repetition_time_ms,
+                        plan.minimum_readout_repetition_time_s,
+                    )
+                )
         else:
             return None
         return {
@@ -8472,6 +8796,173 @@ class SequenceSimulationWidget(QWidget):
         self.press_resolution_info.setText(
             f"{plan.spectral_bandwidth_hz / points:.6g} Hz"
         )
+
+    def _ir_changed(self, *_):
+        ir_selected = self.sequence_source.currentIndex() == (
+            self.INVERSION_RECOVERY_SOURCE
+        )
+        if ir_selected:
+            self._resolve_ir_timing(protected=self.sender())
+            self.ir_timing_settle_timer.start()
+        self._update_ir_labels()
+        self._update_spoiling_quality()
+        if ir_selected:
+            self.ir_slice_ti_info.setText("Listed once the sequence is generated")
+            self._request_generated_sequence_refresh()
+
+    def _settle_ir_timing(self):
+        """Correct the field the user last edited once input has paused."""
+        if self.sequence_source.currentIndex() != self.INVERSION_RECOVERY_SOURCE:
+            return
+        if self._resolve_ir_timing(protected=None, keep_notes=True):
+            self._update_ir_labels()
+            self._request_generated_sequence_refresh()
+
+    def _resolve_ir_timing(self, protected=None, keep_notes=False):
+        """Raise IR bandwidth, TE, line TR and inversion TR to valid values.
+
+        Same policy as FLASH: values below the shortest feasible timing are
+        raised and larger ones are never reduced, so switching to the longer
+        slice-selective train keeps a raised inversion TR.  Returns whether
+        any control changed.
+        """
+        if self._resolving_ir_timing or self._restoring_session_run:
+            return False
+        self._resolving_ir_timing = True
+        notes: list[str] = []
+        plan = None
+        try:
+            for _ in range(5):
+                try:
+                    plan = make_pulseq_inversion_recovery(
+                        **self._ir_pulseq_parameters(), timing_only=True
+                    )
+                except Exception as exc:
+                    self._show_ir_timing_status(None, notes, error=str(exc))
+                    return bool(notes)
+                if not self._apply_ir_timing_plan(plan, protected, notes):
+                    break
+            if notes or not keep_notes:
+                self._ir_timing_notes = notes
+            self._show_ir_timing_status(plan, self._ir_timing_notes)
+        finally:
+            self._resolving_ir_timing = False
+        return bool(notes)
+
+    def _apply_ir_timing_plan(self, plan, protected, notes):
+        changed = False
+        control = self.ir_sampling_bandwidth_khz
+        if control is not protected:
+            bandwidth_khz = self._ceil_spin_value(
+                plan.sampling_bandwidth_hz / 1000.0, control.decimals()
+            )
+            if abs(control.value() - bandwidth_khz) > 0.5 * 10.0 ** -control.decimals():
+                self._set_timing_control(
+                    control, bandwidth_khz, "Bandwidth", "kHz", notes
+                )
+                changed = True
+        limits = [(self.ir_echo_time_ms, plan.minimum_echo_time_s, "TE")]
+        if plan.minimum_readout_repetition_time_s is not None:
+            limits.append(
+                (
+                    self.ir_line_repetition_time_ms,
+                    plan.minimum_readout_repetition_time_s,
+                    "Line TR",
+                )
+            )
+        limits.append(
+            (self.ir_repetition_time_ms, plan.minimum_repetition_time_s, "Inversion TR")
+        )
+        for control, minimum_s, label in limits:
+            changed |= self._raise_timing_control(
+                control, minimum_s, label, protected, notes
+            )
+        return changed
+
+    def _show_ir_timing_status(self, plan, notes, error=None):
+        minimum_text = (
+            ""
+            if plan is None
+            else "Shortest possible: " + self._ir_minimum_timing_text(plan) + "."
+        )
+        self._show_timing_status("Inversion recovery", minimum_text, notes, error=error)
+
+    @staticmethod
+    def _ir_minimum_timing_text(plan):
+        parts = [f"TE {plan.minimum_echo_time_s * 1e3:.4g} ms"]
+        if plan.minimum_readout_repetition_time_s is not None:
+            parts.append(
+                f"line TR {plan.minimum_readout_repetition_time_s * 1e3:.4g} ms"
+            )
+        parts.append(f"inversion TR {plan.minimum_repetition_time_s * 1e3:.5g} ms")
+        return ", ".join(parts)
+
+    def _ir_readout_changed(self, *_):
+        previous = self.INVERSION_RECOVERY_READOUT_DEFAULTS[self._ir_previous_readout]
+        readout = self.ir_readout.currentData()
+        self._ir_previous_readout = readout
+        for name, value in self.INVERSION_RECOVERY_READOUT_DEFAULTS[readout].items():
+            control = getattr(self, f"ir_{name}")
+            blocked = control.blockSignals(True)
+            if isinstance(control, QLineEdit):
+                if control.text().strip() == previous[name]:
+                    control.setText(value)
+            elif math.isclose(control.value(), previous[name]):
+                control.setValue(value)
+            control.blockSignals(blocked)
+        self._ir_changed()
+
+    def _update_ir_labels(self):
+        readout = self.ir_readout.currentData()
+        self.ir_epi_readout_strategy.setEnabled(readout == "epi")
+        self.ir_line_repetition_time_ms.setEnabled(readout != "epi")
+        self.ir_rf_spoiling_increment_deg.setEnabled(self.ir_rf_spoiling.isChecked())
+        self._update_inversion_controls("ir")
+        try:
+            plan = make_pulseq_inversion_recovery(
+                **self._ir_pulseq_parameters(), timing_only=True
+            )
+            count = len(self._inversion_parameters("ir")["inversion_times_s"])
+        except Exception as exc:
+            self.ir_timing_info.setText(f"Timing cannot be resolved: {exc}")
+            self.ir_dwell_info.setText("")
+            self.ir_inversion_info.setText("")
+            return
+        self.ir_timing_info.setText(self._ir_minimum_timing_text(plan))
+        self.ir_dwell_info.setText(
+            f"{plan.dwell_s * 1e6:.6g} µs; actual bandwidth "
+            f"{plan.sampling_bandwidth_hz / 1000.0:.6g} kHz"
+        )
+        repetitions = self._ir_repetition_count()
+        inversions = repetitions * (
+            self.ir_phase_matrix.value() if readout == "gre" else 1
+        )
+        if self.ir_inversion_mode.currentData() == "slice_selective":
+            inversions *= self.ir_slice_count.value()
+        cycles = (
+            f"{repetitions // count} complete TI series"
+            if repetitions % count == 0
+            else f"{repetitions} repetitions do not complete the {count}-TI cycle"
+        )
+        self.ir_inversion_info.setText(
+            f"Shortest TI {plan.minimum_inversion_time_s * 1e3:.4g} ms; "
+            f"{inversions} inversions, {cycles}."
+        )
+
+    def _show_ir_slice_inversion_times(self, sequence):
+        """List how much later than TI each slice is excited after inversion."""
+        times = slice_inversion_times(sequence.definitions, slice_axis="last")
+        offsets_ms = (times[0] - times[0].min()) * 1000.0
+        if np.all(offsets_ms < 1e-6):
+            self.ir_slice_ti_info.setText("Every slice sees the requested TI.")
+            return
+        values = [f"{value:.4g}" for value in offsets_ms]
+        if len(values) > 8:
+            values = [*values[:3], "…", values[-1]]
+        text = f"TI + {' / '.join(values)} ms for slices 1–{offsets_ms.size}"
+        if self.ir_slice_order.currentData() == "cyclic":
+            text += " in the first series; each series rotates the slice train"
+        self.ir_slice_ti_info.setText(text + ".")
 
     def _flash_changed(self, *_):
         flash_selected = self.sequence_source.currentIndex() == self.FLASH_SOURCE
@@ -9076,6 +9567,22 @@ class SequenceSimulationWidget(QWidget):
                 * self.epsi_repetitions.value()
             )
             name = "EPSI / MGE end-of-echo-train spoiler"
+        elif source_index == self.INVERSION_RECOVERY_SOURCE:
+            role_cycles = (
+                self.ir_spoiler_cycles_per_voxel.value(),
+                self.ir_spoiler_cycles_per_voxel.value(),
+                self.ir_spoiler_cycles_per_slice.value(),
+            )
+            enabled = any(cycles > 0.0 for cycles in role_cycles)
+            role_reference_sizes = (
+                self.ir_read_fov_mm.value() / (1000.0 * self.ir_read_matrix.value()),
+                self.ir_phase_fov_mm.value() / (1000.0 * self.ir_phase_matrix.value()),
+                self.ir_slice_thickness_mm.value() / 1000.0,
+            )
+            excitation_count = self.ir_slice_count.value() * self._ir_repetition_count()
+            if self.ir_readout.currentData() != "epi":
+                excitation_count *= self.ir_phase_matrix.value()
+            name = "Inversion recovery end-of-readout spoiler"
         else:
             raise ValueError("Source has no two-dimensional spoiler configuration")
 
@@ -9646,6 +10153,7 @@ class SequenceSimulationWidget(QWidget):
             self.EPI_SOURCE,
             self.CSI_SOURCE,
             self.EPSI_MGE_SOURCE,
+            self.INVERSION_RECOVERY_SOURCE,
         }:
             self._set_configured_spoiling_quality(
                 self._two_dimensional_spoiler_spec(source_index)
@@ -9793,6 +10301,7 @@ class SequenceSimulationWidget(QWidget):
             "me_bssfp",
             "slice_selection",
             "press",
+            "ir",
         ):
             if not hasattr(self, f"{prefix}_rf_pulse_type"):
                 continue
@@ -10095,6 +10604,12 @@ class SequenceSimulationWidget(QWidget):
             self.flash_phase_fov_mm.value() / 1000.0,
         )
 
+    def _ir_fov_m(self):
+        return (
+            self.ir_read_fov_mm.value() / 1000.0,
+            self.ir_phase_fov_mm.value() / 1000.0,
+        )
+
     def _two_dimensional_encoding_frame(self, source_index=None):
         source_index = (
             self.sequence_source.currentIndex()
@@ -10117,6 +10632,10 @@ class SequenceSimulationWidget(QWidget):
             self.EPSI_MGE_SOURCE: (
                 self.epsi_read_gradient_axis,
                 self.epsi_phase_gradient_axis,
+            ),
+            self.INVERSION_RECOVERY_SOURCE: (
+                self.ir_read_gradient_axis,
+                self.ir_phase_gradient_axis,
             ),
         }
         read_phase = controls.get(source_index)
@@ -10197,6 +10716,16 @@ class SequenceSimulationWidget(QWidget):
                 )
                 / 1000.0,
             )
+        if source_index == self.INVERSION_RECOVERY_SOURCE:
+            return (
+                *self._ir_fov_m(),
+                (
+                    self.ir_slice_thickness_mm.value() * self.ir_slice_count.value()
+                    + self.ir_slice_gap_mm.value()
+                    * max(0, self.ir_slice_count.value() - 1)
+                )
+                / 1000.0,
+            )
         return None
 
     def _confirm_generated_sequence_fov(self):
@@ -10225,6 +10754,7 @@ class SequenceSimulationWidget(QWidget):
             self.CSI_SOURCE,
             self.FLASH_SOURCE,
             self.EPSI_MGE_SOURCE,
+            self.INVERSION_RECOVERY_SOURCE,
         }:
             frame = self._two_dimensional_encoding_frame(source_index)
             scanner_extents = np.zeros(3, dtype=float)
@@ -10423,6 +10953,14 @@ class SequenceSimulationWidget(QWidget):
                     **self._in_plane_offset_parameters("flash"),
                 },
             ),
+            self.INVERSION_RECOVERY_SOURCE: (
+                self._ir_fov_m(),
+                (self.ir_read_matrix, self.ir_phase_matrix),
+                {
+                    **self._slice_package_parameters("ir"),
+                    **self._in_plane_offset_parameters("ir"),
+                },
+            ),
             # CSI excites a single slice.
             self.CSI_SOURCE: (
                 self._csi_fov_m(),
@@ -10579,6 +11117,52 @@ class SequenceSimulationWidget(QWidget):
         }
         parameters.update(self._shared_rf_parameters("press"))
         return parameters
+
+    def _ir_pulseq_parameters(self):
+        readout = self.ir_readout.currentData()
+        parameters = {
+            **self._sequence_geometry_parameters(self.INVERSION_RECOVERY_SOURCE),
+            "readout": readout,
+            "sampling_bandwidth_hz": self.ir_sampling_bandwidth_khz.value() * 1000.0,
+            "flip_angle_deg": self.ir_flip_angle_deg.value(),
+            "echo_time_s": self.ir_echo_time_ms.value() / 1000.0,
+            "repetition_time_s": self.ir_repetition_time_ms.value() / 1000.0,
+            # Zero shows as "One TI series", the builder default.
+            "repetitions": self.ir_repetitions.value() or None,
+            "slice_order": self.ir_slice_order.currentData(),
+            "rf_spoiling": self._rf_spoiling_is_effective("ir"),
+            "rf_spoiling_increment_deg": self.ir_rf_spoiling_increment_deg.value(),
+            "spoiler_cycles_per_slice": self.ir_spoiler_cycles_per_slice.value(),
+            "spoiler_cycles_per_voxel": self.ir_spoiler_cycles_per_voxel.value(),
+            "spoiler_duration_s": self.ir_spoiler_duration_ms.value() / 1000.0,
+            "nucleus": self.nucleus.currentText(),
+            "scanner_parameters": self.scanner_parameters.to_dict(),
+        }
+        if readout == "epi":
+            parameters["readout_strategy"] = (
+                self.ir_epi_readout_strategy.currentText().lower()
+            )
+        else:
+            parameters["readout_repetition_time_s"] = (
+                self.ir_line_repetition_time_ms.value() / 1000.0
+            )
+        parameters.update(self._shared_rf_parameters("ir"))
+        parameters.update(self._inversion_parameters("ir"))
+        return parameters
+
+    def _ir_repetition_count(self):
+        """Repetitions of the IR form, with "One TI series" resolved."""
+        if self.ir_repetitions.value():
+            return self.ir_repetitions.value()
+        try:
+            times = self._inversion_parameters("ir")["inversion_times_s"]
+        except ValueError:
+            times = (0.0,)
+        return default_inversion_recovery_repetitions(
+            times,
+            n_slices=self.ir_slice_count.value(),
+            slice_order=self.ir_slice_order.currentData(),
+        )
 
     def _flash_pulseq_parameters(self):
         ernst = self._update_ernst_controls(
@@ -10854,6 +11438,12 @@ class SequenceSimulationWidget(QWidget):
             )
         if source_index == self.PRESS_SOURCE:
             return "press", self._press_pulseq_parameters(), "press_svs.seq"
+        if source_index == self.INVERSION_RECOVERY_SOURCE:
+            return (
+                "inversion_recovery",
+                self._ir_pulseq_parameters(),
+                f"ir_{self.ir_readout.currentData()}_2d.seq",
+            )
         raise ValueError("Select a generated sequence")
 
     def _slice_selection_changed(self, *_):
@@ -11027,6 +11617,38 @@ class SequenceSimulationWidget(QWidget):
             self.spiral_acquisition = None
             self.spectroscopic_acquisition = None
             self._generation_error = f"Invalid PRESS sequence: {exc}"
+            return False
+
+    def _load_inversion_recovery(self):
+        try:
+            self._resolve_ir_timing(keep_notes=True)
+            self._update_ir_labels()
+            sequence = make_pulseq_inversion_recovery(**self._ir_pulseq_parameters())
+            self._set_generated_pulseq_sequence(
+                sequence, "internal-inversion-recovery-2d"
+            )
+            self._sync_sampling_bandwidth_control(
+                self.ir_sampling_bandwidth_khz, sequence
+            )
+            self._last_valid_ir_bandwidth_khz = self.ir_sampling_bandwidth_khz.value()
+            self._update_ir_labels()
+            self._show_ir_slice_inversion_times(sequence)
+            return True
+        except Exception as exc:
+            self._generated_pulseq_sequence = None
+            self.program = None
+            self._acquisition_compiled = None
+            self.acquisition = None
+            self.acquisition_frames = None
+            self.acquisition_volumes = None
+            self.spiral_acquisition = None
+            self.spectroscopic_acquisition = None
+            self._generation_error = f"Invalid inversion-recovery sequence: {exc}"
+            self._restore_sampling_bandwidth_after_failure(
+                self.ir_sampling_bandwidth_khz,
+                self._last_valid_ir_bandwidth_khz,
+                exc,
+            )
             return False
 
     def _load_epsi_mge(self):
@@ -11668,6 +12290,7 @@ class SequenceSimulationWidget(QWidget):
             "flash": make_pulseq_flash,
             "slice_selection": make_pulseq_slice_selection,
             "press": make_pulseq_press,
+            "inversion_recovery": make_pulseq_inversion_recovery,
             "bssfp_3d": make_pulseq_bssfp,
             "spectral_bssfp_3d": make_pulseq_spectral_selective_bssfp,
             "me_bssfp_3d": make_pulseq_me_bssfp,
@@ -14257,6 +14880,7 @@ class SequenceSimulationWidget(QWidget):
             "me_bssfp",
             "slice_selection",
             "press",
+            "ir",
         ):
             if hasattr(self, f"{prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(prefix)
@@ -14946,6 +15570,9 @@ class SequenceSimulationWidget(QWidget):
         self._source_changed()
         self._object_source_changed()
         self._update_parameter_loop_input_controls()
+        # Restored with signals blocked, so the readout-default swap must not
+        # compare against the readout chosen before the restore.
+        self._ir_previous_readout = self.ir_readout.currentData()
         for update in (
             self._update_bandwidth_labels,
             self._update_csi_labels,
@@ -14954,6 +15581,8 @@ class SequenceSimulationWidget(QWidget):
             self._update_ss_bssfp_labels,
             self._update_radial_me_bssfp_labels,
             self._update_me_bssfp_labels,
+            self._update_press_labels,
+            self._update_ir_labels,
         ):
             update()
         self._update_simulation_object_table()
