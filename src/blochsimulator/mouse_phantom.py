@@ -76,7 +76,7 @@ INJECTION_COMPOUNDS = {
     "pyruvate": "[1-13C]Pyruvate",
     "lactate": "[1-13C]Lactate",
     "z_ompd": "[1,5-13C2]Z-OMPD",
-    "contrast_agent": "Generic contrast agent",
+    "contrast_agent": "Contrast agent (gadolinium DCE with 1H)",
 }
 
 # Which relaxation time sets the transverse decay in the Bloch solver. The
