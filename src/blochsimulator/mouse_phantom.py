@@ -76,7 +76,14 @@ INJECTION_COMPOUNDS = {
     "pyruvate": "[1-13C]Pyruvate",
     "lactate": "[1-13C]Lactate",
     "z_ompd": "[1,5-13C2]Z-OMPD",
-    "contrast_agent": "Contrast agent (gadolinium DCE with 1H)",
+    "contrast_agent": "Generic contrast agent",
+    "none": "None (tissue water only)",
+}
+# 1H images tissue water, so only an agent that changes its relaxation, or no
+# injection at all, is meaningful there; 13C needs a hyperpolarized compound.
+TISSUE_WATER_COMPOUND_LABELS = {
+    "contrast_agent": "Gadolinium contrast agent (DCE)",
+    "none": INJECTION_COMPOUNDS["none"],
 }
 
 # Which relaxation time sets the transverse decay in the Bloch solver. The
@@ -128,6 +135,18 @@ BLOOD_WATER_DENSITY = TISSUE_WATER_BY_LABEL[9][1]
 def uses_tissue_water(nucleus: str) -> bool:
     """Return whether a mouse phantom of this nucleus images tissue water."""
     return str(nucleus).strip() == "H1"
+
+
+def injection_compounds(nucleus: str) -> Dict[str, str]:
+    """Return the injection compounds offered for a nucleus, with labels."""
+    if uses_tissue_water(nucleus):
+        return dict(TISSUE_WATER_COMPOUND_LABELS)
+    return {key: label for key, label in INJECTION_COMPOUNDS.items() if key != "none"}
+
+
+def injection_compound_label(nucleus: str, compound: str) -> str:
+    """Return the label of a compound as seen by this nucleus."""
+    return injection_compounds(nucleus).get(compound, INJECTION_COMPOUNDS[compound])
 
 
 # Bounds of the procedural body surface in atlas coordinates. ``mouse_size_m``
@@ -345,6 +364,11 @@ class MousePerfusionConfig:
                 "injection compound must be one of "
                 + ", ".join(sorted(INJECTION_COMPOUNDS))
             )
+        if self.injection_compound == "none" and not uses_tissue_water(self.nucleus):
+            raise ValueError(
+                "a mouse without injection needs 1H tissue water; "
+                f"{self.nucleus} needs an injected compound"
+            )
         self.transverse_decay = str(self.transverse_decay).strip().lower()
         if self.transverse_decay not in TRANSVERSE_DECAY_MODES:
             raise ValueError(
@@ -502,7 +526,9 @@ class MousePerfusionConfig:
 
     @property
     def injection_amount_umol(self) -> float:
-        """Injected dose; mM × µl = nmol."""
+        """Injected dose; mM × µl = nmol. Without a compound nothing is injected."""
+        if self.injection_compound == "none":
+            return 0.0
         return self.injection_concentration_mm * self.injection_volume_ul * 1e-3
 
     @property
@@ -1363,9 +1389,9 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
                 "temperature_k": config.temperature_k,
                 "injection_amount_mol": config.injection_amount_umol * 1e-6,
                 "injection_compound": config.injection_compound,
-                "injection_compound_label": INJECTION_COMPOUNDS[
-                    config.injection_compound
-                ],
+                "injection_compound_label": injection_compound_label(
+                    config.nucleus, config.injection_compound
+                ),
                 "transport_solver": "voxelwise_arrival_delay",
                 "transport_preview": "matches_sequence_source_timing",
                 "perfusion_preview_model": "delayed_inflow_with_exponential_clearance",
@@ -1567,7 +1593,9 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
 
     @property
     def injection_compound_label(self) -> str:
-        return INJECTION_COMPOUNDS[self.config.injection_compound]
+        return injection_compound_label(
+            self.config.nucleus, self.config.injection_compound
+        )
 
     def preview_time_bounds_s(self) -> Tuple[float, float]:
         """Return a useful time interval containing arrival and wash-out."""
