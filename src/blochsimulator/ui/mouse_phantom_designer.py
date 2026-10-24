@@ -48,6 +48,11 @@ from .default_settings import WorkspaceDefaults
 from .volume_viewer import PhantomInspectorWidget
 from .widgets import ExplicitAcceptDialog, PolarizationPercentSpinBox
 
+MOUSE_NUCLEI = {
+    "C13": "13C (hyperpolarized injection)",
+    "H1": "1H (tissue water, contrast-agent DCE)",
+}
+
 
 class ClickableImageItem(pg.ImageItem):
     """Image item that reports reliable item-local click coordinates."""
@@ -603,6 +608,16 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
 
         compound_group = QGroupBox("Injected compound")
         compound_form = self._group_form(compound_group)
+        self.nucleus = QComboBox()
+        self.nucleus.setObjectName("mouse_nucleus")
+        for key, label in MOUSE_NUCLEI.items():
+            self.nucleus.addItem(label, key)
+        self.nucleus.setToolTip(
+            "13C images the hyperpolarized injection and its metabolites. 1H "
+            "images thermal tissue water; with the contrast agent this is a "
+            "gadolinium DCE experiment."
+        )
+        self.nucleus.currentIndexChanged.connect(self._nucleus_changed)
         self.injection_compound = QComboBox()
         for key, label in INJECTION_COMPOUNDS.items():
             self.injection_compound.addItem(label, key)
@@ -629,6 +644,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.injection_polarization_thermal = QLabel()
         self.injection_polarization_thermal.setWordWrap(True)
         self.injection_polarization_thermal.setStyleSheet("color: palette(mid);")
+        compound_form.addRow("Nucleus", self.nucleus)
         compound_form.addRow("Compound", self.injection_compound)
         compound_form.addRow("Concentration", self.injection_concentration)
         compound_form.addRow("Volume", self.injection_volume)
@@ -639,6 +655,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self._build_contrast_group(injection_controls_layout)
 
         relaxation_group = QGroupBox("Hyperpolarized relaxation")
+        self.relaxation_group = relaxation_group
         relaxation_grid = QGridLayout(relaxation_group)
         for column, header in enumerate(("T1", "T2", "T2*"), start=1):
             label = QLabel(header)
@@ -1167,6 +1184,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
 
         self.name_edit.textChanged.connect(self._schedule_live_preview)
         self.injection_compound.currentIndexChanged.connect(self._schedule_live_preview)
+        self.nucleus.currentIndexChanged.connect(self._schedule_live_preview)
         self.contrast_agent.currentIndexChanged.connect(self._schedule_live_preview)
         self.body_mass.valueChanged.connect(self._update_dose_label)
         self.transverse_decay.currentIndexChanged.connect(self._schedule_live_preview)
@@ -1225,7 +1243,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
     def _update_injection_summary(self):
         # Display only: legacy values above 100 % must not raise here.
         pth = thermal_polarization(
-            self.config.nucleus,
+            self._selected_nucleus(),
             self.field_strength.value(),
             self.temperature_c.value() + 273.15,
         )
@@ -1251,6 +1269,9 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         )
         self.field_strength.setValue(config.field_strength_t)
         self.temperature_c.setValue(config.temperature_k - 273.15)
+        if self.nucleus.findData(config.nucleus) < 0:
+            self.nucleus.addItem(config.nucleus, config.nucleus)
+        self.nucleus.setCurrentIndex(self.nucleus.findData(config.nucleus))
         compound_index = self.injection_compound.findData(config.injection_compound)
         self.injection_compound.setCurrentIndex(max(0, compound_index))
         self.injection_concentration.setValue(config.injection_concentration_mm)
@@ -1360,6 +1381,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
                 spin.value() / 1000.0 for spin in self.mouse_offset_spins
             ),
             field_strength_t=self.field_strength.value(),
+            nucleus=self._selected_nucleus(),
             injection_compound=str(self.injection_compound.currentData()),
             injection_concentration_mm=self.injection_concentration.value(),
             injection_volume_ul=self.injection_volume.value(),
@@ -1437,6 +1459,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         above 100 % still open and rebuild; editing them raises instead.
         """
         config = self.config
+        nucleus = self._selected_nucleus()
         percent = self.injection_polarization.value()
         field_strength = self.field_strength.value()
         temperature_k = self.temperature_c.value() + 273.15
@@ -1447,13 +1470,14 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             config.temperature_k,
         )
         if (
-            field_strength == config.field_strength_t
+            nucleus == config.nucleus
+            and field_strength == config.field_strength_t
             and temperature_k == config.temperature_k
             and percent == round(stored_percent, self.injection_polarization.decimals())
         ):
             return config.injection_polarization
         return polarization_percent_to_relative(
-            percent, config.nucleus, field_strength, temperature_k
+            percent, nucleus, field_strength, temperature_k
         )
 
     def _build_phantom(self) -> MousePerfusionPhantom:
@@ -1568,11 +1592,11 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
                 "pH compartment while C1 stays nearly fixed."
             ),
             "contrast_agent": (
-                "With a 1H workspace the contrast agent is a gadolinium DCE "
+                "With nucleus 1H the contrast agent is a gadolinium DCE "
                 "bolus: its plasma, Tofts tissue and urinary concentrations "
                 "shorten T1 and T2 of the tissue water in the Bloch solver. "
-                "With other nuclei it only animates tracer delivery and "
-                "clearance."
+                "With 13C it only animates tracer delivery and clearance; "
+                "choose 1H above for DCE."
             ),
         }
         self.compound_help.setText(messages.get(key, ""))
@@ -1593,9 +1617,19 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         ):
             spin.setEnabled(enabled)
 
+    def _selected_nucleus(self) -> str:
+        return str(self.nucleus.currentData())
+
+    def _nucleus_changed(self, *_):
+        water = uses_tissue_water(self._selected_nucleus())
+        # Thermal water carries no injected polarization or HP relaxation.
+        self.injection_polarization.setEnabled(not water)
+        self.relaxation_group.setEnabled(not water)
+        self._compound_selection_changed()
+
     def _dce_selected(self) -> bool:
         return (
-            uses_tissue_water(self.config.nucleus)
+            uses_tissue_water(self._selected_nucleus())
             and self.injection_compound.currentData() == "contrast_agent"
         )
 

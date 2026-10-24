@@ -288,3 +288,28 @@ def test_designer_edits_dce_parameters():
 
     c13 = MousePhantomDesignerDialog(config=_dce_config(nucleus="C13"))
     assert c13.contrast_group.isHidden()
+
+
+def test_new_designer_switches_to_1h_dce():
+    QApplication.instance() or QApplication([])
+    from blochsimulator.ui.mouse_phantom_designer import MousePhantomDesignerDialog
+
+    dialog = MousePhantomDesignerDialog()
+    dialog.injection_compound.setCurrentIndex(
+        dialog.injection_compound.findData("contrast_agent")
+    )
+    assert dialog.contrast_group.isHidden()
+    assert dialog.injection_polarization.isEnabled()
+
+    dialog.nucleus.setCurrentIndex(dialog.nucleus.findData("H1"))
+    assert not dialog.contrast_group.isHidden()
+    assert not dialog.injection_polarization.isEnabled()
+    assert not dialog.relaxation_group.isEnabled()
+    config = dialog._read_config()
+    assert config.nucleus == "H1" and config.dce_enabled
+
+    dialog.nucleus.setCurrentIndex(dialog.nucleus.findData("C13"))
+    assert dialog.contrast_group.isHidden()
+    assert dialog._read_config().injection_polarization == pytest.approx(
+        dialog.config.injection_polarization
+    )
