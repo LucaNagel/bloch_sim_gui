@@ -9,12 +9,15 @@ from blochsimulator.dynamic_phantom import DynamicSpectralPhantom
 from blochsimulator.dynamic_phantom import PyruvateInflow, TimeCurve, VoxelWashout
 from blochsimulator.mouse_phantom import (
     BLADDER_LABEL,
+    TISSUE_WATER_BY_LABEL,
+    TISSUE_WATER_POOLS,
     Z_OMPD_C1_POOL,
     Z_OMPD_C5_POOL,
     MousePerfusionConfig,
     MousePerfusionPhantom,
     reference_mouse_vascular_graph,
 )
+from blochsimulator.phantom_polarization import rebase_phantom_polarization
 from blochsimulator.phantom_widget import PhantomCreatorWidget
 from blochsimulator.sequence import RFEvent, SequenceProgram
 from blochsimulator.spectral_phantom import ChemicalSpecies
@@ -1003,3 +1006,88 @@ def test_mouse_phantom_pools_use_t2_star_by_default():
     phantom = MousePerfusionPhantom.from_config(MousePerfusionConfig(shape=(8, 8, 12)))
     for pool in phantom.pools:
         assert pool.t2 == pytest.approx(pool.t2_star)
+
+
+def test_h1_mouse_images_tissue_water_with_per_tissue_relaxation():
+    phantom = MousePerfusionConfig(shape=(24, 16, 48), nucleus="H1").build()
+
+    assert tuple(pool.name for pool in phantom.pools) == tuple(TISSUE_WATER_POOLS)
+    assert phantom.pyruvate_inflow is None
+    assert phantom.voxel_washout is None
+    assert phantom.spectral_reference_ppm == pytest.approx(4.7)
+    assert not np.any(phantom.kpl_map_s_inv) and not np.any(phantom.kpa_map_s_inv)
+    labels = phantom.anatomy_labels
+    assert np.all(phantom.pd_map[labels == 0] == 0.0)
+    vessels = phantom.arterial_mask | phantom.venous_mask
+    for label, (pool_name, density) in TISSUE_WATER_BY_LABEL.items():
+        tissue = (labels == label) & ~vessels
+        if not np.any(tissue):
+            continue
+        t1, t2, t2_star = TISSUE_WATER_POOLS[pool_name]
+        assert np.allclose(phantom.pd_map[tissue], density)
+        assert np.allclose(phantom.t1_map[tissue], t1)
+        # The default decay mode hands T2* to the solver.
+        assert np.allclose(phantom.t2_map[tissue], t2_star)
+    # Thermal water starts at equilibrium and does not change in the preview.
+    assert np.allclose(sum(phantom.initial_concentration_maps.values()), phantom.pd_map)
+    index = tuple(int(value) for value in np.argwhere(labels == 6)[0])
+    curves = phantom.preview_pool_curves_at(index, np.linspace(0.0, 30.0, 5))
+    assert np.allclose(curves["Liver water"], TISSUE_WATER_BY_LABEL[6][1])
+    # The 13C injection stays available as an authoring preview.
+    assert np.max(phantom.injected_concentration_map(5.0)) > 0.0
+
+
+def test_h1_mouse_bssfp_mode_uses_tissue_t2():
+    phantom = MousePerfusionConfig(
+        shape=(24, 16, 48), nucleus="H1", transverse_decay="t2"
+    ).build()
+    kidney = phantom.anatomy_labels == 3
+    assert np.allclose(
+        phantom.t2_map[kidney & (phantom.pd_map > 0)],
+        TISSUE_WATER_POOLS["Kidney medulla water"][1],
+    )
+
+
+def test_h1_mouse_water_stays_at_thermal_equilibrium_without_rf():
+    phantom = MousePerfusionConfig(shape=(16, 12, 32), nucleus="H1").build()
+    program = SequenceProgram((), duration_s=2.0)
+    result = BlochSimulator().simulate_dynamic_sequence(
+        program, phantom, checkpoints_s=(2.0,)
+    )
+    mz = np.asarray(result.checkpoint_pool_magnetization)[..., 2]
+    initial = np.stack(
+        [phantom.initial_concentration_maps[pool.name] for pool in phantom.pools]
+    )
+    assert np.allclose(mz.reshape(initial.shape), initial)
+
+
+def test_workspace_nucleus_change_swaps_mouse_compound_and_water_pools(tmp_path):
+    phantom = MousePerfusionConfig(shape=(24, 16, 48)).build()
+
+    rebase_phantom_polarization(phantom, field_strength_t=7.0, nucleus="H1")
+    assert isinstance(phantom, MousePerfusionPhantom)
+    assert tuple(pool.name for pool in phantom.pools) == tuple(TISSUE_WATER_POOLS)
+    assert phantom.nucleus == "H1"
+    pd_map = phantom.pd_map.copy()
+
+    # A field change must not rescale thermal water magnetization.
+    rebase_phantom_polarization(phantom, field_strength_t=9.4, nucleus="H1")
+    assert phantom.field_strength == pytest.approx(9.4)
+    assert np.allclose(phantom.pd_map, pd_map)
+    assert np.allclose(sum(phantom.initial_concentration_maps.values()), pd_map)
+
+    path = tmp_path / "h1_mouse.npz"
+    phantom.save(path)
+    loaded = load_any_phantom(path)
+    assert isinstance(loaded, MousePerfusionPhantom)
+    assert loaded.pyruvate_inflow is None
+    assert np.allclose(loaded.pd_map, pd_map)
+
+    rebase_phantom_polarization(phantom, field_strength_t=9.4, nucleus="C13")
+    assert tuple(pool.name for pool in phantom.pools) == (
+        "Pyruvate",
+        "Lactate",
+        "Alanine",
+    )
+    assert phantom.pyruvate_inflow is not None
+    assert np.all(phantom.pd_map == 0.0)

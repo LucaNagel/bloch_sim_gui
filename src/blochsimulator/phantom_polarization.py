@@ -8,7 +8,8 @@ from .units import thermal_polarization
 def rebase_phantom_polarization(phantom, *, field_strength_t, nucleus):
     """Rebase thermal-relative states of a temperature-aware authored phantom.
 
-    Concentrations, geometry, relaxation and dose are unchanged. Older objects
+    Concentrations, geometry, relaxation and dose are unchanged, except that
+    mouse phantoms are rebuilt when they gain or carry 1H tissue water. Older objects
     without an explicit temperature keep their historical relative convention.
     The caller continues to apply the new field/nucleus to the phantom itself.
     """
@@ -64,3 +65,30 @@ def rebase_phantom_polarization(phantom, *, field_strength_t, nucleus):
         config.injection_polarization *= factor
         config.field_strength_t = float(field_strength_t)
         config.nucleus = str(nucleus)
+    _rebuild_mouse_for_nucleus(phantom)
+
+
+def _rebuild_mouse_for_nucleus(phantom):
+    """Rebuild a mouse phantom in place when it shows tissue water.
+
+    A nucleus change swaps 13C compound and 1H water pools. Thermal water
+    magnetization must not follow the relative rebase above, so a water
+    phantom is always rebuilt from its configuration.
+    """
+    from .mouse_phantom import (
+        MousePerfusionConfig,
+        MousePerfusionPhantom,
+        _has_tissue_water,
+        uses_tissue_water,
+    )
+
+    mouse = phantom.metadata.get("mouse_perfusion_config")
+    if not isinstance(mouse, dict):
+        return
+    water = uses_tissue_water(mouse["nucleus"])
+    if not water and not _has_tissue_water(phantom):
+        return
+    rebuilt = MousePerfusionPhantom.from_config(MousePerfusionConfig.from_dict(mouse))
+    phantom.__class__ = MousePerfusionPhantom
+    phantom.__dict__.clear()
+    phantom.__dict__.update(rebuilt.__dict__)
