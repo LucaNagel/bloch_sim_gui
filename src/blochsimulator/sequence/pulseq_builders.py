@@ -23,6 +23,7 @@ from .encoding import (
 from .rf_pulses import (
     design_hyperbolic_secant_inversion,
     design_rf_envelope,
+    hyperbolic_secant_bandwidth_hz,
     make_pulseq_rf_events,
     normalize_rf_pulse_type,
     scale_rf_envelope_to_flip,
@@ -415,14 +416,76 @@ def _feasible_role_trapezoid(
     )
 
 
+INVERSION_MODES = ("global", "slice_selective")
+_INVERSION_MODE_ALIASES = {
+    "global": "global",
+    "nonselective": "global",
+    "non selective": "global",
+    "slice selective": "slice_selective",
+    "selective": "slice_selective",
+    "per slice": "slice_selective",
+}
+SLICE_ORDERS = ("sequential", "interleaved", "cyclic")
+_SLICE_ORDER_ALIASES = {
+    "sequential": "sequential",
+    "ascending": "sequential",
+    "interleaved": "interleaved",
+    "cyclic": "cyclic",
+    "rotating": "cyclic",
+    "rotated": "cyclic",
+}
+INVERSION_INTERVALS = ("image", "line")
+
+
+def _normalized_choice(value, aliases: Mapping[str, str], name: str) -> str:
+    key = str(value).strip().lower().replace("-", " ").replace("_", " ")
+    normalized = aliases.get(key)
+    if normalized is None:
+        choices = ", ".join(dict.fromkeys(aliases.values()))
+        raise ValueError(f"{name} must be one of {choices}")
+    return normalized
+
+
+def _normalized_slice_order(slice_order) -> str:
+    return _normalized_choice(slice_order, _SLICE_ORDER_ALIASES, "slice_order")
+
+
+def slice_acquisition_order(
+    n_slices: int,
+    slice_order: str = "sequential",
+    *,
+    repetition: int = 0,
+    series_length: int = 1,
+) -> tuple[int, ...]:
+    """Return the spatial slice indices of one repetition in acquisition order.
+
+    ``interleaved`` acquires the even slices before the odd ones.
+    ``cyclic`` rotates the sequential order by one slice after every
+    ``series_length`` repetitions. With a global inversion, a TI series
+    repeated ``n_slices`` times then samples every slice at every position
+    of the slice train (Clare and Jezzard, MRM 45, 630, 2001).
+    """
+    n_slices = _positive_integer(n_slices, "n_slices")
+    order = _normalized_slice_order(slice_order)
+    if order == "interleaved":
+        return tuple(range(0, n_slices, 2)) + tuple(range(1, n_slices, 2))
+    sequential = tuple(range(n_slices))
+    if order == "sequential":
+        return sequential
+    shift = (int(repetition) // max(1, int(series_length))) % n_slices
+    return sequential[shift:] + sequential[:shift]
+
+
 @dataclass(frozen=True)
 class InversionPreparation:
-    """Non-selective inversion, crusher and the cycled inversion times.
+    """Inversion, crusher and the cycled inversion times.
 
-    The preparation is played once per repetition. ``inversion_times_s``
-    cycle across repetitions; each TI runs from the inversion centre to the
-    centre of the excitation that samples the k-space centre of the first
-    slice.
+    A global (non-selective) preparation is played once per acquisition
+    unit and inverts every slice. A slice-selective preparation carries the
+    slice-select ``gradient`` and is played before each slice at that slice's
+    frequency. ``inversion_times_s`` cycle across repetitions; each TI runs
+    from the inversion centre to the excitation centre of the k-space centre
+    of the first slice that follows it.
     """
 
     rf: object
@@ -433,9 +496,18 @@ class InversionPreparation:
     block_duration_s: float
     center_from_block_start_s: float
     crusher_duration_s: float
+    mode: str = "global"
+    gradient: object | None = None
+    logical_gradient_hz_per_m: float = 0.0
+    slab_thickness_m: float | None = None
+    frequency_offset_hz: float = 0.0
 
     def inversion_time_for(self, repetition: int) -> float:
         return self.inversion_times_s[repetition % len(self.inversion_times_s)]
+
+    @property
+    def selective(self) -> bool:
+        return self.mode == "slice_selective"
 
     @property
     def fixed_duration_s(self) -> float:
@@ -472,11 +544,20 @@ def _make_inversion_preparation(
     slice_thickness_m: float,
     spoiler_cycles_per_slice: float,
     spoiler_duration_s: float,
+    mode: str = "global",
+    slab_factor: float = 1.0,
 ) -> InversionPreparation | None:
-    """Build the inversion block, or return ``None`` when no TI is set."""
+    """Build the inversion block, or return ``None`` when no TI is set.
+
+    ``mode='slice_selective'`` adds a slice-select gradient of
+    ``bandwidth / (slab_factor * slice_thickness_m)``: the frequency sweep
+    for the hyperbolic secant, ``TBW / duration`` for the sinc. A block
+    pulse has no slice profile and is rejected in that mode.
+    """
     times = _inversion_time_values(inversion_times_s)
     if not times:
         return None
+    mode = _normalized_choice(mode, _INVERSION_MODE_ALIASES, "inversion_mode")
     key = str(pulse_type).strip().lower().replace("-", " ").replace("_", " ")
     normalized = _INVERSION_PULSE_ALIASES.get(key) or _INVERSION_PULSE_ALIASES.get(
         key.replace(" ", "_")
@@ -491,7 +572,19 @@ def _make_inversion_preparation(
         raise ValueError(
             "inversion_spoiler_cycles_per_slice must be non-negative and finite"
         )
+    selective = mode == "slice_selective"
+    if selective:
+        if normalized == "block":
+            raise ValueError(
+                "a block inversion has no slice profile; use hyperbolic_secant "
+                "or sinc for a slice-selective inversion"
+            )
+        if not np.isfinite(slab_factor) or slab_factor <= 0:
+            raise ValueError("inversion_slab_factor must be positive and finite")
+        # The slice-select flat top must lie on the gradient raster.
+        duration_s = _ceil_to_raster(duration_s, system.grad_raster_time)
     raster = float(system.rf_raster_time)
+    sinc_time_bandwidth_product = 4.0
     if normalized == "hyperbolic_secant":
         signal = design_hyperbolic_secant_inversion(
             duration_s=duration_s, raster_s=raster
@@ -501,20 +594,57 @@ def _make_inversion_preparation(
             pulse_type=normalized,
             duration_s=duration_s,
             raster_s=raster,
-            time_bandwidth_product=4.0,
+            time_bandwidth_product=sinc_time_bandwidth_product,
         )
         signal = scale_rf_envelope_to_flip(
             envelope, flip_angle_deg=180.0, raster_s=raster
         )
-    rf = pp.make_arbitrary_rf(
-        signal=np.asarray(signal, dtype=np.complex128),
-        flip_angle=np.pi,
-        dwell=raster,
-        no_signal_scaling=True,
-        delay=system.rf_dead_time,
-        system=system,
-        use="inversion",
-    )
+    signal = np.asarray(signal, dtype=np.complex128)
+    gradient = None
+    logical_gradient = 0.0
+    slab_thickness = None
+    if selective:
+        actual_duration = signal.size * raster
+        bandwidth = (
+            hyperbolic_secant_bandwidth_hz(actual_duration)
+            if normalized == "hyperbolic_secant"
+            else sinc_time_bandwidth_product / actual_duration
+        )
+        slab_thickness = float(slab_factor) * float(slice_thickness_m)
+        required = bandwidth / slab_thickness
+        if required > float(system.max_grad) * (1.0 + 1e-9):
+            gamma = float(system.gamma)
+            raise ValueError(
+                "the slice-selective inversion needs "
+                f"{required / gamma * 1e3:.3g} mT/m ({bandwidth:.4g} Hz over "
+                f"{slab_thickness * 1e3:.3g} mm), above the "
+                f"{float(system.max_grad) / gamma * 1e3:.3g} mT/m limit; "
+                "lengthen the inversion pulse or widen the inversion slab"
+            )
+        rf, logical_gz = pp.make_arbitrary_rf(
+            signal=signal,
+            flip_angle=np.pi,
+            bandwidth=bandwidth,
+            dwell=raster,
+            no_signal_scaling=True,
+            delay=system.rf_dead_time,
+            slice_thickness=slab_thickness,
+            return_gz=True,
+            system=system,
+            use="inversion",
+        )
+        logical_gradient = float(logical_gz.amplitude)
+        gradient = _remap_gradient_event(logical_gz, encoding_frame, "partition")
+    else:
+        rf = pp.make_arbitrary_rf(
+            signal=signal,
+            flip_angle=np.pi,
+            dwell=raster,
+            no_signal_scaling=True,
+            delay=system.rf_dead_time,
+            system=system,
+            use="inversion",
+        )
     rf_center, _ = pp.calc_rf_center(rf)
     rf.freq_offset = float(frequency_offset_hz)
     rf.phase_offset = -2.0 * np.pi * float(frequency_offset_hz) * rf_center
@@ -531,15 +661,21 @@ def _make_inversion_preparation(
             system=system,
         )
         crusher_duration = float(pp.calc_duration(crusher))
+    block_events = (rf,) if gradient is None else (rf, gradient)
     return InversionPreparation(
         rf=rf,
         crusher=crusher,
         pulse_type=normalized,
         duration_s=float(rf.shape_dur),
         inversion_times_s=times,
-        block_duration_s=float(pp.calc_duration(rf)),
+        block_duration_s=float(pp.calc_duration(*block_events)),
         center_from_block_start_s=float(rf.delay + rf_center),
         crusher_duration_s=crusher_duration,
+        mode=mode,
+        gradient=gradient,
+        logical_gradient_hz_per_m=logical_gradient,
+        slab_thickness_m=slab_thickness,
+        frequency_offset_hz=float(frequency_offset_hz),
     )
 
 
@@ -563,17 +699,45 @@ def _inversion_delay_s(
 
 
 def _add_inversion_preparation(
-    pp, sequence, preparation, delay_s: float
-) -> float | None:
-    """Play the inversion, crusher and TI delay; return the crusher end."""
-    sequence.add_block(preparation.rf)
+    pp, sequence, preparation, delay_s: float, *, position_m: float = 0.0
+) -> tuple[float, float | None]:
+    """Play the inversion, crusher and TI delay.
+
+    A slice-selective inversion is shifted to the logical slice position
+    ``position_m``. Returns the inversion centre time and the crusher end.
+    """
+    inversion_center = (
+        _sequence_duration_s(sequence) + preparation.center_from_block_start_s
+    )
+    if preparation.gradient is None:
+        sequence.add_block(preparation.rf)
+    else:
+        rf = preparation.rf
+        frequency = (
+            preparation.frequency_offset_hz
+            + preparation.logical_gradient_hz_per_m * float(position_m)
+        )
+        rf_center = preparation.center_from_block_start_s - rf.delay
+        rf.freq_offset = frequency
+        rf.phase_offset = -2.0 * np.pi * frequency * rf_center
+        sequence.add_block(rf, preparation.gradient)
     crusher_end = None
     if preparation.crusher is not None:
         sequence.add_block(preparation.crusher)
         crusher_end = _sequence_duration_s(sequence)
     if delay_s:
         sequence.add_block(pp.make_delay(delay_s))
-    return crusher_end
+    return inversion_center, crusher_end
+
+
+def _set_slice_order_definitions(
+    sequence, slice_order: str, acquisition_orders: Sequence[Sequence[int]]
+) -> None:
+    sequence.set_definition("SliceOrder", _normalized_slice_order(slice_order))
+    sequence.set_definition(
+        "SliceAcquisitionOrder",
+        [int(index) for order in acquisition_orders for index in order],
+    )
 
 
 def _set_inversion_definitions(
@@ -583,15 +747,36 @@ def _set_inversion_definitions(
     actual_inversion_times_s,
     slice_inversion_offsets_s,
     spoiler_cycles_per_slice: float,
+    slice_inversion_times_s=(),
 ) -> None:
+    """Persist the inversion settings and the TI of every slice.
+
+    ``InversionTimes`` holds one TI per repetition, measured to the first
+    acquired slice. ``SliceInversionTimes`` is the repetition-major
+    ``(repetition, spatial slice)`` table flattened row by row; with a
+    global inversion later slices of the train see longer TIs.
+    """
     sequence.set_definition("InversionRecovery", preparation is not None)
     if preparation is None:
         return
     sequence.set_definition("InversionPulseType", preparation.pulse_type)
     sequence.set_definition("InversionPulseDuration", preparation.duration_s)
-    sequence.set_definition("InversionSelectivity", "nonselective")
+    sequence.set_definition("InversionMode", preparation.mode)
     sequence.set_definition(
-        "InversionTimeReference", "first_slice_k_space_centre_excitation"
+        "InversionSelectivity",
+        "slice_selective" if preparation.selective else "nonselective",
+    )
+    if preparation.selective:
+        sequence.set_definition(
+            "InversionSlabThickness", float(preparation.slab_thickness_m)
+        )
+    sequence.set_definition(
+        "InversionTimeReference",
+        (
+            "slice_k_space_centre_excitation"
+            if preparation.selective
+            else "first_slice_k_space_centre_excitation"
+        ),
     )
     sequence.set_definition(
         "RequestedInversionTimes", list(preparation.inversion_times_s)
@@ -602,6 +787,10 @@ def _set_inversion_definitions(
     sequence.set_definition(
         "InversionSliceTimeOffsets",
         [float(value) for value in slice_inversion_offsets_s],
+    )
+    sequence.set_definition(
+        "SliceInversionTimes",
+        [float(value) for row in slice_inversion_times_s for value in row],
     )
     sequence.set_definition(
         "InversionSpoilerCyclesPerSlice", float(spoiler_cycles_per_slice)
@@ -2277,6 +2466,9 @@ def make_pulseq_epi(
     inversion_pulse_type: str = "hyperbolic_secant",
     inversion_duration_s: float = 10e-3,
     inversion_spoiler_cycles_per_slice: float = 8.0,
+    inversion_mode: str = "global",
+    inversion_slab_factor: float = 1.0,
+    slice_order: str = "sequential",
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
     nucleus: str = "H1",
     timing_only: bool = False,
@@ -2302,6 +2494,11 @@ def make_pulseq_epi(
     before every repetition; several values cycle across repetitions for T1
     mapping. TI runs from the inversion centre to the first slice's
     excitation centre and later slices follow at the recorded offsets.
+    ``inversion_mode='slice_selective'`` instead inverts each slice right
+    before its own excitation, so every slice sees the requested TI.
+    ``slice_order`` sets the acquisition order (see
+    :func:`slice_acquisition_order`); ``SliceInversionTimes`` records the TI
+    of every repetition and slice.
     """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -2663,11 +2860,17 @@ def make_pulseq_epi(
         slice_thickness_m=slice_thickness_m,
         spoiler_cycles_per_slice=inversion_spoiler_cycles_per_slice,
         spoiler_duration_s=spoiler_duration_s,
+        mode=inversion_mode,
+        slab_factor=inversion_slab_factor,
     )
+    series_length = 1 if inversion is None else len(inversion.inversion_times_s)
     # Plan every repetition first: schedules and TI cycling change its length.
     repetition_plans = []
     excitation_index = 0
     for repetition in range(repetitions):
+        order = slice_acquisition_order(
+            n_slices, slice_order, repetition=repetition, series_length=series_length
+        )
         variant_indices = []
         for _ in range(n_slices):
             if schedule_active:
@@ -2680,29 +2883,37 @@ def make_pulseq_epi(
                 schedule_index = repetition if variable_flip_angle else 0
             variant_indices.append(int(schedule_index))
             excitation_index += 1
-        first_excitation_center = rf_variants[variant_indices[0]]["excitation_center"]
-        inversion_delay = 0.0
-        inversion_time = None
+        # One delay per acquisition position: a global inversion precedes
+        # only the first slice, a selective one precedes every slice.
+        inversion_delays = [None] * n_slices
+        minimum_inversion_times = []
         preparation_duration = 0.0
         if inversion is not None:
-            inversion_delay = _inversion_delay_s(
-                inversion,
-                inversion.inversion_time_for(repetition),
-                first_excitation_center,
-                system.block_duration_raster,
-                sequence_name="EPI",
-                allow_short=timing_only,
-            )
-            inversion_time = (
-                inversion.minimum_inversion_time_s(first_excitation_center)
-                + inversion_delay
-            )
-            preparation_duration = inversion.fixed_duration_s + inversion_delay
+            positions = range(n_slices) if inversion.selective else range(1)
+            for position in positions:
+                excitation_center = rf_variants[variant_indices[position]][
+                    "excitation_center"
+                ]
+                minimum_inversion_times.append(
+                    inversion.minimum_inversion_time_s(excitation_center)
+                )
+                inversion_delays[position] = _inversion_delay_s(
+                    inversion,
+                    inversion.inversion_time_for(repetition),
+                    excitation_center,
+                    system.block_duration_raster,
+                    sequence_name="EPI",
+                    allow_short=timing_only,
+                )
+                preparation_duration += (
+                    inversion.fixed_duration_s + inversion_delays[position]
+                )
         repetition_plans.append(
             {
+                "order": order,
                 "variant_indices": variant_indices,
-                "inversion_delay": inversion_delay,
-                "inversion_time": inversion_time,
+                "inversion_delays": inversion_delays,
+                "minimum_inversion_times": minimum_inversion_times,
                 "duration": preparation_duration
                 + sum(
                     rf_variants[index]["slice_duration"] for index in variant_indices
@@ -2721,10 +2932,9 @@ def make_pulseq_epi(
                 if inversion is None
                 else float(
                     max(
-                        inversion.minimum_inversion_time_s(
-                            rf_variants[plan["variant_indices"][0]]["excitation_center"]
-                        )
+                        value
                         for plan in repetition_plans
+                        for value in plan["minimum_inversion_times"]
                     )
                 )
             ),
@@ -2749,6 +2959,7 @@ def make_pulseq_epi(
     used_frame_pulse_ids = []
     actual_inversion_times = []
     slice_inversion_offsets = []
+    slice_inversion_times = []
     excitation_index = 0
     for repetition, plan in enumerate(repetition_plans):
         repetition_start = _sequence_duration_s(sequence)
@@ -2760,16 +2971,18 @@ def make_pulseq_epi(
         )
         used_frame_schedule_indices.append(int(frame_schedule_index))
         used_frame_pulse_ids.append(str(rf_variants[frame_schedule_index]["pulse_id"]))
-        if inversion is not None:
-            crusher_end = _add_inversion_preparation(
-                pp, sequence, inversion, plan["inversion_delay"]
-            )
-            if crusher_end is not None:
-                spoiler_end_times.append(crusher_end)
-            actual_inversion_times.append(plan["inversion_time"])
-        first_excitation_time = None
-        for slice_index, position in enumerate(slice_positions):
-            variant = rf_variants[plan["variant_indices"][slice_index]]
+        inversion_center_time = None
+        repetition_slice_times = [0.0] * n_slices
+        for acquisition_position, slice_index in enumerate(plan["order"]):
+            position = slice_positions[slice_index]
+            inversion_delay = plan["inversion_delays"][acquisition_position]
+            if inversion is not None and inversion_delay is not None:
+                inversion_center_time, crusher_end = _add_inversion_preparation(
+                    pp, sequence, inversion, inversion_delay, position_m=position
+                )
+                if crusher_end is not None:
+                    spoiler_end_times.append(crusher_end)
+            variant = rf_variants[plan["variant_indices"][acquisition_position]]
             rf = variant["rf"]
             gz = variant["gz"]
             rf_center = variant["rf_center"]
@@ -2802,13 +3015,19 @@ def make_pulseq_epi(
                     np.deg2rad(rf_phase_deg)
                     - 2 * np.pi * slice_frequency_offset_hz * rf_center
                 )
-            excitation_time = (
-                _sequence_duration_s(sequence) + variant["excitation_center"]
-            )
-            if first_excitation_time is None:
-                first_excitation_time = excitation_time
-            if repetition == 0:
-                slice_inversion_offsets.append(excitation_time - first_excitation_time)
+            if inversion_center_time is not None:
+                slice_inversion_time = (
+                    _sequence_duration_s(sequence)
+                    + variant["excitation_center"]
+                    - inversion_center_time
+                )
+                repetition_slice_times[slice_index] = slice_inversion_time
+                if acquisition_position == 0:
+                    actual_inversion_times.append(slice_inversion_time)
+                if repetition == 0:
+                    slice_inversion_offsets.append(
+                        slice_inversion_time - actual_inversion_times[0]
+                    )
             rf_block_events = [
                 rf_for_slice,
                 gz,
@@ -2844,6 +3063,8 @@ def make_pulseq_epi(
                 sequence.add_block(*spoilers)
                 spoiler_end_times.append(float(sequence.duration()[0]))
             excitation_index += 1
+        if inversion is not None:
+            slice_inversion_times.append(repetition_slice_times)
         acquired = _sequence_duration_s(sequence) - repetition_start
         if acquired > actual_repetition_time + 1e-9:
             raise ValueError(
@@ -2936,6 +3157,10 @@ def make_pulseq_epi(
         actual_inversion_times_s=actual_inversion_times,
         slice_inversion_offsets_s=slice_inversion_offsets,
         spoiler_cycles_per_slice=inversion_spoiler_cycles_per_slice,
+        slice_inversion_times_s=slice_inversion_times,
+    )
+    _set_slice_order_definitions(
+        sequence, slice_order, [plan["order"] for plan in repetition_plans]
     )
     if schedule_active:
         _set_spectral_spatial_schedule_definitions(
@@ -2975,6 +3200,7 @@ class FlashTimingPlan:
     minimum_repetition_time_s: float
     minimum_acquisition_interval_s: float
     minimum_inversion_time_s: float | None = None
+    minimum_inversion_repetition_time_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -3558,6 +3784,11 @@ def make_pulseq_flash(
     inversion_pulse_type: str = "hyperbolic_secant",
     inversion_duration_s: float = 10e-3,
     inversion_spoiler_cycles_per_slice: float = 8.0,
+    inversion_mode: str = "global",
+    inversion_interval: str = "image",
+    inversion_repetition_time_s: float | None = None,
+    inversion_slab_factor: float = 1.0,
+    slice_order: str = "sequential",
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
     nucleus: str = "H1",
@@ -3581,6 +3812,15 @@ def make_pulseq_flash(
     inversion centre to the excitation of the k-space centre line of the
     first slice; several values cycle across repetitions for T1 mapping.
     ``acquisition_interval_s`` then sets the inversion-to-inversion time.
+
+    ``inversion_interval='line'`` inverts before every phase-encoding line
+    instead (classic multi-slice IR): after each inversion every slice is
+    excited once for that line, and ``inversion_repetition_time_s`` (``None``
+    for the shortest) sets the inversion-to-inversion time. With the global
+    ``inversion_mode`` the k-th slice of the train sees TI plus k line TRs;
+    ``'slice_selective'`` inverts each slice right before its own
+    excitations so every slice sees the requested TI. ``slice_order`` and
+    ``SliceInversionTimes`` behave as in :func:`make_pulseq_epi`.
     """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -3842,53 +4082,154 @@ def make_pulseq_flash(
         slice_thickness_m=slice_thickness_m,
         spoiler_cycles_per_slice=inversion_spoiler_cycles_per_slice,
         spoiler_duration_s=spoiler_duration_s,
+        mode=inversion_mode,
+        slab_factor=inversion_slab_factor,
     )
+    interval = _normalized_choice(
+        inversion_interval,
+        {"image": "image", "frame": "image", "line": "line"},
+        "inversion_interval",
+    )
+    if inversion_repetition_time_s is not None and (
+        not np.isfinite(inversion_repetition_time_s) or inversion_repetition_time_s <= 0
+    ):
+        raise ValueError("inversion_repetition_time_s must be positive and finite")
+    line_interval = inversion is not None and interval == "line"
     center_line = n_phase // 2
-    inversion_delays = []
+    series_length = 1 if inversion is None else len(inversion.inversion_times_s)
+    # Plan every repetition as groups of segments. A segment starts with an
+    # optional inversion and lists (slice, line, variant) excitations; in
+    # line mode each phase-encoding line is one group, padded to the
+    # inversion repetition time.
+    repetition_plans = []
     inversion_minimums = []
-    if inversion is not None:
-        for repetition in range(repetitions):
-            first_excitation = repetition * n_slices * n_phase
-            # TI targets the centre line of the first slice of each image.
-            target_offset = (
-                sum(
-                    rf_variants[
-                        variant_for_excitation(repetition, first_excitation + line)
-                    ]["actual_tr"]
-                    for line in range(center_line)
-                )
-                + rf_variants[
-                    variant_for_excitation(repetition, first_excitation + center_line)
-                ]["excitation_center"]
-            )
-            inversion_minimums.append(inversion.minimum_inversion_time_s(target_offset))
-            inversion_delays.append(
-                _inversion_delay_s(
-                    inversion,
-                    inversion.inversion_time_for(repetition),
-                    target_offset,
-                    system.block_duration_raster,
-                    sequence_name="FLASH",
-                    allow_short=timing_only,
-                )
-            )
-    if timing_only:
-        actual_tr = max(actual_tr, minimum_repetition_time)
-        preparation_duration = (
-            0.0
-            if inversion is None
-            else inversion.fixed_duration_s + max(inversion_delays)
+    excitation_index = 0
+    for repetition in range(repetitions):
+        order = slice_acquisition_order(
+            n_slices, slice_order, repetition=repetition, series_length=series_length
         )
+        if line_interval:
+            group_excitations = [
+                [(slice_index, line) for slice_index in order]
+                for line in range(n_phase)
+            ]
+        else:
+            group_excitations = [
+                [
+                    (slice_index, line)
+                    for slice_index in order
+                    for line in range(n_phase)
+                ]
+            ]
+        groups = []
+        for excitations in group_excitations:
+            if inversion is not None and inversion.selective:
+                segment_excitations = [
+                    [item for item in excitations if item[0] == slice_index]
+                    for slice_index in order
+                ]
+            else:
+                segment_excitations = [excitations]
+            segments = []
+            group_duration = 0.0
+            for items in segment_excitations:
+                planned = []
+                for slice_index, line in items:
+                    planned.append(
+                        (
+                            slice_index,
+                            line,
+                            variant_for_excitation(repetition, excitation_index),
+                        )
+                    )
+                    excitation_index += 1
+                inversion_delay = None
+                if inversion is not None:
+                    # TI targets the centre line of the first slice after the
+                    # inversion; in line mode that is the first excitation.
+                    target = (
+                        0
+                        if line_interval
+                        else next(
+                            index
+                            for index, item in enumerate(planned)
+                            if item[1] == center_line
+                        )
+                    )
+                    target_offset = (
+                        sum(
+                            rf_variants[item[2]]["actual_tr"]
+                            for item in planned[:target]
+                        )
+                        + rf_variants[planned[target][2]]["excitation_center"]
+                    )
+                    inversion_minimums.append(
+                        inversion.minimum_inversion_time_s(target_offset)
+                    )
+                    inversion_delay = _inversion_delay_s(
+                        inversion,
+                        inversion.inversion_time_for(repetition),
+                        target_offset,
+                        system.block_duration_raster,
+                        sequence_name="FLASH",
+                        allow_short=timing_only,
+                    )
+                    group_duration += inversion.fixed_duration_s + inversion_delay
+                group_duration += sum(
+                    rf_variants[item[2]]["actual_tr"] for item in planned
+                )
+                segments.append(
+                    {"inversion_delay": inversion_delay, "excitations": planned}
+                )
+            groups.append({"segments": segments, "duration": group_duration})
+        repetition_plans.append({"order": order, "groups": groups})
+
+    minimum_inversion_repetition_time = None
+    inversion_repetition_time = None
+    if line_interval:
+        minimum_inversion_repetition_time = max(
+            group["duration"] for plan in repetition_plans for group in plan["groups"]
+        )
+        if inversion_repetition_time_s is None:
+            inversion_repetition_time = _ceil_to_raster(
+                minimum_inversion_repetition_time, system.block_duration_raster
+            )
+        else:
+            inversion_repetition_time = float(inversion_repetition_time_s)
+            if (
+                inversion_repetition_time < minimum_inversion_repetition_time - 1e-12
+                and not timing_only
+            ):
+                raise ValueError(
+                    "inversion_repetition_time_s is too short; minimum is "
+                    f"{minimum_inversion_repetition_time:.9g} s"
+                )
+    if timing_only:
         return FlashTimingPlan(
             sampling_bandwidth_hz=1.0 / dwell,
             dwell_s=float(dwell),
             minimum_echo_time_s=float(minimum_echo_time),
             minimum_repetition_time_s=float(minimum_repetition_time),
             minimum_acquisition_interval_s=float(
-                preparation_duration + n_slices * n_phase * actual_tr
+                max(
+                    sum(
+                        (
+                            max(group["duration"], inversion_repetition_time)
+                            if line_interval
+                            else group["duration"]
+                        )
+                        for group in plan["groups"]
+                    )
+                    for plan in repetition_plans
+                )
             ),
             minimum_inversion_time_s=(
                 None if inversion is None else float(max(inversion_minimums))
+            ),
+            minimum_inversion_repetition_time_s=(
+                None
+                if minimum_inversion_repetition_time is None
+                else float(minimum_inversion_repetition_time)
             ),
         )
 
@@ -3906,19 +4247,10 @@ def make_pulseq_flash(
     used_frame_pulse_ids = []
     actual_inversion_times = []
     slice_inversion_offsets = []
-    for repetition in range(repetitions):
+    slice_inversion_times = []
+    for repetition, plan in enumerate(repetition_plans):
         acquisition_start = _sequence_duration_s(sequence)
         acquisition_start_times.append(acquisition_start)
-        inversion_center_time = None
-        if inversion is not None:
-            inversion_center_time = (
-                acquisition_start + inversion.center_from_block_start_s
-            )
-            crusher_end = _add_inversion_preparation(
-                pp, sequence, inversion, inversion_delays[repetition]
-            )
-            if crusher_end is not None:
-                spoiler_end_times.append(crusher_end)
         if schedule_active and pulse_schedule.selection_level == "frame":
             frame_schedule_index, _ = pulse_schedule.entry_for_index(repetition)
         else:
@@ -3926,130 +4258,153 @@ def make_pulseq_flash(
         frame_variant = rf_variants[frame_schedule_index]
         used_frame_schedule_indices.append(int(frame_schedule_index))
         used_frame_pulse_ids.append(str(frame_variant["pulse_id"]))
-        for slice_index, position in enumerate(slice_positions):
-            for line, phase_area in enumerate(phase_areas):
-                if schedule_active and pulse_schedule.selection_level == "tr":
-                    schedule_index, _ = pulse_schedule.entry_for_index(excitation_index)
+        inversion_center_time = None
+        repetition_slice_times = [0.0] * n_slices
+        for group in plan["groups"]:
+            group_start = _sequence_duration_s(sequence)
+            for segment in group["segments"]:
+                if segment["inversion_delay"] is not None:
+                    first_slice = segment["excitations"][0][0]
+                    inversion_center_time, crusher_end = _add_inversion_preparation(
+                        pp,
+                        sequence,
+                        inversion,
+                        segment["inversion_delay"],
+                        position_m=slice_positions[first_slice],
+                    )
+                    if crusher_end is not None:
+                        spoiler_end_times.append(crusher_end)
+                for slice_index, line, schedule_index in segment["excitations"]:
+                    position = slice_positions[slice_index]
+                    phase_area = phase_areas[line]
                     variant = rf_variants[schedule_index]
-                else:
-                    schedule_index = frame_schedule_index
-                    variant = frame_variant
-                if inversion_center_time is not None and line == center_line:
-                    excitation_time = (
-                        _sequence_duration_s(sequence) + variant["excitation_center"]
-                    )
-                    if slice_index == 0:
-                        actual_inversion_times.append(
-                            excitation_time - inversion_center_time
-                        )
-                    if repetition == 0:
-                        slice_inversion_offsets.append(
-                            excitation_time
+                    if inversion_center_time is not None and line == center_line:
+                        repetition_slice_times[slice_index] = (
+                            _sequence_duration_s(sequence)
+                            + variant["excitation_center"]
                             - inversion_center_time
-                            - actual_inversion_times[0]
                         )
-                rf = variant["rf"]
-                gz = variant["gz"]
-                spsp_logical_gz = variant["logical_gz"]
-                rf_center = variant["rf_center"]
-                logical_slice_area = variant["logical_slice_area"]
-                slice_rephase_area = variant["slice_rephase_area"]
-                gz_rephase = variant["gz_rephase"]
-                te_delay_value = variant["te_delay"]
-                tr_delay_value = variant["tr_delay"]
-                rf_phase_deg = (
-                    _rf_spoiling_phase_deg(excitation_index, rf_spoiling_increment_deg)
-                    if rf_spoiling
-                    else 0.0
-                )
-                if rf_pulse_type == "spectral_spatial":
-                    rf_for_slice = shifted_spectral_spatial_rf_event(
-                        rf,
-                        spsp_logical_gz,
-                        spatial_offset_m=position,
-                        rf_raster_s=system.rf_raster_time,
-                        gradient_raster_s=system.grad_raster_time,
+                    rf = variant["rf"]
+                    gz = variant["gz"]
+                    spsp_logical_gz = variant["logical_gz"]
+                    rf_center = variant["rf_center"]
+                    logical_slice_area = variant["logical_slice_area"]
+                    slice_rephase_area = variant["slice_rephase_area"]
+                    gz_rephase = variant["gz_rephase"]
+                    te_delay_value = variant["te_delay"]
+                    tr_delay_value = variant["tr_delay"]
+                    rf_phase_deg = (
+                        _rf_spoiling_phase_deg(
+                            excitation_index, rf_spoiling_increment_deg
+                        )
+                        if rf_spoiling
+                        else 0.0
                     )
-                    total_rf_frequency_offset_hz = rf_frequency_offset_hz
-                else:
-                    rf_for_slice = rf
-                    logical_slice_amplitude = float(gz.amplitude) * slice_sign
-                    total_rf_frequency_offset_hz = (
-                        rf_frequency_offset_hz + logical_slice_amplitude * position
+                    if rf_pulse_type == "spectral_spatial":
+                        rf_for_slice = shifted_spectral_spatial_rf_event(
+                            rf,
+                            spsp_logical_gz,
+                            spatial_offset_m=position,
+                            rf_raster_s=system.rf_raster_time,
+                            gradient_raster_s=system.grad_raster_time,
+                        )
+                        total_rf_frequency_offset_hz = rf_frequency_offset_hz
+                    else:
+                        rf_for_slice = rf
+                        logical_slice_amplitude = float(gz.amplitude) * slice_sign
+                        total_rf_frequency_offset_hz = (
+                            rf_frequency_offset_hz + logical_slice_amplitude * position
+                        )
+                    rf_for_slice.freq_offset = total_rf_frequency_offset_hz
+                    rf_for_slice.phase_offset = (
+                        np.deg2rad(rf_phase_deg)
+                        - 2.0 * np.pi * total_rf_frequency_offset_hz * rf_center
                     )
-                rf_for_slice.freq_offset = total_rf_frequency_offset_hz
-                rf_for_slice.phase_offset = (
-                    np.deg2rad(rf_phase_deg)
-                    - 2.0 * np.pi * total_rf_frequency_offset_hz * rf_center
-                )
-                adc.phase_offset = pulseq_phase_offset_rad(
-                    rf_phase_deg + 360.0 * float(phase_area) * phase_offset_m,
-                    frequency_offset_hz=adc.freq_offset,
-                    event_center_s=adc_center,
-                )
-                gy_phase = make_role_trapezoid(
+                    adc.phase_offset = pulseq_phase_offset_rad(
+                        rf_phase_deg + 360.0 * float(phase_area) * phase_offset_m,
+                        frequency_offset_hz=adc.freq_offset,
+                        event_center_s=adc_center,
+                    )
+                    gy_phase = make_role_trapezoid(
+                        pp,
+                        encoding_frame,
+                        "phase",
+                        area=float(phase_area),
+                        duration=encoding_duration_s,
+                        system=system,
+                    )
+                    gx_spoil = make_role_trapezoid(
+                        pp,
+                        encoding_frame,
+                        "read",
+                        area=(
+                            -logical_read_area / 2.0
+                            + spoiler_cycles_per_voxel / (fov_read / n_read)
+                        ),
+                        duration=spoiler_duration_s,
+                        system=system,
+                    )
+                    gy_spoil = make_role_trapezoid(
+                        pp,
+                        encoding_frame,
+                        "phase",
+                        area=(
+                            -float(phase_area)
+                            + spoiler_cycles_per_voxel / (fov_phase / n_phase)
+                        ),
+                        duration=spoiler_duration_s,
+                        system=system,
+                    )
+                    gz_spoil = make_role_trapezoid(
+                        pp,
+                        encoding_frame,
+                        "partition",
+                        # Keep the net moment per TR equal to the spoiler moment.
+                        area=(
+                            -(logical_slice_area + slice_rephase_area)
+                            + spoiler_cycles_per_slice / slice_thickness_m
+                        ),
+                        duration=spoiler_duration_s,
+                        system=system,
+                    )
+                    rf_block_events = [
+                        rf_for_slice,
+                        gz,
+                        pp.make_label("LIN", "SET", line),
+                        pp.make_label("SLC", "SET", slice_index),
+                        pp.make_label("REP", "SET", repetition),
+                    ]
+                    if schedule_active:
+                        rf_block_events.append(
+                            pp.make_label("SET", "SET", int(schedule_index))
+                        )
+                    sequence.add_block(*rf_block_events)
+                    sequence.add_block(gx_pre, gy_phase, gz_rephase)
+                    if te_delay_value:
+                        sequence.add_block(pp.make_delay(te_delay_value))
+                    sequence.add_block(gx_read, adc)
+                    sequence.add_block(gx_spoil, gy_spoil, gz_spoil)
+                    spoiler_end_times.append(float(sequence.duration()[0]))
+                    if tr_delay_value:
+                        sequence.add_block(pp.make_delay(tr_delay_value))
+                    excitation_index += 1
+            if line_interval:
+                _finish_acquisition_interval(
                     pp,
-                    encoding_frame,
-                    "phase",
-                    area=float(phase_area),
-                    duration=encoding_duration_s,
-                    system=system,
+                    sequence,
+                    acquisition_start_s=group_start,
+                    requested_interval_s=inversion_repetition_time,
+                    raster_s=system.block_duration_raster,
+                    acquisition_name="FLASH inversion",
                 )
-                gx_spoil = make_role_trapezoid(
-                    pp,
-                    encoding_frame,
-                    "read",
-                    area=(
-                        -logical_read_area / 2.0
-                        + spoiler_cycles_per_voxel / (fov_read / n_read)
-                    ),
-                    duration=spoiler_duration_s,
-                    system=system,
-                )
-                gy_spoil = make_role_trapezoid(
-                    pp,
-                    encoding_frame,
-                    "phase",
-                    area=(
-                        -float(phase_area)
-                        + spoiler_cycles_per_voxel / (fov_phase / n_phase)
-                    ),
-                    duration=spoiler_duration_s,
-                    system=system,
-                )
-                gz_spoil = make_role_trapezoid(
-                    pp,
-                    encoding_frame,
-                    "partition",
-                    # Keep the net moment per TR equal to the spoiler moment.
-                    area=(
-                        -(logical_slice_area + slice_rephase_area)
-                        + spoiler_cycles_per_slice / slice_thickness_m
-                    ),
-                    duration=spoiler_duration_s,
-                    system=system,
-                )
-                rf_block_events = [
-                    rf_for_slice,
-                    gz,
-                    pp.make_label("LIN", "SET", line),
-                    pp.make_label("SLC", "SET", slice_index),
-                    pp.make_label("REP", "SET", repetition),
+        if inversion is not None:
+            slice_inversion_times.append(repetition_slice_times)
+            actual_inversion_times.append(repetition_slice_times[plan["order"][0]])
+            if repetition == 0:
+                slice_inversion_offsets = [
+                    repetition_slice_times[slice_index] - actual_inversion_times[0]
+                    for slice_index in plan["order"]
                 ]
-                if schedule_active:
-                    rf_block_events.append(
-                        pp.make_label("SET", "SET", int(schedule_index))
-                    )
-                sequence.add_block(*rf_block_events)
-                sequence.add_block(gx_pre, gy_phase, gz_rephase)
-                if te_delay_value:
-                    sequence.add_block(pp.make_delay(te_delay_value))
-                sequence.add_block(gx_read, adc)
-                sequence.add_block(gx_spoil, gy_spoil, gz_spoil)
-                spoiler_end_times.append(float(sequence.duration()[0]))
-                if tr_delay_value:
-                    sequence.add_block(pp.make_delay(tr_delay_value))
-                excitation_index += 1
         minimum_interval = _sequence_duration_s(sequence) - acquisition_start
         actual_interval, _ = _finish_acquisition_interval(
             pp,
@@ -4111,6 +4466,20 @@ def make_pulseq_flash(
         actual_inversion_times_s=actual_inversion_times,
         slice_inversion_offsets_s=slice_inversion_offsets,
         spoiler_cycles_per_slice=inversion_spoiler_cycles_per_slice,
+        slice_inversion_times_s=slice_inversion_times,
+    )
+    if inversion is not None:
+        sequence.set_definition("InversionInterval", interval)
+        if line_interval:
+            sequence.set_definition(
+                "InversionRepetitionTime", float(inversion_repetition_time)
+            )
+            sequence.set_definition(
+                "MinimumInversionRepetitionTime",
+                float(minimum_inversion_repetition_time),
+            )
+    _set_slice_order_definitions(
+        sequence, slice_order, [plan["order"] for plan in repetition_plans]
     )
     _set_rf_definitions(
         sequence,

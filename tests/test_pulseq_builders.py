@@ -1212,6 +1212,7 @@ def test_sequence_workspace_builds_and_exports_configurable_fov(tmp_path):
         "Pulseq .seq file",
         "RF + Slice Selection",
         "PRESS (single voxel)",
+        "Inversion Recovery (2D)",
     ]
 
     widget.epi_read_fov_mm.setValue(80.0)

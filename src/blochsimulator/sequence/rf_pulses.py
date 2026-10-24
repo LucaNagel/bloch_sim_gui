@@ -386,6 +386,22 @@ def design_hyperbolic_secant_inversion(
     return samples
 
 
+def hyperbolic_secant_bandwidth_hz(
+    duration_s: float,
+    *,
+    mu: float = 4.9,
+    beta_duration_product: float = 8.0,
+) -> float:
+    """Return the frequency sweep ``mu beta / pi`` of the HS inversion.
+
+    The adiabatic pulse inverts this band, so a slice-selective HS inversion
+    of thickness ``d`` needs the gradient ``bandwidth / d`` in Hz/m.
+    """
+    if not np.isfinite(duration_s) or duration_s <= 0:
+        raise ValueError("duration_s must be positive and finite")
+    return float(mu) * float(beta_duration_product) / (np.pi * float(duration_s))
+
+
 def make_pulseq_rf_events(
     pp,
     system,

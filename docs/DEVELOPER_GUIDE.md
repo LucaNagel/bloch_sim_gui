@@ -275,30 +275,84 @@ do not duplicate the frequency or Bloch logic in widgets.
 
 ### Inversion Recovery and T1 Fitting
 
-`make_pulseq_flash` and `make_pulseq_epi` accept `inversion_times_s`. Before
-every repetition they play a non-selective inversion, a crusher and a TI
-delay. The other parameters are:
+`sequence.inversion_recovery.make_pulseq_inversion_recovery` is the
+standalone multi-slice IR sequence. The GUI lists it as the
+"Inversion Recovery (2D)" source. `readout` selects the acquisition after
+each inversion:
+
+- `epi`: one single-shot EPI image per slice and inversion.
+- `gre`: classic IR with one gradient-echo line per slice and inversion. The
+  inversion repeats for every phase-encoding line.
+- `turboflash`: the whole low-flip FLASH image follows one inversion
+  (MP-RAGE-like). TI targets the k-space centre line.
+
+`inversion_mode` places the inversion:
+
+- `global` (default): one non-selective 180° followed by
+  TI - 90° slice 1 - 90° slice 2 ... 90° slice N. Slice k sees TI plus the
+  k preceding excitation-and-readout durations. Those offsets are recorded in
+  `InversionSliceTimeOffsets`.
+- `slice_selective`: every slice gets its own inversion right before its
+  excitation, so every slice sees the requested TI. The inversion slab is
+  `inversion_slab_factor` times the slice thickness. Without the overlap of
+  the slice train and the TI delay, the inversion TR grows by roughly the
+  number of slices. A block pulse has no slice profile and is rejected. The
+  error for a too-steep inversion gradient names the needed mT/m.
+
+`slice_order` is `sequential`, `interleaved` (even then odd slices) or
+`cyclic`. The cyclic order rotates the slice train by one position per TI
+series, so every slice is acquired at every train position.
+`slice_acquisition_order` returns the order for one repetition.
+`repetition_time_s` is the inversion-to-inversion time, and
+`readout_repetition_time_s` is the gradient-echo line TR. `None` selects the
+shortest. `repetitions` defaults to one complete TI series, or one series per
+slice with the cyclic order. `timing_only=True` returns an
+`InversionRecoveryTimingPlan` with the TE, line TR, inversion TR and TI
+minimums. All other keywords are passed to `make_pulseq_epi` or
+`make_pulseq_flash`. The arguments the wrapper sets itself raise `TypeError`.
+
+The builders underneath accept the same preparation, so FLASH and EPI with
+`inversion_times_s` still work on their own:
 
 - `inversion_pulse_type`, one of `INVERSION_PULSE_TYPES`: `hyperbolic_secant`
   (adiabatic, default), `sinc` or `block`;
 - `inversion_duration_s`;
-- `inversion_spoiler_cycles_per_slice`.
+- `inversion_spoiler_cycles_per_slice`;
+- `inversion_mode`, `inversion_slab_factor` and `slice_order` as above;
+- FLASH only: `inversion_interval` (`image` or `line`), with
+  `acquisition_interval_s` and `inversion_repetition_time_s` as the spacing
+  of the inversions.
 
 Several TI values cycle across repetitions, so one sequence produces a T1
 mapping series. TI is measured from the inversion centre to the excitation
-centre that samples the k-space centre of the first slice:
+that samples the k-space centre of the first slice in the train. A TI below
+the minimum raises `ValueError` and names the minimum. The minimum is the
+second half of the inversion pulse, the crusher, and the time up to the
+target excitation centre. The definitions record:
 
-- FLASH: the centre line. `acquisition_interval_s` sets the time between
-  inversions, as in MP-RAGE.
-- EPI: the first slice's excitation. Later slices follow at the offsets
-  stored in `InversionSliceTimeOffsets`.
+- `RequestedInversionTimes` and `InversionTimes`: the requested and actual
+  values per repetition;
+- `SliceInversionTimes`: the actual TI of every repetition and slice;
+- `SliceAcquisitionOrder`: the spatial slice index of every excitation;
+- `InversionMode`, `InversionSelectivity` and `InversionSlabThickness`.
 
-A TI below the minimum raises `ValueError` and names the minimum. The minimum
-is the second half of the inversion pulse, the crusher, and the time up to the
-target excitation centre. The definitions `RequestedInversionTimes` and `InversionTimes`
-record the requested and actual values. The GUI adds an "Inversion recovery"
-section to the FLASH and EPI forms, with a TI list in ms and the resulting
-timing.
+The GUI source has readout-specific defaults for flip angle, TE and the TI
+list (10° and 250-2500 ms for TurboFLASH). It raises a too-short TE, line TR
+or inversion TR to the minimum and lists the per-slice TI offsets after
+generation. The FLASH and EPI forms keep their own "Inversion recovery"
+section.
+
+`relaxometry.slice_inversion_times(definitions)` reshapes the slice TIs to
+(slices, repetitions). They can be passed directly to the fit, because it
+broadcasts TI against the signal.
+
+In the three-parameter fit a constant per-slice TI offset `d` does not bias
+T1: `a - b exp(-(TI + d)/T1)` is the same model with `b exp(-d/T1)`. A fit
+with the nominal TIs then finds the same T1 and only a smaller apparent
+inversion efficiency for later slices. The true slice TIs matter for
+two-parameter fits, for the inversion efficiency, for the dynamic range
+near the zero crossing, and for the cyclic order, whose offset changes per
+series.
 
 `sequence.relaxometry.fit_inversion_recovery_t1` fits
 `S(TI) = a - b exp(-TI/T1)` voxelwise, with TI on the last axis:

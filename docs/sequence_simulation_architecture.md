@@ -231,9 +231,12 @@ The refocused profile of a sinc 180° follows `sin²(θ(z)/2)` and is narrower
 than its nominal slab. The effective voxel is slightly smaller than
 `VoxelSize`.
 
-Inversion recovery is a preparation, not a new acquisition model. FLASH and
-EPI with `inversion_times_s` keep their Cartesian layout. Each repetition is
-one frame whose TI is recorded in the `InversionTimes` definition, and
+Inversion recovery is a preparation, not a new acquisition model. The
+standalone `make_pulseq_inversion_recovery` and FLASH or EPI with
+`inversion_times_s` keep their Cartesian layout. Each repetition and slice is
+one frame. A global inversion shifts the TI of later slices in the train, so
+every frame's TI is recorded in `SliceInversionTimes`.
+`relaxometry.slice_inversion_times` reshapes it, and
 `relaxometry.fit_inversion_recovery_t1` fits the reconstructed frame series
 along that axis.
 
