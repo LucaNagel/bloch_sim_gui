@@ -255,12 +255,116 @@ Pulseq `SET` label, while reproducibility data is stored in
 metadata copies the definitions, ADC label values, and the schedule-definition
 subset.
 
+`make_pulseq_epi` takes the same two arguments. Its `frame` level advances
+the schedule once per repetition, so every slice of that repetition shares
+one pulse. Its `tr` level advances once per slice excitation, so each
+single-shot slice image carries one pulse. Each excitation carries the
+schedule index in `SET`, and the same `SPSPSchedule*` definitions are written.
+The echo-time minimum is checked for every pulse variant. Variable flip
+angles cannot be combined with a schedule and raise `ValueError`. The GUI
+enables the multi-step schedule dialog for FLASH and Cartesian EPI
+(`_spectral_spatial_schedule_supported`); all other sequences keep one
+pulse.
+
 The pure `spectral_spatial_peaks` function is the canonical conversion from
 absolute phantom/preset ppm to sequence-relative and carrier-relative Hz.
 `simulate_spectral_spatial_schedule_preview` is the UI-independent reduced-grid
 preview and propagates complex magnetization through full RF/gradient samples.
 Keep future GUI changes in the schedule dialogs and shared plotting helpers;
 do not duplicate the frequency or Bloch logic in widgets.
+
+### Inversion Recovery and T1 Fitting
+
+`make_pulseq_flash` and `make_pulseq_epi` accept `inversion_times_s`. Before
+every repetition they play a non-selective inversion, a crusher and a TI
+delay. The other parameters are:
+
+- `inversion_pulse_type`, one of `INVERSION_PULSE_TYPES`: `hyperbolic_secant`
+  (adiabatic, default), `sinc` or `block`;
+- `inversion_duration_s`;
+- `inversion_spoiler_cycles_per_slice`.
+
+Several TI values cycle across repetitions, so one sequence produces a T1
+mapping series. TI is measured from the inversion centre to the excitation
+centre that samples the k-space centre of the first slice:
+
+- FLASH: the centre line. `acquisition_interval_s` sets the time between
+  inversions, as in MP-RAGE.
+- EPI: the first slice's excitation. Later slices follow at the offsets
+  stored in `InversionSliceTimeOffsets`.
+
+A TI below the minimum raises `ValueError` and names the minimum. The minimum
+is the second half of the inversion pulse, the crusher, and the time up to the
+target excitation centre. The definitions `RequestedInversionTimes` and `InversionTimes`
+record the requested and actual values. The GUI adds an "Inversion recovery"
+section to the FLASH and EPI forms, with a TI list in ms and the resulting
+timing.
+
+`sequence.relaxometry.fit_inversion_recovery_t1` fits
+`S(TI) = a - b exp(-TI/T1)` voxelwise, with TI on the last axis:
+
+- Complex data is rotated by the phase of the longest-TI sample and then
+  fitted on its real part.
+- Magnitude data uses polarity restoration (NLS-PR, Barral et al., DOI
+  10.1002/mrm.22497).
+- The search is a log-spaced T1 grid with closed-form `a` and `b`.
+
+`InversionRecoveryFit` also reports the inversion efficiency `b/a - 1` and
+the number of restored samples. `inversion_recovery_signal` is the forward
+model. The fit is not yet wired into the Reconstruction Explorer.
+
+### Single-Voxel PRESS
+
+`make_pulseq_press` builds a PRESS sequence:
+
+- **Excitation:** slice-selective 90° on the partition axis.
+- **Refocusing:** two slice-selective 180°s, on the phase and read axes, with
+  a CPMG phase of 90° (`RefocusingPhaseDeg`).
+- **Echo timing:** TE is `2 (t_refocus2 - t_refocus1)`.
+  `first_echo_time_s` (TE1) places the first refocusing pulse at TE1/2;
+  it defaults to TE/2.
+- **Crushers:** each 180° sits between a crusher pair on its own axis.
+- **Readout:** the FID is acquired from the echo top without a read
+  gradient.
+
+`voxel_size_m` and `voxel_offset_m` are logical (read, phase, partition)
+values and follow `encoding_axes`. `timing_only=True` returns a
+`PressTimingPlan` with the TE1, TE and TR minimums.
+`refocusing_pulse_type` is one of `PRESS_REFOCUSING_PULSE_TYPES`.
+
+The sequence is labelled as a 1×1 CSI grid, so
+`infer_spectroscopic_acquisition` returns a single-voxel
+`SpectroscopicAcquisition` and the existing CSI spectrum view displays it.
+
+Simulation caveats:
+
+- **Crushers act across isochromats.** Signal outside the voxel only
+  cancels when every phantom voxel is represented by many spins along the
+  crusher axes. Use gradient-waveform subvoxel spoiling, or check single
+  positions with `simulate_sequence_probes` as `tests/test_press.py` does.
+  With one spin per voxel, the FIDs of the refocusing pulses and the
+  stimulated echo stay visible.
+- **A sinc 180° refocuses a narrower profile than its nominal slab.** The
+  refocusing efficiency `sin²(θ/2)` falls faster at the slab edges than the
+  90° excitation profile. The effective voxel is therefore slightly smaller
+  than `voxel_size_m`, more so for `block` and low time-bandwidth products.
+
+### Compressed Sensing
+
+`sequence.compressed_sensing` is a numpy-only module for retrospective CS on
+reconstructed Cartesian grids. It provides:
+
+- variable-density and k-t masks;
+- PSF incoherence;
+- zero-filled reference;
+- the primal-dual reconstruction with Haar wavelet, TV and temporal-difference
+  terms.
+
+The builders and acquisition models do not accept undersampled grids yet.
+`docs/compressed_sensing_concept.md` describes the measured behaviour, the
+retrospective workflow and the staged plan for prospective undersampling
+(builder masks, subset `phase_indices`, a reconstruction hook and GUI
+controls).
 
 ### Choosing Subvoxel Sampling for Imported Pulseq Sequences
 

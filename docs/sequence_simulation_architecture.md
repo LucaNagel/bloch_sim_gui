@@ -210,6 +210,41 @@ clicking k-space maps its displayed grid index to the same selector as a UI
 convenience and explicitly does not reinterpret a k-space coordinate as a
 physical voxel.
 
+Single-voxel PRESS (`make_pulseq_press`) uses the same spectroscopic model.
+The sequence declares `MatrixSize` `[1, 1, spectral_points]`, labels every
+FID with `LIN = PAR = 0` and `REP`, and has no phase encoding. A 1×1 grid
+therefore skips the moment validation: the crusher and slab moments after
+the last refocusing pulse are refocused by the echo itself. Inference returns
+one FID per repetition as a `SpectroscopicAcquisition` with
+`matrix == (1, 1)`.
+
+The localisation is physical. Only the intersection of the three slabs forms
+the double spin echo, and the crusher pairs dephase everything else across
+isochromats. The result therefore depends on the intravoxel spin model
+described above:
+
+- **Ideal mode (one spin per voxel):** only adds a phase, so signal outside
+  the voxel survives.
+- **Gradient-waveform subvoxel spins:** reproduce the suppression.
+
+The refocused profile of a sinc 180° follows `sin²(θ(z)/2)` and is narrower
+than its nominal slab. The effective voxel is slightly smaller than
+`VoxelSize`.
+
+Inversion recovery is a preparation, not a new acquisition model. FLASH and
+EPI with `inversion_times_s` keep their Cartesian layout. Each repetition is
+one frame whose TI is recorded in the `InversionTimes` definition, and
+`relaxometry.fit_inversion_recovery_t1` fits the reconstructed frame series
+along that axis.
+
+Compressed sensing is likewise outside the acquisition models.
+`sequence.compressed_sensing` works on the grids that `reshape_signal`
+produces and uses the same centred FFT convention. Retrospective masks need
+the voxel-centred phase of `CartesianAcquisition.reconstruct` applied to the
+k-space first. `CartesianAcquisition` still requires `phase_indices` to be a
+full permutation, so a prospectively undersampled grid is rejected. The
+staged extension is described in `docs/compressed_sensing_concept.md`.
+
 The main window has two presentation modes. Free Mode retains the single-spin
 parameter panel, global run controls, playback controls, and all analysis tabs.
 Sequence Mode hides those controls, collapses the legacy left panel, and shows

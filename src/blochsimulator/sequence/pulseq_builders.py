@@ -21,8 +21,11 @@ from .encoding import (
     slice_package_positions,
 )
 from .rf_pulses import (
+    design_hyperbolic_secant_inversion,
+    design_rf_envelope,
     make_pulseq_rf_events,
     normalize_rf_pulse_type,
+    scale_rf_envelope_to_flip,
     set_rf_definitions,
     shifted_spectral_spatial_rf_event,
     spectral_spatial_refocus_area,
@@ -218,6 +221,390 @@ def _make_slice_selective_rf_events(
         spectral_spatial_pulse=rf_spectral_spatial_pulse,
         spatial_offset_m=spatial_offset_m,
         nucleus=nucleus,
+    )
+
+
+def _spectral_spatial_schedule_variants(
+    pp,
+    system,
+    *,
+    rf_pulse_type: str,
+    rf_spectral_spatial_library,
+    rf_spectral_spatial_schedule,
+    rf_spectral_spatial_pulse,
+    slice_thickness_m: float,
+    rf_apodization: float,
+    rf_slr_sharpness: int,
+    rf_frequency_offset_hz: float,
+    encoding_frame: EncodingFrame,
+    scanner_parameters,
+    nucleus: str,
+):
+    """Return the library, schedule, warnings and one RF variant per step.
+
+    Every expanded schedule step becomes one slice-selective SPSP event at
+    the schedule's flip angle. Builders choose a variant per frame or per
+    excitation and must label the excitation with its schedule index.
+    """
+    if normalize_rf_pulse_type(rf_pulse_type) != "spectral_spatial":
+        raise ValueError(
+            "an SPSP pulse library/schedule requires rf_pulse_type='spectral_spatial'"
+        )
+    pulse_library, pulse_schedule, _ = migrate_spectral_spatial_state(
+        library=rf_spectral_spatial_library,
+        schedule=rf_spectral_spatial_schedule,
+        legacy_pulse=rf_spectral_spatial_pulse,
+    )
+    schedule_warnings = validate_spectral_spatial_schedule(
+        pulse_library,
+        pulse_schedule,
+        nucleus=nucleus,
+        thickness_m=slice_thickness_m,
+        scanner_parameters=(
+            scanner_parameters
+            if scanner_parameters is not None
+            else ScannerParameters()
+        ),
+    )
+    rf_variants = []
+    for schedule_index, entry in enumerate(pulse_schedule.expanded_entries()):
+        pulse = pulse_library.get(entry.pulse_id)
+        entry_flip_angle_deg = entry.effective_flip_angle_deg(pulse)
+        events, duration_s, effective_tbw, _ = _make_slice_selective_rf_events(
+            pp,
+            system,
+            flip_angle_schedule_deg=(entry_flip_angle_deg,),
+            slice_thickness_m=slice_thickness_m,
+            rf_pulse_type="spectral_spatial",
+            rf_duration_s=pulse.duration_s,
+            rf_time_bandwidth_product=pulse.spatial_time_bandwidth_product,
+            rf_apodization=rf_apodization,
+            rf_slr_sharpness=rf_slr_sharpness,
+            rf_custom_waveform_hz=None,
+            rf_custom_raster_s=None,
+            rf_custom_flip_angle_deg=None,
+            rf_frequency_offset_hz=rf_frequency_offset_hz,
+            rf_spectral_spatial_pulse=pulse,
+            spatial_offset_m=0.0,
+            nucleus=nucleus,
+        )
+        rf_event, logical_gz = events[0]
+        rf_variants.append(
+            {
+                "schedule_index": schedule_index,
+                "entry": entry,
+                "pulse": pulse,
+                "pulse_id": entry.pulse_id,
+                "rf": rf_event,
+                "logical_gz": logical_gz,
+                "gz": _remap_gradient_event(logical_gz, encoding_frame, "partition"),
+                "duration_s": duration_s,
+                "tbw": effective_tbw,
+                "flip_angle_deg": entry_flip_angle_deg,
+            }
+        )
+    return pulse_library, pulse_schedule, schedule_warnings, rf_variants
+
+
+def _rf_variant_label(variant) -> str:
+    if variant["entry"] is None:
+        return "RF pulse"
+    return variant["entry"].display_name or variant["pulse"].name
+
+
+def _set_spectral_spatial_schedule_definitions(
+    sequence,
+    pulse_library,
+    pulse_schedule,
+    *,
+    schedule_warnings,
+    frame_schedule_indices,
+    frame_pulse_ids,
+    contrast_warning: str,
+) -> None:
+    expanded = pulse_schedule.expanded_entries()
+    sequence.set_definition("SPSPScheduleVersion", 1)
+    sequence.set_definition(
+        "SPSPScheduleSelectionLevel", pulse_schedule.selection_level
+    )
+    sequence.set_definition("SPSPScheduleCyclic", bool(pulse_schedule.cyclic))
+    sequence.set_definition("SPSPScheduleStepCount", len(expanded))
+    for definition_name, values in (
+        ("SPSPScheduleEntryIDs", [entry.entry_id for entry in expanded]),
+        ("SPSPSchedulePulseIDs", [entry.pulse_id for entry in expanded]),
+        (
+            "SPSPScheduleDisplayNames",
+            [
+                entry.display_name or pulse_library.get(entry.pulse_id).name
+                for entry in expanded
+            ],
+        ),
+        (
+            "SPSPScheduleTargetNames",
+            [entry.target_metabolite for entry in expanded],
+        ),
+        ("SPSPScheduleScaleModes", [entry.scale_mode for entry in expanded]),
+    ):
+        sequence.set_definition(
+            definition_name, json.dumps(values, separators=(",", ":"))
+        )
+    sequence.set_definition(
+        "SPSPScheduleAmplitudeScales",
+        [
+            entry.effective_amplitude_scale(pulse_library.get(entry.pulse_id))
+            for entry in expanded
+        ],
+    )
+    sequence.set_definition(
+        "SPSPScheduleFlipAnglesDeg",
+        [
+            entry.effective_flip_angle_deg(pulse_library.get(entry.pulse_id))
+            for entry in expanded
+        ],
+    )
+    sequence.set_definition(
+        "SPSPSchedulePulseDurations",
+        [pulse_library.get(entry.pulse_id).duration_s for entry in expanded],
+    )
+    sequence.set_definition("SPSPScheduleFrameIndices", list(frame_schedule_indices))
+    sequence.set_definition(
+        "SPSPScheduleFramePulseIDs",
+        json.dumps(list(frame_pulse_ids), separators=(",", ":")),
+    )
+    sequence.set_definition(
+        "SPSPScheduleWarnings",
+        json.dumps(list(schedule_warnings), separators=(",", ":")),
+    )
+    sequence.set_definition("SPSPScheduleContrastWarning", contrast_warning)
+
+
+INVERSION_PULSE_TYPES = ("hyperbolic_secant", "sinc", "block")
+_INVERSION_PULSE_ALIASES = {
+    "hyperbolic_secant": "hyperbolic_secant",
+    "hyperbolic secant": "hyperbolic_secant",
+    "adiabatic": "hyperbolic_secant",
+    "adiabatic hyperbolic secant": "hyperbolic_secant",
+    "adiabatic hs": "hyperbolic_secant",
+    "hs": "hyperbolic_secant",
+    "hypsec": "hyperbolic_secant",
+    "sinc": "sinc",
+    "block": "block",
+    "hard": "block",
+}
+
+
+def _feasible_role_trapezoid(
+    pp, encoding_frame, role: str, *, area: float, minimum_duration_s: float, system
+):
+    """Return a trapezoid of ``area`` lasting at least ``minimum_duration_s``.
+
+    It stretches to the shortest feasible trapezoid when the area does not
+    fit the requested duration at the scanner gradient limits.
+    """
+    shortest = make_role_trapezoid(pp, encoding_frame, role, area=area, system=system)
+    return make_role_trapezoid(
+        pp,
+        encoding_frame,
+        role,
+        area=area,
+        duration=_ceil_to_raster(
+            max(float(minimum_duration_s), float(pp.calc_duration(shortest))),
+            system.grad_raster_time,
+        ),
+        system=system,
+    )
+
+
+@dataclass(frozen=True)
+class InversionPreparation:
+    """Non-selective inversion, crusher and the cycled inversion times.
+
+    The preparation is played once per repetition. ``inversion_times_s``
+    cycle across repetitions; each TI runs from the inversion centre to the
+    centre of the excitation that samples the k-space centre of the first
+    slice.
+    """
+
+    rf: object
+    crusher: object | None
+    pulse_type: str
+    duration_s: float
+    inversion_times_s: tuple[float, ...]
+    block_duration_s: float
+    center_from_block_start_s: float
+    crusher_duration_s: float
+
+    def inversion_time_for(self, repetition: int) -> float:
+        return self.inversion_times_s[repetition % len(self.inversion_times_s)]
+
+    @property
+    def fixed_duration_s(self) -> float:
+        return self.block_duration_s + self.crusher_duration_s
+
+    def minimum_inversion_time_s(self, excitation_center_s: float) -> float:
+        """TI without a delay when the target excitation centre follows
+        the crusher after ``excitation_center_s``."""
+        return (
+            self.fixed_duration_s
+            - self.center_from_block_start_s
+            + float(excitation_center_s)
+        )
+
+
+def _inversion_time_values(inversion_times_s) -> tuple[float, ...]:
+    if inversion_times_s is None:
+        return ()
+    values = np.atleast_1d(np.asarray(inversion_times_s, dtype=float)).reshape(-1)
+    if values.size and (not np.all(np.isfinite(values)) or np.any(values <= 0)):
+        raise ValueError("inversion_times_s must be positive and finite")
+    return tuple(float(value) for value in values)
+
+
+def _make_inversion_preparation(
+    pp,
+    system,
+    *,
+    inversion_times_s,
+    pulse_type: str,
+    duration_s: float,
+    frequency_offset_hz: float,
+    encoding_frame: EncodingFrame,
+    slice_thickness_m: float,
+    spoiler_cycles_per_slice: float,
+    spoiler_duration_s: float,
+) -> InversionPreparation | None:
+    """Build the inversion block, or return ``None`` when no TI is set."""
+    times = _inversion_time_values(inversion_times_s)
+    if not times:
+        return None
+    key = str(pulse_type).strip().lower().replace("-", " ").replace("_", " ")
+    normalized = _INVERSION_PULSE_ALIASES.get(key) or _INVERSION_PULSE_ALIASES.get(
+        key.replace(" ", "_")
+    )
+    if normalized is None:
+        raise ValueError(
+            "inversion_pulse_type must be one of " + ", ".join(INVERSION_PULSE_TYPES)
+        )
+    if not np.isfinite(duration_s) or duration_s <= 0:
+        raise ValueError("inversion_duration_s must be positive and finite")
+    if not np.isfinite(spoiler_cycles_per_slice) or spoiler_cycles_per_slice < 0:
+        raise ValueError(
+            "inversion_spoiler_cycles_per_slice must be non-negative and finite"
+        )
+    raster = float(system.rf_raster_time)
+    if normalized == "hyperbolic_secant":
+        signal = design_hyperbolic_secant_inversion(
+            duration_s=duration_s, raster_s=raster
+        )
+    else:
+        envelope, _, _, _ = design_rf_envelope(
+            pulse_type=normalized,
+            duration_s=duration_s,
+            raster_s=raster,
+            time_bandwidth_product=4.0,
+        )
+        signal = scale_rf_envelope_to_flip(
+            envelope, flip_angle_deg=180.0, raster_s=raster
+        )
+    rf = pp.make_arbitrary_rf(
+        signal=np.asarray(signal, dtype=np.complex128),
+        flip_angle=np.pi,
+        dwell=raster,
+        no_signal_scaling=True,
+        delay=system.rf_dead_time,
+        system=system,
+        use="inversion",
+    )
+    rf_center, _ = pp.calc_rf_center(rf)
+    rf.freq_offset = float(frequency_offset_hz)
+    rf.phase_offset = -2.0 * np.pi * float(frequency_offset_hz) * rf_center
+    crusher = None
+    crusher_duration = 0.0
+    if spoiler_cycles_per_slice > 0:
+        # The crusher is never shorter than the readout spoiler.
+        crusher = _feasible_role_trapezoid(
+            pp,
+            encoding_frame,
+            "partition",
+            area=float(spoiler_cycles_per_slice) / float(slice_thickness_m),
+            minimum_duration_s=spoiler_duration_s,
+            system=system,
+        )
+        crusher_duration = float(pp.calc_duration(crusher))
+    return InversionPreparation(
+        rf=rf,
+        crusher=crusher,
+        pulse_type=normalized,
+        duration_s=float(rf.shape_dur),
+        inversion_times_s=times,
+        block_duration_s=float(pp.calc_duration(rf)),
+        center_from_block_start_s=float(rf.delay + rf_center),
+        crusher_duration_s=crusher_duration,
+    )
+
+
+def _inversion_delay_s(
+    preparation: InversionPreparation,
+    inversion_time_s: float,
+    excitation_center_s: float,
+    raster_s: float,
+    *,
+    sequence_name: str,
+    allow_short: bool = False,
+) -> float:
+    minimum = preparation.minimum_inversion_time_s(excitation_center_s)
+    requested = float(inversion_time_s) - minimum
+    if requested < -1e-12 and not allow_short:
+        raise ValueError(
+            f"{sequence_name} inversion time {inversion_time_s:.9g} s is too short; "
+            f"minimum is {minimum:.9g} s"
+        )
+    return _ceil_to_raster(max(0.0, requested), raster_s)
+
+
+def _add_inversion_preparation(
+    pp, sequence, preparation, delay_s: float
+) -> float | None:
+    """Play the inversion, crusher and TI delay; return the crusher end."""
+    sequence.add_block(preparation.rf)
+    crusher_end = None
+    if preparation.crusher is not None:
+        sequence.add_block(preparation.crusher)
+        crusher_end = _sequence_duration_s(sequence)
+    if delay_s:
+        sequence.add_block(pp.make_delay(delay_s))
+    return crusher_end
+
+
+def _set_inversion_definitions(
+    sequence,
+    preparation: InversionPreparation | None,
+    *,
+    actual_inversion_times_s,
+    slice_inversion_offsets_s,
+    spoiler_cycles_per_slice: float,
+) -> None:
+    sequence.set_definition("InversionRecovery", preparation is not None)
+    if preparation is None:
+        return
+    sequence.set_definition("InversionPulseType", preparation.pulse_type)
+    sequence.set_definition("InversionPulseDuration", preparation.duration_s)
+    sequence.set_definition("InversionSelectivity", "nonselective")
+    sequence.set_definition(
+        "InversionTimeReference", "first_slice_k_space_centre_excitation"
+    )
+    sequence.set_definition(
+        "RequestedInversionTimes", list(preparation.inversion_times_s)
+    )
+    sequence.set_definition(
+        "InversionTimes", [float(value) for value in actual_inversion_times_s]
+    )
+    sequence.set_definition(
+        "InversionSliceTimeOffsets",
+        [float(value) for value in slice_inversion_offsets_s],
+    )
+    sequence.set_definition(
+        "InversionSpoilerCyclesPerSlice", float(spoiler_cycles_per_slice)
     )
 
 
@@ -901,6 +1288,475 @@ def make_pulseq_csi(
     return sequence
 
 
+PRESS_REFOCUSING_PULSE_TYPES = ("sinc", "gaussian", "block")
+
+
+@dataclass(frozen=True)
+class PressTimingPlan:
+    """Shortest feasible single-voxel PRESS timing for the requested parameters.
+
+    ``minimum_echo_time_s`` keeps the requested first echo time, or the
+    symmetric split when none is given.
+    """
+
+    spectral_bandwidth_hz: float
+    dwell_s: float
+    minimum_first_echo_time_s: float
+    minimum_echo_time_s: float
+    minimum_repetition_time_s: float
+
+
+def make_pulseq_press(
+    *,
+    voxel_size_m: Sequence[float] = (20e-3, 20e-3, 20e-3),
+    voxel_offset_m: Sequence[float] = (0.0, 0.0, 0.0),
+    spectral_bandwidth_hz: float = 4000.0,
+    spectral_points: int = 512,
+    echo_time_s: float = 30e-3,
+    first_echo_time_s: float | None = None,
+    repetition_time_s: float = 2.0,
+    repetitions: int = 1,
+    flip_angle_deg: float = 90.0,
+    rf_pulse_type: str = "sinc",
+    rf_duration_s: float = 2.6e-3,
+    rf_time_bandwidth_product: float = 4.0,
+    rf_apodization: float = 0.5,
+    rf_slr_sharpness: int = 1,
+    rf_custom_waveform_hz: Sequence[complex] | None = None,
+    rf_custom_raster_s: float | None = None,
+    rf_custom_flip_angle_deg: float | None = None,
+    rf_custom_name: str | None = None,
+    rf_spectral_spatial_pulse=None,
+    rf_frequency_offset_hz: float = 0.0,
+    refocusing_flip_angle_deg: float = 180.0,
+    refocusing_pulse_type: str = "sinc",
+    refocusing_duration_s: float = 4e-3,
+    refocusing_time_bandwidth_product: float = 4.0,
+    refocusing_apodization: float = 0.5,
+    crusher_cycles_per_voxel: float = 4.0,
+    crusher_duration_s: float = 1.5e-3,
+    spoil_after_readout: bool = True,
+    spoiler_cycles_per_voxel: float = 4.0,
+    spoiler_duration_s: float = 2e-3,
+    encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
+    scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
+    nucleus: str = "H1",
+    timing_only: bool = False,
+):
+    """Build a single-voxel PRESS spectroscopy sequence.
+
+    A slice-selective excitation on the partition axis is followed by two
+    slice-selective refocusing pulses on the phase and read axes (Bottomley,
+    Ann N Y Acad Sci 508:333, 1987), so only the intersection of the three
+    slabs forms the double spin echo. The echo time is
+    ``2 (t_refocus2 - t_refocus1)``; ``first_echo_time_s`` (TE1) places the
+    first refocusing pulse at TE1/2 and defaults to TE/2. Every refocusing
+    pulse sits between a crusher pair on its own slab axis, which dephases
+    the FIDs of the refocusing pulses and the stimulated echo. The FID is
+    acquired from the echo top without a readout gradient, one per
+    repetition, and is labelled as a 1x1 CSI grid for reconstruction.
+
+    ``voxel_size_m`` and ``voxel_offset_m`` are logical (read, phase,
+    partition) values. Refocusing pulses use the CPMG phase (90 degrees).
+    With ``timing_only=True`` a :class:`PressTimingPlan` is returned.
+    Crusher dephasing needs isochromats spread across each voxel of a
+    phantom; single isochromats outside the PRESS voxel keep their magnitude.
+    A sinc refocusing pulse scaled to 180 degrees refocuses a narrower
+    profile than its small-tip slab: at a time-bandwidth product of four the
+    echo falls to half at about two thirds of the nominal voxel width.
+    """
+    pp = _pypulseq()
+    encoding_frame = resolve_encoding_frame(encoding_axes)
+    if len(tuple(voxel_size_m)) != 3:
+        raise ValueError("voxel_size_m must contain read, phase and partition sizes")
+    voxel_read, voxel_phase, voxel_partition = _positive_values(
+        voxel_size_m, "voxel size"
+    )
+    offsets = tuple(float(value) for value in voxel_offset_m)
+    if len(offsets) != 3 or not np.all(np.isfinite(offsets)):
+        raise ValueError("voxel_offset_m must contain three finite values")
+    offset_read, offset_phase, offset_partition = offsets
+    spectral_points = _positive_integer(spectral_points, "spectral_points")
+    repetitions = _positive_integer(repetitions, "repetitions")
+    for name, value in {
+        "spectral_bandwidth_hz": spectral_bandwidth_hz,
+        "echo_time_s": echo_time_s,
+        "repetition_time_s": repetition_time_s,
+        "flip_angle_deg": flip_angle_deg,
+        "rf_duration_s": rf_duration_s,
+        "refocusing_flip_angle_deg": refocusing_flip_angle_deg,
+        "refocusing_duration_s": refocusing_duration_s,
+        "crusher_duration_s": crusher_duration_s,
+        "spoiler_duration_s": spoiler_duration_s,
+    }.items():
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be positive and finite")
+    for name, value in {
+        "crusher_cycles_per_voxel": crusher_cycles_per_voxel,
+        "spoiler_cycles_per_voxel": spoiler_cycles_per_voxel,
+    }.items():
+        if not np.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be non-negative and finite")
+    if not np.isfinite(rf_frequency_offset_hz):
+        raise ValueError("rf_frequency_offset_hz must be finite")
+    if first_echo_time_s is not None and (
+        not np.isfinite(first_echo_time_s) or not 0 < first_echo_time_s < echo_time_s
+    ):
+        raise ValueError("first_echo_time_s must lie between zero and echo_time_s")
+    refocusing_type = normalize_rf_pulse_type(refocusing_pulse_type)
+    if refocusing_type not in PRESS_REFOCUSING_PULSE_TYPES:
+        raise ValueError(
+            "refocusing_pulse_type must be one of "
+            + ", ".join(PRESS_REFOCUSING_PULSE_TYPES)
+        )
+    if nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
+        raise ValueError(f"unknown nucleus: {nucleus}")
+
+    system = pp.Opts(
+        **ScannerParameters.from_mapping(scanner_parameters).to_pypulseq_kwargs(),
+        gamma=NUCLEUS_GAMMA_HZ_PER_T[nucleus],
+    )
+    raster = system.block_duration_raster
+    dwell = (
+        round(1.0 / float(spectral_bandwidth_hz) / system.adc_raster_time)
+        * system.adc_raster_time
+    )
+    if dwell <= 0:
+        raise ValueError("spectral bandwidth exceeds the ADC raster capability")
+    actual_bandwidth = 1.0 / dwell
+
+    raw_excitation, actual_rf_duration_s, effective_rf_tbw, rf_pulse_type = (
+        _make_slice_selective_rf_events(
+            pp,
+            system,
+            flip_angle_schedule_deg=(flip_angle_deg,),
+            slice_thickness_m=voxel_partition,
+            rf_pulse_type=rf_pulse_type,
+            rf_duration_s=rf_duration_s,
+            rf_time_bandwidth_product=rf_time_bandwidth_product,
+            rf_apodization=rf_apodization,
+            rf_slr_sharpness=rf_slr_sharpness,
+            rf_custom_waveform_hz=rf_custom_waveform_hz,
+            rf_custom_raster_s=rf_custom_raster_s,
+            rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
+            rf_frequency_offset_hz=rf_frequency_offset_hz,
+            rf_spectral_spatial_pulse=rf_spectral_spatial_pulse,
+            spatial_offset_m=offset_partition,
+            nucleus=nucleus,
+        )
+    )
+    excitation, excitation_gradient = raw_excitation[0]
+    excitation_frequency_hz = rf_frequency_offset_hz
+    if rf_pulse_type != "spectral_spatial":
+        excitation_frequency_hz += (
+            float(excitation_gradient.amplitude) * offset_partition
+        )
+    excitation_center, _ = pp.calc_rf_center(excitation)
+    excitation.freq_offset = excitation_frequency_hz
+    excitation.phase_offset = pulseq_phase_offset_rad(
+        0.0,
+        frequency_offset_hz=excitation_frequency_hz,
+        event_center_s=excitation_center,
+    )
+    excitation_gradient = _remap_gradient_event(
+        excitation_gradient, encoding_frame, "partition"
+    )
+
+    refocusing = []
+    refocusing_actual_duration_s = refocusing_duration_s
+    refocusing_tbw = refocusing_time_bandwidth_product
+    for role, thickness, offset in (
+        ("phase", voxel_phase, offset_phase),
+        ("read", voxel_read, offset_read),
+    ):
+        raw, refocusing_actual_duration_s, refocusing_tbw, _ = make_pulseq_rf_events(
+            pp,
+            system,
+            flip_angles_deg=(refocusing_flip_angle_deg,),
+            pulse_type=refocusing_type,
+            duration_s=refocusing_duration_s,
+            time_bandwidth_product=refocusing_time_bandwidth_product,
+            apodization=refocusing_apodization,
+            slice_thickness_m=thickness,
+            frequency_offset_hz=rf_frequency_offset_hz,
+            use="refocusing",
+            nucleus=nucleus,
+        )
+        rf, gradient = raw[0]
+        frequency_hz = rf_frequency_offset_hz + float(gradient.amplitude) * offset
+        center, _ = pp.calc_rf_center(rf)
+        rf.freq_offset = frequency_hz
+        rf.phase_offset = pulseq_phase_offset_rad(
+            90.0, frequency_offset_hz=frequency_hz, event_center_s=center
+        )
+        crusher = None
+        if crusher_cycles_per_voxel > 0:
+            crusher = _feasible_role_trapezoid(
+                pp,
+                encoding_frame,
+                role,
+                area=float(crusher_cycles_per_voxel) / thickness,
+                minimum_duration_s=crusher_duration_s,
+                system=system,
+            )
+        refocusing.append(
+            (rf, _remap_gradient_event(gradient, encoding_frame, role), crusher)
+        )
+
+    rephaser = _feasible_role_trapezoid(
+        pp,
+        encoding_frame,
+        "partition",
+        area=_slice_rephase_area(
+            excitation,
+            excitation_gradient,
+            encoding_frame,
+            rf_pulse_type=rf_pulse_type,
+            gradient_raster_s=system.grad_raster_time,
+        ),
+        minimum_duration_s=crusher_duration_s,
+        system=system,
+    )
+    adc = pp.make_adc(
+        num_samples=spectral_points,
+        dwell=dwell,
+        delay=system.adc_dead_time,
+        system=system,
+    )
+    adc_block_delay = pp.make_delay(_ceil_to_raster(pp.calc_duration(adc), raster))
+    spoiler_events = []
+    if spoil_after_readout and spoiler_cycles_per_voxel > 0:
+        for role, size in (
+            ("read", voxel_read),
+            ("phase", voxel_phase),
+            ("partition", voxel_partition),
+        ):
+            spoiler_events.append(
+                _feasible_role_trapezoid(
+                    pp,
+                    encoding_frame,
+                    role,
+                    area=float(spoiler_cycles_per_voxel) / size,
+                    minimum_duration_s=spoiler_duration_s,
+                    system=system,
+                )
+            )
+
+    def crusher_duration(crusher) -> float:
+        return 0.0 if crusher is None else float(pp.calc_duration(crusher))
+
+    (rf1, gradient1, crusher1), (rf2, gradient2, crusher2) = refocusing
+    excitation_block = float(pp.calc_duration(excitation, excitation_gradient))
+    excitation_offset = float(excitation.delay + excitation_center)
+    first_block = float(pp.calc_duration(rf1, gradient1))
+    first_offset = float(rf1.delay + pp.calc_rf_center(rf1)[0])
+    second_block = float(pp.calc_duration(rf2, gradient2))
+    second_offset = float(rf2.delay + pp.calc_rf_center(rf2)[0])
+    rephase_block = max(float(pp.calc_duration(rephaser)), crusher_duration(crusher1))
+    adc_first_sample = float(adc.delay + adc.dwell / 2.0)
+    # Fixed time between the centres that each delay must cover.
+    to_first = excitation_block - excitation_offset + rephase_block + first_offset
+    between = (
+        first_block
+        - first_offset
+        + crusher_duration(crusher1)
+        + crusher_duration(crusher2)
+        + second_offset
+    )
+    to_adc = second_block - second_offset + crusher_duration(crusher2)
+    to_adc += adc_first_sample
+    minimum_first_echo = 2.0 * to_first
+    if first_echo_time_s is None:
+        minimum_echo = max(2.0 * minimum_first_echo, 2.0 * between, 4.0 * to_adc)
+        first_echo = 0.5 * float(echo_time_s)
+    else:
+        first_echo = float(first_echo_time_s)
+        minimum_echo = max(2.0 * between, first_echo + 2.0 * to_adc)
+    spoiler_block = max(
+        (float(pp.calc_duration(event)) for event in spoiler_events), default=0.0
+    )
+    # The echo top fixes the ADC start, so one repetition lasts the echo
+    # time plus everything outside the excitation-to-echo span.
+    outside_echo = (
+        excitation_offset
+        + float(pp.calc_duration(adc_block_delay))
+        - adc_first_sample
+        + spoiler_block
+    )
+    if timing_only:
+        planned_echo = max(float(echo_time_s), minimum_echo)
+        return PressTimingPlan(
+            spectral_bandwidth_hz=actual_bandwidth,
+            dwell_s=dwell,
+            minimum_first_echo_time_s=minimum_first_echo,
+            minimum_echo_time_s=minimum_echo,
+            minimum_repetition_time_s=planned_echo + outside_echo,
+        )
+    if first_echo_time_s is not None and first_echo < minimum_first_echo - 1e-12:
+        raise ValueError(
+            "first_echo_time_s is too short; minimum is " f"{minimum_first_echo:.9g} s"
+        )
+    if echo_time_s < minimum_echo - 1e-12:
+        raise ValueError(f"echo_time_s is too short; minimum is {minimum_echo:.9g} s")
+
+    def delay_on_raster(value: float) -> float:
+        return max(0.0, round(float(value) / raster) * raster)
+
+    first_delay = delay_on_raster(0.5 * first_echo - to_first)
+    second_delay = delay_on_raster(0.5 * float(echo_time_s) - between)
+    first_spacing = to_first + first_delay
+    second_spacing = between + second_delay
+    actual_echo = 2.0 * second_spacing
+    actual_first_echo = 2.0 * first_spacing
+    # The first sample lands on the realised echo top: a block delay on the
+    # block raster plus the remainder in the ADC delay on the RF raster.
+    to_first_sample = second_spacing - first_spacing - (to_adc - adc_first_sample)
+    adc_delay = max(
+        0.0, np.floor((to_first_sample - adc_first_sample + 1e-12) / raster) * raster
+    )
+    adc = pp.make_adc(
+        num_samples=spectral_points,
+        dwell=dwell,
+        delay=max(
+            float(system.adc_dead_time),
+            round((to_first_sample - adc_delay - dwell / 2.0) / system.rf_raster_time)
+            * system.rf_raster_time,
+        ),
+        system=system,
+    )
+    adc_block_delay = pp.make_delay(_ceil_to_raster(pp.calc_duration(adc), raster))
+    repetition_minimum = (
+        excitation_offset
+        + first_spacing
+        + second_spacing
+        + to_adc
+        - adc_first_sample
+        + adc_delay
+        + float(pp.calc_duration(adc_block_delay))
+        + spoiler_block
+    )
+    tr_delay = float(repetition_time_s) - repetition_minimum
+    if tr_delay < -1e-12:
+        raise ValueError(
+            "repetition_time_s is too short; minimum is " f"{repetition_minimum:.9g} s"
+        )
+    tr_delay = _ceil_to_raster(max(0.0, tr_delay), raster)
+    actual_tr = repetition_minimum + tr_delay
+
+    sequence = pp.Sequence(system)
+    spoiler_end_times = []
+    acquisition_start_times = []
+    for repetition in range(repetitions):
+        acquisition_start_times.append(_sequence_duration_s(sequence))
+        sequence.add_block(excitation, excitation_gradient)
+        if crusher1 is None:
+            sequence.add_block(rephaser)
+        else:
+            sequence.add_block(rephaser, crusher1)
+        if first_delay:
+            sequence.add_block(pp.make_delay(first_delay))
+        sequence.add_block(rf1, gradient1)
+        if crusher1 is not None:
+            sequence.add_block(crusher1)
+        if second_delay:
+            sequence.add_block(pp.make_delay(second_delay))
+        if crusher2 is not None:
+            sequence.add_block(crusher2)
+        sequence.add_block(rf2, gradient2)
+        if crusher2 is not None:
+            sequence.add_block(crusher2)
+        if adc_delay:
+            sequence.add_block(pp.make_delay(adc_delay))
+        sequence.add_block(
+            adc,
+            adc_block_delay,
+            pp.make_label("LIN", "SET", 0),
+            pp.make_label("PAR", "SET", 0),
+            pp.make_label("REP", "SET", repetition),
+        )
+        if spoiler_events:
+            sequence.add_block(*spoiler_events)
+            spoiler_end_times.append(_sequence_duration_s(sequence))
+        if tr_delay:
+            sequence.add_block(pp.make_delay(tr_delay))
+
+    _raise_for_timing_errors(sequence, "PRESS")
+    voxel = (voxel_read, voxel_phase, voxel_partition)
+    sequence.set_definition("Name", "press_svs")
+    sequence.set_definition("TrajectoryType", "single_voxel_press")
+    sequence.set_definition("FOV", list(voxel))
+    sequence.set_definition("MatrixSize", [1, 1, spectral_points])
+    set_pulseq_encoding_definitions(
+        sequence, encoding_frame, fov_m=voxel, matrix=(1, 1, 1)
+    )
+    sequence.set_definition("VoxelSize", list(voxel))
+    sequence.set_definition("VoxelOffset", list(offsets))
+    sequence.set_definition("ReadOffset", offset_read)
+    sequence.set_definition("PhaseOffset", offset_phase)
+    sequence.set_definition("SliceOffset", offset_partition)
+    sequence.set_definition("SliceThickness", voxel_partition)
+    sequence.set_definition("SpectralBandwidth", actual_bandwidth)
+    sequence.set_definition("SpectralPoints", spectral_points)
+    sequence.set_definition("SpectralResolution", actual_bandwidth / spectral_points)
+    sequence.set_definition("TE", actual_echo)
+    sequence.set_definition("PRESSFirstEchoTime", actual_first_echo)
+    sequence.set_definition("PRESSSecondEchoTime", actual_echo - actual_first_echo)
+    sequence.set_definition("MinimumEchoTime", minimum_echo)
+    sequence.set_definition("TR", actual_tr)
+    sequence.set_definition("MinimumRepetitionTime", repetition_minimum)
+    sequence.set_definition("Repetitions", repetitions)
+    sequence.set_definition("VolumeInterval", actual_tr)
+    _set_acquisition_interval_definitions(
+        sequence,
+        requested_interval_s=None,
+        actual_intervals_s=(actual_tr,) * repetitions,
+        minimum_intervals_s=(repetition_minimum,) * repetitions,
+        start_times_s=acquisition_start_times,
+    )
+    sequence.set_definition("FlipAngleDeg", float(flip_angle_deg))
+    sequence.set_definition("RefocusingFlipAngleDeg", float(refocusing_flip_angle_deg))
+    sequence.set_definition("RefocusingPhaseDeg", 90.0)
+    sequence.set_definition("RefocusingAxes", "phase,read")
+    _set_rf_definitions(
+        sequence,
+        pulse_type=rf_pulse_type,
+        requested_duration_s=rf_duration_s,
+        actual_duration_s=actual_rf_duration_s,
+        time_bandwidth_product=effective_rf_tbw,
+        apodization=rf_apodization,
+        slr_sharpness=rf_slr_sharpness,
+        custom_name=rf_custom_name,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        frequency_offset_hz=rf_frequency_offset_hz,
+        spectral_spatial_pulse=rf_spectral_spatial_pulse,
+    )
+    set_rf_definitions(
+        sequence,
+        pulse_type=refocusing_type,
+        requested_duration_s=refocusing_duration_s,
+        actual_duration_s=refocusing_actual_duration_s,
+        time_bandwidth_product=refocusing_tbw,
+        apodization=refocusing_apodization,
+        slr_sharpness=1,
+        custom_name=None,
+        custom_flip_angle_deg=None,
+        frequency_offset_hz=rf_frequency_offset_hz,
+        prefix="Refocusing",
+    )
+    sequence.set_definition("CrusherCyclesPerVoxel", float(crusher_cycles_per_voxel))
+    sequence.set_definition(
+        "CrusherDurations",
+        [crusher_duration(crusher1), crusher_duration(crusher2)],
+    )
+    sequence.set_definition("SpoilAfterReadout", bool(spoiler_events))
+    sequence.set_definition("SpoilerCyclesPerVoxel", float(spoiler_cycles_per_voxel))
+    sequence.set_definition("SpoilerDuration", spoiler_duration_s)
+    sequence.set_definition("SpoilerEndTimes", spoiler_end_times)
+    sequence.set_definition("IdealSpoilerEndTimes", spoiler_end_times)
+    sequence.set_definition("Nucleus", str(nucleus))
+    return sequence
+
+
 def make_pulseq_bssfp(
     *,
     fov_m: Sequence[float] = (0.22, 0.22, 0.16),
@@ -1398,6 +2254,8 @@ def make_pulseq_epi(
     rf_custom_flip_angle_deg: float | None = None,
     rf_custom_name: str | None = None,
     rf_spectral_spatial_pulse=None,
+    rf_spectral_spatial_library=None,
+    rf_spectral_spatial_schedule=None,
     rf_frequency_offset_hz: float = 0.0,
     slice_thickness_m: float = 3e-3,
     slice_gap_m: float = 0.0,
@@ -1415,6 +2273,10 @@ def make_pulseq_epi(
     spoiler_cycles_per_slice: float = 8.0,
     spoiler_cycles_per_voxel: float = 0.0,
     spoiler_duration_s: float = 4e-3,
+    inversion_times_s: float | Sequence[float] | None = None,
+    inversion_pulse_type: str = "hyperbolic_secant",
+    inversion_duration_s: float = 10e-3,
+    inversion_spoiler_cycles_per_slice: float = 8.0,
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
     nucleus: str = "H1",
     timing_only: bool = False,
@@ -1429,6 +2291,17 @@ def make_pulseq_epi(
     ``read_offset_m`` and ``phase_offset_m`` move the FOV centre as in
     :func:`make_pulseq_flash`; reversed bipolar lines use the opposite
     receiver frequency.
+
+    A spectral-spatial pulse library/schedule advances once per repetition
+    (``selection_level='frame'``), so all slices of one repetition share the
+    pulse, or once per slice excitation (``'tr'``), so every single-shot
+    slice image carries one pulse. Each excitation is labelled with the
+    schedule index in Pulseq ``SET``.
+
+    ``inversion_times_s`` adds a non-selective inversion, crusher and TI delay
+    before every repetition; several values cycle across repetitions for T1
+    mapping. TI runs from the inversion centre to the first slice's
+    excitation centre and later slices follow at the recorded offsets.
     """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -1509,32 +2382,79 @@ def make_pulseq_epi(
         n_x,
         system,
     )
-    rf_events, actual_rf_duration_s, effective_rf_tbw, rf_pulse_type = (
-        _make_slice_selective_rf_events(
-            pp,
-            system,
-            flip_angle_schedule_deg=flip_angle_schedule_deg,
-            slice_thickness_m=slice_thickness_m,
-            rf_pulse_type=rf_pulse_type,
-            rf_duration_s=rf_duration_s,
-            rf_time_bandwidth_product=rf_time_bandwidth_product,
-            rf_apodization=rf_apodization,
-            rf_slr_sharpness=rf_slr_sharpness,
-            rf_custom_waveform_hz=rf_custom_waveform_hz,
-            rf_custom_raster_s=rf_custom_raster_s,
-            rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
-            rf_frequency_offset_hz=rf_frequency_offset_hz,
-            rf_spectral_spatial_pulse=rf_spectral_spatial_pulse,
-            spatial_offset_m=0.0,
-            nucleus=nucleus,
-        )
+    schedule_active = (
+        rf_spectral_spatial_library is not None
+        or rf_spectral_spatial_schedule is not None
     )
-    spsp_logical_gz = rf_events[0][1]
-    rf_events = [
-        (rf, _remap_gradient_event(gz, encoding_frame, "partition"))
-        for rf, gz in rf_events
-    ]
-    rf, gz = rf_events[0]
+    if schedule_active and variable_flip_angle:
+        raise ValueError(
+            "variable flip angles cannot be combined with an SPSP pulse schedule; "
+            "set the flip angle of each schedule step instead"
+        )
+    pulse_library = SpectralSpatialPulseLibrary()
+    pulse_schedule = SpectralSpatialSchedule()
+    schedule_warnings = ()
+    if schedule_active:
+        pulse_library, pulse_schedule, schedule_warnings, rf_variants = (
+            _spectral_spatial_schedule_variants(
+                pp,
+                system,
+                rf_pulse_type=rf_pulse_type,
+                rf_spectral_spatial_library=rf_spectral_spatial_library,
+                rf_spectral_spatial_schedule=rf_spectral_spatial_schedule,
+                rf_spectral_spatial_pulse=rf_spectral_spatial_pulse,
+                slice_thickness_m=slice_thickness_m,
+                rf_apodization=rf_apodization,
+                rf_slr_sharpness=rf_slr_sharpness,
+                rf_frequency_offset_hz=rf_frequency_offset_hz,
+                encoding_frame=encoding_frame,
+                scanner_parameters=scanner_parameters,
+                nucleus=nucleus,
+            )
+        )
+        rf_pulse_type = "spectral_spatial"
+        actual_rf_duration_s = max(item["duration_s"] for item in rf_variants)
+        effective_rf_tbw = rf_variants[0]["tbw"]
+        rf_spectral_spatial_pulse = rf_variants[0]["pulse"]
+    else:
+        rf_events, actual_rf_duration_s, effective_rf_tbw, rf_pulse_type = (
+            _make_slice_selective_rf_events(
+                pp,
+                system,
+                flip_angle_schedule_deg=flip_angle_schedule_deg,
+                slice_thickness_m=slice_thickness_m,
+                rf_pulse_type=rf_pulse_type,
+                rf_duration_s=rf_duration_s,
+                rf_time_bandwidth_product=rf_time_bandwidth_product,
+                rf_apodization=rf_apodization,
+                rf_slr_sharpness=rf_slr_sharpness,
+                rf_custom_waveform_hz=rf_custom_waveform_hz,
+                rf_custom_raster_s=rf_custom_raster_s,
+                rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
+                rf_frequency_offset_hz=rf_frequency_offset_hz,
+                rf_spectral_spatial_pulse=rf_spectral_spatial_pulse,
+                spatial_offset_m=0.0,
+                nucleus=nucleus,
+            )
+        )
+        # Variable flip angles give one RF variant per repetition.
+        rf_variants = [
+            {
+                "schedule_index": index,
+                "entry": None,
+                "pulse": None,
+                "pulse_id": "",
+                "rf": rf_event,
+                "logical_gz": logical_gz,
+                "gz": _remap_gradient_event(logical_gz, encoding_frame, "partition"),
+                "duration_s": actual_rf_duration_s,
+                "tbw": effective_rf_tbw,
+                "flip_angle_deg": float(flip_angle),
+            }
+            for index, ((rf_event, logical_gz), flip_angle) in enumerate(
+                zip(rf_events, flip_angle_schedule_deg)
+            )
+        ]
     delta_kx, delta_ky = 1.0 / fov_x, 1.0 / fov_y
     adc_duration = n_x * dwell
     flat_time = _ceil_to_raster(adc_duration, system.grad_raster_time)
@@ -1576,20 +2496,6 @@ def make_pulseq_epi(
         encoding_frame,
         "phase",
         area=-n_y / 2 * delta_ky,
-        duration=pre_time,
-        system=system,
-    )
-    gz_rephase = make_role_trapezoid(
-        pp,
-        encoding_frame,
-        "partition",
-        area=_slice_rephase_area(
-            rf,
-            gz,
-            encoding_frame,
-            rf_pulse_type=rf_pulse_type,
-            gradient_raster_s=system.grad_raster_time,
-        ),
         duration=pre_time,
         system=system,
     )
@@ -1680,8 +2586,6 @@ def make_pulseq_epi(
     slice_positions = slice_package_positions(
         n_slices, slice_thickness_m, slice_gap_m, slice_offset_m
     )
-    rf_center, _ = pp.calc_rf_center(rf)
-    rf_block_duration = pp.calc_duration(rf, gz)
     readout_block_duration = pp.calc_duration(gx, adc)
     blip_duration = (
         pp.calc_duration(gx_flyback, gy_blip)
@@ -1689,54 +2593,186 @@ def make_pulseq_epi(
         else pp.calc_duration(gy_blip)
     )
     center_line = n_y // 2
-    echo_without_delay = (
-        rf_block_duration
-        - (rf.delay + rf_center)
-        + pre_time
-        + center_line * (readout_block_duration + blip_duration)
-        + adc.delay
-        + adc_duration / 2.0
+    readout_train_duration = n_y * readout_block_duration + (n_y - 1) * blip_duration
+    post_readout_duration = pp.calc_duration(gx_post, gy_post) + (
+        pp.calc_duration(*spoilers) if spoilers else 0.0
     )
-    requested_te_delay = float(echo_time_s) - echo_without_delay
-    if requested_te_delay < -1e-12 and not timing_only:
-        raise ValueError(
-            f"echo_time_s is too short; minimum is {echo_without_delay:.9g} s"
+    minimum_echo_time = 0.0
+    for variant in rf_variants:
+        rf = variant["rf"]
+        gz = variant["gz"]
+        rf_center, _ = pp.calc_rf_center(rf)
+        rf_block_duration = pp.calc_duration(rf, gz)
+        gz_rephase = make_role_trapezoid(
+            pp,
+            encoding_frame,
+            "partition",
+            area=_slice_rephase_area(
+                rf,
+                gz,
+                encoding_frame,
+                rf_pulse_type=rf_pulse_type,
+                gradient_raster_s=system.grad_raster_time,
+            ),
+            duration=pre_time,
+            system=system,
         )
-    te_delay_value = _ceil_to_raster(
-        max(0.0, requested_te_delay), system.block_duration_raster
-    )
-    actual_te = echo_without_delay + te_delay_value
-    if timing_only:
-        slice_duration = (
+        echo_without_delay = (
             rf_block_duration
-            + pp.calc_duration(gx_pre, gy_pre, gz_rephase)
-            + te_delay_value
-            + n_y * readout_block_duration
-            + (n_y - 1) * blip_duration
-            + pp.calc_duration(gx_post, gy_post)
-            + (pp.calc_duration(*spoilers) if spoilers else 0.0)
+            - (rf.delay + rf_center)
+            + pre_time
+            + center_line * (readout_block_duration + blip_duration)
+            + adc.delay
+            + adc_duration / 2.0
         )
+        minimum_echo_time = max(minimum_echo_time, echo_without_delay)
+        requested_te_delay = float(echo_time_s) - echo_without_delay
+        if requested_te_delay < -1e-12 and not timing_only:
+            label = f" for {_rf_variant_label(variant)}" if schedule_active else ""
+            raise ValueError(
+                f"echo_time_s is too short{label}; minimum is "
+                f"{echo_without_delay:.9g} s"
+            )
+        te_delay_value = _ceil_to_raster(
+            max(0.0, requested_te_delay), system.block_duration_raster
+        )
+        variant.update(
+            rf_center=rf_center,
+            gz_rephase=gz_rephase,
+            te_delay=te_delay_value,
+            actual_te=echo_without_delay + te_delay_value,
+            excitation_center=float(rf.delay + rf_center),
+            slice_duration=(
+                rf_block_duration
+                + pp.calc_duration(gx_pre, gy_pre, gz_rephase)
+                + te_delay_value
+                + readout_train_duration
+                + post_readout_duration
+            ),
+        )
+    actual_te = max(variant["actual_te"] for variant in rf_variants)
+
+    inversion = _make_inversion_preparation(
+        pp,
+        system,
+        inversion_times_s=inversion_times_s,
+        pulse_type=inversion_pulse_type,
+        duration_s=inversion_duration_s,
+        frequency_offset_hz=rf_frequency_offset_hz,
+        encoding_frame=encoding_frame,
+        slice_thickness_m=slice_thickness_m,
+        spoiler_cycles_per_slice=inversion_spoiler_cycles_per_slice,
+        spoiler_duration_s=spoiler_duration_s,
+    )
+    # Plan every repetition first: schedules and TI cycling change its length.
+    repetition_plans = []
+    excitation_index = 0
+    for repetition in range(repetitions):
+        variant_indices = []
+        for _ in range(n_slices):
+            if schedule_active:
+                schedule_index, _ = pulse_schedule.entry_for_index(
+                    repetition
+                    if pulse_schedule.selection_level == "frame"
+                    else excitation_index
+                )
+            else:
+                schedule_index = repetition if variable_flip_angle else 0
+            variant_indices.append(int(schedule_index))
+            excitation_index += 1
+        first_excitation_center = rf_variants[variant_indices[0]]["excitation_center"]
+        inversion_delay = 0.0
+        inversion_time = None
+        preparation_duration = 0.0
+        if inversion is not None:
+            inversion_delay = _inversion_delay_s(
+                inversion,
+                inversion.inversion_time_for(repetition),
+                first_excitation_center,
+                system.block_duration_raster,
+                sequence_name="EPI",
+                allow_short=timing_only,
+            )
+            inversion_time = (
+                inversion.minimum_inversion_time_s(first_excitation_center)
+                + inversion_delay
+            )
+            preparation_duration = inversion.fixed_duration_s + inversion_delay
+        repetition_plans.append(
+            {
+                "variant_indices": variant_indices,
+                "inversion_delay": inversion_delay,
+                "inversion_time": inversion_time,
+                "duration": preparation_duration
+                + sum(
+                    rf_variants[index]["slice_duration"] for index in variant_indices
+                ),
+            }
+        )
+    minimum_repetition_time = max(plan["duration"] for plan in repetition_plans)
+    if timing_only:
         return EpiTimingPlan(
             sampling_bandwidth_hz=1.0 / dwell,
             dwell_s=float(dwell),
-            minimum_echo_time_s=float(echo_without_delay),
-            minimum_repetition_time_s=float(n_slices * slice_duration),
+            minimum_echo_time_s=float(minimum_echo_time),
+            minimum_repetition_time_s=float(minimum_repetition_time),
+            minimum_inversion_time_s=(
+                None
+                if inversion is None
+                else float(
+                    max(
+                        inversion.minimum_inversion_time_s(
+                            rf_variants[plan["variant_indices"][0]]["excitation_center"]
+                        )
+                        for plan in repetition_plans
+                    )
+                )
+            ),
         )
+    if repetition_time_s is None:
+        actual_repetition_time = _ceil_to_raster(
+            minimum_repetition_time, system.block_duration_raster
+        )
+    else:
+        actual_repetition_time = float(repetition_time_s)
+        if actual_repetition_time < minimum_repetition_time - 1e-12:
+            raise ValueError(
+                "repetition_time_s is too short; minimum is "
+                f"{minimum_repetition_time:.9g} s"
+            )
     _, slice_sign = encoding_frame.axis_and_sign("partition")
-    package_duration = None
-    actual_repetition_time = None
     spoiler_end_times = []
     acquisition_start_times = []
     acquisition_intervals = []
     minimum_acquisition_intervals = []
+    used_frame_schedule_indices = []
+    used_frame_pulse_ids = []
+    actual_inversion_times = []
+    slice_inversion_offsets = []
     excitation_index = 0
-    for repetition in range(repetitions):
-        rf, gz = rf_events[repetition if variable_flip_angle else 0]
-        repetition_start = (
-            0.0 if not sequence.block_events else float(sequence.duration()[0])
-        )
+    for repetition, plan in enumerate(repetition_plans):
+        repetition_start = _sequence_duration_s(sequence)
         acquisition_start_times.append(repetition_start)
+        frame_schedule_index = (
+            plan["variant_indices"][0]
+            if schedule_active and pulse_schedule.selection_level == "frame"
+            else 0
+        )
+        used_frame_schedule_indices.append(int(frame_schedule_index))
+        used_frame_pulse_ids.append(str(rf_variants[frame_schedule_index]["pulse_id"]))
+        if inversion is not None:
+            crusher_end = _add_inversion_preparation(
+                pp, sequence, inversion, plan["inversion_delay"]
+            )
+            if crusher_end is not None:
+                spoiler_end_times.append(crusher_end)
+            actual_inversion_times.append(plan["inversion_time"])
+        first_excitation_time = None
         for slice_index, position in enumerate(slice_positions):
+            variant = rf_variants[plan["variant_indices"][slice_index]]
+            rf = variant["rf"]
+            gz = variant["gz"]
+            rf_center = variant["rf_center"]
             rf_phase_deg = (
                 _rf_spoiling_phase_deg(excitation_index, rf_spoiling_increment_deg)
                 if rf_spoiling
@@ -1745,7 +2781,7 @@ def make_pulseq_epi(
             if rf_pulse_type == "spectral_spatial":
                 rf_for_slice = shifted_spectral_spatial_rf_event(
                     rf,
-                    spsp_logical_gz,
+                    variant["logical_gz"],
                     spatial_offset_m=position,
                     rf_raster_s=system.rf_raster_time,
                     gradient_raster_s=system.grad_raster_time,
@@ -1766,15 +2802,27 @@ def make_pulseq_epi(
                     np.deg2rad(rf_phase_deg)
                     - 2 * np.pi * slice_frequency_offset_hz * rf_center
                 )
-            sequence.add_block(
+            excitation_time = (
+                _sequence_duration_s(sequence) + variant["excitation_center"]
+            )
+            if first_excitation_time is None:
+                first_excitation_time = excitation_time
+            if repetition == 0:
+                slice_inversion_offsets.append(excitation_time - first_excitation_time)
+            rf_block_events = [
                 rf_for_slice,
                 gz,
                 pp.make_label("SLC", "SET", slice_index),
                 pp.make_label("REP", "SET", repetition),
-            )
-            sequence.add_block(gx_pre, gy_pre, gz_rephase)
-            if te_delay_value:
-                sequence.add_block(pp.make_delay(te_delay_value))
+            ]
+            if schedule_active:
+                rf_block_events.append(
+                    pp.make_label("SET", "SET", int(variant["schedule_index"]))
+                )
+            sequence.add_block(*rf_block_events)
+            sequence.add_block(gx_pre, gy_pre, variant["gz_rephase"])
+            if variant["te_delay"]:
+                sequence.add_block(pp.make_delay(variant["te_delay"]))
             for line in range(n_y):
                 reverse = strategy == "bipolar" and line % 2 == 1
                 readout = gx_reverse if reverse else gx
@@ -1796,16 +2844,11 @@ def make_pulseq_epi(
                 sequence.add_block(*spoilers)
                 spoiler_end_times.append(float(sequence.duration()[0]))
             excitation_index += 1
-        acquired = float(sequence.duration()[0]) - repetition_start
-        if package_duration is None:
-            package_duration = acquired
-            actual_repetition_time = (
-                acquired if repetition_time_s is None else float(repetition_time_s)
+        acquired = _sequence_duration_s(sequence) - repetition_start
+        if acquired > actual_repetition_time + 1e-9:
+            raise ValueError(
+                f"repetition_time_s is too short; minimum is {acquired:.9g} s"
             )
-            if actual_repetition_time < acquired - 1e-12:
-                raise ValueError(
-                    f"repetition_time_s is too short; minimum is {acquired:.9g} s"
-                )
         delay = actual_repetition_time - acquired
         if delay > 1e-12:
             sequence.add_block(pp.make_delay(delay))
@@ -1867,7 +2910,7 @@ def make_pulseq_epi(
     )
     sequence.set_definition("Repetitions", repetitions)
     sequence.set_definition("RepetitionTime", actual_repetition_time)
-    sequence.set_definition("MinimumRepetitionTime", package_duration)
+    sequence.set_definition("MinimumRepetitionTime", max(minimum_acquisition_intervals))
     sequence.set_definition("RFSpoiling", bool(rf_spoiling))
     sequence.set_definition("RFSpoilingIncrementDeg", rf_spoiling_increment_deg)
     sequence.set_definition("VolumeInterval", max(acquisition_intervals))
@@ -1887,6 +2930,27 @@ def make_pulseq_epi(
     )
     sequence.set_definition("SpoilerEndTimes", spoiler_end_times)
     sequence.set_definition("IdealSpoilerEndTimes", spoiler_end_times)
+    _set_inversion_definitions(
+        sequence,
+        inversion,
+        actual_inversion_times_s=actual_inversion_times,
+        slice_inversion_offsets_s=slice_inversion_offsets,
+        spoiler_cycles_per_slice=inversion_spoiler_cycles_per_slice,
+    )
+    if schedule_active:
+        _set_spectral_spatial_schedule_definitions(
+            sequence,
+            pulse_library,
+            pulse_schedule,
+            schedule_warnings=schedule_warnings,
+            frame_schedule_indices=used_frame_schedule_indices,
+            frame_pulse_ids=used_frame_pulse_ids,
+            contrast_warning=(
+                "Each schedule step applies to one complete single-shot EPI slice image."
+                if pulse_schedule.selection_level == "tr"
+                else "Each schedule step applies to all slices of one EPI repetition."
+            ),
+        )
     return sequence
 
 
@@ -1898,6 +2962,7 @@ class EpiTimingPlan:
     dwell_s: float
     minimum_echo_time_s: float
     minimum_repetition_time_s: float
+    minimum_inversion_time_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1909,6 +2974,7 @@ class FlashTimingPlan:
     minimum_echo_time_s: float
     minimum_repetition_time_s: float
     minimum_acquisition_interval_s: float
+    minimum_inversion_time_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -2488,6 +3554,10 @@ def make_pulseq_flash(
     spoiler_cycles_per_voxel: float = 0.0,
     spoiler_duration_s: float = 2e-3,
     encoding_duration_s: float = 1e-3,
+    inversion_times_s: float | Sequence[float] | None = None,
+    inversion_pulse_type: str = "hyperbolic_secant",
+    inversion_duration_s: float = 10e-3,
+    inversion_spoiler_cycles_per_slice: float = 8.0,
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
     nucleus: str = "H1",
@@ -2505,6 +3575,12 @@ def make_pulseq_flash(
     logical read and phase axes. They are encoded in the ADC events as on a
     scanner: a receiver frequency offset for read and a per-line phase ramp
     for phase, so the reconstruction stays a centred FFT.
+
+    ``inversion_times_s`` prepares every image with a non-selective inversion,
+    crusher and TI delay (an MP-RAGE-like IR-FLASH). TI runs from the
+    inversion centre to the excitation of the k-space centre line of the
+    first slice; several values cycle across repetitions for T1 mapping.
+    ``acquisition_interval_s`` then sets the inversion-to-inversion time.
     """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -2579,67 +3655,23 @@ def make_pulseq_flash(
     schedule_warnings = ()
     rf_variants = []
     if schedule_active:
-        if normalize_rf_pulse_type(rf_pulse_type) != "spectral_spatial":
-            raise ValueError(
-                "an SPSP pulse library/schedule requires rf_pulse_type='spectral_spatial'"
+        pulse_library, pulse_schedule, schedule_warnings, rf_variants = (
+            _spectral_spatial_schedule_variants(
+                pp,
+                system,
+                rf_pulse_type=rf_pulse_type,
+                rf_spectral_spatial_library=rf_spectral_spatial_library,
+                rf_spectral_spatial_schedule=rf_spectral_spatial_schedule,
+                rf_spectral_spatial_pulse=rf_spectral_spatial_pulse,
+                slice_thickness_m=slice_thickness_m,
+                rf_apodization=rf_apodization,
+                rf_slr_sharpness=rf_slr_sharpness,
+                rf_frequency_offset_hz=rf_frequency_offset_hz,
+                encoding_frame=encoding_frame,
+                scanner_parameters=scanner_parameters,
+                nucleus=nucleus,
             )
-        pulse_library, pulse_schedule, _ = migrate_spectral_spatial_state(
-            library=rf_spectral_spatial_library,
-            schedule=rf_spectral_spatial_schedule,
-            legacy_pulse=rf_spectral_spatial_pulse,
         )
-        schedule_warnings = validate_spectral_spatial_schedule(
-            pulse_library,
-            pulse_schedule,
-            nucleus=nucleus,
-            thickness_m=slice_thickness_m,
-            scanner_parameters=(
-                scanner_parameters
-                if scanner_parameters is not None
-                else ScannerParameters()
-            ),
-        )
-        expanded_schedule = pulse_schedule.expanded_entries()
-        for schedule_index, entry in enumerate(expanded_schedule):
-            pulse = pulse_library.get(entry.pulse_id)
-            entry_flip_angle_deg = entry.effective_flip_angle_deg(pulse)
-            events, duration_s, effective_tbw, normalized_type = (
-                _make_slice_selective_rf_events(
-                    pp,
-                    system,
-                    flip_angle_schedule_deg=(entry_flip_angle_deg,),
-                    slice_thickness_m=slice_thickness_m,
-                    rf_pulse_type="spectral_spatial",
-                    rf_duration_s=pulse.duration_s,
-                    rf_time_bandwidth_product=pulse.spatial_time_bandwidth_product,
-                    rf_apodization=rf_apodization,
-                    rf_slr_sharpness=rf_slr_sharpness,
-                    rf_custom_waveform_hz=None,
-                    rf_custom_raster_s=None,
-                    rf_custom_flip_angle_deg=None,
-                    rf_frequency_offset_hz=rf_frequency_offset_hz,
-                    rf_spectral_spatial_pulse=pulse,
-                    spatial_offset_m=0.0,
-                    nucleus=nucleus,
-                )
-            )
-            rf_event, logical_gz = events[0]
-            rf_variants.append(
-                {
-                    "schedule_index": schedule_index,
-                    "entry": entry,
-                    "pulse": pulse,
-                    "pulse_id": entry.pulse_id,
-                    "rf": rf_event,
-                    "logical_gz": logical_gz,
-                    "gz": _remap_gradient_event(
-                        logical_gz, encoding_frame, "partition"
-                    ),
-                    "duration_s": duration_s,
-                    "tbw": effective_tbw,
-                    "flip_angle_deg": entry_flip_angle_deg,
-                }
-            )
         rf_pulse_type = "spectral_spatial"
         actual_rf_duration_s = max(item["duration_s"] for item in rf_variants)
         effective_rf_tbw = rf_variants[0]["tbw"]
@@ -2745,11 +3777,7 @@ def make_pulseq_flash(
         if timing_only:
             minimum_echo_time = max(minimum_echo_time, echo_without_delay)
         if requested_te_delay < -1e-12 and not timing_only:
-            label = (
-                variant["entry"].display_name or variant["pulse"].name
-                if variant["entry"] is not None
-                else "RF pulse"
-            )
+            label = _rf_variant_label(variant)
             raise ValueError(
                 f"echo_time_s is too short for {label}; minimum is "
                 f"{echo_without_delay:.9g} s"
@@ -2771,11 +3799,7 @@ def make_pulseq_flash(
                 minimum_repetition_time, line_without_tr_delay
             )
         if requested_tr_delay < -1e-12 and not timing_only:
-            label = (
-                variant["entry"].display_name or variant["pulse"].name
-                if variant["entry"] is not None
-                else "RF pulse"
-            )
+            label = _rf_variant_label(variant)
             raise ValueError(
                 f"repetition_time_s is too short for {label}; minimum is "
                 f"{line_without_tr_delay:.9g} s"
@@ -2785,6 +3809,7 @@ def make_pulseq_flash(
         )
         variant.update(
             rf_center=rf_center,
+            excitation_center=float(rf.delay + rf_center),
             rf_block_duration=rf_block_duration,
             logical_slice_area=logical_slice_area,
             slice_rephase_area=slice_rephase_area,
@@ -2797,14 +3822,74 @@ def make_pulseq_flash(
         )
     actual_te = max(variant["actual_te"] for variant in rf_variants)
     actual_tr = max(variant["actual_tr"] for variant in rf_variants)
+
+    def variant_for_excitation(repetition: int, excitation: int) -> int:
+        if not schedule_active:
+            return 0
+        index, _ = pulse_schedule.entry_for_index(
+            repetition if pulse_schedule.selection_level == "frame" else excitation
+        )
+        return int(index)
+
+    inversion = _make_inversion_preparation(
+        pp,
+        system,
+        inversion_times_s=inversion_times_s,
+        pulse_type=inversion_pulse_type,
+        duration_s=inversion_duration_s,
+        frequency_offset_hz=rf_frequency_offset_hz,
+        encoding_frame=encoding_frame,
+        slice_thickness_m=slice_thickness_m,
+        spoiler_cycles_per_slice=inversion_spoiler_cycles_per_slice,
+        spoiler_duration_s=spoiler_duration_s,
+    )
+    center_line = n_phase // 2
+    inversion_delays = []
+    inversion_minimums = []
+    if inversion is not None:
+        for repetition in range(repetitions):
+            first_excitation = repetition * n_slices * n_phase
+            # TI targets the centre line of the first slice of each image.
+            target_offset = (
+                sum(
+                    rf_variants[
+                        variant_for_excitation(repetition, first_excitation + line)
+                    ]["actual_tr"]
+                    for line in range(center_line)
+                )
+                + rf_variants[
+                    variant_for_excitation(repetition, first_excitation + center_line)
+                ]["excitation_center"]
+            )
+            inversion_minimums.append(inversion.minimum_inversion_time_s(target_offset))
+            inversion_delays.append(
+                _inversion_delay_s(
+                    inversion,
+                    inversion.inversion_time_for(repetition),
+                    target_offset,
+                    system.block_duration_raster,
+                    sequence_name="FLASH",
+                    allow_short=timing_only,
+                )
+            )
     if timing_only:
         actual_tr = max(actual_tr, minimum_repetition_time)
+        preparation_duration = (
+            0.0
+            if inversion is None
+            else inversion.fixed_duration_s + max(inversion_delays)
+        )
         return FlashTimingPlan(
             sampling_bandwidth_hz=1.0 / dwell,
             dwell_s=float(dwell),
             minimum_echo_time_s=float(minimum_echo_time),
             minimum_repetition_time_s=float(minimum_repetition_time),
-            minimum_acquisition_interval_s=float(n_slices * n_phase * actual_tr),
+            minimum_acquisition_interval_s=float(
+                preparation_duration + n_slices * n_phase * actual_tr
+            ),
+            minimum_inversion_time_s=(
+                None if inversion is None else float(max(inversion_minimums))
+            ),
         )
 
     phase_areas = (np.arange(n_phase) - n_phase // 2) / fov_phase
@@ -2819,9 +3904,21 @@ def make_pulseq_flash(
     minimum_acquisition_intervals = []
     used_frame_schedule_indices = []
     used_frame_pulse_ids = []
+    actual_inversion_times = []
+    slice_inversion_offsets = []
     for repetition in range(repetitions):
         acquisition_start = _sequence_duration_s(sequence)
         acquisition_start_times.append(acquisition_start)
+        inversion_center_time = None
+        if inversion is not None:
+            inversion_center_time = (
+                acquisition_start + inversion.center_from_block_start_s
+            )
+            crusher_end = _add_inversion_preparation(
+                pp, sequence, inversion, inversion_delays[repetition]
+            )
+            if crusher_end is not None:
+                spoiler_end_times.append(crusher_end)
         if schedule_active and pulse_schedule.selection_level == "frame":
             frame_schedule_index, _ = pulse_schedule.entry_for_index(repetition)
         else:
@@ -2837,6 +3934,20 @@ def make_pulseq_flash(
                 else:
                     schedule_index = frame_schedule_index
                     variant = frame_variant
+                if inversion_center_time is not None and line == center_line:
+                    excitation_time = (
+                        _sequence_duration_s(sequence) + variant["excitation_center"]
+                    )
+                    if slice_index == 0:
+                        actual_inversion_times.append(
+                            excitation_time - inversion_center_time
+                        )
+                    if repetition == 0:
+                        slice_inversion_offsets.append(
+                            excitation_time
+                            - inversion_center_time
+                            - actual_inversion_times[0]
+                        )
                 rf = variant["rf"]
                 gz = variant["gz"]
                 spsp_logical_gz = variant["logical_gz"]
@@ -2994,6 +4105,13 @@ def make_pulseq_flash(
     )
     sequence.set_definition("SpoilerEndTimes", spoiler_end_times)
     sequence.set_definition("IdealSpoilerEndTimes", spoiler_end_times)
+    _set_inversion_definitions(
+        sequence,
+        inversion,
+        actual_inversion_times_s=actual_inversion_times,
+        slice_inversion_offsets_s=slice_inversion_offsets,
+        spoiler_cycles_per_slice=inversion_spoiler_cycles_per_slice,
+    )
     _set_rf_definitions(
         sequence,
         pulse_type=rf_pulse_type,
@@ -3008,62 +4126,14 @@ def make_pulseq_flash(
         spectral_spatial_pulse=rf_spectral_spatial_pulse,
     )
     if schedule_active:
-        expanded = pulse_schedule.expanded_entries()
-        sequence.set_definition("SPSPScheduleVersion", 1)
-        sequence.set_definition(
-            "SPSPScheduleSelectionLevel", pulse_schedule.selection_level
-        )
-        sequence.set_definition("SPSPScheduleCyclic", bool(pulse_schedule.cyclic))
-        sequence.set_definition("SPSPScheduleStepCount", len(expanded))
-        for definition_name, values in (
-            ("SPSPScheduleEntryIDs", [entry.entry_id for entry in expanded]),
-            ("SPSPSchedulePulseIDs", [entry.pulse_id for entry in expanded]),
-            (
-                "SPSPScheduleDisplayNames",
-                [
-                    entry.display_name or pulse_library.get(entry.pulse_id).name
-                    for entry in expanded
-                ],
-            ),
-            (
-                "SPSPScheduleTargetNames",
-                [entry.target_metabolite for entry in expanded],
-            ),
-            ("SPSPScheduleScaleModes", [entry.scale_mode for entry in expanded]),
-        ):
-            sequence.set_definition(
-                definition_name, json.dumps(values, separators=(",", ":"))
-            )
-        sequence.set_definition(
-            "SPSPScheduleAmplitudeScales",
-            [
-                entry.effective_amplitude_scale(pulse_library.get(entry.pulse_id))
-                for entry in expanded
-            ],
-        )
-        sequence.set_definition(
-            "SPSPScheduleFlipAnglesDeg",
-            [
-                entry.effective_flip_angle_deg(pulse_library.get(entry.pulse_id))
-                for entry in expanded
-            ],
-        )
-        sequence.set_definition(
-            "SPSPSchedulePulseDurations",
-            [pulse_library.get(entry.pulse_id).duration_s for entry in expanded],
-        )
-        sequence.set_definition("SPSPScheduleFrameIndices", used_frame_schedule_indices)
-        sequence.set_definition(
-            "SPSPScheduleFramePulseIDs",
-            json.dumps(used_frame_pulse_ids, separators=(",", ":")),
-        )
-        sequence.set_definition(
-            "SPSPScheduleWarnings",
-            json.dumps(list(schedule_warnings), separators=(",", ":")),
-        )
-        sequence.set_definition(
-            "SPSPScheduleContrastWarning",
-            (
+        _set_spectral_spatial_schedule_definitions(
+            sequence,
+            pulse_library,
+            pulse_schedule,
+            schedule_warnings=schedule_warnings,
+            frame_schedule_indices=used_frame_schedule_indices,
+            frame_pulse_ids=used_frame_pulse_ids,
+            contrast_warning=(
                 "Schedule changes within phase-encoding lines; SET ADC labels are required for interpretation."
                 if pulse_schedule.selection_level == "tr"
                 else "Each schedule step applies to one complete logical FLASH frame."

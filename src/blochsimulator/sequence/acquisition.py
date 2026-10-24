@@ -1157,6 +1157,12 @@ class SpectroscopicAcquisition:
         moments = np.asarray(moments_cyc_per_m, dtype=float)
         if moments.shape != (self.num_samples, 3):
             raise ValueError("CSI gradient moments must have shape (num_samples, 3)")
+        if self.matrix == (1, 1):
+            # A single-voxel grid carries no phase encoding. RF-localised
+            # spectroscopy such as PRESS leaves crusher and slab-selection
+            # moments after the last refocusing pulse, which the echo itself
+            # refocuses, so there is no encoding to validate.
+            return
         raw = moments.reshape(self.num_encodings, self.spectral_points, 3)
         origins = np.asarray(self.moment_origins_cyc_per_m)[:, None, :]
         relative = raw - origins

@@ -72,6 +72,7 @@ docs/_build/
 !docs/simulation_acceleration_implementation_prompt.md
 !docs/simulation_acceleration_progress.md
 !docs/SPECTRAL_SPATIAL_RF.md
+!docs/compressed_sensing_concept.md
 !THIRD_PARTY_NOTICES.md
 !docs/dynamic_metal_feasibility.md
 !docs/free_mode_ahp_performance.md

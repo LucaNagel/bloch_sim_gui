@@ -17,6 +17,7 @@ from blochsimulator.sequence import (
     SpectralSpatialScheduleEntry,
     design_spectral_spatial_pulse,
     load_pulseq,
+    make_pulseq_epi,
     make_pulseq_flash,
     migrate_spectral_spatial_state,
     simulate_spectral_spatial_profile,
@@ -241,6 +242,100 @@ def test_flash_schedule_is_frame_level_labelled_and_round_trips(tmp_path):
     set_labels = program.metadata["adc_label_values"]["SET"]
     assert tuple(set_labels[:4]) == (0, 0, 0, 0)
     assert tuple(set_labels[4:8]) == (1, 1, 1, 1)
+
+
+def _scheduled_epi(schedule, library, **overrides):
+    parameters = dict(
+        matrix=(4, 4),
+        fov_m=(0.08, 0.08),
+        slice_thickness_m=30e-3,
+        slice_gap_m=5e-3,
+        n_slices=2,
+        repetitions=4,
+        echo_time_s=20e-3,
+        repetition_time_s=None,
+        rf_pulse_type="spectral_spatial",
+        rf_spectral_spatial_library=library.to_dict(),
+        rf_spectral_spatial_schedule=schedule.to_dict(),
+        nucleus="C13",
+    )
+    parameters.update(overrides)
+    return make_pulseq_epi(**parameters)
+
+
+def test_epi_frame_schedule_shares_one_pulse_across_slices(tmp_path):
+    library, schedule = _library_and_schedule()
+    sequence = _scheduled_epi(schedule, library)
+
+    assert sequence.check_timing()[0]
+    definitions = sequence.definitions
+    assert definitions["SPSPScheduleSelectionLevel"] == "frame"
+    assert definitions["SPSPScheduleFrameIndices"] == [0, 1, 2, 0]
+    assert "all slices" in definitions["SPSPScheduleContrastWarning"]
+
+    path = Path(tmp_path) / "scheduled_epi.seq"
+    sequence.write(path, v141_compat=True)
+    program = load_pulseq(path)
+    set_labels = tuple(program.metadata["adc_label_values"]["SET"])
+    # Two slices of four EPI lines per repetition.
+    assert set_labels == (0,) * 8 + (1,) * 8 + (2,) * 8 + (0,) * 8
+    rf_events = [event for event in program.events if isinstance(event, RFEvent)]
+    durations = [round(event.end_s - event.start_s, 6) for event in rf_events]
+    pyruvate, lactate = (
+        round(library.get(pulse_id).duration_s, 6)
+        for pulse_id in ("pyruvate-pulse", "lactate-pulse")
+    )
+    assert durations == [pyruvate] * 2 + [lactate] * 4 + [pyruvate] * 2
+    assert SequenceCompiler().compile(program).n_intervals > 0
+
+
+def test_epi_tr_schedule_advances_per_slice_and_keeps_echo_time(tmp_path):
+    library, schedule = _library_and_schedule()
+    tr_schedule = SpectralSpatialSchedule(
+        schedule.entries, cyclic=True, selection_level="tr"
+    )
+    sequence = _scheduled_epi(tr_schedule, library)
+
+    assert sequence.check_timing()[0]
+    assert sequence.definitions["SPSPScheduleSelectionLevel"] == "tr"
+    assert "slice image" in sequence.definitions["SPSPScheduleContrastWarning"]
+    path = Path(tmp_path) / "scheduled_tr_epi.seq"
+    sequence.write(path, v141_compat=True)
+    program = load_pulseq(path)
+    set_labels = program.metadata["adc_label_values"]["SET"]
+    assert tuple(set_labels[::4]) == (0, 1, 2, 0, 1, 2, 0, 1)
+
+    # Pulses of different length keep the same TE through per-pulse delays.
+    compiled = SequenceCompiler().compile_acquisition(program)
+    rf_events = program.rf_events
+    samples_per_slice = compiled.adc_times_s.size // len(rf_events)
+    k_radius = np.linalg.norm(compiled.adc_gradient_moment_cyc_per_m[:, :2], axis=1)
+    pulses = [library.get(f"{name}-pulse") for name in ("pyruvate", "lactate")]
+    echo_times = []
+    for slice_number, (rf_event, pulse_index) in enumerate(
+        zip(rf_events, (0, 1, 1, 0, 1, 1, 0, 1))
+    ):
+        assert rf_event.end_s - rf_event.start_s == pytest.approx(
+            pulses[pulse_index].duration_s, abs=2e-6
+        )
+        window = slice(
+            slice_number * samples_per_slice, (slice_number + 1) * samples_per_slice
+        )
+        echo_sample = int(np.argmin(k_radius[window]))
+        echo_times.append(
+            compiled.adc_times_s[window][echo_sample]
+            - rf_event.start_s
+            - pulses[pulse_index].excitation_center_s
+        )
+    dwell = float(np.diff(compiled.adc_times_s[:2])[0])
+    assert np.ptp(echo_times) <= dwell + 2e-6
+    assert np.mean(echo_times) == pytest.approx(20e-3, abs=dwell)
+
+
+def test_epi_schedule_rejects_variable_flip_angles():
+    library, schedule = _library_and_schedule()
+    with pytest.raises(ValueError, match="variable flip angles"):
+        _scheduled_epi(schedule, library, variable_flip_angle=True)
 
 
 def test_fast_preview_matches_single_pulse_profile_and_propagates_complex_state():

@@ -342,6 +342,50 @@ def scale_rf_envelope_to_flip(
     return samples_hz
 
 
+def design_hyperbolic_secant_inversion(
+    *,
+    duration_s: float,
+    raster_s: float,
+    mu: float = 4.9,
+    beta_duration_product: float = 8.0,
+    adiabaticity: float = 4.0,
+) -> np.ndarray:
+    """Return an adiabatic hyperbolic-secant inversion waveform in hertz.
+
+    The Silver-Hoult pulse is ``A sech(beta t) exp(i phi(t))`` with the
+    frequency sweep ``-mu beta tanh(beta t)`` (Baum et al., Phys Rev A 32,
+    3435). ``beta`` follows from ``beta_duration_product / duration_s`` so
+    the default truncates the envelope at sech(4). The peak amplitude
+    satisfies ``(2 pi A)^2 = adiabaticity * mu * beta^2``, the same scaling as
+    PyPulseq's ``make_adiabatic_pulse``. The sweep spans ``mu beta / pi`` Hz
+    and the phase is zero at the pulse centre.
+    """
+    for name, value in {
+        "duration_s": duration_s,
+        "raster_s": raster_s,
+        "mu": mu,
+        "beta_duration_product": beta_duration_product,
+        "adiabaticity": adiabaticity,
+    }.items():
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be positive and finite")
+    sample_count = int(round(float(duration_s) / float(raster_s)))
+    if sample_count < 2:
+        raise ValueError("the inversion pulse must span at least two RF samples")
+    actual_duration_s = sample_count * float(raster_s)
+    beta = float(beta_duration_product) / actual_duration_s
+    time_s = (np.arange(sample_count, dtype=float) + 0.5) * float(
+        raster_s
+    ) - actual_duration_s / 2.0
+    frequency_rad_s = -float(mu) * beta * np.tanh(beta * time_s)
+    phase = np.cumsum(frequency_rad_s) * float(raster_s)
+    phase -= np.interp(0.0, time_s, phase)
+    amplitude_hz = np.sqrt(float(adiabaticity) * float(mu) * beta**2) / (2.0 * np.pi)
+    samples = amplitude_hz / np.cosh(beta * time_s) * np.exp(1j * phase)
+    samples.setflags(write=False)
+    return samples
+
+
 def make_pulseq_rf_events(
     pp,
     system,
