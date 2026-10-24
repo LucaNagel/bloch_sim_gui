@@ -1068,6 +1068,9 @@ def test_workspace_nucleus_change_swaps_mouse_compound_and_water_pools(tmp_path)
     assert isinstance(phantom, MousePerfusionPhantom)
     assert tuple(pool.name for pool in phantom.pools) == tuple(TISSUE_WATER_POOLS)
     assert phantom.nucleus == "H1"
+    # Pyruvate is invisible to 1H; the rebase must not switch DCE on.
+    assert phantom.metadata["injection_compound"] == "none"
+    assert phantom.contrast_relaxation is None
     pd_map = phantom.pd_map.copy()
 
     # A field change must not rescale thermal water magnetization.

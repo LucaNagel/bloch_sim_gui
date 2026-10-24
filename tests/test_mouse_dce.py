@@ -20,6 +20,7 @@ from blochsimulator.mouse_phantom import (
     MousePerfusionPhantom,
 )
 from blochsimulator.sequence import ADCEvent, RFEvent, SequenceProgram
+from blochsimulator.units import relative_polarization_to_percent
 
 RASTER = 20e-6
 TR = 5e-3
@@ -294,22 +295,82 @@ def test_new_designer_switches_to_1h_dce():
     QApplication.instance() or QApplication([])
     from blochsimulator.ui.mouse_phantom_designer import MousePhantomDesignerDialog
 
+    def offered(dialog):
+        return [
+            dialog.injection_compound.itemData(index)
+            for index in range(dialog.injection_compound.count())
+        ]
+
     dialog = MousePhantomDesignerDialog()
+    assert offered(dialog) == ["pyruvate", "lactate", "z_ompd", "contrast_agent"]
     dialog.injection_compound.setCurrentIndex(
         dialog.injection_compound.findData("contrast_agent")
     )
     assert dialog.contrast_group.isHidden()
-    assert dialog.injection_polarization.isEnabled()
+    assert not dialog.injection_polarization.isHidden()
 
     dialog.nucleus.setCurrentIndex(dialog.nucleus.findData("H1"))
+    assert offered(dialog) == ["contrast_agent", "none"]
+    assert dialog.injection_compound.currentData() == "contrast_agent"
     assert not dialog.contrast_group.isHidden()
-    assert not dialog.injection_polarization.isEnabled()
-    assert not dialog.relaxation_group.isEnabled()
+    # Thermal water: no polarization, no HP relaxation, no 13C delivery or
+    # metabolism, but the solver decay choice still applies to the water.
+    assert dialog.injection_polarization.isHidden()
+    assert dialog.relaxation_group.title() == "Transverse decay"
+    assert all(spin.isHidden() for spin in dialog.relaxation_spins["injected"])
+    assert not dialog.transverse_decay.isHidden()
+    assert dialog.perfusion_group.isHidden()
+    assert dialog.tissue_clearance.isHidden()
+    assert not dialog.renal_tubular_transit.isHidden()
+    assert dialog.perfusion_timestep.isHidden()
+    assert not dialog.tabs.isTabVisible(dialog.metabolism_tab)
     config = dialog._read_config()
     assert config.nucleus == "H1" and config.dce_enabled
 
-    dialog.nucleus.setCurrentIndex(dialog.nucleus.findData("C13"))
-    assert dialog.contrast_group.isHidden()
-    assert dialog._read_config().injection_polarization == pytest.approx(
-        dialog.config.injection_polarization
+    dialog.injection_compound.setCurrentIndex(
+        dialog.injection_compound.findData("none")
     )
+    assert dialog.contrast_group.isHidden()
+    assert dialog.bolus_group.isHidden() and dialog.injection_volume.isHidden()
+    dialog._preview()
+    assert dialog.phantom.config.injection_compound == "none"
+    assert dialog.phantom.contrast_relaxation is None
+    assert dialog.phantom.config.injection_amount_umol == 0.0
+
+    dialog.nucleus.setCurrentIndex(dialog.nucleus.findData("C13"))
+    assert dialog.injection_compound.currentData() == "pyruvate"
+    assert dialog.contrast_group.isHidden()
+    assert not dialog.relaxation_spins["injected"][0].isHidden()
+    assert dialog.tabs.isTabVisible(dialog.metabolism_tab)
+    # The absolute polarization survives the 1H round trip.
+    config = dialog._read_config()
+    assert relative_polarization_to_percent(
+        config.injection_polarization,
+        "C13",
+        config.field_strength_t,
+        config.temperature_k,
+    ) == pytest.approx(20.0)
+
+
+def test_designer_opens_legacy_1h_compound_as_tissue_water_only():
+    QApplication.instance() or QApplication([])
+    from blochsimulator.ui.mouse_phantom_designer import MousePhantomDesignerDialog
+
+    dialog = MousePhantomDesignerDialog(
+        config=_dce_config(injection_compound="pyruvate")
+    )
+    assert dialog.injection_compound.currentData() == "none"
+    assert not dialog._read_config().dce_enabled
+
+
+def test_no_injection_needs_tissue_water_and_rebases_to_13c():
+    from blochsimulator.phantom_polarization import rebase_phantom_polarization
+
+    with pytest.raises(ValueError, match="needs 1H tissue water"):
+        _dce_config(nucleus="C13", injection_compound="none").validate()
+    phantom = _dce_config(injection_compound="none").build()
+    assert phantom.injection_compound_label == "None (tissue water only)"
+    assert phantom.metadata["injection_amount_mol"] == 0.0
+    rebase_phantom_polarization(phantom, field_strength_t=7.0, nucleus="C13")
+    assert phantom.config.nucleus == "C13"
+    assert phantom.config.injection_compound == "pyruvate"

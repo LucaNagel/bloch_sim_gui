@@ -30,12 +30,12 @@ from PyQt5.QtWidgets import (
 
 from ..mouse_dce import CONTRAST_AGENTS, TOFTS_TISSUE_NAMES
 from ..mouse_phantom import (
-    INJECTION_COMPOUNDS,
     MOUSE_TISSUE_COLORS,
     TRANSVERSE_DECAY_MODES,
     MousePerfusionConfig,
     MousePerfusionPhantom,
     build_reference_mouse_anatomy,
+    injection_compounds,
     uses_tissue_water,
 )
 from ..units import (
@@ -608,6 +608,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
 
         compound_group = QGroupBox("Injected compound")
         compound_form = self._group_form(compound_group)
+        self.compound_form = compound_form
         self.nucleus = QComboBox()
         self.nucleus.setObjectName("mouse_nucleus")
         for key, label in MOUSE_NUCLEI.items():
@@ -619,8 +620,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         )
         self.nucleus.currentIndexChanged.connect(self._nucleus_changed)
         self.injection_compound = QComboBox()
-        for key, label in INJECTION_COMPOUNDS.items():
-            self.injection_compound.addItem(label, key)
+        self._populate_compounds(self._selected_nucleus(), None)
         self.injection_compound.currentIndexChanged.connect(
             self._compound_selection_changed
         )
@@ -657,8 +657,10 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         relaxation_group = QGroupBox("Hyperpolarized relaxation")
         self.relaxation_group = relaxation_group
         relaxation_grid = QGridLayout(relaxation_group)
+        self.relaxation_headers = []
         for column, header in enumerate(("T1", "T2", "T2*"), start=1):
             label = QLabel(header)
+            self.relaxation_headers.append(label)
             label.setAlignment(Qt.AlignCenter)
             relaxation_grid.addWidget(label, 0, column)
             relaxation_grid.setColumnStretch(column, 1)
@@ -695,7 +697,9 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         injection_controls_layout.addWidget(relaxation_group)
 
         bolus_group = QGroupBox("Bolus timing and shape")
+        self.bolus_group = bolus_group
         bolus_form = self._group_form(bolus_group)
+        self.bolus_form = bolus_form
         self.injection_start = self._float_spin(
             -10000.0, 10000.0, decimals=4, suffix=" s", step=0.1
         )
@@ -740,7 +744,9 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         injection_controls_layout.addWidget(bolus_group)
 
         clearance_group = QGroupBox("Clearance and renal excretion")
+        self.clearance_group = clearance_group
         clearance_form = self._group_form(clearance_group)
+        self.clearance_form = clearance_form
         self.tissue_clearance = self._float_spin(
             0.0001, 100.0, decimals=4, suffix=" s⁻¹", step=0.01
         )
@@ -781,6 +787,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         injection_controls_layout.addWidget(clearance_group)
 
         perfusion_group = QGroupBox("Relative delivery weights")
+        self.perfusion_group = perfusion_group
         perfusion_group.setToolTip(
             "Relative blood flow per tissue, roughly in ml/g/min. The weights "
             "only distribute the injected dose; their absolute scale cancels."
@@ -818,6 +825,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         injection_help.setWordWrap(True)
         injection_help.setStyleSheet("color: palette(mid);")
         injection_controls_layout.addWidget(injection_help)
+        self.injection_help = injection_help
         self.compound_help = QLabel()
         self.compound_help.setWordWrap(True)
         self.compound_help.setStyleSheet("color: palette(mid);")
@@ -950,7 +958,9 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         ph_help.setWordWrap(True)
         kidney_layout.addWidget(ph_help)
         kidney_layout.addStretch(1)
-        self.tabs.addTab(self._scrollable_form(kidney_page), "Metabolism & pH")
+        self.metabolism_tab = self.tabs.addTab(
+            self._scrollable_form(kidney_page), "Metabolism & pH"
+        )
 
         motion_page = QWidget()
         motion_layout = QVBoxLayout(motion_page)
@@ -1272,8 +1282,12 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         if self.nucleus.findData(config.nucleus) < 0:
             self.nucleus.addItem(config.nucleus, config.nucleus)
         self.nucleus.setCurrentIndex(self.nucleus.findData(config.nucleus))
-        compound_index = self.injection_compound.findData(config.injection_compound)
-        self.injection_compound.setCurrentIndex(max(0, compound_index))
+        # A 13C compound saved with 1H is invisible there: tissue water only.
+        self._populate_compounds(
+            config.nucleus,
+            config.injection_compound,
+            fallback="none" if uses_tissue_water(config.nucleus) else None,
+        )
         self.injection_concentration.setValue(config.injection_concentration_mm)
         self.injection_volume.setValue(config.injection_volume_ul)
         for key in ("injected", "metabolite"):
@@ -1565,10 +1579,14 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
                 " · 1H tissue water with gadolinium DCE relaxation"
                 if phantom.contrast_relaxation is not None
                 else (
-                    " · 1H images tissue water (7 T relaxation); the injection is "
-                    "a preview only"
-                    if phantom.pyruvate_inflow is None
-                    else ""
+                    " · 1H tissue water (7 T relaxation) without injection"
+                    if phantom.config.injection_compound == "none"
+                    else (
+                        " · 1H images tissue water (7 T relaxation); the "
+                        "injection is a preview only"
+                        if phantom.pyruvate_inflow is None
+                        else ""
+                    )
                 )
             )
         )
@@ -1592,15 +1610,22 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
                 "pH compartment while C1 stays nearly fixed."
             ),
             "contrast_agent": (
-                "With nucleus 1H the contrast agent is a gadolinium DCE "
-                "bolus: its plasma, Tofts tissue and urinary concentrations "
-                "shorten T1 and T2 of the tissue water in the Bloch solver. "
-                "With 13C it only animates tracer delivery and clearance; "
-                "choose 1H above for DCE."
+                "The gadolinium bolus follows a plasma model with glomerular "
+                "filtration; extended Tofts tissue curves and the urinary "
+                "concentrations shorten T1 and T2 of the tissue water in the "
+                "Bloch solver."
+                if uses_tissue_water(self._selected_nucleus())
+                else "The generic contrast agent is a hyperpolarized tracer "
+                "without conversion; it shows delivery and clearance only. "
+                "Choose nucleus 1H for gadolinium DCE."
+            ),
+            "none": (
+                "No injection: 1H images the thermal tissue water with its "
+                "per-tissue proton density, T1 and T2."
             ),
         }
         self.compound_help.setText(messages.get(key, ""))
-        self.contrast_group.setVisible(self._dce_selected())
+        self._update_nucleus_controls()
         self._update_dose_label()
         enabled = key == "pyruvate"
         self.relaxation_row_labels["metabolite"].setEnabled(enabled)
@@ -1620,12 +1645,68 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
     def _selected_nucleus(self) -> str:
         return str(self.nucleus.currentData())
 
+    def _populate_compounds(self, nucleus, selected, *, fallback=None):
+        """Offer the compounds of this nucleus, keeping ``selected`` if offered."""
+        compounds = injection_compounds(nucleus)
+        if selected not in compounds:
+            selected = fallback if fallback in compounds else next(iter(compounds))
+        self.injection_compound.blockSignals(True)
+        self.injection_compound.clear()
+        for key, label in compounds.items():
+            self.injection_compound.addItem(label, key)
+        self.injection_compound.setCurrentIndex(
+            self.injection_compound.findData(selected)
+        )
+        self.injection_compound.blockSignals(False)
+
     def _nucleus_changed(self, *_):
-        water = uses_tissue_water(self._selected_nucleus())
-        # Thermal water carries no injected polarization or HP relaxation.
-        self.injection_polarization.setEnabled(not water)
-        self.relaxation_group.setEnabled(not water)
+        self._populate_compounds(
+            self._selected_nucleus(), self.injection_compound.currentData()
+        )
         self._compound_selection_changed()
+
+    @staticmethod
+    def _set_row_visible(form, field, visible):
+        label = form.labelForField(field)
+        if label is not None:
+            label.setVisible(visible)
+        field.setVisible(visible)
+
+    def _update_nucleus_controls(self):
+        """Show only the controls the selected nucleus and compound use."""
+        water = uses_tissue_water(self._selected_nucleus())
+        injected = self.injection_compound.currentData() != "none"
+        for field in (
+            self.injection_concentration,
+            self.injection_volume,
+            self.injection_dose_label,
+        ):
+            self._set_row_visible(self.compound_form, field, injected)
+        # Thermal water carries no injected polarization, its per-tissue
+        # relaxation is fixed, and the DCE model has its own delivery.
+        for field in (self.injection_polarization, self.injection_polarization_thermal):
+            self._set_row_visible(self.compound_form, field, not water)
+        self.relaxation_group.setTitle(
+            "Transverse decay" if water else "Hyperpolarized relaxation"
+        )
+        for widget in (
+            *self.relaxation_headers,
+            *self.relaxation_row_labels.values(),
+            *(spin for spins in self.relaxation_spins.values() for spin in spins),
+        ):
+            widget.setVisible(not water)
+        self.bolus_group.setVisible(injected)
+        self._set_row_visible(self.bolus_form, self.perfusion_timestep, not water)
+        self.clearance_group.setVisible(injected)
+        self.clearance_group.setTitle(
+            "Urinary transit" if water else "Clearance and renal excretion"
+        )
+        for field in (self.tissue_clearance, self.renal_excretion):
+            self._set_row_visible(self.clearance_form, field, not water)
+        self.perfusion_group.setVisible(not water)
+        self.injection_help.setVisible(not water)
+        self.contrast_group.setVisible(self._dce_selected())
+        self.tabs.setTabVisible(self.metabolism_tab, not water)
 
     def _dce_selected(self) -> bool:
         return (

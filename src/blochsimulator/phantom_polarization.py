@@ -79,6 +79,7 @@ def _rebuild_mouse_for_nucleus(phantom):
         MousePerfusionConfig,
         MousePerfusionPhantom,
         _has_tissue_water,
+        injection_compounds,
         uses_tissue_water,
     )
 
@@ -88,6 +89,13 @@ def _rebuild_mouse_for_nucleus(phantom):
     water = uses_tissue_water(mouse["nucleus"])
     if not water and not _has_tissue_water(phantom):
         return
+    if mouse["injection_compound"] not in injection_compounds(mouse["nucleus"]):
+        # A 13C compound is invisible to 1H, so water keeps no injection
+        # rather than silently starting DCE; 13C cannot image the
+        # injection-free water mouse and falls back to its first compound.
+        mouse["injection_compound"] = (
+            "none" if water else next(iter(injection_compounds(mouse["nucleus"])))
+        )
     rebuilt = MousePerfusionPhantom.from_config(MousePerfusionConfig.from_dict(mouse))
     phantom.__class__ = MousePerfusionPhantom
     phantom.__dict__.clear()
