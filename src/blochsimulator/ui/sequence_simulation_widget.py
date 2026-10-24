@@ -71,6 +71,7 @@ from ..spectral_phantom import SpectralPhantom
 from ..dynamic_phantom import DynamicSpectralPhantom
 from ..sequence import (
     ADCEvent,
+    PRESS_REFOCUSING_PULSE_TYPES,
     CartesianAcquisition,
     CartesianAcquisitionFrames,
     CartesianAcquisitionVolumes,
@@ -105,6 +106,7 @@ from ..sequence import (
     make_pulseq_flash,
     make_pulseq_slice_selection,
     make_pulseq_me_bssfp,
+    make_pulseq_press,
     make_pulseq_radial_me_bssfp,
     make_pulseq_spectral_selective_bssfp,
     make_pulseq_spiral,
@@ -973,11 +975,18 @@ def _infer_sequence_acquisition(program, compiled):
             program, compiled=compiled
         )
         csi = spectroscopic_acquisition
-        note = (
-            f"2D CSI {csi.matrix[0]}×{csi.matrix[1]}×{csi.spectral_points}; "
-            f"repetitions={csi.num_repetitions}; "
-            f"BW={csi.spectral_bandwidth_hz:.6g} Hz"
-        )
+        if definitions.get("TrajectoryType") == "single_voxel_press":
+            note = (
+                f"PRESS single voxel; {csi.spectral_points} points; "
+                f"repetitions={csi.num_repetitions}; "
+                f"BW={csi.spectral_bandwidth_hz:.6g} Hz"
+            )
+        else:
+            note = (
+                f"2D CSI {csi.matrix[0]}×{csi.matrix[1]}×{csi.spectral_points}; "
+                f"repetitions={csi.num_repetitions}; "
+                f"BW={csi.spectral_bandwidth_hz:.6g} Hz"
+            )
         return _SequenceLoadPayload(
             program,
             compiled,
@@ -1470,8 +1479,13 @@ class SequenceSimulationWidget(QWidget):
     EPSI_MGE_SOURCE = 8
     PULSEQ_SOURCE = 9
     SLICE_SELECTION_SOURCE = 10
+    PRESS_SOURCE = 11
     GENERATED_SOURCES = frozenset(
-        (*range(EPI_SOURCE, EPSI_MGE_SOURCE + 1), SLICE_SELECTION_SOURCE)
+        (
+            *range(EPI_SOURCE, EPSI_MGE_SOURCE + 1),
+            SLICE_SELECTION_SOURCE,
+            PRESS_SOURCE,
+        )
     )
     CONFIGURABLE_SOURCES = GENERATED_SOURCES | {INTERNAL_SOURCE}
     CARTESIAN_3D_SOURCES = frozenset((BSSFP_SOURCE, SS_BSSFP_SOURCE, ME_BSSFP_SOURCE))
@@ -1485,6 +1499,7 @@ class SequenceSimulationWidget(QWidget):
         ME_BSSFP_SOURCE: "me_bssfp",
         FLASH_SOURCE: "flash",
         EPSI_MGE_SOURCE: "epsi",
+        PRESS_SOURCE: "press",
     }
     # Tooltip endings of the read/phase offset fields, by where the shift is
     # applied.
@@ -1938,6 +1953,7 @@ class SequenceSimulationWidget(QWidget):
                 "radial_me",
                 "me_bssfp",
                 "slice_selection",
+                "press",
             ):
                 duration_control = getattr(self, f"{prefix}_rf_duration_ms", None)
                 if duration_control is None:
@@ -1966,6 +1982,7 @@ class SequenceSimulationWidget(QWidget):
                 "radial_me",
                 "me_bssfp",
                 "slice_selection",
+                "press",
             )
         ):
             self._request_generated_sequence_refresh()
@@ -2028,6 +2045,7 @@ class SequenceSimulationWidget(QWidget):
             "radial_me",
             "me_bssfp",
             "slice_selection",
+            "press",
         ):
             if hasattr(self, f"{prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(prefix)
@@ -2147,6 +2165,7 @@ class SequenceSimulationWidget(QWidget):
             "radial_me",
             "me_bssfp",
             "slice_selection",
+            "press",
         ):
             if self._selected_shared_rf_pulse_type(prefix) == "designer":
                 self._update_shared_rf_controls(prefix)
@@ -2232,6 +2251,7 @@ class SequenceSimulationWidget(QWidget):
             "radial_me": self.radial_me_fov_mm,
             "me_bssfp": self.me_bssfp_partition_fov_mm,
             "slice_selection": self.slice_selection_thickness_mm,
+            "press": self.press_slice_size_mm,
         }
         return float(controls[prefix].value()) / 1000.0
 
@@ -2290,6 +2310,7 @@ class SequenceSimulationWidget(QWidget):
             "radial_me",
             "me_bssfp",
             "slice_selection",
+            "press",
         ):
             if hasattr(self, f"{control_prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(control_prefix)
@@ -2325,7 +2346,7 @@ class SequenceSimulationWidget(QWidget):
             library=library,
             schedule=schedule,
             selected_pulse_id=selected_id,
-            allow_multiple_steps=prefix == "flash",
+            allow_multiple_steps=self._spectral_spatial_schedule_supported(prefix),
         )
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -2351,6 +2372,7 @@ class SequenceSimulationWidget(QWidget):
             "radial_me",
             "me_bssfp",
             "slice_selection",
+            "press",
         ):
             if hasattr(self, f"{control_prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(control_prefix)
@@ -2361,7 +2383,7 @@ class SequenceSimulationWidget(QWidget):
         """Return a one-line metabolite plan such as ``Pyr 10° → Lac 30°``."""
         pulse = self._spectral_spatial_pulse_data
         schedule = self._spectral_spatial_schedule
-        if prefix == "flash" and schedule.entries:
+        if self._spectral_spatial_schedule_supported(prefix) and schedule.entries:
             steps = []
             for entry in schedule.entries:
                 if not entry.enabled:
@@ -2396,6 +2418,9 @@ class SequenceSimulationWidget(QWidget):
         pulse_spacing_s = 0.0
         if prefix == "flash":
             pulse_spacing_s = float(self.flash_repetition_time_ms.value()) / 1000.0
+        elif prefix == "epi":
+            # Spins of one slice see the next schedule step one interval later.
+            pulse_spacing_s = float(self.epi_repetition_time_ms.value()) / 1000.0
         dialog = SpectralSpatialScheduleDialog(
             self,
             library=self._spectral_spatial_pulse_library,
@@ -2442,6 +2467,7 @@ class SequenceSimulationWidget(QWidget):
             "radial_me",
             "me_bssfp",
             "slice_selection",
+            "press",
         ):
             if hasattr(self, f"{control_prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(control_prefix)
@@ -2500,13 +2526,15 @@ class SequenceSimulationWidget(QWidget):
                 "EPSI / MGE (2D)",
                 "Pulseq .seq file",
                 "RF + Slice Selection",
+                "PRESS (single voxel)",
             ]
         )
         self.sequence_source.currentIndexChanged.connect(self._source_changed)
         self.sequence_source.setToolTip(
             "Build EPI, EPSI/MGE, CSI, FLASH, Cartesian bSSFP, spectrally "
             "selective bSSFP, Cartesian or radial multi-echo bSSFP "
-            "interactively, inspect RF + Slice Selection, or load a Pulseq file"
+            "interactively, inspect RF + Slice Selection, build single-voxel "
+            "PRESS spectroscopy, or load a Pulseq file"
         )
         sequence_layout.addWidget(self.sequence_source)
 
@@ -2877,6 +2905,9 @@ class SequenceSimulationWidget(QWidget):
             self.epi_repetition_time_ms,
         )
         acquisition_form.addRow("Repetitions", self.epi_repetitions)
+        self._add_inversion_controls(
+            acquisition_form, "epi", lambda *_: self._acquisition_changed()
+        )
         _add_form_section(acquisition_form, "Spoiling")
         acquisition_form.addRow("RF spoiling", self.epi_rf_spoiling)
         acquisition_form.addRow(
@@ -3165,6 +3196,150 @@ class SequenceSimulationWidget(QWidget):
         self.csi_group.setVisible(False)
         controls_layout.addWidget(self.csi_group)
 
+        self.press_group = QGroupBox("PRESS single-voxel spectroscopy")
+        press_form = _left_aligned_form(self.press_group)
+        press_hint = QLabel(
+            "Point-resolved spectroscopy: a slice-selective excitation on the "
+            "partition axis and two slice-selective 180° pulses on the phase "
+            "and read axes refocus a double spin echo from the voxel where the "
+            "three slabs intersect. Crusher pairs around each 180° dephase "
+            "signal from outside the voxel; the FID is acquired from the echo "
+            "top."
+        )
+        press_hint.setWordWrap(True)
+        self.press_read_size_mm = self._parameter_spin(0.1, 1000.0, 10.0, " mm")
+        self.press_phase_size_mm = self._parameter_spin(0.1, 1000.0, 10.0, " mm")
+        self.press_slice_size_mm = self._parameter_spin(0.1, 1000.0, 10.0, " mm")
+        press_offsets = []
+        for role in OFFSET_ROLES:
+            spin = self._parameter_spin(-10000.0, 10000.0, 0.0, " mm")
+            spin.setObjectName(f"press_{role}_offset_mm")
+            spin.setToolTip(
+                f"Move the voxel centre along the {role} direction. Each slab "
+                "pulse shifts its RF frequency, as a scanner does, so the "
+                "exported .seq carries the offset as well."
+            )
+            press_offsets.append(spin)
+        (
+            self.press_read_offset_mm,
+            self.press_phase_offset_mm,
+            self.press_slice_offset_mm,
+        ) = press_offsets
+        (
+            self.press_read_gradient_axis,
+            self.press_phase_gradient_axis,
+            self.press_partition_gradient_axis,
+        ) = self._three_dimensional_orientation_controls("press")
+        self.press_spectral_points = QSpinBox()
+        self.press_spectral_points.setRange(2, 65536)
+        self.press_spectral_points.setValue(512)
+        self.press_bandwidth_hz = QDoubleSpinBox()
+        self.press_bandwidth_hz.setRange(10.0, 1_000_000.0)
+        self.press_bandwidth_hz.setDecimals(3)
+        self.press_bandwidth_hz.setValue(4000.0)
+        self.press_bandwidth_hz.setSuffix(" Hz")
+        self.press_flip_angle_deg = self._parameter_spin(0.1, 360.0, 90.0, "°")
+        self.press_refocusing_pulse_type = QComboBox()
+        for pulse_type in PRESS_REFOCUSING_PULSE_TYPES:
+            self.press_refocusing_pulse_type.addItem(pulse_type.title(), pulse_type)
+        self.press_refocusing_flip_angle_deg = self._parameter_spin(
+            0.1, 360.0, 180.0, "°"
+        )
+        self.press_refocusing_duration_ms = self._parameter_spin(
+            0.01, 100.0, 4.0, " ms"
+        )
+        self.press_refocusing_tbw = self._parameter_spin(0.5, 100.0, 4.0, "")
+        self.press_refocusing_tbw.setToolTip(
+            "Time-bandwidth product of the refocusing pulses. A sinc scaled to "
+            "180° refocuses a narrower profile than its small-tip slab: at 4 "
+            "the echo falls to half at about two thirds of the voxel width."
+        )
+        self.press_refocusing_apodization = self._parameter_spin(0.0, 1.0, 0.5, "")
+        self.press_refocusing_apodization.setSingleStep(0.05)
+        self.press_echo_time_ms = self._parameter_spin(0.1, 10000.0, 30.0, " ms")
+        self.press_first_echo_time_ms = self._parameter_spin(0.0, 10000.0, 0.0, " ms")
+        self.press_first_echo_time_ms.setSpecialValueText("TE / 2")
+        self.press_first_echo_time_ms.setToolTip(
+            "Time from the excitation to the first spin echo (TE1); the first "
+            "refocusing pulse sits at TE1 / 2. 0 places it symmetrically at "
+            "TE / 2."
+        )
+        self.press_repetition_time_ms = self._parameter_spin(
+            0.1, 100000.0, 2000.0, " ms"
+        )
+        self.press_repetitions = QSpinBox()
+        self.press_repetitions.setRange(1, 10000)
+        self.press_repetitions.setValue(1)
+        self.press_crusher_cycles_per_voxel = self._parameter_spin(
+            0.0, 1000.0, 4.0, " cycles/voxel"
+        )
+        self.press_crusher_cycles_per_voxel.setToolTip(
+            "Area of each crusher around a refocusing pulse along that pulse's "
+            "slab axis. Crushing needs isochromats spread across each phantom "
+            "voxel; a single isochromat outside the PRESS voxel keeps its "
+            "magnitude."
+        )
+        self.press_crusher_duration_ms = self._parameter_spin(0.001, 1000.0, 1.5, " ms")
+        self.press_spoil_after_readout = QCheckBox("Enable after each FID")
+        self.press_spoil_after_readout.setChecked(True)
+        self.press_spoiler_cycles_per_voxel = self._parameter_spin(
+            0.0, 1000.0, 4.0, " cycles/voxel"
+        )
+        self.press_spoiler_duration_ms = self._parameter_spin(0.001, 1000.0, 2.0, " ms")
+        self.press_timing_info = QLabel()
+        self.press_timing_info.setWordWrap(True)
+        self.press_dwell_info = QLabel()
+        self.press_dwell_info.setWordWrap(True)
+        self.press_resolution_info = QLabel()
+        press_form.addRow(press_hint)
+        _add_form_section(press_form, "Voxel")
+        press_form.addRow("Read gradient direction", self.press_read_gradient_axis)
+        press_form.addRow("Phase gradient direction", self.press_phase_gradient_axis)
+        press_form.addRow(
+            "Partition gradient direction", self.press_partition_gradient_axis
+        )
+        press_form.addRow("Voxel size (read)", self.press_read_size_mm)
+        press_form.addRow("Voxel size (phase)", self.press_phase_size_mm)
+        press_form.addRow("Voxel size (partition)", self.press_slice_size_mm)
+        press_form.addRow("Read offset", self.press_read_offset_mm)
+        press_form.addRow("Phase offset", self.press_phase_offset_mm)
+        press_form.addRow("Partition offset", self.press_slice_offset_mm)
+        _add_form_section(press_form, "Spectral sampling")
+        press_form.addRow("Spectral points", self.press_spectral_points)
+        press_form.addRow("Spectral bandwidth", self.press_bandwidth_hz)
+        _add_form_section(press_form, "Excitation (partition axis)")
+        press_form.addRow("Flip angle", self.press_flip_angle_deg)
+        self._add_shared_rf_controls(
+            press_form,
+            "press",
+            pulse_type="Sinc",
+            duration_ms=2.6,
+            sinc_lobes=3,
+        )
+        _add_form_section(press_form, "Refocusing (phase and read axes)")
+        press_form.addRow("Refocusing pulse", self.press_refocusing_pulse_type)
+        press_form.addRow("Refocusing flip angle", self.press_refocusing_flip_angle_deg)
+        press_form.addRow("Refocusing duration", self.press_refocusing_duration_ms)
+        press_form.addRow("Refocusing TBW", self.press_refocusing_tbw)
+        press_form.addRow("Refocusing apodization", self.press_refocusing_apodization)
+        press_form.addRow("Crusher area", self.press_crusher_cycles_per_voxel)
+        press_form.addRow("Crusher duration", self.press_crusher_duration_ms)
+        _add_form_section(press_form, "Timing")
+        press_form.addRow("Echo time (TE)", self.press_echo_time_ms)
+        press_form.addRow("First echo time (TE1)", self.press_first_echo_time_ms)
+        press_form.addRow("Repetition time (TR)", self.press_repetition_time_ms)
+        press_form.addRow("Repetitions", self.press_repetitions)
+        press_form.addRow("Shortest timing", self.press_timing_info)
+        _add_form_section(press_form, "Spoiling")
+        press_form.addRow("Gradient spoiler", self.press_spoil_after_readout)
+        press_form.addRow("Spoiler area", self.press_spoiler_cycles_per_voxel)
+        press_form.addRow("Spoiler duration", self.press_spoiler_duration_ms)
+        _add_form_section(press_form, "Derived sampling")
+        press_form.addRow("ADC dwell", self.press_dwell_info)
+        press_form.addRow("Spectral resolution", self.press_resolution_info)
+        self.press_group.setVisible(False)
+        controls_layout.addWidget(self.press_group)
+
         self.flash_group = QGroupBox("FLASH acquisition (2D)")
         flash_form = _left_aligned_form(self.flash_group)
         self.flash_form = flash_form
@@ -3286,6 +3461,9 @@ class SequenceSimulationWidget(QWidget):
         flash_form.addRow(
             "Acquisition interval (start-to-start)",
             self.flash_acquisition_interval_ms,
+        )
+        self._add_inversion_controls(
+            flash_form, "flash", lambda *_: self._flash_changed()
         )
         _add_form_section(flash_form, "Spoiling")
         flash_form.addRow("RF spoiling", self.flash_rf_spoiling)
@@ -4844,6 +5022,40 @@ class SequenceSimulationWidget(QWidget):
             self.csi_spoiler_duration_ms.setEnabled
         )
         for widget in (
+            self.press_read_size_mm,
+            self.press_phase_size_mm,
+            self.press_slice_size_mm,
+            self.press_read_offset_mm,
+            self.press_phase_offset_mm,
+            self.press_slice_offset_mm,
+            self.press_spectral_points,
+            self.press_bandwidth_hz,
+            self.press_flip_angle_deg,
+            self.press_refocusing_flip_angle_deg,
+            self.press_refocusing_duration_ms,
+            self.press_refocusing_tbw,
+            self.press_refocusing_apodization,
+            self.press_crusher_cycles_per_voxel,
+            self.press_crusher_duration_ms,
+            self.press_echo_time_ms,
+            self.press_first_echo_time_ms,
+            self.press_repetition_time_ms,
+            self.press_repetitions,
+            self.press_spoiler_cycles_per_voxel,
+            self.press_spoiler_duration_ms,
+        ):
+            widget.valueChanged.connect(self._press_changed)
+        self.press_refocusing_pulse_type.currentIndexChanged.connect(
+            self._press_changed
+        )
+        self.press_spoil_after_readout.toggled.connect(self._press_changed)
+        self._connect_three_dimensional_orientation_controls(
+            self.press_read_gradient_axis,
+            self.press_phase_gradient_axis,
+            self.press_partition_gradient_axis,
+            self._press_changed,
+        )
+        for widget in (
             self.flash_read_matrix,
             self.flash_phase_matrix,
             self.flash_read_fov_mm,
@@ -5051,6 +5263,7 @@ class SequenceSimulationWidget(QWidget):
             ("radial_me", self._radial_me_bssfp_changed),
             ("me_bssfp", self._me_bssfp_changed),
             ("slice_selection", self._slice_selection_changed),
+            ("press", self._press_changed),
         ):
             self._connect_shared_rf_controls(prefix, callback)
         for control in (
@@ -5126,6 +5339,7 @@ class SequenceSimulationWidget(QWidget):
         self._update_ss_bssfp_labels()
         self._update_radial_me_bssfp_labels()
         self._update_me_bssfp_labels()
+        self._update_press_labels()
         self._object_source_changed()
         self._refresh_parameter_loop_parameters()
 
@@ -5716,7 +5930,7 @@ class SequenceSimulationWidget(QWidget):
         spsp_plan_button.setObjectName(f"{prefix}_rf_spsp_plan_button")
         spsp_plan_button.setToolTip(
             "List the metabolites in the sample and choose which one to excite"
-            + (" in each step" if prefix == "flash" else "")
+            + (" in each step" if prefix in ("flash", "epi") else "")
             + "; a selective spectral-spatial pulse is designed and checked for "
             "every target automatically"
         )
@@ -5731,7 +5945,8 @@ class SequenceSimulationWidget(QWidget):
         spsp_schedule_button.setObjectName(f"{prefix}_rf_spsp_schedule_button")
         spsp_schedule_button.setToolTip(
             "Create, duplicate, edit, delete, and order several SPSP pulses. "
-            "FLASH applies one schedule step to a complete image frame by default."
+            "FLASH and Cartesian EPI apply one schedule step to a complete "
+            "image frame by default."
         )
         spsp_summary = QLabel("No spectral-spatial pulse designed")
         spsp_summary.setObjectName(f"{prefix}_rf_spsp_summary")
@@ -6023,6 +6238,135 @@ class SequenceSimulationWidget(QWidget):
             bandwidth.setValue(tbw / duration_s)
         bandwidth.blockSignals(previous)
 
+    def _spectral_spatial_schedule_supported(self, prefix):
+        """FLASH and Cartesian EPI cycle an SPSP schedule; others use one pulse."""
+        if prefix == "flash":
+            return True
+        return prefix == "epi" and self.epi_readout_trajectory.currentText() != "Spiral"
+
+    INVERSION_PULSE_CHOICES = (
+        ("Hyperbolic secant", "hyperbolic_secant"),
+        ("Sinc", "sinc"),
+        ("Block", "block"),
+    )
+
+    def _add_inversion_controls(self, form, prefix, changed):
+        """Add the inversion-recovery section of the FLASH or EPI form."""
+        enabled = QCheckBox("Before every repetition")
+        enabled.setToolTip(
+            "Prepend a non-selective 180° inversion, a crusher and a TI delay "
+            "to every repetition. TI runs from the inversion centre to the "
+            "excitation that samples the k-space centre of the first slice"
+        )
+        times = QLineEdit("100, 400, 1000, 2500")
+        times.setToolTip(
+            "Inversion times in ms, separated by commas. Repetitions cycle "
+            "through the list, so set Repetitions to a multiple of its length "
+            "for complete T1 series"
+        )
+        pulse_type = QComboBox()
+        for label, value in self.INVERSION_PULSE_CHOICES:
+            pulse_type.addItem(label, value)
+        pulse_type.setToolTip(
+            "The adiabatic hyperbolic secant inverts robustly across B1 "
+            "inhomogeneity; sinc and block pulses are scaled to 180°"
+        )
+        duration = self._parameter_spin(0.5, 100.0, 10.0, " ms")
+        crusher = self._parameter_spin(0.0, 1000.0, 8.0, " cycles/slice")
+        crusher.setToolTip(
+            "Through-slice crusher after the inversion; its end is an ideal "
+            "spoiler time when ideal spoiling is selected"
+        )
+        info = QLabel()
+        info.setWordWrap(True)
+        for suffix, control in (
+            ("enabled", enabled),
+            ("times_ms", times),
+            ("pulse_type", pulse_type),
+            ("duration_ms", duration),
+            ("crusher_cycles_per_slice", crusher),
+            ("info", info),
+        ):
+            control.setObjectName(f"{prefix}_inversion_{suffix}")
+            setattr(self, f"{prefix}_inversion_{suffix}", control)
+        _add_form_section(form, "Inversion recovery")
+        form.addRow("Inversion", enabled)
+        form.addRow("Inversion times (TI)", times)
+        form.addRow("Inversion pulse", pulse_type)
+        form.addRow("Inversion pulse duration", duration)
+        form.addRow("Inversion crusher", crusher)
+        form.addRow("TI timing", info)
+        enabled.toggled.connect(lambda *_: self._update_inversion_controls(prefix))
+        enabled.toggled.connect(changed)
+        times.editingFinished.connect(changed)
+        pulse_type.currentIndexChanged.connect(changed)
+        duration.valueChanged.connect(changed)
+        crusher.valueChanged.connect(changed)
+        self._update_inversion_controls(prefix)
+
+    def _update_inversion_controls(self, prefix):
+        enabled = getattr(self, f"{prefix}_inversion_enabled")
+        if prefix == "epi":
+            enabled.setEnabled(self.epi_readout_trajectory.currentText() != "Spiral")
+        active = enabled.isEnabled() and enabled.isChecked()
+        for suffix in (
+            "times_ms",
+            "pulse_type",
+            "duration_ms",
+            "crusher_cycles_per_slice",
+        ):
+            getattr(self, f"{prefix}_inversion_{suffix}").setEnabled(active)
+        if not active:
+            getattr(self, f"{prefix}_inversion_info").setText(
+                "Off" if enabled.isEnabled() else "Cartesian EPI readouts only"
+            )
+
+    def _inversion_parameters(self, prefix):
+        """Inversion-recovery builder arguments of the FLASH or EPI form."""
+        enabled = getattr(self, f"{prefix}_inversion_enabled")
+        if not (enabled.isEnabled() and enabled.isChecked()):
+            return {}
+        text = getattr(self, f"{prefix}_inversion_times_ms").text()
+        try:
+            times_ms = [
+                float(value)
+                for value in text.replace(";", ",").split(",")
+                if value.strip()
+            ]
+        except ValueError:
+            raise ValueError(
+                f"Inversion times must be numbers in ms separated by commas, "
+                f"not {text!r}"
+            ) from None
+        if not times_ms:
+            raise ValueError("Enter at least one inversion time")
+        return {
+            "inversion_times_s": tuple(value / 1000.0 for value in times_ms),
+            "inversion_pulse_type": getattr(
+                self, f"{prefix}_inversion_pulse_type"
+            ).currentData(),
+            "inversion_duration_s": (
+                getattr(self, f"{prefix}_inversion_duration_ms").value() / 1000.0
+            ),
+            "inversion_spoiler_cycles_per_slice": getattr(
+                self, f"{prefix}_inversion_crusher_cycles_per_slice"
+            ).value(),
+        }
+
+    def _show_inversion_timing(self, prefix, plan):
+        info = getattr(self, f"{prefix}_inversion_info")
+        minimum = getattr(plan, "minimum_inversion_time_s", None)
+        if minimum is None:
+            return
+        repetitions = getattr(self, f"{prefix}_repetitions").value()
+        count = len(self._inversion_parameters(prefix)["inversion_times_s"])
+        cycles = (
+            f"{repetitions // count} complete series"
+            if repetitions % count == 0
+            else f"{repetitions} repetitions do not complete the {count}-TI cycle"
+        )
+        info.setText(f"Shortest TI {minimum * 1e3:.4g} ms; {cycles}.")
+
     def _shared_rf_parameters(self, prefix):
         pulse_type = self._selected_shared_rf_pulse_type(prefix)
         parameters = {
@@ -6069,7 +6413,10 @@ class SequenceSimulationWidget(QWidget):
                 rf_time_bandwidth_product=(pulse.spatial_time_bandwidth_product),
                 rf_spectral_spatial_pulse=pulse.to_dict(),
             )
-            if prefix == "flash" and self._spectral_spatial_schedule.entries:
+            if (
+                self._spectral_spatial_schedule_supported(prefix)
+                and self._spectral_spatial_schedule.entries
+            ):
                 parameters.update(
                     rf_spectral_spatial_library=(
                         self._spectral_spatial_pulse_library.to_dict()
@@ -7251,6 +7598,7 @@ class SequenceSimulationWidget(QWidget):
         loaders = {
             self.INTERNAL_SOURCE: self._load_internal_sequence,
             self.SLICE_SELECTION_SOURCE: self._load_slice_selection,
+            self.PRESS_SOURCE: self._load_press,
             1: self._load_cartesian_epi,
             2: self._load_csi,
             3: self._load_bssfp,
@@ -7592,6 +7940,9 @@ class SequenceSimulationWidget(QWidget):
             source_index == self.SLICE_SELECTION_SOURCE
         )
         self._update_slice_selection_controls()
+        press_selected = source_index == self.PRESS_SOURCE
+        self.press_group.setVisible(press_selected)
+        self.press_group.setEnabled(press_selected)
         self.acquisition_group.setVisible(epi_selected)
         self.acquisition_group.setEnabled(epi_selected)
         self.epsi_mge_group.setVisible(epsi_mge_selected)
@@ -7654,6 +8005,10 @@ class SequenceSimulationWidget(QWidget):
             self.ME_BSSFP_SOURCE: (
                 self.me_bssfp_read_gradient_axis,
                 self.me_bssfp_phase_gradient_axis,
+            ),
+            self.PRESS_SOURCE: (
+                self.press_read_gradient_axis,
+                self.press_phase_gradient_axis,
             ),
         }
         try:
@@ -7750,6 +8105,8 @@ class SequenceSimulationWidget(QWidget):
                 f"interval {plan.minimum_repetition_time_s * 1e3:.4g} ms."
             )
         )
+        if plan is not None:
+            self._show_inversion_timing("epi", plan)
         self._show_timing_status("EPI", minimum_text, notes, error=error)
 
     def _show_timing_status(self, source, minimum_text, notes, error=None):
@@ -7794,6 +8151,7 @@ class SequenceSimulationWidget(QWidget):
         label = self.acquisition_group.layout().labelForField(self.pixel_bandwidth_info)
         if label is not None:
             label.setVisible(not spiral)
+        self._update_inversion_controls("epi")
         self._acquisition_changed()
 
     def _rf_pulse_type_changed(self, *_):
@@ -7859,6 +8217,7 @@ class SequenceSimulationWidget(QWidget):
                 make_pulseq_epsi_mge,
                 self._epsi_mge_pulseq_parameters,
             ),
+            self.PRESS_SOURCE: (make_pulseq_press, self._press_pulseq_parameters),
         }
         if source not in builders:
             return None
@@ -7868,8 +8227,8 @@ class SequenceSimulationWidget(QWidget):
     def _timing_minimums_ms(self):
         """Shortest feasible value of each timing field, or None.
 
-        Only FLASH, Cartesian EPI and EPSI / MGE have timing-only plans; the
-        limits are rounded up to each field's precision.
+        Only FLASH, Cartesian EPI, EPSI / MGE and PRESS have timing-only
+        plans; the limits are rounded up to each field's precision.
         """
         source = self.sequence_source.currentIndex()
         if source == self.FLASH_SOURCE:
@@ -7902,6 +8261,15 @@ class SequenceSimulationWidget(QWidget):
                     self.epsi_acquisition_interval_ms,
                     plan.minimum_acquisition_interval_s,
                 ),
+            ]
+        elif source == self.PRESS_SOURCE:
+            plan = make_pulseq_press(
+                **self._press_pulseq_parameters(), timing_only=True
+            )
+            limits = [
+                (self.press_first_echo_time_ms, plan.minimum_first_echo_time_s),
+                (self.press_echo_time_ms, plan.minimum_echo_time_s),
+                (self.press_repetition_time_ms, plan.minimum_repetition_time_s),
             ]
         else:
             return None
@@ -8068,6 +8436,43 @@ class SequenceSimulationWidget(QWidget):
         if self.sequence_source.currentIndex() == 2:
             self._request_generated_sequence_refresh()
 
+    def _press_changed(self, *_):
+        self._update_press_labels()
+        self._update_spoiling_quality()
+        if self.sequence_source.currentIndex() == self.PRESS_SOURCE:
+            self._request_generated_sequence_refresh()
+
+    def _update_press_labels(self):
+        pulse_type = self.press_refocusing_pulse_type.currentData()
+        self.press_refocusing_tbw.setEnabled(pulse_type != "block")
+        self.press_refocusing_apodization.setEnabled(pulse_type == "sinc")
+        spoiler = self.press_spoil_after_readout.isChecked()
+        self.press_spoiler_cycles_per_voxel.setEnabled(spoiler)
+        self.press_spoiler_duration_ms.setEnabled(spoiler)
+        try:
+            plan = make_pulseq_press(
+                **self._press_pulseq_parameters(), timing_only=True
+            )
+        except Exception as exc:
+            self.press_timing_info.setText(f"Timing cannot be resolved: {exc}")
+            self.press_dwell_info.setText("")
+            self.press_resolution_info.setText("")
+            return
+        self.press_timing_info.setText(
+            f"TE1 {plan.minimum_first_echo_time_s * 1e3:.4g} ms, "
+            f"TE {plan.minimum_echo_time_s * 1e3:.4g} ms, "
+            f"TR {plan.minimum_repetition_time_s * 1e3:.4g} ms"
+        )
+        points = self.press_spectral_points.value()
+        self.press_dwell_info.setText(
+            f"{plan.dwell_s * 1e6:.6g} µs; actual bandwidth "
+            f"{plan.spectral_bandwidth_hz:.6g} Hz; FID "
+            f"{points * plan.dwell_s * 1e3:.6g} ms"
+        )
+        self.press_resolution_info.setText(
+            f"{plan.spectral_bandwidth_hz / points:.6g} Hz"
+        )
+
     def _flash_changed(self, *_):
         flash_selected = self.sequence_source.currentIndex() == self.FLASH_SOURCE
         if flash_selected:
@@ -8154,6 +8559,8 @@ class SequenceSimulationWidget(QWidget):
                 f"TR {plan.minimum_repetition_time_s * 1e3:.4g} ms."
             )
         )
+        if plan is not None:
+            self._show_inversion_timing("flash", plan)
         self._show_timing_status("FLASH", minimum_text, notes, error=error)
 
     def _flash_auto_spoiler_toggled(self, enabled):
@@ -9262,6 +9669,13 @@ class SequenceSimulationWidget(QWidget):
                 "RF + Slice Selection has no spoiler. Inspect the local "
                 "magnetization under Spatial Magnetization."
             )
+        elif source_index == self.PRESS_SOURCE:
+            self._set_spoiling_quality_unavailable(
+                "PRESS crushers bracket each refocusing pulse and dephase "
+                "signal from outside the voxel across its isochromats; a single "
+                "isochromat keeps its magnitude. The end spoiler is applied "
+                "after each FID when enabled."
+            )
         elif source_index == self.INTERNAL_SOURCE:
             self._set_spoiling_quality_unavailable(
                 "Internal FID has no gradient spoiler (0 cycles/voxel). Expected "
@@ -9378,6 +9792,7 @@ class SequenceSimulationWidget(QWidget):
             "radial_me",
             "me_bssfp",
             "slice_selection",
+            "press",
         ):
             if not hasattr(self, f"{prefix}_rf_pulse_type"):
                 continue
@@ -9918,6 +10333,20 @@ class SequenceSimulationWidget(QWidget):
                 "slice_offset_m": self.slice_selection_offset_mm.value() / 1000.0,
                 "slice_axis": self.slice_selection_axis.currentText().lower(),
             }
+        if source_index == self.PRESS_SOURCE:
+            return {
+                "voxel_size_m": tuple(
+                    getattr(self, f"press_{role}_size_mm").value() / 1000.0
+                    for role in OFFSET_ROLES
+                ),
+                "voxel_offset_m": tuple(
+                    getattr(self, f"press_{role}_offset_mm").value() / 1000.0
+                    for role in OFFSET_ROLES
+                ),
+                "encoding_axes": self._three_dimensional_encoding_frame(
+                    source_index
+                ).axis_codes,
+            }
         if source_index == self.RADIAL_ME_BSSFP_SOURCE:
             return {
                 "fov_m": self.radial_me_fov_mm.value() / 1000.0,
@@ -10048,6 +10477,7 @@ class SequenceSimulationWidget(QWidget):
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
         parameters.update(self._epi_rf_parameters())
+        parameters.update(self._inversion_parameters("epi"))
         return parameters
 
     def _spiral_pulseq_parameters(self):
@@ -10122,6 +10552,34 @@ class SequenceSimulationWidget(QWidget):
         parameters.update(self._shared_rf_parameters("csi"))
         return parameters
 
+    def _press_pulseq_parameters(self):
+        first_echo_ms = self.press_first_echo_time_ms.value()
+        parameters = {
+            **self._sequence_geometry_parameters(self.PRESS_SOURCE),
+            "spectral_bandwidth_hz": self.press_bandwidth_hz.value(),
+            "spectral_points": self.press_spectral_points.value(),
+            "echo_time_s": self.press_echo_time_ms.value() / 1000.0,
+            # Zero shows as "TE / 2", the builder default.
+            "first_echo_time_s": first_echo_ms / 1000.0 if first_echo_ms else None,
+            "repetition_time_s": self.press_repetition_time_ms.value() / 1000.0,
+            "repetitions": self.press_repetitions.value(),
+            "flip_angle_deg": self.press_flip_angle_deg.value(),
+            "refocusing_flip_angle_deg": (self.press_refocusing_flip_angle_deg.value()),
+            "refocusing_pulse_type": self.press_refocusing_pulse_type.currentData(),
+            "refocusing_duration_s": self.press_refocusing_duration_ms.value() / 1000.0,
+            "refocusing_time_bandwidth_product": self.press_refocusing_tbw.value(),
+            "refocusing_apodization": self.press_refocusing_apodization.value(),
+            "crusher_cycles_per_voxel": self.press_crusher_cycles_per_voxel.value(),
+            "crusher_duration_s": self.press_crusher_duration_ms.value() / 1000.0,
+            "spoil_after_readout": self.press_spoil_after_readout.isChecked(),
+            "spoiler_cycles_per_voxel": self.press_spoiler_cycles_per_voxel.value(),
+            "spoiler_duration_s": self.press_spoiler_duration_ms.value() / 1000.0,
+            "nucleus": self.nucleus.currentText(),
+            "scanner_parameters": self.scanner_parameters.to_dict(),
+        }
+        parameters.update(self._shared_rf_parameters("press"))
+        return parameters
+
     def _flash_pulseq_parameters(self):
         ernst = self._update_ernst_controls(
             "flash", self.flash_repetition_time_ms.value()
@@ -10151,6 +10609,7 @@ class SequenceSimulationWidget(QWidget):
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
         parameters.update(self._shared_rf_parameters("flash"))
+        parameters.update(self._inversion_parameters("flash"))
         return parameters
 
     def _bssfp_pulseq_parameters(self):
@@ -10393,6 +10852,8 @@ class SequenceSimulationWidget(QWidget):
                 self._epsi_mge_pulseq_parameters(),
                 "epsi_mge_2d.seq",
             )
+        if source_index == self.PRESS_SOURCE:
+            return "press", self._press_pulseq_parameters(), "press_svs.seq"
         raise ValueError("Select a generated sequence")
 
     def _slice_selection_changed(self, *_):
@@ -10551,6 +11012,21 @@ class SequenceSimulationWidget(QWidget):
             self.spiral_acquisition = None
             self.spectroscopic_acquisition = None
             self._generation_error = f"Invalid CSI sequence: {exc}"
+            return False
+
+    def _load_press(self):
+        try:
+            sequence = make_pulseq_press(**self._press_pulseq_parameters())
+            self._set_generated_pulseq_sequence(sequence, "internal-press")
+            return True
+        except Exception as exc:
+            self._generated_pulseq_sequence = None
+            self.program = None
+            self._acquisition_compiled = None
+            self.acquisition = None
+            self.spiral_acquisition = None
+            self.spectroscopic_acquisition = None
+            self._generation_error = f"Invalid PRESS sequence: {exc}"
             return False
 
     def _load_epsi_mge(self):
@@ -11190,6 +11666,8 @@ class SequenceSimulationWidget(QWidget):
             "spiral": make_pulseq_spiral,
             "csi": make_pulseq_csi,
             "flash": make_pulseq_flash,
+            "slice_selection": make_pulseq_slice_selection,
+            "press": make_pulseq_press,
             "bssfp_3d": make_pulseq_bssfp,
             "spectral_bssfp_3d": make_pulseq_spectral_selective_bssfp,
             "me_bssfp_3d": make_pulseq_me_bssfp,
@@ -12056,6 +12534,19 @@ class SequenceSimulationWidget(QWidget):
                 name=name,
             )
         frame = resolve_encoding_frame(parameters["encoding_axes"]).matrix
+        if source_index == self.PRESS_SOURCE:
+            # The voxel is the in-plane FOV of a 1x1 grid on its partition slab.
+            read, phase, partition = parameters["voxel_size_m"]
+            read_offset, phase_offset, slice_offset = parameters["voxel_offset_m"]
+            return SequenceGeometry(
+                frame=frame,
+                fov_m=(read, phase),
+                matrix=(1, 1),
+                slice_positions_m=(slice_offset,),
+                slice_thickness_m=partition,
+                name=name,
+                in_plane_center_m=(read_offset, phase_offset),
+            )
         if source_index == self.RADIAL_ME_BSSFP_SOURCE:
             samples = parameters["base_resolution"] * parameters["readout_oversampling"]
             return SequenceGeometry(
@@ -13765,6 +14256,7 @@ class SequenceSimulationWidget(QWidget):
             "radial_me",
             "me_bssfp",
             "slice_selection",
+            "press",
         ):
             if hasattr(self, f"{prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(prefix)

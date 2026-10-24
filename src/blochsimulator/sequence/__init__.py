@@ -68,6 +68,19 @@ from .model import (
     physical_b1_field_arrays,
     physical_sequence_waveforms,
 )
+from .compressed_sensing import (
+    CS_REFERENCE_DOI,
+    PRIMAL_DUAL_REFERENCE_DOI,
+    CompressedSensingResult,
+    HaarWavelet,
+    expand_phase_mask,
+    kt_variable_density_mask,
+    mask_point_spread_function,
+    normalized_rmse,
+    reconstruct_compressed_sensing,
+    variable_density_mask,
+    zero_filled_reconstruction,
+)
 from .encoding import EncodingFrame, resolve_encoding_frame
 from .flip_angles import (
     VFA_REFERENCE_DOI,
@@ -75,6 +88,12 @@ from .flip_angles import (
     variable_flip_angle_schedule,
 )
 from .probe import SequenceProbeResult
+from .relaxometry import (
+    IR_T1_FIT_REFERENCE_DOI,
+    InversionRecoveryFit,
+    fit_inversion_recovery_t1,
+    inversion_recovery_signal,
+)
 from .reference import ReferenceSimulationResult, simulate_reference_sequence
 from .result import SequenceSimulationResult
 from .spin_sampling import SpinSampling
@@ -161,6 +180,9 @@ from .pulseq import (
     load_pulseq,
 )
 from .pulseq_builders import (
+    INVERSION_PULSE_TYPES,
+    PRESS_REFOCUSING_PULSE_TYPES,
+    PressTimingPlan,
     make_pulseq_bssfp,
     make_pulseq_csi,
     EpiTimingPlan,
@@ -169,6 +191,7 @@ from .pulseq_builders import (
     make_pulseq_epsi_mge,
     make_pulseq_epi,
     make_pulseq_flash,
+    make_pulseq_press,
     make_pulseq_slice_selection,
     make_pulseq_spiral,
 )
@@ -320,11 +343,30 @@ __all__ = [
     "make_pulseq_bssfp",
     "make_pulseq_csi",
     "EpiTimingPlan",
+    "INVERSION_PULSE_TYPES",
+    "IR_T1_FIT_REFERENCE_DOI",
+    "InversionRecoveryFit",
+    "fit_inversion_recovery_t1",
+    "inversion_recovery_signal",
+    "CS_REFERENCE_DOI",
+    "PRIMAL_DUAL_REFERENCE_DOI",
+    "CompressedSensingResult",
+    "HaarWavelet",
+    "expand_phase_mask",
+    "kt_variable_density_mask",
+    "mask_point_spread_function",
+    "normalized_rmse",
+    "reconstruct_compressed_sensing",
+    "variable_density_mask",
+    "zero_filled_reconstruction",
     "EpsiMgeTimingPlan",
     "FlashTimingPlan",
     "make_pulseq_epsi_mge",
     "make_pulseq_epi",
     "make_pulseq_flash",
+    "PRESS_REFOCUSING_PULSE_TYPES",
+    "PressTimingPlan",
+    "make_pulseq_press",
     "make_pulseq_me_bssfp",
     "make_pulseq_radial_me_bssfp",
     "make_pulseq_spectral_selective_bssfp",
