@@ -8,7 +8,8 @@
  * buffers, so the signal does not depend on the thread count.
  *
  * Pool 0 is the precursor (pyruvate); every other pool is a product fed by a
- * per-spin precursor-to-product rate. Inflow either follows global source
+ * per-spin precursor-to-product rate. Contrast agents add per-spin,
+ * piecewise-constant relaxation rates to pool 0. Inflow either follows global source
  * rows or, with per-spin arrival delays, delayed time curves evaluated per
  * spin from the plan's interval times.
  */
@@ -119,6 +120,19 @@ typedef struct {
     /* (n_washout, 2, compartments, npools, 2): per half step, compartment
      * and pool the magnetization and concentration gains. */
     const double *washout_table;
+
+    /* Contrast relaxation (ContrastRelaxation in dynamic_phantom.py). Spins
+     * of a relaxation compartment add the rate increments of their
+     * compartment to pool 0: dR1 to the longitudinal rate and dR2 to the
+     * transverse rate. The increments are constant over an interval and
+     * selected by the group's row, so the row is part of the group key. The
+     * compartment map is NULL without contrast. */
+    const int32_t *relaxation_compartment; /* (nspins,), -1 outside */
+    int32_t relaxation_compartments;
+    const int32_t *group_relaxation;       /* (n_groups,) row or -1 */
+    int32_t n_relaxation;
+    /* (n_relaxation, compartments, 2): dR1, dR2 in 1/s. */
+    const double *relaxation_table;
 
     /* Boundary actions at state index interval + 1 (CSR layout). */
     int64_t n_actions;

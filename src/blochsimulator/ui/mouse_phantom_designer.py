@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from ..mouse_dce import CONTRAST_AGENTS, TOFTS_TISSUE_NAMES
 from ..mouse_phantom import (
     INJECTION_COMPOUNDS,
     MOUSE_TISSUE_COLORS,
@@ -35,6 +36,7 @@ from ..mouse_phantom import (
     MousePerfusionConfig,
     MousePerfusionPhantom,
     build_reference_mouse_anatomy,
+    uses_tissue_water,
 )
 from ..units import (
     NUCLEUS_GAMMA_HZ_PER_T,
@@ -634,6 +636,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         compound_form.addRow("Polarization", self.injection_polarization)
         compound_form.addRow("", self.injection_polarization_thermal)
         injection_controls_layout.addWidget(compound_group)
+        self._build_contrast_group(injection_controls_layout)
 
         relaxation_group = QGroupBox("Hyperpolarized relaxation")
         relaxation_grid = QGridLayout(relaxation_group)
@@ -1035,11 +1038,137 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         action_row.addWidget(self.buttons)
         root.addLayout(action_row)
 
+    def _build_contrast_group(self, layout):
+        """Add the gadolinium DCE controls of the 1H contrast-agent mouse."""
+
+        self.contrast_group = QGroupBox("Contrast agent kinetics (1H DCE)")
+        self.contrast_group.setToolTip(
+            "A three-compartment plasma model (central and systemic plasma, "
+            "interstitial fluid, glomerular filtration) gives the arterial "
+            "input; every tissue follows the extended Tofts model and the "
+            "kidneys fill the ureters and bladder. Fast water exchange sets "
+            "R1 + r1·C and R2 + r2·C of each tissue water pool."
+        )
+        form = self._group_form(self.contrast_group)
+        self.contrast_agent = QComboBox()
+        for key, (label, _, _) in CONTRAST_AGENTS.items():
+            self.contrast_agent.addItem(label, key)
+        self.contrast_agent.currentIndexChanged.connect(self._contrast_agent_changed)
+        self.contrast_r1 = self._float_spin(
+            0.0, 1000.0, decimals=3, suffix=" mM⁻¹s⁻¹", step=0.1
+        )
+        self.contrast_r2 = self._float_spin(
+            0.0, 1000.0, decimals=3, suffix=" mM⁻¹s⁻¹", step=0.1
+        )
+        self.contrast_r1.setToolTip("Longitudinal relaxivity in plasma at 7 T.")
+        self.contrast_r2.setToolTip("Transverse relaxivity in plasma at 7 T.")
+        self.body_mass = self._float_spin(
+            1.0, 1000.0, decimals=1, suffix=" g", step=1.0
+        )
+        self.body_mass.setToolTip(
+            "Scales plasma (72 µl/g blood) and interstitial (200 µl/g) volumes "
+            "and the dose per body weight."
+        )
+        self.hematocrit = self._float_spin(0.0, 0.95, decimals=3, step=0.01)
+        self.cardiac_output = self._float_spin(
+            0.01, 10000.0, decimals=2, suffix=" ml/min", step=1.0
+        )
+        self.gfr = self._float_spin(
+            0.0, 1000.0, decimals=3, suffix=" ml/min", step=0.05
+        )
+        self.gfr.setToolTip(
+            "Glomerular filtration rate of both kidneys; a mouse filters "
+            "roughly 0.2–0.3 ml/min."
+        )
+        self.capillary_ps = self._float_spin(
+            0.0, 1000.0, decimals=3, suffix=" ml/min", step=0.1
+        )
+        self.capillary_ps.setToolTip(
+            "Whole-body permeability-surface product between plasma and "
+            "interstitial fluid; sets how fast the plasma curve equilibrates."
+        )
+        self.contrast_horizon = self._float_spin(
+            1.0, 100000.0, decimals=1, suffix=" s", step=60.0
+        )
+        self.contrast_horizon.setToolTip(
+            "Kinetics are computed up to this time after the injection start "
+            "and held constant afterwards."
+        )
+        self.contrast_step = self._float_spin(
+            0.001, 100.0, decimals=3, suffix=" s", step=0.1
+        )
+        self.contrast_step.setToolTip(
+            "The Bloch solver holds the relaxation rates constant over epochs "
+            "of this length, so RF propagators are reused within an epoch."
+        )
+        relaxivity = QWidget()
+        relaxivity_layout = QHBoxLayout(relaxivity)
+        relaxivity_layout.setContentsMargins(0, 0, 0, 0)
+        relaxivity_layout.addWidget(QLabel("r1"))
+        relaxivity_layout.addWidget(self.contrast_r1, 1)
+        relaxivity_layout.addWidget(QLabel("r2"))
+        relaxivity_layout.addWidget(self.contrast_r2, 1)
+        form.addRow("Agent", self.contrast_agent)
+        form.addRow("Relaxivity", relaxivity)
+        form.addRow("Body mass", self.body_mass)
+        form.addRow("Hematocrit", self.hematocrit)
+        form.addRow("Cardiac output", self.cardiac_output)
+        form.addRow("GFR", self.gfr)
+        form.addRow("Capillary PS", self.capillary_ps)
+        form.addRow("Kinetics horizon", self.contrast_horizon)
+        form.addRow("Solver epoch", self.contrast_step)
+        tofts = QWidget()
+        tofts_grid = QGridLayout(tofts)
+        tofts_grid.setContentsMargins(0, 0, 0, 0)
+        for column, header in enumerate(("Ktrans (min⁻¹)", "ve", "vp"), start=1):
+            label = QLabel(header)
+            label.setAlignment(Qt.AlignCenter)
+            tofts_grid.addWidget(label, 0, column)
+            tofts_grid.setColumnStretch(column, 1)
+        self.tofts_spins = {}
+        for row, (key, name) in enumerate(TOFTS_TISSUE_NAMES.items(), start=1):
+            tofts_grid.addWidget(QLabel(name), row, 0)
+            spins = (
+                self._float_spin(0.0, 100.0, decimals=3, step=0.05),
+                self._float_spin(0.0, 1.0, decimals=3, step=0.01),
+                self._float_spin(0.0, 1.0, decimals=3, step=0.01),
+            )
+            for column, spin in enumerate(spins, start=1):
+                tofts_grid.addWidget(spin, row, column)
+            self.tofts_spins[key] = spins
+        form.addRow(tofts)
+        layout.addWidget(self.contrast_group)
+
+    def _contrast_agent_changed(self, *_):
+        _, r1, r2 = CONTRAST_AGENTS[str(self.contrast_agent.currentData())]
+        preset = r1 is not None
+        if preset:
+            self.contrast_r1.setValue(r1)
+            self.contrast_r2.setValue(r2)
+        self.contrast_r1.setEnabled(not preset)
+        self.contrast_r2.setEnabled(not preset)
+
+    def _contrast_controls(self):
+        return [
+            self.contrast_r1,
+            self.contrast_r2,
+            self.body_mass,
+            self.hematocrit,
+            self.cardiac_output,
+            self.gfr,
+            self.capillary_ps,
+            self.contrast_horizon,
+            self.contrast_step,
+            *(spin for spins in self.tofts_spins.values() for spin in spins),
+        ]
+
     def _connect_live_preview_controls(self):
         """Debounce expensive phantom rebuilds while configuration is edited."""
 
         self.name_edit.textChanged.connect(self._schedule_live_preview)
         self.injection_compound.currentIndexChanged.connect(self._schedule_live_preview)
+        self.contrast_agent.currentIndexChanged.connect(self._schedule_live_preview)
+        self.body_mass.valueChanged.connect(self._update_dose_label)
         self.transverse_decay.currentIndexChanged.connect(self._schedule_live_preview)
         self.injection_concentration.valueChanged.connect(self._update_dose_label)
         self.injection_volume.valueChanged.connect(self._update_dose_label)
@@ -1083,6 +1212,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             self.breathing_rate,
             self.breathing_amplitude,
             self.breathing_phase,
+            *self._contrast_controls(),
         ]
         for control in controls:
             control.valueChanged.connect(self._schedule_live_preview)
@@ -1178,6 +1308,24 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.breathing_rate.setValue(config.breathing_rate_hz)
         self.breathing_amplitude.setValue(config.breathing_amplitude_mm)
         self.breathing_phase.setValue(config.breathing_phase_rad)
+        self.contrast_agent.blockSignals(True)
+        self.contrast_agent.setCurrentIndex(
+            max(0, self.contrast_agent.findData(config.contrast_agent))
+        )
+        self.contrast_agent.blockSignals(False)
+        self.contrast_r1.setValue(config.contrast_r1_mm_s_inv)
+        self.contrast_r2.setValue(config.contrast_r2_mm_s_inv)
+        self._contrast_agent_changed()
+        self.body_mass.setValue(config.body_mass_g)
+        self.hematocrit.setValue(config.hematocrit)
+        self.cardiac_output.setValue(config.cardiac_output_ml_min)
+        self.gfr.setValue(config.gfr_ml_min)
+        self.capillary_ps.setValue(config.capillary_ps_ml_min)
+        self.contrast_horizon.setValue(config.contrast_horizon_s)
+        self.contrast_step.setValue(config.contrast_step_s)
+        for key, spins in self.tofts_spins.items():
+            for spin, value in zip(spins, config.dce_tofts_parameters[key]):
+                spin.setValue(value)
         self.animation_time.setValue(
             config.injection_start_s - 0.1 * config.injection_duration_s
         )
@@ -1190,6 +1338,12 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             self.injection_concentration.value() * self.injection_volume.value() * 1e-3
         )
         polarized_umol = dose_umol * self.injection_polarization.value() / 100.0
+        if self._dce_selected():
+            self.injection_dose_label.setText(
+                f"{dose_umol:.4g} µmol ({dose_umol / self.body_mass.value():.4g} "
+                "mmol/kg)"
+            )
+            return
         self.injection_dose_label.setText(
             f"{dose_umol:.4g} µmol ({polarized_umol:.4g} µmol fully polarized "
             "equivalent)"
@@ -1257,6 +1411,20 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             breathing_rate_hz=self.breathing_rate.value(),
             breathing_amplitude_mm=self.breathing_amplitude.value(),
             breathing_phase_rad=self.breathing_phase.value(),
+            contrast_agent=str(self.contrast_agent.currentData()),
+            contrast_r1_mm_s_inv=self.contrast_r1.value(),
+            contrast_r2_mm_s_inv=self.contrast_r2.value(),
+            body_mass_g=self.body_mass.value(),
+            hematocrit=self.hematocrit.value(),
+            cardiac_output_ml_min=self.cardiac_output.value(),
+            gfr_ml_min=self.gfr.value(),
+            capillary_ps_ml_min=self.capillary_ps.value(),
+            contrast_horizon_s=self.contrast_horizon.value(),
+            contrast_step_s=self.contrast_step.value(),
+            dce_tofts_parameters={
+                key: tuple(spin.value() for spin in spins)
+                for key, spins in self.tofts_spins.items()
+            },
         )
         result = MousePerfusionConfig.from_dict(values)
         result.validate()
@@ -1370,10 +1538,14 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             f"{len(phantom.vascular_graph.edges)} major-vessel segments · "
             f"integrated source {delivered_mol * 1e6:.6g} µmol"
             + (
-                " · 1H images tissue water (7 T relaxation); the injection is "
-                "a preview only"
-                if phantom.pyruvate_inflow is None
-                else ""
+                " · 1H tissue water with gadolinium DCE relaxation"
+                if phantom.contrast_relaxation is not None
+                else (
+                    " · 1H images tissue water (7 T relaxation); the injection is "
+                    "a preview only"
+                    if phantom.pyruvate_inflow is None
+                    else ""
+                )
             )
         )
 
@@ -1396,11 +1568,16 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
                 "pH compartment while C1 stays nearly fixed."
             ),
             "contrast_agent": (
-                "Generic contrast agent animates tracer delivery and clearance. "
-                "Agent-specific T1/T2 relaxivity is not inferred automatically."
+                "With a 1H workspace the contrast agent is a gadolinium DCE "
+                "bolus: its plasma, Tofts tissue and urinary concentrations "
+                "shorten T1 and T2 of the tissue water in the Bloch solver. "
+                "With other nuclei it only animates tracer delivery and "
+                "clearance."
             ),
         }
         self.compound_help.setText(messages.get(key, ""))
+        self.contrast_group.setVisible(self._dce_selected())
+        self._update_dose_label()
         enabled = key == "pyruvate"
         self.relaxation_row_labels["metabolite"].setEnabled(enabled)
         for spin in self.relaxation_spins["metabolite"]:
@@ -1415,6 +1592,12 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             self.brain_kpa,
         ):
             spin.setEnabled(enabled)
+
+    def _dce_selected(self) -> bool:
+        return (
+            uses_tissue_water(self.config.nucleus)
+            and self.injection_compound.currentData() == "contrast_agent"
+        )
 
     def _anatomy_resolution_changed(self, *_):
         if self.phantom is None:

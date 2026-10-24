@@ -356,6 +356,7 @@ def test_kernel_capabilities_report_spin_major_extensions():
     assert native.details["spin_major_spatial_inflow"]
     assert native.details["spin_major_rf_cache_multi_pool"]
     assert native.details["spin_major_rf_cache_phase"]
+    assert native.details["spin_major_contrast_relaxation"]
 
 
 def _with_washout(phantom, sources=True):
