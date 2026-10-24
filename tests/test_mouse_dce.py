@@ -2,6 +2,8 @@
 
 import copy
 from dataclasses import replace
+import json
+import zipfile
 
 import numpy as np
 import pytest
@@ -19,6 +21,7 @@ from blochsimulator.mouse_phantom import (
     MousePerfusionConfig,
     MousePerfusionPhantom,
 )
+from blochsimulator.project_io import load_project, save_project
 from blochsimulator.sequence import ADCEvent, RFEvent, SequenceProgram
 from blochsimulator.units import relative_polarization_to_percent
 
@@ -227,6 +230,69 @@ def test_dce_mouse_spin_major_matches_reference_across_epochs():
     assert np.mean(np.abs(native.signal[late])) > 1.05 * np.mean(
         np.abs(baseline.signal[late])
     )
+
+
+@pytest.mark.parametrize(
+    "dce, kernel",
+    [(True, "native_serial"), (True, "reference"), (False, "native_serial")],
+)
+def test_per_pool_passes_name_every_pool(dce, kernel):
+    # Each pass simulates a two-pool phantom; the merged result must still
+    # describe all pools, or its reconstruction dataset cannot be built.
+    pytest.importorskip("blochsimulator.dynamic_spin_major_cy")
+    config = _dce_config() if dce else MousePerfusionConfig(shape=SMALL, nucleus="H1")
+    phantom = config.build()
+    program = _spgr(4)
+    result = _run(phantom, program, kernel)
+    names = tuple(pool.name for pool in phantom.pools)
+    assert len(result.metadata["independent_pool_passes"]) > 1
+    assert result.pool_names == names
+    assert tuple(result.metadata["pool_names"]) == names
+    assert len(result.metadata["pool_frequency_offsets_hz"]) == len(names)
+    dataset = result.to_xarray()
+    assert tuple(dataset.coords["pool"].values) == names
+    assert dataset["species_signal"].sizes["pool"] == len(names)
+    if not dce:
+        # The reference kernel runs the phantom in one pass.
+        single = _run(phantom, program, "reference")
+        assert "independent_pool_passes" not in single.metadata
+        assert result.metadata["pool_frequency_offsets_hz"] == pytest.approx(
+            single.metadata["pool_frequency_offsets_hz"]
+        )
+
+
+def test_project_load_names_every_pool_of_a_legacy_merged_result(tmp_path):
+    phantom = _dce_config().build()
+    result = _run(phantom, _spgr(4), "reference")
+    path = tmp_path / "dce.blochproj"
+    save_project(
+        path,
+        {"workspace_mode": "sequence"},
+        phantom=phantom,
+        sequence_result=result,
+    )
+    # Reproduce results saved before the merge named every pool: the first
+    # two-pool pass' names next to the data of all pools.
+    legacy = tmp_path / "legacy.blochproj"
+    with zipfile.ZipFile(path) as source, zipfile.ZipFile(legacy, "w") as target:
+        for item in source.infolist():
+            data = source.read(item)
+            if item.filename == "manifest.json":
+                manifest = json.loads(data)
+                value = manifest["sequence_result"]["value"]
+                first_pass = {"$tuple": list(result.pool_names[:2])}
+                value["pool_names"] = first_pass
+                value["metadata"]["pool_names"] = first_pass
+                value["metadata"]["pool_frequency_offsets_hz"] = {"$tuple": [0.0, 0.0]}
+                data = json.dumps(manifest)
+            target.writestr(item, data)
+
+    loaded = load_project(legacy)["sequence_result"]
+    assert loaded.pool_names == result.pool_names
+    assert loaded.metadata["pool_frequency_offsets_hz"] == pytest.approx(
+        result.metadata["pool_frequency_offsets_hz"]
+    )
+    assert loaded.to_xarray().sizes["pool"] == len(result.pool_names)
 
 
 def test_spgr_steady_state_matches_the_analytic_signal_with_contrast():

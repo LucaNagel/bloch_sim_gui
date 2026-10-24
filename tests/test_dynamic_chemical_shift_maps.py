@@ -124,6 +124,9 @@ def test_colabelled_pool_matches_standalone_precursor():
     combined = _run(phantom)
     assert combined.metadata["colabelled_pools"] == ["C1"]
     assert np.max(np.abs(combined.species_signal[2])) > 0
+    # The superposed passes keep the names of every pool.
+    assert combined.pool_names == tuple(pool.name for pool in phantom.pools)
+    assert combined.to_xarray().sizes["pool"] == phantom.n_species
 
     standalone = _phantom()
     standalone.pools = (standalone.pools[2], standalone.pools[0], standalone.pools[1])
