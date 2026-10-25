@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from scipy.ndimage import zoom
-from PyQt5.QtCore import QPointF, QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QImage, QPainter, QPen
 from PyQt5.QtWidgets import (
     QCheckBox,
@@ -34,11 +34,35 @@ from PyQt5.QtWidgets import (
 
 from ..sequence.reconstruction import SequenceReconstructionModel
 from .colormaps import COLORMAP_NAMES, colormap
+from .reconstruction_phantom import (
+    VOLUME_PLANES,
+    contour_rgba,
+    grid_description,
+    legend_html,
+    planar_image_grid,
+    resample_phantom,
+    resampled_rgba,
+    volume_display,
+    volume_image_grid,
+    volume_section_grid,
+    voxel_composition,
+)
+from .sequence_geometry_viewer import (
+    AXES,
+    SEQUENCE_COLOR,
+    VIEW_PLANES,
+    automatic_contrast,
+    object_contrasts,
+    object_sections,
+    projected_outline_mm,
+)
 from .volume_viewer import VolumeViewerWidget
 from .widgets import IMAGE_CANVAS_BACKGROUND, style_image_item
 
 
 _IMAGE_INTERPOLATION_FACTOR = 8
+_PHANTOM_CACHE_SIZE = 48
+_VOXEL_COLOR = (255, 0, 255)
 
 
 def _colormap(name: str):
@@ -275,6 +299,19 @@ class _SelectableImagePanel(QWidget):
         self.plot.autoRange()
         self.info.setText(f"{description}; shape={data.shape}")
 
+    def set_rgba(self, rgba, shape, description: str):
+        """Show colours mapped elsewhere on the pixel grid ``shape``."""
+        self._shape = (int(shape[0]), int(shape[1]))
+        self.image.setLookupTable(None)
+        self.image.setImage(
+            np.transpose(np.asarray(rgba), (1, 0, 2)),
+            autoLevels=False,
+            levels=(0, 255),
+        )
+        self.image.setRect(0.0, 0.0, float(shape[1]), float(shape[0]))
+        self.plot.autoRange()
+        self.info.setText(description)
+
     def set_selected_pixel(self, x: int, y: int):
         if self._shape == (0, 0):
             self.marker_halo.clear()
@@ -295,6 +332,87 @@ class _SelectableImagePanel(QWidget):
         x, y = int(np.floor(point.x())), int(np.floor(point.y()))
         if 0 <= y < self._shape[0] and 0 <= x < self._shape[1]:
             self.pixel_selected.emit(x, y)
+
+
+class _PhantomOverview(QWidget):
+    """Phantom sections through the selected voxel with FOV and voxel outlines."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.canvas = pg.GraphicsLayoutWidget()
+        self.canvas.setBackground(IMAGE_CANVAS_BACKGROUND)
+        self.canvas.setFixedHeight(150)
+        self.canvas.setToolTip(
+            "Phantom sections through the selected voxel centre. Orange outlines "
+            "the imaged field of view (and slab), magenta the selected voxel."
+        )
+        self.plots = []
+        self.images = []
+        self.fov_outlines = []
+        self.voxel_outlines = []
+        for horizontal, vertical in VIEW_PLANES:
+            plot = self.canvas.addPlot(
+                title=f"{AXES[horizontal].upper()}–{AXES[vertical].upper()}"
+            )
+            plot.setAspectLocked(True)
+            plot.hideAxis("left")
+            plot.hideAxis("bottom")
+            plot.setMenuEnabled(False)
+            plot.setMouseEnabled(False, False)
+            plot.hideButtons()
+            image = pg.ImageItem(axisOrder="col-major")
+            plot.addItem(image)
+            fov = pg.PlotDataItem(pen=pg.mkPen(SEQUENCE_COLOR, width=1.5))
+            voxel = pg.PlotDataItem(pen=pg.mkPen(*_VOXEL_COLOR, width=2))
+            fov.setZValue(10)
+            voxel.setZValue(11)
+            plot.addItem(fov)
+            plot.addItem(voxel)
+            self.plots.append(plot)
+            self.images.append(image)
+            self.fov_outlines.append(fov)
+            self.voxel_outlines.append(voxel)
+        layout.addWidget(self.canvas)
+
+    def clear(self):
+        for image, fov, voxel in zip(
+            self.images, self.fov_outlines, self.voxel_outlines
+        ):
+            image.clear()
+            fov.setData([], [])
+            voxel.setData([], [])
+
+    def set_view(self, phantom, contrast, image_box, voxel_box):
+        sections, _shown_range = object_sections(phantom, contrast, voxel_box.center_m)
+        for plot, image, fov, voxel, (rgba, rect), plane in zip(
+            self.plots,
+            self.images,
+            self.fov_outlines,
+            self.voxel_outlines,
+            sections,
+            VIEW_PLANES,
+        ):
+            image.setImage(rgba, levels=(0, 255), autoLevels=False)
+            image.setRect(rect)
+            outline = projected_outline_mm(image_box, plane)
+            fov.setData(outline[:, 0], outline[:, 1])
+            marker = projected_outline_mm(voxel_box, plane)
+            voxel.setData(marker[:, 0], marker[:, 1])
+            # The phantom sets the view; a much larger FOV is clipped, the
+            # voxel always stays inside.
+            shown = QRectF(rect)
+            low, high = marker[:, :2].min(axis=0), marker[:, :2].max(axis=0)
+            shown = shown.united(
+                QRectF(
+                    low[0],
+                    low[1],
+                    max(high[0] - low[0], 1e-3),
+                    max(high[1] - low[1], 1e-3),
+                )
+            )
+            plot.setRange(rect=shown, padding=0.05)
 
 
 class SequenceReconstructionExplorer(QWidget):
@@ -320,6 +438,12 @@ class SequenceReconstructionExplorer(QWidget):
         self._image_dims = ()
         self._session_runs = {}
         self._result = None
+        self._phantom = None
+        self._phantom_contrasts = []
+        self._phantom_contrast = None
+        self._phantom_grid = None
+        self._phantom_cache = {}
+        self._syncing_volumes = False
         self._build_ui()
 
     def _build_ui(self):
@@ -376,12 +500,26 @@ class SequenceReconstructionExplorer(QWidget):
         self.kspace_panel = _SelectableImagePanel("Gridded k-space")
         self.image_panel = _SelectableImagePanel("Reconstruction")
         self.image_panel.pixel_selected.connect(self._voxel_selected)
+        self.phantom_panel = _SelectableImagePanel("Phantom on the image grid")
+        self.phantom_panel.setToolTip(
+            "The simulated phantom resampled onto the reconstruction grid: the "
+            "same pixel shows the object part that the voxel measures. Click to "
+            "select a voxel."
+        )
+        self.phantom_panel.pixel_selected.connect(self._voxel_selected)
+        self.phantom_panel.hide()
+        # Region outlines of the phantom drawn on top of the reconstruction.
+        self.image_contours = pg.ImageItem(axisOrder="col-major")
+        self.image_contours.setZValue(50)
+        self.image_panel.plot.addItem(self.image_contours)
         images.addWidget(self.kspace_panel)
         images.addWidget(self.image_panel)
+        images.addWidget(self.phantom_panel)
         # The reconstruction is the image of interest; k-space stays as a
         # smaller companion view.
         images.setStretchFactor(0, 2)
         images.setStretchFactor(1, 3)
+        images.setStretchFactor(2, 3)
         result_splitter.addWidget(images)
         self.spectrum_plot = pg.PlotWidget(title="Selected voxel")
         self.spectrum_plot.setLabel("left", "Signal", "a.u.")
@@ -406,9 +544,28 @@ class SequenceReconstructionExplorer(QWidget):
         self.volume_pages.addTab(
             self.kspace_volume, "Gridded k-space volume — independent slices"
         )
+        self.phantom_volume = VolumeViewerWidget(show_3d=False)
+        self.volume_pages.addTab(self.phantom_volume, "Phantom on the image grid")
         self.volume_pages.setToolTip(
-            "Image and k-space keep separate X/Y/Z slice positions."
+            "Image and k-space keep separate X/Y/Z slice positions; the phantom "
+            "follows the reconstruction."
         )
+        self._volume_contour_items = []
+        for viewer in (self.image_volume, self.phantom_volume):
+            viewer.indices_changed.connect(
+                lambda indices, source=viewer: self._volume_indices_changed(
+                    source, indices
+                )
+            )
+            for plane, view in (
+                ("xy", viewer.xy_view),
+                ("xz", viewer.xz_view),
+                ("yz", viewer.yz_view),
+            ):
+                item = pg.ImageItem(axisOrder="col-major")
+                item.setZValue(50)
+                view.getView().addItem(item, ignoreBounds=True)
+                self._volume_contour_items.append((viewer, plane, item))
         three_d_layout.addWidget(self.volume_pages, 1)
         self.pages.addWidget(self.three_d_page)
         body.addWidget(self.pages)
@@ -470,6 +627,54 @@ class SequenceReconstructionExplorer(QWidget):
         self.voxel_plot_combo.currentIndexChanged.connect(self._voxel_plot_changed)
         data_layout.addRow(self.voxel_plot_label, self.voxel_plot_combo)
         controls_layout.addWidget(data_group)
+
+        phantom_group = QGroupBox("Phantom")
+        phantom_group.setObjectName("reconstruction_phantom_group")
+        phantom_layout = QVBoxLayout(phantom_group)
+        self.phantom_show = QCheckBox("Show phantom next to the image")
+        self.phantom_show.setObjectName("reconstruction_phantom_show")
+        self.phantom_show.setChecked(True)
+        self.phantom_show.setToolTip(
+            "Resample the simulated phantom onto the reconstruction grid"
+        )
+        self.phantom_show.toggled.connect(self._phantom_options_changed)
+        phantom_layout.addWidget(self.phantom_show)
+        self.phantom_contours = QCheckBox("Outline phantom on the reconstruction")
+        self.phantom_contours.setObjectName("reconstruction_phantom_contours")
+        self.phantom_contours.setToolTip(
+            "Draw the object outline (cyan) and region boundaries of the phantom "
+            "on the reconstructed image"
+        )
+        self.phantom_contours.toggled.connect(self._phantom_options_changed)
+        phantom_layout.addWidget(self.phantom_contours)
+        phantom_form = QFormLayout()
+        self.phantom_contrast_combo = QComboBox()
+        self.phantom_contrast_combo.setObjectName("reconstruction_phantom_contrast")
+        self.phantom_contrast_combo.setToolTip(
+            "Phantom property that colours the phantom view and its outlines"
+        )
+        self.phantom_contrast_combo.currentIndexChanged.connect(
+            self._phantom_options_changed
+        )
+        phantom_form.addRow("Colour by", self.phantom_contrast_combo)
+        phantom_layout.addLayout(phantom_form)
+        self.phantom_overview = _PhantomOverview()
+        phantom_layout.addWidget(self.phantom_overview)
+        self.phantom_legend = QLabel()
+        self.phantom_legend.setWordWrap(True)
+        self.phantom_legend.setTextFormat(Qt.RichText)
+        phantom_layout.addWidget(self.phantom_legend)
+        self.phantom_composition = QLabel()
+        self.phantom_composition.setObjectName("reconstruction_phantom_composition")
+        self.phantom_composition.setWordWrap(True)
+        self.phantom_composition.setTextFormat(Qt.RichText)
+        self.phantom_composition.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        phantom_layout.addWidget(self.phantom_composition)
+        self.phantom_note = QLabel()
+        self.phantom_note.setWordWrap(True)
+        phantom_layout.addWidget(self.phantom_note)
+        controls_layout.addWidget(phantom_group)
+        self._set_phantom(None)
 
         contrast_group = QGroupBox("Contrast")
         contrast_layout = QVBoxLayout(contrast_group)
@@ -577,6 +782,7 @@ class SequenceReconstructionExplorer(QWidget):
         self.kspace_panel.clear()
         self.image_panel.clear()
         self.spectrum_plot.clear()
+        self._set_phantom(None)
         self.pages.setCurrentWidget(self.empty_page)
         self.empty_page.setText(message or "No reconstructable image data")
         self.summary.setText(
@@ -592,20 +798,27 @@ class SequenceReconstructionExplorer(QWidget):
         )
         if run is not None:
             source = run.sequence_name
-        self.set_model(SequenceReconstructionModel.from_result(result), source=source)
+        self.set_model(
+            SequenceReconstructionModel.from_result(result),
+            source=source,
+            phantom=phantom,
+        )
         self._result = result
         self._select_session_run(None if run is None else run.run_id)
 
     def set_dataset(self, dataset, *, source=None):
         self.set_model(SequenceReconstructionModel(dataset), source=source)
 
-    def set_model(self, model: SequenceReconstructionModel, *, source=None):
+    def set_model(
+        self, model: SequenceReconstructionModel, *, source=None, phantom=None
+    ):
         self._result = None
         self._select_session_run(None)
         self.model = model
         self.source = None if source is None else str(source)
         self._contrast_domain_cache.clear()
         self._time_course_cache.clear()
+        self._set_phantom(phantom)
         self._populate_controls()
         self._refresh()
         if self._pending_state is not None:
@@ -874,6 +1087,8 @@ class SequenceReconstructionExplorer(QWidget):
             image_lut = self._image_lut()
             interpolation = self._image_interpolation()
             if model.kind in {"cartesian_3d", "radial_3d"}:
+                # The previous phantom grid may not fit the new volume.
+                self._phantom_grid = None
                 display_levels = self._display_levels(
                     display,
                     domain=contrast_domain,
@@ -912,6 +1127,7 @@ class SequenceReconstructionExplorer(QWidget):
                 )
                 if image_indices is not None:
                     self._set_volume_indices(self.image_volume, image_indices)
+                self._refresh_phantom_volume()
                 if kspace_indices is not None:
                     self._set_volume_indices(self.kspace_volume, kspace_indices)
                 self._volume_initialized = True
@@ -1004,6 +1220,7 @@ class SequenceReconstructionExplorer(QWidget):
         self.image_panel.set_selected_pixel(*self._voxel)
         self.pages.setCurrentWidget(self.two_d_page)
         self._current_display = image_values
+        self._refresh_phantom_planar()
         self._refresh_voxel_plot(mode, pool_index, effective_coil_mode)
 
     def _contrast_mode_changed(self, automatic):
@@ -1229,9 +1446,255 @@ class SequenceReconstructionExplorer(QWidget):
             )
         self.spectrum_plot.setTitle(f"Time course · voxel x={x}, y={y}")
 
+    def _set_phantom(self, phantom):
+        """Use ``phantom`` as the object behind the shown reconstruction."""
+        self._phantom = phantom
+        self._phantom_cache.clear()
+        self._phantom_grid = None
+        self._phantom_contrast = None
+        try:
+            self._phantom_contrasts = object_contrasts(phantom)
+        except Exception:
+            self._phantom_contrasts = []
+        combo = self.phantom_contrast_combo
+        previous_key = combo.currentData() or "auto"
+        blocked = combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Automatic", "auto")
+        combo.addItem("Object density", "density")
+        for contrast in self._phantom_contrasts:
+            combo.addItem(contrast.title, contrast.key)
+        index = combo.findData(previous_key)
+        combo.setCurrentIndex(max(index, 0))
+        combo.blockSignals(blocked)
+        available = phantom is not None
+        for widget in (self.phantom_show, self.phantom_contours, combo):
+            widget.setEnabled(available)
+        self._clear_phantom_views()
+        self.phantom_note.setText(
+            ""
+            if available
+            else "No phantom is stored with this result (opened files carry none)."
+        )
+
+    def _clear_phantom_views(self):
+        self.phantom_panel.clear()
+        self.phantom_panel.hide()
+        self.image_contours.clear()
+        for _viewer, _plane, item in self._volume_contour_items:
+            item.clear()
+        self.phantom_overview.clear()
+        self.phantom_legend.setText("")
+        self.phantom_composition.setText("")
+        self._set_phantom_tab_visible(False)
+
+    def _set_phantom_tab_visible(self, visible):
+        index = self.volume_pages.indexOf(self.phantom_volume)
+        if not visible and self.volume_pages.currentIndex() == index:
+            self.volume_pages.setCurrentIndex(0)
+        self.volume_pages.setTabVisible(index, bool(visible))
+
+    def _phantom_options_changed(self, *_):
+        if not self._updating:
+            self._refresh()
+
+    def _selected_phantom_contrast(self):
+        key = self.phantom_contrast_combo.currentData() or "auto"
+        if key == "auto":
+            return automatic_contrast(self._phantom_contrasts)
+        return next(
+            (contrast for contrast in self._phantom_contrasts if contrast.key == key),
+            None,
+        )
+
+    def _resampled_phantom(self, grid, contrast):
+        key = (
+            np.asarray(grid.origin_m, dtype=float).tobytes(),
+            np.asarray(grid.steps_m, dtype=float).tobytes(),
+            tuple(grid.shape),
+            bool(grid.planar),
+            bool(grid.projection),
+            None if contrast is None else contrast.key,
+        )
+        resampled = self._phantom_cache.get(key)
+        if resampled is None:
+            resampled = resample_phantom(self._phantom, grid, contrast)
+            if len(self._phantom_cache) >= _PHANTOM_CACHE_SIZE:
+                self._phantom_cache.pop(next(iter(self._phantom_cache)))
+            self._phantom_cache[key] = resampled
+        return resampled
+
+    def _phantom_unavailable(self, message):
+        self._phantom_grid = None
+        self._clear_phantom_views()
+        self.phantom_note.setText(message)
+
+    def _refresh_phantom_planar(self):
+        self._phantom_grid = None
+        self._set_phantom_tab_visible(False)
+        if self._phantom is None:
+            return
+        try:
+            grid = planar_image_grid(
+                self.model, self._image_dims, self._phantom, self._selections()
+            )
+            if grid is None:
+                self._phantom_unavailable(
+                    "The phantom position of this image is not known."
+                )
+                return
+            contrast = self._selected_phantom_contrast()
+            resampled = self._resampled_phantom(grid, contrast)
+        except Exception as exc:
+            self._phantom_unavailable(f"Phantom unavailable for this image: {exc}")
+            return
+        self.phantom_note.setText("")
+        rows, cols = int(grid.shape[0]), int(grid.shape[1])
+        if self.phantom_show.isChecked():
+            self.phantom_panel.set_rgba(
+                resampled_rgba(resampled), (rows, cols), grid_description(grid)
+            )
+            self.phantom_panel.set_selected_pixel(*self._voxel)
+            self.phantom_panel.show()
+        else:
+            self.phantom_panel.hide()
+        if self.phantom_contours.isChecked():
+            self.image_contours.setImage(
+                np.transpose(contour_rgba(resampled), (1, 0, 2)),
+                levels=(0, 255),
+                autoLevels=False,
+            )
+            self.image_contours.setRect(QRectF(0.0, 0.0, float(cols), float(rows)))
+        else:
+            self.image_contours.clear()
+        self._phantom_grid = grid
+        self._phantom_contrast = contrast
+        self._update_phantom_selection()
+
+    def _refresh_phantom_volume(self):
+        self._phantom_grid = None
+        self.phantom_panel.hide()
+        self.image_contours.clear()
+        if self._phantom is None:
+            return
+        try:
+            grid = volume_image_grid(self.model)
+            if grid is None or tuple(grid.shape) != tuple(
+                np.shape(self.image_volume.data)[:3]
+            ):
+                self._phantom_unavailable(
+                    "The phantom position of this volume is not known."
+                )
+                return
+            contrast = self._selected_phantom_contrast()
+            resampled = self._resampled_phantom(grid, contrast)
+        except Exception as exc:
+            self._phantom_unavailable(f"Phantom unavailable for this volume: {exc}")
+            return
+        self.phantom_note.setText("")
+        self._phantom_grid = grid
+        self._phantom_contrast = contrast
+        show = self.phantom_show.isChecked()
+        if show:
+            values, levels, lookup = volume_display(resampled)
+            title = "object density" if contrast is None else contrast.title
+            self.phantom_volume.set_volume(
+                values,
+                fov_m=self.image_volume.fov_m,
+                name=f"Phantom on the image grid · {title}",
+                levels=levels,
+                lookup_table=lookup,
+            )
+            self._syncing_volumes = True
+            try:
+                self.phantom_volume.set_indices(self.image_volume.indices)
+            finally:
+                self._syncing_volumes = False
+        self._set_phantom_tab_visible(show)
+        self._update_volume_contours()
+        self._update_phantom_selection()
+
+    def _volume_indices_changed(self, source, indices):
+        if self._syncing_volumes:
+            return
+        grid = self._phantom_grid
+        if grid is None or grid.planar:
+            return
+        target = (
+            self.phantom_volume if source is self.image_volume else self.image_volume
+        )
+        if np.shape(target.data) == np.shape(source.data):
+            self._syncing_volumes = True
+            try:
+                target.set_indices(indices)
+            finally:
+                self._syncing_volumes = False
+        self._update_volume_contours()
+        self._update_phantom_selection()
+
+    def _update_volume_contours(self):
+        grid = self._phantom_grid
+        for viewer, plane, item in self._volume_contour_items:
+            if viewer is self.phantom_volume:
+                visible = self.phantom_show.isChecked()
+            else:
+                visible = self.phantom_contours.isChecked()
+            if grid is None or grid.planar or not visible:
+                item.clear()
+                continue
+            horizontal, vertical, normal = VOLUME_PLANES[plane]
+            try:
+                section = volume_section_grid(grid, plane, viewer.indices[normal])
+                rgba = contour_rgba(
+                    self._resampled_phantom(section, self._phantom_contrast)
+                )
+            except Exception:
+                item.clear()
+                continue
+            item.setImage(rgba, levels=(0, 255), autoLevels=False)
+            width = float(viewer.fov_m[horizontal]) * 1000.0
+            height = float(viewer.fov_m[vertical]) * 1000.0
+            item.setRect(QRectF(-width / 2.0, -height / 2.0, width, height))
+
+    def _update_phantom_selection(self):
+        grid = self._phantom_grid
+        if grid is None or self._phantom is None:
+            self.phantom_overview.clear()
+            self.phantom_legend.setText("")
+            self.phantom_composition.setText("")
+            return
+        if grid.planar:
+            index = (self._voxel[1], self._voxel[0], 0)
+            position = f"x={self._voxel[0]}, y={self._voxel[1]}"
+        else:
+            index = self.image_volume.indices
+            position = "(" + ", ".join(str(int(value)) for value in index) + ")"
+        index = np.clip(np.asarray(index, dtype=int), 0, np.asarray(grid.shape) - 1)
+        box = grid.voxel_box(index)
+        contrast = self._phantom_contrast
+        try:
+            self.phantom_overview.set_view(self._phantom, contrast, grid.box(), box)
+            composition = voxel_composition(
+                self._phantom, box, self._phantom_contrasts, contrast
+            )
+        except Exception as exc:
+            self.phantom_composition.setText("")
+            self.phantom_note.setText(f"Voxel composition unavailable: {exc}")
+            return
+        center = np.asarray(box.center_m, dtype=float) * 1000.0
+        self.phantom_composition.setText(
+            f"<b>Selected voxel</b> {position} · centre "
+            f"({center[0]:.1f}, {center[1]:.1f}, {center[2]:.1f}) mm<br>"
+            + composition.html()
+        )
+        self.phantom_legend.setText(legend_html(contrast))
+
     def _voxel_selected(self, x: int, y: int):
         self._voxel = (int(x), int(y))
         self.image_panel.set_selected_pixel(x, y)
+        if self.phantom_panel.isVisible():
+            self.phantom_panel.set_selected_pixel(x, y)
+        self._update_phantom_selection()
         if self.model is not None:
             mode, pool_index = self._selected_data_mode()
             self._refresh_voxel_plot(mode, pool_index, self._effective_coil_mode(mode))
@@ -1293,6 +1756,11 @@ class SequenceReconstructionExplorer(QWidget):
                 self.image_volume.tabs.currentIndex(),
                 self.kspace_volume.tabs.currentIndex(),
             ],
+            "phantom": {
+                "show": self.phantom_show.isChecked(),
+                "contours": self.phantom_contours.isChecked(),
+                "contrast": self.phantom_contrast_combo.currentData(),
+            },
         }
 
     def restore_state(self, state):
@@ -1332,6 +1800,13 @@ class SequenceReconstructionExplorer(QWidget):
             voxel = state.get("voxel", (0, 0))
             if isinstance(voxel, (list, tuple)) and len(voxel) == 2:
                 self._voxel = (int(voxel[0]), int(voxel[1]))
+            phantom = state.get("phantom", {})
+            if isinstance(phantom, dict):
+                self.phantom_show.setChecked(bool(phantom.get("show", True)))
+                self.phantom_contours.setChecked(bool(phantom.get("contours", False)))
+                self._set_combo_data(
+                    self.phantom_contrast_combo, phantom.get("contrast", "auto")
+                )
         finally:
             self._updating = False
         self._refresh()
