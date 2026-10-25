@@ -530,6 +530,79 @@ def test_epi_and_csi_export_slice_orientation_offset_and_echo_time(tmp_path):
     assert csi_program.rf_events[0].frequency_offset_hz != 0.0
 
 
+@pytest.mark.parametrize(
+    "encoding_axes", [("+x", "+z", "-y"), ("+y", "+z", "+x")], ids=["cor", "sag"]
+)
+def test_rotated_csi_reconstructs_in_its_encoding_frame(tmp_path, encoding_axes):
+    from blochsimulator.sequence.acquisition import SpectroscopicAcquisition
+    from blochsimulator.sequence.reconstruction import SequenceReconstructionModel
+
+    read_offset, phase_offset, slice_offset = 6e-3, -9e-3, 4e-3
+    sequence = make_pulseq_csi(
+        fov_m=(0.06, 0.04),
+        matrix=(3, 2),
+        spectral_points=8,
+        repetition_time_s=30e-3,
+        read_offset_m=read_offset,
+        phase_offset_m=phase_offset,
+        slice_offset_m=slice_offset,
+        encoding_axes=encoding_axes,
+    )
+    program = _write_and_load(sequence, tmp_path / "csi_rotated.seq")
+    # Coronal and sagittal phase encoding lies on z, which the axial-only
+    # moment check used to reject, leaving the result without CSI data.
+    acquisition = infer_spectroscopic_acquisition(program)
+    assert acquisition.encoding_frame.axis_codes == encoding_axes
+    restored = SpectroscopicAcquisition.from_metadata(acquisition.to_metadata())
+    assert restored == acquisition
+
+    result = SequenceSimulationResult(
+        signal=np.zeros(acquisition.num_samples, dtype=np.complex128),
+        adc_times_s=SequenceCompiler().compile(program).adc_times_s,
+        final_magnetization=np.zeros((1, 1, 1, 3)),
+        checkpoint_magnetization=None,
+        checkpoint_times_s=np.empty(0),
+        metadata={
+            "spectroscopic_acquisition": acquisition.to_metadata(),
+            "sequence_definitions": dict(program.metadata["definitions"]),
+        },
+    )
+    model = SequenceReconstructionModel.from_result(result)
+    assert model.kind == "csi"
+    assert model.image_name() == "csi_spatial_fid"
+
+    frame = acquisition.encoding_frame.matrix
+    expected_centre = (
+        read_offset * frame[:, 0]
+        + phase_offset * frame[:, 1]
+        + slice_offset * frame[:, 2]
+    )
+    from blochsimulator.sequence.image_export import extract_image_series
+
+    series = extract_image_series(result, include_pools=False)[0]
+    assert series.row_direction == pytest.approx(frame[:, 0])
+    assert series.column_direction == pytest.approx(frame[:, 1])
+    assert _exported_centre(result) == pytest.approx(expected_centre, abs=1e-9)
+
+
+def test_reconstruction_model_without_images_has_no_outer_dimensions():
+    import xarray as xr
+
+    from blochsimulator.sequence.reconstruction import SequenceReconstructionModel
+
+    dataset = xr.Dataset(
+        {"signal": (("adc",), np.zeros(4, dtype=np.complex128))},
+        coords={"adc": np.arange(4)},
+    )
+    with patch(
+        "blochsimulator.sequence.reconstruction.prepare_reconstruction_dataset",
+        side_effect=lambda value: value,
+    ):
+        model = SequenceReconstructionModel(dataset)
+    assert model.kind == "raw_signal"
+    assert model.outer_dimensions == ()
+
+
 def test_flash_builder_round_trips_with_spoiling_and_cartesian_frames(tmp_path):
     sequence = make_pulseq_flash(
         fov_m=(0.08, 0.06),

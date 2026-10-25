@@ -420,8 +420,11 @@ class SequenceReconstructionModel:
             )
         if self.kind == "spiral_2d" and "spiral_frame" in ds.dims:
             return tuple(self._frame_outer_dimensions("spiral_frame", "spiral_frame"))
+        image_name = self.image_name()
+        if not image_name:
+            return ()
         excluded = set(self.spatial_dims) | {"coil", "pool"}
-        source = self.dataset[self.image_name()]
+        source = self.dataset[image_name]
         return tuple(
             OuterDimension(
                 dimension,

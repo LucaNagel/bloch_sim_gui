@@ -259,7 +259,7 @@ def planar_image_grid(model, image_dims, phantom, selections=None):
     for dimension in image_dims:
         if model.kind == "csi":
             positions = _csi_positions(dataset, definitions, dimension)
-            direction = np.eye(3)[{"phase_x": 0, "phase_y": 1}.get(dimension, 0)]
+            direction = frame[:, {"phase_x": 0, "phase_y": 1}.get(dimension, 0)]
             if positions is None:
                 return None
             center = _scalar(

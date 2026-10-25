@@ -956,7 +956,9 @@ class SpectroscopicAcquisition:
     one fixed spatial k-space coordinate.  Treating the spectral samples as a
     readout axis would therefore produce a physically invalid reconstruction.
     For multiple repetitions the returned arrays have an explicit leading
-    ``repetition`` dimension before ``(ky, kx, spectral_point)``.
+    ``repetition`` dimension before ``(ky, kx, spectral_point)``.  The x and y
+    grid axes are the read and phase directions of ``encoding_frame``, so a
+    coronal or sagittal CSI keeps its logical ``(ky, kx)`` layout.
     """
 
     matrix: Tuple[int, int]
@@ -966,6 +968,7 @@ class SpectroscopicAcquisition:
     encoding_indices: Tuple[Tuple[int, int], ...]
     repetition_indices: Tuple[int, ...] = ()
     moment_origins_cyc_per_m: Tuple[Tuple[float, float, float], ...] = ()
+    encoding_frame: EncodingFrame = field(default_factory=EncodingFrame.identity)
 
     def __post_init__(self) -> None:
         matrix = tuple(
@@ -1014,6 +1017,8 @@ class SpectroscopicAcquisition:
             origins = tuple((0.0, 0.0, 0.0) for _ in indices)
         if len(origins) != len(indices) or any(len(origin) != 3 for origin in origins):
             raise ValueError("CSI requires one 3D gradient-moment origin per FID")
+        if not isinstance(self.encoding_frame, EncodingFrame):
+            raise TypeError("encoding_frame must be an EncodingFrame")
         object.__setattr__(self, "matrix", matrix)
         object.__setattr__(self, "fov_m", fov)
         object.__setattr__(self, "spectral_points", points)
@@ -1165,7 +1170,7 @@ class SpectroscopicAcquisition:
             return
         raw = moments.reshape(self.num_encodings, self.spectral_points, 3)
         origins = np.asarray(self.moment_origins_cyc_per_m)[:, None, :]
-        relative = raw - origins
+        relative = self.encoding_frame.scanner_to_encoding(raw - origins)
         tolerance_x = max(1e-9, 1e-3 / self.fov_m[0])
         tolerance_y = max(1e-9, 1e-3 / self.fov_m[1])
         for acquired, (x_index, y_index) in enumerate(self.encoding_indices):
@@ -1176,7 +1181,7 @@ class SpectroscopicAcquisition:
                 atol=tolerance_x,
             ):
                 raise ValueError(
-                    "CSI x phase encoding does not match the declared grid"
+                    "CSI read phase encoding does not match the declared grid"
                 )
             if not np.allclose(
                 relative[acquired, :, 1],
@@ -1184,9 +1189,7 @@ class SpectroscopicAcquisition:
                 rtol=0.0,
                 atol=tolerance_y,
             ):
-                raise ValueError(
-                    "CSI y phase encoding does not match the declared grid"
-                )
+                raise ValueError("CSI phase encoding does not match the declared grid")
 
     def to_metadata(self) -> dict:
         return {
@@ -1198,6 +1201,7 @@ class SpectroscopicAcquisition:
             "encoding_indices": self.encoding_indices,
             "repetition_indices": self.repetition_indices,
             "moment_origins_cyc_per_m": self.moment_origins_cyc_per_m,
+            "encoding_frame": self.encoding_frame.to_metadata(),
         }
 
     @classmethod
@@ -1215,6 +1219,9 @@ class SpectroscopicAcquisition:
             repetition_indices=tuple(metadata.get("repetition_indices", ())),
             moment_origins_cyc_per_m=tuple(
                 tuple(value) for value in metadata.get("moment_origins_cyc_per_m", ())
+            ),
+            encoding_frame=EncodingFrame.from_metadata(
+                metadata.get("encoding_frame", {})
             ),
         )
 
@@ -1879,6 +1886,9 @@ def infer_spectroscopic_acquisition(
         encoding_indices=encoding_indices,
         repetition_indices=repetition_indices,
         moment_origins_cyc_per_m=origins,
+        encoding_frame=EncodingFrame.from_definitions(
+            program.metadata.get("definitions", {})
+        ),
     )
     acquisition.validate_adc_times(compiled.adc_times_s)
     acquisition.validate_gradient_moments(compiled.adc_gradient_moment_cyc_per_m)
