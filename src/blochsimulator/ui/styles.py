@@ -60,6 +60,9 @@ RUN_BUTTON_ACCENT_STYLE = (
     " padding: 3px 12px; }"
 )
 
+# Text colour of a result tab whose data come from the finished simulation.
+RESULT_READY_TAB_COLOR = "#43a047"
+
 # Hue in degrees at 0 % and 100 % progress: orange through yellow to green.
 _PROGRESS_START_HUE = 30
 _PROGRESS_END_HUE = 125

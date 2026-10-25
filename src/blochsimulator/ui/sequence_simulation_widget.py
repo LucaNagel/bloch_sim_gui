@@ -19,6 +19,7 @@ from uuid import uuid4
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import QProcess, QRectF, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -204,6 +205,7 @@ from .sequence_export_dialog import SequenceExportDialog
 from .simulation_explorer import SessionSimulationRun
 from .styles import (
     BOLD_GROUP_TITLES_STYLE,
+    RESULT_READY_TAB_COLOR,
     RUN_BUTTON_ACCENT_STYLE,
     ProgressAccent,
 )
@@ -15280,6 +15282,7 @@ class SequenceSimulationWidget(QWidget):
         self.reconstruction_info.setText(message)
         if clear_reconstruction:
             self.reconstruction_explorer.clear(message)
+            self._mark_reconstruction_ready(False)
         if clear_spatial_magnetization:
             self.result_volume_viewer.clear(message)
         self.magnetization_animation_viewer.clear(
@@ -15597,6 +15600,7 @@ class SequenceSimulationWidget(QWidget):
         try:
             if result.adc_times_s.size:
                 self.reconstruction_explorer.set_result(result, self.phantom)
+                self._mark_reconstruction_ready(True)
             else:
                 self.reconstruction_explorer.clear(
                     "Inspect the excitation volume under Spatial Magnetization."
@@ -15762,6 +15766,14 @@ class SequenceSimulationWidget(QWidget):
             if callable(capture):
                 capture(run)
         return run
+
+    def _mark_reconstruction_ready(self, ready):
+        """Colour the Reconstruction Explorer tab green while it shows a new result."""
+        color = QColor(RESULT_READY_TAB_COLOR) if ready else QColor()
+        # An invalid colour returns the tab to the style's text colour.
+        self.views.tabBar().setTabTextColor(
+            self.reconstruction_explorer_tab_index, color
+        )
 
     def _retain_session_simulation_run(self, run):
         register = getattr(self.window(), "register_sequence_simulation_run", None)

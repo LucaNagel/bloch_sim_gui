@@ -9,7 +9,7 @@ from blochsimulator.spectral_phantom import ChemicalSpecies, SpectralPhantom
 from blochsimulator.ui.reconstruction_explorer import SequenceReconstructionExplorer
 from blochsimulator.ui.reconstruction_phantom import (
     ImageGrid,
-    contour_rgba,
+    contour_segments,
     grid_description,
     planar_image_grid,
     resample_phantom,
@@ -136,10 +136,18 @@ def test_resampled_regions_contours_and_voxel_composition():
     assert resampled.values[0, 0] == -1
     assert resampled.fraction[left] == pytest.approx(1.0)
 
-    contours = contour_rgba(resampled)
-    assert contours.shape == resampled.fraction.shape + (4,)
-    assert contours[left][3] == 0 and contours[0, 0][3] == 0
-    assert np.count_nonzero(contours[..., 3]) > 0
+    segments = contour_segments(resampled)
+    outline = next(points for rgba, points in segments if rgba[:3] == (38, 198, 218))
+    assert outline.shape[0] % 2 == 0 and outline.shape[1] == 2
+    # Every segment is one display-sample edge long, finer than a pixel.
+    lengths = np.linalg.norm(outline[1::2] - outline[0::2], axis=1)
+    assert np.allclose(lengths, 1.0 / up[0]) and up[0] > 1
+    # The pyruvate outline spans 6 mm around x = -8 mm: pixels 2.4 to 7.2.
+    pyruvate = outline[outline[:, 0] < 8.0]
+    assert pyruvate[:, 0].min() == pytest.approx(2.5, abs=0.3)
+    assert pyruvate[:, 0].max() == pytest.approx(7.0, abs=0.3)
+    # The two species touch nowhere, so every boundary is object outline.
+    assert len(segments) == 1
 
     inside = voxel_composition(phantom, grid.voxel_box((4, 7, 0)), [contrast], contrast)
     assert inside.object_fraction == pytest.approx(1.0)
@@ -184,6 +192,10 @@ def test_explorer_shows_phantom_next_to_planar_image(qt_application):
     explorer = SequenceReconstructionExplorer()
     explorer.set_model(SequenceReconstructionModel(_planar_dataset()), phantom=phantom)
 
+    # The phantom panel is opt-in; the voxel summary is always shown.
+    assert explorer.phantom_panel.isHidden()
+    assert not explorer.phantom_show.isChecked()
+    explorer.phantom_show.setChecked(True)
     assert not explorer.phantom_panel.isHidden()
     assert explorer.phantom_note.text() == ""
     explorer.phantom_panel.pixel_selected.emit(4, 8)
@@ -192,7 +204,7 @@ def test_explorer_shows_phantom_next_to_planar_image(qt_application):
     assert "Dominant species" in explorer.phantom_legend.text()
 
     explorer.phantom_contours.setChecked(True)
-    assert explorer.image_contours.image is not None
+    assert explorer.image_contours.drawn
     explorer.phantom_contrast_combo.setCurrentIndex(
         explorer.phantom_contrast_combo.findData("density")
     )
@@ -222,6 +234,8 @@ def test_explorer_phantom_volume_follows_reconstruction_indices(qt_application):
     explorer.set_model(SequenceReconstructionModel(_volume_dataset()), phantom=phantom)
 
     tab = explorer.volume_pages.indexOf(explorer.phantom_volume)
+    assert not explorer.volume_pages.isTabVisible(tab)
+    explorer.phantom_show.setChecked(True)
     assert explorer.volume_pages.isTabVisible(tab)
     assert explorer.phantom_volume.data.shape == (5, 4, 3)
 
@@ -233,8 +247,10 @@ def test_explorer_phantom_volume_follows_reconstruction_indices(qt_application):
     assert explorer.image_volume.indices == (3, 1, 0)
 
     explorer.phantom_contours.setChecked(True)
+    # Sections through the pyruvate sphere, which every plane cuts.
+    explorer.image_volume.set_indices((1, 2, 1))
     drawn = {
-        (viewer is explorer.image_volume, plane): item.image is not None
+        (viewer is explorer.image_volume, plane): item.drawn
         for viewer, plane, item in explorer._volume_contour_items
     }
     assert all(drawn.values())

@@ -36,7 +36,7 @@ from ..sequence.reconstruction import SequenceReconstructionModel
 from .colormaps import COLORMAP_NAMES, colormap
 from .reconstruction_phantom import (
     VOLUME_PLANES,
-    contour_rgba,
+    contour_segments,
     grid_description,
     legend_html,
     planar_image_grid,
@@ -63,6 +63,9 @@ from .widgets import IMAGE_CANVAS_BACKGROUND, style_image_item
 _IMAGE_INTERPOLATION_FACTOR = 8
 _PHANTOM_CACHE_SIZE = 48
 _VOXEL_COLOR = (255, 0, 255)
+# Initial width of the control column and smallest phantom overview height.
+_CONTROLS_WIDTH = 420
+_OVERVIEW_MIN_HEIGHT = 150
 
 
 def _colormap(name: str):
@@ -334,6 +337,38 @@ class _SelectableImagePanel(QWidget):
             self.pixel_selected.emit(x, y)
 
 
+class _ContourOverlay:
+    """Phantom region boundaries drawn as thin lines on an image view."""
+
+    def __init__(self, view):
+        self._view = view
+        self._items = []
+
+    @property
+    def drawn(self) -> bool:
+        return bool(self._items)
+
+    def clear(self):
+        for item in self._items:
+            self._view.removeItem(item)
+        self._items = []
+
+    def set_segments(self, segments, to_view):
+        """Draw :func:`contour_segments`; ``to_view`` maps points to ``(x, y)``."""
+        self.clear()
+        for rgba, points in segments:
+            x, y = to_view(points)
+            item = pg.PlotCurveItem(
+                np.asarray(x, dtype=float),
+                np.asarray(y, dtype=float),
+                connect="pairs",
+                pen=pg.mkPen(rgba, width=2),
+            )
+            item.setZValue(50)
+            self._view.addItem(item, ignoreBounds=True)
+            self._items.append(item)
+
+
 class _PhantomOverview(QWidget):
     """Phantom sections through the selected voxel with FOV and voxel outlines."""
 
@@ -343,7 +378,7 @@ class _PhantomOverview(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.canvas = pg.GraphicsLayoutWidget()
         self.canvas.setBackground(IMAGE_CANVAS_BACKGROUND)
-        self.canvas.setFixedHeight(150)
+        self.canvas.setFixedHeight(_OVERVIEW_MIN_HEIGHT)
         self.canvas.setToolTip(
             "Phantom sections through the selected voxel centre. Orange outlines "
             "the imaged field of view (and slab), magenta the selected voxel."
@@ -375,6 +410,13 @@ class _PhantomOverview(QWidget):
             self.fov_outlines.append(fov)
             self.voxel_outlines.append(voxel)
         layout.addWidget(self.canvas)
+
+    def resizeEvent(self, event):
+        # Three square sections side by side grow with the column width.
+        super().resizeEvent(event)
+        height = int(np.clip(self.width() / 3 + 24, _OVERVIEW_MIN_HEIGHT, 360))
+        if height != self.canvas.height():
+            self.canvas.setFixedHeight(height)
 
     def clear(self):
         for image, fov, voxel in zip(
@@ -509,9 +551,7 @@ class SequenceReconstructionExplorer(QWidget):
         self.phantom_panel.pixel_selected.connect(self._voxel_selected)
         self.phantom_panel.hide()
         # Region outlines of the phantom drawn on top of the reconstruction.
-        self.image_contours = pg.ImageItem(axisOrder="col-major")
-        self.image_contours.setZValue(50)
-        self.image_panel.plot.addItem(self.image_contours)
+        self.image_contours = _ContourOverlay(self.image_panel.plot)
         images.addWidget(self.kspace_panel)
         images.addWidget(self.image_panel)
         images.addWidget(self.phantom_panel)
@@ -562,10 +602,8 @@ class SequenceReconstructionExplorer(QWidget):
                 ("xz", viewer.xz_view),
                 ("yz", viewer.yz_view),
             ):
-                item = pg.ImageItem(axisOrder="col-major")
-                item.setZValue(50)
-                view.getView().addItem(item, ignoreBounds=True)
-                self._volume_contour_items.append((viewer, plane, item))
+                overlay = _ContourOverlay(view.getView())
+                self._volume_contour_items.append((viewer, plane, overlay))
         three_d_layout.addWidget(self.volume_pages, 1)
         self.pages.addWidget(self.three_d_page)
         body.addWidget(self.pages)
@@ -633,7 +671,7 @@ class SequenceReconstructionExplorer(QWidget):
         phantom_layout = QVBoxLayout(phantom_group)
         self.phantom_show = QCheckBox("Show phantom next to the image")
         self.phantom_show.setObjectName("reconstruction_phantom_show")
-        self.phantom_show.setChecked(True)
+        self.phantom_show.setChecked(False)
         self.phantom_show.setToolTip(
             "Resample the simulated phantom onto the reconstruction grid"
         )
@@ -749,10 +787,12 @@ class SequenceReconstructionExplorer(QWidget):
         self.controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.controls_scroll.setWidget(controls)
         self.controls_scroll.setMinimumWidth(240)
-        self.controls_scroll.setMaximumWidth(380)
         body.addWidget(self.controls_scroll)
         body.setStretchFactor(0, 1)
         body.setStretchFactor(1, 0)
+        # The images take the width the control column does not need; the
+        # column has no maximum, so dragging the handle never leaves a gap.
+        body.setSizes([3 * _CONTROLS_WIDTH, _CONTROLS_WIDTH])
         layout.addWidget(body, 1)
 
     def _sequence_settings_toggled(self, visible):
@@ -1559,12 +1599,10 @@ class SequenceReconstructionExplorer(QWidget):
         else:
             self.phantom_panel.hide()
         if self.phantom_contours.isChecked():
-            self.image_contours.setImage(
-                np.transpose(contour_rgba(resampled), (1, 0, 2)),
-                levels=(0, 255),
-                autoLevels=False,
+            # Array axis 0 is the image row (y), axis 1 the column (x).
+            self.image_contours.set_segments(
+                contour_segments(resampled), lambda points: (points[:, 1], points[:, 0])
             )
-            self.image_contours.setRect(QRectF(0.0, 0.0, float(cols), float(rows)))
         else:
             self.image_contours.clear()
         self._phantom_grid = grid
@@ -1645,16 +1683,22 @@ class SequenceReconstructionExplorer(QWidget):
             horizontal, vertical, normal = VOLUME_PLANES[plane]
             try:
                 section = volume_section_grid(grid, plane, viewer.indices[normal])
-                rgba = contour_rgba(
+                segments = contour_segments(
                     self._resampled_phantom(section, self._phantom_contrast)
                 )
             except Exception:
                 item.clear()
                 continue
-            item.setImage(rgba, levels=(0, 255), autoLevels=False)
             width = float(viewer.fov_m[horizontal]) * 1000.0
             height = float(viewer.fov_m[vertical]) * 1000.0
-            item.setRect(QRectF(-width / 2.0, -height / 2.0, width, height))
+            columns, rows = section.shape[0], section.shape[1]
+            item.set_segments(
+                segments,
+                lambda points, w=width, h=height, n=columns, m=rows: (
+                    -w / 2.0 + points[:, 0] * w / n,
+                    -h / 2.0 + points[:, 1] * h / m,
+                ),
+            )
 
     def _update_phantom_selection(self):
         grid = self._phantom_grid
@@ -1802,7 +1846,7 @@ class SequenceReconstructionExplorer(QWidget):
                 self._voxel = (int(voxel[0]), int(voxel[1]))
             phantom = state.get("phantom", {})
             if isinstance(phantom, dict):
-                self.phantom_show.setChecked(bool(phantom.get("show", True)))
+                self.phantom_show.setChecked(bool(phantom.get("show", False)))
                 self.phantom_contours.setChecked(bool(phantom.get("contours", False)))
                 self._set_combo_data(
                     self.phantom_contrast_combo, phantom.get("contrast", "auto")
