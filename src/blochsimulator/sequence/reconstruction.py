@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Sequence
 
 import numpy as np
 
@@ -540,6 +540,7 @@ class SequenceReconstructionModel:
         selections: Optional[Mapping[str, object]] = None,
         *,
         coil_mode: str = "sum",
+        average_dimensions: Sequence[str] = (),
     ) -> np.ndarray:
         """Return linearly separated complex images for the selected outer state."""
         configuration = self.ideal_configuration
@@ -561,6 +562,7 @@ class SequenceReconstructionModel:
                         self.image_name(),
                         echo_selection,
                         coil_mode=coil_mode,
+                        average_dimensions=average_dimensions,
                     )
                 )
             )
@@ -584,9 +586,12 @@ class SequenceReconstructionModel:
             [float(np.min(frame_times[frame_values == value])) for value in item.values]
         )
 
-    def _frame_index(
-        self, selections: Mapping[str, object]
-    ) -> Optional[tuple[str, int]]:
+    def _frame_indices(
+        self,
+        selections: Mapping[str, object],
+        average_dimensions: Sequence[str] = (),
+    ) -> Optional[tuple[str, np.ndarray]]:
+        """Return the frames matching ``selections``, ignoring averaged dimensions."""
         frame_dimensions = {
             item.virtual_frame_dimension
             for item in self.outer_dimensions
@@ -599,6 +604,8 @@ class SequenceReconstructionModel:
         for item in self.outer_dimensions:
             if item.virtual_frame_dimension != frame_dimension:
                 continue
+            if item.name in average_dimensions:
+                continue
             value = selections.get(item.name, item.values[0])
             if item.coordinate_name is None:
                 candidates = candidates[candidates == int(value)]
@@ -607,9 +614,9 @@ class SequenceReconstructionModel:
                     self.dataset.coords[item.coordinate_name].values
                 )
                 candidates = candidates[coordinate[candidates] == value]
-        if candidates.size != 1:
+        if candidates.size == 0 or (candidates.size > 1 and not average_dimensions):
             raise ValueError("outer dimension selection does not identify one frame")
-        return frame_dimension, int(candidates[0])
+        return frame_dimension, candidates
 
     def select(
         self,
@@ -618,18 +625,33 @@ class SequenceReconstructionModel:
         *,
         pool_index: Optional[int] = None,
         coil_mode: str = "rss",
+        average_dimensions: Sequence[str] = (),
     ):
-        """Select outer dimensions and combine receive channels."""
+        """Select outer dimensions and combine receive channels.
+
+        Dimensions named in ``average_dimensions`` are not selected but averaged
+        as complex data, before the receive channels are combined.
+        """
         if not variable_name or variable_name not in self.dataset:
             raise ValueError(f"result variable {variable_name!r} is unavailable")
         selections = {} if selections is None else dict(selections)
         data = self.dataset[variable_name]
-        frame = self._frame_index(selections)
+        average_dimensions = tuple(average_dimensions)
+        frame = self._frame_indices(selections, average_dimensions)
         selectors = {}
+        averaged = []
         if frame is not None and frame[0] in data.dims:
-            selectors[frame[0]] = frame[1]
+            if frame[1].size == 1:
+                selectors[frame[0]] = int(frame[1][0])
+            else:
+                selectors[frame[0]] = frame[1]
+                averaged.append(frame[0])
         for item in self.outer_dimensions:
             if item.virtual_frame_dimension is not None:
+                continue
+            if item.name in average_dimensions:
+                if item.name in data.dims:
+                    averaged.append(item.name)
                 continue
             if item.name in data.dims:
                 value = selections.get(item.name, item.values[0])
@@ -642,6 +664,8 @@ class SequenceReconstructionModel:
                     selectors[item.name] = int(value)
         if selectors:
             data = data.isel(selectors)
+        if averaged:
+            data = data.mean(averaged)
         if "pool" in data.dims:
             data = data.isel(pool=0 if pool_index is None else int(pool_index))
         if "coil" in data.dims:

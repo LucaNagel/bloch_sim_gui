@@ -692,3 +692,111 @@ def test_single_frame_explorer_hides_voxel_plot(qt_application):
 
     assert explorer.voxel_plot_combo.count() == 0
     assert not explorer.spectrum_plot.isVisibleTo(explorer)
+
+
+def test_model_averages_complex_repetitions_of_framed_data():
+    dataset = _framed_cartesian_dataset()
+    model = SequenceReconstructionModel(dataset)
+    frames = dataset.cartesian_frame_repetition_index.values
+    echoes = dataset.cartesian_frame_echo_index.values
+
+    averaged = model.select(
+        model.image_name(),
+        {"echo": 1, "repetition": 0},
+        average_dimensions=("repetition",),
+    )
+
+    selected = np.flatnonzero(echoes == 1)
+    assert selected.size > 1 and set(frames[selected]) == {0, 1}
+    expected = dataset.cartesian_image.isel(cartesian_frame=selected)
+    np.testing.assert_allclose(averaged, expected.mean("cartesian_frame"))
+    # A complex mean differs from the mean of the magnitudes.
+    assert not np.allclose(np.abs(averaged), np.abs(expected).mean("cartesian_frame"))
+
+
+def test_model_averages_complex_repetitions_before_combining_coils():
+    shape = (2, 2, 3, 4, 2)
+    rng = np.random.default_rng(3)
+    values = rng.normal(size=shape) + 1j * rng.normal(size=shape)
+    dims = ("repetition", "phase_y", "phase_x", "spectral_point", "coil")
+    dataset = xr.Dataset(
+        {
+            "csi_kspace": (dims, values),
+            "csi_spatial_fid": (dims, values),
+            "csi_spectrum": (dims, values),
+        },
+        coords={
+            "repetition": [0, 1],
+            "phase_y": np.arange(2),
+            "phase_x": np.arange(3),
+            "spectral_point": np.arange(4),
+            "coil": np.arange(2),
+        },
+    )
+    model = SequenceReconstructionModel(dataset)
+    assert [item.name for item in model.outer_dimensions] == ["repetition"]
+
+    averaged = model.select(
+        "csi_spatial_fid", {}, coil_mode="rss", average_dimensions=("repetition",)
+    )
+
+    expected = np.sqrt((np.abs(values.mean(axis=0)) ** 2).sum(axis=-1))
+    np.testing.assert_allclose(averaged, expected)
+
+
+def test_explorer_averages_repetitions_independent_of_displayed_component(
+    qt_application,
+):
+    dataset = _framed_cartesian_dataset()
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(dataset)
+    assert explorer.average_repetitions.isEnabled()
+    echoes = dataset.cartesian_frame_echo_index.values
+    selected = np.flatnonzero(echoes == 0)
+    mean = dataset.cartesian_image.isel(cartesian_frame=selected).mean(
+        "cartesian_frame"
+    )
+
+    explorer.average_repetitions.setChecked(True)
+    np.testing.assert_allclose(explorer._current_display, np.abs(mean))
+    assert not explorer.outer_controls["repetition"].isEnabled()
+    assert explorer.get_state()["average_repetitions"] is True
+
+    explorer._set_combo_data(explorer.component_combo, "real")
+    np.testing.assert_allclose(explorer._current_display, np.real(mean))
+
+    restored = SequenceReconstructionExplorer()
+    restored.set_dataset(dataset)
+    restored.restore_state(explorer.get_state())
+    assert restored.average_repetitions.isChecked()
+    np.testing.assert_allclose(restored._current_display, np.real(mean))
+
+    explorer.average_repetitions.setChecked(False)
+    assert explorer.outer_controls["repetition"].isEnabled()
+
+
+def test_csi_explorer_average_keeps_the_time_course_per_repetition(qt_application):
+    shape = (3, 2, 3, 4)
+    values = np.arange(np.prod(shape), dtype=float).reshape(shape) * (1 + 0.5j)
+    dims = ("repetition", "phase_y", "phase_x", "spectral_point")
+    dataset = xr.Dataset(
+        {name: (dims, values) for name in ("csi_kspace", "csi_spatial_fid")}
+        | {"csi_spectrum": (dims, values)},
+        coords={
+            "repetition": [0, 1, 2],
+            "phase_y": np.arange(2),
+            "phase_x": np.arange(3),
+            "spectral_point": np.arange(4),
+        },
+    )
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(dataset)
+    explorer._voxel_selected(1, 1)
+    explorer._set_combo_data(explorer.voxel_plot_combo, "time_course")
+
+    explorer.average_repetitions.setChecked(True)
+
+    expected = np.abs(values.mean(axis=0)[:, :, 0])
+    np.testing.assert_allclose(explorer._current_display, expected)
+    (curve,) = explorer.spectrum_plot.listDataItems()
+    assert len(curve.getData()[1]) == 3

@@ -633,6 +633,15 @@ class SequenceReconstructionExplorer(QWidget):
         self.outer_layout.setVerticalSpacing(2)
         self.outer_layout.setColumnStretch(1, 1)
         frame_layout.addWidget(self.outer_container)
+        self.average_repetitions = QCheckBox("Average repetitions")
+        self.average_repetitions.setObjectName("reconstruction_average_repetitions")
+        self.average_repetitions.setToolTip(
+            "Show the complex mean over all repetitions, whatever component is "
+            "displayed. Averaging happens before the receive channels are combined."
+        )
+        self.average_repetitions.toggled.connect(self._average_toggled)
+        self.average_repetitions.setVisible(False)
+        frame_layout.addWidget(self.average_repetitions)
         controls_layout.addWidget(frame_group)
 
         data_group = QGroupBox("Data")
@@ -993,6 +1002,11 @@ class SequenceReconstructionExplorer(QWidget):
                 self.coil_combo.addItem(f"Coil {coil + 1}", f"coil:{coil}")
             self.coil_combo.setEnabled(model.coil_count > 1)
 
+            has_repetitions = self._time_course_dimension() is not None
+            self.average_repetitions.setVisible(has_repetitions)
+            if not has_repetitions:
+                self.average_repetitions.setChecked(False)
+
             is_csi = model.kind == "csi"
             self.spectral_label.setVisible(is_csi)
             self.spectral_control.setVisible(is_csi)
@@ -1066,6 +1080,17 @@ class SequenceReconstructionExplorer(QWidget):
                 selections[name] = control.currentData()
         return selections
 
+    def _average_dimensions(self):
+        """Return the outer dimensions averaged instead of browsed."""
+        if self.model is None or not self.average_repetitions.isChecked():
+            return ()
+        return ("repetition",) if self._time_course_dimension() is not None else ()
+
+    def _average_toggled(self, _checked):
+        if self._updating:
+            return
+        self._refresh()
+
     def _outer_slider_changed(self, name, index):
         self._update_outer_slider_label(name, index)
         self._refresh()
@@ -1102,14 +1127,19 @@ class SequenceReconstructionExplorer(QWidget):
             return "total", -1
         return str(value[0]), int(value[1])
 
-    def _selected_image(self, selections=None):
+    def _selected_image(self, selections=None, *, average=True):
         model = self.model
         selections = self._selections() if selections is None else dict(selections)
+        averaged = self._average_dimensions() if average else ()
         mode, index = self._selected_data_mode()
         coil_mode = str(self.coil_combo.currentData() or "rss")
         if mode == "ideal":
             effective_coil_mode = "sum" if coil_mode == "rss" else coil_mode
-            separated = model.ideal_images(selections, coil_mode=effective_coil_mode)
+            separated = model.ideal_images(
+                selections,
+                coil_mode=effective_coil_mode,
+                average_dimensions=averaged,
+            )
             template_selections = dict(selections)
             configuration = model.ideal_configuration
             template_selections[configuration[0].name] = configuration[0].values[0]
@@ -1117,6 +1147,7 @@ class SequenceReconstructionExplorer(QWidget):
                 model.image_name(),
                 template_selections,
                 coil_mode=effective_coil_mode,
+                average_dimensions=averaged,
             )
             return (
                 template.copy(data=separated[index]),
@@ -1131,6 +1162,7 @@ class SequenceReconstructionExplorer(QWidget):
                 selections,
                 pool_index=index if pool else None,
                 coil_mode=coil_mode,
+                average_dimensions=averaged,
             ),
             mode,
             index,
@@ -1167,6 +1199,7 @@ class SequenceReconstructionExplorer(QWidget):
                     self._selections(),
                     pool_index=pool_index if mode == "pool" else None,
                     coil_mode=effective_coil_mode,
+                    average_dimensions=self._average_dimensions(),
                 )
                 kspace_display, kspace_title = self._kspace_display(kspace)
                 kspace_scalar = kspace.copy(data=kspace_display)
@@ -1219,6 +1252,9 @@ class SequenceReconstructionExplorer(QWidget):
             echo_control = self.outer_controls.get("echo")
             if echo_control is not None:
                 echo_control.setEnabled(mode != "ideal")
+            repetition_control = self.outer_controls.get("repetition")
+            if repetition_control is not None:
+                repetition_control.setEnabled(not self._average_dimensions())
         except Exception as exc:
             self.pages.setCurrentWidget(self.empty_page)
             self.empty_page.setText(f"Reconstruction unavailable: {exc}")
@@ -1263,6 +1299,7 @@ class SequenceReconstructionExplorer(QWidget):
             self._selections(),
             pool_index=pool_index if mode == "pool" else None,
             coil_mode=effective_coil_mode,
+            average_dimensions=self._average_dimensions(),
         )
         if model.kind == "csi":
             kspace = kspace.isel(spectral_point=self.spectral_point.value())
@@ -1328,11 +1365,14 @@ class SequenceReconstructionExplorer(QWidget):
         """Return one contrast domain across every selectable image frame."""
         mode, pool_index = self._selected_data_mode()
         coil_mode = str(self.coil_combo.currentData() or "rss")
-        cache_key = (mode, pool_index, coil_mode, component)
+        averaged = self._average_dimensions()
+        cache_key = (mode, pool_index, coil_mode, component, averaged)
         if cache_key in self._contrast_domain_cache:
             return self._contrast_domain_cache[cache_key]
 
-        outer_dimensions = tuple(self.model.outer_dimensions)
+        outer_dimensions = tuple(
+            item for item in self.model.outer_dimensions if item.name not in averaged
+        )
         if not outer_dimensions:
             finite_range = self._finite_range(current_display)
             domain = None if finite_range is None else (0.0, max(0.0, finite_range[1]))
@@ -1413,6 +1453,7 @@ class SequenceReconstructionExplorer(QWidget):
             self._selections(),
             pool_index=pool_index if pool else None,
             coil_mode=coil_mode,
+            average_dimensions=self._average_dimensions(),
         )
         x, y = self._voxel
         values = np.asarray(data.isel(phase_x=x, phase_y=y))
@@ -1457,7 +1498,7 @@ class SequenceReconstructionExplorer(QWidget):
             frame_selections = dict(selections)
             frame_selections[dimension.name] = value
             try:
-                image_data, *_ = self._selected_image(frame_selections)
+                image_data, *_ = self._selected_image(frame_selections, average=False)
             except ValueError:
                 planes.append(None)
                 continue
@@ -1811,6 +1852,7 @@ class SequenceReconstructionExplorer(QWidget):
     def get_state(self):
         return {
             "outer": self._selections(),
+            "average_repetitions": self.average_repetitions.isChecked(),
             "pool": list(self._selected_data_mode()),
             "coil": self.coil_combo.currentData(),
             "component": self.component_combo.currentData(),
@@ -1847,6 +1889,10 @@ class SequenceReconstructionExplorer(QWidget):
         try:
             for name, value in dict(state.get("outer", {})).items():
                 self._set_outer_control_value(name, value)
+            self.average_repetitions.setChecked(
+                bool(state.get("average_repetitions", False))
+                and self._time_course_dimension() is not None
+            )
             pool = state.get("pool")
             if isinstance(pool, (list, tuple)) and len(pool) == 2:
                 self._set_combo_data(self.pool_combo, (str(pool[0]), int(pool[1])))

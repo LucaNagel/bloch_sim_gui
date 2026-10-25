@@ -6,6 +6,10 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Reconstruction Explorer: **Average repetitions** option that shows the complex mean over all repetitions (before receive-channel combination), whichever component is displayed.
+
 ## [2.9.4] - 2026-10-25
 
 ### Added
