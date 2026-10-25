@@ -73,6 +73,17 @@ A mode that lets you load, generate and simulate [Pulseq
   Cartesian 3D bSSFP, alternating-frequency [spectrally selective 3D bSSFP](https://doi.org/10.1002/mrm.29676), and
   Cartesian or [spiral-phyllotaxis radial 3D multi-echo bSSFP sequences](https://doi.org/10.1002/mrm.30614), with
   export to `.seq` files and reproducing Jupyter notebooks.
+- **Multi-slice inversion recovery** (global or slice-selective inversion with
+  EPI, gradient-echo or TurboFLASH readout) with a voxelwise T1 fit,
+  single-voxel **PRESS** and slice-selective FID spectroscopy, and a
+  **compressed sensing** module (variable-density and k-t masks,
+  Chambolle-Pock reconstruction). See the
+  [user guide](docs/USER_GUIDE.md) and the
+  [compressed sensing concept](docs/compressed_sensing_concept.md).
+- **Sequence presets** that store all sequence settings under a name (with an
+  optional startup preset), and a **PSF Analysis** tab that simulates the
+  point-spread function and slice profile of the current sequence, with FWHM,
+  broadening, side-lobe and slice cross-talk metrics.
 - **Spectral-spatial RF design** with explicit spatial and frequency target
   ranges, coupled RF/slice-gradient waveforms, configurable two-dimensional
   Bloch validation, spatial and spectral profile cuts, and phantom-aware
@@ -95,7 +106,11 @@ A mode that lets you load, generate and simulate [Pulseq
 - A dimension-aware **Reconstruction Explorer** for interactive 2D/3D k-space
   and image views, echo/repetition/slice selection, CSI voxel spectra, receive-coil
   combination, simulated pool comparison, and known-frequency linear IDEAL
-  estimates.
+  estimates. It shows the simulated phantom next to the reconstruction, with
+  region outlines and the composition of the selected voxel.
+- A **mouse perfusion phantom** for hyperpolarized ¹³C and for ¹H, where
+  tissue water has per-tissue PD, T1 and T2 and a gadolinium contrast agent
+  (DCE, extended Tofts) changes R1 and R2.
 
 
 ### Visualization and analysis and reproducibility

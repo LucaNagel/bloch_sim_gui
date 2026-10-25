@@ -6,6 +6,50 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.9.4] - 2026-10-25
+
+### Added
+
+- PSF Analysis tab: point-spread function and slice profile of Cartesian 2D,
+  EPI and 3D sequences from point sources simulated through the real sequence,
+  with FWHM, broadening, peak shift, side lobe and slice cross-talk metrics.
+- Standalone multi-slice Inversion Recovery (2D) sequence with global or
+  slice-selective inversion, EPI, gradient-echo or TurboFLASH readout and
+  per-slice TI definitions; voxelwise T1 fit
+  (`relaxometry.fit_inversion_recovery_t1`).
+- PRESS single-voxel spectroscopy and slice-selective FID spectroscopy sources.
+- Spectral-spatial schedules in EPI and a compressed sensing module
+  (`sequence.compressed_sensing`, retrospective).
+- Sequence presets (save, load, import/export, startup preset) and a shared
+  colormap list.
+- Reconstruction Explorer: phantom resampled onto the image grid next to
+  reconstructions, region outlines, voxel composition and a synced 3D phantom
+  tab.
+- Mouse phantom: ¹H nucleus with eight tissue-water pools (per-tissue PD, T1,
+  T2) and gadolinium DCE (extended Tofts, whole-body kinetics, ΔR1/ΔR2 epochs in
+  the reference and spin-major kernels); nucleus selector and nucleus-matching
+  compounds in the designer.
+
+### Changed
+
+- The inversion-recovery options were removed from the 2D FLASH and EPI forms;
+  use the Inversion Recovery (2D) source.
+- The Reconstruction Explorer tab turns green after a run, phantom outlines are
+  drawn at the phantom's resolution, and the voxel plot defaults to manual
+  contrast.
+- Clearer message when calibrated receiver noise is applied to a result without
+  voxel-volume weighting.
+
+### Fixed
+
+- Coronal and sagittal CSI are reconstructed in their encoding frame; the
+  Reconstruction Explorer no longer fails with `KeyError` for them.
+- Merged per-pool pass results name every pool, and old projects are repaired
+  on load.
+- Writing a `.seq` file from the RF + Slice Selection source no longer raises
+  `KeyError`.
+- The reappearing voxel plot keeps its height.
+
 ## [2.9.3] - 2026-10-23
 
 ### Added

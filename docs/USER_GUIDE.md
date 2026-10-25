@@ -462,6 +462,90 @@ raster, producing a symmetric waveform with complete matching edge lobes;
 mode-specific apodization choices are applied after that common base shape.
 Standalone scripts call the same public design path as well.
 
+**Inversion Recovery (2D)** is a standalone multi-slice sequence for T1
+mapping. **Readout** selects EPI (one shot per slice after the inversion), a
+gradient echo (the inversion is repeated for every phase-encoding line, classic
+IR) or TurboFLASH (a low-flip image after each inversion, with TI timed to the
+k-space centre line). The readout choice sets the flip-angle default (90° for
+EPI and gradient echo, 10° for TurboFLASH) as long as you have not changed it.
+A **global** inversion is one non-selective 180° followed by TI and then the 90°
+excitation of slice 1, slice 2, and so on, so later slices see TI plus their
+offset in the train; **Slice TIs** lists these per-slice values. A
+**slice-selective** inversion inverts each slice right before its excitation
+over a multiple of the slice thickness and gives every slice the requested TI;
+it rejects the block pulse and names the gradient it needs when the slab is too
+thin. The **Slice order** is sequential, interleaved or cyclic (the cyclic
+order rotates the train once per TI series). The repetition time is the
+inversion-to-inversion time, the repetitions default to one TI series, and
+**Shortest timing** reports the minimum TE, line TR, inversion TR and TI; too
+short entries are raised to these minima. The per-slice TI values are stored in
+the Pulseq definitions (`SliceInversionTimes`) so that
+`sequence.relaxometry.fit_inversion_recovery_t1` can fit
+$S = a - b\,e^{-TI/T_1}$ voxelwise, including polarity restoration for
+magnitude data. The 2D FLASH and EPI forms no longer carry inversion
+options; use this source instead.
+
+**PRESS (single voxel)** builds point-resolved spectroscopy: a slice-selective
+excitation on the partition axis and two slice-selective 180° pulses on the
+phase and read axes refocus a double spin echo from the voxel where the three
+slabs intersect. Enter the voxel size and centre offset per direction (each slab
+pulse shifts its RF frequency, as on a scanner, so the exported `.seq` carries
+the offset), the refocusing pulse type, flip angle, duration, time-bandwidth
+product and apodization, **TE**, optionally **TE1** (the first echo; empty
+places the first refocusing pulse at TE / 2), TR and the FID spectral points
+and bandwidth. Crusher pairs around each 180° pulse dephase signal from
+outside the voxel; their area is given in cycles per voxel. Crushing needs
+isochromats spread across each phantom voxel, so use a subvoxel grid for it.
+The sequence is read as a 1×1 CSI grid, so the result shows one spectrum.
+It exports to Pulseq and notebooks like the other generated sequences.
+
+**Slice-selective FID (spectroscopy)** excites one slice, rewinds the
+slice-selection moment and acquires an FID without a readout gradient, so the
+spectrum sums every spin in the slice. Slice normal, thickness, offset, flip
+angle, rewinder duration, acquisition delay (**Shortest** takes the shortest
+delay the rewinder allows), spectral points, bandwidth, TR, repetitions and an
+optional spoiler across the slice thickness after each FID are available.
+Like PRESS, it is acquired as a 1×1 spectroscopic grid.
+
+**Presets** (button beside **Source / mode**) store the settings of all
+sequence forms, the RF pulse, the receiver noise and the spoiler under a name,
+without the phantom or results. The menu saves the current settings, loads or
+deletes a stored preset, imports or exports a preset file and selects a
+**Startup preset** that is loaded instead of the built-in FLASH default when
+the Sequence workspace opens. Every colormap selector (also the image
+histogram menus) shares one list of sequential, diverging, cyclic and rainbow
+colormaps.
+
+When calibrated receiver noise is applied to a result that was simulated
+without physical voxel-volume weighting, a message says so and offers
+**Run again** with the weighting enabled.
+
+The **PSF Analysis** tab, after **Spoiling Analysis**, estimates the
+point-spread function and the slice profile of the current sequence. It is
+visible in Sequence mode and can be opened with **Show PSF Analysis** under
+the sequence information. A point source is simulated through the real
+sequence in a background thread (with its own simulator, so the main
+simulation is not blocked) and reconstructed with a continuous inverse DFT
+over the acquired k-space grid. The point source has a position (x / y / z),
+T1 / T2 / T2*, an off-resonance and, optionally, hyperpolarization; **Preset**
+fills typical values for the sequence nucleus (¹H, hyperpolarized ¹³C).
+Relaxation during the readout, flip-angle and hyperpolarized depletion along
+the k-space order, off-resonance and T2* (through a Lorentzian frequency
+ensemble) are included. Cartesian 2D frames, EPI and 3D volumes are
+supported. **Compute PSF** starts the run and **Cancel** stops it; **Slice
+profile** additionally sweeps the source through the slice package along the
+slice normal, which simulates a few hundred sources. The tab shows the PSF
+image on the full FOV (**Frame**, **Plane** and image scale selectable),
+profiles through the peak against the ideal PSF, the k-space modulation, the
+slice profile and a metrics table with per-axis FWHM, broadening against flat
+k-space weighting, peak shift, side lobes, the voxel energy fraction and, for
+2D sequences, the effective slice thickness and slice cross-talk. Results are
+marked as stale when the sequence changes; other frames are reconstructed from
+the stored simulation. Compressed sensing (variable-density and k-t masks and
+a Chambolle-Pock reconstruction) is available as the Python module
+`blochsimulator.sequence.compressed_sensing`; see the
+[compressed sensing concept](compressed_sensing_concept.md).
+
 **RF Pulse Designer** uses the current complex baseband waveform from the
 **RF Design** tab. **Load RF pulse…** is also available inside every Sequence
 Mode RF section for `.exc`, `.dat`, `.txt`, and `.csv` waveforms. Duration,
@@ -769,6 +853,23 @@ and maximum of the currently displayed image. Complete project files retain
 these display settings, the explorer selection, and both independent 3D cursor
 positions.
 
+The **Phantom** group of the explorer shows the simulated phantom next to the
+reconstruction. **Show phantom next to the image** resamples the phantom onto the
+image grid of the shown reconstruction (slice slab, offsets and in-plane
+orientation of FLASH, EPI, spiral and CSI images, or the voxel grid of a 3D
+volume) in a "Phantom on the image grid" panel and, for 3D volumes, in a synced
+phantom tab with XY/XZ/YZ sections. The FOV or slab (orange) and the selected
+voxel (magenta) are marked. Clicking selects the same voxel everywhere, and the
+composition of that voxel (regions, object share, mean values) is listed below.
+**Outline phantom on the reconstruction** draws the region boundaries as thin
+lines at the phantom's own resolution, and **Colour by** colours the phantom by
+region, density or any phantom map. Results opened from files carry no phantom
+and show a note instead. After a run finishes, the Reconstruction Explorer tab
+turns green until the next simulation starts. The voxel plot below the image
+(Spectrum / FID / time course) keeps at least 160 px of height, and the contrast
+defaults to **manual** with the full dataset range; coronal and sagittal CSI are
+reconstructed in their own encoding frame.
+
 ### Use Case 3: Parameter Sweep
 **Goal:** Analyze how simulation metrics change when varying a parameter (e.g., Flip Angle, TE, TR, $T_1$, $T_2$).
 
@@ -943,6 +1044,22 @@ bilateral renal cortex/medulla, and an explicitly voxelized major-vessel
 scaffold. Select `[1-13C]Pyruvate`, `[1-13C]Lactate`, `[1,5-13C2]Z-OMPD`, or a
 generic contrast tracer as the injected compound. Delivery remains normalized
 to the entered dose for every preset.
+
+The **Injected compound** group has a **Nucleus** selector. With ¹³C the
+hyperpolarized compounds above are offered; with ¹H the mouse holds eight thermal
+tissue-water pools (muscle, kidney cortex and medulla, liver, lung, blood, brain
+and urine) with 7 T rodent proton density, T1 and T2 per tissue, and the
+compound list contains only **Gadolinium contrast agent (DCE)** and **None
+(tissue water only)**. For ¹H the designer hides the polarization, the HP
+relaxation spins (only the solver decay stays, as **Transverse decay**),
+delivery weights, tissue clearance, renal excretion and the Metabolism & pH tab.
+The **Contrast agent kinetics (1H DCE)** group, shown for ¹H with the contrast
+agent, holds the relaxivities r1 and r2, the physiology (whole-body plasma
+compartments and glomerular filtration into the urinary tract) and per-tissue
+extended-Tofts parameters with arrival delays. The concentration maps become
+piecewise-constant ΔR1 / ΔR2 epochs on the tissue-water pools in the
+fast-exchange limit, in both the reference and the spin-major kernel. Legacy
+¹H files that store a ¹³C compound open as **None**.
 
 In **Injected perfusion**, enter **Injection concentration** in mM and
 **Injection volume** in µl. The derived amount is shown in µmol; for example,
