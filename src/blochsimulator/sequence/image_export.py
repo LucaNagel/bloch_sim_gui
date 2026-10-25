@@ -849,8 +849,9 @@ def _radial_series(context: _Context) -> list[ImageSeries]:
 def _csi_series(context: _Context) -> list[ImageSeries]:
     """Return signal maps of a phase-encoded CSI acquisition.
 
-    The spatial encoding of the simulated CSI runs along scanner ``x``
-    (columns) and ``y`` (rows).  The total map is the magnitude of the first
+    The spatial encoding of the simulated CSI runs along the read (columns)
+    and phase (rows) directions of its encoding frame, scanner ``x`` and
+    ``y`` for an axial plane.  The total map is the magnitude of the first
     FID point.  Pool-resolved results give one map per pool; otherwise peaks
     listed in ``pool_frequency_offsets_hz`` are integrated over a window of
     the magnitude spectrum.
@@ -871,15 +872,20 @@ def _csi_series(context: _Context) -> list[ImageSeries]:
     slice_offset = definition_float(context.definitions, "SliceOffset") or 0.0
     read_offset = definition_float(context.definitions, "ReadOffset") or 0.0
     phase_offset = definition_float(context.definitions, "PhaseOffset") or 0.0
-    position = (
-        float(x_positions[0] + read_offset),
-        float(y_positions[0] + phase_offset),
-        float(slice_offset),
+    basis = _cartesian_basis(context)
+    read_direction = _unit(basis[:, 0])
+    phase_direction = _unit(basis[:, 1])
+    normal = np.cross(read_direction, phase_direction)
+    position = tuple(
+        float(value)
+        for value in (x_positions[0] + read_offset) * np.asarray(read_direction)
+        + (y_positions[0] + phase_offset) * np.asarray(phase_direction)
+        + slice_offset * normal
     )
     common = dict(
         kind=model.kind,
-        row_direction=(1.0, 0.0, 0.0),
-        column_direction=(0.0, 1.0, 0.0),
+        row_direction=read_direction,
+        column_direction=phase_direction,
         pixel_spacing_m=(fov_y_m / ny, fov_x_m / nx),
         slice_thickness_m=context.slice_thickness_m(),
         acquisition_type="2D",
