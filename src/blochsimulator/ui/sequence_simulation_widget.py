@@ -172,6 +172,7 @@ from .spectral_spatial_designer import (
 from .magnetization_viewer import MagnetizationViewer
 from .spin_minimum import ZeroToMinimum, minimum_ms_from_message, spin_boxes
 from .spoiling_analysis_view import SpoilingAnalysisSnapshot, SpoilingAnalysisView
+from .psf_analysis_view import PSFAnalysisContext, PSFAnalysisView
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
 from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumViewer
 from .project_export_dialog import ProjectExportNamingWidget
@@ -1448,6 +1449,7 @@ class SequenceSimulationWidget(QWidget):
     # Emitted with "ideal" or "gradient" whenever the spoiler mode is applied.
     spoiler_mode_changed = pyqtSignal(str)
     spoiling_analysis_requested = pyqtSignal()
+    psf_analysis_requested = pyqtSignal()
 
     # Generated-sequence forms (notably EPI, CSI, and FLASH) need enough
     # room for a label and its editor alongside the vertical scroll bar.
@@ -2606,6 +2608,16 @@ class SequenceSimulationWidget(QWidget):
         self.sequence_info = QLabel()
         self.sequence_info.setWordWrap(True)
         sequence_layout.addWidget(self.sequence_info)
+        self.psf_analysis_link = QLabel("<a href='psf-analysis'>Show PSF Analysis</a>")
+        self.psf_analysis_link.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        self.psf_analysis_link.setToolTip(
+            "Open the PSF Analysis tab to simulate the point-spread function "
+            "and slice profile of this sequence."
+        )
+        self.psf_analysis_link.linkActivated.connect(
+            lambda _link: self.psf_analysis_requested.emit()
+        )
+        sequence_layout.addWidget(self.psf_analysis_link)
         self.sequence_summary_table = QTableWidget(0, 2)
         self.sequence_summary_table.setHorizontalHeaderLabels(["Parameter", "Value"])
         self.sequence_summary_table.verticalHeader().setVisible(False)
@@ -3999,7 +4011,11 @@ class SequenceSimulationWidget(QWidget):
         self.slice_selection_group.hide()
         controls_layout.addWidget(self.slice_selection_group)
 
-        # The main window shows this view as its own tab in gradient mode.
+        # The main window shows these views as their own tabs.
+        self.psf_analysis_view = PSFAnalysisView()
+        self.psf_analysis_view.context_provider = self._psf_analysis_context
+        self.psf_analysis_view.token_provider = self._psf_analysis_token
+        self.psf_analysis_view.nucleus_provider = lambda: self.nucleus.currentText()
         self.spoiling_analysis_view = SpoilingAnalysisView()
         self.spoiling_analysis_view.apply_recommendation_requested.connect(
             self._apply_current_recommended_spin_grid
@@ -12659,6 +12675,46 @@ class SequenceSimulationWidget(QWidget):
         points = int(getattr(phantom, "spectral_points", self.probe_points.value()))
         if self.probe_points.minimum() <= points <= self.probe_points.maximum():
             self.probe_points.setValue(points)
+
+    def _psf_analysis_token(self):
+        return (self._sequence_revision, id(self.program))
+
+    def _psf_analysis_context(self):
+        """Return the current sequence for the PSF Analysis tab.
+
+        Raises ``ValueError`` with a message for the user instead of opening
+        dialogs, because the tab shows it next to its Compute button.
+        """
+        if self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES:
+            if not self._ensure_current_generated_sequence():
+                raise ValueError(
+                    self._generation_error
+                    or "Generate a valid sequence before computing the PSF."
+                )
+        if self.program is None:
+            raise ValueError(
+                "Choose or load a sequence in Sequence Mode, or click Generate "
+                "sequence first."
+            )
+        if self.worker is not None and self.worker.isRunning():
+            raise ValueError("Wait for the sequence simulation to finish.")
+        if self.probe_worker is not None and self.probe_worker.isRunning():
+            raise ValueError("Wait for the spin probe to finish.")
+        # A separate simulator keeps the PSF thread from racing a later
+        # sequence simulation over shared state such as last_result.
+        simulator = BlochSimulator(
+            use_parallel=True,
+            num_threads=self.simulator.num_threads,
+            sequence_kernel=self.simulator.sequence_kernel,
+            dynamic_sequence_kernel=self.simulator.dynamic_sequence_kernel,
+        )
+        return PSFAnalysisContext(
+            program=self.program,
+            simulator=simulator,
+            simulation_timestep_s=self.simulation_timestep_us.value() * 1e-6,
+            title=self.sequence_source.currentText(),
+            token=self._psf_analysis_token(),
+        )
 
     def _can_start_probe(self):
         if self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES:
