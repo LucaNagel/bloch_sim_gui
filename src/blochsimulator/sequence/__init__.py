@@ -75,6 +75,19 @@ from .flip_angles import (
     variable_flip_angle_schedule,
 )
 from .probe import SequenceProbeResult
+from .psf import (
+    AxisPSFMetrics,
+    CartesianPSFLayout,
+    PointSource,
+    PSFResult,
+    SliceProfileMetrics,
+    SliceProfileResult,
+    cartesian_psf_layouts,
+    estimate_psf,
+    estimate_slice_profile,
+    psf_from_result,
+    simulate_point_sources,
+)
 from .reference import ReferenceSimulationResult, simulate_reference_sequence
 from .result import SequenceSimulationResult
 from .spin_sampling import SpinSampling
@@ -238,6 +251,17 @@ __all__ = [
     "SequenceReconstructionModel",
     "SpinProbeEnsemble",
     "SpinSampling",
+    "AxisPSFMetrics",
+    "CartesianPSFLayout",
+    "PointSource",
+    "PSFResult",
+    "SliceProfileMetrics",
+    "SliceProfileResult",
+    "cartesian_psf_layouts",
+    "estimate_psf",
+    "estimate_slice_profile",
+    "psf_from_result",
+    "simulate_point_sources",
     "SpinGridRecommendation",
     "SpoilerTrainAnalysis",
     "WeightedPathwayError",
