@@ -22,6 +22,7 @@ import numpy as np
 from pathlib import Path
 from ..position_sampling import AXIS_NAMES, centered_stride_indices, infer_layout
 from ..visualization import ImageExporter
+from .colormaps import COLORMAP_NAMES, colormap
 
 
 class MagnetizationViewer(QWidget):
@@ -258,15 +259,12 @@ class MagnetizationViewer(QWidget):
         self.vector_palette_combo = QComboBox()
         self.vector_palette_combo.setObjectName("mag_3d_vector_palette")
         self.vector_palette_combo.addItems(
-            [
-                "Rainbow",
-                "Viridis",
-                "Plasma",
-                "Magma",
-                "Cividis",
-                "Inferno",
-                "Gray",
-                "White",
+            ["Rainbow", "White", "Gray"]
+            # Capitalized like the names older projects store, e.g. "Viridis".
+            + [
+                name[:1].upper() + name[1:]
+                for name in COLORMAP_NAMES
+                if name not in ("gray", "gray_r")
             ]
         )
         self.vector_palette_combo.setToolTip(
@@ -1494,7 +1492,10 @@ class MagnetizationViewer(QWidget):
             level = int(round(90 + 165 * fraction))
             return QColor(level, level, level)
         try:
-            cmap = pg.colormap.get(palette.lower())
+            name = palette
+            if name not in COLORMAP_NAMES:
+                name = name[:1].lower() + name[1:]
+            cmap = colormap(name)
             position = 0.5 if total == 1 else index / (total - 1)
             return cmap.map(position, mode="qcolor")
         except Exception:

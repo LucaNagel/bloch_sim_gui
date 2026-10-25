@@ -1946,6 +1946,314 @@ def make_pulseq_press(
     return sequence
 
 
+@dataclass(frozen=True)
+class SliceFidTimingPlan:
+    """Shortest feasible slice-selective FID timing for the requested values."""
+
+    spectral_bandwidth_hz: float
+    dwell_s: float
+    minimum_acquisition_delay_s: float
+    minimum_repetition_time_s: float
+
+
+# Right-handed read and phase axes whose cross product is the slice normal.
+_SLICE_FID_IN_PLANE_AXES = {
+    "+x": ("+y", "+z"),
+    "-x": ("+y", "-z"),
+    "+y": ("+z", "+x"),
+    "-y": ("+z", "-x"),
+    "+z": ("+x", "+y"),
+    "-z": ("+x", "-y"),
+}
+
+
+def make_pulseq_slice_fid(
+    *,
+    slice_thickness_m: float = 5e-3,
+    slice_offset_m: float = 0.0,
+    slice_axis: str = "+z",
+    in_plane_extent_m: float = 0.1,
+    spectral_bandwidth_hz: float = 4000.0,
+    spectral_points: int = 512,
+    acquisition_delay_s: float | None = None,
+    repetition_time_s: float = 1.0,
+    repetitions: int = 1,
+    flip_angle_deg: float = 90.0,
+    rf_pulse_type: str = "sinc",
+    rf_duration_s: float = 2.6e-3,
+    rf_time_bandwidth_product: float = 4.0,
+    rf_apodization: float = 0.5,
+    rf_slr_sharpness: int = 1,
+    rf_custom_waveform_hz: Sequence[complex] | None = None,
+    rf_custom_raster_s: float | None = None,
+    rf_custom_flip_angle_deg: float | None = None,
+    rf_custom_name: str | None = None,
+    rf_spectral_spatial_pulse=None,
+    rf_frequency_offset_hz: float = 0.0,
+    rephase_duration_s: float = 1e-3,
+    spoil_after_readout: bool = True,
+    spoiler_cycles_per_slice: float = 4.0,
+    spoiler_duration_s: float = 2e-3,
+    scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
+    nucleus: str = "H1",
+    timing_only: bool = False,
+):
+    """Build a slice-selective FID (pulse-acquire) spectroscopy sequence.
+
+    Each repetition excites one slice, rewinds the slice-selection moment
+    after the RF centre and acquires the FID without a readout gradient, so
+    the spectrum integrates every spin in the slice. ``acquisition_delay_s``
+    is the time from the RF centre to the first ADC sample; None takes the
+    shortest delay. A gradient spoiler of ``spoiler_cycles_per_slice`` cycles
+    across the slice thickness follows each FID when enabled.
+
+    The acquisition is labelled as a 1x1 CSI grid. ``in_plane_extent_m`` is
+    only the nominal in-plane FOV of that grid, because no in-plane encoding
+    is applied. With ``timing_only=True`` a :class:`SliceFidTimingPlan` is
+    returned.
+    """
+    pp = _pypulseq()
+    axis_code = str(slice_axis).lower()
+    if axis_code not in _SLICE_FID_IN_PLANE_AXES:
+        raise ValueError("slice_axis must be +x, -x, +y, -y, +z, or -z")
+    encoding_frame = EncodingFrame.from_read_phase_axes(
+        *_SLICE_FID_IN_PLANE_AXES[axis_code]
+    )
+    spectral_points = _positive_integer(spectral_points, "spectral_points")
+    repetitions = _positive_integer(repetitions, "repetitions")
+    for name, value in {
+        "slice_thickness_m": slice_thickness_m,
+        "in_plane_extent_m": in_plane_extent_m,
+        "spectral_bandwidth_hz": spectral_bandwidth_hz,
+        "repetition_time_s": repetition_time_s,
+        "flip_angle_deg": flip_angle_deg,
+        "rf_duration_s": rf_duration_s,
+        "rephase_duration_s": rephase_duration_s,
+        "spoiler_duration_s": spoiler_duration_s,
+    }.items():
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be positive and finite")
+    if not np.isfinite(spoiler_cycles_per_slice) or spoiler_cycles_per_slice < 0:
+        raise ValueError("spoiler_cycles_per_slice must be non-negative and finite")
+    for name, value in {
+        "slice_offset_m": slice_offset_m,
+        "rf_frequency_offset_hz": rf_frequency_offset_hz,
+    }.items():
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+    if acquisition_delay_s is not None and (
+        not np.isfinite(acquisition_delay_s) or acquisition_delay_s <= 0
+    ):
+        raise ValueError("acquisition_delay_s must be positive and finite")
+    if nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
+        raise ValueError(f"unknown nucleus: {nucleus}")
+
+    system = pp.Opts(
+        **ScannerParameters.from_mapping(scanner_parameters).to_pypulseq_kwargs(),
+        gamma=NUCLEUS_GAMMA_HZ_PER_T[nucleus],
+    )
+    raster = system.block_duration_raster
+    dwell = (
+        round(1.0 / float(spectral_bandwidth_hz) / system.adc_raster_time)
+        * system.adc_raster_time
+    )
+    if dwell <= 0:
+        raise ValueError("spectral bandwidth exceeds the ADC raster capability")
+    actual_bandwidth = 1.0 / dwell
+
+    raw_excitation, actual_rf_duration_s, effective_rf_tbw, rf_pulse_type = (
+        _make_slice_selective_rf_events(
+            pp,
+            system,
+            flip_angle_schedule_deg=(flip_angle_deg,),
+            slice_thickness_m=slice_thickness_m,
+            rf_pulse_type=rf_pulse_type,
+            rf_duration_s=rf_duration_s,
+            rf_time_bandwidth_product=rf_time_bandwidth_product,
+            rf_apodization=rf_apodization,
+            rf_slr_sharpness=rf_slr_sharpness,
+            rf_custom_waveform_hz=rf_custom_waveform_hz,
+            rf_custom_raster_s=rf_custom_raster_s,
+            rf_custom_flip_angle_deg=rf_custom_flip_angle_deg,
+            rf_frequency_offset_hz=rf_frequency_offset_hz,
+            rf_spectral_spatial_pulse=rf_spectral_spatial_pulse,
+            spatial_offset_m=slice_offset_m,
+            nucleus=nucleus,
+        )
+    )
+    excitation, excitation_gradient = raw_excitation[0]
+    excitation_frequency_hz = rf_frequency_offset_hz
+    if rf_pulse_type != "spectral_spatial":
+        excitation_frequency_hz += float(excitation_gradient.amplitude) * slice_offset_m
+    excitation_center, _ = pp.calc_rf_center(excitation)
+    excitation.freq_offset = excitation_frequency_hz
+    excitation.phase_offset = pulseq_phase_offset_rad(
+        0.0,
+        frequency_offset_hz=excitation_frequency_hz,
+        event_center_s=excitation_center,
+    )
+    excitation_gradient = _remap_gradient_event(
+        excitation_gradient, encoding_frame, "partition"
+    )
+    rephaser = _feasible_role_trapezoid(
+        pp,
+        encoding_frame,
+        "partition",
+        area=_slice_rephase_area(
+            excitation,
+            excitation_gradient,
+            encoding_frame,
+            rf_pulse_type=rf_pulse_type,
+            gradient_raster_s=system.grad_raster_time,
+        ),
+        minimum_duration_s=rephase_duration_s,
+        system=system,
+    )
+    spoiler = None
+    if spoil_after_readout and spoiler_cycles_per_slice > 0:
+        spoiler = _feasible_role_trapezoid(
+            pp,
+            encoding_frame,
+            "partition",
+            area=float(spoiler_cycles_per_slice) / float(slice_thickness_m),
+            minimum_duration_s=spoiler_duration_s,
+            system=system,
+        )
+
+    excitation_block = float(pp.calc_duration(excitation, excitation_gradient))
+    excitation_offset = float(excitation.delay + excitation_center)
+    rephase_block = float(pp.calc_duration(rephaser))
+    minimum_adc_delay = float(system.adc_dead_time)
+    # Fixed time from the RF centre to the start of the ADC block.
+    to_adc_block = excitation_block - excitation_offset + rephase_block
+    minimum_delay = to_adc_block + minimum_adc_delay + dwell / 2.0
+    spoiler_block = 0.0 if spoiler is None else float(pp.calc_duration(spoiler))
+
+    def repetition_length(adc_wait: float, adc_delay: float) -> float:
+        adc_duration = adc_delay + spectral_points * dwell
+        return (
+            excitation_block
+            + rephase_block
+            + adc_wait
+            + _ceil_to_raster(adc_duration, raster)
+            + spoiler_block
+        )
+
+    if timing_only:
+        return SliceFidTimingPlan(
+            spectral_bandwidth_hz=actual_bandwidth,
+            dwell_s=dwell,
+            minimum_acquisition_delay_s=minimum_delay,
+            minimum_repetition_time_s=repetition_length(0.0, minimum_adc_delay),
+        )
+    requested_delay = (
+        minimum_delay if acquisition_delay_s is None else (float(acquisition_delay_s))
+    )
+    if requested_delay < minimum_delay - 1e-12:
+        raise ValueError(
+            f"acquisition_delay_s is too short; minimum is {minimum_delay:.9g} s"
+        )
+    # A block delay on the block raster plus the remainder in the ADC delay
+    # on the RF raster places the first sample at the requested time.
+    to_first_sample = requested_delay - to_adc_block
+    adc_wait = max(
+        0.0,
+        np.floor((to_first_sample - minimum_adc_delay - dwell / 2.0 + 1e-12) / raster)
+        * raster,
+    )
+    adc_delay = max(
+        minimum_adc_delay,
+        round((to_first_sample - adc_wait - dwell / 2.0) / system.rf_raster_time)
+        * system.rf_raster_time,
+    )
+    adc = pp.make_adc(
+        num_samples=spectral_points, dwell=dwell, delay=adc_delay, system=system
+    )
+    adc_block_delay = pp.make_delay(_ceil_to_raster(pp.calc_duration(adc), raster))
+    actual_delay = to_adc_block + adc_wait + adc_delay + dwell / 2.0
+    repetition_minimum = repetition_length(adc_wait, adc_delay)
+    tr_delay = float(repetition_time_s) - repetition_minimum
+    if tr_delay < -1e-12:
+        raise ValueError(
+            "repetition_time_s is too short; minimum is " f"{repetition_minimum:.9g} s"
+        )
+    tr_delay = _ceil_to_raster(max(0.0, tr_delay), raster)
+    actual_tr = repetition_minimum + tr_delay
+
+    sequence = pp.Sequence(system)
+    spoiler_end_times = []
+    acquisition_start_times = []
+    for repetition in range(repetitions):
+        acquisition_start_times.append(_sequence_duration_s(sequence))
+        sequence.add_block(excitation, excitation_gradient)
+        sequence.add_block(rephaser)
+        if adc_wait:
+            sequence.add_block(pp.make_delay(adc_wait))
+        sequence.add_block(
+            adc,
+            adc_block_delay,
+            pp.make_label("LIN", "SET", 0),
+            pp.make_label("PAR", "SET", 0),
+            pp.make_label("REP", "SET", repetition),
+        )
+        if spoiler is not None:
+            sequence.add_block(spoiler)
+            spoiler_end_times.append(_sequence_duration_s(sequence))
+        if tr_delay:
+            sequence.add_block(pp.make_delay(tr_delay))
+
+    _raise_for_timing_errors(sequence, "Slice-selective FID")
+    fov = (float(in_plane_extent_m), float(in_plane_extent_m), slice_thickness_m)
+    sequence.set_definition("Name", "slice_fid")
+    sequence.set_definition("TrajectoryType", "slice_selective_fid")
+    sequence.set_definition("FOV", list(fov))
+    sequence.set_definition("MatrixSize", [1, 1, spectral_points])
+    set_pulseq_encoding_definitions(
+        sequence, encoding_frame, fov_m=fov, matrix=(1, 1, 1)
+    )
+    sequence.set_definition("SliceThickness", slice_thickness_m)
+    sequence.set_definition("SliceOffset", slice_offset_m)
+    sequence.set_definition("SliceGradientAxis", axis_code)
+    sequence.set_definition("SpectralBandwidth", actual_bandwidth)
+    sequence.set_definition("SpectralPoints", spectral_points)
+    sequence.set_definition("SpectralResolution", actual_bandwidth / spectral_points)
+    sequence.set_definition("AcquisitionDelay", actual_delay)
+    sequence.set_definition("MinimumAcquisitionDelay", minimum_delay)
+    sequence.set_definition("TE", actual_delay)
+    sequence.set_definition("TR", actual_tr)
+    sequence.set_definition("MinimumRepetitionTime", repetition_minimum)
+    sequence.set_definition("Repetitions", repetitions)
+    sequence.set_definition("VolumeInterval", actual_tr)
+    _set_acquisition_interval_definitions(
+        sequence,
+        requested_interval_s=None,
+        actual_intervals_s=(actual_tr,) * repetitions,
+        minimum_intervals_s=(repetition_minimum,) * repetitions,
+        start_times_s=acquisition_start_times,
+    )
+    sequence.set_definition("FlipAngleDeg", float(flip_angle_deg))
+    _set_rf_definitions(
+        sequence,
+        pulse_type=rf_pulse_type,
+        requested_duration_s=rf_duration_s,
+        actual_duration_s=actual_rf_duration_s,
+        time_bandwidth_product=effective_rf_tbw,
+        apodization=rf_apodization,
+        slr_sharpness=rf_slr_sharpness,
+        custom_name=rf_custom_name,
+        custom_flip_angle_deg=rf_custom_flip_angle_deg,
+        frequency_offset_hz=rf_frequency_offset_hz,
+        spectral_spatial_pulse=rf_spectral_spatial_pulse,
+    )
+    sequence.set_definition("SpoilAfterReadout", spoiler is not None)
+    sequence.set_definition("SpoilerCyclesPerSlice", float(spoiler_cycles_per_slice))
+    sequence.set_definition("SpoilerDuration", spoiler_duration_s)
+    sequence.set_definition("SpoilerEndTimes", spoiler_end_times)
+    sequence.set_definition("IdealSpoilerEndTimes", spoiler_end_times)
+    sequence.set_definition("Nucleus", str(nucleus))
+    return sequence
+
+
 def make_pulseq_bssfp(
     *,
     fov_m: Sequence[float] = (0.22, 0.22, 0.16),

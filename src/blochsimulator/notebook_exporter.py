@@ -3885,6 +3885,7 @@ def export_pulseq_generation_notebook(
         "flash": "make_pulseq_flash",
         "slice_selection": "make_pulseq_slice_selection",
         "press": "make_pulseq_press",
+        "slice_fid": "make_pulseq_slice_fid",
         "inversion_recovery": "make_pulseq_inversion_recovery",
         "bssfp_3d": "make_pulseq_bssfp",
         "spectral_bssfp_3d": "make_pulseq_spectral_selective_bssfp",
@@ -3896,7 +3897,8 @@ def export_pulseq_generation_notebook(
     except KeyError as exc:
         raise ValueError(
             "sequence_kind must be 'epi', 'epsi_mge', 'spiral', 'csi', 'flash', "
-            "'slice_selection', 'press', 'inversion_recovery', 'bssfp_3d', "
+            "'slice_selection', 'press', 'slice_fid', 'inversion_recovery', "
+            "'bssfp_3d', "
             "'spectral_bssfp_3d', 'me_bssfp_3d', or 'radial_me_bssfp_3d'"
         ) from exc
     notebook_path = Path(filename)

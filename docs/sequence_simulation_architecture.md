@@ -216,7 +216,8 @@ FID with `LIN = PAR = 0` and `REP`, and has no phase encoding. A 1×1 grid
 therefore skips the moment validation: the crusher and slab moments after
 the last refocusing pulse are refocused by the echo itself. Inference returns
 one FID per repetition as a `SpectroscopicAcquisition` with
-`matrix == (1, 1)`.
+`matrix == (1, 1)`. The slice-selective FID (`make_pulseq_slice_fid`) is
+labelled the same way and integrates the whole excited slice.
 
 The localisation is physical. Only the intersection of the three slabs forms
 the double spin echo, and the crusher pairs dephase everything else across

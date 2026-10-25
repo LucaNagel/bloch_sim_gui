@@ -211,60 +211,31 @@ def test_t1_fit_masks_background_and_validates_input():
         fit_inversion_recovery_t1(inversion_times[:2], np.zeros(2))
 
 
-def test_gui_inversion_controls_feed_epi_and_flash(qt_application):
+def test_gui_epi_and_flash_forms_leave_inversion_to_the_ir_source(qt_application):
     from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
 
     widget = SequenceSimulationWidget()
     try:
+        # Inversion recovery has its own source; FLASH and EPI never invert.
+        for prefix in ("epi", "flash"):
+            assert not hasattr(widget, f"{prefix}_inversion_times_ms")
+            assert not hasattr(widget, f"{prefix}_inversion_enabled")
+        assert hasattr(widget, "ir_inversion_times_ms")
+        assert "inversion_times_s" not in widget._epi_pulseq_parameters()
+        assert "inversion_times_s" not in widget._flash_pulseq_parameters()
+
         widget.sequence_live_preview.setChecked(True)
-        widget.sequence_source.setCurrentIndex(widget.EPI_SOURCE)
-        widget.read_matrix.setValue(4)
-        widget.phase_matrix.setValue(4)
-        widget.epi_repetitions.setValue(4)
-        assert not widget.epi_inversion_times_ms.isEnabled()
-        widget.epi_inversion_times_ms.setText("50, 500")
-        widget.epi_inversion_enabled.setChecked(True)
+        widget.sequence_source.setCurrentIndex(widget.FLASH_SOURCE)
         qt_application.processEvents()
+        assert not widget.program.metadata["definitions"].get("InversionRecovery")
 
-        assert widget.epi_inversion_times_ms.isEnabled()
-        definitions = widget.program.metadata["definitions"]
-        assert definitions["InversionRecovery"]
-        assert definitions["InversionTimes"] == pytest.approx(
-            [0.05, 0.5, 0.05, 0.5], abs=1e-5
-        )
-        # The interval is raised so the longest TI fits.
-        assert widget.epi_repetition_time_ms.value() >= 500.0
-        assert "Shortest TI" in widget.epi_inversion_info.text()
-        assert "2 complete series" in widget.epi_inversion_info.text()
-
-        widget.epi_inversion_times_ms.setText("50, abc")
-        with pytest.raises(ValueError, match="Inversion times"):
-            widget._epi_pulseq_parameters()
-        widget.epi_inversion_times_ms.setText("50, 500")
-
+        widget.sequence_source.setCurrentIndex(widget.EPI_SOURCE)
         widget.epi_readout_trajectory.setCurrentText("Spiral")
         qt_application.processEvents()
-        assert not widget.epi_inversion_enabled.isEnabled()
         assert "inversion_times_s" not in widget._spiral_pulseq_parameters()
         assert not widget._spectral_spatial_schedule_supported("epi")
         widget.epi_readout_trajectory.setCurrentText("Cartesian EPI")
         assert widget._spectral_spatial_schedule_supported("epi")
-
-        widget.sequence_source.setCurrentIndex(widget.FLASH_SOURCE)
-        widget.flash_inversion_times_ms.setText("3000")
-        widget.flash_inversion_pulse_type.setCurrentIndex(1)
-        widget.flash_inversion_enabled.setChecked(True)
-        qt_application.processEvents()
-        definitions = widget.program.metadata["definitions"]
-        assert definitions["InversionPulseType"] == "sinc"
-        assert np.atleast_1d(definitions["InversionTimes"])[0] == pytest.approx(
-            3.0, abs=1e-5
-        )
-        # FLASH measures TI to the centre line, so its minimum spans half
-        # the phase-encoding train.
-        minimum_text = widget.flash_inversion_info.text()
-        minimum_ms = float(minimum_text.split("Shortest TI ")[1].split(" ms")[0])
-        assert minimum_ms > widget.flash_repetition_time_ms.value()
     finally:
         widget.close()
         widget.deleteLater()
