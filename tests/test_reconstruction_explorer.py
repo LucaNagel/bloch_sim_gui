@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import xarray as xr
 from PyQt5.QtWidgets import QSlider
 
@@ -328,6 +329,7 @@ def test_explorer_uses_two_handle_contrast_slider(qt_application):
 def test_auto_contrast_tracks_minimum_and_maximum_of_selected_image(qt_application):
     dataset = _framed_cartesian_dataset()
     explorer = SequenceReconstructionExplorer()
+    explorer.auto_contrast.setChecked(True)
     explorer.set_dataset(dataset)
 
     first_image = np.abs(dataset.cartesian_image.isel(cartesian_frame=0))
@@ -348,6 +350,7 @@ def test_auto_contrast_includes_negative_values_of_selected_component(
 ):
     dataset = _framed_cartesian_dataset()
     explorer = SequenceReconstructionExplorer()
+    explorer.auto_contrast.setChecked(True)
     explorer.set_dataset(dataset)
 
     explorer._set_combo_data(explorer.component_combo, "real")
@@ -357,6 +360,25 @@ def test_auto_contrast_includes_negative_values_of_selected_component(
     expected = (selected_image.min().item(), selected_image.max().item())
     np.testing.assert_allclose(explorer.contrast_slider.values(), expected)
     np.testing.assert_allclose(explorer.image_panel.image.levels, expected)
+
+
+def test_manual_contrast_is_default_and_starts_at_the_full_dataset_range(
+    qt_application,
+):
+    dataset = _framed_cartesian_dataset()
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(dataset)
+
+    assert not explorer.auto_contrast.isChecked()
+    assert explorer.contrast_slider.isEnabled()
+    high = 1.1 * np.abs(dataset.cartesian_image).max().item()
+    np.testing.assert_allclose(explorer.contrast_slider.values(), (0.0, high))
+
+    # A much weaker result does not collapse the kept range to one value.
+    weak = dataset.copy(deep=True)
+    weak["cartesian_image"] = weak.cartesian_image * 1e-6
+    explorer.set_dataset(weak)
+    np.testing.assert_allclose(explorer.contrast_slider.values(), (0.0, 1e-6 * high))
 
 
 def test_manual_contrast_survives_navigation_from_strong_to_weak_echo(
@@ -404,6 +426,7 @@ def test_manual_contrast_domain_covers_all_slices_with_headroom_and_survives_nav
 ):
     dataset = _sliced_cartesian_dataset()
     explorer = SequenceReconstructionExplorer()
+    explorer.auto_contrast.setChecked(True)
     explorer.set_dataset(dataset)
     slice_control = explorer.outer_controls["slice"]
 
@@ -643,6 +666,24 @@ def test_dynamic_explorer_plots_voxel_time_course(qt_application):
     image = np.asarray(dataset["cartesian_image"])
     np.testing.assert_allclose(course.xData, [0.0, 1.0])
     np.testing.assert_allclose(course.yData, np.abs(image[[1, 3], 2, 4]))
+
+
+def test_reappearing_voxel_plot_gets_its_share_of_the_height(qt_application):
+    dataset = _framed_cartesian_dataset().assign_coords(
+        cartesian_frame_first_adc_time_s=("cartesian_frame", [0.0, 0.01, 1.0, 1.01])
+    )
+    explorer = SequenceReconstructionExplorer()
+    explorer.resize(1400, 900)
+    explorer.show()
+    explorer.set_dataset(_sliced_cartesian_dataset())
+    qt_application.processEvents()
+    assert explorer.spectrum_plot.isHidden()
+
+    explorer.set_dataset(dataset)
+    qt_application.processEvents()
+    images, plot = explorer.result_splitter.sizes()
+    assert plot == pytest.approx(0.4 * (images + plot), abs=2)
+    explorer.close()
 
 
 def test_single_frame_explorer_hides_voxel_plot(qt_application):
