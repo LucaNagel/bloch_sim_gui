@@ -8,8 +8,8 @@ without a slice (unselective excitation) project through the whole phantom.
 
 With that grid the phantom is resampled onto the image plane (averaged over
 the slab), the footprint of a selected voxel is turned into an oriented box,
-the phantom cells inside it are summarised, and region boundaries become a
-contour overlay for the reconstruction.
+the phantom cells inside it are summarised, and region boundaries become
+outline segments for the reconstruction.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from .sequence_geometry_viewer import (
 
 # Display samples per image pixel and slab samples are capped so a large
 # phantom never makes a selection change slow.
-MAX_IN_PLANE_UPSAMPLING = 8
+MAX_IN_PLANE_UPSAMPLING = 16
 MAX_DISPLAY_SIZE = 512
 MAX_DEPTH_SAMPLES = 64
 MAX_VOLUME_UPSAMPLING = 4
@@ -643,45 +643,71 @@ def _region_labels(resampled: ResampledPhantom) -> np.ndarray:
     return np.where(inside, labels, -1)
 
 
-def contour_rgba(resampled: ResampledPhantom) -> np.ndarray:
-    """Return region boundaries as an RGBA image of the resampled shape.
-
-    The object outline is cyan; boundaries between regions take the colour
-    of the region they belong to (categories) or of their level (maps,
-    quantised into ``CONTOUR_LEVELS`` bands).
-    """
-    labels = _region_labels(resampled)
-    boundary = np.zeros(labels.shape, dtype=bool)
-    outline = np.zeros(labels.shape, dtype=bool)
-    for axis in range(labels.ndim):
-        for shift in (1, -1):
-            neighbour = np.roll(labels, shift, axis=axis)
-            edge = [slice(None)] * labels.ndim
-            edge[axis] = 0 if shift == 1 else -1
-            differs = labels != neighbour
-            differs[tuple(edge)] = False
-            # Each boundary is drawn on its inner side only.
-            boundary |= differs & (labels >= 0)
-            outline |= differs & (labels >= 0) & (neighbour < 0)
-    rgba = np.zeros(labels.shape + (4,), dtype=np.ubyte)
+def _boundary_color(resampled: ResampledPhantom, labels: np.ndarray) -> np.ndarray:
+    """RGB of region ``labels`` (categories or quantised map levels)."""
     contrast = resampled.contrast
     if contrast is not None and contrast.categorical and resampled.labels:
         colors = np.asarray(
             [contrast.categories[label][1] for label in resampled.labels],
             dtype=np.ubyte,
         )
-        inner = np.clip(labels, 0, len(colors) - 1)
-        rgba[boundary, :3] = colors[inner][boundary]
-    elif contrast is not None:
+        return colors[np.clip(labels, 0, len(colors) - 1)]
+    if contrast is not None:
         lookup = pg.colormap.get(CONTRAST_COLORMAP).getLookupTable(
             0.0, 1.0, CONTOUR_LEVELS, alpha=False
         )
-        rgba[boundary, :3] = np.asarray(lookup, dtype=np.ubyte)[
+        return np.asarray(lookup, dtype=np.ubyte)[
             np.clip(labels, 0, CONTOUR_LEVELS - 1)
-        ][boundary]
-    rgba[outline, :3] = OUTLINE_COLOR
-    rgba[boundary | outline, 3] = CONTOUR_ALPHA
-    return rgba
+        ]
+    return np.tile(np.asarray(OUTLINE_COLOR, dtype=np.ubyte), (len(labels), 1))
+
+
+def contour_segments(resampled: ResampledPhantom):
+    """Return region boundaries of a planar resampling as line segments.
+
+    The lines run along the edges of the display samples, which follow the
+    phantom cells, so the outline keeps the phantom resolution however
+    coarse the image is.  Each entry is ``(rgba, points)``: consecutive rows
+    of ``points`` are the two ends of one segment, in image-pixel units
+    along the two array axes (pixel ``i`` spans ``[i, i + 1]``).  The object
+    outline is cyan; a boundary between two regions takes the colour of
+    the region with the higher category index or map level.
+    """
+    labels = _region_labels(resampled)
+    up = np.asarray(resampled.upsampling[:2], dtype=float)
+    starts, ends, outer, inner = [], [], [], []
+    for axis in range(2):
+        lower = labels[:-1, :] if axis == 0 else labels[:, :-1]
+        upper = labels[1:, :] if axis == 0 else labels[:, 1:]
+        rows, cols = np.nonzero(lower != upper)
+        # The edge between sample k and k + 1 lies at k + 1 along ``axis``.
+        start = np.stack([rows, cols], axis=-1).astype(float)
+        start[:, axis] += 1.0
+        end = start.copy()
+        end[:, 1 - axis] += 1.0
+        a, b = lower[rows, cols], upper[rows, cols]
+        starts.append(start)
+        ends.append(end)
+        outer.append((a < 0) | (b < 0))
+        inner.append(np.maximum(a, b))
+    starts = np.concatenate(starts) / up
+    ends = np.concatenate(ends) / up
+    outer = np.concatenate(outer)
+    inner = np.concatenate(inner)
+    colors = _boundary_color(resampled, inner)
+    colors[outer] = OUTLINE_COLOR
+    segments = []
+    for color in np.unique(colors, axis=0):
+        chosen = np.all(colors == color, axis=1)
+        points = np.empty((2 * int(np.count_nonzero(chosen)), 2))
+        points[0::2] = starts[chosen]
+        points[1::2] = ends[chosen]
+        segments.append(
+            (tuple(int(value) for value in color) + (CONTOUR_ALPHA,), points)
+        )
+    # Region boundaries first, so the object outline is drawn on top.
+    segments.sort(key=lambda item: item[0][:3] == tuple(OUTLINE_COLOR))
+    return segments
 
 
 @dataclass

@@ -21,6 +21,7 @@ from blochsimulator.ui.sequence_simulation_widget import (
     SequenceSimulationThread,
     SequenceSimulationWidget,
 )
+from blochsimulator.ui.styles import RESULT_READY_TAB_COLOR
 from blochsimulator.ui.widgets import IMAGE_CANVAS_BACKGROUND, IMAGE_FOV_BORDER
 
 
@@ -430,6 +431,30 @@ def test_new_sequence_run_clears_previous_signal_and_images():
     assert "current simulation" in widget.spectrum_info.text().lower()
     assert "current simulation" in widget.kspace_info.text().lower()
     assert "current simulation" in widget.reconstruction_info.text().lower()
+    widget.close()
+    app.processEvents()
+
+
+def test_reconstruction_explorer_tab_turns_green_until_the_next_run():
+    app = QApplication.instance() or QApplication([])
+    widget = SequenceSimulationWidget()
+    widget.object_source.setCurrentIndex(1)
+    widget.nucleus.setCurrentText("C13")
+    widget.matrix_size.setValue(2)
+    widget.z_matrix_size.setValue(1)
+    widget._build_phantom()
+    result = BlochSimulator(use_parallel=False).simulate_sequence(
+        widget.program, widget.phantom
+    )
+    tabs = widget.views.tabBar()
+    index = widget.reconstruction_explorer_tab_index
+    assert not tabs.tabTextColor(index).isValid()
+
+    widget._finished(result, record_run=False)
+    assert tabs.tabTextColor(index).name() == RESULT_READY_TAB_COLOR
+
+    widget._clear_previous_simulation_views()
+    assert not tabs.tabTextColor(index).isValid()
     widget.close()
     app.processEvents()
 
