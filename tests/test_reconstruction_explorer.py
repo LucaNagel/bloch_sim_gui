@@ -425,7 +425,11 @@ def test_explorer_keeps_3d_image_and_kspace_slice_positions_independent(
     explorer = SequenceReconstructionExplorer()
     explorer.set_dataset(_cartesian_3d_dataset())
 
-    assert explorer.volume_pages.count() == 2
+    # Image, k-space and a phantom tab that stays hidden without a phantom.
+    assert explorer.volume_pages.count() == 3
+    assert not explorer.volume_pages.isTabVisible(
+        explorer.volume_pages.indexOf(explorer.phantom_volume)
+    )
     explorer._set_volume_indices(explorer.image_volume, (0, 1, 2))
     explorer._set_volume_indices(explorer.kspace_volume, (4, 3, 0))
     explorer.image_volume.sliders[0].setValue(1)
