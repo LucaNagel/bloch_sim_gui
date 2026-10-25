@@ -1525,6 +1525,22 @@ class BlochSimulatorGUI(QMainWindow):
         self._spoiling_analysis_placed = False
         self.tab_widget.currentChanged.connect(self._ensure_spoiling_analysis_workspace)
 
+        # Sequence Mode only; the view lives in the sequence widget and moves
+        # here when the tab is first opened.
+        self.psf_analysis_page = QWidget()
+        self.psf_analysis_page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        psf_layout = QVBoxLayout(self.psf_analysis_page)
+        psf_layout.setContentsMargins(0, 0, 0, 0)
+        psf_layout.addWidget(
+            QLabel("Open this tab to compute the point-spread function.")
+        )
+        psf_layout.addStretch()
+        self.psf_analysis_tab_index = self.tab_widget.addTab(
+            self.psf_analysis_page, "PSF Analysis"
+        )
+        self._psf_analysis_placed = False
+        self.tab_widget.currentChanged.connect(self._ensure_psf_analysis_workspace)
+
         # === TEMPORARY SESSION SIMULATIONS ===
         # This intentionally lives next to Phantom + B1 and is separate from
         # the persistent, file-based Project Explorer in the File menu.
@@ -1773,6 +1789,9 @@ class BlochSimulatorGUI(QMainWindow):
         self.sequence_simulation_widget.spoiling_analysis_requested.connect(
             self._open_spoiling_analysis_tab
         )
+        self.sequence_simulation_widget.psf_analysis_requested.connect(
+            self._open_psf_analysis_tab
+        )
         self._update_spoiling_analysis_tab_visibility()
         self.sequence_parameter_loop_panel_layout.addWidget(
             self.sequence_simulation_widget.parameter_loop_group
@@ -1828,6 +1847,24 @@ class BlochSimulatorGUI(QMainWindow):
                 widget.deleteLater()
         layout.addWidget(self.sequence_simulation_widget.spoiling_analysis_view)
         self._spoiling_analysis_placed = True
+
+    def _ensure_psf_analysis_workspace(self, index):
+        if index != self.psf_analysis_tab_index or self._psf_analysis_placed:
+            return
+        self._ensure_sequence_simulation_workspace(self.sequence_simulation_tab_index)
+        layout = self.psf_analysis_page.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+        layout.addWidget(self.sequence_simulation_widget.psf_analysis_view)
+        self._psf_analysis_placed = True
+
+    def _open_psf_analysis_tab(self):
+        if getattr(self, "workspace_mode", None) == "sequence":
+            self.tab_widget.setCurrentIndex(self.psf_analysis_tab_index)
 
     def _open_spoiling_analysis_tab(self):
         if self._spoiling_analysis_tab_wanted():
@@ -5945,6 +5982,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self.b1_combo_tab_index,
                 self.receiver_noise_tab_index,
                 self.spoiling_analysis_tab_index,
+                self.psf_analysis_tab_index,
                 self.simulation_explorer_tab_index,
                 self.sequence_parameter_loop_tab_index,
             }:
@@ -5982,6 +6020,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self.b1_tab_index,
                 self.b1_combo_tab_index,
                 self.receiver_noise_tab_index,
+                self.psf_analysis_tab_index,
                 self.simulation_explorer_tab_index,
             }
             if self.sequence_parameter_loop_tab_opened:
@@ -6005,6 +6044,7 @@ class BlochSimulatorGUI(QMainWindow):
                     self.b1_combo_tab_index,
                     self.receiver_noise_tab_index,
                     self.spoiling_analysis_tab_index,
+                    self.psf_analysis_tab_index,
                     self.simulation_explorer_tab_index,
                     self.sequence_parameter_loop_tab_index,
                 }:
@@ -6031,6 +6071,7 @@ class BlochSimulatorGUI(QMainWindow):
             self._set_main_tab_visible(self.b1_combo_tab_index, False)
             self._set_main_tab_visible(self.receiver_noise_tab_index, False)
             self._set_main_tab_visible(self.spoiling_analysis_tab_index, False)
+            self._set_main_tab_visible(self.psf_analysis_tab_index, False)
             self._set_main_tab_visible(self.simulation_explorer_tab_index, False)
             self._set_main_tab_visible(self.sequence_parameter_loop_tab_index, False)
             free_geometry = getattr(self, "_free_workspace_geometry", None)

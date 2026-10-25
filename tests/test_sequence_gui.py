@@ -732,9 +732,8 @@ def test_session_simulations_tab_is_next_to_phantom_b1_and_accepts_runs():
 
     assert window.receiver_noise_tab_index == window.b1_combo_tab_index + 1
     assert window.spoiling_analysis_tab_index == window.receiver_noise_tab_index + 1
-    assert (
-        window.simulation_explorer_tab_index == window.spoiling_analysis_tab_index + 1
-    )
+    assert window.psf_analysis_tab_index == window.spoiling_analysis_tab_index + 1
+    assert window.simulation_explorer_tab_index == window.psf_analysis_tab_index + 1
     assert window.tab_widget.tabText(window.simulation_explorer_tab_index) == (
         "Simulations"
     )
