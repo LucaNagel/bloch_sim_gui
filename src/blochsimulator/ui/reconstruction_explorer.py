@@ -66,6 +66,9 @@ _VOXEL_COLOR = (255, 0, 255)
 # Initial width of the control column and smallest phantom overview height.
 _CONTROLS_WIDTH = 420
 _OVERVIEW_MIN_HEIGHT = 150
+# Share of the result height the voxel plot gets when it appears.
+_VOXEL_PLOT_SHARE = 0.4
+_VOXEL_PLOT_MIN_HEIGHT = 160
 
 
 def _colormap(name: str):
@@ -104,6 +107,8 @@ class _DoubleRangeSlider(QWidget):
         super().__init__(parent)
         self._domain = (0.0, 1.0)
         self._values = (0.0, 1.0)
+        # The first domain shows its full range; later domains keep the choice.
+        self._range_chosen = False
         self._active_handle = 0
         self._dragging = False
         self.setFocusPolicy(Qt.StrongFocus)
@@ -124,9 +129,10 @@ class _DoubleRangeSlider(QWidget):
             low, high = 0.0, 1.0
         if high <= low:
             high = np.nextafter(low, np.inf)
+        keep = preserve and self._range_chosen
         previous = self._values
         self._domain = (low, high)
-        self.set_values(*(previous if preserve else (low, high)), emit=False)
+        self.set_values(*(previous if keep else (low, high)), emit=False)
 
     def set_values(self, low: float, high: float, *, emit=True):
         domain_low, domain_high = self._domain
@@ -136,6 +142,7 @@ class _DoubleRangeSlider(QWidget):
             low, high = high, low
         changed = (low, high) != self._values
         self._values = (low, high)
+        self._range_chosen = True
         self.update()
         if changed and emit:
             self.valuesChanged.emit(low, high)
@@ -538,6 +545,8 @@ class SequenceReconstructionExplorer(QWidget):
         two_d_layout = QVBoxLayout(self.two_d_page)
         two_d_layout.setContentsMargins(0, 0, 0, 0)
         result_splitter = QSplitter(Qt.Vertical)
+        result_splitter.setChildrenCollapsible(False)
+        self.result_splitter = result_splitter
         images = QSplitter(Qt.Horizontal)
         self.kspace_panel = _SelectableImagePanel("Gridded k-space")
         self.image_panel = _SelectableImagePanel("Reconstruction")
@@ -565,9 +574,12 @@ class SequenceReconstructionExplorer(QWidget):
         self.spectrum_plot.setLabel("left", "Signal", "a.u.")
         self.spectrum_plot.setLabel("bottom", "Frequency", "Hz")
         self.spectrum_plot.addLegend()
+        self.spectrum_plot.setMinimumHeight(_VOXEL_PLOT_MIN_HEIGHT)
         result_splitter.addWidget(self.spectrum_plot)
         result_splitter.setStretchFactor(0, 3)
         result_splitter.setStretchFactor(1, 2)
+        self._voxel_plot_share = _VOXEL_PLOT_SHARE
+        result_splitter.splitterMoved.connect(self._voxel_plot_resized)
         two_d_layout.addWidget(result_splitter, 1)
         self.pages.addWidget(self.two_d_page)
 
@@ -717,11 +729,10 @@ class SequenceReconstructionExplorer(QWidget):
         contrast_group = QGroupBox("Contrast")
         contrast_layout = QVBoxLayout(contrast_group)
         self.auto_contrast = QCheckBox("Auto contrast")
-        self.auto_contrast.setChecked(True)
+        self.auto_contrast.setChecked(False)
         self.auto_contrast.toggled.connect(self._contrast_mode_changed)
         contrast_layout.addWidget(self.auto_contrast)
         self.contrast_slider = _DoubleRangeSlider()
-        self.contrast_slider.setEnabled(False)
         self.contrast_slider.valuesChanged.connect(self._contrast_range_changed)
         contrast_layout.addWidget(self.contrast_slider)
         range_row = QHBoxLayout()
@@ -1009,7 +1020,22 @@ class SequenceReconstructionExplorer(QWidget):
         available = self.voxel_plot_combo.count() > 0
         self.voxel_plot_label.setVisible(available)
         self.voxel_plot_combo.setVisible(available)
+        reappearing = available and self.spectrum_plot.isHidden()
         self.spectrum_plot.setVisible(available)
+        if reappearing:
+            self._restore_voxel_plot_height()
+
+    def _restore_voxel_plot_height(self):
+        # A splitter gives a re-shown widget only its minimum height.
+        total = sum(self.result_splitter.sizes())
+        if total > 0:
+            plot = int(round(total * self._voxel_plot_share))
+            self.result_splitter.setSizes([total - plot, plot])
+
+    def _voxel_plot_resized(self, *_):
+        sizes = self.result_splitter.sizes()
+        if self.spectrum_plot.isVisible() and sum(sizes) > 0:
+            self._voxel_plot_share = sizes[1] / sum(sizes)
 
     def _time_course_dimension(self):
         """Return the outer dimension that orders dynamic acquisitions."""
@@ -1354,6 +1380,10 @@ class SequenceReconstructionExplorer(QWidget):
             display_high = 1e-6
         self.contrast_slider.set_domain(0.0, display_high, preserve=True)
         selected_low, selected_high = self.contrast_slider.values()
+        if selected_high <= selected_low:
+            # A much weaker result collapses the kept range; show all of it.
+            self.contrast_slider.set_domain(0.0, display_high, preserve=False)
+            selected_low, selected_high = self.contrast_slider.values()
         self._update_contrast_labels(selected_low, selected_high)
         if selected_high <= selected_low:
             selected_high = np.nextafter(selected_low, np.inf)
@@ -1827,11 +1857,12 @@ class SequenceReconstructionExplorer(QWidget):
             )
             contrast_range = state.get("contrast_range", ())
             if isinstance(contrast_range, (list, tuple)) and len(contrast_range) == 2:
-                self.contrast_slider.set_values(
-                    float(contrast_range[0]), float(contrast_range[1]), emit=False
+                # The saved range becomes the domain until the data replaces it.
+                self.contrast_slider.set_domain(
+                    float(contrast_range[0]), float(contrast_range[1]), preserve=False
                 )
                 self._update_contrast_labels(*self.contrast_slider.values())
-            automatic = bool(state.get("auto_contrast", True))
+            automatic = bool(state.get("auto_contrast", False))
             self.auto_contrast.setChecked(automatic)
             self.contrast_slider.setEnabled(not automatic)
             self.colormap_combo.setCurrentText(str(state.get("colormap", "gray")))
