@@ -420,8 +420,11 @@ def apply_receiver_noise(result, settings: ReceiverNoise):
     if calibration is not None:
         if result.metadata.get("signal_weighting") != "voxel_volume":
             raise ValueError(
-                "Calibrated receiver noise requires physical voxel-volume "
-                "signal weighting"
+                "Calibrated receiver noise needs a signal in physical units, but "
+                "this result was simulated with the relative voxel sum. Rerun "
+                "the simulation with the calibrated noise mode selected (it "
+                "switches Signal weighting to 'Physical voxel volume (3D)') and "
+                "apply the noise to that result."
             )
     if settings.mode == "off":
         sigma, event_std = 0.0, [0.0] * len((context or {}).get("adc_dwell_s", ()))

@@ -33,6 +33,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..sequence.reconstruction import SequenceReconstructionModel
+from .colormaps import COLORMAP_NAMES, colormap
 from .volume_viewer import VolumeViewerWidget
 from .widgets import IMAGE_CANVAS_BACKGROUND, style_image_item
 
@@ -42,12 +43,7 @@ _IMAGE_INTERPOLATION_FACTOR = 8
 
 def _colormap(name: str):
     """Return a pyqtgraph colormap, including a dependency-free gray map."""
-    if name == "gray":
-        return pg.ColorMap(
-            np.asarray([0.0, 1.0]),
-            np.asarray([[0, 0, 0, 255], [255, 255, 255, 255]], dtype=np.ubyte),
-        )
-    return pg.colormap.get(name)
+    return colormap(name)
 
 
 def _display_lut(name: str, strength: float, size: int = 256):
@@ -507,9 +503,7 @@ class SequenceReconstructionExplorer(QWidget):
         self.kspace_scale_combo.currentIndexChanged.connect(self._refresh)
         appearance_layout.addRow("K-space view", self.kspace_scale_combo)
         self.colormap_combo = QComboBox()
-        self.colormap_combo.addItems(
-            ["gray", "viridis", "plasma", "magma", "cividis", "inferno", "turbo"]
-        )
+        self.colormap_combo.addItems(COLORMAP_NAMES)
         self.colormap_combo.setToolTip("Color palette for the reconstructed image")
         self.colormap_combo.currentTextChanged.connect(self._refresh)
         appearance_layout.addRow("Colormap", self.colormap_combo)

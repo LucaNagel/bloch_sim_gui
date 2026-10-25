@@ -367,6 +367,27 @@ series.
 the number of restored samples. `inversion_recovery_signal` is the forward
 model. The fit is not yet wired into the Reconstruction Explorer.
 
+### Slice-Selective FID
+
+`make_pulseq_slice_fid` builds a pulse-acquire sequence from one slice:
+
+- **Excitation:** slice-selective RF on `slice_axis` (±x, ±y, ±z) with
+  `slice_thickness_m` and `slice_offset_m`; the RF frequency carries the
+  offset.
+- **Rewinder:** the slice-selection moment after the RF centre is rewound
+  in `rephase_duration_s`.
+- **Readout:** the FID is acquired without a read gradient, so the spectrum
+  sums every spin in the slice. `acquisition_delay_s` is the time from the
+  RF centre to the first sample; None takes the shortest delay.
+- **Spoiler:** `spoiler_cycles_per_slice` cycles across the slice thickness
+  after each FID when `spoil_after_readout` is set.
+
+Like PRESS it is labelled as a 1×1 CSI grid (`TrajectoryType`
+`slice_selective_fid`); `in_plane_extent_m` is only the nominal in-plane FOV
+of that grid. `timing_only=True` returns a `SliceFidTimingPlan` with the
+delay and TR minimums. The GUI source is "Slice-selective FID
+(spectroscopy)".
+
 ### Single-Voxel PRESS
 
 `make_pulseq_press` builds a PRESS sequence:

@@ -71,6 +71,7 @@ from ..visualization import (
     imageio as vz_imageio,
 )
 from ..slice_explorer import SliceSelectionExplorer
+from ..paths import get_app_data_dir
 from ..project_io import load_project, save_project
 from ..project_naming import ProjectExportNamer, project_timestamp
 from ..units import NUCLEUS_GAMMA_HZ_PER_T, gradient_t_per_m_to_g_per_cm
@@ -94,7 +95,10 @@ try:
 except ImportError:
     KSPACE_AVAILABLE = False
 
+from .colormaps import COLORMAP_NAMES, colormap
 from .widgets import CheckableComboBox, install_spin_box_wheel_guard
+from .widget_state import capture_widget_state as _capture_widget_state
+from .widget_state import restore_widget_state as _restore_widget_state
 from .threads import SimulationThread
 from .tissue_parameters import TissueParameterWidget
 from .rf_pulse_designer import RFPulseDesigner
@@ -168,97 +172,6 @@ def _view_title(text: str) -> QLabel:
     label.setFont(font)
     label.setVisible(False)
     return label
-
-
-def _capture_widget_state(owner):
-    """Capture direct, user-editable Qt attributes without serializing Qt itself."""
-    state = {}
-    for name, widget in vars(owner).items():
-        if isinstance(widget, QComboBox):
-            state[name] = {
-                "type": "combo",
-                "index": widget.currentIndex(),
-                "text": widget.currentText(),
-            }
-        elif isinstance(widget, (QSpinBox, QDoubleSpinBox, QSlider)):
-            state[name] = {"type": "value", "value": widget.value()}
-        elif isinstance(widget, QCheckBox):
-            state[name] = {"type": "checked", "value": widget.isChecked()}
-        elif isinstance(widget, QLineEdit):
-            state[name] = {"type": "text", "value": widget.text()}
-    return state
-
-
-def _restore_widget_state(owner, state, *, block_signals=False):
-    for name, saved in state.items():
-        widget = getattr(owner, name, None)
-        if widget is None:
-            continue
-        previous_blocked = widget.blockSignals(True) if block_signals else None
-        try:
-            kind = saved.get("type")
-            if kind == "combo" and isinstance(widget, QComboBox):
-                text = str(saved.get("text", ""))
-                index = widget.findText(text)
-                if index < 0 and text:
-                    # Older project files may use equivalent numeric formatting,
-                    # e.g. "7T" while the current item is "7.0T".
-                    try:
-                        saved_number = float(text.removesuffix("T").strip())
-                    except ValueError:
-                        saved_number = None
-                    if saved_number is not None:
-                        for candidate in range(widget.count()):
-                            candidate_text = widget.itemText(candidate)
-                            try:
-                                if np.isclose(
-                                    float(candidate_text.removesuffix("T").strip()),
-                                    saved_number,
-                                ):
-                                    index = candidate
-                                    break
-                            except ValueError:
-                                continue
-                if index < 0:
-                    saved_index = int(saved.get("index", -1))
-                    index = (
-                        saved_index
-                        if 0 <= saved_index < widget.count()
-                        else widget.currentIndex()
-                    )
-                if index >= 0:
-                    widget.setCurrentIndex(index)
-            elif kind == "value" and isinstance(
-                widget, (QSpinBox, QDoubleSpinBox, QSlider)
-            ):
-                value = saved["value"]
-                if isinstance(widget, (QSpinBox, QSlider)):
-                    value = int(round(float(value)))
-                widget.setValue(value)
-            elif kind == "checked" and isinstance(widget, QCheckBox):
-                widget.setChecked(bool(saved["value"]))
-            elif kind == "text" and isinstance(widget, QLineEdit):
-                widget.setText(str(saved.get("value", "")))
-        finally:
-            if block_signals:
-                widget.blockSignals(previous_blocked)
-
-
-def get_app_data_dir() -> Path:
-    """Return a writable per-user application directory."""
-    override = os.environ.get("BLOCH_APP_DIR")
-    if override:
-        return Path(override).expanduser()
-
-    system = sys.platform
-    if system.startswith("win"):
-        root = Path(os.environ.get("APPDATA", Path.home()))
-    elif system == "darwin":
-        root = Path.home() / "Library" / "Application Support"
-    else:
-        root = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-
-    return root / "BlochSimulator"
 
 
 class BlochSimulatorGUI(QMainWindow):
@@ -856,9 +769,7 @@ class BlochSimulatorGUI(QMainWindow):
         colormap_layout.setContentsMargins(0, 0, 0, 0)
         colormap_layout.addWidget(QLabel("Heatmap colormap:"))
         self.heatmap_colormap = QComboBox()
-        self.heatmap_colormap.addItems(
-            ["viridis", "plasma", "magma", "cividis", "inferno", "gray"]
-        )
+        self.heatmap_colormap.addItems(COLORMAP_NAMES)
         self.heatmap_colormap.setCurrentText("viridis")
         self.heatmap_colormap.currentTextChanged.connect(self._apply_heatmap_colormap)
         colormap_layout.addWidget(self.heatmap_colormap)
@@ -4127,7 +4038,7 @@ class BlochSimulatorGUI(QMainWindow):
             cmap_name = self.heatmap_colormap.currentText()
         cmap_name = cmap_name or "viridis"
         try:
-            cmap = pg.colormap.get(cmap_name)
+            cmap = colormap(cmap_name)
         except Exception:
             cmap = cmap_name  # fall back to string name if lookup fails
 

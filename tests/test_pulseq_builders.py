@@ -1213,6 +1213,7 @@ def test_sequence_workspace_builds_and_exports_configurable_fov(tmp_path):
         "RF + Slice Selection",
         "PRESS (single voxel)",
         "Inversion Recovery (2D)",
+        "Slice-selective FID (spectroscopy)",
     ]
 
     widget.epi_read_fov_mm.setValue(80.0)

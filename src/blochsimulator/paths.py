@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 
@@ -24,3 +25,20 @@ def workspace_directory(name: str) -> Path:
     path = workspace_root() / name
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def get_app_data_dir() -> Path:
+    """Return a writable per-user application directory."""
+    override = os.environ.get("BLOCH_APP_DIR")
+    if override:
+        return Path(override).expanduser()
+
+    system = sys.platform
+    if system.startswith("win"):
+        root = Path(os.environ.get("APPDATA", Path.home()))
+    elif system == "darwin":
+        root = Path.home() / "Library" / "Application Support"
+    else:
+        root = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+
+    return root / "BlochSimulator"

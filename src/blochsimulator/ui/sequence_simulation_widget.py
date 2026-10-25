@@ -34,8 +34,10 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QHeaderView,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QProgressBar,
@@ -108,6 +110,7 @@ from ..sequence import (
     make_pulseq_slice_selection,
     make_pulseq_me_bssfp,
     make_pulseq_press,
+    make_pulseq_slice_fid,
     make_pulseq_radial_me_bssfp,
     make_pulseq_spectral_selective_bssfp,
     make_pulseq_spiral,
@@ -189,6 +192,14 @@ from .sequence_geometry_viewer import (
     sequence_geometry_from_definitions,
 )
 from .receiver_noise import ReceiverNoiseWidget
+from .sequence_presets import (
+    STARTUP_PRESET_KEY,
+    SequencePresetStore,
+    apply_sequence_preset,
+    capture_sequence_preset,
+    read_preset_file,
+    write_preset_file,
+)
 from .sequence_export_dialog import SequenceExportDialog
 from .simulation_explorer import SessionSimulationRun
 from .styles import (
@@ -984,6 +995,12 @@ def _infer_sequence_acquisition(program, compiled):
                 f"repetitions={csi.num_repetitions}; "
                 f"BW={csi.spectral_bandwidth_hz:.6g} Hz"
             )
+        elif definitions.get("TrajectoryType") == "slice_selective_fid":
+            note = (
+                f"Slice-selective FID; {csi.spectral_points} points; "
+                f"repetitions={csi.num_repetitions}; "
+                f"BW={csi.spectral_bandwidth_hz:.6g} Hz"
+            )
         else:
             note = (
                 f"2D CSI {csi.matrix[0]}×{csi.matrix[1]}×{csi.spectral_points}; "
@@ -1484,12 +1501,14 @@ class SequenceSimulationWidget(QWidget):
     SLICE_SELECTION_SOURCE = 10
     PRESS_SOURCE = 11
     INVERSION_RECOVERY_SOURCE = 12
+    SLICE_FID_SOURCE = 13
     GENERATED_SOURCES = frozenset(
         (
             *range(EPI_SOURCE, EPSI_MGE_SOURCE + 1),
             SLICE_SELECTION_SOURCE,
             PRESS_SOURCE,
             INVERSION_RECOVERY_SOURCE,
+            SLICE_FID_SOURCE,
         )
     )
     CONFIGURABLE_SOURCES = GENERATED_SOURCES | {INTERNAL_SOURCE}
@@ -1653,6 +1672,7 @@ class SequenceSimulationWidget(QWidget):
             else "physical"
         )
         self.workspace_defaults = WorkspaceDefaults.from_settings(settings)
+        self.sequence_preset_store = SequencePresetStore()
         self.scanner_parameters = load_scanner_parameters(settings)
         try:
             animation_memory_budget_mib = float(
@@ -1778,10 +1798,139 @@ class SequenceSimulationWidget(QWidget):
         self.views.setCurrentIndex(self.geometry_tab_index)
 
     def _load_default_sequence(self) -> None:
-        """Start with a generated 2D FLASH and fall back to the internal FID."""
+        """Start with a generated 2D FLASH and fall back to the internal FID.
+
+        A startup preset chosen in the Presets menu replaces the FLASH default.
+        """
         self.sequence_source.setCurrentIndex(self.FLASH_SOURCE)
         if not self._reload_selected_generated_sequence():
             self.sequence_source.setCurrentIndex(self.INTERNAL_SOURCE)
+        startup = self.startup_sequence_preset()
+        if startup and self.sequence_preset_store.exists(startup):
+            try:
+                apply_sequence_preset(self, self.sequence_preset_store.load(startup))
+            except Exception as exc:
+                self.status.setText(f"Startup preset {startup!r} not loaded: {exc}")
+
+    def startup_sequence_preset(self) -> str:
+        if self.app_settings is None:
+            return ""
+        return str(self.app_settings.value(STARTUP_PRESET_KEY, "") or "")
+
+    def set_startup_sequence_preset(self, name: str) -> None:
+        if self.app_settings is not None:
+            self.app_settings.setValue(STARTUP_PRESET_KEY, name)
+
+    def _rebuild_sequence_presets_menu(self) -> None:
+        menu = self.sequence_presets_menu
+        menu.clear()
+        menu.addAction(
+            "Save current settings as preset…", self._save_sequence_preset_dialog
+        )
+        names = self.sequence_preset_store.names()
+        load_menu = menu.addMenu("Load preset")
+        delete_menu = menu.addMenu("Delete preset")
+        startup_menu = menu.addMenu("Startup preset")
+        startup = self.startup_sequence_preset()
+        default_action = startup_menu.addAction("Built-in default (FLASH)")
+        default_action.setCheckable(True)
+        default_action.setChecked(startup not in names)
+        default_action.triggered.connect(lambda: self.set_startup_sequence_preset(""))
+        startup_menu.addSeparator()
+        for name in names:
+            load_menu.addAction(name, lambda name=name: self.load_sequence_preset(name))
+            delete_menu.addAction(
+                name, lambda name=name: self._delete_sequence_preset(name)
+            )
+            action = startup_menu.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(name == startup)
+            action.triggered.connect(
+                lambda _checked=False, name=name: self.set_startup_sequence_preset(name)
+            )
+        for submenu in (load_menu, delete_menu):
+            submenu.setEnabled(bool(names))
+        menu.addSeparator()
+        menu.addAction("Import preset file…", self._import_sequence_preset)
+        menu.addAction("Export current settings…", self._export_sequence_preset)
+
+    def save_sequence_preset(self, name: str):
+        """Store the current sequence settings under a preset name."""
+        path = self.sequence_preset_store.save(name, capture_sequence_preset(self))
+        self.status.setText(f"Sequence preset saved: {path.stem}")
+        return path
+
+    def load_sequence_preset(self, name: str) -> None:
+        """Apply a stored preset to every sequence form and regenerate."""
+        try:
+            apply_sequence_preset(self, self.sequence_preset_store.load(name))
+        except Exception as exc:
+            QMessageBox.warning(self, "Load sequence preset", str(exc))
+            return
+        self.status.setText(f"Sequence preset loaded: {name}")
+
+    def _save_sequence_preset_dialog(self) -> None:
+        name, accepted = QInputDialog.getText(
+            self,
+            "Save sequence preset",
+            "Preset name (sequence settings only, no phantom or results):",
+            text=self.sequence_source.currentText(),
+        )
+        name = name.strip()
+        if not accepted or not name:
+            return
+        if self.sequence_preset_store.exists(name):
+            answer = QMessageBox.question(
+                self,
+                "Save sequence preset",
+                f"Replace the existing preset {name!r}?",
+            )
+            if answer != QMessageBox.Yes:
+                return
+        try:
+            self.save_sequence_preset(name)
+        except Exception as exc:
+            QMessageBox.warning(self, "Save sequence preset", str(exc))
+
+    def _delete_sequence_preset(self, name: str) -> None:
+        answer = QMessageBox.question(
+            self, "Delete sequence preset", f"Delete the preset {name!r}?"
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self.sequence_preset_store.delete(name)
+        if self.startup_sequence_preset() == name:
+            self.set_startup_sequence_preset("")
+        self.status.setText(f"Sequence preset deleted: {name}")
+
+    def _import_sequence_preset(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import sequence preset", "", "Sequence preset (*.json)"
+        )
+        if not path:
+            return
+        try:
+            preset = read_preset_file(Path(path))
+            self.sequence_preset_store.save(Path(path).stem, preset)
+            apply_sequence_preset(self, preset)
+        except Exception as exc:
+            QMessageBox.warning(self, "Import sequence preset", str(exc))
+            return
+        self.status.setText(f"Sequence preset imported: {Path(path).stem}")
+
+    def _export_sequence_preset(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export sequence preset",
+            f"{self.sequence_source.currentText()}.json",
+            "Sequence preset (*.json)",
+        )
+        if not path:
+            return
+        try:
+            write_preset_file(Path(path), capture_sequence_preset(self))
+        except Exception as exc:
+            QMessageBox.warning(self, "Export sequence preset", str(exc))
 
     def _connect_rf_designer(self, parent) -> None:
         """Subscribe to the main RF designer when hosted by the desktop app."""
@@ -1970,6 +2119,7 @@ class SequenceSimulationWidget(QWidget):
                 "slice_selection",
                 "press",
                 "ir",
+                "slice_fid",
             ):
                 duration_control = getattr(self, f"{prefix}_rf_duration_ms", None)
                 if duration_control is None:
@@ -2000,6 +2150,7 @@ class SequenceSimulationWidget(QWidget):
                 "slice_selection",
                 "press",
                 "ir",
+                "slice_fid",
             )
         ):
             self._request_generated_sequence_refresh()
@@ -2064,6 +2215,7 @@ class SequenceSimulationWidget(QWidget):
             "slice_selection",
             "press",
             "ir",
+            "slice_fid",
         ):
             if hasattr(self, f"{prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(prefix)
@@ -2185,6 +2337,7 @@ class SequenceSimulationWidget(QWidget):
             "slice_selection",
             "press",
             "ir",
+            "slice_fid",
         ):
             if self._selected_shared_rf_pulse_type(prefix) == "designer":
                 self._update_shared_rf_controls(prefix)
@@ -2272,6 +2425,7 @@ class SequenceSimulationWidget(QWidget):
             "slice_selection": self.slice_selection_thickness_mm,
             "press": self.press_slice_size_mm,
             "ir": self.ir_slice_thickness_mm,
+            "slice_fid": self.slice_fid_thickness_mm,
         }
         return float(controls[prefix].value()) / 1000.0
 
@@ -2332,6 +2486,7 @@ class SequenceSimulationWidget(QWidget):
             "slice_selection",
             "press",
             "ir",
+            "slice_fid",
         ):
             if hasattr(self, f"{control_prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(control_prefix)
@@ -2395,6 +2550,7 @@ class SequenceSimulationWidget(QWidget):
             "slice_selection",
             "press",
             "ir",
+            "slice_fid",
         ):
             if hasattr(self, f"{control_prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(control_prefix)
@@ -2491,6 +2647,7 @@ class SequenceSimulationWidget(QWidget):
             "slice_selection",
             "press",
             "ir",
+            "slice_fid",
         ):
             if hasattr(self, f"{control_prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(control_prefix)
@@ -2534,7 +2691,24 @@ class SequenceSimulationWidget(QWidget):
         sequence_title.setStyleSheet("font-weight: bold;")
         self.sequence_title = sequence_title
         sequence_layout.addWidget(sequence_title)
-        sequence_layout.addWidget(QLabel("Source / mode"))
+        source_row = QHBoxLayout()
+        source_row.addWidget(QLabel("Source / mode"))
+        source_row.addStretch(1)
+        self.sequence_presets_button = QToolButton()
+        self.sequence_presets_button.setText("Presets")
+        self.sequence_presets_button.setPopupMode(QToolButton.InstantPopup)
+        self.sequence_presets_button.setToolTip(
+            "Save and load named sequence settings (all sequence forms, RF "
+            "pulse, receiver noise and spoiler) without phantom or results, "
+            "and choose a preset to load at startup"
+        )
+        self.sequence_presets_menu = QMenu(self.sequence_presets_button)
+        self.sequence_presets_menu.aboutToShow.connect(
+            self._rebuild_sequence_presets_menu
+        )
+        self.sequence_presets_button.setMenu(self.sequence_presets_menu)
+        source_row.addWidget(self.sequence_presets_button)
+        sequence_layout.addLayout(source_row)
         self.sequence_source = QComboBox()
         self.sequence_source.addItems(
             [
@@ -2551,6 +2725,7 @@ class SequenceSimulationWidget(QWidget):
                 "RF + Slice Selection",
                 "PRESS (single voxel)",
                 "Inversion Recovery (2D)",
+                "Slice-selective FID (spectroscopy)",
             ]
         )
         self.sequence_source.currentIndexChanged.connect(self._source_changed)
@@ -2558,8 +2733,9 @@ class SequenceSimulationWidget(QWidget):
             "Build EPI, EPSI/MGE, CSI, FLASH, Cartesian bSSFP, spectrally "
             "selective bSSFP, Cartesian or radial multi-echo bSSFP "
             "interactively, inspect RF + Slice Selection, build single-voxel "
-            "PRESS spectroscopy or multi-slice inversion recovery for T1 "
-            "mapping, or load a Pulseq file"
+            "PRESS spectroscopy, slice-selective FID spectroscopy or "
+            "multi-slice inversion recovery for T1 mapping, or load a Pulseq "
+            "file"
         )
         sequence_layout.addWidget(self.sequence_source)
 
@@ -2930,9 +3106,6 @@ class SequenceSimulationWidget(QWidget):
             self.epi_repetition_time_ms,
         )
         acquisition_form.addRow("Repetitions", self.epi_repetitions)
-        self._add_inversion_controls(
-            acquisition_form, "epi", lambda *_: self._acquisition_changed()
-        )
         _add_form_section(acquisition_form, "Spoiling")
         acquisition_form.addRow("RF spoiling", self.epi_rf_spoiling)
         acquisition_form.addRow(
@@ -3365,6 +3538,98 @@ class SequenceSimulationWidget(QWidget):
         self.press_group.setVisible(False)
         controls_layout.addWidget(self.press_group)
 
+        self.slice_fid_group = QGroupBox("Slice-selective FID spectroscopy")
+        slice_fid_form = _left_aligned_form(self.slice_fid_group)
+        slice_fid_hint = QLabel(
+            "Pulse-acquire spectroscopy from one slice: a slice-selective "
+            "excitation, a rewinder of the slice-selection moment and an FID "
+            "acquired without a readout gradient, so the spectrum sums every "
+            "spin in the slice. A spoiler across the slice thickness follows "
+            "each FID when enabled."
+        )
+        slice_fid_hint.setWordWrap(True)
+        self.slice_fid_axis = QComboBox()
+        self.slice_fid_axis.addItems(["+X", "-X", "+Y", "-Y", "+Z", "-Z"])
+        self.slice_fid_axis.setCurrentText("+Z")
+        self.slice_fid_thickness_mm = self._parameter_spin(0.1, 1000.0, 5.0, " mm")
+        self.slice_fid_offset_mm = self._parameter_spin(-10000.0, 10000.0, 0.0, " mm")
+        self.slice_fid_offset_mm.setToolTip(
+            "Move the slice along its normal. The excitation shifts its RF "
+            "frequency, as a scanner does, so the exported .seq carries the "
+            "offset as well."
+        )
+        self.slice_fid_spectral_points = QSpinBox()
+        self.slice_fid_spectral_points.setRange(2, 65536)
+        self.slice_fid_spectral_points.setValue(512)
+        self.slice_fid_bandwidth_hz = QDoubleSpinBox()
+        self.slice_fid_bandwidth_hz.setRange(10.0, 1_000_000.0)
+        self.slice_fid_bandwidth_hz.setDecimals(3)
+        self.slice_fid_bandwidth_hz.setValue(4000.0)
+        self.slice_fid_bandwidth_hz.setSuffix(" Hz")
+        self.slice_fid_flip_angle_deg = self._parameter_spin(0.1, 360.0, 90.0, "°")
+        self.slice_fid_rephase_duration_ms = self._parameter_spin(
+            0.01, 100.0, 1.0, " ms"
+        )
+        self.slice_fid_acquisition_delay_ms = self._parameter_spin(
+            0.0, 10000.0, 0.0, " ms"
+        )
+        self.slice_fid_acquisition_delay_ms.setSpecialValueText("Shortest")
+        self.slice_fid_acquisition_delay_ms.setToolTip(
+            "Time from the RF centre to the first FID sample. 0 takes the "
+            "shortest delay the rewinder allows."
+        )
+        self.slice_fid_repetition_time_ms = self._parameter_spin(
+            0.1, 100000.0, 1000.0, " ms"
+        )
+        self.slice_fid_repetitions = QSpinBox()
+        self.slice_fid_repetitions.setRange(1, 10000)
+        self.slice_fid_repetitions.setValue(1)
+        self.slice_fid_spoil_after_readout = QCheckBox("Enable after each FID")
+        self.slice_fid_spoil_after_readout.setChecked(True)
+        self.slice_fid_spoiler_cycles_per_slice = self._parameter_spin(
+            0.0, 1000.0, 4.0, " cycles/slice"
+        )
+        self.slice_fid_spoiler_duration_ms = self._parameter_spin(
+            0.001, 1000.0, 2.0, " ms"
+        )
+        self.slice_fid_timing_info = QLabel()
+        self.slice_fid_timing_info.setWordWrap(True)
+        self.slice_fid_dwell_info = QLabel()
+        self.slice_fid_dwell_info.setWordWrap(True)
+        self.slice_fid_resolution_info = QLabel()
+        slice_fid_form.addRow(slice_fid_hint)
+        _add_form_section(slice_fid_form, "Slice")
+        slice_fid_form.addRow("Slice normal", self.slice_fid_axis)
+        slice_fid_form.addRow("Slice thickness", self.slice_fid_thickness_mm)
+        slice_fid_form.addRow("Slice offset", self.slice_fid_offset_mm)
+        _add_form_section(slice_fid_form, "Spectral sampling")
+        slice_fid_form.addRow("Spectral points", self.slice_fid_spectral_points)
+        slice_fid_form.addRow("Spectral bandwidth", self.slice_fid_bandwidth_hz)
+        _add_form_section(slice_fid_form, "Excitation")
+        slice_fid_form.addRow("Flip angle", self.slice_fid_flip_angle_deg)
+        self._add_shared_rf_controls(
+            slice_fid_form,
+            "slice_fid",
+            pulse_type="Sinc",
+            duration_ms=2.6,
+            sinc_lobes=3,
+        )
+        slice_fid_form.addRow("Rewinder duration", self.slice_fid_rephase_duration_ms)
+        _add_form_section(slice_fid_form, "Timing")
+        slice_fid_form.addRow("Acquisition delay", self.slice_fid_acquisition_delay_ms)
+        slice_fid_form.addRow("Repetition time (TR)", self.slice_fid_repetition_time_ms)
+        slice_fid_form.addRow("Repetitions", self.slice_fid_repetitions)
+        slice_fid_form.addRow("Shortest timing", self.slice_fid_timing_info)
+        _add_form_section(slice_fid_form, "Spoiling")
+        slice_fid_form.addRow("Gradient spoiler", self.slice_fid_spoil_after_readout)
+        slice_fid_form.addRow("Spoiler area", self.slice_fid_spoiler_cycles_per_slice)
+        slice_fid_form.addRow("Spoiler duration", self.slice_fid_spoiler_duration_ms)
+        _add_form_section(slice_fid_form, "Derived sampling")
+        slice_fid_form.addRow("ADC dwell", self.slice_fid_dwell_info)
+        slice_fid_form.addRow("Spectral resolution", self.slice_fid_resolution_info)
+        self.slice_fid_group.setVisible(False)
+        controls_layout.addWidget(self.slice_fid_group)
+
         self.flash_group = QGroupBox("FLASH acquisition (2D)")
         flash_form = _left_aligned_form(self.flash_group)
         self.flash_form = flash_form
@@ -3486,9 +3751,6 @@ class SequenceSimulationWidget(QWidget):
         flash_form.addRow(
             "Acquisition interval (start-to-start)",
             self.flash_acquisition_interval_ms,
-        )
-        self._add_inversion_controls(
-            flash_form, "flash", lambda *_: self._flash_changed()
         )
         _add_form_section(flash_form, "Spoiling")
         flash_form.addRow("RF spoiling", self.flash_rf_spoiling)
@@ -3639,9 +3901,7 @@ class SequenceSimulationWidget(QWidget):
         ir_form.addRow("Slice gap", self.ir_slice_gap_mm)
         ir_form.addRow("Slice package offset", self.ir_slice_offset_mm)
         ir_form.addRow("Slice order", self.ir_slice_order)
-        self._add_inversion_controls(
-            ir_form, "ir", lambda *_: self._ir_changed(), optional=False
-        )
+        self._add_inversion_controls(ir_form, "ir", lambda *_: self._ir_changed())
         ir_form.addRow("Slice TIs", self.ir_slice_ti_info)
         _add_form_section(ir_form, "Timing")
         ir_form.addRow("Echo time (TE)", self.ir_echo_time_ms)
@@ -5266,6 +5526,22 @@ class SequenceSimulationWidget(QWidget):
             self._press_changed
         )
         self.press_spoil_after_readout.toggled.connect(self._press_changed)
+        for widget in (
+            self.slice_fid_thickness_mm,
+            self.slice_fid_offset_mm,
+            self.slice_fid_spectral_points,
+            self.slice_fid_bandwidth_hz,
+            self.slice_fid_flip_angle_deg,
+            self.slice_fid_rephase_duration_ms,
+            self.slice_fid_acquisition_delay_ms,
+            self.slice_fid_repetition_time_ms,
+            self.slice_fid_repetitions,
+            self.slice_fid_spoiler_cycles_per_slice,
+            self.slice_fid_spoiler_duration_ms,
+        ):
+            widget.valueChanged.connect(self._slice_fid_changed)
+        self.slice_fid_axis.currentTextChanged.connect(self._slice_fid_changed)
+        self.slice_fid_spoil_after_readout.toggled.connect(self._slice_fid_changed)
         self._connect_three_dimensional_orientation_controls(
             self.press_read_gradient_axis,
             self.press_phase_gradient_axis,
@@ -5482,6 +5758,7 @@ class SequenceSimulationWidget(QWidget):
             ("slice_selection", self._slice_selection_changed),
             ("press", self._press_changed),
             ("ir", self._ir_changed),
+            ("slice_fid", self._slice_fid_changed),
         ):
             self._connect_shared_rf_controls(prefix, callback)
         for control in (
@@ -5559,6 +5836,7 @@ class SequenceSimulationWidget(QWidget):
         self._update_me_bssfp_labels()
         self._update_press_labels()
         self._update_ir_labels()
+        self._update_slice_fid_labels()
         self._object_source_changed()
         self._refresh_parameter_loop_parameters()
 
@@ -6504,20 +6782,8 @@ class SequenceSimulationWidget(QWidget):
         },
     }
 
-    def _add_inversion_controls(self, form, prefix, changed, *, optional=True):
-        """Add the inversion-recovery section of a form.
-
-        ``optional=False`` leaves out the on/off checkbox for forms that
-        always invert.
-        """
-        enabled = None
-        if optional:
-            enabled = QCheckBox("Before every repetition")
-            enabled.setToolTip(
-                "Prepend a 180° inversion, a crusher and a TI delay to every "
-                "repetition. TI runs from the inversion centre to the "
-                "excitation that samples the k-space centre of the first slice"
-            )
+    def _add_inversion_controls(self, form, prefix, changed):
+        """Add the inversion-recovery section of a form that always inverts."""
         mode = QComboBox()
         for label, value in self.INVERSION_MODE_CHOICES:
             mode.addItem(label, value)
@@ -6555,7 +6821,6 @@ class SequenceSimulationWidget(QWidget):
         info = QLabel()
         info.setWordWrap(True)
         for suffix, control in (
-            ("enabled", enabled),
             ("mode", mode),
             ("slab_factor", slab_factor),
             ("times_ms", times),
@@ -6564,15 +6829,9 @@ class SequenceSimulationWidget(QWidget):
             ("crusher_cycles_per_slice", crusher),
             ("info", info),
         ):
-            if control is None:
-                continue
             control.setObjectName(f"{prefix}_inversion_{suffix}")
             setattr(self, f"{prefix}_inversion_{suffix}", control)
         _add_form_section(form, "Inversion recovery")
-        if enabled is not None:
-            form.addRow("Inversion", enabled)
-            enabled.toggled.connect(lambda *_: self._update_inversion_controls(prefix))
-            enabled.toggled.connect(changed)
         form.addRow("Inversion mode", mode)
         form.addRow("Inversion slab", slab_factor)
         form.addRow("Inversion times (TI)", times)
@@ -6591,37 +6850,13 @@ class SequenceSimulationWidget(QWidget):
         crusher.valueChanged.connect(changed)
         self._update_inversion_controls(prefix)
 
-    def _inversion_active(self, prefix):
-        enabled = getattr(self, f"{prefix}_inversion_enabled", None)
-        return enabled is None or (enabled.isEnabled() and enabled.isChecked())
-
     def _update_inversion_controls(self, prefix):
-        enabled = getattr(self, f"{prefix}_inversion_enabled", None)
-        if prefix == "epi":
-            enabled.setEnabled(self.epi_readout_trajectory.currentText() != "Spiral")
-        active = self._inversion_active(prefix)
-        for suffix in (
-            "mode",
-            "times_ms",
-            "pulse_type",
-            "duration_ms",
-            "crusher_cycles_per_slice",
-        ):
-            getattr(self, f"{prefix}_inversion_{suffix}").setEnabled(active)
         getattr(self, f"{prefix}_inversion_slab_factor").setEnabled(
-            active
-            and getattr(self, f"{prefix}_inversion_mode").currentData()
-            == "slice_selective"
+            getattr(self, f"{prefix}_inversion_mode").currentData() == "slice_selective"
         )
-        if not active:
-            getattr(self, f"{prefix}_inversion_info").setText(
-                "Off" if enabled.isEnabled() else "Cartesian EPI readouts only"
-            )
 
     def _inversion_parameters(self, prefix):
         """Inversion-recovery builder arguments of a form."""
-        if not self._inversion_active(prefix):
-            return {}
         text = getattr(self, f"{prefix}_inversion_times_ms").text()
         try:
             times_ms = [
@@ -6652,20 +6887,6 @@ class SequenceSimulationWidget(QWidget):
                 self, f"{prefix}_inversion_crusher_cycles_per_slice"
             ).value(),
         }
-
-    def _show_inversion_timing(self, prefix, plan):
-        info = getattr(self, f"{prefix}_inversion_info")
-        minimum = getattr(plan, "minimum_inversion_time_s", None)
-        if minimum is None:
-            return
-        repetitions = getattr(self, f"{prefix}_repetitions").value()
-        count = len(self._inversion_parameters(prefix)["inversion_times_s"])
-        cycles = (
-            f"{repetitions // count} complete series"
-            if repetitions % count == 0
-            else f"{repetitions} repetitions do not complete the {count}-TI cycle"
-        )
-        info.setText(f"Shortest TI {minimum * 1e3:.4g} ms; {cycles}.")
 
     def _shared_rf_parameters(self, prefix):
         pulse_type = self._selected_shared_rf_pulse_type(prefix)
@@ -7900,6 +8121,7 @@ class SequenceSimulationWidget(QWidget):
             self.SLICE_SELECTION_SOURCE: self._load_slice_selection,
             self.PRESS_SOURCE: self._load_press,
             self.INVERSION_RECOVERY_SOURCE: self._load_inversion_recovery,
+            self.SLICE_FID_SOURCE: self._load_slice_fid,
             1: self._load_cartesian_epi,
             2: self._load_csi,
             3: self._load_bssfp,
@@ -8247,6 +8469,9 @@ class SequenceSimulationWidget(QWidget):
         ir_selected = source_index == self.INVERSION_RECOVERY_SOURCE
         self.ir_group.setVisible(ir_selected)
         self.ir_group.setEnabled(ir_selected)
+        slice_fid_selected = source_index == self.SLICE_FID_SOURCE
+        self.slice_fid_group.setVisible(slice_fid_selected)
+        self.slice_fid_group.setEnabled(slice_fid_selected)
         self.acquisition_group.setVisible(epi_selected)
         self.acquisition_group.setEnabled(epi_selected)
         self.epsi_mge_group.setVisible(epsi_mge_selected)
@@ -8409,8 +8634,6 @@ class SequenceSimulationWidget(QWidget):
                 f"interval {plan.minimum_repetition_time_s * 1e3:.4g} ms."
             )
         )
-        if plan is not None:
-            self._show_inversion_timing("epi", plan)
         self._show_timing_status("EPI", minimum_text, notes, error=error)
 
     def _show_timing_status(self, source, minimum_text, notes, error=None):
@@ -8455,7 +8678,6 @@ class SequenceSimulationWidget(QWidget):
         label = self.acquisition_group.layout().labelForField(self.pixel_bandwidth_info)
         if label is not None:
             label.setVisible(not spiral)
-        self._update_inversion_controls("epi")
         self._acquisition_changed()
 
     def _rf_pulse_type_changed(self, *_):
@@ -8526,6 +8748,10 @@ class SequenceSimulationWidget(QWidget):
                 make_pulseq_inversion_recovery,
                 self._ir_pulseq_parameters,
             ),
+            self.SLICE_FID_SOURCE: (
+                make_pulseq_slice_fid,
+                self._slice_fid_pulseq_parameters,
+            ),
         }
         if source not in builders:
             return None
@@ -8580,6 +8806,21 @@ class SequenceSimulationWidget(QWidget):
                 (self.press_echo_time_ms, plan.minimum_echo_time_s),
                 (self.press_repetition_time_ms, plan.minimum_repetition_time_s),
             ]
+        elif source == self.SLICE_FID_SOURCE:
+            plan = make_pulseq_slice_fid(
+                **self._slice_fid_pulseq_parameters(), timing_only=True
+            )
+            # A zero delay shows as "Shortest" and is never raised.
+            limits = [
+                (self.slice_fid_repetition_time_ms, plan.minimum_repetition_time_s),
+            ]
+            if self.slice_fid_acquisition_delay_ms.value() > 0.0:
+                limits.append(
+                    (
+                        self.slice_fid_acquisition_delay_ms,
+                        plan.minimum_acquisition_delay_s,
+                    )
+                )
         elif source == self.INVERSION_RECOVERY_SOURCE:
             plan = make_pulseq_inversion_recovery(
                 **self._ir_pulseq_parameters(), timing_only=True
@@ -8794,6 +9035,39 @@ class SequenceSimulationWidget(QWidget):
             f"{points * plan.dwell_s * 1e3:.6g} ms"
         )
         self.press_resolution_info.setText(
+            f"{plan.spectral_bandwidth_hz / points:.6g} Hz"
+        )
+
+    def _slice_fid_changed(self, *_):
+        self._update_slice_fid_labels()
+        self._update_spoiling_quality()
+        if self.sequence_source.currentIndex() == self.SLICE_FID_SOURCE:
+            self._request_generated_sequence_refresh()
+
+    def _update_slice_fid_labels(self):
+        spoiler = self.slice_fid_spoil_after_readout.isChecked()
+        self.slice_fid_spoiler_cycles_per_slice.setEnabled(spoiler)
+        self.slice_fid_spoiler_duration_ms.setEnabled(spoiler)
+        try:
+            plan = make_pulseq_slice_fid(
+                **self._slice_fid_pulseq_parameters(), timing_only=True
+            )
+        except Exception as exc:
+            self.slice_fid_timing_info.setText(f"Timing cannot be resolved: {exc}")
+            self.slice_fid_dwell_info.setText("")
+            self.slice_fid_resolution_info.setText("")
+            return
+        self.slice_fid_timing_info.setText(
+            f"Acquisition delay {plan.minimum_acquisition_delay_s * 1e3:.4g} ms, "
+            f"TR {plan.minimum_repetition_time_s * 1e3:.4g} ms"
+        )
+        points = self.slice_fid_spectral_points.value()
+        self.slice_fid_dwell_info.setText(
+            f"{plan.dwell_s * 1e6:.6g} µs; actual bandwidth "
+            f"{plan.spectral_bandwidth_hz:.6g} Hz; FID "
+            f"{points * plan.dwell_s * 1e3:.6g} ms"
+        )
+        self.slice_fid_resolution_info.setText(
             f"{plan.spectral_bandwidth_hz / points:.6g} Hz"
         )
 
@@ -9050,8 +9324,6 @@ class SequenceSimulationWidget(QWidget):
                 f"TR {plan.minimum_repetition_time_s * 1e3:.4g} ms."
             )
         )
-        if plan is not None:
-            self._show_inversion_timing("flash", plan)
         self._show_timing_status("FLASH", minimum_text, notes, error=error)
 
     def _flash_auto_spoiler_toggled(self, enabled):
@@ -10184,6 +10456,16 @@ class SequenceSimulationWidget(QWidget):
                 "isochromat keeps its magnitude. The end spoiler is applied "
                 "after each FID when enabled."
             )
+        elif source_index == self.SLICE_FID_SOURCE:
+            cycles = self.slice_fid_spoiler_cycles_per_slice.value()
+            if not self.slice_fid_spoil_after_readout.isChecked():
+                cycles = 0.0
+            self._set_spoiling_quality_unavailable(
+                f"Slice-selective FID spoiler: {cycles:.4g} cycles across the "
+                "slice thickness after each FID. It dephases the slice's "
+                "isochromats along the slice normal; a single isochromat keeps "
+                "its magnitude."
+            )
         elif source_index == self.INTERNAL_SOURCE:
             self._set_spoiling_quality_unavailable(
                 "Internal FID has no gradient spoiler (0 cycles/voxel). Expected "
@@ -10302,6 +10584,7 @@ class SequenceSimulationWidget(QWidget):
             "slice_selection",
             "press",
             "ir",
+            "slice_fid",
         ):
             if not hasattr(self, f"{prefix}_rf_pulse_type"):
                 continue
@@ -10817,6 +11100,8 @@ class SequenceSimulationWidget(QWidget):
         """Return the offset fields a drag in the Geometry tab sets, by role."""
         if source_index == self.SLICE_SELECTION_SOURCE:
             return {"slice": self.slice_selection_offset_mm}
+        if source_index == self.SLICE_FID_SOURCE:
+            return {"slice": self.slice_fid_offset_mm}
         prefix = self.OFFSET_FORM_PREFIXES.get(source_index)
         if prefix is None:
             return {}
@@ -10862,6 +11147,12 @@ class SequenceSimulationWidget(QWidget):
                 ),
                 "slice_offset_m": self.slice_selection_offset_mm.value() / 1000.0,
                 "slice_axis": self.slice_selection_axis.currentText().lower(),
+            }
+        if source_index == self.SLICE_FID_SOURCE:
+            return {
+                "slice_thickness_m": self.slice_fid_thickness_mm.value() / 1000.0,
+                "slice_offset_m": self.slice_fid_offset_mm.value() / 1000.0,
+                "slice_axis": self.slice_fid_axis.currentText().lower(),
             }
         if source_index == self.PRESS_SOURCE:
             return {
@@ -11015,7 +11306,6 @@ class SequenceSimulationWidget(QWidget):
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
         parameters.update(self._epi_rf_parameters())
-        parameters.update(self._inversion_parameters("epi"))
         return parameters
 
     def _spiral_pulseq_parameters(self):
@@ -11118,6 +11408,29 @@ class SequenceSimulationWidget(QWidget):
         parameters.update(self._shared_rf_parameters("press"))
         return parameters
 
+    def _slice_fid_pulseq_parameters(self):
+        delay_ms = self.slice_fid_acquisition_delay_ms.value()
+        parameters = {
+            **self._sequence_geometry_parameters(self.SLICE_FID_SOURCE),
+            "spectral_bandwidth_hz": self.slice_fid_bandwidth_hz.value(),
+            "spectral_points": self.slice_fid_spectral_points.value(),
+            # Zero shows as "Shortest", the builder default.
+            "acquisition_delay_s": delay_ms / 1000.0 if delay_ms else None,
+            "repetition_time_s": self.slice_fid_repetition_time_ms.value() / 1000.0,
+            "repetitions": self.slice_fid_repetitions.value(),
+            "flip_angle_deg": self.slice_fid_flip_angle_deg.value(),
+            "rephase_duration_s": (self.slice_fid_rephase_duration_ms.value() / 1000.0),
+            "spoil_after_readout": self.slice_fid_spoil_after_readout.isChecked(),
+            "spoiler_cycles_per_slice": (
+                self.slice_fid_spoiler_cycles_per_slice.value()
+            ),
+            "spoiler_duration_s": self.slice_fid_spoiler_duration_ms.value() / 1000.0,
+            "nucleus": self.nucleus.currentText(),
+            "scanner_parameters": self.scanner_parameters.to_dict(),
+        }
+        parameters.update(self._shared_rf_parameters("slice_fid"))
+        return parameters
+
     def _ir_pulseq_parameters(self):
         readout = self.ir_readout.currentData()
         parameters = {
@@ -11193,7 +11506,6 @@ class SequenceSimulationWidget(QWidget):
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
         parameters.update(self._shared_rf_parameters("flash"))
-        parameters.update(self._inversion_parameters("flash"))
         return parameters
 
     def _bssfp_pulseq_parameters(self):
@@ -11438,6 +11750,8 @@ class SequenceSimulationWidget(QWidget):
             )
         if source_index == self.PRESS_SOURCE:
             return "press", self._press_pulseq_parameters(), "press_svs.seq"
+        if source_index == self.SLICE_FID_SOURCE:
+            return "slice_fid", self._slice_fid_pulseq_parameters(), "slice_fid.seq"
         if source_index == self.INVERSION_RECOVERY_SOURCE:
             return (
                 "inversion_recovery",
@@ -11602,6 +11916,21 @@ class SequenceSimulationWidget(QWidget):
             self.spiral_acquisition = None
             self.spectroscopic_acquisition = None
             self._generation_error = f"Invalid CSI sequence: {exc}"
+            return False
+
+    def _load_slice_fid(self):
+        try:
+            sequence = make_pulseq_slice_fid(**self._slice_fid_pulseq_parameters())
+            self._set_generated_pulseq_sequence(sequence, "internal-slice-fid")
+            return True
+        except Exception as exc:
+            self._generated_pulseq_sequence = None
+            self.program = None
+            self._acquisition_compiled = None
+            self.acquisition = None
+            self.spiral_acquisition = None
+            self.spectroscopic_acquisition = None
+            self._generation_error = f"Invalid slice-selective FID sequence: {exc}"
             return False
 
     def _load_press(self):
@@ -12290,6 +12619,7 @@ class SequenceSimulationWidget(QWidget):
             "flash": make_pulseq_flash,
             "slice_selection": make_pulseq_slice_selection,
             "press": make_pulseq_press,
+            "slice_fid": make_pulseq_slice_fid,
             "inversion_recovery": make_pulseq_inversion_recovery,
             "bssfp_3d": make_pulseq_bssfp,
             "spectral_bssfp_3d": make_pulseq_spectral_selective_bssfp,
@@ -12647,7 +12977,10 @@ class SequenceSimulationWidget(QWidget):
                 "system limits",
             )
         ):
-            if self.sequence_source.currentIndex() == self.SLICE_SELECTION_SOURCE:
+            if self.sequence_source.currentIndex() in {
+                self.SLICE_SELECTION_SOURCE,
+                self.SLICE_FID_SOURCE,
+            }:
                 return (
                     "Increase the RF duration or slice thickness to reduce the "
                     "slice gradient. For a rephasing-gradient error, increase "
@@ -13149,7 +13482,7 @@ class SequenceSimulationWidget(QWidget):
         except ValueError:
             return None
         name = self.sequence_source.currentText()
-        if source_index == self.SLICE_SELECTION_SOURCE:
+        if source_index in {self.SLICE_SELECTION_SOURCE, self.SLICE_FID_SOURCE}:
             return SequenceGeometry(
                 frame=self._slice_axis_frame(parameters["slice_axis"]),
                 slice_positions_m=(parameters["slice_offset_m"],),
@@ -14379,8 +14712,33 @@ class SequenceSimulationWidget(QWidget):
     def _apply_noise_to_result(self):
         if self.result is None or (self.worker is not None and self.worker.isRunning()):
             return
+        settings = self.receiver_noise.settings()
+        if (
+            settings.mode == "calibrated"
+            and self.result.metadata.get("signal_weighting") != "voxel_volume"
+        ):
+            # A relative voxel sum has no physical scale, so calibrated noise
+            # can only be added to a new run with voxel-volume weighting.
+            dialog = QMessageBox(
+                QMessageBox.Information,
+                "Receiver noise",
+                "The current result was simulated with Signal weighting "
+                "'Relative voxel sum'. That signal has no physical scale, so "
+                "calibrated noise (in mol x polarization) cannot be added to "
+                "it.\n\n"
+                "Rerun the simulation with the calibrated noise mode selected. "
+                "Signal weighting then switches to 'Physical voxel volume "
+                "(3D)' and the calibrated noise is applied to the new result.",
+                QMessageBox.Cancel,
+                self,
+            )
+            rerun = dialog.addButton("Run again", QMessageBox.AcceptRole)
+            dialog.setDefaultButton(rerun)
+            dialog.exec_()
+            if dialog.clickedButton() is rerun:
+                self._run()
+            return
         try:
-            settings = self.receiver_noise.settings()
             result = apply_receiver_noise(self.result, settings)
         except Exception as exc:
             QMessageBox.warning(self, "Receiver noise", str(exc))
@@ -14881,6 +15239,7 @@ class SequenceSimulationWidget(QWidget):
             "slice_selection",
             "press",
             "ir",
+            "slice_fid",
         ):
             if hasattr(self, f"{prefix}_rf_pulse_type"):
                 self._update_shared_rf_controls(prefix)
@@ -15583,6 +15942,7 @@ class SequenceSimulationWidget(QWidget):
             self._update_me_bssfp_labels,
             self._update_press_labels,
             self._update_ir_labels,
+            self._update_slice_fid_labels,
         ):
             update()
         self._update_simulation_object_table()
