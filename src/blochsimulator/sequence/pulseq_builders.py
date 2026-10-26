@@ -50,8 +50,8 @@ def _pypulseq():
         import pypulseq as pp
     except ImportError as exc:  # pragma: no cover - depends on optional install
         raise ImportError(
-            "Pulseq sequence generation requires the optional dependency: "
-            "pip install 'blochsimulator[pulseq]'"
+            "Pulseq sequence generation requires pypulseq: "
+            "pip install 'pypulseq>=1.5.0,<1.5.1'"
         ) from exc
     return pp
 

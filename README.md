@@ -1,140 +1,38 @@
 # Bloch Equation Simulator for Python
 
+A fast Bloch equation simulator with a C core, Python API and interactive GUI,
+based on the solver by Brian Hargreaves (Stanford). Use it to explore spin
+physics in **Free Mode**, or to simulate complete [Pulseq](https://github.com/pulseq/pypulseq)
+acquisitions on 3D phantoms in **Sequence Mode**.
 
-A high-performance Python implementation of the Bloch equation solver originally developed by Brian Hargreaves at Stanford University. This package provides a fast C-based core with Python bindings, parallel processing support, and an interactive GUI with classic waveform simulation and an event-based Sequence mode for [Pulseq](https://github.com/pulseq/pypulseq) workflows.
+## Installation
 
-Download:
+**Python package** (GUI, Pulseq support and Python API):
 
 ```bash
-pip install "blochsimulator[gui,pulseq]"
+pip install blochsimulator
+blochsimulator-gui
 ```
-or already built on
-[GitHub Releases](https://github.com/LucaNagel/bloch_sim_gui/releases)
 
-## Demo
+In a Jupyter notebook, use `%pip install blochsimulator` so the package lands in
+the notebook's own environment.
 
-### Sequence mode
+**Desktop application** for macOS and Windows (no Python needed): download from
+[GitHub Releases](https://github.com/LucaNagel/bloch_sim_gui/releases). Builds
+target 64-bit systems; mainly tested on macOS 26.
 
-![Sequence workspace](docs/_static/media/sequence_mode_demo.gif)
-
-***Sequence Mode:** Demonstration of different EPI sequence modes on a spherical object, including multi-repetition and multi-slice acquisitions with B0 inhomogeneities. Generated EPI, CSI, and bSSFP sequences can be exported as [Pulseq `.seq`](https://github.com/pulseq/pypulseq) files.*
-
-### Classic simulation
-
-![Spin Echo Animation](docs/_static/media/spin_echo_v240.gif)
-
-***Free Mode:** Demonstration of a spin-echo simulation.*
-
-## Features
-
-### Simulation and sequence design
-
-Fast C-based Bloch solver with parallel processing support.
-The GUI can be used in 2 modes:
-
-**Free Mode**
-
-Free mode lets you investigate the behaviour of spins over a range of frequencies and spatial positions. Good for education and learning MRI concepts such as off-resonances, relaxation, basic sequences, rf pulses etc.
-
-*Features:*
-- Endpoint and **full time-resolved** simulations
-- Configurable **tissue properties** including T1, T2, proton density, and initial
-  magnetization.
-- Parameter sweeps with final-state or full time-resolved result collection.
-- **RF pulse design** for rectangular, sinc, Gaussian, adiabatic half/full passage,
-  and BIR-4 pulses
-- **Sequence support** for FID, spin echo, gradient echo, inversion recovery,
-  slice-selective excitation, EPI, and SSFP.
-- Live magnetization, signal, spectrum, spatial-profile, heatmap, and **3D-vector
-  views**.
-
-**Sequence mode**
-
-A mode that lets you load, generate and simulate [Pulseq
-  `.seq`](https://github.com/pulseq/pypulseq) sequences. In addition, an interactive 3D phantom and B1 Tx/Rx  designer is provided.
-
-*Features:*
-
-- **Dynamically generate sequences**:
-  - FID
-  - FLASH
-  - EPI (cartesian, flyback, spiral)
-  - bSSFP
-  - [spectrally-selective](https://doi.org/10.1002/mrm.29676) 3D bSSFP
-  - ([radial](https://doi.org/10.1002/mrm.30614)) 3D multi-echo bSSFP
-  - Inversion Recovery
-  - EPSI/MGE
-  - PRESS
-  - Slice-spectroscopy
-  - RF + Slice selection
-
-- **[Spectral-spatial RF pulse design](docs/SPECTRAL_SPATIAL_RF.md)**
-- **Spin Probe** mode enables the investigation of the behaviour of spectral/spatial spin distributions during sequences.
-- Spectral and dynamic **phantom design** with spatial peak distributions,
-  pyruvate-to-lactate kinetics, spatial B0 inhomogeneity maps, and optional
-  time-dependent B0 offsets.
-- **B1 Transmit Receive design**, letting you choose between uniform, 3D birdcage, 3D surface coil B1 fields.
-- A dimension-aware **Reconstruction Explorer** for interactive 2D/3D k-space
-  and image views, echo/repetition/slice selection,
-- A **mouse perfusion phantom** for hyperpolarized ¹³C and for ¹H, where
-  tissue water has per-tissue PD, T1 and T2 and a gadolinium contrast agent
-  (DCE, extended Tofts) changes R1 and R2.
-
-
-### Visualization and analysis and reproducibility
-
-Project files that contain current parameter selection, selected sequence, phantom and B1 can be saved and loaded. The tool has different ways to visualize and export bloch simulations:
-
-**Free Mode**
-
-The time-resolved bevahiour of spins during and after RF Pulse can be visualized in a multitude of ways, including a 3D vector view, heatmaps, spectral and spatial profiles. Additionally, simulation results can be exported as
-* figures/animations and `xarray.Dataset` conversion
-
-* **automatically generated Jupyter notebooks** ([analysis](examples/spin_echo_analysis.ipynb) of [spin-echo result data](examples/spin_echo_analysis_data.h5) and [reproduction](examples/spin_echo_reproduction.ipynb)) using the parameters selected in the GUI.
-
-
-**Sequence Mode**
-
-Loaded and generated sequences can be inspected in a sequence viewer. A 3D phantom design viewer in addition to a 3D B1 design viewer are provided.
-
-- Experimental **export of simulated acquisitions as Bruker raw datasets**,
-  including `fid` and/or `rawdata.job0` plus the associated parameter files.
-- **Automatically generated Jupyter notebooks** using the parameters selected in
-  the GUI.
-- Export blochsimulator projects to later continue working on them, see
-  [Bloch project vs. exported results](#bloch-project-vs-exported-results).
-
-
-## Get started
-
-## Documentation
-
-For detailed instructions on installation, GUI features, and Python API usage,
-see the **[User Guide](https://github.com/LucaNagel/bloch_sim_gui/blob/main/docs/USER_GUIDE.md)**.
-
-
-### Desktop application
-
-Download the standalone application for Windows or macOS from
-[GitHub Releases](https://github.com/LucaNagel/bloch_sim_gui/releases). This is
-the recommended option for interactive simulation and requires no Python
-installation. Windows downloads and Python wheels target 64-bit systems. Was mainly tested on macOS 26.5.2.
-
-As I did not pay for the Apple Developer Program, the app is unlicensed and will be put in quarantine after unzipping and installation upon the first run. How to run it anyways:
 <details>
-<summary><strong>Activation on macOS</strong></summary>
+<summary><strong>macOS: the app is blocked on first launch</strong></summary>
 
-After downloading the application, move `BlochSimulator.app` to your
-**Applications** folder and launch it. If macOS blocks the first launch:
+The app is not signed with an Apple Developer ID, so macOS quarantines it.
+Move `BlochSimulator.app` to **Applications** and launch it. If it is blocked:
 
 1. Dismiss the warning.
 2. Open **System Settings > Privacy & Security** and scroll to **Security**.
-3. Find the message that `BlochSimulator.app` was blocked and click
-   **Open Anyway**.
+3. Click **Open Anyway** next to the `BlochSimulator.app` message.
 4. Launch **BlochSimulator** again.
 
-Alternatively, after verifying that you trust the downloaded application,
-remove its quarantine flag in Terminal:
+Alternatively, if you trust the download, remove the quarantine flag:
 
 ```bash
 xattr -cr /Applications/BlochSimulator.app
@@ -142,34 +40,54 @@ xattr -cr /Applications/BlochSimulator.app
 
 </details>
 
-### Python package
+## Demo
 
-Install the full [blochsimulator from PyPI](https://pypi.org/project/blochsimulator/) including GUI and pulseq skills (**recommended**):
+![Sequence workspace](docs/_static/media/sequence_mode_demo.gif)
 
-```bash
-pip install "blochsimulator[gui,pulseq]"
-```
+***Sequence Mode:** EPI variants on a spherical object, including
+multi-repetition and multi-slice acquisitions with B0 inhomogeneity.*
 
-or
+![Spin Echo Animation](docs/_static/media/spin_echo_v240.gif)
 
-```bash
-pip install blochsimulator
-```
+***Free Mode:** a spin-echo simulation.*
 
-The package exposes the full simulation API for Python scripts, Jupyter
-notebooks, and custom analysis pipelines, but no graphical user interface or pulseq skulls
+## Features
 
-## Usage
+**Free Mode** — understand spin behaviour over frequency and position:
 
-### GUI application
+- Endpoint or time-resolved simulation of configurable tissues (T1, T2, PD)
+- RF pulses: rectangular, sinc, Gaussian, adiabatic half/full passage, BIR-4,
+  or loaded from file
+- FID, spin echo, gradient echo, inversion recovery, slice selection, EPI, SSFP
+- Magnetization, signal, spectrum, spatial-profile, heatmap and 3D-vector views,
+  GIF/MP4 export
+- Parameter sweeps with final-state or full time-resolved result collection
 
-Once installed, launch the GUI from the applications folder or a terminal:
+**Sequence Mode** — simulate what the scanner would measure:
 
-```bash
-blochsimulator-gui
-```
+- **Pulseq sequences**, loaded or generated: EPI (bipolar/flyback), spiral,
+  EPSI/MGE, CSI, FLASH, inversion recovery with T1 fit, PRESS, slice-selective
+  FID, Cartesian 3D bSSFP, [spectrally selective 3D bSSFP](https://doi.org/10.1002/mrm.29676)
+  and Cartesian or [radial multi-echo 3D bSSFP](https://doi.org/10.1002/mrm.30614)
+- **RF design** including [spectral-spatial pulses](docs/SPECTRAL_SPATIAL_RF.md)
+  with per-metabolite pulse schedules
+- **Phantoms**: 3D spectral phantoms with B0 maps, hyperpolarized
+  pyruvate→lactate kinetics with inflow, and a mouse perfusion phantom for
+  hyperpolarized ¹³C and for ¹H (tissue water, gadolinium DCE)
+- **B1 Tx/Rx fields**: uniform, birdcage, surface coil
+- **Receiver noise** calibrated from a measured phantom FID, to predict SNR
+  of e.g. hyperpolarized in-vivo experiments
+- **Reconstruction Explorer** for 2D/3D images, k-space and CSI spectra, with
+  the phantom shown on the image grid
+- **PSF and spoiling analysis** of the current sequence
+- **Export** to `.seq`, NetCDF/HDF5, Bruker raw data (experimental) and
+  auto-generated Jupyter notebooks; complete projects as `.blochproj` (see
+  [Bloch project vs. exported results](#bloch-project-vs-exported-results))
 
-### Bloch project vs. exported results
+See the **[User Guide](https://github.com/LucaNagel/bloch_sim_gui/blob/main/docs/USER_GUIDE.md)** for how to use these and what to
+watch out for.
+
+## Bloch project vs. exported results
 
 The GUI writes two kinds of files. Choose by what you want to do with them:
 
@@ -233,29 +151,15 @@ for path in Path("loop_folder").glob("*.blochproj"):
 result_at_15 = runs[15.0]  # e.g. the run with flip angle 15°
 ```
 
-### Jupyter Notebook/ Python API
+## Python API
 
-The bloch simulator can be used in both jupyter notebooks or via python api
+Exported notebooks reproduce any GUI simulation; see the
+[spin-echo reproduction](examples/spin_echo_reproduction.ipynb) and
+[analysis](examples/spin_echo_analysis.ipynb) examples. The GUI can also be
+started from a local Jupyter notebook with `!blochsimulator-gui` (not on remote
+servers or Colab).
 
-#### Jupyter Notebook
-
-You can launch the interactive GUI directly from a cell in your local Jupyter
-Notebook. You can also export the selected GUI simulation as a notebook. See
-the [spin-echo reproduction](examples/spin_echo_reproduction.ipynb) and
-[spin-echo analysis](examples/spin_echo_analysis.ipynb) examples.
-
-```python
-# Install from PyPI once, if needed
-!pip install blochsimulator[gui,pulseq]"
-
-# Launch the GUI
-!blochsimulator-gui
-```
-
-This requires Jupyter to run on your local machine; it does not work on a
-headless remote server or Google Colab.
-
-#### Basic simulation
+### Basic simulation
 
 ```python
 import numpy as np
@@ -444,7 +348,7 @@ For detailed packaging, release workflows, and CI/CD information, see the
 
 ### Install from source
 
-The Python package supports Python 3.9 or later. Desktop GUI development and
+The Python package supports Python 3.10 or later. Desktop GUI development and
 PyInstaller app builds use the shared Python 3.12 runtime declared in
 `.python-version`, so the source GUI and packaged app do not silently use
 different interpreters.
@@ -499,11 +403,10 @@ From the repository root, create an environment with an explicit Python version:
 ```bash
 conda create -n bloch-simulator python=3.12 pip
 conda activate bloch-simulator
-python -m pip install "ipykernel==7.4.0" ".[gui,pulseq]"
+python -m pip install -e .
 ```
 
-Python 3.12 matches the project's desktop development runtime and supports
-ipykernel 7.4.0. Select this environment as the kernel in your notebook editor.
+Select this environment as the kernel in your notebook editor.
 
 Pip installs `h5py` automatically because it is declared in `pyproject.toml`.
 If no compatible pre-built wheel is available, pip attempts a source build,
@@ -523,7 +426,7 @@ is required.
 Prerequisites:
 
 - macOS: Xcode CLT; `brew install libomp`
-- Windows: Python 3.9+ and MSVC Build Tools for the C extension
+- Windows: Python 3.10+ and MSVC Build Tools for the C extension
 - Linux: gcc/g++; ensure `libgomp` is available
 
 Quick build:

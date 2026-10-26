@@ -50,7 +50,7 @@ jobs:
       - name: Build and test one representative wheel
         uses: pypa/cibuildwheel@v3.4.1
         env:
-          CIBW_BUILD: "cp39-*"
+          CIBW_BUILD: "cp310-*"
           CIBW_ARCHS: ${{ matrix.cibw_archs }}
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
 

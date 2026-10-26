@@ -63,8 +63,7 @@ def load_pulseq(path, strict: bool = True) -> SequenceProgram:
         import pypulseq as pp
     except ImportError as exc:
         raise ImportError(
-            "Pulseq import requires the optional dependency: "
-            "pip install 'blochsimulator[pulseq]'"
+            "Pulseq import requires pypulseq: pip install 'pypulseq>=1.5.0,<1.5.1'"
         ) from exc
 
     sequence = pp.Sequence()
