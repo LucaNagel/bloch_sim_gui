@@ -247,6 +247,17 @@ fig.tight_layout()
     }
 
 
+def unique_notebook_path(path: Path) -> Path:
+    """Return ``path`` or, if it exists, the first free ``<stem>_<n>`` name."""
+    path = Path(path)
+    stem, suffix = path.stem, path.suffix
+    number = 2
+    while path.exists():
+        path = path.with_name(f"{stem}_{number}{suffix}")
+        number += 1
+    return path
+
+
 def write_project_loader_notebook(
     directory, *, loop_id: Optional[str] = None, filename: str = DEFAULT_NOTEBOOK_NAME
 ) -> Path:
@@ -256,12 +267,7 @@ def write_project_loader_notebook(
     numbered name instead, so user edits are never overwritten.
     """
     directory = Path(directory).expanduser().resolve()
-    path = directory / filename
-    stem, suffix = path.stem, path.suffix
-    number = 2
-    while path.exists():
-        path = directory / f"{stem}_{number}{suffix}"
-        number += 1
+    path = unique_notebook_path(directory / filename)
     notebook = project_loader_notebook(directory, loop_id=loop_id)
     path.write_text(json.dumps(notebook, indent=1, ensure_ascii=False) + "\n")
     return path

@@ -83,3 +83,9 @@ def test_probe_loop_saves_probe_projects_and_notebook(qt_application, tmp_path):
     assert loop_ids.pop() in notebook.read_text()
     json.loads(notebook.read_text())
     assert "notebook load_simulations.ipynb written" in widget.status.text()
+    probe_notebook = tmp_path / "load_spin_probes.ipynb"
+    json.loads(probe_notebook.read_text())
+    assert metadata["loop_id"] in probe_notebook.read_text()
+    assert "spin-probe notebook load_spin_probes.ipynb written" in (
+        widget.status.text()
+    )
