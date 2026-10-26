@@ -1,200 +1,38 @@
 # Bloch Equation Simulator for Python
 
+A fast Bloch equation simulator with a C core, Python API and interactive GUI,
+based on the solver by Brian Hargreaves (Stanford). Use it to explore spin
+physics in **Free Mode**, or to simulate complete [Pulseq](https://github.com/pulseq/pypulseq)
+acquisitions on 3D phantoms in **Sequence Mode**.
 
-A high-performance Python implementation of the Bloch equation solver originally developed by Brian Hargreaves at Stanford University. This package provides a fast C-based core with Python bindings, parallel processing support, and an interactive GUI with classic waveform simulation and an event-based Sequence mode for [Pulseq](https://github.com/pulseq/pypulseq) workflows.
+## Installation
 
-Download:
+**Python package** (GUI, Pulseq support and Python API):
 
 ```bash
-pip install "blochsimulator[gui,pulseq]"
+pip install blochsimulator
+blochsimulator-gui
 ```
-or already built on
-[GitHub Releases](https://github.com/LucaNagel/bloch_sim_gui/releases)
 
-## Demo
+In a Jupyter notebook, use `%pip install blochsimulator` so the package lands in
+the notebook's own environment.
 
-### Sequence mode
+**Desktop application** for macOS and Windows (no Python needed): download from
+[GitHub Releases](https://github.com/LucaNagel/bloch_sim_gui/releases). Builds
+target 64-bit systems; mainly tested on macOS 26.
 
-![Sequence workspace](docs/_static/media/sequence_mode_demo.gif)
-
-***Sequence Mode:** Demonstration of different EPI sequence modes on a spherical object, including multi-repetition and multi-slice acquisitions with B0 inhomogeneities. Generated EPI, CSI, and bSSFP sequences can be exported as [Pulseq `.seq`](https://github.com/pulseq/pypulseq) files.*
-
-### Classic simulation
-
-![Spin Echo Animation](docs/_static/media/spin_echo_v240.gif)
-
-***Free Mode:** Demonstration of a spin-echo simulation.*
-
-## Features
-
-### Simulation and sequence design
-
-Fast C-based Bloch solver with parallel processing support.
-The GUI can be used in 2 modes:
-
-**Free Mode**
-
-Free mode lets you investigate the behaviour of spins over a range of frequencies and spatial positions. Good for education and learning MRI concepts such as off-resonances, relaxation, basic sequences, rf pulses etc.
-
-*Features:*
-- Endpoint and **full time-resolved** simulations
-- Configurable **tissue properties** including T1, T2, proton density, and initial
-  magnetization.
-- Parameter sweeps with final-state or full time-resolved result collection.
-- **RF pulse design** for rectangular, sinc, Gaussian, adiabatic half/full passage,
-  and BIR-4 pulses
-- **Sequence support** for FID, spin echo, gradient echo, inversion recovery,
-  slice-selective excitation, EPI, and SSFP.
-- Live magnetization, signal, spectrum, spatial-profile, heatmap, and **3D-vector
-  views**.
-
-**Sequence mode**
-
-A mode that lets you load, generate and simulate [Pulseq
-  `.seq`](https://github.com/pulseq/pypulseq) sequences. In addition, an interactive 3D phantom and B1 Tx/Rx  designer is provided.
-
-*Features:*
-
-- **Internal FID** with configurable Block, Sinc, Gaussian, SLR, or imported
-  RF Designer pulses, flip angle, RF duration, phase and carrier offset.
-  Set the complex FID points per repetition, sampling bandwidth, ADC delay,
-  receiver offset, repetition count and TR. TR is measured from RF start to
-  RF start; **Shortest possible** fits the pulse, delay and complete FID.
-  Magnetization evolves continuously between repetitions, without resetting,
-  averaging or spoiling. The sequence ends after the final FID. Use
-  **Generate sequence** or **Live preview** to refresh the timeline.
-- **RF + Slice Selection** for full 3D excitation volumes immediately after
-  a pulse and its slice gradient, with optional rephasing and direct
-  $|M_{xy}|$, $M_z$, and phase inspection. See
-  [RF excitation volumes](docs/rf_slice_selection.md).
-- **Interactive generation of Pulseq** bipolar or flyback EPI, centre-out 2D
-  spiral, 2D EPSI/MGE, 2D CSI,
-  spoiled 2D FLASH,
-  Cartesian 3D bSSFP, alternating-frequency [spectrally selective 3D bSSFP](https://doi.org/10.1002/mrm.29676), and
-  Cartesian or [spiral-phyllotaxis radial 3D multi-echo bSSFP sequences](https://doi.org/10.1002/mrm.30614), with
-  export to `.seq` files and reproducing Jupyter notebooks.
-- **Multi-slice inversion recovery** (global or slice-selective inversion with
-  EPI, gradient-echo or TurboFLASH readout) with a voxelwise T1 fit,
-  single-voxel **PRESS** and slice-selective FID spectroscopy, and a
-  **compressed sensing** module (variable-density and k-t masks,
-  Chambolle-Pock reconstruction). See the
-  [user guide](docs/USER_GUIDE.md) and the
-  [compressed sensing concept](docs/compressed_sensing_concept.md).
-- **Sequence presets** that store all sequence settings under a name (with an
-  optional startup preset), and a **PSF Analysis** tab that simulates the
-  point-spread function and slice profile of the current sequence, with FWHM,
-  broadening, side-lobe and slice cross-talk metrics.
-- **Spectral-spatial RF design** with explicit spatial and frequency target
-  ranges, coupled RF/slice-gradient waveforms, configurable two-dimensional
-  Bloch validation, spatial and spectral profile cuts, and phantom-aware
-  metabolite frequencies. A stable-ID pulse library and ordered cyclic
-  schedule support separate metabolite pulses, per-entry flip-angle or RF
-  amplitude scaling, repetition, reordering, and a coherent cumulative
-  preview. FLASH applies one schedule step per complete image frame by default
-  and preserves schedule definitions and ADC labels through Pulseq export and
-  import. Pulses, schedule, and legacy-single-pulse migration are stored with
-  project files.
-  The native Python flyback method is based on the Larson/Kerr design approach;
-  supported modes, validation scope, differences from the MATLAB reference,
-  citations, and license provenance are documented in
-  [Spectral-spatial RF pulse design](docs/SPECTRAL_SPATIAL_RF.md).
-- Spin Probe mode enables the investigation of the behaviour of spectral/spatial spin distributions during sequences.
-- Spectral and dynamic **phantom design** with spatial peak distributions,
-  pyruvate-to-lactate kinetics, spatial B0 inhomogeneity maps, and optional
-  time-dependent B0 offsets.
-- **B1 Transmit Receive design**, letting you choose between uniform, 3D birdcage, 3D surface coil B1 fields.
-- A dimension-aware **Reconstruction Explorer** for interactive 2D/3D k-space
-  and image views, echo/repetition/slice selection, CSI voxel spectra, receive-coil
-  combination, simulated pool comparison, and known-frequency linear IDEAL
-  estimates. It shows the simulated phantom next to the reconstruction, with
-  region outlines and the composition of the selected voxel.
-- A **mouse perfusion phantom** for hyperpolarized ¹³C and for ¹H, where
-  tissue water has per-tissue PD, T1 and T2 and a gadolinium contrast agent
-  (DCE, extended Tofts) changes R1 and R2.
-
-
-### Visualization and analysis and reproducibility
-
-Project files that contain current parameter selection, selected sequence, phantom and B1 can be saved and loaded. The tool has different ways to visualize and export bloch simulations:
-
-**Free Mode**
-
-The time-resolved bevahiour of spins during and after RF Pulse can be visualized in a multitude of ways, including a 3D vector view, heatmaps, spectral and spatial profiles. Additionally, simulation results can be exported as
-* figures/animations and `xarray.Dataset` conversion
-
-* **automatically generated Jupyter notebooks** ([analysis](examples/spin_echo_analysis.ipynb) of [spin-echo result data](examples/spin_echo_analysis_data.h5) and [reproduction](examples/spin_echo_reproduction.ipynb)) using the parameters selected in the GUI.
-
-
-**Sequence Mode**
-
-- Mouse Phantom Designer polarization inputs use absolute percent with the
-  thermal multiple alongside them, based on nucleus, B0 and temperature. Mouse
-  injections use mM × µl and show the resulting µmol dose and fully polarized
-  equivalent. New injections start at 80 mM × 250 µl (20 µmol) and
-  10000 × thermal, 5.8 % at 7 T and 37 °C; older files retain their original
-  dose and relative-polarization values.
-  The spectral Phantom Designer keeps × thermal and shows the thermal
-  polarization at its sample temperature.
-- **Receiver / Noise** adds reproducible complex noise from a relative SNR
-  (single-scan SNR of the ideal 90° FID of the whole object, including any
-  delivered bolus) or a calibration from a measured phantom FID: amplitude,
-  noise std, averages, bandwidth, flip angle, concentration (mM), volume (ml),
-  enrichment and temperature. Noise follows each ADC event's bandwidth, so a
-  thermal phantom scan predicts e.g. hyperpolarized in-vivo SNR. An optional
-  reference scan model corrects the calibration for T1 saturation, T2* decay
-  and the B1 workspace coil at the phantom position. **Load FID…** and
-  **Load noise scan…** read the ParaVision raw data or complex arrays of the
-  phantom FID and 0° noise scan directly. Its dedicated
-  tab between **Phantom + B1** and **Simulations** shows an SNR budget from
-  the receiver setting through the whole-object FID and each readout
-  bandwidth to the image voxels of the current object and last run. Clean ADC
-  data and noise settings are preserved in projects and result exports.
-  **Settings → Interface → Signal units** switches the current Sequence
-  plots between physical amounts (mol with automatic SI prefixes, calibrated
-  runs) and SNR units (noise σ = 1 per complex quadrature), without rerunning
-  the simulation. Cartesian/CSI FFTs preserve that noise normalization;
-  spiral images use a labelled estimate from their noise realization. Runs
-  without the required calibration or noise metadata show simulation units.
-  See [receiver calibration](docs/sequence_simulation_architecture.md#receiver-noise-and-phantom-calibration).
-
-Loaded and generated sequences can be inspected in a sequence viewer. A 3D phantom design viewer in addition to a 3D B1 design viewer are provided.
-
-- Experimental **export of simulated acquisitions as Bruker raw datasets**,
-  including `fid` and/or `rawdata.job0` plus the associated parameter files.
-- **Automatically generated Jupyter notebooks** using the parameters selected in
-  the GUI.
-
-
-## Get started
-
-## Documentation
-
-For detailed instructions on installation, GUI features, and Python API usage,
-see the **[User Guide](https://github.com/LucaNagel/bloch_sim_gui/blob/main/docs/USER_GUIDE.md)**.
-
-
-### Desktop application
-
-Download the standalone application for Windows or macOS from
-[GitHub Releases](https://github.com/LucaNagel/bloch_sim_gui/releases). This is
-the recommended option for interactive simulation and requires no Python
-installation. Windows downloads and Python wheels target 64-bit systems. Was mainly tested on macOS 26.5.2.
-
-As I did not pay for the Apple Developer Program, the app is unlicensed and will be put in quarantine after unzipping and installation upon the first run. How to run it anyways:
 <details>
-<summary><strong>Activation on macOS</strong></summary>
+<summary><strong>macOS: the app is blocked on first launch</strong></summary>
 
-After downloading the application, move `BlochSimulator.app` to your
-**Applications** folder and launch it. If macOS blocks the first launch:
+The app is not signed with an Apple Developer ID, so macOS quarantines it.
+Move `BlochSimulator.app` to **Applications** and launch it. If it is blocked:
 
 1. Dismiss the warning.
 2. Open **System Settings > Privacy & Security** and scroll to **Security**.
-3. Find the message that `BlochSimulator.app` was blocked and click
-   **Open Anyway**.
+3. Click **Open Anyway** next to the `BlochSimulator.app` message.
 4. Launch **BlochSimulator** again.
 
-Alternatively, after verifying that you trust the downloaded application,
-remove its quarantine flag in Terminal:
+Alternatively, if you trust the download, remove the quarantine flag:
 
 ```bash
 xattr -cr /Applications/BlochSimulator.app
@@ -202,56 +40,61 @@ xattr -cr /Applications/BlochSimulator.app
 
 </details>
 
-### Python package
+## Demo
 
-Install the full [blochsimulator from PyPI](https://pypi.org/project/blochsimulator/) including GUI and pulseq skills (**recommended**):
+![Sequence workspace](docs/_static/media/sequence_mode_demo.gif)
 
-```bash
-pip install "blochsimulator[gui,pulseq]"
-```
+***Sequence Mode:** EPI variants on a spherical object, including
+multi-repetition and multi-slice acquisitions with B0 inhomogeneity.*
 
-or
+![Spin Echo Animation](docs/_static/media/spin_echo_v240.gif)
 
-```bash
-pip install blochsimulator
-```
+***Free Mode:** a spin-echo simulation.*
 
-The package exposes the full simulation API for Python scripts, Jupyter
-notebooks, and custom analysis pipelines, but no graphical user interface or pulseq skulls
+## Features
 
-## Usage
+**Free Mode** — understand spin behaviour over frequency and position:
 
-### GUI application
+- Endpoint or time-resolved simulation of configurable tissues (T1, T2, PD)
+- RF pulses: rectangular, sinc, Gaussian, adiabatic half/full passage, BIR-4,
+  or loaded from file
+- FID, spin echo, gradient echo, inversion recovery, slice selection, EPI, SSFP
+- Magnetization, signal, spectrum, spatial-profile, heatmap and 3D-vector views,
+  GIF/MP4 export
+- Parameter sweeps with final-state or full time-resolved result collection
 
-Once installed, launch the GUI from the applications folder or a terminal:
+**Sequence Mode** — simulate what the scanner would measure:
 
-```bash
-blochsimulator-gui
-```
+- **Pulseq sequences**, loaded or generated: EPI (bipolar/flyback), spiral,
+  EPSI/MGE, CSI, FLASH, inversion recovery with T1 fit, PRESS, slice-selective
+  FID, Cartesian 3D bSSFP, [spectrally selective 3D bSSFP](https://doi.org/10.1002/mrm.29676)
+  and Cartesian or [radial multi-echo 3D bSSFP](https://doi.org/10.1002/mrm.30614)
+- **RF design** including [spectral-spatial pulses](docs/SPECTRAL_SPATIAL_RF.md)
+  with per-metabolite pulse schedules
+- **Phantoms**: 3D spectral phantoms with B0 maps, hyperpolarized
+  pyruvate→lactate kinetics with inflow, and a mouse perfusion phantom for
+  hyperpolarized ¹³C and for ¹H (tissue water, gadolinium DCE)
+- **B1 Tx/Rx fields**: uniform, birdcage, surface coil
+- **Receiver noise** calibrated from a measured phantom FID, to predict SNR
+  of e.g. hyperpolarized in-vivo experiments
+- **Reconstruction Explorer** for 2D/3D images, k-space and CSI spectra, with
+  the phantom shown on the image grid
+- **PSF and spoiling analysis** of the current sequence
+- **Export** to `.seq`, NetCDF/HDF5, Bruker raw data (experimental) and
+  auto-generated Jupyter notebooks; complete projects as `.blochproj`
 
-### Jupyter Notebook/ Python API
+See the **[User Guide](https://github.com/LucaNagel/bloch_sim_gui/blob/main/docs/USER_GUIDE.md)** for how to use these and what to
+watch out for.
 
-The bloch simulator can be used in both jupyter notebooks or via python api
+## Python API
 
-#### Jupyter Notebook
+Exported notebooks reproduce any GUI simulation; see the
+[spin-echo reproduction](examples/spin_echo_reproduction.ipynb) and
+[analysis](examples/spin_echo_analysis.ipynb) examples. The GUI can also be
+started from a local Jupyter notebook with `!blochsimulator-gui` (not on remote
+servers or Colab).
 
-You can launch the interactive GUI directly from a cell in your local Jupyter
-Notebook. You can also export the selected GUI simulation as a notebook. See
-the [spin-echo reproduction](examples/spin_echo_reproduction.ipynb) and
-[spin-echo analysis](examples/spin_echo_analysis.ipynb) examples.
-
-```python
-# Install from PyPI once, if needed
-!pip install blochsimulator[gui,pulseq]"
-
-# Launch the GUI
-!blochsimulator-gui
-```
-
-This requires Jupyter to run on your local machine; it does not work on a
-headless remote server or Google Colab.
-
-#### Basic simulation
+### Basic simulation
 
 ```python
 import numpy as np
@@ -492,11 +335,10 @@ From the repository root, create an environment with an explicit Python version:
 ```bash
 conda create -n bloch-simulator python=3.12 pip
 conda activate bloch-simulator
-python -m pip install "ipykernel==7.4.0" ".[gui,pulseq]"
+python -m pip install -e .
 ```
 
-Python 3.12 matches the project's desktop development runtime and supports
-ipykernel 7.4.0. Select this environment as the kernel in your notebook editor.
+Select this environment as the kernel in your notebook editor.
 
 Pip installs `h5py` automatically because it is declared in `pyproject.toml`.
 If no compatible pre-built wheel is available, pip attempts a source build,

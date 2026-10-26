@@ -29,11 +29,11 @@ repository root:
 ```bash
 conda create -n bloch-simulator python=3.12 pip
 conda activate bloch-simulator
-python -m pip install "ipykernel==7.4.0" ".[gui,pulseq]"
+python -m pip install "ipykernel==7.4.0" -e .
 ```
 
-Use `-e ".[gui,pulseq]"` in place of `".[gui,pulseq]"` for an editable
-development installation. Select the `bloch-simulator` environment as the
+GUI and Pulseq support are regular dependencies; no extras are needed. Drop
+`-e` for a non-editable installation. Select the `bloch-simulator` environment as the
 kernel in your notebook editor. If the editor requires a registered kernel,
 register it from the active environment:
 

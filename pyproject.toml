@@ -47,17 +47,18 @@ dependencies = [
     "imageio>=2.34.0",
     "imageio-ffmpeg>=0.4.9",
     "psutil>=5.9.0; sys_platform != 'emscripten'",
+    # GUI and Pulseq support are installed by default; the browser (Pyodide)
+    # build has no Qt and only runs the core simulator.
+    "PyQt5>=5.15.0; sys_platform != 'emscripten'",
+    "pyqtgraph>=0.12.0; sys_platform != 'emscripten'",
+    "PyOpenGL>=3.1.0; sys_platform != 'emscripten'",
+    "pypulseq>=1.5.0,<1.5.1; sys_platform != 'emscripten'",
 ]
 
 [project.optional-dependencies]
-gui = [
-    "PyQt5>=5.15.0",
-    "pyqtgraph>=0.12.0",
-    "PyOpenGL>=3.1.0",
-]
-pulseq = [
-    "pypulseq>=1.5.0,<1.5.1",
-]
+# Kept as empty aliases so older "blochsimulator[gui,pulseq]" commands still work.
+gui = []
+pulseq = []
 export = [
     "pydicom>=2.4",
     "nibabel>=5.0",
