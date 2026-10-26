@@ -180,6 +180,7 @@ from .spectral_spatial_designer import (
     SpectralSpatialScheduleDialog,
 )
 from .magnetization_viewer import MagnetizationViewer
+from .spectral_target_table import SpectralTargetTable
 from .spin_minimum import ZeroToMinimum, minimum_ms_from_message, spin_boxes
 from .spoiling_analysis_view import SpoilingAnalysisSnapshot, SpoilingAnalysisView
 from .psf_analysis_view import PSFAnalysisContext, PSFAnalysisView
@@ -4208,9 +4209,6 @@ class SequenceSimulationWidget(QWidget):
         ss_alpha_half_absolute_form.addRow(
             "First TR", self.ss_bssfp_alpha_half_spacing_ms
         )
-        ss_alpha_half_absolute_form.addRow(
-            "First flip angles", self.ss_bssfp_alpha_half_flip_angles_deg
-        )
         self.ss_bssfp_spoiler_cycles = self._parameter_spin(
             0.0, 1000.0, 0.0, " cycles/FOV"
         )
@@ -4250,10 +4248,16 @@ class SequenceSimulationWidget(QWidget):
         ss_form.addRow("Read offset", self.ss_bssfp_read_offset_mm)
         ss_form.addRow("Phase offset", self.ss_bssfp_phase_offset_mm)
         _add_form_section(ss_form, "Spectral targets and RF pulse")
-        ss_form.addRow("Target names", self.ss_bssfp_target_names)
-        ss_form.addRow("RF target offsets", self.ss_bssfp_target_offsets_hz)
-        ss_form.addRow("Receiver offsets", self.ss_bssfp_receiver_offsets_hz)
-        ss_form.addRow("Target flip angles", self.ss_bssfp_flip_angles_deg)
+        # One row per metabolite. The comma-separated line edits stay as the
+        # hidden canonical values that projects, presets and the sequence
+        # builder read; the table mirrors them in both directions.
+        self.ss_bssfp_target_table = SpectralTargetTable(prefix="ss_bssfp_target")
+        for line_edit in self._ss_bssfp_target_line_edits().values():
+            line_edit.setParent(self.ss_bssfp_target_table)
+            line_edit.setVisible(False)
+        self._syncing_ss_bssfp_targets = False
+        self._sync_ss_bssfp_target_table_from_text()
+        ss_form.addRow(self.ss_bssfp_target_table)
         self._add_shared_rf_controls(
             ss_form,
             "ss_bssfp",
@@ -5704,6 +5708,8 @@ class SequenceSimulationWidget(QWidget):
             self.ss_bssfp_alpha_half_flip_angles_deg,
         ):
             widget.editingFinished.connect(self._ss_bssfp_changed)
+            widget.textChanged.connect(self._sync_ss_bssfp_target_table_from_text)
+        self.ss_bssfp_target_table.changed.connect(self._ss_bssfp_target_table_changed)
         self.ss_bssfp_rf_pulse_type.currentIndexChanged.connect(self._ss_bssfp_changed)
         self.ss_bssfp_alpha_half.toggled.connect(self._ss_bssfp_changed)
         self.ss_bssfp_alpha_half_use_ratios.toggled.connect(self._ss_bssfp_changed)
@@ -7269,6 +7275,7 @@ class SequenceSimulationWidget(QWidget):
             return parameters
 
         discovered = self._form_loop_parameters(group, category="sequence")
+        discovered.extend(self._spectral_target_loop_parameters(group))
         # Flip-angle controls are the most common loop target. The remaining
         # controls retain construction order, which follows their form order.
         discovered.sort(
@@ -7276,6 +7283,25 @@ class SequenceSimulationWidget(QWidget):
         )
         parameters.extend(discovered)
         return parameters
+
+    def _spectral_target_loop_parameters(self, group):
+        """Per-metabolite RF/receiver offsets and flip angles of a target table."""
+        table = self.ss_bssfp_target_table
+        if not group.isAncestorOf(table) or not table.isVisibleTo(group):
+            return []
+        return [
+            _SequenceLoopParameter(
+                key=key,
+                label=label,
+                unit=self._plain_parameter_label(spin.suffix()),
+                minimum=float(spin.minimum()),
+                maximum=float(spin.maximum()),
+                decimals=int(spin.decimals()),
+                widget=spin,
+                category="sequence",
+            )
+            for key, label, spin in table.loop_controls()
+        ]
 
     def _form_loop_parameters(self, group, *, category):
         """Return the enabled numeric controls of ``group`` as loop parameters."""
@@ -10965,7 +10991,62 @@ class SequenceSimulationWidget(QWidget):
         bandwidth_hz = self.ss_bssfp_bandwidth_khz.value() * 1000.0
         self.ss_bssfp_dwell_info.setText(f"{1e6 / bandwidth_hz:.3f} µs")
         self._update_bssfp_startup_value_controls("ss_bssfp")
+        self._sync_ss_bssfp_target_table_from_text()
+        self.ss_bssfp_target_table.set_startup_visible(
+            self.ss_bssfp_alpha_half.isChecked()
+            and not self.ss_bssfp_alpha_half_use_ratios.isChecked()
+        )
         self._update_ss_bssfp_spoiler_info()
+
+    def _ss_bssfp_target_line_edits(self):
+        """Map table fields to the comma-separated line edits that store them."""
+        return {
+            "name": self.ss_bssfp_target_names,
+            "rf_offset_hz": self.ss_bssfp_target_offsets_hz,
+            "receiver_offset_hz": self.ss_bssfp_receiver_offsets_hz,
+            "flip_angle_deg": self.ss_bssfp_flip_angles_deg,
+            "startup_flip_angle_deg": self.ss_bssfp_alpha_half_flip_angles_deg,
+        }
+
+    def _sync_ss_bssfp_target_table_from_text(self, *_):
+        if getattr(self, "_syncing_ss_bssfp_targets", True):
+            return
+        edits = self._ss_bssfp_target_line_edits()
+        names = [
+            value.strip()
+            for value in edits.pop("name").text().split(",")
+            if value.strip()
+        ]
+        values = {}
+        try:
+            for field, line_edit in edits.items():
+                values[field] = self._comma_separated_floats(line_edit.text(), field)
+        except ValueError:
+            # Keep the last valid table while a value is half typed.
+            return
+        if not names:
+            names = [
+                f"Target {index + 1}" for index in range(len(values["rf_offset_hz"]))
+            ]
+        self._syncing_ss_bssfp_targets = True
+        try:
+            self.ss_bssfp_target_table.set_targets(names, values)
+        finally:
+            self._syncing_ss_bssfp_targets = False
+
+    def _ss_bssfp_target_table_changed(self):
+        if self._syncing_ss_bssfp_targets:
+            return
+        names, values = self.ss_bssfp_target_table.targets()
+        edits = self._ss_bssfp_target_line_edits()
+        self._syncing_ss_bssfp_targets = True
+        try:
+            edits.pop("name").setText(", ".join(names))
+            for field, line_edit in edits.items():
+                line_edit.setText(", ".join(f"{value:.9g}" for value in values[field]))
+        finally:
+            self._syncing_ss_bssfp_targets = False
+        self._ss_bssfp_changed()
 
     def _update_radial_me_bssfp_labels(self):
         self._update_shared_rf_controls("radial_me")
