@@ -280,7 +280,7 @@ For detailed packaging, release workflows, and CI/CD information, see the
 
 ### Install from source
 
-The Python package supports Python 3.9 or later. Desktop GUI development and
+The Python package supports Python 3.10 or later. Desktop GUI development and
 PyInstaller app builds use the shared Python 3.12 runtime declared in
 `.python-version`, so the source GUI and packaged app do not silently use
 different interpreters.
@@ -358,7 +358,7 @@ is required.
 Prerequisites:
 
 - macOS: Xcode CLT; `brew install libomp`
-- Windows: Python 3.9+ and MSVC Build Tools for the C extension
+- Windows: Python 3.10+ and MSVC Build Tools for the C extension
 - Linux: gcc/g++; ensure `libgomp` is available
 
 Quick build:

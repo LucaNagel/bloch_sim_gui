@@ -25,7 +25,7 @@ name = "blochsimulator"
 version = "2.9.4"
 description = "High-performance Bloch equation simulator for MRI"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {text = "GPL-3.0-only"}
 authors = [
     {name = "Luca Nagel"}
@@ -77,7 +77,7 @@ test-command = "python -c \"import blochsimulator.blochsimulator_cy; import bloc
 
 [tool.black]
 line-length = 88
-target-version = ['py39']
+target-version = ['py310']
 include = '\.pyi?$'
 
 [tool.pytest.ini_options]
