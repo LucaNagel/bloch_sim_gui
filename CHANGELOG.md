@@ -6,9 +6,44 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.9.5] - 2026-10-26
+
 ### Added
 
-- Reconstruction Explorer: **Average repetitions** option that shows the complex mean over all repetitions (before receive-channel combination), whichever component is displayed.
+- Reconstruction Explorer: **Average repetitions** option that shows the complex
+  mean over all repetitions (before receive-channel combination), whichever
+  component is displayed.
+- Selectable phase-encoding orders: FLASH, IR-FLASH and EPSI-MGE acquire lines
+  linearly or centrically; CSI and the 3D bSSFP family (bSSFP, SS-bSSFP,
+  ME-bSSFP) combine one order per axis with a swappable inner loop axis, plus
+  elliptical-centric. The Bruker export stores signed `EncSteps` and
+  `CENTRIC_ENC`, and falls back to k-space order with a warning for 3D orders
+  that are not a ky-inner loop.
+- Spin probe export (`.nc`/`.npz`, `SequenceProbeResult.save/load`) with a
+  `load_spin_probes.ipynb` loader notebook, a selector for every retained probe
+  of the session and a hint in the Spin Probe tab while no probe has run. The
+  tabs are reordered: Sequence, Geometry, Reconstruction Explorer, Spin Probe,
+  Signal, Spatial Magnetization, 3D Magnetization Animation, Log.
+- Parameter loops over spin probe parameters and over phantom T1/T2 (pool values
+  or scaled maps), with `loop_id` in the loop metadata and an optional
+  `load_simulations.ipynb` next to disk loops and batch project exports.
+- SS-bSSFP targets are edited in a per-metabolite table (RF offset, receiver
+  offset, flip angle, startup flip); every table value can be looped.
+- Phantom designer: isotope (¹³C) enrichment, volume and observed amount; peak
+  amplitudes are molecule concentrations in mM, the receiver calibration scales
+  its noise by the enrichment and the SNR budget lists it. The default spectral
+  window is 5 ppm with 257 points. Receiver noise errors open a warning with a
+  button to the Receiver / Noise tab.
+- User guide rewritten around non-obvious behaviour, kernel internals moved to
+  `docs/simulation_kernels.md`, and a README/guide section on Bloch projects
+  versus exported results with loader notebooks.
+
+### Changed
+
+- Python 3.10 or later is required (pypulseq 1.5.0 does not import on 3.9).
+- PyQt5, pyqtgraph, PyOpenGL and pypulseq are regular dependencies, so
+  `pip install blochsimulator` installs the GUI and Pulseq support; the `gui`
+  and `pulseq` extras remain as empty aliases.
 
 ### Fixed
 
@@ -18,6 +53,12 @@ The project follows [Semantic Versioning](https://semver.org/).
   shoulders and a Nyquist zigzag for odd sample counts. SLR sharpness now sets
   the time-bandwidth product (TBW = sharpness + 1), which is also used for the
   slice-select gradient.
+- The phantom designer spectrum preview redraws after each peak edit instead of
+  showing a stale peak position, and its reference line uses the sequence
+  reference. The Phantom and Phantom + B1 tabs show the sequence's default
+  sphere until a phantom is created or loaded.
+- Sequence compile errors are shown in a dialog, and cancelling without a
+  running simulation thread no longer fails.
 
 ## [2.9.4] - 2026-10-25
 
