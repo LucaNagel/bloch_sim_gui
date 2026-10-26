@@ -101,7 +101,8 @@ Loaded and generated sequences can be inspected in a sequence viewer. A 3D phant
   including `fid` and/or `rawdata.job0` plus the associated parameter files.
 - **Automatically generated Jupyter notebooks** using the parameters selected in
   the GUI.
-- Export blochsimulator projects to later continue working on them.
+- Export blochsimulator projects to later continue working on them, see
+  [Bloch project vs. exported results](#bloch-project-vs-exported-results).
 
 
 ## Get started
