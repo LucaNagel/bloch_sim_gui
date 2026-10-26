@@ -5,7 +5,10 @@ import pytest
 from blochsimulator.simulator import design_rf_pulse
 from blochsimulator.sequence.rf_pulses import (
     design_rf_envelope,
+    make_pulseq_rf_events,
     rf_time_bandwidth_product_from_envelope,
+    scale_rf_envelope_to_flip,
+    slr_time_bandwidth_product,
 )
 
 
@@ -52,7 +55,8 @@ def test_sequence_slr_is_designed_from_parameters_without_loading_a_file(
 
     assert pulse_type == "slr"
     assert duration_s == pytest.approx(2.5e-3)
-    assert tbw == pytest.approx(rf_time_bandwidth_product_from_envelope(broad))
+    # SLR ignores the generic TBW input; sharpness sets the designed TBW.
+    assert tbw == pytest.approx(slr_time_bandwidth_product(1)) == 2.0
     assert broad.size == sharp.size == 250
     assert np.allclose(broad, broad[::-1])
     assert np.allclose(sharp, sharp[::-1])
@@ -85,6 +89,7 @@ def test_free_mode_slr_uses_the_global_sequence_envelope():
         raster_s=duration_s / sample_count,
         time_bandwidth_product=time_bandwidth_product,
         slr_sharpness=sharpness,
+        flip_angle_deg=30.0,
     )
     assert np.allclose(
         free_b1 / np.max(np.abs(free_b1)), shared / np.max(np.abs(shared))
@@ -134,11 +139,9 @@ def test_slr_sharpness_does_not_reduce_temporal_lobes():
             )
         )
 
-    # Remez may place a pair of roots exactly on or just off the sampled raster
-    # depending on the SciPy/platform combination. Adjacent sharpness settings
-    # can therefore have the same sampled zero-crossing count even though the
-    # transition is narrower. The progression must not reverse, and the full
-    # sharpness range must still add lobes.
+    # Adjacent sharpness settings can share a sampled zero-crossing count
+    # while the transition still narrows. The progression must not reverse,
+    # and the full sharpness range must still add lobes.
     assert all(
         current >= previous
         for previous, current in zip(zero_crossings, zero_crossings[1:])
@@ -196,7 +199,7 @@ def test_full_sinc_apodization_suppresses_outer_lobes():
 
 
 @pytest.mark.parametrize("sharpness", [1.0, 5.0])
-def test_sequence_slr_has_zero_edges_and_centered_main_lobe(sharpness):
+def test_sequence_slr_has_small_edges_and_centered_main_lobe(sharpness):
     envelope, *_ = design_rf_envelope(
         pulse_type="slr",
         duration_s=2.33e-3,
@@ -207,8 +210,10 @@ def test_sequence_slr_has_zero_edges_and_centered_main_lobe(sharpness):
     magnitude = np.abs(envelope)
     center = envelope.size // 2
 
-    assert magnitude[0] == pytest.approx(0.0, abs=1e-15)
-    assert magnitude[-1] == pytest.approx(0.0, abs=1e-15)
+    # A true SLR pulse is not tapered to zero; its 1 % ripple design leaves
+    # edges of a few percent of the peak, with no spikes.
+    assert magnitude[0] < 0.03 * magnitude[center]
+    assert magnitude[-1] < 0.03 * magnitude[center]
     assert abs(int(np.argmax(magnitude)) - center) <= 2
     assert magnitude[center] == pytest.approx(np.max(magnitude), rel=1e-4)
     assert np.max(magnitude[: envelope.size // 10]) < 0.35 * magnitude[center]
@@ -321,3 +326,151 @@ def test_bir4_pulse():
     assert len(b1) == npoints
     # BIR-4 is a composite pulse, check it's not all zeros
     assert np.max(np.abs(b1)) > 0
+
+
+def _hard_pulse_profile(samples_hz, raster_s, offsets_hz):
+    """Return Mx, My, Mz from rest after hard-pulse rotations per raster cell."""
+    magnetization = np.zeros((offsets_hz.size, 3))
+    magnetization[:, 2] = 1.0
+    for sample in np.asarray(samples_hz, dtype=np.complex128):
+        field = np.empty((offsets_hz.size, 3))
+        field[:, 0] = 2.0 * np.pi * raster_s * sample.real
+        field[:, 1] = 2.0 * np.pi * raster_s * sample.imag
+        field[:, 2] = 2.0 * np.pi * raster_s * offsets_hz
+        angle = np.linalg.norm(field, axis=1, keepdims=True)
+        axis = field / np.maximum(angle, 1e-30)
+        cos, sin = np.cos(angle), np.sin(angle)
+        dot = np.sum(axis * magnetization, axis=1, keepdims=True)
+        magnetization = (
+            magnetization * cos
+            - np.cross(axis, magnetization) * sin
+            + axis * dot * (1.0 - cos)
+        )
+    return magnetization
+
+
+def _sample_slr(sample_count, duration_s, sharpness, flip_angle_deg):
+    envelope, *_ = design_rf_envelope(
+        pulse_type="slr",
+        duration_s=duration_s,
+        raster_s=duration_s / sample_count,
+        slr_sharpness=sharpness,
+        flip_angle_deg=flip_angle_deg,
+    )
+    return envelope
+
+
+@pytest.mark.parametrize("sharpness", [1, 2, 5])
+@pytest.mark.parametrize("flip_angle_deg", [None, 90.0])
+def test_slr_shape_is_identical_for_even_and_odd_sample_counts(
+    sharpness, flip_angle_deg
+):
+    duration_s = 2.5e-3
+    shapes = {}
+    for sample_count in (250, 251, 1000, 1001):
+        envelope = _sample_slr(sample_count, duration_s, sharpness, flip_angle_deg)
+        normalized = envelope.real / np.max(np.abs(envelope))
+        assert np.allclose(envelope.imag, 0.0)
+        assert np.allclose(normalized, normalized[::-1], atol=1e-9)
+        # No Nyquist zigzag: neighbouring second differences may not
+        # alternate in sign around a smooth pulse. Their size stays at the
+        # level a smooth curve has on this raster.
+        curvature = np.diff(normalized, 2)
+        assert np.max(np.abs(curvature)) < 40.0 / sample_count**2 * (sharpness + 1) ** 2
+        shapes[sample_count] = normalized
+
+    # Even and odd sample counts sample the same continuous pulse.
+    for coarse, fine in ((250, 251), (1000, 1001), (250, 1001)):
+        positions = (np.arange(coarse) + 0.5) / coarse
+        fine_positions = (np.arange(fine) + 0.5) / fine
+        assert np.allclose(
+            shapes[coarse],
+            np.interp(positions, fine_positions, shapes[fine]),
+            atol=2e-3,
+        )
+
+
+@pytest.mark.parametrize("sample_count", [400, 401])
+@pytest.mark.parametrize("flip_angle_deg", [30.0, 90.0])
+def test_slr_pulse_excites_its_designed_time_bandwidth_product(
+    sample_count, flip_angle_deg
+):
+    duration_s = 2e-3
+    sharpness = 3
+    raster_s = duration_s / sample_count
+    envelope, _, tbw, _ = design_rf_envelope(
+        pulse_type="slr",
+        duration_s=duration_s,
+        raster_s=raster_s,
+        slr_sharpness=sharpness,
+        flip_angle_deg=flip_angle_deg,
+    )
+    assert tbw == slr_time_bandwidth_product(sharpness) == 4.0
+    samples_hz = scale_rf_envelope_to_flip(
+        envelope, flip_angle_deg=flip_angle_deg, raster_s=raster_s
+    )
+    bandwidth_hz = tbw / duration_s
+    offsets_hz = np.linspace(0.0, 1.5 * bandwidth_hz, 301)
+    profile = _hard_pulse_profile(samples_hz, raster_s, offsets_hz)
+    transverse = np.hypot(profile[:, 0], profile[:, 1])
+    target = np.sin(np.deg2rad(flip_angle_deg))
+
+    passband = offsets_hz <= 0.25 * bandwidth_hz
+    stopband = offsets_hz >= 0.85 * bandwidth_hz
+    assert transverse[0] == pytest.approx(target, abs=1e-3)
+    assert np.all(np.abs(transverse[passband] - target) < 0.03)
+    assert np.max(transverse[stopband]) < 0.02
+    half_width = offsets_hz[np.argmax(transverse < 0.5 * target)]
+    assert 2.0 * half_width == pytest.approx(bandwidth_hz, rel=0.08)
+
+
+def test_large_tip_slr_differs_from_small_tip_and_keeps_its_area():
+    small = _sample_slr(500, 3e-3, 4, None).real
+    large = _sample_slr(500, 3e-3, 4, 90.0).real
+    small = small / np.max(small)
+    large = large / np.max(large)
+
+    assert not np.allclose(small, large, atol=1e-2)
+    samples_hz = scale_rf_envelope_to_flip(
+        _sample_slr(500, 3e-3, 4, 90.0), flip_angle_deg=90.0, raster_s=6e-6
+    )
+    on_resonance = _hard_pulse_profile(samples_hz, 6e-6, np.zeros(1))[0]
+    assert on_resonance[2] == pytest.approx(0.0, abs=1e-9)
+
+
+@pytest.mark.parametrize("sharpness", [0, 1.5])
+def test_slr_rejects_invalid_sharpness_before_design(sharpness):
+    with pytest.raises(ValueError, match="positive integer"):
+        slr_time_bandwidth_product(sharpness)
+
+
+def test_slr_requires_enough_samples_for_its_time_bandwidth_product():
+    with pytest.raises(ValueError, match="too high"):
+        _sample_slr(10, 1e-3, 5, None)
+
+
+def test_pulseq_slr_events_use_flip_specific_shapes():
+    pp = pytest.importorskip("pypulseq")
+    system = pp.Opts(rf_raster_time=1e-6, grad_raster_time=10e-6)
+    events, duration_s, tbw, pulse_type = make_pulseq_rf_events(
+        pp,
+        system,
+        flip_angles_deg=(10.0, 90.0),
+        pulse_type="slr",
+        duration_s=2e-3,
+        slr_sharpness=3,
+    )
+    assert pulse_type == "slr"
+    assert tbw == 4.0
+    small, large = (np.real(event.signal) for event in events)
+    for event, angle in zip(events, (10.0, 90.0)):
+        area_deg = np.rad2deg(
+            2.0 * np.pi * np.sum(event.signal).real * system.rf_raster_time
+        )
+        assert area_deg == pytest.approx(angle, rel=1e-6)
+    assert not np.allclose(small / small.max(), large / large.max(), atol=1e-2)
+    assert np.allclose(
+        large / large.max(),
+        _sample_slr(2000, 2e-3, 3, 90.0).real
+        / np.max(_sample_slr(2000, 2e-3, 3, 90.0).real),
+    )

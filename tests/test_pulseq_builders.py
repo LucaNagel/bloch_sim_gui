@@ -29,6 +29,7 @@ from blochsimulator.sequence import (
 from blochsimulator.sequence.model import ADCEvent
 from blochsimulator.sequence.rf_pulses import (
     rf_time_bandwidth_product_from_envelope,
+    slr_time_bandwidth_product,
 )
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
 
@@ -1117,7 +1118,12 @@ def test_epi_builder_exports_configurable_rf_pulse_properties(tmp_path, pulse_ty
     assert sequence.check_timing()[0]
     assert definitions["RFPulseType"] == pulse_type
     assert definitions["RFDuration"] == pytest.approx(2.5e-3)
-    expected_tbw = rf_time_bandwidth_product_from_envelope(rf.samples_hz)
+    # SLR reports its designed TBW; other shapes measure it from the envelope.
+    expected_tbw = (
+        slr_time_bandwidth_product(5)
+        if pulse_type == "slr"
+        else rf_time_bandwidth_product_from_envelope(rf.samples_hz)
+    )
     assert definitions["RFTimeBandwidthProduct"] == pytest.approx(
         expected_tbw, rel=1e-6
     )

@@ -6,6 +6,15 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- SLR pulses are now real Shinnar–Le Roux designs (least-squares beta
+  polynomial, minimum-phase alpha, inverse SLR per flip angle). The former
+  equiripple design produced end spikes hidden by a Tukey taper, visible
+  shoulders and a Nyquist zigzag for odd sample counts. SLR sharpness now sets
+  the time-bandwidth product (TBW = sharpness + 1), which is also used for the
+  slice-select gradient.
+
 ## [2.9.4] - 2026-10-25
 
 ### Added

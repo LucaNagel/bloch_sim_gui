@@ -452,9 +452,14 @@ designer. Choose **Sinc**, **SLR**, **Gaussian**, **Block**, **RF Pulse
 Designer**, or **Spectral-spatial Designer**, then set duration,
 time-bandwidth product, Sinc lobe count, apodization, SLR sharpness, and RF
 carrier offset as applicable. Shape-specific controls are only shown for the
-selected pulse type. SLR sharpness is a positive integer: order 1 is one
-central lobe, while higher orders narrow the designed transition and visibly
-add temporal side lobes. Sinc apodization remains non-negative from 0 to 1;
+selected pulse type. SLR pulses are true Shinnar–Le Roux designs: a
+least-squares beta polynomial with 1 % pass- and stop-band ripple is
+converted to RF by the inverse SLR transform for each flip angle, so 90° and
+small-tip pulses have their own shapes. SLR sharpness is a positive integer
+that sets the time-bandwidth product, TBW = sharpness + 1: sharpness 1 is one
+central lobe, while higher values sharpen the slice profile and add temporal
+side lobes. The pulse is designed on a fixed fine grid and resampled, so even
+and odd RF sample counts give the same shape. Sinc apodization remains non-negative from 0 to 1;
 0.5 is Hann and 1.0 is Hann squared.
 Free Mode and Sequence Mode now call the same analytic envelope factory for
 Sinc, SLR, Gaussian, and Block pulses. Sinc samples are centred on the RF

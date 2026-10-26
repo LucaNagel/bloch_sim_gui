@@ -152,6 +152,7 @@ def design_rf_pulse(
             time_bandwidth_product=time_bw_product,
             apodization=0.0,
             slr_sharpness=slr_sharpness,
+            flip_angle_deg=flip_angle,
         )
         area = np.sum(envelope) * dt
         if abs(area) < 1e-15:
