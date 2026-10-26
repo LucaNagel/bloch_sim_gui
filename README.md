@@ -229,6 +229,70 @@ Once installed, launch the GUI from the applications folder or a terminal:
 blochsimulator-gui
 ```
 
+### Bloch project vs. exported results
+
+The GUI writes two kinds of files. Choose by what you want to do with them:
+
+| | **Bloch project** (`.blochproj`) | **Exported results** (`.nc`, `.h5`, `.npz`, Bruker, DICOM, NIfTI) |
+| --- | --- | --- |
+| Written by | **File → Save Project**, **Export selected…** in the Simulations list, parameter loops with *Results: Save to folder* | **Export Results** |
+| Purpose | Continue working: re-open the complete session in the GUI | Analyse the numbers of one result in other tools |
+| Contains | Sequence, phantom, B1 fields, all GUI controls, the last **Free Mode** result *and* the last **Sequence/Spin Probe** result | Signal, k-space, images, magnetization, B1 maps and the parameters as JSON metadata of the current result |
+| Re-open in the GUI | Yes (**File → Open Project**) | No (a `.nc` file can be viewed with **Open result…** in the Reconstruction Explorer) |
+| Read without Bloch Simulator | No, needs `blochsimulator.project_io.load_project` | Yes (xarray, h5py, NumPy, MATLAB, scanner viewers) |
+
+Both keep the simulation parameters (flip angle, matrix, FOV, TR/TE, nucleus,
+B0). Only a project also keeps the phantom and B1 field objects themselves.
+Two example notebooks show how to load each kind, including these parameters:
+
+- [load_bloch_project.ipynb](examples/load_bloch_project.ipynb): parameters,
+  phantom, B1 and every simulation inside a project.
+- [load_exported_results.ipynb](examples/load_exported_results.ipynb):
+  NetCDF, HDF5 and NPZ exports with their metadata. Free Mode HDF5 exports:
+  [read_hdf5_examples.py](examples/read_hdf5_examples.py).
+
+**Several simulations in one project.** A project can hold one Free Mode and
+one Sequence (or Spin Probe) result at the same time. Each result again
+contains many spins, voxels, pools or coils that can be selected by index:
+
+```python
+from blochsimulator.project_io import load_project
+
+project = load_project("simulation.blochproj")
+
+# Free Mode: arrays of shape (time, position, frequency), one spin per pair
+free_mode = project["legacy_result"]
+if free_mode is not None:
+    mz_one_spin = free_mode["mz"][:, 0, 10]  # position 0, frequency index 10
+
+# Sequence mode: one result with signal, magnetization and per-pool data
+result = project["sequence_result"]
+if result is not None:
+    parameters = result.metadata["sequence_definitions"]
+    flip_angle_deg = parameters["FlipAngleDeg"]
+    voxel = result.final_magnetization[32, 32, 0]  # Mx, My, Mz of one voxel
+    for index, pool in enumerate(result.pool_names):
+        pool_signal = result.species_signal[index]  # signal of one metabolite
+```
+
+A parameter loop with *Results: Save to folder* or **Export selected…** in
+the Simulations list writes **one project per run** into a folder. Every run records the varied parameter in
+`result.metadata["parameter_loop"]` (`loop_id`, `parameter_label`, `value`,
+`unit`, `index`), so single runs can be picked or stacked:
+
+```python
+from pathlib import Path
+
+runs = {}
+for path in Path("loop_folder").glob("*.blochproj"):
+    result = load_project(path)["sequence_result"]
+    loop = result.metadata.get("parameter_loop")
+    if loop is not None:
+        runs[loop["value"]] = result
+
+result_at_15 = runs[15.0]  # e.g. the run with flip angle 15°
+```
+
 ### Jupyter Notebook/ Python API
 
 The bloch simulator can be used in both jupyter notebooks or via python api
@@ -300,6 +364,9 @@ project = load_project("simulation.blochproj")
 phantom = project["phantom"]
 result = project["sequence_result"]
 ```
+
+See [Bloch project vs. exported results](#bloch-project-vs-exported-results)
+and [load_bloch_project.ipynb](examples/load_bloch_project.ipynb).
 
 #### Spin echo sequence
 
