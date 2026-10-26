@@ -5,7 +5,8 @@ not the magnitude or complex RMS. Relative SNR refers to the ideal 90-degree
 FID of the whole simulated object. With ``signal_weighting="voxel_volume"`` and
 concentrations in mM (= mol/m^3), simulated signal is in mol times
 polarization relative to thermal equilibrium at the calibration's target
-temperature.
+temperature. Concentrations count molecules; the object's isotope enrichment
+(phantom metadata ``isotope_enrichment``, default 1) gives the observed share.
 """
 
 from __future__ import annotations
@@ -120,8 +121,9 @@ class ReceiverCalibration:
     ``temperature_k``.
 
     Simulated signal is read as mol times polarization relative to thermal at
-    ``target_temperature_k``; ``noise_factor`` multiplies the target noise (e.g.
-    extra coil loading in vivo).
+    ``target_temperature_k``; ``target_enrichment`` is the observed isotope
+    fraction of the simulated molecules and ``noise_factor`` multiplies the
+    target noise (e.g. extra coil loading in vivo).
 
     ``signal_efficiency`` is the measured amplitude relative to the fully
     relaxed 90-degree amplitude at t=0 in a unit coil, for example from
@@ -144,6 +146,7 @@ class ReceiverCalibration:
     enrichment: float = 1.0
     polarization: Optional[float] = None
     target_temperature_k: float = 310.15
+    target_enrichment: float = 1.0
     noise_factor: float = 1.0
     signal_efficiency: Optional[float] = None
     reference_scan: Optional[dict] = None
@@ -172,6 +175,8 @@ class ReceiverCalibration:
             raise ValueError("Reference flip angle must be between 0 and 180 degrees")
         if not 0 < self.enrichment <= 1:
             raise ValueError("Enrichment must be in (0, 1]")
+        if not 0 < self.target_enrichment <= 1:
+            raise ValueError("Simulated object enrichment must be in (0, 1]")
         if self.polarization is not None and not 0 < self.polarization <= 1:
             raise ValueError("Reference polarization must be in (0, 1]")
         if not self.nucleus:
@@ -208,6 +213,11 @@ class ReceiverCalibration:
         )
 
     @property
+    def target_signal_scale(self):
+        """Fully polarized observed mol per simulation unit of the object."""
+        return self.target_thermal_polarization * self.target_enrichment
+
+    @property
     def measured_snr(self):
         return self.measured_amplitude / self.measured_noise_std
 
@@ -240,7 +250,7 @@ class ReceiverCalibration:
         return (
             bandwidth_scale
             * self.noise_factor
-            / (self.sensitivity_per_mol * self.target_thermal_polarization)
+            / (self.sensitivity_per_mol * self.target_signal_scale)
         )
 
     def check_context(self, *, nucleus, field_strength_t):
@@ -260,6 +270,7 @@ class ReceiverCalibration:
             "reference_moles": self.reference_moles,
             "reference_polarization": self.reference_polarization,
             "target_thermal_polarization": self.target_thermal_polarization,
+            "target_signal_scale": self.target_signal_scale,
             "single_scan_snr": self.single_scan_snr,
             "reference_signal_fraction": self.reference_signal_fraction,
             "sensitivity_per_mol": self.sensitivity_per_mol,
@@ -282,9 +293,13 @@ def receiver_acquisition_metadata(
         "adc_samples": [int(event.num_samples) for event in events],
     }
     if phantom is not None:
-        temperature = (getattr(phantom, "metadata", {}) or {}).get("temperature_k")
+        phantom_metadata = getattr(phantom, "metadata", {}) or {}
+        temperature = phantom_metadata.get("temperature_k")
         if temperature is not None:
             metadata["temperature_k"] = _positive(temperature, "Phantom temperature")
+        enrichment = phantom_metadata.get("isotope_enrichment")
+        if enrichment is not None:
+            metadata["isotope_enrichment"] = float(enrichment)
         try:
             amplitude = ideal_fid_amplitude(phantom, signal_weighting or "voxel")
         except ValueError:
@@ -335,20 +350,29 @@ class ReceiverNoise:
         )
         return bandwidth_scale * float(ideal_fid_amplitude) / self.snr
 
-    def for_temperature(self, temperature_k):
-        """Use a phantom's explicit thermal reference, retaining the measured calibration.
+    def for_object(self, metadata):
+        """Use a phantom's temperature and enrichment, retaining the measured calibration.
 
-        Legacy objects without a temperature keep the configured target value.
+        ``metadata`` is phantom or run metadata with optional ``temperature_k``
+        and ``isotope_enrichment``. Legacy objects without a temperature keep
+        the configured target value; without an enrichment they are fully
+        enriched.
         """
-        if self.mode != "calibrated" or temperature_k is None:
+        metadata = metadata or {}
+        if self.mode != "calibrated":
             return self
-        return replace(
-            self,
-            calibration=replace(
-                self.calibration,
-                target_temperature_k=_positive(temperature_k, "Phantom temperature"),
-            ),
-        )
+        changes = {}
+        temperature_k = metadata.get("temperature_k")
+        if temperature_k is not None:
+            changes["target_temperature_k"] = _positive(
+                temperature_k, "Phantom temperature"
+            )
+        enrichment = metadata.get("isotope_enrichment")
+        if enrichment is not None:
+            changes["target_enrichment"] = float(enrichment)
+        if not changes:
+            return self
+        return replace(self, calibration=replace(self.calibration, **changes))
 
 
 def receiver_noise_samples(shape, seed, sigma):
@@ -366,7 +390,7 @@ def _sample_std(settings, context, count):
         raise ValueError(
             f"{label} needs the run's nucleus, field strength and ADC dwell"
         )
-    settings = settings.for_temperature(context.get("temperature_k"))
+    settings = settings.for_object(context)
     amplitude = None
     if settings.mode == "calibrated":
         settings.calibration.check_context(
@@ -415,7 +439,7 @@ def apply_receiver_noise(result, settings: ReceiverNoise):
     if clean.ndim not in (1, 2) or (clean.ndim == 2 and clean.shape[0] != 1):
         raise ValueError("Receiver noise currently supports one receive channel")
     context = result.metadata.get("receiver_acquisition")
-    settings = settings.for_temperature((context or {}).get("temperature_k"))
+    settings = settings.for_object(context)
     calibration = settings.calibration if settings.mode == "calibrated" else None
     if calibration is not None:
         if result.metadata.get("signal_weighting") != "voxel_volume":
@@ -454,7 +478,8 @@ def apply_receiver_noise(result, settings: ReceiverNoise):
         "signal_unit": (
             None
             if calibration is None
-            else "mol x polarization relative to thermal at target_temperature_k"
+            else "mol of molecules x polarization relative to thermal at "
+            "target_temperature_k"
         ),
         "species_signal": "noiseless_ground_truth",
     }

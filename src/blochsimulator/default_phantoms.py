@@ -26,6 +26,8 @@ MAX_DEFAULT_PHANTOM_MATRIX = 128
 MAX_DEFAULT_SLICE_AXIS_MATRIX = 256
 CELLS_PER_SLICE_THICKNESS = 2
 DEFAULT_PHANTOM_FOV_M = 0.22
+DEFAULT_SPECTRAL_BANDWIDTH_PPM = 5.0
+DEFAULT_SPECTRAL_POINTS = 257
 
 
 @dataclass(frozen=True)
@@ -35,26 +37,23 @@ class DefaultCompound:
     name: str
     t1_s: float
     t2_star_s: float
-    spectral_bandwidth_ppm: float
 
 
-def _preset_compound(nucleus, key, bandwidth_ppm):
+def _preset_compound(nucleus, key):
     for preset in METABOLITE_PRESETS_BY_NUCLEUS.get(nucleus, ()):
         if preset.key == key:
-            return DefaultCompound(
-                preset.name, preset.t1_s, preset.t2_star_s, bandwidth_ppm
-            )
+            return DefaultCompound(preset.name, preset.t1_s, preset.t2_star_s)
     raise KeyError(f"missing {nucleus} metabolite preset {key!r}")
 
 
 # Relaxation follows the curated presets where one exists; the remaining
 # values are generic starting points and only need to be plausible.
 DEFAULT_COMPOUNDS = {
-    "H1": DefaultCompound("Water", 1.5, 0.080, 10.0),
-    "C13": _preset_compound("C13", "pyruvate", 20.0),
-    "P31": _preset_compound("P31", "pcr", 30.0),
-    "F19": DefaultCompound("Fluorine", 1.0, 0.050, 20.0),
-    "Na23": DefaultCompound("Sodium", 0.040, 0.020, 20.0),
+    "H1": DefaultCompound("Water", 1.5, 0.080),
+    "C13": _preset_compound("C13", "pyruvate"),
+    "P31": _preset_compound("P31", "pcr"),
+    "F19": DefaultCompound("Fluorine", 1.0, 0.050),
+    "Na23": DefaultCompound("Sodium", 0.040, 0.020),
 }
 
 
@@ -144,8 +143,8 @@ def default_phantom_design(
         nucleus=nucleus,
         spectral_reference_ppm=float(sequence_reference_ppm),
         spectral_window_center_ppm=float(sequence_reference_ppm),
-        spectral_bandwidth_ppm=compound.spectral_bandwidth_ppm,
-        spectral_points=256,
+        spectral_bandwidth_ppm=DEFAULT_SPECTRAL_BANDWIDTH_PPM,
+        spectral_points=DEFAULT_SPECTRAL_POINTS,
         supersampling_enabled=True,
         supersampling_factor=2,
         shapes=[

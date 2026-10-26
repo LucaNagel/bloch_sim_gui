@@ -61,8 +61,11 @@ def test_new_phantom_designer_uses_new_spectral_defaults(tmp_path):
     )
     assert dialog.nucleus.currentData() == "C13"
     assert dialog.field_strength_t.value() == 7.0
-    assert dialog.spectral_bandwidth_ppm.value() == pytest.approx(10.0)
+    assert dialog.spectral_bandwidth_ppm.value() == pytest.approx(5.0)
     assert dialog.spectral_points.value() == 257
+    assert dialog.isotope_enrichment.value() == pytest.approx(100.0)
+    assert "Object volume" in dialog.object_amount_info.text()
+    assert "observed C13 nuclei" in dialog.object_amount_info.text()
     assert dialog.spectral_window_center_ppm.value() == pytest.approx(0.0)
     assert float(dialog.peak_table.item(0, 5).text()) == pytest.approx(20.0)
     assert dialog.supersampling_enabled.isChecked()
@@ -86,7 +89,7 @@ def test_new_phantom_designer_uses_new_spectral_defaults(tmp_path):
     assert labels["FOV"].alignment() & Qt.AlignLeft
     assert dialog.phantom_geometry_grid.alignment() & Qt.AlignLeft
     preview_frequency, preview_spectrum = dialog.spectral_preview_curve.getData()
-    assert preview_frequency[[0, -1]] == pytest.approx([-5.0, 5.0])
+    assert preview_frequency[[0, -1]] == pytest.approx([-2.5, 2.5])
     assert preview_spectrum.max() > 0.0
     assert dialog.spectral_reference_line.value() == pytest.approx(0.0)
 
@@ -329,6 +332,32 @@ def test_supersampling_is_enabled_by_default_and_round_trips():
     legacy_defaults = PhantomDesign.from_dict({"shapes": [{"name": "Default"}]})
     assert legacy_defaults.supersampling_enabled is False
     assert ShapeDefinition(name="Default").kind == "cylinder"
+
+
+def test_isotope_enrichment_round_trips_and_reaches_phantom_metadata():
+    design = _spectral_design()
+    assert design.isotope_enrichment == 1.0
+    design.isotope_enrichment = 0.011
+    restored = PhantomDesign.from_dict(design.to_dict())
+    assert restored.isotope_enrichment == pytest.approx(0.011)
+    assert restored.build().metadata["isotope_enrichment"] == pytest.approx(0.011)
+    assert PhantomDesign.from_dict({"shapes": []}).isotope_enrichment == 1.0
+    design.isotope_enrichment = 0.0
+    with pytest.raises(ValueError, match="enrichment"):
+        design.validate()
+
+
+def test_designer_enrichment_spin_syncs_and_updates_amount_info(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    settings.setValue("defaults/phantom_nucleus", "C13")
+    dialog = SpectralPhantomDesignerDialog(settings=settings)
+    dialog.isotope_enrichment.setValue(50.0)
+    dialog._sync_global()
+    assert dialog.design.isotope_enrichment == pytest.approx(0.5)
+    assert "(50 % of" in dialog.object_amount_info.text()
+    dialog.close()
+    app.processEvents()
 
 
 def test_designer_loads_and_syncs_supersampling_settings():
@@ -1367,7 +1396,7 @@ def test_designer_edits_optional_metabolite_t1_and_preserves_default_fallback():
         dialog.peak_table.horizontalHeaderItem(column).text().replace("\n", " ")
         for column in range(dialog.peak_table.columnCount())
     ]
-    assert headers[1].lower() == "relative concentration"
+    assert headers[1].lower() == "concentration (mm)"
     assert headers[2].lower() == "initial polarization"
     assert headers[5] == "T2 (ms)"
     delegate = dialog.peak_table.itemDelegateForColumn(2)

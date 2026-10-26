@@ -325,6 +325,8 @@ class PhantomDesign:
     kinetics_time_offset_s: float = 0.0
     dynamic_b0_curve: Optional[TimeCurve] = None
     temperature_k: float = 310.15
+    # Observed isotope fraction; peak amplitudes are molecule concentrations.
+    isotope_enrichment: float = 1.0
 
     def validate(self) -> None:
         if len(self.shape) != 3 or any(
@@ -339,6 +341,8 @@ class PhantomDesign:
             raise ValueError("design field strength must be positive and finite")
         if not np.isfinite(self.temperature_k) or self.temperature_k <= 0:
             raise ValueError("design temperature must be positive and finite")
+        if not 0 < self.isotope_enrichment <= 1:
+            raise ValueError("isotope enrichment must be in (0, 1]")
         if self.nucleus is not None and self.nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
             raise ValueError(f"unsupported nucleus {self.nucleus!r}")
         if not np.isfinite(self.spectral_reference_ppm):
@@ -700,6 +704,7 @@ class PhantomDesign:
                 metadata={
                     "phantom_design": self.to_dict(),
                     "temperature_k": self.temperature_k,
+                    "isotope_enrichment": self.isotope_enrichment,
                 },
             )
         return SpectralPhantom(
@@ -720,6 +725,7 @@ class PhantomDesign:
             metadata={
                 "phantom_design": self.to_dict(),
                 "temperature_k": self.temperature_k,
+                "isotope_enrichment": self.isotope_enrichment,
             },
         )
 
@@ -820,6 +826,7 @@ class PhantomDesign:
         return cls(
             name=str(data.get("name", "Designed spectral phantom")),
             temperature_k=float(data.get("temperature_k", 310.15)),
+            isotope_enrichment=float(data.get("isotope_enrichment", 1.0)),
             shape=tuple(int(value) for value in data.get("shape", (128, 128, 128))),
             fov_m=tuple(
                 float(value) for value in data.get("fov_m", (0.22, 0.22, 0.22))

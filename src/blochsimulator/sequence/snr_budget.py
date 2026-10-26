@@ -446,9 +446,7 @@ def snr_budget(
                 "budget from the receiver setting to the voxel SNR.",
             ),
         )
-    noise = noise.for_temperature(
-        (getattr(phantom, "metadata", {}) or {}).get("temperature_k")
-    )
+    noise = noise.for_object(getattr(phantom, "metadata", {}))
     sections = []
     calibration = noise.calibration
     if noise.mode == "relative":
@@ -484,6 +482,12 @@ def snr_budget(
                         f"P_th = {target * 1e6:.4g} ppm, thermal at "
                         f"{_celsius(calibration.target_temperature_k)}",
                         target,
+                    ),
+                    BudgetRow(
+                        "Object enrichment",
+                        f"{calibration.target_enrichment * 100:g} %",
+                        "observed isotope share of the simulated molecules",
+                        calibration.target_enrichment,
                     ),
                     BudgetRow(
                         "Noise factor",
@@ -537,12 +541,12 @@ def snr_budget(
             )
         ]
         if noise.mode == "calibrated":
-            target = calibration.target_thermal_polarization
+            target = calibration.target_signal_scale
             rows.append(
                 BudgetRow(
                     "Fully polarized equivalent",
                     format_amount(amplitude * target),
-                    "moles × polarization of the object",
+                    "observed moles × polarization of the object",
                     amplitude * target,
                 )
             )

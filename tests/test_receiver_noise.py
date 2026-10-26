@@ -906,3 +906,22 @@ def test_clean_signal_and_calibration_round_trip_in_project(tmp_path):
         ).signal,
         noisy.signal,
     )
+
+
+def test_object_enrichment_scales_noise_and_follows_the_phantom_metadata():
+    base = calibration(target_temperature_k=293.15)
+    sigma = base.noise_std(1e-4)
+    labelled = calibration(target_temperature_k=293.15, target_enrichment=0.5)
+    assert labelled.target_signal_scale == pytest.approx(0.5 * base.target_signal_scale)
+    # Half the observed nuclei per simulated mol: noise is twice as large in
+    # simulated units.
+    assert labelled.noise_std(1e-4) == pytest.approx(2 * sigma)
+    noise = ReceiverNoise(mode="calibrated", calibration=base)
+    applied = noise.for_object({"temperature_k": 293.15, "isotope_enrichment": 0.5})
+    assert applied.calibration.target_enrichment == 0.5
+    assert applied.calibration.noise_std(1e-4) == pytest.approx(2 * sigma)
+    assert noise.for_object({}) is noise
+    with pytest.raises(ValueError, match="enrichment"):
+        calibration(target_enrichment=0.0)
+    with pytest.raises(ValueError, match="enrichment"):
+        calibration(target_enrichment=1.5)

@@ -196,7 +196,8 @@ class ReceiverNoiseWidget(QGroupBox):
             " °C",
             "Fallback object temperature for phantoms without temperature metadata. "
             "A temperature saved by the Phantom Designer takes precedence for "
-            "receiver noise and physical signal units.",
+            "receiver noise and physical signal units, as does its isotope "
+            "enrichment (100 % for phantoms without one).",
         )
         self.noise_factor = _spin(
             0.01,
@@ -697,8 +698,9 @@ class ReceiverNoiseWidget(QGroupBox):
             f"polarization {calibration.reference_polarization:.4g}; single-scan "
             f"SNR {calibration.single_scan_snr:.6g}. Noise std at the reference "
             f"bandwidth: {calibration.noise_std(calibration.dwell_s):.6g} "
-            "simulation units. Simulated concentrations are read as mM and Mz "
-            "relative to thermal at "
+            "simulation units. Simulated concentrations are read as mM of "
+            "molecules, scaled by the phantom's isotope enrichment (Phantom "
+            "Designer; 100 % if not set), and Mz relative to thermal at "
             f"{calibration.target_temperature_k - KELVIN_AT_0_CELSIUS:g} °C "
             f"(polarization {calibration.target_thermal_polarization:.4g})."
             + (
