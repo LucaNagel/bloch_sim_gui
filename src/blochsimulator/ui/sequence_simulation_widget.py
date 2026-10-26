@@ -6466,8 +6466,9 @@ class SequenceSimulationWidget(QWidget):
         sharpness.setValue(max(1, int(slr_sharpness)))
         sharpness.setObjectName(f"{prefix}_rf_slr_sharpness")
         sharpness.setToolTip(
-            "Integer SLR order. Order 1 is a single central lobe; higher "
-            "orders narrow the transition and add temporal side lobes"
+            "SLR sharpness sets the designed time-bandwidth product "
+            "(TBW = sharpness + 1). Sharpness 1 is a single central lobe; "
+            "higher values sharpen the slice profile and add temporal side lobes"
         )
         bandwidth = self._parameter_spin(0.1, 1_000_000.0, 1.0, " Hz")
         bandwidth.setObjectName(f"{prefix}_rf_bandwidth_hz")

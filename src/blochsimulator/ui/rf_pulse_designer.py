@@ -225,8 +225,9 @@ class RFPulseDesigner(QGroupBox):
         self.slr_sharpness.setRange(1, 20)
         self.slr_sharpness.setValue(1)
         self.slr_sharpness.setToolTip(
-            "Integer SLR order. Order 1 is a single central lobe; higher "
-            "orders narrow the transition and add temporal side lobes"
+            "SLR sharpness sets the designed time-bandwidth product "
+            "(TBW = sharpness + 1). Sharpness 1 is a single central lobe; "
+            "higher values sharpen the slice profile and add temporal side lobes"
         )
         self.slr_sharpness.valueChanged.connect(self.update_pulse)
         slr_layout.addWidget(self.slr_sharpness)
@@ -495,7 +496,7 @@ class RFPulseDesigner(QGroupBox):
         desc_map = {
             "rectangle": "<b>Rectangular Pulse</b><br>Constant amplitude hard pulse. Broad excitation bandwidth.",
             "sinc": "<b>Sinc Pulse</b><br>Selective excitation. Fourier transform of a rectangular slice profile. Use 'Lobes' to control bandwidth/sharpness.",
-            "slr": "<b>SLR Pulse</b><br>Small-tip linear-phase beta-polynomial design shared with Sequence Mode. Sharpness changes the pulse shape; the time-bandwidth product is calculated from the resulting waveform.",
+            "slr": "<b>SLR Pulse</b><br>Shinnar–Le Roux design shared with Sequence Mode: a least-squares beta polynomial with 1 % ripple, converted to RF by the inverse SLR transform for the chosen flip angle. Sharpness sets the time-bandwidth product (TBW = sharpness + 1).",
             "gaussian": "<b>Gaussian Pulse</b><br>Selective pulse with no side lobes in time domain. Smooth excitation profile.",
             "hermite": "<b>Hermite Pulse</b><br>Short selective pulse derived from Hermite polynomials. Good for short TR sequences.",
             "adiabatic half passage": "<b>Adiabatic Half Passage (AHP)</b><br>Frequency sweep from off-resonance to resonance (or vice versa). Generates robust 90° excitation insensitive to B1 inhomogeneity (above a threshold).",

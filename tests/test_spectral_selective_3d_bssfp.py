@@ -20,7 +20,7 @@ from blochsimulator.sequence import (
     load_pulseq,
 )
 from blochsimulator.sequence.rf_pulses import (
-    rf_time_bandwidth_product_from_envelope,
+    slr_time_bandwidth_product,
 )
 from blochsimulator.spectral_phantom import ChemicalSpecies
 
@@ -138,9 +138,7 @@ def test_spectral_selective_3d_bssfp_cycles_rf_and_receiver_offsets(tmp_path):
     assert definitions["SpectralRFPulseType"] == "slr"
     assert definitions["SpectralSLRSharpness"] == pytest.approx(1.0)
     assert "SpectralRFPulseFile" not in definitions
-    effective_tbw = rf_time_bandwidth_product_from_envelope(
-        program.rf_events[0].samples_hz
-    )
+    effective_tbw = slr_time_bandwidth_product(1)
     assert definitions["SpectralRFTimeBandwidthProduct"] == pytest.approx(
         effective_tbw, rel=1e-6
     )
@@ -489,8 +487,9 @@ def test_spectral_selective_3d_bssfp_uses_metabolite_specific_flip_angles(tmp_pa
 
     by_offset = {}
     for event in program.rf_events:
+        # SLR shapes depend on the flip angle, so compare RF areas, not peaks.
         by_offset.setdefault(round(event.frequency_offset_hz), []).append(
-            np.max(np.abs(event.samples_hz))
+            abs(np.sum(event.samples_hz))
         )
 
     assert max(by_offset[1655]) / max(by_offset[-245]) == pytest.approx(

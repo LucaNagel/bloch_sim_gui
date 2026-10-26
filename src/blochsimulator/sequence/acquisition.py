@@ -2399,19 +2399,27 @@ def make_cartesian_epi(
     else:
         flip_angle_schedule_deg = np.full(repetitions, flip_angle_deg, dtype=float)
     requested_rf_duration_s = float(rf_duration_s)
+    rf_design_kwargs = {
+        "pulse_type": rf_pulse_type,
+        "duration_s": rf_duration_s,
+        "raster_s": rf_raster_s,
+        "time_bandwidth_product": rf_time_bandwidth_product,
+        "apodization": rf_apodization,
+        "slr_sharpness": rf_slr_sharpness,
+        "custom_waveform": rf_custom_waveform_hz,
+        "custom_raster_s": rf_custom_raster_s,
+    }
     rf_envelope, rf_duration_s, effective_rf_tbw, rf_pulse_type = design_rf_envelope(
-        pulse_type=rf_pulse_type,
-        duration_s=rf_duration_s,
-        raster_s=rf_raster_s,
-        time_bandwidth_product=rf_time_bandwidth_product,
-        apodization=rf_apodization,
-        slr_sharpness=rf_slr_sharpness,
-        custom_waveform=rf_custom_waveform_hz,
-        custom_raster_s=rf_custom_raster_s,
+        **rf_design_kwargs
     )
     rf_samples_by_repetition = [
         scale_rf_envelope_to_flip(
-            rf_envelope,
+            (
+                # SLR shapes depend on the flip angle they are designed for.
+                design_rf_envelope(**rf_design_kwargs, flip_angle_deg=angle_deg)[0]
+                if rf_pulse_type == "slr"
+                else rf_envelope
+            ),
             flip_angle_deg=angle_deg,
             raster_s=rf_raster_s,
             reference_flip_angle_deg=(

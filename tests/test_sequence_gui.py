@@ -61,7 +61,7 @@ from blochsimulator.sequence import (
     make_pulseq_flash,
 )
 from blochsimulator.sequence.rf_pulses import (
-    rf_time_bandwidth_product_from_envelope,
+    slr_time_bandwidth_product,
 )
 from blochsimulator.units import NUCLEUS_GAMMA_HZ_PER_T, rf_hz_to_gauss
 
@@ -2629,10 +2629,11 @@ def test_sequence_workspace_configures_rf_pulse_for_epi_and_spiral(tmp_path):
     rf = widget.program.rf_events[0]
     assert definitions["RFPulseType"] == "slr"
     assert definitions["RFDuration"] == pytest.approx(2.5e-3)
-    expected_tbw = rf_time_bandwidth_product_from_envelope(rf.samples_hz)
+    # SLR sharpness sets the designed TBW; the TBW field is not used.
     assert definitions["RFTimeBandwidthProduct"] == pytest.approx(
-        expected_tbw, rel=1e-6
+        slr_time_bandwidth_product(5), rel=1e-6
     )
+    assert widget.epi_rf_time_bandwidth_product.value() == pytest.approx(6.0)
     assert definitions["RFSLRSharpness"] == pytest.approx(5.0)
     assert rf.samples_hz.size * rf.raster_s == pytest.approx(2.5e-3)
     assert 360.0 * abs(np.sum(rf.samples_hz) * rf.raster_s) == pytest.approx(

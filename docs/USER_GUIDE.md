@@ -126,6 +126,11 @@ timing.
 **Loaded RF pulses** keep duration, phase modulation and carrier offset, but
 their amplitude is rescaled to the sequence flip angle.
 
+**SLR pulses** are true Shinnar–Le Roux designs for the chosen flip angle, so a
+90° pulse has a different shape than a small-tip one. *SLR sharpness* sets the
+time-bandwidth product (TBW = sharpness + 1); the TBW field is ignored for SLR.
+The pulse edges are a few percent of the peak, not exactly zero.
+
 **The result tab is not switched automatically** after a run. Look in
 *Signal* for the ADC signal, FID or CSI spectrum, or in the
 *Reconstruction Explorer* (its tab turns green when a new result is ready).

@@ -57,6 +57,7 @@ def make_internal_fid(
         slr_sharpness=rf_slr_sharpness,
         custom_waveform=rf_custom_waveform_hz,
         custom_raster_s=rf_custom_raster_s,
+        flip_angle_deg=flip_angle_deg,
     )
     samples = scale_rf_envelope_to_flip(
         envelope,

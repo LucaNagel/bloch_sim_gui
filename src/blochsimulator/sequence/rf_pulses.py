@@ -12,8 +12,8 @@ from copy import copy
 from functools import lru_cache
 
 import numpy as np
-from scipy.signal import remez
-from scipy.signal.windows import tukey
+from scipy.interpolate import CubicSpline
+from scipy.signal import firls
 
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
 from .spectral_spatial import SpectralSpatialPulse
@@ -114,72 +114,134 @@ def _validate_slr_sharpness(sharpness: int) -> int:
     return int(sharpness)
 
 
+# Passband and stopband ripple of the SLR beta polynomial. One percent is the
+# customary choice for excitation pulses (Pauly et al., IEEE TMI 1991).
+SLR_PASSBAND_RIPPLE = 0.01
+SLR_STOPBAND_RIPPLE = 0.01
+# Odd tap count of the reference design. The design is completed on this
+# fixed grid and resampled to the RF raster, so even and odd raster sample
+# counts describe the same continuous pulse.
+_SLR_MIN_DESIGN_SAMPLES = 511
+
+
+def slr_time_bandwidth_product(sharpness: int) -> float:
+    """Return the time-bandwidth product designed for an SLR sharpness.
+
+    Sharpness one is TBW 2, a single positive lobe. Each further step adds one
+    unit of TBW, so the slice profile becomes sharper and the pulse gains
+    temporal side lobes.
+    """
+    return float(_validate_slr_sharpness(sharpness) + 1)
+
+
+def _slr_transition_width(passband_ripple: float, stopband_ripple: float) -> float:
+    """Return Pauly's D_inf, the transition width times the TBW."""
+    l1 = np.log10(passband_ripple)
+    l2 = np.log10(stopband_ripple)
+    a1, a2, a3 = 5.309e-3, 7.114e-2, -4.761e-1
+    a4, a5, a6 = -2.66e-3, -5.941e-1, -4.278e-1
+    return float((a1 * l1 * l1 + a2 * l1 + a3) * l2 + (a4 * l1 * l1 + a5 * l1 + a6))
+
+
+def _slr_beta(tap_count: int, time_bandwidth_product: float) -> np.ndarray:
+    """Design the linear-phase least-squares SLR beta polynomial."""
+    tbw = float(time_bandwidth_product)
+    transition = min(
+        _slr_transition_width(SLR_PASSBAND_RIPPLE, SLR_STOPBAND_RIPPLE) / tbw, 0.9
+    )
+    half = tap_count / 2.0
+    edges = np.array(
+        (0.0, (1.0 - transition) * tbw / 2.0, (1.0 + transition) * tbw / 2.0, half)
+    )
+    return firls(
+        tap_count,
+        edges / half,
+        (1.0, 1.0, 0.0, 0.0),
+        weight=(1.0, SLR_PASSBAND_RIPPLE / SLR_STOPBAND_RIPPLE),
+    )
+
+
+def _slr_alpha(beta: np.ndarray) -> np.ndarray:
+    """Return the minimum-phase alpha polynomial matching ``beta``.
+
+    |A|^2 + |B|^2 = 1 fixes the magnitude of A; its minimum phase follows from
+    the folded cepstrum on a zero-padded frequency grid.
+    """
+    pad = 16 * beta.size
+    beta_f = np.fft.fft(beta, pad)
+    peak = np.max(np.abs(beta_f))
+    if peak >= 1.0:
+        beta_f /= peak * (1.0 + 1e-9)
+    log_magnitude = np.log(np.maximum(np.sqrt(1.0 - np.abs(beta_f) ** 2), 1e-300))
+    cepstrum = np.fft.fft(log_magnitude)
+    cepstrum[1 : pad // 2] *= 2.0
+    cepstrum[pad // 2 + 1 :] = 0.0
+    alpha = np.fft.fft(np.exp(np.fft.ifft(cepstrum)))[: beta.size] / pad
+    return alpha[::-1]
+
+
+def _inverse_slr(alpha: np.ndarray, beta: np.ndarray) -> np.ndarray:
+    """Return hard-pulse rotation angles (rad) from the SLR polynomials."""
+    alpha = np.asarray(alpha, dtype=np.complex128)
+    beta = np.asarray(beta, dtype=np.complex128)
+    rotations = np.zeros(beta.size, dtype=np.complex128)
+    for index in range(beta.size - 1, -1, -1):
+        ratio = beta[index] / alpha[index]
+        cos_half = np.sqrt(1.0 / (1.0 + np.abs(ratio) ** 2))
+        sin_half = np.conj(cos_half * ratio)
+        rotations[index] = (
+            2.0
+            * np.arctan2(np.abs(sin_half), cos_half)
+            * np.exp(1j * np.angle(sin_half))
+        )
+        if index:
+            alpha, beta = (
+                (cos_half * alpha + sin_half * beta)[1 : index + 1],
+                (-np.conj(sin_half) * alpha + cos_half * beta)[:index],
+            )
+    return rotations
+
+
 @lru_cache(maxsize=64)
 def _design_slr_waveform(
-    sample_count: int, time_bandwidth_product: float, sharpness: int
+    sample_count: int, sharpness: int, flip_angle_deg: float | None
 ) -> np.ndarray:
-    """Design a linear-phase, small-tip SLR beta polynomial.
+    """Design an SLR pulse on ``sample_count`` RF raster samples.
 
-    ``sharpness`` is the integer order of the design. Order one is a single
-    positive central lobe; increasing the order progressively adds temporal
-    side lobes and narrows the transition. The result is cached because
-    sequence previews often request the same RF shape for several flip angles
-    and slices.
+    A least-squares linear-phase beta polynomial with time-bandwidth product
+    :func:`slr_time_bandwidth_product` is scaled to ``sin(flip / 2)``, paired
+    with its minimum-phase alpha and converted to RF by the inverse SLR
+    transform. Without a flip angle the small-tip limit, the beta polynomial
+    itself, is returned. The result has arbitrary amplitude; on resonance its
+    area is the flip angle, so consumers scale it by area. It is cached because
+    sequence previews often request the same RF shape for several slices.
     """
-    sharpness = _validate_slr_sharpness(sharpness)
+    tbw = slr_time_bandwidth_product(sharpness)
     if sample_count < 8:
         raise ValueError("an SLR pulse requires at least 8 RF samples")
-    tbw = float(time_bandwidth_product)
-    if tbw >= sample_count:
+    if 2.0 * tbw >= sample_count:
         raise ValueError(
-            "rf_time_bandwidth_product must be smaller than the SLR sample count"
+            "rf_slr_sharpness is too high for the RF duration; use a longer "
+            "pulse or a lower sharpness"
         )
 
-    if sharpness == 1:
-        # The first member of the historical SLR family is deliberately a
-        # single, positive cosine lobe. Construct it analytically so numerical
-        # equiripple noise cannot introduce tiny false side lobes.
-        positions = np.linspace(-0.5, 0.5, sample_count, dtype=float)
-        signal = np.cos(np.pi * positions).astype(np.complex128)
-        signal.setflags(write=False)
-        return signal
+    tap_count = max(_SLR_MIN_DESIGN_SAMPLES, 32 * int(np.ceil(tbw)) + 1)
+    beta = _slr_beta(tap_count, tbw)
+    flip_rad = 0.0 if flip_angle_deg is None else np.deg2rad(abs(flip_angle_deg))
+    if flip_rad <= np.deg2rad(1e-3):
+        design = beta
+    else:
+        # Beyond 180 degrees the beta amplitude cannot grow further.
+        beta = beta * (np.sin(min(flip_rad, np.pi) / 2.0) / np.sum(beta))
+        design = _inverse_slr(_slr_alpha(beta), beta).real
 
-    # Sharpness historically selected an integer SLR family: order one had a
-    # single temporal lobe, while higher orders added side lobes. Do not
-    # multiply by the construction TBW here: doing so makes order one inherit
-    # several lobes from the hidden TBW input. The completed waveform still
-    # reports its measured TBW to consumers below.
-    designed_tbw = float(sharpness)
-    if designed_tbw >= sample_count:
-        raise ValueError("rf_slr_sharpness must be smaller than the SLR sample count")
-    band_center = designed_tbw / (2.0 * sample_count)
-    transition_fraction = 1.0 / (sharpness + 1.0)
-    passband_edge = band_center * (1.0 - transition_fraction)
-    stopband_edge = band_center * (1.0 + transition_fraction)
-    if passband_edge <= 0 or stopband_edge >= 0.5:
-        raise ValueError("SLR pulse parameters leave no valid transition band")
-
-    try:
-        beta = remez(
-            sample_count,
-            (0.0, passband_edge, stopband_edge, 0.5),
-            (1.0, 0.0),
-            weight=(1.0, sharpness),
-            fs=1.0,
-            maxiter=100,
-        )
-    except ValueError as exc:
-        raise ValueError(
-            "SLR filter design did not converge; use a longer duration, lower "
-            "time-bandwidth product, or lower sharpness"
-        ) from exc
-    # Very narrow equiripple designs can develop numerically amplified first
-    # and last coefficients when evaluated directly at a fine scanner raster.
-    # RF hardware also benefits from a waveform that starts and ends at zero,
-    # so apply a symmetric cosine edge taper before flip-angle normalization.
-    signal = np.asarray(beta * tukey(sample_count, alpha=0.2), dtype=np.complex128)
+    # Interpolate the smooth reference design at the centres of the raster
+    # intervals. Both grids span the same pulse duration.
+    source = (np.arange(tap_count, dtype=float) + 0.5) / tap_count
+    target = (np.arange(sample_count, dtype=float) + 0.5) / sample_count
+    signal = CubicSpline(source, design)(target).astype(np.complex128)
     if not np.all(np.isfinite(signal)) or not np.any(np.abs(signal) > 0):
-        raise ValueError("SLR filter design produced an invalid waveform")
+        raise ValueError("SLR design produced an invalid waveform")
     signal.setflags(write=False)
     return signal
 
@@ -205,6 +267,7 @@ def design_rf_envelope(
     slr_sharpness: int = 1,
     custom_waveform: np.ndarray | None = None,
     custom_raster_s: float | None = None,
+    flip_angle_deg: float | None = None,
 ) -> tuple[np.ndarray, float, float, str]:
     """Design a baseband envelope on an RF raster.
 
@@ -213,6 +276,11 @@ def design_rf_envelope(
     pulses, the input ``time_bandwidth_product`` is retained as a construction
     parameter for backward compatibility; the third return value is calculated
     from the completed normalized pulse shape and is used for slice selection.
+
+    SLR pulses ignore ``time_bandwidth_product``: their TBW follows from
+    ``slr_sharpness`` and is returned as designed. Their shape depends on the
+    flip angle, so ``flip_angle_deg`` selects the large-tip design; ``None``
+    gives the small-tip shape.
     """
     pulse_type = normalize_rf_pulse_type(pulse_type)
     if pulse_type == "spectral_spatial":
@@ -261,9 +329,12 @@ def design_rf_envelope(
         signal = window * np.sinc(shape_parameter * centered_s / actual_duration_s)
         signal = signal.astype(np.complex128)
     elif pulse_type == "slr":
-        slr_sharpness = _validate_slr_sharpness(slr_sharpness)
+        if flip_angle_deg is not None and not np.isfinite(flip_angle_deg):
+            raise ValueError("flip_angle_deg must be finite")
         signal = _design_slr_waveform(
-            sample_count, shape_parameter, slr_sharpness
+            sample_count,
+            _validate_slr_sharpness(slr_sharpness),
+            None if flip_angle_deg is None else float(flip_angle_deg),
         ).copy()
     elif pulse_type == "gaussian":
         time_s = (np.arange(sample_count, dtype=float) + 0.5) * float(raster_s)
@@ -308,7 +379,11 @@ def design_rf_envelope(
         raise ValueError("RF waveform has zero or non-finite integral")
     if pulse_type != "designer":
         signal *= np.exp(-1j * np.angle(integral))
-        effective_tbw = rf_time_bandwidth_product_from_envelope(signal)
+        effective_tbw = (
+            slr_time_bandwidth_product(slr_sharpness)
+            if pulse_type == "slr"
+            else rf_time_bandwidth_product_from_envelope(signal)
+        )
     else:
         # Loaded formats may provide an independently measured bandwidth
         # factor. Callers pass that value through this compatibility parameter.
@@ -535,19 +610,25 @@ def make_pulseq_rf_events(
             normalized_type,
         )
 
+    design_kwargs = {
+        "pulse_type": pulse_type,
+        "duration_s": duration_s,
+        "raster_s": system.rf_raster_time,
+        "time_bandwidth_product": time_bandwidth_product,
+        "apodization": apodization,
+        "slr_sharpness": slr_sharpness,
+        "custom_waveform": custom_waveform_hz,
+        "custom_raster_s": custom_raster_s,
+    }
     envelope, actual_duration_s, effective_tbw, normalized_type = design_rf_envelope(
-        pulse_type=pulse_type,
-        duration_s=duration_s,
-        raster_s=system.rf_raster_time,
-        time_bandwidth_product=time_bandwidth_product,
-        apodization=apodization,
-        slr_sharpness=slr_sharpness,
-        custom_waveform=custom_waveform_hz,
-        custom_raster_s=custom_raster_s,
+        **design_kwargs
     )
     loaded = normalized_type == "designer"
     results = []
     for angle_deg in angles:
+        if normalized_type == "slr":
+            # The SLR shape depends on the flip angle it is designed for.
+            envelope = design_rf_envelope(**design_kwargs, flip_angle_deg=angle_deg)[0]
         signal = (
             scale_rf_envelope_to_flip(
                 envelope,
