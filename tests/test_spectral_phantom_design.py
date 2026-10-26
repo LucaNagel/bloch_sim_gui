@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
 from unittest.mock import MagicMock, patch
 
 from blochsimulator import BlochSimulator
+from blochsimulator.default_phantoms import default_phantom_design
 from blochsimulator.kspace_widget import TrajectoryWidget
 from blochsimulator.phantom_design import (
     PhantomDesign,
@@ -134,6 +135,39 @@ def test_designer_adds_nucleus_specific_metabolite_preset(tmp_path):
     dialog.nucleus.setCurrentIndex(dialog.nucleus.findData("F19"))
     assert not dialog.add_metabolite_preset_button.isEnabled()
     assert "No curated F19 presets" == dialog.metabolite_preset_combo.currentText()
+
+    dialog.close()
+    app.processEvents()
+
+
+def test_designer_peak_and_reference_follow_sequence_reference():
+    """The sequence reference can differ from the design's offset reference."""
+    app = QApplication.instance() or QApplication([])
+    design = default_phantom_design(
+        "C13", field_strength_t=7.0, sequence_reference_ppm=171.0
+    )
+    dialog = SpectralPhantomDesignerDialog(design=design, sequence_reference_ppm=163.5)
+    dialog.spectral_bandwidth_ppm.setValue(18.0)
+    dialog.spectral_window_center_ppm.setValue(163.5)
+    dialog.peak_table.item(0, 3).setText("163.5")
+
+    def preview_peak_ppm():
+        frequency, spectrum = dialog.spectral_preview_curve.getData()
+        return frequency[np.argmax(spectrum)]
+
+    assert preview_peak_ppm() == pytest.approx(163.5, abs=0.05)
+    assert dialog.spectral_reference_line.value() == pytest.approx(163.5)
+
+    # Even if a table edit was not stored yet, building the preview syncs the
+    # table and must redraw the designer spectrum from it.
+    dialog.design.shapes[0].peaks[0].frequency_ppm = 0.0
+    dialog._update_spectral_preview()
+    assert preview_peak_ppm() == pytest.approx(171.0, abs=0.05)
+    assert dialog._refresh_inspector_preview()
+    assert preview_peak_ppm() == pytest.approx(163.5, abs=0.05)
+
+    assert dialog.phantom.metadata["sequence_reference_ppm"] == pytest.approx(163.5)
+    assert "reference 163.5 ppm" in dialog.inspector.spectrum_info.text()
 
     dialog.close()
     app.processEvents()
@@ -1745,3 +1779,35 @@ def test_sequence_axis_grids_reject_oblique_directions():
 
     assert "oblique" in grids[0] and "oblique" in grids[1]
     assert grids[2] == (pytest.approx(0.02), 8)
+
+
+def test_phantom_tabs_preview_the_sequence_default_sphere(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = BlochSimulatorGUI()
+    window.app_settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    window._ensure_sequence_simulation_workspace(window.sequence_simulation_tab_index)
+    default = window.sequence_simulation_widget._default_sequence_phantom()
+
+    window.tab_widget.setCurrentIndex(window.phantom_tab_index)
+    app.processEvents()
+    assert window.phantom_widget.current_phantom is None
+    assert window.phantom_widget.viewer.phantom is default
+    assert "sequence default" in window.phantom_widget.phantom_creator.info_label.text()
+
+    window.tab_widget.setCurrentIndex(window.b1_combo_tab_index)
+    app.processEvents()
+    assert window.b1_combo_widget.phantom is default
+
+    # A chosen phantom replaces the preview and is not overwritten later.
+    phantom = _spectral_design().build()
+    window.phantom_widget._on_phantom_created(phantom)
+    window.phantom_widget.phantom_creator.phantom_created.emit(phantom)
+    window.tab_widget.setCurrentIndex(window.phantom_tab_index)
+    app.processEvents()
+    assert window.phantom_widget.viewer.phantom is phantom
+    window.tab_widget.setCurrentIndex(window.b1_combo_tab_index)
+    app.processEvents()
+    assert window.b1_combo_widget.phantom is phantom
+
+    window.close()
+    app.processEvents()

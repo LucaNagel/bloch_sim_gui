@@ -1492,6 +1492,8 @@ class BlochSimulatorGUI(QMainWindow):
             self.b1_combo_placeholder, "Phantom + B1"
         )
         self.tab_widget.currentChanged.connect(self._ensure_b1_combo_workspace)
+        # Connected after the lazy builders so the opened workspace exists.
+        self.tab_widget.currentChanged.connect(self._show_default_phantom_preview)
 
         self.receiver_noise_workspace = None
         self.receiver_noise_page = QWidget()
@@ -1971,6 +1973,31 @@ class BlochSimulatorGUI(QMainWindow):
             None if b1_widget is None else b1_widget.rx_field,
         )
         self._connect_sequence_b1_display()
+
+    def _show_default_phantom_preview(self, index: int):
+        """Show the default sphere the sequence simulates while none is chosen."""
+        if index not in (
+            getattr(self, "phantom_tab_index", -1),
+            getattr(self, "b1_combo_tab_index", -1),
+        ):
+            return
+        phantom_widget = getattr(self, "phantom_widget", None)
+        if phantom_widget is not None and phantom_widget.current_phantom is not None:
+            return
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        if sequence_widget is None:
+            return
+        # Cached by the sequence widget and rebuilt only when nucleus,
+        # reference or the encoded grid change.
+        phantom = sequence_widget._default_sequence_phantom()
+        if phantom is None:
+            return
+        if index == self.phantom_tab_index and phantom_widget is not None:
+            phantom_widget.show_default_phantom(phantom)
+        combo_widget = getattr(self, "b1_combo_widget", None)
+        if index == self.b1_combo_tab_index and combo_widget is not None:
+            if combo_widget.phantom is not phantom:
+                combo_widget.set_phantom(phantom)
 
     def _connect_phantom_sequence_workspaces(self):
         """Keep all focused workspaces synchronized to the shared phantom."""

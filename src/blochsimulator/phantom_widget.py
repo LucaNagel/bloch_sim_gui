@@ -126,6 +126,8 @@ class PhantomCreatorWidget(QGroupBox):
         self.settings = settings
         self.workspace_defaults = WorkspaceDefaults.from_settings(settings)
         self.current_phantom = None
+        # Name of the automatic default sphere shown while nothing is chosen.
+        self.default_preview_name = None
         # Spectral designer dialogs contain nested PyQtGraph scenes and signal
         # cycles. Letting the last Python reference disappear after exec_() can
         # defer their destruction until an unrelated GC pass, which is unsafe
@@ -297,7 +299,7 @@ class PhantomCreatorWidget(QGroupBox):
             action_text = "Create Phantom"
         self.create_btn.setText(action_text)
         if self.current_phantom is None:
-            self.info_label.setText(f"Click '{action_text}' to begin")
+            self.info_label.setText(self._empty_hint())
         self._update_edit_button()
 
     def get_field_strength(self) -> float:
@@ -584,6 +586,21 @@ class PhantomCreatorWidget(QGroupBox):
         )
         self.edit_btn.setEnabled(editable)
 
+    def _empty_hint(self) -> str:
+        action_text = self.create_btn.text()
+        if self.default_preview_name:
+            return (
+                f"Showing the sequence default: {self.default_preview_name}. "
+                f"Click '{action_text}' to edit or replace it."
+            )
+        return f"Click '{action_text}' to begin"
+
+    def show_default_preview(self, name: Optional[str]) -> None:
+        """Describe the automatic default phantom while none is chosen."""
+        self.default_preview_name = name
+        if self.current_phantom is None:
+            self.info_label.setText(self._empty_hint())
+
     def _update_info(self):
         """Update info label with phantom details."""
         if self.current_phantom:
@@ -601,7 +618,7 @@ class PhantomCreatorWidget(QGroupBox):
                 "color: #006400; padding: 5px; background: #f0fff0; border-radius: 3px;"
             )
         else:
-            self.info_label.setText("Click 'Create Phantom' to begin")
+            self.info_label.setText(self._empty_hint())
             self.info_label.setStyleSheet(
                 "color: gray; font-style: italic; padding: 5px;"
             )
@@ -1219,6 +1236,14 @@ class PhantomWidget(QWidget):
 
         main_layout.addWidget(splitter)
         self.setLayout(main_layout)
+
+    def show_default_phantom(self, phantom: Phantom):
+        """Preview the sequence's automatic default while nothing is chosen."""
+        if self.current_phantom is not None:
+            return
+        if self.viewer.phantom is not phantom:
+            self.viewer.set_phantom(phantom)
+        self.phantom_creator.show_default_preview(phantom.name)
 
     def _on_phantom_created(self, phantom: Phantom):
         """Handle new phantom creation."""
