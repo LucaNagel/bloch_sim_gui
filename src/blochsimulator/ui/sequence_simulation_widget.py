@@ -67,6 +67,7 @@ from ..default_phantoms import (
 )
 from ..phantom import Phantom
 from ..phantom_loop import phantom_loop_parameters, phantom_with_parameter
+from ..probe_notebook import write_probe_loader_notebook
 from ..project_notebook import write_project_loader_notebook
 from ..notebook_exporter import export_pulseq_generation_notebook
 from ..paths import workspace_directory
@@ -1583,6 +1584,7 @@ class SequenceSimulationWidget(QWidget):
         self._project_export_contexts = {}
         self._restoring_session_run = False
         self.probe_result = None
+        self._probe_session_runs = {}
         self._sequence_revision = 0
         self._probe_sequence_revision = None
         self._split_csi_data = None
@@ -6029,58 +6031,6 @@ class SequenceSimulationWidget(QWidget):
         self._geometry_overlays_stale = False
         views.currentChanged.connect(self._views_current_changed)
 
-        signal_page = QWidget()
-        self.signal_page = signal_page
-        signal_layout = QVBoxLayout(signal_page)
-        # Split View is a Signal-tab inspection mode. Keeping these
-        # controls inside this page leaves the result tabs aligned with the
-        # Phantom workspace tabs.
-        signal_layout.addLayout(view_mode_row)
-        self.view_stack = QStackedWidget()
-        signal_layout.addWidget(self.view_stack, 1)
-        normal_signal_page = QWidget()
-        self.normal_signal_page = normal_signal_page
-        normal_signal_layout = QVBoxLayout(normal_signal_page)
-        self.view_stack.addWidget(normal_signal_page)
-        # CSI voxel coordinates remain as internal state controls for the
-        # reconstruction code. Voxel selection itself is performed directly
-        # in the clickable reconstruction image below, so the result plot no
-        # longer loses a full row to two wide sliders.
-        self.spectrum_x_selector = QSpinBox(signal_page)
-        self.spectrum_y_selector = QSpinBox(signal_page)
-        self.spectrum_x_slider = QSlider(Qt.Horizontal, signal_page)
-        self.spectrum_y_slider = QSlider(Qt.Horizontal, signal_page)
-        for axis, selector, slider in (
-            ("x", self.spectrum_x_selector, self.spectrum_x_slider),
-            ("y", self.spectrum_y_selector, self.spectrum_y_slider),
-        ):
-            selector.setRange(0, 0)
-            selector.setEnabled(False)
-            selector.valueChanged.connect(self._spectral_view_changed)
-            slider.setRange(0, 0)
-            slider.setEnabled(False)
-            slider.setTracking(True)
-            slider.setMinimumWidth(100)
-            tooltip = f"Browse the reconstructed CSI voxel {axis} coordinate"
-            selector.setToolTip(tooltip)
-            slider.setToolTip(tooltip)
-            slider.valueChanged.connect(selector.setValue)
-            selector.valueChanged.connect(slider.setValue)
-            selector.hide()
-            slider.hide()
-        self.signal_plot = pg.PlotWidget(title="Received ADC signal")
-        self.signal_plot.setLabel("left", "Signal", "a.u.")
-        self.signal_plot.setLabel("bottom", "Time", "ms")
-        self.signal_plot.addLegend()
-        normal_signal_layout.addWidget(self.signal_plot)
-        self.spectrum_info = QLabel("No spectroscopic result")
-        normal_signal_layout.addWidget(self.spectrum_info)
-        self.signal_tab_index = views.addTab(signal_page, "Signal")
-        views.setTabToolTip(
-            self.signal_tab_index,
-            "Inspect the received ADC signal, FID, or CSI voxel spectrum.",
-        )
-
         two_d_page = QWidget()
         two_d_layout = QVBoxLayout(two_d_page)
         two_d_splitter = QSplitter(Qt.Horizontal)
@@ -6148,35 +6098,55 @@ class SequenceSimulationWidget(QWidget):
             "Browse reconstructed 2D, 3D, dynamic, and spectroscopic results.",
         )
 
-        self.result_volume_viewer = SequenceResultVolumeViewer()
-        spatial_magnetization_index = views.addTab(
-            self.result_volume_viewer, "Spatial Magnetization"
-        )
-        views.setTabToolTip(
-            spatial_magnetization_index,
-            "Inspect the final or checkpoint magnetization throughout the phantom.",
-        )
-
-        self.magnetization_animation_viewer = SequenceMagnetizationAnimationViewer()
-        # Aliases keep these user-editable next-run settings in the normal
-        # project-state capture while their visible controls live in this tab.
-        self.animation_enabled = self.magnetization_animation_viewer.capture_enabled
-        self.animation_time_resolution_ms = (
-            self.magnetization_animation_viewer.time_resolution_ms
-        )
-        self.animation_storage_dtype = (
-            self.magnetization_animation_viewer.storage_dtype_combo
-        )
-        self.animation_tab_index = views.addTab(
-            self.magnetization_animation_viewer, "3D Magnetization Animation"
-        )
-        views.setTabToolTip(
-            self.animation_tab_index,
-            "Configure and play a sparse 3D magnetization animation.",
-        )
-
         probe_page = QWidget()
         probe_layout = QVBoxLayout(probe_page)
+        probe_run_row = QHBoxLayout()
+        probe_run_row.addWidget(QLabel("Spin probe"))
+        self.probe_run_combo = QComboBox()
+        self.probe_run_combo.setObjectName("sequence_probe_run_selector")
+        self.probe_run_combo.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.probe_run_combo.setMinimumContentsLength(30)
+        self.probe_run_combo.setPlaceholderText("Run a spin probe first")
+        self.probe_run_combo.setEnabled(False)
+        self.probe_run_combo.setToolTip(
+            "Choose a completed spin probe of this session, including individual "
+            "parameter-loop runs. This changes the probe view without changing "
+            "the sequence setup."
+        )
+        self.probe_run_combo.currentIndexChanged.connect(self._probe_run_selected)
+        probe_run_row.addWidget(self.probe_run_combo, 1)
+        self.probe_export_button = QToolButton()
+        self.probe_export_button.setObjectName("sequence_probe_export")
+        self.probe_export_button.setText("Export…")
+        self.probe_export_button.setPopupMode(QToolButton.InstantPopup)
+        self.probe_export_button.setToolTip(
+            "Save spin probes as NetCDF with a Jupyter notebook that loads them."
+        )
+        probe_export_menu = QMenu(self.probe_export_button)
+        self.probe_export_selected_action = probe_export_menu.addAction(
+            "Shown spin probe…", self._export_probe_results
+        )
+        self.probe_export_all_action = probe_export_menu.addAction(
+            "All spin probes of this session…", self._export_all_probe_results
+        )
+        self.probe_export_button.setMenu(probe_export_menu)
+        self.probe_export_button.setEnabled(False)
+        probe_run_row.addWidget(self.probe_export_button)
+        probe_layout.addLayout(probe_run_row)
+        self.probe_empty_hint = QLabel(
+            "<b>No spin probe has run yet.</b> In the Sequence tab, set "
+            "<i>Simulation object → Source</i> to <i>Spin probe</i>, then run a "
+            "<i>Spectral Probe</i> or <i>Geometry Probe</i>."
+        )
+        self.probe_empty_hint.setObjectName("sequence_probe_empty_hint")
+        self.probe_empty_hint.setWordWrap(True)
+        self.probe_empty_hint.setStyleSheet(
+            "QLabel { border: 1px solid palette(mid); border-radius: 4px; "
+            "padding: 8px; }"
+        )
+        probe_layout.addWidget(self.probe_empty_hint)
         self.probe_info = QLabel("Run a spin probe to populate these views")
         self.probe_info.setWordWrap(True)
         probe_layout.addWidget(self.probe_info)
@@ -6257,6 +6227,85 @@ class SequenceSimulationWidget(QWidget):
         views.setTabToolTip(
             spin_probe_index,
             "Run and inspect spectral or geometry spin probes.",
+        )
+
+        signal_page = QWidget()
+        self.signal_page = signal_page
+        signal_layout = QVBoxLayout(signal_page)
+        # Split View is a Signal-tab inspection mode. Keeping these
+        # controls inside this page leaves the result tabs aligned with the
+        # Phantom workspace tabs.
+        signal_layout.addLayout(view_mode_row)
+        self.view_stack = QStackedWidget()
+        signal_layout.addWidget(self.view_stack, 1)
+        normal_signal_page = QWidget()
+        self.normal_signal_page = normal_signal_page
+        normal_signal_layout = QVBoxLayout(normal_signal_page)
+        self.view_stack.addWidget(normal_signal_page)
+        # CSI voxel coordinates remain as internal state controls for the
+        # reconstruction code. Voxel selection itself is performed directly
+        # in the clickable reconstruction image below, so the result plot no
+        # longer loses a full row to two wide sliders.
+        self.spectrum_x_selector = QSpinBox(signal_page)
+        self.spectrum_y_selector = QSpinBox(signal_page)
+        self.spectrum_x_slider = QSlider(Qt.Horizontal, signal_page)
+        self.spectrum_y_slider = QSlider(Qt.Horizontal, signal_page)
+        for axis, selector, slider in (
+            ("x", self.spectrum_x_selector, self.spectrum_x_slider),
+            ("y", self.spectrum_y_selector, self.spectrum_y_slider),
+        ):
+            selector.setRange(0, 0)
+            selector.setEnabled(False)
+            selector.valueChanged.connect(self._spectral_view_changed)
+            slider.setRange(0, 0)
+            slider.setEnabled(False)
+            slider.setTracking(True)
+            slider.setMinimumWidth(100)
+            tooltip = f"Browse the reconstructed CSI voxel {axis} coordinate"
+            selector.setToolTip(tooltip)
+            slider.setToolTip(tooltip)
+            slider.valueChanged.connect(selector.setValue)
+            selector.valueChanged.connect(slider.setValue)
+            selector.hide()
+            slider.hide()
+        self.signal_plot = pg.PlotWidget(title="Received ADC signal")
+        self.signal_plot.setLabel("left", "Signal", "a.u.")
+        self.signal_plot.setLabel("bottom", "Time", "ms")
+        self.signal_plot.addLegend()
+        normal_signal_layout.addWidget(self.signal_plot)
+        self.spectrum_info = QLabel("No spectroscopic result")
+        normal_signal_layout.addWidget(self.spectrum_info)
+        self.signal_tab_index = views.addTab(signal_page, "Signal")
+        views.setTabToolTip(
+            self.signal_tab_index,
+            "Inspect the received ADC signal, FID, or CSI voxel spectrum.",
+        )
+
+        self.result_volume_viewer = SequenceResultVolumeViewer()
+        spatial_magnetization_index = views.addTab(
+            self.result_volume_viewer, "Spatial Magnetization"
+        )
+        views.setTabToolTip(
+            spatial_magnetization_index,
+            "Inspect the final or checkpoint magnetization throughout the phantom.",
+        )
+
+        self.magnetization_animation_viewer = SequenceMagnetizationAnimationViewer()
+        # Aliases keep these user-editable next-run settings in the normal
+        # project-state capture while their visible controls live in this tab.
+        self.animation_enabled = self.magnetization_animation_viewer.capture_enabled
+        self.animation_time_resolution_ms = (
+            self.magnetization_animation_viewer.time_resolution_ms
+        )
+        self.animation_storage_dtype = (
+            self.magnetization_animation_viewer.storage_dtype_combo
+        )
+        self.animation_tab_index = views.addTab(
+            self.magnetization_animation_viewer, "3D Magnetization Animation"
+        )
+        views.setTabToolTip(
+            self.animation_tab_index,
+            "Configure and play a sparse 3D magnetization animation.",
         )
 
         self.log_widget = QTextEdit()
@@ -7952,6 +8001,13 @@ class SequenceSimulationWidget(QWidget):
                     state["output_directory"], loop_id=state["loop_id"]
                 )
                 notebook_note = f"; notebook {notebook.name} written"
+                if state["probe_mode"] is not None:
+                    probe_notebook = write_probe_loader_notebook(
+                        state["output_directory"], loop_id=state["loop_id"]
+                    )
+                    notebook_note += (
+                        f"; spin-probe notebook {probe_notebook.name} written"
+                    )
             except OSError as exc:
                 notebook_note = f"; notebook could not be written: {exc}"
         self._parameter_loop_state = None
@@ -14421,6 +14477,7 @@ class SequenceSimulationWidget(QWidget):
         self.cancel_probe_button.setEnabled(True)
         self.probe_status.setText(f"Preparing {label} probe…")
         self.probe_result = None
+        self.probe_empty_hint.setVisible(False)
         self._probe_sequence_revision = self._sequence_revision
         self._update_probe_stale_warning()
         self._probe_started_at = time.monotonic()
@@ -14484,6 +14541,7 @@ class SequenceSimulationWidget(QWidget):
         self.run_geometry_probe_button.setEnabled(probe_selected)
         self.cancel_probe_button.setEnabled(False)
         self.probe_status.setText(message)
+        self._update_probe_empty_hint()
         cancelled = message == "Probe simulation cancelled"
         if self._parameter_loop_state is not None:
             self._finish_parameter_loop(
@@ -14521,6 +14579,7 @@ class SequenceSimulationWidget(QWidget):
         self.probe_status.setText("Spin probe complete")
         self._update_probe_stale_warning()
         self._show_probe_result()
+        self.export_button.setEnabled(True)
         save_to_disk = (
             loop_metadata is not None
             and self._parameter_loop_state["output_directory"] is not None
@@ -14533,8 +14592,183 @@ class SequenceSimulationWidget(QWidget):
         elif loop_metadata is not None:
             self._parameter_loop_iteration_finished()
 
+    def _probe_session_run_label(self, run):
+        number = list(self._probe_session_runs).index(run.run_id) + 1
+        return run.display_name or f"Spin probe {number} · {run.phantom_name}"
+
+    def add_probe_session_run(self, run, *, current=False):
+        """List a retained spin probe in the Spin Probe tab's selector."""
+        self._probe_session_runs[run.run_id] = run
+        combo = self.probe_run_combo
+        index = combo.findData(run.run_id)
+        previous = combo.blockSignals(True)
+        if index < 0:
+            index = combo.count()
+            combo.addItem(self._probe_session_run_label(run), run.run_id)
+        else:
+            combo.setItemText(index, self._probe_session_run_label(run))
+        combo.setItemData(
+            index, f"{run.sequence_name} · {run.phantom_name}", Qt.ToolTipRole
+        )
+        if current or self.probe_result is run.result:
+            combo.setCurrentIndex(index)
+        combo.blockSignals(previous)
+        combo.setEnabled(True)
+        combo.setPlaceholderText("Select a completed spin probe")
+        self._update_probe_empty_hint()
+
+    def remove_probe_session_run(self, run):
+        """Drop a deleted run from the selector; True if it was the shown one."""
+        if self._probe_session_runs.pop(run.run_id, None) is None:
+            return False
+        combo = self.probe_run_combo
+        index = combo.findData(run.run_id)
+        shown = self.probe_result is run.result
+        previous = combo.blockSignals(True)
+        if index >= 0:
+            combo.removeItem(index)
+        if shown:
+            combo.setCurrentIndex(-1)
+        combo.blockSignals(previous)
+        combo.setEnabled(bool(self._probe_session_runs))
+        if not self._probe_session_runs:
+            combo.setPlaceholderText("Run a spin probe first")
+        return shown
+
+    def _probe_run_selected(self, *_):
+        run = self._probe_session_runs.get(self.probe_run_combo.currentData())
+        if run is None or run.result is self.probe_result:
+            return
+        if self.probe_worker is not None and self.probe_worker.isRunning():
+            QMessageBox.warning(
+                self,
+                "Spin probe running",
+                "Cancel or finish the current spin probe before switching runs.",
+            )
+            self._select_shown_probe_run()
+            return
+        self._stop_probe_playback()
+        self.probe_result = run.result
+        self._project_export_contexts["spin_probe"] = (run.state, run.result)
+        # A run keeps the sequence revision it was simulated with, so the
+        # stale warning still tells whether it matches the current setup.
+        self._probe_sequence_revision = run.state.get("probe_sequence_revision")
+        self._update_probe_stale_warning()
+        self._show_probe_result()
+        self.export_button.setEnabled(True)
+        self.probe_status.setText(f"Showing {run.display_name or 'spin probe'}")
+
+    def _select_shown_probe_run(self):
+        combo = self.probe_run_combo
+        run_id = next(
+            (
+                run_id
+                for run_id, run in self._probe_session_runs.items()
+                if run.result is self.probe_result
+            ),
+            None,
+        )
+        previous = combo.blockSignals(True)
+        combo.setCurrentIndex(-1 if run_id is None else combo.findData(run_id))
+        combo.blockSignals(previous)
+
+    def _update_probe_empty_hint(self):
+        running = self.probe_worker is not None and self.probe_worker.isRunning()
+        empty = self.probe_result is None and not self._probe_session_runs
+        self.probe_empty_hint.setVisible(empty and not running)
+        self.probe_export_button.setEnabled(
+            self.probe_result is not None or bool(self._probe_session_runs)
+        )
+        self.probe_export_selected_action.setEnabled(self.probe_result is not None)
+        self.probe_export_all_action.setEnabled(bool(self._probe_session_runs))
+
+    def _export_probe_results(self):
+        """Save the shown spin probe as NetCDF plus a loader notebook."""
+        result = self.probe_result
+        if result is None:
+            QMessageBox.warning(self, "No spin probe", "Run a spin probe first.")
+            return
+        mode = str(
+            result.metadata.get("ui_probe_mode")
+            or result.metadata.get("probe_type")
+            or "spin"
+        )
+        timestamp = project_timestamp(result.metadata.get("simulation_finished_at_utc"))
+        default = self._export_directory() / f"{mode}_probe_{timestamp}.nc"
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export spin probe",
+            str(default),
+            "xarray NetCDF (*.nc);;NumPy archive (*.npz)",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        if path.suffix.lower() not in (".nc", ".npz"):
+            path = path.with_suffix(".nc")
+        notebook_path = path.with_suffix(".ipynb")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            result.save(path)
+            write_probe_loader_notebook(
+                path.parent,
+                data_file=path.name,
+                filename=notebook_path.name,
+                overwrite=True,
+            )
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        QApplication.restoreOverrideCursor()
+        self._log_message(f"Spin probe exported to {path}")
+        QMessageBox.information(
+            self,
+            "Export complete",
+            f"Exported to {path.parent}:\n  Spin probe: {path.name}\n"
+            f"  Jupyter notebook: {notebook_path.name}",
+        )
+
+    def _export_all_probe_results(self):
+        """Save every retained spin probe into one folder with one notebook."""
+        runs = list(self._probe_session_runs.values())
+        if not runs:
+            QMessageBox.warning(self, "No spin probe", "Run a spin probe first.")
+            return
+        directory = QFileDialog.getExistingDirectory(
+            self, "Export all spin probes to folder", str(self._export_directory())
+        )
+        if not directory:
+            return
+        directory = Path(directory)
+        prefix = f"spin_probes_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        written = []
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            for number, run in enumerate(runs, start=1):
+                label = re.sub(
+                    r"[^A-Za-z0-9.+-]+", "_", self._probe_session_run_label(run)
+                ).strip("_")
+                path = directory / f"{prefix}_{number:03d}_{label[:60]}.nc"
+                run.result.save(path)
+                written.append(path)
+            notebook = write_probe_loader_notebook(directory)
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        QApplication.restoreOverrideCursor()
+        self._log_message(f"{len(written)} spin probes exported to {directory}")
+        QMessageBox.information(
+            self,
+            "Export complete",
+            f"Exported {len(written)} spin probes to {directory}\n"
+            f"Jupyter notebook: {notebook.name}",
+        )
+
     def _show_probe_result(self):
         result = self.probe_result
+        self._update_probe_empty_hint()
         if result is None or result.time_s.size == 0:
             return
         previous_result = self.probe_spectrum_viewer.result
@@ -16159,6 +16393,7 @@ class SequenceSimulationWidget(QWidget):
             state=self._session_run_state(
                 phantom=probe_phantom,
                 probe_mode=probe_mode,
+                probe_sequence_revision=self._probe_sequence_revision,
             ),
             run_type="spin_probe",
         )
@@ -16169,6 +16404,7 @@ class SequenceSimulationWidget(QWidget):
             if callable(register):
                 register(run)
                 self._active_session_run_id = run.run_id
+            self.add_probe_session_run(run, current=True)
         else:
             capture = getattr(self.window(), "_capture_sequence_simulation_run", None)
             if callable(capture):
@@ -16214,6 +16450,7 @@ class SequenceSimulationWidget(QWidget):
             self._probe_sequence_revision = self._sequence_revision
             self._update_probe_stale_warning()
             self._show_probe_result()
+            self.add_probe_session_run(run, current=True)
             self.probe_status.setText(f"Showing {run.display_name} from this session")
             for index in range(self.views.count()):
                 if self.views.tabText(index) == "Spin Probe":
@@ -16264,6 +16501,15 @@ class SequenceSimulationWidget(QWidget):
             self._project_export_contexts.pop(run.run_type)
         self.reconstruction_explorer.remove_session_run(run)
         self.result_volume_viewer.remove_session_run(run)
+        shown_probe_deleted = self.remove_probe_session_run(run)
+        if shown_probe_deleted and self._active_session_run_id != run.run_id:
+            self._stop_probe_playback()
+            self.probe_result = None
+            self.probe_spectrum_viewer.result = None
+            self.probe_spatial_viewer.result = None
+            self.probe_info.setText("The displayed spin-probe run was deleted")
+            self._update_probe_stale_warning()
+            self._update_probe_empty_hint()
         if self._active_session_run_id != run.run_id:
             return
         if run.run_type == "spin_probe":
@@ -16275,6 +16521,7 @@ class SequenceSimulationWidget(QWidget):
             self.probe_info.setText("The displayed spin-probe run was deleted")
             self.probe_status.setText("Spin-probe run deleted")
             self._active_session_run_id = None
+            self._update_probe_empty_hint()
             return
         self._clear_previous_simulation_views(
             clear_reconstruction=False, clear_spatial_magnetization=False
@@ -17018,6 +17265,9 @@ class SequenceSimulationWidget(QWidget):
         self._export_results()
 
     def _export_results(self):
+        if self.object_source.currentIndex() == 2 and self.probe_result is not None:
+            self._export_probe_results()
+            return
         if self.result is None:
             QMessageBox.warning(self, "No result", "Run a simulation first.")
             return

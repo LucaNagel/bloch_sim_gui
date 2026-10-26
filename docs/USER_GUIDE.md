@@ -346,6 +346,13 @@ Follows a spectral/spatial spin distribution through the sequence.
 *Y scale → Per-spin response* normalizes so an ideal 90° gives |Mxy| = 1; set
 *Y max* to compare time points on a fixed scale.
 
+Every completed probe stays in the *Spin probe* list at the top of the tab, so
+earlier probes can be reopened without re-running them. **Export…** saves the
+shown probe (or all probes of the session) as `.nc`/`.npz` together with a
+`load_spin_probes.ipynb` notebook that plots time courses, spectra or profiles
+and compares the probes. Spin-probe parameter loops saved to a folder get the
+same notebook.
+
 ### Post-run 3D animation
 
 Enable *Create post-run animation* before running. The animation is captured
@@ -360,6 +367,7 @@ increases the run time.
 | --- | --- | --- |
 | **Project** `.blochproj` | *File → Save Project…* | Everything: settings, phantom, B1, sequence, results, explorer state |
 | **Results** | *Export results…* | `.nc` (NetCDF, recommended) + analysis notebook; also HDF5/NPZ, Bruker raw (experimental) |
+| **Spin probe** | *Spin Probe → Export…* | `.nc`/`.npz` per probe + `load_spin_probes.ipynb` |
 | **Sequence** | *Export Pulseq…* | `.seq` and/or a notebook that regenerates it |
 | **Free Mode results** | *File → Export Results* | HDF5 + analysis notebook; optionally a *reproducible* notebook that re-runs the simulation |
 

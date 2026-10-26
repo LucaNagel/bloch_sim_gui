@@ -5775,6 +5775,8 @@ class BlochSimulatorGUI(QMainWindow):
         if sequence_widget is not None and run.run_type == "sequence":
             sequence_widget.reconstruction_explorer.add_session_run(run)
             sequence_widget.result_volume_viewer.add_session_run(run)
+        elif sequence_widget is not None and run.run_type == "spin_probe":
+            sequence_widget.add_probe_session_run(run)
         self.statusBar().showMessage(f"Simulation renamed to {run.display_name}", 5000)
 
     @staticmethod
@@ -7428,9 +7430,29 @@ class BlochSimulatorGUI(QMainWindow):
                         saved_view_index = (
                             legacy_index - 1 if legacy_index >= 4 else legacy_index
                         )
-                        # Unnamed saves also predate the Geometry tab.
-                        if saved_view_index >= sequence_widget.geometry_tab_index:
+                        # Unnamed saves also predate the Geometry tab and
+                        # the current tab order, so map them by name.
+                        if saved_view_index >= 1:
                             saved_view_index += 1
+                        legacy_names = (
+                            "Sequence",
+                            "Geometry",
+                            "Signal",
+                            "2D k-space / Reconstruction",
+                            "Reconstruction Explorer",
+                            "Spatial Magnetization",
+                            "3D Magnetization Animation",
+                            "Spin Probe",
+                            "Log",
+                        )
+                        if 0 <= saved_view_index < len(legacy_names):
+                            for index in range(sequence_widget.views.count()):
+                                if (
+                                    sequence_widget.views.tabText(index)
+                                    == legacy_names[saved_view_index]
+                                ):
+                                    saved_view_index = index
+                                    break
                 if saved_view_index == sequence_widget.two_d_result_tab_index:
                     # The combined 2D page is hidden behind the Explorer.
                     saved_view_index = sequence_widget.reconstruction_explorer_tab_index

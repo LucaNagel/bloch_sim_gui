@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
+
+PROBE_FILE_FORMAT = "blochsimulator-spin-probe"
+
+
+def _json_default(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    return str(value)
 
 
 @dataclass(frozen=True)
@@ -94,3 +106,75 @@ class SequenceProbeResult:
             },
             attrs=dict(self.metadata),
         )
+
+    def save(self, filename) -> Path:
+        """Save the probe as xarray NetCDF (``.nc``) or NumPy archive (``.npz``).
+
+        The complete metadata, including a parameter-loop description, is
+        stored as JSON so :meth:`load` restores it unchanged.
+        """
+        path = Path(filename)
+        suffix = path.suffix.lower()
+        metadata_json = json.dumps(self.metadata, default=_json_default)
+        if suffix == ".npz":
+            np.savez_compressed(
+                path,
+                time_s=self.time_s,
+                positions_m=self.positions_m,
+                frequency_offsets_hz=self.frequency_offsets_hz,
+                magnetization=self.magnetization,
+                metadata_json=np.asarray(metadata_json),
+                format=np.asarray(PROBE_FILE_FORMAT),
+            )
+            return path
+        if suffix != ".nc":
+            raise ValueError("spin probes are saved as .nc or .npz")
+        dataset = self.to_xarray()
+        # NetCDF attributes only hold scalars and flat arrays.
+        attrs = {
+            key: value
+            for key, value in self.metadata.items()
+            if isinstance(value, (str, int, float, bool))
+        }
+        attrs["metadata_json"] = metadata_json
+        attrs["format"] = PROBE_FILE_FORMAT
+        dataset.attrs = attrs
+        dataset.to_netcdf(path)
+        return path
+
+    @classmethod
+    def load(cls, filename) -> "SequenceProbeResult":
+        """Load a probe written by :meth:`save`."""
+        path = Path(filename)
+        if path.suffix.lower() == ".npz":
+            with np.load(path, allow_pickle=False) as data:
+                if "format" not in data or str(data["format"]) != PROBE_FILE_FORMAT:
+                    raise ValueError(f"{path.name} is not a spin-probe export")
+                return cls(
+                    time_s=np.asarray(data["time_s"]),
+                    positions_m=np.asarray(data["positions_m"]),
+                    frequency_offsets_hz=np.asarray(data["frequency_offsets_hz"]),
+                    magnetization=np.asarray(data["magnetization"]),
+                    metadata=json.loads(str(data["metadata_json"])),
+                )
+        import xarray as xr
+
+        with xr.open_dataset(path) as dataset:
+            if dataset.attrs.get("format") != PROBE_FILE_FORMAT:
+                raise ValueError(f"{path.name} is not a spin-probe export")
+            positions = np.stack(
+                [dataset[axis].values for axis in ("x", "y", "z")], axis=-1
+            )
+            return cls(
+                time_s=np.asarray(dataset["time"].values, dtype=float),
+                positions_m=np.asarray(positions, dtype=float),
+                frequency_offsets_hz=np.asarray(
+                    dataset["frequency"].values, dtype=float
+                ),
+                magnetization=np.asarray(
+                    dataset["magnetization"]
+                    .transpose("time", "position", "frequency", "component")
+                    .values
+                ),
+                metadata=json.loads(dataset.attrs.get("metadata_json", "{}")),
+            )

@@ -160,14 +160,28 @@ def test_timing_feedback_moves_to_run_status_and_survives_in_log(source, monkeyp
     )
 
 
-def test_sequence_log_beside_spin_probe_shares_application_history(qt_application):
+def test_sequence_tab_order_and_log_shares_application_history(qt_application):
     window = BlochSimulatorGUI()
     window.show()
     window.log_message("Message before opening Sequence Mode")
     window.set_workspace_mode("sequence")
     widget = window.sequence_simulation_widget
 
-    assert widget.views.tabText(widget.log_tab_index - 1) == "Spin Probe"
+    visible_tabs = [
+        widget.views.tabText(index)
+        for index in range(widget.views.count())
+        if widget.views.isTabVisible(index)
+    ]
+    assert visible_tabs == [
+        "Sequence",
+        "Geometry",
+        "Reconstruction Explorer",
+        "Spin Probe",
+        "Signal",
+        "Spatial Magnetization",
+        "3D Magnetization Animation",
+        "Log",
+    ]
     assert widget.views.tabText(widget.log_tab_index) == "Log"
     assert widget.log_widget.isReadOnly()
     assert widget.log_widget.document() is window.log_widget.document()
