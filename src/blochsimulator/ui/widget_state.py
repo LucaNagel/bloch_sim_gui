@@ -47,6 +47,8 @@ def restore_widget_state(owner, state, *, block_signals=False):
             kind = saved.get("type")
             if kind == "combo" and isinstance(widget, QComboBox):
                 text = str(saved.get("text", ""))
+                aliases = widget.property("state_aliases") or {}
+                text = str(aliases.get(text, text))
                 index = widget.findText(text)
                 if index < 0 and text:
                     # Older project files may use equivalent numeric formatting,
