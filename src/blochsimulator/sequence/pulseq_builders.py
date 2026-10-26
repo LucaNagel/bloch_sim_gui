@@ -12,6 +12,15 @@ import numpy as np
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
 
 from .flip_angles import VFA_REFERENCE_DOI, variable_flip_angle_schedule
+from .encoding_order import (
+    ELLIPTICAL_CENTRIC,
+    axis_encoding_order,
+    inner_axis_index,
+    normalized_axis_order,
+    normalized_two_axis_order,
+    two_axis_encoding_order,
+    volume_encoding_order,
+)
 from .encoding import (
     EncodingFrame,
     logical_gradient_area,
@@ -864,46 +873,27 @@ def _phase_encoding_indices(
     n_y: int,
     order: str,
     fov_m: tuple[float, float],
+    inner_axis: str = "kx",
 ) -> list[tuple[int, int]]:
-    if order == "linear":
-        return [(x, y) for y in range(n_y) for x in range(n_x)]
-    if order == "spiral":
-        center_x, center_y = n_x // 2, n_y // 2
-        result = [(center_x, center_y)]
-        x, y = center_x, center_y
-        step_length = 1
-        directions = ((1, 0), (0, 1), (-1, 0), (0, -1))
-        direction_index = 0
-        while len(result) < n_x * n_y:
-            for _ in range(2):
-                dx, dy = directions[direction_index % 4]
-                direction_index += 1
-                for _ in range(step_length):
-                    x += dx
-                    y += dy
-                    if 0 <= x < n_x and 0 <= y < n_y:
-                        result.append((x, y))
-            step_length += 1
-        return result
-    if order != "centric":
-        raise ValueError("phase encoding order must be linear, spiral, or centric")
+    """Return the chronological CSI ``(x, y)`` encodings.
 
-    center_x, center_y = n_x // 2, n_y // 2
-    fov_x, fov_y = fov_m
-
-    def key(index: tuple[int, int]) -> tuple[float, float]:
-        x, y = index
-        k_x = (x - center_x) / fov_x
-        k_y = (y - center_y) / fov_y
-        return (
-            float(np.hypot(k_x, k_y)),
-            float((np.arctan2(k_y, k_x) + np.pi) % (2 * np.pi)),
+    ``"centric"`` keeps its historical CSI meaning, the joint
+    elliptical-centric order.
+    """
+    return list(
+        two_axis_encoding_order(
+            (n_x, n_y),
+            _normalized_csi_order(order),
+            inner_axis=inner_axis_index(inner_axis, ("kx", "ky")),
+            fov_m=fov_m,
         )
-
-    return sorted(
-        ((x, y) for y in range(n_y) for x in range(n_x)),
-        key=key,
     )
+
+
+def _normalized_csi_order(order) -> str:
+    if isinstance(order, str) and order.strip().lower() == "centric":
+        return ELLIPTICAL_CENTRIC
+    return normalized_two_axis_order(order)
 
 
 def make_pulseq_slice_selection(
@@ -1098,6 +1088,7 @@ def make_pulseq_csi(
     spectral_bandwidth_hz: float = 4000.0,
     spectral_points: int = 128,
     phase_encoding_order: str = "linear",
+    phase_encoding_inner_axis: str = "kx",
     flip_angle_deg: float = 15.0,
     variable_flip_angle: bool = False,
     vfa_final_flip_angle_deg: float = 90.0,
@@ -1132,6 +1123,11 @@ def make_pulseq_csi(
 ):
     """Build a repeated slice-selective Cartesian 2D CSI Pulseq sequence.
 
+    ``phase_encoding_order`` is any two-axis order of
+    :mod:`blochsimulator.sequence.encoding_order` for the ``(kx, ky)`` axes,
+    e.g. ``"linear-centric"``, ``"elliptical_centric"`` or ``"spiral"``;
+    ``"centric"`` alone means elliptical-centric. ``phase_encoding_inner_axis``
+    (``"kx"`` or ``"ky"``) is the inner loop of the paired orders.
     Variable flip angles advance with the chronological phase-encoding order
     and restart at the beginning of every complete CSI repetition.
     ``read_offset_m`` and ``phase_offset_m`` move the FOV centre with a
@@ -1180,7 +1176,10 @@ def make_pulseq_csi(
         raise ValueError("rf_spoiling_increment_deg must be finite")
     rf_spoiling = _uses_rf_spoiling(rf_spoiling, rf_spoiling_increment_deg)
 
-    order = _phase_encoding_indices(n_x, n_y, phase_encoding_order, (fov_x, fov_y))
+    phase_encoding_order = _normalized_csi_order(phase_encoding_order)
+    order = _phase_encoding_indices(
+        n_x, n_y, phase_encoding_order, (fov_x, fov_y), phase_encoding_inner_axis
+    )
     if variable_flip_angle:
         flip_angle_schedule_deg = variable_flip_angle_schedule(
             len(order),
@@ -1420,6 +1419,9 @@ def make_pulseq_csi(
     sequence.set_definition("SpectralPoints", spectral_points)
     sequence.set_definition("SpectralResolution", actual_bandwidth / spectral_points)
     sequence.set_definition("PhaseEncodingOrder", phase_encoding_order)
+    sequence.set_definition(
+        "PhaseEncodingInnerAxis", str(phase_encoding_inner_axis).strip().lower()
+    )
     sequence.set_definition(
         "FlipAngleDeg",
         float(vfa_final_flip_angle_deg if variable_flip_angle else flip_angle_deg),
@@ -2287,6 +2289,8 @@ def make_pulseq_bssfp(
     use_alpha_half: bool = True,
     read_offset_m: float = 0.0,
     phase_offset_m: float = 0.0,
+    phase_encoding_order: str = "linear-linear",
+    phase_encoding_inner_axis: str = "ky",
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
     nucleus: str = "H1",
@@ -2299,6 +2303,11 @@ def make_pulseq_bssfp(
     Ratio mode preserves the conventional ``alpha/2 - TR/2`` preparation.
     ``read_offset_m`` and ``phase_offset_m`` move the FOV centre as in
     :func:`make_pulseq_flash`.
+
+    ``phase_encoding_order`` sets the chronological ``(ky, kz)`` order:
+    ``"<ky>-<kz>"`` with ``linear`` or ``centric`` per axis, or
+    ``"elliptical_centric"``. ``phase_encoding_inner_axis`` (``"ky"`` or
+    ``"kz"``) is the inner loop of the paired orders.
     """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -2529,6 +2538,16 @@ def make_pulseq_bssfp(
 
     ky_areas = (np.arange(n_phase) - n_phase // 2) / fov_y
     kz_areas = (np.arange(n_partition) - n_partition // 2) / fov_z
+    (
+        phase_encoding_order,
+        phase_encoding_inner_axis,
+        volume_order,
+    ) = volume_encoding_order(
+        (n_phase, n_partition),
+        phase_encoding_order,
+        phase_encoding_inner_axis,
+        fov_m=(fov_y, fov_z),
+    )
     # The SPSP slab is refocused inside the balanced partition gradients.
     slab_refocus_area = (
         _slice_rephase_area(
@@ -2649,16 +2668,15 @@ def make_pulseq_bssfp(
     for volume_index in range(repetitions):
         acquisition_start = _sequence_duration_s(sequence)
         acquisition_start_times.append(acquisition_start)
-        for partition_index, kz in enumerate(kz_areas):
-            for line_index, ky in enumerate(ky_areas):
-                add_repetition(
-                    float(ky),
-                    float(kz),
-                    acquire=True,
-                    line_index=line_index,
-                    partition_index=partition_index,
-                    volume_index=volume_index,
-                )
+        for line_index, partition_index in volume_order:
+            add_repetition(
+                float(ky_areas[line_index]),
+                float(kz_areas[partition_index]),
+                acquire=True,
+                line_index=line_index,
+                partition_index=partition_index,
+                volume_index=volume_index,
+            )
         minimum_interval = _sequence_duration_s(sequence) - acquisition_start
         actual_interval, _ = _finish_acquisition_interval(
             pp,
@@ -2677,6 +2695,8 @@ def make_pulseq_bssfp(
     sequence.set_definition("ReadOffset", float(read_offset_m))
     sequence.set_definition("PhaseOffset", float(phase_offset_m))
     sequence.set_definition("MatrixSize", [n_read, n_phase, n_partition])
+    sequence.set_definition("PhaseEncodingOrder", phase_encoding_order)
+    sequence.set_definition("PhaseEncodingInnerAxis", phase_encoding_inner_axis)
     set_pulseq_encoding_definitions(
         sequence,
         encoding_frame,
@@ -3561,6 +3581,7 @@ def make_pulseq_epsi_mge(
     spoiler_cycles_per_voxel: float = 0.0,
     spoiler_duration_s: float = 2e-3,
     encoding_duration_s: float = 0.8e-3,
+    phase_encoding_order: str = "linear",
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
     nucleus: str = "H1",
@@ -3575,7 +3596,8 @@ def make_pulseq_epsi_mge(
     flyback readout acquires every echo in the same direction.
     ``read_offset_m`` and ``phase_offset_m`` move the FOV centre as in
     :func:`make_pulseq_flash`, with the opposite receiver frequency on
-    reversed echoes.
+    reversed echoes. ``phase_encoding_order`` (``"linear"`` or
+    ``"centric"``) sets the chronological order of the ky lines.
 
     With ``timing_only=True`` no sequence is assembled.  The function instead
     returns an :class:`EpsiMgeTimingPlan` holding the hardware-compatible
@@ -3876,6 +3898,8 @@ def make_pulseq_epsi_mge(
         n_slices, slice_thickness_m, slice_gap_m, slice_offset_m
     )
     ky_areas = (np.arange(n_y, dtype=float) - n_y // 2) * delta_ky
+    phase_encoding_order = normalized_axis_order(phase_encoding_order)
+    line_order = axis_encoding_order(n_y, phase_encoding_order)
     _, slice_sign = encoding_frame.axis_and_sign("partition")
     excitation_index = 0
     spoiler_end_times = []
@@ -3887,7 +3911,8 @@ def make_pulseq_epsi_mge(
         acquisition_start = _sequence_duration_s(sequence)
         acquisition_start_times.append(acquisition_start)
         for slice_index, position in enumerate(slice_positions):
-            for line_index, ky_area in enumerate(ky_areas):
+            for line_index in line_order:
+                ky_area = ky_areas[line_index]
                 rf_phase_deg = (
                     _rf_spoiling_phase_deg(excitation_index, rf_spoiling_increment_deg)
                     if rf_spoiling
@@ -3987,6 +4012,7 @@ def make_pulseq_epsi_mge(
     sequence.set_definition("TrajectoryType", "cartesian_2d_multi_echo")
     sequence.set_definition("FOV", [fov_x, fov_y, slice_extent])
     sequence.set_definition("MatrixSize", [n_x, n_y])
+    sequence.set_definition("PhaseEncodingOrder", phase_encoding_order)
     set_pulseq_encoding_definitions(
         sequence,
         encoding_frame,
@@ -4097,6 +4123,7 @@ def make_pulseq_flash(
     inversion_repetition_time_s: float | None = None,
     inversion_slab_factor: float = 1.0,
     slice_order: str = "sequential",
+    phase_encoding_order: str = "linear",
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
     nucleus: str = "H1",
@@ -4129,6 +4156,11 @@ def make_pulseq_flash(
     ``'slice_selective'`` inverts each slice right before its own
     excitations so every slice sees the requested TI. ``slice_order`` and
     ``SliceInversionTimes`` behave as in :func:`make_pulseq_epi`.
+
+    ``phase_encoding_order`` is ``"linear"`` (``-N/2 ... N/2-1``) or
+    ``"centric"`` (``0, -1, +1, -2, ...``). With a centric order and one
+    inversion per image the k-space centre is the first line after the
+    inversion, so TI is the effective inversion time of the image.
     """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -4403,6 +4435,8 @@ def make_pulseq_flash(
     ):
         raise ValueError("inversion_repetition_time_s must be positive and finite")
     line_interval = inversion is not None and interval == "line"
+    phase_encoding_order = normalized_axis_order(phase_encoding_order)
+    line_order = axis_encoding_order(n_phase, phase_encoding_order)
     center_line = n_phase // 2
     series_length = 1 if inversion is None else len(inversion.inversion_times_s)
     # Plan every repetition as groups of segments. A segment starts with an
@@ -4418,16 +4452,11 @@ def make_pulseq_flash(
         )
         if line_interval:
             group_excitations = [
-                [(slice_index, line) for slice_index in order]
-                for line in range(n_phase)
+                [(slice_index, line) for slice_index in order] for line in line_order
             ]
         else:
             group_excitations = [
-                [
-                    (slice_index, line)
-                    for slice_index in order
-                    for line in range(n_phase)
-                ]
+                [(slice_index, line) for slice_index in order for line in line_order]
             ]
         groups = []
         for excitations in group_excitations:
@@ -4730,6 +4759,7 @@ def make_pulseq_flash(
     sequence.set_definition("Name", "flash_2d")
     sequence.set_definition("FOV", [fov_read, fov_phase, slice_extent])
     sequence.set_definition("MatrixSize", [n_read, n_phase])
+    sequence.set_definition("PhaseEncodingOrder", phase_encoding_order)
     set_pulseq_encoding_definitions(
         sequence,
         encoding_frame,

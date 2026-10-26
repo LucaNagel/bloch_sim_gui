@@ -812,6 +812,18 @@ def _volume_layout(scan: "_Scan") -> Optional[_RawLayout]:
     blocks = np.zeros((count, partitions, phase, coils, read), dtype=np.complex128)
     if any(d < 0 for item in frames.acquisitions for d in item.readout_directions):
         scan.warn("reversed readout lines are stored in forward direction")
+    orders = {_volume_line_order(volumes, volume) for volume in range(count)}
+    nested = _ky_inner_axis_orders(next(iter(orders)), phase, partitions)
+    if len(orders) > 1 or nested is None:
+        scan.warn(
+            "3D phase-encoding order is not a ky-inner loop; "
+            "lines are stored in k-space order"
+        )
+        line_order, partition_order = tuple(range(phase)), tuple(range(partitions))
+    else:
+        line_order, partition_order = nested
+    line_rows = {index: row for row, index in enumerate(line_order)}
+    partition_rows = {index: row for row, index in enumerate(partition_order)}
     for volume in range(count):
         for z_index, frame in enumerate(volumes.volume_frame_indices[volume]):
             item = frames.acquisitions[frame]
@@ -822,7 +834,8 @@ def _volume_layout(scan: "_Scan") -> Optional[_RawLayout]:
                 values = raw[:, line, :]
                 if item.readout_directions[line] < 0:
                     values = values[:, ::-1]
-                blocks[volume, z_index, item.phase_indices[line]] = values
+                row = line_rows[item.phase_indices[line]]
+                blocks[volume, partition_rows[z_index], row] = values
     return _RawLayout(
         kind="cartesian_3d",
         blocks=blocks.reshape(count * partitions * phase, coils, read),
@@ -830,8 +843,62 @@ def _volume_layout(scan: "_Scan") -> Optional[_RawLayout]:
         dim_desc=("Spatial", "Spatial", "Spatial"),
         matrix=(read, phase, partitions),
         nr=count,
-        enc_steps=(_linear_steps(phase), _linear_steps(partitions)),
+        enc_steps=(
+            tuple(int(value - phase // 2) for value in line_order),
+            tuple(int(value - partitions // 2) for value in partition_order),
+        ),
     )
+
+
+def _volume_line_order(volumes, volume: int) -> tuple[tuple[int, int], ...]:
+    """Return one volume's ``(line, partition)`` indices in acquisition order."""
+
+    frames = volumes.frames
+    read = volumes.read_matrix
+    lines = []
+    for z_index, frame in enumerate(volumes.volume_frame_indices[volume]):
+        samples = frames.sample_indices[frame]
+        for line, phase_index in enumerate(frames.acquisitions[frame].phase_indices):
+            lines.append((int(samples[line * read]), int(phase_index), z_index))
+    return tuple((line, partition) for _, line, partition in sorted(lines))
+
+
+def _ky_inner_axis_orders(
+    pairs, phase: int, partitions: int
+) -> Optional[tuple[tuple[int, ...], tuple[int, ...]]]:
+    """Split a chronological ``(line, partition)`` order into a ky-inner loop.
+
+    Bruker stores 3D raw data with the first phase axis inside the second
+    one, each with its own step list; other orders do not fit that layout.
+    """
+
+    pairs = tuple(pairs)
+    if len(pairs) != phase * partitions:
+        return None
+    line_order = tuple(line for line, _ in pairs[:phase])
+    partition_order = tuple(partition for _, partition in pairs[::phase])
+    expected = tuple(
+        (line, partition) for partition in partition_order for line in line_order
+    )
+    if pairs != expected or len(set(expected)) != len(expected):
+        return None
+    return line_order, partition_order
+
+
+def _encoding_order_name(steps) -> str:
+    """Return the ParaVision ``PVM_EncOrder`` value of one step list."""
+
+    steps = tuple(int(value) for value in steps)
+    centric = [0]
+    for distance in range(1, len(steps)):
+        centric.extend(
+            value
+            for value in (-distance, distance)
+            if -(len(steps) // 2) <= value < len(steps) - len(steps) // 2
+        )
+    if len(steps) > 1 and steps == tuple(centric[: len(steps)]):
+        return "CENTRIC_ENC"
+    return "LINEAR_ENC"
 
 
 def _spiral_layout(scan: "_Scan") -> Optional[_RawLayout]:
@@ -1620,7 +1687,11 @@ def _write_method(path, scan: _Scan, context, relative: str) -> Path:
     writer.array("PVM_EncZf", np.ones(len(enc_matrix)))
     writer.array("PVM_EncPft", np.ones(len(enc_matrix)))
     writer.array("PVM_EncPpi", np.ones(len(enc_matrix)))
-    writer.enums("PVM_EncOrder", ["LINEAR_ENC"] * max(1, len(enc_matrix)))
+    enc_orders = ["LINEAR_ENC"] * max(1, len(enc_matrix))
+    if layout.kind in ("cartesian_2d", "cartesian_3d"):
+        for axis, steps in enumerate(layout.enc_steps, start=1):
+            enc_orders[axis] = _encoding_order_name(steps)
+    writer.enums("PVM_EncOrder", enc_orders)
     writer.array("PVM_EncStart", [-1] * len(enc_matrix))
     writer.scalar("PVM_EncNReceivers", scan.coils)
     writer.scalar("PVM_EncAvailReceivers", max(scan.coils, 1))

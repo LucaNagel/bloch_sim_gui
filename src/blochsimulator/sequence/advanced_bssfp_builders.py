@@ -8,6 +8,7 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
+from .encoding_order import volume_encoding_order
 from .encoding import (
     EncodingFrame,
     logical_gradient_area,
@@ -281,6 +282,8 @@ def make_pulseq_spectral_selective_bssfp(
     nucleus: str = "C13",
     read_offset_m: float = 0.0,
     phase_offset_m: float = 0.0,
+    phase_encoding_order: str = "linear-linear",
+    phase_encoding_inner_axis: str = "ky",
     encoding_axes: Sequence[str] | EncodingFrame = ("+x", "+y", "+z"),
     scanner_parameters: ScannerParameters | Mapping[str, float] | None = None,
 ):
@@ -292,6 +295,11 @@ def make_pulseq_spectral_selective_bssfp(
     ``read_offset_m`` and ``phase_offset_m`` move the FOV centre: the read
     offset adds to each receiver frequency, the phase offset adds a per-line
     receiver phase ramp.
+
+    ``phase_encoding_order`` sets the chronological ``(ky, kz)`` order:
+    ``"<ky>-<kz>"`` with ``linear`` or ``centric`` per axis, or
+    ``"elliptical_centric"``. ``phase_encoding_inner_axis`` (``"ky"`` or
+    ``"kz"``) is the inner loop of the paired orders.
 
     ``end_image_spoiler_cycles_per_voxel`` adds a crusher moment referenced to
     physical scanner X/Y/Z voxel sizes.  Supply the actual simulation-phantom
@@ -557,6 +565,16 @@ def make_pulseq_spectral_selective_bssfp(
     readout_area = logical_gradient_area(gx, encoding_frame, "read")
     ky_areas = (np.arange(n_phase) - n_phase // 2) / fov[1]
     kz_areas = (np.arange(n_partition) - n_partition // 2) / fov[2]
+    (
+        phase_encoding_order,
+        phase_encoding_inner_axis,
+        volume_order,
+    ) = volume_encoding_order(
+        (n_phase, n_partition),
+        phase_encoding_order,
+        phase_encoding_inner_axis,
+        fov_m=(fov[1], fov[2]),
+    )
 
     # All three spatial encoders are played in one block and must therefore
     # share a duration.  Ask Pulseq for the shortest hardware-valid lobe for
@@ -831,85 +849,86 @@ def make_pulseq_spectral_selective_bssfp(
             if tr_fill:
                 sequence.add_block(pp.make_delay(tr_fill))
 
-        for partition, kz in enumerate(kz_areas):
-            for line, ky in enumerate(ky_areas):
-                rf.freq_offset = rf_offset
-                rf.phase_offset = pulseq_phase_offset_rad(
-                    common_phase,
-                    frequency_offset_hz=rf_offset,
-                    event_center_s=frame_rf_center,
-                )
-                adc.freq_offset = receiver_offset + read_frequency_hz
-                adc_phase = advance_bssfp_phase_deg(
-                    common_phase,
-                    elapsed_s=actual_tr / 2,
-                    frequency_offset_hz=receiver_offset,
-                )
-                adc.phase_offset = pulseq_phase_offset_rad(
-                    adc_phase + 360.0 * float(ky) * phase_offset_m,
-                    frequency_offset_hz=adc.freq_offset,
-                    event_center_s=adc_center_from_start,
-                )
-                common_phase = advance_bssfp_phase_deg(
-                    common_phase,
-                    elapsed_s=actual_tr,
-                    frequency_offset_hz=rf_offset,
-                    phase_increment_deg=rf_phase_increment_deg,
-                )
-                gy_pre = make_role_trapezoid(
-                    pp,
-                    encoding_frame,
-                    "phase",
-                    area=float(ky),
-                    duration=encoding_duration_s,
-                    system=system,
-                )
-                gz_pre = make_role_trapezoid(
-                    pp,
-                    encoding_frame,
-                    "partition",
-                    area=float(kz) + slab_refocus_area,
-                    duration=encoding_duration_s,
-                    system=system,
-                )
-                gy_rephase = make_role_trapezoid(
-                    pp,
-                    encoding_frame,
-                    "phase",
-                    area=-float(ky),
-                    duration=encoding_duration_s,
-                    system=system,
-                )
-                gz_rephase = make_role_trapezoid(
-                    pp,
-                    encoding_frame,
-                    "partition",
-                    area=-float(kz) - slab_refocus_area,
-                    duration=encoding_duration_s,
-                    system=system,
-                )
-                _add_rf_block(
-                    sequence,
-                    rf,
-                    *(
-                        [rf_select, rf_block_padding]
-                        if rf_select is not None
-                        else [rf_block_padding]
-                    ),
-                )
-                if rf_balance_delay_value:
-                    sequence.add_block(pp.make_delay(rf_balance_delay_value))
-                sequence.add_block(gx_pre, gy_pre, gz_pre)
-                sequence.add_block(
-                    gx,
-                    adc,
-                    pp.make_label("LIN", "SET", line),
-                    pp.make_label("PAR", "SET", partition),
-                    pp.make_label("REP", "SET", repetition),
-                )
-                sequence.add_block(gx_pre, gy_rephase, gz_rephase)
-                if tr_fill:
-                    sequence.add_block(pp.make_delay(tr_fill))
+        for line, partition in volume_order:
+            ky = ky_areas[line]
+            kz = kz_areas[partition]
+            rf.freq_offset = rf_offset
+            rf.phase_offset = pulseq_phase_offset_rad(
+                common_phase,
+                frequency_offset_hz=rf_offset,
+                event_center_s=frame_rf_center,
+            )
+            adc.freq_offset = receiver_offset + read_frequency_hz
+            adc_phase = advance_bssfp_phase_deg(
+                common_phase,
+                elapsed_s=actual_tr / 2,
+                frequency_offset_hz=receiver_offset,
+            )
+            adc.phase_offset = pulseq_phase_offset_rad(
+                adc_phase + 360.0 * float(ky) * phase_offset_m,
+                frequency_offset_hz=adc.freq_offset,
+                event_center_s=adc_center_from_start,
+            )
+            common_phase = advance_bssfp_phase_deg(
+                common_phase,
+                elapsed_s=actual_tr,
+                frequency_offset_hz=rf_offset,
+                phase_increment_deg=rf_phase_increment_deg,
+            )
+            gy_pre = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "phase",
+                area=float(ky),
+                duration=encoding_duration_s,
+                system=system,
+            )
+            gz_pre = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "partition",
+                area=float(kz) + slab_refocus_area,
+                duration=encoding_duration_s,
+                system=system,
+            )
+            gy_rephase = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "phase",
+                area=-float(ky),
+                duration=encoding_duration_s,
+                system=system,
+            )
+            gz_rephase = make_role_trapezoid(
+                pp,
+                encoding_frame,
+                "partition",
+                area=-float(kz) - slab_refocus_area,
+                duration=encoding_duration_s,
+                system=system,
+            )
+            _add_rf_block(
+                sequence,
+                rf,
+                *(
+                    [rf_select, rf_block_padding]
+                    if rf_select is not None
+                    else [rf_block_padding]
+                ),
+            )
+            if rf_balance_delay_value:
+                sequence.add_block(pp.make_delay(rf_balance_delay_value))
+            sequence.add_block(gx_pre, gy_pre, gz_pre)
+            sequence.add_block(
+                gx,
+                adc,
+                pp.make_label("LIN", "SET", line),
+                pp.make_label("PAR", "SET", partition),
+                pp.make_label("REP", "SET", repetition),
+            )
+            sequence.add_block(gx_pre, gy_rephase, gz_rephase)
+            if tr_fill:
+                sequence.add_block(pp.make_delay(tr_fill))
         if spoilers:
             sequence.add_block(*spoilers)
             spoiler_end_times.append(float(sequence.duration()[0]))
@@ -931,6 +950,8 @@ def make_pulseq_spectral_selective_bssfp(
     sequence.set_definition("ReadOffset", float(read_offset_m))
     sequence.set_definition("PhaseOffset", float(phase_offset_m))
     sequence.set_definition("MatrixSize", list(matrix_values))
+    sequence.set_definition("PhaseEncodingOrder", phase_encoding_order)
+    sequence.set_definition("PhaseEncodingInnerAxis", phase_encoding_inner_axis)
     set_pulseq_encoding_definitions(
         sequence,
         encoding_frame,
@@ -1071,6 +1092,8 @@ def make_pulseq_me_bssfp(
     receiver_frequency_offset_hz: float = -460.0,
     read_offset_m: float = 0.0,
     phase_offset_m: float = 0.0,
+    phase_encoding_order: str = "linear-linear",
+    phase_encoding_inner_axis: str = "ky",
     encoding_duration_s: float = 0.5e-3,
     repetition_time_s: float = 8.696e-3,
     rf_phase_start_deg: float = 0.0,
@@ -1096,6 +1119,11 @@ def make_pulseq_me_bssfp(
     is fully balanced in read, phase, and partition directions.
     ``read_offset_m`` and ``phase_offset_m`` move the FOV centre on top of the
     receiver frequency offset; bipolar echoes reverse the read frequency.
+
+    ``phase_encoding_order`` sets the chronological ``(ky, kz)`` order:
+    ``"<ky>-<kz>"`` with ``linear`` or ``centric`` per axis, or
+    ``"elliptical_centric"``. ``phase_encoding_inner_axis`` (``"ky"`` or
+    ``"kz"``) is the inner loop of the paired orders.
     """
     pp = _pypulseq()
     encoding_frame = resolve_encoding_frame(encoding_axes)
@@ -1410,6 +1438,16 @@ def make_pulseq_me_bssfp(
     )
     ky_areas = (np.arange(n_phase) - n_phase // 2) / fov[1]
     kz_areas = (np.arange(n_partition) - n_partition // 2) / fov[2]
+    (
+        phase_encoding_order,
+        phase_encoding_inner_axis,
+        volume_order,
+    ) = volume_encoding_order(
+        (n_phase, n_partition),
+        phase_encoding_order,
+        phase_encoding_inner_axis,
+        fov_m=(fov[1], fov[2]),
+    )
     # The receiver is locked to the phase of the exciting RF pulse and only
     # evolves at the receiver frequency from that pulse to each echo, as in the
     # spectrally selective builder.  The bSSFP steady state is periodic in the
@@ -1537,16 +1575,15 @@ def make_pulseq_me_bssfp(
     for volume_index in range(repetitions):
         acquisition_start = _sequence_duration_s(sequence)
         acquisition_start_times.append(acquisition_start)
-        for partition_index, kz in enumerate(kz_areas):
-            for line_index, ky in enumerate(ky_areas):
-                add_tr(
-                    float(ky),
-                    float(kz),
-                    acquire=True,
-                    line_index=line_index,
-                    partition_index=partition_index,
-                    volume_index=volume_index,
-                )
+        for line_index, partition_index in volume_order:
+            add_tr(
+                float(ky_areas[line_index]),
+                float(kz_areas[partition_index]),
+                acquire=True,
+                line_index=line_index,
+                partition_index=partition_index,
+                volume_index=volume_index,
+            )
         minimum_interval = _sequence_duration_s(sequence) - acquisition_start
         actual_interval, interval_delay = _finish_acquisition_interval(
             pp,
@@ -1575,6 +1612,8 @@ def make_pulseq_me_bssfp(
     sequence.set_definition("ReadOffset", float(read_offset_m))
     sequence.set_definition("PhaseOffset", float(phase_offset_m))
     sequence.set_definition("MatrixSize", list(matrix_values))
+    sequence.set_definition("PhaseEncodingOrder", phase_encoding_order)
+    sequence.set_definition("PhaseEncodingInnerAxis", phase_encoding_inner_axis)
     set_pulseq_encoding_definitions(
         sequence,
         encoding_frame,

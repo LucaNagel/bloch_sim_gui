@@ -127,6 +127,12 @@ from ..sequence import (
 )
 from ..sequence.bruker_export import suggest_bruker_method
 from ..sequence.compiler import IDEAL_SPOILER_DEFINITION
+from ..sequence.encoding_order import (
+    AXIS_ORDERS,
+    ELLIPTICAL_CENTRIC,
+    PAIRED_ORDERS,
+    TWO_AXIS_ORDERS,
+)
 from ..sequence.encoding import (
     _axis_vector,
     numeric_definition_array,
@@ -255,6 +261,44 @@ def _left_aligned_form(parent=None):
     form = QFormLayout(parent)
     form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
     return form
+
+
+_ENCODING_ORDER_LABELS = {ELLIPTICAL_CENTRIC: "elliptical centric"}
+_ENCODING_ORDER_TOOLTIP = (
+    "Chronological phase-encoding order. Linear runs -N/2 ... N/2-1, centric "
+    "0, -1, +1, -2, +2, ... . Two axes combine one mode per axis (first-second); "
+    "the inner-loop axis runs through all its steps before the other advances. "
+    "Elliptical centric sorts all steps by their k-space radius."
+)
+
+
+def _encoding_order_combo(orders, *, aliases=None) -> QComboBox:
+    """Return a phase-encoding order combo holding canonical names as data."""
+    combo = QComboBox()
+    for name in orders:
+        combo.addItem(_ENCODING_ORDER_LABELS.get(name, name), name)
+    combo.setToolTip(_ENCODING_ORDER_TOOLTIP)
+    if aliases:
+        # Saved projects and presets name these items by their older texts.
+        combo.setProperty("state_aliases", dict(aliases))
+    return combo
+
+
+def _encoding_inner_axis_combo(axis_names, order_combo: QComboBox) -> QComboBox:
+    """Return the inner-loop axis combo, enabled for the paired orders only."""
+    combo = QComboBox()
+    combo.addItems(list(axis_names))
+    combo.setToolTip(
+        "Phase-encoding axis of the inner loop of a paired order; joint orders "
+        "such as elliptical centric ignore it"
+    )
+
+    def update(*_):
+        combo.setEnabled(order_combo.currentData() in PAIRED_ORDERS)
+
+    order_combo.currentIndexChanged.connect(update)
+    update()
+    return combo
 
 
 def _add_form_section(form: QFormLayout, title: str) -> None:
@@ -3175,6 +3219,7 @@ class SequenceSimulationWidget(QWidget):
             self._in_plane_offset_spins("epsi", self.OFFSET_IN_SEQUENCE)
         )
         self.epsi_sampling_bandwidth_khz = self._sampling_bandwidth_spin(50.0)
+        self.epsi_phase_encoding_order = _encoding_order_combo(AXIS_ORDERS)
         self.epsi_echoes = QSpinBox()
         self.epsi_echoes.setRange(1, 1024)
         self.epsi_echoes.setValue(8)
@@ -3235,6 +3280,7 @@ class SequenceSimulationWidget(QWidget):
         epsi_form.addRow("Phase FOV", self.epsi_phase_fov_mm)
         epsi_form.addRow("Read offset", self.epsi_read_offset_mm)
         epsi_form.addRow("Phase offset", self.epsi_phase_offset_mm)
+        epsi_form.addRow("Phase encoding order", self.epsi_phase_encoding_order)
         epsi_form.addRow("Sampling bandwidth", self.epsi_sampling_bandwidth_khz)
         epsi_form.addRow("Echoes / spectral points", self.epsi_echoes)
         epsi_form.addRow("Echo spacing", self.epsi_echo_spacing_ms)
@@ -3305,8 +3351,13 @@ class SequenceSimulationWidget(QWidget):
         self.csi_bandwidth_hz.setDecimals(3)
         self.csi_bandwidth_hz.setValue(4000.0)
         self.csi_bandwidth_hz.setSuffix(" Hz")
-        self.csi_encoding_order = QComboBox()
-        self.csi_encoding_order.addItems(["linear", "centric", "spiral"])
+        self.csi_encoding_order = _encoding_order_combo(
+            TWO_AXIS_ORDERS,
+            aliases={"linear": "linear-linear", "centric": "elliptical centric"},
+        )
+        self.csi_encoding_inner_axis = _encoding_inner_axis_combo(
+            ("kx", "ky"), self.csi_encoding_order
+        )
         self.csi_flip_angle_deg = self._parameter_spin(0.1, 360.0, 15.0, "°")
         self.csi_use_ernst_angle = QCheckBox("Use phantom-derived angle")
         self.csi_use_ernst_angle.setToolTip(
@@ -3371,7 +3422,8 @@ class SequenceSimulationWidget(QWidget):
         csi_form.addRow("Phase FOV", self.csi_phase_fov_mm)
         csi_form.addRow("Read offset", self.csi_read_offset_mm)
         csi_form.addRow("Phase offset", self.csi_phase_offset_mm)
-        csi_form.addRow("Encoding order", self.csi_encoding_order)
+        csi_form.addRow("Encoding order (kx-ky)", self.csi_encoding_order)
+        csi_form.addRow("Inner encoding loop", self.csi_encoding_inner_axis)
         _add_form_section(csi_form, "Spectral sampling")
         csi_form.addRow("Spectral points", self.csi_spectral_points)
         csi_form.addRow("Spectral bandwidth", self.csi_bandwidth_hz)
@@ -3674,6 +3726,7 @@ class SequenceSimulationWidget(QWidget):
             0.1, 10000.0, default_fov_y, " mm"
         )
         self.flash_sampling_bandwidth_khz = self._sampling_bandwidth_spin(100.0)
+        self.flash_phase_encoding_order = _encoding_order_combo(AXIS_ORDERS)
         self.flash_flip_angle_deg = self._parameter_spin(0.1, 360.0, 15.0, "°")
         self.flash_use_ernst_angle = QCheckBox("Use phantom-derived angle")
         self.flash_use_ernst_angle.setToolTip(
@@ -3746,6 +3799,7 @@ class SequenceSimulationWidget(QWidget):
         flash_form.addRow("Phase FOV", self.flash_phase_fov_mm)
         flash_form.addRow("Read offset", self.flash_read_offset_mm)
         flash_form.addRow("Phase offset", self.flash_phase_offset_mm)
+        flash_form.addRow("Phase encoding order", self.flash_phase_encoding_order)
         flash_form.addRow("Sampling bandwidth", self.flash_sampling_bandwidth_khz)
         _add_form_section(flash_form, "RF pulse")
         flash_form.addRow("Flip angle", self.flash_flip_angle_deg)
@@ -3821,6 +3875,7 @@ class SequenceSimulationWidget(QWidget):
             "ir", self.OFFSET_IN_SEQUENCE
         )
         self.ir_sampling_bandwidth_khz = self._sampling_bandwidth_spin(100.0)
+        self.ir_phase_encoding_order = _encoding_order_combo(AXIS_ORDERS)
         ir_defaults = self.INVERSION_RECOVERY_READOUT_DEFAULTS["epi"]
         self._ir_previous_readout = "epi"
         self.ir_flip_angle_deg = self._parameter_spin(
@@ -3904,6 +3959,7 @@ class SequenceSimulationWidget(QWidget):
         ir_form.addRow("Phase FOV", self.ir_phase_fov_mm)
         ir_form.addRow("Read offset", self.ir_read_offset_mm)
         ir_form.addRow("Phase offset", self.ir_phase_offset_mm)
+        ir_form.addRow("Phase encoding order", self.ir_phase_encoding_order)
         ir_form.addRow("Sampling bandwidth", self.ir_sampling_bandwidth_khz)
         _add_form_section(ir_form, "RF pulse")
         ir_form.addRow("Flip angle", self.ir_flip_angle_deg)
@@ -3978,6 +4034,12 @@ class SequenceSimulationWidget(QWidget):
             self._in_plane_offset_spins("bssfp", self.OFFSET_IN_SEQUENCE)
         )
         self.bssfp_bandwidth_khz = self._sampling_bandwidth_spin(10.0)
+        self.bssfp_phase_encoding_order = _encoding_order_combo(
+            PAIRED_ORDERS + (ELLIPTICAL_CENTRIC,)
+        )
+        self.bssfp_phase_encoding_inner_axis = _encoding_inner_axis_combo(
+            ("ky", "kz"), self.bssfp_phase_encoding_order
+        )
         self.bssfp_flip_angle_deg = self._parameter_spin(0.1, 360.0, 15.0, "°")
         self.bssfp_repetition_time_ms = self._parameter_spin(0.1, 10000.0, 10.0, " ms")
         self.bssfp_phase_start_deg = self._parameter_spin(-360.0, 360.0, 180.0, "°")
@@ -4067,6 +4129,10 @@ class SequenceSimulationWidget(QWidget):
         bssfp_form.addRow("Partition FOV", self.bssfp_partition_fov_mm)
         bssfp_form.addRow("Read offset", self.bssfp_read_offset_mm)
         bssfp_form.addRow("Phase offset", self.bssfp_phase_offset_mm)
+        bssfp_form.addRow(
+            "Phase encoding order (ky-kz)", self.bssfp_phase_encoding_order
+        )
+        bssfp_form.addRow("Inner encoding loop", self.bssfp_phase_encoding_inner_axis)
         bssfp_form.addRow("Sampling bandwidth", self.bssfp_bandwidth_khz)
         _add_form_section(bssfp_form, "RF pulse and timing")
         bssfp_form.addRow("Flip angle", self.bssfp_flip_angle_deg)
@@ -4144,6 +4210,12 @@ class SequenceSimulationWidget(QWidget):
             "Comma-separated nominal flip angles matching the target list"
         )
         self.ss_bssfp_bandwidth_khz = self._sampling_bandwidth_spin(10.0)
+        self.ss_bssfp_phase_encoding_order = _encoding_order_combo(
+            PAIRED_ORDERS + (ELLIPTICAL_CENTRIC,)
+        )
+        self.ss_bssfp_phase_encoding_inner_axis = _encoding_inner_axis_combo(
+            ("ky", "kz"), self.ss_bssfp_phase_encoding_order
+        )
         self.ss_bssfp_encoding_duration_ms = self._parameter_spin(
             0.01, 100.0, 0.2, " ms"
         )
@@ -4249,6 +4321,10 @@ class SequenceSimulationWidget(QWidget):
         ss_form.addRow("Partition FOV", self.ss_bssfp_partition_fov_mm)
         ss_form.addRow("Read offset", self.ss_bssfp_read_offset_mm)
         ss_form.addRow("Phase offset", self.ss_bssfp_phase_offset_mm)
+        ss_form.addRow(
+            "Phase encoding order (ky-kz)", self.ss_bssfp_phase_encoding_order
+        )
+        ss_form.addRow("Inner encoding loop", self.ss_bssfp_phase_encoding_inner_axis)
         _add_form_section(ss_form, "Spectral targets and RF pulse")
         # One row per metabolite. The comma-separated line edits stay as the
         # hidden canonical values that projects, presets and the sequence
@@ -4482,6 +4558,12 @@ class SequenceSimulationWidget(QWidget):
         self.me_bssfp_readout_strategy = QComboBox()
         self.me_bssfp_readout_strategy.addItems(["Flyback", "Symmetric bipolar"])
         self.me_bssfp_bandwidth_khz = self._sampling_bandwidth_spin(39.6825)
+        self.me_bssfp_phase_encoding_order = _encoding_order_combo(
+            PAIRED_ORDERS + (ELLIPTICAL_CENTRIC,)
+        )
+        self.me_bssfp_phase_encoding_inner_axis = _encoding_inner_axis_combo(
+            ("ky", "kz"), self.me_bssfp_phase_encoding_order
+        )
         self.me_bssfp_flip_angle_deg = self._parameter_spin(0.1, 360.0, 3.5, "°")
         self.me_bssfp_receiver_offset_hz = self._parameter_spin(
             -1_000_000.0, 1_000_000.0, -460.0, " Hz"
@@ -4557,6 +4639,10 @@ class SequenceSimulationWidget(QWidget):
         me_form.addRow("Partition FOV", self.me_bssfp_partition_fov_mm)
         me_form.addRow("Read offset", self.me_bssfp_read_offset_mm)
         me_form.addRow("Phase offset", self.me_bssfp_phase_offset_mm)
+        me_form.addRow(
+            "Phase encoding order (ky-kz)", self.me_bssfp_phase_encoding_order
+        )
+        me_form.addRow("Inner encoding loop", self.me_bssfp_phase_encoding_inner_axis)
         me_form.addRow("Echoes", self.me_bssfp_echoes)
         me_form.addRow("Echo spacing", self.me_bssfp_echo_spacing_ms)
         me_form.addRow("Readout strategy", self.me_bssfp_readout_strategy)
@@ -5455,6 +5541,9 @@ class SequenceSimulationWidget(QWidget):
         ):
             widget.valueChanged.connect(self._epsi_mge_changed)
         self.epsi_readout_strategy.currentIndexChanged.connect(self._epsi_mge_changed)
+        self.epsi_phase_encoding_order.currentIndexChanged.connect(
+            self._epsi_mge_changed
+        )
         self.epsi_rf_spoiling.toggled.connect(self._epsi_mge_changed)
         self.epsi_spoil_after_readout.toggled.connect(self._epsi_mge_changed)
         self.epsi_spoil_after_readout.toggled.connect(
@@ -5500,6 +5589,7 @@ class SequenceSimulationWidget(QWidget):
         ):
             widget.valueChanged.connect(self._csi_changed)
         self.csi_encoding_order.currentIndexChanged.connect(self._csi_changed)
+        self.csi_encoding_inner_axis.currentIndexChanged.connect(self._csi_changed)
         self.csi_rf_pulse_type.currentIndexChanged.connect(self._csi_changed)
         self._connect_two_dimensional_orientation_controls(
             self.csi_slice_orientation,
@@ -5535,6 +5625,7 @@ class SequenceSimulationWidget(QWidget):
         self.ir_readout.currentIndexChanged.connect(self._ir_readout_changed)
         self.ir_epi_readout_strategy.currentIndexChanged.connect(self._ir_changed)
         self.ir_slice_order.currentIndexChanged.connect(self._ir_changed)
+        self.ir_phase_encoding_order.currentIndexChanged.connect(self._ir_changed)
         self.ir_rf_spoiling.toggled.connect(self._ir_changed)
         self._connect_two_dimensional_orientation_controls(
             self.ir_slice_orientation,
@@ -5641,6 +5732,7 @@ class SequenceSimulationWidget(QWidget):
             self._apply_current_recommended_spin_grid
         )
         self.flash_rf_pulse_type.currentIndexChanged.connect(self._flash_changed)
+        self.flash_phase_encoding_order.currentIndexChanged.connect(self._flash_changed)
         self._connect_two_dimensional_orientation_controls(
             self.flash_slice_orientation,
             self.flash_read_gradient_axis,
@@ -5674,6 +5766,10 @@ class SequenceSimulationWidget(QWidget):
         ):
             widget.valueChanged.connect(self._bssfp_changed)
         self.bssfp_alpha_half.toggled.connect(self._bssfp_changed)
+        self.bssfp_phase_encoding_order.currentIndexChanged.connect(self._bssfp_changed)
+        self.bssfp_phase_encoding_inner_axis.currentIndexChanged.connect(
+            self._bssfp_changed
+        )
         self.bssfp_alpha_half_use_ratios.toggled.connect(self._bssfp_changed)
         for widget in (
             self.ss_bssfp_read_matrix,
@@ -5714,6 +5810,12 @@ class SequenceSimulationWidget(QWidget):
         self.ss_bssfp_target_table.changed.connect(self._ss_bssfp_target_table_changed)
         self.ss_bssfp_rf_pulse_type.currentIndexChanged.connect(self._ss_bssfp_changed)
         self.ss_bssfp_alpha_half.toggled.connect(self._ss_bssfp_changed)
+        self.ss_bssfp_phase_encoding_order.currentIndexChanged.connect(
+            self._ss_bssfp_changed
+        )
+        self.ss_bssfp_phase_encoding_inner_axis.currentIndexChanged.connect(
+            self._ss_bssfp_changed
+        )
         self.ss_bssfp_alpha_half_use_ratios.toggled.connect(self._ss_bssfp_changed)
         for widget in (
             self.radial_me_fov_mm,
@@ -5779,6 +5881,12 @@ class SequenceSimulationWidget(QWidget):
         )
         self.me_bssfp_rf_pulse_type.currentIndexChanged.connect(self._me_bssfp_changed)
         self.me_bssfp_alpha_half.toggled.connect(self._me_bssfp_changed)
+        self.me_bssfp_phase_encoding_order.currentIndexChanged.connect(
+            self._me_bssfp_changed
+        )
+        self.me_bssfp_phase_encoding_inner_axis.currentIndexChanged.connect(
+            self._me_bssfp_changed
+        )
         self.me_bssfp_alpha_half_use_ratios.toggled.connect(self._me_bssfp_changed)
         self._connect_three_dimensional_orientation_controls(
             self.bssfp_read_gradient_axis,
@@ -9391,6 +9499,8 @@ class SequenceSimulationWidget(QWidget):
         readout = self.ir_readout.currentData()
         self.ir_epi_readout_strategy.setEnabled(readout == "epi")
         self.ir_line_repetition_time_ms.setEnabled(readout != "epi")
+        # EPI acquires all lines in one train; only FLASH lines can be reordered.
+        self.ir_phase_encoding_order.setEnabled(readout != "epi")
         self.ir_rf_spoiling_increment_deg.setEnabled(self.ir_rf_spoiling.isChecked())
         self._update_inversion_controls("ir")
         try:
@@ -11596,6 +11706,7 @@ class SequenceSimulationWidget(QWidget):
             "spoiler_cycles_per_slice": (self.epsi_spoiler_cycles_per_slice.value()),
             "spoiler_cycles_per_voxel": (self.epsi_spoiler_cycles_per_voxel.value()),
             "spoiler_duration_s": self.epsi_spoiler_duration_ms.value() / 1000.0,
+            "phase_encoding_order": self.epsi_phase_encoding_order.currentData(),
             "nucleus": self.nucleus.currentText(),
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
@@ -11610,7 +11721,8 @@ class SequenceSimulationWidget(QWidget):
             **self._sequence_geometry_parameters(self.CSI_SOURCE),
             "spectral_bandwidth_hz": self.csi_bandwidth_hz.value(),
             "spectral_points": self.csi_spectral_points.value(),
-            "phase_encoding_order": self.csi_encoding_order.currentText(),
+            "phase_encoding_order": self.csi_encoding_order.currentData(),
+            "phase_encoding_inner_axis": self.csi_encoding_inner_axis.currentText(),
             "flip_angle_deg": (
                 ernst.angle_deg
                 if ernst is not None
@@ -11715,6 +11827,9 @@ class SequenceSimulationWidget(QWidget):
             parameters["readout_repetition_time_s"] = (
                 self.ir_line_repetition_time_ms.value() / 1000.0
             )
+            parameters["phase_encoding_order"] = (
+                self.ir_phase_encoding_order.currentData()
+            )
         parameters.update(self._shared_rf_parameters("ir"))
         parameters.update(self._inversion_parameters("ir"))
         return parameters
@@ -11758,6 +11873,7 @@ class SequenceSimulationWidget(QWidget):
             "spoiler_cycles_per_slice": (self.flash_spoiler_cycles_per_slice.value()),
             "spoiler_cycles_per_voxel": (self.flash_spoiler_cycles_per_voxel.value()),
             "spoiler_duration_s": self.flash_spoiler_duration_ms.value() / 1000.0,
+            "phase_encoding_order": self.flash_phase_encoding_order.currentData(),
             "nucleus": self.nucleus.currentText(),
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
@@ -11786,6 +11902,10 @@ class SequenceSimulationWidget(QWidget):
                 self.bssfp_acquisition_interval_ms
             ),
             "use_alpha_half": self.bssfp_alpha_half.isChecked(),
+            "phase_encoding_order": (self.bssfp_phase_encoding_order.currentData()),
+            "phase_encoding_inner_axis": (
+                self.bssfp_phase_encoding_inner_axis.currentText()
+            ),
             "nucleus": self.nucleus.currentText(),
             "scanner_parameters": self.scanner_parameters.to_dict(),
         }
@@ -11839,6 +11959,10 @@ class SequenceSimulationWidget(QWidget):
                 self.ss_bssfp_acquisition_interval_ms
             ),
             "use_alpha_half": self.ss_bssfp_alpha_half.isChecked(),
+            "phase_encoding_order": (self.ss_bssfp_phase_encoding_order.currentData()),
+            "phase_encoding_inner_axis": (
+                self.ss_bssfp_phase_encoding_inner_axis.currentText()
+            ),
             "alpha_half_use_ratios": (self.ss_bssfp_alpha_half_use_ratios.isChecked()),
             "alpha_half_tr_ratio": self.ss_bssfp_alpha_half_tr_ratio.value(),
             "alpha_half_flip_ratio": self.ss_bssfp_alpha_half_flip_ratio.value(),
@@ -11944,6 +12068,10 @@ class SequenceSimulationWidget(QWidget):
                 self.me_bssfp_acquisition_interval_ms
             ),
             "use_alpha_half": self.me_bssfp_alpha_half.isChecked(),
+            "phase_encoding_order": (self.me_bssfp_phase_encoding_order.currentData()),
+            "phase_encoding_inner_axis": (
+                self.me_bssfp_phase_encoding_inner_axis.currentText()
+            ),
             "alpha_half_use_ratios": (self.me_bssfp_alpha_half_use_ratios.isChecked()),
             "alpha_half_tr_ratio": self.me_bssfp_alpha_half_tr_ratio.value(),
             "alpha_half_flip_ratio": self.me_bssfp_alpha_half_flip_ratio.value(),
@@ -17451,5 +17579,7 @@ class SequenceSimulationWidget(QWidget):
             if radii.size and np.all(np.diff(radii) >= -1e-12):
                 order = "centric"
 
-        method = "User:lucaCSI4" if order == "centric" else "Bruker:CSI"
+        # Older sequences call the elliptical-centric CSI order "centric".
+        luca_csi4 = order in ("centric", ELLIPTICAL_CENTRIC)
+        method = "User:lucaCSI4" if luca_csi4 else "Bruker:CSI"
         return (method, slice_thickness_mm, "both")
