@@ -1,5 +1,7 @@
 """Keyboard and tab navigation must preserve unapplied editor changes."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from PyQt5.QtCore import Qt
@@ -217,7 +219,7 @@ def test_phantom_enter_commits_inputs_and_escape_closes(phantom_editor):
 
 def test_phantom_ok_button_still_accepts(phantom_editor, monkeypatch):
     dialog, _spin = phantom_editor
-    phantom = object()
+    phantom = SimpleNamespace(metadata={})
     if isinstance(dialog, SpectralPhantomDesignerDialog):
         monkeypatch.setattr(dialog.design, "build", lambda: phantom)
     else:
