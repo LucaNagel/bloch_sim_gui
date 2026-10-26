@@ -2342,22 +2342,27 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         if self._updating or not (0 <= row < len(self.design.shapes)):
             return
         self._updating = True
-        item = self.design.shapes[row]
-        self._configure_shape_geometry_controls(item)
-        self.shape_name.setText(item.name)
-        self.kind_label.setText(item.kind)
-        self.x_center.setValue(item.center[0] * 100.0)
-        self.y_center.setValue(item.center[1] * 100.0)
-        self.z_center.setValue(item.center[2] * 100.0)
-        self.x_size.setValue(item.size[0] * 100.0)
-        self.y_size.setValue(item.size[1] * 100.0)
-        self.z_size.setValue(item.size[2] * 100.0)
-        for widget, angle in zip(self.rotation_spins, item.rotation_deg):
-            widget.setValue(float(angle))
-        self.shape_kpl.setValue(item.effective_kpl_s_inv(self.design.default_kpl_s_inv))
-        self._populate_peaks(item)
-        self._update_xy_info(row)
-        self._updating = False
+        try:
+            item = self.design.shapes[row]
+            self._configure_shape_geometry_controls(item)
+            self.shape_name.setText(item.name)
+            self.kind_label.setText(item.kind)
+            self.x_center.setValue(item.center[0] * 100.0)
+            self.y_center.setValue(item.center[1] * 100.0)
+            self.z_center.setValue(item.center[2] * 100.0)
+            self.x_size.setValue(item.size[0] * 100.0)
+            self.y_size.setValue(item.size[1] * 100.0)
+            self.z_size.setValue(item.size[2] * 100.0)
+            for widget, angle in zip(self.rotation_spins, item.rotation_deg):
+                widget.setValue(float(angle))
+            self.shape_kpl.setValue(
+                item.effective_kpl_s_inv(self.design.default_kpl_s_inv)
+            )
+            self._populate_peaks(item)
+            self._update_xy_info(row)
+        finally:
+            # A stuck flag would silently drop every later table edit.
+            self._updating = False
         self._set_kinetics_preview_shape(row)
         self._update_roi_highlights(row)
         self._update_shape_preview()
@@ -2385,11 +2390,13 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
                 item.size = (float(size.x()), float(size.y()), item.size[2])
                 self.shape_list.setCurrentRow(row)
                 self._updating = True
-                self.x_center.setValue(item.center[0] * 100.0)
-                self.y_center.setValue(item.center[1] * 100.0)
-                self.x_size.setValue(item.size[0] * 100.0)
-                self.y_size.setValue(item.size[1] * 100.0)
-                self._updating = False
+                try:
+                    self.x_center.setValue(item.center[0] * 100.0)
+                    self.y_center.setValue(item.center[1] * 100.0)
+                    self.x_size.setValue(item.size[0] * 100.0)
+                    self.y_size.setValue(item.size[1] * 100.0)
+                finally:
+                    self._updating = False
                 self._update_xy_info(row)
                 self._update_shape_projection(row)
                 self._update_shape_preview()
@@ -2620,10 +2627,10 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         except (AttributeError, ValueError):
             return
         self.design.shapes[row].peaks = peaks
-        self._update_object_amount_info()
-        self._update_kinetics_preview()
         self._inspector_preview_dirty = True
         self._update_spectral_preview()
+        self._update_object_amount_info()
+        self._update_kinetics_preview()
 
     def _read_peak_table(self):
         peaks = []
@@ -3441,6 +3448,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         row = self._current_row()
         if row is not None:
             self.design.shapes[row].peaks = self._read_peak_table()
+            self._update_spectral_preview()
         self.design.name = self.name_edit.text().strip() or "Designed spectral phantom"
         self.design.shape = tuple(widget.value() for widget in self.matrix_spins)
         self.design.fov_m = tuple(widget.value() / 1000.0 for widget in self.fov_spins)
@@ -3509,7 +3517,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         self._building_inspector_preview = True
         try:
             self._sync_global()
-            self.phantom = self.design.build()
+            self.phantom = self._build_phantom()
             self.inspector.set_phantom(self.phantom)
             if self.design.dynamic_enabled:
                 self.inspector.map_combo.setCurrentText("kPL")
@@ -3574,11 +3582,18 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
     def accept(self):
         try:
             self._sync_global()
-            self.phantom = self.design.build()
+            self.phantom = self._build_phantom()
         except Exception as exc:
             QMessageBox.critical(self, "Invalid phantom", str(exc))
             return
         super().accept()
+
+    def _build_phantom(self):
+        phantom = self.design.build()
+        # The orange reference line marks the sequence carrier, which can
+        # differ from the design's internal peak-offset reference.
+        phantom.metadata["sequence_reference_ppm"] = float(self.sequence_reference_ppm)
+        return phantom
 
     def get_phantom(self):
         return self.phantom
