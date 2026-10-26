@@ -36,6 +36,8 @@ phantoms/phantoms/*
 *.gif
 *.ipynb
 !tutorials/ss_bssfp_spoiling_validation.ipynb
+!examples/load_bloch_project.ipynb
+!examples/load_exported_results.ipynb
 
 !docs/_static/media/*.gif
 !docs/_static/media/*.png
