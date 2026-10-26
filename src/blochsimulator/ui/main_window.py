@@ -1792,6 +1792,9 @@ class BlochSimulatorGUI(QMainWindow):
         self.sequence_simulation_widget.psf_analysis_requested.connect(
             self._open_psf_analysis_tab
         )
+        self.sequence_simulation_widget.receiver_noise_requested.connect(
+            self._open_receiver_noise_tab
+        )
         self._update_spoiling_analysis_tab_visibility()
         self.sequence_parameter_loop_panel_layout.addWidget(
             self.sequence_simulation_widget.parameter_loop_group
@@ -1812,6 +1815,10 @@ class BlochSimulatorGUI(QMainWindow):
         self.sequence_parameter_loop_tab_opened = True
         self._set_main_tab_visible(self.sequence_parameter_loop_tab_index, True)
         self.tab_widget.setCurrentIndex(self.sequence_parameter_loop_tab_index)
+
+    def _open_receiver_noise_tab(self):
+        self._set_main_tab_visible(self.receiver_noise_tab_index, True)
+        self.tab_widget.setCurrentIndex(self.receiver_noise_tab_index)
 
     def _ensure_receiver_noise_workspace(self, index):
         if (

@@ -2,7 +2,8 @@
 
 Simulated signals are in simulation units. With a calibrated receiver they are
 mol × P/P_th at the calibration's target temperature, so multiplying by that
-thermal polarization gives the fully polarized equivalent amount in mol. In
+thermal polarization and the object's isotope enrichment gives the fully
+polarized equivalent amount of observed nuclei in mol. In
 SNR units every ADC sample is divided by its own noise std; an orthonormal
 reconstruction then keeps the per-quadrature noise std at 1 in images and
 spectra, so every value reads directly as a multiple of the noise.
@@ -53,15 +54,21 @@ def noise_std_per_sample(result) -> Optional[np.ndarray]:
 
 
 def _fully_polarized_scale(result) -> Optional[float]:
-    """Factor from mol × P/P_th to fully polarized mol of a calibrated run."""
+    """Factor from mol × P/P_th to fully polarized observed mol of a calibrated run.
+
+    It includes the object's isotope enrichment; results from before that was
+    recorded fall back to the thermal polarization alone.
+    """
     noise = result.metadata.get("receiver_noise") or {}
     if noise.get("mode") != "calibrated":
         return None
     derived = noise.get("calibration_derived") or {}
-    polarization = derived.get("target_thermal_polarization")
-    if polarization is None or not np.isfinite(polarization) or polarization <= 0:
+    scale = derived.get(
+        "target_signal_scale", derived.get("target_thermal_polarization")
+    )
+    if scale is None or not np.isfinite(scale) or scale <= 0:
         return None
-    return float(polarization)
+    return float(scale)
 
 
 @dataclass(frozen=True)

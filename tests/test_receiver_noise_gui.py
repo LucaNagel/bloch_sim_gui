@@ -270,11 +270,9 @@ def test_workspace_reapplies_noise_without_running_bloch_again():
     # Results from before relative SNR lack the reference amplitude.
     widget._finished(with_context(None), record_run=False)
     panel.mode.setCurrentIndex(1)
-    with patch(
-        "blochsimulator.ui.sequence_simulation_widget.QMessageBox.warning"
-    ) as warning:
+    with patch.object(widget, "_show_receiver_noise_error") as warning:
         panel.apply_button.click()
-    assert "Rerun the simulation" in warning.call_args.args[2]
+    assert "Rerun the simulation" in warning.call_args.args[0]
     widget.close()
 
 
@@ -327,11 +325,9 @@ def test_run_rejects_changed_field_strength_before_worker_starts(monkeypatch):
     widget._capture_noise_calibration()
     widget.field_strength_t.setValue(widget.field_strength_t.value() + 1)
     monkeypatch.setattr(widget, "_ensure_current_generated_sequence", lambda: True)
-    with patch(
-        "blochsimulator.ui.sequence_simulation_widget.QMessageBox.critical"
-    ) as error:
+    with patch.object(widget, "_show_receiver_noise_error") as error:
         assert widget._run() is False
-    assert "field strength" in error.call_args.args[2]
+    assert "field strength" in error.call_args.args[0]
     assert widget.worker is None
     widget.close()
 
@@ -1005,10 +1001,38 @@ def test_run_rejects_a_coil_calibration_for_an_object_without_b1_maps(monkeypatc
     panel.reference_use_coil.setChecked(True)
     widget._capture_noise_calibration()
     monkeypatch.setattr(widget, "_ensure_current_generated_sequence", lambda: True)
-    with patch(
-        "blochsimulator.ui.sequence_simulation_widget.QMessageBox.critical"
-    ) as error:
+    with patch.object(widget, "_show_receiver_noise_error") as error:
         assert widget._run() is False
-    assert "no B1 maps" in error.call_args.args[2]
+    assert "no B1 maps" in error.call_args.args[0]
     assert widget.worker is None
     widget.close()
+
+
+def _click_open_receiver_noise(dialog):
+    (button,) = [b for b in dialog.buttons() if b.text() == "Open Receiver / Noise"]
+    button.click()
+
+
+def test_receiver_noise_error_links_to_the_receiver_tab(qt_application):
+    window = BlochSimulatorGUI()
+    window.set_workspace_mode("sequence")
+    widget = window.sequence_simulation_widget
+    widget.object_source.setCurrentIndex(1)
+    widget.program = _inputs()[1]
+    _fill_urea_calibration(widget.receiver_noise)
+    widget._capture_noise_calibration()
+    widget.field_strength_t.setValue(widget.field_strength_t.value() + 1)
+    widget._ensure_current_generated_sequence = lambda: True
+    shown = []
+
+    def exec_(dialog):
+        shown.append(dialog.text())
+        _click_open_receiver_noise(dialog)
+
+    with patch("blochsimulator.ui.sequence_simulation_widget.QMessageBox.exec_", exec_):
+        assert widget._run() is False
+    assert len(shown) == 1 and "Receiver / Noise tab" in shown[0]
+    assert widget.worker is None
+    assert window.tab_widget.currentIndex() == window.receiver_noise_tab_index
+    window.close()
+    qt_application.processEvents()

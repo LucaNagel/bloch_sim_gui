@@ -48,6 +48,7 @@ from ..dynamic_phantom import (
     kinetic_preroll_start_s,
     simulate_two_pool_kinetics,
 )
+from ..default_phantoms import DEFAULT_SPECTRAL_BANDWIDTH_PPM, DEFAULT_SPECTRAL_POINTS
 from ..paths import workspace_directory
 from ..metabolite_presets import MetabolitePreset, metabolite_presets
 from ..phantom_design import (
@@ -55,6 +56,7 @@ from ..phantom_design import (
     ShapeDefinition,
     SpectralPeakDefinition,
 )
+from ..sequence.snr_budget import format_amount
 from ..spectral_phantom import SpectralPhantom
 from ..units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm, thermal_polarization
 from .volume_viewer import PhantomInspectorWidget
@@ -108,6 +110,11 @@ def sequence_axis_grids(geometry) -> list:
             (float(geometry.fov_m[direction]), int(geometry.matrix[direction]))
         )
     return grids
+
+
+# Shape volume per product of the three extents.
+_SHAPE_VOLUME_FACTOR = {"ellipsoid": np.pi / 6.0, "box": 1.0, "cylinder": np.pi / 4.0}
+_AMOUNT_GRID_LIMIT = 96
 
 
 class SuffixNumberDelegate(QStyledItemDelegate):
@@ -562,8 +569,8 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
                 ),
                 nucleus=defaults.phantom_nucleus,
                 field_strength_t=defaults.field_strength_t,
-                spectral_bandwidth_ppm=10.0,
-                spectral_points=257,
+                spectral_bandwidth_ppm=DEFAULT_SPECTRAL_BANDWIDTH_PPM,
+                spectral_points=DEFAULT_SPECTRAL_POINTS,
                 shapes=[
                     ShapeDefinition(
                         name="Shape 1",
@@ -681,6 +688,15 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         sampling_row.addWidget(self.supersampling_factor)
         sampling_row.addStretch()
         geometry_layout.addLayout(sampling_row)
+        self.object_amount_info = QLabel()
+        self.object_amount_info.setObjectName("phantom_object_amount_info")
+        self.object_amount_info.setWordWrap(True)
+        self.object_amount_info.setToolTip(
+            "Volume covered by any shape and the observed nuclei it initially "
+            "holds: Σ concentration × shape volume × isotope enrichment. "
+            "Calibrated receiver noise and physical signal units use this amount."
+        )
+        geometry_layout.addWidget(self.object_amount_info)
         # Keep the compact controls together at the top of the group.  Without
         # an explicit trailing stretch, the configuration row's height is
         # distributed between the matrix and supersampling layouts.
@@ -725,13 +741,15 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             "Absolute ppm center of the sampled spectral window. This is independent "
             "of the sequence reference/carrier."
         )
-        self.spectral_bandwidth_ppm = self._number_spin(0.0001, 10000.0, 10.0, " ppm")
+        self.spectral_bandwidth_ppm = self._number_spin(
+            0.0001, 10000.0, DEFAULT_SPECTRAL_BANDWIDTH_PPM, " ppm"
+        )
         self.spectral_bandwidth_ppm.setToolTip(
             "Full width of the sampled spectral window around Spectrum centre."
         )
         self.spectral_points = QSpinBox()
         self.spectral_points.setRange(2, 65536)
-        self.spectral_points.setValue(257)
+        self.spectral_points.setValue(DEFAULT_SPECTRAL_POINTS)
         self.spectral_points.setToolTip(
             "Default number of samples in spectral previews"
         )
@@ -746,6 +764,15 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         )
         self.thermal_polarization_info = QLabel()
         self.thermal_polarization_info.setWordWrap(True)
+        self.isotope_enrichment = self._number_spin(0.01, 100.0, 100.0, " %")
+        self.isotope_enrichment.setDecimals(2)
+        self.isotope_enrichment.setObjectName("phantom_isotope_enrichment")
+        self.isotope_enrichment.setToolTip(
+            "Fraction of the molecules that carry the observed isotope at the "
+            "labelled position, e.g. 99 % for [1-13C]pyruvate or 1.1 % for "
+            "natural-abundance 13C. Concentrations count molecules; calibrated "
+            "receiver noise and physical signal units scale them by this value."
+        )
 
         spectral_fields.addWidget(QLabel("B0"), 0, 0)
         spectral_fields.addWidget(self.field_strength_t, 0, 1)
@@ -763,7 +790,9 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         spectral_fields.addWidget(QLabel("Temperature"), 3, 0)
         spectral_fields.addWidget(self.temperature_c, 3, 1)
         spectral_fields.addWidget(self.thermal_polarization_info, 3, 2, 1, 2)
-        spectral_fields.addWidget(self.spectral_resolution_info, 4, 0, 1, 4)
+        spectral_fields.addWidget(QLabel("Isotope enrichment"), 4, 0)
+        spectral_fields.addWidget(self.isotope_enrichment, 4, 1)
+        spectral_fields.addWidget(self.spectral_resolution_info, 4, 2, 1, 2)
         # Absorb spare vertical space below the resolution instead of between
         # the field rows, so the resolution reads as part of the settings.
         spectral_fields.setRowStretch(5, 1)
@@ -801,6 +830,10 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         )
         self.spectral_points.valueChanged.connect(self._spectral_settings_changed)
         self.temperature_c.valueChanged.connect(self._spectral_settings_changed)
+        self.isotope_enrichment.valueChanged.connect(self._update_object_amount_info)
+        self.nucleus.currentIndexChanged.connect(self._update_object_amount_info)
+        for spin in (*self.matrix_spins, *self.fov_spins):
+            spin.valueChanged.connect(self._update_object_amount_info)
         configuration_row.addWidget(spectral_group, 1)
         draw_layout.addLayout(configuration_row)
 
@@ -970,8 +1003,11 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         shape_layout.addWidget(geometry_group)
 
         peak_explanation = QLabel(
-            "<b>Relative concentration</b>: how much of the metabolite is present "
-            "(0 = none). <b>Initial polarization</b>: its starting polarization in "
+            "<b>Concentration</b>: how much of the metabolite is present in mM "
+            "of molecules (0 = none); the isotope enrichment above sets how many "
+            "carry the observed nucleus. Only calibrated receiver noise and "
+            "physical signal units use the absolute value; otherwise only the "
+            "ratios matter. <b>Initial polarization</b>: its starting polarization in "
             "multiples of thermal equilibrium (1 × thermal = not hyperpolarized, "
             "e.g. 10000 × thermal for hyperpolarized pyruvate). The initial signal "
             "is concentration × polarization; T1 relaxes the polarization back to "
@@ -984,7 +1020,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         self.peak_table.setHorizontalHeaderLabels(
             [
                 "Name",
-                "Relative\nconcentration",
+                "Concentration\n(mM)",
                 "Initial\npolarization",
                 "Peak\n(ppm)",
                 "T1\n(ms)",
@@ -995,8 +1031,9 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             (
                 "Metabolite name; the kinetic model matches pyruvate and lactate "
                 "by this name",
-                "Amount of the metabolite in this shape, relative to the other "
-                "peaks (spin density). 0 means none is present initially.",
+                "Concentration of the metabolite in this shape in mM of molecules "
+                "(spin density). Overlapping shapes add up; 0 means none is "
+                "present initially.",
                 "Starting longitudinal polarization in multiples of the thermal "
                 "equilibrium value. 1 × thermal is a conventional sample; "
                 "hyperpolarized substrates use e.g. 10000 × thermal.",
@@ -2146,6 +2183,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             widget.setValue(float(value) * 1000.0)
         self.field_strength_t.setValue(float(self.design.field_strength_t))
         self.temperature_c.setValue(self.design.temperature_k - 273.15)
+        self.isotope_enrichment.setValue(100.0 * self.design.isotope_enrichment)
         nucleus_index = self.nucleus.findData(self.design.nucleus)
         self.nucleus.setCurrentIndex(max(0, nucleus_index))
         self.spectral_reference_ppm.setValue(self.design.spectral_reference_ppm)
@@ -2367,11 +2405,46 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             item.size[index] * self.fov_spins[index].value() for index in range(2)
         )
         z_size_mm = item.size[2] * self.fov_spins[2].value()
+        volume_ml = (
+            size_mm[0] * size_mm[1] * z_size_mm * _SHAPE_VOLUME_FACTOR[item.kind] / 1e3
+        )
         self.xy_info.setText(
             f"centre=({center_mm[0]:.3g}, {center_mm[1]:.3g}) mm; "
             f"size=({size_mm[0]:.3g}, {size_mm[1]:.3g}) mm; "
             f"{'length' if item.kind == 'cylinder' else 'Z size'}="
-            f"{z_size_mm:.3g} mm"
+            f"{z_size_mm:.3g} mm; volume {volume_ml:.4g} ml"
+        )
+
+    def _update_object_amount_info(self, *_):
+        """Show the object volume and its observed nuclei."""
+        if self._updating or not hasattr(self, "object_amount_info"):
+            return
+        fov_m = tuple(widget.value() / 1000.0 for widget in self.fov_spins)
+        # A coarse voxel-centre grid keeps this cheap for large matrices; the
+        # shapes are smooth, so the volume stays within about a percent.
+        grid = tuple(
+            min(int(widget.value()), _AMOUNT_GRID_LIMIT) for widget in self.matrix_spins
+        )
+        probe = PhantomDesign(shape=grid, fov_m=fov_m, supersampling_enabled=False)
+        voxel_ml = float(np.prod(fov_m) / np.prod(grid)) * 1e6
+        covered = np.zeros(grid, dtype=bool)
+        molecules_mol = 0.0
+        try:
+            for item in self.design.shapes:
+                mask = probe.rasterize_mask(item)
+                covered |= mask
+                concentration_mm = sum(peak.amplitude for peak in item.peaks)
+                # mM × ml × 1e-6 = mol
+                molecules_mol += concentration_mm * mask.sum() * voxel_ml * 1e-6
+        except ValueError:
+            self.object_amount_info.setText("")
+            return
+        enrichment = self.isotope_enrichment.value() / 100.0
+        self.object_amount_info.setText(
+            f"Object volume ≈ {covered.sum() * voxel_ml:.4g} ml; initially "
+            f"{format_amount(molecules_mol * enrichment)} observed "
+            f"{self._effective_nucleus()} nuclei "
+            f"({enrichment * 100:.4g} % of {format_amount(molecules_mol)})."
         )
 
     def _update_canvas_axes(self, *_):
@@ -2386,6 +2459,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         self._update_shape_preview()
 
     def _update_shape_preview(self):
+        self._update_object_amount_info()
         if not hasattr(self, "shape_preview_3d"):
             return
         fov_mm = tuple(widget.value() for widget in self.fov_spins)
@@ -2546,6 +2620,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         except (AttributeError, ValueError):
             return
         self.design.shapes[row].peaks = peaks
+        self._update_object_amount_info()
         self._update_kinetics_preview()
         self._inspector_preview_dirty = True
         self._update_spectral_preview()
@@ -3371,6 +3446,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         self.design.fov_m = tuple(widget.value() / 1000.0 for widget in self.fov_spins)
         self.design.field_strength_t = self.field_strength_t.value()
         self.design.temperature_k = self.temperature_c.value() + 273.15
+        self.design.isotope_enrichment = self.isotope_enrichment.value() / 100.0
         self.design.nucleus = self.nucleus.currentData()
         self.design.spectral_reference_ppm = self.spectral_reference_ppm.value()
         self.design.spectral_window_center_ppm = self.spectral_window_center_ppm.value()

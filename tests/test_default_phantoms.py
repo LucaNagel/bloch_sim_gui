@@ -88,3 +88,14 @@ def test_default_grid_resolves_the_slice_thickness():
         slice_normal=(1.0, 0.0, 0.0),
     )
     assert thin == (256, 32, 32)
+
+
+def test_default_sphere_uses_5_ppm_and_257_points():
+    phantom = build_default_phantom(
+        "C13", field_strength_t=3.0, sequence_reference_ppm=171.0, matrix=8
+    )
+    design = phantom.metadata["phantom_design"]
+    assert design["spectral_bandwidth_ppm"] == pytest.approx(5.0)
+    assert design["spectral_points"] == 257
+    assert design["isotope_enrichment"] == 1.0
+    assert phantom.metadata["isotope_enrichment"] == 1.0

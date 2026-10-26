@@ -1472,6 +1472,10 @@ class SequenceProbeThread(QThread):
                 self.failed.emit(str(exc))
 
 
+class ReceiverNoiseSetupError(ValueError):
+    """The receiver noise settings cannot be used for the requested run."""
+
+
 class SequenceSimulationWidget(QWidget):
     """Load/build sequences, configure a 3D object, and inspect sparse output."""
 
@@ -1481,6 +1485,7 @@ class SequenceSimulationWidget(QWidget):
     spoiler_mode_changed = pyqtSignal(str)
     spoiling_analysis_requested = pyqtSignal()
     psf_analysis_requested = pyqtSignal()
+    receiver_noise_requested = pyqtSignal()
 
     # Generated-sequence forms (notably EPI, CSI, and FLASH) need enough
     # room for a label and its editor alongside the vertical scroll bar.
@@ -14767,10 +14772,80 @@ class SequenceSimulationWidget(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Receiver calibration", str(exc))
 
+    def _show_receiver_noise_error(self, message):
+        """Explain a receiver noise problem and offer the Receiver / Noise tab."""
+        dialog = QMessageBox(
+            QMessageBox.Warning,
+            "Receiver noise",
+            f"{message}.\n\nFix the setting in the Receiver / Noise tab, set the "
+            "calibration again, or switch the noise off there.",
+            QMessageBox.Cancel,
+            self,
+        )
+        open_tab = dialog.addButton("Open Receiver / Noise", QMessageBox.AcceptRole)
+        dialog.setDefaultButton(open_tab)
+        dialog.exec_()
+        if dialog.clickedButton() is open_tab:
+            self.receiver_noise_requested.emit()
+
+    def _checked_receiver_noise(self):
+        """Receiver noise settings for a run on the current phantom.
+
+        Raises ReceiverNoiseSetupError when they cannot be used.
+        """
+        try:
+            receiver_noise = self.receiver_noise.settings(
+                nucleus=self.nucleus.currentText(),
+                field_strength_t=self.field_strength_t.value(),
+            )
+            receive_maps = getattr(self.phantom, "rx_sensitivity_maps", None)
+            if (
+                receiver_noise.mode != "off"
+                and receive_maps is not None
+                and len(receive_maps) != 1
+            ):
+                raise ValueError(
+                    "Receiver noise currently supports one receive channel"
+                )
+            if receiver_noise.mode == "calibrated" and self.phantom.ndim != 3:
+                raise ValueError(
+                    "Calibrated receiver noise requires a 3D phantom with "
+                    "physical volume"
+                )
+            unit_b1 = all(
+                maps is None or np.all(np.asarray(maps) == 1)
+                for maps in (
+                    receive_maps,
+                    getattr(self.phantom, "tx_sensitivity_map", None),
+                )
+            )
+            if (
+                unit_b1
+                and receiver_noise.calibration is not None
+                and coil_dependent(receiver_noise.calibration)
+            ):
+                raise ValueError(
+                    "The receiver calibration models the B1 workspace coil, but "
+                    "the simulated object has no B1 maps. Apply the B1 fields to "
+                    "the phantom or clear 'Use B1 workspace coil fields' and set "
+                    "the calibration again"
+                )
+            if receiver_noise.mode == "relative":
+                # Fail before the run instead of after it.
+                ideal_fid_amplitude(self.phantom, self._signal_weighting_mode())
+        except ValueError as exc:
+            raise ReceiverNoiseSetupError(str(exc).rstrip(".")) from exc
+        return receiver_noise
+
     def _apply_noise_to_result(self):
         if self.result is None or (self.worker is not None and self.worker.isRunning()):
             return
-        settings = self.receiver_noise.settings()
+        try:
+            # The result's own scanner context is checked when noise is applied.
+            settings = self.receiver_noise.settings()
+        except ValueError as exc:
+            self._show_receiver_noise_error(str(exc).rstrip("."))
+            return
         if (
             settings.mode == "calibrated"
             and self.result.metadata.get("signal_weighting") != "voxel_volume"
@@ -14799,7 +14874,7 @@ class SequenceSimulationWidget(QWidget):
         try:
             result = apply_receiver_noise(self.result, settings)
         except Exception as exc:
-            QMessageBox.warning(self, "Receiver noise", str(exc))
+            self._show_receiver_noise_error(str(exc).rstrip("."))
             return
         animation = self.magnetization_animation
         self._finished(_SequenceSimulationPayload(result, animation), record_run=False)
@@ -14984,45 +15059,7 @@ class SequenceSimulationWidget(QWidget):
         try:
             self._build_phantom()
             checkpoints = self._checkpoint_seconds()
-            receiver_noise = self.receiver_noise.settings(
-                nucleus=self.nucleus.currentText(),
-                field_strength_t=self.field_strength_t.value(),
-            )
-            receive_maps = getattr(self.phantom, "rx_sensitivity_maps", None)
-            if (
-                receiver_noise.mode != "off"
-                and receive_maps is not None
-                and len(receive_maps) != 1
-            ):
-                raise ValueError(
-                    "Receiver noise currently supports one receive channel"
-                )
-            if receiver_noise.mode == "calibrated" and self.phantom.ndim != 3:
-                raise ValueError(
-                    "Calibrated receiver noise requires a 3D phantom with "
-                    "physical volume"
-                )
-            unit_b1 = all(
-                maps is None or np.all(np.asarray(maps) == 1)
-                for maps in (
-                    receive_maps,
-                    getattr(self.phantom, "tx_sensitivity_map", None),
-                )
-            )
-            if (
-                unit_b1
-                and receiver_noise.calibration is not None
-                and coil_dependent(receiver_noise.calibration)
-            ):
-                raise ValueError(
-                    "The receiver calibration models the B1 workspace coil, but "
-                    "the simulated object has no B1 maps. Apply the B1 fields to "
-                    "the phantom or clear 'Use B1 workspace coil fields' and set "
-                    "the calibration again"
-                )
-            if receiver_noise.mode == "relative":
-                # Fail before the run instead of after it.
-                ideal_fid_amplitude(self.phantom, self._signal_weighting_mode())
+            receiver_noise = self._checked_receiver_noise()
             (
                 animation_time_resolution_s,
                 animation_maximum_frames,
@@ -15031,6 +15068,8 @@ class SequenceSimulationWidget(QWidget):
         except Exception as exc:
             if str(exc) == self.NO_PHANTOM_MESSAGE:
                 self._show_no_phantom_dialog()
+            elif isinstance(exc, ReceiverNoiseSetupError):
+                self._show_receiver_noise_error(str(exc))
             else:
                 QMessageBox.critical(self, "Invalid simulation", str(exc))
             return False
