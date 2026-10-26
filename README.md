@@ -55,59 +55,27 @@ A mode that lets you load, generate and simulate [Pulseq
 
 *Features:*
 
-- **Internal FID** with configurable Block, Sinc, Gaussian, SLR, or imported
-  RF Designer pulses, flip angle, RF duration, phase and carrier offset.
-  Set the complex FID points per repetition, sampling bandwidth, ADC delay,
-  receiver offset, repetition count and TR. TR is measured from RF start to
-  RF start; **Shortest possible** fits the pulse, delay and complete FID.
-  Magnetization evolves continuously between repetitions, without resetting,
-  averaging or spoiling. The sequence ends after the final FID. Use
-  **Generate sequence** or **Live preview** to refresh the timeline.
-- **RF + Slice Selection** for full 3D excitation volumes immediately after
-  a pulse and its slice gradient, with optional rephasing and direct
-  $|M_{xy}|$, $M_z$, and phase inspection. See
-  [RF excitation volumes](docs/rf_slice_selection.md).
-- **Interactive generation of Pulseq** bipolar or flyback EPI, centre-out 2D
-  spiral, 2D EPSI/MGE, 2D CSI,
-  spoiled 2D FLASH,
-  Cartesian 3D bSSFP, alternating-frequency [spectrally selective 3D bSSFP](https://doi.org/10.1002/mrm.29676), and
-  Cartesian or [spiral-phyllotaxis radial 3D multi-echo bSSFP sequences](https://doi.org/10.1002/mrm.30614), with
-  export to `.seq` files and reproducing Jupyter notebooks.
-- **Multi-slice inversion recovery** (global or slice-selective inversion with
-  EPI, gradient-echo or TurboFLASH readout) with a voxelwise T1 fit,
-  single-voxel **PRESS** and slice-selective FID spectroscopy, and a
-  **compressed sensing** module (variable-density and k-t masks,
-  Chambolle-Pock reconstruction). See the
-  [user guide](docs/USER_GUIDE.md) and the
-  [compressed sensing concept](docs/compressed_sensing_concept.md).
-- **Sequence presets** that store all sequence settings under a name (with an
-  optional startup preset), and a **PSF Analysis** tab that simulates the
-  point-spread function and slice profile of the current sequence, with FWHM,
-  broadening, side-lobe and slice cross-talk metrics.
-- **Spectral-spatial RF design** with explicit spatial and frequency target
-  ranges, coupled RF/slice-gradient waveforms, configurable two-dimensional
-  Bloch validation, spatial and spectral profile cuts, and phantom-aware
-  metabolite frequencies. A stable-ID pulse library and ordered cyclic
-  schedule support separate metabolite pulses, per-entry flip-angle or RF
-  amplitude scaling, repetition, reordering, and a coherent cumulative
-  preview. FLASH applies one schedule step per complete image frame by default
-  and preserves schedule definitions and ADC labels through Pulseq export and
-  import. Pulses, schedule, and legacy-single-pulse migration are stored with
-  project files.
-  The native Python flyback method is based on the Larson/Kerr design approach;
-  supported modes, validation scope, differences from the MATLAB reference,
-  citations, and license provenance are documented in
-  [Spectral-spatial RF pulse design](docs/SPECTRAL_SPATIAL_RF.md).
-- Spin Probe mode enables the investigation of the behaviour of spectral/spatial spin distributions during sequences.
+- **Dynamically generate sequences**:
+  - FID
+  - FLASH
+  - EPI (cartesian, flyback, spiral)
+  - bSSFP
+  - [spectrally-selective](https://doi.org/10.1002/mrm.29676) 3D bSSFP
+  - ([radial](https://doi.org/10.1002/mrm.30614)) 3D multi-echo bSSFP
+  - Inversion Recovery
+  - EPSI/MGE
+  - PRESS
+  - Slice-spectroscopy
+  - RF + Slice selection
+
+- **[Spectral-spatial RF pulse design](docs/SPECTRAL_SPATIAL_RF.md)**
+- **Spin Probe** mode enables the investigation of the behaviour of spectral/spatial spin distributions during sequences.
 - Spectral and dynamic **phantom design** with spatial peak distributions,
   pyruvate-to-lactate kinetics, spatial B0 inhomogeneity maps, and optional
   time-dependent B0 offsets.
 - **B1 Transmit Receive design**, letting you choose between uniform, 3D birdcage, 3D surface coil B1 fields.
 - A dimension-aware **Reconstruction Explorer** for interactive 2D/3D k-space
-  and image views, echo/repetition/slice selection, CSI voxel spectra, receive-coil
-  combination, simulated pool comparison, and known-frequency linear IDEAL
-  estimates. It shows the simulated phantom next to the reconstruction, with
-  region outlines and the composition of the selected voxel.
+  and image views, echo/repetition/slice selection,
 - A **mouse perfusion phantom** for hyperpolarized ¹³C and for ¹H, where
   tissue water has per-tissue PD, T1 and T2 and a gadolinium contrast agent
   (DCE, extended Tofts) changes R1 and R2.
@@ -127,42 +95,13 @@ The time-resolved bevahiour of spins during and after RF Pulse can be visualized
 
 **Sequence Mode**
 
-- Mouse Phantom Designer polarization inputs use absolute percent with the
-  thermal multiple alongside them, based on nucleus, B0 and temperature. Mouse
-  injections use mM × µl and show the resulting µmol dose and fully polarized
-  equivalent. New injections start at 80 mM × 250 µl (20 µmol) and
-  10000 × thermal, 5.8 % at 7 T and 37 °C; older files retain their original
-  dose and relative-polarization values.
-  The spectral Phantom Designer keeps × thermal and shows the thermal
-  polarization at its sample temperature.
-- **Receiver / Noise** adds reproducible complex noise from a relative SNR
-  (single-scan SNR of the ideal 90° FID of the whole object, including any
-  delivered bolus) or a calibration from a measured phantom FID: amplitude,
-  noise std, averages, bandwidth, flip angle, concentration (mM), volume (ml),
-  enrichment and temperature. Noise follows each ADC event's bandwidth, so a
-  thermal phantom scan predicts e.g. hyperpolarized in-vivo SNR. An optional
-  reference scan model corrects the calibration for T1 saturation, T2* decay
-  and the B1 workspace coil at the phantom position. **Load FID…** and
-  **Load noise scan…** read the ParaVision raw data or complex arrays of the
-  phantom FID and 0° noise scan directly. Its dedicated
-  tab between **Phantom + B1** and **Simulations** shows an SNR budget from
-  the receiver setting through the whole-object FID and each readout
-  bandwidth to the image voxels of the current object and last run. Clean ADC
-  data and noise settings are preserved in projects and result exports.
-  **Settings → Interface → Signal units** switches the current Sequence
-  plots between physical amounts (mol with automatic SI prefixes, calibrated
-  runs) and SNR units (noise σ = 1 per complex quadrature), without rerunning
-  the simulation. Cartesian/CSI FFTs preserve that noise normalization;
-  spiral images use a labelled estimate from their noise realization. Runs
-  without the required calibration or noise metadata show simulation units.
-  See [receiver calibration](docs/sequence_simulation_architecture.md#receiver-noise-and-phantom-calibration).
-
 Loaded and generated sequences can be inspected in a sequence viewer. A 3D phantom design viewer in addition to a 3D B1 design viewer are provided.
 
 - Experimental **export of simulated acquisitions as Bruker raw datasets**,
   including `fid` and/or `rawdata.job0` plus the associated parameter files.
 - **Automatically generated Jupyter notebooks** using the parameters selected in
   the GUI.
+- Export blochsimulator projects to later continue working on them.
 
 
 ## Get started
