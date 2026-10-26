@@ -67,6 +67,7 @@ from ..default_phantoms import (
 )
 from ..phantom import Phantom
 from ..phantom_loop import phantom_loop_parameters, phantom_with_parameter
+from ..project_notebook import write_project_loader_notebook
 from ..notebook_exporter import export_pulseq_generation_notebook
 from ..paths import workspace_directory
 from ..project_naming import ProjectExportNamer, project_timestamp
@@ -5115,12 +5116,18 @@ class SequenceSimulationWidget(QWidget):
         self.parameter_loop_category.setObjectName("sequence_parameter_loop_category")
         self.parameter_loop_category.addItem("Sequence parameters", "sequence")
         self.parameter_loop_category.addItem("Phantom parameters", "phantom")
+        self.parameter_loop_category.addItem("Spin probe parameters", "probe")
         self.parameter_loop_category.setToolTip(
             "Sequence parameters change the generated sequence or the simulation "
             "settings; the phantom stays fixed.\n"
             "Phantom parameters change the simulated object; the sequence stays "
             "fixed. Designed and mouse phantoms are rebuilt from their designer "
-            "settings for every value (e.g. circulation delay, kPL, T1)."
+            "settings for every value (e.g. circulation delay, kPL, T1); other "
+            "phantoms vary their T1/T2 values.\n"
+            "Spin probe parameters change the spin probe configuration (T1, T2, "
+            "initial Mz, position, frequencies); the sequence stays fixed.\n"
+            "With Spin probe selected as the object, every loop value runs a "
+            "spin probe instead of a sequence simulation."
         )
         self.parameter_loop_category.currentIndexChanged.connect(
             self._refresh_parameter_loop_parameters
@@ -5132,6 +5139,16 @@ class SequenceSimulationWidget(QWidget):
             self._parameter_loop_parameter_changed
         )
         parameter_loop_form.addRow("Parameter", self.parameter_loop_parameter)
+        self.parameter_loop_probe_mode = QComboBox()
+        self.parameter_loop_probe_mode.setObjectName(
+            "sequence_parameter_loop_probe_mode"
+        )
+        self.parameter_loop_probe_mode.addItem("Spectral probe", "spectral")
+        self.parameter_loop_probe_mode.addItem("Geometry probe", "geometry")
+        self.parameter_loop_probe_mode.setToolTip(
+            "Probe run for every loop value while Spin probe is the simulated object"
+        )
+        parameter_loop_form.addRow("Probe run", self.parameter_loop_probe_mode)
         self.parameter_loop_parameter_info = QLabel()
         self.parameter_loop_parameter_info.setObjectName(
             "sequence_parameter_loop_parameter_info"
@@ -5268,6 +5285,17 @@ class SequenceSimulationWidget(QWidget):
         )
         self._update_parameter_loop_naming_preview()
         parameter_loop_form.addRow(self.parameter_loop_export_naming)
+        self.parameter_loop_write_notebook = QCheckBox(
+            "Write example notebook (load_simulations.ipynb)"
+        )
+        self.parameter_loop_write_notebook.setObjectName(
+            "sequence_parameter_loop_write_notebook"
+        )
+        self.parameter_loop_write_notebook.setToolTip(
+            "Save a Jupyter notebook next to the projects that shows how to load "
+            "them and access the sequence, phantom, results and loop parameters."
+        )
+        parameter_loop_form.addRow(self.parameter_loop_write_notebook)
         self.parameter_loop_output_directory.textChanged.connect(
             self._update_parameter_loop_naming_preview
         )
@@ -7325,19 +7353,37 @@ class SequenceSimulationWidget(QWidget):
             for item in authored
         ]
 
+    def _probe_loop_parameters(self):
+        """Discover the numeric spin-probe settings while a probe is selected."""
+        if self.object_source.currentIndex() != 2:
+            return []
+        return self._form_loop_parameters(self.probe_controls, category="probe")
+
     def _parameter_loop_parameters(self):
-        if self.parameter_loop_category.currentData() == "phantom":
+        category = self.parameter_loop_category.currentData()
+        if category == "phantom":
             return self._phantom_loop_parameters()
+        if category == "probe":
+            return self._probe_loop_parameters()
         return self._sequence_loop_parameters()
 
     def _update_parameter_loop_parameter_info(self, has_parameters):
-        phantom = self.parameter_loop_category.currentData() == "phantom"
+        category = self.parameter_loop_category.currentData()
         source_index = self.object_source.currentIndex()
-        if not phantom:
+        probe_runs = " Every value runs a spin probe." if source_index == 2 else ""
+        if category == "sequence":
             text = (
                 "Controls of the active sequence form plus the RF/flip-angle "
                 "scale, sequence reference and simulation time resolution. "
-                "The phantom stays fixed."
+                "The phantom stays fixed." + probe_runs
+            )
+        elif category == "probe":
+            text = (
+                "Settings of the spin probe configuration. The sequence stays "
+                "fixed; every value runs a spin probe."
+                if source_index == 2
+                else "Select Spin probe as the simulated object to loop over "
+                "spin probe settings."
             )
         elif source_index == 2:
             text = (
@@ -7354,11 +7400,16 @@ class SequenceSimulationWidget(QWidget):
             )
         else:
             text = (
-                "The selected phantom has no designer settings to vary. Create it "
-                "with the phantom designer or the mouse designer, or use the "
-                "built-in quick object."
+                "The selected phantom has no designer settings or relaxation "
+                "times to vary. Create it with the phantom designer or the mouse "
+                "designer, or use the built-in quick object."
             )
         self.parameter_loop_parameter_info.setText(text)
+        self.parameter_loop_probe_mode.setVisible(source_index == 2)
+        form = self.parameter_loop_group.layout()
+        label = form.labelForField(self.parameter_loop_probe_mode)
+        if label is not None:
+            label.setVisible(source_index == 2)
         self.parameter_loop_parameter.setToolTip(text)
 
     def _refresh_parameter_loop_parameters(self):
@@ -7510,6 +7561,7 @@ class SequenceSimulationWidget(QWidget):
         self.parameter_loop_output_directory.setEnabled(disk and not locked)
         self.parameter_loop_output_browse.setEnabled(disk and not locked)
         self.parameter_loop_export_naming.setEnabled(disk and not locked)
+        self.parameter_loop_write_notebook.setEnabled(disk and not locked)
         self.parameter_loop_export_naming._update_controls()
         self.parameter_loop_storage_help.setText(
             "Save each run as a .blochproj; keep only the current result in RAM."
@@ -7546,8 +7598,10 @@ class SequenceSimulationWidget(QWidget):
             self.object_source,
             self.parameter_loop_category,
             self.parameter_loop_parameter,
+            self.parameter_loop_probe_mode,
             self.parameter_loop_input_mode,
             self.parameter_loop_output_mode,
+            self.probe_controls,
         ):
             control.setEnabled(not locked)
         self._update_parameter_loop_input_controls()
@@ -7565,14 +7619,6 @@ class SequenceSimulationWidget(QWidget):
         parameter = self.parameter_loop_parameter.currentData()
         if not isinstance(parameter, _SequenceLoopParameter):
             QMessageBox.warning(self, "Parameter loop", "Select a loop parameter.")
-            return
-        if self.object_source.currentIndex() == 2:
-            QMessageBox.information(
-                self,
-                "Spin probe mode",
-                "Parameter loops run sequence simulations. Select a phantom or "
-                "the built-in quick object first.",
-            )
             return
         try:
             values = self._parameter_loop_values(parameter)
@@ -7626,15 +7672,26 @@ class SequenceSimulationWidget(QWidget):
                 return
 
         manual = self.parameter_loop_input_mode.currentData() == "manual"
+        loop_id = uuid4().hex[:8]
         self._parameter_loop_state = {
             "parameter": parameter,
             "base_phantom": base_phantom,
             "values": values,
             "output_directory": output_directory,
             "file_namer": file_namer,
+            "loop_id": loop_id,
+            "write_notebook": (
+                output_directory is not None
+                and self.parameter_loop_write_notebook.isChecked()
+            ),
+            "probe_mode": (
+                self.parameter_loop_probe_mode.currentData()
+                if self.object_source.currentIndex() == 2
+                else None
+            ),
             "output_prefix": (
                 f"parameter_loop_{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
-                f"{uuid4().hex[:8]}"
+                f"{loop_id}"
             ),
             "saved": 0,
             "input_mode": self.parameter_loop_input_mode.currentData(),
@@ -7709,10 +7766,31 @@ class SequenceSimulationWidget(QWidget):
             f"Preparing {parameter.label} = "
             f"{self._format_parameter_loop_value(parameter, actual_value)}"
         )
-        if not self._run():
+        started = (
+            self._run_parameter_loop_probe()
+            if state["probe_mode"] is not None
+            else self._run()
+        )
+        if not started:
             self._finish_parameter_loop(
                 error="The next loop simulation could not start."
             )
+
+    def _run_parameter_loop_probe(self):
+        """Start the configured spin probe for the current loop value."""
+        state = self._parameter_loop_state
+        if self.probe_worker is not None:
+            # The previous probe emits its result just before its thread ends.
+            self.probe_worker.wait()
+        if state["probe_mode"] == "geometry":
+            started = self._run_geometry_probe()
+        else:
+            started = self._run_spectral_probe()
+        parameter = state["parameter"]
+        if started and parameter.widget is not None:
+            # Sequence generation may round the requested value.
+            state["current_value"] = float(parameter.widget.value())
+        return started
 
     @staticmethod
     def _format_parameter_loop_value(parameter, value):
@@ -7731,6 +7809,7 @@ class SequenceSimulationWidget(QWidget):
             return None
         parameter = state["parameter"]
         metadata = {
+            "loop_id": state["loop_id"],
             "category": parameter.category,
             "parameter_key": parameter.key,
             "parameter_label": parameter.label,
@@ -7839,6 +7918,15 @@ class SequenceSimulationWidget(QWidget):
             return
         completed = int(state["completed"])
         total = int(len(state["values"]))
+        notebook_note = ""
+        if state["write_notebook"] and state["saved"]:
+            try:
+                notebook = write_project_loader_notebook(
+                    state["output_directory"], loop_id=state["loop_id"]
+                )
+                notebook_note = f"; notebook {notebook.name} written"
+            except OSError as exc:
+                notebook_note = f"; notebook could not be written: {exc}"
         self._parameter_loop_state = None
         self._parameter_loop_phantom = None
         self._set_parameter_loop_controls_locked(False)
@@ -7848,10 +7936,12 @@ class SequenceSimulationWidget(QWidget):
         if error:
             self.status.setText(
                 f"Parameter loop stopped after {completed}/{total}: {error}"
+                f"{notebook_note}"
             )
         elif cancelled:
             self.status.setText(
                 f"Parameter loop cancelled after {completed}/{total} runs"
+                f"{notebook_note}"
             )
         else:
             self.progress.setValue(self.progress.maximum())
@@ -7860,6 +7950,7 @@ class SequenceSimulationWidget(QWidget):
                 self.status.setText(
                     f"Parameter loop complete — {state['saved']} projects saved to "
                     f"{state['output_directory']}; only the current result kept in RAM"
+                    f"{notebook_note}"
                 )
             else:
                 self.status.setText(
@@ -7896,6 +7987,10 @@ class SequenceSimulationWidget(QWidget):
         self.open_phantom_button.setVisible(phantom_selected)
         self.probe_group.setVisible(probe_selected)
         self._update_run_action_availability()
+        loop_category = getattr(self, "parameter_loop_category", None)
+        if loop_category is not None and loop_category.currentData() != "phantom":
+            # Probe settings and the probe-run choice follow the object source.
+            self._refresh_parameter_loop_parameters()
         self.refresh_object_summary()
         self._update_all_ernst_controls()
         self._update_frequency_reference_info()
@@ -14203,19 +14298,20 @@ class SequenceSimulationWidget(QWidget):
 
     def _run_spectral_probe(self):
         if not self._can_start_probe():
-            return
+            return False
         try:
             display_axis, hz_axis = self._probe_frequency_axis_hz()
             checkpoints = self._probe_checkpoints_s()
             positions = self._probe_position_m()
         except Exception as exc:
             QMessageBox.critical(self, "Invalid spin probe", str(exc))
-            return
+            return False
         self._start_probe(positions, hz_axis, display_axis, checkpoints, "spectral")
+        return True
 
     def _run_geometry_probe(self):
         if not self._can_start_probe():
-            return
+            return False
         try:
             if self.object_source.currentIndex() == 2:
                 self.phantom = self._selected_designed_phantom()
@@ -14229,8 +14325,9 @@ class SequenceSimulationWidget(QWidget):
             positions = self._probe_geometry_positions_m()
         except Exception as exc:
             QMessageBox.critical(self, "Invalid geometry probe", str(exc))
-            return
+            return False
         self._start_probe(positions, hz_axis, display_axis, checkpoints, "geometry")
+        return True
 
     def _start_probe(self, positions, hz_axis, display_axis, checkpoints, label):
         self._stop_probe_playback()
@@ -14305,7 +14402,12 @@ class SequenceSimulationWidget(QWidget):
         self.run_geometry_probe_button.setEnabled(probe_selected)
         self.cancel_probe_button.setEnabled(False)
         self.probe_status.setText(message)
-        if message != "Probe simulation cancelled":
+        cancelled = message == "Probe simulation cancelled"
+        if self._parameter_loop_state is not None:
+            self._finish_parameter_loop(
+                cancelled=cancelled, error="" if cancelled else str(message)
+            )
+        if not cancelled:
             self._show_simulation_failure("Spin probe failed", message)
 
     def _probe_finished(self, result, frequency_axis, frequency_unit, mode=None):
@@ -14327,6 +14429,9 @@ class SequenceSimulationWidget(QWidget):
         )
         if mode is not None:
             result.metadata["ui_probe_mode"] = str(mode)
+        loop_metadata = self._parameter_loop_metadata()
+        if loop_metadata is not None:
+            result.metadata["parameter_loop"] = loop_metadata
         probe_selected = self.object_source.currentIndex() == 2
         self.run_probe_button.setEnabled(probe_selected)
         self.run_geometry_probe_button.setEnabled(probe_selected)
@@ -14334,7 +14439,17 @@ class SequenceSimulationWidget(QWidget):
         self.probe_status.setText("Spin probe complete")
         self._update_probe_stale_warning()
         self._show_probe_result()
-        self._register_session_probe_run(result, mode=mode)
+        save_to_disk = (
+            loop_metadata is not None
+            and self._parameter_loop_state["output_directory"] is not None
+        )
+        run = self._register_session_probe_run(
+            result, mode=mode, retain=not save_to_disk
+        )
+        if save_to_disk and run is not None:
+            self._save_parameter_loop_run(run)
+        elif loop_metadata is not None:
+            self._parameter_loop_iteration_finished()
 
     def _show_probe_result(self):
         result = self.probe_result
@@ -15836,6 +15951,18 @@ class SequenceSimulationWidget(QWidget):
                 animation_message=animation_message,
             ),
         )
+        self._apply_parameter_loop_display_name(run, metadata)
+        self._project_export_contexts["sequence"] = (run.state, result)
+        if retain:
+            self._retain_session_simulation_run(run)
+        else:
+            capture = getattr(self.window(), "_capture_sequence_simulation_run", None)
+            if callable(capture):
+                capture(run)
+        return run
+
+    def _apply_parameter_loop_display_name(self, run, metadata):
+        """Name a loop run after its index and parameter value."""
         loop_metadata = metadata.get("parameter_loop")
         if isinstance(loop_metadata, dict):
             parameter = _SequenceLoopParameter(
@@ -15853,14 +15980,6 @@ class SequenceSimulationWidget(QWidget):
                 parameter, loop_metadata.get("value", 0.0)
             )
             run.display_name = f"Loop {index}/{count} · {parameter.label} = {value}"
-        self._project_export_contexts["sequence"] = (run.state, result)
-        if retain:
-            self._retain_session_simulation_run(run)
-        else:
-            capture = getattr(self.window(), "_capture_sequence_simulation_run", None)
-            if callable(capture):
-                capture(run)
-        return run
 
     def _mark_reconstruction_ready(self, ready):
         """Colour the Reconstruction Explorer tab green while it shows a new result."""
@@ -15961,6 +16080,7 @@ class SequenceSimulationWidget(QWidget):
             ),
             run_type="spin_probe",
         )
+        self._apply_parameter_loop_display_name(run, metadata)
         self._project_export_contexts["spin_probe"] = (run.state, result)
         if retain:
             register = getattr(self.window(), "register_sequence_simulation_run", None)

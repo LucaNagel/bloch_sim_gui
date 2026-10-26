@@ -4,10 +4,16 @@ Phantoms built by the mouse perfusion designer or the spectral phantom
 designer keep their authoring configuration in ``phantom.metadata``. A loop
 changes one scalar of that configuration and rebuilds the phantom, so derived
 maps (perfusion curves, kinetics, relaxation) stay consistent with the value.
+
+Phantoms without such a configuration (loaded phantom files, 1H tissue water
+pools of the mouse) still expose their relaxation times. These are changed on
+a copy of the built phantom: per-pool T1/T2 values are replaced, and T1/T2
+maps of conventional phantoms are scaled so their median takes the value.
 """
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, fields, replace
 from typing import Dict, List, Tuple
 
@@ -16,6 +22,7 @@ import numpy as np
 
 MOUSE_PREFIX = "mouse."
 DESIGN_PREFIX = "design."
+RELAXATION_PREFIX = "relax."
 
 
 @dataclass(frozen=True)
@@ -103,7 +110,8 @@ _SHAPE_FIELDS: Dict[str, Tuple[str, str, float, float, int]] = {
 _PEAK_FIELDS: Dict[str, Tuple[str, str, float, float, int]] = {
     "amplitude": ("amplitude", "", 0, 1e9, 4),
     "frequency_ppm": ("frequency", "ppm", -1e4, 1e4, 4),
-    "t2_star_s": ("T2*", "s", 0, 1e4, 5),
+    # Designed peaks use one value for T2 and T2*.
+    "t2_star_s": ("T2/T2*", "s", 0, 1e4, 5),
     "t1_s": ("T1", "s", 0, 1e4, 4),
     "initial_polarization": ("initial polarization", "", 0, 1e9, 4),
 }
@@ -115,10 +123,18 @@ def phantom_loop_parameters(phantom) -> List[PhantomLoopParameter]:
         return []
     metadata = getattr(phantom, "metadata", None) or {}
     if isinstance(metadata.get("mouse_perfusion_config"), dict):
-        return _mouse_parameters(_mouse_config(phantom))
+        config = _mouse_config(phantom)
+        parameters = _mouse_parameters(config)
+        # Tissue water relaxation is fixed by the anatomy table, not the
+        # configuration, so it is varied on the built pools instead.
+        from .mouse_phantom import uses_tissue_water
+
+        if uses_tissue_water(config.nucleus):
+            parameters.extend(_relaxation_parameters(phantom))
+        return parameters
     if metadata.get("phantom_design") is not None:
         return _design_parameters(_design(phantom))
-    return []
+    return _relaxation_parameters(phantom)
 
 
 def phantom_with_parameter(phantom, key: str, value: float):
@@ -134,6 +150,9 @@ def phantom_with_parameter(phantom, key: str, value: float):
         design = _design(phantom)
         _set_design_value(design, key[len(DESIGN_PREFIX) :], float(value))
         rebuilt = design.build()
+    elif key.startswith(RELAXATION_PREFIX):
+        # The copy already carries the sequence reference in its metadata.
+        return _with_relaxation(phantom, key[len(RELAXATION_PREFIX) :], float(value))
     else:
         raise KeyError(f"unknown phantom loop parameter {key!r}")
     # The Phantom tab stores the chosen sequence reference with the phantom.
@@ -247,3 +266,97 @@ def _set_design_value(design, path: str, value: float) -> None:
     if not np.isfinite(value):
         raise ValueError(f"{path} must be finite")
     setattr(target, name, float(value))
+
+
+_RELAXATION_FIELDS: Dict[str, Tuple[str, int]] = {"t1": ("T1", 4), "t2": ("T2", 5)}
+
+
+def _pool_list(phantom):
+    """Return the relaxation-carrying pools and the attribute that stores them."""
+    for attribute in ("pools", "species"):
+        pools = getattr(phantom, attribute, None)
+        if isinstance(pools, (list, tuple)) and pools:
+            return attribute, list(pools)
+    return None, []
+
+
+def _map_reference(values, mask=None) -> float:
+    values = np.asarray(values, dtype=float)
+    if mask is not None and np.shape(mask) == values.shape:
+        values = values[np.asarray(mask, dtype=bool)]
+    values = values[np.isfinite(values) & (values > 0)]
+    return float(np.median(values)) if values.size else 0.0
+
+
+def _relaxation_parameters(phantom) -> List[PhantomLoopParameter]:
+    attribute, pools = _pool_list(phantom)
+    parameters = []
+    if attribute is not None:
+        for index, pool in enumerate(pools):
+            for name, (label, decimals) in _RELAXATION_FIELDS.items():
+                parameters.append(
+                    PhantomLoopParameter(
+                        key=f"{RELAXATION_PREFIX}pool[{index}].{name}",
+                        label=f"{pool.name}: {label}",
+                        unit="s",
+                        value=float(getattr(pool, name)),
+                        minimum=1e-6,
+                        maximum=1e4,
+                        decimals=decimals,
+                    )
+                )
+        return parameters
+    for name, (label, decimals) in _RELAXATION_FIELDS.items():
+        values = getattr(phantom, f"{name}_map", None)
+        if values is None:
+            continue
+        reference = _map_reference(values, getattr(phantom, "mask", None))
+        if reference <= 0:
+            continue
+        parameters.append(
+            PhantomLoopParameter(
+                key=f"{RELAXATION_PREFIX}{name}_map",
+                label=f"{label} (scales the map; median)",
+                unit="s",
+                value=reference,
+                minimum=1e-6,
+                maximum=1e4,
+                decimals=decimals,
+            )
+        )
+    return parameters
+
+
+def _with_relaxation(phantom, path: str, value: float):
+    """Return a copy of ``phantom`` with one relaxation time changed."""
+    if not np.isfinite(value) or value <= 0:
+        raise ValueError(f"{path} must be positive and finite")
+    attribute, pools = _pool_list(phantom)
+    if path.startswith("pool[") and attribute is not None:
+        index, _, name = path[len("pool[") :].partition("].")
+        if name not in _RELAXATION_FIELDS or not index.isdigit():
+            raise KeyError(f"unknown phantom relaxation parameter {path!r}")
+        index = int(index)
+        if index >= len(pools):
+            raise KeyError(f"unknown phantom relaxation parameter {path!r}")
+        changes = {name: value}
+        t2_star = getattr(pools[index], "t2_star", None)
+        if name == "t2" and t2_star is not None and t2_star > value:
+            # T2* cannot exceed T2.
+            changes["t2_star"] = value
+        pools[index] = replace(pools[index], **changes)
+        pools = tuple(pools) if attribute == "pools" else pools
+        updated = replace(phantom, **{attribute: pools})
+    elif path in {f"{name}_map" for name in _RELAXATION_FIELDS} and attribute is None:
+        values = np.asarray(getattr(phantom, path), dtype=float)
+        reference = _map_reference(values, getattr(phantom, "mask", None))
+        if reference <= 0:
+            raise KeyError(f"phantom has no positive {path}")
+        updated = copy.copy(phantom)
+        setattr(updated, path, values * (value / reference))
+    else:
+        raise KeyError(f"unknown phantom relaxation parameter {path!r}")
+    # Runs store their loop value in the phantom metadata, so the copy keeps
+    # its own dictionary.
+    updated.metadata = copy.deepcopy(phantom.metadata)
+    return updated
