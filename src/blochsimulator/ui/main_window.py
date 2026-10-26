@@ -74,6 +74,7 @@ from ..slice_explorer import SliceSelectionExplorer
 from ..paths import get_app_data_dir
 from ..project_io import load_project, save_project
 from ..project_naming import ProjectExportNamer, project_timestamp
+from ..project_notebook import write_project_loader_notebook
 from ..units import NUCLEUS_GAMMA_HZ_PER_T, gradient_t_per_m_to_g_per_cm
 from ..sequence.signal_units import normalize_signal_unit
 from ..phantom_polarization import rebase_phantom_polarization
@@ -5845,11 +5846,13 @@ class BlochSimulatorGUI(QMainWindow):
             examples,
             self,
             naming=getattr(self, "_simulation_export_naming", None),
+            write_notebook=getattr(self, "_simulation_export_notebook", False),
         )
         if dialog.exec_() != dialog.Accepted:
             return None
         directory, naming = dialog.export_options()
         self._simulation_export_naming = naming
+        self._simulation_export_notebook = dialog.write_notebook.isChecked()
         return directory, naming
 
     def _export_session_simulation_runs(self, runs):
@@ -5858,6 +5861,7 @@ class BlochSimulatorGUI(QMainWindow):
             return
         export_directory = self._get_export_directory()
         paths = []
+        write_notebook = False
         if len(runs) == 1:
             default_path = export_directory / (
                 f"{self._session_run_export_stem(runs[0])}.blochproj"
@@ -5878,6 +5882,7 @@ class BlochSimulatorGUI(QMainWindow):
             if options is None:
                 return
             directory, naming = options
+            write_notebook = getattr(self, "_simulation_export_notebook", False)
             try:
                 directory = Path(directory).resolve()
                 directory.mkdir(parents=True, exist_ok=True)
@@ -5915,6 +5920,12 @@ class BlochSimulatorGUI(QMainWindow):
             if len(exported) == 1
             else f"{len(exported)} simulation projects saved to {exported[0].parent}"
         )
+        if write_notebook:
+            try:
+                notebook = write_project_loader_notebook(exported[0].parent)
+                message += f"; example notebook {notebook.name} written"
+            except OSError as exc:
+                message += f"; example notebook could not be written: {exc}"
         self.statusBar().showMessage(message, 7000)
 
     def _set_main_tab_visible(self, index: int, visible: bool):

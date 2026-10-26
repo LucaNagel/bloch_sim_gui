@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -114,7 +115,9 @@ class ProjectExportNamingWidget(QWidget):
 class SimulationProjectExportDialog(QDialog):
     """Choose a batch destination and filename policy in one dialog."""
 
-    def __init__(self, directory, examples, parent=None, *, naming=None):
+    def __init__(
+        self, directory, examples, parent=None, *, naming=None, write_notebook=False
+    ):
         super().__init__(parent)
         self.setWindowTitle("Export simulations as projects")
         self.resize(620, 360)
@@ -136,6 +139,15 @@ class SimulationProjectExportDialog(QDialog):
         layout.addLayout(folder_layout)
         self.naming = ProjectExportNamingWidget(self, naming=naming)
         layout.addWidget(self.naming)
+        self.write_notebook = QCheckBox(
+            "Write example notebook (load_simulations.ipynb)"
+        )
+        self.write_notebook.setToolTip(
+            "Save a Jupyter notebook next to the projects that shows how to load "
+            "them and access the sequence, phantom, results and loop parameters."
+        )
+        self.write_notebook.setChecked(bool(write_notebook))
+        layout.addWidget(self.write_notebook)
         self.directory.textChanged.connect(self._update_preview)
         self.buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         self.buttons.accepted.connect(self.accept)

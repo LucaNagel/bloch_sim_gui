@@ -153,6 +153,8 @@ def test_batch_export_uses_actual_naming_dialog_and_preserves_each_result(
         dialog.naming.start_number.setValue(11)
         dialog.naming.digits.setValue(2)
         assert "simulation_12.blochproj" in dialog.naming.preview.text()
+        assert not dialog.write_notebook.isChecked()
+        dialog.write_notebook.setChecked(True)
         dialog.buttons.button(QDialogButtonBox.Save).click()
 
     watchdog = QTimer()
@@ -173,6 +175,7 @@ def test_batch_export_uses_actual_naming_dialog_and_preserves_each_result(
         project = load_project(tmp_path / f"simulation_{number}.blochproj")
         np.testing.assert_array_equal(project["sequence_result"].signal, value)
     assert window._simulation_export_naming.prefix == "simulation"
+    assert (tmp_path / "load_simulations.ipynb").is_file()
     monkeypatch.setattr(
         window,
         "_prompt_session_project_export",
@@ -182,6 +185,8 @@ def test_batch_export_uses_actual_naming_dialog_and_preserves_each_result(
     timestamped = sorted(tmp_path.glob("bloch_project_*.blochproj"))
     assert len(timestamped) == 2
     assert timestamped[1].stem == f"{timestamped[0].stem}_2"
+    # The notebook choice is remembered; an existing notebook is never replaced.
+    assert (tmp_path / "load_simulations_2.ipynb").is_file()
     for path, value in zip(timestamped, (1, 2)):
         np.testing.assert_array_equal(
             load_project(path)["sequence_result"].signal, value

@@ -76,3 +76,47 @@ def test_unknown_phantom_loop_parameter_is_rejected():
     with pytest.raises(KeyError):
         phantom_with_parameter(phantom, "mouse.field_strength_t", 3.0)
     assert phantom_loop_parameters(None) == []
+
+
+def test_plain_phantom_loops_scale_relaxation_maps():
+    import numpy as np
+
+    from blochsimulator.phantom import PhantomFactory
+
+    phantom = PhantomFactory.shepp_logan_2d(16)
+    parameters = {
+        parameter.key: parameter for parameter in phantom_loop_parameters(phantom)
+    }
+    assert {"relax.t1_map", "relax.t2_map"} <= set(parameters)
+    reference = parameters["relax.t1_map"].value
+    original = phantom.t1_map.copy()
+
+    changed = phantom_with_parameter(phantom, "relax.t1_map", 2 * reference)
+
+    np.testing.assert_allclose(changed.t1_map, 2 * original)
+    np.testing.assert_array_equal(phantom.t1_map, original)
+    with pytest.raises(ValueError):
+        phantom_with_parameter(phantom, "relax.t2_map", 0.0)
+
+
+def test_pool_phantoms_loop_over_pool_relaxation_without_mutation():
+    from blochsimulator.spectral_phantom import SpectralPhantomFactory
+
+    phantom = SpectralPhantomFactory.brain_mrs_voxel()
+    parameters = {
+        parameter.key: parameter for parameter in phantom_loop_parameters(phantom)
+    }
+    assert "relax.pool[0].t1" in parameters and "relax.pool[0].t2" in parameters
+    original_t2 = phantom.species[0].t2
+
+    changed = phantom_with_parameter(phantom, "relax.pool[0].t2", 0.5 * original_t2)
+
+    assert changed.species[0].t2 == pytest.approx(0.5 * original_t2)
+    assert changed.species[0].t2_star <= changed.species[0].t2
+    assert phantom.species[0].t2 == original_t2
+
+
+def test_h1_mouse_loops_over_tissue_water_relaxation():
+    mouse = MousePerfusionConfig(shape=(8, 8, 8), nucleus="H1").build()
+    keys = {parameter.key for parameter in phantom_loop_parameters(mouse)}
+    assert any(key.startswith("relax.pool[") for key in keys)
