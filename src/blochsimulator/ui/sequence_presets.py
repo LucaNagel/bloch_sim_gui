@@ -13,6 +13,8 @@ import json
 import re
 from pathlib import Path
 
+import numpy as np
+
 from .. import __version__
 from ..paths import get_app_data_dir
 from .widget_state import capture_widget_state, restore_widget_state
@@ -159,12 +161,43 @@ class SequencePresetStore:
         self.path(name).unlink(missing_ok=True)
 
 
+_NDARRAY_KEY = "__ndarray__"
+
+
+def _json_default(value):
+    """Encode numpy arrays (also complex) and scalars for the preset file."""
+    if isinstance(value, np.ndarray):
+        if np.iscomplexobj(value):
+            return {
+                _NDARRAY_KEY: "complex",
+                "real": value.real.tolist(),
+                "imag": value.imag.tolist(),
+            }
+        return {_NDARRAY_KEY: "real", "data": value.tolist()}
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _json_object_hook(obj):
+    kind = obj.get(_NDARRAY_KEY)
+    if kind == "complex":
+        return np.asarray(obj["real"]) + 1j * np.asarray(obj["imag"])
+    if kind == "real":
+        return np.asarray(obj["data"])
+    return obj
+
+
 def write_preset_file(path: Path, preset: dict) -> None:
-    Path(path).write_text(json.dumps(preset, indent=2), encoding="utf-8")
+    Path(path).write_text(
+        json.dumps(preset, indent=2, default=_json_default), encoding="utf-8"
+    )
 
 
 def read_preset_file(path: Path) -> dict:
-    preset = json.loads(Path(path).read_text(encoding="utf-8"))
+    preset = json.loads(
+        Path(path).read_text(encoding="utf-8"), object_hook=_json_object_hook
+    )
     if not isinstance(preset, dict) or preset.get("format") != PRESET_FORMAT:
         raise ValueError(f"{Path(path).name} is not a Bloch simulator sequence preset.")
     return preset
