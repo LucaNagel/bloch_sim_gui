@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -800,3 +801,164 @@ def test_csi_explorer_average_keeps_the_time_course_per_repetition(qt_applicatio
     np.testing.assert_allclose(explorer._current_display, expected)
     (curve,) = explorer.spectrum_plot.listDataItems()
     assert len(curve.getData()[1]) == 3
+
+
+def _dynamic_cartesian_3d_dataset(definitions, repetitions=4):
+    base = _cartesian_3d_dataset()
+    volume = np.asarray(base["cartesian_3d_image"])
+    # Even repetitions are weak (lactate-like), odd ones strong (pyruvate-like).
+    scale = np.asarray(
+        [1.0 if value % 2 == 0 else 100.0 for value in range(repetitions)]
+    )
+    image = (
+        scale[:, None, None, None]
+        * (1.0 + np.arange(repetitions))[:, None, None, None]
+        * (volume + 1.0)
+    )
+    samples = 3
+    return xr.Dataset(
+        {
+            "cartesian_3d_image": (
+                ("repetition", "partition_z", "phase_y", "read_x"),
+                image,
+            ),
+            "cartesian_3d_kspace": (
+                ("repetition", "partition_z", "phase_y", "read_x"),
+                np.fft.fftn(image, axes=(-3, -2, -1)),
+            ),
+        },
+        coords={
+            **{name: base.coords[name] for name in base.coords},
+            "repetition": np.arange(repetitions),
+            "repetition_index": (
+                "adc_sample",
+                np.repeat(np.arange(repetitions), samples),
+            ),
+            "adc_time_s": (
+                "adc_sample",
+                np.repeat(0.5 * np.arange(repetitions), samples)
+                + np.tile(np.arange(samples) * 1e-3, repetitions),
+            ),
+        },
+        attrs={
+            "cartesian_encoding_axes": "+x +y +z",
+            "metadata_json": json.dumps({"sequence_definitions": definitions}),
+        },
+    )
+
+
+def test_model_labels_repetitions_of_spectrally_selective_sequences():
+    ss_bssfp = SequenceReconstructionModel(
+        _dynamic_cartesian_3d_dataset({"SpectralTargetNames": "Lac Py"})
+    )
+    assert ss_bssfp.repetition_metabolites == ("Lac", "Py", "Lac", "Py")
+    np.testing.assert_allclose(
+        ss_bssfp.outer_dimension_times_s("repetition"), [0.0, 0.5, 1.0, 1.5]
+    )
+
+    schedule = {
+        "SPSPScheduleFrameIndices": "0 1 2 0",
+        "SPSPScheduleTargetNames": json.dumps(["Pyruvate", "Lactate", ""]),
+        "SPSPScheduleDisplayNames": json.dumps(["Pyr", "Lac", "Alanine"]),
+        "SPSPScheduleSelectionLevel": "frame",
+    }
+    spsp = SequenceReconstructionModel(_dynamic_cartesian_3d_dataset(schedule))
+    assert spsp.repetition_metabolites == ("Pyruvate", "Lactate", "Alanine", "Pyruvate")
+
+    mixed = SequenceReconstructionModel(
+        _dynamic_cartesian_3d_dataset({**schedule, "SPSPScheduleSelectionLevel": "tr"})
+    )
+    assert mixed.repetition_metabolites == ()
+    plain = SequenceReconstructionModel(_dynamic_cartesian_3d_dataset({}))
+    assert plain.repetition_metabolites == ()
+
+
+def test_model_averages_a_subset_of_volume_repetitions():
+    dataset = _dynamic_cartesian_3d_dataset({})
+    model = SequenceReconstructionModel(dataset)
+    averaged = model.select(
+        model.image_name(),
+        {},
+        average_dimensions=("repetition",),
+        average_values={"repetition": [1, 3]},
+    )
+    expected = np.abs(
+        dataset.cartesian_3d_image.isel(repetition=[1, 3]).mean("repetition")
+    )
+    np.testing.assert_allclose(np.asarray(averaged), np.asarray(expected))
+
+
+def test_explorer_colours_and_filters_metabolite_repetitions(qt_application):
+    dataset = _dynamic_cartesian_3d_dataset({"SpectralTargetNames": "Lac Py"})
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(dataset)
+    image = np.abs(np.asarray(dataset.cartesian_3d_image))
+
+    assert explorer.frame_bar.isVisibleTo(explorer)
+    assert [
+        explorer.metabolite_filter.itemData(index)
+        for index in range(explorer.metabolite_filter.count())
+    ] == [None, "Lac", "Py"]
+    assert explorer._metabolite_colors["Py"] != explorer._metabolite_colors["Lac"]
+    slider = explorer.outer_controls["repetition"]
+    assert "Lac" in explorer.outer_value_labels["repetition"].text()
+    # Weak lactate images are not scaled to the strong pyruvate ones.
+    assert explorer.contrast_slider._domain[1] == pytest.approx(1.1 * image[2].max())
+    slider.setValue(1)
+    assert "Py" in explorer.summary.text()
+    assert explorer.contrast_slider._domain[1] == pytest.approx(1.1 * image[3].max())
+
+    curves = explorer.volume_plot.listDataItems()
+    assert explorer.volume_plot.isVisibleTo(explorer)
+    assert [curve.name() for curve in curves] == ["Lac", "Py"]
+    np.testing.assert_allclose(curves[1].xData, [0.5, 1.5])
+    x, y, z = explorer.image_volume.indices
+    np.testing.assert_allclose(curves[1].yData, image[[1, 3], z, y, x])
+
+    # Averaging mixed contrasts is refused until one metabolite is chosen.
+    assert not explorer.average_repetitions.isEnabled()
+    explorer.metabolite_filter.setCurrentIndex(
+        explorer.metabolite_filter.findData("Py")
+    )
+    assert explorer.outer_values["repetition"] == (1, 3)
+    assert slider.maximum() == 1
+    assert [curve.name() for curve in explorer.volume_plot.listDataItems()] == ["Py"]
+    explorer.average_repetitions.setChecked(True)
+    np.testing.assert_allclose(
+        explorer.image_volume.data,
+        explorer.model.scanner_volume(
+            xr.DataArray(
+                image[[1, 3]].mean(axis=0), dims=dataset.cartesian_3d_image.dims[1:]
+            )
+        )[0],
+    )
+
+    state = explorer.get_state()
+    assert state["metabolite_filter"] == "Py"
+    restored = SequenceReconstructionExplorer()
+    restored.set_dataset(dataset)
+    restored.restore_state(state)
+    assert restored.outer_values["repetition"] == (1, 3)
+    assert restored.average_repetitions.isChecked()
+
+
+def test_explorer_plays_repetitions_and_keeps_3d_slices(qt_application):
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(_dynamic_cartesian_3d_dataset({}))
+    slider = explorer.outer_controls["repetition"]
+    explorer.image_volume.set_indices((1, 2, 0))
+
+    explorer.play_button.setChecked(True)
+    assert explorer._play_timer.isActive()
+    for expected in (1, 2, 3, 0):
+        explorer._play_step()
+        assert slider.value() == expected
+    assert explorer.image_volume.indices == (1, 2, 0)
+    assert [curve.name() for curve in explorer.volume_plot.listDataItems()] == [
+        "Magnitude"
+    ]
+
+    explorer.average_repetitions.setChecked(True)
+    assert not explorer.play_button.isChecked()
+    explorer.clear()
+    assert not explorer.frame_bar.isVisibleTo(explorer)

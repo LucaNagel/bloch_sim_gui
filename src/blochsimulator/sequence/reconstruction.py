@@ -8,6 +8,7 @@ dimensions, receive channels, and pool-resolved data.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
@@ -34,6 +35,66 @@ def is_radial_3d_result(result) -> bool:
 def radial_3d_fov_center_xyz_m(result) -> np.ndarray:
     """Return the scanner-xyz centre of the radial reconstruction grid in m."""
     return fov_center_xyz_from_definitions(_definition_mapping(result))
+
+
+def _dataset_definitions(dataset) -> dict:
+    """Return the sequence definitions stored with a result dataset."""
+    try:
+        metadata = json.loads(str(dataset.attrs.get("metadata_json", "{}")))
+    except (TypeError, ValueError):
+        return {}
+    definitions = metadata.get("sequence_definitions", {})
+    if not isinstance(definitions, dict):
+        return {}
+    return {str(key).lower(): value for key, value in definitions.items()}
+
+
+def _name_list(value) -> tuple[str, ...]:
+    """Parse a list of names written as a list, JSON text, or Pulseq words."""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            parsed = value.replace(",", " ").split()
+        value = [parsed] if isinstance(parsed, str) else parsed
+    try:
+        return tuple(str(item).strip() for item in value)
+    except TypeError:
+        return (str(value).strip(),)
+
+
+def repetition_metabolite_labels(dataset, repetitions) -> tuple[str, ...]:
+    """Return the metabolite each repetition excites, or ``()`` if not selective.
+
+    SS-bSSFP cycles its spectral targets once per repetition. A
+    spectral-spatial schedule at frame level records the schedule step of
+    every repetition; TR-level schedules mix metabolites within one image and
+    therefore carry no per-repetition label.
+    """
+    definitions = _dataset_definitions(dataset)
+    repetitions = [int(value) for value in repetitions]
+    targets = _name_list(definitions.get("spectraltargetnames"))
+    if targets:
+        return tuple(targets[value % len(targets)] for value in repetitions)
+    if "spspscheduleframeindices" not in definitions:
+        return ()
+    level = str(definitions.get("spspscheduleselectionlevel", "frame")).lower()
+    if level.strip() != "frame":
+        return ()
+    frame_indices = _numeric_definition(definitions["spspscheduleframeindices"])
+    targets = _name_list(definitions.get("spspscheduletargetnames"))
+    display_names = _name_list(definitions.get("spspscheduledisplaynames"))
+    names = tuple(
+        target or (display_names[index] if index < len(display_names) else "")
+        for index, target in enumerate(targets or display_names)
+    )
+    labels = []
+    for value in repetitions:
+        step = int(frame_indices[value]) if value < frame_indices.size else -1
+        labels.append(names[step] if 0 <= step < len(names) else "")
+    return tuple(labels) if any(labels) else ()
 
 
 def _numeric_definition(value) -> np.ndarray:
@@ -326,6 +387,15 @@ class SequenceReconstructionModel:
         self.kind = self._detect_kind()
         self.spatial_dims = self._detect_spatial_dims()
         self.outer_dimensions = self._detect_outer_dimensions()
+        repetition = next(
+            (item for item in self.outer_dimensions if item.name == "repetition"),
+            None,
+        )
+        self.repetition_metabolites = (
+            ()
+            if repetition is None
+            else repetition_metabolite_labels(self.dataset, repetition.values)
+        )
 
     @classmethod
     def from_result(cls, result):
@@ -541,6 +611,7 @@ class SequenceReconstructionModel:
         *,
         coil_mode: str = "sum",
         average_dimensions: Sequence[str] = (),
+        average_values: Optional[Mapping[str, Sequence]] = None,
     ) -> np.ndarray:
         """Return linearly separated complex images for the selected outer state."""
         configuration = self.ideal_configuration
@@ -563,35 +634,54 @@ class SequenceReconstructionModel:
                         echo_selection,
                         coil_mode=coil_mode,
                         average_dimensions=average_dimensions,
+                        average_values=average_values,
                     )
                 )
             )
         return ideal_separate(np.stack(echoes), echo_times, offsets)
 
     def outer_dimension_times_s(self, name: str) -> Optional[np.ndarray]:
-        """Return the first ADC time of each value of a framed outer dimension."""
+        """Return the first ADC time of each value of an outer dimension."""
         item = next((item for item in self.outer_dimensions if item.name == name), None)
-        if (
-            item is None
-            or item.virtual_frame_dimension is None
-            or item.coordinate_name is None
-        ):
+        if item is None:
             return None
-        time_name = f"{item.virtual_frame_dimension}_first_adc_time_s"
-        if time_name not in self.dataset.coords:
+        if item.virtual_frame_dimension is None or item.coordinate_name is None:
+            # Volumes keep the dimension itself; the ADC samples carry its index.
+            label_name = f"{name}_index"
+            if label_name not in self.dataset.coords or "adc_time_s" not in (
+                self.dataset.coords
+            ):
+                return None
+            frame_values = np.asarray(self.dataset.coords[label_name].values)
+            frame_times = np.asarray(
+                self.dataset.coords["adc_time_s"].values, dtype=float
+            )
+        else:
+            time_name = f"{item.virtual_frame_dimension}_first_adc_time_s"
+            if time_name not in self.dataset.coords:
+                return None
+            frame_values = np.asarray(self.dataset.coords[item.coordinate_name].values)
+            frame_times = np.asarray(self.dataset.coords[time_name].values, dtype=float)
+        if frame_values.shape != frame_times.shape:
             return None
-        frame_values = np.asarray(self.dataset.coords[item.coordinate_name].values)
-        frame_times = np.asarray(self.dataset.coords[time_name].values, dtype=float)
-        return np.asarray(
-            [float(np.min(frame_times[frame_values == value])) for value in item.values]
-        )
+        times = []
+        for value in item.values:
+            matching = frame_times[frame_values == value]
+            if not matching.size:
+                return None
+            times.append(float(np.min(matching)))
+        return np.asarray(times)
 
     def _frame_indices(
         self,
         selections: Mapping[str, object],
         average_dimensions: Sequence[str] = (),
+        average_values: Optional[Mapping[str, Sequence]] = None,
     ) -> Optional[tuple[str, np.ndarray]]:
-        """Return the frames matching ``selections``, ignoring averaged dimensions."""
+        """Return the frames matching ``selections``, ignoring averaged dimensions.
+
+        ``average_values`` restricts an averaged dimension to some of its values.
+        """
         frame_dimensions = {
             item.virtual_frame_dimension
             for item in self.outer_dimensions
@@ -605,6 +695,16 @@ class SequenceReconstructionModel:
             if item.virtual_frame_dimension != frame_dimension:
                 continue
             if item.name in average_dimensions:
+                subset = (average_values or {}).get(item.name)
+                if subset is not None:
+                    coordinate = (
+                        candidates
+                        if item.coordinate_name is None
+                        else np.asarray(
+                            self.dataset.coords[item.coordinate_name].values
+                        )[candidates]
+                    )
+                    candidates = candidates[np.isin(coordinate, list(subset))]
                 continue
             value = selections.get(item.name, item.values[0])
             if item.coordinate_name is None:
@@ -626,18 +726,22 @@ class SequenceReconstructionModel:
         pool_index: Optional[int] = None,
         coil_mode: str = "rss",
         average_dimensions: Sequence[str] = (),
+        average_values: Optional[Mapping[str, Sequence]] = None,
     ):
         """Select outer dimensions and combine receive channels.
 
         Dimensions named in ``average_dimensions`` are not selected but averaged
         as complex data, before the receive channels are combined.
+        ``average_values`` limits that mean to some values of a dimension, for
+        example the repetitions that image one metabolite.
         """
         if not variable_name or variable_name not in self.dataset:
             raise ValueError(f"result variable {variable_name!r} is unavailable")
         selections = {} if selections is None else dict(selections)
         data = self.dataset[variable_name]
         average_dimensions = tuple(average_dimensions)
-        frame = self._frame_indices(selections, average_dimensions)
+        average_values = dict(average_values or {})
+        frame = self._frame_indices(selections, average_dimensions, average_values)
         selectors = {}
         averaged = []
         if frame is not None and frame[0] in data.dims:
@@ -652,6 +756,13 @@ class SequenceReconstructionModel:
             if item.name in average_dimensions:
                 if item.name in data.dims:
                     averaged.append(item.name)
+                    subset = average_values.get(item.name)
+                    if subset is not None:
+                        selectors[item.name] = [
+                            index
+                            for index, value in enumerate(item.values)
+                            if value in subset
+                        ]
                 continue
             if item.name in data.dims:
                 value = selections.get(item.name, item.values[0])
