@@ -190,6 +190,7 @@ from .magnetization_viewer import MagnetizationViewer
 from .spectral_target_table import SpectralTargetTable
 from .spin_minimum import ZeroToMinimum, minimum_ms_from_message, spin_boxes
 from .spoiling_analysis_view import SpoilingAnalysisSnapshot, SpoilingAnalysisView
+from .kspace_view import KSpaceContext, KSpaceView
 from .psf_analysis_view import PSFAnalysisContext, PSFAnalysisView
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
 from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumViewer
@@ -1532,6 +1533,7 @@ class SequenceSimulationWidget(QWidget):
     spoiler_mode_changed = pyqtSignal(str)
     spoiling_analysis_requested = pyqtSignal()
     psf_analysis_requested = pyqtSignal()
+    kspace_requested = pyqtSignal()
     receiver_noise_requested = pyqtSignal()
 
     # Generated-sequence forms (notably EPI, CSI, and FLASH) need enough
@@ -2892,15 +2894,17 @@ class SequenceSimulationWidget(QWidget):
         self.sequence_info = QLabel()
         self.sequence_info.setWordWrap(True)
         sequence_layout.addWidget(self.sequence_info)
-        self.psf_analysis_link = QLabel("<a href='psf-analysis'>Show PSF Analysis</a>")
+        self.psf_analysis_link = QLabel(
+            "<a href='psf-analysis'>Show PSF Analysis</a> · "
+            "<a href='kspace'>Show k-space trajectory</a>"
+        )
         self.psf_analysis_link.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
         self.psf_analysis_link.setToolTip(
-            "Open the PSF Analysis tab to simulate the point-spread function "
-            "and slice profile of this sequence."
+            "PSF Analysis simulates the point-spread function and slice "
+            "profile of this sequence; k-Space shows its trajectory, gradient "
+            "timing and sampling PSF."
         )
-        self.psf_analysis_link.linkActivated.connect(
-            lambda _link: self.psf_analysis_requested.emit()
-        )
+        self.psf_analysis_link.linkActivated.connect(self._analysis_link_activated)
         sequence_layout.addWidget(self.psf_analysis_link)
         self.sequence_summary_table = QTableWidget(0, 2)
         self.sequence_summary_table.setHorizontalHeaderLabels(["Parameter", "Value"])
@@ -4737,6 +4741,12 @@ class SequenceSimulationWidget(QWidget):
         self.psf_analysis_view.context_provider = self._psf_analysis_context
         self.psf_analysis_view.token_provider = self._psf_analysis_token
         self.psf_analysis_view.nucleus_provider = lambda: self.nucleus.currentText()
+        self.kspace_trajectory_view = KSpaceView()
+        self.kspace_trajectory_view.context_provider = self._kspace_context
+        self.kspace_trajectory_view.token_provider = self._psf_analysis_token
+        self.kspace_trajectory_view.psf_analysis_requested.connect(
+            self.psf_analysis_requested
+        )
         self.spoiling_analysis_view = SpoilingAnalysisView()
         self.spoiling_analysis_view.apply_recommendation_requested.connect(
             self._apply_current_recommended_spin_grid
@@ -14529,6 +14539,37 @@ class SequenceSimulationWidget(QWidget):
             simulation_timestep_s=self.simulation_timestep_us.value() * 1e-6,
             title=self.sequence_source.currentText(),
             token=self._psf_analysis_token(),
+        )
+
+    def _analysis_link_activated(self, link):
+        if link == "kspace":
+            self.kspace_requested.emit()
+        else:
+            self.psf_analysis_requested.emit()
+
+    def _kspace_context(self):
+        """Return the current sequence for the k-Space tab.
+
+        Raises ``ValueError`` with a message for the user, shown next to the
+        tab's Recalculate button.
+        """
+        if self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES:
+            if not self._ensure_current_generated_sequence():
+                raise ValueError(
+                    self._generation_error
+                    or "Generate a valid sequence to see its trajectory."
+                )
+        if self.program is None:
+            raise ValueError(
+                "Choose or load a sequence in Sequence Mode, or click Generate "
+                "sequence first."
+            )
+        return KSpaceContext(
+            program=self.program,
+            title=self.sequence_source.currentText(),
+            token=self._psf_analysis_token(),
+            nucleus=self.nucleus.currentText(),
+            field_strength_t=float(self.field_strength_t.value()),
         )
 
     def _can_start_probe(self):

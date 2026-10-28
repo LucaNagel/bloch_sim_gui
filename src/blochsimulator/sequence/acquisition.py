@@ -1701,12 +1701,16 @@ def infer_spiral_acquisition(
     dimensions = AcquisitionDimensions.from_program(program)
     if dimensions.num_adc_events != len(adc_events):
         raise ValueError("spiral acquisition dimensions do not match ADC events")
-    compiled = (
-        SequenceCompiler().compile_acquisition(program)
-        if compiled is None
-        else compiled
-    )
-    moments = np.asarray(compiled.adc_gradient_moment_cyc_per_m, dtype=float)
+    if compiled is None and kspace.imperfections.is_ideal:
+        # The analytic moments match the compiler's and avoid compiling.
+        moments = kspace.gradient_moment(kspace.adc_times_s)
+    else:
+        compiled = (
+            SequenceCompiler().compile_acquisition(program)
+            if compiled is None
+            else compiled
+        )
+        moments = np.asarray(compiled.adc_gradient_moment_cyc_per_m, dtype=float)
     if moments.shape != (dimensions.num_samples, 3):
         raise ValueError("compiled spiral ADC moments have an invalid shape")
     conjugation = kspace.conjugation_at(kspace.adc_times_s)

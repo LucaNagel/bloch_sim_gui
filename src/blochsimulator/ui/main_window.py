@@ -1544,6 +1544,19 @@ class BlochSimulatorGUI(QMainWindow):
         self._psf_analysis_placed = False
         self.tab_widget.currentChanged.connect(self._ensure_psf_analysis_workspace)
 
+        # Sequence Mode only, placed like PSF Analysis.
+        self.kspace_page = QWidget()
+        self.kspace_page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        kspace_layout = QVBoxLayout(self.kspace_page)
+        kspace_layout.setContentsMargins(0, 0, 0, 0)
+        kspace_layout.addWidget(QLabel("Open this tab to see the k-space trajectory."))
+        kspace_layout.addStretch()
+        self.kspace_tab_index = self.tab_widget.addTab(
+            self.kspace_page, "k-Space Trajectory"
+        )
+        self._kspace_placed = False
+        self.tab_widget.currentChanged.connect(self._ensure_kspace_workspace)
+
         # === TEMPORARY SESSION SIMULATIONS ===
         # This intentionally lives next to Phantom + B1 and is separate from
         # the persistent, file-based Project Explorer in the File menu.
@@ -1795,6 +1808,7 @@ class BlochSimulatorGUI(QMainWindow):
         self.sequence_simulation_widget.psf_analysis_requested.connect(
             self._open_psf_analysis_tab
         )
+        self.sequence_simulation_widget.kspace_requested.connect(self._open_kspace_tab)
         self.sequence_simulation_widget.receiver_noise_requested.connect(
             self._open_receiver_noise_tab
         )
@@ -1871,6 +1885,24 @@ class BlochSimulatorGUI(QMainWindow):
                 widget.deleteLater()
         layout.addWidget(self.sequence_simulation_widget.psf_analysis_view)
         self._psf_analysis_placed = True
+
+    def _ensure_kspace_workspace(self, index):
+        if index != self.kspace_tab_index or self._kspace_placed:
+            return
+        self._ensure_sequence_simulation_workspace(self.sequence_simulation_tab_index)
+        layout = self.kspace_page.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+        layout.addWidget(self.sequence_simulation_widget.kspace_trajectory_view)
+        self._kspace_placed = True
+
+    def _open_kspace_tab(self):
+        if getattr(self, "workspace_mode", None) == "sequence":
+            self.tab_widget.setCurrentIndex(self.kspace_tab_index)
 
     def _open_psf_analysis_tab(self):
         if getattr(self, "workspace_mode", None) == "sequence":
@@ -2273,6 +2305,10 @@ class BlochSimulatorGUI(QMainWindow):
                 "Configure and run a generic parameter loop for the active sequence."
             ),
             "📡 K-Space": "Simulate and inspect sampled k-space data.",
+            "k-Space Trajectory": (
+                "Inspect the k-space trajectory of the current sequence with "
+                "gradient timing, imperfections, animation, and sampling PSF."
+            ),
             "Parameter Sweep": (
                 "Run the simulator across a parameter range and compare the results."
             ),
@@ -6030,6 +6066,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self.receiver_noise_tab_index,
                 self.spoiling_analysis_tab_index,
                 self.psf_analysis_tab_index,
+                self.kspace_tab_index,
                 self.simulation_explorer_tab_index,
                 self.sequence_parameter_loop_tab_index,
             }:
@@ -6068,6 +6105,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self.b1_combo_tab_index,
                 self.receiver_noise_tab_index,
                 self.psf_analysis_tab_index,
+                self.kspace_tab_index,
                 self.simulation_explorer_tab_index,
             }
             if self.sequence_parameter_loop_tab_opened:
@@ -6092,6 +6130,7 @@ class BlochSimulatorGUI(QMainWindow):
                     self.receiver_noise_tab_index,
                     self.spoiling_analysis_tab_index,
                     self.psf_analysis_tab_index,
+                    self.kspace_tab_index,
                     self.simulation_explorer_tab_index,
                     self.sequence_parameter_loop_tab_index,
                 }:
@@ -6119,6 +6158,7 @@ class BlochSimulatorGUI(QMainWindow):
             self._set_main_tab_visible(self.receiver_noise_tab_index, False)
             self._set_main_tab_visible(self.spoiling_analysis_tab_index, False)
             self._set_main_tab_visible(self.psf_analysis_tab_index, False)
+            self._set_main_tab_visible(self.kspace_tab_index, False)
             self._set_main_tab_visible(self.simulation_explorer_tab_index, False)
             self._set_main_tab_visible(self.sequence_parameter_loop_tab_index, False)
             free_geometry = getattr(self, "_free_workspace_geometry", None)
