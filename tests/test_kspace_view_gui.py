@@ -7,6 +7,7 @@ from PyQt5.QtWidgets import QApplication
 from blochsimulator.sequence import load_pulseq, make_pulseq_flash
 from blochsimulator.sequence.kspace_trajectory import calculate_kspace
 from blochsimulator.sequence.pulseq_builders import make_pulseq_spiral
+from blochsimulator.sequence.result import SequenceSimulationResult
 from blochsimulator.ui.kspace_view import (
     KSpaceContext,
     KSpaceView,
@@ -15,6 +16,7 @@ from blochsimulator.ui.kspace_view import (
     sampling_psf,
 )
 from blochsimulator.ui.main_window import BlochSimulatorGUI
+from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
 
 
 def _flash(tmp_path):
@@ -233,3 +235,34 @@ def test_large_sampling_psf_waits_for_request(tmp_path, monkeypatch):
     view.render()
     assert view.psf is not None
     view.deleteLater()
+
+
+def test_saved_result_without_layout_gets_spiral_from_program(tmp_path):
+    widget = SequenceSimulationWidget()
+    widget.program = _spiral(tmp_path)
+    widget._infer_current_acquisition()
+    assert widget.spiral_acquisition is not None
+    samples = widget.spiral_acquisition.num_samples
+
+    def result(samples, **metadata):
+        return SequenceSimulationResult(
+            signal=np.zeros(samples, dtype=complex),
+            adc_times_s=np.arange(samples) * 1e-5,
+            final_magnetization=np.zeros((1, 3)),
+            checkpoint_magnetization=None,
+            checkpoint_times_s=np.zeros(0),
+            metadata={"spiral_acquisition": None, **metadata},
+        )
+
+    # Results simulated before spirals could be inferred.
+    old = result(samples)
+    assert widget.complete_result_acquisition(old)
+    assert old.spiral_acquisition.num_frames == 2
+    # A stored layout and a foreign ADC stream stay untouched.
+    stored = result(samples, cartesian_acquisition={"type": "cartesian_2d"})
+    assert not widget.complete_result_acquisition(stored)
+    assert stored.metadata["spiral_acquisition"] is None
+    foreign = result(samples + 1)
+    assert not widget.complete_result_acquisition(foreign)
+    assert foreign.metadata["spiral_acquisition"] is None
+    widget.deleteLater()
