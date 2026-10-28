@@ -32,6 +32,14 @@ def _cartesian_grid_tolerance(fov_m: float) -> float:
     return max(1e-9, _CARTESIAN_GRID_TOLERANCE_CELLS / float(fov_m))
 
 
+def _adc_time_tolerance(times_s: np.ndarray) -> float:
+    # Absolute ADC times of long dynamic scans (hours) carry float64 rounding
+    # of a few picoseconds, so a fixed 1 ps tolerance rejects valid dwells.
+    times = np.asarray(times_s, dtype=float)
+    scale = float(np.max(np.abs(times))) if times.size else 0.0
+    return max(1e-12, 64.0 * np.finfo(float).eps * scale)
+
+
 @dataclass(frozen=True)
 class AcquisitionDimensions:
     """Map chronological ADC events to explicit outer acquisition indices.
@@ -1152,7 +1160,10 @@ class SpectroscopicAcquisition:
             raise ValueError("ADC times do not match the CSI acquisition")
         fids = times.reshape(self.num_encodings, self.spectral_points)
         if self.spectral_points > 1 and not np.allclose(
-            np.diff(fids, axis=1), self.dwell_s, rtol=0.0, atol=1e-12
+            np.diff(fids, axis=1),
+            self.dwell_s,
+            rtol=0.0,
+            atol=_adc_time_tolerance(times),
         ):
             raise ValueError(
                 "CSI spectral dwell spacing does not match the acquisition"
@@ -1445,7 +1456,10 @@ class CartesianAcquisition:
             raise ValueError("ADC times do not match the Cartesian acquisition")
         lines = times.reshape(self.phase_matrix, self.read_matrix)
         if self.read_matrix > 1 and not np.allclose(
-            np.diff(lines, axis=1), self.dwell_s, rtol=0.0, atol=1e-12
+            np.diff(lines, axis=1),
+            self.dwell_s,
+            rtol=0.0,
+            atol=_adc_time_tolerance(times),
         ):
             raise ValueError("ADC dwell spacing does not match the acquisition")
 
@@ -1685,7 +1699,10 @@ def infer_cartesian_acquisition(
     compiled = SequenceCompiler().compile(program) if compiled is None else compiled
     expected_times = np.concatenate([event.sample_times_s for event in adc_events])
     if compiled.adc_times_s.shape != expected_times.shape or not np.allclose(
-        compiled.adc_times_s, expected_times, rtol=0.0, atol=1e-12
+        compiled.adc_times_s,
+        expected_times,
+        rtol=0.0,
+        atol=_adc_time_tolerance(expected_times),
     ):
         raise ValueError("ADC samples cannot be grouped into chronological lines")
 
