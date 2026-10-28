@@ -349,16 +349,31 @@ class CartesianAcquisitionFrames:
 
 @dataclass(frozen=True)
 class SpiralAcquisition:
-    """Single-shot 2D spiral frames within one chronological ADC stream.
+    """Single-shot 2D non-Cartesian (spiral) frames within one ADC stream.
 
     The trajectory itself remains in the compiled/result ADC gradient moments.
     This object records how those samples are split into slices and repetitions
-    and provides a lightweight linear gridding reconstruction.
+    and how the moments map to k-space: ``k = M - origin`` per frame. The
+    origin accounts for the excitation centre and any refocusing pulses; a
+    frame after an odd number of refocusing pulses encodes the conjugated
+    object (``conjugated_frames``), which reconstruction undoes (see
+    :mod:`.kspace_trajectory`).
+
+    ``reconstruction_method`` selects density-compensated NUFFT gridding
+    (``"nufft"``), iterative least-squares NUFFT (``"cg"``), or the legacy
+    linear interpolation onto the Cartesian grid (``"linear"``).
 
     ``fov_center_xyz_m`` is the scanner-xyz FOV centre. With
     ``offset_in_reconstruction`` the gridding applies it as a k-space phase
     ramp; otherwise the signal is assumed to contain the shift already.
     """
+
+    RECONSTRUCTION_METHODS: ClassVar[Tuple[str, ...]] = ("nufft", "cg", "linear")
+    RECONSTRUCTION_LABELS: ClassVar[Mapping[str, str]] = {
+        "nufft": "density-compensated NUFFT",
+        "cg": "iterative CG-NUFFT",
+        "linear": "linear gridding",
+    }
 
     matrix: Tuple[int, int]
     fov_m: Tuple[float, float]
@@ -369,6 +384,9 @@ class SpiralAcquisition:
     moment_origins_cyc_per_m: Tuple[Tuple[float, float, float], ...]
     fov_center_xyz_m: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     offset_in_reconstruction: bool = False
+    conjugated_frames: Tuple[bool, ...] = ()
+    reconstruction_method: str = "nufft"
+    trajectory_kind: str = "spiral"
 
     def __post_init__(self) -> None:
         matrix = tuple(
@@ -396,17 +414,26 @@ class SpiralAcquisition:
             raise ValueError(
                 "spiral frame metadata must contain equal non-zero lengths"
             )
-        if any(len(item) != matrix[0] * matrix[1] for item in samples):
-            raise ValueError(
-                "each spiral frame must contain matrix_x * matrix_y samples"
-            )
+        if any(len(item) < 3 for item in samples):
+            raise ValueError("each spiral frame must contain at least three samples")
         if any(len(item) != len(AcquisitionDimensions.AXIS_NAMES) for item in frames):
             raise ValueError("each spiral frame index must contain all outer axes")
         if any(len(item) != 3 or not np.all(np.isfinite(item)) for item in origins):
             raise ValueError("each spiral frame requires one finite 3D moment origin")
+        conjugated = tuple(bool(value) for value in self.conjugated_frames) or (
+            False,
+        ) * len(samples)
+        if len(conjugated) != len(samples):
+            raise ValueError("spiral conjugated_frames needs one flag per frame")
         center = tuple(float(value) for value in self.fov_center_xyz_m)
         if len(center) != 3 or not np.all(np.isfinite(center)):
             raise ValueError("spiral fov_center_xyz_m must contain three finite values")
+        method = str(self.reconstruction_method).strip().lower()
+        if method not in self.RECONSTRUCTION_METHODS:
+            raise ValueError(
+                "spiral reconstruction_method must be one of "
+                + ", ".join(self.RECONSTRUCTION_METHODS)
+            )
         flattened = [value for item in samples for value in item]
         if sorted(flattened) != list(range(self.dimensions.num_samples)):
             raise ValueError("spiral frames must cover the complete ADC stream once")
@@ -416,7 +443,10 @@ class SpiralAcquisition:
         object.__setattr__(self, "sample_indices", samples)
         object.__setattr__(self, "frame_indices", frames)
         object.__setattr__(self, "moment_origins_cyc_per_m", origins)
+        object.__setattr__(self, "conjugated_frames", conjugated)
         object.__setattr__(self, "fov_center_xyz_m", center)
+        object.__setattr__(self, "reconstruction_method", method)
+        object.__setattr__(self, "trajectory_kind", str(self.trajectory_kind))
         object.__setattr__(
             self, "offset_in_reconstruction", bool(self.offset_in_reconstruction)
         )
@@ -427,7 +457,7 @@ class SpiralAcquisition:
 
     @property
     def samples_per_frame(self) -> int:
-        return self.matrix[0] * self.matrix[1]
+        return len(self.sample_indices[0])
 
     @property
     def center_m(self) -> Tuple[float, float]:
@@ -462,6 +492,11 @@ class SpiralAcquisition:
             np.arange(self.matrix[1], dtype=float) - self.matrix[1] // 2
         ) / self.fov_m[1]
 
+    def with_reconstruction_method(self, method: str) -> "SpiralAcquisition":
+        from dataclasses import replace
+
+        return replace(self, reconstruction_method=method)
+
     def frame_label(self, frame: int) -> str:
         values = self.frame_indices[int(frame)]
         axes = self.varying_axes
@@ -479,6 +514,7 @@ class SpiralAcquisition:
         return np.take(array, self.sample_indices[int(frame)], axis=-1)
 
     def trajectory(self, moments_cyc_per_m, frame: int) -> np.ndarray:
+        """k-space positions in cycles/m (scanner xyz) of one frame."""
         moments = np.asarray(moments_cyc_per_m, dtype=float)
         if moments.shape != (self.num_samples, 3):
             raise ValueError("spiral gradient moments must have shape (num_samples, 3)")
@@ -492,8 +528,19 @@ class SpiralAcquisition:
             raise ValueError("spiral trajectory must vary on both in-plane axes")
         return relative
 
-    def grid_kspace(self, result, frame: int) -> np.ndarray:
-        """Linearly grid one non-Cartesian frame onto its nominal matrix."""
+    @property
+    def reconstruction_label(self) -> str:
+        return self.RECONSTRUCTION_LABELS[self.reconstruction_method]
+
+    def nufft_operator(self, trajectory_cyc_per_m):
+        """Cached NUFFT operator for the in-plane part of a frame trajectory."""
+        return _cached_nufft_operator(
+            np.asarray(trajectory_cyc_per_m, dtype=float)[:, :2],
+            self.matrix,
+            self.fov_m,
+        )
+
+    def _frame_signal(self, result, frame: int):
         if result.adc_gradient_moment_cyc_per_m is None:
             raise ValueError("spiral gridding requires ADC gradient moments")
         trajectory = self.trajectory(result.adc_gradient_moment_cyc_per_m, frame)
@@ -501,6 +548,33 @@ class SpiralAcquisition:
         if self.offset_in_reconstruction and any(self.fov_center_xyz_m):
             values = values * np.exp(
                 2j * np.pi * (trajectory @ np.asarray(self.fov_center_xyz_m))
+            )
+        return trajectory, values
+
+    def _nufft_image(self, trajectory, values, method: str) -> np.ndarray:
+        operator = self.nufft_operator(trajectory)
+        if method == "cg":
+            image = operator.reconstruct(values, method="cg", iterations=10)
+        else:
+            image = operator.reconstruct(values)
+        # The operator works on (x, y); results use (phase_y, read_x).
+        return np.swapaxes(image, -1, -2)
+
+    def grid_kspace(
+        self, result, frame: int, *, method: Optional[str] = None
+    ) -> np.ndarray:
+        """Grid one non-Cartesian frame onto its nominal Cartesian matrix.
+
+        NUFFT methods return the centred 2D FFT of the reconstructed image,
+        so that the centred IFFT of the grid reproduces it.
+        """
+        method = self.reconstruction_method if method is None else method
+        trajectory, values = self._frame_signal(result, frame)
+        if method != "linear":
+            image = self._nufft_image(trajectory, values, method)
+            return np.fft.fftshift(
+                np.fft.fft2(np.fft.ifftshift(image, axes=(-2, -1)), axes=(-2, -1)),
+                axes=(-2, -1),
             )
         from scipy.interpolate import griddata
 
@@ -511,7 +585,7 @@ class SpiralAcquisition:
         )
         points = trajectory[:, :2]
         leading_shape = values.shape[:-1]
-        flattened = values.reshape((-1, self.samples_per_frame))
+        flattened = values.reshape((-1, values.shape[-1]))
         grids = []
         for channel in flattened:
             try:
@@ -540,15 +614,22 @@ class SpiralAcquisition:
         *,
         norm: Optional[str] = None,
         coil_combine: Optional[str] = None,
+        method: Optional[str] = None,
     ) -> np.ndarray:
-        """Grid and reconstruct one spiral frame with a centred 2D IFFT."""
-        kspace = self.grid_kspace(result, frame)
-        image = np.fft.fftshift(
-            np.fft.ifft2(
-                np.fft.ifftshift(kspace, axes=(-2, -1)), axes=(-2, -1), norm=norm
-            ),
-            axes=(-2, -1),
-        )
+        """Reconstruct one spiral frame (NUFFT gridding by default)."""
+        method = self.reconstruction_method if method is None else method
+        if method != "linear" and norm is None:
+            image = self._nufft_image(*self._frame_signal(result, frame), method)
+        else:
+            kspace = self.grid_kspace(result, frame, method=method)
+            image = np.fft.fftshift(
+                np.fft.ifft2(
+                    np.fft.ifftshift(kspace, axes=(-2, -1)), axes=(-2, -1), norm=norm
+                ),
+                axes=(-2, -1),
+            )
+        if self.conjugated_frames[int(frame)]:
+            image = np.conj(image)
         if coil_combine is None:
             return image
         if image.ndim != 3:
@@ -569,8 +650,11 @@ class SpiralAcquisition:
             "frame_indices": self.frame_indices,
             "dimensions": self.dimensions.to_metadata(),
             "moment_origins_cyc_per_m": self.moment_origins_cyc_per_m,
+            "conjugated_frames": self.conjugated_frames,
             "fov_center_xyz_m": self.fov_center_xyz_m,
             "offset_in_reconstruction": self.offset_in_reconstruction,
+            "reconstruction_method": self.reconstruction_method,
+            "trajectory_kind": self.trajectory_kind,
         }
 
     @classmethod
@@ -591,7 +675,33 @@ class SpiralAcquisition:
             offset_in_reconstruction=bool(
                 metadata.get("offset_in_reconstruction", False)
             ),
+            conjugated_frames=tuple(metadata.get("conjugated_frames", ())),
+            reconstruction_method=metadata.get("reconstruction_method", "nufft"),
+            trajectory_kind=metadata.get("trajectory_kind", "spiral"),
         )
+
+
+_NUFFT_CACHE: list = []
+_NUFFT_CACHE_SIZE = 16
+
+
+def _cached_nufft_operator(k_cyc_per_m, matrix, fov_m):
+    """Share NUFFT operators (and their density weights) between frames."""
+    from .nufft import NUFFTOperator
+
+    k = np.asarray(k_cyc_per_m, dtype=float)
+    key = (k.shape, tuple(matrix), tuple(fov_m))
+    # Repeated frames differ only by floating-point noise in the moments, far
+    # below the k-space cell size 1/FOV.
+    tolerance = 1e-6 / max(fov_m)
+    for cached_key, cached_k, operator in _NUFFT_CACHE:
+        if cached_key == key and np.allclose(cached_k, k, rtol=0.0, atol=tolerance):
+            return operator
+    operator = NUFFTOperator(k, tuple(matrix), tuple(fov_m))
+    if len(_NUFFT_CACHE) >= _NUFFT_CACHE_SIZE:
+        _NUFFT_CACHE.pop(0)
+    _NUFFT_CACHE.append((key, k.copy(), operator))
+    return operator
 
 
 @dataclass(frozen=True)
@@ -1516,13 +1626,34 @@ class CartesianAcquisition:
         )
 
 
+def _definition_matrix(definitions, *keys) -> Optional[Tuple[int, int]]:
+    for key in keys:
+        value = definitions.get(key)
+        if value is None:
+            continue
+        array = numeric_definition_array(value, f"spiral {key}")
+        if array.size >= 2:
+            return tuple(_positive_integer(item, f"spiral {key}") for item in array[:2])
+    return None
+
+
 def infer_spiral_acquisition(
     program: SequenceProgram,
     *,
     compiled=None,
+    kspace=None,
 ) -> SpiralAcquisition:
-    """Infer generated single-interleaf 2D spiral frames from ADC moments."""
+    """Infer single-interleaf 2D spiral frames from the k-space trajectory.
+
+    A sequence qualifies when it declares a spiral trajectory or when the
+    readout of its first ADC event winds around the k-space centre. The FOV
+    comes from the ``FOV`` definition; the matrix from ``MatrixSize``, then
+    ``ReconMatrix``, and otherwise from the trajectory's maximum extent.
+    The k-space origin and sign of every frame follow from the excitation and
+    refocusing pulses (:func:`.kspace_trajectory.calculate_kspace`).
+    """
     from .compiler import SequenceCompiler
+    from .kspace_trajectory import calculate_kspace, classify_readout
 
     definitions = {
         str(key).lower(): value
@@ -1530,37 +1661,42 @@ def infer_spiral_acquisition(
     }
     trajectory_name = str(definitions.get("trajectory", "")).strip().lower()
     sequence_name = str(definitions.get("name", "")).strip().lower()
-    if trajectory_name != "spiral" and "spiral" not in sequence_name:
-        raise ValueError("sequence is not declared as a spiral acquisition")
-    matrix_value = numeric_definition_array(
-        definitions.get("matrixsize", ()), "spiral MatrixSize"
-    )
-    fov_value = numeric_definition_array(definitions.get("fov", ()), "spiral FOV")
-    if matrix_value.size < 2:
-        raise ValueError("spiral acquisition requires a 2D MatrixSize definition")
-    if fov_value.size < 2:
-        raise ValueError("spiral acquisition requires a 2D FOV definition")
-    matrix = tuple(
-        _positive_integer(value, "spiral MatrixSize") for value in matrix_value[:2]
-    )
-    fov = tuple(float(value) for value in fov_value[:2])
-    if not np.all(np.isfinite(fov)) or min(fov) <= 0:
-        raise ValueError("spiral FOV values must be positive and finite")
+    declared = trajectory_name == "spiral" or "spiral" in sequence_name
+    if trajectory_name and trajectory_name != "spiral":
+        raise ValueError("sequence declares a non-spiral trajectory")
 
     adc_events = program.adc_events
     if not adc_events:
         raise ValueError("spiral sequence contains no ADC events")
-    samples_per_frame = matrix[0] * matrix[1]
-    if any(event.num_samples != samples_per_frame for event in adc_events):
-        raise ValueError(
-            "each spiral ADC event must contain matrix_x * matrix_y samples"
-        )
     dwell = adc_events[0].dwell_s
     if any(
         not np.isclose(event.dwell_s, dwell, rtol=0.0, atol=1e-15)
         for event in adc_events
     ):
         raise ValueError("spiral ADC events do not share one dwell time")
+    if min(event.num_samples for event in adc_events) < 3:
+        raise ValueError("spiral ADC events need at least three samples")
+
+    kspace = calculate_kspace(program) if kspace is None else kspace
+    reference = kspace.event_k(0)
+    if not np.all(np.isfinite(reference)):
+        raise ValueError("spiral readout starts before the first excitation")
+    if not declared and classify_readout(reference) != "spiral":
+        raise ValueError("sequence is not a spiral acquisition")
+
+    fov_value = numeric_definition_array(definitions.get("fov", ()), "spiral FOV")
+    if fov_value.size < 2:
+        raise ValueError("spiral acquisition requires a 2D FOV definition")
+    fov = tuple(float(value) for value in fov_value[:2])
+    if not np.all(np.isfinite(fov)) or min(fov) <= 0:
+        raise ValueError("spiral FOV values must be positive and finite")
+    matrix = _definition_matrix(definitions, "matrixsize", "reconmatrix")
+    if matrix is None:
+        extent = np.nanmax(np.abs(kspace.adc_k_cyc_per_m[:, :2]), axis=0)
+        matrix = tuple(
+            max(2, 2 * int(np.ceil(value * width - 1e-6)))
+            for value, width in zip(extent, fov)
+        )
 
     dimensions = AcquisitionDimensions.from_program(program)
     if dimensions.num_adc_events != len(adc_events):
@@ -1573,10 +1709,12 @@ def infer_spiral_acquisition(
     moments = np.asarray(compiled.adc_gradient_moment_cyc_per_m, dtype=float)
     if moments.shape != (dimensions.num_samples, 3):
         raise ValueError("compiled spiral ADC moments have an invalid shape")
+    conjugation = kspace.conjugation_at(kspace.adc_times_s)
 
     sample_indices = []
     frame_indices = []
     origins = []
+    conjugated_frames = []
     cursor = 0
     for event_index, count in enumerate(dimensions.adc_event_sample_counts):
         indices = tuple(range(cursor, cursor + count))
@@ -1587,7 +1725,15 @@ def infer_spiral_acquisition(
                 for axis in dimensions.AXIS_NAMES
             )
         )
-        origins.append(tuple(float(value) for value in moments[cursor]))
+        flag = conjugation[cursor]
+        if not np.isfinite(flag) or np.any(
+            conjugation[cursor : cursor + count] != flag
+        ):
+            raise ValueError("a spiral readout crosses an RF pulse")
+        # k = M - origin holds at every sample of the frame.
+        origin = moments[cursor] - kspace.adc_k_cyc_per_m[cursor]
+        origins.append(tuple(float(value) for value in origin))
+        conjugated_frames.append(bool(flag))
         cursor += count
 
     acquisition = SpiralAcquisition(
@@ -1600,19 +1746,19 @@ def infer_spiral_acquisition(
         moment_origins_cyc_per_m=tuple(origins),
         fov_center_xyz_m=tuple(fov_center_xyz_from_definitions(definitions)),
         offset_in_reconstruction=offset_applied_in_reconstruction(definitions),
+        conjugated_frames=tuple(conjugated_frames),
+        trajectory_kind="spiral",
     )
-    reference = acquisition.trajectory(moments, 0)
     scale = np.asarray((matrix[0] / (2 * fov[0]), matrix[1] / (2 * fov[1])))
-    normalized_radius = np.hypot(reference[:, 0] / scale[0], reference[:, 1] / scale[1])
-    if float(np.max(normalized_radius)) < 0.75:
-        raise ValueError("spiral trajectory does not reach the declared matrix extent")
-    for frame in range(1, acquisition.num_frames):
-        candidate = acquisition.trajectory(moments, frame)
-        tolerance = max(1e-8, 1e-5 * float(np.max(np.abs(reference))))
-        if not np.allclose(
-            candidate[:, :2], reference[:, :2], rtol=0.0, atol=tolerance
-        ):
-            raise ValueError("spiral trajectory changes between acquisition frames")
+    for frame in range(acquisition.num_frames):
+        trajectory = acquisition.trajectory(moments, frame)
+        normalized_radius = np.hypot(
+            trajectory[:, 0] / scale[0], trajectory[:, 1] / scale[1]
+        )
+        if float(np.max(normalized_radius)) < 0.75:
+            raise ValueError(
+                "spiral trajectory does not reach the declared matrix extent"
+            )
     return acquisition
 
 

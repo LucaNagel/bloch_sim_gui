@@ -16096,10 +16096,10 @@ class SequenceSimulationWidget(QWidget):
         self.kspace_view.setImage(np.log1p(kspace_display).T, autoLevels=True)
         self.reconstruction_view.setImage(image_display.T, autoLevels=True)
         self.kspace_info.setText(
-            f"Live linearly gridded spiral k-space: {preview_summary}"
+            f"Live spiral k-space ({spiral.reconstruction_label}): {preview_summary}"
         )
         self.reconstruction_info.setText(
-            f"Live spiral gridding + |IFFT2| from {preview_summary}"
+            f"Live spiral {spiral.reconstruction_label} from {preview_summary}"
         )
 
     def _cancel(self):
@@ -17070,12 +17070,12 @@ class SequenceSimulationWidget(QWidget):
                 self.reconstruction_view, self.reconstruction_zoom_info
             )
             self.kspace_info.setText(
-                f"2D spiral samples linearly gridded to "
+                f"2D spiral samples ({spiral.reconstruction_label}) on "
                 f"{spiral.matrix[1]}×{spiral.matrix[0]}{coil_text}{frame_text}; "
                 f"{display.note or display.description}"
             )
             self.reconstruction_info.setText(
-                "Spiral gridding + |IFFT2|, "
+                f"Spiral {spiral.reconstruction_label}, "
                 f"min={display.format_value(np.min(np.abs(image_display)))}, "
                 f"max={display.format_value(np.max(np.abs(image_display)))}"
                 f"{coil_text}{frame_text}; slice-selective 2D frames (no kz encoding); "

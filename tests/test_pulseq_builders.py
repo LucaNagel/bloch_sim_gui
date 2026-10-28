@@ -1071,15 +1071,17 @@ def test_spiral_reconstruction_applies_read_phase_offsets(tmp_path, encoding_axe
     dataset = result.to_xarray()
     image = dataset["spiral_image_magnitude"].isel(spiral_frame=0)
     # Squared magnitude keeps the gridding blur from biasing the centroid.
-    weights = np.asarray(image) ** 2
+    # Row and column 0 of an even matrix have no mirror partner about N // 2,
+    # so their sidelobes are left out of the centroid.
+    weights = np.asarray(image)[1:, 1:] ** 2
     weights /= weights.sum()
     # The reconstruction phase ramp moves the disc to the image centre, N // 2.
     assert (
-        float(weights.sum(axis=1) @ np.arange(16)),
-        float(weights.sum(axis=0) @ np.arange(16)),
+        float(weights.sum(axis=1) @ np.arange(1, 16)),
+        float(weights.sum(axis=0) @ np.arange(1, 16)),
     ) == pytest.approx((8.0, 8.0), abs=0.05)
-    x_positions = dataset["spiral_position_x_m"].values
-    y_positions = dataset["spiral_position_y_m"].values
+    x_positions = dataset["spiral_position_x_m"].values[1:]
+    y_positions = dataset["spiral_position_y_m"].values[1:]
     assert (
         float(weights.sum(axis=0) @ x_positions),
         float(weights.sum(axis=1) @ y_positions),
@@ -1270,6 +1272,71 @@ def test_spiral_builder_round_trips_and_reconstructs_frames(tmp_path):
     dataset = result.to_xarray()
     assert dataset["spiral_gridded_kspace"].shape == (4, 8, 8)
     assert dataset["spiral_image"].shape == (4, 8, 8)
+
+
+def test_undeclared_spiral_is_detected_from_its_trajectory(tmp_path):
+    from dataclasses import replace
+
+    from blochsimulator.sequence.acquisition import SpiralAcquisition
+
+    sequence = make_pulseq_spiral(
+        fov_m=(0.12, 0.12),
+        matrix=(16, 16),
+        sampling_bandwidth_hz=100_000.0,
+        spiral_turns=8.0,
+        repetition_time_s=100e-3,
+    )
+    program = _write_and_load(sequence, tmp_path / "spiral.seq")
+    # Like third-party spiral files: no Trajectory/MatrixSize, only ReconMatrix.
+    definitions = {
+        key: value
+        for key, value in program.metadata["definitions"].items()
+        if key not in ("Trajectory", "MatrixSize", "Name")
+    }
+    definitions["ReconMatrix"] = [16, 16]
+    program = replace(
+        program, metadata={**program.metadata, "definitions": definitions}
+    )
+    compiled = SequenceCompiler().compile_acquisition(program)
+    acquisition = infer_spiral_acquisition(program, compiled=compiled)
+    assert acquisition.matrix == (16, 16)
+    assert acquisition.reconstruction_method == "nufft"
+    assert acquisition.conjugated_frames == (False,)
+
+    # A point object on pixel (+3, -2) of the 7.5 mm grid reconstructs there.
+    trajectory = acquisition.trajectory(compiled.adc_gradient_moment_cyc_per_m, 0)
+    signal = np.exp(-2j * np.pi * (trajectory[:, :2] @ np.array([0.0225, -0.015])))
+    result = SequenceSimulationResult(
+        signal=signal,
+        adc_times_s=compiled.adc_times_s,
+        final_magnetization=np.zeros((1, 1, 1, 3)),
+        checkpoint_magnetization=None,
+        checkpoint_times_s=np.empty(0),
+        adc_gradient_moment_cyc_per_m=compiled.adc_gradient_moment_cyc_per_m,
+        metadata={},
+    )
+    expected = (8 - 2, 8 + 3)
+    for method in SpiralAcquisition.RECONSTRUCTION_METHODS:
+        image = np.abs(acquisition.reconstruct(result, 0, method=method))
+        assert np.unravel_index(image.argmax(), image.shape) == expected, method
+    # The spiral covers a disc, so a unit point peaks at the disc's share of
+    # the Cartesian k-space square.
+    k_max = np.hypot(trajectory[:, 0], trajectory[:, 1]).max()
+    disc_share = np.pi * k_max**2 * 0.12**2 / 16**2
+    assert np.abs(acquisition.reconstruct(result, 0)).max() == pytest.approx(
+        disc_share, rel=0.05
+    )
+
+    restored = SpiralAcquisition.from_metadata(acquisition.to_metadata())
+    assert restored == acquisition
+    legacy = acquisition.to_metadata()
+    for key in ("conjugated_frames", "reconstruction_method", "trajectory_kind"):
+        legacy.pop(key)
+    assert SpiralAcquisition.from_metadata(legacy).reconstruction_method == "nufft"
+    assert (
+        acquisition.with_reconstruction_method("cg").reconstruction_label
+        == "iterative CG-NUFFT"
+    )
 
 
 def test_sequence_workspace_builds_and_exports_configurable_fov(tmp_path):

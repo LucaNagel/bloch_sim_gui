@@ -973,7 +973,10 @@ class SequenceSimulationResult:
             "cartesian_3d_image_magnitude": (
                 "magnitude of the Cartesian 3D reconstruction"
             ),
-            "spiral_gridded_kspace": "linearly gridded complex spiral k-space",
+            "spiral_gridded_kspace": (
+                "complex spiral k-space on the Cartesian grid (FFT of the "
+                "NUFFT image, or linear gridding)"
+            ),
             "spiral_image": "complex image reconstructed from the spiral ADC signal",
             "spiral_image_magnitude": "magnitude of the spiral reconstruction",
             "csi_kspace": "sorted complex spatial CSI k-space and spectral samples",
