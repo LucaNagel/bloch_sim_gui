@@ -1121,6 +1121,7 @@ class KSpaceView(QWidget):
         geometry = self._image_geometry(horizontal, vertical)
         if geometry is None:
             self.psf = None
+            self._psf_key = None
             self.psf_image.clear()
             self.psf_message.setText(
                 "The sampling PSF needs the in-plane FOV and matrix of a "

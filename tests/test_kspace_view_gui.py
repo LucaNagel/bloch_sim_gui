@@ -11,6 +11,7 @@ from blochsimulator.sequence.result import SequenceSimulationResult
 from blochsimulator.ui.kspace_view import (
     KSpaceContext,
     KSpaceView,
+    PLANES,
     peak_slew_t_per_m_per_s,
     readout_layout,
     sampling_psf,
@@ -232,6 +233,25 @@ def test_large_sampling_psf_waits_for_request(tmp_path, monkeypatch):
     view.render()
     assert view.psf is None
     view.show_mode.setCurrentIndex(0)
+    view.render()
+    assert view.psf is not None
+    view.deleteLater()
+
+
+def test_sampling_psf_survives_switching_to_unsupported_plane_and_back(tmp_path):
+    view, _ = _view(_flash(tmp_path))
+    view.render()
+    assert view.psf is not None
+    plane = view.plane_selector.currentText()
+    other = next(
+        name
+        for name in PLANES
+        if PLANES[name] != PLANES[plane] and PLANES[name] != (0, 1)
+    )
+    view.plane_selector.setCurrentText(other)
+    view.render()
+    assert view.psf is None
+    view.plane_selector.setCurrentText(plane)
     view.render()
     assert view.psf is not None
     view.deleteLater()
