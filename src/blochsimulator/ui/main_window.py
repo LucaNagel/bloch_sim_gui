@@ -7447,6 +7447,10 @@ class BlochSimulatorGUI(QMainWindow):
                         "Spin probe loaded from project"
                     )
                 else:
+                    if project["program"] is not None:
+                        sequence_widget.complete_result_acquisition(
+                            project["sequence_result"]
+                        )
                     sequence_widget._finished(
                         project["sequence_result"], record_run=False
                     )

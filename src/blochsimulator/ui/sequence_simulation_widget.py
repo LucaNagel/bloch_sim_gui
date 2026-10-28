@@ -12582,6 +12582,36 @@ class SequenceSimulationWidget(QWidget):
         self.spiral_acquisition = payload.spiral_acquisition
         self.acquisition_note = payload.acquisition_note
 
+    def complete_result_acquisition(self, result):
+        """Attach the current program's layout to a result saved without one.
+
+        Results simulated before a layout could be inferred (for example
+        undeclared spirals) otherwise only offer the raw-signal fallback.
+        """
+        layouts = {
+            "spiral_acquisition": self.spiral_acquisition,
+            "cartesian_acquisition": self.acquisition,
+            "cartesian_acquisition_frames": self.acquisition_frames,
+            "cartesian_acquisition_volumes": self.acquisition_volumes,
+            "spectroscopic_acquisition": self.spectroscopic_acquisition,
+        }
+        metadata = result.metadata
+        if any(metadata.get(key) is not None for key in layouts):
+            return False
+        attached = False
+        for key, layout in layouts.items():
+            if layout is None:
+                continue
+            metadata[key] = layout.to_metadata()
+            try:
+                # The result properties check the sample count.
+                getattr(result, key)
+            except (AttributeError, ValueError):
+                metadata[key] = None
+            else:
+                attached = True
+        return attached
+
     def _run_python_script(self):
         """Select and run a Python sequence-generation script without a shell."""
         if (
