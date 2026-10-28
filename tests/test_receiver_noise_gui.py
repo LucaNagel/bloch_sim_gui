@@ -428,7 +428,8 @@ def test_receiver_tab_lives_between_phantom_b1_and_simulations(qt_application):
     assert index == window.b1_combo_tab_index + 1
     assert window.spoiling_analysis_tab_index == index + 1
     assert window.psf_analysis_tab_index == index + 2
-    assert window.simulation_explorer_tab_index == index + 3
+    assert window.kspace_tab_index == index + 3
+    assert window.simulation_explorer_tab_index == index + 4
     assert not window.tab_widget.isTabVisible(index)
     window.set_workspace_mode("sequence")
     sequence = window.sequence_simulation_widget
