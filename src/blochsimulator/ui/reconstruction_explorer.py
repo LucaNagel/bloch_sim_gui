@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from scipy.ndimage import zoom
-from PyQt5.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QImage, QPainter, QPen
 from PyQt5.QtWidgets import (
     QCheckBox,
@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -69,6 +70,44 @@ _OVERVIEW_MIN_HEIGHT = 150
 # Share of the result height the voxel plot gets when it appears.
 _VOXEL_PLOT_SHARE = 0.4
 _VOXEL_PLOT_MIN_HEIGHT = 160
+# Interval between repetitions while the frame bar plays them.
+_PLAY_INTERVAL_MS = 500
+# Metabolite colours by name prefix, so one metabolite keeps its colour in
+# every sequence; further names take the fallback colours in order.
+_METABOLITE_COLORS = (
+    (("pyr", "py"), "#3b9cff"),
+    (("lac",), "#ff8c1a"),
+    (("ala",), "#3ccf5a"),
+    (("bic", "hco"), "#e8434b"),
+    (("ure",), "#b07cff"),
+    (("glu",), "#f2d43d"),
+)
+_FALLBACK_METABOLITE_COLORS = ("#33d6d6", "#ff6fd8", "#c8c8c8", "#9fd356")
+
+
+def metabolite_colors(labels) -> dict:
+    """Return one display colour per distinct metabolite label."""
+    colors = {}
+    fallback = iter(_FALLBACK_METABOLITE_COLORS * 4)
+    for label in dict.fromkeys(labels):
+        key = str(label).strip().lower()
+        if not key:
+            continue
+        # "Pyr hydrate" must not take the pyruvate colour.
+        named = (
+            None
+            if "hyd" in key
+            else next(
+                (
+                    color
+                    for prefixes, color in _METABOLITE_COLORS
+                    if key.startswith(prefixes) and color not in colors.values()
+                ),
+                None,
+            )
+        )
+        colors[label] = named or next(fallback)
+    return colors
 
 
 def _colormap(name: str):
@@ -484,6 +523,12 @@ class SequenceReconstructionExplorer(QWidget):
         self._volume_initialized = False
         self._contrast_domain_cache = {}
         self._time_course_cache = {}
+        self._repetition_labels = {}
+        self._metabolite_colors = {}
+        # Manual contrast window of each metabolite and the one last shown.
+        self._metabolite_windows = {}
+        self._window_metabolite = None
+        self._refreshing = False
         self._image_dims = ()
         self._session_runs = {}
         self._result = None
@@ -616,33 +661,31 @@ class SequenceReconstructionExplorer(QWidget):
             ):
                 overlay = _ContourOverlay(view.getView())
                 self._volume_contour_items.append((viewer, plane, overlay))
-        three_d_layout.addWidget(self.volume_pages, 1)
+        self.volume_splitter = QSplitter(Qt.Vertical)
+        self.volume_splitter.setChildrenCollapsible(False)
+        self.volume_splitter.addWidget(self.volume_pages)
+        self.volume_plot = pg.PlotWidget(title="Selected voxel")
+        self.volume_plot.setObjectName("reconstruction_volume_voxel_plot")
+        self.volume_plot.addLegend()
+        self.volume_plot.setMinimumHeight(_VOXEL_PLOT_MIN_HEIGHT)
+        self.volume_splitter.addWidget(self.volume_plot)
+        self.volume_splitter.setStretchFactor(0, 3)
+        self.volume_splitter.setStretchFactor(1, 1)
+        self.volume_plot.hide()
+        self.image_volume.indices_changed.connect(self._volume_voxel_changed)
+        three_d_layout.addWidget(self.volume_splitter, 1)
         self.pages.addWidget(self.three_d_page)
-        body.addWidget(self.pages)
+
+        image_area = QWidget()
+        image_area_layout = QVBoxLayout(image_area)
+        image_area_layout.setContentsMargins(0, 0, 0, 0)
+        image_area_layout.addWidget(self.pages, 1)
+        image_area_layout.addWidget(self._build_frame_bar())
+        body.addWidget(image_area)
 
         controls = QWidget()
         controls_layout = QVBoxLayout(controls)
         controls_layout.setContentsMargins(6, 0, 6, 0)
-
-        frame_group = QGroupBox("Frame")
-        frame_layout = QVBoxLayout(frame_group)
-        self.outer_container = QWidget()
-        self.outer_layout = QGridLayout(self.outer_container)
-        self.outer_layout.setContentsMargins(0, 0, 0, 0)
-        self.outer_layout.setHorizontalSpacing(6)
-        self.outer_layout.setVerticalSpacing(2)
-        self.outer_layout.setColumnStretch(1, 1)
-        frame_layout.addWidget(self.outer_container)
-        self.average_repetitions = QCheckBox("Average repetitions")
-        self.average_repetitions.setObjectName("reconstruction_average_repetitions")
-        self.average_repetitions.setToolTip(
-            "Show the complex mean over all repetitions, whatever component is "
-            "displayed. Averaging happens before the receive channels are combined."
-        )
-        self.average_repetitions.toggled.connect(self._average_toggled)
-        self.average_repetitions.setVisible(False)
-        frame_layout.addWidget(self.average_repetitions)
-        controls_layout.addWidget(frame_group)
 
         data_group = QGroupBox("Data")
         data_layout = QFormLayout(data_group)
@@ -815,6 +858,54 @@ class SequenceReconstructionExplorer(QWidget):
         body.setSizes([3 * _CONTROLS_WIDTH, _CONTROLS_WIDTH])
         layout.addWidget(body, 1)
 
+    def _build_frame_bar(self):
+        """Build the frame bar below the images: outer dimensions and playback."""
+        self.frame_bar = QFrame()
+        self.frame_bar.setObjectName("reconstruction_frame_bar")
+        self.frame_bar.setFrameShape(QFrame.StyledPanel)
+        layout = QHBoxLayout(self.frame_bar)
+        layout.setContentsMargins(8, 4, 8, 4)
+        self.play_button = QToolButton()
+        self.play_button.setObjectName("reconstruction_play_repetitions")
+        self.play_button.setCheckable(True)
+        self.play_button.setText("▶")
+        self.play_button.setToolTip("Play through the repetitions")
+        self.play_button.toggled.connect(self._play_toggled)
+        layout.addWidget(self.play_button)
+        self._play_timer = QTimer(self)
+        self._play_timer.setInterval(_PLAY_INTERVAL_MS)
+        self._play_timer.timeout.connect(self._play_step)
+        self.outer_container = QWidget()
+        self.outer_layout = QGridLayout(self.outer_container)
+        self.outer_layout.setContentsMargins(0, 0, 0, 0)
+        self.outer_layout.setHorizontalSpacing(6)
+        self.outer_layout.setVerticalSpacing(2)
+        self.outer_layout.setColumnStretch(1, 1)
+        layout.addWidget(self.outer_container, 1)
+        self.metabolite_filter = QComboBox()
+        self.metabolite_filter.setObjectName("reconstruction_metabolite_filter")
+        self.metabolite_filter.setToolTip(
+            "Browse, average, and contrast-scale only the repetitions that image "
+            "one metabolite"
+        )
+        self.metabolite_filter.currentIndexChanged.connect(
+            self._metabolite_filter_changed
+        )
+        layout.addWidget(self.metabolite_filter)
+        self.average_repetitions = QCheckBox("Average repetitions")
+        self.average_repetitions.setObjectName("reconstruction_average_repetitions")
+        self.average_repetitions.setToolTip(
+            "Show the complex mean over all repetitions, whatever component is "
+            "displayed. Averaging happens before the receive channels are combined. "
+            "With spectrally selective sequences only the repetitions of one "
+            "metabolite are averaged."
+        )
+        self.average_repetitions.toggled.connect(self._average_toggled)
+        self.average_repetitions.setVisible(False)
+        layout.addWidget(self.average_repetitions)
+        self.frame_bar.hide()
+        return self.frame_bar
+
     def _sequence_settings_toggled(self, visible):
         self.sequence_settings_button.setText(
             "Hide sequence settings" if visible else "Show sequence settings"
@@ -839,9 +930,13 @@ class SequenceReconstructionExplorer(QWidget):
         self._volume_initialized = False
         self._contrast_domain_cache.clear()
         self._time_course_cache.clear()
+        self.play_button.setChecked(False)
+        self.frame_bar.hide()
         self.kspace_panel.clear()
         self.image_panel.clear()
         self.spectrum_plot.clear()
+        self.volume_plot.clear()
+        self.volume_plot.hide()
         self._set_phantom(None)
         self.pages.setCurrentWidget(self.empty_page)
         self.empty_page.setText(message or "No reconstructable image data")
@@ -874,10 +969,13 @@ class SequenceReconstructionExplorer(QWidget):
     ):
         self._result = None
         self._select_session_run(None)
+        self.play_button.setChecked(False)
         self.model = model
         self.source = None if source is None else str(source)
         self._contrast_domain_cache.clear()
         self._time_course_cache.clear()
+        self._metabolite_windows.clear()
+        self._window_metabolite = None
         self._set_phantom(phantom)
         self._populate_controls()
         self._refresh()
@@ -979,11 +1077,10 @@ class SequenceReconstructionExplorer(QWidget):
                     self.outer_controls[dimension.name] = slider
                     self.outer_values[dimension.name] = tuple(dimension.values)
                     self.outer_value_labels[dimension.name] = value_label
-                    self._update_outer_slider_label(dimension.name, 0)
-            else:
-                self.outer_layout.addWidget(
-                    QLabel("Single acquisition frame"), 0, 0, 1, 3
-                )
+            self._populate_metabolites()
+            for name in self.outer_controls:
+                self._update_outer_slider_label(name, 0)
+            self.frame_bar.setVisible(bool(model.outer_dimensions))
 
             self.pool_combo.clear()
             self.pool_combo.addItem("Combined signal", ("total", -1))
@@ -1004,8 +1101,10 @@ class SequenceReconstructionExplorer(QWidget):
 
             has_repetitions = self._time_course_dimension() is not None
             self.average_repetitions.setVisible(has_repetitions)
+            self.play_button.setVisible(has_repetitions)
             if not has_repetitions:
                 self.average_repetitions.setChecked(False)
+            self._update_average_availability()
 
             is_csi = model.kind == "csi"
             self.spectral_label.setVisible(is_csi)
@@ -1016,6 +1115,134 @@ class SequenceReconstructionExplorer(QWidget):
             self._populate_voxel_plot_modes(is_csi)
         finally:
             self._updating = False
+
+    def _populate_metabolites(self):
+        """Label repetitions with the metabolite their spectral pulse excites."""
+        dimension = self._time_course_dimension()
+        labels = () if dimension is None else self.model.repetition_metabolites
+        self._repetition_labels = dict(zip(dimension.values, labels)) if labels else {}
+        self._metabolite_colors = metabolite_colors(labels)
+        previous = self.metabolite_filter.currentData()
+        self.metabolite_filter.blockSignals(True)
+        try:
+            self.metabolite_filter.clear()
+            self.metabolite_filter.addItem("All metabolites", None)
+            for label, color in self._metabolite_colors.items():
+                count = sum(1 for value in labels if value == label)
+                self.metabolite_filter.addItem(f"{label} ({count})", label)
+                index = self.metabolite_filter.count() - 1
+                self.metabolite_filter.setItemData(
+                    index, pg.mkColor(color), Qt.ForegroundRole
+                )
+            self.metabolite_filter.setCurrentIndex(
+                max(0, self.metabolite_filter.findData(previous))
+            )
+        finally:
+            self.metabolite_filter.blockSignals(False)
+        self.metabolite_filter.setVisible(len(self._metabolite_colors) > 1)
+        self._apply_metabolite_filter()
+
+    def _metabolite_filter_value(self):
+        if len(self._metabolite_colors) < 2:
+            return None
+        return self.metabolite_filter.currentData()
+
+    def _apply_metabolite_filter(self):
+        """Restrict the repetition slider to the selected metabolite."""
+        dimension = self._time_course_dimension()
+        slider = self.outer_controls.get("repetition")
+        if dimension is None or slider is None:
+            return
+        label = self._metabolite_filter_value()
+        values = tuple(
+            value
+            for value in dimension.values
+            if label is None or self._repetition_labels.get(value) == label
+        ) or tuple(dimension.values)
+        previous_values = self.outer_values.get("repetition", values)
+        current = previous_values[
+            int(np.clip(slider.value(), 0, len(previous_values) - 1))
+        ]
+        # Keep the repetition, or move to the next one of the new metabolite.
+        index = next(
+            (position for position, value in enumerate(values) if value >= current),
+            len(values) - 1,
+        )
+        self.outer_values["repetition"] = values
+        blocked = slider.blockSignals(True)
+        try:
+            slider.setRange(0, len(values) - 1)
+            slider.setValue(index)
+        finally:
+            slider.blockSignals(blocked)
+        self._update_outer_slider_label("repetition", index)
+        self._update_average_availability()
+
+    def _metabolite_filter_changed(self, *_):
+        if self._updating or self.model is None:
+            return
+        self._apply_metabolite_filter()
+        self._refresh()
+
+    def _average_allowed(self):
+        """Average only images of one metabolite, never mixed contrasts."""
+        return (
+            len(self._metabolite_colors) < 2
+            or self._metabolite_filter_value() is not None
+        )
+
+    def _update_average_availability(self):
+        allowed = self._average_allowed()
+        self.average_repetitions.setEnabled(allowed)
+        self.average_repetitions.setText(
+            "Average repetitions"
+            if allowed or not self._metabolite_colors
+            else "Average repetitions (choose a metabolite)"
+        )
+
+    def _current_metabolite(self):
+        """Return the metabolite of the shown image, or None if unlabelled."""
+        if not self._repetition_labels:
+            return None
+        label = self._metabolite_filter_value()
+        if label is not None:
+            return label
+        return self._repetition_labels.get(self._selections().get("repetition"))
+
+    def _metabolite_html(self, label):
+        color = self._metabolite_colors.get(label)
+        if color is None:
+            return ""
+        return f'<span style="color:{color}; font-weight:600">● {label}</span>'
+
+    def _update_metabolite_annotation(self):
+        label = self._current_metabolite()
+        color = self._metabolite_colors.get(label)
+        pen = None if color is None else pg.mkPen(color, width=3)
+        self.image_panel.plot.getPlotItem().getViewBox().setBorder(pen)
+        for view in (
+            self.image_volume.xy_view,
+            self.image_volume.xz_view,
+            self.image_volume.yz_view,
+        ):
+            view.getView().setBorder(pen)
+
+    def _play_toggled(self, playing):
+        self.play_button.setText("⏸" if playing else "▶")
+        self.play_button.setToolTip(
+            "Pause playback" if playing else "Play through the repetitions"
+        )
+        if playing:
+            self._play_timer.start()
+        else:
+            self._play_timer.stop()
+
+    def _play_step(self):
+        slider = self.outer_controls.get("repetition")
+        if slider is None or not slider.isEnabled() or self.model is None:
+            self.play_button.setChecked(False)
+            return
+        slider.setValue((slider.value() + 1) % (slider.maximum() + 1))
 
     def _populate_voxel_plot_modes(self, is_csi):
         previous = self.voxel_plot_combo.currentData()
@@ -1084,9 +1311,23 @@ class SequenceReconstructionExplorer(QWidget):
         """Return the outer dimensions averaged instead of browsed."""
         if self.model is None or not self.average_repetitions.isChecked():
             return ()
-        return ("repetition",) if self._time_course_dimension() is not None else ()
+        if self._time_course_dimension() is None or not self._average_allowed():
+            return ()
+        return ("repetition",)
 
-    def _average_toggled(self, _checked):
+    def _average_kwargs(self):
+        """Return the averaging arguments of ``SequenceReconstructionModel.select``."""
+        averaged = self._average_dimensions()
+        subset = (
+            {"repetition": self.outer_values["repetition"]}
+            if averaged and self._metabolite_filter_value() is not None
+            else None
+        )
+        return {"average_dimensions": averaged, "average_values": subset}
+
+    def _average_toggled(self, checked):
+        if checked:
+            self.play_button.setChecked(False)
         if self._updating:
             return
         self._refresh()
@@ -1119,7 +1360,12 @@ class SequenceReconstructionExplorer(QWidget):
         if label is None or not values:
             return
         index = int(np.clip(index, 0, len(values) - 1))
-        label.setText(f"{values[index]}  ({index + 1}/{len(values)})")
+        text = f"{values[index]}  ({index + 1}/{len(values)})"
+        if name == "repetition" and self._repetition_labels:
+            metabolite = self._repetition_labels.get(values[index])
+            label.setTextFormat(Qt.RichText)
+            text = f"{values[index]} {self._metabolite_html(metabolite)}  ({index + 1}/{len(values)})"
+        label.setText(text)
 
     def _selected_data_mode(self):
         value = self.pool_combo.currentData()
@@ -1130,7 +1376,11 @@ class SequenceReconstructionExplorer(QWidget):
     def _selected_image(self, selections=None, *, average=True):
         model = self.model
         selections = self._selections() if selections is None else dict(selections)
-        averaged = self._average_dimensions() if average else ()
+        averaging = (
+            self._average_kwargs()
+            if average
+            else {"average_dimensions": (), "average_values": None}
+        )
         mode, index = self._selected_data_mode()
         coil_mode = str(self.coil_combo.currentData() or "rss")
         if mode == "ideal":
@@ -1138,7 +1388,7 @@ class SequenceReconstructionExplorer(QWidget):
             separated = model.ideal_images(
                 selections,
                 coil_mode=effective_coil_mode,
-                average_dimensions=averaged,
+                **averaging,
             )
             template_selections = dict(selections)
             configuration = model.ideal_configuration
@@ -1147,7 +1397,7 @@ class SequenceReconstructionExplorer(QWidget):
                 model.image_name(),
                 template_selections,
                 coil_mode=effective_coil_mode,
-                average_dimensions=averaged,
+                **averaging,
             )
             return (
                 template.copy(data=separated[index]),
@@ -1162,7 +1412,7 @@ class SequenceReconstructionExplorer(QWidget):
                 selections,
                 pool_index=index if pool else None,
                 coil_mode=coil_mode,
-                average_dimensions=averaged,
+                **averaging,
             ),
             mode,
             index,
@@ -1199,39 +1449,72 @@ class SequenceReconstructionExplorer(QWidget):
                     self._selections(),
                     pool_index=pool_index if mode == "pool" else None,
                     coil_mode=effective_coil_mode,
-                    average_dimensions=self._average_dimensions(),
+                    **self._average_kwargs(),
                 )
                 kspace_display, kspace_title = self._kspace_display(kspace)
                 kspace_scalar = kspace.copy(data=kspace_display)
                 kspace_volume, _ = model.scanner_volume(kspace_scalar)
-                image_indices = (
-                    self.image_volume.indices if self._volume_initialized else None
+                metabolite = self._current_metabolite()
+                image_name = f"{component.title()} reconstruction" + (
+                    "" if metabolite is None else f" · {metabolite}"
                 )
-                kspace_indices = (
-                    self.kspace_volume.indices if self._volume_initialized else None
-                )
-                self.image_volume.set_volume(
-                    image_volume,
-                    fov_m=fov,
-                    name=f"{component.title()} reconstruction",
+                image_settings = dict(
+                    name=image_name,
                     levels=display_levels,
                     color_map=_colormap(self.colormap_combo.currentText()),
                     lookup_table=image_lut,
-                    interpolation=interpolation,
                 )
-                self.kspace_volume.set_volume(
-                    kspace_volume,
-                    fov_m=fov,
-                    name=kspace_title,
+                same_grid = (
+                    self._volume_initialized
+                    and np.shape(self.image_volume.data) == np.shape(image_volume)
+                    and np.shape(self.kspace_volume.data) == np.shape(kspace_volume)
+                    and self.image_volume.fov_m is not None
+                    and np.allclose(self.image_volume.fov_m[: len(fov)], fov)
                 )
-                if image_indices is not None:
-                    self._set_volume_indices(self.image_volume, image_indices)
-                self._refresh_phantom_volume()
-                if kspace_indices is not None:
-                    self._set_volume_indices(self.kspace_volume, kspace_indices)
+                self._refreshing = True
+                try:
+                    if same_grid:
+                        # Browsing repetitions keeps the slices and 3D camera.
+                        self.image_volume.interpolation = interpolation
+                        self.image_volume.update_volume_data(
+                            image_volume, **image_settings
+                        )
+                        self.kspace_volume.update_volume_data(
+                            kspace_volume, name=kspace_title
+                        )
+                    else:
+                        image_indices = (
+                            self.image_volume.indices
+                            if self._volume_initialized
+                            else None
+                        )
+                        kspace_indices = (
+                            self.kspace_volume.indices
+                            if self._volume_initialized
+                            else None
+                        )
+                        self.image_volume.set_volume(
+                            image_volume,
+                            fov_m=fov,
+                            interpolation=interpolation,
+                            **image_settings,
+                        )
+                        self.kspace_volume.set_volume(
+                            kspace_volume,
+                            fov_m=fov,
+                            name=kspace_title,
+                        )
+                        if image_indices is not None:
+                            self._set_volume_indices(self.image_volume, image_indices)
+                        if kspace_indices is not None:
+                            self._set_volume_indices(self.kspace_volume, kspace_indices)
+                    self._refresh_phantom_volume()
+                finally:
+                    self._refreshing = False
                 self._volume_initialized = True
                 self.pages.setCurrentWidget(self.three_d_page)
                 self._current_display = image_volume
+                self._refresh_volume_plot()
             else:
                 self._refresh_two_dimensional(
                     image_data,
@@ -1245,9 +1528,13 @@ class SequenceReconstructionExplorer(QWidget):
             ideal_note = (
                 " · linear known-frequency IDEAL (no B0 fit)" if mode == "ideal" else ""
             )
+            metabolite = self._current_metabolite()
+            metabolite_note = "" if metabolite is None else f" · {metabolite}"
             self.summary.setText(
-                f"{model.kind.replace('_', ' ').title()} reconstruction{source}{ideal_note}"
+                f"{model.kind.replace('_', ' ').title()} reconstruction"
+                f"{source}{metabolite_note}{ideal_note}"
             )
+            self._update_metabolite_annotation()
             self.export_button.setEnabled(self._current_display is not None)
             echo_control = self.outer_controls.get("echo")
             if echo_control is not None:
@@ -1299,7 +1586,7 @@ class SequenceReconstructionExplorer(QWidget):
             self._selections(),
             pool_index=pool_index if mode == "pool" else None,
             coil_mode=effective_coil_mode,
-            average_dimensions=self._average_dimensions(),
+            **self._average_kwargs(),
         )
         if model.kind == "csi":
             kspace = kspace.isel(spectral_point=self.spectral_point.value())
@@ -1307,9 +1594,11 @@ class SequenceReconstructionExplorer(QWidget):
             dimension for dimension in kspace.dims if dimension in image_dims
         ]
         kspace_values = np.asarray(kspace.transpose(*kspace_dims))
+        metabolite = self._current_metabolite()
         self.image_panel.set_data(
             image_values,
-            f"{self.component_combo.currentText()} reconstruction",
+            f"{self.component_combo.currentText()} reconstruction"
+            + ("" if metabolite is None else f" · {metabolite}"),
             levels=display_levels,
             lut=self._image_lut(),
             interpolation=self._image_interpolation(),
@@ -1366,7 +1655,9 @@ class SequenceReconstructionExplorer(QWidget):
         mode, pool_index = self._selected_data_mode()
         coil_mode = str(self.coil_combo.currentData() or "rss")
         averaged = self._average_dimensions()
-        cache_key = (mode, pool_index, coil_mode, component, averaged)
+        metabolite = self._current_metabolite()
+        # Metabolites differ by orders of magnitude, so each gets its own scale.
+        cache_key = (mode, pool_index, coil_mode, component, averaged, metabolite)
         if cache_key in self._contrast_domain_cache:
             return self._contrast_domain_cache[cache_key]
 
@@ -1381,7 +1672,17 @@ class SequenceReconstructionExplorer(QWidget):
 
         selections = self._selections()
         high = None
-        for values in product(*(item.values for item in outer_dimensions)):
+
+        def browsed_values(item):
+            if item.name != "repetition" or metabolite is None:
+                return item.values
+            return [
+                value
+                for value in item.values
+                if self._repetition_labels.get(value) == metabolite
+            ]
+
+        for values in product(*(browsed_values(item) for item in outer_dimensions)):
             frame_selections = dict(selections)
             frame_selections.update(
                 (item.name, value) for item, value in zip(outer_dimensions, values)
@@ -1418,6 +1719,18 @@ class SequenceReconstructionExplorer(QWidget):
         display_high = 1.1 * high
         if display_high <= 0.0:
             display_high = 1e-6
+        metabolite = self._current_metabolite()
+        if metabolite != self._window_metabolite:
+            # Each metabolite keeps its own window; a new one starts at full range.
+            if self._window_metabolite is not None:
+                self._metabolite_windows[self._window_metabolite] = (
+                    self.contrast_slider.values()
+                )
+            self._window_metabolite = metabolite
+            self.contrast_slider.set_domain(0.0, display_high, preserve=False)
+            window = self._metabolite_windows.get(metabolite)
+            if window is not None:
+                self.contrast_slider.set_values(*window, emit=False)
         self.contrast_slider.set_domain(0.0, display_high, preserve=True)
         selected_low, selected_high = self.contrast_slider.values()
         if selected_high <= selected_low:
@@ -1453,7 +1766,7 @@ class SequenceReconstructionExplorer(QWidget):
             self._selections(),
             pool_index=pool_index if pool else None,
             coil_mode=coil_mode,
-            average_dimensions=self._average_dimensions(),
+            **self._average_kwargs(),
         )
         x, y = self._voxel
         values = np.asarray(data.isel(phase_x=x, phase_y=y))
@@ -1471,17 +1784,23 @@ class SequenceReconstructionExplorer(QWidget):
         self.spectrum_plot.setTitle(f"{title} · voxel x={x}, y={y}")
 
     def _time_course_planes(self, dimension):
-        """Return the displayed image of every repetition, cached per view."""
+        """Return the displayed image of every repetition, cached per view.
+
+        2D results give planes ordered like the image panel; 3D results give
+        scanner-ordered volumes like the volume viewer.
+        """
         selections = self._selections()
         component = str(self.component_combo.currentData() or "magnitude")
         spectral_point = (
             self.spectral_point.value() if self.model.kind == "csi" else None
         )
+        volumetric = self.model.kind in {"cartesian_3d", "radial_3d"}
         key = (
             self._selected_data_mode(),
             str(self.coil_combo.currentData() or "rss"),
             component,
             spectral_point,
+            volumetric,
             tuple(
                 sorted(
                     (name, repr(value))
@@ -1504,58 +1823,112 @@ class SequenceReconstructionExplorer(QWidget):
                 continue
             if spectral_point is not None:
                 image_data = image_data.isel(spectral_point=spectral_point)
-            display = self.model.display_values(image_data, component)
-            planes.append(
-                np.asarray(image_data.copy(data=display).transpose(*self._image_dims))
+            display = image_data.copy(
+                data=self.model.display_values(image_data, component)
             )
+            if volumetric:
+                planes.append(np.asarray(self.model.scanner_volume(display)[0]))
+            else:
+                planes.append(np.asarray(display.transpose(*self._image_dims)))
         self._time_course_cache[key] = planes
         return planes
 
-    def _plot_time_course(self, mode, pool_index):
+    @staticmethod
+    def _voxel_series(planes, index):
+        """Return one voxel of every plane, NaN where it does not exist."""
+        values = []
+        for plane in planes:
+            inside = plane is not None and all(
+                0 <= position < size for position, size in zip(index, plane.shape)
+            )
+            values.append(float(plane[index]) if inside else np.nan)
+        return np.asarray(values)
+
+    def _plot_time_course(self, mode=None, pool_index=None, *, plot=None, index=None):
+        """Plot the voxel's repetitions, one coloured curve per metabolite."""
+        plot = self.spectrum_plot if plot is None else plot
         dimension = self._time_course_dimension()
         if dimension is None:
             return
         planes = self._time_course_planes(dimension)
-        x, y = self._voxel
-        values = np.asarray(
-            [
-                (
-                    np.nan
-                    if plane is None or y >= plane.shape[0] or x >= plane.shape[1]
-                    else float(plane[y, x])
-                )
-                for plane in planes
-            ]
-        )
+        if index is None:
+            x, y = self._voxel
+            index = (y, x)
+            location = f"x={x}, y={y}"
+        else:
+            location = "x={}, y={}, z={}".format(*index)
+        values = self._voxel_series(planes, tuple(index))
         times = self.model.outer_dimension_times_s(dimension.name)
         if times is None:
             axis = np.arange(values.size, dtype=float)
-            self.spectrum_plot.setLabel("bottom", "Repetition")
+            plot.setLabel("bottom", "Repetition")
         else:
             axis = np.asarray(times, dtype=float)
-            self.spectrum_plot.setLabel("bottom", "Time", "s")
+            plot.setLabel("bottom", "Time", "s")
         component = self.component_combo.currentText()
-        self.spectrum_plot.setLabel("left", component, "a.u.")
-        self.spectrum_plot.plot(
-            axis,
-            values,
-            pen="w",
-            symbol="o",
-            symbolSize=5,
-            symbolBrush="w",
-            name=component,
-        )
+        plot.setLabel("left", component, "a.u.")
+        repetitions = list(dimension.values)
+        if self._repetition_labels:
+            selected = self._metabolite_filter_value()
+            for label, color in self._metabolite_colors.items():
+                if selected is not None and label != selected:
+                    continue
+                rows = [
+                    position
+                    for position, value in enumerate(repetitions)
+                    if self._repetition_labels.get(value) == label
+                ]
+                plot.plot(
+                    axis[rows],
+                    values[rows],
+                    pen=pg.mkPen(color, width=2),
+                    symbol="o",
+                    symbolSize=5,
+                    symbolPen=color,
+                    symbolBrush=color,
+                    name=label,
+                )
+        else:
+            plot.plot(
+                axis,
+                values,
+                pen="w",
+                symbol="o",
+                symbolSize=5,
+                symbolBrush="w",
+                name=component,
+            )
         current = self._selections().get(dimension.name)
-        matches = [
-            index for index, value in enumerate(dimension.values) if value == current
-        ]
-        if matches:
-            self.spectrum_plot.addItem(
+        if current in repetitions and not self._average_dimensions():
+            plot.addItem(
                 pg.InfiniteLine(
-                    axis[matches[0]], angle=90, pen=pg.mkPen(255, 0, 255, width=1)
+                    axis[repetitions.index(current)],
+                    angle=90,
+                    pen=pg.mkPen(255, 0, 255, width=1),
                 )
             )
-        self.spectrum_plot.setTitle(f"Time course · voxel x={x}, y={y}")
+        plot.setTitle(f"Time course · voxel {location}")
+
+    def _refresh_volume_plot(self):
+        """Show the time course of the voxel selected in the 3D image."""
+        plot = self.volume_plot
+        plot.clear()
+        available = (
+            self.model is not None
+            and self._time_course_dimension() is not None
+            and self.pages.currentWidget() is self.three_d_page
+        )
+        plot.setVisible(available)
+        if available:
+            self._plot_time_course(plot=plot, index=self.image_volume.indices)
+
+    def _volume_voxel_changed(self, *_):
+        if self._refreshing or self._updating:
+            return
+        try:
+            self._refresh_volume_plot()
+        except Exception:
+            self.volume_plot.clear()
 
     def _set_phantom(self, phantom):
         """Use ``phantom`` as the object behind the shown reconstruction."""
@@ -1853,6 +2226,7 @@ class SequenceReconstructionExplorer(QWidget):
         return {
             "outer": self._selections(),
             "average_repetitions": self.average_repetitions.isChecked(),
+            "metabolite_filter": self.metabolite_filter.currentData(),
             "pool": list(self._selected_data_mode()),
             "coil": self.coil_combo.currentData(),
             "component": self.component_combo.currentData(),
@@ -1887,6 +2261,8 @@ class SequenceReconstructionExplorer(QWidget):
             return
         self._updating = True
         try:
+            self._set_combo_data(self.metabolite_filter, state.get("metabolite_filter"))
+            self._apply_metabolite_filter()
             for name, value in dict(state.get("outer", {})).items():
                 self._set_outer_control_value(name, value)
             self.average_repetitions.setChecked(
