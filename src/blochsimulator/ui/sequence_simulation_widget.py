@@ -6205,6 +6205,9 @@ class SequenceSimulationWidget(QWidget):
         views.setTabVisible(self.two_d_result_tab_index, False)
 
         self.reconstruction_explorer = SequenceReconstructionExplorer()
+        self.reconstruction_explorer.gradient_error_provider = (
+            self._explorer_gradient_error
+        )
         self.reconstruction_explorer_tab_index = views.addTab(
             self.reconstruction_explorer, "Reconstruction Explorer"
         )
@@ -14579,6 +14582,33 @@ class SequenceSimulationWidget(QWidget):
             self.kspace_requested.emit()
         else:
             self.psf_analysis_requested.emit()
+
+    def _explorer_gradient_error(self, result):
+        """Δk per ADC sample of ``result`` for the k-space tab's imperfections.
+
+        Uses the current sequence, which must have the result's ADC stream.
+        """
+        imperfections = self.kspace_trajectory_view.imperfections()
+        if imperfections.is_ideal:
+            raise ValueError("No gradient imperfections are set in the k-space tab")
+        program = self.program
+        if program is None:
+            raise ValueError("No sequence is loaded to compute gradient errors")
+        key = (id(program), repr(imperfections.to_dict()))
+        cached = getattr(self, "_explorer_gradient_error_cache", None)
+        if cached is None or cached[0] != key:
+            from ..sequence.kspace_trajectory import gradient_error
+
+            cached = (key, gradient_error(program, imperfections))
+            self._explorer_gradient_error_cache = cached
+        delta = cached[1]
+        samples = np.asarray(result.adc_times_s).size
+        if delta.shape[0] != samples:
+            raise ValueError(
+                f"The current sequence has {delta.shape[0]} ADC samples, the "
+                f"result {samples}"
+            )
+        return delta
 
     def _kspace_context(self):
         """Return the current sequence for the k-Space tab.

@@ -777,6 +777,10 @@ class SequenceReconstructionModel:
             data = data.isel(selectors)
         if averaged:
             data = data.mean(averaged)
+        # A single frame has no outer dimension that would select it.
+        for name in ("cartesian_frame", "spiral_frame"):
+            if data.sizes.get(name) == 1:
+                data = data.isel({name: 0})
         if "pool" in data.dims:
             data = data.isel(pool=0 if pool_index is None else int(pool_index))
         if "coil" in data.dims:

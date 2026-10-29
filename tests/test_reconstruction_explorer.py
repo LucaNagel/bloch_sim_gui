@@ -962,3 +962,69 @@ def test_explorer_plays_repetitions_and_keeps_3d_slices(qt_application):
     assert not explorer.play_button.isChecked()
     explorer.clear()
     assert not explorer.frame_bar.isVisibleTo(explorer)
+
+
+def test_explorer_switches_spiral_reconstruction_method_and_gradient_errors(
+    qt_application, tmp_path
+):
+    from blochsimulator import BlochSimulator
+    from blochsimulator.sequence import load_pulseq
+    from blochsimulator.sequence.kspace_trajectory import (
+        GradientImperfections,
+        gradient_error,
+    )
+    from blochsimulator.sequence.psf import PointSource, simulate_point_sources
+    from blochsimulator.sequence.pulseq_builders import make_pulseq_spiral
+
+    sequence = make_pulseq_spiral(
+        fov_m=(0.08, 0.08),
+        matrix=(16, 16),
+        sampling_bandwidth_hz=50e3,
+        read_offset_m=0.0,
+    )
+    path = tmp_path / "spiral.seq"
+    sequence.write(str(path), v141_compat=True)
+    program = load_pulseq(path)
+    result = simulate_point_sources(
+        program,
+        (PointSource(position_m=(0.012, -0.007, 0.0)),),
+        simulator=BlochSimulator(use_parallel=False),
+    )
+    delta = gradient_error(program, GradientImperfections(delay_s=(8e-6, 8e-6, 0.0)))
+
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_result(result)
+    assert not explorer.reconstruction_group.isHidden()
+    assert explorer.reconstruction_method_combo.currentData() == "nufft"
+    assert not explorer.reconstruction_trajectory_combo.isEnabled()
+    nufft = np.array(explorer._current_display)
+
+    explorer.reconstruction_method_combo.setCurrentIndex(
+        explorer.reconstruction_method_combo.findData("cg")
+    )
+    assert explorer._result is result
+    assert not explorer.reconstruction_group.isHidden()
+    cg = np.array(explorer._current_display)
+    assert cg.shape == nufft.shape
+    assert not np.allclose(cg, nufft)
+    assert np.unravel_index(cg.argmax(), cg.shape) == np.unravel_index(
+        nufft.argmax(), nufft.shape
+    )
+
+    explorer.gradient_error_provider = lambda _result: delta
+    explorer.set_result(result)
+    assert explorer.reconstruction_trajectory_combo.isEnabled()
+    explorer.reconstruction_trajectory_combo.setCurrentIndex(1)
+    shifted = np.array(explorer._current_display)
+    # An 8 µs delay misplaces the spiral by about half a k-space cell.
+    assert np.abs(shifted - nufft).max() > 0.05 * nufft.max()
+    assert explorer.reconstruction_message.text() == ""
+
+    def missing(_result):
+        raise ValueError("No gradient imperfections are set")
+
+    explorer.gradient_error_provider = missing
+    explorer.reconstruction_trajectory_combo.setCurrentIndex(0)
+    explorer.reconstruction_trajectory_combo.setCurrentIndex(1)
+    assert "ideal gradients" in explorer.reconstruction_message.text()
+    np.testing.assert_allclose(explorer._current_display, nufft)
