@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from blochsimulator import BlochSimulator
-from blochsimulator.sequence import load_pulseq, make_pulseq_flash
+from blochsimulator.sequence import ScannerParameters, load_pulseq, make_pulseq_flash
 from blochsimulator.sequence.acquisition import CartesianAcquisition, make_cartesian_epi
 from blochsimulator.sequence.advanced_bssfp_builders import (
     make_pulseq_spectral_selective_bssfp,
@@ -259,6 +259,8 @@ def test_hyperpolarized_flash_depletion_broadens_the_phase_psf(tmp_path, nucleus
         repetition_time_s=10e-3,
         flip_angle_deg=flip_angle_deg,
         nucleus=nucleus,
+        # Preclinical gradients, on which the 3 mm 13C slice is feasible.
+        scanner_parameters=ScannerParameters(),
     )
     program = _round_trip(sequence, tmp_path / "hp_flash.seq")
     source = PointSource(t1_s=30.0, t2_s=1.0, equilibrium_mz=1e-5)

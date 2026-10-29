@@ -424,12 +424,6 @@ class SpiralTrajectoryDesigner(QDialog):
                 f"{fov[0] * 1e3:.1f} × {fov[1] * 1e3:.1f} mm. Use at least "
                 f"{max(design.matrix) / 2:g} turns."
             )
-        if design.nucleus != "H1":
-            notes.append(
-                "The sequence builder checks the gradient limits with the 1H "
-                "gyromagnetic ratio. Apply this design so that the "
-                f"{design.nucleus} gradients stay within the limits."
-            )
         return notes
 
     # Apply and export -----------------------------------------------------

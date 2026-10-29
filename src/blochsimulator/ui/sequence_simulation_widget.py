@@ -13454,15 +13454,19 @@ class SequenceSimulationWidget(QWidget):
                 "max_grad",
                 "maximum gradient",
                 "larger than max",
+                "mt/m limit",
                 "amplitude",
                 "slew",
                 "system limits",
             )
         ):
-            if self.sequence_source.currentIndex() in {
-                self.SLICE_SELECTION_SOURCE,
-                self.SLICE_FID_SOURCE,
-            }:
+            if "slice-selective rf pulse needs" in error.lower() or (
+                self.sequence_source.currentIndex()
+                in {
+                    self.SLICE_SELECTION_SOURCE,
+                    self.SLICE_FID_SOURCE,
+                }
+            ):
                 return (
                     "Increase the RF duration or slice thickness to reduce the "
                     "slice gradient. For a rephasing-gradient error, increase "

@@ -16,10 +16,15 @@ class ScannerParameters:
     Gradient amplitude and slew rate use the conventional scanner units shown
     in the UI. All timing values are stored in seconds so they can be passed to
     :class:`pypulseq.Opts` without an implicit unit conversion.
+
+    The limits bound the physical gradient of the imaged nucleus. The default
+    profile is a preclinical gradient system, on which the default protocols
+    remain feasible for 13C and 31P; a clinical system (about 32 mT/m and
+    130 T/m/s) can be saved as a scanner profile.
     """
 
-    max_grad_mtm: float = 32.0
-    max_slew_tms: float = 130.0
+    max_grad_mtm: float = 400.0
+    max_slew_tms: float = 3000.0
     grad_raster_time_s: float = 10e-6
     rf_raster_time_s: float = 1e-6
     adc_raster_time_s: float = 0.1e-6

@@ -614,8 +614,9 @@ def test_spsp_designer_map_runs_in_background_and_can_be_cancelled(qt_applicatio
 
 
 def test_spsp_automatic_range_covers_every_active_peak(qt_application):
+    # On a clinical gradient system the peaks span more than the alias bandwidth.
     dialog = SpectralSpatialPulseDesignerDialog(
-        scanner_parameters=ScannerParameters(),
+        scanner_parameters=ScannerParameters(max_grad_mtm=32.0, max_slew_tms=130.0),
         nucleus="C13",
         field_strength_t=3.0,
         sequence_reference_ppm=171.076,

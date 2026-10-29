@@ -236,14 +236,6 @@ class SpiralDesign:
         }
 
 
-def _system(pp, scanner_parameters, gamma_hz_per_t):
-    if scanner_parameters is None:
-        kwargs = dict(LEGACY_SPIRAL_LIMITS)
-    else:
-        kwargs = ScannerParameters.from_mapping(scanner_parameters).to_pypulseq_kwargs()
-    return pp.Opts(**kwargs, gamma=gamma_hz_per_t)
-
-
 def design_spiral(
     *,
     fov_m: Sequence[float],
@@ -255,11 +247,16 @@ def design_spiral(
 ) -> SpiralDesign:
     """Design the spiral readout of :func:`make_pulseq_spiral`.
 
-    The gradient limits apply to the physical gradient of ``nucleus``:
-    a 13C spiral needs about four times the gradient of a 1H spiral with
-    the same k-space trajectory.
+    As in the sequence builder, the gradient limits apply to the physical
+    gradient of ``nucleus``: a 13C spiral needs about four times the
+    gradient of a 1H spiral with the same k-space trajectory.
     """
-    from .pulseq_builders import NUCLEUS_GAMMA_HZ_PER_T, _pypulseq, _spiral_waveforms
+    from .pulseq_builders import (
+        NUCLEUS_GAMMA_HZ_PER_T,
+        _make_scanner_system,
+        _pypulseq,
+        _spiral_waveforms,
+    )
 
     if nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
         raise ValueError(f"unknown nucleus: {nucleus}")
@@ -277,7 +274,12 @@ def design_spiral(
         raise ValueError("spiral_turns must be positive and finite")
     gamma = float(NUCLEUS_GAMMA_HZ_PER_T[nucleus])
     pp = _pypulseq()
-    system = _system(pp, scanner_parameters, gamma)
+    system = _make_scanner_system(
+        pp,
+        scanner_parameters,
+        legacy_kwargs=LEGACY_SPIRAL_LIMITS,
+        nucleus=nucleus,
+    )
     gx, gy, dwell = _spiral_waveforms(
         matrix=size,
         fov_m=fov,

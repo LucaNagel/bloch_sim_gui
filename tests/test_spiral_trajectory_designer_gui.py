@@ -5,6 +5,7 @@ import pytest
 from PyQt5.QtWidgets import QApplication
 
 from blochsimulator.sequence.kspace_trajectory import calculate_kspace
+from blochsimulator.sequence.scanner import ScannerParameters
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
 from blochsimulator.ui.spiral_trajectory_designer import SpiralTrajectoryDesigner
 
@@ -17,6 +18,7 @@ def test_designer_warns_about_limits_and_undersampling_and_exports(tmp_path):
         sampling_bandwidth_hz=100e3,
         turns=8,
         nucleus="C13",
+        scanner_parameters={"max_grad_mtm": 32.0, "max_slew_tms": 130.0},
     )
     app.processEvents()
 
@@ -24,7 +26,7 @@ def test_designer_warns_about_limits_and_undersampling_and_exports(tmp_path):
     text = designer.message.text()
     assert "lower the bandwidth" in text
     assert "undersample" in text
-    assert "1H" in text
+    assert "1H" not in text
     rows = [
         designer.info_table.item(row, 0).text()
         for row in range(designer.info_table.rowCount())
@@ -48,6 +50,8 @@ def test_designer_warns_about_limits_and_undersampling_and_exports(tmp_path):
 def test_applied_carbon_design_is_played_by_the_spiral_sequence():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
+    # A clinical gradient system, on which the 13C spiral is slew limited.
+    widget.scanner_parameters = ScannerParameters(max_grad_mtm=32.0, max_slew_tms=130.0)
     widget.nucleus.setCurrentText("C13")
     widget.sequence_live_preview.setChecked(True)
     widget.sequence_source.setCurrentIndex(1)
@@ -55,6 +59,7 @@ def test_applied_carbon_design_is_played_by_the_spiral_sequence():
     widget.phase_matrix.setValue(16)
     widget.epi_read_fov_mm.setValue(120.0)
     widget.epi_phase_fov_mm.setValue(120.0)
+    widget.epi_slice_thickness_mm.setValue(10.0)
     widget.sampling_bandwidth_khz.setValue(50.0)
     widget.epi_readout_trajectory.setCurrentText("Spiral")
     app.processEvents()

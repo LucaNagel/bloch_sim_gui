@@ -440,7 +440,8 @@ def test_spectral_selective_builder_matches_paper_readout_and_auto_encoding():
         repetition_time_s=6.29e-3,
         repetitions=1,
         use_alpha_half=False,
-        scanner_parameters={"max_grad_mtm": 100.0, "max_slew_tms": 1000.0},
+        # Preclinical 13C gradient performance.
+        scanner_parameters={"max_grad_mtm": 400.0, "max_slew_tms": 4000.0},
     )
 
     definitions = sequence.definitions

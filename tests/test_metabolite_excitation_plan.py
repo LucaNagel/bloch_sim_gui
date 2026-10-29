@@ -204,8 +204,9 @@ def test_plan_dialog_explains_impossible_thin_slice(qt_application, monkeypatch)
         "blochsimulator.ui.metabolite_excitation_plan.QMessageBox.warning",
         lambda _parent, title, text: warnings.append((title, text)),
     )
+    # A clinical gradient system, on which a 3 mm 13C slice is impossible.
     dialog = MetaboliteExcitationPlanDialog(
-        scanner_parameters=ScannerParameters(),
+        scanner_parameters=ScannerParameters(max_grad_mtm=32.0, max_slew_tms=130.0),
         **{**_PLAN, "target_thickness_m": 3e-3},
     )
     _keep_peaks(dialog, {"Pyruvate", "Lactate", "Bicarbonate"})
