@@ -276,7 +276,9 @@ in vivo.
 
 1. **Measure** an FID of a phantom with known concentration and volume, plus a
    0° noise scan with the same receiver gain, bandwidth and averages (or use
-   the FID's signal-free tail).
+   the FID's signal-free tail). Use the receiver gain of the scans you want to
+   predict: at a very low gain (e.g. RG 1) the digitizer noise dominates and
+   the calibration underestimates their SNR.
 2. **Load FID…** reads a ParaVision scan folder (`fid` / `rawdata.job0`) or a
    complex `.npy/.txt/.csv/.dat` array and fills the values. The amplitude is
    extrapolated through the digital-filter delay.
@@ -288,7 +290,10 @@ in vivo.
    changing either asks for a new calibration.
 
 The **SNR budget** shows the chain from the reference phantom to the image
-voxels. Noise scales with each ADC event's bandwidth. **New realization** and
+voxels. A phantom's own temperature and enrichment (set in the Phantom
+Designer) replace the *Simulated object* fields; the budget marks this. A
+whole-object FID or brightest voxel below SNR 1 is flagged with the averaging
+needed for SNR 3. Noise scales with each ADC event's bandwidth. **New realization** and
 **Apply to result** re-noise without re-simulating. **Settings → Interface →
 Signal units** switches plots between physical units and SNR units (σ = 1).
 

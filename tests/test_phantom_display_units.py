@@ -270,6 +270,10 @@ def test_receiver_uses_explicit_phantom_temperature_for_calibration_and_display(
     sections = snr_budget(noise, phantom=phantom, nucleus="C13", field_strength_t=7)
     units = next(section for section in sections if section.title == "Simulation units")
     assert units.rows[0].number == effective.target_thermal_polarization
+    temperature = units.rows[1]
+    assert (temperature.label, temperature.value) == ("Object temperature", "20 °C")
+    assert "overrides the Simulated object temperature of 37 °C" in temperature.note
+    assert units.status == "temperature from the phantom"
     assert calibration.target_temperature_k == 310.15
 
 

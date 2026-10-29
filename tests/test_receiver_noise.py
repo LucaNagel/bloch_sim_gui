@@ -810,6 +810,44 @@ def test_budget_scales_relative_snr_with_bandwidth_and_grid():
     )
 
 
+def test_budget_warns_when_the_object_or_voxel_is_below_the_noise():
+    from blochsimulator.sequence import EncodingFrame
+    from blochsimulator.sequence.snr_budget import snr_budget
+
+    obj = phantom(shape=(4, 4, 1), fov=(0.02, 0.02, 0.005))
+    program = fid_program()
+    clean = BlochSimulator(use_parallel=False).simulate_sequence(program, obj)
+    grid = ((4, 4), (0.02, 0.02, 0.005), EncodingFrame())
+    run = with_context(clean, program, obj=obj)
+
+    weak = snr_budget(
+        ReceiverNoise("relative", 0.5),
+        phantom=obj,
+        program=program,
+        grid=grid,
+        result=run,
+    )
+    statuses = {section.title: section.status for section in weak}
+    assert statuses["Simulated object"] == "⚠ SNR < 1"
+    warning = next(s for s in weak if s.title == "Simulated object").rows[-1]
+    assert warning.label.startswith("The whole-object FID is below the noise")
+    # 16 equal voxels: the sum rule gives 0.5 x sqrt(32) / sqrt(16) = 0.71.
+    voxel = budget_row(weak, "Last run", "Brightest voxel, all samples")
+    assert voxel.number == pytest.approx(0.5 * np.sqrt(32) / 4, rel=1e-3)
+    assert statuses["Last run"] == "⚠ SNR < 1"
+    last = next(s for s in weak if s.title == "Last run").rows[-1]
+    assert f"about {(3 / voxel.number) ** 2:.3g}×" in last.label
+
+    strong = snr_budget(
+        ReceiverNoise("relative", 100.0),
+        phantom=obj,
+        program=program,
+        grid=grid,
+        result=run,
+    )
+    assert all(section.status == "" for section in strong)
+
+
 def test_spectral_and_dynamic_reference_polarization_is_integrated_once():
     from blochsimulator.dynamic_phantom import DynamicSpectralPhantom
 
