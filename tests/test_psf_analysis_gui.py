@@ -9,6 +9,8 @@ from blochsimulator.sequence import load_pulseq, make_pulseq_flash
 from blochsimulator.sequence.advanced_bssfp_builders import (
     make_pulseq_spectral_selective_bssfp,
 )
+from blochsimulator.sequence.kspace_trajectory import GradientImperfections
+from blochsimulator.sequence.pulseq_builders import make_pulseq_spiral
 from blochsimulator.ui.main_window import BlochSimulatorGUI
 from blochsimulator.ui.psf_analysis_view import (
     PRESETS,
@@ -46,6 +48,18 @@ def _bssfp_3d(tmp_path):
         rf_phase_increment_deg=180.0,
     )
     path = tmp_path / "bssfp_3d.seq"
+    sequence.write(str(path), v141_compat=True)
+    return load_pulseq(path)
+
+
+def _spiral(tmp_path):
+    sequence = make_pulseq_spiral(
+        fov_m=(0.08, 0.08),
+        matrix=(8, 8),
+        sampling_bandwidth_hz=50e3,
+        read_offset_m=0.0,
+    )
+    path = tmp_path / "spiral.seq"
     sequence.write(str(path), v141_compat=True)
     return load_pulseq(path)
 
@@ -145,6 +159,45 @@ def test_psf_view_shows_3d_planes_without_slice_sweep(qt_application, tmp_path):
         assert view.image_item.image.shape == shape
         assert view.image_item.image.max() == pytest.approx(1.0, abs=1e-3)
     assert view.metrics_table.rowCount() == 3
+    view.close()
+
+
+def test_psf_view_spiral_psf_and_gradient_error_modes(qt_application, tmp_path):
+    view, _ = _view(_spiral(tmp_path))
+    imperfections = {"value": GradientImperfections()}
+    view.imperfections_provider = lambda: imperfections["value"]
+    view.position_mm[0].setValue(12.0)
+    view.position_mm[1].setValue(-7.0)
+    view.show()
+    _compute(view)
+
+    psf = view.psf
+    assert psf.kind == "spiral"
+    assert psf.gradient_error == "none"
+    assert "spiral" in view.title_label.text()
+    rows = [
+        view.metrics_table.item(row, 0).text()
+        for row in range(view.metrics_table.rowCount())
+    ]
+    assert rows[:2] == ["Scanner x", "Scanner y"]
+    assert view.modulation_plot.listDataItems()
+    view.modulation_part.setCurrentText("Phase")
+    QApplication.processEvents()
+
+    # Without imperfections the error modes fall back to ideal gradients.
+    view.gradient_error_mode.setCurrentText("Errors, uncorrected")
+    assert view.psf.gradient_error == "none"
+    assert "No gradient imperfections" in view.status_label.text()
+
+    imperfections["value"] = GradientImperfections(delay_s=(5e-6, 5e-6, 0.0))
+    view.gradient_error_mode.setCurrentText("Errors, trajectory-corrected")
+    assert view.psf.gradient_error == "corrected"
+    view.gradient_error_mode.setCurrentText("Errors, uncorrected")
+    assert view.psf.gradient_error == "uncorrected"
+    assert view.status_label.text() == ""
+    assert "nominal trajectory" in view.summary_label.text()
+    view.gradient_error_mode.setCurrentText("Ideal gradients")
+    assert view.psf.gradient_error == "none"
     view.close()
 
 

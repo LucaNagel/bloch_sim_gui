@@ -4742,6 +4742,9 @@ class SequenceSimulationWidget(QWidget):
         self.psf_analysis_view.token_provider = self._psf_analysis_token
         self.psf_analysis_view.nucleus_provider = lambda: self.nucleus.currentText()
         self.kspace_trajectory_view = KSpaceView()
+        self.psf_analysis_view.imperfections_provider = (
+            self.kspace_trajectory_view.imperfections
+        )
         self.kspace_trajectory_view.context_provider = self._kspace_context
         self.kspace_trajectory_view.token_provider = self._psf_analysis_token
         self.kspace_trajectory_view.psf_analysis_requested.connect(
