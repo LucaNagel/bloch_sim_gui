@@ -3096,6 +3096,16 @@ class SequenceSimulationWidget(QWidget):
             "Number of revolutions in the single centre-out spiral interleaf"
         )
         self.epi_spiral_turns.setEnabled(False)
+        self.epi_spiral_design_button = QPushButton("Design…")
+        self.epi_spiral_design_button.setObjectName("epi_spiral_design_button")
+        self.epi_spiral_design_button.setToolTip(
+            "Open the spiral trajectory designer: k-space, gradients and slew "
+            "against the scanner limits for the sequence nucleus, and the "
+            "sampling PSF"
+        )
+        self.epi_spiral_design_button.setEnabled(False)
+        self.epi_spiral_design_button.clicked.connect(self.open_spiral_designer)
+        self.spiral_designer = None
         self.epi_spoil_after_slice = QCheckBox("Enable after each slice")
         self.epi_spoil_after_slice.setChecked(True)
         self.epi_spoil_after_slice.setToolTip(
@@ -3140,7 +3150,11 @@ class SequenceSimulationWidget(QWidget):
         acquisition_form.addRow("Read offset", self.epi_read_offset_mm)
         acquisition_form.addRow("Phase offset", self.epi_phase_offset_mm)
         acquisition_form.addRow("Sampling bandwidth", self.sampling_bandwidth_khz)
-        acquisition_form.addRow("Spiral revolutions", self.epi_spiral_turns)
+        spiral_turns_row = QHBoxLayout()
+        spiral_turns_row.setContentsMargins(0, 0, 0, 0)
+        spiral_turns_row.addWidget(self.epi_spiral_turns, 1)
+        spiral_turns_row.addWidget(self.epi_spiral_design_button)
+        acquisition_form.addRow("Spiral revolutions", spiral_turns_row)
         _add_form_section(acquisition_form, "RF pulse")
         acquisition_form.addRow("Flip angle (constant)", self.epi_flip_angle_deg)
         acquisition_form.addRow("Ernst angle", self.epi_use_ernst_angle)
@@ -8999,6 +9013,7 @@ class SequenceSimulationWidget(QWidget):
     def _readout_trajectory_changed(self, *_):
         spiral = self.epi_readout_trajectory.currentText() == "Spiral"
         self.epi_spiral_turns.setEnabled(spiral)
+        self.epi_spiral_design_button.setEnabled(spiral)
         self.pixel_bandwidth_info.setVisible(not spiral)
         label = self.acquisition_group.layout().labelForField(self.pixel_bandwidth_info)
         if label is not None:
@@ -11689,6 +11704,43 @@ class SequenceSimulationWidget(QWidget):
         }
         parameters.update(self._epi_rf_parameters())
         return parameters
+
+    def open_spiral_designer(self):
+        """Open the spiral designer with the current spiral parameters."""
+        from .spiral_trajectory_designer import SpiralTrajectoryDesigner
+
+        if self.spiral_designer is not None:
+            self.spiral_designer.close()
+        self.spiral_designer = SpiralTrajectoryDesigner(
+            fov_m=self._epi_fov_m(),
+            matrix=(self.read_matrix.value(), self.phase_matrix.value()),
+            sampling_bandwidth_hz=self.sampling_bandwidth_khz.value() * 1000.0,
+            turns=self.epi_spiral_turns.value(),
+            nucleus=self.nucleus.currentText(),
+            scanner_parameters=self.scanner_parameters,
+            parent=self,
+        )
+        self.spiral_designer.applied.connect(self.apply_spiral_design)
+        self.spiral_designer.show()
+        return self.spiral_designer
+
+    def apply_spiral_design(self, parameters):
+        """Set the spiral form fields from the designer's ``applied`` signal."""
+        fov_x, fov_y = parameters["fov_m"]
+        matrix_x, matrix_y = parameters["matrix"]
+        self.epi_read_fov_mm.setValue(fov_x * 1000.0)
+        self.epi_phase_fov_mm.setValue(fov_y * 1000.0)
+        self.read_matrix.setValue(int(matrix_x))
+        self.phase_matrix.setValue(int(matrix_y))
+        self.epi_spiral_turns.setValue(float(parameters["turns"]))
+        self.sampling_bandwidth_khz.setValue(
+            parameters["sampling_bandwidth_hz"] / 1000.0
+        )
+        self._log_message(
+            "Applied spiral design: "
+            f"{parameters['turns']:g} turns, "
+            f"{parameters['sampling_bandwidth_hz'] / 1000.0:.3f} kHz"
+        )
 
     def _spiral_pulseq_parameters(self):
         parameters = self._epi_pulseq_parameters()
