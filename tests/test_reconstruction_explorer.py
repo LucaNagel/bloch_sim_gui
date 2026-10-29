@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import xarray as xr
+from PyQt5.QtCore import QPointF, Qt
 from PyQt5.QtWidgets import QSlider
 
 from blochsimulator.sequence import AcquisitionDimensions, SequenceSimulationResult
@@ -723,6 +724,31 @@ def test_dynamic_explorer_plots_voxel_time_course(qt_application):
     image = np.asarray(dataset["cartesian_image"])
     np.testing.assert_allclose(course.xData, [0.0, 1.0])
     np.testing.assert_allclose(course.yData, np.abs(image[[1, 3], 2, 4]))
+
+
+def test_clicking_the_time_course_selects_the_nearest_repetition(qt_application):
+    dataset = _framed_cartesian_dataset().assign_coords(
+        cartesian_frame_first_adc_time_s=("cartesian_frame", [0.0, 0.01, 1.0, 1.01])
+    )
+    explorer = SequenceReconstructionExplorer()
+    explorer.resize(1200, 800)
+    explorer.show()
+    explorer.set_dataset(dataset)
+    qt_application.processEvents()
+    repetition = explorer.outer_controls["repetition"]
+    assert repetition.value() == 0
+
+    view_box = explorer.spectrum_plot.getViewBox()
+    y = float(np.mean(view_box.viewRange()[1]))
+    event = SimpleNamespace(
+        button=lambda: Qt.LeftButton,
+        scenePos=lambda: view_box.mapViewToScene(QPointF(0.8, y)),
+        accept=lambda: None,
+    )
+    explorer._time_course_clicked(explorer.spectrum_plot, event)
+
+    assert repetition.value() == 1
+    explorer.close()
 
 
 def test_reappearing_voxel_plot_gets_its_share_of_the_height(qt_application):

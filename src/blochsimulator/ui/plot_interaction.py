@@ -56,6 +56,11 @@ def _data_limits(view_box):
     """Return (xLimits, yLimits) from the plotted data, ``None`` where unknown."""
     if not getattr(view_box, "auto_data_limits", True):
         return (None, None), (None, None)
+    # With a locked aspect ratio the widget shape sets one axis from the
+    # other: an X limit then crops Y (and vice versa), so images keep
+    # pyqtgraph's unrestricted zoom.
+    if view_box.state.get("aspectLocked"):
+        return (None, None), (None, None)
     items = [item for item in view_box.addedItems if item.isVisible()]
     if not items:
         return (None, None), (None, None)
@@ -90,8 +95,9 @@ def install_data_range_zoom_limit():
 
     Zooming out of a plot shows nothing new beyond the data (for a time axis
     the measurement), so the view range stops a small margin outside it.
-    Explicit ``setLimits`` still apply; the tighter limit wins. A ViewBox with
-    ``auto_data_limits = False`` keeps pyqtgraph's unrestricted zoom.
+    Explicit ``setLimits`` still apply; the tighter limit wins. An
+    aspect-locked ViewBox, or one with ``auto_data_limits = False``, keeps
+    pyqtgraph's unrestricted zoom.
     """
     current = pg.ViewBox._effectiveLimits
     if getattr(current, "_blochsimulator_data_limits", False):

@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt
@@ -117,6 +118,27 @@ def test_explicit_limits_and_opt_out_are_respected():
     view_box.setRange(xRange=(-100.0, 100.0), padding=0.0)
     app.processEvents()
     assert view_box.viewRange()[0] == pytest.approx([-100.0, 100.0])
+    plot.close()
+    plot.deleteLater()
+    app.processEvents()
+
+
+def test_aspect_locked_image_is_shown_whole_in_a_wide_view():
+    app = QApplication.instance() or QApplication([])
+    install_data_range_zoom_limit()
+    plot = pg.PlotWidget()
+    plot.resize(700, 400)
+    plot.setAspectLocked(True)
+    image = pg.ImageItem(np.ones((64, 64)))
+    plot.addItem(image)
+    plot.show()
+    app.processEvents()
+    plot.autoRange()
+    app.processEvents()
+
+    # A data limit on X would shrink Y through the aspect lock and crop it.
+    y_min, y_max = plot.getViewBox().viewRange()[1]
+    assert y_min <= 0.0 and y_max >= 64.0
     plot.close()
     plot.deleteLater()
     app.processEvents()

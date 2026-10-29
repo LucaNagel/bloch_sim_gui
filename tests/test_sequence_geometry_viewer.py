@@ -368,6 +368,12 @@ def test_geometry_tab_previews_sequence_parameter_changes():
     assert " at 4 mm" in summary
     assert "Generated (dotted)" not in summary
 
+    # Timing-only edits leave FOV and slices as drawn: no notice.
+    widget.flash_echo_time_ms.setValue(widget.flash_echo_time_ms.value() + 1.0)
+    app.processEvents()
+    assert widget._sequence_generation_pending
+    assert notice.isHidden()
+
     widget.flash_read_offset_mm.setValue(6.0)
     widget.flash_phase_offset_mm.setValue(-4.0)
     app.processEvents()

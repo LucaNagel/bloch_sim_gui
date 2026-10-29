@@ -14059,9 +14059,14 @@ class SequenceSimulationWidget(QWidget):
             self._sequence_generation_pending
             and self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES
         )
+        planned = self._planned_sequence_geometry()
         if previewing is None:
-            previewing = self._planned_sequence_geometry() is not None
+            previewing = planned is not None
         if previewing:
+            if stale and self._geometry_matches_sequence(planned):
+                # Timing-only edits such as TE or TR leave FOV and slices
+                # as drawn, so the views are not outdated.
+                stale = False
             if self.program is None:
                 message = (
                     "No sequence has been generated yet; the views show the FOV "
@@ -14079,6 +14084,17 @@ class SequenceSimulationWidget(QWidget):
         else:
             message = STALE_SEQUENCE_MESSAGE
         self.geometry_viewer.set_stale(stale, message)
+
+    def _geometry_matches_sequence(self, planned):
+        """Return whether the planned FOV and slices equal the shown ones."""
+        if planned is None or self.program is None:
+            return False
+        generated = self._sequence_geometry()
+        if generated is None or not planned.covers_same_region(generated):
+            return False
+        if planned.matrix is None or generated.matrix is None:
+            return planned.matrix is None and generated.matrix is None
+        return tuple(planned.matrix) == tuple(generated.matrix)
 
     def _geometry_update_requested(self):
         self._generate_sequence_clicked()

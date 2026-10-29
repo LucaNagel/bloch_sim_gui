@@ -531,6 +531,8 @@ class SequenceReconstructionExplorer(QWidget):
         self._volume_initialized = False
         self._contrast_domain_cache = {}
         self._time_course_cache = {}
+        # Time course plots on screen: plot -> (dimension, x values, positions).
+        self._time_course_clicks = {}
         self._repetition_labels = {}
         self._metabolite_colors = {}
         # Manual contrast window of each metabolite and the one last shown.
@@ -646,6 +648,9 @@ class SequenceReconstructionExplorer(QWidget):
         images.setStretchFactor(2, 3)
         result_splitter.addWidget(images)
         self.spectrum_plot = pg.PlotWidget(title="Selected voxel")
+        self.spectrum_plot.scene().sigMouseClicked.connect(
+            lambda event: self._time_course_clicked(self.spectrum_plot, event)
+        )
         self.spectrum_plot.setLabel("left", "Signal", "a.u.")
         self.spectrum_plot.setLabel("bottom", "Frequency", "Hz")
         self.spectrum_plot.addLegend()
@@ -724,6 +729,9 @@ class SequenceReconstructionExplorer(QWidget):
         self.volume_splitter.setChildrenCollapsible(False)
         self.volume_splitter.addWidget(self.volume_pages)
         self.volume_plot = pg.PlotWidget(title="Selected voxel")
+        self.volume_plot.scene().sigMouseClicked.connect(
+            lambda event: self._time_course_clicked(self.volume_plot, event)
+        )
         self.volume_plot.setObjectName("reconstruction_volume_voxel_plot")
         self.volume_plot.addLegend()
         self.volume_plot.setMinimumHeight(_VOXEL_PLOT_MIN_HEIGHT)
@@ -990,6 +998,7 @@ class SequenceReconstructionExplorer(QWidget):
         self._volume_initialized = False
         self._contrast_domain_cache.clear()
         self._time_course_cache.clear()
+        self._time_course_clicks.clear()
         self.play_button.setChecked(False)
         self.frame_bar.hide()
         self.kspace_panel.clear()
@@ -2011,6 +2020,8 @@ class SequenceReconstructionExplorer(QWidget):
         plot_mode = self.voxel_plot_combo.currentData()
         self.spectrum_plot.clear()
         self.spectrum_plot.setLimits(xMin=None)
+        self._time_course_clicks.pop(self.spectrum_plot, None)
+        self.spectrum_plot.setToolTip("")
         if plot_mode is None or self.pages.currentWidget() is not self.two_d_page:
             return
         if plot_mode == "time_course":
@@ -2135,8 +2146,10 @@ class SequenceReconstructionExplorer(QWidget):
         component = self.component_combo.currentText()
         plot.setLabel("left", component, "a.u.")
         repetitions = list(dimension.values)
+        shown = list(range(len(repetitions)))
         if self._repetition_labels:
             selected = self._metabolite_filter_value()
+            shown = []
             for label, color in self._metabolite_colors.items():
                 if selected is not None and label != selected:
                     continue
@@ -2145,6 +2158,7 @@ class SequenceReconstructionExplorer(QWidget):
                     for position, value in enumerate(repetitions)
                     if self._repetition_labels.get(value) == label
                 ]
+                shown.extend(rows)
                 plot.plot(
                     axis[rows],
                     values[rows],
@@ -2177,11 +2191,36 @@ class SequenceReconstructionExplorer(QWidget):
         plot.setTitle(f"Time course · voxel {location}")
         # Repetitions and times start at zero.
         plot.setLimits(xMin=0.0)
+        # A click picks the nearest plotted repetition.
+        self._time_course_clicks[plot] = (dimension.name, axis, sorted(shown))
+        plot.setToolTip("Click into the time course to show that repetition.")
+
+    def _time_course_clicked(self, plot, event):
+        """Select the repetition nearest to a click into a time course."""
+        target = self._time_course_clicks.get(plot)
+        if target is None or event.button() != Qt.LeftButton:
+            return
+        name, axis, shown = target
+        control = self.outer_controls.get(name)
+        view_box = plot.getViewBox()
+        if (
+            not shown
+            or not isinstance(control, QSlider)
+            or not control.isEnabled()
+            or not view_box.sceneBoundingRect().contains(event.scenePos())
+        ):
+            return
+        x = view_box.mapSceneToView(event.scenePos()).x()
+        nearest = min(shown, key=lambda position: abs(axis[position] - x))
+        event.accept()
+        control.setValue(int(nearest))
 
     def _refresh_volume_plot(self):
         """Show the time course of the voxel selected in the 3D image."""
         plot = self.volume_plot
         plot.clear()
+        self._time_course_clicks.pop(plot, None)
+        plot.setToolTip("")
         available = (
             self.model is not None
             and self._time_course_dimension() is not None
