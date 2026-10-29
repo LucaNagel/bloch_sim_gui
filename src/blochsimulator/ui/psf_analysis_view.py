@@ -39,7 +39,14 @@ from ..sequence.psf import (
 )
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
 
-ROLE_COLORS = {"read": "#2563eb", "phase": "#d97706", "partition": "#7c3aed"}
+ROLE_COLORS = {
+    "read": "#2563eb",
+    "phase": "#d97706",
+    "partition": "#7c3aed",
+    "x": "#2563eb",
+    "y": "#d97706",
+}
+SPIRAL_COLOR = "#0f766e"
 SLICE_COLOR = "#15803d"
 OTHER_SLICE_COLOR = "#94a3b8"
 NOMINAL_FILL = (21, 128, 61, 28)
@@ -72,6 +79,12 @@ PRESETS = (
     PSFSourcePreset("HP [1-13C]pyruvate in vivo", 30000.0, 300.0, 20.0, True),
 )
 NUCLEUS_PRESETS = {"H1": 1, "C13": 2}
+# Gradient-error display modes: label, (apply errors, correct trajectory).
+GRADIENT_ERROR_MODES = {
+    "Ideal gradients": (False, False),
+    "Errors, uncorrected": (True, False),
+    "Errors, trajectory-corrected": (True, True),
+}
 
 
 @dataclass(frozen=True)
@@ -173,6 +186,8 @@ class PSFAnalysisThread(QThread):
 
 
 def _role_label(role, frame):
+    if role in ("x", "y", "z"):
+        return f"Scanner {role}"
     if frame is None or not frame.is_axis_aligned:
         return role.capitalize()
     axis = frame.axis_codes[ROLE_INDEX[role]]
@@ -190,7 +205,9 @@ class PSFAnalysisView(QWidget):
     ``ValueError`` with a message for the user; ``token_provider`` returns the
     current sequence token, which marks older results stale; and
     ``nucleus_provider`` returns the Sequence Mode nucleus and chooses the
-    initial source preset.
+    initial source preset. ``imperfections_provider`` returns the
+    :class:`GradientImperfections` of the k-space tab for the gradient-error
+    modes.
     """
 
     def __init__(self, parent=None):
@@ -198,6 +215,8 @@ class PSFAnalysisView(QWidget):
         self.context_provider: Optional[Callable[[], PSFAnalysisContext]] = None
         self.nucleus_provider: Optional[Callable[[], str]] = None
         self.token_provider: Optional[Callable[[], object]] = None
+        self.imperfections_provider: Optional[Callable[[], object]] = None
+        self._gradient_error_cache = None
         self.computation: Optional[PSFComputation] = None
         self.psf: Optional[PSFResult] = None
         self.worker: Optional[PSFAnalysisThread] = None
@@ -227,7 +246,9 @@ class PSFAnalysisView(QWidget):
             "relaxation during the readout, flip-angle and hyperpolarized "
             "depletion along the k-space order, off-resonance, and T2* through "
             "a Lorentzian frequency ensemble. Supported are Cartesian 2D "
-            "frames and 3D volumes."
+            "frames and 3D volumes and 2D spiral frames, which are "
+            "reconstructed by density-compensated gridding. Gradient errors "
+            "come from the imperfections set in the k-space tab."
         )
         self.summary_label.setWordWrap(True)
         self.summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -283,6 +304,20 @@ class PSFAnalysisView(QWidget):
         self.modulation_part.setToolTip("Part of the k-space modulation in plot 3")
         self.modulation_part.currentIndexChanged.connect(self._display_changed)
         controls.addWidget(self.modulation_part)
+        self.gradient_error_mode = QComboBox()
+        self.gradient_error_mode.addItems(list(GRADIENT_ERROR_MODES))
+        self.gradient_error_mode.setToolTip(
+            "Gradient imperfections of the k-space tab (delay, scaling, eddy "
+            "currents) shift the actual k-space positions by Δk, which adds "
+            "exp(-2πi Δk·r0) to the source signal. Uncorrected: reconstruct "
+            "on the nominal trajectory. Trajectory-corrected: reconstruct on "
+            "the actual (measured) trajectory; 2D only. The simulation itself "
+            "is not repeated."
+        )
+        self.gradient_error_mode.currentIndexChanged.connect(
+            self._gradient_error_changed
+        )
+        controls.addWidget(self.gradient_error_mode)
         layout.addLayout(controls)
 
         grid = QGridLayout()
@@ -360,7 +395,7 @@ class PSFAnalysisView(QWidget):
         self.metrics_table.setToolTip(
             "Nominal: voxel size, or slice thickness for the slice row. "
             "Broadening: FWHM relative to the ideal PSF of the same matrix "
-            "(about 1.21 voxels). Peak shift: for the slice, in slice "
+            "or trajectory (about 1.21 voxels for Cartesian k-space). Peak shift: for the slice, in slice "
             "thicknesses from the nominal centre. Side lobe: largest side lobe "
             "relative to the peak, with the ideal value in brackets."
         )
@@ -564,6 +599,8 @@ class PSFAnalysisView(QWidget):
         self.cancel_button.setEnabled(False)
         self.status_label.setText("")
         self.set_computation(computation)
+        if self.gradient_error_mode.currentIndex() > 0:
+            self._gradient_error_changed()
 
     def _failed(self, message):
         self.compute_button.setEnabled(True)
@@ -600,14 +637,72 @@ class PSFAnalysisView(QWidget):
         )
         self.image_scale.setEnabled(enabled)
         self.modulation_part.setEnabled(enabled)
+        self.gradient_error_mode.setEnabled(enabled)
+
+    def _gradient_error(self, program):
+        """Return Δk per ADC sample for the k-space tab's imperfections."""
+        if self.imperfections_provider is None:
+            raise ValueError("No gradient imperfections are connected")
+        imperfections = self.imperfections_provider()
+        if imperfections.is_ideal:
+            raise ValueError(
+                "No gradient imperfections are set in the k-space tab; the "
+                "PSF uses ideal gradients"
+            )
+        key = (id(program), repr(imperfections.to_dict()))
+        if self._gradient_error_cache is None or self._gradient_error_cache[0] != key:
+            from ..sequence.kspace_trajectory import gradient_error
+
+            self._gradient_error_cache = (key, gradient_error(program, imperfections))
+        return self._gradient_error_cache[1]
+
+    def _psf_for(self, frame):
+        """PSF of ``frame`` under the selected gradient-error mode."""
+        computation = self.computation
+        apply_errors, correct = GRADIENT_ERROR_MODES[
+            self.gradient_error_mode.currentText()
+        ]
+        options = {}
+        message = ""
+        if apply_errors:
+            try:
+                options = dict(
+                    gradient_error_cyc_per_m=self._gradient_error(
+                        computation.context.program
+                    ),
+                    trajectory_correction=correct,
+                )
+            except ValueError as exc:
+                message = str(exc)
+        try:
+            psf = psf_from_result(
+                computation.simulation, computation.source, frame=frame, **options
+            )
+        except ValueError as exc:
+            if not options:
+                raise
+            message = f"{exc}; showing the uncorrected PSF"
+            options["trajectory_correction"] = False
+            psf = psf_from_result(
+                computation.simulation, computation.source, frame=frame, **options
+            )
+        self.status_label.setText(message)
+        self.status_label.setStyleSheet(
+            "color: #b45309;" if message else "color: #475569;"
+        )
+        return psf
 
     def _frame_changed(self, index):
         computation = self.computation
         if computation is None or index < 0 or index == self.psf.frame:
             return
-        self.psf = psf_from_result(
-            computation.simulation, computation.source, frame=index
-        )
+        self.psf = self._psf_for(index)
+        self._display_changed()
+
+    def _gradient_error_changed(self, *_):
+        if self.computation is None:
+            return
+        self.psf = self._psf_for(self.psf.frame)
         self._display_changed()
 
     def _display_changed(self, *_):
@@ -658,7 +753,10 @@ class PSFAnalysisView(QWidget):
         psf = self.psf
         source = computation.source
         title = f"{computation.context.title} · "
-        title += "3D volume" if len(psf.roles) == 3 else "2D frame"
+        if psf.kind == "spiral":
+            title += "2D spiral frame"
+        else:
+            title += "3D volume" if len(psf.roles) == 3 else "2D frame"
         if len(psf.frame_labels) > 1:
             title += f" {psf.label}"
         self.title_label.setText(title)
@@ -681,10 +779,15 @@ class PSFAnalysisView(QWidget):
             if source.equilibrium_mz < 1.0
             else "thermal"
         )
+        gradients = {
+            "none": "ideal gradients",
+            "uncorrected": "gradient errors reconstructed on the nominal trajectory",
+            "corrected": "gradient errors reconstructed on the actual trajectory",
+        }[psf.gradient_error]
         self.summary_label.setText(
             f"Point source at ({position}) mm, "
             f"{', '.join(relaxation) or 'no relaxation'}, "
-            f"Δf {source.off_resonance_hz:g} Hz, {polarization}."
+            f"Δf {source.off_resonance_hz:g} Hz, {polarization}, {gradients}."
         )
         self.summary_label.setStyleSheet("color: #15803d;")
 
@@ -772,6 +875,23 @@ class PSFAnalysisView(QWidget):
             step = np.median(np.abs(np.diff(k))) if k.size > 1 else 1.0
             yield role, k / (step or 1.0), values
 
+    @staticmethod
+    def _spiral_modulation(psf):
+        """Return ``(|k| in Δk, values)`` of all samples in acquisition order.
+
+        ``offsets_m`` spans one FOV period per axis, so Δk = 1/FOV.
+        """
+        fov = [
+            offsets.size * (offsets[1] - offsets[0]) if offsets.size > 1 else 1.0
+            for offsets in psf.offsets_m
+        ]
+        radius = np.sqrt(
+            sum((np.asarray(k) * size) ** 2 for k, size in zip(psf.k_cyc_per_m, fov))
+        )
+        modulation = np.asarray(psf.modulation)
+        reference = modulation[int(np.argmin(radius))] if modulation.size else 1.0
+        return radius, modulation / (reference if reference != 0 else 1.0)
+
     def _render_modulation(self, psf):
         plot = self.modulation_plot
         phase = self.modulation_part.currentText() == "Phase"
@@ -779,6 +899,30 @@ class PSFAnalysisView(QWidget):
             "left",
             "Phase vs k-space centre [°]" if phase else "Weight / k-space centre",
         )
+        if psf.kind == "spiral":
+            plot.setLabel("bottom", "|k| [Δk], samples in acquisition order")
+            radius, values = self._spiral_modulation(psf)
+            y = np.degrees(np.unwrap(np.angle(values))) if phase else np.abs(values)
+            plot.plot(
+                radius,
+                y,
+                pen=pg.mkPen(SPIRAL_COLOR, width=1),
+                symbol="o",
+                symbolSize=3,
+                symbolPen=None,
+                symbolBrush=pg.mkBrush(SPIRAL_COLOR),
+                name="spiral samples",
+            )
+            if not phase:
+                plot.addItem(
+                    pg.InfiniteLine(
+                        1.0, angle=0, pen=pg.mkPen("#334155", style=Qt.DashLine)
+                    )
+                )
+            self._limit_zoom(plot, [y], 5.0 if phase else 0.05)
+            return
+        plot.setLabel("bottom", "k [Δk]")
+        drawn = []
         for role, k, values in self._modulation_lines(psf):
             order = np.argsort(k)
             y = (
@@ -796,12 +940,29 @@ class PSFAnalysisView(QWidget):
                 symbolBrush=pg.mkBrush(ROLE_COLORS[role]),
                 name=_role_label(role, psf.encoding_frame),
             )
+            drawn.append(y)
         if not phase:
             plot.addItem(
                 pg.InfiniteLine(
                     1.0, angle=0, pen=pg.mkPen("#334155", style=Qt.DashLine)
                 )
             )
+        self._limit_zoom(plot, drawn, 5.0 if phase else 0.05)
+
+    @staticmethod
+    def _limit_zoom(plot, values, half_span):
+        """Keep at least ``2 half_span`` of y range around nearly flat data.
+
+        Auto-range would otherwise zoom into rounding noise, e.g. the
+        constant weight of a source without relaxation.
+        """
+        values = np.concatenate([np.ravel(value) for value in values] or [[]])
+        values = values[np.isfinite(values)]
+        if values.size and np.ptp(values) < half_span:
+            centre = 0.5 * (values.min() + values.max())
+            plot.setYRange(centre - half_span, centre + half_span, padding=0.0)
+        else:
+            plot.enableAutoRange(axis="y")
 
     def _render_slice_profile(self, psf):
         plot = self.slice_plot

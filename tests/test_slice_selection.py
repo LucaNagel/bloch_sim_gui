@@ -191,7 +191,7 @@ def test_selection_round_trip_has_no_adc_spoiler_or_tail(tmp_path, rephase, axis
         tmp_path,
         rephase=rephase,
         slice_axis=axis,
-        scanner_parameters=ScannerParameters(),
+        scanner_parameters=ScannerParameters(max_grad_mtm=32.0, max_slew_tms=130.0),
     )
     compiled = SequenceCompiler().compile(program)
     assert len(program.rf_events) == 1

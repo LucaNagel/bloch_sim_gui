@@ -323,8 +323,28 @@ def resolve_encoding_frame(
 
 
 def make_role_trapezoid(pp, frame: EncodingFrame, role: str, **kwargs):
-    """Create one axis-aligned Pulseq trapezoid from logical role values."""
+    """Create one axis-aligned Pulseq trapezoid from logical role values.
+
+    A requested amplitude above the gradient limit raises a ValueError that
+    reports the physical gradient of the nucleus of ``system``.
+    """
     axis, sign = frame.axis_and_sign(role)
+    system = kwargs.get("system")
+    amplitude = kwargs.get("amplitude")
+    if system is not None and amplitude is not None:
+        limit = float(system.max_grad)
+        if abs(float(amplitude)) > limit * (1.0 + 1e-9):
+            gamma = float(system.gamma)
+            hint = (
+                "; lower the sampling bandwidth or enlarge the FOV"
+                if role == "read"
+                else ""
+            )
+            raise ValueError(
+                f"the {role} gradient needs "
+                f"{abs(float(amplitude)) / gamma * 1e3:.3g} mT/m, above the "
+                f"{limit / gamma * 1e3:.3g} mT/m limit{hint}"
+            )
     transformed = dict(kwargs)
     for key in ("area", "flat_area", "amplitude"):
         if key in transformed:

@@ -23,6 +23,7 @@ from .rf_pulses import (
     spectral_spatial_refocus_area,
 )
 from .scanner import ScannerParameters
+from ..units import NUCLEUS_GAMMA_HZ_PER_T
 from .spectral_spatial import SpectralSpatialPulse
 from .bssfp_phase import (
     advance_bssfp_phase_deg,
@@ -79,13 +80,25 @@ def _nonnegative_values(values: Sequence[float], name: str) -> tuple[float, ...]
     return result
 
 
+# Standalone limits of these 13C builders: a preclinical gradient system, on
+# which the published 13C protocols they reproduce are feasible (the former
+# 100 mT/m and 1000 T/m/s scaled to the 13C gyromagnetic ratio).
+PRECLINICAL_MAX_GRAD_MTM = 400.0
+PRECLINICAL_MAX_SLEW_TMS = 4000.0
+
+
 def _make_system(
     pp,
     scanner_parameters: ScannerParameters | Mapping[str, float] | None,
     *,
     legacy_max_grad_mtm: float,
     legacy_max_slew_tms: float,
+    nucleus: str,
 ):
+    """Pulseq limits that bound the physical gradient of ``nucleus``."""
+    if nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
+        raise ValueError(f"unknown nucleus: {nucleus}")
+    gamma = NUCLEUS_GAMMA_HZ_PER_T[nucleus]
     if scanner_parameters is None:
         return pp.Opts(
             max_grad=legacy_max_grad_mtm,
@@ -95,9 +108,10 @@ def _make_system(
             rf_ringdown_time=20e-6,
             rf_dead_time=100e-6,
             adc_dead_time=20e-6,
+            gamma=gamma,
         )
     profile = ScannerParameters.from_mapping(scanner_parameters)
-    return pp.Opts(**profile.to_pypulseq_kwargs())
+    return pp.Opts(**profile.to_pypulseq_kwargs(), gamma=gamma)
 
 
 def _raise_for_timing_errors(sequence, name: str) -> None:
@@ -467,8 +481,9 @@ def make_pulseq_spectral_selective_bssfp(
     system = _make_system(
         pp,
         scanner_parameters,
-        legacy_max_grad_mtm=100.0,
-        legacy_max_slew_tms=1000.0,
+        legacy_max_grad_mtm=PRECLINICAL_MAX_GRAD_MTM,
+        legacy_max_slew_tms=PRECLINICAL_MAX_SLEW_TMS,
+        nucleus=nucleus,
     )
     sequence = pp.Sequence(system)
     raster = system.block_duration_raster
@@ -1207,8 +1222,9 @@ def make_pulseq_me_bssfp(
     system = _make_system(
         pp,
         scanner_parameters,
-        legacy_max_grad_mtm=100.0,
-        legacy_max_slew_tms=1000.0,
+        legacy_max_grad_mtm=PRECLINICAL_MAX_GRAD_MTM,
+        legacy_max_slew_tms=PRECLINICAL_MAX_SLEW_TMS,
+        nucleus=nucleus,
     )
     sequence = pp.Sequence(system)
     if rf_time_bandwidth_product is None:
@@ -1887,8 +1903,9 @@ def make_pulseq_radial_me_bssfp(
     system = _make_system(
         pp,
         scanner_parameters,
-        legacy_max_grad_mtm=32.0,
-        legacy_max_slew_tms=130.0,
+        legacy_max_grad_mtm=PRECLINICAL_MAX_GRAD_MTM,
+        legacy_max_slew_tms=PRECLINICAL_MAX_SLEW_TMS,
+        nucleus=nucleus,
     )
     sequence = pp.Sequence(system)
     sample_count = base_resolution * readout_oversampling

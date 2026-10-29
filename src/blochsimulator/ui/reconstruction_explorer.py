@@ -11,6 +11,7 @@ from scipy.ndimage import zoom
 from PyQt5.QtCore import QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QImage, QPainter, QPen
 from PyQt5.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -533,6 +534,8 @@ class SequenceReconstructionExplorer(QWidget):
         self._image_dims = ()
         self._session_runs = {}
         self._result = None
+        # Returns Δk per ADC sample of a result for the gradient-error option.
+        self.gradient_error_provider = None
         self._phantom = None
         self._phantom_contrasts = []
         self._phantom_contrast = None
@@ -759,6 +762,7 @@ class SequenceReconstructionExplorer(QWidget):
         self.voxel_plot_combo.currentIndexChanged.connect(self._voxel_plot_changed)
         data_layout.addRow(self.voxel_plot_label, self.voxel_plot_combo)
         controls_layout.addWidget(data_group)
+        controls_layout.addWidget(self._build_reconstruction_group())
 
         phantom_group = QGroupBox("Phantom")
         phantom_group.setObjectName("reconstruction_phantom_group")
@@ -978,6 +982,121 @@ class SequenceReconstructionExplorer(QWidget):
         )
         self.export_button.setEnabled(False)
 
+    def _build_reconstruction_group(self):
+        """Spiral reconstruction method and gradient-error options."""
+        group = QGroupBox("Reconstruction")
+        group.setObjectName("reconstruction_method_group")
+        layout = QFormLayout(group)
+        self.reconstruction_method_combo = QComboBox()
+        self.reconstruction_method_combo.setObjectName("reconstruction_method")
+        for label, value in (
+            ("Density-compensated NUFFT", "nufft"),
+            ("Iterative CG-NUFFT", "cg"),
+            ("Linear gridding", "linear"),
+        ):
+            self.reconstruction_method_combo.addItem(label, value)
+        self.reconstruction_method_combo.setToolTip(
+            "NUFFT: adjoint NUFFT with Pipe-Menon density compensation. "
+            "CG-NUFFT: 10 conjugate-gradient iterations of the least-squares "
+            "problem, sharper but slower. Linear: interpolation of the samples "
+            "onto the Cartesian grid followed by an FFT."
+        )
+        self.reconstruction_method_combo.currentIndexChanged.connect(
+            self._reconstruction_options_changed
+        )
+        layout.addRow("Method", self.reconstruction_method_combo)
+        self.reconstruction_trajectory_combo = QComboBox()
+        self.reconstruction_trajectory_combo.setObjectName("reconstruction_trajectory")
+        self.reconstruction_trajectory_combo.addItem("Ideal gradients", False)
+        self.reconstruction_trajectory_combo.addItem(
+            "Gradient errors, uncorrected", True
+        )
+        self.reconstruction_trajectory_combo.setToolTip(
+            "Reconstruct as if the gradient imperfections set in the k-space "
+            "tab had acted during the scan while the reconstruction assumes the "
+            "nominal trajectory. The simulated signal is reconstructed on "
+            "k - Δk, which gives the same trajectory mismatch to first order."
+        )
+        self.reconstruction_trajectory_combo.currentIndexChanged.connect(
+            self._reconstruction_options_changed
+        )
+        layout.addRow("Trajectory", self.reconstruction_trajectory_combo)
+        self.reconstruction_message = QLabel()
+        self.reconstruction_message.setWordWrap(True)
+        self.reconstruction_message.setStyleSheet("color: #475569;")
+        layout.addRow(self.reconstruction_message)
+        self.reconstruction_group = group
+        group.setVisible(False)
+        return group
+
+    def _update_reconstruction_controls(self, result):
+        """Show the spiral options for ``result`` and select its own method."""
+        try:
+            spiral = getattr(result, "spiral_acquisition", None)
+        except ValueError:
+            spiral = None
+        self.reconstruction_group.setVisible(spiral is not None)
+        if spiral is None:
+            return
+        for combo, value in (
+            (self.reconstruction_method_combo, spiral.reconstruction_method),
+            (self.reconstruction_trajectory_combo, False),
+        ):
+            previous = combo.blockSignals(True)
+            self._set_combo_data(combo, value)
+            combo.blockSignals(previous)
+        self.reconstruction_message.setText("")
+        self.reconstruction_trajectory_combo.setEnabled(
+            self.gradient_error_provider is not None
+        )
+
+    def reconstruction_variant(self, result, method, gradient_errors=False):
+        """Return ``result`` reconstructed with ``method`` (spiral only).
+
+        With ``gradient_errors`` the ADC moments are shifted by -Δk from
+        :attr:`gradient_error_provider`, so the reconstruction assumes a
+        trajectory that differs from the one that encoded the signal.
+        """
+        from dataclasses import replace
+
+        spiral = result.spiral_acquisition.with_reconstruction_method(method)
+        metadata = dict(result.metadata)
+        metadata["spiral_acquisition"] = spiral.to_metadata()
+        moments = result.adc_gradient_moment_cyc_per_m
+        if gradient_errors:
+            delta = np.asarray(self.gradient_error_provider(result), dtype=float)
+            moments = np.asarray(moments, dtype=float) - delta
+        return replace(result, metadata=metadata, adc_gradient_moment_cyc_per_m=moments)
+
+    def _reconstruction_options_changed(self, *_):
+        result = self._result
+        if result is None or self.model is None:
+            return
+        method = self.reconstruction_method_combo.currentData()
+        errors = bool(self.reconstruction_trajectory_combo.currentData())
+        message = ""
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            try:
+                variant = self.reconstruction_variant(result, method, errors)
+            except ValueError as exc:
+                message = f"{exc}; reconstructed with ideal gradients"
+                variant = self.reconstruction_variant(result, method)
+            model = SequenceReconstructionModel.from_result(variant)
+        finally:
+            QApplication.restoreOverrideCursor()
+        state = self.get_state()
+        run_id = self.simulation_combo.currentData()
+        self.set_model(model, source=self.source, phantom=self._phantom)
+        self.restore_state(state)
+        self._result = result
+        self._select_session_run(run_id)
+        self.reconstruction_group.setVisible(True)
+        self.reconstruction_message.setText(message)
+        self.reconstruction_message.setStyleSheet(
+            "color: #b45309;" if message else "color: #475569;"
+        )
+
     def set_result(self, result, phantom=None):
         source = result.metadata.get("sequence_source", "current simulation")
         run = next(
@@ -992,6 +1111,7 @@ class SequenceReconstructionExplorer(QWidget):
         )
         self._result = result
         self._select_session_run(None if run is None else run.run_id)
+        self._update_reconstruction_controls(result)
 
     def set_dataset(self, dataset, *, source=None):
         self.set_model(SequenceReconstructionModel(dataset), source=source)
@@ -1001,6 +1121,7 @@ class SequenceReconstructionExplorer(QWidget):
     ):
         self._result = None
         self._select_session_run(None)
+        self.reconstruction_group.setVisible(False)
         self.play_button.setChecked(False)
         self.model = model
         self.source = None if source is None else str(source)

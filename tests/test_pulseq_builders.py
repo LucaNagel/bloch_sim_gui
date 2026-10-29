@@ -1274,6 +1274,94 @@ def test_spiral_builder_round_trips_and_reconstructs_frames(tmp_path):
     assert dataset["spiral_image"].shape == (4, 8, 8)
 
 
+def test_exported_spiral_reconstructs_again_from_every_format(tmp_path):
+    import json
+
+    import xarray as xr
+
+    from blochsimulator.notebook_exporter import (
+        _sequence_result_reconstruction_methods_markdown,
+        export_sequence_result_notebook,
+    )
+    from blochsimulator.sequence.reconstruction import reconstruct_spiral_frames
+
+    sequence = make_pulseq_spiral(
+        fov_m=(0.08, 0.08),
+        matrix=(8, 8),
+        sampling_bandwidth_hz=50_000.0,
+        spiral_turns=4.0,
+        repetitions=2,
+        repetition_time_s=50e-3,
+    )
+    program = _write_and_load(sequence, tmp_path / "spiral.seq")
+    compiled = SequenceCompiler().compile_acquisition(program)
+    acquisition = infer_spiral_acquisition(program, compiled=compiled)
+    rng = np.random.default_rng(3)
+    signal = rng.normal(size=acquisition.num_samples) + 1j * rng.normal(
+        size=acquisition.num_samples
+    )
+    result = SequenceSimulationResult(
+        signal=signal,
+        adc_times_s=compiled.adc_times_s,
+        final_magnetization=np.zeros((1, 1, 1, 3)),
+        checkpoint_magnetization=None,
+        checkpoint_times_s=np.empty(0),
+        adc_gradient_moment_cyc_per_m=compiled.adc_gradient_moment_cyc_per_m,
+        metadata={
+            "acquisition_dimensions": acquisition.dimensions.to_metadata(),
+            "spiral_acquisition": acquisition.to_metadata(),
+        },
+    )
+    expected = result.to_xarray()["spiral_image"].values
+
+    netcdf = result.save(tmp_path / "spiral.nc")
+    with xr.open_dataset(netcdf) as stored:
+        moments = (
+            stored["adc_gradient_moment_cyc_per_m"]
+            .transpose("adc", "gradient_axis")
+            .values
+        )
+        metadata = stored.attrs["metadata_json"]
+        raw = stored["signal_real"].values + 1j * stored["signal_imag"].values
+    assert np.allclose(reconstruct_spiral_frames(raw, moments, metadata), expected)
+
+    with np.load(result.save(tmp_path / "spiral.npz")) as stored:
+        cg = reconstruct_spiral_frames(
+            stored["signal"],
+            stored["adc_gradient_moment_cyc_per_m"],
+            stored["metadata_json"],
+            method="cg",
+            frames=[1],
+        )
+    assert cg.shape == (1, 8, 8)
+    assert np.allclose(cg[0], acquisition.reconstruct(result, 1, method="cg"))
+
+    notebook_path = export_sequence_result_notebook(
+        str(tmp_path / "spiral_analysis.ipynb"), str(netcdf)
+    )
+    notebook = nbformat.read(notebook_path, as_version=4)
+    text = nbformat.writes(notebook)
+    assert "NUFFT" in text
+    assert "reconstruct_spiral_frames" in text
+    assert "sampling_gap" in text
+    for cell in notebook.cells:
+        if cell.cell_type == "code":
+            compile(cell.source, str(notebook_path), "exec")
+    assert "NUFFTOperator" in _sequence_result_reconstruction_methods_markdown(
+        "radial_3d"
+    )
+
+    examples = Path(__file__).resolve().parents[1] / "examples"
+    for name, marker in (
+        ("load_bloch_project.ipynb", "spiral.reconstruct(sequence"),
+        ("load_exported_results.ipynb", "reconstruct_spiral_frames"),
+    ):
+        example = json.loads((examples / name).read_text(encoding="utf-8"))
+        cells = ["".join(cell["source"]) for cell in example["cells"]]
+        assert any("NUFFT" in source for source in cells)
+        assert any(marker in source for source in cells)
+
+
 def test_undeclared_spiral_is_detected_from_its_trajectory(tmp_path):
     from dataclasses import replace
 

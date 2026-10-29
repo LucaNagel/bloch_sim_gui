@@ -109,6 +109,19 @@ def _centered_adc_dwell(requested_dwell: float, sample_count: int, system) -> fl
     )
 
 
+def _readout_rise_time(system, amplitude_hz_per_m: float) -> float:
+    """Ramp of an ADC plateau: slew limited and at least the ADC dead time.
+
+    Pulseq delays an ADC that starts within the dead time, which would move
+    the samples off the centre of the plateau, and extends its block past the
+    gradient raster.
+    """
+    slew_limited = abs(float(amplitude_hz_per_m)) / system.max_slew
+    return _ceil_to_raster(
+        max(slew_limited, float(system.adc_dead_time)), system.grad_raster_time
+    )
+
+
 def _sequence_duration_s(sequence) -> float:
     return 0.0 if not sequence.block_events else float(sequence.duration()[0])
 
@@ -186,12 +199,21 @@ def _make_scanner_system(
     scanner_parameters: ScannerParameters | Mapping[str, float] | None,
     *,
     legacy_kwargs: Mapping[str, float | str],
+    nucleus: str = "H1",
 ):
-    """Create Pulseq limits while preserving legacy standalone defaults."""
+    """Create Pulseq limits while preserving legacy standalone defaults.
+
+    The gradient limits are in mT/m and T/m/s; Pulseq converts them to Hz/m
+    with the gyromagnetic ratio of ``nucleus``, so they bound the physical
+    gradient of the imaged nucleus.
+    """
+    if nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
+        raise ValueError(f"unknown nucleus: {nucleus}")
+    gamma = NUCLEUS_GAMMA_HZ_PER_T[nucleus]
     if scanner_parameters is None:
-        return pp.Opts(**dict(legacy_kwargs))
+        return pp.Opts(**dict(legacy_kwargs), gamma=gamma)
     profile = ScannerParameters.from_mapping(scanner_parameters)
-    return pp.Opts(**profile.to_pypulseq_kwargs())
+    return pp.Opts(**profile.to_pypulseq_kwargs(), gamma=gamma)
 
 
 def _make_slice_selective_rf_events(
@@ -821,6 +843,22 @@ def _remap_gradient_event(event, frame: EncodingFrame, role: str):
     return mapped
 
 
+def _shortest_common_lobe_duration(
+    pp, system, areas: Sequence[float], *, minimum_s: float
+) -> float:
+    """Duration that fits trapezoids of all ``areas``, at least ``minimum_s``.
+
+    Fixed lobe durations that suffice for 1H can be too short for a nucleus
+    with a lower gyromagnetic ratio; the lobes are then lengthened.
+    """
+    duration = float(minimum_s)
+    for area in areas:
+        if abs(float(area)) > 0:
+            lobe = pp.make_trapezoid("x", area=float(area), system=system)
+            duration = max(duration, float(pp.calc_duration(lobe)))
+    return _ceil_to_raster(duration, system.grad_raster_time)
+
+
 def _slice_rephase_area(
     rf_event,
     gradient_event,
@@ -1200,6 +1238,7 @@ def make_pulseq_csi(
             "rf_dead_time": 100e-6,
             "adc_dead_time": 20e-6,
         },
+        nucleus=nucleus,
     )
     sequence = pp.Sequence(system)
     requested_dwell = 1.0 / float(spectral_bandwidth_hz)
@@ -2383,12 +2422,10 @@ def make_pulseq_bssfp(
             "rf_dead_time": 100e-6,
             "adc_dead_time": 20e-6,
         },
+        nucleus=nucleus,
     )
     sequence = pp.Sequence(system)
-    requested_dwell = 1.0 / float(sampling_bandwidth_hz)
-    dwell = round(requested_dwell / system.adc_raster_time) * system.adc_raster_time
-    if dwell <= 0:
-        raise ValueError("sampling bandwidth exceeds the ADC raster capability")
+    dwell = _centered_adc_dwell(1.0 / float(sampling_bandwidth_hz), n_read, system)
 
     rf_events, actual_rf_duration_s, effective_rf_tbw, rf_pulse_type = (
         make_pulseq_rf_events(
@@ -2425,24 +2462,21 @@ def make_pulseq_bssfp(
         rf_alpha_half_select = None
     readout_duration = n_read * dwell
     readout_amplitude = 1.0 / (fov_x * dwell)
-    readout_rise_time = max(
-        system.adc_dead_time,
-        np.ceil(abs(readout_amplitude) / system.max_slew / system.grad_raster_time)
-        * system.grad_raster_time,
-    )
+    readout_rise_time = _readout_rise_time(system, readout_amplitude)
+    flat_time = _ceil_to_raster(readout_duration, system.grad_raster_time)
     gx = make_role_trapezoid(
         pp,
         encoding_frame,
         "read",
-        flat_area=n_read / fov_x,
-        flat_time=readout_duration,
+        amplitude=readout_amplitude,
+        flat_time=flat_time,
         rise_time=readout_rise_time,
         system=system,
     )
     adc = pp.make_adc(
         num_samples=n_read,
         dwell=dwell,
-        delay=gx.rise_time,
+        delay=gx.rise_time + (flat_time - readout_duration) / 2.0,
         system=system,
     )
     adc.freq_offset = float(read_offset_m) * readout_amplitude
@@ -2900,6 +2934,7 @@ def make_pulseq_epi(
             "rf_dead_time": 100e-6,
             "adc_dead_time": 20e-6,
         },
+        nucleus=nucleus,
     )
     sequence = pp.Sequence(system)
     dwell = _centered_adc_dwell(
@@ -2983,12 +3018,14 @@ def make_pulseq_epi(
     delta_kx, delta_ky = 1.0 / fov_x, 1.0 / fov_y
     adc_duration = n_x * dwell
     flat_time = _ceil_to_raster(adc_duration, system.grad_raster_time)
+    readout_rise_time = _readout_rise_time(system, (n_x * delta_kx) / adc_duration)
     gx = make_role_trapezoid(
         pp,
         encoding_frame,
         "read",
         amplitude=(n_x * delta_kx) / adc_duration,
         flat_time=flat_time,
+        rise_time=readout_rise_time,
         system=system,
     )
     gx_reverse = make_role_trapezoid(
@@ -2997,6 +3034,7 @@ def make_pulseq_epi(
         "read",
         amplitude=-(n_x * delta_kx) / adc_duration,
         flat_time=flat_time,
+        rise_time=readout_rise_time,
         system=system,
     )
     adc = pp.make_adc(
@@ -3007,12 +3045,40 @@ def make_pulseq_epi(
     )
     adc_center = adc.delay + adc_duration / 2.0
     read_frequency_hz = float(read_offset_m) * (n_x * delta_kx) / adc_duration
-    pre_time = 0.8e-3
+    logical_read_area = logical_gradient_area(gx, encoding_frame, "read")
+    relative_x_end = (
+        logical_read_area / 2
+        if strategy == "flyback"
+        else -logical_read_area / 2 + (logical_read_area if n_y % 2 else 0.0)
+    )
+    relative_y_end = (-n_y / 2 + max(n_y - 1, 0)) * delta_ky
+    slice_rephase_areas = [
+        _slice_rephase_area(
+            variant["rf"],
+            variant["gz"],
+            encoding_frame,
+            rf_pulse_type=rf_pulse_type,
+            gradient_raster_s=system.grad_raster_time,
+        )
+        for variant in rf_variants
+    ]
+    pre_time = _shortest_common_lobe_duration(
+        pp,
+        system,
+        [
+            logical_read_area / 2,
+            n_y / 2 * delta_ky,
+            relative_x_end,
+            relative_y_end,
+            *slice_rephase_areas,
+        ],
+        minimum_s=0.8e-3,
+    )
     gx_pre = make_role_trapezoid(
         pp,
         encoding_frame,
         "read",
-        area=-logical_gradient_area(gx, encoding_frame, "read") / 2,
+        area=-logical_read_area / 2,
         duration=pre_time,
         system=system,
     )
@@ -3024,13 +3090,6 @@ def make_pulseq_epi(
         duration=pre_time,
         system=system,
     )
-    logical_read_area = logical_gradient_area(gx, encoding_frame, "read")
-    relative_x_end = (
-        logical_read_area / 2
-        if strategy == "flyback"
-        else -logical_read_area / 2 + (logical_read_area if n_y % 2 else 0.0)
-    )
-    relative_y_end = (-n_y / 2 + max(n_y - 1, 0)) * delta_ky
     gx_post = make_role_trapezoid(
         pp,
         encoding_frame,
@@ -3123,7 +3182,7 @@ def make_pulseq_epi(
         pp.calc_duration(*spoilers) if spoilers else 0.0
     )
     minimum_echo_time = 0.0
-    for variant in rf_variants:
+    for variant, rephase_area in zip(rf_variants, slice_rephase_areas):
         rf = variant["rf"]
         gz = variant["gz"]
         rf_center, _ = pp.calc_rf_center(rf)
@@ -3132,13 +3191,7 @@ def make_pulseq_epi(
             pp,
             encoding_frame,
             "partition",
-            area=_slice_rephase_area(
-                rf,
-                gz,
-                encoding_frame,
-                rf_pulse_type=rf_pulse_type,
-                gradient_raster_s=system.grad_raster_time,
-            ),
+            area=rephase_area,
             duration=pre_time,
             system=system,
         )
@@ -3675,6 +3728,7 @@ def make_pulseq_epsi_mge(
             "rf_dead_time": 100e-6,
             "adc_dead_time": 20e-6,
         },
+        nucleus=nucleus,
     )
     sequence = pp.Sequence(system)
     dwell = _centered_adc_dwell(1.0 / sampling_bandwidth_hz, n_x, system)
@@ -3708,12 +3762,14 @@ def make_pulseq_epsi_mge(
     delta_kx, delta_ky = 1.0 / fov_x, 1.0 / fov_y
     adc_duration = n_x * dwell
     flat_time = _ceil_to_raster(adc_duration, system.grad_raster_time)
+    readout_rise_time = _readout_rise_time(system, (n_x * delta_kx) / adc_duration)
     gx_positive = make_role_trapezoid(
         pp,
         encoding_frame,
         "read",
         amplitude=(n_x * delta_kx) / adc_duration,
         flat_time=flat_time,
+        rise_time=readout_rise_time,
         system=system,
     )
     gx_negative = make_role_trapezoid(
@@ -3722,6 +3778,7 @@ def make_pulseq_epsi_mge(
         "read",
         amplitude=-(n_x * delta_kx) / adc_duration,
         flat_time=flat_time,
+        rise_time=readout_rise_time,
         system=system,
     )
     adc = pp.make_adc(
@@ -4218,6 +4275,7 @@ def make_pulseq_flash(
             "rf_dead_time": 100e-6,
             "adc_dead_time": 20e-6,
         },
+        nucleus=nucleus,
     )
     sequence = pp.Sequence(system)
     dwell = _centered_adc_dwell(
@@ -4301,6 +4359,7 @@ def make_pulseq_flash(
         "read",
         amplitude=(n_read / fov_read) / adc_duration,
         flat_time=flat_time,
+        rise_time=_readout_rise_time(system, (n_read / fov_read) / adc_duration),
         system=system,
     )
     adc = pp.make_adc(
@@ -5031,6 +5090,7 @@ def make_pulseq_spiral(
             "rf_dead_time": 100e-6,
             "adc_dead_time": 20e-6,
         },
+        nucleus=nucleus,
     )
     sequence = pp.Sequence(system)
     gx_waveform, gy_waveform, dwell = _spiral_waveforms(
@@ -5092,18 +5152,21 @@ def make_pulseq_spiral(
         for rf, gz in rf_events
     ]
     rf, gz = rf_events[0]
-    rephase_time = 0.8e-3
+    rephase_area = _slice_rephase_area(
+        rf,
+        gz,
+        encoding_frame,
+        rf_pulse_type=rf_pulse_type,
+        gradient_raster_s=system.grad_raster_time,
+    )
+    rephase_time = _shortest_common_lobe_duration(
+        pp, system, [rephase_area], minimum_s=0.8e-3
+    )
     gz_rephase = make_role_trapezoid(
         pp,
         encoding_frame,
         "partition",
-        area=_slice_rephase_area(
-            rf,
-            gz,
-            encoding_frame,
-            rf_pulse_type=rf_pulse_type,
-            gradient_raster_s=system.grad_raster_time,
-        ),
+        area=rephase_area,
         duration=rephase_time,
         system=system,
     )

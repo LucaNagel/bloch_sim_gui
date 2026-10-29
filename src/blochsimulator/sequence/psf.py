@@ -1,4 +1,4 @@
-"""Point-spread functions and slice profiles of simulated Cartesian sequences.
+"""Point-spread functions and slice profiles of simulated sequences.
 
 The PSF of a sequence is the reconstructed image of a point object. Bloch
 signals are linear in proton density and isochromats do not interact, so one
@@ -11,9 +11,18 @@ Lorentzian frequency ensemble per source.
 Several sources share one simulation: each one is received by its own
 virtual coil with unit sensitivity, which keeps the source signals apart.
 
-The reconstruction is the continuous inverse DFT over the acquired Cartesian
-k-space grid. At the voxel centres it equals the sequence's centred-FFT
-reconstruction; in between it samples the same band-limited image finely.
+For Cartesian frames and volumes the reconstruction is the continuous
+inverse DFT over the acquired k-space grid. At the voxel centres it equals
+the sequence's centred-FFT reconstruction; in between it samples the same
+band-limited image finely. 2D spiral frames are reconstructed by exact
+density-compensated gridding, ``sum_j w_j s_j exp(2 pi i k_j . x)``, with the
+Pipe-Menon weights of the NUFFT reconstruction.
+
+Gradient errors (a per-sample deviation ``dk`` of the actual from the
+nominal trajectory, see :func:`.kspace_trajectory.gradient_error`) multiply
+a point source's signal by ``exp(-2 pi i dk . r0)``; this is exact for a
+point. The image is then reconstructed on the nominal trajectory
+(uncorrected) or on the actual one (trajectory-corrected, 2D only).
 All lengths are in metres, frequencies in Hz, and times in seconds.
 """
 
@@ -32,6 +41,9 @@ from .encoding import EncodingFrame, numeric_definition_array
 MAX_SOURCES_PER_RUN = 64
 # Bound the PSF image of a 3D volume to about 4 M complex points (64 MB).
 MAX_PSF_IMAGE_POINTS = 1 << 22
+# Bound non-uniform evaluations (image points times samples) to about 1 G
+# complex products, a few seconds.
+MAX_SAMPLE_IMAGE_PRODUCTS = 1 << 30
 MAX_SLICE_PROFILE_POSITIONS = 801
 # The T2* ensemble rephases at 12 / R2' (see PointSource.frequency_ensemble).
 T2_STAR_REVIVAL_RATE_PRODUCT = 12.0
@@ -198,7 +210,34 @@ def simulate_point_sources(
     return replace(result, signal=np.concatenate(signals, axis=0))
 
 
-ROLE_INDEX = {"read": 0, "phase": 1, "partition": 2}
+# Encoding roles index the columns of a layout's EncodingFrame; non-Cartesian
+# layouts use the identity frame with scanner axis roles.
+ROLE_INDEX = {"read": 0, "phase": 1, "partition": 2, "x": 0, "y": 1, "z": 2}
+
+
+def evaluate_sample_image(samples, k_cyc_per_m, offsets_m) -> np.ndarray:
+    """Evaluate ``sum_j s_j exp(2 pi i k_j . x)`` on a separable 2D grid.
+
+    ``samples`` has shape ``(..., J)`` and ``k_cyc_per_m`` shape ``(J, 2)``
+    with one column per entry of ``offsets_m``. The sum is not normalized.
+    """
+    values = np.asarray(samples, dtype=np.complex128)
+    k = np.asarray(k_cyc_per_m, dtype=float)
+    if k.ndim != 2 or k.shape[1] != 2 or len(offsets_m) != 2:
+        raise ValueError("sample images are evaluated on 2D grids")
+    first, second = (
+        np.exp(2j * np.pi * np.outer(np.atleast_1d(x), k[:, axis]))
+        for axis, x in enumerate(offsets_m)
+    )
+    return (values[..., None, :] * first) @ second.T
+
+
+def _gradient_error_array(gradient_error_cyc_per_m, num_samples) -> np.ndarray:
+    delta = np.asarray(gradient_error_cyc_per_m, dtype=float)
+    if delta.shape != (num_samples, 3):
+        raise ValueError("gradient_error_cyc_per_m must have shape (num_samples, 3)")
+    # Samples before the first excitation carry no k-space position.
+    return np.nan_to_num(delta, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 @dataclass(frozen=True)
@@ -208,7 +247,12 @@ class CartesianPSFLayout:
     ``roles`` and ``k_cyc_per_m`` follow the k-space array order, i.e.
     ``(phase, read)`` or ``(partition, phase, read)``. ``center_m`` is the
     logical read/phase/partition FOV centre the reconstruction is placed on.
+    ``sample_k`` replaces the nominal grid by per-cell k vectors (array-order
+    components, shape ``matrix + (dims,)``) for trajectory-corrected
+    reconstructions of 2D frames.
     """
+
+    kind = "cartesian"
 
     label: str
     roles: tuple
@@ -220,10 +264,57 @@ class CartesianPSFLayout:
     slice_index: int
     _layout: object = field(repr=False, compare=False)
     _index: int = 0
+    sample_k: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
 
     @property
     def voxel_size_m(self) -> tuple:
         return tuple(fov / count for fov, count in zip(self.fov_m, self.matrix))
+
+    def _k_vectors(self) -> np.ndarray:
+        if self.sample_k is not None:
+            return self.sample_k
+        grids = np.meshgrid(*self.k_cyc_per_m, indexing="ij")
+        return np.stack(grids, axis=-1)
+
+    def samples(self, result) -> np.ndarray:
+        return self.kspace(result)
+
+    def encoding_phase(self, offset_m) -> np.ndarray:
+        """``exp(-2 pi i k . x0)`` of a source at array-order ``offset_m``."""
+        return np.exp(-2j * np.pi * (self._k_vectors() @ np.asarray(offset_m)))
+
+    def centre_index(self) -> tuple:
+        return tuple(int(np.argmin(np.abs(k))) for k in self.k_cyc_per_m)
+
+    def evaluate(self, values, offsets_m) -> np.ndarray:
+        """Image of k-space ``values`` at array-order offset vectors."""
+        if self.sample_k is None:
+            return evaluate_cartesian_image(values, self.k_cyc_per_m, offsets_m)
+        dims = len(self.matrix)
+        values = np.asarray(values)
+        flat = values.reshape(values.shape[: values.ndim - dims] + (-1,))
+        return evaluate_sample_image(
+            flat / flat.shape[-1], self.sample_k.reshape(-1, dims), offsets_m
+        )
+
+    def with_gradient_error(self, result, gradient_error_cyc_per_m):
+        """Layout reconstructed on the actual trajectory ``k + dk`` (2D only)."""
+        if len(self.matrix) != 2:
+            raise ValueError("trajectory correction supports 2D frames only")
+        count = np.asarray(result.signal).shape[-1]
+        delta = _gradient_error_array(gradient_error_cyc_per_m, count)
+        # The k-space layout reorders ADC samples; an index stream reveals
+        # which sample fills each cell (0 marks cells without a sample).
+        stream = np.arange(1, count + 1, dtype=np.complex128)[None, :]
+        cells = np.rint(np.abs(self.kspace(replace(result, signal=stream))[0]))
+        cells = cells.astype(int)
+        if cells.min() < 0 or cells.max() > count:
+            raise ValueError("unable to map ADC samples onto the k-space grid")
+        logical = self.encoding_frame.scanner_to_encoding(delta)
+        logical = logical[:, [ROLE_INDEX[role] for role in self.roles]]
+        logical = np.concatenate((np.zeros((1, len(self.roles))), logical))
+        nominal = np.stack(np.meshgrid(*self.k_cyc_per_m, indexing="ij"), -1)
+        return replace(self, sample_k=nominal + logical[cells])
 
     def kspace(self, result) -> np.ndarray:
         """Return ``(source, [partition], phase, read)`` k-space of a result."""
@@ -307,6 +398,130 @@ def cartesian_psf_layouts(result) -> tuple:
     )
 
 
+@dataclass(frozen=True)
+class SpiralPSFLayout:
+    """One 2D spiral frame of a result, reconstructed by gridding.
+
+    ``roles`` are the scanner axes in image array order ``(y, x)``, like the
+    ``(phase_y, read_x)`` spiral reconstructions. ``sample_k`` holds the
+    per-sample k vectors in that order; ``center_m`` is the scanner-xyz
+    position of the reconstruction origin.
+    """
+
+    kind = "spiral"
+
+    label: str
+    roles: tuple
+    fov_m: tuple
+    matrix: tuple
+    encoding_frame: EncodingFrame
+    center_m: tuple
+    slice_index: int
+    conjugated: bool
+    sample_k: np.ndarray = field(repr=False, compare=False)
+    _trajectory: np.ndarray = field(repr=False, compare=False)
+    _spiral: object = field(repr=False, compare=False)
+    _index: int = 0
+
+    @property
+    def voxel_size_m(self) -> tuple:
+        return tuple(fov / count for fov, count in zip(self.fov_m, self.matrix))
+
+    @property
+    def k_cyc_per_m(self) -> tuple:
+        """Per-sample k components in array order."""
+        return tuple(self.sample_k[:, axis] for axis in range(len(self.roles)))
+
+    @property
+    def weights(self) -> np.ndarray:
+        """Density compensation of the frame, one per Cartesian cell."""
+        return self._spiral.nufft_operator(self._trajectory).density_compensation()
+
+    def samples(self, result) -> np.ndarray:
+        """Return ``(source, sample)`` data of the frame."""
+        if np.asarray(result.signal).ndim != 2:
+            raise ValueError("point-source results must have signal (source, adc)")
+        values = self._spiral._frame_values(result.signal, self._index)
+        if self._spiral.offset_in_reconstruction and any(self.center_m):
+            values = values * np.exp(
+                2j * np.pi * (self._trajectory @ np.asarray(self.center_m))
+            )
+        return values
+
+    def encoding_phase(self, offset_m) -> np.ndarray:
+        return np.exp(-2j * np.pi * (self.sample_k @ np.asarray(offset_m)))
+
+    def centre_index(self) -> tuple:
+        return (int(np.argmin(np.linalg.norm(self.sample_k, axis=1))),)
+
+    def evaluate(self, values, offsets_m) -> np.ndarray:
+        weighted = np.asarray(values) * self.weights / float(np.prod(self.matrix))
+        return evaluate_sample_image(weighted, self.sample_k, offsets_m)
+
+    def source_offset_m(self, position_m) -> np.ndarray:
+        relative = np.asarray(position_m, dtype=float) - np.asarray(self.center_m)
+        return relative[[ROLE_INDEX[role] for role in self.roles]]
+
+    def with_gradient_error(self, result, gradient_error_cyc_per_m):
+        """Layout reconstructed on the actual trajectory ``k + dk``."""
+        count = np.asarray(result.signal).shape[-1]
+        delta = _gradient_error_array(gradient_error_cyc_per_m, count)
+        trajectory = (
+            self._trajectory + delta[list(self._spiral.sample_indices[self._index])]
+        )
+        return replace(
+            self,
+            sample_k=trajectory[:, [ROLE_INDEX[role] for role in self.roles]],
+            _trajectory=trajectory,
+        )
+
+
+def spiral_psf_layouts(result) -> tuple:
+    """Return every 2D spiral frame of a result a PSF can be computed for."""
+    spiral = result.spiral_acquisition
+    if spiral is None:
+        raise ValueError("this result has no spiral acquisition layout")
+    moments = result.adc_gradient_moment_cyc_per_m
+    if moments is None:
+        raise ValueError("spiral PSFs require ADC gradient moments")
+    roles = ("y", "x")
+    slice_axis = AcquisitionDimensions.AXIS_NAMES.index("slice")
+    origin = spiral.fov_center_xyz_m if spiral.offset_in_reconstruction else (0.0,) * 3
+    layouts = []
+    for index in range(spiral.num_frames):
+        trajectory = spiral.trajectory(moments, index)
+        layouts.append(
+            SpiralPSFLayout(
+                label=spiral.frame_label(index),
+                roles=roles,
+                fov_m=(spiral.fov_m[1], spiral.fov_m[0]),
+                matrix=(spiral.matrix[1], spiral.matrix[0]),
+                encoding_frame=EncodingFrame.identity(),
+                center_m=tuple(float(value) for value in origin),
+                slice_index=int(spiral.frame_indices[index][slice_axis]),
+                conjugated=bool(spiral.conjugated_frames[index]),
+                sample_k=trajectory[:, [ROLE_INDEX[role] for role in roles]],
+                _trajectory=trajectory,
+                _spiral=spiral,
+                _index=index,
+            )
+        )
+    return tuple(layouts)
+
+
+def psf_layouts(result) -> tuple:
+    """Return the Cartesian or spiral frames a PSF can be computed for."""
+    if result.spiral_acquisition is not None:
+        return spiral_psf_layouts(result)
+    try:
+        return cartesian_psf_layouts(result)
+    except ValueError:
+        raise ValueError(
+            "PSF estimation supports Cartesian 2D frames and 3D volumes and "
+            "2D spiral frames; this sequence has no supported acquisition layout"
+        ) from None
+
+
 def evaluate_cartesian_image(kspace, k_cyc_per_m, offsets_m) -> np.ndarray:
     """Evaluate the inverse DFT of trailing k-space axes at given offsets.
 
@@ -357,13 +572,18 @@ class AxisPSFMetrics:
 
 @dataclass(frozen=True)
 class PSFResult:
-    """PSF of one Cartesian frame for one point source.
+    """PSF of one frame for one point source.
 
     ``psf`` and ``ideal_psf`` are sampled at ``offsets_m``, the displacement
     from the source along ``roles`` (array order) covering one FOV period.
     The ideal PSF uses flat k-space weighting equal to the measured
-    modulation at the k-space centre. ``modulation`` is the sampled k-space
-    with the source's encoding phase removed, i.e. the transfer function.
+    modulation at the k-space centre on the nominal trajectory, without
+    gradient errors. ``modulation`` is the sampled k-space with the source's
+    encoding phase removed, i.e. the transfer function. For Cartesian
+    layouts (``kind == "cartesian"``) it is a grid over the axes
+    ``k_cyc_per_m``; for spiral frames it holds one value per sample and
+    ``k_cyc_per_m`` the per-sample k components of the reconstruction.
+    ``gradient_error`` is ``"none"``, ``"uncorrected"`` or ``"corrected"``.
     """
 
     source: PointSource
@@ -383,6 +603,8 @@ class PSFResult:
     ideal_voxel_energy_fraction: float
     voxel_size_m: tuple
     encoding_frame: EncodingFrame
+    kind: str = "cartesian"
+    gradient_error: str = "none"
 
 
 def _wrap(values, period):
@@ -460,41 +682,62 @@ def psf_from_result(
     source_index: int = 0,
     oversampling: int = 4,
     profile_oversampling: int = 32,
+    gradient_error_cyc_per_m=None,
+    trajectory_correction: bool = False,
 ) -> PSFResult:
-    """Reconstruct the PSF of one simulated point source and one frame."""
-    layouts = cartesian_psf_layouts(result)
+    """Reconstruct the PSF of one simulated point source and one frame.
+
+    ``gradient_error_cyc_per_m`` is the deviation of the actual from the
+    nominal k-space position for every ADC sample, shape ``(adc, 3)`` in
+    scanner xyz. It is imposed on the source's signal; with
+    ``trajectory_correction`` the reconstruction uses the actual trajectory.
+    """
+    layouts = psf_layouts(result)
     frame = int(frame)
     if not 0 <= frame < len(layouts):
         raise ValueError(f"frame must lie in [0, {len(layouts) - 1}]")
     if int(oversampling) < 1 or int(profile_oversampling) < 1:
         raise ValueError("oversampling factors must be positive integers")
-    layout = layouts[frame]
-    k_axes = tuple(np.asarray(k, dtype=float) for k in layout.k_cyc_per_m)
-    kspace = layout.kspace(result)[int(source_index)]
+    nominal = layouts[frame]
+    layout = nominal
+    error_mode = "none"
+    if gradient_error_cyc_per_m is not None:
+        signal = np.asarray(result.signal)
+        delta = _gradient_error_array(gradient_error_cyc_per_m, signal.shape[-1])
+        # Exact for a point: s = s_nominal exp(-2 pi i dk . r0), r0 in scanner xyz.
+        error_phase = np.exp(-2j * np.pi * (delta @ np.asarray(source.position_m)))
+        result = replace(result, signal=signal * error_phase)
+        error_mode = "uncorrected"
+        if trajectory_correction:
+            layout = nominal.with_gradient_error(result, delta)
+            error_mode = "corrected"
+    data = layout.samples(result)[int(source_index)]
     source_offset = layout.source_offset_m(source.position_m)
 
-    grids = np.meshgrid(*k_axes, indexing="ij")
-    encoding_phase = np.exp(
-        -2j * np.pi * sum(k * x for k, x in zip(grids, source_offset))
-    )
-    modulation = kspace / encoding_phase
-    centre_index = tuple(int(np.argmin(np.abs(k))) for k in k_axes)
-    reference = modulation[centre_index]
+    encoding_phase = layout.encoding_phase(source_offset)
+    modulation = data / encoding_phase
+    reference = modulation[nominal.centre_index()]
     if reference == 0:
         reference = modulation.reshape(-1)[np.argmax(np.abs(modulation))]
-    ideal_kspace = reference * encoding_phase
+    ideal_data = reference * nominal.encoding_phase(source_offset)
 
     factor = int(oversampling)
-    if len(k_axes) == 3:
-        budget = MAX_PSF_IMAGE_POINTS / float(np.prod(layout.matrix))
+    dims = len(layout.matrix)
+    image_points = float(np.prod(layout.matrix))
+    if dims == 3:
+        budget = MAX_PSF_IMAGE_POINTS / image_points
         factor = max(1, min(factor, int(np.floor(budget ** (1.0 / 3.0)))))
+    if layout.kind != "cartesian" or layout.sample_k is not None:
+        budget = MAX_SAMPLE_IMAGE_PRODUCTS / (image_points * data.size)
+        factor = max(1, min(factor, int(np.floor(np.sqrt(budget)))))
     offsets = tuple(
         _periodic_offsets(count * factor, size / factor)
         for count, size in zip(layout.matrix, layout.voxel_size_m)
     )
     absolute = tuple(x + x0 for x, x0 in zip(offsets, source_offset))
-    psf = evaluate_cartesian_image(kspace, k_axes, absolute)
-    ideal_psf = evaluate_cartesian_image(ideal_kspace, k_axes, absolute)
+    conjugate = np.conj if getattr(layout, "conjugated", False) else np.asarray
+    psf = conjugate(layout.evaluate(data, absolute))
+    ideal_psf = conjugate(nominal.evaluate(ideal_data, absolute))
     ideal_peak = float(np.abs(ideal_psf).max())
 
     peak_index = np.unravel_index(int(np.argmax(np.abs(psf))), psf.shape)
@@ -510,18 +753,16 @@ def psf_from_result(
             count * int(profile_oversampling), size / int(profile_oversampling)
         )
 
-        def through(peak_at, kspace_values):
+        def through(peak_at, reconstruction, values):
             coordinates = [
                 np.atleast_1d(offsets[other][peak_at[other]] + source_offset[other])
-                for other in range(len(k_axes))
+                for other in range(dims)
             ]
             coordinates[axis] = line + source_offset[axis]
-            return evaluate_cartesian_image(kspace_values, k_axes, coordinates).reshape(
-                -1
-            )
+            return conjugate(reconstruction.evaluate(values, coordinates)).reshape(-1)
 
-        values = through(peak_index, kspace)
-        ideal_values = through(ideal_peak_index, ideal_kspace)
+        values = through(peak_index, layout, data)
+        ideal_values = through(ideal_peak_index, nominal, ideal_data)
         profiles[role] = (line, values, ideal_values)
         width, peak_offset, sidelobe = profile_metrics(line, values)
         ideal_width, _, ideal_sidelobe = profile_metrics(line, ideal_values)
@@ -545,7 +786,7 @@ def psf_from_result(
         psf=psf,
         ideal_psf=ideal_psf,
         profiles=profiles,
-        k_cyc_per_m=k_axes,
+        k_cyc_per_m=tuple(np.asarray(k, dtype=float) for k in layout.k_cyc_per_m),
         modulation=modulation,
         axis_metrics=metrics,
         peak_efficiency=(
@@ -557,6 +798,8 @@ def psf_from_result(
         ),
         voxel_size_m=layout.voxel_size_m,
         encoding_frame=layout.encoding_frame,
+        kind=layout.kind,
+        gradient_error=error_mode,
     )
 
 
@@ -567,19 +810,30 @@ def estimate_psf(
     frame: int = 0,
     oversampling: int = 4,
     profile_oversampling: int = 32,
+    imperfections=None,
+    trajectory_correction: bool = False,
     **simulation_options,
 ) -> PSFResult:
     """Simulate one point source through ``program`` and return its PSF.
 
+    ``imperfections`` (:class:`.GradientImperfections` or a mapping) adds
+    the resulting gradient errors to the PSF, see :func:`psf_from_result`.
     ``simulation_options`` are passed to :func:`simulate_point_sources`.
     """
     result = simulate_point_sources(program, (source,), **simulation_options)
+    error = None
+    if imperfections is not None:
+        from .kspace_trajectory import gradient_error
+
+        error = gradient_error(program, imperfections)
     return psf_from_result(
         result,
         source,
         frame=frame,
         oversampling=oversampling,
         profile_oversampling=profile_oversampling,
+        gradient_error_cyc_per_m=error,
+        trajectory_correction=trajectory_correction,
     )
 
 
@@ -708,7 +962,7 @@ def estimate_slice_profile(
     )
     sources = tuple(source.moved_to(in_plane + normal * value) for value in positions)
     result = simulate_point_sources(program, sources, **simulation_options)
-    layouts = cartesian_psf_layouts(result)
+    layouts = psf_layouts(result)
     if len(layouts[0].roles) == 3:
         raise ValueError(
             "3D acquisitions encode the partition direction; use estimate_psf"
@@ -716,16 +970,14 @@ def estimate_slice_profile(
 
     rows = []
     for layout in layouts:
-        kspace = layout.kspace(result)
+        kspace = layout.samples(result)
         offsets = np.asarray(
             [layout.source_offset_m(item.position_m) for item in sources]
         )
         rows.append(
             [
-                evaluate_cartesian_image(
-                    kspace[index],
-                    layout.k_cyc_per_m,
-                    [np.atleast_1d(value) for value in offsets[index]],
+                layout.evaluate(
+                    kspace[index], [np.atleast_1d(value) for value in offsets[index]]
                 ).item()
                 for index in range(len(sources))
             ]

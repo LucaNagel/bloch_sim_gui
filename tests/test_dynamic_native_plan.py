@@ -639,7 +639,11 @@ def test_dynamic_flash_without_timestep_uses_native_rf_raster(
     tmp_path, sequence_kernel
 ):
     pytest.importorskip("pypulseq")
-    from blochsimulator.sequence import load_pulseq, make_pulseq_flash
+    from blochsimulator.sequence import (
+        ScannerParameters,
+        load_pulseq,
+        make_pulseq_flash,
+    )
 
     phantom, _program, _raster = _native_plan_fixture()
     sequence = make_pulseq_flash(
@@ -650,6 +654,7 @@ def test_dynamic_flash_without_timestep_uses_native_rf_raster(
         rf_duration_s=0.5e-3,
         slice_thickness_m=phantom.fov[2],
         nucleus="C13",
+        scanner_parameters=ScannerParameters(),
     )
     path = tmp_path / "flash.seq"
     sequence.write(str(path), v141_compat=True)

@@ -564,6 +564,30 @@ def calculate_kspace(
     return trajectory
 
 
+def gradient_error(
+    program: SequenceProgram,
+    imperfections,
+    *,
+    refocusing_threshold_deg: float = REFOCUSING_THRESHOLD_DEG,
+) -> np.ndarray:
+    """Return ``k_actual - k_nominal`` per ADC sample, shape ``(adc, 3)``.
+
+    The deviation is in cycles/m and scanner xyz, in the chronological ADC
+    order of a simulation result; samples before the first excitation are
+    zero. It includes the errors of prephasers and rephasers, i.e. of every
+    gradient since the excitation.
+    """
+    actual = calculate_kspace(
+        program,
+        imperfections=imperfections,
+        refocusing_threshold_deg=refocusing_threshold_deg,
+    ).adc_k_cyc_per_m
+    nominal = calculate_kspace(
+        program, refocusing_threshold_deg=refocusing_threshold_deg
+    ).adc_k_cyc_per_m
+    return np.nan_to_num(actual - nominal, nan=0.0)
+
+
 def classify_readout(k_cyc_per_m, *, tolerance: float = 0.02) -> str:
     """Name the shape of one readout's k-space path.
 

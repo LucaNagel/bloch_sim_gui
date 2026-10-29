@@ -228,6 +228,7 @@ def test_flash_schedule_is_frame_level_labelled_and_round_trips(tmp_path):
         rf_spectral_spatial_library=library.to_dict(),
         rf_spectral_spatial_schedule=schedule.to_dict(),
         nucleus="C13",
+        scanner_parameters=ScannerParameters(),
     )
     assert sequence.check_timing()[0]
     assert sequence.definitions["SPSPScheduleSelectionLevel"] == "frame"
@@ -258,6 +259,7 @@ def _scheduled_epi(schedule, library, **overrides):
         rf_spectral_spatial_library=library.to_dict(),
         rf_spectral_spatial_schedule=schedule.to_dict(),
         nucleus="C13",
+        scanner_parameters=ScannerParameters(),
     )
     parameters.update(overrides)
     return make_pulseq_epi(**parameters)

@@ -655,6 +655,11 @@ def make_pulseq_rf_events(
                 raise ValueError("rf center_s must be non-negative and finite")
             kwargs["center"] = float(center_s)
         if slice_thickness_m is not None:
+            _check_slice_gradient(
+                system,
+                bandwidth_hz=kwargs["bandwidth"],
+                slice_thickness_m=slice_thickness_m,
+            )
             kwargs.update(
                 slice_thickness=slice_thickness_m,
                 return_gz=True,
@@ -664,6 +669,26 @@ def make_pulseq_rf_events(
         rf_event.freq_offset = float(frequency_offset_hz)
         results.append(event)
     return tuple(results), actual_duration_s, effective_tbw, normalized_type
+
+
+def _check_slice_gradient(system, *, bandwidth_hz: float, slice_thickness_m: float):
+    """Raise a readable error when the slice-select gradient exceeds the limit.
+
+    ``system`` converts its limits with the gyromagnetic ratio of the imaged
+    nucleus, so the message reports the physical gradient of that nucleus.
+    """
+    required = float(bandwidth_hz) / float(slice_thickness_m)
+    limit = float(system.max_grad)
+    if required <= limit * (1.0 + 1e-9):
+        return
+    gamma = float(system.gamma)
+    raise ValueError(
+        "the slice-selective RF pulse needs "
+        f"{required / gamma * 1e3:.3g} mT/m ({float(bandwidth_hz):.4g} Hz over "
+        f"{float(slice_thickness_m) * 1e3:.3g} mm), above the "
+        f"{limit / gamma * 1e3:.3g} mT/m limit; lengthen the RF pulse, lower "
+        "its time-bandwidth product or increase the slice thickness"
+    )
 
 
 def shifted_spectral_spatial_rf_event(

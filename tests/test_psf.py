@@ -4,11 +4,16 @@ import numpy as np
 import pytest
 
 from blochsimulator import BlochSimulator
-from blochsimulator.sequence import load_pulseq, make_pulseq_flash
+from blochsimulator.sequence import ScannerParameters, load_pulseq, make_pulseq_flash
 from blochsimulator.sequence.acquisition import CartesianAcquisition, make_cartesian_epi
 from blochsimulator.sequence.advanced_bssfp_builders import (
     make_pulseq_spectral_selective_bssfp,
 )
+from blochsimulator.sequence.kspace_trajectory import (
+    GradientImperfections,
+    gradient_error,
+)
+from blochsimulator.sequence.pulseq_builders import make_pulseq_spiral
 from blochsimulator.sequence.psf import (
     PointSource,
     cartesian_psf_layouts,
@@ -42,6 +47,16 @@ def _epi(read=16, phase=16, fov=(0.08, 0.08), dwell_s=10e-6):
         blip_duration_s=50e-6,
     )
     return acquisition, program
+
+
+def _spiral(tmp_path, matrix=16, fov_m=0.08):
+    sequence = make_pulseq_spiral(
+        fov_m=(fov_m, fov_m),
+        matrix=(matrix, matrix),
+        sampling_bandwidth_hz=50e3,
+        read_offset_m=0.0,
+    )
+    return _round_trip(sequence, tmp_path / "spiral.seq")
 
 
 def _echo_spacing_s(result):
@@ -244,6 +259,8 @@ def test_hyperpolarized_flash_depletion_broadens_the_phase_psf(tmp_path, nucleus
         repetition_time_s=10e-3,
         flip_angle_deg=flip_angle_deg,
         nucleus=nucleus,
+        # Preclinical gradients, on which the 3 mm 13C slice is feasible.
+        scanner_parameters=ScannerParameters(),
     )
     program = _round_trip(sequence, tmp_path / "hp_flash.seq")
     source = PointSource(t1_s=30.0, t2_s=1.0, equilibrium_mz=1e-5)
@@ -285,3 +302,74 @@ def test_point_source_validation():
     moved = PointSource(t1_s=2.0).moved_to((1e-3, 2e-3, 3e-3))
     assert moved.position_m == (1e-3, 2e-3, 3e-3)
     assert moved.t1_s == 2.0
+
+
+def test_spiral_psf_matches_the_spiral_reconstruction(tmp_path):
+    program = _spiral(tmp_path)
+    source = PointSource(position_m=(0.01, -0.005, 0.0))
+    result = simulate_point_sources(program, (source,), simulator=_simulator())
+    psf = psf_from_result(result, source)
+
+    assert psf.kind == "spiral"
+    assert psf.roles == ("y", "x")
+    assert psf.modulation.shape == (256,) == psf.k_cyc_per_m[0].shape
+    image = np.abs(result.spiral_acquisition.reconstruct(result, 0)[0])
+    np.testing.assert_allclose(np.abs(psf.psf).max(), image.max(), rtol=0.02)
+    for role in psf.roles:
+        metrics = psf.axis_metrics[role]
+        assert abs(metrics.peak_offset_voxels) < 0.05
+        assert metrics.broadening == pytest.approx(1.0, abs=0.05)
+    assert psf.peak_efficiency == pytest.approx(1.0, abs=0.02)
+
+
+def test_spiral_gradient_delay_shifts_psf_unless_trajectory_is_corrected(tmp_path):
+    program = _spiral(tmp_path)
+    source = PointSource(position_m=(0.012, -0.007, 0.0))
+    result = simulate_point_sources(program, (source,), simulator=_simulator())
+    delta = gradient_error(program, GradientImperfections(delay_s=(5e-6, 5e-6, 0.0)))
+
+    uncorrected = psf_from_result(result, source, gradient_error_cyc_per_m=delta)
+    corrected = psf_from_result(
+        result, source, gradient_error_cyc_per_m=delta, trajectory_correction=True
+    )
+
+    assert uncorrected.gradient_error == "uncorrected"
+    assert corrected.gradient_error == "corrected"
+    shift = max(abs(m.peak_offset_voxels) for m in uncorrected.axis_metrics.values())
+    assert shift > 0.02
+    for metrics in corrected.axis_metrics.values():
+        assert abs(metrics.peak_offset_voxels) < 1e-3
+    assert corrected.peak_efficiency > 0.999
+    assert uncorrected.peak_efficiency < corrected.peak_efficiency
+
+
+def test_epi_gradient_delay_ghost_vanishes_on_the_corrected_trajectory():
+    acquisition, program = _epi(read=16, phase=16)
+    source = PointSource(position_m=(0.01, 0.0, 0.0))
+    result = simulate_point_sources(program, (source,), simulator=_simulator())
+    delta = gradient_error(program, GradientImperfections(delay_s=(4e-6, 0.0, 0.0)))
+    ideal = psf_from_result(result, source)
+    uncorrected = psf_from_result(result, source, gradient_error_cyc_per_m=delta)
+    corrected = psf_from_result(
+        result, source, gradient_error_cyc_per_m=delta, trajectory_correction=True
+    )
+
+    def ghost(psf):
+        # Peak of the N/2 ghost along phase relative to the main peak.
+        magnitude = np.abs(psf.psf)
+        axis = psf.roles.index("phase")
+        offsets = psf.offsets_m[axis] / psf.voxel_size_m[axis]
+        profile = magnitude.max(axis=1 - axis)
+        return profile[np.abs(np.abs(offsets) - 8) < 1.5].max() / magnitude.max()
+
+    assert ghost(uncorrected) > 0.3
+    assert ghost(corrected) < 0.1
+    assert corrected.peak_efficiency == pytest.approx(ideal.peak_efficiency, rel=1e-3)
+
+
+def test_gradient_error_shape_is_checked():
+    _, program = _epi(read=8, phase=8)
+    source = PointSource()
+    result = simulate_point_sources(program, (source,), simulator=_simulator())
+    with pytest.raises(ValueError):
+        psf_from_result(result, source, gradient_error_cyc_per_m=np.zeros((3, 3)))

@@ -337,6 +337,65 @@ def load_reconstruction_dataset(filename):
     return prepare_reconstruction_dataset(dataset)
 
 
+def _metadata_mapping(metadata) -> dict:
+    """Accept result metadata as a mapping or as its exported JSON text."""
+    if isinstance(metadata, np.ndarray):
+        metadata = metadata.item() if metadata.shape == () else metadata.tolist()
+    if isinstance(metadata, bytes):
+        metadata = metadata.decode("utf-8")
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
+    if not isinstance(metadata, Mapping):
+        raise TypeError("metadata must be a mapping or its JSON text")
+    return dict(metadata)
+
+
+def spiral_acquisition_from_metadata(metadata):
+    """Return the spiral frame layout stored in result metadata, or ``None``.
+
+    ``metadata`` is ``result.metadata``, the ``metadata_json`` attribute of a
+    ``.nc``/``.h5`` export, or the ``metadata_json`` entry of a ``.npz``.
+    """
+    from .acquisition import SpiralAcquisition
+
+    layout = _metadata_mapping(metadata).get("spiral_acquisition")
+    return None if layout is None else SpiralAcquisition.from_metadata(layout)
+
+
+def reconstruct_spiral_frames(
+    signal,
+    gradient_moments_cyc_per_m,
+    metadata,
+    *,
+    method: Optional[str] = None,
+    frames: Optional[Sequence[int]] = None,
+) -> np.ndarray:
+    """Reconstruct non-Cartesian (spiral) frames from exported raw data.
+
+    ``signal`` is the complex ADC stream (``(..., adc)``, e.g. coils or pools
+    in front), ``gradient_moments_cyc_per_m`` the ``(adc, 3)`` ADC gradient
+    moments, and ``metadata`` as in :func:`spiral_acquisition_from_metadata`.
+    ``method`` is ``"nufft"`` (density-compensated NUFFT, the default stored
+    with the result), ``"cg"`` (iterative CG-NUFFT) or ``"linear"`` (linear
+    gridding followed by an FFT). Returns ``(frame, ..., phase_y, read_x)``.
+    """
+    from types import SimpleNamespace
+
+    acquisition = spiral_acquisition_from_metadata(metadata)
+    if acquisition is None:
+        raise ValueError("metadata contains no spiral acquisition layout")
+    if method is not None:
+        acquisition = acquisition.with_reconstruction_method(method)
+    source = SimpleNamespace(
+        signal=np.asarray(signal),
+        adc_gradient_moment_cyc_per_m=np.asarray(
+            gradient_moments_cyc_per_m, dtype=float
+        ),
+    )
+    selected = range(acquisition.num_frames) if frames is None else frames
+    return np.stack([acquisition.reconstruct(source, int(f)) for f in selected])
+
+
 def ideal_separate(
     echo_images,
     echo_times_s,
@@ -794,6 +853,10 @@ class SequenceReconstructionModel:
             data = data.isel(selectors)
         if averaged:
             data = data.mean(averaged)
+        # A single frame has no outer dimension that would select it.
+        for name in ("cartesian_frame", "spiral_frame"):
+            if data.sizes.get(name) == 1:
+                data = data.isel({name: 0})
         if "pool" in data.dims:
             data = data.isel(pool=0 if pool_index is None else int(pool_index))
         if "coil" in data.dims:

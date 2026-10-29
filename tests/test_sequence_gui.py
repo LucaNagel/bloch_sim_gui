@@ -60,6 +60,7 @@ from blochsimulator.sequence import (
     make_pulseq_bssfp,
     make_pulseq_flash,
 )
+from blochsimulator.sequence.scanner import ScannerParameters
 from blochsimulator.sequence.rf_pulses import (
     slr_time_bandwidth_product,
 )
@@ -1762,6 +1763,8 @@ def test_explicit_sequence_generation_error_has_guidance_and_details(monkeypatch
 def test_invalid_epi_bandwidth_restores_last_valid_value(monkeypatch):
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
+    # A clinical gradient system, on which 500 kHz needs too much gradient.
+    widget.scanner_parameters = ScannerParameters(max_grad_mtm=32.0, max_slew_tms=130.0)
     widget.sequence_source.setCurrentIndex(widget.EPI_SOURCE)
     widget.sampling_bandwidth_khz.setValue(500.0)
     captured = {}
@@ -1779,7 +1782,8 @@ def test_invalid_epi_bandwidth_restores_last_valid_value(monkeypatch):
     assert "Reduce bandwidth" in captured["info"]
     assert "restored to the last valid value, 50.000 kHz" in captured["info"]
     assert "Invalid Cartesian acquisition" in captured["details"]
-    assert "larger than max" in captured["details"]
+    assert "the read gradient needs" in captured["details"]
+    assert "above the 32 mT/m limit" in captured["details"]
 
     widget.close()
     widget.deleteLater()
