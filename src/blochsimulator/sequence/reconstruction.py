@@ -562,7 +562,24 @@ class SequenceReconstructionModel:
         return name if name in self.dataset else ""
 
     def has_pool_data(self) -> bool:
+        if self.kind == "raw_signal":
+            return bool(self.pool_names and "species_signal" in self.dataset)
         return bool(self.pool_names and self.image_name(pool=True))
+
+    def acquisition_signal(self, *, pool_index: Optional[int] = None, coil_mode="rss"):
+        """Return the ADC signal of an unencoded acquisition, such as one pulse.
+
+        Every ADC sample belongs to the single voxel the coil sees, so the
+        "reconstruction" is the FID itself and its spectrum.
+        """
+        name = "signal" if pool_index is None else "species_signal"
+        return self.select(name, {}, pool_index=pool_index, coil_mode=coil_mode)
+
+    def acquisition_events(self) -> np.ndarray:
+        """Return the excitation each ADC sample follows, in acquisition order."""
+        if "adc_event_index" in self.dataset.coords:
+            return np.asarray(self.dataset["adc_event_index"].values)
+        return np.zeros(self.dataset.sizes.get("adc", 0), dtype=int)
 
     @staticmethod
     def _numeric_attr(values) -> tuple[float, ...]:

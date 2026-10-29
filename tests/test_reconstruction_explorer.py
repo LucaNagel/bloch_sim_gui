@@ -962,3 +962,38 @@ def test_explorer_plays_repetitions_and_keeps_3d_slices(qt_application):
     assert not explorer.play_button.isChecked()
     explorer.clear()
     assert not explorer.frame_bar.isVisibleTo(explorer)
+
+
+def _raw_signal_dataset(samples=64, dwell_s=1e-3, offset_hz=50.0):
+    times = 1e-3 + dwell_s * np.arange(samples)
+    signal = np.exp(2j * np.pi * offset_hz * times) * np.exp(-times / 0.05)
+    return xr.Dataset(
+        {
+            "signal": (("adc",), signal),
+            "species_signal": (("adc", "pool"), signal[:, None]),
+        },
+        coords={
+            "adc_time_s": ("adc", times),
+            "adc_event_index": ("adc", np.zeros(samples, dtype=int)),
+            "pool": ["Pyruvate"],
+        },
+        attrs={"duration_s": 0.08},
+    )
+
+
+def test_single_pulse_is_shown_as_fid_and_spectrum(qt_application):
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(_raw_signal_dataset())
+
+    assert explorer.model.kind == "raw_signal"
+    assert explorer.pages.currentWidget() is explorer.signal_page
+    fid = explorer.signal_fid_plot.listDataItems()
+    spectrum = explorer.signal_spectrum_plot.listDataItems()
+    assert fid and spectrum
+    frequency, amplitude = spectrum[0].getData()
+    assert frequency[np.argmax(amplitude)] == pytest.approx(50.0, abs=16.0)
+    # A single excitation needs no excitation selector.
+    assert not explorer.signal_event_spin.isVisibleTo(explorer)
+
+    explorer.clear()
+    assert not explorer.signal_fid_plot.listDataItems()

@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QSpinBox,
     QSplitter,
     QStackedWidget,
     QTabWidget,
@@ -628,6 +629,35 @@ class SequenceReconstructionExplorer(QWidget):
         two_d_layout.addWidget(result_splitter, 1)
         self.pages.addWidget(self.two_d_page)
 
+        # Acquisitions without spatial encoding, such as a single pulse: the
+        # signal of the one voxel is shown as FID and spectrum.
+        self.signal_page = QWidget()
+        signal_layout = QVBoxLayout(self.signal_page)
+        signal_layout.setContentsMargins(0, 0, 0, 0)
+        signal_event_row = QHBoxLayout()
+        self.signal_event_label = QLabel("Excitation")
+        self.signal_event_spin = QSpinBox()
+        self.signal_event_spin.setToolTip(
+            "Excitation whose spectrum is shown; the FID plot covers all of them"
+        )
+        self.signal_event_spin.valueChanged.connect(self._refresh)
+        signal_event_row.addWidget(self.signal_event_label)
+        signal_event_row.addWidget(self.signal_event_spin)
+        signal_event_row.addStretch(1)
+        signal_layout.addLayout(signal_event_row)
+        self.signal_fid_plot = pg.PlotWidget(title="FID")
+        self.signal_spectrum_plot = pg.PlotWidget(title="Spectrum")
+        for plot, axis, unit in (
+            (self.signal_fid_plot, "Time", "ms"),
+            (self.signal_spectrum_plot, "Frequency", "Hz"),
+        ):
+            plot.setLabel("left", "Signal", "a.u.")
+            plot.setLabel("bottom", axis, unit)
+            plot.addLegend()
+            plot.setMinimumHeight(_VOXEL_PLOT_MIN_HEIGHT)
+            signal_layout.addWidget(plot, 1)
+        self.pages.addWidget(self.signal_page)
+
         self.three_d_page = QWidget()
         three_d_layout = QVBoxLayout(self.three_d_page)
         three_d_layout.setContentsMargins(0, 0, 0, 0)
@@ -935,6 +965,8 @@ class SequenceReconstructionExplorer(QWidget):
         self.kspace_panel.clear()
         self.image_panel.clear()
         self.spectrum_plot.clear()
+        self.signal_fid_plot.clear()
+        self.signal_spectrum_plot.clear()
         self.volume_plot.clear()
         self.volume_plot.hide()
         self._set_phantom(None)
@@ -1424,6 +1456,9 @@ class SequenceReconstructionExplorer(QWidget):
             return
         try:
             model = self.model
+            if model.kind == "raw_signal":
+                self._refresh_acquisition_signal()
+                return
             image_data, mode, pool_index, effective_coil_mode = self._selected_image()
             component = str(self.component_combo.currentData() or "magnitude")
             display = model.display_values(image_data, component)
@@ -1548,6 +1583,68 @@ class SequenceReconstructionExplorer(QWidget):
             self.summary.setText(f"Reconstruction unavailable: {exc}")
             self._current_display = None
             self.export_button.setEnabled(False)
+
+    def _refresh_acquisition_signal(self):
+        """Show the FID and spectrum of an acquisition without image encoding."""
+        model = self.model
+        mode, index = self._selected_data_mode()
+        pool = mode == "pool"
+        signal = np.asarray(
+            model.acquisition_signal(
+                pool_index=index if pool else None,
+                coil_mode=str(self.coil_combo.currentData() or "rss"),
+            )
+        ).reshape(-1)
+        times = np.asarray(model.dataset.coords["adc_time_s"].values, dtype=float)
+        events = model.acquisition_events()
+        event_values = list(dict.fromkeys(events.tolist()))
+        self.signal_event_label.setVisible(len(event_values) > 1)
+        self.signal_event_spin.setVisible(len(event_values) > 1)
+        blocked = self.signal_event_spin.blockSignals(True)
+        self.signal_event_spin.setRange(1, max(1, len(event_values)))
+        self.signal_event_spin.blockSignals(blocked)
+        selected = event_values[self.signal_event_spin.value() - 1]
+        rows = np.flatnonzero(events == selected)
+
+        self.signal_fid_plot.clear()
+        self.signal_spectrum_plot.clear()
+        self.signal_fid_plot.setLimits(xMin=None, xMax=None)
+        measurement_ms = 1e3 * float(model.dataset.attrs.get("duration_s") or 0.0)
+        time_ms = times * 1e3
+        for plot, x, values in (
+            (self.signal_fid_plot, time_ms, signal),
+            *self._signal_spectrum(times[rows], signal[rows]),
+        ):
+            plot.plot(x, np.abs(values), pen="w", name="Magnitude")
+            plot.plot(x, values.real, pen="g", name="Real")
+            plot.plot(x, values.imag, pen="r", name="Imaginary")
+        if time_ms.size:
+            # Zooming out of the FID stops at the measurement.
+            self.signal_fid_plot.setLimits(
+                xMin=0.0, xMax=max(measurement_ms, float(time_ms.max()))
+            )
+        self.signal_fid_plot.setTitle("FID")
+        label = "" if not pool else f" · {model.pool_names[index]}"
+        self.signal_spectrum_plot.setTitle(f"Spectrum{label}")
+        self.pages.setCurrentWidget(self.signal_page)
+        source = f" · {Path(self.source).name}" if self.source else ""
+        self.summary.setText(
+            f"Single-voxel acquisition{source}{label}: no spatial encoding, so the "
+            "FID and its spectrum are shown instead of an image"
+        )
+        self._current_display = None
+        self.export_button.setEnabled(False)
+
+    def _signal_spectrum(self, times, values):
+        """Return ``[(plot, frequency_hz, spectrum)]`` of one excitation's FID."""
+        if values.size < 2:
+            return []
+        dwell = float(np.median(np.diff(times)))
+        if not dwell > 0:
+            return []
+        frequency = np.fft.fftshift(np.fft.fftfreq(values.size, dwell))
+        spectrum = np.fft.fftshift(np.fft.fft(values))
+        return [(self.signal_spectrum_plot, frequency, spectrum)]
 
     def _refresh_two_dimensional(
         self,

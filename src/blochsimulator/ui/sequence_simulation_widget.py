@@ -517,6 +517,8 @@ class _SequenceOverviewPlot(pg.PlotItem):
         self.vb.setBorder(pg.mkPen("#607078"))
         self.setMouseEnabled(x=False, y=False)
         self.disableAutoRange()
+        # It shows the whole sequence, including its trailing silence.
+        self.vb.auto_data_limits = False
         self.region = pg.LinearRegionItem(
             values=(0.0, 1.0),
             brush=pg.mkBrush(128, 203, 235, 65),
@@ -4343,10 +4345,11 @@ class SequenceSimulationWidget(QWidget):
         self._add_shared_rf_controls(
             ss_form,
             "ss_bssfp",
-            pulse_type="Gaussian",
+            pulse_type="SLR",
             duration_ms=2.33,
             sinc_lobes=3,
             apodization=0.0,
+            slr_sharpness=1,
             label_prefix="Spectral RF",
         )
         _add_form_section(ss_form, "Readout and timing")
@@ -4816,6 +4819,50 @@ class SequenceSimulationWidget(QWidget):
         self._auto_spin_grid_pending = False
         self._auto_spin_grid_history = []
         self._auto_spin_grid_time = 0.0
+        self.ideal_crusher_banner = QFrame()
+        self.ideal_crusher_banner.setObjectName("ideal_crusher_banner")
+        self.ideal_crusher_banner.setStyleSheet(
+            "QFrame#ideal_crusher_banner {background: #fef3c7; "
+            "border: 1px solid #f59e0b; border-radius: 4px;}"
+            "QFrame#ideal_crusher_banner QLabel {color: #78350f;}"
+        )
+        crusher_banner_layout = QVBoxLayout(self.ideal_crusher_banner)
+        self.ideal_crusher_banner_label = QLabel(
+            "Gradient spoiling simulates every crusher with subvoxel spins and "
+            "is much slower. For sequences generated here, the ideal crusher "
+            "is usually sufficient."
+        )
+        self.ideal_crusher_banner_label.setWordWrap(True)
+        crusher_banner_layout.addWidget(self.ideal_crusher_banner_label)
+        crusher_banner_buttons = QHBoxLayout()
+        crusher_banner_layout.addLayout(crusher_banner_buttons)
+        self.ideal_crusher_accept_button = QPushButton("Use ideal crusher")
+        self.ideal_crusher_accept_button.setToolTip(
+            "Switch the spoiler simulation to ideal crushers and remember it."
+        )
+        self.ideal_crusher_accept_button.clicked.connect(self._accept_ideal_crusher)
+        crusher_banner_buttons.addWidget(self.ideal_crusher_accept_button)
+        self.ideal_crusher_settings_link = QLabel(
+            "<a href='settings'>Open Settings</a>"
+        )
+        self.ideal_crusher_settings_link.setTextInteractionFlags(
+            Qt.LinksAccessibleByMouse
+        )
+        self.ideal_crusher_settings_link.linkActivated.connect(
+            lambda _link: self._show_simulation_settings()
+        )
+        crusher_banner_buttons.addWidget(self.ideal_crusher_settings_link)
+        crusher_banner_buttons.addStretch()
+        self.ideal_crusher_dismiss_button = QPushButton("Keep gradient spoiling")
+        self.ideal_crusher_dismiss_button.setToolTip(
+            "Hide this reminder until the application is restarted."
+        )
+        self.ideal_crusher_dismiss_button.clicked.connect(
+            self._dismiss_ideal_crusher_reminder
+        )
+        crusher_banner_buttons.addWidget(self.ideal_crusher_dismiss_button)
+        self._ideal_crusher_reminder_dismissed = False
+        controls_layout.addWidget(self.ideal_crusher_banner)
         self._update_spoiling_quality_visibility()
         controls_layout.addWidget(self.spoiling_quality_group)
 
@@ -6107,6 +6154,15 @@ class SequenceSimulationWidget(QWidget):
         self.gradient_plot.setLabel("left", "Gradient", "T/m")
         self.gradient_plot.setLabel("bottom", "Time", "ms")
         self.gradient_plot.addLegend()
+        # These plots only hold the visible time window, so their zoom range
+        # is bounded by the sequence duration, not by the data currently
+        # drawn.
+        for view_box in (
+            self.rf_plot.getViewBox(),
+            self.gradient_plot.getViewBox(),
+            self._rf_phase_view,
+        ):
+            view_box.auto_data_limits = False
         self.rf_overview = _SequenceOverviewPlot(self.rf_plot)
         self.gradient_overview = _SequenceOverviewPlot(self.gradient_plot)
         zero_line_pen = pg.mkPen("#757575", width=1)
@@ -8765,6 +8821,7 @@ class SequenceSimulationWidget(QWidget):
         source_index = self.sequence_source.currentIndex()
         source_changed = source_index != self._selected_sequence_source_index
         self._selected_sequence_source_index = source_index
+        self._update_ideal_crusher_reminder()
         self.fid_group.setVisible(source_index == self.INTERNAL_SOURCE)
         self.fid_group.setEnabled(source_index == self.INTERNAL_SOURCE)
         epi_selected = source_index == self.EPI_SOURCE
@@ -10799,6 +10856,32 @@ class SequenceSimulationWidget(QWidget):
         """Show physical spoiler diagnostics only for gradient simulation."""
         if hasattr(self, "spoiling_quality_group"):
             self.spoiling_quality_group.setVisible(self.spoiler_mode == "gradient")
+        self._update_ideal_crusher_reminder()
+
+    def _update_ideal_crusher_reminder(self):
+        """Suggest the ideal crusher when a generated sequence uses gradients."""
+        banner = getattr(self, "ideal_crusher_banner", None)
+        source = getattr(self, "sequence_source", None)
+        if banner is None or source is None:
+            return
+        banner.setVisible(
+            self.spoiler_mode == "gradient"
+            and source.currentIndex() in self.GENERATED_SOURCES
+            and not self._ideal_crusher_reminder_dismissed
+        )
+
+    def _accept_ideal_crusher(self):
+        """Switch to ideal crushers and persist the choice like Settings does."""
+        if self.app_settings is not None:
+            self.app_settings.setValue("sequence/spoiler_mode", "ideal")
+            self.app_settings.sync()
+        self.set_spoiler_configuration(
+            "ideal", (1, 1, 1), self.subvoxel_sampling_method
+        )
+
+    def _dismiss_ideal_crusher_reminder(self):
+        self._ideal_crusher_reminder_dismissed = True
+        self._update_ideal_crusher_reminder()
 
     def _ss_bssfp_effective_spoiler_cycles_xyz(self):
         voxel_sizes = np.asarray(self._ss_bssfp_reference_voxel_sizes_m())
@@ -15990,6 +16073,7 @@ class SequenceSimulationWidget(QWidget):
         self.magnetization_animation = None
         self._split_csi_data = None
         self.signal_plot.clear()
+        self.signal_plot.setLimits(xMin=None, xMax=None)
         self.signal_plot.setTitle("Received ADC signal — current simulation")
         for plot in (self.signal_plot, self.split_signal_plot):
             self._set_signal_axis(plot, SignalDisplay("simulation"))
@@ -16063,6 +16147,7 @@ class SequenceSimulationWidget(QWidget):
     def _show_live_signal(self, signal, adc_times, visible_samples, preview_summary):
         """Plot only ADC data produced by the simulation currently running."""
         self.signal_plot.clear()
+        self.signal_plot.setLimits(xMin=None, xMax=None)
         self.signal_plot.setTitle("Live received ADC signal")
         self._set_signal_axis(self.signal_plot, SignalDisplay("simulation"))
         self.signal_plot.setLabel("bottom", "Time", "ms")
@@ -16212,6 +16297,7 @@ class SequenceSimulationWidget(QWidget):
         display = signal_display(result, self.signal_unit)
         result = display_result(result, display)
         self.signal_plot.clear()
+        self.signal_plot.setLimits(xMin=None, xMax=None)
         self.signal_plot.setTitle("Received ADC signal")
         self.signal_plot.setLabel("bottom", "Time", "ms")
         self._set_signal_axis(self.signal_plot, display)
@@ -16277,6 +16363,12 @@ class SequenceSimulationWidget(QWidget):
                     pen=pg.mkPen(colors[pool_index % len(colors)], width=2),
                     name=f"|{name}|",
                 )
+        # Zooming out stops at the measurement, from 0 to its end.
+        measurement_ms = 1000.0 * float(result.metadata.get("duration_s") or 0.0)
+        if np.size(plot_time):
+            self.signal_plot.setLimits(
+                xMin=0.0, xMax=max(measurement_ms, float(np.max(plot_time)))
+            )
         self.spectrum_info.setText(display.note or display.description)
 
     def _finished(self, result, *, record_run=True):

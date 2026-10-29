@@ -5,6 +5,7 @@ from PyQt5.QtWidgets import QApplication
 
 from blochsimulator.ui.plot_interaction import (
     install_axis_constrained_zoom,
+    install_data_range_zoom_limit,
     zoom_axis_for_modifiers,
 )
 
@@ -71,6 +72,51 @@ def test_trackpad_zoom_can_be_constrained_to_one_axis(modifiers, x_changes, y_ch
     assert (after_x != before_x) is x_changes
     assert (after_y != before_y) is y_changes
     assert event.accepted
+    plot.close()
+    plot.deleteLater()
+    app.processEvents()
+
+
+def test_zoom_out_stops_near_the_plotted_data():
+    app = QApplication.instance() or QApplication([])
+    install_data_range_zoom_limit()
+    plot = pg.PlotWidget()
+    plot.resize(600, 400)
+    plot.show()
+    plot.plot([0.0, 10.0], [0.0, 1.0])
+    view_box = plot.getViewBox()
+    app.processEvents()
+
+    view_box.setRange(xRange=(-1e6, 1e6), padding=0.0)
+    app.processEvents()
+
+    # Curves limit the abscissa (time, frequency); the ordinate stays free so
+    # plots with a deliberately fixed amplitude range keep it.
+    x_min, x_max = view_box.viewRange()[0]
+    assert -1.0 <= x_min <= 0.0 and 10.0 <= x_max <= 11.0
+    plot.close()
+    plot.deleteLater()
+    app.processEvents()
+
+
+def test_explicit_limits_and_opt_out_are_respected():
+    app = QApplication.instance() or QApplication([])
+    install_data_range_zoom_limit()
+    plot = pg.PlotWidget()
+    plot.resize(600, 400)
+    plot.show()
+    plot.plot([0.0, 10.0], [0.0, 1.0])
+    view_box = plot.getViewBox()
+    view_box.setLimits(xMin=0.0, xMax=10.0)
+    view_box.setRange(xRange=(-100.0, 100.0), padding=0.0)
+    app.processEvents()
+    assert view_box.viewRange()[0] == pytest.approx([0.0, 10.0])
+
+    view_box.setLimits(xMin=None, xMax=None)
+    view_box.auto_data_limits = False
+    view_box.setRange(xRange=(-100.0, 100.0), padding=0.0)
+    app.processEvents()
+    assert view_box.viewRange()[0] == pytest.approx([-100.0, 100.0])
     plot.close()
     plot.deleteLater()
     app.processEvents()

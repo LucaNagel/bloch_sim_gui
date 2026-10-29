@@ -4173,3 +4173,47 @@ def test_typing_zero_bisects_to_the_shortest_buildable_bssfp_tr():
     with pytest.raises(Exception):
         make_pulseq_bssfp(**widget._bssfp_pulseq_parameters())
     widget.close()
+
+
+def test_ss_bssfp_defaults_to_slr_sharpness_one():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+
+    assert widget.ss_bssfp_rf_pulse_type.currentText() == "SLR"
+    assert widget.ss_bssfp_rf_slr_sharpness.value() == 1
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_ideal_crusher_reminder_for_generated_sequences_with_gradient_spoiling():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.show()
+    widget.sequence_source.setCurrentIndex(widget.FLASH_SOURCE)
+    widget.set_spoiler_configuration("ideal", (1, 1, 1))
+    assert not widget.ideal_crusher_banner.isVisible()
+
+    widget.set_spoiler_configuration("gradient", (1, 1, 9))
+    assert widget.ideal_crusher_banner.isVisible()
+
+    # Sequences that are not generated here keep their own spoilers.
+    widget.sequence_source.setCurrentIndex(widget.PULSEQ_SOURCE)
+    assert not widget.ideal_crusher_banner.isVisible()
+
+    widget.sequence_source.setCurrentIndex(widget.FLASH_SOURCE)
+    assert widget.ideal_crusher_banner.isVisible()
+    widget.ideal_crusher_accept_button.click()
+    assert widget.spoiler_mode == "ideal"
+    assert widget.subvoxel_spin_counts == (1, 1, 1)
+    assert not widget.ideal_crusher_banner.isVisible()
+
+    widget.set_spoiler_configuration("gradient", (1, 1, 9))
+    widget.ideal_crusher_dismiss_button.click()
+    assert widget.spoiler_mode == "gradient"
+    assert not widget.ideal_crusher_banner.isVisible()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
