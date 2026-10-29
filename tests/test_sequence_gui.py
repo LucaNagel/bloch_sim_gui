@@ -3588,6 +3588,7 @@ def test_default_flash_sequence_reports_time_per_image(qt_application):
     widget = SequenceSimulationWidget()
     assert widget.sequence_source.currentIndex() == widget.FLASH_SOURCE
     assert widget._ensure_current_generated_sequence(), widget._generation_error
+    widget.set_sequence_timing_visible(True)
     widget._show_program()
     assert "Time per image:" in widget.sequence_timing_summary.text()
 
@@ -3597,6 +3598,8 @@ def test_sequence_preview_timing_refresh_and_saved_visibility(tmp_path, qt_appli
     parent = QWidget()
     parent.app_settings = settings
     widget = SequenceSimulationWidget(parent)
+    assert widget.sequence_timing_summary.isHidden()  # hidden by default
+    widget.set_sequence_timing_visible(True)
     widget.program = SequenceProgram(
         (), duration_s=0.06, metadata={"definitions": {"TE": 0.02, "TR": 0.06}}
     )
@@ -3617,7 +3620,7 @@ def test_sequence_preview_timing_refresh_and_saved_visibility(tmp_path, qt_appli
     assert not widget.sequence_timing_summary.isHidden()
     assert widget.sequence_timing_summary.text().count("not specified") == 2
 
-    settings.setValue("interface/show_sequence_timing", False)
+    settings.setValue("interface/show_sequence_timing_row", False)
     settings.sync()
     reopened = SequenceSimulationWidget(parent)
     assert reopened.sequence_timing_summary.isHidden()
@@ -4065,19 +4068,29 @@ def test_reconstruction_explorer_hides_2d_tab_and_sequence_settings(qt_applicati
     assert not widget.views.isTabVisible(widget.two_d_result_tab_index)
     assert widget.csi_slice_thickness_mm.value() == pytest.approx(3.0)
 
+    # Every tab starts without the sequence settings column.
+    qt_application.processEvents()
+    assert not widget.controls_scroll.isVisible()
+    assert widget.run_button.isVisible()
     widget.views.setCurrentIndex(widget.reconstruction_explorer_tab_index)
     qt_application.processEvents()
-    assert not widget.control_column.isVisible()
+    assert not widget.controls_scroll.isVisible()
     assert explorer.controls_scroll.isVisible()
 
     explorer.sequence_settings_button.click()
     qt_application.processEvents()
-    assert widget.control_column.isVisible()
+    assert widget.controls_scroll.isVisible()
+    assert widget.sequence_settings_toggle.isChecked()
 
-    explorer.sequence_settings_button.click()
+    # The choice is shared by all tabs and can be changed from any of them.
     widget.views.setCurrentIndex(widget.log_tab_index)
     qt_application.processEvents()
-    assert widget.control_column.isVisible()
+    assert widget.controls_scroll.isVisible()
+    widget.sequence_settings_toggle.click()
+    qt_application.processEvents()
+    assert not widget.controls_scroll.isVisible()
+    assert not explorer.sequence_settings_button.isChecked()
+    assert widget.sequence_settings_toggle.text() == "Show sequence settings"
 
 
 def test_phantom_designer_starts_from_default_sphere(qt_application):

@@ -111,3 +111,27 @@ def install_data_range_zoom_limit():
 
     effective_limits._blochsimulator_data_limits = True
     pg.ViewBox._effectiveLimits = effective_limits
+
+
+class AxisZoomPlotWidget(pg.PlotWidget):
+    """A plot that zooms only through its axes, never by scrolling over the data.
+
+    Scrolling or swiping over the plot area is passed on to the enclosing
+    scroll area, so moving down a page of plots cannot zoom one by accident.
+    The wheel over an axis zooms that axis; Shift or Alt over the plot area
+    still zooms X or Y.
+    """
+
+    AXIS_ONLY_ZOOM_TOOLTIP = (
+        "Scroll over the horizontal or vertical axis to zoom that axis. "
+        "Scrolling over the plot itself scrolls the page."
+    )
+
+    def wheelEvent(self, event):
+        over_axis = any(
+            isinstance(item, pg.AxisItem) for item in self.items(event.pos())
+        )
+        if over_axis or zoom_axis_for_modifiers(event.modifiers()) is not None:
+            super().wheelEvent(event)
+        else:
+            event.ignore()

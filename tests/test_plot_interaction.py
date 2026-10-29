@@ -120,3 +120,42 @@ def test_explicit_limits_and_opt_out_are_respected():
     plot.close()
     plot.deleteLater()
     app.processEvents()
+
+
+def test_tab_bar_wheel_slides_tabs_without_switching():
+    from PyQt5.QtCore import QPoint, QPointF
+    from PyQt5.QtGui import QWheelEvent
+    from PyQt5.QtWidgets import QLabel, QTabWidget
+
+    from blochsimulator.ui.widgets import install_tab_bar_wheel_scroll
+
+    app = QApplication.instance() or QApplication([])
+    tabs = QTabWidget()
+    for index in range(12):
+        tabs.addTab(QLabel(str(index)), f"Tab number {index}")
+    tabs.resize(300, 200)
+    tabs.show()
+    app.processEvents()
+    install_tab_bar_wheel_scroll(tabs)
+    bar = tabs.tabBar()
+    first_x = bar.tabRect(0).x()
+
+    def wheel(delta):
+        event = QWheelEvent(
+            QPointF(20, 10),
+            QPointF(20, 10),
+            QPoint(0, 0),
+            QPoint(0, delta),
+            0,
+            Qt.Vertical,
+            Qt.NoButton,
+            Qt.NoModifier,
+        )
+        app.sendEvent(bar, event)
+        app.processEvents()
+
+    wheel(-240)
+    assert bar.tabRect(0).x() < first_x
+    assert tabs.currentIndex() == 0
+    wheel(240)
+    assert bar.tabRect(0).x() == first_x

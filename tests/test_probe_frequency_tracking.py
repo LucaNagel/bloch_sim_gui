@@ -204,3 +204,39 @@ def test_per_spin_spectrum_scale_matches_known_bloch_rotations(
     viewer.close()
     viewer.deleteLater()
     app.processEvents()
+
+
+def test_probe_plots_stay_within_the_simulated_range_and_zoom_only_over_axes():
+    from PyQt5.QtCore import QPoint, QPointF, Qt
+    from PyQt5.QtGui import QWheelEvent
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    viewer = SequenceProbeSpectrumViewer()
+    viewer.set_result(_probe_result())
+
+    spectrum = viewer.plot.getViewBox().state["limits"]["xLimits"]
+    assert spectrum == [-100.0, 100.0]
+    evolution = viewer.trace_plot.getViewBox().state["limits"]["xLimits"]
+    assert evolution[0] == 0.0 and evolution[1] == pytest.approx(2.0)
+
+    viewer.resize(900, 900)
+    viewer.show()
+    app.processEvents()
+    for plot in (viewer.plot, viewer.trace_plot):
+        view_box = plot.getViewBox()
+        before = view_box.viewRange()
+        center = plot.mapFromScene(view_box.sceneBoundingRect().center())
+        event = QWheelEvent(
+            QPointF(center),
+            QPointF(center),
+            QPoint(0, 0),
+            QPoint(0, 120),
+            0,
+            Qt.Vertical,
+            Qt.NoButton,
+            Qt.NoModifier,
+        )
+        app.sendEvent(plot.viewport(), event)
+        assert not event.isAccepted()
+        assert view_box.viewRange() == before
+    viewer.close()

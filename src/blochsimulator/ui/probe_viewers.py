@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from .plot_interaction import AxisZoomPlotWidget
 from .widgets import CheckableComboBox
 
 try:
@@ -189,7 +190,8 @@ class SequenceProbeSpectrumViewer(QWidget):
         component_row.addWidget(self.heatmap_mode)
         layout.addLayout(component_row)
 
-        self.plot = pg.PlotWidget()
+        self.plot = AxisZoomPlotWidget()
+        self.plot.setToolTip(AxisZoomPlotWidget.AXIS_ONLY_ZOOM_TOOLTIP)
         self.plot.setLabel("left", "Magnitude")
         self.plot.setLabel("bottom", "Spin offset", "Hz")
         self.plot.setDownsampling(mode="peak")
@@ -280,7 +282,8 @@ class SequenceProbeSpectrumViewer(QWidget):
         trace_controls.addWidget(self.trace_component)
         trace_layout.addLayout(trace_controls)
 
-        self.trace_plot = pg.PlotWidget(title="Selected frequency evolution")
+        self.trace_plot = AxisZoomPlotWidget(title="Selected frequency evolution")
+        self.trace_plot.setToolTip(AxisZoomPlotWidget.AXIS_ONLY_ZOOM_TOOLTIP)
         self.trace_plot.setObjectName("sequence_probe_frequency_trace_plot")
         self.trace_plot.setLabel("left", "Magnitude")
         self.trace_plot.setLabel("bottom", "Sequence time", "ms")
@@ -668,6 +671,10 @@ class SequenceProbeSpectrumViewer(QWidget):
                 ),
                 padding=0,
             )
+            # Neither negative times nor beyond the simulated sequence.
+            self.trace_plot.setLimits(
+                xMin=0.0, xMax=max(float(self.result.time_s.max() * 1000.0), 1e-9)
+            )
             cursor_time_ms = float(self.result.time_s[self.time_index] * 1000.0)
             self.trace_plot.addItem(
                 pg.InfiniteLine(
@@ -752,6 +759,9 @@ class SequenceProbeSpectrumViewer(QWidget):
         )
         self.plot.setLabel("left", ylabel)
         self.plot.setXRange(*_safe_range(freq, fallback=(-1.0, 1.0)), padding=0)
+        # Zooming out stops at the simulated frequency range.
+        if freq.size > 1 and np.all(np.isfinite(freq)):
+            self.plot.setLimits(xMin=float(freq.min()), xMax=float(freq.max()))
         self._set_y_range(self.plot, visible, selected)
 
     def _render_heatmap(self):

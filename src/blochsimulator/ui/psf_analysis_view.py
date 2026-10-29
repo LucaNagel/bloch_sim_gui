@@ -732,6 +732,7 @@ class PSFAnalysisView(QWidget):
         psf = self.psf
         for plot in (self.profile_plot, self.modulation_plot, self.slice_plot):
             plot.clear()
+            plot.setLimits(xMin=None, xMax=None, yMin=None, yMax=None)
         self.metrics_table.setRowCount(0)
         self._fit_metrics_table()
         if psf is None:
@@ -859,6 +860,14 @@ class PSFAnalysisView(QWidget):
                 pen=pg.mkPen(color, width=1, style=Qt.DashLine),
             )
         plot.plot([], [], pen=pg.mkPen("#334155", style=Qt.DashLine), name="ideal")
+        # Zooming out stops at the field of view; |PSF| is never negative.
+        extent = np.concatenate(
+            [
+                psf.profiles[role][0] / psf.voxel_size_m[psf.roles.index(role)]
+                for role in psf.roles
+            ]
+        )
+        plot.setLimits(xMin=float(extent.min()), xMax=float(extent.max()), yMin=0.0)
         plot.setXRange(-PROFILE_VIEW_VOXELS, PROFILE_VIEW_VOXELS, padding=0.0)
 
     def _modulation_lines(self, psf):
@@ -920,9 +929,11 @@ class PSFAnalysisView(QWidget):
                     )
                 )
             self._limit_zoom(plot, [y], 5.0 if phase else 0.05)
+            plot.setLimits(xMin=float(np.min(radius)), xMax=float(np.max(radius)))
             return
         plot.setLabel("bottom", "k [Δk]")
         drawn = []
+        extent = []
         for role, k, values in self._modulation_lines(psf):
             order = np.argsort(k)
             y = (
@@ -941,6 +952,7 @@ class PSFAnalysisView(QWidget):
                 name=_role_label(role, psf.encoding_frame),
             )
             drawn.append(y)
+            extent.append(k)
         if not phase:
             plot.addItem(
                 pg.InfiniteLine(
@@ -948,6 +960,9 @@ class PSFAnalysisView(QWidget):
                 )
             )
         self._limit_zoom(plot, drawn, 5.0 if phase else 0.05)
+        # Zooming out stops at the sampled k-space extent.
+        k_values = np.concatenate(extent)
+        plot.setLimits(xMin=float(k_values.min()), xMax=float(k_values.max()))
 
     @staticmethod
     def _limit_zoom(plot, values, half_span):
@@ -1017,6 +1032,10 @@ class PSFAnalysisView(QWidget):
         )
         plot.setLabel("bottom", f"Position along slice normal ({axis}) [mm]")
         plot.enableAutoRange()
+        # The profile covers the sampled positions; |signal| is never negative.
+        plot.setLimits(
+            xMin=float(positions_mm.min()), xMax=float(positions_mm.max()), yMin=0.0
+        )
 
     def _render_metrics(self, psf):
         rows = []

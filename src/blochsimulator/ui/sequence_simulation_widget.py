@@ -227,6 +227,7 @@ from .volume_viewer import (
 from .widgets import (
     IMAGE_CANVAS_BACKGROUND,
     compact_image_histogram,
+    install_tab_bar_wheel_scroll,
     style_image_item,
 )
 from .default_settings import WorkspaceDefaults, load_kernel_settings
@@ -1834,9 +1835,9 @@ class SequenceSimulationWidget(QWidget):
             else True
         )
         self._sequence_timing_visible = (
-            bool(settings.value("interface/show_sequence_timing", True, type=bool))
+            bool(settings.value("interface/show_sequence_timing_row", False, type=bool))
             if settings is not None
-            else True
+            else False
         )
         self.spoiler_mode = spoiler_mode
         self.subvoxel_spin_counts = (
@@ -4879,7 +4880,9 @@ class SequenceSimulationWidget(QWidget):
         )
         crusher_banner_buttons.addWidget(self.ideal_crusher_dismiss_button)
         self._ideal_crusher_reminder_dismissed = False
-        controls_layout.addWidget(self.ideal_crusher_banner)
+        # Lives above the scroll area so the reminder stays visible while the
+        # sequence settings are hidden.
+        control_column_layout.insertWidget(0, self.ideal_crusher_banner)
         self._update_spoiling_quality_visibility()
         controls_layout.addWidget(self.spoiling_quality_group)
 
@@ -6107,6 +6110,20 @@ class SequenceSimulationWidget(QWidget):
         view_mode_row.addStretch()
         views = QTabWidget()
         self.views = views
+        install_tab_bar_wheel_scroll(views)
+        # The sequence parameter column takes a large share of the window, so
+        # every tab starts without it and offers this button to bring it back.
+        self._sequence_settings_shown = False
+        self.sequence_settings_toggle = QPushButton("Show sequence settings")
+        self.sequence_settings_toggle.setObjectName("sequence_settings_toggle")
+        self.sequence_settings_toggle.setCheckable(True)
+        self.sequence_settings_toggle.setToolTip(
+            "Show or hide the sequence parameter column next to the views"
+        )
+        self.sequence_settings_toggle.toggled.connect(
+            self._explorer_sequence_settings_requested
+        )
+        views.setCornerWidget(self.sequence_settings_toggle, Qt.TopRightCorner)
         views_font = views.tabBar().font()
         views_font.setBold(True)
         views.tabBar().setFont(views_font)
@@ -6281,12 +6298,10 @@ class SequenceSimulationWidget(QWidget):
         self.reconstruction_explorer_tab_index = views.addTab(
             self.reconstruction_explorer, "Reconstruction Explorer"
         )
-        # Browsing results does not need the sequence parameters, so the
-        # Explorer collapses them unless the user asks to keep them shown.
-        self._explorer_shows_sequence_settings = False
         self.reconstruction_explorer.sequence_settings_visibility_requested.connect(
             self._explorer_sequence_settings_requested
         )
+        self._update_control_column_visibility()
         views.setTabToolTip(
             self.reconstruction_explorer_tab_index,
             "Browse reconstructed 2D, 3D, dynamic, and spectroscopic results.",
@@ -6386,6 +6401,7 @@ class SequenceSimulationWidget(QWidget):
         )
         probe_layout.addWidget(self.probe_time_control)
         self.probe_views = QTabWidget()
+        install_tab_bar_wheel_scroll(self.probe_views)
         self.probe_spectrum_viewer = SequenceProbeSpectrumViewer()
         self.probe_spatial_viewer = SequenceProbeSpatialViewer()
         self.probe_magnetization_viewer = MagnetizationViewer()
@@ -13969,13 +13985,20 @@ class SequenceSimulationWidget(QWidget):
         self._update_control_column_visibility()
 
     def _update_control_column_visibility(self):
-        exploring = self.views.currentIndex() == self.reconstruction_explorer_tab_index
-        visible = not exploring or self._explorer_shows_sequence_settings
-        self.control_column.setVisible(visible)
+        visible = self._sequence_settings_shown
+        # Only the parameters collapse; the run controls below stay reachable.
+        self.controls_scroll.setVisible(visible)
+        blocked = self.sequence_settings_toggle.blockSignals(True)
+        self.sequence_settings_toggle.setChecked(visible)
+        self.sequence_settings_toggle.blockSignals(blocked)
+        self.sequence_settings_toggle.setText(
+            "Hide sequence settings" if visible else "Show sequence settings"
+        )
         self.reconstruction_explorer.set_sequence_settings_visible(visible)
 
     def _explorer_sequence_settings_requested(self, visible):
-        self._explorer_shows_sequence_settings = bool(visible)
+        """Show or hide the parameter column for every tab at once."""
+        self._sequence_settings_shown = bool(visible)
         self._update_control_column_visibility()
 
     def _update_geometry_stale_notice(self, previewing=None):
@@ -16238,6 +16261,7 @@ class SequenceSimulationWidget(QWidget):
         self.signal_plot.clear()
         self.signal_plot.setLimits(xMin=None, xMax=None)
         self.signal_plot.setTitle("Live received ADC signal")
+        self.signal_plot.setLimits(xMin=0.0)
         self._set_signal_axis(self.signal_plot, SignalDisplay("simulation"))
         self.signal_plot.setLabel("bottom", "Time", "ms")
         visible_samples = min(int(visible_samples), int(adc_times.size))
@@ -17138,11 +17162,13 @@ class SequenceSimulationWidget(QWidget):
             x_values = csi.spectral_time_s * 1000.0
             self.split_signal_plot.setTitle("Spatially reconstructed voxel FID")
             self.split_signal_plot.setLabel("bottom", "Time", "ms")
+            self.split_signal_plot.setLimits(xMin=0.0)
         else:
             voxel_signal = spectra[..., y_index, x_index, :]
             x_values = csi.frequency_hz
             self.split_signal_plot.setTitle("Spatially reconstructed voxel spectrum")
             self.split_signal_plot.setLabel("bottom", "Frequency", "Hz")
+            self.split_signal_plot.setLimits(xMin=None)
         if voxel_signal.ndim == 2:
             magnitude = np.sqrt(np.sum(np.abs(voxel_signal) ** 2, axis=0))
             self.split_signal_plot.plot(
@@ -17219,6 +17245,7 @@ class SequenceSimulationWidget(QWidget):
             self.signal_plot.clear()
             self.signal_plot.setTitle("Spatially reconstructed CSI spectrum")
             self.signal_plot.setLabel("bottom", "Frequency", "Hz")
+            self.signal_plot.setLimits(xMin=None, xMax=None)
             if voxel_spectrum.ndim == 2:
                 magnitude = np.sqrt(np.sum(np.abs(voxel_spectrum) ** 2, axis=0))
                 self.signal_plot.plot(

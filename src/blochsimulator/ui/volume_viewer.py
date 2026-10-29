@@ -41,8 +41,8 @@ except Exception:
 class _SliceScrollViewBox(pg.ViewBox):
     """Use an unmodified wheel/trackpad gesture to step through slices."""
 
-    def __init__(self, scroll_callback):
-        super().__init__(enableMenu=False)
+    def __init__(self, scroll_callback, *, enable_menu=False):
+        super().__init__(enableMenu=enable_menu)
         self._scroll_callback = scroll_callback
 
     def wheelEvent(self, event, axis=None):

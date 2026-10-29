@@ -59,7 +59,7 @@ from .sequence_geometry_viewer import (
     object_sections,
     projected_outline_mm,
 )
-from .volume_viewer import VolumeViewerWidget
+from .volume_viewer import VolumeViewerWidget, _SliceScrollViewBox
 from .widgets import IMAGE_CANVAS_BACKGROUND, style_image_item
 
 
@@ -281,12 +281,18 @@ class _DoubleRangeSlider(QWidget):
 
 class _SelectableImagePanel(QWidget):
     pixel_selected = pyqtSignal(int, int)
+    # +1 / -1: an unmodified wheel or two-finger scroll steps the displayed
+    # slice instead of zooming (Shift, Alt and pinch still zoom).
+    slice_scrolled = pyqtSignal(int)
 
     def __init__(self, title: str, parent=None):
         super().__init__(parent)
         self._shape = (0, 0)
         layout = QVBoxLayout(self)
-        self.plot = pg.PlotWidget(title=title)
+        self.plot = pg.PlotWidget(
+            title=title,
+            viewBox=_SliceScrollViewBox(self.slice_scrolled.emit, enable_menu=True),
+        )
         self.plot.setBackground(IMAGE_CANVAS_BACKGROUND)
         self.plot.setAspectLocked(True)
         self.plot.setLabel("bottom", "x index")
@@ -600,6 +606,13 @@ class SequenceReconstructionExplorer(QWidget):
         self.kspace_panel = _SelectableImagePanel("Gridded k-space")
         self.image_panel = _SelectableImagePanel("Reconstruction")
         self.image_panel.pixel_selected.connect(self._voxel_selected)
+        for panel in (self.kspace_panel, self.image_panel):
+            panel.setToolTip(
+                "Scroll or swipe vertically to step through the slice slider "
+                "below; hold Shift or Alt (or pinch) to zoom."
+            )
+        self.kspace_panel.slice_scrolled.connect(self._scroll_outer_dimension)
+        self.image_panel.slice_scrolled.connect(self._scroll_outer_dimension)
         self.phantom_panel = _SelectableImagePanel("Phantom on the image grid")
         self.phantom_panel.setToolTip(
             "The simulated phantom resampled onto the reconstruction grid: the "
@@ -607,6 +620,7 @@ class SequenceReconstructionExplorer(QWidget):
             "select a voxel."
         )
         self.phantom_panel.pixel_selected.connect(self._voxel_selected)
+        self.phantom_panel.slice_scrolled.connect(self._scroll_outer_dimension)
         self.phantom_panel.hide()
         # Region outlines of the phantom drawn on top of the reconstruction.
         self.image_contours = _ContourOverlay(self.image_panel.plot)
@@ -1390,6 +1404,21 @@ class SequenceReconstructionExplorer(QWidget):
         else:
             self._play_timer.stop()
 
+    def _scroll_outer_dimension(self, step):
+        """Step the slice slider (else the first browse slider) by ``step``."""
+        controls = [
+            (name, slider)
+            for name, slider in self.outer_controls.items()
+            if isinstance(slider, QSlider) and slider.isEnabled()
+        ]
+        if not controls:
+            return
+        preferred = [item for item in controls if item[0] in ("slice", "partition")]
+        slider = (preferred or controls)[0][1]
+        slider.setValue(
+            int(np.clip(slider.value() + int(np.sign(step)), 0, slider.maximum()))
+        )
+
     def _play_step(self):
         slider = self.outer_controls.get("repetition")
         if slider is None or not slider.isEnabled() or self.model is None:
@@ -1963,6 +1992,7 @@ class SequenceReconstructionExplorer(QWidget):
     def _refresh_voxel_plot(self, mode, pool_index, coil_mode):
         plot_mode = self.voxel_plot_combo.currentData()
         self.spectrum_plot.clear()
+        self.spectrum_plot.setLimits(xMin=None)
         if plot_mode is None or self.pages.currentWidget() is not self.two_d_page:
             return
         if plot_mode == "time_course":
@@ -1992,6 +2022,7 @@ class SequenceReconstructionExplorer(QWidget):
         if plot_mode == "fid":
             axis = axis * 1e3
             self.spectrum_plot.setLabel("bottom", "Time", "ms")
+            self.spectrum_plot.setLimits(xMin=0.0)
         else:
             self.spectrum_plot.setLabel("bottom", "Frequency", "Hz")
         self.spectrum_plot.setLabel("left", "Signal", "a.u.")
@@ -2126,6 +2157,8 @@ class SequenceReconstructionExplorer(QWidget):
                 )
             )
         plot.setTitle(f"Time course · voxel {location}")
+        # Repetitions and times start at zero.
+        plot.setLimits(xMin=0.0)
 
     def _refresh_volume_plot(self):
         """Show the time course of the voxel selected in the 3D image."""

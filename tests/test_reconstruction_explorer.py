@@ -422,6 +422,53 @@ def test_explorer_uses_labelled_slider_for_2d_slice_series(qt_application):
     )
 
 
+def test_wheel_over_2d_image_steps_the_slice_slider_instead_of_zooming(
+    qt_application,
+):
+    dataset = _sliced_cartesian_dataset()
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(dataset)
+    slice_control = explorer.outer_controls["slice"]
+    view_range = explorer.image_panel.plot.getViewBox().viewRange()
+
+    class _Wheel:
+        def __init__(self, delta, modifiers=0):
+            self._delta, self._modifiers = delta, modifiers
+
+        def modifiers(self):
+            return self._modifiers
+
+        def delta(self):
+            return self._delta
+
+        def accept(self):
+            pass
+
+        def scenePos(self):
+            from PyQt5.QtCore import QPointF
+
+            return QPointF(0, 0)
+
+    box = explorer.image_panel.plot.getViewBox()
+    box.wheelEvent(_Wheel(120))
+    assert slice_control.value() == 1
+    box.wheelEvent(_Wheel(-120))
+    box.wheelEvent(_Wheel(-120))
+    assert slice_control.value() == 0
+    assert explorer.image_panel.plot.getViewBox().viewRange() == view_range
+
+
+def test_time_course_never_shows_negative_repetitions(qt_application):
+    dataset = _framed_cartesian_dataset().assign_coords(
+        cartesian_frame_first_adc_time_s=("cartesian_frame", [0.0, 0.01, 1.0, 1.01])
+    )
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(dataset)
+    explorer._voxel_selected(4, 2)
+
+    assert explorer.spectrum_plot.getViewBox().state["limits"]["xLimits"][0] == 0.0
+
+
 def test_manual_contrast_domain_covers_all_slices_with_headroom_and_survives_navigation(
     qt_application,
 ):

@@ -6363,7 +6363,7 @@ class BlochSimulatorGUI(QMainWindow):
             signal_unit=self.app_settings.value("sequence/signal_unit", "physical"),
             sequence_section_titles_bold=previous_sequence_section_titles_bold,
             sequence_timing_visible=self.app_settings.value(
-                "interface/show_sequence_timing", True, type=bool
+                "interface/show_sequence_timing_row", False, type=bool
             ),
             color_accents=self._load_color_accents(),
         )
@@ -6408,7 +6408,7 @@ class BlochSimulatorGUI(QMainWindow):
         live_progress_enabled = dialog.sequence_live_progress_enabled()
         sequence_timing_visible = bool(dialog.sequence_timing_visible())
         self.app_settings.setValue(
-            "interface/show_sequence_timing", sequence_timing_visible
+            "interface/show_sequence_timing_row", sequence_timing_visible
         )
         self.app_settings.setValue(
             "sequence/live_progress_enabled", live_progress_enabled

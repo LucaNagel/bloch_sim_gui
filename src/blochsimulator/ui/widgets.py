@@ -8,6 +8,8 @@ from PyQt5.QtWidgets import (
     QDialog,
     QDoubleSpinBox,
     QPushButton,
+    QTabWidget,
+    QToolButton,
     QWidget,
 )
 import pyqtgraph as pg
@@ -237,3 +239,55 @@ class CheckableComboBox(QComboBox):
 
     def currentText(self):
         return self.lineEdit().text()
+
+
+class _TabBarWheelScroller(QObject):
+    """Slide a tab bar's overflowing tabs with the wheel or a two-finger swipe.
+
+    Qt's default would switch the current tab; here the gesture only moves the
+    visible tabs, as the scroll arrows do.
+    """
+
+    STEP = 60  # accumulated angle delta (1/8 degree) per scrolled tab
+
+    def __init__(self, tab_bar):
+        super().__init__(tab_bar)
+        self._tab_bar = tab_bar
+        self._accumulated = 0
+        tab_bar.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if watched is self._tab_bar and event.type() == QEvent.Wheel:
+            angle = event.angleDelta()
+            delta = angle.y() if abs(angle.y()) >= abs(angle.x()) else angle.x()
+            self._accumulated += delta
+            steps = int(self._accumulated / self.STEP)
+            if steps:
+                self._accumulated -= steps * self.STEP
+                self.scroll(-steps)
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+    def scroll(self, steps):
+        """Scroll ``steps`` tabs to the right (negative: to the left)."""
+        buttons = sorted(
+            (
+                button
+                for button in self._tab_bar.findChildren(QToolButton)
+                if button.isVisibleTo(self._tab_bar)
+            ),
+            key=lambda button: button.x(),
+        )
+        if len(buttons) < 2:
+            return
+        button = buttons[-1] if steps > 0 else buttons[0]
+        for _ in range(abs(steps)):
+            if not button.isEnabled():
+                break
+            button.click()
+
+
+def install_tab_bar_wheel_scroll(tab_widget: QTabWidget) -> _TabBarWheelScroller:
+    """Let the wheel/trackpad slide ``tab_widget``'s tabs without switching."""
+    return _TabBarWheelScroller(tab_widget.tabBar())

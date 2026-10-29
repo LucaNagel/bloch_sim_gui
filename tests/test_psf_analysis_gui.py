@@ -122,6 +122,13 @@ def test_psf_view_computes_2d_psf_and_slice_profile(qt_application, tmp_path):
     assert "outside the nominal slice" in view.metrics_summary.text()
     assert len(view.slice_plot.listDataItems()) == 2
 
+    # Zooming out stops at the sampled extent and magnitudes are never negative.
+    for plot in (view.profile_plot, view.modulation_plot, view.slice_plot):
+        limits = plot.getViewBox().state["limits"]
+        assert limits["xLimits"][0] is not None and limits["xLimits"][1] is not None
+    assert view.profile_plot.getViewBox().state["limits"]["yLimits"][0] == 0.0
+    assert view.slice_plot.getViewBox().state["limits"]["yLimits"][0] == 0.0
+
     # Another frame reconstructs from the stored simulation.
     simulation = computation.simulation
     view.frame_selector.setCurrentIndex(1)
