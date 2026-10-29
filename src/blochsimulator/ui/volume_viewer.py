@@ -41,9 +41,15 @@ except Exception:
 class _SliceScrollViewBox(pg.ViewBox):
     """Use an unmodified wheel/trackpad gesture to step through slices."""
 
+    # One mouse-wheel notch is 120 units and steps one slice. Trackpads send
+    # many small deltas per swipe, so they must travel further per slice.
+    WHEEL_NOTCH = 120.0
+    TRACKPAD_STEP = 360.0
+
     def __init__(self, scroll_callback, *, enable_menu=False):
         super().__init__(enableMenu=enable_menu)
         self._scroll_callback = scroll_callback
+        self._scroll_accumulated = 0.0
 
     def wheelEvent(self, event, axis=None):
         modifier_getter = getattr(event, "modifiers", None)
@@ -60,7 +66,18 @@ class _SliceScrollViewBox(pg.ViewBox):
                 angle_delta = getattr(event, "angleDelta", lambda: None)()
                 delta = 0.0 if angle_delta is None else float(angle_delta.y())
             if delta:
-                self._scroll_callback(1 if delta > 0 else -1)
+                if delta * self._scroll_accumulated < 0:
+                    self._scroll_accumulated = 0.0
+                self._scroll_accumulated += delta
+                threshold = (
+                    self.WHEEL_NOTCH
+                    if abs(delta) >= self.WHEEL_NOTCH
+                    else self.TRACKPAD_STEP
+                )
+                while abs(self._scroll_accumulated) >= threshold:
+                    step = 1 if self._scroll_accumulated > 0 else -1
+                    self._scroll_accumulated -= step * threshold
+                    self._scroll_callback(step)
                 event.accept()
                 return
         super().wheelEvent(event, axis=axis)

@@ -4068,29 +4068,42 @@ def test_reconstruction_explorer_hides_2d_tab_and_sequence_settings(qt_applicati
     assert not widget.views.isTabVisible(widget.two_d_result_tab_index)
     assert widget.csi_slice_thickness_mm.value() == pytest.approx(3.0)
 
-    # Every tab starts without the sequence settings column.
+    # The Geometry tab starts with the sequence settings, the others without.
     qt_application.processEvents()
-    assert not widget.controls_scroll.isVisible()
+    assert widget.views.currentIndex() == widget.geometry_tab_index
+    assert widget.control_column.isVisible()
     assert widget.run_button.isVisible()
     widget.views.setCurrentIndex(widget.reconstruction_explorer_tab_index)
     qt_application.processEvents()
-    assert not widget.controls_scroll.isVisible()
+    # The whole column collapses and the Explorer offers its own button.
+    assert not widget.control_column.isVisible()
+    assert not widget.run_button.isVisible()
+    assert not widget.sequence_settings_toggle.isVisible()
     assert explorer.controls_scroll.isVisible()
 
     explorer.sequence_settings_button.click()
     qt_application.processEvents()
-    assert widget.controls_scroll.isVisible()
-    assert widget.sequence_settings_toggle.isChecked()
+    assert widget.control_column.isVisible()
 
-    # The choice is shared by all tabs and can be changed from any of them.
+    # Each tab keeps its own choice.
     widget.views.setCurrentIndex(widget.log_tab_index)
     qt_application.processEvents()
-    assert widget.controls_scroll.isVisible()
+    assert not widget.control_column.isVisible()
+    assert widget.sequence_settings_toggle.isVisible()
+    assert widget.sequence_settings_toggle.text() == "Show sequence settings"
     widget.sequence_settings_toggle.click()
     qt_application.processEvents()
-    assert not widget.controls_scroll.isVisible()
-    assert not explorer.sequence_settings_button.isChecked()
-    assert widget.sequence_settings_toggle.text() == "Show sequence settings"
+    assert widget.control_column.isVisible()
+    assert widget.sequence_settings_toggle.text() == "Hide sequence settings"
+    widget.views.setCurrentIndex(widget.geometry_tab_index)
+    qt_application.processEvents()
+    widget.sequence_settings_toggle.click()
+    qt_application.processEvents()
+    assert not widget.control_column.isVisible()
+    widget.views.setCurrentIndex(widget.reconstruction_explorer_tab_index)
+    qt_application.processEvents()
+    assert widget.control_column.isVisible()
+    assert explorer.sequence_settings_button.isChecked()
 
 
 def test_phantom_designer_starts_from_default_sphere(qt_application):

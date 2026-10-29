@@ -457,6 +457,15 @@ def test_wheel_over_2d_image_steps_the_slice_slider_instead_of_zooming(
     assert slice_control.value() == 0
     assert explorer.image_panel.plot.getViewBox().viewRange() == view_range
 
+    # A short two-finger swipe sends many small deltas and must not race
+    # through every slice: it takes a long travel per slice.
+    for _ in range(10):
+        box.wheelEvent(_Wheel(8))
+    assert slice_control.value() == 0
+    for _ in range(40):
+        box.wheelEvent(_Wheel(8))
+    assert slice_control.value() == 1
+
 
 def test_time_course_never_shows_negative_repetitions(qt_application):
     dataset = _framed_cartesian_dataset().assign_coords(

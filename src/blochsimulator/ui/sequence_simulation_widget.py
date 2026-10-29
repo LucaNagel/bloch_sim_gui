@@ -6112,8 +6112,9 @@ class SequenceSimulationWidget(QWidget):
         self.views = views
         install_tab_bar_wheel_scroll(views)
         # The sequence parameter column takes a large share of the window, so
-        # every tab starts without it and offers this button to bring it back.
-        self._sequence_settings_shown = False
+        # each tab remembers its own choice: only the Geometry tab starts with
+        # the column shown, the others offer this button to bring it back.
+        self._sequence_settings_shown_by_tab = {}
         self.sequence_settings_toggle = QPushButton("Show sequence settings")
         self.sequence_settings_toggle.setObjectName("sequence_settings_toggle")
         self.sequence_settings_toggle.setCheckable(True)
@@ -6301,6 +6302,7 @@ class SequenceSimulationWidget(QWidget):
         self.reconstruction_explorer.sequence_settings_visibility_requested.connect(
             self._explorer_sequence_settings_requested
         )
+        self._sequence_settings_shown_by_tab[self.geometry_tab_index] = True
         self._update_control_column_visibility()
         views.setTabToolTip(
             self.reconstruction_explorer_tab_index,
@@ -13984,21 +13986,31 @@ class SequenceSimulationWidget(QWidget):
             self._schedule_geometry_refresh()
         self._update_control_column_visibility()
 
+    def _sequence_settings_shown(self):
+        return self._sequence_settings_shown_by_tab.get(
+            self.views.currentIndex(), False
+        )
+
     def _update_control_column_visibility(self):
-        visible = self._sequence_settings_shown
-        # Only the parameters collapse; the run controls below stay reachable.
-        self.controls_scroll.setVisible(visible)
+        visible = self._sequence_settings_shown()
+        # Hide the whole column (run controls included) so the views get the
+        # full width, as the Reconstruction Explorer always did.
+        self.control_column.setVisible(visible)
         blocked = self.sequence_settings_toggle.blockSignals(True)
         self.sequence_settings_toggle.setChecked(visible)
         self.sequence_settings_toggle.blockSignals(blocked)
         self.sequence_settings_toggle.setText(
             "Hide sequence settings" if visible else "Show sequence settings"
         )
+        # The Explorer carries its own button next to the simulation selector.
+        self.sequence_settings_toggle.setVisible(
+            self.views.currentIndex() != self.reconstruction_explorer_tab_index
+        )
         self.reconstruction_explorer.set_sequence_settings_visible(visible)
 
     def _explorer_sequence_settings_requested(self, visible):
-        """Show or hide the parameter column for every tab at once."""
-        self._sequence_settings_shown = bool(visible)
+        """Show or hide the parameter column for the current tab."""
+        self._sequence_settings_shown_by_tab[self.views.currentIndex()] = bool(visible)
         self._update_control_column_visibility()
 
     def _update_geometry_stale_notice(self, previewing=None):
